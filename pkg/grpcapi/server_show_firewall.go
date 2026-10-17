@@ -445,6 +445,14 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 			// report a default-policy verdict here.
 			fmt.Fprintf(buf, "No matching to-zone junos-host policy for %s -> junos-host\n", fromZone)
 			fmt.Fprintf(buf, "  %s\n", policymatch.HostInboundShowLine)
+			// #14362 (#3627 B1a parity): name the admitting token / deny, as
+			// the local CLI does — the generic line alone hides WHICH verdict
+			// the coarse gate returns for this tuple.
+			if res.HostInbound != nil {
+				if line := res.HostInbound.Describe(); line != "" {
+					fmt.Fprintf(buf, "  host-inbound-traffic (zone %s): %s\n", fromZone, line)
+				}
+			}
 		case res.Matched && res.Global:
 			fmt.Fprintf(buf, "Policy match (global):\n")
 			fmt.Fprintf(buf, "  Policy:    %s\n", res.PolicyName)
@@ -463,6 +471,14 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 				fmt.Fprintf(buf, "  Description: %s\n", res.Description)
 			}
 			fmt.Fprintf(buf, "  Action:    %s\n", policymatch.ActionString(res.Action))
+			// #14362: a matched junos-host policy (global scope can still be
+			// host-bound) still needs the coarse gate named; Describe() is
+			// empty off-host, so this is a no-op for transit globals.
+			if res.HostInbound != nil {
+				if line := res.HostInbound.Describe(); line != "" {
+					fmt.Fprintf(buf, "  host-inbound-traffic (zone %s): %s\n", fromZone, line)
+				}
+			}
 			// #5572: a non-first fragment whose permit was overridden to this
 			// overlapping port-bearing deny — explain the over-drop.
 			if note := res.FragmentDenyNote(); note != "" {
@@ -473,6 +489,16 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 			fmt.Fprintf(buf, "  From zone: %s\n  To zone:   %s\n", fromZone, toZone)
 			fmt.Fprintf(buf, "  Policy:    %s\n", res.PolicyName)
 			fmt.Fprintf(buf, "  Action:    %s\n", policymatch.ActionString(res.Action))
+			// #14362 (#5649 parity): a MATCHED to-zone junos-host fine policy
+			// still needs the coarse host-inbound-traffic admission gate named
+			// — LocalDelivery evaluates BOTH and the fine action never
+			// overrides a coarse deny. Without this line a permit whose gate
+			// denies read as an unqualified permit.
+			if res.HostInbound != nil {
+				if line := res.HostInbound.Describe(); line != "" {
+					fmt.Fprintf(buf, "  host-inbound-traffic (zone %s): %s\n", fromZone, line)
+				}
+			}
 			// #5572: fragment-associated deny advisory (see global arm).
 			if note := res.FragmentDenyNote(); note != "" {
 				fmt.Fprintf(buf, "  %s\n", note)
@@ -493,6 +519,14 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 			// preserving the pre-#3103 wording for that case.
 			fmt.Fprintf(buf, "Default %s (no matching policy for %s -> %s)\n",
 				policymatch.ActionString(res.Action), fromZone, toZone)
+		}
+		// #14362 (#4373 parity): a multicast/broadcast/unspecified/loopback
+		// destination is dropped at route lookup before policy runs — print
+		// the advisory after the verdict, as the local surfaces do, so it is
+		// not read as real forwarding. Host-bound results carry no route
+		// advisory, so this is a no-op there.
+		if note := res.RouteDropNote(); note != "" {
+			fmt.Fprintf(buf, "  %s\n", note)
 		}
 	}
 	return &pb.ShowTextResponse{Output: buf.String()}, nil

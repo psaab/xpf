@@ -7815,8 +7815,25 @@ type MatchPoliciesResponse struct {
 	// responses so clients do not read a pre-NAT VIP verdict as the dataplane
 	// decision.
 	PostNatInputNote string `protobuf:"bytes,31,opt,name=post_nat_input_note,json=postNatInputNote,proto3" json:"post_nat_input_note,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// #14362: typed fail-closed verdict flags so the remote CLI renders the
+	// same dedicated verdicts the local CLI / gRPC-text surfaces print instead
+	// of falling through to a fabricated "(default)" line. Previously only
+	// unzoned_egress (27) existed, and even it was never populated; the other
+	// postures were carried only inside the `action` string, which the remote
+	// CLI's no-match branch prints parenthesised after "No matching policy
+	// found" — actively wrong for these unconditional denies.
+	// unzoned_ingress: FROM zone unknown; transit denied unconditionally
+	// (#6682/#8318), default-policy NOT applied.
+	UnzonedIngress bool `protobuf:"varint,32,opt,name=unzoned_ingress,json=unzonedIngress,proto3" json:"unzoned_ingress,omitempty"`
+	// content_rejected: config content the dataplane fails closed on (#3727);
+	// no simulated verdict is enforced. Action carries
+	// ContentRejectedActionString; the reasons ride the text surfaces.
+	ContentRejected bool `protobuf:"varint,33,opt,name=content_rejected,json=contentRejected,proto3" json:"content_rejected,omitempty"`
+	// unsupported_tuple_family: IPv4 source with IPv6 destination (#5720);
+	// NAT46 unimplemented, the runtime matcher fails the tuple closed.
+	UnsupportedTupleFamily bool `protobuf:"varint,34,opt,name=unsupported_tuple_family,json=unsupportedTupleFamily,proto3" json:"unsupported_tuple_family,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *MatchPoliciesResponse) Reset() {
@@ -8064,6 +8081,27 @@ func (x *MatchPoliciesResponse) GetPostNatInputNote() string {
 		return x.PostNatInputNote
 	}
 	return ""
+}
+
+func (x *MatchPoliciesResponse) GetUnzonedIngress() bool {
+	if x != nil {
+		return x.UnzonedIngress
+	}
+	return false
+}
+
+func (x *MatchPoliciesResponse) GetContentRejected() bool {
+	if x != nil {
+		return x.ContentRejected
+	}
+	return false
+}
+
+func (x *MatchPoliciesResponse) GetUnsupportedTupleFamily() bool {
+	if x != nil {
+		return x.UnsupportedTupleFamily
+	}
+	return false
 }
 
 // HostInboundAdmission is the structured host-inbound-traffic classifier verdict
@@ -10099,8 +10137,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\n" +
 	"_icmp_typeB\f\n" +
 	"\n" +
-	"_icmp_code\"\xc4\n" +
-	"\n" +
+	"_icmp_code\"\xd2\v\n" +
 	"\x15MatchPoliciesResponse\x12\x1f\n" +
 	"\vpolicy_name\x18\x01 \x01(\tR\n" +
 	"policyName\x12\x16\n" +
@@ -10134,7 +10171,10 @@ const file_xpf_proto_rawDesc = "" +
 	"\x15feed_publication_debt\x18\x1c \x01(\bR\x13feedPublicationDebt\x12=\n" +
 	"\x1bfeed_publication_debt_feeds\x18\x1d \x03(\tR\x18feedPublicationDebtFeeds\x12;\n" +
 	"\x1afeed_publication_debt_note\x18\x1e \x01(\tR\x17feedPublicationDebtNote\x12-\n" +
-	"\x13post_nat_input_note\x18\x1f \x01(\tR\x10postNatInputNoteB\f\n" +
+	"\x13post_nat_input_note\x18\x1f \x01(\tR\x10postNatInputNote\x12'\n" +
+	"\x0funzoned_ingress\x18  \x01(\bR\x0eunzonedIngress\x12)\n" +
+	"\x10content_rejected\x18! \x01(\bR\x0fcontentRejected\x128\n" +
+	"\x18unsupported_tuple_family\x18\" \x01(\bR\x16unsupportedTupleFamilyB\f\n" +
 	"\n" +
 	"_policy_id\"\x9e\x01\n" +
 	"\x14HostInboundAdmission\x12:\n" +

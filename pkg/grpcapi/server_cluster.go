@@ -298,12 +298,14 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 		// application-set) and enforces none of its policies. Render the SSOT
 		// fail-closed action string (self-describing) so a gRPC client does not
 		// read a fabricated permit/deny/default verdict. Matched/DefaultUsed stay
-		// false; the structured response has no dedicated content-rejected field,
-		// so the explanatory Action string carries the posture (the reasons are
-		// surfaced in full on the REST and `test policy` text surfaces).
+		// false. #14362: also set the typed content_rejected flag so the remote
+		// CLI can branch on the posture without string-parsing `action` (the
+		// reasons are surfaced in full on the REST and `test policy` text
+		// surfaces).
 		return &pb.MatchPoliciesResponse{
 			PostNatInputNote: res.PostNATInputNote,
 			Matched:          false,
+			ContentRejected:  true,
 			Action:           res.DisplayAction(),
 			QueriedFromZone:  req.FromZone,
 			QueriedToZone:    req.ToZone,
@@ -337,7 +339,9 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 			Matched:                  false,
 			Action:                   res.DisplayAction(),
 			DefaultUsed:              res.DefaultUsed,
+			UnzonedIngress:           res.UnzonedIngress,
 			UnzonedEgress:            res.UnzonedEgress,
+			UnsupportedTupleFamily:   res.UnsupportedTupleFamily,
 			FeedPublicationDebt:      res.FeedPublicationDebt,
 			FeedPublicationDebtFeeds: res.FeedPublicationDebtNames,
 			FeedPublicationDebtNote:  res.FeedPublicationDebtNote(),
