@@ -489,6 +489,16 @@ Multi-value matches survive `Format` / `FormatSet` replay. List closure is
 tracked structurally: bare or quoted clause words are values inside a balanced
 list, while an unclosed bracketed `from` list fails closed.
 
+**Routing policy-statement conflicting `then` actions are rejected (#14425):**
+a merged term carrying both `then accept` and `then reject` — whether
+hand-authored, flat-set, or composed by apply-groups (group terminal
+materializes beside the inline terminal instead of overriding it) —
+hard-rejects at commit via `validateRoutingTermTerminalConflictStrict`;
+`PolicyTerm.TerminalActions` retains every authored terminal so the
+loser is visible. Tolerant loads warn and force the term to `reject`.
+Repeating the same action and non-terminal modifiers (`local-preference`,
+`next-hop`, ...) remain valid.
+
 Distinct conflicting terminal actions on a lenient load retain the compiler's
 last-wins action only as an internal parse result; `LenientContentDropped`
 poisons the policy snapshot with the unsupported sentinel, so the partial

@@ -90,12 +90,21 @@ type PolicyTerm struct {
 	// disappearing and widening the term; strict compilation rejects it, while
 	// tolerant compilation warns and forces the term to reject. Mirrors
 	// FirewallFilterTerm.UnknownFrom (#3307).
-	UnknownFrom     []string
-	RouteFilters    []*RouteFilter // prefix matching
-	Action          string         // "accept", "reject"
-	NextHop         string         // then next-hop (e.g. "peer-address", "self", IP)
-	LoadBalance     string         // then load-balance (e.g. "consistent-hash", "per-packet")
-	LocalPreference int            // BGP local-preference value (valid when HasLocalPreference)
+	UnknownFrom  []string
+	RouteFilters []*RouteFilter // prefix matching
+	Action       string         // "accept", "reject"
+	// TerminalActions records every accept/reject keyword the term's
+	// `then` readers encountered, in order with duplicates (#14425).
+	// Action is single-valued last-write-wins, so a merged term carrying
+	// both accept and reject would silently keep only the last; this
+	// slice is the mutual-exclusion channel for
+	// validateRoutingTermTerminalConflictStrict. Same-action repeats are
+	// a redundancy, not a conflict. Compiler-only, excluded from JSON
+	// like the other provenance fields below.
+	TerminalActions []string `json:"-"`
+	NextHop         string   // then next-hop (e.g. "peer-address", "self", IP)
+	LoadBalance     string   // then load-balance (e.g. "consistent-hash", "per-packet")
+	LocalPreference int      // BGP local-preference value (valid when HasLocalPreference)
 	// HasLocalPreference distinguishes an explicitly configured
 	// local-preference (including the valid value 0, which maximally
 	// deprioritizes a route within the AS) from "local-preference not

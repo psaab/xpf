@@ -2166,9 +2166,11 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 				switch action {
 				case "accept":
 					term.Action = "accept"
+					term.TerminalActions = append(term.TerminalActions, "accept")
 					extraCount = 0
 				case "reject":
 					term.Action = "reject"
+					term.TerminalActions = append(term.TerminalActions, "reject")
 					extraCount = 0
 				case "next":
 					recordPolicyNextAction11780(term, nodeVal(ac))
@@ -2613,6 +2615,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				i++
 				term.Action = keys[i]
 				if term.Action == "accept" || term.Action == "reject" {
+					term.TerminalActions = append(term.TerminalActions, term.Action)
 					recordPolicyThenInlineTail12517(term, keys, i, term.Action, true)
 				} else {
 					// #12517: neither a dispatched value action nor a
@@ -2861,6 +2864,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 		case "accept":
 			if !inFrom {
 				term.Action = "accept"
+				term.TerminalActions = append(term.TerminalActions, "accept")
 				if seenThen {
 					recordPolicyThenInlineTail12517(term, keys, i, "accept", true)
 				}
@@ -2868,6 +2872,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 		case "reject":
 			if !inFrom {
 				term.Action = "reject"
+				term.TerminalActions = append(term.TerminalActions, "reject")
 				if seenThen {
 					recordPolicyThenInlineTail12517(term, keys, i, "reject", true)
 				}
