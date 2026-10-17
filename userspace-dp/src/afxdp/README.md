@@ -799,7 +799,10 @@ sync.
     untranslated forwarding. The fallback arms (`nat_match_v4` /
     `nat_match_v6`) now discriminate direction: a reply-key hit with
     `is_reverse == false` on a pure source-NAT flow (`rewrite_src` set, no
-    dst NAT) marks the match `outbound_snat`, and
+    dst NAT) marks the match `outbound_snat` (#14628: an as-is hit on the
+    locally installed REVERSE half — whose translated alias equals the
+    pre-NAT reply quote — is classified the same way by direction, with
+    the FORWARD decision recovered from the forward companion), and
     `build_snat_outbound_icmp_error_{v4,v6}` re-NATs the outer source to
     the SNAT address and the embedded quote's destination address + L4
     port/echo id to the translated value (every affected checksum

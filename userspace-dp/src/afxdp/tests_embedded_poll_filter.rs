@@ -12170,3 +12170,462 @@ fn session_miss_syn_ack_flood_alarm_without_drop_tallies_zone_alarm_12873() {
         "an alarmed (permitted) packet must not be counted as a flood DROP"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #14628 (Y24-01): #6474 outbound-SNAT re-NAT shadowed when the local
+// REVERSE half is installed (the production default). The quote is the
+// session's reply in PRE-NAT form, so its as-is key equals the reverse
+// half's translated alias (S:sp -> H:hp) and the as-is probe wins before
+// the reply-key probe can classify it as outbound. The matchers must
+// classify by DIRECTION (quoted_is_reply) plus the forward-decision shape
+// recovered from the reverse half, not by which index answered.
+// ---------------------------------------------------------------------------
+
+/// Install the production both-halves SNAT session: forward
+/// `client:12345 -> server:80` SNAT'd to `snat:40000`, plus the local
+/// reverse companion exactly as `poll_descriptor` installs it
+/// (`reverse_session_key` + `NatDecision::reverse`, `ReverseFlow`,
+/// `is_reverse: true`, swapped zones). `nptv6` marks an NPTv6 decision
+/// (prefix-only translation: no port rewrite).
+fn n14628_install_snat_session_both_halves(
+    sessions: &mut SessionTable,
+    client_ip: IpAddr,
+    server_ip: IpAddr,
+    snat_ip: IpAddr,
+    addr_family: u8,
+    nptv6: bool,
+) {
+    n6474_install_snat_session(
+        sessions,
+        client_ip,
+        server_ip,
+        snat_ip,
+        addr_family,
+        0,
+    );
+    if nptv6 {
+        // NPTv6 is prefix-only: strip the port rewrite the shared
+        // #6474 helper stamps, on the forward half too.
+        // Reinstalling under the same key replaces the entry.
+        let forward_key = SessionKey {
+            addr_family,
+            protocol: PROTO_TCP,
+            src_ip: client_ip,
+            dst_ip: server_ip,
+            src_port: 12345,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let forward_nat = NatDecision {
+            rewrite_src: Some(snat_ip),
+            rewrite_dst: None,
+            rewrite_src_port: None,
+            rewrite_dst_port: None,
+            source_nat_icmp: None,
+            nat64: false,
+            nptv6: true,
+        };
+        assert!(sessions.install_with_protocol(
+            forward_key.clone(),
+            SessionDecision {
+                resolution: ForwardingResolution {
+                    disposition: ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex: 12,
+                    tx_ifindex: 12,
+                    tunnel_endpoint_id: 0,
+                    next_hop: None,
+                    neighbor_mac: Some(N6472_WAN_GW_MAC),
+                    src_mac: Some(N6472_WAN_SRC_MAC),
+                    tx_vlan_id: 80,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                },
+                nat: forward_nat,
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            SessionMetadata {
+                ingress_zone: TEST_LAN_ZONE_ID,
+                egress_zone: TEST_WAN_ZONE_ID,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                forward_ingress_vlan_id: None,
+                owner_rg_id: 0,
+                fabric_ingress: false,
+                is_reverse: false,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+            },
+            123_000_000_000,
+            PROTO_TCP,
+            0x18,
+        ));
+        let reverse_key = crate::session::reverse_session_key(&forward_key, forward_nat);
+        assert!(sessions.install_with_protocol_with_origin(
+            reverse_key,
+            SessionDecision {
+                resolution: ForwardingResolution {
+                    disposition: ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex: 24,
+                    tx_ifindex: 24,
+                    tunnel_endpoint_id: 0,
+                    next_hop: Some(client_ip),
+                    neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                    src_mac: Some(TEST_LAN_MAC),
+                    tx_vlan_id: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                },
+                nat: forward_nat.reverse(client_ip, server_ip, 12345, 80),
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            SessionMetadata {
+                ingress_zone: TEST_WAN_ZONE_ID,
+                egress_zone: TEST_LAN_ZONE_ID,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                forward_ingress_vlan_id: None,
+                owner_rg_id: 0,
+                fabric_ingress: false,
+                is_reverse: true,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+            },
+            crate::session::SessionOrigin::ReverseFlow,
+            123_000_000_000,
+            PROTO_TCP,
+            0x18,
+        ));
+        return;
+    }
+    let forward_key = SessionKey {
+        addr_family,
+        protocol: PROTO_TCP,
+        src_ip: client_ip,
+        dst_ip: server_ip,
+        src_port: 12345,
+        dst_port: 80,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let forward_nat = NatDecision {
+        rewrite_src: Some(snat_ip),
+        rewrite_dst: None,
+        rewrite_src_port: Some(40000),
+        rewrite_dst_port: None,
+        source_nat_icmp: None,
+        nat64: false,
+        nptv6: false,
+    };
+    let reverse_key = crate::session::reverse_session_key(&forward_key, forward_nat);
+    assert!(sessions.install_with_protocol_with_origin(
+        reverse_key,
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 24,
+                tx_ifindex: 24,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(client_ip),
+                neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                src_mac: Some(TEST_LAN_MAC),
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: forward_nat.reverse(client_ip, server_ip, 12345, 80),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        SessionMetadata {
+            ingress_zone: TEST_WAN_ZONE_ID,
+            egress_zone: TEST_LAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: true,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        crate::session::SessionOrigin::ReverseFlow,
+        123_000_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+}
+
+/// #14628 FAIL-ON-REVERT (v4 SNAT44, both halves): the shipped #6474
+/// v4 cell plus the local reverse half. RED on master: the as-is probe
+/// hits the reverse half's translated alias, `outbound_snat` stays
+/// false, and the #5690 reversed builder leaks
+/// `outer_src=10.0.61.102` with the pre-NAT quote. GREEN: outer src =
+/// SNAT address, quote dst = SNAT:40000.
+#[test]
+fn poll_descriptor_snat_outbound_icmp_error_renat_v4_with_reverse_half_14628() {
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+
+    let mut frame = build_icmp_te_frame_v4_with_mac(client_ip, server_ip, client_ip, 80, 12345, PROTO_TCP, TEST_LAN_MAC);
+    frame[34] = 3;
+    frame[35] = 3;
+    frame[36] = 0;
+    frame[37] = 0;
+    let icmp_csum = checksum16(&frame[34..]);
+    frame[36..38].copy_from_slice(&icmp_csum.to_be_bytes());
+
+    let mut snapshot = nat_snapshot();
+    snapshot.flow.allow_embedded_icmp = true;
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    n14628_install_snat_session_both_halves(
+        &mut sessions,
+        IpAddr::V4(client_ip),
+        IpAddr::V4(server_ip),
+        IpAddr::V4(snat_ip),
+        libc::AF_INET as u8,
+        false,
+    );
+    let sessions_before = sessions.len();
+    assert_eq!(sessions_before, 2, "fixture: both halves installed");
+
+    let meta = n6474_meta(24, libc::AF_INET as u8, PROTO_ICMP, frame.len());
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(),
+        1,
+        "#14628: outbound SNAT error with reverse half must queue one re-NAT'd prebuilt forward"
+    );
+    let fwd = &binding.scratch.scratch_forwards[0];
+    let out = match &fwd.frame {
+        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        _ => panic!("#14628: outbound re-NAT must queue a PREBUILT frame"),
+    };
+    assert_eq!(&out[0..6], &N6472_WAN_GW_MAC, "eth dst = WAN gateway");
+    assert_eq!(&out[16..18], &[0x08, 0x00], "ethertype IPv4 after the VLAN tag");
+    let ip = &out[18..];
+    assert_eq!(
+        &ip[12..16],
+        &snat_ip.octets(),
+        "#14628: outer src must be the SNAT address, not the internal host"
+    );
+    assert_eq!(&ip[16..20], &server_ip.octets(), "outer dst untouched (the remote)");
+    assert_eq!(checksum16(&ip[..20]), 0, "outer IPv4 header checksum verifies");
+    let icmp = &ip[20..];
+    assert_eq!(icmp[0], 3, "stays Destination Unreachable");
+    assert_eq!(icmp[1], 3, "stays port-unreachable");
+    assert_eq!(checksum16(icmp), 0, "outer ICMP checksum verifies");
+    let emb = &icmp[8..];
+    assert_eq!(&emb[12..16], &server_ip.octets(), "embedded src untouched (server)");
+    assert_eq!(
+        &emb[16..20],
+        &snat_ip.octets(),
+        "#14628: embedded dst re-NAT'd to the SNAT address"
+    );
+    assert_eq!(checksum16(&emb[..20]), 0, "embedded IPv4 header checksum verifies");
+    assert_eq!(&emb[20..22], &80u16.to_be_bytes(), "embedded src port untouched");
+    assert_eq!(
+        &emb[22..24],
+        &40000u16.to_be_bytes(),
+        "#14628: embedded dst port re-NAT'd to the translated value"
+    );
+    assert!(
+        matches!(fwd.target_ifindex, 11 | 12),
+        "re-NAT'd error egresses toward the server (WAN unit reth0.80 / its parent)"
+    );
+    assert!(fwd.flow_key.is_none());
+    assert_eq!(sessions.len(), sessions_before, "no new session minted");
+}
+
+/// #14628 FAIL-ON-REVERT (v6 SNAT66, both halves): the v6 twin.
+#[test]
+fn poll_descriptor_snat_outbound_icmp_error_renat_v6_with_reverse_half_14628() {
+    let client_v6: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("client v6");
+    let server_v6: Ipv6Addr = "2001:db8::1".parse().expect("server v6");
+    let snat_v6: Ipv6Addr = "2001:559:8585:80::8".parse().expect("snat v6 (reth0.80)");
+
+    let mut frame = build_icmpv6_te_frame_with_mac(client_v6, server_v6, client_v6, 80, 12345, PROTO_TCP, TEST_LAN_MAC);
+    let l4 = 54;
+    frame[l4] = 1;
+    frame[l4 + 1] = 4;
+    frame[l4 + 2] = 0;
+    frame[l4 + 3] = 0;
+    let icmp6_csum = checksum16_ipv6(client_v6, server_v6, PROTO_ICMPV6, &frame[l4..]);
+    frame[l4 + 2..l4 + 4].copy_from_slice(&icmp6_csum.to_be_bytes());
+
+    let mut snapshot = nat_snapshot();
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    n14628_install_snat_session_both_halves(
+        &mut sessions,
+        IpAddr::V6(client_v6),
+        IpAddr::V6(server_v6),
+        IpAddr::V6(snat_v6),
+        libc::AF_INET6 as u8,
+        false,
+    );
+    assert_eq!(sessions.len(), 2, "fixture: both halves installed");
+
+    let meta = n6474_meta(24, libc::AF_INET6 as u8, PROTO_ICMPV6, frame.len());
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(),
+        1,
+        "#14628: outbound SNAT66 error with reverse half must queue one re-NAT'd prebuilt forward"
+    );
+    let fwd = &binding.scratch.scratch_forwards[0];
+    let out = match &fwd.frame {
+        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        _ => panic!("#14628: outbound re-NAT must queue a PREBUILT frame"),
+    };
+    assert_eq!(&out[12..14], &[0x81, 0x00], "VLAN tag (reth0.80) present");
+    assert_eq!(&out[16..18], &[0x86, 0xdd], "ethertype IPv6 after the tag");
+    let ip = &out[18..];
+    assert_eq!(
+        &ip[8..24],
+        &snat_v6.octets(),
+        "#14628: outer src must be the SNAT66 address, not the internal host"
+    );
+    assert_eq!(&ip[24..40], &server_v6.octets(), "outer dst untouched (the remote)");
+    let icmp = &ip[40..];
+    assert_eq!(icmp[0], 1, "stays Destination Unreachable");
+    assert_eq!(icmp[1], 4, "stays port-unreachable");
+    let emb = &icmp[8..];
+    assert_eq!(&emb[8..24], &server_v6.octets(), "embedded src untouched (server)");
+    assert_eq!(
+        &emb[24..40],
+        &snat_v6.octets(),
+        "#14628: embedded dst re-NAT'd to the SNAT66 address"
+    );
+    assert_eq!(&emb[40..42], &80u16.to_be_bytes(), "embedded src port untouched");
+    assert_eq!(
+        &emb[42..44],
+        &40000u16.to_be_bytes(),
+        "#14628: embedded dst port re-NAT'd to the translated value"
+    );
+    let s6 = Ipv6Addr::from(<[u8; 16]>::try_from(&ip[8..24]).unwrap());
+    let d6 = Ipv6Addr::from(<[u8; 16]>::try_from(&ip[24..40]).unwrap());
+    assert_eq!(
+        checksum16_ipv6(s6, d6, PROTO_ICMPV6, icmp),
+        0,
+        "outer ICMPv6 checksum verifies"
+    );
+    assert!(
+        matches!(fwd.target_ifindex, 11 | 12),
+        "re-NAT'd error egresses toward the server (WAN unit reth0.80 / its parent)"
+    );
+    assert!(fwd.flow_key.is_none());
+}
+
+/// #14628 FAIL-ON-REVERT (NPTv6, both halves): prefix-only translation
+/// (no port rewrite). The external identity is the translated prefix
+/// address; the quoted port stays the original 12345.
+#[test]
+fn poll_descriptor_nptv6_outbound_icmp_error_renat_with_reverse_half_14628() {
+    let client_v6: Ipv6Addr = "fd35:1940:27:100::102".parse().expect("internal client v6");
+    let server_v6: Ipv6Addr = "2001:db8::1".parse().expect("server v6");
+    let snat_v6: Ipv6Addr = "2602:fd41:70:100::102".parse().expect("external NPTv6 client");
+
+    let mut frame = build_icmpv6_te_frame_with_mac(client_v6, server_v6, client_v6, 80, 12345, PROTO_TCP, TEST_LAN_MAC);
+    let l4 = 54;
+    frame[l4] = 1;
+    frame[l4 + 1] = 4;
+    frame[l4 + 2] = 0;
+    frame[l4 + 3] = 0;
+    let icmp6_csum = checksum16_ipv6(client_v6, server_v6, PROTO_ICMPV6, &frame[l4..]);
+    frame[l4 + 2..l4 + 4].copy_from_slice(&icmp6_csum.to_be_bytes());
+
+    let mut snapshot = nat_snapshot();
+    snapshot.nptv6_rules = vec![crate::Nptv6RuleSnapshot {
+        name: "nptv6-14628".to_string(),
+        from_zone: "wan".to_string(),
+        internal_prefix: "fd35:1940:0027::/48".to_string(),
+        external_prefix: "2602:fd41:0070::/48".to_string(),
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    n14628_install_snat_session_both_halves(
+        &mut sessions,
+        IpAddr::V6(client_v6),
+        IpAddr::V6(server_v6),
+        IpAddr::V6(snat_v6),
+        libc::AF_INET6 as u8,
+        true,
+    );
+    assert_eq!(sessions.len(), 2, "fixture: both halves installed");
+
+    let meta = n6474_meta(24, libc::AF_INET6 as u8, PROTO_ICMPV6, frame.len());
+    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(),
+        1,
+        "#14628: outbound NPTv6 error with reverse half must queue one re-NAT'd prebuilt forward"
+    );
+    let fwd = &binding.scratch.scratch_forwards[0];
+    let out = match &fwd.frame {
+        PendingForwardFrame::Prebuilt(bytes) => bytes,
+        _ => panic!("#14628: outbound re-NAT must queue a PREBUILT frame"),
+    };
+    let ip = &out[18..];
+    assert_eq!(
+        &ip[8..24],
+        &snat_v6.octets(),
+        "#14628: outer src must be the external NPTv6 address, not the internal prefix address"
+    );
+    assert_eq!(&ip[24..40], &server_v6.octets(), "outer dst untouched (the remote)");
+    let icmp = &ip[40..];
+    let emb = &icmp[8..];
+    assert_eq!(&emb[8..24], &server_v6.octets(), "embedded src untouched (server)");
+    assert_eq!(
+        &emb[24..40],
+        &snat_v6.octets(),
+        "#14628: embedded dst re-NAT'd to the external NPTv6 address"
+    );
+    assert_eq!(&emb[40..42], &80u16.to_be_bytes(), "embedded src port untouched");
+    assert_eq!(
+        &emb[42..44],
+        &12345u16.to_be_bytes(),
+        "NPTv6 has no port rewrite: embedded dst port stays the original"
+    );
+    assert!(fwd.flow_key.is_none());
+}

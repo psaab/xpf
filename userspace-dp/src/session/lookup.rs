@@ -244,6 +244,43 @@ impl SessionTable {
             record.entry.origin,
         ))
     }
+    /// #14628: expiry-aware probe that also returns the entry's CANONICAL
+    /// key. `probe_with_origin_at` cannot name it: an alias hit (the
+    /// reverse half's translated key) validates against the canonical
+    /// record internally but returns only the lookup, so a caller holding
+    /// the alias cannot recover the companion key. The embedded-ICMP
+    /// outbound classifier needs the canonical reverse key to derive the
+    /// forward companion (`reverse_session_key` is its own inverse).
+    pub(crate) fn probe_canonical_with_origin_at(
+        &self,
+        key: &SessionKey,
+        now_ns: u64,
+    ) -> SessionExpiryProbe<(SessionKey, SessionLookup, SessionOrigin)> {
+        let Some(record) = self.probe_record_with_origin(key) else {
+            return SessionExpiryProbe::Absent;
+        };
+        if now_ns.saturating_sub(record.entry.last_seen_ns) > record.entry.expires_after_ns {
+            return SessionExpiryProbe::IdleCrossed;
+        }
+        SessionExpiryProbe::Live((
+            record.key.clone(),
+            SessionLookup {
+                decision: record.entry.decision,
+                metadata: record.entry.metadata.clone_without_policy_counter(),
+                forwarding_generation: record.entry.forwarding_generation,
+                aux: SessionLookupAux {
+                    session_id: record.entry.session_id,
+                    source_nat_static: record.entry.source_nat_static,
+                    leak_incarnation: self
+                        .leak_incarnations
+                        .get(&record.key)
+                        .copied()
+                        .unwrap_or(0),
+                },
+            },
+            record.entry.origin,
+        ))
+    }
 
     /// Expiry-aware forward-wire match with stale/local-miss distinction from
     /// the same candidate walk.
