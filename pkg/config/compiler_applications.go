@@ -635,6 +635,17 @@ func compileApplications(node *Node, apps *ApplicationsConfig) error {
 		}
 	}
 
+	// appendPacked mirrors appendPackedAddressSetMembers12831 (#12831) for
+	// application-sets (#14341): it reads recognized member statements from
+	// a packed token run, preserves multi-valued (bracketed) members until
+	// the next recognized statement head, and records every unrecognized
+	// token as unknown so a typo cannot silently yield a valid subset.
+	appendPacked := func(as *ApplicationSet, keys []string, bracketed []bool) {
+		appendPackedApplicationSetMembers14341(keys, bracketed,
+			func(values []string) { as.Applications = append(as.Applications, values...) },
+			func(kw string) { as.UnknownMembers = append(as.UnknownMembers, kw) })
+	}
+
 	for _, inst := range namedInstances(node.FindChildren("application-set")) {
 		as := &ApplicationSet{Name: inst.name}
 
@@ -661,15 +672,30 @@ func compileApplications(node *Node, apps *ApplicationsConfig) error {
 				// first application (#5181, the applications-side analogue of
 				// the #4791 address-set fix). Accumulate every value across
 				// BOTH AST shapes.
-				for _, v := range applicationSetMemberValues(member) {
-					as.Applications = append(as.Applications, v)
-				}
+				as.Applications = append(as.Applications, applicationSetMemberValues(member)...)
 			case "description":
 				// Junos allows a `description` statement on an application-set
 				// (metadata, not a member reference). Accept it without adding a
 				// member and without flagging it below — a `description` is the
 				// documented way to author an otherwise-empty set (the #3144/#3434
 				// empty-set gate then rejects it only when it is REFERENCED).
+				// #14341: ignore only the metadata value, not a packed member
+				// run after it (`description "d" application a1`, or the braced
+				// child-block equivalent under member.Children).
+				if len(member.Keys) > 2 {
+					appendPacked(as, member.Keys[2:], bracketMask12831(member, 2))
+				}
+				for _, packed := range member.Children {
+					// The child's first key is the description VALUE itself
+					// (`description { "d" application a1; }` -> child
+					// Keys=["d","application","a1"]): skip it, parse the rest.
+					if len(packed.Keys) > 1 {
+						appendPacked(as, packed.Keys[1:], bracketMask12831(packed, 1))
+					}
+					for _, nested := range packed.Children {
+						appendPacked(as, nested.Keys, bracketMask12831(nested, 0))
+					}
+				}
 			default:
 				// #3890: an unrecognized member statement inside the opaque
 				// application-set body. The schema declares `application-set` as
@@ -691,8 +717,27 @@ func compileApplications(node *Node, apps *ApplicationsConfig) error {
 				}
 			}
 		}
+		// #14341: a brace-elided body may be packed on the application-set
+		// node itself (`application-set S description "d" application a1;`),
+		// mirroring the #12831 address-set elided tail.
+		if tail := instanceValueTail(inst.node, inst.name); len(tail) > 0 {
+			bracketed := bracketMask12831(inst.node, len(inst.node.Keys)-len(tail))
+			appendPacked(as, tail, bracketed)
+		}
 
-		apps.ApplicationSets[as.Name] = as
+		// Merge by name: duplicate `application-set S { ... }` blocks (or a
+		// braced block plus a packed/elided spelling of the same set) union
+		// their members onto the first definition rather than overwriting
+		// it, mirroring the #4706 address-set merge. Without this the
+		// elided-tail handling above would let a second same-name instance
+		// silently drop the first block's members.
+		if existing := apps.ApplicationSets[as.Name]; existing != nil && existing != as {
+			existing.Applications = append(existing.Applications, as.Applications...)
+			existing.UnknownMembers = append(existing.UnknownMembers, as.UnknownMembers...)
+			existing.UnknownMemberValues = append(existing.UnknownMemberValues, as.UnknownMemberValues...)
+		} else {
+			apps.ApplicationSets[as.Name] = as
+		}
 	}
 
 	return nil
@@ -1317,7 +1362,8 @@ func nodeVal(n *Node) string {
 // Reading only member.Keys[1] (nodeVal, the pre-#5181 bug) compiles just the
 // first bracket-list entry and silently drops the rest — a security-relevant
 // under-match when a DENY policy references the truncated set. Reading BOTH
-// Keys[1:] AND each child's Keys[0] covers every shape the parser can produce.
+// Keys[1:] AND every token of each child (and grandchild) node covers every
+// shape the parser can produce.
 func applicationSetMemberValues(member *Node) []string {
 	var vals []string
 	for _, k := range member.Keys[1:] {
@@ -1326,9 +1372,61 @@ func applicationSetMemberValues(member *Node) []string {
 		}
 	}
 	for _, vn := range member.Children {
-		if len(vn.Keys) >= 1 && vn.Keys[0] != "" {
-			vals = append(vals, vn.Keys[0])
+		// #14341: a bracketed child block (`application { [ a b ]; }`)
+		// collapses onto ONE child whose Keys hold every value
+		// (Keys=["a","b"]); reading only vn.Keys[0] dropped vn.Keys[1:].
+		for _, k := range vn.Keys {
+			if k != "" {
+				vals = append(vals, k)
+			}
+		}
+		for _, gn := range vn.Children {
+			for _, k := range gn.Keys {
+				if k != "" {
+					vals = append(vals, k)
+				}
+			}
 		}
 	}
 	return vals
+}
+
+// appendPackedApplicationSetMembers14341 is the application-set analogue of
+// appendPackedAddressSetMembers12831: it reads recognized member statements
+// (`application` / `application-set`) from a packed token run (tokens after
+// a `description` value, or the brace-elided tail on the application-set
+// node), preserves multi-valued members until the next recognized statement
+// head, and records every unrecognized token via unknown so a typo cannot
+// silently yield a valid subset. Bracketed tokens (bracketed[i]==true) are
+// always values, even when their text equals a statement keyword.
+func appendPackedApplicationSetMembers14341(keys []string, bracketed []bool, appendMember func([]string), unknown func(string)) {
+	for i := 0; i < len(keys); {
+		if keys[i] == "description" && !keyBracketed12831(bracketed, i) {
+			i += 2 // the schema admits one metadata value
+			continue
+		}
+		kind := keys[i]
+		if kind != "application" && kind != "application-set" {
+			unknown(kind)
+			i++
+			continue
+		}
+		start := i + 1
+		i = start
+		for i < len(keys) {
+			if keyBracketed12831(bracketed, i) {
+				i++
+				continue
+			}
+			if keys[i] == "application" || keys[i] == "application-set" || keys[i] == "description" {
+				break
+			}
+			i++
+		}
+		if start == i {
+			unknown(kind)
+			continue
+		}
+		appendMember(keys[start:i])
+	}
 }

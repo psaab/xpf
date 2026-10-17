@@ -1018,3 +1018,109 @@ applications {
 		assertExpanded(t, cfg, "plain", []string{"plain-t-http"})
 	})
 }
+// #14341: members of an application-set placed after `description` or
+// inside a bracketed child block (`application { [ a b ]; }`) were silently
+// omitted on strict CompileConfig with zero errors or warnings, so a zone
+// deny/reject policy referencing the set failed open for the omitted apps.
+// Root sites: the `description` arm in compileApplications never examined
+// Keys[2:]/Children where packed members live, and
+// applicationSetMemberValues read only vn.Keys[0] per child node, dropping
+// vn.Keys[1:] (the bracketed child-block values).
+func compileAppSet14341(t *testing.T, text string) (*Config, error) {
+	t.Helper()
+	tr, perrs := NewParser(text).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("parse: %v", perrs)
+	}
+	return CompileConfig(tr)
+}
+
+func TestApplicationSetDescriptionChainAndBracketedChildBlockStrict(t *testing.T) {
+	const appsDecl = `applications { application junos-http { protocol tcp; destination-port 80; } application junos-https { protocol tcp; destination-port 443; } application-set inner { application junos-http; } `
+	const policy = ` security { zones { security-zone trust; security-zone untrust; } policies { from-zone trust to-zone untrust { policy p { match { source-address any; destination-address any; application web-set; } then { deny; } } } } }`
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"braced description packed member", `application-set web-set { description "d" application junos-http; application junos-https; } }` + policy, []string{"junos-http", "junos-https"}},
+		{"elided description packed member", `application-set web-set description "d" application junos-http; }` + policy, []string{"junos-http"}},
+		{"bracketed child block", `application-set web-set { application { [ junos-http junos-https ]; } } }` + policy, []string{"junos-http", "junos-https"}},
+		{"description between members", `application-set web-set { application junos-http; description "d" application junos-https; } }` + policy, []string{"junos-http", "junos-https"}},
+		{"braced description packed bracket list", `application-set web-set { description "d" application [ junos-http junos-https ]; } }` + policy, []string{"junos-http", "junos-https"}},
+		{"nested set after description", `application-set web-set { description "d" application-set inner; } }` + policy, []string{"inner"}},
+		{"bracketed nested-set child block", `application-set web-set { application-set { [ inner ]; } } }` + policy, []string{"inner"}},
+		{"description child block packed member", `application-set web-set { description { "d" application junos-http; } } }` + policy, []string{"junos-http"}},
+		{"plain control", `application-set web-set { application junos-http; application junos-https; } }` + policy, []string{"junos-http", "junos-https"}},
+		{"description only stays empty", `application-set web-set { description "d"; } }`, []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := compileAppSet14341(t, appsDecl+tc.body)
+			if err != nil {
+				t.Fatalf("strict CompileConfig: %v", err)
+			}
+			s := cfg.Applications.ApplicationSets["web-set"]
+			if s == nil {
+				t.Fatalf("web-set missing")
+			}
+			if strings.Join(s.Applications, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("Applications=%v want %v", s.Applications, tc.want)
+			}
+			if len(s.UnknownMembers) != 0 {
+				t.Errorf("UnknownMembers=%v, description-packed members must not be poisoned", s.UnknownMembers)
+			}
+		})
+	}
+	// Fail-closed: an unrecognized token packed after description must be
+	// recorded as unknown so strict commit rejects, not silently dropped.
+	t.Run("unrecognized packed tail fails closed", func(t *testing.T) {
+		_, err := compileAppSet14341(t, appsDecl+`application-set web-set { description "d" typo x application junos-http; } }`+policy)
+		if err == nil {
+			t.Fatalf("expected strict reject for typo packed after description")
+		}
+		if !strings.Contains(err.Error(), "web-set") || !strings.Contains(err.Error(), "typo") {
+			t.Fatalf("error %q must name web-set and typo", err.Error())
+		}
+	})
+	// A bracketed member literally named `description` is a VALUE, not a
+	// nested description statement (mirrors #12831 set K). The parser keeps
+	// the bracket provenance (KeysBracketed), so it compiles as a member
+	// named `description`; strict then rejects it as an undefined member
+	// (fail-closed) — critically it is NOT skipped as a description
+	// statement dropping junos-http with it. Verified via the tolerant path
+	// where the member list is observable.
+	t.Run("bracketed keyword-named member kept", func(t *testing.T) {
+		tr, perrs := NewParser(appsDecl + `application-set web-set { description "d" application [ description junos-http ]; } }` + policy).Parse()
+		if len(perrs) > 0 {
+			t.Fatalf("parse: %v", perrs)
+		}
+		cfg, err := CompileConfigLenient(tr)
+		if err != nil {
+			t.Fatalf("lenient CompileConfig: %v", err)
+		}
+		s := cfg.Applications.ApplicationSets["web-set"]
+		if s == nil || strings.Join(s.Applications, ",") != "description,junos-http" {
+			t.Fatalf("Applications=%v want [description junos-http]", s)
+		}
+	})
+}
+
+// #14341 follow-on: an elided (packed) spelling of a set must not silently
+// overwrite a braced definition of the same name. Strict gates duplicate
+// application-set definitions (#3339), so this is observable only on the
+// tolerant path: the unioned members must survive BOTH spellings.
+func TestApplicationSetDuplicateBlocksUnion14341(t *testing.T) {
+	tr, perrs := NewParser(`applications { application junos-http { protocol tcp; destination-port 80; } application junos-https { protocol tcp; destination-port 443; } application-set web-set { application junos-http; } application-set web-set description "d" application junos-https; }`).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("parse: %v", perrs)
+	}
+	cfg, err := CompileConfigLenient(tr)
+	if err != nil {
+		t.Fatalf("lenient CompileConfig: %v", err)
+	}
+	s := cfg.Applications.ApplicationSets["web-set"]
+	if s == nil || strings.Join(s.Applications, ",") != "junos-http,junos-https" {
+		t.Fatalf("Applications=%v want [junos-http junos-https]", s)
+	}
+}
