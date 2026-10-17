@@ -566,7 +566,7 @@ func (m *Manager) runProbeLoop(ctx context.Context, probe *config.RPMProbe, test
 
 	slog.Info("RPM probe started",
 		"probe", probe.Name, "test", test.Name,
-		"type", test.EffectiveProbeType(), "target", test.Target,
+		"type", test.EffectiveProbeType(), "target", config.RedactURL(test.Target),
 		"interval", interval)
 
 	ticker := time.NewTicker(interval)

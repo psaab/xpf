@@ -152,7 +152,7 @@ func (s *Server) showRPM(buf *strings.Builder) {
 			buf.WriteString("RPM Probe Results:\n")
 			for _, r := range results {
 				fmt.Fprintf(buf, "  Probe: %s, Test: %s\n", r.ProbeName, r.TestName)
-				fmt.Fprintf(buf, "    Type: %s, Target: %s\n", r.ProbeType, r.Target)
+				fmt.Fprintf(buf, "    Type: %s, Target: %s\n", r.ProbeType, config.RedactURL(r.Target))
 				fmt.Fprintf(buf, "    Status: %s", r.LastStatus)
 				if r.LastRTT > 0 {
 					fmt.Fprintf(buf, ", RTT: %s", r.LastRTT)
