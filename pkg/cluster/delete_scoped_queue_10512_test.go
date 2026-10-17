@@ -199,6 +199,14 @@ func (f *scopedRecorderStore10512) DeleteClusterScopedV6(key dataplane.SessionKe
 	return nil
 }
 
+func (f *scopedRecorderStore10512) DeleteWithCompanionsV4(dataplane.SessionKey, dataplane.DeleteReason, bool) error {
+	return nil
+}
+
+func (f *scopedRecorderStore10512) DeleteWithCompanionsV6(dataplane.SessionKeyV6, dataplane.DeleteReason, bool) error {
+	return nil
+}
+
 func (f *scopedRecorderStore10512) PutClusterSyncedV4(dataplane.SessionKey, dataplane.SessionValue) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
