@@ -427,6 +427,14 @@ fn d14_zone_gate(
         Some((src, dst)) => (src, dst, true),
         None => (0, 0, false),
     };
+    // #14366: parse the real ICMP type/code from the same owned frame the
+    // ports above were parsed from, so a type-constrained DENY term
+    // (junos-icmp-ping = type 8) can match. The helper returns None for
+    // non-ICMP protocols (meta.protocol on this frame is input.protocol,
+    // including the native-fragment sentinel) and for truncated or
+    // non-first-fragment frames, preserving fail-closed behaviour there.
+    // TCP/UDP verdicts are unchanged: the argument stays None for them.
+    let packet_icmp = crate::afxdp::poll_descriptor::policy_packet_icmp(&owned, meta);
     let policy = crate::policy::evaluate_policy_result_l3_aware(
         &forwarding.policy,
         ingress_zone,
@@ -436,7 +444,7 @@ fn d14_zone_gate(
         effective_protocol,
         src_port,
         dst_port,
-        None,
+        packet_icmp,
         input.inner_packet.len() as u64,
         l4_present,
     );
@@ -1224,6 +1232,141 @@ mod tests {
         };
         crate::policy::parse_policy_state("deny", &[rule], &zones)
     }
+    // #14366: zone pair with a type-constrained ICMP term in one rule and an
+    // unconstrained ICMP term in the other. `icmp_type: Some(8)` mirrors
+    // junos-icmp-ping; `icmp_type: None` mirrors junos-icmp-all.
+    fn icmp_term_policy(
+        first_action: &str,
+        first_icmp_type: Option<u8>,
+        second_action: Option<&str>,
+        second_icmp_type: Option<u8>,
+        default_action: &str,
+    ) -> crate::policy::PolicyState {
+        let mut zones: rustc_hash::FxHashMap<String, u16> = Default::default();
+        zones.insert("vpn".into(), 1);
+        zones.insert("lan".into(), 2);
+        let mut rules = vec![crate::PolicyRuleSnapshot {
+            policy_id: 101,
+            name: "vpn-to-lan-icmp-first".into(),
+            from_zone: "vpn".into(),
+            to_zone: "lan".into(),
+            source_addresses: vec!["any".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["any".into()],
+            application_terms: vec![crate::PolicyApplicationSnapshot {
+                name: "icmp-term".into(),
+                protocol: "icmp".into(),
+                source_port: String::new(),
+                destination_port: String::new(),
+                icmp_type: first_icmp_type,
+                icmp_code: None,
+                inactivity_timeout: None,
+            }],
+            action: first_action.into(),
+            ..Default::default()
+        }];
+        if let Some(action) = second_action {
+            rules.push(crate::PolicyRuleSnapshot {
+                policy_id: 102,
+                name: "vpn-to-lan-icmp-second".into(),
+                from_zone: "vpn".into(),
+                to_zone: "lan".into(),
+                source_addresses: vec!["any".into()],
+                destination_addresses: vec!["any".into()],
+                applications: vec!["any".into()],
+                application_terms: vec![crate::PolicyApplicationSnapshot {
+                    name: "icmp-term".into(),
+                    protocol: "icmp".into(),
+                    source_port: String::new(),
+                    destination_port: String::new(),
+                    icmp_type: second_icmp_type,
+                    icmp_code: None,
+                    inactivity_timeout: None,
+                }],
+                action: action.into(),
+                ..Default::default()
+            });
+        }
+        crate::policy::parse_policy_state(default_action, &rules, &zones)
+    }
+
+    fn v4_icmp_packet(icmp_type: u8, icmp_code: u8) -> Vec<u8> {
+        let total = 28u16;
+        let mut packet = vec![0u8; total as usize];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&total.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 1;
+        packet[12..16].copy_from_slice(&[10, 0, 0, 1]);
+        packet[16..20].copy_from_slice(&[192, 0, 2, 5]);
+        packet[20] = icmp_type;
+        packet[21] = icmp_code;
+        packet
+    }
+
+    fn icmp_decision(policy: crate::policy::PolicyState, packet: &[u8]) -> IpsecInnerDecision {
+        let mut forwarding = local_lan_forwarding();
+        forwarding.policy = policy;
+        let view = view_with_rows(1, 1, st0_rows(), forwarding);
+        let mut inp = input(packet, advisory(1, 1, 1, 1, 1));
+        inp.protocol = 1;
+        adjudicate_ipsec_inner(&view, inp)
+    }
+
+    #[test]
+    fn d14_icmp_ping_deny_above_icmp_all_permit_denies_echo_14366() {
+        // deny+junos-icmp-ping (type 8, policy_id 101) above
+        // permit+junos-icmp-all (policy_id 102): the type-8 frame must
+        // hit the DENY at d15_zone_policy attributed to rule 101, not
+        // fall through to WouldPermit or to the permit rule. Pre-fix
+        // (packet_icmp=None, l4_present=false) the decision still denies
+        // but only via policy.rs's #4569 fragment-association override,
+        // which re-attributes to the skipped deny — the attribution and
+        // the WouldPermit cells are the distinguishing signals; see the
+        // docs log for the measured pre-fix shape.
+        let policy = icmp_term_policy("deny", Some(8), Some("permit"), None, "deny");
+        let packet = v4_icmp_packet(8, 0);
+        let d = icmp_decision(policy, &packet);
+        assert!(!d.is_would_permit(), "{d:?}");
+        assert_eq!(d.reason(), Some(reason::LEGACY_POLICY_DENY), "{d:?}");
+        match &d {
+            IpsecInnerDecision::Deny { stage, policy_id, .. } => {
+                assert_eq!(*stage, "d15_zone_policy", "{d:?}");
+                assert_eq!(*policy_id, 101, "deny must be attributed to the ping-deny rule (101): {d:?}");
+            }
+            other => panic!("type-8 echo must be denied by the ping term, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn d14_icmp_type3_falls_through_ping_deny_to_icmp_all_permit_14366() {
+        // Same pair, type 3: the ping-deny genuinely misses, the
+        // permit-icmp-all applies.
+        let policy = icmp_term_policy("deny", Some(8), Some("permit"), None, "deny");
+        let packet = v4_icmp_packet(3, 0);
+        let d = icmp_decision(policy, &packet);
+        assert!(d.is_would_permit(), "{d:?}");
+    }
+
+    #[test]
+    fn d14_icmp_type3_still_denies_under_permit_ping_default_deny_14366() {
+        // permit+junos-icmp-ping only, default deny: passing Some((3,0))
+        // must not manufacture a permit from the constrained term.
+        let policy = icmp_term_policy("permit", Some(8), None, None, "deny");
+        let packet = v4_icmp_packet(3, 0);
+        let d = icmp_decision(policy, &packet);
+        assert_eq!(d.reason(), Some(reason::LEGACY_POLICY_DENY), "{d:?}");
+    }
+
+    #[test]
+    fn d14_icmp_ping_permit_type8_permits_14366() {
+        // Positive control for the constrained permit term itself.
+        let policy = icmp_term_policy("permit", Some(8), None, None, "deny");
+        let packet = v4_icmp_packet(8, 0);
+        let d = icmp_decision(policy, &packet);
+        assert!(d.is_would_permit(), "{d:?}");
+    }
+
 
     fn v4_l4_packet(protocol: u8, src: [u8; 4], dst: [u8; 4], src_port: u16, dst_port: u16, frag: u16) -> Vec<u8> {
         let l4_len = if protocol == 17 { 8 } else { 20 };
