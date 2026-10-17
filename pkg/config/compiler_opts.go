@@ -2683,6 +2683,14 @@ type compileOpts struct {
 	// presence. Without that, warning on this path would mean a persisted
 	// pre-gate config still serves an authPriv user in clear.
 	lenientSNMPv3SecurityKeyword bool
+	// lenientSNMPv3BarePassword (#14401) downgrades the bare-password-leaf
+	// rejection on the tolerant ingress. A DEDICATED flag rather than a
+	// reuse of the #9155 one above, although both gates guard the same
+	// property and share the #1960 no-brick reasoning: sharing one switch
+	// means a future change to either gate's tolerant behaviour silently
+	// changes the other's, and these two fire on different evidence (a
+	// bare password leaf vs an unknown protocol keyword in the AST).
+	lenientSNMPv3BarePassword bool
 	// lenientPolicyASPathRef (#7471) downgrades the dangling `from as-path`
 	// rejection to a warning on the tolerant Load / SyncApply ingress, so an
 	// already-persisted or peer-synced config carrying the typo still boots
@@ -3401,6 +3409,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyCommunityRef:              true,
 		lenientSNMPv3KeyMaterial:               true,
 		lenientSNMPv3SecurityKeyword:           true,
+		lenientSNMPv3BarePassword:              true,
 		lenientPolicyASPathRef:                 true,
 		lenientPolicyASPathRegex:               true,
 		lenientPolicyCommunityRegex:            true,

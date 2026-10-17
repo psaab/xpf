@@ -213,6 +213,18 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 			return err
 		}
 	}
+	// #14401: a bare authentication-password / privacy-password leaf
+	// directly under a user. Runs on the AST beside the #9155 gate: the
+	// compiled config cannot distinguish a bare-password user from a
+	// deliberate noAuthNoPriv user. Strict rejects; lenient warns (#1960).
+	if err := validateSNMPv3BarePasswordLeafStrict(tree); err != nil {
+		if opts.lenientSNMPv3BarePassword {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("snmpv3 bare password leaf (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	if err := validateSNMPv3UserKeyMaterialStrict(cfg); err != nil {
 		if opts.lenientSNMPv3KeyMaterial {
 			cfg.Warnings = append(cfg.Warnings,
