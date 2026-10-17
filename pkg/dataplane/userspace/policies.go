@@ -103,17 +103,14 @@ func walkPolicyRuleSlots(cfg *config.Config, fn func(slot policyRuleSlot) error)
 	// too: discarded rules must neither overflow a namespace / total cap nor
 	// appear in policy-ID maps. Keep the raw set index stable for survivors.
 	quarantined := config.ZoneQuarantineExclusionsForConfig(cfg)
-	for name := range quarantined {
-		switch name {
-		case config.JunosGlobalZoneName, config.ReservedWildcardZoneName, "junos-host":
-			// Reserved policy sentinels are handled by the rule poison paths,
-			// not by collision quarantine. A poisoned definition is excluded
-			// here just as quarantineCollidingZones excludes it.
-			zone := cfg.Security.Zones[name]
-			if zone == nil || !zone.DroppedEnforcementChild {
-				delete(quarantined, name)
-			}
-		}
+	// #14329: reserved policy sentinels are never policy-quarantine members.
+	// A poisoned reserved definition (DroppedEnforcementChild) must go
+	// through its dedicated poison path (#9570 zone-pair junos-global,
+	// #12249 defined-any) rather than silently erasing global rules
+	// (From/To == junos-global), wildcard rules (any) or host rules
+	// (junos-host). Delete unconditionally, even when poisoned.
+	for _, name := range []string{config.JunosGlobalZoneName, config.ReservedWildcardZoneName, "junos-host"} {
+		delete(quarantined, name)
 	}
 	for _, zpp := range cfg.Security.Policies {
 		if zpp == nil {
@@ -155,21 +152,25 @@ func walkPolicyRuleSlots(cfg *config.Config, fn func(slot policyRuleSlot) error)
 		policySetID++
 	}
 	globalRuleIndex := uint32(0)
-	// #14330: the snapshot quarantine (scrubPoliciesForQuarantinedZones)
+	// #14330/#14329: the snapshot quarantine (scrubPoliciesForQuarantinedZones)
 	// drops a scoped-global rule whose configured match side has NO
 	// surviving member after pruning quarantined zones. Such a rule is
 	// never published, so it must not consume a global slot, appear in
 	// PolicyIDsByStableKey/PoliciesByStableKey/RuntimePolicyIDs, or count
 	// toward expansion caps. A partially quarantined side survives pruned
 	// and keeps its slot/ID (fingerprint change is signalled by
-	// PolicyResolvedFingerprints). Use the same policy-quarantine set as
-	// quarantineCollidingZones (collision losers + poisoned zones;
-	// reserved sentinels excluded so defined-`any` / junos-host scope
-	// handling stays with its own poison paths). "" / "any" wildcards are
-	// never quarantined, so unscoped globals are unaffected.
+	// PolicyResolvedFingerprints). policyQuarantined (quarantinedZoneNamesForConfig:
+	// collision losers + poisoned zones, reserved sentinels excluded so
+	// defined-`any` / junos-host scope handling stays with its own poison
+	// paths) matches the scrub's effective semantics in the integrated
+	// state, and the zone-pair `quarantined` set above likewise has the
+	// reserved sentinels deleted (#14329 unconditional delete). A wildcard
+	// scope (empty or containing "any") is all-zones, not a concrete
+	// quarantined member, so it never triggers a skip; unscoped globals
+	// are unaffected.
 	policyQuarantined := quarantinedZoneNamesForConfig(cfg)
 	globalScopeFullyQuarantined := func(zones []string) bool {
-		if len(zones) == 0 || len(policyQuarantined) == 0 {
+		if len(zones) == 0 || len(policyQuarantined) == 0 || config.IsWildcardZoneSet(zones) {
 			return false
 		}
 		for _, z := range zones {
