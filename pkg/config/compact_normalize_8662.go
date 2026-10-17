@@ -195,21 +195,26 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 				node.Children = nil
 				node.IsLeaf = false
 				stmts := splitPackedStatements8768(tail, childSub, tailValues)
-				// #8850: a braced body plus a MULTI-statement run is ambiguous --
-				// nothing in the tree says which statement the body belongs to.
-				// Measured: `address-book address-set s1 { address a1; } address a2
-				// ...;` compiled to the SET ONLY, losing a2, because the body was
-				// attached to the last statement while it belongs to the first.
-				//
-				// Decline rather than guess, per the #8768 rule for a tail outside
-				// the modelled grammar. A single-statement run is unambiguous (the
-				// body can only belong to it) and is exactly the zones/screens/
-				// host-inbound shape this relaxation exists for.
-				//
-				// Restore and fall THROUGH to the recursion below rather than
-				// `continue`: skipping it would leave the declined node's braced
-				// body unvisited, which is a change master does not make.
-				if len(body) > 0 && len(stmts) > 1 {
+				// #14343: decline when the braced body would land on a leaf.
+				// Resolve the last packed statement's schema exactly as the
+				// splitter does; if it is a leaf (children and wildcard both
+				// nil, e.g. security-zone screen/description), it cannot own
+				// the body. Attaching interfaces/host-inbound/address-book
+				// there silently dropped them because zone readers ignore
+				// leaf children. Declining leaves the tree as authored; the
+				// zone statement-tail / unknown-child gates then reject or
+				// warn instead of publishing an empty zone. Container and
+				// wildcard heads keep the existing attachment.
+				declineLeafBody14343 := false
+				if len(body) > 0 && len(stmts) == 1 {
+					if cs := resolveSchemaChild(childSub, stmts[0][0]); cs != nil {
+						_, refined := consumeNodeKeys(stmts[0], cs)
+						if refined != nil && refined.children == nil && refined.wildcard == nil {
+							declineLeafBody14343 = true
+						}
+					}
+				}
+				if (len(body) > 0 && len(stmts) > 1) || declineLeafBody14343 {
 					node.Keys = append(node.Keys, tail...)
 					node.Children = body
 				} else {

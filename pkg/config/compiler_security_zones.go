@@ -724,8 +724,17 @@ func compileZones(node *Node, sec *SecurityConfig) error {
 					}
 				}
 			case "screen":
-				zone.ScreenProfile = nodeVal(prop)
-				zone.ScreenProfileConfigured = true
+				if len(prop.Keys) > 2 || len(prop.Children) > 0 {
+					// #14343: screen is a leaf; surplus keys or a braced body
+					// folded onto it (compact header) cannot be zone body.
+					// Record as unknown so strict rejects and lenient
+					// quarantines instead of silently dropping interfaces /
+					// host-inbound / address-book carried in that body.
+					recordUnknownSecurityZoneChild11575(zone, prop.Keys)
+				} else {
+					zone.ScreenProfile = nodeVal(prop)
+					zone.ScreenProfileConfigured = true
+				}
 			case "host-inbound-traffic":
 				// #4544: MERGE repeated zone-level host-inbound-traffic blocks
 				// rather than overwrite (Junos merge semantics). This case
@@ -747,7 +756,12 @@ func compileZones(node *Node, sec *SecurityConfig) error {
 					zone.TCPRst = true
 				}
 			case "description":
-				zone.Description = nodeVal(prop)
+				if len(prop.Keys) > 2 || len(prop.Children) > 0 {
+					// #14343: same leaf-body guard as screen.
+					recordUnknownSecurityZoneChild11575(zone, prop.Keys)
+				} else {
+					zone.Description = nodeVal(prop)
+				}
 			case "address-book":
 				// #3061: zone-local address book. Same entry grammar as the
 				// global book; resolved into the global book under
