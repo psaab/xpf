@@ -670,6 +670,13 @@ func junosHostProjectTerm(cfg *Config, key string, p *Policy, feedBound map[stri
 // every packet in its family and makes that family's terminal unnecessary.
 // The userspace `None => deliver` lifeline is unchanged, so the existing permit
 // warning stays to describe that residual path.
+//
+// #14349: the terminal is driven by AUTHORED permit presence, not by whether
+// a permit emitted a return. A permit skipped on tolerant load (#12040) or
+// whose cross-family intersection is empty (v4 source x v6-only application)
+// emits no return in either family, yet the operator still authored a
+// permit-only (deny-by-default) program; omitting the terminal would leave
+// both families on coarse host-inbound alone.
 func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostTerm) (JunosHostDenyProgram, map[string]bool) {
 	prog := JunosHostDenyProgram{
 		Zone:          zone,
@@ -685,8 +692,13 @@ func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostT
 	// counted as rendered and had its #4168 warning suppressed, so the operator
 	// got neither the enforcement nor the diagnostic (#6705).
 	emitted := map[string]bool{}
-	var doneV4, doneV6, hasPermitV4, hasPermitV6 bool
+	var doneV4, doneV6, hasPermitV4, hasPermitV6, hasAuthoredPermit bool
 	for _, t := range terms {
+		if t.action == PolicyPermit {
+			// Authored presence counts even for a permit that is skipped
+			// below or that builds no rule in either family (#14349).
+			hasAuthoredPermit = true
+		}
 		if t.action == PolicyPermit && t.skipPermit {
 			continue // An incomplete permit carves nothing.
 		}
@@ -712,7 +724,11 @@ func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostT
 		add("ip6", &prog.RulesV6, &doneV6, &hasPermitV6)
 	}
 	terminal := junosHostTermVerdict(PolicyDeny)
-	hasPermitProgram := hasPermitV4 || hasPermitV6
+	// Per-family hasPermit* still suppress the terminal where a match-all
+	// permit already covers the family via done*; hasAuthoredPermit is the
+	// program-level trigger so an empty-intersection or skipped sole permit
+	// (#14349) cannot fail open to coarse host-inbound.
+	hasPermitProgram := hasAuthoredPermit
 	if hasPermitProgram && !doneV4 {
 		prog.RulesV4 = append(prog.RulesV4, JunosHostDenyRule{
 			Family: "ip", SrcAny: true, DstAny: true, Verdict: terminal,
