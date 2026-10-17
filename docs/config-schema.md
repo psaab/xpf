@@ -10843,7 +10843,13 @@ reserved for whole-dataplane selection where a rewrite shim
     (`resolveRemoteAddr`, `pkg/ipsec/policy.go`) emits `remote_addrs = %any`
     so strongSwan listens for the inbound IKE rather than skipping the
     connection. `local-address` (or `external-interface`) still pins the
-    local endpoint as usual.
+    local endpoint as usual. Since #14591 a PSK VPN on such a gateway must
+    also configure `remote-identity <type> <value>` on the gateway: with no
+    peer identity the PSK cannot be scoped, and a holder of another VPN's
+    key could authenticate into the tunnel by claiming that peer's
+    identity. Commit rejects the shape
+    (`validateIPsecResponderIdentityStrict`); tolerant loads warn and the
+    renderer skips the connection.
   - `security nat static rule-set rule match` — declared the
     `source-address` / `destination-address` children the static-NAT
     compiler reads (the subtree was previously unreachable by the walker).

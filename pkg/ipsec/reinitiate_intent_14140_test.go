@@ -49,7 +49,7 @@ func TestChangedResponderOnlyVPNIsNotReinitiated14140(t *testing.T) {
 			m := newRecordingManager(t, rec)
 			mk := func(psk string) *config.IPsecConfig {
 				return eagerCfg(
-					&config.IPsecGateway{Name: "dial-in", ResponderOnly: true, LocalAddress: "203.0.113.5"},
+					&config.IPsecGateway{Name: "dial-in", ResponderOnly: true, RemoteIDType: "hostname", RemoteIDValue: "dialin.example.com", LocalAddress: "203.0.113.5"},
 					&config.IPsecVPN{PSK: config.Secret(psk), EstablishTunnels: mode},
 				)
 			}

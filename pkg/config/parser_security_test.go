@@ -5694,6 +5694,7 @@ func TestIPsecResponderOnlyGatewaySetSyntax(t *testing.T) {
 		"set security ike policy ike-pol pre-shared-key ascii-text secret123",
 		"set security ike gateway dial-in ike-policy ike-pol",
 		"set security ike gateway dial-in local-address 198.51.100.1",
+		"set security ike gateway dial-in remote-identity hostname dialin.example.com",
 		"set security ike gateway dial-in dynamic",
 		"set security ipsec vpn dyn ike gateway dial-in",
 		"set security ipsec vpn dyn bind-interface st0.0",
