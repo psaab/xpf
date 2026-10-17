@@ -293,6 +293,14 @@ func flowTraceSizeFilesValues(fileNode *Node) (size string, sizeSet bool, files 
 	scan(fileNode.Keys, 2)
 	for _, child := range fileNode.Children {
 		scan(child.Keys, 0)
+		// #14577: once `file` is a typed leaf with size/files modifier
+		// children, SetPath groups the flat tail as a chain
+		// (size -> files) instead of one collapsed child, so the second
+		// modifier lives one level deeper. Descend grandchildren so the
+		// compiler and this gate read exactly what the schema admits.
+		for _, grand := range child.Children {
+			scan(grand.Keys, 0)
+		}
 	}
 	return size, sizeSet, files, filesSet
 }

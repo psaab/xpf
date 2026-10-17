@@ -943,6 +943,13 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			valueType: ValueIdentifier, valueDesc: "interface name (optionally .<unit>)",
 			valueExamples: []string{"ge-0-0-0", "reth1.100"},
 			validator:     ValidateSyslogSourceInterface, children: nil},
+		// #14577 (Y03-02): `security log report` enables session
+		// aggregation reporting. compileLog reads it as a presence flag
+		// (compiler_security_log.go: sec.Log.Report) and daemon_system.go
+		// arms the aggregator on it. It was compiler-read but never
+		// modelled, so #10078's closed-world security arm rejected it at
+		// strict commit and commit-locked a leniently-carried config.
+		"report": {desc: "Enable session aggregation reporting (security log report)", children: nil},
 		// issue 8932/8936: packedStatements so a run written on one line --
 		// `stream s1 host 192.0.2.1 category policy;` -- splits into siblings
 		// instead of landing whole on the node's Keys, where every statement
@@ -1168,8 +1175,41 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 		"force-ip-reassembly":             {desc: "Force IP fragment reassembly before forwarding (accepted-only)", children: nil},
 		"multicast-session-lifetime":      {desc: "Multicast session lifetime in seconds (accepted-only)", args: 1, placeholder: "<seconds>", valueType: ValueInteger, valueDesc: "Seconds (6..1800)", valueExamples: []string{"30"}, validator: ValidateInteger(6, 1800), children: nil},
 		"preserve-incoming-fragment-size": {desc: "Preserve incoming fragment size when forwarding (accepted-only)", children: nil},
+		// #14577 (Y03-02): global SYN-flood protection mode. compileFlow
+		// reads it into Flow.SynFloodProtectionMode; the only honoured
+		// value is "syn-cookie" (screens.go / compiler_iface.go compare
+		// == "syn-cookie"). Junos also defines syn-proxy, which xpf does
+		// not implement: an enum of exactly {syn-cookie} makes syn-proxy
+		// (and any typo) an explicit commit reject naming the value.
+		"syn-flood-protection-mode": {desc: "SYN flood protection mode (syn-cookie)", args: 1, placeholder: "<mode>",
+			valueType: ValueEnumOf, valueDesc: "SYN flood protection mode",
+			valueExamples: []string{"syn-cookie"},
+			validator:     ValidateEnum([]string{"syn-cookie"}), children: nil},
 		"traceoptions": {desc: "Flow trace debugging options", children: map[string]*schemaNode{
-			"file": {desc: "Trace file name (with size/files options)", args: 1, placeholder: "<filename>", children: nil},
+			// #14577 (Y03-02): `file <name> size <s> files <n>` (#3424).
+			// compileFlow reads size/files via flowTraceSizeFilesValues
+			// across flat, packed and braced shapes. The tail is exactly
+			// two valued modifiers, so it is modelled as a typed filename
+			// leaf with a tailValidator (the #4228 whole-tail mechanism,
+			// as CoS transmit-rate) rather than modifier children — the
+			// typed-leaf modifier walk stops after the first modifier and
+			// would reject `size ... files ...`. Bounds are the #3424
+			// SSOT (FlowTraceMin/Max*); validateFlowTraceSizeFilesAST
+			// remains the compiler-prewalk gate for the same bounds, and
+			// the size/files children below exist for completion and for
+			// the hierarchical modifier-child walk.
+			"file": {desc: "Trace file name (with size/files options)", args: 1, placeholder: "<filename>",
+				valueType: ValueIdentifier, valueDesc: "trace file base name",
+				valueExamples: []string{"rt-flow.log"},
+				validator:     nil, tailValidator: validateFlowTraceFileTail14577,
+				children: map[string]*schemaNode{
+					"size": {desc: "Maximum trace file size in bytes", args: 1, placeholder: "<bytes>",
+						valueType: ValueInteger, valueDesc: "Trace file size in bytes (10240..1073741824)",
+						valueExamples: []string{"100000"}, validator: ValidateInteger(FlowTraceMinFileSize, FlowTraceMaxFileSize), children: nil},
+					"files": {desc: "Number of trace files to retain", args: 1, placeholder: "<count>",
+						valueType: ValueInteger, valueDesc: "Trace file count (2..1000)",
+						valueExamples: []string{"3"}, validator: ValidateInteger(FlowTraceMinFileCount, FlowTraceMaxFileCount), children: nil},
+				}},
 			// #3984: repeated keyed-list leaf — the compiler accumulates
 			// every traceoptions `flag` sibling into Traceoptions.Flags via
 			// FindChildren (compiler_security.go). `multi: true` keeps each
