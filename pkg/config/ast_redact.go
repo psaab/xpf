@@ -35,7 +35,7 @@ import (
 //	pre-shared-key            IKE policy / IPsec VPN PSK   (keeps ascii-text|hexadecimal qualifier)
 //	authentication-key        OSPF/IS-IS/RIP/BGP/VRRP auth key + BGP TCP-MD5
 //	simple-password           OSPF simple-password auth (same AuthKey field)
-//	key (under authentication md5 <id>)   OSPF hello md5 key
+//	key (under an authentication/md5 ancestor pair, any distance)   OSPF hello md5 key (#14389)
 //	authentication-password   SNMPv3 USM auth password
 //	privacy-password          SNMPv3 USM privacy password
 //	encrypted-password        root / login crypt(3) hash
@@ -317,8 +317,25 @@ func secretIndices(fp []string) []int {
 		case "key":
 			// `authentication md5 <key-id> key <secret>`. A GRE tunnel `key`
 			// or a chassis device-map identity `key` has no such context.
-			if i >= 3 && fp[i-2] == "md5" && fp[i-3] == "authentication" && i+1 < len(fp) {
-				out = append(out, i+1)
+			//
+			// #14389: an exact-position window (md5 at i-2, authentication
+			// at i-3) misses the hierarchical spelling
+			// `md5 1 2 { key SECRET; }`, which flattens to
+			// [..., authentication, md5, 1, 2, key, SECRET] — the compiler
+			// still installs that key (id 1), so it leaked live on every
+			// redacted display surface. Mask every token after `key` when
+			// a consecutive ("authentication", "md5") pair appears strictly
+			// before it: that pair is the context every other gated keyword
+			// in this function uses (ancestry, not position), and none of
+			// the non-secret `key` paths (GRE tunnel, NTP, api-auth named
+			// key, chassis device-map) contains it. Masking all trailing
+			// tokens, as the distinctive-secret cases above do, also covers
+			// `md5 1 key { key SECRET; }`, whose outer `key` was previously
+			// masked while its nested secret value leaked.
+			if keyHasOSPFMD5Ancestor(fp, i) {
+				for j := i + 1; j < len(fp); j++ {
+					out = append(out, j)
+				}
 			}
 		case "community":
 			// SNMP v1/v2c community string is the container-identity token
@@ -331,6 +348,19 @@ func secretIndices(fp []string) []int {
 		}
 	}
 	return out
+}
+
+// keyHasOSPFMD5Ancestor reports whether the flattened path fp contains a
+// consecutive ("authentication", "md5") pair strictly before index i — the
+// OSPF MD5 context that makes a generic `key` leaf secret (#14389). The scan
+// is over fp[:i] only, never at or after the `key` token itself.
+func keyHasOSPFMD5Ancestor(fp []string, i int) bool {
+	for j := 0; j+1 < i; j++ {
+		if fp[j] == "authentication" && fp[j+1] == "md5" {
+			return true
+		}
+	}
+	return false
 }
 
 // urlLeafIndices returns the indices into the flattened key path fp that hold a
