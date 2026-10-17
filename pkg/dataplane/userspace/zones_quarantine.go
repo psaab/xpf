@@ -219,7 +219,13 @@ func quarantineCollidingZones(snap *ConfigSnapshot) []ZoneIDCollision {
 	if snap.Config != nil {
 		// #13099: add poisoned zones — a poisoned zone is equally absent from
 		// the published snapshot, so its (hand-built / synced) policies dangle.
+		// #14329: reserved sentinels are excluded — a poisoned junos-global /
+		// any / junos-host definition must not erase global / wildcard / host
+		// policies here; those go through their dedicated poison paths.
 		for name := range config.ZoneQuarantineExclusionsForConfig(snap.Config) {
+			if config.IsReservedZoneName(name) {
+				continue
+			}
 			if z := snap.Config.Security.Zones[name]; z != nil && z.DroppedEnforcementChild {
 				if policyQuarantined == nil {
 					policyQuarantined = make(map[string]struct{})
@@ -338,7 +344,11 @@ func scrubPoliciesForQuarantinedZones(policies []PolicyRuleSnapshot, quarantined
 func quarantinedZoneNamesForConfig(cfg *config.Config) map[string]struct{} {
 	out := config.QuarantinedZoneNames(config.ZoneQuarantineNamesForConfig(cfg))
 	// #13099: partial republish must also scrub poisoned-zone policies.
+	// #14329: reserved sentinels excluded (dedicated poison paths govern).
 	for name := range config.ZoneQuarantineExclusionsForConfig(cfg) {
+		if config.IsReservedZoneName(name) {
+			continue
+		}
 		if z := cfg.Security.Zones[name]; z != nil && z.DroppedEnforcementChild {
 			if out == nil {
 				out = make(map[string]struct{})

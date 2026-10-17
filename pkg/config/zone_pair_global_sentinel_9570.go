@@ -12,6 +12,15 @@ const JunosGlobalZoneName = "junos-global"
 // quarantined from the dataplane (#3055, #12249).
 const ReservedWildcardZoneName = "any"
 
+// IsReservedZoneName reports whether name is a reserved policy sentinel
+// (junos-global, any, junos-host) that must never be treated as an ordinary
+// quarantinable security zone for policy scrubbing / slot walking. Such
+// names go through their dedicated poison paths (#9570, #12249) instead.
+func IsReservedZoneName(name string) bool {
+	_, ok := reservedZoneNames[name]
+	return ok
+}
+
 // ZonePairGlobalSentinelSide reports which structural side(s) of a ZONE-PAIR
 // security-policy stanza (`from-zone <a> to-zone <b> { policy ... }`) name the
 // reserved global-policy sentinel: "from-zone", "to-zone",
