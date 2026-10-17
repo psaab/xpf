@@ -519,7 +519,9 @@ func deriveDPD(gw *config.IPsecGateway, vpn *config.IPsecVPN) dpdSettings {
 	// Restart/trap can cause charon to initiate a replacement CHILD. A
 	// responder-only gateway has no remote target, so DPD must only clear its
 	// dead SA regardless of the configured mode or establish-tunnels setting.
-	if gw.ResponderOnly {
+	// A `dynamic hostname` gateway is responder-only even when the compiled
+	// flag was not carried (#14590).
+	if responderOnlyGateway(gw) {
 		action = "clear"
 	}
 

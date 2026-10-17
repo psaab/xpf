@@ -567,9 +567,9 @@ func validateIPsecManualKeyStrict(cfg *Config) error {
 // config that commits but never loads is a silently broken tunnel (#5630,
 // codex-review-181 M20 / A3-b01-F002).
 //
-// The four effective endpoint fields are:
+// The four effective endpoint/identity fields are:
 //   - gateway `address`         -> remote_addrs
-//   - gateway `dynamic hostname`-> remote_addrs
+//   - gateway `dynamic hostname`-> remote identity (@fqdn, responder-only; #14590)
 //   - gateway `local-address`   -> local_addrs
 //   - vpn `local-address`       -> local_addrs
 //
@@ -617,7 +617,7 @@ func validateIPsecEndpointsStrict(cfg *Config) error {
 		if gw.DynamicHostname != "" && !IsUsableIPsecEndpoint(gw.DynamicHostname) {
 			return fmt.Errorf("security ike gateway %q dynamic hostname %q is "+
 				"not a valid hostname or IP address; strongSwan would reject "+
-				"the generated remote_addrs and the tunnel would never load",
+				"the generated remote identity and the tunnel would never load",
 				name, gw.DynamicHostname)
 		}
 		if gw.LocalAddress != "" && !IsUsableIPsecEndpoint(gw.LocalAddress) {

@@ -1386,8 +1386,8 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			}},
 			"local-identity":  {desc: "Local IKE identity (type and value)", args: 2, children: nil},
 			"remote-identity": {desc: "Remote IKE identity (type and value)", args: 2, children: nil},
-			"dynamic": {desc: "Dynamic peer (peer has a dynamic IP). With `hostname <fqdn>` the peer is DNS-resolved; a bare `dynamic` block marks a responder-only peer (remote_addrs = %any, #2404)", children: map[string]*schemaNode{
-				"hostname": {desc: "Dynamic peer FQDN (DNS-resolved)", args: 1, scalar: true, placeholder: "<fqdn>", children: nil},
+			"dynamic": {desc: "Dynamic peer (peer has a dynamic IP and dials in). `hostname <fqdn>` is the IKE identity the peer presents (remote id @fqdn, responder-only remote_addrs = %any, #14590); a bare `dynamic` block marks a responder-only peer with no pinned identity (#2404)", children: map[string]*schemaNode{
+				"hostname": {desc: "Dynamic peer IKE identity FQDN (presented identity, not DNS-resolved)", args: 1, scalar: true, placeholder: "<fqdn>", children: nil},
 			}},
 		}},
 	}},
@@ -1553,8 +1553,8 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			}},
 			"local-identity":  {desc: "Local IKE identity (type and value)", args: 2, children: nil},
 			"remote-identity": {desc: "Remote IKE identity (type and value)", args: 2, children: nil},
-			"dynamic": {desc: "Dynamic peer (peer has a dynamic IP). With `hostname <fqdn>` the peer is DNS-resolved; a bare `dynamic` block marks a responder-only peer (remote_addrs = %any, #2404)", children: map[string]*schemaNode{
-				"hostname": {desc: "Dynamic peer FQDN (DNS-resolved)", args: 1, scalar: true, placeholder: "<fqdn>", children: nil},
+			"dynamic": {desc: "Dynamic peer (peer has a dynamic IP and dials in). `hostname <fqdn>` is the IKE identity the peer presents (remote id @fqdn, responder-only remote_addrs = %any, #14590); a bare `dynamic` block marks a responder-only peer with no pinned identity (#2404)", children: map[string]*schemaNode{
+				"hostname": {desc: "Dynamic peer IKE identity FQDN (presented identity, not DNS-resolved)", args: 1, scalar: true, placeholder: "<fqdn>", children: nil},
 			}},
 		}},
 		"vpn": {desc: "IPsec VPN tunnel name", args: 1, packedFlatRun: true, placeholder: "<vpn-name>", children: map[string]*schemaNode{

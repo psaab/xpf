@@ -1,14 +1,11 @@
 package ipsec
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -20,12 +17,9 @@ func PrepareConfig(cfg *config.Config) *config.IPsecConfig {
 	if cfg == nil {
 		return nil
 	}
-	// A dynamic-hostname gateway resolves its remote family hint via a DNS
-	// lookup bounded by resolveHostFamilyTimeout (#2757). Resolving those
-	// hints CONCURRENTLY (bounded pool) keeps a multi-gateway commit at
-	// ~one timeout of wall-clock rather than N×timeout under DNS failure
-	// (#4547). The hint is per-gateway and order-independent, so the result
-	// per gateway is identical to the former sequential resolution.
+	// Family hints are pure: a literal remote address classifies directly
+	// and a dynamic-hostname gateway is responder-only (#14590), so no DNS
+	// lookup ever runs on the synchronous commit/apply path.
 	familyHints := resolveGatewayFamilyHints(cfg.Security.IPsec.Gateways)
 	return prepareConfig(cfg, func(name string, gw *config.IPsecGateway) string {
 		return resolveInterfaceAddress(cfg, gw.ExternalIface, familyHints[name])
@@ -218,120 +212,19 @@ func resolveInterfaceAddressFamily(cfg *config.Config, ifaceRef string, family i
 	return ""
 }
 
-// resolveHostFamilyTimeout bounds the default dynamic-hostname DNS lookup.
-// PrepareConfig runs SYNCHRONOUSLY in the daemon's ordered apply sequence
-// (pkg/daemon/daemon_apply.go) and the CLI commit path (pkg/cli/apply.go),
-// neither of which did any DNS before #2757. This lookup is only a *family
-// hint* (strongSwan does the authoritative resolution at IKE time), so it
-// must never stall commit/apply for the full glibc resolver timeout. 2s is
-// ample for a hint; on timeout/error the default returns family 0 and the
-// interface-decides fallback applies — graceful degradation, never a hang.
-const resolveHostFamilyTimeout = 2 * time.Second
-
-// resolveHostFamily is the hook used to resolve a dynamic-hostname gateway to
-// an address family for local-address selection. It is a package var so tests
-// can make resolution deterministic without real DNS (tests inject a fake; no
-// real DNS in the test suite). It returns 4 if the host resolves to (or
-// prefers) IPv4, 6 for IPv6, and 0 if it cannot resolve, times out, or the
-// host is dual-stack with no clear preference (let the local interface
-// decide). The default uses the system resolver bounded by
-// resolveHostFamilyTimeout.
-var resolveHostFamily = defaultResolveHostFamily
-
-func defaultResolveHostFamily(host string) int {
-	ctx, cancel := context.WithTimeout(
-		context.Background(), resolveHostFamilyTimeout)
-	defer cancel()
-
-	var r net.Resolver
-	ips, err := r.LookupIPAddr(ctx, host)
-	if err != nil || len(ips) == 0 {
-		// Timeout / NXDOMAIN / SERVFAIL: fall back to family-agnostic so a
-		// slow or unreachable resolver degrades to interface-decides rather
-		// than stalling commit/apply or guessing the family.
-		return 0
-	}
-	var has4, has6 bool
-	for _, addr := range ips {
-		if addr.IP.To4() != nil {
-			has4 = true
-		} else {
-			has6 = true
-		}
-	}
-	switch {
-	case has4 && has6:
-		// Dual-stack peer: no explicit preference is configured, so let
-		// the local interface's available family decide (family-agnostic).
-		return 0
-	case has6:
-		return 6
-	case has4:
-		return 4
-	default:
-		return 0
-	}
-}
-
-// resolveFamilyHintConcurrency bounds how many gateway family-hint lookups run
-// at once inside resolveGatewayFamilyHints. Each dynamic-hostname lookup can
-// block for up to resolveHostFamilyTimeout under DNS failure, so the cap keeps
-// wall-clock cost at ~one timeout while bounding concurrent resolver goroutines
-// (and file descriptors) for a pathologically large gateway set.
-const resolveFamilyHintConcurrency = 8
-
 // resolveGatewayFamilyHints computes the remote address-family hint for every
 // gateway that needs an external-interface local-address resolution
-// (LocalAddress unset, ExternalIface set) CONCURRENTLY, keyed by gateway name.
-//
-// gatewayRemoteFamilyHint performs a bounded (resolveHostFamilyTimeout) DNS
-// lookup per dynamic-hostname gateway (#2757). PrepareConfig runs
-// synchronously in the ordered commit apply, so resolving the hints
-// sequentially stalled a multi-gateway commit up to N×timeout under DNS
-// failure (#4547). The hint is per-gateway and order-independent, so a bounded
-// worker pool that collects results by name is safe and yields the identical
-// per-gateway result as the former inline sequential lookup — only the
-// scheduling changes.
-//
-// Only gateways whose LocalAddress is resolved from ExternalIface are looked up
-// here; gateways with an explicit LocalAddress never consult the hint, so
-// skipping them avoids needless DNS traffic. Gateways with a literal remote
-// Address (or a bare-IP hostname) resolve their hint without touching DNS, so
-// the concurrency cap only matters for genuine dynamic-hostname sets.
+// (LocalAddress unset, ExternalIface set), keyed by gateway name. The hint
+// is pure — a literal address classifies directly and a dynamic-hostname
+// gateway is responder-only with no remote family (#14590) — so no DNS
+// lookup and no worker pool are involved.
 func resolveGatewayFamilyHints(gateways map[string]*config.IPsecGateway) map[string]int {
-	names := make([]string, 0, len(gateways))
+	hints := make(map[string]int, len(gateways))
 	for name, gw := range gateways {
-		if gw == nil {
+		if gw == nil || gw.LocalAddress != "" || gw.ExternalIface == "" {
 			continue
 		}
-		if gw.LocalAddress == "" && gw.ExternalIface != "" {
-			names = append(names, name)
-		}
-	}
-
-	hints := make(map[string]int, len(names))
-	if len(names) == 0 {
-		return hints
-	}
-
-	// Results land in a per-index slice so no goroutine writes the shared
-	// map — the map is assembled single-threaded after the pool drains.
-	results := make([]int, len(names))
-	sem := make(chan struct{}, resolveFamilyHintConcurrency)
-	var wg sync.WaitGroup
-	for i, name := range names {
-		wg.Add(1)
-		sem <- struct{}{} // block until a worker slot frees — bounds concurrency
-		go func(i int, gw *config.IPsecGateway) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			results[i] = gatewayRemoteFamilyHint(gw)
-		}(i, gateways[name])
-	}
-	wg.Wait()
-
-	for i, name := range names {
-		hints[name] = results[i]
+		hints[name] = gatewayRemoteFamilyHint(gw)
 	}
 	return hints
 }
@@ -339,11 +232,10 @@ func resolveGatewayFamilyHints(gateways map[string]*config.IPsecGateway) map[str
 // gatewayRemoteFamilyHint determines the address family (4, 6, or 0 for
 // either) that the local-address for this gateway must match. A gateway with
 // a literal remote Address takes the family of that IP. A dynamic-hostname
-// gateway (Address empty, DynamicHostname set) is resolved via
-// resolveHostFamily so the chosen local-address matches the family the peer
-// actually resolves to (#2757) — previously the empty Address yielded a
-// family-agnostic hint and the wrong-family local-address could win on a
-// dual-stack appliance.
+// gateway is responder-only (#14590): the peer dials in from an unknown
+// address presenting the FQDN as its IKE identity, so there is no remote
+// family to match and NO DNS lookup — the hint is family-agnostic (a bare
+// IP literal in the identity slot still classifies directly, without DNS).
 func gatewayRemoteFamilyHint(gw *config.IPsecGateway) int {
 	if gw == nil {
 		return 0
@@ -352,25 +244,23 @@ func gatewayRemoteFamilyHint(gw *config.IPsecGateway) int {
 		return addressFamilyHint(gw.Address)
 	}
 	if gw.DynamicHostname != "" {
-		// A bare IP in the hostname slot still classifies directly.
-		if f := addressFamilyHint(gw.DynamicHostname); f != 0 {
-			return f
-		}
-		return resolveHostFamily(gw.DynamicHostname)
+		return addressFamilyHint(gw.DynamicHostname)
 	}
 	return 0
 }
 
 // prepareConfigFromConfig is PrepareConfig resolved from the configuration ALONE (#9641).
-// It replays a stored generation's render without the kernel or DNS, neither of which can
-// be replayed for the past. runtime names every gateway whose production local address
-// could have come from either, and that gateway's LocalAddress is left empty here.
+// It replays a stored generation's render without the kernel, which cannot be
+// replayed for the past. runtime names every gateway whose production local
+// address could have come from the kernel, and that gateway's LocalAddress is
+// left empty here.
 //
-// It mirrors resolveInterfaceAddress. Production takes the configured unit address for
-// the remote family hint when there is one, and asks the kernel only when there is not.
-// So a configured address found here is exactly production's answer, and a miss is
-// runtime. The hint mirrors gatewayRemoteFamilyHint without its DNS lookup, so a dynamic
-// hostname that is not an IP literal is runtime too.
+// It mirrors resolveInterfaceAddress. Production takes the configured unit
+// address for the remote family hint when there is one, and asks the kernel
+// only when there is not. So a configured address found here is exactly
+// production's answer, and a miss is runtime. The hint is pure (#14590): a
+// dynamic hostname is a responder identity, never DNS-resolved, so it is
+// family-agnostic unless it is an IP literal.
 func prepareConfigFromConfig(cfg *config.Config) (*config.IPsecConfig, map[string]bool) {
 	runtime := map[string]bool{}
 	if cfg == nil {
@@ -397,22 +287,10 @@ func prepareConfigFromConfig(cfg *config.Config) (*config.IPsecConfig, map[strin
 	return out, runtime
 }
 
-// configuredGatewayFamilyHint is gatewayRemoteFamilyHint without the DNS lookup. ok is
-// false for exactly the case gatewayRemoteFamilyHint resolves through DNS.
+// configuredGatewayFamilyHint mirrors gatewayRemoteFamilyHint; both are pure
+// (#14590), so it always reports ok.
 func configuredGatewayFamilyHint(gw *config.IPsecGateway) (family int, ok bool) {
-	if gw == nil {
-		return 0, true
-	}
-	if gw.Address != "" {
-		return addressFamilyHint(gw.Address), true
-	}
-	if gw.DynamicHostname != "" {
-		if f := addressFamilyHint(gw.DynamicHostname); f != 0 {
-			return f, true
-		}
-		return 0, false
-	}
-	return 0, true
+	return gatewayRemoteFamilyHint(gw), true
 }
 
 func resolveConfiguredInterfaceAddress(cfg *config.Config, ifaceRef string, family int) string {

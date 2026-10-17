@@ -146,11 +146,13 @@ func TestStartActionTrapWhenEstablishTunnelsUnset14592(t *testing.T) {
 
 // Control for #14592: an unset mode on a responder-only gateway still
 // emits no start_action — there is no fixed peer for a trap to dial.
+// The gateway carries a remote-identity so the #14591 gate does not
+// skip this PSK VPN (it is about start_action, not identity scoping).
 func TestStartActionAbsentWhenUnsetOnResponderOnly14592(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		Gateways: map[string]*config.IPsecGateway{
-			"dial-in": {Name: "dial-in", ResponderOnly: true, LocalAddress: "203.0.113.5"},
+			"dial-in": {Name: "dial-in", ResponderOnly: true, LocalAddress: "203.0.113.5", RemoteIDType: "hostname", RemoteIDValue: "dialin.example.com"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
 			"vpn-a": {PSK: "fixture-secret", Name: "vpn-a", Gateway: "dial-in"},

@@ -5729,10 +5729,11 @@ func TestIPsecResponderOnlyGatewaySetSyntax(t *testing.T) {
 	}
 }
 
-// TestIPsecDynamicHostnameNotResponderOnly pins that a `dynamic hostname
-// <fqdn>` block does NOT flip the responder-only flag — it still carries
-// a resolvable remote target (#2404).
-func TestIPsecDynamicHostnameNotResponderOnly(t *testing.T) {
+// TestIPsecDynamicHostnameResponderOnly pins that a `dynamic hostname
+// <fqdn>` block marks the gateway responder-only: the FQDN is the peer's
+// expected IKE identity, not a DNS dial target (#14590, superseding the
+// #2404 DNS reading).
+func TestIPsecDynamicHostnameResponderOnly14590(t *testing.T) {
 	cmds := []string{
 		"set security ike gateway gw1 ike-policy ike-pol",
 		"set security ike gateway gw1 dynamic hostname peer.example.com",
@@ -5758,8 +5759,8 @@ func TestIPsecDynamicHostnameNotResponderOnly(t *testing.T) {
 	if gw.DynamicHostname != "peer.example.com" {
 		t.Errorf("dynamic hostname = %q, want peer.example.com", gw.DynamicHostname)
 	}
-	if gw.ResponderOnly {
-		t.Errorf("dynamic-hostname gateway must NOT be responder-only")
+	if !gw.ResponderOnly {
+		t.Errorf("dynamic-hostname gateway must be responder-only (identity, not dialed)")
 	}
 }
 

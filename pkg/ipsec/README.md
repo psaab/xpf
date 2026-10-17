@@ -419,9 +419,11 @@ all files stay in `package ipsec`, so the public API is unchanged.
   come straight from strongSwan's `proposal_keywords_static.txt` /
   `diffie_hellman_group_names`. Live swanctl load-verification of an EC
   tunnel is lab-bound; the `pkg/ipsec` swanctl-render tests are the gate.
-- **Gateway reference resolution / `remote_addrs` (#2074).** A VPN's
+- **Gateway reference resolution / `remote_addrs` (#2074, #14590).** A VPN's
   `ike gateway <name>` either names a defined `security ike gateway`
-  object (whose `address` or `dynamic hostname` becomes `remote_addrs`)
+  object (whose `address` becomes `remote_addrs`, or whose `dynamic` /
+  `dynamic hostname <fqdn>` becomes responder-only `remote_addrs = %any`
+  with remote `id = "@<fqdn>"`)
   or, in the legacy inline shape, IS the peer endpoint directly (a
   literal IP or a dotted hostname/FQDN). The invariant is: **a bare
   gateway config-object NAME never reaches swanctl `remote_addrs`** — a
@@ -448,57 +450,29 @@ all files stay in `package ipsec`, so the public API is unchanged.
     gateway — `set security ike gateway <name> address <ip>` (or
     `dynamic hostname <fqdn>`). The shared accept predicate is
     `config.IsUsableIPsecEndpoint`.
-- **Local-address family selection for dynamic-hostname gateways
-  (#2757).** When a gateway has no explicit `local-address` but does name
-  an `external-interface`, `PrepareConfig` derives `local_addrs` from the
-  interface's address. On a dual-stack appliance the interface carries both
-  an IPv4 and an IPv6 address, so the chosen family MUST match the family
-  the remote peer is reached over — otherwise the IKE SA is sourced from
-  the wrong family and never establishes.
-  - **Family hint** (`gatewayRemoteFamilyHint`, `policy.go`): a gateway
-    with a literal `address` takes that IP's family. A **dynamic-hostname**
-    gateway (`address` empty, `dynamic hostname <fqdn>` set) is resolved
-    via `resolveHostFamily` (an injectable package var; the default,
-    `defaultResolveHostFamily`, uses `net.Resolver.LookupIPAddr` bounded by
-    a 2s context timeout — see the bounded-resolver note below) — IPv6-only
-    → family 6, IPv4-only → family 4. Before
-    #2757 the empty `address` produced a family-agnostic hint (0), so
-    `selectUnitAddress` returned whichever family was listed first on the
-    interface (typically IPv4) regardless of the peer — the defect-#2 bug
-    deferred from #2404.
+- **Local-address family selection (#2757, #14590).** When a gateway has
+  no explicit `local-address` but does name an `external-interface`,
+  `PrepareConfig` derives `local_addrs` from the interface's address. For
+  a gateway with a literal `address`, the chosen family must match that
+  address's family — otherwise the IKE SA is sourced from the wrong
+  family and never establishes.
+  - **Family hint** (`gatewayRemoteFamilyHint`, `policy_addr.go`): a
+    gateway with a literal `address` takes that IP's family. A
+    **dynamic-hostname** gateway is responder-only (#14590): `dynamic
+    hostname <fqdn>` is the IKE identity the peer presents (rendered as
+    remote `id = "@<fqdn>"` with `remote_addrs = %any`), never a DNS dial
+    target, so there is no remote family to match and **no DNS lookup**
+    runs on the synchronous commit/apply path. The hint is
+    family-agnostic (0), except that a bare IP literal in the identity
+    slot still classifies directly. A peer that should be dialed by name
+    is expressed with gateway `address <fqdn>`, whose family is taken
+    from the literal when it is an IP.
   - **Family-matched selection** (`resolveInterfaceAddress`): the local
     address is constrained to the hinted family. If the interface is
     single-stack in the OTHER family, selection falls back to
     family-agnostic. If neither family yields an address, the render belt
     skips the VPN with a warning naming its `external-interface` (#11689);
     it never omits `local_addrs` and binds every local interface.
-  - **Dual-stack peer:** when the hostname resolves to BOTH families, no
-    explicit preference is configured, so the hint stays family-agnostic
-    (0) and the interface's first usable address decides — strongSwan then
-    initiates from a routable local source. (An explicit `local-address`
-    always wins outright; this path only fires when one is absent.)
-  - **Bounded resolver (review fold):** `PrepareConfig` runs synchronously
-    inside the daemon apply sequence (`pkg/daemon/daemon_apply.go`) and the
-    CLI commit path (`pkg/cli/apply.go`), which did NO DNS before #2757.
-    Because the lookup is only a family *hint* (strongSwan does the
-    authoritative resolution at IKE time), the default `resolveHostFamily`
-    bounds it with a 2s context timeout (`resolveHostFamilyTimeout`). On
-    timeout / NXDOMAIN / SERVFAIL it returns family 0 (agnostic) — a slow or
-    unreachable resolver degrades to the interface-decides path and NEVER
-    stalls `commit` / apply for the full glibc resolver timeout.
-  - **Concurrent hint resolution (#4547):** the per-gateway family hints are
-    resolved CONCURRENTLY by `resolveGatewayFamilyHints` (`policy.go`) before
-    the gateway copy loop, through a bounded worker pool
-    (`resolveFamilyHintConcurrency = 8`). Because each dynamic-hostname lookup
-    can block for up to the 2s timeout, resolving N gateways sequentially
-    stalled the ordered commit apply up to N×2s under DNS failure; the bounded
-    pool keeps wall-clock cost at ~one timeout regardless of gateway count. The
-    hint is per-gateway and order-independent, so the concurrent result is
-    identical to the former inline sequential lookup — only the scheduling
-    changed. Only gateways that resolve `local_addrs` from an
-    `external-interface` (no explicit `local-address`) are looked up; the cap
-    also bounds concurrent resolver goroutines / file descriptors for a
-    pathologically large dynamic-hostname set.
   - **IPv6 link-local local binds (#2885):** the candidate filter
     `matchFamily` (`policy.go`) admits an IPv6 link-local unicast source
     (`fe80::/10`) when the gateway family hint is IPv6 (family 6). The
@@ -828,20 +802,22 @@ all files stay in `package ipsec`, so the public API is unchanged.
   NO id matches ANY peer, so with two or more PSK VPNs strongSwan could
   bind the wrong secret to a peer and IKE authentication would fail (or a
   peer could authenticate against another VPN's PSK). The selector is the
-  remote peer's IKE identity — the configured `remote-id` when set,
+  remote peer's IKE identity — the configured `remote-id` when set, else
+  the `dynamic hostname` identity `@<fqdn>` for a dynamic peer (#14590),
   otherwise the concrete remote gateway address (strongSwan uses the peer
   IP as its default identity when no id is negotiated), and this is the
   discriminator between two PSK VPNs to different peers. A configured
   `local-id` rides along as a harmless extra owner (two VPNs on the same
   firewall usually share the local id, so it never disambiguates on its
   own, but it can never cause a wrong-peer match either). A dynamic
-  responder-only peer (`remote_addrs = %any`) with no `remote-id` has
-  nothing to scope by: since #14591 such a PSK VPN is rejected at commit
-  (`validateIPsecResponderIdentityStrict`) and skipped at render, so an
-  unscoped secret never loads — never a literal `id = "%any"` (which
-  would defeat the scoping and match all peers). Configure
-  `remote-identity` on the gateway; the peer presenting that identity
-  with this VPN's key is then the only one the secret matches. A
+  responder-only peer (`remote_addrs = %any`) with no `remote-id` and no
+  dynamic hostname has nothing to scope by: since #14591 such a PSK VPN
+  is rejected at commit (`validateIPsecResponderIdentityStrict`) and
+  skipped at render, so an unscoped secret never loads — never a literal
+  `id = "%any"` (which would defeat the scoping and match all peers).
+  Configure `remote-identity` on the gateway (or use
+  `dynamic hostname <fqdn>`); the peer presenting that identity with
+  this VPN's key is then the only one the secret matches. A
   cert/EAP VPN has no PSK,
   so it emits no secret block and is unaffected. The selector values reuse
   the `sanitizeSwanctlValue`/`escapeSwanctlQuoted` quoting (#1798/#2126).
@@ -885,12 +861,13 @@ all files stay in `package ipsec`, so the public API is unchanged.
   groups were still raw:
   - **Endpoints** — the connection `local_addrs = <value>` /
     `remote_addrs = <value>` lines (the resolved peer/local endpoint from
-    `resolveRemoteAddr` — a gateway `address`/`dynamic hostname`, a
-    `local-address`, an `external-interface`-derived local IP, or the
-    legacy inline `vpn.Gateway`). The legacy inline `vpn.Gateway` shape is
+    `resolveRemoteAddr` — a gateway `address`, the responder `%any` for a
+    `dynamic` / `dynamic hostname` gateway, a `local-address`, an
+    `external-interface`-derived local IP, or the legacy inline
+    `vpn.Gateway`). The legacy inline `vpn.Gateway` shape is
     independently filtered by `config.IsUsableIPsecEndpoint` (a
     control-char value is not a usable endpoint → the VPN is skipped), but
-    the Gateways-map shape took `address`/`dynamic hostname` verbatim.
+    the Gateways-map shape took `address` verbatim.
   - **Proposals** — the connection-level `proposals = <value>` (IKE /
     Phase 1, `ikeProposals`) and the child-SA `esp_proposals = <value>`
     (ESP / Phase 2, `espProposals`). `buildIKEProposal` /

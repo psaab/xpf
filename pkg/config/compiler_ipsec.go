@@ -237,10 +237,15 @@ func compileIKE(node *Node, sec *SecurityConfig) error {
 					}
 				}
 			case "dynamic":
-				// "dynamic hostname FQDN" or children. A `dynamic` block
-				// with no hostname marks a responder-only / dynamic-IP peer
-				// (remote_addrs = %any) — see the IPsec-stanza copy below
-				// and resolveRemoteAddr (#2404).
+				// "dynamic hostname FQDN" or children. Junos `dynamic`
+				// identifies a peer with a dynamic IP: the FQDN is the IKE
+				// identity the peer presents (matched against the peer's
+				// local-identity hostname), not a DNS endpoint to dial.
+				// The gateway is therefore always responder-only
+				// (remote_addrs = %any, remote id = @FQDN) — with or
+				// without a hostname (#14590). A DNS-named peer that
+				// should be dialed is expressed with `address <fqdn>`
+				// instead. See resolveRemoteAddr in pkg/ipsec.
 				if len(p.Keys) >= 3 && p.Keys[1] == "hostname" {
 					gw.DynamicHostname = p.Keys[2]
 					// #3332: compact-hierarchical `dynamic hostname <fqdn>
@@ -258,9 +263,7 @@ func compileIKE(node *Node, sec *SecurityConfig) error {
 						}
 					}
 				}
-				if gw.DynamicHostname == "" {
-					gw.ResponderOnly = true
-				}
+				gw.ResponderOnly = true
 			}
 		}
 		sec.IPsec.Gateways[gw.Name] = gw
@@ -560,10 +563,10 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 					}
 				}
 			case "dynamic":
-				// A `dynamic` block with no hostname marks a responder-only
-				// / dynamic-IP peer: the peer initiates from an unknown
-				// address, so the gateway carries no remote_addrs target and
-				// renders remote_addrs = %any (#2404).
+				// Junos `dynamic` identifies a dynamic-IP peer by the IKE
+				// identity it presents; `hostname <fqdn>` is that identity,
+				// not a DNS endpoint to dial. Always responder-only
+				// (remote_addrs = %any, remote id = @FQDN) (#14590).
 				if len(p.Keys) >= 3 && p.Keys[1] == "hostname" {
 					gw.DynamicHostname = p.Keys[2]
 					// #3332: compact-hierarchical trailing tokens past the FQDN.
@@ -577,9 +580,7 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 						}
 					}
 				}
-				if gw.DynamicHostname == "" {
-					gw.ResponderOnly = true
-				}
+				gw.ResponderOnly = true
 			}
 		}
 		sec.IPsec.Gateways[gw.Name] = gw
