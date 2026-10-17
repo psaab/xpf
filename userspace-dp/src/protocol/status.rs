@@ -926,6 +926,10 @@ pub(crate) struct ProcessStatus {
     /// for backward compatibility.
     #[serde(rename = "gre_decap_pt_nibble_mismatch_refusals_total", default)]
     pub gre_decap_pt_nibble_mismatch_refusals_total: u64,
+    /// #14645: outer-fragmented native-GRE datagrams dropped by the bounded
+    /// reassembly pool. Additive / defaulted for backward compatibility.
+    #[serde(rename = "gre_outer_frag_drops_total", default)]
+    pub gre_outer_frag_drops_total: u64,
     /// #2472: locally-generated ICMP Time Exceeded / PTB / `reject` replies
     /// dropped because the per-reason token bucket was empty. Each reason has
     /// an independent global-per-reason bucket (Linux `icmp_msgs_per_sec`

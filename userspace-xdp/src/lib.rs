@@ -91,7 +91,8 @@ use binding_index::{
 };
 use gre_classify::{
     InnerSessionAction, OuterDestinationLocal, USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
-    degraded_general_local_pass_applies, native_gre_inner_pass_steers_to_kernel_typed,
+    degraded_general_local_pass_applies, native_gre_fragment_stays_on_helper,
+    native_gre_inner_pass_steers_to_kernel_typed,
 };
 use ipv4_key::ipv4_map_key;
 use ipv4_len_gate::{ipv4_declared_len_covers_header, ipv4_declared_read_end};
@@ -708,6 +709,14 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     }
     let native_gre =
         parsed.protocol == PROTO_GRE && (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0;
+    // #14645: a fragmented native-GRE outer (head or tail) stays on the XSK
+    // path for reassembly; it must not take a kernel-pass arm below.
+    let native_gre_fragment = native_gre_fragment_stays_on_helper(
+        parsed.protocol,
+        parsed.wire_protocol,
+        parsed.is_fragment,
+        (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0,
+    );
 
     // #5173: wrap the coordinate at the ONE point it leaves the context, so
     // nothing downstream can reduce it — `RawRxQueue` has a private field and no
@@ -860,7 +869,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     {
         return Ok(cpumap_or_pass(ctrl));
     }
-    if should_fallback_early(&parsed, ingress_domain) {
+    if !native_gre_fragment && should_fallback_early(&parsed, ingress_domain) {
         record_trace(
             ctrl.flags,
             ingress_ifindex,
@@ -886,7 +895,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // is_local_destination arm of the session-miss path. A remote
     // destination continues to the AF_XDP redirect and is adjudicated by
     // the worker.
-    if !native_gre {
+    if !native_gre && !native_gre_fragment {
         let session_action = if wg_steer_candidate {
             wg_steer_session_action
         } else {
@@ -1001,6 +1010,10 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 // session (new flow) or drop (stale non-SYN TCP / policy deny).
             }
         }
+        }
+    } else if native_gre_fragment {
+        // A fragmented head cannot be inner-classified for decap; the
+        // helper reassembles the whole datagram first.
     } else {
         let inner_action = classify_native_gre_inner(data, data_end, &parsed, ingress_domain);
         if inner_action == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL
@@ -1597,6 +1610,16 @@ fn is_degraded_local_or_control(
     parsed: &ParsedPacket,
     ingress_domain: u32,
 ) -> bool {
+    // #14645: a native-GRE fragment has no kernel terminator; in degraded
+    // mode it drops with its head rather than passing to the kernel.
+    if native_gre_fragment_stays_on_helper(
+        parsed.protocol,
+        parsed.wire_protocol,
+        parsed.is_fragment,
+        (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0,
+    ) {
+        return false;
+    }
     if should_fallback_early(parsed, ingress_domain) {
         return true;
     }
@@ -1743,6 +1766,11 @@ struct ParsedPacket {
     // False for a datagram with no readable payload byte and for every non-UDP
     // protocol.
     udp_wg_transport_data: bool,
+    // #14645: this packet is one fragment (first or non-first) of a larger
+    // IP datagram. Set from the IPv4 flags/offset or the IPv6 Fragment
+    // header; false for a whole datagram. Read only by the native-GRE
+    // fragment disposition.
+    is_fragment: bool,
     vlan_id: u16,
     vlan_pcp: u8,
     vlan_present: bool,
@@ -1930,6 +1958,7 @@ fn parse_ipv4(
         l4_offset,
         payload_offset,
         udp_wg_transport_data,
+        is_fragment: (frag_field & 0x2000) != 0 || non_first_fragment,
         addr_family: AF_INET,
         protocol,
         wire_protocol: iph[9],
@@ -2045,8 +2074,9 @@ fn parse_ipv6(
         vlan_present,
         l3_offset,
         l4_offset: offset,
-        payload_offset,
         udp_wg_transport_data,
+        is_fragment: walk.fragment_seen,
+        payload_offset,
         addr_family: AF_INET6,
         protocol,
         wire_protocol,

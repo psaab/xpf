@@ -98,6 +98,13 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 			"counted (#10865).",
 		nil, nil,
 	)
+	c.userspaceGreOuterFragDrops = prometheus.NewDesc(
+		"xpf_userspace_gre_outer_frag_drops_total",
+		"Outer-fragmented native-GRE datagrams dropped by the bounded "+
+			"reassembly pool (overlap, oversize, capacity, timeout, or "+
+			"malformed) before decap (#14645).",
+		nil, nil,
+	)
 	c.userspaceTimeExceededRateLimited = prometheus.NewDesc(
 		"xpf_userspace_time_exceeded_rate_limited_total",
 		"Locally-generated ICMP/ICMPv6 Time Exceeded (TTL/hop-limit) "+
