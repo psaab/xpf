@@ -325,6 +325,10 @@ type compileOpts struct {
 	// on tolerant load / peer-sync paths. The typed scheduler model has one window per day, so
 	// silently accepting either conflict loses authored scheduling semantics.
 	lenientSchedulerWindowPairs11358 bool
+	// lenientDuplicateRootLogin14447 (#14447) downgrades conflicting
+	// duplicate `system services ssh root-login` to warning + last-wins
+	// on tolerant paths; strict rejects.
+	lenientDuplicateRootLogin14447 bool
 
 	// lenientCoSInterfaceRefs (#7337) downgrades the class-of-service
 	// INTERFACE-side reference check
@@ -3295,6 +3299,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicySchedulerRef:              true,
 		lenientSchedulerMapRef:                 true,
 		lenientSchedulerWindowPairs11358:       true,
+		lenientDuplicateRootLogin14447:         true,
 		lenientCodelTarget11825:                true,
 		lenientCoSInterfaceRefs:                true,
 		lenientCoSLossPriority:                 true,
