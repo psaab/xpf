@@ -398,6 +398,35 @@ func urlLeafIndices(fp []string) []int {
 					out = append(out, j)
 				}
 			}
+		case "target":
+			// #14379 (DR4-H7 + DR4-H7-ext): the RPM probe target carries a
+			// credential-bearing URL in every spelling the compiler
+			// installs (compiler_services.go `target` case): bare
+			// `target <url>`, `target address <url>` (flat, block and
+			// grandchild — all flatten to [..., "target", "address",
+			// <url>]) and `target url <url>`. Only the last contains a
+			// `url` token, so only it was redacted via the `url` case
+			// above; the bare and `address` spellings rendered the
+			// userinfo/query credential verbatim on every AST display
+			// surface while the typed route redacted RPMTest.Target.
+			//
+			// Gated on an `rpm` ancestor exactly like `server` is gated
+			// on `dynamic-dns`: `target` is generic (the schema declares
+			// this leaf only under services rpm, but the AST can carry
+			// unmodelled stanzas, and an unqualified claim would feed
+			// non-URL targets elsewhere to RedactURL). Marking every
+			// token after `target` is safe: the `address`/`url` keyword
+			// tokens are not URLs, so RedactURL returns them unchanged,
+			// and it is idempotent on the value the `url` case already
+			// claimed, so `target url <url>` keeps its existing
+			// redaction with no double-transform. A credential-free
+			// value (`target address 10.0.0.1`, a bare IP/hostname) is a
+			// RedactURL no-op and renders byte-unchanged.
+			if containsAnyOf(fp[:i], "rpm") {
+				for j := i + 1; j < len(fp); j++ {
+					out = append(out, j)
+				}
+			}
 		case "path":
 			// #7406: the per-feed path under `security dynamic-address
 			// feed-server <s> feed-name <f> path <p>`. resolveBaseURL joins
