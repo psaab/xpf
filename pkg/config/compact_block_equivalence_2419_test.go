@@ -650,6 +650,24 @@ var filedFixed = map[string]string{
 	"protocols isis wide-metrics-only":                           "#14426",
 	"routing-instances xpfname protocols isis overload":          "#14426",
 	"routing-instances xpfname protocols isis wide-metrics-only": "#14426",
+	// #14729: #14442 routed every interface-level read through
+	// packedBody(ifBody), so the compact `ge-0/0/0 mtu 9000;` spelling
+	// now compiles the interface (and its mtu) exactly as the braced
+	// twin does. This site stood in filedStillOpen as the positive
+	// control's compiler_interfaces.go anchor; it moves here rather
+	// than being deleted, for the same reason #6821 moved its two —
+	// the anchor's value is that it keeps being checked after it is
+	// fixed. Its retirement from filedStillOpen is explained there.
+	"interfaces xpfname mtu": "#14442",
+	// #14729: #14420's packed-opening expansion
+	// (packedBodyChildren on the RA interface instance) made the M/O
+	// flag openings compile identically to the braced form — the fix
+	// #14428 then built on for the prefix flags anchored above. The
+	// two lines stayed in the inventory only because the census
+	// panicked before it could measure them; anchored here so the
+	// instrument keeps checking them in both directions.
+	"protocols router-advertisement interface xpfarg managed-configuration":        "#14420",
+	"protocols router-advertisement interface xpfarg other-stateful-configuration": "#14420",
 }
 
 // filedByDesign is the category the inventory did not previously distinguish:
@@ -716,7 +734,35 @@ var filedStillOpen = map[string]string{
 	//
 	// It also keeps the property the swap must preserve: a different compiler
 	// file from the other anchor below (compiler_protocols.go).
-	"interfaces xpfname mtu": "compiler_interfaces.go:31",
+	// #14729 RETIRED the `interfaces xpfname mtu` anchor that stood
+	// here. It was the FIFTH anchor consumed by the fix it watched for:
+	// #14442 routed every interface-level read through
+	// packedBody(ifBody), so the compact spelling compiles the
+	// interface whole — the premise verified above ("compileInterfaces
+	// skips `if child.IsLeaf`") no longer holds. The four predecessors
+	// were consumed by family sweeps; this one by a compiler change,
+	// which the #8933 correction above already named as the remedy no
+	// pair-keyed durability argument survives. The site moves to
+	// filedFixed (keyed "#14442") rather than being deleted, so it
+	// stays checked in both directions. The bridge-domains anchor below
+	// (compiler_services.go) and the LACP anchor below remain, from two
+	// different compiler files, so the known-true half keeps its
+	// two-file spread.
+	//
+	// The LACP anchor, verified by reading the compiler at this commit
+	// (membership here requires it, not the inventory's say-so):
+	// compiler_interfaces.go reads the aggregated-ether-options body
+	// with `aeoNode.FindChild("lacp")` and then
+	// `lacpNode.FindChild("active")` — FindChild searches Children
+	// only. The compact spelling `aggregated-ether-options lacp
+	// active;` packs the tail onto the aeo node's own Keys with no
+	// Children: expandResolvingRun9792 expands only CHILD runs, and
+	// the aeo reader never applies packedBody to the node itself
+	// (unlike the redundant-ether-options reader beside it since
+	// #14441), so no `lacp` child is ever synthesized and LACPActive
+	// stays false. The census measures the site divergent ("empty":
+	// the compact form compiles exactly as the empty stanza does).
+	"interfaces xpfname aggregated-ether-options lacp active": "compiler_interfaces.go:221",
 	// #8690 family 4 replaced the ospf anchor family 3 put here, which family 4
 	// then normalized -- the SECOND anchor in this map to be invalidated by the
 	// next family to land. That churn was the anchor's fault, not the sweep's:

@@ -474,6 +474,80 @@ func TestElidedRedundantEtherOptionsCompilesGroup14441(t *testing.T) {
 // #14441 gate-mirror: an UNUSABLE elided token must not escape the #6782
 // gate just because it is packed. Strict must reject and lenient must warn
 // + suppress, exactly as for the braced spelling.
+// #14729: an EMPTY redundant-ether-options stanza carries NO
+// redundancy-group token. The #14441 expansion removed the gate's
+// `rg == nil` guard and called nodeVal(rg) unconditionally, so an empty
+// stanza (`redundant-ether-options { }`, or the bare leaf
+// `redundant-ether-options;`) panicked the pre-walk — first seen as
+// TestCompactBlockEquivalenceInventory2419 crashing on the census's
+// empty-stanza skeleton fixture, but any operator config with an empty
+// reo stanza crashed commit / commit-check / tolerant load the same
+// way. An empty stanza is the ABSENT-token case #6782 scopes out (like
+// a reth with no reo stanza at all): it must compile untouched on both
+// paths, with no #6782 offence. The third shape is the boundary in the
+// other direction: a PRESENT `redundancy-group;` leaf with no value is
+// a present-but-empty token and must still be gated, so restoring the
+// guard must not swallow it.
+func TestEmptyRedundantEtherOptionsDoesNotPanic14729(t *testing.T) {
+	const unit = "unit 0 { family inet { address 10.0.61.1/24; } }"
+	for _, tc := range []struct{ name, text string }{
+		{"empty-block", "interfaces { reth0 { redundant-ether-options { } " + unit + " } }"},
+		{"bare-leaf", "interfaces { reth0 { redundant-ether-options; " + unit + " } }"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := hierTree(t, tc.text)
+			cfg, err := CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("empty redundant-ether-options carries no token and must COMMIT "+
+					"(absent, not unusable — #6782 scope), got: %v", err)
+			}
+			ifc := cfg.Interfaces.Interfaces["reth0"]
+			if ifc == nil {
+				t.Fatal("reth0 must compile")
+			}
+			if ifc.RedundancyGroup != 0 {
+				t.Fatalf("empty stanza must leave RedundancyGroup=0, got %d", ifc.RedundancyGroup)
+			}
+			addrs := 0
+			for _, u := range ifc.Units {
+				addrs += len(u.Addresses)
+			}
+			if addrs == 0 {
+				t.Fatal("empty stanza must not suppress the reth address (no #6782 offence)")
+			}
+			cfg, err = CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient must boot: %v", err)
+			}
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w, "6782") {
+					t.Fatalf("empty stanza must not warn (#6782), got %q", w)
+				}
+			}
+		})
+	}
+	// Boundary: a present leaf with no value is NOT the absent case.
+	tree := hierTree(t, "interfaces { reth0 { redundant-ether-options { redundancy-group; } "+unit+" } }")
+	if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "reth0") {
+		t.Fatalf("present-but-valueless redundancy-group must still REJECT naming reth0, got: %v", err)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient must boot: %v", err)
+	}
+	ifc := cfg.Interfaces.Interfaces["reth0"]
+	if ifc == nil {
+		t.Fatal("reth0 must compile on lenient path")
+	}
+	addrs := 0
+	for _, u := range ifc.Units {
+		addrs += len(u.Addresses)
+	}
+	if addrs != 0 {
+		t.Fatalf("lenient present-but-valueless token must suppress addresses (#6782), kept %d", addrs)
+	}
+}
+
 func TestElidedRedundantEtherOptionsBadTokenGated14441(t *testing.T) {
 	for _, tok := range []string{"0", "abc", "256"} {
 		elided := "interfaces { reth0 { redundant-ether-options redundancy-group " + tok + "; unit 0 { family inet { address 10.0.61.1/24; } } } }"
