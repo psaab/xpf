@@ -77,22 +77,23 @@ func TestV4RenewMatcherBindsServerAndInterface9944(t *testing.T) {
 		t.Errorf("v4 server-identity rejections after RENEWING = %d, want 2", got)
 	}
 
-	// REBINDING remains bound to the granting server for both response
-	// types; a new server must not replace or revoke the lease.
+	// REBINDING (RFC 2131 §4.3.2) accepts any server: a partner ACK can
+	// extend the lease and a partner NAK can revoke it; only RENEWING
+	// stays bound above. Granting-server replies still accepted.
 	rebindMatcher := v4RenewMatcher(counterManager, req, prev, true)
 	alternateACK := mustV4BindingPacket(t, dhcpv4.MessageTypeAck, other, hw)
 	alternateACK.TransactionID = req.TransactionID
-	if rebindMatcher(alternateACK) {
-		t.Error("alternate-server REBIND ACK accepted; response must remain ignored")
+	if !rebindMatcher(alternateACK) {
+		t.Error("alternate-server REBIND ACK rejected; any server must be able to rebind")
 	}
-	if rebindMatcher(spoofNAK) {
-		t.Error("alternate-server REBIND NAK accepted; response must remain ignored")
+	if !rebindMatcher(spoofNAK) {
+		t.Error("alternate-server REBIND NAK rejected; any server must be able to rebind")
 	}
 	if !rebindMatcher(grantNAK) {
 		t.Error("granting-server REBIND NAK rejected")
 	}
-	if got := counterManager.RenewalBindingStats().DHCPv4ServerIdentityRejects; got != 4 {
-		t.Errorf("v4 server-identity rejections after REBINDING = %d, want 4", got)
+	if got := counterManager.RenewalBindingStats().DHCPv4ServerIdentityRejects; got != 2 {
+		t.Errorf("v4 server-identity rejections after REBINDING = %d, want 2 (RENEWING only)", got)
 	}
 }
 
@@ -193,19 +194,19 @@ func TestV6RenewMatcherBindsDUIDAndInterface9944(t *testing.T) {
 		t.Errorf("v6 server-identity rejections after RENEWING = %d, want 2", got)
 	}
 
-	// REBINDING remains bound to the original granting server: an alternate
-	// Reply cannot replace the lease's renewal binding.
+	// REBIND (RFC 8415 §18.2.5) accepts any server; only RENEW stays
+	// bound above. A Reply without a server DUID is still rejected.
 	rebindMatcher := v6RenewMatcher(counterManager, req, prev, true)
 	alternateReply := mustV6BindingMessage(t, dhcpv6.MessageTypeReply, clientDUID, otherDUID)
 	alternateReply.TransactionID = req.TransactionID
-	if rebindMatcher(alternateReply) {
-		t.Error("alternate-server REBIND Reply accepted; response must remain ignored")
+	if !rebindMatcher(alternateReply) {
+		t.Error("alternate-server REBIND Reply rejected; any server must be able to rebind")
 	}
 	if rebindMatcher(missingServer) {
 		t.Error("Reply without server DUID accepted")
 	}
-	if got := counterManager.RenewalBindingStats().DHCPv6ServerIdentityRejects; got != 4 {
-		t.Errorf("v6 server-identity rejections after REBINDING = %d, want 4", got)
+	if got := counterManager.RenewalBindingStats().DHCPv6ServerIdentityRejects; got != 3 {
+		t.Errorf("v6 server-identity rejections after REBINDING = %d, want 3", got)
 	}
 
 	before := &Lease{

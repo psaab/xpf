@@ -130,7 +130,8 @@ type Manager struct {
 	// one that started before the latch. Add(1) happens under mu in
 	// scheduleRecompile (so it cannot race the latch), Done in the timer func.
 	// RenewalBindingStats counters count replies that pass transaction/client
-	// identity checks but fail the stored granting-server identity check.
+	// identity checks but fail the server-identity check (granting-server
+	// mismatch in RENEWING/RENEW, or a missing server identity in any mode).
 	renewV4ServerIdentityRejects atomic.Uint64
 	renewV6ServerIdentityRejects atomic.Uint64
 	recompileWG                  sync.WaitGroup
@@ -169,7 +170,9 @@ type Manager struct {
 }
 
 // RenewalBindingStats reports renewal replies that were ignored because
-// their server identity did not match the committed lease binding.
+// their server identity was missing or, in RENEWING/RENEW, did not match
+// the committed lease binding. REBINDING replies from any server are
+// accepted (#14600) and do not increment these counters.
 type RenewalBindingStats struct {
 	DHCPv4ServerIdentityRejects uint64
 	DHCPv6ServerIdentityRejects uint64
