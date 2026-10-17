@@ -875,12 +875,31 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 	}
 
 	if rip != nil {
-		fmt.Fprintf(&b, "router rip%s\n", vrfSuffix)
-		for _, iface := range rip.Interfaces {
-			fmt.Fprintf(&b, " network %s\n", iface)
+		// #14398: a non-absent `authentication-type` with NO
+		// `authentication-key` must never render as a silent no-auth RIP
+		// block. The strict gate rejects it at commit; on the tolerant
+		// path (#1960 — a persisted config must still boot) fail closed
+		// by NOT enrolling any interface in RIP: emitting `router rip` +
+		// `network <iface>` with zero auth lines is exactly the silent
+		// unauthenticated adjacency the gate exists to prevent. Warn
+		// loudly; do NOT emit a keyless auth line (FRR behaviour for a
+		// keyless mode line is not established, and a rejected line
+		// would fail the whole managed-section reload).
+		ripKeylessAuth14398 := !config.AuthTypeAbsent(rip.AuthType) && rip.AuthKey == ""
+		if ripKeylessAuth14398 {
+			slog.Warn("frr: rip authentication-type is set with NO authentication-key; "+
+				"NOT enrolling any interface in RIP rather than rendering unauthenticated RIP. "+
+				"Set authentication-key to provide the key (#14398)",
+				"authentication_type", rip.AuthType)
 		}
-		for _, iface := range rip.Passive {
-			fmt.Fprintf(&b, " passive-interface %s\n", iface)
+		fmt.Fprintf(&b, "router rip%s\n", vrfSuffix)
+		if !ripKeylessAuth14398 {
+			for _, iface := range rip.Interfaces {
+				fmt.Fprintf(&b, " network %s\n", iface)
+			}
+			for _, iface := range rip.Passive {
+				fmt.Fprintf(&b, " passive-interface %s\n", iface)
+			}
 		}
 		for _, r := range rip.Redistribute {
 			b.WriteString(m.resolveRedistribute(r, policyOptions, "rip", bgpAcceptDefault, qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
