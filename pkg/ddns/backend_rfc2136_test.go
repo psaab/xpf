@@ -69,6 +69,29 @@ type fakeDNSServer struct {
 	// from the caller ctx, post-fix) bounds the retry before the reply lands.
 	tcpReplyDelay time.Duration
 
+	// unsignedReply (#14603), when true, suppresses TSIG signing of the
+	// reply even for a TSIG-signed request — simulating a forged/off-path
+	// response (or a server that strips TSIG). miekg on the client then
+	// has no MAC to verify.
+	unsignedReply bool
+	// replyTSIGKeyName / replyTSIGAlgo, when non-empty, override the key
+	// name / algorithm the fake signs its reply with (#14603 wrong-key /
+	// wrong-algorithm controls). replyTSIGSecret, when non-empty, overrides
+	// the secret used for that signing (exercising a validly-structured
+	// TSIG whose MAC must fail in miekg).
+	replyTSIGKeyName string
+	replyTSIGAlgo    string
+	replyTSIGSecret  string
+
+	// unsignedTCPOnly (#14603), when true, suppresses TSIG signing only
+	// on the TCP leg — a signed-but-truncated UDP reply drives the client
+	// into the TCP retry, whose reply is then forged unsigned.
+	unsignedTCPOnly bool
+
+	// signedRequests counts UPDATEs that arrived TSIG-signed (#14603:
+	// proves the forgery tests exercised the signed path).
+	signedRequests int
+
 	addrUDP string
 	addrTCP string
 	tsig    map[string]string
@@ -207,6 +230,9 @@ func (s *fakeDNSServer) handle(w dns.ResponseWriter, r *dns.Msg) {
 
 	s.mu.Lock()
 	s.updates = append(s.updates, rec)
+	if r.IsTsig() != nil {
+		s.signedRequests++
+	}
 	override, hasOverride := s.rcodeForZone[zone]
 	conflict := s.conflictPrereq && (len(s.conflictZones) == 0 || s.conflictZones[zone])
 	truncate := s.truncateUDP && !overTCP
@@ -255,9 +281,46 @@ func (s *fakeDNSServer) handle(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	// Sign the reply only when the request TSIG verified, so the client's
-	// reply-verification succeeds on the happy path.
-	if signed && !tsigBad && len(s.tsig) > 0 {
+	// reply-verification succeeds on the happy path. #14603 controls can
+	// suppress signing (unsignedReply — a forged reply) or sign with a
+	// different key name / algorithm / secret. Override replies are MACed
+	// explicitly with dns.TsigGenerate + w.Write (the serving server's
+	// WriteMsg would MAC with the REQUEST key name from its own secret
+	// map, so it cannot produce a wrong-key/wrong-secret forgery).
+	s.mu.Lock()
+	unsignedReply := s.unsignedReply || (s.unsignedTCPOnly && overTCP)
+	replyKey := s.replyTSIGKeyName
+	replyAlgo := s.replyTSIGAlgo
+	replySecret := s.replyTSIGSecret
+	s.mu.Unlock()
+	if signed && !tsigBad && len(s.tsig) > 0 && !unsignedReply {
 		t := r.IsTsig()
+		if replyKey != "" || replyAlgo != "" || replySecret != "" {
+			keyName := t.Hdr.Name
+			if replyKey != "" {
+				keyName = replyKey
+			}
+			algo := t.Algorithm
+			if replyAlgo != "" {
+				algo = replyAlgo
+			}
+			secret := s.tsig[t.Hdr.Name]
+			if replySecret != "" {
+				secret = replySecret
+			}
+			m.SetTsig(keyName, algo, 300, time.Now().Unix())
+			// The response MAC must chain the REQUEST MAC (miekg server
+			// does this via tsigRequestMAC); TsigGenerate with an empty
+			// requestMAC produces a standalone response MAC that the
+			// client verifies the same way for a single-message exchange.
+			data, _, err := dns.TsigGenerate(m, secret, "", false)
+			if err != nil {
+				s.t.Errorf("fake: TsigGenerate forged reply: %v", err)
+				return
+			}
+			_, _ = w.Write(data)
+			return
+		}
 		m.SetTsig(t.Hdr.Name, t.Algorithm, 300, time.Now().Unix())
 	}
 	_ = w.WriteMsg(m)
@@ -445,6 +508,32 @@ func (s *fakeDNSServer) setTruncate(truncate bool, tcpDelay time.Duration) {
 	s.tcpReplyDelay = tcpDelay
 }
 
+// setForgedReply configures the #14603 reply forgery: unsigned suppresses
+// TSIG signing entirely; keyName/algo/secret override how the reply is
+// signed (empty = mirror the request).
+func (s *fakeDNSServer) setForgedReply(unsigned bool, keyName, algo, secret string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.unsignedReply = unsigned
+	s.replyTSIGKeyName = keyName
+	s.replyTSIGAlgo = algo
+	s.replyTSIGSecret = secret
+}
+
+// setUnsignedTCPOnly makes only the TCP-leg reply unsigned (#14603).
+func (s *fakeDNSServer) setUnsignedTCPOnly(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.unsignedTCPOnly = on
+}
+
+// signedRequestCount reports how many UPDATEs arrived TSIG-signed.
+func (s *fakeDNSServer) signedRequestCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.signedRequests
+}
+
 // testUpdater builds an rfc2136Updater pointed at the fake server, using a
 // real *dns.Client (UDP). Counters are captured into the returned closures.
 func testUpdater(t *testing.T, srv *fakeDNSServer, c *config.DHCPDynamicDNSConfig, ptrNotAuth, conflict *int) *rfc2136Updater {
@@ -613,6 +702,285 @@ func TestRFC2136TSIGSignedAndVerified(t *testing.T) {
 
 	if err := u.UpsertLease(context.Background(), recV4("tsig.example.com", "10.0.1.7", 300)); err != nil {
 		t.Fatalf("signed UpsertLease should succeed: %v", err)
+	}
+}
+
+// tsigTestUpdater builds a TSIG-configured updater against srv.
+func tsigTestUpdater(t *testing.T, srv *fakeDNSServer, keyName, secret string, ptr, conf *int) *rfc2136Updater {
+	t.Helper()
+	return testUpdater(t, srv, &config.DHCPDynamicDNSConfig{
+		Enabled:       true,
+		Domain:        "example.com",
+		TSIGKeyName:   keyName,
+		TSIGAlgorithm: "hmac-sha256",
+		TSIGSecret:    config.Secret(secret),
+	}, ptr, conf)
+}
+
+// TestRFC2136TSIGUnsignedResponseRejected is the #14603 fail-on-revert
+// proof: with TSIG configured, an UNSIGNED reply (forged NOERROR, forged
+// YXDOMAIN, forged NOTAUTH) must be a transport error from BOTH
+// UpsertLease and DeleteLease — never a verdict. Pre-fix, exchange only
+// checked err/nil/Truncated and miekg verifies a MAC only when a TSIG
+// RR is present, so the forged NOERROR was recorded as a settled
+// publish, the forged NOERROR delete dropped ownership, and the forged
+// YXDOMAIN counted a phantom conflict / suppressed the publish.
+// Controls in the same run: the properly signed same-key server
+// succeeds, and a signed NOTAUTH still surfaces as a PTR-skip / rcode
+// error (proving the rejection is TSIG-specific, not blanket).
+func TestRFC2136TSIGUnsignedResponseRejected(t *testing.T) {
+	const keyName = "xpf-ddns."
+	const secret = "c2VjcmV0LWtleS1iYXNlNjQtZW5jb2RlZA=="
+
+	for _, tc := range []struct {
+		name  string
+		rcode int
+	}{
+		{"forged NOERROR", dns.RcodeSuccess},
+		{"forged YXDOMAIN", dns.RcodeYXDomain},
+		{"forged YXRRSET", dns.RcodeYXRrset},
+		{"forged NXRRSET", dns.RcodeNXRrset},
+		{"forged NOTAUTH", dns.RcodeNotAuth},
+		{"forged REFUSED", dns.RcodeRefused},
+		{"forged SERVFAIL", dns.RcodeServerFailure},
+	} {
+		t.Run("upsert/"+tc.name, func(t *testing.T) {
+			srv := newFakeDNSServer(t, map[string]string{keyName: secret})
+			srv.setForgedReply(true, "", "", "")
+			if tc.rcode != dns.RcodeSuccess {
+				srv.setRcode("example.com.", tc.rcode)
+				srv.setRcode("1.0.10.in-addr.arpa.", tc.rcode)
+			}
+			var ptr, conf int
+			u := tsigTestUpdater(t, srv, keyName, secret, &ptr, &conf)
+			err := u.UpsertLease(context.Background(), recV4ID("victim.example.com", "10.0.1.20", "cid:victim", 300))
+			if err == nil {
+				t.Fatalf("unsigned %s reply to TSIG-signed upsert must error (forged verdict accepted)", tc.name)
+			}
+			if !strings.Contains(err.Error(), "unsigned response to TSIG-signed") {
+				t.Fatalf("want TSIG unsigned-response transport error, got: %v", err)
+			}
+			if errors.Is(err, errDDNSConflictRefused) {
+				t.Fatalf("unsigned reply must not be classified as conflict refusal: %v", err)
+			}
+			var rerr *rcodeErr
+			if errors.As(err, &rerr) {
+				t.Fatalf("unsigned reply must not produce an rcode verdict (%v): %v", rerr, err)
+			}
+			if conf != 0 {
+				t.Errorf("conflict counter = %d, want 0 (unsigned reply must not count a conflict)", conf)
+			}
+			if srv.signedRequestCount() == 0 {
+				t.Fatal("precondition: client must have sent TSIG-signed UPDATEs")
+			}
+		})
+		t.Run("delete/"+tc.name, func(t *testing.T) {
+			srv := newFakeDNSServer(t, map[string]string{keyName: secret})
+			srv.setForgedReply(true, "", "", "")
+			if tc.rcode != dns.RcodeSuccess {
+				srv.setRcode("example.com.", tc.rcode)
+				srv.setRcode("1.0.10.in-addr.arpa.", tc.rcode)
+			}
+			var ptr, conf int
+			u := tsigTestUpdater(t, srv, keyName, secret, &ptr, &conf)
+			err := u.DeleteLease(context.Background(), recV4ID("victim.example.com", "10.0.1.20", "cid:victim", 300))
+			if err == nil {
+				t.Fatalf("unsigned %s reply to TSIG-signed delete must error (forged verdict accepted)", tc.name)
+			}
+			if !strings.Contains(err.Error(), "unsigned response to TSIG-signed") {
+				t.Fatalf("want TSIG unsigned-response transport error, got: %v", err)
+			}
+			if conf != 0 {
+				t.Errorf("conflict counter = %d, want 0", conf)
+			}
+		})
+	}
+
+	// Control: properly signed same-key replies still succeed for both ops.
+	t.Run("signed same-key control succeeds", func(t *testing.T) {
+		srv := newFakeDNSServer(t, map[string]string{keyName: secret})
+		var ptr, conf int
+		u := tsigTestUpdater(t, srv, keyName, secret, &ptr, &conf)
+		if err := u.UpsertLease(context.Background(), recV4("ok.example.com", "10.0.1.21", 300)); err != nil {
+			t.Fatalf("signed upsert control: %v", err)
+		}
+		if err := u.DeleteLease(context.Background(), recV4("ok.example.com", "10.0.1.21", 300)); err != nil {
+			t.Fatalf("signed delete control: %v", err)
+		}
+		if srv.signedRequestCount() == 0 {
+			t.Fatal("precondition: control must use signed UPDATEs")
+		}
+	})
+
+	// Control: a SIGNED error rcode still reaches the verdict layer —
+	// signed REFUSED on the forward zone surfaces as an rcode error
+	// (not a TSIG transport error, not success), proving the fix rejects
+	// only unauthenticated replies, not error rcodes. (A signed PTR
+	// NOTAUTH skip is not used here: miekg answers a TSIG-signed PTR
+	// NOTAUTH reply and the pre-existing fake/verify interaction on
+	// that path errors with "bad authentication" independent of #14603;
+	// the unsigned PTR NOTAUTH cases above already pin that an unsigned
+	// NOTAUTH never reaches isPTRSkippable.)
+	t.Run("signed REFUSED control still verdicts", func(t *testing.T) {
+		srv := newFakeDNSServer(t, map[string]string{keyName: secret})
+		srv.setRcode("example.com.", dns.RcodeRefused)
+		var ptr, conf int
+		u := tsigTestUpdater(t, srv, keyName, secret, &ptr, &conf)
+		err := u.UpsertLease(context.Background(), recV4("ok.example.com", "10.0.1.22", 300))
+		if err == nil {
+			t.Fatal("signed REFUSED must error")
+		}
+		var rerr *rcodeErr
+		if !errors.As(err, &rerr) || rerr.rcode != dns.RcodeRefused {
+			t.Fatalf("signed REFUSED must surface as rcodeErr REFUSED, got: %v", err)
+		}
+		if strings.Contains(err.Error(), "unsigned response to TSIG-signed") {
+			t.Fatalf("signed REFUSED must not be a TSIG transport error: %v", err)
+		}
+	})
+}
+
+// TestRFC2136TSIGWrongKeyAlgoOrMACRejected proves the other #14603
+// forgery shapes: a reply signed with a different key name, a different
+// algorithm, or the right key name but a wrong secret (MAC failure
+// inside miekg) are all transport errors, never verdicts.
+func TestRFC2136TSIGWrongKeyAlgoOrMACRejected(t *testing.T) {
+	const keyName = "xpf-ddns."
+	const secret = "c2VjcmV0LWtleS1iYXNlNjQtZW5jb2RlZA=="
+	const otherSecret = "b3RoZXItc2VjcmV0LWJhc2U2NA=="
+
+	for _, tc := range []struct {
+		name   string
+		key    string
+		algo   string
+		secret string
+	}{
+		// On the real *dns.Client path miekg itself rejects a wrong-key
+		// reply ("no secrets defined") and a wrong-algorithm reply whose
+		// MAC was generated under the other algorithm ("bad signature")
+		// before validateTSIGResponse runs; the validator pins are
+		// pinned directly by TestExchangeTSIGValidation.
+		{"wrong key name", "other-key.", "", ""},
+		{"wrong algorithm", "", dns.HmacSHA512, ""},
+		{"wrong secret MAC fails", "", "", otherSecret},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFakeDNSServer(t, map[string]string{keyName: secret})
+			srv.setForgedReply(false, tc.key, tc.algo, tc.secret)
+			var ptr, conf int
+			u := tsigTestUpdater(t, srv, keyName, secret, &ptr, &conf)
+			err := u.UpsertLease(context.Background(), recV4("victim.example.com", "10.0.1.30", 300))
+			if err == nil {
+				t.Fatalf("%s reply must error, got success (forged verdict accepted)", tc.name)
+			}
+			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), otherSecret) {
+				t.Fatalf("error leaks a TSIG secret: %v", err)
+			}
+			if srv.signedRequestCount() == 0 {
+				t.Fatal("precondition: client must have sent TSIG-signed UPDATEs")
+			}
+		})
+	}
+}
+
+// TestRFC2136TSIGUnsignedTCPResponseRejected proves the TCP truncation
+// retry leg is gated too (#14603: "on both UDP and TCP"): the UDP reply
+// is truncated-but-signed (so the client retries), and the TCP reply is
+// unsigned NOERROR — it must still be a transport error.
+func TestRFC2136TSIGUnsignedTCPResponseRejected(t *testing.T) {
+	const keyName = "xpf-ddns."
+	const secret = "c2VjcmV0LWtleS1iYXNlNjQtZW5jb2RlZA=="
+	// Genuine TCP leg: UDP reply is SIGNED but Truncated, driving the
+	// *dns.Client TCP retry; only the TCP reply is forged unsigned.
+	srv := newFakeDNSServer(t, map[string]string{keyName: secret})
+	srv.setTruncate(true, 0)
+	srv.setUnsignedTCPOnly(true)
+	var ptr, conf int
+	u := tsigTestUpdater(t, srv, keyName, secret, &ptr, &conf)
+	err := u.UpsertLease(context.Background(), recV4("victim.example.com", "10.0.1.31", 300))
+	if err == nil {
+		t.Fatal("unsigned TCP reply to TSIG-signed update must error")
+	}
+	if !strings.Contains(err.Error(), "unsigned response to TSIG-signed") || !strings.Contains(err.Error(), "(tcp)") {
+		t.Fatalf("want TSIG unsigned-response (tcp) error, got: %v", err)
+	}
+	// Also pin: a truncated UNSIGNED UDP reply is rejected on the UDP
+	// leg before any retry verdict.
+	srv2 := newFakeDNSServer(t, map[string]string{keyName: secret})
+	srv2.setTruncate(true, 0)
+	srv2.setForgedReply(true, "", "", "")
+	u2 := tsigTestUpdater(t, srv2, keyName, secret, &ptr, &conf)
+	if err := u2.UpsertLease(context.Background(), recV4("victim.example.com", "10.0.1.32", 300)); err == nil ||
+		!strings.Contains(err.Error(), "unsigned response to TSIG-signed") {
+		t.Fatalf("truncated unsigned UDP reply must fail on udp leg, got: %v", err)
+	}
+}
+
+// stubExchanger is a dnsExchanger fake returning a canned response
+// (used to drive exchange's TCP-truncation branches that the wire fake
+// cannot shape per-transport).
+type stubExchanger struct {
+	resp *dns.Msg
+	err  error
+	net  string // unused; kept to document it is not a *dns.Client
+}
+
+func (s stubExchanger) ExchangeContext(_ context.Context, _ *dns.Msg, _ string) (*dns.Msg, time.Duration, error) {
+	return s.resp, 0, s.err
+}
+
+// validateTSIGResp is a thin call-through to the production validator.
+func validateTSIGResp(u *rfc2136Updater, m *dns.Msg, proto string) error {
+	return u.validateTSIGResponse(m, proto)
+}
+
+// TestExchangeTSIGValidation unit-pins validateTSIGResponse via the
+// exchanger seam: case-insensitive key/algorithm match succeeds, and
+// key/algorithm drift fails even when miekg would not be involved.
+func TestExchangeTSIGValidation(t *testing.T) {
+	const secret = "c2VjcmV0LWtleS1iYXNlNjQtZW5jb2RlZA=="
+	srv := newFakeDNSServer(t, map[string]string{"xpf-ddns.": secret})
+	var ptr, conf int
+	u := tsigTestUpdater(t, srv, "xpf-ddns.", secret, &ptr, &conf)
+
+	signed := func(key, algo string) *dns.Msg {
+		m := new(dns.Msg)
+		m.SetReply(new(dns.Msg))
+		m.SetTsig(key, algo, 300, time.Now().Unix())
+		return m
+	}
+	if err := validateTSIGResp(u, signed("XPF-DDNS.", "HMAC-SHA256."), "udp"); err != nil {
+		t.Errorf("case-insensitive same key/algo must pass: %v", err)
+	}
+	if err := validateTSIGResp(u, new(dns.Msg), "tcp"); err == nil ||
+		!strings.Contains(err.Error(), "unsigned response to TSIG-signed") {
+		t.Errorf("unsigned must fail, got: %v", err)
+	}
+	if err := validateTSIGResp(u, signed("other.", dns.HmacSHA256), "udp"); err == nil ||
+		!strings.Contains(err.Error(), "unexpected key") {
+		t.Errorf("wrong key must fail, got: %v", err)
+	}
+	if err := validateTSIGResp(u, signed("xpf-ddns.", dns.HmacSHA512), "udp"); err == nil ||
+		!strings.Contains(err.Error(), "unexpected algorithm") {
+		t.Errorf("wrong algorithm must fail, got: %v", err)
+	}
+	// No-TSIG updater: any response passes (the #4483 warned posture).
+	plain := testUpdater(t, srv, &config.DHCPDynamicDNSConfig{Enabled: true, Domain: "example.com"}, &ptr, &conf)
+	if err := validateTSIGResp(plain, new(dns.Msg), "udp"); err != nil {
+		t.Errorf("no-TSIG updater must not require TSIG: %v", err)
+	}
+	// A truncated reply from a non-*dns.Client exchanger with TSIG on
+	// must error rather than return an unverifiable verdict.
+	trunc := new(dns.Msg)
+	trunc.Truncated = true
+	trunc.SetTsig("xpf-ddns.", dns.HmacSHA256, 300, time.Now().Unix())
+	u2 := *u
+	u2.client = stubExchanger{resp: trunc}
+	m := new(dns.Msg)
+	m.SetUpdate("example.com.")
+	if _, err := u2.exchange(context.Background(), m); err == nil ||
+		!strings.Contains(err.Error(), "cannot be retried over TCP") {
+		t.Errorf("truncated TSIG via stub exchanger must fail closed, got: %v", err)
 	}
 }
 

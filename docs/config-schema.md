@@ -12391,7 +12391,12 @@ reserved for whole-dataplane selection where a rewrite shim
   warns (#4483): TSIG is the only authenticator on this path, so an unsigned
   UPDATE trusts a forgeable response rcode — a spoofed `NOERROR` records a name
   as published though the server wrote nothing (silent blackhole) and a spoofed
-  `REFUSED` suppresses a legitimate publish. The same no-`tsig-key` warning is
+  `REFUSED` suppresses a legitimate publish. With `tsig-key`/`tsig-secret`
+  set, `exchange()` requires every response (UDP and the TCP truncation
+  retry) to be TSIG-signed with the configured key name and algorithm
+  (`validateTSIGResponse`, #14603); miekg verifies a signed reply's MAC,
+  and an unsigned/wrong-key/wrong-algorithm reply is a transport error
+  that never sets a verdict. The same no-`tsig-key` warning is
   emitted for the Surface A provider catalog by `validateSurfaceADDNSWarnings`.
   Both are WARN-only (a hard reject would brick a previously-inert config); the
   backend also emits a once-per-update-server runtime `slog.Warn`

@@ -1137,8 +1137,9 @@ var unsignedUpdateWarned sync.Map // server string -> struct{}
 // warnUnsignedOnce logs a single WARN — the first time this process sends an
 // unsigned update to u.server — that the update is unauthenticated and the
 // server's response rcode is forgeable (#4483). Subsequent unsigned updates to
-// the same server are silent. Configuring tsig-key/tsig-secret closes the gap
-// (miekg verifies the response MAC), so the message points the operator there.
+// the same server are silent. Configuring tsig-key/tsig-secret authenticates
+// updates (exchange requires a TSIG-signed response, #14603), so the message
+// points the operator there.
 func (u *rfc2136Updater) warnUnsignedOnce() {
 	if _, loaded := unsignedUpdateWarned.LoadOrStore(u.server, struct{}{}); loaded {
 		return
@@ -1152,9 +1153,46 @@ func (u *rfc2136Updater) warnUnsignedOnce() {
 		"server", u.server)
 }
 
+// validateTSIGResponse enforces the #14603 contract: when TSIG is
+// configured, a response is only trustworthy if it carries a TSIG
+// record for the configured key name and algorithm. miekg/dns only
+// verifies the MAC when a TSIG RR is present (client.go ReadMsg: it
+// verifies if IsTsig()!=nil and otherwise returns err=nil), so an
+// UNSIGNED reply to a signed UPDATE would otherwise be accepted and
+// its forgeable rcode would set the publish/ownership verdict — the
+// residual #4483 gap for exactly the deployments that configured
+// TSIG. A signed reply with a bad MAC already fails inside miekg and
+// never reaches here. The error never carries the secret.
+func (u *rfc2136Updater) validateTSIGResponse(resp *dns.Msg, proto string) error {
+	if u.tsigKeyName == "" {
+		return nil
+	}
+	t := resp.IsTsig()
+	suffix := ""
+	if proto != "" {
+		suffix = " (" + proto + ")"
+	}
+	if t == nil {
+		return fmt.Errorf("ddns: unsigned response to TSIG-signed update from %s%s: "+
+			"refusing to trust its rcode", u.server, suffix)
+	}
+	if !strings.EqualFold(dns.CanonicalName(t.Hdr.Name), dns.CanonicalName(u.tsigKeyName)) {
+		return fmt.Errorf("ddns: TSIG response from %s%s signed with unexpected key %q (want %q): "+
+			"refusing to trust its rcode", u.server, suffix, t.Hdr.Name, u.tsigKeyName)
+	}
+	if !strings.EqualFold(dns.CanonicalName(t.Algorithm), dns.CanonicalName(u.tsigAlgo)) {
+		return fmt.Errorf("ddns: TSIG response from %s%s uses unexpected algorithm %q (want %q): "+
+			"refusing to trust its rcode", u.server, suffix, t.Algorithm, u.tsigAlgo)
+	}
+	return nil
+}
+
 // exchange signs (when TSIG configured) and sends a message UDP-first,
-// retrying over TCP on a truncated response. The per-call context bounds
-// the network I/O.
+// retrying over TCP on a truncated response. When TSIG is configured
+// the response MUST be TSIG-signed with the configured key/algorithm
+// (#14603); an unsigned, wrong-key, or wrong-algorithm reply is a
+// transport error on BOTH legs and never reaches the rcode verdict.
+// The per-call context bounds the network I/O.
 func (u *rfc2136Updater) exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	if u.tsigKeyName != "" {
 		m.SetTsig(u.tsigKeyName, u.tsigAlgo, 300, time.Now().Unix())
@@ -1177,6 +1215,9 @@ func (u *rfc2136Updater) exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, er
 	}
 	if resp == nil {
 		return nil, errors.New("ddns: nil response from update server")
+	}
+	if err := u.validateTSIGResponse(resp, "udp"); err != nil {
+		return nil, err
 	}
 	if resp.Truncated {
 		// Retry over TCP. A dns.Client honors Net="tcp"; the test recorder
@@ -1205,6 +1246,14 @@ func (u *rfc2136Updater) exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, er
 			if resp == nil {
 				return nil, errors.New("ddns: nil response from update server (tcp)")
 			}
+			if err := u.validateTSIGResponse(resp, "tcp"); err != nil {
+				return nil, err
+			}
+		} else if u.tsigKeyName != "" {
+			// A truncated TSIG-signed exchange that cannot retry over TCP
+			// (non-*dns.Client seam) must not fall through with an
+			// unverifiable verdict.
+			return nil, errors.New("ddns: truncated TSIG-signed response cannot be retried over TCP")
 		}
 	}
 	return resp, nil
