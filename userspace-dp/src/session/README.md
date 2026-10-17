@@ -239,6 +239,21 @@ unaffected — its completing segment reaches the slow path because
 `packet_eligible` and `should_cache` admit TCP packets only when `is_ack_only`,
 so neither SYN nor SYN-ACK seeds the flow cache and the final ACK is a miss.
 
+**A closing entry never completes the handshake (#14630).** `stamp_tcp_close`
+stamps `closing`/`reset` but deliberately leaves `handshake_pending` set, so
+the completion predicates must consult entry state, not packet flags alone:
+once `closing` is set, no bare ACK (forward, or reverse for a SYN-ACK-first
+pickup) clears pending, and no SYN-ACK (re-)pends either half. The gate sits
+at every site that can complete or mirror completion — the `lookup.rs` read
+path, the `update_session` HA twin, and the `propagate_tcp_state_to_companion`
+mirror — because pre-fix the matched half stayed on its close window while
+the companion mirror unconditionally re-stamped the sibling onto the 300 s
+established window: after SYN, SYN-ACK, RST, bare ACK the forward half reaped
+at RST+2 s and the reverse half survived as an orphan row (uncounted, since
+per-source counting charges only the forward half) still admitting
+server→client hits. With the gate, both halves stay on `TCP_RST_TIMEOUT_NS`
+and reap together; a FIN-stamped pair likewise stays on the CLOSING window.
+
 The normal SYN-first path still requires the SYN bit on the reverse tuple, not
 just `has_ack`, to prevent a server-spoofed bare reverse ACK from bypassing the
 half-open reap. Promotion is sticky and is applied on the timeout-selection

@@ -3569,7 +3569,12 @@ impl SessionTable {
         let timeouts = self.timeouts;
         let mut rebucket = false;
         if let Some(entry) = self.entry_by_key_mut(&companion_key) {
-            if established && matches!(companion_key.protocol, PROTO_TCP) {
+            // #14630: a closing companion is never (re-)pended or promoted
+            // by a SYN-ACK — it stays on its close window. The matched half
+            // already refuses promotion once closing (lookup/update_session
+            // gate on `entry.closing`); this keeps the mirror symmetric so
+            // a SYN-ACK crossing a RST cannot resurrect the reset half.
+            if established && !entry.closing && matches!(companion_key.protocol, PROTO_TCP) {
                 // A reverse SYN-ACK after SYN-first install, or a reverse ACK
                 // after SYN-ACK-first install, promotes the TCP half and its
                 // companion. A completing ACK clears the pending gap below.
@@ -3579,7 +3584,7 @@ impl SessionTable {
                 // cannot hold the pair on the full established window.
                 entry.established = true;
                 entry.handshake_pending = true;
-            } else if established {
+            } else if established && !entry.closing {
                 // #10889: the reverse datagram is real activity for the whole
                 // bidirectional session. Start both halves' application idle
                 // clocks together and schedule the forward half on its new
@@ -3596,9 +3601,14 @@ impl SessionTable {
                 );
                 rebucket = true;
             }
-            if handshake_completed {
+            if handshake_completed && !entry.closing {
                 // #6752/#10891: clear the companion gap and give both halves
                 // the established idle window from the completing packet.
+                // #14630: a closing companion is never promoted off its
+                // close window — completion is refused on closing entries
+                // at every site, so this arm is unreachable for one; the
+                // guard keeps the mirror correct even if a future caller
+                // passes handshake_completed for a closing pair.
                 entry.established = true;
                 entry.handshake_pending = false;
                 entry.syn_ack_first = false;
@@ -3859,7 +3869,13 @@ impl SessionTable {
             // a non-TCP app-managed session promotes on a genuine reverse
             // packet; a forward-only refresh cannot open the long idle window.
             // #13677: a stray reverse SYN-ACK must not re-pend a completed handshake.
-            reverse_syn_ack = matches!(protocol, PROTO_TCP)
+            // #14630: `closing`/`reset` were just stamped sticky above, so
+            // gating on `record.entry.closing` here also refuses completion
+            // when THIS segment is the RST/FIN (its flags already fail
+            // `!is_closing`, but the entry-state gate covers the crossing
+            // bare ACK that follows a RST stamped by an earlier segment).
+            reverse_syn_ack = !record.entry.closing
+                && matches!(protocol, PROTO_TCP)
                 && is_syn_ack(tcp_flags)
                 && metadata.is_reverse
                 && (!record.entry.established || record.entry.handshake_pending);
@@ -3867,7 +3883,8 @@ impl SessionTable {
             // SYN-ACK-first entry completes only on a reverse non-SYN ACK;
             // a SYN-first entry completes only on a valid forward ACK.
             // Retransmitted SYNs and closing ACKs leave the gate pending.
-            handshake_completed = if record.entry.syn_ack_first {
+            handshake_completed = !record.entry.closing
+                && if record.entry.syn_ack_first {
                 matches!(protocol, PROTO_TCP)
                     && record.entry.handshake_pending
                     && metadata.is_reverse
@@ -5296,3 +5313,9 @@ mod closing_pair_reserved_slots_14126_tests;
 #[cfg(test)]
 #[path = "pptp_ha_sync_13965_tests.rs"]
 mod pptp_ha_sync_13965_tests;
+
+// #14630 (Y25-01): a bare ACK after RST/FIN must not complete the handshake
+// gate and re-arm the companion onto the established window.
+#[cfg(test)]
+#[path = "rst_ack_handshake_14630_tests.rs"]
+mod rst_ack_handshake_14630_tests;
