@@ -126,6 +126,15 @@ func (c *CLI) showApplications(args []string) error {
 			if app.SourcePort != "" {
 				fmt.Printf("%s  Source port: %s\n", indent, app.SourcePort)
 			}
+			if app.ICMPType != nil {
+				// #14365 (cf. #12903 gRPC twin, #11340): render the ICMP
+				// type constraint so a type-constrained application does
+				// not read identically to an unconstrained icmp one.
+				fmt.Printf("%s  ICMP type: %d\n", indent, *app.ICMPType)
+			}
+			if app.ICMPCode != nil {
+				fmt.Printf("%s  ICMP code: %d\n", indent, *app.ICMPCode)
+			}
 			if app.InactivityTimeout > 0 {
 				fmt.Printf("%s  Inactivity timeout: %ds\n", indent, app.InactivityTimeout)
 			}
@@ -137,7 +146,15 @@ func (c *CLI) showApplications(args []string) error {
 			if port == "" {
 				port = "-"
 			}
-			fmt.Printf("%s%-24s protocol: %-6s port: %s\n", indent, app.Name, app.Protocol, port)
+			// Match the gRPC twin's icmp-type=/icmp-code= SSOT (#12903).
+			icmp := ""
+			if app.ICMPType != nil {
+				icmp += fmt.Sprintf(" icmp-type=%d", *app.ICMPType)
+			}
+			if app.ICMPCode != nil {
+				icmp += fmt.Sprintf(" icmp-code=%d", *app.ICMPCode)
+			}
+			fmt.Printf("%s%-24s protocol: %-6s port: %s%s\n", indent, app.Name, app.Protocol, port, icmp)
 		}
 	}
 
@@ -153,6 +170,14 @@ func (c *CLI) showApplications(args []string) error {
 		sort.Strings(names)
 		for _, name := range names {
 			app := cfg.Applications.Applications[name]
+			if app == nil {
+				// #14365: present-but-nil application map values reach this
+				// render via the tolerant-load / peer-sync path (#1960);
+				// the application-set loop below (#5221) and the gRPC twin
+				// (#12903) already tolerate them. Skip rather than
+				// dereferencing app.Name and panicking the CLI display.
+				continue
+			}
 			if filterName != "" && app.Name != filterName {
 				continue
 			}
@@ -194,7 +219,7 @@ func (c *CLI) showApplications(args []string) error {
 					// Show member details if filtering by set name
 					if filterName != "" {
 						if cfg != nil {
-							if app, ok := cfg.Applications.Applications[member]; ok {
+							if app, ok := cfg.Applications.Applications[member]; ok && app != nil {
 								printApp(app, "        ")
 							}
 						}
