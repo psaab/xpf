@@ -2217,6 +2217,7 @@ func validateZoneScreenReferences(cfg *config.Config, result *CompileResult) err
 	if cfg == nil {
 		return nil
 	}
+	excludedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
 	names := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		names = append(names, name)
@@ -2229,6 +2230,13 @@ func validateZoneScreenReferences(cfg *config.Config, result *CompileResult) err
 		// programZoneMaps skips it, so skip it here too: this sweep must reject
 		// exactly what the loop rejects, never more.
 		if zone == nil || zone.ScreenProfile == "" || zone.DroppedEnforcementChild {
+			continue
+		}
+		// #14338: programZoneMaps skips ZoneQuarantineExclusionsForConfig
+		// zones (collision losers / reserved / poisoned), so a missing
+		// screen profile on such a zone would never abort the loop either.
+		// The sweep must not reject more than the loop rejects.
+		if _, excluded := excludedZones[name]; excluded {
 			continue
 		}
 		if result != nil {
