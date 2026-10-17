@@ -252,6 +252,173 @@ func noteNATCounterReadError(w io.Writer, err error) {
 	}
 }
 
+// natScopeNATCounterUnmeasured is what the rule-set session row renders
+// when the tally is keyed by zone pair but the rule-set is not scoped by
+// zone on a side (#14579). n/a follows the #7423 contract: no unqualified
+// number that is not a measurement.
+const natScopeNATCounterUnmeasured = "n/a (rule-set not zone-scoped)"
+
+// natRuleSetZoneScoped reports whether both sides of a source/destination
+// NAT rule-set are zone-scoped (or, for destination, the to side is
+// absent), so the zone-pair session tally actually keys this rule-set.
+// An interface-, routing-instance-, or match-any-scoped side leaves the
+// corresponding zone empty, and the {FromZone, ToZone} lookup would miss
+// unconditionally — printing its zero would claim an idle rule-set that
+// was never measured. Destination rule-sets carry no `to` clause, so an
+// empty ToZone/ToInterface/ToRoutingInstance there is the normal
+// from-zone-only shape, not a non-zone scope.
+func NATRuleSetZoneScoped(rs *config.NATRuleSet, dest bool) bool {
+	if rs == nil {
+		return false
+	}
+	if rs.FromZone == "" {
+		return false
+	}
+	if dest {
+		return rs.ToZone == "" && rs.ToInterface == "" && rs.ToRoutingInstance == ""
+	}
+	return rs.ToZone != ""
+}
+
+// natScopePart is one rendered scope side: a kind label and its value.
+type natScopePart struct {
+	label string
+	value string
+}
+
+// natScopeParts returns the scope sides to render for a rule-set, in
+// from-then-to order. Each side prefers its non-empty #3096 field; a
+// zone field that is set wins its side. A side with no field set is
+// match-any and renders as "any" rather than a blank zone. Zone values
+// carry the quarantine qualifier when the zone is quarantined.
+func natScopeParts(rs *config.NATRuleSet, cfg *config.Config, dest bool) (from, to natScopePart, hasTo bool) {
+	qualify := func(name string) string {
+		if name != "" && config.ZoneQuarantineExcludedReason(name, cfg) != "" {
+			return name + " " + config.ZoneQuarantineReferenceQualifier
+		}
+		return name
+	}
+	side := func(zone, iface, ri string) natScopePart {
+		switch {
+		case iface != "":
+			return natScopePart{"interface", iface}
+		case ri != "":
+			return natScopePart{"routing-instance", ri}
+		case zone != "":
+			return natScopePart{"zone", qualify(zone)}
+		default:
+			return natScopePart{"zone", "any"}
+		}
+	}
+	if rs == nil {
+		return natScopePart{"zone", "any"}, natScopePart{}, false
+	}
+	from = side(rs.FromZone, rs.FromInterface, rs.FromRoutingInstance)
+	if dest && rs.ToZone == "" && rs.ToInterface == "" && rs.ToRoutingInstance == "" {
+		return from, natScopePart{}, false
+	}
+	return from, side(rs.ToZone, rs.ToInterface, rs.ToRoutingInstance), true
+}
+
+// natScopeLine renders the per-rule scope header for the source and
+// destination detail renderers. Zone-scoped sides keep the historical
+// "From zone: X    To zone: Y" bytes; a non-zone side renders its actual
+// scope ("From interface: ge-0/0/1.0") so the operator sees what the
+// rule-set matches instead of a blank zone.
+func natScopeLine(rs *config.NATRuleSet, cfg *config.Config, dest bool) string {
+	from, to, hasTo := natScopeParts(rs, cfg, dest)
+	if !hasTo {
+		return fmt.Sprintf("From %s: %s", from.label, from.value)
+	}
+	return fmt.Sprintf("From %s: %s    To %s: %s", from.label, from.value, to.label, to.value)
+}
+
+// NATScopeLabelCLI renders one rule-set's scope for the non-detail CLI
+// listings (rule-set / rule-all views) in the same vocabulary as the
+// detail header: "trust -> untrust" for a source zone pair, the actual
+// interface/routing-instance value for a #3096-scoped side, and "any"
+// for a match-any side. Destination rule-sets (dest=true) render only
+// the from side when they carry no to scope — the historical
+// "(from untrust)" spelling.
+func NATScopeLabelCLI(rs *config.NATRuleSet, dest bool) string {
+	if rs == nil {
+		return ""
+	}
+	from, to, hasTo := natScopeParts(rs, nil, dest)
+	part := func(p natScopePart) string {
+		if p.label == "zone" {
+			return p.value
+		}
+		return p.label + " " + p.value
+	}
+	if !hasTo {
+		return part(from)
+	}
+	return part(from) + " -> " + part(to)
+}
+
+// NATScopeSlashLabelCLI is NATScopeLabelCLI with "/" between the sides,
+// preserving the historical interface-pool row spelling ("trust/untrust").
+func NATScopeSlashLabelCLI(rs *config.NATRuleSet) string {
+	if rs == nil {
+		return ""
+	}
+	from, to, _ := natScopeParts(rs, nil, false)
+	part := func(p natScopePart) string {
+		if p.label == "zone" {
+			return p.value
+		}
+		return p.label + " " + p.value
+	}
+	return part(from) + "/" + part(to)
+}
+
+// NATScopePairName renders the historical structured interface-pool name
+// "trust->untrust" for a zone pair, and the scope label
+// ("interface ge-0/0/1.0 -> zone untrust") for a #3096-scoped rule-set,
+// whose empty zones would otherwise render as the meaningless "->".
+func NATScopePairName(rs *config.NATRuleSet) string {
+	if rs == nil {
+		return ""
+	}
+	if rs.FromZone != "" && rs.ToZone != "" {
+		return rs.FromZone + "->" + rs.ToZone
+	}
+	return NATScopeLabelCLI(rs, false)
+}
+
+// NATRuleSetScopeLabel renders a rule-set's full scope as one label for
+// structured surfaces (#14579): "zone trust -> zone untrust",
+// "interface ge-0/0/1.0 -> zone untrust", "any -> any", and for a
+// destination rule-set with no to scope just its from side
+// ("routing-instance blue"). It tells a consumer WHY a zone-pair session
+// row is absent for this rule-set.
+func NATRuleSetScopeLabel(rs *config.NATRuleSet, dest bool) string {
+	if rs == nil {
+		return ""
+	}
+	from, to, hasTo := natScopeParts(rs, nil, dest)
+	part := func(p natScopePart) string { return p.label + " " + p.value }
+	if !hasTo {
+		return part(from)
+	}
+	return part(from) + " -> " + part(to)
+}
+
+// NATScopeHeaderCLI renders the "From zone: X, To zone: Y" header the
+// non-detail CLI listings historically used, with the #14579 scope
+// substitution: a non-zone side renders its actual scope
+// ("From interface: ge-0/0/1.0, To zone: untrust") and a match-any side
+// renders "any", never a blank. Destination rule-sets with no to scope
+// render only the from side. Zone values keep the quarantine qualifier.
+func NATScopeHeaderCLI(rs *config.NATRuleSet, cfg *config.Config, dest bool) string {
+	from, to, hasTo := natScopeParts(rs, cfg, dest)
+	if !hasTo {
+		return fmt.Sprintf("From %s: %s", from.label, from.value)
+	}
+	return fmt.Sprintf("From %s: %s, To %s: %s", from.label, from.value, to.label, to.value)
+}
+
 type Reader interface {
 	IsLoaded() bool
 	IterateSessions(fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error

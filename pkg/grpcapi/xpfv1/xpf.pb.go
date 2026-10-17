@@ -4334,8 +4334,16 @@ type NATSourceInfo struct {
 	// false/"" and behaves exactly as before.
 	NotInstalled       bool   `protobuf:"varint,5,opt,name=not_installed,json=notInstalled,proto3" json:"not_installed,omitempty"`
 	NotInstalledReason string `protobuf:"bytes,6,opt,name=not_installed_reason,json=notInstalledReason,proto3" json:"not_installed_reason,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// #14579: the #3096 non-zone scope of this rule's rule-set. Exactly one
+	// of from_interface/from_routing_instance (and the to- pair) is set
+	// when that side is not zone-scoped; both empty with an empty zone
+	// means match-any on that side.
+	FromInterface       string `protobuf:"bytes,8,opt,name=from_interface,json=fromInterface,proto3" json:"from_interface,omitempty"`
+	ToInterface         string `protobuf:"bytes,9,opt,name=to_interface,json=toInterface,proto3" json:"to_interface,omitempty"`
+	FromRoutingInstance string `protobuf:"bytes,10,opt,name=from_routing_instance,json=fromRoutingInstance,proto3" json:"from_routing_instance,omitempty"`
+	ToRoutingInstance   string `protobuf:"bytes,11,opt,name=to_routing_instance,json=toRoutingInstance,proto3" json:"to_routing_instance,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *NATSourceInfo) Reset() {
@@ -4413,6 +4421,34 @@ func (x *NATSourceInfo) GetNotInstalled() bool {
 func (x *NATSourceInfo) GetNotInstalledReason() string {
 	if x != nil {
 		return x.NotInstalledReason
+	}
+	return ""
+}
+
+func (x *NATSourceInfo) GetFromInterface() string {
+	if x != nil {
+		return x.FromInterface
+	}
+	return ""
+}
+
+func (x *NATSourceInfo) GetToInterface() string {
+	if x != nil {
+		return x.ToInterface
+	}
+	return ""
+}
+
+func (x *NATSourceInfo) GetFromRoutingInstance() string {
+	if x != nil {
+		return x.FromRoutingInstance
+	}
+	return ""
+}
+
+func (x *NATSourceInfo) GetToRoutingInstance() string {
+	if x != nil {
+		return x.ToRoutingInstance
 	}
 	return ""
 }
@@ -4536,9 +4572,12 @@ type NATDestInfo struct {
 	NotInstalledReason string `protobuf:"bytes,7,opt,name=not_installed_reason,json=notInstalledReason,proto3" json:"not_installed_reason,omitempty"`
 	// #13199: distinct from translate_ip (the pool's address), this identifies
 	// the configured pool for accurate names and rule-stat hit lookups.
-	PoolName      string `protobuf:"bytes,8,opt,name=pool_name,json=poolName,proto3" json:"pool_name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	PoolName string `protobuf:"bytes,8,opt,name=pool_name,json=poolName,proto3" json:"pool_name,omitempty"`
+	// #14579: the #3096 non-zone from-scope of this rule's rule-set.
+	FromInterface       string `protobuf:"bytes,9,opt,name=from_interface,json=fromInterface,proto3" json:"from_interface,omitempty"`
+	FromRoutingInstance string `protobuf:"bytes,10,opt,name=from_routing_instance,json=fromRoutingInstance,proto3" json:"from_routing_instance,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *NATDestInfo) Reset() {
@@ -4623,6 +4662,20 @@ func (x *NATDestInfo) GetNotInstalledReason() string {
 func (x *NATDestInfo) GetPoolName() string {
 	if x != nil {
 		return x.PoolName
+	}
+	return ""
+}
+
+func (x *NATDestInfo) GetFromInterface() string {
+	if x != nil {
+		return x.FromInterface
+	}
+	return ""
+}
+
+func (x *NATDestInfo) GetFromRoutingInstance() string {
+	if x != nil {
+		return x.FromRoutingInstance
 	}
 	return ""
 }
@@ -7268,10 +7321,13 @@ func (x *NATPoolStats) GetNotInstalledReason() string {
 }
 
 type NATRuleSetSessions struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	FromZone      string                 `protobuf:"bytes,1,opt,name=from_zone,json=fromZone,proto3" json:"from_zone,omitempty"`
-	ToZone        string                 `protobuf:"bytes,2,opt,name=to_zone,json=toZone,proto3" json:"to_zone,omitempty"`
-	Sessions      int32                  `protobuf:"varint,3,opt,name=sessions,proto3" json:"sessions,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	FromZone string                 `protobuf:"bytes,1,opt,name=from_zone,json=fromZone,proto3" json:"from_zone,omitempty"`
+	ToZone   string                 `protobuf:"bytes,2,opt,name=to_zone,json=toZone,proto3" json:"to_zone,omitempty"`
+	Sessions int32                  `protobuf:"varint,3,opt,name=sessions,proto3" json:"sessions,omitempty"`
+	// #14579: additive scope echo so a non-zone-scoped row is
+	// distinguishable from a zone row; empty for zone-scoped rows.
+	Scope         string `protobuf:"bytes,4,opt,name=scope,proto3" json:"scope,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -7325,6 +7381,13 @@ func (x *NATRuleSetSessions) GetSessions() int32 {
 		return x.Sessions
 	}
 	return 0
+}
+
+func (x *NATRuleSetSessions) GetScope() string {
+	if x != nil {
+		return x.Scope
+	}
+	return ""
 }
 
 type GetVRRPStatusRequest struct {
@@ -8312,8 +8375,13 @@ type NATRuleStats struct {
 	// false/"" and behaves exactly as before.
 	NotInstalled       bool   `protobuf:"varint,10,opt,name=not_installed,json=notInstalled,proto3" json:"not_installed,omitempty"`
 	NotInstalledReason string `protobuf:"bytes,11,opt,name=not_installed_reason,json=notInstalledReason,proto3" json:"not_installed_reason,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// #14579: the #3096 non-zone scope of this rule's rule-set.
+	FromInterface       string `protobuf:"bytes,12,opt,name=from_interface,json=fromInterface,proto3" json:"from_interface,omitempty"`
+	ToInterface         string `protobuf:"bytes,13,opt,name=to_interface,json=toInterface,proto3" json:"to_interface,omitempty"`
+	FromRoutingInstance string `protobuf:"bytes,14,opt,name=from_routing_instance,json=fromRoutingInstance,proto3" json:"from_routing_instance,omitempty"`
+	ToRoutingInstance   string `protobuf:"bytes,15,opt,name=to_routing_instance,json=toRoutingInstance,proto3" json:"to_routing_instance,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *NATRuleStats) Reset() {
@@ -8419,6 +8487,34 @@ func (x *NATRuleStats) GetNotInstalled() bool {
 func (x *NATRuleStats) GetNotInstalledReason() string {
 	if x != nil {
 		return x.NotInstalledReason
+	}
+	return ""
+}
+
+func (x *NATRuleStats) GetFromInterface() string {
+	if x != nil {
+		return x.FromInterface
+	}
+	return ""
+}
+
+func (x *NATRuleStats) GetToInterface() string {
+	if x != nil {
+		return x.ToInterface
+	}
+	return ""
+}
+
+func (x *NATRuleStats) GetFromRoutingInstance() string {
+	if x != nil {
+		return x.FromRoutingInstance
+	}
+	return ""
+}
+
+func (x *NATRuleStats) GetToRoutingInstance() string {
+	if x != nil {
+		return x.ToRoutingInstance
 	}
 	return ""
 }
@@ -9895,7 +9991,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\fmax_sessions\x18\f \x01(\x04R\vmaxSessions\"\x15\n" +
 	"\x13GetNATSourceRequest\"C\n" +
 	"\x14GetNATSourceResponse\x12+\n" +
-	"\x05rules\x18\x01 \x03(\v2\x15.xpf.v1.NATSourceInfoR\x05rules\"\xe7\x01\n" +
+	"\x05rules\x18\x01 \x03(\v2\x15.xpf.v1.NATSourceInfoR\x05rules\"\x95\x03\n" +
 	"\rNATSourceInfo\x12\x1b\n" +
 	"\tfrom_zone\x18\x01 \x01(\tR\bfromZone\x12\x17\n" +
 	"\ato_zone\x18\x02 \x01(\tR\x06toZone\x12\x12\n" +
@@ -9903,12 +9999,17 @@ const file_xpf_proto_rawDesc = "" +
 	"\x04pool\x18\x04 \x01(\tR\x04pool\x12!\n" +
 	"\fsource_match\x18\a \x01(\tR\vsourceMatch\x12#\n" +
 	"\rnot_installed\x18\x05 \x01(\bR\fnotInstalled\x120\n" +
-	"\x14not_installed_reason\x18\x06 \x01(\tR\x12notInstalledReason\"\x1a\n" +
+	"\x14not_installed_reason\x18\x06 \x01(\tR\x12notInstalledReason\x12%\n" +
+	"\x0efrom_interface\x18\b \x01(\tR\rfromInterface\x12!\n" +
+	"\fto_interface\x18\t \x01(\tR\vtoInterface\x122\n" +
+	"\x15from_routing_instance\x18\n" +
+	" \x01(\tR\x13fromRoutingInstance\x12.\n" +
+	"\x13to_routing_instance\x18\v \x01(\tR\x11toRoutingInstance\"\x1a\n" +
 	"\x18GetNATDestinationRequest\"\xca\x01\n" +
 	"\x19GetNATDestinationResponse\x12)\n" +
 	"\x05rules\x18\x01 \x03(\v2\x13.xpf.v1.NATDestInfoR\x05rules\x12:\n" +
 	"\x19total_active_translations\x18\x02 \x01(\x05R\x17totalActiveTranslations\x12F\n" +
-	"\x11rule_set_sessions\x18\x03 \x03(\v2\x1a.xpf.v1.NATRuleSetSessionsR\x0fruleSetSessions\"\x95\x02\n" +
+	"\x11rule_set_sessions\x18\x03 \x03(\v2\x1a.xpf.v1.NATRuleSetSessionsR\x0fruleSetSessions\"\xf0\x02\n" +
 	"\vNATDestInfo\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x19\n" +
 	"\bdst_addr\x18\x02 \x01(\tR\adstAddr\x12\x19\n" +
@@ -9917,7 +10018,10 @@ const file_xpf_proto_rawDesc = "" +
 	"\x0etranslate_port\x18\x05 \x01(\rR\rtranslatePort\x12#\n" +
 	"\rnot_installed\x18\x06 \x01(\bR\fnotInstalled\x120\n" +
 	"\x14not_installed_reason\x18\a \x01(\tR\x12notInstalledReason\x12\x1b\n" +
-	"\tpool_name\x18\b \x01(\tR\bpoolName\"\x12\n" +
+	"\tpool_name\x18\b \x01(\tR\bpoolName\x12%\n" +
+	"\x0efrom_interface\x18\t \x01(\tR\rfromInterface\x122\n" +
+	"\x15from_routing_instance\x18\n" +
+	" \x01(\tR\x13fromRoutingInstance\"\x12\n" +
 	"\x10GetScreenRequest\"A\n" +
 	"\x11GetScreenResponse\x12,\n" +
 	"\ascreens\x18\x01 \x03(\v2\x12.xpf.v1.ScreenInfoR\ascreens\"\xbb\x01\n" +
@@ -10110,11 +10214,12 @@ const file_xpf_proto_rawDesc = "" +
 	"\vutilization\x18\x06 \x01(\tR\vutilization\x12!\n" +
 	"\fis_interface\x18\a \x01(\bR\visInterface\x12#\n" +
 	"\rnot_installed\x18\b \x01(\bR\fnotInstalled\x120\n" +
-	"\x14not_installed_reason\x18\t \x01(\tR\x12notInstalledReason\"f\n" +
+	"\x14not_installed_reason\x18\t \x01(\tR\x12notInstalledReason\"|\n" +
 	"\x12NATRuleSetSessions\x12\x1b\n" +
 	"\tfrom_zone\x18\x01 \x01(\tR\bfromZone\x12\x17\n" +
 	"\ato_zone\x18\x02 \x01(\tR\x06toZone\x12\x1a\n" +
-	"\bsessions\x18\x03 \x01(\x05R\bsessions\"\x16\n" +
+	"\bsessions\x18\x03 \x01(\x05R\bsessions\x12\x14\n" +
+	"\x05scope\x18\x04 \x01(\tR\x05scope\"\x16\n" +
 	"\x14GetVRRPStatusRequest\"v\n" +
 	"\x15GetVRRPStatusResponse\x126\n" +
 	"\tinstances\x18\x01 \x03(\v2\x18.xpf.v1.VRRPInstanceInfoR\tinstances\x12%\n" +
@@ -10192,7 +10297,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\brule_set\x18\x01 \x01(\tR\aruleSet\x12\x19\n" +
 	"\bnat_type\x18\x02 \x01(\tR\anatType\"E\n" +
 	"\x17GetNATRuleStatsResponse\x12*\n" +
-	"\x05rules\x18\x01 \x03(\v2\x14.xpf.v1.NATRuleStatsR\x05rules\"\xf9\x02\n" +
+	"\x05rules\x18\x01 \x03(\v2\x14.xpf.v1.NATRuleStatsR\x05rules\"\xa7\x04\n" +
 	"\fNATRuleStats\x12\x19\n" +
 	"\brule_set\x18\x01 \x01(\tR\aruleSet\x12\x1b\n" +
 	"\trule_name\x18\x02 \x01(\tR\bruleName\x12\x1b\n" +
@@ -10206,7 +10311,11 @@ const file_xpf_proto_rawDesc = "" +
 	"\thit_bytes\x18\t \x01(\x04R\bhitBytes\x12#\n" +
 	"\rnot_installed\x18\n" +
 	" \x01(\bR\fnotInstalled\x120\n" +
-	"\x14not_installed_reason\x18\v \x01(\tR\x12notInstalledReason\"\xc8\x01\n" +
+	"\x14not_installed_reason\x18\v \x01(\tR\x12notInstalledReason\x12%\n" +
+	"\x0efrom_interface\x18\f \x01(\tR\rfromInterface\x12!\n" +
+	"\fto_interface\x18\r \x01(\tR\vtoInterface\x122\n" +
+	"\x15from_routing_instance\x18\x0e \x01(\tR\x13fromRoutingInstance\x12.\n" +
+	"\x13to_routing_instance\x18\x0f \x01(\tR\x11toRoutingInstance\"\xc8\x01\n" +
 	"\x1aGetNATDeterministicRequest\x12?\n" +
 	"\tdirection\x18\x01 \x01(\x0e2!.xpf.v1.NATDeterministicDirectionR\tdirection\x12\x12\n" +
 	"\x04pool\x18\x02 \x01(\tR\x04pool\x12#\n" +

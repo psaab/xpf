@@ -41,10 +41,14 @@ func (s *Server) GetNATSource(_ context.Context, _ *pb.GetNATSourceRequest) (*pb
 		for _, rule := range rs.Rules {
 			action := natshow.SourceRuleAction(rule)
 			info := &pb.NATSourceInfo{
-				FromZone:    rs.FromZone,
-				ToZone:      rs.ToZone,
-				Type:        action,
-				SourceMatch: natshow.RuleMatchSource(rule),
+				FromZone:            rs.FromZone,
+				ToZone:              rs.ToZone,
+				FromInterface:       rs.FromInterface,
+				ToInterface:         rs.ToInterface,
+				FromRoutingInstance: rs.FromRoutingInstance,
+				ToRoutingInstance:   rs.ToRoutingInstance,
+				Type:                action,
+				SourceMatch:         natshow.RuleMatchSource(rule),
 			}
 			if strings.HasPrefix(action, "pool ") {
 				info.Type = "pool"
@@ -73,9 +77,11 @@ func (s *Server) GetNATDestination(ctx context.Context, _ *pb.GetNATDestinationR
 	for _, rs := range cfg.Security.NAT.Destination.RuleSets {
 		for _, rule := range rs.Rules {
 			info := &pb.NATDestInfo{
-				Name:     rule.Name,
-				DstAddr:  natshow.RuleMatchDestination(rule),
-				PoolName: rule.Then.PoolName,
+				Name:                rule.Name,
+				DstAddr:             natshow.RuleMatchDestination(rule),
+				PoolName:            rule.Then.PoolName,
+				FromInterface:       rs.FromInterface,
+				FromRoutingInstance: rs.FromRoutingInstance,
 			}
 			if rule.Match.DestinationPort > 0 {
 				info.DstPort = uint32(rule.Match.DestinationPort)
@@ -116,6 +122,9 @@ func (s *Server) GetNATDestination(ctx context.Context, _ *pb.GetNATDestinationR
 		counts := s.countDNATSessions(walkCtx, zoneByID)
 		resp.TotalActiveTranslations = clampInt32(counts.total)
 		for _, rs := range cfg.Security.NAT.Destination.RuleSets {
+			if !natshow.NATRuleSetZoneScoped(rs, true) {
+				continue // #14579: no zone-pair measurement exists for this scope
+			}
 			// #8321 finding 16: a DESTINATION rule-set has no `to` clause, so
 			// `rs.ToZone` is always "" while the pair index is keyed by the
 			// session's REAL egress zone -- which is never "". The pair lookup
@@ -133,6 +142,7 @@ func (s *Server) GetNATDestination(ctx context.Context, _ *pb.GetNATDestinationR
 					FromZone: rs.FromZone,
 					ToZone:   rs.ToZone,
 					Sessions: clampInt32(cnt),
+					Scope:    natshow.NATRuleSetScopeLabel(rs, true),
 				})
 			}
 		}
@@ -305,6 +315,9 @@ func (s *Server) GetNATPoolStats(ctx context.Context, _ *pb.GetNATPoolStatsReque
 	// (keyed by ingress/egress zone name) and surfaced via resp.RuleSetSessions.
 	ifacePoolSeen := make(map[natRuleSetKey]struct{})
 	for _, rs := range cfg.Security.NAT.Source {
+		if !natshow.NATRuleSetZoneScoped(rs, false) {
+			continue // #14579: UsedPorts would be an unmeasured 0 for this scope
+		}
 		key := natRuleSetKey{rs.FromZone, rs.ToZone}
 		for _, rule := range rs.Rules {
 			if !rule.Then.Interface {
@@ -315,7 +328,7 @@ func (s *Server) GetNATPoolStats(ctx context.Context, _ *pb.GetNATPoolStatsReque
 			}
 			ifacePoolSeen[key] = struct{}{}
 			resp.Pools = append(resp.Pools, &pb.NATPoolStats{
-				Name:        fmt.Sprintf("%s->%s", rs.FromZone, rs.ToZone),
+				Name:        natshow.NATScopePairName(rs),
 				Address:     "interface",
 				UsedPorts:   clampInt32(counts.ruleSetSessions[key]),
 				IsInterface: true,
@@ -325,12 +338,16 @@ func (s *Server) GetNATPoolStats(ctx context.Context, _ *pb.GetNATPoolStatsReque
 
 	// Per-rule-set session counts
 	for _, rs := range cfg.Security.NAT.Source {
+		if !natshow.NATRuleSetZoneScoped(rs, false) {
+			continue // #14579: no zone-pair measurement exists for this scope
+		}
 		key := natRuleSetKey{rs.FromZone, rs.ToZone}
 		if cnt, ok := counts.ruleSetSessions[key]; ok {
 			resp.RuleSetSessions = append(resp.RuleSetSessions, &pb.NATRuleSetSessions{
 				FromZone: rs.FromZone,
 				ToZone:   rs.ToZone,
 				Sessions: clampInt32(cnt),
+				Scope:    natshow.NATRuleSetScopeLabel(rs, false),
 			})
 		}
 	}
@@ -407,15 +424,19 @@ func (s *Server) GetNATRuleStats(_ context.Context, req *pb.GetNATRuleStatsReque
 				// dataplane may never have installed, whose 0 reads as "no
 				// traffic matched" rather than "not armed".
 				srcInfo := &pb.NATRuleStats{
-					RuleSet:          rs.Name,
-					RuleName:         rule.Name,
-					FromZone:         rs.FromZone,
-					ToZone:           rs.ToZone,
-					Action:           action,
-					SourceMatch:      srcMatch,
-					DestinationMatch: dstMatch,
-					HitPackets:       hitPkts,
-					HitBytes:         hitBytes,
+					RuleSet:             rs.Name,
+					RuleName:            rule.Name,
+					FromZone:            rs.FromZone,
+					ToZone:              rs.ToZone,
+					FromInterface:       rs.FromInterface,
+					ToInterface:         rs.ToInterface,
+					FromRoutingInstance: rs.FromRoutingInstance,
+					ToRoutingInstance:   rs.ToRoutingInstance,
+					Action:              action,
+					SourceMatch:         srcMatch,
+					DestinationMatch:    dstMatch,
+					HitPackets:          hitPkts,
+					HitBytes:            hitBytes,
 				}
 				if reason := config.SourceNATRuleNotInstalledReason(cfg, rule); reason != "" {
 					srcInfo.NotInstalled = true
@@ -451,14 +472,18 @@ func (s *Server) GetNATRuleStats(_ context.Context, req *pb.GetNATRuleStatsReque
 					// only the source arm would have satisfied a reader
 					// counting functions and left destination rules lying.
 					dstInfo := &pb.NATRuleStats{
-						RuleSet:          rs.Name,
-						RuleName:         rule.Name,
-						FromZone:         rs.FromZone,
-						ToZone:           rs.ToZone,
-						Action:           action,
-						DestinationMatch: dstMatch,
-						HitPackets:       hitPkts,
-						HitBytes:         hitBytes,
+						RuleSet:             rs.Name,
+						RuleName:            rule.Name,
+						FromZone:            rs.FromZone,
+						ToZone:              rs.ToZone,
+						FromInterface:       rs.FromInterface,
+						ToInterface:         rs.ToInterface,
+						FromRoutingInstance: rs.FromRoutingInstance,
+						ToRoutingInstance:   rs.ToRoutingInstance,
+						Action:              action,
+						DestinationMatch:    dstMatch,
+						HitPackets:          hitPkts,
+						HitBytes:            hitBytes,
 					}
 					if reason := config.DestinationNATRuleNotInstalledReason(cfg, rule); reason != "" {
 						dstInfo.NotInstalled = true

@@ -178,10 +178,14 @@ func (s *Server) natSourceHandler(w http.ResponseWriter, _ *http.Request) {
 		for _, rule := range rs.Rules {
 			action := natshow.SourceRuleAction(rule)
 			info := NATSourceInfo{
-				FromZone:    rs.FromZone,
-				ToZone:      rs.ToZone,
-				Type:        action,
-				SourceMatch: natshow.RuleMatchSource(rule),
+				FromZone:            rs.FromZone,
+				ToZone:              rs.ToZone,
+				FromInterface:       rs.FromInterface,
+				ToInterface:         rs.ToInterface,
+				FromRoutingInstance: rs.FromRoutingInstance,
+				ToRoutingInstance:   rs.ToRoutingInstance,
+				Type:                action,
+				SourceMatch:         natshow.RuleMatchSource(rule),
 			}
 			if strings.HasPrefix(action, "pool ") {
 				info.Type = "pool"
@@ -210,8 +214,10 @@ func (s *Server) natDestHandler(w http.ResponseWriter, _ *http.Request) {
 	for _, rs := range cfg.Security.NAT.Destination.RuleSets {
 		for _, rule := range rs.Rules {
 			info := NATDestInfo{
-				Name:    rule.Name,
-				DstAddr: natshow.RuleMatchDestination(rule),
+				Name:                rule.Name,
+				DstAddr:             natshow.RuleMatchDestination(rule),
+				FromInterface:       rs.FromInterface,
+				FromRoutingInstance: rs.FromRoutingInstance,
 			}
 			if rule.Match.DestinationPort > 0 {
 				info.DstPort = uint16(rule.Match.DestinationPort)
@@ -438,6 +444,9 @@ func (s *Server) natPoolStatsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ifacePoolSeen := make(map[[2]string]struct{})
 	for _, rs := range cfg.Security.NAT.Source {
+		if !natshow.NATRuleSetZoneScoped(rs, false) {
+			continue // #14579: UsedPorts would be an unmeasured 0 for this scope
+		}
 		key := [2]string{rs.FromZone, rs.ToZone}
 		for _, rule := range rs.Rules {
 			if !rule.Then.Interface {
@@ -448,7 +457,7 @@ func (s *Server) natPoolStatsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			ifacePoolSeen[key] = struct{}{}
 			result = append(result, NATPoolStatsInfo{
-				Name:        fmt.Sprintf("%s->%s", rs.FromZone, rs.ToZone),
+				Name:        natshow.NATScopePairName(rs),
 				Address:     "interface",
 				UsedPorts:   ruleSetUsed[key],
 				IsInterface: true,
@@ -515,15 +524,19 @@ func (s *Server) natRuleStatsHandler(w http.ResponseWriter, r *http.Request) {
 			// This handler walks `NAT.Source` only, so the source predicate is
 			// the whole verdict here.
 			info := NATRuleStatsInfo{
-				RuleSet:    rs.Name,
-				RuleName:   rule.Name,
-				FromZone:   rs.FromZone,
-				ToZone:     rs.ToZone,
-				Action:     action,
-				SrcMatch:   srcMatch,
-				DstMatch:   dstMatch,
-				HitPackets: hitPkts,
-				HitBytes:   hitBytes,
+				RuleSet:             rs.Name,
+				RuleName:            rule.Name,
+				FromZone:            rs.FromZone,
+				ToZone:              rs.ToZone,
+				FromInterface:       rs.FromInterface,
+				ToInterface:         rs.ToInterface,
+				FromRoutingInstance: rs.FromRoutingInstance,
+				ToRoutingInstance:   rs.ToRoutingInstance,
+				Action:              action,
+				SrcMatch:            srcMatch,
+				DstMatch:            dstMatch,
+				HitPackets:          hitPkts,
+				HitBytes:            hitBytes,
 			}
 			if reason := config.SourceNATRuleNotInstalledReason(cfg, rule); reason != "" {
 				info.NotInstalled = true

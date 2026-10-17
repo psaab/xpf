@@ -541,6 +541,11 @@ type NATSourceInfo struct {
 	// so the two surfaces cannot disagree about which objects are armed.
 	NotInstalled       bool   `json:"not_installed,omitempty"`
 	NotInstalledReason string `json:"not_installed_reason,omitempty"`
+	// #14579: the #3096 non-zone scope of this rule's rule-set.
+	FromInterface       string `json:"from_interface,omitempty"`
+	ToInterface         string `json:"to_interface,omitempty"`
+	FromRoutingInstance string `json:"from_routing_instance,omitempty"`
+	ToRoutingInstance   string `json:"to_routing_instance,omitempty"`
 }
 
 // NATDestInfo holds destination NAT configuration.
@@ -557,6 +562,9 @@ type NATDestInfo struct {
 	// so the two surfaces cannot disagree about which objects are armed.
 	NotInstalled       bool   `json:"not_installed,omitempty"`
 	NotInstalledReason string `json:"not_installed_reason,omitempty"`
+	// #14579: the #3096 non-zone from-scope of this rule's rule-set.
+	FromInterface       string `json:"from_interface,omitempty"`
+	FromRoutingInstance string `json:"from_routing_instance,omitempty"`
 }
 
 // NATDeterministicInfo is a deterministic source-NAT (CGNAT / NAPT64)
@@ -701,6 +709,11 @@ type NATRuleStatsInfo struct {
 	DstMatch   string `json:"destination_match"`
 	HitPackets uint64 `json:"hit_packets"`
 	HitBytes   uint64 `json:"hit_bytes"`
+	// #14579: the #3096 non-zone scope of this rule's rule-set.
+	FromInterface       string `json:"from_interface,omitempty"`
+	ToInterface         string `json:"to_interface,omitempty"`
+	FromRoutingInstance string `json:"from_routing_instance,omitempty"`
+	ToRoutingInstance   string `json:"to_routing_instance,omitempty"`
 	// #7473: the snapshot builder's fail-closed verdict. NotInstalled true
 	// means every other field here is CONFIGURATION, not live state — a hit
 	// counter's zero then means "not armed", not "no traffic matched".

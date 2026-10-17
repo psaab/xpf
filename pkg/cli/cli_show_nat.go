@@ -133,7 +133,7 @@ func (c *CLI) showNATSource(cfg *config.Config, args []string) error {
 	if cfg != nil {
 		for _, rs := range cfg.Security.NAT.Source {
 			fmt.Printf("Source NAT rule-set: %s\n", rs.Name)
-			fmt.Printf("  From zone: %s, To zone: %s\n", rs.FromZone, rs.ToZone)
+			fmt.Printf("  %s\n", natshow.NATScopeHeaderCLI(rs, cfg, false))
 			for _, rule := range rs.Rules {
 				// #8580: one shared computation for every surface — see
 				// natshow.SourceRuleAction. This copy defaulted to "interface",
@@ -258,7 +258,7 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 				}
 				ifacePoolSeen[key] = struct{}{}
 				pools = append(pools, poolInfo{
-					name:    fmt.Sprintf("%s/%s (interface)", zoneLabel(rs.FromZone), zoneLabel(rs.ToZone)),
+					name:    fmt.Sprintf("%s (interface)", natshow.NATScopeSlashLabelCLI(rs)),
 					address: "interface",
 					isIface: true,
 					pairQuarantined: config.ZoneQuarantineExcludedReason(rs.FromZone, cfg) != "" ||
@@ -456,6 +456,9 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 		fmt.Printf("%-30s %-12s\n", "Rule-set (from -> to)", "Sessions")
 		for _, rs := range cfg.Security.NAT.Source {
 			key := ruleSetKey{rs.FromZone, rs.ToZone}
+			if !natshow.NATRuleSetZoneScoped(rs, false) {
+				continue
+			}
 			if config.ZoneQuarantineExcludedReason(rs.FromZone, cfg) != "" ||
 				config.ZoneQuarantineExcludedReason(rs.ToZone, cfg) != "" {
 				fmt.Printf("%-30s %-12s\n",
@@ -608,7 +611,7 @@ func (c *CLI) showNATSourceRuleSet(cfg *config.Config, rsName string) error {
 			continue
 		}
 		fmt.Printf("Rule-set: %s\n", rs.Name)
-		fmt.Printf("  From zone: %s  To zone: %s\n", rs.FromZone, rs.ToZone)
+		fmt.Printf("  %s\n", natshow.NATScopeHeaderCLI(rs, cfg, false))
 		for _, rule := range rs.Rules {
 			// #8580: one shared computation for every surface — see
 			// natshow.SourceRuleAction. This copy defaulted to "interface",
@@ -671,8 +674,8 @@ func (c *CLI) showNATSourceRuleAll(cfg *config.Config) error {
 			srcMatch := natshow.RuleMatchSource(rule)
 			dstMatch := natshow.RuleMatchDestination(rule)
 
-			fmt.Printf("Rule-set: %-20s Rule: %-12s %s -> %s  Action: %s\n",
-				rs.Name, rule.Name, rs.FromZone, rs.ToZone, action)
+			fmt.Printf("Rule-set: %-20s Rule: %-12s %s  Action: %s\n",
+				rs.Name, rule.Name, natshow.NATScopeLabelCLI(rs, false), action)
 			fmt.Printf("  Match: source %s destination %s\n", srcMatch, dstMatch)
 			excludedReason := sourceNATRuleNotInstalled(cfg, rule)
 			if line := natNotInstalledLine(excludedReason, true); line != "" {
@@ -756,7 +759,7 @@ func (c *CLI) showNATDestination(cfg *config.Config, args []string) error {
 	// Show destination NAT rule sets
 	for _, rs := range dnat.RuleSets {
 		fmt.Printf("Destination NAT rule-set: %s\n", rs.Name)
-		fmt.Printf("  From zone: %s, To zone: %s\n", rs.FromZone, rs.ToZone)
+		fmt.Printf("  %s\n", natshow.NATScopeHeaderCLI(rs, cfg, true))
 		for _, rule := range rs.Rules {
 			fmt.Printf("  Rule: %s\n", rule.Name)
 			// A refused rule owns no live translation counter.
@@ -954,6 +957,9 @@ func (c *CLI) showNATDestinationSummary(cfg *config.Config) error {
 		fmt.Printf("%-30s %-12s\n", "Rule-set (from -> to)", "Sessions")
 		for _, rs := range dnat.RuleSets {
 			key := ruleSetKey{rs.FromZone, rs.ToZone}
+			if !natshow.NATRuleSetZoneScoped(rs, true) {
+				continue
+			}
 			if config.ZoneQuarantineExcludedReason(rs.FromZone, cfg) != "" ||
 				config.ZoneQuarantineExcludedReason(rs.ToZone, cfg) != "" {
 				fmt.Printf("%-30s %-12s\n",
@@ -1007,7 +1013,7 @@ func (c *CLI) showNATDestinationPool(cfg *config.Config, poolName string) error 
 				if rule.Then.PoolName != name {
 					continue
 				}
-				fmt.Printf("  Referenced by: %s/%s (from %s)\n", rs.Name, rule.Name, rs.FromZone)
+				fmt.Printf("  Referenced by: %s/%s (from %s)\n", rs.Name, rule.Name, natshow.NATScopeLabelCLI(rs, true))
 				excludedReason := destNATRuleNotInstalled(cfg, rule)
 				if line := natNotInstalledLine(excludedReason, false); line != "" {
 					fmt.Println("  " + line)
@@ -1053,7 +1059,7 @@ func (c *CLI) showNATDestinationRuleSet(cfg *config.Config, rsName string) error
 			continue
 		}
 		fmt.Printf("Rule-set: %s\n", rs.Name)
-		fmt.Printf("  From zone: %s  To zone: %s\n", rs.FromZone, rs.ToZone)
+		fmt.Printf("  %s\n", natshow.NATScopeHeaderCLI(rs, cfg, true))
 		for _, rule := range rs.Rules {
 			fmt.Printf("  Rule: %s\n", rule.Name)
 			// #8580: the destination-NAT renderers carried the same
@@ -1113,7 +1119,7 @@ func (c *CLI) showNATDestinationRuleAll(cfg *config.Config) error {
 			action := natshow.DestRuleAction(rule)
 
 			fmt.Printf("Rule-set: %-20s Rule: %-12s from %s  Action: %s\n",
-				rs.Name, rule.Name, rs.FromZone, action)
+				rs.Name, rule.Name, natshow.NATScopeLabelCLI(rs, true), action)
 			fmt.Printf("  Match: destination %s\n", dstMatch)
 			// #7473: same archetype on the destination family.
 			excludedReason := destNATRuleNotInstalled(cfg, rule)
