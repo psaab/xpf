@@ -1134,6 +1134,20 @@ pub(super) fn build_cos_iface_config(
     // is admitted, ensure every scheduler-map gets a safe unclassified-traffic
     // fallback. A map that omits best-effort must not make the lowest queue id
     // the default: the first configured queue can be expedited-forwarding.
+    //
+    // #14637: distinguish the two synthetic cases. When the interface has NO
+    // real scheduler-map queues, the synthetic queue is the sole queue and
+    // keeps the documented full-root guarantee (docs/cos-traffic-shaping.md:
+    // "sole root-shaped guarantee queue"). When real queues already exist,
+    // the synthetic queue is only a fallback for unclassified traffic: it
+    // must be residual-only (`guarantee_enabled: false`), exactly like a
+    // scheduler-map queue whose scheduler omits `transmit-rate`. A full-rate
+    // guarantee beside real queues would run in the guarantee phase ahead of
+    // strict-priority surplus and starve rate-less priority classes, and it
+    // would bypass an operator's exact cap on a renamed queue-0 class for
+    // unclassified traffic. It keeps the shaping rate as its effective rate
+    // for burst sizing / surplus weight, mirroring residual-only real queues.
+    let has_real_queues = scheduler_map_resolved_to_queues;
     if !queues
         .iter()
         .any(|queue| queue.forwarding_class == "best-effort")
@@ -1148,7 +1162,7 @@ pub(super) fn build_cos_iface_config(
                 forwarding_class: "best-effort".to_string(),
                 priority: cos_priority_rank("low").expect("\"low\" is a known scheduler priority"),
                 transmit_rate_bytes: iface.cos_shaping_rate_bytes_per_sec,
-                guarantee_enabled: true,
+                guarantee_enabled: !has_real_queues,
                 exact: false,
                 surplus_sharing: false,
                 equal_flow_enforcement: false,
@@ -1179,11 +1193,27 @@ pub(super) fn build_cos_iface_config(
         .iter()
         .map(|queue| (queue.forwarding_class.clone(), queue.queue_id))
         .collect::<FastMap<_, _>>();
-    // Priority rank 5 is the lowest service priority; larger ranks are safer
-    // defaults. Prefer best-effort only among equally-low queues.
+    // Default = lowest service priority (largest rank). Among equally-low
+    // queues prefer, in order: the operator's queue-0 class, then a queue
+    // literally named best-effort, then the lowest queue id (deterministic
+    // total order; `max_by_key` otherwise returns the last maximum, i.e. the
+    // highest queue id after the sort above). #14637: the queue-0 preference
+    // keeps a renamed queue-0 class (e.g. `be`, exact-capped) as the default
+    // instead of displacing it with the synthetic best-effort queue, so
+    // unclassified traffic stays under the operator's cap. A configured
+    // best-effort on queue 0 is covered by the same first key. The synthetic
+    // queue still wins when no queue-0 class exists at the lowest priority
+    // (the #11428 EF/NC-only map: queues 5/7 plus synthetic queue 0).
     let default_queue = queues
         .iter()
-        .max_by_key(|queue| (queue.priority, queue.forwarding_class == "best-effort"))
+        .max_by_key(|queue| {
+            (
+                queue.priority,
+                queue.queue_id == 0,
+                queue.forwarding_class == "best-effort",
+                std::cmp::Reverse(queue.queue_id),
+            )
+        })
         .expect("an admitted interface always has a configured or synthetic CoS queue")
         .queue_id;
     // #hb166 T-4: the queue ids this interface actually materializes at
