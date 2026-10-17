@@ -4432,107 +4432,8 @@ func validateNATPoolExternalTupleOverlapStrict(cfg *Config, lenient bool) ([]str
 	if cfg == nil {
 		return nil, nil
 	}
-	pools := cfg.Security.NAT.SourcePools
-	if len(pools) == 0 {
-		return nil, nil
-	}
+	owners := natPoolOverlapOwners(cfg)
 
-	var owners []natAllocOwner
-
-	// Source-NAT allocator instances: one per DISTINCT pool a pool-mode rule
-	// references. Walk rule-sets in sorted name order and collect referenced pool
-	// names into a sorted, deduped list for a deterministic owner order.
-	srcRuleSets := append([]*NATRuleSet(nil), cfg.Security.NAT.Source...)
-	sort.SliceStable(srcRuleSets, func(i, j int) bool {
-		if srcRuleSets[i] == nil || srcRuleSets[j] == nil {
-			return srcRuleSets[i] != nil
-		}
-		return srcRuleSets[i].Name < srcRuleSets[j].Name
-	})
-	var srcPoolNames []string
-	srcSeen := make(map[string]bool)
-	for _, rs := range srcRuleSets {
-		if rs == nil {
-			continue
-		}
-		for _, rule := range rs.Rules {
-			if rule == nil || rule.Then.PoolName == "" || srcSeen[rule.Then.PoolName] {
-				continue
-			}
-			srcSeen[rule.Then.PoolName] = true
-			srcPoolNames = append(srcPoolNames, rule.Then.PoolName)
-		}
-	}
-	sort.Strings(srcPoolNames)
-	for _, name := range srcPoolNames {
-		if pool := pools[name]; pool != nil {
-			owners = append(owners, natAllocOwner{
-				desc: fmt.Sprintf("source-nat pool %q", name),
-				pool: pool,
-			})
-		}
-	}
-
-	// NAT64 allocator instances: one per DISTINCT (prefix, source-pool) pair.
-	// Walk rule-sets in sorted name order and dedup on the (prefix, pool) key that
-	// the Rust nat64 allocator uses.
-	nat64RuleSets := append([]*NAT64RuleSet(nil), cfg.Security.NAT.NAT64...)
-	sort.SliceStable(nat64RuleSets, func(i, j int) bool {
-		if nat64RuleSets[i] == nil || nat64RuleSets[j] == nil {
-			return nat64RuleSets[i] != nil
-		}
-		return nat64RuleSets[i].Name < nat64RuleSets[j].Name
-	})
-	nat64Seen := make(map[string]bool)
-	// #9555: a rule-set shadowed by an earlier one under the same /96 never
-	// mints, so it is not an allocator owner. See nat64ShadowedRuleSets for why
-	// "earlier" is config order, not the name order this loop walks in.
-	nat64Shadowed := nat64ShadowedRuleSets(cfg)
-	for _, rs := range nat64RuleSets {
-		if rs == nil || rs.SourcePool == "" {
-			continue
-		}
-		if _, shadowed := nat64Shadowed[rs]; shadowed {
-			continue
-		}
-		pool := pools[rs.SourcePool]
-		if pool == nil {
-			continue
-		}
-		// Only a rule-set whose prefix builds a LIVE NAT64 allocator is an owner,
-		// keyed on the CANONICAL (prefix, pool) identity the Rust nat64 allocator
-		// uses (12 network bytes + pool_v4). An empty / malformed / non-/96 prefix
-		// builds no allocator and is dropped (ok=false) so it cannot false-report
-		// an overlap; two rule-sets naming one pool under equivalent /96 spellings
-		// (`64:ff9b::/96` vs `64:ff9b::/096` vs `0064:ff9b:0:0:0:0:0:0/96`) dedup to
-		// one owner rather than false-rejecting. See nat64PrefixOwnerKey.
-		prefixKey, ok := nat64PrefixOwnerKey(rs.Prefix)
-		if !ok {
-			continue
-		}
-		key := prefixKey + "\x00" + rs.SourcePool
-		if nat64Seen[key] {
-			continue
-		}
-		nat64Seen[key] = true
-		owners = append(owners, natAllocOwner{
-			desc: fmt.Sprintf("nat64 rule-set %q (prefix %s) source-pool %q",
-				rs.Name, rs.Prefix, rs.SourcePool),
-			pool: pool,
-		})
-	}
-
-	// #6751 §5.7: interface-mode SNAT egress addresses are an occupancy domain
-	// too, and a DISJOINT one from the pool/NAT64 allocators. A source pool (or
-	// NAT64 pool) that contains an egress interface address reintroduces the
-	// very collision interface admission now forecloses — across the seam,
-	// where neither domain can see the other's reservations.
-	//
-	// DEDUPED BY ADDRESS, deliberately: a multi-rule same-WAN config (several
-	// interface-mode rule-sets all egressing the same interface) names one
-	// address many times, and one owner per RULE would make those rule-sets
-	// overlap each OTHER — a false reject of a correct config. The occupancy is
-	// a property of the ADDRESS, so the address is the owner identity.
 	// #6751 §5.7: a whole-address static mapping on an interface-SNAT egress
 	// address emits the same external tuple as interface SNAT itself. Reject at
 	// strict commit; the warn path emits the same finding for a tolerant load.
@@ -4540,14 +4441,6 @@ func validateNATPoolExternalTupleOverlapStrict(cfg *Config, lenient bool) ([]str
 		if collisions := staticOnInterfaceEgressCollisions(cfg); len(collisions) > 0 {
 			return nil, fmt.Errorf("security nat: %s", collisions[0])
 		}
-	}
-
-	ifaceEgress := interfaceSNATEgressAddresses(cfg)
-	for _, host := range sortedAddrKeys(ifaceEgress) {
-		owners = append(owners, natAllocOwner{
-			desc:    ifaceEgress[host],
-			members: []string{host},
-		})
 	}
 
 	if len(owners) == 0 {
@@ -4583,6 +4476,213 @@ func validateNATPoolExternalTupleOverlapStrict(cfg *Config, lenient bool) ([]str
 		return emitNATOverlap(lenient, msg)
 	}
 	return nil, nil
+}
+
+// validateStaticNATPoolOverlapStrict (#14368) rejects a static-NAT external
+// that a REFERENCED source pool or a reachable NAT64 source pool can also
+// mint. It is deliberately a DEDICATED pairwise check, not another owner in
+// the shared #5144 sweep: appending static owners to that sweep would newly
+// reject static-vs-static collisions, which are outside this finding and
+// whose behaviour must stay exactly as today. Each installed static external
+// (host or block, whole-address or port-mapped) is paired ONLY against the
+// non-static owners the shared gate already enumerates — referenced source
+// pools, reachable NAT64 (prefix, pool) pairs, and interface-mode egress
+// addresses. The interface-egress pair overlaps the whole-address-only
+// #6751 §5.7 gate for unscoped rules; that gate stays untouched and wins
+// first on the strict path inside validateNATPoolExternalTupleOverlapStrict.
+//
+// A static rule participates only when the dataplane would install it:
+// non-NPTv6 (NPTv6 lowers to a separate table and never mints a static
+// external tuple), with a translation target, and not excluded by
+// StaticNATRuleExcludedReason (the builder's fail-closed drops). The
+// external is rule.Match, expanded with the same family-scoped interval
+// machinery as pool members, so a block external containing a pool member
+// collides and a mapped-port static is NOT skipped: against a minting pool
+// allocator the minted port can equal the static rule's emitted external
+// port (MatchDestinationPort, or MappedPort when no match port is set).
+//
+// Strict: hard-reject naming both rules. Lenient: warning via emitNATOverlap
+// (#1960 no-brick — a pre-gate config still boots, with the latent duplicate
+// called out until corrected).
+func validateStaticNATPoolOverlapStrict(cfg *Config, lenient bool) ([]string, error) {
+	if cfg == nil || len(cfg.Security.NAT.Static) == 0 {
+		return nil, nil
+	}
+	owners := natPoolOverlapOwners(cfg)
+	if len(owners) == 0 {
+		return nil, nil
+	}
+	var v4 []natV4Interval
+	var v6 []natV6Interval
+	for idx := range owners {
+		for _, m := range owners[idx].expandedMembers() {
+			n := parsePoolAddr(m)
+			if n == nil {
+				continue
+			}
+			switch natAddrFamily(natCIDRIPPart(m)) {
+			case "v4":
+				if lo, hi, ok := natV4IntervalOf(n); ok {
+					v4 = append(v4, natV4Interval{lo: lo, hi: hi, inst: idx, member: m})
+				}
+			case "v6":
+				if lo, hi, ok := natV6IntervalOf(n); ok {
+					v6 = append(v6, natV6Interval{lo: lo, hi: hi, inst: idx, member: m})
+				}
+			}
+		}
+	}
+	if len(v4) == 0 && len(v6) == 0 {
+		return nil, nil
+	}
+	ruleSets := append([]*StaticNATRuleSet(nil), cfg.Security.NAT.Static...)
+	sort.SliceStable(ruleSets, func(i, j int) bool {
+		if ruleSets[i] == nil || ruleSets[j] == nil {
+			return ruleSets[i] != nil
+		}
+		return ruleSets[i].Name < ruleSets[j].Name
+	})
+	for _, rs := range ruleSets {
+		if rs == nil {
+			continue
+		}
+		for _, rule := range rs.Rules {
+			if rule == nil || rule.IsNPTv6 {
+				continue
+			}
+			if rule.Then == "" && rule.ThenPrefixName == "" {
+				continue
+			}
+			if StaticNATRuleExcludedReason(rule) != "" {
+				continue
+			}
+			external := rule.Match
+			n := parsePoolAddr(external)
+			if n == nil {
+				continue
+			}
+			portNote := ""
+			if rule.MatchDestinationPort != 0 || rule.MappedPort != 0 {
+				portNote = fmt.Sprintf(" (port-mapped: match destination-port %d, mapped-port %d — the pool allocator can mint that same external port)", rule.MatchDestinationPort, rule.MappedPort)
+			}
+			switch natAddrFamily(natCIDRIPPart(external)) {
+			case "v4":
+				lo, hi, ok := natV4IntervalOf(n)
+				if !ok {
+					continue
+				}
+				for _, iv := range v4 {
+					if lo <= iv.hi && iv.lo <= hi {
+						return emitNATOverlap(lenient, fmt.Sprintf(
+							"security nat: static rule-set %q rule %q external %q%s overlaps %s member %q; the static mapping publishes its external (address, port) tuple unconditionally while the pool allocator can mint the same tuple for a different internal host, and the reverse NAT index cannot disambiguate the return flow (reply misdelivery) — give the static mapping an external address outside every referenced source/NAT64 pool, or remove the address from the pool (#14368)",
+							rs.Name, rule.Name, external, portNote, owners[iv.inst].desc, iv.member))
+					}
+				}
+			case "v6":
+				lo, hi, ok := natV6IntervalOf(n)
+				if !ok {
+					continue
+				}
+				for _, iv := range v6 {
+					if lo.Compare(iv.hi) <= 0 && iv.lo.Compare(hi) <= 0 {
+						return emitNATOverlap(lenient, fmt.Sprintf(
+							"security nat: static rule-set %q rule %q external %q%s overlaps %s member %q; the static mapping publishes its external (address, port) tuple unconditionally while the pool allocator can mint the same tuple for a different internal host, and the reverse NAT index cannot disambiguate the return flow (reply misdelivery) — give the static mapping an external address outside every referenced source/NAT64 pool, or remove the address from the pool (#14368)",
+							rs.Name, rule.Name, external, portNote, owners[iv.inst].desc, iv.member))
+					}
+				}
+			}
+		}
+	}
+	return nil, nil
+}
+
+// natPoolOverlapOwners enumerates the non-static allocator owners shared by
+// the #5144 sweep and the #14368 static check: referenced source pools,
+// reachable NAT64 (prefix, pool) pairs, and interface-mode egress addresses.
+// Extracted verbatim from validateNATPoolExternalTupleOverlapStrict so the
+// two gates cannot drift on what counts as one allocator.
+func natPoolOverlapOwners(cfg *Config) []natAllocOwner {
+	if cfg == nil {
+		return nil
+	}
+	pools := cfg.Security.NAT.SourcePools
+	if len(pools) == 0 {
+		return nil
+	}
+	var owners []natAllocOwner
+	srcRuleSets := append([]*NATRuleSet(nil), cfg.Security.NAT.Source...)
+	sort.SliceStable(srcRuleSets, func(i, j int) bool {
+		if srcRuleSets[i] == nil || srcRuleSets[j] == nil {
+			return srcRuleSets[i] != nil
+		}
+		return srcRuleSets[i].Name < srcRuleSets[j].Name
+	})
+	var srcPoolNames []string
+	srcSeen := make(map[string]bool)
+	for _, rs := range srcRuleSets {
+		if rs == nil {
+			continue
+		}
+		for _, rule := range rs.Rules {
+			if rule == nil || rule.Then.PoolName == "" || srcSeen[rule.Then.PoolName] {
+				continue
+			}
+			srcSeen[rule.Then.PoolName] = true
+			srcPoolNames = append(srcPoolNames, rule.Then.PoolName)
+		}
+	}
+	sort.Strings(srcPoolNames)
+	for _, name := range srcPoolNames {
+		if pool := pools[name]; pool != nil {
+			owners = append(owners, natAllocOwner{
+				desc: fmt.Sprintf("source-nat pool %q", name),
+				pool: pool,
+			})
+		}
+	}
+	nat64RuleSets := append([]*NAT64RuleSet(nil), cfg.Security.NAT.NAT64...)
+	sort.SliceStable(nat64RuleSets, func(i, j int) bool {
+		if nat64RuleSets[i] == nil || nat64RuleSets[j] == nil {
+			return nat64RuleSets[i] != nil
+		}
+		return nat64RuleSets[i].Name < nat64RuleSets[j].Name
+	})
+	nat64Seen := make(map[string]bool)
+	nat64Shadowed := nat64ShadowedRuleSets(cfg)
+	for _, rs := range nat64RuleSets {
+		if rs == nil || rs.SourcePool == "" {
+			continue
+		}
+		if _, shadowed := nat64Shadowed[rs]; shadowed {
+			continue
+		}
+		pool := pools[rs.SourcePool]
+		if pool == nil {
+			continue
+		}
+		prefixKey, ok := nat64PrefixOwnerKey(rs.Prefix)
+		if !ok {
+			continue
+		}
+		key := prefixKey + "\x00" + rs.SourcePool
+		if nat64Seen[key] {
+			continue
+		}
+		nat64Seen[key] = true
+		owners = append(owners, natAllocOwner{
+			desc: fmt.Sprintf("nat64 rule-set %q (prefix %s) source-pool %q",
+				rs.Name, rs.Prefix, rs.SourcePool),
+			pool: pool,
+		})
+	}
+	ifaceEgress := interfaceSNATEgressAddresses(cfg)
+	for _, host := range sortedAddrKeys(ifaceEgress) {
+		owners = append(owners, natAllocOwner{
+			desc:    ifaceEgress[host],
+			members: []string{host},
+		})
+	}
+	return owners
 }
 
 // emitNATOverlap renders a #5144 overlap finding as a strict error or a lenient

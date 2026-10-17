@@ -289,6 +289,14 @@ pub(crate) struct SourceNatRule {
     /// Synced at forwarding-build from actual egress addresses + interface
     /// registry; None when no pool/NAT64 address equals an egress address.
     pub(crate) iface_overlap_owners: Option<Arc<PoolAddressOwners>>,
+    /// #14368: the static table's external identities, shared by every pool
+    /// rule whose addresses the static domain covers (and by NAT64 prefixes
+    /// via their own field). The static publish is unconditional, so a pool
+    /// mint landing on a covered `(address, port)` can duplicate a static
+    /// session's wire tuple. `None` when no static external covers this
+    /// rule's pool — every strict-accepted config — so the mint path pays
+    /// one `Option::is_none`. Wired by `wire_static_overlap_peers`.
+    pub(crate) static_externals: Option<Arc<crate::nat::StaticExternalIdentities>>,
 }
 
 /// One source-NAT allocator identity: two rules sharing this key share one

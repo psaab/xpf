@@ -725,6 +725,9 @@ mod tests_nat64_overlap_8115;
 #[path = "tests_iface_nat64_14367.rs"]
 mod tests_iface_nat64_14367;
 #[cfg(test)]
+#[path = "tests_static_pool_overlap_14368.rs"]
+mod tests_static_pool_overlap_14368;
+#[cfg(test)]
 #[path = "tests_nat64_protocol_ineligible_8670.rs"]
 mod tests_nat64_protocol_ineligible_8670;
 #[cfg(test)]

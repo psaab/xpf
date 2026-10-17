@@ -831,3 +831,65 @@ pub(crate) fn sync_interface_overlap_peers(
         }
     }
 }
+
+/// #14368: does the static domain already own `(ip, port)`?
+///
+/// The static publish is unconditional — whole-address preserves its host's
+/// source port, port-mapped emits its fixed external port — so unlike the
+/// peer-pool query there is no occupancy bit to read: coverage IS ownership.
+/// Remote-agnostic like `peer_holds` (see `peer_owns_wire_identity`): a
+/// refusal can decline a mint toward a remote no static flow serves, which
+/// costs one refused flow and never publishes a duplicate.
+pub(crate) fn static_owns_wire_identity(
+    statics: Option<&crate::nat::StaticExternalIdentities>,
+    ip: IpAddr,
+    port: u16,
+) -> bool {
+    match statics {
+        Some(s) => s.owns(ip, port),
+        None => false,
+    }
+}
+
+/// #14368: hand the static externals view to every pool rule and NAT64
+/// prefix whose addresses it covers.
+///
+/// Called from `forwarding_build` AFTER `wire_nat64_overlap_peers`, once
+/// `state.static_nat`, `state.source_nat_rules` and `state.nat64` all
+/// exist. A rule/prefix whose pool no static external covers keeps `None`,
+/// so every strict-accepted config pays one `Option::is_none` per mint.
+/// One shared `Arc` for all touched consumers: the view is immutable
+/// snapshot state, cloned per apply like the peer index.
+pub(crate) fn wire_static_overlap_peers(
+    rules: &mut [SourceNatRule],
+    prefixes: &mut [crate::nat64::Nat64Prefix],
+    statics: crate::nat::StaticExternalIdentities,
+) {
+    if statics.is_empty() {
+        return;
+    }
+    let shared = Arc::new(statics);
+    for rule in rules.iter_mut() {
+        if !rule.pool_mode {
+            continue;
+        }
+        let touched = rule
+            .pool_addresses_v4
+            .iter()
+            .map(|a| IpAddr::V4(*a))
+            .chain(rule.pool_addresses_v6.iter().map(|a| IpAddr::V6(*a)))
+            .any(|ip| shared.covers_address(ip));
+        if touched {
+            rule.static_externals = Some(Arc::clone(&shared));
+        }
+    }
+    for prefix in prefixes.iter_mut() {
+        if prefix
+            .pool_v4
+            .iter()
+            .any(|a| shared.covers_address(IpAddr::V4(*a)))
+        {
+            prefix.static_externals = Some(Arc::clone(&shared));
+        }
+    }
+}

@@ -811,6 +811,15 @@ fn build_fallible_forwarding_state(
         let egress_addrs: rustc_hash::FxHashSet<std::net::IpAddr> = state.egress.values().flat_map(|e| e.primary_v4.map(std::net::IpAddr::V4).into_iter().chain(e.primary_v6.map(std::net::IpAddr::V6))).collect();
         crate::nat::sync_interface_overlap_peers(&mut state.source_nat_rules, &mut state.nat64.prefixes, &state.iface_nat_allocators, &egress_addrs);
     }
+    // #14368: hand the static table's externals to every pool rule / NAT64
+    // prefix they cover, so a mint landing on a static external is refused
+    // instead of publishing a duplicate wire tuple. Must run after the
+    // static table, source rules and NAT64 prefixes are all assigned.
+    crate::nat::wire_static_overlap_peers(
+        &mut state.source_nat_rules,
+        &mut state.nat64.prefixes,
+        state.static_nat.external_identities(),
+    );
     let mut nptv6 = Nptv6State::try_from_snapshots(&snapshot.nptv6_rules)?;
     if let Some(previous) = previous {
         nptv6.retain_counters_from(&previous.nptv6);

@@ -247,6 +247,125 @@ pub(crate) struct StaticNatBlock {
     hit_counter: Option<Arc<NatRuleCounter>>,
 }
 
+/// #14368: one installed static external identity for the pool/NAT64 mint
+/// backstop. `external_port` is the port the static publish emits on the
+/// SNAT direction: `Some(match_dst_port)` for a port-mapped rule (the
+/// reverse SNAT un-translates the mapped port back to it), `None` for a
+/// whole-address rule (which preserves whatever source port its internal
+/// host used, so it can collide with ANY minted port on that address).
+/// `block` marks a #3031 block external: the address is the network base
+/// and `prefix_len`/`_v6` carry the span; the mint check must test the
+/// minted address against the whole prefix, not just the base.
+#[derive(Clone, Debug)]
+pub(crate) struct StaticExternalIdentity {
+    pub(crate) external_ip: IpAddr,
+    pub(crate) external_port: Option<u16>,
+    pub(crate) block: Option<(u8, bool)>,
+    pub(crate) from_zone: String,
+    pub(crate) from_interface: String,
+    pub(crate) from_routing_instance: String,
+    pub(crate) internal_ip: IpAddr,
+}
+
+/// #14368: the static table's external identities as one shared view.
+///
+/// A pool or NAT64 mint must never publish `(E:P -> R)` while a static
+/// session can publish the same tuple: the static publish is unconditional
+/// (whole-address preserves the host's source port; port-mapped emits its
+/// fixed external port), so the ONLY safe mint posture is to refuse a
+/// candidate the static domain covers. This is a CONFIG relation (which
+/// externals exist), resolved once at forwarding build; whether a static
+/// flow is live at mint time is unknowable to the allocator, and refusing
+/// on config alone is the conservative direction — the Go #14368 gate
+/// already rejects this config at strict commit, so the backstop only ever
+/// fires on lenient / peer-synced / handcrafted installs.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StaticExternalIdentities {
+    entries: Vec<StaticExternalIdentity>,
+}
+
+impl StaticExternalIdentities {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Would a static publish emit `(ip, port)`? Port-mapped entries collide
+    /// only on their fixed external port; whole-address entries collide on
+    /// every port. Block entries collide on every address in their external
+    /// prefix. Remote-agnostic, matching the PAT peer check's posture
+    /// (#6979): refusing can decline a mint toward a remote the static rule
+    /// never serves, which costs one refused flow, never a duplicate.
+    pub(crate) fn owns(&self, ip: IpAddr, port: u16) -> bool {
+        self.entries.iter().any(|e| {
+            if let Some(p) = e.external_port {
+                if p != port {
+                    return false;
+                }
+            }
+            match e.block {
+                Some((len, _)) => NatPrefix {
+                    base: e.external_ip,
+                    len,
+                }
+                .contains(ip),
+                None => e.external_ip == ip,
+            }
+        })
+    }
+
+    /// #14368: does any static entry cover `ip` at ANY port? Used at wiring
+    /// time to decide whether a rule/prefix touches the static domain at
+    /// all, so untouched configs keep the `None` fast path.
+    pub(crate) fn covers_address(&self, ip: IpAddr) -> bool {
+        self.entries.iter().any(|e| match e.block {
+            Some((len, _)) => NatPrefix {
+                base: e.external_ip,
+                len,
+            }
+            .contains(ip),
+            None => e.external_ip == ip,
+        })
+    }
+}
+
+impl StaticNatTable {
+    /// #14368: the externals view the pool/NAT64 mint backstop consults.
+    /// Built from the SAME installed entries the match paths use — host
+    /// entries from the DNAT map (keyed by external ip + match port, so the
+    /// emitted external port is the key's port) and block entries from
+    /// `blocks` — so a rule the table dropped (mismatched block, /0,
+    /// port-on-block) contributes nothing, mirroring the Go gate's
+    /// StaticNATRuleExcludedReason scoping.
+    pub(crate) fn external_identities(&self) -> StaticExternalIdentities {
+        let mut entries = Vec::new();
+        for ((ip, port), group) in &self.dnat {
+            for entry in group {
+                entries.push(StaticExternalIdentity {
+                    external_ip: *ip,
+                    external_port: *port,
+                    block: None,
+                    from_zone: entry.from_zone.clone(),
+                    from_interface: entry.from_interface.clone(),
+                    from_routing_instance: entry.from_routing_instance.clone(),
+                    internal_ip: entry.internal_ip,
+                });
+            }
+        }
+        for blk in &self.blocks {
+            entries.push(StaticExternalIdentity {
+                external_ip: blk.external.base,
+                external_port: None,
+                block: Some((blk.external.len, blk.external.base.is_ipv6())),
+                from_zone: blk.from_zone.clone(),
+                from_interface: blk.from_interface.clone(),
+                from_routing_instance: blk.from_routing_instance.clone(),
+                internal_ip: blk.internal.base,
+            });
+        }
+        StaticExternalIdentities { entries }
+    }
+}
+
 /// Host mask (the low `32-len` bits set) for an IPv4 prefix of `len`
 /// network bits. Guards the `len >= 32` shift: `u32::MAX >> 32` is UB
 /// (release-mode masks the shift amount to 0, a no-op) so a host route

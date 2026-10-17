@@ -89,7 +89,10 @@ fn reject_peer_owned_address_only_identity(
         (Some(ia), None) => super::nat64_ports::direct_iface_owns(ia, flow, translated),
         _ => false,
     };
-    if !peer && !iface {
+    // #14368: a static external covering this tuple publishes it
+    // unconditionally, so refuse alongside the peer/iface checks.
+    let static_owns = static_owns_wire_identity(rule.static_externals.as_deref(), translated.ip, translated.port);
+    if !peer && !iface && !static_owns {
         return None;
     }
     rule.pool_allocator
@@ -117,7 +120,10 @@ fn reject_peer_owned_identity(
         (Some(ia), None) => super::nat64_ports::direct_iface_owns(ia, flow, translated),
         _ => false,
     };
-    if !peer && !iface {
+    // #14368: a static external covering this tuple publishes it
+    // unconditionally, so refuse alongside the peer/iface checks.
+    let static_owns = static_owns_wire_identity(rule.static_externals.as_deref(), translated.ip, translated.port);
+    if !peer && !iface && !static_owns {
         return None;
     }
     rule.pool_allocator
