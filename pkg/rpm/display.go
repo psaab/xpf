@@ -31,7 +31,7 @@ func SortedTestNames(tests map[string]*config.RPMTest) []string {
 // WriteConfiguredTest renders a single configured RPM test using effective defaults.
 func WriteConfiguredTest(w io.Writer, probeName, testName string, test *config.RPMTest) {
 	fmt.Fprintf(w, "  Probe: %s, Test: %s\n", probeName, testName)
-	fmt.Fprintf(w, "    Type: %s, Target: %s\n", test.EffectiveProbeType(), test.Target)
+	fmt.Fprintf(w, "    Type: %s, Target: %s\n", test.EffectiveProbeType(), config.RedactURL(test.Target))
 	if test.SourceAddress != "" {
 		fmt.Fprintf(w, "    Source: %s\n", test.SourceAddress)
 	}

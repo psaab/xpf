@@ -7,6 +7,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/appid"
 	"github.com/psaab/xpf/pkg/cmdtree"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/rpm"
 	"github.com/psaab/xpf/pkg/scheduler"
@@ -75,7 +76,7 @@ func (c *CLI) showRPMProbeResults() error {
 			fmt.Println("RPM Probe Results:")
 			for _, r := range results {
 				fmt.Printf("  Probe: %s, Test: %s\n", r.ProbeName, r.TestName)
-				fmt.Printf("    Type: %s, Target: %s\n", r.ProbeType, r.Target)
+				fmt.Printf("    Type: %s, Target: %s\n", r.ProbeType, config.RedactURL(r.Target))
 				fmt.Printf("    Status: %s", r.LastStatus)
 				if r.LastRTT > 0 {
 					fmt.Printf(", RTT: %s", r.LastRTT)
