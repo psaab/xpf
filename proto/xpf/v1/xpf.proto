@@ -1166,6 +1166,23 @@ message MatchPoliciesResponse {
   // responses so clients do not read a pre-NAT VIP verdict as the dataplane
   // decision.
   string post_nat_input_note = 31;
+  // #14362: typed fail-closed verdict flags so the remote CLI renders the
+  // same dedicated verdicts the local CLI / gRPC-text surfaces print instead
+  // of falling through to a fabricated "(default)" line. Previously only
+  // unzoned_egress (27) existed, and even it was never populated; the other
+  // postures were carried only inside the `action` string, which the remote
+  // CLI's no-match branch prints parenthesised after "No matching policy
+  // found" — actively wrong for these unconditional denies.
+  // unzoned_ingress: FROM zone unknown; transit denied unconditionally
+  // (#6682/#8318), default-policy NOT applied.
+  bool unzoned_ingress = 32;
+  // content_rejected: config content the dataplane fails closed on (#3727);
+  // no simulated verdict is enforced. Action carries
+  // ContentRejectedActionString; the reasons ride the text surfaces.
+  bool content_rejected = 33;
+  // unsupported_tuple_family: IPv4 source with IPv6 destination (#5720);
+  // NAT46 unimplemented, the runtime matcher fails the tuple closed.
+  bool unsupported_tuple_family = 34;
 }
 
 // HostInboundAdmissionStatus classifies how the ingress zone's

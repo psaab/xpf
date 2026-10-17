@@ -749,6 +749,31 @@ func (c *ctl) showMatchPolicies(args []string) error {
 		fmt.Println(resp.FeedPublicationDebtNote)
 		return nil
 	}
+	// #14362: typed fail-closed verdicts the server now carries (proto fields
+	// 32-34 + unzoned_egress) — render the dedicated verdicts the local CLI
+	// prints instead of falling through to the "No matching policy found
+	// (<action>)" default line, which names the default-policy as the cause
+	// of denies it did not produce (or buries the fail-closed posture in a
+	// parenthesised action string).
+	if resp.GetContentRejected() {
+		fmt.Printf("Policy content rejected for %s -> %s\n", req.FromZone, req.ToZone)
+		fmt.Printf("  %s\n", policymatch.ContentRejectedShowLine)
+		return nil
+	}
+	if resp.GetUnzonedIngress() {
+		fmt.Printf("Ingress zone unknown (%s -> %s): transit denied\n", req.FromZone, req.ToZone)
+		fmt.Printf("  %s\n", policymatch.UnzonedIngressShowLine)
+		return nil
+	}
+	if resp.GetUnzonedEgress() {
+		fmt.Printf("Egress zone unknown (%s -> %s): transit denied\n", req.FromZone, req.ToZone)
+		fmt.Printf("  %s\n", policymatch.UnzonedEgressShowLine)
+		return nil
+	}
+	if resp.GetUnsupportedTupleFamily() {
+		fmt.Printf("%s\n", resp.Action)
+		return nil
+	}
 
 	if resp.Matched {
 		if resp.Global {
@@ -781,6 +806,13 @@ func (c *ctl) showMatchPolicies(args []string) error {
 		fmt.Printf("    Destination addresses%s: %v\n", policymatch.ExceptSuffix(resp.GetDestinationAddressExcluded()), resp.DstAddresses)
 		fmt.Printf("    Applications: %v\n", resp.Applications)
 		fmt.Printf("    Action: %s\n", resp.Action)
+		// #14362 (#5649 parity): a MATCHED to-zone junos-host fine policy still
+		// needs the coarse host-inbound-traffic admission gate — the server
+		// already carries it (proto field 21) but this renderer never printed
+		// it, so a permit whose gate DENIES read as an unqualified permit.
+		if hi := resp.GetHostInbound(); hi != nil && hi.GetDescription() != "" {
+			fmt.Printf("    host-inbound-traffic (zone %s): %s\n", req.FromZone, hi.GetDescription())
+		}
 		// #5572: a non-first fragment whose permit was overridden to this
 		// overlapping port-bearing deny — explain the over-drop, mirroring the
 		// local CLI + REST surfaces.
@@ -798,6 +830,12 @@ func (c *ctl) showMatchPolicies(args []string) error {
 		// accurate verdict as every other transport.
 		fmt.Printf("No matching to-zone junos-host policy for %s -> junos-host\n", req.FromZone)
 		fmt.Printf("  %s\n", policymatch.HostInboundShowLine)
+		// #14362 (#3627 B1a parity): name the admitting token / deny, as the
+		// local CLI does — the generic line above alone hides WHICH verdict
+		// the coarse gate returns for this tuple.
+		if hi := resp.GetHostInbound(); hi != nil && hi.GetDescription() != "" {
+			fmt.Printf("  host-inbound-traffic (zone %s): %s\n", req.FromZone, hi.GetDescription())
+		}
 	} else {
 		// #3283: render the SERVER-provided default verdict (resp.Action carries
 		// "<action> (default)" from the configured default-policy), NOT a
