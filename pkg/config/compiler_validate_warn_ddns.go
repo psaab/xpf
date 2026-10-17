@@ -102,7 +102,8 @@ func ddnsBackendWarningsForPolicy(d *DHCPDynamicDNSConfig, label string) []strin
 		// NOERROR records a name as published though the server wrote nothing
 		// (silent blackhole), and a spoofed REFUSED suppresses a legitimate
 		// publish. WARN-only so a previously-inert config still commits; the
-		// fix is to configure tsig-key/tsig-secret (miekg then verifies the MAC).
+		// fix is to configure tsig-key/tsig-secret (exchange then requires a
+		// TSIG-signed response and miekg verifies its MAC, #14603).
 		if d.UpdateServer != "" && d.TSIGKeyName == "" {
 			warnings = append(warnings, label+" update-server is "+
 				"configured without a tsig-key; DNS UPDATEs are sent unsigned and "+
@@ -368,7 +369,8 @@ func validateSurfaceADDNSWarnings(cfg *Config) []string {
 			// #4483: an update-server with NO tsig-key sends unsigned UPDATEs
 			// and trusts an unauthenticated, forgeable response rcode (spoofed
 			// NOERROR → silent blackhole; spoofed REFUSED → suppressed publish).
-			// WARN-only; the fix is tsig-key/tsig-secret (miekg verifies the MAC).
+			// WARN-only; the fix is tsig-key/tsig-secret (exchange then
+			// requires a TSIG-signed response and miekg verifies its MAC, #14603).
 			if p.UpdateServer != "" && p.TSIGKeyName == "" {
 				warnings = append(warnings, fmt.Sprintf("system services dynamic-dns "+
 					"provider %q (backend rfc2136) has an update-server but no tsig-key; "+

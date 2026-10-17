@@ -1078,10 +1078,17 @@ regressed.
   (or ID+port-guessing off-path) attacker can forge a `NOERROR` so the manager
   records a name as published though the server wrote nothing (silent
   blackhole), or forge a `REFUSED` to suppress a legitimate publish. The gap is
-  fully closed by configuring `tsig-key`/`tsig-secret` (miekg then verifies the
-  response MAC and rejects a forgery). Because a hard reject would brick a
-  previously-inert config, the weakened posture is surfaced rather than
-  forbidden: a COMMIT-time warning (`validateDDNSBackendWarnings` for DHCP DDNS,
+  closed by configuring `tsig-key`/`tsig-secret`: `exchange()` then requires
+  every response (UDP and the TCP truncation retry) to carry a TSIG RR for
+  the configured key name and algorithm (`validateTSIGResponse`, #14603) —
+  miekg verifies the MAC of a signed reply and rejects a bad MAC, while an
+  UNSIGNED, wrong-key, or wrong-algorithm reply to a signed UPDATE is a
+  transport error that never sets a verdict or records/drops ownership.
+  (Before #14603, miekg verified only replies that happened to carry a
+  TSIG RR, so a forged unsigned reply was accepted even with TSIG set.)
+  Because a hard reject would brick a previously-inert config, the weakened
+  posture is surfaced rather than forbidden: a COMMIT-time warning
+  (`validateDDNSBackendWarnings` for DHCP DDNS,
   `validateSurfaceADDNSWarnings` for the Surface A provider catalog — both in
   `pkg/config/compiler_validate_warn.go`) whenever an `update-server` is set
   with no `tsig-key`, AND a once-per-update-server RUNTIME `slog.Warn`
