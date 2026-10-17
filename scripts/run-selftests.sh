@@ -322,6 +322,11 @@ run_shell test/debian/preinst-safe-segment-test.sh
 run_bash scripts/mutate-selftest.sh
 run_bash scripts/go-test-json-selftest.sh
 run_bash scripts/no-git-stash-selftest.sh
+# #14647: the affected-Go-test selector must seed from non-Go paths and
+# always run the import-less census packages. Real-commit legs plus a
+# synthetic clone; the docs/log leg distinguishes the never-read
+# allowlist from the all-seed fallback.
+run_bash scripts/ci_affected_go_tests_selftest.sh
 # #9783: the upgrade-docs canary (make docs-check). Hermetic fixture trees via
 # DOCS_CHECK_ROOT; the row that matters is the positive control -- the phantom
 # symbol in a LIVE doc must still fail once the history archives are excluded.
