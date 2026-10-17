@@ -3016,6 +3016,14 @@ func compileSNMPv3(node *Node, snmp *SNMPConfig) {
 					parseSNMPv3UserKeys(prop.Keys, user)
 				}
 			}
+			// #14411: a wrapper container (`authentication { … }`) is not a
+			// modelled statement; its protocol children compile exactly as
+			// if written directly under the user. The strict gate rejects
+			// the wrapped spelling, but the tolerant path compiles it at
+			// the WRITTEN level rather than silently serving a bare user.
+			if prop.Name() == "authentication" && len(prop.Keys) == 1 {
+				applySNMPv3ProtocolChildren14411(prop.Children, user)
+			}
 			switch prop.Name() {
 			case "authentication-md5":
 				user.AuthProtocol = "md5"
@@ -3048,37 +3056,95 @@ func compileSNMPv3(node *Node, snmp *SNMPConfig) {
 	}
 }
 
+// applySNMPv3ProtocolChildren14411 compiles protocol children found inside a
+// wrapper container under an SNMPv3 user (#14411 tolerant-path arm; the
+// strict gate rejects the wrapped placement). Packed tails on each protocol
+// node are honoured via parseSNMPv3UserKeys exactly as at the user level.
+func applySNMPv3ProtocolChildren14411(children []*Node, user *SNMPv3User) {
+	for _, prop := range children {
+		if len(prop.Keys) >= 3 {
+			switch prop.Keys[1] {
+			case "authentication-password", "privacy-password":
+				parseSNMPv3UserKeys(prop.Keys, user)
+			}
+		}
+		switch prop.Name() {
+		case "authentication-md5":
+			user.AuthProtocol = "md5"
+			if pw := prop.FindChild("authentication-password"); pw != nil {
+				user.AuthPassword = Secret(nodeVal(pw))
+			}
+		case "authentication-sha":
+			user.AuthProtocol = "sha"
+			if pw := prop.FindChild("authentication-password"); pw != nil {
+				user.AuthPassword = Secret(nodeVal(pw))
+			}
+		case "authentication-sha256":
+			user.AuthProtocol = "sha256"
+			if pw := prop.FindChild("authentication-password"); pw != nil {
+				user.AuthPassword = Secret(nodeVal(pw))
+			}
+		case "privacy-des":
+			user.PrivProtocol = "des"
+			if pw := prop.FindChild("privacy-password"); pw != nil {
+				user.PrivPassword = Secret(nodeVal(pw))
+			}
+		case "privacy-aes128":
+			user.PrivProtocol = "aes128"
+			if pw := prop.FindChild("privacy-password"); pw != nil {
+				user.PrivPassword = Secret(nodeVal(pw))
+			}
+		}
+	}
+}
+
 // parseSNMPv3UserKeys parses flat-form keys after the user name.
 // Keys like: ["authentication-sha256", "authentication-password", "adminpass"]
+//
+// #14411: the run may carry BOTH protocols packed on one line —
+// `authentication-sha256 authentication-password A privacy-aes128
+// privacy-password P`. The previous single-shot switch on keys[0] dropped the
+// second protocol silently: the operator configured authPriv and the agent
+// served authNoPriv (unencrypted). Walk the whole run one protocol pair per
+// step (protocol, password-leaf, value = 3 tokens). A password value is
+// consumed only as the value slot of its recognised pair and never re-read
+// as a keyword; an unrecognised token is skipped one slot so a trailing
+// unknown keyword stays for the #9155/#14411 gate to reject rather than
+// being misparsed here.
 func parseSNMPv3UserKeys(keys []string, user *SNMPv3User) {
-	if len(keys) == 0 {
-		return
-	}
-	switch keys[0] {
-	case "authentication-md5":
-		user.AuthProtocol = "md5"
-		if len(keys) >= 3 && keys[1] == "authentication-password" {
-			user.AuthPassword = Secret(keys[2])
+	for i := 0; i < len(keys); {
+		var passwordLeaf string
+		switch keys[i] {
+		case "authentication-md5":
+			user.AuthProtocol = "md5"
+			passwordLeaf = "authentication-password"
+		case "authentication-sha":
+			user.AuthProtocol = "sha"
+			passwordLeaf = "authentication-password"
+		case "authentication-sha256":
+			user.AuthProtocol = "sha256"
+			passwordLeaf = "authentication-password"
+		case "privacy-des":
+			user.PrivProtocol = "des"
+			passwordLeaf = "privacy-password"
+		case "privacy-aes128":
+			user.PrivProtocol = "aes128"
+			passwordLeaf = "privacy-password"
+		default:
+			i++
+			continue
 		}
-	case "authentication-sha":
-		user.AuthProtocol = "sha"
-		if len(keys) >= 3 && keys[1] == "authentication-password" {
-			user.AuthPassword = Secret(keys[2])
+		if i+2 < len(keys) && keys[i+1] == passwordLeaf {
+			if passwordLeaf == "authentication-password" {
+				user.AuthPassword = Secret(keys[i+2])
+			} else {
+				user.PrivPassword = Secret(keys[i+2])
+			}
 		}
-	case "authentication-sha256":
-		user.AuthProtocol = "sha256"
-		if len(keys) >= 3 && keys[1] == "authentication-password" {
-			user.AuthPassword = Secret(keys[2])
-		}
-	case "privacy-des":
-		user.PrivProtocol = "des"
-		if len(keys) >= 3 && keys[1] == "privacy-password" {
-			user.PrivPassword = Secret(keys[2])
-		}
-	case "privacy-aes128":
-		user.PrivProtocol = "aes128"
-		if len(keys) >= 3 && keys[1] == "privacy-password" {
-			user.PrivPassword = Secret(keys[2])
+		if i+1 < len(keys) && keys[i+1] == passwordLeaf {
+			i += 3
+		} else {
+			i++
 		}
 	}
 }
