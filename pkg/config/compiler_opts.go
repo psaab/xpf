@@ -683,6 +683,12 @@ type compileOpts struct {
 	// a failure to load, on the path whose whole purpose is that a persisted
 	// config comes up (#1960). The render site warns in both directions.
 	lenientAuthTypeAbsent bool
+	// lenientISISAuthTypeRequiresKey14399 is the reverse direction of
+	// lenientAuthTypeAbsent (#14399 / DR9-H3): an IS-IS
+	// `authentication-type` with no `authentication-key`. Strict rejects;
+	// tolerant paths warn so a persisted/peer-synced config still boots
+	// (#1960), and the FRR renderer warns at both IS-IS sites.
+	lenientISISAuthTypeRequiresKey14399 bool
 	// lenientMultiLeafSelfRepeat downgrades the #9027 ambiguity rejection to a
 	// warning on the tolerant paths. A config an older binary accepted must
 	// still BOOT; on that path the existing readers keep their behaviour and
@@ -3234,6 +3240,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecPSKPresence:                true,
 		lenientLogProfileStreamRef:             true,
 		lenientAuthTypeAbsent:                  true,
+		lenientISISAuthTypeRequiresKey14399:    true,
 		lenientMultiLeafSelfRepeat:             true,
 		lenientDynamicAddressFeedRef:           true,
 		lenientDuplicateNamedBlock:             true,

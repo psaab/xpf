@@ -20,6 +20,15 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 	} else {
 		cfg.Warnings = append(cfg.Warnings, w...)
 	}
+	// #14399 (DR9-H3): the reverse of #9105 — IS-IS `authentication-type`
+	// with no `authentication-key` renders UNAUTHENTICATED at both the
+	// area/domain and per-interface sites (both render blocks are gated on
+	// the key). Strict refuses; lenient warns so a persisted config boots.
+	if w, err := validateISISAuthTypeRequiresKeyStrict(cfg, opts.lenientISISAuthTypeRequiresKey14399); err != nil {
+		return err
+	} else {
+		cfg.Warnings = append(cfg.Warnings, w...)
+	}
 	// #2008 H7 security log profile -> stream cross-reference. A
 	// `security log profile <name> stream-name <stream>` that names a
 	// stream which is not configured would route to nowhere — the operator
