@@ -460,8 +460,11 @@ type Query struct {
 	FeedOverlay map[string][]string
 	// FeedPublicationDebt identifies installed feed names not confirmed applied
 	// to the dataplane. Live operator simulators populate this alongside
-	// FeedOverlay. The result is marked indeterminate if evaluation consults one
-	// of these names, including through a nested address-set member (#10974).
+	// FeedOverlay. The result is marked indeterminate only when a rule that
+	// could decide the query consulted one of these names (#10974), including
+	// through a nested address-set member; debt from a rule eliminated on a
+	// static dimension (application, scheduler, or the other address side)
+	// does not taint the query (#14337).
 	FeedPublicationDebt map[string]bool
 
 	// PolicyInactiveFn, when non-nil, reports whether a policy bound to the
@@ -2098,24 +2101,54 @@ func ruleMatchesWithMemo(cfg *config.Config, q Query, pol *config.Policy, addres
 	if q.PolicyInactiveFn != nil && q.PolicyInactiveFn(pol.SchedulerName) {
 		return false
 	}
+	// #14337: feed-publication debt is scoped to THIS rule. Static dimensions
+	// (application, scheduler above) are checked before any address token is
+	// resolved, and debt noted while evaluating an address side is committed
+	// to the query-global memo only when that side did not eliminate the rule
+	// on a non-debt-bearing side: if the source side fails, the destination
+	// tokens are never consulted; if the application fails, no address debt
+	// is committed at all. Debt IS committed when the debt-bearing side
+	// itself decides the rule's fate (it matched, or it was the side that
+	// failed), because unpublished content on that side could change the
+	// verdict. The resolved-prefix cache stays shared — only the debt
+	// accounting is per-rule.
+	//
+	// #5572 note: matchApp here receives !q.NonFirstFragment as l4Present, so
+	// a non-first fragment fails port-bearing terms closed while protocol-only
+	// / `any` terms still match — identical semantics to the previous
+	// address-first order, only the evaluation order changed.
+	if !matchApp(cfg, pol.Match.Applications, q.Protocol, q.SrcPort, q.DstPort, q.ICMPType, q.ICMPCode, !q.NonFirstFragment) {
+		return false
+	}
+	srcMemo := addressMemo.ruleScope()
 	if !matchAddrWithMemo(
 		cfg, q.FeedOverlay, pol.Match.SourceAddresses, pol.Match.SourceAddressExcluded,
-		q.SrcIP, q.SrcFamily, addressMemo,
+		q.SrcIP, q.SrcFamily, srcMemo,
 	) {
+		// The source side eliminated the rule: its own debt (if any) is
+		// decisive — the feed content could have made this side match —
+		// so commit it. The destination side was never consulted.
+		srcMemo.commitTo(addressMemo)
 		return false
 	}
+	dstMemo := addressMemo.ruleScope()
 	if !matchAddrWithMemo(
 		cfg, q.FeedOverlay, pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded,
-		q.DstIP, q.DstFamily, addressMemo,
+		q.DstIP, q.DstFamily, dstMemo,
 	) {
+		// Destination eliminated the rule after the source side matched.
+		// Only the destination side's debt is decisive: the source side
+		// already passed, so its (resolved) content cannot change this
+		// rule's fate — discard its debt, but keep its resolved cache.
+		srcMemo.adoptCache()
+		dstMemo.commitTo(addressMemo)
 		return false
 	}
-	// #5572: a non-first fragment is flowless (l4_present == false) — port-bearing
-	// and ICMP-type-constrained application terms then fail closed, while
-	// protocol-only / `any` terms still match on the L3 identity + known protocol
-	// the fragment carries. The default (NonFirstFragment == false) passes
-	// l4Present == true, so the existing L4 path is byte-identical.
-	return matchApp(cfg, pol.Match.Applications, q.Protocol, q.SrcPort, q.DstPort, q.ICMPType, q.ICMPCode, !q.NonFirstFragment)
+	// The rule matched: every consulted debt-bearing token could have
+	// changed the verdict, so commit both sides.
+	srcMemo.commitTo(addressMemo)
+	dstMemo.commitTo(addressMemo)
+	return true
 }
 
 type resolvedAddressToken struct {
@@ -2129,6 +2162,47 @@ type addressExpansionMemo struct {
 	resolved                 map[string]resolvedAddressToken
 	publicationDebt          map[string]bool
 	consultedPublicationDebt map[string]struct{}
+	// parent is set only on a per-rule scope (#14337); commitTo/adoptCache
+	// write through it. Nil on the query-global memo.
+	parent *addressExpansionMemo
+}
+
+// ruleScope returns a per-rule child memo (#14337): it shares the parent's
+// resolved-prefix cache and debt configuration, but accumulates consulted
+// debt privately until commitTo merges it. A nil parent yields nil (debt
+// tracking disabled, as before).
+func (m *addressExpansionMemo) ruleScope() *addressExpansionMemo {
+	if m == nil {
+		return nil
+	}
+	return &addressExpansionMemo{resolved: m.resolved, publicationDebt: m.publicationDebt, parent: m}
+}
+
+// commitTo merges this scope's consulted debt into the query-global parent.
+func (m *addressExpansionMemo) commitTo(parent *addressExpansionMemo) {
+	if m == nil || parent == nil {
+		return
+	}
+	m.adoptCache()
+	for name := range m.consultedPublicationDebt {
+		if parent.consultedPublicationDebt == nil {
+			parent.consultedPublicationDebt = make(map[string]struct{})
+		}
+		parent.consultedPublicationDebt[name] = struct{}{}
+	}
+}
+
+// adoptCache propagates the shared resolved-prefix cache to the parent.
+// resolvePolicyAddressToken lazily allocates memo.resolved on the scope it
+// is handed; a discarded scope must still adopt its cache or later rules
+// would re-resolve every token.
+func (m *addressExpansionMemo) adoptCache() {
+	if m == nil || m.parent == nil {
+		return
+	}
+	if m.parent.resolved == nil {
+		m.parent.resolved = m.resolved
+	}
 }
 
 func noteFeedPublicationDebt(cfg *config.Config, name string, memo *addressExpansionMemo) {
@@ -2143,8 +2217,15 @@ func noteFeedPublicationDebt(cfg *config.Config, name string, memo *addressExpan
 			memo.consultedPublicationDebt[feed] = struct{}{}
 		}
 	}
+	// #14337: bindings and debt keys use the authored name; unqualify a
+	// zone-local token first (snapshot builder's dynamicAddressLookupName).
+	lookup := name
+	if _, authored, ok := config.ZoneLocalUnqualify(name); ok {
+		lookup = authored
+	}
 	mark(name)
-	if binding := cfg.Security.DynamicAddress.AddressBindings[name]; binding != nil {
+	mark(lookup)
+	if binding := cfg.Security.DynamicAddress.AddressBindings[lookup]; binding != nil {
 		for _, feed := range binding.FeedNames {
 			mark(feed)
 		}
@@ -2152,7 +2233,10 @@ func noteFeedPublicationDebt(cfg *config.Config, name string, memo *addressExpan
 }
 
 // matchAddr replicates policy.rs try_match_rule's per-side address logic
-// EXACTLY (#3356). A nil ip (unspecified) does not constrain the match.
+// EXACTLY (#3356). A nil ip (unspecified) does not constrain the match —
+// except that an EXCLUDED side still resolves its tokens (#14337): an
+// excluded side empty across both families fails closed even with no IP,
+// and resolving records any feed-publication debt the side consults.
 //
 // The runtime computes, per side:
 //
@@ -2206,6 +2290,30 @@ func matchAddrWithMemo(
 	memo *addressExpansionMemo,
 ) bool {
 	if ip == nil {
+		// #14337: an omitted IP does not constrain a NON-excluded side, but
+		// the tokens must still be resolved so (a) feed-publication debt is
+		// recorded for the side actually consulted, and (b) an EXCLUDED side
+		// whose set is empty across both families fails closed exactly as
+		// it does with a concrete IP — the dataplane drops every packet
+		// for such a side, so certifying a match here failed OPEN.
+		// Non-excluded sides keep the documented unspecified-tuple
+		// semantics (no constraint) without resolving tokens.
+		if !excluded {
+			return true
+		}
+		v4Empty, v6Empty := true, true
+		for _, tok := range addrs {
+			resolved := resolvePolicyAddressToken(cfg, overlay, tok, memo)
+			if resolved.anyV4 || len(resolved.v4nets) > 0 {
+				v4Empty = false
+			}
+			if resolved.anyV6 || len(resolved.v6nets) > 0 {
+				v6Empty = false
+			}
+		}
+		if len(addrs) > 0 && v4Empty && v6Empty {
+			return false
+		}
 		return true
 	}
 
@@ -2492,6 +2600,23 @@ func isBookName(cfg *config.Config, overlay map[string][]string, tok string) boo
 	if _, ok := overlay[tok]; ok {
 		return true
 	}
+	// #14337: a declared dynamic-address binding is a book name even when
+	// the token is absent from the overlay — the snapshot builder treats a
+	// declared-but-unpublished binding as a name (its row is empty or the
+	// snapshot is rejected), never as a free-form literal. Without this, an
+	// excluded side naming such a binding resolved as a literal, stayed
+	// "non-empty", and matched — failing open where the dataplane fails
+	// closed. Unqualify zone-local tokens the same way the snapshot
+	// builder's dynamicAddressLookupName does.
+	if cfg != nil {
+		lookup := tok
+		if _, authored, ok := config.ZoneLocalUnqualify(tok); ok {
+			lookup = authored
+		}
+		if cfg.Security.DynamicAddress.AddressBindings[lookup] != nil {
+			return true
+		}
+	}
 	ab := cfg.Security.AddressBook
 	if ab == nil {
 		return false
@@ -2538,7 +2663,14 @@ func expandBookNameWithMemo(
 
 	noteFeedPublicationDebt(cfg, name, memo)
 	var out []string
-	feeds, feedBound := overlay[name]
+	// #14337: feed overlay and bindings are keyed by the authored name;
+	// a zone-local policy token must unqualify before consulting them,
+	// mirroring the snapshot builder's dynamicAddressLookupName.
+	lookup := name
+	if _, authored, ok := config.ZoneLocalUnqualify(name); ok {
+		lookup = authored
+	}
+	feeds, feedBound := overlay[lookup]
 	if len(feeds) > 0 {
 		out = append(out, feeds...)
 	}
@@ -2547,8 +2679,8 @@ func expandBookNameWithMemo(
 	// the feed shadows, not a fallback — returning here (not falling through
 	// to the book) keeps the simulator's verdicts on the dataplane's row.
 	if feedBound && len(feeds) == 0 &&
-		cfg.Security.DynamicAddress.AddressBindings[name] != nil &&
-		cfg.Security.DynamicAddress.AddressBindings[name].FailMode == "drop" {
+		cfg.Security.DynamicAddress.AddressBindings[lookup] != nil &&
+		cfg.Security.DynamicAddress.AddressBindings[lookup].FailMode == "drop" {
 		return out
 	}
 	ab := cfg.Security.AddressBook
@@ -2977,13 +3109,20 @@ func isSkippedFragDenyWithMemo(
 	}
 	// L3 overlap: the zone is fixed by the tier bucket, so only source +
 	// destination address overlap is checked (the same matchAddr the runtime uses
-	// via rule_l3_matches).
-	if !matchAddrWithMemo(cfg, q.FeedOverlay, pol.Match.SourceAddresses, pol.Match.SourceAddressExcluded, q.SrcIP, q.SrcFamily, addressMemo) {
+	// via rule_l3_matches). #14337: evaluate in a per-rule scope — a deny
+	// that does NOT overlap never consulted its feeds for this query, and a
+	// deny that DOES overlap made both sides decisive (its skipped-deny
+	// override is exactly a verdict the feed content could change).
+	scope := addressMemo.ruleScope()
+	if !matchAddrWithMemo(cfg, q.FeedOverlay, pol.Match.SourceAddresses, pol.Match.SourceAddressExcluded, q.SrcIP, q.SrcFamily, scope) {
+		scope.adoptCache()
 		return false
 	}
-	if !matchAddrWithMemo(cfg, q.FeedOverlay, pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded, q.DstIP, q.DstFamily, addressMemo) {
+	if !matchAddrWithMemo(cfg, q.FeedOverlay, pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded, q.DstIP, q.DstFamily, scope) {
+		scope.adoptCache()
 		return false
 	}
+	scope.commitTo(addressMemo)
 	return true
 }
 
