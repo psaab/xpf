@@ -266,7 +266,7 @@ ANDs four inputs and calls `SetRGReady`:
 | Input | Source | Not-ready when |
 |-------|--------|----------------|
 | interfaces | `Monitor.RGInterfaceReady` (`monitor.go`) | a LOCAL required interface is missing or down. An interface whose FPC slot maps to the peer node is skipped — it cannot exist locally. |
-| VRRP | `vrrp.Manager.RGVRRPReady` | a desired RETH instance is in `unbuiltDesired` (#5641), or the RG has RETH interfaces and no instance at all. `checkNoRethTakeoverReadiness` replaces this in no-RETH-VRRP mode. |
+| VRRP | `vrrp.Manager.RGVRRPReady` + `InSyncHold` (#14406) | a desired RETH instance is in `unbuiltDesired` (#5641), or the RG has RETH interfaces and no instance at all, or the VRRP sync-hold is active (bounded startup hold until bulk session sync, mirroring the NoRETH #7162 term). `checkNoRethTakeoverReadiness` replaces this in no-RETH-VRRP mode. |
 | fabric | `d.fabricPopulated` | the fabric forwarding path is unpopulated. Forced ready when the peer is not alive. |
 | userspace dataplane | `TakeoverReady()` on the published runtime | fail-closed: config says userspace but no dataplane is published. |
 
