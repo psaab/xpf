@@ -740,6 +740,19 @@ Three changes, and the asymmetry between them is the part to keep:
   no deadline and no context. The connectionless nature of UDP bounds the send,
   not the lookup that precedes it; conflating the two is how this stayed
   asymmetric.
+- **The source-address branch carries the same bound (#14613).** It originally
+  bypassed the dialer entirely — `net.ResolveUDPAddr` + `net.DialUDP` carry
+  neither context nor deadline — so a hostname collector *with* a
+  `source-address` (the canonical vSRX shape, on both `security log stream`
+  and `system syslog host`) stalled for resolver timeout × attempts × servers
+  on every apply. It now resolves both addresses under one 5 s context
+  (`resolveUDPAddrBounded`/`lookupSyslogIPAddr`, mirroring flowexport #9913:
+  literals take the parser fast path, hostnames go through the
+  context resolver, first IPv4 wins) and dials the resolved literal with
+  the same bound, keeping the `resolve source` / `resolve remote` error
+  taxonomy. Tests: `syslog_udp_srcaddr_bound_14613_test.go` (a resolver
+  seam that blocks until cancelled proves the bound; literal and
+  hostname-success controls pin the bind and delivery).
 
 The #3351 operator signal ("receiver unreachable at apply") is preserved rather
 than dropped: `warmSyslogClients` runs the connect asynchronously and logs the

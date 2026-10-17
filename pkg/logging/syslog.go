@@ -642,17 +642,89 @@ func (s *SyslogClient) dial() (net.Conn, error) {
 	}
 }
 
+// syslogDialTimeout bounds one syslog dial — including every DNS lookup it
+// performs — on the construction/commit path (#9326, #14613). A var (not a
+// const) so tests can shorten it; production never writes it.
+var syslogDialTimeout = 5 * time.Second
+
+// lookupSyslogIPAddr is the hostname-resolution seam for dialUDP's
+// source-bound branch. Production is the default resolver under the
+// caller's context; tests substitute a resolver that blocks until its
+// context is cancelled (the black-holed-DNS shape) to prove the bound.
+var lookupSyslogIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
+// resolveUDPAddrBounded resolves address ("host:port") under ctx. The
+// package-level net.ResolveUDPAddr has no context and performs an
+// unbounded hostname lookup, so IP literals (and the empty host) take its
+// parser fast path while hostnames go through lookupSyslogIPAddr with the
+// caller's deadline (#14613, mirroring flowexport #9913). Address
+// selection prefers the first IPv4 result for the family-agnostic "udp"
+// network, falling back to the first result — net's forResolve order.
+func resolveUDPAddrBounded(ctx context.Context, network, address string) (*net.UDPAddr, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		// Not host:port (e.g. a bare literal): the package parser owns
+		// the error taxonomy, and no name lookup is involved.
+		return net.ResolveUDPAddr(network, address)
+	}
+	pn, perr := net.LookupPort("udp", port)
+	if perr != nil {
+		return nil, perr
+	}
+	if host == "" {
+		return &net.UDPAddr{Port: pn}, nil
+	}
+	name, zone := host, ""
+	if i := strings.LastIndex(host, "%"); i >= 0 {
+		name, zone = host[:i], host[i+1:]
+	}
+	if ip := net.ParseIP(name); ip != nil {
+		return &net.UDPAddr{IP: ip, Port: pn, Zone: zone}, nil
+	}
+	ips, err := lookupSyslogIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("lookup %s: no suitable address", host)
+	}
+	chosen := ips[0]
+	for _, cand := range ips {
+		if cand.IP.To4() != nil {
+			chosen = cand
+			break
+		}
+	}
+	if zone == "" {
+		zone = chosen.Zone
+	}
+	return &net.UDPAddr{IP: chosen.IP, Port: pn, Zone: zone}, nil
+}
+
 func (s *SyslogClient) dialUDP() (net.Conn, error) {
 	if s.sourceAddr != "" {
-		laddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(s.sourceAddr, "0"))
+		// #14613: this branch used to resolve BOTH addresses with
+		// net.ResolveUDPAddr and dial with net.DialUDP — no context, no
+		// deadline — so a hostname collector with a source-address stalled
+		// for resolver timeout x attempts x servers on every apply while
+		// the no-source branch below carried the #9326 5 s bound. Resolve
+		// under one bounded context and dial the resolved literal with
+		// the same bound; the resolve-source / resolve-remote taxonomy
+		// is preserved.
+		ctx, cancel := context.WithTimeout(context.Background(), syslogDialTimeout)
+		defer cancel()
+		laddr, err := resolveUDPAddrBounded(ctx, "udp", net.JoinHostPort(s.sourceAddr, "0"))
 		if err != nil {
 			return nil, fmt.Errorf("resolve source %s: %w", s.sourceAddr, err)
 		}
-		raddr, err := net.ResolveUDPAddr("udp", s.remoteAddr)
+		raddr, err := resolveUDPAddrBounded(ctx, "udp", s.remoteAddr)
 		if err != nil {
 			return nil, fmt.Errorf("resolve remote %s: %w", s.remoteAddr, err)
 		}
-		return net.DialUDP("udp", laddr, raddr)
+		dialer := &net.Dialer{Timeout: syslogDialTimeout, LocalAddr: laddr}
+		return dialer.DialContext(ctx, "udp", raddr.String())
 	}
 	// #9326: the same 5s bound its TCP/TLS siblings carry. `net.Dial` on a
 	// HOSTNAME performs a resolver lookup, and with no Dialer there was no
@@ -665,7 +737,7 @@ func (s *SyslogClient) dialUDP() (net.Conn, error) {
 	// non-hostname is now refused at commit rather than handed to the resolver.
 	// This bound is the belt for the tolerant load / HA-sync ingress, which
 	// only warns.
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	dialer := &net.Dialer{Timeout: syslogDialTimeout}
 	return dialer.Dial("udp", s.remoteAddr)
 }
 
