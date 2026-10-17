@@ -100,3 +100,73 @@ func TestSnapshotForBindingsDeepCopy(t *testing.T) {
 		t.Fatalf("manager state corrupted by caller mutation: %v", again["name"])
 	}
 }
+
+// TestSnapshotForBindingsOmitsWholeSpaceUnion14392 is #14392 (DR7-H5): two
+// feeds each serving one half of a family (0.0.0.0/1 + 128.0.0.0/1) pass the
+// per-feed whole-space refusal in parseFeed (#10711), but their binding
+// UNION covers the whole family. The enforcement unit is the union, so the
+// binding must be omitted (fail-closed, #5645) instead of publishing
+// permit-all / deny-all. A single feed serving both halves is already
+// refused at parse (feed_union_10711_test.go); disjoint feeds must still
+// union and enforce.
+func TestSnapshotForBindingsOmitsWholeSpaceUnion14392(t *testing.T) {
+	t.Run("ipv4 halves omitted", func(t *testing.T) {
+		m := New(nil)
+		m.installPrefixes("feed-a", []string{"0.0.0.0/1"})
+		m.installPrefixes("feed-b", []string{"128.0.0.0/1"})
+		got := m.SnapshotForBindings(bindingCfg(map[string][]string{
+			"blocked": {"feed-a", "feed-b"},
+		}))
+		if _, ok := got["blocked"]; ok {
+			t.Fatalf("whole-space union published as %v; binding must be omitted (#14392)", got["blocked"])
+		}
+	})
+	t.Run("ipv6 halves omitted", func(t *testing.T) {
+		m := New(nil)
+		m.installPrefixes("feed-a", []string{"::/1"})
+		m.installPrefixes("feed-b", []string{"8000::/1"})
+		got := m.SnapshotForBindings(bindingCfg(map[string][]string{
+			"blocked6": {"feed-a", "feed-b"},
+		}))
+		if _, ok := got["blocked6"]; ok {
+			t.Fatalf("whole-space IPv6 union published as %v; binding must be omitted (#14392)", got["blocked6"])
+		}
+	})
+	t.Run("disjoint feeds still union", func(t *testing.T) {
+		m := New(nil)
+		m.installPrefixes("feed-a", []string{"198.51.100.0/24"})
+		m.installPrefixes("feed-b", []string{"203.0.113.0/24"})
+		got := m.SnapshotForBindings(bindingCfg(map[string][]string{
+			"blocked": {"feed-a", "feed-b"},
+		}))
+		want := []string{"198.51.100.0/24", "203.0.113.0/24"}
+		if !reflect.DeepEqual(got["blocked"], want) {
+			t.Fatalf("disjoint union = %v, want %v", got["blocked"], want)
+		}
+	})
+	t.Run("partial halves still union", func(t *testing.T) {
+		m := New(nil)
+		m.installPrefixes("feed-a", []string{"0.0.0.0/1"})
+		m.installPrefixes("feed-b", []string{"128.0.0.0/2"})
+		got := m.SnapshotForBindings(bindingCfg(map[string][]string{
+			"blocked": {"feed-a", "feed-b"},
+		}))
+		want := []string{"0.0.0.0/1", "128.0.0.0/2"}
+		if !reflect.DeepEqual(got["blocked"], want) {
+			t.Fatalf("partial union = %v, want %v", got["blocked"], want)
+		}
+	})
+	t.Run("fail-mode drop empty row unaffected", func(t *testing.T) {
+		// coversWholeAddressSpace([]) is false, so the #9689 drop+all-hold-
+		// dropped present-but-empty row must survive the union check.
+		m := New(nil)
+		holdDrop9689(t, m, "partner-feed", []string{"198.51.100.0/24"})
+		got, ok := m.SnapshotForBindings(failModeCfg9689("drop", "partner-feed"))["partners"]
+		if !ok {
+			t.Fatal("fail-mode drop omitted a hold-dropped binding; it must be published as an empty set")
+		}
+		if len(got) != 0 {
+			t.Fatalf("fail-mode drop row = %v, want empty", got)
+		}
+	})
+}

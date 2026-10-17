@@ -1069,8 +1069,12 @@ func (m *Manager) GetPrefixes(name string) []string {
 // keeps enforcing the retained prefixes (the #2050 fail-safe). A persisted
 // feed carries its last-good snapshot across a reconfigure (#5282), so it still
 // has prefixes here and is still published — the omission above only fires for
-// a feed with NO prior good fetch. The caller surfaces the enforced set; this
-// accessor only joins the data.
+// a feed with NO prior good fetch. The merged union is also re-checked against
+// the whole-address-space refusal (#14392): per-feed parse refuses a single
+// feed covering a whole family (#10711), but two half-space feeds bound to one
+// name would otherwise union to permit-all / deny-all, so a covering union is
+// omitted with the same fail-closed semantics and a warning. The caller
+// surfaces the enforced set; this accessor only joins the data.
 func (m *Manager) SnapshotForBindings(daCfg *config.DynamicAddressConfig) map[string][]string {
 	if daCfg == nil || len(daCfg.AddressBindings) == 0 {
 		return nil
@@ -1157,6 +1161,21 @@ func (m *Manager) SnapshotForBindings(daCfg *config.DynamicAddressConfig) map[st
 			}
 		}
 		sort.Strings(merged)
+		// #14392 (DR7-H5): the per-feed guard in parseFeed (#10711) checks
+		// each feed alone, but the ENFORCEMENT unit is the binding union:
+		// two halves (0.0.0.0/1 + 128.0.0.0/1, or ::/1 + 8000::/1) pass
+		// per-feed and would publish as permit-all / deny-all. Re-check
+		// the merged union here. On coverage, OMIT the binding (the
+		// existing #5645 fail-closed omission: the referencing policy
+		// stays unresolved and previous-good stays enforced) and warn
+		// naming the binding. Never install a truncated union. The
+		// #9689 fail-mode-drop empty row is unaffected:
+		// coversWholeAddressSpace([]) is false.
+		if coversWholeAddressSpace(merged) {
+			slog.Warn("dynamic-address: feed binding union covers a whole address space; omitting binding (#14392)",
+				"binding", name, "feeds", strings.Join(binding.FeedNames, ","))
+			continue
+		}
 		out[name] = merged
 	}
 	return out
