@@ -87,11 +87,12 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 	}
 
 	type managedRP struct {
-		proto  string // human label for the message
-		token  string // host-inbound token to require
-		ifaces []string
+		proto    string // human label for the message
+		token    string // host-inbound token to require
+		instance string // owning routing instance; "" is the default (MAIN) instance
+		ifaces   []string
 	}
-	collect := func(ospf *OSPFConfig, ospfv3 *OSPFv3Config, rip *RIPConfig) []managedRP {
+	collect := func(instance string, ospf *OSPFConfig, ospfv3 *OSPFv3Config, rip *RIPConfig) []managedRP {
 		var out []managedRP
 		if ospf != nil {
 			var ifs []string
@@ -106,7 +107,7 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 				}
 			}
 			if len(ifs) > 0 {
-				out = append(out, managedRP{"ospf", "ospf", ifs})
+				out = append(out, managedRP{"ospf", "ospf", instance, ifs})
 			}
 		}
 		if ospfv3 != nil {
@@ -122,21 +123,51 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 				}
 			}
 			if len(ifs) > 0 {
-				out = append(out, managedRP{"ospf3", "ospf3", ifs})
+				out = append(out, managedRP{"ospf3", "ospf3", instance, ifs})
 			}
 		}
 		if rip != nil && len(rip.Interfaces) > 0 {
-			out = append(out, managedRP{"rip", "rip", append([]string(nil), rip.Interfaces...)})
+			out = append(out, managedRP{"rip", "rip", instance, append([]string(nil), rip.Interfaces...)})
 		}
 		return out
 	}
 
 	var all []managedRP
-	all = append(all, collect(cfg.Protocols.OSPF, cfg.Protocols.OSPFv3, cfg.Protocols.RIP)...)
+	all = append(all, collect("", cfg.Protocols.OSPF, cfg.Protocols.OSPFv3, cfg.Protocols.RIP)...)
 	for _, ri := range cfg.RoutingInstances {
 		if ri != nil {
-			all = append(all, collect(ri.OSPF, ri.OSPFv3, ri.RIP)...)
+			all = append(all, collect(ri.Name, ri.OSPF, ri.OSPFv3, ri.RIP)...)
 		}
+	}
+
+	// #14354: a bare zone member fans down onto its configured units
+	// (zoneIfaceLogicalKeys / InterfaceUnitRefKeys), so ifZone also carries
+	// the synthetic physical-parent key. No routing daemon runs on that
+	// key — it runs on the units — and its effective host-inbound set
+	// ignores per-unit overrides, so checking it would duplicate the unit
+	// checks and, when a unit override admits the protocol, false-reject.
+	bareParentWithUnits := func(key string) bool {
+		if cfg.SplitInterfaceUnitRef(key).HasUnit {
+			return false
+		}
+		return len(InterfaceUnitRefKeys(cfg, key)) > 1
+	}
+
+	// #14354: `interface all` is scoped to its routing instance: the global
+	// statement covers default-instance interfaces, an instance statement
+	// only that instance's interfaces. RI ownership is resolved lazily
+	// (only a wildcard needs it) through the same membership traversal the
+	// dataplane snapshots use, so tunnel-stanza and dual-claim decisions
+	// agree with enforcement.
+	var riByInterface map[string]string
+	riOwner := func(key string) string {
+		if riByInterface == nil {
+			riByInterface = fabricZoneRoutingInstanceByInterface(cfg)
+			if riByInterface == nil {
+				riByInterface = map[string]string{}
+			}
+		}
+		return riByInterface[key]
 	}
 
 	var warnings []string
@@ -177,10 +208,20 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 	for _, rp := range all {
 		for _, rawIface := range rp.ifaces {
 			if rawIface == "all" {
-				// Check each resolved zone member. This preserves quarantine,
-				// conflict and effective override semantics for wildcard refs.
+				// Check each resolved zone member owned by this statement's
+				// routing instance (#14354). Bare parent keys with
+				// configured units are skipped: the daemon runs on the
+				// units, whose effective sets carry the per-unit overrides.
+				// This preserves quarantine, conflict and effective
+				// override semantics for wildcard refs.
 				ifaces := make([]string, 0, len(ifZone))
 				for iface := range ifZone {
+					if bareParentWithUnits(iface) {
+						continue
+					}
+					if riOwner(iface) != rp.instance {
+						continue
+					}
 					ifaces = append(ifaces, iface)
 				}
 				sort.Strings(ifaces)
