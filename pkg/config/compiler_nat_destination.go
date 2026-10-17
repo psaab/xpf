@@ -381,6 +381,11 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 //   - Hierarchical multi-port: destination-port { 80; 443; 20000 to 30000; }
 //   - Single port leaf: destination-port 8080;
 //   - Set syntax range: destination-port 20000 { to 30000; } (args=1 consumes low, "to N" is child)
+//   - Braced lists split across Keys and children (#14346):
+//     destination-port { [ 80 443 ]; }, destination-port 8000 { to 8005; 443; },
+//     destination-port [ 80 443 ] { 8080; } — flattened (Keys[1:] + every
+//     child.Keys, `to` children rewritten in sequence) through the same
+//     flat token parser as the single-leaf shape.
 //
 // The second return value (#3446) is the list of raw tokens that did NOT parse
 // as an integer — e.g. `http`, `httpp`. The parser previously dropped these
@@ -444,15 +449,11 @@ func parseDNATPortList(m *Node) (ports []int, invalid []string, reversed []strin
 		}
 		invalid = append(invalid, tok)
 	}
-	// Unified single-leaf shape (#2419): both the hierarchical parser and
-	// the flat-set SetPath now collapse a bracket list or a `low to high`
-	// range onto the node's own keys, with NO children:
-	//   destination-port [ 80 443 ]        → Keys=[destination-port 80 443]
-	//   destination-port 20000 to 20003     → Keys=[destination-port 20000 to 20003]
-	// Parse the trailing key tokens directly. A `to` token between two
-	// numbers is a range; everything else is an individual port.
-	if len(m.Children) == 0 && len(m.Keys) >= 2 {
-		vals := m.Keys[1:]
+	// parseFlatPortTokens parses one flat token stream: individual ports
+	// with `low to high` ranges inlined. A `to` whose neighbour does not
+	// parse is not consumed here — the following token is reported on its
+	// own (matching the pre-#14346 flat-leaf behaviour).
+	parseFlatPortTokens := func(vals []string) {
 		for i := 0; i < len(vals); i++ {
 			low, err := parseCanonicalPort(vals[i])
 			if err != nil {
@@ -472,70 +473,69 @@ func parseDNATPortList(m *Node) (ports []int, invalid []string, reversed []strin
 			}
 			ports = append(ports, low)
 		}
+	}
+	// Unified single-leaf shape (#2419): both the hierarchical parser and
+	// the flat-set SetPath now collapse a bracket list or a `low to high`
+	// range onto the node's own keys, with NO children:
+	//   destination-port [ 80 443 ]        → Keys=[destination-port 80 443]
+	//   destination-port 20000 to 20003     → Keys=[destination-port 20000 to 20003]
+	if len(m.Children) == 0 {
+		if len(m.Keys) >= 2 {
+			parseFlatPortTokens(m.Keys[1:])
+		} else if v := nodeVal(m); v != "" {
+			// Single port: destination-port 8080; (hand-built node with
+			// the value only in a child).
+			if n, err := parseCanonicalPort(v); err == nil {
+				ports = append(ports, n)
+			} else {
+				addInvalid(v)
+			}
+		}
 		return ports, invalid, reversed
 	}
-	if len(m.Children) > 0 {
-		// Check for set-syntax port range: Keys=["destination-port","20000"] + child "to 30000"
-		if len(m.Keys) >= 2 {
-			if low, err := parseCanonicalPort(m.Keys[1]); err == nil {
-				// Look for "to" child indicating a range
-				toChild := m.FindChild("to")
-				if toChild != nil {
-					if high, err2 := parseCanonicalPort(nodeVal(toChild)); err2 == nil {
-						if high >= low {
-							ports = appendDNATPortRange(ports, low, high)
-						} else {
-							addReversed(low, high)
-						}
-						return ports, invalid, reversed
-					}
-				}
-				// No range — just a port with non-range children (shouldn't happen, but be safe)
-				ports = append(ports, low)
-			} else {
-				addInvalid(m.Keys[1])
-			}
-		}
-		// Multiple ports/ranges as children: destination-port { 80; 443; 20000 to 30000; }
-		for i := 0; i < len(m.Children); i++ {
-			child := m.Children[i]
-			low, err := parseCanonicalPort(child.Name())
-			if err != nil {
-				addInvalid(child.Name())
+	// Braced shapes (#14346): the value is split across the node's own
+	// Keys[1:] and its children, and every token in both slots belongs to
+	// the same port list:
+	//   destination-port { [ 80 443 ]; }          → child Keys=[80 443]
+	//   destination-port { 80; 443; 20000 to 30000; }
+	//   destination-port 8000 { to 8005; 443; }   → Keys=[.. 8000], children [to 8005],[443]
+	//   destination-port [ 80 443 ] { 8080; }     → Keys=[.. 80 443], child [8080]
+	//   destination-port { 20000; to 30000; }     → sibling-node range
+	// The previous branch read only Keys[1], returned early on the first
+	// `to` child, and read only child.Name() — silently dropping every
+	// other token, which never reached `invalid` either, so the strict
+	// gate could not see the loss.
+	//
+	// A `to` child with exactly one value key is a range continuation of
+	// the preceding port (the set-syntax spelling `8000 { to 8005; }`),
+	// not a token of its own: rewrite it in place as the `to` keyword so
+	// the flat parser sees `8000 to 8005`. A range written as sibling
+	// children (`{ 20000; to; 30000; }`, keys [to] alone) flattens to the
+	// same stream verbatim. Children with their own nested children are
+	// flattened recursively so no authored token is left unseen.
+	var vals []string
+	if len(m.Keys) > 1 {
+		vals = append(vals, m.Keys[1:]...)
+	}
+	var flatten func(children []*Node)
+	flatten = func(children []*Node) {
+		for _, child := range children {
+			if child == nil {
 				continue
 			}
-			// Hierarchical range: "20000 to 30000" → leaf Keys=["20000", "to", "30000"]
-			if len(child.Keys) >= 3 && child.Keys[1] == "to" {
-				if high, err2 := parseCanonicalPort(child.Keys[2]); err2 == nil {
-					if high >= low {
-						ports = appendDNATPortRange(ports, low, high)
-					} else {
-						addReversed(low, high)
+			if child.Name() == "to" && len(child.Keys) == 2 && len(child.Children) == 0 && len(vals) > 0 {
+				if _, err := parseCanonicalPort(vals[len(vals)-1]); err == nil {
+					if _, err := parseCanonicalPort(child.Keys[1]); err == nil {
+						vals = append(vals, "to", child.Keys[1])
+						continue
 					}
-					continue
 				}
 			}
-			// Sibling-node range: child[i]="20000", child[i+1]="to", child[i+2]="30000"
-			if i+2 < len(m.Children) && m.Children[i+1].Name() == "to" {
-				if high, err2 := parseCanonicalPort(m.Children[i+2].Name()); err2 == nil {
-					if high >= low {
-						ports = appendDNATPortRange(ports, low, high)
-					} else {
-						addReversed(low, high)
-					}
-					i += 2
-					continue
-				}
-			}
-			ports = append(ports, low)
-		}
-	} else if v := nodeVal(m); v != "" {
-		// Single port: destination-port 8080;
-		if n, err := parseCanonicalPort(v); err == nil {
-			ports = append(ports, n)
-		} else {
-			addInvalid(v)
+			vals = append(vals, child.Keys...)
+			flatten(child.Children)
 		}
 	}
+	flatten(m.Children)
+	parseFlatPortTokens(vals)
 	return ports, invalid, reversed
 }
