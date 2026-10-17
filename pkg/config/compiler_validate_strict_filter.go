@@ -2067,8 +2067,9 @@ func validateFirewallPolicerUnknownActionsStrict(cfg *Config) error {
 //
 // Strict on commit / commit-check; lenient on load / peer-sync (warn — #1960
 // no-brick: an already-persisted or peer-synced config still boots, and the
-// last-wins ThenAction drives the dataplane exactly as it did before, so a
-// leniently-loaded config is no worse off than before the gate). Deterministic:
+// conflicting policer is poisoned to `discard` by
+// failClosedPolicerThenConflicts (#14443) so the lenient survivor drops
+// excess traffic instead of metering-and-forwarding it). Deterministic:
 // policers then three-color-policers, each sorted by name.
 func validateFirewallPolicerThenConflictStrict(cfg *Config) error {
 	if cfg == nil {

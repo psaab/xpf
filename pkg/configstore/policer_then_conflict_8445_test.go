@@ -120,16 +120,16 @@ func TestPolicerThenValidFormsStillCommit_8445(t *testing.T) {
 
 // THE HARM, and the #1960 no-brick doctrine, in one cell.
 //
-// On the TOLERANT path the contradictory config must still boot — and this is
-// where the defect is visible in the compiled output. The two orders produce
-// DIFFERENT ThenAction values, and only "discard" makes `filters.go` set
-// DiscardExcess. So the same authored intent is a rate limit in one order and a
-// no-op in the other.
+// On the TOLERANT path the contradictory config must still boot — and before
+// #14443 this is where the defect was visible in the compiled output: the two
+// orders produced DIFFERENT ThenAction values, and only "discard" makes
+// `filters.go` set DiscardExcess. So the same authored intent was a rate
+// limit in one order and a no-op in the other.
 //
-// Asserting this on the lenient path rather than the strict one is deliberate:
-// after the gate, the strict path has no compiled output to inspect. Without
-// this cell the suite would record THAT the combination is refused but never
-// what it was refused for.
+// After #14443 the lenient path poisons both orders to "discard"
+// (failClosedPolicerThenConflicts): the config still boots and warns, but
+// excess traffic is dropped in both orders. The authored set still records
+// both actions, which is what the strict gate reads.
 func TestPolicerThenConflictHarmIsOrderDependent_8445(t *testing.T) {
 	compile := func(then string) *config.PolicerConfig {
 		t.Helper()
@@ -175,25 +175,17 @@ func TestPolicerThenConflictHarmIsOrderDependent_8445(t *testing.T) {
 	markingFirst := compile("set firewall policer p1 then loss-priority high\n" +
 		"set firewall policer p1 then discard")
 
-	if discardFirst.ThenAction == "discard" {
-		t.Errorf("fixture: with `discard` written FIRST the survivor must be the "+
-			"marking action — if this is already \"discard\" the last-wins defect "+
-			"is gone and the rest of this cell proves nothing, got %q",
-			discardFirst.ThenAction)
+	if discardFirst.ThenAction != "discard" {
+		t.Errorf("with `discard` written FIRST the lenient poison must force "+
+			"\"discard\" (#14443), got %q", discardFirst.ThenAction)
 	}
 	if markingFirst.ThenAction != "discard" {
 		t.Errorf("fixture: with `discard` written LAST it must survive, got %q",
 			markingFirst.ThenAction)
 	}
-	if discardFirst.ThenAction == markingFirst.ThenAction {
-		t.Fatalf("the two orders must compile DIFFERENTLY — that difference is the "+
-			"defect: %q vs %q", discardFirst.ThenAction, markingFirst.ThenAction)
-	}
-	// `filters.go` sets DiscardExcess only for exactly "discard", and the Rust
-	// side selects a no-drop treatment for everything else. So the first order
-	// is a policer that enforces nothing.
-	if discardFirst.ThenAction == "discard" {
-		t.Errorf("unreachable given the check above; kept so the claim is explicit")
+	if discardFirst.ThenAction != markingFirst.ThenAction {
+		t.Fatalf("after #14443 both orders must poison to the same fail-closed "+
+			"survivor: %q vs %q", discardFirst.ThenAction, markingFirst.ThenAction)
 	}
 
 	// And the authored set — the thing the gate reads — sees both in both orders.

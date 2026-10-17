@@ -289,8 +289,9 @@ func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// survivor, which is the only place the conflict is visible.
 	if err := validateFirewallPolicerThenConflictStrict(cfg); err != nil {
 		if opts.lenientPolicerThenConflict {
+			failClosedPolicerThenConflicts(cfg)
 			cfg.Warnings = append(cfg.Warnings,
-				fmt.Sprintf("firewall policer then-action conflict (downgraded to warning on tolerant path): %v", err))
+				fmt.Sprintf("firewall policer then-action conflict (downgraded to warning on tolerant path; conflicting policers are forced to discard): %v", err))
 		} else {
 			return err
 		}

@@ -45,12 +45,15 @@ func policerThenExtras9882(child *Node, container *schemaNode) []string {
 
 // policerThenSawDiscard9882 reports whether `discard` was already authored in
 // this policer's `then` (the ThenActions accumulated so far, across blocks and
-// across firewall roots). The forwarding-class arm is LONE-ONLY: it must not
-// overwrite an authored discard, or a discard+FC conflict downgraded to a
-// warning on the lenient path stops dropping (base compiled discard+FC to
-// discard in both orders, both families — measured on 92bf892c2 — while an
-// unconditional arm meters when FC is last). ThenActions still records the FC
-// so the #8445 gate fires; only the ThenAction survivor is fenced.
+// across firewall roots). The marking arms (loss-priority / forwarding-class)
+// are LONE-ONLY: they must not overwrite an authored discard, or a
+// discard+marking conflict downgraded to a warning on the lenient path stops
+// dropping (base compiled discard+FC to discard in both orders, both families
+// — measured on 92bf892c2 — while an unconditional arm meters when the marking
+// is last). ThenActions still records the marking so the #8445 gate fires;
+// only the ThenAction survivor is fenced. The gate-level poison
+// (failClosedPolicerThenConflicts, #14443) covers the reverse order where the
+// marking was authored before discard is seen.
 func policerThenSawDiscard9882(actions []string) bool {
 	for _, a := range actions {
 		if a == "discard" {
@@ -270,7 +273,9 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					case "loss-priority":
 						pol.ThenActions = append(pol.ThenActions, "loss-priority")
 						if v := arg(); v != "" {
-							pol.ThenAction = "loss-priority " + v
+							if !policerThenSawDiscard9882(pol.ThenActions) {
+								pol.ThenAction = "loss-priority " + v
+							}
 						} else {
 							pol.UnknownActions = append(pol.UnknownActions, "loss-priority"+policerMissingValueSuffix9882)
 						}
@@ -322,7 +327,9 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					pol.ThenAction = "discard"
 				case "loss-priority":
 					if v := nodeVal(child); v != "" {
-						pol.ThenAction = "loss-priority " + v
+						if !policerThenSawDiscard9882(pol.ThenActions) {
+							pol.ThenAction = "loss-priority " + v
+						}
 					} else {
 						// M1: a marking without a value is malformed, not a
 						// silent discard — flag it for the gate. (Hierarchical
@@ -475,7 +482,9 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					case "loss-priority":
 						tcp.ThenActions = append(tcp.ThenActions, "loss-priority")
 						if v := arg(); v != "" {
-							tcp.ThenAction = "loss-priority " + v
+							if !policerThenSawDiscard9882(tcp.ThenActions) {
+								tcp.ThenAction = "loss-priority " + v
+							}
 						} else {
 							tcp.UnknownActions = append(tcp.UnknownActions, "loss-priority"+policerMissingValueSuffix9882)
 						}
@@ -513,7 +522,9 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					tcp.ThenAction = "discard"
 				case "loss-priority":
 					if v := nodeVal(child); v != "" {
-						tcp.ThenAction = "loss-priority " + v
+						if !policerThenSawDiscard9882(tcp.ThenActions) {
+							tcp.ThenAction = "loss-priority " + v
+						}
 					} else {
 						// M1: see the policer loop above.
 						tcp.UnknownActions = append(tcp.UnknownActions, "loss-priority"+policerMissingValueSuffix9882)
@@ -2203,6 +2214,49 @@ func failClosedFilterTerminalConflicts(cfg *Config) {
 	}
 	poison(cfg.Firewall.FiltersInet)
 	poison(cfg.Firewall.FiltersInet6)
+}
+
+// policerThenHasConflict14443 reports whether the authored set carries both
+// the terminal `discard` and a marking action — the #8445 predicate.
+func policerThenHasConflict14443(actions []string) bool {
+	seen := map[string]bool{}
+	var terminal, marking bool
+	for _, a := range actions {
+		if seen[a] {
+			continue
+		}
+		seen[a] = true
+		switch a {
+		case "discard":
+			terminal = true
+		case "loss-priority", "forwarding-class":
+			marking = true
+		}
+	}
+	return terminal && marking
+}
+
+// failClosedPolicerThenConflicts forces every conflicting policer /
+// three-color-policer to `discard` on the lenient path (#14443), mirroring
+// failClosedFilterTerminalConflicts (#4375). The authored set (ThenActions)
+// is preserved so the gate and later diagnostics still see the conflict;
+// single-action policers are untouched. This covers all authored orders and
+// producers (merged group then, duplicate roots) even where the compiler
+// fence could not see discard before the marking.
+func failClosedPolicerThenConflicts(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	for _, pol := range cfg.Firewall.Policers {
+		if pol != nil && policerThenHasConflict14443(pol.ThenActions) {
+			pol.ThenAction = "discard"
+		}
+	}
+	for _, tcp := range cfg.Firewall.ThreeColorPolicers {
+		if tcp != nil && policerThenHasConflict14443(tcp.ThenActions) {
+			tcp.ThenAction = "discard"
+		}
+	}
 }
 
 func compileFilterThen(node *Node, term *FirewallFilterTerm) {
