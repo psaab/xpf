@@ -220,7 +220,12 @@ config-mode family (`restNoCommandExempt14146`, governed by the
       `xpf_counter_read_errors_total`. The gauge is the policy sibling of
       `xpf_zone_counters_unpopulated_zones` and counts exactly the rules
       this endpoint reports `hit_counters_unavailable:true` for while the
-      dataplane is loaded. Unlike the zone gauge it is NOT emitted above the
+      dataplane is loaded — except rules scrubbed for zone quarantine
+      (#14360, mirroring #10530): a wholly-quarantined zone-pair or a
+      scoped global whose configured side quarantine empties is skipped
+      without counting (it was never published, by operator action, not
+      by a publication failure), and a mixed-scope global that survives
+      is labelled with its pruned surviving scope. Unlike the zone gauge it is NOT emitted above the
       dataplane-loaded gate: `Collect` reaches `collectPolicyCounters` only
       on the loaded path, so an unloaded boot emits no policy family at all
       (pre-existing) and REST's flag is the signal for that state.

@@ -745,6 +745,38 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp api
 	// unaffected.
 	statsEnabled := cfg.Security.PolicyStatsEnabled
 
+	// #14360: mirror the REST inventory (#10530) and the runtime scrub
+	// (#5577): a rule scrubbed for zone quarantine was never published,
+	// so its unpublished read is a routine operator state, not the
+	// #7567 publication failure the unpublished gauge alerts on. Compute
+	// the exclusion set once per scrape; zone-pair endpoints quarantine
+	// the whole rule, a scoped global is dropped only when a configured
+	// side is emptied (ScopedGlobalQuarantineDropped) and otherwise
+	// survives with its quarantined members pruned from the labels.
+	quarantinedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
+	isQuarantinedZone := func(name string) bool {
+		_, ok := quarantinedZones[name]
+		return ok
+	}
+	pruneQuarantinedScope := func(scope []string) []string {
+		if len(scope) == 0 {
+			return scope
+		}
+		pruned := make([]string, 0, len(scope))
+		touched := false
+		for _, name := range scope {
+			if isQuarantinedZone(name) {
+				touched = true
+				continue
+			}
+			pruned = append(pruned, name)
+		}
+		if !touched {
+			return scope
+		}
+		return pruned
+	}
+
 	// #3965: read the whole policy set from ONE snapshot instead of calling
 	// ReadPolicyCounters once per policy. The per-policy read rebuilt the
 	// ruleID->counter index and rescanned the config under the dataplane's
@@ -772,8 +804,14 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp api
 		}
 		fromZone := zpp.FromZone
 		toZone := zpp.ToZone
+		// #14360: either endpoint quarantined scrubs the whole zone-pair
+		// rule at apply; skip it without counting unpublished (see above).
+		ruleQuarantined := isQuarantinedZone(fromZone) || isQuarantinedZone(toZone)
 		for i, rule := range zpp.Policies {
 			if rule == nil {
+				continue
+			}
+			if ruleQuarantined {
 				continue
 			}
 			if !statsEnabled && !rule.Count {
@@ -807,6 +845,13 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp api
 		if !statsEnabled && !rule.Count {
 			continue
 		}
+		// #14360: a configured side emptied by quarantine drops the whole
+		// global at apply (ScopedGlobalQuarantineDropped, #12897); skip it
+		// without counting unpublished. A mixed scope survives — prune its
+		// quarantined members for the labels below.
+		if config.ScopedGlobalQuarantineDropped(rule.Match.FromZones, rule.Match.ToZones, quarantinedZones) {
+			continue
+		}
 		policyID := policyCounterID(policySetID, i)
 		ctrs, err := readPolicy(policyID)
 		if err != nil {
@@ -828,8 +873,11 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp api
 		// is unchanged.
 		// #4626: a scoped global's scope is a zone SET; label it via the
 		// shared SSOT (unscoped → "*").
-		fromZone := config.ScopeLabelOr(rule.Match.FromZones, "*")
-		toZone := config.ScopeLabelOr(rule.Match.ToZones, "*")
+		// #14360: label the pruned surviving scope, never a quarantined
+		// member (a wholly-pruned side was skipped above, so a non-empty
+		// authored side still has a survivor here).
+		fromZone := config.ScopeLabelOr(pruneQuarantinedScope(rule.Match.FromZones), "*")
+		toZone := config.ScopeLabelOr(pruneQuarantinedScope(rule.Match.ToZones), "*")
 		ch <- prometheus.MustNewConstMetric(c.policyHitsTotal, prometheus.CounterValue,
 			float64(ctrs.Packets), fromZone, toZone, rule.Name)
 	}
