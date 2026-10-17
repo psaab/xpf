@@ -259,6 +259,34 @@ committed clean.
   kept pool is the first by name, not necessarily the older one; commit refuses
   the pair, so only a config that arrived through the tolerant path reaches it.
 
+## Pool subnet / range / router / dns-server values — #14601
+
+The same whole-file blast radius was reachable through four more pool
+leaves, which no commit gate checked: the compiler copied the raw tokens
+and the generators emitted them verbatim, so each of these committed clean
+and then Kea refused the whole rendered file and every pool of the family
+stopped.
+
+- **Commit:** `validateDHCPPoolValuesStrict` (`pkg/config`) refuses, per
+  pool and naming the leaf: a subnet that does not parse as a prefix (a
+  bare address is Kea's "Invalid subnet syntax (prefix/len expected)") or
+  is of the wrong family for the server; an address-range bound that is
+  unparseable, wrong-family, outside the masked pool subnet, or (with both
+  bounds present) low greater than high; a `router` that is not a valid
+  IPv4 address (the v4 `routers` option; the v6 generator emits no router
+  option, so the leaf is inert there and ungated); and every `dns-server`
+  element that is unparseable or wrong-family. A pool with no subnet keeps
+  the parse/family/ordering checks and skips only containment.
+- **Tolerant load and peer sync:** the gate downgrades to a `cfg.Warnings`
+  entry (`lenientDHCPPoolValues`), so a persisted config still boots;
+  Kea's own refusal remains the signal there, as before this gate.
+- **No render belt:** unlike the duplicate subnet, a bad value has no
+  safe kept-pool arbitration — dropping one mistyped pool would silently
+  unserve its clients — so the renderer is unchanged and commit is the
+  gate. `kea-dhcp4 -t` / `kea-dhcp6 -t` on rendered passing configs was
+  not exercised (no Kea binary in the test environment); the Kea refusal
+  shapes above are from the Kea source cited in #14601.
+
 ## Expired-lease reclamation — #1387 (stale-lease-cleanup slice / Path S)
 
 The "stale lease cleanup" half of #1387. Kea keeps an expired / released /

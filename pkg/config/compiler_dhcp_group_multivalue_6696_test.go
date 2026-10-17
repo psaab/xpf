@@ -299,10 +299,15 @@ func TestDHCPGroup6696BareValueBlockStillReadsEveryValue(t *testing.T) {
 // consumer, so a malformed element past it was inert; now every element is
 // installed, and every element is therefore checked at commit.
 //
-// The check runs through the schema (schemaValidateExpandedTreeForNode,
-// pkg/configstore), which is the STRICT commit / commit-check path only —
-// the tolerant load / peer-sync path does not run it, so an
-// already-persisted config still boots (#1960).
+// The dns-server check runs through the schema
+// (schemaValidateExpandedTreeForNode, pkg/configstore), which is the
+// STRICT commit / commit-check path only — the tolerant load / peer-sync
+// path does not run it, so an already-persisted config still boots
+// (#1960). Since #14601 the compiled pool gate
+// (validateDHCPPoolValuesStrict) ALSO refuses a malformed dns-server at
+// CompileConfig time, naming the element, so the two dns-server rows
+// accept either layer's refusal; the interface row still exercises the
+// schema layer alone.
 func TestDHCPGroup6696EveryElementIsValidated(t *testing.T) {
 	bad := []struct {
 		name string
@@ -330,7 +335,14 @@ func TestDHCPGroup6696EveryElementIsValidated(t *testing.T) {
 			tree := setTree6696(t, tc.line)
 			cfg, err := CompileConfig(tree)
 			if err != nil {
-				t.Fatalf("compile: %v", err)
+				// #14601: the compiled pool gate refuses a malformed
+				// dns-server before the schema walk runs. That is the
+				// same commit refusal, one layer earlier; it must
+				// still name the offending element.
+				if !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("compile refusal does not name the offending element %q: %v", tc.want, err)
+				}
+				return
 			}
 			verr := SchemaValidate(tree, cfg)
 			if verr == nil {
@@ -344,16 +356,22 @@ func TestDHCPGroup6696EveryElementIsValidated(t *testing.T) {
 	}
 }
 
-// TestDHCPGroup6696RealValuesStillCommitClean is the TIGHTENING control for
-// the validators added above. The interface leaf accepts the Junos slash
-// spelling, the xpf dash spelling, a bare name and a unit-qualified name;
-// the dns-server leaf accepts v4 and v6. A validator tightened to, say,
-// require a unit suffix or reject '/' reds here while every
-// delete-the-fix cell stays green.
+// TestDHCPGroup6696RealValuesStillCommitClean is the TIGHTENING control
+// for the validators added above. The interface leaf accepts the Junos
+// slash spelling, the xpf dash spelling, a bare name and a
+// unit-qualified name; the dns-server leaf accepts either family at the
+// schema layer (ValidateIPAddress). Since #14601 the compiled pool gate
+// additionally requires each dns-server to match its server's family —
+// a v6 resolver in a v4 pool renders verbatim into Kea's ipv4-address
+// domain-name-servers option and Kea refuses the whole file — so this
+// control keeps one family per server and exercises the mixed-family
+// refusal in TestDHCPPoolValuesRefusedAtCommit14601 instead. A validator
+// tightened to, say, require a unit suffix or reject '/' reds here while
+// every delete-the-fix cell stays green.
 func TestDHCPGroup6696RealValuesStillCommitClean(t *testing.T) {
 	tree := setTree6696(t,
 		`set system services dhcp-local-server group g1 interface [ ge-0/0/1.0 ge-0-0-2 reth0.80 fxp0 ge-0/0/3 ]`,
-		`set system services dhcp-local-server group g1 pool p1 dns-server [ 192.0.2.53 2001:db8::53 ]`,
+		`set system services dhcp-local-server group g1 pool p1 dns-server [ 192.0.2.53 198.51.100.53 ]`,
 	)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
@@ -369,7 +387,7 @@ func TestDHCPGroup6696RealValuesStillCommitClean(t *testing.T) {
 	if got, want := strings.Join(g.Interfaces, ","), "ge-0/0/1.0,ge-0-0-2,reth0.80,fxp0,ge-0/0/3"; got != want {
 		t.Errorf("Interfaces=%q, want %q", got, want)
 	}
-	if got, want := strings.Join(g.Pools[0].DNSServers, ","), "192.0.2.53,2001:db8::53"; got != want {
+	if got, want := strings.Join(g.Pools[0].DNSServers, ","), "192.0.2.53,198.51.100.53"; got != want {
 		t.Errorf("DNSServers=%q, want %q", got, want)
 	}
 }
