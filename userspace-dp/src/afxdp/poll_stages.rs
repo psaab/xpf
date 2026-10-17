@@ -1451,13 +1451,28 @@ fn ike_host_inbound_deny_zone(
 /// carries the admitting zone id and routing domain, so a seed from
 /// one zone/VRF never supplies the exemption on another.
 ///
+/// #14314: the claim's table is the packet's EFFECTIVE table, not the
+/// physical ingress interface's table. An input-filter PBR
+/// `RouteOverride::Table` steer (resolved by the caller before this
+/// stage, exactly once) wins; otherwise the table follows
+/// `flow.forward_key.routing_domain` — the domain stage 9b already
+/// stamped from the validated fabric zone (or the validated V2 scoped
+/// ifindex) instead of the raw fabric link — via the install-table
+/// registry; otherwise (domain 0) the ingress interface's canonical
+/// table, byte-identical to #14124. A nonzero domain with no registry
+/// row fails closed (`NotClaimed`), mirroring `NativeRouteTable::
+/// Unresolvable`: it must never fall back to `inet.0` and claim an
+/// address owned only there.
+///
 /// Non-IPsec packets fall through unchanged (`NotClaimed`).
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn stage_ipsec_passthrough_check(
     flow: Option<&SessionFlow>,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
+    route_override_table: Option<&str>,
     binding_live: &BindingLiveState,
     worker_ctx: &WorkerContext,
     now_ns: u64,
@@ -1470,26 +1485,65 @@ pub(super) fn stage_ipsec_passthrough_check(
     if !is_ipsec_traffic(meta.protocol, dst_port) {
         return IpsecPassthroughOutcome::NotClaimed;
     }
-    // #14124: resolve the ingress scope (logical ifindex, from-zone,
-    // routing domain / table) once. The established-exchange key and
-    // the local-destination claim are both scoped to it: a seed
+    // #14124/#14314: resolve the ingress scope (logical ifindex,
+    // from-zone, routing domain / table) once. The established-exchange
+    // key and the local-destination claim are both scoped to it: a seed
     // admitted on one zone/VRF must not vouch for another, and an
     // address owned only in another VRF must not be claimed as local.
+    // The claim table is the EFFECTIVE table: a PBR
+    // `RouteOverride::Table` steer wins, then the flow's stamped
+    // routing domain (which already carries the validated fabric
+    // scope) via the install-table registry, then the validated V2
+    // fabric scope's canonical table, then the ingress interface's
+    // canonical table. A nonzero domain with no registry row has no
+    // adjudicable table — fail closed rather than claim in `inet.0`.
     let (ingress_logical, from_zone_id, _gated_override) =
         ike_host_inbound_gate_context(flow, meta, ingress_zone_override, now_secs, worker_ctx);
     let routing_domain = flow.forward_key.routing_domain;
-    let ingress_instance = worker_ctx
-        .forwarding
-        .ifindex_to_routing_instance
-        .get(&ingress_logical)
-        .map(String::as_str)
-        .unwrap_or("");
-    let (table_v4, table_v6) =
-        crate::afxdp::forwarding_build::connected_route_tables(ingress_instance);
-    let ingress_table = if matches!(flow.dst_ip, IpAddr::V6(_)) {
-        table_v6.as_str()
+    let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
+    let ingress_table_owned: String;
+    let ingress_table: &str = if let Some(table) = route_override_table {
+        table
+    } else if routing_domain != 0 {
+        match worker_ctx
+            .forwarding
+            .install_tables
+            .get(&routing_domain)
+            .and_then(|row| {
+                if is_v6 {
+                    row.v6.as_ref()
+                } else {
+                    row.v4.as_ref()
+                }
+            }) {
+            Some(table) => table.as_str(),
+            None => return IpsecPassthroughOutcome::NotClaimed,
+        }
+    } else if meta.fabric_ingress_ifindex != 0 {
+        // #14314: a validated V2 fabric stamp names the original
+        // ingress interface; its canonical table outranks the raw
+        // fabric link's (which would otherwise read as `inet.0`).
+        let fabric_instance = worker_ctx
+            .forwarding
+            .ifindex_to_routing_instance
+            .get(&(meta.fabric_ingress_ifindex as i32))
+            .map(String::as_str)
+            .unwrap_or("");
+        let (table_v4, table_v6) =
+            crate::afxdp::forwarding_build::connected_route_tables(fabric_instance);
+        ingress_table_owned = if is_v6 { table_v6 } else { table_v4 };
+        ingress_table_owned.as_str()
     } else {
-        table_v4.as_str()
+        let ingress_instance = worker_ctx
+            .forwarding
+            .ifindex_to_routing_instance
+            .get(&ingress_logical)
+            .map(String::as_str)
+            .unwrap_or("");
+        let (table_v4, table_v6) =
+            crate::afxdp::forwarding_build::connected_route_tables(ingress_instance);
+        ingress_table_owned = if is_v6 { table_v6 } else { table_v4 };
+        ingress_table_owned.as_str()
     };
     // #5620/#11439/#14124: claim only packets whose raw destination is
     // locally delivered after the NAT ownership distinction, in the

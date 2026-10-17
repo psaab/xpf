@@ -3570,7 +3570,7 @@ fn stage_ipsec_passthrough_exempts_all_classes_3616() {
         meta.addr_family = family as u8;
         meta.protocol = protocol;
         let outcome =
-            stage_ipsec_passthrough_check(Some(&flow), &frame, meta, None, &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS);
+            stage_ipsec_passthrough_check(Some(&flow), &frame, meta, None, None, &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS);
         assert!(
             matches!(outcome, IpsecPassthroughOutcome::Passthrough),
             "Stage 11 must exempt raw IPsec (family {family}, proto {protocol}, \
@@ -3591,6 +3591,7 @@ fn stage_ipsec_passthrough_exempts_all_classes_3616() {
                 &frame,
                 meta,
                 None,
+                None,
                 &live,
                 &worker_ctx,
                 TEST_NOW_NS, TEST_NOW_SECS,
@@ -3604,7 +3605,7 @@ fn stage_ipsec_passthrough_exempts_all_classes_3616() {
     let meta = tcp_v4_meta(&frame, TCP_FLAG_ACK);
     assert!(
         matches!(
-            stage_ipsec_passthrough_check(None, &frame, meta, None, &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS),
+            stage_ipsec_passthrough_check(None, &frame, meta, None, None, &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS),
             IpsecPassthroughOutcome::NotClaimed
         ),
         "a flowless packet is not claimed by Stage 11"
@@ -3832,6 +3833,7 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
         &new_ike,
         ike_v4_meta(&new_ike, DENY_IF),
         None,
+        None,
         &live,
         &worker_ctx,
         TEST_NOW_NS, TEST_NOW_SECS,
@@ -3857,6 +3859,7 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
                 Some(&permit_flow),
                 &new_ike,
                 ike_v4_meta(&new_ike, PERMIT_IF),
+                None,
                 None,
                 &live,
                 &worker_ctx,
@@ -3893,6 +3896,7 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
                 &new_natt,
                 ike_v4_meta(&new_natt, DENY_IF),
                 None,
+                None,
                 &live,
                 &worker_ctx,
                 TEST_NOW_NS, TEST_NOW_SECS,
@@ -3914,6 +3918,7 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
                 &est_ike,
                 ike_v4_meta(&est_ike, DENY_IF),
                 None,
+                None,
                 &live,
                 &worker_ctx,
                 TEST_NOW_NS, TEST_NOW_SECS,
@@ -3934,6 +3939,7 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
                 &esp_udp,
                 ike_v4_meta(&esp_udp, DENY_IF),
                 None,
+                None,
                 &live,
                 &worker_ctx,
                 TEST_NOW_NS, TEST_NOW_SECS,
@@ -3953,6 +3959,7 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
                 Some(&esp_flow),
                 &new_ike,
                 esp_meta,
+                None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4062,6 +4069,7 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 &forged,
                 ike_v4_meta(&forged, DENY_IF),
                 None,
+                None,
                 &live,
                 &worker_ctx,
                 TEST_NOW_NS, TEST_NOW_SECS,
@@ -4080,6 +4088,7 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 Some(&natt_flow),
                 &forged_natt,
                 ike_v4_meta(&forged_natt, DENY_IF),
+                None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4100,6 +4109,7 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 Some(&flow),
                 &forged,
                 ike_v4_meta(&forged, PERMIT_IF),
+                None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4134,6 +4144,7 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 &legit,
                 ike_v4_meta(&legit, DENY_IF),
                 None,
+                None,
                 &live,
                 &worker_ctx,
                 TEST_NOW_NS, TEST_NOW_SECS,
@@ -4152,6 +4163,7 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 Some(&flow),
                 &wrong_spi,
                 ike_v4_meta(&wrong_spi, DENY_IF),
+                None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4174,6 +4186,7 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 &legit,
                 ike_v4_meta(&legit, DENY_IF),
                 None,
+                None,
                 &live,
                 &worker_ctx,
                 TEST_NOW_NS, TEST_NOW_SECS,
@@ -4193,6 +4206,7 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 Some(&natt_flow),
                 &esp_udp,
                 ike_v4_meta(&esp_udp, DENY_IF),
+                None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4292,7 +4306,7 @@ fn stage_ipsec_established_seed_does_not_cross_zone_or_vrf_14124() {
     assert!(
         matches!(
             stage_ipsec_passthrough_check(
-                Some(&flow), &est, ike_v4_meta(&est, PERMIT_IF), None,
+                Some(&flow), &est, ike_v4_meta(&est, PERMIT_IF), None, None,
                 &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Passthrough
@@ -4303,7 +4317,7 @@ fn stage_ipsec_established_seed_does_not_cross_zone_or_vrf_14124() {
     assert!(
         matches!(
             stage_ipsec_passthrough_check(
-                Some(&flow), &est, ike_v4_meta(&est, DENY_IF), None,
+                Some(&flow), &est, ike_v4_meta(&est, DENY_IF), None, None,
                 &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Denied { .. }
@@ -4311,14 +4325,34 @@ fn stage_ipsec_established_seed_does_not_cross_zone_or_vrf_14124() {
         "an exchange admitted on the permit zone must not supply the \
          established exemption on the deny zone (#14124)"
     );
-    // Cross-VRF: same denied-zone ingress, flow stamped tenant domain.
+    // Cross-VRF: same denied-zone ingress, flow stamped with the
+    // tenant's REAL install domain, adjudicated against a forwarding
+    // state where ifindex 24 belongs to tenant-a — exactly the
+    // production shape (a synthetic unregistered stamp now fails the
+    // claim closed before the exchange check, #14314, which would
+    // mask the key assertion). The dst (10.0.61.1) IS tenant-a-owned
+    // in this state, so the claim succeeds and the ONLY thing that
+    // can deny is the exchange key: the seed is keyed to the default
+    // VRF (domain 0) + permit zone and must not vouch here.
+    let mut vrf_snapshot = ike_gate_snapshot();
+    for iface in vrf_snapshot.interfaces.iter_mut() {
+        if iface.ifindex == DENY_IF as i32 {
+            iface.routing_instance = "tenant-a".to_string();
+            iface.routing_domain = crate::session::install_table_identity("tenant-a").0;
+        }
+    }
+    let vrf_forwarding = build_forwarding_state(&vrf_snapshot);
     let mut vrf_flow = ipsec_flow(libc::AF_INET, PROTO_UDP, 500);
-    vrf_flow.forward_key.routing_domain = 100_001;
+    vrf_flow.forward_key.routing_domain =
+        crate::session::install_table_identity("tenant-a").0;
     assert!(
         matches!(
-            stage_ipsec_passthrough_check(
-                Some(&vrf_flow), &est, ike_v4_meta(&est, DENY_IF), None,
-                &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS,
+            run_stage11_on_ifindex(
+                &vrf_forwarding,
+                &vrf_flow,
+                &est,
+                ike_v4_meta(&est, DENY_IF),
+                DENY_IF,
             ),
             IpsecPassthroughOutcome::Denied { .. }
         ),
@@ -4355,6 +4389,152 @@ fn owns_ipsec_local_destination_in_table_is_vrf_scoped_14124() {
         "a tenant-a address must not be locally terminated in the \
          default VRF absent a transit DNAT override (#14124)"
     );
+}
+/// #14314 decisive regression: Stage 11 adjudicates local ownership in
+/// the packet's EFFECTIVE table. The fixture puts `10.0.61.1` in
+/// `inet.0` (ifindex 24, default instance) and `172.16.80.8` in
+/// `vrf_blue` (ifindex 25), mirroring the issue's `172.16.0.1` /
+/// `vrf_blue.inet.0` shape:
+///
+/// - a PBR `RouteOverride::Table("vrf_blue.inet.0")` steer must NOT
+///   claim the `inet.0`-owned destination (pre-fix the claim read the
+///   physical ingress table and returned `Passthrough`, bypassing the
+///   tenant VRF's transit policy) and MUST claim the `vrf_blue`-owned
+///   one;
+/// - a flow stamped with the `vrf_blue` routing domain (the stage-9b
+///   fabric/PBR scope) must claim in `vrf_blue.inet.0` even when the
+///   physical ingress is the default-instance interface, and must not
+///   claim the `inet.0`-owned destination;
+/// - a validated fabric scope (`meta.fabric_ingress_ifindex` naming
+///   the `vrf_blue` interface, flow domain unstamped) must claim in
+///   `vrf_blue.inet.0`;
+/// - a nonzero domain with no install-table row fails closed.
+///
+/// ESP is used so the host-inbound IKE gate never masks the claim
+/// outcome. Fail-on-revert: restoring the physical-ingress table
+/// derivation flips every steered cell.
+#[test]
+fn stage_ipsec_claim_follows_effective_table_14314() {
+    const INET_IF: u32 = 24;
+    const BLUE_IF: i32 = 25;
+    let (blue_domain, _) = crate::session::install_table_identity("vrf_blue");
+    let mut snapshot = ike_gate_snapshot();
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == BLUE_IF {
+            iface.routing_instance = "vrf_blue".to_string();
+            iface.routing_domain = blue_domain;
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    // Fixture premises: both addresses are locally owned, each in
+    // exactly its own table, and the domain registry resolves.
+    let inet_dst = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1));
+    let blue_dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8));
+    assert!(forwarding.owns_ipsec_local_destination_in_table(inet_dst, "inet.0"));
+    assert!(!forwarding.owns_ipsec_local_destination_in_table(inet_dst, "vrf_blue.inet.0"));
+    assert!(forwarding.owns_ipsec_local_destination_in_table(blue_dst, "vrf_blue.inet.0"));
+    assert!(!forwarding.owns_ipsec_local_destination_in_table(blue_dst, "inet.0"));
+    assert_eq!(
+        forwarding
+            .install_tables
+            .get(&blue_domain)
+            .and_then(|row| row.v4.as_deref()),
+        Some("vrf_blue.inet.0"),
+        "FIXTURE: vrf_blue domain must resolve to its canonical table"
+    );
+
+    let live = BindingLiveState::new();
+    with_neighbor_learn_ctx(&forwarding, |worker_ctx, _neighbors| {
+        let esp = ike_v4_frame(false, true);
+        let run = |flow: &SessionFlow,
+                   meta: UserspaceDpMeta,
+                   table: Option<&str>|
+         -> IpsecPassthroughOutcome {
+            stage_ipsec_passthrough_check(
+                Some(flow),
+                &esp,
+                meta,
+                None,
+                table,
+                &live,
+                worker_ctx,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
+            )
+        };
+        let esp_meta = |ingress: u32| UserspaceDpMeta {
+            protocol: PROTO_ESP,
+            ..ike_v4_meta(&esp, ingress)
+        };
+
+        // Control: unsteered ingress on the default instance claims
+        // its own address (pre-#14314 behaviour preserved).
+        let flow = ipsec_flow_to(libc::AF_INET, PROTO_ESP, 0, inet_dst);
+        assert!(
+            matches!(run(&flow, esp_meta(INET_IF), None), IpsecPassthroughOutcome::Passthrough),
+            "control: inet.0 ingress must claim the inet.0-owned dst (#14314)"
+        );
+
+        // PBR steer into vrf_blue: the inet.0-owned dst is transit in
+        // the tenant VRF, NOT a local XFRM destination.
+        assert!(
+            matches!(
+                run(&flow, esp_meta(INET_IF), Some("vrf_blue.inet.0")),
+                IpsecPassthroughOutcome::NotClaimed
+            ),
+            "PBR Table(vrf_blue) must not claim an inet.0-owned dst (#14314)"
+        );
+        // ... and the vrf_blue-owned dst IS claimed under the steer.
+        let blue_flow = ipsec_flow_to(libc::AF_INET, PROTO_ESP, 0, blue_dst);
+        assert!(
+            matches!(
+                run(&blue_flow, esp_meta(INET_IF), Some("vrf_blue.inet.0")),
+                IpsecPassthroughOutcome::Passthrough
+            ),
+            "PBR Table(vrf_blue) must claim a vrf_blue-owned dst (#14314)"
+        );
+
+        // Flow-domain scope (stage-9b fabric stamp): same pair of
+        // outcomes with no explicit PBR table.
+        let mut domain_flow = ipsec_flow_to(libc::AF_INET, PROTO_ESP, 0, blue_dst);
+        domain_flow.forward_key.routing_domain = blue_domain;
+        assert!(
+            matches!(run(&domain_flow, esp_meta(INET_IF), None), IpsecPassthroughOutcome::Passthrough),
+            "a vrf_blue-stamped flow must claim its VRF-owned dst (#14314)"
+        );
+        let mut domain_inet_flow = ipsec_flow_to(libc::AF_INET, PROTO_ESP, 0, inet_dst);
+        domain_inet_flow.forward_key.routing_domain = blue_domain;
+        assert!(
+            matches!(
+                run(&domain_inet_flow, esp_meta(INET_IF), None),
+                IpsecPassthroughOutcome::NotClaimed
+            ),
+            "a vrf_blue-stamped flow must not claim an inet.0-owned dst (#14314)"
+        );
+
+        // Validated fabric scope: the meta names the vrf_blue ingress
+        // interface while the raw ingress is the default instance.
+        let mut fabric_meta = esp_meta(INET_IF);
+        fabric_meta.fabric_ingress_ifindex = BLUE_IF as u32;
+        assert!(
+            matches!(run(&blue_flow, fabric_meta, None), IpsecPassthroughOutcome::Passthrough),
+            "a validated fabric scope in vrf_blue must claim its dst (#14314)"
+        );
+        assert!(
+            matches!(run(&flow, fabric_meta, None), IpsecPassthroughOutcome::NotClaimed),
+            "a validated fabric scope in vrf_blue must not claim an inet.0 dst (#14314)"
+        );
+
+        // Fail-closed: a nonzero domain with no registry row never
+        // falls back to inet.0.
+        let mut orphan_flow = ipsec_flow_to(libc::AF_INET, PROTO_ESP, 0, inet_dst);
+        orphan_flow.forward_key.routing_domain = 99;
+        assert!(!forwarding.install_tables.contains_key(&99), "FIXTURE: domain 99 unresolvable");
+        assert!(
+            matches!(run(&orphan_flow, esp_meta(INET_IF), None), IpsecPassthroughOutcome::NotClaimed),
+            "an unresolvable routing domain must fail closed (#14314)"
+        );
+    });
 }
 
 /// #5620 test harness: run Stage 11 against `forwarding` with a full but inert
@@ -4438,7 +4618,7 @@ fn run_stage11_on_ifindex(
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
-    stage_ipsec_passthrough_check(Some(flow), frame, meta, None, &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS)
+    stage_ipsec_passthrough_check(Some(flow), frame, meta, None, None, &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS)
 }
 
 /// #5620 RED-on-revert: Stage 11 must NOT claim the kernel-XFRM passthrough
