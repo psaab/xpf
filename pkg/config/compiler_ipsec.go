@@ -413,8 +413,23 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 	}
 
 	// IPsec policies (PFS + proposal reference)
+	// #14430 (DR17-H1): FIND-OR-CREATE, mirroring the IKE-policy /
+	// gateway / VPN loops in this file. A fresh struct per block plus the
+	// unconditional assignment below wholesale-replaced the first block:
+	// two same-name `policy P` blocks under two DIFFERENT `ipsec`
+	// containers (or two `security` roots) silently discarded the first
+	// container's proposals and perfect-forward-secrecy — a strong suite
+	// + PFS compiled down to the second block's weak suite with no PFS.
+	// The #9023 duplicate fold spans only one `ipsec` parent, so it never
+	// sees cross-container twins. Find-or-create makes the hierarchical
+	// spelling agree with the flat-set spelling, which merges; scalar
+	// leaves (proposal-set, PFS keys) stay last-wins when restated, while
+	// a block stating neither leaves the earlier values intact.
 	for _, inst := range namedInstances(node.FindChildren("policy")) {
-		pol := &IPsecPolicyDef{Name: inst.name}
+		pol := sec.IPsec.Policies[inst.name]
+		if pol == nil {
+			pol = &IPsecPolicyDef{Name: inst.name}
+		}
 		// NOT expandFlatRun'd, deliberately. `security ipsec policy` declares
 		// three children -- `perfect-forward-secrecy` (a CONTAINER),
 		// `proposals` (MULTI) and `proposal-set` -- so exactly ONE is an
@@ -440,7 +455,20 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 			case "proposals":
 				// Multi-value leaf (#3904): read EVERY ESP proposal reference
 				// (Keys[1:] + child nodes) — mirror of the IKE policy loop.
-				pol.Proposals = append(pol.Proposals, firewallMatchValues(p)...)
+				// #14430: skip a reference already present — a cross-container
+				// twin re-listing the same proposal must not render it twice.
+				for _, ref := range firewallMatchValues(p) {
+					found := false
+					for _, existing := range pol.Proposals {
+						if existing == ref {
+							found = true
+							break
+						}
+					}
+					if !found {
+						pol.Proposals = append(pol.Proposals, ref)
+					}
+				}
 			case "perfect-forward-secrecy":
 				for _, c := range p.Children {
 					if c.Name() == "keys" {
