@@ -220,16 +220,16 @@ func TestSyncInterfaceNATAddressMapsDeletesStaleBeforeAddingReplacement13724(t *
 		t.Skipf("RemoveMemlock: %v", err)
 	}
 	m := New()
-	natV4Map, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Hash, KeySize: 4, ValueSize: 1, MaxEntries: 1})
+	natV4Map, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Hash, KeySize: uint32(unsafe.Sizeof(userspaceLocalV4Key{})), ValueSize: 1, MaxEntries: 1})
 	if err != nil {
-		t.Fatalf("new userspace_interface_nat_v4 map: %v", err)
+		t.Fatalf("new userspace_interface_nat_v4_domain map: %v", err)
 	}
 	t.Cleanup(func() { natV4Map.Close() })
-	injectShimMap(t, m.bpfShim, "userspace_interface_nat_v4", natV4Map)
-	injectShimMapSpec(t, m.bpfShim, "userspace_interface_nat_v6", &ebpf.MapSpec{
+	injectShimMap(t, m.bpfShim, mapNameUserspaceInterfaceNATv4, natV4Map)
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceInterfaceNATv6, &ebpf.MapSpec{
 		Type: ebpf.Hash, KeySize: uint32(unsafe.Sizeof(userspaceLocalV6Key{})), ValueSize: 1, MaxEntries: 16,
 	})
-	oldNAT := binary.BigEndian.Uint32([]byte{203, 0, 113, 1})
+	oldNAT := userspaceLocalV4Key{Addr: binary.BigEndian.Uint32([]byte{203, 0, 113, 1})}
 	if err := natV4Map.Update(oldNAT, uint8(1), ebpf.UpdateAny); err != nil {
 		t.Fatalf("seed userspace_interface_nat_v4: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestSyncInterfaceNATAddressMapsDeletesStaleBeforeAddingReplacement13724(t *
 	if err := m.syncInterfaceNATAddressMapsLocked(snapshot); err != nil {
 		t.Fatalf("syncInterfaceNATAddressMapsLocked with stale full map: %v", err)
 	}
-	newNAT := binary.BigEndian.Uint32([]byte{198, 51, 100, 1})
+	newNAT := userspaceLocalV4Key{Addr: binary.BigEndian.Uint32([]byte{198, 51, 100, 1})}
 	var got uint8
 	if err := natV4Map.Lookup(newNAT, &got); err != nil {
 		t.Fatalf("new NAT address missing after replacement: %v", err)
@@ -261,10 +261,10 @@ func TestBuildDesiredLocalAddressSetsExcludesKernelNATAddresses13724(t *testing.
 		}
 		return []netlink.Addr{{IPNet: &net.IPNet{IP: ipv6, Mask: net.CIDRMask(128, 128)}}}, nil
 	}
-	excludedV4 := map[uint32]bool{binary.BigEndian.Uint32(ipv4): true}
+	excludedV4 := map[userspaceLocalV4Key]bool{{Addr: binary.BigEndian.Uint32(ipv4)}: true}
 	var key6 [16]byte
 	copy(key6[:], ipv6)
-	excludedV6 := map[[16]byte]bool{key6: true}
+	excludedV6 := map[userspaceShimLocalV6Key]bool{{Addr: key6}: true}
 	gotV4, gotV6, complete := m.buildDesiredLocalAddressSetsWithExclusions(&ConfigSnapshot{}, excludedV4, excludedV6)
 	if !complete {
 		t.Fatal("address enumeration unexpectedly incomplete")
@@ -377,16 +377,16 @@ func TestSamePlanClassifierMapRefreshFailsClosedOnNATSyncFailure(t *testing.T) {
 	})
 	natV4Map, err := ebpf.NewMap(&ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    4,
+		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV4Key{})),
 		ValueSize:  1,
 		MaxEntries: 1,
 	})
 	if err != nil {
-		t.Fatalf("new userspace_interface_nat_v4 map: %v", err)
+		t.Fatalf("new userspace_interface_nat_v4_domain map: %v", err)
 	}
 	t.Cleanup(func() { natV4Map.Close() })
-	injectShimMap(t, m.bpfShim, "userspace_interface_nat_v4", natV4Map)
-	injectShimMapSpec(t, m.bpfShim, "userspace_interface_nat_v6", &ebpf.MapSpec{
+	injectShimMap(t, m.bpfShim, mapNameUserspaceInterfaceNATv4, natV4Map)
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceInterfaceNATv6, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV6Key{})),
 		ValueSize:  1,
@@ -430,7 +430,7 @@ func TestSamePlanClassifierMapRefreshFailsClosedOnNATSyncFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("classifier-map refresh succeeded despite closed NAT map, want error")
 	}
-	if !strings.Contains(err.Error(), "userspace_interface_nat_v4") {
+	if !strings.Contains(err.Error(), mapNameUserspaceInterfaceNATv4) {
 		t.Fatalf("refresh failed before interface-NAT sync: %v", err)
 	}
 
@@ -489,7 +489,7 @@ func TestBlindFailClosedUserspaceCtrlAfterLookupFailure(t *testing.T) {
 			if err == nil {
 				t.Fatal("classifier-map refresh succeeded despite closed NAT map, want error")
 			}
-			if !strings.Contains(err.Error(), "userspace_interface_nat_v4") {
+			if !strings.Contains(err.Error(), mapNameUserspaceInterfaceNATv4) {
 				t.Fatalf("refresh failed before interface-NAT sync: %v", err)
 			}
 			if !errors.Is(err, lookupErr) {
@@ -538,7 +538,7 @@ func TestClassifierMapRefreshMissingCtrlRowReturnsClassifierError(t *testing.T) 
 	if err == nil {
 		t.Fatal("classifier-map refresh succeeded despite closed NAT map, want error")
 	}
-	if !strings.Contains(err.Error(), "userspace_interface_nat_v4") {
+	if !strings.Contains(err.Error(), mapNameUserspaceInterfaceNATv4) {
 		t.Fatalf("refresh failed before interface-NAT sync: %v", err)
 	}
 	if errors.Is(err, ebpf.ErrKeyNotExist) {
@@ -578,16 +578,16 @@ func injectClassifierRefreshMapsWithNATV4(t *testing.T, m *Manager) *ebpf.Map {
 	})
 	natV4Map, err := ebpf.NewMap(&ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    4,
+		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV4Key{})),
 		ValueSize:  1,
 		MaxEntries: 1,
 	})
 	if err != nil {
-		t.Fatalf("new userspace_interface_nat_v4 map: %v", err)
+		t.Fatalf("new userspace_interface_nat_v4_domain map: %v", err)
 	}
 	t.Cleanup(func() { natV4Map.Close() })
-	injectShimMap(t, m.bpfShim, "userspace_interface_nat_v4", natV4Map)
-	injectShimMapSpec(t, m.bpfShim, "userspace_interface_nat_v6", &ebpf.MapSpec{
+	injectShimMap(t, m.bpfShim, mapNameUserspaceInterfaceNATv4, natV4Map)
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceInterfaceNATv6, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV6Key{})),
 		ValueSize:  1,
@@ -630,24 +630,24 @@ func TestSyncInterfaceNATAddressMapsReplacesStaleWhenCapacityAllows(t *testing.T
 	m := New()
 	natV4Map, err := ebpf.NewMap(&ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    4,
+		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV4Key{})),
 		ValueSize:  1,
 		MaxEntries: 2,
 	})
 	if err != nil {
-		t.Fatalf("new userspace_interface_nat_v4 map: %v", err)
+		t.Fatalf("new userspace_interface_nat_v4_domain map: %v", err)
 	}
 	t.Cleanup(func() { natV4Map.Close() })
-	injectShimMap(t, m.bpfShim, "userspace_interface_nat_v4", natV4Map)
-	injectShimMapSpec(t, m.bpfShim, "userspace_interface_nat_v6", &ebpf.MapSpec{
+	injectShimMap(t, m.bpfShim, mapNameUserspaceInterfaceNATv4, natV4Map)
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceInterfaceNATv6, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV6Key{})),
 		ValueSize:  1,
 		MaxEntries: 16,
 	})
 
-	oldNAT := binary.BigEndian.Uint32([]byte{203, 0, 113, 1})
-	newNAT := binary.BigEndian.Uint32([]byte{198, 51, 100, 1})
+	oldNAT := userspaceLocalV4Key{Addr: binary.BigEndian.Uint32([]byte{203, 0, 113, 1})}
+	newNAT := userspaceLocalV4Key{Addr: binary.BigEndian.Uint32([]byte{198, 51, 100, 1})}
 	if err := natV4Map.Update(oldNAT, uint8(1), ebpf.UpdateAny); err != nil {
 		t.Fatalf("seed userspace_interface_nat_v4: %v", err)
 	}

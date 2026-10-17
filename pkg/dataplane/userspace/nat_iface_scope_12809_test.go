@@ -111,7 +111,7 @@ func lab12809RegisteredAddresses(t *testing.T, snapshot *ConfigSnapshot) (excl, 
 	v4, _ := buildNATTranslatedLocalAddressExclusions(snapshot)
 	for key := range v4 {
 		var octets [4]byte
-		binary.BigEndian.PutUint32(octets[:], key)
+		binary.BigEndian.PutUint32(octets[:], key.Addr)
 		excl = append(excl, netip.AddrFrom4(octets).String())
 	}
 	for _, entry := range buildInterfaceNATAddressEntries(snapshot) {
@@ -124,7 +124,7 @@ func lab12809RegisteredAddresses(t *testing.T, snapshot *ConfigSnapshot) (excl, 
 	desiredV4, _, _, _ := buildDesiredInterfaceNATAddressSets(snapshot)
 	for key := range desiredV4 {
 		var octets [4]byte
-		binary.BigEndian.PutUint32(octets[:], key)
+		binary.BigEndian.PutUint32(octets[:], key.Addr)
 		desired = append(desired, netip.AddrFrom4(octets).String())
 	}
 	for _, s := range [][]string{excl, entries, desired} {

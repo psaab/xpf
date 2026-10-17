@@ -47,8 +47,8 @@ const (
 	mapNameUserspaceIngressDomains  = "userspace_ingress_domains"
 	mapNameUserspaceLocalV4         = "userspace_local_v4_domain"
 	mapNameUserspaceLocalV6         = "userspace_local_v6_domain"
-	mapNameUserspaceInterfaceNATv4  = "userspace_interface_nat_v4"
-	mapNameUserspaceInterfaceNATv6  = "userspace_interface_nat_v6"
+	mapNameUserspaceInterfaceNATv4  = "userspace_interface_nat_v4_domain"
+	mapNameUserspaceInterfaceNATv6  = "userspace_interface_nat_v6_domain"
 	mapNameUserspaceWgIngressZones  = "userspace_wg_ingress_zones"
 	mapNameUserspaceWgZoneAdmission = "userspace_wg_zone_admission"
 	// userspace_ingress_ifaces is a bitset: bit 0 marks a live adjudicated

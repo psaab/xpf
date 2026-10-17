@@ -252,7 +252,14 @@ struct UserspaceLocalV6Key {
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct UserspaceInterfaceNatV4Key {
+    domain: u32,
+    addr: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct UserspaceInterfaceNatV6Key {
+    domain: u32,
     addr: [u8; 16],
 }
 #[repr(C)]
@@ -474,10 +481,10 @@ static USERSPACE_LOCAL_V4: HashMap<UserspaceLocalV4Key, u8> = HashMap::with_max_
 #[map(name = "userspace_local_v6_domain")]
 static USERSPACE_LOCAL_V6: HashMap<UserspaceLocalV6Key, u8> = HashMap::with_max_entries(8192, 0);
 
-#[map(name = "userspace_interface_nat_v4")]
-static USERSPACE_INTERFACE_NAT_V4: HashMap<u32, u8> = HashMap::with_max_entries(8192, 0);
+#[map(name = "userspace_interface_nat_v4_domain")]
+static USERSPACE_INTERFACE_NAT_V4: HashMap<UserspaceInterfaceNatV4Key, u8> = HashMap::with_max_entries(8192, 0);
 
-#[map(name = "userspace_interface_nat_v6")]
+#[map(name = "userspace_interface_nat_v6_domain")]
 static USERSPACE_INTERFACE_NAT_V6: HashMap<UserspaceInterfaceNatV6Key, u8> =
     HashMap::with_max_entries(8192, 0);
 
@@ -923,7 +930,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
             }
             _ => {
                 // Session miss — run full checks for new connections.
-                if is_icmp_to_interface_nat_local(&parsed) {
+                if is_icmp_to_interface_nat_local(&parsed, ingress_domain) {
                     record_trace(
                         ctrl.flags,
                         ingress_ifindex,
@@ -979,7 +986,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 // Interface-NAT session miss: redirect to helper (XSK)
                 // so the helper's reverse-NAT repair path can handle
                 // reply packets for SNATed flows (#290).
-                if is_interface_nat_destination(&parsed) {
+                if is_interface_nat_destination(&parsed, ingress_domain) {
                     // #304 kernel arm is keyed by the parsed upper-layer
                     // protocol. #7494 substitutes 255 on non-first fragments,
                     // so retain the wire protocol solely for this disposition
@@ -1132,7 +1139,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 USERSPACE_FALLBACK_REASON_REDIRECT_ERR,
                 &parsed,
             );
-            if is_interface_nat_destination(&parsed) {
+            if is_interface_nat_destination(&parsed, ingress_domain) {
                 incr_fallback_stat(USERSPACE_FALLBACK_REASON_REDIRECT_ERR);
                 return Ok(xdp_action::XDP_DROP);
             }
@@ -1321,7 +1328,7 @@ fn classify_native_gre_inner_ipv4(data: usize, data_end: usize, l3_offset: usize
     // tunnel-local/control-plane address, passing the outer GRE packet to the
     // kernel no longer works once the kernel GRE device has been replaced by a
     // logical anchor. Keep these packets on the userspace dataplane instead.
-    if unsafe { USERSPACE_INTERFACE_NAT_V4.get(&dst_v4) }.is_some() {
+    if unsafe { USERSPACE_INTERFACE_NAT_V4.get(&UserspaceInterfaceNatV4Key { domain: ingress_domain, addr: dst_v4 }) }.is_some() {
         return USERSPACE_SESSION_ACTION_REDIRECT;
     }
     if unsafe { USERSPACE_LOCAL_V4.get(&UserspaceLocalV4Key { domain: ingress_domain, addr: dst_v4 }) }.is_some() {
@@ -1412,7 +1419,7 @@ fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize
     };
     key.src_addr.copy_from_slice(&ip6[8..24]);
     key.dst_addr.copy_from_slice(&ip6[24..40]);
-    let dst_key = UserspaceInterfaceNatV6Key { addr: key.dst_addr };
+    let dst_key = UserspaceInterfaceNatV6Key { domain: ingress_domain, addr: key.dst_addr };
     let Some(l4_offset) = l3_offset.checked_add(40) else {
         return 0;
     };
@@ -1555,12 +1562,13 @@ fn is_firewall_owned_destination(pkt: &ParsedPacket, domain: u32) -> bool {
     match pkt.addr_family {
         AF_INET => {
             is_local_destination(pkt, domain)
-                || unsafe { USERSPACE_INTERFACE_NAT_V4.get(&pkt.dst_v4) }.is_some()
+                || unsafe { USERSPACE_INTERFACE_NAT_V4.get(&UserspaceInterfaceNatV4Key { domain, addr: pkt.dst_v4 }) }.is_some()
         }
         AF_INET6 => {
             is_local_destination(pkt, domain)
                 || unsafe {
                     USERSPACE_INTERFACE_NAT_V6.get(&UserspaceInterfaceNatV6Key {
+                        domain,
                         addr: pkt.dst_addr,
                     })
                 }
@@ -1603,7 +1611,7 @@ fn is_degraded_local_or_control(
     // #10863: NDP is local control only when its destination is local. The
     // early filter above handles multicast NDP; unicast uses this ownership
     // check.
-    if is_icmp_to_interface_nat_local(parsed) {
+    if is_icmp_to_interface_nat_local(parsed, ingress_domain) {
         return true;
     }
     let destination_is_local = is_local_destination(parsed, ingress_domain);
@@ -1624,7 +1632,7 @@ fn is_degraded_local_or_control(
         return true;
     }
     if degraded_interface_nat_esp_passes_to_kernel(parsed.protocol, parsed.wire_protocol)
-        && is_interface_nat_destination(parsed)
+        && is_interface_nat_destination(parsed, ingress_domain)
     {
         return true;
     }
@@ -2169,7 +2177,7 @@ fn is_local_destination(pkt: &ParsedPacket, domain: u32) -> bool {
     }
 }
 
-fn is_icmp_to_interface_nat_local(pkt: &ParsedPacket) -> bool {
+fn is_icmp_to_interface_nat_local(pkt: &ParsedPacket, domain: u32) -> bool {
     match pkt.addr_family {
         AF_INET => {
             // Echo reply (0) must reach the kernel for locally-originated
@@ -2179,20 +2187,20 @@ fn is_icmp_to_interface_nat_local(pkt: &ParsedPacket) -> bool {
             if pkt.protocol != PROTO_ICMP || (pkt.icmp_type != 8 && pkt.icmp_type != 0) {
                 return false;
             }
-            unsafe { USERSPACE_INTERFACE_NAT_V4.get(&pkt.dst_v4) }.is_some()
+            unsafe { USERSPACE_INTERFACE_NAT_V4.get(&UserspaceInterfaceNatV4Key { domain, addr: pkt.dst_v4 }) }.is_some()
         }
         AF_INET6 => {
             if pkt.protocol != PROTO_ICMPV6 || (pkt.icmp_type != 128 && pkt.icmp_type != 129) {
                 return false;
             }
-            unsafe { USERSPACE_INTERFACE_NAT_V6.get(&UserspaceInterfaceNatV6Key { addr: pkt.dst_addr }) }
+            unsafe { USERSPACE_INTERFACE_NAT_V6.get(&UserspaceInterfaceNatV6Key { domain, addr: pkt.dst_addr }) }
                 .is_some()
         }
         _ => false,
     }
 }
 
-fn is_interface_nat_destination(pkt: &ParsedPacket) -> bool {
+fn is_interface_nat_destination(pkt: &ParsedPacket, domain: u32) -> bool {
     // ICMP errors (TTL Exceeded, Unreachable, etc.) to NAT addresses must NOT
     // be passed to the kernel — they need embedded-ICMP NAT reversal in the
     // userspace helper.  Return false so they fall through to XSK redirect.
@@ -2205,9 +2213,9 @@ fn is_interface_nat_destination(pkt: &ParsedPacket) -> bool {
         return false;
     }
     match pkt.addr_family {
-        AF_INET => unsafe { USERSPACE_INTERFACE_NAT_V4.get(&pkt.dst_v4) }.is_some(),
+        AF_INET => unsafe { USERSPACE_INTERFACE_NAT_V4.get(&UserspaceInterfaceNatV4Key { domain, addr: pkt.dst_v4 }) }.is_some(),
         AF_INET6 => {
-            unsafe { USERSPACE_INTERFACE_NAT_V6.get(&UserspaceInterfaceNatV6Key { addr: pkt.dst_addr }) }
+            unsafe { USERSPACE_INTERFACE_NAT_V6.get(&UserspaceInterfaceNatV6Key { domain, addr: pkt.dst_addr }) }
                 .is_some()
         }
         _ => false,

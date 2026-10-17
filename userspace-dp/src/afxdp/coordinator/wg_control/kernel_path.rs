@@ -32,7 +32,7 @@
 //! second derivation in the helper: `userspace_ingress_ifaces` (bit 0 marks the
 //! set `try_xdp_userspace` adjudicates; bit 1 carries tagged-only VID-0 scope)
 //! and `userspace_local_v4/v6` minus
-//! `userspace_interface_nat_v4/v6` (`is_local_destination`, which Go fills
+//! `userspace_interface_nat_v4_domain`/`_v6_domain` (`is_local_destination`, which Go fills
 //! including the VRRP VIPs it reads from the kernel — addresses the helper's
 //! snapshot-derived `local_v4` does not carry).
 //!
@@ -169,7 +169,7 @@ pub(crate) fn classify_ingress(
     }
 }
 
-/// The shim's `userspace_local_v4` / `userspace_interface_nat_v4` key:
+/// The shim's `userspace_local_v4_domain` / `userspace_interface_nat_v4_domain` key:
 /// `u32::from_be_bytes` of the address octets (#14323 — userspace-xdp
 /// `parse_ipv4` / `ipv4_key`, matching Go's `binary.BigEndian.Uint32`
 /// map writer). The pre-#14323 `from_ne_bytes` byte-reversed every
@@ -191,6 +191,9 @@ struct ShimLocalV6Key {
     addr: [u8; 16],
 }
 
+type ShimInterfaceNatV4Key = ShimLocalV4Key;
+type ShimInterfaceNatV6Key = ShimLocalV6Key;
+
 /// The shim's `is_local_destination` rule on its two lookups: an interface-mode
 /// NAT address is NOT local (its traffic takes the SNAT listener's worker path),
 /// otherwise presence in the local map decides. One function so the bpffs view
@@ -204,8 +207,8 @@ const INGRESS_DOMAINS_PIN: &str = "/sys/fs/bpf/xpf/userspace_ingress_domains";
 const INGRESS_IFACE_FLAG_ADJUDICATED: u8 = 1;
 const LOCAL_V4_PIN: &str = "/sys/fs/bpf/xpf/userspace_local_v4_domain";
 const LOCAL_V6_PIN: &str = "/sys/fs/bpf/xpf/userspace_local_v6_domain";
-const INTERFACE_NAT_V4_PIN: &str = "/sys/fs/bpf/xpf/userspace_interface_nat_v4";
-const INTERFACE_NAT_V6_PIN: &str = "/sys/fs/bpf/xpf/userspace_interface_nat_v6";
+const INTERFACE_NAT_V4_PIN: &str = "/sys/fs/bpf/xpf/userspace_interface_nat_v4_domain";
+const INTERFACE_NAT_V6_PIN: &str = "/sys/fs/bpf/xpf/userspace_interface_nat_v6_domain";
 const REOPEN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
 struct ShimMaps {
     ingress: crate::afxdp::bpf_map::OwnedFd,
@@ -291,8 +294,8 @@ pub(crate) struct TestShimMaps9594 {
     pub(crate) ingress: std::collections::HashSet<u32>,
     pub(crate) local_v4: std::collections::HashSet<(u32, u32)>,
     pub(crate) local_v6: std::collections::HashSet<(u32, [u8; 16])>,
-    pub(crate) interface_nat_v4: std::collections::HashSet<u32>,
-    pub(crate) interface_nat_v6: std::collections::HashSet<[u8; 16]>,
+    pub(crate) interface_nat_v4: std::collections::HashSet<(u32, u32)>,
+    pub(crate) interface_nat_v6: std::collections::HashSet<(u32, [u8; 16])>,
     pub(crate) ingress_domains: std::collections::HashMap<u32, u32>,
 }
 
@@ -309,13 +312,13 @@ impl TestShimMaps9594 {
         }
     }
 
-    pub(crate) fn insert_interface_nat(&mut self, dst: IpAddr) {
+    pub(crate) fn insert_interface_nat(&mut self, domain: u32, dst: IpAddr) {
         match dst {
             IpAddr::V4(v4) => {
-                self.interface_nat_v4.insert(shim_v4_key(v4));
+                self.interface_nat_v4.insert((domain, shim_v4_key(v4)));
             }
             IpAddr::V6(v6) => {
-                self.interface_nat_v6.insert(v6.octets());
+                self.interface_nat_v6.insert((domain, v6.octets()));
             }
         }
     }
@@ -465,14 +468,14 @@ impl WgKernelPathView for ShimMapsKernelPathView {
                 IpAddr::V4(v4) => {
                     let key = shim_v4_key(v4);
                     shim_is_local_destination(
-                        maps.interface_nat_v4.contains(&key),
+                        maps.interface_nat_v4.contains(&(domain, key)),
                         maps.local_v4.contains(&(domain, key)),
                     )
                 }
                 IpAddr::V6(v6) => {
                     let key = v6.octets();
                     shim_is_local_destination(
-                        maps.interface_nat_v6.contains(&key),
+                        maps.interface_nat_v6.contains(&(domain, key)),
                         maps.local_v6.contains(&(domain, key)),
                     )
                 }
@@ -485,16 +488,18 @@ impl WgKernelPathView for ShimMapsKernelPathView {
             IpAddr::V4(v4) => {
                 let key = shim_v4_key(v4);
                 let local_key = ShimLocalV4Key { domain, addr: key };
+                let nat_key = ShimInterfaceNatV4Key { domain, addr: key };
                 shim_is_local_destination(
-                    !matches!(lookup_u8(maps.nat_v4.fd, &key), Ok(None)),
+                    !matches!(lookup_u8(maps.nat_v4.fd, &nat_key), Ok(None)),
                     matches!(lookup_u8(maps.local_v4.fd, &local_key), Ok(Some(_))),
                 )
             }
             IpAddr::V6(v6) => {
                 let key = v6.octets();
                 let local_key = ShimLocalV6Key { domain, addr: key };
+                let nat_key = ShimInterfaceNatV6Key { domain, addr: key };
                 shim_is_local_destination(
-                    !matches!(lookup_u8(maps.nat_v6.fd, &key), Ok(None)),
+                    !matches!(lookup_u8(maps.nat_v6.fd, &nat_key), Ok(None)),
                     matches!(lookup_u8(maps.local_v6.fd, &local_key), Ok(Some(_))),
                 )
             }

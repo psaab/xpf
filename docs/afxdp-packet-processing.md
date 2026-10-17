@@ -60,7 +60,7 @@ The shim checks several conditions before redirecting a packet to userspace:
    absent one (`map_or(true, |v| *v == 0)`), so such a row diverts no traffic;
    that also keeps adoption correct independent of the map's density rather
    than by assuming a HashMap. The sibling classifier maps
-   (`userspace_local_v4`/`_v6`, `userspace_interface_nat_v4`/`_v6`) never had
+   (`userspace_local_v4_domain`/`_v6_domain`, `userspace_interface_nat_v4_domain`/`_v6_domain`) never had
    this hole — they prune by iterating the MAP — so this makes ingress
    consistent with them rather than adding a new mechanism.
 
@@ -222,7 +222,7 @@ The shim checks several conditions before redirecting a packet to userspace:
 5. ICMP/ICMPv6 is handled by the userspace dataplane or passed to the kernel
    for local/control-plane delivery; the shim no longer tail-calls through
    `userspace_fallback_progs`.
-6. Local-destination traffic (matching `userspace_local_v4`/`userspace_local_v6`) passes to kernel.
+6. Local-destination traffic (matching `userspace_local_v4_domain`/`userspace_local_v6_domain`) passes to kernel.
    ICMPv6 Neighbor Discovery (types 133–137) has no type-only kernel-pass
    exception: multicast or link-local destinations use the early destination
    path, and unicast NDP passes only when its destination is configured local.

@@ -56,11 +56,11 @@ func TestBuildNATTranslatedLocalAddressExclusions12085Matrix(t *testing.T) {
 			var got []string
 			for key := range gotV4 {
 				var octets [4]byte
-				binary.BigEndian.PutUint32(octets[:], key)
+				binary.BigEndian.PutUint32(octets[:], key.Addr)
 				got = append(got, netip.AddrFrom4(octets).String())
 			}
 			for key := range gotV6 {
-				got = append(got, netip.AddrFrom16(key).String())
+				got = append(got, netip.AddrFrom16(key.Addr).String())
 			}
 			sort.Strings(got)
 			want := append([]string(nil), tc.Want...)
@@ -109,7 +109,7 @@ func TestBuildNATTranslatedLocalAddressExclusions12085Matrix(t *testing.T) {
 			var desiredGot, rstGot []string
 			for key := range desiredV4 {
 				var octets [4]byte
-				binary.BigEndian.PutUint32(octets[:], key)
+				binary.BigEndian.PutUint32(octets[:], key.Addr)
 				desiredGot = append(desiredGot, netip.AddrFrom4(octets).String())
 			}
 			for key := range desiredV6 {

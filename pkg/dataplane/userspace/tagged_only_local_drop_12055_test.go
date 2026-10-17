@@ -393,7 +393,7 @@ func TestUserspaceXDPTaggedOnlyVID0LocalDropsAndControls12055(t *testing.T) {
 				updateUserspaceXDPTestInterfaceNATV4(t, coll, localV4)
 			}
 			if tc.interfaceNatV6 {
-				updateUserspaceXDPTestMap(t, coll, mapNameUserspaceInterfaceNATv6, userspaceLocalV6Key{Addr: localV6}, uint8(1))
+				updateUserspaceXDPTestMap(t, coll, mapNameUserspaceInterfaceNATv6, userspaceLocalV6Key{Domain: 0, Addr: localV6}, uint8(1))
 			}
 			ret := runUserspaceXDPTestPacket(t, coll, tc.packet())
 			if ret != tc.wantAction {
