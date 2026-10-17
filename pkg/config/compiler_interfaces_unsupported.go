@@ -496,6 +496,14 @@ func isInterfaceFilterConsumerPath12090(ancestors []*Node) bool {
 // compiler also consumes #12093 scalar block values such as `input { f; }`,
 // but not packed `filter input f;`.
 func isInterfaceDirectFilterConsumerPath12090(ancestors []*Node, filter *Node) bool {
+	// #14435: filter child directly under a packed unit node whose Keys
+	// tail carries `family inet|inet6` — packedBody in compileInterfaces
+	// consumes it as the family filter.
+	if len(ancestors) == 2 && ancestors[1] != nil && ancestors[1].Name() == "unit" &&
+		unitPackedTailHasFamilyFilter14435(ancestors[1]) &&
+		isInterfaceBracedFilterConsumer12090(filter) {
+		return true
+	}
 	if !isInterfaceFilterConsumerPath12090(ancestors) {
 		return false
 	}
@@ -634,10 +642,33 @@ func isInterfacePackedFilterConsumer12090(ancestors []*Node, n *Node) bool {
 	if n.Name() == "family" && isInetFamily(n) {
 		return len(ancestors) == 2 && ancestors[1] != nil && ancestors[1].Name() == "unit"
 	}
+	// #14435: `unit 0 point-to-point family inet { filter { ... } }` and
+	// the `tunnel ...`-first form pack point-to-point/tunnel + family onto
+	// the unit node itself; the filter arrives as a real child of that
+	// packed unit node (the family body). packedBody in compileInterfaces
+	// now consumes it, so the gate must not reject it as unbound.
+	if n.Name() == "unit" && len(ancestors) == 1 {
+		return unitPackedTailHasFamilyFilter14435(n)
+	}
 	familyIndex, ok := interfaceUnitFamilyAncestorIndex12090(ancestors)
 	return ok && familyIndex == 2 && len(ancestors) == familyIndex+1 &&
 		len(ancestors[familyIndex].Keys) == 1 &&
 		(n.Name() == "inet" || n.Name() == "inet6")
+}
+
+// unitPackedTailHasFamilyFilter14435 reports whether a packed unit node
+// carries `... family inet|inet6` in its Keys tail (the #14435 shape), in
+// which case a `filter` keyword hit in the tail is — after packedBody
+// expansion in the compiler — the consumed family filter, not an unbound
+// unit-level filter.
+func unitPackedTailHasFamilyFilter14435(n *Node) bool {
+	for i := range len(n.Keys) - 1 {
+		if n.Keys[i] == "family" &&
+			(n.Keys[i+1] == "inet" || n.Keys[i+1] == "inet6") {
+			return true
+		}
+	}
+	return false
 }
 
 // filterKeywordLabel12090 names a filter keyword and direction without
