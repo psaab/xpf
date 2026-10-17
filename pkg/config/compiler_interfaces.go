@@ -88,6 +88,29 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 		if child.IsLeaf && bandwidthNode == nil && len(ifBody.Children) == 0 {
 			continue
 		}
+		// #14436 (DR17-H7): ifBody alone misses a unit packed onto the
+		// RAW child's Keys when ifLeaves run-expansion rewrote Children
+		// (packedBody then has no tail to synthesise from). Expand the
+		// raw child too and merge statements it alone synthesises into
+		// ifBody's view, keyed by full KeyPath so distinct units (unit 0
+		// vs unit 1 in one run) merge while true duplicates do not.
+		if ifRaw := packedBody(child, interfaceSchema); ifRaw != nil && ifRaw != child {
+			have := make(map[string]bool, len(ifBody.Children))
+			for _, c := range ifBody.Children {
+				have[c.KeyPath()] = true
+			}
+			merged := append([]*Node(nil), ifBody.Children...)
+			for _, c := range ifRaw.Children {
+				if !have[c.KeyPath()] {
+					merged = append(merged, c)
+				}
+			}
+			if len(merged) != len(ifBody.Children) {
+				clone := *ifBody
+				clone.Children = merged
+				ifBody = &clone
+			}
+		}
 		ifName := child.Name()
 		ifc := &InterfaceConfig{
 			Name:  ifName,
@@ -103,7 +126,6 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 		if descNode := ifBody.FindChild("description"); descNode != nil {
 			ifc.Description = nodeVal(descNode)
 		}
-
 		// Interface-level MTU
 		if mtuNode := ifBody.FindChild("mtu"); mtuNode != nil {
 			if v := nodeVal(mtuNode); v != "" {

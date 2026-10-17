@@ -167,9 +167,21 @@ func collectQinQFromInterfacesNode(ifacesNode *Node, out map[string]qinqFinding)
 		if ifName == "" {
 			continue
 		}
-		for _, unit := range iface.Children {
+		// #14436: expand a packed instance tail so a unit packed onto
+		// the interface Keys (`ge-0/0/0 bandwidth 1g unit 0 vlan-id 10
+		// inner-vlan-id 20 ...`) is checked like its braced twin.
+		ifaceBody := packedBody(iface, interfaceSchema9792())
+		if ifaceBody == nil {
+			ifaceBody = iface
+		}
+		for _, unit := range ifaceBody.Children {
 			if unit.Name() != "unit" {
 				continue
+			}
+			// The packed unit form itself may carry vlan leaves on its
+			// own Keys tail; expand those into children for the stack.
+			if unitBody := packedBody(unit, schemaForPath("interfaces", "xpfname", "unit")); unitBody != nil {
+				unit = unitBody
 			}
 			st := unitVLANStack(unit)
 			if len(st.inner) == 0 {
