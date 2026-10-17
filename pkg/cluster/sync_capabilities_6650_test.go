@@ -277,6 +277,7 @@ func liveSyncMessageTypesExcept(under int) []syncMessageType {
 		{syncMsgPersistentNatLease, "PersistentNatLease"},
 		{syncMsgPersistentNatLeaseScoped, "PersistentNatLeaseScoped"},
 		{syncMsgPersistentNatLeaseGeneration, "PersistentNatLeaseGeneration"},
+		{syncMsgPersistentNatLeaseDeterministic, "PersistentNatLeaseDeterministic"},
 		{syncMsgBulkRequest, "BulkRequest"},
 	}
 	out := make([]syncMessageType, 0, len(all))

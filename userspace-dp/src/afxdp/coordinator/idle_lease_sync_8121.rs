@@ -191,6 +191,17 @@ impl Coordinator {
                 match outcome { IdleLeaseImport::Installed => counts.installed += 1, IdleLeaseImport::SkippedClearFenced => counts.skipped_clear_fenced += 1, IdleLeaseImport::SkippedExisting => counts.skipped_existing += 1, IdleLeaseImport::SkippedExpired => counts.skipped_expired += 1, IdleLeaseImport::SkippedUnknownAddress => counts.skipped_unknown_address += 1, IdleLeaseImport::SkippedPortBusy => counts.skipped_port_busy += 1, IdleLeaseImport::SkippedIdentityBusy => counts.skipped_identity_busy += 1, IdleLeaseImport::SkippedCapacity => counts.skipped_capacity += 1 }
                 continue;
             }
+            // #14638 remaining validation: a deterministic-shaped lease must
+            // never install through the generic source-NAT path as a dynamic
+            // lease. Only the nat64-deterministic branch above may install
+            // one, and only after its identity/tuple gates pass. A
+            // deterministic record arriving under an ordinary pool name (or
+            // with a mismatched identity under the nat64 name, already
+            // refused above) is identity-busy, not a dynamic import.
+            if rec.lease.deterministic || rec.lease.deterministic_identity.is_some() {
+                counts.skipped_identity_busy += 1;
+                continue;
+            }
             // The allocation-site ownership probes below are advisory fast
             // paths: they run BEFORE the allocator's claim/bit mutations, so
             // they cannot observe a racing peer mint. Mint-then-check closes
