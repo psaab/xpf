@@ -19,6 +19,21 @@ const NS_PER_SEC: u64 = 1_000_000_000;
 const DEFAULT_DATAPLANE_EVENT_RATE_PER_SEC: u64 = 1_000;
 const DEFAULT_DATAPLANE_EVENT_BURST: u64 = 1_024;
 
+// #14609: SessionClose is the sole input to NetFlow/IPFIX flow export
+// (session_delta.rs: "flowexport still needs every close"), so it must not
+// share the 1000/s deny-flood GCRA: above ~1000 closes/s/zone the export
+// was systematically undercounted while the IPFIX sampler record still
+// advertised 1-in-N over the survivors only. The close kind gets its own
+// GCRA sized at the session channel's drain capacity (CHANNEL_CAPACITY
+// frames per second sustained, same burst) so a conforming close stream
+// is never rate-shed; the bounded queue budget below remains the flood
+// bound, and any queue/disconnect shed stays counted in
+// ProcessStatus.event_stream_session_close_{dropped,queue_full,
+// disconnected} and the matching Prometheus series (#10979). The other
+// telemetry kinds keep the shared 1000/s flood limit unchanged.
+const DEFAULT_SESSION_CLOSE_RATE_PER_SEC: u64 = 8_192;
+const DEFAULT_SESSION_CLOSE_BURST: u64 = 8_192;
+
 /// Per-kind/per-source-zone rate-limit configuration for dataplane telemetry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DataplaneEventRateLimitConfig {
@@ -27,6 +42,13 @@ pub(crate) struct DataplaneEventRateLimitConfig {
     pub(crate) events_per_second: u64,
     /// Instantaneous burst per `(event kind, ingress zone)` bucket.
     pub(crate) burst: u64,
+    /// #14609: sustained SessionClose rate per `(SessionClose, ingress
+    /// zone)` bucket; zero disables limiting for that kind. Kept separate
+    /// from `events_per_second` so flow export is not starved by the
+    /// shared telemetry flood limit.
+    pub(crate) session_close_events_per_second: u64,
+    /// #14609: instantaneous SessionClose burst per bucket.
+    pub(crate) session_close_burst: u64,
 }
 
 impl Default for DataplaneEventRateLimitConfig {
@@ -34,6 +56,8 @@ impl Default for DataplaneEventRateLimitConfig {
         Self {
             events_per_second: DEFAULT_DATAPLANE_EVENT_RATE_PER_SEC,
             burst: DEFAULT_DATAPLANE_EVENT_BURST,
+            session_close_events_per_second: DEFAULT_SESSION_CLOSE_RATE_PER_SEC,
+            session_close_burst: DEFAULT_SESSION_CLOSE_BURST,
         }
     }
 }
@@ -43,8 +67,8 @@ impl DataplaneEventRateLimitConfig {
         self.events_per_second == 0
     }
 
-    fn runtime(self) -> DataplaneEventRateLimit {
-        if self.unlimited() {
+    fn runtime_for(events_per_second: u64, burst: u64) -> DataplaneEventRateLimit {
+        if events_per_second == 0 {
             return DataplaneEventRateLimit {
                 interval_ns: 0,
                 burst_horizon_ns: 0,
@@ -52,14 +76,27 @@ impl DataplaneEventRateLimitConfig {
         }
 
         let interval_ns = NS_PER_SEC
-            .saturating_add(self.events_per_second.saturating_sub(1))
-            .saturating_div(self.events_per_second)
+            .saturating_add(events_per_second.saturating_sub(1))
+            .saturating_div(events_per_second)
             .max(1);
-        let burst = self.burst.max(1);
+        let burst = burst.max(1);
         DataplaneEventRateLimit {
             interval_ns,
             burst_horizon_ns: interval_ns.saturating_mul(burst.saturating_sub(1)),
         }
+    }
+
+    fn runtime(self) -> DataplaneEventRateLimit {
+        Self::runtime_for(self.events_per_second, self.burst)
+    }
+
+    // #14609: the SessionClose GCRA; a zero rate disables limiting for
+    // that kind even when the shared telemetry limit stays finite.
+    fn session_close_runtime(self) -> DataplaneEventRateLimit {
+        Self::runtime_for(
+            self.session_close_events_per_second,
+            self.session_close_burst,
+        )
     }
 }
 
@@ -109,6 +146,10 @@ impl DataplaneEventRateBucket {
 
 pub(super) struct DataplaneEventRateLimiter {
     limit: DataplaneEventRateLimit,
+    // #14609: separate GCRA parameters for SessionClose buckets. Only the
+    // SessionClose row of `buckets` reads this limit (see `limit_for`); the
+    // buckets themselves stay one fixed array, so no allocation is added.
+    session_close_limit: DataplaneEventRateLimit,
     buckets: [DataplaneEventRateBucket; DATAPLANE_EVENT_RATE_BUCKETS],
 }
 
@@ -116,12 +157,21 @@ impl DataplaneEventRateLimiter {
     pub(super) fn new(config: DataplaneEventRateLimitConfig) -> Self {
         Self {
             limit: config.runtime(),
+            session_close_limit: config.session_close_runtime(),
             buckets: array::from_fn(|_| DataplaneEventRateBucket::default()),
         }
     }
 
+    fn limit_for(&self, kind: DataplaneEventKind) -> DataplaneEventRateLimit {
+        match kind {
+            DataplaneEventKind::SessionClose => self.session_close_limit,
+            _ => self.limit,
+        }
+    }
+
     fn allow_at(&self, kind: DataplaneEventKind, ingress_zone_id: u16, now_ns: u64) -> bool {
-        self.buckets[rate_bucket_index(kind, ingress_zone_id)].allow_at(self.limit, now_ns)
+        self.buckets[rate_bucket_index(kind, ingress_zone_id)]
+            .allow_at(self.limit_for(kind), now_ns)
     }
 }
 

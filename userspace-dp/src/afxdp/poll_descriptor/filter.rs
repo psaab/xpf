@@ -3194,6 +3194,8 @@ mod filter_terminal_tests {
             crate::event_stream::DataplaneEventRateLimitConfig {
                 events_per_second: 0,
                 burst: 0,
+                session_close_events_per_second: 0,
+                session_close_burst: 0,
             },
         )
     }
@@ -3609,6 +3611,8 @@ mod filter_log_egress_zone_tests {
                 crate::event_stream::DataplaneEventRateLimitConfig {
                     events_per_second: 0,
                     burst: 0,
+                    session_close_events_per_second: 0,
+                    session_close_burst: 0,
                 },
             );
             let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));

@@ -338,6 +338,8 @@ fn dataplane_event_budget_stays_held_after_connected_loop_drains_channel() {
             DataplaneEventRateLimitConfig {
                 events_per_second: 0,
                 burst: 0,
+                session_close_events_per_second: 0,
+                session_close_burst: 0,
             },
             capacity,
         ),
@@ -426,6 +428,8 @@ fn dataplane_event_budget_releases_when_replay_eviction_drops_frame() {
             DataplaneEventRateLimitConfig {
                 events_per_second: 0,
                 burst: 0,
+                session_close_events_per_second: 0,
+                session_close_burst: 0,
             },
             capacity,
         ),

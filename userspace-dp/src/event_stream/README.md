@@ -202,12 +202,18 @@ periodic ACK from the daemon.
   millisecond-accurate `time.Unix(Created, CreatedNanos)`. The
   byte/packet **volume** counters remain 0 pending the per-session
   accounting follow-up #2501 — only the timing is real. (#2512) the close
-  frame now rides the SAME per-kind rate limiter + queue budget +
+  frame now rides the SAME per-kind queue budget +
   sent/dropped counters as the deny/screen/filter frames, under
   `DataplaneEventKind::SessionClose`, via
   `EventStreamWorkerHandle::try_emit_dataplane_frame` — NOT a bare
-  unaccounted `try_send`. It stays telemetry-lossy by design: a dropped
-  close loses exactly one flow-export/syslog record. That is safe because
+  unaccounted `try_send`. (#14609) its RATE limiter is separately sized
+  (8192/s + burst 8192 per zone, the channel drain capacity) rather than
+  the shared 1000/s telemetry GCRA, because flowexport needs every close:
+  below channel capacity a close is never rate-shed, so the Go 1-in-N
+  sampler and its IPFIX sampler record run over the true close population.
+  It stays bounded-lossy by design above that bound: a queue/disconnect
+  shed loses exactly one flow-export/syslog record and is counted (below).
+  That is safe because
   the type-2 `MSG_SESSION_CLOSE` HA session-sync delta is a SEPARATE frame
   (`push_delta`) that is never rate-limited, so consumer session state
   self-heals through the daemon's 1s session sweep; the lossy budget bounds
@@ -273,7 +279,18 @@ periodic ACK from the daemon.
   encode)` (a generalization of `try_emit_dataplane_event_at` that accepts
   a caller-supplied frame encoder); the I/O-thread budget release keys each
   frame by its `msg_type` byte through `DataplaneEventKind::from_msg_type`,
-  so all five kinds balance their per-kind reservation.
+  so all five kinds balance their per-kind reservation. (#14609)
+  `SessionClose` does NOT share the 1000/s telemetry GCRA: it is the sole
+  input to NetFlow/IPFIX flow export, so its buckets use a separately
+  sized GCRA (`session_close_events_per_second` / `session_close_burst`,
+  production 8192/s + burst 8192 — the channel's drain capacity) and a
+  conforming close stream is never rate-shed. Above that the bounded
+  queue budget still sheds, counted in
+  `event_stream_session_close_{dropped,queue_full,disconnected}` /
+  `xpf_userspace_event_stream_producer_frames_total{outcome="session_close_*"}`,
+  so the IPFIX 1-in-N sampler record (computed in Go over delivered
+  closes) is never silently falsified by an invisible rate shed below
+  the channel capacity. The other kinds keep the shared 1000/s limit.
 - `codec_tests.rs`, `producer_tests.rs`, `tests.rs` — co-located.
 
 ## Why push

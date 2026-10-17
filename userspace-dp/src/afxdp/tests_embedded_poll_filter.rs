@@ -1056,6 +1056,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -5188,6 +5190,8 @@ fn run_pptp_control_reply_policy_case(policy_denied: bool) {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 =
@@ -5510,6 +5514,8 @@ fn poll_descriptor_policy_deny_keys_logical_ingress_zone_3021() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -5720,6 +5726,8 @@ fn poll_descriptor_input_filter_discard_drops_and_logs() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -5898,6 +5906,8 @@ fn poll_descriptor_session_hit_rechecks_dscp_input_filter() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -6136,6 +6146,8 @@ fn poll_descriptor_lo0_filter_discard_drops_without_reinject() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -6328,6 +6340,8 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -6639,6 +6653,8 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -6955,6 +6971,8 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -7323,6 +7341,8 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -7725,6 +7745,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -9935,6 +9957,8 @@ fn poll_descriptor_untranslated_v4_error_admission_impl(
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -10398,6 +10422,8 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -10746,6 +10772,8 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -11083,6 +11111,8 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());

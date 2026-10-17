@@ -271,6 +271,8 @@ mod flowless_local_delivery_tests {
             crate::event_stream::DataplaneEventRateLimitConfig {
                 events_per_second: 0,
                 burst: 0,
+                session_close_events_per_second: 0,
+                session_close_burst: 0,
             },
         );
         let fw = fw_with_host_inbound(ZONE, &["ssh"], &[]);
@@ -504,6 +506,8 @@ mod flowless_local_delivery_tests {
             crate::event_stream::DataplaneEventRateLimitConfig {
                 events_per_second: 0,
                 burst: 0,
+                session_close_events_per_second: 0,
+                session_close_burst: 0,
             },
         );
         let flow = flowless_flow(PROTO_TCP);
