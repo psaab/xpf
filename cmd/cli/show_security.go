@@ -517,6 +517,32 @@ func (c *ctl) showPoliciesFiltered(fromZone, toZone string, globalOnly bool) err
 		}
 		zoneFilterConfig = &config.Config{Security: config.SecurityConfig{Zones: zones}}
 	}
+	// #14363: apply the server-stamped per-rule Quarantined verdict
+	// (PolicyRule.quarantined, #11072/#12897) the zone-detail summary in
+	// this file already renders: qualify the zone columns/headers of a
+	// scrubbed rule and give its hit cell the quarantine disposition, so
+	// it cannot read as live enforcement with a merely unpublished
+	// counter. A mixed-scope global keeps Quarantined=false (stays
+	// enforced for its live members), so its scope/counters stay live.
+	qualifyZonePB := func(name string, quarantined bool) string {
+		if quarantined {
+			return name + " " + config.ZoneQuarantinePoliciesQualifier
+		}
+		return name
+	}
+	qualifyScopeLabelPB := func(zones []string, quarantined bool) string {
+		if !quarantined || len(zones) == 0 || config.IsWildcardZoneSet(zones) {
+			return config.ZoneScopeSetLabel(zones)
+		}
+		// The dropped verdict emptied a configured side, so every member
+		// of that side is quarantined; qualify each in place on the
+		// canonical sorted label.
+		parts := strings.Fields(config.ZoneScopeSetLabel(zones))
+		for i, name := range parts {
+			parts[i] = qualifyZonePB(name, true)
+		}
+		return strings.Join(parts, " ")
+	}
 	renderRule := func(rule *pb.PolicyRule) {
 		fmt.Printf("  Rule: %s\n", rule.Name)
 		if rule.Description != "" {
@@ -574,6 +600,12 @@ func (c *ctl) showPoliciesFiltered(fromZone, toZone string, globalOnly bool) err
 		// prints them regardless (unchanged); an uncounted idle rule prints
 		// nothing (unchanged).
 		switch {
+		case rule.GetQuarantined():
+			// #14363/#12901: a quarantined rule's counter was scrubbed
+			// with the rule — it is never coming, so the quarantine
+			// disposition replaces both the generic #7016 wording and
+			// any published-looking numbers.
+			fmt.Printf("    Hit count: %s\n", config.ZoneQuarantineLiveCountersUnavailable)
 		case rule.HitCountersUnavailable:
 			// #7016: the rule is counter-eligible but no runtime counter source
 			// answered for it (dataplane unloaded, or the helper has published
@@ -592,15 +624,26 @@ func (c *ctl) showPoliciesFiltered(fromZone, toZone string, globalOnly bool) err
 			}
 			// #3683 (M02) / #4626: render the effective zone SET through
 			// config.ZoneScopeSetLabel (empty -> "any") so an unscoped global
-			// prints "From zone: any, To zone: any".
+			// prints "From zone: any, To zone: any". #14363: when the
+			// server dropped this global for quarantine, qualify every
+			// scoped member; an unscoped side stays "any".
 			fmt.Printf("From zone: %s, To zone: %s\n",
-				config.ZoneScopeSetLabel(effectiveMatchFromZones(rule)), config.ZoneScopeSetLabel(effectiveMatchToZones(rule)))
+				qualifyScopeLabelPB(effectiveMatchFromZones(rule), rule.GetQuarantined()),
+				qualifyScopeLabelPB(effectiveMatchToZones(rule), rule.GetQuarantined()))
 			renderRule(rule)
 			fmt.Println()
 		}
 	}
 	renderZonePairGroup := func(pi *pb.PolicyInfo) {
-		fmt.Printf("From zone: %s, To zone: %s\n", pi.FromZone, pi.ToZone)
+		quarantined := false
+		for _, rule := range pi.Rules {
+			if rule.GetQuarantined() {
+				quarantined = true
+				break
+			}
+		}
+		fmt.Printf("From zone: %s, To zone: %s\n",
+			qualifyZonePB(pi.FromZone, quarantined), qualifyZonePB(pi.ToZone, quarantined))
 		for _, rule := range pi.Rules {
 			renderRule(rule)
 		}
@@ -955,19 +998,44 @@ func (c *ctl) showPoliciesBriefFiltered(fromZone, toZone string) error {
 	fmt.Printf("%-12s %-12s %-20s %-8s %s\n",
 		"From", "To", "Name", "Action", "Hits")
 	renderRule := func(pi *pb.PolicyInfo, rule *pb.PolicyRule) {
+		// #14363: a quarantined rule's counter was scrubbed with the
+		// rule, so the Hits cell carries the quarantine disposition
+		// (never the generic #7016 "n/a") and its zone columns carry
+		// the qualifier — a dropped global qualifies its scoped
+		// members, a zone-pair rule qualifies the group's endpoints.
+		quarantined := rule.GetQuarantined()
 		hits := "-"
 		switch {
+		case quarantined:
+			hits = config.ZoneQuarantineLiveCountersUnavailable
 		case rule.HitCountersUnavailable:
 			hits = "n/a" // #7016: no counter published for this rule
 		case rule.HitPackets > 0:
 			hits = fmt.Sprintf("%d", rule.HitPackets)
 		}
-		from, to := pi.FromZone, pi.ToZone
+		qualify := func(name string) string {
+			if quarantined {
+				return name + " " + config.ZoneQuarantinePoliciesQualifier
+			}
+			return name
+		}
+		qualifyScope := func(zones []string) string {
+			label := config.ZoneScopeSetLabel(zones)
+			if !quarantined || len(zones) == 0 || config.IsWildcardZoneSet(zones) {
+				return label
+			}
+			parts := strings.Fields(label)
+			for i, name := range parts {
+				parts[i] = qualify(name)
+			}
+			return strings.Join(parts, " ")
+		}
+		from, to := qualify(pi.FromZone), qualify(pi.ToZone)
 		if zs := effectiveMatchFromZones(rule); len(zs) > 0 {
-			from = config.ZoneScopeSetLabel(zs)
+			from = qualifyScope(zs)
 		}
 		if zs := effectiveMatchToZones(rule); len(zs) > 0 {
-			to = config.ZoneScopeSetLabel(zs)
+			to = qualifyScope(zs)
 		}
 		fmt.Printf("%-12s %-12s %-20s %-8s %s\n",
 			from, to, rule.Name, rule.Action, hits)
