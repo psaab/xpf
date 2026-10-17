@@ -1123,7 +1123,17 @@ func compileRouterAdvertisement(node *Node, proto *ProtocolsConfig) error {
 		// default-route selection on a multi-router LAN. #4119 fixed the
 		// `lifetime <= 0` coercion in the sender; the flat spelling reaches the
 		// identical outcome by never setting the flag at all.
-		for _, prop := range expandFlatRun(inst.node.Children, raInterfaceSchema8939()) {
+		// #14420: the PACKED opening `interface ge-0/0/0 managed-configuration
+		// default-lifetime 0;` puts the whole body on the instance node's own
+		// Keys with no Children. The compact normalizer only folds valued-leaf
+		// heads (e.g. `default-lifetime`), so a zero-arg flag opening
+		// (`managed-configuration` / `other-stateful-configuration`) stayed
+		// packed and this loop saw an empty body — ManagedConfig stayed false
+		// and DefaultLifetimeSet stayed false, so the sender advertised 1800
+		// for an explicit 0 (#4119 via a dropped leaf). packedBodyChildren
+		// expands the tail schema-driven, exactly as the OSPF interface loops
+		// above; expandFlatRun then splits any flat-set chain in the result.
+		for _, prop := range expandFlatRun(packedBodyChildren(inst.node, schemaForPath("protocols", "router-advertisement", "interface")), raInterfaceSchema8939()) {
 			switch prop.Name() {
 			case "managed-configuration":
 				ra.ManagedConfig = true
