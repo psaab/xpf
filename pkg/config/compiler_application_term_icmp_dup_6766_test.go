@@ -203,15 +203,20 @@ func TestApplicationTermICMPDup_ApplyGroups_Rejected(t *testing.T) {
 		assertTermICMP(t, cfg, "okapp-t1", 3, u8p(1))
 	})
 
-	// Positive control 2 (#6766 fold) — the CROSS-SOURCE case the rejection
-	// tests never reach. A group value restated locally is not a duplicate: it
-	// is the documented apply-groups override, where the group supplies a
-	// default and the local stanza wins. The local `term t1` REPLACES the
-	// group's outright, so the group's icmp-code must not leak into the merged
-	// term either. An edit that folded the two sources into one token stream
-	// would both reject this (spurious duplicate) and surface icmp-code 5, and
-	// nothing else in this file would notice.
-	t.Run("positive control: local term overrides a group term without a false duplicate", func(t *testing.T) {
+	// Positive control 2 (#6766 fold, updated for #14434) — the CROSS-SOURCE
+	// case the rejection tests never reach. A group value restated locally is
+	// not a duplicate: the two same-name terms MERGE per leaf (#14434 flat
+	// semantics, matching the already-correct braced behaviour), the inline
+	// leaf wins on the leaves it authors, and group leaves the inline term
+	// does not author survive. Here the inline `icmp-type 0` wins over the
+	// group's 8, while the group's `icmp-code 5` — unauthored locally — is
+	// preserved on the merged term. An edit that replaced the group term
+	// outright would drop the code (assertTermICMP wants 5, not nil),
+	// folding the two sources into one undifferentiated token stream would
+	// blame a conflicting "icmp-type" duplicate and reject, and letting the
+	// group win would surface its 8 — nothing else in this file notices any
+	// of the three.
+	t.Run("positive control: local term merges with a group term without a false duplicate", func(t *testing.T) {
 		tree := flatTreeFromSets(t,
 			"set groups g applications application ovr term t1 protocol icmp icmp-type 8 icmp-code 5",
 			"set apply-groups g",
@@ -227,10 +232,48 @@ func TestApplicationTermICMPDup_ApplyGroups_Rejected(t *testing.T) {
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("a local term restating a group-inherited icmp-type is an apply-groups "+
-				"OVERRIDE, not a conflicting repeat, and must COMMIT: %v", err)
+				"per-leaf MERGE, not a conflicting repeat, and must COMMIT: %v", err)
 		}
-		// Local wins; the group's icmp-code does not survive the replacement.
-		assertTermICMP(t, cfg, "ovr-t1", 0, nil)
+		// Inline wins on icmp-type; the group's unauthored icmp-code merges in.
+		assertTermICMP(t, cfg, "ovr-t1", 0, u8p(5))
+	})
+
+	// Duplicate-name rejection must survive the #14434 merge for container
+	// peers: a group term authored braced (`term t1 { ... }`, a container)
+	// beside an inline packed leaf `term t1 ...` is never token-merged —
+	// the two adopt beside each other, generate the same `ovr-t1` name, and
+	// the #3339 collision gate rejects them. Without this cell the merged
+	// flat semantics above could be misread as "same-name terms never
+	// collide"; this pins that only leaf–leaf (and chained) peers merge.
+	t.Run("container peer: same-name group-container term still rejected as duplicate", func(t *testing.T) {
+		tree := hierTree(t, `
+groups {
+  g {
+    applications {
+      application ovr {
+        term t1 {
+          protocol icmp;
+          icmp-type 8;
+          icmp-code 5;
+        }
+      }
+    }
+  }
+}
+applications {
+  application ovr {
+    term t1 protocol icmp icmp-type 0;
+    apply-groups g;
+  }
+}
+`)
+		_, err := CompileConfig(tree)
+		if err == nil {
+			t.Fatalf("expected commit to REJECT same-name container/leaf terms generating duplicate %q", "ovr-t1")
+		}
+		if !strings.Contains(err.Error(), "duplicate") || !strings.Contains(err.Error(), `"ovr-t1"`) {
+			t.Fatalf("error should name the duplicate generated term %q, got: %v", "ovr-t1", err)
+		}
 	})
 }
 
