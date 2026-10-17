@@ -1559,7 +1559,14 @@ pub(super) fn populate_egress(
         } else {
             None
         };
-        if logical_unit_number == Some(0) && vlan_id == 0 {
+        // #14334: a disabled or unzoned unit 0 owns no VID-0 identity and
+        // must not clear tagged-only. Legacy rows (`is_unit: None`) carry
+        // no zone/admin metadata to judge, so preserve #11297 ownership.
+        let legacy_row = iface.is_unit.is_none();
+        if logical_unit_number == Some(0)
+            && vlan_id == 0
+            && (legacy_row || (!iface.admin_disabled && !iface.zone.is_empty()))
+        {
             untagged_unit_ifindexes.insert(bind_ifindex);
         }
 
@@ -1770,9 +1777,12 @@ pub(super) fn populate_egress(
     // not fall back to the parent's / unit-0 identity: leave VID 0 rejected.
     let mut native_unit_by_parent = BTreeMap::<i32, i32>::new();
     for iface in &snapshot.interfaces {
+        // #14334: only a zoned, enabled native unit owns VID 0; legacy
+        // rows (`is_unit: None`) have no metadata to judge (#11297).
         if iface.ifindex <= 0
             || iface.parent_ifindex <= 0
             || !is_logical_unit_row(&iface.name, iface.is_unit)
+            || (iface.is_unit.is_some() && (iface.admin_disabled || iface.zone.is_empty()))
         {
             continue;
         }
@@ -1792,7 +1802,7 @@ pub(super) fn populate_egress(
     }
 
     let mut native_vlan_without_unit = BTreeSet::new();
-    for (parent_ifindex, _) in native_vlan_by_parent {
+    for (&parent_ifindex, _) in &native_vlan_by_parent {
         if ambiguous_native_parents.contains(&parent_ifindex) {
             state.ingress_logical_ifindex.remove(&(parent_ifindex, 0));
             native_vlan_without_unit.insert(parent_ifindex);
@@ -1811,6 +1821,65 @@ pub(super) fn populate_egress(
             None => {
                 state.ingress_logical_ifindex.remove(&(parent_ifindex, 0));
                 native_vlan_without_unit.insert(parent_ifindex);
+            }
+        }
+    }
+    // #14334: VID-0 keys whose only owner is a disabled/unzoned unit 0 or
+    // native unit must not resolve; unknown_ingress_vlan drops them at the
+    // poll head, and removing the stale key keeps downstream resolvers from
+    // observing the non-owner. Valid owners re-inserted theirs above
+    // (native) or via the main loop (unit 0); native-without-unit already
+    // removed its key in the loop above.
+    for iface in &snapshot.interfaces {
+        if iface.is_unit.is_some() && (iface.admin_disabled || iface.zone.is_empty()) {
+            let is_unit0 = is_logical_unit_row(&iface.name, iface.is_unit)
+                && iface
+                    .name
+                    .rsplit_once('.')
+                    .and_then(|(_, unit)| unit.parse::<u32>().ok())
+                    == Some(0);
+            let bind_ifindex = if iface.parent_ifindex > 0 {
+                iface.parent_ifindex
+            } else {
+                iface.ifindex
+            };
+            // Scope: only a parent that a tagged unit nominated (tagged-only
+            // candidate) can lose its VID-0 key here; an ordinary untagged
+            // port's unit 0 (e.g. st0.0, #12250) is not in this builder's
+            // tagged-only scope and its key is left to the general logic.
+            if is_unit0 && iface.vlan_id == 0 && bind_ifindex > 0 && tagged_only_ingress_ifindexes.contains(&bind_ifindex) {
+                // Only prune when this excluded row is the recorded owner;
+                // a surviving zoned/enabled owner on the same key stays.
+                if state.ingress_logical_ifindex.get(&(bind_ifindex, 0)) == Some(&iface.ifindex) {
+                    let has_surviving_owner = snapshot.interfaces.iter().any(|other| {
+                        !other.admin_disabled
+                            && !other.zone.is_empty()
+                            && other.ifindex == iface.ifindex
+                            && is_logical_unit_row(&other.name, other.is_unit)
+                    });
+                    if !has_surviving_owner {
+                        state.ingress_logical_ifindex.remove(&(bind_ifindex, 0));
+                    }
+                }
+            }
+            // Native: if this excluded unit was the native VID for its
+            // parent, ensure no (parent,0) key points at it.
+            if iface.parent_ifindex > 0
+                && tagged_only_ingress_ifindexes.contains(&iface.parent_ifindex)
+                && iface.vlan_id > 0
+                && native_vlan_by_parent.get(&iface.parent_ifindex).copied()
+                    == u16::try_from(iface.vlan_id).ok()
+            {
+                if state
+                    .ingress_logical_ifindex
+                    .get(&(iface.parent_ifindex, 0))
+                    == Some(&iface.ifindex)
+                {
+                    state
+                        .ingress_logical_ifindex
+                        .remove(&(iface.parent_ifindex, 0));
+                }
+                state.native_vlan_egress_ifindexes.remove(&iface.ifindex);
             }
         }
     }
