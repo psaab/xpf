@@ -1158,6 +1158,186 @@ fn build_cos_state_falls_back_to_default_best_effort_queue() {
     );
 }
 
+// #14637 W1: a scheduler-map with real queues but no literal best-effort
+// must get a RESIDUAL-ONLY synthetic queue, not a full-root guarantee.
+// RED pre-fix: guarantee_enabled == true at transmit_rate == shaping rate.
+#[test]
+fn synthetic_best_effort_beside_real_queues_is_residual_only_14637() {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 42,
+            cos_shaping_rate_bytes_per_sec: 10_000_000,
+            cos_scheduler_map: "voice-only".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![CoSForwardingClassSnapshot {
+                name: "voice".into(),
+                queue: 5,
+            }],
+            schedulers: vec![CoSSchedulerSnapshot {
+                name: "voice-sched".into(),
+                priority: "strict-high".into(),
+                ..Default::default()
+            }],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "voice-only".into(),
+                entries: vec![CoSSchedulerMapEntrySnapshot {
+                    forwarding_class: "voice".into(),
+                    scheduler: "voice-sched".into(),
+                }],
+            }],
+            dscp_classifiers: vec![],
+            ieee8021_classifiers: vec![],
+            dscp_rewrite_rules: vec![],
+            inet_precedence_classifiers: vec![],
+        }),
+        ..Default::default()
+    };
+    let state = build_cos_state(&snapshot);
+    let iface = state.interfaces.get(&42).expect("missing CoS interface");
+    let synth = iface
+        .queues
+        .iter()
+        .find(|q| q.forwarding_class == "best-effort")
+        .expect("synthetic best-effort queue");
+    assert!(
+        !synth.guarantee_enabled,
+        "synthetic best-effort beside real queues must be residual-only, got guarantee at rate {}",
+        synth.transmit_rate_bytes
+    );
+    assert!(!synth.exact);
+    // Voice (rate-less) must also remain residual-only (control).
+    let voice = iface
+        .queues
+        .iter()
+        .find(|q| q.forwarding_class == "voice")
+        .expect("voice queue");
+    assert!(!voice.guarantee_enabled);
+}
+
+// #14637 W2: an operator's renamed queue-0 class (exact-capped `be`) must
+// remain the default queue; the synthetic best-effort must not displace it.
+// RED pre-fix: default_queue == synthetic id (2), not 0.
+#[test]
+fn renamed_queue_zero_class_remains_default_over_synthetic_14637() {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 43,
+            cos_shaping_rate_bytes_per_sec: 10_000_000,
+            cos_scheduler_map: "renamed-be".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![
+                CoSForwardingClassSnapshot {
+                    name: "be".into(),
+                    queue: 0,
+                },
+                CoSForwardingClassSnapshot {
+                    name: "voice".into(),
+                    queue: 5,
+                },
+            ],
+            schedulers: vec![
+                CoSSchedulerSnapshot {
+                    name: "be-sched".into(),
+                    transmit_rate_bytes: 125_000,
+                    transmit_rate_exact: true,
+                    priority: "low".into(),
+                    ..Default::default()
+                },
+                CoSSchedulerSnapshot {
+                    name: "voice-sched".into(),
+                    priority: "strict-high".into(),
+                    ..Default::default()
+                },
+            ],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "renamed-be".into(),
+                entries: vec![
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "be".into(),
+                        scheduler: "be-sched".into(),
+                    },
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "voice".into(),
+                        scheduler: "voice-sched".into(),
+                    },
+                ],
+            }],
+            dscp_classifiers: vec![],
+            ieee8021_classifiers: vec![],
+            dscp_rewrite_rules: vec![],
+            inet_precedence_classifiers: vec![],
+        }),
+        ..Default::default()
+    };
+    let state = build_cos_state(&snapshot);
+    let iface = state.interfaces.get(&43).expect("missing CoS interface");
+    assert_eq!(
+        iface.default_queue,
+        0,
+        "operator's queue-0 class `be` must be the default, not the synthetic best-effort; queues={:?}",
+        iface
+            .queues
+            .iter()
+            .map(|q| (q.queue_id, q.forwarding_class.as_str(), q.priority))
+            .collect::<Vec<_>>()
+    );
+    // Classified `be` control: still exact-capped.
+    let be = iface
+        .queues
+        .iter()
+        .find(|q| q.forwarding_class == "be")
+        .expect("be queue");
+    assert!(be.exact && be.guarantee_enabled);
+    assert_eq!(be.transmit_rate_bytes, 125_000);
+}
+
+// #14637: default must prefer queue 0 among equally-low queues even when a
+// non-queue-0 class is literally named best-effort is NOT this case — here
+// queue 0 is a renamed low class and best-effort is absent entirely (W2
+// variant without voice, isolating the queue-0 tie-break).
+#[test]
+fn queue_zero_low_class_wins_default_tiebreak_14637() {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 44,
+            cos_shaping_rate_bytes_per_sec: 10_000_000,
+            cos_scheduler_map: "be-renamed-only".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![CoSForwardingClassSnapshot {
+                name: "bulk".into(),
+                queue: 0,
+            }],
+            schedulers: vec![CoSSchedulerSnapshot {
+                name: "bulk-sched".into(),
+                priority: "low".into(),
+                ..Default::default()
+            }],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "be-renamed-only".into(),
+                entries: vec![CoSSchedulerMapEntrySnapshot {
+                    forwarding_class: "bulk".into(),
+                    scheduler: "bulk-sched".into(),
+                }],
+            }],
+            dscp_classifiers: vec![],
+            ieee8021_classifiers: vec![],
+            dscp_rewrite_rules: vec![],
+            inet_precedence_classifiers: vec![],
+        }),
+        ..Default::default()
+    };
+    let state = build_cos_state(&snapshot);
+    let iface = state.interfaces.get(&44).expect("missing CoS interface");
+    assert_eq!(iface.default_queue, 0);
+}
+
+
 #[test]
 fn build_cos_state_derives_exact_queue_default_burst_from_queue_rate() {
     let snapshot = ConfigSnapshot {

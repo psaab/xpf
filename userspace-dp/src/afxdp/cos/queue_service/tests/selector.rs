@@ -1269,3 +1269,111 @@ fn apply_promotion_pairs_queues_with_their_fast_path_entries() {
     );
 }
 
+
+// #14637 drain cell: a backlogged residual-only synthetic BE (priority low)
+// must not starve a rate-less strict-high EF queue. Both are residual-only
+// (guarantee_enabled=false), so neither takes guarantee service; surplus
+// strict-priority must serve EF (priority 0) before BE (priority 5).
+// FAIL-ON-REVERT shape: if the synthetic BE were guarantee_enabled=true at
+// the full root rate, select_nonexact_cos_guarantee_batch would serve it
+// first (see the control assertion below).
+#[test]
+fn residual_synthetic_be_does_not_starve_rateless_strict_high_14637() {
+    let be = CoSQueueConfig {
+        queue_id: 2,
+        forwarding_class: "best-effort".into(),
+        priority: 5,
+        transmit_rate_bytes: 10_000_000,
+        guarantee_enabled: false,
+        exact: false,
+        surplus_sharing: false,
+        equal_flow_enforcement: false,
+        equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+        surplus_weight: 1,
+        buffer_bytes: COS_MIN_BURST_BYTES,
+        dscp_rewrite: None,
+        codel_target_ns: 0,
+    };
+    let ef = CoSQueueConfig {
+        queue_id: 5,
+        forwarding_class: "voice".into(),
+        priority: 0,
+        transmit_rate_bytes: 10_000_000,
+        guarantee_enabled: false,
+        exact: false,
+        surplus_sharing: false,
+        equal_flow_enforcement: false,
+        equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+        surplus_weight: 1,
+        buffer_bytes: COS_MIN_BURST_BYTES,
+        dscp_rewrite: None,
+        codel_target_ns: 0,
+    };
+    let mut root = test_cos_runtime_with_queues(10_000_000, vec![be.clone(), ef]);
+    root.tokens = 64 * 1024;
+    for queue in &mut root.queues {
+        queue.hot.last_refill_ns = 1;
+        queue.hot.tokens = 1500;
+        queue.hot.runnable = true;
+        queue.hot.items.push_back(test_cos_item(1500));
+        queue.hot.queued_bytes = 1500;
+    }
+    root.nonempty_queues = 2;
+    root.runnable_queues = 2;
+    // Neither residual queue may take guarantee service.
+    assert!(
+        select_nonexact_cos_guarantee_batch(&mut root, &[], 1).is_none(),
+        "residual-only synthetic BE must not consume guarantee service"
+    );
+    // Surplus strict-priority serves EF first.
+    let batch = select_cos_surplus_batch(&mut root, 1).expect("surplus must serve EF");
+    match batch {
+        CoSBatch::Local { queue_idx, .. } => {
+            assert_eq!(
+                queue_idx, 1,
+                "strict-high EF (idx 1) must win surplus over BE"
+            )
+        }
+        CoSBatch::Prepared { .. } => panic!("expected local batch"),
+    }
+    // Control: the same BE shape WITH guarantee_enabled=true (the pre-fix
+    // synthetic shape) DOES take guarantee service — proving the drain cell
+    // distinguishes the defect.
+    let mut bad_be = be;
+    bad_be.guarantee_enabled = true;
+    let mut bad_root = test_cos_runtime_with_queues(
+        10_000_000,
+        vec![
+            bad_be,
+            CoSQueueConfig {
+                queue_id: 5,
+                forwarding_class: "voice".into(),
+                priority: 0,
+                transmit_rate_bytes: 10_000_000,
+                guarantee_enabled: false,
+                exact: false,
+                surplus_sharing: false,
+                equal_flow_enforcement: false,
+                equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+                surplus_weight: 1,
+                buffer_bytes: COS_MIN_BURST_BYTES,
+                dscp_rewrite: None,
+                codel_target_ns: 0,
+            },
+        ],
+    );
+    bad_root.tokens = 64 * 1024;
+    for queue in &mut bad_root.queues {
+        queue.hot.last_refill_ns = 1;
+        queue.hot.tokens = 1500;
+        queue.hot.runnable = true;
+        queue.hot.items.push_back(test_cos_item(1500));
+        queue.hot.queued_bytes = 1500;
+    }
+    bad_root.nonempty_queues = 2;
+    bad_root.runnable_queues = 2;
+    assert!(
+        select_nonexact_cos_guarantee_batch(&mut bad_root, &[], 1).is_some(),
+        "control: guarantee-enabled BE at full rate must take guarantee service"
+    );
+}

@@ -1178,7 +1178,14 @@ Important current behavior:
   non-`exact` guarantee service. The synthetic default best-effort queue used
   when an admitted CoS interface has no real scheduler-map queues remains the
   sole root-shaped guarantee queue; admission can come from shaping or from a
-  classifier/rewrite rule that targets that default queue/class.
+  classifier/rewrite rule that targets that default queue/class. When real
+  scheduler-map queues exist but none is literally named `best-effort`, the
+  synthetic best-effort queue added beside them is likewise residual-only
+  (#14637): it must not take full-root guarantee service ahead of
+  strict-priority surplus, and the interface default queue prefers the
+  operator's queue-0 class among equally-low queues so a renamed queue-0
+  class (e.g. an exact-capped `be`) keeps unclassified traffic under its cap
+  instead of being displaced by the synthetic queue.
 - a scheduler-map entry naming a scheduler that is NOT defined (a
   dangling reference) is hard-rejected at strict commit
   (`validateClassOfServiceSchedulerMapRefsStrict`), so an operator can
