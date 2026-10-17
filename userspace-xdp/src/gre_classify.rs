@@ -91,3 +91,34 @@ pub fn native_gre_inner_pass_steers_to_kernel_typed(
         inner_action.0 == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
     )
 }
+
+/// #14327: may the degraded path's general local-destination arm pass
+/// this packet to the kernel without consulting the native-GRE gate?
+///
+/// `is_degraded_local_or_control` passes genuinely local traffic to the
+/// kernel during a degraded window. But a native-GRE frame's OUTER
+/// destination is the local tunnel endpoint by construction, so an
+/// unconditional local pass hands the outer frame to the kernel before
+/// the #10651 arm can classify the INNER packet: inner transit the
+/// healthy path would keep in userspace (inner action != PASS_TO_KERNEL)
+/// is decapsulated and forwarded by the kernel with no zone policy.
+///
+/// Native-GRE frames therefore decline the general local pass here and
+/// fall through to the #10651 typed gate, which reaches the kernel only
+/// when the inner action is PASS_TO_KERNEL. Every non-native-GRE local
+/// packet keeps the degraded local pass exactly as before. Non-native
+/// GRE (native flag clear) is not userspace-owned, so it also keeps the
+/// general pass; kernel termination remains its disposition.
+///
+/// Both inputs are caller-computed scalars: `is_native_gre` is
+/// `protocol == PROTO_GRE && (ctrl.flags & NATIVE_GRE) != 0` and
+/// `destination_is_local` is the shim's exact `is_local_destination`
+/// verdict. This module owns only the conjunction, per the module shape
+/// above, so the host test executes the real decision.
+#[inline(always)]
+pub fn degraded_general_local_pass_applies(
+    is_native_gre: bool,
+    destination_is_local: bool,
+) -> bool {
+    destination_is_local && !is_native_gre
+}

@@ -90,7 +90,7 @@ use binding_index::{
 };
 use gre_classify::{
     InnerSessionAction, OuterDestinationLocal, USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
-    native_gre_inner_pass_steers_to_kernel_typed,
+    degraded_general_local_pass_applies, native_gre_inner_pass_steers_to_kernel_typed,
 };
 use ipv4_len_gate::{ipv4_declared_len_covers_header, ipv4_declared_read_end};
 use ipv6_ext_walk::{
@@ -1609,7 +1609,15 @@ fn is_degraded_local_or_control(
     {
         return true;
     }
-    if destination_is_local {
+    // #14327: a native-GRE frame's outer destination is the local tunnel
+    // endpoint by construction, so the general local pass must not claim
+    // it — otherwise the #10651 inner gate below is unreachable exactly
+    // for outer-local frames and inner transit reaches the kernel with
+    // no zone policy. Native GRE falls through to that gate; every other
+    // local packet keeps the degraded local pass.
+    let native_gre =
+        parsed.protocol == PROTO_GRE && (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0;
+    if degraded_general_local_pass_applies(native_gre, destination_is_local) {
         return true;
     }
     if degraded_interface_nat_esp_passes_to_kernel(parsed.protocol, parsed.wire_protocol)
@@ -1621,10 +1629,9 @@ fn is_degraded_local_or_control(
     // gate. An inner PASS_TO_KERNEL hit must not kernel-forward a non-local
     // outer here either; the degraded path is cold, so the outer predicate
     // runs before the inner classify.
-    if parsed.protocol == PROTO_GRE && (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0 {
-        let outer_is_local = destination_is_local;
+    if native_gre {
         return native_gre_inner_pass_steers_to_kernel_typed(
-            OuterDestinationLocal::from_is_local_destination(outer_is_local),
+            OuterDestinationLocal::from_is_local_destination(destination_is_local),
             InnerSessionAction::from_classifier_action(classify_native_gre_inner(
                 data, data_end, parsed, ingress_domain,
             )),
