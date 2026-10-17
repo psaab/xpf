@@ -600,6 +600,7 @@ fn reserve_synced_on_first_pool_owner<'a>(
         if !rule.pool_mode {
             continue;
         }
+        let flow_egress_scope = persistent_egress_scope(&rule.from_zone, &rule.to_zone);
         // #5338: address-only synced decision (pool address chosen, source port
         // PRESERVED on the wire). Mint the reverse-identity occupancy token on
         // the rule whose pool owns `rewrite_src`, mirroring the active node's
@@ -738,6 +739,7 @@ fn reserve_synced_on_first_pool_owner<'a>(
                     rule.pool_allocator.record_synced_persistent_permission(
                         flow,
                         rule.persistent_nat_permit,
+                        flow_egress_scope,
                     );
                 }
                 return SyncedReserveOutcome::Reserved;
@@ -835,6 +837,7 @@ fn reserve_synced_on_first_pool_owner<'a>(
                 rule.pool_allocator.record_synced_persistent_permission(
                     flow,
                     rule.persistent_nat_permit,
+                    flow_egress_scope,
                 );
             }
             return SyncedReserveOutcome::Reserved;

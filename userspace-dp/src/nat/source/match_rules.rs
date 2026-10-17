@@ -432,6 +432,8 @@ fn match_source_nat_result_for_tuple_inner(
         if rule_match == L4Match::NoMatch {
             continue;
         }
+        // #14322: scope only this rule's permission grants; lease/flow keys stay unscoped.
+        let flow_egress_scope = persistent_egress_scope(from_zone, to_zone);
         // #9874: a rule whose authored `match` constrains nothing claims the
         // flow and FAILS CLOSED (drop + count) — never a translation, never
         // an exemption, never fall-through to a later rule. Placed AFTER
@@ -919,8 +921,8 @@ fn match_source_nat_result_for_tuple_inner(
                             rule.persistent_nat_permit,
                             rule.persistent_nat_timeout_ns,
                             now_ns,
-                            holder,
-                        )
+                            holder, flow_egress_scope,
+                )
                     } else {
                         // #6226: probe the WHOLE pool from the round-robin start
                         // (`addr_idx`) so a colliding reverse identity on the
@@ -971,7 +973,7 @@ fn match_source_nat_result_for_tuple_inner(
                     rule.persistent_nat_permit,
                     rule.persistent_nat_timeout_ns,
                     now_ns,
-                    holder,
+                    holder, flow_egress_scope,
                 ) {
                     Ok(translated) => translated,
                     Err(reason) => {
@@ -1057,8 +1059,8 @@ fn match_source_nat_result_for_tuple_inner(
                             rule.persistent_nat_permit,
                             rule.persistent_nat_timeout_ns,
                             now_ns,
-                            holder,
-                        )
+                            holder, flow_egress_scope,
+                )
                     } else {
                         // #6226: probe the WHOLE pool from the round-robin start
                         // (`addr_idx`, absolute over the combined v4+v6 index
@@ -1108,7 +1110,7 @@ fn match_source_nat_result_for_tuple_inner(
                     rule.persistent_nat_permit,
                     rule.persistent_nat_timeout_ns,
                     now_ns,
-                    holder,
+                    holder, flow_egress_scope,
                 ) {
                     Ok(translated) => translated,
                     Err(reason) => {

@@ -62,8 +62,7 @@ fn reserve(
         PersistentNatPermit::AnyRemoteHost,
         TIMEOUT_NS,
         NS_PER_SEC,
-        NatHolder::Untracked,
-    )
+        NatHolder::Untracked, 0)
 }
 
 /// THE FIX. Three port-less flows over a TWO-address pool, `address-persistent`

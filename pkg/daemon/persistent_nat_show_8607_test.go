@@ -27,6 +27,7 @@ func persistentNatLeaseScopeDaemon(v uint32) *uint32 {
 func leaseWire8607(src string, sport uint16, nat string, nport uint16, remaining, timeout time.Duration) dpuserspace.IdleLeaseWire {
 	return dpuserspace.IdleLeaseWire{
 		RoutingScope:   persistentNatLeaseScopeDaemon(0),
+		EgressScope:    persistentNatLeaseScopeDaemon(0),
 		Pool:           "pool-snat-pool",
 		Protocol:       6,
 		SrcIP:          src,

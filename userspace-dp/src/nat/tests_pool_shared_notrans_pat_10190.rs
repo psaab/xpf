@@ -225,8 +225,7 @@ fn persistent_pat_lease_reuse_skips_address_only_identity_10190() {
             PersistentNatPermit::AnyRemoteHost,
             300 * 1_000_000_000,
             1_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("first persistent PAT flow");
     assert_eq!(translated.port, 20000);
     assert!(
@@ -257,8 +256,7 @@ fn persistent_pat_lease_reuse_skips_address_only_identity_10190() {
             PersistentNatPermit::AnyRemoteHost,
             300 * 1_000_000_000,
             3_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("PAT flow must fall back to a fresh non-conflicting port");
     assert_eq!(
         rebound.port, 20001,

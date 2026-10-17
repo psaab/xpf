@@ -46,8 +46,7 @@ fn mint_persistent(
             PersistentNatPermit::TargetHostPort,
             TIMEOUT_NS,
             now_ns,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("a fresh persistent allocation must succeed")
 }
 
@@ -68,8 +67,7 @@ fn mint_persistent_with_timeout(
             PersistentNatPermit::TargetHostPort,
             timeout_ns,
             now_ns,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("a fresh persistent allocation must succeed")
 }
 
@@ -89,8 +87,7 @@ fn mint_persistent_any_remote(
             PersistentNatPermit::AnyRemoteHost,
             TIMEOUT_NS,
             now_ns,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("a fresh persistent allocation must succeed")
 }
 
@@ -111,8 +108,7 @@ fn mint_persistent_any_remote_with_timeout(
             PersistentNatPermit::AnyRemoteHost,
             timeout_ns,
             now_ns,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("a fresh persistent allocation must succeed")
 }
 
@@ -131,8 +127,7 @@ fn mint_persistent_address_only_any_remote(
             PersistentNatPermit::AnyRemoteHost,
             TIMEOUT_NS,
             now_ns,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("a fresh address-only persistent allocation must succeed")
 }
 
@@ -152,6 +147,7 @@ fn idle_record_for(
         src_ip: flow.src_ip,
         src_port: flow.src_port,
         routing_scope: flow.routing_scope,
+        egress_scope: 0,
         remote,
         permit_any_remote: remote.is_none(),
         permitted_remotes: remote.into_iter().collect(),
@@ -167,6 +163,7 @@ fn idle_record_for(
 
 fn set_remote_scope(rec: &mut IdleLeaseRecord, remote: Option<(IpAddr, u16)>) {
     rec.remote = remote;
+    rec.egress_scope = 0;
     rec.permit_any_remote = remote.is_none();
     rec.permitted_remotes = remote.into_iter().collect();
 }
@@ -432,6 +429,7 @@ fn a_full_imported_table_refuses_local_mints_11475() {
             src_ip: src_ip.parse().unwrap(),
             src_port,
             routing_scope: 0,
+            egress_scope: 0,
             remote: Some(("8.8.8.8".parse().unwrap(), 443)),
             permit_any_remote: false,
             permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
@@ -487,8 +485,7 @@ fn a_full_imported_table_refuses_local_mints_11475() {
         PersistentNatPermit::TargetHostPort,
         TIMEOUT_NS,
         2_000,
-        NatHolder::Untracked,
-    );
+        NatHolder::Untracked, 0);
     assert!(
         matches!(
             local,
@@ -512,6 +509,7 @@ fn synced_persistent_mints_refuse_a_full_lease_table_11495() {
         src_ip: src_ip.parse().unwrap(),
         src_port,
         routing_scope: 0,
+        egress_scope: 0,
         remote: Some(("8.8.8.8".parse().unwrap(), 443)),
         permit_any_remote: false,
         permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
@@ -593,6 +591,7 @@ fn an_idle_import_pressure_pass_reclaims_expired_capacity_11475() {
         src_ip: src_ip.parse().unwrap(),
         src_port: 40_000,
         routing_scope: 0,
+        egress_scope: 0,
         remote: Some(("8.8.8.8".parse().unwrap(), 443)),
         permit_any_remote: false,
         permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
@@ -633,6 +632,7 @@ fn an_address_only_import_refuses_live_reverse_identity_contention_11475() {
         src_ip: "10.0.61.50".parse().unwrap(),
         src_port: 20_000,
         routing_scope: 0,
+        egress_scope: 0,
         remote: Some(("8.8.8.8".parse().unwrap(), 443)),
         permit_any_remote: false,
         permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
@@ -785,19 +785,19 @@ fn address_only_idle_owner_index_tracks_import_and_rollback_11496() {
         IdleLeaseImport::SkippedIdentityBusy,
         "exact remote scope must see the persistent owner"
     );
-    candidate.remote = Some(("8.8.8.8".parse().unwrap(), 0));
+    set_remote_scope(&mut candidate, Some(("8.8.8.8".parse().unwrap(), 0)));
     assert_eq!(
         allocator.import_idle_lease(&candidate, &pool_addrs, TIMEOUT_NS, 1_001),
         IdleLeaseImport::SkippedIdentityBusy,
         "host scope must see the exact persistent owner"
     );
-    candidate.remote = None;
+    set_remote_scope(&mut candidate, None);
     assert_eq!(
         allocator.import_idle_lease(&candidate, &pool_addrs, TIMEOUT_NS, 1_001),
         IdleLeaseImport::SkippedIdentityBusy,
         "any-remote scope must see the exact persistent owner"
     );
-    candidate.remote = Some(("8.8.8.8".parse().unwrap(), 444));
+    set_remote_scope(&mut candidate, Some(("8.8.8.8".parse().unwrap(), 444)));
     assert_eq!(
         allocator.import_idle_lease(&candidate, &pool_addrs, TIMEOUT_NS, 1_001),
         IdleLeaseImport::Installed,
@@ -805,7 +805,7 @@ fn address_only_idle_owner_index_tracks_import_and_rollback_11496() {
     );
     assert!(allocator.rollback_idle_lease_import(&candidate));
     assert!(allocator.rollback_idle_lease_import(&owner));
-    candidate.remote = Some(("8.8.8.8".parse().unwrap(), 443));
+    set_remote_scope(&mut candidate, Some(("8.8.8.8".parse().unwrap(), 443)));
     assert_eq!(
         allocator.import_idle_lease(&candidate, &pool_addrs, TIMEOUT_NS, 1_002),
         IdleLeaseImport::Installed,
@@ -814,7 +814,7 @@ fn address_only_idle_owner_index_tracks_import_and_rollback_11496() {
     assert!(allocator.rollback_idle_lease_import(&candidate));
     let mut wildcard_owner = owner.clone();
     wildcard_owner.src_ip = "10.0.61.52".parse().unwrap();
-    wildcard_owner.remote = None;
+    set_remote_scope(&mut wildcard_owner, None);
     assert_eq!(
         allocator.import_idle_lease(&wildcard_owner, &pool_addrs, TIMEOUT_NS, 1_003),
         IdleLeaseImport::Installed
@@ -827,7 +827,7 @@ fn address_only_idle_owner_index_tracks_import_and_rollback_11496() {
     assert!(allocator.rollback_idle_lease_import(&wildcard_owner));
 
     wildcard_owner.src_ip = "10.0.61.53".parse().unwrap();
-    wildcard_owner.remote = Some(("8.8.8.8".parse().unwrap(), 0));
+    set_remote_scope(&mut wildcard_owner, Some(("8.8.8.8".parse().unwrap(), 0)));
     assert_eq!(
         allocator.import_idle_lease(&wildcard_owner, &pool_addrs, TIMEOUT_NS, 1_005),
         IdleLeaseImport::Installed
@@ -866,8 +866,7 @@ fn a_pat_mint_refuses_an_idle_address_only_lease_identity_11496() {
         PersistentNatPermit::TargetHostPort,
         TIMEOUT_NS,
         1_001,
-        NatHolder::Untracked,
-    );
+        NatHolder::Untracked, 0);
     assert!(
         pat.is_err(),
         "a PAT mint must not claim an idle address-only wire identity"
@@ -928,6 +927,7 @@ fn a_pat_import_refuses_live_address_only_reverse_identity_11475() {
         src_ip: "10.0.61.50".parse().unwrap(),
         src_port: 40_000,
         routing_scope: 0,
+        egress_scope: 0,
         remote: Some(("8.8.8.8".parse().unwrap(), 443)),
         permit_any_remote: false,
         permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
@@ -1170,8 +1170,7 @@ fn a_local_idle_adoption_promotes_only_on_release_10789_f4() {
             PersistentNatPermit::TargetHostPort,
             TIMEOUT_NS,
             2_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("local flow joins the imported address-only lease");
     assert_eq!(address_tuple.ip, address_rec.translated_ip);
     assert!(address_only.release_flow(address_flow, address_tuple, 3_000, NatHolder::Untracked));
@@ -1338,8 +1337,7 @@ fn a_local_active_lease_join_promotes_on_completion_10789_f4() {
             PersistentNatPermit::AnyRemoteHost,
             TIMEOUT_NS,
             3_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("local N -> N+1 join reuses the active imported lease");
     assert!(pat.debug_live().persistent_by_source[&pat_key].imported);
     assert!(pat.rollback_flow(local_pat_flow, local_pat_tuple, 3_500, NatHolder::Untracked));
@@ -1356,8 +1354,7 @@ fn a_local_active_lease_join_promotes_on_completion_10789_f4() {
             PersistentNatPermit::AnyRemoteHost,
             TIMEOUT_NS,
             3_600,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("a later local reserve can still join after tentative rollback");
     assert!(pat.release_flow(local_pat_flow, local_pat_tuple, 4_000, NatHolder::Untracked));
     let pat_lease = pat.debug_live().persistent_by_source[&pat_key];
@@ -1416,8 +1413,7 @@ fn a_local_active_lease_join_promotes_on_completion_10789_f4() {
             PersistentNatPermit::AnyRemoteHost,
             TIMEOUT_NS,
             3_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("local N -> N+1 join reuses the active imported lease");
     assert!(address_only.debug_live().persistent_by_source[&address_key].imported);
     assert!(address_only.rollback_flow(
@@ -1438,8 +1434,7 @@ fn a_local_active_lease_join_promotes_on_completion_10789_f4() {
             PersistentNatPermit::AnyRemoteHost,
             TIMEOUT_NS,
             3_600,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("a later local reserve can still join after tentative rollback");
     assert!(address_only.release_flow(
         local_address_flow,
@@ -1777,8 +1772,7 @@ fn an_imported_lifetime_is_clamped_to_the_local_timeout_10789_f4() {
             PersistentNatPermit::AnyRemoteHost,
             local_timeout_ns,
             200,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("local flow adopts the bounded imported lease");
     assert!(alloc.release_flow(f, translated, 500, NatHolder::Untracked));
     let key = f.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
@@ -1827,8 +1821,7 @@ fn rollback_preserves_imported_origin_and_timeout_for_both_modes_10789_f4() {
             PersistentNatPermit::TargetHostPort,
             local_timeout_ns,
             2_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("the local flow must tentatively adopt the imported PAT lease");
     assert_eq!(
         pat.debug_live().persistent_by_source
@@ -1868,8 +1861,7 @@ fn rollback_preserves_imported_origin_and_timeout_for_both_modes_10789_f4() {
             PersistentNatPermit::TargetHostPort,
             local_timeout_ns,
             2_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("the local flow must tentatively adopt the imported address-only lease");
     assert_eq!(
         address_only.debug_live().persistent_by_source
@@ -1923,8 +1915,7 @@ fn assert_pat_rollback_with_concurrent_synced_flow(synced_completes_first: bool)
             PersistentNatPermit::AnyRemoteHost,
             TIMEOUT_NS,
             2_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("local 0 -> 1 reserve adopts imported PAT identity");
     let tentative = alloc.debug_live().persistent_by_source[&key];
     assert!(tentative.imported);
@@ -2012,8 +2003,7 @@ fn assert_address_only_rollback_with_concurrent_synced_flow(synced_completes_fir
             PersistentNatPermit::AnyRemoteHost,
             TIMEOUT_NS,
             2_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("local 0 -> 1 reserve adopts imported address-only identity");
     let tentative = alloc.debug_live().persistent_by_source[&key];
     assert!(tentative.imported);
@@ -2142,8 +2132,7 @@ fn reserve_two_local_fixture_flow(
                 PersistentNatPermit::AnyRemoteHost,
                 TIMEOUT_NS,
                 now_ns,
-                holder,
-            )
+                holder, 0)
             .expect("local address-only flow adopts the imported lease")
     } else {
         fixture
@@ -2157,8 +2146,7 @@ fn reserve_two_local_fixture_flow(
                 PersistentNatPermit::AnyRemoteHost,
                 TIMEOUT_NS,
                 now_ns,
-                holder,
-            )
+                holder, 0)
             .expect("local PAT flow adopts the imported lease")
     }
 }
@@ -2393,8 +2381,7 @@ fn clear_fence_survives_expired_address_only_replacement_10784() {
             PersistentNatPermit::AnyRemoteHost,
             min_timeout_ns,
             1_000_000_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("a fresh address-only lease must succeed");
     assert!(allocator.release_flow(client, original, 2_000_000_000, NatHolder::Untracked));
     let stale = allocator
@@ -2415,8 +2402,7 @@ fn clear_fence_survives_expired_address_only_replacement_10784() {
             PersistentNatPermit::AnyRemoteHost,
             min_timeout_ns,
             3_100_000_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("fresh local address-only replacement must succeed");
     assert!(allocator.release_flow(client, replacement, 3_200_000_000, NatHolder::Untracked));
     assert_eq!(allocator.debug_gc_expired_chunked(5_000_000_000, 8), 1);
@@ -2460,8 +2446,7 @@ fn expired_pat_replacement_is_not_reactivated_by_stale_synced_session_10784() {
             PersistentNatPermit::AnyRemoteHost,
             min_timeout_ns,
             3_100_000_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("fresh same-key replacement must succeed");
     assert_eq!(
         replacement, stale_tuple,
@@ -2531,8 +2516,7 @@ fn expired_address_only_replacement_is_not_reactivated_by_stale_synced_session_1
             PersistentNatPermit::AnyRemoteHost,
             min_timeout_ns,
             3_100_000_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("fresh same-key address-only replacement must succeed");
     assert_eq!(replacement, stale_tuple);
     assert!(allocator.release_flow(client, replacement, 4_200_000_000, NatHolder::Untracked));
@@ -3107,7 +3091,7 @@ fn expired_idle_lease_does_not_block_synced_address_only_13692() {
     let key = client.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
     let min_timeout_ns = super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS;
     // Mint address-only with min timeout via reserve_address_only_persistent directly.
-    let old = alloc.reserve_address_only_persistent(client, PoolAddressFamily::V4(&addrs), 0, false, PersistentNatPermit::AnyRemoteHost, min_timeout_ns, 1_000, NatHolder::Untracked).expect("mint");
+    let old = alloc.reserve_address_only_persistent(client, PoolAddressFamily::V4(&addrs), 0, false, PersistentNatPermit::AnyRemoteHost, min_timeout_ns, 1_000, NatHolder::Untracked, 0).expect("mint");
     assert!(alloc.release_flow(client, old, 2_000, NatHolder::Untracked));
     let expiry = alloc.debug_live().persistent_by_source.get(&key).unwrap().expires_at_ns;
     let mut synced = client;
@@ -3441,8 +3425,8 @@ fn idle_lease_permissions_round_trip_and_merge_safely_13945() {
     {
         let live = allocator.lock_live();
         let permissions = live.persistent_permissions.get(&key).unwrap();
-        assert!(permissions.any_remote);
-        assert_eq!(permissions.remotes.len(), 3);
+        assert!(permissions.any_remote());
+        assert_eq!(permissions.remotes_len(), 3);
     }
 
     let mut many = rec.clone();
@@ -3466,8 +3450,7 @@ fn idle_lease_permissions_round_trip_and_merge_safely_13945() {
             .persistent_permissions
             .get(&key)
             .unwrap()
-            .remotes
-            .len(),
+            .remotes_len(),
         super::allocator::MAX_PERSISTENT_PERMITTED_REMOTES,
         "repeated same-lease imports must not grow permissions beyond their bound"
     );
@@ -3490,8 +3473,7 @@ fn idle_lease_permissions_round_trip_and_merge_safely_13945() {
             .persistent_permissions
             .get(&key)
             .unwrap()
-            .remotes
-            .len(),
+            .remotes_len(),
         super::allocator::MAX_PERSISTENT_PERMITTED_REMOTES,
         "a mismatched binding must not widen the local permit set"
     );
@@ -3524,8 +3506,7 @@ fn persistent_reverse_collision_keeps_both_lease_permissions_14046() {
             PersistentNatPermit::TargetHostPort,
             TIMEOUT_NS,
             1_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("address-only persistent allocation succeeds");
     assert_eq!(
         (pat.ip, pat.port),
@@ -3541,6 +3522,8 @@ fn persistent_reverse_collision_keeps_both_lease_permissions_14046() {
             remote.parse().unwrap(),
             remote_port,
             2_000,
+            "",
+            "",
         )
     };
     assert_eq!(
@@ -3570,6 +3553,7 @@ fn persistent_reverse_collision_keeps_both_lease_permissions_14046() {
             ..addr_flow
         },
         PersistentNatPermit::TargetHostPort,
+        0,
     );
     assert_eq!(
         lookup("8.8.8.8", 443),
@@ -3634,6 +3618,8 @@ fn expired_lease_recreation_drops_obsolete_remote_permissions_14113() {
             original.dst_ip,
             original.dst_port,
             reallocated_at + 1,
+            "",
+            "",
         ),
         PersistentInbound::Denied,
         "expired lease's old remote grant must not survive same-key recreation"
@@ -3646,6 +3632,8 @@ fn expired_lease_recreation_drops_obsolete_remote_permissions_14113() {
             replacement.dst_ip,
             replacement.dst_port,
             reallocated_at + 1,
+            "",
+            "",
         ),
         PersistentInbound::Permitted {
             internal_ip: replacement.src_ip,

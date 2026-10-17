@@ -42,8 +42,14 @@ fn zone_snapshot_host_inbound_fields_roundtrip() {
 
     let back: ZoneSnapshot = serde_json::from_value(value).expect("deserialize ZoneSnapshot");
     assert!(back.host_inbound_configured);
-    assert_eq!(back.host_inbound_system_services, vec!["ssh", "ping", "ike"]);
-    assert_eq!(back.host_inbound_protocols, vec!["ospf", "router-discovery"]);
+    assert_eq!(
+        back.host_inbound_system_services,
+        vec!["ssh", "ping", "ike"]
+    );
+    assert_eq!(
+        back.host_inbound_protocols,
+        vec!["ospf", "router-discovery"]
+    );
 
     // Backward-compat: a payload from an older Go binary without the fields
     // decodes to "not configured" (admit-all) rather than failing.
@@ -71,8 +77,7 @@ fn zone_set_validated_omits_false_and_roundtrips_true_10510() {
     };
     let value = serde_json::to_value(&snapshot).expect("serialize validated snapshot");
     assert_eq!(value["zone_set_validated"], true);
-    let decoded: ConfigSnapshot =
-        serde_json::from_value(value).expect("decode validated snapshot");
+    let decoded: ConfigSnapshot = serde_json::from_value(value).expect("decode validated snapshot");
     assert!(decoded.zone_set_validated);
 
     let legacy: ConfigSnapshot =
@@ -90,8 +95,8 @@ fn screen_missing_profile_zones_wire_roundtrip_and_skew() {
     // decode and yield an empty set (→ all-Pass, no warn). Start from a full
     // default snapshot (so every other required field is present) and strip the
     // additive key.
-    let mut v = serde_json::to_value(ConfigSnapshot::default())
-        .expect("serialize default ConfigSnapshot");
+    let mut v =
+        serde_json::to_value(ConfigSnapshot::default()).expect("serialize default ConfigSnapshot");
     v.as_object_mut()
         .expect("snapshot is a JSON object")
         .remove("screen_missing_profile_zones");
@@ -103,12 +108,14 @@ fn screen_missing_profile_zones_wire_roundtrip_and_skew() {
     );
 
     // Present: round-trips with both zone and profile preserved.
-    let mut v = serde_json::to_value(ConfigSnapshot::default())
-        .expect("serialize default ConfigSnapshot");
-    v.as_object_mut().expect("snapshot is a JSON object").insert(
-        "screen_missing_profile_zones".into(),
-        serde_json::json!([{"zone":"trust","profile":"ghost"}]),
-    );
+    let mut v =
+        serde_json::to_value(ConfigSnapshot::default()).expect("serialize default ConfigSnapshot");
+    v.as_object_mut()
+        .expect("snapshot is a JSON object")
+        .insert(
+            "screen_missing_profile_zones".into(),
+            serde_json::json!([{"zone":"trust","profile":"ghost"}]),
+        );
     let snap: ConfigSnapshot =
         serde_json::from_value(v).expect("snapshot with the field must decode");
     assert_eq!(snap.screen_missing_profile_zones.len(), 1);
@@ -122,8 +129,8 @@ fn screen_missing_profile_zones_wire_roundtrip_and_skew() {
     //
     // Old-helper skew: absent field must decode to empty, which is exactly
     // today's behaviour (inert zones Pass silently).
-    let mut v = serde_json::to_value(ConfigSnapshot::default())
-        .expect("serialize default ConfigSnapshot");
+    let mut v =
+        serde_json::to_value(ConfigSnapshot::default()).expect("serialize default ConfigSnapshot");
     v.as_object_mut()
         .expect("snapshot is a JSON object")
         .remove("screen_inert_profile_zones");
@@ -136,12 +143,14 @@ fn screen_missing_profile_zones_wire_roundtrip_and_skew() {
     );
 
     // Present: round-trips with both zone and profile preserved.
-    let mut v = serde_json::to_value(ConfigSnapshot::default())
-        .expect("serialize default ConfigSnapshot");
-    v.as_object_mut().expect("snapshot is a JSON object").insert(
-        "screen_inert_profile_zones".into(),
-        serde_json::json!([{"zone":"trust","profile":"p"}]),
-    );
+    let mut v =
+        serde_json::to_value(ConfigSnapshot::default()).expect("serialize default ConfigSnapshot");
+    v.as_object_mut()
+        .expect("snapshot is a JSON object")
+        .insert(
+            "screen_inert_profile_zones".into(),
+            serde_json::json!([{"zone":"trust","profile":"p"}]),
+        );
     let snap: ConfigSnapshot =
         serde_json::from_value(v).expect("snapshot with the inert field must decode");
     assert_eq!(snap.screen_inert_profile_zones.len(), 1);
@@ -151,8 +160,8 @@ fn screen_missing_profile_zones_wire_roundtrip_and_skew() {
     // The two fields are INDEPENDENT on the wire. A snapshot carrying only the
     // inert set must leave the missing set empty and vice versa — if one
     // decoder key were reused for both, this is the assertion that catches it.
-    let mut v = serde_json::to_value(ConfigSnapshot::default())
-        .expect("serialize default ConfigSnapshot");
+    let mut v =
+        serde_json::to_value(ConfigSnapshot::default()).expect("serialize default ConfigSnapshot");
     {
         let obj = v.as_object_mut().expect("snapshot is a JSON object");
         obj.insert(
@@ -490,8 +499,7 @@ fn process_status_ambiguous_fabric_zone_count_roundtrip_11061() {
         ambiguous_fabric_zone_count: 4,
         ..Default::default()
     };
-    let value: serde_json::Value =
-        serde_json::to_value(&status).expect("serialize ProcessStatus");
+    let value: serde_json::Value = serde_json::to_value(&status).expect("serialize ProcessStatus");
     assert_eq!(value["ambiguous_fabric_zone_count"], 4);
     let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
     assert_eq!(back.ambiguous_fabric_zone_count, 4);
@@ -885,10 +893,7 @@ fn process_status_gre_decap_pt_nibble_mismatch_refusals_roundtrip() {
     };
     let value: serde_json::Value =
         serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
-    assert_eq!(
-        value["gre_decap_pt_nibble_mismatch_refusals_total"],
-        17
-    );
+    assert_eq!(value["gre_decap_pt_nibble_mismatch_refusals_total"], 17);
     let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
     assert_eq!(back.gre_decap_pt_nibble_mismatch_refusals_total, 17);
 
@@ -1134,8 +1139,8 @@ fn install_refusal_trio_roundtrip_and_key_absent_defaults() {
 #[test]
 fn worker_runtime_status_cold_path_fields_roundtrip_default_omitted() {
     let status = WorkerRuntimeStatus::default();
-    let value: serde_json::Value = serde_json::to_value(&status)
-        .expect("serialize default WorkerRuntimeStatus");
+    let value: serde_json::Value =
+        serde_json::to_value(&status).expect("serialize default WorkerRuntimeStatus");
     // Every cold_path_* field MUST be absent in the JSON for a
     // default (uncalibrated) worker. This pins the wire-invariant
     // contract that pre-#1621 daemons see byte-identical payloads.
@@ -1203,8 +1208,7 @@ fn worker_runtime_status_cold_path_fields_roundtrip_populated() {
         cold_path_snapshot_failed: 2,
         ..Default::default()
     };
-    let value: serde_json::Value =
-        serde_json::to_value(&status).expect("serialize populated");
+    let value: serde_json::Value = serde_json::to_value(&status).expect("serialize populated");
     // Spot-check a few fields are present + correctly nested.
     assert_eq!(value["cold_path_layout_version"], 3);
     assert_eq!(value["cold_path_sample_phase"], 50_000);
@@ -1218,8 +1222,7 @@ fn worker_runtime_status_cold_path_fields_roundtrip_populated() {
     assert_eq!(value["cold_path_overflow_active"], true);
 
     // Round-trip back.
-    let back: WorkerRuntimeStatus =
-        serde_json::from_value(value).expect("deserialize");
+    let back: WorkerRuntimeStatus = serde_json::from_value(value).expect("deserialize");
     assert_eq!(back.cold_path_layout_version, 3);
     assert_eq!(back.cold_path_active_slot_ids, vec![0, 5]);
     assert_eq!(back.cold_path_active_zone_from, vec![1, 2]);
@@ -1270,8 +1273,7 @@ fn worker_runtime_status_session_gc_counters_roundtrip_13281() {
     ] {
         assert!(value.get(key).is_some(), "missing session GC key {key}");
     }
-    let decoded: WorkerRuntimeStatus =
-        serde_json::from_value(value).expect("deserialize status");
+    let decoded: WorkerRuntimeStatus = serde_json::from_value(value).expect("deserialize status");
     assert_eq!(decoded.session_gc_scanned, 1);
     assert_eq!(decoded.session_gc_dropped_gone, 2);
     assert_eq!(decoded.session_gc_dropped_stale, 3);
@@ -1385,8 +1387,7 @@ fn process_status_source_nat_pool_status_roundtrip() {
         }],
         ..Default::default()
     };
-    let value: serde_json::Value =
-        serde_json::to_value(&status).expect("serialize ProcessStatus");
+    let value: serde_json::Value = serde_json::to_value(&status).expect("serialize ProcessStatus");
     assert_eq!(value["source_nat_pools"][0]["pool_name"], "pool1");
     let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
     assert_eq!(back.source_nat_pools.len(), 1);
@@ -1861,7 +1862,7 @@ fn cos_scheduler_snapshot_surplus_sharing_round_trip_true() {
         surplus_sharing: true,
         equal_flow_enforcement: false,
         equal_flow_target_policy: String::new(),
-    codel_target_ns: 0,
+        codel_target_ns: 0,
         ..Default::default()
     };
     let json = serde_json::to_string(&snap).expect("serialize");
@@ -1882,7 +1883,7 @@ fn cos_scheduler_snapshot_equal_flow_enforcement_round_trip_true() {
         surplus_sharing: false,
         equal_flow_enforcement: true,
         equal_flow_target_policy: String::new(),
-    codel_target_ns: 0,
+        codel_target_ns: 0,
         ..Default::default()
     };
     let json = serde_json::to_string(&snap).expect("serialize");
@@ -1933,7 +1934,7 @@ fn cos_scheduler_snapshot_buffer_size_percent_round_trip() {
         surplus_sharing: false,
         equal_flow_enforcement: false,
         equal_flow_target_policy: String::new(),
-    codel_target_ns: 0,
+        codel_target_ns: 0,
         ..Default::default()
     };
     let json = serde_json::to_string(&snap).expect("serialize");
@@ -2008,8 +2009,10 @@ fn config_snapshot_decodes_without_app_catalog() {
                     "zone_count":0,"policy_count":0,"scheduler_count":0,"ha_enabled":false}
     }"#;
     let snap: ConfigSnapshot = serde_json::from_str(json).expect("decode old snapshot");
-    assert!(snap.app_catalog.is_empty(),
-        "snapshot without app_catalog must decode to an empty catalog (HA/upgrade compat)");
+    assert!(
+        snap.app_catalog.is_empty(),
+        "snapshot without app_catalog must decode to an empty catalog (HA/upgrade compat)"
+    );
 }
 
 // #3909 (MEDIUM, secret exposure): the SYN-cookie master key is the secret
@@ -2073,8 +2076,8 @@ fn syn_cookie_master_key_is_skipped_in_state_snapshot() {
 fn nat64_rule_snapshot_tolerates_null_pool_addresses() {
     // An explicit null (not absent) must decode to an empty Vec, not error.
     let json = r#"{"name":"rs1","prefix":"64:ff9b::/96","pool_addresses":null}"#;
-    let rule: NAT64RuleSnapshot =
-        serde_json::from_str(json).expect("NAT64 rule with pool_addresses:null must decode (#2214)");
+    let rule: NAT64RuleSnapshot = serde_json::from_str(json)
+        .expect("NAT64 rule with pool_addresses:null must decode (#2214)");
     assert_eq!(rule.name, "rs1");
     assert_eq!(rule.prefix, "64:ff9b::/96");
     assert!(
@@ -2101,7 +2104,10 @@ fn firewall_filter_snapshot_tolerates_null_terms() {
         serde_json::from_str(json).expect("filter with terms:null must decode (#2214)");
     assert_eq!(filter.name, "EMPTY");
     assert_eq!(filter.family, "inet");
-    assert!(filter.terms.is_empty(), "terms:null must decode to an empty Vec");
+    assert!(
+        filter.terms.is_empty(),
+        "terms:null must decode to an empty Vec"
+    );
     // Absent key still works.
     let absent: FirewallFilterSnapshot =
         serde_json::from_str(r#"{"name":"EMPTY","family":"inet"}"#)
@@ -2136,8 +2142,9 @@ fn config_snapshot_decodes_with_null_collections_2214() {
             {"name":"EMPTY","family":"inet","terms":null}
         ]
     }"#;
-    let snap: ConfigSnapshot = serde_json::from_str(json)
-        .expect("snapshot with null pool_addresses + null terms must decode in full (#2214 no-transit)");
+    let snap: ConfigSnapshot = serde_json::from_str(json).expect(
+        "snapshot with null pool_addresses + null terms must decode in full (#2214 no-transit)",
+    );
     assert_eq!(snap.nat64_rules.len(), 1);
     assert!(snap.nat64_rules[0].pool_addresses.is_empty());
     assert_eq!(snap.filters.len(), 1);
@@ -2190,8 +2197,7 @@ fn delegated_slow_path_status_wire_roundtrip_10069() {
     assert_eq!(value["slow_path_delegated"]["injected_packets"], 7);
     assert_eq!(value["slow_path_delegated"]["mtu_dropped_packets"], 3);
 
-    let decoded: ProcessStatus =
-        serde_json::from_value(value).expect("decode ProcessStatus");
+    let decoded: ProcessStatus = serde_json::from_value(value).expect("decode ProcessStatus");
     assert_eq!(decoded.slow_path_delegated.live_mtu, 1500);
     assert!(decoded.slow_path_delegated.degraded);
 }
@@ -2317,8 +2323,7 @@ fn zone_traffic_counters_wire_roundtrip_and_default_omits() {
         {"zone_id": 7, "ingress_packets": 2, "ingress_bytes": 200,
          "egress_packets": 1, "egress_bytes": 100}
     ]);
-    let decoded: ProcessStatus =
-        serde_json::from_value(v).expect("decode Go-style zone payload");
+    let decoded: ProcessStatus = serde_json::from_value(v).expect("decode Go-style zone payload");
     assert_eq!(decoded.zone_counter_layout_version, 1);
     assert_eq!(decoded.zone_traffic_counters.len(), 1);
     assert_eq!(decoded.zone_traffic_counters[0].zone_id, 7);
@@ -2379,8 +2384,7 @@ fn zone_flood_counters_wire_roundtrip_and_default_omits() {
         {"zone_id": 7, "syn_flood_events": 2, "icmp_flood_events": 3,
          "udp_flood_events": 4}
     ]);
-    let decoded: ProcessStatus =
-        serde_json::from_value(v).expect("decode Go-style flood payload");
+    let decoded: ProcessStatus = serde_json::from_value(v).expect("decode Go-style flood payload");
     assert_eq!(decoded.flood_counter_layout_version, 1);
     assert_eq!(decoded.zone_flood_counters.len(), 1);
     assert_eq!(decoded.zone_flood_counters[0].zone_id, 7);
@@ -2414,11 +2418,23 @@ fn wire_invariant_default_specimens() {
     // is preserved by serde_json::Map (BTreeMap-backed), so the
     // fixture output is stable across runs.
     let mut s: Map<String, Value> = Map::new();
-    s.insert("binding_control_request".into(), dump(&BindingControlRequest::default()));
-    s.insert("binding_counters_snapshot".into(), dump(&BindingCountersSnapshot::default()));
+    s.insert(
+        "binding_control_request".into(),
+        dump(&BindingControlRequest::default()),
+    );
+    s.insert(
+        "binding_counters_snapshot".into(),
+        dump(&BindingCountersSnapshot::default()),
+    );
     s.insert("binding_status".into(), dump(&BindingStatus::default()));
-    s.insert("app_catalog_entry".into(), dump(&AppCatalogEntry::default()));
-    s.insert("class_of_service_snapshot".into(), dump(&ClassOfServiceSnapshot::default()));
+    s.insert(
+        "app_catalog_entry".into(),
+        dump(&AppCatalogEntry::default()),
+    );
+    s.insert(
+        "class_of_service_snapshot".into(),
+        dump(&ClassOfServiceSnapshot::default()),
+    );
     s.insert("config_snapshot".into(), dump(&ConfigSnapshot::default()));
     s.insert("control_request".into(), dump(&ControlRequest::default()));
     s.insert("control_response".into(), dump(&ControlResponse::default()));
@@ -2444,6 +2460,7 @@ fn wire_invariant_default_specimens() {
             src_ip: "10.0.61.102".into(),
             src_port: 40000,
             routing_scope: Some(7),
+            egress_scope: Some(11),
             remote_ip: "8.8.8.8".into(),
             remote_port: 443,
             permit_any_remote: true,
@@ -2475,6 +2492,7 @@ fn wire_invariant_default_specimens() {
             protocol: 6,
             src_ip: "10.0.61.102".into(),
             routing_scope: Some(7),
+            egress_scope: Some(11),
             src_port: 40000,
             remote_ip: "8.8.8.8".into(),
             remote_port: 443,
@@ -2535,86 +2553,245 @@ fn wire_invariant_default_specimens() {
             ..Default::default()
         }),
     );
-    s.insert("cos_active_flow_count_status".into(), dump(&CoSActiveFlowCountStatus::default()));
-    s.insert("cos_dscp_classifier_entry_snapshot".into(), dump(&CoSDSCPClassifierEntrySnapshot::default()));
-    s.insert("cos_dscp_classifier_snapshot".into(), dump(&CoSDSCPClassifierSnapshot::default()));
-    s.insert("cos_dscp_rewrite_rule_entry_snapshot".into(), dump(&CoSDSCPRewriteRuleEntrySnapshot::default()));
-    s.insert("cos_dscp_rewrite_rule_snapshot".into(), dump(&CoSDSCPRewriteRuleSnapshot::default()));
-    s.insert("cos_forwarding_class_snapshot".into(), dump(&CoSForwardingClassSnapshot::default()));
-    s.insert("cos_ieee8021_classifier_entry_snapshot".into(), dump(&CoSIEEE8021ClassifierEntrySnapshot::default()));
-    s.insert("cos_ieee8021_classifier_snapshot".into(), dump(&CoSIEEE8021ClassifierSnapshot::default()));
-    s.insert("cos_inet_precedence_classifier_entry_snapshot".into(), dump(&CoSINetPrecedenceClassifierEntrySnapshot::default()));
-    s.insert("cos_inet_precedence_classifier_snapshot".into(), dump(&CoSINetPrecedenceClassifierSnapshot::default()));
-    s.insert("cos_interface_status".into(), dump(&CoSInterfaceStatus::default()));
+    s.insert(
+        "cos_active_flow_count_status".into(),
+        dump(&CoSActiveFlowCountStatus::default()),
+    );
+    s.insert(
+        "cos_dscp_classifier_entry_snapshot".into(),
+        dump(&CoSDSCPClassifierEntrySnapshot::default()),
+    );
+    s.insert(
+        "cos_dscp_classifier_snapshot".into(),
+        dump(&CoSDSCPClassifierSnapshot::default()),
+    );
+    s.insert(
+        "cos_dscp_rewrite_rule_entry_snapshot".into(),
+        dump(&CoSDSCPRewriteRuleEntrySnapshot::default()),
+    );
+    s.insert(
+        "cos_dscp_rewrite_rule_snapshot".into(),
+        dump(&CoSDSCPRewriteRuleSnapshot::default()),
+    );
+    s.insert(
+        "cos_forwarding_class_snapshot".into(),
+        dump(&CoSForwardingClassSnapshot::default()),
+    );
+    s.insert(
+        "cos_ieee8021_classifier_entry_snapshot".into(),
+        dump(&CoSIEEE8021ClassifierEntrySnapshot::default()),
+    );
+    s.insert(
+        "cos_ieee8021_classifier_snapshot".into(),
+        dump(&CoSIEEE8021ClassifierSnapshot::default()),
+    );
+    s.insert(
+        "cos_inet_precedence_classifier_entry_snapshot".into(),
+        dump(&CoSINetPrecedenceClassifierEntrySnapshot::default()),
+    );
+    s.insert(
+        "cos_inet_precedence_classifier_snapshot".into(),
+        dump(&CoSINetPrecedenceClassifierSnapshot::default()),
+    );
+    s.insert(
+        "cos_interface_status".into(),
+        dump(&CoSInterfaceStatus::default()),
+    );
     s.insert("cos_queue_status".into(), dump(&CoSQueueStatus::default()));
-    s.insert("cos_scheduler_map_entry_snapshot".into(), dump(&CoSSchedulerMapEntrySnapshot::default()));
-    s.insert("cos_scheduler_map_snapshot".into(), dump(&CoSSchedulerMapSnapshot::default()));
-    s.insert("cos_scheduler_snapshot".into(), dump(&CoSSchedulerSnapshot::default()));
-    s.insert("destination_nat_rule_snapshot".into(), dump(&DestinationNATRuleSnapshot::default()));
+    s.insert(
+        "cos_scheduler_map_entry_snapshot".into(),
+        dump(&CoSSchedulerMapEntrySnapshot::default()),
+    );
+    s.insert(
+        "cos_scheduler_map_snapshot".into(),
+        dump(&CoSSchedulerMapSnapshot::default()),
+    );
+    s.insert(
+        "cos_scheduler_snapshot".into(),
+        dump(&CoSSchedulerSnapshot::default()),
+    );
+    s.insert(
+        "destination_nat_rule_snapshot".into(),
+        dump(&DestinationNATRuleSnapshot::default()),
+    );
     s.insert("exception_status".into(), dump(&ExceptionStatus::default()));
     s.insert("fabric_snapshot".into(), dump(&FabricSnapshot::default()));
-    s.insert("firewall_filter_snapshot".into(), dump(&FirewallFilterSnapshot::default()));
-    s.insert("firewall_filter_term_counter_status".into(), dump(&FirewallFilterTermCounterStatus::default()));
-    s.insert("firewall_term_snapshot".into(), dump(&FirewallTermSnapshot::default()));
-    s.insert("flow_export_snapshot".into(), dump(&FlowExportSnapshot::default()));
+    s.insert(
+        "firewall_filter_snapshot".into(),
+        dump(&FirewallFilterSnapshot::default()),
+    );
+    s.insert(
+        "firewall_filter_term_counter_status".into(),
+        dump(&FirewallFilterTermCounterStatus::default()),
+    );
+    s.insert(
+        "firewall_term_snapshot".into(),
+        dump(&FirewallTermSnapshot::default()),
+    );
+    s.insert(
+        "flow_export_snapshot".into(),
+        dump(&FlowExportSnapshot::default()),
+    );
     s.insert("flow_snapshot".into(), dump(&FlowSnapshot::default()));
-    s.insert("flow_tuple_status".into(), dump(&FlowTupleStatus::default()));
-    s.insert("flow_worker_status".into(), dump(&FlowWorkerStatus::default()));
-    s.insert("forwarding_control_request".into(), dump(&ForwardingControlRequest::default()));
+    s.insert(
+        "flow_tuple_status".into(),
+        dump(&FlowTupleStatus::default()),
+    );
+    s.insert(
+        "flow_worker_status".into(),
+        dump(&FlowWorkerStatus::default()),
+    );
+    s.insert(
+        "forwarding_control_request".into(),
+        dump(&ForwardingControlRequest::default()),
+    );
     s.insert("ha_group_status".into(), dump(&HAGroupStatus::default()));
-    s.insert("ha_state_update_request".into(), dump(&HAStateUpdateRequest::default()));
-    s.insert("inject_packet_request".into(), dump(&InjectPacketRequest::default()));
-    s.insert("interface_address_snapshot".into(), dump(&InterfaceAddressSnapshot::default()));
-    s.insert("interface_snapshot".into(), dump(&InterfaceSnapshot::default()));
+    s.insert(
+        "ha_state_update_request".into(),
+        dump(&HAStateUpdateRequest::default()),
+    );
+    s.insert(
+        "inject_packet_request".into(),
+        dump(&InjectPacketRequest::default()),
+    );
+    s.insert(
+        "interface_address_snapshot".into(),
+        dump(&InterfaceAddressSnapshot::default()),
+    );
+    s.insert(
+        "interface_snapshot".into(),
+        dump(&InterfaceSnapshot::default()),
+    );
     s.insert("map_pins".into(), dump(&MapPins::default()));
-    s.insert("mirror_config_snapshot".into(), dump(&MirrorConfigSnapshot::default()));
-    s.insert("nat64_rule_snapshot".into(), dump(&NAT64RuleSnapshot::default()));
-    s.insert("nat_rule_counter_status".into(), dump(&NatRuleCounterStatus::default()));
-    s.insert("neighbor_snapshot".into(), dump(&NeighborSnapshot::default()));
-    s.insert("nptv6_rule_snapshot".into(), dump(&Nptv6RuleSnapshot::default()));
-    s.insert("packet_resolution".into(), dump(&PacketResolution::default()));
+    s.insert(
+        "mirror_config_snapshot".into(),
+        dump(&MirrorConfigSnapshot::default()),
+    );
+    s.insert(
+        "nat64_rule_snapshot".into(),
+        dump(&NAT64RuleSnapshot::default()),
+    );
+    s.insert(
+        "nat_rule_counter_status".into(),
+        dump(&NatRuleCounterStatus::default()),
+    );
+    s.insert(
+        "neighbor_snapshot".into(),
+        dump(&NeighborSnapshot::default()),
+    );
+    s.insert(
+        "nptv6_rule_snapshot".into(),
+        dump(&Nptv6RuleSnapshot::default()),
+    );
+    s.insert(
+        "packet_resolution".into(),
+        dump(&PacketResolution::default()),
+    );
     s.insert("policer_snapshot".into(), dump(&PolicerSnapshot::default()));
-    s.insert("policy_application_snapshot".into(), dump(&PolicyApplicationSnapshot::default()));
-    s.insert("policy_rule_counter_status".into(), dump(&PolicyRuleCounterStatus::default()));
-    s.insert("policy_rule_snapshot".into(), dump(&PolicyRuleSnapshot::default()));
+    s.insert(
+        "policy_application_snapshot".into(),
+        dump(&PolicyApplicationSnapshot::default()),
+    );
+    s.insert(
+        "policy_rule_counter_status".into(),
+        dump(&PolicyRuleCounterStatus::default()),
+    );
+    s.insert(
+        "policy_rule_snapshot".into(),
+        dump(&PolicyRuleSnapshot::default()),
+    );
     s.insert("process_status".into(), dump(&ProcessStatus::default()));
-    s.insert("queue_control_request".into(), dump(&QueueControlRequest::default()));
+    s.insert(
+        "queue_control_request".into(),
+        dump(&QueueControlRequest::default()),
+    );
     s.insert("queue_status".into(), dump(&QueueStatus::default()));
     s.insert("route_snapshot".into(), dump(&RouteSnapshot::default()));
     // #11402: populate the weighted sibling so its non-default JSON key stays
     // pinned even though the Go side omits all-default weight vectors.
     s.insert(
         "route_snapshot_weighted".into(),
-        dump(&RouteSnapshot { reject: false, table: "inet.0".into(),
-        family: "inet".into(),
-        destination: "203.0.113.0/24".into(),
-        next_hops: vec!["192.0.2.1".into(), "192.0.2.2".into()],
-        next_hop_weights: vec![1, 4],
-        ..Default::default() }),
+        dump(&RouteSnapshot {
+            reject: false,
+            table: "inet.0".into(),
+            family: "inet".into(),
+            destination: "203.0.113.0/24".into(),
+            next_hops: vec!["192.0.2.1".into(), "192.0.2.2".into()],
+            next_hop_weights: vec![1, 4],
+            ..Default::default()
+        }),
     );
-    s.insert("screen_missing_profile_ref".into(), dump(&ScreenMissingProfileRef::default()));
-    s.insert("screen_profile_snapshot".into(), dump(&ScreenProfileSnapshot::default()));
-    s.insert("session_delta_drain_request".into(), dump(&SessionDeltaDrainRequest::default()));
-    s.insert("session_delta_info".into(), dump(&SessionDeltaInfo::default()));
-    s.insert("session_export_request".into(), dump(&SessionExportRequest::default()));
-    s.insert("session_sync_request".into(), dump(&SessionSyncRequest::default()));
+    s.insert(
+        "screen_missing_profile_ref".into(),
+        dump(&ScreenMissingProfileRef::default()),
+    );
+    s.insert(
+        "screen_profile_snapshot".into(),
+        dump(&ScreenProfileSnapshot::default()),
+    );
+    s.insert(
+        "session_delta_drain_request".into(),
+        dump(&SessionDeltaDrainRequest::default()),
+    );
+    s.insert(
+        "session_delta_info".into(),
+        dump(&SessionDeltaInfo::default()),
+    );
+    s.insert(
+        "session_export_request".into(),
+        dump(&SessionExportRequest::default()),
+    );
+    s.insert(
+        "session_sync_request".into(),
+        dump(&SessionSyncRequest::default()),
+    );
     s.insert("slow_path_status".into(), dump(&SlowPathStatus::default()));
     s.insert("snapshot_summary".into(), dump(&SnapshotSummary::default()));
-    s.insert("source_nat_pool_status".into(), dump(&SourceNatPoolStatus::default()));
-    s.insert("source_nat_rule_snapshot".into(), dump(&SourceNATRuleSnapshot::default()));
-    s.insert("static_nat_rule_snapshot".into(), dump(&StaticNATRuleSnapshot::default()));
-    s.insert("three_color_policer_snapshot".into(), dump(&ThreeColorPolicerSnapshot::default()));
-    s.insert("three_color_policer_status".into(), dump(&ThreeColorPolicerStatus::default()));
-    s.insert("tunnel_endpoint_snapshot".into(), dump(&TunnelEndpointSnapshot::default()));
-    s.insert("userspace_capabilities".into(), dump(&UserspaceCapabilities::default()));
-    s.insert("worker_runtime_status".into(), dump(&WorkerRuntimeStatus::default()));
+    s.insert(
+        "source_nat_pool_status".into(),
+        dump(&SourceNatPoolStatus::default()),
+    );
+    s.insert(
+        "source_nat_rule_snapshot".into(),
+        dump(&SourceNATRuleSnapshot::default()),
+    );
+    s.insert(
+        "static_nat_rule_snapshot".into(),
+        dump(&StaticNATRuleSnapshot::default()),
+    );
+    s.insert(
+        "three_color_policer_snapshot".into(),
+        dump(&ThreeColorPolicerSnapshot::default()),
+    );
+    s.insert(
+        "three_color_policer_status".into(),
+        dump(&ThreeColorPolicerStatus::default()),
+    );
+    s.insert(
+        "tunnel_endpoint_snapshot".into(),
+        dump(&TunnelEndpointSnapshot::default()),
+    );
+    s.insert(
+        "userspace_capabilities".into(),
+        dump(&UserspaceCapabilities::default()),
+    );
+    s.insert(
+        "worker_runtime_status".into(),
+        dump(&WorkerRuntimeStatus::default()),
+    );
     s.insert("zone_snapshot".into(), dump(&ZoneSnapshot::default()));
-    s.insert("zone_flood_counter_status".into(), dump(&ZoneFloodCounterStatus::default()));
-    s.insert("zone_traffic_counter_status".into(), dump(&ZoneTrafficCounterStatus::default()));
+    s.insert(
+        "zone_flood_counter_status".into(),
+        dump(&ZoneFloodCounterStatus::default()),
+    );
+    s.insert(
+        "zone_traffic_counter_status".into(),
+        dump(&ZoneTrafficCounterStatus::default()),
+    );
     let specimens = Value::Object(s);
 
-    let actual = serde_json::to_string_pretty(&specimens)
-        .expect("specimens serialize to pretty JSON");
+    let actual =
+        serde_json::to_string_pretty(&specimens).expect("specimens serialize to pretty JSON");
 
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -2622,10 +2799,8 @@ fn wire_invariant_default_specimens() {
         .join("protocol_wire_v1.json");
 
     if std::env::var("XPF_PROTOCOL_WIRE_REGEN").is_ok() {
-        std::fs::create_dir_all(fixture_path.parent().unwrap())
-            .expect("create fixtures dir");
-        std::fs::write(&fixture_path, format!("{}\n", actual))
-            .expect("write regenerated fixture");
+        std::fs::create_dir_all(fixture_path.parent().unwrap()).expect("create fixtures dir");
+        std::fs::write(&fixture_path, format!("{}\n", actual)).expect("write regenerated fixture");
         eprintln!("regenerated fixture at {}", fixture_path.display());
         return;
     }
@@ -2784,8 +2959,7 @@ fn ha_group_status_lease_fields_wire_keys_1642() {
         lease_state: "owner".to_string(),
         lease_until: 9876543210,
     };
-    let value: serde_json::Value =
-        serde_json::to_value(&status).expect("serialize HAGroupStatus");
+    let value: serde_json::Value = serde_json::to_value(&status).expect("serialize HAGroupStatus");
     assert_eq!(value["forwarding_active"], true);
     assert_eq!(value["lease_state"], "owner");
     assert_eq!(value["lease_until"], 9876543210u64);
@@ -2803,8 +2977,7 @@ fn cos_queue_status_starvation_counters_wire_keys_1642() {
         tx_ring_full_submit_stalls: 33,
         ..Default::default()
     };
-    let value: serde_json::Value =
-        serde_json::to_value(&status).expect("serialize CoSQueueStatus");
+    let value: serde_json::Value = serde_json::to_value(&status).expect("serialize CoSQueueStatus");
     assert_eq!(value["root_token_starvation_parks"], 11u64);
     assert_eq!(value["queue_token_starvation_parks"], 22u64);
     assert_eq!(value["tx_ring_full_submit_stalls"], 33u64);
@@ -2824,8 +2997,7 @@ fn cos_queue_status_sojourn_roundtrip_1829() {
         sojourn_windowed_min_ns: 1_750_000,
         ..Default::default()
     };
-    let value: serde_json::Value =
-        serde_json::to_value(&status).expect("serialize CoSQueueStatus");
+    let value: serde_json::Value = serde_json::to_value(&status).expect("serialize CoSQueueStatus");
     assert_eq!(value["sojourn_ewma_ns"], 2_500_000u64);
     assert_eq!(value["sojourn_peak_ns"], 9_000_000u64);
     assert_eq!(value["sojourn_windowed_min_ns"], 1_750_000u64);
@@ -2835,8 +3007,8 @@ fn cos_queue_status_sojourn_roundtrip_1829() {
     assert_eq!(back.sojourn_windowed_min_ns, 1_750_000);
 
     // Pre-#1829 payload (keys absent) must decode with zero defaults.
-    let mut legacy_value = serde_json::to_value(CoSQueueStatus::default())
-        .expect("serialize default CoSQueueStatus");
+    let mut legacy_value =
+        serde_json::to_value(CoSQueueStatus::default()).expect("serialize default CoSQueueStatus");
     for key in [
         "sojourn_ewma_ns",
         "sojourn_peak_ns",
@@ -2868,8 +3040,7 @@ fn cos_queue_status_flow_fair_occupancy_roundtrip_1830() {
         flow_fair_flows_active: 12,
         ..Default::default()
     };
-    let value: serde_json::Value =
-        serde_json::to_value(&status).expect("serialize CoSQueueStatus");
+    let value: serde_json::Value = serde_json::to_value(&status).expect("serialize CoSQueueStatus");
     assert_eq!(value["flow_fair_buckets_occupied"], 9u64);
     assert_eq!(value["flow_fair_flows_active"], 12u64);
     let back: CoSQueueStatus = serde_json::from_value(value).expect("deserialize CoSQueueStatus");
@@ -2877,8 +3048,8 @@ fn cos_queue_status_flow_fair_occupancy_roundtrip_1830() {
     assert_eq!(back.flow_fair_flows_active, 12);
 
     // Pre-#1830 payload (keys absent) must decode with zero defaults.
-    let mut legacy_value = serde_json::to_value(CoSQueueStatus::default())
-        .expect("serialize default CoSQueueStatus");
+    let mut legacy_value =
+        serde_json::to_value(CoSQueueStatus::default()).expect("serialize default CoSQueueStatus");
     for key in ["flow_fair_buckets_occupied", "flow_fair_flows_active"] {
         legacy_value
             .as_object_mut()
@@ -2899,8 +3070,7 @@ fn binding_status_post_drain_backup_cos_drops_wire_keys_1642() {
         post_drain_backup_cos_drop_bytes: 4096,
         ..Default::default()
     };
-    let value: serde_json::Value =
-        serde_json::to_value(&status).expect("serialize BindingStatus");
+    let value: serde_json::Value = serde_json::to_value(&status).expect("serialize BindingStatus");
     assert_eq!(value["post_drain_backup_cos_drops"], 7u64);
     assert_eq!(value["post_drain_backup_cos_drop_bytes"], 4096u64);
     // These are binding-scoped: CoSQueueStatus must NOT also carry them.
@@ -2926,13 +3096,11 @@ fn binding_status_fabric_redirect_unsendable_drops_wire_key_1946() {
         fabric_redirect_unsendable_drops: 9,
         ..Default::default()
     };
-    let value: serde_json::Value =
-        serde_json::to_value(&status).expect("serialize BindingStatus");
+    let value: serde_json::Value = serde_json::to_value(&status).expect("serialize BindingStatus");
     assert_eq!(value["fabric_redirect_unsendable_drops"], 9u64);
 
     // Round-trip preserves the value.
-    let decoded: BindingStatus =
-        serde_json::from_value(value).expect("deserialize BindingStatus");
+    let decoded: BindingStatus = serde_json::from_value(value).expect("deserialize BindingStatus");
     assert_eq!(decoded.fabric_redirect_unsendable_drops, 9);
 
     // Mixed-version tolerance: an older helper that omits the key (but
@@ -2957,8 +3125,7 @@ fn process_status_event_stream_fields_wire_keys_1642() {
         event_stream_write_stalls: 17,
         ..Default::default()
     };
-    let value: serde_json::Value =
-        serde_json::to_value(&status).expect("serialize ProcessStatus");
+    let value: serde_json::Value = serde_json::to_value(&status).expect("serialize ProcessStatus");
     assert_eq!(value["event_stream_connected"], true);
     assert_eq!(value["event_stream_seq"], 4242u64);
     assert_eq!(value["event_stream_acked"], 4200u64);
@@ -3046,8 +3213,7 @@ fn process_status_replay_evictions_wire_key_2382() {
         event_stream_replay_evictions: 9,
         ..Default::default()
     };
-    let value: serde_json::Value =
-        serde_json::to_value(&status).expect("serialize ProcessStatus");
+    let value: serde_json::Value = serde_json::to_value(&status).expect("serialize ProcessStatus");
     // #2382: the replay-buffer eviction telemetry-loss counter must survive
     // the wire under its exact key so the Go status adapter and Prometheus
     // collector can surface it.
@@ -3055,8 +3221,8 @@ fn process_status_replay_evictions_wire_key_2382() {
 
     // Round-trip with the key absent (legacy helper) must default to 0, not
     // fail to decode (#[serde(default)]).
-    let mut legacy = serde_json::to_value(ProcessStatus::default())
-        .expect("serialize default ProcessStatus");
+    let mut legacy =
+        serde_json::to_value(ProcessStatus::default()).expect("serialize default ProcessStatus");
     legacy
         .as_object_mut()
         .expect("object")
@@ -3079,8 +3245,7 @@ fn cos_queue_status_lease_claim_flow_roundtrip_1863() {
         lease_v8_worker_granted_bytes: vec![90, 0, 200],
         ..Default::default()
     };
-    let value: serde_json::Value =
-        serde_json::to_value(&status).expect("serialize CoSQueueStatus");
+    let value: serde_json::Value = serde_json::to_value(&status).expect("serialize CoSQueueStatus");
     assert_eq!(
         value["lease_v8_worker_requested_bytes"],
         serde_json::json!([100, 0, 250])
@@ -3096,8 +3261,8 @@ fn cos_queue_status_lease_claim_flow_roundtrip_1863() {
     // Legacy/non-v8 rows: empty vectors must be OMITTED from the wire
     // (byte-identical pre-#1863 encoding) and absent keys must decode
     // to empty defaults.
-    let default_value = serde_json::to_value(CoSQueueStatus::default())
-        .expect("serialize default CoSQueueStatus");
+    let default_value =
+        serde_json::to_value(CoSQueueStatus::default()).expect("serialize default CoSQueueStatus");
     let obj = default_value
         .as_object()
         .expect("CoSQueueStatus serializes to an object");
@@ -3201,8 +3366,7 @@ fn process_status_wg_tunnels_roundtrip_and_compat() {
         wg_tunnels: vec![row],
         ..Default::default()
     };
-    let value: serde_json::Value =
-        serde_json::to_value(&status).expect("serialize ProcessStatus");
+    let value: serde_json::Value = serde_json::to_value(&status).expect("serialize ProcessStatus");
     let wire_row = &value["wg_tunnels"][0];
     assert_eq!(wire_row["tunnel"], "wg0");
     assert_eq!(wire_row["tunnel_endpoint_id"], 7);
@@ -3235,8 +3399,7 @@ fn process_status_wg_tunnels_roundtrip_and_compat() {
         wire_row["endpoint_last_error"],
         "vpn.example.com: no AAAA for a v6 socket"
     );
-    let back: ProcessStatus =
-        serde_json::from_value(value).expect("deserialize ProcessStatus");
+    let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
     assert_eq!(back.wg_tunnels.len(), 1);
     let b = &back.wg_tunnels[0];
     assert_eq!(b.tunnel, "wg0");
@@ -3269,8 +3432,8 @@ fn process_status_wg_tunnels_roundtrip_and_compat() {
     // EMPTY-INVARIANT: a ProcessStatus with no WG tunnels serializes
     // with NO `wg_tunnels` key at all — non-WG deployments stay
     // wire-byte-identical to pre-#1865 (plan §3.2).
-    let empty_value = serde_json::to_value(ProcessStatus::default())
-        .expect("serialize default ProcessStatus");
+    let empty_value =
+        serde_json::to_value(ProcessStatus::default()).expect("serialize default ProcessStatus");
     assert!(
         empty_value.get("wg_tunnels").is_none(),
         "empty wg_tunnels must be omitted from the wire entirely"
@@ -3284,10 +3447,9 @@ fn process_status_wg_tunnels_roundtrip_and_compat() {
     // A pre-#1865 ROW shape is impossible (the whole array is new),
     // but a NEWER peer adding fields inside a row must not break us:
     // unknown keys are ignored by serde's default behavior.
-    let future_row: WgTunnelStatus = serde_json::from_str(
-        r#"{"tunnel":"wg9","future_field_from_s6":42}"#,
-    )
-    .expect("row with unknown future key decodes");
+    let future_row: WgTunnelStatus =
+        serde_json::from_str(r#"{"tunnel":"wg9","future_field_from_s6":42}"#)
+            .expect("row with unknown future key decodes");
     assert_eq!(future_row.tunnel, "wg9");
     assert_eq!(future_row.hs_send_errors, 0);
 }
@@ -3328,8 +3490,14 @@ fn apply_snapshot_decodes_numeric_dscp_lists_1961() {
     assert_eq!(req.request_type, "apply_snapshot");
     let snap = req.snapshot.expect("snapshot present");
     let cos = snap.class_of_service.expect("class_of_service present");
-    assert_eq!(cos.dscp_classifiers[0].entries[0].dscp_values, vec![46u8, 10]);
-    assert_eq!(cos.ieee8021_classifiers[0].entries[0].code_points, vec![5u8]);
+    assert_eq!(
+        cos.dscp_classifiers[0].entries[0].dscp_values,
+        vec![46u8, 10]
+    );
+    assert_eq!(
+        cos.ieee8021_classifiers[0].entries[0].code_points,
+        vec![5u8]
+    );
     assert_eq!(snap.filters[0].terms[0].dscp_values, vec![46u8]);
 }
 
@@ -3355,8 +3523,7 @@ fn apply_snapshot_rejects_base64_dscp_string_1961() {
     let err = serde_json::from_str::<ControlRequest>(json)
         .expect_err("base64 dscp_values string must be rejected");
     assert!(
-        err.to_string().contains("expected a sequence")
-            || err.to_string().contains("invalid type"),
+        err.to_string().contains("expected a sequence") || err.to_string().contains("invalid type"),
         "unexpected error: {err}"
     );
 }
@@ -3446,7 +3613,10 @@ fn session_sync_request_generation_roundtrip_2170() {
     let json = serde_json::to_string(&req).expect("serialize SessionSyncRequest");
     let back: SessionSyncRequest =
         serde_json::from_str(&json).expect("deserialize SessionSyncRequest");
-    assert_eq!(back.generation, req.generation, "generation must round-trip");
+    assert_eq!(
+        back.generation, req.generation,
+        "generation must round-trip"
+    );
 
     // A legacy payload without the field decodes to 0 (serde default), so an
     // old peer's request falls back to unconditional behavior.
@@ -3498,7 +3668,10 @@ fn session_sync_request_policy_fields_roundtrip_3301() {
     };
     let json = serde_json::to_string(&req).expect("serialize SessionSyncRequest");
     // Wire keys must match the Go SessionSyncRequest json tags exactly.
-    assert!(json.contains("\"policy_id\":42"), "policy_id wire key/value");
+    assert!(
+        json.contains("\"policy_id\":42"),
+        "policy_id wire key/value"
+    );
     assert!(
         json.contains("\"policy_counter_idx\":7"),
         "policy_counter_idx wire key/value"
@@ -3510,8 +3683,14 @@ fn session_sync_request_policy_fields_roundtrip_3301() {
     let back: SessionSyncRequest =
         serde_json::from_str(&json).expect("deserialize SessionSyncRequest");
     assert_eq!(back.policy_id, 42, "policy_id must round-trip");
-    assert_eq!(back.policy_counter_idx, 7, "policy_counter_idx must round-trip");
-    assert_eq!(back.inactivity_timeout, 30, "inactivity_timeout must round-trip");
+    assert_eq!(
+        back.policy_counter_idx, 7,
+        "policy_counter_idx must round-trip"
+    );
+    assert_eq!(
+        back.inactivity_timeout, 30,
+        "inactivity_timeout must round-trip"
+    );
 
     let legacy: SessionSyncRequest =
         serde_json::from_str(r#"{"operation":"upsert","src_ip":"10.0.0.1"}"#)
@@ -3612,7 +3791,11 @@ fn syn_cookie_master_key_wire_format_is_unchanged_6855() {
     // The wrapper serializes as a bare JSON string, not as an object.
     let wrapped = SynCookieMasterKeyHex::from(KEY.to_string());
     let json = serde_json::to_string(&wrapped).expect("serialize");
-    assert_eq!(json, format!("\"{KEY}\""), "the wrapper must be transparent on the wire");
+    assert_eq!(
+        json,
+        format!("\"{KEY}\""),
+        "the wrapper must be transparent on the wire"
+    );
 
     // And round-trips from that same bare string.
     let back: SynCookieMasterKeyHex = serde_json::from_str(&json).expect("deserialize");
@@ -3800,7 +3983,10 @@ fn syn_cookie_key_ring_is_secret_and_additive_both_ways_9173() {
         parsed.syn_cookie_key_ring.is_none(),
         "an omitted ring must decode as absent"
     );
-    assert_eq!(parsed.syn_cookie_master_key, "00112233445566778899aabbccddeeff");
+    assert_eq!(
+        parsed.syn_cookie_master_key,
+        "00112233445566778899aabbccddeeff"
+    );
 
     // NEW reader, a PRESENT but empty ring: a published ring, not an older
     // control plane, so it must not decode as absent.
@@ -3827,7 +4013,10 @@ fn syn_cookie_key_ring_is_secret_and_additive_both_ways_9173() {
     let future = format!(r#"{{{header}, "a_syn_cookie_field_from_the_future": {{"bases": []}}}}"#);
     let parsed: ConfigSnapshot = serde_json::from_str(&future)
         .expect("an unknown field must be ignored, or an older helper breaks on this upgrade");
-    assert_eq!(parsed.syn_cookie_master_key, "00112233445566778899aabbccddeeff");
+    assert_eq!(
+        parsed.syn_cookie_master_key,
+        "00112233445566778899aabbccddeeff"
+    );
 }
 
 // #10021: `policy_revoked_sessions_total` is additive/skew-tolerant on the
@@ -3837,8 +4026,7 @@ fn syn_cookie_key_ring_is_secret_and_additive_both_ways_9173() {
 fn process_status_policy_revoked_sessions_total_roundtrip_10021() {
     let mut status = ProcessStatus::default();
     status.policy_revoked_sessions_total = 9;
-    let mut value =
-        serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
+    let mut value = serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
     assert_eq!(value["policy_revoked_sessions_total"], 9);
 
     let back: ProcessStatus =

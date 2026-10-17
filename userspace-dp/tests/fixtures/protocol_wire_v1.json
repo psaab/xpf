@@ -576,6 +576,7 @@
     "deterministic_host_count": 2,
     "deterministic_host_prefix_len": 32,
     "deterministic_mode": 2,
+    "egress_scope": 11,
     "permit_any_remote": true,
     "permitted_remotes": [
       {
@@ -776,6 +777,7 @@
     "deterministic_host_count": 2,
     "deterministic_host_prefix_len": 32,
     "deterministic_mode": 2,
+    "egress_scope": 11,
     "permit_any_remote": true,
     "permitted_remotes": [
       {
@@ -1911,6 +1913,7 @@
     "next_hops": [],
     "next_table": "",
     "preference": 0,
+    "reject": false,
     "rule_priority": 0,
     "table": ""
   },
@@ -1928,6 +1931,7 @@
     ],
     "next_table": "",
     "preference": 0,
+    "reject": false,
     "rule_priority": 0,
     "table": "inet.0"
   },
@@ -2210,6 +2214,7 @@
     "yellow_packets": 0
   },
   "tunnel_endpoint_snapshot": {
+    "clear_dont_fragment_bit": false,
     "destination": "",
     "id": 0,
     "ifindex": 0,

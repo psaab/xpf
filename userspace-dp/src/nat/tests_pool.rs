@@ -2188,7 +2188,9 @@ fn persistent_inbound_permission_uses_remote_scope_not_mapping_key() {
                 remote_ip.parse().unwrap(),
                 remote_port,
                 2,
-            )
+            "",
+            "",
+        )
         };
         assert_eq!(
             lookup("8.8.8.8", admitted_port),
@@ -2255,6 +2257,8 @@ fn persistent_address_only_inbound_permission_is_checked() {
             remote_ip.parse().unwrap(),
             remote_port,
             NS_PER_SEC + 1,
+            "",
+            "",
         )
     };
     assert_eq!(
@@ -4162,8 +4166,7 @@ fn pool_snat_sequential_collision_probes_next_free_port() {
         PersistentNatPermit::TargetHostPort,
         0,
         1_000,
-        NatHolder::Untracked,
-    );
+        NatHolder::Untracked, 0);
     let translated = result.expect("collision must not exhaust an otherwise-free range");
     assert_eq!(translated.ip, IpAddr::V4(pool_ip));
     assert_eq!(
@@ -4211,8 +4214,7 @@ fn pool_snat_recycled_collision_retains_port() {
         PersistentNatPermit::TargetHostPort,
         0,
         1_000,
-        NatHolder::Untracked,
-    );
+        NatHolder::Untracked, 0);
     let translated = result.expect("free recycled port must be allocated");
     assert_eq!(translated.port, 1024, "must hand out the free recycled port");
 
@@ -4243,8 +4245,7 @@ fn pool_snat_recycled_collision_retains_port() {
         PersistentNatPermit::TargetHostPort,
         0,
         1_000,
-        NatHolder::Untracked,
-    );
+        NatHolder::Untracked, 0);
     let translated2 = result2.expect("retained recycled port must be reusable after owner clears");
     assert_eq!(
         translated2.port, 1025,
@@ -4287,8 +4288,7 @@ fn pool_snat_recycle_order_is_fifo_not_lifo() {
                 PersistentNatPermit::TargetHostPort,
                 0,
                 1_000,
-                NatHolder::Untracked,
-            )
+                NatHolder::Untracked, 0)
             .expect("sequential allocation must succeed within range")
     };
 
@@ -4491,8 +4491,7 @@ fn synced_session_reserves_nat_pool_port_4388() {
             PersistentNatPermit::TargetHostPort,
             0,
             1_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("the second pool port must be available");
     assert_eq!(
         translated.port, 10001,
@@ -4537,8 +4536,7 @@ fn synced_session_reserves_nat_pool_port_4388() {
             PersistentNatPermit::TargetHostPort,
             0,
             3_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("the freed port must be reusable after release");
     assert_eq!(
         reused.port, 10000,
@@ -5037,8 +5035,7 @@ fn synced_reservation_follows_active_zone_match_6211() {
             PersistentNatPermit::TargetHostPort,
             0,
             1_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("the lan pool must have a free port");
     assert_eq!(
         translated.port, 20001,
@@ -6711,8 +6708,7 @@ fn pool_snat_lockfree_concurrent_fill_is_exact_and_collision_free() {
                     PersistentNatPermit::TargetHostPort,
                     0,
                     1_000,
-                    NatHolder::Untracked,
-                ) {
+                    NatHolder::Untracked, 0) {
                     local.push((t.ip, t.port));
                 }
             }
@@ -6799,8 +6795,7 @@ fn pool_snat_lockfree_concurrent_churn_no_double_alloc_no_leak() {
                     PersistentNatPermit::TargetHostPort,
                     0,
                     1_000,
-                    NatHolder::Untracked,
-                ) {
+                    NatHolder::Untracked, 0) {
                     Ok(t) => {
                         // No two live flows may hold the same translated tuple:
                         // the occupancy bit was exclusively ours, so the insert
@@ -6865,8 +6860,7 @@ fn pool_snat_release_frees_bit_and_port_is_reusable() {
             PersistentNatPermit::TargetHostPort,
             0,
             1_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
     };
 
     let t1 = alloc_one(mk(5001)).expect("first port");
@@ -6925,8 +6919,7 @@ fn pool_snat_fills_to_exact_capacity_then_exhausts() {
                 PersistentNatPermit::TargetHostPort,
                 0,
                 1_000,
-                NatHolder::Untracked,
-            )
+                NatHolder::Untracked, 0)
             .expect("must allocate up to exact capacity without false exhaustion");
         assert!(
             ports.insert(t.port),
@@ -6955,8 +6948,7 @@ fn pool_snat_fills_to_exact_capacity_then_exhausts() {
                 PersistentNatPermit::TargetHostPort,
                 0,
                 1_000,
-                NatHolder::Untracked,
-            )
+                NatHolder::Untracked, 0)
             .is_err(),
         "one flow beyond exact capacity must exhaust"
     );
@@ -7239,8 +7231,7 @@ fn pool_snat_gc_chunked_concurrent_alloc_release_stays_consistent() {
                         PersistentNatPermit::AnyRemoteHost,
                         NS_PER_SEC,
                         now_ns,
-                        NatHolder::Untracked,
-                    ) {
+                        NatHolder::Untracked, 0) {
                         assert!(
                             alloc.release_flow(flow, translated, now_ns + 1, NatHolder::Untracked),
                             "release of a just-allocated unique flow must succeed"
@@ -7768,8 +7759,7 @@ fn untracked_allocation_still_frees_on_first_release_6211_f2() {
             PersistentNatPermit::TargetHostPort,
             0,
             1_000,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("a fresh pool port must be available");
     assert!(
         rules[0]
@@ -8951,8 +8941,7 @@ fn mint_f6_idle_record_10784(rule: &SourceNatRule) -> IdleLeaseRecord {
             PersistentNatPermit::AnyRemoteHost,
             rule.persistent_nat_timeout_ns,
             NS_PER_SEC,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("fixture: persistent pool must mint an idle-lease record");
     assert!(rule.pool_allocator.release_flow(
         flow,
@@ -10519,8 +10508,7 @@ fn stale_persistent_record_10784() -> IdleLeaseRecord {
             PersistentNatPermit::AnyRemoteHost,
             300 * NS_PER_SEC,
             NS_PER_SEC,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("fixture: source allocator must mint a lease");
     assert!(allocator.release_flow(
         flow,
@@ -10607,8 +10595,7 @@ fn extended_per_key_clear_fence_survives_retained_pool_key_change_10784() {
             PersistentNatPermit::AnyRemoteHost,
             rule.persistent_nat_timeout_ns,
             NS_PER_SEC,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("fixture: rule allocator must mint a persistent flow");
     assert!(rule.pool_allocator.release_flow(
         flow,
@@ -10629,8 +10616,7 @@ fn extended_per_key_clear_fence_survives_retained_pool_key_change_10784() {
             PersistentNatPermit::AnyRemoteHost,
             rule.persistent_nat_timeout_ns,
             4 * NS_PER_SEC,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("fixture: the pre-clear lease must be active again");
     assert_eq!(reactivated, translated);
     assert_eq!(
@@ -10703,8 +10689,7 @@ fn retained_pool_reseed_bounds_clear_fence_map_10784() {
                 PersistentNatPermit::AnyRemoteHost,
                 rule.persistent_nat_timeout_ns,
                 now_ns,
-                NatHolder::Untracked,
-            )
+                NatHolder::Untracked, 0)
             .expect("fixture: each distinct source must mint a persistent lease");
         assert!(rule.pool_allocator.release_flow(
             flow,
@@ -10754,8 +10739,7 @@ fn retained_pool_reseed_prunes_expired_clear_fences_10784() {
             PersistentNatPermit::AnyRemoteHost,
             rule.persistent_nat_timeout_ns,
             NS_PER_SEC,
-            NatHolder::Untracked,
-        )
+            NatHolder::Untracked, 0)
         .expect("fixture: rule allocator must mint a persistent lease");
     assert!(rule.pool_allocator.release_flow(
         flow,
@@ -11006,8 +10990,7 @@ fn m13_allocate(
         PersistentNatPermit::TargetHostPort,
         0,
         1_000,
-        NatHolder::Untracked,
-    )
+        NatHolder::Untracked, 0)
 }
 
 /// #7174 M13 fail-on-revert: a claim against an address whose every port is
@@ -11903,8 +11886,7 @@ fn allocate_for_holder_9145(
             PersistentNatPermit::TargetHostPort,
             0,
             1_000,
-            holder,
-        )
+            holder, 0)
         .expect("allocation must succeed on a free range")
 }
 
@@ -12093,8 +12075,7 @@ fn recycle_amortization_9327() {
                 PersistentNatPermit::TargetHostPort,
                 0,
                 1_000,
-                NatHolder::Untracked,
-            );
+                NatHolder::Untracked, 0);
             let now = alloc.debug_recycle_scan_pops(0);
             per_claim.push(now - last);
             last = now;
@@ -12153,8 +12134,7 @@ fn the_recycled_phase_does_not_amortize_at_f_equals_one_9327() {
             PersistentNatPermit::TargetHostPort,
             0,
             1_000,
-            NatHolder::Untracked,
-        );
+            NatHolder::Untracked, 0);
         let now = alloc.debug_recycle_scan_pops(0);
         per_claim.push(now - last);
         last = now;
@@ -12783,8 +12763,7 @@ fn drive_recycled_claims_9392(alloc: &PortAllocator, pool_ip: Ipv4Addr, claims: 
             PersistentNatPermit::TargetHostPort,
             0,
             1_000,
-            NatHolder::Untracked,
-        );
+            NatHolder::Untracked, 0);
         if let Ok(t) = got {
             alloc.debug_free_recycle(0, t.port);
         }

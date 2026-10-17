@@ -809,12 +809,18 @@ impl crate::afxdp::ha::SessionDomain {
         let counts = crate::afxdp::bpf_map::clear_bpf_conntrack_maps(v4_fd, v6_fd)?;
         for key in keys {
             let _ = self.delete_synced_session_gen_marked(
-                key, 0, false, false, Some(&fence), false, 0, None, None,
+                key,
+                0,
+                false,
+                false,
+                Some(&fence),
+                false,
+                0,
+                None,
+                None,
             );
         }
-        self.sessions
-            .owner_rg_indexes
-            .clear(&self.sessions.synced);
+        self.sessions.owner_rg_indexes.clear(&self.sessions.synced);
         lock_shared_recover(&self.sessions.nat).clear();
         lock_shared_recover(&self.sessions.forward_wire).clear();
         drop(fence);
@@ -1072,10 +1078,7 @@ impl crate::afxdp::ha::SessionDomain {
         }
         if previous_entry.as_ref().is_some_and(|current| {
             !current.metadata.is_reverse
-                && !gate_keys.contains(&reverse_session_key(
-                    &current.key,
-                    current.decision.nat,
-                ))
+                && !gate_keys.contains(&reverse_session_key(&current.key, current.decision.nat))
         }) {
             // The replacement changed NAT while this call waited; its current
             // companion is not covered by the candidate lease keys. Refuse
@@ -1179,7 +1182,11 @@ impl crate::afxdp::ha::SessionDomain {
                 let control_tuple = crate::nat::conflicts_with_local_control_tuple(
                     entry.key.protocol,
                     translated_port,
-                    entry.decision.nat.rewrite_dst_port.unwrap_or(entry.key.dst_port),
+                    entry
+                        .decision
+                        .nat
+                        .rewrite_dst_port
+                        .unwrap_or(entry.key.dst_port),
                 );
                 let egress_matches = forwarding.egress.is_empty()
                     || forwarding.egress.values().any(|egress| {
@@ -1423,12 +1430,12 @@ impl crate::afxdp::ha::SessionDomain {
             // poisoned queue (same policy as update_ha_state).
             let mut pending = worker_queue::lock_recover(&rec.handle.commands);
             let mut forward_position = None;
-            if !worker_queue::push_bounded(
-                &mut pending,
-                WorkerCommand::UpsertSynced(entry.clone()),
-            ) {
-                forward_position =
-                    Some(worker_queue::session_import_repair_position(worker_id, pending.len()));
+            if !worker_queue::push_bounded(&mut pending, WorkerCommand::UpsertSynced(entry.clone()))
+            {
+                forward_position = Some(worker_queue::session_import_repair_position(
+                    worker_id,
+                    pending.len(),
+                ));
             }
             let mut reverse_position = None;
             if let Some(reverse) = &reverse_entry
@@ -1437,8 +1444,10 @@ impl crate::afxdp::ha::SessionDomain {
                     WorkerCommand::UpsertSynced(reverse.clone()),
                 )
             {
-                reverse_position =
-                    Some(worker_queue::session_import_repair_position(worker_id, pending.len()));
+                reverse_position = Some(worker_queue::session_import_repair_position(
+                    worker_id,
+                    pending.len(),
+                ));
             }
             if let Some(call) = pptp_call {
                 // Queue after the session replica so the worker first has the
@@ -1575,7 +1584,17 @@ impl crate::afxdp::ha::SessionDomain {
     ) -> SyncedDeleteOutcome {
         // Helper-local deletes (tunnel-remap purge, GC) are authoritative and
         // carry no peer install generation — apply unconditionally.
-        self.delete_synced_session_gen_marked(key, 0, false, forward_only, None, false, 0, None, None)
+        self.delete_synced_session_gen_marked(
+            key,
+            0,
+            false,
+            forward_only,
+            None,
+            false,
+            0,
+            None,
+            None,
+        )
     }
 
     pub(crate) fn delete_synced_session_mirror(
@@ -1583,7 +1602,17 @@ impl crate::afxdp::ha::SessionDomain {
         key: SessionKey,
         forward_only: bool,
     ) -> SyncedDeleteOutcome {
-        self.delete_synced_session_gen_marked(key, 0, false, forward_only, None, true, 0, None, None)
+        self.delete_synced_session_gen_marked(
+            key,
+            0,
+            false,
+            forward_only,
+            None,
+            true,
+            0,
+            None,
+            None,
+        )
     }
 
     /// #10512: one micro-batch match's SHARED-store conditional remove. The
@@ -1722,7 +1751,17 @@ impl crate::afxdp::ha::SessionDomain {
         key: SessionKey,
         forward_only: bool,
     ) -> SyncedDeleteOutcome {
-        self.delete_synced_session_gen_marked(key, 0, true, forward_only, None, false, 0, None, None)
+        self.delete_synced_session_gen_marked(
+            key,
+            0,
+            true,
+            forward_only,
+            None,
+            false,
+            0,
+            None,
+            None,
+        )
     }
 
     pub(crate) fn delete_peer_synced_session_mirror(
@@ -1750,7 +1789,17 @@ impl crate::afxdp::ha::SessionDomain {
         if expected_id == 0 {
             return SyncedDeleteOutcome::RefusedIdentity;
         }
-        self.delete_synced_session_gen_marked(key, 0, true, forward_only, None, true, expected_id, None, None)
+        self.delete_synced_session_gen_marked(
+            key,
+            0,
+            true,
+            forward_only,
+            None,
+            true,
+            expected_id,
+            None,
+            None,
+        )
     }
 
     /// #2170 delete-side guard (belt-and-suspenders for any helper-side delete
@@ -1951,8 +2000,7 @@ impl crate::afxdp::ha::SessionDomain {
                 // different tenant incarnation entirely. Zero disables.
                 // Same-key NAT replacement cleanup is conditional on the exact
                 // synthesized reverse incarnation captured by the importer.
-                if let Some((owner_key, generation, session_id)) =
-                    expected_reverse_owner.as_ref()
+                if let Some((owner_key, generation, session_id)) = expected_reverse_owner.as_ref()
                     && (!current.metadata.is_reverse
                         || current.generation != *generation
                         || current.session_id != *session_id
@@ -2965,6 +3013,7 @@ mod rejected_mirror_reservation_10790_tests {
                             src_ip: key.src_ip,
                             src_port: key.src_port,
                             routing_scope: key.routing_domain,
+                            egress_scope: 0,
                             remote: None,
                             permit_any_remote: false,
                             permitted_remotes: Vec::new(),

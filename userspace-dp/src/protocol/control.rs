@@ -253,7 +253,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // wire records so endpoint-independent mappings retain inbound admission scope.
 // v48 -> v49 (#13957): GRE tunnel snapshots carry clear_dont_fragment_bit;
 // older helpers cannot honor the configured outer-DF behavior.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 49;
+// v49 -> v50 (#14322): persistent-NAT lease identity gained EgressScope.
+// The manager gates both lease-control verbs on an observed v50 helper;
+// without that gate an old helper would ignore the field and merge two
+// egress zones' permissions into one lease.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 50;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
@@ -493,7 +497,6 @@ pub(crate) struct FibRouteWire {
     #[serde(default)]
     pub mtu: u32,
 }
-
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct SlowPathStatus {
@@ -1505,6 +1508,12 @@ pub(crate) struct IdleLeaseWire {
     /// than interpreting it as domain 0.
     #[serde(rename = "routing_scope", default)]
     pub routing_scope: Option<u32>,
+    /// #14322: required on the v50 lease-control wire. `None` means a
+    /// pre-v50 helper omitted the field; handlers reject that record rather
+    /// than merging its permissions into the unscoped lease. A non-zero value
+    /// is the admitting rule's folded egress-zone scope; 0 is unscoped.
+    #[serde(rename = "egress_scope", default)]
+    pub egress_scope: Option<u32>,
     /// Retained legacy scope fields; current permission grants are below.
     #[serde(
         rename = "remote_ip",
@@ -1526,17 +1535,41 @@ pub(crate) struct IdleLeaseWire {
     pub address_only: bool,
     #[serde(rename = "deterministic", default, skip_serializing_if = "is_false")]
     pub deterministic: bool,
-    #[serde(rename = "deterministic_mode", default, skip_serializing_if = "is_zero_u8")]
+    #[serde(
+        rename = "deterministic_mode",
+        default,
+        skip_serializing_if = "is_zero_u8"
+    )]
     pub deterministic_mode: u8,
-    #[serde(rename = "deterministic_block_size", default, skip_serializing_if = "is_zero_u16")]
+    #[serde(
+        rename = "deterministic_block_size",
+        default,
+        skip_serializing_if = "is_zero_u16"
+    )]
     pub deterministic_block_size: u16,
-    #[serde(rename = "deterministic_blocks_per_ip", default, skip_serializing_if = "is_zero_u16")]
+    #[serde(
+        rename = "deterministic_blocks_per_ip",
+        default,
+        skip_serializing_if = "is_zero_u16"
+    )]
     pub deterministic_blocks_per_ip: u16,
-    #[serde(rename = "deterministic_host_prefix_len", default, skip_serializing_if = "is_zero_u8")]
+    #[serde(
+        rename = "deterministic_host_prefix_len",
+        default,
+        skip_serializing_if = "is_zero_u8"
+    )]
     pub deterministic_host_prefix_len: u8,
-    #[serde(rename = "deterministic_host_base", default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        rename = "deterministic_host_base",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub deterministic_host_base: String,
-    #[serde(rename = "deterministic_host_count", default, skip_serializing_if = "is_zero_u32")]
+    #[serde(
+        rename = "deterministic_host_count",
+        default,
+        skip_serializing_if = "is_zero_u32"
+    )]
     pub deterministic_host_count: u32,
     #[serde(rename = "remaining_ns", default)]
     pub remaining_ns: u64,
@@ -1570,6 +1603,12 @@ pub(crate) struct DisplayLeaseWire {
     /// subscriber identities are distinguishable in the SHOW output.
     #[serde(rename = "routing_scope", default)]
     pub routing_scope: Option<u32>,
+    /// #14322: required on the v50 lease-control wire. `None` means a
+    /// pre-v50 helper omitted the field; handlers reject that record rather
+    /// than merging its permissions into the unscoped lease. A non-zero value
+    /// is the admitting rule's folded egress-zone scope; 0 is unscoped.
+    #[serde(rename = "egress_scope", default)]
+    pub egress_scope: Option<u32>,
     /// Retained legacy scope fields; current permission grants are below.
     #[serde(
         rename = "remote_ip",
@@ -1591,17 +1630,41 @@ pub(crate) struct DisplayLeaseWire {
     pub address_only: bool,
     #[serde(rename = "deterministic", default, skip_serializing_if = "is_false")]
     pub deterministic: bool,
-    #[serde(rename = "deterministic_mode", default, skip_serializing_if = "is_zero_u8")]
+    #[serde(
+        rename = "deterministic_mode",
+        default,
+        skip_serializing_if = "is_zero_u8"
+    )]
     pub deterministic_mode: u8,
-    #[serde(rename = "deterministic_block_size", default, skip_serializing_if = "is_zero_u16")]
+    #[serde(
+        rename = "deterministic_block_size",
+        default,
+        skip_serializing_if = "is_zero_u16"
+    )]
     pub deterministic_block_size: u16,
-    #[serde(rename = "deterministic_blocks_per_ip", default, skip_serializing_if = "is_zero_u16")]
+    #[serde(
+        rename = "deterministic_blocks_per_ip",
+        default,
+        skip_serializing_if = "is_zero_u16"
+    )]
     pub deterministic_blocks_per_ip: u16,
-    #[serde(rename = "deterministic_host_prefix_len", default, skip_serializing_if = "is_zero_u8")]
+    #[serde(
+        rename = "deterministic_host_prefix_len",
+        default,
+        skip_serializing_if = "is_zero_u8"
+    )]
     pub deterministic_host_prefix_len: u8,
-    #[serde(rename = "deterministic_host_base", default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        rename = "deterministic_host_base",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub deterministic_host_base: String,
-    #[serde(rename = "deterministic_host_count", default, skip_serializing_if = "is_zero_u32")]
+    #[serde(
+        rename = "deterministic_host_count",
+        default,
+        skip_serializing_if = "is_zero_u32"
+    )]
     pub deterministic_host_count: u32,
     /// RAW remaining lifetime. Meaningful only when `active_flows == 0` — while
     /// flows are live the allocator does not refresh the deadline, so this is
@@ -1619,8 +1682,12 @@ pub(crate) struct DisplayLeaseWire {
 fn is_zero_u16(v: &u16) -> bool {
     *v == 0
 }
-fn is_zero_u8(v: &u8) -> bool { *v == 0 }
-fn is_zero_u32(v: &u32) -> bool { *v == 0 }
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
+}
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
 
 fn is_false(v: &bool) -> bool {
     !*v

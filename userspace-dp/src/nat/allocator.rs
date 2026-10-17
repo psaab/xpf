@@ -140,52 +140,69 @@ pub(super) struct PersistentSourceKey {
     pub(super) remote: Option<(IpAddr, u16)>,
 }
 
-/// Remote destinations that have used an endpoint-independent lease. Port 0
-/// represents a target-host grant; `any_remote` represents unrestricted inbound.
+/// #14322: egress-zone scope for persistent-NAT inbound PERMISSIONS.
+/// `0` is the unscoped sentinel (NAT64 BIBs, legacy/imported records, direct
+/// allocator calls). Lease identity (`PersistentSourceKey`) intentionally
+/// excludes this: two rules sharing one pool must share one lease/tuple
+/// (#9389), while their grants must not merge.
+pub(super) const PERSISTENT_NAT_EGRESS_UNSCOPED: u32 = 0;
+const EGRESS_SCOPE_OFFSET_BASIS: u32 = 0x811c_9dc5;
+const EGRESS_SCOPE_PRIME: u32 = 0x0100_0193;
+/// Deterministically folds the admitting rule's zone pair. Never returns 0.
+pub(super) fn persistent_egress_scope(from_zone: &str, to_zone: &str) -> u32 {
+    let mut hash = EGRESS_SCOPE_OFFSET_BASIS;
+    for byte in from_zone.bytes().chain(std::iter::once(0)).chain(to_zone.bytes()) {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(EGRESS_SCOPE_PRIME);
+    }
+    hash.wrapping_add(1)
+}
+
+/// One egress zone's inbound grants for a lease.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct PersistentPermissions {
+pub(super) struct PersistentPermissionScope {
     pub(super) any_remote: bool,
     pub(super) remotes: FxHashSet<(IpAddr, u16)>,
 }
 
+/// Grants bucketed by egress scope, with the 1024-remote cap across all buckets.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct PersistentPermissions {
+    pub(super) scopes: FxHashMap<u32, PersistentPermissionScope>,
+}
+
 pub(super) const MAX_PERSISTENT_PERMITTED_REMOTES: usize = 1024;
 impl PersistentPermissions {
-
-    fn can_record(&self, permit: PersistentNatPermit, flow: SourceNatFlowKey) -> bool {
+    fn scope(&self, egress_scope: u32) -> Option<&PersistentPermissionScope> { self.scopes.get(&egress_scope) }
+    fn total_remotes(&self) -> usize { self.scopes.values().map(|s| s.remotes.len()).sum() }
+    fn can_record(&self, permit: PersistentNatPermit, flow: SourceNatFlowKey, egress_scope: u32) -> bool {
         match permit {
             PersistentNatPermit::AnyRemoteHost => true,
-            PersistentNatPermit::TargetHost => {
-                self.remotes.contains(&(flow.dst_ip, 0))
-                    || self.remotes.len() < MAX_PERSISTENT_PERMITTED_REMOTES
-            }
-            PersistentNatPermit::TargetHostPort => {
-                self.remotes.contains(&(flow.dst_ip, flow.dst_port))
-                    || self.remotes.len() < MAX_PERSISTENT_PERMITTED_REMOTES
-            }
+            PersistentNatPermit::TargetHost => self.scope(egress_scope).is_some_and(|s| s.remotes.contains(&(flow.dst_ip, 0))) || self.total_remotes() < MAX_PERSISTENT_PERMITTED_REMOTES,
+            PersistentNatPermit::TargetHostPort => self.scope(egress_scope).is_some_and(|s| s.remotes.contains(&(flow.dst_ip, flow.dst_port))) || self.total_remotes() < MAX_PERSISTENT_PERMITTED_REMOTES,
         }
     }
-
-    fn record(&mut self, permit: PersistentNatPermit, flow: SourceNatFlowKey) -> bool {
-        if !self.can_record(permit, flow) {
-            return false;
-        }
+    fn record(&mut self, permit: PersistentNatPermit, flow: SourceNatFlowKey, egress_scope: u32) -> bool {
+        if !self.can_record(permit, flow, egress_scope) { return false; }
+        let scope = self.scopes.entry(egress_scope).or_default();
         match permit {
-            PersistentNatPermit::AnyRemoteHost => self.any_remote = true,
-            PersistentNatPermit::TargetHost => {
-                self.remotes.insert((flow.dst_ip, 0));
-            }
-            PersistentNatPermit::TargetHostPort => {
-                self.remotes.insert((flow.dst_ip, flow.dst_port));
-            }
+            PersistentNatPermit::AnyRemoteHost => scope.any_remote = true,
+            PersistentNatPermit::TargetHost => { scope.remotes.insert((flow.dst_ip, 0)); }
+            PersistentNatPermit::TargetHostPort => { scope.remotes.insert((flow.dst_ip, flow.dst_port)); }
         }
         true
     }
-
-    pub(super) fn permits(&self, remote_ip: IpAddr, remote_port: u16) -> bool {
-        self.any_remote
-            || self.remotes.contains(&(remote_ip, 0))
-            || self.remotes.contains(&(remote_ip, remote_port))
+    pub(super) fn permits(&self, egress_scope: u32, remote_ip: IpAddr, remote_port: u16) -> bool {
+        let granted = |s: &PersistentPermissionScope| s.any_remote || s.remotes.contains(&(remote_ip, 0)) || s.remotes.contains(&(remote_ip, remote_port));
+        if egress_scope != PERSISTENT_NAT_EGRESS_UNSCOPED {
+            return self.scope(egress_scope).is_some_and(granted);
+        }
+        self.scopes.values().any(granted)
     }
+    #[cfg(test)]
+    pub(super) fn any_remote(&self) -> bool { self.scopes.values().any(|s| s.any_remote) }
+    #[cfg(test)]
+    pub(super) fn remotes_len(&self) -> usize { self.total_remotes() }
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -1029,92 +1046,39 @@ impl PortAllocatorLiveState {
         }
     }
 
-    fn add_persistent_address_only_owner(
-        &mut self,
-        key: PersistentSourceKey,
-        lease: PersistentLease,
-    ) {
-        if !lease.address_only || lease.revoked {
-            return;
+    fn persistent_address_only_owner_keys(&self, key: &PersistentSourceKey, lease: &PersistentLease) -> Vec<PersistentAddressOnlyOwnerKey> {
+        if !lease.address_only || lease.revoked { return Vec::new(); }
+        // #14322: derive from stored permission buckets; key.remote is always None.
+        let base = ReverseIdentityBaseKey { protocol: key.protocol, translated_ip: lease.translated.ip, translated_port: lease.translated.port };
+        let mut out = vec![PersistentAddressOnlyOwnerKey::Any(base)];
+        let Some(permissions) = self.persistent_permissions.get(key) else { return out; };
+        let mut any_remote = false;
+        let mut remotes = std::collections::BTreeSet::new();
+        for scope in permissions.scopes.values() {
+            any_remote |= scope.any_remote;
+            remotes.extend(scope.remotes.iter().copied());
         }
-        let base = ReverseIdentityBaseKey {
-            protocol: key.protocol,
-            translated_ip: lease.translated.ip,
-            translated_port: lease.translated.port,
-        };
-        self.increment_persistent_address_only_owner(PersistentAddressOnlyOwnerKey::Any(base));
-        match key.remote {
-            Some((dst_ip, dst_port)) => {
-                let host = ReverseIdentityHostKey { base, dst_ip };
-                self.increment_persistent_address_only_owner(
-                    PersistentAddressOnlyOwnerKey::Host(host),
-                );
-                if dst_port == 0 {
-                    self.increment_persistent_address_only_owner(
-                        PersistentAddressOnlyOwnerKey::HostWildcard(host),
-                    );
-                } else {
-                    self.increment_persistent_address_only_owner(
-                        PersistentAddressOnlyOwnerKey::Exact(AddressOnlyReverseKey {
-                            protocol: key.protocol,
-                            translated_ip: lease.translated.ip,
-                            translated_port: lease.translated.port,
-                            dst_ip,
-                            dst_port,
-                        }),
-                    );
-                }
-            }
-            None => {
-                self.increment_persistent_address_only_owner(
-                    PersistentAddressOnlyOwnerKey::AnyWildcard(base),
-                );
-            }
+        if any_remote { out.push(PersistentAddressOnlyOwnerKey::AnyWildcard(base)); }
+        for (dst_ip, dst_port) in remotes {
+            let host = ReverseIdentityHostKey { base, dst_ip };
+            out.push(PersistentAddressOnlyOwnerKey::Host(host));
+            if dst_port == 0 { out.push(PersistentAddressOnlyOwnerKey::HostWildcard(host)); }
+            else { out.push(PersistentAddressOnlyOwnerKey::Exact(AddressOnlyReverseKey { protocol: key.protocol, translated_ip: lease.translated.ip, translated_port: lease.translated.port, dst_ip, dst_port })); }
         }
+        out.sort_by_key(|k| match k {
+            PersistentAddressOnlyOwnerKey::Exact(a) => (0, a.translated_ip, a.translated_port, a.dst_ip, a.dst_port),
+            PersistentAddressOnlyOwnerKey::Host(h) => (1, h.base.translated_ip, h.base.translated_port, h.dst_ip, 0),
+            PersistentAddressOnlyOwnerKey::HostWildcard(h) => (2, h.base.translated_ip, h.base.translated_port, h.dst_ip, 0),
+            PersistentAddressOnlyOwnerKey::Any(b) => (3, b.translated_ip, b.translated_port, std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
+            PersistentAddressOnlyOwnerKey::AnyWildcard(b) => (4, b.translated_ip, b.translated_port, std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
+        });
+        out.dedup(); out
     }
-
-    fn remove_persistent_address_only_owner(
-        &mut self,
-        key: PersistentSourceKey,
-        lease: PersistentLease,
-    ) {
-        if !lease.address_only || lease.revoked {
-            return;
-        }
-        let base = ReverseIdentityBaseKey {
-            protocol: key.protocol,
-            translated_ip: lease.translated.ip,
-            translated_port: lease.translated.port,
-        };
-        self.decrement_persistent_address_only_owner(PersistentAddressOnlyOwnerKey::Any(base));
-        match key.remote {
-            Some((dst_ip, dst_port)) => {
-                let host = ReverseIdentityHostKey { base, dst_ip };
-                self.decrement_persistent_address_only_owner(
-                    PersistentAddressOnlyOwnerKey::Host(host),
-                );
-                if dst_port == 0 {
-                    self.decrement_persistent_address_only_owner(
-                        PersistentAddressOnlyOwnerKey::HostWildcard(host),
-                    );
-                } else {
-                    self.decrement_persistent_address_only_owner(
-                        PersistentAddressOnlyOwnerKey::Exact(AddressOnlyReverseKey {
-                            protocol: key.protocol,
-                            translated_ip: lease.translated.ip,
-                            translated_port: lease.translated.port,
-                            dst_ip,
-                            dst_port,
-                        }),
-                    );
-                }
-            }
-            None => {
-                self.decrement_persistent_address_only_owner(
-                    PersistentAddressOnlyOwnerKey::AnyWildcard(base),
-                );
-            }
-        }
+    fn add_persistent_address_only_owner(&mut self, key: PersistentSourceKey, lease: PersistentLease) {
+        for owner_key in self.persistent_address_only_owner_keys(&key, &lease) { self.increment_persistent_address_only_owner(owner_key); }
+    }
+    fn remove_persistent_address_only_owner(&mut self, key: PersistentSourceKey, lease: PersistentLease) {
+        for owner_key in self.persistent_address_only_owner_keys(&key, &lease) { self.decrement_persistent_address_only_owner(owner_key); }
     }
 
     fn remove_persistent_reverse_owner(
@@ -1183,11 +1147,31 @@ impl PortAllocatorLiveState {
         key: PersistentSourceKey,
         permit: PersistentNatPermit,
         flow: SourceNatFlowKey,
+        egress_scope: u32,
     ) -> bool {
-        self.persistent_permissions
+        // #14322: an address-only lease's owner index is derived from its
+        // stored grants; a grant recorded after mint must add its owner keys
+        // or contention checks would miss the new exact/host identity.
+        let lease = self.persistent_by_source.get(&key).copied();
+        let before = lease.map(|l| self.persistent_address_only_owner_keys(&key, &l)).unwrap_or_default();
+        let recorded = self
+            .persistent_permissions
             .entry(key)
             .or_default()
-            .record(permit, flow)
+            .record(permit, flow, egress_scope);
+        if recorded {
+            if let Some(l) = lease {
+                if l.address_only && !l.revoked {
+                    let after = self.persistent_address_only_owner_keys(&key, &l);
+                    for owner_key in after {
+                        if !before.contains(&owner_key) {
+                            self.increment_persistent_address_only_owner(owner_key);
+                        }
+                    }
+                }
+            }
+        }
+        recorded
     }
     /// Drop expired clear fences during the cold-path lease snapshot refresh.
     /// This keeps the replay guard bounded even when no later clear occurs.
@@ -2306,7 +2290,14 @@ impl PortAllocator {
         remote_ip: IpAddr,
         remote_port: u16,
         now_ns: u64,
+        from_zone: &str,
+        ingress_zone: &str,
     ) -> PersistentInbound {
+        let arrival_scope = if from_zone.is_empty() || ingress_zone.is_empty() {
+            PERSISTENT_NAT_EGRESS_UNSCOPED
+        } else {
+            persistent_egress_scope(from_zone, ingress_zone)
+        };
         let reverse = ReverseIdentityBaseKey {
             protocol,
             translated_ip,
@@ -2317,6 +2308,7 @@ impl PortAllocator {
             return PersistentInbound::Miss;
         };
         let mut matched = None;
+        let mut saw_lease = false;
         for key in keys {
             let Some(lease) = live.persistent_by_source.get(key) else {
                 continue;
@@ -2324,10 +2316,11 @@ impl PortAllocator {
             if lease.revoked || (lease.active_flows == 0 && lease.expires_at_ns <= now_ns) {
                 continue;
             }
+            saw_lease = true;
             let permitted = live
                 .persistent_permissions
                 .get(key)
-                .is_some_and(|permissions| permissions.permits(remote_ip, remote_port));
+                .is_some_and(|permissions| permissions.permits(arrival_scope, remote_ip, remote_port));
             if !permitted {
                 continue;
             }
@@ -2341,18 +2334,23 @@ impl PortAllocator {
             }
             matched = Some(candidate);
         }
-        matched.unwrap_or(PersistentInbound::Denied)
+        match matched {
+            Some(c) => c,
+            None if saw_lease => PersistentInbound::Denied,
+            None => PersistentInbound::Miss,
+        }
     }
 
     pub(super) fn record_synced_persistent_permission(
         &self,
         flow: SourceNatFlowKey,
         permit: PersistentNatPermit,
+        egress_scope: u32,
     ) {
         let key = flow.persistent_source_key(permit);
         let mut live = self.lock_live();
         if live.persistent_by_source.contains_key(&key) {
-            live.record_persistent_permission(key, permit, flow);
+            live.record_persistent_permission(key, permit, flow, egress_scope);
         }
     }
     /// Atomically capture a flow's complete incumbent snapshot and retain the
@@ -2845,7 +2843,7 @@ impl PortAllocator {
             src_ip: rec.src_ip,
             src_port: rec.src_port,
             routing_scope: rec.routing_scope,
-            remote: rec.remote,
+            remote: None,
         };
         let mut live = self.lock_live();
         let Some(lease) = live.persistent_by_source.get(&key).copied() else {
@@ -2918,6 +2916,7 @@ impl PortAllocator {
         persistent_nat_timeout_ns: u64,
         now_ns: u64,
         holder: NatHolder,
+        egress_scope: u32,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
         let out = self.allocate_translation_inner(
             flow,
@@ -2929,6 +2928,7 @@ impl PortAllocator {
             persistent_nat_timeout_ns,
             now_ns,
             holder,
+            egress_scope,
         );
         if persistent_nat {
             let counter = if out.is_ok() {
@@ -2957,6 +2957,7 @@ impl PortAllocator {
         // pre-#6522 single-holder contract and is what the test entry points
         // and the read-only fragment probe pass.
         holder: NatHolder,
+        egress_scope: u32,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
         if self.port_low == 0 || self.port_high == 0 || self.port_low > self.port_high {
             return Err(super::source::SourceNatFailureReason::InvalidPortRange);
@@ -3111,6 +3112,7 @@ impl PortAllocator {
             persistent_nat_timeout_ns,
             now_ns,
             holder,
+            egress_scope,
         )
     }
 
@@ -3136,6 +3138,7 @@ impl PortAllocator {
         // pre-#6522 single-holder contract and is what the test entry points
         // and the read-only fragment probe pass.
         holder: NatHolder,
+        egress_scope: u32,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
         let family_len = family_addresses.len();
         let mut live = self.lock_live();
@@ -3162,7 +3165,7 @@ impl PortAllocator {
                     !lease.revoked
                         && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
                         && live.persistent_permissions.get(&key).is_some_and(|permissions| {
-                            !permissions.can_record(persistent_nat_permit, flow)
+                            !permissions.can_record(persistent_nat_permit, flow, egress_scope)
                         })
                 })
             {
@@ -3180,7 +3183,7 @@ impl PortAllocator {
                 holder,
             ) {
                 LeaseReuse::Reused(translated) => {
-                    live.record_persistent_permission(key, persistent_nat_permit, flow);
+                    live.record_persistent_permission(key, persistent_nat_permit, flow, egress_scope);
                     return Ok(translated);
                 }
                 LeaseReuse::NoLease => {}
@@ -3283,7 +3286,7 @@ impl PortAllocator {
                             revoked: false,
                         },
                     );
-                    live.record_persistent_permission(key, persistent_nat_permit, flow);
+                    live.record_persistent_permission(key, persistent_nat_permit, flow, egress_scope);
                 }
                 live.live_by_flow.insert(
                     flow,
@@ -5923,6 +5926,7 @@ impl PortAllocator {
         // pre-#6522 single-holder contract and is what the test entry points
         // and the read-only fragment probe pass.
         holder: NatHolder,
+        egress_scope: u32,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
         let family_len = family_addresses.len();
         if family_len == 0 {
@@ -6066,7 +6070,7 @@ impl PortAllocator {
             && live
                 .persistent_permissions
                 .get(&key)
-                .is_some_and(|permissions| !permissions.can_record(persistent_nat_permit, flow))
+                .is_some_and(|permissions| !permissions.can_record(persistent_nat_permit, flow, egress_scope))
         {
             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
             return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
@@ -6244,7 +6248,7 @@ impl PortAllocator {
         }
 
         if !live_mode_mismatch {
-            live.record_persistent_permission(key, persistent_nat_permit, flow);
+            live.record_persistent_permission(key, persistent_nat_permit, flow, egress_scope);
         }
         live.live_by_flow.insert(
             flow,
