@@ -406,7 +406,7 @@ func buildSNMPIfData() []snmp.IfData {
 			admin = 1
 		}
 		oper := 2 // down
-		if attrs.OperState == netlink.OperUp || attrs.OperState == netlink.OperUnknown {
+		if linkOperUp(attrs) {
 			oper = 1
 		}
 		ifSpeed, ifHighSpeed := snmpIfSpeedValues(speedMbpsByIndex[attrs.Index])

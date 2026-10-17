@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/dhcp"
@@ -1256,7 +1257,7 @@ func (d *Daemon) runLinkStateSubscription(ctx context.Context, prevOper map[int]
 				continue
 			}
 			d.applyLinkState(prevOper, attrs.Index, attrs.Name,
-				attrs.OperState == netlink.OperUp, true)
+				linkOperUp(attrs), true)
 		}
 	}
 }
@@ -1283,8 +1284,23 @@ func (d *Daemon) resyncLinkState(prevOper map[int]bool, emit bool) {
 			continue
 		}
 		d.applyLinkState(prevOper, attrs.Index, attrs.Name,
-			attrs.OperState == netlink.OperUp, emit)
+			linkOperUp(attrs), emit)
 	}
+}
+
+// linkOperUp is the single "operationally up" predicate for the SNMP
+// monitoring plane (#14614): the link-trap monitor (stream + resync)
+// and buildSNMPIfData (ifTable ifOperStatus) both classify through it,
+// so a trap's ifOperStatus can never contradict ifTable for the same
+// ifIndex. It delegates to cluster.LinkAttrsUp — OperUp is up; an
+// OperUnknown link (xfrm/gre/wg/ip6tnl and VLAN sub-interfaces report
+// no independent carrier) is up only while admin-up (IFF_UP); every
+// other state is down. Classifying UNKNOWN as unconditionally up (the
+// pre-#14614 ifTable rule) reported an admin-down tunnel as up, and
+// classifying it as down (the pre-#14614 trap rule) silenced tunnel
+// traps and raised a false linkDown for every post-boot tunnel.
+func linkOperUp(attrs *netlink.LinkAttrs) bool {
+	return cluster.LinkAttrsUp(attrs)
 }
 
 // applyLinkState records the up/down state for ifindex against prevOper
