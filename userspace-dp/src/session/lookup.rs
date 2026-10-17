@@ -926,7 +926,8 @@ impl SessionTable {
     /// Find a live forward NAT candidate for an embedded quote without
     /// applying reverse-session egress admission. Unlike ordinary reverse
     /// admission, a quote may come from an off-path routing domain; if the
-    /// tuple is owned by multiple routing domains, its tenant is ambiguous.
+    /// tuple is owned by more than one distinct forward session, its
+    /// owner is ambiguous.
     pub(crate) fn find_forward_nat_quote_match_at(
         &self,
         reply_key: &SessionKey,
@@ -964,7 +965,14 @@ impl SessionTable {
                 continue;
             }
             if let Some(previous) = candidate {
-                if previous.key.routing_domain != record.key.routing_domain {
+                // #14375: any second passing candidate with a different
+                // forward key (or NAT decision) is ambiguous: the quote
+                // names only the post-NAT tuple, so a same-domain DNAT
+                // twin sharing the backend is indistinguishable from the
+                // first. Cross-domain twins are subsumed (different
+                // domains imply different forward keys). A repeat handle
+                // for the SAME forward key/decision is not ambiguity.
+                if previous.key != record.key || previous.entry.decision.nat != entry.decision.nat {
                     return ForwardNatQuoteLookup::Ambiguous;
                 }
             } else {

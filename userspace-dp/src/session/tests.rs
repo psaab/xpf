@@ -10671,6 +10671,91 @@ fn a_default_instance_reply_resolves_by_egress_domain_11298() {
         .expect("the default egress domain must match a default reply");
     assert_eq!(matched.key, forward);
 }
+/// #14375: two same-domain DNAT forwards to the same backend share one
+/// reverse (post-NAT) tuple. The embedded quote names only that tuple, so
+/// the local quote lookup must fail closed as Ambiguous instead of
+/// returning the first twin as Unique.
+#[test]
+fn quote_match_same_domain_dnat_shared_backend_twins_are_ambiguous_14375() {
+    const DOMAIN: u32 = 100_075;
+    let mut table = SessionTable::new();
+    let now = 1_000_000_000u64;
+    // Client 10.0.0.1:1111 -> VIP1/VIP2, both DNAT to 192.168.1.5:80.
+    let mut forward1 = key_v4();
+    forward1.src_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    forward1.src_port = 1111;
+    forward1.dst_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+    forward1.dst_port = 80;
+    forward1.routing_domain = DOMAIN;
+    let mut forward2 = forward1.clone();
+    forward2.dst_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2));
+    let nat = NatDecision {
+        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5))),
+        ..NatDecision::default()
+    };
+    let mut dec = decision();
+    dec.nat = nat;
+    assert!(table.install_with_protocol(forward1.clone(), dec, metadata(), now, PROTO_TCP, 0x10));
+    assert!(table.install_with_protocol(forward2.clone(), dec, metadata(), now, PROTO_TCP, 0x10));
+    // Quote probe: post-NAT tuple backend:80 -> client:1111, domain D.
+    let mut quote = super::key::reverse_wire_key(&forward1, nat);
+    quote.routing_domain = DOMAIN;
+    assert_eq!(
+        super::key::reverse_wire_key(&forward2, nat),
+        { let mut q = quote.clone(); q.routing_domain = 0; q },
+        "fixture premise: both twins share one post-NAT reverse tuple"
+    );
+    assert!(
+        matches!(
+            table.find_forward_nat_quote_match_at(&quote, now),
+            ForwardNatQuoteLookup::Ambiguous
+        ),
+        "same-domain DNAT twins sharing a backend must be Ambiguous, got {:?}",
+        table.find_forward_nat_quote_match_at(&quote, now)
+    );
+    // Single-candidate control returns Unique.
+    let mut single = SessionTable::new();
+    assert!(single.install_with_protocol(forward1.clone(), dec, metadata(), now, PROTO_TCP, 0x10));
+    assert!(
+        matches!(
+            &single.find_forward_nat_quote_match_at(&quote, now),
+            ForwardNatQuoteLookup::Unique(hit) if hit.key == forward1
+        ),
+        "single candidate must remain Unique"
+    );
+}
+
+/// #14375 control: cross-domain twins remain Ambiguous (pre-existing).
+#[test]
+fn quote_match_cross_domain_twins_still_ambiguous_14375() {
+    const DOMAIN_A: u32 = 100_076;
+    const DOMAIN_B: u32 = 100_077;
+    let mut table = SessionTable::new();
+    let now = 1_000_000_000u64;
+    let mut forward_a = key_v4();
+    forward_a.routing_domain = DOMAIN_A;
+    let mut forward_b = forward_a.clone();
+    forward_b.routing_domain = DOMAIN_B;
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))),
+        rewrite_src_port: Some(40_000),
+        ..NatDecision::default()
+    };
+    let mut dec = decision();
+    dec.nat = nat;
+    assert!(table.install_with_protocol(forward_a.clone(), dec, metadata(), now, PROTO_TCP, 0x10));
+    assert!(table.install_with_protocol(forward_b.clone(), dec, metadata(), now, PROTO_TCP, 0x10));
+    let mut quote = super::key::reverse_wire_key(&forward_a, nat);
+    quote.routing_domain = DOMAIN_A;
+    assert!(
+        matches!(
+            table.find_forward_nat_quote_match_at(&quote, now),
+            ForwardNatQuoteLookup::Ambiguous
+        ),
+        "cross-domain twins must remain Ambiguous"
+    );
+}
+
 
 /// `reverse_match_key` is the ONE name for the domain-agnostic convention, so
 /// the index side and the probe side cannot drift. It must be identity on a
