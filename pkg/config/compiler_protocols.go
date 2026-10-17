@@ -9,6 +9,46 @@ import (
 	"strings"
 )
 
+// validateLLDPInterfacePackedTokens rejects an unknown token on an LLDP
+// interface statement (#14616). Only the optional disable flag may follow
+// the interface name, in either shape: packed onto the interface node's
+// Keys (`interface ge-0/0/0 disable;`) or nested as a child (the braced
+// form, and the SetPath nesting of `set ... interface ge-0/0/0 disable`).
+// A duplicate disable is rejected as a second statement in that position.
+func validateLLDPInterfacePackedTokens(node *Node, _ *schemaNode) error {
+	if node == nil || len(node.Keys) == 0 {
+		return nil
+	}
+	seenChildDisable := false
+	for _, c := range node.Children {
+		if c == nil || len(c.Keys) == 0 {
+			continue
+		}
+		for _, tok := range c.Keys {
+			if tok != "disable" {
+				return fmt.Errorf("protocols lldp interface: unknown configuration keyword %q (valid: disable)", tok)
+			}
+		}
+		if len(c.Keys) > 1 {
+			return fmt.Errorf("protocols lldp interface: unknown configuration keyword %q (valid: disable)", c.Keys[1])
+		}
+		if seenChildDisable {
+			return fmt.Errorf("protocols lldp interface: unknown configuration keyword %q (valid: disable)", c.Keys[0])
+		}
+		seenChildDisable = true
+	}
+	if len(node.Keys) >= 2 && node.Keys[0] == "interface" {
+		seenDisable := false
+		for _, tok := range node.Keys[2:] {
+			if tok != "disable" || seenDisable {
+				return fmt.Errorf("protocols lldp interface: unknown configuration keyword %q (valid: disable)", tok)
+			}
+			seenDisable = true
+		}
+	}
+	return nil
+}
+
 func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warnings *[]string) error {
 	raNode := node.FindChild("router-advertisement")
 	if raNode != nil {
@@ -27,6 +67,25 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 					iface := LLDPInterface{Name: v}
 					if child.FindChild("disable") != nil {
 						iface.Disable = true
+					}
+					// #14616: the one-line spelling packs disable onto
+					// the interface node's own Keys. Strict rejects an
+					// unknown trailing token; tolerant warns and drops
+					// it, keeping a valid disable.
+					if err := validateLLDPInterfacePackedTokens(child, nil); err != nil {
+						if opts.lenientLLDPInterfaceTokens14616 {
+							*warnings = append(*warnings, fmt.Sprintf("protocols lldp interface %s: %v (ignored on tolerant load)", v, err))
+						} else {
+							return err
+						}
+					}
+					// Read packed disable even on the tolerant path
+					// (and after a strict pass it is known-valid).
+					for _, tok := range child.Keys[2:] {
+						if tok == "disable" {
+							iface.Disable = true
+							break
+						}
 					}
 					proto.LLDP.Interfaces = append(proto.LLDP.Interfaces, iface)
 				}

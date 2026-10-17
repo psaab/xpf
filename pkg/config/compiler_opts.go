@@ -3278,6 +3278,14 @@ type compileOpts struct {
 	// conflicting duplicate still boots (#1960); the reader keeps the
 	// last value (Junos last-wins). Commit / commit-check stay strict.
 	lenientAPIAuthDuplicateScalar bool
+	// lenientLLDPInterfaceTokens14616 downgrades the LLDP interface
+	// packed-tail token gate from a hard compile error to a warning on
+	// the tolerant load / peer-sync paths (#14616). Strict commit rejects
+	// an unknown trailing token on protocols lldp interface <name> ...;
+	// a persisted config an older binary accepted still boots (#1960),
+	// with the unknown token dropped exactly as before and a valid
+	// disable still taking effect.
+	lenientLLDPInterfaceTokens14616 bool
 }
 
 // lenientCompileOpts returns a compileOpts with every tolerant-path
@@ -3551,6 +3559,7 @@ func lenientCompileOpts() compileOpts {
 		lenientInterfaceSpeed:                  true,
 		lenientInterfaceNumericBounds:          true,
 		lenientBareLeafInstance9838:            true,
+		lenientLLDPInterfaceTokens14616:        true,
 		lenientSystemHostname:                  true,
 		lenientSystemLoginUID11826:             true,
 		lenientSystemAAA10831:                  true,
