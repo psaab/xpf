@@ -1544,7 +1544,20 @@ func compileRPM(node *Node, svc *ServicesConfig) error {
 						test.TestInterval = n
 					}
 				case "thresholds":
-					for _, th := range prop.Children {
+					// #14615: read through packedBody so the one-line
+					// spelling `thresholds successive-loss N;`
+					// (Keys=[thresholds,successive-loss,N], no
+					// Children) compiles exactly as the braced
+					// `thresholds { successive-loss N; }` does.
+					// Iterating only prop.Children dropped the
+					// inline value (ThresholdSuccessive stayed 0
+					// -> default 3) and let `successive-loss 0`
+					// bypass parseRPMPositiveInt. packedBody
+					// returns prop unchanged when there is no
+					// packed tail, so the block spelling is
+					// unaffected; a nil schema likewise returns
+					// the raw children.
+					for _, th := range packedBody(prop, rpmThresholdsSchema14615()).Children {
 						if th.Name() == "successive-loss" {
 							if v := nodeVal(th); v != "" {
 								n, err := parseRPMPositiveInt(probe.Name, test.Name, "thresholds successive-loss", v)

@@ -39,3 +39,15 @@ func rpmProbeTestSchema8939() *schemaNode {
 	}
 	return tst
 }
+
+// rpmThresholdsSchema14615 resolves `services rpm probe <p> test <t>
+// thresholds` so compileRPM can expand the one-line spelling
+// `thresholds successive-loss N;` through the same schema the block
+// spelling is validated against (#14615).
+func rpmThresholdsSchema14615() *schemaNode {
+	test := rpmProbeTestSchema8939()
+	if test == nil {
+		return nil
+	}
+	return resolveSchemaChild(test, "thresholds")
+}
