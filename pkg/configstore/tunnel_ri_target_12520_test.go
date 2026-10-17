@@ -70,11 +70,11 @@ func assertQuarantinedTunnelTargets12520(t *testing.T, cfg *config.Config) {
 	} {
 		ifName, target := tc.ifName, tc.target
 		ifc := cfg.Interfaces.Interfaces[ifName]
-		if ifc == nil || ifc.Tunnel == nil {
-			t.Fatalf("%s tunnel missing from compiled config", ifName)
+		if ifc == nil {
+			t.Fatalf("%s interface missing from compiled config", ifName)
 		}
-		if got := ifc.Tunnel.RoutingInstance; got != "" {
-			t.Errorf("%s target = %q, want quarantined default", ifName, got)
+		if ifc.Tunnel != nil {
+			t.Errorf("%s tunnel survived bad-target removal: %+v, want removed (#14390)", ifName, ifc.Tunnel)
 		}
 		found := false
 		for _, warning := range warnings {
@@ -160,8 +160,8 @@ func assertQuarantinedGRECollision12520(t *testing.T, cfg *config.Config, path s
 }
 
 // TestLoadAndSyncApplySkipQuarantinedGRECollision12520: a persisted tunnel
-// whose cleared target lands on another tunnel's GRE outer identity is skipped
-// on both tolerant paths, and the valid tunnel keeps it.
+// whose bad target would land on another tunnel's GRE outer identity is
+// removed on both tolerant paths (#14390), and the valid tunnel keeps it.
 func TestLoadAndSyncApplySkipQuarantinedGRECollision12520(t *testing.T) {
 	const legacy = `interfaces {
   gr-0/0/0 {

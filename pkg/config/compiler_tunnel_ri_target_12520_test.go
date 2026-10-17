@@ -26,8 +26,14 @@ func tunnelRITargetTree12520(t *testing.T, target, level string, instanceType st
 
 func tunnelConfigAtLevel12520(cfg *Config, level string) *TunnelConfig {
 	iface := cfg.Interfaces.Interfaces["gr-0/0/0"]
+	if iface == nil {
+		return nil
+	}
 	if level == "unit" {
-		return iface.Units[0].Tunnel
+		if unit := iface.Units[0]; unit != nil {
+			return unit.Tunnel
+		}
+		return nil
 	}
 	return iface.Tunnel
 }
@@ -57,8 +63,8 @@ func TestTunnelRoutingInstanceTargetsStrictAndTolerant12520(t *testing.T) {
 				if err != nil {
 					t.Fatalf("tolerant compile rejected legacy target %q: %v", tc.target, err)
 				}
-				if got := tunnelConfigAtLevel12520(cfg, level).RoutingInstance; got != "" {
-					t.Fatalf("tolerant tunnel target = %q, want quarantined target cleared to default", got)
+				if got := tunnelConfigAtLevel12520(cfg, level); got != nil {
+					t.Fatalf("tolerant tunnel survived bad-target removal: %+v, want tunnel removed (#14390)", got)
 				}
 				foundWarning := false
 				for _, warning := range cfg.Warnings {
@@ -112,8 +118,8 @@ func TestTunnelRoutingInstanceTolerantQuarantinesEveryClaim12520(t *testing.T) {
 		}
 	}
 	for _, ifName := range []string{"gr-0/0/0", "gr-0/0/1"} {
-		if got := cfg.Interfaces.Interfaces[ifName].Tunnel.RoutingInstance; got != "" {
-			t.Errorf("%s tunnel target = %q, want quarantined default", ifName, got)
+		if got := cfg.Interfaces.Interfaces[ifName].Tunnel; got != nil {
+			t.Errorf("%s tunnel survived bad-target removal: %+v, want removed (#14390)", ifName, got)
 		}
 	}
 }
@@ -139,16 +145,17 @@ func skipWarned12520(cfg *Config, skipped, owner string) bool {
 		if strings.Contains(warning, "is skipped on tolerant load") &&
 			strings.Contains(warning, "#12520") && strings.Contains(warning, "#10654") &&
 			strings.Contains(warning, fmt.Sprintf("tunnel %q", skipped)) &&
-			strings.Contains(warning, fmt.Sprintf("where tunnel %q", owner)) {
+			strings.Contains(warning, fmt.Sprintf("tunnel %q, which already owns it", owner)) {
 			return true
 		}
 	}
 	return false
 }
 
-// TestTolerantQuarantineSkipsCollidingGRETunnel12520 pins the post-clear
-// #10654 identity check: clearing a quarantined target must never let the
-// quarantined tunnel take a GRE outer identity from a tunnel that owns it.
+// TestTolerantQuarantineSkipsCollidingGRETunnel12520 pins the #10654
+// identity diagnostic under #14390 removal: every quarantined tunnel is
+// removed, and a quarantined GRE tunnel whose default-instance identity
+// another tunnel already owns gets the explicit collision warning.
 func TestTolerantQuarantineSkipsCollidingGRETunnel12520(t *testing.T) {
 	pair := func(ifName, target string) []string {
 		lines := []string{
@@ -194,9 +201,9 @@ func TestTolerantQuarantineSkipsCollidingGRETunnel12520(t *testing.T) {
 			skipped: [][2]string{{"gr-0/0/1.0", "gr-0/0/0.0"}},
 		},
 		{
-			name:    "two quarantined tunnels keep the first-sorting one",
+			name:    "two quarantined tunnels are both removed",
 			lines:   append(pair("gr-0/0/0", "missing"), pair("gr-0/0/1", "mgmt")...),
-			emitted: []string{"gr-0/0/0.0"},
+			emitted: nil,
 			skipped: [][2]string{{"gr-0/0/1.0", "gr-0/0/0.0"}},
 		},
 		{
@@ -226,7 +233,7 @@ func TestTolerantQuarantineSkipsCollidingGRETunnel12520(t *testing.T) {
 			name: "keyed quarantined tunnel does not collide with an unkeyed one",
 			lines: append(append(pair("gr-0/0/0", "missing"), pair("gr-0/0/1", "")...),
 				"set interfaces gr-0/0/0 tunnel key 5"),
-			emitted: []string{"gr-0/0/0.0", "gr-0/0/1.0"},
+			emitted: []string{"gr-0/0/1.0"},
 		},
 		{
 			name: "valid duplicates stay with the #10654 gate",
@@ -235,7 +242,7 @@ func TestTolerantQuarantineSkipsCollidingGRETunnel12520(t *testing.T) {
 				"set interfaces gr-0/0/2 tunnel destination 192.0.2.4",
 				"set interfaces gr-0/0/2 tunnel routing-instance destination missing",
 				"set interfaces gr-0/0/2 unit 0 family inet address 10.0.2.1/30"),
-			emitted: []string{"gr-0/0/0.0", "gr-0/0/1.0", "gr-0/0/2.0"},
+			emitted: []string{"gr-0/0/0.0", "gr-0/0/1.0"},
 		},
 	}
 	for _, tc := range cases {
@@ -340,9 +347,12 @@ func TestTunnelRITargetPreservesEstablishedTailGatePriority12520(t *testing.T) {
 }
 
 // TestSkippedInterfaceGREDeletesInheritingUnits13139: a quarantined
-// interface-level GRE tunnel that loses its cleared outer identity must not
-// leave its inheriting unit behind as a live non-tunnel interface; a unit
-// with its own tunnel keeps it.
+// interface-level GRE tunnel removed for its bad target (#14390) must not
+// leave its inheriting unit behind as a live non-tunnel interface. A unit
+// whose tunnel was cloned from the interface tunnel inherits the same bad
+// target as its own claim, so it is removed too; only a unit whose tunnel
+// does not carry the bad target survives (see the valid-VRF control in
+// TestTolerantBadTunnelRITargetRemovesTunnel14390).
 func TestSkippedInterfaceGREDeletesInheritingUnits13139(t *testing.T) {
 	cfg, err := CompileConfigLenient(treeFromSet(t, []string{
 		"set interfaces gr-0/0/0 tunnel source 192.0.2.1",
@@ -366,8 +376,8 @@ func TestSkippedInterfaceGREDeletesInheritingUnits13139(t *testing.T) {
 	if _, ok := ifc.Units[0]; ok {
 		t.Errorf("inheriting unit 0 survived skipped interface-level tunnel: %+v", ifc.Units[0])
 	}
-	if u, ok := ifc.Units[1]; !ok || u == nil || u.Tunnel == nil {
-		t.Errorf("unit 1 with its own tunnel was removed: %v", ifc.Units)
+	if _, ok := ifc.Units[1]; ok {
+		t.Errorf("unit 1 cloned from the bad-target interface tunnel survived: %+v", ifc.Units[1])
 	}
 	for _, ep := range EmitTunnelEndpointNames(cfg) {
 		if ep.Name == "gr-0/0/0.0" {
@@ -397,7 +407,7 @@ func TestUnitTunnelRIShadowsInterfaceLevelClaim13139(t *testing.T) {
 		t.Fatalf("claims = %+v, want single vrfB claim", claims)
 	}
 	// Shadowed undefined interface target must not cause #12520 rejection or
-	// tolerant clearing of the effective unit tunnel.
+	// tolerant removal of the effective unit tunnel.
 	shadowed := append([]string(nil), base...)
 	shadowed[2] = "set interfaces gr-0/0/0 tunnel routing-instance destination missing"
 	if _, err := CompileConfig(treeFromSet(t, shadowed)); err != nil {

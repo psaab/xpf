@@ -52,7 +52,7 @@ func TestTunnelRITargetSnapshotMatchesValidVRF12520(t *testing.T) {
 
 }
 
-func TestRejectedAndTolerantTunnelRITargetsUseDefaultSnapshot12520(t *testing.T) {
+func TestRejectedAndTolerantTunnelRITargetsEmitNoEndpoint12520(t *testing.T) {
 	cases := []struct {
 		name         string
 		target       string
@@ -90,22 +90,19 @@ func TestRejectedAndTolerantTunnelRITargetsUseDefaultSnapshot12520(t *testing.T)
 			if warnings != 1 {
 				t.Errorf("got %d target warnings, want one for %q: %v", warnings, tc.target, cfg.Warnings)
 			}
-			if got := cfg.Interfaces.Interfaces["gr-0/0/0"].Tunnel.RoutingInstance; got != "" {
-				t.Errorf("tolerant target = %q, want quarantine to default", got)
+			if got := cfg.Interfaces.Interfaces["gr-0/0/0"].Tunnel; got != nil {
+				t.Errorf("tolerant tunnel survived bad-target removal: %+v, want removed (#14390)", got)
 			}
-			row := snapshotByName9132(t, BuildInterfaceSnapshots(cfg), "gr-0/0/0.0")
-			if row.RoutingInstance != "" || row.RoutingDomain != 0 {
-				t.Fatalf("quarantined snapshot owner = (%q, %d), want default domain (empty, 0)",
-					row.RoutingInstance, row.RoutingDomain)
-			}
-			if table := tunnelTransportTable12520(t, cfg, "gr-0/0/0"); table != "inet.0" {
-				t.Errorf("quarantined transport table = %q, want inet.0", table)
+			if eps := buildTunnelEndpointSnapshots(cfg, []InterfaceSnapshot{{
+				Name: "gr-0/0/0.0", LinuxName: config.LinuxIfName("gr-0/0/0"), Ifindex: 362,
+			}}); len(eps) != 0 {
+				t.Errorf("tunnel endpoints = %+v, want none after bad-target removal", eps)
 			}
 		})
 	}
 }
 
-func TestTolerantMultiTargetQuarantineUsesDefaultSnapshots12520(t *testing.T) {
+func TestTolerantMultiTargetQuarantineRemovesTunnels12520(t *testing.T) {
 	cfg, err := config.CompileConfigLenient(treeFromSet6722(t, []string{
 		"set interfaces gr-0/0/0 tunnel source 192.0.2.1",
 		"set interfaces gr-0/0/0 tunnel destination 192.0.2.2",
@@ -129,7 +126,6 @@ func TestTolerantMultiTargetQuarantineUsesDefaultSnapshots12520(t *testing.T) {
 		t.Errorf("got %d #12520 warnings, want one per unsupported target: %v",
 			len(warnings), warnings)
 	}
-	rows := BuildInterfaceSnapshots(cfg)
 	for _, tc := range []struct {
 		ifName string
 		target string
@@ -138,8 +134,8 @@ func TestTolerantMultiTargetQuarantineUsesDefaultSnapshots12520(t *testing.T) {
 		{ifName: "gr-0/0/1", target: "mgmt"},
 	} {
 		ifName, target := tc.ifName, tc.target
-		if got := cfg.Interfaces.Interfaces[ifName].Tunnel.RoutingInstance; got != "" {
-			t.Errorf("%s target = %q, want quarantined default", ifName, got)
+		if got := cfg.Interfaces.Interfaces[ifName].Tunnel; got != nil {
+			t.Errorf("%s tunnel survived bad-target removal: %+v, want removed (#14390)", ifName, got)
 		}
 		found := false
 		for _, warning := range warnings {
@@ -151,21 +147,16 @@ func TestTolerantMultiTargetQuarantineUsesDefaultSnapshots12520(t *testing.T) {
 		if !found {
 			t.Errorf("warnings omit %s target %q: %v", ifName, target, warnings)
 		}
-		row := snapshotByName9132(t, rows, ifName+".0")
-		if row.RoutingInstance != "" || row.RoutingDomain != 0 {
-			t.Errorf("%s snapshot owner = (%q, %d), want default domain (empty, 0)",
-				ifName, row.RoutingInstance, row.RoutingDomain)
-		}
-		if table := tunnelTransportTable12520(t, cfg, ifName); table != "inet.0" {
-			t.Errorf("%s transport table = %q, want inet.0", ifName, table)
-		}
+	}
+	if eps := config.EmitTunnelEndpointNames(cfg); len(eps) != 0 {
+		t.Errorf("tunnel endpoints = %v, want none after bad-target removal", eps)
 	}
 }
 
 // TestQuarantinedGRECollisionKeepsValidSnapshot12520: gr-0/0/0 (undefined
-// target) and gr-0/0/1 (no target) share one outer tuple. Without the
-// post-clear identity check, the builder kept the first-sorting, quarantined
-// gr-0/0/0.0 and dropped the valid gr-0/0/1.0 (#10654 ERROR).
+// target) and gr-0/0/1 (no target) share one outer tuple. Under #14390
+// removal the quarantined tunnel is gone, so the builder emits only the
+// valid gr-0/0/1.0 (#10654 ERROR class).
 func TestQuarantinedGRECollisionKeepsValidSnapshot12520(t *testing.T) {
 	cfg, err := config.CompileConfigLenient(treeFromSet6722(t, []string{
 		"set interfaces gr-0/0/0 tunnel source 192.0.2.1",

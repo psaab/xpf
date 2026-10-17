@@ -644,9 +644,9 @@ var gateValuePairs = []gateValuePair{
 }
 
 // #12520: a tunnel routing-instance target must name a defined VRF, and the
-// tolerant compile clears any other target, so under every generic pair these
-// two leaves compile exactly like the bare leaf and drop out of coverage. They
-// probe a pair of VRF names instead, defined at the root by gateRootPrereq.
+// tolerant compile removes any tunnel naming another target (#14390), so
+// under every generic pair these two leaves compile exactly like the bare
+// leaf and drop out of coverage. They
 var gateTunnelRITargetSites = map[string]bool{
 	"interfaces <*> tunnel routing-instance destination":          true,
 	"interfaces <*> unit <*> tunnel routing-instance destination": true,

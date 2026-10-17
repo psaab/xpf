@@ -2996,11 +2996,12 @@ type compileOpts struct {
 	// tolerant load/peer-sync so existing configs still boot. Strict commit
 	// rejects these members because fxp*/fab*/em* are owned by vrf-mgmt.
 	lenientRIMgmtMember11392 bool
-	// lenientTunnelRITarget12520 (#12520) warns instead of rejecting an
-	// undefined, forwarding or reserved-management explicit tunnel
-	// routing-instance target on load/sync, and clears that target so the
-	// tunnel runs in the default routing domain. A cleared GRE tunnel whose
-	// outer identity another tunnel already owns is skipped instead.
+	// lenientTunnelRITarget12520 (#12520, #14390) warns instead of rejecting
+	// an undefined, forwarding or reserved-management explicit tunnel
+	// routing-instance target on load/sync, and removes that tunnel (the
+	// #9909 posture) so it installs in no routing domain. A removed GRE
+	// tunnel whose outer identity another tunnel already owns in the
+	// default instance gets the #10654 collision diagnostic.
 	lenientTunnelRITarget12520 bool
 	// lenientRoutingInstanceType9814 (#9814) downgrades the routing-instance
 	// instance-type value-domain gate (validateRoutingInstanceTypeStrict9814)

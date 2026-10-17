@@ -401,11 +401,11 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // #10826 adds seven api-auth class/expiry/named-key leaves. The UTC date pair
 // and a valid sibling credential for per-user/per-key fields make all seven
 // comparable; tighten the measured floor 780 -> 787.
-// #12520 clears an undefined tunnel routing-instance target on the tolerant
-// path, which made both tunnel-RI target leaves inert (788 -> 786 compared);
-// gateTunnelRITargetPairs probes them with defined VRFs, restoring 788. The
-// base already measured 788 against 787, so tighten 787 -> 788: one floor
-// unit of slack would let either restored leaf go blind again unnoticed.
+// #12520 removes a tunnel naming an undefined routing-instance target on
+// the tolerant path (#14390), which made both tunnel-RI target leaves
+// inert (788 -> 786 compared); gateTunnelRITargetPairs probes them with
+// defined VRFs, restoring 788. The base already measured 788 against 787,
+// so tighten 787 -> 788: one floor
 // #13112 makes the wildcard-inherited zone `tcp-rst` leaf observable to the
 // differential, moving it from flag to compared; tighten both ratchets.
 // #13538 moves the two deterministic source-pool validations from compiler-time
