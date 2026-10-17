@@ -540,6 +540,33 @@ func (c *CLI) handleShowSecurity(args []string) error {
 			return nil
 		}
 
+		// #14363: mirror the brief branch above / detail view — a rule whose
+		// zone is quarantined was scrubbed from the applied snapshot, so its
+		// zone header (and a scoped global's zone scope) must carry the
+		// qualifier; otherwise the standard view presents scrubbed rules
+		// as plain State: enabled live enforcement.
+		quarantinedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
+		isQuarantined := func(name string) bool {
+			_, ok := quarantinedZones[name]
+			return ok
+		}
+		qualifyZone := func(name string) string {
+			if isQuarantined(name) {
+				return name + " " + config.ZoneQuarantinePoliciesQualifier
+			}
+			return name
+		}
+		qualifyScopeLabel := func(zones []string, placeholder string) string {
+			label := config.ScopeLabelOr(zones, placeholder)
+			if len(zones) == 0 || config.IsWildcardZoneSet(zones) {
+				return label
+			}
+			parts := strings.Fields(label)
+			for i, name := range parts {
+				parts[i] = qualifyZone(name)
+			}
+			return strings.Join(parts, " ")
+		}
 		schedActive, haveSched := c.policySchedulerActiveState()
 		// #3063: render the detail Index from the span-accumulated runtime
 		// policy-ID namespace so it matches the RT_FLOW/event log policy ID.
@@ -565,7 +592,7 @@ func (c *CLI) handleShowSecurity(args []string) error {
 						continue
 					}
 					// Junos format: "From zone: X, To zone: Y" header
-					fmt.Printf("From zone: %s, To zone: %s\n", zpp.FromZone, zpp.ToZone)
+					fmt.Printf("From zone: %s, To zone: %s\n", qualifyZone(zpp.FromZone), qualifyZone(zpp.ToZone))
 					for i, pol := range zpp.Policies {
 						// #3476: skip a nil rule like the runtime walker does.
 						if pol == nil {
@@ -650,8 +677,8 @@ func (c *CLI) handleShowSecurity(args []string) error {
 				// #3286/#4626: render the scoped-global zone SET (#3148)
 				// instead of the all-zones "any" placeholder. An unscoped
 				// global still shows any/any — no regression.
-				globalFromZone := config.ScopeLabelOr(pol.Match.FromZones, "any")
-				globalToZone := config.ScopeLabelOr(pol.Match.ToZones, "any")
+				globalFromZone := qualifyScopeLabel(pol.Match.FromZones, "any")
+				globalToZone := qualifyScopeLabel(pol.Match.ToZones, "any")
 				fmt.Printf("    From zones: %s\n", globalFromZone)
 				fmt.Printf("    To zones: %s\n", globalToZone)
 				fmt.Printf("    Source addresses: %s\n",
