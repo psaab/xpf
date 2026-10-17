@@ -287,13 +287,16 @@ func TestLoadedConnsEqualIsOrderInsensitiveAndFieldExact9641(t *testing.T) {
 	}
 }
 
-// Local addresses resolved at apply time from the kernel or through DNS cannot be
-// replayed for a stored generation, so validation must REFUSE rather than guess. An
-// explicit or configured address is exact and stays validatable.
+// Local addresses resolved at apply time from the kernel cannot be replayed
+// for a stored generation, so validation must REFUSE rather than guess. An
+// explicit or configured address is exact and stays validatable. A dynamic
+// hostname is a responder identity (#14590) — never DNS-resolved — so its
+// configured unit address replays exactly.
 func TestExpectedLoadedConnsRefusesApplyTimeLocalAddresses9641(t *testing.T) {
 	withHost := func(cfg *config.Config, host string) *config.Config {
 		gw := cfg.Security.IPsec.Gateways["gw"]
 		gw.Address, gw.DynamicHostname = "", host
+		gw.ResponderOnly = host != ""
 		return cfg
 	}
 	withVPNLocal := func(cfg *config.Config, addr string) *config.Config {
@@ -306,7 +309,7 @@ func TestExpectedLoadedConnsRefusesApplyTimeLocalAddresses9641(t *testing.T) {
 		wantLocal string // "" means unvalidatable
 	}{
 		{"DHCP unit with no configured address", dhcpBoundConfig("wan0.0", "", "", true), ""},
-		{"dynamic hostname whose family needs DNS", withHost(dhcpBoundConfig("wan0.0", "", "192.0.2.10/24", false), "peer.example.net"), ""},
+		{"dynamic hostname identity with configured unit address", withHost(dhcpBoundConfig("wan0.0", "", "192.0.2.10/24", false), "peer.example.net"), "192.0.2.10"},
 		{"configured unit address", dhcpBoundConfig("wan0.0", "", "192.0.2.10/24", false), "192.0.2.10"},
 		{"explicit gateway local-address", dhcpBoundConfig("wan0.0", "192.0.2.20", "", true), "192.0.2.20"},
 		{"IP-literal dynamic hostname", withHost(dhcpBoundConfig("wan0.0", "", "192.0.2.10/24", false), "203.0.113.9"), "192.0.2.10"},

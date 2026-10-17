@@ -1067,7 +1067,7 @@ func vpnEagerlyInitiates(ipsecCfg *config.IPsecConfig, vpn *config.IPsecVPN) boo
 	if !ok {
 		return false
 	}
-	return gw == nil || !gw.ResponderOnly
+	return gw == nil || !responderOnlyGateway(gw)
 }
 
 // terminateIKE issues `swanctl --terminate --ike <name>` for a single

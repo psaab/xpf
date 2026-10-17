@@ -133,20 +133,22 @@ func TestChangedImmediatelyVPNIsStillReinitiated14140(t *testing.T) {
 		}
 	})
 
-	t.Run("dynamic hostname gateway", func(t *testing.T) {
+	// #14590: a dynamic-hostname gateway is responder-only, so even an
+	// immediately VPN through it is never reinitiated (nothing to dial).
+	t.Run("dynamic hostname gateway is responder-only", func(t *testing.T) {
 		rec := &swanctlRecorder{}
 		m := newRecordingManager(t, rec)
 		mk := func(psk string) *config.IPsecConfig {
 			return eagerCfg(
-				&config.IPsecGateway{Name: "gw", DynamicHostname: "peer.example.com"},
+				&config.IPsecGateway{Name: "gw", DynamicHostname: "peer.example.com", ResponderOnly: true},
 				&config.IPsecVPN{PSK: config.Secret(psk), EstablishTunnels: "immediately"},
 			)
 		}
 		if err := applyChange14140(t, rec, m, mk("old-secret"), mk("rotated-secret")); err != nil {
-			t.Fatalf("changed immediately Apply: %v", err)
+			t.Fatalf("changed dynamic-hostname Apply: %v", err)
 		}
-		if got := rec.initiateCalls(); len(got) != 1 || got[0] != "site-a" {
-			t.Fatalf("dynamic-hostname immediately VPN must be reinitiated, got %v", got)
+		if got := rec.initiateCalls(); len(got) != 0 {
+			t.Fatalf("dynamic-hostname (responder) VPN must not be reinitiated, got %v", got)
 		}
 	})
 }

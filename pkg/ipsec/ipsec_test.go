@@ -6,9 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -760,6 +758,8 @@ func TestGenerateConfig_IKEChain(t *testing.T) {
 	}
 }
 
+// #14590: `dynamic hostname` is a responder identity, not a DNS dial target.
+// The render is remote_addrs = %any with remote id @peer.example.com.
 func TestGenerateConfig_DynamicHostname(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
@@ -775,6 +775,7 @@ func TestGenerateConfig_DynamicHostname(t *testing.T) {
 			"dyn-gw": {
 				Name:            "dyn-gw",
 				DynamicHostname: "peer.example.com",
+				ResponderOnly:   true,
 				IKEPolicy:       "pol1",
 				Version:         "v2-only",
 			},
@@ -790,8 +791,9 @@ func TestGenerateConfig_DynamicHostname(t *testing.T) {
 	}
 	got := m.generateConfig(cfg)
 	conn := parseSwanctlDoc(t, got).at(t, "connections", "tun1")
-	conn.requireSetting(t, "remote_addrs", "peer.example.com")
+	conn.requireSetting(t, "remote_addrs", "%any")
 	conn.requireSetting(t, "version", "2")
+	conn.at(t, "remote").requireSetting(t, "id", `"@peer.example.com"`)
 	// The xfrmi ids belong to the child SA. The old needles found them
 	// anywhere in the document, so a render that emitted them on the
 	// CONNECTION -- where charon would ignore them -- passed identically.
@@ -1387,9 +1389,9 @@ func TestPrepareConfig_ExternalInterfaceLocalAddress(t *testing.T) {
 }
 
 // dualStackCfg builds a config whose external interface carries BOTH an IPv4
-// and an IPv6 address, and whose gateway is reached by a dynamic hostname.
-// The local-address family is therefore ambiguous unless it is constrained to
-// the resolved remote family.
+// and an IPv6 address, and whose gateway is a dynamic-hostname responder.
+// The peer dials in from an unknown address, so the local-address family is
+// unconstrained: selection is family-agnostic (first usable address).
 func dualStackCfg(hostname string) *config.Config {
 	return &config.Config{
 		Interfaces: config.InterfacesConfig{
@@ -1398,9 +1400,6 @@ func dualStackCfg(hostname string) *config.Config {
 					Name: "wan0",
 					Units: map[int]*config.InterfaceUnit{
 						0: {
-							// IPv4 listed first so a family-agnostic
-							// selection would wrongly win it for the IPv6
-							// peer (the #2757 bug).
 							Addresses: []string{
 								"198.51.100.1/24",
 								"2001:db8:1::1/64",
@@ -1416,6 +1415,7 @@ func dualStackCfg(hostname string) *config.Config {
 					"gw": {
 						Name:            "gw",
 						DynamicHostname: hostname,
+						ResponderOnly:   true,
 						ExternalIface:   "wan0.0",
 					},
 				},
@@ -1427,91 +1427,33 @@ func dualStackCfg(hostname string) *config.Config {
 	}
 }
 
-// TestPrepareConfig_DynamicHostnameFamilyMatch is the #2757 fail-on-revert
-// guard: a dual-stack appliance reaching a dynamic-hostname gateway must
-// source the IKE SA from the local-address whose family matches the family
-// the peer resolves to. If the family-matching is reverted (the empty
-// gateway.Address yields a family-agnostic hint), the IPv4 address — listed
-// first on the interface — wins for the IPv6 peer and this test goes RED.
-func TestPrepareConfig_DynamicHostnameFamilyMatch(t *testing.T) {
-	orig := resolveHostFamily
-	t.Cleanup(func() { resolveHostFamily = orig })
-
-	tests := []struct {
-		name          string
-		resolvedFam   int
-		wantLocalAddr string
-	}{
-		{"ipv6 peer selects ipv6 local", 6, "2001:db8:1::1"},
-		{"ipv4 peer selects ipv4 local", 4, "198.51.100.1"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			resolveHostFamily = func(host string) int {
-				if host != "peer.example.com" {
-					t.Fatalf("unexpected host lookup: %q", host)
-				}
-				return tc.resolvedFam
-			}
-			cfg := dualStackCfg("peer.example.com")
-			prepared := PrepareConfig(cfg)
-			got := prepared.Gateways["gw"].LocalAddress
-			if got != tc.wantLocalAddr {
-				t.Fatalf("local-address = %q, want %q (family %d)",
-					got, tc.wantLocalAddr, tc.resolvedFam)
-			}
-		})
-	}
-}
-
-// TestDefaultResolveHostFamily_BoundedDegrades exercises the REAL default
-// resolver implementation (not an injected fake) and proves it (a) is bounded
-// by resolveHostFamilyTimeout and (b) degrades to family 0 on failure rather
-// than hanging the synchronous commit/apply path (#2757 review fold). It uses
-// the RFC 6761 reserved `.invalid` TLD, which is guaranteed never to resolve,
-// so the lookup fails (NXDOMAIN / no such host) without depending on a
-// reachable nameserver. The hard deadline (4x the timeout) catches a
-// regression that drops the context bound; the expected return is 0.
-func TestDefaultResolveHostFamily_BoundedDegrades(t *testing.T) {
-	done := make(chan int, 1)
-	go func() { done <- defaultResolveHostFamily("xpf-2757-nonexistent.invalid") }()
-
-	select {
-	case fam := <-done:
-		if fam != 0 {
-			t.Fatalf("unresolvable host family = %d, want 0 (degrade-to-agnostic)", fam)
-		}
-	case <-time.After(4 * resolveHostFamilyTimeout):
-		t.Fatalf("default resolver did not return within %v — context bound missing",
-			4*resolveHostFamilyTimeout)
-	}
-}
-
-// TestPrepareConfig_DynamicHostnameDualStackPeer verifies that when the peer
-// resolves to BOTH families (no explicit preference), local-address selection
-// stays family-agnostic and degrades to the interface's first usable address
-// rather than guessing — and that a single-stack interface still resolves.
-func TestPrepareConfig_DynamicHostnameDualStackPeer(t *testing.T) {
-	orig := resolveHostFamily
-	t.Cleanup(func() { resolveHostFamily = orig })
-	resolveHostFamily = func(string) int { return 0 } // dual-stack peer
-
+// #14590: a dynamic-hostname gateway is responder-only, so PrepareConfig
+// never DNS-resolves its identity hostname. The family hint is agnostic and
+// the local address is the interface's first usable address.
+func TestPrepareConfig_DynamicHostnameNoDNSFamilyAgnostic14590(t *testing.T) {
 	cfg := dualStackCfg("peer.example.com")
 	prepared := PrepareConfig(cfg)
-	got := prepared.Gateways["gw"].LocalAddress
-	if got != "198.51.100.1" {
-		t.Fatalf("dual-stack peer local-address = %q, want 198.51.100.1 (first usable)", got)
+	if got := prepared.Gateways["gw"].LocalAddress; got != "198.51.100.1" {
+		t.Fatalf("local-address = %q, want 198.51.100.1 (family-agnostic first usable)", got)
+	}
+	if got := gatewayRemoteFamilyHint(prepared.Gateways["gw"]); got != 0 {
+		t.Fatalf("family hint = %d, want 0 (responder, no DNS)", got)
 	}
 }
 
-// TestPrepareConfig_DynamicHostnameFamilyFallback verifies the single-stack
-// fallback: an IPv6-only peer against an IPv4-only interface still yields the
-// IPv4 local-address rather than an empty local_addrs.
-func TestPrepareConfig_DynamicHostnameFamilyFallback(t *testing.T) {
-	orig := resolveHostFamily
-	t.Cleanup(func() { resolveHostFamily = orig })
-	resolveHostFamily = func(string) int { return 6 } // IPv6 peer
+// An IP literal in the dynamic identity slot still classifies directly,
+// without any resolver.
+func TestPrepareConfig_DynamicHostnameIPLiteralFamily14590(t *testing.T) {
+	cfg := dualStackCfg("2001:db8:ffff::2")
+	prepared := PrepareConfig(cfg)
+	if got := prepared.Gateways["gw"].LocalAddress; got != "2001:db8:1::1" {
+		t.Fatalf("local-address = %q, want 2001:db8:1::1 (IPv6 literal hint)", got)
+	}
+}
 
+// The single-stack fallback still applies: a responder hint against an
+// IPv4-only interface yields the IPv4 local-address.
+func TestPrepareConfig_DynamicHostnameFamilyFallback(t *testing.T) {
 	cfg := &config.Config{
 		Interfaces: config.InterfacesConfig{
 			Interfaces: map[string]*config.InterfaceConfig{
@@ -1529,6 +1471,7 @@ func TestPrepareConfig_DynamicHostnameFamilyFallback(t *testing.T) {
 					"gw": {
 						Name:            "gw",
 						DynamicHostname: "peer.example.com",
+						ResponderOnly:   true,
 						ExternalIface:   "wan0.0",
 					},
 				},
@@ -1538,24 +1481,23 @@ func TestPrepareConfig_DynamicHostnameFamilyFallback(t *testing.T) {
 	}
 	prepared := PrepareConfig(cfg)
 	if got := prepared.Gateways["gw"].LocalAddress; got != "198.51.100.1" {
-		t.Fatalf("IPv6-peer/IPv4-only-iface local-address = %q, want 198.51.100.1 (fallback)", got)
+		t.Fatalf("responder/IPv4-only-iface local-address = %q, want 198.51.100.1 (fallback)", got)
 	}
 }
 
 // multiDynamicHostnameCfg builds a config with a single dual-stack external
 // interface and n dynamic-hostname gateways (each LocalAddress unset, so
-// PrepareConfig resolves the local-address per gateway via a family hint). The
-// interface carries both an IPv4 and an IPv6 address so the resolved
-// local-address directly reflects the per-gateway family hint: family 4 →
-// 198.51.100.1, family 6 → 2001:db8:1::1.
+// PrepareConfig resolves the local-address per gateway). Every responder
+// hint is family-agnostic, so every gateway gets the first usable address.
 func multiDynamicHostnameCfg(n int) *config.Config {
 	gws := make(map[string]*config.IPsecGateway, n)
 	vpns := make(map[string]*config.IPsecVPN, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		name := fmt.Sprintf("gw%d", i)
 		gws[name] = &config.IPsecGateway{
 			Name:            name,
 			DynamicHostname: fmt.Sprintf("peer%d.example.com", i),
+			ResponderOnly:   true,
 			ExternalIface:   "wan0.0",
 		}
 		vpns[fmt.Sprintf("tun%d", i)] = &config.IPsecVPN{PSK: "fixture-secret", Gateway: name}
@@ -1580,75 +1522,16 @@ func multiDynamicHostnameCfg(n int) *config.Config {
 	}
 }
 
-// TestPrepareConfig_DynamicHostnameParallelResolve is the #4547 fail-on-revert
-// guard. Dynamic-hostname gateways resolve a family hint via a DNS lookup
-// bounded by resolveHostFamilyTimeout. Resolving N such gateways SEQUENTIALLY
-// in the commit apply stalls the commit up to N×timeout under a slow/failing
-// resolver; PrepareConfig now resolves the per-gateway hints concurrently
-// (bounded pool), so N gateways cost ~one lookup of wall-clock, not N.
-//
-// The injected resolver sleeps perLookup per call. With n gateways under the
-// concurrency cap, a parallel resolve completes in ~perLookup; a sequential
-// resolve needs ~n×perLookup. The deadline below (n/2 × perLookup) is safely
-// above the parallel time and safely below the sequential time, so reverting
-// the parallelization (back to an inline per-gateway lookup) makes this RED.
-// The test also asserts each gateway's family hint is applied correctly and is
-// identical to what the sequential per-gateway lookup produced, and that
-// exactly one lookup happened per gateway (no redundant or dropped lookups).
-func TestPrepareConfig_DynamicHostnameParallelResolve(t *testing.T) {
-	orig := resolveHostFamily
-	t.Cleanup(func() { resolveHostFamily = orig })
-
-	const (
-		n         = 6 // under resolveFamilyHintConcurrency (8) → all run at once
-		perLookup = 150 * time.Millisecond
-	)
-
-	var calls int64
-	// Deterministic per-host family: even index → IPv4, odd index → IPv6.
-	// The stub is invoked concurrently, so it must be goroutine-safe (it reads
-	// only its host argument and an atomic counter).
-	resolveHostFamily = func(host string) int {
-		atomic.AddInt64(&calls, 1)
-		time.Sleep(perLookup)
-		var idx int
-		if _, err := fmt.Sscanf(host, "peer%d.example.com", &idx); err != nil {
-			return -1 // unexpected host → forces a mismatch assertion below
-		}
-		if idx%2 == 0 {
-			return 4
-		}
-		return 6
-	}
-
+// #14590: many dynamic-hostname gateways resolve with no DNS at all, so
+// PrepareConfig stays fast and every gateway gets the agnostic address.
+func TestPrepareConfig_DynamicHostnameManyResponders14590(t *testing.T) {
+	const n = 6
 	cfg := multiDynamicHostnameCfg(n)
-
-	start := time.Now()
 	prepared := PrepareConfig(cfg)
-	elapsed := time.Since(start)
-
-	deadline := (n / 2) * perLookup
-	if elapsed >= deadline {
-		t.Fatalf("PrepareConfig took %v for %d dynamic-hostname gateways; "+
-			"want < %v (parallel). Sequential per-gateway lookup regressed (#4547)",
-			elapsed, n, deadline)
-	}
-
-	if got := atomic.LoadInt64(&calls); got != n {
-		t.Fatalf("resolver called %d times, want exactly %d (one per gateway)", got, n)
-	}
-
-	// Each gateway's local-address must reflect its own family hint, identical
-	// to the sequential resolution: even → IPv4 (198.51.100.1), odd → IPv6.
-	for i := 0; i < n; i++ {
+	for i := range n {
 		name := fmt.Sprintf("gw%d", i)
-		want := "2001:db8:1::1"
-		if i%2 == 0 {
-			want = "198.51.100.1"
-		}
-		if got := prepared.Gateways[name].LocalAddress; got != want {
-			t.Fatalf("gateway %s local-address = %q, want %q (family hint mismatch)",
-				name, got, want)
+		if got := prepared.Gateways[name].LocalAddress; got != "198.51.100.1" {
+			t.Fatalf("gateway %s local-address = %q, want 198.51.100.1 (agnostic)", name, got)
 		}
 	}
 }

@@ -34,7 +34,7 @@ func (m *Manager) generateConfig(ipsecCfg *config.IPsecConfig) string {
 // (#2074), an unresolved ike-policy chain (#2270), an unusable IKE DH group
 // (#9919 F-161), an unsupported IKE authentication method, a malformed PSK,
 // a PSK connection with no effective secret (#14139), a responder-only PSK
-// connection whose gateway has no remote-identity (#14591),
+// connection whose gateway has no remote-identity or dynamic hostname (#14591),
 // a `protocol ah` proposal with no ESP render path (#4298), a section-breaking
 // VPN name (#9495), an unresolved ipsec-policy chain (#9919 F-090), an unusable
 // ESP/PFS DH group (#9919 F-161), a non-empty bind-interface that resolves to
@@ -306,7 +306,7 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 			continue
 		}
 
-		// A responder-only PSK VPN whose gateway has no remote-identity
+		// A responder-only PSK VPN whose gateway has no peer identity
 		// (#14591, Y09-04) accepts an initiator from any address, and
 		// with no configured peer identity its secret carries no id
 		// selector — it matches any peer, so strongSwan's key selection
@@ -317,14 +317,20 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 		// Apply unloads it and tears down any stale SA. The commit-time
 		// gate (validateIPsecResponderIdentityStrict) hard-rejects the
 		// shape; this belt covers the tolerant load / peer-sync path.
-		// Pubkey (certificate) VPNs are unaffected.
-		if authMethod == "psk" && gw != nil && gw.ResponderOnly && gw.RemoteIDValue == "" {
+		// Pubkey (certificate) VPNs are unaffected. The peer identity
+		// may be an explicit remote-identity or the `dynamic hostname`
+		// FQDN (#14590), which the renderer renders as remote id @FQDN
+		// and scopes the secret by — either satisfies the gate. Use
+		// responderOnlyGateway so a dynamic-hostname gateway whose
+		// ResponderOnly flag was not carried is gated identically.
+		if authMethod == "psk" && responderOnlyGateway(gw) && gw.RemoteIDValue == "" && gw.DynamicHostname == "" {
 			skipped[name] = true
 			slog.Warn("skipping IPsec VPN: responder-only gateway has "+
-				"no remote-identity, so its pre-shared key cannot be "+
-				"scoped to the peer — configure a remote-identity on "+
-				"the gateway (rendering the connection would let a "+
-				"holder of another VPN's key authenticate into it by "+
+				"no remote-identity or dynamic hostname, so its "+
+				"pre-shared key cannot be scoped to the peer — "+
+				"configure a remote-identity on the gateway "+
+				"(rendering the connection would let a holder of "+
+				"another VPN's key authenticate into it by "+
 				"claiming that peer's identity)",
 				"vpn", name, "gateway", vpn.Gateway)
 			continue
@@ -418,11 +424,16 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 		}
 		b.WriteString("    }\n")
 
-		// Remote auth section
+		// Remote auth section. The expected remote identity is the explicit
+		// remote-identity when set, else the `dynamic hostname` identity
+		// (#14590): a dynamic-IP peer is matched by the FQDN identity it
+		// presents, rendered fqdn-typed as @FQDN.
 		b.WriteString("    remote {\n")
 		fmt.Fprintf(&b, "      auth = %s\n", authMethod)
 		if gw != nil && gw.RemoteIDValue != "" {
 			fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(formatIdentity(gw.RemoteIDType, gw.RemoteIDValue))))
+		} else if gw != nil && gw.DynamicHostname != "" {
+			fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(formatIdentity("hostname", gw.DynamicHostname))))
 		}
 		b.WriteString("    }\n")
 
@@ -536,7 +547,7 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 			// flows"), so "" renders the same trap as explicit on-traffic.
 			// Rendering nothing left two default-configured peers with no
 			// initiator at all: no SA, no error, green commit.
-			if gw == nil || !gw.ResponderOnly {
+			if gw == nil || !responderOnlyGateway(gw) {
 				switch vpn.EstablishTunnels {
 				case "immediately":
 					fmt.Fprintf(&b, "        start_action = start\n")
@@ -598,15 +609,22 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 	return b.String(), rendered, nil
 }
 
-// resolveRemoteAddr resolves the swanctl remote_addrs value (a real IP /
-// dotted hostname) for a VPN, plus the effective local address and the
-// resolved gateway. ok=false means there is nothing usable to render —
-// the caller MUST skip the connection so a bare gateway config-object
-// NAME never leaks into remote_addrs (#2074):
+// resolveRemoteAddr resolves the swanctl remote_addrs value for a VPN, plus
+// the effective local address and the resolved gateway. ok=false means there
+// is nothing usable to render — the caller MUST skip the connection so a bare
+// gateway config-object NAME never leaks into remote_addrs (#2074):
 //
-//   - defined gateway with an address / dynamic hostname -> remote = that
-//   - defined gateway flagged responder-only (dynamic, no addr/host)
-//     -> remote = "%any" (strongSwan responds, never initiates) (#2404)
+//   - defined gateway with an address            -> remote = that (dialed)
+//   - defined gateway flagged responder-only     -> remote = "%any"
+//     (strongSwan responds, never initiates). This covers both bare
+//     `dynamic` and `dynamic hostname <fqdn>`: the FQDN is the peer's
+//     expected IKE identity (rendered as remote id @FQDN and as the PSK
+//     selector), never a DNS dial target (#14590). A peer that should be
+//     dialed by name is expressed with gateway `address <fqdn>`.
+//   - defined gateway with a dynamic hostname but NOT flagged
+//     responder-only (directly constructed / peer-synced config) is
+//     likewise treated as responder-only: DynamicHostname only ever
+//     means the identity form (#14590)
 //   - defined gateway with neither + not responder-only   -> ok=false
 //   - no gateway object, vpn.Gateway is a usable IP/host -> remote = it
 //   - no gateway object, vpn.Gateway empty               -> ok=true,
@@ -615,6 +633,14 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 //
 // This mirrors the commit-time validator validateIPsecGatewayReferencesStrict
 // exactly, using the same config.IsUsableIPsecEndpoint predicate.
+// responderOnlyGateway reports whether gw never initiates: the compiled
+// ResponderOnly flag, or a `dynamic hostname` gateway whose flag was not
+// carried (direct construction / peer sync) — DynamicHostname only ever
+// means the responder identity form (#14590).
+func responderOnlyGateway(gw *config.IPsecGateway) bool {
+	return gw != nil && (gw.ResponderOnly || gw.DynamicHostname != "")
+}
+
 func resolveRemoteAddr(ipsecCfg *config.IPsecConfig, vpn *config.IPsecVPN) (
 	remoteAddr, localAddr string, gw *config.IPsecGateway, ok bool) {
 
@@ -624,12 +650,10 @@ func resolveRemoteAddr(ipsecCfg *config.IPsecConfig, vpn *config.IPsecVPN) (
 		switch {
 		case gw.Address != "":
 			remoteAddr = gw.Address
-		case gw.DynamicHostname != "":
-			remoteAddr = gw.DynamicHostname
-		case gw.ResponderOnly:
-			// Responder-only / dynamic-IP peer (#2404): the peer initiates
-			// from an unknown source address, so strongSwan listens with
-			// remote_addrs = %any and never initiates to this gateway.
+		case gw.ResponderOnly || gw.DynamicHostname != "":
+			// Responder-only / dynamic-IP peer (#2404, #14590): the peer
+			// initiates from an unknown source address, so strongSwan
+			// listens with remote_addrs = %any and never initiates.
 			remoteAddr = "%any"
 		default:
 			// Gateway exists but has nothing routable and is not flagged
@@ -993,7 +1017,8 @@ func escapeSwanctlQuoted(s string) string {
 // value is an IKE identity strongSwan matches against the peer of the
 // exchange (the peer's identity must match at least one selector):
 //
-//   - the remote peer identity: the configured remote-id when set,
+//   - the remote peer identity: the configured remote-id when set, else
+//     the `dynamic hostname` identity (@FQDN, #14590) for a dynamic peer,
 //     otherwise the concrete remote gateway address (strongSwan uses the
 //     peer IP as its default identity when no id is negotiated) — one
 //     selector per address when the gateway carries a comma-separated
@@ -1006,11 +1031,11 @@ func escapeSwanctlQuoted(s string) string {
 //     on its own, but it can never cause a wrong-peer match either).
 //
 // A dynamic responder-only peer (remote_addrs = %any) with no configured
-// remote-id yields no address selector — %any is not a usable identity.
-// Since #14591 such a PSK VPN is skipped at render and rejected at
-// commit (validateIPsecResponderIdentityStrict), an unscoped secret
-// never loads; the empty-list arm remains only for non-responder shapes
-// that offer nothing to scope by.
+// remote-id and no dynamic hostname yields no address selector — %any is
+// not a usable identity. Since #14591 such a PSK VPN is skipped at render
+// and rejected at commit (validateIPsecResponderIdentityStrict), an
+// unscoped secret never loads; the empty-list arm remains only for
+// non-responder shapes that offer nothing to scope by.
 func pskIDSelectors(remoteAddr string, gw *config.IPsecGateway) []string {
 	var ids []string
 	seen := make(map[string]bool)
@@ -1031,6 +1056,11 @@ func pskIDSelectors(remoteAddr string, gw *config.IPsecGateway) []string {
 	// every address in the list.
 	if gw != nil && gw.RemoteIDValue != "" {
 		add(formatIdentity(gw.RemoteIDType, gw.RemoteIDValue))
+	} else if gw != nil && gw.DynamicHostname != "" {
+		// #14590: a dynamic-hostname peer is matched by its presented
+		// FQDN identity, so the PSK is scoped by @FQDN — never by the
+		// bare hostname as a dial address.
+		add(formatIdentity("hostname", gw.DynamicHostname))
 	} else {
 		for _, addr := range strings.Split(remoteAddr, ",") {
 			add(strings.TrimSpace(addr))

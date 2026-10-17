@@ -12,7 +12,8 @@ import (
 // spellings were silently dropped in the IKE gateway path: the hostname
 // child only invoked `nodeVal(c)`-equivalent logic when the FQDN was a
 // second key on the hostname leaf, so a nested block left
-// DynamicHostname empty and flipped the gateway to ResponderOnly.
+// DynamicHostname empty. Since #14590 every `dynamic hostname` form is
+// responder-only (the FQDN is an IKE identity, never dialed).
 func TestCompilerIPsecDynamicHostnameBlock13540(t *testing.T) {
 	const proposals = `
         proposal ike-phase1 {
@@ -68,8 +69,10 @@ func TestCompilerIPsecDynamicHostnameBlock13540(t *testing.T) {
 			if gw.DynamicHostname != "peer.example.com" {
 				t.Errorf("DynamicHostname = %q, want %q", gw.DynamicHostname, "peer.example.com")
 			}
-			if gw.ResponderOnly {
-				t.Errorf("ResponderOnly = true, want false (explicit hostname present)")
+			// #14590: a dynamic hostname is a responder identity, so the
+			// gateway is responder-only (never dialed).
+			if !gw.ResponderOnly {
+				t.Errorf("ResponderOnly = false, want true (dynamic hostname is an identity, #14590)")
 			}
 		})
 	}

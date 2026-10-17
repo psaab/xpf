@@ -2096,8 +2096,8 @@ type IPsecPolicyDef struct {
 type IPsecGateway struct {
 	Name             string
 	Address          string // remote gateway IP
-	DynamicHostname  string // dynamic peer hostname (DNS-resolved)
-	ResponderOnly    bool   // dynamic peer with no fixed address/hostname: responder-only (remote_addrs = %any)
+	DynamicHostname  string // dynamic peer IKE identity hostname (expected FQDN identity, NOT a DNS dial address; #14590)
+	ResponderOnly    bool   // dynamic peer (bare `dynamic` or `dynamic hostname`): responder-only (remote_addrs = %any, never initiated)
 	LocalAddress     string // local IP
 	IKEPolicy        string // IKE policy reference
 	ExternalIface    string // external-facing interface

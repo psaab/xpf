@@ -10834,27 +10834,36 @@ reserved for whole-dataplane selection where a rewrite shim
     encapsulated packets via PMTUD while commit reported success. This is the
     input-domain gate the #4015 valid-token `set`/`clear` mapping fix and the
     #4301 `establish-tunnels` enum did not cover.
-  - **#2404 (responder-only / dynamic-IP peer):** the `security ike gateway
-    <g> dynamic` node now declares a `hostname <fqdn>` child (it was a
-    `children: nil` leaf in both the `ike` and `ipsec` stanza copies of the
-    gateway schema). The semantics: `dynamic hostname <fqdn>` is a peer with
-    a dynamic IP but a resolvable DNS name (renders `remote_addrs = <fqdn>`,
-    unchanged); a BARE `dynamic` block — no address, no hostname — marks a
-    responder-only peer that dials in from an unknown source address. The
-    compiler (`compileIKE` / `compileIPsec`) sets `IPsecGateway.ResponderOnly`
-    when the `dynamic` block resolves no hostname; the strict commit-time
-    validator (`validateIPsecGatewayReferencesStrict`) accepts such a gateway
+  - **#2404 (responder-only / dynamic-IP peer), as corrected by #14590:**
+    the `security ike gateway <g> dynamic` node declares a `hostname
+    <fqdn>` child in both the `ike` and `ipsec` stanza copies of the
+    gateway schema. Junos semantics: `dynamic hostname <fqdn>` identifies
+    a peer with a dynamic IP by the IKE identity it presents — the hub's
+    `dynamic hostname X` is matched against the spoke's
+    `local-identity hostname X` — it is NOT a DNS name to dial. The
+    compiler (`compileIKE` / `compileIPsec`) sets
+    `IPsecGateway.ResponderOnly` for every `dynamic` block (with or
+    without a hostname, keeping the FQDN in `DynamicHostname` as the
+    expected identity); the strict commit-time validator
+    (`validateIPsecGatewayReferencesStrict`) accepts such a gateway
     instead of rejecting it as addressless; and the swanctl render
-    (`resolveRemoteAddr`, `pkg/ipsec/policy.go`) emits `remote_addrs = %any`
+    (`resolveRemoteAddr`, `pkg/ipsec/policy.go`) emits
+    `remote_addrs = %any` with `remote { id = "@<fqdn>" }` (an explicit
+    `remote-identity` still wins), no `start_action`, responder DPD
+    (`dpd_action = clear`), and the PSK scoped by `id-1 = "@<fqdn>"`,
     so strongSwan listens for the inbound IKE rather than skipping the
-    connection. `local-address` (or `external-interface`) still pins the
-    local endpoint as usual. Since #14591 a PSK VPN on such a gateway must
-    also configure `remote-identity <type> <value>` on the gateway: with no
-    peer identity the PSK cannot be scoped, and a holder of another VPN's
-    key could authenticate into the tunnel by claiming that peer's
-    identity. Commit rejects the shape
-    (`validateIPsecResponderIdentityStrict`); tolerant loads warn and the
-    renderer skips the connection.
+    connection. A bare `dynamic` block pins no identity. A peer that should be
+    dialed by DNS name is expressed with `address <fqdn>` instead.
+    `local-address` (or `external-interface`) still pins the local
+    endpoint as usual; the family hint for a dynamic gateway is
+    family-agnostic and no DNS lookup runs at PrepareConfig time.
+    Since #14591 a PSK VPN on such a gateway must also carry a peer
+    identity — the `dynamic hostname` FQDN above, or an explicit
+    `remote-identity <type> <value>`: with neither, the PSK cannot be
+    scoped, and a holder of another VPN's key could authenticate into
+    the tunnel by claiming that peer's identity. Commit rejects that
+    bare shape (`validateIPsecResponderIdentityStrict`); tolerant loads
+    warn and the renderer skips the connection.
   - `security nat static rule-set rule match` — declared the
     `source-address` / `destination-address` children the static-NAT
     compiler reads (the subtree was previously unreachable by the walker).

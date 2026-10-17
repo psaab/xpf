@@ -65,10 +65,13 @@ func TestSwanctlAddrInjectionNeutralized_6469(t *testing.T) {
 			addrPrefix: "203.0.113.1",
 		},
 		{
-			name:       "remote via gateway DynamicHostname",
+			// #14590: a DynamicHostname is an identity, never rendered as
+			// remote_addrs, so the payload lands in the quoted remote id
+			// (sanitized + escaped) and remote_addrs stays %any.
+			name:       "remote identity via gateway DynamicHostname",
 			cfg:        buildAddrCfg("", inject, "198.51.100.7", ""),
 			addrKey:    "remote_addrs",
-			addrPrefix: "203.0.113.1",
+			addrPrefix: "%any",
 		},
 		{
 			name:       "local via gateway LocalAddress",
