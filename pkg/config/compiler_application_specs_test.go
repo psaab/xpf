@@ -738,3 +738,284 @@ func TestApplicationSpec_UserAppShadowingPredefinedSet_DoesNotValidateBundleMemb
 		t.Fatalf("user app junos-sip shadows the bundle; runtime never reads junos-sip-tcp, so commit must succeed: %v", err)
 	}
 }
+
+// #14340: a container-form term (`term { <name> { ... } }`) and nested
+// grandchildren inside a term were silently dropped by compileApplications.
+// applicationTermKeys returned nil for the nameless container (Keys ==
+// ["term"]) and flattened only one level of children (c.Keys), ignoring
+// c.Children — so a deny referencing the application silently lost the
+// container term's ports (fail-open), with zero strict errors or lenient
+// warnings, whenever a sibling term kept the application non-empty.
+//
+// The fix expands container terms via the same namedInstances-style
+// unpacking compileFirewall / compilePolicies use, flattens term children
+// recursively so nested values/trailing blocks reach parseApplicationTerms,
+// and records a term that can yield no named term (empty container) for
+// the strict gate instead of skipping it in silence.
+//
+// RED-on-revert: reverting compiler_applications.go makes the container
+// cases below expand to only [custom-app-t-http] (or [] with a bogus
+// empty parent application) with a clean strict compile, and the
+// grandchild case compile clean instead of rejecting "foo".
+func TestApplicationContainerTermAndNestedChildrenStrict(t *testing.T) {
+	assertExpanded := func(t *testing.T, cfg *Config, set string, want []string) {
+		t.Helper()
+		got, err := ExpandApplicationSet(set, &cfg.Applications)
+		if err != nil {
+			t.Fatalf("ExpandApplicationSet(%q): %v", set, err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("ExpandApplicationSet(%q) = %v, want %v", set, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("ExpandApplicationSet(%q) = %v, want %v", set, got, want)
+			}
+		}
+	}
+	assertTerm := func(t *testing.T, cfg *Config, name, proto, dst string) {
+		t.Helper()
+		app, ok := cfg.Applications.Applications[name]
+		if !ok {
+			t.Fatalf("application %q missing; have %v", name, cfg.Applications.Applications)
+		}
+		if app.Protocol != proto || app.DestinationPort != dst {
+			t.Fatalf("application %q = proto %q dst %q, want %q/%q", name, app.Protocol, app.DestinationPort, proto, dst)
+		}
+	}
+
+	t.Run("container term expands alongside canonical term", func(t *testing.T) {
+		tree := hierTree(t, `
+applications {
+    application custom-app {
+        term {
+            t-ssh {
+                protocol tcp;
+                destination-port 22;
+            }
+        }
+        term t-http {
+            protocol tcp;
+            destination-port 80;
+        }
+    }
+}
+`)
+		cfg, err := CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("strict compile must expand (not reject) container terms: %v", err)
+		}
+		assertExpanded(t, cfg, "custom-app", []string{"custom-app-t-ssh", "custom-app-t-http"})
+		assertTerm(t, cfg, "custom-app-t-ssh", "tcp", "22")
+		assertTerm(t, cfg, "custom-app-t-http", "tcp", "80")
+
+		// Lenient path must produce the same expansion, not a silent subset.
+		lenientTree := hierTree(t, `
+applications {
+    application custom-app {
+        term {
+            t-ssh {
+                protocol tcp;
+                destination-port 22;
+            }
+        }
+        term t-http {
+            protocol tcp;
+            destination-port 80;
+        }
+    }
+}
+`)
+		lcfg, err := CompileConfigLenient(lenientTree)
+		if err != nil {
+			t.Fatalf("lenient compile: %v", err)
+		}
+		assertExpanded(t, lcfg, "custom-app", []string{"custom-app-t-ssh", "custom-app-t-http"})
+	})
+
+	t.Run("container-only application expands", func(t *testing.T) {
+		tree := hierTree(t, `
+applications {
+    application solo {
+        term {
+            t-ssh {
+                protocol tcp;
+                destination-port 22;
+            }
+        }
+    }
+}
+`)
+		cfg, err := CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("strict compile: %v", err)
+		}
+		assertExpanded(t, cfg, "solo", []string{"solo-t-ssh"})
+		assertTerm(t, cfg, "solo-t-ssh", "tcp", "22")
+		if _, ok := cfg.Applications.Applications["solo"]; ok {
+			t.Fatalf("container-only application must not also store an empty parent application")
+		}
+	})
+
+	t.Run("container with multiple named terms expands all", func(t *testing.T) {
+		tree := hierTree(t, `
+applications {
+    application multi {
+        term {
+            t-a {
+                protocol tcp;
+                destination-port 22;
+            }
+            t-b {
+                protocol udp;
+                destination-port 53;
+            }
+        }
+    }
+}
+`)
+		cfg, err := CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("strict compile: %v", err)
+		}
+		assertExpanded(t, cfg, "multi", []string{"multi-t-a", "multi-t-b"})
+		assertTerm(t, cfg, "multi-t-b", "udp", "53")
+	})
+
+	t.Run("unknown leaf inside container term rejects strict and warns lenient", func(t *testing.T) {
+		src := `
+applications {
+    application c5 {
+        term {
+            t-a {
+                protocol tcp;
+                destination-poort 22;
+            }
+        }
+        term t-http {
+            protocol tcp;
+            destination-port 80;
+        }
+    }
+}
+`
+		if _, err := CompileConfig(hierTree(t, src)); err == nil || !strings.Contains(err.Error(), "destination-poort") {
+			t.Fatalf("strict compile must reject unknown leaf inside container term, got %v", err)
+		}
+		lcfg, err := CompileConfigLenient(hierTree(t, src))
+		if err != nil {
+			t.Fatalf("lenient compile must boot (#1960): %v", err)
+		}
+		found := false
+		for _, w := range lcfg.Warnings {
+			if strings.Contains(w, "destination-poort") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("lenient compile must warn on dropped container term, warnings=%v", lcfg.Warnings)
+		}
+	})
+
+	t.Run("nested block value inside term is honored", func(t *testing.T) {
+		tree := hierTree(t, `
+applications {
+    application custom-app {
+        term t-nested {
+            protocol tcp;
+            destination-port {
+                443;
+            }
+        }
+    }
+}
+`)
+		cfg, err := CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("strict compile must honor nested block value: %v", err)
+		}
+		assertTerm(t, cfg, "custom-app-t-nested", "tcp", "443")
+	})
+
+	t.Run("grandchild block after valued leaf rejects strict", func(t *testing.T) {
+		src := `
+applications {
+    application custom-app {
+        term t-grand {
+            protocol tcp;
+            destination-port 8443 {
+                foo;
+            }
+        }
+    }
+}
+`
+		if _, err := CompileConfig(hierTree(t, src)); err == nil || !strings.Contains(err.Error(), "foo") {
+			t.Fatalf("strict compile must reject grandchild token inside term, got %v", err)
+		}
+		lcfg, err := CompileConfigLenient(hierTree(t, src))
+		if err != nil {
+			t.Fatalf("lenient compile must boot (#1960): %v", err)
+		}
+		found := false
+		for _, w := range lcfg.Warnings {
+			if strings.Contains(w, "foo") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("lenient compile must warn on grandchild token, warnings=%v", lcfg.Warnings)
+		}
+		// The honored prefix still compiles on the tolerant path.
+		assertTerm(t, lcfg, "custom-app-t-grand", "tcp", "8443")
+	})
+
+	t.Run("empty container term rejects strict and warns lenient", func(t *testing.T) {
+		src := `
+applications {
+    application c2 {
+        term {
+        }
+        term t-http {
+            protocol tcp;
+            destination-port 80;
+        }
+    }
+}
+`
+		if _, err := CompileConfig(hierTree(t, src)); err == nil || !strings.Contains(err.Error(), "term") {
+			t.Fatalf("strict compile must reject nameless empty container term, got %v", err)
+		}
+		lcfg, err := CompileConfigLenient(hierTree(t, src))
+		if err != nil {
+			t.Fatalf("lenient compile must boot (#1960): %v", err)
+		}
+		found := false
+		for _, w := range lcfg.Warnings {
+			if strings.Contains(w, "term") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("lenient compile must warn on nameless term, warnings=%v", lcfg.Warnings)
+		}
+	})
+
+	t.Run("canonical terms without container still compile", func(t *testing.T) {
+		tree := hierTree(t, `
+applications {
+    application plain {
+        term t-http {
+            protocol tcp;
+            destination-port 80;
+        }
+    }
+}
+`)
+		cfg, err := CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("strict compile of canonical term must stay clean: %v", err)
+		}
+		assertExpanded(t, cfg, "plain", []string{"plain-t-http"})
+	})
+}
