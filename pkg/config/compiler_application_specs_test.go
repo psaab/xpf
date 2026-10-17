@@ -672,13 +672,10 @@ func TestApplicationSpec_ShadowedPredefinedBundleMember_AppIDOnControl(t *testin
 	}
 }
 
-// A user application shadows a predefined bundle with the same name: the
-// strict walk must check user applications BEFORE predefined sets (matching
-// the runtime's ResolveApplication-then-ResolveApplicationSet order). This
-// pins that precedence — moving the PredefinedApplicationSets branch ahead of
-// the user-app check would expand junos-sip to its predefined members, collect
-// nothing user-defined, and commit green while the runtime resolves the
-// malformed user app first and poisons at apply.
+// #14339 supersedes the commit-clean premise below: a user application
+// shadowing a predefined SET is now rejected strict (split-brain by reference
+// path), so the user-app-before-predefined-set precedence is exercised on the
+// lenient path / spec walk directly. The malformed-shadow cases still reject.
 func TestApplicationSpec_UserAppBeforePredefinedSet_AppIDOffRejectsAtCommit(t *testing.T) {
 	tree := flatTreeFromSets(t,
 		"set applications application junos-sip protocol tcp",
@@ -694,8 +691,8 @@ func TestApplicationSpec_UserAppBeforePredefinedSet_AppIDOffRejectsAtCommit(t *t
 	if err == nil {
 		t.Fatal("expected commit to reject malformed user application junos-sip shadowing the predefined junos-sip bundle")
 	}
-	if !strings.Contains(err.Error(), `application "junos-sip": destination-port`) {
-		t.Fatalf("error %q must name user application junos-sip and destination-port", err.Error())
+	if !strings.Contains(err.Error(), "junos-sip") {
+		t.Fatalf("error %q must name user application junos-sip", err.Error())
 	}
 }
 
@@ -721,6 +718,8 @@ func TestApplicationSpec_UserAppBeforePredefinedApp_AppIDOffRejectsAtCommit(t *t
 	}
 }
 
+// #14339: a well-formed user app shadowing a predefined set is rejected strict
+// (split-brain), regardless of whether bundle members are malformed.
 func TestApplicationSpec_UserAppShadowingPredefinedSet_DoesNotValidateBundleMembers(t *testing.T) {
 	tree := flatTreeFromSets(t,
 		"set applications application junos-sip protocol udp",
@@ -734,8 +733,8 @@ func TestApplicationSpec_UserAppShadowingPredefinedSet_DoesNotValidateBundleMemb
 		"set security policies from-zone trust to-zone untrust policy p match application junos-sip",
 		"set security policies from-zone trust to-zone untrust policy p then deny",
 	)
-	if _, err := CompileConfig(tree); err != nil {
-		t.Fatalf("user app junos-sip shadows the bundle; runtime never reads junos-sip-tcp, so commit must succeed: %v", err)
+	if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "#14339") {
+		t.Fatalf("#14339: user app junos-sip shadows predefined set; commit must reject with #14339, got %v", err)
 	}
 }
 

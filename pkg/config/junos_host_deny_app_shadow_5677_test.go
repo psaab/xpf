@@ -14,33 +14,39 @@ import "testing"
 //
 // This case uses a user application named `junos-ms-rpc` — the predefined
 // application-set bundle (junos-ms-rpc-tcp tcp/135 + junos-ms-rpc-udp udp/135,
-// #4102). A user application shadowing a PREDEFINED set name is NOT an
-// application/application-set collision (only user-authored AST stanzas are
-// examined by the #3339 gate; the predefined table lives outside the AST), so
-// the config commits clean and both resolvers see the name.
+// #4102). #14339 now REJECTS this authored shadow at strict commit (direct
+// ExpandApplicationSet resolves the predefined set while ResolveApplication /
+// nested members resolve the user app — split-brain by reference path), so the
+// resolver-ordering scenario is constructed directly as a compiled config
+// (the shape tolerant load can still produce) rather than via CompileConfig.
+// The projection assertion is unchanged.
 //
 // With the app-first fix the deny projects exactly tcp/9999 (the user
 // application). Reverting to set-first re-expands the bundle and the deny
 // projects tcp/135 + udp/135 instead — the ports the operator's application
 // never named — making this test RED.
 func TestJunosHostDirectProjectionAppShadowsSet(t *testing.T) {
-	cmds := append(append([]string{}, junosHostBaseZones...),
-		// User application shadowing the predefined `junos-ms-rpc` app-set.
+	// #14339: the strict gate must reject the authored shadow (split-brain).
+	strictCmds := append(append([]string{}, junosHostBaseZones...),
 		"set applications application junos-ms-rpc protocol tcp",
 		"set applications application junos-ms-rpc destination-port 9999",
-		// Deny the shadowed application on the direct host-bound path.
 		"set security policies from-zone untrust to-zone junos-host policy block-rpc match source-address bad-host",
 		"set security policies from-zone untrust to-zone junos-host policy block-rpc match destination-address any",
 		"set security policies from-zone untrust to-zone junos-host policy block-rpc match application junos-ms-rpc",
 		"set security policies from-zone untrust to-zone junos-host policy block-rpc then deny",
 	)
-	cfg, err := CompileConfig(buildJunosHostWarnTree(t, cmds))
-	if err != nil {
-		// A user application shadowing a PREDEFINED set name must commit clean
-		// (not a #3339 collision). If this fails the shadow scenario itself is
-		// unconstructible and the resolver-ordering assertion below is moot.
-		t.Fatalf("CompileConfig: user application shadowing predefined app-set should commit clean, got %v", err)
+	if _, err := CompileConfig(buildJunosHostWarnTree(t, strictCmds)); err == nil {
+		t.Fatal("CompileConfig: #14339 expected rejection of authored application shadowing predefined set junos-ms-rpc")
 	}
+	// Resolver scenario built directly (tolerant-load shape).
+	cmds := strictCmds
+	cfg, err := CompileConfigLenient(buildJunosHostWarnTree(t, cmds))
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	// Clear the #14339 quarantine for this projection-only scenario: the test
+	// pins app-vs-set resolver precedence, not the quarantine refusal.
+	delete(cfg.Applications.CollidingNames, "junos-ms-rpc")
 
 	proj := BuildJunosHostDenyProjection(cfg)
 	var prog *JunosHostDenyProgram

@@ -557,30 +557,37 @@ func TestCrossParentGeneratedNameCollisionRejected(t *testing.T) {
 	}
 }
 
-// M03: a generated per-term application name shadows a predefined junos-*
-// application. `application junos term ssh` mints `junos-ssh`, which shadows the
-// predefined junos-ssh service. This is a WARNING on BOTH paths (never a hard
-// reject) — a user-defined application legitimately wins over predefined, so the
-// strict commit must SUCCEED while surfacing the accidental shadow.
+// M03/#14339: a generated per-term application name shadows a predefined
+// junos-* application. `application junos term ssh` mints `junos-ssh`, which
+// shadows the predefined junos-ssh service. #14339 rejects this strict (the
+// generated name was never authored as an application) and quarantines it
+// lenient; the full matrix is in
+// TestGeneratedTermShadowingPredefinedAppAndSetRejectedStrict.
 func TestGeneratedTermNameShadowsPredefinedWarns(t *testing.T) {
 	tree := buildTreeFromSet(t, []string{
 		"set applications application junos term ssh protocol tcp destination-port 22",
 		"set applications application junos term web protocol tcp destination-port 80",
 	})
 
-	cfg, err := CompileConfig(tree)
+	if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "junos-ssh") || !strings.Contains(err.Error(), "#14339") {
+		t.Fatalf("CompileConfig: expected #14339 rejection of generated junos-ssh shadow, got %v", err)
+	}
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
-		t.Fatalf("CompileConfig: a generated predefined shadow must warn, not reject: %v", err)
+		t.Fatalf("CompileConfigLenient: generated predefined shadow must warn, not reject: %v", err)
 	}
 	found := false
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "junos-ssh") && strings.Contains(w, "shadows the predefined") {
+		if strings.Contains(w, "junos-ssh") && strings.Contains(w, "#14339") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("expected a #3472 predefined-shadow warning for junos-ssh, got: %v", cfg.Warnings)
+		t.Fatalf("expected a #14339 predefined-shadow warning for junos-ssh, got: %v", cfg.Warnings)
+	}
+	if _, ok := cfg.Applications.CollidingNames["junos-ssh"]; !ok {
+		t.Fatalf("lenient did not quarantine junos-ssh: %v", cfg.Applications.CollidingNames)
 	}
 }
 
@@ -702,5 +709,90 @@ func TestApplicationNameCollisionLenientWarns(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected a #3339 collision warning on the lenient path, got: %v", cfg.Warnings)
+	}
+}
+
+// #14339: decisive regression. Generated <parent>-<term> names shadowing a
+// predefined application (junos-ssh) or a predefined application-set
+// (junos-cifs via junos + term cifs) must be rejected strict and quarantined
+// lenient, and an authored application/set colliding with a predefined SET
+// must not split by reference path.
+func TestGeneratedTermShadowingPredefinedAppAndSetRejectedStrict(t *testing.T) {
+	cases := []struct {
+		name      string
+		cmds      []string
+		wantSub   string
+		colliding string
+	}{
+		{
+			name: "generated shadows predefined application",
+			cmds: []string{
+				"set applications application junos term ssh protocol tcp destination-port 2222",
+				"set applications application junos term web protocol tcp destination-port 80",
+			},
+			wantSub:   "junos-ssh",
+			colliding: "junos-ssh",
+		},
+		{
+			name: "generated shadows predefined application-set",
+			cmds: []string{
+				"set applications application junos term cifs protocol tcp destination-port 4450",
+				"set applications application junos term web protocol tcp destination-port 80",
+			},
+			wantSub:   "junos-cifs",
+			colliding: "junos-cifs",
+		},
+		{
+			name: "authored application shadows predefined application-set",
+			cmds: []string{
+				"set applications application junos-cifs protocol tcp destination-port 4450",
+			},
+			wantSub:   "junos-cifs",
+			colliding: "junos-cifs",
+		},
+
+		{
+			name: "term-based application shadows predefined application-set",
+			cmds: []string{
+				"set applications application junos-cifs term t1 protocol tcp destination-port 4450",
+				"set applications application junos-cifs term t2 protocol udp destination-port 4451",
+			},
+			wantSub:   "junos-cifs",
+			colliding: "junos-cifs",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/strict", func(t *testing.T) {
+			tree := buildTreeFromSet(t, tc.cmds)
+			_, err := CompileConfig(tree)
+			if err == nil {
+				t.Fatalf("CompileConfig: expected rejection for %s, got nil", tc.wantSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) || !strings.Contains(err.Error(), "#14339") {
+				t.Fatalf("unexpected error text: %v", err)
+			}
+		})
+		t.Run(tc.name+"/lenient", func(t *testing.T) {
+			tree := buildTreeFromSet(t, tc.cmds)
+			cfg, err := CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("CompileConfigLenient: expected warning, got %v", err)
+			}
+			if _, ok := cfg.Applications.CollidingNames[tc.colliding]; !ok {
+				t.Fatalf("lenient did not quarantine %q: %v", tc.colliding, cfg.Applications.CollidingNames)
+			}
+			found := false
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w, tc.wantSub) && strings.Contains(w, "#14339") {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("expected #14339 warning for %s, got %v", tc.wantSub, cfg.Warnings)
+			}
+			if drops := ApplicationReferenceMatchDrops(tc.colliding, &cfg.Applications); len(drops) == 0 {
+				t.Fatalf("lenient reference to %q not quarantined", tc.colliding)
+			}
+		})
 	}
 }

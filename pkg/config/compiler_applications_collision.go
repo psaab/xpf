@@ -58,16 +58,24 @@ import (
 // Scope notes:
 //   - A SIMPLE (non-term) user `application junos-http` that shadows a predefined
 //     application remains allowed — that is the legitimate shadow/extend case
-//     from #3339. A term-based application of the same name mints an implicit
-//     application-set, which takes the nested-reference path and is diagnosed by
-//     section 5.
+//     from #3339. Likewise an authored application-set that shadows a predefined
+//     application-SET remains allowed when it is the only authored kind
+//     claiming the name (#4102 user-set-first on every path). A simple
+//     application claiming a predefined-set name is NOT consistent (direct
+//     set expansion is predefined-first, app/member resolution is app-first)
+//     and is diagnosed by section 5 (#14339). A term-based application mints
+//     an implicit application-set and is likewise diagnosed by section 5.
 //   - A user `application-set` shadowing a predefined application is also
 //     diagnosed in section 5: direct references resolve application-first, while
-//     nested members resolve user-set-first.
+//     nested members resolve user-set-first. The same split-brain applies when
+//     an authored application (simple or term-based/implicit-set) claims a
+//     predefined application-SET name, or when BOTH authored kinds claim one
+//     predefined-set name: direct/top-level expansion is predefined/user-set
+//     first while ResolveApplication / nested members are user-app first.
 //   - A multi-term application <X> minting an implicit set <X> is not itself a
 //     collision: the application stanza and its synthesized set share a name
-//     by design. If <X> is a predefined application, section 5 diagnoses the
-//     differing direct and nested resolution paths. An explicit
+//     by design. If <X> is a predefined application or predefined set, section 5
+//     diagnoses the differing direct and nested resolution paths. An explicit
 //     `application-set <X>` is a separate operator-authored stanza and remains
 //     the M07 implicit-set-overwrite case.
 //   - Duplicate application or application-set definitions (the same name authored
@@ -84,9 +92,12 @@ import (
 // ignored: a generated `<parent>-<term>` name that overwrites an authored
 // application (H01), collides cross-namespace with an authored application-set
 // (H02), or collides with another parent's generated name (H03) is rejected
-// under strict commit (warned on the tolerant load / peer-sync path), and a
-// generated name that shadows a predefined junos-* application (M03) is always
-// surfaced as a warning. See section 6 below.
+// under strict commit (warned on the tolerant load / peer-sync path). #14339
+// extends section 6d: a generated name that shadows a predefined application
+// OR a predefined application-set is rejected under strict commit and
+// quarantined (warned) on the lenient path — the generated name was never
+// authored as an application, so the legitimate authored-shadow doctrine does
+// not cover it. See section 6 below.
 func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string, map[string]struct{}, error) {
 	// The compiler compiles EVERY top-level `applications` node (compiler.go's
 	// `for _, node := range tree.Children` switch hits `case "applications"`
@@ -301,7 +312,8 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 	//    set expansion selects the user-defined application-set first. A
 	//    term-based application under that name also mints an implicit set, so
 	//    nested references resolve differently from direct references. The
-	//    simple, non-term application shadow remains allowed.
+	//    simple, non-term application shadow remains allowed. #14339 mirrors
+	//    this for predefined application-SETS (see below).
 	for _, name := range setNames {
 		if appCounts[name] > 0 || len(genParents[name]) > 0 {
 			continue
@@ -323,22 +335,59 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 
 	// A term-based application <X> mints an implicit application-set named <X>
 	// and writes no apps.Applications[<X>] entry. This shadows the predefined
-	// application for nested members while direct references still resolve to the
-	// predefined service. Do not diagnose an explicit set of the same name twice;
-	// the authored-set check above owns that diagnostic.
+	// application/set for nested members while direct references still resolve
+	// to the predefined service. Do not diagnose an explicit set of the same
+	// name twice; the authored-set check above owns that diagnostic.
 	for _, name := range appOrder {
 		if len(termSeen[name]) == 0 || setCounts[name] > 0 {
 			continue
 		}
-		if _, isPredefinedApplication := PredefinedApplications[name]; !isPredefinedApplication {
+		if _, isPredefinedApplication := PredefinedApplications[name]; isPredefinedApplication {
+			markCollision(name)
+			if err := emit(
+				"term-based application %q mints an implicit application-set that shadows "+
+					"predefined application %q — direct references resolve to the predefined "+
+					"application, but nested application-set members expand the implicit set; "+
+					"rename the application (#12220)",
+				name, name); err != nil {
+				return nil, nil, err
+			}
+			continue
+		}
+		if _, isPredefSet := PredefinedApplicationSets[name]; isPredefSet {
+			markCollision(name)
+			if err := emit(
+				"term-based application %q mints an implicit application-set that shadows "+
+					"predefined application-set %q — direct application-set expansion "+
+					"resolves the predefined set, but nested application-set members "+
+					"expand the implicit set; rename the application (#14339)",
+				name, name); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+
+	// #14339: an authored simple application claiming a predefined
+	// application-SET name (no authored set of that name) splits by path:
+	// ExpandApplicationSet("junos-cifs") resolves the predefined set, while
+	// ResolveApplication and nested members (memberIsNestedSet user-app-first)
+	// resolve the single custom application. A lone authored application-set
+	// claiming a predefined-set name stays allowed (#4102 user-set-first, all
+	// paths agree); both-kinds is already rejected by section 3.
+	for _, name := range appOrder {
+		if setCounts[name] > 0 || len(termSeen[name]) > 0 {
+			continue
+		}
+		if _, isPredefSet := PredefinedApplicationSets[name]; !isPredefSet {
 			continue
 		}
 		markCollision(name)
 		if err := emit(
-			"term-based application %q mints an implicit application-set that shadows "+
-				"predefined application %q — direct references resolve to the predefined "+
-				"application, but nested application-set members expand the implicit set; "+
-				"rename the application (#12220)",
+			"application %q shadows predefined application-set %q — direct "+
+				"application-set expansion resolves the predefined set, but direct "+
+				"application references and nested application-set members resolve "+
+				"the user application; a policy can therefore enforce different "+
+				"applications by reference path (rename the application) (#14339)",
 			name, name); err != nil {
 			return nil, nil, err
 		}
@@ -426,27 +475,39 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 			}
 		}
 
-		// 6d. M03 — generated name shadows a predefined junos-* application.
-		//     Always a WARNING on both paths (never a hard reject): a generated
-		//     name is a user-defined application, and ResolveApplication prefers
-		//     user-defined over predefined (pkg/config/predefined.go), so the
-		//     generated term silently shadows the predefined service. Unlike
-		//     H01-H03 this does not overwrite another OPERATOR-authored definition,
-		//     and a SIMPLE (non-term) authored application shadow of a junos-* name
-		//     remains a documented legitimate case. A term-based application or an
-		//     application-set under that name is diagnosed by section 5; reserving
-		//     the whole junos-* namespace would still be inconsistent and could
-		//     brick a config an older binary accepted. Surface it so an accidental
-		//     generated shadow (e.g. `application junos term ssh` minting junos-ssh)
-		//     is operator-visible.
+		// 6d. #14339 — generated name shadows a predefined application or
+		//     predefined application-set. Strict: hard reject via emit;
+		//     lenient: warning + markCollision quarantine. Unlike an authored
+		//     simple application, a generated <parent>-<term> name was never
+		//     written as an application by the operator, so the documented
+		//     authored-shadow doctrine does not cover it: `application junos
+		//     term ssh` silently hijacks junos-ssh (tcp/22 -> author port) and
+		//     `application junos term cifs` hijacks the junos-cifs predefined
+		//     set on the ResolveApplication/nested-member path while direct
+		//     ExpandApplicationSet still resolves the predefined set.
 		if _, isPredef := PredefinedApplications[g]; isPredef {
-			warnings = append(warnings, fmt.Sprintf(
-				"generated per-term application name %q (from %v) shadows the predefined "+
-					"application %q — a user-defined application wins over the predefined "+
-					"service (ResolveApplication prefers user-defined), so the predefined "+
-					"%q is no longer reachable by that name; rename the term/parent if the "+
-					"shadow is unintended (#3472)",
-				g, parents, g, g))
+			markCollision(g)
+			if err := emit(
+				"generated per-term application name %q (from %v) shadows predefined "+
+					"application %q — the generated name was never authored as an "+
+					"application, but ResolveApplication prefers the generated "+
+					"application over the predefined service, so the predefined %q "+
+					"is hijacked by reference path; rename the term or parent (#14339)",
+				g, parents, g, g); err != nil {
+				return nil, nil, err
+			}
+		} else if _, isPredefSet := PredefinedApplicationSets[g]; isPredefSet {
+			markCollision(g)
+			if err := emit(
+				"generated per-term application name %q (from %v) shadows predefined "+
+					"application-set %q — direct application-set expansion resolves "+
+					"the predefined set, but ResolveApplication and nested "+
+					"application-set members resolve the generated application; a "+
+					"policy can therefore enforce different applications by "+
+					"reference path (rename the term or parent) (#14339)",
+				g, parents, g); err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 
