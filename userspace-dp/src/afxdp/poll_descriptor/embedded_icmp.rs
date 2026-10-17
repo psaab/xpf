@@ -43,6 +43,12 @@ pub(in crate::afxdp) enum EmbeddedIcmpReversal {
         /// queued policy gate (outbound SNAT re-NAT; NAT64 V6→V4 pool
         /// rewrite); retain the actual ingress source for policy.
         policy_src_ip: Option<IpAddr>,
+        /// #14316: the ORIGINAL packet's ICMP type/code, captured before
+        /// in-place translation rewrites them (NAT64 V4→V6 / V6→V4). The
+        /// queued gate prefers this over the translated frame's type/code
+        /// so icmp-type terms judge the arriving error, not its RFC 7915
+        /// translation. `None` for producers that do not translate.
+        policy_icmp: Option<(u8, u8)>,
         /// #10667: the F-077 gating key the matcher charged — the caller
         /// refunds it via `SessionTable::refund_icmp_error_not_delivered`
         /// when the queued prebuilt is policy-refused.
@@ -264,10 +270,12 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
         EmbeddedIcmpReversal::Queued {
             budget_key,
             policy_src_ip: _,
+            policy_icmp: _,
             ..
         } => EmbeddedIcmpReversal::Queued {
             related_admit,
             policy_src_ip: pre_snat_policy_src,
+            policy_icmp: None,
             budget_key,
         },
         other => other,
@@ -430,6 +438,7 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
     EmbeddedIcmpReversal::Queued {
         related_admit: false,
         policy_src_ip: None,
+        policy_icmp: None,
         budget_key: budget_key.clone(),
     }
 }
@@ -456,6 +465,7 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
     now_secs: u64,
     related_admit: bool,
     policy_src_ip: Option<IpAddr>,
+    policy_icmp: Option<(u8, u8)>,
 ) -> bool {
     // A queued prebuilt never reaches the later flowless disposition arms:
     // both callers continue after this adjudicator and TX dispatch sends a
@@ -488,6 +498,9 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
         // the gate fail-closed protects the queue if a new builder regresses.
         return false;
     };
+    // #14316: the deny event below keeps the queued (wire) identity; only
+    // the policy EVALUATION judges the original sender when carried.
+    let wire_flow = policy_flow.clone();
     if let Some(src_ip) = policy_src_ip {
         policy_flow.src_ip = src_ip;
         policy_flow.forward_key.src_ip = src_ip;
@@ -521,6 +534,9 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
     // Without this a V6→V4 override would evaluate an ICMPv6 sender
     // under the translated frame's ICMPv4 protocol and no
     // ICMPv6-application rule could ever match it.
+    // #14316: likewise, a carried `policy_icmp` is the ORIGINAL type/code
+    // (pre-translation); the queued frame's are the RFC 7915 translation,
+    // so icmp-type terms must judge the carried pair when present.
     let policy_proto = match policy_src_ip {
         Some(IpAddr::V6(_)) if policy_flow.dst_ip.is_ipv4() => PROTO_ICMPV6,
         Some(IpAddr::V4(_)) if policy_flow.dst_ip.is_ipv6() => PROTO_ICMP,
@@ -535,7 +551,7 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
         policy_proto,
         0,
         0,
-        super::policy_packet_icmp(queued_frame, policy_meta),
+        policy_icmp.or_else(|| super::policy_packet_icmp(queued_frame, policy_meta)),
         queued_frame.len() as u64,
         false,
         now_ns,
@@ -546,7 +562,7 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
     let owner_rg_id = super::owner_rg_for_resolution(worker_ctx.forwarding, resolution);
     super::emit_policy_deny_event(
         worker_ctx.event_stream,
-        &policy_flow,
+        &wire_flow,
         &NatDecision::default(),
         policy_meta,
         from_zone_id,
