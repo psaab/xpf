@@ -520,7 +520,11 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// config (no interfaces) does NOT exit bootstrap (a confirmed-but-empty
 	// commit is not a takeover). Runs under d.applySem (the caller holds it).
 	if err := d.maybeExitBootstrapOnFirstConfig(cfg); err != nil {
-		return err
+		// #14356: Store.Commit already promoted cfg and the pre-networkd
+		// fence above may already stand in the kernel. A non-cancellation
+		// bootstrap refusal must still enforce the committed host-auth
+		// tightening via the bounded closeout before propagating.
+		return d.closeoutHostAuthOnPostPromotionError(err, cfg)
 	}
 
 	// #4179 config-arrival re-naming: a config-less HA node (node-id present,
@@ -534,7 +538,8 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// wires the config onto links/VRF/dataplane (transient naming failures
 	// still warn-and-continue inside the helper with a nil error).
 	if _, err := d.maybeReapplyConfigArrivalNaming(cfg); err != nil {
-		return err
+		// #14356: same post-promotion closeout as the bootstrap exit above.
+		return d.closeoutHostAuthOnPostPromotionError(err, cfg)
 	}
 
 	// Log config validation warnings
@@ -553,7 +558,7 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 		// promotion too — funnel it through the same host-authorization closeout
 		// as C2/C3 so the committed nft/login/root-auth tightening is enforced
 		// even when the apply is abandoned at the earliest boundary.
-		return d.closeoutHostAuthOnCancel(ctxErr, cfg)
+		return d.closeoutHostAuthOnPostPromotionError(ctxErr, cfg)
 	}
 	// #5700: vrfErr is the DEFERRED VRF-device-setup failure (a genuine, non-
 	// cancellation ReconcileVRFs error). The rest of the apply still runs; it is
@@ -632,15 +637,19 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 		// independent of xpfd. Skipping them here would leave the OLD, more-
 		// permissive host authorization live for the entire stop window — a
 		// monotonic-revocation violation (a committed management-access tightening
-		// silently deferred by the cancel). closeoutHostAuthOnCancel runs just
+		// silently deferred by the cancel). The closeout runs just
 		// those security-critical owners to completion — bounded (two nft loads +
 		// local credential reconciles, no FRR/netlink reload) and non-cancellable
 
-		// — against the committed config before propagating the cancellation. A
-		// non-cancellation error (an ordinary compile-abort) returns unchanged.
-		// The non-security tail is intentionally left to next-boot convergence
-		// (the #2926 C3 contract).
-		return d.closeoutHostAuthOnCancel(err, cfg)
+		// — against the committed config before propagating the error.
+		// #14356: this is no longer cancel-only — a non-cancellation abort
+		// (required protocol-gate compile error, policy-rename ancestry
+		// authority refusal) has also already promoted cfg, so it runs the
+		// same closeout; otherwise the committed tightening stays
+		// unenforced until a later successful apply. The non-security tail
+		// is intentionally left to next-boot convergence (the #2926 C3
+		// contract).
+		return d.closeoutHostAuthOnPostPromotionError(err, cfg)
 	}
 	var captureCommitErr error
 	if !captureStagePending {
@@ -735,9 +744,9 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 // authorization owners of the apply tail — the kernel nft lo0/host-inbound
 // filters and the OS login/sudo/root-SSH/root-authentication credential
 // reconciles — against cfg. It is the bounded, non-cancellable closeout invoked
-// from applyConfigLocked (via closeoutHostAuthOnCancel) when an apply is
-// abandoned at a #2926 ctx-cancellation boundary AFTER Store.Commit promoted the
-// config (#5643 / M35).
+// from applyConfigLocked (via closeoutHostAuthOnPostPromotionError) when an
+// apply is abandoned at a post-promotion error boundary AFTER Store.Commit
+// promoted the config (#5643 / M35; non-cancellation aborts since #14356).
 //
 // These owners are singled out from the rest of applyTailReconciles because,
 // unlike FRR/IPsec/DHCP/RA/VRRP/syslog/exporters (which the next boot re-renders

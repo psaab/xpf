@@ -1169,7 +1169,7 @@ type Daemon struct {
 	// tail publishes synchronously). Cleared on any ApplyConfig failure AND
 	// on deferred-publish success (fail-closed: the helper still serves the
 	// previous snapshot until the status loop lands it) AND on
-	// cancellation-closeout entry (closeoutHostAuthOnCancel — the C1/C2
+	// post-promotion closeout entry (closeoutHostAuthOnPostPromotionError — the C1/C2
 	// closeout renders the INCOMING config with the previous snapshot still
 	// installed, F1-A). An InstallHostInbound failure deliberately leaves it
 	// untouched: the retained table's staleness is the pre-existing #5789

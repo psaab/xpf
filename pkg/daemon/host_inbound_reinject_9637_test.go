@@ -926,12 +926,13 @@ func TestHostInboundReinjectDeferredPublishRendersAcceptless9637(t *testing.T) {
 // TestHostInboundReinjectVersionRefusalAbortsAcceptless9637 is the GPT-1
 // mixed-version cell: a pre-narrowing (v17) helper under this daemon
 // refuses the v18 snapshot (exact-equality gate), which surfaces as an
-// abort-class apply error. The commit must abort (loud, operator-visible),
-// the flag must be clear, and NO install may run — the kernel retains its
-// previous table instead of installing the narrowed exemption against a
-// helper that funnels every reinject through `xpf-usp0`. RED-on-revert:
-// stop clearing the flag before the abort check and a retained-true flag
-// would authorize a later accept against the old helper.
+// abort-class apply error. The commit must abort (loud, operator-visible)
+// and the flag must be clear. Since #14356 the aborted apply runs the
+// post-promotion host-auth closeout (Store.Commit already promoted this
+// config), so an install DOES run — but it must be accept-less: the kernel
+// must not install the narrowed exemption against a helper that funnels
+// every reinject through `xpf-usp0`. RED-on-revert: stop clearing the flag
+// in the closeout and the captured install carries DataplaneFresh=true.
 func TestHostInboundReinjectVersionRefusalAbortsAcceptless9637(t *testing.T) {
 	dp := &runtimeOnlyApplyTestDP{applyErr: dpuserspace.ErrEgressZoneProtocolIncompatible}
 	d, got := reinjectProductionHarness9637(t, dp)
@@ -940,8 +941,13 @@ func TestHostInboundReinjectVersionRefusalAbortsAcceptless9637(t *testing.T) {
 	if !errors.Is(err, dpuserspace.ErrEgressZoneProtocolIncompatible) {
 		t.Fatalf("version refusal must abort the commit with the gate error, got %v", err)
 	}
-	if len(*got) != 0 {
-		t.Fatalf("aborted apply must install nothing (tail skipped), got %d installs", len(*got))
+	if len(*got) == 0 {
+		t.Fatal("post-promotion abort must run the host-auth closeout install (#14356): no install captured")
+	}
+	for _, s := range *got {
+		if s.DataplaneFresh {
+			t.Error("abort closeout must install accept-less: the helper never published this generation")
+		}
 	}
 	if d.hostInboundDataplaneFresh.Load() {
 		t.Error("flag must be clear after a version-refusal abort")

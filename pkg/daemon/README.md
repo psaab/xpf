@@ -2518,10 +2518,18 @@ never lock an operator out of a remote box it manages.
     the FRR reload) — is post-promotion, and a cancel that skipped the tail would
     leave the OLD, more-permissive host authorization live for the whole stop
     window (a monotonic-revocation violation). So each of those early-returns is
-    funneled through `closeoutHostAuthOnCancel(err, cfg)`, which — only for a
-    `context.Canceled` / `DeadlineExceeded` error — runs a bounded,
-    non-cancellable `applyHostAuthorizationCloseout(cfg)` against the committed
-    config before propagating the cancel. The closeout runs the security-critical
+    funneled through `closeoutHostAuthOnPostPromotionError(err, cfg)`, which
+    runs a bounded, non-cancellable `applyHostAuthorizationCloseout(cfg)`
+    against the committed config before propagating the error. Since #14356
+    this is no longer cancel-only: post-promotion non-cancellation aborts
+    (required protocol-gate compile errors, policy-rename ancestry refusals,
+    bootstrap-exit / config-arrival naming refusals) run the same closeout,
+    because `store.Commit` has already promoted the config on those paths
+    too — otherwise the committed tightening stays unenforced until a later
+    successful apply, and a preactivation fence installed earlier in the
+    apply strands with no real table behind it. The closeout renders
+    host-inbound without the reinject accept (fail-closed) and records
+    staleness when a preactivation fence is still standing afterwards. The closeout runs the security-critical
     owners in tail order (step 9.5–13): the two nft loads, then
     `applySystemLogin` / `reconcileSudoers` / `reconcileAbsentLoginUsers` /
     `applySSHConfig`, then **`applyRootAuth`** — the sole manager of root's
@@ -2541,8 +2549,8 @@ never lock an operator out of a remote box it manages.
       runs each owner as a named `hostAuthOwner`, records a per-owner
       `hostAuthOwnerOutcome`, and `summarizeHostAuthCloseout` joins every
       **failing OR timed-out** owner into the returned error — naming which
-      owner did not reconcile — so `closeoutHostAuthOnCancel` propagates a
-      fail-visible cancel instead of a false-clean one. The "bounded" claim is
+      owner did not reconcile — so the closeout propagates a
+      fail-visible error instead of a false-clean one. The "bounded" claim is
       now an **enforced** wall-clock budget (`hostAuthCloseoutBudget`, 30s):
       `runHostAuthCloseoutOwners` runs each owner under a shared deadline in its
       own goroutine (sequentially — the M35 order is load-bearing — but bounded),
