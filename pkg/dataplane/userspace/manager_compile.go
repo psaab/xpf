@@ -535,6 +535,17 @@ func (m *Manager) applyCompiledSnapshot(
 	// Plan classification and the eventual digest/send must observe one interface
 	// sample. Revalidation detaches snap.Interfaces before it compacts in place.
 	m.prepareSnapshotForApply(snap)
+	// #14333: revalidation moved an ifindex (a link materialized or was
+	// recreated in the build->apply window), so the rebuilt rows may name
+	// an ifindex Compile's shim attach never saw. Attach it now, before
+	// publish — the helper cannot bind an AF_XDP socket to an unshimmed
+	// interface, and the attach failure mode is fail-closed. This is the
+	// same reconcile RefreshInterfaceRowsForLink runs (#14133); the
+	// detach half stays at the post-acceptance syncInterfaceAttachments.
+	if m.revalidateChangedIfindex {
+		m.reconcileInterfaceAttachmentsForRefreshLocked(snap)
+		m.revalidateChangedIfindex = false
+	}
 	prevPlanKey := snapshotBindingPlanKey(m.lastSnapshot)
 	newPlanKey := snapshotBindingPlanKey(snap)
 	pendingXSKStartup := m.proc != nil &&

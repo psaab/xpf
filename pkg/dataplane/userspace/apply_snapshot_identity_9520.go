@@ -74,8 +74,14 @@ func (m *Manager) prepareSnapshotForApply(snap *ConfigSnapshot) {
 	// #11086: re-resolve interface rows against the live kernel before
 	// classification, digest, and send. revalidateSnapshotIfindexes detaches
 	// the interface backing array and LinkUp pointers before mutating them.
+	if m != nil {
+		m.revalidateChangedIfindex = false
+	}
 	refreshed, dropped := revalidateSnapshotIfindexes(snap)
 	if refreshed+dropped > 0 {
+		if m != nil {
+			m.revalidateChangedIfindex = true
+		}
 		slog.Info("userspace: snapshot interface rows revalidated at apply",
 			"refreshed", refreshed, "dropped", dropped)
 		m.rebuildDerivedSectionsAfterRevalidate(snap)
@@ -83,20 +89,23 @@ func (m *Manager) prepareSnapshotForApply(snap *ConfigSnapshot) {
 }
 
 // rebuildDerivedSectionsAfterRevalidate re-derives the sections the full
-// build computes FROM the interface rows — Routes (connected rows and
-// next-hop qualification read row ifindexes/addresses), Fabrics,
-// TunnelEndpoints and MirrorConfigs/MirrorExclusions — against the
-// revalidated rows (#14209).
+// build computes FROM the interface rows — the interface rows themselves
+// (#14333), Routes (connected rows and next-hop qualification read row
+// ifindexes/addresses), Fabrics, TunnelEndpoints and
+// MirrorConfigs/MirrorExclusions — against the revalidated rows (#14209).
 //
 // Before this rebuild, revalidation refreshed only Interfaces: a link
 // recreated between build and apply shipped a current ingress row joined
 // to tunnel/mirror egress rows carrying the OLD ifindex (Rust consumes
 // the tunnel endpoint's own ifindex in forwarding_build/tunnels.rs), and
-// a vanished link kept its connected route and mirror. The link-event
-// refresh (RefreshInterfaceRowsForLink) already rebuilds exactly these
-// sections after revalidating; the normal apply now does the same, from
-// the same builders, so the two paths cannot drift.
-//
+// a vanished link kept its connected route and mirror. It also shipped
+// the build-time link metadata: revalidation discarded the live MTU, MAC
+// and addresses, and a row built while its link was absent (Ifindex 0)
+// was never stamped with an EgressZone, because stampEgressZones skips
+// Ifindex<=0 rows (#14333). The link-event refresh
+// (RefreshInterfaceRowsForLink) already rebuilds exactly these sections
+// after revalidating; the normal apply now does the same, from the same
+// builders, so the two paths cannot drift.
 // The rebuild runs ONLY when revalidation actually moved a row, and only
 // when the snapshot carries its Config: without a config there is nothing
 // to derive from, and a hand-built snapshot's derived rows are its
@@ -122,6 +131,31 @@ func (m *Manager) rebuildDerivedSectionsAfterRevalidate(snap *ConfigSnapshot) {
 	cfg := snap.Config
 	liveXfrm, xfrmDumpFailed := sampleLiveXfrmNetdevs()
 	snap.xfrmDumpFailed = xfrmDumpFailed
+	// #14333: rebuild the interface rows themselves, exactly as
+	// RefreshInterfaceRowsForLink does. Revalidation refreshed only
+	// Ifindex/ParentIfindex/LinkUp and discarded the live MTU, MAC and
+	// addresses from buildLinkSnapshot, and stampEgressZones skips
+	// Ifindex<=0 rows at build time — so a link that materialized
+	// (0 -> N) in the build->apply window shipped with EgressZone "",
+	// empty HardwareAddr, stale/empty Addresses and build-time RXQueues.
+	// A full rebuild restamps every link-derived field from the same
+	// builders the full build uses, so the two paths cannot drift.
+	// The rebuilt rows are freshly built and not shared, so they are
+	// revalidated in place once (no second detach) before deriving.
+	// Only a config that actually describes interface rows may replace
+	// them: a hand-built snapshot carrying rows its empty/foreign Config
+	// does not describe keeps its author's rows (revalidated above).
+	if snapshotHasInterfaceRows(cfg) {
+		snap.Interfaces = buildInterfaceSnapshotsFrom(cfg, liveXfrm)
+		snap.wgFanUpBaseRows = wgFanUpBaseRows(cfg)
+		if refreshed, dropped := revalidateSnapshotIfindexesInPlace(snap); refreshed+dropped > 0 {
+			if m != nil {
+				m.revalidateChangedIfindex = true
+			}
+			slog.Info("userspace: rebuilt snapshot interface rows revalidated at apply",
+				"refreshed", refreshed, "dropped", dropped)
+		}
+	}
 	if routes, capped, err := buildRouteSnapshots(cfg, snap.Interfaces, m.routeOverlayForSnapshot(snap)); err != nil {
 		slog.Warn("userspace: keeping prior routes after apply-time rebuild failure (#14209)",
 			"err", err)

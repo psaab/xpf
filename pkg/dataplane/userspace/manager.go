@@ -98,6 +98,12 @@ type Manager struct {
 	// interface-link refresh reconciliation (#14133) so tests can observe the
 	// attach attempt without privileged BPF state. Production leaves it nil.
 	attachInterfaceXDPHook func(ifindex int, forceGeneric bool) error
+	// revalidateChangedIfindex records that the most recent
+	// prepareSnapshotForApply revalidation (or interface-row rebuild)
+	// moved at least one row's Ifindex/ParentIfindex (#14333). Guarded
+	// by mu; consumed and cleared by applyCompiledSnapshot to decide
+	// whether the pre-publish XDP attach reconciliation must run.
+	revalidateChangedIfindex bool
 
 	mu           sync.Mutex
 	sessionMu    sync.Mutex // separate lock for session sync requests (Phase 3)

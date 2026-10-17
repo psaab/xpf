@@ -105,9 +105,11 @@ func TestPrepareSnapshotForApplyRebuildsDerivedIfindexes14209(t *testing.T) {
 	m := &Manager{}
 	m.prepareSnapshotForApply(snap)
 
-	// Interfaces: recreated row refreshed, vanished row dropped.
-	if len(snap.Interfaces) != 3 {
-		t.Fatalf("interfaces = %+v, want 3 surviving rows", snap.Interfaces)
+	// Interfaces: the config rebuild emits base+unit rows; the vanished
+	// interface's rebuilt rows are dropped by the in-place revalidation,
+	// leaving the 5 surviving rows (#14333).
+	if len(snap.Interfaces) != 5 {
+		t.Fatalf("interfaces = %+v, want 5 surviving rows", snap.Interfaces)
 	}
 	for _, row := range snap.Interfaces {
 		if row.LinuxName == "ge-0-0-0" && row.Ifindex != 29 {
@@ -201,8 +203,13 @@ func TestPrepareSnapshotForApplyRebuildsTunnelIfindex14209(t *testing.T) {
 	m := &Manager{}
 	m.prepareSnapshotForApply(snap)
 
-	if len(snap.Interfaces) != 1 || snap.Interfaces[0].Ifindex != 77 {
-		t.Fatalf("interfaces = %+v, want gr row refreshed to 77", snap.Interfaces)
+	if len(snap.Interfaces) != 2 {
+		t.Fatalf("interfaces = %+v, want rebuilt base+unit gr rows", snap.Interfaces)
+	}
+	for _, row := range snap.Interfaces {
+		if row.Ifindex != 77 {
+			t.Fatalf("interfaces = %+v, want gr rows refreshed to 77", snap.Interfaces)
+		}
 	}
 	if len(snap.TunnelEndpoints) != 1 || snap.TunnelEndpoints[0].Ifindex != 77 {
 		t.Fatalf("tunnel endpoints = %+v, want endpoint ifindex rebuilt to 77 (#14209)", snap.TunnelEndpoints)
