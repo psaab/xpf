@@ -52,9 +52,10 @@ const SYN_COOKIE_VALIDATED_CACHE_TTL_SECS: u64 = SynCookieCodec::EPOCH_SECS;
 pub(super) const SYN_COOKIE_STANDBY_ACK_VALIDATION_RATE_LIMIT_PER_SEC: u32 = 4096;
 #[cfg(test)]
 pub(super) const SYN_COOKIE_STANDBY_ACK_VALIDATION_RATE_LIMIT_PER_SEC: u32 = 8;
-/// #13952: maximum SYN-cookie ACK MAC attempts per client key and worker per
-/// second, including the initial bucket burst, this allows up to 1040 attempts
-/// during a 64-second cookie epoch.
+/// #13952/#14324: maximum FAILED SYN-cookie ACK MAC attempts per client key
+/// and worker per second, including the initial bucket burst (up to 1040
+/// failed attempts during a 64-second cookie epoch). Charged only after a
+/// failed MAC; valid cookies never consume it (#13700/#14324).
 #[cfg(not(test))]
 pub(super) const SYN_COOKIE_FAILED_ATTEMPT_RATE_LIMIT_PER_SEC: u32 = 16;
 #[cfg(test)]

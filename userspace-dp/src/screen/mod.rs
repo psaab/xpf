@@ -276,6 +276,7 @@ use scan::{IpSweepTracker, PortScanTracker};
 use syn_rate::SynRateSketch;
 use syncookie::SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC;
 use syncookie::SYN_COOKIE_STANDBY_ACK_VALIDATION_RATE_LIMIT_PER_SEC;
+#[cfg(test)]
 use syncookie::SYN_COOKIE_FAILED_ATTEMPT_RATE_LIMIT_PER_SEC;
 #[cfg(not(test))]
 use syncookie::SynCookieValidatedCache;
@@ -1507,22 +1508,6 @@ impl ScreenState {
         {
             return SynCookieAckVerdict::Invalid;
         }
-        // #13952: bound candidate MAC checks by client key before SipHash.
-        // The active arm retains its distinct drop verdict; standby remains
-        // fail-open. This shared per-zone sketch survives active/standby
-        // changes and is independent of the post-MAC aggregate diagnostics.
-        let pre_mac_limited = self
-            .zones
-            .get_mut(zone)
-            .is_none_or(|zstate| zstate.syn_cookie_ack_attempt_limited(pkt, now_ns));
-        if pre_mac_limited {
-            return if locally_active {
-                SynCookieAckVerdict::ActiveBudgetExceeded
-            } else {
-                SynCookieAckVerdict::NotApplicable
-            };
-        }
-
         // The cookie MAC binds the full 4-tuple (that is what makes the
         // cookie unforgeable for this connection); the whitelist it seeds is
         // source-scoped (#9419) because the client that comes back does so on
@@ -1534,6 +1519,13 @@ impl ScreenState {
         let validated = SynCookieCodec::cookie_full_epoch(current_epoch, cookie_isn)
             .is_some_and(|epoch| ring.validates(legacy_codec, tuple, zone_tag, epoch, cookie_isn));
         if validated {
+            // #14324: a valid cookie NEVER charges the failed-attempt
+            // budget and is never refused by it. Charging valid ACKs
+            // pre-MAC (#13952) let 16 spoofed ACKs/s from a victim's
+            // source starve that victim's legitimate cookie ACK and
+            // throttled NATed clients at 16 conn/s per service,
+            // defeating #13700. SipHash validation runs first; only
+            // failures below consume any budget.
             let profile_gen = self.syn_cookie_profile_gen(zone);
             self.syn_cookie_validated.insert(
                 zone_tag,
@@ -1543,14 +1535,29 @@ impl ScreenState {
             );
             SynCookieAckVerdict::Validated
         } else if locally_active {
-            if self.active_syn_cookie_ack_validation_limited(zone, now_ns) {
+            // #13952/#14324: failed MACs charge the per-(src,dst,dport)
+            // sketch AFTER validation, so a key flooding forgeries is
+            // throttled to ActiveBudgetExceeded instead of Invalid, but
+            // spoofed failures can never block a later valid cookie
+            // (validated above). The sketch is shared across
+            // active/standby so role changes do not reset it.
+            let per_key_limited = self
+                .zones
+                .get_mut(zone)
+                .is_none_or(|zstate| zstate.syn_cookie_ack_attempt_limited(pkt, now_ns));
+            if per_key_limited || self.active_syn_cookie_ack_validation_limited(zone, now_ns) {
                 SynCookieAckVerdict::ActiveBudgetExceeded
             } else {
                 SynCookieAckVerdict::Invalid
             }
         } else {
-            // Failed MACs consume the standby invalid-attempt budget; valid
-            // cookies above never touch this zone-wide bucket.
+            // Failed MACs consume the per-key failed-attempt sketch and
+            // the standby zone-wide budget; valid cookies above never
+            // touch either. Standby remains fail-open regardless.
+            let _ = self
+                .zones
+                .get_mut(zone)
+                .is_none_or(|zstate| zstate.syn_cookie_ack_attempt_limited(pkt, now_ns));
             let _ = self.standby_syn_cookie_ack_validation_limited(zone, now_ns);
             SynCookieAckVerdict::NotApplicable
         }
