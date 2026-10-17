@@ -60,6 +60,17 @@ var snmpV3PrivKeywords = map[string]bool{
 	"privacy-aes128": true,
 }
 
+// #14405: the walk below must read the same shapes the compiler reads.
+// compileSNMPv3 expands a packed ancestor (`v3 usm { ... }`,
+// `usm local-engine { ... }`) with packedBodyChildren at each level and
+// hoists a descendant flat-chain statement under a user with
+// hoistAndSplitRun8939. A gate that walks only direct children and only
+// a user's direct children's Keys therefore skips exactly the users the
+// compiler creates from those spellings, and the unknown protocol
+// keyword inside them is dropped silently — the #9155 harm again.
+// Expanding with the compiler's own helpers keeps the two in step: a
+// shape the compiler cannot expand is not expanded here either.
+//
 // validateSNMPv3SecurityKeywordStrict rejects an unrecognised
 // `authentication-*` / `privacy-*` keyword under an SNMPv3 USM user.
 func validateSNMPv3SecurityKeywordStrict(tree *ConfigTree) error {
@@ -70,19 +81,45 @@ func validateSNMPv3SecurityKeywordStrict(tree *ConfigTree) error {
 		if root.Name() != "snmp" {
 			continue
 		}
-		for _, v3 := range root.Children {
+		for _, v3 := range packedBodyChildren(root, schemaForPath("snmp")) {
 			if v3.Name() != "v3" {
 				continue
 			}
-			for _, usm := range v3.Children {
+			for _, usm := range packedBodyChildren(v3, schemaForPath("snmp", "v3")) {
 				if usm.Name() != "usm" {
 					continue
 				}
-				for _, eng := range usm.Children {
+				for _, eng := range packedBodyChildren(usm, schemaForPath("snmp", "v3", "usm")) {
 					if eng.Name() != "local-engine" {
 						continue
 					}
 					for _, user := range eng.FindChildren("user") {
+						if err := checkSNMPv3UserKeywords9155(user); err != nil {
+							return err
+						}
+					}
+					// A fully packed tail can synthesise the user
+					// itself (`v3 usm local-engine user u1 ...`):
+					// packedBodyChildren on the engine yields the
+					// user nodes directly when the engine was packed.
+					for _, user := range packedBodyChildren(eng, schemaForPath("snmp", "v3", "usm", "local-engine")) {
+						if user.Name() != "user" {
+							continue
+						}
+						// FindChildren above already covered a
+						// braced engine's users; packedBodyChildren
+						// returns Children unchanged when there is
+						// no tail, so skip nodes already checked.
+						seen := false
+						for _, u := range eng.FindChildren("user") {
+							if u == user {
+								seen = true
+								break
+							}
+						}
+						if seen {
+							continue
+						}
 						if err := checkSNMPv3UserKeywords9155(user); err != nil {
 							return err
 						}
@@ -101,6 +138,15 @@ func validateSNMPv3SecurityKeywordStrict(tree *ConfigTree) error {
 // authentication-password X` packs the run onto the user node's own Keys, while
 // the braced form makes it a child. Checking only one is how a gate ends up
 // covering the spelling its author happened to test with.
+//
+// #14405: a flat `set` chain nests each later statement under the previous
+// one, so a privacy (or second auth) keyword can be a GRANDCHILD of the
+// user. Hoist the user's children with the same helper the compiler uses
+// so every hoisted statement's Keys are examined, then also scan any
+// remaining descendant Keys: an unknown protocol keyword
+// (`authentication-foo` / `privacy-bar`) is not a declared child of the
+// user schema, so the hoist leaves it nested where it was authored —
+// exactly where a direct-children-only scan cannot see it.
 func checkSNMPv3UserKeywords9155(user *Node) error {
 	name := "<unnamed>"
 	if len(user.Keys) > 1 {
@@ -112,11 +158,40 @@ func checkSNMPv3UserKeywords9155(user *Node) error {
 			return err
 		}
 	}
-	for _, prop := range user.Children {
+	hoisted := hoistAndSplitRun8939(user.Children,
+		schemaForPath("snmp", "v3", "usm", "local-engine", "user"))
+	for _, prop := range hoisted {
 		for _, tok := range prop.Keys {
 			if err := rejectUnknownSNMPv3Keyword9155(name, tok); err != nil {
 				return err
 			}
+		}
+	}
+	// Descendant scan for keywords the hoist cannot lift (unknown heads
+	// do not resolve as user-schema leaves). Password leaves and known
+	// protocols are exempted inside rejectUnknownSNMPv3Keyword9155, and
+	// values are never `authentication-*`/`privacy-*` heads in a valid
+	// spelling, so scanning every descendant token is safe.
+	var scan func(n *Node) error
+	scan = func(n *Node) error {
+		if n == nil {
+			return nil
+		}
+		for _, tok := range n.Keys {
+			if err := rejectUnknownSNMPv3Keyword9155(name, tok); err != nil {
+				return err
+			}
+		}
+		for _, c := range n.Children {
+			if err := scan(c); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, prop := range user.Children {
+		if err := scan(prop); err != nil {
+			return err
 		}
 	}
 	return nil
