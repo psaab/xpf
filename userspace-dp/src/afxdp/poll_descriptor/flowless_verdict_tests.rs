@@ -374,6 +374,96 @@ mod flowless_local_delivery_tests {
         );
     }
 
+    // #14317: a flowless host-bound packet must meter its interface INPUT
+    // policer. It never installs a session and never takes a TX-selection
+    // leg, so before the fix an over-burst fragment flood was delivered
+    // unmetered (policer status stayed at zero). Protocol-scoped term
+    // (ports are unknown on a flowless packet and fail closed by design).
+    #[test]
+    fn flowless_input_policer_meters_and_drops_14317() {
+        let mut fw = fw_with_host_inbound(ZONE, &["any-service"], &[]);
+        fw.filter_state = crate::filter::parse_filter_state_with_three_color(
+            &[crate::FirewallFilterSnapshot {
+                name: "edge-in".into(),
+                family: "inet".into(),
+                terms: vec![crate::FirewallTermSnapshot {
+                    name: "police-tcp".into(),
+                    protocols: vec!["tcp".into()],
+                    policer: "host-pol".into(),
+                    action: "accept".into(),
+                    ..Default::default()
+                }],
+            }],
+            &[],
+            &[crate::ThreeColorPolicerSnapshot {
+                name: "host-pol".into(),
+                mode: "single-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1,
+                committed_burst_bytes: 1_000,
+                peak_or_excess_burst_bytes: 50,
+                then_action: "discard".into(),
+                ..Default::default()
+            }],
+            &[crate::InterfaceSnapshot {
+                name: "ge-0/0/0.0".into(),
+                ifindex: INGRESS_IF,
+                filter_input_v4: "edge-in".into(),
+                ..Default::default()
+            }],
+            "",
+            "",
+        )
+        .expect("flowless input policer compiles");
+        let flow = flowless_flow(PROTO_TCP);
+        let meta900 = {
+            let mut m = flowless_meta(PROTO_TCP);
+            m.pkt_len = 900;
+            m
+        };
+        assert_eq!(
+            flowless_local_delivery_verdict(
+                &fw,
+                None,
+                flowless_extra(),
+                &flow,
+                meta900,
+                INGRESS_IF,
+                ZONE,
+                Some(ZONE),
+                900,
+                1_000,
+            ),
+            FlowlessLocalVerdict::Deliver,
+            "conforming flowless packet passes",
+        );
+        assert_eq!(
+            fw.filter_state.three_color_policer_statuses()[0].green_packets,
+            1,
+            "first flowless packet charged exactly once",
+        );
+        assert_eq!(
+            flowless_local_delivery_verdict(
+                &fw,
+                None,
+                flowless_extra(),
+                &flow,
+                meta900,
+                INGRESS_IF,
+                ZONE,
+                Some(ZONE),
+                900,
+                1_000,
+            ),
+            FlowlessLocalVerdict::Filtered,
+            "over-rate flowless packet must drop on its input policer (#14317)",
+        );
+        assert!(
+            fw.filter_state.three_color_policer_statuses()[0].drop_packets >= 1,
+            "red flowless drop must be charged",
+        );
+    }
+
     // (a) junos-host: an admit-all zone with `from-zone trust to-zone junos-host
     // then deny` (application any) denies the flowless host-bound packet → NOT
     // delivered. `any` / address terms match regardless of L4.

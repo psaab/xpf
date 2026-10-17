@@ -3983,3 +3983,180 @@ fn transit_hit_defers_input_policer_to_tx_selection_14120() {
     );
     assert_eq!(status[0].drop_packets, 0);
 }
+
+/// #14317: after a config-generation bump a Stale LocalDelivery hit must
+/// capture its policer with the packet's REAL L4 identity. A port-scoped
+/// policer term (`destination-port 22`) cannot match under
+/// `TermMatchExtra::default()` (ports are in the flow, but tcp-flags/icmp
+/// constraints are not), yet the decisive observable is the port-scoped
+/// capture: with burst 1 the first 900-byte packet passes, the second drops.
+/// Pre-fix the Stale arm captures with `default()` semantics for the
+/// per-packet flags — this cell pins the port-scoped capture+meter, and the
+/// NoLocalEntry cell below pins the sessionless arm.
+#[test]
+fn stale_local_delivery_policer_captures_with_packet_extra_14317() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "police-ssh".into(),
+            protocols: vec!["tcp".into()],
+            destination_ports: vec!["22".into()],
+            policer: "host-pol".into(),
+            action: "accept".into(),
+            ..Default::default()
+        }],
+    }];
+    snapshot.three_color_policers = vec![crate::ThreeColorPolicerSnapshot {
+        name: "host-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 1_000,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    // dst_port 22 (not the fixture's 5201): the policer term is port-scoped.
+    let flow = v4_flow(22);
+    let local_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::LocalDelivery,
+            ..decision().resolution
+        },
+        ..decision()
+    };
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    assert!(sessions.install_with_protocol_with_origin(
+        flow.forward_key.clone(),
+        local_decision,
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+        PROTO_TCP,
+        0,
+    ));
+    let mut m = meta(LAN_IFINDEX as u32, 0, false);
+    m.pkt_len = 900;
+    // The build_policy_deny_tcp_syn_frame is 10.0.61.102:12345 -> .200:5201;
+    // its ports do not match flow(22). Build the extra from the flow instead
+    // by using a frame whose L4 the helper reads only for per-packet flags:
+    // capture reads ports from `flow`, so the decisive path is exercised.
+    let (hit, _) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        m,
+        Some(TEST_LAN_ZONE_ID),
+        ForwardingDisposition::LocalDelivery,
+        1_000,
+    );
+    assert!(hit.is_none(), "conforming stale hit must pass: {hit:?}");
+    assert_eq!(
+        forwarding.filter_state.three_color_policer_statuses()[0].green_packets,
+        1,
+        "stale host-bound hit must capture+meter its port-scoped policer (#14317)",
+    );
+    // Fresh replay must retain the handles: second over-rate packet drops.
+    let (hit, _) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        m,
+        Some(TEST_LAN_ZONE_ID),
+        ForwardingDisposition::LocalDelivery,
+        1_000,
+    );
+    let hit = hit.expect("over-rate fresh hit must drop via stored policer");
+    assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
+    assert!(hit.eval.policer_drop, "drop must be the policer verdict");
+}
+
+/// #14317: a NoLocalEntry (sessionless) LocalDelivery hit has no entry to
+/// store handles on, so it must meter INLINE on every packet. Pre-fix this
+/// arm returned only the static verdict — policer status stayed at zero and
+/// an over-burst flood was delivered unmetered.
+#[test]
+fn no_local_entry_local_delivery_meters_input_policer_inline_14317() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "police-ssh".into(),
+            protocols: vec!["tcp".into()],
+            destination_ports: vec!["22".into()],
+            policer: "host-pol".into(),
+            action: "accept".into(),
+            ..Default::default()
+        }],
+    }];
+    snapshot.three_color_policers = vec![crate::ThreeColorPolicerSnapshot {
+        name: "host-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 1_000,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let flow = v4_flow(22);
+    // No session installed at all => filter_revalidation_target == NoLocalEntry.
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    let mut m = meta(LAN_IFINDEX as u32, 0, false);
+    m.pkt_len = 900;
+    let (hit, _) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        m,
+        Some(TEST_LAN_ZONE_ID),
+        ForwardingDisposition::LocalDelivery,
+        1_000,
+    );
+    assert!(
+        hit.is_none(),
+        "conforming sessionless packet must pass: {hit:?}"
+    );
+    assert_eq!(
+        forwarding.filter_state.three_color_policer_statuses()[0].green_packets,
+        1,
+        "NoLocalEntry host-bound packet must meter inline (#14317)",
+    );
+    let (hit, _) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        m,
+        Some(TEST_LAN_ZONE_ID),
+        ForwardingDisposition::LocalDelivery,
+        1_000,
+    );
+    let hit = hit.expect("over-rate sessionless packet must drop on policer");
+    assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
+    assert!(hit.eval.policer_drop);
+}

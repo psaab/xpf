@@ -1523,10 +1523,22 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                 meta,
                 ingress_zone_override,
             );
-            // #14120: the static revalidation walk is side-effect-free, so an
+            // #14120/#14317: the static revalidation walk is side-effect-free, so an
             // ACCEPTED host-bound packet was never metered. Capture (or
             // refresh) its policer handles, store them for Fresh-hit replay,
             // and meter this packet exactly once.
+            //
+            // #14317: capture with the packet's REAL frame-derived `extra`
+            // (the same value the varies-per-packet arm above computes),
+            // NOT `TermMatchExtra::default()`. `static_input_filter_deny_eval`
+            // deliberately uses `default()` for its flow-invariant VERDICT
+            // (a port-gated term must not deny a flow on a fragment's absent
+            // L4), but the policer CAPTURE is a per-packet match: a
+            // tcp-flags / icmp-type / flex-scoped policer term never matches
+            // under `default()` (every such constraint fails closed there),
+            // so those policers were silently disabled after any generation
+            // bump. Port-scoped terms read ports from the flow itself and
+            // were never the gap; the frame-derived extra covers them too.
             if result.0.is_none()
                 && meter == crate::filter::InputPolicerMeter::Inline
                 && filter.has_three_color_policer_terms
@@ -1541,7 +1553,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                     flow.forward_key.src_port,
                     flow.forward_key.dst_port,
                     meta.dscp,
-                    TermMatchExtra::default(),
+                    term_match_extra_from_frame(frame, meta),
                 );
                 if !policers.is_empty() {
                     sessions.set_input_policers(&canonical_key, policers.clone());
@@ -1579,14 +1591,65 @@ pub(super) fn evaluate_input_filter_on_session_hit(
         // an entry, and both are skipped — `revoked_key: None` tells the caller
         // to drop this packet without revoking anything.
         crate::session::FilterRevalidationTarget::NoLocalEntry => {
-            sessionless_static_input_filter_verdict(
+            let (verdict, counted) = sessionless_static_input_filter_verdict(
                 forwarding,
                 filter,
                 ingress_ifindex,
                 flow,
                 meta,
                 ingress_zone_override,
-            )
+            );
+            // #14317: a host-bound (LocalDelivery) sessionless packet has no
+            // entry to store policer handles on and no TX-selection leg, so
+            // meter INLINE on this packet or an over-burst flood to a local
+            // address with no session (non-SYN TCP, WG listener, install
+            // refused) reaches the kernel unpoliced. A static DENY already
+            // ran its counted walk (and the packet drops either way), so only
+            // an ACCEPTED packet meters here. Transit keeps deferring to its
+            // TX-selection leg exactly once.
+            if verdict.is_none()
+                && meter == crate::filter::InputPolicerMeter::Inline
+                && filter.has_three_color_policer_terms
+            {
+                let policers = crate::filter::evaluate_interface_input_filter_policers_cached(
+                    &forwarding.filter_state,
+                    ingress_ifindex,
+                    is_v6,
+                    flow.src_ip,
+                    flow.dst_ip,
+                    flow.forward_key.protocol,
+                    flow.forward_key.src_port,
+                    flow.forward_key.dst_port,
+                    meta.dscp,
+                    term_match_extra_from_frame(frame, meta),
+                );
+                if !policers.is_empty() {
+                    let action = crate::filter::apply_cached_three_color_policers(
+                        &policers,
+                        now_ns,
+                        meta.pkt_len as u64,
+                    );
+                    if action.drop {
+                        return (
+                            Some(SessionHitInputFilterEval {
+                                eval: NonPbrInputFilterEval {
+                                    action: crate::filter::FilterAction::Discard,
+                                    cached_log: None,
+                                    policer_drop: true,
+                                },
+                                revoked_key: None,
+                                log_source: FilterLogSource::Input,
+                            }),
+                            true,
+                        );
+                    }
+                    // Metered and conforming: report counted so the caller
+                    // does not also charge the static counters for a packet
+                    // whose policer walk already paid (mirrors Fresh/Stale).
+                    return (None, true);
+                }
+            }
+            (verdict, counted)
         }
     }
 }

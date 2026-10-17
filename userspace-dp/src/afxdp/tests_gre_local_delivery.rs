@@ -2966,3 +2966,102 @@ fn gre_decapped_slow_path_hit_counters_charge_inner_length_13970() {
         frame.len()
     );
 }
+
+/// #14317 e2e: a non-SYN TCP packet to a firewall-local address declines to
+/// cache a session by design (#4539), so before the fix it was reinjected
+/// unmetered on EVERY packet — the input policer never charged. Two 900-byte
+/// ACK packets against a burst-1000 policer: the first is delivered (one
+/// slow-path attempt), the second is policer-dropped before reinjection.
+#[test]
+fn local_delivery_non_syn_ack_input_policer_drops_second_packet_14317() {
+    let mut snapshot = nat_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.source_nat_rules.clear();
+    // Input filter + burst policer on reth1.0 (ifindex 24 in nat_snapshot).
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "police-tcp".into(),
+            protocols: vec!["tcp".into()],
+            policer: "host-pol".into(),
+            action: "accept".into(),
+            ..Default::default()
+        }],
+    }];
+    snapshot.three_color_policers = vec![ThreeColorPolicerSnapshot {
+        name: "host-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 1_000,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 24 {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+
+    // ACK (0x10) + PSH: not a SYN opener, so no session is ever cached.
+    const ACK_PSH: u8 = 0x18;
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 0, 61, 1),
+        12345,
+        179,
+        ACK_PSH,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    // Pad to 900 bytes so two packets exceed the 1000-byte burst.
+    let mut frame = frame;
+    frame.resize(900, 0);
+    let meta = txn_meta_v4(24, ACK_PSH, frame.len() as u16);
+
+    let (_b1, dbg1) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(dbg1.local, 1, "first ACK must take LocalDelivery");
+    assert_eq!(
+        binding.live.slow_path_drops.load(Ordering::Relaxed),
+        1,
+        "conforming first packet reinjects",
+    );
+    assert_eq!(
+        forwarding.filter_state.three_color_policer_statuses()[0].green_packets,
+        1,
+        "first non-cached LocalDelivery packet must meter (#14317)",
+    );
+    assert_eq!(sessions.len(), 0, "non-SYN packet must not cache a session");
+
+    let (_b2, _dbg2) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(
+        binding.live.slow_path_drops.load(Ordering::Relaxed),
+        1,
+        "over-rate second packet must NOT reinject (policer drop before LocalDelivery)",
+    );
+    assert!(
+        forwarding.filter_state.three_color_policer_statuses()[0].drop_packets >= 1,
+        "red drop must be charged",
+    );
+}

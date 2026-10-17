@@ -4633,6 +4633,61 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // reinjection is rejected by the physical-ingress
                         // WireGuard owner-zone guard. Leave listener tuples
                         // sessionless so handshake traffic reaches its socket.
+                        // #14317: EVERY LocalDelivery miss meters its input
+                        // policer before reinjection — not only the
+                        // session-cacheable subset below. The precheck above
+                        // deferred (`DeferToTxSelection`), but host-bound
+                        // traffic never takes a TX-selection leg, so a
+                        // non-SYN TCP packet (ACK/RST/data-first: declines to
+                        // cache by design) or a WireGuard listener tuple
+                        // (sessionless by design) was delivered unmetered on
+                        // every packet. The cacheable arm below replays the
+                        // stored handles instead and must NOT charge twice:
+                        // this arm owns exactly the packets that arm declines.
+                        let cache_local_delivery = resolution.disposition
+                            == ForwardingDisposition::LocalDelivery
+                            && should_cache_local_delivery_session_on_miss(
+                                worker_ctx.forwarding,
+                                effective_resolution_target,
+                                resolution,
+                                meta.protocol,
+                                meta.tcp_flags,
+                            )
+                            && !(flow.forward_key.protocol == PROTO_UDP
+                                && crate::afxdp::wg::decap::is_wg_listener_tuple(
+                                    flow.forward_key.dst_port,
+                                    flow.forward_key.dst_ip,
+                                    meta,
+                                    worker_ctx.forwarding,
+                                ));
+                        if resolution.disposition == ForwardingDisposition::LocalDelivery
+                            && !cache_local_delivery
+                        {
+                            let local_miss_policers =
+                                evaluate_non_pbr_input_filter_policers_cached(
+                                    worker_ctx.forwarding,
+                                    crate::afxdp::frame::term_match_extra_from_frame(
+                                        packet_frame,
+                                        meta,
+                                    ),
+                                    Some(flow),
+                                    meta,
+                                );
+                            if !local_miss_policers.is_empty() {
+                                let miss_action = crate::filter::apply_cached_three_color_policers(
+                                    &local_miss_policers,
+                                    now_ns,
+                                    meta.pkt_len as u64,
+                                );
+                                if miss_action.drop {
+                                    telemetry.dbg.local += 1;
+                                    telemetry.dbg.policy_deny += 1;
+                                    telemetry.counters.touched = true;
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
+                            }
+                        }
                         if resolution.disposition == ForwardingDisposition::LocalDelivery
                             && should_cache_local_delivery_session_on_miss(
                                 worker_ctx.forwarding,
@@ -6796,6 +6851,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 meta,
                             );
                             extra.ports_unknown = true;
+                            // #14317: a fragment-association hit whose stored
+                            // decision is LocalDelivery reinjects to the host
+                            // and never takes a TX-selection leg, so meter
+                            // inline here; a transit hit keeps deferring to
+                            // that leg exactly once. The disposition lives on
+                            // the association decision (`hit`), resolved below.
+                            let hit_meter = if hit.resolution.disposition
+                                == ForwardingDisposition::LocalDelivery
+                            {
+                                crate::filter::InputPolicerMeter::Inline
+                            } else {
+                                crate::filter::InputPolicerMeter::DeferToTxSelection
+                            };
                             evaluate_non_pbr_input_filter(
                                 worker_ctx.forwarding,
                                 extra,
@@ -6805,7 +6873,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // #2620 counter ownership: the routing evaluator
                                 // below owns the Accept/defer exit count.
                                 true,
-                                crate::filter::InputPolicerMeter::DeferToTxSelection,
+                                hit_meter,
                                 now_ns,
                             )
                         };
@@ -6825,7 +6893,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 now_ns,
                             );
                         }
-                        if input_eval.action != crate::filter::FilterAction::Accept {
+                        if input_eval.action != crate::filter::FilterAction::Accept
+                            || input_eval.policer_drop
+                        {
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
@@ -7077,10 +7147,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 now_ns,
                             );
                         }
-                        if input_eval.action != crate::filter::FilterAction::Accept {
+                        if input_eval.action != crate::filter::FilterAction::Accept
+                            || input_eval.policer_drop
+                        {
                             // A flowless deny is SILENT: a non-first fragment has
                             // no L4 header to synthesize a TCP RST / reject from,
-                            // so both `discard` and `reject` drop quietly.
+                            // so both `discard` and `reject` drop quietly. A
+                            // policer-red Accept (#14317, metered inline for a
+                            // LocalDelivery resolution below) drops the same way.
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
