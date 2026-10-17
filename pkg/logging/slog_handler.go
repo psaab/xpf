@@ -18,12 +18,35 @@ func eventReaderSlogInfo(message string, args ...any) {
 	slog.Default().Log(eventReaderSlogContext, slog.LevelInfo, message, args...)
 }
 
+type suppressSystemSyslogContextKey struct{}
+
+var suppressSystemSyslogContext = context.WithValue(eventReaderSlogContext, suppressSystemSyslogContextKey{}, true)
+
+// eventReaderSlogInfoSuppressSystemSyslog is eventReaderSlogInfo for a
+// record whose copy must NOT be forwarded to the `system syslog host`
+// clients (#14612). The record still reaches the wrapped base handler
+// (stderr / local log) unconditionally; only SyslogSlogHandler's remote
+// forwarding is withheld. Used for a FILTER_LOG event whose term carried
+// `then log` without `then syslog` — the #6859 gate covered the
+// EventReader's stream clients but not this slog sink.
+func eventReaderSlogInfoSuppressSystemSyslog(message string, args ...any) {
+	slog.Default().Log(suppressSystemSyslogContext, slog.LevelInfo, message, args...)
+}
+
 func isEventReaderSlogContext(ctx context.Context) bool {
 	if ctx == nil {
 		return false
 	}
 	eventReader, _ := ctx.Value(eventReaderSlogContextKey{}).(bool)
 	return eventReader
+}
+
+func isSuppressSystemSyslogContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	suppress, _ := ctx.Value(suppressSystemSyslogContextKey{}).(bool)
+	return suppress
 }
 
 // SyslogSlogHandler is an slog.Handler that forwards log records to remote
@@ -158,6 +181,15 @@ func (h *SyslogSlogHandler) Handle(ctx context.Context, r slog.Record) error {
 	// Always forward to the base handler (stderr) — unconditionally, even on a
 	// re-entrant call, so the record is never lost from local logs.
 	err := h.base.Handle(ctx, r)
+
+	// #14612: a record marked suppress-system-syslog (a `then log`-only
+	// FILTER_LOG hit) has already reached the local log via the base
+	// handler above; it must not be copied to the `system syslog host`
+	// clients. Return before the client snapshot / re-entrancy guard so
+	// the suppressed path pays neither.
+	if isSuppressSystemSyslogContext(ctx) {
+		return err
+	}
 
 	// Snapshot the client set first. With no syslog clients configured (the
 	// default until syslog config applies) there is nothing to forward, so

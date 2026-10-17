@@ -827,6 +827,21 @@ func (er *EventReader) logEvent(data []byte) {
 		return
 	}
 
+	// #14612: decide the #6859 filter-term gate BEFORE emitting the slog
+	// line. The gate originally sat only at the stream fan-out below, so
+	// the daemon "firewall event" line — forwarded by SyslogSlogHandler
+	// to the `system syslog host` clients — leaked a `then log`-only
+	// FILTER_LOG hit to that second sink. The decision is the same
+	// allows(RuleID, TermID) call; only its placement relative to the
+	// slog emission changes. The local (base-handler) copy is kept: the
+	// suppress marker withholds only the handler's remote forwarding.
+	filterLogSyslogAllowed := evt.EventType != eventTypeFilterLog ||
+		er.filterSyslogRoute.allows(rec.RuleID, rec.TermID)
+	slogInfo := eventReaderSlogInfo
+	if !filterLogSyslogAllowed {
+		slogInfo = eventReaderSlogInfoSuppressSystemSyslog
+	}
+
 	// Log to slog (existing behavior) — use resolved zone names
 	inZone := rec.InZoneName
 	if inZone == "" {
@@ -853,7 +868,7 @@ func (er *EventReader) logEvent(data []byte) {
 		// this generic slog branch was the residual sink still emitting it.
 		// Carry the close reason instead, which is what the structured line
 		// surfaces.
-		eventReaderSlogInfo("firewall event",
+		slogInfo("firewall event",
 			"type", eventName,
 			"src", srcStr,
 			"dst", dstStr,
@@ -865,7 +880,7 @@ func (er *EventReader) logEvent(data []byte) {
 			"session_packets", rec.SessionPkts,
 			"session_bytes", rec.SessionBytes)
 	} else if evt.EventType == eventTypeScreenDrop {
-		eventReaderSlogInfo("firewall event",
+		slogInfo("firewall event",
 			"type", eventName,
 			"screen_check", rec.ScreenCheck,
 			"src", srcStr,
@@ -874,7 +889,7 @@ func (er *EventReader) logEvent(data []byte) {
 			"action", actionStr,
 			"ingress_zone", inZone)
 	} else {
-		eventReaderSlogInfo("firewall event",
+		slogInfo("firewall event",
 			"type", eventName,
 			"src", srcStr,
 			"dst", dstStr,
@@ -888,12 +903,14 @@ func (er *EventReader) logEvent(data []byte) {
 	// Forward to syslog clients. #6859: a FILTER_LOG event reaches them only if
 	// its term carried `then syslog`; FILTER_LOG alone is gated, and the gate
 	// sits HERE (after the buffer callbacks, before the local writers) for the
-	// reasons in filter_log_syslog_route.go.
+	// reasons in filter_log_syslog_route.go. #14612: the same decision
+	// (filterLogSyslogAllowed, computed before the slog line above) also
+	// withholds the slog copy from the `system syslog host` clients.
 	er.syslogMu.RLock()
 	clients := er.syslogClients
 	er.syslogMu.RUnlock()
 
-	if evt.EventType == eventTypeFilterLog && !er.filterSyslogRoute.allows(rec.RuleID, rec.TermID) {
+	if !filterLogSyslogAllowed {
 		clients = nil
 	}
 

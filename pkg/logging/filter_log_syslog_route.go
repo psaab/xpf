@@ -24,9 +24,17 @@ import "sync"
 // failing.
 //
 // PLACEMENT is what makes suppression safe: the gate is consulted at the syslog
-// fan-out in ringbuf.go, AFTER the event-buffer callbacks and the daemon log
-// line and BEFORE the local-writer loop. xpf has no `show firewall log`;
-// `show security log` reads that buffer and still shows a suppressed hit.
+// fan-out in ringbuf.go, AFTER the event-buffer callbacks and BEFORE the local
+// writers. xpf has no `show firewall log`; `show security log` reads that buffer
+// and still shows a suppressed hit.
+//
+// #14612: there are TWO remote sinks, not one. The gate above covers the
+// EventReader's stream clients; the daemon "firewall event" slog line is a
+// second sink, forwarded by SyslogSlogHandler to the `system syslog host`
+// clients. logEvent therefore computes the same allows() decision BEFORE
+// emitting that line and marks a gated FILTER_LOG record
+// suppress-system-syslog, so the handler withholds its remote copy while
+// the local (base-handler) copy and the buffer entry are unchanged.
 
 // filterSyslogRoute holds the (filter_id, term_id) -> `then syslog` map the
 // filter-log fan-out gate consults.
