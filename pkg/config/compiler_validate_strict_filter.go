@@ -565,6 +565,79 @@ func validateFilterProtocolsStrict(cfg *Config) error {
 	return check("inet6", cfg.Firewall.FiltersInet6)
 }
 
+// ipv6ExtensionHeaderNumbers is the set of IPv6 Next Header values the
+// dataplane extension-header walk TRAVERSES to the terminal protocol —
+// the generic length-prefixed set (0/43/60/135/139/140/253/254), AH (51)
+// and Fragment (44). It mirrors ipv6_ext_header_is_traversable in
+// userspace-dp/src/afxdp/frame/inspect.rs (IPV6_GENERIC_EXT_HEADERS +
+// 44/51). No-Next-Header (59) and ESP (50) are deliberately absent: both
+// are terminal verdicts the walk hands out as the resolved protocol.
+var ipv6ExtensionHeaderNumbers = map[int]bool{
+	0: true, 43: true, 44: true, 51: true, 60: true,
+	135: true, 139: true, 140: true, 253: true, 254: true,
+}
+
+// protocolNumberForFilterToken resolves a filter protocol token to its
+// number via the same acceptance set as filterProtocolResolvable: the
+// named SSOT subset plus canonical numerics 0-255.
+func protocolNumberForFilterToken(token string) (int, bool) {
+	switch strings.ToLower(strings.TrimSpace(token)) {
+	case "ah":
+		return 51, true
+	default:
+		if n, err := ParseCanonicalUint(token); err == nil && n >= 0 && n < 256 {
+			return n, true
+		}
+		return 0, false
+	}
+}
+
+// validateFilterNextHeaderExtStrict hard-rejects an inet6 firewall-filter
+// term whose Protocols carry an IPv6 extension-header value (#14633).
+// compileFilterFrom aliases `next-header` (and cross-family `protocol`)
+// under inet6 to term.Protocols; the Rust walk and the nft `meta l4proto`
+// mirror both resolve an extension-header chain to its TERMINAL protocol,
+// so such a term can never match — a discard term silently never fires.
+// Only family inet6 is gated: in inet the same numbers are ordinary IPv4
+// protocol numbers. Runs after validateFilterProtocolsStrict, so an
+// unresolvable token is reported there first. On the tolerant path the
+// caller downgrades to a warning (#1960); the Rust backstop below fails
+// the lenient snapshot closed.
+func validateFilterNextHeaderExtStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Firewall.FiltersInet6))
+	for name := range cfg.Firewall.FiltersInet6 {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		filter := cfg.Firewall.FiltersInet6[name]
+		if filter == nil {
+			continue
+		}
+		for _, term := range filter.Terms {
+			if term == nil {
+				continue
+			}
+			for _, proto := range term.Protocols {
+				if strings.TrimSpace(proto) == "" {
+					continue
+				}
+				n, ok := protocolNumberForFilterToken(proto)
+				if !ok || !ipv6ExtensionHeaderNumbers[n] {
+					continue
+				}
+				return fmt.Errorf(
+					"firewall family inet6 filter %q term %q: next-header value %q (%d) is an IPv6 extension-header type the dataplane traverses to the terminal protocol, so the term can never match (use the terminal protocol such as tcp/udp/esp, or match the extension header with is-fragment where applicable)",
+					name, term.Name, proto, n)
+			}
+		}
+	}
+	return nil
+}
+
 // firstIncompatibleProtocol returns the first NON-EMPTY protocol token in a
 // firewall-filter term's protocol list for which pred returns false, plus true;
 // or ("", false) when every present token satisfies pred (or none is present).

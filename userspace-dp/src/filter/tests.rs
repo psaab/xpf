@@ -7186,6 +7186,33 @@ fn crossfield_filter_full(
 }
 
 #[test]
+fn filter_next_header_ext_14633_inet6_rejected_inet_compiles() {
+    // #14633: an inet6 term whose protocol is an extension-header value
+    // (43 = Routing) can never match — the walk resolves the chain to
+    // its terminal protocol. Must fail closed; same value under inet
+    // is an ordinary IPv4 protocol number and compiles.
+    let err = crossfield_filter("inet6", vec!["43".into()], vec![], None, vec![])
+        .expect_err("inet6 next-header 43 must fail the build closed");
+    match err {
+        SnapshotIntegrityError::UnsatisfiableFilterCrossField {
+            family,
+            predicate,
+            protocol,
+            ..
+        } => {
+            assert_eq!(family, "inet6");
+            assert_eq!(predicate, "next-header-extension");
+            assert_eq!(protocol, 43);
+        }
+        other => panic!("expected UnsatisfiableFilterCrossField, got {other:?}"),
+    }
+    crossfield_filter("inet", vec!["43".into()], vec![], None, vec![])
+        .expect("inet protocol 43 compiles");
+    crossfield_filter("inet6", vec!["tcp".into()], vec![], None, vec![])
+        .expect("inet6 terminal protocol compiles");
+}
+
+#[test]
 fn filter_crossfield_3723_port_on_nonport_protocol_rejected() {
     // H01: a destination-port on a non-port-bearing protocol (gre) is a
     // never-match. The backstop rejects the whole snapshot rather than compile a
