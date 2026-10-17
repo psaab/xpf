@@ -230,6 +230,24 @@ func newRFC2136Updater(pol ddnsPolicy, c *config.DHCPDynamicDNSConfig, client dn
 	if c == nil {
 		return nil, errors.New("ddns: nil config for rfc2136 backend")
 	}
+	// #14432: fail closed on a garbage conflict-policy. Pre-fix, any value
+	// other than "replace-owned" took sendRemoveForward's UNGUARDED plain
+	// exact-RR delete branch, so a typo (skip-existng, none, ...) that
+	// reached the backend via the tolerant load / peer-sync path (which
+	// downgrades the strict schema-enum reject to a warning) could delete
+	// a third party's record on lease release. The strict commit path
+	// already rejects such values via the schema enum; this gate covers
+	// the tolerant path and direct callers. Returning an error here makes
+	// resolveFamilyUpdater fall back to the no-op updater for the cycle,
+	// so no UPDATE is emitted and no ownership is recorded. Empty is
+	// allowed: Surface A builds the backend from a policy literal that
+	// sets it explicitly, and policyFromConfig has already defaulted an
+	// unset config value to replace-owned — but a non-empty value outside
+	// the valid set is never honoured. (The add side shares this gate;
+	// #14429 is its audit owner.)
+	if pol.conflictPolicy != "" && !validConflictPolicy(pol.conflictPolicy) {
+		return nil, fmt.Errorf("ddns: invalid conflict-policy %q (valid: replace-owned, skip-existing, strict-fail); refusing to publish or withdraw DNS records", pol.conflictPolicy)
+	}
 	server, err := normalizeUpdateServer(c.UpdateServer)
 	if err != nil {
 		return nil, err
@@ -962,6 +980,13 @@ func (u *rfc2136Updater) sendRemove(ctx context.Context, zone string, rr dns.RR)
 // it (the pre-#2700 behaviour), so a fully-released name leaves no orphan DHCID.
 func (u *rfc2136Updater) sendRemoveForward(ctx context.Context, zone string, rr dns.RR, keepDHCID bool) error {
 	if u.conflictPolicy != "replace-owned" {
+		// #14432: valid non-replace-owned policies keep the plain
+		// exact-RR delete; a garbage value (only reachable via a
+		// directly-built updater, since newRFC2136Updater refuses it)
+		// must REFUSE the delete rather than take this unguarded branch.
+		if u.conflictPolicy != "skip-existing" && u.conflictPolicy != "strict-fail" {
+			return fmt.Errorf("ddns: invalid conflict-policy %q (valid: replace-owned, skip-existing, strict-fail); refusing DELETE of %s", u.conflictPolicy, rr.Header().Name)
+		}
 		return u.sendRemove(ctx, zone, rr)
 	}
 	dhcid, hasDHCID := u.dhcidForRR(rr)
