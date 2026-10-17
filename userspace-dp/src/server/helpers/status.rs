@@ -196,6 +196,7 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // signal, distinct from budget-admitted matches.
     state.status.embedded_error_per_session_suppressed_total =
         state.afxdp.embedded_error_per_session_suppressed_total();
+    state.status.nat_reverse_ambiguous_total = state.afxdp.nat_reverse_ambiguous_total();
     state.status.interface_snat_identity_exhaustion_total =
         state.afxdp.interface_snat_identity_exhaustion_total();
     state

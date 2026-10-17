@@ -204,6 +204,11 @@ pub(crate) struct ProcessStatus {
     /// GCRA. Additive + `default`ed (#1961).
     #[serde(rename = "embedded_error_per_session_suppressed_total", default)]
     pub embedded_error_per_session_suppressed_total: u64,
+    /// #14374 (DR4-H2): reverse-NAT matches refused as ambiguous — a second
+    /// distinct forward candidate passed every check on a shared egress.
+    /// Additive + `default`ed (#1961).
+    #[serde(rename = "nat_reverse_ambiguous_total", default)]
+    pub nat_reverse_ambiguous_total: u64,
     /// #6751 PR 2/3: interface-mode SNAT admissions that failed CLOSED with no
     /// free translated identity — a completed full-cycle PAT probe, a port-less
     /// protocol whose single identity is owned, or a peer-synced import whose

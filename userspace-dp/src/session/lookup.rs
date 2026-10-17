@@ -891,6 +891,7 @@ impl SessionTable {
             return ForwardNatExpiryProbe::Absent;
         };
         let mut idle_crossed = false;
+        let mut first: Option<ForwardSessionMatch> = None;
         for &handle in bucket.iter() {
             let Some(record) = self.entries.get(handle as usize) else {
                 continue;
@@ -919,13 +920,26 @@ impl SessionTable {
                 idle_crossed = true;
                 continue;
             }
-            return ForwardNatExpiryProbe::Live(ForwardSessionMatch {
+            let m = ForwardSessionMatch {
                 key: record.key.clone(),
                 decision: entry.decision,
                 metadata: entry.metadata.clone(),
                 forwarding_generation: entry.forwarding_generation,
-            aux: SessionLookupAux::default(),
-            });
+                aux: SessionLookupAux::default(),
+            };
+            if let Some(prev) = &first {
+                if prev.key != m.key && prev.key.routing_domain != m.key.routing_domain {
+                    // #14374: second distinct forward passes — ambiguous.
+                    crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL
+                        .fetch_add(1, AtomicOrdering::Relaxed);
+                    return ForwardNatExpiryProbe::Absent;
+                }
+                continue;
+            }
+            first = Some(m);
+        }
+        if let Some(m) = first {
+            return ForwardNatExpiryProbe::Live(m);
         }
         if idle_crossed {
             ForwardNatExpiryProbe::IdleCrossed
@@ -1078,6 +1092,7 @@ impl SessionTable {
             &zeroed
         };
         let bucket = self.nat_reverse_index.get(probe)?;
+        let mut first: Option<ForwardSessionMatch> = None;
         for &handle in bucket.iter() {
             let Some(record) = self.entries.get(handle as usize) else {
                 continue;
@@ -1107,15 +1122,25 @@ impl SessionTable {
             {
                 continue;
             }
-            return Some(ForwardSessionMatch {
+            let m = ForwardSessionMatch {
                 key: record.key.clone(),
                 decision: entry.decision,
                 metadata: entry.metadata.clone(),
                 forwarding_generation: entry.forwarding_generation,
-            aux: SessionLookupAux::default(),
-            });
+                aux: SessionLookupAux::default(),
+            };
+            if let Some(prev) = &first {
+                if prev.key != m.key && prev.key.routing_domain != m.key.routing_domain {
+                    // #14374: second distinct forward passes — ambiguous.
+                    crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL
+                        .fetch_add(1, AtomicOrdering::Relaxed);
+                    return None;
+                }
+                continue;
+            }
+            first = Some(m);
         }
-        None
+        first
     }
 
     /// #10130/#10674: session-gated discriminator for a flowless reply fragment.

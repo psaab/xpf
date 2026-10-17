@@ -636,6 +636,12 @@ impl super::Coordinator {
         crate::session::EMBEDDED_ERROR_PER_SESSION_SUPPRESSED_TOTAL.load(Ordering::Relaxed)
     }
 
+    /// #14374 (DR4-H2): reverse-NAT matches refused as ambiguous.
+    /// Surfaced as `xpf_userspace_nat_reverse_ambiguous_total`.
+    pub fn nat_reverse_ambiguous_total(&self) -> u64 {
+        crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL.load(Ordering::Relaxed)
+    }
+
     /// #6751 PR 2/3: interface-mode SNAT admissions that failed CLOSED with no
     /// free translated identity for their `(egress, remote)` pair, plus
     /// peer-synced imports refused for the same reason. Surfaced as

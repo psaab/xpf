@@ -304,3 +304,80 @@ fn nat_ipv6_and_nat64_replies_use_the_same_egress_domain_predicate_11298() {
     };
     assert_nat_reply_uses_egress_domain(forward_key_v6(DOMAIN_A), nat64);
 }
+
+// #14374 (DR4-H2): two tenants with identical tuples egressing through the
+// SAME shared uplink. The reverse index is domain-agnostic and the shared
+// egress ifindex maps to one domain W for both, so neither matcher may pick
+// the first candidate — the tenant is indistinguishable and the match must
+// fail closed rather than mint a reverse session from the wrong forward.
+const DOMAIN_W: u32 = 100_003;
+const IFINDEX_EGRESS_SHARED: i32 = 15;
+
+fn egress_routing_domain_shared(egress_ifindex: i32) -> u32 {
+    match egress_ifindex {
+        IFINDEX_EGRESS_SHARED => DOMAIN_W,
+        other => egress_routing_domain(other),
+    }
+}
+
+#[test]
+fn shared_egress_overlapping_tenants_are_ambiguous_14374() {
+    let nat = NatDecision::default();
+    let mut table = SessionTable::new();
+    let forward_a = forward_key_v4(DOMAIN_A);
+    let forward_b = forward_key_v4(DOMAIN_B);
+    install(&mut table, &forward_a, decision(IFINDEX_EGRESS_SHARED, nat));
+    install(&mut table, &forward_b, decision(IFINDEX_EGRESS_SHARED, nat));
+
+    // The reply arrives in W, the shared egress interface's domain.
+    let reply_w = reply_key(&forward_a, nat, DOMAIN_W);
+    let before = crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        table
+            .find_forward_nat_match(&reply_w, egress_routing_domain_shared)
+            .is_none(),
+        "#14374: shared-egress overlapping tenants must not first-wins match"
+    );
+    assert!(
+        matches!(
+            table.find_forward_nat_match_expiry(
+                &reply_w,
+                1_000_000_000,
+                egress_routing_domain_shared
+            ),
+            ForwardNatExpiryProbe::Absent
+        ),
+        "#14374: expiry matcher must also fail closed on shared-egress ambiguity"
+    );
+    let after = crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        after > before,
+        "#14374: ambiguity must count a nat_reverse_ambiguous event"
+    );
+}
+
+#[test]
+fn shared_egress_single_candidate_control_still_matches_14374() {
+    let nat = NatDecision::default();
+    let mut table = SessionTable::new();
+    let forward_a = forward_key_v4(DOMAIN_A);
+    install(&mut table, &forward_a, decision(IFINDEX_EGRESS_SHARED, nat));
+    let reply_w = reply_key(&forward_a, nat, DOMAIN_W);
+    let hit = table
+        .find_forward_nat_match(&reply_w, egress_routing_domain_shared)
+        .expect("#14374: single shared-egress candidate must still match");
+    assert_eq!(hit.key, forward_a);
+    assert!(
+        matches!(
+            table.find_forward_nat_match_expiry(
+                &reply_w,
+                1_000_000_000,
+                egress_routing_domain_shared
+            ),
+            ForwardNatExpiryProbe::Live(_)
+        ),
+        "#14374: single-candidate expiry probe must stay Live"
+    );
+}
