@@ -435,6 +435,7 @@ impl SessionTable {
             // #10889: a non-TCP entry with an application override promotes
             // only on the first packet observed on its reverse half.
             let promote_from_reverse = !defer_all
+                && !entry.closing
                 && if is_tcp {
                     is_syn_ack(tcp_flags)
                         && entry.metadata.is_reverse
@@ -453,6 +454,7 @@ impl SessionTable {
                 }
             }
             let promote_from_asymmetric_ack = !defer_all
+                && !entry.closing
                 && is_tcp
                 && entry.syn_ack_first
                 && entry.handshake_pending
@@ -465,7 +467,15 @@ impl SessionTable {
             // With SYN-ACK-first pickup, only a reverse non-SYN, non-closing
             // ACK completes; retransmitted SYN-ACKs and closing ACKs remain
             // OPENING.
+            // #14630: a closing (FIN/RST-stamped) entry never completes —
+            // `stamp_tcp_close` leaves `handshake_pending` set, so without
+            // the `!entry.closing` gate a bare ACK crossing a RST would
+            // clear pending here and re-arm the companion (below) onto
+            // the established window, orphaning the reverse half past
+            // the reset reap. The Reset contract (#3046) is sticky: no
+            // later segment promotes a closing entry to a longer window.
             let handshake_completed = !defer_all
+                && !entry.closing
                 && if entry.syn_ack_first {
                     promote_from_asymmetric_ack
                 } else {

@@ -5266,11 +5266,15 @@ fn reference_update_session(
     // #3152/#4109/#6752/#10891/#13678: mirror update_session's complete TCP
     // handshake transitions, including the SYN-ACK pending gap and the
     // asymmetric reverse-ACK completion gate.
-    let reverse_syn_ack = matches!(protocol, PROTO_TCP)
+    // #14630: mirror update_session — a closing entry never promotes or
+    // completes, so the parity sweep stays faithful to the RST-then-ACK gate.
+    let reverse_syn_ack = !entry.closing
+        && matches!(protocol, PROTO_TCP)
         && is_syn_ack(tcp_flags)
         && metadata.is_reverse
         && (!entry.established || entry.handshake_pending);
-    let handshake_completed = if entry.syn_ack_first {
+    let handshake_completed = !entry.closing
+        && if entry.syn_ack_first {
         matches!(protocol, PROTO_TCP)
             && entry.handshake_pending
             && metadata.is_reverse
