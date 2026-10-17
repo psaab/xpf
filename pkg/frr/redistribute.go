@@ -54,16 +54,16 @@ func knownRedistProtocol(name string) bool {
 // when an export cannot be resolved to a source protocol we SKIP it and warn
 // rather than poison the managed reload.
 //
-// Two cases reach the skip-and-warn path:
+// Cases after the no-from expansion (#14380):
 //
-//   - The export names a defined policy-statement, but none of its terms
-//     carry a `from protocol` (e.g. it matches only from community /
-//     prefix-list / as-path). This case PASSES the commit-time strict
-//     validator, which checks only that the name is a known token OR a
-//     defined policy-statement — it does NOT require a `from protocol`.
-//     FRR's redistribute has no construct to express "redistribute
-//     whatever this policy matches" without a source protocol, so there
-//     is no valid line to emit.
+//   - A policy-statement whose explicit `from protocol` sources are
+//     all self or off-family at this node, or a policy-statement
+//     with no terms at all, still skips and warns: there is no
+//     per-source route-map to attach at this node.
+//     A term with NO `from protocol` is NOT in this class — it applies
+//     to every source (redistPolicyForProtocol) and enumerates the
+//     whole node-fitting keyword domain. Per-source maps are defined
+//     union-wide only for the node an export actually references.
 //   - The export is neither a known protocol token nor a defined
 //     policy-statement (a name that slipped past validation on a tolerant
 //     load / peer-sync path, opts.lenientRoutingExportRef in pkg/config).
@@ -92,17 +92,56 @@ func redistProtocolRouteMapName(policy, proto string) string {
 	return policy + "-" + normalizedRedistProtocol(proto) + config.ReservedRedistSuffix
 }
 
+// redistProtocols is the explicit-only set: the per-source maps
+// generatePolicyOptions defines for every policy it renders and the
+// names redistProtocolMapCollision guards, where no export node is
+// in hand. A no-from term adds nothing here (see
+// redistProtocolsForNode).
 func redistProtocols(ps *config.PolicyStatement) []string {
+	return redistProtocolsFiltered(ps, "", "", false)
+}
+
+// redistProtocolsForNode is redistProtocols at one render node
+// (#14380): a term with no `from protocol` applies to every source
+// (redistPolicyForProtocol), so it adds the whole keyword domain,
+// filtered exactly like an explicit term — self excluded,
+// redistSourceFitsNode(proto, node) required. With no enclosing
+// router (self/node both "") the whole domain renders.
+func redistProtocolsForNode(ps *config.PolicyStatement, self, node string) []string {
+	return redistProtocolsFiltered(ps, self, node, true)
+}
+
+func redistProtocolsFiltered(ps *config.PolicyStatement, self, node string, expandNoFrom bool) []string {
 	if ps == nil {
 		return nil
 	}
 	seen := make(map[string]bool)
+	hasNoFromTerm := false
 	for _, term := range ps.Terms {
 		if term == nil {
 			continue
 		}
+		if len(term.FromProtocols) == 0 {
+			hasNoFromTerm = true
+		}
 		for _, proto := range term.FromProtocols {
 			seen[normalizedRedistProtocol(proto)] = true
+		}
+	}
+	// Only the enumeration site (redistributeEntriesAt, via
+	// redistProtocolsForNode) expands: with no enclosing router
+	// (self/node both "") the whole domain renders, exactly like an
+	// explicit term that no node filters.
+	if expandNoFrom && hasNoFromTerm {
+		for _, proto := range config.RedistributionSourceKeywords() {
+			proto = normalizedRedistProtocol(proto)
+			if self != "" && proto == self {
+				continue
+			}
+			if !redistSourceFitsNode(proto, node) {
+				continue
+			}
+			seen[proto] = true
 		}
 	}
 	protocols := make([]string, 0, len(seen))
@@ -141,6 +180,25 @@ func redistPolicyForProtocol(ps *config.PolicyStatement, proto string) *config.P
 }
 
 func redistProtocolMapCollision(po *config.PolicyOptionsConfig) error {
+	return redistProtocolMapCollisionFiltered(po, func(ps *config.PolicyStatement) []string {
+		return redistProtocols(ps)
+	})
+}
+
+// redistProtocolMapCollisionForNodes is redistProtocolMapCollision
+// over the #14380 expanded sets: for a policy-statement actually
+// referenced by an export at (self, node), a no-from term also
+// generates the node-fitting whole domain, and an operator policy
+// colliding with one of those generated names must refuse the apply
+// (FRR merges same-named route-maps). Unreferenced policies keep the
+// explicit-only set above.
+func redistProtocolMapCollisionForNodes(po *config.PolicyOptionsConfig, self, node string) error {
+	return redistProtocolMapCollisionFiltered(po, func(ps *config.PolicyStatement) []string {
+		return redistProtocolsForNode(ps, self, node)
+	})
+}
+
+func redistProtocolMapCollisionFiltered(po *config.PolicyOptionsConfig, protocolsFor func(*config.PolicyStatement) []string) error {
 	if po == nil || po.PolicyStatements == nil {
 		return nil
 	}
@@ -158,7 +216,7 @@ func redistProtocolMapCollision(po *config.PolicyOptionsConfig) error {
 	}
 	generated := make(map[string]string)
 	for _, policy := range names {
-		for _, proto := range redistProtocols(po.PolicyStatements[policy]) {
+		for _, proto := range protocolsFor(po.PolicyStatements[policy]) {
 			routeMap := redistProtocolRouteMapName(policy, proto)
 			final := frrName(routeMap)
 			if operator, ok := operatorNames[final]; ok {
@@ -198,6 +256,81 @@ func renderRedistributePolicyMap(m *Manager, po *config.PolicyOptionsConfig, pol
 // only; BGP MED is distinct and must not consume the IGP export cost.
 func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsConfig, self string, _ map[string]bool, metrics ...*qnhMetricScope11447) string {
 	return formatRedistEntries(m.redistributeEntries(export, po, self, metrics...))
+}
+
+// redistReferencedNodes14380 collects the (self, node) pairs at which
+// a policy-statement is actually referenced by a redistribute-backed
+// export (OSPF/OSPFv3/RIP/IS-IS, global and per-instance), so the
+// per-source maps generatePolicyOptions defines and the collision
+// belt guards cover exactly the nodes whose attachments name them.
+// A defined BGP policy-statement renders as `route-map out`, never as
+// a redistribute, so BGP exports contribute nothing here.
+func redistReferencedNodes14380(fc *FullConfig) map[string][][2]string {
+	out := make(map[string][][2]string)
+	if fc == nil {
+		return out
+	}
+	po := fc.PolicyOptions
+	add := func(name, self, node string) {
+		if name == "" || !isDefinedPolicyStatement(name, po) {
+			return
+		}
+		for _, p := range out[name] {
+			if p[0] == self && p[1] == node {
+				return
+			}
+		}
+		out[name] = append(out[name], [2]string{self, node})
+	}
+	walk := func(ospf *config.OSPFConfig, ospfv3 *config.OSPFv3Config, rip *config.RIPConfig, isis *config.ISISConfig) {
+		if ospf != nil {
+			for _, e := range ospf.Export {
+				add(e, "ospf", "ospf")
+			}
+		}
+		if ospfv3 != nil {
+			for _, e := range ospfv3.Export {
+				add(e, "ospf6", "ospf6")
+			}
+		}
+		if rip != nil {
+			for _, e := range rip.Redistribute {
+				add(e, "rip", "rip")
+			}
+		}
+		if isis != nil {
+			for _, e := range isis.Export {
+				add(e, "isis", "isis")
+			}
+		}
+	}
+	walk(fc.OSPF, fc.OSPFv3, fc.RIP, fc.ISIS)
+	for _, inst := range fc.Instances {
+		walk(inst.OSPF, inst.OSPFv3, inst.RIP, inst.ISIS)
+	}
+	return out
+}
+
+// redistReferencedProtocols14380 returns, per policy-statement, the
+// union of per-source protocols over the nodes that actually
+// reference it: the explicit set plus, for a no-from term, the
+// whole node-fitting domain at each referencing node.
+func redistReferencedProtocols14380(ps *config.PolicyStatement, nodes [][2]string) []string {
+	seen := make(map[string]bool)
+	for _, proto := range redistProtocols(ps) {
+		seen[proto] = true
+	}
+	for _, nd := range nodes {
+		for _, proto := range redistProtocolsForNode(ps, nd[0], nd[1]) {
+			seen[proto] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for proto := range seen {
+		out = append(out, proto)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func applyQNHMetricRouteMap11447(export string, metrics *qnhMetricScope11447, entries []redistEntry, resolvedAsPolicy ...bool) {
@@ -344,7 +477,20 @@ func (m *Manager) redistributeEntriesAt(export string, po *config.PolicyOptionsC
 		if ps, ok := po.PolicyStatements[export]; ok {
 			protocols := make(map[string]bool)
 			skipped := false
+			hasNoFromTerm := false
 			for _, term := range ps.Terms {
+				if term == nil {
+					continue
+				}
+				// A term with no `from protocol` matches routes from
+				// every source (redistPolicyForProtocol), so it
+				// contributes the whole keyword domain below, filtered
+				// exactly like an explicit term: self excluded,
+				// redistSourceFitsNode(proto, node) required.
+				if len(term.FromProtocols) == 0 {
+					hasNoFromTerm = true
+					continue
+				}
 				for _, proto := range term.FromProtocols {
 					proto = normalizedRedistProtocol(proto)
 					// Skip a policy term that matches the enclosing
@@ -365,6 +511,14 @@ func (m *Manager) redistributeEntriesAt(export string, po *config.PolicyOptionsC
 						skipped = true
 						continue
 					}
+					protocols[proto] = true
+				}
+			}
+			if hasNoFromTerm {
+				// #14380: a no-from term expands over every source
+				// that fits this node (redistProtocolsForNode), so a
+				// protocol-less or mixed policy yields the union.
+				for _, proto := range redistProtocolsForNode(ps, self, node) {
 					protocols[proto] = true
 				}
 			}
@@ -394,11 +548,12 @@ func (m *Manager) redistributeEntriesAt(export string, po *config.PolicyOptionsC
 					"policy", export, "protocol", self)
 				return nil
 			}
-			// Defined policy-statement with no resolvable source protocol:
-			// nothing valid to redistribute. Skip + warn rather than emit
-			// the FRR-invalid `redistribute <policy>` that would degrade the
+			// Defined policy-statement with no source at this node
+			// (no terms at all). Nothing valid to redistribute here.
+			// Skip + warn rather than emit the FRR-invalid
+			// `redistribute <policy>` line that would degrade the
 			// managed-section reload (#2223).
-			slog.Warn("FRR redistribute export skipped: policy-statement has no `from protocol`",
+			slog.Warn("FRR redistribute export skipped: policy-statement has no applicable source protocol under this router",
 				"policy", export,
 				"hint", "redistribute requires a source protocol; add `from protocol <proto>` to the policy or use a bare protocol token")
 			return nil

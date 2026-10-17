@@ -264,12 +264,14 @@ func TestResolveRedistributeAllFilteredWarnsAccurately_9510(t *testing.T) {
 	if out := buf.String(); !strings.Contains(out, "applies under this router") || strings.Contains(out, "has no `from protocol`") {
 		t.Errorf("all-filtered policy warned:\n%s\nwant the none-applies diagnostic, not has-no-from-protocol", out)
 	}
-	// Control: a policy that really has no `from protocol` keeps its own text.
+	// #14380 control: a policy that really has no `from protocol`
+	// now expands over every node-fitting source instead of warning.
 	buf.Reset()
-	if got := m.resolveRedistribute("commonly", po, "ospf", nil); got != "" {
-		t.Fatalf("protocol-less policy rendered %q", got)
-	}
-	if out := buf.String(); !strings.Contains(out, "has no `from protocol`") {
-		t.Errorf("protocol-less policy warned:\n%s\nwant has-no-from-protocol", out)
+	got := m.resolveRedistribute("commonly", po, "ospf", nil)
+	for _, proto := range []string{"bgp", "connected", "isis", "kernel", "rip", "static"} {
+		want := " redistribute " + proto + " route-map commonly-" + proto + "-xpf-redist\n"
+		if !strings.Contains(got, want) {
+			t.Errorf("protocol-less policy missing %q, got %q", want, got)
+		}
 	}
 }

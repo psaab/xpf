@@ -3181,18 +3181,15 @@ func TestGenerateProtocols_BGPExportMixed(t *testing.T) {
 	}
 }
 
-// TestResolveRedistribute_ProtocolLessPolicy is the #2223 fail-on-revert
-// guard. A defined policy-statement whose terms carry NO `from protocol`
-// (it matches only from community / prefix-list / as-path) has no
-// resolvable redistribute source protocol. resolveRedistribute MUST skip
-// it (emit nothing) rather than fall back to the FRR-invalid
-// `redistribute <policy>` line — that line is rejected by frr-reload.py
-// and, because it lands in the xpf-managed section, fails the WHOLE
-// reload: no stale config is removed anywhere in the managed section while
-// it is rendered, not just in this stanza.
-//
-// Pre-fix this returned " redistribute export-comm\n". Post-fix it
-// returns "".
+// TestResolveRedistribute_ProtocolLessPolicy is the #2223 + #14380
+// fail-on-revert guard. A defined policy-statement whose terms carry
+// NO `from protocol` matches routes regardless of source protocol
+// (redistPolicyForProtocol: len(FromProtocols) == 0 applies to every
+// protocol), so resolveRedistribute enumerates every source that
+// fits the enclosing router — it must NOT emit the FRR-invalid
+// `redistribute <policy>` line (#2223) and must NOT silently emit
+// zero lines (#14380). With no enclosing router (self "") the whole
+// keyword domain renders, each with its per-protocol route-map.
 func TestResolveRedistribute_ProtocolLessPolicy(t *testing.T) {
 	m := New()
 	po := &config.PolicyOptionsConfig{
@@ -3208,8 +3205,11 @@ func TestResolveRedistribute_ProtocolLessPolicy(t *testing.T) {
 		},
 	}
 	got := m.resolveRedistribute("export-comm", po, "", nil)
-	if got != "" {
-		t.Errorf("protocol-less policy must yield no redistribute line, got %q", got)
+	for _, proto := range []string{"bgp", "connected", "isis", "kernel", "ospf", "ospf6", "rip", "ripng", "static"} {
+		want := " redistribute " + proto + " route-map export-comm-" + proto + "-xpf-redist\n"
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q, got %q", want, got)
+		}
 	}
 	// Specifically must NOT emit the FRR-invalid bare-policy line.
 	if strings.Contains(got, "redistribute export-comm") {
@@ -3240,13 +3240,14 @@ func TestResolveRedistribute_UnknownToken(t *testing.T) {
 	}
 }
 
-// TestGenerateProtocols_ProtocolLessPolicyExport is the end-to-end #2223
-// guard at the generateProtocols level: an OSPF instance exporting a
-// protocol-less policy alongside a normal protocol-qualified policy must
-// (a) omit any invalid `redistribute <policy>` line for the protocol-less
-// export, and (b) still emit the correct `redistribute <proto> route-map
-// <name>` for the well-formed one — one bad stanza never suppresses the
-// good one.
+// TestGenerateProtocols_ProtocolLessPolicyExport is the end-to-end
+// #2223 + #14380 guard at the generateProtocols level: an OSPF
+// instance exporting a protocol-less policy alongside a normal
+// protocol-qualified policy must (a) omit any invalid
+// `redistribute <policy>` line for the protocol-less export (#2223),
+// (b) render one `redistribute <proto> route-map export-comm-<proto>-xpf-redist`
+// line per applicable non-self source for it (#14380), and (c) still
+// emit the correct line for the well-formed one.
 func TestGenerateProtocols_ProtocolLessPolicyExport(t *testing.T) {
 	m := New()
 	po := &config.PolicyOptionsConfig{
@@ -3276,6 +3277,20 @@ func TestGenerateProtocols_ProtocolLessPolicyExport(t *testing.T) {
 	// The protocol-less export must NOT produce any invalid line.
 	if strings.Contains(got, "redistribute export-comm") {
 		t.Errorf("rendered FRR-invalid `redistribute export-comm`, got:\n%s", got)
+	}
+	// #14380: under router ospf the no-from policy expands to every
+	// IPv4-fitting, non-self source (ospf excluded as self; ospf6 and
+	// ripng excluded as off-family).
+	for _, proto := range []string{"bgp", "connected", "isis", "kernel", "rip", "static"} {
+		want := " redistribute " + proto + " route-map export-comm-" + proto + "-xpf-redist\n"
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q, got:\n%s", want, got)
+		}
+	}
+	for _, bad := range []string{" redistribute ospf ", " redistribute ospf6 ", " redistribute ripng "} {
+		if strings.Contains(got, bad) {
+			t.Errorf("self/off-family source %q must not render, got:\n%s", bad, got)
+		}
 	}
 	// The well-formed export must still render correctly.
 	if !strings.Contains(got, "redistribute static route-map export-static-static-xpf-redist\n") {
