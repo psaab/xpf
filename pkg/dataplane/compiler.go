@@ -1183,8 +1183,33 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 	result.PolicyNames[DefaultPolicySentinelID] = DefaultPolicyName
 
 	policySetID := uint32(0)
+	// #14336: exclude quarantined zone stanzas (collision losers / poisoned
+	// zones, #13168) exactly as walkPolicyRuleSlots does: discarded rules
+	// must neither abort the compile (>MaxRulesPerPolicy), clobber the
+	// survivor's shared ZonePairKey slot, nor leak into PolicyNames/schedule
+	// slots. Reserved sentinels are never policy-quarantine members
+	// (#14329) — defined-`any`/junos-host/junos-global go through their
+	// dedicated paths — so delete them unconditionally, even when poisoned.
+	quarantined := config.ZoneQuarantineExclusionsForConfig(cfg)
+	for _, name := range []string{config.JunosGlobalZoneName, config.ReservedWildcardZoneName, "junos-host"} {
+		delete(quarantined, name)
+	}
 
 	for _, zpp := range cfg.Security.Policies {
+		if zpp == nil {
+			policySetID++
+			continue
+		}
+		// Keep the raw set index stable for survivors (walkPolicyRuleSlots
+		// parity): a skipped stanza still consumes its policySetID.
+		if _, drop := quarantined[zpp.FromZone]; drop {
+			policySetID++
+			continue
+		}
+		if _, drop := quarantined[zpp.ToZone]; drop {
+			policySetID++
+			continue
+		}
 		// Zone-pair policies may use Junos' reserved host context and wildcard
 		// context. Keep a defined legacy `any` zone bound to its configured ID;
 		// only treat `any` as a wildcard when it is not a zone definition.
