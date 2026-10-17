@@ -1467,7 +1467,20 @@ func validateVRRPTrackInterfaceAST(nodes []*Node, prefix string, lenient bool) (
 func validateVRRPAuthenticationAST(nodes []*Node, prefix string, lenient bool) ([]string, error) {
 	var warnings []string
 	for _, n := range nodes {
-		nodePath := joinNodePath(prefix, n.Keys)
+		// nodePath may embed a secret when n itself (or an ancestor-packed
+		// node on the recursion path) carries a Keys-packed auth leaf
+		// (#14403: e.g. `address 10.0.0.1/24 authentication-key <secret>;`).
+		// Such nodes are reported via the misplaced arm below, which builds
+		// its path from value-free segments (see safeVRRPPathKeys) and
+		// returns before recursing, so a secret never reaches a deeper path.
+		// A node that carries no auth token has no secret in its Keys.
+		nodePath := joinNodePath(prefix, safeVRRPPathKeys(n))
+		// #14403 (H1-e): auth nested UNDER a vrrp-group but not a direct
+		// child (under virtual-address / track-interface) — recursive scan
+		// when n itself is a group. Handled before the child loop so the
+		// group's parent can prune it on the lenient path via the child
+		// loop below; here we only need the strict reject when the group
+		// is a top-level entry (defensive — real groups are children).
 		// Examine n's DIRECT vrrp-group children so a lenient prune can rebuild
 		// n.Children (dropping the offending group). A vrrp-group is always a
 		// child of a family inet/inet6 address node, so detecting it here (as a
@@ -1477,7 +1490,7 @@ func validateVRRPAuthenticationAST(nodes []*Node, prefix string, lenient bool) (
 		kept := make([]*Node, 0, len(n.Children))
 		for _, c := range n.Children {
 			if c.Name() == "vrrp-group" {
-				if leaf := vrrpAuthLeaf(c); leaf != "" {
+				if leaf := vrrpAuthLeafRecursive(c); leaf != "" {
 					// SECURITY: build the message path from the group IDENTITY
 					// ONLY (`vrrp-group <id>`), never c.Keys — in the Keys-packed
 					// spelling (`vrrp-group 1 authentication-key <secret>;`) the
@@ -1487,7 +1500,8 @@ func validateVRRPAuthenticationAST(nodes []*Node, prefix string, lenient bool) (
 					// vrrpGroupIDKeys truncates to the value-free identity;
 					// `nodePath` is composed of ancestor container keys
 					// (interface/unit/family/address) which carry no secret leaf
-					// value.
+					// value — except a Keys-packed misplaced leaf on an
+					// ancestor, which safeVRRPPathKeys strips (#14403).
 					idPath := joinNodePath(nodePath, vrrpGroupIDKeys(c))
 					if !lenient {
 						return nil, fmt.Errorf("%s: VRRP %s is configured but NOT enforced — "+
@@ -1511,6 +1525,42 @@ func validateVRRPAuthenticationAST(nodes []*Node, prefix string, lenient bool) (
 		if pruned {
 			n.Children = kept
 		}
+		// #14403 (H1-a..H1-d): auth leaf on a NON-group node (address /
+		// family / unit / interface ancestor) whose subtree contains a
+		// vrrp-group. Checked AFTER the direct-group prune so a group
+		// already dropped for its own auth is not double-reported, and so
+		// `groups` reflects only surviving groups. The message names the
+		// misplaced keyword and the first affected group identity; paths
+		// are built from value-free key segments only.
+		if leaf, groups := vrrpMisplacedAuth(n); leaf != "" {
+			idPath := joinNodePath(nodePath, vrrpGroupIDKeys(groups[0]))
+			if !lenient {
+				return nil, fmt.Errorf("%s: VRRP %s is configured but NOT enforced — "+
+					"the dataplane is RFC 5798 VRRPv3, which removed authentication; "+
+					"adverts are unauthenticated regardless, so a rogue host can hijack "+
+					"mastership. Remove the authentication statement (#4288)",
+					idPath, leaf)
+			}
+			for _, g := range groups {
+				gidPath := joinNodePath(nodePath, vrrpGroupIDKeys(g))
+				warnings = append(warnings, fmt.Sprintf("%s: VRRP %s is configured but the "+
+					"dataplane is RFC 5798 VRRPv3, which removed authentication; the group is "+
+					"DROPPED (not activated) rather than claim the VIP with unauthenticated "+
+					"adverts — the operator required authentication that the impl cannot honor. "+
+					"Remove the authentication statement to activate the group (#4288/#5834)",
+					gidPath, leaf))
+				stripVRRPGroup(n, g)
+			}
+			// Groups are now stripped, so recursion cannot re-report this
+			// leaf (scope guard: no group in that child's subtree unless a
+			// distinct placement remains). Recurse for sibling placements.
+			w, err := validateVRRPAuthenticationAST(n.Children, nodePath, lenient)
+			warnings = append(warnings, w...)
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
 		w, err := validateVRRPAuthenticationAST(n.Children, nodePath, lenient)
 		warnings = append(warnings, w...)
 		if err != nil {
@@ -1533,6 +1583,19 @@ func vrrpGroupIDKeys(n *Node) []string {
 	return n.Keys
 }
 
+// safeVRRPPathKeys returns n.Keys truncated at the first auth token so a
+// Keys-packed misplaced leaf (`address 10.0.0.1/24 authentication-key
+// <secret>;` on an ancestor, #14403) never embeds the secret VALUE in a
+// diagnostic path. Nodes without an auth token return Keys unchanged.
+func safeVRRPPathKeys(n *Node) []string {
+	for i := 1; i < len(n.Keys); i++ {
+		if n.Keys[i] == "authentication-type" || n.Keys[i] == "authentication-key" {
+			return n.Keys[:i]
+		}
+	}
+	return n.Keys
+}
+
 // vrrpAuthLeaf returns the first authentication leaf name
 // ("authentication-type" or "authentication-key") present on a vrrp-group node,
 // across BOTH the Keys-packed flat-set spelling (the token appears in the
@@ -1551,6 +1614,91 @@ func vrrpAuthLeaf(vg *Node) string {
 		}
 	}
 	return ""
+}
+
+// vrrpAuthLeafRecursive is the #14403 descendant scan: like vrrpAuthLeaf but
+// walks the group's WHOLE subtree, so an auth leaf nested under
+// virtual-address / track-interface (not a direct child of the group) is
+// caught. Keys of every descendant are scanned (a Keys-packed descendant may
+// carry the leaf token); only the leaf NAME is returned, never a value.
+func vrrpAuthLeafRecursive(vg *Node) string {
+	if leaf := vrrpAuthLeaf(vg); leaf != "" {
+		return leaf
+	}
+	for _, c := range vg.Children {
+		if leaf := vrrpAuthLeafRecursive(c); leaf != "" {
+			return leaf
+		}
+	}
+	return ""
+}
+
+// vrrpDirectAuthLeaf returns the auth leaf carried DIRECTLY by a non-group
+// node: a token in its own Keys run (Keys-packed spelling, e.g.
+// `address 10.0.0.1/24 authentication-key <secret>;` — scan from index 1 so
+// the node's own name at Keys[0] is not mistaken, though it never spells an
+// auth leaf) or a direct child named authentication-type/key. Only the leaf
+// NAME is returned, never a value.
+func vrrpDirectAuthLeaf(n *Node) string {
+	for i := 1; i < len(n.Keys); i++ {
+		if n.Keys[i] == "authentication-type" || n.Keys[i] == "authentication-key" {
+			return n.Keys[i]
+		}
+	}
+	for _, c := range n.Children {
+		if name := c.Name(); name == "authentication-type" || name == "authentication-key" {
+			return name
+		}
+	}
+	return ""
+}
+
+// collectVRRPGroups returns every vrrp-group node in n's subtree.
+func collectVRRPGroups(n *Node) []*Node {
+	var out []*Node
+	if n.Name() == "vrrp-group" {
+		out = append(out, n)
+	}
+	for _, c := range n.Children {
+		out = append(out, collectVRRPGroups(c)...)
+	}
+	return out
+}
+
+// vrrpMisplacedAuth reports (leaf, groups) when node n — which is NOT itself
+// a vrrp-group — directly carries an auth leaf AND its subtree contains at
+// least one vrrp-group (#14403 cells H1-a..H1-d: address / family / unit /
+// interface ancestors). Returns ("", nil) otherwise.
+func vrrpMisplacedAuth(n *Node) (string, []*Node) {
+	if n.Name() == "vrrp-group" {
+		return "", nil
+	}
+	leaf := vrrpDirectAuthLeaf(n)
+	if leaf == "" {
+		return "", nil
+	}
+	groups := collectVRRPGroups(n)
+	if len(groups) == 0 {
+		return "", nil
+	}
+	return leaf, groups
+}
+
+// stripVRRPGroup removes target (by identity) from its parent's subtree,
+// rebuilding Children slices in place. Returns true when removed. Used by
+// the lenient #14403 arm where the misplaced leaf sits on an ancestor, so
+// the affected group is not a direct child of the node being pruned.
+func stripVRRPGroup(parent, target *Node) bool {
+	for i, c := range parent.Children {
+		if c == target {
+			parent.Children = append(parent.Children[:i:i], parent.Children[i+1:]...)
+			return true
+		}
+		if stripVRRPGroup(c, target) {
+			return true
+		}
+	}
+	return false
 }
 
 // validateRenderUnsafeInterfaceNamesAST is the #9886 lenient-path gate on
