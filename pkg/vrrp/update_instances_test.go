@@ -830,3 +830,65 @@ func TestUpdateInstances_IfindexChange_TransientResolveFailKeepsOld(t *testing.T
 		t.Fatalf("pass 2: not rebound to new ifindex (same=%v index=%d)", got == orig, got.iface.Index)
 	}
 }
+
+// #14407: runtime backstop — a second distinct election claiming a VIP
+// already claimed on the same interface+family is refused/skipped, the
+// first claimant is kept. This is the lenient-path bound: the config gate
+// rejects at commit, but a leniently-loaded config reaches UpdateInstances.
+//
+// FAIL-ON-REVERT: remove the secondVIPClaimant refusal in UpdateInstances
+// and the second claimant is seated alongside the first.
+func TestUpdateInstances_RefusesSecondVIPClaimant14407(t *testing.T) {
+	m, _ := newTestManagerNoNetwork()
+	first := &Instance{Interface: "ge-0-0-0", Family: "inet", GroupID: 1, Priority: 200, AdvertiseInterval: 1000, VirtualAddresses: []string{"10.0.0.100/24"}}
+	second := &Instance{Interface: "ge-0-0-0", Family: "inet", GroupID: 2, Priority: 200, AdvertiseInterval: 1000, VirtualAddresses: []string{"10.0.0.100/24"}}
+	if err := m.UpdateInstances([]*Instance{first, second}); err != nil {
+		t.Fatalf("UpdateInstances: %v", err)
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if _, ok := m.instances[instanceKey{iface: "ge-0-0-0", groupID: 1, family: "inet"}]; !ok {
+		t.Error("first claimant (VRID 1) not seated")
+	}
+	if _, ok := m.instances[instanceKey{iface: "ge-0-0-0", groupID: 2, family: "inet"}]; ok {
+		t.Error("second claimant (VRID 2) seated for the same VIP — dual-master would result")
+	}
+	reason, recorded := m.unbuiltDesired[instanceKey{iface: "ge-0-0-0", groupID: 2, family: "inet"}]
+	if !recorded {
+		t.Error("second claimant absent from unbuiltDesired: refusal left no manager state")
+	} else if !strings.Contains(reason, "10.0.0.100") {
+		t.Errorf("unbuiltDesired reason %q does not name the VIP", reason)
+	}
+}
+
+// TestUpdateInstances_DifferentVIPsBothSeated14407 is the tightening
+// control: distinct VIPs on one interface seat both elections.
+func TestUpdateInstances_DifferentVIPsBothSeated14407(t *testing.T) {
+	m, _ := newTestManagerNoNetwork()
+	a := &Instance{Interface: "ge-0-0-0", Family: "inet", GroupID: 1, Priority: 200, AdvertiseInterval: 1000, VirtualAddresses: []string{"10.0.0.100/24"}}
+	b := &Instance{Interface: "ge-0-0-0", Family: "inet", GroupID: 2, Priority: 200, AdvertiseInterval: 1000, VirtualAddresses: []string{"10.0.0.101/24"}}
+	if err := m.UpdateInstances([]*Instance{a, b}); err != nil {
+		t.Fatalf("UpdateInstances: %v", err)
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(m.instances) != 2 {
+		t.Errorf("instances = %d, want 2 distinct-VIP elections seated", len(m.instances))
+	}
+}
+
+// TestUpdateInstances_SameVIPDifferentInterfacesBothSeated14407 pins scope:
+// the same VIP on different interfaces is a different L2 domain.
+func TestUpdateInstances_SameVIPDifferentInterfacesBothSeated14407(t *testing.T) {
+	m, _ := newTestManagerNoNetwork()
+	a := &Instance{Interface: "ge-0-0-0", Family: "inet", GroupID: 1, Priority: 200, AdvertiseInterval: 1000, VirtualAddresses: []string{"10.0.0.100/24"}}
+	b := &Instance{Interface: "ge-0-0-1", Family: "inet", GroupID: 2, Priority: 200, AdvertiseInterval: 1000, VirtualAddresses: []string{"10.0.0.100/24"}}
+	if err := m.UpdateInstances([]*Instance{a, b}); err != nil {
+		t.Fatalf("UpdateInstances: %v", err)
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(m.instances) != 2 {
+		t.Errorf("instances = %d, want 2 (same VIP on different interfaces)", len(m.instances))
+	}
+}

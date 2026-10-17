@@ -244,6 +244,25 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
+	// #14407 cross-group VIP overlap gate. Strict on commit / commit-check
+	// (hard-reject one canonical VIP claimed by two distinct VRRP elections —
+	// distinct VRIDs, explicit-vs-explicit or explicit-vs-RETH — on the same
+	// resolved kernel interface+family). Each group is an independent
+	// election and each master independently installs its VIPs, so divergent
+	// per-node track-interface state can elect different masters for the two
+	// groups and both nodes advertise the same address (dual-master
+	// duplicate-IP). Lenient on load / peer-sync (#1960 no-brick); the
+	// pkg/vrrp UpdateInstances backstop refuses the second claimant, so a
+	// leniently-loaded duplicate seats only one election.
+	if err := validateVRRPVIPCrossGroupStrict(cfg); err != nil {
+		if opts.lenientVRRPVIPCrossGroup {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("vrrp cross-group virtual-address overlap (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #3055 reserved zone-name definition gate. Strict on commit / commit-check
 	// (hard-reject a `security zones security-zone <name>` whose name is a
 	// reserved sentinel — "junos-global" is reclassified by the userspace
