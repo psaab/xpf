@@ -1293,7 +1293,8 @@ func detectLifelineInterface() (name string, ok bool, err error) {
 
 // pciAddrForInterface resolves the PCI bus address + MAC for a kernel
 // interface name via sysfs (the same source enumeratePCINICs uses). A
-// non-PCI NIC (virtio, bond, VLAN sub-interface, or other paravirtual /
+// non-PCI NIC (USB behind a host controller, virtio-mmio, bond, VLAN
+// sub-interface, or other paravirtual /
 // overlay device with no `/sys/class/net/<name>/device` PCI symlink) still
 // yields a MAC-only record — PCI resolution failing must NOT short-circuit
 // the MAC lookup, per the lifelineRecord format's own documented contract

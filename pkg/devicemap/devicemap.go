@@ -417,18 +417,57 @@ func RethMembersFromConfig(cfg *config.Config) map[string]bool {
 	return m
 }
 
-// ExtractPCIAddr extracts the last canonical PCI address (DDDD:BB:DD.F) from
-// a sysfs path. Mirrors the daemon's extractPCIAddr so a committed key
-// resolves against the live enumeration without normalization drift.
+// ExtractPCIAddr extracts the PCI address (DDDD:BB:DD.F) from a sysfs
+// device path. Every caller passes the resolved `device` symlink
+// target. A PCI netdev's target ends in the device's own BDF (possibly
+// below PCI bridges / a root port), so that BDF names this device; a
+// virtio netdev's target ends in `virtioN` directly below its PCI
+// function, which is a 1:1 channel to that function, so the parent
+// BDF likewise names this device (linksetup enumerates virtio_net
+// under it). Any other final component means the device sits on a
+// NON-PCI bus below the last PCI ancestor, and that ancestor's BDF must
+// NOT be reported as this device's address (#14595): on x86 a USB NIC
+// hangs off an xHCI controller (…/0000:00:14.0/usb2/2-1/2-1:1.0), and
+// reporting the controller's BDF gave every NIC behind one controller
+// one shared "PCI address" — a pci+mac entry then refused when a
+// second dongle appeared, and a pci-only entry bound a foreign dongle
+// unverified, contradicting the documented contract that a USB NIC has
+// no PCI address (docs/bare-metal-device-map.md) and the #1956
+// invariant that one identity names one device. Returns "" for a
+// non-PCI device so classifyNetdev keeps the NIC (with its permanent
+// MAC, #4884) without a PCI key. Mirrors the daemon's extractPCIAddr
+// so a committed key resolves against the live enumeration without
+// normalization drift.
 func ExtractPCIAddr(path string) string {
 	parts := strings.Split(path, "/")
-	var last string
-	for _, p := range parts {
-		if len(p) >= 11 && p[4] == ':' && p[7] == ':' && p[10] == '.' {
-			last = p
+	last := parts[len(parts)-1]
+	if len(last) >= 11 && last[4] == ':' && last[7] == ':' && last[10] == '.' {
+		return last
+	}
+	if isVirtioComponent(last) {
+		// virtioN directly below a PCI function: report that function.
+		for i := len(parts) - 2; i >= 0; i-- {
+			p := parts[i]
+			if len(p) >= 11 && p[4] == ':' && p[7] == ':' && p[10] == '.' {
+				return p
+			}
 		}
 	}
-	return last
+	return ""
+}
+
+// isVirtioComponent reports whether a sysfs path component is a virtio
+// device directory (`virtio0`, `virtio12`, …).
+func isVirtioComponent(p string) bool {
+	if !strings.HasPrefix(p, "virtio") || len(p) == len("virtio") {
+		return false
+	}
+	for _, c := range p[len("virtio"):] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // classifyNetdev decides whether a /sys/class/net entry is a mappable physical
