@@ -25,6 +25,7 @@ func TestNativeVLANWithoutMatchingUnitWarns12248(t *testing.T) {
 
 func TestNativeVLANWithUniqueMatchingUnitStaysSilent12248(t *testing.T) {
 	cfg, err := CompileConfig(flatTreeFromSets(t,
+		"set interfaces ge-0/0/0 vlan-tagging",
 		"set interfaces ge-0/0/0 native-vlan-id 100",
 		"set interfaces ge-0/0/0 unit 100 vlan-id 100",
 		"set interfaces ge-0/0/0 unit 100 family inet address 10.0.1.1/24",
@@ -93,6 +94,7 @@ func TestNativeVLANUnitNumberDifferingFromNativeIDWithMatchingVlanIDStaysSilent1
 
 func TestNativeVLANUnsetNativeIDStaysSilent12248(t *testing.T) {
 	cfg, err := CompileConfig(flatTreeFromSets(t,
+		"set interfaces ge-0/0/0 vlan-tagging",
 		"set interfaces ge-0/0/0 unit 100 vlan-id 100",
 		"set interfaces ge-0/0/0 unit 100 family inet address 10.0.5.1/24",
 	))

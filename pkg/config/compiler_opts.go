@@ -850,6 +850,19 @@ type compileOpts struct {
 	// silently ignored. Same doctrine as lenientQinQVLANStack (#5879).
 	lenientVLANMap bool
 
+	// lenientVlanIDTagging (#14574) downgrades the vlan-id-without-tagging
+	// gate (validateVlanIDTaggingAST) from a hard error to a warning on the
+	// tolerant load / peer-sync paths. A unit `vlan-id N` with neither
+	// `vlan-tagging` nor `flexible-vlan-tagging` on its parent was silently
+	// accepted by every binary up to this gate, with the networkd writer
+	// placing the addresses on the untagged parent while the dataplane
+	// writer created the tagged sub-interface; an already-persisted or
+	// peer-synced config may carry one, and an upgrading / receiving node
+	// must still boot through it (warn) rather than fail-closed-on-load
+	// (#1960 class). Commit / commit-check stay strict. Same doctrine as
+	// lenientVLANMap (#6178).
+	lenientVlanIDTagging bool
+
 	// lenientRoutingExportRef (#2144) downgrades the routing-export
 	// cross-reference gate (validateRoutingExportReferencesStrict) from a
 	// hard compile error to a cfg.Warnings entry. Set ONLY on the tolerant
@@ -3363,6 +3376,7 @@ func lenientCompileOpts() compileOpts {
 		lenientForwardingFilters:               true,
 		lenientQinQVLANStack:                   true,
 		lenientVLANMap:                         true,
+		lenientVlanIDTagging:                   true,
 		lenientRoutingExportRef:                true,
 		lenientFRRAuthValues:                   true,
 		lenientOSPFMD5KeyID11794:               true,

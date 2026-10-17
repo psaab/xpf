@@ -111,7 +111,10 @@ func TestQinQVlanTagsOuterOnlyAccepted_5879(t *testing.T) {
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
 	))
 	// A plain single 802.1Q `vlan-id` (the fully-supported common case).
+	// #14574: the parent carries vlan-tagging — without it this shape is
+	// the vlan-id-without-tagging defect, not a QinQ control.
 	mustAcceptNoQinQ(t, flatTreeFromSets(t,
+		"set interfaces ge-0/0/0 vlan-tagging",
 		"set interfaces ge-0/0/0 unit 0 vlan-id 100",
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
 	))
@@ -127,12 +130,12 @@ func TestQinQPeerOnlyGroupRejectedOnCommittingNode_5879(t *testing.T) {
 	src := `groups {
     node0 {
         interfaces {
-            ge-0/0/0 { unit 0 { vlan-id 100; family inet { address 10.0.1.1/24; } } }
+            ge-0/0/0 { vlan-tagging; unit 0 { vlan-id 100; family inet { address 10.0.1.1/24; } } }
         }
     }
     node1 {
         interfaces {
-            ge-0/0/0 { unit 0 { vlan-id 100; inner-vlan-id 200; family inet { address 10.0.1.1/24; } } }
+            ge-0/0/0 { vlan-tagging; unit 0 { vlan-id 100; inner-vlan-id 200; family inet { address 10.0.1.1/24; } } }
         }
     }
 }
@@ -157,8 +160,8 @@ chassis { cluster { node 0; authentication-key test-cluster-psk-6611; } }`
 	// compile clean for both nodes — proving the reject is the inner tag, not
 	// the group scaffolding.
 	clean := hierTree(t, `groups {
-    node0 { interfaces { ge-0/0/0 { unit 0 { vlan-id 100; family inet { address 10.0.1.1/24; } } } } }
-    node1 { interfaces { ge-0/0/0 { unit 0 { vlan-id 100; family inet { address 10.0.1.1/24; } } } } }
+    node0 { interfaces { ge-0/0/0 { vlan-tagging; unit 0 { vlan-id 100; family inet { address 10.0.1.1/24; } } } } }
+    node1 { interfaces { ge-0/0/0 { vlan-tagging; unit 0 { vlan-id 100; family inet { address 10.0.1.1/24; } } } } }
 }
 apply-groups "${node}";
 chassis { cluster { node 0; authentication-key test-cluster-psk-6611; } }`)

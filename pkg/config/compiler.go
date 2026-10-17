@@ -623,6 +623,15 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 		return nil, vlanMapErr
 	}
 
+	// #14574: vlan-id without vlan-tagging/flexible-vlan-tagging gate — see
+	// compiler_interfaces_vlan_tagging.go. Runs PRE-expansion beside the
+	// QinQ/vlanMap gates, expanding once per cluster node so the verdict is
+	// HA-symmetric. Strict hard-rejects; lenient warns (#1960).
+	vlanIDTaggingWarnings, vlanIDTaggingErr := validateVlanIDTaggingAST(tree, opts.lenientVlanIDTagging)
+	if vlanIDTaggingErr != nil {
+		return nil, vlanIDTaggingErr
+	}
+
 	// #6662 / #6701 (#6706 review blocker): the `system login` packed-body and
 	// built-in-class-shadow gates, as BOTH-NODE-effective unions. Pre-expansion
 	// for the same reason as the #5878/#5879/#6178 gates above — a `groups
@@ -714,6 +723,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	cfg.Warnings = append(cfg.Warnings, unitAliasWarnings...)
 	cfg.Warnings = append(cfg.Warnings, qinqWarnings...)
 	cfg.Warnings = append(cfg.Warnings, vlanMapWarnings...)
+	cfg.Warnings = append(cfg.Warnings, vlanIDTaggingWarnings...)
 	cfg.Warnings = append(cfg.Warnings, loginPackedWarnings...)
 	cfg.Warnings = append(cfg.Warnings, schedulerWindowWarnings11358...)
 	appendClusterNTPAdvisoryLocked(cfg, opts)
@@ -985,6 +995,14 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 		return nil, vlanMapErr
 	}
 
+	// #14574: vlan-id without tagging gate — see compileConfigWithOpts /
+	// compiler_interfaces_vlan_tagging.go. PRE-expansion per cluster node.
+	// Strict rejects; lenient warns (#1960).
+	vlanIDTaggingWarnings, vlanIDTaggingErr := validateVlanIDTaggingAST(tree, opts.lenientVlanIDTagging)
+	if vlanIDTaggingErr != nil {
+		return nil, vlanIDTaggingErr
+	}
+
 	// #6662 / #6701 (#6706 review blocker): the `system login` packed-body and
 	// built-in-class-shadow gates, as BOTH-NODE-effective unions. This is the
 	// site the blocker turned on: with the gates running post-expansion on the
@@ -1063,6 +1081,7 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	cfg.Warnings = append(cfg.Warnings, unitAliasWarnings...)
 	cfg.Warnings = append(cfg.Warnings, qinqWarnings...)
 	cfg.Warnings = append(cfg.Warnings, vlanMapWarnings...)
+	cfg.Warnings = append(cfg.Warnings, vlanIDTaggingWarnings...)
 	cfg.Warnings = append(cfg.Warnings, loginPackedWarnings...)
 	cfg.Warnings = append(cfg.Warnings, schedulerWindowWarnings11358...)
 	appendClusterNTPAdvisoryLocked(cfg, opts)

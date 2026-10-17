@@ -46,6 +46,7 @@ func TestNativeVLANBindingAdvisorySurfacesOnCommit12248(t *testing.T) {
 
 func TestNativeVLANBindingAdvisoryStaysSilentWithUniqueUnit12248(t *testing.T) {
 	c := newCLINativeVLANStore12248(t,
+		"set interfaces ge-0/0/0 vlan-tagging",
 		"set interfaces ge-0/0/0 native-vlan-id 100",
 		"set interfaces ge-0/0/0 unit 100 vlan-id 100",
 		"set interfaces ge-0/0/0 unit 100 family inet address 10.0.1.1/24",
