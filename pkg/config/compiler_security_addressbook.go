@@ -405,10 +405,12 @@ func recordDroppedNamedAddressBookCollisions(tree *ConfigTree, cfg *Config) {
 //     trailing token onto Keys, so a bracketed list collapses onto ONE node)
 //   - flat set, one line each `set ... address a` +
 //     `set ... address b`                              → one child per value
+//   - bracketed child block   `address { [ a b ]; }`   → one child whose
+//     Keys=["a","b"] (#14345: every child key is a member, not just Keys[0])
 //
 // Reading only member.Keys[1] (the pre-#4791 bug) compiles just the first
 // bracket-list entry and silently drops the rest. Reading BOTH Keys[1:] AND
-// each child's Keys[0] covers every shape the parser can produce.
+// every key of each child covers every shape the parser can produce.
 func addressSetMemberValues(member *Node) []string {
 	var vals []string
 	for _, k := range member.Keys[1:] {
@@ -417,8 +419,10 @@ func addressSetMemberValues(member *Node) []string {
 		}
 	}
 	for _, vn := range member.Children {
-		if len(vn.Keys) >= 1 && vn.Keys[0] != "" {
-			vals = append(vals, vn.Keys[0])
+		for _, v := range vn.Keys {
+			if v != "" {
+				vals = append(vals, v)
+			}
 		}
 	}
 	return vals
