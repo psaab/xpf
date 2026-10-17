@@ -397,6 +397,7 @@ func TestH10PackedUnitMACMidTailRejected(t *testing.T) {
 	// first-position mac; the tail walk is schema-guided so a value
 	// spelling "mac" (description) is not a hit.
 	assertCommitRejects(t, flatTreeFromSets(t,
+		"set interfaces ge-0/0/0 vlan-tagging",
 		"set interfaces ge-0/0/0 unit 0 vlan-id 5 mac 00:11:22:33:44:66",
 	), "#2008 H10")
 	assertCommitAccepts(t, flatTreeFromSets(t,

@@ -60,6 +60,7 @@ func TestVLANMapHonestyGate6178(t *testing.T) {
 	// vlan-id (fully supported) must compile clean — the gate keys on the
 	// vlan-map, not on the presence of a VLAN tag or a logical unit.
 	mustAcceptNoVLANMap(t, flatTreeFromSets(t,
+		"set interfaces ge-0/0/0 vlan-tagging",
 		"set interfaces ge-0/0/0 unit 0 vlan-id 100",
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
 	))

@@ -129,9 +129,15 @@ func TestTunnelUnitIsNotReportedTwice7795(t *testing.T) {
 // header says the gate must not commit, and it would break every real VLAN
 // config in the tree.
 func TestNonCollidingVlanSubInterfaceStillCompiles7795(t *testing.T) {
+	// #14574 migration: the parents now carry `vlan-tagging`. Without it
+	// this shape is the #14574 defect itself (vlan-id without tagging),
+	// not a legitimate non-colliding VLAN config; the collision gate's
+	// control must exercise the tagged form every real config uses.
 	if err := compileSet7795(t,
+		"set interfaces ge-0/0/0 vlan-tagging",
 		"set interfaces ge-0/0/0 unit 100 vlan-id 100",
 		"set interfaces ge-0/0/0 unit 100 family inet address 10.0.1.1/24",
+		"set interfaces ge-0/0/1 vlan-tagging",
 		"set interfaces ge-0/0/1 unit 200 vlan-id 200",
 		"set interfaces ge-0/0/1 unit 200 family inet address 10.0.2.1/24",
 	); err != nil {
