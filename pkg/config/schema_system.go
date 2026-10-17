@@ -743,7 +743,7 @@ var schemaServices = &schemaNode{desc: "Services configuration", children: map[s
 					validator: ValidateInteger(1, MaxDurationSeconds),
 					children:  nil,
 				},
-				"thresholds": {desc: "Failure thresholds for the test", children: map[string]*schemaNode{
+				"thresholds": {desc: "Failure thresholds for the test", packedTail: true, children: map[string]*schemaNode{
 					"successive-loss": {
 						args:          1,
 						desc:          "Consecutive losses before marking the test failed",
