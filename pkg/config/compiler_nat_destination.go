@@ -186,14 +186,25 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 
 	// Parse rule-sets
 	for _, rsInst := range namedInstances(node.FindChildren("rule-set")) {
+		// #3444/#14391: a destination-NAT rule-set has only a `from` clause
+		// — DNAT translates the destination on inbound, so there is no
+		// egress context. A `to` scope is rejected at strict commit
+		// (validateDNATRuleSetToScopeAST, which aborts before this builder
+		// runs), but on the lenient load / peer-sync path the gate only
+		// warns — so the builder must OMIT the rule-set here. Installing it
+		// scope-less would apply the translation regardless of the authored
+		// egress context (the wire struct and Rust DNAT runtime model only
+		// `from`, so the scope has nowhere to go). This is the
+		// lenientNATEmptyScope posture: a rule-set whose scope cannot be
+		// enforced is omitted (zero emissions), never widened. Detection is
+		// shared with the gate (natRuleSetHasToScope) so both spellings —
+		// nested `to` child and `to` packed onto the rule-set header — are
+		// covered and cannot drift.
+		if natRuleSetHasToScope(rsInst.node, rsInst.name) {
+			continue
+		}
 		// #3096: capture the `from` scope across zone | interface |
 		// routing-instance (bracket lists produce multiple scopes).
-		// #3444: a destination-NAT rule-set has only a `from` clause — DNAT
-		// translates the destination on inbound, so there is no egress
-		// context. A `to` scope is rejected at strict commit
-		// (validateDNATRuleSetToScopeAST); it is NOT collected here so it
-		// can never be stamped onto a NATRuleSet (the snapshot builder and
-		// the Rust DNAT runtime model only the `from` clause).
 		fromScopes, _ := collectNATScopes(rsInst.node, false)
 
 		var rules []*NATRule

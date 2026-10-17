@@ -38,6 +38,31 @@ import "fmt"
 // apply-groups-inherited `to` is caught and an `inactive:` rule-set is
 // ignored for free.
 
+// natRuleSetHasToScope reports whether a destination-NAT rule-set node
+// carries a `to` scope in EITHER spelling: a nested `to` child (flat-set and
+// ordinary hierarchical form) or a `to` packed onto the rule-set header
+// itself (`rule-set RD to zone trust { ... }`, R15-01), where the token
+// rides on the rule-set node's own Keys tail and FindChild("to") never sees
+// it. It is the single detection shared by the #3444 gate
+// (validateDNATRuleSetToScopeAST) and the destination-NAT builder
+// (compileNATDestination, #14391) so gate and builder cannot drift: a
+// spelling the gate warns/rejects on is exactly the spelling the builder
+// omits on the lenient path.
+func natRuleSetHasToScope(rsNode *Node, name string) bool {
+	if rsNode == nil {
+		return false
+	}
+	if rsNode.FindChild("to") != nil {
+		return true
+	}
+	for _, tok := range instanceValueTail(rsNode, name) {
+		if tok == "to" {
+			return true
+		}
+	}
+	return false
+}
+
 // validateDNATRuleSetToScopeAST walks the `security nat destination
 // rule-set` subtree of the group-expanded AST and rejects any rule-set
 // carrying a `to` scope.
@@ -46,10 +71,11 @@ import "fmt"
 // rule-set is a hard compile error, naming the exact rule-set.
 //
 // Lenient path (load / peer-sync, lenient=true): every offending rule-set is
-// returned as a warning and compilation continues. The `to` subtree is NOT
-// pruned — compileNATDestination no longer reads it (collectNATScopes with
-// wantTo=false), so leaving it in the cloned tree is harmless and the warning
-// is the operator signal.
+// returned as a warning and compilation continues, but the rule-set is NOT
+// installed scope-less — compileNATDestination omits it via the same
+// natRuleSetHasToScope detection (#14391), so no translation applies
+// regardless of the authored egress context. The warning is the operator
+// signal; the omission is the fail-closed posture.
 func validateDNATRuleSetToScopeAST(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
 	emit := func(format string, args ...any) error {
@@ -84,7 +110,7 @@ func validateDNATRuleSetToScopeAST(nodes []*Node, lenient bool) ([]string, error
 		return forEachChild(sec.Children, "nat", func(nat *Node) error {
 			return forEachChild(nat.Children, "destination", func(dst *Node) error {
 				for _, rs := range namedInstances(dst.FindChildren("rule-set")) {
-					if rs.node.FindChild("to") == nil {
+					if !natRuleSetHasToScope(rs.node, rs.name) {
 						continue
 					}
 					if err := emit(

@@ -11,10 +11,12 @@ import (
 // scope under `security nat destination rule-set` and Cartesian-expanded it
 // onto each NATRuleSet, but the userspace snapshot builder and the Rust DNAT
 // runtime model ONLY the `from` clause, so the `to` scope was silently
-// dropped and the translation applied regardless of it. The fix rejects a
-// DNAT `to` scope at strict commit (validateDNATRuleSetToScopeAST) and warns
-// (does not fail) on the tolerant load / peer-sync path (#1960), and stops
-// the compiler from stamping a phantom To* onto the typed NATRuleSet.
+// dropped and the translation applied regardless of it. The #3444 fix
+// rejects a DNAT `to` scope at strict commit (validateDNATRuleSetToScopeAST)
+// and warns on the tolerant load / peer-sync path (#1960); #14391 closes the
+// lenient residual: the warned rule-set is OMITTED from the tolerant load
+// (never installed scope-less), in both the nested-child spelling and the
+// packed rule-set-header spelling (R15-01).
 //
 // Flat-set syntax MUST be built with ParseSetCommand/SetPath, never
 // NewParser (the parser merges newline-separated set lines into one giant
@@ -65,36 +67,189 @@ func TestDNATRuleSetToScopeRejectedAtCommit(t *testing.T) {
 
 // TestDNATRuleSetToScopeLenientWarns proves the tolerant load / peer-sync path
 // (CompileConfigLenient) does NOT hard-fail on a DNAT `to` scope (so an
-// already-persisted config still boots, #1960), emits a warning, and the
-// rule-set still compiles with NO phantom To* stamped on the typed NATRuleSet
-// (the `to` scope was never enforceable for DNAT).
+// already-persisted config still boots, #1960), emits the #3444 warning, and
+// OMITS the offending rule-set entirely (#14391): installing it scope-less
+// would apply the translation regardless of the authored egress context.
+// This is the lenientNATEmptyScope posture — a rule-set whose scope cannot
+// be enforced is omitted (zero emissions), never widened. A sibling DNAT
+// rule-set without a `to` scope in the same config still compiles.
 func TestDNATRuleSetToScopeLenientWarns(t *testing.T) {
-	tree := buildDNATToTree(t, "to zone trust")
+	for _, tc := range []struct {
+		name  string
+		scope string
+	}{
+		{"to zone", "to zone trust"},
+		{"to interface", "to interface ge-0/0/1.0"},
+		{"to routing-instance", "to routing-instance red"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := buildDNATToTree(t, tc.scope)
+			// Sibling control: a from-only DNAT rule-set must survive.
+			for _, cmd := range []string{
+				"set security nat destination rule-set OK from zone untrust",
+				"set security nat destination rule-set OK rule R9 match destination-address 198.51.100.9/32",
+				"set security nat destination rule-set OK rule R9 then destination-nat pool P1",
+			} {
+				if err := tree.SetPath(strings.Fields(cmd)[1:]); err != nil {
+					t.Fatalf("SetPath(%q): %v", cmd, err)
+				}
+			}
+			cfg, err := CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("CompileConfigLenient hard-failed on a DNAT `to` scope: %v", err)
+			}
+			var warnCount int
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w, "#3444") && strings.Contains(w, `"RD"`) {
+					warnCount++
+				}
+			}
+			if warnCount != 1 {
+				t.Fatalf("CompileConfigLenient emitted %d #3444 warnings for RD, want exactly 1; warnings=%v", warnCount, cfg.Warnings)
+			}
+			if cfg.Security.NAT.Destination == nil {
+				t.Fatalf("destination NAT did not compile under lenient load")
+			}
+			for _, rs := range cfg.Security.NAT.Destination.RuleSets {
+				if rs.Name == "RD" {
+					t.Fatalf("lenient load installed DNAT rule-set RD with its %q scope silently dropped (#14391): %+v", tc.scope, rs)
+				}
+			}
+			var ok *NATRuleSet
+			for _, rs := range cfg.Security.NAT.Destination.RuleSets {
+				if rs.Name == "OK" {
+					ok = rs
+				}
+			}
+			if ok == nil {
+				t.Fatalf("sibling from-only DNAT rule-set OK was dropped with the offending RD; rule-sets=%v", cfg.Security.NAT.Destination.RuleSets)
+			}
+			if ok.FromZone != "untrust" {
+				t.Fatalf("sibling OK FromZone = %q, want untrust", ok.FromZone)
+			}
+		})
+	}
+}
+
+// buildDNATPackedToTree builds the PACKED hierarchical spelling: the `to`
+// scope rides on the rule-set header line itself
+// (`rule-set RD to zone trust { ... }`), so the rule-set node carries Keys
+// [rule-set RD to zone trust] and has NO `to` child. It is the R15-01
+// spelling of the same #14391 root cause: a gate/builder that reads only
+// FindChild("to") never sees it.
+func buildDNATPackedToTree(t *testing.T) *ConfigTree {
+	t.Helper()
+	cfgText := `
+security {
+    nat {
+        destination {
+            pool P1 {
+                address 10.0.30.100;
+            }
+            rule-set RD to zone trust {
+                from zone untrust;
+                rule R1 {
+                    match {
+                        destination-address 198.51.100.5/32;
+                    }
+                    then {
+                        destination-nat pool P1;
+                    }
+                }
+            }
+            rule-set OK {
+                from zone untrust;
+                rule R9 {
+                    match {
+                        destination-address 198.51.100.9/32;
+                    }
+                    then {
+                        destination-nat pool P1;
+                    }
+                }
+            }
+        }
+    }
+}
+`
+	p := NewParser(cfgText)
+	tree, perrs := p.Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("Parse: %v", perrs)
+	}
+	// Premise: the packed header must put `to` on the rule-set node's own
+	// Keys with no `to` child, and the sibling OK rule-set must be present.
+	var rd, ok *Node
+	for _, sec := range tree.Children {
+		for _, nat := range sec.FindChildren("nat") {
+			for _, dst := range nat.FindChildren("destination") {
+				for _, inst := range namedInstances(dst.FindChildren("rule-set")) {
+					switch inst.name {
+					case "RD":
+						rd = inst.node
+					case "OK":
+						ok = inst.node
+					}
+				}
+			}
+		}
+	}
+	if rd == nil || ok == nil {
+		t.Fatalf("packed premise: RD=%v OK=%v, want both rule-sets parsed", rd != nil, ok != nil)
+	}
+	if rd.FindChild("to") != nil {
+		t.Fatalf("packed premise: RD unexpectedly has a `to` child (Keys=%v); not the packed shape", rd.Keys)
+	}
+	return tree
+}
+
+// TestDNATRuleSetPackedToScopeRejectedAtCommit proves strict commit rejects
+// the packed-header `to` spelling with the #3444 error naming the rule-set
+// (previously the FindChild-only gate missed it entirely).
+func TestDNATRuleSetPackedToScopeRejectedAtCommit(t *testing.T) {
+	tree := buildDNATPackedToTree(t)
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatalf("CompileConfig accepted a packed DNAT rule-set `to` scope; want a strict #3444 reject")
+	}
+	if !strings.Contains(err.Error(), "RD") || !strings.Contains(err.Error(), "#3444") {
+		t.Fatalf("reject error %q does not name the rule-set (RD) and #3444", err.Error())
+	}
+}
+
+// TestDNATRuleSetPackedToScopeLenientOmits proves the lenient path warns
+// (#3444, naming RD) and omits the packed-`to` rule-set while the sibling
+// from-only rule-set still compiles.
+func TestDNATRuleSetPackedToScopeLenientOmits(t *testing.T) {
+	tree := buildDNATPackedToTree(t)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
-		t.Fatalf("CompileConfigLenient hard-failed on a DNAT `to` scope: %v", err)
+		t.Fatalf("CompileConfigLenient hard-failed on a packed DNAT `to` scope: %v", err)
 	}
 	var found bool
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "#3444") && strings.Contains(w, "RD") {
+		if strings.Contains(w, "#3444") && strings.Contains(w, `"RD"`) {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("CompileConfigLenient emitted no #3444 DNAT `to` warning; warnings=%v", cfg.Warnings)
+		t.Fatalf("CompileConfigLenient emitted no #3444 warning for packed RD; warnings=%v", cfg.Warnings)
 	}
-	if cfg.Security.NAT.Destination == nil || len(cfg.Security.NAT.Destination.RuleSets) != 1 {
-		t.Fatalf("destination rule-set did not compile under lenient load")
+	if cfg.Security.NAT.Destination == nil {
+		t.Fatalf("destination NAT did not compile under lenient load")
 	}
-	rs := cfg.Security.NAT.Destination.RuleSets[0]
-	if rs.FromZone != "untrust" {
-		t.Fatalf("FromZone = %q, want untrust (the `from` scope must survive)", rs.FromZone)
+	var okSeen bool
+	for _, rs := range cfg.Security.NAT.Destination.RuleSets {
+		if rs.Name == "RD" {
+			t.Fatalf("lenient load installed packed-`to` DNAT rule-set RD scope-less (#14391): %+v", rs)
+		}
+		if rs.Name == "OK" {
+			okSeen = true
+		}
 	}
-	// The `to` scope must NOT be carried onto the typed config — it is not
-	// enforceable for DNAT and would be a silent lie.
-	if rs.ToZone != "" || rs.ToInterface != "" || rs.ToRoutingInstance != "" {
-		t.Fatalf("DNAT rule-set carried a phantom To* scope: %+v", rs)
+	if !okSeen {
+		t.Fatalf("sibling from-only DNAT rule-set OK was dropped with packed RD; rule-sets=%v", cfg.Security.NAT.Destination.RuleSets)
 	}
 }
 
