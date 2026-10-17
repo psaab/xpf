@@ -58,6 +58,15 @@ func PolicyResolvedFingerprints(cfg *config.Config, feedOverlay map[string][]str
 		// name-level comparison rather than reporting a universal change.
 		return nil
 	}
+	// #14330: hash exactly what ships. The publish path runs
+	// quarantineCollidingZones, which drops a scoped-global rule whose
+	// match side is fully quarantined and prunes only the quarantined
+	// members of a partially quarantined side. Without this scrub a
+	// commit whose only enforcement change is a zone becoming quarantined
+	// (StableZoneID collision / poisoned child) hashes identically to
+	// the pre-quarantine config, so policy-rematch never re-evaluates
+	// live sessions of the dropped/narrowed rule.
+	rules, _ = policySnapshotAfterZoneQuarantine(cfg, rules)
 	// A policy expanded into several rule slots (application-set expansion)
 	// contributes every slot, sorted, so the fingerprint is order-independent.
 	perKey := make(map[string][]string, len(rules))
@@ -98,6 +107,11 @@ func PolicyResolvedIdentityStrippedFingerprints(cfg *config.Config, feedOverlay 
 	if err != nil {
 		return nil
 	}
+	// #14330: same quarantine scrub as PolicyResolvedFingerprints — a
+	// solely-quarantined rule is absent from the published snapshot and
+	// must be absent here too, or rename-ancestry validation could infer
+	// continuity for a rule the helper no longer enforces.
+	rules, _ = policySnapshotAfterZoneQuarantine(cfg, rules)
 	perKey := make(map[string][]string, len(rules))
 	for _, rule := range rules {
 		key := stablePolicyRuleID(rule.FromZone, rule.ToZone, rule.Name)
