@@ -11922,7 +11922,7 @@ fn shim_maps_view_places_configured_uncovered_ingress_9594() {
         maps.ingress.insert(4552);
         seam.push(("wgt9594-view".to_string(), maps));
     }
-    let view = ShimMapsKernelPathView::new("wgt9594-view".to_string(), coordinator.ha.runtime_reader());
+    let view = ShimMapsKernelPathView::new("wgt9594-view".to_string(), 4551, coordinator.ha.runtime_reader());
     assert_eq!(view.ingress(Some(4552)), WgKernelPathIngress::Covered, "in the shim's ingress set");
     assert_eq!(
         view.ingress(Some(4551)),

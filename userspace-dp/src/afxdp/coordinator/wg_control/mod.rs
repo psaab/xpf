@@ -280,8 +280,11 @@ pub(super) fn wg_control_loop(
     // #9594: the production kernel-path posture — the XDP shim's own pinned
     // ingress and local-address maps. Built here, on the control thread that
     // uses it.
-    let kernel_path_view =
-        kernel_path::ShimMapsKernelPathView::new(tunnel_name.clone(), shared_runtime.clone());
+    let kernel_path_view = kernel_path::ShimMapsKernelPathView::new(
+        tunnel_name.clone(),
+        spawned_logical_ifindex,
+        shared_runtime.clone(),
+    );
     run_wg_control_loop_with_kernel_path_and_forward(
         &tunnel_name,
         &engine,
