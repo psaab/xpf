@@ -220,6 +220,24 @@ func policyFromConfig(c *config.DHCPDynamicDNSConfig) ddnsPolicy {
 	return p
 }
 
+// validConflictPolicy reports whether p is one of the three conflict
+// policies the RFC 2136 backend implements. The empty string is NOT
+// valid here: policyFromConfig has already defaulted it to
+// replace-owned, so any other value reaching the backend is an operator
+// typo (e.g. skip-existng, none) that arrived via the tolerant load /
+// peer-sync path, which downgrades the strict schema-enum reject to a
+// warning (#1319/#1960). Such a value must fail closed on BOTH the add
+// side (#14429) and the delete side (#14432), never fall through to an
+// unguarded branch.
+func validConflictPolicy(p string) bool {
+	switch p {
+	case "replace-owned", "skip-existing", "strict-fail":
+		return true
+	default:
+		return false
+	}
+}
+
 // Stats is the observable counter snapshot surfaced by `show` (and,
 // since increment 2, the Prometheus collector). All counters are monotonic.
 type Stats struct {
