@@ -3,11 +3,11 @@ package grpcapi
 import (
 	"context"
 	"errors"
-	"sort"
-
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"sort"
+	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -215,6 +215,36 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 		_, ok := quarantinedZones[name]
 		return ok
 	}
+	// #14361: mirror the REST policiesHandler (#12900) display helpers so
+	// the structured twin prunes/qualifies identically: a quarantined zone
+	// must not read as an active match member of a live mixed-scope global.
+	appendPolicyQualifier := func(description string) string {
+		if strings.Contains(description, config.ZoneQuarantinePoliciesQualifier) {
+			return description
+		}
+		if description == "" {
+			return config.ZoneQuarantinePoliciesQualifier
+		}
+		return description + " " + config.ZoneQuarantinePoliciesQualifier
+	}
+	pruneQuarantinedScope := func(scope []string) ([]string, bool) {
+		if len(scope) == 0 {
+			return scope, false
+		}
+		pruned := make([]string, 0, len(scope))
+		touched := false
+		for _, name := range scope {
+			if isQuarantined(name) {
+				touched = true
+				continue
+			}
+			pruned = append(pruned, name)
+		}
+		if !touched {
+			return scope, false
+		}
+		return pruned, true
+	}
 
 	var policySetID uint32
 	for _, zpp := range cfg.Security.Policies {
@@ -276,12 +306,20 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 			if pr.Applications == nil {
 				pr.Applications = []string{}
 			}
-			if (statsEnabled || rule.Count) && readPolicy == nil {
+			// #14361: a quarantined rule is dropped by the scrub, so its
+			// 0/0 is never a live reading — mark it unavailable even when
+			// the rule is not counter-eligible (stats off, no count), and
+			// never read its (possibly stale/survivor) counter slot.
+			if pr.Quarantined {
+				pr.Description = appendPolicyQualifier(pr.Description)
+				pr.HitCountersUnavailable = true
+			}
+			if !pr.Quarantined && (statsEnabled || rule.Count) && readPolicy == nil {
 				// #12900: dataplane unloaded — hits are NO-DATA, not a
 				// published zero.
 				pr.HitCountersUnavailable = true
 			}
-			if (statsEnabled || rule.Count) && readPolicy != nil {
+			if !pr.Quarantined && (statsEnabled || rule.Count) && readPolicy != nil {
 				policyID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
 				ctrs, err := readPolicy(policyID)
 				switch {
@@ -325,6 +363,15 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 			if rule == nil {
 				continue
 			}
+			// #14361: prune quarantined members from the display scope
+			// (REST #12900 parity). Unlike REST — which intentionally keeps
+			// the authored singular for compatibility — the structured twin
+			// regenerates singulars from survivors, matching the runtime
+			// snapshot scrub (zones_quarantine.go), so a quarantined zone
+			// never reads as the active first match member.
+			displayFromZones, fromScopePruned := pruneQuarantinedScope(rule.Match.FromZones)
+			displayToZones, toScopePruned := pruneQuarantinedScope(rule.Match.ToZones)
+			scopePruned := fromScopePruned || toScopePruned
 			pr := &pb.PolicyRule{
 				Name:        rule.Name,
 				Description: rule.Description,
@@ -345,10 +392,10 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 				// first zone for backward compatibility; the plural fields
 				// carry the full set. Empty for an unscoped (all-zones)
 				// global — no regression.
-				MatchFromZone:  config.ScopeSingular(rule.Match.FromZones),
-				MatchToZone:    config.ScopeSingular(rule.Match.ToZones),
-				MatchFromZones: rule.Match.FromZones,
-				MatchToZones:   rule.Match.ToZones,
+				MatchFromZone:  config.ScopeSingular(displayFromZones),
+				MatchToZone:    config.ScopeSingular(displayToZones),
+				MatchFromZones: displayFromZones,
+				MatchToZones:   displayToZones,
 				// #3336: match-inversion flags + log modes + runtime identity.
 				// Global rule_id uses the "junos-global" sentinel zones, matching
 				// the snapshot builder so the rule_id joins to the same event.
@@ -372,12 +419,21 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 			if pr.Applications == nil {
 				pr.Applications = []string{}
 			}
-			if (statsEnabled || rule.Count) && readPolicy == nil {
+			// #14361: qualify any pruned scope; a wholly-quarantined rule
+			// (Quarantined=true) is dropped by the scrub, so mark its
+			// counters unavailable unconditionally and never read its slot.
+			if scopePruned {
+				pr.Description = appendPolicyQualifier(pr.Description)
+			}
+			if pr.Quarantined {
+				pr.HitCountersUnavailable = true
+			}
+			if !pr.Quarantined && (statsEnabled || rule.Count) && readPolicy == nil {
 				// #12900: dataplane unloaded — hits are NO-DATA, not a
 				// published zero.
 				pr.HitCountersUnavailable = true
 			}
-			if (statsEnabled || rule.Count) && readPolicy != nil {
+			if !pr.Quarantined && (statsEnabled || rule.Count) && readPolicy != nil {
 				policyID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
 				ctrs, err := readPolicy(policyID)
 				switch {
