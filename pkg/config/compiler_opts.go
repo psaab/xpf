@@ -2110,6 +2110,16 @@ type compileOpts struct {
 	// lenientBGPAllowASIn11795 downgrades an invalid effective BGP `loops`
 	// count from a strict compile error to a warning on tolerant load / sync.
 	lenientBGPAllowASIn11795 bool
+	// lenientBGPCrossField14585 downgrades the #14585 BGP/OSPF cross-field
+	// gate (validateBGPCrossFieldStrict) from a hard compile error to a
+	// cfg.Warnings entry. Combinations bgpd/ospfd refuse (per-neighbor
+	// local-as equal to the router AS, route-reflector-client on an eBGP
+	// peer, remove-private on an iBGP peer, dampening suppress <= reuse,
+	// backbone stub/nssa) previously committed clean and then failed every
+	// later frr-reload. Strict on commit / commit-check (hard reject naming
+	// the field); lenient on load / peer-sync (warn — #1960; the FRR render
+	// path omits each refused line so a leniently-loaded config is inert).
+	lenientBGPCrossField14585 bool
 	// lenientBGPRouterAS (#11313) downgrades missing process-AS validation
 	// from a commit error to a warning on tolerant load / peer-sync. The FRR
 	// renderer omits the entire router BGP stanza when LocalAS is zero.
@@ -3454,6 +3464,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRPMRoutingInstance:              true,
 		lenientBGPNeighborPeerAS:               true,
 		lenientBGPAllowASIn11795:               true,
+		lenientBGPCrossField14585:              true,
 		lenientBGPRouterAS:                     true,
 		lenientBGPDuplicateNeighbor:            true,
 		lenientBGPNeighborAddress:              true,
