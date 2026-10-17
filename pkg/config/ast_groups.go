@@ -894,6 +894,18 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			continue
 		}
 
+		// #14444: a single-key group block whose schema leaf is
+		// groupReplace never reaches the generic container merge when
+		// an inline peer exists: ports union iff range-free on both
+		// sides, everything else overrides. No peer falls through to
+		// adoption below. Placed before the sibling-except scope so a
+		// vetoed group's block is still dropped by the entry veto
+		// above; a scoped veto on this level is honoured by the
+		// generic path only when this branch does not handle the node.
+		if groupReplaceBlockHandled14444(ancestorPath, dst, s) {
+			continue
+		}
+
 		// #9422: a same-keyed destination container excludes the group. Checked
 		// across ALL same-keyed siblings, not only the one this merge would
 		// descend into, because a level spread over two blocks
