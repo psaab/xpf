@@ -276,7 +276,7 @@ fn a_full_block_still_re_enters_its_own_live_flow_9130() {
 /// cap arm and the occupancy assertion fails (a port leaks per refusal);
 /// change its `false` to `true` and the recycle-queue assertion fails.
 #[test]
-fn a_cap_refusal_gives_the_claimed_port_back_unrecycled_9130() {
+fn a_cap_refusal_gives_the_claimed_port_back_recycled_9130() {
     // 1 address x 4 ports -> allocator_capacity 4 = max_tracked_flows.
     let det = DeterministicV4 {
         block_size: 1,
@@ -337,11 +337,13 @@ fn a_cap_refusal_gives_the_claimed_port_back_unrecycled_9130() {
         "the refused allocation must give its claimed port back — occupancy must \
          be exactly what it was before the call"
     );
-    assert!(
-        alloc.debug_recycled_ports(0).is_empty(),
-        "a deterministic port must be given back via free_no_recycle: the \
-         deterministic path never drains the per-address recycle queue, so a \
-         recycled token is a leak (#4559 / #5178). Queue holds {:?}",
+    assert_eq!(
+        alloc.debug_recycled_ports(0),
+        vec![1024],
+        "#14625: a deterministic give-back recycles like any other port -- \
+         the ring is bounded to one token per offset and `claim_in_block` \
+         ignores it, while a later PAT phase on this reused allocator can \
+         only reach the port through the ring. Queue holds {:?}",
         alloc.debug_recycled_ports(0)
     );
 }
@@ -411,7 +413,7 @@ fn the_restructure_does_not_change_which_block_a_subscriber_gets_9130() {
 /// Change its `free_translated_port(..., false)` to `true` and the recycle-queue
 /// assertion fails.
 #[test]
-fn an_idempotency_race_gives_the_claimed_port_back_unrecycled_9130() {
+fn an_idempotency_race_gives_the_claimed_port_back_recycled_9130() {
     let alloc = Arc::new(PortAllocator::new(1, 1024, 2047));
     let entered = Arc::new(AtomicBool::new(false));
     let src = Ipv4Addr::new(100, 64, 0, 1);
@@ -462,10 +464,11 @@ fn an_idempotency_race_gives_the_claimed_port_back_unrecycled_9130() {
         0,
         "the loser must give its claimed port back"
     );
-    assert!(
-        alloc.debug_recycled_ports(0).is_empty(),
-        "the give-back must be free_no_recycle — the deterministic path never \
-         drains the per-address recycle queue (#4559 / #5178). Queue holds {:?}",
+    assert_eq!(
+        alloc.debug_recycled_ports(0).len(),
+        1,
+        "#14625: the give-back recycles (bounded ring; a later PAT phase on \
+         this reused allocator needs the token). Queue holds {:?}",
         alloc.debug_recycled_ports(0)
     );
 }

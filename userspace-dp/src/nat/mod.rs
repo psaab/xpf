@@ -175,6 +175,10 @@ mod tests_deterministic_collision_10721;
 #[cfg(test)]
 #[path = "tests_deterministic_bib_14091.rs"]
 mod tests_deterministic_bib_14091;
+// #14625: deterministic->PAT flip strands no-recycle frees in a reused allocator.
+#[cfg(test)]
+#[path = "tests_det_flip_14625.rs"]
+mod tests_det_flip_14625;
 
 // #9131: the address-only PERSISTENT allocator's sibling-address fallback.
 #[cfg(test)]
