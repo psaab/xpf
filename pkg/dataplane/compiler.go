@@ -751,40 +751,142 @@ func compileAddressBook(dp DataPlane, cfg *config.Config, result *CompileResult)
 		return fmt.Errorf("clear address_membership: %w", err)
 	}
 
-	ab := cfg.Security.AddressBook
-	if ab == nil {
+	// Collect every book this compiler must materialize: the global book
+	// plus each zone-local book (#3061), keyed by its folded global name
+	// (zone-local/<zone>/<name>) so a zone-local entry wins for policies in
+	// its zone without shadowing the same-named global entry. Zone-local
+	// address-set members that are also defined in that zone are qualified
+	// the same way resolveZoneLocalAddressBooks qualifies them.
+	type bookDef struct {
+		addr    *config.Address
+		set     *config.AddressSet
+		setZone string // zone whose book defined set, "" for global
+	}
+	books := make(map[string]*bookDef)
+	bookNames := make([]string, 0)
+	addBook := func(name string, def *bookDef) {
+		if _, dup := books[name]; !dup {
+			bookNames = append(bookNames, name)
+		}
+		books[name] = def
+	}
+	collect := func(ab *config.AddressBook, zone string) {
+		if ab == nil {
+			return
+		}
+		for name, addr := range ab.Addresses {
+			key := name
+			if zone != "" {
+				key = config.ZoneLocalQualify(zone, name)
+			}
+			addBook(key, &bookDef{addr: addr, setZone: zone})
+		}
+		for name, set := range ab.AddressSets {
+			key := name
+			if zone != "" {
+				key = config.ZoneLocalQualify(zone, name)
+			}
+			addBook(key, &bookDef{set: set, setZone: zone})
+		}
+	}
+	collect(cfg.Security.AddressBook, "")
+	if cfg.Security.Zones != nil {
+		zoneNames := make([]string, 0, len(cfg.Security.Zones))
+		for zn := range cfg.Security.Zones {
+			zoneNames = append(zoneNames, zn)
+		}
+		sort.Strings(zoneNames)
+		for _, zn := range zoneNames {
+			if z := cfg.Security.Zones[zn]; z != nil {
+				collect(z.AddressBook, zn)
+			}
+		}
+	}
+	if len(books) == 0 {
 		result.nextAddrID = 1 // start from 1 for implicit entries
 		return nil
+	}
+	sort.Strings(bookNames)
+
+	// qualifies a set member against the book that defined the set:
+	// zone-local first (mirroring resolveZoneLocalAddressBooks), then
+	// the name as authored (global book or an already-qualified token).
+	qualifyMember := func(def *bookDef, member string) string {
+		if def.setZone != "" {
+			if q := config.ZoneLocalQualify(def.setZone, member); books[q] != nil {
+				return q
+			}
+		}
+		return member
+	}
+	expandSet := func(def *bookDef, set *config.AddressSet) ([]string, error) {
+		seen := make(map[string]bool)
+		var out []string
+		var expand func(s *config.AddressSet, d *bookDef, depth int) error
+		expand = func(s *config.AddressSet, d *bookDef, depth int) error {
+			if depth > 5 {
+				return fmt.Errorf("address-set nesting too deep (max 5)")
+			}
+			if s == nil {
+				return fmt.Errorf("address-set is nil")
+			}
+			if len(s.UnknownMembers) > 0 {
+				return fmt.Errorf("address-set has unknown member statement %q", s.UnknownMembers[0])
+			}
+			for _, m := range s.Addresses {
+				q := qualifyMember(d, m)
+				// Cross-kind member (an Addresses entry naming a set):
+				// keep the set NAME, matching config.ExpandAddressSet's
+				// non-cross-kind mode — the membership loop then writes
+				// (setID(member), setID(this)) plus, via the nested-set
+				// recursion below, that set's own leaf memberships.
+				if !seen[q] {
+					seen[q] = true
+					out = append(out, q)
+				}
+			}
+			for _, m := range s.AddressSets {
+				q := qualifyMember(d, m)
+				md := books[q]
+				if md == nil || md.set == nil {
+					return fmt.Errorf("address-set %q not found", m)
+				}
+				if err := expand(md.set, md, depth+1); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if err := expand(set, def, 0); err != nil {
+			return nil, err
+		}
+		return out, nil
 	}
 
 	// Assign address IDs (1-based; 0 = "any")
 	addrID := uint32(1)
 
-	// Process individual addresses (sorted for deterministic IDs across restarts)
-	addrNames := make([]string, 0, len(ab.Addresses))
-	for name := range ab.Addresses {
-		addrNames = append(addrNames, name)
-	}
-	sort.Strings(addrNames)
-	for _, name := range addrNames {
-		addr := ab.Addresses[name]
+	// Process individual addresses (bookNames sorted for deterministic IDs).
+	for _, name := range bookNames {
+		def := books[name]
+		if def.addr == nil {
+			continue
+		}
+		addr := def.addr
 		result.AddrIDs[name] = addrID
 
 		cidr := addr.Value
-		// Ensure CIDR notation
 		if !strings.Contains(cidr, "/") {
 			if strings.Contains(cidr, ":") {
-				cidr = cidr + "/128" // IPv6
+				cidr = cidr + "/128"
 			} else {
-				cidr = cidr + "/32" // IPv4
+				cidr = cidr + "/32"
 			}
 		}
 
 		if err := dp.SetAddressBookEntry(cidr, addrID); err != nil {
 			return fmt.Errorf("set address %s (%s): %w", name, cidr, err)
 		}
-
-		// Write self-membership: (addrID, addrID) -> 1
 		if err := dp.SetAddressMembership(addrID, addrID); err != nil {
 			return fmt.Errorf("set self-membership for %s: %w", name, err)
 		}
@@ -793,40 +895,76 @@ func compileAddressBook(dp DataPlane, cfg *config.Config, result *CompileResult)
 		addrID++
 	}
 
-	// Process address sets (sorted for deterministic IDs)
-	setNames := make([]string, 0, len(ab.AddressSets))
-	for name := range ab.AddressSets {
-		setNames = append(setNames, name)
+	// Process address sets. Register every set ID before resolving members,
+	// since an address member may legally name another set.
+	for _, setName := range bookNames {
+		if books[setName].set != nil {
+			result.AddrIDs[setName] = addrID
+			addrID++
+		}
 	}
-	sort.Strings(setNames)
-	// Register every set ID before resolving members, since an address member
-	// may legally name another set regardless of sort order.
-	for _, setName := range setNames {
-		result.AddrIDs[setName] = addrID
-		addrID++
-	}
-	for _, setName := range setNames {
+	for _, setName := range bookNames {
+		def := books[setName]
+		if def.set == nil {
+			continue
+		}
 		setID := result.AddrIDs[setName]
 
-		// Recursively expand nested sets to flat address list
-		allAddresses, err := config.ExpandAddressSet(setName, ab)
+		// Legacy membership semantics (pre-#14335 ExpandAddressSet parity):
+		// every expanded ADDRESS name gets a membership, and a member that
+		// names another SET also keeps a direct set->set membership when
+		// both IDs exist (the #12233 cross-kind graph). Expand the set to
+		// leaf addresses for the address memberships, then add the direct
+		// cross-kind edges separately.
+		allAddresses, err := expandSet(def, def.set)
 		if err != nil {
 			return fmt.Errorf("address set %q: %w", setName, err)
 		}
-
-		// Write membership entries for each resolved address
-		for _, memberName := range allAddresses {
+		writeMember := func(memberName string) error {
 			memberID, ok := result.AddrIDs[memberName]
 			if !ok {
-				return fmt.Errorf("address set %q: member %q not found",
-					setName, memberName)
+				cidr := memberName
+				if !strings.Contains(cidr, "/") {
+					if ip := net.ParseIP(cidr); ip != nil {
+						if ip.To4() != nil {
+							cidr += "/32"
+						} else {
+							cidr += "/128"
+						}
+					}
+				}
+				if _, _, err := net.ParseCIDR(cidr); err != nil {
+					return fmt.Errorf("address set %q: member %q not found",
+						setName, memberName)
+				}
+				if result.literalAddrIDs == nil {
+					result.literalAddrIDs = make(map[string]uint32)
+				}
+				if existing, ok := result.literalAddrIDs[cidr]; ok {
+					memberID = existing
+				} else {
+					memberID = addrID
+					addrID++
+					if err := dp.SetAddressBookEntry(cidr, memberID); err != nil {
+						return fmt.Errorf("set address %s (%s): %w", memberName, cidr, err)
+					}
+					if err := dp.SetAddressMembership(memberID, memberID); err != nil {
+						return fmt.Errorf("set self-membership for %s: %w", memberName, err)
+					}
+					result.literalAddrIDs[cidr] = memberID
+				}
 			}
 			if err := dp.SetAddressMembership(memberID, setID); err != nil {
 				return fmt.Errorf("set membership %s in %s: %w",
 					memberName, setName, err)
 			}
+			return nil
 		}
-
+		for _, memberName := range allAddresses {
+			if err := writeMember(memberName); err != nil {
+				return err
+			}
+		}
 		slog.Debug("address set compiled", "name", setName, "id", setID,
 			"members", len(allAddresses))
 	}
@@ -834,7 +972,6 @@ func compileAddressBook(dp DataPlane, cfg *config.Config, result *CompileResult)
 	result.nextAddrID = addrID
 	return nil
 }
-
 func compileApplications(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 	// Track written keys for populate-before-clear.
 	writtenApps := make(map[AppKey]bool)
@@ -1017,8 +1154,11 @@ func compileApplications(dp DataPlane, cfg *config.Config, result *CompileResult
 // resolveAddrList resolves address-book names and policy address tokens to one
 // address ID. ID 0 is the match-any sentinel; dynamic bindings without feed
 // contents cannot be represented by this compiler and are rejected rather
-// than widened to match-any.
-func resolveAddrList(dp DataPlane, cfg *config.Config, names []string, result *CompileResult) (uint32, error) {
+// than widened to match-any, except on the userspace shim path whose setters
+// are no-ops and whose real enforcement comes from the userspace snapshot.
+// zone selects the zone-local book consulted ahead of the global book (""
+// = global only, used for unscoped global policies).
+func resolveAddrList(dp DataPlane, cfg *config.Config, names []string, result *CompileResult, zone ...string) (uint32, error) {
 	if len(names) == 0 {
 		return 0, nil
 	}
@@ -1055,13 +1195,44 @@ func resolveAddrList(dp DataPlane, cfg *config.Config, names []string, result *C
 		if err := dp.SetAddressMembership(fallbackID, setID); err != nil {
 			return 0, fmt.Errorf("set family wildcard membership %s: %w", cidr, err)
 		}
-		if cfg != nil && cfg.Security.AddressBook != nil {
-			for name, addr := range cfg.Security.AddressBook.Addresses {
+		books := make([]*config.AddressBook, 0, 2)
+		if cfg != nil {
+			if cfg.Security.AddressBook != nil {
+				books = append(books, cfg.Security.AddressBook)
+			}
+			for _, z := range cfg.Security.Zones {
+				if z != nil && z.AddressBook != nil {
+					books = append(books, z.AddressBook)
+				}
+			}
+		}
+		seenAddr := make(map[string]bool)
+		for _, book := range books {
+			for name, addr := range book.Addresses {
+				idName := name
+				if _, found := result.AddrIDs[idName]; !found || seenAddr[idName] {
+					for zn, z := range cfg.Security.Zones {
+						if z == nil || z.AddressBook == nil {
+							continue
+						}
+						if _, isLocal := z.AddressBook.Addresses[name]; isLocal {
+							if q := config.ZoneLocalQualify(zn, name); q != idName {
+								if _, qfound := result.AddrIDs[q]; qfound && !seenAddr[q] {
+									idName = q
+								}
+							}
+						}
+					}
+				}
+				if seenAddr[idName] {
+					continue
+				}
+				seenAddr[idName] = true
 				familyV4, valid := policyAddressTokenFamily(addr.Value)
 				if !valid || familyV4 != isV4 {
 					continue
 				}
-				id, found := result.AddrIDs[name]
+				id, found := result.AddrIDs[idName]
 				if !found {
 					continue
 				}
@@ -1070,17 +1241,28 @@ func resolveAddrList(dp DataPlane, cfg *config.Config, names []string, result *C
 				}
 			}
 		}
-		for existingCIDR, id := range result.literalAddrIDs {
-			familyV4, valid := policyAddressTokenFamily(existingCIDR)
-			if !valid || familyV4 != isV4 {
-				continue
-			}
-			if err := dp.SetAddressMembership(id, setID); err != nil {
-				return 0, fmt.Errorf("set family wildcard membership %s: %w", existingCIDR, err)
-			}
-		}
 		result.policyFamilySetIDs[isV4] = setID
 		return setID, nil
+	}
+	zoneName := ""
+	if len(zone) > 0 {
+		zoneName = zone[0]
+	}
+	allocSyntheticID := func(name string) (uint32, error) {
+		if id, ok := result.AddrIDs[name]; ok {
+			return id, nil
+		}
+		id := result.nextAddrID
+		result.nextAddrID++
+		result.AddrIDs[name] = id
+		if err := dp.SetAddressMembership(id, id); err != nil {
+			return 0, fmt.Errorf("set self-membership for implicit %s: %w", name, err)
+		}
+		return id, nil
+	}
+	isShim := false
+	if _, ok := dp.(userspaceShimCompileDataplane); ok {
+		isShim = true
 	}
 	resolve := func(name string) (uint32, error) {
 		if v4, v6, ok := config.PolicyAddressWildcardFamilies(name); ok && v4 != v6 {
@@ -1090,6 +1272,21 @@ func resolveAddrList(dp DataPlane, cfg *config.Config, names []string, result *C
 		// ordinary CIDR/IP-shaped names retain name-before-literal resolution.
 		if config.IsPolicyAddressWildcardKeyword(name) {
 			name = config.PolicyAddressKeywordLiteral(name)
+		} else if cfg != nil && zoneName != "" && !config.IsWildcardZone(zoneName) {
+			lookup := name
+			if qz, qn, ok := config.ZoneLocalUnqualify(name); ok {
+				if qz == zoneName {
+					lookup = qn
+				} else {
+					return 0, fmt.Errorf("address %q not found", name)
+				}
+			}
+			if id, ok := result.AddrIDs[config.ZoneLocalQualify(zoneName, lookup)]; ok {
+				return id, nil
+			}
+			if id, ok := result.AddrIDs[name]; ok {
+				return id, nil
+			}
 		} else if id, ok := result.AddrIDs[name]; ok {
 			return id, nil
 		}
@@ -1129,7 +1326,20 @@ func resolveAddrList(dp DataPlane, cfg *config.Config, names []string, result *C
 			return id, nil
 		}
 		if cfg != nil && cfg.Security.DynamicAddress.AddressBindings[name] != nil {
+			if isShim || isValidationPass(dp) {
+				return allocSyntheticID(name)
+			}
 			return 0, fmt.Errorf("dynamic address %q has no feed prefixes in the legacy dataplane compiler", name)
+		}
+		if cfg != nil {
+			if _, authored, ok := config.ZoneLocalUnqualify(name); ok {
+				if cfg.Security.DynamicAddress.AddressBindings[authored] != nil {
+					if isShim || isValidationPass(dp) {
+						return allocSyntheticID(name)
+					}
+					return 0, fmt.Errorf("dynamic address %q has no feed prefixes in the legacy dataplane compiler", authored)
+				}
+			}
 		}
 		return 0, fmt.Errorf("address %q not found", name)
 	}
@@ -1333,14 +1543,14 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 			}
 
 			// Source address (supports multiple via implicit address-set)
-			srcID, err := resolveAddrList(dp, cfg, pol.Match.SourceAddresses, result)
+			srcID, err := resolveAddrList(dp, cfg, pol.Match.SourceAddresses, result, zpp.FromZone)
 			if err != nil {
 				return fmt.Errorf("policy %s source address: %w", pol.Name, err)
 			}
 			rule.SrcAddrID = srcID
 
 			// Destination address (supports multiple via implicit address-set)
-			dstID, err := resolveAddrList(dp, cfg, pol.Match.DestinationAddresses, result)
+			dstID, err := resolveAddrList(dp, cfg, pol.Match.DestinationAddresses, result, zpp.ToZone)
 			if err != nil {
 				return fmt.Errorf("policy %s destination address: %w", pol.Name, err)
 			}
@@ -1465,13 +1675,20 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 				}
 			}
 
-			srcID, err := resolveAddrList(dp, cfg, pol.Match.SourceAddresses, result)
+			srcZone, dstZone := "", ""
+			if len(pol.Match.FromZones) == 1 {
+				srcZone = pol.Match.FromZones[0]
+			}
+			if len(pol.Match.ToZones) == 1 {
+				dstZone = pol.Match.ToZones[0]
+			}
+			srcID, err := resolveAddrList(dp, cfg, pol.Match.SourceAddresses, result, srcZone)
 			if err != nil {
 				return fmt.Errorf("global policy %s source address: %w", pol.Name, err)
 			}
 			rule.SrcAddrID = srcID
 
-			dstID, err := resolveAddrList(dp, cfg, pol.Match.DestinationAddresses, result)
+			dstID, err := resolveAddrList(dp, cfg, pol.Match.DestinationAddresses, result, dstZone)
 			if err != nil {
 				return fmt.Errorf("global policy %s destination address: %w", pol.Name, err)
 			}
