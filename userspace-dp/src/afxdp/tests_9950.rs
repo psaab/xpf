@@ -974,6 +974,7 @@ fn f035_shard_full_drop_is_not_forward_accounted_10285() {
         ident: 0,
         protocol: PROTO_UDP,
         routing_domain: 0,
+        ingress_zone: 0,
         fairness_origin: None,
     };
     let shard = crate::fragment_overlap::overlap_shard_index(&base);
@@ -2037,6 +2038,7 @@ fn f035_enforcement_order_armed_screen_9950() {
         ident: 0xBEEF,
         protocol: PROTO_TCP,
         routing_domain: 0,
+        ingress_zone: 0,
         fairness_origin: None,
     };
     assert!(!t.check_and_record(key, 0, 20, 1_000, &crate::fragment_overlap::FRAG_OVERLAP_DROPPED));

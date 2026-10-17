@@ -697,6 +697,15 @@ pub(super) fn retry_pending_neigh(
                 pkt.meta.ingress_vlan_id,
                 pkt.fabric_ingress_zone,
             );
+            // #14321: same ingress-zone stamp as the inline hook (the
+            // validated fabric zone carried on the parked packet, else the
+            // logical unit's configured zone), so the retry keys under the
+            // same zone membership/quota as its inline sibling.
+            okey.ingress_zone = crate::afxdp::poll_descriptor::frag_assoc::frag_ingress_zone(
+                forwarding,
+                pkt.meta,
+                pkt.fabric_ingress_zone,
+            );
             let mut pre_overlap = forwarding
                 .nat64
                 .frag_overlap

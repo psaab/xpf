@@ -83,6 +83,20 @@ pub(in crate::afxdp) fn frag_ingress_authority_with_nat_scope(
     }
 }
 
+/// #14321: the ingress zone stamped onto an `OverlapKey`, resolved from
+/// exactly the same inputs as `frag_ingress_authority`'s zone (validated
+/// fabric override, else the logical unit's configured zone, else 0) so
+/// overlap membership/quota and fragment-association authority agree on
+/// what "same zone" means by construction.
+#[inline]
+pub(in crate::afxdp) fn frag_ingress_zone(
+    forwarding: &ForwardingState,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+) -> u16 {
+    frag_ingress_authority(forwarding, meta, ingress_zone_override).ingress_zone
+}
+
 /// #2562: on a FIRST NAT64 fragment that translated and will forward, install
 /// the fragment association keyed by `(family, src, dst, ip_id, protocol,
 /// authority)` (#5798 widened the original `(family, src, dst, ip_id)`) so its
