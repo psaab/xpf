@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -930,5 +931,58 @@ func TestApplyTunnelHostInboundSkipsNilZone(t *testing.T) {
 	}
 	if _, ok := dp.zoneCfgs[2]; ok {
 		t.Fatalf("nil zone orphaned (id 2) must not be configured")
+	}
+}
+
+// TestValidateZoneScreenReferences_SkipsQuarantinedCollisionLoser is the
+// #14338 regression: a quarantined collision-loser zone referencing an
+// undefined screen profile must not abort the pre-mutation sweep, because
+// programZoneMaps will never install that zone. Fail-closed is preserved:
+// a non-quarantined zone with the same bad reference must still be rejected.
+func TestValidateZoneScreenReferences_SkipsQuarantinedCollisionLoser(t *testing.T) {
+	if config.StableZoneID("z174") != config.StableZoneID("z214") {
+		t.Fatalf("test premise broken: z174/z214 no longer collide")
+	}
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			Screen: map[string]*config.ScreenProfile{
+				"good-screen": {Name: "good-screen"},
+			},
+			Zones: map[string]*config.ZoneConfig{
+				"z174": {Name: "z174", ScreenProfile: "good-screen"},
+				"z214": {Name: "z214", ScreenProfile: "missing-screen"},
+			},
+		},
+	}
+	if _, excluded := config.ZoneQuarantineExclusionsForConfig(cfg)["z214"]; !excluded {
+		t.Fatalf("test premise broken: z214 not quarantined: %v", config.ZoneQuarantineExclusionsForConfig(cfg))
+	}
+	if _, excluded := config.ZoneQuarantineExclusionsForConfig(cfg)["z174"]; excluded {
+		t.Fatalf("test premise broken: survivor z174 quarantined")
+	}
+	result := newValidationResult()
+	result.ScreenIDs["good-screen"] = 1
+	if err := validateZoneScreenReferences(cfg, result); err != nil {
+		t.Fatalf("quarantined collision loser with missing screen must be skipped, got: %v", err)
+	}
+
+	// Fail-closed control: same bad reference on the survivor must reject.
+	cfg2 := &config.Config{
+		Security: config.SecurityConfig{
+			Screen: map[string]*config.ScreenProfile{
+				"good-screen": {Name: "good-screen"},
+			},
+			Zones: map[string]*config.ZoneConfig{
+				"z174": {Name: "z174", ScreenProfile: "missing-screen"},
+				"z214": {Name: "z214", ScreenProfile: "good-screen"},
+			},
+		},
+	}
+	if _, excluded := config.ZoneQuarantineExclusionsForConfig(cfg2)["z214"]; !excluded {
+		t.Fatalf("control premise broken: z214 not quarantined")
+	}
+	err := validateZoneScreenReferences(cfg2, result)
+	if err == nil || !strings.Contains(err.Error(), `"missing-screen" not found for zone "z174"`) {
+		t.Fatalf("non-quarantined zone with missing screen must be rejected, got: %v", err)
 	}
 }
