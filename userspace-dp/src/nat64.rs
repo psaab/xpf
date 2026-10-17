@@ -280,6 +280,11 @@ pub(crate) struct Nat64Prefix {
     /// `parse_source_nat_rules_with_previous`, before this state exists, which
     /// is why R3 needed a second pass rather than one more line in the first.
     pub(crate) overlap_owners: Option<std::sync::Arc<crate::nat::PoolAddressOwners>>,
+    /// #14367: interface registry synced at forwarding-build (egress addrs).
+    pub(crate) iface_allocs: Option<std::sync::Arc<crate::nat::InterfaceNatAllocators>>,
+    /// #14367: pool+NAT64 combined index incl. interface members, for the
+    /// NAT64->interface check. Synced alongside iface_allocs.
+    pub(crate) iface_overlap_owners: Option<std::sync::Arc<crate::nat::PoolAddressOwners>>,
 }
 
 impl Nat64Prefix {
@@ -302,6 +307,8 @@ impl Nat64Prefix {
             deterministic_v6: None,
             over_budget: false,
             overlap_owners: None,
+            iface_allocs: None,
+            iface_overlap_owners: None,
             draining_pool_allocators: Vec::new(),
         }
     }
@@ -319,6 +326,8 @@ impl Clone for Nat64Prefix {
             deterministic_v6: self.deterministic_v6,
             over_budget: self.over_budget,
             overlap_owners: self.overlap_owners.clone(),
+            iface_allocs: self.iface_allocs.clone(),
+            iface_overlap_owners: self.iface_overlap_owners.clone(),
             draining_pool_allocators: self.draining_pool_allocators.clone(),
         }
     }
@@ -1033,6 +1042,8 @@ impl Nat64State {
                 // Filled in by `wire_nat64_overlap_peers` once source-NAT rules
                 // and NAT64 prefixes both exist (#8115 R3).
                 overlap_owners: None,
+                iface_allocs: None,
+                iface_overlap_owners: None,
                 draining_pool_allocators: Vec::new(),
             });
         }
@@ -1289,8 +1300,8 @@ impl Nat64State {
             now_ns,
             crate::nat::NatHolder::Untracked,
             &[],
-            // #9680: the default routing instance; every caller is a test.
             0,
+            None,
         )
     }
 
@@ -1318,6 +1329,7 @@ impl Nat64State {
         // the BIB, so identical IPv6 5-tuples in two routing instances get two
         // translated bindings instead of sharing one.
         routing_scope: u32,
+        iface_allocs: Option<&crate::nat::InterfaceNatAllocators>,
     ) -> Result<(Ipv4Addr, u16), SourceNatFailureReason> {
         self.allocate_source_with_holder(
             prefix_idx,
@@ -1330,6 +1342,7 @@ impl Nat64State {
             crate::nat::NatHolder::Worker(worker_id),
             draining_rules,
             routing_scope,
+            iface_allocs,
         )
     }
 
@@ -1367,6 +1380,7 @@ impl Nat64State {
         // #7799: see `Nat64OverlapDraining`.
         draining_rules: &[crate::nat::SourceNatRule],
         routing_scope: u32,
+        iface_allocs: Option<&crate::nat::InterfaceNatAllocators>,
     ) -> Result<(Ipv4Addr, u16), SourceNatFailureReason> {
         let prefix = self
             .prefixes
@@ -1432,6 +1446,21 @@ impl Nat64State {
             now_ns,
             holder,
         )?;
+        // #14367 Check C: refuse if interface registry owns this identity.
+        // Prefer explicit caller handle; fall back to build-synced prefix fields.
+        let eff_iface = iface_allocs.or(prefix.iface_allocs.as_deref());
+        if let Some(ia) = eff_iface {
+            let eff_owners = prefix.iface_overlap_owners.as_deref().or(prefix.overlap_owners.as_deref());
+            crate::nat::nat64_refuse_if_interface_owns(
+                &prefix.port_allocator,
+                eff_owners,
+                ia,
+                flow,
+                translated,
+                now_ns,
+                holder,
+            )?;
+        }
         Ok(translated)
     }
 

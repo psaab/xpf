@@ -189,20 +189,15 @@ func TestInterfaceSNATPoolOverlapStatsDistinguishUnknownFromHealthy(t *testing.T
 	}
 }
 
-// TestInterfaceSNATPoolOverlapSkipsNonHostPoolMembers pins the stated limitation.
-//
-// A pool member expressed as a range or prefix is NOT compared. Reporting a
-// maybe-overlap as an overlap would make the warning unactionable, and this half
-// exists to give operators a signal they can act on. The limitation is in the
-// warning's own text; this is what keeps the code honest about it.
+// TestInterfaceSNATPoolOverlapSkipsNonHostPoolMembers — SUPERSEDED by #14367:
+// prefix members are now compared prefix-aware, so "172.16.80.0/24" DOES
+// produce a finding for egress 172.16.80.8. Kept as the prefix-positive cell;
+// the separate 14367 test file carries disjoint/range controls.
 func TestInterfaceSNATPoolOverlapSkipsNonHostPoolMembers(t *testing.T) {
 	snap := overlapSnapshot(ifaceModeRule(), poolRuleOn("172.16.80.0/24"), wanUnit())
-	if got := detectInterfaceSNATPoolOverlaps(snap); len(got) != 0 {
-		t.Fatalf("prefix pool member produced %d findings %v; ranges/prefixes are out of "+
-			"scope for this detector and must be skipped, not approximated", len(got), got)
+	if got := detectInterfaceSNATPoolOverlaps(snap); len(got) != 1 {
+		t.Fatalf("prefix pool member produced %d findings %v; #14367 requires prefix-aware comparison (want 1)", len(got), got)
 	}
-	// CONTROL: the same address as a HOST member is detected, so the skip above
-	// is about the member's SHAPE and not about the address being wrong.
 	snap = overlapSnapshot(ifaceModeRule(), poolRuleOn(overlapEgress), wanUnit())
 	if got := detectInterfaceSNATPoolOverlaps(snap); len(got) != 1 {
 		t.Fatalf("control: host pool member produced %d findings, want 1", len(got))

@@ -5229,6 +5229,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // NAT64 BIB; release and the HA synced reserve
                                         // read the same field off the session key.
                                         flow.forward_key.routing_domain,
+                                        Some(&worker_ctx.forwarding.iface_nat_allocators),
                                     ) {
                                         Ok((snat_v4, translated_port)) => {
                                             decision.nat = Nat64State::forward_decision(

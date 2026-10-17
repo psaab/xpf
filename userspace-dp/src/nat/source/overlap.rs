@@ -131,7 +131,7 @@ struct PoolAddressOwner {
 /// directed rule-peer map per pair; that was NOT bounded by the budget (a
 /// strict-VALID config of 1024 rules over one `/16` pool built 67,108,864
 /// owner entries) and is the defect Codex round 1 finding 4 measured.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct PoolAddressOwners {
     v4: FxHashMap<Ipv4Addr, Vec<PoolAddressOwner>>,
     v6: FxHashMap<Ipv6Addr, Vec<PoolAddressOwner>>,
@@ -206,6 +206,32 @@ impl PoolAddressOwners {
             }
         })
     }
+    // #14367: interface-domain members (no bitmap index; index stored as 0).
+    pub(crate) fn holds_for_interface(&self, flow: SourceNatFlowKey, translated: TranslatedTuple, own_iface: &PortAllocator) -> bool {
+        let owners = match translated.ip {
+            IpAddr::V4(v4) => self.v4.get(&v4),
+            IpAddr::V6(v6) => self.v6.get(&v6),
+        };
+        let rkey = AddressOnlyReverseKey::for_flow(&flow, translated.ip, translated.port);
+        owners.into_iter().flatten().any(|owner| {
+            if owner.allocator.same_allocator(own_iface) { return false; }
+            owner.allocator.holds_port(owner.index, translated.port)
+                || owner.allocator.holds_address_only_identity(&rkey)
+        })
+    }
+
+    pub(crate) fn interface_holds(&self, flow: SourceNatFlowKey, translated: TranslatedTuple, own_iface: &crate::nat::allocator::PortAllocator) -> bool {
+        let owners = match translated.ip {
+            IpAddr::V4(v4) => self.v4.get(&v4),
+            IpAddr::V6(v6) => self.v6.get(&v6),
+        };
+        let rkey = AddressOnlyReverseKey::for_flow(&flow, translated.ip, translated.port);
+        owners.into_iter().flatten().any(|owner| {
+            !owner.allocator.same_allocator(own_iface)
+                && owner.allocator.holds_address_only_identity(&rkey)
+        })
+    }
+
 
 }
 
@@ -691,4 +717,117 @@ pub(crate) fn wire_nat64_overlap_peers(
         }
     }
     assign_source_owners_shared(rules, &distinct_src, owners);
+}
+
+/// #14367: sync combined pool+NAT64+interface index onto iface rules/prefixes.
+/// `egress_addrs` are actual interface egress addresses (primary_v4/v6);
+/// interface allocators are obtained via allocator_for (creates, matching mint).
+pub(crate) fn sync_interface_overlap_peers(
+    rules: &mut [SourceNatRule],
+    prefixes: &mut [crate::nat64::Nat64Prefix],
+    iface_allocs: &std::sync::Arc<crate::nat::InterfaceNatAllocators>,
+    egress_addrs: &rustc_hash::FxHashSet<IpAddr>,
+) {
+    // Collect pool/NAT64 addresses intersecting egress.
+    let mut shared: rustc_hash::FxHashSet<IpAddr> = rustc_hash::FxHashSet::default();
+    for r in rules.iter().filter(|r| r.pool_mode) {
+        for a in &r.pool_addresses_v4 { if egress_addrs.contains(&IpAddr::V4(*a)) { shared.insert(IpAddr::V4(*a)); } }
+        for a in &r.pool_addresses_v6 { if egress_addrs.contains(&IpAddr::V6(*a)) { shared.insert(IpAddr::V6(*a)); } }
+    }
+    for p in prefixes.iter() {
+        for a in &p.pool_v4 { if egress_addrs.contains(&IpAddr::V4(*a)) { shared.insert(IpAddr::V4(*a)); } }
+    }
+    if shared.is_empty() {
+        for r in rules.iter_mut() { r.iface_overlap_owners = None; }
+        for p in prefixes.iter_mut() { p.iface_allocs = None; p.iface_overlap_owners = None; }
+        return;
+    }
+    // Base combined index: reuse any existing combined owners if present,
+    // else build pool+NAT64 views (need >=2 domains or single domain + iface).
+    let base: Option<Arc<PoolAddressOwners>> = rules.iter().find_map(|r| r.overlap_owners.clone())
+        .or_else(|| prefixes.iter().find_map(|p| p.overlap_owners.clone()));
+    let combined: Arc<PoolAddressOwners> = if let Some(b) = base {
+        // Clone inner and add interface members for shared addrs not yet present
+        // with iface allocator. PoolAddressOwners fields are private to this
+        // module, so we can mutate the clone.
+        let mut inner = (*b).clone();
+        for addr in &shared {
+            if let Some(alloc) = iface_allocs.allocator_for(*addr) {
+                let entry = match addr { IpAddr::V4(v4) => inner.v4.entry(*v4).or_default(), IpAddr::V6(v6) => inner.v6.entry(*v6).or_default() };
+                if !entry.iter().any(|o| o.allocator.same_allocator(&alloc)) {
+                    entry.push(PoolAddressOwner { allocator: (*alloc).clone(), index: 0 });
+                }
+            }
+        }
+        Arc::new(inner)
+    } else {
+        // Build from scratch: views for distinct pool + NAT64 + iface (shared only).
+        let distinct_src = distinct_source_owners(rules);
+        let mut views: Vec<OwnerView<'_>> = Vec::new();
+        // We cannot easily build views with iface allocators owned here (lifetimes).
+        // Instead construct owners manually for shared addrs.
+        let mut owners = PoolAddressOwners::default();
+        for &i in &distinct_src {
+            let r = &rules[i];
+            for (pos, a) in r.pool_addresses_v4.iter().enumerate() {
+                if shared.contains(&IpAddr::V4(*a)) {
+                    owners.v4.entry(*a).or_default().push(PoolAddressOwner { allocator: r.pool_allocator.clone(), index: pos });
+                }
+            }
+            for (pos, a) in r.pool_addresses_v6.iter().enumerate() {
+                if shared.contains(&IpAddr::V6(*a)) {
+                    owners.v6.entry(*a).or_default().push(PoolAddressOwner { allocator: r.pool_allocator.clone(), index: r.pool_addresses_v4.len() + pos });
+                }
+            }
+        }
+        for p in prefixes.iter() {
+            if p.port_allocator.address_slots() == 0 { continue; }
+            for (pos, a) in p.pool_v4.iter().enumerate() {
+                if shared.contains(&IpAddr::V4(*a)) {
+                    let entry = owners.v4.entry(*a).or_default();
+                    if !entry.iter().any(|o| o.allocator.same_allocator(&p.port_allocator)) {
+                        entry.push(PoolAddressOwner { allocator: p.port_allocator.clone(), index: pos });
+                    }
+                }
+            }
+        }
+        for addr in &shared {
+            if let Some(alloc) = iface_allocs.allocator_for(*addr) {
+                let entry = match addr { IpAddr::V4(v4) => owners.v4.entry(*v4).or_default(), IpAddr::V6(v6) => owners.v6.entry(*v6).or_default() };
+                if !entry.iter().any(|o| o.allocator.same_allocator(&alloc)) {
+                    entry.push(PoolAddressOwner { allocator: (*alloc).clone(), index: 0 });
+                }
+            }
+        }
+        // Drop singletons (only iface alone).
+        owners.v4.retain(|_, v| v.len() >= 2);
+        owners.v6.retain(|_, v| v.len() >= 2);
+        if owners.v4.is_empty() && owners.v6.is_empty() { 
+            for r in rules.iter_mut() { r.iface_overlap_owners = None; }
+            for p in prefixes.iter_mut() { p.iface_allocs = None; p.iface_overlap_owners = None; }
+            return;
+        }
+        Arc::new(owners)
+    };
+    // Sync onto iface rules whose egress could be shared: all interface_mode rules
+    // (egress unknown per rule) get it if any shared addr exists.
+    for r in rules.iter_mut() {
+        if r.interface_mode {
+            r.iface_overlap_owners = Some(Arc::clone(&combined));
+        }
+        if r.pool_mode {
+            // Pool rules also need iface member visible: set iface_overlap_owners
+            // as the combined-with-iface index for reject helpers.
+            r.iface_overlap_owners = Some(Arc::clone(&combined));
+        }
+    }
+    for p in prefixes.iter_mut() {
+        if p.pool_v4.iter().any(|a| combined.v4.contains_key(a)) {
+            p.iface_allocs = Some(Arc::clone(iface_allocs));
+            p.iface_overlap_owners = Some(Arc::clone(&combined));
+        } else {
+            p.iface_allocs = None;
+            p.iface_overlap_owners = None;
+        }
+    }
 }

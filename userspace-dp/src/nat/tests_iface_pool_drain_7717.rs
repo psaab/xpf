@@ -325,7 +325,7 @@ fn nat64_mint_fails_closed_while_a_pool_drains_the_same_address_7799() {
     // makes the refusal below attributable to the DRAIN rather than to the
     // rule set, the pool, or the allocator being unusable in the first place.
     nat64
-        .allocate_source_for_worker(0, TCP, client, dst_v4, 6000, 443, 0, 0, &gen1, 0)
+        .allocate_source_for_worker(0, TCP, client, dst_v4, 6000, 443, 0, 0, &gen1, 0, None)
         .expect("control: with no draining pool a NAT64 mint on E must succeed");
 
     // Quarantine the pool. Its allocator is RETAINED, so it is still holding
@@ -347,7 +347,7 @@ fn nat64_mint_fails_closed_while_a_pool_drains_the_same_address_7799() {
     );
     crate::nat::wire_nat64_overlap_peers(&mut draining, &mut nat64.prefixes);
 
-    match nat64.allocate_source_for_worker(0, TCP, client, dst_v4, 6001, 443, 0, 0, &draining, 0) {
+    match nat64.allocate_source_for_worker(0, TCP, client, dst_v4, 6001, 443, 0, 0, &draining, 0, None) {
         Err(SourceNatFailureReason::Nat64OverlapDraining) => {}
         other => panic!(
             "#7799: a NAT64 mint on an address a quarantined pool is still draining must fail \
@@ -393,7 +393,7 @@ fn nat64_deterministic_mint_also_fails_closed_while_draining_7799() {
 
     // CONTROL: the deterministic path mints fine while nothing is draining.
     nat64
-        .allocate_source_for_worker(0, TCP, client, dst_v4, 6000, 443, 0, 0, &gen1, 0)
+        .allocate_source_for_worker(0, TCP, client, dst_v4, 6000, 443, 0, 0, &gen1, 0, None)
         .expect("control: a deterministic NAPT64 mint must succeed with no draining pool");
 
     let mut draining = parse_source_nat_rules_with_previous(
@@ -403,7 +403,7 @@ fn nat64_deterministic_mint_also_fails_closed_while_draining_7799() {
         0,
     );
     crate::nat::wire_nat64_overlap_peers(&mut draining, &mut nat64.prefixes);
-    match nat64.allocate_source_for_worker(0, TCP, client, dst_v4, 6001, 443, 0, 0, &draining, 0) {
+    match nat64.allocate_source_for_worker(0, TCP, client, dst_v4, 6001, 443, 0, 0, &draining, 0, None) {
         Err(SourceNatFailureReason::Nat64OverlapDraining) => {}
         other => panic!(
             "#7799: the DETERMINISTIC NAPT64 mint path allocates from the same pool and must \
@@ -488,6 +488,6 @@ fn nat64_draining_check_with_disjoint_large_pools_mints_13083() {
     let client: std::net::Ipv6Addr = "2001:db8::1".parse().expect("client v6");
     let dst_v4: std::net::Ipv4Addr = SRV.parse().expect("server v4");
     nat64
-        .allocate_source_for_worker(0, TCP, client, dst_v4, 6000, 443, 0, 0, &draining, 0)
+        .allocate_source_for_worker(0, TCP, client, dst_v4, 6000, 443, 0, 0, &draining, 0, None)
         .expect("#13083: disjoint draining pool must not quarantine NAT64 mint");
 }
