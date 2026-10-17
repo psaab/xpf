@@ -386,6 +386,17 @@ all files stay in `package ipsec`, so the public API is unchanged.
   (#3904 ANY-semantics); a VPN with nothing renderable left is SKIPPED
   (`errDHGroupUnresolved`) rather than negotiate with a silently-dropped
   modp term or a charon-refused empty keyword.
+- **Missing IKE `dh-group` (#14588, Y09-01).** An IKE proposal with NO
+  `dh-group` at all rendered `proposals = aes256-sha256` — no
+  key-exchange method — which strongSwan refuses ("invalid value for:
+  proposals, config discarded, loaded 0 of 1"), discarding every
+  connection in the file. Strict commit now rejects an IKE proposal
+  referenced by a rendered VPN with no `dh-group`
+  (`validateIPsecIkeDHGroupsPresentStrict`, message names `dh-group`);
+  the tolerant path warns (`lenientIKEProposalMissingDH`) and
+  `resolveIKESettings` skips the VPN via `errDHGroupUnresolved`, so a
+  lenient-loaded copy keeps its healthy VPNs loadable. ESP proposals
+  with no `dh-group` remain valid no-PFS suites.
 - **Rekey jitter (#9919 F-163).** `rekey_time` is emitted WITHOUT
   `rand_time`, so strongSwan's default jitter (rand_time = over_time = 10%
   of rekey_time) applies and co-timed tunnels do not rekey together.

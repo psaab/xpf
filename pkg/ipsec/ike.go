@@ -61,7 +61,7 @@ var errESPChainUnresolved = errors.New(
 // validateIPsecDHGroupsStrict (pkg/config) hard-rejects the value up front
 // so a new operator edit fails loudly.
 var errDHGroupUnresolved = errors.New(
-	"proposal carries a Diffie-Hellman group that cannot be rendered")
+	"proposal carries a Diffie-Hellman group that cannot be rendered or has no dh-group configured")
 
 // errProposalUnresolved signals that an IKE/ESP proposal set cannot be
 // rendered without changing operator intent: candidates were rejected by the
@@ -150,6 +150,20 @@ func dhGroupBad(group int, invalidSpec string) (bad bool, detail string) {
 	return false, ""
 }
 
+// ikeDHGroupMissing reports whether an IKE proposal carries no usable
+// dh-group: DHGroup 0 with no InvalidSpec recorded. That is distinct
+// from dhGroupBad — the proposal is absent, not bad — but the rendered
+// proposal is just as unloadable: buildIKEProposalFromIKE /
+// buildIKEProposal omit the key-exchange term, and strongSwan requires
+// a key-exchange method in every IKE proposal ("invalid value for:
+// proposals, config discarded, loaded 0 of 1", #14588 Y09-01). ESP
+// proposals legitimately carry DHGroup 0 (no PFS); IKE proposals do
+// not. On revert (no missing-DH check) a DHCP-less IKE proposal renders
+// `aes256-sha256` and charon discards the config.
+func ikeDHGroupMissing(group int, invalidSpec string) bool {
+	return invalidSpec == "" && group == 0
+}
+
 // resolveIKESettings resolves the IKE (Phase 1) auth method, proposal
 // string, lifetime, and aggressive-mode flag from the gateway's IKE policy
 // chain.
@@ -196,6 +210,10 @@ func resolveIKESettings(cfg *config.IPsecConfig, gw *config.IPsecGateway) (authM
 			// SKIPPED (per-entry) rather than aborting the whole render.
 			if bad, detail := dhGroupBad(ikeProp.DHGroup, ikeProp.DHGroupInvalidSpec); bad {
 				dhSkipped = append(dhSkipped, fmt.Sprintf("ike-proposal %q %s", ref, detail))
+				continue
+			}
+			if ikeDHGroupMissing(ikeProp.DHGroup, ikeProp.DHGroupInvalidSpec) {
+				dhSkipped = append(dhSkipped, fmt.Sprintf("ike-proposal %q has no dh-group configured", ref))
 				continue
 			}
 			if bad, detail := ikeProposalBad(ref, ikeProp); bad {
@@ -251,6 +269,10 @@ func resolveIKESettings(cfg *config.IPsecConfig, gw *config.IPsecGateway) (authM
 		if prop, ok := cfg.Proposals[gw.IKEPolicy]; ok && prop != nil {
 			// #9919 F-161: the legacy direct-proposal form carries a DH
 			// group too; a bad one skips like the chain form.
+			if ikeDHGroupMissing(prop.DHGroup, prop.DHGroupInvalidSpec) {
+				return "", "", 0, aggressive, fmt.Errorf("%w: ike-policy %q names proposal %q with no dh-group configured",
+					errDHGroupUnresolved, gw.IKEPolicy, gw.IKEPolicy)
+			}
 			if bad, detail := dhGroupBad(prop.DHGroup, prop.DHGroupInvalidSpec); bad {
 				return "", "", 0, aggressive, fmt.Errorf("%w: ike-policy %q names proposal %q with %s",
 					errDHGroupUnresolved, gw.IKEPolicy, gw.IKEPolicy, detail)

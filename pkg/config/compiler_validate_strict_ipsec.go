@@ -784,3 +784,101 @@ func validateIPsecDHGroupsStrict(cfg *Config) error {
 	sort.Strings(bad)
 	return fmt.Errorf("%s", strings.Join(bad, "; "))
 }
+
+// validateIPsecIkeDHGroupsPresentStrict rejects an IKE proposal that is
+// referenced by a rendered VPN and carries no usable dh-group (#14588, Y09-01).
+//
+// An absent dh-group (DHGroup 0 with no DHGroupInvalidSpec) is distinct
+// from a present-but-bad one: validateIPsecDHGroupsStrict above only sees
+// the latter. buildIKEProposalFromIKE / buildIKEProposal omit the key
+// exchange term when DHGroup == 0, rendering `aes256-sha256` — a proposal
+// with no DH group. strongSwan requires a key-exchange method in every IKE
+// proposal and refuses the whole file ("invalid value for: proposals,
+// config discarded, loaded 0 of 1"), so a commit-clean config never loads
+// — the #7165 commit=>loadable breach. ESP proposals with no dh-group are
+// deliberately NOT judged here: ESP without a DH term is a valid no-PFS
+// suite (see the Junos `basic` ESP set, DHGroup 0).
+//
+// Referenced means exactly what renderConfig will render. Walking VPN ->
+// gateway -> ike-policy -> ike-proposal (and the legacy direct-proposal
+// fallback, where the ike-policy value names an IPsec proposal) ensures an
+// orphan proposal that no tunnel uses is not rejected: it never renders,
+// so it cannot make charon refuse anything. The walk mirrors
+// resolveIKESettings (pkg/ipsec) — the chain form, plus the legacy
+// fallback below it — so commit and render agree on what "referenced by a
+// rendered VPN" means. InvalidSpec needs no duplicate diagnosis here: the
+// DH value gate already reports it.
+//
+// Wired through opts.lenientIKEProposalMissingDH, so the tolerant path
+// WARNS where the strict path rejects (#1960: Store.Load must not gain a
+// new rejection). The renderer (pkg/ipsec) separately SKIPS any VPN whose
+// effective IKE proposal has no DH group, so a warned config keeps its
+// healthy VPNs loadable instead of letting charon refuse every tunnel.
+func validateIPsecIkeDHGroupsPresentStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	ipsec := &cfg.Security.IPsec
+	if len(ipsec.VPNs) == 0 {
+		return nil
+	}
+	vpnNames := make([]string, 0, len(ipsec.VPNs))
+	for name := range ipsec.VPNs {
+		vpnNames = append(vpnNames, name)
+	}
+	sort.Strings(vpnNames)
+	var bad []string
+	seen := make(map[string]bool)
+	add := func(msg string) {
+		if !seen[msg] {
+			seen[msg] = true
+			bad = append(bad, msg)
+		}
+	}
+	for _, vpnName := range vpnNames {
+		vpn := ipsec.VPNs[vpnName]
+		if vpn == nil || vpn.Gateway == "" {
+			continue
+		}
+		gw, ok := ipsec.Gateways[vpn.Gateway]
+		if !ok || gw == nil || gw.IKEPolicy == "" {
+			// No gateway / no ike-policy is the intentional-strongSwan
+			// -default case (see validateIKEPolicyChainReferencesStrict);
+			// a dangling gateway is that gate's domain.
+			continue
+		}
+		if pol, ok := ipsec.IKEPolicies[gw.IKEPolicy]; ok && pol != nil {
+			for _, ref := range pol.Proposals {
+				prop, ok := ipsec.IKEProposals[ref]
+				if !ok || prop == nil {
+					continue
+				}
+				if prop.DHGroup == 0 && prop.DHGroupInvalidSpec == "" {
+					add(fmt.Sprintf(
+						"security ike proposal %s dh-group is not configured "+
+							"(an IKE proposal must configure a dh-group; without it the "+
+							"rendered proposal has no key-exchange method and "+
+							"strongSwan refuses to load the VPN — security ike proposal %s dh-group group<N>)",
+						ref, ref))
+				}
+			}
+			continue
+		}
+		// Legacy direct-proposal fallback (mirror of resolveIKESettings):
+		// the ike-policy value names an IPsec proposal rendered as IKE.
+		if prop, ok := ipsec.Proposals[gw.IKEPolicy]; ok && prop != nil {
+			if prop.DHGroup == 0 && prop.DHGroupInvalidSpec == "" {
+				add(fmt.Sprintf(
+					"security ipsec proposal %s dh-group is not configured "+
+						"(referenced as the IKE proposal by ike-policy %q; an IKE "+
+						"proposal must configure a dh-group — security ipsec proposal %s dh-group group<N>)",
+					gw.IKEPolicy, gw.IKEPolicy, gw.IKEPolicy))
+			}
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	sort.Strings(bad)
+	return fmt.Errorf("%s", strings.Join(bad, "; "))
+}
