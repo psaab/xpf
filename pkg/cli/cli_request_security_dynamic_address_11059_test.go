@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -20,7 +21,7 @@ import (
 func TestLocalDynamicAddressShrinkAckRequiresConfigPermissionAndInstallsCurrentCandidate11059(t *testing.T) {
 	var mu sync.RWMutex
 	prefixCount := 100
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		mu.RLock()
 		count := prefixCount
 		mu.RUnlock()
@@ -32,6 +33,11 @@ func TestLocalDynamicAddressShrinkAckRequiresConfigPermissionAndInstallsCurrentC
 
 	manager := feeds.New(nil)
 	manager.SetPrivateFeedAllowlist([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")})
+	{
+		pool := x509.NewCertPool()
+		pool.AddCert(server.Certificate())
+		manager.SetLabFeedTLSRoots(pool)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer func() {
 		cancel()

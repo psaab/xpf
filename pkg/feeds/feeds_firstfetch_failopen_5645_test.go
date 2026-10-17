@@ -52,7 +52,7 @@ func TestFirstFetchFailedDenyFeedNotPublishedMatchNone(t *testing.T) {
 	// prior good snapshot — this is the first-fetch case, not the re-fetch window.
 	down := &bodyServer{}
 	down.set("hijacked-or-error", http.StatusInternalServerError)
-	ts := httptest.NewServer(down.handler())
+	ts := newLabTLSServer(m, down.handler())
 	defer ts.Close()
 
 	const feedName = "threat"
@@ -91,7 +91,7 @@ func TestFirstFetchSuccessPublishesFeed(t *testing.T) {
 
 	good := &bodyServer{}
 	good.set("203.0.113.0/24\n", http.StatusOK)
-	ts := httptest.NewServer(good.handler())
+	ts := newLabTLSServer(m, good.handler())
 	defer ts.Close()
 
 	const feedName = "threat"

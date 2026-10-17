@@ -112,7 +112,7 @@ func TestApplyQueryBaseFeedFetchesJoinedPath14177(t *testing.T) {
 	var gotPath, gotToken atomic.Value
 	gotPath.Store("")
 	gotToken.Store("")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath.Store(r.URL.Path)
 		gotToken.Store(r.URL.Query().Get("token"))
 		_, _ = w.Write([]byte("203.0.113.0/24\n"))
@@ -120,6 +120,7 @@ func TestApplyQueryBaseFeedFetchesJoinedPath14177(t *testing.T) {
 	defer server.Close()
 
 	m := newLabManager10177(nil)
+	trustLabFeedServer(m, server)
 	daCfg := &config.DynamicAddressConfig{
 		FeedServers: map[string]*config.FeedServer{
 			"threat": {

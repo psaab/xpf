@@ -69,12 +69,12 @@ func TestDynamicAddressFeedServerPackedFlatRunStrict10337(t *testing.T) {
 	}{
 		{
 			name:   "declared feed-name after url",
-			line:   "set security dynamic-address feed-server office url http://example.com/feed feed-name blocklist",
+			line:   "set security dynamic-address feed-server office url https://example.com/feed feed-name blocklist",
 			wantOK: true,
 		},
 		{
 			name:   "unknown feed child remains rejected",
-			line:   "set security dynamic-address feed-server office url http://example.com/feed feed-nam blocklist",
+			line:   "set security dynamic-address feed-server office url https://example.com/feed feed-nam blocklist",
 			wantOK: false,
 		},
 	} {

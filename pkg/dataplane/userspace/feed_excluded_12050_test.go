@@ -2,6 +2,7 @@ package userspace
 
 import (
 	"context"
+	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -206,7 +207,7 @@ func TestExcludedDenyOverPopulatedDropFeedStillPublishes12050(t *testing.T) {
 // SnapshotForBindings feeds the resulting present-empty row into policy lowering.
 func TestHoldDroppedExcludedFeedRefusesSnapshot12050(t *testing.T) {
 	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if requests.Add(1) == 1 {
 			_, _ = w.Write([]byte("192.0.2.0/24\n"))
 			return
@@ -216,6 +217,11 @@ func TestHoldDroppedExcludedFeedRefusesSnapshot12050(t *testing.T) {
 
 	m := feeds.New(nil)
 	m.SetPrivateFeedAllowlist([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")})
+	{
+		pool := x509.NewCertPool()
+		pool.AddCert(server.Certificate())
+		m.SetLabFeedTLSRoots(pool)
+	}
 	cfg := excludedDropFeedConfig12050([]string{"partners"}, false, false)
 	cfg.Security.DynamicAddress.FeedServers = map[string]*config.FeedServer{
 		"partner-server": {

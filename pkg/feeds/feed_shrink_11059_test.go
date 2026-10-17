@@ -3,6 +3,7 @@ package feeds
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -26,12 +27,16 @@ func shrinkBody11059(count int) string {
 	return body.String()
 }
 
+var shrinkCert11059 *x509.Certificate
+
 func newShrinkFeed11059(t *testing.T, name string, hold time.Duration, onUpdate func() error) (*Manager, *bodyServer, *feedState) {
 	t.Helper()
 	server := &bodyServer{}
-	ts := httptest.NewServer(server.handler())
+	ts := httptest.NewTLSServer(server.handler())
 	t.Cleanup(ts.Close)
 	m := New(onUpdate)
+	shrinkCert11059 = ts.Certificate()
+	trustLabFeedServer(m, ts)
 	fs := m.newFeed(name, ts.URL, hold)
 	return m, server, fs
 }
@@ -494,6 +499,11 @@ func TestShrinkAckBindsLastGoodBaseline11059(t *testing.T) {
 	// The current tuple remains a valid one-shot acknowledgement when its
 	// baseline is unchanged.
 	control := New(nil)
+	{
+		pool := x509.NewCertPool()
+		pool.AddCert(shrinkCert11059)
+		control.SetLabFeedTLSRoots(pool)
+	}
 	controlFS := control.newFeed(initialFS.name, initialFS.url, retainForever)
 	controlInfo := refuse(t, control, controlFS, baselineA)
 	if err := control.AcknowledgeFeedShrink(controlFS.name, controlInfo.ShrinkRefusalID,
@@ -520,9 +530,19 @@ func TestShrinkAckBindsLastGoodBaseline11059(t *testing.T) {
 	// A fresh manager reproduces the same ID reuse across restart while the
 	// changed baseline is the only differing field in the refused tuple.
 	beforeRestart := New(nil)
+	{
+		pool := x509.NewCertPool()
+		pool.AddCert(shrinkCert11059)
+		beforeRestart.SetLabFeedTLSRoots(pool)
+	}
 	beforeRestartFS := beforeRestart.newFeed(initialFS.name, initialFS.url, retainForever)
 	restartOld := refuse(t, beforeRestart, beforeRestartFS, baselineA)
 	afterRestart := New(nil)
+	{
+		pool := x509.NewCertPool()
+		pool.AddCert(shrinkCert11059)
+		afterRestart.SetLabFeedTLSRoots(pool)
+	}
 	afterRestartFS := afterRestart.newFeed(initialFS.name, initialFS.url, retainForever)
 	restartCurrent := refuse(t, afterRestart, afterRestartFS, baselineB)
 	assertSameCandidateAcrossBaselines(t, restartOld, restartCurrent)

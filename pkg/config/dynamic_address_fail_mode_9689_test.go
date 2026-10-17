@@ -6,7 +6,7 @@ import "testing"
 // compiled binding, and an omitted leaf leaves the default (retain).
 func TestDynamicAddressFailModeCompiles9689(t *testing.T) {
 	cfg := compileSetLines(t, []string{
-		"set security dynamic-address feed-server partners url http://example.test/partners",
+		"set security dynamic-address feed-server partners url https://example.test/partners",
 		"set security dynamic-address address-name allow-partners profile feed-name partners",
 		"set security dynamic-address address-name allow-partners profile fail-mode drop",
 		"set security dynamic-address address-name deny-threats profile feed-name partners",
@@ -23,7 +23,7 @@ func TestDynamicAddressFailModeCompiles9689(t *testing.T) {
 // fail-mode outside retain|drop, and accepts both valid values.
 func TestDynamicAddressFailModeRejectsUnknownValue9689(t *testing.T) {
 	base := []string{
-		"set security dynamic-address feed-server partners url http://example.test/partners",
+		"set security dynamic-address feed-server partners url https://example.test/partners",
 		"set security dynamic-address address-name allow-partners profile feed-name partners",
 	}
 	for _, v := range []string{"retain", "drop"} {
@@ -46,14 +46,14 @@ func TestDynamicAddressFailModeRejectsUnknownValue9689(t *testing.T) {
 // sync, which is why the lenient compile is what is asserted.
 func TestDynamicAddressFailModeSurvivesOneLineSpellings9689(t *testing.T) {
 	flat := buildTreeFromSet(t, []string{
-		"set security dynamic-address feed-server partners url http://example.test/partners",
+		"set security dynamic-address feed-server partners url https://example.test/partners",
 		"set security dynamic-address address-name allow-partners profile feed-name partners fail-mode drop",
 	})
-	braced, err := NewParser(`security { dynamic-address { feed-server partners { url http://example.test/partners; } address-name allow-partners { profile { feed-name partners fail-mode drop; } } } }`).Parse()
+	braced, err := NewParser(`security { dynamic-address { feed-server partners { url https://example.test/partners; } address-name allow-partners { profile { feed-name partners fail-mode drop; } } } }`).Parse()
 	if err != nil {
 		t.Fatalf("parse braced: %v", err)
 	}
-	compact, err := NewParser(`security { dynamic-address { feed-server partners { url http://example.test/partners; } address-name allow-partners { profile feed-name partners; profile fail-mode drop; } } }`).Parse()
+	compact, err := NewParser(`security { dynamic-address { feed-server partners { url https://example.test/partners; } address-name allow-partners { profile feed-name partners; profile fail-mode drop; } } }`).Parse()
 	if err != nil {
 		t.Fatalf("parse compact: %v", err)
 	}

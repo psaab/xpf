@@ -794,7 +794,7 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 		// #9689: `profile` opted into packedStatements when it gained its second
 		// scalar leaf, fail-mode.
 		"security/dynamic-address/address-name/profile": {
-			prefix: "security { dynamic-address { feed-server partners { url http://example.test/partners; } address-name allow-partners { ",
+			prefix: "security { dynamic-address { feed-server partners { url https://example.test/partners; } address-name allow-partners { ",
 			open:   "profile",
 			closer: " } } }",
 			stmts: map[string]string{

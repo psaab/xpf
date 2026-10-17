@@ -48,10 +48,11 @@ func (c *countingFeedServer) handler() http.HandlerFunc {
 // (lexicographically-first server), and does NOT orphan a second fetcher.
 func TestApplyDeDupsDuplicateFeedNames(t *testing.T) {
 	cs := newCountingFeedServer()
-	ts := httptest.NewServer(cs.handler())
+	ts := httptest.NewTLSServer(cs.handler())
 	defer ts.Close()
 
 	m := newLabManager10177(func() error { return nil })
+	trustLabFeedServer(m, ts)
 	// Two servers "aaa" and "bbb" each declare the SAME feed name "dup" with a
 	// distinct path so the winner's URL is identifiable. Both hit the same
 	// counting server. Winner must be the sorted-first server, "aaa".

@@ -87,7 +87,7 @@ func TestDynamicAddressInterval_HierarchicalGate_4879(t *testing.T) {
 // does not disturb the happy path).
 func TestDynamicAddressInterval_ValidCompiles_4879(t *testing.T) {
 	tree := flatTreeFromSets(t,
-		"set security dynamic-address feed-server threat url http://feeds.example.net/list",
+		"set security dynamic-address feed-server threat url https://feeds.example.net/list",
 		"set security dynamic-address feed-server threat update-interval 300",
 		"set security dynamic-address feed-server threat hold-interval 86400",
 	)

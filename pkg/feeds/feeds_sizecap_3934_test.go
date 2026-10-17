@@ -243,20 +243,3 @@ func TestFetchFeedSlowServerTimesOut(t *testing.T) {
 		t.Error("expected lastError recorded on timeout")
 	}
 }
-
-// TestWarnPlaintextFeedPredicate pins the plaintext-http detection used to warn
-// operators about an integrity-free feed source (#3934).
-func TestWarnPlaintextFeedPredicate(t *testing.T) {
-	cases := map[string]bool{
-		"http://feeds.example/deny.txt":  true,
-		"HTTP://feeds.example/deny.txt":  true,
-		"https://feeds.example/deny.txt": false,
-		"https://http.example/deny.txt":  false,
-	}
-	for url, wantPlain := range cases {
-		gotPlain := strings.HasPrefix(strings.ToLower(url), "http://")
-		if gotPlain != wantPlain {
-			t.Errorf("plaintext detection for %q = %v, want %v", url, gotPlain, wantPlain)
-		}
-	}
-}

@@ -5,6 +5,7 @@ package feeds
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"net/http"
@@ -26,6 +27,23 @@ func newLabManager10177(onUpdate func() error) *Manager {
 	m := New(onUpdate)
 	m.SetPrivateFeedAllowlist(labFeedAllowlist10177)
 	return m
+}
+
+// trustLabFeedServer makes a Manager created by New trust an httptest TLS
+// server's certificate (#14385: Apply now refuses plaintext-http feeds, so
+// Apply-level fixtures serve over TLS). Only the test manager's root pool
+// gains the fixture certificate; production verification is untouched.
+func trustLabFeedServer(m *Manager, srv *httptest.Server) {
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	m.SetLabFeedTLSRoots(pool)
+}
+
+// newLabTLSServer starts an httptest TLS server and trusts it on m.
+func newLabTLSServer(m *Manager, h http.Handler) *httptest.Server {
+	srv := httptest.NewTLSServer(h)
+	trustLabFeedServer(m, srv)
+	return srv
 }
 
 // TestFeedFetcherRefusesDirectPrivateIP10177 is the #10177 fail-on-revert

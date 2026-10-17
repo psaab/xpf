@@ -5,6 +5,8 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -498,6 +500,31 @@ func (m *Manager) SetPrivateFeedAllowlist(prefixes []netip.Prefix) {
 	m.mu.Unlock()
 }
 
+// SetLabFeedTLSRoots installs extra TLS root certificates for feed fetches.
+// It is the HTTPS counterpart of SetPrivateFeedAllowlist: an explicit
+// lab-only escape hatch so test fixtures served by httptest TLS servers
+// (with self-signed certificates) can be fetched through Apply, which now
+// refuses plaintext-http feeds (#14385). It is not a feed-server
+// configuration knob and production code never calls it — the daemon's
+// manager keeps the system roots only. Passing nil restores system roots.
+func (m *Manager) SetLabFeedTLSRoots(pool *x509.CertPool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.client == nil {
+		return
+	}
+	tr, ok := m.client.Transport.(*http.Transport)
+	if !ok || tr == nil {
+		return
+	}
+	cfg := tr.TLSClientConfig.Clone()
+	if cfg == nil {
+		cfg = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	cfg.RootCAs = pool
+	tr.TLSClientConfig = cfg
+}
+
 // blockedFeedDestinationPrefixes contains IPv6 transition / special-purpose
 // address space that is not a public feed destination, plus the IPv4
 // special-purpose ranges stdlib classification still calls global unicast.
@@ -727,16 +754,14 @@ func resolveBaseURL(fsCfg *config.FeedServer) string {
 	return ""
 }
 
-// warnPlaintextFeed emits a one-time (per Apply) warning when a feed URL uses
-// plaintext http:// (#3934). A plaintext feed has no transport integrity: a
-// MITM can substitute an arbitrary body (including an over-size body aimed at
-// the OOM path guarded by maxFeedBodyBytes, or a hostile prefix set). https
-// is strongly preferred for any denylist/allowlist source.
-func warnPlaintextFeed(name, url string) {
-	if strings.HasPrefix(strings.ToLower(url), "http://") {
-		slog.Warn("dynamic-address: feed URL is plaintext http (no integrity — a MITM can substitute the feed body); prefer https",
-			"name", name, "url", config.RedactURL(url))
-	}
+// isPlaintextFeedURL reports whether url is a plaintext-http feed URL.
+// Such a feed has no transport integrity and this package has no per-feed
+// signature / pinned-hash verification, so a substituted body would install
+// as enforced policy (#14385, DR5-H13; the #3934 warning alone never fixed
+// the substitution). Manager.Apply refuses to register plaintext-http feeds
+// and the strict compiler gate rejects them at commit.
+func isPlaintextFeedURL(url string) bool {
+	return strings.HasPrefix(strings.ToLower(url), "http://")
 }
 
 // resolveHoldInterval maps the configured hold-interval (seconds) to a
@@ -834,6 +859,19 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 			}
 			baseURL := resolveBaseURL(fsCfg)
 			if baseURL == "" {
+				continue
+			}
+			// #14385 (DR5-H13): refuse plaintext-http feed servers. A
+			// plaintext feed has no transport integrity and no per-feed
+			// signature/hash exists in this package, so a MITM-substituted
+			// body would install as enforced policy. Skip the whole server
+			// (no worker, no snapshot): bound address-names stay
+			// unresolvable and fail CLOSED per #5645. This is the
+			// load-bearing runtime half — it also covers leniently-loaded /
+			// peer-synced configs the strict compiler gate only warns on.
+			if isPlaintextFeedURL(baseURL) {
+				slog.Warn("dynamic-address: refusing plaintext-http feed server (no integrity — a MITM can substitute the feed body); use https",
+					"server", fsCfg.Name, "url", config.RedactURL(baseURL))
 				continue
 			}
 			interval := feedIntervalSeconds(fsCfg.UpdateInterval, time.Hour)
@@ -940,7 +978,6 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 			}
 		}
 		newFeeds[p.name] = fs
-		warnPlaintextFeed(p.name, p.url)
 		go m.refreshLoop(feedCtx, fs, p.interval)
 		slog.Info("dynamic address feed started",
 			"name", p.name, "server", p.server, "url", config.RedactURL(p.url),

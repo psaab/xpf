@@ -380,9 +380,14 @@ applies a *retain-last-good* policy rather than installing a partial/empty set:
   userspace-dp control-request cap (`MaxControlRequestBytes`, #2744) so a single
   feed cannot dominate the apply snapshot. The 30 s client timeout
   (`httpClientTimeout`) bounds a slow-loris server that dribbles bytes.
-- **plaintext-http feeds are warned (#3934).** A feed URL using `http://`
-  (no transport integrity — a MITM can substitute the body) logs a one-time
-  `slog.Warn` at `Apply`. `https` is strongly preferred for any feed source.
+- **plaintext-http feeds are refused (#14385).** A feed URL using `http://`
+  has no transport integrity and no per-feed signature/hash verification, so
+  a MITM can substitute the body and have it installed as enforced policy.
+  The strict compiler rejects an `http://` feed-server URL at commit, and
+  `Manager.Apply` independently skips plaintext-http servers (no worker, no
+  snapshot) so a leniently-loaded config still boots but its bound
+  address-names stay unresolvable and fail closed (#5645). Use `https://`
+  (a hostname-only server already resolves to `https://`).
 - **content-based change detection, keyed off the last *published* set (#5646).**
   Prefixes are canonicalized (parsed to masked CIDR / `/32` / `/128`), deduped,
   sorted, and SHA-256 hashed. The `onUpdate` recompile callback fires whenever

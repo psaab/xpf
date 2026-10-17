@@ -136,13 +136,14 @@ func TestDuplicateFeedNameWarnRedactsCredentialURL10015(t *testing.T) {
 
 	// The winner needs a fetchable URL (its worker starts); the loser never
 	// fetches, so its token-bearing URL only reaches the Warn.
-	winner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	winner := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("192.0.2.0/24\n"))
 	}))
 	defer winner.Close()
 
 	m := newLabManager10177(func() error { return nil })
+	trustLabFeedServer(m, winner)
 	// "aaa" sorts first and wins; "bbb" is the duplicate whose URL is logged.
 	// Empty Path keeps the token URL byte-identical into the Warn.
 	daCfg := &config.DynamicAddressConfig{
