@@ -518,10 +518,17 @@ func poolPortRangeV4(pool *config.NATPool) (uint16, uint16, bool) {
 // expandPoolV4 resolves the pool's ordered external IPv4 addresses using the
 // dataplane semantics for the selected deterministic mode. Mode 1 mirrors
 // Rust expand_pool_address: a CIDR enumerates every host (subject to the
-// safety cap). Mode 2 instead mirrors NAT64 parse_pool_v4: only a bare IPv4
+// safety cap) and only the first occurrence of each address is kept
+// (#14623 — the production caller threads seen-sets through the expansion,
+// so an overlapping member creates no second pool position; keeping the
+// duplicate would shift every later index and make this surface name a
+// different external address / subscriber than the dataplane enforces).
+// Mode 2 instead mirrors NAT64 parse_pool_v4: only a bare IPv4
 // address or explicit /32 is an allocator member; compiler-expanded "a to b"
 // ranges arrive as ordered /32 entries. An IPv4 subnet is rejected because
-// the NAT64 dataplane filters it rather than expanding it. IPv6 entries are
+// the NAT64 dataplane filters it rather than expanding it. parse_pool_v4
+// pushes each parsed host verbatim (no seen-set), so mode 2 is deliberately
+// NOT deduped. IPv6 entries are
 // skipped in both modes and pool.Address is prepended exactly as the wire
 // builders do.
 func expandPoolV4(pool *config.NATPool, mode Mode) ([]net.IP, *LookupError) {
@@ -532,6 +539,24 @@ func expandPoolV4(pool *config.NATPool, mode Mode) ([]net.IP, *LookupError) {
 	addrs = append(addrs, pool.Addresses...)
 
 	var out []net.IP
+	// #14623: mode-1 first-occurrence dedupe, mirroring the seen_v4 set the
+	// Rust production caller threads through expand_pool_address. Keyed on
+	// the host-order u32 so a bare host, its /32 form, and a CIDR-enumerated
+	// host all collide. Mode 2 mirrors parse_pool_v4, which has no seen-set,
+	// so seen stays nil there and appends remain verbatim.
+	var seen map[uint32]struct{}
+	if mode == ModeV4 {
+		seen = make(map[uint32]struct{})
+	}
+	appendV4 := func(v uint32) {
+		if seen != nil {
+			if _, dup := seen[v]; dup {
+				return
+			}
+			seen[v] = struct{}{}
+		}
+		out = append(out, uint32ToIP(v))
+	}
 	for _, a := range addrs {
 		// Classify the family with the colon-strict Go/Rust-parity SSOT
 		// (config.NATAddrFamily on the mask-stripped text) — NEVER net.IP.To4().
@@ -609,11 +634,12 @@ func expandPoolV4(pool *config.NATPool, mode Mode) ([]net.IP, *LookupError) {
 			}
 			base := binary.BigEndian.Uint32(ipnet.IP.To4())
 			for i := uint64(0); i < count; i++ {
-				out = append(out, uint32ToIP(base+uint32(i)))
+				appendV4(base + uint32(i))
 			}
 			continue
 		}
-		out = append(out, net.ParseIP(a).To4())
+		ip := net.ParseIP(a).To4()
+		appendV4(binary.BigEndian.Uint32(ip))
 	}
 	return out, nil
 }

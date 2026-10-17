@@ -232,9 +232,12 @@ func TestRoundTripV4(t *testing.T) {
 	}
 }
 
-// TestReverseRejectsDuplicatePoolAddress pins the forensic exactness rule:
-// the same translated tuple denotes different subscribers when an external
-// address occupies multiple pool positions, so reverse lookup must reject it.
+// TestReverseRejectsDuplicatePoolAddress pins the #14623 rule: the
+// Rust dataplane keeps only the first occurrence of a pool address (seen-set
+// in expand_pool_address's production caller), so a duplicated address has
+// exactly one pool position. The Go pool must dedupe the same way — the
+// address is no longer ambiguous on reverse, and subscribers past the
+// duplicate index into the single deduped position.
 func TestReverseRejectsDuplicatePoolAddress(t *testing.T) {
 	pool := &config.NATPool{
 		Name:      "duplicate",
@@ -250,19 +253,25 @@ func TestReverseRejectsDuplicatePoolAddress(t *testing.T) {
 	cfg.Security.NAT.SourcePools = map[string]*config.NATPool{"duplicate": pool}
 	view := AppliedView{Config: cfg, Generation: 1, Available: true}
 
-	// sub_idx 2 selects pool position 1 and block 0. A first-match reverse
-	// would incorrectly claim the position-0 subscriber (100.64.0.0).
-	fwd, err := LookupForward(view, "duplicate", "100.64.0.2")
+	// Deduped pool is [203.0.113.1] with 2 blocks (1024-1027, 1028-1031):
+	// sub_idx 0 -> block 0, sub_idx 1 -> block 1. sub_idx 2 would need a
+	// second pool position the dataplane does not have.
+	fwd, err := LookupForward(view, "duplicate", "100.64.0.1")
 	if err != nil {
-		t.Fatalf("position-1 forward: %v", err)
+		t.Fatalf("forward: %v", err)
 	}
-	if fwd.ExternalIP != "203.0.113.1" || fwd.PortLow != 1024 {
-		t.Fatalf("position-1 forward mismatch: %+v", fwd)
+	if fwd.ExternalIP != "203.0.113.1" || fwd.PortLow != 1028 {
+		t.Fatalf("forward mismatch: %+v, want 203.0.113.1 block 1028-1031", fwd)
 	}
-	if _, e := LookupReverse(view, "duplicate", fwd.ExternalIP, fwd.PortLow); e == nil ||
-		e.Code != ErrCodeAmbiguousPool ||
-		e.Detail != "translated address is ambiguous: appears at multiple pool positions" {
-		t.Fatalf("duplicate-address reverse must be ambiguous, got %v", e)
+	if _, e := LookupForward(view, "duplicate", "100.64.0.2"); e == nil || e.Code != ErrCodeOutOfRange {
+		t.Fatalf("subscriber past the deduped pool must be out-of-range, got %v", e)
+	}
+	rev, e := LookupReverse(view, "duplicate", "203.0.113.1", 1028)
+	if e != nil {
+		t.Fatalf("reverse of deduped address must succeed (first occurrence wins), got %v", e)
+	}
+	if rev.InternalHost != "100.64.0.1" {
+		t.Fatalf("reverse mismatch: got %s, want 100.64.0.1", rev.InternalHost)
 	}
 }
 
