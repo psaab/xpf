@@ -102,10 +102,11 @@ pub(super) struct ZoneScreenState {
     /// iff `syn_flood_src_threshold > 0`; SKIPPED while the zone is
     /// SYN-cookie active.
     pub(super) syn_src_sketch: Option<SynRateSketch<TokenBucket>>,
-    /// Monotonic seconds until which the zone is SYN-cookie active (0 = never).
-    /// #13952 pre-MAC attempts, shared by active and standby validation.
+    /// #13952/#14324 post-MAC failed-attempt sketch, shared by active and
+    /// standby validation. Charged ONLY after a failed MAC so valid cookies
+    /// never consume it and spoofed failures cannot starve them (#13700).
     /// `Some` iff SYN cookies are enabled; fixed-capacity and collision-biased
-    /// fail closed.
+    /// fail closed for invalid ACKs.
     syn_cookie_ack_attempt_sketch: Option<SynRateSketch<TokenBucket>>,
 
     pub(super) syn_cookie_active_until_secs: u64,
@@ -304,8 +305,10 @@ impl ZoneScreenState {
             self.syn_cookie_active_until_secs = 0;
         }
     }
-    /// #13952: consume one pre-MAC ACK attempt for `(src, dst, dport)`.
-    /// Shared across active/standby role changes. `true` means limited.
+    /// #13952/#14324: consume one post-MAC FAILED ACK attempt for
+    /// `(src, dst, dport)`. Called only after `ring.validates()` fails, so
+    /// valid cookies never charge it. Shared across active/standby role
+    /// changes. `true` means limited.
     pub(super) fn syn_cookie_ack_attempt_limited(
         &mut self,
         pkt: &ScreenPacketInfo,

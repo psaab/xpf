@@ -4686,15 +4686,14 @@ fn syn_cookie_active_failed_macs_do_not_starve_valid_ack_13700() {
     assert_eq!(state.syn_cookie_validated_len(), 1);
 }
 
-/// #13952 (H13-02): the #13700 zone-wide budgets are charged only AFTER the
-/// MAC, so at one instant an attacker can enumerate the 24-bit MAC for one
-/// chosen `(src, dst, dport)` client key without bound and reach `Validated`.
-/// Once that key's pre-MAC attempt budget is exhausted, even a CORRECT-MAC
-/// ACK for the same key must not validate within the cookie window. An
-/// unrelated legitimate key is a different attempt bucket and still
-/// validates (the #13700 guarantee, preserved per-key).
+/// #13952/#14324: failed MACs for one `(src, dst, dport)` key charge the
+/// per-key failed-attempt sketch AFTER validation. Once that key's failed
+/// budget is exhausted, further INVALID ACKs for the key report
+/// `ActiveBudgetExceeded` instead of `Invalid`, but a CORRECT-MAC ACK for
+/// the same key still validates (#14324 restores the #13700 guarantee the
+/// #13952 pre-MAC gate defeated). An unrelated key still validates.
 #[test]
-fn syn_cookie_active_per_key_attempt_bound_blocks_brute_force_13952() {
+fn syn_cookie_active_failed_attempt_bound_preserves_valid_ack_14324() {
     let mut profile = ScreenProfile::default();
     profile.syn_flood_threshold = 1;
     profile.syn_cookie = true;
@@ -4715,16 +4714,16 @@ fn syn_cookie_active_per_key_attempt_bound_blocks_brute_force_13952() {
     bad_ack.tcp_ack =
         (((41u32 & SYN_COOKIE_EPOCH_MASK) << SYN_COOKIE_EPOCH_SHIFT) | 0x1234).wrapping_add(1);
     let base_ns = 128 * NS;
-    // Flood the chosen key at one instant (no bucket refill).
+    // Flood the chosen key with failed MACs at one instant (no refill).
     for _ in 0..SYN_COOKIE_FAILED_ATTEMPT_RATE_LIMIT_PER_SEC {
         let _ = state.validate_syn_cookie_ack_on_session_miss("trust", 7, &bad_ack, base_ns, 128);
     }
     assert_eq!(
         state.validate_syn_cookie_ack_on_session_miss("trust", 7, &bad_ack, base_ns, 128),
         SynCookieAckVerdict::ActiveBudgetExceeded,
-        "exhausted chosen key must be bound before the MAC"
+        "exhausted failed-attempt key must be bound after the MAC"
     );
-    // The enumerated correct MAC for the SAME key must not reach Validated.
+    // The correct MAC for the SAME key must still validate (#14324).
     let valid_cookie = syn_cookie_codec().mint_isn(
         SynCookieTuple::from_packet(&syn),
         syn_cookie_zone_tag("trust"),
@@ -4737,10 +4736,10 @@ fn syn_cookie_active_per_key_attempt_bound_blocks_brute_force_13952() {
     valid_ack.tcp_ack = valid_cookie.wrapping_add(1);
     assert_eq!(
         state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
-        SynCookieAckVerdict::ActiveBudgetExceeded,
-        "a correct MAC for an exhausted key must not validate within the window"
+        SynCookieAckVerdict::Validated,
+        "a correct MAC must validate even after its key's failed budget is spent"
     );
-    assert_eq!(state.syn_cookie_validated_len(), 0);
+    assert_eq!(state.syn_cookie_validated_len(), 1);
     // An unrelated legitimate key (different source) still validates.
     let other_syn = tcp_pkt(
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
@@ -4764,15 +4763,14 @@ fn syn_cookie_active_per_key_attempt_bound_blocks_brute_force_13952() {
         SynCookieAckVerdict::Validated,
         "an unrelated legitimate key must still validate"
     );
-    assert_eq!(state.syn_cookie_validated_len(), 1);
 }
 
-/// #13952 standby twin: on the standby (not locally cookie-active) arm the
-/// fail-open verdict stays `NotApplicable`, but the pre-MAC per-key bound
-/// must still stop a correct MAC for an exhausted key from reaching
-/// `Validated`; an unrelated legitimate key still validates.
+/// #13952/#14324 standby twin: on the standby (not locally cookie-active)
+/// arm the fail-open verdict stays `NotApplicable` for failed MACs, and a
+/// correct MAC for a key whose failed budget is exhausted still reaches
+/// `Validated` (#14324); an unrelated legitimate key also validates.
 #[test]
-fn syn_cookie_standby_per_key_attempt_bound_blocks_brute_force_13952() {
+fn syn_cookie_standby_failed_attempt_bound_preserves_valid_ack_14324() {
     let mut profile = ScreenProfile::default();
     profile.syn_flood_threshold = 1;
     profile.syn_cookie = true;
@@ -4807,10 +4805,10 @@ fn syn_cookie_standby_per_key_attempt_bound_blocks_brute_force_13952() {
     valid_ack.tcp_ack = valid_cookie.wrapping_add(1);
     assert_eq!(
         peer.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
-        SynCookieAckVerdict::NotApplicable,
-        "standby stays fail-open, but an exhausted key must not reach Validated"
+        SynCookieAckVerdict::Validated,
+        "standby must validate a correct MAC even after its key's failed budget is spent"
     );
-    assert_eq!(peer.syn_cookie_validated_len(), 0);
+    assert_eq!(peer.syn_cookie_validated_len(), 1);
     let other_syn = tcp_pkt(
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
         IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
@@ -4833,7 +4831,98 @@ fn syn_cookie_standby_per_key_attempt_bound_blocks_brute_force_13952() {
         SynCookieAckVerdict::Validated,
         "an unrelated legitimate key must still validate on standby"
     );
-    assert_eq!(peer.syn_cookie_validated_len(), 1);
+}
+
+/// #14324: the #13952 pre-MAC per-key sketch charged VALID and invalid ACKs
+/// before SipHash, reintroducing the #13700 starvation: 300 spoofed invalid
+/// ACKs from a victim's source IP exhaust the key and the victim's own valid
+/// cookie ACK is refused, and legitimate clients behind one NAT IP to one
+/// service share 16 conn/s. The fix validates first and charges only failed
+/// MACs, so a valid ACK validates regardless of prior spoofed failures.
+#[test]
+fn syn_cookie_spoofed_failures_do_not_starve_valid_ack_14324() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    state.set_syn_cookie_full_epoch_for_test(41);
+    state.force_syn_cookie_active_for_test("trust", 200);
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+    let mut bad_ack = syn.clone();
+    bad_ack.tcp_flags = TCP_ACK;
+    bad_ack.tcp_seq = 2;
+    bad_ack.tcp_ack =
+        (((41u32 & SYN_COOKIE_EPOCH_MASK) << SYN_COOKIE_EPOCH_SHIFT) | 0x1234).wrapping_add(1);
+    let base_ns = 128 * NS;
+    // 300 spoofed invalid ACKs from the victim's source IP, same instant
+    // (production limit is 16/s; the test build raises it to 256/s).
+    for _ in 0..300 {
+        let _ = state.validate_syn_cookie_ack_on_session_miss("trust", 7, &bad_ack, base_ns, 128);
+    }
+    let valid_cookie = syn_cookie_codec().mint_isn(
+        SynCookieTuple::from_packet(&syn),
+        syn_cookie_zone_tag("trust"),
+        41,
+        syn.tcp_mss,
+    );
+    let mut valid_ack = syn.clone();
+    valid_ack.tcp_flags = TCP_ACK;
+    valid_ack.tcp_seq = 3;
+    valid_ack.tcp_ack = valid_cookie.wrapping_add(1);
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
+        SynCookieAckVerdict::Validated,
+        "a valid cookie must validate even after spoofed invalid ACKs from the same source"
+    );
+    assert_eq!(state.syn_cookie_validated_len(), 1);
+}
+
+/// #14324 NAT leg: 300 valid cookie ACKs from different source ports behind
+/// one NAT source IP to the same (dst, dport) within one second must all
+/// validate; valid cookies never consume the failed-attempt budget.
+#[test]
+fn syn_cookie_nat_valid_acks_not_throttled_14324() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    state.set_syn_cookie_full_epoch_for_test(41);
+    state.force_syn_cookie_active_for_test("trust", 200);
+    let base_ns = 128 * NS;
+    for offset in 0..300u16 {
+        let syn = tcp_pkt(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+            40000 + offset,
+            443,
+            TCP_SYN,
+        );
+        let cookie = syn_cookie_codec().mint_isn(
+            SynCookieTuple::from_packet(&syn),
+            syn_cookie_zone_tag("trust"),
+            41,
+            syn.tcp_mss,
+        );
+        let mut ack = syn.clone();
+        ack.tcp_flags = TCP_ACK;
+        ack.tcp_seq = 3;
+        ack.tcp_ack = cookie.wrapping_add(1);
+        assert_eq!(
+            state.validate_syn_cookie_ack_on_session_miss("trust", 7, &ack, base_ns, 128),
+            SynCookieAckVerdict::Validated,
+            "valid NAT client on source port {} must not be throttled",
+            40000 + offset
+        );
+    }
+    assert_eq!(state.syn_cookie_validated_len(), 1);
 }
 
 #[test]
@@ -4946,9 +5035,9 @@ fn syn_cookie_invalid_ack_flood_does_not_grow_validated_cache() {
         ack.tcp_flags = TCP_ACK;
         ack.src_port = 30000 + offset;
         ack.tcp_ack = 0xdead_0000u32.wrapping_add(offset as u32);
-        // Implausible epochs remain Invalid; plausible attempts can also be
-        // refused by the #13952 pre-MAC per-client budget. Neither may
-        // populate the validated-client cache.
+        // Implausible epochs remain Invalid; plausible failed attempts can
+        // also be refused by the #13952/#14324 post-MAC per-client failed
+        // budget. Neither may populate the validated-client cache.
         assert!(matches!(
             state.validate_syn_cookie_ack_on_session_miss("trust", 7, &ack, 128 * NS, 128),
             SynCookieAckVerdict::Invalid | SynCookieAckVerdict::ActiveBudgetExceeded

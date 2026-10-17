@@ -354,9 +354,10 @@ impl<C: SketchCell> SynRateSketch<C> {
         self.increment_indices(indices, now, threshold)
     }
 
-    /// Charge one SYN-cookie ACK attempt against its `(src, dst, dport)` client
-    /// key. This is a fixed-size count-min sketch: collisions can only reduce
-    /// admission, never let a key undercount its attempts.
+    /// Charge one FAILED SYN-cookie ACK attempt against its
+    /// `(src, dst, dport)` client key (#14324: charged post-MAC only).
+    /// This is a fixed-size count-min sketch: collisions can only reduce
+    /// admission, never let a key undercount its failed attempts.
     pub(super) fn increment_cookie_client_key(
         &mut self,
         src: &IpAddr,
