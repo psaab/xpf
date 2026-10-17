@@ -472,3 +472,129 @@ func TestNAT5144MappedV6VsGenuineV4Accepted(t *testing.T) {
 	cmds = append(cmds, srcRule("RSB", "r1", "B")...)
 	assertNATOverlapAccepted(t, cmds...)
 }
+
+// --- #14368: static-NAT external vs referenced source / NAT64 pool ---
+//
+// The #5144 sweep enumerates only pool/NAT64/interface-egress owners, so a
+// static external equal to a pool member yielded one owner and no pair.
+// validateStaticNATPoolOverlapStrict pairs each installed static external
+// ONLY against those non-static owners. FAIL-ON-REVERT: deleting that gate
+// (or its tail-gate dispatch) turns every reject cell below GREEN.
+
+func staticRule14368(match string) []string {
+	return []string{
+		"set security nat static rule-set SS from zone untrust",
+		"set security nat static rule-set SS rule S1 match destination-address " + match,
+		"set security nat static rule-set SS rule S1 then static-nat prefix 10.0.30.100/32",
+	}
+}
+
+func assertStaticPoolRejected14368(t *testing.T, want string, cmds ...string) {
+	t.Helper()
+	if _, err := CompileConfig(natOverlapTree(t, cmds...)); err == nil {
+		t.Fatalf("strict commit must reject the static/pool overlap (want %q)", want)
+	} else {
+		msg := err.Error()
+		if !strings.Contains(msg, "#14368") {
+			t.Fatalf("strict error must cite #14368, got: %v", err)
+		}
+		if !strings.Contains(msg, want) {
+			t.Fatalf("strict error %q does not contain %q", msg, want)
+		}
+		for _, name := range []string{`static rule-set "SS"`, `rule "S1"`} {
+			if !strings.Contains(msg, name) {
+				t.Fatalf("strict error %q does not name %q", msg, name)
+			}
+		}
+	}
+	cfg, err := CompileConfigLenient(natOverlapTree(t, cmds...))
+	if err != nil {
+		t.Fatalf("lenient compile must not brick on a static/pool overlap: %v", err)
+	}
+	found := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "#14368") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("lenient compile must record a #14368 warning; warnings = %v", cfg.Warnings)
+	}
+}
+
+func TestStaticExternalInSourcePoolRejected14368(t *testing.T) {
+	cmds := []string{"set security nat source pool P address 203.0.113.10"}
+	cmds = append(cmds, srcRule("RS1", "R1", "P")...)
+	cmds = append(cmds, staticRule14368("203.0.113.10/32")...)
+	assertStaticPoolRejected14368(t, `source-nat pool "P"`, cmds...)
+}
+
+func TestStaticExternalOutsidePoolAccepted14368(t *testing.T) {
+	cmds := []string{"set security nat source pool P address 203.0.113.10"}
+	cmds = append(cmds, srcRule("RS1", "R1", "P")...)
+	cmds = append(cmds, staticRule14368("203.0.113.11/32")...)
+	assertNATOverlapAccepted(t, cmds...)
+}
+
+func TestStaticBlockExternalContainingPoolRejected14368(t *testing.T) {
+	cmds := []string{"set security nat source pool P address 203.0.113.10"}
+	cmds = append(cmds, srcRule("RS1", "R1", "P")...)
+	cmds = append(cmds,
+		"set security nat static rule-set SS from zone untrust",
+		"set security nat static rule-set SS rule S1 match destination-address 203.0.113.0/24",
+		"set security nat static rule-set SS rule S1 then static-nat prefix 10.0.30.0/24",
+	)
+	assertStaticPoolRejected14368(t, `source-nat pool "P"`, cmds...)
+}
+
+func TestStaticPortMappedExternalInPoolRejected14368(t *testing.T) {
+	cmds := []string{"set security nat source pool P address 203.0.113.10"}
+	cmds = append(cmds, srcRule("RS1", "R1", "P")...)
+	cmds = append(cmds,
+		"set security nat static rule-set SS from zone untrust",
+		"set security nat static rule-set SS rule S1 match destination-address 203.0.113.10/32",
+		"set security nat static rule-set SS rule S1 match destination-port 8443",
+		"set security nat static rule-set SS rule S1 then static-nat prefix 10.0.30.100/32 mapped-port 8443",
+	)
+	assertStaticPoolRejected14368(t, "port-mapped", cmds...)
+}
+
+func TestStaticExternalInNAT64PoolRejected14368(t *testing.T) {
+	cmds := []string{
+		"set security nat source pool N address 100.64.0.7/32",
+		"set security nat nat64 rule-set N64 prefix 64:ff9b::/96",
+		"set security nat nat64 rule-set N64 source-pool N",
+		"set security nat static rule-set SS from zone untrust",
+		"set security nat static rule-set SS rule S1 match destination-address 100.64.0.7/32",
+		"set security nat static rule-set SS rule S1 then static-nat prefix 10.0.30.100/32",
+	}
+	assertStaticPoolRejected14368(t, `nat64 rule-set "N64"`, cmds...)
+}
+
+func TestStaticExternalInUnreferencedPoolAccepted14368(t *testing.T) {
+	cmds := staticRule14368("203.0.113.10/32")
+	cmds = append(cmds, "set security nat source pool P address 203.0.113.10")
+	assertNATOverlapAccepted(t, cmds...)
+}
+
+func TestStaticVsStaticExternalAccepted14368(t *testing.T) {
+	cmds := staticRule14368("203.0.113.10/32")
+	cmds = append(cmds,
+		"set security nat static rule-set SS2 from zone dmz",
+		"set security nat static rule-set SS2 rule S2 match destination-address 203.0.113.10/32",
+		"set security nat static rule-set SS2 rule S2 then static-nat prefix 10.0.31.100/32",
+	)
+	assertNATOverlapAccepted(t, cmds...)
+}
+
+func TestStaticV6ExternalInV6PoolRejected14368(t *testing.T) {
+	cmds := []string{"set security nat source pool P6 address 2001:db8::10"}
+	cmds = append(cmds, srcRule("RS1", "R1", "P6")...)
+	cmds = append(cmds,
+		"set security nat static rule-set SS from zone untrust",
+		"set security nat static rule-set SS rule S1 match destination-address 2001:db8::10/128",
+		"set security nat static rule-set SS rule S1 then static-nat prefix fd00:30::100/128",
+	)
+	assertStaticPoolRejected14368(t, `source-nat pool "P6"`, cmds...)
+}

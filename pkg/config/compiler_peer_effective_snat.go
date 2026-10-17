@@ -102,5 +102,10 @@ func validateSourceNATStrictView(cfg *Config) error {
 	if _, err := validateNATPoolExternalTupleOverlapStrict(cfg, false); err != nil {
 		return err
 	}
+	// #14368: a peer-only divergence can likewise place a static external
+	// inside the peer's referenced pool set while the origin's is disjoint.
+	if _, err := validateStaticNATPoolOverlapStrict(cfg, false); err != nil {
+		return err
+	}
 	return nil
 }

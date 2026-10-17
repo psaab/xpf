@@ -285,6 +285,10 @@ pub(crate) struct Nat64Prefix {
     /// #14367: pool+NAT64 combined index incl. interface members, for the
     /// NAT64->interface check. Synced alongside iface_allocs.
     pub(crate) iface_overlap_owners: Option<std::sync::Arc<crate::nat::PoolAddressOwners>>,
+    /// #14368: the static table's external identities covering this prefix's
+    /// pool (see `SourceNatRule::static_externals`). `None` on every config
+    /// a strict commit accepts. Wired by `wire_static_overlap_peers`.
+    pub(crate) static_externals: Option<std::sync::Arc<crate::nat::StaticExternalIdentities>>,
 }
 
 impl Nat64Prefix {
@@ -309,6 +313,7 @@ impl Nat64Prefix {
             overlap_owners: None,
             iface_allocs: None,
             iface_overlap_owners: None,
+            static_externals: None,
             draining_pool_allocators: Vec::new(),
         }
     }
@@ -328,6 +333,7 @@ impl Clone for Nat64Prefix {
             overlap_owners: self.overlap_owners.clone(),
             iface_allocs: self.iface_allocs.clone(),
             iface_overlap_owners: self.iface_overlap_owners.clone(),
+            static_externals: self.static_externals.clone(),
             draining_pool_allocators: self.draining_pool_allocators.clone(),
         }
     }
@@ -1044,6 +1050,7 @@ impl Nat64State {
                 overlap_owners: None,
                 iface_allocs: None,
                 iface_overlap_owners: None,
+                static_externals: None,
                 draining_pool_allocators: Vec::new(),
             });
         }
@@ -1461,6 +1468,16 @@ impl Nat64State {
                 holder,
             )?;
         }
+        // #14368: a static external covering this tuple publishes it
+        // unconditionally; refuse alongside the peer check.
+        crate::nat::nat64_refuse_if_static_owns(
+            &prefix.port_allocator,
+            prefix.static_externals.as_deref(),
+            flow,
+            translated,
+            now_ns,
+            holder,
+        )?;
         Ok(translated)
     }
 
@@ -1886,6 +1903,19 @@ fn reserve_synced_nat64_port_unless_peer_owns(
     };
     *previous_holders = captured_holders;
     if !reserved {
+        return false;
+    }
+    // #14368: refuse a synced import a static external already covers.
+    if crate::nat::nat64_refuse_if_static_owns(
+        &prefix.port_allocator,
+        prefix.static_externals.as_deref(),
+        flow,
+        (snat_v4, port),
+        now_ns,
+        holder,
+    )
+    .is_err()
+    {
         return false;
     }
     crate::nat::nat64_refuse_if_peer_owns(

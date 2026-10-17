@@ -275,3 +275,28 @@ pub(crate) fn peer_owns_for_interface(owners: Option<&PoolAddressOwners>, own_if
 pub(crate) fn iface_owns_for_pool(iface_allocs: &InterfaceNatAllocators, flow: SourceNatFlowKey, translated: TranslatedTuple) -> bool {
     direct_iface_owns(iface_allocs, flow, translated)
 }
+
+/// #14368: the static twin of [`nat64_refuse_if_peer_owns`]. A static
+/// external covering the minted tuple publishes it unconditionally, so the
+/// mint rolls back and fails with the same reason rather than publishing a
+/// duplicate the reverse index cannot attribute. One helper for both NAT64
+/// mint arms and the synced reserve, for the same anti-drift reason as the
+/// peer helper above.
+pub(crate) fn nat64_refuse_if_static_owns(
+    allocator: &PortAllocator,
+    statics: Option<&crate::nat::StaticExternalIdentities>,
+    flow: SourceNatFlowKey,
+    translated: (Ipv4Addr, u16),
+    now_ns: u64,
+    holder: NatHolder,
+) -> Result<(), SourceNatFailureReason> {
+    if !static_owns_wire_identity(statics, IpAddr::V4(translated.0), translated.1) {
+        return Ok(());
+    }
+    let tuple = TranslatedTuple {
+        ip: IpAddr::V4(translated.0),
+        port: translated.1,
+    };
+    allocator.rollback_flow(flow, tuple, now_ns, holder);
+    Err(SourceNatFailureReason::PoolPeerAddressOverlap)
+}

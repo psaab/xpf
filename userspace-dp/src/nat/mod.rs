@@ -256,8 +256,9 @@ pub(crate) use source::{
     MAX_POOL_PREFIX_HOSTS,
     // #8115 R3: the peer index type, the allocator-level query, and the
     // cross-feature wiring pass NAT64 needs.
-    PoolAddressOwners, nat64_refuse_if_interface_owns, nat64_refuse_if_peer_owns, peer_owns_identity_in,
-    sync_interface_overlap_peers, wire_nat64_overlap_peers, PersistentNatPermit,
+    PoolAddressOwners, nat64_refuse_if_interface_owns, nat64_refuse_if_peer_owns, nat64_refuse_if_static_owns,
+    peer_owns_identity_in, static_owns_wire_identity,
+    sync_interface_overlap_peers, wire_nat64_overlap_peers, wire_static_overlap_peers, PersistentNatPermit,
     SourceNatFailure, SourceNatFailureReason, SourceNatFlowKey, SourceNatLookup, SourceNatRule,
     flowless_source_nat_rule_possible,
     SyncedNatZones, allocate_nat64_pool_port, allocate_nat64_pool_port_deterministic_v6,
@@ -295,7 +296,7 @@ pub(crate) use source::{SourceNatMatchSnapshot, process_source_nat_match_counter
 // #6979: reachable from the afxdp coordinator test that binds the retirement
 // wiring; the primitive itself stays covered by nat::tests_pool.
 pub(crate) use allocator::TranslatedTuple;
-pub(crate) use static_nat::{StaticNatEntry, StaticNatTable};
+pub(crate) use static_nat::{StaticExternalIdentities, StaticNatEntry, StaticNatTable};
 pub(crate) use status::source_nat_pool_statuses;
 
 /// NatDecision is the cross-cutting output type for every NAT

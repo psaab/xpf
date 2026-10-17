@@ -240,6 +240,16 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 		return err
 	}
 	cfg.Warnings = append(cfg.Warnings, natOverlapWarnings...)
+	// #14368: static-NAT external vs referenced source/NAT64 pool gate.
+	// A static external inside a pool's interval lets the unconditional
+	// static publish and a pool mint emit the same external tuple. Strict
+	// rejects naming both rules; lenient warns (#1960 no-brick). Runs right
+	// after the #5144 gate so allocator-overlap errors keep first slot.
+	staticOverlapWarnings, err := validateStaticNATPoolOverlapStrict(cfg, opts.lenientNATPoolOverlap)
+	if err != nil {
+		return err
+	}
+	cfg.Warnings = append(cfg.Warnings, staticOverlapWarnings...)
 
 	// #1434 multi-peer WireGuard: per-tunnel commit gate. Strict (commit /
 	// commit-check): hard-reject a WG tunnel with a missing/invalid

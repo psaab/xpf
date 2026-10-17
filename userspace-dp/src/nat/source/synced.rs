@@ -719,7 +719,17 @@ fn reserve_synced_on_first_pool_owner<'a>(
                 // Within PASS 1 the address is fixed by the WIRE, so no sibling
                 // rule can reach a different one and there is nothing to fall
                 // through to.
-                if stop_at_first_owner && peer_owns_wire_identity(rule, flow, translated) {
+                // #14368: a static external covering the imported tuple
+                // publishes it unconditionally; refuse on PASS 1 alongside
+                // the peer-pool check (same gate, same reason it is gated).
+                if stop_at_first_owner
+                    && (peer_owns_wire_identity(rule, flow, translated)
+                        || static_owns_wire_identity(
+                            rule.static_externals.as_deref(),
+                            translated.ip,
+                            translated.port,
+                        ))
+                {
                     rule.pool_allocator
                         .rollback_flow(flow, translated, now_ns, holder);
                     return SyncedReserveOutcome::Refused;
@@ -809,7 +819,14 @@ fn reserve_synced_on_first_pool_owner<'a>(
             // and sets only THIS allocator's bitmap, so an imported flow
             // narrowed to pool B succeeds while a LOCAL flow already owns the
             // same tuple in pool A.
-            if stop_at_first_owner && peer_owns_wire_identity(rule, flow, translated) {
+            if stop_at_first_owner
+                && (peer_owns_wire_identity(rule, flow, translated)
+                    || static_owns_wire_identity(
+                        rule.static_externals.as_deref(),
+                        translated.ip,
+                        translated.port,
+                    ))
+            {
                 rule.pool_allocator
                     .rollback_flow(flow, translated, now_ns, holder);
                 return SyncedReserveOutcome::Refused;
