@@ -11668,16 +11668,29 @@ reserved for whole-dataplane selection where a rewrite shim
   | `format` | `mode stream` (remote syslog) | `mode event` (local file) |
   |---|---|---|
   | `binary` | binary records | binary records |
-  | `structured` | Junos RT_FLOW | Junos RT_FLOW (local timestamp+tag prefix) |
-  | `sd-syslog` | RFC 5424 envelope | RFC 5424 envelope |
+  | `structured` | RFC 3164 envelope, MSG = Junos RT_FLOW body (`RT_FLOW_SESSION_* [junos@2636...]`) | Junos RT_FLOW body (local timestamp+tag prefix) |
+  | `sd-syslog` | Junos sd-syslog: RFC 5424 `<PRI>1 TS HOST RT_FLOW - RT_FLOW_SESSION_* [junos@2636.1.1.1.2.* ...]` (HOSTNAME present; generic/non-session text keeps `xpf - -`) | same Junos sd-syslog line in the local file |
   | `syslog` / unset | standard RFC 3164 text | standard text (local timestamp+tag prefix) |
 
+  **#14611 decision — what the two text formats mean.** `sd-syslog` is the
+  Junos format: an RFC 5424 envelope whose APP-NAME is `RT_FLOW`, whose
+  MSGID is the `RT_FLOW_SESSION_CREATE` / `_CLOSE` / `_DENY` event name,
+  and whose STRUCTURED-DATA is the `[junos@2636.1.1.1.2.129 ...]` element
+  (with `source-address`, `policy-name`, zone and NAT params) — there is
+  no additional MSG after the SD. Event types with no SD shape
+  (screen/filter) keep the flat `RT_FLOW ...` body under
+  `RT_FLOW - -`, and non-RT_FLOW (generic system) text keeps
+  `xpf - - -`. `structured` is the same Junos RT_FLOW body carried as
+  the MSG of the historical envelopes: RFC 3164 on the stream writer
+  (`xpf: RT_FLOW_SESSION_CREATE [junos@...]`) and the local
+  timestamp+tag prefix in event mode. Before #14611 the pairing was
+  inverted: `sd-syslog` wrapped the flat body in a NILVALUE 5424 header
+  (`xpf - - - RT_FLOW SESSION_OPEN src=...`, so SIEM parsers keyed on
+  `RT_FLOW_SESSION_*` / `[junos@...]` as SD saw neither), while
+  `structured` carried the SD only as RFC 3164 MSG text with a doubled
+  `RT_FLOW -` lead-in (now stripped).
+
   The #3409 follow-up closed the prior event-mode gap (before it, `structured`
-  / `sd-syslog` were rejected at commit because the event-mode writer would
-  silently no-op them to standard text). The event-honorable set in
-  `validateLogEventModeFormatStrict` MUST stay in sync with the `ringbuf.go`
-  local-writer fanout: a value accepted there but unhonored in the fanout would
-  reintroduce the silent fallback.
 - **#2008 H9/H10 (interface silent-drop reject):** two interface stanzas
   that parsed-accepted and were silently dropped (no schema child, no
   compiler case, no dataplane consumer) are now hard-rejected at commit /

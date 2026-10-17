@@ -17,12 +17,14 @@ import (
 // values (#3409 closed the event-mode gap):
 //
 //   - stream mode (remote syslog): honors binary (formatBinaryRecord),
-//     structured (formatStructuredMsg), sd-syslog (RFC 5424 envelope in
-//     SyslogClient.Send), and the standard RFC 3164 default.
+//     structured (formatStructuredMsg as RFC 3164 MSG), sd-syslog (Junos
+//     RFC 5424 RT_FLOW/MSGID/SD in SyslogClient.Send, #14611), and the
+//     standard RFC 3164 default.
 //   - event mode (local file, pkg/logging LocalLogWriter via
 //     ringbuf.go ProcessRawEvent local-writer fanout): honors binary
 //     (formatBinaryRecord), structured (Junos RT_FLOW body), sd-syslog
-//     (RFC 5424 envelope in LocalLogWriter.Send), and the standard default.
+//     (same Junos RFC 5424 line in LocalLogWriter.Send), and the
+//     standard default.
 //
 // Before #3409 the event-mode fanout branched ONLY on `binary` and wrote
 // standard text for every other value, so `structured` and `sd-syslog`

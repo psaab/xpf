@@ -119,7 +119,7 @@ type SyslogClient struct {
 	tlsConfig   *tls.Config
 	Facility    int    // syslog facility code (default: FacilityLocal0)
 	MinSeverity int    // severity threshold; 0 = no filter, SeverityEmergency(-1)/SeverityNone(-2) sentinels, else raw RFC level (see ShouldSend)
-	Format      string // "sd-syslog" for RFC 5424, "structured" for Junos RT_FLOW, "" for RFC 3164
+	Format      string // "sd-syslog" for Junos RFC 5424 RT_FLOW/MSGID/SD (#14611), "structured" for Junos RT_FLOW body over RFC 3164, "" for RFC 3164
 	Categories  uint8  // bitmask of allowed event categories (0 = all)
 
 	// Stream-transport resilience (TCP/TLS). All guarded by mu except the
@@ -947,12 +947,17 @@ func (s *SyslogClient) Send(severity int, msg string) error {
 	var line string
 	if s.Format == "sd-syslog" {
 		// RFC 5424: <PRI>VERSION TIMESTAMP HOSTNAME APP-NAME PROCID MSGID SD MSG
+		// Junos sd-syslog (#14611): APP-NAME=RT_FLOW, MSGID=RT_FLOW_SESSION_*,
+		// SD=[junos@2636...]. msg carries the structured body for firewall
+		// events (ringbuf fanout); generic text keeps NILVALUE MSGID/SD.
 		ts := time.Now().Format("2006-01-02T15:04:05.000Z07:00")
-		line = fmt.Sprintf("<%d>1 %s %s xpf - - - %s", priority, ts, hostname, msg)
+		line = formatSDSyslogLine(priority, ts, hostname, msg, msg)
 	} else {
-		// RFC 3164: <PRI>TIMESTAMP HOSTNAME TAG: MSG
+		// RFC 3164: <PRI>TIMESTAMP HOSTNAME TAG: MSG. Structured keeps its
+		// Junos body here; strip the redundant "RT_FLOW - " lead-in so the
+		// wire is "xpf: RT_FLOW_SESSION_CREATE [junos@...]" (#14611).
 		ts := time.Now().Format(time.Stamp) // "Jan _2 15:04:05"
-		line = fmt.Sprintf("<%d>%s %s xpf: %s", priority, ts, hostname, msg)
+		line = fmt.Sprintf("<%d>%s %s xpf: %s", priority, ts, hostname, stripRTFlowLeadIn(msg))
 	}
 
 	// pendingWarn is captured under s.mu by noteDrop and emitted AFTER the

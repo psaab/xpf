@@ -65,15 +65,18 @@ func TestLocalLogWriter_EventModeFormats_3409(t *testing.T) {
 
 	t.Run("sd-syslog", func(t *testing.T) {
 		out := feed(t, "sd-syslog")
-		// RFC 5424 envelope: <PRI>1 TIMESTAMP HOSTNAME xpf - - - <body>.
+		// Junos sd-syslog (#14611): <PRI>1 TS HOST RT_FLOW - MSGID [junos SD].
 		if !strings.HasPrefix(out, "<") {
 			t.Fatalf("sd-syslog output missing <PRI> prefix: %q", out)
 		}
 		if !strings.Contains(out, ">1 ") {
 			t.Fatalf("sd-syslog output missing RFC 5424 VERSION (>1 ): %q", out)
 		}
-		if !strings.Contains(out, " xpf - - - RT_FLOW") {
-			t.Fatalf("sd-syslog output missing RFC 5424 NILVALUE fields + RT_FLOW body: %q", out)
+		if !strings.Contains(out, " RT_FLOW - RT_FLOW_SESSION_CREATE [junos@") {
+			t.Fatalf("sd-syslog output missing Junos APP-NAME/MSGID/SD: %q", out)
+		}
+		if !strings.Contains(out, `source-address="`) {
+			t.Fatalf("sd-syslog output missing source-address SD param: %q", out)
 		}
 	})
 

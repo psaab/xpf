@@ -916,7 +916,10 @@ func (er *EventReader) logEvent(data []byte) {
 				continue
 			}
 			var msg string
-			if c.Format == "structured" {
+			if c.Format == "structured" || c.Format == "sd-syslog" {
+				// sd-syslog carries the structured body so Send can decompose
+				// it into APP-NAME/MSGID/SD (#14611); structured carries it
+				// as the RFC 3164 MSG.
 				if structMsg == "" {
 					structMsg = formatStructuredMsg(rec, evt.Protocol)
 				}
@@ -958,12 +961,12 @@ func (er *EventReader) logEvent(data []byte) {
 				}
 				continue
 			}
-			// Body selection matches the syslog fanout: `structured` emits the
-			// Junos RT_FLOW structured body; `sd-syslog` and the standard
-			// default share the RFC 3164 body, with sd-syslog wrapped in an
-			// RFC 5424 envelope by LocalLogWriter.Send.
+			// Body selection matches the syslog fanout: `structured` and
+			// `sd-syslog` emit the Junos RT_FLOW structured body (sd-syslog
+			// is decomposed into APP-NAME/MSGID/SD by LocalLogWriter.Send,
+			// #14611); the standard default uses the RFC 3164 body.
 			var msg string
-			if lw.Format == "structured" {
+			if lw.Format == "structured" || lw.Format == "sd-syslog" {
 				if structMsg == "" {
 					structMsg = formatStructuredMsg(rec, evt.Protocol)
 				}

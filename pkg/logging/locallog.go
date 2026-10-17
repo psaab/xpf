@@ -155,20 +155,20 @@ func NewLocalLogWriter(cfg LocalLogConfig) (*LocalLogWriter, error) {
 func (lw *LocalLogWriter) Send(severity int, msg string) error {
 	var line string
 	if lw.Format == "sd-syslog" {
-		// RFC 5424 envelope, byte-for-byte identical to SyslogClient.Send's
-		// sd-syslog framing apart from the absence of transport octet-counting
-		// (#3409): <PRI>VERSION TIMESTAMP HOSTNAME APP-NAME PROCID MSGID SD MSG.
-		// The structured-data and msgid fields are NILVALUE ("-"), matching the
-		// stream path. msg is the standard RT_FLOW body (formatSyslogMsg).
+		// Junos sd-syslog (#14611), byte-for-byte identical to
+		// SyslogClient.Send's framing apart from transport octet-counting:
+		// <PRI>1 TS HOST RT_FLOW - RT_FLOW_SESSION_* [junos@... SD].
+		// msg carries the structured body for firewall events.
 		priority := lw.Facility*8 + severity
 		ts := time.Now().Format("2006-01-02T15:04:05.000Z07:00")
-		line = fmt.Sprintf("<%d>1 %s %s xpf - - - %s\n", priority, ts, sanitizeSyslogHostname(lw.hostname), msg)
+		line = formatSDSyslogLine(priority, ts, lw.hostname, msg, msg) + "\n"
 	} else {
 		// Standard ("" / syslog) and structured (Junos RT_FLOW) bodies share the
 		// local-file timestamp+severity-tag prefix; only the msg body differs
-		// (chosen by the ringbuf fanout per Format).
+		// (chosen by the ringbuf fanout per Format). Strip the redundant
+		// "RT_FLOW - " lead-in from structured bodies (#14611).
 		ts := time.Now().Format("2006-01-02T15:04:05.000")
-		line = fmt.Sprintf("%s [%s] %s\n", ts, severityTag(severity), msg)
+		line = fmt.Sprintf("%s [%s] %s\n", ts, severityTag(severity), stripRTFlowLeadIn(msg))
 	}
 
 	lw.mu.Lock()
