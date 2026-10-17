@@ -617,7 +617,19 @@ type RAPrefix struct {
 	OnLink        bool   // on-link flag (default true)
 	Autonomous    bool   // SLAAC autonomous flag (default true)
 	ValidLifetime int    // seconds, 0 = default (2592000 = 30 days)
-	PreferredLife int    // seconds, 0 = default (604800 = 7 days)
+	PreferredLife int    // seconds, meaningful when PreferredLifeSet; otherwise 0 = default (604800 = 7 days)
+	// PreferredLifeSet records that PreferredLife was explicitly supplied —
+	// by the operator's preferred-lifetime leaf or, for a delegated prefix,
+	// by the DHCPv6 IAPREFIX itself — so an explicit 0 is distinguishable
+	// from unset. RFC 8415 §21.22 makes preferred 0 legal (deprecated) and
+	// RFC 4862 §5.5.4 deprecates addresses from such a prefix; conflating it
+	// with unset re-advertised a dying PD prefix at the 7-day default
+	// (#14606), mirroring DefaultLifetimeSet (#4119) for the RA header.
+	// The compiler sets it only when the leaf is present; buildRAConfigs
+	// sets it always on the PD path (the delegation always carries a
+	// preferred lifetime, including 0). Hand-built values with the flag
+	// false keep the historical <=0 default substitution.
+	PreferredLifeSet bool
 	// Delegated marks a prefix DERIVED from a DHCPv6 IA_PD delegation rather
 	// than authored by the operator (#6587).
 	//
@@ -628,9 +640,8 @@ type RAPrefix struct {
 	// break. #6581 fixed the same class at the DHCPv6 DECODER for exactly this
 	// reason — by the time a prefix reaches pkg/ra the provenance was gone.
 	//
-	// Set ONLY by buildRAConfigs (pkg/daemon) on the PD path. The compiler
-	// leaves it at the zero value, so operator-authored prefixes stay false by
-	// construction and no compiler change is needed.
+	// Set ONLY by buildRAConfigs (pkg/daemon) on the PD path; the compiler
+	// leaves it false for operator-authored prefixes by construction.
 	Delegated bool
 }
 

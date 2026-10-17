@@ -1484,6 +1484,10 @@ func configEqual(a, b *config.RAInterfaceConfig) bool {
 			a.Prefixes[i].Autonomous != b.Prefixes[i].Autonomous ||
 			a.Prefixes[i].ValidLifetime != b.Prefixes[i].ValidLifetime ||
 			a.Prefixes[i].PreferredLife != b.Prefixes[i].PreferredLife ||
+			// #14606: PreferredLifeSet decides whether PreferredLife 0
+			// marshals as 0 (deprecated) or the 7-day default, so it is
+			// wire-affecting exactly like DefaultLifetimeSet (#4119).
+			a.Prefixes[i].PreferredLifeSet != b.Prefixes[i].PreferredLifeSet ||
 			// #6587: Delegated gates whether the PIO is emitted at all
 			// (buildRA drops a delegated /0), so it is WIRE-AFFECTING and
 			// belongs in this change detector. The #4307 comment above

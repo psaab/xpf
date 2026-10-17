@@ -57,9 +57,14 @@ func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig 
 			if mapping.ValidLifetime > 0 {
 				pfx.ValidLifetime = int(mapping.ValidLifetime.Seconds())
 			}
-			if mapping.PreferredLifetime > 0 {
-				pfx.PreferredLife = int(mapping.PreferredLifetime.Seconds())
-			}
+			// #14606: the IAPREFIX always carries a preferred lifetime, and
+			// 0 is legal (deprecated, RFC 8415 §21.22). Record it explicitly
+			// so pkg/ra does not conflate deprecated-0 with unset and
+			// re-advertise the dying prefix at the 7-day default. Only the
+			// preferred side needs the flag: valid 0 is a withdrawal and
+			// never reaches this mapping as a live prefix.
+			pfx.PreferredLife = int(mapping.PreferredLifetime.Seconds())
+			pfx.PreferredLifeSet = true
 
 			if existing, ok := raByIface[mapping.RAIface]; ok {
 				// Append prefix to existing RA interface config.
