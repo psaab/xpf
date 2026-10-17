@@ -2040,7 +2040,8 @@ func anySamplingDirectionConfigured(cfg *Config) bool {
 			if unit == nil {
 				continue
 			}
-			if unit.SamplingInput || unit.SamplingOutput {
+			if unit.SamplingV4Input || unit.SamplingV4Output ||
+				unit.SamplingV6Input || unit.SamplingV6Output {
 				return true
 			}
 		}

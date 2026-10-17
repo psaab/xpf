@@ -44,23 +44,27 @@ func flowDirRecord(v6 bool, dir uint8) FlowRecord {
 // flowDirection mapping, including the ingress-wins tie-break. Reverting the
 // FlowDirection method (or the ingress-first ordering) flips a case RED.
 func TestFlowDirectionFromSampling(t *testing.T) {
-	ec := &ExportConfig{SamplingZones: map[uint16]SamplingDir{
+	dirs := map[uint16]SamplingDir{
 		1: {Input: true},
 		2: {Output: true},
 		3: {Input: true, Output: true},
-	}}
+	}
+	ec := &ExportConfig{SamplingZones: FamilySamplingDirs{V4: dirs, V6: dirs}}
 	for _, tc := range []struct {
 		name            string
 		inZone, outZone uint16
+		isV6            bool
 		want            uint8
 	}{
-		{"ingress input-sampled", 1, 9, 0},
-		{"egress output-sampled only", 9, 2, 1},
-		{"both sampled: ingress wins", 1, 2, 0},
-		{"ingress zone both flags: input wins", 3, 9, 0},
-		{"neither sampled", 9, 9, 0},
+		{"ingress input-sampled", 1, 9, false, 0},
+		{"egress output-sampled only", 9, 2, false, 1},
+		{"both sampled: ingress wins", 1, 2, false, 0},
+		{"ingress zone both flags: input wins", 3, 9, false, 0},
+		{"neither sampled", 9, 9, false, 0},
+		{"v6 ingress input-sampled", 1, 9, true, 0},
+		{"v6 egress output-sampled only", 9, 2, true, 1},
 	} {
-		if got := ec.FlowDirection(tc.inZone, tc.outZone); got != tc.want {
+		if got := ec.FlowDirection(tc.inZone, tc.outZone, tc.isV6); got != tc.want {
 			t.Errorf("%s: FlowDirection(%d,%d) = %d, want %d",
 				tc.name, tc.inZone, tc.outZone, got, tc.want)
 		}

@@ -121,7 +121,7 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 					for _, u := range i.Units {
 						out += fmt.Sprintf("addrs=%v fin4=%q fout4=%q fin6=%q fout6=%q sample=%v/%v dhcp=%v dhcpv6=%v",
 							u.Addresses, u.FilterInputV4, u.FilterOutputV4,
-							u.FilterInputV6, u.FilterOutputV6, u.SamplingInput, u.SamplingOutput,
+							u.FilterInputV6, u.FilterOutputV6, u.SamplingV4Input, u.SamplingV4Output,
 							u.DHCP, u.DHCPv6)
 					}
 				}
@@ -155,7 +155,7 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 					for _, u := range i.Units {
 						out += fmt.Sprintf("addrs=%v fin4=%q fout4=%q fin6=%q fout6=%q sample=%v/%v dhcp=%v dhcpv6=%v",
 							u.Addresses, u.FilterInputV4, u.FilterOutputV4,
-							u.FilterInputV6, u.FilterOutputV6, u.SamplingInput, u.SamplingOutput,
+							u.FilterInputV6, u.FilterOutputV6, u.SamplingV6Input, u.SamplingV6Output,
 							u.DHCP, u.DHCPv6)
 					}
 				}

@@ -13,16 +13,16 @@ import (
 // FAIL-ON-REVERT: without the SamplingStats counters this test fails.
 func TestShouldExportCounters_13307(t *testing.T) {
 	ec := &ExportConfig{
-		SamplingZones: map[uint16]SamplingDir{2: {Input: true}},
+		SamplingZones: FamilySamplingDirs{V4: map[uint16]SamplingDir{2: {Input: true}}},
 		SamplingRate:  2,
 	}
-	if ec.ShouldExport(1, 1) {
+	if ec.ShouldExport(1, 1, false) {
 		t.Fatal("zone-filtered session exported")
 	}
-	if ec.ShouldExport(2, 9) {
+	if ec.ShouldExport(2, 9, false) {
 		t.Fatal("first eligible session must be sampled out at rate 2")
 	}
-	if !ec.ShouldExport(2, 9) {
+	if !ec.ShouldExport(2, 9, false) {
 		t.Fatal("second eligible session must be sampled in at rate 2")
 	}
 	evaluated, selected, zoneFiltered := ec.SamplingStats()
@@ -36,15 +36,15 @@ func TestShouldExportCounters_13307(t *testing.T) {
 	}
 	open := &ExportConfig{}
 	for range 3 {
-		if !open.ShouldExport(1, 2) {
+		if !open.ShouldExport(1, 2, false) {
 			t.Fatal("unrestricted config must export")
 		}
 	}
 	if ev, sel, zf := open.SamplingStats(); ev != 3 || sel != 3 || zf != 0 {
 		t.Fatalf("open SamplingStats = (%d %d %d), want (3 3 0)", ev, sel, zf)
 	}
-	closed := &ExportConfig{SamplingZones: map[uint16]SamplingDir{}}
-	if closed.ShouldExport(1, 1) {
+	closed := &ExportConfig{SamplingZones: FamilySamplingDirs{V4: map[uint16]SamplingDir{}, V6: map[uint16]SamplingDir{}}}
+	if closed.ShouldExport(1, 1, false) {
 		t.Fatal("empty non-nil SamplingZones must fail closed")
 	}
 	if _, _, zf := closed.SamplingStats(); zf != 1 {

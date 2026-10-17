@@ -314,7 +314,7 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 	d.flowExportErr = nil
 	slog.Info("NetFlow v9 exporter reconciled",
 		"template_groups", len(ecs),
-		"sampling_zones", len(ecs[0].SamplingZones),
+		"sampling_zones", len(ecs[0].SamplingZones.V4)+len(ecs[0].SamplingZones.V6),
 		"sampling_rate", ecs[0].SamplingRate)
 	return true
 }
@@ -511,7 +511,7 @@ func (d *Daemon) reconcileIPFIXExporter(cfg *config.Config) bool {
 	d.ipfixExportErr = nil
 	slog.Info("IPFIX exporter reconciled",
 		"template_groups", len(ecs),
-		"sampling_zones", len(ecs[0].SamplingZones),
+		"sampling_zones", len(ecs[0].SamplingZones.V4)+len(ecs[0].SamplingZones.V6),
 		"sampling_rate", ecs[0].SamplingRate)
 	return true
 }
@@ -608,11 +608,11 @@ func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
 			j++
 		}
 		// Family attribution then the single per-instance sampling decision.
-		if lead.ServesFamily(sd.IsIPv6) && lead.ShouldExport(rec.InZone, rec.OutZone) {
+		if lead.ServesFamily(sd.IsIPv6) && lead.ShouldExport(rec.InZone, rec.OutZone, sd.IsIPv6) {
 			// #3270: derive flowDirection (IE 61) from the per-zone
 			// sampling-direction. Always computed; only the groups whose
 			// template enabled `export-extension flow-dir` actually encode it.
-			sd.Direction = lead.FlowDirection(rec.InZone, rec.OutZone)
+			sd.Direction = lead.FlowDirection(rec.InZone, rec.OutZone, sd.IsIPv6)
 			for k := i; k < j; k++ {
 				// #6811: fan out only to the groups of THIS address family.
 				// Groups are single-family by construction (the resolver keys
@@ -678,9 +678,9 @@ func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
 		for j < len(b.groups) && b.groups[j].ec.InstanceName == inst {
 			j++
 		}
-		if lead.ServesFamily(sd.IsIPv6) && lead.ShouldExport(rec.InZone, rec.OutZone) {
+		if lead.ServesFamily(sd.IsIPv6) && lead.ShouldExport(rec.InZone, rec.OutZone, sd.IsIPv6) {
 			// #3270: see flowExportCallback.
-			sd.Direction = lead.FlowDirection(rec.InZone, rec.OutZone)
+			sd.Direction = lead.FlowDirection(rec.InZone, rec.OutZone, sd.IsIPv6)
 			for k := i; k < j; k++ {
 				// #6811: fan out only to the groups of THIS address family.
 				// Groups are single-family by construction (the resolver keys
