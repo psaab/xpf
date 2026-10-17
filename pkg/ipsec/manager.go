@@ -999,21 +999,22 @@ func (m *Manager) terminateRemovedConns(removed []string) (terminated, failed []
 // live IKE SA before teardown. Removed connections and changed connections
 // whose teardown failed are never initiated.
 //
-// Only a connection whose NEW rendered policy would itself initiate is
-// reinitiated here (#14140). The renderer emits start_action = start only
-// for establish-tunnels=immediately on a non-responder-only gateway, and
-// trap (traffic-triggered, not eager) for on-traffic. A responder-only
-// gateway (remote_addrs = %any, gw.ResponderOnly) has no fixed peer to
-// dial — swanctl --initiate against it fails or is meaningless — and an
-// on-traffic / responder-only-mode / unset-mode VPN deliberately does not
-// eagerly establish. Eagerly initiating those after a content change
-// contradicted the rendered policy: it turned a config change that
-// touched a live responder/on-traffic SA into a spurious Apply failure
-// (the initiate error propagates) and attempted an outbound IKE the
-// operator never asked for. Skipping is not leaving the tunnel down by
-// accident: the new config is loaded, the peer (responder-only) or the
-// first matching packet (trap) re-establishes under the new settings,
-// exactly as on a fresh load.
+// Only a connection whose NEW rendered policy would itself eagerly
+// initiate is reinitiated here (#14140). The renderer emits
+// start_action = start only for establish-tunnels=immediately on a
+// non-responder-only gateway, and trap (traffic-triggered, not eager)
+// for on-traffic and for the absent Junos default (#14592). A
+// responder-only gateway (remote_addrs = %any, gw.ResponderOnly) has
+// no fixed peer to dial — swanctl --initiate against it fails or is
+// meaningless — and an on-traffic / responder-only-mode / unset-mode
+// VPN deliberately does not eagerly establish. Eagerly initiating
+// those after a content change contradicted the rendered policy: it
+// turned a config change that touched a live responder/on-traffic SA
+// into a spurious Apply failure (the initiate error propagates) and
+// attempted an outbound IKE the operator never asked for. Skipping is
+// not leaving the tunnel down by accident: the new config is loaded,
+// the peer (responder-only) or the first matching packet (trap)
+// re-establishes under the new settings, exactly as on a fresh load.
 func (m *Manager) reinitiateChangedConnections(ipsecCfg *config.IPsecConfig, changed, terminated []string) error {
 	if len(changed) == 0 || len(terminated) == 0 {
 		return nil
@@ -1055,8 +1056,9 @@ func (m *Manager) reinitiateChangedConnections(ipsecCfg *config.IPsecConfig, cha
 // dangling/unrenderable gateway (ok == false — such a VPN is not in the
 // loaded set and cannot be a changed+terminated candidate anyway) does
 // not, and a defined responder-only gateway does not. Every other mode —
-// on-traffic (trap), responder-only, and unset — waits for the peer or
-// for traffic, on reapply just as on first load (#14140).
+// on-traffic (trap), the absent Junos default (also trap, #14592),
+// responder-only mode, and responder-only gateways — waits for the peer
+// or for traffic, on reapply just as on first load (#14140).
 func vpnEagerlyInitiates(ipsecCfg *config.IPsecConfig, vpn *config.IPsecVPN) bool {
 	if vpn == nil || vpn.EstablishTunnels != "immediately" {
 		return false

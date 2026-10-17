@@ -1547,7 +1547,8 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			// at commit instead of silently selecting a different tunnel-
 			// establishment mode. `immediately` starts the child, `on-traffic`
 			// installs a trap for first-packet initiation, and responder-only
-			// omits start_action.
+			// omits start_action. An absent statement is the Junos default,
+			// on-traffic (#14592): the renderer emits trap for "".
 			"establish-tunnels": {desc: "Tunnel establishment (immediately|on-traffic|responder-only)", args: 1, placeholder: "<mode>",
 				valueType: ValueEnumOf, valueDesc: "tunnel establishment mode",
 				valueExamples: []string{"immediately", "on-traffic", "responder-only"},

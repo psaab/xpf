@@ -1979,8 +1979,9 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	// never ran — and in the asymmetric case (this node already RG0 primary,
 	// taking RG1 from a dead peer) there is no RG0 transition at all, so
 	// nothing re-initiated the tunnels anchored on the reth whose VIP just
-	// moved here. With the default `establish-tunnels` setting charon emits no
-	// start_action, so the tunnel then waits for the REMOTE peer.
+	// moved here. With anything but `establish-tunnels immediately`
+	// charon emits no eager `start_action = start` (the unset default
+	// renders `trap`, #14592), so the tunnel then waits for traffic.
 	//
 	// ownsIPsecConn scopes the set to this RG, so this is not a second
 	// unconditional initiate-everything: RG0's own transition still handles

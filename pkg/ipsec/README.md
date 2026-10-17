@@ -709,22 +709,33 @@ all files stay in `package ipsec`, so the public API is unchanged.
   path can be driven from parsed `--list-sas` output.
 - **`establish-tunnels` enum validated (#4301, fable-167 V-5).** The leaf
   was untyped, so a typo (`on-tarffic`) or a newer value stored verbatim and
-  silently degraded to on-traffic. It is now
+  silently changed transports. It is now
   `ValidateEnum([immediately, on-traffic, responder-only])` in
   `setSchema` — a typo fails closed at commit.
+- **Unset `establish-tunnels` defaults to on-traffic (#14592).** Junos:
+  "If this configuration is not specified, IKE is activated only when
+  data traffic flows" — on-traffic is the default behavior. The renderer
+  used to emit no `start_action` for an unset mode, so two peers at the
+  Junos default never initiated: no SA, no error, green commit. An unset
+  mode now renders the child `start_action = trap` exactly as explicit
+  `on-traffic` does, except on a responder-only gateway (below), where
+  unset still emits nothing.
 - **Responder-only gateways never initiate (#11688).** With
   `remote_addrs = %any`, neither `establish-tunnels immediately` nor
-  `establish-tunnels on-traffic` may create a child `start_action`: `start`
-  has no fixed peer to dial, and `trap` would initiate when traffic arrives.
+  `establish-tunnels on-traffic` (nor the #14592 unset default) may
+  create a child `start_action`: `start` has no fixed peer to dial, and
+  `trap` would initiate when traffic arrives.
   DPD always renders `dpd_action = clear` for a responder-only gateway, so a
   dead SA is cleared without restarting an outbound exchange.
 - **Post-change reinitiation honours initiation intent (#14140).**
   `reinitiateChangedConnections` reinitiates a changed+terminated
-  connection only when its NEW rendered policy would itself initiate —
+  connection only when its NEW rendered policy would itself eagerly
+  initiate —
   `establish-tunnels immediately` on a non-responder-only gateway (the
   `start_action = start` arm, resolved through `resolveRemoteAddr` so a
   legacy inline endpoint counts and a responder-only gateway does not).
-  `on-traffic` (trap), `responder-only`, and unset modes are terminated
+  `on-traffic` (trap), the #14592 unset default (also trap),
+  `responder-only`, and responder-only-gateway modes are terminated
   but not eagerly reinitiated: the peer or the first matching packet
   re-establishes under the new settings, as on a fresh load, and an
   unrelated config change no longer fails Apply on a `swanctl --initiate`
