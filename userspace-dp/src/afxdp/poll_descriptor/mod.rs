@@ -5475,6 +5475,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // `desc` is carried only to recycle the outer UMEM
                                 // slot (the reply is a freshly built prebuilt
                                 // frame).
+                                // #14643: distinguish "not expiring" from
+                                // "expiring but Time Exceeded suppressed".
+                                // The builder returns None for both; only
+                                // the former may fall through to session
+                                // install. An expiring packet is never
+                                // forwarded (rewrite refuses TTL<=1), so a
+                                // suppressed reply must drop here — with
+                                // the same NAT rollbacks the built-TE arm
+                                // performs — mirroring the flow-cache-hit
+                                // sibling in flow_cache_hit.rs.
+                                let ttl_would_expire = matches!(
+                                    packet_ttl_would_expire(packet_frame, meta),
+                                    Some(true)
+                                );
                                 let local_icmp_te = build_local_time_exceeded_request(
                                     packet_frame,
                                     desc,
@@ -5514,6 +5528,28 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     );
                                     binding.scratch.scratch_forwards.push(request);
                                     recycle_now = false;
+                                } else if ttl_would_expire {
+                                    if let Some(release_key) = source_nat_release_key.as_ref() {
+                                        rollback_source_nat_allocation_for_worker(
+                                            &worker_ctx.forwarding.iface_nat_allocators,
+                                            &worker_ctx.forwarding.source_nat_rules,
+                                            release_key,
+                                            decision.nat,
+                                            false,
+                                            now_ns,
+                                            worker_id,
+                                        );
+                                    }
+                                    crate::nat64::rollback_nat64_allocation_for_worker(
+                                        &worker_ctx.forwarding.nat64,
+                                        &flow.forward_key,
+                                        decision.nat,
+                                        false,
+                                        now_ns,
+                                        worker_id,
+                                    );
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
                                 } else {
                                     let mut created = 0u64;
                                     // #850: DNS-reply fast-path skips session install
