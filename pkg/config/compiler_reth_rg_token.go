@@ -102,10 +102,14 @@ func validateRethRedundancyGroupTokensAST(nodes []*Node, lenient bool) ([]string
 			if reo == nil {
 				continue
 			}
+			// #14441: mirror the compiler's elided-spelling expansion so
+			// `redundant-ether-options redundancy-group <tok>;` (tail on
+			// the reo node's Keys, no Children) is seen here too; otherwise
+			// an unusable elided token would escape the strict reject and
+			// the lenient suppression alike.
+			reo = expandResolvingRun9792(reo, redundantEtherOptionsSchema9792())
+			reo = packedBody(reo, redundantEtherOptionsSchema9792())
 			rg := reo.FindChild("redundancy-group")
-			if rg == nil {
-				continue
-			}
 			tok := nodeVal(rg)
 			if why, bad := rethRGTokenProblem(tok); bad {
 				found = append(found, offence{iface: name, token: tok, why: why})

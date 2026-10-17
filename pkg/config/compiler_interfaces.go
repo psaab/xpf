@@ -233,7 +233,15 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 		}
 
 		// Check for redundant-ether-options redundancy-group
+		// #14441: expand the elided spelling
+		// `redundant-ether-options redundancy-group 1;`, whose tail sits on
+		// the reo node's own Keys with no Children, exactly as the
+		// gigether/aggregated siblings above do for their packed runs.
+		// Without the expansion FindChild sees no child and the group stays
+		// 0, so the reth reads as an ordinary interface on both nodes.
 		if reoNode := child.FindChild("redundant-ether-options"); reoNode != nil {
+			reoNode = expandResolvingRun9792(reoNode, redundantEtherOptionsSchema9792())
+			reoNode = packedBody(reoNode, redundantEtherOptionsSchema9792())
 			if rgNode := reoNode.FindChild("redundancy-group"); rgNode != nil {
 				if v, err := strconv.Atoi(nodeVal(rgNode)); err == nil {
 					ifc.RedundancyGroup = v

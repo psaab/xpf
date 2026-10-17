@@ -84,6 +84,10 @@ func aggregatedEtherOptionsSchema9792() *schemaNode {
 	return resolveSchemaPath9235("interfaces", "xpfname", "aggregated-ether-options")
 }
 
+func redundantEtherOptionsSchema9792() *schemaNode {
+	return resolveSchemaPath9235("interfaces", "xpfname", "redundant-ether-options")
+}
+
 func tunnelWireguardSchema9792() *schemaNode {
 	return resolveSchemaPath9235("interfaces", "xpfname", "tunnel", "wireguard")
 }
