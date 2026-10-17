@@ -100,100 +100,135 @@ func validateSNMPv3SecurityKeywordStrict(tree *ConfigTree) error {
 	}
 	// Top-level `snmp` roots, plus any `snmp` child under `system`
 	// (compileSystem dispatches that spelling to the same compileSNMP).
+	// #14767 (residual of #14411): the synthetic brace-elided form
+	// (`system snmp v3 …` packed onto the system node's own Keys) is
+	// synthesised by compileSystem the same way, so mirror it here too.
 	var snmpRoots []*Node
 	snmpRoots = append(snmpRoots, tree.FindChildren("snmp")...)
 	for _, sys := range tree.FindChildren("system") {
 		snmpRoots = append(snmpRoots, sys.FindChildren("snmp")...)
+		if len(sys.Keys) > 1 && sys.Keys[1] == "snmp" {
+			snmpRoots = append(snmpRoots, &Node{Keys: sys.Keys[1:], Children: sys.Children})
+		}
 	}
 	for _, snmp := range snmpRoots {
-		// Mirror compileSNMPv3's own resolution exactly: the same
-		// packedBodyChildren calls locate the v3 node, the usm node, the
-		// local-engine, and its users across braced, packed, and elided
-		// spellings. Any OTHER node in those subtrees is a place the
-		// compiler never reads a protocol keyword from.
-		var v3 *Node
-		for _, c := range packedBodyChildren(snmp, resolveSchemaChild(setSchema, "snmp")) {
-			if c.Name() == "v3" {
-				v3 = c
-				break
-			}
-		}
-		if v3 == nil {
-			continue
-		}
+		// #14767: compileSNMP iterates EVERY `v3` child, so gate every
+		// one — checking only the first (the merged #14411 gate) lets a
+		// second `v3` block's bad user through. The same
+		// packedBodyChildren calls locate each v3 node, the usm node,
+		// the local-engine, and its users across braced, packed, and
+		// elided spellings. Any OTHER node in those subtrees is a place
+		// the compiler never reads a protocol keyword from.
 		if err := checkSNMPv3MisplacedPacked14411(snmp); err != nil {
 			return err
 		}
-		if err := checkSNMPv3MisplacedPacked14411(v3); err != nil {
-			return err
+		// #14767: fully-packed flat form: compact normalization splits
+		// `snmp v3 usm …` into an `snmp` root carrying ONE `v3 …` child
+		// whose Keys hold the whole remaining run. When that run reaches
+		// `user <name>` (including the synthetic `system snmp …` root),
+		// compileSNMPv3's flat branch reads it directly, so gate it here
+		// — the per-v3 walk below cannot synthesise a user from a run
+		// whose tail is a user, not a v3 body.
+		for _, c := range snmp.Children {
+			if len(c.Keys) >= 4 && c.Keys[0] == "v3" && c.Keys[1] == "usm" &&
+				c.Keys[2] == "local-engine" && c.Keys[3] == "user" {
+				if err := checkSNMPv3UserKeywords9155(c); err != nil {
+					return err
+				}
+			}
 		}
-		// The v3 node itself may BE the elided user node (its Keys carry
-		// the whole `v3 usm local-engine user <name>` path); then it is
-		// the user body and its direct children are legitimate protocols.
-		if isSNMPv3UserNode14411(v3) {
-			if err := checkSNMPv3BracedKeywords14411(v3, v3); err != nil {
+		if len(snmp.Keys) >= 5 && snmp.Keys[1] == "v3" && snmp.Keys[2] == "usm" &&
+			snmp.Keys[3] == "local-engine" && snmp.Keys[4] == "user" {
+			if err := checkSNMPv3UserKeywords9155(snmp); err != nil {
 				return err
 			}
-		} else if err := checkSNMPv3BracedKeywords14411(v3, nil); err != nil {
-			return err
 		}
-		var usm *Node
-		for _, c := range packedBodyChildren(v3, schemaForPath("snmp", "v3")) {
-			if c.Name() == "usm" {
-				usm = c
-				break
-			}
-		}
-		if usm == nil {
-			continue
-		}
-		if err := checkSNMPv3MisplacedPacked14411(usm); err != nil {
-			return err
-		}
-		// #14405: expand the engine level too — a fully packed tail
-		// (`v3 usm local-engine { ... }` / `usm local-engine user u1 ...`)
-		// can synthesise the user itself from the engine node.
-		for _, eng := range packedBodyChildren(usm, schemaForPath("snmp", "v3", "usm")) {
-			if eng.Name() != "local-engine" {
+		for _, v3 := range packedBodyChildren(snmp, resolveSchemaChild(setSchema, "snmp")) {
+			if v3.Name() != "v3" {
 				continue
 			}
-			if err := checkSNMPv3MisplacedPacked14411(eng); err != nil {
+			if err := validateSNMPv3Node14767(v3); err != nil {
 				return err
-			}
-			for _, user := range eng.FindChildren("user") {
-				if err := checkSNMPv3UserKeywords9155(user); err != nil {
-					return err
-				}
-			}
-			// A fully packed tail can synthesise the user itself
-			// (`v3 usm local-engine user u1 ...`): packedBodyChildren
-			// on the engine yields the user nodes directly.
-			for _, user := range packedBodyChildren(eng, schemaForPath("snmp", "v3", "usm", "local-engine")) {
-				if user.Name() != "user" {
-					continue
-				}
-				seen := false
-				for _, u := range eng.FindChildren("user") {
-					if u == user {
-						seen = true
-						break
-					}
-				}
-				if seen {
-					continue
-				}
-				if err := checkSNMPv3UserKeywords9155(user); err != nil {
-					return err
-				}
 			}
 		}
-		// Elided user (`v3 usm local-engine user u1 { … }`): there is no
-		// local-engine child to hang the user on — v3 itself carries the
-		// user path in its Keys and the protocol body as its children.
-		if isSNMPv3UserNode14411(v3) {
-			if err := checkSNMPv3UserKeywords9155(v3); err != nil {
+	}
+	return nil
+}
+
+// validateSNMPv3Node14767 gates one resolved `v3` node: misplaced packed
+// and braced keywords anywhere the compiler never reads them, plus the
+// per-user #9155 keyword checks through the compiler's own expansion. Its
+// body is validateSNMPv3SecurityKeywordStrict's per-v3 walk, unchanged.
+func validateSNMPv3Node14767(v3 *Node) error {
+	if err := checkSNMPv3MisplacedPacked14411(v3); err != nil {
+		return err
+	}
+	// The v3 node itself may BE the elided user node (its Keys carry
+	// the whole `v3 usm local-engine user <name>` path); then it is
+	// the user body and its direct children are legitimate protocols.
+	if isSNMPv3UserNode14411(v3) {
+		if err := checkSNMPv3BracedKeywords14411(v3, v3); err != nil {
+			return err
+		}
+	} else if err := checkSNMPv3BracedKeywords14411(v3, nil); err != nil {
+		return err
+	}
+	var usm *Node
+	for _, c := range packedBodyChildren(v3, schemaForPath("snmp", "v3")) {
+		if c.Name() == "usm" {
+			usm = c
+			break
+		}
+	}
+	if usm == nil {
+		return nil
+	}
+	if err := checkSNMPv3MisplacedPacked14411(usm); err != nil {
+		return err
+	}
+	// #14405: expand the engine level too — a fully packed tail
+	// (`v3 usm local-engine { ... }` / `usm local-engine user u1 ...`)
+	// can synthesise the user itself from the engine node.
+	for _, eng := range packedBodyChildren(usm, schemaForPath("snmp", "v3", "usm")) {
+		if eng.Name() != "local-engine" {
+			continue
+		}
+		if err := checkSNMPv3MisplacedPacked14411(eng); err != nil {
+			return err
+		}
+		for _, user := range eng.FindChildren("user") {
+			if err := checkSNMPv3UserKeywords9155(user); err != nil {
 				return err
 			}
+		}
+		// A fully packed tail can synthesise the user itself
+		// (`v3 usm local-engine user u1 ...`): packedBodyChildren
+		// on the engine yields the user nodes directly.
+		for _, user := range packedBodyChildren(eng, schemaForPath("snmp", "v3", "usm", "local-engine")) {
+			if user.Name() != "user" {
+				continue
+			}
+			seen := false
+			for _, u := range eng.FindChildren("user") {
+				if u == user {
+					seen = true
+					break
+				}
+			}
+			if seen {
+				continue
+			}
+			if err := checkSNMPv3UserKeywords9155(user); err != nil {
+				return err
+			}
+		}
+	}
+	// Elided user (`v3 usm local-engine user u1 { … }`): there is no
+	// local-engine child to hang the user on — v3 itself carries the
+	// user path in its Keys and the protocol body as its children.
+	if isSNMPv3UserNode14411(v3) {
+		if err := checkSNMPv3UserKeywords9155(v3); err != nil {
+			return err
 		}
 	}
 	return nil
