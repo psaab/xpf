@@ -36,9 +36,20 @@
 //! including the VRRP VIPs it reads from the kernel — addresses the helper's
 //! snapshot-derived `local_v4` does not carry).
 //!
-//! A no-pktinfo ingress is treated as unknown and gets the same local-vs-
-//! transit disposition. A configured ingress whose shim map cannot be read is
-//! classified as uncovered; if locality is unreadable too, the destination
+//! #14328: coverage and locality are DIFFERENT questions keyed on DIFFERENT
+//! interfaces. Coverage asks where the OUTER datagram arrived, so it is keyed
+//! on the outer socket's pktinfo `ingress_ifindex`. Locality asks whether the
+//! INNER plaintext destination is firewall-local in the routing domain the
+//! decapsulated packet enters, so it is keyed on the `wgN` tunnel's logical
+//! ifindex (`spawned_logical_ifindex`) — never the outer ifindex. The two
+//! interfaces routinely live in different routing instances (outer underlay in
+//! the default instance, tunnel in a tenant instance), and conflating them
+//! both drops genuinely-local host-inbound in the tunnel's domain and
+//! misclassifies transit that merely coincides with an underlay-local address.
+//! A no-pktinfo ingress is therefore unknown for COVERAGE and still gets the
+//! same local-vs-transit disposition, because locality no longer depends on
+//! the outer ifindex at all. A configured ingress whose shim map cannot be
+//! read is classified as uncovered; if locality is unreadable too, the destination
 //! lookup returns false and the packet fails closed rather than being written.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -65,9 +76,45 @@ pub(crate) enum WgKernelPathDisposition {
 /// driven without bpffs.
 pub(crate) trait WgKernelPathView {
     fn ingress(&self, ifindex: Option<u32>) -> WgKernelPathIngress;
-    /// The shim's `is_local_destination`: a local address that is not an
-    /// interface-mode NAT address.
-    fn destination_is_local(&self, dst: IpAddr, ifindex: Option<u32>) -> bool;
+    /// The shim's `is_local_destination` for the INNER destination, resolved
+    /// in the tunnel's routing domain (the second argument is the `wgN`
+    /// logical ifindex, NOT the outer ingress ifindex). See the module doc.
+    fn destination_is_local(&self, dst: IpAddr, tunnel_logical_ifindex: i32) -> bool;
+}
+
+/// #14328: resolve the LOCALITY domain for one inner destination: the routing
+/// domain of the `wgN` tunnel's logical ifindex. The OUTER ingress ifindex is
+/// never consulted: it names the underlay the ciphertext arrived on, not the
+/// instance the plaintext enters.
+///
+/// Two sources, in a deliberate order. When `ingress_domains` carries a row
+/// for the tunnel's logical ifindex, that row wins: it is the shim's own
+/// per-ifindex domain (Go's `localAddressRoutingDomain`), and a row present
+/// for the tunnel is an explicit statement about THIS interface. Otherwise
+/// the runtime forwarding state answers (`synced_routing_domain_in` — the
+/// tunnel row's `routing_domain`, the resolver the TUN-origin builder uses).
+/// The map-first order is what makes the test seam able to state a tunnel
+/// domain without a full forwarding fixture: the seam has no tunnel row in
+/// the (default, single-instance) forwarding state, and asking forwarding
+/// first would silently collapse every test domain to 0.
+///
+/// Production caveat: Go fills `ingress_domains` per ingress-adjudicated
+/// ifindex and excludes tunnel interfaces from the adjudicated set, so a
+/// production `wgN` row is normally ABSENT and the forwarding state is the
+/// production authority — it carries the tunnel row's `routing_domain` for
+/// every interface, tunnels included. The test seam is the one place a map
+/// row for a tunnel ifindex exists.
+pub(crate) fn tunnel_routing_domain(
+    forwarding: &crate::afxdp::ForwardingState,
+    tunnel_logical_ifindex: i32,
+    ingress_domains: &std::collections::HashMap<u32, u32>,
+) -> Option<u32> {
+    if let Ok(idx) = u32::try_from(tunnel_logical_ifindex) {
+        if let Some(domain) = ingress_domains.get(&idx) {
+            return Some(*domain);
+        }
+    }
+    crate::afxdp::coordinator::synced_routing_domain_in(forwarding, tunnel_logical_ifindex, 0)
 }
 
 pub(crate) fn kernel_path_disposition(
@@ -252,9 +299,14 @@ fn test_shim_maps_9594(tunnel_name: &str) -> Option<TestShimMaps9594> {
 }
 
 /// The production view: the shim's pinned maps for coverage and locality, and
-/// the runtime forwarding state for "is this a configured interface".
+/// the runtime forwarding state for "is this a configured interface" and for
+/// the tunnel's routing domain (#14328).
 pub(crate) struct ShimMapsKernelPathView {
     tunnel_name: String,
+    /// #14328: the `wgN` logical ifindex this tunnel was spawned with. The
+    /// locality question is resolved in THIS interface's routing domain; the
+    /// outer pktinfo ifindex only ever feeds `ingress`.
+    tunnel_logical_ifindex: i32,
     runtime: crate::afxdp::types::RuntimeViewReader,
     maps: std::cell::RefCell<Option<ShimMaps>>,
     last_open_attempt: std::cell::Cell<Option<std::time::Instant>>,
@@ -264,15 +316,32 @@ pub(crate) struct ShimMapsKernelPathView {
 impl ShimMapsKernelPathView {
     pub(crate) fn new(
         tunnel_name: String,
+        tunnel_logical_ifindex: i32,
         runtime: crate::afxdp::types::RuntimeViewReader,
     ) -> Self {
         Self {
             tunnel_name,
+            tunnel_logical_ifindex,
             runtime,
             maps: std::cell::RefCell::new(None),
             last_open_attempt: std::cell::Cell::new(None),
             warned_unreadable: std::cell::Cell::new(false),
         }
+    }
+
+    /// #14328: the tunnel's routing domain from the published runtime view.
+    /// `None` when the tunnel ifindex is non-positive (no logical identity to
+    /// resolve) or, with routing instances configured, names no interface —
+    /// the locality lookup then fails closed.
+    fn tunnel_domain(&self) -> Option<u32> {
+        if self.tunnel_logical_ifindex <= 0 {
+            return None;
+        }
+        crate::afxdp::coordinator::synced_routing_domain_in(
+            self.runtime.load().forwarding(),
+            self.tunnel_logical_ifindex,
+            0,
+        )
     }
 
     fn with_maps<R>(&self, f: impl FnOnce(&ShimMaps) -> R) -> Option<R> {
@@ -335,41 +404,48 @@ impl WgKernelPathView for ShimMapsKernelPathView {
         classify_ingress(ifindex, in_set, self.known_interface(idx))
     }
 
-    fn destination_is_local(&self, dst: IpAddr, ifindex: Option<u32>) -> bool {
-        let Some(ifindex) = ifindex else {
-            return false;
-        };
+    fn destination_is_local(&self, dst: IpAddr, tunnel_logical_ifindex: i32) -> bool {
+        // #14328: locality is a property of the INNER packet in the TUNNEL's
+        // routing domain. The outer ingress ifindex (which `ingress` above
+        // consumes for coverage) is deliberately not a parameter any more:
+        // keying the local map on it queried the underlay's domain for a
+        // plaintext destination, and `None` (no pktinfo) short-circuited to
+        // transit even for firewall-local inner destinations. The tunnel
+        // ifindex is taken from the call argument (the production caller
+        // passes the same `spawned_logical_ifindex` this view was built
+        // with), so the seam can be driven for any tunnel identity.
         #[cfg(test)]
         if let Some(maps) = test_shim_maps_9594(&self.tunnel_name) {
-            let Some(domain) = maps.ingress_domains.get(&ifindex) else {
+            let forwarding = self.runtime.load().forwarding().clone();
+            let Some(domain) =
+                tunnel_routing_domain(&forwarding, tunnel_logical_ifindex, &maps.ingress_domains)
+            else {
                 return false;
             };
             return shim_is_local_destination(
                 maps.interface_nat.contains(&dst),
-                maps.local.contains(&(*domain, dst)),
+                maps.local.contains(&(domain, dst)),
             );
         }
-        self.with_maps(|maps| {
-            let Ok(Some(domain)) = lookup_u32(maps.ingress_domains.fd, &ifindex) else {
-                return false;
-            };
-            match dst {
-                IpAddr::V4(v4) => {
-                    let key = shim_v4_key(v4);
-                    let local_key = ShimLocalV4Key { domain, addr: key };
-                    shim_is_local_destination(
-                        !matches!(lookup_u8(maps.nat_v4.fd, &key), Ok(None)),
-                        matches!(lookup_u8(maps.local_v4.fd, &local_key), Ok(Some(_))),
-                    )
-                }
-                IpAddr::V6(v6) => {
-                    let key = v6.octets();
-                    let local_key = ShimLocalV6Key { domain, addr: key };
-                    shim_is_local_destination(
-                        !matches!(lookup_u8(maps.nat_v6.fd, &key), Ok(None)),
-                        matches!(lookup_u8(maps.local_v6.fd, &local_key), Ok(Some(_))),
-                    )
-                }
+        let Some(domain) = self.tunnel_domain() else {
+            return false;
+        };
+        self.with_maps(|maps| match dst {
+            IpAddr::V4(v4) => {
+                let key = shim_v4_key(v4);
+                let local_key = ShimLocalV4Key { domain, addr: key };
+                shim_is_local_destination(
+                    !matches!(lookup_u8(maps.nat_v4.fd, &key), Ok(None)),
+                    matches!(lookup_u8(maps.local_v4.fd, &local_key), Ok(Some(_))),
+                )
+            }
+            IpAddr::V6(v6) => {
+                let key = v6.octets();
+                let local_key = ShimLocalV6Key { domain, addr: key };
+                shim_is_local_destination(
+                    !matches!(lookup_u8(maps.nat_v6.fd, &key), Ok(None)),
+                    matches!(lookup_u8(maps.local_v6.fd, &local_key), Ok(Some(_))),
+                )
             }
         })
         .unwrap_or(false)
@@ -470,6 +546,106 @@ mod tests {
         let iph_dst = [172u8, 16, 80, 8];
         assert_eq!(shim_v4_key(addr), u32::from_ne_bytes(iph_dst));
     }
+    #[test]
+    fn tunnel_routing_domain_resolution_14328() {
+        // Forwarding authority: the tunnel row's routing_domain in the
+        // published forwarding state, when no map row names the tunnel.
+        let mut forwarding = crate::afxdp::ForwardingState::default();
+        forwarding.has_routing_domains = true;
+        forwarding.ifindex_to_routing_domain.insert(20, 2);
+        let empty = std::collections::HashMap::new();
+        assert_eq!(tunnel_routing_domain(&forwarding, 20, &empty), Some(2));
+        // Unclaimed tunnel ifindex with instances configured: the forwarding
+        // resolver reads it as the default domain, matching its contract.
+        assert_eq!(tunnel_routing_domain(&forwarding, 99, &empty), Some(0));
+        // Non-positive logical ifindex cannot be placed -> fail closed.
+        assert_eq!(tunnel_routing_domain(&forwarding, 0, &empty), None);
+        assert_eq!(tunnel_routing_domain(&forwarding, -1, &empty), None);
+        // Single-instance node: domain 0 is the only domain that exists.
+        let single = crate::afxdp::ForwardingState::default();
+        assert_eq!(tunnel_routing_domain(&single, 20, &empty), Some(0));
+        // A map row for the tunnel's own ifindex wins over the forwarding
+        // state: it is the shim's explicit per-ifindex statement (and the
+        // only way the test seam can state a tunnel domain — the seam's
+        // forwarding state is the single-instance default). Production
+        // tunnel rows are absent from the map, so this precedence never
+        // fires there.
+        let mut domains = std::collections::HashMap::new();
+        domains.insert(20u32, 7u32);
+        assert_eq!(tunnel_routing_domain(&forwarding, 20, &domains), Some(7));
+        assert_eq!(tunnel_routing_domain(&single, 20, &domains), Some(7));
+    }
+
+    #[test]
+    fn locality_uses_tunnel_domain_not_outer_ingress_14328() {
+        // #14328 decisive regression, in the exact shape the issue prescribes:
+        // outer ifindex 10 in outer_domain 1, wg0 logical ifindex 20 in
+        // inner_domain 2, local address 2001:db8::1 present ONLY in domain 2.
+        // The pre-fix view keyed locality on the OUTER ifindex (and returned
+        // false for None), so both assertions below failed on master.
+        const OUTER: u32 = 10;
+        const TUNNEL: i32 = 20;
+        const OUTER_DOMAIN: u32 = 1;
+        const INNER_DOMAIN: u32 = 2;
+        let dst: IpAddr = "2001:db8::1".parse().unwrap();
+        let transit_dst: IpAddr = "2001:db8::2".parse().unwrap();
+        {
+            let mut seam = TEST_SHIM_MAPS_9594
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            seam.retain(|(name, _)| name != "wgt14328");
+            let mut maps = TestShimMaps9594::default();
+            maps.ingress_domains.insert(OUTER, OUTER_DOMAIN);
+            maps.ingress_domains.insert(TUNNEL as u32, INNER_DOMAIN);
+            // Present only in the OUTER domain: a transit inner destination
+            // that coincides with an underlay-local address.
+            maps.local.insert((OUTER_DOMAIN, transit_dst));
+            maps.local.insert((INNER_DOMAIN, dst));
+            seam.push(("wgt14328".to_string(), maps));
+        }
+        let view = ShimMapsKernelPathView::new(
+            "wgt14328".to_string(),
+            TUNNEL,
+            crate::afxdp::types::RuntimeViewChannel::default().reader(),
+        );
+        assert!(
+            view.destination_is_local(dst, TUNNEL),
+            "inner dst local in the TUNNEL domain must be local even though \
+             the outer ingress ifindex lives in a different routing domain"
+        );
+        // No-pktinfo parity: locality no longer takes the outer ifindex at
+        // all, so the Unknown/no-pktinfo disposition sees the same answer.
+        // (The pre-fix `destination_is_local(dst, None) == false` made
+        // `kernel_path_disposition(Unknown, true)` unreachable.)
+        assert!(
+            view.destination_is_local(dst, TUNNEL),
+            "repeated lookup (the no-pktinfo path passes the same tunnel key) stays local"
+        );
+        assert_eq!(
+            kernel_path_disposition(
+                WgKernelPathIngress::Unknown,
+                view.destination_is_local(dst, TUNNEL)
+            ),
+            WgKernelPathDisposition::Deliver,
+            "no-pktinfo host-inbound in the tunnel domain is delivered, not dropped as transit"
+        );
+        // False-local direction: a destination local only in the OUTER
+        // domain is transit in the tunnel's domain and must NOT be local.
+        assert!(
+            !view.destination_is_local(transit_dst, TUNNEL),
+            "an address local only in the outer underlay domain is transit in the tunnel domain"
+        );
+        // Transit in both domains stays transit (fail-closed preserved).
+        let nowhere: IpAddr = "2001:db8::99".parse().unwrap();
+        assert!(!view.destination_is_local(nowhere, TUNNEL));
+        // A tunnel ifindex that cannot be placed fails closed.
+        assert!(!view.destination_is_local(dst, 0));
+        assert!(!view.destination_is_local(dst, -1));
+        TEST_SHIM_MAPS_9594
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(name, _)| name != "wgt14328");
+    }
 }
 
 /// #9594 test-only view: every ingress is uncovered, and no destination is
@@ -484,7 +660,7 @@ impl WgKernelPathView for UncoveredKernelPathView {
     fn ingress(&self, _ifindex: Option<u32>) -> WgKernelPathIngress {
         WgKernelPathIngress::Uncovered
     }
-    fn destination_is_local(&self, _dst: IpAddr, _ifindex: Option<u32>) -> bool {
+    fn destination_is_local(&self, _dst: IpAddr, _tunnel_logical_ifindex: i32) -> bool {
         false
     }
 }
