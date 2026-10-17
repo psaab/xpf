@@ -2683,6 +2683,12 @@ mod tests_shim_degraded_ndp_10863;
 #[cfg(test)]
 #[path = "tests_shim_gre_classify_10651.rs"]
 mod tests_shim_gre_classify_10651;
+// #14323: the shim's IPv4 map-key encoding, executed rather than modelled
+// — same shape as above: parse_ipv4, the GRE-inner classifier, and the WG
+// kernel path's shim_v4_key must all agree with Go's BigEndian writer.
+#[cfg(test)]
+#[path = "tests_shim_ipv4_key_14323.rs"]
+mod tests_shim_ipv4_key_14323;
 // #10677: interface-NAT tunnel-fragment disposition at the shim boundary.
 #[cfg(test)]
 #[path = "tests_9782_copy.rs"]

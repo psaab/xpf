@@ -170,10 +170,12 @@ pub(crate) fn classify_ingress(
 }
 
 /// The shim's `userspace_local_v4` / `userspace_interface_nat_v4` key:
-/// `u32::from_ne_bytes` of the address octets (userspace-xdp `parse_ipv4`), which
-/// is also what Go's native-endian map encoding writes.
+/// `u32::from_be_bytes` of the address octets (#14323 — userspace-xdp
+/// `parse_ipv4` / `ipv4_key`, matching Go's `binary.BigEndian.Uint32`
+/// map writer). The pre-#14323 `from_ne_bytes` byte-reversed every
+/// non-palindromic address on little-endian hosts.
 pub(crate) fn shim_v4_key(addr: Ipv4Addr) -> u32 {
-    u32::from_ne_bytes(addr.octets())
+    u32::from_be_bytes(addr.octets())
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -275,13 +277,48 @@ fn lookup_u32<K>(fd: libc::c_int, key: &K) -> std::io::Result<Option<u32>> {
 /// `ShimMapsKernelPathView` BEFORE bpffs. Keyed by tunnel name like
 /// `TEST_WG_TUN_STANDINS`, so a cell configuring one tunnel cannot change what
 /// another test's control thread sees.
+///
+/// #14323: `local` / `interface_nat` store the ENCODED map keys
+/// (`shim_v4_key` for IPv4, octets for IPv6), not `IpAddr` — so a cell
+/// populates them through `insert_local` / `insert_interface_nat`, which
+/// route through the production encoding, and the test branch of
+/// `destination_is_local` probes with the same encoded keys as the bpffs
+/// branch. Storing `IpAddr` bypassed `shim_v4_key` entirely, so the seam
+/// could not catch an endian regression.
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub(crate) struct TestShimMaps9594 {
     pub(crate) ingress: std::collections::HashSet<u32>,
-    pub(crate) local: std::collections::HashSet<(u32, IpAddr)>,
-    pub(crate) interface_nat: std::collections::HashSet<IpAddr>,
+    pub(crate) local_v4: std::collections::HashSet<(u32, u32)>,
+    pub(crate) local_v6: std::collections::HashSet<(u32, [u8; 16])>,
+    pub(crate) interface_nat_v4: std::collections::HashSet<u32>,
+    pub(crate) interface_nat_v6: std::collections::HashSet<[u8; 16]>,
     pub(crate) ingress_domains: std::collections::HashMap<u32, u32>,
+}
+
+#[cfg(test)]
+impl TestShimMaps9594 {
+    pub(crate) fn insert_local(&mut self, domain: u32, dst: IpAddr) {
+        match dst {
+            IpAddr::V4(v4) => {
+                self.local_v4.insert((domain, shim_v4_key(v4)));
+            }
+            IpAddr::V6(v6) => {
+                self.local_v6.insert((domain, v6.octets()));
+            }
+        }
+    }
+
+    pub(crate) fn insert_interface_nat(&mut self, dst: IpAddr) {
+        match dst {
+            IpAddr::V4(v4) => {
+                self.interface_nat_v4.insert(shim_v4_key(v4));
+            }
+            IpAddr::V6(v6) => {
+                self.interface_nat_v6.insert(v6.octets());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -422,10 +459,24 @@ impl WgKernelPathView for ShimMapsKernelPathView {
             else {
                 return false;
             };
-            return shim_is_local_destination(
-                maps.interface_nat.contains(&dst),
-                maps.local.contains(&(domain, dst)),
-            );
+            // #14323: probe with the same encoded keys as the bpffs branch
+            // below, so the seam exercises shim_v4_key.
+            return match dst {
+                IpAddr::V4(v4) => {
+                    let key = shim_v4_key(v4);
+                    shim_is_local_destination(
+                        maps.interface_nat_v4.contains(&key),
+                        maps.local_v4.contains(&(domain, key)),
+                    )
+                }
+                IpAddr::V6(v6) => {
+                    let key = v6.octets();
+                    shim_is_local_destination(
+                        maps.interface_nat_v6.contains(&key),
+                        maps.local_v6.contains(&(domain, key)),
+                    )
+                }
+            };
         }
         let Some(domain) = self.tunnel_domain() else {
             return false;
@@ -540,11 +591,50 @@ mod tests {
     }
 
     #[test]
-    fn v4_key_matches_the_shims_native_endian_parse_9594() {
-        // userspace-xdp parse_ipv4: `u32::from_ne_bytes([iph[16], iph[17], iph[18], iph[19]])`.
+    fn v4_key_matches_the_shims_big_endian_parse_14323() {
+        // #14323 decisive regression: userspace-xdp parse_ipv4 stores
+        // dst_v4 as u32::from_be_bytes of the header octets, and Go writes
+        // the maps with binary.BigEndian.Uint32. 172.16.80.8 is
+        // non-palindromic, so from_ne_bytes (0x0850_10ac) cannot pass.
         let addr = Ipv4Addr::new(172, 16, 80, 8);
-        let iph_dst = [172u8, 16, 80, 8];
-        assert_eq!(shim_v4_key(addr), u32::from_ne_bytes(iph_dst));
+        assert_eq!(shim_v4_key(addr), 0xac10_5008);
+        assert_eq!(shim_v4_key(addr), u32::from_be_bytes(addr.octets()));
+        // Palindromic control: byte-reversal-invariant, passes either way.
+        assert_eq!(
+            shim_v4_key(Ipv4Addr::new(10, 1, 1, 10)),
+            u32::from_be_bytes([10, 1, 1, 10])
+        );
+    }
+
+    #[test]
+    fn test_seam_destination_is_local_uses_encoded_keys_14323() {
+        // #14323: the seam must route through shim_v4_key. A local entry
+        // for the byte-REVERSED address (8.80.16.172) must not make the
+        // real destination (172.16.80.8) local, and vice versa.
+        let mut maps = TestShimMaps9594::default();
+        maps.ingress_domains.insert(7, 0);
+        maps.insert_local(0, IpAddr::V4(Ipv4Addr::new(8, 80, 16, 172)));
+        let reversed_only = ShimMapsKernelPathView::new(
+            "seam-14323-reversed".to_string(),
+            7,
+            crate::afxdp::types::RuntimeViewChannel::default().reader(),
+        );
+        TEST_SHIM_MAPS_9594
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(("seam-14323-reversed".to_string(), maps));
+        assert!(
+            !reversed_only.destination_is_local(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)), 7),
+            "byte-reversed local entry must not claim the real destination (#14323)"
+        );
+        assert!(
+            reversed_only.destination_is_local(IpAddr::V4(Ipv4Addr::new(8, 80, 16, 172)), 7),
+            "the stored local address itself must still resolve"
+        );
+        TEST_SHIM_MAPS_9594
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(name, _)| name != "seam-14323-reversed");
     }
     #[test]
     fn tunnel_routing_domain_resolution_14328() {
@@ -599,8 +689,8 @@ mod tests {
             maps.ingress_domains.insert(TUNNEL as u32, INNER_DOMAIN);
             // Present only in the OUTER domain: a transit inner destination
             // that coincides with an underlay-local address.
-            maps.local.insert((OUTER_DOMAIN, transit_dst));
-            maps.local.insert((INNER_DOMAIN, dst));
+            maps.insert_local(OUTER_DOMAIN, transit_dst);
+            maps.insert_local(INNER_DOMAIN, dst);
             seam.push(("wgt14328".to_string(), maps));
         }
         let view = ShimMapsKernelPathView::new(
