@@ -7336,6 +7336,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 related_admit,
                                 budget_key,
                                 policy_src_ip,
+                                policy_icmp,
                             } => {
                                 if is_injected {
                                     crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
@@ -7361,6 +7362,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 now_secs,
                                                 related_admit,
                                                 policy_src_ip,
+                                                policy_icmp,
                                             ))
                                         }
                                         _ => None,
@@ -7452,6 +7454,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 related_admit,
                                 budget_key,
                                 policy_src_ip,
+                                policy_icmp,
                             } => {
                                 if is_injected {
                                     crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
@@ -7480,6 +7483,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 now_secs,
                                                 related_admit,
                                                 policy_src_ip,
+                                                policy_icmp,
                                             ))
                                         }
                                         _ => None,

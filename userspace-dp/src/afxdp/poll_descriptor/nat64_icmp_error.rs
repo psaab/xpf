@@ -92,16 +92,29 @@ pub(super) fn try_translate_nat64_icmp_error(
             // the session's synthetic destination (`orig_dst_v6`) — NAT64
             // prefixes here are /96-only (config gate in `from_snapshots`),
             // so the split is exact.
-            let Some(router_v4) = packet_frame.get(l3 + 12..l3 + 16) else {
+            let Some(router_v4) = packet_frame
+                .get(l3 + 12..l3 + 16)
+                .and_then(|b| <[u8; 4]>::try_from(b).ok().map(Ipv4Addr::from))
+            else {
                 // #14123: the matcher already charged the F-077 token; a
                 // matched-but-unbuildable arm must refund before declining,
                 // or a transient failure starves later valid errors.
                 sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
                 return EmbeddedIcmpReversal::NotHandled;
             };
+            // #14316: capture the original ICMPv4 type/code before the
+            // RFC 7915 translation rewrites them into ICMPv6 numbers, and
+            // retain the v4 sender so the queued gate's #14123
+            // PROTO_ICMP arm can fire. Fail closed (refund + drop) if
+            // either cannot be read — never judge the Pref64-mapped
+            // source or the translated type/code.
+            let Some(policy_icmp) = super::policy_packet_icmp(packet_frame, meta) else {
+                sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
+                return EmbeddedIcmpReversal::Dropped;
+            };
             let mut src_v6_octets = [0u8; 16];
             src_v6_octets[..12].copy_from_slice(&orig_dst_v6.octets()[..12]);
-            src_v6_octets[12..].copy_from_slice(router_v4);
+            src_v6_octets[12..].copy_from_slice(&router_v4.octets());
             let src_v6 = Ipv6Addr::from(src_v6_octets);
 
             let arrival_zone = actual_embedded_icmp_ingress_zone(
@@ -176,7 +189,8 @@ pub(super) fn try_translate_nat64_icmp_error(
                         related_admit: fwd_egress_zone != 0
                             && arrival_zone == fwd_egress_zone
                             && outer_is_pmtud_error(packet_frame, meta),
-                        policy_src_ip: None,
+                        policy_src_ip: Some(IpAddr::V4(router_v4)),
+                        policy_icmp: Some(policy_icmp),
                         budget_key,
                     }
                 }
@@ -200,6 +214,12 @@ pub(super) fn try_translate_nat64_icmp_error(
             let Some(original_src) =
                 queued_embedded_icmp_identity(packet_frame).map(|(flow, _)| flow.src_ip)
             else {
+                sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
+                return EmbeddedIcmpReversal::Dropped;
+            };
+            // #14316: capture the original ICMPv6 type/code before the
+            // RFC 7915 §5.2 translation rewrites them into ICMPv4 numbers.
+            let Some(policy_icmp) = super::policy_packet_icmp(packet_frame, meta) else {
                 sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
                 return EmbeddedIcmpReversal::Dropped;
             };
@@ -272,6 +292,7 @@ pub(super) fn try_translate_nat64_icmp_error(
                             && arrival_zone == fwd_ingress_zone
                             && outer_is_pmtud_error(packet_frame, meta),
                         policy_src_ip: Some(original_src),
+                        policy_icmp: Some(policy_icmp),
                         budget_key,
                     }
                 }
