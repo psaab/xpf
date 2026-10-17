@@ -695,7 +695,7 @@ fn an_address_only_import_refuses_live_reverse_identity_contention_11475() {
     let address_only_allocator = PortAllocator::new(1, 20_000, 20_002);
     let address_only_owner = flow("10.0.61.99", 20_000);
     let owned = address_only_allocator
-        .reserve_address_only(address_only_owner, rec.translated_ip, NatHolder::Untracked)
+        .reserve_address_only(address_only_owner, rec.translated_ip, 0, NatHolder::Untracked)
         .unwrap();
     rec.src_ip = "10.0.61.50".parse().unwrap();
     set_remote_scope(&mut rec, Some(("8.8.8.8".parse().unwrap(), 443)));
@@ -917,6 +917,7 @@ fn a_pat_import_refuses_live_address_only_reverse_identity_11475() {
         .reserve_address_only(
             address_only_owner,
             IpAddr::V4(addrs[0]),
+            0,
             NatHolder::Untracked,
         )
         .unwrap();
@@ -2946,6 +2947,7 @@ fn synced_pat_reserve_refuses_when_live_flow_cap_is_full_11692() {
             .reserve_address_only(
                 flow(src, sport),
                 IpAddr::V4(addrs[0]),
+                0,
                 NatHolder::Untracked,
             )
             .expect("address-only token fills one tracked-flow slot");

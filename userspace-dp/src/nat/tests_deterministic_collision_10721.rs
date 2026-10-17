@@ -52,7 +52,7 @@ fn deterministic_v6() -> DeterministicV6 {
 fn reserve_v4_identity(alloc: &PortAllocator, port: u16) {
     let address_only = flow(IpAddr::V4(V4_SUBSCRIBER), port);
     let translated = alloc
-        .reserve_address_only(address_only, IpAddr::V4(POOL_IP), NatHolder::Untracked)
+        .reserve_address_only(address_only, IpAddr::V4(POOL_IP), 0, NatHolder::Untracked)
         .expect("address-only owner reserves its wire identity");
     assert_eq!(translated.port, port);
 }
@@ -60,7 +60,7 @@ fn reserve_v4_identity(alloc: &PortAllocator, port: u16) {
 fn reserve_v6_identity(alloc: &PortAllocator, port: u16) {
     let address_only = flow(IpAddr::V6(V6_SUBSCRIBER), port);
     let translated = alloc
-        .reserve_address_only(address_only, IpAddr::V4(POOL_IP), NatHolder::Untracked)
+        .reserve_address_only(address_only, IpAddr::V4(POOL_IP), 0, NatHolder::Untracked)
         .expect("address-only owner reserves its wire identity");
     assert_eq!(translated.port, port);
 }
