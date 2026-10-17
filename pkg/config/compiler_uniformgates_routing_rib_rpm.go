@@ -214,6 +214,19 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
+	// #14425: a merged routing term carrying both `then accept` and
+	// `then reject` resolved last-write-wins (group action won). Strict
+	// commits reject; tolerant loads warn and force reject.
+	if err := validateRoutingTermTerminalConflictStrict(cfg); err != nil {
+		if opts.lenientRoutingTermTerminalConflict {
+			failClosedRoutingTermTerminalConflicts(cfg)
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("routing policy term terminal-action conflict (downgraded to warning on tolerant path; conflicting terms fail closed to reject): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #12517: a token past a recognized `then` action's operands, or a then-side
 	// from-match word, was dropped or reinterpreted as a match by the policy
 	// readers. Deliberately after #11780 and #11779 so their diagnostics win

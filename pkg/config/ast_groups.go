@@ -644,6 +644,16 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				*dst = append(*dst, s)
 				continue
 			}
+			// #14425: a group routing-term terminal (then accept/reject,
+			// accept/reject inside then, or packed term ... then X) must
+			// materialize beside ANY peer terminal — authored inline or
+			// group-adopted — so the compiler accumulates both actions
+			// and the strict gate rejects distinct actions. Without this
+			// the inline-wins override silently dropped the group action.
+			if peer != nil && isRoutingTermThenAction14425(ancestorPath, s) {
+				*dst = append(*dst, s)
+				continue
+			}
 			if bracketedPeer := bracketedAddressPeer9859(ancestorPath, *dst, s); bracketedPeer != nil &&
 				mergeBracketedAddressInto9859(ancestorPath, *dst, bracketedPeer, s) {
 				appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{bracketedPeer}, markers)
@@ -1131,7 +1141,8 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			if len(s.Keys) == 1 && hasMatchingLeaf(*dst, s.Keys) &&
 				(!isDefaultPolicyGroupStanza12923(ancestorPath, s) ||
 					!groupDefaultPolicyStanzaAdopted12923(budget, *dst)) &&
-				!packedTailLeafExempts4325(ancestorPath, *dst, s) {
+				!packedTailLeafExempts4325(ancestorPath, *dst, s) &&
+				!isRoutingTermThenAction14425(ancestorPath, s) {
 				continue
 			}
 			hadChildren := len(s.Children) > 0

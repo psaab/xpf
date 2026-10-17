@@ -1598,6 +1598,10 @@ type compileOpts struct {
 	// `from`-leaf gate to a warning on tolerant loads; matching fails closed by
 	// changing any affected term to reject.
 	lenientPolicyFromUnknown11779 bool
+	// lenientRoutingTermTerminalConflict (#14425) downgrades the routing
+	// policy-statement term conflicting-terminal-action gate to a warning
+	// on tolerant loads; conflicting terms fail closed to reject.
+	lenientRoutingTermTerminalConflict bool
 	// lenientRouteDispositionConflict (#5633) downgrades the static-route
 	// disposition-conflict gate (validateStaticRouteDispositionConflictStrict)
 	// from a hard compile error to a cfg.Warnings entry. Repeated same-prefix
@@ -3422,6 +3426,8 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyRouteMapSeq:               true,
 		lenientPolicyNextAction11780:           true,
 		lenientPolicyDefaultConflict14433:      true,
+		lenientRoutingTermTerminalConflict:     true,
+		lenientPolicyFromUnknown11779:          true,
 		lenientRouteDispositionConflict:        true,
 		lenientStaticNextHopFamily:             true,
 		lenientStaticRouteCIDRMaskSpelling:     true,

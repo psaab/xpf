@@ -72,7 +72,10 @@ func TestExpandGroupsRetainsPackedRouteFilterRange12529(t *testing.T) {
 // statement: width over-consumption would swallow `then accept`
 // into the filter and silently compile rf=[] (GLM R1 F1).
 func TestExpandGroupsRouteFilterMidTailNotOverConsumed12529(t *testing.T) {
-	text := "groups { G { policy-options { policy-statement P { term T from route-filter 10.0.0.0/8 upto /24 then accept; } } } }\n" +
+	// Inline action matches the group's (`reject`): before #14425 the
+	// group accept silently overrode/was dropped; identical actions
+	// remain a legal redundancy, distinct ones now reject (#14425).
+	text := "groups { G { policy-options { policy-statement P { term T from route-filter 10.0.0.0/8 upto /24 then reject; } } } }\n" +
 		"policy-options { apply-groups G; policy-statement P { term T then reject; } }"
 	tree, errs := config.NewParser(text).Parse()
 	if len(errs) != 0 {

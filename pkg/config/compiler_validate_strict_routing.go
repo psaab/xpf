@@ -2230,3 +2230,83 @@ func policyThenTailError12517(policy string, term *PolicyTerm) error {
 			policy, term.Name, action, value)
 	}
 }
+
+// validateRoutingTermTerminalConflictStrict hard-rejects a routing
+// policy-statement term carrying more than one DISTINCT terminal action
+// (accept + reject) — #14425 (DR16-H3), mirroring #4375 (firewall) and
+// #3043 (security policy).
+//
+// Group expansion merges a group term into its same-name inline peer:
+// the merged `then` container carries both distinct-keyed leaves, and
+// the compiler's single Action field resolved last-write-wins (group
+// children sort after inline, so the group's action won). By render
+// time only the winner existed. TerminalActions retains every authored
+// accept/reject so this gate sees the conflict. Repeating the SAME
+// action is a redundancy, not a conflict. Non-terminal modifiers
+// (next-hop, local-preference, metric, community, ...) are not recorded
+// and coexist with a terminal.
+func validateRoutingTermTerminalConflictStrict(cfg *Config) error {
+	if cfg == nil || cfg.PolicyOptions.PolicyStatements == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.PolicyOptions.PolicyStatements))
+	for name := range cfg.PolicyOptions.PolicyStatements {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		ps := cfg.PolicyOptions.PolicyStatements[name]
+		if ps == nil {
+			continue
+		}
+		for _, term := range ps.Terms {
+			if term == nil || !routingTermHasConflictingActions(term.TerminalActions) {
+				continue
+			}
+			seen := make(map[string]bool, len(term.TerminalActions))
+			distinct := make([]string, 0, len(term.TerminalActions))
+			for _, a := range term.TerminalActions {
+				if !seen[a] {
+					seen[a] = true
+					distinct = append(distinct, a)
+				}
+			}
+			return fmt.Errorf(
+				"policy-options policy-statement %q term %q: conflicting terminal actions %s — a term may have at most one terminal action (accept/reject are mutually exclusive) (#14425)",
+				name, term.Name, strings.Join(distinct, " and "))
+		}
+	}
+	return nil
+}
+
+func routingTermHasConflictingActions(actions []string) bool {
+	if len(actions) < 2 {
+		return false
+	}
+	first := actions[0]
+	for _, a := range actions[1:] {
+		if a != first {
+			return true
+		}
+	}
+	return false
+}
+
+// failClosedRoutingTermTerminalConflicts forces conflicting terms to
+// reject on the tolerant path, so neither authored action can win.
+func failClosedRoutingTermTerminalConflicts(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	for _, ps := range cfg.PolicyOptions.PolicyStatements {
+		if ps == nil {
+			continue
+		}
+		for _, term := range ps.Terms {
+			if term != nil && routingTermHasConflictingActions(term.TerminalActions) {
+				term.Action = "reject"
+				term.NextPolicy = false
+			}
+		}
+	}
+}
