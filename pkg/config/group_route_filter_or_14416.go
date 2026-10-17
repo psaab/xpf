@@ -89,3 +89,58 @@ func routeFilterMemberExists14416(dst []*Node, src *Node) bool {
 	}
 	return false
 }
+
+// #14741: cross-twin dedup for the adoption above. One group body is
+// merged once per same-keyed destination container at a level (#9802
+// fan-out routes the same body into every policy-statement/term/from
+// twin), and each merge sees only its own twin's children, so
+// routeFilterMemberExists14416 cannot see a sibling adopted into
+// another twin of the same `from` level. The compiler folds the
+// twins' from bags into one term, so adopting into both twins
+// duplicates the member. The expansion budget records (destination
+// level, member identity) for every adoption; the second merge into
+// a twin of the same level is then a no-op. The destination level is
+// keyed by ancestor path (which carries the term identity) plus the
+// inline peer's member identity: twins of one level are merged
+// against peers carrying the same inline member, while distinct
+// terms and distinct inline members never collide.
+func routeFilterLevelKey14741(ancestorPath [][]string, peer *Node) string {
+	var b strings.Builder
+	for _, pk := range ancestorPath {
+		b.WriteString(strings.Join(pk, "\x1f"))
+		b.WriteByte('\x1e')
+	}
+	if peer != nil {
+		b.WriteString(routeFilterMemberIdentity14416(peer))
+	}
+	return b.String()
+}
+
+// routeFilterAlreadyAdopted14741 reports whether this expansion has
+// already adopted src's member at the destination level peer stands
+// in. A nil budget (direct mergeNodes callers in tests) never
+// suppresses: those callers merge once per level by construction.
+func (b *groupExpandBudget) routeFilterAlreadyAdopted14741(ancestorPath [][]string, peer, src *Node) bool {
+	if b == nil || len(b.adoptedRouteFilters14741) == 0 {
+		return false
+	}
+	members := b.adoptedRouteFilters14741[routeFilterLevelKey14741(ancestorPath, peer)]
+	return members[routeFilterMemberIdentity14416(src)]
+}
+
+// recordRouteFilterAdopted14741 notes src's adoption at peer's level.
+func (b *groupExpandBudget) recordRouteFilterAdopted14741(ancestorPath [][]string, peer, src *Node) {
+	if b == nil {
+		return
+	}
+	if b.adoptedRouteFilters14741 == nil {
+		b.adoptedRouteFilters14741 = map[string]map[string]bool{}
+	}
+	key := routeFilterLevelKey14741(ancestorPath, peer)
+	members := b.adoptedRouteFilters14741[key]
+	if members == nil {
+		members = map[string]bool{}
+		b.adoptedRouteFilters14741[key] = members
+	}
+	members[routeFilterMemberIdentity14416(src)] = true
+}
