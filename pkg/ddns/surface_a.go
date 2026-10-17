@@ -1118,6 +1118,28 @@ func (m *SurfaceAManager) reconcileScopeLocked(ctx context.Context, sc SurfaceAS
 					"fqdn", sc.FQDN)
 				return nil
 			}
+			// #14438 (DR18-H2): #3735-equivalent H03 guard for the Pass-1
+			// address-loss path. The scope is still configured, so the current
+			// provider for this scope IS sc.Provider — comparing its fingerprint
+			// against the stored owned.BackendFingerprint is exactly Pass 2's
+			// classifyOwnedBackend check for this path (provider-gone cannot
+			// occur here: a gone provider means the scope is not in desired
+			// and takes Pass 2). Without this, backendFor(sc) resolves the
+			// CURRENT (possibly edited) endpoint and the delete lands at the
+			// wrong endpoint, false-success-dropping ownership while the old
+			// record stays live with no alarm. On a proven mismatch: keep
+			// ownership + raise the orphan alarm (noteOrphan is idempotent),
+			// return nil mirroring Pass 2's continue — no wire delete, no
+			// backoff/error churn. Skip when a fixed test backend is injected
+			// (m.backend != nil), mirroring classifyOwnedBackend, which
+			// reports ownedBackendOK for a fixed backend. Both fingerprints
+			// must be non-empty to prove a mismatch, as in classifyOwnedBackend.
+			if m.backend == nil && owned.BackendFingerprint != "" {
+				if cur := backendFingerprint(sc.Provider); cur != "" && cur != owned.BackendFingerprint {
+					m.noteOrphan(owned, cur, orphanReasonEndpointChanged, now)
+					return nil
+				}
+			}
 			backend, err := m.backendFor(sc)
 			if err != nil {
 				// Could not even build the backend: arm the SAME per-scope backoff the

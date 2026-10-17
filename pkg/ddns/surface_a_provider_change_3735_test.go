@@ -445,3 +445,110 @@ func TestSurfaceAFingerprintPersistedNoSecretOnDisk(t *testing.T) {
 		t.Fatalf("#2053: the TSIG secret must NOT be written to the ownership state file")
 	}
 }
+
+// lostObserver returns a definitive address loss (ok=true, invalid Addr) for every
+// scope — the Pass-1 address-loss trigger. fixedObserver requires a parseable
+// address, so the Pass-1 fixtures define their own loss observer (DR18-H2).
+func lostObserver() AddressObserver {
+	return func(context.Context, SurfaceAScope) (AddressObservation, bool) {
+		return AddressObservation{}, true
+	}
+}
+
+// DR18-H2 / #14438 — a Pass-1 address-loss withdraw AFTER an in-place provider
+// endpoint edit must NOT be issued at the mutated NEW endpoint. The scope is
+// still configured, so it never reaches Pass 2's classifyOwnedBackend guard;
+// without a Pass-1 fingerprint check it called backendFor(sc) (the CURRENT
+// provider) and withdrew at ns-b, false-success-dropping ownership while the
+// OLD record stayed live with no orphan alarm.
+//
+// FAIL-ON-REVERT: remove the Pass-1 fingerprint guard in reconcileScopeLocked
+// and the withdraw lands at ns-b — ns-b deletes becomes 1, ownership is dropped
+// (Scopes==0), and Orphaned stays 0, so every assertion below goes RED.
+func TestSurfaceAPass1AddressLossWithdrawWrongEndpointOrphans(t *testing.T) {
+	reg := newEndpointRegistry()
+	now := time.Unix(1_700_000_000, 0)
+	m := newSurfaceAProviderChangeManager(t, reg, func() time.Time { return now })
+
+	scOld, provOld := providerScope("prov", "ns-a.example.net:53", "wan.example.net")
+	if err := m.Reconcile(context.Background(), []SurfaceAScope{scOld}, fixedObserver("203.0.113.5"), nil,
+		map[string]*config.DDNSProvider{"prov": provOld}); err != nil {
+		t.Fatalf("initial publish: %v", err)
+	}
+	if got := len(reg.get("ns-a.example.net:53").upserts); got != 1 {
+		t.Fatalf("initial publish must land at ns-a; upserts=%d", got)
+	}
+
+	// Same provider NAME edited in place to ns-b; address lost (Pass 1, binding
+	// still configured).
+	scNew, _ := providerScope("prov", "ns-b.example.net:53", "wan.example.net")
+	provNew := &config.DDNSProvider{Name: "prov", Backend: "rfc2136", UpdateServer: "ns-b.example.net:53"}
+	scNew.Provider = provNew
+	if err := m.Reconcile(context.Background(), []SurfaceAScope{scNew}, lostObserver(), nil,
+		map[string]*config.DDNSProvider{"prov": provNew}); err != nil {
+		t.Fatalf("address-loss reconcile must not churn an error (terminal orphan): %v", err)
+	}
+
+	if got := len(reg.get("ns-b.example.net:53").deletes); got != 0 {
+		t.Fatalf("DR18-H2: a Pass-1 address-loss withdraw must NOT be issued at the mutated new endpoint; ns-b deletes=%d", got)
+	}
+	if got := len(reg.get("ns-a.example.net:53").deletes); got != 0 {
+		t.Fatalf("DR18-H2: no delete may be issued at the old endpoint either (deferred); ns-a deletes=%d", got)
+	}
+	st := m.Stats()
+	if st.DeleteOK != 0 {
+		t.Fatalf("DR18-H2: no delete may be counted as success; stats=%+v", st)
+	}
+	if st.Scopes != 1 {
+		t.Fatalf("DR18-H2: ownership must be KEPT (no false-success drop); scopes=%d", st.Scopes)
+	}
+	if st.Orphaned != 1 {
+		t.Fatalf("DR18-H2: a wrong-endpoint Pass-1 withdraw must raise exactly one orphan alarm; stats=%+v", st)
+	}
+	views := m.StatusViews([]SurfaceAScope{scNew})
+	if orphanRow(views) == nil {
+		t.Fatalf("DR18-H2: the Pass-1 orphan must be operator-visible; views=%+v", views)
+	}
+	// Idempotent: a second loss pass must not re-alarm or attempt a delete.
+	if err := m.Reconcile(context.Background(), []SurfaceAScope{scNew}, lostObserver(), nil,
+		map[string]*config.DDNSProvider{"prov": provNew}); err != nil {
+		t.Fatalf("second address-loss reconcile: %v", err)
+	}
+	if st := m.Stats(); st.Orphaned != 1 || st.Scopes != 1 {
+		t.Fatalf("DR18-H2: orphan alarm must be idempotent; stats=%+v", st)
+	}
+	if got := len(reg.get("ns-b.example.net:53").deletes); got != 0 {
+		t.Fatalf("DR18-H2: second pass must not delete at ns-b; deletes=%d", got)
+	}
+}
+
+// DR18-H2 control — a normal Pass-1 address-loss withdraw (endpoint UNCHANGED)
+// still deletes at the original endpoint and drops ownership with no alarm.
+func TestSurfaceAPass1AddressLossWithdrawSameEndpointDeletes(t *testing.T) {
+	reg := newEndpointRegistry()
+	now := time.Unix(1_700_000_000, 0)
+	m := newSurfaceAProviderChangeManager(t, reg, func() time.Time { return now })
+
+	scOld, provOld := providerScope("prov", "ns-a.example.net:53", "wan.example.net")
+	if err := m.Reconcile(context.Background(), []SurfaceAScope{scOld}, fixedObserver("203.0.113.5"), nil,
+		map[string]*config.DDNSProvider{"prov": provOld}); err != nil {
+		t.Fatalf("initial publish: %v", err)
+	}
+	if err := m.Reconcile(context.Background(), []SurfaceAScope{scOld}, lostObserver(), nil,
+		map[string]*config.DDNSProvider{"prov": provOld}); err != nil {
+		t.Fatalf("address-loss reconcile: %v", err)
+	}
+	if got := len(reg.get("ns-a.example.net:53").deletes); got != 1 {
+		t.Fatalf("control: same-endpoint address-loss withdraw must delete at ns-a; deletes=%d", got)
+	}
+	st := m.Stats()
+	if st.Scopes != 0 {
+		t.Fatalf("control: ownership must be dropped after a successful withdraw; scopes=%d", st.Scopes)
+	}
+	if st.Orphaned != 0 {
+		t.Fatalf("control: same-endpoint withdraw must not alarm; stats=%+v", st)
+	}
+	if st.DeleteOK != 1 {
+		t.Fatalf("control: exactly one delete must succeed; stats=%+v", st)
+	}
+}
