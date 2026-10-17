@@ -38,6 +38,15 @@ const (
 	// StateDisabled so an operator can tell a genuinely-off listener from one
 	// that failed to come up.
 	StateFailed
+	// StateStale: the listener IS serving a socket, but not at the address
+	// the configuration currently resolves to (#14582) — it sits on the
+	// loopback fallback because the configured interface had no usable
+	// address at resolution time, or on an interface address that has since
+	// been replaced/vanished. Off-box callers to the configured address get
+	// RST while the socket lives elsewhere, so this must never render as
+	// Listening. Addr is the address ACTUALLY bound (the fallback or the
+	// vanished address), so the operator sees where it really is.
+	StateStale
 )
 
 // Listener is the effective state of one management listener.
@@ -45,7 +54,9 @@ type Listener struct {
 	// Addr is the bind address. For StateListening it is the ACTUAL bound
 	// address (post-clamp, post-bind — an ephemeral :0 request resolves to its
 	// concrete port); for StateFailed it is the address that failed to bind (or
-	// "" when unknown); for StateDisabled it is ignored.
+	// "" when unknown); for StateStale it is the address actually bound (the
+	// loopback fallback or the vanished interface address, #14582); for
+	// StateDisabled it is ignored.
 	Addr string
 	// State is the listener's operational state.
 	State State
@@ -53,6 +64,7 @@ type Listener struct {
 
 // render formats one listener cell: the address when serving, an
 // address-tagged "(bind failed)" (or bare "bind failed") when failed,
+// "(stale bind)" when serving at a superseded/fallback address,
 // "disabled" when off.
 func (l Listener) render() string {
 	switch l.State {
@@ -63,6 +75,11 @@ func (l Listener) render() string {
 			return l.Addr + " (bind failed)"
 		}
 		return "bind failed"
+	case StateStale:
+		if l.Addr != "" {
+			return l.Addr + " (stale bind)"
+		}
+		return "stale bind"
 	default: // StateDisabled
 		return "disabled"
 	}

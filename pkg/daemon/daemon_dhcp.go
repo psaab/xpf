@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -130,6 +131,14 @@ func (d *Daemon) onDHCPAddressChange() {
 			// re-renders IPsec via applyConfig (step 6); this closes the
 			// management-only gap so swanctl re-binds to the new IP.
 			d.reapplyIPsecForLeaseChange(activeCfg)
+			// #14582: same management-only gap for web-management. A lifeline
+			// (e.g. fxp0) lease change to a new address does not recompile, so
+			// a `web-management https interface fxp0` leg would otherwise keep
+			// the stale lease address (or the loopback fallback) until a later
+			// commit. Re-resolve the bind from the active config; the seam
+			// gates on the bound interface actually being DHCP-managed so an
+			// unrelated renew never churns the listener.
+			d.rebindWebMgmtForLeaseChange(activeCfg)
 		}
 	}
 }
@@ -192,6 +201,98 @@ func (d *Daemon) reapplyIPsecForLeaseChange(cfg *config.Config) {
 	// Success: clear any prior pending state (a no-op on the common healthy
 	// path, where nothing was pending and nothing is logged).
 	d.clearIPsecRebindPending()
+}
+
+// webMgmtRebindApply is the reconcile seam for the #14582 lease-change
+// rebind, a package var (like mgmtReassertApply) so a test can observe
+// WHETHER the rebind was driven. Production code must never mutate it.
+var webMgmtRebindApply = func(d *Daemon, cfg *config.Config) error {
+	return d.reconcileWebManagement(cfg)
+}
+
+// webMgmtBindsToDHCPInterface reports whether any web-management HTTP/HTTPS
+// leg is bound (via resolveAPIBinds' interface resolution) to an interface
+// that has a DHCP/DHCPv6 unit in cfg. It gates the lease-change rebind so
+// an unrelated renew never churns the management listener (#14582, mirroring
+// ipsec.HasDHCPBoundGateway's gating for #2884).
+func webMgmtBindsToDHCPInterface(cfg *config.Config) bool {
+	if cfg == nil || cfg.System.Services == nil || cfg.System.Services.WebManagement == nil {
+		return false
+	}
+	wm := cfg.System.Services.WebManagement
+	for _, ref := range []string{wm.HTTPInterface, wm.HTTPSInterface} {
+		if ref == "" {
+			continue
+		}
+		if interfaceRefHasDHCPUnit(cfg, ref) {
+			return true
+		}
+	}
+	return false
+}
+
+// interfaceRefHasDHCPUnit reports whether the authored Junos ref (e.g.
+// "fxp0.0" or "ge-0/0/0.0") names a unit with dhcp/dhcpv6 enabled. A bare
+// interface ref matches any unit of that interface. Mirrors
+// ipsec.interfaceRefIsDHCP's base/unit parsing (SplitInterfaceUnitRef) so
+// the two derivations cannot drift on unit handling.
+func interfaceRefHasDHCPUnit(cfg *config.Config, ref string) bool {
+	split := cfg.SplitInterfaceUnitRef(ref)
+	ifc, ok := cfg.Interfaces.Interfaces[split.Base]
+	if !ok || ifc == nil {
+		return false
+	}
+	if !split.HasUnit {
+		for _, u := range ifc.Units {
+			if u != nil && (u.DHCP || u.DHCPv6) {
+				return true
+			}
+		}
+		return false
+	}
+	unit, err := strconv.Atoi(split.UnitTok)
+	if err != nil {
+		return false
+	}
+	u := ifc.Units[unit]
+	return u != nil && (u.DHCP || u.DHCPv6)
+}
+
+// rebindWebMgmtForLeaseChange re-resolves the web-management bind after a
+// DHCP lease change on the management-only fast path (#14582). It mirrors
+// reapplyIPsecForLeaseChange: gated on the bound interface actually being
+// DHCP-managed, serialized under applySem, and non-fatal — a failed rebind
+// keeps the previous listener (fail-safe in reconcileTo) and the degraded
+// state keeps the 30s re-assert owner re-driving until it converges.
+func (d *Daemon) rebindWebMgmtForLeaseChange(cfg *config.Config) {
+	if cfg == nil || d.mgmt.Load() == nil {
+		return
+	}
+	if !webMgmtBindsToDHCPInterface(cfg) {
+		return
+	}
+	if d.applySem == nil {
+		return
+	}
+	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+		slog.Warn("web-management: failed to acquire apply lock for DHCP lease rebind", "err", err)
+		return
+	}
+	defer d.applySem.Release(1)
+	// Re-read the active config under the semaphore (the #6716 discipline
+	// applyActiveConfig follows): a commit that landed while waiting must
+	// not be reverted by this callback's older snapshot. committedDesired
+	// inside reconcile would fence the endpoint anyway; passing the fresh
+	// config keeps the two agreeing rather than relying on it.
+	if d.store != nil {
+		if active := d.store.ActiveConfig(); active != nil {
+			cfg = active
+		}
+	}
+	slog.Info("DHCP address changed on web-management interface, re-resolving management bind")
+	if err := webMgmtRebindApply(d, cfg); err != nil {
+		slog.Warn("failed to re-resolve web-management bind after DHCP address change; will retry via re-assert owner", "err", err)
+	}
 }
 
 // reconcileDHCPClients converges running DHCP/DHCPv6 clients with the

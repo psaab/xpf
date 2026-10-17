@@ -2002,6 +2002,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		}{
 			{"grpc", ls.GRPC},
 			{"http", ls.HTTP},
+			{"https", ls.HTTPS},
 		} {
 			// Every state gets a series, not just the current one. A state set
 			// that emitted only the active state would make an alert on
@@ -2015,6 +2016,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 				{"listening", sysservices.StateListening},
 				{"failed", sysservices.StateFailed},
 				{"disabled", sysservices.StateDisabled},
+				{"stale", sysservices.StateStale},
 			} {
 				v := 0.0
 				if row.l.State == st.want {

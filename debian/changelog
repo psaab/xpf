@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Re-resolve the web-management interface bind after networkd applies
+    addresses in the same commit, on DHCP lifeline lease changes, and via
+    the 30s management re-assert owner. A bind that fell back to loopback
+    because the interface had no address yet (or whose address was
+    replaced) now reports a stale bind instead of Listening and rebinds onto
+    the interface address when it appears, instead of leaving off-box
+    REST/J-Web silently down until a later commit (#14582).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Reuse NAT64 translated IPv4 address and port across remote endpoints for
     each IPv6 protocol/source-address/source-port binding (RFC 6146 endpoint-
     independent mapping). Keep the binding while any associated session is

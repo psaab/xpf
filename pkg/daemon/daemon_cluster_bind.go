@@ -42,6 +42,19 @@ var interfaceAddrsByName = func(kernelName string) ([]net.Addr, error) {
 // rather than not at all — a hard error here would strand a mgmt interface that
 // is merely not up yet at daemon start.
 func resolveInterfaceAddr(cfg *config.Config, ifname, fallback string) string {
+	addr, _ := resolveInterfaceAddrDegraded(cfg, ifname, fallback)
+	return addr
+}
+
+// resolveInterfaceAddrDegraded is resolveInterfaceAddr for callers that must
+// distinguish "the interface's current address" from "no usable address yet,
+// so the loopback fallback was used" (#14582). degraded=true means fallback
+// was returned because the kernel lookup failed or found no usable address;
+// the desired bind has NOT landed on the configured interface. A leg that
+// resolves degraded must not be recorded as converged on the configured
+// interface and must not report Listening there: the socket (if any) is on
+// loopback while the operator asked for a routable interface address.
+func resolveInterfaceAddrDegraded(cfg *config.Config, ifname, fallback string) (addr string, degraded bool) {
 	kernelName := ifname
 	if cfg != nil {
 		kernelName = cfg.ResolveKernelIfName(ifname)
@@ -50,12 +63,12 @@ func resolveInterfaceAddr(cfg *config.Config, ifname, fallback string) string {
 	if err != nil {
 		slog.Error("web-management interface not found; NOT bound to configured interface, using loopback fallback",
 			"interface", ifname, "kernel", kernelName, "fallback", fallback, "err", err)
-		return fallback
+		return fallback, true
 	}
 	if len(addrs) == 0 {
 		slog.Error("web-management interface has no addresses; NOT bound to configured interface, using loopback fallback",
 			"interface", ifname, "kernel", kernelName, "fallback", fallback)
-		return fallback
+		return fallback, true
 	}
 	for _, a := range addrs {
 		ipNet, ok := a.(*net.IPNet)
@@ -63,7 +76,7 @@ func resolveInterfaceAddr(cfg *config.Config, ifname, fallback string) string {
 			continue
 		}
 		if ip4 := ipNet.IP.To4(); ip4 != nil {
-			return ip4.String()
+			return ip4.String(), false
 		}
 	}
 	// No IPv4, try IPv6
@@ -73,12 +86,12 @@ func resolveInterfaceAddr(cfg *config.Config, ifname, fallback string) string {
 			continue
 		}
 		if ipNet.IP.To4() == nil {
-			return ipNet.IP.String()
+			return ipNet.IP.String(), false
 		}
 	}
 	slog.Error("web-management interface has no usable addresses; NOT bound to configured interface, using loopback fallback",
 		"interface", ifname, "kernel", kernelName, "fallback", fallback)
-	return fallback
+	return fallback, true
 }
 
 // hostIsLoopback reports whether a bind host string is a loopback address.

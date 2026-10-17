@@ -116,6 +116,14 @@ type mgmtEndpoint struct {
 	addr      string
 	httpsAddr string
 	tls       bool
+	// httpDegraded / httpsDegraded (#14582): the leg's address above is the
+	// loopback fallback because the configured interface had no usable kernel
+	// address at resolution time, not the interface address. A degraded leg
+	// is NOT converged on its configured interface: it reports non-Listening
+	// and drives the re-assert owner until a later re-resolution lands on
+	// the interface address (or the address vanishes and it degrades again).
+	httpDegraded  bool
+	httpsDegraded bool
 }
 
 func (e mgmtEndpoint) summary() string {
@@ -126,7 +134,7 @@ func (e mgmtEndpoint) summary() string {
 }
 
 func endpointOf(cfg api.Config) mgmtEndpoint {
-	return mgmtEndpoint{addr: cfg.Addr, httpsAddr: cfg.HTTPSAddr, tls: cfg.TLS}
+	return mgmtEndpoint{addr: cfg.Addr, httpsAddr: cfg.HTTPSAddr, tls: cfg.TLS, httpDegraded: cfg.HTTPBindDegraded, httpsDegraded: cfg.HTTPSBindDegraded}
 }
 
 // allLoopback reports whether every listener CURRENTLY SERVING under this
@@ -191,6 +199,8 @@ func (m *managementReconciler) desired(cfg *config.Config) api.Config {
 	next := m.baseCfg
 	next.Addr = m.d.opts.APIAddr
 	next.HTTPSAddr = ""
+	next.HTTPBindDegraded = false
+	next.HTTPSBindDegraded = false
 	next.TLS = false
 	next.TLSCertificate = ""
 	next.TLSPrivateKey = ""
@@ -274,7 +284,7 @@ func (m *managementReconciler) startLocked(ctx context.Context, next api.Config)
 	// the boot HTTPS failure was permanent and silent. Ask the server what is
 	// actually serving instead (#5561 round 14, MAJOR 5).
 	if next.TLS && !srv.HTTPSServing() {
-		m.cur.tls, m.cur.httpsAddr = false, ""
+		m.cur.tls, m.cur.httpsAddr, m.cur.httpsDegraded = false, "", false
 	}
 	return nil
 }
@@ -323,6 +333,17 @@ func (m *managementReconciler) effectiveHTTPSListener() sysservices.Listener {
 		// reconciler last tried, not a stale Listening on a dead socket.
 		return sysservices.Listener{Addr: m.cur.httpsAddr, State: sysservices.StateFailed}
 	}
+	if m.cur.httpsDegraded {
+		// #14582: serving only on the loopback fallback because the configured
+		// interface had no usable address at resolution time. That is not
+		// Listening on the configured interface; report Stale (a non-Listening
+		// state the re-assert owner keys on) against the fallback bound. The
+		// record may instead be non-degraded but STALE (the interface address
+		// was replaced after convergence) — that case is decided by the
+		// reconciler-level mgmtBindStale check, which needs d.store and so
+		// lives outside this m.mu-only snapshot.
+		return sysservices.Listener{Addr: bound, State: sysservices.StateStale}
+	}
 	return sysservices.Listener{Addr: bound, State: sysservices.StateListening}
 }
 
@@ -350,6 +371,11 @@ func (m *managementReconciler) effectiveHTTPListener() sysservices.Listener {
 			addr = m.lastHTTPAttempt
 		}
 		return sysservices.Listener{Addr: addr, State: sysservices.StateFailed}
+	}
+	if m.cur.httpDegraded {
+		// #14582: loopback fallback, not the configured interface — see
+		// effectiveHTTPSListener.
+		return sysservices.Listener{Addr: bound, State: sysservices.StateStale}
 	}
 	return sysservices.Listener{Addr: bound, State: sysservices.StateListening}
 }
@@ -517,10 +543,11 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 		m.publishNilDirectionLocked()
 	}
 
-	// HTTP leg: rebind only when the address changes; an empty desired address
-	// disables the cleartext listener. Retry an unexpected exit only when a
-	// non-empty bind is still requested.
-	if next.Addr != m.cur.addr || (next.Addr != "" && !m.srv.HTTPServing()) {
+	// HTTP leg: rebind only when the address changes (or its degraded state
+	// changes, #14582); an empty desired address disables the cleartext
+	// listener. Retry an unexpected exit only when a non-empty bind is still
+	// requested.
+	if next.Addr != m.cur.addr || next.HTTPBindDegraded != m.cur.httpDegraded || (next.Addr != "" && !m.srv.HTTPServing()) {
 		// Record the attempted bind so `show system services` reports the address
 		// a boot-failed listener is retrying, not the one it failed at boot (#6401).
 		m.lastHTTPAttempt = next.Addr
@@ -529,11 +556,12 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 		} else {
 			// curSet advances here too: a boot bind failure leaves it false, and
 			// this is the reconcile that pays that retry debt off (#5561 round 14).
-			m.cur.addr, m.curSet = next.Addr, true
+			m.cur.addr, m.cur.httpDegraded, m.curSet = next.Addr, next.HTTPBindDegraded, true
 		}
 	}
 
 	// HTTPS leg: enable / disable / rebind if the HTTPS bind or TLS flag changed
+	// (or its degraded state changed, #14582)
 	// — or if the leg this reconciler RECORDED as converged is no longer serving
 	// (#6827 round 6). api.Server.ReconcileHTTPS never touches the live HTTP
 	// listener, so a TLS enable can no longer collide with the retained HTTP
@@ -551,11 +579,11 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 	// server what is actually serving is the same question startTo asks after the
 	// boot bind (#5561 round 14, MAJOR 5); this is that check applied to the
 	// steady state rather than only to boot.
-	if next.TLS != m.cur.tls || next.HTTPSAddr != m.cur.httpsAddr || (next.TLS && !m.srv.HTTPSServing()) {
+	if next.TLS != m.cur.tls || next.HTTPSAddr != m.cur.httpsAddr || next.HTTPSBindDegraded != m.cur.httpsDegraded || (next.TLS && !m.srv.HTTPSServing()) {
 		if err := m.srv.ReconcileHTTPS(next.TLS, next.HTTPSAddr); err != nil {
 			errs = append(errs, err)
 		} else {
-			m.cur.tls, m.cur.httpsAddr = next.TLS, next.HTTPSAddr
+			m.cur.tls, m.cur.httpsAddr, m.cur.httpsDegraded = next.TLS, next.HTTPSAddr, next.HTTPSBindDegraded
 		}
 	}
 

@@ -133,20 +133,28 @@ func TestManagementListenerStateIsExported8195(t *testing.T) {
 // point an alert reads it.
 func TestManagementListenerStateEmitsEveryState8195(t *testing.T) {
 	got := collectManagementListenerState8195(t, sysservices.Listeners{
-		GRPC: sysservices.Listener{Addr: "a", State: sysservices.StateListening},
-		HTTP: sysservices.Listener{Addr: "b", State: sysservices.StateListening},
+		GRPC:  sysservices.Listener{Addr: "a", State: sysservices.StateListening},
+		HTTP:  sysservices.Listener{Addr: "b", State: sysservices.StateListening},
+		HTTPS: sysservices.Listener{Addr: "c", State: sysservices.StateStale},
 	})
 	for _, want := range []string{
-		"grpc|a|listening", "grpc|a|failed", "grpc|a|disabled",
-		"http|b|listening", "http|b|failed", "http|b|disabled",
+		"grpc|a|listening", "grpc|a|failed", "grpc|a|disabled", "grpc|a|stale",
+		"http|b|listening", "http|b|failed", "http|b|disabled", "http|b|stale",
+		"https|c|listening", "https|c|failed", "https|c|disabled", "https|c|stale",
 	} {
 		if _, ok := got[want]; !ok {
 			t.Errorf("missing series %q — %d emitted: %v", want, len(got), got)
 		}
 	}
-	if len(got) != 6 {
-		t.Errorf("emitted %d series, want exactly 6 (2 surfaces x 3 states): %v",
+	if len(got) != 12 {
+		t.Errorf("emitted %d series, want exactly 12 (3 surfaces x 4 states): %v",
 			len(got), got)
+	}
+	// #14582: the stale HTTPS leg must carry value 1 on its stale series, so
+	// an alert on state="stale" fires for a loopback-fallback/vanished bind.
+	if got["https|c|stale"] != 1 || got["https|c|listening"] != 0 {
+		t.Errorf("https stale series = %v (listening %v), want stale=1 listening=0: %v",
+			got["https|c|stale"], got["https|c|listening"], got)
 	}
 }
 
