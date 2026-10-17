@@ -50,7 +50,12 @@ Standard library only.
   daemon's `ensureRethLinkOriginalName()` auto-fixes stale `.link` files
   that still use `MACAddress=`.
 - `KeepConfiguration=static` on RETH interfaces preserves VRRP VIPs
-  across `networkctl reload`.
+  across `networkctl reload`. DHCP rows preserve the daemon's lease
+  address the same way (#14594): `keepConfigurationValue` emits `dhcp`
+  for a dynamic-only row, `static` for a static-only row, and `yes`
+  when both classes are present (systemd accepts one value). DHCPv6
+  counts as dynamic only when it is stateful and requests IA_NA;
+  stateless and PD-only clients own no address on the interface.
 
 ## Gotchas
 
