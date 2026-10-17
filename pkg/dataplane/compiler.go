@@ -1063,8 +1063,13 @@ func compileApplications(dp DataPlane, cfg *config.Config, result *CompileResult
 		// stays emittable even though ProtocolNumber("") reports ok=false; an
 		// EXPLICIT but unrepresentable protocol records no AppNames name (gated
 		// identically to appid.BuildCatalog for parity).
+		// #14355: a widened dropped-constraint application
+		// (config.ApplicationMatchWidened) is unemittable in
+		// appid.BuildCatalog, so it must not record an AppNames name here
+		// either — the two maps stay byte-identical.
+		dropped := config.ApplicationMatchWidened(app)
 		protoEmittable := protoOK || strings.TrimSpace(app.Protocol) == ""
-		if protoEmittable && srcOK && dstOK && dstLow <= dstHigh && srcLow <= srcHigh {
+		if !dropped && protoEmittable && srcOK && dstOK && dstLow <= dstHigh && srcLow <= srcHigh {
 			result.AppNames[uint16(appID)] = appName
 		}
 

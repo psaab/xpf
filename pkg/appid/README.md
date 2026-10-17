@@ -264,3 +264,22 @@ security flow session` re-derivation, which crosses the HA session-sync wire) is
 a separate deliberate change requiring `test-failover`. The interim guarantees
 NO FALSE LABEL (honest `UNKNOWN`), NOT positive echo classification — that
 arrives with the deferred wire work.
+
+## Dropped-constraint applications are inert (#14355)
+
+An application whose authored match constraint was dropped on the tolerant
+load path so the compiled term is wider than authored
+(`config.ApplicationMatchWidened` — a value-less match leaf, a malformed
+`icmp-type`, an unimplemented leaf, ...) compiles to a protocol-wide shape
+(`DestinationPort==""`, `ICMPType==nil`). `BuildCatalog` treats such an app
+as unemittable (no `CatalogEntry`, no `AppNames` name, id still consumed via
+the name-derived assignment), `compileApplications` gates its `AppNames`
+row identically for parity, and the AppID-disabled tuple fallback
+(`resolveTupleFallbackWithIndex`) skips it — mirroring the #9525 refusal the
+userspace policy expansion already applies. Never-matching drops (a retained
+port on a protocol with no such port) keep their faithful catalog row. A
+well-formed neighbor is unaffected. The tuple fallback also accepts port 0
+inside an explicit `0-N` range (strict `validatePortSpec` allows `lo==0` in
+a range and the catalog preserves `0-N` via `NormalizeExplicitPortRange`; a
+bare `0` or `0-0` still never matches), and `ProtocolNumber` resolves the
+hyphenated `icmp-v6` spelling to 58 alongside `icmpv6`/`icmp6`.

@@ -88,7 +88,7 @@ pub(crate) fn proto_number(name: &str) -> Option<u8> {
         "tcp" | "junos-tcp-any" => Some(PROTO_TCP),
         "udp" | "junos-udp-any" => Some(PROTO_UDP),
         "icmp" | "junos-icmp-all" | "junos-ping" => Some(PROTO_ICMP),
-        "icmp6" | "icmpv6" | "junos-icmp6-all" | "junos-pingv6" => Some(PROTO_ICMPV6),
+        "icmp6" | "icmpv6" | "icmp-v6" | "junos-icmp6-all" | "junos-pingv6" => Some(PROTO_ICMPV6),
         "gre" | "junos-gre" => Some(PROTO_GRE),
         "ospf" | "junos-ospf" => Some(PROTO_OSPF),
         "ipip" | "junos-ip-in-ip" | "junos-ipip" => Some(PROTO_IPIP),

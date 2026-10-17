@@ -411,7 +411,15 @@ func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *co
 		consider := func(name string, app *config.Application) {
 			// A nil app is tolerated by the lenient config path (#4865), and
 			// the tuple matcher cannot model ICMP type/code constraints (#3781).
+			// #14355: an application whose authored match constraint was
+			// dropped on the tolerant load path so the compiled term is
+			// wider than authored (config.ApplicationMatchWidened) must
+			// stay inert here too, mirroring BuildCatalog — otherwise it
+			// stamps every session of its protocol when AppID stamping
+			// is off. Never-matching drops are not widened and need no
+			// skip: their retained constraint already matches nothing.
 			if app == nil || icmpTypeConstrained(app) ||
+				config.ApplicationMatchWidened(app) ||
 				!matchTuple(proto, srcPort, dstPort, app.Protocol, app.SourcePort, app.DestinationPort) {
 				return
 			}
@@ -556,12 +564,17 @@ func portInSpec(port uint16, spec string) bool {
 	}
 	if strings.Contains(spec, "-") {
 		parts := strings.SplitN(spec, "-", 2)
-		lo, ok1 := canonicalPort(parts[0])
-		hi, ok2 := canonicalPort(parts[1])
+		lo, ok1 := canonicalRangePort(parts[0])
+		hi, ok2 := canonicalRangePort(parts[1])
 		// A reversed range (lo>hi) can never match any port; reject it here so
 		// the fallback fails CLOSED rather than treating garbage bounds as a
 		// live constraint (mirrors validatePortSpec's start>end rejection).
+		// The (0,0) sentinel collision is rejected exactly as in the
+		// catalog: an explicit range ending at 0 is unrepresentable.
 		if !ok1 || !ok2 || lo > hi {
+			return false
+		}
+		if _, _, ok := NormalizeExplicitPortRange(lo, hi); !ok {
 			return false
 		}
 		return port >= lo && port <= hi
@@ -576,10 +589,23 @@ func portInSpec(port uint16, spec string) bool {
 // out-of-range ("70000") token so a malformed spec is dropped rather than
 // sign-stripped or uint16-narrowed into a wrong-but-plausible port. This mirrors
 // the strict commit gate config.validatePortSpec, which parses through
-// config.ParseCanonicalUint and range-checks 1..65535.
+// config.ParseCanonicalUint and range-checks 1..65535 for a bare port.
 func canonicalPort(s string) (uint16, bool) {
 	n, err := config.ParseCanonicalUint(s)
 	if err != nil || n < 1 || n > 65535 {
+		return 0, false
+	}
+	return uint16(n), true
+}
+
+// canonicalRangePort parses one endpoint of a "lo-hi" range. The strict gate
+// (config.validatePortSpec) allows 0..65535 in a range — only a BARE port
+// must be 1..65535 — and the catalog preserves an explicit 0-N range
+// (NormalizeExplicitPortRange), so a range endpoint accepts 0. This keeps
+// the tuple fallback in parity with the catalog for dst/src port 0 (#14355).
+func canonicalRangePort(s string) (uint16, bool) {
+	n, err := config.ParseCanonicalUint(s)
+	if err != nil || n < 0 || n > 65535 {
 		return 0, false
 	}
 	return uint16(n), true
