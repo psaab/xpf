@@ -29,6 +29,16 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 	} else {
 		cfg.Warnings = append(cfg.Warnings, w...)
 	}
+	// #14398: the reverse direction of #9105 — a RIP `authentication-type`
+	// with no `authentication-key` renders NO authentication at all (the
+	// renderer block is gated on a non-empty key), silently. Strict refuses
+	// so the operator supplies the key; lenient warns (#1960) and the FRR
+	// renderer fails closed for those interfaces.
+	if w, err := validateRIPAuthTypeRequiresKeyStrict(cfg, opts.lenientRIPAuthTypeWithoutKey); err != nil {
+		return err
+	} else {
+		cfg.Warnings = append(cfg.Warnings, w...)
+	}
 	// #2008 H7 security log profile -> stream cross-reference. A
 	// `security log profile <name> stream-name <stream>` that names a
 	// stream which is not configured would route to nowhere — the operator

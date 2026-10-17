@@ -692,6 +692,14 @@ type compileOpts struct {
 	// tolerant paths warn so a persisted/peer-synced config still boots
 	// (#1960), and the FRR renderer warns at both IS-IS sites.
 	lenientISISAuthTypeRequiresKey14399 bool
+	// lenientRIPAuthTypeWithoutKey downgrades the #14398 "RIP
+	// authentication-type with no authentication-key" rejection to a
+	// warning on the tolerant paths (Store.Load, Store.SyncApply), the
+	// reverse direction of lenientAuthTypeAbsent (#9105). A config an
+	// older binary accepted must still BOOT (#1960); the FRR renderer
+	// fails closed for the keyless-auth RIP interfaces instead of
+	// enrolling them unauthenticated.
+	lenientRIPAuthTypeWithoutKey bool
 	// lenientMultiLeafSelfRepeat downgrades the #9027 ambiguity rejection to a
 	// warning on the tolerant paths. A config an older binary accepted must
 	// still BOOT; on that path the existing readers keep their behaviour and
@@ -3252,6 +3260,7 @@ func lenientCompileOpts() compileOpts {
 		lenientLogProfileStreamRef:             true,
 		lenientAuthTypeAbsent:                  true,
 		lenientISISAuthTypeRequiresKey14399:    true,
+		lenientRIPAuthTypeWithoutKey:           true,
 		lenientMultiLeafSelfRepeat:             true,
 		lenientDynamicAddressFeedRef:           true,
 		lenientDuplicateNamedBlock:             true,
