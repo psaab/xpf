@@ -188,6 +188,18 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
+	// #14433: statement-level default carrying both accept and reject.
+	// Strict commits reject; tolerant loads warn and fail closed to reject.
+	if err := validateRoutingStatementDefaultConflictStrict(cfg); err != nil {
+		if opts.lenientPolicyDefaultConflict14433 {
+			failClosedRoutingStatementDefaultConflicts14433(cfg)
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("routing policy-statement conflicting default actions (downgraded to warning on tolerant path; conflicting statements fail closed to reject): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #11779: an unsupported routing-policy `from` match was compiled away,
 	// turning a constrained term into a broader match. Strict commits reject
 	// it; tolerant loads warn and force the affected term to reject rather

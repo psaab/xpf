@@ -572,6 +572,13 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			}
 		}
 		if s.IsLeaf {
+			// #14433 leaf arm: a group `then accept;` leaf beside an inline
+			// `then reject;` leaf (or container) at statement level.
+			if peer := policyStatementThenPeer14433(ancestorPath, *dst, s); peer != nil && peer != s {
+				if adoptPolicyStatementThenArm14433(peer, s) {
+					continue
+				}
+			}
 			key := ""
 			if len(s.Keys) > 0 {
 				key = s.Keys[0]
@@ -978,6 +985,13 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			} else {
 				// Same name exists only as a braced/container peer:
 				// keep adopt-beside twin → collision gate.
+			}
+		}
+		// #14433: a group statement-level `then` beside an inline `then`
+		// keeps both arms (see group_policy_default_14433.go).
+		if peer := policyStatementThenPeer14433(ancestorPath, *dst, s); peer != nil && peer != s {
+			if adoptPolicyStatementThenArm14433(peer, s) {
+				continue
 			}
 		}
 

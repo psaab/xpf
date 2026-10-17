@@ -53,7 +53,13 @@ type PolicyStatement struct {
 	Name          string
 	Terms         []*PolicyTerm
 	DefaultAction string // "accept", "reject", or "" (implicit reject)
-	UnknownFrom   []string
+	// DefaultActionsSeen records every distinct statement-level default
+	// authored across all `then` nodes of this statement (#14433), in
+	// first-seen order. DefaultAction is single-valued last-wins, so a
+	// merged accept+reject pair is invisible after compilation without
+	// this channel. Compiler-only; not persisted.
+	DefaultActionsSeen []string
+	UnknownFrom        []string
 }
 
 // PolicyTerm is a single match+action clause within a policy-statement.
