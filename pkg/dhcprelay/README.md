@@ -406,6 +406,19 @@ Bindings remain live for the same 30-second TTL, are bounded with the v6
 default ingress rate, and are carried across relay reconfiguration; the match
 is not consumed, so both multi-server Advertises and later replies can use it.
 
+IA-less Reply alias (#14599): a server Reply to a Confirm, Release, or
+Decline may legally carry no IA at all (RFC 8415 §18.3.3: Confirm draws a
+Status Code such as NotOnLink; §18.3.7/§18.3.8: Release/Decline draw a
+top-level Success, with an IA present only to carry NoBinding). Such a
+Reply keys to IA type 0 with a zero IAID, which can never equal the
+IA-bound key of the request that carried an IA. Forwarding those three
+request types therefore records a second, IA-less alias binding (same
+xid, DUID, recorded client, and request type) alongside the primary key,
+so the conformant IA-less Reply matches exactly once. No other request
+type gets an alias: an IA-less Reply to a recorded Solicit, Request,
+Renew, or Rebind is still dropped, and the #14181 peer-address and
+answer-type checks apply on the alias path unchanged.
+
 Client-identity binding (#14181): the pending entry also records the
 soliciting client's address and request type. A Relay-Reply is forwarded
 only when its outer peer-address equals the recorded client address (so a

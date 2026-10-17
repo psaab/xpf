@@ -142,6 +142,62 @@ func pending6KeyFor(packet dhcpv6.DHCPv6) (pending6Key, bool) {
 	return key, true
 }
 
+// pending6MayReplyWithoutIA reports whether a server Reply to a client
+// request of this type may legally carry no IA at all, so the request
+// needs an IA-less alias binding (below) in addition to its IA-bound
+// key. RFC 8415: a Confirm Reply carries Server ID, Client ID, and a
+// Status Code with no IA required (§18.3.3, e.g. NotOnLink); a Release
+// Reply carries a top-level Success Status Code, with an IA present
+// only to carry NoBinding (§18.3.7); a Decline Reply has the same
+// shape (§18.3.8). Every other request type's Reply is required to
+// carry the IA it answers — Solicit draws Advertise, and Request,
+// Renew, and Rebind draw a Reply echoing the IA — so those requests
+// get no alias and an IA-less reply to them is still dropped. An
+// Information-request carries no IA in the first place, so its
+// primary key already is the IA-less key and needs no second entry.
+func pending6MayReplyWithoutIA(requestType dhcpv6.MessageType) bool {
+	switch requestType {
+	case dhcpv6.MessageTypeConfirm, dhcpv6.MessageTypeRelease,
+		dhcpv6.MessageTypeDecline:
+		return true
+	default:
+		return false
+	}
+}
+
+// pending6IALessKey returns the key an IA-less message with the same
+// transaction ID and Client ID keys to: IA type 0 and a zero IAID,
+// exactly as pending6KeyFor computes it for such a message.
+func pending6IALessKey(key pending6Key) pending6Key {
+	key.iaType = 0
+	key.iaid = [4]byte{}
+	return key
+}
+
+// insertPending6 records the binding for a client request the relay is
+// about to forward upstream: the primary IA-bound key, plus — for the
+// request types in pending6MayReplyWithoutIA whose Reply may legally
+// omit every IA — an IA-less alias key carrying the same entry. The
+// alias lets a conformant IA-less Reply (Confirm NotOnLink, Release
+// or Decline Success) match the transaction that carried an IA, which
+// the IA-bound key alone could never do (#14599). The alias entry
+// carries the same recorded client address and request type, so every
+// #14181 check on the reply path (outer peer-address equality and
+// legitimate server answer type) applies unchanged, and an IA-less
+// Advertise or RECONFIGURE answering a Confirm still fails the
+// per-request type check. The alias consumes one extra ring slot;
+// eviction can only cause a legitimate reply to be dropped, never an
+// unsolicited one to be accepted (see pending.go).
+func insertPending6(table *pendingTableOf[pending6Key, pending6Entry], key pending6Key, requestType dhcpv6.MessageType, peer net.IP) {
+	entry := pending6EntryFor(peer, requestType)
+	table.insertValue(key, entry)
+	if pending6MayReplyWithoutIA(requestType) {
+		if alias := pending6IALessKey(key); alias != key {
+			table.insertValue(alias, entry)
+		}
+	}
+}
+
 func pending6IAIDLess(a, b [4]byte) bool {
 	for i := range a {
 		if a[i] != b[i] {
