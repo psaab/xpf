@@ -900,7 +900,7 @@ func (c *CLI) showEventOptions() error {
 		if len(ep.ThenCommands) > 0 {
 			fmt.Println("  Then commands:")
 			for _, cmd := range ep.ThenCommands {
-				fmt.Printf("    %s\n", cmd)
+				fmt.Printf("    %s\n", config.RedactEmbeddedChangeConfigCommand(cmd))
 			}
 		}
 		fmt.Println()
