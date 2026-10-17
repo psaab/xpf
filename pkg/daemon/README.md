@@ -1075,7 +1075,7 @@ Three properties carry the mechanism:
 not the requested/config-declared addresses. `Daemon.effectiveListeners`
 (`daemon_run_servers.go`) builds one `sysservices.Listeners` snapshot. Each row
 is a `sysservices.Listener{Addr, State}` where `State` ∈ {`Listening`, `Failed`,
-`Disabled`} (#6401) — so a CONFIGURED-but-FAILED bind is reported as
+`Disabled`, `Stale`} (#6401, `Stale` added by #14582) — so a CONFIGURED-but-FAILED bind is reported as
 `addr (bind failed)`, distinct from a genuinely-off listener's `disabled` and
 from a serving listener's bare address:
 
@@ -1100,6 +1100,23 @@ from a serving listener's bare address:
   day-2 rebind failure RETAINS the old serving leg (its socket stays live →
   `EffectiveHTTPAddr` non-empty), so this reports the address still serving, not
   the failed new bind.
+
+**Interface-address convergence (#14582).** The early reconcile above resolves
+the interface bind before networkd applies addresses later in the same apply,
+so `resolveInterfaceAddr` can only return the loopback fallback. That fallback
+is now RECORDED, not converged: `resolveAPIBinds` marks the leg degraded
+(`api.Config.HTTPBindDegraded`/`HTTPSBindDegraded` → `mgmtEndpoint.httpDegraded`/
+`httpsDegraded`), the effective-listener snapshot reports a degraded leg
+`Stale` (never `Listening` on an address the operator did not configure), and
+`mgmtListenerDown` — the same question — drives the 30s re-assert owner until a
+re-resolution lands on the interface address. Three re-resolution points close
+the timing: a second `reconcileWebManagement` in `applyConfigLocked` AFTER
+`applyDataplaneAndHACore` (same-commit address + stanza), the re-assert tick
+(address appears/vanishes with no commit at all), and
+`rebindWebMgmtForLeaseChange` on the DHCP management-only fast path in
+`onDHCPAddressChange` (lifeline lease change, gated on the bound interface
+being DHCP-managed, serialized under `applySem` — the #2884 shape). Pinned by
+`webmgmt_rebind_14582_test.go`.
 
 BOTH render surfaces read this ONE snapshot: the remote gRPC renderer via
 `grpcapi.Config.ListenersFn` and the local console CLI via `cli.SetListenersFn`,

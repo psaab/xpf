@@ -91,14 +91,71 @@ func (d *Daemon) mgmtListenerReassertLoop(ctx context.Context) {
 	}
 }
 
+// mgmtBindStaleLegs re-resolves the desired endpoint from the CURRENT
+// committed configuration (committedDesired → resolveAPIBinds → the kernel
+// seam — the same derivation the reconcile uses) and reports, per leg,
+// whether the converged fingerprint no longer matches it (#14582): the leg
+// is on the loopback fallback (degraded) or on an interface address that
+// has since been replaced/vanished. It takes m.mu only briefly for the
+// fingerprint read and never while resolving, so it cannot deadlock
+// against reconcileTo. ok=false means there is nothing to judge (no
+// reconciler/store/active config, or nothing converged yet — that state
+// is Failed/Disabled's job, not Stale's).
+func (d *Daemon) mgmtBindStaleLegs() (httpStale, httpsStale, ok bool) {
+	mgmt := d.mgmt.Load()
+	if mgmt == nil || d.store == nil {
+		return false, false, false
+	}
+	cfg := d.store.ActiveConfig()
+	if cfg == nil {
+		return false, false, false
+	}
+	want := endpointOf(mgmt.committedDesired(cfg))
+	mgmt.mu.Lock()
+	cur, curSet := mgmt.cur, mgmt.curSet
+	mgmt.mu.Unlock()
+	if !curSet {
+		return false, false, false
+	}
+	if cur.tls && want.tls {
+		httpsStale = want.httpsDegraded || cur.httpsDegraded || cur.httpsAddr != want.httpsAddr
+	}
+	if cur.addr != "" && want.addr != "" {
+		httpStale = want.httpDegraded || cur.httpDegraded || cur.addr != want.addr
+	}
+	return httpStale, httpsStale, true
+}
+
+// mgmtBindStaleHTTPS / mgmtBindStaleHTTP are the per-leg forms used by
+// Daemon.effectiveListeners to promote a Listening leg to StateStale.
+func (d *Daemon) mgmtBindStaleHTTPS() bool {
+	_, httpsStale, ok := d.mgmtBindStaleLegs()
+	return ok && httpsStale
+}
+
+func (d *Daemon) mgmtBindStaleHTTP() bool {
+	httpStale, _, ok := d.mgmtBindStaleLegs()
+	return ok && httpStale
+}
+
+// mgmtBindStale reports whether ANY serving leg is stale (see above).
+func (d *Daemon) mgmtBindStale() bool {
+	h, s, ok := d.mgmtBindStaleLegs()
+	return ok && (h || s)
+}
+
 // mgmtListenerDown reports whether a management listener the configuration asked
-// for is not currently serving.
+// for is not currently serving AT THE ADDRESS IT CURRENTLY RESOLVES TO.
 //
 // It asks the SAME question `show system services` answers, deliberately: the
-// operator-visible Failed state and the retry trigger must not be able to
-// disagree, or the box reports a dead listener that nothing is retrying (or
-// retries one it reports healthy). StateFailed covers both a boot bind that
-// never converged and a converged leg whose serve loop exited.
+// operator-visible state and the retry trigger must not be able to disagree,
+// or the box reports a dead listener that nothing is retrying (or retries one
+// it reports healthy). StateFailed covers both a boot bind that never
+// converged and a converged leg whose serve loop exited; StateStale (#14582)
+// covers a leg serving on the loopback fallback or a vanished interface
+// address. Because Daemon.effectiveListeners folds mgmtBindStale into the
+// snapshot (see daemon_run_servers.go), the gate below — Failed || Stale on
+// the daemon-level snapshot — IS the operator view, not a parallel one.
 func (d *Daemon) mgmtListenerDown() bool {
 	mgmt := d.mgmt.Load()
 	if mgmt == nil {
@@ -110,10 +167,11 @@ func (d *Daemon) mgmtListenerDown() bool {
 	// broken management plane makes hard to deliver. The commit path already
 	// asked the right question (`next.TLS && !m.srv.HTTPSServing()`); this is
 	// that question asked by the loop whose entire job is to notice.
-	if mgmt.effectiveHTTPListener().State == sysservices.StateFailed {
+	ls := d.effectiveListeners()
+	if ls.HTTP.State == sysservices.StateFailed || ls.HTTP.State == sysservices.StateStale {
 		return true
 	}
-	return mgmt.effectiveHTTPSListener().State == sysservices.StateFailed
+	return ls.HTTPS.State == sysservices.StateFailed || ls.HTTPS.State == sysservices.StateStale
 }
 
 // reassertMgmtListenersOnce re-drives one management reconcile if a listener is

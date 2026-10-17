@@ -173,12 +173,20 @@ type BinaryUpgradeStatusSnapshot struct {
 
 // Config configures the API server.
 type Config struct {
-	Addr           string
-	HTTPSAddr      string      // HTTPS listen address (empty = no HTTPS)
-	TLS            bool        // enable HTTPS with a management certificate
-	TLSCertificate string      // optional PEM certificate-chain path
-	TLSPrivateKey  string      // optional PEM private-key path; pair must be configured together
-	Auth           *AuthConfig // nil = no authentication
+	Addr      string
+	HTTPSAddr string // HTTPS listen address (empty = no HTTPS)
+	// HTTPBindDegraded / HTTPSBindDegraded mark that Addr/HTTPSAddr is the
+	// loopback fallback because the configured interface had no usable kernel
+	// address at resolution time (#14582), not the interface address itself.
+	// The daemon's management reconciler uses this to avoid recording the leg
+	// as converged on the configured interface and to report it non-Listening
+	// until a later re-resolution lands on the interface address.
+	HTTPBindDegraded  bool
+	HTTPSBindDegraded bool
+	TLS               bool        // enable HTTPS with a management certificate
+	TLSCertificate    string      // optional PEM certificate-chain path
+	TLSPrivateKey     string      // optional PEM private-key path; pair must be configured together
+	Auth              *AuthConfig // nil = no authentication
 	// ListenFunc is the listener factory the server binds through (#5866).
 	// nil defaults to net.Listen; a test injects a fake so the
 	// make-before-break listener reconcile is exercised without real ports.

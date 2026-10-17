@@ -737,6 +737,23 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// non-convergence (hard or transient degraded — stale config may still
 	// be installed while the in-manager retry converges it); the helper
 	// creates lo0Err/hostInboundErr and returns the joined errors.
+	// #14582: re-resolve the web-management interface bind AFTER networkd /
+	// dataplane address convergence in this same apply. The early reconcile
+	// above (line ~494) runs before applyDataplaneAndHACore for credential
+	// revocation, so a commit that creates the interface address and the
+	// `web-management https interface` stanza together resolves against a
+	// kernel with no address yet and would otherwise stay on the loopback
+	// fallback until a later commit. This second reconcile is the same
+	// idempotent reconcile: while the address is still absent the leg stays
+	// degraded (Failed, re-driven by the 30s re-assert owner); once it
+	// appears the make-before-break rebind lands on the interface address.
+	// It must not fail the commit — the early reconcile already enforced
+	// revocation, and a still-missing address is retry debt, not a commit
+	// error (mirrors the early reconcile's warn-and-retry posture).
+	if err := d.reconcileWebManagement(cfg); err != nil {
+		slog.Warn("web-management listener re-reconcile after networkd did not converge; retrying via re-assert owner",
+			"err", err)
+	}
 	return d.applyTailReconciles(cfg, networkdErr, applyErr, dhcpServerErr, ipsecErr, ifaceErr, routeLeakErr, routingRuleErr, mgmtRouteErr, vrfErr, fabricErr, frrErr)
 }
 

@@ -49,6 +49,19 @@ func (d *Daemon) effectiveListeners() sysservices.Listeners {
 	}
 	ls.HTTP = d.mgmt.Load().effectiveHTTPListener()
 	ls.HTTPS = d.mgmt.Load().effectiveHTTPSListener()
+	// #14582: a leg the reconciler recorded as converged can still be STALE —
+	// serving, but at an address the current config no longer resolves to
+	// (the interface address appeared/was replaced after the last reconcile,
+	// with no commit since). The reconciler-level snapshot cannot see that
+	// (it would need to re-resolve under m.mu), so fold it in here, where
+	// the store is reachable. Only a Listening leg is promoted to Stale: a
+	// Failed/Disabled leg already reports its own truth.
+	if ls.HTTP.State == sysservices.StateListening && d.mgmtBindStaleHTTP() {
+		ls.HTTP.State = sysservices.StateStale
+	}
+	if ls.HTTPS.State == sysservices.StateListening && d.mgmtBindStaleHTTPS() {
+		ls.HTTPS.State = sysservices.StateStale
+	}
 	return ls
 }
 
@@ -379,8 +392,11 @@ func (d *Daemon) resolveAPIBinds(apiCfg *api.Config, cfg *config.Config) {
 		// host-inbound-admitted; that path must NOT be silently moved to port 80.
 		if wm.HTTP {
 			httpBindIP := "127.0.0.1"
+			apiCfg.HTTPBindDegraded = false
 			if wm.HTTPInterface != "" {
-				httpBindIP = resolveInterfaceAddr(cfg, wm.HTTPInterface, "127.0.0.1")
+				var degraded bool
+				httpBindIP, degraded = resolveInterfaceAddrDegraded(cfg, wm.HTTPInterface, "127.0.0.1")
+				apiCfg.HTTPBindDegraded = degraded
 			}
 			// net.JoinHostPort (not string-concat) so an IPv6 interface
 			// address is bracketed ("[2001:db8::1]:80") — a bare
@@ -392,8 +408,11 @@ func (d *Daemon) resolveAPIBinds(apiCfg *api.Config, cfg *config.Config) {
 		// Enable HTTPS if configured — bind the canonical TCP/443 (webmgmt SSOT).
 		if wm.HTTPS {
 			httpsBindIP := "127.0.0.1"
+			apiCfg.HTTPSBindDegraded = false
 			if wm.HTTPSInterface != "" {
-				httpsBindIP = resolveInterfaceAddr(cfg, wm.HTTPSInterface, "127.0.0.1")
+				var degraded bool
+				httpsBindIP, degraded = resolveInterfaceAddrDegraded(cfg, wm.HTTPSInterface, "127.0.0.1")
+				apiCfg.HTTPSBindDegraded = degraded
 			}
 			apiCfg.TLS = true
 			apiCfg.HTTPSAddr = net.JoinHostPort(httpsBindIP, webmgmt.HTTPSPortString())
