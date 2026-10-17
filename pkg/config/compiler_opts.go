@@ -931,12 +931,14 @@ type compileOpts struct {
 	// SchemaValidate (applications stay opaque there). Same doctrine as
 	// lenientPolicyMatchAddress / lenientNATHostMask.
 	lenientApplicationSpecs bool
-	// lenientApplicationNameCollisions (#3339, #12220, Codex review 080 M07/M08)
+	// lenientApplicationNameCollisions (#3339, #12220, #14339, Codex review 080 M07/M08)
 	// downgrades the application / application-set name-collision gate
 	// (validateApplicationNameCollisionsAST) from a hard compile error to a
 	// cfg.Warnings entry. Strict commit / commit-check hard-rejects duplicate or
 	// cross-namespace authored names, authored or implicit application-sets
-	// shadowing predefined applications, and generated per-term name collisions.
+	// shadowing predefined applications, authored applications shadowing
+	// predefined application-sets, generated per-term name collisions, and
+	// generated names shadowing predefined applications/sets (#14339).
 	// On the tolerant path, the existing last-write-wins maps are retained for
 	// boot compatibility, but colliding references are recorded and refused
 	// during userspace expansion rather than matching an arbitrary winner.
