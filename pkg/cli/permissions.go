@@ -147,6 +147,35 @@ func showSystemRollbackCompare(args []string) bool {
 	return strings.Contains(rest, "compare")
 }
 
+// showSecurityMatchPolicies reports whether the operational `show`
+// arguments resolve to `security match-policies` — the shared
+// policymatch simulator. It resolves both tokens through the command
+// tree (operationalTree["show"].Children, then the security node's
+// children) via resolveCommand, mirroring showSystemRollbackCompare /
+// handleShowSecurity, so an unambiguous abbreviation (`show sec
+// match-p`) gates identically to the fully-spelled form and cannot
+// bypass the gate. An unresolvable/ambiguous token that the dispatcher
+// would never execute returns false.
+func showSecurityMatchPolicies(args []string) bool {
+	if len(args) < 2 {
+		return false
+	}
+	showNode, ok := operationalTree["show"]
+	if !ok || showNode == nil {
+		return false
+	}
+	security, err := resolveCommand(args[0], keysFromTree(showNode.Children))
+	if err != nil || security != "security" {
+		return false
+	}
+	secNode := showNode.Children[security]
+	if secNode == nil {
+		return false
+	}
+	match, err := resolveCommand(args[1], keysFromTree(secNode.Children))
+	return err == nil && match == "match-policies"
+}
+
 // requiredPermission returns the login-class permission a resolved operational
 // command needs. Gating is on the top-level word (parts[0]) for almost every
 // command, with a few privileged subcommands needing a finer gate.
@@ -162,6 +191,17 @@ func requiredPermission(parts []string) config.LoginClassPermission {
 	// REST twin), rather than gRPC's additive method-table-plus-gate price.
 	if action == "show" && showSystemRollbackCompare(parts[1:]) {
 		return config.PermConfig
+	}
+
+	// #14408 (DR13-H1): `show security match-policies` runs the shared
+	// policymatch simulator over an arbitrary 5-tuple — the same verdict
+	// gRPC MatchPolicies (#11077) and REST GET /api/v1/security/match
+	// (#11674) price at PermControl as policy reconnaissance gated from
+	// read-only classes. Price it identically here so a PermView-only
+	// console class cannot probe the policy set; every other `show`
+	// stays PermView.
+	if action == "show" && showSecurityMatchPolicies(parts[1:]) {
+		return config.PermControl
 	}
 
 	// `monitor traffic` = privileged capture (root tcpdump). Gate it at the
