@@ -54,7 +54,25 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 
 		// #9408: expand a FLAT-SET CHAIN before reading the leaves, and read
 		// the SAME expanded slice from both loops below (compiler_protocols_ospf_flat_run_9408.go).
-		ospfChildren := expandFlatRun(ospfNode.Children, ospfSchema9408())
+		//
+		// #14427: unpack ospfNode itself first. `ospf passive router-id
+		// 1.1.1.1 { area ... }` packs the body onto ospfNode.Keys (and
+		// `ospf passive;` leaves Children empty), so a Children-only reader
+		// dropped passive/router-id while the braced area survived —
+		// ospfd then formed adjacencies on interfaces meant to be passive.
+		// packedBodyChildren declines (returns the braced Children alone)
+		// when a packed tail ends in a leaf beside a braced body; expand
+		// that tail from a childless view and read both halves, mirroring
+		// the IS-IS interface reader.
+		ospfSchema := ospfSchema9408()
+		ospfBody := packedBodyChildren(ospfNode, ospfSchema)
+		if len(ospfNode.Keys) > 1 && len(ospfNode.Children) > 0 && len(ospfBody) == len(ospfNode.Children) &&
+			(len(ospfBody) == 0 || &ospfBody[0] == &ospfNode.Children[0]) {
+			tailOnly := *ospfNode
+			tailOnly.Children = nil
+			ospfBody = append(packedBodyChildren(&tailOnly, ospfSchema), ospfNode.Children...)
+		}
+		ospfChildren := expandFlatRun(ospfBody, ospfSchema)
 		ospfExpanded := &Node{Keys: ospfNode.Keys, Children: ospfChildren}
 
 		// Router ID, passive-default, and export policies at the ospf level
