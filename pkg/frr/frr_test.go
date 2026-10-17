@@ -448,16 +448,19 @@ func TestGenerateProtocols_BGPExportBareToken(t *testing.T) {
 	}
 }
 
-// TestGenerateProtocols_BGPExportNoLeak is the #2473 route-leak guard. A
-// Junos global `protocols bgp export <policy>` whose policy carries `from
-// protocol ospf` (or connected/static) MUST render as a peer-level
-// `neighbor <X> route-map <name> out` — NOT as `redistribute ospf
-// route-map ...` under `router bgp`. The old code routed bgp.Export
-// through resolveRedistribute, which emitted `redistribute ospf` and
-// actively ANNOUNCED the OSPF/connected RIB into BGP (internal subnets
-// leaked to external peers). Fail-on-revert: reverting to
-// resolveRedistribute makes `redistribute ospf` reappear → this test
-// fails.
+// TestGenerateProtocols_BGPExportNoLeak is the #2473 route-leak guard,
+// narrowed by #14586. A Junos global `protocols bgp export <policy>`
+// whose policy carries `from protocol ospf` (or connected/static) MUST
+// render as a peer-level `neighbor <X> route-map <name> out` — NOT as
+// an UNFILTERED `redistribute ospf` under `router bgp`. The pre-#2473
+// code routed bgp.Export through resolveRedistribute's bare path and
+// actively ANNOUNCED the whole OSPF/connected RIB into BGP (internal
+// subnets leaked to external peers). #14586 adds the Junos origination
+// half: the same policy ALSO emits `redistribute ospf route-map
+// leak-ospf-ospf-xpf-redist` (the filtered per-source map), so the
+// guard below pins the unfiltered form only. Fail-on-revert: reverting
+// to the unfiltered bare path makes `redistribute ospf` (no route-map)
+// reappear → this test fails.
 func TestGenerateProtocols_BGPExportNoLeak(t *testing.T) {
 	m := New()
 	po := &config.PolicyOptionsConfig{
@@ -483,9 +486,14 @@ func TestGenerateProtocols_BGPExportNoLeak(t *testing.T) {
 	if !strings.Contains(got, "neighbor 10.0.2.1 route-map leak-ospf out\n") {
 		t.Errorf("missing peer-level route-map out for global export, got:\n%s", got)
 	}
-	// The leak: a from-protocol global export must NOT emit redistribute.
-	if strings.Contains(got, "redistribute ospf") {
-		t.Errorf("ROUTE LEAK: global BGP export must not emit redistribute, got:\n%s", got)
+	// The leak: a from-protocol global export must NOT emit an
+	// UNFILTERED redistribute. #14586's filtered origination
+	// (`redistribute ospf route-map leak-ospf-ospf-xpf-redist`) is the
+	// Junos-correct half and is pinned by
+	// TestBGPDefinedExportOspfFilteredNotUnfiltered14586; only the bare
+	// `redistribute ospf` line (whole RIB, no filter) is the leak.
+	if strings.Contains(got, " redistribute ospf\n") || strings.Contains(got, "  redistribute ospf\n") {
+		t.Errorf("ROUTE LEAK: global BGP export must not emit unfiltered redistribute ospf, got:\n%s", got)
 	}
 }
 
@@ -3027,11 +3035,15 @@ func TestGenerateProtocols_OSPFExportRouteMap(t *testing.T) {
 }
 
 // TestGenerateProtocols_BGPExportRouteMap covers the #2473 corrected
-// contract: a global `protocols bgp export <policy>` is applied to each
-// peer as `neighbor <X> route-map <policy> out`. The route-map itself is
-// rendered by generatePolicyOptions (verified separately); here we assert
-// the BGP render references it as a peer-level export, never as
-// `redistribute`.
+// contract as completed by #14586: a global `protocols bgp export
+// <policy>` is applied to each peer as `neighbor <X> route-map
+// <policy> out`, AND the routes its `from protocol` terms select are
+// originated through the filtered per-source maps
+// (`redistribute <proto> route-map <policy>-<proto>-xpf-redist`).
+// The route-map itself is rendered by generatePolicyOptions (verified
+// separately); here we assert the BGP render references it as a
+// peer-level export and originates only through the filtered maps —
+// never an unfiltered `redistribute`.
 func TestGenerateProtocols_BGPExportRouteMap(t *testing.T) {
 	m := New()
 	po := &config.PolicyOptionsConfig{
@@ -3057,8 +3069,21 @@ func TestGenerateProtocols_BGPExportRouteMap(t *testing.T) {
 	if !strings.Contains(got, "neighbor 10.0.2.1 route-map bgp-export out\n") {
 		t.Errorf("missing peer-level route-map out, got:\n%s", got)
 	}
-	if strings.Contains(got, "redistribute") {
-		t.Errorf("global BGP export must not emit redistribute, got:\n%s", got)
+	// #14586 origination: filtered per-source maps only.
+	for _, want := range []string{
+		" redistribute connected route-map bgp-export-connected-xpf-redist\n",
+		" redistribute static route-map bgp-export-static-xpf-redist\n",
+		"  redistribute connected route-map bgp-export-connected-xpf-redist\n",
+		"  redistribute static route-map bgp-export-static-xpf-redist\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q, got:\n%s", want, got)
+		}
+	}
+	for _, bad := range []string{" redistribute connected\n", " redistribute static\n", "  redistribute connected\n", "  redistribute static\n"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("unfiltered %q must not render, got:\n%s", strings.TrimSpace(bad), got)
+		}
 	}
 }
 
@@ -3092,8 +3117,20 @@ func TestGenerateProtocols_BGPExportPrefixOnly(t *testing.T) {
 	if !strings.Contains(got, "neighbor 10.0.2.1 route-map adv-filter out\n") {
 		t.Errorf("prefix/community-only global export must apply as route-map out (was silently dropped), got:\n%s", got)
 	}
-	if strings.Contains(got, "redistribute") {
-		t.Errorf("global BGP export must not emit redistribute, got:\n%s", got)
+	// #14586: no-from policy originates the whole non-self domain,
+	// filtered per source (spot-check one IPv4 and one IPv6 source).
+	for _, want := range []string{
+		" redistribute static route-map adv-filter-static-xpf-redist\n",
+		"  redistribute ospf6 route-map adv-filter-ospf6-xpf-redist\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q, got:\n%s", want, got)
+		}
+	}
+	for _, bad := range []string{" redistribute static\n", " redistribute connected\n", "  redistribute static\n", "  redistribute connected\n", "redistribute bgp"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("unfiltered/self %q must not render, got:\n%s", strings.TrimSpace(bad), got)
+		}
 	}
 }
 

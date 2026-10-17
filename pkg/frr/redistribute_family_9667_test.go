@@ -115,8 +115,9 @@ func TestBGPIPv6RedistributeSharesTheNeighborBlock_9667(t *testing.T) {
 }
 
 // TestRedistEntriesAtNodesAreCovered_9667 extends the #9510 census to the
-// node-aware entry point: every caller passes a node the family table knows, and
-// the only non-literal caller is redistributeEntries' pass-through.
+// node-aware entry point: every caller passes a node the family table knows,
+// and the only non-literal callers are redistributeEntries' pass-through and
+// the #14586 BGP wrappers, whose (self, node) pairs are proven below.
 func TestRedistEntriesAtNodesAreCovered_9667(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -125,8 +126,15 @@ func TestRedistEntriesAtNodesAreCovered_9667(t *testing.T) {
 	callRE := regexp.MustCompile(`\.redistributeEntriesAt\(`)
 	passRE := regexp.MustCompile(`\.redistributeEntriesAt\(export, po, self, self\)`)
 	litRE := regexp.MustCompile(`\.redistributeEntriesAt\([^,()]+,\s*[^,()]+,\s*"([a-z0-9-]+)",\s*"([a-z0-9-]+)"\)`)
-	calls, pass := 0, 0
+	// #14586: bgpPolicyRedistEntriesAt14586 takes (self, node) parameters
+	// and forwards them unchanged; its two wrappers pin the literal pairs
+	// ("bgp","bgp") and ("bgp","bgp-ipv6"). Prove the forwarding and both
+	// wrapper literals, then count the forwarder as those two nodes.
+	fwdRE := regexp.MustCompile(`\.redistributeEntriesAt\(name, po, self, node\)`)
+	wrapRE := regexp.MustCompile(`bgpPolicyRedistEntriesAt14586\(policies, po, "([a-z0-9-]+)", "([a-z0-9-]+)"\)`)
+	calls, pass, fwd := 0, 0, 0
 	nodes := map[string]int{}
+	wraps := map[string]int{}
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -137,7 +145,12 @@ func TestRedistEntriesAtNodesAreCovered_9667(t *testing.T) {
 		}
 		calls += len(callRE.FindAllIndex(b, -1))
 		pass += len(passRE.FindAllIndex(b, -1))
+		fwd += len(fwdRE.FindAllIndex(b, -1))
 		for _, mm := range litRE.FindAllSubmatch(b, -1) {
+			nodes[string(mm[2])]++
+		}
+		for _, mm := range wrapRE.FindAllSubmatch(b, -1) {
+			wraps[string(mm[2])]++
 			nodes[string(mm[2])]++
 		}
 	}
@@ -145,11 +158,16 @@ func TestRedistEntriesAtNodesAreCovered_9667(t *testing.T) {
 	for _, c := range nodes {
 		lit += c
 	}
-	if pass != 1 || calls != pass+lit {
-		t.Fatalf("redistributeEntriesAt: %d calls, %d pass-through, %d literal nodes %v; a call this census cannot read is a node the filter cannot see", calls, pass, lit, nodes)
+	// calls = pass-through (1) + literal-node calls + forwarder (1);
+	// lit counts literal calls plus one per proven wrapper literal.
+	if pass != 1 || fwd != 1 || calls != pass+fwd+lit-len(wraps) || len(wraps) != 2 {
+		t.Fatalf("redistributeEntriesAt: %d calls, %d pass-through, %d forwarder, %d literal nodes %v (wrappers %v); a call this census cannot read is a node the filter cannot see", calls, pass, fwd, lit, nodes, wraps)
 	}
 	if nodes["bgp-ipv6"] == 0 {
 		t.Fatal("positive control: the BGP IPv6 address-family caller was not found")
+	}
+	if wraps["bgp"] == 0 || wraps["bgp-ipv6"] == 0 {
+		t.Fatalf("positive control: the #14586 BGP wrapper literals were not both found: %v", wraps)
 	}
 	for node := range nodes {
 		if _, ok := frrRedistNodeAFI[node]; !ok {
