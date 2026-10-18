@@ -288,7 +288,20 @@ func (s *Server) authorizeRESTCommand(r *http.Request, cfg *config.Config, p aut
 
 	actionVerb := restActionVerb9952(r)
 
-	route := r.Method + " " + r.URL.Path
+	// #14712: key the tables on the route as SERVED, not on the raw
+	// method. readPermissionFor (#9134) already canonicalizes any safe
+	// non-GET method to the GET entry for the coarse permission, so a
+	// HEAD request (the only safe non-GET method Go's ServeMux aliases
+	// to a GET pattern) passes that gate and reaches here — where the
+	// raw "HEAD /api/v1/status" missed every GET-keyed table and hit
+	// the fail-closed !mapped denial below. Every regex-restricted
+	// class therefore got 403 on 100% of HEAD reads while GET
+	// succeeded. Canonicalizing here, with the same isSafeHTTPMethod
+	// predicate readPermissionFor uses, makes HEAD follow the GET
+	// verdict exactly — including deny cases and the request-decoded
+	// routes resolved below. Non-safe methods (the POST mutation
+	// family) keep their raw key, so no mutation route is aliased.
+	route := canonicalRESTRoute14712(r.Method, r.URL.Path)
 	if _, declared := restRoutesNoCommand[route]; declared {
 		cmd, resolved := restRequestCommand9952(route, r, actionVerb)
 		if !resolved {
@@ -347,6 +360,23 @@ func restActionVerb9952(r *http.Request) string {
 		return ""
 	}
 	return req.Action
+}
+
+// canonicalRESTRoute14712 returns the route key the command tables are
+// keyed on: the GET spelling for any safe method, the raw method
+// otherwise. This is the same alias readPermissionFor resolves for the
+// coarse permission (#9134) — a safe method other than GET reaches the
+// GET handler through the mux (HEAD is the one Go's ServeMux actually
+// aliases; OPTIONS/TRACE never reach a GET handler), so it is the GET
+// entry that governs it here too. Keeping the canonicalization in one
+// predicate-shaped helper means a future safe method the mux learns
+// to alias is charged identically on both gates rather than reopening
+// the #14712 gap on this one.
+func canonicalRESTRoute14712(method, path string) string {
+	if method != http.MethodGet && isSafeHTTPMethod(method) {
+		return http.MethodGet + " " + path
+	}
+	return method + " " + path
 }
 
 func isRequestDecodedRoute9952(route string) bool {
