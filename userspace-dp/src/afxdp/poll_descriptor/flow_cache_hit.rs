@@ -147,6 +147,9 @@ pub(super) fn stage_flow_cache_hit(
             .forwarding
             .policy
             .scheduler_rules_expired_at(now_ns),
+        // #14943: validate/re-stamp the entry against the CURRENT runtime
+        // lease from this batch's live HA snapshot, not the insert stamp.
+        worker_ctx.ha_state,
     ) {
         // #3048/#5147: an ARP/NDP MAC replacement or neighbor deletion may
         // invalidate this descriptor's next-hop mapping (gateway VRRP

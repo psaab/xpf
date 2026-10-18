@@ -185,14 +185,28 @@ impl FlowCacheStamp {
             // fall back to the node-level rg_epochs[0] edge instead of a
             // literal epoch 0 that no per-RG bump ever moves.
             owner_rg_epoch: rg_epochs[rg_epoch_index(owner_rg_id)].load(Ordering::Relaxed),
-            owner_rg_lease_until: ha_state
-                .get(&owner_rg_id)
-                .map(|group| match group.lease {
-                    HAForwardingLease::ActiveUntil(until) if group.active => until,
-                    _ => 0,
-                })
-                .unwrap_or(0),
+            owner_rg_lease_until: Self::current_lease_until(owner_rg_id, ha_state),
         }
+    }
+    /// #14943: the CURRENT runtime lease for `owner_rg_id` — the same
+    /// extraction `capture` stamps at insert. A hit validates (and
+    /// re-stamps) against this live value, never the insert-frozen one:
+    /// the runtime lease is receipt-anchored and renewed every few
+    /// seconds, so a frozen copy self-evicts every live entry ~10s
+    /// after seeding. Returns 0 when the owner is absent or not
+    /// actively leased (no lease to validate against).
+    #[inline]
+    pub(super) fn current_lease_until(
+        owner_rg_id: i32,
+        ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    ) -> u64 {
+        ha_state
+            .get(&owner_rg_id)
+            .map(|group| match group.lease {
+                HAForwardingLease::ActiveUntil(until) if group.active => until,
+                _ => 0,
+            })
+            .unwrap_or(0)
     }
 }
 
@@ -1138,7 +1152,25 @@ impl FlowCache {
         now_secs: u64,
         rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
     ) -> Option<&FlowCacheEntry> {
-        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, 0, None, false)
+        // Test seam: an empty HA map means "no current lease" (0), which
+        // the #14943 hit validation treats as no-frozen-lease (standalone
+        // / pre-HA entries keep their pre-#14943 behaviour). Cells that
+        // exercise the current-lease gate call `lookup_with_ha_state`.
+        let empty_ha = BTreeMap::new();
+        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, 0, None, false, &empty_ha)
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(super) fn lookup_with_ha_state(
+        &mut self,
+        key: &crate::session::SessionKey,
+        lookup: FlowCacheLookup,
+        now_secs: u64,
+        rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
+        ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    ) -> Option<&FlowCacheEntry> {
+        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, 0, None, false, ha_state)
     }
 
     #[inline]
@@ -1149,6 +1181,7 @@ impl FlowCache {
         now_secs: u64,
         rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
         packet_len: u16,
+        ha_state: &BTreeMap<i32, HAGroupRuntime>,
     ) -> Option<&FlowCacheEntry> {
         self.lookup_with_observed_bytes(
             key,
@@ -1158,7 +1191,25 @@ impl FlowCache {
             u64::from(packet_len),
             None,
             false,
+            ha_state,
         )
+    }
+
+    /// #14943 test/caller shim: `lookup_counted` without a live HA map
+    /// (empty map = no current lease). Production hit path passes the
+    /// worker's live `ha_state` via the 7-arg form.
+    #[cfg(test)]
+    #[inline]
+    pub(super) fn lookup_counted_without_ha(
+        &mut self,
+        key: &crate::session::SessionKey,
+        lookup: FlowCacheLookup,
+        now_secs: u64,
+        rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
+        packet_len: u16,
+    ) -> Option<&FlowCacheEntry> {
+        let empty_ha = BTreeMap::new();
+        self.lookup_counted(key, lookup, now_secs, rg_epochs, packet_len, &empty_ha)
     }
 
     /// Lease phase changes can alter eligibility independently of the entry's
@@ -1175,6 +1226,7 @@ impl FlowCache {
         packet_len: u16,
         policy: &crate::policy::PolicyState,
         scheduler_expired: bool,
+        ha_state: &BTreeMap<i32, HAGroupRuntime>,
     ) -> Option<&FlowCacheEntry> {
         if scheduler_expired != self.scheduler_expired {
             let phase_can_change_verdict = if scheduler_expired {
@@ -1220,6 +1272,7 @@ impl FlowCache {
             u64::from(packet_len),
             Some(policy),
             scheduler_expired,
+            ha_state,
         )
     }
 
@@ -1233,6 +1286,7 @@ impl FlowCache {
         observed_bytes: u64,
         policy: Option<&crate::policy::PolicyState>,
         scheduler_expired: bool,
+        ha_state: &BTreeMap<i32, HAGroupRuntime>,
     ) -> Option<&FlowCacheEntry> {
         let ingress_ifindex = if self.binding_ifindex != 0 {
             self.binding_ifindex
@@ -1283,8 +1337,26 @@ impl FlowCache {
                     self.misses += 1;
                     return None;
                 }
+                // #14943: validate against the CURRENT runtime lease, not
+                // the insert-frozen stamp. The runtime lease is renewed
+                // every few seconds (10s receipt-anchored); a frozen copy
+                // self-evicts every live entry ~10s after seeding and the
+                // downstream HA validator then demotes the resolution to
+                // HAInactive. Only a lease-carrying entry (stamp != 0) is
+                // gated, and only by the live lease: a genuinely expired
+                // runtime lease (current != 0, now past it) still fails
+                // closed, as does an owner that vanished from a PROVIDED
+                // (non-empty) runtime map or was inactivated there
+                // (current == 0 with a lease-carrying stamp — the lease is
+                // gone, not merely unrecorded). An empty map means no HA
+                // snapshot was provided (standalone / test seam): not
+                // gated here, exactly as before — the caller's
+                // `cached_flow_decision_valid` re-checks HA against the
+                // same live map on the production path.
+                let current_lease = FlowCacheStamp::current_lease_until(owner, ha_state);
                 if entry.stamp.owner_rg_lease_until != 0
-                    && now_secs > entry.stamp.owner_rg_lease_until
+                    && !ha_state.is_empty()
+                    && (current_lease == 0 || now_secs > current_lease)
                 {
                     self.entries[entry_idx] = None;
                     self.evictions += 1;
@@ -1327,6 +1399,13 @@ impl FlowCache {
                     "BUG: entry at entry_idx is None after key match — impossible cache state",
                 );
                 entry.last_used_epoch = now;
+                // #14943: re-stamp from the CURRENT runtime lease so the
+                // stored stamp tracks renewals (and debug/observability
+                // never reports a long-dead frozen deadline for a live
+                // entry). Same single mutable borrow, one u64 store.
+                if entry.stamp.owner_rg_lease_until != 0 && !ha_state.is_empty() {
+                    entry.stamp.owner_rg_lease_until = current_lease;
+                }
                 entry.observed_bytes = entry.observed_bytes.saturating_add(observed_bytes);
                 return Some(entry);
             }

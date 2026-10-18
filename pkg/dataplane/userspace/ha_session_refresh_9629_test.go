@@ -56,10 +56,11 @@ func sessionTestManager9629(t *testing.T, groups map[int]HAGroupStatus) *Manager
 }
 
 // haRefreshOracle9629 is a small stateful mirror of Rust's lease-only
-// decision table. It deliberately models key-set equality, matching refreshes,
-// valid stored-active mismatch renewal, and expired stored-active mismatch
-// preservation, so the Go composition cells validate helper behavior rather
-// than only capturing a request payload.
+// decision table. It deliberately models key-set equality, matching refreshes
+// (including #14943 resurrection of an expired stored-active on a matching
+// fresh heartbeat), valid stored-active mismatch renewal, and expired
+// stored-active mismatch preservation, so the Go composition cells validate
+// helper behavior rather than only capturing a request payload.
 type haRefreshOutcome9629 uint8
 
 const (
@@ -1031,7 +1032,8 @@ func TestSessionHAContendedMergePreservesFullSetAndScalarThrottle9629(t *testing
 // authoritative main-socket request is blocked. With an expired stored-active
 // lease, Rust's mismatch branch keeps the stored entry expired; sending the
 // acknowledged Active=true bit would instead take the matching branch and
-// resurrect it.
+// resurrect it (#14943 makes that resurrection explicit — this overlay is
+// the guard that keeps a demotion from ever arriving as matching-active).
 func TestSessionHAContendedDemotionIntentDoesNotRenewExpiredOwner9629(t *testing.T) {
 	m := sessionTestManager9629(t, map[int]HAGroupStatus{
 		1: {Active: true, WatchdogTimestamp: 1},
@@ -1361,10 +1363,11 @@ func TestSessionHAQueuedDemotionIsPerRG11160(t *testing.T) {
 		{RGID: 1, Active: true, WatchdogTimestamp: 1},
 		{RGID: 2, Active: true, WatchdogTimestamp: 1},
 	}, 10)
-	// RG1 expired (the stall outlasted its lease — the #11160 scenario);
-	// RG2 VALID: the helper refuses whole-set when an incoming-active RG
-	// has an expired stored-active lease (#10787), so an expired RG2 would
-	// make Served unobservable and the renewal proof vacuous.
+	// RG1 expired (the stall outlasted its lease — the #11160 scenario) and
+	// overlaid inactive by the demotion intent, so its expired lease is
+	// preserved by the mismatch branch; RG2 is matching-active and valid,
+	// so the whole set is Served (#14943: a matching-active expired RG
+	// would be resurrected instead — RG1 here is mismatch, never matching).
 	oracle.leaseUntil[1] = 9
 	oracle.leaseUntil[2] = 12
 	var served int
