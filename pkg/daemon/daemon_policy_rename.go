@@ -510,10 +510,34 @@ func remappedQueryZones(
 	return from, to, newIngress, newEgress, true
 }
 
-// BPF conntrack mirrors intentionally omit TunnelDiscriminator: a production
-// SessionValue read therefore returns zero even for a keyed GRE row. Zero is
-// the valid non-tunnel/WireGuard None class, but it cannot identify GRE
-// Unkeyed/Keyed/PPTP sessions, so those rows are deleted rather than aliased.
+// Session tuples are lossy for two protocol classes:
+//
+//   - GRE (protocol 47): BPF conntrack mirrors intentionally omit
+//     TunnelDiscriminator, so a production SessionValue read returns zero
+//     even for a keyed GRE row. Zero is the valid non-tunnel/WireGuard
+//     None class, but it cannot identify GRE Unkeyed/Keyed/PPTP sessions,
+//     so those rows are deleted rather than aliased.
+//   - ICMP (1) / ICMPv6 (58): the keys store only the echo identifier in
+//     the port fields; the packet's type/code is never captured. Offline
+//     re-evaluation with ICMPType nil skips every icmp-type/code-
+//     constrained deny/reject rule in first-match order and falls
+//     through to a broader permit (#14697), so these rows likewise fail
+//     closed rather than being retained under a permit the unknown type
+//     cannot be shown to satisfy.
+//
+// capturedTupleValid is the single fail-closed gate every offline
+// session re-evaluation (rename rematch and rollback reauthorization)
+// must pass before its tuple is rebuilt into a policymatch.Query.
+func capturedTupleValid(protocol uint8, discriminator uint64) bool {
+	if protocol == 1 || protocol == 58 {
+		return false
+	}
+	return protocol != 47 || discriminator != 0
+}
+
+// capturedTunnelDiscriminatorValid is retained for the capture-time
+// PurgeTunnelVariants classification, where only the GRE discriminator
+// question is asked (an ICMP row's tunnel variants are not in doubt).
 func capturedTunnelDiscriminatorValid(protocol uint8, discriminator uint64) bool {
 	return protocol != 47 || discriminator != 0
 }
@@ -525,7 +549,7 @@ func capturedTunnelDiscriminatorValid(protocol uint8, discriminator uint64) bool
 // constant is ABI width documentation nothing stamps. An NPTv6 row therefore
 // reaches the capture as DNAT-flagged with a translated NATDstIP and zero port.
 func rematchRenamedV4(oldCfg, newCfg *config.Config, binding policyRenameBinding, key dataplane.SessionKey, value dataplane.SessionValue) (dpuserspace.PolicySessionRebind, bool) {
-	if !capturedTunnelDiscriminatorValid(key.Protocol, value.TunnelDiscriminator) {
+	if !capturedTupleValid(key.Protocol, value.TunnelDiscriminator) {
 		return dpuserspace.PolicySessionRebind{}, false
 	}
 	from, to, newIngress, newEgress, ok := remappedQueryZones(oldCfg, newCfg, binding, value.IngressZone, value.EgressZone)
@@ -559,7 +583,7 @@ func rematchRenamedV4(oldCfg, newCfg *config.Config, binding policyRenameBinding
 	return record, permitted
 }
 func rematchRenamedV6(oldCfg, newCfg *config.Config, binding policyRenameBinding, key dataplane.SessionKeyV6, value dataplane.SessionValueV6) (dpuserspace.PolicySessionRebind, bool) {
-	if !capturedTunnelDiscriminatorValid(key.Protocol, value.TunnelDiscriminator) {
+	if !capturedTupleValid(key.Protocol, value.TunnelDiscriminator) {
 		return dpuserspace.PolicySessionRebind{}, false
 	}
 	from, to, newIngress, newEgress, ok := remappedQueryZones(oldCfg, newCfg, binding, value.IngressZone, value.EgressZone)
@@ -609,7 +633,7 @@ func rematchRenamedV6(oldCfg, newCfg *config.Config, binding policyRenameBinding
 // bucket: an older helper omits the additive fields, and retaining on unknown
 // zones would keep a session the new policy may deny.
 func rematchRenamedMatch(oldCfg, newCfg *config.Config, binding policyRenameBinding, match dpuserspace.SessionPolicyMatch) (dpuserspace.PolicySessionRebind, bool) {
-	if !capturedTunnelDiscriminatorValid(match.Tuple.Protocol, match.Tuple.TunnelDiscriminator) {
+	if !capturedTupleValid(match.Tuple.Protocol, match.Tuple.TunnelDiscriminator) {
 		return dpuserspace.PolicySessionRebind{}, false
 	}
 	from, to, newIngress, newEgress, ok := remappedQueryZones(oldCfg, newCfg, binding, match.IngressZoneID, match.EgressZoneID)

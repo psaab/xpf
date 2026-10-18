@@ -1124,6 +1124,231 @@ func TestRematchRenamedV4RejectsUnknownGREDiscriminator10511(t *testing.T) {
 	}
 }
 
+// #14697: offline session re-evaluation never captures ICMP/ICMPv6
+// type/code (session keys store only the echo identifier in the port
+// fields). Evaluating such a session with ICMPType nil skips every
+// icmp-type-constrained deny/reject rule in first-match order and falls
+// through to a broader permit, keeping a forbidden session. The GRE
+// discriminator (protocol 47, zero discriminator) is the same lossy-tuple
+// class and must also fail closed in reauthorizePolicyCandidates,
+// which until now never called the guard.
+//
+// The deny-first fixture is decisive: with ICMPType 8 populated the
+// matcher itself would match the deny, so an unconstrained-permit control
+// (junos-icmp-all permit only) proves the denial comes from the lossy
+// tuple guard, not from the deny matching. The GRE permit control shows
+// the guard targets only discriminator-zero GRE, not GRE in general.
+
+func icmpRenameConfigs14697(t *testing.T) (oldCfg, newCfg *config.Config, binding policyRenameBinding) {
+	t.Helper()
+	mk := func() *config.Config {
+		cfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+		// lan->wan: first token renamed p-old->p-new is the permit; the deny
+		// inserted before it in newCfg is NOT part of the rename.
+		return cfg
+	}
+	oldCfg = mk()
+	newCfg = policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+	// Broad unconstrained ICMP permit is the renamed rule's sibling control:
+	// keep p-new as permit-any (policyRenameEvaluatorConfig already does).
+	bindings, _, ok := expandPolicyRenameAncestry(
+		oldCfg, newCfg, []configstore.RenameDescriptor{policyRenameDescriptor("p-old", "p-new")},
+	)
+	if !ok {
+		t.Fatal("valid policy ancestry rejected")
+	}
+	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"]
+	binding, ok = bindings[oldID]
+	if !ok {
+		t.Fatalf("missing binding for old policy id %d", oldID)
+	}
+	return oldCfg, newCfg, binding
+}
+
+// installICMPDenyFirst14697 rewrites cfg's lan->wan pair to
+// [deny junos-icmp-ping, permit <renamedRule>] in first-match order, the
+// exact ordering that fails open when the query type is nil: the deny
+// (ICMPType 8) is skipped and the broader permit matches.
+func installICMPDenyFirst14697(cfg *config.Config, renamedRule string) {
+	for _, pair := range cfg.Security.Policies {
+		if pair.FromZone == "lan" && pair.ToZone == "wan" {
+			pair.Policies = []*config.Policy{
+				{Name: "deny-ping", Action: config.PolicyDeny, Match: config.PolicyMatch{
+					SourceAddresses: []string{"any"}, DestinationAddresses: []string{"any"},
+					Applications: []string{"junos-icmp-ping"},
+				}},
+				{Name: renamedRule, Action: config.PolicyPermit, Match: config.PolicyMatch{
+					SourceAddresses: []string{"any"}, DestinationAddresses: []string{"any"},
+					Applications: []string{"junos-icmp-all"},
+				}},
+			}
+		}
+	}
+}
+
+func TestRematchRenamedV4FailsClosedOnICMPWhenDenyICMPTypePrecedesPermit14697(t *testing.T) {
+	oldCfg, newCfg, binding := icmpRenameConfigs14697(t)
+	installICMPDenyFirst14697(newCfg, "p-new")
+	// Premise: the matcher with a known echo type matches the deny first.
+	ty := uint8(8)
+	pre := policymatch.Match(newCfg, policymatch.Query{
+		FromZone: "lan", ToZone: "wan",
+		SrcIP: net.ParseIP("10.0.0.10"), DstIP: net.ParseIP("10.0.0.20"),
+		Protocol: "icmp", SrcPort: 0x1234, DstPort: 0x1234,
+		SrcFamily: "v4", DstFamily: "v4", ICMPType: &ty,
+	})
+	if !pre.Matched || pre.Action != config.PolicyDeny || pre.RuleID != "lan->wan/deny-ping" {
+		t.Fatalf("premise: known-type query = %+v, want deny-ping deny", pre)
+	}
+	key := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 10}, DstIP: [4]byte{10, 0, 0, 20},
+		SrcPort: 0x3412, DstPort: 0x3412, Protocol: 1,
+	}
+	value := dataplane.SessionValue{
+		PolicyID:    dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"],
+		IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+	}
+	if rec, permitted := rematchRenamedV4(oldCfg, newCfg, binding, key, value); permitted {
+		t.Fatalf("ICMP session without captured type retained through broader permit: %+v", rec)
+	}
+}
+
+func TestRematchRenamedV6FailsClosedOnICMPv6WhenDenyICMPTypePrecedesPermit14697(t *testing.T) {
+	oldCfg, newCfg, binding := icmpRenameConfigs14697(t)
+	// No predefined echo-only ICMPv6 app exists (junos-pingv6 is
+	// protocol-only, #11340), so the type-128 constraint is a custom app.
+	ty128 := uint8(128)
+	newCfg.Applications.Applications = map[string]*config.Application{
+		"deny-echo6": {Name: "deny-echo6", Protocol: "icmpv6", ICMPType: &ty128},
+	}
+	for _, pair := range newCfg.Security.Policies {
+		if pair.FromZone == "lan" && pair.ToZone == "wan" {
+			pair.Policies = []*config.Policy{
+				{Name: "deny-ping6", Action: config.PolicyDeny, Match: config.PolicyMatch{
+					SourceAddresses: []string{"any"}, DestinationAddresses: []string{"any"},
+					Applications: []string{"deny-echo6"},
+				}},
+				{Name: "p-new", Action: config.PolicyPermit, Match: config.PolicyMatch{
+					SourceAddresses: []string{"any"}, DestinationAddresses: []string{"any"},
+					Applications: []string{"junos-icmp6-all"},
+				}},
+			}
+		}
+	}
+	ty := uint8(128)
+	pre := policymatch.Match(newCfg, policymatch.Query{
+		FromZone: "lan", ToZone: "wan",
+		SrcIP: net.ParseIP("2001:db8::10"), DstIP: net.ParseIP("2001:db8::20"),
+		Protocol: "icmpv6", SrcPort: 0x1234, DstPort: 0x1234,
+		SrcFamily: "v6", DstFamily: "v6", ICMPType: &ty,
+	})
+	if !pre.Matched || pre.Action != config.PolicyDeny {
+		t.Fatalf("premise: known-type v6 query = %+v, want deny", pre)
+	}
+	key := dataplane.SessionKeyV6{
+		SrcIP:   [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0a},
+		DstIP:   [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x14},
+		SrcPort: 0x3412, DstPort: 0x3412, Protocol: 58,
+	}
+	value := dataplane.SessionValueV6{
+		PolicyID:    dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"],
+		IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+	}
+	if rec, permitted := rematchRenamedV6(oldCfg, newCfg, binding, key, value); permitted {
+		t.Fatalf("ICMPv6 session without captured type retained through broader permit: %+v", rec)
+	}
+}
+
+func TestRematchRenamedMatchFailsClosedOnICMPWhenDenyICMPTypePrecedesPermit14697(t *testing.T) {
+	oldCfg := policyRenameEvaluatorConfig("p-old", config.PolicyPermit)
+	newCfg := policyRenameEvaluatorConfig("p-new", config.PolicyPermit)
+	_, binding := helperRenameBinding10626(t, oldCfg, newCfg)
+	installICMPDenyFirst14697(newCfg, "p-new")
+	match := dpuserspace.SessionPolicyMatch{
+		AddrFamily: 4,
+		Tuple: dpuserspace.SessionPolicyTuple{
+			AddrFamily: 4, Protocol: 1,
+			SrcIP: "10.0.0.10", DstIP: "10.0.0.20",
+			SrcPort: 0x1234, DstPort: 0x1234,
+		},
+		IngressZoneID: config.StableZoneID("lan"),
+		EgressZoneID:  config.StableZoneID("wan"),
+	}
+	if rec, permitted := rematchRenamedMatch(oldCfg, newCfg, binding, match); permitted {
+		t.Fatalf("helper ICMP session without captured type retained: %+v", rec)
+	}
+}
+
+func TestRematchRenamedICMPControlUnconstrainedPermitStillFailsClosed14697(t *testing.T) {
+	// Control: even with NO icmp-type deny in the new config — only the
+	// broader junos-icmp-all permit — the lossy ICMP tuple must fail
+	// closed, because the guard cannot prove no earlier/future rule in
+	// the evaluated set constrains the type. (Fail-on-revert of a
+	// deny-scanning alternative would keep this green; the unconditional
+	// guard is the GRE-parity contract.)
+	oldCfg, newCfg, binding := icmpRenameConfigs14697(t)
+	for _, pair := range newCfg.Security.Policies {
+		if pair.FromZone == "lan" && pair.ToZone == "wan" {
+			pair.Policies = []*config.Policy{
+				{Name: "p-new", Action: config.PolicyPermit, Match: config.PolicyMatch{
+					SourceAddresses: []string{"any"}, DestinationAddresses: []string{"any"},
+					Applications: []string{"junos-icmp-all"},
+				}},
+			}
+		}
+	}
+	key := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 10}, DstIP: [4]byte{10, 0, 0, 20},
+		SrcPort: 0x3412, DstPort: 0x3412, Protocol: 1,
+	}
+	value := dataplane.SessionValue{
+		PolicyID:    dpuserspace.PolicyIDsByStableKey(oldCfg)["lan->wan/p-old"],
+		IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+	}
+	if rec, permitted := rematchRenamedV4(oldCfg, newCfg, binding, key, value); permitted {
+		t.Fatalf("lossy ICMP tuple retained under unconstrained permit (guard missing): %+v", rec)
+	}
+	// TCP control: an ordinary TCP session through a match-any binding
+	// (the evaluator-config default, whose p-new rule has no applications)
+	// is unaffected by the ICMP/GRE guard.
+	anyOld, anyNew, anyBinding := icmpRenameConfigs14697(t)
+	tcpKey := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 10}, DstIP: [4]byte{10, 0, 0, 20},
+		SrcPort: 0x3412, DstPort: 0xBB01, Protocol: 6,
+	}
+	tcpValue := dataplane.SessionValue{
+		PolicyID:    dpuserspace.PolicyIDsByStableKey(anyOld)["lan->wan/p-old"],
+		IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+	}
+	if _, permitted := rematchRenamedV4(anyOld, anyNew, anyBinding, tcpKey, tcpValue); !permitted {
+		t.Fatal("TCP control session was not retained — guard over-broad")
+	}
+}
+
+func TestCapturedTupleValidRejectsLossyProtocols14697(t *testing.T) {
+	if !capturedTupleValid(6, 0) {
+		t.Fatal("TCP must stay valid")
+	}
+	if capturedTupleValid(47, 0) {
+		t.Fatal("GRE zero discriminator must stay invalid")
+	}
+	if !capturedTupleValid(47, 0x1234) {
+		t.Fatal("keyed GRE must stay valid")
+	}
+	for _, proto := range []uint8{1, 58} {
+		if capturedTupleValid(proto, 0) {
+			t.Fatalf("protocol %d without captured type/code must be invalid", proto)
+		}
+		if capturedTupleValid(proto, 0x1234) {
+			t.Fatalf("protocol %d must be invalid regardless of discriminator", proto)
+		}
+	}
+	// The capture-time purge classification keeps its GRE-only meaning.
+	if !capturedTunnelDiscriminatorValid(1, 0) || capturedTunnelDiscriminatorValid(47, 0) {
+		t.Fatal("capturedTunnelDiscriminatorValid must stay GRE-only")
+	}
+}
+
 // Ownership of rename lineage transfers from the store to the daemon copy at
 // bind time in commitWithGenBinding: the consumed store generation retires
 // immediately, and no apply outcome — converged, terminally failed, or fatal

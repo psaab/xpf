@@ -1196,6 +1196,14 @@ func (d *Daemon) reauthorizePolicyCandidates(
 	policyInactive := dpuserspace.PolicyInactiveFn(
 		d.policySchedulerActiveStateForApplyLocked(restored, time.Now()))
 	isPermitted := func(key string, match dpuserspace.SessionPolicyMatch) bool {
+		// #14697: lossy tuples (GRE without a captured discriminator,
+		// ICMP/ICMPv6 without a captured type/code) can never be shown
+		// permitted — the rebuilt query would skip icmp-type-constrained
+		// deny/reject rules and fall through to a broader permit. Keep
+		// the candidate (fail closed), mirroring the rename rematch.
+		if !capturedTupleValid(match.Tuple.Protocol, match.Tuple.TunnelDiscriminator) {
+			return false
+		}
 		if key == dataplane.DefaultPolicyName && preserveDefaultRematch {
 			return false
 		}
