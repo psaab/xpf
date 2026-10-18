@@ -247,19 +247,30 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 				"user", user.Name, "err", err)
 			continue
 		}
+		// #14694: a malformed key or a negative UID must not skip the
+		// shell demotion / password reconcile for an EXISTING account.
+		// On the tolerant/peer-sync/rollback path the demoting config is
+		// already live, so an early continue would leave the old bash
+		// shell, shadow hash and keys in force while reporting (for
+		// UID<0, silently) success. Record the failure, suppress ONLY
+		// the key install / account creation below, and still converge
+		// shell + password. A nonexistent account is never created.
+		keysValid := true
 		if err := validateAuthorizedSSHKeys(user.Name, user.SSHKeys); err != nil {
 			fail(err)
-			continue
+			keysValid = false
 		}
-
 		// A missing UID (zero) requests the system's normal automatic
 		// assignment. Invalid authored UIDs are kept negative by compilation
 		// on the tolerant path and must never silently take that route.
+		uidValid := true
 		if user.UID < 0 {
 			slog.Warn("refusing to provision login user with invalid uid",
 				"user", user.Name, "uid", user.UID)
-			continue
+			fail(fmt.Errorf("login user %s has invalid uid %d", user.Name, user.UID))
+			uidValid = false
 		}
+		provisionBlocked := !keysValid || !uidValid
 
 		// Check if user already exists. A non-zero exit means "user
 		// doesn't exist"; a timeout also lands here, in which case the
@@ -268,6 +279,10 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 		shell := loginShellForClass(cfg, user.Class, cliShell)
 
 		_, err := runCommandTimeout("id", "--", user.Name)
+		if err != nil && provisionBlocked {
+			// #14694: never create an account whose keys/UID are invalid.
+			continue
+		}
 		if err != nil {
 			// User doesn't exist — create it
 			args := []string{"-m", "-s", shell}
@@ -351,6 +366,12 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 
 		// Set SSH authorized keys. An EMPTY configured key list takes the else
 		// branch below and REVOKES any xpf-managed authorized_keys (#5106).
+		// #14694: when keys/UID are invalid, skip BOTH branches — never
+		// install the bad key, and never treat its presence as an emptied
+		// list that revokes the prior xpf-managed keys.
+		if provisionBlocked {
+			continue
+		}
 		if len(user.SSHKeys) > 0 {
 			// Derive the .ssh dir from the SAME homeBaseDir seam the emptied-key
 			// removal branch below uses (managedAuthorizedKeysPath), so the key
@@ -1387,8 +1408,15 @@ func (d *Daemon) applyRootAuth(cfg *config.Config) (retErr error) {
 		keys = ra.SSHKeys
 	}
 
+	// #14694: a malformed root key must not skip the password reconcile
+	// below. Record the failure, suppress ONLY the key install, and
+	// still apply/lock root's password. Prior xpf-managed keys stay
+	// untouched (the bad key is never installed, and its presence is
+	// not an emptied list).
+	keysValid := true
 	if err := validateAuthorizedSSHKeys("root", keys); err != nil {
-		return err
+		fail(err)
+		keysValid = false
 	}
 
 	// Password: reuse the non-root #1944 reconciler keyed on name "root" / UID 0.
@@ -1398,6 +1426,10 @@ func (d *Daemon) applyRootAuth(cfg *config.Config) (retErr error) {
 	fail(d.reconcileUserPassword(&config.LoginUser{Name: "root", EncryptedPassword: password}))
 
 	// Keys: write the configured set wholesale, else revoke the xpf-managed file.
+	// #14694: invalid keys suppress both branches (see above).
+	if !keysValid {
+		return retErr
+	}
 	if len(keys) > 0 {
 		// #5841 marker-first: record root KEY ownership AND the account registry
 		// entry BEFORE writing root's authorized_keys. The key marker gates the
