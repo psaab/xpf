@@ -293,7 +293,20 @@ func (r *Runner) Run(opts Options) (err error) {
 		} else if rbErr := r.rollback(j); rbErr != nil {
 			return fmt.Errorf("resume rollback: %w", rbErr)
 		}
-		return nil
+		// #14721: a completed rollback is NOT a successful forward cut.
+		// Returning nil here let callers treat the run as a completed cut:
+		// the standalone CLI printed "upgrade complete" and exited 0,
+		// and runRollingWith proceeded to re-sync +
+		// RejoinAndConfirm/ResetFailover, logging "cut complete" while
+		// the node runs the OLD version. Report the rollback outcome as
+		// a non-nil error (mirroring the uninterrupted auto-rollback at
+		// the START phase, which returns "rolled back to %s"). The
+		// rollback itself succeeded and its journal is already cleared;
+		// LastCommittedCut stays empty so no caller can mistake this for
+		// committed-cut evidence. stopAttempted is already true for this
+		// branch, so the rolling driver keeps the node passive instead
+		// of failing back.
+		return fmt.Errorf("resumed an interrupted rollback: rolled back to %s (the cut to %s was abandoned; re-stage and re-run to retry the upgrade)", j.PreviousVersion, j.TargetVersion)
 	}
 
 	// Resolve the SOURCE the cut copies from (#1981 Option B). A B-aware cut
