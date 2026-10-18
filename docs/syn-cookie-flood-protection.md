@@ -166,26 +166,35 @@ screen runtime:
   "accepted but NOT yet enforced" WARNING is removed now that the leaf is
   effective.
 
+### SYN-flood attack/alarm thresholds are PER DESTINATION:PORT (#14635)
+
+Junos counts `syn-flood attack-threshold` (and `alarm-threshold`) as SYNs
+to the same destination address (current docs: destination address and
+ingress interface port; older docs: destination address and port) per
+second — never per zone. Before #14635 xpf measured one per-zone
+aggregate, so two services at 0.75x threshold summed and false-dropped /
+false-challenged, while one hot service was under-protected until the
+zone sum crossed. #14635 rekeys the PRIMARY measurement per
+`(dst_ip, dst_port)`: a count-all `SynRateSketch<RateCounter>` for
+attack/alarm classification, a `SynRateSketch<TokenBucket>` for the
+cookie-OFF drop gate, per-key cookie activation (`syn_cookie_active_per_dst`)
+and per-key alarm cadence. The old zone counters remain only as a
+SECONDARY 8x ceiling counting per-dst-admitted packets (cookie-OFF token
+bucket; cookie-ON zone latch as a ceiling/legacy state), mirroring #4112.
+
 Enforcement order (`ZoneScreenState::syn_flood_gate` in `screen/zone.rs`
-since #6437 — previously inlined in `screen/mod.rs`; the caller
-`check_packet_with_zone_id_opts` runs the validated-cookie bypass first and
-applies the returned `SynFloodGate` verdict): (1) the aggregate `attack-threshold` (+
-`alarm-threshold`) ALWAYS counts via a single `RateCounter::increment_and_classify`
-so its cookie-activation side-effect can never be skipped — it does NOT return
-here; (2) the per-destination cap is evaluated BEFORE the aggregate over-attack
-verdict (#4112 F19), so a per-destination trip HARD-DROPS the flooded victim even
-while the zone is over `attack-threshold` and minting cookies for validated
-clients; (3) the aggregate over-attack verdict then mints the SYN-cookie
-challenge (or Drops when cookies are disabled) for the case where the per-dest
-cap did not trip — `attack` keeps its existing cookie-mint / Drop behaviour;
-(4) per-source cap (gated, skipped while cookie-active). Before #4112 the
-per-destination sketch sat AFTER the over-attack early-return, so a real-client
-flood that pushed the zone over `attack-threshold` took the cookie-mint branch on
-every SYN and the per-destination sketch was NEVER reached — the
-`destination-threshold` that exists to shield a single victim even from validated
-clients was defeated in exactly the high-load regime it is configured for (a
-code-vs-comment contradiction). A per-IP trip hard-drops with the existing
-`syn-flood` reason id (no Go gRPC/CLI change); per-source vs per-destination is
+since #6437; the caller `check_packet_with_zone_id_opts` runs the
+validated-cookie bypass first and applies the returned `SynFloodGate`
+verdict): (1) the per-(dst,port) `attack-threshold` (+ `alarm-threshold`)
+counts via `increment_ip_port_and_classify`; (2) the per-destination-IP
+cap (#3315 `destination-threshold`) is evaluated BEFORE the per-dst
+over-attack verdict (#4112 F19), so a per-destination trip HARD-DROPS the
+flooded victim even while cookies are being minted; (3) the per-dst
+over-attack verdict then mints the SYN-cookie challenge per key (or drops
+via the per-dst token bucket when cookies are disabled, subject to the 8x
+zone ceiling); (4) per-source cap (gated, skipped while this destination
+is cookie-active). A per-IP trip hard-drops with the existing `syn-flood`
+reason id (no Go gRPC/CLI change); per-source vs per-destination is
 distinguished by separate per-worker counters.
 
 Substrate (`userspace-dp/src/screen/syn_rate.rs`): a per-zone **count-min sketch**

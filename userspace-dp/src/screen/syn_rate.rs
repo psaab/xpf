@@ -431,6 +431,35 @@ impl SynRateSketch<RateCounter> {
     fn with_cols_seeded(cols: usize, seed: u64) -> Self {
         Self::build_seeded(cols, seed)
     }
+
+    pub(super) fn for_syn_dst_port() -> Self {
+        Self::build_seeded(DST_COLS, crate::hot_hash_seed::hot_path_hash_seed())
+    }
+
+    /// #14635: count-all per-(dst,port) dual-threshold classify. Every row
+    /// must report over for the key to be over (CMS AND/min); collisions only
+    /// over-count (fail-closed).
+    pub(super) fn increment_ip_port_and_classify(
+        &mut self,
+        ip: &IpAddr,
+        port: u16,
+        now_secs: u64,
+        attack: u32,
+        alarm: u32,
+    ) -> (bool, bool) {
+        let mut indices = [0usize; ROWS];
+        for (row, slot) in indices.iter_mut().enumerate() {
+            *slot = self.cell_index_ip_port(row, ip, port);
+        }
+        let mut over_attack = true;
+        let mut over_alarm = true;
+        for (row, &idx) in indices.iter().enumerate() {
+            let (a, b) = self.rows[row][idx].increment_and_classify(now_secs, attack, alarm);
+            over_attack &= a;
+            over_alarm &= b;
+        }
+        (over_attack, over_alarm)
+    }
 }
 
 impl SynRateSketch<TokenBucket> {
@@ -470,6 +499,26 @@ impl SynRateSketch<TokenBucket> {
     /// an over-threshold destination down to the configured rate.
     pub(super) fn for_flood_dst() -> Self {
         Self::build_seeded(DST_COLS, crate::hot_hash_seed::hot_path_hash_seed())
+    }
+
+    /// #14635 per-(dst,port) cookie-OFF token-bucket sketch.
+    pub(super) fn for_syn_dst_port_token() -> Self {
+        Self::with_cols(DST_COLS)
+    }
+
+    /// #14635: per-(dst,port) token-bucket admission (cookie-OFF drop gate).
+    pub(super) fn increment_ip_port_token(
+        &mut self,
+        ip: &IpAddr,
+        port: u16,
+        now_ns: u64,
+        threshold: u32,
+    ) -> bool {
+        let mut indices = [0usize; ROWS];
+        for (row, slot) in indices.iter_mut().enumerate() {
+            *slot = self.cell_index_ip_port(row, ip, port);
+        }
+        self.increment_indices(indices, now_ns, threshold)
     }
 }
 

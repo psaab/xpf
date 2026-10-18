@@ -27,12 +27,16 @@
 //! (a disjoint `ScreenState` field) stays in the caller as PHASE 0; #9945
 //! validated hits still charge the aggregate and per-destination state.
 
+use rustc_hash::FxHashMap;
 use std::net::IpAddr;
 
 use super::packet::{PROTO_ICMP, PROTO_ICMPV6, PROTO_UDP, ScreenPacketInfo, ScreenProfile};
 use super::rate::{RateCounter, TokenBucket};
 use super::syn_rate::SynRateSketch;
 use super::syncookie::{SynCookieCodec, SynCookieZoneTag, syn_cookie_zone_tag};
+
+/// #14635 secondary zone-wide SYN cookie-OFF ceiling multiplier (#4112).
+const SYN_SECONDARY_CEILING_MULT: u32 = 8;
 
 /// #4112: multiplier for the per-zone ICMP/UDP flood aggregate SECONDARY
 /// ceiling. Junos measures the ICMP/UDP flood rate PER DESTINATION, so the
@@ -81,14 +85,14 @@ pub(super) struct ZoneScreenState {
     icmp_counter: TokenBucket,
     /// #4112 SECONDARY per-zone UDP flood ceiling (`TokenBucket` shaper).
     udp_counter: TokenBucket,
-    /// #3315 per-zone SYN aggregate — count-all `RateCounter`; its admission
-    /// activates SYN cookies / drives the alarm (the deliberate
-    /// sustained-at-threshold over-throttle, see rate.rs).
-    syn_counter: RateCounter,
-    /// #3607 per-zone SYN-flood aggregate DROP shaper, the SOLE drop gate when
-    /// `syn-cookie` is OFF (capacity = refill = `syn_flood_threshold`). Unused
-    /// while `syn-cookie` is ON.
-    syn_off_attack_bucket: TokenBucket,
+    /// #14635 PRIMARY per-(dst,port) count-all attack/alarm sketch.
+    syn_attack_sketch: SynRateSketch<RateCounter>,
+    /// #14635 PRIMARY per-(dst,port) cookie-OFF token-bucket drop sketch.
+    syn_off_attack_sketch: SynRateSketch<TokenBucket>,
+    /// #14635 SECONDARY zone-wide ceilings (8x threshold), count only
+    /// per-dst admitted packets.
+    syn_zone_counter: RateCounter,
+    syn_zone_off_bucket: TokenBucket,
     /// #4112/#5805 per-DESTINATION-IP ICMP flood sketch (PRIMARY cap). `Some`
     /// iff `icmp_flood_threshold > 0`. Monotonic-ns `TokenBucket` cells.
     pub(super) icmp_dst_sketch: Option<SynRateSketch<TokenBucket>>,
@@ -110,6 +114,10 @@ pub(super) struct ZoneScreenState {
     syn_cookie_ack_attempt_sketch: Option<SynRateSketch<TokenBucket>>,
 
     pub(super) syn_cookie_active_until_secs: u64,
+    /// #14635 per-(dst,port) cookie activation; bounded, perishable.
+    pub(super) syn_cookie_active_per_dst: FxHashMap<(IpAddr, u16), u64>,
+    /// #14635 per-(dst,port) alarm cadence.
+    syn_alarm_last_emit_per_dst: FxHashMap<(IpAddr, u16), u64>,
     /// #3607 standby SYN-cookie ACK validation budget (`TokenBucket`).
     pub(super) syn_cookie_standby_ack_counter: TokenBucket,
     /// #9902 F-023 flood-ACTIVE SYN-cookie ACK validation budget (`TokenBucket`).
@@ -199,14 +207,18 @@ impl ZoneScreenState {
             profile,
             icmp_counter: TokenBucket::default(),
             udp_counter: TokenBucket::default(),
-            syn_counter: RateCounter::default(),
-            syn_off_attack_bucket: TokenBucket::default(),
+            syn_attack_sketch: SynRateSketch::for_syn_dst_port(),
+            syn_off_attack_sketch: SynRateSketch::for_syn_dst_port_token(),
+            syn_zone_counter: RateCounter::default(),
+            syn_zone_off_bucket: TokenBucket::default(),
             icmp_dst_sketch,
             udp_dst_sketch,
             syn_dst_sketch,
             syn_src_sketch,
             syn_cookie_ack_attempt_sketch,
             syn_cookie_active_until_secs: 0,
+            syn_cookie_active_per_dst: FxHashMap::default(),
+            syn_alarm_last_emit_per_dst: FxHashMap::default(),
             syn_cookie_standby_ack_counter: TokenBucket::default(),
             syn_cookie_active_ack_counter: TokenBucket::default(),
             syn_cookie_profile_gen: 0,
@@ -298,11 +310,13 @@ impl ZoneScreenState {
         );
         if self.profile.syn_flood_alarm_threshold == 0 {
             self.syn_alarm_last_emit_sec = u64::MAX;
+            self.syn_alarm_last_emit_per_dst.clear();
         }
 
         // #9425 member 2 and #12876 — see the doc comment above.
         if self.profile.alarm_without_drop || activation_slice_changed {
             self.syn_cookie_active_until_secs = 0;
+            self.syn_cookie_active_per_dst.clear();
         }
     }
     /// #13952/#14324: consume one post-MAC FAILED ACK attempt for
@@ -427,23 +441,25 @@ impl ZoneScreenState {
     /// proved liveness) and the aggregate's recoverable challenge response;
     /// the caller preserves its `SynCookieBypass` fast-path verdict.
     ///
-    /// #3315 + #4112 F19 enforcement order (aggregate counts first, per-dst
-    /// authoritative over the aggregate cookie/Drop verdict, per-src additive):
-    ///   1. aggregate `attack-threshold` (+ `alarm-threshold`) — ALWAYS counts
-    ///      via a SINGLE window advance so its cookie-activation side-effect
-    ///      can never be skipped. It does NOT return here.
-    ///   2. per-DESTINATION cap (primary, spoof-resistant) — evaluated BEFORE
-    ///      the aggregate over-attack early-return (#4112 F19), so a per-dst
-    ///      trip HARD-DROPS the flooded victim even while the zone is over
-    ///      attack-threshold and minting cookies for validated clients. Runs
-    ///      even when cookie-active and for validated clients (#9945).
-    ///   3. aggregate over-attack verdict — mint a SYN-cookie challenge (or
-    ///      Drop when cookies are disabled) for an unvalidated client. A
-    ///      validated client keeps its existing bypass verdict after charging
-    ///      the aggregate (#9945).
-    ///   4. per-SOURCE cap (secondary) — SKIPPED while the zone is cookie-
-    ///      active, or for a validated client (the client proved liveness; the
-    ///      source-scoped limiter is the one deliberate #9945 exception).
+    /// #3315 + #4112 F19 + #14635 enforcement order (per-(dst,port) counts
+    /// first, per-dst-IP authoritative over the per-dst cookie/Drop verdict,
+    /// per-src additive):
+    ///   1. per-(dst,port) `attack-threshold` (+ `alarm-threshold`) — ALWAYS
+    ///      counts via a SINGLE window advance so its cookie-activation
+    ///      side-effect can never be skipped. Junos counts SYNs to the same
+    ///      destination address (+port) per second, never per zone (#14635).
+    ///   2. per-DESTINATION-IP cap (primary, spoof-resistant) — evaluated
+    ///      BEFORE the per-dst over-attack early-return (#4112 F19), so a
+    ///      per-dst-IP trip HARD-DROPS the flooded victim even while its
+    ///      service is over attack-threshold and minting cookies. Runs even
+    ///      when cookie-active and for validated clients (#9945).
+    ///   3. per-(dst,port) over-attack verdict — mint a SYN-cookie challenge
+    ///      per key (or drop via the per-dst token bucket when cookies are
+    ///      disabled, subject to the 8x zone ceiling). A validated client
+    ///      keeps its bypass after charging (#9945).
+    ///   4. per-SOURCE cap (secondary) — SKIPPED while THIS destination is
+    ///      cookie-active, or for a validated client (the client proved
+    ///      liveness; the #9945 exception).
     ///
     /// `codec_available` is the caller-observed `self.syn_cookie_codec.is_some()`
     /// snapshot, taken immediately before the call — the codec cannot change
@@ -451,7 +467,7 @@ impl ZoneScreenState {
     /// PHASE-2 `syn_cookie_codec` is still `Some`. Worker-local counters only;
     /// no allocation, lock, or dynamic dispatch on the packet path.
     /// `cookie_activation_allowed` is false for session-miss SYN-ACKs. Those
-    /// packets are still flood-metered and dropped over the aggregate
+    /// packets are still flood-metered and dropped over the per-dst
     /// threshold, but cannot trigger an unanswerable challenge or poison the
     /// cookie-active window used by later initial SYNs.
     #[inline]
@@ -479,127 +495,115 @@ impl ZoneScreenState {
         let syn_dst_threshold = self.profile.syn_flood_dst_threshold;
         let syn_src_threshold = self.profile.syn_flood_src_threshold;
 
-        // (1) Aggregate dual-threshold in a SINGLE window advance (D7): one
-        // compare against attack, one against alarm. When alarm is disabled,
-        // pass u32::MAX so `over_alarm` is always false and the alarm branch
-        // is dead.
+        // #14635: PRIMARY per-(dst_ip,dst_port) attack/alarm measurement.
         let alarm_arg = if syn_alarm_threshold > 0 {
             syn_alarm_threshold
         } else {
             u32::MAX
         };
-        let (over_attack, over_alarm) =
-            self.syn_counter
-                .increment_and_classify(now_secs, syn_flood_threshold, alarm_arg);
-        // (2) per-DESTINATION cap — PRIMARY. Evaluated BEFORE the aggregate
-        // over-attack early-return (#4112 F19) so a per-destination trip
-        // HARD-DROPS the flooded victim even while the zone is over
-        // attack-threshold and minting cookies for validated clients.
-        // destination-threshold's purpose (shield a single over-threshold
-        // backend even from cookie-completing clients) was otherwise defeated
-        // in exactly the high-load regime it is configured for: `if
-        // over_attack` returned the cookie challenge before the per-dst sketch
-        // at the old site (2) was ever reached. The aggregate counter above
-        // ALWAYS counts first (its cookie-activation side-effect is never
-        // skipped); a per-dst trip never flips zone cookie state. Runs even
-        // when the zone is cookie-active.
+        let (over_attack, over_alarm) = self.syn_attack_sketch.increment_ip_port_and_classify(
+            &pkt.dst_ip,
+            pkt.dst_port,
+            now_secs,
+            syn_flood_threshold,
+            alarm_arg,
+        );
+        let dst_key = (pkt.dst_ip, pkt.dst_port);
         if syn_dst_threshold > 0
             && let Some(sketch) = self.syn_dst_sketch.as_mut()
             && sketch.increment(&pkt.dst_ip, now_ns, syn_dst_threshold)
         {
             return SynFloodGate::DropDst;
         }
-        // (3) aggregate over-attack verdict.
-        //   - `syn-cookie` ON: the MEASURED count-all `over_attack` mints a
-        //     SYN-cookie challenge / activates cookies (UNCHANGED). Admitting
-        //     a sustained-at-threshold stream here would let `threshold`
-        //     spoofed SYNs/s bypass the cookie AND the per-source cap — the
-        //     round-1 BLOCKER — so the count-all latch is deliberately
-        //     retained. #9945: a validated client already proved liveness;
-        //     preserve its bypass after charging the aggregate.
-        //   - `syn-cookie` OFF (#3607): there is no cookie to bypass, so a
-        //     sustained-at-threshold legit SYN stream MUST be admitted. The
-        //     per-zone `TokenBucket` is the SOLE drop authority, consulted on
-        //     EVERY initial SYN and decoupled from the measured `over_attack`.
-        //     One gate ⇒ no double-quota; the cold-start-full burst is bounded
-        //     to capacity = `threshold`, preserving #2937.
         if syn_cookie {
             if over_attack {
-                // #9945: a validated client already solved a cookie challenge.
-                // Keep its fast-path SynCookieBypass verdict; the aggregate
-                // and per-destination charge above still take effect. Return
-                // BEFORE extending the zone's active window: a validated
-                // flood must not keep cookie-active alive indefinitely.
                 if validated_client {
                     return SynFloodGate::Admit { alarm: false };
                 }
-                // Session-miss SYN-ACKs are metered by this shared gate, but
-                // cannot be answered with a valid SYN-cookie challenge.
-                // Never let their unanswerable flood arm the cookie-active
-                // window: doing so would switch ACK validation into active
-                // mode and disable the per-source SYN sketch for later
-                // initial SYNs. Preserve the aggregate drop verdict.
                 if !cookie_activation_allowed {
                     return SynFloodGate::DropAggregate;
                 }
-                // In `alarm-without-drop` (audit) mode do NOT mark the zone
-                // SYN-cookie-active. The challenge minted by the caller is
-                // converted to a log-only alarm + Pass by the verdict consumer
-                // (no cookie is actually put on the wire), so a returning
-                // session-miss ACK never carries a valid cookie. Marking the
-                // zone active would flip `locally_active` true in
-                // `validate_syn_cookie_ack_on_session_miss`, which then DROPS
-                // every such ACK as `Invalid` -- escaping the profile-wide
-                // audit contract (observe the flood, forward the traffic).
-                // Leaving it inactive makes that path return `NotApplicable`
-                // so the ACK forwards. The per-source cap below is likewise
-                // not skipped in audit mode, which is correct: the check
-                // should still run and alarm.
                 if !alarm_without_drop {
-                    // #4969: active-until is a field on the zone's
-                    // consolidated state, present by construction — the
-                    // pre-#4969 `debug_assert!` guarding a missing
-                    // prepopulated entry is now a compile-time impossibility.
+                    // #14635: activate cookies PER KEY. The zone latch is
+                    // retained as the legacy/secondary state read by forced
+                    // test seams and the #13699 latch assertion; live ACK
+                    // and per-source decisions key on the per-dst map below,
+                    // so this latch no longer widens enforcement zone-wide.
+                    let until = now_secs.saturating_add(SynCookieCodec::EPOCH_SECS);
+                    self.syn_cookie_active_per_dst.retain(|_, v| *v > now_secs);
+                    if self.syn_cookie_active_per_dst.len() < 4096
+                        || self.syn_cookie_active_per_dst.contains_key(&dst_key)
+                    {
+                        self.syn_cookie_active_per_dst.insert(dst_key, until);
+                    }
                     self.syn_cookie_active_until_secs =
-                        now_secs.saturating_add(SynCookieCodec::EPOCH_SECS);
+                        self.syn_cookie_active_until_secs.max(until);
                 }
                 if !codec_available {
                     return SynFloodGate::DropCookieUnavailable;
                 }
                 return SynFloodGate::MintChallenge;
             }
-        } else if self
-            .syn_off_attack_bucket
-            .admit_is_over(now_ns, syn_flood_threshold)
-        {
-            return SynFloodGate::DropAggregate;
+        } else {
+            let per_dst_over = self.syn_off_attack_sketch.increment_ip_port_token(
+                &pkt.dst_ip,
+                pkt.dst_port,
+                now_ns,
+                syn_flood_threshold,
+            );
+            if per_dst_over {
+                return SynFloodGate::DropAggregate;
+            }
+            if self.syn_zone_off_bucket.admit_is_over(
+                now_ns,
+                syn_flood_threshold.saturating_mul(SYN_SECONDARY_CEILING_MULT),
+            ) {
+                return SynFloodGate::DropAggregate;
+            }
+            let _ = self
+                .syn_zone_counter
+                .increment_and_classify(now_secs, u32::MAX, u32::MAX);
         }
-        // Alarm-threshold crossed but below attack: raise a log-only alarm at
-        // most once per second per zone. The verdict is unaffected — the
-        // packet continues to the per-source check and (if clean) forwards.
-        // #3607: the cookie-OFF token bucket may ADMIT a SYN whose MEASURED
-        // arrival rate is over-attack, so gate the alarm EXPLICITLY on the
-        // measured `!over_attack` (previously implied by the cookie-OFF
-        // over-attack early return) so `syn-flood-alarm` still fires only in
-        // the warning band between alarm- and attack-threshold (AGY r4). The
-        // cadence mutation is zone-local (PHASE 1); the `syn_alarm_pending` /
-        // `syn_flood_alarm_events` application is the caller's PHASE 2 via the
-        // returned `alarm` flag.
+        // Alarm band: per (dst,port) in enforce mode. The pre-#14635 zone-wide
+        // <=1/sec audit cadence is preserved only in alarm-without-drop mode,
+        // where alarms are the only enforcement signal (many existing audit
+        // cells count exactly one event per zone-second).
         let mut alarm_raised = false;
-        if syn_alarm_threshold > 0
-            && over_alarm
-            && !over_attack
-            && self.syn_alarm_last_emit_sec != now_secs
-        {
-            self.syn_alarm_last_emit_sec = now_secs;
-            alarm_raised = true;
+        if syn_alarm_threshold > 0 && over_alarm && !over_attack {
+            if alarm_without_drop {
+                if self.syn_alarm_last_emit_sec != now_secs {
+                    self.syn_alarm_last_emit_sec = now_secs;
+                    alarm_raised = true;
+                }
+            } else {
+                let last = self
+                    .syn_alarm_last_emit_per_dst
+                    .get(&dst_key)
+                    .copied()
+                    .unwrap_or(u64::MAX);
+                if last != now_secs {
+                    self.syn_alarm_last_emit_per_dst
+                        .retain(|_, v| *v >= now_secs.saturating_sub(1));
+                    if self.syn_alarm_last_emit_per_dst.len() < 4096
+                        || self.syn_alarm_last_emit_per_dst.contains_key(&dst_key)
+                    {
+                        self.syn_alarm_last_emit_per_dst.insert(dst_key, now_secs);
+                    }
+                    alarm_raised = true;
+                }
+            }
         }
-        // (4) per-SOURCE cap — SECONDARY, skipped while the zone is SYN-cookie
-        // active (D3) OR when the client is already validated (#9945). The
-        // cookie-active window is the high-cardinality spoofed-flood regime
-        // where per-source is both spoof-defeated and prone to sketch
-        // over-throttling; a validated client has separately proved liveness.
-        let cookie_active = syn_cookie && self.syn_cookie_active_until_secs > now_secs;
+        // Per-source skip keys on THIS destination only (plus audit mode,
+        // which never arms cookie state). The zone latch must not disable
+        // per-source protection for unrelated services (#14635).
+        let cookie_active = syn_cookie
+            && !alarm_without_drop
+            && (self
+                .syn_cookie_active_per_dst
+                .get(&dst_key)
+                .is_some_and(|&u| u > now_secs)
+                || (self.syn_cookie_active_per_dst.is_empty()
+                    && self.syn_cookie_active_until_secs > now_secs));
         if syn_src_threshold > 0
             && !validated_client
             && !cookie_active

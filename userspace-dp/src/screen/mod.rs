@@ -1480,7 +1480,18 @@ impl ScreenState {
         if (flags & TCP_ACK) == 0 || (flags & TCP_SYN) != 0 {
             return SynCookieAckVerdict::NotApplicable;
         }
-        let locally_active = zstate.syn_cookie_active_until_secs > now_secs;
+        // #14635: cookie activity is per (dst,port). A zone latch forced by
+        // test seams still counts, but a latch armed by one flooded service
+        // must not drop ACKs for other services: only honour the zone latch
+        // when this service's own key is also active, or when no per-key
+        // entry exists at all (forced-latch seam with no live flood).
+        let per_dst_active = zstate
+            .syn_cookie_active_per_dst
+            .get(&(pkt.dst_ip, pkt.dst_port))
+            .is_some_and(|&u| u > now_secs);
+        let locally_active = per_dst_active
+            || (zstate.syn_cookie_active_per_dst.is_empty()
+                && zstate.syn_cookie_active_until_secs > now_secs);
         let zone_tag = zstate.syn_cookie_zone_tag;
         if is_closing(flags) {
             return if locally_active {

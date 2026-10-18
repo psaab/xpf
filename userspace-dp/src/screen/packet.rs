@@ -87,7 +87,7 @@ pub(crate) struct ScreenProfile {
     pub source_route: bool,
     pub icmp_flood_threshold: u32, // packets per second, 0 = disabled
     pub udp_flood_threshold: u32,  // packets per second, 0 = disabled
-    pub syn_flood_threshold: u32,  // SYN packets per second per zone, 0 = disabled
+    pub syn_flood_threshold: u32, // SYN packets per second per (dst_ip,dst_port), 0 = disabled (#14635; secondary zone ceiling 8x)
     /// Enable SYN-cookie challenge/validation behavior for SYN flood threshold
     /// crossings. Defaults false so rate-based SYN flood behavior remains a
     /// plain drop until the control plane explicitly enables cookie mode.
