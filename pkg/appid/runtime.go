@@ -237,11 +237,34 @@ func SessionMatches(filter string, appNames map[uint16]string, cfg *config.Confi
 
 // SessionMatchesWithIndex is SessionMatches with a per-config snapshot fallback
 // index; see ResolveSessionNameWithIndex.
+//
+// #14725: when the exact check fails, a filter naming an application-set
+// (including the implicit set the compiler mints for a multi-term
+// application, user application-sets, and predefined sets) matches when the
+// resolved leaf name is a member of that set, expanded with the same
+// depth/cycle bounds as config.ExpandApplicationSet. The warmed exact path
+// stays allocation-free; expansion is resolved once per distinct filter
+// per index.
 func SessionMatchesWithIndex(filter string, appNames map[uint16]string, cfg *config.Config, fallback *FallbackIndex, proto uint8, srcPort, dstPort uint16, appID uint16) bool {
 	if filter == "" {
 		return true
 	}
-	return ResolveSessionNameWithIndex(appNames, cfg, fallback, proto, srcPort, dstPort, appID) == filter
+	resolved := ResolveSessionNameWithIndex(appNames, cfg, fallback, proto, srcPort, dstPort, appID)
+	if resolved == filter {
+		return true
+	}
+	if resolved == "" || resolved == Unknown {
+		return false
+	}
+	if fallback == nil {
+		fallback = NewFallbackIndex(cfg)
+	}
+	members, ok := fallback.SetMembers(filter)
+	if !ok {
+		return false
+	}
+	_, hit := members[resolved]
+	return hit
 }
 
 func sortedNames(names map[string]struct{}) []string {
@@ -274,6 +297,18 @@ type fallbackSlot struct {
 // shared cache would go stale on such in-place mutation. A single index is
 // used single-threaded by one session scan; concurrent scans must use their
 // own index (no mutex is held so the warmed path stays allocation-free).
+// fallbackCandidate is one tuple-matching application in the winning
+// specificity tier of a tuple-fallback ranking (#14725). predefined marks
+// a candidate admitted from PredefinedApplications (vs a user app); the
+// displaced-winner guard applies only to user-vs-user steals, so a
+// catalogued predefined app does not block a catalogued user app.
+type fallbackCandidate struct {
+	name       string
+	portBased  bool
+	catalogued bool
+	predefined bool
+}
+
 type FallbackIndex struct {
 	// multiplicity counts distinct names per natural StableAppID, capped at
 	// two because the resolver only needs to know whether a slot collides.
@@ -283,8 +318,17 @@ type FallbackIndex struct {
 	// names is the full-universe list for the lazy reassignment; the config
 	// assignment helper deduplicates a name shadowing a predefined app.
 	names []string
+	// cfg is the snapshot the index was built from, retained so the lazy
+	// set-expansion cache below and the predefined fallback read the same
+	// config the slots were hashed from (#14725).
+	cfg *config.Config
+	// tierBuf is the reusable candidate buffer for one fallback ranking;
+	// the index is single-threaded per scan by contract (#14725).
+	tierBuf []fallbackCandidate
+	// sets caches one filter-name expansion per request: filter -> member
+	// set, with a nil set marking a filter that names no application-set.
+	sets map[string]map[string]struct{}
 	// fullIDs caches the AssignStableAppIDsQuiet result (or its error) on
-	// first colliding-tie use so one request reuses one assignment.
 	fullIDs map[string]uint16
 	fullErr error
 	fullOK  bool
@@ -302,6 +346,7 @@ func NewFallbackIndex(cfg *config.Config) *FallbackIndex {
 	names := make([]string, 0, nameCount)
 	ix := &FallbackIndex{
 		slots: make(map[uint16]fallbackSlot, nameCount),
+		cfg:   cfg,
 	}
 	add := func(name string) {
 		names = append(names, name)
@@ -327,6 +372,21 @@ func NewFallbackIndex(cfg *config.Config) *FallbackIndex {
 	return ix
 }
 
+// activeIDOf resolves name's active-catalog ID by scanning appNames once.
+// It is donor-only: called at most once per tie when a catalogued winner
+// is challenged, so the linear scan does not affect the warmed path. It
+// exists because assignedIDForName falls back to the natural ID when a
+// second name holds the natural slot, hiding a displaced catalogued ID
+// (#14725 leg 3).
+func activeIDOf(appNames map[uint16]string, name string) (uint16, bool) {
+	for id, n := range appNames {
+		if n == name {
+			return id, true
+		}
+	}
+	return 0, false
+}
+
 // Collides reports whether another full-catalog name shares name's natural
 // StableAppID slot. It is O(1) work with zero allocations: one StableAppID
 // hash plus one map load.
@@ -350,6 +410,46 @@ func (ix *FallbackIndex) FullIDs() (map[string]uint16, error) {
 		ix.fullOK = true
 	}
 	return ix.fullIDs, ix.fullErr
+}
+
+// SetMembers returns the leaf application names filter expands to when it
+// names an application-set, resolving user sets (including the implicit
+// multi-term parent set) and predefined sets with the same precedence and
+// bounds as config.ExpandApplicationSet (#14725). ok is false when filter
+// names no set (or expansion fails closed, e.g. a dangling member). The
+// expansion — success or failure — is computed once per filter per index,
+// so a batch scan pays it at most once per distinct filter.
+func (ix *FallbackIndex) SetMembers(filter string) (map[string]struct{}, bool) {
+	if ix == nil {
+		return nil, false
+	}
+	if members, seen := ix.sets[filter]; seen {
+		return members, members != nil
+	}
+	var out map[string]struct{}
+	if ix.cfg != nil {
+		if expanded, err := config.ExpandApplicationSet(filter, &ix.cfg.Applications); err == nil {
+			out = make(map[string]struct{}, len(expanded))
+			for _, name := range expanded {
+				out[name] = struct{}{}
+			}
+		}
+	} else if _, isSet := config.ResolveApplicationSet(filter, nil); isSet {
+		// No config snapshot: only predefined sets can resolve. Expand
+		// against an empty user config so predefined members still work.
+		empty := &config.ApplicationsConfig{}
+		if expanded, err := config.ExpandApplicationSet(filter, empty); err == nil {
+			out = make(map[string]struct{}, len(expanded))
+			for _, name := range expanded {
+				out[name] = struct{}{}
+			}
+		}
+	}
+	if ix.sets == nil {
+		ix.sets = make(map[string]map[string]struct{})
+	}
+	ix.sets[filter] = out
+	return out, out != nil
 }
 
 // assignedIDForName resolves a catalog name's actual app_id and reports whether
@@ -396,19 +496,26 @@ func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *co
 		// Uncatalogued user apps remain available to fallback; builtin
 		// candidates are admitted below only when the OFF catalog contains them
 		// (#12731).
-		best := ""
-		bestPortBased := false
-		var bestID uint16
-		bestCatalogued := false
-		hasTie := false
-		needsAssignedIDs := false
-		anyUncatalogued := false
-		var fullIDs map[string]uint16
-		fullIDsTried := false
-		fullIDsActive := false
-		// Keep candidate processing shared so user and predefined candidates
-		// cannot acquire separate precedence tiers.
+		// #14725: collect every matching candidate in the winning
+		// specificity tier first, then rank the collected set once. The
+		// old incremental ranking re-based bestID when the #12225
+		// full-universe re-rank first activated, which let map order
+		// decide mixed catalogued/uncatalogued ties and let an
+		// uncatalogued collider steal a catalogued candidate's slot.
+		var tier []fallbackCandidate
+		if fallback != nil {
+			tier = fallback.tierBuf[:0]
+		}
+		tierPortBased := false
+		haveTier := false
+		var considerFrom func(name string, app *config.Application, predefined bool)
 		consider := func(name string, app *config.Application) {
+			considerFrom(name, app, false)
+		}
+		considerPredefined := func(name string, app *config.Application) {
+			considerFrom(name, app, true)
+		}
+		considerFrom = func(name string, app *config.Application, predefined bool) {
 			// A nil app is tolerated by the lenient config path (#4865), and
 			// the tuple matcher cannot model ICMP type/code constraints (#3781).
 			// #14355: an application whose authored match constraint was
@@ -424,72 +531,156 @@ func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *co
 				return
 			}
 			portBased := app.DestinationPort != "" || app.SourcePort != ""
-			id, catalogued := assignedIDForName(appNames, name)
-			if best == "" || (portBased && !bestPortBased) {
-				best = name
-				bestPortBased = portBased
-				bestID = id
-				hasTie = false
-				needsAssignedIDs = false
-				anyUncatalogued = false
-				bestCatalogued = catalogued
-				fullIDsTried = false
-				fullIDsActive = false
-			} else if portBased == bestPortBased {
-				if !hasTie {
-					hasTie = true
-					if fallback == nil {
-						fallback = NewFallbackIndex(cfg)
-					}
-					needsAssignedIDs = fallback.Collides(best) || fallback.Collides(name)
-					anyUncatalogued = !bestCatalogued || !catalogued
-				} else {
-					if !needsAssignedIDs && fallback.Collides(name) {
-						needsAssignedIDs = true
-					}
-					if !anyUncatalogued {
-						anyUncatalogued = !catalogued
-					}
-				}
-				// Normally catalog IDs are already authoritative. Only when a
-				// tie has an uncatalogued name whose natural hash collides do we
-				// need the full-universe displaced IDs (#10722/#12225).
-				if needsAssignedIDs && anyUncatalogued && !fullIDsTried {
-					fullIDsTried = true
-					if ids, err := fallback.FullIDs(); err == nil {
-						fullIDs = ids
-						fullIDsActive = true
-						bestID = ids[best]
-					}
-				}
-				if fullIDsActive {
-					id = fullIDs[name]
-				}
-				if id < bestID || (id == bestID && name < best) {
-					best = name
-					bestID = id
-					bestCatalogued = catalogued
+			_, catalogued := assignedIDForName(appNames, name)
+			cand := fallbackCandidate{name: name, portBased: portBased, catalogued: catalogued, predefined: predefined}
+			if !haveTier || (portBased && !tierPortBased) {
+				tier = tier[:0]
+				tier = append(tier, cand)
+				tierPortBased = portBased
+				haveTier = true
+			} else if portBased == tierPortBased {
+				tier = append(tier, cand)
+			}
+		}
+		// rankTier picks the deterministic winner of the collected tier:
+		// (1) a catalogued candidate that shares its natural slot with an
+		// uncatalogued candidate in the tier keeps its active slot — the
+		// uncatalogued collider's displaced full ID must not steal it
+		// (#14725 leg 3); (2) otherwise the lowest ranking ID wins, where
+		// the ranking ID is the full-universe ID when the tie needs it
+		// (#12225: a candidate collides with any full-universe name) and
+		// the active ID otherwise, with catalogued candidates keeping
+		// their active ID so AppID-on includeAll catalogs (whose active
+		// IDs differ from full) rank by the catalog the sessions were
+		// stamped with (#14355); name order breaks exact ID ties.
+		rankTier := func() string {
+			if fallback == nil {
+				fallback = NewFallbackIndex(cfg)
+			}
+			fallback.tierBuf = tier
+			needsFull := false
+			for _, c := range tier {
+				if fallback.Collides(c.name) {
+					needsFull = true
+					break
 				}
 			}
+			var full map[string]uint16
+			if needsFull {
+				if ids, err := fallback.FullIDs(); err == nil {
+					full = ids
+				} else {
+					needsFull = false
+				}
+			}
+			rankID := func(c fallbackCandidate) uint16 {
+				if c.catalogued {
+					if id, ok := activeIDOf(appNames, c.name); ok {
+						return id
+					}
+				}
+				if needsFull && full != nil {
+					return full[c.name]
+				}
+				id, _ := assignedIDForName(appNames, c.name)
+				return id
+			}
+			// Rule (1): a catalogued candidate that was DISPLACED in
+			// the full universe (full[cat] != its natural ID, because
+			// an uncatalogued collider took its slot there) keeps
+			// its active slot when that collider is in this tier.
+			// The collider's full ID (the displaced low ID) would
+			// otherwise win the old re-rank. Direct and displaced
+			// forms both satisfy: collider shares cat's natural slot
+			// in the FULL placement (full[collider] is cat's natural
+			// ID or the low displaced ID below full[cat]).
+			// Guards (1)-(3) apply only when no catalogued PREDEFINED
+			// candidate is in the tier. A catalogued predefined
+			// candidate marks the predefined-inclusive case, where
+			// the plain lowest-rankID ranking below must decide
+			// (protocol-only predefined apps are not admitted at
+			// all — see the predefined loop — so this only affects
+			// port-constrained predefined vs user ties).
+			hasPredefinedCatalogued := false
+			for _, c := range tier {
+				if c.catalogued && c.predefined {
+					hasPredefinedCatalogued = true
+					break
+				}
+			}
+			if !hasPredefinedCatalogued && needsFull && full != nil {
+				for _, c := range tier {
+					if !c.catalogued {
+						continue
+					}
+					natural := config.StableAppID(c.name)
+					if full[c.name] == natural {
+						continue
+					}
+					for _, o := range tier {
+						if !o.catalogued && (config.StableAppID(o.name) == natural || full[o.name] < full[c.name]) {
+							return c.name
+						}
+					}
+				}
+				for _, c := range tier {
+					if !c.catalogued {
+						continue
+					}
+					for _, o := range tier {
+						if !o.catalogued && config.StableAppID(o.name) == config.StableAppID(c.name) {
+							return c.name
+						}
+					}
+				}
+				for _, c := range tier {
+					if !c.catalogued || c.predefined {
+						continue
+					}
+					for _, o := range tier {
+						if !o.catalogued && !o.predefined && full[o.name] != config.StableAppID(o.name) && full[o.name] < full[c.name] {
+							return c.name
+						}
+					}
+				}
+			}
+			best := tier[0]
+			bestRank := rankID(best)
+			for _, c := range tier[1:] {
+				r := rankID(c)
+				if r < bestRank || (r == bestRank && c.name < best.name) {
+					best, bestRank = c, r
+				}
+			}
+			return best.name
 		}
 		for name, app := range cfg.Applications.Applications {
 			consider(name, app)
 		}
-		// Rank only builtins present in the OFF stamping catalog. An
-		// unreferenced builtin has no stamped app_id in this mode; guessing it
-		// here would give otherwise identical stamped and unstamped sessions
-		// different labels (#12731). A user definition shadows the builtin.
-		for name := range builtinFallbacks {
-			if _, shadowed := cfg.Applications.Applications[name]; shadowed {
+		// Rank only predefined apps present in the active stamping catalog.
+		// An unreferenced predefined app has no stamped app_id in this mode;
+		// guessing it here would give otherwise identical stamped and
+		// unstamped sessions different labels (#12731). #14725: consider the
+		// full PredefinedApplications table, not just the 15-entry
+		// builtinFallbacks subset, so catalogued predefined apps (junos-rdp,
+		// junos-irc, ...) label unstamped sessions. A non-nil user definition
+		// shadows the predefined app; a present-but-nil entry (#4865) does
+		// not — consider already skips the nil user entry, so the predefined
+		// definition must still run.
+		for name, predef := range config.PredefinedApplications {
+			if cfg.Applications.Applications[name] != nil {
+				continue
+			}
+			if predef.DestinationPort == "" && predef.SourcePort == "" {
 				continue
 			}
 			if _, catalogued := assignedIDForName(appNames, name); !catalogued {
 				continue
 			}
-			consider(name, config.PredefinedApplications[name])
+			considerPredefined(name, predef)
 		}
-		if best != "" {
-			return best
+		if haveTier {
+			return rankTier()
 		}
 	}
 	if cfg == nil {
