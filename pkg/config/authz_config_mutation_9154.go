@@ -191,6 +191,146 @@ func lexConfigMutationLine9938(line string) (tokens []string, quoted []bool) {
 	}
 }
 
+// ParseConfigPath lexes a typed configuration-path fragment (for example
+// the argument of an interactive `edit` command) the way the store lexer
+// does: block and line comments are skipped and quoted strings are
+// unquoted (#14716). ok is false when the fragment is lexically malformed
+// — an unterminated string or block comment, a brace/semicolon/pipe, or
+// any other non-path token — so callers can refuse it instead of storing
+// raw text the executor would re-parse differently. A comment-only
+// fragment is well-formed and yields no tokens.
+func ParseConfigPath(fragment string) (tokens []string, ok bool) {
+	tokens, _, ok = lexConfigPath14716(fragment)
+	return tokens, ok
+}
+
+// ParseEditFragment lexes a full `edit ...` config-mode line and returns
+// the lexed path fragment after the verb (#14716). ok is false when the
+// line is not an edit line or the fragment is lexically malformed.
+func ParseEditFragment(line string) (tokens []string, ok bool) {
+	lexed, _, lexOK := lexConfigPath14716(line)
+	if !lexOK || len(lexed) == 0 || lexed[0] != "edit" {
+		return nil, false
+	}
+	return lexed[1:], true
+}
+
+// lexConfigPath14716 is ParseConfigPath carrying quote provenance.
+func lexConfigPath14716(fragment string) (tokens []string, quoted []bool, ok bool) {
+	lex := NewLexer(fragment)
+	for {
+		tok := lex.Next()
+		switch tok.Type {
+		case TokenEOF:
+			return tokens, quoted, true
+		case TokenIdentifier, TokenString:
+			tokens = append(tokens, tok.Value)
+			quoted = append(quoted, tok.Type == TokenString)
+		default:
+			return nil, nil, false
+		}
+	}
+}
+
+// NormalizeEditPathTokens lexes an already-stored edit cursor token by
+// token, dropping tokens that are lexically invisible on their own
+// (comment-only or malformed fragments such as a stray `*/`) and
+// expanding tokens that lex to more than one path element (#14716).
+// Plain identifiers and quoted strings map to their lexed values, so a
+// cursor minted before the fix — or by any writer that stored raw
+// strings.Fields output — is adjudicated and executed as the path the
+// store lexer produces, never as the raw spelling.
+func NormalizeEditPathTokens(editPath []string) []string {
+	if len(editPath) == 0 {
+		return nil
+	}
+	// A comment may span several stored tokens (`/*`, `interfaces`,
+	// `*/`), which no per-token lex can see. Lex the re-joined cursor
+	// first — that is the string the executor re-joins and the store
+	// re-lexes — and fall back to per-token lexing only when the joined
+	// form is malformed (an unterminated comment opened by the cursor
+	// and not yet closed, whose opener is lexically invisible anyway).
+	if lexed, ok := ParseConfigPath(strings.Join(editPath, " ")); ok {
+		return lexed
+	}
+	out := make([]string, 0, len(editPath))
+	for _, tok := range editPath {
+		lexed, ok := ParseConfigPath(tok)
+		if !ok {
+			continue
+		}
+		out = append(out, lexed...)
+	}
+	return out
+}
+
+// normalizeEditPath14716 resolves a stored cursor against a mutation
+// line's leading tokens for the split-comment case (#14716): when the
+// cursor's trailing tokens open a block comment that the line's leading
+// tokens close (`edit system /*` then `set */ ...`), re-lexing the
+// joined raw text drops the comment exactly as the store lexer does on
+// the re-joined execution string. Plain cursors (and lines whose leading
+// tokens do not complete a comment) keep the per-token normalization.
+// lineQuoted carries the line tokens' quote provenance so the returned
+// line slice stays aligned with it.
+func normalizeEditPath14716(editPath, lineTokens []string, lineQuoted []bool) ([]string, []string, []bool) {
+	base := NormalizeEditPathTokens(editPath)
+	if len(editPath) == 0 || len(lineTokens) == 0 {
+		return base, lineTokens, lineQuoted
+	}
+	joined := strings.Join(editPath, " ") + " " + strings.Join(lineTokens, " ")
+	lexed, lexedQuoted, ok := lexConfigPath14716(joined)
+	if !ok {
+		return base, lineTokens, lineQuoted
+	}
+	// The joined re-lex is meaningful only when it yields exactly the
+	// lexed cursor as a prefix; then its suffix is the lexed line (this
+	// drops a block comment spanning the cursor/line boundary). A verb
+	// consumed into a spanning comment (`set */ ...` after `edit
+	// system /*`) means no mutation verb survives, so nothing is gated
+	// here — the executor's equally verb-less string errors without
+	// mutating, and returning the unchanged line keeps the gate from
+	// inventing a path. Otherwise the per-token view is authoritative.
+	if len(lexed) < len(base) {
+		return base, lineTokens, lineQuoted
+	}
+	for i := range base {
+		if lexed[i] != base[i] {
+			return base, lineTokens, lineQuoted
+		}
+	}
+	suffix := lexed[len(base):]
+	if len(suffix) == 0 {
+		return base, lineTokens, lineQuoted
+	}
+	if suffix[0] != lineTokens[0] {
+		// The line's verb was consumed by a comment spanning the
+		// cursor/line boundary (`edit system /*` + `set */ ...`).
+		// Execution re-joins the same raw text, so the store acts on
+		// exactly `base + suffix`; adjudicate that by re-presenting it
+		// under the original verb. If no verb survives at all there is
+		// no gated mutation (handled by the empty-suffix return above
+		// when the whole line was comment).
+		if len(lineTokens) > 0 && configMutationVerbs[lineTokens[0]] {
+			syn := make([]string, 0, len(suffix)+1)
+			syn = append(syn, lineTokens[0])
+			syn = append(syn, suffix...)
+			synQuoted := make([]bool, len(syn))
+			if len(lexedQuoted) >= len(base) {
+				copy(synQuoted[1:], lexedQuoted[len(base):])
+			}
+			return base, syn, synQuoted
+		}
+		return base, lineTokens, lineQuoted
+	}
+	// Align suffix provenance with the lexed joined tokens.
+	suffixQuoted := lexedQuoted[len(base):]
+	if len(suffixQuoted) != len(suffix) {
+		suffixQuoted = make([]bool, len(suffix))
+	}
+	return base, suffix, suffixQuoted
+}
+
 // AuthorizeConfigMutation adjudicates one config-mode line against a class's
 // `*-configuration` regexes, returning nil when the mutation is permitted.
 //
@@ -207,6 +347,12 @@ func authorizeConfigMutationDepth9939(cfg *Config, class string, editPath []stri
 		return nil
 	}
 	parts, quoted := lexConfigMutationLine9938(line)
+	// #14716: the stored cursor may carry raw, un-lexed tokens (quotes,
+	// comment fragments) from a writer that split with strings.Fields.
+	// Normalize it — including a block comment split across the cursor
+	// and this line — so the adjudicated path is the path the store
+	// lexer will execute, never the raw spelling.
+	editPath, parts, quoted = normalizeEditPath14716(editPath, parts, quoted)
 	paths, gated := configMutationPaths(editPath, parts, quoted)
 	if !gated {
 		return nil

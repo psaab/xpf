@@ -353,14 +353,25 @@ func (c *CLI) dispatchConfig(line string) error {
 
 	switch parts[0] {
 	case "edit":
-		if len(parts) < 2 {
+		// #14716: lex the typed fragment the way the store does (comments
+		// skipped, quotes unquoted) and store only the lexed path. Storing
+		// raw strings.Fields tokens let a decorated cursor (`edit /*
+		// interfaces */ "system"`, `edit system /*`) desynchronize the
+		// authorization gate from store execution.
+		frag, fragOK := config.ParseEditFragment(line)
+		if !fragOK {
+			return fmt.Errorf("edit: invalid path")
+		}
+		if len(frag) == 0 {
 			fmt.Println("edit: missing path")
 			return nil
 		}
-		newPath := append(c.store.GetEditPath(), parts[1:]...)
-		c.store.SetEditPath(newPath)
-		c.rl.SetPrompt(c.configPrompt())
-		fmt.Printf("[edit %s]\n", strings.Join(newPath, " "))
+		newPath := append(c.store.GetEditPath(), frag...)
+		c.store.SetEditPath(config.NormalizeEditPathTokens(newPath))
+		if c.rl != nil {
+			c.rl.SetPrompt(c.configPrompt())
+		}
+		fmt.Printf("[edit %s]\n", strings.Join(c.store.GetEditPath(), " "))
 		return nil
 	case "top":
 		c.store.NavigateTop()
@@ -381,25 +392,25 @@ func (c *CLI) dispatchConfig(line string) error {
 		if len(parts) < 2 {
 			return fmt.Errorf("set: missing path")
 		}
-		fullPath := append(c.store.GetEditPath(), parts[1:]...)
+		fullPath := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), parts[1:]...)
 		return c.store.SetFromInputAsPlantClass("", config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
 	case "delete":
 		if len(parts) < 2 {
 			return fmt.Errorf("delete: missing path")
 		}
-		fullPath := append(c.store.GetEditPath(), parts[1:]...)
+		fullPath := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), parts[1:]...)
 		return c.store.DeleteFromInputAsPlantClass("", config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
 	case "deactivate":
 		if len(parts) < 2 {
 			return fmt.Errorf("deactivate: missing path")
 		}
-		fullPath := append(c.store.GetEditPath(), parts[1:]...)
+		fullPath := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), parts[1:]...)
 		return c.store.DeactivateFromInputAsPlantClass("", config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
 	case "activate":
 		if len(parts) < 2 {
 			return fmt.Errorf("activate: missing path")
 		}
-		fullPath := append(c.store.GetEditPath(), parts[1:]...)
+		fullPath := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), parts[1:]...)
 		return c.store.ActivateFromInputAsPlantClass("", config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
 	case "copy", "rename":
 		return c.handleCopyRename(line)
@@ -466,7 +477,7 @@ func (c *CLI) dispatchConfig(line string) error {
 			fmt.Println("usage: annotate <path> \"comment\"")
 			return nil
 		}
-		pathParts := append(c.store.GetEditPath(), relPath...)
+		pathParts := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), relPath...)
 		if err := c.store.AnnotateAsPlantClass("", config.EventPlantClassForMutation(c.userClass), pathParts, comment); err != nil {
 			return err
 		}
