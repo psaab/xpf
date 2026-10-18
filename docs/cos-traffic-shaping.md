@@ -1160,6 +1160,21 @@ Important current behavior:
   fallback because voice and network-control traffic may receive best-effort
   treatment (#13967).
 
+- a firewall filter `then forwarding-class <fc>` (input or output) is the
+  packet's FINAL forwarding class for egress DSCP rewriting (#14663): it
+  outranks the ingress BA classifier's class, so a DSCP-0 packet the filter
+  elevates to `expedited-forwarding` is re-marked by the EF rewrite entry
+  (e.g. DSCP 46), not bleached to the BA best-effort entry (DSCP 0). This
+  holds on the fresh, cached-seed, cached-hit LP re-resolution, and flowless
+  paths (filter-class priority itself from #14636), and when `<fc>` has
+  no materialized egress queue: the queue clamps to the interface default
+  but the rewrite still keys on the filter class's
+  canonical (pre-clamp) class id. On V2 fabric arrivals the customer input
+  filter is looked up on the validated fabric-scoped logical ingress unit,
+  not the fabric link; a fabric stamp whose owner-RG gate rejects it does
+  not steer BA classification at all. A base-interface row (`is_unit ==
+  Some(false)`) sharing an ifindex with a logical unit never overwrites the
+  unit's CoS interface/loss-priority-rewrite state.
 - a BA classifier code-point that maps to a forwarding-class whose queue the
   interface does NOT materialize (the forwarding-class has no `scheduler-map`
   entry on that interface) falls back to the interface **default best-effort

@@ -4185,6 +4185,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             ingress_zone_override,
                             resolution,
                         );
+                        // #14663 leg 3b: the fabric ingress scope is only
+                        // trustworthy while its zone survived the owner-RG
+                        // gate (mirrors the NAT-scope gating below); a
+                        // rejected stamp must not steer BA classification.
+                        if ingress_zone_override.is_none() {
+                            meta.fabric_ingress_ifindex = 0;
+                        }
                         // NAT scope identity is only authoritative when its
                         // zone survived the same owner-RG gate used for policy.
                         let ingress_nat_scope_ifindex =
@@ -7882,6 +7889,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         ingress_zone_override,
                         final_resolution,
                     );
+                    // #14663 leg 3b: rejected fabric stamp must not steer BA.
+                    if ingress_zone_override.is_none() {
+                        meta.fabric_ingress_ifindex = 0;
+                    }
                     let ingress_nat_scope_ifindex =
                         ingress_nat_scope_ifindex.filter(|_| ingress_zone_override.is_some());
 
@@ -9573,6 +9584,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     ingress_zone_override,
                                     decision.resolution,
                                 );
+                                // #14663 leg 3b: rejected fabric stamp must not steer BA.
+                                if ingress_zone_override.is_none() {
+                                    meta.fabric_ingress_ifindex = 0;
+                                }
                                 let (from_zone_id, to_zone_id) =
                                     zone_pair_ids_for_flow_with_override(
                                         worker_ctx.forwarding,

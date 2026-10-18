@@ -1505,7 +1505,14 @@ pub(super) fn build_cos_state(
             // Identical aliases share the first unit's already-built runtime
             // state. Differing state was rejected above, before either
             // ifindex-keyed table can be overwritten.
-            if !duplicate_unit {
+            // #14663 leg 4: a base-interface row (`is_unit == Some(false)`)
+            // is not a consumed unit (see the `ingress_classifier_bindings`
+            // guard above); it must never overwrite — or block — the logical
+            // unit's runtime state for the shared ifindex, in either order.
+            if !duplicate_unit
+                && (iface.is_unit != Some(false)
+                    || !state.interfaces.contains_key(&iface.ifindex))
+            {
                 state.lp_rewrite.insert(iface.ifindex, lp_rewrite);
                 state.interfaces.insert(iface.ifindex, cfg);
             }
@@ -1530,3 +1537,6 @@ mod dangling_refs_7337;
 #[cfg(test)]
 #[path = "cos_ingress_domains_11679.rs"]
 mod cos_ingress_domains_11679;
+#[cfg(test)]
+#[path = "cos_base_overwrite_14663.rs"]
+mod cos_base_overwrite_14663;
