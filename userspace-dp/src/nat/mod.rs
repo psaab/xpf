@@ -192,6 +192,10 @@ mod tests_addr_only_index_13690;
 #[cfg(test)]
 #[path = "tests_addr_only_reseed_14622.rs"]
 mod tests_addr_only_reseed_14622;
+// #14671: idle persistent address-only leases block duplicate (ip,port) mints.
+#[cfg(test)]
+#[path = "tests_addr_only_persistent_idle_14671.rs"]
+mod tests_addr_only_persistent_idle_14671;
 // #10018: PersistentSourceKey must include routing scope so overlapping
 // subscribers in different VRFs cannot share a persistent NAT lease.
 #[cfg(test)]

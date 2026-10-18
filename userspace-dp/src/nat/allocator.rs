@@ -1225,6 +1225,66 @@ impl PortAllocatorLiveState {
             false,
         )
     }
+    /// #14671: is this reverse tuple held by an IDLE persistent
+    /// address-only lease OTHER than `candidate_key`'s own lease? Scoped by
+    /// the recorded permit grants (`PersistentPermissions::permits` over
+    /// all egress scopes): an Exact grant blocks only that remote
+    /// endpoint, a Host grant that host at any port, and AnyRemoteHost
+    /// any remote. Live leases are excluded — their flows hold live
+    /// `address_only_owners` tokens the caller checks exactly. The
+    /// candidate's own lease never blocks its rejoin.
+    fn persistent_address_only_contended_except(
+        &self,
+        flow: &SourceNatFlowKey,
+        translated: TranslatedTuple,
+        candidate_key: Option<PersistentSourceKey>,
+    ) -> bool {
+        let base = ReverseIdentityBaseKey {
+            protocol: flow.protocol,
+            translated_ip: translated.ip,
+            translated_port: translated.port,
+        };
+        self.persistent_by_source.iter().any(|(key, lease)| {
+            // Only IDLE leases contend here: a live lease's flows hold live
+            // address_only_owners tokens, which the caller already checks
+            // with exact remote scoping. Counting live leases by their
+            // (often AnyRemoteHost) grants would refuse flows to remotes
+            // the live lease does not own a token for (#9131).
+            if Some(*key) == candidate_key
+                || !lease.address_only
+                || lease.revoked
+                || lease.active_flows > 0
+            {
+                return false;
+            }
+            if lease.translated != translated {
+                return false;
+            }
+            let Some(permissions) = self.persistent_permissions.get(key) else {
+                return false;
+            };
+            permissions.permits(
+                PERSISTENT_NAT_EGRESS_UNSCOPED,
+                flow.dst_ip,
+                flow.dst_port,
+            )
+        })
+        || self
+            .persistent_by_translated
+            .get(&base)
+            .is_some_and(|keys| {
+                keys.iter().any(|key| {
+                    Some(*key) != candidate_key
+                        && self.persistent_by_source.get(key).is_some_and(|lease| {
+                            lease.address_only
+                                && !lease.revoked
+                                && lease.active_flows == 0
+                                && lease.translated == translated
+                                && !self.persistent_permissions.contains_key(key)
+                        })
+                })
+            })
+    }
     /// #11475: address-only idle imports claim no bitmap bit, so check both
     /// live ownership domains for their exact, target-host, or any-remote scope.
     pub(super) fn import_idle_address_only_contended(
@@ -5251,15 +5311,16 @@ impl PortAllocator {
         // replies are indistinguishable), so deny the second — the address-only
         // capacity limit. `flow` is not in `live_by_flow` here (checked above),
         // so any existing owner is necessarily a different flow.
-        if live.address_only_owners.contains_key(&rkey) {
-            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
-            return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
-        }
-        // #10190: PAT owns the bitmap token in this SAME allocator. Check its
-        // exact reverse identity too; the cross-allocator guard deliberately
-        // skips this allocator instance, so the local admission path must
-        // close the two-token gap.
-        if live.pat_owns_wire_identity(&flow, translated) {
+        // #14671: idle persistent address-only leases still own their wire
+        // identity for the permit scope after the live token is released.
+        // Minting a duplicate puts two source keys under one
+        // persistent_by_translated entry and denies inbound for both. The
+        // synced candidate's own lease (if any) never blocks its rejoin.
+        let candidate_key = persistent.map(|(key, _)| key);
+        if live.address_only_owners.contains_key(&rkey)
+            || live.pat_owns_wire_identity(&flow, translated)
+            || live.persistent_address_only_contended_except(&flow, translated, candidate_key)
+        {
             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
             return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
         }
@@ -5835,11 +5896,6 @@ impl PortAllocator {
                 dst_ip: flow.dst_ip,
                 dst_port: flow.dst_port,
             };
-            if live.address_only_owners.contains_key(&rkey) {
-                // This address's reverse identity is owned by a DIFFERENT flow
-                // for this remote — try the next sibling instead of dropping.
-                continue;
-            }
             let translated = TranslatedTuple {
                 ip: translated_ip,
                 // Port-bearing protocols preserve their source port; a port-less
@@ -5848,11 +5904,13 @@ impl PortAllocator {
                 // the SAME `release_flow` free the token.
                 port: flow.src_port,
             };
-            // #10190: an existing PAT owner in this allocator occupies the
-            // exact reverse identity even though it has no address-only token.
-            // Try another pool address when round-robin address selection can
-            // provide one; a different remote remains admissible.
-            if live.pat_owns_wire_identity(&flow, translated) {
+            // #14671: a live token, an idle persistent lease (scoped to its
+            // permit grants), or a PAT owner of this reverse identity for
+            // this remote — try the next sibling instead of dropping.
+            if live.address_only_owners.contains_key(&rkey)
+                || live.pat_owns_wire_identity(&flow, translated)
+                || live.persistent_address_only_contended_except(&flow, translated, None)
+            {
                 continue;
             }
             live.insert_address_only_owner(rkey, flow);
@@ -6136,7 +6194,12 @@ impl PortAllocator {
                     port: flow.src_port,
                 };
                 (!live.address_only_owners.contains_key(&rkey)
-                    && !live.pat_owns_wire_identity(&flow, translated))
+                    && !live.pat_owns_wire_identity(&flow, translated)
+                    && !live.persistent_address_only_contended_except(
+                        &flow,
+                        translated,
+                        Some(key),
+                    ))
                 .then_some((ip, idx, rkey))
             }
             None => {
@@ -6156,7 +6219,12 @@ impl PortAllocator {
                             port: flow.src_port,
                         };
                         (!live.address_only_owners.contains_key(&rkey)
-                            && !live.pat_owns_wire_identity(&flow, translated))
+                            && !live.pat_owns_wire_identity(&flow, translated)
+                            && !live.persistent_address_only_contended_except(
+                                &flow,
+                                translated,
+                                None,
+                            ))
                         .then_some((ip, family_offset + rel, rkey))
                     })
             }
