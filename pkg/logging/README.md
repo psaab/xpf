@@ -100,7 +100,10 @@ reports.
 before it becomes a frame. That is the LAST boundary before the wire and
 every caller passes through it, which is the point: the producers are
 open-ended — any `slog` attribute anywhere in the daemon — so a
-per-producer fix rots on the next one.
+per-producer fix rots on the next one. Event-mode `LocalLogWriter.Send`
+applies the same sanitization before the on-disk line is formed (#14732):
+a bare LF there forged an extra audit-file line and stored ESC/CSI fired
+when the file was later viewed, exactly as on the wire.
 
 **Why the local copy was already safe and this one was not.** Go's
 standard `slog` text handler quotes non-printing attribute values, so the
@@ -356,6 +359,13 @@ bounded by this deadline.
     the most severe level gets its own code rather than collapsing into
     send-all.
   - raw RFC level `alert(1)..debug(7)` — forward `severity <= MinSeverity`.
+
+  `LocalLogWriter.ShouldSend`/`ShouldSendEvent` mirror this exactly
+  (#14732); the old local arithmetic (`MinSeverity != 0 && severity >
+  MinSeverity`) dropped every emergency under an `emergency` writer, and
+  `ForwardLogMsg` now gates local writers with `ShouldSend` just as it
+  gates syslog clients, so forwarded/aggregated messages honor
+  `SeverityNone`/`SeverityEmergency` instead of bypassing the filter.
 
   `ParseSeverity` maps all ten schema severities
   (`junosSyslogSeverities`, pkg/config) to these codes, case-insensitively.
