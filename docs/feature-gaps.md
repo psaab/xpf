@@ -411,14 +411,19 @@ selected per-packet at frame build (`select_tcp_mss`,
 `userspace-dp/src/afxdp/forwarding/mod.rs`):
 
 - `all-tcp` — clamps every forwarded TCP SYN (IPv4 and IPv6); also the
-  universal fallback for the contexts below.
+  universal fallback for the contexts below. On tunnel egress it is a
+  ceiling only on the implicit MTU-derived value (#14664): with no
+  `gre-out` set, a tunnel-bound SYN gets `min(derived, all-tcp)`.
 - `gre-in` — clamps an inbound GRE-decapped SYN. The decap stage marks
   the inner packet with `GRE_DECAP_INGRESS_FLAG` in `meta_flags` so the
   builder can select this value (fixes the prior silent full-MSS
   blackhole on the GRE return path).
 - `gre-out` — clamps a SYN egressing into a native GRE tunnel
-  (gre-out value, or the MTU-derived formula; WireGuard uses the
-  overhead-aware value, #2299).
+  (`min(gre-out, derived)`, irrespective of `all-tcp` — the explicit
+  per-context knob is more specific than `all-tcp`, #14664; with no
+  `gre-out`, the MTU-derived formula capped by `all-tcp` as above).
+  WireGuard uses the overhead-aware derived value (#2299), likewise
+  capped by `all-tcp` (`gre-out` is a GRE-only knob and never caps WG).
 - `ipsec-vpn` — **rejected at commit** (`validateTCPMSSRanges`,
   pkg/config/compiler_security.go). IPsec is processed by the
   kernel XFRM stack; the decrypted inner packets re-enter the userspace

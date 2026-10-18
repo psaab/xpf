@@ -8,7 +8,10 @@ use super::*;
 /// #2486: `all-tcp` is the context-agnostic clamp — it applies to every
 /// forwarded TCP SYN regardless of tunnel context, and also serves as
 /// the fallback for the per-context selectors (`gre-in`, tunnel egress)
-/// below. `ipsec-vpn` is NOT read here: there is no IPsec context in the
+/// below. #14664: on tunnel egress it is a ceiling only on the implicit
+/// MTU-derived value — an explicit `gre-out` is more specific and stays
+/// `min(gre-out, derived)` irrespective of `all-tcp` (see `select_tcp_mss`).
+/// `ipsec-vpn` is NOT read here: there is no IPsec context in the
 /// userspace forward-build path (ESP/AH/IKE is local-delivered to the
 /// kernel XFRM stack and the decrypted inner packets re-enter as plain
 /// traffic with no IPsec marker), so `security flow tcp-mss ipsec-vpn`
@@ -92,11 +95,21 @@ pub(in crate::afxdp) fn native_gre_tcp_mss(
     if forwarding.tcp_mss_gre_out > 0 {
         // The configured gre-out value is a ceiling, not permission to
         // exceed either the outer- or overlay-derived inner budget.
+        // #14664: explicit gre-out is more specific than all-tcp, so it
+        // stays min(gre-out, derived) irrespective of all-tcp.
         return forwarding
             .tcp_mss_gre_out
             .min(u16::try_from(max_mss).unwrap_or(u16::MAX));
     }
-    u16::try_from(max_mss).unwrap_or_default()
+    // #14664: no explicit gre-out — this is the implicit MTU-derived value,
+    // so all-tcp is a ceiling on it (an operator who set all-tcp below the
+    // tunnel budget for a smaller downstream link must not have tunnel-bound
+    // SYNs advertise the larger derived MSS). all-tcp == 0 (unset) never caps.
+    let derived = u16::try_from(max_mss).unwrap_or_default();
+    if forwarding.tcp_mss_all_tcp > 0 {
+        return derived.min(forwarding.tcp_mss_all_tcp);
+    }
+    derived
 }
 
 /// Resolve the effective outer-link (transport) MTU for a tunnel endpoint —
@@ -180,13 +193,19 @@ pub(in crate::afxdp) fn tunnel_tcp_mss(
     if endpoint.mode == "wireguard" {
         // outer family from the endpoint; inner family from the packet
         // being forwarded; outer MTU from the real egress interface.
+        // #14664: gre-out is a GRE-only knob and never caps the WG value;
+        // the WG value is purely MTU-derived, so all-tcp caps it.
         let outer_mtu = tunnel_outer_mtu(forwarding, decision, endpoint);
-        return crate::afxdp::wg::mss::wg_tcp_mss_with_route_mtu(
+        let wg = crate::afxdp::wg::mss::wg_tcp_mss_with_route_mtu(
             endpoint.outer_family,
             addr_family as i32,
             outer_mtu,
             decision.resolution.route_mtu as usize,
         );
+        if forwarding.tcp_mss_all_tcp > 0 {
+            return wg.min(forwarding.tcp_mss_all_tcp);
+        }
+        return wg;
     }
     native_gre_tcp_mss(forwarding, decision, addr_family)
 }
@@ -200,11 +219,14 @@ pub(in crate::afxdp) fn tunnel_tcp_mss(
 /// dead config and `gre-in` produced a silent full-MSS blackhole on the
 /// GRE return path).
 ///
-/// Priority (most specific wins, `all-tcp` is the universal fallback):
+/// Priority (most specific wins):
 ///   1. Tunnel egress (`tunnel_endpoint_id != 0`): the GRE/WG
-///      overhead-aware value via `tunnel_tcp_mss` (gre-out, or the
-///      MTU-derived formula). Falls back to `all-tcp` only when that
-///      yields 0 (no gre-out and no MTU available).
+///      overhead-aware value via `tunnel_tcp_mss`. An explicit `gre-out`
+///      (GRE only) is `min(gre-out, derived)` irrespective of `all-tcp`;
+///      with no `gre-out` the implicit MTU-derived GRE/WG value is capped
+///      by `all-tcp` when set (#14664 — `all-tcp` is a ceiling on the
+///      derived value, so a downstream link smaller than the tunnel budget
+///      is honoured). Falls back to `all-tcp` when the tunnel value is 0.
 ///   2. GRE-decapped ingress (`GRE_DECAP_INGRESS_FLAG`): `gre-in`,
 ///      falling back to `all-tcp`.
 ///   3. Plain forwarded packet: `all-tcp`.
