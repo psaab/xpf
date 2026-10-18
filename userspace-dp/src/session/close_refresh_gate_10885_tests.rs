@@ -17,7 +17,9 @@
 
 use super::tests::{install_forward_reverse_pair, key_v4};
 use super::*;
-use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST};
+use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_PSH, TCP_RST};
+
+const DATA: u32 = 100;
 
 /// Distinct close windows so a half-close landing on the wrong one is named by
 /// the value (same idiom as the #7342 fixtures).
@@ -124,9 +126,10 @@ fn rst_hits_at_half_window_intervals_do_not_keep_state_alive_10885() {
     assert!(table.entry_by_key(&reverse).is_none());
 }
 
-/// A FIN half-close slides only from the non-FINed direction: the peer may
-/// still be sending, while the FINed side is done and its retransmits/ACKs
-/// must not extend the window.
+/// A FIN half-close slides only from the non-FINed direction on bare
+/// ACKs: the peer may still be sending, while the FINed side's ACKs
+/// must not extend the window. Data-bearing segments are the #14935
+/// exception pinned separately below.
 ///
 /// RED pre-fix: the FINed-side hit re-stamps `last_seen_ns`.
 #[test]
@@ -148,31 +151,145 @@ fn half_close_slides_only_from_the_non_fined_direction_10885() {
         "precondition: the other direction has not FINed"
     );
 
-    // FINed-side traffic still forwards in-window but does not slide...
+    // FINed-side bare ACKs still forward in-window but do not slide...
     let fin_retrans_ns = fin_ns + 500_000_000;
-    assert!(table.lookup(&forward, fin_retrans_ns, TCP_FIN).is_some());
+    assert!(table.lookup_with_payload(&forward, fin_retrans_ns, TCP_FIN, 0).is_some());
     assert_eq!(
         table.entry_by_key(&forward).expect("fwd").last_seen_ns,
         fin_ns,
         "a retransmitted FIN from the same direction must not slide"
     );
     let fwd_hit_ns = fin_ns + 1_000_000_000;
-    assert!(table.lookup(&forward, fwd_hit_ns, TCP_ACK).is_some());
+    assert!(table.lookup_with_payload(&forward, fwd_hit_ns, TCP_ACK, 0).is_some());
     assert_eq!(
         table.entry_by_key(&forward).expect("fwd").last_seen_ns,
         fin_ns,
-        "hits from the FINed direction must not slide the close window"
+        "bare ACKs from the FINed direction must not slide the close window"
     );
 
     // ...while the non-FINed direction keeps sliding (legitimate half-close).
-    // This ACK models pre-FIN data reordered behind the close from the peer.
     let rev_hit_ns = fin_ns + 2_000_000_000;
-    assert!(table.lookup(&reverse, rev_hit_ns, TCP_ACK).is_some());
+    assert!(table.lookup_with_payload(&reverse, rev_hit_ns, TCP_ACK, 0).is_some());
     assert_eq!(
         table.entry_by_key(&reverse).expect("rev").last_seen_ns,
         rev_hit_ns,
         "hits from the non-FINed direction must keep sliding the half-close window"
     );
+}
+
+/// #14935: data-bearing segments re-stamp a CLOSING entry from EITHER
+/// direction (including the FIN-owning side still draining), at intervals
+/// past FIN+30s both halves stay alive, and once data stops both reap at
+/// last-data + closing window. Bare ACKs keep the fixed fuse.
+///
+/// RED pre-fix (payload ignored): the FINed-side data hit does not
+/// re-stamp, so the first assertion fails and the pair reaps mid-transfer.
+#[test]
+fn data_bearing_segments_restamp_closing_past_fuse_14935() {
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    table.set_timeouts(configured());
+    let t0 = 10_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_ACK);
+    let fin_ns = t0 + 1_000_000_000;
+    assert!(table.lookup(&forward, fin_ns, TCP_FIN).is_some());
+    let data1 = fin_ns + 3_000_000_000;
+    assert!(table.lookup_with_payload(&forward, data1, TCP_ACK | TCP_PSH, DATA).is_some());
+    assert_eq!(
+        table.entry_by_key(&forward).expect("fwd").last_seen_ns, data1,
+        "data from the FINed direction must re-stamp the CLOSING entry"
+    );
+    assert_eq!(
+        table.entry_by_key(&forward).expect("fwd").expires_after_ns,
+        CLOSING_SECS * 1_000_000_000,
+        "payload refresh stays on the CLOSING window, not established"
+    );
+    let data2 = fin_ns + 5_000_000_000;
+    assert!(table.lookup_with_payload(&reverse, data2, TCP_ACK | TCP_PSH, DATA).is_some());
+    assert_eq!(table.entry_by_key(&reverse).expect("rev").last_seen_ns, data2);
+    let ack_ns = fin_ns + 6_000_000_000;
+    assert!(table.lookup_with_payload(&forward, ack_ns, TCP_ACK, 0).is_some());
+    assert_eq!(
+        table.entry_by_key(&forward).expect("fwd").last_seen_ns, data1,
+        "bare ACK from FINed side keeps the fixed fuse"
+    );
+    let mut now = data2;
+    for _ in 0..6 {
+        now += 3_000_000_000;
+        assert!(table.lookup_with_payload(&forward, now, TCP_ACK | TCP_PSH, DATA).is_some(),
+            "FINed-side data at {now} must still be admitted past the fuse");
+        assert!(table.lookup_with_payload(&reverse, now, TCP_ACK | TCP_PSH, DATA).is_some());
+        table.last_gc_ns = now - SESSION_GC_INTERVAL_NS;
+        let expired = table.expire_stale_entries(now);
+        assert!(expired.is_empty(), "active closing flow must not reap at {now}");
+    }
+    assert!(now > fin_ns + CLOSING_SECS * 1_000_000_000, "test must cross the fuse");
+    let reap_ns = now + CLOSING_SECS * 1_000_000_000 + SESSION_GC_INTERVAL_NS_FOR_TEST + 1;
+    table.last_gc_ns = reap_ns - SESSION_GC_INTERVAL_NS;
+    let expired = table.expire_stale_entries(reap_ns);
+    assert_eq!(expired.len(), 2, "quiet closing pair reaps at last-data+window");
+}
+
+/// #14935: TIME_WAIT (both FINs) and RST keep the fixed fuse even on
+/// data-bearing segments.
+#[test]
+fn time_wait_and_rst_data_do_not_slide_14935() {
+    let forward = key_v4();
+    let t0 = 10_000_000_000u64;
+    let mut table = SessionTable::new();
+    table.set_timeouts(configured());
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_ACK);
+    assert!(table.lookup(&forward, t0 + 1_000_000_000, TCP_FIN).is_some());
+    let fin2 = t0 + 2_000_000_000;
+    assert!(table.lookup(&reverse, fin2, TCP_FIN).is_some());
+    let hit = fin2 + 1_000_000_000;
+    assert!(table.lookup_with_payload(&forward, hit, TCP_ACK | TCP_PSH, DATA).is_some());
+    assert!(table.lookup_with_payload(&reverse, hit, TCP_ACK | TCP_PSH, DATA).is_some());
+    for (label, key) in [("fwd", &forward), ("rev", &reverse)] {
+        assert_eq!(table.entry_by_key(key).expect(label).last_seen_ns, fin2,
+            "{label}: TIME_WAIT data must not slide");
+    }
+    let mut table = SessionTable::new();
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_ACK);
+    let rst_ns = t0 + 1_000_000_000;
+    assert!(table.lookup(&forward, rst_ns, TCP_RST).is_some());
+    let hit = rst_ns + 1_000_000_000;
+    assert!(table.lookup_with_payload(&forward, hit, TCP_ACK | TCP_PSH, DATA).is_some());
+    assert!(table.lookup_with_payload(&reverse, hit, TCP_ACK | TCP_PSH, DATA).is_some());
+    for (label, key) in [("fwd", &forward), ("rev", &reverse)] {
+        assert_eq!(table.entry_by_key(key).expect(label).last_seen_ns, rst_ns,
+            "{label}: RST data must not slide");
+    }
+}
+
+/// #14935: flow-cache keepalive with payload progress re-stamps the
+/// FINed side of a half-close; without payload it stays frozen, and
+/// TIME_WAIT/RST stay frozen even with payload.
+#[test]
+fn flow_cache_payload_keepalive_restamps_closing_14935() {
+    let forward = key_v4();
+    let t0 = 10_000_000_000u64;
+    let mut table = SessionTable::new();
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_ACK);
+    let fin_ns = t0 + 1_000_000_000;
+    assert!(table.lookup(&forward, fin_ns, TCP_FIN).is_some());
+    let ka_ns = fin_ns + 8_000_000_000;
+    assert!(table.touch_if_stale_with_payload(&forward, ka_ns, TCP_ACK, 0));
+    assert_eq!(table.entry_by_key(&forward).expect("fwd").last_seen_ns, fin_ns);
+    assert!(table.touch_if_stale_with_payload(&forward, ka_ns, TCP_ACK | TCP_PSH, DATA));
+    assert_eq!(table.entry_by_key(&forward).expect("fwd").last_seen_ns, ka_ns,
+        "payload keepalive must re-stamp the FINed side");
+    let _ = reverse;
+    let mut table = SessionTable::new();
+    table.set_timeouts(configured());
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_ACK);
+    assert!(table.lookup(&forward, t0 + 1_000_000_000, TCP_FIN).is_some());
+    let fin2 = t0 + 2_000_000_000;
+    assert!(table.lookup(&reverse, fin2, TCP_FIN).is_some());
+    let ka2 = fin2 + 40_000_000_000;
+    assert!(table.touch_if_stale_with_payload(&forward, ka2, TCP_ACK | TCP_PSH, DATA));
+    assert_eq!(table.entry_by_key(&forward).expect("fwd").last_seen_ns, fin2,
+        "TIME_WAIT payload keepalive must not slide");
 }
 
 /// Once both directions have FINed (TIME_WAIT) neither side slides.

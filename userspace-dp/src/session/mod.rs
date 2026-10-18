@@ -3384,27 +3384,44 @@ impl SessionTable {
     /// Allocation-free.
     #[inline]
     pub fn touch_if_stale(&mut self, key: &SessionKey, now_ns: u64) -> bool {
+        self.touch_if_stale_with_payload(key, now_ns, 0, 0)
+    }
+
+    /// #14935: flow-cache keepalive carrying TCP payload progress. A
+    /// data-bearing segment re-stamps a CLOSING (single-FIN) entry even
+    /// from the FIN-owning direction; bare cache hits (payload unknown,
+    /// pure ACK) keep the #10885 gate. TIME_WAIT (both FINs) and RST
+    /// entries keep the fixed fuse even on payload. Callers that cannot
+    /// derive a payload length pass 0 and retain the pre-#14935 gate.
+    #[inline]
+    pub fn touch_if_stale_with_payload(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+    ) -> bool {
         let canonical_refresh_key = match self.record_by_key(key) {
             Some(record) => {
                 let entry = &record.entry;
                 let age = now_ns.saturating_sub(entry.last_seen_ns);
-                // Keep the flow-cache keepalive from resurrecting a session
-                // after the same strict deadline enforced by packet lookup
-                // and the expiry wheel. The wheel still owns physical
-                // removal, including HA HOLD/SELF-HEAL retention.
                 if age > entry.expires_after_ns {
                     return false;
                 }
                 let refresh_after = entry.expires_after_ns.max(SESSION_KEEPALIVE_DIVISOR)
                     / SESSION_KEEPALIVE_DIVISOR;
-                let refresh_allowed = !entry.closing || (!entry.reset && !entry.fin_own);
+                let payload_progress = entry.closing
+                    && !entry.reset
+                    && !(entry.fin_own && entry.fin_peer)
+                    && crate::tcp_flags::has_payload_progress(tcp_flags, payload_len);
+                let refresh_allowed = !entry.closing
+                    || (!entry.reset && !entry.fin_own)
+                    || payload_progress;
                 (age >= refresh_after && refresh_allowed).then(|| record.key.clone())
             }
             None => return false,
         };
         if let Some(canonical_key) = canonical_refresh_key {
-            // Alias hits resolve to a canonical record. Put that identity on
-            // the expiry wheel too; the wire alias is not a primary key.
             self.touch(&canonical_key, now_ns);
         }
         true

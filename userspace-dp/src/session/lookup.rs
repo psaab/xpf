@@ -149,7 +149,22 @@ impl SessionTable {
         now_ns: u64,
         tcp_flags: u8,
     ) -> Option<SessionLookup> {
-        self.lookup_with_origin(key, now_ns, tcp_flags)
+        self.lookup_with_payload(key, now_ns, tcp_flags, 0)
+    }
+
+    /// #14935: [`Self::lookup`] with the TCP payload length of this
+    /// segment (0 when unknown / non-TCP). A data-bearing segment
+    /// re-stamps a CLOSING (single-FIN) entry even from the FIN-owning
+    /// direction; bare ACKs keep the #10885 fixed fuse, and TIME_WAIT /
+    /// RST entries never slide on payload.
+    pub fn lookup_with_payload(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+    ) -> Option<SessionLookup> {
+        self.lookup_with_origin_with_payload(key, now_ns, tcp_flags, payload_len)
             .map(|(lookup, _origin)| lookup)
     }
 
@@ -350,7 +365,18 @@ impl SessionTable {
         now_ns: u64,
         tcp_flags: u8,
     ) -> Option<(SessionLookup, SessionOrigin)> {
-        match self.lookup_with_origin_inner(key, now_ns, tcp_flags, false, false) {
+        self.lookup_with_origin_with_payload(key, now_ns, tcp_flags, 0)
+    }
+
+    /// #14935: [`Self::lookup_with_origin`] with TCP payload progress.
+    pub fn lookup_with_origin_with_payload(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+    ) -> Option<(SessionLookup, SessionOrigin)> {
+        match self.lookup_with_origin_inner(key, now_ns, tcp_flags, false, false, payload_len) {
             SessionExpiryProbe::Live(hit) => Some(hit),
             SessionExpiryProbe::IdleCrossed | SessionExpiryProbe::Absent => None,
         }
@@ -377,7 +403,7 @@ impl SessionTable {
         now_ns: u64,
         tcp_flags: u8,
     ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
-        self.lookup_with_origin_inner(key, now_ns, tcp_flags, true, false)
+        self.lookup_with_origin_inner(key, now_ns, tcp_flags, true, false, 0)
     }
 
     /// #13938: a local hit is resolved before #9519 has decided whether this
@@ -392,7 +418,19 @@ impl SessionTable {
         now_ns: u64,
         tcp_flags: u8,
     ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
-        self.lookup_with_origin_inner(key, now_ns, tcp_flags, true, true)
+        self.lookup_with_origin_deferring_authority_with_payload(key, now_ns, tcp_flags, 0)
+    }
+
+    /// #14935: deferring-authority lookup carrying TCP payload progress so
+    /// the Owner replay can re-stamp a CLOSING entry on data.
+    pub fn lookup_with_origin_deferring_authority_with_payload(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+    ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
+        self.lookup_with_origin_inner(key, now_ns, tcp_flags, true, true, payload_len)
     }
 
     fn lookup_with_origin_inner(
@@ -402,6 +440,7 @@ impl SessionTable {
         tcp_flags: u8,
         defer_close: bool,
         defer_all: bool,
+        payload_len: u32,
     ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
         // #964 Step 1: resolve handle from key. Direct-primary path
         // looks up via key_to_handle; alias path (NAT-translated
@@ -533,10 +572,24 @@ impl SessionTable {
             // entry's deadline; an Owner applies actual close progress after
             // the verdict, while a foreign packet is dropped. Ordinary hits
             // from the non-FINed half still refresh the half-close window.
+            //
+            // #14935: a data-bearing segment (payload progress) re-stamps a
+            // CLOSING (single-FIN) entry from EITHER direction — the FINed
+            // side may still be draining its send buffer, and the peer may
+            // still be delivering the bulk of the transfer. Bare ACKs keep
+            // the #10885 fixed fuse. The fixed fuse is retained ONLY for
+            // TIME_WAIT (both FINs) and RST: `entry.reset` and the
+            // both-FINs class check below exclude payload refresh there.
             let deferred_close_segment = defer_close && is_tcp && is_closing(tcp_flags);
+            let payload_progress = is_tcp
+                && crate::tcp_flags::has_payload_progress(tcp_flags, payload_len)
+                && entry.closing
+                && !entry.reset
+                && !(entry.fin_own && entry.fin_peer);
             let refresh = !defer_all
                 && (!was_closing
                     || close_progress
+                    || payload_progress
                     || (!do_close && !deferred_close_segment && !entry.reset && !entry.fin_own));
             if refresh {
                 entry.last_seen_ns = now_ns;
@@ -667,7 +720,18 @@ impl SessionTable {
     /// handshake/close behavior, companion propagation, HA updates, and wheel
     /// scheduling while foreign hits never reach it.
     pub fn apply_deferred_owner_hit(&mut self, key: &SessionKey, now_ns: u64, tcp_flags: u8) {
-        let _ = self.lookup_with_origin(key, now_ns, tcp_flags);
+        self.apply_deferred_owner_hit_with_payload(key, now_ns, tcp_flags, 0);
+    }
+
+    /// #14935: Owner replay carrying TCP payload progress.
+    pub fn apply_deferred_owner_hit_with_payload(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+    ) {
+        let _ = self.lookup_with_origin_with_payload(key, now_ns, tcp_flags, payload_len);
     }
 
     /// #10636: apply a close the deferring lookup skipped, after the #9519
