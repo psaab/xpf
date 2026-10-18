@@ -7,7 +7,7 @@ import (
 )
 
 // compiler_interfaces_qinq.go carries the #5879 canonical per-physical-
-// interface QinQ (stacked-VLAN) honesty gate.
+// interface QinQ (stacked-VLAN) honesty gate (#14683: two-level unit form).
 //
 // Background (#2354): the AF_XDP shim's parse_l2 unwinds exactly ONE VLAN
 // tag, so xpf cannot represent a double-tagged (802.1ad S-tag + 802.1Q
@@ -44,6 +44,13 @@ import (
 // node0 AND node1 `${node}`/apply-groups expansions — so a QinQ stack split
 // across spellings, statements, or a peer-only group is caught on whichever
 // node commits. Any INNER (second) tag is unsupported.
+//
+// #14683: the collector enumerates units with namedInstances (the same
+// helper compileInterfaces uses), so the two-level hierarchical form
+// `unit { 0 { ... } }` — Keys=[unit] with the numbered instance as a
+// child — is seen, and unitVLANStack recurses so a vlan leaf nested
+// under a packed-tail child (flat `unit 0 point-to-point inner-vlan-id`)
+// is seen exactly as packedBody hoists it for the compiler.
 //
 // Doctrine mirrors #2354 / #1960: strict (commit / commit-check) hard-
 // rejects, naming the interface, unit, and the contributing statement(s);
@@ -131,26 +138,44 @@ func renderVLANStmt(n *Node) string {
 // (regardless of whether the same node also carries `outer`, i.e. the
 // combined `vlan-tags outer X inner Y` form is inner-bearing); otherwise an
 // `outer`-only `vlan-tags` is a single S-tag and contributes to outer.
+//
+// #14683: the scan is recursive. The flat `unit 0 point-to-point
+// inner-vlan-id 200` form nests the inner leaf under the point-to-point
+// child, and packedBody (as used by compileInterfaces) hoists it onto the
+// unit, so the compiler compiles a tag this gate would miss with a
+// direct-children-only scan. Recursing mirrors the compiler's effective
+// view; the compound children still exclude family/filter/etc. subtrees
+// because a vlan leaf there is a different statement (e.g. vlan-map args).
 func unitVLANStack(unit *Node) qinqUnitStack {
 	var st qinqUnitStack
-	for _, c := range unit.Children {
-		if len(c.Keys) == 0 {
-			continue
-		}
-		switch c.Keys[0] {
-		case "vlan-id":
-			st.outer = append(st.outer, renderVLANStmt(c))
-		case "inner-vlan-id":
-			st.inner = append(st.inner, renderVLANStmt(c))
-		case "vlan-tags":
-			switch {
-			case vlanTagsHasToken(c, "inner"):
-				st.inner = append(st.inner, renderVLANStmt(c))
-			case vlanTagsHasToken(c, "outer"):
-				st.outer = append(st.outer, renderVLANStmt(c))
+	var walk func(n *Node, inVLANMap bool)
+	walk = func(n *Node, inVLANMap bool) {
+		for _, c := range n.Children {
+			if len(c.Keys) == 0 {
+				continue
 			}
+			childInVLANMap := inVLANMap || c.Keys[0] == "input-vlan-map" || c.Keys[0] == "output-vlan-map"
+			switch c.Keys[0] {
+			case "vlan-id":
+				if !inVLANMap {
+					st.outer = append(st.outer, renderVLANStmt(c))
+				}
+			case "inner-vlan-id":
+				if !inVLANMap {
+					st.inner = append(st.inner, renderVLANStmt(c))
+				}
+			case "vlan-tags":
+				switch {
+				case vlanTagsHasToken(c, "inner"):
+					st.inner = append(st.inner, renderVLANStmt(c))
+				case vlanTagsHasToken(c, "outer"):
+					st.outer = append(st.outer, renderVLANStmt(c))
+				}
+			}
+			walk(c, childInVLANMap)
 		}
 	}
+	walk(unit, false)
 	return st
 }
 
@@ -174,10 +199,15 @@ func collectQinQFromInterfacesNode(ifacesNode *Node, out map[string]qinqFinding)
 		if ifaceBody == nil {
 			ifaceBody = iface
 		}
-		for _, unit := range ifaceBody.Children {
-			if unit.Name() != "unit" {
-				continue
-			}
+		// #14683: enumerate units via namedInstances, mirroring
+		// compileInterfaces. The two-level hierarchical form
+		// `unit { 0 { ... } }` carries Keys=[unit] with the numbered
+		// instance as a child; namedInstances descends into it, while a
+		// direct-children scan saw only the child `0` and an empty stack.
+		// Merging duplicate-unit statements matches the gate's prior
+		// keyed-union behaviour (and validateVLANMapAST).
+		for _, unitInst := range namedInstances(ifaceBody.FindChildren("unit")) {
+			unit := unitInst.node
 			// The packed unit form itself may carry vlan leaves on its
 			// own Keys tail; expand those into children for the stack.
 			if unitBody := packedBody(unit, schemaForPath("interfaces", "xpfname", "unit")); unitBody != nil {
@@ -187,11 +217,15 @@ func collectQinQFromInterfacesNode(ifacesNode *Node, out map[string]qinqFinding)
 			if len(st.inner) == 0 {
 				continue // supported single-tag / untagged unit
 			}
-			key := ifName + "\x00" + unitIdentity(unit)
-			if _, seen := out[key]; seen {
+			key := ifName + "\x00" + unitInst.name
+			finding, seen := out[key]
+			if !seen {
+				out[key] = qinqFinding{iface: ifName, unit: unitInst.name, stack: st}
 				continue
 			}
-			out[key] = qinqFinding{iface: ifName, unit: unitIdentity(unit), stack: st}
+			finding.stack.outer = append(finding.stack.outer, st.outer...)
+			finding.stack.inner = append(finding.stack.inner, st.inner...)
+			out[key] = finding
 		}
 	}
 }
