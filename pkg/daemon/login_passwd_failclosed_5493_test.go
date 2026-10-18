@@ -191,7 +191,10 @@ func TestLookupUIDGIDErrThreeState(t *testing.T) {
 
 // TestApplyRejectsMalformedAuthorizedKeys10725 is RED-on-revert for both
 // authorized_keys writers. Newlines and non-ssh-* prefixes must be rejected
-// before login/root credentials or provenance markers are mutated.
+// before any authorized_keys file or key-ownership marker is mutated.
+// #14694 narrows the old "no account command at all" expectation: for an
+// EXISTING account the shell demotion / password reconcile must still run
+// (id/usermod are expected), but useradd and any key write must not.
 func TestApplyRejectsMalformedAuthorizedKeys10725(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -206,9 +209,9 @@ func TestApplyRejectsMalformedAuthorizedKeys10725(t *testing.T) {
 				"root:x:0:0:root:/root:/bin/bash\nalice:x:1001:1001:,,,:/home/alice:/bin/bash\n",
 				"root:!:19000:0:99999:7:::\nalice:!:19000:0:99999:7:::\n")
 			oldRun := runCommandTimeout
-			var commands int
-			runCommandTimeout = func(string, ...string) ([]byte, error) {
-				commands++
+			var commands []string
+			runCommandTimeout = func(name string, _ ...string) ([]byte, error) {
+				commands = append(commands, name)
 				return nil, nil
 			}
 			t.Cleanup(func() { runCommandTimeout = oldRun })
@@ -221,8 +224,10 @@ func TestApplyRejectsMalformedAuthorizedKeys10725(t *testing.T) {
 			if err := (&Daemon{}).applySystemLogin(cfg); err == nil {
 				t.Fatal("applySystemLogin accepted a malformed authorized_keys entry")
 			}
-			if commands != 0 {
-				t.Fatalf("invalid key reached account/SSH commands: %d commands", commands)
+			for _, c := range commands {
+				if c == "useradd" {
+					t.Fatalf("invalid key reached useradd: %v", commands)
+				}
 			}
 			if _, err := os.Stat(managedAuthorizedKeysPath("alice")); !os.IsNotExist(err) {
 				t.Fatalf("invalid key created authorized_keys (stat err=%v)", err)

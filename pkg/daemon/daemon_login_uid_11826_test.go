@@ -22,10 +22,15 @@ func TestApplySystemLoginRefusesInvalidUID11826(t *testing.T) {
 			UID:   -1,
 		}}},
 	}}
-	if err := (&Daemon{}).applySystemLogin(cfg); err != nil {
-		t.Fatalf("applySystemLogin: %v", err)
+	// #14694: the negative UID must now SURFACE as an error (previously
+	// silently skipped). No account command other than the existence
+	// probe may run — in particular useradd must never auto-assign.
+	if err := (&Daemon{}).applySystemLogin(cfg); err == nil {
+		t.Fatalf("applySystemLogin with UID -1 = nil, want surfaced error (#14694)")
 	}
-	if len(calls) != 0 {
-		t.Fatalf("invalid UID reached account commands %v; invalid values must not request useradd auto-assignment", calls)
+	for _, c := range calls {
+		if c == "useradd" || c == "usermod" {
+			t.Fatalf("invalid UID reached account mutation command %q in %v; invalid values must not request useradd auto-assignment", c, calls)
+		}
 	}
 }
