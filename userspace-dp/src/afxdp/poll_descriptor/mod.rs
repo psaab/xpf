@@ -457,6 +457,27 @@ pub(super) fn dns_reply_fastpath_admit(
         && dns_reply_qr_set(packet_frame, meta)
 }
 
+/// #14668: Junos-default illegal DNS reply — a session-miss UDP first
+/// packet to port 53 whose parseable DNS header (declared-end bounded,
+/// #10664) has QR=1, while `allow-dns-reply` is unset. Such a packet
+/// must drop before session install and count as an illegal packet.
+/// With `allow-dns-reply` set the check is skipped (the packet proceeds
+/// through ordinary policy/session handling, including the src-port-53
+/// sessionless fast path when that separately applies). A truncated or
+/// unparseable DNS header fails `dns_reply_qr_set` closed and is NOT
+/// illegal here — it takes normal session handling.
+#[inline]
+pub(super) fn dns_illegal_reply_drop(
+    forwarding: &ForwardingState,
+    flow: &SessionFlow,
+    packet_frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> bool {
+    !forwarding.allow_dns_reply
+        && super::forwarding::is_dns_query_port_flow(flow)
+        && dns_reply_qr_set(packet_frame, meta)
+}
+
 pub(super) fn is_pressure_shed_shared_opening(
     current: &SyncedSessionEntry,
     shed: &crate::session::PressureShedSession,
@@ -5159,6 +5180,30 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
                                 }
+                                // #14668: Junos-default QR check. A UDP
+                                // first packet TO port 53 with a parseable
+                                // QR=1 DNS header is illegal when
+                                // `allow-dns-reply` is unset: drop before
+                                // NAT allocation or session install (no
+                                // session is created) and count it. The
+                                // check reuses the #10664 declared-end
+                                // bound, so a truncated header is not
+                                // illegal and proceeds normally. Placed
+                                // inside Permit so a policy-denied packet
+                                // is attributed to policy, not double-counted
+                                // here. The src-port-53 sessionless fast
+                                // path below is a distinct mechanism gated
+                                // by the same knob.
+                                if dns_illegal_reply_drop(
+                                    worker_ctx.forwarding,
+                                    flow,
+                                    packet_frame,
+                                    meta,
+                                ) {
+                                    telemetry.counters.record_dns_illegal_reply_drop();
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
                                 // #12904: the #10683 selector fence must drop
                                 // matching transit BEFORE any state or pool
                                 // resource is consumed. Checking here — after
@@ -9781,6 +9826,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             worker_ctx.last_resolution,
                                             worker_ctx.forwarding,
                                         );
+                                        break 'missing_neighbor StageOutcome::RecycleAndContinue;
+                                    }
+                                    // #14668: Junos-default QR check on the
+                                    // MissingNeighbor permit leg — drop
+                                    // before any neighbor-resolution side
+                                    // effect or seed, counted as illegal.
+                                    if dns_illegal_reply_drop(
+                                        worker_ctx.forwarding,
+                                        flow,
+                                        packet_frame,
+                                        meta,
+                                    ) {
+                                        telemetry.counters.record_dns_illegal_reply_drop();
                                         break 'missing_neighbor StageOutcome::RecycleAndContinue;
                                     }
                                 } else {

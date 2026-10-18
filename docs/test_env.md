@@ -93,7 +93,7 @@ ge-0/0/3.50          2001:559:8585:50::5/64
 
 ## Flow Settings
 - `tcp-mss { ipsec-vpn 1350; }` — MSS clamping for IPsec
-- `allow-dns-reply` — permit DNS responses without sessions (legacy BPF conntrack wiring: `1a8b873`)
+- `allow-dns-reply` — permit DNS responses without sessions (legacy BPF conntrack wiring: `1a8b873`); also skips the Junos-default drop of a first UDP packet to port 53 with QR=1 (#14668)
 - `allow-embedded-icmp` — legacy no-op in the userspace dataplane; ICMP errors use session matching, and unmatched errors remain subject to ordinary flowless policy
 - ALG disabled: dns, ftp
 

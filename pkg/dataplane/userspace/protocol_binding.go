@@ -89,6 +89,10 @@ type BindingStatus struct {
 	// helper omits it → 0). Summed across bindings and rendered as the
 	// "Martian drops" status row.
 	MartianDropped uint64 `json:"martian_dropped,omitempty"`
+	// #14668: Junos-default drops of a first UDP packet to port 53 with a
+	// parseable DNS QR=1 header while allow-dns-reply is unset (no session
+	// created). Summed across bindings as "DNS illegal-reply drops".
+	DNSIllegalReplyDropped uint64 `json:"dns_illegal_reply_dropped,omitempty"`
 	// #4743: fail-closed drops of an IPv6 packet whose extension-header chain is
 	// still on an extension header after MAX_IPV6_EXT_HEADERS (8) iterations (an
 	// over-limit, uninspectable chain). Before #4743 such a packet was forwarded

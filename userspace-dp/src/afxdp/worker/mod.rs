@@ -1449,6 +1449,9 @@ pub(crate) struct BindingLiveSnapshot {
     /// Includes post-FIB transit rejections as well as martian NoRoute drops;
     /// only the latter are also included in `route_miss_packets`.
     pub(crate) martian_dropped: u64,
+    /// #14668: Junos-default illegal DNS-reply drops snapshotted from
+    /// BindingLiveState.
+    pub(crate) dns_illegal_reply_dropped: u64,
     /// #4743: over-limit IPv6 ext-header fail-closed drops snapshotted from
     /// BindingLiveState.
     pub(crate) ipv6_ext_header_dropped: u64,

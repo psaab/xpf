@@ -44,6 +44,7 @@ Userspace dataplane helper:
   Unknown VLAN drops:        2
   Destination MAC drops:     3
   Martian drops:             1
+  DNS illegal-reply drops:   13
   IPv6 ext-header drops:     4
   V4-mapped IPv6 drops:    0
   Invalid fabric-stamp drops: 5
