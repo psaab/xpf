@@ -9786,7 +9786,7 @@ fn policy_deferred_redirects_execute_under_collecting_worker_holder_10512() {
     let owners = crate::afxdp::bpf_map::SteeringRowOwners::default();
     let row = crate::afxdp::bpf_map::session_map_row(&key);
     owners
-        .publish_row(
+        .publish_row_for_test(
             &row,
             &key,
             crate::afxdp::bpf_map::SteeringHolder::Worker(1),
@@ -9832,7 +9832,7 @@ fn policy_deferred_redirects_execute_under_collecting_worker_holder_10512() {
     outside_key.src_port = outside_key.src_port.wrapping_add(1);
     let outside_row = crate::afxdp::bpf_map::session_map_row(&outside_key);
     owners
-        .publish_row(
+        .publish_row_for_test(
             &outside_row,
             &outside_key,
             crate::afxdp::bpf_map::SteeringHolder::Worker(1),
@@ -10090,7 +10090,7 @@ fn policy_batch_mapless_intent_still_retires_registry_10512() {
     fixture
         .coordinator
         .steering_owners
-        .publish_row(
+        .publish_row_for_test(
             &row,
             &key,
             crate::afxdp::bpf_map::SteeringHolder::Worker(0),
