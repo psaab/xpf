@@ -239,6 +239,26 @@ unaffected — its completing segment reaches the slow path because
 `packet_eligible` and `should_cache` admit TCP packets only when `is_ack_only`,
 so neither SYN nor SYN-ACK seeds the flow cache and the final ACK is a miss.
 
+**A cached completing segment completes on the cache path (#14939).**
+The sentence above is true only for a SYN-ACK-seeded cache entry and a
+bare completing ACK as the very next packet. It is false in the
+realistic order: the SYN-ACK (an ACK-only segment by the `is_ack_only`
+test, which ignores PSH/URG) seeds the cache, and Linux's first data
+segment is a PSH+ACK — also cache-eligible — so the completing segment
+and all later data are served by `touch_if_stale_with_payload`, which
+pre-#14939 refreshed only `last_seen_ns` and never consulted
+`handshake_pending`. Live loss (8cece4238a) showed every iperf -P12
+session at `Timeout: 20` mid-flow: pending never cleared, both halves
+reaped on the opening window under continuous traffic. The keepalive
+now mirrors the lookup arm's completion predicate (forward non-SYN ACK
+for SYN-first, reverse non-SYN ACK for SYN-ACK-first, never on closing
+— #14630) and propagates via `propagate_tcp_state_to_companion`, so
+completion lands on whichever hit path consumes the segment. The
+deferred-Owner replay already completed through the real lookup arm;
+the synced-replica shape completes here too because a materialized
+HandshakePending import is a local entry whose hits are cache hits.
+Steady state costs one `handshake_pending` bool check per cache hit.
+
 **A closing entry never completes the handshake (#14630).** `stamp_tcp_close`
 stamps `closing`/`reset` but deliberately leaves `handshake_pending` set, so
 the completion predicates must consult entry state, not packet flags alone:
