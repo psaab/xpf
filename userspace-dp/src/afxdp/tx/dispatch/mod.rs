@@ -33,7 +33,7 @@ use super::*;
 use smallvec::SmallVec;
 
 use super::tcp_segmentation::segment_forwarded_tcp_frames_into_prepared;
-use crate::afxdp::frame::segment_forwarded_tcp_frames_from_frame_with_commit;
+use crate::afxdp::frame::segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic;
 
 mod cos;
 mod shared_recycle;
@@ -176,6 +176,30 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb(
     ingress_ident: &BindingIdentity,
     recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
 ) -> (Option<Vec<u8>>, bool) {
+    compute_forwarded_egress_ptb_with_dynamic(
+        source_frame,
+        meta,
+        decision,
+        forwarding,
+        is_nat64,
+        uses_native_tunnel,
+        ingress_ident,
+        recent_exceptions,
+        None,
+    )
+}
+
+pub(in crate::afxdp) fn compute_forwarded_egress_ptb_with_dynamic(
+    source_frame: &[u8],
+    meta: ForwardPacketMeta,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    is_nat64: bool,
+    uses_native_tunnel: bool,
+    ingress_ident: &BindingIdentity,
+    recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> (Option<Vec<u8>>, bool) {
     let mut ptb_reply: Option<Vec<u8>> = None;
     let mut mtu_signalled = false;
     let egress_mtu = forwarded_egress_mtu(decision, forwarding);
@@ -188,13 +212,14 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb(
         is_nat64,
     );
     let mtu = if is_nat64 || uses_native_tunnel {
-        post_transform_inner_mtu(
+        crate::afxdp::icmp_ptb::post_transform_inner_mtu_with_dynamic(
             decision,
             forwarding,
             is_nat64,
             meta.addr_family,
             egress_mtu,
             inner_dst,
+            dynamic_neighbors,
         )
     } else {
         egress_mtu
@@ -510,6 +535,7 @@ struct CopyFallbackInputs<'a> {
     expected_ports: Option<(u16, u16)>,
     is_nat64: bool,
     forwarding: &'a ForwardingState,
+    dynamic_neighbors: Option<&'a Arc<ShardedNeighborMap>>,
     ingress_ident: &'a BindingIdentity,
     recent_exceptions: &'a Arc<Mutex<ExceptionEventRing>>,
 }
@@ -567,7 +593,16 @@ fn enqueue_copy_fallback_frame(
     let built_frames = if is_nat64 {
         let (v4_egress_mtu, v6_egress_mtu) =
             if request.meta.addr_family as i32 == libc::AF_INET6 {
-                (nat64_v4_egress_mtu(source_frame, request.meta, &request.decision, forwarding), 0)
+                (
+                    nat64_v4_egress_mtu_with_dynamic(
+                        source_frame,
+                        request.meta,
+                        &request.decision,
+                        forwarding,
+                        inputs.dynamic_neighbors,
+                    ),
+                    0,
+                )
             } else {
                 let l3 = frame_l3_offset(source_frame)
                     .unwrap_or(request.meta.l3_offset as usize);
@@ -575,10 +610,16 @@ fn enqueue_copy_fallback_frame(
                 (0, if input_df {
                     0
                 } else {
-                    nat64_v6_egress_mtu(source_frame, request.meta, &request.decision, forwarding)
+                    nat64_v6_egress_mtu_with_dynamic(
+                        source_frame,
+                        request.meta,
+                        &request.decision,
+                        forwarding,
+                        inputs.dynamic_neighbors,
+                    )
                 })
             };
-        crate::afxdp::frame::build_nat64_forwarded_frames_with_commit(
+        crate::afxdp::frame::build_nat64_forwarded_frames_with_commit_and_dynamic(
             source_frame,
             request.meta,
             &request.decision,
@@ -587,15 +628,17 @@ fn enqueue_copy_fallback_frame(
             forwarding,
             v4_egress_mtu,
             v6_egress_mtu,
+            inputs.dynamic_neighbors,
         )
     } else {
-        crate::afxdp::frame::build_forwarded_frame_from_frame_with_commit(
+        crate::afxdp::frame::build_forwarded_frame_from_frame_with_commit_and_dynamic(
             source_frame,
             request.meta,
             &request.decision,
             forwarding,
             request.apply_nat_on_fabric,
             expected_ports,
+            inputs.dynamic_neighbors,
         )
         .map(|built| {
             let mut frames = SmallVec::new();
@@ -796,6 +839,53 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
     counters: &mut BatchCounters,
     worker_id: u32,
     worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+) {
+    enqueue_pending_forwards_with_dynamic(
+        left,
+        ingress_index,
+        ingress_binding,
+        right,
+        binding_lookup,
+        mirror_targets,
+        pending_forwards,
+        post_recycles,
+        now_ns,
+        forwarding,
+        ingress_ident,
+        ingress_live,
+        slow_path,
+        local_tunnel_deliveries,
+        recent_exceptions,
+        dbg,
+        counters,
+        worker_id,
+        worker_commands_by_id,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
+    left: &mut [BindingWorker],
+    ingress_index: usize,
+    ingress_binding: &mut BindingWorker,
+    right: &mut [BindingWorker],
+    binding_lookup: &WorkerBindingLookup,
+    mirror_targets: &MirrorTargetMap,
+    pending_forwards: &mut Vec<PendingForwardRequest>,
+    post_recycles: &mut Vec<(u32, u64)>,
+    now_ns: u64,
+    forwarding: &ForwardingState,
+    ingress_ident: &BindingIdentity,
+    ingress_live: &BindingLiveState,
+    slow_path: Option<&Arc<SlowPathReinjector>>,
+    local_tunnel_deliveries: &Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+    recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
+    dbg: &mut DebugPollCounters,
+    counters: &mut BatchCounters,
+    worker_id: u32,
+    worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) {
     if pending_forwards.is_empty() {
         return;
@@ -1144,14 +1234,17 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                             worker_commands_by_id,
                         );
                     }
-                } else if let Some(segmented) = segment_forwarded_tcp_frames_from_frame_with_commit(
-                    source_frame,
-                    request.meta,
-                    &request.decision,
-                    forwarding,
-                    request.apply_nat_on_fabric,
-                    expected_ports,
-                ) {
+                } else if let Some(segmented) =
+                    segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic(
+                        source_frame,
+                        request.meta,
+                        &request.decision,
+                        forwarding,
+                        request.apply_nat_on_fabric,
+                        expected_ports,
+                        dynamic_neighbors,
+                    )
+                {
                     drop(overlap_admissions.take());
                     for (frame, wg_commit) in segmented {
                         if cfg!(feature = "debug-log") {
@@ -1267,7 +1360,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                 // doc comment for the full rationale. Pure code-motion: same
                 // inner-MTU derivation, `forwarded_egress_mtu_decision`, PTB
                 // build, and `egress_mtu_exceeded` exception recording.
-                (ptb_reply, mtu_signalled) = compute_forwarded_egress_ptb(
+                (ptb_reply, mtu_signalled) = compute_forwarded_egress_ptb_with_dynamic(
                     source_frame,
                     request.meta,
                     &request.decision,
@@ -1276,6 +1369,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                     uses_native_tunnel,
                     ingress_ident,
                     recent_exceptions,
+                    dynamic_neighbors,
                 );
                 // Skip the oversized-frame build/forward entirely when an
                 // egress-MTU PTB was signalled; the finalizer enqueues
@@ -1368,6 +1462,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                     expected_ports,
                                     is_nat64,
                                     forwarding,
+                                    dynamic_neighbors,
                                     ingress_ident,
                                     recent_exceptions,
                                 };
@@ -1607,6 +1702,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                 expected_ports,
                                 is_nat64,
                                 forwarding,
+                                dynamic_neighbors,
                                 ingress_ident,
                                 recent_exceptions,
                             };
@@ -1870,7 +1966,18 @@ fn nat64_v4_egress_mtu(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
 ) -> usize {
-    post_transform_inner_mtu(
+    nat64_v4_egress_mtu_with_dynamic(source_frame, meta, decision, forwarding, None)
+}
+
+#[inline(always)]
+fn nat64_v4_egress_mtu_with_dynamic(
+    source_frame: &[u8],
+    meta: ForwardPacketMeta,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> usize {
+    crate::afxdp::icmp_ptb::post_transform_inner_mtu_with_dynamic(
         decision,
         forwarding,
         true,
@@ -1882,6 +1989,7 @@ fn nat64_v4_egress_mtu(
             decision,
             true,
         ),
+        dynamic_neighbors,
     )
     .saturating_sub(20)
 }
@@ -1897,7 +2005,18 @@ fn nat64_v6_egress_mtu(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
 ) -> usize {
-    let mtu = post_transform_inner_mtu(
+    nat64_v6_egress_mtu_with_dynamic(source_frame, meta, decision, forwarding, None)
+}
+
+#[inline(always)]
+fn nat64_v6_egress_mtu_with_dynamic(
+    source_frame: &[u8],
+    meta: ForwardPacketMeta,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> usize {
+    let mtu = crate::afxdp::icmp_ptb::post_transform_inner_mtu_with_dynamic(
         decision,
         forwarding,
         true,
@@ -1909,6 +2028,7 @@ fn nat64_v6_egress_mtu(
             decision,
             true,
         ),
+        dynamic_neighbors,
     );
     if mtu == 0 { 0 } else { mtu.saturating_add(20) }
 }

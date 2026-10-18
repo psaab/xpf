@@ -901,13 +901,14 @@ pub(super) fn retry_pending_neigh(
         // when the ordinary dispatcher can split it to the egress MTU.
         if pkt.meta.protocol == PROTO_TCP && !decision.nat.nat64 {
             if let Some(segments) =
-                crate::afxdp::frame::segment_forwarded_tcp_frames_from_frame_with_commit(
+                crate::afxdp::frame::segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic(
                     source_frame,
                     pkt.meta,
                     &decision,
                     forwarding,
                     false,
                     None,
+                    Some(dynamic_neighbors),
                 )
             {
                 let target = binding_by_index_mut(left, binding_index, binding, right, target_idx)
@@ -967,16 +968,18 @@ pub(super) fn retry_pending_neigh(
         // discard/reject or missing target binding must not trigger a PTB.
         // Only permitted, deliverable candidates reach this PMTU decision.
         let ingress_ident = binding.identity();
-        let (ptb_reply, mtu_signalled) = super::tx::dispatch::compute_forwarded_egress_ptb(
-            source_frame,
-            pkt.meta.into(),
-            &decision,
-            forwarding,
-            decision.nat.nat64,
-            decision.resolution.tunnel_endpoint_id != 0,
-            &ingress_ident,
-            recent_exceptions,
-        );
+        let (ptb_reply, mtu_signalled) =
+            super::tx::dispatch::compute_forwarded_egress_ptb_with_dynamic(
+                source_frame,
+                pkt.meta.into(),
+                &decision,
+                forwarding,
+                decision.nat.nat64,
+                decision.resolution.tunnel_endpoint_id != 0,
+                &ingress_ident,
+                recent_exceptions,
+                Some(dynamic_neighbors),
+            );
         if let Some(ptb_bytes) = ptb_reply {
             super::tx::dispatch::enqueue_forwarded_ptb_reply(
                 binding,

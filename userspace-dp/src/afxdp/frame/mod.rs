@@ -19,7 +19,11 @@ pub(in crate::afxdp) use generated::generated_reply_session_key;
 // dispatcher's `post_transform_inner_mtu` (icmp_ptb.rs) derives the PTB
 // inner MTU from the SAME physical underlay the encap drop guard admits
 // against (the `mod wg` submodule itself is private to `frame`).
-pub(in crate::afxdp) use wg::{wg_endpoint_physical_outer_mtu, wg_selected_peer_outer};
+pub(in crate::afxdp) use wg::{
+    wg_endpoint_physical_outer_mtu, wg_endpoint_physical_outer_mtu_with_dynamic,
+    wg_selected_peer_outer, wg_selected_peer_outer_with_dynamic,
+    wg_transit_egress_physical_egress_ifindex_with_dynamic,
+};
 
 // #6308: the WG transit-egress DISPATCH physical-egress SSOT, re-exported so
 // the forward-request builder (`forward_request.rs`) selects the same physical
@@ -145,6 +149,8 @@ mod tcp_segmentation;
 pub(in crate::afxdp) use tcp_segmentation::{
     finalize_tcp_segment_headers, segment_forwarded_tcp_frames,
     segment_forwarded_tcp_frames_from_frame, segment_forwarded_tcp_frames_from_frame_with_commit,
+    segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic,
+    segment_forwarded_tcp_frames_from_frame_with_dynamic,
 };
 
 // #1352 — extracted build orchestrator + per-address-family helpers.
@@ -329,8 +335,36 @@ pub(super) fn build_nat64_forwarded_frame(
     no_v6_frag_header: bool,
     forwarding: &ForwardingState,
 ) -> Option<Vec<u8>> {
-    let mut frames = build_nat64_forwarded_frames(
-        frame, meta, decision, nat64_reverse, no_v6_frag_header, forwarding, 0, 0,
+    build_nat64_forwarded_frame_with_dynamic(
+        frame,
+        meta,
+        decision,
+        nat64_reverse,
+        no_v6_frag_header,
+        forwarding,
+        None,
+    )
+}
+
+pub(super) fn build_nat64_forwarded_frame_with_dynamic(
+    frame: &[u8],
+    meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    nat64_reverse: Option<&Nat64ReverseInfo>,
+    no_v6_frag_header: bool,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> Option<Vec<u8>> {
+    let mut frames = build_nat64_forwarded_frames_with_dynamic(
+        frame,
+        meta,
+        decision,
+        nat64_reverse,
+        no_v6_frag_header,
+        forwarding,
+        0,
+        0,
+        dynamic_neighbors,
     )?;
     (frames.len() == 1).then(|| frames.pop()).flatten()
 }
@@ -347,9 +381,40 @@ pub(super) fn build_nat64_forwarded_frames(
     v4_egress_mtu: usize,
     v6_egress_mtu: usize,
 ) -> Option<SmallVec<[Vec<u8>; 1]>> {
-    build_nat64_forwarded_frames_with_commit(
-        frame, meta, decision, nat64_reverse, no_v6_frag_header, forwarding,
-        v4_egress_mtu, v6_egress_mtu,
+    build_nat64_forwarded_frames_with_dynamic(
+        frame,
+        meta,
+        decision,
+        nat64_reverse,
+        no_v6_frag_header,
+        forwarding,
+        v4_egress_mtu,
+        v6_egress_mtu,
+        None,
+    )
+}
+
+pub(super) fn build_nat64_forwarded_frames_with_dynamic(
+    frame: &[u8],
+    meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    nat64_reverse: Option<&Nat64ReverseInfo>,
+    no_v6_frag_header: bool,
+    forwarding: &ForwardingState,
+    v4_egress_mtu: usize,
+    v6_egress_mtu: usize,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> Option<SmallVec<[Vec<u8>; 1]>> {
+    build_nat64_forwarded_frames_with_commit_and_dynamic(
+        frame,
+        meta,
+        decision,
+        nat64_reverse,
+        no_v6_frag_header,
+        forwarding,
+        v4_egress_mtu,
+        v6_egress_mtu,
+        dynamic_neighbors,
     )
     .map(|frames| frames.into_iter().map(|(frame, _)| frame).collect())
 }
@@ -363,6 +428,30 @@ pub(super) fn build_nat64_forwarded_frames_with_commit(
     forwarding: &ForwardingState,
     v4_egress_mtu: usize,
     v6_egress_mtu: usize,
+) -> Option<SmallVec<[(Vec<u8>, Option<wg::WgEncapCommit>); 1]>> {
+    build_nat64_forwarded_frames_with_commit_and_dynamic(
+        frame,
+        meta,
+        decision,
+        nat64_reverse,
+        no_v6_frag_header,
+        forwarding,
+        v4_egress_mtu,
+        v6_egress_mtu,
+        None,
+    )
+}
+
+pub(super) fn build_nat64_forwarded_frames_with_commit_and_dynamic(
+    frame: &[u8],
+    meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    nat64_reverse: Option<&Nat64ReverseInfo>,
+    no_v6_frag_header: bool,
+    forwarding: &ForwardingState,
+    v4_egress_mtu: usize,
+    v6_egress_mtu: usize,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) -> Option<SmallVec<[(Vec<u8>, Option<wg::WgEncapCommit>); 1]>> {
     let meta = meta.into();
     let inner = build_nat64_inner_frame(frame, meta, decision, nat64_reverse, no_v6_frag_header)?;
@@ -380,9 +469,14 @@ pub(super) fn build_nat64_forwarded_frames_with_commit(
     let mut frames = SmallVec::new();
     for inner in inner_frames {
         let encapsulated = match kind {
-            Some(TunnelKind::WireGuard) =>
-                wg::wg_encap_frame_with_commit(&inner, inner_meta, decision, forwarding)
-                    .map(|(frame, commit)| (frame, Some(commit))),
+            Some(TunnelKind::WireGuard) => wg::wg_encap_frame_with_commit_and_dynamic(
+                &inner,
+                inner_meta,
+                decision,
+                forwarding,
+                dynamic_neighbors,
+            )
+            .map(|(frame, commit)| (frame, Some(commit))),
             Some(TunnelKind::Gre) =>
                 encapsulate_native_gre_frame(&inner, inner_meta, decision, forwarding)
                     .map(|frame| (frame, None)),
@@ -899,6 +993,27 @@ pub(super) fn build_forwarded_frame_from_frame(
     .map(|(frame, _)| frame)
 }
 
+pub(super) fn build_forwarded_frame_from_frame_with_dynamic(
+    frame: &[u8],
+    meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    apply_nat_on_fabric: bool,
+    expected_ports: Option<(u16, u16)>,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> Option<Vec<u8>> {
+    build_forwarded_frame_from_frame_with_commit_and_dynamic(
+        frame,
+        meta,
+        decision,
+        forwarding,
+        apply_nat_on_fabric,
+        expected_ports,
+        dynamic_neighbors,
+    )
+    .map(|(frame, _)| frame)
+}
+
 pub(super) fn build_forwarded_frame_from_frame_with_commit(
     frame: &[u8],
     meta: impl Into<ForwardPacketMeta>,
@@ -906,6 +1021,26 @@ pub(super) fn build_forwarded_frame_from_frame_with_commit(
     forwarding: &ForwardingState,
     apply_nat_on_fabric: bool,
     expected_ports: Option<(u16, u16)>,
+) -> Option<(Vec<u8>, Option<wg::WgEncapCommit>)> {
+    build_forwarded_frame_from_frame_with_commit_and_dynamic(
+        frame,
+        meta,
+        decision,
+        forwarding,
+        apply_nat_on_fabric,
+        expected_ports,
+        None,
+    )
+}
+
+pub(super) fn build_forwarded_frame_from_frame_with_commit_and_dynamic(
+    frame: &[u8],
+    meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    apply_nat_on_fabric: bool,
+    expected_ports: Option<(u16, u16)>,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) -> Option<(Vec<u8>, Option<wg::WgEncapCommit>)> {
     let meta = meta.into();
     let mut out = vec![0u8; frame.len().saturating_add(4)];
@@ -936,10 +1071,14 @@ pub(super) fn build_forwarded_frame_from_frame_with_commit(
             .get(&decision.resolution.tunnel_endpoint_id)
             .map(|e| tunnel_mode_kind(&e.mode));
         return match kind {
-            Some(TunnelKind::WireGuard) => {
-                wg::wg_encap_frame_with_commit(&out, meta, decision, forwarding)
-                    .map(|(frame, commit)| (frame, Some(commit)))
-            }
+            Some(TunnelKind::WireGuard) => wg::wg_encap_frame_with_commit_and_dynamic(
+                &out,
+                meta,
+                decision,
+                forwarding,
+                dynamic_neighbors,
+            )
+            .map(|(frame, commit)| (frame, Some(commit))),
             Some(TunnelKind::Gre) => encapsulate_native_gre_frame(&out, meta, decision, forwarding)
                 .map(|frame| (frame, None)),
             // Unknown mode or missing endpoint row: fail closed.

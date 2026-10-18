@@ -267,6 +267,26 @@ pub(in crate::afxdp) fn post_transform_inner_mtu(
     egress_mtu: usize,
     inner_dst: Option<std::net::IpAddr>,
 ) -> usize {
+    post_transform_inner_mtu_with_dynamic(
+        decision,
+        forwarding,
+        is_nat64,
+        inner_addr_family,
+        egress_mtu,
+        inner_dst,
+        None,
+    )
+}
+
+pub(in crate::afxdp) fn post_transform_inner_mtu_with_dynamic(
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    is_nat64: bool,
+    inner_addr_family: u8,
+    egress_mtu: usize,
+    inner_dst: Option<std::net::IpAddr>,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> usize {
     // §8896: NAT64 THROUGH A TUNNEL COMPOSES BOTH BUDGETS.
     //
     // Before #8896 the two transforms could not co-occur (§8890 dropped the
@@ -290,7 +310,12 @@ pub(in crate::afxdp) fn post_transform_inner_mtu(
     // the RFC 7915 header delta on top of that, in the same direction the
     // NAT64-only arm uses.
     if is_nat64 && decision.resolution.tunnel_endpoint_id != 0 {
-        let tunnel_inner = tunnel_inner_mtu(decision, forwarding, inner_dst);
+        let tunnel_inner = tunnel_inner_mtu_with_dynamic(
+            decision,
+            forwarding,
+            inner_dst,
+            dynamic_neighbors,
+        );
         if tunnel_inner == 0 {
             return 0;
         }
@@ -327,7 +352,12 @@ pub(in crate::afxdp) fn post_transform_inner_mtu(
     if decision.resolution.tunnel_endpoint_id == 0 {
         return 0;
     }
-    let tunnel_inner = tunnel_inner_mtu(decision, forwarding, inner_dst);
+    let tunnel_inner = tunnel_inner_mtu_with_dynamic(
+        decision,
+        forwarding,
+        inner_dst,
+        dynamic_neighbors,
+    );
     if tunnel_inner == 0 {
         return 0;
     }
@@ -345,6 +375,15 @@ fn tunnel_inner_mtu(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
     inner_dst: Option<std::net::IpAddr>,
+) -> usize {
+    tunnel_inner_mtu_with_dynamic(decision, forwarding, inner_dst, None)
+}
+
+fn tunnel_inner_mtu_with_dynamic(
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    inner_dst: Option<std::net::IpAddr>,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) -> usize {
     let Some(endpoint) = forwarding
         .tunnel_endpoints
@@ -380,9 +419,14 @@ fn tunnel_inner_mtu(
             // endpoint row's `outer_family` (its placeholder transport)
             // charges the wrong overhead (20B) for a peer of the other
             // family, mis-sizing the advertised inner MTU.
-            let (outer_family, outer_mtu) = crate::afxdp::frame::wg_selected_peer_outer(
-                decision, forwarding, endpoint, inner_dst,
-            );
+            let (outer_family, outer_mtu) =
+                crate::afxdp::frame::wg_selected_peer_outer_with_dynamic(
+                    decision,
+                    forwarding,
+                    endpoint,
+                    inner_dst,
+                    dynamic_neighbors,
+                );
             crate::afxdp::wg::mss::wg_inner_mtu(outer_family, outer_mtu)
         }
         TunnelKind::Unknown => 0,

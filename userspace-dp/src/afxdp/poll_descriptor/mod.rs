@@ -8850,7 +8850,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     let packet_source_mac: Option<[u8; 6]> = packet_frame
                         .get(6..12)
                         .and_then(|bytes| bytes.try_into().ok());
-                    if let Some(mut request) = build_live_forward_request_from_frame(
+                    if let Some(mut request) = build_live_forward_request_from_frame_with_dynamic(
                         worker_ctx.binding_lookup,
                         binding_index,
                         &worker_ctx.ident,
@@ -8883,6 +8883,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // IPv6 (with `None` it returns `None` and drops the reply).
                         // `None` for every non-NAT64 flow.
                         session_nat64_reverse,
+                        Some(worker_ctx.dynamic_neighbors),
                     ) {
                         if flow.is_none()
                             && decision.resolution.disposition
