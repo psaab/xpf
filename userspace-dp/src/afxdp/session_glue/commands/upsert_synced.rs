@@ -62,10 +62,13 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
     worker_id: u32,
 ) {
     let key = entry.key.clone();
-    let allow_replace_local =
+    // #14669: the peer's stamped owner_rg_id is not this node's ownership.
+    // Compute allow_replace_local / is_active only AFTER a cache-free local
+    // re-resolution yields the local owner. The cached variant would serve
+    // the peer's LocalDelivery verbatim (foreign local_ifindex) and its
+    // neighbor fallback would reuse the peer's egress/MAC on NoRoute.
+    let mut allow_replace_local =
         synced_entry_allows_local_replace(ha_state, entry.metadata.owner_rg_id, now_secs);
-    let is_active = !allow_replace_local;
-
     if !entry.metadata.is_reverse {
         // #9752 round 3: resolve with the EFFECTIVE stamp. A (0,0) re-import
         // over a stamped stored entry is an old sender's resend, and the
@@ -82,33 +85,56 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
             dst_ip: key.dst_ip,
             forward_key: key.clone(),
         };
-        let re_resolved = lookup_forwarding_resolution_for_session(
+        let peer_resolution = entry.decision.resolution;
+        let raw_resolved = lookup_forwarding_resolution_for_session_without_cache(
             forwarding,
             dynamic_neighbors,
             &flow,
             entry.decision,
         )
         .resolution;
+        let new_owner = owner_rg_for_resolution(forwarding, raw_resolved);
+        if new_owner > 0 {
+            entry.metadata.owner_rg_id = new_owner;
+        }
+        allow_replace_local =
+            synced_entry_allows_local_replace(ha_state, entry.metadata.owner_rg_id, now_secs);
+        let is_active = !allow_replace_local;
         // On active node, enforce HA snapshot to filter out sessions
         // for inactive RGs. On standby, skip HA enforcement — store
         // the resolved ForwardCandidate so the session is ready when
         // activation happens. The packet path enforces HA state via
         // flow cache validation.
-        let re_resolved = if is_active {
-            enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, re_resolved)
+        let mut re_resolved = if is_active {
+            enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, raw_resolved)
         } else {
-            re_resolved
+            raw_resolved
         };
+        // #326 standby readiness: when the local FIB has no route /
+        // neighbor yet, keep the session forwarding-ready at activation
+        // from the peer candidate, but ONLY after cached_session_resolution
+        // revalidates its egress/neighbor against THIS node's live state
+        // (foreign or stale bindings are rejected). Never reached for a
+        // peer LocalDelivery: that disposition is not a ForwardCandidate,
+        // so the foreign local_ifindex cannot survive (#14669).
+        if !is_active
+            && matches!(
+                re_resolved.disposition,
+                ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor
+            )
+        {
+            if let Some(fallback) =
+                cached_session_resolution(forwarding, dynamic_neighbors, peer_resolution)
+            {
+                re_resolved = fallback;
+            }
+        }
         // #9752: a terminal re-resolve arms the purge walk (D8).
         if re_resolved.disposition == ForwardingDisposition::TableUnavailable {
             flag_install_table_purge(worker_id);
         }
         if re_resolved.disposition != ForwardingDisposition::HAInactive {
             entry.decision.resolution = re_resolved;
-            let new_owner = owner_rg_for_resolution(forwarding, re_resolved);
-            if new_owner > 0 {
-                entry.metadata.owner_rg_id = new_owner;
-            }
         }
     }
     // #9951: a zero token carries no leak provenance and is recomputed locally
@@ -162,19 +188,30 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         if leak_incarnation != 0 {
             sessions.stamp_leak_incarnation(&leak_key, leak_incarnation);
         }
-        // #6979 F3: release the replaced session's reservation when the new
-        // entry will NOT re-reserve this flow. Mirrors `handle_delete_synced`'s
-        // teardown exactly — same helpers, same holder id — because it is the
-        // same operation: this worker is no longer forwarding the old
-        // translated tuple. When the new entry DOES reserve, this is skipped
-        // and `reserve_flow`'s own stale-tuple eviction does the retire, so the
-        // port is never released twice and a same-tuple refresh keeps its
-        // holder bit (a release/re-reserve would open a window where another
-        // worker's local allocation could steal the port).
+        // #6979 F3 + #14669: release the replaced reservation when the new
+        // entry will NOT re-reserve this flow in the SAME allocator, or will
+        // not reserve at all. Mirrors `handle_delete_synced`'s teardown —
+        // same helpers, same holder id. `reserve_flow`'s stale-tuple eviction
+        // only retires an incumbent in the allocator the NEW reservation
+        // lands in, so a Pool A -> Pool B / Pool -> static / SNAT -> NAT64
+        // (or reverse) move would strand Pool A's holder bit forever. The
+        // release sweep is keyed on the PREVIOUS translated tuple and
+        // no-ops in allocators not holding that exact tuple, so releasing
+        // before re-reserving cannot free the new (different-tuple)
+        // reservation; for a same-tuple refresh the translated tuple is
+        // unchanged and this branch is not taken, preserving the holder bit.
         let new_entry_reserves = entry_origin.is_peer_synced()
             && !metadata.is_reverse
             && entry_decision.nat.rewrite_src.is_some();
-        if !new_entry_reserves {
+        let reservation_target_changed = previous_reservation.as_ref().is_some_and(
+            |(prev_decision, prev_metadata, _)| {
+                prev_metadata.is_reverse != metadata.is_reverse
+                    || prev_decision.nat != entry_decision.nat
+                    || prev_metadata.ingress_zone != metadata.ingress_zone
+                    || prev_metadata.egress_zone != metadata.egress_zone
+            },
+        );
+        if !new_entry_reserves || reservation_target_changed {
             if let Some((prev_decision, prev_metadata, _)) = previous_reservation {
                 release_source_nat_allocation_for_worker(
                     &forwarding.iface_nat_allocators,

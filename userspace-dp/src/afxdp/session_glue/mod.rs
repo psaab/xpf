@@ -114,6 +114,9 @@ mod routing_domain_publish_9517_tests;
 #[cfg(test)]
 #[path = "steering_row_owners_9560_tests.rs"]
 mod steering_row_owners_9560_tests;
+#[cfg(test)]
+#[path = "upsert_synced_14669_tests.rs"]
+mod upsert_synced_14669_tests;
 
 // #6600: the coordinator's pre-publish NAT reservation resolves the synced zone
 // pair through the SAME helper the worker-side upsert uses, so the two cannot
