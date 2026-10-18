@@ -513,6 +513,30 @@ type Store struct {
 	// keeps serving rescue saves normally.
 	rescueFenced atomic.Bool
 
+	// rescueMu serializes the off-lock rescue.conf filesystem mutations
+	// among SaveRescueConfig writers themselves (#14722 D18-05). It is
+	// acquired AFTER rescueWriteBarrier, so a test holding a writer at
+	// the barrier never blocks a concurrent writer or deleter from
+	// superseding it. It does NOT serialize DeleteRescueConfig: delete
+	// bumps rescueSeq/rescueAppliedGen under s.mu (see store_persist.go)
+	// and unlinks immediately, so a delete issued during an in-flight
+	// save succeeds without waiting for that save's durable write.
+	rescueMu sync.Mutex
+
+	// rescueSeq is the monotonic generation source for rescue.conf
+	// operations (#14722 D18-05). SaveRescueConfig claims a generation
+	// under s.mu (together with its data snapshot and rescueWG
+	// registration); DeleteRescueConfig claims a generation under
+	// s.mu before it unlinks. Accessed only under s.mu.
+	rescueSeq uint64
+
+	// rescueAppliedGen is the highest rescue generation already applied
+	// to disk (written by a save or unlinked by a delete). Accessed
+	// only under rescueMu. A writer whose generation is <= the applied
+	// generation, or below the latest claimed rescueSeq, has been
+	// superseded and must not touch rescue.conf.
+	rescueAppliedGen uint64
+
 	// rollbackPersistDegraded records that the most recent
 	// saveRollbackFiles() failed to durably write a rollback slot or sync
 	// the directory (#3441 L1). The commit itself still succeeds — the

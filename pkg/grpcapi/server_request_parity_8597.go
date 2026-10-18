@@ -68,9 +68,13 @@ func (s *Server) rescueAction(action string) (*pb.SystemActionResponse, error) {
 		if err := s.store.SaveRescueConfig(); err != nil {
 			// #10769 d05-F8 and #11803: a save refused by the reset fence or
 			// because there is no non-empty committed active config reports a
-			// failed precondition rather than a server failure.
+			// failed precondition rather than a server failure. #14722: a
+			// save superseded by a newer rescue save/delete likewise never
+			// landed, so it is the same failed-precondition class, not an
+			// internal failure and not a claimed success.
 			if errors.Is(err, configstore.ErrRescueSaveFenced) ||
-				errors.Is(err, configstore.ErrRescueSaveNoCommittedConfig) {
+				errors.Is(err, configstore.ErrRescueSaveNoCommittedConfig) ||
+				errors.Is(err, configstore.ErrRescueSaveSuperseded) {
 				return nil, status.Errorf(codes.FailedPrecondition, "save rescue configuration: %v", err)
 			}
 			return nil, status.Errorf(codes.Internal, "save rescue configuration: %v", err)

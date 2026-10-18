@@ -2019,6 +2019,15 @@ var ErrRescueSaveFenced = errors.New("factory reset in progress: rescue configur
 // configuration to save as the rescue configuration.
 var ErrRescueSaveNoCommittedConfig = errors.New("no non-empty committed configuration to save as rescue")
 
+// ErrRescueSaveSuperseded reports that a rescue save was displaced by a
+// newer rescue operation (a later save or a DeleteRescueConfig) while it
+// was in flight, so it did not write rescue.conf (#14722 D18-05). It is
+// distinct from ErrRescueSaveFenced: the save was admitted, then lost
+// the race for the file. Callers that map ErrRescueSaveFenced to a
+// failed-precondition response should do the same for this error rather
+// than reporting a save that never landed as a server failure.
+var ErrRescueSaveSuperseded = errors.New("rescue configuration save superseded by a newer rescue operation")
+
 // rescueWriteBarrier is a test seam invoked by SaveRescueConfig after it has
 // registered in rescueWG and before its durable write. Production is a no-op.
 var rescueWriteBarrier = func() {}
@@ -2385,6 +2394,18 @@ func (s *Store) rescuePath() string {
 // counter can never rise from zero concurrently with Wait. Only the WRITE
 // itself runs off-lock, so a long durable write never blocks
 // reconcile/QuiesceRescueWrites (#6185).
+//
+// #14722 D18-05: the save also claims a rescue generation under s.mu
+// (together with the snapshot above) and, after rescueWriteBarrier,
+// takes rescueMu and refuses to write if it has been superseded — a
+// DeleteRescueConfig claimed/applied a later generation (in-flight
+// save must not resurrect a deleted rescue.conf) or a newer save has
+// already claimed/written (stale snapshot must not overwrite it). A
+// superseded save reports ErrRescueSaveSuperseded; it never writes.
+// Delete does not take rescueMu for its unlink (see DeleteRescueConfig),
+// so a delete issued while this save is held at the barrier still
+// succeeds immediately. A save STARTED after the delete claims a later
+// generation than the delete's and legitimately recreates rescue.conf.
 func (s *Store) SaveRescueConfig() error {
 	s.mu.RLock()
 	if s.rescueFenced.Load() {
@@ -2400,10 +2421,33 @@ func (s *Store) SaveRescueConfig() error {
 		s.mu.RUnlock()
 		return fmt.Errorf("save rescue config: %w", ErrRescueSaveNoCommittedConfig)
 	}
+	// #14722 D18-05: claim this save's generation together with the data
+	// snapshot, the fence check and the rescueWG registration, so
+	// generation order matches snapshot order and a concurrent
+	// DeleteRescueConfig (which claims its generation under s.mu)
+	// orders unambiguously against this save.
+	s.rescueSeq++
+	myGen := s.rescueSeq
 	s.rescueWG.Add(1)
 	s.mu.RUnlock()
 	defer s.rescueWG.Done()
 	rescueWriteBarrier()
+
+	// #14722 D18-05: serialize rescue.conf writers among themselves.
+	// rescueMu is taken AFTER the barrier so a writer held at the
+	// barrier never blocks a concurrent writer or deleter from
+	// superseding it. DeleteRescueConfig deliberately does NOT take
+	// rescueMu: it must be able to succeed (and bump the applied
+	// generation) while a save is mid-write at the barrier.
+	s.rescueMu.Lock()
+	defer s.rescueMu.Unlock()
+	if myGen <= s.rescueAppliedGen || myGen < s.rescueSeqSnapshot() {
+		// A delete or a newer save claimed/applied a later generation
+		// while this save was in flight. Writing now would resurrect
+		// a rescue.conf the operator deleted or overwrite the newer
+		// save with this stale snapshot.
+		return fmt.Errorf("save rescue config: %w", ErrRescueSaveSuperseded)
+	}
 
 	path := s.rescuePath()
 	// DurableState (#1894): the rescue config is the operator's
@@ -2416,6 +2460,7 @@ func (s *Store) SaveRescueConfig() error {
 	if err := fsatomic.WriteFileDurable(path, []byte(data), 0600); err != nil {
 		return fmt.Errorf("save rescue config: %w", err)
 	}
+	s.rescueAppliedGen = myGen
 	slog.Info("rescue configuration saved", "path", path)
 	return nil
 }
@@ -2434,8 +2479,39 @@ func (s *Store) SaveRescueConfig() error {
 // the parent directory after the unlink so the removal survives power loss.
 // The unlink and dir fsync route through the package durability seams
 // (rbRemove/rbSyncDir) so a dropped dir sync fails a test RED.
+//
+// #14722 D18-05: the delete first claims a rescue generation under
+// s.mu and raises rescueAppliedGen under rescueMu, so any save that
+// started before the delete and is still in flight (e.g. held at
+// rescueWriteBarrier) is superseded and cannot recreate rescue.conf
+// after this delete returns. The generation claim does not wait for
+// such a save's durable write, so the delete succeeds promptly even
+// during an in-flight save.
 func (s *Store) DeleteRescueConfig() error {
 	path := s.rescuePath()
+	// #14722 D18-05: claim the delete's generation under s.mu BEFORE
+	// unlinking. Every save that claimed an earlier generation and is
+	// still in flight observes rescueAppliedGen >= its own generation
+	// when it later takes rescueMu and therefore refuses to recreate
+	// the file; a save started after the delete claims a later
+	// generation and legitimately recreates it. rescueAppliedGen is
+	// bumped under rescueMu (not s.mu) so this claim is ordered
+	// against a writer currently inside its critical section: if that
+	// writer's WriteFileDurable is mid-rename, the bump waits for it
+	// to finish, then the unlink below removes whatever it landed —
+	// the bump does not deadlock against a writer held at
+	// rescueWriteBarrier because such a writer has not yet taken
+	// rescueMu. rescueMu is released before the unlink so the durable
+	// delete itself is not serialized behind a save's fsync.
+	s.mu.Lock()
+	s.rescueSeq++
+	myGen := s.rescueSeq
+	s.mu.Unlock()
+	s.rescueMu.Lock()
+	if myGen > s.rescueAppliedGen {
+		s.rescueAppliedGen = myGen
+	}
+	s.rescueMu.Unlock()
 	if err := rbRemove(path); err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("no rescue configuration exists")
@@ -2447,6 +2523,15 @@ func (s *Store) DeleteRescueConfig() error {
 	}
 	slog.Info("rescue configuration deleted", "path", path)
 	return nil
+}
+
+// rescueSeqSnapshot returns the latest claimed rescue generation. It
+// takes s.mu because rescueSeq is only mutated under s.mu; it is never
+// called while holding s.mu.
+func (s *Store) rescueSeqSnapshot() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.rescueSeq
 }
 
 // LoadRescueConfig returns the rescue configuration text, or "" if none.
