@@ -15,6 +15,17 @@ use crate::afxdp::{
 
 use super::stats::{record_kick_latency, record_tx_completions_with_stamp};
 use super::update_binding_debug_state;
+// #14641: test-only seam that runs after `drain_pending_fill` has published a
+// batch to the kernel FILL ring but before it returns. A test can scribble
+// over the just-published UMEM chunks to model kernel DMA ownership, proving
+// that no caller reads a chunk after recycling it. Thread-local storage
+// isolates concurrent tests and adds no release-build state or call.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FILL_PUBLISH_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnOnce(&mut BindingWorker)>>>
+        = std::cell::RefCell::new(None);
+}
 
 /// #9900 F-092: TX completions reaped beyond `outstanding_tx` (including
 /// completions drained at gauge 0, which are definitionally stale). The old
@@ -231,6 +242,15 @@ pub(in crate::afxdp) fn drain_pending_fill(binding: &mut BindingWorker, now_ns: 
         }
     }
     binding.scratch.scratch_fill.clear();
+    // #14641: model kernel DMA ownership immediately after FILL publish
+    // (cfg(test) only; the hook is a no-op in release builds).
+    #[cfg(test)]
+    {
+        let hook = FILL_PUBLISH_HOOK.with(|h| h.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook(binding);
+        }
+    }
     // Only wake NAPI when the kernel signals it needs fill ring entries,
     // or as a safety net every FILL_WAKE_SAFETY_INTERVAL_NS to prevent
     // lost-wakeup stalls from the race between commit() and needs_wakeup.
