@@ -674,30 +674,50 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		// reference an undefined access-list instead.
 		// A name is fully dangling when EVERY per-family ref under it has
 		// no rendered entry. A mixed list with ONE rendered family is not
-		// fully dangling: its fine ref keeps emitting below and only the
-		// dangling family ref drops — deny-all for a partially-rendered
-		// reject would deny routes its fine branch never rejected, and the
-		// issue's undefined/all-skipped cases are already fully dangling.
+		// fully dangling: its fine ref keeps emitting below.
+		// #14700: for a reject term the dropped family still needs a
+		// per-family deny-all (see emitVariants). The fine branch never
+		// matches routes of the dropped family, so those routes were
+		// exclusively the dropped branch's responsibility; letting them
+		// fall through to later accepts / the BGP default is fail-open,
+		// exactly as in the #14137 split route-filter case. For accept /
+		// non-terminating terms the dropped ref simply does not emit
+		// (subset direction, never broader).
 		danglingPrefixList := make(map[string]bool, len(term.PrefixList))
+		// prefixListDanglingFamilies records, per name, the per-family
+		// refs that dangle (mixed list with one all-malformed family).
+		prefixListDanglingFamilies := make(map[string][]fromPrefixListRef)
 		for _, plName := range term.PrefixList {
 			if plName == "" {
 				continue
 			}
-			if danglingPrefixList[plName] {
+			if _, seen := danglingPrefixList[plName]; seen {
 				continue
 			}
-			danglingPrefixList[plName] = true
-			for _, ref := range fromPrefixListRefs(po, plName) {
-				if !prefixListRefMissingAtRender(po, ref.name, ref.matchKW) {
-					danglingPrefixList[plName] = false
-					break
+			refs := fromPrefixListRefs(po, plName)
+			allMissing := len(refs) > 0
+			for _, ref := range refs {
+				if prefixListRefMissingAtRender(po, ref.name, ref.matchKW) {
+					prefixListDanglingFamilies[plName] = append(prefixListDanglingFamilies[plName], ref)
+				} else {
+					allMissing = false
 				}
 			}
+			danglingPrefixList[plName] = allMissing
 		}
 		anyDanglingPrefixList := false
 		for _, dangling := range danglingPrefixList {
 			if dangling {
 				anyDanglingPrefixList = true
+				break
+			}
+		}
+		// hasPartialDanglingPrefixList: some name has a dangling family
+		// but also a rendered family.
+		hasPartialDanglingPrefixList := false
+		for plName, dangling := range danglingPrefixList {
+			if !dangling && len(prefixListDanglingFamilies[plName]) > 0 {
+				hasPartialDanglingPrefixList = true
 				break
 			}
 		}
@@ -1259,6 +1279,41 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				}
 			}
 		}
+		// emitPartialPrefixListDeny14700 renders one bare deny-all per
+		// dropped family of a partially-dangling reject term (#14700).
+		// The fine families' deny sequences have already been emitted by
+		// emitVariants; this closes the dropped families. Bare deny has
+		// no family match, so it technically matches every family — but
+		// fine-family routes that matched the term's other AND clauses
+		// already terminated at the fine deny, and valid configs never
+		// reach here (every family rendered). This mirrors the #14137
+		// split case where a per-family deny-all is likewise bare.
+		// Suppressed when the term has same-type route-filters: then a
+		// bare deny would also deny opposite-family routes the valid
+		// route-filter + dropped prefix-list AND combination could never
+		// have matched (both families split separately there).
+		emitPartialPrefixListDeny14700 := func() {
+			if action != "deny" || !hasPartialDanglingPrefixList {
+				return
+			}
+			if len(term.RouteFilters) > 0 {
+				return
+			}
+			n := 0
+			for _, plName := range term.PrefixList {
+				if danglingPrefixList[plName] {
+					continue
+				}
+				n += len(prefixListDanglingFamilies[plName])
+			}
+			for range n {
+				slog.Warn("frr: reject term prefix-list family absent from frr.conf; rendering deny-all for dropped family",
+					"route_map", routeMapName, "term", term.Name)
+				fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(routeMapName), seq)
+				b.WriteString("exit\n")
+				seq += 10
+			}
+		}
 		// emitDanglingGroup handles one all-invalid route-filter family
 		// group (#14137, see the term rule above): reject renders ONE
 		// bare deny-all sequence for the group; every other action skips
@@ -1277,15 +1332,6 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				"route_map", routeMapName, "term", term.Name)
 		}
 		if mixedFamily {
-			// Mixed-family route-filters: split into a v4 group and a v6
-			// group (#2607), each carrying its own family's route-filter
-			// entries into a per-family prefix-list (plName_v4 / plName_v6 -
-			// FRR `ip` vs `ipv6` prefix-lists are separate namespaces anyway,
-			// but the distinct NAME keeps the two match lines referencing
-			// disjoint single-family lists). Within each group the from-* OR
-			// cross-product is emitted; v4 first. An all-invalid group
-			// (#14137) renders deny-all (reject) or nothing instead of a
-			// dangling match against its undefined inline list.
 			if v4Dangling {
 				emitDanglingGroup()
 			} else {
@@ -1296,19 +1342,17 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			} else {
 				emitVariants("v6", v6rf, inlinePrefixListName(routeMapName, plPrefix, term.Name, "_v6"))
 			}
+			emitPartialPrefixListDeny14700()
 		} else if singleDangling {
 			emitDanglingGroup()
 		} else {
-			// Homogeneous or no route-filters: one family group. Pass the
-			// full (possibly empty) indexed route-filter set and the
-			// derived plName. With no repeated from-* matches this is a
-			// single sequence.
 			all := make([]indexedRouteFilter, len(term.RouteFilters))
 			for i, rf := range term.RouteFilters {
 				all[i] = indexedRouteFilter{i, rf}
 			}
 			plName := inlinePrefixListName(routeMapName, plPrefix, term.Name, "")
 			emitVariants("", all, plName)
+			emitPartialPrefixListDeny14700()
 		}
 	}
 
