@@ -973,8 +973,12 @@ set security zones security-zone untrust interfaces eth1.0`
 
 	if err := s.LoadMerge(setConfig); err == nil {
 		t.Fatal("expected LoadMerge to reject the garbage line, got nil")
-	} else if !strings.Contains(err.Error(), "not-a-set-line") {
-		t.Errorf("expected error to name the garbage line, got %v", err)
+	} else if strings.Contains(err.Error(), "not-a-set-line") {
+		// #14718: the error must NOT echo the offending line (file-owned
+		// content may be a denied secret); line coordinate only.
+		t.Errorf("expected error NOT to echo the garbage line, got %v", err)
+	} else if !strings.Contains(err.Error(), "line 2") {
+		t.Errorf("expected error to retain the line coordinate, got %v", err)
 	}
 
 	// The junk top-level node must NOT have been materialized.
@@ -1570,8 +1574,11 @@ func TestLoadSet(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error on malformed line, got nil (count=%d)", count2)
 	}
-	if !strings.Contains(err.Error(), "not-a-set-line") {
-		t.Errorf("expected error to name the malformed line, got %v", err)
+	if strings.Contains(err.Error(), "not-a-set-line") {
+		// #14718: coordinates only, never the offending line text.
+		t.Errorf("expected error NOT to echo the malformed line, got %v", err)
+	} else if !strings.Contains(err.Error(), "line 5") {
+		t.Errorf("expected error to retain the line coordinate, got %v", err)
 	}
 
 	// A clean comment/blank-only-plus-verbs body still succeeds.

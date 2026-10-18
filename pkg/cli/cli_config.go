@@ -197,6 +197,21 @@ func (c *CLI) handleLoad(args []string) error {
 			return err
 		}
 	} else {
+		// #14718: consult the load gate BEFORE opening the file with the
+		// daemon's privileges. A class the gate refuses categorically
+		// (restricted override, or deny-everything) must get that refusal
+		// without the file being opened at all — otherwise distinguishable
+		// read errors (not-exist vs non-regular vs empty vs parse) are a
+		// filesystem oracle and the parse errors below could echo denied
+		// file lines. Content-dependent verdicts still run after the read
+		// via AuthorizeConfigLoad below.
+		var preCfg *config.Config
+		if c.store != nil {
+			preCfg = c.store.ActiveConfig()
+		}
+		if err := config.PreflightConfigLoad(preCfg, c.userClass, mode); err != nil {
+			return err
+		}
 		// Read from file
 		// #6753: bound the READ, not just the post-read length. checkConfigSize
 		// takes an already-materialised string, so it bounds what the store
