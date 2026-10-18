@@ -232,15 +232,27 @@ pub(in crate::afxdp) fn transit_source_class_drop(
 
 #[inline]
 pub(in crate::afxdp) fn transit_destination_class_drop(
+    forwarding: &ForwardingState,
     disposition: ForwardingDisposition,
     destination: IpAddr,
     translated_destination: Option<IpAddr>,
+    flow_routing_domain: u32,
+    meta: ForwardPacketMeta,
+    fabric_ingress_zone: Option<u16>,
 ) -> bool {
     if !transit_source_class_disposition(disposition) {
         return false;
     }
-    crate::afxdp::frame::transit_dst_is_martian(destination)
-        || translated_destination.is_some_and(crate::afxdp::frame::transit_dst_is_martian)
+    let routing_domain = crate::afxdp::forwarding::effective_routing_domain_for_flow(
+        forwarding,
+        flow_routing_domain,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+        fabric_ingress_zone,
+    );
+    crate::afxdp::frame::transit_dst_is_martian(forwarding, destination, routing_domain)
+        || translated_destination
+            .is_some_and(|d| crate::afxdp::frame::transit_dst_is_martian(forwarding, d, routing_domain))
 }
 
 #[inline]
@@ -2064,9 +2076,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // primary address helpers), so loopback/management
                         // addresses on another interface remain reachable.
                         if transit_destination_class_drop(
+                            worker_ctx.forwarding,
                             resolved.decision.resolution.disposition,
                             flow.dst_ip,
                             resolved.decision.nat.rewrite_dst,
+                            flow.forward_key.routing_domain,
+                            ForwardPacketMeta::from(meta),
+                            fabric_arrival_zone,
                         ) {
                             telemetry.counters.record_martian_drop();
                             binding.scratch.scratch_recycle.push(desc.addr);
@@ -4381,9 +4397,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // #11413: reject special destinations before transit
                         // policy, session creation or neighbor side effects.
                         if transit_destination_class_drop(
+                            worker_ctx.forwarding,
                             decision.resolution.disposition,
                             flow.dst_ip,
                             decision.nat.rewrite_dst,
+                            flow.forward_key.routing_domain,
+                            ForwardPacketMeta::from(meta),
+                            fabric_arrival_zone,
                         ) {
                             telemetry.counters.record_martian_drop();
                             binding.scratch.scratch_recycle.push(desc.addr);
@@ -7757,9 +7777,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         });
                     if flowless_destination.is_some_and(|destination| {
                         transit_destination_class_drop(
+                            worker_ctx.forwarding,
                             final_resolution.disposition,
                             destination,
                             flowless_nat.rewrite_dst,
+                            l3_ctx.as_ref().map_or(0, |f| f.forward_key.routing_domain),
+                            ForwardPacketMeta::from(meta),
+                            fabric_arrival_zone,
                         )
                     }) {
                         telemetry.counters.record_martian_drop();
@@ -8292,9 +8316,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 });
                 if transit_destination.is_some_and(|destination| {
                     transit_destination_class_drop(
+                        worker_ctx.forwarding,
                         decision.resolution.disposition,
                         destination,
                         decision.nat.rewrite_dst,
+                        flow.as_ref().map_or(0, |f| f.forward_key.routing_domain),
+                        ForwardPacketMeta::from(meta),
+                        fabric_arrival_zone,
                     )
                 }) {
                     telemetry.counters.record_martian_drop();

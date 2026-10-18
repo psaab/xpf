@@ -741,6 +741,9 @@ mod tests_martian_source_10689;
 #[path = "tests_martian_destination_11413.rs"]
 mod tests_martian_destination_11413;
 #[cfg(test)]
+#[path = "tests_directed_broadcast_14654.rs"]
+mod tests_directed_broadcast_14654;
+#[cfg(test)]
 #[path = "tests_gre_local_delivery.rs"]
 mod tests_gre_local_delivery;
 #[cfg(test)]

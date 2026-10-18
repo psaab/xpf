@@ -211,18 +211,15 @@ fn transit_drops_ipv6_link_local_upper_boundary_destination_13981() {
 #[test]
 fn transit_dst_gate_covers_link_local_ranges_13981() {
     use crate::afxdp::frame::transit_dst_is_martian;
-    // IPv4 169.254/16 inclusive, both boundaries.
-    assert!(transit_dst_is_martian(IpAddr::V4(Ipv4Addr::new(169, 254, 0, 0))));
-    assert!(transit_dst_is_martian(IpAddr::V4(Ipv4Addr::new(169, 254, 255, 255))));
-    assert!(!transit_dst_is_martian(IpAddr::V4(Ipv4Addr::new(169, 253, 0, 1))));
-    assert!(!transit_dst_is_martian(IpAddr::V4(Ipv4Addr::new(169, 255, 0, 1))));
-    // IPv6 fe80::/10 inclusive: fe80..=febf, both boundaries.
-    assert!(transit_dst_is_martian(IpAddr::V6("fe80::".parse().unwrap())));
-    assert!(transit_dst_is_martian(IpAddr::V6(
-        "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()
-    )));
-    assert!(!transit_dst_is_martian(IpAddr::V6("fe7f:ffff::1".parse().unwrap())));
-    assert!(!transit_dst_is_martian(IpAddr::V6("fec0::1".parse().unwrap())));
+    let forwarding = ForwardingState::default();
+    assert!(transit_dst_is_martian(&forwarding, IpAddr::V4(Ipv4Addr::new(169, 254, 0, 0)), 0));
+    assert!(transit_dst_is_martian(&forwarding, IpAddr::V4(Ipv4Addr::new(169, 254, 255, 255)), 0));
+    assert!(!transit_dst_is_martian(&forwarding, IpAddr::V4(Ipv4Addr::new(169, 253, 0, 1)), 0));
+    assert!(!transit_dst_is_martian(&forwarding, IpAddr::V4(Ipv4Addr::new(169, 255, 0, 1)), 0));
+    assert!(transit_dst_is_martian(&forwarding, IpAddr::V6("fe80::".parse().unwrap()), 0));
+    assert!(transit_dst_is_martian(&forwarding, IpAddr::V6("febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()), 0));
+    assert!(!transit_dst_is_martian(&forwarding, IpAddr::V6("fe7f:ffff::1".parse().unwrap()), 0));
+    assert!(!transit_dst_is_martian(&forwarding, IpAddr::V6("fec0::1".parse().unwrap()), 0));
 }
 
 #[test]

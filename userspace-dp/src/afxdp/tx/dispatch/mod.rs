@@ -865,9 +865,16 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                 .l3_addrs_unfiltered()
                 .is_some_and(|(_, destination)| {
                     crate::afxdp::poll_descriptor::transit_destination_class_drop(
+                        forwarding,
                         request.decision.resolution.disposition,
                         destination,
                         request.decision.nat.rewrite_dst,
+                        request
+                            .flow_key
+                            .as_ref()
+                            .map_or(0, |flow| flow.routing_domain),
+                        request.meta,
+                        None,
                     )
                 })
         {

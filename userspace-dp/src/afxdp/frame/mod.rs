@@ -91,9 +91,10 @@ pub(crate) use inspect::{
 };
 pub(in crate::afxdp) use inspect::{
     L3_CTX_NONE_UNSPECIFIED_ADDR, authoritative_forward_ports, declared_l3_end,
-    decode_frame_summary, dest_is_directed_broadcast, dest_is_multicast_or_broadcast,
-    flowless_effective_protocol, forward_tuple_mismatch_reason, fragment_protocol_from_frame,
-    icmp_reply_type, ipv4_is_any_fragment, ipv4_is_non_first_fragment, is_term_fragment,
+    decode_frame_summary, dest_is_directed_broadcast, dest_is_directed_broadcast_in_table,
+    dest_is_multicast_or_broadcast, flowless_effective_protocol, forward_tuple_mismatch_reason,
+    fragment_protocol_from_frame, icmp_error_table_for_meta, icmp_reply_type,
+    ipv4_is_any_fragment, ipv4_is_non_first_fragment, is_term_fragment,
     ipv6_addr_is_v4_mapped_or_compat, ipv6_ext_chain_over_limit,
     ipv6_frame_has_v4_mapped_or_compat, ipv6_is_any_fragment, ipv6_is_non_first_fragment,
     ipv6_is_nonatomically_fragmented, is_any_fragment, is_non_first_fragment,
@@ -101,8 +102,9 @@ pub(in crate::afxdp) use inspect::{
     l3_session_flow_from_meta, meta_icmp_identifier_bearing, meta_l4_ports_in_declared_end,
     neighbor_ip_is_learnable, neighbor_mac_is_learnable, parse_session_flow,
     post_nat_expected_ports, source_is_invalid_for_icmp_error, src_is_directed_broadcast,
-    term_match_extra_from_frame, term_match_extra_from_meta, transit_dst_is_martian,
-    transit_src_is_martian, try_parse_metadata,
+    src_is_directed_broadcast_in_table, term_match_extra_from_frame,
+    term_match_extra_from_meta, transit_dst_is_martian, transit_src_is_martian,
+    try_parse_metadata, v4_addr_is_directed_broadcast_in_table,
 };
 pub(super) use inspect::{
     ZoneEncodedFabricStamp, frame_is_non_first_fragment, frame_l3_offset, frame_l4_offset,
