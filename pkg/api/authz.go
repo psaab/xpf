@@ -977,6 +977,13 @@ func (s *Server) authorizeRESTRead(r *http.Request, required config.LoginClassPe
 	if err := s.authorizeRESTCommand(r, cfg, p); err != nil {
 		return p, err
 	}
+	// #14707: subtree/format-scoped config-read adjudication (shared
+	// with gRPC in pkg/config). The operational gate above saw only the
+	// bare "show configuration"; the *-configuration pair was never
+	// consulted on reads at all.
+	if err := s.authorizeRESTConfigRead(r, cfg, p); err != nil {
+		return p, err
+	}
 	return p, nil
 }
 func logRESTLoginDenial(r *http.Request, p authz.Principal, required, decision string) {

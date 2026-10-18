@@ -274,6 +274,16 @@ func (c *CLI) dispatchOperational(line string) error {
 	if err := c.checkCommandRegex(line); err != nil {
 		return err
 	}
+	// #14707: `show configuration …` also carries *-configuration
+	// restrictions, which the operational gate does not evaluate. A
+	// whole-tree render refuses a configuration-restricted class; an
+	// explicit path is adjudicated per-path (the operational arm above
+	// already charged the path/format-scoped deny-commands).
+	if parts[0] == "show" && len(parts) >= 2 && parts[1] == "configuration" {
+		if err := c.checkShowConfigurationRead(parts[2:]); err != nil {
+			return err
+		}
+	}
 
 	switch parts[0] {
 	case "configure":
@@ -334,6 +344,18 @@ func (c *CLI) dispatchConfig(line string) error {
 	// `system root-authentication`.
 	if err := c.checkConfigRegex(line); err != nil {
 		return err
+	}
+	// #14707: `show` in config mode renders the candidate (whole tree or
+	// the edit-path subtree). The mutation gate declines it (not a verb
+	// it gates) and dispatchOperational's command gate never runs here,
+	// so a deny-configuration / path-scoped deny-commands class read the
+	// denied subtree. Adjudicate the read with the shared decision:
+	// an explicit path (edit path + typed remainder) per-path, the bare
+	// `show` as a whole-tree render.
+	if parts[0] == "show" {
+		if err := c.checkConfigShowRegex(parts[1:]); err != nil {
+			return err
+		}
 	}
 
 	switch parts[0] {

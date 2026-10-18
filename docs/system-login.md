@@ -544,6 +544,25 @@ Three consequences an operator should know:
   fired over REST. An unknown or missing `type` has no command and **denies**
   for a restricted class.
 
+- **Configuration READS are concealed by the same regexes (#14707).**
+  `ShowConfig` / `ShowCompare` / `ShowRollback` (gRPC), the REST
+  config-show / export / compare / show-rollback / search routes, and
+  `show configuration …` / config-mode `show` on the CLI previously
+  rendered the whole secret-redacted tree for any class the coarse
+  bits admitted: `deny-configuration "^security"` denied `set` but
+  concealed nothing on read, and `deny-commands "^show configuration
+  security"` or `"display set"` never fired because the RPC was
+  flattened to the bare `show configuration`. Now an explicit subtree
+  path is adjudicated against `*-configuration` on the path and
+  `*-commands` on `show configuration <path> | display <format>`; a
+  whole-tree render, a candidate diff, and a rollback render are
+  refused for a class with `*-configuration` regexes (the subtrees
+  they disclose cannot be enumerated from the request — request an
+  allowed subtree instead), mirroring `load override` / `rollback`
+  refusal. A class with no regexes, and the super-user, are
+  unaffected. The decision is shared (`AuthorizeConfigShow*` in
+  `pkg/config`) so the surfaces cannot drift.
+
 > **This sentence was a LIVE OVERCLAIM until #9154, and the shape of the error
 > is worth keeping.** It said "every dispatch surface" and then enumerated two,
 > and the `*-configuration` pair was in force on exactly ONE of them — the

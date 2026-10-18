@@ -295,6 +295,12 @@ func (s *Server) authorizeRPCContext(ctx context.Context, fullMethod string, req
 		if err := s.authorizeRPCConfigMutation(cfg, p.Class, fullMethod, req); err != nil {
 			return nil, denyRPC(fullMethod, required, p, err)
 		}
+		// #14707: the config-READ pair. ShowConfig/ShowCompare/ShowRollback
+		// rendered denied subtrees because the command gate saw only the
+		// bare "show configuration" and the mutation gate ignores reads.
+		if err := s.authorizeRPCConfigRead(cfg, p.Class, fullMethod, req); err != nil {
+			return nil, denyRPC(fullMethod, required, p, err)
+		}
 	}
 	return context.WithValue(ctx, authorizedPrincipalKey{}, p), nil
 }
