@@ -6112,8 +6112,7 @@ impl PortAllocator {
         // The refusal itself is correct and is KEPT for the two PINNED cases;
         // only the missing retry was the defect:
         //   * `address_persistent` — the address is `sticky_pool_index(src_ip)`,
-        //     a pure function of the source within this process (#12789).
-        //     Probing on would break the
+        //     a pure function of the source (#14627). Probing on would break the
         //     `address-persistent` contract, so the sibling
         //     `reserve_address_only_roundrobin` likewise sets
         //     `address_attempts = 1` here.
@@ -6774,17 +6773,36 @@ pub(crate) fn allocator_capacity(num_addresses: usize, port_low: u16, port_high:
         .min(usize::MAX as u64) as usize
 }
 
+/// Fixed, domain-separated seed for `address-persistent` sticky pool
+/// selection (#14627). Unlike node-local hot-path placement
+/// (`hot_path_hash_seed`, #2364/#12789), this mapping is a cross-node
+/// contract: Junos `address-persistent` promises one pool address per
+/// internal host, and after an HA failover the new node must place a
+/// host's NEW flows on the same pool address its synced sessions use.
+/// Both nodes run identical config (same pool, same order), so a pure
+/// function of `(src_ip, pool_len)` under a FIXED seed computes the
+/// same slot everywhere and across restarts — the ECMP precedent
+/// (`ECMP_FLOW_HASH_SEED`). The seed is stable, not secret: sticky
+/// placement runs only at first-flow allocation, its output (the
+/// translated pool address) is observable on the wire in every packet,
+/// and it indexes no attacker-growable table, so predictable selection
+/// enables no collision eviction or chain amplification. The hash
+/// itself remains the keyed multiply-mix (`HotPathSeededState`), whose
+/// splitmix64 folds destroy the seed-independent v4/v6 collision
+/// families that broke seed-additive FxHash (#12789/#12989) — only the
+/// seed source changes, from per-process secret to this fixed domain
+/// constant. Existing allocations are unchanged (sessions/leases pin
+/// their translated tuple); only a fresh recomputation moves, and it
+/// now moves to the same slot on every node.
+pub(super) const STICKY_POOL_HASH_SEED: u64 = 0x5354_4943_4b59_0001;
+
 /// Map a source IP to a sticky pool-address slot for `address-persistent`
-/// SNAT. Placement uses the per-process keyed hash state so a remote source
-/// cannot predict colliding source families offline. Existing allocations are
-/// unchanged; the mapping is stable for a process lifetime but can differ
-/// across process starts or HA nodes.
+/// SNAT. A pure function of `(src_ip, pool_len)`: identical on every
+/// node running the same pool config and across process restarts, so
+/// the address survives an HA failover for new flows as well as for
+/// synced sessions (#14627).
 pub(super) fn sticky_pool_index(src_ip: IpAddr, pool_len: usize) -> usize {
-    sticky_pool_index_seeded(
-        src_ip,
-        pool_len,
-        crate::hot_hash_seed::hot_path_hash_seed(),
-    )
+    sticky_pool_index_seeded(src_ip, pool_len, STICKY_POOL_HASH_SEED)
 }
 
 /// Seed-pinned core for deterministic placement tests.

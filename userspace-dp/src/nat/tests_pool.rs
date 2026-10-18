@@ -3785,6 +3785,61 @@ fn pool_snat_keyed_index_vector_12789() {
     assert_eq!(indices, [53, 38, 43, 55]);
 }
 
+/// #14627: `address-persistent` must place the same source on the same
+/// pool slot on every node / process. Two independent "nodes" are
+/// simulated by the seed-pinned core under an unrelated process seed:
+/// pre-fix the production `sticky_pool_index` draws the per-process
+/// `hot_path_hash_seed()` (#12789), so its mapping reshuffles across
+/// restarts and HA peers and cannot equal the fixed-seed mapping.
+/// Post-fix production uses `STICKY_POOL_HASH_SEED`, identical everywhere.
+#[test]
+fn sticky_pool_index_is_cross_process_stable_14627() {
+    let pool_len = 4usize;
+    let sources: Vec<IpAddr> = (1..=64u8)
+        .map(|o| IpAddr::V4(Ipv4Addr::new(10, 0, 1, o)))
+        .collect();
+    for src in &sources {
+        assert_eq!(
+            sticky_pool_index(*src, pool_len),
+            super::allocator::sticky_pool_index_seeded(
+                *src,
+                pool_len,
+                super::allocator::STICKY_POOL_HASH_SEED
+            ),
+            "production sticky index for {src} is not the cross-node stable mapping"
+        );
+        assert_eq!(
+            sticky_pool_index(*src, pool_len),
+            sticky_pool_index(*src, pool_len),
+        );
+    }
+    // Control: two different process seeds really do move sources
+    // (guards against a vacuous seeded core).
+    let moved = sources
+        .iter()
+        .filter(|src| {
+            super::allocator::sticky_pool_index_seeded(**src, pool_len, 0xA)
+                != super::allocator::sticky_pool_index_seeded(**src, pool_len, 0xB)
+        })
+        .count();
+    assert!(
+        moved > 0,
+        "seeded core is seed-insensitive ({moved}/64 moved) — cross-process test would be vacuous"
+    );
+    // IPv6 sources likewise follow the stable mapping.
+    for i in 0..16u16 {
+        let src = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, i, 0, 0, 0, 1));
+        assert_eq!(
+            sticky_pool_index(src, 8),
+            super::allocator::sticky_pool_index_seeded(
+                src,
+                8,
+                super::allocator::STICKY_POOL_HASH_SEED
+            ),
+        );
+    }
+}
+
 #[test]
 fn pool_snat_sticky_index_v6_s3_clique_disperses_for_each_seed_12789() {
     for seed in [1, 42, 0x0123_4567_89AB_CDEF, u64::MAX] {
@@ -3893,8 +3948,8 @@ fn pool_snat_address_persistent_seeded_hashes_full_ipv6_address_12789() {
 
 #[test]
 fn pool_snat_address_persistent_sticky_index_is_deterministic_and_stable() {
-    // Same-process sticky contract: the per-process secret is held fixed for
-    // the process lifetime, so other source lookups cannot perturb this key.
+    // Cross-node sticky contract (#14627): the production selector uses
+    // the fixed stable seed, so other source lookups cannot perturb this key.
     let sources: &[&str] = &[
         "10.0.1.100",
         "10.0.1.101",
@@ -3922,7 +3977,7 @@ fn pool_snat_address_persistent_sticky_index_is_deterministic_and_stable() {
 
             // Interleaving other sources cannot perturb this key because
             // each lookup initializes a fresh keyed hasher from the same
-            // process seed. The separate lease cache memoizes allocations;
+            // fixed stable seed. The separate lease cache memoizes allocations;
             // the selector itself caches nothing.
             for other in sources {
                 let _ = sticky_pool_index(other.parse().unwrap(), pool_len);
