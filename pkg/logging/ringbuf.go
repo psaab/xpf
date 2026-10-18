@@ -501,6 +501,14 @@ func (er *EventReader) ForwardLogMsg(severity int, msg string) {
 	writers := er.localWriters
 	er.localMu.RUnlock()
 	for _, lw := range writers {
+		// #14732: parity with the syslog-client loop above — the local
+		// severity filter (incl. SeverityNone/SeverityEmergency sentinels)
+		// applies to forwarded/aggregated messages too. ForwardLogMsg has
+		// no event category, so the severity-only ShouldSend is the gate
+		// (same as SyslogClient.ShouldSend used for clients here).
+		if !lw.ShouldSend(severity) {
+			continue
+		}
 		// #3478 M05: don't discard the aggregator's local-writer error.
 		// LocalLogWriter.Send already counts the drop (DroppedWrites) and
 		// emits a rate-limited WARN; surface it here at Debug so the

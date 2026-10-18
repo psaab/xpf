@@ -2,13 +2,15 @@ package logging
 
 import (
 	"fmt"
-	"github.com/psaab/xpf/pkg/fsatomic"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/psaab/xpf/pkg/fsatomic"
+	"github.com/psaab/xpf/pkg/termsafe"
 )
 
 // LocalLogWriter writes security log events to a local file with rotation.
@@ -153,6 +155,12 @@ func NewLocalLogWriter(cfg LocalLogConfig) (*LocalLogWriter, error) {
 // Send writes a log message to the local file. It matches the SyslogClient.Send
 // signature pattern so it can be used as a drop-in replacement.
 func (lw *LocalLogWriter) Send(severity int, msg string) error {
+	// #14732 / #6585 parity with SyslogClient.Send: this is the last
+	// boundary before the on-disk audit file. A bare LF forges an extra
+	// audit line, CR/ESC stored verbatim fire when an operator cats/tails
+	// the file. SanitizeForDisplay (single-line, not the LF-preserving
+	// block variant) has an allocation-free fast path for clean messages.
+	msg = termsafe.SanitizeForDisplay(msg)
 	var line string
 	if lw.Format == "sd-syslog" {
 		// Junos sd-syslog (#14611), byte-for-byte identical to
@@ -238,9 +246,32 @@ func (lw *LocalLogWriter) SendBinary(data []byte) error {
 	return nil
 }
 
+// ShouldSend returns true if the severity passes this writer's filter.
+// It mirrors SyslogClient.ShouldSend (#5314) so the sentinels cannot drift:
+//   - MinSeverity == 0 (no filter / any / unset) → send everything.
+//   - MinSeverity == SeverityNone (-2, Junos none) → send nothing.
+//   - MinSeverity == SeverityEmergency (-1, Junos emergency) → send only
+//     emergency (SyslogEmergency==0).
+//   - otherwise a raw RFC level alert(1)..debug(7); send iff severity <= MinSeverity.
+//
+// The old `MinSeverity != 0 && severity > MinSeverity` arithmetic dropped
+// every emergency under an emergency-only writer (0 > -1) (#14732).
+func (lw *LocalLogWriter) ShouldSend(severity int) bool {
+	switch lw.MinSeverity {
+	case 0:
+		return true
+	case SeverityNone:
+		return false
+	case SeverityEmergency:
+		return severity <= SyslogEmergency
+	default:
+		return severity <= lw.MinSeverity
+	}
+}
+
 // ShouldSendEvent returns true if both severity and category filters pass.
 func (lw *LocalLogWriter) ShouldSendEvent(severity int, categoryBit uint8) bool {
-	if lw.MinSeverity != 0 && severity > lw.MinSeverity {
+	if !lw.ShouldSend(severity) {
 		return false
 	}
 	return lw.Categories == 0 || lw.Categories&categoryBit != 0
