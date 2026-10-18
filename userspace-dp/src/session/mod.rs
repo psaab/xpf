@@ -3399,6 +3399,20 @@ impl SessionTable {
     /// pure ACK) keep the #10885 gate. TIME_WAIT (both FINs) and RST
     /// entries keep the fixed fuse even on payload. Callers that cannot
     /// derive a payload length pass 0 and retain the pre-#14935 gate.
+    ///
+    /// #14939: this keepalive is also a handshake-completion path. Once
+    /// an ACK-only (PSH+ACK data included — `is_ack_only` ignores
+    /// PSH/URG) segment seeds the flow cache, the completing segment and
+    /// every later segment are served here and never reach the
+    /// `lookup` promotion arm, so `handshake_pending` would never clear
+    /// and both halves would reap on the 20 s opening window mid-flow.
+    /// Mirror the lookup arm's completion predicate exactly (forward
+    /// non-SYN ACK for SYN-first, reverse non-SYN ACK for SYN-ACK-first,
+    /// never on a closing entry — #14630) and propagate via
+    /// `propagate_tcp_state_to_companion`, so completion lands on
+    /// whichever hit path consumes the segment. Steady state costs one
+    /// extra bool check: the arm is gated on `handshake_pending`, which
+    /// is false for every established flow.
     #[inline]
     pub fn touch_if_stale_with_payload(
         &mut self,
@@ -3407,12 +3421,27 @@ impl SessionTable {
         tcp_flags: u8,
         payload_len: u32,
     ) -> bool {
+        let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
         let canonical_refresh_key = match self.record_by_key(key) {
             Some(record) => {
                 let entry = &record.entry;
                 let age = now_ns.saturating_sub(entry.last_seen_ns);
                 if age > entry.expires_after_ns {
                     return false;
+                }
+                // #14939: handshake completion is not a keepalive
+                // refresh — it must apply even inside the throttle
+                // window, or the completing segment is consumed without
+                // promoting and the pair stays on the opening window.
+                if entry.handshake_pending
+                    && !entry.closing
+                    && matches!(key.protocol, PROTO_TCP)
+                    && crate::tcp_flags::has_ack(tcp_flags)
+                    && !crate::tcp_flags::has_syn(tcp_flags)
+                    && !is_closing(tcp_flags)
+                    && (entry.syn_ack_first == entry.metadata.is_reverse)
+                {
+                    completing = Some((record.key.clone(), entry.decision.nat));
                 }
                 let refresh_after = entry.expires_after_ns.max(SESSION_KEEPALIVE_DIVISOR)
                     / SESSION_KEEPALIVE_DIVISOR;
@@ -3427,7 +3456,40 @@ impl SessionTable {
             }
             None => return false,
         };
-        if let Some(canonical_key) = canonical_refresh_key {
+        if let Some((matched_key, nat)) = completing {
+            let timeouts = self.timeouts;
+            let opening_override_ns = self
+                .entry_by_key(&matched_key)
+                .map(|entry| entry.metadata.ingress_zone)
+                .and_then(|zone| self.opening_override_for(zone));
+            if let Some(entry) = self.entry_by_key_mut(&matched_key) {
+                entry.established = true;
+                entry.handshake_pending = false;
+                entry.syn_ack_first = false;
+                entry.last_seen_ns = now_ns;
+                entry.expires_after_ns = session_timeout_ns(
+                    matched_key.protocol,
+                    tcp_flags,
+                    true,
+                    &timeouts,
+                    entry.metadata.inactivity_timeout_ns,
+                    opening_override_ns,
+                );
+            }
+            self.propagate_tcp_state_to_companion(
+                &matched_key,
+                now_ns,
+                TcpStatePropagation {
+                    nat,
+                    close: false,
+                    reset: false,
+                    fin: false,
+                    established: false,
+                    handshake_completed: true,
+                },
+            );
+            self.push_to_wheel(&matched_key, now_ns);
+        } else if let Some(canonical_key) = canonical_refresh_key {
             self.touch(&canonical_key, now_ns);
         }
         true
@@ -5382,3 +5444,10 @@ mod pptp_ha_sync_13965_tests;
 #[cfg(test)]
 #[path = "rst_ack_handshake_14630_tests.rs"]
 mod rst_ack_handshake_14630_tests;
+
+// #14939: a handshake-completing segment consumed by the flow-cache
+// keepalive (or a synced pending replica's hit path) must complete the
+// handshake on that path, not merely re-stamp the opening window.
+#[cfg(test)]
+#[path = "handshake_cache_hit_14939_tests.rs"]
+mod handshake_cache_hit_14939_tests;
