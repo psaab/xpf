@@ -381,6 +381,24 @@ impl AuthorityState {
         if permit_epoch < self.permit_epoch {
             return false;
         }
+        // #14651: at the current permit epoch a snapshot must not roll a
+        // queue epoch backward. Queue epochs are minted monotonically per
+        // queue by the daemon allocator, so a lower value can only be a
+        // stale/reordered snapshot; rejecting it (instead of silently
+        // re-admitting the superseded queue epoch) keeps the fence closed.
+        // A queue absent from the snapshot is a withdrawal, not a
+        // regression, and a higher permit epoch starts a fresh queue set.
+        if permit_epoch == self.permit_epoch
+            && queue_epochs.iter().any(|&(queue, epoch)| {
+                epoch != 0
+                    && self
+                        .queue_epochs
+                        .get(&queue)
+                        .is_some_and(|&current| epoch < current)
+            })
+        {
+            return false;
+        }
         if permit_epoch > self.permit_epoch {
             self.permit_epoch = permit_epoch;
             self.open = permit_epoch > self.closed_epoch;
@@ -417,6 +435,15 @@ impl AuthorityState {
             self.tombstones.clear();
             self.open = false;
         }
+        // #14651: within one run the generation is monotonic. A regressed
+        // generation is a stale/replayed announce; rejecting it before any
+        // mutation keeps it from re-opening a fenced epoch, reviving the
+        // epoch-zero close, or rolling queue epochs backward. An equal
+        // generation is an idempotent re-announce of the same timeline
+        // point and stays accepted.
+        if generation < self.generation {
+            return false;
+        }
         if permit_epoch == 0 {
             self.run_id = run_id.to_string();
             self.generation = generation;
@@ -428,6 +455,19 @@ impl AuthorityState {
         if permit_epoch < self.permit_epoch {
             return false;
         }
+        // #14651: same fence as `publish` — at the current permit epoch a
+        // queue epoch must not move backward (see `publish`).
+        if permit_epoch == self.permit_epoch
+            && queue_epochs.iter().any(|&(queue, epoch)| {
+                epoch != 0
+                    && self
+                        .queue_epochs
+                        .get(&queue)
+                        .is_some_and(|&current| epoch < current)
+            })
+        {
+            return false;
+        }
         // Same-epoch generation advance is a legitimate queue rotation: the
         // daemon mints a new handles generation under an unchanged permit
         // epoch, so accept and adopt the announced generation (#10478).
@@ -435,6 +475,13 @@ impl AuthorityState {
         self.generation = generation;
         if permit_epoch > self.permit_epoch {
             self.permit_epoch = permit_epoch;
+        }
+        // #14651: an announce-close fences this permit epoch monotonically,
+        // exactly like `close_permit` and the epoch-zero paths: no later
+        // announce (any generation) may re-open it; only a strictly higher
+        // permit epoch opens again.
+        if !permit_open {
+            self.closed_epoch = self.closed_epoch.max(permit_epoch);
         }
         self.open = permit_open && permit_epoch > self.closed_epoch;
         self.queue_epochs = queue_epochs
