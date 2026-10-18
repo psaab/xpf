@@ -899,6 +899,8 @@ fn poll_loop_wg_outer_input_filter_discard_counts_and_drops_pre_decap_12041() {
         .terms[0]
         .counter
         .clone();
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(std::sync::atomic::Ordering::Relaxed),
         0,
@@ -919,6 +921,8 @@ fn poll_loop_wg_outer_input_filter_discard_counts_and_drops_pre_decap_12041() {
         true,
     );
 
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(std::sync::atomic::Ordering::Relaxed),
         1,
@@ -934,6 +938,8 @@ fn poll_loop_wg_outer_input_filter_discard_counts_and_drops_pre_decap_12041() {
         tunnel_sessions, 0,
         "#12041: a filter-discarded WG outer must install no inner session"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #12041 permit guard: accepting a WG outer at the underlay filter must still
@@ -965,6 +971,8 @@ fn poll_loop_wg_outer_input_filter_permit_still_decaps_12041() {
         true,
     );
 
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(std::sync::atomic::Ordering::Relaxed),
         1,
@@ -980,6 +988,8 @@ fn poll_loop_wg_outer_input_filter_permit_still_decaps_12041() {
         tunnel_sessions > 0,
         "#12041: a filter-permitted WG outer must still decap and install its inner flow"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #12289 Finding 1: RFC 6040 rejects an outer-CE over Not-ECT inner after the
@@ -1020,6 +1030,8 @@ fn poll_loop_wg_outer_ce_over_not_ect_counts_underlay_once_12289() {
         .terms[0]
         .counter
         .clone();
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(std::sync::atomic::Ordering::Relaxed),
         0,
@@ -1059,6 +1071,8 @@ fn poll_loop_wg_outer_ce_over_not_ect_counts_underlay_once_12289() {
                 .expect("filter-log event payload")
         })
         .collect::<Vec<_>>();
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(std::sync::atomic::Ordering::Relaxed),
         1,
@@ -1118,6 +1132,8 @@ fn poll_loop_wg_outer_ce_over_not_ect_counts_underlay_once_12289() {
         batch.validated_packets, 1,
         "fallback pin: the descriptor must still validate exactly once"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// A correctly configured listener reached through another zone is declined

@@ -1511,6 +1511,8 @@ fn accepting_counted_mirror_filter_forwarding() -> ForwardingState {
 }
 
 fn accepting_analyzer_counter_packets(forwarding: &ForwardingState) -> u64 {
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     forwarding
         .filter_state
         .filters
@@ -1566,6 +1568,8 @@ fn mirror_output_filter_accept_counter_counts_once_13656() {
         ),
         MirrorCloneResult::Enqueued
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(accepting_analyzer_counter_packets(&forwarding), 1);
     let mut queued = VecDeque::new();
     unsafe { target_live.take_pending_tx_into(&mut queued) };
@@ -1597,9 +1601,12 @@ fn mirror_output_filter_accept_counter_counts_once_13656() {
         ),
         MirrorCloneResult::Enqueued
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         accepting_analyzer_counter_packets(&forwarding),
         2,
         "same-worker clone must add exactly one filter count"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }

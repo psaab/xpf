@@ -2621,6 +2621,8 @@ fn nat64_frag_assoc_hit_counts_route_lookup_affecting_input_filter_5798() {
         .expect("the count term")
         .counter
         .clone();
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(counter.packets.load(Ordering::Relaxed), 0);
 
     let ha_state = txn_ha_state();
@@ -2646,6 +2648,8 @@ fn nat64_frag_assoc_hit_counts_route_lookup_affecting_input_filter_5798() {
         true,
     );
     assert_eq!(dbg1.tx, 1, "the first fragment must translate + forward");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(Ordering::Relaxed),
         1,
@@ -2684,6 +2688,8 @@ fn nat64_frag_assoc_hit_counts_route_lookup_affecting_input_filter_5798() {
         b2.nat64_translations, 1,
         "the inherited fragment is NAT64-translated"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(Ordering::Relaxed),
         2,
@@ -2693,6 +2699,7 @@ fn nat64_frag_assoc_hit_counts_route_lookup_affecting_input_filter_5798() {
          not 2 — `Always` counts here AND the routing walk counts again, double-counting the \
          second fragment only (the first takes the miss arm, where `true` was already right)"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 // ---------------------------------------------------------------------------
@@ -2791,6 +2798,8 @@ fn nat64_frag_assoc_hit_applies_matching_pbr_discard_6927() {
         .expect("the PBR drop term")
         .counter
         .clone();
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(counter.packets.load(Ordering::Relaxed), 0);
 
     let ha_state = txn_ha_state();
@@ -2846,12 +2855,15 @@ fn nat64_frag_assoc_hit_applies_matching_pbr_discard_6927() {
         b2.nat64_translations, 0,
         "#6835: a dropped fragment must not be counted as a NAT64 translation"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(Ordering::Relaxed),
         1,
         "#6835: the PBR term's `then count` must record the fragment it dropped — without it an \
          operator cannot even see that the guard fired"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #6835 B2 FAIL-ON-REVERT: an association hit must re-check owner-RG activity.

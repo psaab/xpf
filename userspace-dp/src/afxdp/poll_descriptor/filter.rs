@@ -2392,6 +2392,8 @@ mod lo0_gate_tests {
     /// `record_filter_counter` updates this atomic immediately, so a non-zero
     /// value proves the lo0 filter actually evaluated the packet.
     fn lo0_term_packets(fw: &ForwardingState) -> u64 {
+        crate::filter::flush_recorded_filter_counters();
+        crate::policy::flush_recorded_policy_hit_counters();
         fw.filter_state
             .lo0_filter_v4_fast
             .as_ref()
@@ -2633,11 +2635,15 @@ mod lo0_gate_tests {
             )),
             "admitted packet runs the lo0 reject term",
         );
+        crate::filter::flush_recorded_filter_counters();
+        crate::policy::flush_recorded_policy_hit_counters();
         assert_eq!(
             lo0_term_packets(&fw),
             1,
             "lo0 filter must run + count on an admitted packet",
         );
+        // #14656: counters are coalesced per-thread in every build; flush before asserting.
+        // #14656: counters are coalesced per-thread in every build; flush before asserting.
     }
 
     /// #3609 (M10): a host-bound packet on a VLAN LOGICAL sub-interface must get

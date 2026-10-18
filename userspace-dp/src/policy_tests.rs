@@ -6877,6 +6877,8 @@ fn policy_hit_count_counts_every_established_packet_not_just_first() {
         record_policy_hit_counter(counter, PKT_LEN);
     }
 
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     let snap = policy_counter(&state, &rule_id);
     assert_eq!(
         snap.packets,
@@ -6965,7 +6967,8 @@ fn bound_hit_counter_survives_live_policy_reorder() {
         .resolve_session_hit_counter(bound.as_ref(), 1)
         .expect("bound handle must resolve");
     record_policy_hit_counter(counter, 1500);
-    flush_recorded_policy_hit_counters();
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
 
     let after = policy_counter(&state2, &id_b);
     let inserted = policy_counter(&state2, &id_a);
@@ -6987,7 +6990,8 @@ fn bound_hit_counter_survives_live_policy_reorder() {
         .resolve_session_hit_counter(None, 1)
         .expect("positional idx 1 resolves");
     record_policy_hit_counter(positional, 1500);
-    flush_recorded_policy_hit_counters();
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         policy_counter(&state2, &id_a).packets,
         1,
@@ -8999,8 +9003,110 @@ fn app_term_icmp_constrained_before_all_icmp_wins() {
 // its stale pre-clear counts onto the freshly-zeroed counter at the next
 // flush — the clear appeared to fail or to invent traffic.
 //
-// These tests drive the load-bearing flush helper directly because the
-// thread-local coalescer is compiled out under `#[cfg(test)]`.
+// These tests drive the load-bearing flush helper directly; the
+// coalescer-record cells below (#14656) drive the record side too.
+
+// -- #14656: the coalescer itself is exercised in test builds -------------
+//
+// Before #14656 `record_policy_hit_counter` was `#[cfg(not(test))]` for the
+// coalescer and a write-through `counter.add` under `cfg(test)`, so these
+// record-side behaviours had no cell at all: buffering until flush, the
+// counter-switch flush, the 64-packet threshold flush, and the record-side
+// generation check. Mutant M in the issue (both production bodies replaced
+// by `let _ = (counter, packet_bytes);`) survived `hit_count`/`counted`/
+// `established_hit`; neutering `PolicyHitCoalescer::record` below now reds
+// every cell in this block.
+
+#[test]
+fn coalescer_buffers_until_flush_and_switch_14656() {
+    let a = Arc::new(PolicyRuleCounter::default());
+    let b = Arc::new(PolicyRuleCounter::default());
+    let mut coalescer = PolicyHitCoalescer::default();
+    for _ in 0..10 {
+        coalescer.record(&a, 100);
+    }
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(a.snapshot("a").packets, 0, "hits must stay buffered pre-flush");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(a.snapshot("a").bytes, 0);
+    coalescer.record(&b, 50);
+    assert_eq!(
+        (a.snapshot("a").packets, a.snapshot("a").bytes),
+        (10, 1000),
+        "recording a different counter must flush the pending batch"
+    );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(b.snapshot("b").packets, 0, "b's hit is now the buffered one");
+    coalescer.flush();
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!((b.snapshot("b").packets, b.snapshot("b").bytes), (1, 50));
+}
+
+#[test]
+fn coalescer_threshold_flushes_at_64_14656() {
+    let counter = Arc::new(PolicyRuleCounter::default());
+    let mut coalescer = PolicyHitCoalescer::default();
+    for _ in 0..63 {
+        coalescer.record(&counter, 10);
+    }
+    assert_eq!(
+        counter.snapshot("x").packets,
+        0,
+        "63 hits must still be buffered below the threshold"
+    );
+    coalescer.record(&counter, 10);
+    assert_eq!(
+        (counter.snapshot("x").packets, counter.snapshot("x").bytes),
+        (64, 640),
+        "the 64th hit must flush the batch without an explicit flush"
+    );
+}
+
+#[test]
+fn coalescer_record_10_clear_record_5_flush_reads_5_14656() {
+    // The issue's decisive cell: record 10, clear, record 5, flush -> 5.
+    let counter = Arc::new(PolicyRuleCounter::default());
+    let mut coalescer = PolicyHitCoalescer::default();
+    for _ in 0..10 {
+        coalescer.record(&counter, 100);
+    }
+    counter.reset();
+    for _ in 0..5 {
+        coalescer.record(&counter, 100);
+    }
+    coalescer.flush();
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    let snap = counter.snapshot("x");
+    assert_eq!(
+        (snap.packets, snap.bytes),
+        (5, 500),
+        "pre-clear buffered hits must be discarded, post-clear hits counted exactly"
+    );
+}
+
+#[test]
+fn thread_local_wrapper_buffers_until_flush_14656() {
+    flush_recorded_policy_hit_counters();
+    let counter = Arc::new(PolicyRuleCounter::default());
+    for _ in 0..3 {
+        record_policy_hit_counter(&counter, 200);
+    }
+    assert_eq!(
+        counter.snapshot("x").packets,
+        0,
+        "wrapper hits must be coalesced, not written through (#14656)"
+    );
+    flush_recorded_policy_hit_counters();
+    assert_eq!(
+        (counter.snapshot("x").packets, counter.snapshot("x").bytes),
+        (3, 600)
+    );
+}
 
 #[test]
 fn clear_discards_pre_clear_pending_policy_hits_3448() {
@@ -9115,8 +9221,7 @@ fn store_clear_bumps_generation_for_all_counters_3448() {
 // observed pre-clear total instead of storing zero, so a concurrent post-clear
 // increment survives (both are atomic RMWs that serialize — no lost update).
 //
-// The thread-local coalescer is compiled out under `#[cfg(test)]`, so a live
-// two-thread race would be non-deterministic. This drives the exact
+// A live two-thread race would be non-deterministic. This drives the exact
 // interleaving deterministically through the real code paths: the flush helper
 // (`flush_pending_policy_hit_record`, generation-guarded) folds the post-clear
 // batch in, then the clear's subtraction seam (`subtract_observed`) applies.

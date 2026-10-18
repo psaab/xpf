@@ -3006,8 +3006,13 @@ fn resolve_cos_tx_selection_counts_counter_only_output_filter_hits() {
         .get("inet:wan-count")
         .expect("inet output filter");
     let term = filter.terms.first().expect("first term");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(term.counter.packets.load(Ordering::Relaxed), 1);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(term.counter.bytes.load(Ordering::Relaxed), 1514);
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -4094,16 +4099,22 @@ fn resolve_cos_tx_selection_flowless_counts_counter_only_output_filter() {
         .get("inet:wan-count-l3")
         .expect("inet output filter");
     let term = filter.terms.first().expect("first term");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         term.counter.packets.load(Ordering::Relaxed),
         1,
         "#6360: the flowless runtime arm must fire the output filter's `then count`",
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         term.counter.bytes.load(Ordering::Relaxed),
         1514,
         "#6360: the counted flowless packet's pkt_len must be recorded as bytes",
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -6650,6 +6661,8 @@ fn count4085_counts_once_per_miss(is_v6: bool) {
     // Leg 1: action-eval counts once. Assert it landed on the RIGHT counter so a
     // wrong-ifindex zero here can't let a pre-fix leg-2 double masquerade as 1.
     count4085_action_eval(&forwarding, is_v6, &key, meta.pkt_len as u64);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(std::sync::atomic::Ordering::Relaxed),
         1,
@@ -6682,11 +6695,15 @@ fn count4085_counts_once_per_miss(is_v6: bool) {
 #[test]
 fn input_filter_count_plus_fc_counts_once_per_miss_v4() {
     count4085_counts_once_per_miss(false);
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
 fn input_filter_count_plus_fc_counts_once_per_miss_v6() {
     count4085_counts_once_per_miss(true);
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -6700,6 +6717,8 @@ fn input_filter_count_plus_fc_counts_once_none_now_ns_branch_v4() {
     let meta = count4085_meta(false);
 
     count4085_action_eval(&forwarding, false, &key, meta.pkt_len as u64);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(std::sync::atomic::Ordering::Relaxed),
         1
@@ -6713,12 +6732,16 @@ fn input_filter_count_plus_fc_counts_once_none_now_ns_branch_v4() {
         TermMatchExtra::default(),
     );
     assert_eq!(sel.queue_id, Some(1));
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(std::sync::atomic::Ordering::Relaxed),
         1,
         "#4085: the None-now_ns TX-selection ingress leg must NOT re-count \
          (RED == 2 on revert)"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -6732,6 +6755,8 @@ fn input_filter_count_plus_policer_counts_once_and_still_meters_v4() {
     let meta = count4085_meta(false);
 
     count4085_action_eval(&forwarding, false, &key, meta.pkt_len as u64);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(std::sync::atomic::Ordering::Relaxed),
         1
@@ -6750,12 +6775,16 @@ fn input_filter_count_plus_policer_counts_once_and_still_meters_v4() {
         "#4085: the ingress three-color policer must still meter (RED -> drop) \
          even though the count is suppressed"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(std::sync::atomic::Ordering::Relaxed),
         1,
         "#4085: count+policer input term must count once, not twice \
          (RED == 2 on revert)"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -6776,12 +6805,16 @@ fn plain_count_only_input_filter_unchanged_v4() {
         TermMatchExtra::default(),
         1_000_000_000,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(std::sync::atomic::Ordering::Relaxed),
         1,
         "a plain count-only input filter is counted once and untouched by \
          TX-selection"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -6806,11 +6839,15 @@ fn non_cacheable_flow_counts_once_per_packet_v4() {
             1_000_000_000,
         );
     }
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(std::sync::atomic::Ordering::Relaxed),
         3,
         "#4085: a non-cacheable flow counts once per packet (RED == 6 on revert)"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -6834,6 +6871,8 @@ fn cache_hit_replays_input_count_exactly_once_v4() {
         TermMatchExtra::default(),
         1_000_000_000,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(std::sync::atomic::Ordering::Relaxed),
         1,
@@ -6864,12 +6903,16 @@ fn cache_hit_replays_input_count_exactly_once_v4() {
             .for_each(|c| crate::filter::record_filter_counter(c, meta.pkt_len as u64));
         input_counters.for_each(|c| crate::filter::record_filter_counter(c, meta.pkt_len as u64));
     }
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.packets.load(std::sync::atomic::Ordering::Relaxed),
         3,
         "#4085: seed (1) + 2 cache hits (1 each) == 3 — hits must count once, \
          not zero or two"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 // #hb166 T-3 middle case: an INPUT filter assigns a forwarding-class and a

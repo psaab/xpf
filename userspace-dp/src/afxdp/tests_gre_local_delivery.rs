@@ -2577,6 +2577,8 @@ fn gre_outer_input_filter_discard_counts_and_drops_pre_decap_12041() {
         .terms[0]
         .counter
         .clone();
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         outer_counter.packets.load(Ordering::Relaxed),
         0,
@@ -2603,6 +2605,8 @@ fn gre_outer_input_filter_discard_counts_and_drops_pre_decap_12041() {
         meta,
         &local_tunnel_deliveries,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         outer_counter.packets.load(Ordering::Relaxed),
         1,
@@ -2618,6 +2622,8 @@ fn gre_outer_input_filter_discard_counts_and_drops_pre_decap_12041() {
         rx.try_recv().is_err(),
         "#12041: a filter-discarded outer must not deliver its inner packet"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #12041 permit guard: an underlay `filter input` that ACCEPTS the GRE outer
@@ -2739,6 +2745,8 @@ fn gre_outer_ce_over_not_ect_counts_underlay_once_12289() {
         .terms[0]
         .counter
         .clone();
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         outer_counter.packets.load(Ordering::Relaxed),
         0,
@@ -2797,6 +2805,8 @@ fn gre_outer_ce_over_not_ect_counts_underlay_once_12289() {
         &event_handle,
     );
     let event_frames = event_rx.try_iter().collect::<Vec<_>>();
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         outer_counter.packets.load(Ordering::Relaxed),
         1,
@@ -2864,6 +2874,8 @@ fn gre_outer_ce_over_not_ect_counts_underlay_once_12289() {
         batch.validated_packets, 1,
         "fallback pin: the descriptor must still validate exactly once"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #13970 (H19-04): slow-path policy and NAT hit counters must charge

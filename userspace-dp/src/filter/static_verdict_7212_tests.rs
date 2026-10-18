@@ -207,6 +207,8 @@ fn static_verdict_charges_no_counter_on_any_exit_7212() {
     for (name, terms) in walk_shapes() {
         let always_state = shape_state(name, terms.clone());
         let never_state = shape_state(name, terms);
+        crate::filter::flush_recorded_filter_counters();
+        crate::policy::flush_recorded_policy_hit_counters();
         let before = counters(&never_state, "inet:edge-in");
 
         let _ = evaluate_interface_filter_non_routing_counted(
@@ -235,7 +237,11 @@ fn static_verdict_charges_no_counter_on_any_exit_7212() {
             TermMatchExtra::default(),
         );
 
+        crate::filter::flush_recorded_filter_counters();
+        crate::policy::flush_recorded_policy_hit_counters();
         let always_after = counters(&always_state, "inet:edge-in");
+        crate::filter::flush_recorded_filter_counters();
+        crate::policy::flush_recorded_policy_hit_counters();
         let never_after = counters(&never_state, "inet:edge-in");
         assert_eq!(
             never_after, before,
@@ -255,6 +261,7 @@ fn static_verdict_charges_no_counter_on_any_exit_7212() {
         "the counted walk must actually move counters on the shapes whose \
          Never rows are supposed to prove suppression"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// The specific mutation the `counting()` refactor guards. The replay arm used

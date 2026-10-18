@@ -1720,6 +1720,8 @@ fn a_pbr_term_that_discards_revokes_the_session_8114() {
         "the verdict came from a routing-instance term; the session-MISS path \
          logs that term as Pbr and the two must not label it differently"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         filter.terms[0].counter.packets.load(Ordering::Relaxed),
         1,
@@ -1727,6 +1729,8 @@ fn a_pbr_term_that_discards_revokes_the_session_8114() {
          counted replay runs only on the DENY arm. Two means the verdict walk \
          counted too; zero means the replay did not run"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// THE PERMIT CONTROL, and the scope statement. A PLAIN `then { routing-instance
@@ -3762,6 +3766,8 @@ fn per_packet_shape_preserves_pbr_discard_on_hit_13648() {
             crate::afxdp::event_emit::FilterLogSource::Pbr
         );
         assert!(already_counted, "PBR deny replay must be counted");
+        crate::filter::flush_recorded_filter_counters();
+        crate::policy::flush_recorded_policy_hit_counters();
         assert_eq!(
             filter.terms[2]
                 .counter
@@ -3800,6 +3806,8 @@ fn per_packet_shape_preserves_pbr_discard_on_hit_13648() {
             "the PBR deny counter bytes must be charged exactly once"
         );
     }
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]

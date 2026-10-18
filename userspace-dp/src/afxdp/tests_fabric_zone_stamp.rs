@@ -3333,6 +3333,8 @@ fn pbr_discard_of_quarantined_flow_counts_ambiguous_drop_11061() {
     let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     let term_hits = forwarding
         .filter_state
         .filters
@@ -3348,6 +3350,8 @@ fn pbr_discard_of_quarantined_flow_counts_ambiguous_drop_11061() {
     );
     assert_eq!(sessions.len(), 0);
     assert!(binding.scratch.scratch_forwards.is_empty());
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #11061 R3 control: the SAME PBR discard on a domain-0 (non-quarantined)
@@ -3388,6 +3392,8 @@ fn pbr_discard_of_domain_zero_flow_does_not_count_ambiguous_drop_11061() {
     let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     let term_hits = forwarding
         .filter_state
         .filters
@@ -3403,6 +3409,8 @@ fn pbr_discard_of_domain_zero_flow_does_not_count_ambiguous_drop_11061() {
     );
     assert_eq!(sessions.len(), 0);
     assert!(binding.scratch.scratch_forwards.is_empty());
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #11061 R3: the flowless ICMP-error PBR arm counts quarantine drops too.
@@ -3552,6 +3560,8 @@ fn flowless_icmp_error_pbr_discard_on_quarantine_counts_11061() {
     let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     let term_hits = forwarding
         .filter_state
         .filters
@@ -3566,6 +3576,8 @@ fn flowless_icmp_error_pbr_discard_on_quarantine_counts_11061() {
         "a flowless PBR discard on a quarantined zone must count (RED on revert: the arm reads the unstamped l3 domain)"
     );
     assert!(binding.scratch.scratch_forwards.is_empty());
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #12051 N1: a preferred V2 stamp produced by the real ingress-identity

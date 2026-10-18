@@ -31,6 +31,92 @@ fn make_filter_state_with_interfaces(
     parse_filter_state(filters, &[], interfaces, "", "").expect("filter state compiles")
 }
 
+// -- #14656: the coalescer itself is exercised in test builds -------------
+//
+// Before #14656 `record_filter_counter` was `#[cfg(not(test))]` for the
+// coalescer and a write-through `counter.record` under `cfg(test)`, so the
+// shipped buffering, counter-switch, and threshold-flush behaviour had no
+// cell at all. Mutant M in the issue (both production bodies replaced by
+// `let _ = (counter, packet_bytes);`) survived `counted`; neutering
+// `FilterCounterCoalescer::record` below now reds every cell in this block.
+
+#[test]
+fn filter_coalescer_buffers_until_flush_and_switch_14656() {
+    let a = Arc::new(FilterTermCounter::default());
+    let b = Arc::new(FilterTermCounter::default());
+    let mut coalescer = FilterCounterCoalescer::default();
+    for _ in 0..10 {
+        coalescer.record(&a, 100);
+    }
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(a.packets.load(Ordering::Relaxed), 0, "hits must stay buffered pre-flush");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(a.bytes.load(Ordering::Relaxed), 0);
+    coalescer.record(&b, 50);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(
+        (a.packets.load(Ordering::Relaxed), a.bytes.load(Ordering::Relaxed)),
+        (10, 1000),
+        "recording a different counter must flush the pending batch"
+    );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(b.packets.load(Ordering::Relaxed), 0, "b's hit is buffered");
+    coalescer.flush();
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(
+        (b.packets.load(Ordering::Relaxed), b.bytes.load(Ordering::Relaxed)),
+        (1, 50)
+    );
+}
+
+#[test]
+fn filter_coalescer_threshold_flushes_at_64_14656() {
+    let counter = Arc::new(FilterTermCounter::default());
+    let mut coalescer = FilterCounterCoalescer::default();
+    for _ in 0..63 {
+        coalescer.record(&counter, 10);
+    }
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(
+        counter.packets.load(Ordering::Relaxed),
+        0,
+        "63 hits must still be buffered below the threshold"
+    );
+    coalescer.record(&counter, 10);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(
+        (counter.packets.load(Ordering::Relaxed), counter.bytes.load(Ordering::Relaxed)),
+        (64, 640),
+        "the 64th hit must flush the batch without an explicit flush"
+    );
+}
+
+#[test]
+fn filter_thread_local_wrapper_buffers_until_flush_14656() {
+    flush_recorded_filter_counters();
+    let counter = Arc::new(FilterTermCounter::default());
+    for _ in 0..3 {
+        record_filter_counter(&counter, 200);
+    }
+    assert_eq!(
+        counter.packets.load(Ordering::Relaxed),
+        0,
+        "wrapper hits must be coalesced, not written through (#14656)"
+    );
+    flush_recorded_filter_counters();
+    assert_eq!(
+        (counter.packets.load(Ordering::Relaxed), counter.bytes.load(Ordering::Relaxed)),
+        (3, 600)
+    );
+}
+
 #[test]
 fn basic_accept_discard() {
     let state = make_filter_state(
@@ -353,8 +439,13 @@ fn input_filter_counters_cached_includes_pbr_term_14121() {
     // Replay once and assert both handles charged.
     counters.for_each(|c| record_filter_counter(c, 100));
     let filter = state.iface_filter_v4_fast.get(&7).expect("input filter");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(filter.terms[0].counter.packets.load(Ordering::Relaxed), 1);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(filter.terms[1].counter.packets.load(Ordering::Relaxed), 1);
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 // #14659 (D3-01): a PBR (`then routing-instance`) input term's three-color
 // policer, forwarding-class and dscp-rewrite must be enforced by the runtime
@@ -3950,8 +4041,13 @@ fn interface_filter_routing_instance_counted_returns_matching_override() {
     );
     assert_eq!(routing_instance, Some("sfmix"));
     let filter = state.iface_filter_v6_fast.get(&11).expect("input filter");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(filter.terms[0].counter.packets.load(Ordering::Relaxed), 1);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(filter.terms[0].counter.bytes.load(Ordering::Relaxed), 1500);
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #4499 H6: an IPv6 PBR term `from destination-port 80 then routing-instance
@@ -4181,8 +4277,13 @@ fn interface_output_filter_counted_records_term_hits() {
         .get("inet6:bandwidth-output")
         .expect("inet6 output filter");
     let term = filter.terms.first().expect("first term");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(term.counter.packets.load(Ordering::Relaxed), 1);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(term.counter.bytes.load(Ordering::Relaxed), 1514);
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -5118,7 +5219,11 @@ fn evaluate_filter_counted_increments_term_counter() {
     assert_eq!(result.action, FilterAction::Accept);
     let filter = state.filters.get("inet:counted").expect("counted filter");
     let term = filter.terms.first().expect("first term");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(term.counter.packets.load(Ordering::Relaxed), 1);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(term.counter.bytes.load(Ordering::Relaxed), 1400);
 
     // A non-matching packet (wrong port) must not bump the counter.
@@ -5135,8 +5240,13 @@ fn evaluate_filter_counted_increments_term_counter() {
         1400,
     );
     assert_eq!(miss.action, FilterAction::Accept);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(term.counter.packets.load(Ordering::Relaxed), 1);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(term.counter.bytes.load(Ordering::Relaxed), 1400);
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -5171,8 +5281,13 @@ fn evaluate_filter_counted_increments_term_counter_ipv6() {
     assert_eq!(result.action, FilterAction::Accept);
     let filter = state.filters.get("inet6:counted6").expect("counted filter");
     let term = filter.terms.first().expect("first term");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(term.counter.packets.load(Ordering::Relaxed), 1);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(term.counter.bytes.load(Ordering::Relaxed), 1500);
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 // --- Gap 6: evaluate_interface_filter_non_routing_counted PBR-reject behavior ---
@@ -5238,6 +5353,8 @@ fn interface_filter_non_routing_counted_defers_pbr_term() {
     // evaluator resets it to None (it defers PBR to the routing-instance eval).
     assert!(pbr.routing_instance.is_none());
     let filter = state.iface_filter_v4_fast.get(&12).expect("input filter");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(filter.terms[0].counter.packets.load(Ordering::Relaxed), 0);
 
     // A packet matching the plain (non-routing) term gets its action and a
@@ -5258,8 +5375,13 @@ fn interface_filter_non_routing_counted_defers_pbr_term() {
         None,
     );
     assert_eq!(plain.action, FilterAction::Discard);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(filter.terms[1].counter.packets.load(Ordering::Relaxed), 1);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(filter.terms[1].counter.bytes.load(Ordering::Relaxed), 500);
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 // --- Gap 7: FilterState-keyed tx_selection dispatch wrappers ---
@@ -6131,7 +6253,11 @@ fn per_packet_match_action_applies_with_count() {
     );
     assert_eq!(r.action, FilterAction::Discard);
     let filter = state.filters.get("inet:c").expect("filter");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(filter.terms[0].counter.packets.load(Ordering::Relaxed), 1);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(filter.terms[0].counter.bytes.load(Ordering::Relaxed), 1500);
     // A non-matching ACK must NOT bump the counter.
     let _ = evaluate_filter_counted(
@@ -6146,7 +6272,10 @@ fn per_packet_match_action_applies_with_count() {
         extra_tcp(0x10),
         1500,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(filter.terms[0].counter.packets.load(Ordering::Relaxed), 1);
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -9129,8 +9258,13 @@ fn fallthrough_explicit_next_term_reaches_later_discard() {
     assert_eq!(r.action, FilterAction::Discard);
     // Modifier (count) on the fall-through term still applied.
     let filter = state.filters.get("inet:ft").expect("filter");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(filter.terms[0].counter.packets.load(Ordering::Relaxed), 1);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(filter.terms[0].counter.bytes.load(Ordering::Relaxed), 1400);
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -9187,9 +9321,14 @@ fn modifier_only_term_implicit_accept_14632() {
         FilterAction::Accept,
         "modifier-only `then count bgp;` must implicitly accept tcp/179, not fall through to discard (#14632)"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     // The count modifier still fired before terminating.
     assert_eq!(filter.terms[0].counter.packets.load(Ordering::Relaxed), 1);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(filter.terms[0].counter.bytes.load(Ordering::Relaxed), 1400);
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -9277,7 +9416,10 @@ fn fallthrough_no_later_match_uses_default_accept_with_modifiers() {
     );
     assert_eq!(r.action, FilterAction::Accept);
     let filter = state.filters.get("inet:ftd").expect("filter");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(filter.terms[0].counter.packets.load(Ordering::Relaxed), 1);
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -9337,7 +9479,10 @@ fn fallthrough_tx_selection_applies_forwarding_class_then_discards() {
     assert_eq!(result.action, FilterAction::Discard);
     assert_eq!(result.forwarding_class, Some("expedited"));
     let filter = state.filters.get("inet:tx-ft").expect("filter");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(filter.terms[0].counter.packets.load(Ordering::Relaxed), 1);
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 // ---------------------------------------------------------------------------
@@ -9617,7 +9762,6 @@ fn cached_tx_selection_records_all_fallthrough_count_terms() {
     cached.counters.for_each(|counter| {
         crate::filter::record_filter_counter(counter, 1500);
     });
-    crate::filter::flush_recorded_filter_counters();
 
     // BOTH fall-through count terms must have incremented on the cached replay.
     // Revert to last-only and terms[0] stays 0 -> this assert fails RED.
@@ -10118,16 +10262,22 @@ fn pbr_miss_path_counts_fallthrough_term_exactly_once() {
     // Counted EXACTLY ONCE (the routing evaluator), not twice. Pre-#2620 (the
     // precheck also counts) this reads 2.
     let filter = state.iface_filter_v4_fast.get(&14).expect("input filter");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         filter.terms[0].counter.packets.load(Ordering::Relaxed),
         1,
         "pre-PBR fall-through count must increment exactly once on the Accept miss path (#2620)"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         filter.terms[0].counter.bytes.load(Ordering::Relaxed),
         1400,
         "byte counter must reflect a single packet"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 // #2620 finding 1: a terminal `discard`/`reject` term BEFORE the
@@ -10210,16 +10360,22 @@ fn pbr_miss_path_terminal_discard_before_routing_instance_counts_once() {
     assert_eq!(precheck.action, FilterAction::Discard);
 
     let filter = state.iface_filter_v4_fast.get(&15).expect("input filter");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         filter.terms[0].counter.packets.load(Ordering::Relaxed),
         1,
         "pre-discard fall-through count must increment once on the terminal-discard exit (#2620 finding 1)"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         filter.terms[0].counter.bytes.load(Ordering::Relaxed),
         1400,
         "byte counter must reflect a single packet"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 // #2620: a plain non-PBR filter (no routing-instance term anywhere) — the
@@ -10284,11 +10440,15 @@ fn non_pbr_miss_path_counts_fallthrough_term_once() {
     assert_eq!(precheck.action, FilterAction::Accept);
 
     let filter = state.iface_filter_v4_fast.get(&16).expect("input filter");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         filter.terms[0].counter.packets.load(Ordering::Relaxed),
         1,
         "plain non-PBR fall-through count must increment once (precheck Always, #2620)"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 // #2620 finding 3: on the session-HIT DSCP/L4 re-eval path the routing
@@ -10360,11 +10520,15 @@ fn pbr_session_hit_path_counts_fallthrough_term_per_packet() {
     }
 
     let filter = state.iface_filter_v4_fast.get(&17).expect("input filter");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         filter.terms[0].counter.packets.load(Ordering::Relaxed),
         2,
         "session-hit re-eval counts the fall-through term per packet (#2620 finding 3)"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 // ===================================================================

@@ -2219,6 +2219,8 @@ fn live_flow_cache_callsite_recounts_the_established_policy_hit_6304() {
         "control: the in-place hairpin rewrite must have SUCCEEDED"
     );
 
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     // --- THE DISCRIMINATOR.
     assert_eq!(
         counter.test_packet_count(),
@@ -2228,12 +2230,16 @@ fn live_flow_cache_callsite_recounts_the_established_policy_hit_6304() {
          it `show security policies hit-count` reports only each flow's first \
          frame"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.test_byte_count(),
         frame.len() as u64,
         "#6304/#3073: ...charged the FULL wire length the shim reported, not a \
          stripped or zero byte count"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #6304 (#3651 per-zone traffic volume). `record_zone_traffic` at
@@ -2436,6 +2442,8 @@ fn live_flow_cache_callsite_replays_every_filter_count_term_6304() {
 
     // --- THE DISCRIMINATORS.
     for (label, counter) in [("first", &tx_first), ("second", &tx_second)] {
+        crate::filter::flush_recorded_filter_counters();
+        crate::policy::flush_recorded_policy_hit_counters();
         assert_eq!(
             (
                 counter.packets.load(Ordering::Relaxed),
@@ -2447,6 +2455,8 @@ fn live_flow_cache_callsite_replays_every_filter_count_term_6304() {
              only the last term is the #2544 fall-through under-count #2573 fixed"
         );
     }
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         (
             input.packets.load(Ordering::Relaxed),
@@ -2457,6 +2467,8 @@ fn live_flow_cache_callsite_replays_every_filter_count_term_6304() {
          The input side regressed independently of the output side once already, \
          which is why #3777 exists as a separate issue"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #6304 (per-batch forward + NAT accounting). Three counters on
@@ -4249,12 +4261,20 @@ fn policy_deny_cache_hit_replays_counts_logs_and_exception_without_session_11073
     assert_eq!(run.counters.policy_denied_packets, 1);
     assert_eq!(run.dbg_policy_deny, 1);
     assert_eq!(run.dbg_disposition_other, 0);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(input_counter.packets.load(Ordering::Relaxed), 1);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.bytes.load(Ordering::Relaxed),
         frame.len() as u64
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(policy_counter.test_packet_count(), 1);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(policy_counter.test_byte_count(), frame.len() as u64);
 
     let events = drained_events(&fixture);
@@ -4297,6 +4317,7 @@ fn policy_deny_cache_hit_replays_counts_logs_and_exception_without_session_11073
             .map(|event| event.resolution.disposition),
         Some(ForwardingDisposition::PolicyDenied)
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]

@@ -604,6 +604,8 @@ fn a_foreign_zone_is_held_to_its_own_host_inbound_services_9519() {
 }
 
 fn rule_hits(fw: &ForwardingState, name: &str) -> u64 {
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     fw.policy
         .rules
         .iter()
@@ -1174,6 +1176,8 @@ fn owner_close_update_carries_revalidated_route_12265() {
 fn a_foreign_packet_is_not_counted_against_the_owners_rule_9519() {
     let fw = forwarding(WAN_ONLY);
     let mut sessions = admitted(&fw);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     let after_admit = rule_hits(&fw, "wan-in");
     assert_ne!(
         after_admit,
@@ -1185,6 +1189,8 @@ fn a_foreign_packet_is_not_counted_against_the_owners_rule_9519() {
         foreign.session_hit, 1,
         "the dmz packet must HIT the wan session"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         rule_hits(&fw, "wan-in"),
         after_admit,
@@ -1194,12 +1200,15 @@ fn a_foreign_packet_is_not_counted_against_the_owners_rule_9519() {
     );
     let owner = drive(&fw, &mut sessions, client_ack(WAN_IFINDEX));
     assert_eq!(owner.tx, 1, "control: the owner's ACK forwards");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         rule_hits(&fw, "wan-in"),
         after_admit + 1,
         "control: the OWNER's established packet IS counted against its admitting \
          rule, or the zero delta above is not measuring the skip"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// The `to-zone junos-host` half of host-bound authority. dmz's services admit
