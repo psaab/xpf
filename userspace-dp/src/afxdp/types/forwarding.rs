@@ -126,8 +126,14 @@ pub(in crate::afxdp) struct ForwardingState {
     /// exclusion branch, from the same per-interface address list.
     pub(in crate::afxdp) configured_iface_v4: FastSet<Ipv4Addr>,
     pub(in crate::afxdp) configured_iface_v6: FastSet<Ipv6Addr>,
-    pub(in crate::afxdp) interface_nat_v4: FastMap<Ipv4Addr, i32>,
-    pub(in crate::afxdp) interface_nat_v6: FastMap<Ipv6Addr, i32>,
+    /// #14662: per-table interface-NAT ifindex: host address -> (canonical
+    /// connected table -> ifindex), mirroring the #3769 `(table, addr)`
+    /// local-delivery attribution. The flat `addr -> ifindex` form was
+    /// last-write-wins when two VRFs configured the same address on
+    /// different interfaces. The nested form also keeps the per-packet
+    /// lookup allocation-free (borrowed `&str` table key).
+    pub(in crate::afxdp) interface_nat_v4: FastMap<Ipv4Addr, FastMap<String, i32>>,
+    pub(in crate::afxdp) interface_nat_v6: FastMap<Ipv6Addr, FastMap<String, i32>>,
     /// #12086: owning routing tables for interface-NAT local-delivery
     /// addresses. Like `local_tables_v*`, these interface addresses are not
     /// wildcarded across routing instances.

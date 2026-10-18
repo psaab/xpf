@@ -1290,7 +1290,11 @@ fn unresolvable_stamp_serves_any_table_local() {
 fn unresolvable_stamp_does_not_serve_interface_nat_local_12086() {
     let mut forwarding = pbr_state();
     let address = Ipv4Addr::new(8, 8, 8, 8);
-    forwarding.interface_nat_v4.insert(address, LAN_IFINDEX);
+    forwarding
+        .interface_nat_v4
+        .entry(address)
+        .or_default()
+        .insert("inet.0".to_string(), LAN_IFINDEX);
     forwarding
         .interface_nat_tables_v4
         .entry(address)

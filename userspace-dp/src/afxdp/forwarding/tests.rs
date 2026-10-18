@@ -5103,6 +5103,271 @@ fn interface_nat_local_delivery_is_table_scoped_no_cross_vrf_leak_12086() {
     );
 }
 
+/// #14662: the same host address in two VRFs, only one an interface-mode
+/// SNAT egress. Pre-fix the flat exclusion diverted BOTH VRFs' rows out of
+/// `local_*` and the flat ifindex map kept only the last row. RED on revert.
+#[test]
+fn same_ip_two_vrfs_one_nat_keeps_per_table_local_state_14662() {
+    let v4 = Ipv4Addr::new(192, 0, 2, 99);
+    let v6: Ipv6Addr = "2001:db8:99::99".parse().expect("v6 fixture");
+    let nat_v4 = Ipv4Addr::new(198, 51, 100, 99);
+    let state = build_forwarding_state(&crate::ConfigSnapshot {
+        zones: vec![
+            crate::ZoneSnapshot {
+                name: "za".to_string(),
+                id: TEST_TRUST_ZONE_ID,
+                ..Default::default()
+            },
+            crate::ZoneSnapshot {
+                name: "zb".to_string(),
+                id: TEST_UNTRUST_ZONE_ID,
+                ..Default::default()
+            },
+            crate::ZoneSnapshot {
+                name: "wan".to_string(),
+                id: TEST_WAN_ZONE_ID,
+                ..Default::default()
+            },
+        ],
+        interfaces: vec![
+            crate::InterfaceSnapshot {
+                name: "ge-0/0/1.0".to_string(),
+                zone: "za".to_string(),
+                egress_zone: "za".to_string(),
+                routing_instance: "tenant-a".to_string(),
+                linux_name: "ge-0-0-1.0".to_string(),
+                ifindex: 21,
+                hardware_addr: "02:00:00:00:00:15".to_string(),
+                addresses: vec![
+                    crate::InterfaceAddressSnapshot {
+                        family: "inet".to_string(),
+                        address: "192.0.2.99/24".to_string(),
+                        scope: 0,
+                    },
+                    crate::InterfaceAddressSnapshot {
+                        family: "inet6".to_string(),
+                        address: "2001:db8:99::99/64".to_string(),
+                        scope: 0,
+                    },
+                ],
+                ..Default::default()
+            },
+            crate::InterfaceSnapshot {
+                name: "ge-0/0/2.0".to_string(),
+                zone: "zb".to_string(),
+                egress_zone: "zb".to_string(),
+                routing_instance: "tenant-b".to_string(),
+                linux_name: "ge-0-0-2.0".to_string(),
+                ifindex: 22,
+                hardware_addr: "02:00:00:00:00:16".to_string(),
+                addresses: vec![
+                    crate::InterfaceAddressSnapshot {
+                        family: "inet".to_string(),
+                        address: "192.0.2.99/24".to_string(),
+                        scope: 0,
+                    },
+                    crate::InterfaceAddressSnapshot {
+                        family: "inet6".to_string(),
+                        address: "2001:db8:99::99/64".to_string(),
+                        scope: 0,
+                    },
+                ],
+                ..Default::default()
+            },
+            crate::InterfaceSnapshot {
+                name: "ge-0/0/3.0".to_string(),
+                zone: "wan".to_string(),
+                egress_zone: "wan".to_string(),
+                linux_name: "ge-0-0-3.0".to_string(),
+                ifindex: 23,
+                hardware_addr: "02:00:00:00:00:17".to_string(),
+                addresses: vec![crate::InterfaceAddressSnapshot {
+                    family: "inet".to_string(),
+                    address: "198.51.100.99/24".to_string(),
+                    scope: 0,
+                }],
+                ..Default::default()
+            },
+        ],
+        source_nat_rules: vec![
+            crate::SourceNATRuleSnapshot {
+                name: "snat-b".to_string(),
+                to_routing_instance: "tenant-b".to_string(),
+                interface_mode: true,
+                ..Default::default()
+            },
+            crate::SourceNATRuleSnapshot {
+                name: "snat-wan".to_string(),
+                to_zone: "wan".to_string(),
+                interface_mode: true,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+
+    assert!(
+        state
+            .local_tables_v4
+            .get(&v4)
+            .is_some_and(|tables| tables.contains("tenant-a.inet.0")),
+        "tenant-a must keep local ownership of the shared address"
+    );
+    assert!(
+        !state
+            .local_tables_v4
+            .get(&v4)
+            .is_some_and(|tables| tables.contains("tenant-b.inet.0")),
+        "tenant-b's diverted row must not claim local ownership"
+    );
+    assert!(
+        state
+            .local_tables_v6
+            .get(&v6)
+            .is_some_and(|tables| tables.contains("tenant-a.inet6.0")),
+        "tenant-a must keep local v6 ownership of the shared address"
+    );
+    assert_eq!(
+        state
+            .interface_nat_v4
+            .get(&v4)
+            .and_then(|by_table| by_table.get("tenant-b.inet.0")),
+        Some(&22),
+        "tenant-b must map the shared address to its own ifindex"
+    );
+    assert_eq!(
+        state
+            .interface_nat_v6
+            .get(&v6)
+            .and_then(|by_table| by_table.get("tenant-b.inet6.0")),
+        Some(&22),
+    );
+    assert!(
+        !state
+            .interface_nat_v4
+            .get(&v4)
+            .is_some_and(|by_table| by_table.contains_key("tenant-a.inet.0")),
+        "tenant-a was never NAT-diverted"
+    );
+    let owner_b = interface_nat_local_resolution(
+        &state,
+        IpAddr::V4(v4),
+        Some("tenant-b.inet.0"),
+    )
+    .expect("tenant-b interface-NAT local delivery");
+    assert_eq!(owner_b.local_ifindex, 22);
+    assert!(
+        interface_nat_local_resolution(&state, IpAddr::V4(v4), Some("tenant-a.inet.0"))
+            .is_none(),
+        "tenant-a must not take the interface-NAT arm for its local address"
+    );
+    let owner_b6 = interface_nat_local_resolution(
+        &state,
+        IpAddr::V6(v6),
+        Some("tenant-b.inet6.0"),
+    )
+    .expect("tenant-b v6 interface-NAT local delivery");
+    assert_eq!(owner_b6.local_ifindex, 22);
+    let wan = interface_nat_local_resolution(
+        &state,
+        IpAddr::V4(nat_v4),
+        Some("inet.0"),
+    )
+    .expect("wan interface-NAT local delivery");
+    assert_eq!(wan.local_ifindex, 23);
+}
+
+/// #14662: an unzoned interface diverted by table-scoped exclusion must
+/// arm the #5659 sentinel. The zoned tenant-b row makes 192.0.2.77 an
+/// SNAT-egress candidate in `tenant-b.inet.0`; the unzoned tenant-b row
+/// carrying the SAME address matches the same `(table, addr)` exclusion
+/// in `populate_interfaces`, so it is diverted too — yet pre-fix its
+/// `registered_local` stayed false and no sentinel was armed, while the
+/// interface-NAT arm still delivered packets to it locally. RED on
+/// revert: `ifindex_host_inbound` has no entry for ifindex 28.
+#[test]
+fn unzoned_nat_diverted_interface_arms_5659_sentinel_14662() {
+    let shared = Ipv4Addr::new(192, 0, 2, 77);
+    let state = build_forwarding_state(&crate::ConfigSnapshot {
+        zones: vec![crate::ZoneSnapshot {
+            name: "wan".to_string(),
+            id: TEST_WAN_ZONE_ID,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            crate::InterfaceSnapshot {
+                name: "ge-0/0/7.0".to_string(),
+                zone: "wan".to_string(),
+                egress_zone: "wan".to_string(),
+                routing_instance: "tenant-b".to_string(),
+                linux_name: "ge-0-0-7.0".to_string(),
+                ifindex: 27,
+                hardware_addr: "02:00:00:00:00:1b".to_string(),
+                addresses: vec![crate::InterfaceAddressSnapshot {
+                    family: "inet".to_string(),
+                    address: "192.0.2.77/24".to_string(),
+                    scope: 0,
+                }],
+                ..Default::default()
+            },
+            crate::InterfaceSnapshot {
+                name: "ge-0/0/8.0".to_string(),
+                zone: String::new(),
+                routing_instance: "tenant-b".to_string(),
+                linux_name: "ge-0-0-8.0".to_string(),
+                ifindex: 28,
+                hardware_addr: "02:00:00:00:00:1c".to_string(),
+                addresses: vec![crate::InterfaceAddressSnapshot {
+                    family: "inet".to_string(),
+                    address: "192.0.2.77/24".to_string(),
+                    scope: 0,
+                }],
+                ..Default::default()
+            },
+        ],
+        source_nat_rules: vec![crate::SourceNATRuleSnapshot {
+            name: "snat-b".to_string(),
+            to_routing_instance: "tenant-b".to_string(),
+            interface_mode: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    // The unzoned row's address was diverted, not registered local.
+    assert!(
+        !state
+            .local_tables_v4
+            .get(&shared)
+            .is_some_and(|tables| tables.contains("tenant-b.inet.0")),
+        "the shared address must not be local in tenant-b"
+    );
+    // Both rows share the (table, addr) ifindex entry; delivery exists.
+    let delivered = interface_nat_local_resolution(
+        &state,
+        IpAddr::V4(shared),
+        Some("tenant-b.inet.0"),
+    )
+    .expect("diverted address still delivers locally in tenant-b");
+    assert!(delivered.local_ifindex == 27 || delivered.local_ifindex == 28);
+    // The sentinel must be armed for the unzoned diverted ifindex.
+    assert!(
+        state.ifindex_host_inbound.contains_key(&28),
+        "#5659 sentinel must arm for the unzoned NAT-diverted interface"
+    );
+    assert!(
+        !host_inbound_admits_iface(
+            &state,
+            28,
+            0,
+            crate::ip_proto::PROTO_TCP,
+            22,
+            false,
+            0,
+        ),
+        "the armed sentinel must deny host-bound SSH on the diverted interface"
+    );
+}
+
 /// #3769 (DNAT): identical table-scoped local-delivery guarantee for a DNAT
 /// destination IP owned by a rule in tenant-b. Revert the table gate →
 /// tenant-a leaks to LocalDelivery → RED.

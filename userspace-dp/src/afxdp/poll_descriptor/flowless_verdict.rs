@@ -266,6 +266,9 @@ pub(super) fn flowless_base_resolution(
         super::frag_assoc::FlowlessPreRoutingNat::Untranslatable => {
             let resolution =
                 flowless_local_resolution(forwarding, meta, l3_flow.dst_ip, route_override)?;
+            // #14662: a local hit is still HA-gated (see below).
+            let resolution =
+                enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, resolution);
             return Some(FlowlessBaseResolution {
                 resolution,
                 nat: NatDecision::default(),
@@ -274,18 +277,26 @@ pub(super) fn flowless_base_resolution(
         }
     };
     let dst = nat.rewrite_dst.unwrap_or(l3_flow.dst_ip);
-    let resolution =
-        flowless_local_resolution(forwarding, meta, dst, route_override).unwrap_or_else(|| {
-        enforce_ha_resolution_snapshot(
+    // #14662: HA enforcement applies to a local hit exactly as to a FIB
+    // resolution. The pre-fix `unwrap_or_else` ran it only on a local miss,
+    // so a peer-owned RG's local/interface-NAT address delivered on the
+    // inactive node. `enforce_ha_resolution_snapshot` already handles
+    // LocalDelivery (including the empty-ha_state standalone contract).
+    let resolution = match flowless_local_resolution(forwarding, meta, dst, route_override) {
+        Some(local) => enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, local),
+        None => enforce_ha_resolution_snapshot(
             forwarding,
             ha_state,
             now_secs,
-            lookup_forwarding_resolution_in_table_with_dynamic(forwarding,
-            dynamic_neighbors,
-            dst,
-            route_override,).resolution,
-        )
-    });
+            lookup_forwarding_resolution_in_table_with_dynamic(
+                forwarding,
+                dynamic_neighbors,
+                dst,
+                route_override,
+            )
+            .resolution,
+        ),
+    };
     // #12905: a translated resolution that lands on NoRoute or MissingNeighbor
     // is NOT dropped here. The cold dispositions carry the rewrite downstream:
     // the MissingNeighbor arm parks the frame in pending_neigh with this

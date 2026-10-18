@@ -12699,8 +12699,8 @@ mod contract_9821_tests {
         crate::afxdp::forwarding_build::interfaces::populate_interfaces(
             &snapshot,
             &mut state,
-            &FastSet::default(),
-            &FastSet::default(),
+            &FastMap::default(),
+            &FastMap::default(),
         )
         .expect("populate_interfaces");
         (snapshot, state)
