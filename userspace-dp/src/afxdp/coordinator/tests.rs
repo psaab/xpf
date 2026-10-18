@@ -9287,7 +9287,7 @@ fn retire_dead_worker_holders_reclaims_only_dead_workers_6979() {
     let steering_row = crate::afxdp::bpf_map::session_map_row(&steering_key);
     coordinator
         .steering_owners
-        .publish_row(
+        .publish_row_for_test(
             &steering_row,
             &steering_key,
             crate::afxdp::bpf_map::SteeringHolder::Worker(3),
@@ -10444,7 +10444,7 @@ fn distinct_workers_are_distinct_holders_of_one_registry_9560() {
 
     for worker_id in [0u32, 1, 2] {
         registry
-            .publish_row(
+            .publish_row_for_test(
                 &row,
                 &key,
                 crate::afxdp::bpf_map::SteeringHolder::Worker(worker_id),
@@ -10467,6 +10467,7 @@ fn distinct_workers_are_distinct_holders_of_one_registry_9560() {
             &key,
             crate::afxdp::bpf_map::SteeringHolder::Worker(worker_id),
             |_| deleted += 1,
+            |_, _| {},
         );
     }
     assert_eq!(
@@ -10479,6 +10480,7 @@ fn distinct_workers_are_distinct_holders_of_one_registry_9560() {
         &key,
         crate::afxdp::bpf_map::SteeringHolder::Worker(2),
         |_| deleted += 1,
+        |_, _| {},
     );
     assert_eq!(deleted, 1, "the last holder's release must take the row");
 }
@@ -10495,7 +10497,7 @@ fn stop_retires_every_steering_claim_and_keeps_the_one_registry_9560() {
     let key = f4_key();
     let row = crate::afxdp::bpf_map::session_map_row(&key);
     registry
-        .publish_row(
+        .publish_row_for_test(
             &row,
             &key,
             crate::afxdp::bpf_map::SteeringHolder::Worker(0),
@@ -10924,7 +10926,7 @@ fn retire_all_worker_holders_does_not_vacate_a_live_workers_v_min_slot_9367() {
     let steering_key = f4_key();
     coordinator
         .steering_owners
-        .publish_row(
+        .publish_row_for_test(
             &crate::afxdp::bpf_map::session_map_row(&steering_key),
             &steering_key,
             crate::afxdp::bpf_map::SteeringHolder::Worker(5),
@@ -11002,7 +11004,7 @@ fn stop_inner_joins_workers_before_retiring_holders_13669() {
         ));
         let key = f4_key();
         owners_worker
-            .publish_row(
+            .publish_row_for_test(
                 &crate::afxdp::bpf_map::session_map_row(&key),
                 &key,
                 crate::afxdp::bpf_map::SteeringHolder::Worker(7),

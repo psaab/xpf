@@ -653,3 +653,93 @@ fn a_same_key_replacement_releases_the_predecessors_rows_9560() {
          DELETED, not merely unclaimed. Writes: {writes:?}"
     );
 }
+
+/// #14650 decisive integration cell: two aliased entries share one 40-byte
+/// row, one published REDIRECT and the other PASS_TO_KERNEL through the real
+/// `publish_session_rows` seam (recorder fd). The PASS publish must not leave
+/// the shim row at PASS while the REDIRECT owner survives, and releasing the
+/// PASS owner must restore (write) REDIRECT, not delete the row.
+#[test]
+fn aliased_pass_over_redirect_is_coalesced_and_restored_14650() {
+    use crate::afxdp::bpf_map::{delete_live_session_key, publish_session_map_key};
+    let owners = SteeringRowOwners::default();
+    let redirect_owner = in_domain(1);
+    let pass_owner = in_domain(2);
+    assert_eq!(
+        session_map_row(&redirect_owner),
+        session_map_row(&pass_owner),
+        "control: aliased domains must share one row or this cell observes nothing"
+    );
+    // Same physical row key for both writes: use the redirect owner's key as
+    // the row key (both encode identically).
+    let row_key = redirect_owner.clone();
+    clear_session_map_writes();
+    publish_session_map_key(steering(&owners), &row_key, USERSPACE_SESSION_ACTION_REDIRECT, &redirect_owner)
+        .expect("redirect publish");
+    publish_session_map_key(steering(&owners), &row_key, USERSPACE_SESSION_ACTION_PASS_TO_KERNEL, &pass_owner)
+        .expect("pass publish");
+    let writes = session_map_writes();
+    let pass_writes = writes.iter().filter(|w| w.value == Some(USERSPACE_SESSION_ACTION_PASS_TO_KERNEL)).count();
+    assert_eq!(
+        pass_writes, 0,
+        "a PASS publish over a shared REDIRECT row must be coalesced to REDIRECT; \
+         the shim must never see PASS while a REDIRECT owner survives (#14650). Writes: {writes:?}"
+    );
+    // Release the PASS owner: the row must be restored to REDIRECT (a write
+    // of 1), not deleted, and the survivor must still own it.
+    clear_session_map_writes();
+    delete_live_session_key(steering(&owners), &row_key, &pass_owner);
+    let after = session_map_writes();
+    assert_eq!(
+        deletes_of(&after, &redirect_owner), 0,
+        "releasing the PASS owner deleted the shared row under the REDIRECT survivor (#14650). Writes: {after:?}"
+    );
+    assert!(
+        after.iter().any(|w| w.value == Some(USERSPACE_SESSION_ACTION_REDIRECT)),
+        "releasing the PASS owner must restore REDIRECT for the survivor (#14650). Writes: {after:?}"
+    );
+    assert_eq!(owners.owner_count(&session_map_row(&redirect_owner)), 1);
+}
+
+/// #14650 reverse order: PASS first, then a REDIRECT publish on the same
+/// aliased row, then the REDIRECT owner releases. The row must end at PASS
+/// for the surviving PASS owner (restored, not deleted, not stuck at
+/// REDIRECT).
+#[test]
+fn aliased_redirect_release_restores_pass_for_survivor_14650() {
+    use crate::afxdp::bpf_map::{delete_live_session_key, publish_session_map_key};
+    let owners = SteeringRowOwners::default();
+    let pass_owner = in_domain(1);
+    let redirect_owner = in_domain(2);
+    let row_key = pass_owner.clone();
+    clear_session_map_writes();
+    publish_session_map_key(
+        steering(&owners),
+        &row_key,
+        USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
+        &pass_owner,
+    )
+    .expect("pass publish");
+    publish_session_map_key(
+        steering(&owners),
+        &row_key,
+        USERSPACE_SESSION_ACTION_REDIRECT,
+        &redirect_owner,
+    )
+    .expect("redirect publish");
+    clear_session_map_writes();
+    delete_live_session_key(steering(&owners), &row_key, &redirect_owner);
+    let after = session_map_writes();
+    assert_eq!(
+        deletes_of(&after, &pass_owner),
+        0,
+        "releasing the REDIRECT owner deleted the shared row under the PASS survivor (#14650). Writes: {after:?}"
+    );
+    assert!(
+        after
+            .iter()
+            .any(|w| w.value == Some(USERSPACE_SESSION_ACTION_PASS_TO_KERNEL)),
+        "releasing the REDIRECT owner must restore PASS for the surviving PASS owner (#14650). Writes: {after:?}"
+    );
+    assert_eq!(owners.owner_count(&session_map_row(&pass_owner)), 1);
+}

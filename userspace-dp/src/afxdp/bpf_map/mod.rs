@@ -297,9 +297,10 @@ fn delete_steering_row(map: SteeringMap<'_>, row: &SteeringRow, key: Option<&Ses
     let _ = unsafe { libbpf_sys::bpf_map_delete_elem(map.fd, row.as_ptr().cast::<c_void>()) };
 }
 
-/// Tests only: a `SessionKey` naming `row`, for the write recorder. The row carries no
-/// routing domain or discriminator, so both are zero.
-#[cfg(test)]
+/// A `SessionKey` naming `row` (routing domain/discriminator zero — the row
+/// carries neither). Used by the test write recorder and by #14650 restores
+/// of held-only rows, where no claimant key is at hand: any key encoding to
+/// the row writes the same 40-byte BPF entry.
 fn session_key_for_row(row: &SteeringRow) -> SessionKey {
     // SAFETY: the inverse of `session_map_row`; every 40-byte pattern is a valid key.
     let map_key = unsafe { std::mem::transmute::<SteeringRow, UserspaceSessionMapKey>(*row) };
@@ -324,9 +325,11 @@ fn session_key_for_row(row: &SteeringRow) -> SessionKey {
     }
 }
 
-/// #9560: publish one entry's rows through the handle's holder. A worker releases the rows it
-/// held for `owner` that `rows` does not name (`SteeringRowOwners::publish_entry`), so a
-/// same-key replacement moves its claims without the call site keeping the old decision.
+/// #9560/#14650: publish one entry's rows through the handle's holder. Rows
+/// carry `(key, action)` payloads; the registry coalesces a PASS write to
+/// REDIRECT while a REDIRECT owner shares the row and restores the
+/// survivor's action on release, so the recorder sees exactly what the
+/// shim would see.
 fn publish_session_rows(
     map: SteeringMap<'_>,
     owner: &SessionKey,
@@ -345,22 +348,44 @@ fn publish_session_rows(
         owner,
         map.holder,
         &claims,
+        |&(_, value)| value,
+        |&(key, _), action| (key, action),
         |&(key, value)| write_steering_row(map, key, value),
         |row| delete_steering_row(map, row, None),
+        |row, action| {
+            // Stale-row restore: the row is no longer in `claims`, so decode
+            // a key from the row bytes (any key encoding to it suffices).
+            let _ = write_steering_row(map, &session_key_for_row(row), action);
+        },
     )
 }
 
-/// #9560: give up one entry's rows through the handle's holder: every row `keys` names and,
-/// for a worker, every other row it holds for `owner` (`SteeringRowOwners::release_entry`).
+/// #9560/#14650: give up one entry's rows through the handle's holder: every
+/// row `keys` names and every other row it holds for `owner`. A surviving
+/// owner's action is restored instead of leaving the removed owner's value.
 fn release_session_rows(map: SteeringMap<'_>, owner: &SessionKey, keys: &[SessionKey]) {
     let rows: smallvec::SmallVec<[SteeringRow; 4]> = keys.iter().map(session_map_row).collect();
-    map.owners.release_entry(owner, map.holder, &rows, |row| {
-        let key = rows
-            .iter()
-            .position(|named| named == row)
-            .map(|index| &keys[index]);
-        delete_steering_row(map, row, key);
-    });
+    map.owners.release_entry(
+        owner,
+        map.holder,
+        &rows,
+        |row| {
+            let key = rows.iter().position(|named| named == row).map(|index| &keys[index]);
+            delete_steering_row(map, row, key);
+        },
+        |row, action| {
+            // A held-only row has no key in `keys`; decode one from the row.
+            let decoded;
+            let key = match rows.iter().position(|named| named == row) {
+                Some(index) => &keys[index],
+                None => {
+                    decoded = session_key_for_row(row);
+                    &decoded
+                }
+            };
+            let _ = write_steering_row(map, key, action);
+        },
+    );
 }
 
 pub(super) fn publish_session_map_key(
@@ -373,12 +398,12 @@ pub(super) fn publish_session_map_key(
     if !steering_key_is_publishable(key) {
         return Ok(());
     }
-    // #9560: ONE row, claimed for `owner` without releasing its other rows. The write runs
-    // under the row's shard lock, so a sibling's teardown can neither see the row ownerless
-    // while the write lands nor delete it right after.
+    // #9560/#14650: ONE row, claimed for `owner` without releasing its other
+    // rows. The write runs under the row's shard lock with the coalesced
+    // action, so a PASS write cannot hijack a shared REDIRECT row.
     map.owners
-        .publish_row(&session_map_row(key), owner, map.holder, || {
-            write_steering_row(map, key, value)
+        .publish_row(&session_map_row(key), owner, map.holder, value, |action| {
+            write_steering_row(map, key, action)
         })
 }
 
@@ -2524,10 +2549,15 @@ pub(super) fn delete_live_session_key(map: SteeringMap<'_>, key: &SessionKey, ow
     // #9560: `owner` gives up this one row through the handle's holder. The BPF row goes only
     // when no owner remains, and the delete runs under the same shard lock as that decision.
     // A row no owner holds is deleted as before.
-    map.owners
-        .release_row(&session_map_row(key), owner, map.holder, |row| {
-            delete_steering_row(map, row, Some(key))
-        });
+    map.owners.release_row(
+        &session_map_row(key),
+        owner,
+        map.holder,
+        |row| delete_steering_row(map, row, Some(key)),
+        |_, action| {
+            let _ = write_steering_row(map, key, action);
+        },
+    );
 }
 
 pub(super) fn delete_live_session_entry(
@@ -2559,8 +2589,13 @@ pub(super) fn delete_live_session_entry(
 /// CAS when the supervisor declares a worker dead; that worker never runs its own
 /// teardown, so without this its bit suppresses every later delete of the rows it held.
 pub(super) fn retire_worker_steering_rows(map: SteeringMap<'_>, worker_id: u32) -> usize {
-    map.owners
-        .retire_worker(worker_id, |row| delete_steering_row(map, row, None))
+    map.owners.retire_worker(
+        worker_id,
+        |row| delete_steering_row(map, row, None),
+        |row, action| {
+            let _ = write_steering_row(map, &session_key_for_row(row), action);
+        },
+    )
 }
 
 /// Give up the COORDINATOR's claims for `owner`, through any handle onto the same

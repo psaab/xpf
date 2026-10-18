@@ -518,8 +518,14 @@ forward-direction collision.
 
   There is ONE registry per `Coordinator`, shared with the session domain:
   `sync_session` runs without the `ServerState` mutex (#7209), so an HA delete
-  can race a bringup. `stop_inner` retires every claim, without a BPF delete,
-  once the workers are joined.
+  can race a bringup. `stop_inner` retires every WORKER claim, without a BPF
+  delete, once the workers are joined; coordinator claims survive (#14650).
+
+  The registry is also ACTION-aware (#14650): each owner records the action
+  byte it published, a shared row is coalesced fail-safe (REDIRECT wins over
+  PASS_TO_KERNEL) on publish, and a release/retire restores the surviving
+  owners' action instead of stranding the row at the removed owner's PASS
+  value.
 
   Residuals:
   - A row an EARLIER helper incarnation left in the pinned map is unowned, and
