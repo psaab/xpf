@@ -12,7 +12,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/mutate-lib.sh"
 
 fails=0
-W="$(mktemp -d "${TMPDIR:-/var/tmp}/xpf-mutate-selftest.XXXXXX")"
+W="$(mkdir -p /var/worktrees/.cache/tmpdir && mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-mutate-selftest.XXXXXX")"
 trap 'rm -rf "$W"' EXIT
 
 ck() { # ck <desc> <want> <got>

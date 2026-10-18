@@ -419,7 +419,7 @@ for _ in 1 2 3 4 5; do
 done
 ((RESERVED)) || fail_void harness-void
 
-CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-conntrack-cap.XXXXXX")"
+CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-conntrack-cap.XXXXXX")"
 $SG "incus exec ${SINK_REF} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -tt -vv -s 0 'tcp and dst host ${SINK_ADDR} and dst port ${LIFECYCLE_PORT}'" >"$CAPLOG" 2>&1 &
 CAP_PID=$!
 sleep 2

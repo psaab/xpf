@@ -193,7 +193,7 @@ if [[ -n "$BROKEN_FIXTURE" ]]; then
     grep -qE 'commit (complete|succeeded)' /tmp/xpf-wire-hostinbound-commit.log || fail_void harness-void
 fi
 
-CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-hostinbound-cap.XXXXXX")"
+CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-hostinbound-cap.XXXXXX")"
 $SG "incus exec ${UNTRUST_REF} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -tt -vv -s 0 host ${DUT_ADDR} and '(' tcp port ${PROBE_PORT_A} or tcp port ${PROBE_PORT_B} or tcp port ${CONTROL_PORT} ')'" >"$CAPLOG" 2>&1 &
 CAP_PID=$!
 sleep 2

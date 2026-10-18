@@ -27,6 +27,16 @@ ifneq ($(shell python3 scripts/image/validate-build-metadata.py),ok)
 $(error unsafe VERSION, COMMIT, or BUILD_TIME; see validator diagnostic (#12698))
 endif
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)
+# Scratch pin (#14833): all build/test scratch under /var/worktrees only.
+# These are defaults (:?=) — an explicit caller TMPDIR/GOCACHE/GOTMPDIR/
+# CARGO_TARGET_DIR wins. They exist so Go/Python/cargo subprocesses spawned
+# by any recipe cannot fall back to /tmp, /dev/shm, or /var/tmp.
+TMPDIR ?= /var/worktrees/.cache/tmpdir
+GOCACHE ?= /var/worktrees/.cache/go-build
+GOTMPDIR ?= /var/worktrees/.cache/go-tmp
+CARGO_TARGET_DIR ?= /var/worktrees/.cache/cargo
+export TMPDIR GOCACHE GOTMPDIR CARGO_TARGET_DIR
+$(shell mkdir -p $(TMPDIR) $(GOCACHE) $(GOTMPDIR) $(CARGO_TARGET_DIR))
 
 # eBPF compilation flags
 .PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log check-userspace-dt-needed proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-rolling-upgrade test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib test-failover-clock-lib test-ha-assurance-lib test-failover-client-lib
@@ -82,7 +92,7 @@ build-ctl:
 # Build the userspace dataplane helper
 build-userspace-dp:
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned build --manifest-path userspace-dp/Cargo.toml --release
-	install -m 0755 userspace-dp/target/release/xpf-userspace-dp ./xpf-userspace-dp
+	install -m 0755 $(CARGO_TARGET_DIR)/release/xpf-userspace-dp ./xpf-userspace-dp
 
 # Manual build check for the diagnostic `debug-log` feature (#1678).
 # The debug-log build is not the production target and is deliberately
@@ -196,10 +206,12 @@ test-root: test-shim-run test-memlock-guards test-xfrm-lifecycle
 # line, and the package set is DERIVED from the registry rather than written
 # down, so adding a guard in a new package cannot leave it unrun.
 #
-# TMPDIR is pinned to /tmp: several of these guards bind an AF_UNIX control
-# socket under the temp dir, and a long TMPDIR pushes the path past the
-# 108-byte sun_path limit — "bind: invalid argument", which reads like a
-# dataplane defect and is not one.
+# Scratch pin (#14833): all build/test scratch lives under /var/worktrees.
+# Several of these guards bind an AF_UNIX control socket under the temp
+# dir, and a long TMPDIR pushes the path past the 108-byte sun_path limit
+# — "bind: invalid argument", which reads like a dataplane defect and is
+# not one. /var/worktrees/.cache/go-tmp is 28 chars, so a Go test temp
+# dir (<TMPDIR>/Test<Name><random>/sock) stays well under 108 bytes.
 .PHONY: test-memlock-guards
 test-memlock-guards:
 	@if [ "$$(id -u)" != "0" ]; then \
@@ -218,7 +230,7 @@ test-memlock-guards:
 		exit 1; \
 	fi; \
 	echo "test-memlock-guards: packages $$pkgs"; \
-	out=$$(TMPDIR=/tmp XPF_REQUIRE_MEMLOCK_GUARDS=1 $(GO) test -json=false -count=1 -v $$pkgs ./pkg/memlockcensus/ 2>&1); \
+	out=$$(mkdir -p /var/worktrees/.cache/go-tmp && TMPDIR=/var/worktrees/.cache/go-tmp XPF_REQUIRE_MEMLOCK_GUARDS=1 $(GO) test -json=false -count=1 -v $$pkgs ./pkg/memlockcensus/ 2>&1); \
 	status=$$?; \
 	echo "$$out"; \
 	missing=''; \
@@ -557,7 +569,7 @@ test-miri-census-lib:
 # being a gate). The per-struct signal is reviewable in the artifact diff.
 .PHONY: audit-structs
 audit-structs:
-	@tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
+	@mkdir -p /var/worktrees/.cache/tmpdir; tmp=$$(TMPDIR=/var/worktrees/.cache/tmpdir mktemp); trap 'rm -f "$$tmp"' EXIT; \
 	bash scripts/refactoring-audit-structs.sh > "$$tmp" || { \
 		echo "ERROR: scripts/refactoring-audit-structs.sh failed."; exit 1; }; \
 	if [ ! -s "$$tmp" ]; then \
@@ -574,7 +586,7 @@ audit-structs:
 
 .PHONY: audit-check
 audit-check:
-	@tmp=$$(mktemp); com=$$(mktemp); gen=$$(mktemp); \
+	@mkdir -p /var/worktrees/.cache/tmpdir; tmp=$$(TMPDIR=/var/worktrees/.cache/tmpdir mktemp); com=$$(TMPDIR=/var/worktrees/.cache/tmpdir mktemp); gen=$$(TMPDIR=/var/worktrees/.cache/tmpdir mktemp); \
 	trap 'rm -f "$$tmp" "$$com" "$$gen"' EXIT; \
 	bash scripts/refactoring-audit.sh > "$$tmp" || { \
 		echo "ERROR: scripts/refactoring-audit.sh failed."; \
@@ -786,7 +798,7 @@ clean:
 	# re-introduction by a future PR.
 	rm -f pkg/dataplane/xpf*_bpfel.go pkg/dataplane/xpf*_bpfeb.go
 	rm -f pkg/dataplane/xpf*_bpfel.o pkg/dataplane/xpf*_bpfeb.o
-	rm -rf userspace-dp/target
+	rm -rf $(CARGO_TARGET_DIR) userspace-dp/target
 
 # Legacy standalone test environment management (single Incus VM/container).
 # The standalone instance name defaults to xpf-fw; override it for an
@@ -837,6 +849,7 @@ test-mutate-lib:
 	bash ./scripts/mutate-selftest.sh
 	bash ./scripts/go-test-json-selftest.sh
 	bash ./scripts/no-git-stash-selftest.sh
+	sh ./scripts/scratch-pinning-selftest.sh
 
 # Self-test the #1875 shared-cluster lock cell (with-cluster.sh contention
 # matrix) and the #4020 destructive-smoke lock preamble (every reboot/

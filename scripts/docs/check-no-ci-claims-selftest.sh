@@ -5,7 +5,7 @@
 set -u
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 guard="$here/check-no-ci-claims.sh"
-tmp="$(mktemp -d)"
+tmp="$(mkdir -p /var/worktrees/.cache/tmpdir && TMPDIR=/var/worktrees/.cache/tmpdir mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 fail=0
 

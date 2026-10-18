@@ -91,7 +91,7 @@ REMOTE_PREFIX="${INCUS_REMOTE:+${INCUS_REMOTE}:}"
 FW0="${REMOTE_PREFIX}${VM0}"
 FW1="${REMOTE_PREFIX}${VM1}"
 HOST="${REMOTE_PREFIX}${LAN_HOST}"
-ARTIFACT_DIR="${ARTIFACT_DIR:-/tmp/userspace-ha-failover-rg${RG}-$(date +%Y%m%d-%H%M%S)}"
+ARTIFACT_DIR="${ARTIFACT_DIR:-/var/worktrees/.cache/tmpdir/userspace-ha-failover-rg${RG}-$(date +%Y%m%d-%H%M%S)}"
 REMOTE_IPERF_LOG="/tmp/userspace-iperf-rg${RG}-failover.log"
 REMOTE_IPERF_UNIT="userspace-ha-rg${RG}-iperf3.service"
 LOCAL_IPERF_LOG="${ARTIFACT_DIR}/iperf3.log"
@@ -1021,7 +1021,7 @@ recent_interval_metric() {
 		printf 'recent iperf3 event stream: capture unavailable\n' >&2
 		return 2
 	fi
-	if ! recent_file=$(mktemp "${TMPDIR:-/tmp}/ha-recent-iperf.XXXXXX"); then
+	if ! recent_file=$(mkdir -p /var/worktrees/.cache/tmpdir && mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/ha-recent-iperf.XXXXXX"); then
 		printf 'recent iperf3 event stream: local capture unavailable\n' >&2
 		return 2
 	fi

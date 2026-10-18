@@ -1290,7 +1290,9 @@ def main():
                              os.path.expanduser("~/.cache")), "xpf-image-bake")
     os.makedirs(a.out, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
-    work = tempfile.mkdtemp(prefix="xpf-bake-", dir=os.environ.get("TMPDIR", "/tmp"))
+    _tmpdir = os.environ.get("TMPDIR", "/var/worktrees/.cache/tmpdir")
+    os.makedirs(_tmpdir, exist_ok=True)
+    work = tempfile.mkdtemp(prefix="xpf-bake-", dir=_tmpdir)
 
     try:
         # 1. build the xpf .deb (#1917 increment A). `make deb` runs

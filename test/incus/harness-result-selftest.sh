@@ -98,7 +98,7 @@ else
 	bad "DHCP selftest guard changed: guards=$dhcp_guard_count env_refs=$dhcp_selftest_refs probe='$dhcp_source_probe'"
 fi
 
-WORK=$(mktemp -d "${TMPDIR:-/var/tmp}/xpf-harness-result-selftest.XXXXXX")
+WORK=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-harness-result-selftest.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 LOG="$WORK/gate.log"
 LEDGER="$WORK/ledger.d"

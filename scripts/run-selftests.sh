@@ -28,6 +28,15 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck disable=SC1007
 ROOT=$(CDPATH= cd -- "$HERE/.." && pwd)
 cd "$ROOT" || { echo "FATAL: cannot cd to repo root $ROOT" >&2; exit 1; }
+# Scratch pin (#14833): defaults only — an explicit caller env wins.
+# Children (python tempfile, shell mktemp, go test) inherit these, so
+# no leg can fall back to /tmp, /dev/shm, or /var/tmp by default.
+TMPDIR="${TMPDIR:-/var/worktrees/.cache/tmpdir}"
+GOCACHE="${GOCACHE:-/var/worktrees/.cache/go-build}"
+GOTMPDIR="${GOTMPDIR:-/var/worktrees/.cache/go-tmp}"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/var/worktrees/.cache/cargo}"
+export TMPDIR GOCACHE GOTMPDIR CARGO_TARGET_DIR
+mkdir -p "$TMPDIR" "$GOCACHE" "$GOTMPDIR" "$CARGO_TARGET_DIR"
 
 PASS=0
 FAIL=0
@@ -222,14 +231,15 @@ for s in $SH_SCRIPTS; do
 		skipl "$interp -n $s ($interp not installed)"
 		continue
 	fi
-	if "$interp" -n "$s" 2>/tmp/xpf-selftest-shn.$$; then
+	mkdir -p /var/worktrees/.cache/tmpdir
+	if "$interp" -n "$s" 2>/var/worktrees/.cache/tmpdir/xpf-selftest-shn.$$; then
 		passl "$interp -n $s"
 	else
 		faill "$interp -n $s"
-		sed 's/^/      /' /tmp/xpf-selftest-shn.$$
+		sed 's/^/      /' /var/worktrees/.cache/tmpdir/xpf-selftest-shn.$$
 	fi
 done
-rm -f /tmp/xpf-selftest-shn.$$
+rm -f /var/worktrees/.cache/tmpdir/xpf-selftest-shn.$$
 
 # ── 2. optional shellcheck lint (SKIP if not installed) ──
 hdr "shellcheck (optional)"
@@ -322,6 +332,7 @@ run_shell test/debian/preinst-safe-segment-test.sh
 run_bash scripts/mutate-selftest.sh
 run_bash scripts/go-test-json-selftest.sh
 run_bash scripts/no-git-stash-selftest.sh
+run_shell scripts/scratch-pinning-selftest.sh
 # #14647: the affected-Go-test selector must seed from non-Go paths and
 # always run the import-less census packages. Real-commit legs plus a
 # synthetic clone; the docs/log leg distinguishes the never-read

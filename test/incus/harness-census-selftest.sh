@@ -46,7 +46,7 @@ bad() { echo "  FAIL — $*" >&2; FAIL=$((FAIL + 1)); }
 
 [[ -f "$CENSUS" ]] || { echo "FATAL: census not found at $CENSUS" >&2; exit 1; }
 
-WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/harness-census-selftest.XXXXXX")"
+WORK="$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/harness-census-selftest.XXXXXX")"
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 

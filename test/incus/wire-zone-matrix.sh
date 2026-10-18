@@ -49,7 +49,7 @@ matrix_keys=(
 
 capture_start() {
     local dst="$1" dst_addr="$2" port_filter="$3"
-    CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-zone-cap.XXXXXX")"
+    CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-zone-cap.XXXXXX")"
     $SG "incus exec ${INCUS_REMOTE}:${dst} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -tt -vv -s 0 udp and dst host ${dst_addr} and '(' ${port_filter} ')'" >"$CAPLOG" 2>&1 &
     CAP_PID=$!
     sleep 2
@@ -231,10 +231,10 @@ if [[ "$MODE" == selftest ]]; then
     matrix_measure_case() {
         local scenario="$1" out rc ok=1 offset=20 port filter stub_window stub_legs stub_order
         MATRIX_STUB_CAPTURE="$scenario"
-        MATRIX_STUB_WINDOWS_FILE="$(mktemp "${TMPDIR:-/tmp}/wire-zone-windows.XXXXXX")"
-        MATRIX_STUB_LEGS_FILE="$(mktemp "${TMPDIR:-/tmp}/wire-zone-legs.XXXXXX")"
-        MATRIX_STUB_LEG_ORDER_FILE="$(mktemp "${TMPDIR:-/tmp}/wire-zone-order.XXXXXX")"
-        MATRIX_STUB_FILTER_FILE="$(mktemp "${TMPDIR:-/tmp}/wire-zone-filter.XXXXXX")"
+        MATRIX_STUB_WINDOWS_FILE="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/wire-zone-windows.XXXXXX")"
+        MATRIX_STUB_LEGS_FILE="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/wire-zone-legs.XXXXXX")"
+        MATRIX_STUB_LEG_ORDER_FILE="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/wire-zone-order.XXXXXX")"
+        MATRIX_STUB_FILTER_FILE="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/wire-zone-filter.XXXXXX")"
         CAP_PID=""; CAPLOG=""
         measure_cell 0 2 deny 2200 2 >/dev/null
         stub_window="$(wc -c <"$MATRIX_STUB_WINDOWS_FILE")"
@@ -296,7 +296,7 @@ if [[ "$MODE" == selftest ]]; then
     matrix_measure_case swap
     matrix_measure_case blind
     matrix_measure_case leak
-    CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/wire-zone-parser.XXXXXX")"
+    CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/wire-zone-parser.XXXXXX")"
     printf '00:00:00 IP 10.0.0.1.40000 > 10.0.0.2.%s: UDP, length 100\n00:00:01 IP 10.0.0.1 > 10.0.0.2: bad ip cksum\n' \
         "$PROBE_PORT" >"$CAPLOG"
     any_len="$(count_any_len "$PROBE_PORT")"

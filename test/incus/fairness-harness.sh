@@ -170,7 +170,7 @@ COS_TSV="$WORK_DIR/cos-flows.tsv"
 FAIRNESS_EVAL=${FAIRNESS_EVAL:-/usr/local/bin/fairness-eval}
 if [ ! -x "$FAIRNESS_EVAL" ]; then
     # Try cargo target dir as fallback for local development.
-    for c in /dev/shm/cargo/release/fairness-eval ./target/release/fairness-eval ./userspace-dp/target/release/fairness-eval; do
+    for c in /var/worktrees/.cache/cargo/release/fairness-eval ./target/release/fairness-eval ./userspace-dp/target/release/fairness-eval; do
         if [ -x "$c" ]; then FAIRNESS_EVAL=$c; break; fi
     done
 fi

@@ -150,10 +150,10 @@ if [[ "$MODE" == selftest ]]; then
         fi
     }
     marker_cell "bare commit marker" 0 $'configuration check succeeds\ncommit complete'
-    set_a=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-set-a.XXXXXX")
-    set_b=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-set-b.XXXXXX")
-    set_c=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-set-c.XXXXXX")
-    set_d=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-set-d.XXXXXX")
+    set_a=$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-10136-set-a.XXXXXX")
+    set_b=$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-10136-set-b.XXXXXX")
+    set_c=$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-10136-set-c.XXXXXX")
+    set_d=$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-10136-set-d.XXXXXX")
     printf '%s\n' \
         'set security flow allow-dns-reply' \
         'set security flow allow-embedded-icmp' >"$set_a"
@@ -242,12 +242,12 @@ if [[ "$MODE" == selftest ]]; then
     # RED→GREEN proof through the fixture parser/emitter, not just a direct
     # reducer call: stale precommit liveness must not rescue the post-commit
     # near-miss absence; the leak transcript must fail and the clean fixture pass.
-    good=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-good.XXXXXX")
-    bad=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-bad.XXXXXX")
-    blind=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-blind.XXXXXX")
-    late=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-late.XXXXXX")
-    missing_tail=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-missing-tail.XXXXXX")
-    missing_positive=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-missing-positive.XXXXXX")
+    good=$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-10136-good.XXXXXX")
+    bad=$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-10136-bad.XXXXXX")
+    blind=$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-10136-blind.XXXXXX")
+    late=$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-10136-late.XXXXXX")
+    missing_tail=$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-10136-missing-tail.XXXXXX")
+    missing_positive=$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-10136-missing-positive.XXXXXX")
     printf '%s\n' 'probe_offered=1000 probe_leaked=0 precommit_control_offered=1500 precommit_control_observed=1500 near_miss_offered=1500 near_miss_observed=1500 near_miss_tail_observed=99 populated_offered=1500 populated_observed=1500 populated_control_offered=1500 populated_control_observed=1500 removed_offered=1000 removed_observed=0 removed_control_offered=1500 removed_control_observed=1500 cksum_bad=0' >"$good"
     printf '%s\n' 'probe_offered=1000 probe_leaked=1 precommit_control_offered=1500 precommit_control_observed=1500 near_miss_offered=1500 near_miss_observed=1500 near_miss_tail_observed=99 populated_offered=1500 populated_observed=1500 populated_control_offered=1500 populated_control_observed=1500 removed_offered=1000 removed_observed=0 removed_control_offered=1500 removed_control_observed=1500 cksum_bad=0' >"$bad"
     printf '%s\n' 'probe_offered=1000 probe_leaked=0 precommit_control_offered=1500 precommit_control_observed=1500 near_miss_offered=1500 near_miss_observed=0 near_miss_tail_observed=0 populated_offered=1500 populated_observed=1500 populated_control_offered=1500 populated_control_observed=1500 removed_offered=1000 removed_observed=0 removed_control_offered=1500 removed_control_observed=1500 cksum_bad=0' >"$blind"
@@ -588,7 +588,7 @@ wait_managed_vrf() {
     return 1
 }
 
-ARCHIVE_DIR="${XPF_WIRE_CONFIG_ARCHIVE_DIR:-${TMPDIR:-/var/tmp}/xpf-wire-routing-separation-$(date +%s)}"
+ARCHIVE_DIR="${XPF_WIRE_CONFIG_ARCHIVE_DIR:-${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-routing-separation-$(date +%s)}"
 mkdir -p "$ARCHIVE_DIR" || true
 BASE0_RAW="$ARCHIVE_DIR/fw0-pre.set"
 BASE1_RAW="$ARCHIVE_DIR/fw1-pre.set"
@@ -765,7 +765,7 @@ $SG "incus file push --mode 0755 ${SCRIPT_DIR}/wire_routing_probe.py ${LAN_REF}$
     void_now harness-void
 
 # ── Phase 1: exact control, then post-commit near-miss and empty-RI probe ─
-CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-routing-cap.XXXXXX")" || void_now harness-void
+CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-routing-cap.XXXXXX")" || void_now harness-void
 $SG "incus exec ${TARGET} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -vv -A -s 0 'udp and dst host ${DEST_IP} and (dst port ${PORT} or dst port ${NEAR_MISS_PORT})'" >"$CAPLOG" 2>&1 &
 CAP_PID=$!
 sleep 2
@@ -846,7 +846,7 @@ cli_commit_ri_route add || void_now harness-void
 wait_ri_route present || void_now harness-void
 printf '%s\n' "$(remote "ip -4 route show table ${VRF_TABLE}" 2>/dev/null || true)" \
     >"$ARCHIVE_DIR/populated-route.set"
-CAPLOG2="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-routing-cap2.XXXXXX")" || void_now harness-void
+CAPLOG2="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-routing-cap2.XXXXXX")" || void_now harness-void
 $SG "incus exec ${TARGET} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -vv -A -s 0 'dst host ${DEST_IP} and (proto 47 or (udp and dst port ${NEAR_MISS_PORT}))'" >"$CAPLOG2" 2>&1 &
 CAP_PID=$!
 sleep 2
@@ -871,7 +871,7 @@ cli_commit_ri_route delete || void_now harness-void
 POP_ROUTE_OWNED=0
 wait_ri_route absent || void_now harness-void
 clear_steered_sessions removed || void_now harness-void
-CAPLOG3="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-routing-cap3.XXXXXX")" || void_now harness-void
+CAPLOG3="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-routing-cap3.XXXXXX")" || void_now harness-void
 $SG "incus exec ${TARGET} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -vv -A -s 0 'dst host ${DEST_IP} and (proto 47 or (udp and (dst port ${PORT} or dst port ${NEAR_MISS_PORT})))'" >"$CAPLOG3" 2>&1 &
 CAP_PID=$!
 sleep 2

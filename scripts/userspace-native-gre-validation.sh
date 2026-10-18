@@ -550,7 +550,7 @@ if (( GRE_VALIDATE_HOST_PROBES == 1 )); then
 	pass "native GRE host/control-plane TCP connect works on ${ACTIVE_FW}"
 	if (( IPERF == 1 )); then
 		info "running firewall-originated GRE iperf3 probe to ${GRE_IPERF_TARGET}:${GRE_IPERF_PORT} from ${ACTIVE_FW}"
-		host_iperf_log="$(mktemp)"
+		host_iperf_log="$(mkdir -p /var/worktrees/.cache/tmpdir && TMPDIR=/var/worktrees/.cache/tmpdir mktemp)"
 		run_vm_iperf_stream_to_log "${host_iperf_log}" "${ACTIVE_FW}" "${GRE_IPERF_TARGET}" "${GRE_IPERF_PORT}" "${GRE_HOST_IPERF_DURATION}" "${GRE_HOST_IPERF_PARALLEL}"
 		assert_iperf_log_healthy_with_threshold "${host_iperf_log}" "host native GRE iperf" "${GRE_HOST_IPERF_MIN_GBPS}"
 		rm -f "${host_iperf_log}"
@@ -560,7 +560,7 @@ fi
 
 if (( IPERF == 1 )); then
 	info "running GRE iperf3 probe to ${GRE_IPERF_TARGET}:${GRE_IPERF_PORT} from ${HOST}"
-	iperf_log="$(mktemp)"
+	iperf_log="$(mkdir -p /var/worktrees/.cache/tmpdir && TMPDIR=/var/worktrees/.cache/tmpdir mktemp)"
 	run_iperf_stream_to_log "${iperf_log}" "${GRE_IPERF_TARGET}" "${GRE_IPERF_PORT}" "${GRE_IPERF_DURATION}" "${GRE_IPERF_PARALLEL}"
 	assert_iperf_log_healthy "${iperf_log}" "steady native GRE iperf"
 	rm -f "${iperf_log}"
@@ -623,17 +623,17 @@ if (( FAILOVER == 1 )); then
 	failover_tcp_log=""
 	failover_tcp_pid=""
 	if (( IPERF == 0 )); then
-		failover_ping_log="$(mktemp)"
+		failover_ping_log="$(mkdir -p /var/worktrees/.cache/tmpdir && TMPDIR=/var/worktrees/.cache/tmpdir mktemp)"
 		sg incus-admin -c "incus exec ${HOST} -- bash -lc $(printf %q "ping -i 0.2 -c ${FAILOVER_PING_COUNT} -W 1 ${GRE_TARGET}")" >"${failover_ping_log}" 2>&1 &
 		failover_ping_pid=$!
-		failover_tcp_log="$(mktemp)"
+		failover_tcp_log="$(mkdir -p /var/worktrees/.cache/tmpdir && TMPDIR=/var/worktrees/.cache/tmpdir mktemp)"
 		sg incus-admin -c "incus exec ${HOST} -- bash -lc $(printf %q "for seq in \$(seq 1 ${FAILOVER_PING_COUNT}); do if $(tcp_probe_cmd "${GRE_TCP_TARGET}" "${GRE_TCP_PORT}") >/dev/null 2>&1; then echo ok seq=\${seq}; else echo fail seq=\${seq}; fi; sleep 0.2; done")" >"${failover_tcp_log}" 2>&1 &
 		failover_tcp_pid=$!
 	fi
 	failover_iperf_log=""
 	failover_iperf_pid=""
 	if (( IPERF == 1 )); then
-		failover_iperf_log="$(mktemp)"
+		failover_iperf_log="$(mkdir -p /var/worktrees/.cache/tmpdir && TMPDIR=/var/worktrees/.cache/tmpdir mktemp)"
 		run_iperf_stream_to_log "${failover_iperf_log}" "${GRE_IPERF_TARGET}" "${GRE_IPERF_PORT}" "${GRE_IPERF_DURATION}" "${GRE_IPERF_PARALLEL}" &
 		failover_iperf_pid=$!
 	fi
@@ -717,7 +717,7 @@ if (( FAILOVER == 1 )); then
 		grep -q 'bytes from' <<<"$post_failover_host_ping_output" || die "post-failover firewall-originated GRE ping failed"
 		run_vm "$ACTIVE_FW" "$(tcp_probe_cmd "${GRE_TCP_TARGET}" "${GRE_TCP_PORT}") >/dev/null 2>&1" || die "post-failover firewall-originated GRE TCP connect failed"
 		if (( IPERF == 1 )); then
-			post_failover_host_iperf_log="$(mktemp)"
+			post_failover_host_iperf_log="$(mkdir -p /var/worktrees/.cache/tmpdir && TMPDIR=/var/worktrees/.cache/tmpdir mktemp)"
 			run_vm_iperf_stream_to_log "${post_failover_host_iperf_log}" "${ACTIVE_FW}" "${GRE_IPERF_TARGET}" "${GRE_IPERF_PORT}" "${GRE_HOST_IPERF_DURATION}" "${GRE_HOST_IPERF_PARALLEL}"
 			assert_iperf_log_healthy_with_threshold "${post_failover_host_iperf_log}" "post-failover host native GRE iperf" "${GRE_HOST_IPERF_MIN_GBPS}"
 			rm -f "${post_failover_host_iperf_log}"

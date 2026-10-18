@@ -103,7 +103,7 @@ wire_policy_deny_arm_finalizer() {
 }
 wire_policy_deny_finalizer_selftest() {
 	local tmp mode out rc expected_out expected_rc
-	tmp="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-policy-deny-finalizer.XXXXXX")" || return 1
+	tmp="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-policy-deny-finalizer.XXXXXX")" || return 1
 	export WIRE_POLICY_DENY_FINALIZER_TEST_FILE="$tmp"
 	export -f wire_gate_finalize wire_policy_deny_arm_finalizer wire_policy_deny_signal_abort wire_policy_deny_prepare_final_verdict
 	for mode in restore-fail clean-fail; do
@@ -184,7 +184,7 @@ if [[ "$MODE" == "selftest" ]]; then
 		echo "  FAIL  interleaved sender legs preserve offered floors (probe=$POFFERED control=$COFFERED)"
 		fail=$((fail + 1))
 	fi
-	_capture_log="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-policy-capture.XXXXXX")"
+	_capture_log="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-policy-capture.XXXXXX")"
 	printf 'tcpdump: listening on eth0, link-type EN10MB (Ethernet), snapshot length 262144 bytes\n' >"$_capture_log"
 	if wire_policy_deny_capture_ready "$_capture_log"; then
 		echo "  PASS  capture readiness is confirmed before sending"
@@ -378,7 +378,7 @@ if ! $SG "incus file push --mode 0755 $PROBER_SRC ${CLUSTER_LAN_HOST}${REMOTE_PR
 fi
 
 # Baseline config snapshot for the post-run diff.
-BASELINE_SNAP="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-baseline.XXXXXX")"
+BASELINE_SNAP="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-baseline.XXXXXX")"
 trap 'rm -f "$BASELINE_SNAP"' EXIT
 printf '%s\n' "$POLines" >"$BASELINE_SNAP"
 
@@ -389,7 +389,7 @@ echo "--- same-path baseline burst (pre-fixture) ---"
 # Capture runs in the background: a foreground `tcpdump -c` would wait for
 # packets the burst has not sent yet. tcpdump prints `IP a.b.c.d.p > w.x.y.z.q:`
 # with the dst port BEFORE the `UDP` token, hence the `\.port:` patterns.
-BASE_CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-basecap.XXXXXX")"
+BASE_CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-basecap.XXXXXX")"
 $SG "incus exec $SINK_EXEC -- timeout $STEP_TIMEOUT tcpdump -i any -n udp and dst host $SINK and '(' dst port $PROBE_PORT or dst port $CONTROL_PORT ')'" >"$BASE_CAPLOG" 2>&1 &
 BASE_CAP_PID=$!
 sleep 3
@@ -506,7 +506,7 @@ wire_policy_deny_cleanup() {
 	# Same-path dataplane proof: P must forward AGAIN post-restore (the narrow
 	# exclude is gone) and the control must still forward. A config diff alone
 	# cannot certify this (store-only divergence).
-	RE_CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-recap.XXXXXX")"
+	RE_CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-recap.XXXXXX")"
 	$SG "incus exec $SINK_EXEC -- timeout 60 tcpdump -i any -n udp and dst host $SINK and '(' dst port $PROBE_PORT or dst port $CONTROL_PORT ')'" >"$RE_CAPLOG" 2>&1 &
 	RE_CAP_PID=$!
 	sleep 3
@@ -543,7 +543,7 @@ wire_policy_deny_arm_finalizer
 # The control sends half its offered frames before and half after the probe;
 # the leading witness proves tcpdump was attached before any probe could leak.
 echo "--- capture window + interleaved bursts (probe $BURST, control $CONTROL_BURST) ---"
-CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-cap.XXXXXX")"
+CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-cap.XXXXXX")"
 $SG "incus exec $SINK_EXEC -- timeout $STEP_TIMEOUT tcpdump -l -i any -n -vv udp and dst host $SINK and '(' dst port $PROBE_PORT or dst port $CONTROL_PORT ')'" >"$CAPLOG" 2>&1 &
 CAP_PID=$!
 CAP_READY=0

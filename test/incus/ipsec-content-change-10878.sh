@@ -17,7 +17,7 @@ shape=v4_native
 count=2
 old_selector=10.0.61.0/24
 new_selector=10.0.61.0/25
-workdir="$(mktemp -d "${TMPDIR:-/tmp}/xpf-ipsec-10878.XXXXXX")"
+workdir="$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-ipsec-10878.XXXXXX")"
 chmod 0700 "$workdir"
 fixture_active=0
 
