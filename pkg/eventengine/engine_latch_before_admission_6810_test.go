@@ -199,66 +199,10 @@ func TestLatchRollbackIsRevisionGuarded6810(t *testing.T) {
 	}
 }
 
-// TestClassifyRejectAndEmptyPlanKeepTheLatch6810 documents, as an executable
-// decision, the two post-latch abandonment paths #6810 deliberately does NOT
-// roll back. R71 names only the queue-full one; HandleEvent has three.
-//
-//   - classifyPlan rejects (malformed/unknown command): DETERMINISTIC. The same
-//     policy fails identically every time, so rolling back would re-evaluate
-//     and re-reject on every subsequent event — unbounded log and counter churn
-//     for a remediation that can never run. It is already counted (rejected)
-//     and logged once, which is the better signal.
-//   - empty op list: there was no remediation to lose, so nothing was consumed.
-//
-// The queue-full drop is different in kind because it is TRANSIENT: retrying
-// succeeds once the worker catches up. That is the distinction the fix is
-// scoped to, and this cell is what stops the scope from being mistaken for an
-// oversight later.
-func TestClassifyRejectAndEmptyPlanKeepTheLatch6810(t *testing.T) {
-	t.Run("classify-reject", func(t *testing.T) {
-		e, at := newInertEngine6810(t)
-		const event = "ping_probe_failed"
-		bad := edgePolicy6810("broken", event, 2)
-		bad.ThenCommands = []string{"reboot the router"} // not set/delete → rejected
-		applyPolicies9984(e, []*config.EventPolicy{bad})
-
-		at(0)
-		e.HandleEvent(rpm.Event{Name: event, TestOwner: "o", TestName: "t"})
-		at(1)
-		e.HandleEvent(rpm.Event{Name: event, TestOwner: "o", TestName: "t"})
-		if got := e.Stats().Rejected; got != 1 {
-			t.Fatalf("Rejected = %d, want 1 — the fixture did not reach the "+
-				"classify rejection it is about", got)
-		}
-		// Sustained level: still suppressed, and deliberately so.
-		at(2)
-		e.HandleEvent(rpm.Event{Name: event, TestOwner: "o", TestName: "t"})
-		if got := e.Stats().Rejected; got != 1 {
-			t.Fatalf("Rejected climbed to %d — a deterministic classify failure is "+
-				"being retried on every event, which is unbounded churn for a "+
-				"remediation that can never run", got)
-		}
-	})
-
-	t.Run("empty-plan", func(t *testing.T) {
-		e, at := newInertEngine6810(t)
-		const event = "ping_probe_failed"
-		empty := edgePolicy6810("noop", event, 2)
-		empty.ThenCommands = nil // classifies fine, yields zero ops
-		applyPolicies9984(e, []*config.EventPolicy{empty})
-
-		at(0)
-		e.HandleEvent(rpm.Event{Name: event, TestOwner: "o", TestName: "t"})
-		at(1)
-		e.HandleEvent(rpm.Event{Name: event, TestOwner: "o", TestName: "t"})
-		at(2)
-		e.HandleEvent(rpm.Event{Name: event, TestOwner: "o", TestName: "t"})
-
-		if st := e.Stats(); st.DroppedQueueFull != 0 || st.Rejected != 0 {
-			t.Fatalf("an empty plan must neither drop nor reject: %+v", st)
-		}
-		if queued := drainPolicyNames(e); len(queued) != 0 {
-			t.Fatalf("an empty plan queued %v", queued)
-		}
-	})
-}
+// TestClassifyRejectAndEmptyPlanKeepTheLatch6810 historically pinned the
+// #6810 decision NOT to roll back on classify-reject / empty-plan. #14724
+// reverses that decision: every terminal non-commit exit releases the
+// latch. The successor cell is
+// TestHandleEventPreEnqueueReleasesLatch14724 — see docs/log/14724.md
+// for the reversal rationale (per-event rejected churn is counted and
+// accepted; a wedged latch on a sustained fault is not).

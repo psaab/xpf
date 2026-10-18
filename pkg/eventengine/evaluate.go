@@ -80,7 +80,16 @@ func (e *Engine) classifyPlan(pol *config.EventPolicy) ([]plannedOp, bool) {
 
 // criticalConfigPath identifies configuration whose queued remediation gets
 // priority over ordinary settings while preserving FIFO within each class.
+// A leading "groups <name>" prefix is unwrapped (#14724): the effective
+// target of "set groups <g> security …" is the security subtree once the
+// group is applied, so it earns the same priority as a direct security
+// path. "apply-groups <g>" alone names no target subtree — the group's
+// contents were already classified when authored under groups — so it
+// stays ordinary.
 func criticalConfigPath(path []string) bool {
+	if len(path) >= 3 && path[0] == "groups" {
+		path = path[2:]
+	}
 	return len(path) > 0 && (path[0] == "security" || path[0] == "firewall")
 }
 

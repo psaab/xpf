@@ -445,19 +445,52 @@ func (e *Engine) globalBudgetAvailable() bool {
 
 // reserveGlobalCommit accounts one commit attempt. The worker is serialized,
 // so a reservation is made only when it is ready to enter the commit callback.
-func (e *Engine) reserveGlobalCommit(policyOrder int) bool {
+// It returns the reserved slot timestamp (zero on denial) so a commit that
+// never promotes can refund exactly that slot (#14724); a promoted commit
+// (including committed-with-debt) keeps the slot.
+func (e *Engine) reserveGlobalCommit(policyOrder int) (time.Time, bool) {
 	e.budgetMu.Lock()
 	defer e.budgetMu.Unlock()
 	now := e.now()
 	e.pruneGlobalBudgetLocked(now)
 	if e.budgetCount == globalActionBudget {
-		return false
+		return time.Time{}, false
 	}
 	next := (e.budgetStart + e.budgetCount) % globalActionBudget
 	e.budgetTimes[next] = now
 	e.budgetCount++
 	e.budgetCursor = policyOrder + 1
-	return true
+	return now, true
+}
+
+// refundGlobalCommit removes the slot reserved at ts (#14724). Failure to
+// promote must not consume the rolling budget: a transient commitFn
+// (nil, err) or an ErrClusterReadOnly deferral otherwise burns all four
+// slots and dropGlobalBudget then discards healthy policies' actions.
+// The newest matching slot is removed so interleaved successes keep
+// theirs; a slot already pruned (window expired) or refunded is a no-op.
+// budgetCursor is not rewound: it is a fairness hint, not accounting.
+func (e *Engine) refundGlobalCommit(ts time.Time) {
+	if ts.IsZero() {
+		return
+	}
+	e.budgetMu.Lock()
+	defer e.budgetMu.Unlock()
+	for i := e.budgetCount - 1; i >= 0; i-- {
+		idx := (e.budgetStart + i) % globalActionBudget
+		if !e.budgetTimes[idx].Equal(ts) {
+			continue
+		}
+		// Remove idx, preserving chronological order of the rest.
+		for j := i; j < e.budgetCount-1; j++ {
+			dst := (e.budgetStart + j) % globalActionBudget
+			src := (e.budgetStart + j + 1) % globalActionBudget
+			e.budgetTimes[dst] = e.budgetTimes[src]
+		}
+		e.budgetTimes[(e.budgetStart+e.budgetCount-1)%globalActionBudget] = time.Time{}
+		e.budgetCount--
+		return
+	}
 }
 
 // newRetryTimer returns the backoff fire channel plus a stop func for the
@@ -675,12 +708,16 @@ func (e *Engine) HandleEvent(ev rpm.Event) {
 		ops, ok := e.classifyPlan(tp.pol)
 		if !ok {
 			// Malformed/unknown command: reject the whole batch before it can
-			// take a queue slot or a lock (#2139 pre-classify).
+			// take a queue slot or a lock (#2139 pre-classify). #14724: the
+			// crossing produced no remediation, so release its edge latch.
 			e.counters.rejected.Add(1)
+			e.releaseEdgeLatch(tp.pol.Name, ev.Name, tp.semRev)
 			continue
 		}
 		if len(ops) == 0 {
-			continue // nothing to do
+			// Nothing to do, and nothing fired: release the latch (#14724).
+			e.releaseEdgeLatch(tp.pol.Name, ev.Name, tp.semRev)
+			continue
 		}
 		// Stamp the action with the policy's semantic revision as of this
 		// evaluate (#3750) so the worker can revalidate it against live engine
@@ -871,7 +908,12 @@ func (e *Engine) runAction(a plannedAction) {
 			// the cooldown, while this action waited (on a held lock or in the
 			// queue). Drop it — do NOT commit a batch no active policy authorizes,
 			// and do NOT retry (the staleness is terminal for this action).
+			// #14724: release the latch — for removed/redefined the release is
+			// a revision-guarded no-op, for cooldown-stale the sibling commit
+			// (not this crossing) armed the cooldown, which still throttles
+			// re-fire until it expires.
 			e.counters.droppedStale.Add(1)
+			e.releaseEdgeLatch(a.policyName, a.event, a.semRev)
 			slog.Info("event-options: remediation dropped (stale queued action)",
 				"policy", a.policyName, "err", err)
 			return
@@ -938,7 +980,12 @@ func (e *Engine) runAction(a plannedAction) {
 			continue
 		}
 		// Permanent failure (bad apply / CommitCheck reject): do not retry.
+		// #14724: release the latch — a transient commitFn (nil, err) is
+		// classed permanent here, and wedging the latch would suppress every
+		// later sustained-fault event. Deterministic rejections re-attempt
+		// (and re-count) per event, which is the accepted churn.
 		e.counters.rejected.Add(1)
+		e.releaseEdgeLatch(a.policyName, a.event, a.semRev)
 		slog.Warn("event-options: remediation rejected",
 			"policy", a.policyName, "err", err)
 		return
@@ -1065,8 +1112,11 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 	}
 	// Reserve the cross-policy budget only when this action is ready to commit.
 	// Queue-time admission would let a held worker accumulate expired budget
-	// timestamps and then release an unbounded commit burst.
-	if !e.reserveGlobalCommit(a.policyOrder) {
+	// timestamps and then release an unbounded commit burst. #14724: a commit
+	// that never promotes refunds the slot below — only a promoted commit
+	// (clean or committed-with-debt) consumes the rolling budget.
+	reservedAt, ok := e.reserveGlobalCommit(a.policyOrder)
+	if !ok {
 		e.store.ExitConfigure()
 		return errGlobalActionBudget
 	}
@@ -1081,6 +1131,12 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 		// daemon path.
 		if _, err := e.store.CommitWithDescriptionAs("system:event-engine", desc); err != nil {
 			e.store.ExitConfigure()
+			e.refundGlobalCommit(reservedAt)
+			if errors.Is(err, configstore.ErrClusterReadOnly) {
+				// Preserve HA deferral on the standalone path too (#14724):
+				// wrapped, the read-only error classified the action rejected.
+				return fmt.Errorf("commit: %w", configstore.ErrClusterReadOnly)
+			}
 			return errBatch("commit: %w", err)
 		}
 		e.store.ExitConfigure()
@@ -1102,6 +1158,12 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 		// permanent rejection.
 		if compiled != nil {
 			return &commitDebtError{err: err}
+		}
+		e.refundGlobalCommit(reservedAt)
+		if errors.Is(err, configstore.ErrClusterReadOnly) {
+			// Preserve the sentinel for runAction's HA deferral (#14724):
+			// errBatch would hide it and class the standby action rejected.
+			return fmt.Errorf("commit: %w", configstore.ErrClusterReadOnly)
 		}
 		return errBatch("commit: %w", err)
 	}
