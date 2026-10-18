@@ -400,9 +400,11 @@ func (d *Daemon) nudgeDHCPLeaseSync() {
 // those still-mastered leases and let Kea re-allocate their in-use addresses.
 // The merge (PreSeedMemfileMerged{4,6}) reads the local set and fails closed on
 // an untrusted local source rather than replacing it. If Kea is down while
-// another RG remains MASTER, stillMastering preserves the fallback union and
-// avoids deleting LFC generations; only a pure-backup transition may use
-// peer-only replacement.
+// another RG remains MASTER, stillMastering preserves the fallback union
+// (instead of a peer-only replacement). Since #14730 every merged write is
+// an active-only snapshot that also removes stale LFC generations, because
+// the snapshot erases current-file tombstones and a retained generation
+// would resurrect released/declined leases on the Kea reload.
 //
 // Called from the MASTER-takeover path BEFORE dhcpServer.ApplyAsync(start).
 // The VRRP event loop holds no applySem, so factory reset cannot block this

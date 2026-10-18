@@ -208,6 +208,10 @@ func SanitizeSyncLeaseForFamily(family int, l SyncLease) (SyncLease, bool) {
 	if !validSyncLeasePrefixLen(l) {
 		return l, false
 	}
+	l.Hostname = stripLeaseControlChars(l.Hostname)
+	l.HWAddress = stripLeaseControlChars(l.HWAddress)
+	l.ClientID = stripLeaseControlChars(l.ClientID)
+	l.DUID = stripLeaseControlChars(l.DUID)
 	l.ValidLife = clampSyncLeaseLifetime(l.ValidLife)
 	l.Remaining = clampSyncLeaseLifetime(l.Remaining)
 	if l.ValidLife > 0 && l.Remaining > l.ValidLife {
@@ -215,6 +219,26 @@ func SanitizeSyncLeaseForFamily(family int, l SyncLease) (SyncLease, bool) {
 	}
 	l.PreferredRemaining = clampPreferredRemaining(clampSyncLeaseLifetime(l.PreferredRemaining), l.Remaining)
 	return l, true
+}
+
+// stripLeaseControlChars removes ASCII control characters (including CR/LF)
+// from a client- or peer-supplied lease string field (#14730). A bare CR in
+// a hostname breaks Go encoding/csv parsing of the memfile (9-field row ->
+// DDNS halt) and Kea's own CSV loader; stripping at the shared sanitize
+// boundary protects the memfile writer, socket seed, and cluster hold.
+func stripLeaseControlChars(s string) string {
+	if !strings.ContainsAny(s, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f\r\n\t") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // validSyncLeaseAddressForFamily reports whether address parses as an IP of the
@@ -873,17 +897,18 @@ func (m *Manager) controlSocket(family int) string {
 // (now + Remaining) so peer wall-clock skew never enters the seeded expiry.
 //
 // The file is written atomically (fsatomic) with Kea's canonical v4 memfile
-// header so Kea parses it cleanly. It OVERWRITES any existing memfile: on
-// takeover the held peer set is the authoritative serving state, and Kea's own
-// LFC will compact going forward.
+// header so Kea parses it cleanly. It OVERWRITES any existing memfile and
+// removes stale LFC generations (#14730): on takeover the held peer set is
+// the authoritative serving state, and a retained generation could replay
+// a tombstoned lease the active-only snapshot erased.
 func (m *Manager) PreSeedMemfile4(leases []SyncLease, now time.Time) error {
-	return m.writeMemfile4(m.leaseFile(4), leases, now)
+	return m.writeMemfile4ReplacingLFC(m.leaseFile(4), leases, now)
 }
 
 // PreSeedMemfile6 writes the held peer v6 leases into the Kea v6 memfile CSV
 // before Kea start (#2239 Q3). See PreSeedMemfile4.
 func (m *Manager) PreSeedMemfile6(leases []SyncLease, now time.Time) error {
-	return m.writeMemfile6(m.leaseFile(6), leases, now)
+	return m.writeMemfile6ReplacingLFC(m.leaseFile(6), leases, now)
 }
 
 // PreSeedMemfileMerged4 pre-seeds the Kea v4 memfile with the UNION of this
@@ -897,32 +922,28 @@ func (m *Manager) PreSeedMemfile6(leases []SyncLease, now time.Time) error {
 // concurrent apply/restart from reopening Kea during that operation.
 func (m *Manager) PreSeedMemfileMerged4(ctx context.Context, peer []SyncLease, now time.Time, stillMastering bool) error {
 	return m.withQuiescedPreSeed(ctx, 4, now, func(local []SyncLease, live bool) error {
-		if !live && stillMastering {
-			return m.writeMemfile4(m.leaseFile(4), mergeLeasesByIdentity(local, peer, 4), now)
-		}
-		if !live {
-			// The fallback was parsed only to distinguish a trusted empty file
-			// from a corrupt source. It is not current authority for a
-			// pure-backup takeover, so write the peer set and replace stale LFC
-			// generations.
+		if !live && !stillMastering {
 			return m.writeMemfile4ReplacingLFC(
 				m.leaseFile(4), mergeLeasesByIdentity(nil, peer, 4), now)
 		}
-		return m.writeMemfile4(m.leaseFile(4), mergeLeasesByIdentity(local, peer, 4), now)
+		// #14730: every merged write replaces the current file with an
+		// active-only snapshot, erasing any state=1/2 tombstones it held.
+		// Stale .1/.2/.completed generations still carrying the pre-release
+		// active row would then resurrect the lease in Kea and in
+		// parseActiveLeases. Always remove them; the merged set already
+		// includes every live local lease worth preserving.
+		return m.writeMemfile4ReplacingLFC(m.leaseFile(4), mergeLeasesByIdentity(local, peer, 4), now)
 	})
 }
 
 // PreSeedMemfileMerged6 is the v6 counterpart of PreSeedMemfileMerged4 (#9853).
 func (m *Manager) PreSeedMemfileMerged6(ctx context.Context, peer []SyncLease, now time.Time, stillMastering bool) error {
 	return m.withQuiescedPreSeed(ctx, 6, now, func(local []SyncLease, live bool) error {
-		if !live && stillMastering {
-			return m.writeMemfile6(m.leaseFile(6), mergeLeasesByIdentity(local, peer, 6), now)
-		}
-		if !live {
+		if !live && !stillMastering {
 			return m.writeMemfile6ReplacingLFC(
 				m.leaseFile(6), mergeLeasesByIdentity(nil, peer, 6), now)
 		}
-		return m.writeMemfile6(m.leaseFile(6), mergeLeasesByIdentity(local, peer, 6), now)
+		return m.writeMemfile6ReplacingLFC(m.leaseFile(6), mergeLeasesByIdentity(local, peer, 6), now)
 	})
 }
 
@@ -935,7 +956,7 @@ func (m *Manager) PreSeedMemfileMerged4WithAuthority(ctx context.Context, peer L
 			return m.writeMemfile4ReplacingLFC(
 				m.leaseFile(4), mergeLeasesByAuthority(nil, peer, 4, authority, stillMastering), now)
 		}
-		return m.writeMemfile4(
+		return m.writeMemfile4ReplacingLFC(
 			m.leaseFile(4), mergeLeasesByAuthority(local, peer, 4, authority, stillMastering), now)
 	})
 }
@@ -947,7 +968,7 @@ func (m *Manager) PreSeedMemfileMerged6WithAuthority(ctx context.Context, peer L
 			return m.writeMemfile6ReplacingLFC(
 				m.leaseFile(6), mergeLeasesByAuthority(nil, peer, 6, authority, stillMastering), now)
 		}
-		return m.writeMemfile6(
+		return m.writeMemfile6ReplacingLFC(
 			m.leaseFile(6), mergeLeasesByAuthority(local, peer, 6, authority, stillMastering), now)
 	})
 }
@@ -1404,10 +1425,10 @@ func (m *Manager) writeMemfileAtomic(path, content string) error {
 	return writeMemfileFile(path, []byte(content), 0640, uid, gid, ok)
 }
 
-// writeMemfile4ReplacingLFC performs a peer-only takeover pre-seed and then
-// removes prior LFC generations. It is used only when the local source was a
-// stopped-Kea fallback; the live-socket active-active union path retains Kea's
-// normal LFC lifecycle (#9853).
+// writeMemfile4ReplacingLFC writes an active-only current file and then
+// removes prior LFC generations. Every merged/plain pre-seed uses it
+// (#14730): the active-only snapshot erases current-file tombstones, so
+// leaving .1/.2/.completed would resurrect released/declined leases.
 func (m *Manager) writeMemfile4ReplacingLFC(path string, leases []SyncLease, now time.Time) error {
 	if err := m.writeMemfile4(path, leases, now); err != nil {
 		return err
@@ -1530,7 +1551,8 @@ func (m *Manager) warnf(format string, args ...any) {
 // hex-encoded identities, hostnames) do not normally contain commas, but a
 // hostname could; quote-escape per RFC 4180 to stay safe.
 func csvField(s string) string {
-	if strings.ContainsAny(s, ",\"\n") {
+	s = stripLeaseControlChars(s)
+	if strings.ContainsAny(s, ",\"\r\n") {
 		return "\"" + strings.ReplaceAll(s, "\"", "\"\"") + "\""
 	}
 	return s

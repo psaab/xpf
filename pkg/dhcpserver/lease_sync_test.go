@@ -1206,12 +1206,15 @@ func TestPreSeedMemfileMerged_DropsFallbackMemfileLeases9853(t *testing.T) {
 // TestPreSeedMemfileMerged_StaggeredFailoverPreservesStillMastered9853 covers
 // the hostile-review race: RG-X is already MASTER, its Kea restart is still in
 // flight, and RG-Y's synchronous pre-seed runs while the control socket is
-// down. The fallback union must preserve RG-X's binding and leave its LFC
-// generation intact while adding RG-Y's peer binding.
+// down. The fallback union (read via the LFC set, so a local row living only
+// in .1 is captured) must preserve RG-X's binding while adding RG-Y's peer
+// binding. Since #14730 the merged active-only current file supersedes the
+// LFC generations, which are removed to avoid resurrecting tombstoned rows;
+// the local binding survives in the merged current file, not the generation.
 //
-// Fail-on-revert: making stillMastering take the peer-only replacement branch
-// drops the RG-X assertion and removes the generation, reproducing the
-// duplicate-allocation wipe.
+// Fail-on-revert: making stillMastering take the peer-only branch drops the
+// RG-X assertion, reproducing the duplicate-allocation wipe; retaining the
+// stale generation after #14730 would resurrect tombstoned leases.
 func TestPreSeedMemfileMerged_StaggeredFailoverPreservesStillMastered9853(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	tests := []struct {
@@ -1312,8 +1315,8 @@ func TestPreSeedMemfileMerged_StaggeredFailoverPreservesStillMastered9853(t *tes
 				t.Fatalf("still-mastered fallback union lost a binding: got %v, want %s and %s",
 					seen, tc.local.Address, tc.peer.Address)
 			}
-			if _, statErr := os.Stat(generation); statErr != nil {
-				t.Fatalf("still-mastered LFC generation was removed: %v", statErr)
+			if _, statErr := os.Stat(generation); !os.IsNotExist(statErr) {
+				t.Fatalf("stale LFC generation survived merged pre-seed (#14730): %v", statErr)
 			}
 		})
 	}
