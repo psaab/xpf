@@ -461,8 +461,9 @@ that actually reach address-only reservation.
 **The two paths pin different things, and that changes what can fail.** Under
 PAT the lease pins a `(address, port)` and the PORT is the fragile half — with
 `address-persistent` the address survives a failover for free, because
-`sticky_pool_index` is a pure function of `(src_ip, pool_len)` and both nodes
-compute it. Under `port no-translation` the client keeps its own source port on
+`sticky_pool_index` is a pure function of `(src_ip, pool_len)` under the fixed
+`STICKY_POOL_HASH_SEED` (#14627) and both nodes compute it. Under
+`port no-translation` the client keeps its own source port on
 the wire, so there is no translated port at all: the lease pins an ADDRESS, and
 the address is the whole promise. A test that asserts the address while
 `address-persistent` is on measures the hash rather than the repair, which is

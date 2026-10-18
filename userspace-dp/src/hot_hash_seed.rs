@@ -29,6 +29,15 @@
 // cache/map placement, predictable ECMP selection does not enable collision
 // eviction or chain amplification.
 //
+// Address-persistent SNAT sticky selection (`sticky_pool_index`, #14627)
+// likewise does not use this seed: it is a cross-node contract (one pool
+// address per host, surviving failover for new flows), so it uses its own
+// fixed domain seed (`STICKY_POOL_HASH_SEED`) over the same keyed
+// multiply-mix hasher. Its output is the wire-visible translated address
+// and it indexes no attacker-growable table, so — like ECMP — predictable
+// selection enables no eviction/amplification, while the keyed folds
+// still destroy the seed-independent collision families of additive FxHash.
+//
 // The draw reuses the exact OS-entropy mechanism vetted for the CoS seed
 // (`getrandom(2)` with a CLOCK_MONOTONIC + pid + stack-address fallback
 // and a never-zero invariant) via `os_random_seed_u64`, so there is one

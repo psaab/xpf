@@ -1130,9 +1130,9 @@ the NAT module applies it:
   from different subscribers to the same popular remote — a VPN concentrator, a
   cloud SASE endpoint — collided on whichever pool address they landed on, and
   the second was denied while other pool addresses sat idle. With global source
-  NAT `address-persistent`, the userspace dataplane hashes a domain-tag seed,
-  address family, and canonical source IP bytes with a seeded non-cryptographic
-  FxHash (`rustc_hash`) to choose a stable pool index (userspace-v2; #2349
+  NAT `address-persistent`, the userspace dataplane hashes the source IP with
+  the keyed multiply-mix hasher under the fixed domain seed
+  `STICKY_POOL_HASH_SEED` to choose a stable pool index (#14627; #2349
   replaced the prior SHA-256 selector — this is load distribution, not a
   security primitive). See `docs/userspace-dataplane-gaps.md` (Source NAT pool
   mode) for the authoritative algorithm/contract. This is sticky within the
