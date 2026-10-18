@@ -181,6 +181,24 @@ func evaluateCommandRegex(
 				class, strings.Join(pipeWords[1:], " "))
 		}
 	}
+	// #14714: a multi-stage chain reaches here as one suffix
+	// (`no-more | match xpf`). Every later stage's verb must be a
+	// filter the CLI honours, like the first: an unrecognised verb
+	// after a recognised first stage cannot be evaluated, so fail
+	// closed rather than matching only the recognised prefix. A `|`
+	// inside a quoted/typed filter argument is not a stage separator
+	// for this check beyond the verb position — SplitPipe itself
+	// splits at the last " | " for exactly that reason — so only a
+	// `|` immediately followed by a bare verb token is inspected,
+	// which is precisely how dispatch recursed over the chain.
+	for i := 0; i+2 < len(pipeWords); i++ {
+		if pipeWords[i] == "|" && !authorizablePipe(pipeWords[i+1]) {
+			return fmt.Errorf(
+				"permission denied: login class %q restricts commands and the output pipe %q is not "+
+					"a recognised filter, so the restriction cannot be evaluated",
+				class, pipeWords[i+1])
+		}
+	}
 	command := strings.Join(canon, " ")
 	matched := command
 	if len(pipeWords) > 0 {

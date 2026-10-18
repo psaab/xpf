@@ -79,8 +79,23 @@ func (c *CLI) dispatchWithPipe(cmd, pipeType, pipeArg string) error {
 	// already removed it. Hand it to the gate for the duration of this single
 	// dispatch and clear it after, so a later un-piped command on the same CLI
 	// cannot inherit a stale suffix.
+	//
+	// #14714: SplitPipe splits at the LAST " | ", so this frame holds the
+	// rightmost stage and dispatch(cmd) recurses here for each earlier
+	// stage. Accumulate rather than overwrite: prepend this stage to any
+	// suffix an outer frame already installed, so the innermost frame's
+	// gate sees the full chain in original order
+	// (cmd | first | ... | last). Overwriting hid every stage after the
+	// leftmost from allow/deny-commands — prepending a permitted
+	// `| no-more` defeated a rule on the denied stage that followed it,
+	// while all filter goroutines still executed.
 	prevSuffix := c.pendingPipeSuffix
-	c.pendingPipeSuffix = strings.TrimSpace(pipeType + " " + pipeArg)
+	stage := strings.TrimSpace(pipeType + " " + pipeArg)
+	if prevSuffix != "" {
+		c.pendingPipeSuffix = stage + " | " + prevSuffix
+	} else {
+		c.pendingPipeSuffix = stage
+	}
 	defer func() { c.pendingPipeSuffix = prevSuffix }()
 
 	return c.dispatch(cmd)
