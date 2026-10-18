@@ -1308,6 +1308,115 @@ fn session_open_rule_id_at_capacity_boundary_14839() {
     }
 }
 
+/// #14621: full-length sweep of the session open/update rule_id guard.
+/// The #14839 boundary test pins the exact-fit edge; this sweep is the
+/// acceptance criterion named for Y22-01: every rule_id length in
+/// 0..=600, for v4 and v6, on both the OPEN and UPDATE paths, must
+/// encode without panicking, must stay within the 512-byte frame, and
+/// must round-trip the handshake/provenance/PPTP trailer exactly as Go
+/// decodeSessionEvent reads it (length-prefixed id, then 1+1+8 bytes).
+/// A mutation restoring the old `+ 2` reservation turns the cells that
+/// overflow the trailer window (v6: 307..=314, v4: 367..=374) red with
+/// a range-out-of-bounds panic on the PPTP write.
+#[test]
+fn session_open_update_rule_id_len_sweep_never_panics_14621() {
+    let zones = test_zone_map();
+    const TRAILER: usize = 10; // handshake 1 + provenance 1 + PPTP pair 8
+    const PPTP: u64 = 0x0102_0304_0506_0708;
+    for key in [test_key_v4(), test_key_v6()] {
+        // Baseline empty-id frame: rule_id prefix sits TRAILER + 2 bytes
+        // back from the end, regardless of address family.
+        let base = EventFrame::encode_session_open(
+            1,
+            &key,
+            &test_decision(),
+            &test_metadata(),
+            &zones,
+            false,
+            0,
+            0,
+        );
+        let base_payload_len = base.len as usize - FRAME_HEADER_SIZE;
+        let prefix_off = base_payload_len - 2 - TRAILER;
+        let max_fit = EVENT_FRAME_CAPACITY - FRAME_HEADER_SIZE - (prefix_off + 2 + TRAILER);
+        assert_eq!(
+            base.len as usize,
+            FRAME_HEADER_SIZE + prefix_off + 2 + TRAILER
+        );
+
+        for id_len in 0..=600usize {
+            let rule_id = "x".repeat(id_len);
+            let mut metadata = test_metadata();
+            if id_len != 0 {
+                metadata.policy_counter = Some(std::sync::Arc::new(
+                    crate::policy::PolicyRuleCounter::with_rule_id(&rule_id),
+                ));
+            }
+            let frames = [
+                EventFrame::encode_session_open_with_handshake_state(
+                    1,
+                    &key,
+                    &test_decision(),
+                    &metadata,
+                    &zones,
+                    false,
+                    0,
+                    0,
+                    3,
+                    Some(true),
+                    PPTP,
+                ),
+                EventFrame::encode_session_update_with_handshake_state(
+                    2,
+                    &key,
+                    &test_decision(),
+                    &metadata,
+                    &zones,
+                    false,
+                    0,
+                    0,
+                    3,
+                    Some(true),
+                    PPTP,
+                ),
+            ];
+            for frame in &frames {
+                let payload = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
+                assert!(
+                    frame.len as usize <= EVENT_FRAME_CAPACITY,
+                    "rule_id len {id_len}: frame exceeds capacity"
+                );
+                // Mirror of pkg/dataplane/userspace decodeSessionEvent:
+                // u16 length prefix, then id bytes, then handshake (1),
+                // provenance (1) and the PPTP pair (8), all of which must
+                // lie inside the carried payload.
+                assert!(
+                    prefix_off + 2 <= payload.len(),
+                    "rule_id len {id_len}: prefix outside payload"
+                );
+                let carried = u16::from_le_bytes(
+                    payload[prefix_off..prefix_off + 2].try_into().unwrap(),
+                ) as usize;
+                let want_carried = if id_len <= max_fit { id_len } else { 0 };
+                assert_eq!(carried, want_carried, "rule_id len {id_len}");
+                let id_end = prefix_off + 2 + carried;
+                assert!(
+                    payload[prefix_off + 2..id_end].iter().all(|&b| b == b'x'),
+                    "rule_id len {id_len}: id bytes corrupted"
+                );
+                assert_eq!(payload.len(), id_end + TRAILER, "rule_id len {id_len}");
+                assert_eq!(payload[id_end], 3, "rule_id len {id_len}: handshake");
+                assert_eq!(payload[id_end + 1], 2, "rule_id len {id_len}: provenance");
+                assert_eq!(
+                    u64::from_le_bytes(payload[id_end + 2..id_end + 10].try_into().unwrap()),
+                    PPTP,
+                    "rule_id len {id_len}: PPTP pair"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn test_encode_session_close_carries_ingress_after_legacy_marker11070() {
     for (key, want_af, want_len) in [(test_key_v4(), 4u8, 42usize), (test_key_v6(), 6u8, 66usize)] {
