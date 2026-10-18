@@ -121,10 +121,24 @@ pub(super) fn can_generate_icmp_error_reply(
             // SOURCE would send the generated error to that directed
             // broadcast (Smurf backscatter); `source_is_invalid_for_icmp_error`
             // only catches the limited broadcast (255.255.255.255).
+            // #14654: scope directed-broadcast suppression to the trigger's table.
+            let icmp_table = crate::afxdp::frame::icmp_error_table_for_meta(
+                forwarding,
+                meta.ingress_ifindex as i32,
+                meta.ingress_vlan_id,
+            );
             if source_is_invalid_for_icmp_error(meta.addr_family, packet)
-                || src_is_directed_broadcast(forwarding, packet)
+                || crate::afxdp::frame::src_is_directed_broadcast_in_table(
+                    forwarding,
+                    packet,
+                    icmp_table,
+                )
                 || dest_is_multicast_or_broadcast(meta.addr_family, packet)
-                || dest_is_directed_broadcast(forwarding, packet)
+                || crate::afxdp::frame::dest_is_directed_broadcast_in_table(
+                    forwarding,
+                    packet,
+                    icmp_table,
+                )
             {
                 return false;
             }

@@ -525,19 +525,35 @@ pub(in crate::afxdp) fn ptb_reply_suppressed(
     // broadcast (255.255.255.255). v4-only — IPv6 has no broadcast and
     // `src_is_directed_broadcast` reads the v4 source octets, so it is
     // gated on AF_INET (matching the #2411 destination gate below).
-    if meta.addr_family as i32 == libc::AF_INET && src_is_directed_broadcast(forwarding, packet) {
+    // #14654: scope both directed-broadcast checks to the trigger's table.
+    let icmp_table = if meta.addr_family as i32 == libc::AF_INET {
+        crate::afxdp::frame::icmp_error_table_for_meta(
+            forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+        )
+    } else {
+        None
+    };
+    if meta.addr_family as i32 == libc::AF_INET
+        && crate::afxdp::frame::src_is_directed_broadcast_in_table(
+            forwarding,
+            packet,
+            icmp_table,
+        )
+    {
         return true;
     }
-    // #2314: never generate a PTB in reply to a datagram whose IP
-    // destination was multicast or broadcast.
     if dest_is_multicast_or_broadcast(meta.addr_family, packet) {
         return true;
     }
-    // #2411: never generate a PTB in reply to an IPv4 subnet-directed
-    // broadcast (all-ones host of a connected prefix). v4-only — IPv6
-    // has no broadcast and `dest_is_directed_broadcast` reads the v4
-    // destination octets, so it is gated on AF_INET.
-    if meta.addr_family as i32 == libc::AF_INET && dest_is_directed_broadcast(forwarding, packet) {
+    if meta.addr_family as i32 == libc::AF_INET
+        && crate::afxdp::frame::dest_is_directed_broadcast_in_table(
+            forwarding,
+            packet,
+            icmp_table,
+        )
+    {
         return true;
     }
     // The L4 offset on a non-first IPv6 fragment points into opaque fragment

@@ -91,10 +91,48 @@ pub(in crate::afxdp) fn dest_is_multicast_or_broadcast(addr_family: u8, packet: 
 /// directed broadcast: a /31 (RFC 3021) has no broadcast and a /32's
 /// host-all-ones value equals the host itself, so both are skipped to
 /// avoid mis-suppressing a legitimate unicast to a /32 connected host.
+
+/// #14654: routing table owning the trigger's ingress routing domain,
+/// for ICMP-error directed-broadcast scoping. Domain 0 owns `inet.0`;
+/// a nonzero domain resolves through the installing-table registry.
+/// `None` (synthetic/ambiguous domain or a v4-less instance) keeps the
+/// legacy any-table behaviour rather than guessing a table.
+#[inline]
+pub(in crate::afxdp) fn icmp_error_table_for_meta<'a>(
+    forwarding: &'a ForwardingState,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+) -> Option<&'a str> {
+    let domain = crate::afxdp::forwarding::ingress_routing_domain(
+        forwarding,
+        ingress_ifindex,
+        ingress_vlan_id,
+        None,
+    );
+    if domain == 0 {
+        return Some("inet.0");
+    }
+    forwarding
+        .install_tables
+        .get(&domain)
+        .and_then(|row| row.v4.as_deref())
+}
+
 #[inline]
 pub(in crate::afxdp) fn dest_is_directed_broadcast(
     forwarding: &ForwardingState,
     packet: &[u8],
+) -> bool {
+    dest_is_directed_broadcast_in_table(forwarding, packet, None)
+}
+
+/// #14654: table-scoped variant of [`dest_is_directed_broadcast`];
+/// `table = None` keeps the any-table behaviour.
+#[inline]
+pub(in crate::afxdp) fn dest_is_directed_broadcast_in_table(
+    forwarding: &ForwardingState,
+    packet: &[u8],
+    table: Option<&str>,
 ) -> bool {
     let Some(dst) = packet.get(16..20) else {
         // Fail closed: a destination we cannot read must suppress the
@@ -102,7 +140,7 @@ pub(in crate::afxdp) fn dest_is_directed_broadcast(
         return true;
     };
     let dst = Ipv4Addr::new(dst[0], dst[1], dst[2], dst[3]);
-    v4_addr_is_directed_broadcast(forwarding, dst)
+    v4_addr_is_directed_broadcast_in_table(forwarding, dst, table)
 }
 
 /// Shared connected-table directed-broadcast test for a single IPv4
@@ -124,10 +162,21 @@ pub(in crate::afxdp) fn dest_is_directed_broadcast(
 /// avoid mis-classifying a legitimate unicast to a /32 connected host.
 #[inline]
 fn v4_addr_is_directed_broadcast(forwarding: &ForwardingState, addr: Ipv4Addr) -> bool {
-    forwarding
-        .connected_v4
-        .iter()
-        .any(|entry| entry.prefix.prefix_len() < 31 && entry.prefix.directed_broadcast() == addr)
+    v4_addr_is_directed_broadcast_in_table(forwarding, addr, None)
+}
+
+/// #14654: table-scoped directed-broadcast test; `None` is any-table.
+#[inline]
+pub(in crate::afxdp) fn v4_addr_is_directed_broadcast_in_table(
+    forwarding: &ForwardingState,
+    addr: Ipv4Addr,
+    table: Option<&str>,
+) -> bool {
+    forwarding.connected_v4.iter().any(|entry| {
+        entry.prefix.prefix_len() < 31
+            && entry.prefix.directed_broadcast() == addr
+            && table.is_none_or(|t| entry.table == t)
+    })
 }
 
 /// #2487: RFC 1812 §4.3.2.7 — a router MUST NOT originate an ICMP error
@@ -156,13 +205,24 @@ pub(in crate::afxdp) fn src_is_directed_broadcast(
     forwarding: &ForwardingState,
     packet: &[u8],
 ) -> bool {
+    src_is_directed_broadcast_in_table(forwarding, packet, None)
+}
+
+/// #14654: table-scoped variant of [`src_is_directed_broadcast`];
+/// `table = None` keeps the any-table behaviour.
+#[inline]
+pub(in crate::afxdp) fn src_is_directed_broadcast_in_table(
+    forwarding: &ForwardingState,
+    packet: &[u8],
+    table: Option<&str>,
+) -> bool {
     let Some(src) = packet.get(12..16) else {
         // Fail closed: a source we cannot read must suppress the error
         // rather than risk directed-broadcast backscatter.
         return true;
     };
     let src = Ipv4Addr::new(src[0], src[1], src[2], src[3]);
-    v4_addr_is_directed_broadcast(forwarding, src)
+    v4_addr_is_directed_broadcast_in_table(forwarding, src, table)
 }
 
 /// #2367: RFC 1812 §4.3.2.7 / RFC 4443 §2.4(e) — a router MUST NOT
@@ -345,16 +405,17 @@ pub(in crate::afxdp) fn transit_src_is_martian(
     }
 }
 
-/// #11413/#13960/#13981: transit destination-class gate for special addresses
-/// that routers must not forward as ordinary unicast. LocalDelivery remains
-/// outside the caller-side gate so firewall-local traffic is intact.
-///
-/// IPv4 covers this-network (`0/8`), multicast (224/4), limited broadcast,
-/// loopback (127/8), link-local (169.254/16), and reserved (240/4). IPv6
-/// covers unspecified (`::`), loopback (`::1`), multicast (ff00::/8), and
-/// link-local (fe80::/10); IPv6 has no broadcast.
+/// #11413/#13960/#13981/#14654: transit destination-class gate.
+/// IPv4 covers this-network (`0/8`), multicast, limited broadcast,
+/// loopback, link-local, reserved (240/4), and connected directed
+/// broadcasts in the flow's routing domain (RFC 2644). IPv6 covers
+/// unspecified, loopback, multicast, link-local; no broadcast.
 #[inline]
-pub(in crate::afxdp) fn transit_dst_is_martian(ip: IpAddr) -> bool {
+pub(in crate::afxdp) fn transit_dst_is_martian(
+    forwarding: &ForwardingState,
+    ip: IpAddr,
+    routing_domain: u32,
+) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
@@ -364,6 +425,9 @@ pub(in crate::afxdp) fn transit_dst_is_martian(ip: IpAddr) -> bool {
                 || v4.is_loopback()
                 || v4.is_link_local()
                 || o[0] >= 240
+                || forwarding
+                    .connected_v4_directed_broadcasts
+                    .contains(&(routing_domain, v4))
         }
         IpAddr::V6(v6) => {
             v6.is_unspecified()

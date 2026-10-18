@@ -283,12 +283,21 @@ pub(in crate::afxdp) fn ingress_l2_group_unicast_ip(
     };
     match dst_ip {
         IpAddr::V4(dst) => {
+            // #14654: a directed broadcast is only this property in the
+            // ingress routing domain; the same address may be a unicast
+            // host in another domain sharing the egress segment.
+            let domain = super::ingress_routing_domain(
+                forwarding,
+                ingress_meta.ingress_ifindex as i32,
+                ingress_meta.ingress_vlan_id,
+                None,
+            );
             !dst.is_unspecified()
                 && !dst.is_multicast()
                 && !dst.is_broadcast()
-                && !frame
-                    .get(ingress_meta.l3_offset as usize..)
-                    .is_some_and(|l3| crate::afxdp::frame::dest_is_directed_broadcast(forwarding, l3))
+                && !forwarding
+                    .connected_v4_directed_broadcasts
+                    .contains(&(domain, dst))
         }
         IpAddr::V6(dst) => !dst.is_unspecified() && !dst.is_multicast(),
     }

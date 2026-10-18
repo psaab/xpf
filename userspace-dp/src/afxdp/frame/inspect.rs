@@ -1418,9 +1418,11 @@ pub(in crate::afxdp) fn term_match_extra_from_meta(
 // and a fully-qualified `crate::afxdp::frame::inspect::...` path, and the second
 // would break on a move. See `addr_class.rs` for why this group was the seam.
 pub(in crate::afxdp) use super::addr_class::{
-    dest_is_directed_broadcast, dest_is_multicast_or_broadcast, l2_dst_is_group_or_broadcast,
+    dest_is_directed_broadcast, dest_is_directed_broadcast_in_table,
+    dest_is_multicast_or_broadcast, icmp_error_table_for_meta, l2_dst_is_group_or_broadcast,
     neighbor_ip_is_learnable, neighbor_mac_is_learnable, source_is_invalid_for_icmp_error,
-    src_is_directed_broadcast, transit_dst_is_martian, transit_src_is_martian,
+    src_is_directed_broadcast, src_is_directed_broadcast_in_table, transit_dst_is_martian,
+    transit_src_is_martian, v4_addr_is_directed_broadcast_in_table,
 };
 
 /// Is the shim-stamped metadata tuple a RESOLVED flow identity, or only the

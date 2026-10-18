@@ -307,9 +307,13 @@ pub(super) fn stage_flow_cache_hit(
         // #11413: a Consumed FlowCache hit bypasses the slow-path destination
         // class gate, so reject it before liveness, rewrite, accounting or TX.
         if transit_destination_class_drop(
+            worker_ctx.forwarding,
             cached_decision.resolution.disposition,
             flow.dst_ip,
             cached_decision.nat.rewrite_dst,
+            flow.forward_key.routing_domain,
+            ForwardPacketMeta::from(meta),
+            fabric_arrival_zone,
         ) {
             scratch.scratch_recycle.push(desc.addr);
             telemetry.counters.record_martian_drop();
