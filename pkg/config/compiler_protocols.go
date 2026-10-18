@@ -1391,6 +1391,9 @@ func compileRouterAdvertisement(node *Node, proto *ProtocolsConfig) error {
 							if v := nodeVal(child); v != "" {
 								if n, err := strconv.Atoi(v); err == nil {
 									pfx.PreferredLife = n
+									// #14606: an explicit 0 (deprecated) must
+									// stay distinguishable from an absent leaf.
+									pfx.PreferredLifeSet = true
 								}
 							}
 						}

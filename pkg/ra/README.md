@@ -546,6 +546,14 @@ never retried and the stale IPv6 default-router identity lingered on hosts
   §4.2 ND timer hints wire-stamped by #4307; here 0=unspecified maps directly
   to a zero wire field with no unset/default coercion, so a plain int compare
   is exact and no companion set-flag is needed).
+  - **`RAPrefix.PreferredLifeSet` (#14606).** `buildRA` honors an
+    explicitly-set preferred lifetime verbatim, including 0 (a deprecated
+    DHCPv6-PD prefix, RFC 8415 §21.22); only an unset preferred life takes
+    the 7-day default. The flag is set by the compiler when the
+    `preferred-lifetime` leaf is present and always by `buildRAConfigs`
+    on the PD path, so it is compared in `configEqual` alongside
+    `PreferredLife` — omitting it would keep a stale fully-preferred
+    advertisement after a delegation is deprecated.
   - **The converse also holds: CIDR fields compare by parsed value, not raw
     text (#4590 A5-03).** `buildRA` re-parses `NAT64Prefix` and each advertised
     `Prefixes[i].Prefix` via `netip.ParsePrefix`, so two strings that parse to

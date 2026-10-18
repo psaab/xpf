@@ -888,8 +888,13 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 		if validLife <= 0 {
 			validLife = defaultValidLifetime
 		}
+		// #14606: an explicitly-set preferred lifetime (PreferredLifeSet)
+		// is honored verbatim, including 0 = deprecated (RFC 8415 §21.22 /
+		// RFC 4862 §5.5.4). Only an unset preferred life falls back to the
+		// 7-day default; negative explicit values still take the default,
+		// matching the <=0 substitution for unset/hand-built values.
 		prefLife := int64(pfx.PreferredLife)
-		if prefLife <= 0 {
+		if prefLife < 0 || (prefLife == 0 && !pfx.PreferredLifeSet) {
 			prefLife = defaultPreferredLifetime
 		}
 
@@ -898,9 +903,9 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 		// before converting seconds to time.Duration. Without this sink clamp,
 		// 2^32 seconds wraps to 0 in ndp's uint32 marshal (expiring the on-link
 		// prefix immediately), while larger values can overflow Duration
-		// itself. Keep the <=0 default substitution above unchanged, and clamp
-		// preferred only after valid so the RFC 4861 pref<=valid ordering is
-		// evaluated on the final advertised values.
+		// itself. Keep the default substitution above unchanged (an explicit
+		// preferred 0 stays 0), and clamp preferred only after valid so the
+		// RFC 4861 pref<=valid ordering is evaluated on the final values.
 		validLife = clampPIOSeconds12193(validLife)
 		prefLife = clampPIOSeconds12193(prefLife)
 
@@ -909,11 +914,12 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 		// conforming host treats prefLife>validLife as an error and ignores
 		// the prefix. Clamp preferred DOWN, never valid upward: extending the
 		// valid lifetime would advertise a longer-lived prefix than configured.
-		// The <=0 defaults and sink saturations above leave both values in
-		// [0, 0xffffffff], so the comparison is a straight integer ordering
-		// check on the final advertised values. The infinite value is simply
-		// the largest expressible lifetime: finite valid life pulls a larger
-		// preferred life down to it, while infinite valid life preserves any
+		// The default substitutions and sink saturations above leave both
+		// values in [0, 0xffffffff] (an explicit preferred 0 included), so
+		// the comparison is a straight integer ordering check on the final
+		// advertised values. The infinite value is simply the largest
+		// expressible lifetime: finite valid life pulls a larger preferred
+		// life down to it, while infinite valid life preserves any
 		// preferred lifetime that is itself in range.
 		if prefLife > validLife {
 			prefLife = validLife

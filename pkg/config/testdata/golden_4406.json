@@ -4009,6 +4009,7 @@
                 "Autonomous": true,
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
+                "PreferredLifeSet": false,
                 "Delegated": false
               }
             ],
@@ -5466,6 +5467,7 @@
                 "Autonomous": true,
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
+                "PreferredLifeSet": false,
                 "Delegated": false
               }
             ],
@@ -6922,6 +6924,7 @@
                 "Autonomous": true,
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
+                "PreferredLifeSet": false,
                 "Delegated": false
               }
             ],
@@ -8378,6 +8381,7 @@
                 "Autonomous": true,
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
+                "PreferredLifeSet": false,
                 "Delegated": false
               }
             ],
@@ -9838,6 +9842,7 @@
                 "Autonomous": true,
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
+                "PreferredLifeSet": false,
                 "Delegated": false
               }
             ],
@@ -11297,6 +11302,7 @@
                 "Autonomous": true,
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
+                "PreferredLifeSet": false,
                 "Delegated": false
               }
             ],
@@ -12500,6 +12506,7 @@
                 "Autonomous": true,
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
+                "PreferredLifeSet": false,
                 "Delegated": false
               }
             ],
@@ -13584,6 +13591,7 @@
                 "Autonomous": true,
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
+                "PreferredLifeSet": false,
                 "Delegated": false
               }
             ],
@@ -14667,6 +14675,7 @@
                 "Autonomous": true,
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
+                "PreferredLifeSet": false,
                 "Delegated": false
               }
             ],
@@ -15750,6 +15759,7 @@
                 "Autonomous": true,
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
+                "PreferredLifeSet": false,
                 "Delegated": false
               }
             ],
@@ -16837,6 +16847,7 @@
                 "Autonomous": true,
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
+                "PreferredLifeSet": false,
                 "Delegated": false
               }
             ],
@@ -17923,6 +17934,7 @@
                 "Autonomous": true,
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
+                "PreferredLifeSet": false,
                 "Delegated": false
               }
             ],

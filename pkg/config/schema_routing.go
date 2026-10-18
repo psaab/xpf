@@ -746,9 +746,11 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 					"no-onlink":     {desc: "Clear the on-link (L) flag", children: nil},
 					"no-autonomous": {desc: "Clear the autonomous (A) flag", children: nil},
 					// Prefix lifetimes compile with a bare strconv.Atoi
-					// (compiler_protocols.go) and treat 0 as "use the SLAAC
-					// default" (types_routing.go RAPrefix; pkg/ra sender clamps
-					// <=0 to defaultValid/PreferredLifetime). Type them as
+					// (compiler_protocols.go). Valid 0 means "use the SLAAC
+					// default"; preferred 0 is ambiguous at the int alone, so
+					// the compiler records PreferredLifeSet and pkg/ra honors
+					// an explicit preferred 0 as deprecated (#14606) while an
+					// absent leaf still defaults. Type them as
 					// non-negative integers so the gate rejects garbage (e.g.
 					// `valid-lifetime abc`, which previously stayed at 0 and
 					// silently fell back to the default) while still accepting

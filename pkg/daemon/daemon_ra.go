@@ -71,11 +71,16 @@ func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig 
 					continue
 				}
 				pfx.ValidLifetime = int(remValid.Seconds())
-				if remPref > 0 {
-					pfx.PreferredLife = int(remPref.Seconds())
-				} else {
-					pfx.PreferredLife = 0
-				}
+				// #14606: the remaining preferred lifetime is explicit,
+				// and 0 is legal (deprecated, RFC 8415 §21.22) — whether
+				// granted as 0 or decayed to 0 while valid remains.
+				// Record it so pkg/ra does not conflate deprecated-0
+				// with unset and re-advertise the dying prefix at the
+				// 7-day default. Valid 0 never reaches here (skipped
+				// above or left as the sender default sentinel when the
+				// granted valid lifetime itself is 0).
+				pfx.PreferredLife = int(remPref.Seconds())
+				pfx.PreferredLifeSet = true
 			}
 
 			if existing, ok := raByIface[mapping.RAIface]; ok {
