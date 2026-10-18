@@ -17,6 +17,8 @@ func TestEmitDropClassCounters_4768(t *testing.T) {
 	c := &xpfCollector{
 		userspaceMartianDropped: prometheus.NewDesc(
 			"xpf_userspace_martian_dropped_total", "test", nil, nil),
+		userspaceDNSIllegalReplyDropped: prometheus.NewDesc(
+			"xpf_userspace_dns_illegal_reply_dropped_total", "test", nil, nil),
 		userspaceIPv6ExtHeaderDropped: prometheus.NewDesc(
 			"xpf_userspace_ipv6_ext_header_dropped_total", "test", nil, nil),
 		userspaceV4MappedIPv6Dropped: prometheus.NewDesc(
@@ -32,11 +34,11 @@ func TestEmitDropClassCounters_4768(t *testing.T) {
 	status := dpuserspace.ProcessStatus{
 		Bindings: []dpuserspace.BindingStatus{
 			{
-				MartianDropped: 3, IPv6ExtHeaderDropped: 0, V4MappedIPv6Dropped: 4,
+				MartianDropped: 3, DNSIllegalReplyDropped: 2, IPv6ExtHeaderDropped: 0, V4MappedIPv6Dropped: 4,
 				UMEMSliceDropped: 1, UnknownVLANDropped: 2, DstMACDropped: 3,
 			},
 			{
-				MartianDropped: 4, IPv6ExtHeaderDropped: 10, V4MappedIPv6Dropped: 5,
+				MartianDropped: 4, DNSIllegalReplyDropped: 5, IPv6ExtHeaderDropped: 10, V4MappedIPv6Dropped: 5,
 				UMEMSliceDropped: 5, UnknownVLANDropped: 7, DstMACDropped: 11,
 			},
 			{
@@ -64,17 +66,18 @@ func TestEmitDropClassCounters_4768(t *testing.T) {
 		byName[m.Desc().String()] = pb.Counter.GetValue()
 	}
 
-	if count != 6 {
-		t.Fatalf("want exactly 6 aggregate metrics, got %d", count)
+	if count != 7 {
+		t.Fatalf("want exactly 7 aggregate metrics, got %d", count)
 	}
 
 	want := map[string]float64{
-		"martian_dropped_total":         7,
-		"ipv6_ext_header_dropped_total": 15,
-		"v4_mapped_ipv6_dropped_total":  15,
-		"umem_slice_dropped_total":      6,
-		"unknown_vlan_dropped_total":    9,
-		"dst_mac_dropped_total":         14,
+		"martian_dropped_total":           7,
+		"dns_illegal_reply_dropped_total": 7,
+		"ipv6_ext_header_dropped_total":   15,
+		"v4_mapped_ipv6_dropped_total":    15,
+		"umem_slice_dropped_total":        6,
+		"unknown_vlan_dropped_total":      9,
+		"dst_mac_dropped_total":           14,
 	}
 	for desc, value := range byName {
 		matched := false
@@ -110,7 +113,7 @@ func TestEmitDropClassCounters_4768(t *testing.T) {
 		}
 		zeros++
 	}
-	if zeros != 6 {
-		t.Errorf("empty bindings: want 6 series emitted at 0, got %d", zeros)
+	if zeros != 7 {
+		t.Errorf("empty bindings: want 7 series emitted at 0, got %d", zeros)
 	}
 }

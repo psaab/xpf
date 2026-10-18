@@ -1091,6 +1091,11 @@ pub(in crate::afxdp) struct BatchCounters {
     // classifications and post-FIB transit rejections. The latter do not
     // increment `route_miss_packets`.
     martian_dropped: u64,
+    // #14668: Junos-default drop of a first UDP packet to port 53 whose
+    // parseable DNS header has QR=1, when `allow-dns-reply` is unset.
+    // Batched like the sibling drop counters and flushed to
+    // BindingLiveState.dns_illegal_reply_dropped.
+    dns_illegal_reply_dropped: u64,
     // #4743: fail-closed drops of an over-limit IPv6 extension-header chain
     // (still on an ext header after MAX_IPV6_EXT_HEADERS iterations). Bumped at
     // the flow-parse stage when the helper walkers fail closed.
@@ -1156,6 +1161,14 @@ impl BatchCounters {
     pub(in crate::afxdp) fn record_martian_drop(&mut self) {
         self.touched = true;
         self.martian_dropped += 1;
+    }
+
+    /// #14668: record one Junos-default illegal DNS-reply drop (first UDP
+    /// packet to port 53 with QR=1, `allow-dns-reply` unset).
+    #[inline]
+    pub(in crate::afxdp) fn record_dns_illegal_reply_drop(&mut self) {
+        self.touched = true;
+        self.dns_illegal_reply_dropped += 1;
     }
 
     #[inline]
@@ -1686,6 +1699,12 @@ impl BatchCounters {
             live.martian_dropped
                 .fetch_add(self.martian_dropped, Ordering::Relaxed);
             self.martian_dropped = 0;
+        }
+        // #14668: Junos-default illegal DNS-reply drops.
+        if self.dns_illegal_reply_dropped != 0 {
+            live.dns_illegal_reply_dropped
+                .fetch_add(self.dns_illegal_reply_dropped, Ordering::Relaxed);
+            self.dns_illegal_reply_dropped = 0;
         }
         // #4743: over-limit IPv6 ext-header fail-closed-drop tally.
         if self.ipv6_ext_header_dropped != 0 {

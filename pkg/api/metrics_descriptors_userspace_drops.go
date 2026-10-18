@@ -215,6 +215,15 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 			"Emitted unconditionally so 0 is a real \"no martian drops\" signal.",
 		nil, nil,
 	)
+	c.userspaceDNSIllegalReplyDropped = prometheus.NewDesc(
+		"xpf_userspace_dns_illegal_reply_dropped_total",
+		"First UDP packets to port 53 dropped by the Junos-default QR "+
+			"check: a parseable DNS header with QR=1 arrived as a session "+
+			"miss while allow-dns-reply was unset, so no session was "+
+			"created. Summed across bindings (#14668). Emitted "+
+			"unconditionally so 0 is a real \"no illegal DNS replies\" signal.",
+		nil, nil,
+	)
 	c.userspaceIPv6ExtHeaderDropped = prometheus.NewDesc(
 		"xpf_userspace_ipv6_ext_header_dropped_total",
 		"Packets fail-closed-dropped because their IPv6 extension-header "+

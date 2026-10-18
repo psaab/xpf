@@ -72,6 +72,7 @@ impl BindingLiveState {
                 .load(Ordering::Relaxed),
             ambiguous_fabric_zone_drops: self.ambiguous_fabric_zone_drops.load(Ordering::Relaxed),
             martian_dropped: self.martian_dropped.load(Ordering::Relaxed),
+            dns_illegal_reply_dropped: self.dns_illegal_reply_dropped.load(Ordering::Relaxed),
             ipv6_ext_header_dropped: self.ipv6_ext_header_dropped.load(Ordering::Relaxed),
             v4_mapped_ipv6_dropped: self.v4_mapped_ipv6_dropped.load(Ordering::Relaxed),
             umem_slice_dropped: self.umem_slice_dropped.load(Ordering::Relaxed),

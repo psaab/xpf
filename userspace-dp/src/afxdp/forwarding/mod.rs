@@ -341,6 +341,14 @@ pub(super) fn allow_unsolicited_dns_reply(
         && flow.forward_key.src_port == 53
 }
 
+/// #14668: true when this flow is a first-packet candidate for the Junos
+/// default QR check — UDP destined to port 53. The QR bit itself is read
+/// from the frame by `dns_reply_qr_set` (declared-end bounded, #10664);
+/// `allow-dns-reply` unset means a QR=1 packet here is illegal.
+pub(super) fn is_dns_query_port_flow(flow: &SessionFlow) -> bool {
+    flow.forward_key.protocol == PROTO_UDP && flow.forward_key.dst_port == 53
+}
+
 
 pub(super) fn resolve_ingress_logical_ifindex(
     forwarding: &ForwardingState,

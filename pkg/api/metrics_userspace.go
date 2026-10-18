@@ -109,9 +109,10 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, statu
 // and emitted without labels. All six are emitted unconditionally so 0 is a
 // real "no such drops" signal, not an absent series.
 func (c *xpfCollector) emitDropClassCounters(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
-	var martian, ipv6ExtHeader, v4MappedIPv6, umemSlice, unknownVLAN, dstMAC uint64
+	var martian, dnsIllegalReply, ipv6ExtHeader, v4MappedIPv6, umemSlice, unknownVLAN, dstMAC uint64
 	for _, b := range status.Bindings {
 		martian += b.MartianDropped
+		dnsIllegalReply += b.DNSIllegalReplyDropped
 		ipv6ExtHeader += b.IPv6ExtHeaderDropped
 		v4MappedIPv6 += b.V4MappedIPv6Dropped
 		umemSlice += b.UMEMSliceDropped
@@ -119,6 +120,7 @@ func (c *xpfCollector) emitDropClassCounters(ch chan<- prometheus.Metric, status
 		dstMAC += b.DstMACDropped
 	}
 	ch <- prometheus.MustNewConstMetric(c.userspaceMartianDropped, prometheus.CounterValue, float64(martian))
+	ch <- prometheus.MustNewConstMetric(c.userspaceDNSIllegalReplyDropped, prometheus.CounterValue, float64(dnsIllegalReply))
 	ch <- prometheus.MustNewConstMetric(c.userspaceIPv6ExtHeaderDropped, prometheus.CounterValue, float64(ipv6ExtHeader))
 	ch <- prometheus.MustNewConstMetric(c.userspaceV4MappedIPv6Dropped, prometheus.CounterValue, float64(v4MappedIPv6))
 	ch <- prometheus.MustNewConstMetric(c.userspaceUMEMSliceDropped, prometheus.CounterValue, float64(umemSlice))

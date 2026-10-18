@@ -128,6 +128,11 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// increment `route_miss_packets` as well.
     /// Surfaced as the `Martian drops` operator counter.
     pub(super) martian_dropped: AtomicU64,
+    /// #14668: cumulative Junos-default drops of a first UDP packet to
+    /// port 53 with a parseable DNS QR=1 header while `allow-dns-reply`
+    /// is unset. Surfaced as the `DNS illegal-reply drops` operator
+    /// counter / `xpf_userspace_dns_illegal_reply_dropped_total`.
+    pub(super) dns_illegal_reply_dropped: AtomicU64,
     /// #4743/#10665: cumulative fail-closed drops of IPv6 packets whose
     /// extension-header chain declares a traversable 8th header, even when
     /// that header is truncated. The #2292 walkers fail closed on this
@@ -1038,9 +1043,11 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // second, and the size/offset assertions below pin the resulting footprint.
 // #13286 extends the reason array by four u64 slots and adds one u64
 // syn-cookie active-budget counter (+40 bytes).
+// #14668 adds one unconditional u64 DNS illegal-reply drop counter before
+// both sentinels; offsets advance by 8 bytes, size unchanged.
 const _: [(); 2624] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2472] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2601] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2480] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2609] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1068,6 +1075,7 @@ impl BindingLiveState {
             flowless_forward_bytes: AtomicU64::new(0),
             route_miss_packets: AtomicU64::new(0),
             martian_dropped: AtomicU64::new(0),
+            dns_illegal_reply_dropped: AtomicU64::new(0),
             ipv6_ext_header_dropped: AtomicU64::new(0),
             v4_mapped_ipv6_dropped: AtomicU64::new(0),
             invalid_fabric_stamp_drops: AtomicU64::new(0),

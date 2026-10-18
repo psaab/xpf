@@ -49,6 +49,7 @@ type statusSummaryAggregates struct {
 	// #4743: martian-dst NoRoute drops (a sub-breakout of routeMisses) and
 	// over-limit IPv6 ext-header fail-closed drops, summed across bindings.
 	martianDropped              uint64
+	dnsIllegalReplyDropped      uint64
 	ipv6ExtHeaderDropped        uint64
 	v4MappedIPv6Dropped         uint64
 	invalidFabricStampDrops     uint64
@@ -226,6 +227,7 @@ func aggregateStatusSummary(status userspace.ProcessStatus) statusSummaryAggrega
 		agg.unknownVLANDropped += binding.UnknownVLANDropped
 		agg.dstMACDropped += binding.DstMACDropped
 		agg.martianDropped += binding.MartianDropped
+		agg.dnsIllegalReplyDropped += binding.DNSIllegalReplyDropped
 		agg.ipv6ExtHeaderDropped += binding.IPv6ExtHeaderDropped
 		agg.v4MappedIPv6Dropped += binding.V4MappedIPv6Dropped
 		agg.invalidFabricStampDrops += binding.InvalidFabricStampDrops
@@ -483,6 +485,7 @@ func writeOverviewSection(b *strings.Builder, status userspace.ProcessStatus, ag
 	fmt.Fprintf(b, "  Unknown VLAN drops:        %d\n", agg.unknownVLANDropped)
 	fmt.Fprintf(b, "  Destination MAC drops:     %d\n", agg.dstMACDropped)
 	fmt.Fprintf(b, "  Martian drops:             %d\n", agg.martianDropped)
+	fmt.Fprintf(b, "  DNS illegal-reply drops:   %d\n", agg.dnsIllegalReplyDropped)
 	fmt.Fprintf(b, "  IPv6 ext-header drops:     %d\n", agg.ipv6ExtHeaderDropped)
 	fmt.Fprintf(b, "  V4-mapped IPv6 drops:    %d\n", agg.v4MappedIPv6Dropped)
 	fmt.Fprintf(b, "  Invalid fabric-stamp drops: %d\n", agg.invalidFabricStampDrops)

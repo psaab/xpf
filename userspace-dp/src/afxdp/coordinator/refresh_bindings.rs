@@ -120,6 +120,7 @@ fn copy_live_snapshot(binding: &mut BindingStatus, snap: BindingLiveSnapshot) {
     binding.ambiguous_fabric_zone_drops = snap.ambiguous_fabric_zone_drops;
     binding.route_miss_packets = snap.route_miss_packets;
     binding.martian_dropped = snap.martian_dropped;
+    binding.dns_illegal_reply_dropped = snap.dns_illegal_reply_dropped;
     binding.ipv6_ext_header_dropped = snap.ipv6_ext_header_dropped;
     binding.v4_mapped_ipv6_dropped = snap.v4_mapped_ipv6_dropped;
     binding.umem_slice_dropped = snap.umem_slice_dropped;
@@ -384,6 +385,7 @@ fn zero_unbound_slot(binding: &mut BindingStatus) {
     // rx_packets == 0 — an inconsistency an operator reads as "this
     // dead slot is still dropping traffic".
     binding.martian_dropped = 0;
+    binding.dns_illegal_reply_dropped = 0;
     binding.ipv6_ext_header_dropped = 0;
     binding.v4_mapped_ipv6_dropped = 0;
     binding.umem_slice_dropped = 0;

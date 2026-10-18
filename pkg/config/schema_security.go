@@ -1174,7 +1174,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			"gre-out":   {desc: "Outbound GRE MSS clamp", closedWorldOpaque: true, children: nil},
 			"all-tcp":   {desc: "All forwarded TCP MSS clamp", closedWorldOpaque: true, children: nil},
 		}},
-		"allow-dns-reply":                {desc: "Allow unsolicited DNS reply packets", children: nil},
+		"allow-dns-reply":                {desc: "Allow unsolicited DNS replies: skip the default drop of a first UDP packet to port 53 with QR=1, and skip session install for unsolicited UDP replies from port 53", children: nil},
 		"allow-embedded-icmp":            {desc: "Legacy no-op in the userspace dataplane; ICMP errors use session matching and unmatched errors use zone policy", children: nil},
 		"allow-unstamped-fabric-ingress": {desc: "ROLLING-UPGRADE WINDOW ONLY: allow absent fabric stamps to use legacy MAIN routing on routing-instance nodes (invalid stamps still drop). Remove once all peers emit zone-encoded stamps (#11061)", children: nil},
 		"gre-performance-acceleration":   {desc: "Enable GRE performance acceleration", children: nil},

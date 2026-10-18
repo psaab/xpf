@@ -28,6 +28,7 @@ pub(super) fn reset_binding_counters(bindings: &mut [BindingStatus]) {
         binding.unstamped_fabric_ingress_drops = 0;
         binding.ambiguous_fabric_zone_drops = 0;
         binding.martian_dropped = 0;
+        binding.dns_illegal_reply_dropped = 0;
         binding.ipv6_ext_header_dropped = 0;
         binding.v4_mapped_ipv6_dropped = 0;
         binding.umem_slice_dropped = 0;

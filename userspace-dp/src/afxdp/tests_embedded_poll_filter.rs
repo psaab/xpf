@@ -22,7 +22,7 @@ use super::tests_support::*;
 use crate::session::TunnelDiscriminator;
 use super::poll_descriptor::{try_reverse_embedded_icmp_error, EmbeddedIcmpReversal};
 
-use super::poll_descriptor::dns_reply_fastpath_admit;
+use super::poll_descriptor::{dns_illegal_reply_drop, dns_reply_fastpath_admit};
 /// `reth0.80` is the tagged WAN child. Its fixtures must carry an on-wire
 /// 802.1Q VID-80 tag and matching RX metadata/offsets; VID 0 is intentionally
 /// dropped by #11297. Explicit unit-0 arrivals remain untagged.
@@ -301,6 +301,253 @@ fn dns_reply_qr_bounded_by_ipv6_declared_end_10664() {
         !dns_reply_fastpath_admit(&forwarding, &flow, &nat, &slack, meta),
         "UDP extent past the IPv6 payload_len must fail closed despite capture slack"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #14668: Junos-default QR check on a first UDP packet to port 53.
+// ---------------------------------------------------------------------------
+
+fn dns_first_packet_forwarding_14668(allow_dns_reply: bool) -> ForwardingState {
+    let mut snapshot = nat_snapshot();
+    snapshot.source_nat_rules.clear();
+    snapshot.flow.allow_dns_reply = allow_dns_reply;
+    // LAN host 10.0.61.100 -> WAN DNS server 172.16.80.200:53, neighbor
+    // resolved so the permit leg is ForwardCandidate.
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: "172.16.80.200".to_string(),
+        mac: "00:aa:bb:cc:dd:ee".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".to_string(),
+        ifindex: 12,
+        family: "inet6".to_string(),
+        ip: "2001:559:8585:80::200".to_string(),
+        mac: "00:aa:bb:cc:dd:ef".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    build_forwarding_state(&snapshot)
+}
+
+/// Build eth + IPv4 + UDP + 12-byte DNS header. `qr` sets the QR bit;
+/// `dns_bytes` < 12 truncates the DNS header (UDP length follows).
+fn dns_first_packet_frame_v4_14668(qr: bool, dns_bytes: usize) -> Vec<u8> {
+    let src = Ipv4Addr::new(10, 0, 61, 100);
+    let dst = Ipv4Addr::new(172, 16, 80, 200);
+    let udp_len = (8 + dns_bytes) as u16;
+    let total_len = 20u16 + udp_len;
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&TEST_LAN_MAC);
+    frame.extend_from_slice(&[0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]);
+    frame.extend_from_slice(&[0x08, 0x00]);
+    let s = src.octets();
+    let d = dst.octets();
+    frame.extend_from_slice(&[
+        0x45, 0x00,
+        (total_len >> 8) as u8, total_len as u8,
+        0x00, 0x01, 0x00, 0x00, 64, PROTO_UDP, 0x00, 0x00,
+        s[0], s[1], s[2], s[3], d[0], d[1], d[2], d[3],
+    ]);
+    let ip_sum = crate::afxdp::frame::checksum::checksum16(&frame[14..34]);
+    frame[24] = (ip_sum >> 8) as u8;
+    frame[25] = ip_sum as u8;
+    frame.extend_from_slice(&54321u16.to_be_bytes());
+    frame.extend_from_slice(&53u16.to_be_bytes());
+    frame.extend_from_slice(&udp_len.to_be_bytes());
+    frame.extend_from_slice(&[0u8, 0u8]);
+    let mut dns = vec![0u8; dns_bytes];
+    if dns_bytes > 2 && qr {
+        dns[2] = 0x80;
+    }
+    frame.extend_from_slice(&dns);
+    frame
+}
+
+fn dns_first_packet_frame_v6_14668(qr: bool, dns_bytes: usize) -> Vec<u8> {
+    let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("src6");
+    let dst: Ipv6Addr = "2001:559:8585:80::200".parse().expect("dst6");
+    let udp_len = (8 + dns_bytes) as u16;
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&TEST_LAN_MAC);
+    frame.extend_from_slice(&[0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]);
+    frame.extend_from_slice(&[0x86, 0xdd]);
+    frame.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+    frame.extend_from_slice(&udp_len.to_be_bytes());
+    frame.extend_from_slice(&[PROTO_UDP, 64]);
+    frame.extend_from_slice(&src.octets());
+    frame.extend_from_slice(&dst.octets());
+    frame.extend_from_slice(&54321u16.to_be_bytes());
+    frame.extend_from_slice(&53u16.to_be_bytes());
+    frame.extend_from_slice(&udp_len.to_be_bytes());
+    frame.extend_from_slice(&[0u8, 0u8]);
+    let mut dns = vec![0u8; dns_bytes];
+    if dns_bytes > 2 && qr {
+        dns[2] = 0x80;
+    }
+    frame.extend_from_slice(&dns);
+    frame
+}
+
+fn dns_first_packet_meta_v4_14668(frame: &[u8]) -> UserspaceDpMeta {
+    let mut meta = txn_meta_v4(24, 0, frame.len() as u16);
+    meta.protocol = PROTO_UDP;
+    meta.tcp_flags = 0;
+    meta.payload_offset = 42;
+    meta.flow_src_addr[..4].copy_from_slice(&Ipv4Addr::new(10, 0, 61, 100).octets());
+    meta.flow_dst_addr[..4].copy_from_slice(&Ipv4Addr::new(172, 16, 80, 200).octets());
+    meta.flow_src_port = 54321;
+    meta.flow_dst_port = 53;
+    meta
+}
+
+fn dns_first_packet_meta_v6_14668(frame: &[u8]) -> UserspaceDpMeta {
+    let mut meta = txn_meta_v6(24, frame.len());
+    meta.protocol = PROTO_UDP;
+    meta.tcp_flags = 0;
+    meta.payload_offset = 62;
+    meta.flow_src_addr = "2001:559:8585:ef00::102".parse::<Ipv6Addr>().expect("src6").octets();
+    meta.flow_dst_addr = "2001:559:8585:80::200".parse::<Ipv6Addr>().expect("dst6").octets();
+    meta.flow_src_port = 54321;
+    meta.flow_dst_port = 53;
+    meta
+}
+
+fn run_dns_first_packet_14668(
+    allow_dns_reply: bool,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> (BatchCounters, DebugPollCounters, SessionTable, BindingWorker) {
+    let forwarding = dns_first_packet_forwarding_14668(allow_dns_reply);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        frame,
+        meta,
+        true,
+    );
+    (batch, dbg, sessions, binding)
+}
+
+/// #14668 FAIL-ON-REVERT (v4): a QR=1 first packet to port 53 under a
+/// permitting policy drops with no session and illegal +1 when
+/// `allow-dns-reply` is off; removing the poll-path check forwards it
+/// and installs sessions, so every assertion below goes RED.
+#[test]
+fn dns_qr1_first_packet_to_port53_dropped_when_reply_not_allowed_14668() {
+    let frame = dns_first_packet_frame_v4_14668(true, 12);
+    let meta = dns_first_packet_meta_v4_14668(&frame);
+    let (batch, dbg, sessions, binding) = run_dns_first_packet_14668(false, &frame, meta);
+    assert_eq!(dbg.rx, 1, "descriptor must reach the poll path");
+    assert_eq!(batch.dns_illegal_reply_dropped, 1, "QR=1 to port 53 must count as illegal");
+    assert_eq!(dbg.tx, 0, "illegal DNS reply must not transmit");
+    assert_eq!(dbg.forward, 0, "illegal DNS reply must not forward");
+    assert_eq!(batch.session_creates, 0, "illegal DNS reply must create no session");
+    assert_eq!(sessions.len(), 0, "illegal DNS reply must install no session");
+    assert!(binding.scratch.scratch_forwards.is_empty(), "illegal DNS reply must not queue a forward");
+    assert_eq!(binding.pending_neigh.len(), 0, "illegal DNS reply must not enter neighbor retry");
+}
+
+#[test]
+fn dns_qr1_first_packet_to_port53_forwarded_when_reply_allowed_14668() {
+    let frame = dns_first_packet_frame_v4_14668(true, 12);
+    let meta = dns_first_packet_meta_v4_14668(&frame);
+    let (batch, dbg, sessions, _binding) = run_dns_first_packet_14668(true, &frame, meta);
+    assert_eq!(batch.dns_illegal_reply_dropped, 0, "allow-dns-reply must skip the QR check");
+    assert_eq!(dbg.forward, 1, "allowed QR=1 packet must forward under permit");
+    assert_eq!(sessions.len(), 2, "allowed QR=1 packet must install forward+reverse sessions");
+}
+
+#[test]
+fn dns_qr0_first_packet_to_port53_forwarded_14668() {
+    let frame = dns_first_packet_frame_v4_14668(false, 12);
+    let meta = dns_first_packet_meta_v4_14668(&frame);
+    let (batch, dbg, sessions, _binding) = run_dns_first_packet_14668(false, &frame, meta);
+    assert_eq!(batch.dns_illegal_reply_dropped, 0, "QR=0 query must not count as illegal");
+    assert_eq!(dbg.forward, 1, "QR=0 query must forward under permit");
+    assert_eq!(sessions.len(), 2, "QR=0 query must install sessions");
+}
+
+#[test]
+fn dns_truncated_header_first_packet_not_illegal_14668() {
+    // 4-byte DNS stub: UDP length 12 < 8+12, so dns_reply_qr_set fails
+    // closed (#10664 declared-end bound) and the packet is not illegal.
+    let frame = dns_first_packet_frame_v4_14668(true, 4);
+    let meta = dns_first_packet_meta_v4_14668(&frame);
+    let (batch, dbg, sessions, _binding) = run_dns_first_packet_14668(false, &frame, meta);
+    assert_eq!(batch.dns_illegal_reply_dropped, 0, "truncated DNS header must not count as illegal");
+    assert_eq!(dbg.forward, 1, "truncated-header packet must take normal forwarding");
+    assert_eq!(sessions.len(), 2, "truncated-header packet must install sessions normally");
+}
+
+#[test]
+fn dns_qr1_first_packet_to_port53_dropped_v6_14668() {
+    let frame = dns_first_packet_frame_v6_14668(true, 12);
+    let meta = dns_first_packet_meta_v6_14668(&frame);
+    let (batch, dbg, sessions, binding) = run_dns_first_packet_14668(false, &frame, meta);
+    assert_eq!(batch.dns_illegal_reply_dropped, 1, "v6 QR=1 to port 53 must count as illegal");
+    assert_eq!(dbg.tx, 0, "v6 illegal DNS reply must not transmit");
+    assert_eq!(sessions.len(), 0, "v6 illegal DNS reply must install no session");
+    assert!(binding.scratch.scratch_forwards.is_empty(), "v6 illegal DNS reply must not queue a forward");
+}
+
+#[test]
+fn dns_qr0_first_packet_to_port53_forwarded_v6_14668() {
+    let frame = dns_first_packet_frame_v6_14668(false, 12);
+    let meta = dns_first_packet_meta_v6_14668(&frame);
+    let (batch, dbg, sessions, _binding) = run_dns_first_packet_14668(false, &frame, meta);
+    assert_eq!(batch.dns_illegal_reply_dropped, 0, "v6 QR=0 query must not count as illegal");
+    assert_eq!(dbg.forward, 1, "v6 QR=0 query must forward under permit");
+    assert_eq!(sessions.len(), 2, "v6 QR=0 query must install sessions");
+}
+
+/// Unit pin for the predicate itself: knob on skips, dport != 53 skips,
+/// QR=0 skips.
+#[test]
+fn dns_illegal_reply_drop_predicate_14668() {
+    let mut forwarding = dns_first_packet_forwarding_14668(false);
+    let flow = SessionFlow {
+        src_ip: "10.0.61.100".parse().expect("src"),
+        dst_ip: "172.16.80.200".parse().expect("dst"),
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_UDP,
+            src_ip: "10.0.61.100".parse().expect("src"),
+            dst_ip: "172.16.80.200".parse().expect("dst"),
+            src_port: 54321,
+            dst_port: 53,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    };
+    let meta = UserspaceDpMeta {
+        l3_offset: 14,
+        l4_offset: 34,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        ..UserspaceDpMeta::default()
+    };
+    let frame = dns_first_packet_frame_v4_14668(true, 12);
+    assert!(dns_illegal_reply_drop(&forwarding, &flow, &frame, meta), "QR=1 to port 53 with knob off is illegal");
+    forwarding.allow_dns_reply = true;
+    assert!(!dns_illegal_reply_drop(&forwarding, &flow, &frame, meta), "knob on skips the check");
+    forwarding.allow_dns_reply = false;
+    let query = dns_first_packet_frame_v4_14668(false, 12);
+    assert!(!dns_illegal_reply_drop(&forwarding, &flow, &query, meta), "QR=0 is not illegal");
 }
 
 #[test]

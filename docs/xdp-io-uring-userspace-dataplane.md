@@ -1059,7 +1059,7 @@ Implemented today:
 - daemon-to-helper propagation of `rg_active` and HA watchdog state
 - HA-aware userspace forwarding resolution that blocks egress on inactive or stale owner RGs
 - flow knob snapshots for `allow-dns-reply` and `allow-embedded-icmp`
-- `allow-dns-reply` sessionless admit through policy on the Rust fast path for unsolicited UDP replies from port 53 (post-#850: policy runs, session install is skipped only when no NAT is required)
+- `allow-dns-reply` sessionless admit through policy on the Rust fast path for unsolicited UDP replies from port 53 (post-#850: policy runs, session install is skipped only when no NAT is required). Separately (#14668), the Junos default QR check drops a first UDP packet TO port 53 whose parseable DNS header has QR=1 (no session, counted as `xpf_userspace_dns_illegal_reply_dropped_total` / "DNS illegal-reply drops") unless `allow-dns-reply` is set; a truncated header is not illegal and takes normal session handling.
 - `allow-embedded-icmp` treated as supported because local-destination ICMP error traffic stays on the local/control kernel-delivery path
 - interface-mode source NAT rule snapshots from the Go control plane
 - per-session NAT decisions and reply-direction key installation
