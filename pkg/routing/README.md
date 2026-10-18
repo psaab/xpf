@@ -518,8 +518,9 @@ delegate to the owning domain. Exported types:
   range. A term carrying any predicate an `ip rule` cannot represent —
   `source-port-except` / `destination-port-except`, `tcp-flags`,
   `icmp-type` / `icmp-code`, `is-fragment`, `flexible-match-range`, an
-  unknown DSCP name, a non-empty address `except` set, an unknown protocol /
-  unparseable port, or any unresolved `from` leaf — FAILS CLOSED:
+  unknown DSCP name, a non-empty address `except` set (including the
+  #4338 match-any `0.0.0.0/0`/`::/0`/`any` + `except` idiom and any
+  positive + `except` mix, #14699), an unknown protocol /
   `buildPBRFromFilter` (via `pbrTermL4`) drops the whole term and records a
   degraded build error. Honoring the address/protocol/port half while
   silently dropping the rest would WIDEN the match and steer traffic the
