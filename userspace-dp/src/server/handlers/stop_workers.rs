@@ -11,8 +11,15 @@ pub(super) fn handle(guard: &mut ServerState, persist_state: &mut bool) {
     // that the NIC unmaps during link cycle. The subsequent
     // "rebind" request (sent by NotifyLinkCycle after the
     // link is back UP) recreates workers with fresh sockets.
+    //
+    // #14677: use `stop_for_link_cycle`, NOT `stop()`. `stop()` runs
+    // `stop_inner(true)`, wiping every HA-synced session, the
+    // persistent-NAT allocator state, and the tunnel-owner baseline
+    // that `rebind`'s reconcile is supposed to replay/migrate — the
+    // exact side effects `rebind.rs` documents as "wrong for a rebind".
+    // The link-cycle stop must only join the workers.
     eprintln!("stop_workers: stopping all AF_XDP workers");
-    guard.afxdp.stop();
+    guard.afxdp.stop_for_link_cycle();
     for binding in &mut guard.status.bindings {
         binding.bound = false;
         binding.xsk_registered = false;

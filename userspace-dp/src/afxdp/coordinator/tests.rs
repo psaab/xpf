@@ -299,6 +299,55 @@ impl Coordinator {
             },
         )])));
     }
+
+    /// #14677: seed the forwarding/validation baselines `stop_workers`
+    /// must preserve for the following `rebind`: one tunnel endpoint
+    /// (the tunnel-owner remap baseline), one source-NAT rule carrying a
+    /// PortAllocator (persistent-lease state), and snapshot_installed.
+    pub(crate) fn seed_link_cycle_baselines_for_test_14677(&mut self) {
+        use std::net::{IpAddr, Ipv4Addr};
+        let mut forwarding = ForwardingState::default();
+        forwarding.tunnel_endpoints.insert(
+            7,
+            TunnelEndpoint {
+                id: 7,
+                logical_ifindex: 42,
+                interface_label: "gr-0/0/0".into(),
+                interface: "gr-0/0/0".into(),
+                redundancy_group: 1,
+                mode: "gre".into(),
+                outer_family: libc::AF_INET,
+                source: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+                destination: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+                key: 0,
+                ttl: 64,
+                clear_dont_fragment_bit: false,
+                transport_table: String::new(),
+                wg_listen_port: 0,
+                wg_local_privkey: zeroize::Zeroizing::new([0u8; 32]),
+                wg_peers: Vec::new(),
+            },
+        );
+        let mut rule = crate::nat::SourceNatRule::default();
+        rule.name = "link-cycle-persistent".into();
+        rule.persistent_nat = true;
+        rule.pool_mode = true;
+        rule.pool_allocator = crate::nat::PortAllocator::new(1, 40000, 40100);
+        forwarding.source_nat_rules.push(rule);
+        self.set_forwarding_for_test(forwarding);
+        self.validation.snapshot_installed = true;
+        self.publish_runtime_view();
+    }
+
+    /// #14677: read back the baselines seeded above as
+    /// (tunnel_endpoints, snapshot_installed, source_nat_rules).
+    pub(crate) fn link_cycle_baselines_for_test_14677(&self) -> (usize, bool, usize) {
+        (
+            self.forwarding.tunnel_endpoints.len(),
+            self.validation.snapshot_installed,
+            self.forwarding.source_nat_rules.len(),
+        )
+    }
 }
 
 use crate::INJECT_PACKET_TUPLE_PROTOCOL_VERSION;
