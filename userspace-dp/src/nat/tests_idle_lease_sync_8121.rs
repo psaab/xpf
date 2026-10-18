@@ -3015,6 +3015,121 @@ fn expired_idle_lease_does_not_block_import_13692() {
     );
 }
 
+/// #14672: a live idle lease re-imported with the same binding must have its
+/// expiry (and timeout) refreshed from the incoming record's remaining
+/// lifetime, and the expiration indexes re-keyed to the new deadline. The
+/// imported lease's owner did not retire it; its periodic re-export carries
+/// a fresh remaining lifetime measured on the sender. Without the refresh
+/// the standby copy dies at the FIRST import's expiry even though the
+/// originator still holds (and re-exports) the lease.
+#[test]
+fn reimport_refreshes_live_idle_lease_expiry_14672() {
+    let addrs = pool();
+    let standby = PortAllocator::new(1, 1024, 65535);
+    let local_pool = ipv4_pool(&addrs);
+    let client = flow("10.0.61.50", 40000);
+    let key = client.persistent_source_key(PersistentNatPermit::TargetHostPort);
+    let mut rec = idle_record_for(client, IpAddr::V4(addrs[0]), 20_000, false, Some(("8.8.8.8".parse().unwrap(), 443)));
+    rec.remaining_ns = TIMEOUT_NS;
+    assert_eq!(
+        standby.import_idle_lease(&rec, &local_pool, TIMEOUT_NS, 1_000),
+        IdleLeaseImport::Installed
+    );
+    let first_expiry = 1_000 + TIMEOUT_NS;
+    {
+        let live = standby.debug_live();
+        let lease = live.persistent_by_source.get(&key).unwrap();
+        assert_eq!(lease.expires_at_ns, first_expiry);
+        assert_eq!(lease.timeout_ns, TIMEOUT_NS);
+        assert!(live.lease_expirations.contains(&(first_expiry, key)));
+        assert!(live.lease_expirations_by_addr[0].contains(&(first_expiry, key)));
+    }
+    // Re-import the same binding later with a fresh remaining lifetime.
+    let reimport_at = 2_000;
+    let mut reimport = rec.clone();
+    reimport.remaining_ns = TIMEOUT_NS;
+    assert_eq!(
+        standby.import_idle_lease(&reimport, &local_pool, TIMEOUT_NS, reimport_at),
+        IdleLeaseImport::SkippedExisting,
+        "a same-binding re-import remains SkippedExisting (no duplicate install)"
+    );
+    let refreshed_expiry = reimport_at + TIMEOUT_NS;
+    assert_ne!(refreshed_expiry, first_expiry);
+    {
+        let live = standby.debug_live();
+        let lease = live.persistent_by_source.get(&key).unwrap();
+        assert_eq!(
+            lease.expires_at_ns, refreshed_expiry,
+            "#14672: re-import must refresh expires_at_ns from the incoming remaining_ns"
+        );
+        assert!(live.lease_expirations.contains(&(refreshed_expiry, key)), "global expiration index must be re-keyed to the refreshed expiry");
+        assert!(live.lease_expirations_by_addr[0].contains(&(refreshed_expiry, key)), "per-address expiration index must be re-keyed to the refreshed expiry");
+        assert!(!live.lease_expirations.contains(&(first_expiry, key)), "stale expiration index entry must be removed on refresh");
+        assert!(!live.lease_expirations_by_addr[0].contains(&(first_expiry, key)));
+        assert_eq!(live.lease_expirations.len(), 1);
+        assert_eq!(live.lease_expirations_by_addr[0].len(), 1);
+    }
+    // The refreshed lease must still be display-live at the old expiry
+    // instant and die at the refreshed expiry.
+    assert_eq!(standby.export_display_leases(first_expiry).len(), 1, "lease must survive past its first-import expiry after refresh");
+    assert_eq!(standby.export_display_leases(refreshed_expiry + 1).len(), 0);
+    assert!(standby.holds_port(0, 20_000), "PAT occupancy must survive the refresh");
+}
+
+/// #14672 control: re-import must NOT refresh a lease with live flows or a
+/// mismatched binding; the incumbent stays authoritative and its expiry is
+/// untouched (active leases are owned by session sync / local flows, not by
+/// the idle channel).
+#[test]
+fn reimport_does_not_refresh_active_or_mismatched_lease_14672() {
+    let addrs = pool();
+    let pool_addrs = ipv4_pool(&addrs);
+    let allocator = PortAllocator::new(1, 20_000, 20_010);
+    let source = flow("10.0.61.50", 40_000);
+    let key = source.persistent_source_key(PersistentNatPermit::TargetHostPort);
+    let mut rec = idle_record_for(source, IpAddr::V4(addrs[0]), 20_000, false, Some(("8.8.8.8".parse().unwrap(), 443)));
+    rec.remaining_ns = TIMEOUT_NS;
+    assert_eq!(
+        allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 1_000),
+        IdleLeaseImport::Installed
+    );
+    let first_expiry = 1_000 + TIMEOUT_NS;
+    // Mismatched translated port: no refresh, no binding change.
+    let mut mismatched = rec.clone();
+    mismatched.translated_port = 20_001;
+    mismatched.remaining_ns = TIMEOUT_NS;
+    assert_eq!(
+        allocator.import_idle_lease(&mismatched, &pool_addrs, TIMEOUT_NS, 5_000),
+        IdleLeaseImport::SkippedExisting
+    );
+    {
+        let live = allocator.debug_live();
+        let lease = live.persistent_by_source.get(&key).unwrap();
+        assert_eq!(lease.translated.port, 20_000);
+        assert_eq!(lease.expires_at_ns, first_expiry, "mismatched re-import must not refresh expiry");
+        assert!(live.lease_expirations.contains(&(first_expiry, key)));
+    }
+    // Active lease (live flow joined): no refresh from the idle channel.
+    let resumed = mint_persistent(&allocator, &addrs, source, 6_000);
+    assert_eq!((resumed.ip, resumed.port), (IpAddr::V4(addrs[0]), 20_000));
+    let active_expiry = {
+        let live = allocator.debug_live();
+        let lease = live.persistent_by_source.get(&key).unwrap();
+        assert_eq!(lease.active_flows, 1);
+        lease.expires_at_ns
+    };
+    assert_eq!(
+        allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 7_000),
+        IdleLeaseImport::SkippedExisting
+    );
+    {
+        let live = allocator.debug_live();
+        let lease = live.persistent_by_source.get(&key).unwrap();
+        assert_eq!(lease.active_flows, 1);
+        assert_eq!(lease.expires_at_ns, active_expiry, "active lease expiry must not be refreshed by an idle re-import");
+    }
+}
+
 
 /// #13692: synced PAT reserve for same port as expired idle lease must succeed
 /// and mint a fresh active lease.

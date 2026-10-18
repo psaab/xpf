@@ -3568,7 +3568,7 @@ impl PortAllocator {
 
 
 
-    fn remove_lease_expiration_locked(
+    pub(super) fn remove_lease_expiration_locked(
         live: &mut PortAllocatorLiveState,
         addr_index: usize,
         expires_at_ns: u64,

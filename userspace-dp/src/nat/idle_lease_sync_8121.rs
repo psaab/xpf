@@ -381,6 +381,37 @@ impl PortAllocator {
                 && existing.deterministic == rec.deterministic
                 && existing.deterministic_identity == rec.deterministic_identity
             {
+                // #14672: refresh a live IDLE same-binding lease from the
+                // incoming record. The originator still holds the lease and
+                // re-exports it with a fresh remaining lifetime; without
+                // this the standby copy dies at the first import's expiry.
+                // Only idle leases are refreshed: an active lease's expiry
+                // is owned by its live flows (it is not in the expiration
+                // index while active), and a revoked shell must drain, not
+                // be revived by a peer re-export.
+                if existing.active_flows == 0 && !existing.revoked {
+                    let refreshed_expiry = now_ns.saturating_add(remaining_ns);
+                    if refreshed_expiry != existing.expires_at_ns
+                        || timeout_ns != existing.timeout_ns
+                    {
+                        PortAllocator::remove_lease_expiration_locked(
+                            &mut live,
+                            existing.addr_index,
+                            existing.expires_at_ns,
+                            key,
+                        );
+                        if let Some(lease) = live.persistent_by_source.get_mut(&key) {
+                            lease.expires_at_ns = refreshed_expiry;
+                            lease.timeout_ns = timeout_ns;
+                        }
+                        PortAllocator::insert_lease_expiration_locked(
+                            &mut live,
+                            existing.addr_index,
+                            refreshed_expiry,
+                            key,
+                        );
+                    }
+                }
                 let current = live.persistent_permissions.entry(key).or_default();
                 let total = current.scopes.values().map(|g| g.remotes.len()).sum::<usize>();
                 let bucket = current.scopes.entry(rec.egress_scope).or_default();
