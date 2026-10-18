@@ -504,3 +504,88 @@ fn deterministic_shaped_lease_never_installs_via_generic_pool_14638() {
     assert_eq!(counts.skipped_identity_busy, 1, "deterministic-via-generic must count identity-busy: {counts:?}");
     assert_eq!(coord.export_idle_persistent_leases(2_000).len(), 0);
 }
+
+/// #14676: deterministic NAT64 leases must be visible to SHOW and revoked by
+/// `clear_persistent_nat_leases`, with the clear fence refusing a stale
+/// pre-clear re-import — the same legs the source-NAT pool path already has.
+/// Pre-fix, display omitted NAT64 entirely and clear never touched the NAT64
+/// allocator, so the count was 0 and the stale import installed.
+#[test]
+fn deterministic_nat64_display_and_clear_revoke_and_fence_14676() {
+    let snap = crate::NAT64RuleSnapshot {
+        name: "napt64".into(),
+        prefix: "64:ff9b::/96".into(),
+        pool_addresses: vec!["203.0.113.1".into()],
+        deterministic_block_size: 32,
+        deterministic_blocks_per_ip: 2,
+        deterministic_host_prefix_len: 32,
+        deterministic_host_base_v6: "2001:db8::".into(),
+        ..Default::default()
+    };
+    let mut coord = Coordinator::new();
+    coord.forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[snap]);
+    let prefix = &coord.forwarding.nat64.prefixes[0];
+    let params = prefix.deterministic_v6.expect("deterministic prefix");
+    let flow = crate::nat::SourceNatFlowKey {
+        protocol: 6,
+        src_ip: "2001:db8::1".parse().unwrap(),
+        dst_ip: "8.8.8.8".parse().unwrap(),
+        src_port: 40000,
+        dst_port: 443,
+        routing_scope: 0,
+    };
+    let (ip, port) = crate::nat::allocate_nat64_pool_port_deterministic_v6(
+        &prefix.port_allocator,
+        flow,
+        &prefix.pool_v4,
+        params,
+        "2001:db8::1".parse().unwrap(),
+        1,
+        crate::nat::NatHolder::Untracked,
+    )
+    .unwrap();
+    assert!(crate::nat::release_nat64_pool_port(
+        &prefix.port_allocator,
+        flow,
+        ip,
+        port,
+        20,
+        false,
+        crate::nat::NatHolder::Untracked
+    ));
+    // Precondition: idle export (already NAT64-aware) sees the lease.
+    let exported = coord.export_idle_persistent_leases(21);
+    assert_eq!(exported.len(), 1, "setup: idle export must see NAT64 lease");
+    assert_eq!(exported[0].pool_name, "nat64-deterministic-0");
+    // Display leg.
+    let display = coord.export_display_persistent_leases(21);
+    assert_eq!(
+        display.len(),
+        1,
+        "deterministic NAT64 lease must appear in SHOW: {display:?}"
+    );
+    assert_eq!(display[0].pool_name, "nat64-deterministic-0");
+    assert!(display[0].lease.deterministic, "display lease must be deterministic");
+    assert_eq!(
+        display[0].lease.deterministic_identity,
+        Some(crate::nat::DeterministicPortedIdentity::V6(params))
+    );
+    // Clear leg.
+    let cleared = coord.clear_persistent_nat_leases();
+    assert_eq!(cleared, 1, "clear must revoke the deterministic NAT64 lease");
+    assert!(
+        coord.export_idle_persistent_leases(22).is_empty(),
+        "cleared NAT64 lease must not export as idle"
+    );
+    assert!(
+        coord.export_display_persistent_leases(22).is_empty(),
+        "cleared NAT64 lease must not appear in SHOW"
+    );
+    // Fence leg: a stale pre-clear record must not reinstall.
+    let counts = coord.import_idle_persistent_leases(&exported, 23);
+    assert_eq!(counts.installed, 0, "stale NAT64 lease must not reinstall after clear: {counts:?}");
+    assert_eq!(
+        counts.skipped_clear_fenced, 1,
+        "stale NAT64 import must be clear-fenced, not installed: {counts:?}"
+    );
+}

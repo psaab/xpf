@@ -136,6 +136,16 @@ impl Coordinator {
                 });
             }
         }
+        for (idx, prefix) in self.forwarding.nat64.prefixes.iter().enumerate() {
+            let Some(params) = prefix.deterministic_v6 else { continue };
+            let pool_name = format!("nat64-deterministic-{idx}");
+            for mut lease in prefix.port_allocator.export_display_leases(now_ns) {
+                lease.deterministic = true;
+                lease.deterministic_identity =
+                    Some(crate::nat::DeterministicPortedIdentity::V6(params));
+                out.push(PoolDisplayLease { pool_name: pool_name.clone(), lease });
+            }
+        }
         out
     }
 
@@ -156,6 +166,12 @@ impl Coordinator {
                 continue;
             }
             cleared += rule.pool_allocator.clear_persistent_leases(now_ns);
+        }
+        for prefix in &self.forwarding.nat64.prefixes {
+            if prefix.deterministic_v6.is_none() {
+                continue;
+            }
+            cleared += prefix.port_allocator.clear_persistent_leases(now_ns);
         }
         cleared
     }
