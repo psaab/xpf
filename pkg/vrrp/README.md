@@ -294,7 +294,8 @@ the baseline with an ordinary advert.
   from the interval the **current master advertises**, learned from the
   received advert's Max Adver Int field (centiseconds on the wire, 10 ms
   units), NOT from its own `cfg.AdvertiseInterval`. `recordMasterAdvert`
-  stores it in `masterAdverInterval` for every non-zero-priority advert;
+  stores it in `masterAdverInterval` for every accepted non-zero-priority
+  advert (#14706; see the accepted-master rule below);
   `masterDownInterval()` (and the #2082/#2850 staleness-horizon replicas
   `shouldPreemptObservedMaster`/`preemptingLiveLowerMaster`) use it, with
   the local interval as the pre-first-advert fallback. Skew_Time still uses
@@ -313,12 +314,30 @@ the baseline with an ordinary advert.
   buggy or misconfigured peer advertising `Max Adver Int=1` (10 ms) would
   otherwise collapse `masterDownInterval` (and the preempt-gate staleness
   horizons) to ~30 ms on a 30 ms RETH node and flap mastership on ordinary
-  scheduling/network jitter. Only the LOW side is clamped: a SLOWER master
-  (learned ≥ floor, the anti-premature-failover case above) is adopted
-  unchanged, and a matching 30 ms advert equals the 30 ms floor so the
-  fast-failover default is preserved exactly. Because the floor is the node's
-  OWN interval, a legitimately-configured low-interval cluster (e.g.
-  `reth-advertise-interval 10` on both nodes) is not over-clamped.
+  scheduling/network jitter. Only the LOW side is floor-clamped: a SLOWER
+  master (learned ≥ floor, the anti-premature-failover case above) is
+  adopted unchanged up to the largest emittable interval
+  (`maxLearnedMasterAdverInterval`, 40950 ms — the 12-bit wire ceiling,
+  #14706), and a matching 30 ms advert equals the 30 ms floor so the
+  fast-failover default is preserved exactly. Because the floor is the
+  node's OWN interval, a legitimately-configured low-interval cluster
+  (e.g. `reth-advertise-interval 10` on both nodes) is not over-clamped.
+- Accepted-master learning (#14706): `recordMasterAdvert` overwrites
+  `lastMasterPriority`/`lastMasterSeen`, the per-family known-master
+  source, and `masterAdverInterval` ONLY for an advert accepted as the
+  current master: no retained master, a same-source advert (including
+  that master's own demotion), a priority >= the retained master's, a
+  priority-255 advert (source still subject to the #10719 carve-out),
+  or any advert once the retained record is stale under the interval
+  learned from that same master (RFC 5798 §6.4.2/§6.4.3 discard a
+  lower-priority advert). A rejected lower-priority advert from a
+  different source therefore cannot lower the #2082 preempt bar,
+  refresh a bogus master's liveness, prime the #10719 unknown-source
+  detector, or inflate the master-down horizon. The first
+  lower-than-local master is still recorded (it is the current master
+  the preempt / hold-time paths defer to), and election handling
+  itself (`handleBackupRx`/`handleMasterRx` timer and transition
+  decisions) is unchanged.
 - Planned **legacy VRRP shutdown**: the resigning instance sends three
   priority-0 advertisements; the backup arms a 1ms master-down timer, and the
   run-loop test requires its MASTER advertisement within 50ms (test
@@ -486,9 +505,9 @@ the baseline with an ordinary advert.
   (e.g. a rejoining cluster Secondary at priority 100) therefore no longer
   transiently becomes a second MASTER on sync-hold release while a
   higher-priority peer is legitimately MASTER. `handleBackupRx` /
-  `handleMasterRx` record each non-zero peer advert
-  (`lastMasterPriority`/`lastMasterSeen`); priority-0 resignation adverts
-  are not recorded (post-resign takeover flows through the ungated
+  `handleMasterRx` record each accepted non-zero peer advert
+  (`lastMasterPriority`/`lastMasterSeen`, #14706); priority-0 resignation
+  adverts are not recorded (post-resign takeover flows through the ungated
   `masterDownTimer` path). Staleness — no master seen, or last seen older
   than `masterDownInterval` — is treated as "no live master", allowing
   cold-start / silent-master-death takeover. `ForceRGMaster` (force=true,
@@ -533,10 +552,11 @@ blackholing on takeover. Compiled to `Instance.PreemptHoldTime` (seconds);
   `masterDownInterval` as a liveness watchdog. On its fire while
   `preemptHoldArmed`, `stepBackup` checks `heldMasterIsStale()`: a stale
   held master (last advert beyond the master-down horizon → it went silent)
-  disarms the hold and takes over NOW; a still-live one (adverts keep
-  refreshing `lastMasterSeen` via `recordMasterAdvert`) re-arms the watchdog
-  and lets the hold run to its natural expiry. `heldMasterIsStale` checks
-  ONLY staleness — NOT the effective>master priority comparison — so a
+  disarms the hold and takes over NOW; a still-live one (accepted adverts
+  keep refreshing `lastMasterSeen` via `recordMasterAdvert`, #14706)
+  re-arms the watchdog and lets the hold run to its natural expiry.
+  `heldMasterIsStale` checks ONLY staleness — NOT the
+  effective>master priority comparison — so a
   track-interface demotion below a *still-live* master does not trigger a
   spurious watchdog takeover; the natural-expiry re-validation
   (`shouldPreemptObservedMaster`, #2900) owns the demotion case. So a LIVE

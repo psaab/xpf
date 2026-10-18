@@ -11,63 +11,161 @@ import (
 // backup and master RX handlers, and equal-priority resolution.
 // Split out of instance.go for the #8090 modularity floor. Pure move.
 
-// recordMasterAdvert records a peer's last advertised priority for the
-// sync-hold preempt gate (#2082). Priority-0 (resignation) adverts are NOT
-// recorded — leaving a stale lastMasterPriority is safe because post-resign
-// takeover flows through the ungated masterDownTimer path, not the gated
-// preemptNowCh shortcut. A nonzero source address is retained per family for
-// the #10719 unknown-source detector. An unexpected priority-255 source does
-// not replace an already-learned identity; a priority-255 first advert can
-// seed a cold-start identity only after the detector has reported it. Called
-// from handleBackupRx/handleMasterRx, which run in the run-loop goroutine; mu
-// also makes its state race-clean for external readers.
-func (vi *vrrpInstance) recordMasterAdvert(pkt *VRRPPacket) {
-	if pkt.Priority == 0 {
-		return
+// maxLearnedMasterAdverInterval caps a learned Master_Adver_Interval
+// (#14706). MaxAdvertInt is masked to 12 bits on the wire (4095 cs =
+// 40.95 s); without a ceiling a rejected advert could inflate the
+// master-down / preempt staleness horizon to ~122 s. The ceiling is the
+// largest interval advertiseIntervalMS can emit: the advertise-interval
+// normalizer saturates at the 12-bit wire ceiling, i.e. 40950 ms.
+const maxLearnedMasterAdverInterval = 40950 * time.Millisecond
+
+// advertSourceFamily reports whether pkt carries a usable source of the
+// given family and returns that source. A 4-byte source is IPv4 even
+// though To16 would also succeed, mirroring warnUnknownMasterAdvert.
+func advertSourceFamily(pkt *VRRPPacket, ipv4 bool) (net.IP, bool) {
+	if ipv4 {
+		if src4 := pkt.SrcIP.To4(); src4 != nil {
+			return src4, true
+		}
+		return nil, false
 	}
-	vi.mu.Lock()
-	vi.lastMasterPriority = int(pkt.Priority)
-	vi.lastMasterSeen = time.Now()
-	if src4 := pkt.SrcIP.To4(); src4 != nil {
-		// Priority 255 changes mastership unconditionally. Do not let an
-		// unexpected owner advert replace the source against which the next
-		// owner/resignation advert is checked.
+	if pkt.SrcIP.To4() != nil {
+		return nil, false
+	}
+	if src16 := pkt.SrcIP.To16(); src16 != nil {
+		return src16, true
+	}
+	return nil, false
+}
+
+// sameAdvertSource reports whether pkt's source equals the learned
+// master source for its own family. A packet with no usable source is
+// never the same source.
+func (vi *vrrpInstance) sameAdvertSource(pkt *VRRPPacket) bool {
+	// Caller holds vi.mu.
+	if src4, ok := advertSourceFamily(pkt, true); ok {
+		return vi.lastMasterIPv4Known && net.IP(vi.lastMasterIPv4[:]).Equal(src4)
+	}
+	if src16, ok := advertSourceFamily(pkt, false); ok {
+		return vi.lastMasterIPv6Known && net.IP(vi.lastMasterIPv6[:]).Equal(src16)
+	}
+	return false
+}
+
+// learnMasterSource records pkt's source for its family, preserving the
+// #10719 priority-255 carve-out: an unexpected owner advert does not
+// replace an already-learned identity.
+func (vi *vrrpInstance) learnMasterSource(pkt *VRRPPacket) {
+	// Caller holds vi.mu.
+	if src4, ok := advertSourceFamily(pkt, true); ok {
 		if pkt.Priority != addressOwnerPriority || !vi.lastMasterIPv4Known ||
 			net.IP(vi.lastMasterIPv4[:]).Equal(src4) {
 			copy(vi.lastMasterIPv4[:], src4)
 			vi.lastMasterIPv4Known = true
 		}
-	} else if src16 := pkt.SrcIP.To16(); src16 != nil {
+		return
+	}
+	if src16, ok := advertSourceFamily(pkt, false); ok {
 		if pkt.Priority != addressOwnerPriority || !vi.lastMasterIPv6Known ||
 			net.IP(vi.lastMasterIPv6[:]).Equal(src16) {
 			copy(vi.lastMasterIPv6[:], src16)
 			vi.lastMasterIPv6Known = true
 		}
 	}
-	// Adopt the master's advertised interval (RFC 5798 §6.1/§6.4.2
-	// Master_Adver_Interval). Max Adver Int is centiseconds on the wire (10 ms
-	// units); convert to a Duration. A zero/absent field is ignored so
-	// masterDownInterval falls back to the local interval rather than computing
-	// a zero (flapping) master-down timer from a malformed advert.
+}
+
+// observedMasterStaleLocked reports whether the retained master record
+// is stale under the interval learned from that same master. Caller
+// holds vi.mu; the effective priority is recomputed from cfg/tracking
+// fields (never via an RLock-taking accessor) mirroring
+// shouldPreemptObservedMaster.
+func (vi *vrrpInstance) observedMasterStaleLocked(now time.Time) bool {
+	if vi.lastMasterSeen.IsZero() {
+		return true
+	}
+	effective := vi.cfg.Priority
+	if effective != 0 && effective != addressOwnerPriority && vi.trackDown && vi.cfg.TrackInterface != "" {
+		effective -= vi.cfg.TrackPriorityCost
+		if effective < 1 {
+			effective = 1
+		} else if effective > 254 {
+			effective = 254
+		}
+	}
+	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
+	skew := time.Duration(256-effective) * advert / 256
+	return now.Sub(vi.lastMasterSeen) > 3*advert+skew
+}
+
+// recordMasterAdvert records the master this state machine accepts for
+// the sync-hold preempt gate (#2082), the #10719 known-source detector,
+// and the learned Master_Adver_Interval. Priority-0 (resignation)
+// adverts are NOT recorded — leaving a stale lastMasterPriority is safe
+// because post-resign takeover flows through the ungated
+// masterDownTimer path, not the gated preemptNowCh shortcut.
+//
+// Only an accepted advert may overwrite the retained record (#14706,
+// RFC 5798 §6.4.2/§6.4.3 discard a lower-priority advert): no retained
+// master, a same-source advert (including that master's own demotion),
+// a priority >= the retained master's, a priority-255 advert (which
+// changes mastership unconditionally, subject to the #10719 source
+// carve-out in learnMasterSource), or any advert once the retained
+// record is stale. A rejected lower-priority advert from a different
+// source therefore cannot lower the preempt bar, refresh a bogus
+// master's liveness, prime the #10719 detector, or inflate the learned
+// interval. The first lower-than-local master is still recorded: with
+// no retained master it is the current master the preempt / hold-time
+// paths defer to. Called from handleBackupRx/handleMasterRx, which run
+// in the run-loop goroutine; mu also makes its state race-clean for
+// external readers.
+func (vi *vrrpInstance) recordMasterAdvert(pkt *VRRPPacket) {
+	if pkt.Priority == 0 {
+		return
+	}
+	vi.mu.Lock()
+	defer vi.mu.Unlock()
+	now := time.Now()
+	accepted := vi.lastMasterSeen.IsZero() ||
+		int(pkt.Priority) >= vi.lastMasterPriority ||
+		pkt.Priority == addressOwnerPriority ||
+		vi.sameAdvertSource(pkt) ||
+		vi.observedMasterStaleLocked(now)
+	if !accepted {
+		return
+	}
+	vi.lastMasterPriority = int(pkt.Priority)
+	vi.lastMasterSeen = now
+	vi.learnMasterSource(pkt)
+	// Adopt the accepted master's advertised interval (RFC 5798
+	// §6.1/§6.4.2 Master_Adver_Interval). Max Adver Int is centiseconds
+	// on the wire (10 ms units); convert to a Duration. A zero/absent
+	// field is ignored so masterDownInterval falls back to the local
+	// interval rather than computing a zero (flapping) master-down
+	// timer from a malformed advert.
 	if pkt.MaxAdvertInt > 0 {
-		learned := time.Duration(pkt.MaxAdvertInt) * 10 * time.Millisecond
+		learned := time.Duration(pkt.MaxAdvertInt&0x0FFF) * 10 * time.Millisecond
 		// Clamp a pathologically-low learned interval up to a safe floor
-		// (#4548). A BACKUP must never time its master out FASTER than its own
-		// configured advertise cadence: a buggy or misconfigured peer that
-		// advertises Max Adver Int=1 (10 ms) would otherwise collapse
-		// masterDownInterval (and the preempt-gate staleness horizons) to
-		// ~30 ms (3*10ms + skew) on a 30 ms RETH node and flap mastership on
-		// ordinary jitter. The floor is the node's own configured advertise
-		// interval; a SLOWER master (learned >= floor, the #4061
-		// anti-premature-failover case) is adopted unchanged — only the low
-		// side is clamped, so the 30 ms RETH fast-failover default is preserved
-		// exactly (floor == 30 ms == learned → no change).
+		// (#4548) and cap it at the largest emittable interval
+		// (#14706). A BACKUP must never time its master out FASTER than
+		// its own configured advertise cadence: a buggy or
+		// misconfigured peer that advertises Max Adver Int=1 (10 ms)
+		// would otherwise collapse masterDownInterval (and the
+		// preempt-gate staleness horizons) to ~30 ms (3*10ms + skew) on
+		// a 30 ms RETH node and flap mastership on ordinary jitter. The
+		// floor is the node's own configured advertise interval; a
+		// SLOWER master (learned >= floor, the #4061
+		// anti-premature-failover case) is adopted unchanged — only the
+		// low side is clamped, so the 30 ms RETH fast-failover default
+		// is preserved exactly (floor == 30 ms == learned → no
+		// change).
 		if floor := vi.masterAdverFloor(); learned < floor {
 			learned = floor
 		}
+		if learned > maxLearnedMasterAdverInterval {
+			learned = maxLearnedMasterAdverInterval
+		}
 		vi.masterAdverInterval = learned
 	}
-	vi.mu.Unlock()
 }
 
 // warnUnknownMasterAdvert counts and rate-limits a warning for a priority-0
@@ -143,11 +241,11 @@ func (vi *vrrpInstance) masterAdverFloor() time.Duration {
 // in-flight hold: the first because takeover becomes immediate, the second
 // because there is no longer a lower-priority master to preempt. A persisting
 // lower-priority master leaves an armed hold running (this path intentionally
-// does not reset masterDownTimer on a lower advert). recordMasterAdvert still
-// refreshes lastMasterSeen from every non-zero advert, which is what keeps the
-// #4584 masterDownTimer liveness watchdog (armed by armPreemptHold) reading the
-// held master as alive; if the adverts stop, the watchdog observes the staleness
-// and takes over.
+// does not reset masterDownTimer on a lower advert). recordMasterAdvert
+// refreshes lastMasterSeen only from an accepted advert (#14706), which is
+// what keeps the #4584 masterDownTimer liveness watchdog (armed by
+// armPreemptHold) reading the held master as alive; if the accepted
+// adverts stop, the watchdog observes the staleness and takes over.
 func (vi *vrrpInstance) handleBackupRx(pkt *VRRPPacket, masterDownTimer, preemptHoldTimer *time.Timer) {
 	vi.warnUnknownMasterAdvert(pkt)
 	vi.recordMasterAdvert(pkt)
