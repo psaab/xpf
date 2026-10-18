@@ -790,6 +790,9 @@ mod tests_session_hit_guards_13638;
 #[cfg(test)]
 #[path = "tests_bindless_fence_ordering_12904.rs"]
 mod tests_bindless_fence_ordering_12904;
+#[cfg(test)]
+#[path = "tests_missing_neighbor_probe_gate_14661.rs"]
+mod tests_missing_neighbor_probe_gate_14661;
 #[path = "worker/mod.rs"]
 mod worker;
 // #1807: shared poison-recovery helpers (lock_recover /

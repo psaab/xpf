@@ -913,8 +913,21 @@ pub(super) fn retry_pending_neigh(
             {
                 let target = binding_by_index_mut(left, binding_index, binding, right, target_idx)
                     .expect("target index resolved from current binding set");
+                let mut first_segment = true;
                 for (bytes, wg_commit) in segments {
                     let len = bytes.len();
+                    // #14661: the retry overlap admission was recorded for
+                    // the whole parked datagram; ride it on the FIRST
+                    // segment only (mirroring the immediate copy-fallback
+                    // at tx/dispatch, which attaches it to enqueued == 0).
+                    // Dropping it here failed the admission (Drop = fail),
+                    // pinning a transmitted datagram as failed until TTL.
+                    let segment_overlap = if first_segment {
+                        first_segment = false;
+                        retry_overlap_admissions_10659.take()
+                    } else {
+                        None
+                    };
                     target.tx_pipeline.pending_tx_local.push_back(TxRequest {
                         bytes,
                         expected_ports: None,
@@ -925,7 +938,7 @@ pub(super) fn retry_pending_neigh(
                         cos_queue_id: cos.queue_id,
                         dscp_rewrite: cos.dscp_rewrite,
                         mirror_clone: false,
-                        overlap_admissions: None,
+                        overlap_admissions: segment_overlap,
                         enqueue_ns: 0,
                     });
                     if let Some(commit) = wg_commit {

@@ -121,8 +121,9 @@ mod try_enqueue_resolver_tests {
     // attempt via note_kernel_probe instead of buffering the frame, so
     // the first packet must consume exactly one throttle window and the
     // second must observe that same window without adding another entry.
-    // The probe-call capture makes an inverted gate fail; the throttle
-    // assertions fail if capacity/NAT64 no longer records the attempt.
+    // #14661: a discarded NAT64 packet emits NO wire probe at all (the
+    // probe is deferred to committed seeds only); the throttle-record
+    // assertions below still fail if capacity/NAT64 stops recording.
     #[test]
     fn nat64_missing_neighbor_poll_path_consumes_one_throttle_window() {
         use crate::afxdp::tests_support::{
@@ -189,8 +190,8 @@ mod try_enqueue_resolver_tests {
         assert_eq!(dbg1.nat64_missing_neigh_drop, 1);
         assert_eq!(
             kernel_arp_probe_test_capture_count(),
-            1,
-            "first unthrottled NAT64 miss must invoke one kernel probe"
+            0,
+            "#14661: a discarded NAT64 miss must not invoke a kernel probe"
         );
         let first_probe_at = *binding
             .resolver_enqueue_throttle
@@ -210,8 +211,8 @@ mod try_enqueue_resolver_tests {
         assert_eq!(dbg2.nat64_missing_neigh_drop, 1);
         assert_eq!(
             kernel_arp_probe_test_capture_count(),
-            1,
-            "second same-key NAT64 miss must not invoke another kernel probe"
+            0,
+            "#14661: discarded NAT64 misses never invoke a kernel probe"
         );
         stop_kernel_arp_probe_test_capture();
         assert_eq!(

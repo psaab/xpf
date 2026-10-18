@@ -10243,6 +10243,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         break 'missing_neighbor StageOutcome::RecycleAndContinue;
                                     }
                                 }
+                                // #14661: NO packet in this arm probes here.
+                                // NAT64-required flows are fail-closed dropped
+                                // below; flowless packets never seed; and a
+                                // flow-backed seed must first survive the
+                                // NPTv6-Untranslatable, SNAT-allocation, and
+                                // final composed-NAT fence gates below. The
+                                // single admitted probe is deferred to the
+                                // committed-seed site (probe_admitted_14661);
+                                // only the throttle record is kept here, so a
+                                // discarded packet emits no wire probe and a
+                                // permitted seed probes exactly once.
+                                let suppress_neighbor_probe_14661 = true;
                                 // Send ARP/NDP solicitation via RAW socket (not XSK)
                                 // so the reply goes through the kernel's normal RX
                                 // path (cpumap_or_pass), bypassing XSK fill ring issues.
@@ -10330,6 +10342,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     if !already_probing
                                         && !is_probe_throttled
                                         && !tunnel_without_outer
+                                        && !suppress_neighbor_probe_14661
                                     {
                                         if let Some(name) = worker_ctx
                                             .forwarding
@@ -10361,7 +10374,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // resolver re-reads the SAME throttle entry
                                     // and bumps it once, so the probe above and
                                     // this enqueue share one window per key.
-                                    if outer_if_distinct && !is_probe_throttled {
+                                    if outer_if_distinct && !is_probe_throttled && !suppress_neighbor_probe_14661 {
                                         if let Some(resolver) = worker_ctx.neighbor_resolver {
                                             try_enqueue_resolver(
                                                 resolver,
@@ -10394,9 +10407,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         );
                                     }
                                 }
-                                // #5174: NAT64 MissingNeighbor fail-closed. The kernel
-                                // ARP/NDP probe above already fired for the extracted
-                                // IPv4 next-hop (so the neighbor will resolve), but the
+                                // #5174: NAT64 MissingNeighbor fail-closed. #14661:
+                                // no wire probe fires for this discarded packet
+                                // (suppressed above); only the throttle record
+                                // remains, bounding later admitted probes. The
                                 // cold-path seed + pending_neigh replay is SAME-FAMILY
                                 // only — the replay `rewrite_forwarded_frame_in_place`
                                 // does MAC/VLAN/NAT, NOT the v6->v4 cross-family NAT64
@@ -10440,6 +10454,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // less packets (no install attempted) keep
                                 // buffering as before.
                                 let mut seed_install_refused = false;
+                                // #14661: probe-suppression state captured
+                                // BEFORE the seed NAT composition below can
+                                // reserve a pool identity. The deferred probe
+                                // (if any) fires only after every later gate
+                                // admits, using this pre-composition snapshot.
+                                let mut probe_admitted_14661 = false;
                                 if let Some(flow) = flow.as_ref() {
                                     // #1913 (Codex r2): policy was already
                                     // evaluated (and any DENY dropped+recycled)
@@ -10615,6 +10635,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         telemetry.counters.touched = true;
                                         break 'missing_neighbor StageOutcome::RecycleAndContinue;
                                     }
+                                    // #14661: every later gate (NPTv6
+                                    // Untranslatable, SNAT allocation, final
+                                    // composed-NAT fence) has admitted. Arm
+                                    // the deferred probe; it fires below only
+                                    // if the seed install commits.
+                                    probe_admitted_14661 = true;
                                     let pending_resolution_target =
                                         crate::afxdp::session_glue::resolution_target_for_session(
                                             flow,
@@ -10675,6 +10701,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta.tcp_flags,
                                             )
                                         };
+                                    // #14661: capture before the lease
+                                    // branches consume the shed vec.
+                                    let shed_nonempty_14661 =
+                                        !pressure_shed_sessions.is_empty();
                                     let shed_keys: Vec<_> = pressure_shed_sessions
                                         .iter()
                                         .map(|shed| shed.key.clone())
@@ -10790,10 +10820,54 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             meta.tcp_flags,
                                         );
                                     }
+                                    // #14661: a failed shed lease left the
+                                    // victims' shared/BPF authority live
+                                    // (deferred above); installing now would
+                                    // exceed the shared invariant and could
+                                    // collide on a shed SNAT identity. Refuse
+                                    // the seed (and its probe) instead. The
+                                    // tuple-gate install permit then fences
+                                    // the local install + shared/BPF publish
+                                    // below against a concurrent eviction
+                                    // lease, mirroring ForwardCandidate.
+                                    let seed_gate_refused_14661 =
+                                        shed_lease.is_err() && shed_nonempty_14661;
+                                    let mut seed_install_permit_14661 =
+                                        if pending_capacity_available
+                                            && !seed_gate_refused_14661
+                                        {
+                                            match crate::afxdp::bpf_map::global_tuple_gate()
+                                                .try_acquire_installs([flow
+                                                    .forward_key
+                                                    .clone()])
+                                            {
+                                                Ok(mut permits) => permits.pop(),
+                                                Err(_) => None,
+                                            }
+                                        } else {
+                                            None
+                                        };
+                                    let seed_gate_admitted_14661 =
+                                        pending_capacity_available
+                                            && !seed_gate_refused_14661
+                                            && seed_install_permit_14661.is_some();
+                                    if pending_capacity_available
+                                        && !seed_gate_admitted_14661
+                                    {
+                                        sessions.note_admission_refused();
+                                        // #14661: a lease/gate refusal is an
+                                        // at-cap-class refusal: refuse the
+                                        // buffer too (the else-arm SNAT
+                                        // rollback runs below) instead of
+                                        // parking this frame for a replay on
+                                        // an unreserved NAT tuple (cf. the
+                                        // seed_install_refused contract).
+                                        seed_install_refused = true;
+                                    }
                                     if !pending_capacity_available {
                                         sessions.note_admission_refused();
                                     }
-                                    let pending_installed = pending_capacity_available
+                                    let pending_installed = seed_gate_admitted_14661
                                         && sessions
                                             .install_with_protocol_with_origin_and_source_nat(
                                                 flow.forward_key.clone(),
@@ -10805,6 +10879,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta.tcp_flags,
                                                 source_nat_static,
                                             );
+                                    // Permit held in seed_install_permit_14661
+                                    // until after the shared/BPF publish below.
                                     let pending_install_info = pending_installed.then(|| {
                                         sessions
                                             .installed_session_info(&flow.forward_key)
@@ -10931,7 +11007,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         let session_id = install_info.session_id;
                                         // #8125: see the sibling site.
                                         let timeout_secs = install_info.timeout_secs;
-                                        publish_bpf_conntrack_entry_with_source_nat(
+                                        publish_bpf_conntrack_entry_under_gate_with_source_nat(
                                             conntrack_v4_fd,
                                             conntrack_v6_fd,
                                             &flow.forward_key,
@@ -10945,6 +11021,17 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             SessionOrigin::MissingNeighborSeed,
                                             entry.source_nat_static,
                                         );
+                                        // #14661: replicate the committed seed
+                                        // to peer workers (ForwardCandidate
+                                        // parity) so a reply hashed to another
+                                        // queue finds the session before
+                                        // neighbor resolution completes.
+                                        replicate_session_upsert(
+                                            worker_ctx.peer_worker_commands,
+                                            worker_ctx.worker_commands_by_id,
+                                            &entry,
+                                        );
+                                        drop(seed_install_permit_14661);
                                         // #2244: count failed reverse-NAT publishes so
                                         // map-pressure loss is operator-visible.
                                         if !publish_dnat_table_entry(
@@ -10958,6 +11045,78 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 .fetch_add(1, Ordering::Relaxed);
                                         }
                                         telemetry.counters.session_creates += 1;
+                                        // #14661: deferred probe fires ONLY
+                                        // now — post-fence, post-SNAT, and
+                                        // after the seed committed. Recompute
+                                        // the throttle/already-probing state
+                                        // at fire time (the early snapshot may
+                                        // be stale); the neg-cache gate above
+                                        // already admitted this packet.
+                                        if probe_admitted_14661 {
+                                            if let Some(next_hop) =
+                                                pending_decision.resolution.next_hop
+                                            {
+                                                let key = (neigh_if, next_hop);
+                                                // #14661: the early block already
+                                                // recorded this key in the throttle
+                                                // map (note_kernel_probe), so the
+                                                // deferred fire must NOT re-check
+                                                // probe_throttled — it would always
+                                                // suppress itself. The record IS
+                                                // the window; this single fire is
+                                                // the probe it was bounding.
+                                                let already = binding
+                                                    .pending_neigh
+                                                    .contains_key(&key);
+                                                let tunnel_marked =
+                                                    pending_decision.resolution.tunnel_endpoint_id
+                                                        != 0;
+                                                let outer_distinct = tunnel_marked
+                                                    && neigh_if > 0
+                                                    && neigh_if
+                                                        != pending_decision
+                                                            .resolution
+                                                            .egress_ifindex;
+                                                let tunnel_without_outer =
+                                                    tunnel_marked && !outer_distinct;
+                                                if !already && !tunnel_without_outer
+                                                {
+                                                    if let Some(name) = worker_ctx
+                                                        .forwarding
+                                                        .ifindex_to_name
+                                                        .get(&neigh_if)
+                                                        .map(String::as_str)
+                                                    {
+                                                        if trigger_kernel_arp_probe(
+                                                            name, neigh_if, next_hop,
+                                                        ) {
+                                                            worker_ctx
+                                                                .dynamic_neighbors
+                                                                .record_neighbor_probe(
+                                                                    key,
+                                                                    monotonic_nanos(),
+                                                                );
+                                                        }
+                                                    }
+                                                }
+                                                if outer_distinct {
+                                                    if let Some(resolver) =
+                                                        worker_ctx.neighbor_resolver
+                                                    {
+                                                        try_enqueue_resolver(
+                                                            resolver,
+                                                            &mut binding
+                                                                .resolver_enqueue_throttle,
+                                                            &worker_ctx
+                                                                .forwarding
+                                                                .ifindex_to_name,
+                                                            key,
+                                                            now_ns,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
                                     } else {
                                         // #1861 §5.3: at-cap seed refusal. The
                                         // single-entry install IS the
