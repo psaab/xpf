@@ -244,7 +244,28 @@ func (s *Server) authorizeRESTConfigMutation(r *http.Request, cfg *config.Config
 		if err := decodeRESTConfigBody(r, &req); err != nil {
 			return err
 		}
-		input = strings.TrimSpace(req.Path)
+		// #14710: adjudicate exactly the path the handler acts on.
+		// The handler splits req.Path with strings.Fields (unicode-aware)
+		// and passes the resulting parts to Annotate. Lexing the raw
+		// string with the config lexer diverges in two fail-open ways:
+		// (a) non-ASCII/VT/FF whitespace stops the lexer (TokenError) so
+		// only a prefix is judged, while Fields splits fully; (b) a
+		// quoted final token (system "login") is treated by
+		// configMutationPaths as the annotate comment and dropped.
+		// Joining Fields with single spaces makes every handler token a
+		// bare lexer token, and appending a synthetic empty quoted
+		// comment satisfies the annotate arm's comment-drop without
+		// discarding a real path token: `annotate system login ""`
+		// adjudicates `system login`, and `annotate system "login" ""`
+		// (after Fields unquotes nothing — Fields keeps the quote
+		// characters in the token, so the joined token `"login"` lexes
+		// as a quoted string) also adjudicates the full path once the
+		// synthetic comment is the token dropped.
+		parts := strings.Fields(req.Path)
+		if len(parts) == 0 {
+			return nil
+		}
+		input = strings.Join(parts, " ") + ` ""`
 	default:
 		// FAIL CLOSED. An unrecognised field means this table gained a row
 		// whose extraction nobody wrote, and allowing the request would be
