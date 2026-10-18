@@ -350,35 +350,67 @@ func (d *Daemon) reassertServiceReloadDebtOnce(ctx context.Context) {
 		}
 	}
 
-	// sshd is VALIDATED before the reload, exactly as the apply path does
-	// (#4311): a reload is a SIGHUP, and re-execing into a config that fails
-	// `sshd -t` can drop the listener — an SSH lockout on an appliance. A
-	// validation failure deliberately leaves the debt OUTSTANDING rather than
-	// discharging it: nothing was reloaded, so nothing is paid.
+	// #14693: the sshd debt is NOT paid by reloading whatever is on
+	// disk. The update path's reload-failure arm reverts the drop-in
+	// to its prior bytes (#2062) AFTER latching this debt, so the disk
+	// can hold the pre-hardening (more permissive) policy while the
+	// desired config says otherwise. A reload-only retry would make
+	// sshd enforce exactly those reverted bytes and then discharge
+	// the debt — permanent silent loss of the hardening. Instead the
+	// owed state is re-derived from the live config by re-driving the
+	// full apply (rewrite the drop-in, `sshd -t`, reload): disk,
+	// running sshd and desired converge together, and applySSHConfig
+	// itself notes the reload outcome that pays (or re-latches) the
+	// debt. The semaphore held here serializes that re-drive with
+	// commits; under it the live config IS the config a commit would
+	// apply. Only when this process has no store at all (direct unit
+	// construction) is there no desired-state authority to re-drive,
+	// and the historical validate+reload retry below is kept: there
+	// the disk cannot disagree with a desired config, because none
+	// exists in-process.
 	if d.sshdReloadOwed() {
-		slog.Warn("sshd reload still owed from an earlier apply — retrying " +
-			"(the drop-in is gone but sshd has not re-read its configuration)")
-		if out, err := sshdValidateCmd(); err != nil {
-			// #9073: count the failing PASS. Without it the metric channel
-			// showed a FLAT count while the retry owner ran and failed every
-			// tick -- the exact "running and failing vs wedged" distinction
-			// these counters exist for.
-			//
-			// On its OWN series, not folded into sshdFailures. #6800 pinned
-			// that count to reload ATTEMPTS in as many words, and it is a real
-			// distinction: a failing reload means systemd or sshd rejected a
-			// config that PASSED validation, which is a different fault from
-			// one that never got that far. Three states need three signals.
-			d.noteSSHDValidationFailure()
-			slog.Error("sshd config validation failed; not reloading — will retry",
-				"err", err, "output", strings.TrimSpace(string(out)))
-		} else if out, err := sshdReloadCmd(); err != nil {
-			d.noteSSHDReloadResult(err)
-			slog.Error("sshd reload re-assert failed; will retry",
-				"err", err, "output", strings.TrimSpace(string(out)))
+		if live := d.liveConfig12169(); live != nil {
+			// #14693: re-drive the DESIRED config from the live
+			// authority; never reload the on-disk bytes as-is (see the
+			// block comment above). This also covers the removal debt:
+			// a live config with no ssh stanza re-runs the removal
+			// apply, which re-removes a drop-in a failed update apply
+			// may have restored before validating and reloading.
+			slog.Warn("sshd reload still owed from an earlier apply — re-driving " +
+				"the desired sshd config (the on-disk drop-in may have been " +
+				"reverted by the failed apply, so reloading it as-is would " +
+				"enforce the reverted policy)")
+			if err := d.applySSHConfig(live); err != nil {
+				slog.Error("sshd config re-assert failed; will retry", "err", err)
+			} else {
+				slog.Info("sshd reload re-asserted")
+			}
 		} else {
-			d.noteSSHDReloadResult(nil)
-			slog.Info("sshd reload re-asserted")
+			// No store authority in this process (direct unit
+			// construction): no desired config exists here that the
+			// disk could disagree with, so keep the historical retry —
+			// sshd is VALIDATED before the reload, exactly as the
+			// apply path does (#4311): a reload is a SIGHUP, and
+			// re-execing into a config that fails `sshd -t` can drop
+			// the listener. A validation failure deliberately leaves
+			// the debt OUTSTANDING: nothing was reloaded, so nothing
+			// is paid.
+			slog.Warn("sshd reload still owed from an earlier apply — retrying " +
+				"(the drop-in is gone but sshd has not re-read its configuration)")
+			if out, err := sshdValidateCmd(); err != nil {
+				// #9073: count the failing PASS on its own series; a
+				// validation failure is not a reload attempt.
+				d.noteSSHDValidationFailure()
+				slog.Error("sshd config validation failed; not reloading — will retry",
+					"err", err, "output", strings.TrimSpace(string(out)))
+			} else if out, err := sshdReloadCmd(); err != nil {
+				d.noteSSHDReloadResult(err)
+				slog.Error("sshd reload re-assert failed; will retry",
+					"err", err, "output", strings.TrimSpace(string(out)))
+			} else {
+				d.noteSSHDReloadResult(nil)
+				slog.Info("sshd reload re-asserted")
+			}
 		}
 	}
 
