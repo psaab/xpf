@@ -84,16 +84,25 @@ cycle would otherwise fire into a nil callback and be lost (#3755); registering
 first closes the gap, and `pkg/rpm` additionally buffers-and-replays any event
 fired before a callback exists as a belt against a future reorder.
 
-## Cross-policy global action budget (#10871)
+## Cross-policy global action budget (#10871, refund #14724)
 
 Per-policy cooldowns do not constrain a storm across many distinct policies.
-The worker therefore admits at most **four commit attempts in any rolling
+The worker therefore admits at most **four promoted commits in any rolling
 60-second window**, shared by every event-options policy. Four simultaneous
 actions can still run as a burst; once exhausted, queued actions are dropped
 before taking the config lock and counted by
 `xpf_event_actions_dropped_total{reason="global_budget"}`. A denied `trigger on`
 edge has its latch released, so a later edge can retry after budget capacity
 returns.
+
+The slot is reserved only when the action is ready to commit, and a commit
+that never promotes — a transient `commitFn` returning `(nil, err)`, a
+standalone commit failure, or an `ErrClusterReadOnly` deferral — refunds
+its slot (#14724), so a flapping standby or a broken policy cannot burn
+the shared budget and starve healthy remediations. Only a promoted commit
+(clean, or committed-with-apply-debt under #5063) consumes the budget.
+The read-only error is preserved across the commit wrap so `runAction`
+still defers instead of classing the standby action rejected.
 
 Admission order rotates from the policy after the last budgeted commit. This
 prevents the first four policies in config order from consuming every refill
@@ -351,7 +360,10 @@ cannot occur.
   benign dedup no longer inflates the alert-worthy `queue_full` metric.
 - **Critical security/firewall lane (#10877):** actions whose parsed target is
   under the top-level `security` or `firewall` tree are queued ahead of ordinary
-  actions, with FIFO preserved within each class. A critical action arriving at
+  actions, with FIFO preserved within each class. A `groups <name>` prefix is
+  unwrapped before classification (#14724), so `set groups <g> security …`
+  earns the same lane as the direct path; `set apply-groups <g>` alone names
+  no target subtree and stays ordinary. A critical action arriving at
   a full queue displaces the newest ordinary action; that real loss increments
   `queue_full` and releases the displaced policy's edge latch so it can retry
   on a fresh event. A full queue of critical actions can still reject another
@@ -538,18 +550,23 @@ Junos reading in `withinMatches` (`evaluate.go`):
   the drop and the rollback is still suppressed, so the cost is a delay to the
   next event rather than a consumed crossing.
 
-  **Two sibling paths deliberately do NOT roll back**, and the distinction is
-  transient-vs-deterministic. A `classifyPlan` rejection (malformed/unknown
-  command) fails identically every time, so re-arming would re-evaluate and
-  re-reject on every subsequent event — unbounded churn for a remediation that
-  can never run; it is counted (`rejected`) and logged once instead. An empty op
-  list had no remediation to lose. Only the queue-full drop is transient, i.e.
-  the only one where retrying succeeds. Pinned as an executable decision by
-  `TestClassifyRejectAndEmptyPlanKeepTheLatch6810` so the scope is not mistaken
-  for an oversight later. Regression-locked by
-  `engine_latch_before_admission_6810_test.go`, which drives the real
-  `HandleEvent` — every pre-existing edge-latch test calls `evaluateEvent`
-  directly and is structurally blind to this seam.
+  **Every terminal non-commit exit releases the latch (#14724).** #6810
+  covered only queue-full admission; #13558 added the config-lock timeout.
+  #14724 extends the same invariant to the cooldown-stale drop, the
+  permanent-rejection return (a transient `commitFn` `(nil, err)` is
+  classed permanent there), and the `HandleEvent` pre-enqueue
+  classify-reject / empty-plan continues: a crossing whose remediation
+  never committed did not fire. For cooldown-stale the release cannot
+  re-fire early — the sibling commit that made the action stale armed
+  the 30 s cooldown, and `evaluateEvent`'s cooldown check suppresses
+  re-trigger until it expires; for removed/redefined policies the
+  release is a revision-guarded no-op. Deterministic classify/preflight
+  rejections now re-attempt (and re-count `rejected`) per sustained
+  event — counted, log-visible churn that is accepted over a silently
+  wedged latch; this reverses #6810's narrower keep-the-latch decision
+  for those two branches. Shutdown abandons stay unreleased (terminal).
+  Regression-locked by `engine_latch_budget_groups_14724_test.go`, which
+  drives the real `HandleEvent` / `runAction` / `applyOnce` seams.
 - **`trigger until N` fires through the INCLUSIVE N-th event**, then stops
   (Junos "trigger UNTIL the event has been received N times" — the N-th
   occurrence is the last that fires). The current event is appended to the
