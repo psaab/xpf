@@ -122,27 +122,30 @@ type vrrpInstance struct {
 
 	trackDown bool // tracked interface (cfg.TrackInterface) is down (#1814); guarded by mu
 
-	// Last-seen master advertisement (#2082). Recorded by handleBackupRx /
-	// handleMasterRx for every non-zero-priority advert from a peer, and read
-	// by shouldPreemptObservedMaster to gate the non-force sync-hold preempt
-	// shortcut on a strictly-higher effective priority (RFC 5798 §6.4.2). Both
-	// writers and the gate reader run in the run-loop goroutine, so they are
-	// already serialized with respect to each other; mu makes the writes/reads
-	// race-clean for any future cross-goroutine reader. Priority-0
-	// (resignation) adverts are NOT recorded — post-resign takeover flows
-	// through the ungated masterDownTimer path. Guarded by mu.
+	// Last-seen accepted master advertisement (#2082). Recorded by
+	// handleBackupRx / handleMasterRx only for an advert accepted as the
+	// current master (#14706 — see recordMasterAdvert), and read by
+	// shouldPreemptObservedMaster to gate the non-force sync-hold preempt
+	// shortcut on a strictly-higher effective priority (RFC 5798 §6.4.2).
+	// Both writers and the gate reader run in the run-loop goroutine, so
+	// they are already serialized with respect to each other; mu makes
+	// the writes/reads race-clean for any future cross-goroutine reader.
+	// Priority-0 (resignation) adverts are NOT recorded — post-resign
+	// takeover flows through the ungated masterDownTimer path. Guarded
+	// by mu.
 	lastMasterPriority int       // last non-zero peer advert priority
 	lastMasterSeen     time.Time // when lastMasterPriority was recorded
-	// lastMasterIPv4 / lastMasterIPv6 store the learned nonzero-priority source
-	// per family — the currently-known master identity the #10719 detector
-	// compares against. They are recorded by recordMasterAdvert alongside
-	// lastMasterPriority/lastMasterSeen; the Known flags distinguish cold start.
-	// Two fixed-size slots, not one, because a dual-stack instance hears its
+	// lastMasterIPv4 / lastMasterIPv6 store the learned accepted-master
+	// source per family — the currently-known master identity the #10719
+	// detector compares against. They are recorded by recordMasterAdvert
+	// alongside lastMasterPriority/lastMasterSeen for accepted adverts
+	// only (#14706); the Known flags distinguish cold start. Two
+	// fixed-size slots, not one, because a dual-stack instance hears its
 	// master from two UNRELATED sources (v4 from getLocalIP, v6 from the
-	// link-local) — a single slot would flip-flop and misreport every legitimate
-	// cross-family advert as unknown. Priority-0 adverts are NOT recorded (same
-	// early return as the priority), so a resignation never overwrites the
-	// identity it is resigning FROM. Guarded by mu.
+	// link-local) — a single slot would flip-flop and misreport every
+	// legitimate cross-family advert as unknown. Priority-0 adverts are
+	// NOT recorded (same early return as the priority), so a resignation
+	// never overwrites the identity it is resigning FROM. Guarded by mu.
 	lastMasterIPv4      [4]byte
 	lastMasterIPv4Known bool
 	lastMasterIPv6      [16]byte
@@ -157,10 +160,10 @@ type vrrpInstance struct {
 	// backup are configured with different intervals (a rolling change or a
 	// misconfig), timing the master out on the local interval fails over too
 	// early (shorter local interval → flapping) or too late (longer → traffic
-	// loss). Recorded by recordMasterAdvert for every non-zero-priority advert,
-	// alongside lastMasterPriority/lastMasterSeen. 0 = none learned yet
-	// (cold-start / pre-first-advert), in which case the local interval is the
-	// fallback. Guarded by mu.
+	// loss). Recorded by recordMasterAdvert for accepted non-zero-priority
+	// adverts only (#14706), alongside lastMasterPriority/lastMasterSeen.
+	// 0 = none learned yet (cold-start / pre-first-advert), in which case
+	// the local interval is the fallback. Guarded by mu.
 	masterAdverInterval time.Duration
 
 	state   VRRPState
