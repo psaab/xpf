@@ -771,6 +771,7 @@ type xpfCollector struct {
 	// #10865: GRE endpoint refusals for a Protocol Type / inner IP version
 	// nibble mismatch. A refusal, not a drop; transit GRE is not counted.
 	userspaceGreDecapPtNibbleMismatchRefusals *prometheus.Desc
+	userspaceGreOuterFragDrops *prometheus.Desc
 	// #2472: locally-generated ICMP/RST error replies dropped by the
 	// per-reason token-bucket rate limiter (Time Exceeded / PTB / reject).
 	userspaceTimeExceededRateLimited *prometheus.Desc
@@ -1503,6 +1504,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceGreDecapChecksumInvalidDrops
 	ch <- c.userspaceGreDecapUnsupportedVersionRefusals
 	ch <- c.userspaceGreDecapPtNibbleMismatchRefusals
+	ch <- c.userspaceGreOuterFragDrops
 	ch <- c.userspaceTimeExceededRateLimited
 	ch <- c.userspacePacketTooBigRateLimited
 	ch <- c.userspaceRejectRateLimited

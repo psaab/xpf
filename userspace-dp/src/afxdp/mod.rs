@@ -91,6 +91,7 @@ mod forwarding_build;
 pub(crate) mod frame;
 #[path = "gre.rs"]
 mod gre;
+mod gre_reassembly;
 mod logical_ingress;
 pub(crate) mod ipsec_inner;
 pub(crate) mod ipsec_inner_queue;
@@ -756,6 +757,9 @@ mod tests_gre_version_6842;
 #[cfg(test)]
 #[path = "tests_gre_reserved0_13662.rs"]
 mod tests_gre_reserved0_13662;
+#[cfg(test)]
+#[path = "tests_gre_outer_frag_14645.rs"]
+mod tests_gre_outer_frag_14645;
 #[cfg(test)]
 #[path = "tests_decap_dnat_table.rs"]
 mod tests_decap_dnat_table;

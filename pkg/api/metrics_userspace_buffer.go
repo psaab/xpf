@@ -614,6 +614,12 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		float64(status.GreDecapPtNibbleMismatchRefusalsTotal),
 	)
 
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceGreOuterFragDrops,
+		prometheus.CounterValue,
+		float64(status.GreOuterFragDropsTotal),
+	)
+
 	// #2472: locally-generated error-reply per-reason token-bucket drops.
 	// Emitted unconditionally so a 0 is a real "no generated errors
 	// rate-limited" signal rather than an absent series. Nonzero flags an

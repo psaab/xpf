@@ -209,6 +209,9 @@ pub struct ExtWalk {
     /// sighting; that would make the shim the more permissive side, which is
     /// the direction this issue exists to close.
     pub non_first_fragment: bool,
+    /// #14645: any Fragment header was sighted (first or non-first). A first
+    /// fragment (offset 0, M set) is still a fragment of a larger datagram.
+    pub fragment_seen: bool,
 }
 
 /// Walk the extension-header chain from `first_protocol` at `offset`.
@@ -257,6 +260,7 @@ pub fn walk_ipv6_ext_headers(
     let mut protocol = first_protocol;
     let mut offset = start_offset;
     let mut non_first_fragment = false;
+    let mut fragment_seen = false;
     for _ in 0..MAX_EXT_HDRS {
         match eh_class(protocol) {
             EH_CLASS_GENERIC => {
@@ -294,13 +298,19 @@ pub fn walk_ipv6_ext_headers(
                 // the walk fail closed. The caller substitutes
                 // PROTO_FRAGMENT_NO_L4 for this sighting, matching the sibling
                 // screen and userspace walkers.
-                let non_first_fragment_sighting =
-                    (u16::from_be_bytes([frag[2], frag[3]]) & 0xFFF8) != 0;
+                let word = u16::from_be_bytes([frag[2], frag[3]]);
+                let non_first_fragment_sighting = (word & 0xFFF8) != 0;
+                fragment_seen = true;
                 protocol = frag[0];
                 offset = offset.checked_add(mem::size_of::<FragHdr>() as u16)?;
                 if non_first_fragment_sighting {
                     non_first_fragment = true;
                     break;
+                }
+                // A first fragment with M clear is an atomic fragment: a
+                // whole datagram, not a piece of a larger one.
+                if word & 0x0001 == 0 {
+                    fragment_seen = false;
                 }
             }
             _ => break,
@@ -310,5 +320,6 @@ pub fn walk_ipv6_ext_headers(
         offset,
         protocol,
         non_first_fragment,
+        fragment_seen,
     })
 }

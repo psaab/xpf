@@ -365,13 +365,53 @@ fn outline_ndp_na_learn_and_program(
 /// The helper does NOT return the active slice — that would be a
 /// self-referential return type (the slice would borrow from the
 /// returned `Vec`).
+/// #14645 outcome of the GRE stage: decap produced a packet, the packet was
+/// an outer fragment buffered for reassembly (caller must recycle without
+/// further adjudication), or neither (ordinary fall-through).
+pub(super) enum GreDecapStage {
+    Decapped(UserspaceDpMeta, Vec<u8>),
+    Buffered,
+    NotGre(UserspaceDpMeta),
+    FilterDropped,
+}
+
 #[inline]
 pub(super) fn stage_native_gre_decap(
     raw_frame: &[u8],
     meta: UserspaceDpMeta,
     forwarding: &ForwardingState,
+    reassembler: &mut crate::afxdp::gre_reassembly::GreReassembler,
+    now_ns: u64,
     outer_input_filter_allows: &mut impl FnMut(&[u8], UserspaceDpMeta) -> bool,
-) -> (UserspaceDpMeta, Option<Vec<u8>>, bool) {
+) -> GreDecapStage {
+    // #14645: an outer-fragmented native-GRE datagram must be reassembled
+    // before decap. Heads keep protocol GRE; tails carry the 255 sentinel
+    // with GRE recoverable from the frame, so gate on the frame, not meta.
+    if crate::afxdp::gre_reassembly::frame_is_fragment(raw_frame, meta)
+        && crate::afxdp::frame::flowless_effective_protocol(raw_frame, meta)
+            == crate::ip_proto::PROTO_GRE
+    {
+        return match reassembler.offer(raw_frame, meta, now_ns) {
+            Some((frame, rmeta)) => {
+                let mut filtered = false;
+                let pkt = crate::afxdp::gre::try_native_gre_decap_from_frame_with_input_filter(
+                    &frame,
+                    rmeta,
+                    forwarding,
+                    outer_input_filter_allows,
+                    &mut filtered,
+                );
+                if filtered {
+                    return GreDecapStage::FilterDropped;
+                }
+                match pkt {
+                    Some(p) => GreDecapStage::Decapped(p.meta, p.frame),
+                    None => GreDecapStage::Buffered,
+                }
+            }
+            None => GreDecapStage::Buffered,
+        };
+    }
     let mut filtered = false;
     let native_gre_packet = crate::afxdp::gre::try_native_gre_decap_from_frame_with_input_filter(
         raw_frame,
@@ -380,12 +420,13 @@ pub(super) fn stage_native_gre_decap(
         outer_input_filter_allows,
         &mut filtered,
     );
-    let new_meta = native_gre_packet
-        .as_ref()
-        .map(|packet| packet.meta)
-        .unwrap_or(meta);
-    let owned_packet_frame = native_gre_packet.map(|packet| packet.frame);
-    (new_meta, owned_packet_frame, filtered)
+    if filtered {
+        return GreDecapStage::FilterDropped;
+    }
+    match native_gre_packet {
+        Some(packet) => GreDecapStage::Decapped(packet.meta, packet.frame),
+        None => GreDecapStage::NotGre(meta),
+    }
 }
 
 /// Stage 6b — WireGuard transport-data decap (#8274 step 3).
