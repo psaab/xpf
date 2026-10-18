@@ -879,6 +879,166 @@ fn wg_encap_outer_dst_mac_never_borrows_unresolved_peer_nexthop_13978() {
         not borrow the default adjacency's dst MAC onto the peer egress");
 }
 
+// === #14657: the outer dst MAC must resolve from the runtime
+// `dynamic_neighbors` map when the selected peer's next hop is learned only
+// there. After #13978 removed the session-neighbor fallback, passing
+// `dynamic_neighbors = None` into the outer re-resolution made
+// `neighbor_mac` permanently `None` for such neighbors and blackholed every
+// WG transit packet. ===
+
+#[test]
+fn wg_encap_dynamic_only_neighbor_resolves_outer_dst_mac_14657() {
+    let mut state = build_forwarding_state(&wg_outer_mtu_snapshot());
+    let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
+    state.wg_engines.insert(1, Arc::new(
+        established_initiator_engine(peer_ep, "10.123.0.0/24"),
+    ));
+    // No static neighbor for (12, 172.16.80.1): the encap must fail closed
+    // without the dynamic map, and must build with the dynamic-only MAC.
+    const DYNAMIC_MAC: [u8; 6] = [0x02, 0x57, 0x00, 0x00, 0x14, 0x57];
+    let dynamic = Arc::new(crate::afxdp::ShardedNeighborMap::new());
+    dynamic.insert(
+        (12, IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 80, 1))),
+        crate::afxdp::types::NeighborEntry { mac: DYNAMIC_MAC },
+    );
+    let decision = wg_decision_with_wrong_default_adjacency();
+    // RED on pre-fix: the old signature had no dynamic map to pass, so this
+    // call resolved with `None` and returned `None`.
+    assert!(
+        wg_encap_frame(&inner_v4_frame(), inner_v4_meta(), &decision, &state).is_none(),
+        "without the dynamic map the dynamic-only neighbor must fail closed (#13978 preserved)"
+    );
+    let out = wg_encap_frame_with_dynamic(
+        &inner_v4_frame(),
+        inner_v4_meta(),
+        &decision,
+        &state,
+        Some(&dynamic),
+    )
+    .expect("dynamic-only underlay neighbor must resolve the WG outer dst MAC");
+    assert_eq!(
+        &out[0..6], &DYNAMIC_MAC,
+        "outer dst MAC must come from the dynamic neighbor entry for the selected peer route"
+    );
+    assert_eq!(
+        &out[6..12], &[0x02, 0xbf, 0x72, 0x00, 0x50, 0x08],
+        "outer src MAC remains the selected peer's physical egress"
+    );
+}
+
+#[test]
+fn wg_encap_dynamic_only_neighbor_via_forwarded_builder_14657() {
+    // Same mechanism through the production builder wiring
+    // (`build_forwarded_frame_from_frame_with_dynamic`), so deleting the
+    // dynamic threading at the frame/mod.rs dispatch arm reds here too.
+    let mut state = build_forwarding_state(&wg_outer_mtu_snapshot());
+    let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
+    state.wg_engines.insert(1, Arc::new(
+        established_initiator_engine(peer_ep, "10.123.0.0/24"),
+    ));
+    const DYNAMIC_MAC: [u8; 6] = [0x02, 0x57, 0x00, 0x00, 0x14, 0x58];
+    let dynamic = Arc::new(crate::afxdp::ShardedNeighborMap::new());
+    dynamic.insert(
+        (12, IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 80, 1))),
+        crate::afxdp::types::NeighborEntry { mac: DYNAMIC_MAC },
+    );
+    let decision = wg_encap_decision();
+    let built = crate::afxdp::frame::build_forwarded_frame_from_frame_with_dynamic(
+        &inner_v4_frame(),
+        inner_v4_meta(),
+        &decision,
+        &state,
+        false,
+        None,
+        Some(&dynamic),
+    )
+    .expect("forwarded builder must encapsulate when the peer next hop is dynamic-only");
+    assert_eq!(
+        &built[0..6], &DYNAMIC_MAC,
+        "builder-emitted outer dst MAC must be the dynamic neighbor MAC"
+    );
+}
+
+#[test]
+fn wg_encap_dynamic_only_neighbor_via_nat64_builder_14657() {
+    // NAT64+WG arm (`mod.rs:381`): the translated peer's next hop is
+    // dynamic-only, so the NAT64 builder must thread the same map.
+    // Selecting peer B here: its next hop (13, 172.16.50.1) exists ONLY in
+    // `dynamic_neighbors`, peer A's next hop is static — so without the map
+    // the encap must fail closed, and with it the emitted dst MAC must be
+    // peer B's dynamic MAC. (An earlier draft made peer B static and peer A
+    // dynamic-only; the builder selected peer B, so that fixture passed
+    // even with the dynamic threading deleted — test-only-green.)
+    let mut state = build_forwarding_state(&wg_two_peer_dnat_snapshot());
+    state.neighbors.insert(
+        (12, IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 80, 1))),
+        crate::afxdp::types::NeighborEntry {
+            mac: [0x02, 0xbf, 0x72, 0x00, 0x50, 0x08],
+        },
+    );
+    // Peer B's next hop (13, 172.16.50.1) is intentionally dynamic-only.
+    const DYNAMIC_MAC: [u8; 6] = [0x02, 0x57, 0x00, 0x00, 0x14, 0x59];
+    let dynamic = Arc::new(crate::afxdp::ShardedNeighborMap::new());
+    dynamic.insert(
+        (13, IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 50, 1))),
+        crate::afxdp::types::NeighborEntry { mac: DYNAMIC_MAC },
+    );
+    let peer_b_dst = std::net::Ipv4Addr::new(10, 200, 0, 9);
+    let mut decision = wg_tunnel_decision(400, 1);
+    decision.resolution.neighbor_mac = Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    decision.resolution.src_mac = Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]);
+    decision.nat.nat64 = true;
+    decision.nat.rewrite_src = Some(IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 1)));
+    decision.nat.rewrite_dst = Some(IpAddr::V4(peer_b_dst));
+    // The encap path needs an ESTABLISHED session for the selected peer;
+    // `two_peer_config_engine` is config-only (no handshake), so install the
+    // established initiator engine for peer B (mirrors the #14117 sibling).
+    let peer_b_ep: std::net::SocketAddr = "198.51.100.7:51820".parse().unwrap();
+    state.wg_engines.insert(
+        1,
+        Arc::new(established_initiator_engine(peer_b_ep, "10.200.0.0/24")),
+    );
+    let nat64_meta = ForwardPacketMeta {
+        l3_offset: 14,
+        l4_offset: 54,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_UDP,
+        ..ForwardPacketMeta::default()
+    };
+    let mut nat64_frame = inner_v6_frame();
+    let mut synthetic_dst = "64:ff9b::".parse::<std::net::Ipv6Addr>().unwrap().octets();
+    synthetic_dst[12..].copy_from_slice(&peer_b_dst.octets());
+    nat64_frame[38..54].copy_from_slice(&synthetic_dst);
+    // RED on pre-fix: the selected peer (B) resolves only via the dynamic
+    // map, so the None-wrapper must fail closed (#13978 preserved).
+    assert!(
+        crate::afxdp::frame::build_nat64_forwarded_frame(
+            &nat64_frame,
+            nat64_meta,
+            &decision,
+            None,
+            false,
+            &state,
+        )
+        .is_none(),
+        "NAT64 encap must fail closed when the selected peer's next hop is dynamic-only and no map is threaded"
+    );
+    let built = crate::afxdp::frame::build_nat64_forwarded_frame_with_dynamic(
+        &nat64_frame,
+        nat64_meta,
+        &decision,
+        None,
+        false,
+        &state,
+        Some(&dynamic),
+    )
+    .expect("NAT64 builder must encapsulate with the dynamic map threaded");
+    assert_eq!(
+        &built[0..6], &DYNAMIC_MAC,
+        "NAT64 outer dst MAC must be peer B's dynamic neighbor MAC"
+    );
+}
+
 // === #6308: the WG transit-egress TX DISPATCH must target the SELECTED peer's
 // PHYSICAL egress NIC — the SAME physical egress #5292 resolved the frame BYTES
 // against — even when the WG transport table carries ONLY a specific peer route

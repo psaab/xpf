@@ -298,7 +298,7 @@ pub(super) fn poll_binding(
             let ingress_live: *const BindingLiveState = &*binding.live;
             let mut scratch_post_recycles =
                 core::mem::take(&mut binding.scratch.scratch_post_recycles);
-            enqueue_pending_forwards(
+            enqueue_pending_forwards_with_dynamic(
                 left,
                 binding_index,
                 binding,
@@ -318,6 +318,7 @@ pub(super) fn poll_binding(
                 &mut counters,
                 worker_id,
                 worker_commands_by_id,
+                Some(dynamic_neighbors),
             );
             binding.scratch.scratch_post_recycles = scratch_post_recycles;
         }

@@ -82,16 +82,38 @@ pub(in crate::afxdp) fn resolve_forward_target_ifindex(
     frame_addr_family: u8,
     frame_l3_offset_hint: u16,
 ) -> i32 {
-    // #6345: the SELECTED-PEER physical egress is the SSOT for BOTH the frame
-    // bytes and the dispatch NIC, so it wins over the stored resolution
-    // whenever it resolves — including when `tx_ifindex > 0`.
-    if let Some(peer_egress) = crate::afxdp::frame::wg_transit_egress_physical_egress_ifindex(
+    resolve_forward_target_ifindex_with_dynamic(
         decision,
         forwarding,
         frame,
         frame_addr_family,
         frame_l3_offset_hint,
-    ) {
+        None,
+    )
+}
+
+#[inline]
+pub(in crate::afxdp) fn resolve_forward_target_ifindex_with_dynamic(
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    frame: &[u8],
+    frame_addr_family: u8,
+    frame_l3_offset_hint: u16,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> i32 {
+    // #6345: the SELECTED-PEER physical egress is the SSOT for BOTH the frame
+    // bytes and the dispatch NIC, so it wins over the stored resolution
+    // whenever it resolves — including when `tx_ifindex > 0`.
+    if let Some(peer_egress) =
+        crate::afxdp::frame::wg_transit_egress_physical_egress_ifindex_with_dynamic(
+            decision,
+            forwarding,
+            frame,
+            frame_addr_family,
+            frame_l3_offset_hint,
+            dynamic_neighbors,
+        )
+    {
         return resolve_tx_binding_ifindex(forwarding, peer_egress);
     }
     if decision.resolution.tx_ifindex > 0 {
@@ -157,6 +179,48 @@ pub(super) fn build_live_forward_request_from_frame(
     hints: Option<PendingForwardHints>,
     precomputed_tx_selection: Option<&CachedTxSelectionDescriptor>,
     reject_reply: Option<ForwardRejectReply<'_>>,
+    nat64_reverse: Option<Nat64ReverseInfo>,
+) -> Option<PendingForwardRequest> {
+    build_live_forward_request_from_frame_with_dynamic(
+        binding_lookup,
+        current_binding_index,
+        ingress_ident,
+        desc,
+        frame,
+        meta,
+        decision,
+        forwarding,
+        flow,
+        fabric_ingress_zone,
+        apply_nat_on_fabric,
+        now_ns,
+        event_stream,
+        hints,
+        precomputed_tx_selection,
+        reject_reply,
+        nat64_reverse,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_live_forward_request_from_frame_with_dynamic(
+    binding_lookup: &WorkerBindingLookup,
+    current_binding_index: usize,
+    ingress_ident: &BindingIdentity,
+    desc: XdpDesc,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    flow: Option<&SessionFlow>,
+    fabric_ingress_zone: Option<u16>,
+    apply_nat_on_fabric: bool,
+    now_ns: u64,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    hints: Option<PendingForwardHints>,
+    precomputed_tx_selection: Option<&CachedTxSelectionDescriptor>,
+    reject_reply: Option<ForwardRejectReply<'_>>,
     // #5606: the driving session's NAT64 reverse info (original v6 src/dst), or
     // `None` for every non-NAT64 flow. Threaded straight onto
     // `PendingForwardRequest.nat64_reverse`: the TX dispatcher's
@@ -166,6 +230,7 @@ pub(super) fn build_live_forward_request_from_frame(
     // flow carries this in its `SessionMetadata`, so the session-hit resolve
     // that produced `decision` supplies it here.
     nat64_reverse: Option<Nat64ReverseInfo>,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) -> Option<PendingForwardRequest> {
     let hints = hints.unwrap_or_default();
     // #6308/#6345: `resolve_forward_target_ifindex` keeps the `tx_ifindex`
@@ -174,12 +239,13 @@ pub(super) fn build_live_forward_request_from_frame(
     // the same route #5292 builds the frame bytes against — whether or not the
     // transport table carries a default route. Dispatch NIC and frame L2 are
     // therefore the same NIC by construction.
-    let target_ifindex = resolve_forward_target_ifindex(
+    let target_ifindex = resolve_forward_target_ifindex_with_dynamic(
         decision,
         forwarding,
         frame,
         meta.addr_family,
         meta.l3_offset,
+        dynamic_neighbors,
     );
     // #2357: a forwarded non-first IP fragment carries no L4 header — its
     // post-IP-header bytes are payload, not ports. #2344 already made it

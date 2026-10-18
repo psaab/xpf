@@ -103,11 +103,10 @@ pub(super) fn outer_route_resolve_count_bump() {
 /// the build path zeroes to `0.0.0.0` for WG — the peer carries the real
 /// outer hop). So the physical egress is the route to `outer_dst` in the
 /// endpoint's transport table — exactly the interface the encapped datagram
-/// egresses. `dynamic_neighbors` is `None`: the egress ifindex comes from
-/// the ROUTE lookup, not from neighbor resolution, so the static forwarding
-/// state suffices. (This is why `resolve_tunnel_outer`, which reads the
-/// zeroed endpoint destination, cannot be reused here — it always NoRoutes
-/// for WG.)
+/// egresses. The egress ifindex comes from the ROUTE lookup, not from neighbor
+/// resolution, so the static forwarding state suffices for that value alone.
+/// (This is why `resolve_tunnel_outer`, which reads the zeroed endpoint
+/// destination, cannot be reused here — it always NoRoutes for WG.)
 ///
 /// #2837 (NON-REPRODUCING — investigated, no fix applicable): the original
 /// report was that this re-resolution "drops the known physical tx_ifindex and
@@ -123,11 +122,13 @@ pub(super) fn outer_route_resolve_count_bump() {
 ///     below accepts `MissingNeighbor`. (Verified: the route to the real peer
 ///     endpoint with `dynamic_neighbors = None` yields
 ///     `MissingNeighbor`/`egress_ifindex = <physical>`.) So the dynamic map
-///     would only change the disposition/`neighbor_mac` (neither read here),
-///     never the returned ifindex — the first arm already returns the physical
-///     underlay egress for the dynamic-learned case. The fallback is reached
-///     ONLY on a genuine NoRoute to the peer endpoint, in which case there is
-///     no underlay to deliver on regardless of which ifindex is chosen.
+///     would only change the disposition/`neighbor_mac`, never the returned
+///     ifindex — the first arm already returns the physical underlay egress
+///     for the dynamic-learned case. The fallback is reached ONLY on a genuine
+///     NoRoute to the peer endpoint, in which case there is no underlay to
+///     deliver on regardless of which ifindex is chosen. (#14657: the encap
+///     path nonetheless threads the map, because it DOES read
+///     `neighbor_mac` — see `outer_physical_egress_resolution`.)
 ///
 ///  2. There is no admit-time physical `tx_ifindex` to fall back TO for a WG
 ///     session. `forwarding_build::tunnels` zeroes the WG endpoint destination
@@ -156,12 +157,28 @@ fn outer_physical_egress_ifindex(
     endpoint: &TunnelEndpoint,
     outer_dst: IpAddr,
 ) -> i32 {
+    outer_physical_egress_ifindex_with_dynamic(decision, forwarding, endpoint, outer_dst, None)
+}
+
+#[inline]
+fn outer_physical_egress_ifindex_with_dynamic(
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    endpoint: &TunnelEndpoint,
+    outer_dst: IpAddr,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> i32 {
     // #3992: the outer underlay route is resolved ONCE per encapped packet
     // (shared by the MTU guard, the outer source, AND — since #5292 — the
     // outer L2/VLAN). `outer_physical_egress_resolution` performs the single
     // FIB LPM and bumps the per-packet count; a second resolution per packet
     // is the redundant lookup #3992 removed.
-    let outer = outer_physical_egress_resolution(forwarding, endpoint, outer_dst);
+    let outer = outer_physical_egress_resolution_with_dynamic(
+        forwarding,
+        endpoint,
+        outer_dst,
+        dynamic_neighbors,
+    );
     outer_egress_ifindex_or_fallback(decision, forwarding, &outer)
 }
 
@@ -176,15 +193,31 @@ fn outer_physical_egress_ifindex(
 /// neighbor/L2 attributes from the same immutable forwarding snapshot.
 ///
 /// Bumps `OUTER_ROUTE_RESOLVE_COUNT` exactly once — the #3992 single-FIB-LPM-
-/// per-packet invariant. `dynamic_neighbors` is `None`: the egress ifindex is
-/// ROUTE-derived (a missing underlay neighbor resolves to `MissingNeighbor`
-/// with the physical egress still populated). The caller must not substitute
-/// a neighbor MAC from the session's unrelated resolution.
+/// per-packet invariant. The egress ifindex is ROUTE-derived (a missing
+/// underlay neighbor resolves to `MissingNeighbor` with the physical egress
+/// still populated), but the encap path reads `neighbor_mac` from this same
+/// resolution, so it MUST thread the runtime `dynamic_neighbors` map
+/// (#14657): after #13978 removed the session-neighbor fallback, a next hop
+/// learned only into `ShardedNeighborMap` resolved to `neighbor_mac = None`
+/// here and `wg_encap_frame_with_commit` failed closed on every transit
+/// packet — a permanent blackhole, with no MissingNeighbor requeue. The
+/// caller must not substitute a neighbor MAC from the session's unrelated
+/// resolution.
 #[inline]
 fn outer_physical_egress_resolution(
     forwarding: &ForwardingState,
     endpoint: &TunnelEndpoint,
     outer_dst: IpAddr,
+) -> ForwardingLookupResult {
+    outer_physical_egress_resolution_with_dynamic(forwarding, endpoint, outer_dst, None)
+}
+
+#[inline]
+fn outer_physical_egress_resolution_with_dynamic(
+    forwarding: &ForwardingState,
+    endpoint: &TunnelEndpoint,
+    outer_dst: IpAddr,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) -> ForwardingLookupResult {
     #[cfg(test)]
     outer_route_resolve_count_bump();
@@ -193,7 +226,7 @@ fn outer_physical_egress_resolution(
     match outer_dst {
         IpAddr::V4(ip) => lookup_forwarding_resolution_v4(
             forwarding,
-            None,
+            dynamic_neighbors,
             ip,
             &endpoint.transport_table,
             1,
@@ -202,7 +235,7 @@ fn outer_physical_egress_resolution(
         ),
         IpAddr::V6(ip) => lookup_forwarding_resolution_v6(
             forwarding,
-            None,
+            dynamic_neighbors,
             ip,
             &endpoint.transport_table,
             1,
@@ -250,7 +283,23 @@ fn outer_physical_egress_mtu(
     endpoint: &TunnelEndpoint,
     outer_dst: IpAddr,
 ) -> usize {
-    let outer = outer_physical_egress_resolution(forwarding, endpoint, outer_dst);
+    outer_physical_egress_mtu_with_dynamic(decision, forwarding, endpoint, outer_dst, None)
+}
+
+#[inline]
+fn outer_physical_egress_mtu_with_dynamic(
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    endpoint: &TunnelEndpoint,
+    outer_dst: IpAddr,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> usize {
+    let outer = outer_physical_egress_resolution_with_dynamic(
+        forwarding,
+        endpoint,
+        outer_dst,
+        dynamic_neighbors,
+    );
     let physical_ifindex = outer_egress_ifindex_or_fallback(decision, forwarding, &outer);
     let interface_mtu = forwarding
         .egress
@@ -356,12 +405,29 @@ pub(in crate::afxdp) fn wg_endpoint_physical_outer_mtu(
     endpoint: &TunnelEndpoint,
     inner_dst: Option<IpAddr>,
 ) -> usize {
+    wg_endpoint_physical_outer_mtu_with_dynamic(decision, forwarding, endpoint, inner_dst, None)
+}
+
+#[inline]
+pub(in crate::afxdp) fn wg_endpoint_physical_outer_mtu_with_dynamic(
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    endpoint: &TunnelEndpoint,
+    inner_dst: Option<IpAddr>,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> usize {
     // #2845: resolve the outer hop of the SAME peer the encap path selects
     // for this inner destination (per-peer underlay), with the pre-#2845
     // first-peer behaviour as the fallback.
     let outer_dst = wg_peer_outer_dst(forwarding, endpoint, inner_dst);
     match outer_dst {
-        Some(dst) => outer_physical_egress_mtu(decision, forwarding, endpoint, dst),
+        Some(dst) => outer_physical_egress_mtu_with_dynamic(
+            decision,
+            forwarding,
+            endpoint,
+            dst,
+            dynamic_neighbors,
+        ),
         // No peer endpoint to route to: fall back to the resolution's own
         // egress (the logical ifindex), exactly what `tunnel_outer_mtu`
         // would have yielded — no regression in the degenerate case.
@@ -394,13 +460,30 @@ pub(in crate::afxdp) fn wg_selected_peer_outer(
     endpoint: &TunnelEndpoint,
     inner_dst: Option<IpAddr>,
 ) -> (i32, usize) {
+    wg_selected_peer_outer_with_dynamic(decision, forwarding, endpoint, inner_dst, None)
+}
+
+#[inline]
+pub(in crate::afxdp) fn wg_selected_peer_outer_with_dynamic(
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    endpoint: &TunnelEndpoint,
+    inner_dst: Option<IpAddr>,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> (i32, usize) {
     // Resolve the selected peer ONCE: with an engine present the LPM
     // answer (including a covering peer with NO endpoint, which must
     // NOT borrow another peer) mirrors `wg_peer_outer_dst`; without an
     // engine answer, fall back to its first-peer rule.
     let outer_dst = wg_peer_outer_dst(forwarding, endpoint, inner_dst);
     let outer_mtu = match outer_dst {
-        Some(dst) => outer_physical_egress_mtu(decision, forwarding, endpoint, dst),
+        Some(dst) => outer_physical_egress_mtu_with_dynamic(
+            decision,
+            forwarding,
+            endpoint,
+            dst,
+            dynamic_neighbors,
+        ),
         None => forwarding
             .egress
             .get(&decision.resolution.egress_ifindex)
@@ -481,6 +564,24 @@ pub(in crate::afxdp) fn wg_transit_egress_physical_egress_ifindex(
     inner_addr_family: u8,
     inner_l3_offset: u16,
 ) -> Option<i32> {
+    wg_transit_egress_physical_egress_ifindex_with_dynamic(
+        decision,
+        forwarding,
+        inner_frame,
+        inner_addr_family,
+        inner_l3_offset,
+        None,
+    )
+}
+
+pub(in crate::afxdp) fn wg_transit_egress_physical_egress_ifindex_with_dynamic(
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    inner_frame: &[u8],
+    inner_addr_family: u8,
+    inner_l3_offset: u16,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> Option<i32> {
     let id = decision.resolution.tunnel_endpoint_id;
     if id == 0 {
         return None;
@@ -550,7 +651,12 @@ pub(in crate::afxdp) fn wg_transit_egress_physical_egress_ifindex(
         return None;
     }
     let outer_dst = wg_peer_outer_dst(forwarding, endpoint, inner_dst)?;
-    let outer = outer_physical_egress_resolution(forwarding, endpoint, outer_dst);
+    let outer = outer_physical_egress_resolution_with_dynamic(
+        forwarding,
+        endpoint,
+        outer_dst,
+        dynamic_neighbors,
+    );
     Some(outer_egress_ifindex_or_fallback(
         decision, forwarding, &outer,
     ))
@@ -571,11 +677,38 @@ pub(super) fn wg_encap_frame(
         .map(|(frame, _)| frame)
 }
 
+pub(super) fn wg_encap_frame_with_dynamic(
+    inner_frame: &[u8],
+    inner_meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> Option<Vec<u8>> {
+    wg_encap_frame_with_commit_and_dynamic(
+        inner_frame,
+        inner_meta,
+        decision,
+        forwarding,
+        dynamic_neighbors,
+    )
+    .map(|(frame, _)| frame)
+}
+
 pub(super) fn wg_encap_frame_with_commit(
     inner_frame: &[u8],
     inner_meta: impl Into<ForwardPacketMeta>,
     decision: &SessionDecision,
     forwarding: &ForwardingState,
+) -> Option<(Vec<u8>, WgEncapCommit)> {
+    wg_encap_frame_with_commit_and_dynamic(inner_frame, inner_meta, decision, forwarding, None)
+}
+
+pub(super) fn wg_encap_frame_with_commit_and_dynamic(
+    inner_frame: &[u8],
+    inner_meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) -> Option<(Vec<u8>, WgEncapCommit)> {
     let inner_meta = inner_meta.into();
     let id = decision.resolution.tunnel_endpoint_id;
@@ -650,8 +783,12 @@ pub(super) fn wg_encap_frame_with_commit(
     // `outer_physical_egress_mtu` remains the SSOT used by the PTB path
     // (`wg_endpoint_physical_outer_mtu`); here we read the MTU straight off the
     // single shared `egress` row so the guard MTU is byte-identical.
-    let outer_resolution =
-        outer_physical_egress_resolution(forwarding, endpoint, peer_endpoint.ip());
+    let outer_resolution = outer_physical_egress_resolution_with_dynamic(
+        forwarding,
+        endpoint,
+        peer_endpoint.ip(),
+        dynamic_neighbors,
+    );
     let physical_egress_ifindex =
         outer_egress_ifindex_or_fallback(decision, forwarding, &outer_resolution);
     let egress = forwarding.egress.get(&physical_egress_ifindex);

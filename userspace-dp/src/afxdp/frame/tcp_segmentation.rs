@@ -135,6 +135,27 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame(
     .map(|frames| frames.into_iter().map(|(frame, _)| frame).collect())
 }
 
+pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_dynamic(
+    frame: &[u8],
+    meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    apply_nat_on_fabric: bool,
+    expected_ports: Option<(u16, u16)>,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> Option<Vec<Vec<u8>>> {
+    segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic(
+        frame,
+        meta,
+        decision,
+        forwarding,
+        apply_nat_on_fabric,
+        expected_ports,
+        dynamic_neighbors,
+    )
+    .map(|frames| frames.into_iter().map(|(frame, _)| frame).collect())
+}
+
 pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit(
     frame: &[u8],
     meta: impl Into<ForwardPacketMeta>,
@@ -142,6 +163,26 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit(
     forwarding: &ForwardingState,
     apply_nat_on_fabric: bool,
     expected_ports: Option<(u16, u16)>,
+) -> Option<Vec<(Vec<u8>, Option<super::wg::WgEncapCommit>)>> {
+    segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic(
+        frame,
+        meta,
+        decision,
+        forwarding,
+        apply_nat_on_fabric,
+        expected_ports,
+        None,
+    )
+}
+
+pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic(
+    frame: &[u8],
+    meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    apply_nat_on_fabric: bool,
+    expected_ports: Option<(u16, u16)>,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) -> Option<Vec<(Vec<u8>, Option<super::wg::WgEncapCommit>)>> {
     let meta = meta.into();
     if meta.protocol != PROTO_TCP {
@@ -221,9 +262,14 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit(
                 let endpoint = forwarding
                     .tunnel_endpoints
                     .get(&decision.resolution.tunnel_endpoint_id)?;
-                let (outer_family, outer_mtu) = crate::afxdp::frame::wg_selected_peer_outer(
-                    decision, forwarding, endpoint, inner_dst_for_wg,
-                );
+                let (outer_family, outer_mtu) =
+                    crate::afxdp::frame::wg_selected_peer_outer_with_dynamic(
+                        decision,
+                        forwarding,
+                        endpoint,
+                        inner_dst_for_wg,
+                        dynamic_neighbors,
+                    );
                 crate::afxdp::wg::mss::wg_inner_mtu(outer_family, outer_mtu)
             }
             // Unknown mode or missing endpoint row: 0 budget → None below.
@@ -460,7 +506,11 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit(
         }
         if decision.resolution.tunnel_endpoint_id != 0 {
             out.push(encap_tunnel_segment(
-                &frame_out, meta, decision, forwarding,
+                &frame_out,
+                meta,
+                decision,
+                forwarding,
+                dynamic_neighbors,
             )?);
         } else {
             out.push((frame_out, None));
@@ -678,6 +728,7 @@ fn encap_tunnel_segment(
     meta: ForwardPacketMeta,
     decision: &SessionDecision,
     forwarding: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) -> Option<(Vec<u8>, Option<super::wg::WgEncapCommit>)> {
     let kind = forwarding
         .tunnel_endpoints
@@ -688,10 +739,14 @@ fn encap_tunnel_segment(
             encapsulate_native_gre_frame(frame_out, meta, decision, forwarding)
                 .map(|frame| (frame, None))
         }
-        Some(TunnelKind::WireGuard) => {
-            wg::wg_encap_frame_with_commit(frame_out, meta, decision, forwarding)
-                .map(|(frame, commit)| (frame, Some(commit)))
-        }
+        Some(TunnelKind::WireGuard) => wg::wg_encap_frame_with_commit_and_dynamic(
+            frame_out,
+            meta,
+            decision,
+            forwarding,
+            dynamic_neighbors,
+        )
+        .map(|(frame, commit)| (frame, Some(commit))),
         // Unknown mode or missing endpoint row: fail closed.
         Some(TunnelKind::Unknown) | None => None,
     }
@@ -1882,6 +1937,99 @@ mod mode_aware_segmentation_tests {
             Some(want),
             "full segment must be sized to the SELECTED peer (v6/1405), not the endpoint row family (v4)"
         );
+    }
+
+    #[test]
+    fn wg_segmentation_dynamic_only_neighbor_encapsulates_14657() {
+        // #14657: TCP-segmented WG transit must encapsulate when the selected
+        // peer's underlay next hop exists only in `dynamic_neighbors`.
+        // Pre-fix the segmenter resolved the outer route with
+        // `dynamic_neighbors = None`, so every segment dropped at
+        // `neighbor_mac?` after #13978. Fixture mirrors the #14118 cell
+        // (snapshot state, v6 peer endpoint 2001:db8:c0::7 via
+        // 2001:559:8585:80::1 on ifindex 12) but leaves the next hop
+        // dynamic-only.
+        let mut snap = crate::afxdp::test_fixtures::wg_outer_mtu_snapshot();
+        snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot {
+            family: "inet6".to_string(),
+            address: "2001:559:8585:80::8/64".to_string(),
+            scope: 0,
+        });
+        snap.routes.push(crate::RouteSnapshot {
+            reject: false,
+            table: "inet6.0".to_string(),
+            family: "inet6".to_string(),
+            destination: "2001:db8:c0::/48".to_string(),
+            next_hop_weights: vec![],
+            next_hops: vec!["2001:559:8585:80::1@reth0.80".to_string()],
+            discard: false,
+            next_table: String::new(),
+            preference: 0,
+            rule_priority: 0,
+            mtu: 0,
+        });
+        snap.tunnel_endpoints[0].outer_family = "inet6".to_string();
+        snap.tunnel_endpoints[0].transport_table = "inet6.0".to_string();
+        let state = crate::afxdp::forwarding_build::build_forwarding_state(&snap);
+        // No static neighbor for (12, 2001:559:8585:80::1).
+        const DYNAMIC_MAC: [u8; 6] = [0x02, 0x57, 0x00, 0x00, 0x14, 0x60];
+        let dynamic = Arc::new(crate::afxdp::ShardedNeighborMap::new());
+        dynamic.insert(
+            (12, "2001:559:8585:80::1".parse().unwrap()),
+            NeighborEntry { mac: DYNAMIC_MAC },
+        );
+        let (init_engine, _resp_engine) = established_engine_pair_v6("10.123.0.0/24");
+        let mut state = state;
+        state.wg_engines.insert(TUN_ID, Arc::new(init_engine));
+        let decision = SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::MissingNeighbor,
+                local_ifindex: 0,
+                egress_ifindex: 400,
+                tx_ifindex: 0,
+                tunnel_endpoint_id: TUN_ID,
+                next_hop: None,
+                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let frame = ipv4_tcp_frame_dst(2000, Ipv4Addr::new(10, 123, 0, 9));
+        assert!(
+            segment_forwarded_tcp_frames_from_frame(
+                &frame,
+                meta_v4(),
+                &decision,
+                &state,
+                false,
+                None,
+            )
+            .is_none(),
+            "without the dynamic map, segmented WG encap must fail closed (#13978 preserved)"
+        );
+        let segments = segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic(
+            &frame,
+            meta_v4(),
+            &decision,
+            &state,
+            false,
+            None,
+            Some(&dynamic),
+        )
+        .expect("dynamic-only underlay neighbor must let segmented WG encap build");
+        assert!(segments.len() > 1, "2000-byte inner must split into WG segments");
+        for (segment, commit) in &segments {
+            assert!(commit.is_some(), "WG segment must carry send metadata");
+            assert_eq!(
+                &segment[0..6], &DYNAMIC_MAC,
+                "segment outer dst MAC must be the dynamic neighbor MAC"
+            );
+        }
     }
 
     fn established_engine_pair_v6(peer_cidr: &str) -> (WgEngine, WgEngine) {

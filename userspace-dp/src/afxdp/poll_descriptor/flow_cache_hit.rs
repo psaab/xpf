@@ -849,7 +849,7 @@ pub(super) fn stage_flow_cache_hit(
                     drop: cached_descriptor.tx_selection.drop,
                     ..CachedTxSelectionDescriptor::default()
                 };
-                if let Some(mut request) = build_live_forward_request_from_frame(
+                if let Some(mut request) = build_live_forward_request_from_frame_with_dynamic(
                     worker_ctx.binding_lookup,
                     binding_index,
                     worker_ctx.ident,
@@ -882,6 +882,7 @@ pub(super) fn stage_flow_cache_hit(
                     // "request.nat64_reverse mirrors its driving session
                     // metadata" holding uniformly across every builder call.
                     cached_metadata.nat64_reverse,
+                    Some(worker_ctx.dynamic_neighbors),
                 ) {
                     request.frame = owned_packet_frame
                         .take()
