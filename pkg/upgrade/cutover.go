@@ -706,9 +706,19 @@ func (r *Runner) Run(opts Options) (err error) {
 			"rollback cannot revert commits made during the interruption", j.State)
 	}
 
+	// #14720: if this cut re-stages the live version's committed predecessor,
+	// preserve its committed stamp + DB snapshot before COPY/VERIFY can
+	// demote, replace, or delete it. The journal records PreviousVersion as
+	// the live version, so the predecessor needs explicit protection; the
+	// backup is restored verbatim on a pre-STOP or auto-rollback failure.
+	var predecessorBackup *predecessorStampBackup
+	if !j.State.atLeast(StateStopped) {
+		predecessorBackup = r.backupCommittedPredecessor(j, j.TargetVersion)
+	}
+
 	// ---- COPY (pure) ----
 	if !j.State.atLeast(StateCopied) {
-		if err := r.copyStaged(j); err != nil {
+		if err := r.copyStaged(j, predecessorBackup); err != nil {
 			return fmt.Errorf("copy: %w", err)
 		}
 		if err := r.transition(j, StateCopied); err != nil {
@@ -722,8 +732,10 @@ func (r *Runner) Run(opts Options) (err error) {
 			// A REJECT or verify failure leaves live state untouched. Clean up
 			// the just-copied versions/<ver> so a same-version retry recopies
 			// a corrected staged binary instead of re-verifying the stale
-			// failing copy (#1967 verify-fail cleanup).
-			r.cleanupFailedVerifyCopy(j)
+			// failing copy (#1967 verify-fail cleanup). A committed
+			// predecessor re-staged as the target is NOT cleaned up: it is
+			// the live version's rollback target (#14720).
+			r.cleanupFailedVerifyCopy(j, predecessorBackup)
 			return fmt.Errorf("verify-dataplane: %w", err)
 		}
 		if err := r.transition(j, StateVerified); err != nil {
@@ -806,6 +818,7 @@ func (r *Runner) Run(opts Options) (err error) {
 		}
 	}
 	if j.State.atLeast(StateStaged) && refuseNoTarget {
+		r.restoreCommittedPredecessorBackup(predecessorBackup)
 		return fmt.Errorf("refuse-before-STOP: no restorable previous version to roll "+
 			"back to (versions/current is absent, unreadable, or names a "+
 			"missing/incomplete runtime) and this is not a sanctioned first cut; "+
@@ -821,6 +834,7 @@ func (r *Runner) Run(opts Options) (err error) {
 				r.logf("upgrade: WARN clear journal on pre-STOP envelope refuse: %v", cerr)
 				return fmt.Errorf("%w; failed to clear refusal journal: %v", refusal, cerr)
 			}
+			r.restoreCommittedPredecessorBackup(predecessorBackup)
 			return refusal
 		}
 		// A committed predecessor reused as the staged target remains a
@@ -1446,7 +1460,7 @@ func (r *Runner) sourceDir(j *Journal) string {
 	return r.cfg.StagedDir
 }
 
-func (r *Runner) copyStaged(j *Journal) error {
+func (r *Runner) copyStaged(j *Journal, predecessorBackups ...*predecessorStampBackup) error {
 	ver := j.TargetVersion
 	dst := r.versionDir(ver)
 	partial := r.partialDir(ver)
@@ -1546,6 +1560,9 @@ func (r *Runner) copyStaged(j *Journal) error {
 						ver, err)
 				}
 				preservedPredecessorStamp = nil
+				if b := firstPredecessorBackup(predecessorBackups); b != nil {
+					b.demotedByReplacement = true
+				}
 			}
 		}
 		if rerr := r.removeStaleVersionDir(ver); rerr != nil {
@@ -1733,7 +1750,7 @@ func (r *Runner) verify(j *Journal) error {
 // Best-effort: a cleanup failure is logged, never masking the verify error
 // the caller is about to return. If the dir was protected (active), we still
 // reset the journal so a retry re-enters cleanly.
-func (r *Runner) cleanupFailedVerifyCopy(j *Journal) {
+func (r *Runner) cleanupFailedVerifyCopy(j *Journal, predecessorBackups ...*predecessorStampBackup) {
 	ver := j.TargetVersion
 	if ver == "" {
 		return
@@ -1746,6 +1763,13 @@ func (r *Runner) cleanupFailedVerifyCopy(j *Journal) {
 	if curErr != nil {
 		r.logf("upgrade: verify-fail cleanup SKIPPED for %s (cannot determine "+
 			"the live `current` version, so it cannot be proven non-live: %v)", ver, curErr)
+	} else if predecessorBackup := firstPredecessorBackup(predecessorBackups); predecessorBackup != nil {
+		// Guard (#14720): the target is the committed predecessor of the live
+		// version — the rollback target defaultRollbackTarget would restore.
+		// NEVER delete it; restore its committed stamp/snapshot instead.
+		r.logf("upgrade: verify-fail cleanup SKIPPED for %s (it is the committed "+
+			"predecessor of live %s; preserving the rollback target)", ver, j.PreviousVersion)
+		r.restoreCommittedPredecessorBackup(predecessorBackup)
 	} else if ver == j.PreviousVersion || ver == cur {
 		// Guard (a): the target version is the rollback target or the live
 		// `current` — its dir backs a runnable daemon. NEVER delete it. A
@@ -1799,6 +1823,20 @@ func (r *Runner) cleanupFailedVerifyCopy(j *Journal) {
 	// trusting the persisted DBSnapshotPath as an os.RemoveAll target (Codex
 	// r2): ver is validated as a safe path segment in Run() before any cut, so
 	// this is the same path preflight wrote. gc() also sweeps orphan .dbsnap
-	// dotfiles defensively.
-	_ = os.RemoveAll(filepath.Join(r.cfg.VersionsDir, "."+ver+".dbsnap"))
+	// dotfiles defensively. A committed predecessor's snapshot is NOT an
+	// orphan: it is the live version's rollback snapshot (#14720). The
+	// restore above already reinstalled the backup copy if this cut's
+	// PREFLIGHT overwrote it; skipping the removal keeps that restore.
+	if firstPredecessorBackup(predecessorBackups) == nil {
+		_ = os.RemoveAll(filepath.Join(r.cfg.VersionsDir, "."+ver+".dbsnap"))
+	}
+}
+
+func firstPredecessorBackup(backups []*predecessorStampBackup) *predecessorStampBackup {
+	for _, b := range backups {
+		if b != nil {
+			return b
+		}
+	}
+	return nil
 }
