@@ -4400,3 +4400,373 @@ fn revalidation_leaves_nat_rule_counters_unchanged_14315() {
         );
     }
 }
+
+/// #14941 fixture: lan (24) <-> wan (12, egress ifindex 12) with a
+/// dmz (26) reply-egress. Zones lan=1, wan=2, dmz=7 (`policy_deny_snapshot`).
+/// The forward flow 10.0.0.1:12345 -> 8.8.8.8:443 egresses wan; its reply
+/// 8.8.8.8:443 -> 10.0.0.1:12345 egresses lan. Both routes resolve, so a
+/// stale reverse hit re-resolves to a locally-forwarding LAN route —
+/// exactly the shape that flipped `reverse.ingress_zone` WAN->LAN.
+fn reverse_revalidation_forwarding_14941() -> ForwardingState {
+    let mut snapshot = crate::afxdp::test_fixtures::policy_deny_snapshot();
+    snapshot.interfaces.push(crate::InterfaceSnapshot {
+        name: "reth2.0".to_string(),
+        zone: "dmz".to_string(),
+        egress_zone: "dmz".to_string(),
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: 26,
+        hardware_addr: "02:bf:72:02:00:1a".to_string(),
+        addresses: vec![crate::InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "10.0.0.254/24".to_string(),
+            scope: 0,
+        }],
+        ..Default::default()
+    });
+    snapshot.routes = vec![
+        crate::RouteSnapshot {
+            table: "inet.0".to_string(),
+            family: "inet".to_string(),
+            destination: "8.8.8.8/32".to_string(),
+            next_hops: vec!["172.16.80.1@reth0.80".to_string()],
+            ..Default::default()
+        },
+        crate::RouteSnapshot {
+            table: "inet.0".to_string(),
+            family: "inet".to_string(),
+            destination: "10.0.0.0/24".to_string(),
+            next_hops: vec!["10.0.0.254@reth2.0".to_string()],
+            ..Default::default()
+        },
+    ];
+    snapshot.neighbors = vec![
+        crate::NeighborSnapshot {
+            interface: "reth0.80".to_string(),
+            ifindex: 12,
+            family: "inet".to_string(),
+            ip: "172.16.80.1".to_string(),
+            mac: "00:aa:bb:cc:dd:12".to_string(),
+            state: "reachable".to_string(),
+            ..Default::default()
+        },
+        crate::NeighborSnapshot {
+            interface: "reth2.0".to_string(),
+            ifindex: 26,
+            family: "inet".to_string(),
+            ip: "10.0.0.254".to_string(),
+            mac: "00:aa:bb:cc:dd:1a".to_string(),
+            state: "reachable".to_string(),
+            ..Default::default()
+        },
+    ];
+    crate::afxdp::forwarding_build::build_forwarding_state(&snapshot)
+}
+
+fn key_14941(src: &str, dst: &str, src_port: u16, dst_port: u16) -> SessionKey {
+    SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: src.parse().expect("src IPv4"),
+        dst_ip: dst.parse().expect("dst IPv4"),
+        src_port,
+        dst_port,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    }
+}
+
+fn pair_14941(
+    sessions: &mut SessionTable,
+) -> (SessionKey, SessionKey, SessionMetadata, SessionMetadata) {
+    let forward = key_14941("10.0.0.1", "8.8.8.8", 12345, 443);
+    let reverse = crate::session::reverse_session_key(&forward, NatDecision::default());
+    let fwd_meta = SessionMetadata {
+        ingress_zone: crate::test_zone_ids::TEST_LAN_ZONE_ID,
+        egress_zone: crate::test_zone_ids::TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 24,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 1,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    };
+    let mut rev_meta = fwd_meta.clone();
+    rev_meta.is_reverse = true;
+    rev_meta.ingress_zone = crate::test_zone_ids::TEST_WAN_ZONE_ID;
+    rev_meta.egress_zone = crate::test_zone_ids::TEST_LAN_ZONE_ID;
+    rev_meta.ingress_ifindex = 0;
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some("172.16.80.1".parse().expect("WAN gateway")),
+            neighbor_mac: Some([0, 0xaa, 0xbb, 0xcc, 0xdd, 0x12]),
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let mut rev_decision = decision;
+    rev_decision.resolution.egress_ifindex = 24;
+    rev_decision.resolution.tx_ifindex = 24;
+    rev_decision.resolution.next_hop = Some("10.0.0.1".parse().expect("client"));
+    assert!(sessions.install_with_protocol_with_origin(
+        forward.clone(),
+        decision,
+        fwd_meta.clone(),
+        SessionOrigin::ForwardFlow,
+        1_000_000_000,
+        6,
+        0x12,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        reverse.clone(),
+        rev_decision,
+        rev_meta.clone(),
+        SessionOrigin::ReverseFlow,
+        1_000_000_000,
+        6,
+        0x12,
+    ));
+    (forward, reverse, fwd_meta, rev_meta)
+}
+
+/// #14941: the mapping is direction-relative. Forward hits pass the
+/// resolved zone through; reverse hits never let their resolved zone
+/// (the forward ingress leg) become the forward egress.
+#[test]
+fn forward_egress_zone_mapping_is_direction_relative_14941() {
+    use crate::afxdp::shared_ops::{ForwardEgressZone, forward_egress_zone_for_hit};
+    let lan = crate::test_zone_ids::TEST_LAN_ZONE_ID;
+    let wan = crate::test_zone_ids::TEST_WAN_ZONE_ID;
+    assert_eq!(
+        forward_egress_zone_for_hit(false, Some(wan), wan),
+        ForwardEgressZone::Zone(wan),
+        "forward hit: resolved zone is the forward egress"
+    );
+    assert_eq!(
+        forward_egress_zone_for_hit(false, None, wan),
+        ForwardEgressZone::Preserve,
+        "forward hit with a terminal route preserves the recorded pair"
+    );
+    assert_eq!(
+        forward_egress_zone_for_hit(true, Some(lan), wan),
+        ForwardEgressZone::Preserve,
+        "reverse hit: the resolved LAN zone is the forward INGRESS leg and \
+         must not be written as the forward egress (WAN->LAN flip, #14941)"
+    );
+    assert_eq!(
+        forward_egress_zone_for_hit(true, None, wan),
+        ForwardEgressZone::Preserve
+    );
+    assert_eq!(ForwardEgressZone::Zone(wan).as_option(), Some(wan));
+    assert_eq!(ForwardEgressZone::Preserve.as_option(), None);
+}
+
+/// #14941: a stale REVERSE hit revalidated at the descriptor level must
+/// leave the pair's zones untouched (forward egress WAN, reverse
+/// ingress WAN), and the packet stays an Owner so its deferred refresh
+/// (`apply_deferred_owner_hit`) still runs. Pre-fix, the reverse
+/// re-resolve wrote the LAN reply-egress into `reverse.ingress_zone`;
+/// the next ACK arrived from WAN, classified Foreign, skipped refresh,
+/// and the session idled out at ~28s (#14300).
+#[test]
+fn reverse_hit_revalidation_preserves_pair_zones_14941() {
+    let forwarding = reverse_revalidation_forwarding_14941();
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    let (forward, reverse, ..) = pair_14941(&mut sessions);
+    sessions.set_forwarding_revalidation_gen(2, 2);
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat = Arc::new(Mutex::new(FastMap::default()));
+    let shared_wire = Arc::new(Mutex::new(FastMap::default()));
+    let owner_indexes = crate::afxdp::SharedSessionOwnerRgIndexes::default();
+    let peer_commands: Vec<Arc<Mutex<std::collections::VecDeque<crate::afxdp::WorkerCommand>>>> =
+        Vec::new();
+    let flow = SessionFlow {
+        src_ip: reverse.src_ip,
+        dst_ip: reverse.dst_ip,
+        forward_key: reverse.clone(),
+    };
+    let resolved = crate::afxdp::session_glue::resolve_flow_session_decision(
+        &mut sessions,
+        crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat,
+        &shared_wire,
+        &owner_indexes,
+        &peer_commands,
+        &forwarding,
+        &BTreeMap::new(),
+        &Arc::new(ShardedNeighborMap::new()),
+        &flow,
+        2_000_000_000,
+        2,
+        6,
+        0x10,
+        12,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
+    .expect("stale reverse hit resolves");
+    assert!(resolved.metadata.is_reverse);
+
+    let (_, stored_rev, _) = sessions
+        .entry_with_origin(&reverse)
+        .expect("reverse entry present");
+    assert_eq!(
+        stored_rev.ingress_zone,
+        crate::test_zone_ids::TEST_WAN_ZONE_ID,
+        "reverse ingress stays the forward egress zone (WAN); the reverse \
+         re-resolve's LAN egress must not flip it (#14941)"
+    );
+    assert_eq!(
+        stored_rev.egress_zone,
+        crate::test_zone_ids::TEST_LAN_ZONE_ID,
+        "reverse egress (forward ingress) is untouched by the forward-egress persist"
+    );
+    let (_, stored_fwd, _) = sessions
+        .entry_with_origin(&forward)
+        .expect("forward entry present");
+    assert_eq!(
+        stored_fwd.egress_zone,
+        crate::test_zone_ids::TEST_WAN_ZONE_ID
+    );
+    assert_eq!(
+        stored_fwd.ingress_zone,
+        crate::test_zone_ids::TEST_LAN_ZONE_ID
+    );
+
+    // The ACK-refresh consequence: the same WAN arrival is still an
+    // Owner (not Foreign), so the poll path replays the deferred hit
+    // refresh. Assert both the authority verdict on the STORED zones
+    // and that the deferred refresh machinery accepts the pair.
+    let meta = crate::afxdp::tests_support::txn_meta_v4(12, 0x10, 54);
+    assert_eq!(
+        session_hit_authority(
+            &forwarding,
+            &stored_rev,
+            SessionOrigin::ReverseFlow,
+            meta,
+            false,
+            None,
+        ),
+        HitAuthority::Owner,
+        "ACK arriving from WAN after reverse revalidation is Owner, not Foreign"
+    );
+    // Deferred refresh is the poll path's Owner-only replay; it must
+    // still find the pair (a Foreign verdict would skip it entirely).
+    sessions.apply_deferred_owner_hit(&reverse, 3_000_000_000, 0x10);
+    assert!(
+        sessions.entry_with_origin(&reverse).is_some(),
+        "deferred owner refresh keeps the reverse entry live"
+    );
+}
+
+/// #14941 control: a stale FORWARD hit revalidated to a NEW egress zone
+/// still rebinds the pair (forward egress and reverse ingress move
+/// together) — the #14318 reroute behaviour is not regressed by the
+/// direction-relative mapping.
+#[test]
+fn forward_hit_revalidation_still_rebinds_pair_14941() {
+    let mut forwarding = reverse_revalidation_forwarding_14941();
+    // Move 8.8.8.8 onto the dmz egress (ifindex 26): the forward
+    // re-resolve now names dmz as the new forward egress zone.
+    forwarding.routes_v4.insert(
+        "inet.0".to_string(),
+        vec![crate::afxdp::RouteEntryV4 {
+            prefix: crate::afxdp::PrefixV4::from_net(
+                ipnet::Ipv4Net::new(Ipv4Addr::new(8, 8, 8, 0), 24).expect("server prefix"),
+            ),
+            next_hops: vec![crate::afxdp::RouteNextHopV4 {
+                next_hop: Some(Ipv4Addr::new(10, 0, 0, 254)),
+                ifindex: 26,
+                logical_interface_id: 0,
+                tunnel_endpoint_id: 0,
+                weight: 1,
+            }],
+            discard: false,
+            reject: false,
+            next_table: String::new(),
+            preference: 0,
+            mtu: 1500,
+            rule_priority: 0,
+        }],
+    );
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    let (forward, reverse, ..) = pair_14941(&mut sessions);
+    sessions.set_forwarding_revalidation_gen(2, 2);
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat = Arc::new(Mutex::new(FastMap::default()));
+    let shared_wire = Arc::new(Mutex::new(FastMap::default()));
+    let owner_indexes = crate::afxdp::SharedSessionOwnerRgIndexes::default();
+    let peer_commands: Vec<Arc<Mutex<std::collections::VecDeque<crate::afxdp::WorkerCommand>>>> =
+        Vec::new();
+    let flow = SessionFlow {
+        src_ip: forward.src_ip,
+        dst_ip: forward.dst_ip,
+        forward_key: forward.clone(),
+    };
+    let resolved = crate::afxdp::session_glue::resolve_flow_session_decision(
+        &mut sessions,
+        crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat,
+        &shared_wire,
+        &owner_indexes,
+        &peer_commands,
+        &forwarding,
+        &BTreeMap::new(),
+        &Arc::new(ShardedNeighborMap::new()),
+        &flow,
+        2_000_000_000,
+        2,
+        6,
+        0x10,
+        24,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
+    .expect("stale forward hit resolves");
+    let (_, stored_fwd, _) = sessions
+        .entry_with_origin(&forward)
+        .expect("forward entry present");
+    assert_eq!(
+        stored_fwd.egress_zone,
+        crate::test_zone_ids::TEST_DMZ_ZONE_ID,
+        "forward reroute to dmz rebinds the forward egress zone (#14318)"
+    );
+    let (_, stored_rev, _) = sessions
+        .entry_with_origin(&reverse)
+        .expect("reverse entry present");
+    assert_eq!(
+        stored_rev.ingress_zone,
+        crate::test_zone_ids::TEST_DMZ_ZONE_ID,
+        "reverse ingress follows the forward egress on a forward reroute"
+    );
+}

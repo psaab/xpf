@@ -2266,20 +2266,34 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             if revalidation.invalidate_policy_revalidation {
                                 sessions.invalidate_policy_revalidation(&resolved.key);
                             }
+                            // #14941: `new_egress_zone` is direction-relative
+                            // (the hit packet's egress leg). Map it to the
+                            // forward flow's egress before persisting: a
+                            // reverse hit's resolved zone is the forward
+                            // ingress and must not overwrite forward
+                            // `egress_zone` / reverse `ingress_zone`, or every
+                            // later ACK classifies Foreign and stops
+                            // refreshing the session.
+                            let forward_zone = crate::afxdp::shared_ops::forward_egress_zone_for_hit(
+                                resolved.metadata.is_reverse,
+                                revalidation.new_egress_zone,
+                                resolved.metadata.ingress_zone,
+                            )
+                            .as_option();
                             sessions.revalidate_forwarding_resolution_with_egress_zone(
                                 &resolved.key,
                                 revalidation.resolution,
                                 revalidation.owner_rg_id,
-                                revalidation.new_egress_zone,
+                                forward_zone,
                             );
                             if let Some(owner_rg_id) = revalidation.owner_rg_id {
                                 resolved.metadata.owner_rg_id = owner_rg_id;
                             }
-                            if let Some(new_zone) = revalidation.new_egress_zone {
+                            if let Some(zone) = forward_zone {
                                 if resolved.metadata.is_reverse {
-                                    resolved.metadata.ingress_zone = new_zone;
+                                    resolved.metadata.ingress_zone = zone;
                                 } else {
-                                    resolved.metadata.egress_zone = new_zone;
+                                    resolved.metadata.egress_zone = zone;
                                 }
                             }
                         }
