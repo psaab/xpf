@@ -425,7 +425,12 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				// string) like `description`: the compiler consumes the raw
 				// token and the strict reference check stays the SSOT for
 				// undefined-scheduler rejection (no treeValidator here).
-				"scheduler-name": {desc: "Class-of-service scheduler bound to this policy", args: 1, placeholder: "<scheduler-name>", children: nil},
+				// #14681: `scalar: true` like `description` — the leaf takes
+				// exactly one scheduler name and no sub-statement, so strict
+				// SchemaValidate rejects a trailing container tail
+				// (`scheduler-name X { then deny; }`) instead of silently
+				// dropping it on the compiler's lenient path.
+				"scheduler-name": {desc: "Class-of-service scheduler bound to this policy", args: 1, scalar: true, placeholder: "<scheduler-name>", children: nil},
 			}},
 		}},
 		"global": {desc: "Global policies", children: map[string]*schemaNode{
@@ -462,7 +467,8 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"then": {desc: "Action", children: policyThenSchemaChildren()},
 				// #3117: scheduler-name on global policies — same compiler +
 				// strict-validator path as the zone-pair policy above.
-				"scheduler-name": {desc: "Class-of-service scheduler bound to this policy", args: 1, placeholder: "<scheduler-name>", children: nil},
+				// #14681: `scalar: true` like `description` (see zone-pair).
+				"scheduler-name": {desc: "Class-of-service scheduler bound to this policy", args: 1, scalar: true, placeholder: "<scheduler-name>", children: nil},
 			}},
 		}},
 	}},
