@@ -261,7 +261,7 @@ func mergeWireguardUnitPeers(iface *InterfaceConfig, unitNums []int) *TunnelConf
 	}
 	seen := make(map[string]bool, len(merged.WgPeers))
 	for _, p := range merged.WgPeers {
-		seen[p.PublicKeyHex] = true
+		seen[canonicalWireguardPubkeyHex(p.PublicKeyHex)] = true
 	}
 	for _, unitNum := range unitNums {
 		unit := iface.Units[unitNum]
@@ -269,10 +269,11 @@ func mergeWireguardUnitPeers(iface *InterfaceConfig, unitNums []int) *TunnelConf
 			continue
 		}
 		for _, p := range unit.Tunnel.WgPeers {
-			if seen[p.PublicKeyHex] {
+			canon := canonicalWireguardPubkeyHex(p.PublicKeyHex)
+			if seen[canon] {
 				continue
 			}
-			seen[p.PublicKeyHex] = true
+			seen[canon] = true
 			cp := p
 			if p.AllowedIPs != nil {
 				cp.AllowedIPs = append([]string(nil), p.AllowedIPs...)

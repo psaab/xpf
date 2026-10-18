@@ -146,7 +146,7 @@ func validateMergedWireguardUnitPeers(ifName string, ifc *InterfaceConfig, unitN
 	}
 	inherited := make(map[string]struct{}, len(ifc.Tunnel.WgPeers))
 	for _, p := range ifc.Tunnel.WgPeers {
-		inherited[p.PublicKeyHex] = struct{}{}
+		inherited[canonicalWireguardPubkeyHex(p.PublicKeyHex)] = struct{}{}
 	}
 	owners := make(map[string]int)
 	for _, unitNum := range unitNums {
@@ -155,10 +155,11 @@ func validateMergedWireguardUnitPeers(ifName string, ifc *InterfaceConfig, unitN
 			continue
 		}
 		for _, p := range unit.Tunnel.WgPeers {
-			if _, isInherited := inherited[p.PublicKeyHex]; isInherited {
+			canon := canonicalWireguardPubkeyHex(p.PublicKeyHex)
+			if _, isInherited := inherited[canon]; isInherited {
 				continue
 			}
-			if owner, exists := owners[p.PublicKeyHex]; exists {
+			if owner, exists := owners[canon]; exists {
 				if owner == unitNum {
 					// A duplicate within one unit is owned by the
 					// per-tunnel validator above, not this merged gate.
@@ -169,22 +170,25 @@ func validateMergedWireguardUnitPeers(ifName string, ifc *InterfaceConfig, unitN
 					fmt.Sprintf("%s.%d", ifName, owner),
 					fmt.Sprintf("%s.%d", ifName, unitNum))
 			}
-			owners[p.PublicKeyHex] = unitNum
+			owners[canon] = unitNum
 		}
 	}
 	// Check exact-prefix ownership on the peer set mergeWireguardUnitPeers
 	// emits: interface peers first, followed by each unit's first peer for a
 	// pubkey. Inherited unit copies are already represented by the interface
 	// peer and must not appear twice in this view.
+	// prefixOwner values are canonical pubkeys (#14690): two case-spellings
+	// of one key are ONE owner, so a same-key repeat is not a prefix conflict.
 	prefixOwner := make(map[string]string)
 	checkPrefixes := func(p WgPeerConfig) error {
+		canon := canonicalWireguardPubkeyHex(p.PublicKeyHex)
 		for _, cidr := range p.AllowedIPs {
-			canon := canonicalAllowedIPPrefix(cidr)
-			if owner, exists := prefixOwner[canon]; exists && owner != p.PublicKeyHex {
-				return duplicateWireguardAllowedIPPrefixError(canon, owner, p.PublicKeyHex)
+			pc := canonicalAllowedIPPrefix(cidr)
+			if owner, exists := prefixOwner[pc]; exists && owner != canon {
+				return duplicateWireguardAllowedIPPrefixError(pc, owner, p.PublicKeyHex)
 			}
-			if _, exists := prefixOwner[canon]; !exists {
-				prefixOwner[canon] = p.PublicKeyHex
+			if _, exists := prefixOwner[pc]; !exists {
+				prefixOwner[pc] = canon
 			}
 		}
 		return nil
@@ -194,7 +198,7 @@ func validateMergedWireguardUnitPeers(ifName string, ifc *InterfaceConfig, unitN
 		if err := checkPrefixes(p); err != nil {
 			return err
 		}
-		mergedPubkeys[p.PublicKeyHex] = struct{}{}
+		mergedPubkeys[canonicalWireguardPubkeyHex(p.PublicKeyHex)] = struct{}{}
 	}
 	for _, unitNum := range unitNums {
 		unit := ifc.Units[unitNum]
@@ -202,10 +206,11 @@ func validateMergedWireguardUnitPeers(ifName string, ifc *InterfaceConfig, unitN
 			continue
 		}
 		for _, p := range unit.Tunnel.WgPeers {
-			if _, alreadyMerged := mergedPubkeys[p.PublicKeyHex]; alreadyMerged {
+			canon := canonicalWireguardPubkeyHex(p.PublicKeyHex)
+			if _, alreadyMerged := mergedPubkeys[canon]; alreadyMerged {
 				continue
 			}
-			mergedPubkeys[p.PublicKeyHex] = struct{}{}
+			mergedPubkeys[canon] = struct{}{}
 			if err := checkPrefixes(p); err != nil {
 				return err
 			}
@@ -329,10 +334,10 @@ func validateOneWireguardTunnel(tc *TunnelConfig) error {
 		if isDegenerateWireguardKeyHex(p.PublicKeyHex) {
 			return fmt.Errorf("peer %d has a degenerate public key %q (an all-zero, repeated-byte, or small-order X25519 point yields a zero or enumerable DH secret, so anyone can handshake as this peer)", i, p.PublicKeyHex)
 		}
-		if _, dup := seen[p.PublicKeyHex]; dup {
+		if _, dup := seen[canonicalWireguardPubkeyHex(p.PublicKeyHex)]; dup {
 			return fmt.Errorf("duplicate peer public key %q (each peer on a WireGuard tunnel must have a unique public key)", p.PublicKeyHex)
 		}
-		seen[p.PublicKeyHex] = struct{}{}
+		seen[canonicalWireguardPubkeyHex(p.PublicKeyHex)] = struct{}{}
 
 		if p.PresharedKeyHex != "" && !isWireguardKeyHex(string(p.PresharedKeyHex)) {
 			return fmt.Errorf("peer %q has an invalid preshared key (expected 64 hex chars / 32 bytes)", p.PublicKeyHex)
@@ -392,14 +397,15 @@ func validateOneWireguardTunnel(tc *TunnelConfig) error {
 				return fmt.Errorf("peer %q has a malformed allowed-ips prefix %q: %v (expected CIDR like 10.0.0.0/24 or 2001:db8::/48)", p.PublicKeyHex, cidr, perr)
 			}
 			canon := canonicalAllowedIPPrefix(cidr)
-			if owner, dup := prefixOwner[canon]; dup && owner != p.PublicKeyHex {
+			canonPub := canonicalWireguardPubkeyHex(p.PublicKeyHex)
+			if owner, dup := prefixOwner[canon]; dup && owner != canonPub {
 				return duplicateWireguardAllowedIPPrefixError(canon, owner, p.PublicKeyHex)
 			}
 			// First claimant wins the map entry; a same-peer repeat (the
 			// engine dedups exact entries per peer) is harmless and not a
 			// conflict.
 			if _, exists := prefixOwner[canon]; !exists {
-				prefixOwner[canon] = p.PublicKeyHex
+				prefixOwner[canon] = canonPub
 			}
 		}
 	}
@@ -430,6 +436,16 @@ func canonicalAllowedIPPrefix(cidr string) string {
 func duplicateWireguardAllowedIPPrefixError(prefix, owner, peer string) error {
 	return fmt.Errorf("allowed-ips prefix %s is claimed by two peers (%q and %q); the cryptokey routing table maps a prefix to exactly one peer, so an exact-duplicate prefix has no longest-prefix winner and silently strips one peer's route — give each peer distinct allowed-ips",
 		prefix, owner, peer)
+}
+
+// canonicalWireguardPubkeyHex returns the comparison key for a WireGuard
+// peer public key (#14690). hex decoding is case-insensitive, so MIXED-case
+// spellings decode to identical [u8;32] in Rust and must collide in every
+// Go uniqueness/ownership/merge map. Canonicalising here (rather than
+// mutating Authored PublicKeyHex) mirrors isDegenerateWireguardKeyHex and
+// keeps error rendering on the operator's spelling.
+func canonicalWireguardPubkeyHex(s string) string {
+	return strings.ToLower(s)
 }
 
 // isWireguardKeyHex reports whether s is exactly 64 hex characters (a
