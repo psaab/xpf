@@ -364,16 +364,15 @@ pub(crate) struct FilterTerm {
     // pre-#3232 silent L3-base mis-match).
     pub(crate) flex_match_start: FlexMatchStart,
     pub(crate) action: FilterAction,
-    // #2544: fall-through. When true, this term carries NO terminating action
-    // (an explicit `then next term` OR a modifier-only term). On a MATCH the
-    // evaluator applies the term's modifiers (count, log, forwarding-class,
-    // policer, dscp) and then CONTINUES to the next term instead of returning —
-    // Junos fall-through semantics. `action` is left as Accept (the historical
-    // empty-action mapping) but is never returned for a matched fall-through
-    // term; it only takes effect as the default if NO later term terminates and
-    // no term matched (handled by the trailing default). A term with a
-    // terminating action (accept/reject/discard) has this false and returns on
-    // match as before.
+    // #14632: fall-through. When true, this term was authored `then next term`
+    // (and carries no terminating action and no routing-instance). On a MATCH
+    // the evaluator applies the term's modifiers (count, log,
+    // forwarding-class, policer, dscp) and then CONTINUES to the next term
+    // instead of returning. A modifier-only term (empty action, no authored
+    // `next term`) has this FALSE: its nonterminating actions carry an
+    // implicit accept, so it terminates with `action` (the Accept placeholder
+    // the empty action maps to). A term with a terminating action
+    // (accept/reject/discard) also has this false and returns on match.
     pub(crate) continue_term: bool,
     pub(crate) count: String,
     pub(crate) has_count: bool,

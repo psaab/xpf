@@ -14,10 +14,10 @@ import (
 // peer-sync path downgrades that gate to a warning (#1960 no-brick), so the
 // shape can still reach this lowering from an already-persisted or peer-synced
 // config. The Rust evaluator resolves the contradiction in favour of the
-// action — `continue_term: snap.action.is_empty() &&
+// action — `continue_term: snap.next_term && snap.action.is_empty() &&
 // snap.routing_instance.is_empty()` (userspace-dp/src/filter/compiler.rs,
-// #5142) — and TERMINATES. #10012 fixed the snapshot RENDER to mirror that
-// predicate; the nft LOWERING still branched on
+// #14632/#5142) — and TERMINATES. #10012 fixed the snapshot RENDER to mirror
+// that predicate; the nft LOWERING still branched on
 // `(term.NextTerm || term.Action == "") && term.RoutingInstance == ""`
 // (daemon_nft_term_lower.go:527, pkg/nftables/netlink_lo0.go:262) and fell
 // through, emitting no rule (or a non-terminating modifier rule) where the
@@ -25,8 +25,10 @@ import (
 //
 // These cells pin the corrected contract: any non-empty action terminates on
 // the nft path regardless of the advisory NextTerm bit, with the honored
-// log/count modifiers riding the terminating rule. Actionless terms and
-// routing-instance terms are unchanged.
+// log/count modifiers riding the terminating rule. Under #14632 an
+// actionless term WITHOUT the authored bit (modifier-only) also terminates
+// (implicit accept); only the authored-bit actionless term falls through.
+// Routing-instance terms are unchanged.
 //
 // FAIL-ON-REVERT: restore the `(term.NextTerm || ...)` fall-through branch
 // and the issue cells go RED — the lowering again emits no terminating
@@ -116,11 +118,13 @@ func TestNftActionNextTermTerminatesMirroringRust10253(t *testing.T) {
 	})
 }
 
-// TestNftActionlessAndRITermsUnaffected10253 pins the unchanged shapes: an
-// actionless term still falls through (no rule without a honored modifier, a
-// NON-TERMINATING rule with one), a pure terminal still terminates, and a
-// routing-instance term still terminates as accept with or without NextTerm
-// (#3427 M08, #9140). GREEN before and after the fix.
+// TestNftActionlessAndRITermsUnaffected10253 pins the actionless shapes under
+// #14632: an authored-bit actionless term still falls through (no rule
+// without a honored modifier, a NON-TERMINATING rule with one); a
+// modifier-only term WITHOUT the bit now TERMINATES as implicit accept (the
+// #14632 change); a pure terminal still terminates; and a routing-instance
+// term still terminates as accept with or without NextTerm (#3427 M08,
+// #9140).
 func TestNftActionlessAndRITermsUnaffected10253(t *testing.T) {
 	prefixLists := map[string]*config.PrefixList{}
 
@@ -132,23 +136,23 @@ func TestNftActionlessAndRITermsUnaffected10253(t *testing.T) {
 		}
 	}
 
-	// Modifier-only fall-through (with and without the explicit bit): exactly
-	// one NON-TERMINATING rule — the modifiers, no verdict.
+	// Authored-bit fall-through with honored modifiers: one NON-TERMINATING
+	// rule. Modifier-only WITHOUT the bit: one TERMINATING accept rule.
 	for _, c := range []struct {
-		name string
-		term *config.FirewallFilterTerm
+		name        string
+		term        *config.FirewallFilterTerm
+		wantVerdict bool
 	}{
-		{"explicit-bit", &config.FirewallFilterTerm{Name: "t1", Count: "hits", Log: true, NextTerm: true}},
-		{"implicit-modifier-only", &config.FirewallFilterTerm{Name: "t1", Count: "hits", Log: true}},
+		{"explicit-bit", &config.FirewallFilterTerm{Name: "t1", Count: "hits", Log: true, NextTerm: true}, false},
+		{"implicit-modifier-only", &config.FirewallFilterTerm{Name: "t1", Count: "hits", Log: true}, true},
 	} {
 		rules := nftRulesFromTerm(c.term, "ip", prefixLists)
 		if len(rules) != 1 {
 			t.Fatalf("%s: got %d rules, want 1: %v", c.name, len(rules), rules)
 		}
-		for _, verdict := range []string{"accept", "drop", "reject"} {
-			if strings.Contains(rules[0], verdict) {
-				t.Errorf("%s: fall-through emitted a terminating %q: %q", c.name, verdict, rules[0])
-			}
+		hasVerdict := strings.HasSuffix(rules[0], " accept")
+		if hasVerdict != c.wantVerdict {
+			t.Errorf("%s: terminating-accept=%v, want %v: %q", c.name, hasVerdict, c.wantVerdict, rules[0])
 		}
 	}
 

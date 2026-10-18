@@ -2026,8 +2026,9 @@ range R { byte-offset 9; then discard; }         # inside flexible-match-range
 ```
 
 compiled to `Action=""` while `show configuration` printed the action. An
-empty action is a fall-through: later terms decide, and a filter that nothing
-terminates accepts. `validateFirewallFusedThenStrict12528`
+empty action without an authored `next term` is a modifier-only term that
+terminates as implicit accept (#14632); only an authored `then next term`
+falls through to later terms, and a filter that nothing terminates accepts. `validateFirewallFusedThenStrict12528`
 (`compiler_firewall_fused_then_12528.go`) now refuses the first offending term
 at strict commit. Tolerant load and peer-sync warn once per offending term and
 keep the historical compilation (#1960).
@@ -14074,7 +14075,7 @@ at commit. `compileFilterThen` now records the unrecognized token on
 (`compiler_validate_strict.go`) hard-rejects any term carrying one, naming
 the family / filter / term / offending token. Note that an EMPTY action
 (`Action == ""`) is the legitimate "no terminating action" case (a term
-with only modifiers falls through to the next term) and is NOT flagged.
+with only modifiers and NO authored `next term` terminates as implicit accept, #14632; only an authored `then next term` falls through) and is NOT flagged.
 Two more VALID Junos constructs are recognized so a real config import is
 NOT over-rejected: `then reject <message-type>` (the standard ICMP-unreachable
 codes plus `tcp-reset`) commits as a plain reject and captures the type on
@@ -14108,8 +14109,9 @@ a strict error (#11683). Regression coverage:
 `TestFilterAction_UnknownUnkeyedRejectChildStillRejected11683`).
 Defense-in-depth in the Rust filter: a NON-EMPTY unrecognized action (only
 reachable via a mixed-version snapshot now that commit rejects it) fails
-CLOSED to `Discard`, never `Accept`; the empty string keeps the
-fall-through `Accept` semantics.
+CLOSED to `Discard`, never `Accept`; the empty string is the
+modifier-only implicit `Accept` (terminating unless `next term` was
+authored, #14632).
 
 **(032-17) Unsupported `from protocol` alias → dropped constraint.**
 Already handled by #2175 — **`validateFilterProtocolsStrict`** rejects a
@@ -14169,8 +14171,9 @@ contradiction handled by `validateFilterRoutingInstanceConflictStrict` (#3308);
 **`then routing-instance` IS a terminating action (#9140).** It is not carried
 on `TerminalActions` — that slice records only the `accept`/`reject`/`discard`
 KEYWORDS — but it terminates the term in BOTH runtimes: the Rust evaluator sets
-`continue_term: snap.action.is_empty() && snap.routing_instance.is_empty()`
-(`userspace-dp/src/filter/compiler.rs`), which is false whenever the
+`continue_term: snap.next_term && snap.action.is_empty() &&
+snap.routing_instance.is_empty()`
+(`userspace-dp/src/filter/compiler.rs`, #14632), which is false whenever the
 routing-instance is set, and `resolve_term_action` maps the empty action to
 `Accept`; the kernel lo0 nft mirror guards its fall-through arm with
 `term.RoutingInstance == ""` and renders a terminating `accept`

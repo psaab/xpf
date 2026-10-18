@@ -56,14 +56,16 @@ type FirewallTermSnapshot struct {
 	DestPortsExcept   []string      `json:"destination_ports_except,omitempty"`
 	DSCPValues        WireUint8List `json:"dscp_values,omitempty"`
 	Action            string        `json:"action"` // "accept", "discard", "reject"
-	// NextTerm carries the authored `then next term` bit (#2544), which normally
-	// marks a no-action/modifier-only term as falling through. The builder also
-	// synthesizes it for an actionless modifier-only term when the explicit bit is
-	// absent. A tolerant load can retain the bit alongside a terminating action
-	// or routing-instance despite the strict contradiction gate; the Rust evaluator
-	// ignores the advisory bit in that shape, while the effective renderer
-	// discloses it as ignored (#10514). serde(default) on the Rust side keeps wire
-	// parity with an older Go control plane that omits it (#1961).
+	// NextTerm carries ONLY the authored `then next term` bit (#14632): the
+	// single fall-through signal. A modifier-only term (empty Action, no
+	// authored bit) is NOT synthesized to true — Junos nonterminating actions
+	// carry an implicit accept, so it terminates as Accept in the Rust
+	// evaluator. A tolerant load can retain the bit alongside a terminating
+	// action or routing-instance despite the strict contradiction gate; the
+	// Rust evaluator ignores the advisory bit in that shape, while the
+	// effective renderer discloses it as ignored (#10514). serde(default) on
+	// the Rust side keeps wire parity with an older Go control plane that
+	// omits it (#1961).
 	NextTerm bool   `json:"next_term,omitempty"`
 	Count    string `json:"count,omitempty"`
 	Log      bool   `json:"log,omitempty"`

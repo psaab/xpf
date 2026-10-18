@@ -226,14 +226,15 @@ pub(crate) struct FirewallTermSnapshot {
     pub dscp_values: Vec<u8>,
     #[serde(default)]
     pub action: String,
-    // #2544: fall-through. A term whose `then` carries NO terminating action
-    // (explicit `then next term` OR a modifier-only term) must APPLY its
-    // modifiers (count/log/forwarding-class/policer/dscp) and FALL THROUGH to
-    // the next term instead of terminating as Accept (Junos semantics). The Go
-    // control plane sets this true for both cases (Action left empty). The
-    // compiler maps it to FilterTerm.continue_term; the evaluator continues to
-    // the next term on a match instead of returning. serde(default) keeps wire
-    // parity with an older Go control plane that omits the field (#1961).
+    // #14632: fall-through is ONLY the authored `then next term`. A term
+    // whose `then` carries only nonterminating modifiers (count/log/
+    // forwarding-class/policer/dscp, empty action, this bit false) applies
+    // its modifiers and TERMINATES as Accept (Junos implicit accept) — it
+    // does NOT fall through. The Go control plane sets this true only for
+    // the authored bit. The compiler maps it (with empty action and no
+    // routing-instance) to FilterTerm.continue_term; the evaluator continues
+    // to the next term on a match instead of returning. serde(default) keeps
+    // wire parity with an older Go control plane that omits the field (#1961).
     #[serde(rename = "next_term", default)]
     pub next_term: bool,
     #[serde(default)]

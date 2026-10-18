@@ -7,15 +7,15 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #2544: a firewall-filter term whose `then` carries NO terminating action —
-// an explicit `then next term` (NextTerm set, Action == "") OR a modifier-only
-// term (Action == "" with only count/log/forwarding-class/policer/dscp) — must
-// fall through to the next term per Junos semantics. The Go snapshot builder
-// must record this so the Rust evaluator continues instead of terminating as
-// Accept. These tests pin (1) NextTerm is copied into the snapshot for both
-// cases, (2) a routing-instance (PBR) term is NOT marked fall-through, and
-// (3) the JSON wire tag is exactly `next_term` (one-sided rename = #1961
-// no-transit; the Rust side reads `#[serde(rename="next_term")]`).
+// #2544 (as narrowed by #14632): fall-through is ONLY the authored
+// `then next term` (NextTerm set, Action == ""). A modifier-only term
+// (Action == "" with only count/log/forwarding-class/policer/dscp, no
+// authored bit) carries Junos nonterminating actions with an implicit
+// accept and TERMINATES — the snapshot must NOT mark it fall-through.
+// These tests pin (1) the authored NextTerm bit is copied into the
+// snapshot, (2) a routing-instance (PBR) term is NOT marked fall-through,
+// and (3) the JSON wire tag is exactly `next_term` (one-sided rename =
+// #1961 no-transit; the Rust side reads `#[serde(rename="next_term")]`).
 
 func nextTermCfg(terms []*config.FirewallFilterTerm) *config.Config {
 	cfg := &config.Config{}
@@ -43,10 +43,11 @@ func TestFilterSnapshotExplicitNextTermFallsThrough(t *testing.T) {
 	}
 }
 
+// #14632 supersedes the modifier-only half of #2544: a modifier-only term
+// (empty Action, NextTerm NOT authored) carries Junos nonterminating actions
+// with an implicit accept — the snapshot must NOT mark it fall-through.
+// Detailed cells live in filters_modifier_only_14632_test.go.
 func TestFilterSnapshotModifierOnlyTermFallsThrough(t *testing.T) {
-	// Modifier-only: empty Action, NextTerm NOT set by the compiler — Junos
-	// treats this as an implicit fall-through, so the snapshot must still mark
-	// it.
 	cfg := nextTermCfg([]*config.FirewallFilterTerm{
 		{Name: "count-only", Protocols: []string{"tcp"}, Count: "hits",
 			Action: ""},
@@ -55,8 +56,8 @@ func TestFilterSnapshotModifierOnlyTermFallsThrough(t *testing.T) {
 	if len(snaps) != 1 || len(snaps[0].Terms) != 1 {
 		t.Fatalf("expected 1 filter with 1 term, got %#v", snaps)
 	}
-	if !snaps[0].Terms[0].NextTerm {
-		t.Error("modifier-only term (empty action) must be marked fall-through")
+	if snaps[0].Terms[0].NextTerm {
+		t.Error("modifier-only term (empty action, no authored `next term`) must NOT be marked fall-through (#14632 implicit accept)")
 	}
 }
 

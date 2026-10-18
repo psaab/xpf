@@ -63,7 +63,6 @@ func buildLo0FilterNetlink(p *nlPlan, spec Lo0FilterSpec) {
 	}
 }
 
-
 // buildLo0TermNetlink lowers one filter term to 0, 1, or 2 kernel rules,
 // mirroring nftRulesFromTerm.
 func buildLo0TermNetlink(p *nlPlan, t Lo0FilterTerm, f nlFamily) {
@@ -265,10 +264,14 @@ func buildLo0TermNetlink(p *nlPlan, t Lo0FilterTerm, f nlFamily) {
 		return
 	}
 
-	// Fall-through (#3427): a term with no terminating action applies its honored
-	// modifiers and continues. Emit a non-terminating rule (no verdict) only when
-	// there is a modifier to honor; otherwise emit no rule.
-	if t.Action == "" && t.RoutingInstance == "" {
+	// Fall-through (#14632): ONLY an authored `then next term` (NextTerm set,
+	// no terminating action, no routing-instance) applies its honored
+	// modifiers and continues. Emit a non-terminating rule (no verdict) only
+	// when there is a modifier to honor; otherwise emit no rule. A
+	// modifier-only term (empty action, no authored bit) terminates below as
+	// the implicit accept verdict — Junos nonterminating actions carry an
+	// implicit accept.
+	if t.NextTerm && t.Action == "" && t.RoutingInstance == "" {
 		if !t.Log && t.Count == "" {
 			return
 		}

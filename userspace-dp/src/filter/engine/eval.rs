@@ -673,7 +673,7 @@ fn evaluate_filter_ref_routing_instance_counted_v4<'a>(
         if count && term.has_count {
             record_filter_counter(&term.counter, packet_bytes);
         }
-        // #2544: a matched fall-through term (no terminating action, no
+        // #2544: a matched fall-through term (authored next term, no
         // routing-instance) applies its count modifier above and must NOT halt
         // the search for a routing-instance term — keep scanning. A matched
         // TERMINATING term without a routing-instance still halts (returns None
@@ -1275,7 +1275,7 @@ fn evaluate_filter_ref_log_match(
     if !filter.has_log_terms {
         return None;
     }
-    // #2544: a matched fall-through term (`then next term` / modifier-only) with
+    // #2544: a matched fall-through term (authored `then next term`) with
     // `then log` fires its log even though evaluation continues to later terms.
     // #2618: this log-only helper must share the FULL evaluator's
     // latest-matched-logging-term semantics — it previously returned on the

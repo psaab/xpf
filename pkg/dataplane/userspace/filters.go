@@ -113,23 +113,27 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 			PolicerName:       term.Policer,
 			RoutingInstance:   term.RoutingInstance,
 			ForwardingClass:   term.ForwardingClass,
-			// #2544: fall-through. A term whose `then` carries NO terminating
-			// action must apply its modifiers and FALL THROUGH to the next term
-			// (Junos). This covers BOTH the explicit `then next term`
-			// (term.NextTerm set by compileFilterThen) AND a modifier-only term
-			// (Action=="" with only count/log/forwarding-class/policer/dscp).
-			// Junos treats a modifier-only term as an implicit fall-through, so
-			// the signal is uniformly "no terminating action" == fall-through.
-			// A routing-instance (PBR) term is terminating-wise its own decision
-			// and is NOT a fall-through even with an empty Action — the implicit
-			// arm stays gated on an empty routing-instance. The AUTHORED
-			// term.NextTerm bit is still preserved verbatim (#10514): the strict
-			// gate rejects RI+next-term but the tolerant path downgrades it to a
-			// warning, and clearing the bit here hid the contradiction from the
-			// renderer's ignored-next-term disclosure. The runtimes terminate on
-			// a set routing-instance regardless of this advisory bit (Rust
-			// `continue_term`, nft mirrors), so preserving it is disclosure-only.
-			NextTerm: term.NextTerm || (term.Action == "" && term.RoutingInstance == ""),
+			// #14632: fall-through is ONLY the authored `then next term`.
+			// Junos nonterminating actions (count/log/forwarding-class/
+			// policer/dscp on a term with no terminating action) "carry with
+			// them an implicit accept action": a modifier-only term applies
+			// its modifiers and TERMINATES as Accept — it does NOT fall
+			// through to a later discard. Only `next term` is the explicit
+			// continuation. The AUTHORED term.NextTerm bit is preserved
+			// verbatim (#10514): the strict gate rejects RI+next-term but
+			// the tolerant path downgrades it to a warning, and clearing the
+			// bit here would hide the contradiction from the renderer's
+			// ignored-next-term disclosure. A routing-instance (PBR) term
+			// terminates on its own decision regardless of this bit.
+			// Mixed-version note: an older Go peer synthesizes next_term=true
+			// for modifier-only terms; a new Rust helper honors that authored
+			// bit on empty-action terms, so such a peer's modifier-only terms
+			// keep falling through until the peer upgrades. The reverse
+			// (new Go, old Rust) also keeps falling through — not safe/new:
+			// the old Rust ignores next_term and treats every empty action
+			// as fall-through, so implicit accept requires BOTH the new Go
+			// (next_term=false) AND the new Rust; upgrade them together.
+			NextTerm: term.NextTerm,
 		}
 		// Source / destination addresses: literal CIDRs PLUS the prefixes
 		// resolved from any `from source-prefix-list` / `destination-prefix-list`

@@ -17,11 +17,12 @@ import (
 //	MODIFIER-ONLY SOLE TERM -> action=Accept
 //	CONTROL, discard KEPT   -> action=Discard
 //
-// The chain is: the elision leaves `Action=""`; the snapshot builder sets
-// `NextTerm` for a modifier-only term (Junos fall-through); the Rust evaluator
-// applies modifiers and continues; nothing later terminates, so
-// `FilterResult::default()` returns `FilterAction::Accept`. `show` prints
-// `then accept` for an empty action too, so nothing contradicts it on screen.
+// The chain is: the elision leaves `Action=""`; under #14632 the Rust
+// evaluator terminates a modifier-only term as implicit Accept (Junos
+// nonterminating actions carry an implicit accept; only an authored
+// `next term` falls through), so `FilterAction::Accept` results either way.
+// `show` prints `then accept` for an empty action too, so nothing
+// contradicts it on screen.
 //
 // THE MECHANISM WAS IN THE READER, NOT THE ELISION. `packedBodyChildren` built a
 // strictly NESTED chain, refining one schema level per statement. That is right

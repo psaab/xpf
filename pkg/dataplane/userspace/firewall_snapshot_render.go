@@ -132,13 +132,14 @@ func RenderFirewallFilterSnapshot(snap *FirewallFilterSnapshot) string {
 		if term.Count != "" {
 			fmt.Fprintf(&b, "    then count %s\n", term.Count)
 		}
-		// The Rust evaluator terminates whenever a real action or a
-		// routing-instance is present, regardless of the advisory NextTerm bit:
-		// `continue_term = action.is_empty() && routing_instance.is_empty()`.
-		// A tolerant load can preserve the contradictory bits, so render the
-		// effective runtime decision and disclose that the fall-through request
-		// was ignored rather than claiming the term falls through (#10012).
-		effectiveFallThrough := term.Action == "" && term.RoutingInstance == ""
+		// #14632: the Rust evaluator falls through ONLY on the authored
+		// `next term` bit with no action and no routing-instance:
+		// `continue_term = next_term && action.is_empty() &&
+		// routing_instance.is_empty()`. A modifier-only term (empty action,
+		// no bit) terminates as implicit Accept. A tolerant load can preserve
+		// the bit alongside a terminating action/RI, so render the effective
+		// runtime decision and disclose the ignored bit (#10012).
+		effectiveFallThrough := term.NextTerm && term.Action == "" && term.RoutingInstance == ""
 		if effectiveFallThrough {
 			fmt.Fprintf(&b, "    then next term (fall-through)\n")
 		} else {

@@ -7,15 +7,18 @@ import (
 
 // #10253: the netlink lo0 mirror must resolve a contradictory real action plus
 // `then next term` in favour of the action, matching Rust
-// `continue_term = action.is_empty() && routing_instance.is_empty()`
-// (userspace-dp/src/filter/compiler.rs, #5142). Before the fix the
+// `continue_term = next_term && action.is_empty() &&
+// routing_instance.is_empty()` (userspace-dp/src/filter/compiler.rs,
+// #14632/#5142). Before the #10253 fix the
 // `(t.NextTerm || t.Action == "") && t.RoutingInstance == ""` branch at
 // netlink_lo0.go:262 returned before the terminating verdict, so the kernel
-// mirror fell through while Rust terminated.
+// mirror fell through while Rust terminated. Under #14632 the actionless
+// modifier-only shape (no authored bit) likewise terminates (implicit
+// accept); only the authored-bit actionless term falls through.
 //
 // FAIL-ON-REVERT: restoring the NextTerm-inclusive branch makes the action and
-// reject cells below emit no verdict rules; actionless and routing-instance
-// controls remain unchanged.
+// reject cells below emit no verdict rules; the authored-bit actionless and
+// routing-instance controls remain unchanged.
 func netlinkActionNextTermRules10253(t *testing.T, term Lo0FilterTerm) string {
 	t.Helper()
 	p := newBuildPlan(t, "xpf_10253", lo0FilterPriority)

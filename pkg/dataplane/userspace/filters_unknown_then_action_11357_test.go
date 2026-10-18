@@ -66,6 +66,10 @@ func TestUnknownFilterThenActionFailsClosedInSnapshot11357(t *testing.T) {
 	}
 }
 
+// #14632: a valid modifier-only term (no authored `next term`) must NOT be
+// marked fall-through — it terminates as implicit accept. (Renamed in
+// spirit: the #11357 concern is only that the unknown-action fail-closed
+// machinery does not touch a well-formed modifier-only term.)
 func TestUnknownFilterThenActionDoesNotChangeModifierFallThrough11357(t *testing.T) {
 	tree := unknownThenActionTree11357(t, "count c1")
 	cfg, err := config.CompileConfigLenient(tree)
@@ -77,7 +81,7 @@ func TestUnknownFilterThenActionDoesNotChangeModifierFallThrough11357(t *testing
 		t.Fatalf("valid modifier-only term changed unexpectedly: %+v", term)
 	}
 	snap := buildFirewallFilterSnapshots(cfg)[0].Terms[0]
-	if !snap.NextTerm {
-		t.Fatalf("valid modifier-only term must still fall through: %+v", snap)
+	if snap.NextTerm {
+		t.Fatalf("valid modifier-only term must NOT fall through (#14632 implicit accept): %+v", snap)
 	}
 }

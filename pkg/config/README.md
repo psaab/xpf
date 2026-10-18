@@ -170,8 +170,9 @@ distinction).
   `FirewallFilterTerm.UnknownActions`. Strict commit rejects it; `Store.Load`
   and `Store.SyncApply` keep startup/HA sync bootable with a warning and compile
   that term's action as `discard`, rather than treating the empty action as a
-  fall-through to the implicit accept. Known modifier-only terms remain
-  fall-through terms.
+  fall-through to the implicit accept. Known modifier-only terms (no authored
+  `next term`) terminate as implicit accept (#14632); only an authored
+  `then next term` falls through.
 
 - `ValueType` — `value_type.go`. Classifies a typed leaf's value
   (`ValueRate`, `ValueByteSizeOrPercent`, `ValueDate`, `ValueString`, ...)

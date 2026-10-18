@@ -13,7 +13,7 @@ import (
 // nftRule renders a term to its single nft rule line, asserting the term lowers
 // to exactly one rule (the common accept / discard / fall-through-skip case) or
 // zero (returns ""). Multi-rule terms — a faithful `reject` (TCP RST + ICMP
-// admin-prohibited) and modifier-only fall-through terms (#3445) — are exercised
+// admin-prohibited) and authored fall-through terms (#3445) — are exercised
 // against nftRulesFromTerm directly. The single-rule assertion also guards
 // against an accidental extra rule slipping into a verdict term.
 func nftRule(t *testing.T, term *config.FirewallFilterTerm, family string, prefixLists map[string]*config.PrefixList) string {
@@ -349,11 +349,12 @@ func TestNftRuleFromTermRejectVsDiscard(t *testing.T) {
 	}{
 		{"accept", "accept"},
 		{"discard", "drop"},
-		// #3427: an empty action is a Junos fall-through (modifier-only term),
-		// NOT a terminating accept. The kernel mirror must skip it (emit "") so
-		// later discard/reject terms remain reachable. Before the fix this row
-		// asserted "accept" — the control-plane fail-open this issue tracks.
-		{"", ""},
+		// #14632: an empty action WITHOUT an authored `next term` is a
+		// modifier-only term — Junos nonterminating actions carry an implicit
+		// accept, so the kernel mirror TERMINATES as `accept` (shadowing
+		// later terms exactly as the Rust evaluator does). Only an authored
+		// `then next term` term (NextTerm set, tested below) falls through.
+		{"", "accept"},
 	}
 
 	for _, tt := range tests {
@@ -1123,22 +1124,19 @@ func TestNftRuleFromTermFragment(t *testing.T) {
 	}
 }
 
-// TestNftRuleFromTermFallThroughNoBareAccept pins #3427: a fall-through term —
-// an explicit `then next term`, or a modifier-only term (empty action) — must
-// NOT emit a terminating kernel verdict that shadows later discard/reject terms.
-// The kernel lo0 chain is the PRIMARY enforcement for host-bound traffic (the
-// XDP shim shunts it to the kernel before userspace), so a bare `accept` here is
-// a real control-plane fail-open. A fall-through term WITHOUT a honored modifier
-// emits no rule; a fall-through term carrying `then log`/`then count` (#3445)
-// emits a NON-TERMINATING rule (the modifier statements, no verdict) so the
-// per-term log/count fires while later terms stay reachable. Every case asserts
-// no terminating verdict (no accept / drop / reject) is emitted. RED before the
-// #3427 fix (Action=="" returned "accept"; NextTerm was ignored so it also
-// returned "accept").
+// TestNftRuleFromTermFallThroughNoBareAccept pins the fall-through contract
+// as narrowed by #14632: ONLY an authored `then next term` falls through.
+// A fall-through term WITHOUT a honored modifier emits no rule; one carrying
+// `then log`/`then count` (#3445) emits a NON-TERMINATING rule (the modifier
+// statements, no verdict) so the per-term log/count fires while later terms
+// stay reachable. A modifier-only term (empty action, NO authored bit) is
+// the opposite shape under #14632: Junos nonterminating actions carry an
+// implicit accept, so it TERMINATES as `accept` (with honored modifiers
+// riding the verdict) and shadows later terms exactly as userspace does.
 func TestNftRuleFromTermFallThroughNoBareAccept(t *testing.T) {
 	prefixLists := map[string]*config.PrefixList{}
 
-	// Pure fall-through (no honored modifier): emits NO rule.
+	// Pure authored fall-through (no honored modifier): emits NO rule.
 	noRule := []struct {
 		name string
 		term *config.FirewallFilterTerm
@@ -1161,17 +1159,6 @@ func TestNftRuleFromTermFallThroughNoBareAccept(t *testing.T) {
 				NextTerm: true,
 			},
 		},
-		{
-			// Modifier-only term whose only modifier is unrepresentable on the
-			// kernel mirror (forwarding-class) — nothing is honored, so no rule and
-			// (commit-time) a warning. Must not shadow later terms.
-			name: "modifier-only-unhonored",
-			term: &config.FirewallFilterTerm{
-				Name:            "t1",
-				Protocols:       []string{"tcp"},
-				ForwardingClass: "expedited-forwarding",
-			},
-		},
 	}
 	for _, c := range noRule {
 		for _, fam := range []string{"ip", "ip6"} {
@@ -1182,9 +1169,46 @@ func TestNftRuleFromTermFallThroughNoBareAccept(t *testing.T) {
 		}
 	}
 
-	// H07 / #3445: a modifier-only term carrying a HONORED modifier (count, log)
-	// emits a single NON-TERMINATING rule (the modifier statements, no verdict),
-	// so later discard/reject terms remain reachable.
+	// #14632: a modifier-only term whose only modifier is unrepresentable on
+	// the kernel mirror (forwarding-class) still TERMINATES as accept — the
+	// implicit accept shadows later terms as in userspace.
+	fcTerm := &config.FirewallFilterTerm{
+		Name:            "t1",
+		Protocols:       []string{"tcp"},
+		ForwardingClass: "expedited-forwarding",
+	}
+	if got := nftRule(t, fcTerm, "ip", prefixLists); got != "meta l4proto 6 accept" {
+		t.Errorf("modifier-only-unhonored: got %q, want terminating %q", got, "meta l4proto 6 accept")
+	}
+
+	// H07 / #3445 (authored-bit form): a `then { count; log; next term; }`
+	// term emits a single NON-TERMINATING rule so later terms stay reachable.
+	for _, fam := range []string{"ip", "ip6"} {
+		term := &config.FirewallFilterTerm{
+			Name:      "t1",
+			Protocols: []string{"tcp"},
+			Count:     "tcp-seen",
+			Log:       true,
+			NextTerm:  true,
+		}
+		rules := nftRulesFromTerm(term, fam, prefixLists)
+		if len(rules) != 1 {
+			t.Fatalf("next-term-count+log (%s): got %d rules, want 1: %v", fam, len(rules), rules)
+		}
+		got := rules[0]
+		want := `meta l4proto 6 log prefix "xpf-lo0 t1: " counter name "xpflo0_tcp-seen"`
+		if got != want {
+			t.Errorf("next-term-count+log (%s):\n  got:  %s\n  want: %s", fam, got, want)
+		}
+		for _, verdict := range []string{"accept", "drop", "reject"} {
+			if strings.Contains(got, verdict) {
+				t.Errorf("authored fall-through (%s) emitted a terminating %q: %q", fam, verdict, got)
+			}
+		}
+	}
+
+	// #14632: the same count+log term WITHOUT the authored bit terminates as
+	// accept with the modifiers riding the verdict.
 	for _, fam := range []string{"ip", "ip6"} {
 		term := &config.FirewallFilterTerm{
 			Name:      "t1",
@@ -1196,16 +1220,9 @@ func TestNftRuleFromTermFallThroughNoBareAccept(t *testing.T) {
 		if len(rules) != 1 {
 			t.Fatalf("modifier-only-count+log (%s): got %d rules, want 1: %v", fam, len(rules), rules)
 		}
-		got := rules[0]
-		want := `meta l4proto 6 log prefix "xpf-lo0 t1: " counter name "xpflo0_tcp-seen"`
-		if got != want {
-			t.Errorf("modifier-only-count+log (%s):\n  got:  %s\n  want: %s", fam, got, want)
-		}
-		// Critically: no terminating verdict, so the term cannot shadow later terms.
-		for _, verdict := range []string{"accept", "drop", "reject"} {
-			if strings.Contains(got, verdict) {
-				t.Errorf("modifier-only fall-through (%s) emitted a terminating %q (fail-open #3427): %q", fam, verdict, got)
-			}
+		want := `meta l4proto 6 log prefix "xpf-lo0 t1: " counter name "xpflo0_tcp-seen" accept`
+		if rules[0] != want {
+			t.Errorf("modifier-only-count+log (%s):\n  got:  %s\n  want: %s", fam, rules[0], want)
 		}
 	}
 }

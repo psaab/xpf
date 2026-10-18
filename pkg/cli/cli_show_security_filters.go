@@ -352,10 +352,11 @@ func (c *CLI) showFirewallFilter(name, requestedFamily string) error {
 // the config compiler emits and prints the terms exactly as the matcher would
 // enforce them: prefix-list references resolved to literal prefixes, address/
 // port `except` folded (positive-wins on a mixed term), DSCP tokens resolved to
-// numeric code points, TCP-flags lowered to required/forbidden masks, `then next
-// term` / modifier-only fall-through computed, and any unrepresentable match
-// marked fail-closed. It is read-only — it derives the snapshot from the active
-// config and never touches the dataplane.
+// numeric code points, TCP-flags lowered to required/forbidden masks, authored
+// `then next term` fall-through / modifier-only implicit accept computed
+// (#14632), and any unrepresentable match marked fail-closed. It is
+// read-only — it derives the snapshot from the active config and never
+// touches the dataplane.
 //
 // #5067: the snapshots are compiled from ActiveConfig(), which commitAndApply
 // promotes via store.Commit() BEFORE applyAndSyncCommitted runs. A required-

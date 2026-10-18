@@ -2197,9 +2197,11 @@ where compilation transforms the term:
 - **Symbolic DSCP names resolve to numeric code points** (`ef` → `46`).
 - **`tcp-flags` expressions** render as lowered `require`/`forbid` masks
   (#3076).
-- **Fall-through** — a `then next term` or modifier-only term (no terminating
-  action) renders `then next term (fall-through)` (#2544); a terminating term
-  renders `then <action>` (default `accept`).
+- **Fall-through / implicit accept** — only an authored `then next term`
+  renders `then next term (fall-through)`; a modifier-only term (no
+  terminating action, no authored `next term`) renders its modifiers plus
+  `then accept` — Junos nonterminating actions carry an implicit accept
+  (#14632); a terminating term renders `then <action>` (default `accept`).
 - **Unrepresentable matches** — a token the compiler cannot lower (an
   out-of-range ICMP type, an unknown DSCP, an unparseable `tcp-flags`) that
   reaches the snapshot on the lenient / peer-sync path renders
@@ -2263,7 +2265,7 @@ Filter: demo (family inet) [effective]
     from dscp 46
     then forwarding-class best-effort
     then count c1
-    then next term (fall-through)
+    then accept
   Term: t2
     then accept
 ```
