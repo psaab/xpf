@@ -153,3 +153,72 @@ fn deterministic_napt64_bib_identity_teardown_and_idle_import_14091() {
     let mut mismatched = exported[0].clone(); mismatched.deterministic_identity = Some(super::DeterministicPortedIdentity::V6(DeterministicV6 { block_size: 64, ..params }));
     assert_ne!(mismatched.deterministic_identity, exported[0].deterministic_identity, "configuration identity must be distinguishable");
 }
+
+#[test]
+fn deterministic_napt64_expired_block_bibs_reclaimed_on_exhaustion_14670() {
+    let allocator = PortAllocator::new(1, 1024, 1027);
+    let params = DeterministicV6 {
+        block_size: 4, blocks_per_ip: 1, host_prefix_len: 32,
+        host_base: "2001:db8::".parse::<Ipv6Addr>().unwrap().octets(), host_count: 1,
+    };
+    let mut flows = Vec::new();
+    let mut tuples = Vec::new();
+    for i in 0..4u16 {
+        let f = flow_from_source(40000 + i, Ipv4Addr::new(8, 8, 8, 8), 443);
+        let t = allocator.allocate_deterministic_v6_at(f, &[POOL], params, SUB, 1, NatHolder::Untracked).unwrap();
+        flows.push(f);
+        tuples.push(t);
+    }
+    assert_eq!(allocator.snapshot().persistent_leases, 4);
+    for (f, t) in flows.iter().zip(tuples.iter()) {
+        assert!(allocator.release_flow(*f, *t, 20, NatHolder::Untracked));
+    }
+    assert_eq!(allocator.live_flow_count(), 0);
+    let later = 20 + 300_000_000_001u64;
+    let new_flow = flow_from_source(40010, Ipv4Addr::new(9, 9, 9, 9), 80);
+    let got = allocator.allocate_deterministic_v6_at(new_flow, &[POOL], params, SUB, later, NatHolder::Untracked)
+        .expect("expired BIBs in the subscriber block must be reclaimed on exhaustion");
+    assert!((1024..=1027).contains(&got.port), "reclaimed port must be inside the subscriber block, got {}", got.port);
+    assert_eq!(allocator.snapshot().persistent_leases, 1, "expired block BIBs must be GC'd, not left as phantom leases");
+}
+
+#[test]
+fn deterministic_napt64_rollback_preserves_imported_bib_14670() {
+    let params = DeterministicV6 { block_size: 32, blocks_per_ip: 2, host_prefix_len: 32, host_base: "2001:db8::".parse::<Ipv6Addr>().unwrap().octets(), host_count: 1 };
+    let origin = PortAllocator::new(1, 1024, 1087);
+    let f0 = flow(Ipv4Addr::new(8, 8, 8, 8), 443);
+    let t0 = origin.allocate_deterministic_v6(f0, &[POOL], params, SUB, NatHolder::Untracked).unwrap();
+    assert!(origin.release_flow(f0, t0, 20, NatHolder::Untracked));
+    let exported = origin.export_idle_leases(21);
+    assert_eq!(exported.len(), 1);
+    let standby = PortAllocator::new(1, 1024, 1087);
+    assert_eq!(standby.import_idle_lease(&exported[0], &[IpAddr::V4(POOL)], 300_000_000_000, 1_000), super::IdleLeaseImport::Installed);
+    let join_flow = flow(Ipv4Addr::new(1, 1, 1, 1), 53);
+    let joined = standby.allocate_deterministic_v6_at(join_flow, &[POOL], params, SUB, 2_000, NatHolder::Untracked).unwrap();
+    assert_eq!(joined.port, exported[0].translated_port);
+    let before = standby.debug_persistent_lease_for_flow(&join_flow, super::source::PersistentNatPermit::AnyRemoteHost).unwrap();
+    assert!(before.imported, "joined lease must still be the imported BIB");
+    assert!(standby.rollback_flow(join_flow, joined, 3_000, NatHolder::Untracked));
+    let after = standby.debug_persistent_lease_for_flow(&join_flow, super::source::PersistentNatPermit::AnyRemoteHost)
+        .expect("rollback of a flow joining an imported BIB must not delete the BIB");
+    assert_eq!(after.translated, before.translated);
+    assert_eq!(after.active_flows, 0);
+    assert!(after.imported);
+    let rejoined = standby.allocate_deterministic_v6_at(flow(Ipv4Addr::new(2, 2, 2, 2), 8443), &[POOL], params, SUB, 4_000, NatHolder::Untracked).unwrap();
+    assert_eq!(rejoined.port, exported[0].translated_port);
+}
+
+#[test]
+fn deterministic_napt64_capacity_reuse_and_max_tracked_14670() {
+    let allocator = PortAllocator::new(1, 1024, 1024);
+    let params = DeterministicV6 {
+        block_size: 1, blocks_per_ip: 1, host_prefix_len: 32,
+        host_base: "2001:db8::".parse::<Ipv6Addr>().unwrap().octets(), host_count: 1,
+    };
+    let f1 = flow(Ipv4Addr::new(8, 8, 8, 8), 443);
+    let t1 = allocator.allocate_deterministic_v6_at(f1, &[POOL], params, SUB, 1, NatHolder::Untracked).unwrap();
+    let f2 = flow(Ipv4Addr::new(1, 1, 1, 1), 53);
+    let err = allocator.allocate_deterministic_v6_at(f2, &[POOL], params, SUB, 2, NatHolder::Untracked);
+    assert!(err.is_err(), "full-block BIB reuse must enforce max_tracked_flows, got {err:?} (t1={t1:?})");
+    assert_eq!(allocator.live_flow_count(), 1);
+}

@@ -4399,6 +4399,18 @@ impl PortAllocator {
                     self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
                     return Ok(existing);
                 }
+                // #14670: a block full of expired idle BIBs under OTHER
+                // source ports must not report permanent exhaustion. The
+                // per-address sweep is bounded (PRESSURE_GC_BUDGET); expired
+                // entries are the earliest in the per-address index, so one
+                // pass reclaims this address's expired frontier. Only retry
+                // the lock-free claim when something was actually reclaimed.
+                let reclaimed = self.gc_expired_for_addr_locked(&mut live, ip_idx, now_ns, PRESSURE_GC_BUDGET);
+                if reclaimed > 0 {
+                    drop(live);
+                    probe_start = Some(port_start as u16);
+                    continue;
+                }
                 if let Some(expired) = live.persistent_by_source.get(&bib_key).copied().filter(|lease| lease.active_flows == 0 && lease.expires_at_ns <= now_ns) {
                     Self::remove_lease_expiration_locked(&mut live, expired.addr_index, expired.expires_at_ns, bib_key);
                     live.remove_persistent_lease(&bib_key);
@@ -4409,9 +4421,39 @@ impl PortAllocator {
                 }
                 if let Some(lease) = live.persistent_by_source.get(&bib_key).copied() {
                     if lease.deterministic && lease.deterministic_identity == Some(super::idle_lease_sync_8121::DeterministicPortedIdentity::V6(params)) && lease.addr_index == ip_idx && lease.translated.ip == translated_ip && (port_start..=port_end).contains(&(lease.translated.port as u32)) && !lease.revoked && (lease.active_flows > 0 || lease.expires_at_ns > now_ns) {
-                        if lease.active_flows == 0 { Self::remove_lease_expiration_locked(&mut live, lease.addr_index, lease.expires_at_ns, bib_key); }
-                        if let Some(slot) = live.persistent_by_source.get_mut(&bib_key) { slot.active_flows = slot.active_flows.saturating_add(1); slot.expires_at_ns = now_ns.saturating_add(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS); }
-                        live.live_by_flow.insert(flow, LiveAllocation { translated: lease.translated, persistent_key: Some(bib_key), addr_index: ip_idx, deterministic: true, address_only: false, promotion_timeout_ns: None, holders: holder.bit() });
+                        // #14670: joining an existing BIB is a tracked flow
+                        // too — the claimed-port reuse branch below already
+                        // enforces this cap; the full-block branch must not
+                        // bypass it.
+                        if live.live_by_flow.len() >= self.shared.max_tracked_flows {
+                            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+                            return Err(SourceNatFailureReason::AllocatorExhausted);
+                        }
+                        let was_idle = lease.active_flows == 0;
+                        if was_idle { Self::remove_lease_expiration_locked(&mut live, lease.addr_index, lease.expires_at_ns, bib_key); }
+                        // #14670: 0->1 re-arm activation-rollback bookkeeping
+                        // (mirrors reuse_existing_lease_locked). Without it
+                        // rollback_flow treats a promoted imported BIB as
+                        // freshly minted and deletes it. Imported leases
+                        // defer timeout promotion to a completing
+                        // release_flow via the per-flow marker.
+                        let mut promotion_timeout_ns = None;
+                        if let Some(slot) = live.persistent_by_source.get_mut(&bib_key) {
+                            if was_idle {
+                                slot.activation_saw_completion = false;
+                                slot.activation_previous_expires_at_ns = slot.expires_at_ns;
+                                slot.activation_previous_timeout_ns = slot.timeout_ns;
+                                slot.activation_had_previous_lease = true;
+                                if slot.imported {
+                                    promotion_timeout_ns = Some(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS);
+                                }
+                            } else if slot.imported {
+                                promotion_timeout_ns = Some(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS);
+                            }
+                            slot.active_flows = slot.active_flows.saturating_add(1);
+                            slot.expires_at_ns = now_ns.saturating_add(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS);
+                        }
+                        live.live_by_flow.insert(flow, LiveAllocation { translated: lease.translated, persistent_key: Some(bib_key), addr_index: ip_idx, deterministic: true, address_only: false, promotion_timeout_ns, holders: holder.bit() });
                         live.record_pat_owner(&flow, lease.translated);
                         self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
                         return Ok(lease.translated);
@@ -4475,11 +4517,32 @@ impl PortAllocator {
                         self.free_translated_port(ip_idx, port);
                         return Err(SourceNatFailureReason::AllocatorExhausted);
                     }
-                    if lease.active_flows == 0 {
+                    let was_idle = lease.active_flows == 0;
+                    if was_idle {
                         Self::remove_lease_expiration_locked(&mut live, lease.addr_index, lease.expires_at_ns, bib_key);
                     }
+                    // #14670: same 0->1 activation re-arm as the full-block
+                    // branch above (and reuse_existing_lease_locked).
+                    let mut promotion_timeout_ns = None;
                     if let Some(slot) = live.persistent_by_source.get_mut(&bib_key) {
+                        if was_idle {
+                            slot.activation_saw_completion = false;
+                            slot.activation_previous_expires_at_ns = slot.expires_at_ns;
+                            slot.activation_previous_timeout_ns = slot.timeout_ns;
+                            slot.activation_had_previous_lease = true;
+                            if slot.imported {
+                                promotion_timeout_ns = Some(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS);
+                            }
+                        } else if slot.imported {
+                            promotion_timeout_ns = Some(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS);
+                        }
                         slot.active_flows = slot.active_flows.saturating_add(1);
+                        // Claimed-port branch historically did not refresh
+                        // the idle expiry on reuse; the 0->1 snapshot above
+                        // captures the pre-join expiry for rollback, and
+                        // release_flow re-arms expiry on completion. Keep
+                        // expires_at_ns unchanged here to avoid extending
+                        // an active lease's stale index entry.
                     }
                     live.live_by_flow.insert(flow, LiveAllocation {
                         translated: lease.translated,
@@ -4487,7 +4550,7 @@ impl PortAllocator {
                         addr_index: ip_idx,
                         deterministic: true,
                         address_only: false,
-                        promotion_timeout_ns: None,
+                        promotion_timeout_ns,
                         holders: holder.bit(),
                     });
                     live.record_pat_owner(&flow, lease.translated);
