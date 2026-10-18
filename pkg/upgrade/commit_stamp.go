@@ -93,6 +93,95 @@ func (r *Runner) committedPredecessorStamp(j *Journal, target string) *committed
 	return targetStamp
 }
 
+// predecessorStampBackup captures a committed predecessor's stamp file and
+// DB snapshot so a failed recopy can restore them. A nil field means the
+// corresponding artifact did not exist when the backup was taken.
+type predecessorStampBackup struct {
+	version   string
+	stampData []byte
+	dbsnapDir string
+	backupDir string
+	// demotedByReplacement is set when COPY replaced the predecessor with
+	// different (or unverifiable) bytes: the old committed history no
+	// longer describes the bytes on disk, so a later failure must NOT
+	// resurrect it (#12177 demotion survives; #14720 Case C).
+	demotedByReplacement bool
+}
+
+// backupCommittedPredecessor preserves the committed stamp bytes and the
+// .<ver>.dbsnap tree of a committed predecessor before a recopy demotes or
+// replaces it (#14720). Returns nil when target is not a committed
+// predecessor of the journal's live version.
+func (r *Runner) backupCommittedPredecessor(j *Journal, target string) *predecessorStampBackup {
+	if r.committedPredecessorStamp(j, target) == nil {
+		return nil
+	}
+	b := &predecessorStampBackup{version: target}
+	if data, err := os.ReadFile(r.committedStampPath(target)); err == nil {
+		b.stampData = data
+	}
+	snap := filepath.Join(r.cfg.VersionsDir, "."+target+".dbsnap")
+	if _, err := os.Stat(snap); err == nil {
+		tmp, err := os.MkdirTemp(r.cfg.VersionsDir, ".predbak-*")
+		if err != nil {
+			r.logf("upgrade: WARN backup committed predecessor %s snapshot: %v", target, err)
+			return b
+		}
+		b.backupDir = tmp
+		b.dbsnapDir = filepath.Join(tmp, "dbsnap")
+		if _, err := copyTree(snap, b.dbsnapDir); err != nil {
+			r.logf("upgrade: WARN backup committed predecessor %s snapshot: %v", target, err)
+			_ = os.RemoveAll(tmp)
+			b.backupDir = ""
+			b.dbsnapDir = ""
+		}
+	}
+	return b
+}
+
+// restoreCommittedPredecessorBackup restores the backed-up committed stamp
+// (and DB snapshot, when the live one is gone) after a failed recopy of the
+// predecessor. A backup whose bytes were replaced (demotedByReplacement) is
+// never restored: the old committed history does not describe the
+// replacement bytes. Best-effort: failures are logged, never masking the
+// cut error that triggered restore.
+func (r *Runner) restoreCommittedPredecessorBackup(b *predecessorStampBackup) {
+	if b == nil || b.version == "" {
+		return
+	}
+	if b.demotedByReplacement {
+		if b.backupDir != "" {
+			_ = os.RemoveAll(b.backupDir)
+		}
+		return
+	}
+	defer func() {
+		if b.backupDir != "" {
+			_ = os.RemoveAll(b.backupDir)
+		}
+	}()
+	if len(b.stampData) > 0 {
+		if _, err := os.Stat(r.versionDir(b.version)); err == nil {
+			var stamp committedStamp
+			if err := json.Unmarshal(b.stampData, &stamp); err == nil {
+				if err := r.writeCommitStamp(stamp); err != nil {
+					r.logf("upgrade: WARN restore committed predecessor %s stamp: %v", b.version, err)
+				}
+			}
+		}
+	}
+	if b.dbsnapDir != "" {
+		snap := filepath.Join(r.cfg.VersionsDir, "."+b.version+".dbsnap")
+		if _, err := os.Stat(snap); os.IsNotExist(err) {
+			if _, err := copyTree(b.dbsnapDir, snap); err != nil {
+				r.logf("upgrade: WARN restore committed predecessor %s snapshot: %v", b.version, err)
+			} else if serr := partialSweepSyncDir(r.cfg.VersionsDir); serr != nil {
+				r.logf("upgrade: WARN fsync versions dir after predecessor snapshot restore: %v", serr)
+			}
+		}
+	}
+}
+
 // stampInFlightVersion marks a copied target as non-committed until the cut
 // reaches COMMIT. The durable marker survives an auto-rollback, excluding a
 // complete but just-failed runtime from default rollback selection.
