@@ -198,9 +198,10 @@ pub(in crate::afxdp) fn match_source_nat_for_flow_result_at(
     )
 }
 
-/// #12086: interface-NAT local delivery is scoped to the table resolving this
-/// destination. `None` is the family's default table, matching the FIB lookup
-/// contract; interface addresses are never wildcarded across routing instances.
+/// #12086/#14662: interface-NAT local delivery is scoped to the table
+/// resolving this destination via the per-table ifindex map.
+/// `None` is the family's default table, matching the FIB lookup contract;
+/// interface addresses are never wildcarded across routing instances.
 pub(in crate::afxdp) fn interface_nat_local_resolution(
     state: &ForwardingState,
     dst: IpAddr,
@@ -211,16 +212,10 @@ pub(in crate::afxdp) fn interface_nat_local_resolution(
             let table = resolving_table
                 .map(|table| canonical_route_table(table, false))
                 .unwrap_or(Cow::Borrowed(DEFAULT_V4_TABLE));
-            if !state
-                .interface_nat_tables_v4
-                .get(&ip)
-                .is_some_and(|tables| tables.contains(table.as_ref()))
-            {
-                return None;
-            }
             state
                 .interface_nat_v4
                 .get(&ip)
+                .and_then(|by_table| by_table.get(table.as_ref()))
                 .copied()
                 .map(|local_ifindex| ForwardingResolution {
                     disposition: ForwardingDisposition::LocalDelivery,
@@ -244,16 +239,10 @@ pub(in crate::afxdp) fn interface_nat_local_resolution(
             let table = resolving_table
                 .map(|table| canonical_route_table(table, true))
                 .unwrap_or(Cow::Borrowed(DEFAULT_V6_TABLE));
-            if !state
-                .interface_nat_tables_v6
-                .get(&ip)
-                .is_some_and(|tables| tables.contains(table.as_ref()))
-            {
-                return None;
-            }
             state
                 .interface_nat_v6
                 .get(&ip)
+                .and_then(|by_table| by_table.get(table.as_ref()))
                 .copied()
                 .map(|local_ifindex| ForwardingResolution {
                     disposition: ForwardingDisposition::LocalDelivery,

@@ -3492,7 +3492,11 @@ fn pbr_revalidation_rejects_changed_wg_local_arm_with_same_identity_12642() {
         IpAddr::V4(address) => address,
         IpAddr::V6(_) => unreachable!("the fixture flow is IPv4"),
     };
-    forwarding.interface_nat_v4.insert(address, 400);
+    forwarding
+        .interface_nat_v4
+        .entry(address)
+        .or_default()
+        .insert("blue.inet.0".to_string(), 400);
     forwarding
         .interface_nat_tables_v4
         .entry(address)

@@ -618,7 +618,9 @@ mod flowless_local_delivery_tests {
         let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8));
         let mut fw = ForwardingState::default();
         fw.interface_nat_v4
-            .insert(Ipv4Addr::new(172, 16, 80, 8), 12);
+            .entry(Ipv4Addr::new(172, 16, 80, 8))
+            .or_default()
+            .insert("red.inet.0".to_string(), 12);
         fw.interface_nat_tables_v4
             .entry(Ipv4Addr::new(172, 16, 80, 8))
             .or_default()
@@ -680,7 +682,10 @@ mod flowless_local_delivery_tests {
     fn interface_nat_gre_tail_is_refused_by_helper_host_inbound_10677() {
         let dst = Ipv4Addr::new(10, 0, 99, 1);
         let mut fw = fw_with_host_inbound(ZONE, &["gre"], &[]);
-        fw.interface_nat_v4.insert(dst, INGRESS_IF);
+        fw.interface_nat_v4
+            .entry(dst)
+            .or_default()
+            .insert("inet.0".to_string(), INGRESS_IF);
         fw.interface_nat_tables_v4
             .entry(dst)
             .or_default()
@@ -718,6 +723,122 @@ mod flowless_local_delivery_tests {
             verdict(&fw, &flowless_flow(GRE), flowless_meta(GRE), ZONE),
             FlowlessLocalVerdict::Deliver,
             "the real GRE head protocol remains admitted",
+        );
+    }
+
+    /// #14662: a flowless local hit must still pass HA enforcement. The
+    /// pre-fix `unwrap_or_else` ran `enforce_ha_resolution_snapshot` only
+    /// on a local miss, so an interface-NAT address owned by an inactive
+    /// RG delivered on the peer. RED on revert: disposition stays
+    /// LocalDelivery instead of HAInactive.
+    #[test]
+    fn flowless_interface_nat_local_hit_is_ha_gated_14662() {
+        let dst = Ipv4Addr::new(172, 16, 80, 8);
+        let mut fw = ForwardingState::default();
+        fw.interface_nat_v4
+            .entry(dst)
+            .or_default()
+            .insert("red.inet.0".to_string(), 12);
+        fw.interface_nat_tables_v4
+            .entry(dst)
+            .or_default()
+            .insert("red.inet.0".to_string());
+        fw.egress.insert(
+            12,
+            EgressInterface {
+                bind_ifindex: 12,
+                vlan_id: 0,
+                mtu: 1500,
+                src_mac: [0; 6],
+                zone_id: ZONE,
+                redundancy_group: 1,
+                primary_v4: Some(dst),
+                primary_v6: None,
+            },
+        );
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+        let now_secs = 1_000u64;
+        let inactive: BTreeMap<i32, HAGroupRuntime> = BTreeMap::from([(
+            1,
+            HAGroupRuntime {
+                active: false,
+                watchdog_timestamp: now_secs,
+                lease: HAForwardingLease::Inactive,
+            },
+        )]);
+        let active: BTreeMap<i32, HAGroupRuntime> = BTreeMap::from([(
+            1,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: now_secs,
+                lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+            },
+        )]);
+        let mut flow = flowless_flow(PROTO_TCP);
+        flow.dst_ip = IpAddr::V4(dst);
+        flow.forward_key.dst_ip = IpAddr::V4(dst);
+        let meta = flowless_meta(PROTO_TCP);
+
+        let gated = flowless_base_resolution(
+            &fw,
+            &dynamic_neighbors,
+            &inactive,
+            now_secs,
+            &flow,
+            meta,
+            None,
+            Default::default(),
+            None,
+            None,
+            Some("red.inet.0"),
+        )
+        .expect("flowless destination resolves");
+        assert_eq!(
+            gated.resolution.disposition,
+            ForwardingDisposition::HAInactive,
+            "inactive RG must gate a flowless interface-NAT local hit"
+        );
+
+        // Control: the active RG still delivers locally.
+        let allowed = flowless_base_resolution(
+            &fw,
+            &dynamic_neighbors,
+            &active,
+            now_secs,
+            &flow,
+            meta,
+            None,
+            Default::default(),
+            None,
+            None,
+            Some("red.inet.0"),
+        )
+        .expect("flowless destination resolves");
+        assert_eq!(
+            allowed.resolution.disposition,
+            ForwardingDisposition::LocalDelivery,
+            "active RG must still deliver the interface-NAT address locally"
+        );
+        assert_eq!(allowed.resolution.local_ifindex, 12);
+
+        // Control: standalone (empty HA inventory) still delivers.
+        let standalone = flowless_base_resolution(
+            &fw,
+            &dynamic_neighbors,
+            &BTreeMap::new(),
+            now_secs,
+            &flow,
+            meta,
+            None,
+            Default::default(),
+            None,
+            None,
+            Some("red.inet.0"),
+        )
+        .expect("flowless destination resolves");
+        assert_eq!(
+            standalone.resolution.disposition,
+            ForwardingDisposition::LocalDelivery,
         );
     }
 }

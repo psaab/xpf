@@ -12,11 +12,18 @@ pub(crate) fn remove_kernel_rst_suppression() {
     // No-op: the Go daemon manages the nftables table lifecycle.
 }
 
+/// #14662: exclusions are scoped by the owning interface's canonical
+/// connected table, not flat per address. The same host address may be
+/// configured in two routing instances where only one is an interface-mode
+/// SNAT egress; only that instance's row is diverted out of `local_*`.
 pub(super) fn nat_translated_local_exclusions(
     snapshot: &ConfigSnapshot,
-) -> (FastSet<Ipv4Addr>, FastSet<Ipv6Addr>) {
-    let mut excluded_v4 = FastSet::default();
-    let mut excluded_v6 = FastSet::default();
+) -> (
+    FastMap<String, FastSet<Ipv4Addr>>,
+    FastMap<String, FastSet<Ipv6Addr>>,
+) {
+    let mut excluded_v4: FastMap<String, FastSet<Ipv4Addr>> = FastMap::default();
+    let mut excluded_v6: FastMap<String, FastSet<Ipv6Addr>> = FastMap::default();
     if snapshot.source_nat_rules.is_empty() || snapshot.interfaces.is_empty() {
         return (excluded_v4, excluded_v6);
     }
@@ -24,6 +31,8 @@ pub(super) fn nat_translated_local_exclusions(
     struct Candidate {
         v4: Option<Ipv4Addr>,
         v6: Option<Ipv6Addr>,
+        table_v4: String,
+        table_v6: String,
     }
 
     let mut candidates = Vec::with_capacity(snapshot.interfaces.len());
@@ -32,9 +41,13 @@ pub(super) fn nat_translated_local_exclusions(
         if !interface_can_be_snat_egress(iface) {
             continue;
         }
+        let (table_v4, table_v6) =
+            crate::afxdp::forwarding_build::connected_route_tables(&iface.routing_instance);
         let item = Candidate {
             v4: pick_interface_v4(iface),
             v6: pick_interface_v6(iface),
+            table_v4,
+            table_v6,
         };
         if item.v4.is_none() && item.v6.is_none() {
             continue;
@@ -87,10 +100,16 @@ pub(super) fn nat_translated_local_exclusions(
             for &index in indices {
                 let item = &candidates[index];
                 if let Some(v4) = item.v4 {
-                    excluded_v4.insert(v4);
+                    excluded_v4
+                        .entry(item.table_v4.clone())
+                        .or_default()
+                        .insert(v4);
                 }
                 if let Some(v6) = item.v6 {
-                    excluded_v6.insert(v6);
+                    excluded_v6
+                        .entry(item.table_v6.clone())
+                        .or_default()
+                        .insert(v6);
                 }
             }
         }
@@ -143,11 +162,14 @@ mod nat_iface_scope_12085_tests {
         }
     }
 
-    fn addresses(v4: &FastSet<Ipv4Addr>, v6: &FastSet<Ipv6Addr>) -> Vec<String> {
+    fn addresses(
+        v4: &FastMap<String, FastSet<Ipv4Addr>>,
+        v6: &FastMap<String, FastSet<Ipv6Addr>>,
+    ) -> Vec<String> {
         let mut out: Vec<String> = v4
-            .iter()
-            .map(ToString::to_string)
-            .chain(v6.iter().map(ToString::to_string))
+            .values()
+            .flat_map(|set| set.iter().map(ToString::to_string))
+            .chain(v6.values().flat_map(|set| set.iter().map(ToString::to_string)))
             .collect();
         out.sort();
         out
@@ -206,7 +228,10 @@ mod nat_iface_scope_12085_tests {
         let state = crate::afxdp::forwarding_build::build_forwarding_state(&snapshot);
         let egress: Ipv4Addr = "192.0.2.2".parse().expect("IPv4 fixture address");
         assert_eq!(
-            state.interface_nat_v4.get(&egress),
+            state
+                .interface_nat_v4
+                .get(&egress)
+                .and_then(|by_table| by_table.get("VR1.inet.0")),
             Some(&11),
             "to-interface-only rule must route the egress address through interface_nat_v4"
         );
@@ -268,7 +293,7 @@ mod nat_iface_scope_12085_tests {
         let addr: Ipv4Addr = "203.0.113.2".parse().expect("unzoned fixture address");
         let (v4, _) = nat_translated_local_exclusions(&snapshot);
         assert!(
-            !v4.contains(&addr),
+            !v4.values().any(|set| set.contains(&addr)),
             "unzoned address entered interface-NAT exclusions"
         );
 

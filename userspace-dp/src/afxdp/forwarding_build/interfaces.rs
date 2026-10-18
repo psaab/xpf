@@ -409,8 +409,8 @@ impl EgressZoneClaim {
 pub(super) fn populate_interfaces(
     snapshot: &ConfigSnapshot,
     state: &mut ForwardingState,
-    excluded_local_v4: &FastSet<Ipv4Addr>,
-    excluded_local_v6: &FastSet<Ipv6Addr>,
+    excluded_local_v4: &FastMap<String, FastSet<Ipv4Addr>>,
+    excluded_local_v6: &FastMap<String, FastSet<Ipv6Addr>>,
 ) -> Result<IfaceIndex, crate::policy::SnapshotIntegrityError> {
     let mut name_to_ifindex = BTreeMap::new();
     let mut linux_to_ifindex = BTreeMap::new();
@@ -849,11 +849,14 @@ pub(super) fn populate_interfaces(
         // prefix owned by a different routing-instance.
         let (connected_table_v4, connected_table_v6) =
             connected_route_tables(&iface.routing_instance);
-        // #5659: track whether this interface registered at least one
-        // local-delivery target (an address that landed in local_v4/local_v6,
-        // NOT one routed into interface_nat_*). Only such an addressed
-        // local-delivery target is a host-inbound exposure worth the empty-zone
-        // fail-closed sentinel installed after this loop.
+        // #5659/#14662: track whether this interface registered at least one
+        // local-delivery target in EITHER map (`local_*` or the table-scoped
+        // `interface_nat_*`). A NAT-diverted address still delivers locally
+        // via `interface_nat_local_resolution_on_session_miss` /
+        // `flowless_local_resolution`, so it is the same host-inbound
+        // exposure worth the empty-zone fail-closed sentinel installed after
+        // this loop; counting only `local_*` left a diverted unzoned
+        // interface with no sentinel while packets still reached it.
         let mut registered_local = false;
         for addr in &iface.addresses {
             if iface.admin_disabled {
@@ -895,8 +898,16 @@ pub(super) fn populate_interfaces(
                             }
                         }
                     }
-                    if excluded_local_v4.contains(&v4.addr()) {
-                        state.interface_nat_v4.insert(v4.addr(), iface.ifindex);
+                    if excluded_local_v4
+                        .get(&connected_table_v4)
+                        .is_some_and(|set| set.contains(&v4.addr()))
+                    {
+                        state
+                            .interface_nat_v4
+                            .entry(v4.addr())
+                            .or_default()
+                            .insert(connected_table_v4.clone(), iface.ifindex);
+                        registered_local = true;
                         state
                             .interface_nat_tables_v4
                             .entry(v4.addr())
@@ -957,8 +968,16 @@ pub(super) fn populate_interfaces(
                             }
                         }
                     }
-                    if excluded_local_v6.contains(&v6.addr()) {
-                        state.interface_nat_v6.insert(v6.addr(), iface.ifindex);
+                    if excluded_local_v6
+                        .get(&connected_table_v6)
+                        .is_some_and(|set| set.contains(&v6.addr()))
+                    {
+                        state
+                            .interface_nat_v6
+                            .entry(v6.addr())
+                            .or_default()
+                            .insert(connected_table_v6.clone(), iface.ifindex);
+                        registered_local = true;
                         state
                             .interface_nat_tables_v6
                             .entry(v6.addr())
@@ -1019,8 +1038,9 @@ pub(super) fn populate_interfaces(
         //
         // Scope guards:
         //   - registered_local: only an interface that actually registered a
-        //     local_v4/local_v6 target is a host-inbound exposure. A fully
-        //     NAT-excluded (interface_nat only) or address-less interface is not.
+        //     local-delivery target (`local_*` or the table-scoped
+        //     `interface_nat_*`, #14662) is a host-inbound exposure. An
+        //     address-less interface is not.
         //     #9941: that reasoning holds for an ORDINARY interface and fails for
         //     a TUNNEL. A decapped inner packet re-ingresses on the tunnel's
         //     LOGICAL ifindex (logical_ingress::build_logical_ingress_packet,
@@ -2176,8 +2196,8 @@ mod routing_domain_7160_tests {
         populate_interfaces(
             snapshot,
             &mut state,
-            &FastSet::default(),
-            &FastSet::default(),
+            &FastMap::default(),
+            &FastMap::default(),
         )
         .expect("populate_interfaces");
         state
@@ -2555,8 +2575,8 @@ mod row_identity_9821_tests {
         populate_interfaces(
             snapshot,
             &mut state,
-            &FastSet::default(),
-            &FastSet::default(),
+            &FastMap::default(),
+            &FastMap::default(),
         )
         .expect("populate_interfaces");
         state
