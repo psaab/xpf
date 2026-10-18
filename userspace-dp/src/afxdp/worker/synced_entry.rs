@@ -37,10 +37,16 @@ pub(crate) struct SyncedSessionEntry {
     /// peer's id instead of minting a fresh local one — the standby's
     /// SESSION_CLOSE RT_FLOW then correlates with the primary's SESSION_CREATE
     /// across HA nodes. Local-origin publishes (forwarding learn, tunnel,
-    /// promote) and synthesized reverse companions leave this 0: the incremental
-    /// Open delta carries the real id straight off the live entry
+    /// promote) leave this 0: the incremental Open delta carries the real id
+    /// straight off the live entry
     /// (`install_with_protocol_with_origin`), and a 0 here on any import path
-    /// falls back to `alloc_session_id()` (rolling-upgrade safe).
+    /// falls back to `alloc_session_id()` (rolling-upgrade safe). #14667:
+    /// synthesized reverse companions are the exception — the HA-import
+    /// synthesizer derives one deterministic companion id from the
+    /// forward's stable id (`synthesized_companion_session_id`, reserved
+    /// `0xFFFE` namespace) and the live-reply synthesizer publishes the id
+    /// it just minted, so every worker adopts ONE companion identity and
+    /// the identity-captured policy delete cannot miss on siblings.
     pub(crate) session_id: u64,
     /// #9412: the session's TCP close class on the HA wire (`0` = open or not
     /// carried), from `SessionSyncRequest.tcp_close_class` on a peer import.
