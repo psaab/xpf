@@ -1574,6 +1574,55 @@ pub(in crate::afxdp) fn declared_l3_end(frame: &[u8], l3: usize, addr_family: u8
     }
 }
 
+/// #14655: is this packet's session-less (`parse_session_flow_from_bytes`
+/// returned `None`) shape a LEGITIMATELY portless one that may still be
+/// transmitted, rather than an uninspectable/truncated one that must fail
+/// closed? The wire path forwards the former flowless (route-based,
+/// session-less — #3067/#2344); only the latter may be dropped.
+///
+/// Legitimately portless means the L4 header itself is complete inside
+/// the IP-DECLARED datagram end (#2361 — trailing slack never counts):
+/// a portless protocol (OSPF 89, PIM 103, ESP 50, VRRP 112, IGMP, GRE, …)
+/// needs at least one L4 byte; ICMP/ICMPv6 needs its full fixed 8-byte
+/// header (type/code/checksum + the 4-byte type-specific word) and a
+/// non-identifier-bearing type — identifier-bearing queries are flow-
+/// bearing by definition (#3067), so their `None` means truncation.
+/// TCP/UDP are never legitimately portless: their `None` is a truncated
+/// port read or a non-first fragment (the caller owns that case, #14119).
+/// No-Next-Header (59) carries no L4 at all and is not transmissible
+/// payload here.
+pub(in crate::afxdp) fn local_origin_flowless_eligible(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> bool {
+    // #9900 idiom: derive L3 from the verified stamp, never a raw stamp.
+    let l3 = verified_l3_or_stamp(frame, meta.l3_offset, meta.addr_family);
+    let Some(declared_end) = declared_l3_end(frame, l3, meta.addr_family) else {
+        return false;
+    };
+    let l4 = meta.l4_offset as usize;
+    match meta.protocol {
+        PROTO_TCP | PROTO_UDP => false,
+        PROTO_ICMP | PROTO_ICMPV6 => {
+            // The type byte must be inside the declared datagram (#2361)
+            // and non-identifier-bearing, and the fixed 8-byte header
+            // must be complete inside it.
+            if l4 >= declared_end {
+                return false;
+            }
+            let Some(&icmp_type) = frame.get(l4) else {
+                return false;
+            };
+            if icmp_identifier_bearing(meta.protocol, icmp_type) {
+                return false;
+            }
+            l4.checked_add(8).is_some_and(|end| end <= declared_end)
+        }
+        59 => false,
+        _ => l4 < declared_end,
+    }
+}
+
 /// Read the L4 ports at `l4`, bounded by BOTH the backing slice AND the
 /// IP-DECLARED packet end (`declared_end`, the slice-clamped
 /// `ipv4_declared_l3_end` / `ipv6_declared_l3_end`).

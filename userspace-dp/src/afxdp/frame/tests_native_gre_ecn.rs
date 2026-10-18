@@ -507,6 +507,155 @@ fn local_origin_tunnel_ipv6_nonfirst_fragment_transmits_without_session_14119() 
     assert_eq!(inner, pkt.as_slice(), "v6 fragment must be carried verbatim");
 }
 
+fn local_origin_v4_packet_14655(src: Ipv4Addr, dst: Ipv4Addr, protocol: u8, payload: &[u8]) -> Vec<u8> {
+    let total = (20 + payload.len()) as u16;
+    let mut pkt = Vec::new();
+    pkt.push(0x45);
+    pkt.push(0);
+    pkt.extend_from_slice(&total.to_be_bytes());
+    pkt.extend_from_slice(&0x1465u16.to_be_bytes());
+    pkt.extend_from_slice(&0u16.to_be_bytes());
+    pkt.push(64);
+    pkt.push(protocol);
+    pkt.extend_from_slice(&[0, 0]);
+    pkt.extend_from_slice(&src.octets());
+    pkt.extend_from_slice(&dst.octets());
+    let csum = checksum16(&pkt[..20]);
+    pkt[10..12].copy_from_slice(&csum.to_be_bytes());
+    pkt.extend_from_slice(payload);
+    pkt
+}
+
+fn local_origin_v6_packet_14655(src: Ipv6Addr, dst: Ipv6Addr, next_header: u8, payload: &[u8]) -> Vec<u8> {
+    let mut pkt = Vec::new();
+    pkt.extend_from_slice(&[0x60, 0, 0, 0]);
+    pkt.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    pkt.push(next_header);
+    pkt.push(64);
+    pkt.extend_from_slice(&src.octets());
+    pkt.extend_from_slice(&dst.octets());
+    pkt.extend_from_slice(payload);
+    pkt
+}
+
+fn ipv6_tunnel_state_14655() -> (ForwardingState, Ipv6Addr, Ipv6Addr) {
+    let mut snapshot = native_gre_snapshot(true);
+    let gre = snapshot.interfaces.iter_mut().find(|iface| iface.name == "gr-0/0/0.0").expect("GRE interface");
+    gre.addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:db8:255:192::42/64".to_string(), scope: 0 });
+    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "sfmix.inet6.0".to_string(), family: "inet6".to_string(), destination: "::/0".to_string(), next_hop_weights: vec![], next_hops: vec!["2001:db8:255:192::41".to_string()], discard: false, next_table: String::new(), preference: 0, rule_priority: 0, mtu: 0 });
+    let src: Ipv6Addr = "2001:db8:255:192::42".parse().unwrap();
+    let dst: Ipv6Addr = "2001:db8:255:192::41".parse().unwrap();
+    (build_forwarding_state(&snapshot), src, dst)
+}
+
+#[test]
+fn local_origin_tunnel_portless_protocols_transmit_without_session_14655() {
+    let state = build_forwarding_state(&native_gre_snapshot(true));
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let src = Ipv4Addr::new(10, 255, 192, 42);
+    let dst = Ipv4Addr::new(10, 255, 192, 41);
+    for (protocol, payload) in [
+        (crate::ip_proto::PROTO_OSPF, &[1u8, 1, 0, 24, 0, 0, 0, 42][..]),
+        (crate::ip_proto::PROTO_PIM, &[2u8, 0, 0, 0, 0, 0, 0, 0][..]),
+        (crate::ip_proto::PROTO_ESP, &[0xAA, 0xBB, 0xCC, 0xDD, 0, 0, 0, 1][..]),
+        (crate::ip_proto::PROTO_VRRP, &[3u8, 1, 1, 50, 0, 10, 0, 0][..]),
+        (PROTO_ICMP, &[3u8, 1, 0, 0, 0x11, 0x22, 0x33, 0x44][..]),
+    ] {
+        let outer_dst = if protocol == crate::ip_proto::PROTO_OSPF { Ipv4Addr::new(224, 0, 0, 5) } else { dst };
+        let pkt = local_origin_v4_packet_14655(src, outer_dst, protocol, payload);
+        let ike = crate::afxdp::forwarding::IkeExchangeTable::new();
+        let plan = build_local_origin_tunnel_tx_request(&pkt, 1, &state, &ha_state, &dynamic_neighbors, &ike)
+            .unwrap_or_else(|e| panic!("#14655: proto {protocol} must be GRE-encapsulated, got {e}"));
+        assert!(plan.session_entry.is_none(), "proto {protocol} must not mint a TunOrigin session");
+        assert!(plan.reverse_session_entry.is_none(), "proto {protocol} must not mint a reverse session");
+        assert!(plan.tx_request.flow_key.is_none(), "proto {protocol} must not fabricate a flow key");
+        assert_eq!(plan.tx_request.expected_protocol, protocol);
+        let inner = &plan.tx_request.bytes[plan.tx_request.bytes.len() - pkt.len()..];
+        assert_eq!(inner, pkt.as_slice(), "proto {protocol} must be carried verbatim");
+        assert_eq!(ike.len(), 0, "proto {protocol} must not seed IKE");
+    }
+}
+
+#[test]
+fn local_origin_tunnel_icmp_errors_and_icmpv6_nd_transmit_without_session_14655() {
+    let state = build_forwarding_state(&native_gre_snapshot(true));
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let src = Ipv4Addr::new(10, 255, 192, 42);
+    let dst = Ipv4Addr::new(10, 255, 192, 41);
+    for icmp_type in [3u8, 11, 12, 5] {
+        let pkt = local_origin_v4_packet_14655(src, dst, PROTO_ICMP, &[icmp_type, 0, 0, 0, 0x11, 0x22, 0x33, 0x44]);
+        let ike = crate::afxdp::forwarding::IkeExchangeTable::new();
+        let plan = build_local_origin_tunnel_tx_request(&pkt, 1, &state, &ha_state, &dynamic_neighbors, &ike)
+            .unwrap_or_else(|e| panic!("#14655: ICMP type {icmp_type} must transmit, got {e}"));
+        assert!(plan.session_entry.is_none(), "ICMP type {icmp_type} must not mint a session");
+        assert!(plan.tx_request.flow_key.is_none());
+    }
+    let (state6, src6, dst6) = ipv6_tunnel_state_14655();
+    for icmp_type in [133u8, 134, 135, 136, 137, 2, 3] {
+        let pkt = local_origin_v6_packet_14655(src6, dst6, PROTO_ICMPV6, &[icmp_type, 0, 0, 0, 0, 0, 0, 0]);
+        let ike = crate::afxdp::forwarding::IkeExchangeTable::new();
+        let plan = build_local_origin_tunnel_tx_request(&pkt, 1, &state6, &ha_state, &dynamic_neighbors, &ike)
+            .unwrap_or_else(|e| panic!("#14655: ICMPv6 type {icmp_type} must transmit, got {e}"));
+        assert!(plan.session_entry.is_none(), "ICMPv6 type {icmp_type} must not mint a session");
+        assert!(plan.tx_request.flow_key.is_none());
+        assert_eq!(plan.tx_request.expected_protocol, PROTO_ICMPV6);
+    }
+}
+
+#[test]
+fn local_origin_tunnel_portless_nonlocal_source_fails_closed_14655() {
+    let state = build_forwarding_state(&native_gre_snapshot(true));
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let pkt = local_origin_v4_packet_14655(Ipv4Addr::new(10, 123, 0, 5), Ipv4Addr::new(10, 255, 192, 41), crate::ip_proto::PROTO_OSPF, &[1, 1, 0, 0]);
+    let ike = crate::afxdp::forwarding::IkeExchangeTable::new();
+    let err = build_local_origin_tunnel_tx_request(&pkt, 1, &state, &ha_state, &dynamic_neighbors, &ike)
+        .expect_err("#14655: nonlocal OSPF must fail closed at the ownership gate");
+    assert!(err.contains("local_tunnel_source_not_owned_in_routing_instance"), "got: {err}");
+    assert_eq!(ike.len(), 0);
+}
+
+#[test]
+fn local_origin_tunnel_truncated_icmp_fails_closed_14655() {
+    let state = build_forwarding_state(&native_gre_snapshot(true));
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    // IPv4 total_len declares the 20-byte header only, so the whole ICMP
+    // header sits past the declared datagram end (present only as slack).
+    let mut truncated = local_origin_v4_packet_14655(Ipv4Addr::new(10, 255, 192, 42), Ipv4Addr::new(10, 255, 192, 41), PROTO_ICMP, &[8, 0, 0, 0, 0x12, 0x34, 0, 1]);
+    truncated[2..4].copy_from_slice(&20u16.to_be_bytes());
+    truncated[10..12].copy_from_slice(&[0, 0]);
+    let csum = checksum16(&truncated[..20]);
+    truncated[10..12].copy_from_slice(&csum.to_be_bytes());
+    let ike = crate::afxdp::forwarding::IkeExchangeTable::new();
+    let err = build_local_origin_tunnel_tx_request(&truncated, 1, &state, &ha_state, &dynamic_neighbors, &ike)
+        .expect_err("#14655: truncated/uninspectable ICMP must not be laundered into flowless TX");
+    assert!(err.contains("parse_local_origin_session_flow_failed"), "got: {err}");
+}
+
+#[test]
+fn local_origin_tunnel_ipv6_overlimit_chain_fails_closed_14655() {
+    let (state6, src6, dst6) = ipv6_tunnel_state_14655();
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    // Nine Hop-by-Hop headers exceed MAX_IPV6_EXT_HEADERS (8); UDP is unreachable/uninspectable.
+    let mut payload = Vec::new();
+    for i in 0..9u8 {
+        let next = if i == 8 { PROTO_UDP } else { 0 };
+        payload.push(next);
+        payload.push(0);
+        payload.extend_from_slice(&[0; 6]);
+    }
+    payload.extend_from_slice(&[0xC0, 0x00, 0x00, 0x35, 0, 8, 0, 0]);
+    let pkt = local_origin_v6_packet_14655(src6, dst6, 0, &payload);
+    let ike = crate::afxdp::forwarding::IkeExchangeTable::new();
+    let err = build_local_origin_tunnel_tx_request(&pkt, 1, &state6, &ha_state, &dynamic_neighbors, &ike)
+        .expect_err("#14655: over-limit ext chain must fail closed (#4743), not transmit flowless");
+    assert!(err.contains("unsupported_local_origin_packet") || err.contains("parse_local_origin_session_flow_failed"), "got: {err}");
+}
+
 #[test]
 fn local_origin_tunnel_tx_request_accepts_owned_ipv6_in_tunnel_instance() {
     let mut snapshot = native_gre_snapshot(true);
