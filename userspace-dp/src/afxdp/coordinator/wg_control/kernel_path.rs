@@ -203,7 +203,7 @@ pub(crate) fn shim_is_local_destination(in_interface_nat: bool, in_local: bool) 
 }
 
 const INGRESS_IFACES_PIN: &str = "/sys/fs/bpf/xpf/userspace_ingress_ifaces";
-const INGRESS_DOMAINS_PIN: &str = "/sys/fs/bpf/xpf/userspace_ingress_domains";
+const INGRESS_DOMAINS_PIN: &str = "/sys/fs/bpf/xpf/userspace_ingress_domains_vlan";
 const INGRESS_IFACE_FLAG_ADJUDICATED: u8 = 1;
 const LOCAL_V4_PIN: &str = "/sys/fs/bpf/xpf/userspace_local_v4_domain";
 const LOCAL_V6_PIN: &str = "/sys/fs/bpf/xpf/userspace_local_v6_domain";

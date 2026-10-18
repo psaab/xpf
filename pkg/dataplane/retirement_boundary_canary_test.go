@@ -83,7 +83,7 @@ var legacyDataplaneImportAllowlist = map[string]string{
 	"pkg/daemon/daemon_apply_tail.go":                "#5661 pure-motion split of daemon_apply.go: tail reconcile still names legacy dataplane types",
 	"pkg/daemon/daemon_apply_mtu_warnings_9841.go":   "#9841: the commit wrapper syncs the just-published unconverged-MTU records onto the committed config via dataplane.LastApplyGenerationOf/SyncMTUUnconvergedWarnings; commit-warning projection only, no legacy enforcement path",
 	"pkg/daemon/daemon_persistent_nat_show_8607.go":  "#8607 persistent-NAT SHOW refresh names dataplane.PersistentNATTable / PersistentNATBinding and resolves the published backend through dataplane.Unwrap, to fill the table `show security nat source persistent-nat-table` reads. It exists BECAUSE the legacy path is dead here: daemon_run.go sets gc.SkipSweep on the userspace backend, so the preserve hook on SessionStore.DeleteBatchKnown* (the table's only writer) and pnat.GC() are both unreachable. Display-only, no legacy enforcement path",
-	"pkg/daemon/rxvlan_audit_11446.go":                  "#12159: RX-VLAN audit classifies offload state via dataplane.ClassifyRxVlanOffload and probes XDP attachment through the daemon dataplane handle; audit/diagnostic only, no legacy enforcement path",
+	"pkg/daemon/rxvlan_audit_11446.go":               "#12159: RX-VLAN audit classifies offload state via dataplane.ClassifyRxVlanOffload and probes XDP attachment through the daemon dataplane handle; audit/diagnostic only, no legacy enforcement path",
 	"pkg/daemon/daemon_policy_invalidate.go":         "#4234 commit-time deletion-clear names root dataplane session types (SessionEntryV4/V6, DeleteReasonPolicyDeleted) to invalidate a deleted policy's live sessions via SessionStore.DeleteBatchKnown*; control-plane session lifecycle, no legacy enforcement path",
 	"pkg/daemon/daemon_policy_invalidate_capture.go": "#6948 pre-publication invalidation capture names root dataplane session types (SessionEntryV4/V6, SessionKey/Value, DefaultPolicySentinelID) to snapshot the candidate sessions through SessionStore.ForEach* before the new policy snapshot is published; control-plane session lifecycle, no legacy enforcement path",
 	"pkg/daemon/daemon_policy_rename.go":             "#10511 policy-rename evaluator names root dataplane session types (SessionKey/SessionValue/SessionKeyV6/SessionValueV6, SessFlagDNAT, DefaultPolicySentinelID) to re-evaluate renamed-policy sessions against the new config at commit time; control-plane session lifecycle, no legacy enforcement path",
@@ -151,15 +151,15 @@ var userspaceShimAllowedMapTypes = map[string]ebpf.MapType{
 	// CPU's fragment sighting decide another CPU's packet.
 	"userspace_v6frag_scratch": ebpf.PerCPUArray,
 
-	"userspace_heartbeat":         ebpf.Array,
-	"userspace_ingress_ifaces":    ebpf.Hash,
-	"userspace_ingress_domains":   ebpf.Hash,
-	"userspace_interface_nat_v4_domain":  ebpf.Hash,
-	"userspace_interface_nat_v6_domain":  ebpf.Hash,
-	"userspace_local_v4_domain":   ebpf.Hash,
-	"userspace_local_v6_domain":   ebpf.Hash,
-	"userspace_sessions":          ebpf.Hash,
-	"userspace_trace":            ebpf.Hash,
+	"userspace_heartbeat":               ebpf.Array,
+	"userspace_ingress_ifaces":          ebpf.Hash,
+	"userspace_ingress_domains_vlan":    ebpf.Hash,
+	"userspace_interface_nat_v4_domain": ebpf.Hash,
+	"userspace_interface_nat_v6_domain": ebpf.Hash,
+	"userspace_local_v4_domain":         ebpf.Hash,
+	"userspace_local_v6_domain":         ebpf.Hash,
+	"userspace_sessions":                ebpf.Hash,
+	"userspace_trace":                   ebpf.Hash,
 	// #12119: separate ingress-zone identity from exact listener destination
 	// admission; both are pinned shared maps consumed by the XDP shim.
 	"userspace_wg_ingress_zones":  ebpf.Hash,

@@ -25,7 +25,7 @@ func TestUserspaceXDPDoesNotPassForeignDomainLocalAddress13929(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			coll := loadUserspaceXDPTestCollection(t)
-			if coll.Maps["userspace_ingress_domains"] == nil && tc.ingressDomain != 0 {
+			if coll.Maps[mapNameUserspaceIngressDomains] == nil && tc.ingressDomain != 0 {
 				t.Skip("master ingress has no routing-domain map")
 			}
 			updateUserspaceXDPTestIngressDomain(t, coll, userspaceXDPTestRunIfindex(t), tc.ingressDomain)

@@ -99,6 +99,13 @@ const (
 	// PerCpuArray; it is a collection-pinned map, so a stale incompatible pin
 	// must be reconciled on upgrade (see reconcileDisposableCollectionPin).
 	userspaceFallbackStatsMapName = "userspace_fallback_stats"
+	// userspaceIngressDomainsMapName (#14842): the ingress-domain map was
+	// re-keyed per (ifindex, VLAN) under a new pin name. It is config-derived
+	// and repopulated from the snapshot on every apply, so the legacy
+	// ifindex-only pin is disposable state: reconcile it like the counter
+	// map rather than letting it brick (or silently alias across) upgrades.
+	userspaceIngressDomainsMapName       = "userspace_ingress_domains_vlan"
+	userspaceLegacyIngressDomainsMapName = "userspace_ingress_domains"
 )
 
 // pinnedMaps lists maps that survive daemon restarts via BPF
@@ -172,6 +179,20 @@ func (m *Manager) loadUserspaceShimObjectsOnce() (err error) {
 		pinPath := filepath.Join(bpfPinPath, userspaceFallbackStatsMapName)
 		if err := reconcileDisposableCollectionPin(pinPath, spec); err != nil {
 			return err
+		}
+	}
+	// #14842: same reconcile for the re-keyed ingress-domain map, plus drop
+	// the orphaned legacy ifindex-only pin so no stale alias survives.
+	if spec, ok := userspaceSpec.Maps[userspaceIngressDomainsMapName]; ok {
+		pinPath := filepath.Join(bpfPinPath, userspaceIngressDomainsMapName)
+		if err := reconcileDisposableCollectionPin(pinPath, spec); err != nil {
+			return err
+		}
+	}
+	legacyDomainPin := filepath.Join(bpfPinPath, userspaceLegacyIngressDomainsMapName)
+	if _, err := os.Stat(legacyDomainPin); err == nil {
+		if err := os.Remove(legacyDomainPin); err != nil {
+			return fmt.Errorf("remove legacy %s pin: %w", userspaceLegacyIngressDomainsMapName, err)
 		}
 	}
 
@@ -474,7 +495,7 @@ func userspaceABICheckedPinnedMaps() []string {
 	seen := make(map[string]bool)
 	out := make([]string, 0, len(userspacePinnedShimMaps())+len(userspaceShimSharedMapSpecs()))
 	add := func(n string) {
-		if n == userspaceFallbackStatsMapName || seen[n] {
+		if n == userspaceFallbackStatsMapName || n == userspaceIngressDomainsMapName || seen[n] {
 			return
 		}
 		seen[n] = true
@@ -631,7 +652,7 @@ func userspacePinnedShimMaps() []string {
 		"userspace_ctrl",
 		"userspace_bindings",
 		"userspace_ingress_ifaces",
-		"userspace_ingress_domains",
+		"userspace_ingress_domains_vlan",
 		"userspace_heartbeat",
 		"userspace_xsk_map",
 		"userspace_local_v4_domain",

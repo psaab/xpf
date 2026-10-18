@@ -378,7 +378,7 @@ func TestUserspaceXDPTaggedOnlyVID0LocalDropsAndControls12055(t *testing.T) {
 			})
 			ifindex := userspaceXDPTestRunIfindex(t)
 			updateUserspaceXDPTestMap(t, coll, mapNameUserspaceIngressIfaces, ifindex, tc.flags)
-			updateUserspaceXDPTestMap(t, coll, mapNameUserspaceIngressDomains, ifindex, uint32(0))
+			updateUserspaceXDPTestMap(t, coll, mapNameUserspaceIngressDomains, userspaceIngressDomainKey{Ifindex: ifindex, VLANID: userspaceIngressDomainUntaggedVLANID}, uint32(0))
 			updateUserspaceXDPTestBinding(t, coll, userspaceXDPTestRunBindingIndex(t, 0), userspaceBindingValue{
 				Slot: 0, Flags: userspaceBindingReady,
 			})

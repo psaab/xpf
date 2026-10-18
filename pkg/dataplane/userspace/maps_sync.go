@@ -136,6 +136,150 @@ type userspaceLocalAddressEntry struct {
 	v6Key  userspaceLocalV6Key
 }
 
+// userspaceIngressDomainKey mirrors UserspaceIngressDomainKey in
+// userspace-xdp/src/lib.rs (#14842): the shim resolves the routing domain
+// per (ingress ifindex, wire VLAN ID) so VLAN units sharing one parent
+// ifindex resolve to their own instance.
+type userspaceIngressDomainKey struct {
+	Ifindex  uint32
+	VLANID   uint16
+	Reserved uint16
+}
+
+// userspaceIngressDomainUntaggedVLANID is the untagged-arrival sentinel:
+// 0xffff can never be a wire VID.
+const userspaceIngressDomainUntaggedVLANID = uint16(0xffff)
+
+// userspaceIngressDomainFailClosed is stored for a (ifindex, VID) claimed
+// by two routing domains: the shim reads it exactly as it reads an absent
+// row (u32::MAX matches no domain-scoped local/NAT entry).
+const userspaceIngressDomainFailClosed = uint32(0xffff_ffff)
+
+// userspaceIngressDomainMapCapacity mirrors the shim map's max_entries.
+const userspaceIngressDomainMapCapacity = 8192
+
+// buildUserspaceIngressDomainEntries derives the desired
+// userspace_ingress_domains_vlan rows from the snapshot (#14842).
+//
+// Every ingress-adjudicated ifindex gets an untagged (0xffff) row from
+// the rows sharing that exact ifindex, so non-VLAN interfaces keep their
+// current resolution and an untagged frame on a tagged parent keeps
+// failing closed (domain u32::MAX) unless an untagged owner exists. Each
+// VLAN unit additionally nominates (parent ifindex, VID) with its own
+// RoutingDomain; a native-VLAN unit owns the parent's untagged arrivals,
+// mirroring buildUserspaceTaggedOnlyIngressIfindexes. A key claimed by
+// two different domains is poisoned to the fail-closed sentinel rather
+// than letting map iteration order pick a winner. Disabled rows own
+// nothing. Keys beyond the shim capacity are NOT trimmed — the sync
+// refuses the oversized set before writing (checkIngressDomainCapacity).
+func buildUserspaceIngressDomainEntries(snapshot *ConfigSnapshot) map[userspaceIngressDomainKey]uint32 {
+	entries := make(map[userspaceIngressDomainKey]uint32)
+	if snapshot == nil {
+		return entries
+	}
+	put := func(key userspaceIngressDomainKey, domain uint32) {
+		if prior, exists := entries[key]; exists && prior != domain {
+			entries[key] = userspaceIngressDomainFailClosed
+			return
+		}
+		entries[key] = domain
+	}
+	ingress := make(map[uint32]struct{})
+	for _, ifindex := range buildUserspaceIngressIfindexes(snapshot) {
+		ingress[ifindex] = struct{}{}
+	}
+	nativeVLANByParent := make(map[int]int)
+	ambiguousNativeParents := make(map[int]struct{})
+	for _, iface := range snapshot.Interfaces {
+		if iface.Ifindex <= 0 || iface.IsUnit || iface.NativeVLANID <= 0 || iface.NativeVLANID > 4094 {
+			continue
+		}
+		if previous, exists := nativeVLANByParent[iface.Ifindex]; exists && previous != iface.NativeVLANID {
+			ambiguousNativeParents[iface.Ifindex] = struct{}{}
+		}
+		nativeVLANByParent[iface.Ifindex] = iface.NativeVLANID
+	}
+	for _, iface := range snapshot.Interfaces {
+		if iface.Ifindex <= 0 || iface.AdminDisabled {
+			continue
+		}
+		if _, managed := ingress[uint32(iface.Ifindex)]; !managed {
+			continue
+		}
+		if iface.ParentIfindex == 0 && iface.NativeVLANID > 0 {
+			continue
+		}
+		put(userspaceIngressDomainKey{Ifindex: uint32(iface.Ifindex), VLANID: userspaceIngressDomainUntaggedVLANID}, iface.RoutingDomain)
+	}
+	for _, iface := range snapshot.Interfaces {
+		if iface.ParentIfindex <= 0 || iface.VLANID <= 0 || iface.VLANID > 4094 || iface.AdminDisabled {
+			continue
+		}
+		parent := uint32(iface.ParentIfindex)
+		if _, managed := ingress[parent]; !managed {
+			continue
+		}
+		put(userspaceIngressDomainKey{Ifindex: parent, VLANID: uint16(iface.VLANID)}, iface.RoutingDomain)
+		if nativeVLANByParent[iface.ParentIfindex] == iface.VLANID {
+			if _, ambiguous := ambiguousNativeParents[iface.ParentIfindex]; !ambiguous {
+				put(userspaceIngressDomainKey{Ifindex: parent, VLANID: userspaceIngressDomainUntaggedVLANID}, iface.RoutingDomain)
+			}
+		}
+	}
+	return entries
+}
+
+func checkIngressDomainCapacity(desired int) error {
+	if desired > userspaceIngressDomainMapCapacity {
+		return fmt.Errorf("%d ingress (ifindex, VLAN) domain entries exceed the %s map capacity of %d (#14842); the classifier maps and userspace_ctrl are left on the previous plan",
+			desired, mapNameUserspaceIngressDomains, userspaceIngressDomainMapCapacity)
+	}
+	return nil
+}
+
+// syncIngressDomainMapLocked reconciles the domain map to the desired set
+// by iterating the live map (the WG-zone-map pattern), so rows left by a
+// previous daemon in the pinned map are reaped even though no in-process
+// inventory names them (#14842).
+func (m *Manager) syncIngressDomainMapLocked(domainMap *ebpf.Map, desired map[userspaceIngressDomainKey]uint32) error {
+	current := make(map[userspaceIngressDomainKey]uint32)
+	var key userspaceIngressDomainKey
+	var value uint32
+	iter := domainMap.Iterate()
+	for iter.Next(&key, &value) {
+		current[key] = value
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("iterate userspace_ingress_domains_vlan: %w", err)
+	}
+	same := len(current) == len(desired)
+	if same {
+		for k, v := range current {
+			if got, ok := desired[k]; !ok || got != v {
+				same = false
+				break
+			}
+		}
+	}
+	if same {
+		return nil
+	}
+	for k, v := range desired {
+		if err := domainMap.Update(k, v, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("update userspace_ingress_domains_vlan ifindex=%d vlan=%d: %w", k.Ifindex, k.VLANID, err)
+		}
+	}
+	for k := range current {
+		if _, keep := desired[k]; keep {
+			continue
+		}
+		if err := domainMap.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("delete stale userspace_ingress_domains_vlan ifindex=%d vlan=%d: %w", k.Ifindex, k.VLANID, err)
+		}
+	}
+	return nil
+}
+
 func localAddressRoutingDomain(snapshot *ConfigSnapshot, ifindex int) (uint32, bool) {
 	if snapshot == nil || ifindex <= 0 {
 		return 0, false
@@ -346,6 +490,9 @@ func (m *Manager) syncUserspaceClassifierMapsLocked(snapshot *ConfigSnapshot) er
 	if err := checkInterfaceNATAddressCapacity(len(natV4), len(natV6)); err != nil {
 		return err
 	}
+	if err := checkIngressDomainCapacity(len(buildUserspaceIngressDomainEntries(snapshot))); err != nil {
+		return err
+	}
 	if err := m.syncIngressIfaceMapLocked(snapshot); err != nil {
 		return err
 	}
@@ -369,13 +516,9 @@ func (m *Manager) lookupUserspaceCtrlForFailClosed(ctrlMap ctrlMapUpdater, key u
 
 func (m *Manager) syncUserspaceClassifierMapsFailClosedLocked(snapshot *ConfigSnapshot) error {
 	if err := m.syncUserspaceClassifierMapsLocked(snapshot); err != nil {
-		if isLocalAddressCapacityError(err) {
-			// #9646: the preflight refused before any classifier map was
-			// written, so the maps still hold the plan the helper enforces and
-			// ctrl stays as it is. Failing closed here turned one local address
-			// past the map capacity into dropping ALL transit.
-			slog.Error("userspace: classifier maps not refreshed; the local-address set exceeds the shim map capacity",
-				"err", err, "issue", "#9646")
+		if isLocalAddressCapacityError(err) || strings.Contains(err.Error(), "ingress (ifindex, VLAN) domain entries exceed") {
+			slog.Error("userspace: classifier maps not refreshed; a classifier set exceeds its shim map capacity",
+				"err", err, "issue", "#14842")
 			return err
 		}
 		return m.failClosedUserspaceCtrlMapLocked(snapshot, err)
@@ -904,27 +1047,18 @@ func (m *Manager) syncIngressIfaceMapLocked(snapshot *ConfigSnapshot) error {
 	}
 	domainMap := m.bpfShim.Map(mapNameUserspaceIngressDomains)
 	if domainMap == nil {
-		return errors.New("userspace_ingress_domains map not loaded")
+		return errors.New("userspace_ingress_domains_vlan map not loaded")
 	}
-
-	// #6784: make the delete inventory truthful about the PINNED map before
-	// anything reads it. On a fresh Manager (daemon restart) this is what turns
-	// the reap below from a no-op into a real reconcile; on every later pass it
-	// is a single already-adopted bool test.
 	if err := m.adoptIngressInventoryLocked(ifaceMap); err != nil {
 		return fmt.Errorf("adopt userspace_ingress_ifaces inventory: %w", err)
 	}
-
 	newIngress := buildUserspaceIngressIfindexes(snapshot)
 	taggedOnly := buildUserspaceTaggedOnlyIngressIfindexes(snapshot)
 	prior := m.lastIngressIfaces
-	// installed accumulates the rows THIS pass created, so an early return can
-	// hand them to the retry inventory rather than stranding them.
 	installed := make([]uint32, 0, len(newIngress))
 	retainDebt := func() {
 		m.lastIngressIfaces = mergeIngressInventory(prior, installed)
 	}
-
 	newIngressSet := make(map[uint32]struct{}, len(newIngress))
 	for _, ifindex := range newIngress {
 		newIngressSet[ifindex] = struct{}{}
@@ -936,28 +1070,12 @@ func (m *Manager) syncIngressIfaceMapLocked(snapshot *ConfigSnapshot) error {
 			retainDebt()
 			return fmt.Errorf("update userspace_ingress_ifaces %d: %w", ifindex, err)
 		}
-		// The ingress row is live as soon as Update succeeds. Record it before
-		// touching the companion domain map so any later error remains reapable.
 		installed = append(installed, ifindex)
-		domain, ok := localAddressRoutingDomain(snapshot, int(ifindex))
-		if !ok {
-			// Ambiguous parent/fabric ingress has no safe local domain.
-			// Delete stale domain so local lookup fails closed and traffic
-			// continues through userspace policy.
-			if err := domainMap.Delete(ifindex); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-				retainDebt()
-				return fmt.Errorf("delete ambiguous userspace_ingress_domains %d: %w", ifindex, err)
-			}
-		} else if err := domainMap.Update(ifindex, domain, ebpf.UpdateAny); err != nil {
-			retainDebt()
-			return fmt.Errorf("update userspace_ingress_domains %d: %w", ifindex, err)
-		}
 	}
-	// HashMap: Delete removes the entry. ErrKeyNotExist is expected
-	// across daemon restarts (idempotent). Any other failure must be
-	// fatal — a stale entry the dataplane still treats as ingress
-	// would silently redirect traffic for an interface removed from
-	// the config.
+	if err := m.syncIngressDomainMapLocked(domainMap, buildUserspaceIngressDomainEntries(snapshot)); err != nil {
+		retainDebt()
+		return err
+	}
 	for _, k := range prior {
 		if _, keep := newIngressSet[k]; keep {
 			continue
@@ -965,10 +1083,6 @@ func (m *Manager) syncIngressIfaceMapLocked(snapshot *ConfigSnapshot) error {
 		if err := ifaceMap.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			retainDebt()
 			return fmt.Errorf("delete userspace_ingress_ifaces %d: %w", k, err)
-		}
-		if err := domainMap.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			retainDebt()
-			return fmt.Errorf("delete userspace_ingress_domains %d: %w", k, err)
 		}
 	}
 	m.lastIngressIfaces = newIngress

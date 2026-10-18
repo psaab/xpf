@@ -44,7 +44,7 @@ const (
 
 	// Per-interface address, ingress-zone, and NAT maps consumed at snapshot apply.
 	mapNameUserspaceIngressIfaces   = "userspace_ingress_ifaces"
-	mapNameUserspaceIngressDomains  = "userspace_ingress_domains"
+	mapNameUserspaceIngressDomains  = "userspace_ingress_domains_vlan"
 	mapNameUserspaceLocalV4         = "userspace_local_v4_domain"
 	mapNameUserspaceLocalV6         = "userspace_local_v6_domain"
 	mapNameUserspaceInterfaceNATv4  = "userspace_interface_nat_v4_domain"

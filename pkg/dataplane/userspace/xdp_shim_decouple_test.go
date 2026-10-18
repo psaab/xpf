@@ -415,7 +415,7 @@ func injectUserspaceBootstrapMaps(t *testing.T, m *Manager) {
 	})
 	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceIngressDomains, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    4,
+		KeySize:    8,
 		ValueSize:  4,
 		MaxEntries: dataplane.MaxInterfaces,
 	})
@@ -536,8 +536,12 @@ func updateUserspaceXDPTestIngress(t *testing.T, coll *ebpf.Collection, ifindex 
 func updateUserspaceXDPTestIngressDomain(t *testing.T, coll *ebpf.Collection, ifindex, domain uint32) {
 	t.Helper()
 	updateUserspaceXDPTestMap(t, coll, "userspace_ingress_ifaces", ifindex, uint8(userspaceIngressIfaceFlagAdjudicated))
-	if coll.Maps["userspace_ingress_domains"] != nil {
-		updateUserspaceXDPTestMap(t, coll, "userspace_ingress_domains", ifindex, domain)
+	if m := coll.Maps[mapNameUserspaceIngressDomains]; m != nil {
+		if info, err := m.Info(); err == nil && info.KeySize == 4 {
+			updateUserspaceXDPTestMap(t, coll, mapNameUserspaceIngressDomains, ifindex, domain)
+		} else {
+			updateUserspaceXDPTestMap(t, coll, mapNameUserspaceIngressDomains, userspaceIngressDomainKey{Ifindex: ifindex, VLANID: userspaceIngressDomainUntaggedVLANID}, domain)
+		}
 	}
 }
 

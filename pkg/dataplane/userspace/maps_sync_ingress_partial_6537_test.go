@@ -41,12 +41,12 @@ func newIngressManager(t *testing.T, typ ebpf.MapType, maxEntries uint32) (*Mana
 	injectShimMap(t, m.bpfShim, mapNameUserspaceIngressIfaces, ifaceMap)
 	domainMap, err := ebpf.NewMap(&ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    4,
+		KeySize:    8,
 		ValueSize:  4,
-		MaxEntries: maxEntries,
+		MaxEntries: 64,
 	})
 	if err != nil {
-		skipIfBPFMapUnavailable(t, "new userspace_ingress_domains map", err)
+		skipIfBPFMapUnavailable(t, "new userspace_ingress_domains_vlan map", err)
 	}
 	t.Cleanup(func() { domainMap.Close() })
 	injectShimMap(t, m.bpfShim, mapNameUserspaceIngressDomains, domainMap)
@@ -202,7 +202,7 @@ func TestSyncIngressIfaceMapRecordsRowBeforeDomainMapFailure13929(t *testing.T) 
 	m, ifaceMap := newIngressManager(t, ebpf.Hash, 16)
 	domainMap := m.bpfShim.Map(mapNameUserspaceIngressDomains)
 	if domainMap == nil {
-		t.Fatal("userspace_ingress_domains map not loaded")
+		t.Fatal("userspace_ingress_domains_vlan map not loaded")
 	}
 	if err := domainMap.Close(); err != nil {
 		t.Fatalf("close domain map to force update failure: %v", err)
@@ -220,10 +220,10 @@ func TestSyncIngressIfaceMapRecordsRowBeforeDomainMapFailure13929(t *testing.T) 
 	}
 
 	replacement, err := ebpf.NewMap(&ebpf.MapSpec{
-		Type: ebpf.Hash, KeySize: 4, ValueSize: 4, MaxEntries: 16,
+		Type: ebpf.Hash, KeySize: 8, ValueSize: 4, MaxEntries: 16,
 	})
 	if err != nil {
-		skipIfBPFMapUnavailable(t, "replacement userspace_ingress_domains map", err)
+		skipIfBPFMapUnavailable(t, "replacement userspace_ingress_domains_vlan map", err)
 	}
 	t.Cleanup(func() { replacement.Close() })
 	injectShimMap(t, m.bpfShim, mapNameUserspaceIngressDomains, replacement)
