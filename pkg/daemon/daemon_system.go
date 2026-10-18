@@ -4,6 +4,7 @@ package daemon
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,6 +23,7 @@ import (
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/logging"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/crypto/ssh"
 )
 
 // applySyslogConfig constructs syslog clients or local log writers from the
@@ -1032,53 +1035,190 @@ var sshKnownHostsPath = "/etc/ssh/ssh_known_hosts"
 // ssh_known_hosts.
 const sshKnownHostsHeader = "# Managed by xpfd — do not edit\n"
 
+// sshKnownHostTypes maps Junos key-type spellings (and the legacy short
+// spellings used with real keys, #10078) to the OpenSSH algorithm name that
+// must also match the algorithm embedded in the decoded key blob. Any
+// spelling outside this map is rejected: previously it was rendered
+// verbatim, so an unknown type wrote an attacker-chosen token into
+// /etc/ssh/ssh_known_hosts (#14692).
+var sshKnownHostTypes = map[string]string{
+	"ssh-rsa-key":                                  "ssh-rsa",
+	"rsa-key":                                      "ssh-rsa",
+	"ssh-ed25519-key":                              "ssh-ed25519",
+	"ed25519-key":                                  "ssh-ed25519",
+	"ssh-ecdsa-key":                                "ecdsa-sha2-nistp256",
+	"ecdsa-key":                                    "ecdsa-sha2-nistp256",
+	"ecdsa-sha2-nistp256-key":                      "ecdsa-sha2-nistp256",
+	"ecdsa-sha2-nistp384-key":                      "ecdsa-sha2-nistp384",
+	"ecdsa-sha2-nistp521-key":                      "ecdsa-sha2-nistp521",
+	"sk-ssh-ed25519@openssh.com-key":               "sk-ssh-ed25519@openssh.com",
+	"sk-ecdsa-sha2-nistp256@openssh.com-key":       "sk-ecdsa-sha2-nistp256@openssh.com",
+	"ssh-rsa-cert-v01@openssh.com-key":             "ssh-rsa-cert-v01@openssh.com",
+	"ssh-ed25519-cert-v01@openssh.com-key":         "ssh-ed25519-cert-v01@openssh.com",
+	"ecdsa-sha2-nistp256-cert-v01@openssh.com-key": "ecdsa-sha2-nistp256-cert-v01@openssh.com",
+	"ecdsa-sha2-nistp384-cert-v01@openssh.com-key": "ecdsa-sha2-nistp384-cert-v01@openssh.com",
+	"ecdsa-sha2-nistp521-cert-v01@openssh.com-key": "ecdsa-sha2-nistp521-cert-v01@openssh.com",
+}
+
+// validSSHKnownHostField reports whether host is a single OpenSSH
+// known_hosts host pattern that cannot widen trust. It rejects empty
+// fields, whitespace/control (newline injection), leading '-' and '@'
+// markers (@cert-authority / @revoked), and '*'/'?' wildcards in any
+// comma-separated member. Allowed: hostnames, IP literals, [host]:port,
+// and hashed |1|salt|hash entries.
+func validSSHKnownHostField(host string) bool {
+	if host == "" {
+		return false
+	}
+	for _, r := range host {
+		if r <= ' ' || r == 0x7f {
+			return false
+		}
+	}
+	if strings.HasPrefix(host, "|1|") {
+		parts := strings.Split(host, "|")
+		if len(parts) != 4 || parts[0] != "" || parts[1] != "1" {
+			return false
+		}
+		salt, err1 := base64.StdEncoding.DecodeString(parts[2])
+		hash, err2 := base64.StdEncoding.DecodeString(parts[3])
+		return err1 == nil && err2 == nil && len(salt) > 0 && len(hash) > 0
+	}
+	if strings.ContainsAny(host, "*?@") || strings.HasPrefix(host, "-") || strings.HasPrefix(host, "!") {
+		return false
+	}
+	for _, member := range strings.Split(host, ",") {
+		if !validSSHKnownHostMember(member) {
+			return false
+		}
+	}
+	return true
+}
+
+func validSSHKnownHostMember(member string) bool {
+	if member == "" || strings.HasPrefix(member, "-") || strings.HasPrefix(member, "!") {
+		return false
+	}
+	name := member
+	if strings.HasPrefix(member, "[") {
+		end := strings.Index(member, "]")
+		if end <= 1 || end+1 >= len(member) || member[end+1] != ':' {
+			return false
+		}
+		port, err := strconv.Atoi(member[end+2:])
+		if err != nil || port < 1 || port > 65535 {
+			return false
+		}
+		name = member[1:end]
+		if name == "" || strings.ContainsAny(name, "[]") {
+			return false
+		}
+	} else if strings.ContainsAny(member, "[]") {
+		return false
+	}
+	if ip := net.ParseIP(name); ip != nil {
+		return true
+	}
+	if len(name) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+		for _, r := range label {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+// validSSHKnownHostKey validates one configured key against its mapped
+// OpenSSH type, returning the canonical base64 blob to render. The blob
+// must be a single whitespace-free base64 token, decode canonically,
+// parse as that exact algorithm via ssh.ParsePublicKey, and re-marshal
+// to the same canonical encoding. This rejects unknown types, type/key
+// mismatches, truncated legacy markers, and newline/space injection.
+func validSSHKnownHostKey(key config.SSHKnownHostKey) (string, string, bool) {
+	sshType, ok := sshKnownHostTypes[key.Type]
+	if !ok || key.Key == "" {
+		return "", "", false
+	}
+	for _, r := range key.Key {
+		if r <= ' ' || r == 0x7f {
+			return "", "", false
+		}
+	}
+	raw, err := base64.StdEncoding.DecodeString(key.Key)
+	if err != nil || base64.StdEncoding.EncodeToString(raw) != key.Key {
+		return "", "", false
+	}
+	pub, err := ssh.ParsePublicKey(raw)
+	if err != nil || pub.Type() != sshType {
+		return "", "", false
+	}
+	canonical := base64.StdEncoding.EncodeToString(pub.Marshal())
+	return sshType, canonical, true
+}
+
 // applySSHKnownHosts writes /etc/ssh/ssh_known_hosts from
 // security { ssh-known-hosts { host ... } } config. When the desired trust is
 // cleared (no configured hosts) the xpf-owned file is REMOVED, so a revoked or
 // compromised host key can never outlive the config that trusted it (#5112):
 // applied durable trust must not outlive desired trust. The removal is
 // ownership-guarded — a file lacking the managed header is left untouched.
+//
+// #14692: every host/type/key is validated before rendering. Wildcard or
+// @cert-authority/@revoked hosts, negations, malformed [host]:port forms,
+// unknown key types, type/key mismatches, and non-canonical key blobs are
+// skipped fail-closed with a warning naming host and type (never the key).
+// If entries were configured but none validate, the existing managed file
+// is left untouched rather than replaced by a header-only file, so bad
+// input cannot silently revoke previously rendered trust.
 func (d *Daemon) applySSHKnownHosts(cfg *config.Config) {
 	path := sshKnownHostsPath
 	if len(cfg.Security.SSHKnownHosts) == 0 {
 		removeManagedSSHKnownHosts(path)
 		return
 	}
-
-	var buf strings.Builder
-	buf.WriteString(sshKnownHostsHeader)
-	// Sort hosts for deterministic output
 	var hosts []string
 	for h := range cfg.Security.SSHKnownHosts {
 		hosts = append(hosts, h)
 	}
 	sort.Strings(hosts)
+	var buf strings.Builder
+	buf.WriteString(sshKnownHostsHeader)
+	valid, skipped := 0, 0
 	for _, host := range hosts {
+		hostOK := validSSHKnownHostField(host)
 		for _, key := range cfg.Security.SSHKnownHosts[host] {
-			// Map Junos key type names to OpenSSH types
-			sshType := key.Type
-			switch sshType {
-			case "ssh-rsa-key":
-				sshType = "ssh-rsa"
-			case "ecdsa-sha2-nistp256-key":
-				sshType = "ecdsa-sha2-nistp256"
-			case "ssh-ed25519-key":
-				sshType = "ssh-ed25519"
-			case "ecdsa-sha2-nistp384-key":
-				sshType = "ecdsa-sha2-nistp384"
-			case "ecdsa-sha2-nistp521-key":
-				sshType = "ecdsa-sha2-nistp521"
+			if !hostOK {
+				skipped++
+				slog.Warn("skipping ssh known-host entry with invalid host", "host", host, "type", key.Type)
+				continue
 			}
-			fmt.Fprintf(&buf, "%s %s %s\n", host, sshType, key.Key)
+			sshType, blob, ok := validSSHKnownHostKey(key)
+			if !ok {
+				skipped++
+				slog.Warn("skipping ssh known-host entry with invalid key", "host", host, "type", key.Type)
+				continue
+			}
+			fmt.Fprintf(&buf, "%s %s %s\n", host, sshType, blob)
+			valid++
 		}
 	}
-
+	if valid == 0 {
+		slog.Warn("ssh known hosts: no valid entries; leaving existing file untouched", "skipped", skipped)
+		return
+	}
 	content := buf.String()
 	current, _ := os.ReadFile(path)
 	if string(current) == content {
 		return
 	}
-
 	// AtomicGeneratedConfig (D2b): regenerated from declarative config and
 	// governs only outbound host-key verification — a torn/lost file
 	// re-renders next apply; no power-loss durability needed.
@@ -1086,7 +1226,7 @@ func (d *Daemon) applySSHKnownHosts(cfg *config.Config) {
 		slog.Warn("failed to write ssh known hosts", "err", err)
 		return
 	}
-	slog.Info("SSH known hosts written", "hosts", len(cfg.Security.SSHKnownHosts))
+	slog.Info("SSH known hosts written", "hosts", len(cfg.Security.SSHKnownHosts), "entries", valid, "skipped", skipped)
 }
 
 // removeManagedSSHKnownHosts removes the xpf-owned ssh_known_hosts file when
