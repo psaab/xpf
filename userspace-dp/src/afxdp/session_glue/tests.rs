@@ -866,7 +866,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         dst_ip: wire_key.dst_ip,
         forward_key: wire_key,
     };
-    let mut resolved = resolve_flow_session_decision_with_conntrack(
+    let mut resolved = resolve_flow_session_decision_with_conntrack_and_payload(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
         -1,
@@ -885,6 +885,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         1,
         PROTO_TCP,
         0x18,
+        0,
         21,
         0, // #9383: arrival VLAN (untagged in this fixture)
         true,
@@ -12853,11 +12854,11 @@ fn local_hit_purge_removes_shared_and_replicates_14666() {
     };
     let by_id_ref = &by_id;
     // resolve_flow_session_decision uses empty by_id, so call with_conntrack directly then promote.
-    let resolved_opt = resolve_flow_session_decision_with_conntrack(
+    let resolved_opt = resolve_flow_session_decision_with_conntrack_and_payload(
         &mut sessions, SteeringMap::unshared_for_test(-1), -1, -1,
         &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes,
         &peer_worker_commands, by_id_ref, &forwarding, &ha_state, &Arc::new(ShardedNeighborMap::new()),
-        &flow, 1_000_000, 1, PROTO_TCP, TCP_FLAG_ACK, 0, 0, false, false, 0, 0, None,
+        &flow, 1_000_000, 1, PROTO_TCP, TCP_FLAG_ACK, 0, 0, 0, false, false, 0, 0, None,
     );
     let mut resolved = resolved_opt.expect("transient local hit must resolve");
     assert!(resolved.deferred_synced_purge.is_some(), "fixture: transient purge must be deferred, got {resolved:?}");
@@ -12900,7 +12901,7 @@ fn local_hit_purge_preserves_replacement_shared_entry_14666() {
         m.insert(9u32, peer_queue.clone());
         crate::afxdp::WorkerCommandQueues::new(m)
     };
-    let mut resolved = resolve_flow_session_decision_with_conntrack(&mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &peer_worker_commands, &by_id, &forwarding, &ha_state, &Arc::new(ShardedNeighborMap::new()), &flow, 1_000_000, 1, PROTO_TCP, TCP_FLAG_ACK, 0, 0, false, false, 0, 0, None).expect("hit resolves");
+    let mut resolved = resolve_flow_session_decision_with_conntrack_and_payload(&mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &peer_worker_commands, &by_id, &forwarding, &ha_state, &Arc::new(ShardedNeighborMap::new()), &flow, 1_000_000, 1, PROTO_TCP, TCP_FLAG_ACK, 0, 0, 0, false, false, 0, 0, None).expect("hit resolves");
     let shared = SharedSessionRefs { sessions: &shared_sessions, nat_sessions: &shared_nat_sessions, forward_wire_sessions: &shared_forward_wire_sessions, owner_rg_indexes: &shared_owner_rg_indexes };
     let mut evicted = Vec::new();
     maybe_promote_synced_session_with_conntrack(&mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, shared, &peer_worker_commands, &by_id, &forwarding, 1_000_000, TCP_FLAG_ACK, 0, SessionHitVerdict::Owner, &mut resolved, &mut evicted);
@@ -20417,7 +20418,7 @@ fn across_scopes_absent_exact_key_uses_one_primary_index_probe_13078() {
 #[test]
 fn resolved_flow_callers_reuse_snapshots_without_reprobing_13079() {
     let glue = include_str!("resolve.rs");
-    let resolver = function_body(glue, "fn resolve_flow_session_decision_with_conntrack(");
+    let resolver = function_body(glue, "fn resolve_flow_session_decision_with_conntrack_and_payload(");
     let poll = include_str!("../poll_descriptor/mod.rs");
     let descriptor = function_body(poll, "fn poll_binding_process_descriptor_with_injection(");
     let keyed_probe_sites = [

@@ -152,6 +152,33 @@ pub(in crate::afxdp) fn tcp_payload_offset(frame: &[u8]) -> Option<usize> {
     Some(l3 + l4_offset + data_offset)
 }
 
+/// #14937: L3-relative variant of [`tcp_payload_offset`] for callers
+/// holding a bare IP packet (no Ethernet header) plus an already-walked
+/// relative L4 offset — e.g. `tunnel::local_origin_packet_meta`, whose
+/// previous stamp was the L4 start, counting the TCP header as payload.
+/// Returns the payload start relative to the L3 header, or `None` when
+/// the packet is not TCP / the header is truncated or malformed.
+#[inline]
+pub(in crate::afxdp) fn tcp_payload_offset_from_l3(
+    packet: &[u8],
+    addr_family: u8,
+    rel_l4_offset: usize,
+) -> Option<usize> {
+    let (l4_offset, protocol) = packet_rel_l4_offset_and_protocol(packet, addr_family)?;
+    if protocol != PROTO_TCP || l4_offset != rel_l4_offset {
+        return None;
+    }
+    let tcp = packet.get(l4_offset..)?;
+    if tcp.len() < TCP_MIN_HEADER_LEN {
+        return None;
+    }
+    let data_offset = ((tcp[12] >> 4) as usize) * 4;
+    if data_offset < TCP_MIN_HEADER_LEN || tcp.len() < data_offset {
+        return None;
+    }
+    Some(l4_offset + data_offset)
+}
+
 /// Extract TCP window size from raw frame data.
 /// Returns None if not a TCP frame or if frame is too short.
 ///

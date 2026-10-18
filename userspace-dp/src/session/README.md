@@ -272,9 +272,36 @@ same closing window; bare ACKs keep the #10885 fixed fuse, and the
 fixed fuse is retained ONLY for TIME_WAIT (both FINs) and RST, which
 never slide on payload. Payload-unknown callers pass 0 and retain the
 pre-#14935 gate — the conservative direction. Companion retention
-(`companion_keeps_alive`) is unchanged: it copies a companion's real
+(`companion_keeps_alive`) copies a companion's real
 `last_seen_ns`, so data refreshed on either half still holds the pair,
 and once data stops both halves reap at last-data + closing window.
+
+**Payload-less wrappers removed from the poll loop (#14937, follow-up).**
+Live loss retest of the #14935 build still decayed per-worker at
+20–30 s: a subset of hit paths derived `payload_len = 0` for
+data-bearing segments, so their CLOSING entries kept the frozen fuse
+while correctly-stamped workers slid. The follow-up (a) makes
+`poll_descriptor::tcp_payload_len` fall back to the frame-derived TCP
+header end (`frame::tcp_payload_offset`, fail-closed on
+truncated/malformed) when `meta.payload_offset` is unstamped (0)
+instead of reporting unknown; (b) fixes
+`tunnel::local_origin_packet_meta` to stamp the TCP header END via
+`frame::tcp_payload_offset_from_l3` (it stamped the L4 start, counting
+the header as payload — false progress on bare ACKs for GRE/WG
+local-origin flows); (c) deletes the payload-less AF_XDP wrappers
+`lookup_session_across_scopes_with_shared` and
+`resolve_flow_session_decision_with_conntrack` — the poll loop now
+reaches only the `_and_payload` variants, and test/non-worker callers
+call the inner/`_and_payload` form with an explicit honest 0; and
+(d) adds expiry belt-and-braces (`closing_counters_keep_alive`): a
+CLOSING (single-FIN, non-RST) entry whose canonical forward counters
+(`account_packet` folds both directions there) ADVANCED since the
+last expiry check is retained even if every hit missed payload
+progress (change, not historic volume, is the signal).
+TIME_WAIT and RST keep their fixed fuse under all of (a)–(d). The
+session-level `lookup`/`touch_if_stale` payload-less forms remain
+only for non-poll callers (embedded-ICMP quotes carry no TCP payload
+of their own; unit tests) and cannot be reached from the poll loop.
 
 The normal SYN-first path still requires the SYN bit on the reverse tuple, not
 just `has_ack`, to prevent a server-spoofed bare reverse ACK from bypassing the
@@ -528,7 +555,10 @@ data-bearing exception: a payload-carrying segment re-stamps a CLOSING
 `touch_if_stale_with_payload`; TIME_WAIT and RST never slide. Companion
 retention follows the same close state: reset and FIN-owning companions
 cannot keep an entry alive, but an active non-FINed companion can retain
-its FINed peer.
+its FINed peer. Since #14937 the expiry pass additionally retains a
+CLOSING entry on advancing forward counters
+(`closing_counters_keep_alive`) as belt-and-braces against any hit path
+that still misses payload progress.
 
 This replaced the pre-#2220 binding-GLOBAL modulo-64 counter
 (`flow_cache_session_touch`), which incremented across ALL flows on the

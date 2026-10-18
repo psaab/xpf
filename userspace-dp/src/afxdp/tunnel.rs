@@ -862,12 +862,22 @@ pub(super) fn local_origin_packet_meta(packet: &[u8]) -> Option<UserspaceDpMeta>
         _ => return None,
     };
     let (l4_offset, protocol) = packet_rel_l4_offset_and_protocol(packet, addr_family)?;
+    // #14937: payload_offset is the TCP header END, not the L4 start.
+    // The previous stamp counted the header as payload, so a bare ACK
+    // on a local-origin (GRE/WG TUN) flow falsely claimed payload
+    // progress. Derive the true payload start; non-TCP keeps l4_offset.
+    let payload_offset = if protocol == crate::ip_proto::PROTO_TCP {
+        crate::afxdp::frame::tcp_payload_offset_from_l3(packet, addr_family, l4_offset)
+            .unwrap_or(l4_offset)
+    } else {
+        l4_offset
+    };
     Some(UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         l4_offset: l4_offset.min(u16::MAX as usize) as u16,
-        payload_offset: l4_offset.min(u16::MAX as usize) as u16,
+        payload_offset: payload_offset.min(u16::MAX as usize) as u16,
         pkt_len: packet.len().min(u16::MAX as usize) as u16,
         addr_family,
         protocol,

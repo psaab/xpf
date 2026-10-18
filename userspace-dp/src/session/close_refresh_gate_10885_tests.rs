@@ -599,3 +599,97 @@ fn deferred_owner_fin_still_advances_half_close_to_time_wait_13682() {
         );
     }
 }
+
+/// #14937 (shared-scope / deferred-owner path): a CLOSING entry hit
+/// through the deferring-authority lookup with payload, then replayed
+/// via `apply_deferred_owner_hit_with_payload`, re-stamps from the
+/// FINed direction. The payload-less replay (the removed shim's
+/// behavior) must NOT slide — this is the fabric/shared-scope leg
+/// that stayed frozen while direct hits slid.
+///
+/// RED on the payload-less replay alone: `last_seen_ns` stays at FIN.
+#[test]
+fn deferred_owner_payload_replay_restamps_closing_14937() {
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    table.set_timeouts(configured());
+    let t0 = 30_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_ACK);
+    let fin_ns = t0 + 1_000_000_000;
+    assert!(table.lookup(&forward, fin_ns, TCP_FIN).is_some());
+    let hit_ns = fin_ns + 3_000_000_000;
+    assert!(matches!(
+        table.lookup_with_origin_deferring_authority_with_payload(
+            &forward, hit_ns, TCP_ACK | TCP_PSH, DATA
+        ),
+        SessionExpiryProbe::Live(_)
+    ));
+    assert_eq!(
+        table.entry_by_key(&forward).expect("fwd").last_seen_ns, fin_ns,
+        "deferring probe is read-only even with payload"
+    );
+    table.apply_deferred_owner_hit_with_payload(&forward, hit_ns, TCP_ACK | TCP_PSH, 0);
+    assert_eq!(
+        table.entry_by_key(&forward).expect("fwd").last_seen_ns, fin_ns,
+        "payload-less owner replay must not slide the FINed side"
+    );
+    table.apply_deferred_owner_hit_with_payload(&forward, hit_ns, TCP_ACK | TCP_PSH, DATA);
+    let e = table.entry_by_key(&forward).expect("fwd after replay");
+    assert_eq!(e.last_seen_ns, hit_ns, "payload owner replay must re-stamp CLOSING");
+    assert_eq!(
+        e.expires_after_ns,
+        CLOSING_SECS * 1_000_000_000,
+        "payload replay stays on the CLOSING window"
+    );
+    let _ = reverse;
+}
+
+/// #14937 (belt-and-braces): even when every hit misses payload
+/// progress (payload_len=0 throughout — the unstamped-worker case),
+/// a CLOSING pair whose forward counters keep advancing must not be
+/// reaped as idle. Traffic is FINed-side only, so
+/// `companion_keeps_alive` refuses (FIN-owning companion) — only the
+/// counters check saves the pair. Once accounting stops, both
+/// halves reap.
+///
+/// RED without the expiry retention: the pair reaps at FIN+window.
+#[test]
+fn closing_counters_retention_keeps_active_pair_14937() {
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    table.set_timeouts(configured());
+    let t0 = 40_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_ACK);
+    let fin_ns = t0 + 1_000_000_000;
+    assert!(table.lookup(&forward, fin_ns, TCP_FIN).is_some());
+    let mut now = fin_ns;
+    for _ in 0..4 {
+        now += 3_000_000_000;
+        // GC first (1s cadence in production): the counters check
+        // must retain the crossed half before the next hit's
+        // live-deadline gate would refuse it.
+        table.last_gc_ns = now - SESSION_GC_INTERVAL_NS;
+        let expired = table.expire_stale_entries(now);
+        assert!(
+            expired.is_empty(),
+            "active CLOSING pair must not reap at {now} (counters retention)"
+        );
+        assert!(table.lookup_with_payload(&forward, now, TCP_ACK, 0).is_some());
+        table.account_packet(&forward, 1500, TCP_ACK, 0);
+    }
+    assert!(now > fin_ns + CLOSING_SECS * 1_000_000_000);
+    assert!(
+        table.session_counters(&forward).is_some_and(|c| c.fwd_packets + c.rev_packets > 0),
+        "fixture: forward counters must prove traffic"
+    );
+    // Quiet: first quiet GC observes the last counter advance and
+    // retains once; the next sees static counters and reaps both.
+    let reap_ns = now + CLOSING_SECS * 1_000_000_000 + SESSION_GC_INTERVAL_NS_FOR_TEST + 1;
+    table.last_gc_ns = reap_ns - SESSION_GC_INTERVAL_NS;
+    let _ = table.expire_stale_entries(reap_ns);
+    let reap2_ns = reap_ns + CLOSING_SECS * 1_000_000_000 + SESSION_GC_INTERVAL_NS_FOR_TEST;
+    table.last_gc_ns = reap2_ns - SESSION_GC_INTERVAL_NS;
+    let expired = table.expire_stale_entries(reap2_ns);
+    assert_eq!(expired.len(), 2, "quiet CLOSING pair reaps together");
+    let _ = reverse;
+}
