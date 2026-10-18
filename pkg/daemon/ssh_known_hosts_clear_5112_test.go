@@ -1,12 +1,15 @@
 package daemon
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"golang.org/x/crypto/ssh"
 )
 
 // withTempSSHKnownHostsPath points sshKnownHostsPath at a temp file for the
@@ -21,10 +24,29 @@ func withTempSSHKnownHostsPath(t *testing.T) string {
 	return path
 }
 
+// trustKey14692 is a real ssh-ed25519 blob (generated key, fixed test
+// vector) so the #14692 parser validation accepts it. The legacy
+// synthetic "...AAAAtestkey" marker no longer parses and is skipped.
+func trustKey14692() string {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	pub, err := ssh.NewPublicKey(priv.Public())
+	if err != nil {
+		panic(err)
+	}
+	return strings.Fields(string(ssh.MarshalAuthorizedKey(pub)))[1]
+}
+
+// cachedTrustKey14692 memoises one generated blob so want-line assertions
+// compare against exactly what newTrustCfg rendered.
+var cachedTrustKey14692 = trustKey14692()
+
 func newTrustCfg() *config.Config {
 	cfg := &config.Config{}
 	cfg.Security.SSHKnownHosts = map[string][]config.SSHKnownHostKey{
-		"192.168.0.253": {{Type: "ssh-ed25519-key", Key: "AAAAC3NzaC1lZDI1NTE5AAAAtestkey"}},
+		"192.168.0.253": {{Type: "ssh-ed25519-key", Key: cachedTrustKey14692}},
 	}
 	return cfg
 }
@@ -93,7 +115,7 @@ func TestApplySSHKnownHostsWritesNonEmpty(t *testing.T) {
 		t.Fatalf("missing managed header: %q", content)
 	}
 	// ssh-ed25519-key must map to OpenSSH ssh-ed25519.
-	wantLine := "192.168.0.253 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAtestkey\n"
+	wantLine := "192.168.0.253 ssh-ed25519 " + cachedTrustKey14692 + "\n"
 	if !strings.Contains(content, wantLine) {
 		t.Fatalf("expected host line %q in %q", wantLine, content)
 	}
