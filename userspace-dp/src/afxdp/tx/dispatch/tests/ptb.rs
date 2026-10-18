@@ -1168,6 +1168,184 @@ fn successful_forward_commits_one_mirror_clone_11432() {
     assert!(!reasons.iter().any(|reason| reason == "egress_mtu_exceeded"));
 }
 
+/// RAII guard for the #14641 FILL-publish hook (see
+/// `mirror_clone_copies_frame_before_fill_publish_14641`): clears the
+/// thread-local on drop so a panicking assertion cannot leak the hook into
+/// the next test on the same thread.
+struct FillHookGuard;
+impl Drop for FillHookGuard {
+    fn drop(&mut self) {
+        crate::afxdp::tx::rings::FILL_PUBLISH_HOOK.with(|h| *h.borrow_mut() = None);
+    }
+}
+
+/// #14641 fail-on-revert: the staged mirror clone on the non-in-place
+/// dispatch arm must copy the ORIGINAL ingress frame even when the
+/// success-path recycle publishes that ingress UMEM chunk to the kernel
+/// FILL ring before the clone reads it.
+///
+/// The `FILL_PUBLISH_HOOK` seam fires the instant `drain_pending_fill`
+/// publishes a batch and scribbles `0xA5` over the source frame's arena at
+/// offset 0 — modelling the kernel DMA-ing a different packet into the
+/// now-kernel-owned chunk. Two bindings with distinct UMEMs force the
+/// non-in-place arm (no `snapshot_staged_mirror_clone`), 1023 stale
+/// entries in `pending_fill_frames` make the very next recycle reach the
+/// 1024 threshold and drain mid-dispatch, and a 60-byte UDP frame fits
+/// beside the stale offsets.
+///
+/// Pre-fix (recycle-then-commit): the hook clobbers the arena BEFORE the
+/// commit, so the mirror clone becomes `0xA5` bytes and the
+/// `mirror == frame` assertion below reds. Post-fix (commit-then-
+/// recycle): the clone is copied while the frame is still userspace-owned
+/// and the hook fires only afterwards, so the clone equals the frame.
+///
+/// Controls — both stay green before AND after the fix because the
+/// corruption is a cross-ordering defect, not a counting one:
+/// `successful_forward_commits_one_mirror_clone_11432` (exactly one clone,
+/// no fill-pressure prequeue) and
+/// `mtu_signalled_forward_does_not_enqueue_mirror_clone_11432` (MTU arm
+/// still suppresses the clone).
+#[test]
+fn mirror_clone_copies_frame_before_fill_publish_14641() {
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    let _hook_guard = FillHookGuard;
+
+    let mut bindings = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+        BindingWorker::new_for_mirror_test(2, 0, 33, 0),
+    ];
+    let frame = large_udp_v4_df_frame(60);
+    unsafe { bindings[0].umem.area().slice_mut_unchecked(0, frame.len()) }
+        .expect("ingress frame")
+        .copy_from_slice(&frame);
+    // Stale entries cycle the binding's 256 valid frame bases — only
+    // their count matters (it trips the 1024 recycle threshold); every
+    // offset stays in-region so no FILL_INVALID drop interferes.
+    for i in 0..1023u64 {
+        bindings[0]
+            .tx_pipeline
+            .pending_fill_frames
+            .push_back((i % 256) * 4096);
+    }
+
+    let mut forwarding = forwarding_for_ptb(1500);
+    forwarding.mirror_configs.insert(
+        11,
+        MirrorRuntimeConfig {
+            output_ifindex: 33,
+            rate: 0,
+        },
+    );
+    let lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let mirror_targets = MirrorTargetMap::default();
+    let mut req = test_live_forward_request_for_frame(
+        frame.len(),
+        test_forwarding_decision_to_bound_ifindex(22),
+    );
+    req.meta.protocol = PROTO_UDP;
+    req.meta.l3_offset = 14;
+    req.meta.l4_offset = 34;
+    req.meta.pkt_len = frame.len() as u16;
+    req.meta.flow_src_addr[..4].copy_from_slice(&frame[26..30]);
+    req.meta.flow_dst_addr[..4].copy_from_slice(&frame[30..34]);
+    let mut pending = vec![req];
+    let mut post_recycles = Vec::new();
+    let ingress_ident = bindings[0].identity();
+    let ingress_live = &*bindings[0].live as *const BindingLiveState;
+    let local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>> =
+        Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let worker_commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> = BTreeMap::new();
+    let mut dbg = DebugPollCounters::default();
+
+    // Scribble the source chunk the moment it is published to FILL — the
+    // modelled kernel DMA that makes the post-publish read observable.
+    let frame_len = frame.len();
+    crate::afxdp::tx::rings::FILL_PUBLISH_HOOK.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move |binding: &mut BindingWorker| {
+            binding.telemetry.dbg_fill_submitted += 1;
+            let area =
+                binding.umem.area() as *const _ as *mut crate::afxdp::umem::MmapArea;
+            if let Some(chunk) = unsafe { (*area).slice_mut(0, frame_len) } {
+                chunk.fill(0xA5);
+            }
+        }));
+    });
+
+    let (left, rest) = bindings.split_at_mut(0);
+    let (ingress, right) = rest.split_first_mut().expect("ingress binding");
+    enqueue_pending_forwards(
+        left,
+        0,
+        ingress,
+        right,
+        &lookup,
+        &mirror_targets,
+        &mut pending,
+        &mut post_recycles,
+        1,
+        &forwarding,
+        &ingress_ident,
+        unsafe { &*ingress_live },
+        None,
+        &local_tunnel_deliveries,
+        &recent_exceptions,
+        &mut dbg,
+        &mut BatchCounters::default(),
+        0,
+        &worker_commands_by_id,
+    );
+
+    // The 128-entry test fill ring caps every publish: 128 offsets land
+    // in the ring and the remaining 896 stay queued (the tail drain stops
+    // when a publish makes no progress because the test kernel never
+    // consumes). 128 + 896 == 1024 is the exact recycle witness; the
+    // mirror-bytes assertion below is the ordering witness (post-fix the
+    // publish runs only at the tail drain, after the clone is copied).
+    assert_eq!(
+        bindings[0].xsk.device.pending(),
+        128,
+        "the test fill ring (128 entries) must have accepted the batch"
+    );
+    assert_eq!(
+        bindings[0].tx_pipeline.pending_fill_frames.len(),
+        896,
+        "128 published + 896 queued == the 1024 recycled offsets"
+    );
+    let reasons: Vec<String> = recent_exceptions
+        .lock()
+        .expect("exceptions")
+        .iter()
+        .map(|e| e.reason().to_string())
+        .collect();
+    assert!(
+        !reasons.iter().any(|r| r == "egress_mtu_exceeded"),
+        "the 60-byte frame fits the 1500 MTU: {reasons:?}"
+    );
+    assert_eq!(
+        bindings[1].tx_pipeline.pending_tx_local.len()
+            + bindings[1].tx_pipeline.pending_tx_prepared.len(),
+        1,
+        "the in-MTU original must forward exactly once"
+    );
+    let mirrors = &bindings[2].tx_pipeline.pending_tx_prepared;
+    assert_eq!(mirrors.len(), 1, "one successful forward yields one clone");
+    let mirror = mirrors.front().expect("mirror request");
+    assert!(mirror.mirror_clone);
+    assert_eq!(
+        bindings[2]
+            .umem
+            .area()
+            .slice(mirror.offset as usize, mirror.len as usize)
+            .expect("mirror frame"),
+        frame.as_slice(),
+        "the mirror clone must copy the original frame BEFORE its chunk is \
+         published to FILL (post-publish the chunk reads as 0xA5 DMA bytes)"
+    );
+    assert_eq!(bindings[0].live.mirrored_packets.load(Ordering::Relaxed), 1);
+}
+
 /// #11786 fail-on-revert: PMTUD classification and the queued CoS key must
 /// agree on the logical VLAN unit; transmission still uses the physical bind.
 #[test]

@@ -983,8 +983,12 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
         }
 
         // Read source frame directly from ingress UMEM — no heap copy needed.
-        // The frame is safe to read: RX ring released but frame not yet returned
-        // to fill ring (that happens after this function completes).
+        // The frame stays safe to read for the whole dispatch of this request:
+        // the RX ring released it, but the success-path recycle (the only path
+        // that can publish it to the fill ring at the batch threshold) is
+        // deferred until after the staged mirror clone is committed (#14641).
+        // The retained/in-place arm keeps it owned by the prepared TX request
+        // instead. Failure/drop arms recycle without any later read.
         let source_frame = match &request.frame {
             PendingForwardFrame::Owned(frame) => frame.as_slice(),
             PendingForwardFrame::Live => {
@@ -1671,9 +1675,16 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
             }
             continue;
         }
-        if !retained_source_frame {
-            recycle_ingress_frame(ingress_binding, source_offset, now_ns);
-        }
+        // #14641: commit the staged mirror clone BEFORE recycling the
+        // ingress frame. On the non-in-place arm the staged clone holds no
+        // snapshot, so `commit_staged_mirror_clone` copies bytes out of
+        // `source_frame` (live ingress UMEM). Recycling first could
+        // synchronously publish the chunk to the kernel FILL ring at the
+        // 1024-batch threshold (`recycle_ingress_frame` -> `drain_pending_fill`),
+        // after which userspace must not read it — the kernel may DMA a
+        // different packet into it and the analyzer would receive the wrong
+        // bytes (cross-flow disclosure). This matches the commit-before-
+        // recycle ordering already used in `neighbor_dispatch.rs`.
         if !mtu_signalled && dbg.enqueue_ok > enqueue_count_before {
             if let Some(staged) = staged_mirror {
                 commit_staged_mirror_clone(
@@ -1690,6 +1701,9 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                     now_ns,
                 );
             }
+        }
+        if !retained_source_frame {
+            recycle_ingress_frame(ingress_binding, source_offset, now_ns);
         }
     }
     while !ingress_binding.tx_pipeline.pending_fill_frames.is_empty() {
