@@ -1789,8 +1789,20 @@ func (r *heartbeatReceiver) readLoop() {
 		// operator fixes /etc/xpf/node-id, then discard it: it cannot be told
 		// apart from a stray loopback and a duplicate-node-id cluster is
 		// unresolvable at runtime, so it must never drive election.
+		//
+		// #14705: the warning is gated on HMAC verification when this node is
+		// keyed. Before this gate the check ran before admitFrame, so an
+		// on-link sender able to spoof the configured peer IP (the #6888 pin
+		// is source-IP only, explicitly not an authentication boundary)
+		// could forge the EventRG history entry and, by re-sending once per
+		// 30s, keep the shared duplicateNodeIDWarningDueLocked limiter fresh
+		// and suppress the richer authenticated NoteDuplicateNodeIDBeacon
+		// diagnostic. An unkeyed node cannot verify, so it keeps the legacy
+		// unauthenticated warning (dual-accept, mirroring admitFrame).
 		if int(pkt.NodeID) == r.mgr.NodeID() {
-			r.mgr.NoteDuplicateNodeIDHeartbeat()
+			if r.duplicateNodeIDAuthenticated(buf[:n]) {
+				r.mgr.NoteDuplicateNodeIDHeartbeat()
+			}
 			continue
 		}
 
@@ -1798,6 +1810,32 @@ func (r *heartbeatReceiver) readLoop() {
 			continue
 		}
 	}
+}
+
+// duplicateNodeIDAuthenticated reports whether a same-NodeID heartbeat may
+// trigger the duplicate-node-id warning (#14705). It verifies ONLY the HMAC
+// against every accepted key — deliberately without admitAuthed: the frame
+// is discarded either way, so it must not refresh liveness, drive election,
+// or consume replay/epoch state (a replayed genuine duplicate frame may
+// still warn, rate-limited by the shared 30s limiter; admitting it into the
+// replay ring would let a duplicate frame churn genuine peer replay state).
+// An unkeyed node cannot verify and returns true, preserving the legacy
+// unauthenticated warning under dual-accept.
+func (r *heartbeatReceiver) duplicateNodeIDAuthenticated(frame []byte) bool {
+	keys := r.mgr.controlLinkAcceptedKeys()
+	if len(keys) == 0 {
+		return true
+	}
+	_, _, present := heartbeatAuthTrailer(frame)
+	if !present {
+		return false
+	}
+	for _, k := range keys {
+		if verifyHeartbeatMAC(frame, k) {
+			return true
+		}
+	}
+	return false
 }
 
 // admitFrame runs the #4107/#6169 authentication gate over one raw heartbeat
