@@ -255,24 +255,82 @@ func validateDynamicAddressFeedServerEndpointStrict(cfg *Config) error {
 				"resolves to https://)",
 				display, RedactURL(resolved))
 		}
+		// #14723: a malformed or mistakable per-feed path (unparseable,
+		// //network-path, or scheme:opaque / absolute) must reject at
+		// commit. The runtime join previously fell back to fetching the
+		// base endpoint and installed its prefixes under this feed's
+		// name. The tolerant path downgrades via the shared wrapper;
+		// the runtime independently registers no feed for such a path.
+		for _, fe := range fs.FeedEntries {
+			if reason := feedEntryPathMalformed(fe.Path); reason != "" {
+				display := fs.Name
+				if display == "" {
+					display = name
+				}
+				feedDisplay := fe.Name
+				if feedDisplay == "" {
+					feedDisplay = display
+				}
+				return fmt.Errorf("security dynamic-address feed-server %q "+
+					"feed %q path %q is malformed (%s) — it does not name "+
+					"a feed document under the server base, so no feed is "+
+					"registered and any address-name bound to it is "+
+					"unresolvable and fails CLOSED at runtime (#14723); "+
+					"set a plain relative path such as /list.txt",
+					display, feedDisplay, RedactURL(fe.Path), reason)
+			}
+		}
 	}
 	return nil
 }
 
-// feedServerResolvedBaseURL returns the base url feeds.resolveBaseURL
-// (pkg/feeds/feeds.go) would produce for this server: explicit `url` (trimmed
-// of trailing slashes) wins, else `https://<hostname>`, else "". Mirrors
-// resolveBaseURL branch-for-branch; keep in sync (pkg/config cannot import
-// pkg/feeds — import cycle). Callers here reach it only after
-// feedServerBaseURLEmpty has ruled out the "" result.
-func feedServerResolvedBaseURL(fs *FeedServer) string {
-	if fs.URL != "" {
-		return strings.TrimRight(fs.URL, "/")
+// feedEntryPathMalformed mirrors the rejection in feeds.joinFeedURL
+// (#14723; pkg/config cannot import pkg/feeds): a non-empty per-feed
+// path must parse and be a plain relative path tail — no scheme, no
+// opaque part, no authority. An empty path is the base itself and is
+// not malformed. Keep in sync with joinFeedURL.
+func feedEntryPathMalformed(rawPath string) string {
+	if rawPath == "" {
+		return ""
 	}
-	if fs.Hostname != "" {
-		return "https://" + strings.TrimRight(fs.Hostname, "/")
+	ref, err := url.Parse(rawPath)
+	if err != nil {
+		return fmt.Sprintf("not a parseable URL path: %v", err)
+	}
+	if ref.Scheme != "" || ref.Opaque != "" || ref.Host != "" || ref.User != nil {
+		return "not a plain relative path (scheme, opaque, or authority present)"
 	}
 	return ""
+}
+
+// feedServerResolvedBaseURL returns the base url feeds.resolveBaseURL
+// (pkg/feeds/feeds.go) would produce for this server: explicit `url` wins,
+// else `https://<hostname>`, else "". Mirrors resolveBaseURL: trailing
+// "/" is trimmed from the URL PATH only (#14723), never from a query or
+// fragment token; an unparseable or scheme-less value keeps the
+// historical raw slash-trim so slash-only URLs still resolve to "".
+// Keep in sync (pkg/config cannot import pkg/feeds — import cycle).
+// Callers here reach it only after feedServerBaseURLEmpty has ruled
+// out the "" result.
+func feedServerResolvedBaseURL(fs *FeedServer) string {
+	raw := fs.URL
+	if raw == "" && fs.Hostname != "" {
+		raw = "https://" + fs.Hostname
+	}
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" {
+		return strings.TrimRight(raw, "/")
+	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	if u.Path == "" {
+		u.RawPath = ""
+	} else if u.RawPath != "" {
+		u.RawPath = strings.TrimRight(u.RawPath, "/")
+	}
+	return u.String()
 }
 
 // feedServerBaseURLUnconstructible reports why a non-empty resolved feed base

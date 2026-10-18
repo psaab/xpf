@@ -538,7 +538,11 @@ provider offers a query-string or userinfo form, prefer it — those are redacte
   Timeouts log a warning but do not stop the manager — the next refresh tick
   retries.
 - Multiple feeds can share a server; each feed's path is appended to the
-  base URL.
+  base URL. A per-feed `path` must be a plain relative path tail: an
+  unparseable value, a `//host/...` network-path, or a `scheme:...` /
+  absolute-URL form is rejected at strict commit and registers no feed
+  at runtime (#14723) — it never falls back to fetching the base URL.
+  Percent-escapes such as `%2F` are preserved in the requested URI.
 - Default refresh interval is 1 hour; the Junos config can override via
   `update-interval`.
 - Feed bodies are parsed line-by-line, one CIDR per line. Comment lines

@@ -93,8 +93,10 @@ func TestJoinFeedURLQueryBase14177(t *testing.T) {
 		{"https://feed.example/base?token=abc", "", "https://feed.example/base?token=abc"},
 		// A per-feed path carrying its own query supersedes the base query.
 		{"https://feed.example/base?token=abc", "/malware.txt?token=xyz", "https://feed.example/base/malware.txt?token=xyz"},
-		// An absolute / scheme-relative path must not escape the origin.
-		{"https://feed.example/base?token=abc", "//evil.example/malware.txt", "https://feed.example/base/malware.txt?token=abc"},
+		// A scheme-relative path must not escape the origin; #14723
+		// rejects it outright ("") rather than silently keeping only
+		// its tail under the configured origin.
+		{"https://feed.example/base?token=abc", "//evil.example/malware.txt", ""},
 		{"https://user:pass@feed.example/base?token=abc", "/malware.txt", "https://user:pass@feed.example/base/malware.txt?token=abc"},
 	}
 	for _, tc := range cases {
