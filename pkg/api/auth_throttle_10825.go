@@ -161,6 +161,7 @@ func (t *authFailureTracker) locked(source, account string) (bool, time.Duration
 type authThrottleReservation struct {
 	source        string
 	claimed       string
+	secondAccount *authFailureBucket
 	account       *authFailureBucket
 	globalAccount *authFailureBucket
 	sourceBucket  *authFailureBucket
@@ -171,7 +172,8 @@ type authThrottleReservation struct {
 // existing budget before any credential verification begins. If outstanding
 // verifiers occupy every slot, refuse transiently for one second rather than
 // running unbounded work or charging a request whose credential was not checked.
-func (t *authFailureTracker) reserve(source, account string) (authThrottleReservation, time.Duration) {
+// Dual headers also reserve the API-key pair before either verifier runs.
+func (t *authFailureTracker) reserve(source, account string, dualHeader bool) (authThrottleReservation, time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -181,16 +183,23 @@ func (t *authFailureTracker) reserve(source, account string) (authThrottleReserv
 	accountBucket := t.accounts[accountKey]
 	globalBucket := t.globalAccounts[globalKey]
 	sourceBucket := t.sources[source]
-	if wait := authThrottleWaitLocked(now, accountBucket, globalBucket, sourceBucket); wait > 0 {
+	var secondBucket *authFailureBucket
+	hasSecond := dualHeader && account != authThrottleAPIKeyAccount
+	if hasSecond {
+		secondBucket = t.accounts[source+"\x00"+authThrottleAPIKeyAccount]
+	}
+	if wait := authThrottleWaitLocked(now, accountBucket, globalBucket, sourceBucket, secondBucket); wait > 0 {
 		return authThrottleReservation{}, wait
 	}
 	resetExpiredFailuresLocked(accountBucket, now)
 	resetExpiredFailuresLocked(globalBucket, now)
 	resetExpiredFailuresLocked(sourceBucket, now)
+	resetExpiredFailuresLocked(secondBucket, now)
 
 	if (accountBucket != nil && accountBucket.failures+accountBucket.inFlight >= authThrottleAccountFailures) ||
 		(globalBucket != nil && globalBucket.failures+globalBucket.inFlight >= authThrottleGlobalBasicFailures) ||
-		(sourceBucket != nil && sourceBucket.failures+sourceBucket.inFlight >= authThrottleSourceFailures) {
+		(sourceBucket != nil && sourceBucket.failures+sourceBucket.inFlight >= authThrottleSourceFailures) ||
+		(secondBucket != nil && secondBucket.failures+secondBucket.inFlight >= authThrottleAccountFailures) {
 		return authThrottleReservation{}, time.Second
 	}
 	needed := 0
@@ -203,7 +212,10 @@ func (t *authFailureTracker) reserve(source, account string) (authThrottleReserv
 	if sourceBucket == nil {
 		needed++
 	}
-	if !t.makeRoomLocked(needed, now, accountBucket, globalBucket, sourceBucket) {
+	if hasSecond && secondBucket == nil {
+		needed++
+	}
+	if !t.makeRoomLocked(needed, now, accountBucket, globalBucket, sourceBucket, secondBucket) {
 		return authThrottleReservation{}, time.Second
 	}
 	if accountBucket == nil {
@@ -218,24 +230,32 @@ func (t *authFailureTracker) reserve(source, account string) (authThrottleReserv
 		sourceBucket = &authFailureBucket{windowStart: now}
 		t.sources[source] = sourceBucket
 	}
+	if hasSecond && secondBucket == nil {
+		secondBucket = &authFailureBucket{windowStart: now}
+		t.accounts[source+"\x00"+authThrottleAPIKeyAccount] = secondBucket
+	}
 
 	accountBucket.inFlight++
 	if globalBucket != nil {
 		globalBucket.inFlight++
 	}
 	sourceBucket.inFlight++
+	if secondBucket != nil {
+		secondBucket.inFlight++
+	}
 	return authThrottleReservation{
 		source:        source,
 		claimed:       account,
+		secondAccount: secondBucket,
 		account:       accountBucket,
 		globalAccount: globalBucket,
 		sourceBucket:  sourceBucket,
 	}, 0
 }
 
-func authThrottleWaitLocked(now time.Time, account, globalAccount, source *authFailureBucket) time.Duration {
+func authThrottleWaitLocked(now time.Time, account, globalAccount, source, fallback *authFailureBucket) time.Duration {
 	wait := time.Duration(0)
-	for _, bucket := range [3]*authFailureBucket{account, globalAccount, source} {
+	for _, bucket := range [4]*authFailureBucket{account, globalAccount, source, fallback} {
 		if bucket == nil {
 			continue
 		}
@@ -266,11 +286,10 @@ func resetExpiredFailuresLocked(bucket *authFailureBucket, now time.Time) {
 	bucket.windowStart = now
 }
 
-// complete releases all reservations. Clean Basic success clears that account
-// across sources; all clean successes clear their source/account pair but
-// never source failures. When a bad Authorization header falls back to a valid
-// X-API-Key, it charges the failed identity and source while clearing only the
-// successfully verified key bucket.
+// complete releases all reservations. A failed Authorization charges its
+// claimed identity even when the API-key fallback succeeds. Dual failures
+// charge both pairs, but charge the source only once. An unevaluated fallback
+// is released without charging or clearing its existing failures.
 func (t *authFailureTracker) complete(reservation *authThrottleReservation, authorized bool, verified string, authorizationFailed bool) {
 	if reservation == nil {
 		return
@@ -287,6 +306,17 @@ func (t *authFailureTracker) complete(reservation *authThrottleReservation, auth
 		reservation.globalAccount.inFlight--
 	}
 	reservation.sourceBucket.inFlight--
+	if fallback := reservation.secondAccount; fallback != nil {
+		fallback.inFlight--
+		if !authorized {
+			t.chargeLocked(fallback, now, authThrottleAccountFailures)
+		} else if !authorizationFailed && fallback.inFlight == 0 &&
+			fallback.failures == 0 && fallback.lockouts == 0 {
+			// Authorization succeeded without evaluating X-API-Key. Remove
+			// only an empty reservation, never forgive existing key failures.
+			delete(t.accounts, reservation.source+"\x00"+authThrottleAPIKeyAccount)
+		}
+	}
 	if authorized && !authorizationFailed {
 		t.clearAccountLocked(reservation.source, reservation.claimed, now)
 		t.clearGlobalBasicAccountLocked(reservation.claimed, now)
