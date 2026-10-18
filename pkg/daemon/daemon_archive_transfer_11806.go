@@ -200,6 +200,19 @@ func scpArchiveTransfer(ctx context.Context, srcPath, dest string) error {
 	if config.URLHasPassword(dest) {
 		return fmt.Errorf("config archival refused: inline URL password is not supported; use SSH key authentication")
 	}
+	// #14691: require a remote destination before any exec. A colon-less
+	// (or `:::` / `//host/path` local) destination makes OpenSSH scp perform
+	// a LOCAL copy of the unredacted ShowActive() staging file as root —
+	// overwriting an arbitrary local file and disclosing every secret in
+	// it — and a local copy never consults SSH, so the #10298 known-hosts
+	// gate below cannot stop it. The same shared validator carries the
+	// #4589 leading-dash gate (including the user@-oProxyCommand form), so
+	// a tolerant load or direct caller that bypasses the compiler gate is
+	// still refused here. Validation runs before the trust-file stat so a
+	// bad destination is rejected deterministically.
+	if err := config.ArchiveDestinationError(dest); err != nil {
+		return fmt.Errorf("config archival refused: %w", err)
+	}
 	knownHosts := sshKnownHostsPath
 	if fi, err := os.Stat(knownHosts); err != nil || fi.Size() == 0 {
 		if err == nil {
@@ -210,21 +223,15 @@ func scpArchiveTransfer(ctx context.Context, srcPath, dest string) error {
 		}
 		return fmt.Errorf("config archival refused: cannot stat SSH host-key trust file %s: %w", knownHosts, err)
 	}
-	if strings.HasPrefix(dest, "-") {
-		return fmt.Errorf("config archival refused: archive-site destination must not begin with '-'")
-	}
-	// #4589 A7 F-02: `dest` is an operator-configured `archive-sites` URL
-	// taken verbatim (compiler_system.go). A leading-dash value is rejected
-	// both at commit and at this transport boundary, preventing it from being
-	// parsed by scp's getopt as an OPTION — CWE-88 argv injection running as
-	// the xpfd root user. The source is an absolute temp-file path, so no
-	// option-like source can reach scp.
+	// `--` ends scp option parsing (#4589 defense in depth): even a future
+	// destination shape that slipped the validator cannot be re-read as an
+	// scp option. Current OpenSSH scp accepts `--` before the operands.
 	out, err := exec.CommandContext(ctx, "scp",
 		"-o", "StrictHostKeyChecking=yes",
 		"-o", "UserKnownHostsFile="+knownHosts,
 		"-o", "GlobalKnownHostsFile=/dev/null",
 		"-o", "BatchMode=yes",
-		srcPath, dest,
+		"--", srcPath, dest,
 	).CombinedOutput()
 	if err != nil {
 		if trimmed := strings.TrimSpace(string(out)); trimmed != "" {

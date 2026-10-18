@@ -108,7 +108,7 @@ func TestScpArchiveTransfer10298RejectsMITMAndAcceptsTrustedKey(t *testing.T) {
 		"-o", "UserKnownHostsFile=" + knownHosts,
 		"-o", "GlobalKnownHostsFile=/dev/null",
 		"-o", "BatchMode=yes",
-		srcPath, dest,
+		"--", srcPath, dest,
 	}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("scp argv = %q, want %q", gotArgs, wantArgs)
