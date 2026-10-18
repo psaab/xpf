@@ -179,13 +179,17 @@ type Daemon struct {
 	ipsecCaptureAuthorityRevision        atomic.Uint64
 	ipsecCaptureStageGeneration          uint64
 	ipsecCaptureSnapshotLandedGeneration uint64
-	ipsecOverlay                         atomic.Pointer[xnft.HostInputFenceOverlay]
-	ipsecOverlayAcked                    atomic.Pointer[xnft.HostInputFenceOverlay]
-	ipsecOverlayRetryUntil               atomic.Int64
-	ipsecOverlayRetryGeneration          atomic.Uint64
-	ipsecOverlayRetrySequence            atomic.Uint64
-	ipsecTopologyDirty                   atomic.Bool
-	ipsecTopologySubscribed              atomic.Bool
+	// ipsecCaptureKernelOrphaned (#14696): a guarded/actor failure
+	// retained kernel quarantine/divert tables while the runtime
+	// pointers were cleared via restore(nil). Guarded by ipsecCaptureMu.
+	ipsecCaptureKernelOrphaned  bool
+	ipsecOverlay                atomic.Pointer[xnft.HostInputFenceOverlay]
+	ipsecOverlayAcked           atomic.Pointer[xnft.HostInputFenceOverlay]
+	ipsecOverlayRetryUntil      atomic.Int64
+	ipsecOverlayRetryGeneration atomic.Uint64
+	ipsecOverlayRetrySequence   atomic.Uint64
+	ipsecTopologyDirty          atomic.Bool
+	ipsecTopologySubscribed     atomic.Bool
 
 	// --- always-on transit-gate link watcher (#9848) ---
 	// The watcher has its own subscription seam so it remains independent of
