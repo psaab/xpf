@@ -57,6 +57,16 @@ import (
 // cosmetic: authorizeRPCCommand matches deny regexes against the entry
 // exactly as written, so `show  version` would escape a `^show version$`
 // deny that the on-box CLI's canonical spelling meets.
+//
+// #14687: Canonicalize now refuses a line ending mid-value, which the bare
+// argument-free path of a PREFIX-form topic (`route-table:` ->
+// `show route table`) and the flows topic (whose <limit> is optional,
+// carried in the topic value, not the command path) legitimately are. Those
+// entries are exempt from the Canonicalize arm only: the keyword arm above
+// still proves every word is a real node, and the dispatcher only reaches
+// them with a value packed in the topic. Bare (non-prefix) entries whose
+// path ends mid-value remain refused — they would name a command no
+// operator can run bare.
 func assertCanonicalCommands(t *testing.T, what string, table map[string]string) {
 	t.Helper()
 	if len(table) == 0 {
@@ -81,6 +91,13 @@ func assertCanonicalCommands(t *testing.T, what string, table map[string]string)
 				"LEAF, which fails even when both words are keywords (an option after "+
 				"a complete command, #12527). Every word must be a real node, and only "+
 				"the last may be a leaf.", what, key, cmd)
+			continue
+		}
+		// #14687: prefix-form topics, the flows path, and `route-instance`
+		// (whose instance name rides in req.Filter, not the topic) pack
+		// their value outside the command path, so the argument-free path
+		// ends mid-value by design.
+		if strings.HasSuffix(key, ":") || cmd == "show chassis cluster data-plane flows" || cmd == "show route instance" {
 			continue
 		}
 		canon, res := cmdtree.Canonicalize(cmdtree.OperationalTree, words)

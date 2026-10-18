@@ -764,15 +764,20 @@ func (c *CLI) handleShowScreen(args []string) error {
 	}
 	switch args[0] {
 	case "ids-option":
+		// #14687: a dangling ids-option selector must error, not widen to
+		// the all-profiles listing the RBAC gate did not judge.
 		if len(args) < 2 {
-			return c.showScreen()
+			return fmt.Errorf("usage: show security screen ids-option <name> [detail]")
 		}
 		if len(args) >= 3 && args[2] == "detail" {
 			return c.showScreenIdsOptionDetail(args[1])
 		}
 		return c.showScreenIdsOption(args[1])
 	case "statistics":
-		if len(args) >= 2 && args[1] == "zone" && len(args) >= 3 {
+		if len(args) >= 2 && args[1] == "zone" {
+			if len(args) < 3 {
+				return fmt.Errorf("usage: show security screen statistics zone <zone>")
+			}
 			return c.showScreenStatistics(args[2])
 		}
 		return c.showScreenStatisticsAll()

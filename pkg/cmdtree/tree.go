@@ -155,6 +155,18 @@ type Node struct {
 	// deny on that command be stepped around with a sibling keyword, the
 	// bypass this flag must not reopen. Honoured only in Canonicalize.
 	Options bool
+
+	// RequiresValue marks a dynamic node (#14687) whose value is mandatory:
+	// the line may not end at this node. A typed leaf always requires its
+	// value; a dynamic node by default does not, because many bare dynamic
+	// commands list everything (`show security zones`, `show interfaces`).
+	// Set this only where the dispatcher has no bare form and instead widens
+	// to a broader listing when the value is missing — e.g. `show firewall
+	// filter` (lists all filters), `show security screen ids-option` (lists
+	// all profiles). Without it Canonicalize returned OK for the dangling
+	// selector, so the RBAC gate judged the selector string while the
+	// handler ran the broader command. Honoured only in Canonicalize.
+	RequiresValue bool
 }
 
 // HasDynamic returns true if the node has any dynamic completion function.
@@ -393,7 +405,7 @@ var OperationalTree = map[string]*Node{
 		}},
 		"firewall": {Desc: "Show firewall filter configuration", Children: map[string]*Node{
 			"effective": {Desc: "Show effective (compiled) firewall filter the dataplane receives"},
-			"filter": {Desc: "Show specific filter by name", DynamicFn: func(cfg *config.Config) []string {
+			"filter": {Desc: "Show specific filter by name", RequiresValue: true, DynamicFn: func(cfg *config.Config) []string {
 				if cfg == nil {
 					return nil
 				}
@@ -442,15 +454,15 @@ var OperationalTree = map[string]*Node{
 			"terse":   {Desc: "Display terse output"},
 			"detail":  {Desc: "Display detailed output"},
 			"summary": {Desc: "Show routing table statistics"},
-			"table": {Desc: "Show routes in named routing table", DynamicFn: func(cfg *config.Config) []string {
+			"table": {Desc: "Show routes in named routing table", RequiresValue: true, DynamicFn: func(cfg *config.Config) []string {
 				// Include main tables plus per-instance tables. #4866:
 				// routingInstanceTableNames nil-skips tolerated nil RI entries.
 				return append([]string{"inet.0", "inet6.0"}, routingInstanceTableNames(cfg)...)
 			}},
-			"protocol": {Desc: "Show routes learned from named protocol", DynamicFn: func(_ *config.Config) []string {
+			"protocol": {Desc: "Show routes learned from named protocol", RequiresValue: true, DynamicFn: func(_ *config.Config) []string {
 				return []string{"static", "direct", "local", "ospf", "bgp", "rip", "isis", "kernel", "connected"}
 			}},
-			"instance": {Desc: "Show routes for a routing instance", DynamicFn: func(cfg *config.Config) []string {
+			"instance": {Desc: "Show routes for a routing instance", RequiresValue: true, DynamicFn: func(cfg *config.Config) []string {
 				return routingInstanceNames(cfg) // #4866: nil-skip tolerated entries
 			}},
 		}},
@@ -474,7 +486,7 @@ var OperationalTree = map[string]*Node{
 				"brief":       {Desc: "Show brief policy summary"},
 				"detail":      {Desc: "Show detailed policy information"},
 				"hit-count":   {Desc: "Show policy hit counters [from-zone X to-zone Y]"},
-				"from-zone": {Desc: "Filter by source zone", DynamicFn: func(cfg *config.Config) []string {
+				"from-zone": {Desc: "Filter by source zone", RequiresValue: true, DynamicFn: func(cfg *config.Config) []string {
 					if cfg == nil {
 						return nil
 					}
@@ -484,7 +496,7 @@ var OperationalTree = map[string]*Node{
 					}
 					return names
 				}, Children: map[string]*Node{
-					"to-zone": {Desc: "Filter by destination zone", DynamicFn: func(cfg *config.Config) []string {
+					"to-zone": {Desc: "Filter by destination zone", RequiresValue: true, DynamicFn: func(cfg *config.Config) []string {
 						if cfg == nil {
 							return nil
 						}
@@ -494,7 +506,7 @@ var OperationalTree = map[string]*Node{
 						}
 						return names
 					}, Children: map[string]*Node{
-						"policy": {Desc: "Filter by policy name", ContextDynamicFn: func(cfg *config.Config, words []string) []string {
+						"policy": {Desc: "Filter by policy name", RequiresValue: true, ContextDynamicFn: func(cfg *config.Config, words []string) []string {
 							if cfg == nil {
 								return nil
 							}
@@ -537,7 +549,7 @@ var OperationalTree = map[string]*Node{
 				}},
 			}},
 			"screen": {Desc: "Show screen service information", Children: map[string]*Node{
-				"ids-option": {Desc: "Show configured screen profile", DynamicFn: func(cfg *config.Config) []string {
+				"ids-option": {Desc: "Show configured screen profile", RequiresValue: true, DynamicFn: func(cfg *config.Config) []string {
 					if cfg == nil {
 						return nil
 					}
@@ -550,7 +562,7 @@ var OperationalTree = map[string]*Node{
 					"detail": {Desc: "Show detailed screen profile with thresholds"},
 				}},
 				"statistics": {Desc: "Show screen statistics", Children: map[string]*Node{
-					"zone": {Desc: "Show per-zone screen counters", DynamicFn: func(cfg *config.Config) []string {
+					"zone": {Desc: "Show per-zone screen counters", RequiresValue: true, DynamicFn: func(cfg *config.Config) []string {
 						if cfg == nil {
 							return nil
 						}
@@ -1239,7 +1251,7 @@ var OperationalTree = map[string]*Node{
 			}},
 		}},
 		"security-zone": {Desc: "Show zone for interface", Children: map[string]*Node{
-			"interface": {Desc: "Interface name", DynamicFn: func(cfg *config.Config) []string {
+			"interface": {Desc: "Interface name", RequiresValue: true, DynamicFn: func(cfg *config.Config) []string {
 				if cfg == nil || cfg.Interfaces.Interfaces == nil {
 					return nil
 				}
