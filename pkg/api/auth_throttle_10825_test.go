@@ -103,9 +103,11 @@ func TestAuthThrottleAdmissionCapsConcurrentVerifierWork10825(t *testing.T) {
 		budget       int
 		workers      int
 		varyAccounts bool
+		dualHeader   bool
 	}{
 		{name: "claimed-account", budget: authThrottleAccountFailures, workers: authThrottleAccountFailures + 8},
 		{name: "source", budget: authThrottleSourceFailures, workers: authThrottleSourceFailures + 8, varyAccounts: true},
+		{name: "dual-header-api-key", budget: authThrottleAccountFailures, workers: authThrottleAccountFailures + 8, varyAccounts: true, dualHeader: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -130,7 +132,7 @@ func TestAuthThrottleAdmissionCapsConcurrentVerifierWork10825(t *testing.T) {
 				entered <- struct{}{}
 				<-release
 				current.Add(-1)
-				return false, "", false
+				return false, "", true
 			}
 			for i := 0; i < tc.workers; i++ {
 				go func(i int) {
@@ -142,6 +144,9 @@ func TestAuthThrottleAdmissionCapsConcurrentVerifierWork10825(t *testing.T) {
 						account = fmt.Sprintf("rotating-%d", i)
 					}
 					r.SetBasicAuth(account, "invalid")
+					if tc.dualHeader {
+						r.Header.Set("X-API-Key", "invalid")
+					}
 					_, retry := throttledAuthCheckWithCheck(tracker, AuthConfig{}, true, r, check)
 					results <- retry
 				}(i)
@@ -278,7 +283,7 @@ func TestAuthFallbackChargesClaimedAndSourceAndClearsVerifiedBucket10825(t *test
 	}
 
 	// An invalid Authorization plus a bad fallback key charges the claimed
-	// Basic account and source, and does not create a verified API-key bucket.
+	// Basic account, API-key account, and source exactly once each.
 	r = httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
 	r.RemoteAddr = source + ":43000"
 	r.SetBasicAuth("claimed-user", "wrong-password")
@@ -294,8 +299,8 @@ func TestAuthFallbackChargesClaimedAndSourceAndClearsVerifiedBucket10825(t *test
 	if claimedBucket == nil || claimedBucket.failures != 4 {
 		t.Fatalf("invalid claimed-account bucket = %+v, want four failures", claimedBucket)
 	}
-	if verifiedBucket != nil {
-		t.Fatalf("invalid request created an API-key account bucket: %+v", verifiedBucket)
+	if verifiedBucket == nil || verifiedBucket.failures != 1 || verifiedBucket.inFlight != 0 {
+		t.Fatalf("invalid fallback bucket = %+v, want one failure and no reservations", verifiedBucket)
 	}
 	if sourceBucket == nil || sourceBucket.failures != 8 {
 		t.Fatalf("source failures after invalid request = %+v, want eight", sourceBucket)
@@ -485,7 +490,7 @@ func TestAuthFailureEscalationCapAndPostLockoutQuietReset10825(t *testing.T) {
 
 func TestAuthThrottleReservationFailureCompletesExactlyOnce10825(t *testing.T) {
 	tracker := newAuthFailureTracker(nil)
-	reservation, retry := tracker.reserve("192.0.2.99", "operator")
+	reservation, retry := tracker.reserve("192.0.2.99", "operator", false)
 	if retry != 0 {
 		t.Fatalf("initial reservation returned retry-after %v", retry)
 	}
@@ -512,12 +517,12 @@ func TestAuthThrottleAdmissionResetsExpiredFailuresPreservingInflight10825(t *te
 		tracker.recordFailure(source, account)
 	}
 
-	first, retry := tracker.reserve(source, account)
+	first, retry := tracker.reserve(source, account, false)
 	if retry != 0 {
 		t.Fatalf("first reservation returned retry-after %v", retry)
 	}
 	now = now.Add(authThrottleWindow + time.Second)
-	second, retry := tracker.reserve(source, account)
+	second, retry := tracker.reserve(source, account, false)
 	if retry != 0 {
 		t.Fatalf("reservation remained saturated after failure window expired: retry-after %v", retry)
 	}

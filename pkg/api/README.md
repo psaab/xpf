@@ -621,9 +621,15 @@ budgets; only claimed Basic usernames receive the cross-source account budget.
 Failures and lockout refusals increment the fixed `rest_api_auth` audit counter.
 
 A bad `Authorization` header remains a charged failed attempt even when a valid
-`X-API-Key` fallback authorizes the request. The account lock follows the
-claimed identity; a clean key-only request remains available while the
-source-level budget is below its cap.
+`X-API-Key` fallback authorizes the request. Dual-header requests atomically
+reserve both the claimed Authorization pair and the API-key pair before either
+credential verifier runs; a lockout or occupied budget on either refuses the
+request, even if the other credential would succeed. Failed fallback keys charge
+the API-key pair as well, while the source is charged only once per request.
+A successful fallback clears only its verified key bucket; an unevaluated key
+does not clear existing key failures. A clean key-only request remains available
+after a Basic lockout while its own pair and source budgets remain below their
+caps. Credential precedence and unlocked valid-key fallback remain unchanged.
 
 When no credential authorizes a request, REST responds with HTTP 401; a
 throttle refusal is HTTP 429 with a `Retry-After` header. Throttle state is

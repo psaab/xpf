@@ -254,7 +254,8 @@ func throttledAuthCheckWithCheck(throttle *authFailureTracker, cfg AuthConfig, m
 		return true, 0
 	}
 	source, claimed := throttleIdentity(r)
-	reservation, retryAfter := throttle.reserve(source, claimed)
+	dualHeader := r.Header.Get("Authorization") != "" && r.Header.Get("X-API-Key") != ""
+	reservation, retryAfter := throttle.reserve(source, claimed, dualHeader)
 	if retryAfter > 0 {
 		return false, retryAfter
 	}

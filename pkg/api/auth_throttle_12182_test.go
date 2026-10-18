@@ -70,7 +70,7 @@ func TestAuthThrottleFullOfLiveLockoutsRefusesAdmission12182(t *testing.T) {
 		t.Fatalf("victim lockout before pressure = (%v, %v), want (true, %v)", locked, wait, authThrottleBaseLockout)
 	}
 
-	_, retry := tracker.reserve("203.0.113.9", authThrottleAPIKeyAccount)
+	_, retry := tracker.reserve("203.0.113.9", authThrottleAPIKeyAccount, false)
 	if retry != time.Second {
 		t.Fatalf("saturated reserve retry = %v, want %v", retry, time.Second)
 	}
@@ -95,7 +95,7 @@ func TestAuthThrottleFullOfExpiredBucketsStillAdmits12182(t *testing.T) {
 	fillAuthThrottleWithLiveLockouts12182(t, tracker, now)
 
 	now = now.Add(authThrottleMaxLockout + authThrottleWindow + time.Minute)
-	reservation, retry := tracker.reserve("203.0.113.9", authThrottleAPIKeyAccount)
+	reservation, retry := tracker.reserve("203.0.113.9", authThrottleAPIKeyAccount, false)
 	if retry != 0 {
 		t.Fatalf("reserve on a table of fully-expired buckets refused with retry-after %v, want admission", retry)
 	}
