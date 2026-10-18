@@ -61,6 +61,7 @@ func TestShimHeadroomOutlinesStayOutlined14851(t *testing.T) {
 	src := string(raw)
 	for _, fn := range []string{
 		"incr_fallback_stat",
+		"try_xdp_userspace",
 		"is_interface_nat_destination",
 		"live_userspace_session_action",
 	} {
