@@ -146,10 +146,13 @@ func configMutationPaths(editPath, parts []string, quoted []bool) ([]string, boo
 		// `^system root-authentication` stops matching. That is a coverage LOSS
 		// introduced by a precision gain, which is why quote provenance is
 		// carried out of the lexer rather than inferred from position.
-		if len(parts) < 3 || !quoted[len(parts)-1] {
-			break // no comment token: the whole remainder is the path
+		// #14717: the split itself is splitAnnotateTokens, shared with every
+		// annotate executor via ParseAnnotateCommand, so the path adjudicated
+		// here is the path acted on by construction.
+		if path, _, ok := splitAnnotateTokens(parts, quoted); ok {
+			return []string{resolve(path)}, true
 		}
-		return []string{resolve(parts[1 : len(parts)-1])}, true
+		break // no comment token: the whole remainder is the path
 	}
 
 	return []string{resolve(parts[1:])}, true

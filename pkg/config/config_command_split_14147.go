@@ -137,3 +137,36 @@ func ParseInsertCommand(line string) (elemPath, refPath []string, before, ok boo
 	}
 	return elem, insertRefPath(elem, refTokens), before, true
 }
+
+// splitAnnotateTokens splits lexed annotate tokens as
+// `annotate <path...> "<comment>"`, where the comment is the LAST
+// token and only when it was authored quoted. tokens[0] must already
+// be `annotate`. This is the same rule configMutationPaths applies,
+// so the path adjudicated is the path acted on (#14717).
+func splitAnnotateTokens(tokens []string, quoted []bool) (path []string, comment string, ok bool) {
+	if len(tokens) < 3 || tokens[0] != "annotate" || !quoted[len(tokens)-1] {
+		return nil, "", false
+	}
+	return tokens[1 : len(tokens)-1], tokens[len(tokens)-1], true
+}
+
+// ParseAnnotateCommand lexes line and splits it as
+// `annotate <path...> "<comment>"`, where only a trailing quoted
+// token is the comment. This is the split both the authorization
+// gate (configMutationPaths annotate arm) and every annotate
+// executor must use, so a quoted path element cannot be mistaken
+// for the comment boundary (#14717). The gate drops exactly the
+// last quoted token; an executor splitting at the first '"' acted
+// on a shorter path than the one adjudicated.
+func ParseAnnotateCommand(line string) (path []string, comment string, ok bool) {
+	tokens, quoted := lexConfigMutationLine9938(line)
+	return splitAnnotateTokens(tokens, quoted)
+}
+
+// ParseAnnotateRemainder is ParseAnnotateCommand for a line whose
+// `annotate` verb has already been stripped (the gRPC Set handler
+// and the remote CLI strip it before routing). It re-adds the verb
+// so the same canonical split applies.
+func ParseAnnotateRemainder(remainder string) (path []string, comment string, ok bool) {
+	return ParseAnnotateCommand("annotate " + remainder)
+}

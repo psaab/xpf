@@ -201,11 +201,12 @@ func TestAnnotateCommentReachesConfigVerbatim(t *testing.T) {
 		{"trailing apostrophe", `annotate system host-name "belongs to users'"`, "belongs to users'"},
 		// Syntactic quotes still peeled.
 		{"syntactic quotes peeled", `annotate system host-name "plain comment"`, "plain comment"},
-		// THE DISCRIMINATOR for this site. Its old cutset was `"` only, so a
-		// trailing apostrophe survives either implementation and cannot tell
-		// them apart. An UNTERMINATED leading quote can: the cutset strips it,
-		// the matched pair keeps it.
-		{"unterminated quote kept", `annotate system host-name "unterminated`, `"unterminated`},
+		// #14717: an unterminated trailing string is not a quoted comment
+		// token under the canonical lexer split the gate uses, so the line
+		// is rejected as usage and nothing is annotated. Before the
+		// canonical split, the first-quote parser preserved the raw
+		// `"unterminated` text as the comment.
+		{"unterminated rejected", `annotate system host-name "unterminated`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
@@ -220,6 +221,12 @@ func TestAnnotateCommentReachesConfigVerbatim(t *testing.T) {
 				t.Fatalf("dispatchConfig(%q): %v", tc.line, err)
 			}
 			rendered := store.ShowCandidate()
+			if tc.want == "" {
+				if strings.Contains(rendered, "/*") {
+					t.Errorf("unterminated annotate must not annotate anything.\n%s", rendered)
+				}
+				return
+			}
 			if !strings.Contains(rendered, tc.want) {
 				t.Errorf("rendered candidate does not contain %q; the annotation is persisted, so it must be verbatim.\n%s", tc.want, rendered)
 			}
