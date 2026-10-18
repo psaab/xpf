@@ -11859,7 +11859,7 @@ fn policy_shared_remove_releases_coordinator_and_dnat_14840() {
     for owner in [&key, &reverse_key] {
         coordinator
             .steering_owners
-            .publish_row(
+            .publish_row_for_test(
                 &crate::afxdp::bpf_map::session_map_row(owner),
                 owner,
                 crate::afxdp::bpf_map::SteeringHolder::Coordinator,
@@ -11922,7 +11922,7 @@ fn policy_deferred_redirects_release_coordinator_claim_14840() {
     let owners = crate::afxdp::bpf_map::SteeringRowOwners::default();
     let row = crate::afxdp::bpf_map::session_map_row(&key);
     owners
-        .publish_row(
+        .publish_row_for_test(
             &row,
             &key,
             crate::afxdp::bpf_map::SteeringHolder::Worker(1),
@@ -11930,7 +11930,7 @@ fn policy_deferred_redirects_release_coordinator_claim_14840() {
         )
         .expect("worker pre-claim");
     owners
-        .publish_row(
+        .publish_row_for_test(
             &row,
             &key,
             crate::afxdp::bpf_map::SteeringHolder::Coordinator,
