@@ -436,18 +436,23 @@ func (c *CLI) dispatchConfig(line string) error {
 		}
 		return c.dispatchOperational(strings.Join(parts[1:], " "))
 	case "annotate":
-		if len(parts) < 3 {
+		// #14717: parse with the ONE canonical lexer split the gate uses
+		// (config.ParseAnnotateCommand -> splitAnnotateTokens): the comment
+		// is the LAST token and only when authored quoted, so a quoted path
+		// element stays in the path. Before this the arm re-joined
+		// strings.Fields output (quoting already destroyed) and split at the
+		// FIRST '"', so `annotate system "interfaces" "pwned"` was gated as
+		// `system interfaces` but executed on `system` — a denied stanza
+		// annotated despite deny-configuration. Every sibling mutation arm
+		// and the gRPC arm pass EventPlantClassForMutation(c.userClass);
+		// this arm dropped it via store.Annotate (empty plant class).
+		relPath, comment, ok := config.ParseAnnotateCommand(line)
+		if !ok || len(relPath) == 0 {
 			fmt.Println("usage: annotate <path> \"comment\"")
 			return nil
 		}
-		line := strings.Join(parts[1:], " ")
-		pathStr, comment, ok := annotateCommentFromLine(line)
-		if !ok {
-			fmt.Println("usage: annotate <path> \"comment\"")
-			return nil
-		}
-		pathParts := append(c.store.GetEditPath(), strings.Fields(pathStr)...)
-		if err := c.store.Annotate(pathParts, comment); err != nil {
+		pathParts := append(c.store.GetEditPath(), relPath...)
+		if err := c.store.AnnotateAsPlantClass("", config.EventPlantClassForMutation(c.userClass), pathParts, comment); err != nil {
 			return err
 		}
 		fmt.Println("annotation set")
