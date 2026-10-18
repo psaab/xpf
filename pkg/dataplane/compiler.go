@@ -493,7 +493,16 @@ func CompileConfig(dp DataPlane, cfg *config.Config, isRecompile bool, beforeMut
 	// Phase 2: Compile zones — FIRST HOST MUTATION. Everything above this line
 	// must be non-destructive.
 	if err := compileZones(dp, cfg, result); err != nil {
-		return nil, fmt.Errorf("compile zones: %w", err)
+		// #14680: compileZones is the first host mutation (Phase 2). On a
+		// mid-loop abort the partial result already carries hostMutations
+		// (VLAN create, address reconcile, MTU) and the deferred XDP set
+		// queued before the abort. Return the partial result so
+		// CompileUserspaceShim can run its post-mutation accounting
+		// (#4960 annotation / #8285 retention / #7289 live proof) instead
+		// of discarding exactly the evidence those mechanisms need.
+		// Callers that only check err are unaffected (they already
+		// discarded the result on error).
+		return result, fmt.Errorf("compile zones: %w", err)
 	}
 
 	// Phase 3: Compile address book

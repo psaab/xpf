@@ -136,6 +136,12 @@ func (m *Manager) markVLANSubInterfaces(result *CompileResult) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// #14680: REPLACE, not append-only. The set must describe THIS
+	// compile's VLAN children; an append-only map permanently excludes
+	// a reused ifindex from xdpSwapTargets/XDPEntryPrograms even after
+	// the VLAN child is gone. Success tail only — an aborted apply must
+	// not rewrite the live set (see abort handling in loader.go).
+	clear(m.vlanSubInterfaces)
 	for ifidx := range result.genericXDPIfindexes {
 		if !result.tunnelIfindexes[ifidx] {
 			m.vlanSubInterfaces[ifidx] = true

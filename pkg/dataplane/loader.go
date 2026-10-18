@@ -284,6 +284,19 @@ func (m *Manager) CompileUserspaceShim(cfg *config.Config, beforeMutation ...fun
 	compilerDP := userspaceShimCompileDataplane{Manager: m}
 	result, err := CompileConfig(compilerDP, cfg, m.lastCompile != nil, preMutationCheck)
 	if err != nil {
+		if result != nil {
+			// #14680: CompileConfig now returns the partial result on a
+			// compileZones (Phase 2) abort — the phase that already
+			// mutated the host. Route it through the same post-mutation
+			// accounting as the aborts below: inherit any retained
+			// divergence, publish a LIVE arm-coverage proof for this
+			// apply, retain this apply's divergence, and annotate the
+			// error with what moved (#4960/#8285/#7289). Pre-mutation
+			// failures (pre-pass, bad callback arity) return a nil
+			// result and keep the bare return.
+			m.inheritHostDivergence(result)
+			return nil, m.abortAfterHostMutation(result, annotateHostMutationOnAbort(result, err))
+		}
 		return nil, err
 	}
 	// Scoped ifindex-cap early-warning (#5836): reject only when an

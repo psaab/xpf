@@ -569,6 +569,16 @@ func compileZones(dp DataPlane, cfg *config.Config, result *CompileResult) error
 
 	st, err := programZoneMaps(dp, cfg, result)
 	if err != nil {
+		// #14680: publish the deferred sets queued BEFORE the abort so the
+		// partial CompileResult CompileConfig now returns describes the
+		// surfaces this apply already queued/mutated. The #7289 live proof
+		// in CompileUserspaceShim reads pendingXDP/genericXDPIfindexes;
+		// without this the proof would run on an empty required set and
+		// publish a vacuous complete verdict for a mutated host.
+		if st != nil {
+			result.pendingXDP = st.xdpIfindexes
+			result.tunnelIfindexes = st.tunnelIfindexes
+		}
 		return err
 	}
 
@@ -786,10 +796,10 @@ func programZoneMaps(dp DataPlane, cfg *config.Config, result *CompileResult) (*
 
 		zc, err := buildZoneConfig(zone, name, zid, result)
 		if err != nil {
-			return nil, err
+			return st, err
 		}
 		if err := dp.SetZoneConfig(zid, zc); err != nil {
-			return nil, fmt.Errorf("set zone config %s: %w", name, err)
+			return st, fmt.Errorf("set zone config %s: %w", name, err)
 		}
 
 		for _, ifaceRef := range zone.Interfaces {
@@ -808,7 +818,7 @@ func programZoneMaps(dp DataPlane, cfg *config.Config, result *CompileResult) (*
 				continue
 			}
 			if err := st.mapZoneInterface(dp, cfg, result, name, zone, zid, ifaceRef, ifaceTableID); err != nil {
-				return nil, err
+				return st, err
 			}
 		}
 	}
@@ -1050,6 +1060,22 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 		if err := rxVlanOffloadActivationError(cfg, cfgName, physName, rxvlanErr); err != nil {
 			return err
 		}
+		// #14680: the S-tag gate must fire BEFORE any further host
+		// mutation for this parent (MTU, ethtool, buffers, LinkSetUp).
+		// #10915's gate was deferred to the attach branch below, after
+		// LinkSetUp, so a stuck S-tag NIC was brought UP and addressed
+		// before the abort. Checking here fails closed before the host
+		// moves for this interface. Administratively disabled interfaces
+		// never receive the shim, so they are exempt (matching the
+		// disabled branch below); non-Ethernet framing is only known
+		// after the link lookup, and failing closed for that rare shape
+		// here matches the pre-fix direction (it was already gated,
+		// just later).
+		if dc, ok := cfg.Interfaces.Interfaces[cfgName]; !ok || dc == nil || !dc.Disable {
+			if err := rxVlanStagHwParseActivationError(physName, stagErr); err != nil {
+				return err
+			}
+		}
 
 		// Single cached netlink lookup for MTU, speed/duplex, and UP/DOWN.
 		nl, nlErr := result.cachedLinkByIndex(physIface.Index)
@@ -1178,14 +1204,8 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 			result.recordUnarmedSurface(
 				nonEthernetSurfaceRecord(physName, physIface.Index, encap))
 		} else {
-			// #10915: only an interface that passed the disabled/non-Ethernet
-			// checks above will receive the userspace XDP shim. Its in-frame
-			// S-tag drop is load-bearing on every such parent, so failure to
-			// disable rx-vlan-stag-hw-parse must fail closed here, including a
-			// plain parent with no configured 802.1Q VLAN subinterfaces.
-			if err := rxVlanStagHwParseActivationError(physName, stagErr); err != nil {
-				return err
-			}
+			// #14680: the #10915 S-tag gate fires above, before
+			// MTU/LinkSetUp; no second check here.
 			// Defer actual XDP/TC attachment to after all compile phases
 			// so link.Update() switches to programs with fully-populated maps.
 			if !st.attachedXDP[physIface.Index] {
