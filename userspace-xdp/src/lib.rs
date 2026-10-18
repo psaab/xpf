@@ -1719,6 +1719,15 @@ fn drop_degraded_transit(ctrl: &UserspaceCtrl, reason: u32) -> Result<u32, i64> 
     Ok(xdp_action::XDP_DROP)
 }
 
+// #14851: outlined so the verifier explores the fallback-counter map
+// update once instead of at every inlined call site (many dozen). This
+// is the session_action_for_key shape: a small map-touching helper
+// reached from many sites pays the per-calling-state re-verification
+// at each one when inlined, and outlining it (with the two siblings
+// below) was measured to bring the object back under the #4555 floor
+// instead of installing it OVERRIDDEN. Do not re-inline without
+// re-measuring through cmd/shimverify.
+#[inline(never)]
 fn incr_fallback_stat(reason: u32) {
     if reason >= USERSPACE_FALLBACK_REASON_MAX {
         return;
@@ -2261,6 +2270,10 @@ fn is_icmp_to_interface_nat_local(pkt: &ParsedPacket, domain: u32) -> bool {
     }
 }
 
+// #14851: outlined (the `incr_fallback_stat` rationale above): the
+// interface-NAT key construction and map reads are explored once
+// instead of at every caller. Largest single saving of the set.
+#[inline(never)]
 fn is_interface_nat_destination(pkt: &ParsedPacket, domain: u32) -> bool {
     // ICMP errors (TTL Exceeded, Unreachable, etc.) to NAT addresses must NOT
     // be passed to the kernel — they need embedded-ICMP NAT reversal in the
@@ -2283,6 +2296,9 @@ fn is_interface_nat_destination(pkt: &ParsedPacket, domain: u32) -> bool {
     }
 }
 
+// #14851: outlined (the `incr_fallback_stat` rationale above), the
+// `session_action_for_key` shape for the live session map.
+#[inline(never)]
 fn live_userspace_session_action(pkt: &ParsedPacket) -> u8 {
     let key = UserspaceSessionKey {
         addr_family: pkt.addr_family,
