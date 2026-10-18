@@ -287,11 +287,18 @@ func (c *ctl) dispatchConfig(line string) error {
 
 	switch parts[0] {
 	case "edit":
-		if len(parts) < 2 {
+		// #14716: lex the typed fragment and keep only the lexed cursor,
+		// as the local CLI does; raw Fields tokens desync the server gate
+		// from store execution for quoted/comment-decorated paths.
+		frag, fragOK := config.ParseEditFragment(line)
+		if !fragOK {
+			return fmt.Errorf("edit: invalid path")
+		}
+		if len(frag) == 0 {
 			fmt.Println("edit: missing path")
 			return nil
 		}
-		c.editPath = append(c.editPath, parts[1:]...)
+		c.editPath = append(config.NormalizeEditPathTokens(c.editPath), frag...)
 		if c.rl != nil {
 			c.rl.SetPrompt(c.configPrompt())
 		}
@@ -324,7 +331,7 @@ func (c *ctl) dispatchConfig(line string) error {
 		if len(parts) < 2 {
 			return fmt.Errorf("set: missing path")
 		}
-		fullPath := append(append([]string{}, c.editPath...), parts[1:]...)
+		fullPath := append(append([]string{}, config.NormalizeEditPathTokens(c.editPath)...), parts[1:]...)
 		_, err := c.client.Set(c.ctx(), &pb.SetRequest{
 			Input: strings.Join(fullPath, " "),
 		})
@@ -337,7 +344,7 @@ func (c *ctl) dispatchConfig(line string) error {
 		if len(parts) < 2 {
 			return fmt.Errorf("delete: missing path")
 		}
-		fullPath := append(append([]string{}, c.editPath...), parts[1:]...)
+		fullPath := append(append([]string{}, config.NormalizeEditPathTokens(c.editPath)...), parts[1:]...)
 		_, err := c.client.Delete(c.ctx(), &pb.DeleteRequest{
 			Input: strings.Join(fullPath, " "),
 		})
@@ -354,7 +361,7 @@ func (c *ctl) dispatchConfig(line string) error {
 		if len(parts) < 2 {
 			return fmt.Errorf("%s: missing path", parts[0])
 		}
-		fullPath := append(append([]string{}, c.editPath...), parts[1:]...)
+		fullPath := append(append([]string{}, config.NormalizeEditPathTokens(c.editPath)...), parts[1:]...)
 		_, err := c.client.Set(c.ctx(), &pb.SetRequest{
 			Input: parts[0] + " " + strings.Join(fullPath, " "),
 		})
@@ -368,11 +375,12 @@ func (c *ctl) dispatchConfig(line string) error {
 		// through Server.Set, with the verb retained for authorization.
 		remainder := strings.TrimSpace(strings.TrimPrefix(line, parts[0]))
 		pathText, comment, ok := cliterm.AnnotateCommentFromLine(remainder)
-		if !ok || len(strings.Fields(pathText)) == 0 {
+		annotPath, annotOK := config.ParseConfigPath(pathText)
+		if !ok || !annotOK || len(annotPath) == 0 {
 			fmt.Println("usage: annotate <path> \"comment\"")
 			return nil
 		}
-		fullPath := append(append([]string{}, c.editPath...), strings.Fields(pathText)...)
+		fullPath := append(append([]string{}, config.NormalizeEditPathTokens(c.editPath)...), annotPath...)
 		input := "annotate " + strings.Join(fullPath, " ") + " \"" + cliterm.EscapeAnnotateComment(comment) + "\""
 		_, err := c.client.Set(c.ctx(), &pb.SetRequest{Input: input})
 		if err != nil {
@@ -391,9 +399,9 @@ func (c *ctl) dispatchConfig(line string) error {
 			fmt.Printf("usage: %s <src-path> to <dst-path>\n", parts[0])
 			return nil
 		}
-		if len(c.editPath) > 0 {
-			srcParts = append(append([]string{}, c.editPath...), srcParts...)
-			dstParts = append(append([]string{}, c.editPath...), dstParts...)
+		if norm := config.NormalizeEditPathTokens(c.editPath); len(norm) > 0 {
+			srcParts = append(append([]string{}, norm...), srcParts...)
+			dstParts = append(append([]string{}, norm...), dstParts...)
 		}
 		fullInput := parts[0] + " " + strings.Join(srcParts, " ") + " to " + strings.Join(dstParts, " ")
 		_, err := c.client.Set(c.ctx(), &pb.SetRequest{Input: fullInput})
@@ -413,8 +421,8 @@ func (c *ctl) dispatchConfig(line string) error {
 		if isBefore {
 			kw = "before"
 		}
-		if len(c.editPath) > 0 {
-			elemParts = append(append([]string{}, c.editPath...), elemParts...)
+		if norm := config.NormalizeEditPathTokens(c.editPath); len(norm) > 0 {
+			elemParts = append(append([]string{}, norm...), elemParts...)
 		}
 		fullInput := "insert " + strings.Join(elemParts, " ") + " " + kw + " " + strings.Join(refTokens, " ")
 		_, err := c.client.Set(c.ctx(), &pb.SetRequest{Input: fullInput})

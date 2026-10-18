@@ -80,7 +80,7 @@ func (c *CLI) handleCopyRename(line string) error {
 		fmt.Printf("usage: %s <src-path> to <dst-path>\n", cmd)
 		return nil
 	}
-	editPath := c.store.GetEditPath()
+	editPath := config.NormalizeEditPathTokens(c.store.GetEditPath())
 	if len(editPath) > 0 {
 		srcPath = append(append([]string{}, editPath...), srcPath...)
 		dstPath = append(append([]string{}, editPath...), dstPath...)
@@ -105,7 +105,7 @@ func (c *CLI) handleInsert(line string) error {
 		fmt.Println("usage: insert <element-path> before|after <ref-identifier>")
 		return nil
 	}
-	editPath := c.store.GetEditPath()
+	editPath := config.NormalizeEditPathTokens(c.store.GetEditPath())
 	if len(editPath) > 0 {
 		elemPath = append(append([]string{}, editPath...), elemPath...)
 	}
