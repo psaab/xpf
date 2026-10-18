@@ -177,6 +177,35 @@ pub(crate) struct WgControlEntry {
     /// set-membership change (tunnel added/removed, port moved in or out of
     /// the steered set) takes effect without a restart.
     pub(in crate::afxdp) spawned_kernel_transport: WgKernelTransport,
+    /// #14675: the peer configuration captured at spawn (pubkey,
+    /// configured literal endpoint, authored DNS hostname per peer,
+    /// pubkey-sorted). The control thread seeds its peer set, its
+    /// effective-endpoint map, and the resolver's hostname targets from
+    /// this configuration exactly once, so the apply-time stale prune
+    /// compares this against a fresh capture and restarts the thread
+    /// when a same-engine commit adds/removes a peer or changes a
+    /// peer's endpoint or hostname.
+    pub(in crate::afxdp) spawned_peer_config: Vec<WgPeerSpawnConfig>,
+}
+
+/// #14675: one peer's spawn-time configuration capture for the WG
+/// control-thread stale prune: public key, configured literal endpoint,
+/// and authored DNS hostname endpoint. The control thread seeds
+/// `peer_pubkeys` / `effective_endpoints` from the engine and the
+/// resolver's `endpoint_hosts` from the forwarding state exactly once
+/// at spawn, so any later commit that changes this tuple on a reused
+/// engine Arc must restart the thread — the same treatment
+/// `spawned_outer_mtu` (#2921), `spawned_per_peer_outer_mtu` (#5291),
+/// `spawned_outer_bind_device` (#10196), and
+/// `spawned_kernel_transport` (#9521) already give the other spawn-time
+/// captures. `endpoint_host` is load-bearing here: it is NOT part of
+/// `wg_peers_eq`, so a hostname-only change reuses the engine Arc and
+/// would otherwise leave the resolver resolving the old name forever.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WgPeerSpawnConfig {
+    pub(in crate::afxdp) pubkey: [u8; 32],
+    pub(in crate::afxdp) endpoint: Option<std::net::SocketAddr>,
+    pub(in crate::afxdp) endpoint_host: Option<String>,
 }
 
 /// #9587: the bound on the steered WireGuard listen-port set, shared by the

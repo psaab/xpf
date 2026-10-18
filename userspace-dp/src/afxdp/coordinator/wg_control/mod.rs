@@ -507,6 +507,135 @@ fn init_consumer_state(
     (peer_pubkeys, effective_endpoints, last_authenticated_rx)
 }
 
+/// #14675: converge the control loop's frozen-at-spawn consumer state
+/// onto the engine's CURRENT peer table. `reconcile_peers` publishes a
+/// peer commit into the reused engine Arc in place, so without this a
+/// surviving thread would keep driving timers, handshake attempts,
+/// DNS adoption, and roam adoption for the spawn-time peer set — a
+/// peer added by the commit (DNS-hostname or responder-only included)
+/// would never handshake, and a peer whose configured endpoint moved
+/// would keep receiving initiations at the decommissioned address.
+///
+/// Rules, per peer, against `configured_endpoints` (the configured
+/// value this loop last saw — NOT `effective_endpoints`, which a live
+/// roam or an accepted DNS answer legitimately moves without a
+/// commit, and which therefore must survive an unchanged-config tick
+/// untouched):
+///
+///   - ADDED (in the engine, unknown here): adopt the pubkey, seed
+///     the effective endpoint from the configured value, and start a
+///     BringUp attempt when one is configured — the same bring-up a
+///     fresh spawn performs.
+///   - CONFIGURED ENDPOINT CHANGED (surviving pubkey, new configured
+///     value): the operator's new value wins over any live/roamed or
+///     previously resolved address — reset the effective endpoint to
+///     it (or drop it when the peer is now responder-only/hostname)
+///     and drop any in-flight attempt, whose retransmits target the
+///     old address.
+///   - REMOVED (known here, gone from the engine): drop every piece
+///     of per-peer state, so a re-added pubkey starts clean.
+///
+/// Runs on the timer tick (1s), so the added allocation is two small
+/// table snapshots per second — the same `peer_pubkeys()` /
+/// `peer_configured_endpoints()` slow-path reads `init_consumer_state`
+/// already performs at spawn.
+#[allow(clippy::too_many_arguments)]
+fn refresh_consumer_peers(
+    engine: &crate::afxdp::wg::WgEngine,
+    socket: &UdpSocket,
+    socket_is_v6: bool,
+    peer_pubkeys: &mut Vec<[u8; 32]>,
+    effective_endpoints: &mut std::collections::HashMap<[u8; 32], SocketAddr>,
+    last_authenticated_rx: &mut std::collections::HashMap<[u8; 32], u64>,
+    configured_endpoints: &mut std::collections::HashMap<[u8; 32], Option<SocketAddr>>,
+    attempts: &mut std::collections::HashMap<[u8; 32], HandshakeAttempt>,
+    now_ns: u64,
+    encap_buf: &mut [u8],
+    tunnel_name: &str,
+    recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
+) {
+    let current: std::collections::HashMap<[u8; 32], Option<SocketAddr>> =
+        engine.peer_configured_endpoints().into_iter().collect();
+    if current.len() == configured_endpoints.len()
+        && current
+            .iter()
+            .all(|(pk, ep)| configured_endpoints.get(pk) == Some(ep))
+    {
+        return; // No peer commit since the last tick: the common case.
+    }
+    // Removed peers: drop all per-peer consumer state.
+    peer_pubkeys.retain(|pk| {
+        if current.contains_key(pk) {
+            return true;
+        }
+        effective_endpoints.remove(pk);
+        last_authenticated_rx.remove(pk);
+        attempts.remove(pk);
+        false
+    });
+    for (pk, configured) in &current {
+        match configured_endpoints.get(pk) {
+            None => {
+                // Added peer: seed from its configured endpoint and
+                // run the spawn-time bring-up for it.
+                if let Some(ep) = configured {
+                    effective_endpoints.insert(*pk, *ep);
+                    let replaced = attempts.remove(pk);
+                    if replaced.is_some() {
+                        engine.abort_pending_for_peer(pk);
+                    }
+                    if let Some(att) = start_attempt(
+                        engine,
+                        socket,
+                        socket_is_v6,
+                        pk,
+                        *ep,
+                        AttemptTrigger::BringUp,
+                        now_ns,
+                        encap_buf,
+                        tunnel_name,
+                        recent_exceptions,
+                    ) {
+                        attempts.insert(*pk, att);
+                    }
+                }
+                peer_pubkeys.push(*pk);
+            }
+            Some(previous) if previous != configured => {
+                // Configured endpoint moved (or was removed): the new
+                // configured value wins over any live/roamed address.
+                match configured {
+                    Some(ep) => {
+                        effective_endpoints.insert(*pk, *ep);
+                    }
+                    None => {
+                        effective_endpoints.remove(pk);
+                    }
+                }
+                // The in-flight attempt's retransmits target the old
+                // address, and its pending reservation holds the old
+                // session index — drop both, plus the engine live
+                // endpoint the dataplane prefers over configured.
+                if attempts.remove(pk).is_some() {
+                    engine.abort_pending_for_peer(pk);
+                }
+                engine.clear_live_endpoint(pk);
+                // A hostname peer's stale last_authenticated_rx stamp
+                // would roam-hold the restarted resolver's first
+                // answer for up to 90s; a peer with no configured
+                // endpoint must be free to take it immediately.
+                if configured.is_none() {
+                    last_authenticated_rx.remove(pk);
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    // Engine table (pubkey-sorted) order, matching init_consumer_state.
+    peer_pubkeys.sort_unstable();
+    *configured_endpoints = current;
+}
+
 /// The per-tunnel control loop proper, on pre-opened fds so the loop
 /// logic is unit-testable without a real TUN device (the production
 /// caller binds the socket and attaches the persistent wgN TUN above).
@@ -563,8 +692,18 @@ fn run_wg_control_loop_with_kernel_path_and_forward(
     // attempt window. Egress TUN packets are LPM-routed to the peer that
     // owns the inner destination's AllowedIPs (cryptokey routing); each
     // peer drives its own keepalive/rekey timers.
-    let (peer_pubkeys, mut effective_endpoints, mut last_authenticated_rx) =
+    let (mut peer_pubkeys, mut effective_endpoints, mut last_authenticated_rx) =
         init_consumer_state(engine);
+    // #14675: the CONFIGURED endpoint last seen per peer, seeded from the
+    // same engine snapshot. `refresh_consumer_peers` compares the live
+    // engine table against this each timer tick to adopt peers a
+    // same-engine config commit added/removed or whose configured
+    // endpoint it moved — state `init_consumer_state` otherwise froze
+    // at spawn. Kept separate from `effective_endpoints`, which a live
+    // roam or DNS adoption legitimately moves away from the configured
+    // value without any commit.
+    let mut configured_endpoints: std::collections::HashMap<[u8; 32], Option<SocketAddr>> =
+        engine.peer_configured_endpoints().into_iter().collect();
     // 64 KiB scratch for both directions (max IP packet; WG records are
     // smaller). Single allocation at thread start — no per-packet alloc.
     let mut sock_buf = vec![0u8; 65_535];
@@ -964,6 +1103,30 @@ fn run_wg_control_loop_with_kernel_path_and_forward(
             // Session expiry is engine-wide (sweeps every peer's
             // sessions); run it once per pass, not per peer.
             engine.expire_sessions(now);
+            // #14675: adopt peer-set / configured-endpoint changes a
+            // same-engine commit published into the engine table since
+            // the last tick, BEFORE the resolver adoption and per-peer
+            // timers below consume the peer set — a peer added by that
+            // commit gets its timers, handshake attempts, and roam
+            // adoption from this pass on, and a peer whose configured
+            // endpoint moved stops sending to the decommissioned
+            // address. The coordinator ALSO restarts this thread on
+            // such a commit (peer_config_changed), so this is the
+            // convergence guarantee for any thread that survives.
+            refresh_consumer_peers(
+                engine,
+                socket,
+                socket_is_v6,
+                &mut peer_pubkeys,
+                &mut effective_endpoints,
+                &mut last_authenticated_rx,
+                &mut configured_endpoints,
+                &mut attempts,
+                now,
+                &mut encap_buf,
+                tunnel_name,
+                recent_exceptions,
+            );
             // #7158: adopt freshly-resolved hostname endpoints before driving
             // the per-peer timers, so an initiation this pass uses the newest
             // address rather than the previous one.
