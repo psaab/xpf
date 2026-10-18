@@ -94,19 +94,24 @@ var methodPermissions = map[string]config.LoginClassPermission{
 	"ListHistory":  config.PermView,
 
 	// --- Operational show RPCs: the `show` family. -------------------------
-	"GetConfigModeStatus":      config.PermView,
-	"GetStatus":                config.PermView,
-	"GetGlobalStats":           config.PermView,
-	"GetZones":                 config.PermView,
-	"GetPolicies":              config.PermView,
-	"GetSessions":              config.PermView,
-	"GetSessionSummary":        config.PermView,
-	"GetZonePairSummary":       config.PermView,
-	"GetNATSource":             config.PermView,
-	"GetNATDestination":        config.PermView,
-	"GetScreen":                config.PermView,
-	"GetEvents":                config.PermView,
-	"GetD11AttestationLedger":  config.PermMaint,
+	"GetConfigModeStatus": config.PermView,
+	"GetStatus":           config.PermView,
+	"GetGlobalStats":      config.PermView,
+	"GetZones":            config.PermView,
+	"GetPolicies":         config.PermView,
+	"GetSessions":         config.PermView,
+	"GetSessionSummary":   config.PermView,
+	"GetZonePairSummary":  config.PermView,
+	"GetNATSource":        config.PermView,
+	"GetNATDestination":   config.PermView,
+	"GetScreen":           config.PermView,
+	"GetEvents":           config.PermView,
+	// #14709: the D11 ledger documents "uid 0 or the configured super-user
+	// class" and its handler enforces PermAll; pricing it PermMaint here
+	// would let a maintenance-only custom class through the interceptor
+	// to a handler that must then deny it — and any future handler that
+	// trusted the coarse gate would be a bypass. Price matches handler.
+	"GetD11AttestationLedger":  config.PermAll,
 	"GetInterfaces":            config.PermView,
 	"ShowInterfacesDetail":     config.PermView,
 	"GetDHCPLeases":            config.PermView,
@@ -243,6 +248,15 @@ var systemActionPermissions = map[string]config.LoginClassPermission{
 // handler's would be a bypass rather than a cosmetic bug. Over-restricting a
 // deep dataplane-diagnostic verb to super-user is the cheaper error.
 func systemActionPermission(action string) config.LoginClassPermission {
+	// #14709: the D11 attestation arm re-arms the proof-of-life authority
+	// and its handler requires root or the configured super-user class.
+	// It is a PREFIX verb (`userspace-attest:arm:<run>:<epoch>:<marker>`),
+	// so it has no exact table key; without this arm it would fall to the
+	// PermMaint default and a maintenance-only class would reach a handler
+	// that must deny it — price it PermAll to match the handler.
+	if strings.HasPrefix(action, "userspace-attest:arm:") {
+		return config.PermAll
+	}
 	if p, ok := systemActionPermissions[action]; ok {
 		return p
 	}
