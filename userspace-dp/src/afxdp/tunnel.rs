@@ -600,10 +600,20 @@ pub(super) fn build_local_origin_tunnel_tx_request(
     // originated traffic: the wire path forwards such packets flowless.
     // Recover only the L3 identity from the IP header — never ports — so
     // the zone/source-ownership authority gates below apply before any
-    // transmission, exactly as for a flow-bearing packet. A packet that
+    // transmission, exactly as for a flow-bearing packet.
+    //
+    // #14655: the same holds for every LEGITIMATELY portless protocol —
+    // OSPF/PIM/ESP/VRRP/IGMP and non-query ICMP/ICMPv6 (ND/RA/MLD/errors)
+    // are `None` from `parse_flow_ports` by design (#3067), yet the wire
+    // path forwards them flowless while this path dropped them, so e.g.
+    // an OSPF adjacency over a `gr-` interface could receive Hellos but
+    // never send one. `local_origin_flowless_eligible` admits only a
+    // complete L4 header inside the IP-declared datagram; a packet that
     // is flowless for any other reason (truncated, uninspectable, or a
     // non-first fragment whose L3 header cannot be read) still fails
-    // closed with the same error as before.
+    // closed with the same error as before. Flowless packets mint no
+    // TunOrigin session and seed no IKE exchange (both keyed on `flow`
+    // below) — payload bytes are not a flow identity.
     let non_first_fragment = crate::afxdp::frame::frame_is_non_first_fragment(&inner_frame, meta);
     let flow = parse_session_flow_from_bytes(&inner_frame, meta);
     let (flow, src_ip) = match flow {
@@ -611,7 +621,9 @@ pub(super) fn build_local_origin_tunnel_tx_request(
             let src = flow.forward_key.src_ip;
             (Some(flow), src)
         }
-        None if non_first_fragment => {
+        None if non_first_fragment
+            || crate::afxdp::frame::local_origin_flowless_eligible(&inner_frame, meta) =>
+        {
             let src = crate::afxdp::frame::parse_packet_source_from_frame(&inner_frame, meta)
                 .ok_or_else(|| "parse_local_origin_session_flow_failed".to_string())?;
             (None, src)
