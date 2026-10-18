@@ -476,7 +476,11 @@ fn evaluate_filter_ref_non_routing_counted_v4(
             continue;
         }
         if !term.routing_instance.is_empty() {
-            return FilterResult::default();
+            // #14659: preserve fall-through modifiers (policer drop, log,
+            // FC/DSCP) accumulated from `next term` terms; the routing
+            // evaluator owns only the PBR steering verdict.
+            normalize_log_match_action(&mut acc);
+            return acc;
         }
         if always_count && term.has_count {
             record_filter_counter(&term.counter, packet_bytes);
@@ -573,7 +577,9 @@ fn evaluate_filter_ref_non_routing_counted_v6(
             continue;
         }
         if !term.routing_instance.is_empty() {
-            return FilterResult::default();
+            // #14659: see v4 — preserve accumulated fall-through modifiers.
+            normalize_log_match_action(&mut acc);
+            return acc;
         }
         if always_count && term.has_count {
             record_filter_counter(&term.counter, packet_bytes);

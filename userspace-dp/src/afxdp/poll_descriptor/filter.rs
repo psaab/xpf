@@ -265,21 +265,24 @@ pub(super) fn evaluate_non_pbr_input_filter(
         count_policy,
         meter.now_ns(now_ns),
     );
-    // #14120: the non-routing walk defers at a routing-instance term BEFORE
-    // merging that term's modifiers, so a policer on (or only reachable past)
-    // such a term meters nowhere in the walk above. On the inline-metered
-    // paths no TX-selection leg follows to cover it, so when the walk
-    // already went red, confirm the routing-bearing remainder also meters
-    // (its drop folds in below; when the walk stayed green the remainder
-    // cannot be red without charging, so it is not run — see the condition). Counters stay with
-    // the walks above / the routing evaluator (this walk is
-    // counter-suppressed); only the drop (and the already-applied color
-    // rewrite on the delivered frame's DSCP, where a consumer exists) is
-    // consumed. Transit (`DeferToTxSelection`) skips this: its TX-selection
-    // walk is routing-bearing and meters the whole term list once.
+    // #14120/#14659: the non-routing walk defers at a routing-instance term
+    // BEFORE merging that term's modifiers, so a policer on such a term
+    // meters nowhere in the walk above. On the inline-metered paths no
+    // TX-selection leg follows to cover it, so the routing-bearing
+    // remainder must meter it. Since #14659 the non-routing walk preserves
+    // (and has already metered) any fall-through policer drop, so running
+    // the remainder unconditionally would double-charge those terms: run
+    // it only when the walk stayed green (a red walk already charged every
+    // fall-through term; the remainder then cannot add a drop without a
+    // double charge, and its PBR-term policer is covered on the first
+    // packet by the session policer capture / on transit by TX selection).
+    // Counters stay with the walks above / the routing evaluator (this
+    // walk is counter-suppressed); only the drop is consumed. Transit
+    // (`DeferToTxSelection`) skips this: its TX-selection walk meters the
+    // whole term list once.
     let routing_policer_drop = if meter == crate::filter::InputPolicerMeter::Inline
-        && (result.policer_drop
-            || forwarding
+        && !result.policer_drop
+        && (forwarding
                 .filter_state
                 .iface_filter_v4_fast
                 .get(&ingress_ifindex)
@@ -453,13 +456,13 @@ pub(super) fn enforce_tunnel_outer_input_filter(
     if input_eval.action != crate::filter::FilterAction::Accept {
         return TunnelOuterInputFilterOutcome::Rejected;
     }
-    // #14120: this gate's decapsulated packet may still take the transit
-    // TX-selection leg (ordinary decap forwarding), which meters through a
-    // routing-instance term — so the gate must defer there (`false`). A
+    // #14120/#14659: this gate's decapsulated packet may still take the
+    // transit TX-selection leg (ordinary decap forwarding), which now
+    // meters a routing-instance term — so the gate must defer there. A
     // tunnel-to-self packet instead reinjects to the host and never takes
-    // that leg, so its PBR-term policer meters here (`true`) — before
-    // #14120 the unconditional non-routing deferral plus this walk's
-    // PBR stop left it uncharged, which the #12289 underlay test pins.
+    // that leg, so its PBR-term policer meters here — before #14120 the
+    // unconditional non-routing deferral plus this walk's PBR stop left
+    // it uncharged, which the #12289 underlay test pins.
     // The outer tunnel packet has no L4 flow, so `flow.dst_ip` is the
     // zero placeholder from the L3-only enforcement context — read the
     // real outer destination from the frame's L3 header.
@@ -478,7 +481,7 @@ pub(super) fn enforce_tunnel_outer_input_filter(
             }
         })
         .unwrap_or(flow.dst_ip);
-    let routing_bearing = crate::afxdp::forwarding::ingress_interface_local_resolution(
+    let local_delivery = crate::afxdp::forwarding::ingress_interface_local_resolution(
         forwarding,
         meta.ingress_ifindex as i32,
         meta.ingress_vlan_id,
@@ -493,20 +496,21 @@ pub(super) fn enforce_tunnel_outer_input_filter(
         )
         .is_some()
         || routing_instance_local_delivery_expected(forwarding, outer_dst);
-    let tx_selection = crate::filter::evaluate_filter_ref_tx_selection_runtime_uncounted_bearing(
-        filter,
-        flow.src_ip,
-        flow.dst_ip,
-        flow.forward_key.protocol,
-        flow.forward_key.src_port,
-        flow.forward_key.dst_port,
-        meta.dscp,
-        extra,
-        meta.pkt_len as u64,
-        now_ns,
-        routing_bearing,
-    );
-    if tx_selection.policer_drop {
+    if local_delivery
+        && crate::filter::evaluate_filter_ref_tx_selection_runtime_routing_bearing(
+            filter,
+            flow.src_ip,
+            flow.dst_ip,
+            flow.forward_key.protocol,
+            flow.forward_key.src_port,
+            flow.forward_key.dst_port,
+            meta.dscp,
+            extra,
+            meta.pkt_len as u64,
+            now_ns,
+        )
+        .policer_drop
+    {
         return TunnelOuterInputFilterOutcome::Rejected;
     }
     let route_outcome = crate::afxdp::forwarding::ingress_route_table_override_with_result(

@@ -44,7 +44,6 @@ pub(crate) use policer::{
 pub(crate) use tx_selection::{
     evaluate_filter_ref_tx_selection_counted, evaluate_filter_ref_tx_selection_runtime_counted,
     evaluate_filter_ref_tx_selection_runtime_routing_bearing,
-    evaluate_filter_ref_tx_selection_runtime_uncounted_bearing,
     evaluate_filter_ref_tx_selection_runtime_uncounted, evaluate_filter_ref_tx_selection_uncounted,
     evaluate_interface_filter_tx_selection_counted,
     evaluate_interface_output_filter_tx_selection_counted, filter_state_has_input_tx_selection,

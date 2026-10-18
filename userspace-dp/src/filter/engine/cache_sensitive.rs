@@ -256,12 +256,13 @@ fn capture_input_filter_counters_v4(
     }
     counters
 }
-/// #14120: capture the interface INPUT filter's matched three-color policer
-/// handles for a host-bound (LocalDelivery) flow, mirroring the counter
-/// capture above: every matched non-routing term up to and including the
-/// terminal one, deferring at a routing-instance term (its policer, like its
-/// counter, stays owned by the routing-instance evaluator's path). The
-/// LocalDelivery arms replay these per packet because such flows never take
+/// #14120/#14659: capture the interface INPUT filter's matched three-color
+/// policer handles for a host-bound (LocalDelivery) flow, mirroring the counter
+/// capture above: every matched term up to and including the terminal one,
+/// including a routing-instance term (its policer handle is extended before
+/// stopping, mirroring the #14121 counter fix — the routing evaluator never
+/// runs on a session hit, so excluding it left PBR policers unenforced).
+/// The LocalDelivery arms replay these per packet because such flows never take
 /// the TX-selection leg that meters transit input policers, and they are
 /// never flow-cached (LocalDelivery is not a cacheable disposition), so the
 /// session table is their only per-flow state. Handles only — metering is
@@ -318,12 +319,13 @@ fn capture_input_filter_policers_v4(
         ) {
             continue;
         }
-        if !term.routing_instance.is_empty() {
-            return policers;
-        }
+        // #14659: include the PBR term's policer before stopping (terminal).
         policers.extend(CachedThreeColorPolicers::from_option(
             term.three_color_policer.clone(),
         ));
+        if !term.routing_instance.is_empty() {
+            return policers;
+        }
         if !term.continue_term {
             return policers;
         }
@@ -349,12 +351,13 @@ fn capture_input_filter_policers_v6(
         ) {
             continue;
         }
-        if !term.routing_instance.is_empty() {
-            return policers;
-        }
+        // #14659: see v4 — include the PBR term's policer before stopping.
         policers.extend(CachedThreeColorPolicers::from_option(
             term.three_color_policer.clone(),
         ));
+        if !term.routing_instance.is_empty() {
+            return policers;
+        }
         if !term.continue_term {
             return policers;
         }
