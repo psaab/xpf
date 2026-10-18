@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -36,15 +37,45 @@ import (
 // listen error; tcp-ping/http-get had no such backstop. An EMPTY
 // source-address stays legitimate (means "default source"): only a
 // non-empty value that will not parse is the error.
+
+// validateProbeSourceAddress rejects a source-address that cannot pin
+// the probe to the operator-configured source: unparseable, or the
+// unspecified wildcard address ("0.0.0.0" / "::", #14727). The
+// wildcard parses to a non-nil IP, so the #2492 parse check alone let
+// it bind the kernel-chosen source and measure the default path.
+// Shared by probeDialer (tcp/http) and probeICMP so all three probe
+// types hold identically on a leniently-loaded wildcard source.
+func validateProbeSourceAddress(sourceAddr string) (net.IP, error) {
+	if sourceAddr == "" {
+		return nil, nil
+	}
+	ip := net.ParseIP(sourceAddr)
+	if ip == nil || ip.IsUnspecified() {
+		return nil, fmt.Errorf("%w: invalid source-address %q (would bind wildcard source)",
+			ErrProbeSetup, sourceAddr)
+	}
+	return ip, nil
+}
+
+// isLocalBindSetupError reports whether a dial failure is the local
+// source bind failing before any packet left the box (#14727 leg 3):
+// EADDRNOTAVAIL means the configured source-address is not assigned
+// on this host. That is an environment/config state, not path health,
+// so it must hold like other setup failures. Every other errno
+// (refused, unreachable, timeout, ...) stays a genuine path signal,
+// per the ErrProbeSetup doctrine that ambiguous errnos default to PATH.
+func isLocalBindSetupError(err error) bool {
+	return errors.Is(err, syscall.EADDRNOTAVAIL)
+}
+
 func probeDialer(timeout time.Duration, sourceAddr string, opts probeSockOpts) (*net.Dialer, *setupErrSink, error) {
 	d := &net.Dialer{Timeout: timeout}
-	if sourceAddr != "" {
-		ip := net.ParseIP(sourceAddr)
-		if ip == nil {
-			return nil, nil, fmt.Errorf("%w: invalid source-address %q (would bind wildcard source)",
-				ErrProbeSetup, sourceAddr)
-		}
-		d.LocalAddr = &net.TCPAddr{IP: ip}
+	srcIP, err := validateProbeSourceAddress(sourceAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+	if srcIP != nil {
+		d.LocalAddr = &net.TCPAddr{IP: srcIP}
 	}
 	var sink *setupErrSink
 	if opts.BindDevice != "" || opts.Mark != 0 {
@@ -895,6 +926,9 @@ func (m *Manager) probeTCP(ctx context.Context, test *config.RPMTest, opts probe
 		if se := sink.load(); se != nil {
 			return 0, se
 		}
+		if isLocalBindSetupError(err) {
+			return 0, fmt.Errorf("%w: TCP local source bind failed (source-address not assigned locally): %w", ErrProbeSetup, err)
+		}
 		return 0, fmt.Errorf("TCP connect failed: %w", err)
 	}
 	rtt := time.Since(start)
@@ -922,35 +956,38 @@ func (m *Manager) probeTCP(ctx context.Context, test *config.RPMTest, opts probe
 // https make sense for an http-get probe.
 func canonicalizeHTTPTarget(target string) (string, error) {
 	if target == "" {
-		return "", fmt.Errorf("no target specified")
+		return "", fmt.Errorf("%w: no target specified", ErrProbeSetup)
 	}
 	if !strings.Contains(target, "://") {
 		// Schemeless: prepend the default scheme. C179-042: reject a
 		// canonicalized target with no host (a schemeless ":8080") here so a
 		// dead probe surfaces as a setup failure that HOLDS the test state,
 		// rather than http.NewRequestWithContext failing per attempt and the
-		// permanent no-run being counted as path loss. Stay lenient on a
-		// url.Parse failure (unchanged behavior) — that path is handled
-		// downstream exactly as before.
+		// permanent no-run being counted as path loss (#14727: every error
+		// from this function is a setup failure — the request was never
+		// constructed, let alone sent). Stay lenient on a url.Parse
+		// failure (unchanged behavior) — that path is handled downstream
+		// exactly as before, where NewRequestWithContext re-parses and
+		// its error is likewise setup-classified in probeHTTP.
 		canon := "http://" + target
 		if u, err := url.Parse(canon); err == nil && u.Hostname() == "" {
-			return "", fmt.Errorf("http-get target %q has no host", target)
+			return "", fmt.Errorf("%w: http-get target %q has no host", ErrProbeSetup, target)
 		}
 		return canon, nil
 	}
 	u, err := url.Parse(target)
 	if err != nil {
-		return "", fmt.Errorf("invalid http-get target URL %q: %w", target, err)
+		return "", fmt.Errorf("%w: invalid http-get target URL %q: %w", ErrProbeSetup, target, err)
 	}
 	switch u.Scheme {
 	case "http", "https":
 		// supported
 	default:
-		return "", fmt.Errorf("unsupported http-get target scheme %q (want http or https): %q", u.Scheme, target)
+		return "", fmt.Errorf("%w: unsupported http-get target scheme %q (want http or https): %q", ErrProbeSetup, u.Scheme, target)
 	}
 	// C179-042: reject a scheme'd target with no host ("http://").
 	if u.Hostname() == "" {
-		return "", fmt.Errorf("http-get target %q has no host", target)
+		return "", fmt.Errorf("%w: http-get target %q has no host", ErrProbeSetup, target)
 	}
 	return target, nil
 }
@@ -1025,7 +1062,7 @@ func (m *Manager) probeHTTP(ctx context.Context, test *config.RPMTest, opts prob
 	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return 0, fmt.Errorf("HTTP request error: %w", err)
+		return 0, fmt.Errorf("%w: HTTP request error: %w", ErrProbeSetup, err)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1035,6 +1072,9 @@ func (m *Manager) probeHTTP(ctx context.Context, test *config.RPMTest, opts prob
 		// holds state instead of counting loss (#5061).
 		if se := sink.load(); se != nil {
 			return 0, se
+		}
+		if isLocalBindSetupError(err) {
+			return 0, fmt.Errorf("%w: HTTP local source bind failed (source-address not assigned locally): %w", ErrProbeSetup, err)
 		}
 		return 0, fmt.Errorf("HTTP GET failed: %w", err)
 	}

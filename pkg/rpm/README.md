@@ -139,6 +139,20 @@ out-of-range value to a warning.
   actuates routes off an environment error. Genuine dial outcomes
   (refused/timeout/unreachable) and send/receive errors stay path
   failures; ambiguous dial errnos default to PATH.
+- **Never-sent http-get probes and bad sources also hold state**
+  (#14727): every `canonicalizeHTTPTarget` rejection (empty/hostless
+  target, unsupported scheme, unparseable URL) and the
+  `http.NewRequestWithContext` construction error wrap
+  `ErrProbeSetup` — the request was never sent, so counting it as
+  loss would fail over a WAN for a config typo. A wildcard
+  `source-address` (`0.0.0.0`/`::`) is likewise a setup error in
+  `probeDialer` and `probeICMP` (strict commit rejects it too): it
+  parses, but binds the kernel-chosen source and would measure the
+  default path instead of the pinned one (#2492's intent). And a
+  dial whose local source bind fails `EADDRNOTAVAIL` (configured
+  source not assigned on this box) is re-tagged `ErrProbeSetup` in
+  `probeTCP`/`probeHTTP`; refused/unreachable/timeout from a valid
+  source stay path signals.
 - **Scoped-hostname resolver setup failures also hold state** (#5061):
   a VRF/path-scoped hostname target resolves through a DNS socket pinned
   to the SAME `SO_BINDTODEVICE`/`SO_MARK` as the probe (#2614). A bind

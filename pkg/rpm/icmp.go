@@ -168,6 +168,17 @@ func (m *Manager) probeICMP(ctx context.Context, test *config.RPMTest, opts prob
 		echoType, replyType = ipv6.ICMPTypeEchoRequest, ipv6.ICMPTypeEchoReply
 	}
 
+	// #14727: reject a wildcard source-address before opening a socket.
+	// Unlike tcp/http (probeDialer), this path handed the raw string to
+	// ListenPacket: "0.0.0.0"/"::" bind the unspecified address, so the
+	// echo left from the kernel-chosen source and measured the default
+	// path — the same wrong-path measurement #2492 rejected for
+	// unparseable sources. An unparseable source already fails closed
+	// via the real listen error below; the wildcard binds successfully,
+	// so it needs this explicit guard (shared validateProbeSourceAddress).
+	if _, err := validateProbeSourceAddress(test.SourceAddress); err != nil {
+		return 0, err
+	}
 	listen := m.icmpListen
 	if listen == nil {
 		listen = realICMPListen
