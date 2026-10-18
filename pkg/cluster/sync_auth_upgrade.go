@@ -620,8 +620,11 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) {
 			"connection as it is (#6628)", "len", len(payload))
 		return
 	}
-	key := s.authKey()
-	if len(key) == 0 {
+	// #14703: verify against the accepted ring, not the signing key alone.
+	// The initiator seals its Hello under ITS signing key; during #6630
+	// step 3 that is B while this node still signs A but accepts [A,B].
+	accepted := s.authAcceptedKeys()
+	if len(accepted) == 0 {
 		// Not keyed here yet — the rolling-upgrade case. Silence, as above.
 		return
 	}
@@ -648,8 +651,8 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) {
 	// on the round state, and the msg2 write plus the writeKey install have to
 	// sit in the same critical section as that decision — splitting them
 	// reopens the window the guard below exists to close. The cost is one
-	// X25519 keygen and one AEAD open, on a path that runs at config-commit
-	// rate, not per packet.
+	// X25519 keygen and one AEAD open per candidate, on a path that runs at
+	// config-commit rate, not per packet.
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -668,28 +671,42 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) {
 		return
 	}
 
-	// Nothing else touches ac until the whole step has succeeded: a msg1 that
-	// fails its tag — an injection, or a peer on a different key — must leave
-	// the existing round intact.
-	hs, err := s.newSyncNoiseState(key, false, syncNoisePhaseUpgrade, fabricIdx)
-	if err != nil {
-		slog.Warn("cluster sync: auth-upgrade responder setup failed; the connection stays "+
-			"as it is (#6628)", "err", err)
-		return
+	// Nothing else touches ac until one candidate has succeeded: a msg1 that
+	// fails its tag under every ring member — an injection, or a peer on a
+	// retired key — must leave the existing round intact. Each candidate gets
+	// a FRESH handshake state because Noise consumes msg1.
+	var hs *noise.HandshakeState
+	var matched []byte
+	for _, candidate := range accepted {
+		if len(candidate) == 0 {
+			continue
+		}
+		candHS, err := s.newSyncNoiseState(candidate, false, syncNoisePhaseUpgrade, fabricIdx)
+		if err != nil {
+			slog.Warn("cluster sync: auth-upgrade responder setup failed; the connection stays "+
+				"as it is (#6628)", "err", err)
+			return
+		}
+		if _, _, _, err := candHS.ReadMessage(nil, payload[1:]); err != nil {
+			continue
+		}
+		hs = candHS
+		matched = candidate
+		break
 	}
-	if _, _, _, err := hs.ReadMessage(nil, payload[1:]); err != nil {
-		// This is where a peer holding a different control-link key is
+	if hs == nil {
+		// This is where a peer holding no accepted control-link key is
 		// refused, and it is refused by the construction rather than by a
 		// comparison we remembered to write. Nothing has switched on either
 		// side, so leaving the connection alone costs nothing and loses
 		// nothing.
 		slog.Warn("cluster sync: auth-upgrade hello did not authenticate — the peer holds a "+
 			"different control-link key, or disagrees about cluster/node identity; the "+
-			"connection stays in its current posture (#6628/#7163)",
-			"err", err, "remote", connRemoteAddrString(conn))
+			"connection stays in its current posture (#6628/#7163/#14703)",
+			"remote", connRemoteAddrString(conn))
 		return
 	}
-	// The verified Noise msg1 proves that the peer holds the shared PSK,
+	// The verified Noise msg1 proves that the peer holds an accepted PSK,
 	// independently of whether the remainder of this connection upgrade
 	// succeeds.
 	s.recordAuthenticatedPeer()
@@ -721,7 +738,7 @@ func (s *SessionSync) handleAuthUpgradeHello(conn net.Conn, payload []byte) {
 		binding:   binding,
 		keys:      keys,
 		haveKeys:  true,
-		forPSK:    append([]byte(nil), key...),
+		forPSK:    append([]byte(nil), matched...),
 	}
 	ac.upgrade = st
 	// The write direction switches HERE, immediately after the frame that is

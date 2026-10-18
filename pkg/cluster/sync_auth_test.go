@@ -37,7 +37,7 @@ func (f *fakeSyncAuthProviderNoIdentity) ControlLinkAuthKey() []byte { return f.
 
 type handshakeResult struct {
 	mode syncAuthMode
-	key  syncNoiseKeys
+	key  syncNoiseKeysWithPSK
 	err  error
 }
 

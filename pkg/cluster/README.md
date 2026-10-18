@@ -2414,7 +2414,9 @@ connection is authenticated, then seals every subsequent frame.
   — that method is still exported and still consumed by the gRPC fabric
   listener, just no longer by this interface or the status string.
 - **Wiring.** `SessionSync.SetAuthProvider(*Manager)` (`daemon_ha_sync.go`)
-  supplies `ControlLinkAuthKey()`. No new
+  supplies `ControlLinkAuthKey()` for signing and, via the optional
+  accepted-keys probe (#14703), `ControlLinkAcceptedKeys()` for
+  verification. No new
   config leaf — the same `set chassis cluster authentication-key` secret
   authenticates the heartbeat (PR-A), the fabric gRPC (PR-B/#4357), and now
   the session-sync stream. LOW severity (matches Juniper's own
@@ -2818,12 +2820,18 @@ under the eventual posture (see "The three-way incompatibility") there is not
 even a config-sync push to carry a coordinated plan. Accepting the other key
 for an operator-bounded window is the only rotation that keeps liveness.
 
-Both authenticated control surfaces widen together — the heartbeat
-(`admitFrame`) and the fabric gRPC listener (`checkFabricAuth`). Widening only
-one would turn a rotation from "no outage" into "no outage on the heartbeat,
-`Unauthenticated` on every peer-proxied RPC", which is worse for being harder
-to see. **Session sync does not widen**: its authentication is fixed per
-connection at handshake time, which is #6628's territory, not this one.
+All three authenticated control surfaces widen together — the heartbeat
+(`admitFrame`), the fabric gRPC listener (`checkFabricAuth`), and, since
+#14703, session sync. Widening only one would turn a rotation from "no
+outage" into "no outage on the heartbeat, `Unauthenticated` on every
+peer-proxied RPC", which is worse for being harder to see. Session sync
+widens on its two verification points — the connect responder
+(`performNoiseResponderHandshake`) and the #6628 upgrade responder
+(`handleAuthUpgradeHello`) — trying each accepted key against a fresh
+Noise state over the single msg1 already read off the wire; the initiator
+always seals under its signing key, and `authPSK` records the key that
+actually matched so the reconciler sees the rotation a ring-matched
+connection still owes.
 
 The userspace **SYN-cookie key** widens with them (#9173). It derives from
 `authentication-key`, and while an additional key is set each node's snapshot
