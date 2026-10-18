@@ -752,7 +752,6 @@ impl PolicyRuleCounter {
     }
 
     /// #3073: coalesced multi-packet add used by the per-worker hit-count
-    /// flush (`flush_recorded_policy_hit_counters`). Folds a whole batch of
     /// established-session fast-path packets into ONE pair of relaxed
     /// `fetch_add`s on the shared counter, so the hot path never hammers the
     /// shared cacheline per packet (mirrors `filter::FilterTermCounter`).
@@ -1020,7 +1019,6 @@ impl Drop for PreparedPolicyState {
 // shared `PolicyRuleCounter` in batches — the SAME technique
 // `filter::record_filter_counter` uses for `then count` term counters. The
 // accumulator holds the current rule's counter `Arc`; a different rule (or
-// the per-batch `flush_recorded_policy_hit_counters` call at the end of the
 // RX batch) flushes the pending tally first. `Arc::ptr_eq` keeps the common
 // run of same-flow packets on a pure thread-local add.
 struct PendingPolicyHitRecord {
@@ -1045,18 +1043,89 @@ impl Default for PendingPolicyHitRecord {
     }
 }
 
-#[cfg(not(test))]
 const POLICY_HIT_FLUSH_PACKETS: u64 = 64;
 
-#[cfg(not(test))]
-thread_local! {
-    static PENDING_POLICY_HIT_RECORD: std::cell::RefCell<PendingPolicyHitRecord> =
-        std::cell::RefCell::new(PendingPolicyHitRecord::default());
+/// #14656: the production policy-hit coalescer, compiled in EVERY build
+/// (including `cfg(test)`). Before #14656 the thread-local coalescer lived
+/// under `#[cfg(not(test))]` and test binaries substituted a write-through
+/// `counter.add` twin, so no test ever exercised the shipped buffering,
+/// counter-switch, generation-discard, or threshold-flush behaviour — a
+/// mutant neutering the production body survived the whole suite. This
+/// type is the single implementation both builds use; only the thin
+/// thread-local wrapper below differs from a direct value in tests, and
+/// tests drive this type (via the wrapper or directly) exactly as
+/// production does.
+pub(crate) struct PolicyHitCoalescer {
+    pending: PendingPolicyHitRecord,
+    flush_packets: u64,
 }
 
-// Not gated on `#[cfg(not(test))]`: the generation-discard logic is the
-// load-bearing part of the #3448 fix and is unit-tested directly (the
-// per-worker thread-local coalescer itself is bypassed under `#[cfg(test)]`).
+impl Default for PolicyHitCoalescer {
+    fn default() -> Self {
+        Self {
+            pending: PendingPolicyHitRecord::default(),
+            flush_packets: POLICY_HIT_FLUSH_PACKETS,
+        }
+    }
+}
+
+impl PolicyHitCoalescer {
+    pub(crate) fn new(flush_packets: u64) -> Self {
+        Self {
+            pending: PendingPolicyHitRecord::default(),
+            flush_packets,
+        }
+    }
+
+    /// Record one established-session packet against `counter`, coalesced.
+    /// A different counter (or a changed clear generation) flushes — and,
+    /// via the generation guard in `flush`, possibly discards — the
+    /// pending batch first. Reaching `flush_packets` flushes immediately.
+    #[inline(always)]
+    pub(crate) fn record(&mut self, counter: &Arc<PolicyRuleCounter>, packet_bytes: u64) {
+        let generation = counter.generation();
+        // #3448: continue the current batch only when it is the SAME counter
+        // AND the SAME clear epoch. A `clear` mid-batch advances the
+        // generation; the else branch then flushes (and discards, via the
+        // generation guard) the stale pre-clear tally and re-captures the
+        // counter under the new generation, so post-clear packets are counted
+        // fresh from zero instead of being dropped with the pre-clear batch.
+        if self
+            .pending
+            .counter
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, counter))
+            && self.pending.generation == generation
+        {
+            self.pending.packets = self.pending.packets.saturating_add(1);
+            self.pending.bytes = self.pending.bytes.saturating_add(packet_bytes);
+        } else {
+            flush_pending_policy_hit_record(&mut self.pending);
+            self.pending.counter = Some(counter.clone());
+            self.pending.generation = generation;
+            self.pending.packets = 1;
+            self.pending.bytes = packet_bytes;
+        }
+        if self.pending.packets >= self.flush_packets {
+            flush_pending_policy_hit_record(&mut self.pending);
+        }
+    }
+
+    /// Fold the pending batch into its shared counter (discarding it if
+    /// its clear generation is stale — #3448).
+    #[inline(always)]
+    pub(crate) fn flush(&mut self) {
+        flush_pending_policy_hit_record(&mut self.pending);
+    }
+}
+
+thread_local! {
+    static POLICY_HIT_COALESCER: std::cell::RefCell<PolicyHitCoalescer> =
+        std::cell::RefCell::new(PolicyHitCoalescer::default());
+}
+
+// The generation-discard logic is the load-bearing part of the #3448 fix
+// and is unit-tested directly through `PolicyHitCoalescer` (#14656).
 #[inline(always)]
 fn flush_pending_policy_hit_record(record: &mut PendingPolicyHitRecord) {
     let Some(counter) = record.counter.take() else {
@@ -1079,60 +1148,22 @@ fn flush_pending_policy_hit_record(record: &mut PendingPolicyHitRecord) {
 /// `poll_descriptor` session-hit fast path and the flow-cache hit replay —
 /// NOT the cold path: `apply_frag_deny_override_and_count` counts the first
 /// packet there, so each packet is counted exactly once.
-#[cfg(not(test))]
 #[inline(always)]
 pub(crate) fn record_policy_hit_counter(counter: &Arc<PolicyRuleCounter>, packet_bytes: u64) {
-    PENDING_POLICY_HIT_RECORD.with(|pending| {
-        let mut pending = pending.borrow_mut();
-        let generation = counter.generation();
-        // #3448: continue the current batch only when it is the SAME counter
-        // AND the SAME clear epoch. A `clear` mid-batch advances the
-        // generation; the else branch then flushes (and discards, via the
-        // generation guard) the stale pre-clear tally and re-captures the
-        // counter under the new generation, so post-clear packets are counted
-        // fresh from zero instead of being dropped with the pre-clear batch.
-        if pending
-            .counter
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, counter))
-            && pending.generation == generation
-        {
-            pending.packets = pending.packets.saturating_add(1);
-            pending.bytes = pending.bytes.saturating_add(packet_bytes);
-        } else {
-            flush_pending_policy_hit_record(&mut pending);
-            pending.counter = Some(counter.clone());
-            pending.generation = generation;
-            pending.packets = 1;
-            pending.bytes = packet_bytes;
-        }
-        if pending.packets >= POLICY_HIT_FLUSH_PACKETS {
-            flush_pending_policy_hit_record(&mut pending);
-        }
+    POLICY_HIT_COALESCER.with(|coalescer| {
+        coalescer.borrow_mut().record(counter, packet_bytes);
     });
-}
-
-// In tests the coalescer is bypassed so a single recorded packet is
-// immediately visible in `counter_snapshots()` (deterministic assertions).
-#[cfg(test)]
-#[inline(always)]
-pub(crate) fn record_policy_hit_counter(counter: &Arc<PolicyRuleCounter>, packet_bytes: u64) {
-    counter.add(packet_bytes);
 }
 
 /// #3073: flush this worker's pending policy hit-count tally to the shared
 /// counters. Called once per RX batch (alongside
 /// `filter::flush_recorded_filter_counters`) so `show security policies
 /// hit-count` converges within one poll tick.
-#[cfg(not(test))]
 pub(crate) fn flush_recorded_policy_hit_counters() {
-    PENDING_POLICY_HIT_RECORD.with(|pending| {
-        flush_pending_policy_hit_record(&mut pending.borrow_mut());
+    POLICY_HIT_COALESCER.with(|coalescer| {
+        coalescer.borrow_mut().flush();
     });
 }
-
-#[cfg(test)]
-pub(crate) fn flush_recorded_policy_hit_counters() {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PortRange {

@@ -338,6 +338,8 @@ fn lookup_does_not_clone_policy_counter_arc_5445() {
     );
     drop(lookup);
 
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     // The bound counter is still reachable BY BORROW from the owning entry (no
     // clone, no strong-count bump) and its accounting still increments.
     let before = counter.test_packet_count();
@@ -352,6 +354,8 @@ fn lookup_does_not_clone_policy_counter_arc_5445() {
         );
         crate::policy::record_policy_hit_counter(bound, 1_200);
     }
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         counter.test_packet_count(),
         before + 1,

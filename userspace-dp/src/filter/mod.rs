@@ -17,7 +17,6 @@ use crate::{
     ThreeColorPolicerSnapshot,
 };
 use ipnet::IpNet;
-#[cfg(not(test))]
 use std::cell::RefCell;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -879,7 +878,6 @@ impl FilterTermCounter {
     }
 }
 
-#[cfg(not(test))]
 #[derive(Default)]
 struct PendingFilterCounterRecord {
     counter: Option<Arc<FilterTermCounter>>,
@@ -887,16 +885,77 @@ struct PendingFilterCounterRecord {
     bytes: u64,
 }
 
-#[cfg(not(test))]
 const FILTER_COUNTER_FLUSH_PACKETS: u64 = 64;
 
-#[cfg(not(test))]
-thread_local! {
-    static PENDING_FILTER_COUNTER_RECORD: RefCell<PendingFilterCounterRecord> =
-        RefCell::new(PendingFilterCounterRecord::default());
+/// #14656: the production filter-count coalescer, compiled in EVERY build
+/// (including `cfg(test)`). Before #14656 the thread-local coalescer lived
+/// under `#[cfg(not(test))]` and test binaries substituted a write-through
+/// `counter.record` twin, so no test ever exercised the shipped buffering,
+/// counter-switch, or threshold-flush behaviour — a mutant neutering the
+/// production body survived the whole suite. This type is the single
+/// implementation both builds use; only the thin thread-local wrapper
+/// below differs from a direct value in tests, and tests drive this type
+/// (via the wrapper or directly) exactly as production does. Unlike
+/// `policy::PolicyHitCoalescer` there is no clear-generation guard here:
+/// filter term counters have no operator clear that resets them in place.
+pub(crate) struct FilterCounterCoalescer {
+    pending: PendingFilterCounterRecord,
+    flush_packets: u64,
 }
 
-#[cfg(not(test))]
+impl Default for FilterCounterCoalescer {
+    fn default() -> Self {
+        Self {
+            pending: PendingFilterCounterRecord::default(),
+            flush_packets: FILTER_COUNTER_FLUSH_PACKETS,
+        }
+    }
+}
+
+impl FilterCounterCoalescer {
+    pub(crate) fn new(flush_packets: u64) -> Self {
+        Self {
+            pending: PendingFilterCounterRecord::default(),
+            flush_packets,
+        }
+    }
+
+    /// Record one packet against `counter`, coalesced. A different
+    /// counter flushes the pending batch first; reaching `flush_packets`
+    /// flushes immediately.
+    #[inline(always)]
+    pub(crate) fn record(&mut self, counter: &Arc<FilterTermCounter>, packet_bytes: u64) {
+        if self
+            .pending
+            .counter
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, counter))
+        {
+            self.pending.packets = self.pending.packets.saturating_add(1);
+            self.pending.bytes = self.pending.bytes.saturating_add(packet_bytes);
+        } else {
+            flush_pending_filter_counter_record(&mut self.pending);
+            self.pending.counter = Some(counter.clone());
+            self.pending.packets = 1;
+            self.pending.bytes = packet_bytes;
+        }
+        if self.pending.packets >= self.flush_packets {
+            flush_pending_filter_counter_record(&mut self.pending);
+        }
+    }
+
+    /// Fold the pending batch into its shared counter.
+    #[inline(always)]
+    pub(crate) fn flush(&mut self) {
+        flush_pending_filter_counter_record(&mut self.pending);
+    }
+}
+
+thread_local! {
+    static FILTER_COUNTER_COALESCER: RefCell<FilterCounterCoalescer> =
+        RefCell::new(FilterCounterCoalescer::default());
+}
+
 #[inline(always)]
 fn flush_pending_filter_counter_record(record: &mut PendingFilterCounterRecord) {
     let Some(counter) = record.counter.take() else {
@@ -908,45 +967,18 @@ fn flush_pending_filter_counter_record(record: &mut PendingFilterCounterRecord) 
     record.bytes = 0;
 }
 
-#[cfg(not(test))]
 #[inline(always)]
 pub(crate) fn record_filter_counter(counter: &Arc<FilterTermCounter>, packet_bytes: u64) {
-    PENDING_FILTER_COUNTER_RECORD.with(|pending| {
-        let mut pending = pending.borrow_mut();
-        if pending
-            .counter
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, counter))
-        {
-            pending.packets = pending.packets.saturating_add(1);
-            pending.bytes = pending.bytes.saturating_add(packet_bytes);
-        } else {
-            flush_pending_filter_counter_record(&mut pending);
-            pending.counter = Some(counter.clone());
-            pending.packets = 1;
-            pending.bytes = packet_bytes;
-        }
-        if pending.packets >= FILTER_COUNTER_FLUSH_PACKETS {
-            flush_pending_filter_counter_record(&mut pending);
-        }
+    FILTER_COUNTER_COALESCER.with(|coalescer| {
+        coalescer.borrow_mut().record(counter, packet_bytes);
     });
 }
 
-#[cfg(test)]
-#[inline(always)]
-pub(crate) fn record_filter_counter(counter: &Arc<FilterTermCounter>, packet_bytes: u64) {
-    counter.record(packet_bytes);
-}
-
-#[cfg(not(test))]
 pub(crate) fn flush_recorded_filter_counters() {
-    PENDING_FILTER_COUNTER_RECORD.with(|pending| {
-        flush_pending_filter_counter_record(&mut pending.borrow_mut());
+    FILTER_COUNTER_COALESCER.with(|coalescer| {
+        coalescer.borrow_mut().flush();
     });
 }
-
-#[cfg(test)]
-pub(crate) fn flush_recorded_filter_counters() {}
 
 // #1049 P2: structural split — engine, compiler, and policer extracted
 // into sibling submodules. mod.rs hosts the shared type vocabulary,

@@ -1272,6 +1272,8 @@ fn txn_flow_cache_hit_replays_input_filter_then_count_3777() {
         .expect("one term")
         .counter
         .clone();
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(input_counter.packets.load(Ordering::Relaxed), 0);
 
     // Packet 1 (SYN): the #10270 fail-closed gate admits only SYN on a session
@@ -1295,6 +1297,8 @@ fn txn_flow_cache_hit_replays_input_filter_then_count_3777() {
         meta0,
         true,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         1,
@@ -1326,6 +1330,8 @@ fn txn_flow_cache_hit_replays_input_filter_then_count_3777() {
         meta1,
         true,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         2,
@@ -1361,11 +1367,14 @@ fn txn_flow_cache_hit_replays_input_filter_then_count_3777() {
         dbg2.tx >= 1,
         "packet 3 must be forwarded from the flow-cache fast path"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         3,
         "the flow-cache hit MUST replay the interface input `then count` (#3777)"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #10566: a SYN-admitted TCP flow seeds on its first ACK. The SYN is counted
@@ -1423,11 +1432,15 @@ fn txn_flow_cache_seed_charges_static_input_then_count_10566() {
         syn_meta,
         true,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         1,
         "SYN session-miss count must establish the one-packet base"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.bytes.load(Ordering::Relaxed),
         syn_meta.pkt_len as u64,
@@ -1457,11 +1470,15 @@ fn txn_flow_cache_seed_charges_static_input_then_count_10566() {
         ack_meta,
         true,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         2,
         "ACK seed must charge the captured static INPUT then-count exactly once"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.bytes.load(Ordering::Relaxed),
         (syn_meta.pkt_len as u64) + (ack_meta.pkt_len as u64),
@@ -1486,16 +1503,22 @@ fn txn_flow_cache_seed_charges_static_input_then_count_10566() {
         ack_hit_dbg.tx >= 1,
         "second ACK must forward through the flow-cache fast path"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         3,
         "cache hit must replay the INPUT then-count from the corrected seed base"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.bytes.load(Ordering::Relaxed),
         (syn_meta.pkt_len as u64) + (2 * ack_meta.pkt_len as u64),
         "cache hit must replay the ACK metadata packet length"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #10566 decline canary: a DSCP-sensitive INPUT filter is evaluated and
@@ -1554,6 +1577,8 @@ fn txn_flow_cache_per_packet_input_declines_cache_10566() {
         syn_meta,
         true,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         1,
@@ -1583,6 +1608,8 @@ fn txn_flow_cache_per_packet_input_declines_cache_10566() {
         ack_meta,
         true,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         2,
@@ -1603,6 +1630,8 @@ fn txn_flow_cache_per_packet_input_declines_cache_10566() {
         true,
     );
     assert!(dbg.tx >= 1, "the third per-packet session hit must forward");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         3,
@@ -1613,6 +1642,8 @@ fn txn_flow_cache_per_packet_input_declines_cache_10566() {
         0,
         "the third per-packet session hit must not seed a cache entry"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #10566 miss-path suppression pin: UDP is cache-eligible on its first
@@ -1673,6 +1704,8 @@ fn txn_flow_cache_udp_miss_seed_suppresses_duplicate_input_count_10566() {
         true,
     );
     assert!(miss_dbg.tx >= 1, "UDP miss seed must forward");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         1,
@@ -1694,11 +1727,15 @@ fn txn_flow_cache_udp_miss_seed_suppresses_duplicate_input_count_10566() {
         true,
     );
     assert!(hit_dbg.tx >= 1, "UDP hit must forward");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         2,
         "UDP cache hit must replay the INPUT count once (1 -> 2)"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #10566 folded-counter pin: a static INPUT `then count` plus
@@ -1796,6 +1833,8 @@ fn txn_flow_cache_seed_charges_folded_input_count_once_10566() {
         syn_meta,
         true,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         1,
@@ -1821,6 +1860,8 @@ fn txn_flow_cache_seed_charges_folded_input_count_once_10566() {
         ack_meta,
         true,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         2,
@@ -1850,11 +1891,15 @@ fn txn_flow_cache_seed_charges_folded_input_count_once_10566() {
         ack_meta,
         true,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         3,
         "the folded counter must replay exactly once on the cache hit"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 /// #3778 RED-on-revert: a CoS behavior-aggregate (DSCP) classifier is
 /// per-packet in vSRX, but the cached TX-selection froze the SEED packet's
@@ -2368,6 +2413,8 @@ fn txn_flow_cache_hit_ttl_check_precedes_egress_accounting_3779() {
         0,
         "the SYN must install the session but NOT seed the flow cache"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         out_counter.packets.load(Ordering::Relaxed),
         1,
@@ -2399,6 +2446,8 @@ fn txn_flow_cache_hit_ttl_check_precedes_egress_accounting_3779() {
         1,
         "the first ACK must seed the flow cache"
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         out_counter.packets.load(Ordering::Relaxed),
         2,
@@ -2433,6 +2482,8 @@ fn txn_flow_cache_hit_ttl_check_precedes_egress_accounting_3779() {
         meta2,
         true,
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         out_counter.packets.load(Ordering::Relaxed),
         2,
@@ -2458,6 +2509,8 @@ fn txn_flow_cache_hit_ttl_check_precedes_egress_accounting_3779() {
              ICMP Time Exceeded reply, not the transit packet"
         );
     }
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #4422 RED-on-revert: the CoS behavior-aggregate re-classify on a flow-cache
@@ -5802,6 +5855,8 @@ fn txn_static_input_count_charged_on_non_cacheable_session_hit_13641() {
 
     // SYN: session miss, counted by the miss evaluator.
     run(&mut binding, &mut sessions, TCP_FLAG_SYN);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         1,
@@ -5810,6 +5865,8 @@ fn txn_static_input_count_charged_on_non_cacheable_session_hit_13641() {
 
     // ACK: cacheable session hit; the flow-cache seed charges it.
     run(&mut binding, &mut sessions, TCP_FLAG_ACK);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         2,
@@ -5829,10 +5886,14 @@ fn txn_static_input_count_charged_on_non_cacheable_session_hit_13641() {
         crate::tcp_flags::TCP_FIN | TCP_FLAG_ACK,
     );
     assert!(fin_dbg.tx >= 1, "the FIN session hit must still forward");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         input_counter.packets.load(Ordering::Relaxed),
         3,
         "#13641: non-cacheable FIN session hit must charge the static \
          INPUT then-count exactly once"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }

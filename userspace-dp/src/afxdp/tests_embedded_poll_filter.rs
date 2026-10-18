@@ -7698,10 +7698,10 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
 
     // The criterion: the count term advanced for this packet.
     //
-    // Under cfg(test) record_filter_counter writes through to the counter
-    // immediately (filter/mod.rs) and flush_recorded_filter_counters is a
-    // no-op, so there is no 64-packet batching window to wait out and a zero
-    // here is a real zero rather than an unflushed one.
+    // #14656: `record_filter_counter` coalesces in test builds exactly as
+    // in production, so flush this thread's pending batch before reading
+    // the shared counter -- a zero after the flush is a real zero.
+    crate::filter::flush_recorded_filter_counters();
     assert_eq!(
         filter.terms[0].counter.packets.load(Ordering::Relaxed),
         1,
@@ -9552,6 +9552,8 @@ fn g9528_term(action: &str, routing_instance: &str) -> FirewallTermSnapshot {
 }
 
 fn g9528_packets(forwarding: &ForwardingState) -> u64 {
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     let filter = forwarding
         .filter_state
         .filters
@@ -9760,6 +9762,8 @@ fn nat64_icmp_error_is_dropped_by_an_input_filter_discard_9528() {
     );
     assert_eq!(recycled, 1, "the dropped descriptor is recycled");
     assert_eq!(count, Some(1), "the discard term's counter advances exactly once");
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -9772,6 +9776,8 @@ fn nat64_icmp_error_is_dropped_by_a_pbr_discard_9528() {
     );
     assert_eq!(recycled, 1, "the dropped descriptor is recycled");
     assert_eq!(count, Some(1), "the PBR term's counter advances exactly once");
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -9791,6 +9797,8 @@ fn same_family_reversal_is_dropped_by_a_pbr_discard_9528() {
     );
     assert_eq!(recycled, 1, "the dropped descriptor is recycled");
     assert_eq!(count, Some(1), "the PBR term's counter advances exactly once");
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// Hoisted, not duplicated: a term that ACCEPTS (or only steers) still counts
@@ -9809,6 +9817,8 @@ fn icmp_error_arms_count_a_matching_term_exactly_once_9528() {
         assert_eq!(forwards, 1, "{what}: a PBR steer must not stop or redirect the error");
         assert_eq!(count, Some(1), "{what}: a PBR steer term counts exactly once");
     }
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// The hoist moved the PBR verdict above the ICMP-error arms, and the flowless
@@ -9828,11 +9838,15 @@ fn flowless_fragment_evaluates_pbr_exactly_once_9528() {
     let mut meta = frag_v4_transit_meta();
     meta.pkt_len = frame.len() as u16;
     txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &BTreeMap::new(), &frame, meta, true);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         g9528_packets(&forwarding),
         1,
         "the flowless path must evaluate the PBR term exactly once"
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 /// #9901 (F-077) floor fixture: an outer ICMPv4 Time Exceeded carrying a TCP
@@ -12328,6 +12342,8 @@ fn filtered_syns_do_not_charge_screens_or_receive_syn_cookies_11332() {
             binding.tx_pipeline.pending_tx_local.is_empty(),
             "a filter-discarded SYN must not elicit a reflected SYN-ACK",
         );
+        crate::filter::flush_recorded_filter_counters();
+        crate::policy::flush_recorded_policy_hit_counters();
         assert_eq!(
             g9528_packets(&forwarding),
             expected_count,
@@ -12365,6 +12381,8 @@ fn filtered_syns_do_not_charge_screens_or_receive_syn_cookies_11332() {
         &permitted_source.octets(),
         "the cookie reply destination must be the admitted source, never the filtered one",
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -12385,11 +12403,15 @@ fn pbr_discard_is_applied_before_screen_sketches_11332() {
     );
     assert_eq!(batch.syn_cookie_challenges, 0);
     assert!(binding.tx_pipeline.pending_tx_local.is_empty());
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         g9528_packets(&forwarding),
         1,
         "the PBR discard term is counted once by the normal route evaluator",
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
 #[test]
@@ -12461,11 +12483,15 @@ fn filtered_cookie_ack_cannot_reflect_rst_before_input_filter_11332() {
         binding.tx_pipeline.pending_tx_local.is_empty(),
         "a filter-discarded cookie ACK must not elicit a reflected RST",
     );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         g9528_packets(&filtered_forwarding),
         1,
         "the normal input-filter evaluator must count the denied ACK",
     );
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
+    // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 /// #13637 fail-on-revert: local IKE passthrough must honor the ingress input
 /// filter before handing the packet to the host.
