@@ -1056,7 +1056,16 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 		return nil
 	}
 
-	if priorReadable && string(prior) == content && !legacyPresent {
+	// #14693: `!d.sshdReloadOwed()` joins this gate for the same reason
+	// it joins the removal branch's early-return gate above. When the drop-in already
+	// matches desired but a reload is still owed — e.g. an earlier
+	// removal-path reload failed while the file stayed converged — an
+	// unconditional early return strands sshd on its previous runtime
+	// configuration: the file is right, the daemon never re-reads it,
+	// and no later identical apply would ever reach a reload. Falling
+	// through re-runs the idempotent write + validate + reload, which
+	// is what pays the debt.
+	if priorReadable && string(prior) == content && !legacyPresent && !d.sshdReloadOwed() {
 		return nil // no change
 	}
 

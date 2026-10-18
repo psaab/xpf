@@ -3413,9 +3413,18 @@ never lock an operator out of a remote box it manages.
   MACs), until a manual restart or a reboot. The removal gate is now
   `!hadDropIn && !d.sshdReloadOwed()`, both reload sites record their outcome
   (an update-path SUCCESS discharges a removal debt — sshd has re-read its
-  configuration either way), and the re-assert re-validates with `sshd -t`
-  before the SIGHUP exactly as the apply path does (#4311), leaving the debt
-  OUTSTANDING when validation fails because nothing was reloaded.
+  configuration either way).
+  #14693 closed the update-path hole in that story: the revert restores the
+  PRIOR (possibly permissive) bytes AFTER the debt latches, so a reload-only
+  re-assert would enforce exactly those reverted bytes and then discharge —
+  permanent silent loss of a hardening commit. The re-assert now re-drives
+  the desired config from the live store (`applySSHConfig(liveConfig)`) —
+  rewriting or re-removing the drop-in, validating with `sshd -t` (#4311),
+  then reloading — and only the apply's own outcome record pays the debt.
+  The no-change early return carries `!d.sshdReloadOwed()` for the same
+  reason, so an identical apply also re-drives an owed reload. Only a
+  process with no store at all keeps the historical validate+reload retry,
+  there being no desired-state authority it could disagree with.
   R61 also flagged chrony's SHARED 15s context: one hung `chronyc reload
   sources` consumed the whole budget, so all four threshold fallbacks ran
   against an already-expired context — 15s of apply latency buying no
