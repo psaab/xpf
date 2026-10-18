@@ -134,14 +134,22 @@ func (c *ctl) handleShowSecurity(args []string) error {
 		// #8321 finding 10: honour `global` instead of silently widening.
 		return c.showPoliciesFiltered(q.fromZone, q.toZone, q.globalOnly)
 	case "screen":
-		if len(args) >= 2 && args[1] == "ids-option" && len(args) >= 3 {
+		// #14687: a dangling ids-option/zone selector must error, not widen
+		// to the all-profiles / all-zones listing.
+		if len(args) >= 2 && args[1] == "ids-option" {
+			if len(args) < 3 {
+				return fmt.Errorf("usage: show security screen ids-option <name> [detail]")
+			}
 			if len(args) >= 4 && args[3] == "detail" {
 				return c.showText("screen-ids-option-detail:" + args[2])
 			}
 			return c.showText("screen-ids-option:" + args[2])
 		}
 		if len(args) >= 2 && args[1] == "statistics" {
-			if len(args) >= 4 && args[2] == "zone" {
+			if len(args) >= 3 && args[2] == "zone" {
+				if len(args) < 4 {
+					return fmt.Errorf("usage: show security screen statistics zone <zone>")
+				}
 				return c.showText("screen-statistics:" + args[3])
 			}
 			return c.showCommand("show security screen statistics")

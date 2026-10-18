@@ -137,6 +137,11 @@ func (c *CLI) handleShow(args []string) error {
 		// lowering, fall-through, fail-closed markers) instead of the raw config.
 		// `effective` is a trailing modifier alongside the existing loose
 		// `family <f>` modifier, so scan for both.
+		// #14687: a dangling `filter` selector must error, not widen to the
+		// all-filters listing the RBAC gate did not judge.
+		if len(args) >= 2 && args[1] == "filter" && len(args) < 3 {
+			return fmt.Errorf("usage: show firewall filter <name> [family inet|inet6] [effective]")
+		}
 		if firewallArgsHaveWord(args, "effective") {
 			family := firewallFamilyArg(args)
 			if len(args) >= 3 && args[1] == "filter" {
@@ -146,7 +151,10 @@ func (c *CLI) handleShow(args []string) error {
 		}
 		if len(args) >= 3 && args[1] == "filter" {
 			family := ""
-			if len(args) >= 5 && args[3] == "family" {
+			if len(args) >= 4 && args[3] == "family" {
+				if len(args) < 5 {
+					return fmt.Errorf("usage: show firewall filter <name> family inet|inet6")
+				}
 				family = args[4]
 			}
 			return c.showFirewallFilter(args[2], family)

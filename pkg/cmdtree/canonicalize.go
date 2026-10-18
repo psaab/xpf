@@ -61,6 +61,19 @@ const (
 // closed: it does not know what command it is holding, so it cannot know that a
 // deny regex fails to match it. Treating a failed canonicalization as "no match,
 // allow" is the bypass this function exists to close.
+//
+// A LINE MAY NOT END MID-VALUE (#14687). A typed leaf always awaits its
+// value, a dynamic node marked RequiresValue awaits its value, and an
+// unfilled childless <placeholder> under a keyword node awaits its value.
+// Before this, `show firewall filter secret family` canonicalized OK, the
+// gate judged that string, and the dispatcher — needing len>=5 to read a
+// family — ran showFirewallFilter("secret",""), defeating an anchored deny
+// on either form. Bare dynamic nodes without RequiresValue (e.g. `show
+// security zones`), Options nodes with no option started (e.g. `show
+// security flow session`), placeholders with children (`show route`), and
+// the bare `ping`/`traceroute` command paths stay complete: the RPC/REST
+// authorization tables charge those argument-free paths, and their typed
+// RPCs carry the target in a field, not in the command string.
 func Canonicalize(tree map[string]*Node, words []string) ([]string, CanonicalizeResult) {
 	if len(words) == 0 {
 		return words, CanonicalOK
@@ -77,6 +90,13 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 	dynamicFilled := false
 	filled := map[*Node]bool{}
 	var options map[string]*Node
+	// #14687: placeholderMandatory records that the walk entered a keyword
+	// node (not an Options node, not the tree root) whose level holds an
+	// unfilled childless placeholder. The root exception keeps the bare
+	// `ping`/`traceroute` command paths complete for the RPC/REST tables.
+	// Descending into a placeholder clears it; `show route` (placeholder
+	// with children) is never tracked.
+	placeholderMandatory := false
 
 	for wi, w := range words {
 		name, node, matches, ok := resolveTreeWord(current, w)
@@ -129,8 +149,10 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 					currentNode = ph
 					current = ph.Children
 					dynamicFilled = false
+					placeholderMandatory = false
 				} else {
 					filled[ph] = true
+					placeholderMandatory = false
 				}
 				continue
 			}
@@ -150,6 +172,13 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 		dynamicFilled = false
 		if node.Options {
 			options = node.Children
+			placeholderMandatory = false
+		} else if wi > 0 {
+			if ph := findPlaceholder(node.Children); ph != nil && ph.Children == nil && !filled[ph] {
+				placeholderMandatory = true
+			} else {
+				placeholderMandatory = false
+			}
 		}
 		// #8289: descend UNCONDITIONALLY, including to a leaf's nil child map.
 		// This used to `continue` when `node.Children == nil`, leaving `current`
@@ -177,6 +206,23 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 		// and refuses anything else as CanonicalUnknown. Callers fail closed on
 		// that, per this function's own contract.
 		current = node.Children
+	}
+	// #14687: refuse a line that ends while a value slot is still pending.
+	if parentTyped {
+		return words, CanonicalUnknown
+	}
+	if currentNode != nil && currentNode.RequiresValue && currentNode.HasDynamic() && !dynamicFilled {
+		return words, CanonicalUnknown
+	}
+	// An unfilled childless placeholder under a non-root keyword node is a
+	// mandatory positional value (`show chassis cluster data-plane flows`
+	// with no limit). Placeholders with children are not tracked (ending at
+	// `show route`, whose <destination> has children, is the bare list-all
+	// command), under an Options node a placeholder is optional (`show
+	// security log <count>`), and the root-level ping/traceroute targets are
+	// excluded for the argument-free RPC/REST command paths (see header).
+	if placeholderMandatory {
+		return words, CanonicalUnknown
 	}
 	return out, CanonicalOK
 }

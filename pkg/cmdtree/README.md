@@ -267,6 +267,25 @@ ping ran. Completion is unaffected: placeholder names reach the operator
 only as end-of-walk candidates and typed-leaf hints, never through word
 resolution.
 
+## A line may not end mid-value (#14687)
+
+`Canonicalize` refuses a line that ends while a value slot is pending: a
+typed leaf always awaits its value (`show firewall filter secret family`),
+a dynamic node marked `RequiresValue` awaits its value (`show firewall
+filter`, `show security screen ids-option`, `show route table`,
+`show security policies from-zone … to-zone`, `test security-zone
+interface`), and an unfilled childless `<placeholder>` under a keyword node
+awaits its value (`show chassis cluster data-plane flows` with no limit).
+Before this, the gate judged the dangling string while the dispatcher
+widened to a broader command (`showFirewallFilter("secret","")`, the
+all-filters / all-profiles listings), defeating an anchored deny on either
+form. Bare dynamic nodes without `RequiresValue` (`show security zones`,
+`show interfaces`, `show class-of-service classifier`) and bare `Options`
+nodes remain complete — their handlers really do list everything bare.
+The local and remote dispatchers error on the same dangling selectors
+instead of widening, so an unrestricted class gets a usage error rather
+than a silent dump.
+
 ## Typed leaves
 
 A `Node` with `ValueType != ValueAny` is a typed leaf: it expects exactly

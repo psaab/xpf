@@ -248,6 +248,11 @@ func (c *ctl) handleShow(args []string) error {
 		// config, not the compiled snapshot. Route it to the dedicated server
 		// topics (which share the SSOT renderer) so the two surfaces agree.
 		// `effective` is a trailing modifier, matching the local grammar.
+		// #14687: a dangling `filter` selector must error, not widen to the
+		// all-filters listing.
+		if len(args) >= 2 && args[1] == "filter" && len(args) < 3 {
+			return fmt.Errorf("usage: show firewall filter <name> [family inet|inet6] [effective]")
+		}
 		if firewallArgsContain(args, "effective") {
 			family := firewallFamilyValue(args)
 			if name := firewallFilterName(args); name != "" {
@@ -265,7 +270,10 @@ func (c *ctl) handleShow(args []string) error {
 		}
 		if len(args) >= 3 && args[1] == "filter" {
 			topic := "firewall-filter:" + args[2]
-			if len(args) >= 5 && args[3] == "family" {
+			if len(args) >= 4 && args[3] == "family" {
+				if len(args) < 5 {
+					return fmt.Errorf("usage: show firewall filter <name> family inet|inet6")
+				}
 				topic += ":" + args[4]
 			}
 			return c.showText(topic)
