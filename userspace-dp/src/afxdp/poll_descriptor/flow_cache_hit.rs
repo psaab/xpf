@@ -567,6 +567,7 @@ pub(super) fn stage_flow_cache_hit(
                     meta.ingress_ifindex,
                     meta.ingress_vlan_id,
                     meta.fabric_ingress_ifindex,
+                    cached_descriptor.tx_selection.filter_class_queue_id,
                 )
             })
         } else {

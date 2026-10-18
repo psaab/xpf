@@ -217,6 +217,41 @@ pub(super) fn resolve_cos_queue_lp_rewrite(
     lp.dscp_rewrite_by_queue_lp.get(&(queue_id, plp)).copied()
 }
 
+/// #14636: resolve the egress DSCP rewrite with an explicit forwarding-class
+/// queue id taking precedence over the packet's BA class: a filter-selected
+/// class overrides BA classification, so the rewrite must key on that class
+/// first, then the BA class, then the clamped queue.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn resolve_cos_priority_class_lp_rewrite(
+    forwarding: &ForwardingState,
+    egress_ifindex: i32,
+    ingress_ifindex: u32,
+    filter_class_queue_id: Option<u8>,
+    class_queue_id: Option<u8>,
+    queue_id: u8,
+    dscp: u8,
+    ingress_pcp: u8,
+    vlan_present: bool,
+    trust: BaIngressTrust,
+) -> Option<u8> {
+    let lp = forwarding.cos.lp_rewrite.get(&egress_ifindex)?;
+    let plp = resolve_trusted_ba_loss_priority(
+        lp,
+        forwarding,
+        ingress_ifindex,
+        dscp,
+        ingress_pcp,
+        vlan_present,
+        trust,
+    );
+    filter_class_queue_id
+        .and_then(|cq| lp.dscp_rewrite_by_fc_lp.get(&(cq, plp)).copied())
+        .or_else(|| {
+            class_queue_id.and_then(|cq| lp.dscp_rewrite_by_fc_lp.get(&(cq, plp)).copied())
+        })
+        .or_else(|| lp.dscp_rewrite_by_queue_lp.get(&(queue_id, plp)).copied())
+}
+
 /// #13968: resolve the egress DSCP rewrite by the packet's ORIGINAL
 /// forwarding-class (its pre-clamp BA class queue id) and loss-priority,
 /// falling back to the clamped-queue entry only when the class has no

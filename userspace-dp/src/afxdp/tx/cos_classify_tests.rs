@@ -8501,11 +8501,193 @@ fn egress_dscp_rewrite_unmaterialized_fc_does_not_bleach_and_no_unmaterialized_g
         "cached hit rewrite must key original voice FC"
     );
     let meta_be = UserspaceDpMeta { dscp: 0, ..meta46 };
-    let fresh_be = resolve_cos_tx_selection(&f, 202, meta_be, Some(&key), TermMatchExtra::default());
+    let fresh_be =
+        resolve_cos_tx_selection(&f, 202, meta_be, Some(&key), TermMatchExtra::default());
     assert_eq!(fresh_be.dscp_rewrite, Some(0), "BE class must stay DSCP 0");
     // Control: materialized voice egress.
     let fc = build_forwarding_state(&locus_split_snapshot_11679());
     let ctrl = resolve_cos_tx_selection(&fc, 202, meta46, Some(&key), TermMatchExtra::default());
     assert_eq!(ctrl.queue_id, Some(5));
-    assert_eq!(ctrl.dscp_rewrite, Some(42), "control (materialized) unchanged");
+    assert_eq!(
+        ctrl.dscp_rewrite,
+        Some(42),
+        "control (materialized) unchanged"
+    );
+}
+
+/// #14636: with an ingress BA classifier plus an input-filter
+/// `then forwarding-class`, the packet queues as the filter's class but
+/// must also be re-marked by that class — a multifield class overrides BA
+/// classification for the egress rewrite too. Regression from #13968,
+/// whose class-first key re-derived the class from DSCP/PCP only.
+///
+/// Fixture (from `locus_split_snapshot_11679`): ingress 5 binds DSCP
+/// classifier `voice` (EF/46 -> voice q5 high, DSCP 10 -> bulk-data q1
+/// low); egress 202 materializes best-effort q0, bulk-data q1 and voice
+/// q5 with rewrite rule wan-rw (voice/high=42, bulk-data/low=17). The
+/// input filter on ingress 5 pins `voice` (q5, dscp 46 at low). A DSCP-10
+/// packet is BA-classified bulk-data (q1) but filter-pinned to voice:
+/// fresh, cached-seed and cache-hit must all rewrite by voice/low.
+/// RED pre-fix: the BA class (bulk-data, q1) keyed the rewrite, yielding
+/// Some(17) instead of the voice entry.
+#[test]
+fn filter_forwarding_class_keys_egress_rewrite_over_ba_class_14636() {
+    let mut s = locus_split_snapshot_11679();
+    // Ingress 5 carries the BA classifier; give it an input filter that
+    // pins voice for the test tuple.
+    s.interfaces[2].filter_input_v4 = "pin-voice".into();
+    s.filters.push(FirewallFilterSnapshot {
+        name: "pin-voice".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "voice-class".into(),
+            protocols: vec!["tcp".into()],
+            destination_ports: vec!["443".into()],
+            action: "accept".into(),
+            forwarding_class: "voice".into(),
+            ..Default::default()
+        }],
+    });
+    if let Some(cos) = s.class_of_service.as_mut() {
+        cos.dscp_rewrite_rules[0]
+            .entries
+            .push(CoSDSCPRewriteRuleEntrySnapshot {
+                forwarding_class: "voice".into(),
+                loss_priority: "low".into(),
+                dscp_value: 46,
+            });
+    }
+    let f = build_forwarding_state(&s);
+    let key = inet_precedence_test_key();
+    // DSCP 10: BA class on ingress 5 is bulk-data (q1, low -> 17); the
+    // filter pins voice (q5). Voice/low rewrites to 46.
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: 5,
+        addr_family: libc::AF_INET as u8,
+        dscp: 10,
+        ..Default::default()
+    };
+    let fresh = resolve_cos_tx_selection(&f, 202, meta, Some(&key), TermMatchExtra::default());
+    assert_eq!(fresh.queue_id, Some(5), "filter class pins the voice queue");
+    assert_eq!(
+        fresh.dscp_rewrite,
+        Some(46),
+        "#14636 fresh rewrite must key the filter class (voice), not the BA class (bulk-data)"
+    );
+    let cached = resolve_cached_cos_tx_selection(&f, 202, meta, &key);
+    assert_eq!(
+        cached.queue_id,
+        Some(5),
+        "cached seed keeps the filter queue"
+    );
+    assert_eq!(
+        cached.dscp_rewrite,
+        Some(46),
+        "#14636 cached-seed rewrite must key the filter class"
+    );
+    assert_eq!(
+        cached.filter_class_queue_id,
+        Some(5),
+        "#14636 descriptor must store the filter class for cache hits"
+    );
+    assert!(
+        cached.cos_lp_reclassify,
+        "filter-pinned flow must re-resolve its LP rewrite on hits"
+    );
+    let hit = reclassify_cached_cos_lp_rewrite(
+        &f,
+        202,
+        cached.queue_id.expect("filter queue"),
+        10,
+        0,
+        false,
+        5,
+        0,
+        0,
+        cached.filter_class_queue_id,
+    );
+    assert_eq!(
+        hit,
+        Some(46),
+        "#14636 cache-hit rewrite must key the stored filter class"
+    );
+    // Control A: no filter and no BA binding (ingress 6) — the packet
+    // keeps the egress default queue and no class rewrite, unchanged.
+    let control_a = resolve_cos_tx_selection(
+        &f,
+        202,
+        UserspaceDpMeta {
+            ingress_ifindex: 6,
+            ..meta
+        },
+        Some(&key),
+        TermMatchExtra::default(),
+    );
+    assert_eq!(control_a.queue_id, Some(0));
+    assert_eq!(control_a.dscp_rewrite, None);
+    // Control A2: BA only via the egress classifier (locally generated,
+    // ingress 0): DSCP 46 -> bulk-data q1 -> rewrite 17, unchanged.
+    let control_a2 = resolve_cos_tx_selection(
+        &f,
+        202,
+        UserspaceDpMeta {
+            ingress_ifindex: 0,
+            dscp: 46,
+            ..meta
+        },
+        Some(&key),
+        TermMatchExtra::default(),
+    );
+    assert_eq!(control_a2.queue_id, Some(1));
+    assert_eq!(control_a2.dscp_rewrite, Some(17));
+    // Control B: BA only (ingress 5, DSCP 46, no filter match on a
+    // different tuple) — the BA class keys the rewrite as before.
+    let other_key = SessionKey {
+        dst_port: 80,
+        ..key
+    };
+    let control_b = resolve_cos_tx_selection(
+        &f,
+        202,
+        UserspaceDpMeta { dscp: 46, ..meta },
+        Some(&other_key),
+        TermMatchExtra::default(),
+    );
+    assert_eq!(control_b.queue_id, Some(5));
+    assert_eq!(control_b.dscp_rewrite, Some(42));
+    // Unmaterialized filter class: remove voice from the egress scheduler
+    // map so voice has no materialized queue; the filter class still keys
+    // its own rewrite (voice/low=46) instead of the clamped queue's.
+    let mut s2 = s.clone();
+    if let Some(cos) = s2.class_of_service.as_mut() {
+        cos.scheduler_maps[0]
+            .entries
+            .retain(|e| e.forwarding_class != "voice");
+    }
+    let f2 = build_forwarding_state(&s2);
+    let unmat = resolve_cos_tx_selection(&f2, 202, meta, Some(&key), TermMatchExtra::default());
+    assert_eq!(
+        unmat.dscp_rewrite,
+        Some(46),
+        "#14636 unmaterialized filter class must rewrite by its own class entry"
+    );
+    let unmat_cached = resolve_cached_cos_tx_selection(&f2, 202, meta, &key);
+    assert_eq!(unmat_cached.dscp_rewrite, Some(46));
+    let unmat_hit = reclassify_cached_cos_lp_rewrite(
+        &f2,
+        202,
+        unmat_cached.queue_id.expect("pinned queue"),
+        10,
+        0,
+        false,
+        5,
+        0,
+        0,
+        unmat_cached.filter_class_queue_id,
+    );
+    assert_eq!(
+        unmat_hit,
+        Some(46),
+        "#14636 unmaterialized filter class cache hit must rewrite by its own class"
+    );
 }

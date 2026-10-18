@@ -293,6 +293,7 @@ fn active_flow_debug_test_entry(
                 filter_log: None,
                 ba_reclassify: false,
                 cos_lp_reclassify: false,
+                filter_class_queue_id: None,
                 filter_forwarding_class_fallback_pinned: false,
             },
             nat64: false,
