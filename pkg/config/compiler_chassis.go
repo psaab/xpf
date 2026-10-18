@@ -98,18 +98,29 @@ func collectDeviceMapProps(instNode *Node, props map[string]string) {
 	// property tokens into the deepest leaf's Keys
 	// (e.g. mac node Keys=[mac, <val>, key, mac-then-pci]), so a prop can
 	// appear as Keys[i]==prop with its value at Keys[i+1] at any depth.
+	//
+	// #14685: consume each recognised pair (i += 2) instead of stepping
+	// i++. The value of `key` is itself a prop keyword (`pci`/`mac`), so
+	// stepping by one re-read that value as a property and captured the
+	// following keyword as its address (`key pci pci 0000:01:00.0` ->
+	// PCIAddr="pci", real address never recorded). Consuming the pair
+	// keeps the scan aligned on keyword boundaries; an unrecognised token
+	// still steps by one so a stray token cannot hide a later pair.
 	var walk func(n *Node)
 	walk = func(n *Node) {
 		start := 0
 		if n == instNode {
 			start = 2 // skip "interface <name>"
 		}
-		for i := start; i+1 < len(n.Keys); i++ {
+		for i := start; i+1 < len(n.Keys); {
 			if isDeviceMapProp(n.Keys[i]) {
 				if _, ok := props[n.Keys[i]]; !ok {
 					props[n.Keys[i]] = n.Keys[i+1]
 				}
+				i += 2
+				continue
 			}
+			i++
 		}
 		for _, c := range n.Children {
 			walk(c)
@@ -210,6 +221,33 @@ func validateDeviceMapStrict(cfg *Config) error {
 			return fmt.Errorf("chassis device-map: interface %q has neither a pci nor a "+
 				"mac identity key — add `pci <addr>` (preferred) or `mac <addr>`",
 				e.LogicalName)
+		}
+
+		// #14685: a present identity must be a well-formed address.
+		// SchemaValidate gates operator commits, but direct CompileConfig
+		// callers bypass it; without this a corrupted value such as
+		// PCIAddr="pci" (the compact `key pci pci <addr>` mis-scan) is
+		// non-empty and passed every check below, so the resolver
+		// searched for a NIC literally named "pci". Reuse the schema
+		// validators so strict compile and schema agree on the format.
+		if e.PCIAddr != "" {
+			if err := ValidatePCIAddr(e.PCIAddr, nil); err != nil {
+				return fmt.Errorf("chassis device-map: interface %q has an invalid pci identity: %w", e.LogicalName, err)
+			}
+		}
+		if e.MAC != "" {
+			if err := ValidateMAC(e.MAC, nil); err != nil {
+				return fmt.Errorf("chassis device-map: interface %q has an invalid mac identity: %w", e.LogicalName, err)
+			}
+		}
+
+		// #14685: KeyOrder must be one of the schema enum values; an
+		// unknown order silently fell through to the resolver default.
+		switch e.KeyOrder {
+		case "", DeviceMapKeyPCIThenMAC, DeviceMapKeyMACThenPCI, DeviceMapKeyPCI, DeviceMapKeyMAC:
+		default:
+			return fmt.Errorf("chassis device-map: interface %q has unknown key order %q "+
+				"(expected pci-then-mac, mac-then-pci, pci, or mac)", e.LogicalName, e.KeyOrder)
 		}
 
 		// Duplicate PCI / duplicate MAC → FATAL (one NIC, two names).
