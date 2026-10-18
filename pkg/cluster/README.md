@@ -652,6 +652,15 @@ correct runtime resolution; the only remedy is correcting
   the startup peer-absent grace, each node independently runs `electSingleNode`;
   eligible RGs can claim PRIMARY on both nodes, creating duplicate VIPs. The
   warning names that outcome, not fail-closed election behavior.
+  On a keyed node the warning is gated on HMAC verification against every
+  accepted control-link key (#14705, `duplicateNodeIDAuthenticated`): the
+  #6888 source pin is not an authentication boundary, so an unsigned or
+  wrong-key same-node-id frame from a spoofed peer IP must neither forge
+  the history event nor consume the shared 30s limiter that also gates
+  the authenticated beacon below. Only the MAC is checked — the frame is
+  discarded without touching liveness, election, or replay/epoch state.
+  An unkeyed node cannot verify and keeps the legacy unauthenticated
+  warning (dual-accept, mirroring `admitFrame`).
   In the documented shared `${node}` shape (`ha-pair.conf` puts both `em0`
   and `peer-address` inside the selected node group) two chassis with the
   same node-id hold the same local address and point at a peer address held
