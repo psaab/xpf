@@ -271,6 +271,19 @@ struct UserspaceWgIngressZoneKey {
     reserved: u16,
 }
 
+// #14842: (ifindex, wire VLAN) ingress-domain key. vlan_id is the frame's
+// VID when a tag is present, else the untagged sentinel 0xffff — the same
+// convention as UserspaceWgIngressZoneKey's untagged key in wg_zone_admission.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UserspaceIngressDomainKey {
+    ifindex: u32,
+    vlan_id: u16,
+    reserved: u16,
+}
+
+const USERSPACE_INGRESS_DOMAIN_UNTAGGED_VLAN_ID: u16 = u16::MAX;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct UserspaceWgAdmissionKey {
@@ -282,6 +295,7 @@ struct UserspaceWgAdmissionKey {
 }
 
 const _: [(); 8] = [(); mem::size_of::<UserspaceWgIngressZoneKey>()];
+const _: [(); 8] = [(); mem::size_of::<UserspaceIngressDomainKey>()];
 const _: [(); 24] = [(); mem::size_of::<UserspaceWgAdmissionKey>()];
 
 #[repr(C)]
@@ -456,8 +470,9 @@ static USERSPACE_BINDINGS: Array<UserspaceBindingValue> =
 // the kernel host-inbound path.
 #[map(name = "userspace_ingress_ifaces")]
 static USERSPACE_INGRESS_IFACES: HashMap<u32, u8> = HashMap::with_max_entries(MAX_INTERFACES, 0);
-#[map(name = "userspace_ingress_domains")]
-static USERSPACE_INGRESS_DOMAINS: HashMap<u32, u32> = HashMap::with_max_entries(MAX_INTERFACES, 0);
+#[map(name = "userspace_ingress_domains_vlan")]
+static USERSPACE_INGRESS_DOMAINS: HashMap<UserspaceIngressDomainKey, u32> =
+    HashMap::with_max_entries(8192, 0);
 
 // XDP must resolve the physical arrival interface and VLAN to one validated
 // security zone before it claims an outer WireGuard transport record.
@@ -691,9 +706,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     let Some(parsed) = parsed else {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_PARSE_FAIL);
     };
-    let ingress_domain = unsafe { USERSPACE_INGRESS_DOMAINS.get(&ingress_ifindex) }
-        .copied()
-        .unwrap_or(u32::MAX);
+    let ingress_domain = ingress_domain_for(ingress_ifindex, &parsed);
 
     // #12055/#13932: the worker's VID-0 guard runs after this shim has
     // already returned firewall-owned traffic to the kernel. Carry the
@@ -1016,7 +1029,6 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 // The userspace DP will evaluate policy and either create a
                 // session (new flow) or drop (stale non-SYN TCP / policy deny).
             }
-        }
         }
     } else if native_gre_fragment {
         // A fragmented head cannot be inner-classified for decap; the
@@ -1527,9 +1539,7 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
     let Some(parsed) = parsed else {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED);
     };
-    let ingress_domain = unsafe { USERSPACE_INGRESS_DOMAINS.get(&ingress_ifindex) }
-        .copied()
-        .unwrap_or(u32::MAX);
+    let ingress_domain = ingress_domain_for(ingress_ifindex, &parsed);
     if is_tagged_only_vid0_firewall_owned_destination(ingress_iface_flags, &parsed, ingress_domain) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP);
     }
@@ -1557,6 +1567,27 @@ fn userspace_ingress_metadata(ctx: &XdpContext) -> (u32, u8) {
         .copied()
         .unwrap_or(0);
     (ingress_ifindex, ingress_iface_flags)
+}
+
+// #14842: resolve the routing domain per (ifindex, wire VLAN). Untagged
+// frames use the 0xffff sentinel; a priority-tagged VID 0 keeps VID 0,
+// matching the shim's existing VID-0 ownership semantics. Outlined
+// (#[inline(never)], the session_action_for_key precedent) so the verifier
+// explores the key construction and map read once, not per call site.
+#[inline(never)]
+fn ingress_domain_for(ingress_ifindex: u32, parsed: &ParsedPacket) -> u32 {
+    let key = UserspaceIngressDomainKey {
+        ifindex: ingress_ifindex,
+        vlan_id: if parsed.vlan_present {
+            parsed.vlan_id
+        } else {
+            USERSPACE_INGRESS_DOMAIN_UNTAGGED_VLAN_ID
+        },
+        reserved: 0,
+    };
+    unsafe { USERSPACE_INGRESS_DOMAINS.get(&key) }
+        .copied()
+        .unwrap_or(u32::MAX)
 }
 
 #[inline(always)]

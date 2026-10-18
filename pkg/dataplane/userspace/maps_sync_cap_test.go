@@ -359,7 +359,7 @@ func TestSamePlanClassifierMapRefreshFailsClosedOnNATSyncFailure(t *testing.T) {
 	})
 	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceIngressDomains, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    4,
+		KeySize:    8,
 		ValueSize:  4,
 		MaxEntries: 16,
 	})
@@ -560,7 +560,7 @@ func injectClassifierRefreshMapsWithNATV4(t *testing.T, m *Manager) *ebpf.Map {
 	})
 	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceIngressDomains, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    4,
+		KeySize:    8,
 		ValueSize:  4,
 		MaxEntries: 16,
 	})

@@ -97,3 +97,9 @@ or DNAT reverse mappings.
 - **The refusal is symmetric.** A build from before #9546 deployed onto pins
   that have crossed refuses with `embedded=144 pinned=152`, and needs the same
   targeted unlink.
+- **#14842 needs no manual pin step.** It re-keys the ingress-domain map as
+  `userspace_ingress_domains_vlan` under a new pin name. The loader retires
+  the legacy `userspace_ingress_domains` pin automatically at startup, so a
+  rolling deploy crosses without operator action; only a rollback to a
+  pre-#14842 build needs the targeted unlink of `userspace_ingress_domains_vlan`
+  if the old loader refuses it.

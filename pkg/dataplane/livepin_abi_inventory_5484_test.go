@@ -15,7 +15,7 @@ import (
 // (userspaceShimSharedMapSpecs) — deduplicated, minus the disposable
 // userspace_fallback_stats counter.
 //
-// Before the fix the set was userspacePinnedShimMaps() minus fallback stats
+// Before the fix the set was userspacePinnedShimMaps() minus disposable maps
 // only, so the state-bearing shared maps the shim does not declare —
 // sessions_v6, dnat_table_v6, and the HA/per-CPU maps (rg_active, ha_watchdog,
 // session_id_gen, the *_counters) — were never ABI-checked. An incompatible
@@ -47,6 +47,11 @@ func TestUserspaceABICheckedPinnedMapsCoversAllRequiredPins(t *testing.T) {
 	if _, ok := set[userspaceFallbackStatsMapName]; ok {
 		t.Fatalf("ABI-checked set must exclude disposable %s", userspaceFallbackStatsMapName)
 	}
+	// #14842: the re-keyed ingress-domain map is likewise reconciled, not
+	// ABI-refused.
+	if _, ok := set[userspaceIngressDomainsMapName]; ok {
+		t.Fatalf("ABI-checked set must exclude disposable %s", userspaceIngressDomainsMapName)
+	}
 
 	// Spot-check the previously-omitted state-bearing shared maps that the #5484
 	// stranding scenario turns on.
@@ -60,21 +65,21 @@ func TestUserspaceABICheckedPinnedMapsCoversAllRequiredPins(t *testing.T) {
 	}
 
 	// Completeness: the set must equal the union of both required-pin sources
-	// minus the disposable counter — the exact invariant the fix establishes and
+	// minus the disposable maps — the exact invariant the fix establishes and
 	// that userspaceRequiredShimPins already iterates for existence.
 	want := make(map[string]struct{})
 	for _, n := range userspacePinnedShimMaps() {
-		if n != userspaceFallbackStatsMapName {
+		if n != userspaceFallbackStatsMapName && n != userspaceIngressDomainsMapName {
 			want[n] = struct{}{}
 		}
 	}
 	for _, s := range userspaceShimSharedMapSpecs() {
-		if s.Name != userspaceFallbackStatsMapName {
+		if s.Name != userspaceFallbackStatsMapName && s.Name != userspaceIngressDomainsMapName {
 			want[s.Name] = struct{}{}
 		}
 	}
 	if len(set) != len(want) {
-		t.Fatalf("ABI-checked set has %d maps, want %d (union of both required-pin sources minus fallback stats)", len(set), len(want))
+		t.Fatalf("ABI-checked set has %d maps, want %d (union of both required-pin sources minus disposable maps)", len(set), len(want))
 	}
 	for n := range want {
 		if _, ok := set[n]; !ok {
