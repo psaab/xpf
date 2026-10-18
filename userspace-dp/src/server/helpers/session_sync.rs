@@ -73,6 +73,30 @@ fn reject_unresolved_ipv6_ext_protocol(req: &SessionSyncRequest) -> Result<(), S
     Ok(())
 }
 
+/// #14648: protocol 255 is the shim's non-first-fragment sentinel
+/// (`PROTO_FRAGMENT_NO_L4` / `SHIM_PROTO_FRAGMENT_NO_L4`), not a real
+/// upper-layer protocol. It is in neither the traversable IPv6 ext-header
+/// set nor the TCP/UDP port-bearing set, so both refusals above pass a
+/// 255/0/0 record through, and the steering publish then handed every
+/// protocol's non-first fragments to the kernel. A correct peer never
+/// builds such a key (its packet path substitutes 255 only as a probe
+/// value, never as a session identity), so refuse rather than sanitise.
+/// Scoped to Install: a Delete only retracts an identity and can at worst
+/// under-match, the #7188 discipline.
+fn reject_fragment_sentinel_protocol(
+    req: &SessionSyncRequest,
+    intent: SyncedKeyIntent,
+) -> Result<(), String> {
+    if intent == SyncedKeyIntent::Install
+        && req.protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4
+    {
+        return Err(format!(
+            "{SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX}fragment-sentinel-protocol"
+        ));
+    }
+    Ok(())
+}
+
 /// What the reconstructed key is FOR (#7188).
 ///
 /// The two uses want opposite answers when the peer could not state the
@@ -199,6 +223,7 @@ pub(crate) fn build_synced_session_key(
     intent: SyncedKeyIntent,
 ) -> Result<crate::session::SessionKey, String> {
     reject_unresolved_ipv6_ext_protocol(req)?;
+    reject_fragment_sentinel_protocol(req, intent)?;
     let discriminator = resolve_synced_discriminator(req, intent)?;
     let src_ip = req
         .src_ip

@@ -220,6 +220,44 @@ fn tunnel_discriminators_demote_kernel_local_to_redirect_9517() {
     }
 }
 
+/// #14648: protocol 255 is the shim's non-first-fragment sentinel, never a
+/// real session protocol. A steering row keyed (family, 255, src, dst, 0, 0)
+/// is what the shim probes for every protocol's non-first fragments, so
+/// publishing it as PASS_TO_KERNEL hands those fragments to the kernel with
+/// no zone policy evaluated.
+#[test]
+fn fragment_sentinel_never_publishes_a_steering_row_14648() {
+    for family in [libc::AF_INET, libc::AF_INET6] {
+        let (src_ip, dst_ip) = if family == libc::AF_INET {
+            (IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)), IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)))
+        } else {
+            (IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x66)), IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x01)))
+        };
+        let key = SessionKey { addr_family: family as u8, protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4, src_ip, dst_ip, src_port: 0, dst_port: 0, discriminator: crate::session::TunnelDiscriminator::None, routing_domain: 0 };
+        assert!(!uses_kernel_local_session_map_entry(&key, local_delivery_decision(0), &synced_forward_metadata(), SessionOrigin::SyncImport, false), "#14648: proto-255 LocalDelivery must never select PASS_TO_KERNEL (family {family})");
+        clear_session_map_writes();
+        publish_session_map_entry_for_session_with_conntrack(SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD), &key, local_delivery_decision(0), &synced_forward_metadata(), SessionOrigin::SyncImport, false, None).expect("refused steering publish must not error");
+        let writes = session_map_writes();
+        assert!(writes.is_empty(), "#14648: a proto-255 key publishes nothing (family {family}), got {writes:?}");
+    }
+    clear_session_map_writes();
+    publish_session_map_entry_for_session_with_conntrack(SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD), &plain_key(), local_delivery_decision(0), &synced_forward_metadata(), SessionOrigin::SyncImport, false, None).expect("control publish");
+    let writes = session_map_writes();
+    assert_eq!(writes.iter().filter(|w| w.value == Some(USERSPACE_SESSION_ACTION_PASS_TO_KERNEL)).count(), 1, "#14648 control: TCP LocalDelivery must still publish PASS_TO_KERNEL, got {writes:?}");
+}
+
+/// #14648: the live REDIRECT publish path is gated too.
+#[test]
+fn fragment_sentinel_never_publishes_a_live_row_14648() {
+    let key = SessionKey { protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4, src_port: 0, dst_port: 0, ..plain_key() };
+    clear_session_map_writes();
+    publish_live_session_entry(SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD), &key, NatDecision::default(), false).expect("refused live publish must not error");
+    assert!(session_map_writes().is_empty(), "#14648: live publish of a proto-255 key must write nothing, got {:?}", session_map_writes());
+    clear_session_map_writes();
+    publish_live_session_entry(SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD), &plain_key(), NatDecision::default(), false).expect("control live publish");
+    assert!(!session_map_writes().is_empty(), "#14648 control: TCP live publish must still write rows");
+}
+
 #[test]
 fn degraded_path_reason_names_cover_retained_shim_actions() {
     assert_eq!(DEGRADED_PATH_REASON_NAMES.len(), 19);
