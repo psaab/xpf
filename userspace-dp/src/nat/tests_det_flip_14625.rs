@@ -51,6 +51,9 @@ fn pat_claim(alloc: &PortAllocator, src_port: u16) -> Result<u16, SourceNatFailu
             0,
             1_000,
             NatHolder::Untracked,
+            // #14802: non-persistent PAT claim; egress scope only buckets
+            // persistent grants, so the unscoped sentinel (0) is correct.
+            0,
         )
         .map(|t| t.port)
 }
