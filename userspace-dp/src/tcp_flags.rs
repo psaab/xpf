@@ -125,6 +125,22 @@ pub(crate) fn is_closing(flags: u8) -> bool {
     (flags & (TCP_FIN | TCP_RST)) != 0
 }
 
+/// True iff the segment carries TCP payload progress — i.e. it is a
+/// data-bearing segment rather than a bare control/ACK segment.
+///
+/// `payload_len` is the caller-derived TCP payload length (IP-declared
+/// datagram end minus the TCP header end; zero when unknown/truncated).
+/// The session layer never parses frames, so callers that cannot derive
+/// a payload length pass 0 and this predicate stays false — the
+/// conservative direction (no spurious refresh). PSH is deliberately
+/// NOT used: a zero-window probe or a retransmitted PSH segment carries
+/// no new payload, while a data segment without PSH (bulk-transfer
+/// middle segments routinely clear PSH) still advances the byte stream.
+#[inline]
+pub(crate) fn has_payload_progress(_tcp_flags: u8, payload_len: u32) -> bool {
+    payload_len > 0
+}
+
 #[cfg(test)]
 #[path = "tcp_flags_tests.rs"]
 mod tests;

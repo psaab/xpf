@@ -254,6 +254,28 @@ per-source counting charges only the forward half) still admitting
 server→client hits. With the gate, both halves stay on `TCP_RST_TIMEOUT_NS`
 and reap together; a FIN-stamped pair likewise stays on the CLOSING window.
 
+**Data-bearing segments re-stamp CLOSING (#14935, root cause of #14300).**
+The #10885 gate froze BOTH directions once the FIN-owning side was done:
+its ACKs could not slide, so a half-close whose FINed side was still
+draining (or whose peer was still delivering bulk data that only the
+FINed side's cache/slow-path hits touched) reaped at FIN+30 s regardless
+of traffic — live iperf3 streams stalled to zero at ~28–30 s with
+SESSION_CLOSE `idle Timeout` on 200k+-packet flows. The fix threads TCP
+payload progress (`tcp_flags::has_payload_progress`, payload length
+derived by the caller from the IP-declared datagram end minus the TCP
+header end; zero when unknown) through the slow-path lookup
+(`lookup_with_payload` / `lookup_with_origin_with_payload`, the
+deferring-authority lookup and the Owner replay) and the flow-cache
+keepalive (`touch_if_stale_with_payload`). A data-bearing segment
+re-stamps a CLOSING (single-FIN) entry from either direction onto the
+same closing window; bare ACKs keep the #10885 fixed fuse, and the
+fixed fuse is retained ONLY for TIME_WAIT (both FINs) and RST, which
+never slide on payload. Payload-unknown callers pass 0 and retain the
+pre-#14935 gate — the conservative direction. Companion retention
+(`companion_keeps_alive`) is unchanged: it copies a companion's real
+`last_seen_ns`, so data refreshed on either half still holds the pair,
+and once data stops both halves reap at last-data + closing window.
+
 The normal SYN-first path still requires the SYN bit on the reverse tuple, not
 just `has_ack`, to prevent a server-spoofed bare reverse ACK from bypassing the
 half-open reap. Promotion is sticky and is applied on the timeout-selection
@@ -498,11 +520,15 @@ steady-state per-hit cost is two warm session-index probes (admission plus
 keepalive) and integer compares; the `last_seen_ns` write + throttled
 `push_to_wheel` run only when actually stale. Allocation-free.
 
-For closing TCP, #10885 keeps the timer directional: reset entries and
-FIN-owning halves do not slide on hits, while the non-FINed half of a
-half-close remains refreshable. Companion retention follows the same
-close state: reset and FIN-owning companions cannot keep an entry alive,
-but an active non-FINed companion can retain its FINed peer.
+For closing TCP, #10885 keeps the timer directional on bare ACKs: reset
+entries and FIN-owning halves do not slide on ACK-only hits, while the
+non-FINed half of a half-close remains refreshable. #14935 adds the
+data-bearing exception: a payload-carrying segment re-stamps a CLOSING
+(single-FIN) entry from either direction via
+`touch_if_stale_with_payload`; TIME_WAIT and RST never slide. Companion
+retention follows the same close state: reset and FIN-owning companions
+cannot keep an entry alive, but an active non-FINed companion can retain
+its FINed peer.
 
 This replaced the pre-#2220 binding-GLOBAL modulo-64 counter
 (`flow_cache_session_touch`), which incremented across ALL flows on the

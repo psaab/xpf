@@ -663,20 +663,38 @@ pub(in crate::afxdp) fn lookup_session_across_scopes_with_shared(
     now_ns: u64,
     tcp_flags: u8,
 ) -> Option<ResolvedSessionLookup> {
+    lookup_session_across_scopes_with_shared_and_payload(
+        sessions,
+        shared_sessions,
+        _shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        key,
+        now_ns,
+        tcp_flags,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn lookup_session_across_scopes_with_shared_and_payload(
+    sessions: &mut SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    _shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    key: &SessionKey,
+    now_ns: u64,
+    tcp_flags: u8,
+    payload_len: u32,
+) -> Option<ResolvedSessionLookup> {
     if !crate::session::PMechSessionDirectory::global()
         .probe_packet_key(key)
         .is_fallthrough()
     {
         return None;
     }
-    // #10886: lookup never evicts a closing pair for a SYN. The poll path
-    // probes it read-only, checks authority, and only retires it after an
-    // owner's new-flow policy permit.
-    // #13938: defer all local-hit state changes until the #9519 authority
-    // verdict names the packet's owner. Foreign packets must not promote the
-    // handshake, refresh idle time, propagate to the companion, queue HA
-    // updates, or refresh the expiry wheel.
-    match sessions.lookup_with_origin_deferring_authority(key, now_ns, tcp_flags) {
+    match sessions.lookup_with_origin_deferring_authority_with_payload(key, now_ns, tcp_flags, payload_len) {
         crate::session::SessionExpiryProbe::Live((lookup, origin)) => {
             if is_fabric_wire_placeholder(
                 lookup.metadata.fabric_ingress,

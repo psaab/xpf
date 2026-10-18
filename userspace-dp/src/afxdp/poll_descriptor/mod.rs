@@ -334,6 +334,28 @@ fn stage11_declared_frame(packet_frame: &[u8], meta: UserspaceDpMeta) -> &[u8] {
         .unwrap_or(&packet_frame[..0])
 }
 
+/// #14935: TCP payload length from the meta-stamped offsets, bounded
+/// by the IP-declared datagram end so Ethernet slack never counts as
+/// payload. Zero when the packet is not TCP, the offsets are
+/// inconsistent, or the declared end is unavailable — the conservative
+/// direction (no payload progress, no closing-state refresh).
+#[inline]
+pub(super) fn tcp_payload_len(packet_frame: &[u8], meta: UserspaceDpMeta) -> u32 {
+    if meta.protocol != crate::ip_proto::PROTO_TCP {
+        return 0;
+    }
+    let payload_offset = meta.payload_offset as usize;
+    if payload_offset == 0 {
+        return 0;
+    }
+    let Some(declared_end) =
+        declared_l3_end(packet_frame, meta.l3_offset as usize, meta.addr_family)
+    else {
+        return 0;
+    };
+    u32::try_from(declared_end.saturating_sub(payload_offset)).unwrap_or(0)
+}
+
 #[inline]
 fn record_ipsec_sa_miss_sample(
     sample_phase: &mut u8,
@@ -2060,7 +2082,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 let mut fragment_association_hit = false;
                 let mut decision = if let Some(flow) = flow.as_ref() {
                     if !owner_syn_reuse
-                        && let Some(mut resolved) = resolve_flow_session_decision_with_conntrack(
+                        && let Some(mut resolved) = resolve_flow_session_decision_with_conntrack_and_payload(
                             sessions,
                             binding.bpf_maps.session_map.handle(),
                             conntrack_v4_fd,
@@ -2079,10 +2101,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             now_secs,
                             meta.protocol,
                             meta.tcp_flags,
+                            tcp_payload_len(packet_frame, meta),
                             meta.ingress_ifindex as i32,
-                            // #9383: the arrival VLAN, so the #7169 reverse-session
-                            // synthesis can resolve the LOGICAL unit rather than
-                            // keying `ifindex_to_zone_id` on the raw physical index.
                             meta.ingress_vlan_id,
                             fabric_ingress_for_session,
                             fabric_link_ingress,
@@ -2262,10 +2282,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // Owner-only: a permitted foreign Forward must not
                         // keep any session-state mutation primitive.
                         if foreign_arrival_zone.is_none() && resolved.authority_deferred {
-                            sessions.apply_deferred_owner_hit(
+                            sessions.apply_deferred_owner_hit_with_payload(
                                 &resolved.key,
                                 now_ns,
                                 meta.tcp_flags,
+                                tcp_payload_len(packet_frame, meta),
                             );
                         }
                         // The zone the filter and host-inbound consumers below

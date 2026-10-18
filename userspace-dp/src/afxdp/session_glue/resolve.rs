@@ -179,6 +179,46 @@ verdict: SessionHitVerdict,) -> Option<ResolvedFlowSessionDecision> {
     Some(resolved)
 }
 
+/// #14935: production poll-path variant carrying TCP payload progress.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn resolve_flow_session_decision_with_conntrack_and_payload(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &WorkerCommandQueues,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    flow: &SessionFlow,
+    now_ns: u64,
+    now_secs: u64,
+    protocol: u8,
+    tcp_flags: u8,
+    payload_len: u32,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    fabric_ingress: bool,
+    fabric_link_ingress: bool,
+    ha_startup_grace_until_secs: u64,
+    worker_id: u32,
+    prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,
+) -> Option<ResolvedFlowSessionDecision> {
+    resolve_flow_session_decision_with_conntrack_inner(
+        sessions, session_map, conntrack_v4_fd, conntrack_v6_fd, shared_sessions,
+        shared_nat_sessions, shared_forward_wire_sessions, shared_owner_rg_indexes,
+        peer_worker_commands, worker_commands_by_id, forwarding, ha_state,
+        dynamic_neighbors, flow, now_ns, now_secs, protocol, tcp_flags, payload_len,
+        ingress_ifindex, ingress_vlan_id, fabric_ingress, fabric_link_ingress,
+        ha_startup_grace_until_secs, worker_id, prevalidated_forward_nat_match,
+    )
+}
+
 /// Materialize a shared entry only after the packet's Owner verdict.
 pub(in crate::afxdp::session_glue) fn apply_deferred_shared_materialization(
     sessions: &mut SessionTable,
@@ -229,22 +269,48 @@ now_secs: u64,
 protocol: u8,
 tcp_flags: u8,
 ingress_ifindex: i32,
-// #9383: the arrival frame's VLAN id, needed ONLY to resolve
-// `ingress_ifindex` (a physical bind port) to the LOGICAL unit ifindex the
-// zone ledger is keyed by. A caller with no VLAN context passes 0, which
-// resolves logical == physical for every untagged port.
 ingress_vlan_id: u16,
-// `fabric_ingress` is the validated stamp/overlay semantic used by
-// session policy; `fabric_link_ingress` is the physical parent-or-overlay
-// arrival semantic used by the anti-loop redirect guard.
 fabric_ingress: bool,
 fabric_link_ingress: bool,
 ha_startup_grace_until_secs: u64,
-// #6211 F2: THIS worker's id, threaded from `WorkerLaunchPlan::worker_id`
-// in the worker loop. A peer-synced reservation is held by every worker, so
-// a release must drop THIS worker's bit rather than free the port outright.
 worker_id: u32,
-// Only the unique unstamped-fabric reverse-NAT exception supplies this.
+prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) -> Option<ResolvedFlowSessionDecision> {
+    resolve_flow_session_decision_with_conntrack_inner(
+        sessions, session_map, conntrack_v4_fd, conntrack_v6_fd, shared_sessions,
+        shared_nat_sessions, shared_forward_wire_sessions, shared_owner_rg_indexes,
+        peer_worker_commands, worker_commands_by_id, forwarding, ha_state,
+        dynamic_neighbors, flow, now_ns, now_secs, protocol, tcp_flags, 0,
+        ingress_ifindex, ingress_vlan_id, fabric_ingress, fabric_link_ingress,
+        ha_startup_grace_until_secs, worker_id, prevalidated_forward_nat_match,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_flow_session_decision_with_conntrack_inner(sessions: &mut SessionTable,
+session_map: SteeringMap<'_>,
+conntrack_v4_fd: c_int,
+conntrack_v6_fd: c_int,
+shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+worker_commands_by_id: &WorkerCommandQueues,
+forwarding: &ForwardingState,
+ha_state: &BTreeMap<i32, HAGroupRuntime>,
+dynamic_neighbors: &Arc<ShardedNeighborMap>,
+flow: &SessionFlow,
+now_ns: u64,
+now_secs: u64,
+protocol: u8,
+tcp_flags: u8,
+payload_len: u32,
+ingress_ifindex: i32,
+ingress_vlan_id: u16,
+fabric_ingress: bool,
+fabric_link_ingress: bool,
+ha_startup_grace_until_secs: u64,
+worker_id: u32,
 prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) -> Option<ResolvedFlowSessionDecision> {
     if !crate::session::PMechSessionDirectory::global()
         .probe_packet_key(&flow.forward_key)
@@ -265,7 +331,7 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
         forward_wire_sessions: shared_forward_wire_sessions,
         owner_rg_indexes: shared_owner_rg_indexes,
     };
-    if let Some(mut hit) = lookup_session_across_scopes_with_shared(
+    if let Some(mut hit) = lookup_session_across_scopes_with_shared_and_payload(
         sessions,
         shared_sessions,
         shared_nat_sessions,
@@ -274,6 +340,7 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
         &flow.forward_key,
         now_ns,
         tcp_flags,
+        payload_len,
     ) {
         let hit_origin = hit.origin;
         let poison_key = hit

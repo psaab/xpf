@@ -435,7 +435,12 @@ pub(super) fn stage_flow_cache_hit(
         // filter, log, policer, or packet-accounting side effects. The TTL
         // check above is intentionally first so a TTL-expired packet does not
         // refresh a session before its generated error/drop decision.
-        if !sessions.touch_if_stale(&flow.forward_key, now_ns) {
+        if !sessions.touch_if_stale_with_payload(
+            &flow.forward_key,
+            now_ns,
+            meta.tcp_flags,
+            super::tcp_payload_len(packet_frame, meta),
+        ) {
             flow_state
                 .flow_cache
                 .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
