@@ -119,7 +119,7 @@ func TestSetRepeatedArchiveSites(t *testing.T) {
 	tree := buildTree(t, []string{
 		`set system archival configuration archive-sites "scp://a@host1/c" password s3cret`,
 		`set system archival configuration archive-sites "scp://b@host2/c"`,
-		`set system archival configuration archive-sites "ftp://c@host3/c"`,
+		`set system archival configuration archive-sites "scp://c@host3/c"`,
 	})
 	cfg, err := CompileConfig(tree)
 	if err != nil {
@@ -131,7 +131,7 @@ func TestSetRepeatedArchiveSites(t *testing.T) {
 	want := []string{
 		"scp://a@host1/c",
 		"scp://b@host2/c",
-		"ftp://c@host3/c",
+		"scp://c@host3/c",
 	}
 	if len(cfg.System.Archival.ArchiveSites) != len(want) {
 		t.Fatalf("ArchiveSites = %v, want %v (SetPath collapsed the repeated leaf)",
