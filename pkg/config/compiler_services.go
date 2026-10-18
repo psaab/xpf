@@ -87,6 +87,11 @@ func validateRPMTest(probeName string, test *RPMTest) error {
 // source-specific path). The ICMP path already surfaces a bad source via
 // its real listen error; tcp-ping/http-get had no such backstop.
 //
+// An unspecified source ("0.0.0.0" / "::", #14727) parses fine but is
+// the wildcard itself — it pins nothing, so it is rejected for the
+// same reason: the probe would measure the default uplink while the
+// operator believes a source-specific path is being monitored.
+//
 // When the target is an IP literal, the source must share its address
 // family: a v6 source can never bind a v4 destination connection (and
 // vice-versa). For a hostname target the family is unknown until DNS
@@ -106,7 +111,7 @@ func validateRPMSourceAddressStrict(cfg *Config) error {
 				continue
 			}
 			src := net.ParseIP(test.SourceAddress)
-			if src == nil {
+			if src == nil || src.IsUnspecified() {
 				return fmt.Errorf("services rpm probe %q test %q source-address: invalid IP address %q",
 					probe.Name, test.Name, test.SourceAddress)
 			}
