@@ -1085,6 +1085,22 @@ pub(super) fn try_native_gre_decap_from_frame_with_input_filter(
     if meta.protocol != PROTO_GRE {
         return None;
     }
+    // #14652 residual: refuse decap of an IPv6 outer chain that sights
+    // an Authentication Header before GRE. This runs at stage 6, before
+    // screen (stage 10) and the stage-11 ESP/AH drop ever see the OUTER
+    // packet, and meta.protocol==PROTO_GRE alone admits such a chain:
+    // the XDP walker advances past AH to GRE. Decapsulating it would
+    // strip an unverified AH while non-GRE AH transit is dropped as
+    // PROTO_AH (#10729). Returning None is a refusal, not a drop: the
+    // outer frame continues on the ordinary path where those stages
+    // adjudicate it. The check re-derives from the frame bytes at the
+    // stamped l3_offset (the same input the non-GRE path uses), never
+    // from meta.protocol alone. The fragment half of #14652 is already
+    // handled before decap by #14645 gre_reassembly at stage 6, so no
+    // fragment guard belongs here.
+    if ipv6_ah_sighted(frame, meta.addr_family, meta.l3_offset as usize) {
+        return None;
+    }
     let gre_offset = meta.l4_offset as usize;
     // #6748: everything below reads through `outer`, never `frame`. The outer
     // IP header's own declared length is the authoritative end of this
