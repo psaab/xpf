@@ -203,15 +203,20 @@ func TestWebMgmtRebindsOnAddressReplacement14582(t *testing.T) {
 		t.Fatal("the re-assert gate did not see the stale leg down; nothing " +
 			"would re-drive it onto the new address (#14582)")
 	}
+	stale := reg.get("10.0.0.1:443")
+	if stale == nil || !stale.isOpen() {
+		t.Fatal("setup: the stale-address listener is not open before the rebind")
+	}
 	d.reassertMgmtListenersOnce(context.Background())
 
 	if got := m.effectiveHTTPSListener(); got.State != sysservices.StateListening || httpsBoundAddr14582(m) != "10.0.0.9:443" {
 		t.Fatalf("after the address replacement and one tick: %+v, want "+
 			"Listening at 10.0.0.9:443 — the leg kept the stale address (#14582)", got)
 	}
-	if ln := reg.get("10.0.0.1:443"); ln != nil && ln.isOpen() {
-		t.Fatal("the stale-address listener is still open after the rebind")
-	}
+	// Retirement is asynchronous (#14824): stopLegLocked only wakes the
+	// serve goroutine, which closes the socket after its background
+	// drain. Poll for the close instead of asserting it synchronously.
+	waitClosed(t, stale)
 }
 
 // TestWebMgmtDHCPLeaseChangeRebindsBoundInterface14582 is the DHCP sibling
