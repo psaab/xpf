@@ -230,64 +230,99 @@ type syncNoiseKeys struct {
 // is `1 - localNode` — and the handshake hash is what checks that they agree.
 // Sending it would make it an attacker-chosen input to our own identity
 // binding, which is precisely the mistake the old proof made with its nonce.
-func (s *SessionSync) performNoiseHandshake(conn net.Conn, key []byte, initiator bool, fabricIdx int) (syncNoiseKeys, error) {
-	hs, err := s.newSyncNoiseState(key, initiator, syncNoisePhaseConnect, fabricIdx)
-	if err != nil {
-		return syncNoiseKeys{}, err
+func (s *SessionSync) performNoiseHandshake(conn net.Conn, key []byte, initiator bool, fabricIdx int) (syncNoiseKeysWithPSK, error) {
+	if !initiator {
+		// The connect responder is ring-aware since #14703; reaching this
+		// branch with initiator=false would silently narrow verification to
+		// one key, so refuse rather than guess.
+		return syncNoiseKeysWithPSK{}, fmt.Errorf("cluster sync: performNoiseHandshake responder path is ring-aware; use performNoiseResponderHandshake")
 	}
+	hs, err := s.newSyncNoiseState(key, true, syncNoisePhaseConnect, fabricIdx)
+	if err != nil {
+		return syncNoiseKeysWithPSK{}, err
+	}
+	msg1, _, _, err := hs.WriteMessage(nil, nil)
+	if err != nil {
+		return syncNoiseKeysWithPSK{}, fmt.Errorf("cluster sync: noise msg1: %w", err)
+	}
+	if err := writeMsg(conn, syncMsgAuthHello, msg1); err != nil {
+		return syncNoiseKeysWithPSK{}, err
+	}
+	typ, payload, err := readSyncFrameRaw(conn)
+	if err != nil {
+		return syncNoiseKeysWithPSK{}, err
+	}
+	if typ != syncMsgAuthProof {
+		return syncNoiseKeysWithPSK{}, fmt.Errorf("cluster sync: expected noise msg2, got frame type %d", typ)
+	}
+	_, cs1, cs2, err := hs.ReadMessage(nil, payload)
+	if err != nil {
+		// The single most important error in this file. A peer that does
+		// not hold the PSK cannot produce a msg2 that authenticates
+		// against our handshake hash, so this is where a PSK-less
+		// attacker is refused -- by the construction, not by a comparison
+		// we remembered to write.
+		return syncNoiseKeysWithPSK{}, fmt.Errorf("cluster sync: noise msg2 rejected: %w", err)
+	}
+	if cs1 == nil || cs2 == nil {
+		return syncNoiseKeysWithPSK{}, errors.New("cluster sync: noise handshake produced no cipher states")
+	}
+	return syncNoiseKeysWithPSK{
+		syncNoiseKeys: syncNoiseSplitKeys(true, cs1, cs2),
+		matchedPSK:    append([]byte(nil), key...),
+	}, nil
+}
 
-	var csInitiatorToResponder, csResponderToInitiator *noise.CipherState
-
-	if initiator {
-		msg1, _, _, err := hs.WriteMessage(nil, nil)
+// performNoiseResponderHandshake is the connect responder (#14703). It reads
+// msg1 ONCE off the wire, then tries each accepted key in ring order against
+// a FRESH handshake state: Noise consumes msg1, so a failed ReadMessage
+// cannot be retried on the same state, and re-reading the wire would let a
+// peer (or an attacker) substitute a different msg1 between attempts. The
+// first key whose ReadMessage succeeds is the matched key; msg2 is built and
+// written only for that key, so the wire carries exactly one msg2 and a peer
+// holding no ring member is rejected after the ring is exhausted — still
+// fail-closed, just widened from one key to the accepted set the heartbeat
+// and fabric gRPC listener already verify against.
+func (s *SessionSync) performNoiseResponderHandshake(conn net.Conn, accepted [][]byte, fabricIdx int) (syncNoiseKeysWithPSK, error) {
+	typ, payload, err := readSyncFrameRaw(conn)
+	if err != nil {
+		return syncNoiseKeysWithPSK{}, err
+	}
+	if typ != syncMsgAuthHello {
+		return syncNoiseKeysWithPSK{}, fmt.Errorf("cluster sync: expected noise msg1, got frame type %d", typ)
+	}
+	var lastErr error
+	for _, candidate := range accepted {
+		if len(candidate) == 0 {
+			continue
+		}
+		hs, err := s.newSyncNoiseState(candidate, false, syncNoisePhaseConnect, fabricIdx)
 		if err != nil {
-			return syncNoiseKeys{}, fmt.Errorf("cluster sync: noise msg1: %w", err)
-		}
-		if err := writeMsg(conn, syncMsgAuthHello, msg1); err != nil {
-			return syncNoiseKeys{}, err
-		}
-		typ, payload, err := readSyncFrameRaw(conn)
-		if err != nil {
-			return syncNoiseKeys{}, err
-		}
-		if typ != syncMsgAuthProof {
-			return syncNoiseKeys{}, fmt.Errorf("cluster sync: expected noise msg2, got frame type %d", typ)
-		}
-		_, cs1, cs2, err := hs.ReadMessage(nil, payload)
-		if err != nil {
-			// The single most important error in this file. A peer that does
-			// not hold the PSK cannot produce a msg2 that authenticates
-			// against our handshake hash, so this is where a PSK-less
-			// attacker is refused -- by the construction, not by a comparison
-			// we remembered to write.
-			return syncNoiseKeys{}, fmt.Errorf("cluster sync: noise msg2 rejected: %w", err)
-		}
-		csInitiatorToResponder, csResponderToInitiator = cs1, cs2
-	} else {
-		typ, payload, err := readSyncFrameRaw(conn)
-		if err != nil {
-			return syncNoiseKeys{}, err
-		}
-		if typ != syncMsgAuthHello {
-			return syncNoiseKeys{}, fmt.Errorf("cluster sync: expected noise msg1, got frame type %d", typ)
+			return syncNoiseKeysWithPSK{}, err
 		}
 		if _, _, _, err := hs.ReadMessage(nil, payload); err != nil {
-			return syncNoiseKeys{}, fmt.Errorf("cluster sync: noise msg1 rejected: %w", err)
+			lastErr = err
+			continue
 		}
 		msg2, cs1, cs2, err := hs.WriteMessage(nil, nil)
 		if err != nil {
-			return syncNoiseKeys{}, fmt.Errorf("cluster sync: noise msg2: %w", err)
+			return syncNoiseKeysWithPSK{}, fmt.Errorf("cluster sync: noise msg2: %w", err)
+		}
+		if cs1 == nil || cs2 == nil {
+			return syncNoiseKeysWithPSK{}, errors.New("cluster sync: noise handshake produced no cipher states")
 		}
 		if err := writeMsg(conn, syncMsgAuthProof, msg2); err != nil {
-			return syncNoiseKeys{}, err
+			return syncNoiseKeysWithPSK{}, err
 		}
-		csInitiatorToResponder, csResponderToInitiator = cs1, cs2
+		return syncNoiseKeysWithPSK{
+			syncNoiseKeys: syncNoiseSplitKeys(false, cs1, cs2),
+			matchedPSK:    append([]byte(nil), candidate...),
+		}, nil
 	}
-
-	if csInitiatorToResponder == nil || csResponderToInitiator == nil {
-		return syncNoiseKeys{}, errors.New("cluster sync: noise handshake produced no cipher states")
+	if lastErr != nil {
+		return syncNoiseKeysWithPSK{}, fmt.Errorf("cluster sync: noise msg1 rejected: %w", lastErr)
 	}
-	return syncNoiseSplitKeys(initiator, csInitiatorToResponder, csResponderToInitiator), nil
+	return syncNoiseKeysWithPSK{}, errors.New("cluster sync: noise msg1 rejected: no accepted key")
 }
 
 // newSyncNoiseState builds the Noise_NNpsk0 handshake state both exchanges run

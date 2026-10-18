@@ -1223,9 +1223,12 @@ func TestConnectAuthenticatedConnectionIsNotDisturbedByACommit6628(t *testing.T)
 	// every commit. Driving the production wrapper is the difference.
 	// #7163: directional keys. Deliberately DIFFERENT bytes per direction —
 	// the pre-#7163 shape used one key for both, which is the defect.
-	frameKeys := syncNoiseKeys{
-		readKey:  []byte("connect-time-read-key-32-bytes!!"),
-		writeKey: []byte("connect-time-write-key-32-byte!!"),
+	frameKeys := syncNoiseKeysWithPSK{
+		syncNoiseKeys: syncNoiseKeys{
+			readKey:  []byte("connect-time-read-key-32-bytes!!"),
+			writeKey: []byte("connect-time-write-key-32-byte!!"),
+		},
+		matchedPSK: []byte(psk),
 	}
 	wrapped := e.s.wrapSyncConn(0, e.ac.Conn, syncAuthAuthenticated, frameKeys)
 	e.ac = wrapped

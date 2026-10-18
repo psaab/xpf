@@ -179,6 +179,49 @@ func (s *SessionSync) authKey() []byte {
 	return nil
 }
 
+// syncAcceptedKeysProvider is the optional ring capability. It mirrors the
+// syncPeerAuthRecorder probe pattern: a provider that can enumerate the
+// accepted set (the Manager) widens verification; a provider that cannot
+// (legacy test fakes from before #14703) keeps single-key behaviour.
+type syncAcceptedKeysProvider interface {
+	ControlLinkAcceptedKeys() [][]byte
+}
+
+// authAcceptedKeys returns every PSK this node VERIFIES a session-sync peer
+// against (#14703): the signing key first, then the additional rotation key
+// while a #6630 window is open. Empty when unkeyed. Nothing is ever SIGNED
+// with the additional key — the initiator always seals under authKey()
+// (its current signing key); only responders / upgrade responders widen.
+// Read live so a rotation commit takes effect on the next handshake or
+// upgrade Hello without a restart.
+func (s *SessionSync) authAcceptedKeys() [][]byte {
+	box := s.authProvider.Load()
+	if box == nil || box.p == nil {
+		return nil
+	}
+	if ring, ok := box.p.(syncAcceptedKeysProvider); ok {
+		if keys := ring.ControlLinkAcceptedKeys(); len(keys) > 0 {
+			return keys
+		}
+		return nil
+	}
+	if k := box.p.ControlLinkAuthKey(); len(k) > 0 {
+		return [][]byte{k}
+	}
+	return nil
+}
+
+// syncNoiseKeysWithPSK pairs the directional keys a completed Noise
+// handshake derived with the raw control-link PSK that handshake actually
+// authenticated under. wrapSyncConn stamps the latter as authPSK; without
+// it a responder that matched the peer under its additional key would
+// stamp its own signing key, and the reconciler would re-drive a rotation
+// the connection does not owe (or, worse, consider it current).
+type syncNoiseKeysWithPSK struct {
+	syncNoiseKeys
+	matchedPSK []byte
+}
+
 // peerProcessIdentity is the sender identity advertised on a capabilities
 // frame (#9818). The boot id distinguishes OS boots; the ordered boot epoch
 // distinguishes daemon processes that restart without an OS reboot; and the
@@ -432,15 +475,15 @@ func readSyncFrameRaw(conn net.Conn) (typ uint8, payload []byte, err error) {
 // The initiator writes its Noise msg1 before reading the responder's msg2; the
 // responder reads msg1 before writing msg2. This role order avoids deadlock on
 // a fully-synchronous transport (net.Pipe in tests).
-func (s *SessionSync) performSyncHandshake(conn net.Conn, initiator bool, fabricIdx int) (syncAuthMode, syncNoiseKeys, error) {
-	key := s.authKey()
-	if len(key) == 0 {
+func (s *SessionSync) performSyncHandshake(conn net.Conn, initiator bool, fabricIdx int) (syncAuthMode, syncNoiseKeysWithPSK, error) {
+	accepted := s.authAcceptedKeys()
+	if len(accepted) == 0 {
 		// No local key => no handshake; legacy behavior (dual-accept).
-		return syncAuthUnauthenticated, syncNoiseKeys{}, nil
+		return syncAuthUnauthenticated, syncNoiseKeysWithPSK{}, nil
 	}
 
 	if err := conn.SetDeadline(time.Now().Add(syncHandshakeTimeout)); err != nil {
-		return syncAuthUnauthenticated, syncNoiseKeys{}, err
+		return syncAuthUnauthenticated, syncNoiseKeysWithPSK{}, err
 	}
 	defer conn.SetDeadline(time.Time{})
 
@@ -457,15 +500,37 @@ func (s *SessionSync) performSyncHandshake(conn net.Conn, initiator bool, fabric
 	// fails and the connection drops. SessionSyncWireVersion is bumped so
 	// GateMixedBaseSwap refuses the mixed-base swap up front rather than
 	// letting an operator discover it as a fabric that will not come up.
-	keys, err := s.performNoiseHandshake(conn, key, initiator, fabricIdx)
-	if err != nil {
-		return syncAuthUnauthenticated, syncNoiseKeys{}, err
+	//
+	// #14703: the initiator seals under its SIGNING key (authKey) alone —
+	// nothing is ever signed with the additional key. The responder tries
+	// every key in its accepted ring, in ring order, so a peer that has
+	// already rotated to B authenticates at a node still signing A but
+	// accepting [A,B] (and vice versa) — the #6630 step-3 asymmetric state.
+	// A no-PSK peer still fails under every ring member.
+	var result syncNoiseKeysWithPSK
+	var err error
+	if initiator {
+		signing := s.authKey()
+		if len(signing) == 0 {
+			// Alt-only provider: this node verifies but never signs, so it
+			// cannot initiate an authenticated handshake. Fail closed
+			// rather than sealing under a key the peer only accepts.
+			return syncAuthUnauthenticated, syncNoiseKeysWithPSK{},
+				fmt.Errorf("cluster sync: no signing control-link key to initiate the handshake")
+		}
+		result, err = s.performNoiseHandshake(conn, signing, true, fabricIdx)
+	} else {
+		result, err = s.performNoiseResponderHandshake(conn, accepted, fabricIdx)
 	}
-	// The Noise handshake proves that the peer holds the same control-link
-	// PSK. This also arms the fabric gRPC downgrade guard when the selected
-	// transport is fabric and no control-link heartbeat is running.
+	if err != nil {
+		return syncAuthUnauthenticated, syncNoiseKeysWithPSK{}, err
+	}
+	// The Noise handshake proves that the peer holds a control-link PSK in
+	// the accepted ring. This also arms the fabric gRPC downgrade guard
+	// when the selected transport is fabric and no control-link heartbeat
+	// is running.
 	s.recordAuthenticatedPeer()
-	return syncAuthAuthenticated, keys, nil
+	return syncAuthAuthenticated, result, nil
 }
 
 // wrapSyncConn applies the negotiated handshake result to a connection: it
@@ -474,7 +539,7 @@ func (s *SessionSync) performSyncHandshake(conn net.Conn, initiator bool, fabric
 // pass-through. Admission has already succeeded in performSyncHandshake.
 // There is no pending frame to process before installation. A peer frame is
 // handled only after the handshake has completed and the connection is wrapped.
-func (s *SessionSync) wrapSyncConn(fabricIdx int, conn net.Conn, mode syncAuthMode, keys syncNoiseKeys) *authConn {
+func (s *SessionSync) wrapSyncConn(fabricIdx int, conn net.Conn, mode syncAuthMode, keys syncNoiseKeysWithPSK) *authConn {
 	ac := &authConn{Conn: conn}
 	if mode == syncAuthAuthenticated {
 		// #7163: the two directions get INDEPENDENT keys, straight from the
@@ -493,7 +558,12 @@ func (s *SessionSync) wrapSyncConn(fabricIdx int, conn net.Conn, mode syncAuthMo
 		// (authPSK nil) and every commit starts a pointless upgrade exchange
 		// on a perfectly healthy stream — needless traffic, and a mid-stream
 		// key switch exercised for no reason.
-		ac.authPSK = append([]byte(nil), s.authKey()...)
+		//
+		// #14703: stamp the MATCHED key, not this node's signing key. On a
+		// responder that accepted the peer under its additional key the two
+		// differ; stamping the signing key would hide the rotation the
+		// connection still owes.
+		ac.authPSK = append([]byte(nil), keys.matchedPSK...)
 		slog.Info("cluster sync: connection authenticated with control-link PSK",
 			"fabric", fabricIdx, "remote", connRemoteAddrString(conn))
 	}
