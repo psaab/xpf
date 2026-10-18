@@ -1,6 +1,7 @@
 package configstore
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hkdf"
@@ -295,47 +296,68 @@ func nodeValue(n *config.Node) string {
 }
 
 // confirmEncryptionCover is the encryption profile a commit-confirmed record
-// is persisted under (#14172 D8-05). The record serializes its whole
-// confirmRecord JSON — Deadline, the PrevTree rollback target, hashes and
-// flags — but carries no field for the guarded (newly committed) tree: the
-// guarded tree reaches the record only as GuardedHash. Before #14172 the
-// profile keyed off rec.PrevTree alone (masterPasswordPRF(PrevTree)),
-// so `commit confirmed` ADDING a master-password over a previous plaintext
-// config wrote confirm.json — including every secret leaf in PrevTree and
-// the record's safety fields themselves — in CLEARTEXT, even though the
-// guarded active.json from the same commit was AES-GCM encrypted. The
-// exposure is visible only by reading the raw file: ReadConfirm accepted
-// the plaintext record with no signal.
+// is persisted under (#14172 D8-05, #14719 D18-01). The record serializes
+// its whole confirmRecord JSON — Deadline, the PrevTree rollback target,
+// hashes and flags — but carries no field for the guarded (newly
+// committed) tree: the guarded tree reaches the record only as
+// GuardedHash. Before #14172 the profile keyed off rec.PrevTree alone
+// (masterPasswordPRF(PrevTree)), so `commit confirmed` ADDING a
+// master-password over a previous plaintext config wrote confirm.json —
+// including every secret leaf in PrevTree and the record's safety fields
+// themselves — in CLEARTEXT, even though the guarded active.json from
+// the same commit was AES-GCM encrypted.
 //
-// Accounting for both trees requires the guarded tree explicitly. Store
-// arm paths know it (the committed tree / the loaded active tree); the
-// record does not. The public WriteConfirm signature cannot change (it is
-// the persistence boundary used across the package and by the #4577 test
-// fixtures), so the guarded profile is carried on the DB as a DB-scoped
-// field set by commitConfirmedLocked next to writeConfirmState. It stays
-// "" on every other WriteConfirm path (tombstones, migration rewrites,
-// retries, the FIRST sentinel), which keeps those records exactly under
-// the PrevTree profile they were armed with — the recovery-compatible
-// default.
+// #14719: the #14172 cover was carried only in DB.writeConfirmCover, set
+// by commitConfirmedLocked and cleared by defer on return. Every later
+// WriteConfirm of the same window — the resolution tombstone
+// (markConfirmResolvedLocked, on EVERY resolution in this
+// configuration), the phase-3 finalization retry (confirmArmRec), boot
+// rebind/migration rewrites, the FIRST sentinel — therefore resolved
+// PrevTree("") + cover("") = plaintext and fsynced the full PrevTree
+// secrets in cleartext, defeating the operator's act of enabling
+// master-password. The earlier comment asserted the false premise
+// ("keeps those records exactly under the PrevTree profile they were
+// armed with"): in this scenario the record was NOT armed under a
+// PrevTree profile (PrevTree has none) — it was armed under the cover,
+// so inheriting the cover IS the armed profile.
 //
-// A non-empty cover means: encrypt the confirm body even when the
-// PrevTree has no master-password, sealing under the guarded tree's PRF
-// (the same resolution active.json uses). ReadConfirm stays able to open
-// any envelope the writer can emit because the envelope is
-// self-describing (env.PRF) and the master key comes from master.key, not
-// from either tree. When BOTH trees declare a master-password (a nested
-// re-arm over an already-encrypted config) the PrevTree profile wins, so
-// an existing window's record keeps the profile it was armed under and a
-// pre-fix reader still opens it; only records whose rollback target is
-// plaintext but whose guarded tree declares a master-password move to
-// ciphertext. Legacy plaintext records (a plaintext rollback target that
-// no longer matches the active config's declaration) stay READABLE — a
-// global plaintext ban would strand pending windows across upgrade — and
-// ReadConfirm warns about them instead (#4579 A4-06 parity).
+// Fix: the armed profile is re-derived from durable state at every
+// encode, not only carried in the transient field. The envelope is
+// self-describing (env.PRF) and ReadConfirm decrypts it via master.key,
+// so encodeConfirm — when neither PrevTree nor the transient cover
+// yields a profile — reads the confirm record currently on disk and,
+// if it is an encrypted envelope, adopts its PRF as the profile for
+// this write (existingConfirmDiskPRF). That covers every later writer
+// (tombstone, retry, rebind, migration, FIRST sentinel) and every
+// post-restart writer, because they all rewrite a record that is
+// already on disk under that profile. Fail-open to plaintext on any
+// disk-read error, absent file, or plaintext envelope: a legacy
+// plaintext window stays plaintext (never invent encryption), and an
+// unreadable disk record must not fail a tombstone/retry write that
+// would otherwise succeed.
+//
+// Precedence is unchanged where it was already correct: PrevTree's own
+// profile wins when it has one (a nested re-arm over an already-
+// encrypted config keeps the profile it was armed under, and a
+// pre-fix reader still opens it); the transient arm-time cover is
+// next (the first writes of a window, before anything is on disk);
+// the disk-derived profile is last. Legacy plaintext records stay
+// READABLE — a global plaintext ban would strand pending windows
+// across upgrade — and ReadConfirm warns about them instead
+// (#4579 A4-06 parity).
+//
+// Residual (deliberate, recorded): a window armed encrypted whose
+// on-disk record was deleted or replaced with plaintext before a later
+// writer runs has no disk profile to recover; that writer falls back
+// to plaintext exactly as pre-fix. The delete-then-rewrite ordering in
+// production (tombstone BEFORE delete; retry/rebind/sentinel all
+// rewrite an existing record) makes this unreachable on the named
+// paths; closing it fully would require persisting the guarded profile
+// inside the record (a schema change stranding pre-fix readers).
 //
 // writeConfirmCover is deliberately a plain string profile, not a tree:
-// it is set to masterPasswordPRF(guardedTree) by the caller, so nothing
-// here re-scans or retains the guarded tree.
+// it is set to masterPasswordPRF(guardedTree) by the arm caller, so
+// nothing here re-scans or retains the guarded tree.
 type confirmEncryptionCover struct {
 	// profile is masterPasswordPRF(guardedTree) at arm time, or "" when
 	// the guarded tree declares no master-password (or no cover was set).
@@ -344,15 +366,76 @@ type confirmEncryptionCover struct {
 
 // confirmEncryptionPRF resolves the PRF profile confirm.json is written
 // under: the rollback target's own profile when it has one, else the
-// guarded tree's cover profile, else "" (plaintext). It mirrors
-// masterPasswordPRF's two-question split (configured-belt first, supported
-// selector second) — the cover profile is produced by that same function
-// on the guarded tree, so an unsupported selector can never arrive here.
-func confirmEncryptionPRF(prevTree *config.ConfigTree, cover confirmEncryptionCover) string {
+// guarded tree's cover profile, else the profile recovered from the
+// confirm record already on disk (#14719), else "" (plaintext). It
+// mirrors masterPasswordPRF's two-question split (configured-belt
+// first, supported selector second) — the cover profile is produced by
+// that same function on the guarded tree, and the disk profile is read
+// from a self-describing envelope this same writer emitted, so an
+// unsupported selector can never arrive here.
+func (db *DB) confirmEncryptionPRF(prevTree *config.ConfigTree, cover confirmEncryptionCover) string {
 	if prf := masterPasswordPRF(prevTree); prf != "" {
 		return prf
 	}
-	return cover.profile
+	if cover.profile != "" {
+		return cover.profile
+	}
+	return db.existingConfirmDiskPRF()
+}
+
+// existingConfirmDiskPRF returns the PRF profile of the confirm record
+// currently persisted on disk, or "" when there is none to recover:
+// the file is absent, unreadable, not framed as a confirm envelope, or
+// its body is plaintext (a legacy window that was never encrypted).
+// Best-effort and fail-open by design (#14719): it runs on the write
+// path, which must not fail because a prior record is corrupt — the
+// caller falls back to plaintext exactly as pre-fix, and the record
+// being written is still judged on its own trees first.
+//
+// Cheap fast path first: an encrypted confirm body is a compact
+// single-line envelope JSON whose format marker sits at the very
+// start; a plaintext body is indented confirmRecord JSON beginning
+// with '{'. Only when the marker is present do we pay the bounded
+// read + envelope parse — plaintext windows (the common case) cost
+// one small prefix read, never a full MaxConfigSize parse of a
+// near-ceiling record on every tombstone/retry encode.
+func (db *DB) existingConfirmDiskPRF() string {
+	if db == nil || db.dir == "" {
+		return ""
+	}
+	prefix, err := readFilePrefix(db.confirmPath(), 256)
+	if err != nil || !bytes.Contains(prefix, []byte(encryptedTreeFormat)) {
+		return ""
+	}
+	data, err := rbReadBoundedFile(db.confirmPath(), MaxConfigSize)
+	if err != nil {
+		return ""
+	}
+	body, err := stripConfirmEnvelope(data)
+	if err != nil {
+		return ""
+	}
+	env, ok, err := unmarshalEnvelope(body)
+	if err != nil || !ok {
+		return ""
+	}
+	return env.PRF
+}
+
+// readFilePrefix reads up to n bytes from the start of path. A short
+// file returns what exists; any error returns nil.
+func readFilePrefix(path string, n int) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	buf := make([]byte, n)
+	m, err := io.ReadFull(f, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, err
+	}
+	return buf[:m], nil
 }
 
 // aad is the AES-GCM additional authenticated data. The envelope write path

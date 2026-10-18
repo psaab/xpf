@@ -36,15 +36,16 @@ type DB struct {
 	confirmRecoveryClockSkewCheck func(*config.Config) bool
 
 	// writeConfirmCover is the guarded tree's encryption profile for the
-	// NEXT WriteConfirm (#14172). commitConfirmedLocked sets it from the
-	// candidate it is about to promote (committedTree) before the
-	// provisional/final writeConfirmState calls, and clears it after.
-	// Every other WriteConfirm caller leaves it "" and the record is
-	// encrypted under its PrevTree profile alone, as before. DB-scoped
-	// rather than a WriteConfirm parameter: the public signature is the
+	// arm writes of commitConfirmedLocked (#14172). It is TRANSIENT: set
+	// from the candidate about to be promoted before the provisional/
+	// final writes and cleared on return. Later writers (tombstone,
+	// retry, rebind, migration, FIRST sentinel) run with it "" and
+	// recover the armed profile from the on-disk record's envelope
+	// instead (#14719) — see confirmEncryptionPRF. DB-scoped rather
+	// than a WriteConfirm parameter: the public signature is the
 	// persistence boundary used across the package and by test fixtures,
-	// and a parameter would have to be threaded through every tombstone,
-	// migration and retry write that knows nothing about a guarded tree.
+	// and a parameter would have to be threaded through every
+	// tombstone, migration and retry write.
 	writeConfirmCover confirmEncryptionCover
 }
 
@@ -778,7 +779,7 @@ func (db *DB) encodeConfirm(rec *confirmRecord) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal confirm state: %w", err)
 	}
-	if prf := confirmEncryptionPRF(rec.PrevTree, db.writeConfirmCover); prf != "" {
+	if prf := db.confirmEncryptionPRF(rec.PrevTree, db.writeConfirmCover); prf != "" {
 		data, err = db.encryptTreeJSON(data, prf, nil)
 		if err != nil {
 			return nil, fmt.Errorf("encrypt confirm state: %w", err)
