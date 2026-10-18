@@ -126,3 +126,10 @@ func (m *Manager) HasOptionStateForTesting(ifaceName string, af AddressFamily) b
 func (m *Manager) ProtectedIPv6PrefixesForTesting() []netip.Prefix {
 	return m.protectedIPv6Prefixes()
 }
+
+// ProtectedIPv4PrefixesForTesting snapshots the set installed by
+// SetProtectedIPv4Prefixes (#14728). Callers must not use this from
+// production code paths.
+func (m *Manager) ProtectedIPv4PrefixesForTesting() []netip.Prefix {
+	return m.protectedIPv4Prefixes()
+}

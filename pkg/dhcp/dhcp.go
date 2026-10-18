@@ -263,6 +263,12 @@ type Manager struct {
 	// prefixes (or a standalone Manager), which refuses nothing on overlap —
 	// the class policy still applies.
 	protectedPDOverlaps []netip.Prefix
+	// protectedV4Overlaps is the IPv4 analogue (#14728): every statically
+	// configured IPv4 interface prefix, installed by the daemon on each
+	// apply. A DHCPv4 lease whose connected prefix overlaps it is refused
+	// in leaseFromACKv4WithProtected. Same guarding/snapshot discipline
+	// as protectedPDOverlaps; nil refuses nothing on overlap.
+	protectedV4Overlaps []netip.Prefix
 
 	// runClientForTest replaces the per-family run goroutine body in
 	// tests so reconcile/registry behavior can be exercised without
@@ -467,6 +473,36 @@ func (m *Manager) protectedIPv6Prefixes() []netip.Prefix {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.protectedPDOverlaps
+}
+
+// SetProtectedIPv4Prefixes installs the configured IPv4 prefix set a
+// DHCPv4 lease must not overlap (#14728, v4 analogue of
+// SetProtectedIPv6Prefixes). The daemon calls it on every config apply,
+// before the client reconcile. The slice is copied and stored masked;
+// passing nil clears the set. Deliberately NOT part of the reconcile
+// fingerprint: renewals re-validate against the current set.
+func (m *Manager) SetProtectedIPv4Prefixes(prefixes []netip.Prefix) {
+	masked := make([]netip.Prefix, 0, len(prefixes))
+	for _, p := range prefixes {
+		if p.IsValid() && p.Addr().Is4() {
+			masked = append(masked, p.Masked())
+		}
+	}
+	m.mu.Lock()
+	if len(masked) == 0 {
+		m.protectedV4Overlaps = nil
+	} else {
+		m.protectedV4Overlaps = masked
+	}
+	m.mu.Unlock()
+}
+
+// protectedIPv4Prefixes snapshots the protected IPv4 set for the decode
+// path. Callers must not retain or mutate the returned slice.
+func (m *Manager) protectedIPv4Prefixes() []netip.Prefix {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.protectedV4Overlaps
 }
 
 // Start begins a DHCP client for the given interface and address family.

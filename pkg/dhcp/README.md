@@ -527,3 +527,15 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   private/documentation addresses remain valid. There is no
   classless-trust override for the leased address itself: it is the
   interface's own address, not an optional learned route.
+- **Martian-covering supernet / protected overlap refused (#14728).**
+  Extending #14183: the martian check runs on the masked installed
+  prefix `PrefixFrom(addr, ones)`, not the `/32` yiaddr — a `/8`–`/15`
+  prefix covering a martian range (e.g. `169.255.0.1/15` covering
+  `169.254.0.0/16`) is refused. `leaseFromACKv4WithProtected` also
+  refuses a connected prefix overlapping statically configured IPv4
+  interface prefixes (`config.ConfiguredIPv4Prefixes`, installed via
+  `Manager.SetProtectedIPv4Prefixes` on every daemon apply — the v4
+  analogue of the #10856/#14185 v6 protected set). The free
+  `leaseFromACKv4` keeps a nil protected set; `doDHCPv4` goes through
+  the manager method so acquire/renew/rebind all re-validate. No
+  trust-override for the leased address (same as #14183).

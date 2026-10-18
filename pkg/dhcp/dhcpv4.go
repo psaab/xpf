@@ -435,13 +435,20 @@ func (m *Manager) doDHCPv4(ctx context.Context, ifaceName string, mode dhcpExcha
 		ack = dhcpLease.ACK
 	}
 
-	return leaseFromACKv4(ifaceName, ack)
+	return m.leaseFromACKv4(ifaceName, ack)
 }
 
 // leaseFromACKv4 parses a DHCPv4 ACK into a Lease, capturing the
 // server-identifier needed to unicast a later RENEW (#2994). Shared by
-// the acquire, renew, and rebind paths.
+// the acquire, renew, and rebind paths. It carries no protected-prefix
+// set (nil), so standalone callers keep prior overlap behavior.
 func leaseFromACKv4(ifaceName string, ack *dhcpv4.DHCPv4) (*Lease, error) {
+	return leaseFromACKv4WithProtected(ifaceName, ack, nil)
+}
+
+// leaseFromACKv4WithProtected is leaseFromACKv4 plus the #14728
+// protected-prefix overlap gate (Manager method below).
+func leaseFromACKv4WithProtected(ifaceName string, ack *dhcpv4.DHCPv4, protected []netip.Prefix) (*Lease, error) {
 	yourIP := ack.YourIPAddr
 	if yourIP == nil || yourIP.IsUnspecified() {
 		return nil, fmt.Errorf("no IP in DHCP ACK")
@@ -481,18 +488,42 @@ func leaseFromACKv4(ifaceName string, ack *dhcpv4.DHCPv4) (*Lease, error) {
 		return nil, fmt.Errorf("invalid IP in DHCP ACK: %v", yourIP)
 	}
 
-	// Reject a martian yiaddr (untrusted input, #14183). The leased address
-	// is bound on the interface via AddrReplace and anchors the connected
-	// route, gateway/neighbor resolution, and downstream consumers. A
-	// loopback, "this-network", link-local, multicast, or reserved address
-	// is never a legitimate DHCP assignment — the same non-forwardable
-	// ranges refused for classless destinations and DHCP gateways
-	// (ClasslessRouteIsMartian). 255.255.255.255 is inside 240.0.0.0/4.
-	// Private and documentation ranges remain valid assignments.
-	if ClasslessRouteIsMartian(netip.PrefixFrom(addr, 32)) {
+	// Reject a martian yiaddr or martian-covering connected prefix
+	// (untrusted input, #14183 / #14728). The leased address is bound on
+	// the interface via AddrReplace and anchors the connected route,
+	// gateway/neighbor resolution, and downstream consumers. A
+	// loopback, "this-network", link-local, multicast, or reserved
+	// address is never a legitimate DHCP assignment — the same
+	// non-forwardable ranges refused for classless destinations and
+	// DHCP gateways (ClasslessRouteIsMartian). 255.255.255.255 is
+	// inside 240.0.0.0/4. Private and documentation ranges remain
+	// valid assignments.
+	//
+	// #14728: the check MUST run on the masked installed prefix
+	// PrefixFrom(addr, ones), not the /32 yiaddr. ClasslessRouteIsMartian
+	// is overlap-aware (prefix.Contains(martian.Addr()) ||
+	// martian.Contains(prefix.Addr())), so a /8-/15 prefix covering a
+	// martian range (e.g. 169.255.0.1/15 covering 169.254.0.0/16) is
+	// refused even though the bare /32 yiaddr is routable.
+	installed := netip.PrefixFrom(addr, ones)
+	if ClasslessRouteIsMartian(installed) {
 		return nil, fmt.Errorf(
-			"DHCP ACK has martian yiaddr %v on %s — refusing lease",
-			addr, ifaceName)
+			"DHCP ACK has martian yiaddr or martian-covering prefix %v on %s — refusing lease",
+			installed, ifaceName)
+	}
+
+	// #14728 leg A: refuse a connected prefix overlapping statically
+	// configured IPv4 space (v6 analogue: selectIANAAddress /
+	// extractDelegatedPrefixes vs protectedIPv6Prefixes, #10856/#14185).
+	// A rogue server offering e.g. 10.0.1.2/25 would otherwise install a
+	// more-specific connected route over a configured LAN /24. The
+	// comparison is masked-prefix overlap (either contains the other's
+	// base), so equal, contained, containing, and straddling leases all
+	// refuse. nil protected (standalone Manager) refuses nothing here.
+	if hit := overlappingProtectedPrefixV4(installed, protected); hit.IsValid() {
+		return nil, fmt.Errorf(
+			"DHCP ACK prefix %v on %s overlaps configured prefix %v — refusing lease",
+			installed.Masked(), ifaceName, hit)
 	}
 
 	lease := &Lease{
@@ -558,6 +589,33 @@ func leaseFromACKv4(ifaceName string, ack *dhcpv4.DHCPv4) (*Lease, error) {
 	lease.LeaseTime = lt
 
 	return lease, nil
+}
+
+// overlappingProtectedPrefixV4 returns the first IPv4 protected prefix
+// sharing any address with installed, or the zero Prefix. Host bits are
+// ignored on both sides (masked Contains either way), mirroring
+// overlappingProtectedPrefix for IPv6.
+func overlappingProtectedPrefixV4(installed netip.Prefix, protected []netip.Prefix) netip.Prefix {
+	if !installed.IsValid() {
+		return netip.Prefix{}
+	}
+	masked := installed.Masked()
+	for _, p := range protected {
+		if !p.IsValid() || !p.Addr().Is4() {
+			continue
+		}
+		mp := p.Masked()
+		if masked.Contains(mp.Addr()) || mp.Contains(masked.Addr()) {
+			return mp
+		}
+	}
+	return netip.Prefix{}
+}
+
+// leaseFromACKv4 validates an ACK against the manager's protected IPv4
+// set (#14728). doDHCPv4 uses this so acquire/renew/rebind all re-validate.
+func (m *Manager) leaseFromACKv4(ifaceName string, ack *dhcpv4.DHCPv4) (*Lease, error) {
+	return leaseFromACKv4WithProtected(ifaceName, ack, m.protectedIPv4Prefixes())
 }
 
 // classlessStaticRoutes parses RFC 3442 classless static routes from a
