@@ -1886,6 +1886,87 @@ fn authority_rotation_accepts_generation_advance_same_epoch() {
 }
 
 #[test]
+fn announce_closed_permit_epoch_cannot_reopen_and_rejects_stale_generation_14651() {
+    let core = ReinjectCore::new_shared();
+    assert!(core.announce_epochs("run-1", 5, 10, true, &[(1, 100)]));
+    let queued = ReinjectLease {
+        permit_epoch: 10,
+        queue_epoch: 100,
+        queue_number: 1,
+        request_id: 42,
+    };
+    let mut f = frame(42, 1, 64);
+    f.lease = queued;
+    assert!(core.admit(&f).admitted);
+    // Close permit epoch 10 via permit_open=false at a newer generation.
+    assert!(core.announce_epochs("run-1", 6, 10, false, &[(1, 100)]));
+    assert_eq!(
+        core.pre_write_check(&queued),
+        PreWrite::Fenced,
+        "announced close fences the queued q0 write"
+    );
+    // A stale generation must be rejected outright, not adopted.
+    assert!(
+        !core.announce_epochs("run-1", 2, 10, true, &[(1, 50)]),
+        "stale generation (2 < 6) must be rejected"
+    );
+    // Even a newer generation cannot re-open the fenced permit epoch.
+    assert!(core.announce_epochs("run-1", 7, 10, true, &[(1, 100)]));
+    let (_, generation, epoch, open, rows) = core.authority_snapshot();
+    assert_eq!(generation, 7);
+    assert_eq!(epoch, 10);
+    assert!(
+        !open,
+        "once permit_epoch 10 is announced closed it must stay closed until permit_epoch > 10"
+    );
+    assert_eq!(rows, vec![(1, 100)], "rejected stale announce must not roll the queue epoch back");
+    // A strictly higher permit epoch is a new permit and opens.
+    assert!(core.announce_epochs("run-1", 8, 11, true, &[(1, 100)]));
+    let (_, _, epoch, open, _) = core.authority_snapshot();
+    assert_eq!(epoch, 11);
+    assert!(open, "higher permit epoch opens after an announce-close");
+}
+
+#[test]
+fn announce_rejects_queue_epoch_regression_same_permit_epoch_14651() {
+    let core = ReinjectCore::new_shared();
+    assert!(core.announce_epochs("run-1", 5, 10, true, &[(1, 100)]));
+    assert!(
+        !core.announce_epochs("run-1", 6, 10, true, &[(1, 50)]),
+        "same permit epoch must not roll a queue epoch backward"
+    );
+    let (_, generation, _, open, rows) = core.authority_snapshot();
+    assert_eq!(generation, 5, "rejected announce must not adopt its generation");
+    assert!(open);
+    assert_eq!(rows, vec![(1, 100)]);
+}
+
+#[test]
+fn announce_rejects_generation_regression_same_run_14651() {
+    let core = ReinjectCore::new_shared();
+    assert!(core.announce_epochs("run-1", 6, PERMIT, true, &[(1, QEPOCH)]));
+    assert!(
+        !core.announce_epochs("run-1", 2, PERMIT, true, &[(1, QEPOCH)]),
+        "generation regression for the same run must be rejected"
+    );
+    let (_, generation, _, open, _) = core.authority_snapshot();
+    assert_eq!(generation, 6);
+    assert!(open);
+}
+
+#[test]
+fn publish_rejects_queue_epoch_regression_same_permit_epoch_14651() {
+    let mut st = AuthorityState::new();
+    assert!(st.publish(10, &[(1, 100)]));
+    assert!(
+        !st.publish(10, &[(1, 50)]),
+        "snapshot publish must not roll a queue epoch backward at the same permit epoch"
+    );
+    assert!(st.allows(10, 1, 100), "rejected publish leaves the live queue epoch admitted");
+    assert!(!st.allows(10, 1, 50));
+}
+
+#[test]
 fn authority_restart_clears_old_run_provenance() {
     let core = ReinjectCore::new_shared();
     assert!(core.announce_epochs("run-a", 4, PERMIT, true, &[(1, QEPOCH)]));
