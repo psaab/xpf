@@ -84,6 +84,25 @@ func (t *PersistentNATTable) RegisterNATIP(ip netip.Addr, poolName string) {
 	t.natIPToPool[ip] = poolName
 }
 
+// ReplacePoolConfigs atomically swaps pool configs and IP mappings (#14679).
+// Bindings are preserved, matching ClearPoolConfigs' #8597/#8607 contract.
+// Nil maps are treated as empty, so a successful compile with no persistent
+// pools correctly removes stale registrations.
+func (t *PersistentNATTable) ReplacePoolConfigs(poolConfigs map[string]PersistentNATPoolInfo, natIPToPool map[netip.Addr]string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	nextConfigs := make(map[string]PersistentNATPoolInfo, len(poolConfigs))
+	for k, v := range poolConfigs {
+		nextConfigs[k] = v
+	}
+	nextIPs := make(map[netip.Addr]string, len(natIPToPool))
+	for k, v := range natIPToPool {
+		nextIPs[k] = v
+	}
+	t.poolConfigs = nextConfigs
+	t.natIPToPool = nextIPs
+}
+
 // ClearPoolConfigs removes all pool configuration and IP mappings.
 // Called before recompilation to ensure stale pools are removed.
 //

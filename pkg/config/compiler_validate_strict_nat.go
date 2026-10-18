@@ -1439,6 +1439,43 @@ func isNAT64PoolHostAddress(addr string) (host bool, parsed bool) {
 	return addr[slash+1:] == "32", true
 }
 
+// NAT64PoolHostAddresses returns the deduped IPv4 host addresses a NAT64
+// source pool installs, mirroring Rust parse_pool_v4 (#14679): members are
+// SourceNATPoolMembers (singular Address plus Addresses) and every member must
+// be a bare IPv4 or /32 host; any other member poisons the whole pool.
+func NAT64PoolHostAddresses(pool *NATPool) ([]netip.Addr, bool) {
+	members := SourceNATPoolMembers(pool)
+	if len(members) == 0 {
+		return nil, false
+	}
+	seen := make(map[netip.Addr]struct{}, len(members))
+	var out []netip.Addr
+	for _, m := range members {
+		host, _ := isNAT64PoolHostAddress(m)
+		if !host {
+			return nil, false
+		}
+		ipPart := m
+		if i := strings.IndexByte(ipPart, '/'); i >= 0 {
+			ipPart = ipPart[:i]
+		}
+		addr, err := netip.ParseAddr(ipPart)
+		if err != nil || !addr.Is4() {
+			return nil, false
+		}
+		addr = addr.Unmap()
+		if _, dup := seen[addr]; dup {
+			continue
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
 // nptv6PrefixHasHostBits reports whether the CIDR text `cidr` carries any
 // bit set beyond its prefix length — i.e. the raw address is not equal to
 // its own network (masked) address. `parsed` is the *net.IPNet returned by
