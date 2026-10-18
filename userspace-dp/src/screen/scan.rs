@@ -30,7 +30,8 @@
 //!   discipline (skip-on-full, never a phantom growth) plus a fail-closed
 //!   clamp on the inner axis.
 //!
-//! - **Bounded per-zone eviction on source-axis saturation (#2234, #4890).**
+//! - **Bounded per-zone eviction on source-axis saturation (#2234, #4890,
+//!   #14673).**
 //!   The per-zone source cap was originally a HARD cliff: once a zone held
 //!   `MAX_SOURCES_PER_ZONE` keys a brand-new `(zone, src_ip)` was SKIPPED
 //!   (bumping `skipped_pressure`). That is fail-safe for forwarding but a
@@ -39,37 +40,46 @@
 //!   detected — until the detection window expires, which the attacker can defer
 //!   indefinitely by keeping its 4096 sources fresh. The new-source path now
 //!   makes BOUNDED room instead of skipping: it samples at most
-//!   `EVICT_SCAN_LIMIT` SAME-ZONE sources from a PER-ZONE source index
-//!   (`per_zone_srcs`), reclaims the first expired same-zone window it finds,
-//!   and if none is expired evicts a live same-zone entry within that sample
-//!   (originally the stalest `window_start`; #4418 changed the live-victim
-//!   choice to the least-suspicious entry — see below).
+//!   `EVICT_SCAN_LIMIT` SAME-ZONE sources, reclaims the first expired
+//!   same-zone window it finds, and if none is expired evicts a live
+//!   same-zone entry within that sample (originally the stalest
+//!   `window_start`; #4418 changed the live-victim choice to the
+//!   least-suspicious entry — see below).
 //!
-//!   Because the sample is drawn from the TARGET zone's own index, every one
-//!   of the `EVICT_SCAN_LIMIT` examined entries is a same-zone candidate, and
-//!   the budget is NEVER consumed by unrelated zones. Since this branch only
-//!   runs when the target zone alone holds `>= MAX_SOURCES_PER_ZONE` keys (>>
-//!   `EVICT_SCAN_LIMIT`), a same-zone victim is ALWAYS found and a fresh real
-//!   scanner is ALWAYS admissible under saturation — regardless of how the
-//!   zones are interleaved in the global `per_src` table. The pre-#4890 search
-//!   instead sampled a FIXED GLOBAL PREFIX of `per_src`
-//!   (`iter().take(EVICT_SCAN_LIMIT)`, budget counting EVERY iterated entry,
-//!   same-zone or not); in a many-zone / sparse-interleave table whose first
+//!   Since this branch only runs when the target zone alone holds
+//!   `>= MAX_SOURCES_PER_ZONE` keys (>> `EVICT_SCAN_LIMIT`), a same-zone
+//!   victim is found and a fresh real scanner is admissible under
+//!   saturation. The pre-#4890 search sampled a FIXED GLOBAL PREFIX of
+//!   `per_src` (`iter().take(EVICT_SCAN_LIMIT)`, budget counting EVERY
+//!   iterated entry, same-zone or not); in a many-zone table whose first
 //!   `EVICT_SCAN_LIMIT` global positions held no target-zone entry, eviction
-//!   found no victim, the caller skipped the fresh scanner, and its distinct-
-//!   destination count never accrued — so port-scan / ip-sweep detection never
-//!   fired for it even though its packets were still forwarded (the #4890
-//!   fail-open of DETECTION; forwarding was never fail-open).
+//!   found no victim and skipped the fresh scanner (the #4890 fail-open of
+//!   DETECTION; forwarding was never fail-open).
 //!
-//!   The per-new-flow worst case stays O(`EVICT_SCAN_LIMIT`), NOT an
-//!   O(sources) min-scan over the whole table (a full scan on every new flow
-//!   under a saturation flood would itself be an O(n)-per-packet amplifier).
-//!   The per-zone source count AND the victim-search domain are BOTH served by
-//!   `per_zone_srcs` — its `.len()` is the O(1) cap test, so the only walk is
-//!   the bounded same-zone sample. Each eviction bumps `evicted_pressure`, and
-//!   a rare logarithmic threshold crossing surfaces a `scan-table-pressure`
-//!   screen event (see `take_pressure_event`) so the operator is told the
-//!   detector is saturated — never a per-flow log.
+//!   #14673: the sample itself must ROTATE. The #4890 sample was a static
+//!   `per_zone_srcs[zone].iter().take(EVICT_SCAN_LIMIT)` prefix — the same
+//!   64 buckets of an unseeded `FxHashSet` (deterministic, attacker-
+//!   computable bucket order) on every eviction. An attacker who pinned 63
+//!   prefix entries at `SCAN_DETECT_COUNT - 1` and kept its scanner at
+//!   count 8 inside the prefix made the scanner the deterministic
+//!   lowest-count victim; one decoy packet wiped its history and its next
+//!   probe re-seeded it at count 1, so it never reached the detection
+//!   count. The sample now walks the dense `key_ring` from a persistent
+//!   `evict_cursor` offset by a per-boot secret (`seed`, #2364 pattern),
+//!   counting only SAME-ZONE slots toward `EVICT_SCAN_LIMIT` and advancing
+//!   past the examined span, so successive evictions rotate across the
+//!   whole zone and the start is unpredictable off-box.
+//!
+//!   The per-new-flow worst case stays bounded: at most
+//!   `EVICT_SCAN_LIMIT + 8 * EVICT_SCAN_LIMIT` ring slots per eviction,
+//!   NOT an O(sources) min-scan (a full scan on every new flow under a
+//!   saturation flood would itself be an O(n)-per-packet amplifier). The
+//!   per-zone source count is served by `per_zone_srcs` (`.len()` is the
+//!   O(1) cap test); the victim walk is served by `key_ring`. Each eviction
+//!   bumps `evicted_pressure`, and a rare logarithmic threshold crossing
+//!   surfaces a `scan-table-pressure` screen event (see
+//!   `take_pressure_event`) so the operator is told the detector is
+//!   saturated — never a per-flow log.
 //!
 //! - **Bounded-EXAMINATION, window-aware cleanup (#4353/#4379/#6239).** The
 //!   periodic sweep EXAMINES at most `CLEANUP_BUDGET` candidates per call and
@@ -111,14 +121,16 @@
 //!   — the one with the FEWEST accumulated distinct destinations — rather than
 //!   the one with the oldest `window_start`. A near-threshold slow scanner
 //!   (high count, old-but-live window) is therefore NOT evicted by a flood of
-//!   fresh decoy sources (each at count 1); the decoys are reclaimed first.
-//!   The pre-#4418 stalest-by-`window_start` policy let an attacker evict a
-//!   near-threshold slow scanner by keeping the table full of fresher decoys,
-//!   reopening the evasion on the source-saturation axis. Ties on count fall
-//!   back to the stalest `window_start` so old low-count churn is still
-//!   reclaimed (#2234), and the cost stays O(`EVICT_SCAN_LIMIT`) over the
-//!   per-zone sample (#4890), which guarantees a fresh real scanner is always
-//!   admissible under a flood.
+//!   fresh decoy sources (each at count 1) WITHIN ONE SAMPLE; the decoys are
+//!   reclaimed first. The pre-#4418 stalest-by-`window_start` policy let an
+//!   attacker evict a near-threshold slow scanner by keeping the table full of
+//!   fresher decoys, reopening the evasion on the source-saturation axis. Ties
+//!   on count fall back to the stalest `window_start` so old low-count churn
+//!   is still reclaimed (#2234). #14673 note: least-suspicious WITHIN a static
+//!   sample was itself exploitable (the scanner IS the lowest-count entry of
+//!   a pinned prefix), so the sample rotates (above) — the victim is the
+//!   least-suspicious entry of a ROTATING seeded window, not of a fixed
+//!   attacker-chosen set.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::net::IpAddr;
@@ -153,20 +165,19 @@ const MAX_UNIQUE_PER_SOURCE: usize = 1024;
 const CLEANUP_BUDGET: usize = 256;
 
 /// Hard upper bound on the number of SAME-ZONE sources examined while looking
-/// for an eviction victim on the source-saturation path (#2234/#4890). The
-/// new-flow worst case is O(`EVICT_SCAN_LIMIT`), NOT O(sources): a full
-/// min-scan over all `MAX_SOURCES_PER_ZONE` entries on every new flow under a
-/// saturation flood would itself be an O(n)-per-packet DoS amplifier. We
-/// instead sample a fixed prefix of the TARGET zone's PER-ZONE source index
-/// (`per_zone_srcs[zone]`, #4890) and evict the least-suspicious same-zone
-/// entry found within it. Because the sample is drawn from the zone's own
-/// index, every examined entry is a same-zone candidate; the budget is never
-/// consumed by other zones, so — since this path only runs when the zone is at
-/// `>= MAX_SOURCES_PER_ZONE` (>> `EVICT_SCAN_LIMIT`) — a victim is always
-/// found, regardless of how the zones interleave in the global `per_src`
-/// table. The pre-#4890 code sampled a fixed GLOBAL prefix of `per_src`, which
-/// found no same-zone victim (and skipped the fresh scanner) whenever the
-/// first `EVICT_SCAN_LIMIT` global positions held no target-zone entry.
+/// for an eviction victim on the source-saturation path
+/// (#2234/#4890/#14673). The new-flow worst case is bounded, NOT O(sources):
+/// a full min-scan over all `MAX_SOURCES_PER_ZONE` entries on every new flow
+/// under a saturation flood would itself be an O(n)-per-packet DoS amplifier.
+/// We instead sample `EVICT_SCAN_LIMIT` same-zone candidates from a ROVING,
+/// per-boot-seeded window over the dense `key_ring` (#14673), counting only
+/// same-zone slots toward the limit and capping the total walk at
+/// `EVICT_SCAN_LIMIT + 8 * EVICT_SCAN_LIMIT` ring slots. Since this path only
+/// runs when the zone is at `>= MAX_SOURCES_PER_ZONE` (>> `EVICT_SCAN_LIMIT`),
+/// a victim is found under saturation. The pre-#4890 code sampled a fixed
+/// GLOBAL prefix of `per_src`; the #4890 code sampled a fixed PER-ZONE prefix
+/// of `per_zone_srcs[zone]` — both static, the latter deterministic in
+/// `FxHashSet` bucket order and exploitable per #14673.
 const EVICT_SCAN_LIMIT: usize = 64;
 
 /// Fixed Junos scan/sweep detection COUNT (#4114). A source that touches this
@@ -268,20 +279,13 @@ struct SrcEntry<T> {
 struct ScanCore<T: std::hash::Hash + Eq> {
     per_src: FxHashMap<ScanKey, SrcEntry<T>>,
     /// Per-zone index of the distinct source IPs tracked in `per_src`
-    /// (`zone_id -> {src_ip}`). Serves TWO purposes, both O(1)/bounded:
-    ///
-    /// 1. The per-zone source count is `per_zone_srcs[zone].len()`, so the
-    ///    cap test is O(1) (#2234) — the pre-#2234 code walked every key to
-    ///    count one zone (`sources_in_zone`, O(sources)), which on the
-    ///    new-source-at-cap path under a saturation flood is O(n) per packet.
-    /// 2. It is the DOMAIN of the bounded source-saturation eviction search
-    ///    (#4890): [`ScanCore::evict_stalest_in_zone`] samples victims from
-    ///    the target zone's OWN index, so every examined entry is a same-zone
-    ///    candidate and the `EVICT_SCAN_LIMIT` budget is never consumed by
-    ///    unrelated zones. The pre-#4890 search sampled a fixed GLOBAL prefix
-    ///    of `per_src`, so in a many-zone / sparse-interleave table it could
-    ///    find no same-zone victim and skip a fresh scanner (the #4890
-    ///    detection fail-open — see the module doc).
+    /// (`zone_id -> {src_ip}`). The per-zone source count is
+    /// `per_zone_srcs[zone].len()`, so the cap test is O(1) (#2234) — the
+    /// pre-#2234 code walked every key to count one zone
+    /// (`sources_in_zone`, O(sources)), which on the new-source-at-cap path
+    /// under a saturation flood is O(n) per packet. Since #14673 the
+    /// victim-search domain is `key_ring`, not this index (the static
+    /// `FxHashSet` prefix was deterministic; see the module doc).
     ///
     /// Kept in lock-step with `per_src`: a key is added on insert and removed
     /// on eviction / cleanup. It is bounded by the same per-zone/source caps as
@@ -289,12 +293,13 @@ struct ScanCore<T: std::hash::Hash + Eq> {
     /// unbounded growth.
     per_zone_srcs: FxHashMap<u16, FxHashSet<IpAddr>>,
     /// Dense list of every live source key — the DOMAIN of the bounded #6239
-    /// cleanup cursor. Each key's index is mirrored in `SrcEntry.slot`, so a
-    /// removal is an O(1) swap-remove instead of an O(sources) search, and
-    /// `key_ring.len() == per_src.len()` always. Bounded by the same
-    /// per-zone/source caps as `per_src` (at most `MAX_SOURCES_PER_ZONE` keys
-    /// per zone); after warmup it stops growing (worker-local, no steady-state
-    /// alloc). Maintained ONLY by `insert_src` / `remove_src`.
+    /// cleanup cursor and the #14673 eviction cursor. Each key's index is
+    /// mirrored in `SrcEntry.slot`, so a removal is an O(1) swap-remove
+    /// instead of an O(sources) search, and `key_ring.len() == per_src.len()`
+    /// always. Bounded by the same per-zone/source caps as `per_src` (at most
+    /// `MAX_SOURCES_PER_ZONE` keys per zone); after warmup it stops growing
+    /// (worker-local, no steady-state alloc). Maintained ONLY by
+    /// `insert_src` / `remove_src`.
     key_ring: Vec<ScanKey>,
     /// Persistent round-robin cursor into `key_ring` (#6239). Each `cleanup`
     /// call examines at most `CLEANUP_BUDGET` keys starting here and advances,
@@ -302,12 +307,36 @@ struct ScanCore<T: std::hash::Hash + Eq> {
     /// call walking all of it. Survives across calls; wraps at the ring end and
     /// is re-clamped if the ring shrank since the last call.
     cleanup_cursor: usize,
+    /// Persistent round-robin eviction cursor (#14673), stored in the
+    /// UNSEEDED frame: the next eviction sample starts at
+    /// `(evict_cursor + seed_offset) % ring_len`. Each eviction examines at
+    /// most `EVICT_SCAN_LIMIT` SAME-ZONE candidates from that start and
+    /// advances the cursor past the examined span (translated back into
+    /// this frame), so successive evictions rotate contiguously across the
+    /// whole zone instead of re-examining the same static `FxHashSet`
+    /// prefix. The actual start is never stored directly — it is always
+    /// derived with the per-boot `seed_offset` — so the start offset is
+    /// unpredictable off-box and reshuffles on every restart while the
+    /// cursor still guarantees eventual coverage within a boot.
+    evict_cursor: usize,
+    /// Per-boot secret (#14673, #2364 pattern): drawn once from
+    /// `hot_hash_seed::hot_path_hash_seed()` at construction and mixed into
+    /// the eviction walk start so the sampled window is unpredictable to an
+    /// off-box attacker who knows the insertion history. Stable for the
+    /// lifetime of the tracker, so the cursor still visits every slot over
+    /// time. Test cores pin it via `with_seed`.
+    seed: u64,
     /// Test-only log of the source keys examined by the most recent `cleanup`
     /// pass(es), used by the bounded-examination and eventual-coverage tests to
     /// observe exactly which ring slots the cursor visited. Not compiled into
     /// release builds — zero production cost.
     #[cfg(test)]
     examined_log: Vec<ScanKey>,
+    /// Test-only log of the source keys examined by the most recent eviction
+    /// sample (#14673), used to prove the sample rotates. Not compiled into
+    /// release builds.
+    #[cfg(test)]
+    evict_examined_log: Vec<ScanKey>,
     /// Count of records skipped because a per-source unique-entry cap was
     /// hit, or because eviction could not free a same-zone slot within the
     /// bounded per-zone sample (rare). Pure observability — exposed for the
@@ -327,13 +356,26 @@ struct ScanCore<T: std::hash::Hash + Eq> {
 
 impl<T: std::hash::Hash + Eq> Default for ScanCore<T> {
     fn default() -> Self {
+        Self::with_seed(crate::hot_hash_seed::hot_path_hash_seed())
+    }
+}
+
+impl<T: std::hash::Hash + Eq> ScanCore<T> {
+    /// Seed-pinned constructor (#14673). Production goes through `Default`,
+    /// which draws the per-boot secret; tests pin the seed to assert
+    /// seed-dependent start offsets and cross-seed reshuffling.
+    fn with_seed(seed: u64) -> Self {
         Self {
             per_src: FxHashMap::default(),
             per_zone_srcs: FxHashMap::default(),
             key_ring: Vec::new(),
             cleanup_cursor: 0,
+            evict_cursor: 0,
+            seed,
             #[cfg(test)]
             examined_log: Vec::new(),
+            #[cfg(test)]
+            evict_examined_log: Vec::new(),
             skipped_pressure: 0,
             evicted_pressure: 0,
             // First eviction surfaces an event; thereafter the bar doubles.
@@ -355,16 +397,14 @@ impl<T: std::hash::Hash + Eq> ScanCore<T> {
     /// Bounds (fail-safe, never fail-OPEN):
     /// - a brand-new source key for a zone already holding
     ///   `MAX_SOURCES_PER_ZONE` keys triggers a BOUNDED eviction
-    ///   (#2234/#4418/#4890): the LEAST-suspicious (fewest distinct
-    ///   destinations, or any expired) entry within an `EVICT_SCAN_LIMIT`-sized
-    ///   sample of the zone's OWN source index (`per_zone_srcs[zone]`) is
-    ///   removed to admit the fresh source, so a real scanner is always
+    ///   (#2234/#4418/#4890/#14673): the LEAST-suspicious (fewest distinct
+    ///   destinations, or any expired) entry within a rotating seeded
+    ///   `EVICT_SCAN_LIMIT`-sized same-zone sample of `key_ring` is removed
+    ///   to admit the fresh source, so a real scanner is always
     ///   trackable AND a near-threshold slow scanner is not displaced by a
-    ///   decoy flood. Because the sample is per-zone, a saturated zone always
-    ///   yields a victim regardless of cross-zone interleave (the #4890 fix);
-    ///   the skip-on-full fallback (bumps `skipped_pressure`, returns `false`)
-    ///   remains only as a defensive guard for a zone that is somehow below the
-    ///   cap yet has no evictable entry — still bounded, never fail-open;
+    ///   decoy flood within one sample; the skip-on-full fallback (bumps
+    ///   `skipped_pressure`, returns `false`) remains only as a defensive
+    ///   guard for a zone below the cap with no evictable entry (bounded).
     /// - a new unique entry for a source whose set already holds
     ///   `MAX_UNIQUE_PER_SOURCE` entries is SKIPPED, but the fixed detection
     ///   count is still evaluated against the current (capped) set size. The
@@ -484,12 +524,10 @@ impl<T: std::hash::Hash + Eq> ScanCore<T> {
     }
 
     /// Evict one same-zone source so a fresh source can be admitted under
-    /// source-axis saturation (#2234/#4890). Examines at most
-    /// `EVICT_SCAN_LIMIT` SAME-ZONE candidates drawn from the target zone's
-    /// PER-ZONE source index (`per_zone_srcs[zone_id]`, NOT a global prefix of
-    /// `per_src`) and removes the FIRST expired-or-empty same-zone entry it
-    /// finds, or — failing that — the LEAST-SUSPICIOUS live same-zone entry
-    /// within the sample.
+    /// source-axis saturation (#2234/#4890/#14673). Examines at most
+    /// `EVICT_SCAN_LIMIT` SAME-ZONE candidates and removes the FIRST
+    /// expired-or-empty same-zone entry it finds, or — failing that — the
+    /// LEAST-SUSPICIOUS live same-zone entry within the sample.
     ///
     /// Victim selection among LIVE (non-expired, non-empty) candidates is by
     /// FEWEST accumulated distinct destinations (#4418), with the STALEST
@@ -504,58 +542,178 @@ impl<T: std::hash::Hash + Eq> ScanCore<T> {
     /// — reopening the slow-scan evasion on the source-saturation axis. The
     /// stalest tiebreak preserves #2234's reclamation of old low-count churn.
     ///
-    /// Cost: O(`EVICT_SCAN_LIMIT`), independent of the table size AND of how
-    /// the zones are interleaved in `per_src`, because the sample is drawn
-    /// from the target zone's own index — every one of the `EVICT_SCAN_LIMIT`
-    /// examined entries is a same-zone candidate. Since this branch only runs
-    /// when the TARGET zone holds `>= MAX_SOURCES_PER_ZONE` keys (>>
-    /// `EVICT_SCAN_LIMIT`), the sample is always full of same-zone victims, so
-    /// a victim is ALWAYS found and the fresh scanner ALWAYS admitted under
-    /// saturation. The pre-#4890 search sampled a fixed GLOBAL prefix of
-    /// `per_src` whose budget counted every iterated entry regardless of zone;
-    /// in a many-zone / sparse-interleave table where the first
+    /// #14673 sample: a ROVING cursor over the dense `key_ring`, not a static
+    /// `per_zone_srcs[zone].iter().take(EVICT_SCAN_LIMIT)` prefix. The
+    /// pre-#14673 prefix re-examined the same 64 `FxHashSet` buckets (bucket
+    /// order of an unseeded hasher — deterministic and attacker-computable)
+    /// on every eviction: an attacker who pinned 63 prefix entries at
+    /// `SCAN_DETECT_COUNT - 1` and kept its scanner at count 8 inside the
+    /// prefix made the scanner the deterministic lowest-count victim, wiped
+    /// its history with one decoy packet, and re-seeded it at count 1 on the
+    /// next probe — never reaching the detection count. The cursor walks
+    /// `key_ring` from `(evict_cursor + seed_mix) % ring_len`, counting only
+    /// SAME-ZONE slots toward `EVICT_SCAN_LIMIT`, and advances past the
+    /// examined same-zone span, so successive evictions rotate across the
+    /// whole zone. The per-eviction walk therefore visits at most
+    /// `EVICT_SCAN_LIMIT + (other-zone slots in the window)` ring slots.
+    /// When other zones interleave densely the walk is capped at
+    /// `EVICT_SCAN_LIMIT + MAX_OTHER_ZONE_SKIP` ring slots so adversarial
+    /// interleave cannot turn eviction into an O(ring) scan; if the cap is
+    /// hit before `EVICT_SCAN_LIMIT` same-zone candidates are seen, the
+    /// best victim found so far is still returned when one exists (the
+    /// caller only reaches here at `zone_count >= MAX_SOURCES_PER_ZONE`,
+    /// so same-zone entries are dense in the ring in the saturating case).
+    ///
+    /// Cost bound: at most `EVICT_SCAN_LIMIT + MAX_OTHER_ZONE_SKIP` ring
+    /// slots per eviction, independent of the table size. Since this branch
+    /// only runs when the TARGET zone holds `>= MAX_SOURCES_PER_ZONE` keys
+    /// (>> `EVICT_SCAN_LIMIT`), a victim is found under saturation and the
+    /// fresh scanner is admitted. The pre-#4890 search sampled a fixed
+    /// GLOBAL prefix of `per_src` whose budget counted every iterated entry
+    /// regardless of zone; in a many-zone table where the first
     /// `EVICT_SCAN_LIMIT` global positions held no target-zone entry it found
-    /// no victim, the caller skipped the fresh scanner, and detection never
-    /// fired though the packets were still forwarded (the #4890 fail-open of
+    /// no victim and skipped the fresh scanner (the #4890 fail-open of
     /// detection). Returns `true` if a victim was evicted (index updated,
     /// `evicted_pressure` bumped), `false` otherwise.
     #[inline]
     fn evict_stalest_in_zone(&mut self, zone_id: u16, now_micros: u64, window_micros: u64) -> bool {
+        /// Hard cap on non-target-zone ring slots skipped in one eviction
+        /// walk (#14673). Bounds the walk when zones interleave densely;
+        /// 8x the sample is far beyond any legitimate interleave at
+        /// saturation (the saturating zone alone holds 4096 slots).
+        const MAX_OTHER_ZONE_SKIP: usize = EVICT_SCAN_LIMIT * 8;
+        const WALK_CAP: usize = EVICT_SCAN_LIMIT + MAX_OTHER_ZONE_SKIP;
+        let ring_len = self.key_ring.len();
+        if ring_len == 0 {
+            return false;
+        }
+        if self.evict_cursor >= ring_len {
+            self.evict_cursor = 0;
+        }
+        // Per-boot unpredictable offset (#14673): splitmix-style diffusion
+        // of the secret so the start slot cannot be precomputed off-box.
+        // `evict_cursor` is stored in the UNSEEDED frame: the walk starts
+        // at `(evict_cursor + seed_offset) % ring_len`, and the cursor is
+        // advanced below by translating the next start back into that
+        // frame. Storing the absolute next index instead would re-add the
+        // seed offset on the next call and make successive windows jump by
+        // `seed_offset` each time, so coverage of the ring would depend on
+        // `gcd(seed_offset + span, ring_len)` rather than being a plain
+        // contiguous rotation.
+        let seed_mix = self
+            .seed
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .rotate_left(32) as usize;
+        let seed_offset = seed_mix % ring_len;
+        let start = (self.evict_cursor + seed_offset) % ring_len;
+        let walk_cap = WALK_CAP.min(ring_len);
         let mut victim_src: Option<IpAddr> = None;
         let mut victim_count = usize::MAX;
         let mut victim_start = u64::MAX;
         let mut expired_victim: Option<IpAddr> = None;
-        if let Some(srcs) = self.per_zone_srcs.get(&zone_id) {
-            // Bounded PER-ZONE sample: take a fixed prefix of THIS zone's own
-            // source index, so every examined entry is a same-zone candidate
-            // (the `EVICT_SCAN_LIMIT` budget is never spent on other zones).
-            for src in srcs.iter().take(EVICT_SCAN_LIMIT) {
-                let e = match self.per_src.get(&(zone_id, *src)) {
-                    Some(entry) => entry,
-                    // Index/table skew (should not happen — they are kept in
-                    // lock-step); ignore defensively without consuming the bug.
-                    None => continue,
-                };
-                // An expired-or-empty window is dead weight — evict it first.
-                if now_micros.saturating_sub(e.window_start) >= window_micros
-                    || e.entries.is_empty()
-                {
-                    expired_victim = Some(*src);
-                    break;
+        let mut examined_same_zone = 0usize;
+        let mut last_examined_idx: Option<usize> = None;
+        for step in 0..walk_cap {
+            let idx = (start + step) % ring_len;
+            let (k_zone, src) = self.key_ring[idx];
+            if k_zone != zone_id {
+                continue;
+            }
+            examined_same_zone += 1;
+            last_examined_idx = Some(idx);
+            #[cfg(test)]
+            self.evict_examined_log.push((k_zone, src));
+            let e = match self.per_src.get(&(zone_id, src)) {
+                Some(entry) => entry,
+                // Ring/table skew (should not happen — they are kept in
+                // lock-step); ignore defensively.
+                None => {
+                    if examined_same_zone >= EVICT_SCAN_LIMIT {
+                        break;
+                    }
+                    continue;
                 }
-                // Least-suspicious first: fewest distinct destinations, then
-                // the stalest window on a tie (#4418 / #2234).
-                let count = e.entries.len();
-                if count < victim_count
-                    || (count == victim_count && e.window_start < victim_start)
-                {
-                    victim_count = count;
-                    victim_start = e.window_start;
-                    victim_src = Some(*src);
+            };
+            // An expired-or-empty window is dead weight — evict it first.
+            if now_micros.saturating_sub(e.window_start) >= window_micros || e.entries.is_empty() {
+                expired_victim = Some(src);
+                break;
+            }
+            // Least-suspicious first: fewest distinct destinations, then
+            // the stalest window on a tie (#4418 / #2234).
+            let count = e.entries.len();
+            if count < victim_count || (count == victim_count && e.window_start < victim_start) {
+                victim_count = count;
+                victim_start = e.window_start;
+                victim_src = Some(src);
+            }
+            if examined_same_zone >= EVICT_SCAN_LIMIT {
+                break;
+            }
+        }
+        // Advance the cursor so the next walk starts just past the examined
+        // span, translated back into the unseeded cursor frame (see above).
+        // Re-clamp against the pre-removal ring length; the next call
+        // re-clamps if the ring shrank.
+        let next_start = if let Some(idx) = last_examined_idx {
+            (idx + 1) % ring_len
+        } else {
+            // No same-zone slot in the walked window: advance past it so a
+            // repeated call does not rescan the same dead window.
+            (start + walk_cap) % ring_len
+        };
+        self.evict_cursor = (next_start + ring_len - seed_offset) % ring_len;
+        // Fallback (#4890 guard): if the bounded rotating window found no
+        // same-zone candidate at all (the target zone is sparse in a huge
+        // ring — e.g. 3 target entries among 100k other-zone entries, the
+        // #4890 test shape, which calls this directly below the cap), take
+        // a ROTATING sample of the zone's own index instead of rescanning
+        // the ring: start at `(evict_cursor + seed_offset) % zone_len` in
+        // `per_zone_srcs[zone]` iteration order and wrap, examining at most
+        // `EVICT_SCAN_LIMIT` same-zone entries. The skip is bounded by the
+        // per-zone cap (`MAX_SOURCES_PER_ZONE`), never by the total table
+        // size, and at real saturation (`zone_count >= MAX_SOURCES_PER_ZONE`)
+        // the dense ring window above finds a victim first, so this path
+        // is cold. Victim choice is identical: expired-first, then
+        // least-suspicious.
+        let mut victim = expired_victim.or(victim_src);
+        if victim.is_none() {
+            if let Some(srcs) = self.per_zone_srcs.get(&zone_id) {
+                let zone_len = srcs.len();
+                if zone_len > 0 {
+                    let off = (self.evict_cursor + seed_offset) % zone_len;
+                    let mut v2_src: Option<IpAddr> = None;
+                    let mut v2_count = usize::MAX;
+                    let mut v2_start = u64::MAX;
+                    let mut exp2: Option<IpAddr> = None;
+                    for src in srcs
+                        .iter()
+                        .skip(off)
+                        .chain(srcs.iter().take(off))
+                        .take(EVICT_SCAN_LIMIT)
+                    {
+                        #[cfg(test)]
+                        self.evict_examined_log.push((zone_id, *src));
+                        let Some(e) = self.per_src.get(&(zone_id, *src)) else {
+                            continue;
+                        };
+                        if now_micros.saturating_sub(e.window_start) >= window_micros
+                            || e.entries.is_empty()
+                        {
+                            exp2 = Some(*src);
+                            break;
+                        }
+                        let count = e.entries.len();
+                        if count < v2_count || (count == v2_count && e.window_start < v2_start) {
+                            v2_count = count;
+                            v2_start = e.window_start;
+                            v2_src = Some(*src);
+                        }
+                    }
+                    victim = exp2.or(v2_src);
                 }
             }
         }
-        let victim = expired_victim.or(victim_src);
         if let Some(src) = victim {
             // Route through the single removal primitive so `per_src`,
             // `per_zone_srcs`, and the cleanup `key_ring` stay in lock-step.
@@ -689,6 +847,7 @@ impl<T: std::hash::Hash + Eq> ScanCore<T> {
         self.per_zone_srcs.clear();
         self.key_ring.clear();
         self.cleanup_cursor = 0;
+        self.evict_cursor = 0;
         let keys: Vec<ScanKey> = self.per_src.keys().copied().collect();
         for (idx, key) in keys.into_iter().enumerate() {
             self.per_zone_srcs.entry(key.0).or_default().insert(key.1);
@@ -1760,5 +1919,336 @@ mod scan_tests {
             "the per-zone index must drain in lock-step with per_src"
         );
         core.assert_consistent();
+    }
+    /// #14673 helpers: seed a core with `n` zone-`zone` entries of given
+    /// `(src, count, window_start)` directly (O(few), bypasses the cap).
+    fn seed_core(
+        seed: u64,
+        zone: u16,
+        specs: &[(IpAddr, u16, u64)],
+    ) -> ScanCore<u16> {
+        let mut core: ScanCore<u16> = ScanCore::with_seed(seed);
+        for (src, count, start) in specs {
+            let mut set = FxHashSet::default();
+            for p in 0..*count {
+                set.insert(8000 + p);
+            }
+            core.per_src.insert((zone, *src), seed_entry(*start, set));
+        }
+        core.rebuild_zone_index_for_test();
+        core
+    }
+
+    /// #14673 decisive regression (static-prefix self-evict): the report's
+    /// exact scene recreated in Rust. The first `EVICT_SCAN_LIMIT` entries
+    /// of the zone index in iteration order are pinned: 63 at
+    /// `SCAN_DETECT_COUNT - 1` (9) and the scanner at 8. Every OTHER zone
+    /// entry is at count 1 (thousands of decoys the static prefix never
+    /// examines). Pre-fix, `srcs.iter().take(64)` examines exactly that
+    /// prefix, so the scanner (8 < 9) is the deterministic lowest-count
+    /// victim of the next decoy-triggered eviction and its history is
+    /// wiped. Post-fix the sample rotates over `key_ring`, so the decoy
+    /// eviction hits a count-1 entry and the scanner survives to trip on
+    /// its 10th distinct port. RED on revert to the static prefix.
+    #[test]
+    fn pinned_prefix_scanner_not_self_evicted_14673() {
+        let zone = 1u16;
+        let window = 10_000_000u64;
+        // Attacker scene: 200 sources. Discover the static-prefix
+        // iteration order with a probe core, pick the entry sitting
+        // inside the first EVICT_SCAN_LIMIT positions as the scanner
+        // (count 8), pin the other 63 prefix entries at count 9, and
+        // leave every entry outside the prefix at count 1. Pre-fix the
+        // static `take(64)` sampler would evict the scanner (8 < 9);
+        // post-fix the rotating ring sample must find a count-1 victim.
+        let total = 200usize;
+        let probe: ScanCore<u16> = {
+            let mut c: ScanCore<u16> = ScanCore::with_seed(0x14673);
+            for i in 0..total {
+                let s = IpAddr::V4(Ipv4Addr::from(0x0a00_0000u32 + i as u32));
+                let mut set = FxHashSet::default();
+                set.insert(1u16);
+                c.per_src.insert((zone, s), seed_entry(100, set));
+            }
+            c.rebuild_zone_index_for_test();
+            c
+        };
+        let order: Vec<IpAddr> = probe
+            .per_zone_srcs
+            .get(&zone)
+            .unwrap()
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(order.len(), total);
+        let scanner = order[EVICT_SCAN_LIMIT / 2];
+        let mut specs: Vec<(IpAddr, u16, u64)> = Vec::new();
+        for (pos, ip) in order.iter().enumerate() {
+            let count: u16 = if *ip == scanner {
+                8
+            } else if pos < EVICT_SCAN_LIMIT {
+                9
+            } else {
+                1
+            };
+            specs.push((*ip, count, 100));
+        }
+        let mut core = seed_core(0x14673, zone, &specs);
+        // One decoy-triggered eviction (new source at cap).
+        assert!(core.evict_stalest_in_zone(zone, 1_000, window));
+        assert!(
+            core.per_src.contains_key(&(zone, scanner)),
+            "scanner at count 8 inside a 63x count-9 pinned prefix must NOT \
+             be the eviction victim when thousands of count-1 entries exist \
+             outside the prefix (#14673 static-prefix self-evict)"
+        );
+        // The victim must be a count-1 entry outside the pinned prefix.
+        // Scanner still trips on its 10th distinct port.
+        assert!(!core.check(zone, scanner, 8008, 1_000, window));
+        assert!(
+            core.check(zone, scanner, 8009, 1_000, window),
+            "surviving scanner must trip on its 10th distinct port"
+        );
+        core.assert_consistent();
+    }
+
+    /// #14673 rotation: successive evictions must not re-examine the
+    /// identical candidate set. Bounded: each sample <= EVICT_SCAN_LIMIT.
+    #[test]
+    fn eviction_sample_rotates_across_calls_14673() {
+        let zone = 7u16;
+        let window = 1_000_000u64;
+        let total = EVICT_SCAN_LIMIT * 4;
+        let specs: Vec<(IpAddr, u16, u64)> = (0..total)
+            .map(|i| {
+                (
+                    IpAddr::V4(Ipv4Addr::from(0x0a07_0000u32 + i as u32)),
+                    // Vary counts so victims differ per window.
+                    ((i % 5) + 1) as u16,
+                    100 + i as u64,
+                )
+            })
+            .collect();
+        let mut core = seed_core(42, zone, &specs);
+        assert_eq!(core.per_src.len(), total);
+        let mut sets: Vec<FxHashSet<ScanKey>> = Vec::new();
+        for _ in 0..3 {
+            core.evict_examined_log.clear();
+            assert!(core.evict_stalest_in_zone(zone, 1_000, window));
+            assert!(
+                core.evict_examined_log.len() <= EVICT_SCAN_LIMIT,
+                "eviction examined {}, must be <= EVICT_SCAN_LIMIT",
+                core.evict_examined_log.len()
+            );
+            let s: FxHashSet<ScanKey> = core.evict_examined_log.iter().copied().collect();
+            sets.push(s);
+        }
+        assert!(
+            sets[0] != sets[1] && sets[1] != sets[2] && sets[0] != sets[2],
+            "successive eviction samples must rotate, not repeat the static prefix"
+        );
+        core.assert_consistent();
+    }
+
+    /// #14673 eventual coverage: repeated evictions over a static (no
+    /// refill) table eventually examine every entry. Each direct eviction
+    /// removes one entry, so refill with a fresh count-1 source after
+    /// each eviction to keep the table size constant.
+    #[test]
+    fn eviction_eventually_covers_all_entries_14673() {
+        let zone = 8u16;
+        let window = 1_000_000u64;
+        let total = 200usize;
+        let specs: Vec<(IpAddr, u16, u64)> = (0..total)
+            .map(|i| {
+                (
+                    IpAddr::V4(Ipv4Addr::from(0x0a08_0000u32 + i as u32)),
+                    5u16,
+                    100,
+                )
+            })
+            .collect();
+        let mut core = seed_core(7, zone, &specs);
+        let expected: FxHashSet<ScanKey> =
+            core.key_ring.iter().copied().collect();
+        let mut seen: FxHashSet<ScanKey> = FxHashSet::default();
+        let mut fresh_counter: u32 = 0;
+        for _ in 0..(total * 3) {
+            core.evict_examined_log.clear();
+            assert!(core.evict_stalest_in_zone(zone, 1_000, window));
+            for k in &core.evict_examined_log {
+                seen.insert(*k);
+            }
+            // Refill to keep the ring size constant.
+            fresh_counter += 1;
+            let fresh = IpAddr::V4(Ipv4Addr::from(0x0b08_0000u32 + fresh_counter));
+            assert!(!core.check(zone, fresh, 80, 1_000, window));
+            if expected.is_subset(&seen) {
+                break;
+            }
+        }
+        assert!(
+            expected.is_subset(&seen),
+            "roving eviction must eventually examine every entry (saw {}/{})",
+            seen.len(),
+            expected.len()
+        );
+    }
+
+    /// #14673 preserved #6239-style bound under other-zone interleave: an
+    /// eviction for a sparse zone must terminate (not walk the whole ring)
+    /// while a victim exists.
+    #[test]
+    fn eviction_bounded_under_other_zone_interleave_14673() {
+        let target = 9u16;
+        let other = 1u16;
+        let window = 1_000_000u64;
+        let mut core: ScanCore<u16> = ScanCore::with_seed(99);
+        // Many other-zone entries then a few target entries at the tail.
+        for i in 0..2_000u32 {
+            let s = IpAddr::V4(Ipv4Addr::from(0x0b00_0000u32 + i));
+            let mut set = FxHashSet::default();
+            set.insert(1u16);
+            core.per_src.insert((other, s), seed_entry(100, set));
+        }
+        let victim = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        for (a, count) in [(1u8, 2u16), (2, 5), (3, 8)] {
+            let s = IpAddr::V4(Ipv4Addr::new(203, 0, 113, a));
+            let mut set = FxHashSet::default();
+            for p in 0..count {
+                set.insert(9000 + p);
+            }
+            core.per_src.insert((target, s), seed_entry(100, set));
+            let _ = victim;
+        }
+        core.rebuild_zone_index_for_test();
+        // The rotating ring window may miss the 3 sparse target entries;
+        // the bounded per-zone fallback must still find a same-zone victim
+        // (least-suspicious among the sampled candidates) without any
+        // full-ring scan. Same-zone examination stays <= 2x
+        // EVICT_SCAN_LIMIT (window + fallback sample), never O(ring). The
+        // victim need not be the global count-2 entry — at saturation the
+        // contract is the least-suspicious entry of a bounded sample.
+        let before = core.per_src.len();
+        core.evict_examined_log.clear();
+        assert!(core.evict_stalest_in_zone(target, 1_500, window));
+        assert!(
+            core.evict_examined_log.len() <= 2 * EVICT_SCAN_LIMIT,
+            "same-zone examination must stay <= 2*EVICT_SCAN_LIMIT under interleave, got {}",
+            core.evict_examined_log.len()
+        );
+        assert_eq!(core.per_src.len(), before - 1, "exactly one eviction");
+        core.assert_consistent();
+    }
+    /// #14673 seed sensitivity: the same insertion sequence yields a
+    /// different first-sample start under different pinned seeds.
+    #[test]
+    fn eviction_start_depends_on_seed_14673() {
+        let zone = 3u16;
+        let window = 1_000_000u64;
+        let specs: Vec<(IpAddr, u16, u64)> = (0..128u32)
+            .map(|i| {
+                (
+                    IpAddr::V4(Ipv4Addr::from(0x0a03_0000u32 + i)),
+                    3u16,
+                    100,
+                )
+            })
+            .collect();
+        let first_of = |seed: u64| -> ScanKey {
+            let mut core = seed_core(seed, zone, &specs);
+            core.evict_examined_log.clear();
+            assert!(core.evict_stalest_in_zone(zone, 1_000, window));
+            core.evict_examined_log[0]
+        };
+        let a = first_of(1);
+        let b = first_of(0x9e37_79b9_7f4a_7c15);
+        let c = first_of(0xdead_beef_cafe_f00d);
+        assert!(
+            a != b || b != c || a != c,
+            "different seeds must reshuffle the first sampled key (got {a:?} {b:?} {c:?})"
+        );
+    }
+
+    /// #14673 expired-first preserved over the rotating sample.
+    #[test]
+    fn eviction_rotating_still_prefers_expired_14673() {
+        let zone = 5u16;
+        let expired_src = IpAddr::V4(Ipv4Addr::new(10, 5, 0, 50));
+        let mut specs: Vec<(IpAddr, u16, u64)> = (0..100u32)
+            .map(|i| {
+                (
+                    IpAddr::V4(Ipv4Addr::from(0x0a05_1000u32 + i)),
+                    1u16,
+                    1_000,
+                )
+            })
+            .collect();
+        specs.push((expired_src, 0, 0));
+        // Only the empty expired entry (window_start 0) is expired at
+        // now=1050 with window 100; every live entry starts at 1000.
+        let mut core = seed_core(0, zone, &specs);
+        // Set the cursor so the seeded start lands on the expired entry:
+        // start = (evict_cursor + seed_offset) % len, seed 0 gives offset 0.
+        let pos = core
+            .key_ring
+            .iter()
+            .position(|k| *k == (zone, expired_src))
+            .unwrap();
+        core.evict_cursor = pos;
+        assert!(core.evict_stalest_in_zone(zone, 1_050, 100));
+        assert!(
+            !core.per_src.contains_key(&(zone, expired_src)),
+            "expired entry inside the rotating window must be reclaimed first"
+        );
+        core.assert_consistent();
+    }
+
+    /// #14673 full end-to-end (real `check` fill to the 4096 cap): the
+    /// report's cycle repeated — scanner probes 8, decoy triggers an
+    /// eviction, scanner probes on — must reach detection. Pre-fix the
+    /// scanner is deterministically self-evicted whenever it lands in the
+    /// static prefix with the pinned shape; post-fix the rotating sample
+    /// evicts count-1 background entries and the scanner accumulates.
+    #[test]
+    fn scanner_detected_through_decoy_evictions_at_cap_14673() {
+        let mut t = PortScanTracker::default();
+        let zone = 1u16;
+        let window = 10_000_000u64;
+        // Fill the zone exactly to the cap with count-1 background sources.
+        for i in 0..MAX_SOURCES_PER_ZONE {
+            let src = IpAddr::V4(Ipv4Addr::from(0x0a00_0000u32 + i as u32));
+            assert!(!t.check(zone, src, 80, 1_000, window));
+        }
+        assert_eq!(t.tracked_sources(), MAX_SOURCES_PER_ZONE);
+        let scanner = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 200));
+        let mut detected = false;
+        let mut next_port: u16 = 2000;
+        // Scanner interleaves batches of <=8 probes with fresh decoys.
+        // Each decoy admission evicts a background count-1 source (the
+        // rotating sample always has count-1 candidates and 8 > 1), never
+        // the scanner once admitted. The scanner must reach 10.
+        for round in 0..20u32 {
+            for _ in 0..8 {
+                if t.check(zone, scanner, next_port, 2_000, window) {
+                    detected = true;
+                }
+                next_port += 1;
+                if detected {
+                    break;
+                }
+            }
+            if detected {
+                break;
+            }
+            let decoy = IpAddr::V4(Ipv4Addr::from(0x0c00_0000u32 + round));
+            assert!(!t.check(zone, decoy, 9999, 2_001, window));
+            assert!(
+                t.core.per_src.contains_key(&(zone, scanner)),
+                "scanner must survive decoy-triggered eviction round {round} (#14673)"
+            );
+        }
+        assert!(detected, "scanner must reach SCAN_DETECT_COUNT through decoy evictions");
+        assert_eq!(t.tracked_sources(), MAX_SOURCES_PER_ZONE);
     }
 }
