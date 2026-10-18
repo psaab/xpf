@@ -5546,7 +5546,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         worker_id,
                                     );
                                     binding.scratch.scratch_forwards.push(request);
-                                    recycle_now = false;
+                                    // #14831: consume the descriptor, as on
+                                    // session hits. The prebuilt reply owns
+                                    // its recycle; skip Live TX and accounting.
+                                    continue;
                                 } else if ttl_would_expire {
                                     if let Some(release_key) = source_nat_release_key.as_ref() {
                                         rollback_source_nat_allocation_for_worker(

@@ -209,9 +209,23 @@ fn txn_ttl1_suppressed_te_installs_no_session_14643() {
         1,
         "control: buildable TE must queue exactly one prebuilt reply"
     );
-    // A second (Live) entry from the session-hit TE arm also appears in
-    // this fixture — a separate out-of-scope defect; the miss-arm
-    // contract asserted here is Prebuilt==1, no session, SNAT rolled back.
+    // #14831: the buildable-TE arm must consume the descriptor — exactly
+    // one Prebuilt TE, no Live forward, not counted as forwarded.
+    assert_eq!(
+        binding
+            .scratch
+            .scratch_forwards
+            .iter()
+            .filter(|f| matches!(f.frame, PendingForwardFrame::Live))
+            .count(),
+        0,
+        "#14831: buildable TE must not also queue a Live forward"
+    );
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(),
+        1,
+        "#14831: buildable TE must queue exactly one forward request"
+    );
     assert_eq!(batch.session_creates, 0, "control TE must create no session");
     assert_eq!(sessions.len(), 0, "control TE must install no session");
     assert_eq!(pools[0].live_flows, 0, "control TE must also roll back SNAT");
@@ -225,6 +239,120 @@ fn txn_ttl1_suppressed_te_installs_no_session_14643() {
     assert_eq!(sessions.len(), 2);
     assert_eq!(dbg.tx, 1, "TTL=64 control must forward");
     assert_eq!(pools[0].live_flows, 1, "TTL=64 control retains its SNAT hold");
+}
+
+/// #14831: on the session-miss arm, a buildable TTL=1 packet must queue
+/// ONLY the Prebuilt Time Exceeded — not also a Live forward. Pre-fix the
+/// miss arm set `recycle_now = false` after queueing the TE and fell
+/// through to the trailing Live-forward tail, which counted the packet
+/// as forwarded (`dbg.forward == 1`, `dbg.tx == 1`) and queued a Live
+/// request holding TX state until the rewrite path refused it for
+/// TTL<=1. The session-hit TE arm already continues; the flow-cache
+/// sibling returns Consumed. This cell drives the same descriptor
+/// harness as the #14643 witness (nat_snapshot, pool SNAT, ifindex 24)
+/// with a fresh TE bucket so the reply is buildable.
+#[test]
+fn txn_ttl1_buildable_te_queues_no_live_forward_14831() {
+    use crate::afxdp::icmp_ratelimit::global_bucket_test_lock;
+    let _g = global_bucket_test_lock();
+    let src = Ipv4Addr::new(10, 0, 61, 102);
+    let dst = Ipv4Addr::new(8, 8, 8, 8);
+
+    let mut snapshot = nat_snapshot();
+    snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "snat-pool".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "pool-a".to_string(),
+        pool_addresses: vec!["172.16.80.100".to_string()],
+        port_low: 20000,
+        port_high: 20999,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        src,
+        dst,
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    frame[14 + 8] = 1;
+    frame[24..26].fill(0);
+    let csum = checksum16(&frame[14..34]);
+    frame[24] = (csum >> 8) as u8;
+    frame[25] = csum as u8;
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    let pools = crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules);
+
+    assert_eq!(dbg.rx, 1, "witness descriptor must reach the poll path");
+    assert_eq!(
+        binding
+            .scratch
+            .scratch_forwards
+            .iter()
+            .filter(|f| matches!(f.frame, PendingForwardFrame::Prebuilt(_)))
+            .count(),
+        1,
+        "#14831: buildable TE must queue exactly one prebuilt reply"
+    );
+    assert_eq!(
+        binding
+            .scratch
+            .scratch_forwards
+            .iter()
+            .filter(|f| matches!(f.frame, PendingForwardFrame::Live))
+            .count(),
+        0,
+        "#14831: buildable TE must not also queue a Live forward"
+    );
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(),
+        1,
+        "#14831: exactly one forward request may be queued"
+    );
+    assert_eq!(
+        dbg.forward, 0,
+        "#14831: TTL=1 packet must not count as forwarded"
+    );
+    assert_eq!(dbg.tx, 0, "#14831: no Live forward may be queued for TX");
+    assert_eq!(batch.forward_candidate_packets, 0);
+    assert_eq!(batch.snat_packets, 0);
+    assert_eq!(txn_flow_cache_entries(&binding), 0);
+    assert!(
+        binding.scratch.scratch_recycle.is_empty(),
+        "#14831: only the queued TE owns the ingress descriptor recycle"
+    );
+    let reply = &binding.scratch.scratch_forwards[0];
+    assert_eq!(reply.target_ifindex, 24);
+    assert_eq!(reply.desc.addr, 128);
+    let PendingForwardFrame::Prebuilt(bytes) = &reply.frame else {
+        panic!("expected Time Exceeded reply");
+    };
+    assert_eq!(&bytes[34..36], &[11, 0], "ICMP Time Exceeded type/code");
+    assert_eq!(batch.session_creates, 0, "#14831: TE must create no session");
+    assert_eq!(sessions.len(), 0, "#14831: TE must install no session");
+    assert_eq!(pools.len(), 1, "pool fixture must expose one pool");
+    assert_eq!(
+        pools[0].live_flows, 0,
+        "#14831: SNAT allocation must be rolled back on buildable TE"
+    );
+    assert_eq!(pools[0].used_ports, 0);
 }
 
 /// #10890: run a real validated TCP SYN through the worker admission path at
