@@ -20,6 +20,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 
+/// #14678: per-frame application acknowledgement on the completion
+/// stream. Rust ack_ready (the destructive commit) waits for this
+/// byte; Go sends it only after a full frame is buffered locally.
+pub(crate) const REINJECT_COMPLETE_ACK: u8 = 0xAC;
+
 static NEXT_SUBMIT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 pub(crate) fn derive_reinject_submit_path(control_socket: &str) -> String {
     derive_path(control_socket, "reinject-submit.sock")
@@ -228,6 +233,7 @@ pub(crate) fn serve_complete_conn_with_target(
     target: Option<&Arc<ArcSwapOption<SlowPathReinjector>>>,
     running: &Arc<AtomicBool>,
 ) {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
     let mut shutdown_deadline = None;
     loop {
@@ -254,9 +260,14 @@ pub(crate) fn serve_complete_conn_with_target(
                 break;
             }
         } else {
-            // The completion protocol is server-to-client only. Unexpected
-            // client bytes are not consumed or allowed to pin the listener.
-            break;
+            // #14678: the only legal client byte is the per-frame
+            // acknowledgement (0xAC). It stays queued for the ack wait
+            // below (MSG_PEEK does not consume it); any other byte is
+            // a protocol violation and drops the connection with the
+            // reserved batch still intact for release/redelivery.
+            if probe[0] != REINJECT_COMPLETE_ACK {
+                break;
+            }
         }
         let target_reinjector = target.and_then(|slot| slot.load_full());
         let core = target_reinjector
@@ -265,6 +276,12 @@ pub(crate) fn serve_complete_conn_with_target(
             .unwrap_or_else(|| fallback_core.clone());
         let completions = core.peek_ready(crate::slowpath_reinject_9506::SUBMIT_MAX_FRAMES);
         if completions.is_empty() {
+            if probe_rc > 0 {
+                // Stale ack with nothing reserved: consume and
+                // ignore it rather than wedging the stream.
+                let mut discard = [0u8; 1];
+                let _ = stream.read_exact(&mut discard);
+            }
             if let Some(deadline) = shutdown_deadline {
                 if core.live_count() == 0 || Instant::now() >= deadline {
                     break;
@@ -282,7 +299,24 @@ pub(crate) fn serve_complete_conn_with_target(
             core.release_ready(&ids);
             break;
         }
-        let _ = core.ack_ready(&ids);
+        // #14678: write_all only proves the bytes reached the socket
+        // buffer. ack_ready is the destructive commit, so it must wait
+        // for the Go reader's application-level acknowledgement (a
+        // single 0xAC byte per delivered frame). Without it, a Go-side
+        // close between its read deadline and its Close destroys the
+        // frame unread while Rust has already purged it. On ack
+        // timeout/EOF the batch is released for redelivery on the
+        // next connection instead of being acked away.
+        let mut ack = [0u8; 1];
+        match stream.read_exact(&mut ack) {
+            Ok(()) if ack[0] == REINJECT_COMPLETE_ACK => {
+                let _ = core.ack_ready(&ids);
+            }
+            _ => {
+                core.release_ready(&ids);
+                break;
+            }
+        }
     }
 }
 

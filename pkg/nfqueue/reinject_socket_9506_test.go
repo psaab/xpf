@@ -466,8 +466,12 @@ func TestReinjectSocketCompletionTimeoutResetsPartialFrame9506(t *testing.T) {
 		completePath: path,
 		timeout:      5 * time.Millisecond,
 	}
-	if completions, err := client.DrainReinjectCompletions(1); err != nil || completions != nil {
-		t.Fatalf("partial completion read=(%v, %v), want timeout-as-empty", completions, err)
+	// #14678: a partial-frame timeout is a drain error (Poll fails
+	// pending closed), not the old silent timeout-as-empty; the
+	// desynchronised stream is still closed.
+	completions, err := client.DrainReinjectCompletions(1)
+	if err == nil || completions != nil {
+		t.Fatalf("partial completion read=(%v, %v), want drain error", completions, err)
 	}
 	client.completeMu.Lock()
 	reset := client.complete == nil
