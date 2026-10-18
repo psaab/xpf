@@ -181,6 +181,12 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 // IsActive reports whether the named scheduler is currently active. The
 // stale-republish latch makes every scheduler inactive in this public view.
+// It deliberately does NOT consult PolicyFailClosed: during a wall-clock
+// recovery hold or with an unavailable zone the map is already all-false,
+// and callers that compile policy must use PolicyFailClosed(now) (or
+// ActiveStateWithFailClosed plus PolicyFailClosed, as
+// policySchedulerPublicationState does) to retain scheduled DENY/REJECT
+// eligibility (#14726).
 func (s *Scheduler) IsActive(name string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -194,7 +200,13 @@ func (s *Scheduler) ActiveState() map[string]bool {
 }
 
 // ActiveStateWithFailClosed returns one consistent snapshot of the effective
-// scheduler map and the stale-republish latch disposition.
+// scheduler map and the stale-republish latch disposition. The boolean is
+// ONLY the republish latch: it does not cover a wall-clock recovery hold
+// (unsafeUntil) or an unavailable zone, whose deny-eligible disposition is
+// PolicyFailClosed(now). Snapshot builders must OR the two (see
+// policySchedulerPublicationState in pkg/daemon); using this latch alone
+// for policy compilation would fail open for scheduled deny/reject during
+// a hold (#14726).
 func (s *Scheduler) ActiveStateWithFailClosed() (map[string]bool, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -392,9 +404,42 @@ func (s *Scheduler) recordRepublishResultLocked(err error, now time.Time) {
 	s.lastRepublishErr = nil
 	if recoveredFailClosed {
 		s.republishRecoveryPending = true
+		// #14726: s.active is still the forced all-false map evaluate built
+		// while the latch was set. Clearing the latch without recomputing
+		// would expose (inactive, failClosed=false) — the fail-open encoding
+		// for scheduled deny/reject — to every ActiveStateWithFailClosed
+		// consumer until the next evaluate. Recompute the authoritative map
+		// from the most recent evaluation instant (lastEval, converted to
+		// the committed zone by evaluate) so the pair stays consistent.
+		// Recovery-hold and zone-unavailable states still force inactive;
+		// their deny eligibility is carried by PolicyFailClosed, not this
+		// latch. The recovery-pending flag above still owes exactly one
+		// normal-disposition republish.
+		s.recomputeActiveLocked()
 	} else if s.republishRecoveryPending {
 		s.republishRecoveryPending = false
 	}
+}
+
+// recomputeActiveLocked rebuilds s.active from the scheduler configs at
+// lastEval without firing updateFn. MUST be called with s.mu held. It mirrors
+// evaluate's window logic (wall-clock hold and unavailable zone force
+// inactive) but assumes the republish latch has already been cleared.
+func (s *Scheduler) recomputeActiveLocked() {
+	if s.lastEval.IsZero() {
+		return
+	}
+	now := s.lastEval
+	wallClockUnsafe := !s.unsafeUntil.IsZero() && now.Before(s.unsafeUntil)
+	newActive := make(map[string]bool, len(s.schedulers))
+	for name, sched := range s.schedulers {
+		cur := false
+		if !wallClockUnsafe && !s.zoneUnavailable {
+			cur = isWithinWindow(now, sched)
+		}
+		newActive[name] = cur
+	}
+	s.active = newActive
 }
 
 // RepublishPending reports whether the most recent scheduler-driven
@@ -562,6 +607,11 @@ func isWithinWindow(now time.Time, sched *config.SchedulerConfig) bool {
 	// the daily window).
 	win, have := effectiveDayWindow(sched, now.Weekday())
 	if !have {
+		// No window starts today, but yesterday's overnight window may
+		// still be in its post-midnight tail (#14726).
+		if overnightTailActive(now, sched) {
+			return true
+		}
 		// No time-of-day window applies today. A scheduler scoped ONLY by a
 		// date range (no daily/per-day time restriction) is active for the
 		// entire range; anything else has no window and fails CLOSED.
@@ -572,6 +622,8 @@ func isWithinWindow(now time.Time, sched *config.SchedulerConfig) bool {
 	}
 
 	if win.Exclude {
+		// An explicit exclude for today also suppresses yesterday's
+		// overnight tail (#14726 control cell).
 		return false
 	}
 	if win.AllDay {
@@ -584,7 +636,47 @@ func isWithinWindow(now time.Time, sched *config.SchedulerConfig) bool {
 			"name", sched.Name, "start", win.StartTime, "stop", win.StopTime)
 		return false
 	}
-	return withinTimeOfDay(now, sched.Name, win.StartTime, win.StopTime)
+	// #14726: an overnight window belongs to the weekday it starts on.
+	// Today's wraparound window contributes only its evening segment
+	// (now >= start); the post-midnight segment is yesterday's window's
+	// tail. withinTimeOfDay's wraparound branch conflated the two, so a
+	// Friday-only 22:00-06:00 window was active Friday 00:00-06:00 and
+	// inactive Saturday 00:00-06:00. For a uniform daily window yesterday
+	// resolves to the same window, preserving the existing tail behaviour.
+	startTOD, startErr := parseTimeOfDay(win.StartTime)
+	stopTOD, stopErr := parseTimeOfDay(win.StopTime)
+	if startErr == nil && stopErr == nil && stopTOD.before(startTOD) {
+		return !timeOfDay(now).before(startTOD) || overnightTailActive(now, sched)
+	}
+	return withinTimeOfDay(now, sched.Name, win.StartTime, win.StopTime) || overnightTailActive(now, sched)
+}
+
+// overnightTailActive reports whether now falls in the post-midnight tail
+// of yesterday's window: yesterday resolved to a wraparound window and
+// now's time-of-day is before its stop. An explicit window for today has
+// already been checked by the caller for Exclude/AllDay, so an excluded
+// today suppresses the tail while an all-day today is active regardless.
+func overnightTailActive(now time.Time, sched *config.SchedulerConfig) bool {
+	yesterday := time.Weekday((int(now.Weekday()) + 6) % 7)
+	win, have := effectiveDayWindow(sched, yesterday)
+	if !have || win.Exclude || win.AllDay {
+		return false
+	}
+	if win.StartTime == "" || win.StopTime == "" {
+		return false
+	}
+	startTOD, err := parseTimeOfDay(win.StartTime)
+	if err != nil {
+		return false
+	}
+	stopTOD, err := parseTimeOfDay(win.StopTime)
+	if err != nil {
+		return false
+	}
+	if startTOD == stopTOD || !stopTOD.before(startTOD) {
+		return false
+	}
+	return timeOfDay(now).before(stopTOD)
 }
 
 // withinDateRange reports whether now is inside sched's calendar range.
