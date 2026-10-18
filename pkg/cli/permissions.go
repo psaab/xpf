@@ -111,12 +111,12 @@ func (c *CLI) showActiveConfigPath(path []string) string {
 // rollback` handler will read the shared candidate for a compare request.
 //
 // The first spelling is `show system rollback compare N`; the second is
-// `show system rollback N ... compare`, which the handler recognizes with its
-// substring check. Keep this predicate aligned with handleShowSystem: its
-// `| display set` branch wins over the second spelling, while the first
-// spelling is checked before any display suffix. The system token is resolved
-// here exactly as handleShow does, so an unambiguous abbreviation cannot
-// bypass the candidate-read price.
+// `show system rollback N compare`. Keep this predicate aligned with
+// handleShowSystem's token-exact parsing (#14715): a `| display set` pipe
+// wins over the compare token, while the first spelling is checked before
+// any display suffix. The system token is resolved here exactly as
+// handleShow does, so an unambiguous abbreviation cannot bypass the
+// candidate-read price.
 func showSystemRollbackCompare(args []string) bool {
 	if len(args) < 3 {
 		return false
@@ -140,11 +140,15 @@ func showSystemRollbackCompare(args []string) bool {
 	if err != nil || n < 1 {
 		return false
 	}
-	rest := strings.Join(args[3:], " ")
-	if strings.Contains(rest, "| display set") {
+	if _, format, _, piped, _ := splitDisplayPipe(args[3:]); piped && format == displayPipeSet {
 		return false
 	}
-	return strings.Contains(rest, "compare")
+	for _, a := range args[3:] {
+		if a == "compare" {
+			return true
+		}
+	}
+	return false
 }
 
 // showSecurityMatchPolicies reports whether the operational `show`
