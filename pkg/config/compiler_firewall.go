@@ -1172,8 +1172,16 @@ func firewallPrefixListFamilies(nodes []*Node) map[string]plFamily {
 // shape #4287 enables. An empty or undefined reference is left to the empty-set
 // semantics and validateFirewallPrefixListReferencesStrict respectively.
 //
-// The traversal mirrors compileFirewall's family/filter/term/from walk exactly
-// (BOTH AST shapes) and aggregates across every top-level `firewall {}` block.
+// The traversal mirrors compileFirewall's family/filter/term/from walk:
+// `from` statements are found with firewallTermFromNodes and each is
+// lowered with packedBody under the from-schema (#14682) — the SAME
+// readers compileFirewall, the #8480 gate and the #12528 gate use.
+// Walking the raw `FindChildren("from")` + `Children` here presented
+// ZERO children for the compact spellings the compact normalizer
+// deliberately leaves packed (`term t from icmp-type … then …;`,
+// `from source-prefix-list X;`), so #4296/#4426 never fired for them
+// under `family any` while dual-compilation installed them into both
+// pools. Aggregates across every top-level `firewall {}` block.
 func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
 	plFamilies := firewallPrefixListFamilies(nodes)
@@ -1202,6 +1210,16 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 						continue
 					}
 					for _, termInst := range namedInstances(filterInst.node.FindChildren("term")) {
+						// #14682: resolve schemas exactly as compileFirewall
+						// does, with the inet fallback the sibling gates use
+						// when af has no declared subtree (e.g. `any` before
+						// its deep copy, or an unresolvable family).
+						termSchema := schemaForPath("firewall", "family", af, "filter", "term")
+						fromSchema := schemaForPath("firewall", "family", af, "filter", "term", "from")
+						if termSchema == nil || fromSchema == nil {
+							termSchema = schemaForPath("firewall", "family", "inet", "filter", "term")
+							fromSchema = schemaForPath("firewall", "family", "inet", "filter", "term", "from")
+						}
 						// Per-direction prefix-list coverage, accumulated across
 						// every `from` block of the term (#4426). Index 0 = source,
 						// 1 = destination. POSITIVE (`source-prefix-list X`) and
@@ -1215,8 +1233,9 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 						var posFam, excFam [2]plFamily
 						var hasPos, hasExc [2]bool
 						var dirNames [2][]string
-						for _, fromNode := range termInst.node.FindChildren("from") {
-							for _, child := range fromNode.Children {
+						fromNodes, _ := firewallTermFromNodes(termInst.node, termSchema)
+						for _, fromNode := range fromNodes {
+							for _, child := range packedBody(fromNode, fromSchema).Children {
 								mname := child.Name()
 								// #4426: accumulate the resolved family coverage of
 								// every source/destination-prefix-list reference so a
