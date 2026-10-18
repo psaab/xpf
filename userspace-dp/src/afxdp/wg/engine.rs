@@ -922,6 +922,25 @@ impl WgEngine {
             .collect()
     }
 
+    /// #14675: each peer's CONFIGURED endpoint only (no live overlay),
+    /// in table order. `peer_endpoints` prefers an adopted live endpoint
+    /// (authenticated roam / accepted DNS answer) over the configured
+    /// value, which is right for seeding a fresh incarnation but wrong
+    /// for detecting a config commit: a surviving control thread
+    /// compares this against the configured value it last saw to learn
+    /// that the operator moved (or removed) a peer's configured
+    /// endpoint, while a live roam — absent from this map — must not
+    /// read as a config change. Slow path.
+    pub(crate) fn peer_configured_endpoints(
+        &self,
+    ) -> Vec<([u8; WG_KEY_LEN], Option<std::net::SocketAddr>)> {
+        self.load_table()
+            .peers
+            .iter()
+            .map(|e| (e.peer.pubkey, e.config.endpoint))
+            .collect()
+    }
+
     /// #1434 B1b cryptokey routing on EGRESS: longest-prefix-match the
     /// inner destination IP against the AllowedIPs trie and return the
     /// owning peer's (pubkey, live-or-configured endpoint). `None`
@@ -954,6 +973,16 @@ impl WgEngine {
             entry.peer.pubkey,
             entry.peer.live_endpoint().or(entry.config.endpoint),
         ))
+    }
+
+    /// #14675: drop a peer's adopted live endpoint (roam / DNS) when
+    /// its configured endpoint changes or is removed, so dataplane
+    /// egress (`peer_for_dest`, which prefers live over configured)
+    /// follows the operator's new value. No-op for an unknown peer.
+    pub(crate) fn clear_live_endpoint(&self, peer_pubkey: &[u8; WG_KEY_LEN]) {
+        if let Some(peer) = self.peer_arc(peer_pubkey) {
+            peer.clear_live_endpoint();
+        }
     }
 
     /// #13664: adopt an authenticated roam or a DDNS re-resolution

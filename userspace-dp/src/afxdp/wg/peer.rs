@@ -571,6 +571,15 @@ impl Peer {
         self.live_endpoint.store(Some(Arc::new(endpoint)));
     }
 
+    /// #14675: drop the adopted live endpoint when the operator's
+    /// configured endpoint changes or is removed. Without this the
+    /// dataplane peer_for_dest keeps preferring the stale roamed /
+    /// resolved address over the new configured value even after the
+    /// control loop resets its own effective map.
+    pub(crate) fn clear_live_endpoint(&self) {
+        self.live_endpoint.store(None);
+    }
+
     /// #4092 responder handshake anti-replay check-and-update. Given the
     /// TAI64N recovered from a received type-1 initiation, accept it iff
     /// it is STRICTLY greater than the greatest already accepted from

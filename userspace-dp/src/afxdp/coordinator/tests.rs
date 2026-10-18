@@ -4806,6 +4806,309 @@ fn wg5291_per_peer_outer_mtu_resolves_distinct_underlays() {
 }
 
 // ---------------------------------------------------------------------
+// #14675 — WG control loop / resolver stale peer capture.
+//
+// `wg_peers_eq` does not compare `endpoint_host`, so a hostname-only
+// change (or a hostname peer added alongside an unchanged literal
+// peer, or a responder-only peer added) reuses the engine Arc. Before
+// the fix the control thread kept its spawn-time peer set and the
+// resolver kept its spawn-time `endpoint_hosts` forever.
+// ---------------------------------------------------------------------
+
+/// #14675 helper: decode a hex pubkey constant to bytes.
+fn wg14675_pubkey(hex: &str) -> [u8; 32] {
+    let mut pk = [0u8; 32];
+    for (i, byte) in pk.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap();
+    }
+    pk
+}
+
+/// #14675 helper: a WG snapshot with configurable peer endpoints.
+/// `peers` is (pubkey_hex, endpoint, allowed) — endpoint is a literal
+/// `IP:port`, a `host:port` hostname, or empty (responder-only).
+fn wg14675_snapshot(
+    id: u16,
+    ifindex: i32,
+    name: &str,
+    port: u16,
+    peers: &[(&str, &str, &str)],
+) -> ConfigSnapshot {
+    ConfigSnapshot {
+        interfaces: vec![crate::protocol::snapshot::InterfaceSnapshot {
+            name: name.to_string(),
+            linux_name: name.to_string(),
+            ifindex,
+            tunnel: true,
+            ..Default::default()
+        }],
+        tunnel_endpoints: vec![crate::protocol::snapshot::TunnelEndpointSnapshot {
+            id,
+            interface: name.to_string(),
+            linux_name: name.to_string(),
+            ifindex,
+            mode: "wireguard".to_string(),
+            wg_listen_port: port,
+            wg_local_privkey_hex: WG1866_PRIVKEY_A.to_string(),
+            wg_peers: peers
+                .iter()
+                .map(
+                    |(pk, ep, allowed)| crate::protocol::snapshot::TunnelWgPeerSnapshot {
+                        wg_peer_pubkey_hex: pk.to_string(),
+                        wg_allowed_ips: vec![allowed.to_string()],
+                        wg_endpoint: ep.to_string(),
+                        ..Default::default()
+                    },
+                )
+                .collect(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+const WG14675_PUBKEY_B: &str = "d04040404040404040404040404040404040404040404040404040404040404d";
+
+/// #14675 regression: adding a DNS-hostname peer must restart the
+/// control thread and recapture the spawn-time peer config.
+#[test]
+fn wg14675_hostname_peer_added_restarts_control_thread() {
+    let mut coordinator = Coordinator::new();
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
+    let snap1 = wg14675_snapshot(
+        1,
+        4675,
+        "wgt14675a",
+        port,
+        &[(WG1866_PUBKEY, "127.0.0.1:9", "10.77.0.0/24")],
+    );
+    coordinator
+        .refresh_runtime_snapshot(&snap1)
+        .expect("first apply");
+    let entry = coordinator.wg_control_threads.get(&1).expect("entry");
+    assert_eq!(entry.spawned_peer_config.len(), 1);
+    assert_eq!(entry.spawned_peer_config[0].endpoint_host, None);
+    let t0 = monotonic_nanos();
+    coordinator
+        .wg_control_threads
+        .get_mut(&1)
+        .expect("entry")
+        .last_spawn_attempt_ns = t0;
+    let snap2 = wg14675_snapshot(
+        1,
+        4675,
+        "wgt14675a",
+        port,
+        &[
+            (WG1866_PUBKEY, "127.0.0.1:9", "10.77.0.0/24"),
+            (WG14675_PUBKEY_B, "peer-b.example.com:51820", "10.78.0.0/24"),
+        ],
+    );
+    coordinator
+        .refresh_runtime_snapshot(&snap2)
+        .expect("second apply");
+    let entry = coordinator.wg_control_threads.get(&1).expect("entry after");
+    assert_eq!(
+        entry.spawned_peer_config.len(),
+        2,
+        "spawned capture must include the added hostname peer"
+    );
+    let host_peer = entry
+        .spawned_peer_config
+        .iter()
+        .find(|p| p.pubkey == wg14675_pubkey(WG14675_PUBKEY_B))
+        .expect("hostname peer in capture");
+    assert_eq!(
+        host_peer.endpoint_host.as_deref(),
+        Some("peer-b.example.com:51820"),
+        "resolver hostname must be captured at spawn"
+    );
+    assert_eq!(host_peer.endpoint, None);
+    assert_ne!(
+        entry.last_spawn_attempt_ns, t0,
+        "peer addition must restart the control thread (new spawn stamp)"
+    );
+}
+
+/// #14675 regression (pure same-Arc cell): changing ONLY an existing
+/// peer's endpoint from one hostname to another — same pubkey, same
+/// allowed-ips, endpoint None in the engine table on both sides —
+/// reuses the engine Arc verbatim (`wg_peers_eq` does not compare
+/// `endpoint_host`). Without the peer_config_changed prune the
+/// resolver would keep resolving the old name forever.
+#[test]
+fn wg14675_hostname_rename_on_same_engine_restarts_control_thread() {
+    let mut coordinator = Coordinator::new();
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
+    let snap1 = wg14675_snapshot(
+        1,
+        4676,
+        "wgt14675b",
+        port,
+        &[(WG1866_PUBKEY, "old.example.com:51820", "10.77.0.0/24")],
+    );
+    coordinator
+        .refresh_runtime_snapshot(&snap1)
+        .expect("first apply");
+    let entry = coordinator.wg_control_threads.get(&1).expect("entry");
+    assert_eq!(
+        entry.spawned_peer_config[0].endpoint_host.as_deref(),
+        Some("old.example.com:51820")
+    );
+    let engine_ptr_before = entry.engine_ptr;
+    let t0 = monotonic_nanos();
+    coordinator
+        .wg_control_threads
+        .get_mut(&1)
+        .expect("entry")
+        .last_spawn_attempt_ns = t0;
+    let snap2 = wg14675_snapshot(
+        1,
+        4676,
+        "wgt14675b",
+        port,
+        &[(WG1866_PUBKEY, "new.example.com:51820", "10.77.0.0/24")],
+    );
+    coordinator
+        .refresh_runtime_snapshot(&snap2)
+        .expect("second apply");
+    let entry = coordinator.wg_control_threads.get(&1).expect("entry after");
+    assert_eq!(
+        entry.engine_ptr, engine_ptr_before,
+        "hostname-only change must reuse the engine Arc — the same-engine path"
+    );
+    assert_eq!(
+        entry.spawned_peer_config[0].endpoint_host.as_deref(),
+        Some("new.example.com:51820"),
+        "hostname rename must restart and recapture endpoint_hosts"
+    );
+    assert_ne!(
+        entry.last_spawn_attempt_ns, t0,
+        "hostname rename must restart the control thread"
+    );
+}
+
+/// #14675 regression: a literal endpoint change must still track in
+/// the capture, and a responder-only peer addition must restart.
+#[test]
+fn wg14675_literal_change_and_responder_add_restart() {
+    let mut coordinator = Coordinator::new();
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
+    let snap1 = wg14675_snapshot(
+        1,
+        4677,
+        "wgt14675c",
+        port,
+        &[(WG1866_PUBKEY, "127.0.0.1:9", "10.77.0.0/24")],
+    );
+    coordinator
+        .refresh_runtime_snapshot(&snap1)
+        .expect("first apply");
+    let t0 = monotonic_nanos();
+    coordinator
+        .wg_control_threads
+        .get_mut(&1)
+        .expect("entry")
+        .last_spawn_attempt_ns = t0;
+    let snap2 = wg14675_snapshot(
+        1,
+        4677,
+        "wgt14675c",
+        port,
+        &[(WG1866_PUBKEY, "127.0.0.1:10", "10.77.0.0/24")],
+    );
+    coordinator
+        .refresh_runtime_snapshot(&snap2)
+        .expect("literal apply");
+    let entry = coordinator
+        .wg_control_threads
+        .get(&1)
+        .expect("entry after literal");
+    assert_eq!(
+        entry.spawned_peer_config[0]
+            .endpoint
+            .map(|e| e.to_string())
+            .as_deref(),
+        Some("127.0.0.1:10"),
+        "literal endpoint change must be recaptured"
+    );
+    assert_ne!(entry.last_spawn_attempt_ns, t0, "literal change restarts");
+    let t1 = monotonic_nanos();
+    coordinator
+        .wg_control_threads
+        .get_mut(&1)
+        .expect("entry")
+        .last_spawn_attempt_ns = t1;
+    let snap3 = wg14675_snapshot(
+        1,
+        4677,
+        "wgt14675c",
+        port,
+        &[
+            (WG1866_PUBKEY, "127.0.0.1:10", "10.77.0.0/24"),
+            (WG14675_PUBKEY_B, "", "10.78.0.0/24"),
+        ],
+    );
+    coordinator
+        .refresh_runtime_snapshot(&snap3)
+        .expect("responder apply");
+    let entry = coordinator
+        .wg_control_threads
+        .get(&1)
+        .expect("entry after responder");
+    assert_eq!(
+        entry.spawned_peer_config.len(),
+        2,
+        "responder peer captured"
+    );
+    let resp = entry
+        .spawned_peer_config
+        .iter()
+        .find(|p| p.pubkey == wg14675_pubkey(WG14675_PUBKEY_B))
+        .expect("responder peer");
+    assert_eq!(resp.endpoint, None);
+    assert_eq!(resp.endpoint_host, None);
+    assert_ne!(
+        entry.last_spawn_attempt_ns, t1,
+        "responder-only peer addition must restart the control thread"
+    );
+}
+
+/// #14675 control: an unchanged peer config must NOT restart the
+/// control thread — no churn on the common no-op refresh.
+#[test]
+fn wg14675_unchanged_peer_config_keeps_control_thread() {
+    let mut coordinator = Coordinator::new();
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
+    let snap = wg14675_snapshot(
+        1,
+        4678,
+        "wgt14675d",
+        port,
+        &[(WG1866_PUBKEY, "peer.example.com:51820", "10.77.0.0/24")],
+    );
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("first apply");
+    let entry = coordinator.wg_control_threads.get(&1).expect("entry");
+    let engine_ptr_before = entry.engine_ptr;
+    let t0 = monotonic_nanos();
+    coordinator
+        .wg_control_threads
+        .get_mut(&1)
+        .expect("entry")
+        .last_spawn_attempt_ns = t0;
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("no-op apply");
+    let entry = coordinator.wg_control_threads.get(&1).expect("entry after");
+    assert_eq!(entry.engine_ptr, engine_ptr_before);
+    assert_eq!(
+        entry.last_spawn_attempt_ns, t0,
+        "unchanged peer config must not restart the control thread"
+    );
+}
+// ---------------------------------------------------------------------
 // #1881 — GRE local-origin thread lifecycle regression suite.
 //
 // Same shape as the wg1866 suite above: these drive the REAL spawn

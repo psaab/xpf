@@ -735,6 +735,19 @@ impl super::Coordinator {
                         // plaintext changed. The decision is captured by value
                         // at spawn, so only a restart applies it.
                         Some("kernel_transport_changed")
+                    } else if self.wg_peer_spawn_config(*id) != entry.spawned_peer_config {
+                        // #14675: the peer configuration is a spawn-time
+                        // capture too — the control thread seeds its peer
+                        // set and effective-endpoint map from the engine
+                        // once, and the resolver captures `endpoint_hosts`
+                        // once. `wg_peers_eq` does not compare
+                        // `endpoint_host`, so a hostname-only (or
+                        // responder-only peer add) commit reuses the
+                        // engine Arc and moves none of the captures above;
+                        // without this reason the thread would drive
+                        // timers/handshakes for the OLD peer set and
+                        // resolve the OLD hostname forever.
+                        Some("peer_config_changed")
                     } else {
                         None
                     }
@@ -976,6 +989,36 @@ impl super::Coordinator {
         per_peer
     }
 
+    /// #14675: the peer configuration a control thread spawned NOW
+    /// would capture for endpoint `id`: every peer's pubkey, configured
+    /// literal endpoint, and authored DNS hostname, pubkey-sorted (the
+    /// engine table order, so a stable config yields a stable capture).
+    /// Read from the forwarding state — the only place `endpoint_host`
+    /// exists; the engine's peer table deliberately does not carry it.
+    /// Compared against `WgControlEntry::spawned_peer_config` by the
+    /// stale prune so a peer commit on a reused engine Arc restarts the
+    /// control thread and its resolver.
+    fn wg_peer_spawn_config(&self, id: u16) -> Vec<crate::afxdp::types::WgPeerSpawnConfig> {
+        let mut peers: Vec<crate::afxdp::types::WgPeerSpawnConfig> = self
+            .forwarding
+            .tunnel_endpoints
+            .get(&id)
+            .map(|endpoint| {
+                endpoint
+                    .wg_peers
+                    .iter()
+                    .map(|peer| crate::afxdp::types::WgPeerSpawnConfig {
+                        pubkey: peer.pubkey,
+                        endpoint: peer.endpoint,
+                        endpoint_host: peer.endpoint_host.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        peers.sort_by(|a, b| a.pubkey.cmp(&b.pubkey));
+        peers
+    }
+
     fn spawn_one_wg_control_thread(&mut self, id: u16) {
         let outer_mtu = self.resolve_wg_outer_mtu(id);
         // #5291: per-peer underlay MTU snapshot handed into the control
@@ -984,6 +1027,9 @@ impl super::Coordinator {
         // AF_XDP transit path). Resolved at spawn while `forwarding` is
         // reachable; kept fresh by the #2921 restart-on-MTU-change gate.
         let per_peer_outer_mtu = self.resolve_wg_per_peer_outer_mtus(id);
+        // #14675: peer-config capture for the stale prune, taken beside
+        // the other spawn-time captures.
+        let peer_config = self.wg_peer_spawn_config(id);
         let Some(endpoint) = self.forwarding.tunnel_endpoints.get(&id) else {
             return;
         };
@@ -1073,6 +1119,7 @@ impl super::Coordinator {
                         spawned_outer_mtu: outer_mtu,
                         spawned_outer_bind_device: outer_bind_device,
                         spawned_per_peer_outer_mtu: per_peer_outer_mtu,
+                        spawned_peer_config: peer_config.clone(),
                         last_spawn_attempt_ns: monotonic_nanos(),
                         resolver_telemetry: Some(resolver_telemetry),
                     },
@@ -1153,6 +1200,7 @@ impl super::Coordinator {
                 spawned_outer_mtu: outer_mtu,
                 spawned_outer_bind_device: outer_bind_device,
                 spawned_per_peer_outer_mtu: per_peer_outer_mtu,
+                spawned_peer_config: peer_config,
                 last_spawn_attempt_ns: monotonic_nanos(),
                 resolver_telemetry: Some(resolver_telemetry),
             },

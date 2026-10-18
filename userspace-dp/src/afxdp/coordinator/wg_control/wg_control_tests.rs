@@ -429,6 +429,7 @@ fn wg_local_delivery_publication_tracks_live_entry_10409() {
             spawned_outer_mtu: WG_DEFAULT_OUTER_MTU,
             spawned_outer_bind_device: None,
             spawned_per_peer_outer_mtu: std::collections::HashMap::new(),
+            spawned_peer_config: Vec::new(),
             last_spawn_attempt_ns: 0,
             spawned_kernel_transport: crate::afxdp::types::WgKernelTransport::Deliver,
             resolver_telemetry: None,
@@ -2838,4 +2839,379 @@ fn failed_initiation_send_retains_pending_13665() {
     let ep = rx.local_addr().unwrap();
     super::attempt::drive_initiation(&init, &socket, false, &resp_pub, ep, &mut out, "wg-test-13665", &exceptions);
     assert_eq!(init.pending_count(), 1, "sent msg1 must keep its pending reservation");
+}
+
+// ---------------------------------------------------------------------
+// #14675 — refresh_consumer_peers: a surviving control thread must
+// converge its spawn-frozen peer state onto the engine's current
+// table after an in-place reconcile_peers commit.
+// ---------------------------------------------------------------------
+
+fn wg14675_engine(peers: Vec<([u8; 32], Option<SocketAddr>)>) -> crate::afxdp::wg::WgEngine {
+    crate::afxdp::wg::WgEngine::new(crate::afxdp::wg::WgEngineConfig {
+        local_private_key: [7u8; 32].into(),
+        listen_port: 0,
+        peers: peers
+            .into_iter()
+            .map(|(pubkey, endpoint)| crate::afxdp::wg::WgPeerConfig {
+                pubkey,
+                endpoint,
+                persistent_keepalive: 0,
+                allowed_ips: vec![],
+                preshared_key: [0u8; 32].into(),
+            })
+            .collect(),
+    })
+}
+
+fn wg14675_peer_cfg(
+    pubkey: [u8; 32],
+    endpoint: Option<SocketAddr>,
+) -> crate::afxdp::wg::WgPeerConfig {
+    crate::afxdp::wg::WgPeerConfig {
+        pubkey,
+        endpoint,
+        persistent_keepalive: 0,
+        allowed_ips: vec![],
+        preshared_key: [0u8; 32].into(),
+    }
+}
+
+struct RefreshFixture {
+    socket: UdpSocket,
+    exceptions: Arc<Mutex<ExceptionEventRing>>,
+    encap_buf: Vec<u8>,
+}
+
+impl RefreshFixture {
+    fn new() -> Self {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket.set_nonblocking(true).unwrap();
+        Self {
+            socket,
+            exceptions: Arc::new(Mutex::new(ExceptionEventRing::new())),
+            encap_buf: vec![0u8; 2048],
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn refresh(
+        &mut self,
+        engine: &crate::afxdp::wg::WgEngine,
+        pubkeys: &mut Vec<[u8; 32]>,
+        effective: &mut std::collections::HashMap<[u8; 32], SocketAddr>,
+        heard: &mut std::collections::HashMap<[u8; 32], u64>,
+        configured: &mut std::collections::HashMap<[u8; 32], Option<SocketAddr>>,
+        attempts: &mut std::collections::HashMap<[u8; 32], HandshakeAttempt>,
+        now: u64,
+    ) {
+        refresh_consumer_peers(
+            engine,
+            &self.socket,
+            false,
+            pubkeys,
+            effective,
+            heard,
+            configured,
+            attempts,
+            now,
+            &mut self.encap_buf,
+            "wg-test-14675",
+            &self.exceptions,
+        );
+    }
+}
+
+/// #14675: a peer added by an in-place reconcile must be adopted —
+/// pubkey, effective endpoint seeded, configured map updated.
+#[test]
+fn refresh_adopts_added_peer_14675() {
+    let pk_a = [0x11u8; 32];
+    let pk_b = [0x22u8; 32];
+    let ep_a: SocketAddr = "127.0.0.1:41001".parse().unwrap();
+    let ep_b: SocketAddr = "127.0.0.1:41002".parse().unwrap();
+    let engine = wg14675_engine(vec![(pk_a, Some(ep_a))]);
+    let mut fx = RefreshFixture::new();
+    let mut pubkeys = vec![pk_a];
+    let mut effective = std::collections::HashMap::new();
+    effective.insert(pk_a, ep_a);
+    let mut heard = std::collections::HashMap::new();
+    let mut configured: std::collections::HashMap<[u8; 32], Option<SocketAddr>> =
+        engine.peer_configured_endpoints().into_iter().collect();
+    let mut attempts = std::collections::HashMap::new();
+    engine.reconcile_peers(&[
+        wg14675_peer_cfg(pk_a, Some(ep_a)),
+        wg14675_peer_cfg(pk_b, Some(ep_b)),
+    ]);
+    fx.refresh(
+        &engine,
+        &mut pubkeys,
+        &mut effective,
+        &mut heard,
+        &mut configured,
+        &mut attempts,
+        1_000_000_000,
+    );
+    assert!(
+        pubkeys.contains(&pk_b),
+        "added peer must be adopted into the loop peer set"
+    );
+    assert_eq!(
+        effective.get(&pk_b).copied(),
+        Some(ep_b),
+        "added peer effective seeded from configured"
+    );
+    assert_eq!(configured.get(&pk_b).copied(), Some(Some(ep_b)));
+    assert!(
+        attempts.contains_key(&pk_b),
+        "added peer with endpoint must start a BringUp attempt"
+    );
+}
+
+/// #14675: a responder-only peer added in place (no endpoint) is
+/// adopted into the peer set with no effective endpoint and no attempt.
+#[test]
+fn refresh_adopts_responder_only_peer_14675() {
+    let pk_a = [0x11u8; 32];
+    let pk_b = [0x22u8; 32];
+    let engine = wg14675_engine(vec![(pk_a, None)]);
+    let mut fx = RefreshFixture::new();
+    let mut pubkeys = vec![pk_a];
+    let mut effective = std::collections::HashMap::new();
+    let mut heard = std::collections::HashMap::new();
+    let mut configured: std::collections::HashMap<[u8; 32], Option<SocketAddr>> =
+        engine.peer_configured_endpoints().into_iter().collect();
+    let mut attempts = std::collections::HashMap::new();
+    engine.reconcile_peers(&[wg14675_peer_cfg(pk_a, None), wg14675_peer_cfg(pk_b, None)]);
+    fx.refresh(
+        &engine,
+        &mut pubkeys,
+        &mut effective,
+        &mut heard,
+        &mut configured,
+        &mut attempts,
+        1_000_000_000,
+    );
+    assert!(pubkeys.contains(&pk_b));
+    assert!(
+        !effective.contains_key(&pk_b),
+        "responder-only peer has no effective endpoint"
+    );
+    assert!(
+        !attempts.contains_key(&pk_b),
+        "responder-only peer starts no attempt"
+    );
+}
+
+/// #14675: a removed peer drops every piece of consumer state.
+#[test]
+fn refresh_drops_removed_peer_14675() {
+    let pk_a = [0x11u8; 32];
+    let pk_b = [0x22u8; 32];
+    let ep_a: SocketAddr = "127.0.0.1:41001".parse().unwrap();
+    let ep_b: SocketAddr = "127.0.0.1:41002".parse().unwrap();
+    let engine = wg14675_engine(vec![(pk_a, Some(ep_a)), (pk_b, Some(ep_b))]);
+    let mut fx = RefreshFixture::new();
+    let mut pubkeys = vec![pk_a, pk_b];
+    let mut effective = std::collections::HashMap::new();
+    effective.insert(pk_a, ep_a);
+    effective.insert(pk_b, ep_b);
+    let mut heard = std::collections::HashMap::new();
+    heard.insert(pk_b, 123);
+    let mut configured: std::collections::HashMap<[u8; 32], Option<SocketAddr>> =
+        engine.peer_configured_endpoints().into_iter().collect();
+    let mut attempts = std::collections::HashMap::new();
+    attempts.insert(
+        pk_b,
+        HandshakeAttempt {
+            started_ns: 0,
+            last_tx_ns: 0,
+            baseline_session: None,
+        },
+    );
+    engine.reconcile_peers(&[wg14675_peer_cfg(pk_a, Some(ep_a))]);
+    fx.refresh(
+        &engine,
+        &mut pubkeys,
+        &mut effective,
+        &mut heard,
+        &mut configured,
+        &mut attempts,
+        1_000_000_000,
+    );
+    assert!(
+        !pubkeys.contains(&pk_b),
+        "removed peer dropped from peer set"
+    );
+    assert!(!effective.contains_key(&pk_b));
+    assert!(!heard.contains_key(&pk_b));
+    assert!(!attempts.contains_key(&pk_b));
+    assert!(!configured.contains_key(&pk_b));
+}
+
+/// #14675: a configured endpoint change resets effective to the new
+/// value, drops the in-flight attempt, and clears the engine live
+/// endpoint so dataplane egress follows the operator's new value.
+#[test]
+fn refresh_resets_effective_on_configured_change_14675() {
+    let pk = [0x33u8; 32];
+    let ep_old: SocketAddr = "127.0.0.1:41001".parse().unwrap();
+    let ep_new: SocketAddr = "127.0.0.1:41009".parse().unwrap();
+    let roamed: SocketAddr = "127.0.0.1:49999".parse().unwrap();
+    let engine = wg14675_engine(vec![(pk, Some(ep_old))]);
+    engine.adopt_live_endpoint(&pk, roamed);
+    assert_eq!(
+        engine
+            .peer_endpoints()
+            .into_iter()
+            .find(|(k, _)| *k == pk)
+            .and_then(|(_, e)| e),
+        Some(roamed),
+        "fixture: live roam present before the commit"
+    );
+    let mut fx = RefreshFixture::new();
+    let mut pubkeys = vec![pk];
+    let mut effective = std::collections::HashMap::new();
+    effective.insert(pk, roamed);
+    let mut heard = std::collections::HashMap::new();
+    heard.insert(pk, 999);
+    let mut configured: std::collections::HashMap<[u8; 32], Option<SocketAddr>> =
+        engine.peer_configured_endpoints().into_iter().collect();
+    let mut attempts = std::collections::HashMap::new();
+    attempts.insert(
+        pk,
+        HandshakeAttempt {
+            started_ns: 0,
+            last_tx_ns: 0,
+            baseline_session: None,
+        },
+    );
+    engine.reconcile_peers(&[wg14675_peer_cfg(pk, Some(ep_new))]);
+    fx.refresh(
+        &engine,
+        &mut pubkeys,
+        &mut effective,
+        &mut heard,
+        &mut configured,
+        &mut attempts,
+        1_000_000_000,
+    );
+    assert_eq!(
+        effective.get(&pk).copied(),
+        Some(ep_new),
+        "configured change wins over roamed effective"
+    );
+    assert!(
+        !attempts.contains_key(&pk),
+        "stale attempt dropped on configured change"
+    );
+    assert_eq!(
+        engine
+            .peer_endpoints()
+            .into_iter()
+            .find(|(k, _)| *k == pk)
+            .and_then(|(_, e)| e),
+        Some(ep_new),
+        "engine live endpoint cleared: peer_endpoints falls back to new configured"
+    );
+}
+
+/// #14675 control: with NO configured change, a live roam in
+/// effective must survive untouched — refresh is a no-op.
+#[test]
+fn refresh_preserves_roam_when_config_unchanged_14675() {
+    let pk = [0x33u8; 32];
+    let ep_cfg: SocketAddr = "127.0.0.1:41001".parse().unwrap();
+    let roamed: SocketAddr = "127.0.0.1:49999".parse().unwrap();
+    let engine = wg14675_engine(vec![(pk, Some(ep_cfg))]);
+    let mut fx = RefreshFixture::new();
+    let mut pubkeys = vec![pk];
+    let mut effective = std::collections::HashMap::new();
+    effective.insert(pk, roamed);
+    let mut heard = std::collections::HashMap::new();
+    heard.insert(pk, 42);
+    let mut configured: std::collections::HashMap<[u8; 32], Option<SocketAddr>> =
+        engine.peer_configured_endpoints().into_iter().collect();
+    let mut attempts = std::collections::HashMap::new();
+    attempts.insert(
+        pk,
+        HandshakeAttempt {
+            started_ns: 7,
+            last_tx_ns: 7,
+            baseline_session: None,
+        },
+    );
+    fx.refresh(
+        &engine,
+        &mut pubkeys,
+        &mut effective,
+        &mut heard,
+        &mut configured,
+        &mut attempts,
+        1_000_000_000,
+    );
+    assert_eq!(
+        effective.get(&pk).copied(),
+        Some(roamed),
+        "roam preserved on unchanged config"
+    );
+    assert!(
+        attempts.contains_key(&pk),
+        "attempt preserved on unchanged config"
+    );
+    assert_eq!(heard.get(&pk).copied(), Some(42));
+}
+
+/// #14675: configured endpoint REMOVED (peer becomes responder-only /
+/// hostname) drops effective, attempt, live, and the roam-hold stamp.
+#[test]
+fn refresh_clears_effective_when_configured_removed_14675() {
+    let pk = [0x33u8; 32];
+    let ep_old: SocketAddr = "127.0.0.1:41001".parse().unwrap();
+    let engine = wg14675_engine(vec![(pk, Some(ep_old))]);
+    engine.adopt_live_endpoint(&pk, ep_old);
+    let mut fx = RefreshFixture::new();
+    let mut pubkeys = vec![pk];
+    let mut effective = std::collections::HashMap::new();
+    effective.insert(pk, ep_old);
+    let mut heard = std::collections::HashMap::new();
+    heard.insert(pk, 555);
+    let mut configured: std::collections::HashMap<[u8; 32], Option<SocketAddr>> =
+        engine.peer_configured_endpoints().into_iter().collect();
+    let mut attempts = std::collections::HashMap::new();
+    attempts.insert(
+        pk,
+        HandshakeAttempt {
+            started_ns: 0,
+            last_tx_ns: 0,
+            baseline_session: None,
+        },
+    );
+    engine.reconcile_peers(&[wg14675_peer_cfg(pk, None)]);
+    fx.refresh(
+        &engine,
+        &mut pubkeys,
+        &mut effective,
+        &mut heard,
+        &mut configured,
+        &mut attempts,
+        1_000_000_000,
+    );
+    assert!(
+        !effective.contains_key(&pk),
+        "no effective when configured removed"
+    );
+    assert!(!attempts.contains_key(&pk));
+    assert!(
+        !heard.contains_key(&pk),
+        "roam-hold stamp cleared so a hostname answer adopts immediately"
+    );
+    assert_eq!(
+        engine
+            .peer_endpoints()
+            .into_iter()
+            .find(|(k, _)| *k == pk)
+            .and_then(|(_, e)| e),
+        None,
+        "live cleared and configured gone: no endpoint"
+    );
 }
