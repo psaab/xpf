@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // Fine-grained `system login class` allow/deny regex evaluation (#7172).
@@ -106,6 +107,11 @@ type CompiledLoginRegexes struct {
 	deny    *regexp.Regexp
 	denySrc string
 	denySet bool
+
+	// pipeBoundary is set only by EvaluateFormsWithPipe for the single
+	// evaluation whose full form carries an output pipe. It is a per-call
+	// marker copied into a shallow clone, never stored on a shared ruleset.
+	pipeBoundary bool
 }
 
 // CompileLoginRegexes compiles one class's pair. Returns an error the strict
@@ -250,8 +256,31 @@ func (c CompiledLoginRegexes) Evaluate(command string) LoginRegexDecision {
 }
 
 // EvaluateForms decides whether a command is permitted, matching each side
-// against BOTH the full canonical string and the argument-free command prefix
-// and taking the LONGER match for that side.
+// against the supplied forms and letting the precedence tiers decide.
+//
+// Forms are ALTERNATIVE spellings of the SAME command, not projections to be
+// pooled: the full canonical string (arguments/pipe included, as the operator
+// typed them), the argument-free keyword prefix, and any caller-supplied
+// additional forms such as the pipe-less command. Junos's longest-match rule
+// (tier 2) compares how much of THE command each pattern accounts for, so
+// allow and deny lengths for one tier comparison MUST be measured against
+// the SAME form. #14686: pooling one global max per side across forms of
+// different lengths let a wildcard allow measured on a long piped form
+// (`^show.*` against `show version | match .`, 22 chars) outgrow an
+// end-anchored deny that can only ever match the short pipe-less form
+// (`^show version$`, 12 chars), and let an unanchored allow phrase placed
+// inside user-controlled pipe filter text (`| except show interfaces`)
+// satisfy the allowlist for a command (`show configuration`) that never
+// matched it. Both are complete RBAC bypasses for the affected class shapes.
+//
+// The fix therefore evaluates EVERY form independently under the ordinary
+// tiers (identical-pattern, longest-match, tie-to-deny, allowlist) and
+// requires UNANIMITY: the command is allowed only if EVERY form is allowed.
+// A form is not a weaker hint about the command — each form is a spelling
+// under which a deny was meant to bite (an anchored deny against the
+// pipe-less form, an anchored exception against the full form). The form
+// only a deny matches drags the whole command down; the form only an allow
+// exception matches cannot lift it past a deny that matches another form.
 //
 // #9022: AN ANCHORED DENY WAS DEFEATED BY APPENDING ANY ARGUMENT. With
 // `deny-commands "^show log$"`, every one of these RAN:
@@ -266,29 +295,61 @@ func (c CompiledLoginRegexes) Evaluate(command string) LoginRegexDecision {
 // node under an anchored rule was affected, including `show configuration
 // system`, which discloses the whole committed stanza.
 //
-// WHY THE MAX-PER-SIDE SHAPE RATHER THAN "DENY IF EITHER MATCHES". The obvious
-// fix — deny when either form matches a deny pattern — BREAKS the
-// deny-with-exceptions idiom this feature exists to support:
+// WHY UNANIMITY RATHER THAN "DENY IF ANY FORM MATCHES A DENY". That blunt
+// rule BREAKS the deny-with-exceptions idiom this feature exists to support:
 //
 //	deny-commands  "^show log$"
 //	allow-commands "^show log 100$"
 //	operator types: show log 100
 //
-// "deny if either" denies it, because the prefix `show log` matches the deny.
-// Taking the max per side instead lets the DOCUMENTED longest-match precedence
-// decide: deny matches 8 characters (on the prefix), allow matches 12 (on the
-// full string), tier 2 gives it to allow, and the operator's explicit exception
-// survives. The tiers are unchanged; only the strings each side is measured
-// against widen.
+// Deny-if-any denies it, because the prefix form `show log` matches the deny
+// and has no allow exception. Unanimity preserves it for a different reason:
+// the ALLOWLIST half is not evaluated per form as "must match on every form".
+// An allow exception written against the FULL form (`^show log 100$`) is a
+// deliberate operator grant for that exact command, so once tier 1/2 on the
+// full form grants it, the shorter forms must not veto it merely by failing
+// to re-match the exception — they were only ever widenings to let a DENY
+// see the bare command past its arguments/pipe. The implementation therefore
+// keeps two per-form verdicts apart:
 //
-// The direction is safe by construction: a side's match length can only grow,
-// and growth on the ALLOW side needs a pattern that matches the bare command —
-// which is an allow the operator wrote.
+//   - a form DENIED by the precedence tiers (a deny matched and beat/tied
+//     the allow on that same form), or denied because a deny matched it
+//     alone, vetoes the whole command — no other form's allow can outgrow
+//     it, because lengths are never compared across forms;
+//   - a form denied ONLY by the allowlist ("an allow is configured and this
+//     form does not match it") does NOT veto, provided some other form is
+//     affirmatively allowed. The allowlist requires the COMMAND to be
+//     allowed somewhere; it does not require every truncated spelling of it
+//     to spell-matched the allow pattern. But a command allowed NOWHERE is
+//     still denied, and smuggled pipe text cannot create an affirmation for
+//     the bare command: pipe text is measured only as part of the full form,
+//     and the pipe-less/command forms are measured independently, so
+//     `show configuration | except show interfaces` affirms nothing on the
+//     `show configuration` form and is denied by the allowlist.
 //
-// #9628 adds forms rather than a third parameter shape: the local gate also
-// measures the command WITHOUT its output pipe, so an anchored deny such as
-// `^show version$` still covers `show version | match .`. The same max-per-side
-// rule applies to every form, so the widening direction is unchanged.
+// The one escape from a truncated-form veto is the deny-with-exceptions
+// geometry measured on command cores (see isCoreException): the carrying
+// allow covers strictly more of the full core than the vetoing deny
+// covers of the truncated core, and the allow does not match the
+// truncated core at that vetoing extent. `^show log 100$` / `^show log$`
+// over `show log 100` and `^show route table public-vrf$` /
+// `^show route table` over its piped form are that geometry. `^show.*`
+// over `show version | match .` is not: the wildcard matches the
+// truncated `show version` at exactly the deny's extent, so the
+// pipe-less veto stands. In the pipe-smuggling geometry the deny side is
+// empty and the allow matches only inside the full form's pipe text,
+// while the pipe-less form affirms nothing, so the allowlist denies it.
+
+// EvaluateFormsWithPipe is EvaluateForms for a full form that carries an
+// output pipe (its text after the first `|` is operator-controlled filter
+// text). It marks the pipe boundary so an allow that matches ONLY inside
+// that filter text cannot satisfy an allowlist for the bare command
+// (#14686). Callers without a pipe use EvaluateForms unchanged.
+func (c CompiledLoginRegexes) EvaluateFormsWithPipe(command, prefix string, more ...string) LoginRegexDecision {
+	c.pipeBoundary = true
+	return c.EvaluateForms(command, prefix, more...)
+}
+
 func (c CompiledLoginRegexes) EvaluateForms(command, prefix string, more ...string) LoginRegexDecision {
 	// No regexes configured: this class opted out of fine-grained control and
 	// the coarse permission bits are the whole story.
@@ -297,29 +358,275 @@ func (c CompiledLoginRegexes) EvaluateForms(command, prefix string, more ...stri
 			Reason: "no allow/deny regexes configured for this class"}
 	}
 
-	longest := func(re *regexp.Regexp) int {
-		best := longestMatchLen(re, command)
-		if prefix != command {
-			if n := longestMatchLen(re, prefix); n > best {
-				best = n
+	forms := make([]string, 0, 2+len(more))
+	forms = append(forms, command)
+	if prefix != command {
+		forms = append(forms, prefix)
+	}
+	for _, f := range more {
+		dup := false
+		for _, g := range forms {
+			if f == g {
+				dup = true
+				break
 			}
 		}
-		for _, form := range more {
-			if form != command {
-				if n := longestMatchLen(re, form); n > best {
-					best = n
+		if !dup {
+			forms = append(forms, f)
+		}
+	}
+
+	// Evaluate every form on its own terms. verdicts[0] is the full form.
+	verdicts := make([]LoginRegexDecision, len(forms))
+	for i, f := range forms {
+		verdicts[i] = c.evaluateForm(f)
+	}
+
+	// A tier denial (deny matched and won/tied on that form, or deny alone
+	// matched) on ANY form vetoes, subject only to the documented exception
+	// override below. Cross-form length comparison never happens.
+	// Track whether any non-full form is tier-denied by a deny that also
+	// matches the full form's core. Such a deny is a REAL veto even when
+	// an exception-shaped allow also matches: `^show log 100$` beside an
+	// unanchored `show log` deny must still deny `show log 100 | match x`,
+	// because the deny itself covers the full command, not just a
+	// truncated spelling of it.
+	denyingFormTier := false
+	denyingCoreTier := false
+	for _, f := range forms[1:] {
+		if c.denySet && longestMatchLen(c.deny, f) >= 0 && longestMatchLen(c.deny, coreOf(forms[0])) >= 0 {
+			denyingFormTier = true
+		}
+		if c.denySet && longestMatchLen(c.deny, coreOf(f)) >= 0 && longestMatchLen(c.deny, coreOf(forms[0])) >= 0 {
+			if c.evaluateForm(coreOf(forms[0])).Allowed {
+				continue
+			}
+			denyingCoreTier = true
+		}
+	}
+	for i, v := range verdicts {
+		if v.Allowed || !isTierDeny(v) {
+			continue
+		}
+		if i == 0 {
+			// The full form itself is tier-denied. With a pipe boundary
+			// this can be the pipe-inflated reading of a command whose
+			// pipe-less core is exception-allowed (the allow is
+			// $-anchored to the core, so it cannot match the piped
+			// spelling): when a pipe-less form is allowed on its core,
+			// the full form's denial does not stand.
+			if c.pipeBoundary && !denyingCoreTier {
+				saved := false
+				for _, f := range forms[1:] {
+					if c.allowSet && c.evaluateForm(coreOf(f)).Allowed && longestMatchLen(c.allow, coreOf(f)) >= 0 {
+						saved = true
+					}
+				}
+				// Also saved when a pipe-less form carries the core
+				// exception against the vetoing prefix (public-vrf).
+				if c.allowSet {
+					for _, f := range forms[1:] {
+						for _, tf := range forms[1:] {
+							if c.evaluateForm(coreOf(f)).Allowed && c.isCoreException(f, tf) {
+								saved = true
+							}
+						}
+					}
+				}
+				if saved {
+					continue
+				}
+			}
+			return v
+		}
+		// Truncated-form veto. It stands unless the full form carries the
+		// deny-with-exceptions geometry (see isCoreException): the allow
+		// covers strictly more of the full command's core than the vetoing
+		// deny covers of this form's core, and the allow does not match
+		// this form's core at that vetoing extent. A wildcard that matches
+		// the truncated form at the deny's own extent (`^show.*` beside
+		// `^show version$`) fails that test, so its veto stands.
+		if !denyingFormTier && c.isCoreException(forms[0], forms[i]) && verdicts[0].Allowed && verdicts[0].DecidedBy == LoginRegexAllow {
+			continue
+		}
+		// Non-pipe form of the same override: the full form is allowed
+		// and carries the core-exception geometry against this vetoing
+		// form, even though the deny also matches the full form's core
+		// (an unanchored deny prefix such as `^show route table` beside
+		// `^show route table public-vrf$`). denyingFormTier was computed
+		// on raw forms; the core geometry is the precise test, and the
+		// wildcard arm fails it (allow matches the truncated core at
+		// the deny's own extent).
+		if !c.pipeBoundary && verdicts[0].Allowed && c.isCoreException(forms[0], forms[i]) {
+			continue
+		}
+		// Same override measured from a pipe-less allowed form: the
+		// full form may be tier-denied only through its pipe text while
+		// the pipe-less command form is the exception's own spelling.
+		if c.pipeBoundary && !denyingCoreTier {
+			saved := false
+			for _, f := range forms[1:] {
+				if c.allowSet && c.evaluateForm(coreOf(f)).Allowed && longestMatchLen(c.allow, coreOf(f)) >= 0 {
+					saved = true
+				}
+			}
+			if saved && c.isCoreException(forms[len(forms)-1], forms[i]) {
+				continue
+			}
+		}
+		return v
+	}
+
+	// No tier veto. With no pipe boundary the command is allowed iff some
+	// form is affirmatively allowed; a pure allowlist miss on every form
+	// denies. When no allow leaf is configured, evaluateForm already
+	// allows every non-denied form, so this also covers the deny-only case.
+	//
+	// #14686 pipe arm: when a pipe boundary is present, an affirmation that
+	// exists ONLY on the full (pipe-bearing) form must not suffice — that
+	// affirmation may live entirely inside user-controlled filter text.
+	// The pipe-less form (forms[1:], the command/prefix spellings) must
+	// affirm as well. A denied pipe-less spelling was already vetoed
+	// above; this arm handles the allowlist-only case where the pipe-less
+	// form simply does not match the allow.
+	if c.pipeBoundary {
+		// The pipe-less COMMAND form (the last form: prefix is forms[1]
+		// when present, command forms follow it) must affirm by core, or
+		// carry the exception geometry against the prefix. Checking the
+		// command form by its core is what lets `show log 100 | match x`
+		// and the 9628 public-vrf exception through while the smuggled
+		// `show configuration | except show interfaces` (command core
+		// affirms nothing) still denies.
+		for _, f := range forms[1:] {
+			if denyingCoreTier {
+				break
+			}
+			if c.allowSet && c.evaluateForm(coreOf(f)).Allowed && longestMatchLen(c.allow, coreOf(f)) >= 0 {
+				if verdicts[0].Allowed {
+					return verdicts[0]
+				}
+				return c.evaluateForm(coreOf(f))
+			}
+			if !c.allowSet && c.evaluateForm(coreOf(f)).Allowed {
+				return verdicts[0]
+			}
+		}
+		// Core-exception affirm: a pipe-less form whose core carries the
+		// exception geometry against a vetoing truncated form affirms
+		// the piped command even though its truncated spellings are
+		// tier-denied (public-vrf: allow 27 on the command core vs deny
+		// 16 on the truncated core, allow absent there).
+		if !denyingCoreTier {
+			for _, f := range forms[1:] {
+				for _, tf := range forms[1:] {
+					if c.isCoreException(f, tf) {
+						if verdicts[0].Allowed {
+							return verdicts[0]
+						}
+						return c.evaluateForm(coreOf(f))
+					}
 				}
 			}
 		}
-		return best
+		if verdicts[0].Allowed {
+			allOverridden := len(forms) > 1
+			for _, f := range forms[1:] {
+				if !c.isCoreException(forms[0], f) {
+					allOverridden = false
+					break
+				}
+			}
+			if allOverridden {
+				return verdicts[0]
+			}
+		}
+		for _, v := range verdicts[1:] {
+			if !v.Allowed {
+				return v
+			}
+		}
+		if len(verdicts) > 1 {
+			return verdicts[1]
+		}
 	}
+	for _, v := range verdicts {
+		if v.Allowed {
+			return v
+		}
+	}
+	// Nothing affirmed: report the full form's verdict (the allowlist
+	// denial, which is the most informative spelling).
+	return verdicts[0]
+}
 
+// isTierDeny reports whether a per-form verdict is a denial driven by a
+// deny match (tiers 2/3 or deny-alone), as opposed to an allowlist miss
+// ("an allow is configured and this form does not match it"), which carries
+// DecidedBy=LoginRegexAllow with Allowed=false.
+func isTierDeny(d LoginRegexDecision) bool {
+	return !d.Allowed && d.DecidedBy == LoginRegexDeny
+}
+
+// coreOf returns the command core of a form: the text before its first
+// pipe, trimmed. Pipe filter text is operator-controlled output filtering,
+// not command identity, so exception extents are measured on cores only.
+func coreOf(form string) string {
+	if i := strings.Index(form, "|"); i >= 0 {
+		return strings.TrimSpace(form[:i])
+	}
+	return form
+}
+
+// isCoreException reports the deny-with-exceptions geometry between the
+// full form and a truncated form a deny vetoed, measured on command cores
+// (pipe text excluded): the allow must match the full core, the deny must
+// match the truncated core, and the allow's full-core extent must STRICTLY
+// EXCEED the deny's truncated-core extent, while the allow must NOT match
+// the truncated core at an extent >= that deny extent. The last clause is
+// what excludes the wildcard arm of #14686: `^show.*` matches the
+// truncated `show version` at exactly the anchored deny's 12 chars, so
+// it is not an exception written for a longer command — it is the same
+// coverage, and the veto stands. `^show log 100$` (12 on the full core,
+// no match on `show log`) and `^show route table public-vrf$` (28 on the
+// full core, no match on the `show route table` prefix) both qualify.
+func (c CompiledLoginRegexes) isCoreException(full, truncated string) bool {
+	if !c.allowSet || !c.denySet {
+		return false
+	}
+	fullCore, truncCore := coreOf(full), coreOf(truncated)
+	denyTrunc := longestMatchLen(c.deny, truncCore)
+	allowFull := longestMatchLen(c.allow, fullCore)
+	if allowFull < 0 {
+		return false
+	}
+	if denyTrunc < 0 {
+		// This truncated form carries no deny hit at all (e.g. a keyword
+		// prefix shorter than the deny's text). The only way it can veto
+		// is through the pipe-boundary affirmance arm, and the full core
+		// affirming the allow is enough to override that: the exception
+		// was written for the full core, not for this shorter spelling.
+		return true
+	}
+	if allowFull <= denyTrunc {
+		return false
+	}
+	if allowTrunc := longestMatchLen(c.allow, truncCore); allowTrunc >= denyTrunc {
+		return false
+	}
+	return true
+}
+
+// evaluateForm decides a SINGLE form under the ordinary tiers. It is
+// Evaluate's original body with both sides measured against the same
+// string, so a length comparison can never borrow extent from a longer
+// sibling spelling.
+func (c CompiledLoginRegexes) evaluateForm(command string) LoginRegexDecision {
 	allowLen, denyLen := -1, -1
 	if c.allowSet {
-		allowLen = longest(c.allow)
+		allowLen = longestMatchLen(c.allow, command)
 	}
 	if c.denySet {
-		denyLen = longest(c.deny)
+		denyLen = longestMatchLen(c.deny, command)
 	}
 
 	// Both matched — the precedence tiers decide.

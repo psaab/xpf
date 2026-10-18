@@ -209,13 +209,21 @@ func evaluateCommandRegex(
 	// command prefix. `Canonicalize` passes an AcceptsArgs node's trailing
 	// tokens through (#8304, deliberately), so an ANCHORED deny such as
 	// `^show log$` stopped matching the moment any argument was appended and
-	// the denied command ran. See EvaluateForms for why this is a max-per-side
-	// widening rather than "deny if either matches".
+	// the denied command ran. See EvaluateForms for the per-form rule.
 	//
 	// #9628: the pipe-less command is measured as well. Without it, fixing the
 	// splice would have let `show version | match .` step around
 	// `^show version$`, which the refusal used to hide.
-	decision := rules.EvaluateForms(matched, canonicalPrefix(canon), command)
+	//
+	// #14686: when a pipe is present the evaluation is marked as such, so
+	// an allow that matches only inside pipe filter text cannot satisfy
+	// the allowlist for the bare command.
+	var decision config.LoginRegexDecision
+	if len(pipeWords) > 0 {
+		decision = rules.EvaluateFormsWithPipe(matched, canonicalPrefix(canon), command)
+	} else {
+		decision = rules.EvaluateForms(matched, canonicalPrefix(canon), command)
+	}
 	if decision.Allowed {
 		return nil
 	}

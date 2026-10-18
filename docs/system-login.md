@@ -677,10 +677,9 @@ too.
 > `show log` accepts arguments (`AcceptsArgs` in the operational tree), so the
 > canonical string carried them and the `$` no longer matched. **This is fixed.**
 > Each side of the rule is now matched against BOTH the full canonical string
-> and the argument-free command prefix, and the longer match for that side is
-> what the precedence tiers see. All three rows above now deny.
+> and the argument-free command prefix. All three rows above now deny.
 >
-> **The widening is per-side, not "deny if either matches".** That distinction
+> **The widening is per-spelling, not pooled.** That distinction
 > is what preserves deny-with-exceptions:
 >
 > ```
@@ -688,13 +687,19 @@ too.
 > allow-commands "^show log 100$"
 >
 >   show log        DENIED   (deny matches; no allow does)
->   show log 100    ALLOWED  (deny matches 8 chars on the prefix, allow matches
->                             12 on the full string — tier 2 gives it to allow)
+>   show log 100    ALLOWED  (the allow is written for the full spelling and
+>                             the deny only for the truncated one — the
+>                             deny-with-exceptions geometry, #14686)
 >   show log 200    DENIED   (not the allowed exception)
 > ```
 >
 > A blunt "deny when either form matches a deny pattern" closes the hole and
-> breaks that idiom, denying the form the operator explicitly allowed.
+> breaks that idiom, denying the form the operator explicitly allowed;
+> pooling the longest match per side across spellings breaks it the other
+> way, letting a wildcard allow measured on a longer piped spelling outgrow
+> an anchored deny (#14686). Each spelling is therefore judged on its own
+> and a deny that wins on any spelling vetoes, subject only to the exception
+> geometry above.
 >
 > **An anchored deny still binds to ITS OWN command, not to a subtree.**
 > `deny-commands "^show configuration$"` does not deny `show configuration
@@ -773,6 +778,20 @@ command (#9628). The words before the first `|` are canonicalized and the pipe i
 matched as typed, so a deny on `display set` still sees it. A pipe verb the CLI
 does not implement is refused. The command WITHOUT its pipe is matched as well,
 so `^show version$` also denies `show version | match .`.
+
+Each spelling (full, argument-free prefix, pipe-less) is judged ON ITS OWN
+under the tiers above, and a deny that wins on any spelling vetoes the
+command (#14686). Lengths are never compared across spellings: a wildcard
+allow such as `^show.*` cannot outgrow an end-anchored deny
+(`^show version$`) merely because the piped spelling is longer, and an
+allow phrase that occurs only inside pipe filter text
+(`show configuration | except show interfaces` under
+`allow-commands "show interfaces"`) authorizes nothing — the pipe-less
+spelling affirms no allow, so the allowlist denies it. The one escape from
+a truncated-spelling veto is the deny-with-exceptions geometry itself:
+the vetoing deny matches only the truncated spelling and the allow that
+carries the full spelling matches only there (`^show log 100$` beside
+`^show log$`), so the documented exception still runs, piped or not.
 
 So a deny written against a **path** (`request system reboot`) is enforced on
 both server surfaces that map the command. A deny written against **argument
