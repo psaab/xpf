@@ -113,16 +113,30 @@ warning fires exactly when `isWithinWindow` would fail closed for every
 instant. It is a warning, not a hard reject, because a degenerate scheduler
 is legal Junos and an upgrade must not refuse an existing candidate.
 
-**Overnight windows with per-day overrides.** An overnight window
-(e.g. `22:00:00`-`06:00:00`) wraps past midnight, but `effectiveDayWindow`
-resolves the applicable window by the *current* weekday. The post-midnight
-tail (00:00-06:00 the next calendar day) is therefore evaluated against
-that next day's window — a per-day override on the next day (or its absence)
-governs the tail, not the prior day's overnight window. This matches (and
-does not regress) the single-daily behavior: a uniform `daily 22:00-06:00`
-carries across every night because every day resolves to the same window.
-Mixing an overnight daily window with divergent per-day arms is the case to
-reason about carefully.
+**Overnight windows with per-day overrides (#14726).** An overnight window
+(e.g. `22:00:00`-`06:00:00`) belongs to the weekday it *starts* on. Today's
+wraparound window contributes only its evening segment (`now >= start`);
+the post-midnight tail (00:00-06:00) is *yesterday's* window evaluated via
+`overnightTailActive`. A Friday-only `22:00-06:00` window is therefore
+active Friday evening and Saturday 00:00-06:00, and inactive Friday
+00:00-06:00 (that tail belongs to Thursday, which has no arm). A uniform
+`daily 22:00-06:00` window is unchanged: yesterday resolves to the same
+window, so its tail is active every morning. An explicit `exclude` for
+today suppresses yesterday's tail; today's own window still governs
+today's daytime/evening. Previously `withinTimeOfDay`'s wraparound branch
+evaluated the tail against today's window, inverting the per-day cases.
+
+**Recovery pair consistency (#14726).** While `republishFailClosed` is
+latched, `evaluate` forces the authoritative map all-false. A successful
+latch republish clears the latch in `recordRepublishResultLocked`, which
+now recomputes the map from the last evaluation instant before any reader
+can observe it — otherwise `ActiveStateWithFailClosed` would expose
+`(inactive, failClosed=false)`, the fail-open encoding for scheduled
+deny/reject, until the next tick. The latch boolean returned by
+`ActiveStateWithFailClosed` covers only the republish latch; snapshot
+builders must OR it with `PolicyFailClosed(now)` (recovery hold /
+unavailable zone), as `policySchedulerPublicationState` in `pkg/daemon`
+does.
 
 ## Republish self-heal (#3780)
 
