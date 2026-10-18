@@ -2226,6 +2226,116 @@ fn nat64_v4_fragment_accounts_for_ipv6_fragment_header_budget_13943() {
         "within-budget control exactly fills the IPv6 MTU"
     );
 }
+#[test]
+fn nat64_v4_reply_fragments_at_sub1280_ipv6_egress_mtu_14658() {
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+    let pool = Ipv4Addr::new(203, 0, 113, 1);
+    let make_reply = |total_len: usize| {
+        let mut reply = build_ipv4_tcp_frame(server, pool, 443, 40001, 1, 1, 0x10);
+        reply.resize(14 + total_len, 0x5a);
+        reply[16..18].copy_from_slice(&(total_len as u16).to_be_bytes());
+        reply[18..20].copy_from_slice(&0x4242u16.to_be_bytes());
+        reply[20..22].copy_from_slice(&0u16.to_be_bytes());
+        reply[24..26].fill(0);
+        let ip_sum = checksum16(&reply[14..34]);
+        reply[24..26].copy_from_slice(&ip_sum.to_be_bytes());
+        reply
+    };
+    let forward = Nat64State::forward_decision(pool, server, 40001);
+    let decision = icmp_test_decision(
+        forward.reverse(IpAddr::V6(client), IpAddr::V6(synthetic), 5000, 443),
+    );
+    let reverse = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
+
+    // A 1220-byte DF-clear IPv4 reply translates to a 1240-byte IPv6
+    // packet. At a 1200-byte egress MTU (e.g. a tunnel inner MTU below
+    // the IPv6 1280 link minimum) it must fragment at 1200, not at the
+    // floored 1280: pre-fix this emitted one 1248-byte atomic fragment.
+    let reply = make_reply(1220);
+    let full = build_nat64_forwarded_frame(
+        &reply, nat64_reverse_meta(), &decision, Some(&reverse), false,
+        &ForwardingState::default(),
+    ).expect("single translated IPv6 packet before MTU split");
+    assert_eq!(full.len(), 14 + 1240);
+    assert_eq!(full[20], crate::ip_proto::PROTO_TCP);
+    let frames = build_nat64_forwarded_frames(
+        &reply, nat64_reverse_meta(), &decision, Some(&reverse), false,
+        &ForwardingState::default(), 0, 1200,
+    ).expect("NAT64 reverse frames at sub-1280 MTU");
+    assert_eq!(frames.len(), 2, "1240-byte translated packet must split at 1200");
+    let mut reassembled = Vec::new();
+    let mut ident = None;
+    for (index, frame) in frames.iter().enumerate() {
+        let ip = &frame[14..];
+        let total = 40 + u16::from_be_bytes([ip[4], ip[5]]) as usize;
+        assert!(total <= 1200, "fragment {index} exceeds sub-1280 egress MTU: {total}");
+        assert_eq!(ip[6], 44, "IPv6 fragment header required");
+        let frag = &ip[40..48];
+        let word = u16::from_be_bytes([frag[2], frag[3]]);
+        assert_eq!(usize::from(word >> 3) * 8, index * 1152);
+        assert_eq!(word & 1 != 0, index == 0, "only the first fragment has M set");
+        let this_ident = u32::from_be_bytes(frag[4..8].try_into().unwrap());
+        assert_eq!(ident.get_or_insert(this_ident), &this_ident);
+        reassembled.extend_from_slice(&ip[48..total]);
+    }
+    assert_eq!(reassembled, full[54..], "fragments reassemble exactly");
+
+    // Larger packet: a 1480-byte reply translates to 1500 bytes and must
+    // also fragment at 1200, not emit a 1280-byte first fragment.
+    let large = make_reply(1480);
+    let large_frames = build_nat64_forwarded_frames(
+        &large, nat64_reverse_meta(), &decision, Some(&reverse), false,
+        &ForwardingState::default(), 0, 1200,
+    ).expect("large NAT64 reverse frames at sub-1280 MTU");
+    assert_eq!(large_frames.len(), 2);
+    for (index, frame) in large_frames.iter().enumerate() {
+        let ip = &frame[14..];
+        let total = 40 + u16::from_be_bytes([ip[4], ip[5]]) as usize;
+        assert!(total <= 1200, "large fragment {index} exceeds egress MTU: {total}");
+    }
+
+    // Control: a reply whose translation fits 1200 stays a single
+    // unfragmented packet (no gratuitous fragment header).
+    let fitting_frames = build_nat64_forwarded_frames(
+        &make_reply(1100), nat64_reverse_meta(), &decision, Some(&reverse), false,
+        &ForwardingState::default(), 0, 1200,
+    ).expect("within-budget translated reply at sub-1280 MTU");
+    assert_eq!(fitting_frames.len(), 1);
+    assert_eq!(fitting_frames[0][20], crate::ip_proto::PROTO_TCP);
+    assert_eq!(
+        40 + u16::from_be_bytes([fitting_frames[0][18], fitting_frames[0][19]]) as usize,
+        1120,
+    );
+}
+
+#[test]
+fn nat64_v4_reply_too_small_ipv6_egress_mtu_fails_closed_14658() {
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+    let pool = Ipv4Addr::new(203, 0, 113, 1);
+    let mut reply = build_ipv4_tcp_frame(server, pool, 443, 40001, 1, 1, 0x10);
+    reply.resize(14 + 1220, 0x5a);
+    reply[16..18].copy_from_slice(&1220u16.to_be_bytes());
+    reply[20..22].copy_from_slice(&0u16.to_be_bytes());
+    reply[24..26].fill(0);
+    let ip_sum = checksum16(&reply[14..34]);
+    reply[24..26].copy_from_slice(&ip_sum.to_be_bytes());
+    let forward = Nat64State::forward_decision(pool, server, 40001);
+    let decision = icmp_test_decision(
+        forward.reverse(IpAddr::V6(client), IpAddr::V6(synthetic), 5000, 443),
+    );
+    let reverse = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
+    // 48 bytes cannot carry the 40-byte base + 8-byte fragment header
+    // plus an 8-byte-aligned data chunk; fail closed like the IPv4
+    // sibling instead of looping on a zero-length chunk.
+    assert!(build_nat64_forwarded_frames(
+        &reply, nat64_reverse_meta(), &decision, Some(&reverse), false,
+        &ForwardingState::default(), 0, 48,
+    ).is_none());
+}
 
 // #10729 X2-F6 RED cell 6: MSS clamp must not rewrite through AH. A v6+AH+TCP
 // SYN carrying MSS 1460 with selected MSS 536 must keep its MSS bytes after
