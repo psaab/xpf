@@ -447,8 +447,12 @@ type Manager struct {
 	lastReconcile  atomic.Int64 // unix nanos
 	lastReconcileN atomic.Int64
 
-	// last resolved policy (for Stats()).
+	// lastPolicy is the last resolved aggregate policy (for Stats()).
 	lastPolicy atomic.Pointer[ddnsPolicy]
+	// lastPolicies holds the last resolved policy PER FAMILY (#14731):
+	// [0]=v4, [1]=v6, so each family's wire-RR claims carry that family's
+	// own authority fingerprint instead of the collapsed lastPolicy.
+	lastPolicies atomic.Pointer[[2]ddnsPolicy]
 
 	// surfaceACoowners, when non-nil, returns the wire-RR claims currently owned
 	// by the SEPARATE Surface A ownership surface (router/interface DDNS records,
@@ -856,6 +860,8 @@ func (m *Manager) ReconcileScoped(ctx context.Context, cfg *config.DHCPServerCon
 		agg = pol6
 	}
 	m.lastPolicy.Store(&agg)
+	pols := [2]ddnsPolicy{pol4, pol6}
+	m.lastPolicies.Store(&pols)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1172,7 +1178,7 @@ func (m *Manager) wireRRSharedWithOther(owned ownedRecord) bool {
 	// AddrText, already normalized into the Rdata field of each WireRRClaim; build
 	// the same canonical claim for this lease record and compare by value.
 	if m.surfaceACoowners != nil {
-		ownedClaim := wireRRClaim(owned.FQDN, owned.ForwardType, owned.Address, m.currentAuthorityLocked())
+		ownedClaim := wireRRClaim(owned.FQDN, owned.ForwardType, owned.Address, m.authorityForRecordLocked(owned))
 		for _, c := range m.surfaceACoowners() {
 			if c.coOwns(ownedClaim) {
 				return true
@@ -1210,20 +1216,24 @@ func (m *Manager) WireRRClaims() []WireRRClaim {
 // lock-free read (#5748). Caller holds m.mu. A lease record's rdata IS its
 // Address; rdata-less rows are skipped (they can never co-own a wire RR). The
 // snapshot is an immutable slice — replaced wholesale, never mutated in place.
-// currentAuthorityLocked is this surface's DNS authority fingerprint (#6755),
-// taken from the last resolved policy. Empty when no policy has resolved yet,
-// which coOwns treats as unknown rather than as a different authority.
+// Each claim carries the authority of the record's OWN family / publish
+// endpoint (authorityForRecordLocked, #14731), never one collapsed aggregate.
+// Empty when unknown, which coOwns treats as unknown rather than as a
+// different authority.
 //
-// The lease surface stamps its CURRENT authority rather than a per-record
-// publish-time one, because ownedRecord carries no fingerprint field and adding
-// one would be a durable-store change this fix does not otherwise need. The
-// asymmetry with Surface A (which does store publish-time) is bounded: a policy
-// whose endpoint changes republishes its records through the new endpoint, and
-// until it does, an authority mismatch only ever makes coOwns MORE conservative
-// about suppressing a delete on the Surface A side.
-func (m *Manager) currentAuthorityLocked() string {
-	if p := m.lastPolicy.Load(); p != nil {
-		return p.authority
+// authorityForRecordLocked returns the #6755 authority for a lease record:
+// the authority of the policy for the record's OWN family from the last
+// resolved per-family policies (#14731). The record's stored
+// BackendFingerprint is NOT used: it lives in the #5814 dhcpBackendFingerprint
+// namespace (it folds in TSIG key name / transport bind), so it can never
+// equal a Surface A authorityFingerprint. Empty when no policy has resolved
+// yet, which coOwns treats as unknown rather than as a different authority.
+// The per-policy-change approximation of the pre-#14731 code is retained per
+// family (a changed endpoint republishes through the new endpoint); the
+// defect fixed here is collapsing both families onto the v4 policy.
+func (m *Manager) authorityForRecordLocked(r ownedRecord) string {
+	if p := m.lastPolicies.Load(); p != nil {
+		return p[famIdx(r.Family)].authority
 	}
 	return ""
 }
@@ -1234,7 +1244,7 @@ func (m *Manager) rebuildWireRRClaimsLocked() {
 		if r.Address == "" {
 			continue
 		}
-		claims = append(claims, wireRRClaim(r.FQDN, r.ForwardType, r.Address, m.currentAuthorityLocked()))
+		claims = append(claims, wireRRClaim(r.FQDN, r.ForwardType, r.Address, m.authorityForRecordLocked(r)))
 	}
 	m.wireRRClaims.Store(&claims)
 }
