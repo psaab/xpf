@@ -252,9 +252,11 @@ func TestExternalMACAddressForms12135(t *testing.T) {
 	}{
 		{name: "bare hex rejected", pattern: "525400aabbcc"},
 		{name: "eight-byte EUI-64 rejected", pattern: "52-54-00-aa-bb-cc-dd-ee"},
-		{name: "eight-group colon IPv6 literal", pattern: "52:54:00:aa:bb:cc:dd:ee", want: true},
-		{name: "IPv4 literal", pattern: "192.0.2.1", want: true},
-		{name: "IPv6 literal", pattern: "2001:db8::1", want: true},
+		// #14701: IP literals are not hardware addresses; systemd's
+		// hw_addr parser drops them, so they must not parse as MACs.
+		{name: "eight-group colon IP literal rejected", pattern: "52:54:00:aa:bb:cc:dd:ee"},
+		{name: "IPv4 literal rejected", pattern: "192.0.2.1"},
+		{name: "IPv6 literal rejected", pattern: "2001:db8::1"},
 		{name: "colon-separated address", pattern: "52:54:00:aa:bb:cc", want: true},
 		{name: "short colon groups", pattern: "5:4:0:a:b:c", want: true},
 		{name: "hyphen-separated address", pattern: "52-54-00-aa-bb-cc", want: true},
