@@ -13749,3 +13749,244 @@ fn allocator_id_preserved_by_ha_import_9902() {
     );
     assert_eq!(after[0].used_ports, 1);
 }
+
+// ---------------------------------------------------------------------------
+// #14674: synced interface-mode SNAT must book in iface_allocs, not be
+// refused / mis-booked by a pool containing the egress address.
+// ---------------------------------------------------------------------------
+
+fn iface_first_rules_14674(extra: Vec<SourceNATRuleSnapshot>) -> Vec<SourceNatRule> {
+    let mut snaps = vec![SourceNATRuleSnapshot {
+        name: "iface-snat".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        ..SourceNATRuleSnapshot::default()
+    }];
+    snaps.extend(extra);
+    parse_source_nat_rules(&snaps)
+}
+
+fn quarantined_pool_snap_14674(name: &str, from: &str, to: &str) -> SourceNATRuleSnapshot {
+    SourceNATRuleSnapshot {
+        name: name.to_string(),
+        from_zone: from.to_string(),
+        to_zone: to.to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: format!("{name}-pool"),
+        pool_addresses: vec!["203.0.113.10/32".to_string()],
+        pool_unusable: true,
+        pool_unusable_reason: "iface_snat_egress_overlap".to_string(),
+        port_low: 20000,
+        port_high: 20099,
+        ..SourceNATRuleSnapshot::default()
+    }
+}
+
+fn healthy_pool_snap_14674(name: &str, from: &str, to: &str) -> SourceNATRuleSnapshot {
+    SourceNATRuleSnapshot {
+        name: name.to_string(),
+        from_zone: from.to_string(),
+        to_zone: to.to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: format!("{name}-pool"),
+        pool_addresses: vec!["203.0.113.10/32".to_string()],
+        port_low: 20000,
+        port_high: 20099,
+        ..SourceNATRuleSnapshot::default()
+    }
+}
+
+fn import_iface_14674(
+    reg: &InterfaceNatAllocators,
+    rules: &[SourceNatRule],
+    rewrite_src_port: Option<u16>,
+    zones: Option<(&str, &str)>,
+) -> bool {
+    let key = session_key_from_src("10.0.61.50", 40000, "8.8.8.8", 443);
+    reserve_synced_source_nat_allocation_untracked(
+        reg,
+        rules,
+        &key,
+        NatDecision {
+            rewrite_src: Some("203.0.113.10".parse().unwrap()),
+            rewrite_src_port,
+            ..NatDecision::default()
+        },
+        false,
+        zones,
+        0,
+    )
+}
+
+fn iface_live_14674(reg: &InterfaceNatAllocators) -> usize {
+    reg.allocator_if_present("203.0.113.10".parse().unwrap())
+        .map(|a| a.live_flow_count())
+        .unwrap_or(0)
+}
+
+fn pool_live_14674(rules: &[SourceNatRule], idx: usize) -> usize {
+    rules[idx].pool_allocator.live_flow_count()
+}
+
+#[test]
+fn synced_iface_snat_cross_zone_drained_quarantine_imports_14674() {
+    for port in [Some(20000u16), None] {
+        let rules = iface_first_rules_14674(vec![quarantined_pool_snap_14674(
+            "qpool", "dmz", "untrust",
+        )]);
+        assert_eq!(
+            rules[1].pool_failure,
+            Some(SourceNatFailureReason::PoolIfaceEgressOverlap),
+            "fixture: cross-zone pool must be quarantined"
+        );
+        assert_eq!(rules[1].pool_allocator.live_flow_count(), 0, "fixture: drained");
+        let reg = InterfaceNatAllocators::default();
+        assert!(
+            import_iface_14674(&reg, &rules, port, Some(("lan", "wan"))),
+            "port={port:?}: drained cross-zone quarantined pool must not refuse a synced interface-SNAT import"
+        );
+        assert_eq!(iface_live_14674(&reg), 1, "port={port:?}: identity must book in iface_allocs");
+        assert_eq!(pool_live_14674(&rules, 1), 0, "port={port:?}: quarantined pool must book nothing");
+    }
+}
+
+#[test]
+fn synced_iface_snat_same_zone_drained_quarantine_imports_14674() {
+    for port in [Some(20000u16), None] {
+        let rules = iface_first_rules_14674(vec![quarantined_pool_snap_14674(
+            "qpool", "lan", "wan",
+        )]);
+        let reg = InterfaceNatAllocators::default();
+        assert!(
+            import_iface_14674(&reg, &rules, port, Some(("lan", "wan"))),
+            "port={port:?}: drained same-zone quarantined pool after an interface rule must not refuse the import"
+        );
+        assert_eq!(iface_live_14674(&reg), 1, "port={port:?}: identity must book in iface_allocs");
+        assert_eq!(pool_live_14674(&rules, 1), 0);
+    }
+}
+
+#[test]
+fn synced_iface_snat_lower_pool_books_in_iface_not_pool_14674() {
+    for port in [Some(20000u16), None] {
+        let rules = iface_first_rules_14674(vec![healthy_pool_snap_14674("pool", "lan", "wan")]);
+        let reg = InterfaceNatAllocators::default();
+        assert!(
+            import_iface_14674(&reg, &rules, port, Some(("lan", "wan"))),
+            "port={port:?}: interface-first import must succeed"
+        );
+        assert_eq!(iface_live_14674(&reg), 1, "port={port:?}: must book in iface_allocs");
+        assert_eq!(
+            pool_live_14674(&rules, 1),
+            0,
+            "port={port:?}: lower-priority pool containing E must not mis-book an interface reservation"
+        );
+    }
+}
+
+#[test]
+fn synced_pool_first_still_books_in_pool_14674() {
+    // Control: pool rule FIRST, interface rule second — active used the pool.
+    let rules = parse_source_nat_rules(&[
+        healthy_pool_snap_14674("pool", "lan", "wan"),
+        SourceNATRuleSnapshot {
+            name: "iface-snat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            interface_mode: true,
+            ..SourceNATRuleSnapshot::default()
+        },
+    ]);
+    let reg = InterfaceNatAllocators::default();
+    assert!(import_iface_14674(&reg, &rules, Some(20000), Some(("lan", "wan"))));
+    assert_eq!(pool_live_14674(&rules, 0), 1, "pool-first import must book in the pool");
+    assert_eq!(iface_live_14674(&reg), 0, "pool-first import must not book in iface_allocs");
+}
+
+#[test]
+fn synced_iface_snat_no_zones_drained_quarantine_imports_14674() {
+    for port in [Some(20000u16), None] {
+        let rules = iface_first_rules_14674(vec![quarantined_pool_snap_14674(
+            "qpool", "dmz", "untrust",
+        )]);
+        let reg = InterfaceNatAllocators::default();
+        assert!(
+            import_iface_14674(&reg, &rules, port, None),
+            "port={port:?}: PASS2-only drained quarantine must not refuse the import"
+        );
+        assert_eq!(iface_live_14674(&reg), 1, "port={port:?}: must book in iface_allocs");
+        assert_eq!(pool_live_14674(&rules, 1), 0);
+    }
+}
+
+#[test]
+fn synced_iface_snat_no_zones_overbudget_still_refuses_14674() {
+    // Control: PASS2 OverBudget candidacy (#7076) is preserved.
+    let mut rules = iface_first_rules_14674(vec![healthy_pool_snap_14674("pool", "dmz", "untrust")]);
+    rules[1].pool_failure = Some(SourceNatFailureReason::OverBudget);
+    let reg = InterfaceNatAllocators::default();
+    assert!(
+        !import_iface_14674(&reg, &rules, Some(20000), None),
+        "a PASS2 OverBudget owner must still refuse (not fall through to iface)"
+    );
+    assert_eq!(iface_live_14674(&reg), 0);
+}
+
+#[test]
+fn synced_still_draining_overlap_refuses_14674() {
+    // Control: a still-draining overlap (live > 0) must refuse in both passes.
+    // Mint a live pool flow under the healthy generation, then quarantine
+    // via a previous-generation rebuild so the allocator (and its flow)
+    // is retained, mirroring tests_iface_pool_drain_7717.
+    let healthy = iface_first_rules_14674(vec![healthy_pool_snap_14674("pool", "dmz", "untrust")]);
+    let flow = SourceNatFlowKey {
+        protocol: PROTO_TCP,
+        src_ip: "10.0.61.99".parse().unwrap(),
+        dst_ip: "8.8.8.8".parse().unwrap(),
+        src_port: 40099,
+        dst_port: 443,
+        routing_scope: 0,
+    };
+    assert!(healthy[1].pool_allocator.reserve_flow(
+        flow,
+        TranslatedTuple { ip: "203.0.113.10".parse().unwrap(), port: 20000 },
+        0,
+        false,
+        0,
+        NatHolder::Untracked,
+    ));
+    let mut snaps = vec![SourceNATRuleSnapshot {
+        name: "iface-snat".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        ..SourceNATRuleSnapshot::default()
+    }];
+    snaps.push(quarantined_pool_snap_14674("pool", "dmz", "untrust"));
+    // pool name must match the healthy generation for allocator carry-over.
+    snaps[1].pool_name = "pool-pool".to_string();
+    let rules = parse_source_nat_rules_with_previous(&snaps, Some(&healthy), &NatCounterStore::default(), 0);
+    assert_eq!(
+        rules[1].pool_failure,
+        Some(SourceNatFailureReason::PoolIfaceEgressOverlap),
+        "fixture: pool must be quarantined, got {:?}",
+        rules[1].pool_failure
+    );
+    assert!(
+        rules[1].pool_allocator.live_flow_count() > 0,
+        "fixture: quarantined pool must still be draining (live > 0), got {}",
+        rules[1].pool_allocator.live_flow_count()
+    );
+    for zones in [Some(("lan", "wan")), None] {
+        let reg = InterfaceNatAllocators::default();
+        assert!(
+            !import_iface_14674(&reg, &rules, Some(20000), zones),
+            "zones={zones:?}: still-draining overlap must refuse the interface import"
+        );
+        assert_eq!(iface_live_14674(&reg), 0, "zones={zones:?}: must not book in iface");
+    }
+}

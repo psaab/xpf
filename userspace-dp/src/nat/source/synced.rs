@@ -306,8 +306,61 @@ fn reserve_synced_source_nat_allocation_with_holder(
     // A synced session always carries a real L4 protocol, so `tuple_unknown`
     // is false — the address-only `match_source_nat` wrapper's sentinel
     // (#5687) does not apply here.
+    // #14674: PASS 1 must reproduce the active's FIRST matching rule, not
+    // merely the first pool owner among matching rules. The active takes
+    // the first `matches()` rule in snapshot order; if that rule is
+    // interface-mode it books in `iface_allocs` (gated only by draining-
+    // pool occupancy) and NEVER consults a later pool rule — even though
+    // that pool contains the egress address. So when PASS 1's predicate
+    // (the active's minus scope) proves an interface first match, route
+    // straight to the interface domain and skip BOTH pool scans: a
+    // healthy lower-priority pool would otherwise mis-book the
+    // reservation into `pool_allocator`, and a drained #7717 pool would
+    // otherwise refuse it outright.
     if let Some((from_zone, to_zone)) = synced_zones {
+        // #14674: detect the active's rule before the pool scan. The active
+        // takes the FIRST `matches()` rule in snapshot order; PASS 1's filter
+        // is that same predicate minus scope. If that first rule is
+        // interface-mode, the active booked in `iface_allocs` (gated only by
+        // draining-pool occupancy), never in a pool.
+        let first_match_is_interface = rules
+            .iter()
+            .find(|rule| {
+                rule.matches_ignoring_scope(
+                    from_zone,
+                    to_zone,
+                    flow.src_ip,
+                    flow.dst_ip,
+                    false,
+                    flow.protocol,
+                    flow.src_port,
+                    flow.dst_port,
+                    nat.source_nat_icmp,
+                )
+            })
+            .is_some_and(|rule| rule.interface_mode);
+        if first_match_is_interface {
+            // The active admitted it in the interface domain iff no
+            // draining pool still holds live flows on the egress address.
+            // A still-draining overlap means the active would have refused
+            // (InterfaceOverlapDraining), so refuse the import; a drained
+            // one means book the interface identity directly.
+            if address_has_draining_pool_occupancy(rules, rewrite_src) {
+                return false;
+            }
+            return reserve_synced_interface_identity(
+                iface_allocs,
+                flow,
+                rewrite_src,
+                nat,
+                now_ns,
+                holder,
+                capture_previous_holders,
+                previous_holders,
+            );
+        }
         match reserve_synced_on_first_pool_owner(
+            rules,
             rules.iter().filter(|rule| {
                 rule.matches_ignoring_scope(
                     from_zone,
@@ -347,7 +400,7 @@ fn reserve_synced_source_nat_allocation_with_holder(
             // used.
             //
             // That is not a smaller loss than refusing; it is a LATENT one.
-            // Measured at the parent of this change, with two rules whose
+            // Measure at the parent of this change, with two rules whose
             // pools both own 203.0.113.10 and a local squatter on
             // 203.0.113.10:20000 in rule A's allocator:
             //
@@ -379,6 +432,7 @@ fn reserve_synced_source_nat_allocation_with_holder(
             // sessions stop reserving anything and drift stops degrading
             // gracefully. The whole fix is that these two outcomes are
             // different answers and only one of them stops the search.
+            // (#14674 interface-first is handled above, before this scan.)
             SyncedReserveOutcome::NothingToReserve => {}
         }
     }
@@ -399,6 +453,7 @@ fn reserve_synced_source_nat_allocation_with_holder(
     // produces — is NOT a refusal, and is answered exactly like the
     // `rewrite_src == None` early return above.
     match reserve_synced_on_first_pool_owner(
+        rules,
         rules.iter(),
         // PASS 2 keeps the pre-#6211 first-acceptor scan, byte-identical.
         // Bound by `pass2_still_falls_through_a_refusing_owner_6979_f1` — this
@@ -578,7 +633,20 @@ impl SyncedReserveOutcome {
 /// `stop_at_first_owner` for the same reason it produced `Refused` before —
 /// candidacy is kept, only the allocator is skipped — so blocking the import
 /// still mirrors the active's `Unavailable`.
+///
+/// #14674: `all_rules` is the FULL rule slice, used only for the
+/// `PoolIfaceEgressOverlap` draining check. That failure is not an ordinary
+/// pool refusal: the pool was quarantined because its address IS an
+/// interface egress. Once no draining pool holds live flows on the address
+/// the active admits interface-mode sessions there, so a drained overlap
+/// candidate must not set `saw_candidate` — otherwise it blocks the
+/// interface domain it was quarantined to protect. Other failures (e.g.
+/// `OverBudget`) keep #7076 candidacy, and a still-draining overlap
+/// (live > 0 anywhere on the address) also keeps it: its identities are
+/// still live in the pool domain, so handing the same address to the
+/// interface domain would create two owners.
 fn reserve_synced_on_first_pool_owner<'a>(
+    all_rules: &[SourceNatRule],
     rules: impl Iterator<Item = &'a SourceNatRule>,
     stop_at_first_owner: bool,
     flow: SourceNatFlowKey,
@@ -619,6 +687,14 @@ fn reserve_synced_on_first_pool_owner<'a>(
             let Some(addr_index) = addr_index else {
                 continue;
             };
+            // #14674: a drained PoolIfaceEgressOverlap pool is not a pool
+            // owner for candidacy — see the fn doc. Skip BEFORE
+            // saw_candidate so the scan can reach the interface domain.
+            if rule.pool_failure == Some(SourceNatFailureReason::PoolIfaceEgressOverlap)
+                && !address_has_draining_pool_occupancy(all_rules, rewrite_src)
+            {
+                continue;
+            }
             saw_candidate = true;
             // #7076: a rule carrying a `pool_failure` OWNS the translated
             // address on paper but has no allocator a packet path will ever
@@ -759,6 +835,13 @@ fn reserve_synced_on_first_pool_owner<'a>(
         let Some(addr_index) = addr_index else {
             continue;
         };
+        // #14674: see the address-only arm — a drained overlap pool is not
+        // a candidacy owner.
+        if rule.pool_failure == Some(SourceNatFailureReason::PoolIfaceEgressOverlap)
+            && !address_has_draining_pool_occupancy(all_rules, rewrite_src)
+        {
+            continue;
+        }
         saw_candidate = true;
         // #7076: see the address-only arm above — skip the ALLOCATOR, keep the
         // CANDIDACY, so a quarantined owner yields `Refused` (import blocked,
