@@ -60,9 +60,8 @@ func TestLocalCoSRewriteRuleFilterWiring6858(t *testing.T) {
 		// name under the command.
 		{"bare name", []string{"rewrite-rule", "rw-dscp"}, "Rewrite rule: rw-dscp,", []string{"rw-other"}},
 		{"keyword name", []string{"rewrite-rule", "name", "rw-other"}, "Rewrite rule: rw-other,", []string{"rw-dscp"}},
-		// A later explicit keyword beats the bare positional.
-		{"keyword overrides bare", []string{"rewrite-rule", "rw-dscp", "name", "rw-other"},
-			"Rewrite rule: rw-other,", []string{"Rewrite rule: rw-dscp,"}},
+		// #14688: bare + explicit name is now rejected as duplicate (was
+		// "keyword overrides bare"); covered by error tests in cmdtree.
 		// The comma-bearing name, which is the case the remote surface got
 		// wrong before #6858. Locally it always worked; it is asserted here so
 		// the two surfaces are compared on the SAME input

@@ -167,6 +167,16 @@ type Node struct {
 	// selector, so the RBAC gate judged the selector string while the
 	// handler ran the broader command. Honoured only in Canonicalize.
 	RequiresValue bool
+	// ModifierOnly marks a child keyword of a dynamic node that may appear
+	// only BEFORE the dynamic value, never after it (#14688). Canonicalize
+	// refuses it once the value is filled: the handlers for such keywords
+	// are unfiltered whole-set views (or a different subcommand) that take
+	// no selector, so `show interfaces <name> terse` judged as the longer
+	// string would evade an anchored deny on `show interfaces <name>`
+	// while the handler renders the unfiltered view / summary and drops
+	// the keyword. Keywords that DO honour a selector (detail/extensive
+	// on interfaces) are not marked. Honoured only in Canonicalize.
+	ModifierOnly bool
 }
 
 // HasDynamic returns true if the node has any dynamic completion function.
@@ -478,7 +488,7 @@ var OperationalTree = map[string]*Node{
 				return names
 			}, Children: map[string]*Node{
 				"detail": {Desc: "Show detailed zone information"},
-				"terse":  {Desc: "Display terse output"},
+				"terse":  {Desc: "Display terse output", ModifierOnly: true},
 			}},
 			"policies": {Desc: "Show security firewall policies", Children: map[string]*Node{
 				"global":      {Desc: "Show global security policy information"},
@@ -725,12 +735,12 @@ var OperationalTree = map[string]*Node{
 			}
 			return names
 		}, Children: map[string]*Node{
-			"terse":      {Desc: "Display terse output"},
+			"terse":      {Desc: "Display terse output", ModifierOnly: true},
 			"detail":     {Desc: "Display detailed output"},
 			"extensive":  {Desc: "Display extensive output"},
-			"statistics": {Desc: "Display statistics and detailed output"},
-			"tunnel":     {Desc: "Show tunnel interfaces"},
-			"queue": {Desc: "Show per-queue CoS statistics", DynamicFn: func(cfg *config.Config) []string {
+			"statistics": {Desc: "Display statistics and detailed output", ModifierOnly: true},
+			"tunnel":     {Desc: "Show tunnel interfaces", ModifierOnly: true},
+			"queue": {Desc: "Show per-queue CoS statistics", ModifierOnly: true, DynamicFn: func(cfg *config.Config) []string {
 				if cfg == nil || cfg.Interfaces.Interfaces == nil {
 					return nil
 				}

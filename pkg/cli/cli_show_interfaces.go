@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/dhcp"
@@ -50,44 +51,52 @@ func (c *CLI) showTunnelInterfaces() error {
 }
 
 func (c *CLI) showInterfaces(args []string) error {
-	// Handle "show interfaces queue [<interface>]" sub-command (#4228 Gap 7)
-	if len(args) > 0 && args[0] == "queue" {
-		selector := ""
-		if len(args) > 1 {
-			selector = args[1]
+	// #14688: strict SplitModifiers dispatch — post-selector modifiers,
+	// surplus values and second modifiers are refused, not ignored.
+	split, ok := cmdtree.SplitModifiersAt([]string{"show", "interfaces"}, args)
+	if !ok {
+		return fmt.Errorf("internal: no command tree node for `show interfaces`")
+	}
+	if len(split.Ambiguous) > 0 {
+		return fmt.Errorf("ambiguous keyword %q after `show interfaces`", split.Ambiguous[0])
+	}
+	if len(split.Extra) > 0 {
+		return fmt.Errorf("unexpected argument %q: `show interfaces` takes at most one interface name", split.Extra[0])
+	}
+	if len(split.Modifiers) > 1 {
+		return fmt.Errorf("`show interfaces` takes one modifier, got %v", split.Modifiers)
+	}
+	if len(split.Modifiers) == 1 {
+		mod := split.Modifiers[0]
+		switch mod {
+		case "queue":
+			return c.showInterfacesQueue(split.Selector)
+		case "tunnel":
+			if split.Selector != "" {
+				return fmt.Errorf("`show interfaces tunnel` does not take an interface name (got %q)", split.Selector)
+			}
+			return c.showTunnelInterfaces()
+		case "terse":
+			if split.Selector != "" {
+				return fmt.Errorf("`show interfaces terse` does not take an interface name (got %q)", split.Selector)
+			}
+			return c.showInterfacesTerse()
+		case "statistics":
+			if split.Selector != "" {
+				return fmt.Errorf("`show interfaces statistics` does not take an interface name (got %q)", split.Selector)
+			}
+			return c.showInterfacesStatistics()
+		case "detail":
+			return c.showInterfacesDetail(split.Selector)
+		case "extensive":
+			return c.showInterfacesExtensiveFiltered(split.Selector)
+		default:
+			return fmt.Errorf("internal: `show interfaces %s` has no renderer", mod)
 		}
-		return c.showInterfacesQueue(selector)
 	}
-
-	// Handle "show interfaces tunnel" sub-command
-	if len(args) > 0 && args[0] == "tunnel" {
-		return c.showTunnelInterfaces()
-	}
-
-	// Handle "show interfaces terse" sub-command
-	if len(args) > 0 && args[0] == "terse" {
-		return c.showInterfacesTerse()
-	}
-	// Handle "show interfaces detail" sub-command
-	if len(args) > 0 && args[0] == "detail" {
-		return c.showInterfacesDetail("")
-	}
-	// Handle "show interfaces extensive" sub-command
-	if len(args) > 0 && args[0] == "extensive" {
-		return c.showInterfacesExtensive()
-	}
-	// Handle "show interfaces statistics" sub-command
-	if len(args) > 0 && args[0] == "statistics" {
-		return c.showInterfacesStatistics()
-	}
-
-	// Handle "show interfaces <name> detail"
-	if len(args) >= 2 && args[len(args)-1] == "detail" {
-		return c.showInterfacesDetail(args[0])
-	}
-	// Handle "show interfaces <name> extensive"
-	if len(args) >= 2 && args[len(args)-1] == "extensive" {
-		return c.showInterfacesExtensiveFiltered(args[0])
+	args = nil
+	if split.Selector != "" {
+		args = []string{split.Selector}
 	}
 
 	cfg := c.store.ActiveConfig()

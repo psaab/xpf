@@ -97,6 +97,13 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 	// Descending into a placeholder clears it; `show route` (placeholder
 	// with children) is never tracked.
 	placeholderMandatory := false
+	// #14688: seenFilterKeys counts resolved name/type keywords under the
+	// current dynamic parent; valueParent is that dynamic node; lastWasValue
+	// marks the previous word was consumed as its value.
+	seenFilterKeys := map[string]int{}
+	var valueParent *Node
+	var valueParentChildren map[string]*Node
+	lastWasValue := false
 
 	for wi, w := range words {
 		name, node, matches, ok := resolveTreeWord(current, w)
@@ -110,6 +117,16 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 			name, node, optionMatches, ok = resolveTreeWord(options, w)
 			if len(optionMatches) > len(matches) {
 				matches = optionMatches
+			}
+		}
+		if lastWasValue && valueParent != nil {
+			if _, n2, _, ok2 := resolveTreeWord(valueParent.Children, w); ok2 && n2 != nil && n2.ModifierOnly {
+				return words, CanonicalUnknown
+			}
+		}
+		if !ok && valueParentChildren != nil && valueParent != nil {
+			if name2, node2, _, ok2 := resolveTreeWord(valueParentChildren, w); ok2 && node2 != nil && !node2.ModifierOnly && (name2 == "name" || name2 == "type") {
+				name, node, ok = name2, node2, true
 			}
 		}
 		if !ok {
@@ -134,6 +151,8 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 			// reaches the refusal below.
 			if dynamicPending {
 				dynamicFilled = true
+				valueParent = currentNode
+				lastWasValue = true
 				continue
 			}
 			// #9505: the same rule for a placeholder. A childless one never
@@ -166,10 +185,32 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 			_ = wi
 			return words, CanonicalUnknown
 		}
+		if lastWasValue && valueParent != nil && node.ModifierOnly {
+			return words, CanonicalUnknown
+		}
+		if valueParent != nil && (name == "name" || name == "type") {
+			if seenFilterKeys[name] > 0 {
+				return words, CanonicalUnknown
+			}
+			// Bare positional: previous word was the dynamic parent's own
+			// value (currentNode still equals valueParent before update).
+			if lastWasValue && currentNode == valueParent && name == "name" {
+				return words, CanonicalUnknown
+			}
+			seenFilterKeys[name]++
+		}
 		out[wi] = name
+		lastWasValue = false
 		currentNode = node
 		parentTyped = node.IsTypedLeaf()
 		dynamicFilled = false
+		if node.HasDynamic() && len(node.Children) > 0 && (valueParent == nil || node == valueParent) {
+			if valueParent == nil {
+				seenFilterKeys = map[string]int{}
+			}
+			valueParent = node
+			valueParentChildren = node.Children
+		}
 		if node.Options {
 			options = node.Children
 			placeholderMandatory = false
