@@ -308,7 +308,26 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 				continue
 			}
 			if found && currentShell != shell {
+				// #14695: claim shell ownership BEFORE mutating the shell
+				// (marker-first, #5841/#6797 discipline). Without this a
+				// pre-existing account elevated to super-user (shell ->
+				// /bin/bash) with no password/key of its own left no
+				// provenance, so deprovision early-returned and the shell
+				// grant survived removal. Roll back the claim if usermod
+				// fails so a non-xpf shell is never later reset.
+				uidForShell, uidOK := lookupUID(user.Name)
+				var shellClaim ownershipClaim
+				if uidOK {
+					var claimErr error
+					if shellClaim, claimErr = claimOwnership(provisionedShellsDir(), user.Name, uidForShell); claimErr != nil {
+						slog.Warn("skipping login shell update: cannot record shell ownership marker",
+							"user", user.Name, "err", claimErr)
+						fail(fmt.Errorf("mark shell provisioned %s: %w", user.Name, claimErr))
+						continue
+					}
+				}
 				if out, err := runCommandTimeout("usermod", "-s", shell, "--", user.Name); err != nil {
+					shellClaim.rollback()
 					slog.Warn("failed to update login shell",
 						"user", user.Name, "shell", shell, "err", err, "output", strings.TrimSpace(string(out)))
 					fail(fmt.Errorf("update login shell for %s: %w", user.Name, err))
