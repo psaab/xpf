@@ -900,6 +900,14 @@ func FindExternallyManaged(dir string) ExternalMatchSet {
 					rule.hasMAC = false
 					continue
 				}
+				// Each MACAddress= assignment replaces the previous
+				// list (systemd parses it as a set-valued assignment
+				// cleared by the empty form, and network_verify sees
+				// only the effective list). Rebuild from this line's
+				// words alone so a later all-invalid assignment
+				// resets an earlier valid one instead of leaving the
+				// stale words live for MatchesForApply (#14701).
+				rule.macPatterns = nil
 				validWords := 0
 				for _, pattern := range strings.Fields(value) {
 					if _, ok := parseExternalMACAddress(pattern); ok {
@@ -933,14 +941,20 @@ func FindExternallyManaged(dir string) ExternalMatchSet {
 
 // externalPatternListMatches implements systemd's net_condition_test_strv:
 // any matching negative rule vetoes; otherwise a positive must match if one
-// exists, and an all-negative or empty rule set matches by default.
+// exists, and an all-negative or empty rule set matches by default. A run
+// of leading "!" collapses to a single negation (#14701): the parser
+// prefixes "!" onto every word of a line-negated Name= assignment, so a
+// word that itself starts with "!" (Name=!eth0 !eth1) would otherwise be
+// stored as "!!eth1" and fnmatched literally, losing the veto.
 func externalPatternListMatches(patterns []string, value string) bool {
 	hasPositive, positiveMatched := false, false
 	for _, pattern := range patterns {
-		negative := strings.HasPrefix(pattern, "!")
-		if negative {
+		negative := false
+		for strings.HasPrefix(pattern, "!") {
+			negative = true
 			pattern = pattern[1:]
-		} else {
+		}
+		if !negative {
 			hasPositive = true
 		}
 		if !fnmatchInterfaceName(pattern, value) {
@@ -1289,11 +1303,14 @@ func externalMACAddressListMatches(patterns []string, address string) bool {
 }
 
 func parseExternalMACAddress(value string) ([]byte, bool) {
+	// IP literals are not hardware addresses: systemd's
+	// config_parse_hw_addrs parses each word as a hardware address
+	// and drops non-EUI-48 forms, so an IP-literal MACAddress= word
+	// is dropped like any other unparseable word (#14701). Accepting
+	// it via net.ParseIP made an IP-only file a valid MAC predicate
+	// that could match an interface whose "MAC" string was that IP.
 	if ip := net.ParseIP(value); ip != nil {
-		if v4 := ip.To4(); v4 != nil {
-			return []byte(v4), true
-		}
-		return []byte(ip.To16()), true
+		return nil, false
 	}
 	// net.ParseMAC accepts separator-less hex and 8-byte EUI-64 values, but
 	// systemd's MACAddress= does not accept either form. Require a separator.

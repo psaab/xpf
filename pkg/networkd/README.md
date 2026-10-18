@@ -25,7 +25,12 @@ Triggers `networkctl reload` only when files actually changed.
   use the tested systemd-compatible `fnmatch` forms. Systemd consumes field-level
   backslashes before matching and rejects `:` in interface names, so matcher-helper
   escape and POSIX named-class coverage is not a file-level parity claim. MAC forms
-  normalize systemd's colon-, hyphen-, and dotted EUI-48 spellings. A file whose
+  normalize systemd's colon-, hyphen-, and dotted EUI-48 spellings; IP
+  literals are rejected as hardware addresses (#14701). A run of leading
+  `!` on a `Name=` word collapses to one negation, so a same-line
+  `Name=!eth0 !eth1` vetoes both names. Each `MACAddress=` assignment
+  rebuilds the list, so a later all-invalid assignment resets earlier
+  valid words. A file whose
   effective `[Match]` has no valid setting (empty section, `Name=`/`MACAddress=`
   reset, or all-unparseable `MACAddress=`) is ignored like systemd (#14593), never
   match-all; explicit `Name=*` is the match-all spelling. `Matches` requires
