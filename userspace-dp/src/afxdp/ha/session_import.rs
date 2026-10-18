@@ -1705,15 +1705,16 @@ impl crate::afxdp::ha::SessionDomain {
             key,
             |current| current.session_id == expected_forward,
         );
-        match removal {
+        let removed_forward = match removal {
             SharedRemoval::Declined | SharedRemoval::Absent => {
                 // Declined: the incarnation changed under the lock. Absent: a
                 // concurrent remover won. Either way nothing was removed here.
                 return SyncedDeleteOutcome::StaleForward;
             }
-            SharedRemoval::Removed(_) => {}
-        }
-        if let Some(companion) = companion_key {
+            SharedRemoval::Removed(entry) => *entry,
+        };
+        let mut removed_companion: Option<SyncedSessionEntry> = None;
+        if let Some(companion) = companion_key.as_ref() {
             let companion_removal = remove_shared_session_if(
                 &self.sessions.synced,
                 &self.sessions.nat,
@@ -1722,8 +1723,66 @@ impl crate::afxdp::ha::SessionDomain {
                 &companion,
                 |current| expected_companion != 0 && current.session_id == expected_companion,
             );
-            if !matches!(companion_removal, SharedRemoval::Removed(_)) {
-                partial = true;
+            match companion_removal {
+                SharedRemoval::Removed(entry) => removed_companion = Some(*entry),
+                _ => partial = true,
+            }
+        }
+        // #14840 policy-batch limb: this shared removal is authoritative,
+        // but unlike delete_synced_session_gen_marked it performed no
+        // steering or DNAT teardown. The coordinator claimed the forward
+        // and reverse steering rows at import (owners entry.key /
+        // reverse.key) and holds the forward's DNAT steering hold; the
+        // worker phase only collects Worker-holder intents for rows the
+        // workers themselves published. Release both coordinator claims
+        // and the DNAT hold here, under the caller's batch lease, or
+        // row(reverse) and the DNAT row stay Remaining for the life of
+        // the process. A preserved (partial) companion keeps its claim.
+        {
+            let maps = self.bpf_maps.load();
+            if let Some(session_map_fd) = maps.session_map_fd.as_ref() {
+                let steering = |key: &SessionKey,
+                                decision: crate::session::SessionDecision,
+                                metadata: &crate::session::SessionMetadata| {
+                    delete_session_map_entry_for_removed_session(
+                        SteeringMap {
+                            fd: session_map_fd.fd,
+                            owners: &self.steering_owners,
+                            holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+                        },
+                        key,
+                        decision,
+                        metadata,
+                    );
+                };
+                steering(
+                    &removed_forward.key,
+                    removed_forward.decision,
+                    &removed_forward.metadata,
+                );
+                if let Some(reverse) = removed_companion.as_ref() {
+                    steering(&reverse.key, reverse.decision, &reverse.metadata);
+                } else if !partial
+                    && let Some(companion) = companion_key.as_ref()
+                {
+                    // Companion was already absent (converged): its
+                    // coordinator claim, if any, must still go. Derive
+                    // the reverse metadata from the forward incarnation.
+                    let mut metadata = removed_forward.metadata.clone();
+                    metadata.is_reverse = true;
+                    steering(companion, removed_forward.decision, &metadata);
+                }
+            }
+            if !removed_forward.metadata.is_reverse {
+                let dnat_fds = DnatTableFds {
+                    v4: maps.dnat_table_fd.as_ref().map(|fd| fd.fd),
+                    v6: maps.dnat_table_v6_fd.as_ref().map(|fd| fd.fd),
+                };
+                delete_dnat_table_entry(
+                    &dnat_fds,
+                    &removed_forward.key,
+                    removed_forward.decision.nat,
+                );
             }
         }
         if partial {
@@ -2098,6 +2157,12 @@ impl crate::afxdp::ha::SessionDomain {
         } else {
             None
         };
+        // #14840: retain the removed reverse incarnation. The forward's
+        // steering publish claimed rows under owner=entry.key, but the
+        // synthesized reverse was published under owner=reverse.key. The
+        // shared removal alone does not release that second claim — see
+        // the steering teardown below, which must name both owners.
+        let mut removed_reverse_entry: Option<SyncedSessionEntry> = None;
         let reverse_teardown = if let Some(reverse) = reverse_key.as_ref() {
             let removal = remove_shared_session_if(
                 &self.sessions.synced,
@@ -2108,7 +2173,11 @@ impl crate::afxdp::ha::SessionDomain {
                 |_| true,
             );
             match removal {
-                SharedRemoval::Removed(_) | SharedRemoval::Absent => true,
+                SharedRemoval::Removed(entry) => {
+                    removed_reverse_entry = Some(*entry);
+                    true
+                }
+                SharedRemoval::Absent => true,
                 SharedRemoval::Declined => false,
             }
         } else {
@@ -2165,6 +2234,39 @@ impl crate::afxdp::ha::SessionDomain {
                     entry.decision,
                     &entry.metadata,
                 );
+                // #14840: the reverse companion was published with
+                // owner=reverse.key (upsert calls
+                // publish_synced_entry_or_note_unpublished(&reverse.key,
+                // ..)), so the forward delete above — which releases only
+                // rows held for entry.key — leaves row(reverse) claimed by
+                // Coordinator (Remaining). Release it under its own owner,
+                // but only when the reverse shared removal landed (or the
+                // entry was already absent, converging); a declined reverse
+                // removal keeps its claim.
+                if reverse_teardown && let Some(reverse) = reverse_key.as_ref() {
+                    let reverse_decision = removed_reverse_entry
+                        .as_ref()
+                        .map(|reverse_entry| reverse_entry.decision)
+                        .unwrap_or(entry.decision);
+                    let reverse_metadata = removed_reverse_entry
+                        .as_ref()
+                        .map(|reverse_entry| reverse_entry.metadata.clone())
+                        .unwrap_or_else(|| {
+                            let mut metadata = entry.metadata.clone();
+                            metadata.is_reverse = true;
+                            metadata
+                        });
+                    delete_session_map_entry_for_removed_session(
+                        SteeringMap {
+                            fd: session_map_fd.fd,
+                            owners: &self.steering_owners,
+                            holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+                        },
+                        reverse,
+                        reverse_decision,
+                        &reverse_metadata,
+                    );
+                }
             }
             // #4393: release the reverse-SNAT `dnat_table` entry published for
             // this peer-synced forward SNAT session at `upsert_synced_session`

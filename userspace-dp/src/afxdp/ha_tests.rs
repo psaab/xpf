@@ -10048,9 +10048,15 @@ fn policy_batch_uncovered_intent_fails_loud_then_quiesces_shared_10512() {
         errors.iter().any(|e| e == "policy-batch-deferred-failed"),
         "execution failure must carry the phase-2 verdict, got {errors:?}"
     );
+    // #14840: the shared quiesce below now releases the coordinator's
+    // steering claim itself, so BPF deletes for the BATCH's own tuples
+    // are expected. The cover-failure property is narrower: no write
+    // may name the UNCOVERED intent key (forward src_port + 1).
     assert!(
-        crate::afxdp::bpf_map::session_map_writes().is_empty(),
-        "cover failure must precede any BPF write"
+        crate::afxdp::bpf_map::session_map_writes()
+            .iter()
+            .all(|record| record.key.src_port != fixture.forward.key.src_port.wrapping_add(1)),
+        "cover failure must precede any BPF write for the uncovered intent"
     );
     assert!(
         !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse.key),
@@ -11739,5 +11745,222 @@ fn zero_worker_import_refuses_interface_control_tuple_14084() {
     assert!(
         synced6600_contains(&coordinator, &ok_key),
         "a non-aliasing interface identity must still be published (#14084)"
+    );
+}
+
+/// #14840 limb 1: a synced delete must release the Coordinator steering
+/// claim on the REVERSE row, not only on the forward row.
+///
+/// The import publishes the forward under owner=entry.key and the
+/// synthesized reverse under owner=reverse.key (both as Coordinator).
+/// Pre-fix, `delete_synced_session_gen_marked` issued exactly one
+/// steering delete, keyed on the forward entry, so row(reverse) stayed
+/// claimed by Coordinator (Remaining) for the life of the process: the
+/// BPF row was never deleted and every later aliased teardown skipped
+/// it. The owner-count assertion on `session_map_row(reverse)` after
+/// `delete_synced_session` is the decisive check named by the issue.
+#[test]
+fn synced_delete_releases_coordinator_claim_on_reverse_row_14840() {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(reserve6600_forwarding());
+    coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd {
+                fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
+            }),
+            ..Default::default()
+        }));
+    let entry = reserve6600_entry(41440, 51440);
+    let key = entry.key.clone();
+    let reverse_key = reverse_session_key(&key, entry.decision.nat);
+    assert_ne!(reverse_key, key, "fixture must derive a distinct reverse");
+    let _ = coordinator.upsert_synced_session(entry);
+    // Control: the import claimed the rows as Coordinator. The reverse
+    // row carries TWO coordinator claims — one under owner=entry.key
+    // (the forward's live rows include its reverse-wire row) and one
+    // under owner=reverse.key (the reverse entry's own row).
+    assert_eq!(
+        coordinator
+            .steering_owners
+            .owner_count(&crate::afxdp::bpf_map::session_map_row(&key)),
+        1,
+        "control: import must claim the forward row"
+    );
+    assert_eq!(
+        coordinator
+            .steering_owners
+            .owner_count(&crate::afxdp::bpf_map::session_map_row(&reverse_key)),
+        2,
+        "control: import must claim the reverse row under both owners"
+    );
+    coordinator.delete_synced_session(key.clone(), false);
+    assert_eq!(
+        coordinator
+            .steering_owners
+            .owner_count(&crate::afxdp::bpf_map::session_map_row(&key)),
+        0,
+        "forward coordinator claim must be released by the synced delete"
+    );
+    assert_eq!(
+        coordinator
+            .steering_owners
+            .owner_count(&crate::afxdp::bpf_map::session_map_row(&reverse_key)),
+        0,
+        "#14840: reverse coordinator claim must be released by the synced \
+         delete (pre-fix it stays Remaining under owner=reverse.key while \
+         the delete releases only owner=entry.key)"
+    );
+}
+
+/// #14840 limb 2a: the policy batch's shared conditional remove must
+/// release the Coordinator steering claims (forward + reverse) and the
+/// forward's DNAT steering hold, exactly as the synced delete does.
+///
+/// Pre-fix `remove_shared_policy_item` removed only the shared-map rows:
+/// no steering delete, no `delete_dnat_table_entry`, so both coordinator
+/// claims and the DNAT hold survived the batch for the life of the
+/// process.
+#[test]
+fn policy_shared_remove_releases_coordinator_and_dnat_14840() {
+    use super::session_import::SyncedDeleteOutcome;
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(reserve6600_forwarding());
+    coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd {
+                fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
+            }),
+            dnat_table_fd: Some(crate::afxdp::bpf_map::OwnedFd { fd: -1 }),
+            ..Default::default()
+        }));
+    let mut entry = reserve6600_entry(42440, 52440);
+    entry.session_id = 0xF14840;
+    let key = entry.key.clone();
+    let nat = entry.decision.nat;
+    let reverse_key = reverse_session_key(&key, nat);
+    let mut reverse = entry.clone();
+    reverse.key = reverse_key.clone();
+    reverse.origin = SessionOrigin::ReverseFlow;
+    reverse.metadata.is_reverse = true;
+    reverse.session_id = 0xC14840;
+    for e in [&entry, &reverse] {
+        crate::afxdp::shared_ops::publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            e,
+        );
+    }
+    // Claim both steering rows as Coordinator, as the import does.
+    for owner in [&key, &reverse_key] {
+        coordinator
+            .steering_owners
+            .publish_row(
+                &crate::afxdp::bpf_map::session_map_row(owner),
+                owner,
+                crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+                || Ok(()),
+            )
+            .expect("coordinator pre-claim");
+    }
+    crate::afxdp::checksum::add_dnat_steering_holder(&key, nat);
+    assert_eq!(
+        crate::afxdp::checksum::dnat_steering_holder_count(&key, nat),
+        1,
+        "control: DNAT hold present before the batch remove"
+    );
+    let outcome = coordinator.session_domain().remove_shared_policy_item(
+        &key,
+        0xF14840,
+        0xC14840,
+        Some(&reverse_key),
+        false,
+    );
+    assert!(
+        matches!(outcome, SyncedDeleteOutcome::Applied),
+        "matched policy remove must apply, got {outcome:?}"
+    );
+    assert_eq!(
+        coordinator
+            .steering_owners
+            .owner_count(&crate::afxdp::bpf_map::session_map_row(&key)),
+        0,
+        "#14840: policy remove must release the forward coordinator claim"
+    );
+    assert_eq!(
+        coordinator
+            .steering_owners
+            .owner_count(&crate::afxdp::bpf_map::session_map_row(&reverse_key)),
+        0,
+        "#14840: policy remove must release the reverse coordinator claim"
+    );
+    assert_eq!(
+        crate::afxdp::checksum::dnat_steering_holder_count(&key, nat),
+        0,
+        "#14840: policy remove must release the DNAT steering hold"
+    );
+}
+
+/// #14840 limb 2b: deferred-redirect execution must release the
+/// Coordinator claim as well as the collecting worker's claim.
+///
+/// Pre-fix `execute_deferred_redirects` executed each intent only under
+/// `SteeringHolder::Worker(intent.worker_id)`, so a coordinator-claimed
+/// row (every HA-imported session) stayed Remaining.
+#[test]
+fn policy_deferred_redirects_release_coordinator_claim_14840() {
+    let fixture = fixture_10512_lease(240, 42441, 52441, 0xF81440, 0xC81440);
+    let key = fixture.forward.key.clone();
+    let lease = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([key.clone()])
+        .expect("test lease on the forward tuple");
+    lease.begin_finalizing().expect("test lease finalizes");
+    let owners = crate::afxdp::bpf_map::SteeringRowOwners::default();
+    let row = crate::afxdp::bpf_map::session_map_row(&key);
+    owners
+        .publish_row(
+            &row,
+            &key,
+            crate::afxdp::bpf_map::SteeringHolder::Worker(1),
+            || Ok(()),
+        )
+        .expect("worker pre-claim");
+    owners
+        .publish_row(
+            &row,
+            &key,
+            crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+            || Ok(()),
+        )
+        .expect("coordinator pre-claim");
+    assert_eq!(owners.owner_count(&row), 2, "fixture: worker + coordinator claims");
+    let map = crate::afxdp::bpf_map::SteeringMap {
+        fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
+        owners: &owners,
+        holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+    };
+    let intent = crate::afxdp::DeferredRedirectDelete {
+        key: key.clone(),
+        decision: fixture.forward.decision.clone(),
+        metadata: fixture.forward.metadata.clone(),
+        origin: fixture.forward.origin,
+        worker_id: 1,
+    };
+    crate::afxdp::bpf_map::clear_session_map_writes();
+    let ok = crate::afxdp::SessionDomain::execute_deferred_redirects(map, &lease, &[intent]);
+    assert!(ok, "covered intent must execute cleanly");
+    assert_eq!(
+        owners.held_row_count(&key, 1),
+        0,
+        "execution must still retire the collecting worker's claim"
+    );
+    assert_eq!(
+        owners.owner_count(&row),
+        0,
+        "#14840: execution must also retire the coordinator claim \
+         (pre-fix only the worker holder was executed, leaving it Remaining)"
     );
 }
