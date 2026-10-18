@@ -142,11 +142,23 @@ func warnSecureTunnelPlaintextUnadjudicatedAST(nodes []*Node) []string {
 	_ = forEachChild(nodes, "security", func(security *Node) error {
 		return forEachChild(security.Children, "ipsec", func(ipsec *Node) error {
 			for _, inst := range namedInstances(ipsec.FindChildren("vpn")) {
-				biNode := inst.node.FindChild("bind-interface")
-				if biNode == nil {
-					continue
+				// #14684: read bind-interface through the same run
+				// expansion the compiler and the #2933 gate use. A
+				// chained flat run (`set … vpn v1 gateway gw1
+				// bind-interface st0.0 …`) nests bind-interface inside
+				// the run, so FindChild on direct children returns
+				// nil while compileIPsec installs it — suppressing
+				// this advisory for exactly the tunnels it exists
+				// for. The compiler installs the LAST occurrence,
+				// so iterate every occurrence in run order and keep
+				// the last non-empty value; earlier occurrences are
+				// still findings if a later one is empty/absent.
+				var bindIface string
+				for _, biNode := range findChildrenInRun9088(inst.node, "bind-interface") {
+					if v := nodeVal(biNode); v != "" {
+						bindIface = v
+					}
 				}
-				bindIface := nodeVal(biNode)
 				if bindIface == "" {
 					continue
 				}
