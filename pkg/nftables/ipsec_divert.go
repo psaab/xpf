@@ -142,6 +142,7 @@ func normalizeIpsecQuarantineSpec(spec IpsecDivertSpec) IpsecDivertSpec {
 	requested := spec.QuarantineAll || rawMask != 0 || rawReason != IpsecQuarantineReasonUnknown ||
 		spec.QuarantinePrimaryReason != IpsecQuarantineReasonUnknown || len(spec.CandidateIfindices) != 0
 	if !requested {
+		spec.LifelineNetdevs = nil
 		return spec
 	}
 	spec.QuarantineAll = true
@@ -183,7 +184,28 @@ func normalizeIpsecQuarantineSpec(spec IpsecDivertSpec) IpsecDivertSpec {
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i] < candidates[j] })
 	spec.CandidateIfindices = candidates
+	spec.LifelineNetdevs = normalizeIpsecLifelineNetdevs(spec.LifelineNetdevs)
 	return spec
+}
+
+func normalizeIpsecLifelineNetdevs(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(names))
+	out := names[:0]
+	for _, n := range names {
+		if n == "" {
+			continue
+		}
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // IpsecDivertRule identifies one ownership-keyed xfrmi capture rule. The
@@ -227,6 +249,12 @@ type IpsecDivertSpec struct {
 	// request was already closed). Normalized mask | raw describes the input.
 	QuarantineRawMask  IpsecQuarantineReasonMask
 	CandidateIfindices []uint32
+	// LifelineNetdevs (#14696) are linux netdev names whose input ingress
+	// quarantine must ACCEPT before the terminal drop (management lifeline:
+	// fxp0 plus configured control/fabric members). Only the input chains
+	// consult it; forward chains ignore it. Populated by the daemon from
+	// HostInboundLifelineIngressNetdevs; never carries a vrf-mgmt blanket.
+	LifelineNetdevs []string
 }
 
 // InstallIpsecDivert installs xpf_ipsec_divert in both families. A
@@ -364,6 +392,7 @@ func (in *netlinkInstaller) installNormalUnderQuarantineGuard(spec IpsecDivertSp
 			InstallSequence:      spec.InstallSequence,
 			LabelSchema:          spec.LabelSchema,
 			IdentityLockPath:     spec.IdentityLockPath,
+			LifelineNetdevs:      append([]string(nil), spec.LifelineNetdevs...),
 		}
 		if err := in.installIpsecQuarantineTableAtomic(normalizeIpsecQuarantineSpec(guard), IpsecQuarantineTableName, IpsecQuarantinePriority); err != nil {
 			return fmt.Errorf("quarantine recovery guard install: %w", err)
@@ -488,6 +517,7 @@ func (in *netlinkInstaller) InstallIpsecDivertWithDrain(spec IpsecDivertSpec, dr
 		InstallSequence:      spec.InstallSequence,
 		IdentityLockPath:     spec.IdentityLockPath,
 		LabelSchema:          spec.LabelSchema,
+		LifelineNetdevs:      append([]string(nil), spec.LifelineNetdevs...),
 	}
 	guardPresent, err := in.ipsecTableBothFamiliesPresent(IpsecQuarantineTableName)
 	if err != nil {
@@ -649,6 +679,16 @@ func emitIpsecQuarantineRules(p *nlPlan, family, hook string, spec IpsecDivertSp
 	// cannot be spoofed from the wire; everything else still hits the
 	// candidate + base DROPs below and the chain DROP policy.
 	p.rule().iifname([]string{"lo"}).emit(verdictAccept()...)
+	// #14696: on input only, lifeline ingress survives quarantine so
+	// management (fxp0 / configured control/fabric) is not blackholed
+	// ahead of host-inbound. iifname covers unenslaved lifelines;
+	// sdifname covers VRF-enslaved members without admitting the whole
+	// VRF master (mirrors the gap-fence pair). Forward is transit and
+	// gets no lifeline exemption.
+	if hook == "input" && len(spec.LifelineNetdevs) > 0 {
+		p.rule().iifname(spec.LifelineNetdevs).emit(verdictAccept()...)
+		p.rule().sdifname(spec.LifelineNetdevs).emit(verdictAccept()...)
+	}
 	generation := spec.QuarantineGeneration
 	for _, ifindex := range spec.CandidateIfindices {
 		counter := fmt.Sprintf("xpf_ipsec_quarantine_hits_%s_%s_g%d_if%d", family, hook, generation, ifindex)

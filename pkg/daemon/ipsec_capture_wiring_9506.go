@@ -989,6 +989,7 @@ type ipsecCaptureQueuePlan struct {
 	Keys         []ipsecQueueKey
 	Quarantine   xnft.IpsecDivertSpec
 	HasVPNConfig bool
+	cfg          *config.Config
 }
 
 func (p *ipsecCaptureQueuePlan) addQuarantine(reason xnft.IpsecQuarantineReason) {
@@ -1017,7 +1018,11 @@ func (p *ipsecCaptureQueuePlan) finalize(generation uint64) {
 		return
 	}
 	p.Quarantine.QuarantineGeneration = generation
+	if p.cfg != nil {
+		p.Quarantine.LifelineNetdevs = dpuserspace.HostInboundLifelineIngressNetdevs(p.cfg)
+	}
 	if !p.Quarantine.QuarantineAll {
+		p.Quarantine.LifelineNetdevs = nil
 		return
 	}
 	mask := p.Quarantine.QuarantineReasonMask
@@ -1056,6 +1061,7 @@ func buildIpsecCaptureQueuePlan(cfg *config.Config, generation uint64) (ipsecCap
 	if cfg == nil || generation == 0 {
 		return plan, nil
 	}
+	plan.cfg = cfg
 	names := make([]string, 0, len(cfg.Security.IPsec.VPNs))
 	for name := range cfg.Security.IPsec.VPNs {
 		names = append(names, name)
@@ -1221,6 +1227,12 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 	}
 	if len(keys) == 0 {
 		if old == nil {
+			if d.ipsecCaptureKernelOrphaned {
+				// #14696: kernel still holds quarantine/divert tables
+				// from a failed guarded transition; keep the stage
+				// pending so commit attempts their removal.
+				d.ipsecCaptureStagePending = true
+			}
 			return old, nil, nil
 		}
 		d.ipsecCaptureStagePending = true
@@ -1350,14 +1362,14 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		Queues:      queues,
 		RunID:       runID,
 		Pipeline: nfqueue.CapturePipelineConfig{
-			Phase:          nfqueue.PipelineEnforcing,
-			HandoffCap:     16384,
-			BatchCap:       64,
-			Submitter:      submitter,
-			Attestation:    attestation,
-			DenyEvents:     denyEvents,
-			ZoneEvaluator:  nfqueue.DefaultZoneEvaluator{},
-			ZoneSnapshot:   zoneSnapshot,
+			Phase:         nfqueue.PipelineEnforcing,
+			HandoffCap:    16384,
+			BatchCap:      64,
+			Submitter:     submitter,
+			Attestation:   attestation,
+			DenyEvents:    denyEvents,
+			ZoneEvaluator: nfqueue.DefaultZoneEvaluator{},
+			ZoneSnapshot:  zoneSnapshot,
 		},
 	})
 	if actorErr != nil {
@@ -1614,6 +1626,7 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 			return removeErr
 		}
 		d.publishIpsecCaptureCommitted(nil)
+		d.clearIpsecKernelQuarantineOrphaned()
 		d.ipsecCaptureRemovalPending.Store(false)
 		if old != nil {
 			if err := old.close(); err != nil {
@@ -1645,6 +1658,7 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 			if !oldRetired {
 				_ = old.close()
 			}
+			d.markIpsecKernelQuarantineOrphaned()
 			d.restoreIpsecCaptureRuntime(nil)
 			_ = staged.close()
 			return fmt.Errorf("ipsec capture: guarded divert transition: %w", err)
@@ -1680,6 +1694,7 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 					if quarantineErr := installIpsecQuarantine9506(staged.spec); quarantineErr != nil {
 						slog.Warn("ipsec capture: quarantine fallback after rollback failure failed", "err", quarantineErr)
 					}
+					d.markIpsecKernelQuarantineOrphaned()
 					d.restoreIpsecCaptureRuntime(nil)
 					_ = staged.close()
 				}
@@ -1687,6 +1702,7 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 				if quarantineErr := installIpsecQuarantine9506(staged.spec); quarantineErr != nil {
 					slog.Warn("ipsec capture: quarantine fallback identity allocation failed", "err", quarantineErr)
 				}
+				d.markIpsecKernelQuarantineOrphaned()
 				d.restoreIpsecCaptureRuntime(nil)
 				_ = staged.close()
 			}
@@ -1694,6 +1710,7 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 		}
 	}
 	d.publishIpsecCaptureCommitted(staged)
+	d.clearIpsecKernelQuarantineOrphaned()
 	d.ipsecCaptureRemovalPending.Store(false)
 	if old != nil && !oldRetired {
 		if err := old.close(); err != nil {
@@ -1732,6 +1749,33 @@ func (d *Daemon) reconcileIpsecCaptureAuthorityWithHook(afterSample func()) erro
 	return runtime.announceAuthorityLocked()
 }
 
+func (d *Daemon) markIpsecKernelQuarantineOrphaned() {
+	if d == nil {
+		return
+	}
+	d.ipsecCaptureMu.Lock()
+	d.ipsecCaptureKernelOrphaned = true
+	d.ipsecCaptureMu.Unlock()
+}
+
+func (d *Daemon) clearIpsecKernelQuarantineOrphaned() {
+	if d == nil {
+		return
+	}
+	d.ipsecCaptureMu.Lock()
+	d.ipsecCaptureKernelOrphaned = false
+	d.ipsecCaptureMu.Unlock()
+}
+
+func (d *Daemon) ipsecKernelQuarantineOrphaned() bool {
+	if d == nil {
+		return false
+	}
+	d.ipsecCaptureMu.Lock()
+	defer d.ipsecCaptureMu.Unlock()
+	return d.ipsecCaptureKernelOrphaned
+}
+
 func (d *Daemon) shutdownIpsecCapture() {
 	if d == nil {
 		return
@@ -1739,8 +1783,9 @@ func (d *Daemon) shutdownIpsecCapture() {
 	d.ipsecCaptureMu.Lock()
 	active := d.ipsecCapture
 	staged := d.ipsecCaptureStaged
+	orphaned := d.ipsecCaptureKernelOrphaned
 	d.ipsecCaptureMu.Unlock()
-	if active == nil && staged == nil {
+	if active == nil && staged == nil && !orphaned {
 		return
 	}
 	if nftInstaller != nil {
@@ -1755,7 +1800,12 @@ func (d *Daemon) shutdownIpsecCapture() {
 			}
 		}
 		if remove {
-			if err := removeIpsecDivert9506(owner); err != nil {
+			removeErr := removeIpsecDivert9506(owner)
+			if removeErr == nil && orphaned && active == nil {
+				d.clearIpsecKernelQuarantineOrphaned()
+			}
+			if removeErr != nil {
+				err := removeErr
 				slog.Warn("ipsec capture shutdown: remove divert failed", "err", err)
 				if active != nil {
 					if verifyErr := d.holdIpsecHostInputFenceForDivertTransition(ipsecDivertSpecMasters9506(active.spec)); verifyErr != nil {
