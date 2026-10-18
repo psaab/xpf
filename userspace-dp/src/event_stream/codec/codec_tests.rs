@@ -1148,6 +1148,166 @@ fn test_encode_session_open_carries_ingress_and_stable_policy_rule_id11070() {
     assert_eq!(&frame.data[id_start..id_end], rule_id);
 }
 
+/// #14839: the rule_id capacity guard must reserve the whole trailer that
+/// follows the rule_id (handshake 1B + provenance 1B + PPTP pair 8B = 10B),
+/// not just 2 bytes. A rule_id sized to fit exactly under the old guard
+/// passed it and then panicked when the 8-byte PPTP pair was written past
+/// the 512-byte frame. These cells pin the boundary: the longest rule_id
+/// that fits with the full trailer is carried verbatim; 1-10 bytes longer
+/// than that falls back to the zero-length (unattributed) prefix — and no
+/// length ever panics the worker.
+///
+/// RED pre-fix: the 1-longer cells panic with a range-out-of-bounds on the
+/// PPTP write (and, for v6, the PPTP-carrying Open panics too). Positions
+/// are derived from an empty-rule_id frame of the same key shape, so the
+/// test tracks the layout instead of hard-coding offsets.
+#[test]
+fn session_open_rule_id_at_capacity_boundary_14839() {
+    let zones = test_zone_map();
+    // Bytes from the END of the rule_id field to the end of the frame:
+    // handshake (1) + provenance (1) + PPTP pair (8).
+    const TRAILER: usize = 10;
+    for key in [test_key_v4(), test_key_v6()] {
+        // Baseline: no counter -> rule_id_len 0. The rule_id field's start
+        // (where the u16 length prefix sits) is len - 2 - TRAILER.
+        let base = EventFrame::encode_session_open(
+            1,
+            &key,
+            &test_decision(),
+            &test_metadata(),
+            &zones,
+            false,
+            0,
+            0,
+        );
+        let rule_field_start = base.len as usize - 2 - TRAILER;
+        // The longest rule_id that fits: prefix + id + trailer == capacity.
+        let max_id_len = EVENT_FRAME_CAPACITY - (rule_field_start + 2 + TRAILER);
+
+        let frame_with_id = |id_len: usize| {
+            let rule_id = "x".repeat(id_len);
+            let mut metadata = test_metadata();
+            metadata.policy_counter = Some(std::sync::Arc::new(
+                crate::policy::PolicyRuleCounter::with_rule_id(&rule_id),
+            ));
+            EventFrame::encode_session_open_with_handshake_state(
+                1,
+                &key,
+                &test_decision(),
+                &metadata,
+                &zones,
+                false,
+                0,
+                0,
+                3,
+                Some(true),
+                0x0102_0304_0506_0708,
+            )
+        };
+
+        // Exact fit: the id is carried verbatim and the frame ends exactly
+        // at the capacity edge.
+        let fit = frame_with_id(max_id_len);
+        assert_eq!(
+            fit.len as usize, EVENT_FRAME_CAPACITY,
+            "exact-fit rule_id must fill the frame"
+        );
+        assert_eq!(
+            u16::from_le_bytes(
+                fit.data[rule_field_start..rule_field_start + 2]
+                    .try_into()
+                    .unwrap()
+            ) as usize,
+            max_id_len
+        );
+        assert!(
+            fit.data[rule_field_start + 2..rule_field_start + 2 + max_id_len]
+                .iter()
+                .all(|&b| b == b'x')
+        );
+        // Trailer intact after the id: handshake, provenance, PPTP pair.
+        assert_eq!(fit.data[fit.len as usize - 10], 3);
+        assert_eq!(fit.data[fit.len as usize - 9], 2);
+        assert_eq!(
+            u64::from_le_bytes(
+                fit.data[fit.len as usize - 8..fit.len as usize]
+                    .try_into()
+                    .unwrap()
+            ),
+            0x0102_0304_0506_0708
+        );
+
+        // 1..=10 bytes past the fit: the old guard admits lengths in this
+        // window (it reserved only 2 tail bytes, so up to 8 of them pass
+        // and panic on the PPTP write; the rest raced the handshake /
+        // provenance writes). Every one must now fall back to zero-length.
+        for over in 1..=TRAILER {
+            let frame = frame_with_id(max_id_len + over);
+            assert_eq!(
+                u16::from_le_bytes(
+                    frame.data[rule_field_start..rule_field_start + 2]
+                        .try_into()
+                        .unwrap()
+                ),
+                0,
+                "rule_id {}B over the fit must fall back to zero-length",
+                over
+            );
+            // The frame is then byte-identical in length to the baseline and
+            // the trailer still lands at its baseline position.
+            assert_eq!(frame.len, base.len);
+            assert_eq!(frame.data[frame.len as usize - 10], 3);
+            assert_eq!(frame.data[frame.len as usize - 9], 2);
+            assert_eq!(
+                u64::from_le_bytes(
+                    frame.data[frame.len as usize - 8..frame.len as usize]
+                        .try_into()
+                        .unwrap()
+                ),
+                0x0102_0304_0506_0708
+            );
+        }
+
+        // The UPDATE path shares encode_session_record: an over-long id must
+        // not panic there either.
+        let rule_id = "y".repeat(max_id_len + 1);
+        let mut metadata = test_metadata();
+        metadata.policy_counter = Some(std::sync::Arc::new(
+            crate::policy::PolicyRuleCounter::with_rule_id(&rule_id),
+        ));
+        let update = EventFrame::encode_session_update_with_handshake_state(
+            2,
+            &key,
+            &test_decision(),
+            &metadata,
+            &zones,
+            false,
+            0,
+            0,
+            3,
+            Some(false),
+            0x0102_0304_0506_0708,
+        );
+        assert_eq!(update.data[4], MSG_SESSION_UPDATE);
+        assert_eq!(
+            u16::from_le_bytes(
+                update.data[rule_field_start..rule_field_start + 2]
+                    .try_into()
+                    .unwrap()
+            ),
+            0
+        );
+        assert_eq!(
+            u64::from_le_bytes(
+                update.data[update.len as usize - 8..update.len as usize]
+                    .try_into()
+                    .unwrap()
+            ),
+            0x0102_0304_0506_0708
+        );
+    }
+}
+
 #[test]
 fn test_encode_session_close_carries_ingress_after_legacy_marker11070() {
     for (key, want_af, want_len) in [(test_key_v4(), 4u8, 42usize), (test_key_v6(), 6u8, 66usize)] {
