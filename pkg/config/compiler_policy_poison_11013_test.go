@@ -567,3 +567,146 @@ func TestKnownScalarLeafResolvedRunsStayClean12634(t *testing.T) {
 		})
 	}
 }
+
+// #14681 (D9-01): a container child (`match`/`then`) nested under a known
+// scalar policy leaf must not be hoisted into the expanded policy leaves.
+// Before the fix allDescendantsDeclared9792 accepted any declared head, so
+// `scheduler-name work-hours { then deny; }` hoisted `then deny` beside the
+// scheduler leaf; policyUnresolvedScalarLeafTails then saw only clean len-2
+// scalar leaves while compilePolicy read `match`/`then` from the unexpanded
+// node — the nested deny was compiled by nobody and the policy stayed
+// permit, unpoisoned, with no strict error (SchemaValidate alone rejected
+// it). The scheduler `work-hours` is defined so the scheduler-reference
+// gate cannot mask the drop.
+func nestedThenTree14681(t *testing.T, body string) *ConfigTree {
+	t.Helper()
+	text := `schedulers {
+    scheduler work-hours {
+        daily { start-time 08:30; stop-time 09:00; }
+    }
+}
+security {
+    zones {
+        security-zone trust;
+        security-zone untrust;
+    }
+    policies {
+        from-zone trust to-zone untrust {
+            policy p {
+                match {
+                    source-address any;
+                    destination-address any;
+                    application any;
+                }
+                then { permit; }
+                ` + body + `
+            }
+        }
+    }
+}`
+	tree, errs := NewParser(text).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse policy fixture: %v", errs[0])
+	}
+	return tree
+}
+
+func flatNestedThenTree14681(t *testing.T, tail string) *ConfigTree {
+	t.Helper()
+	tree := &ConfigTree{}
+	commands := []string{
+		"set schedulers scheduler work-hours daily start-time 08:30",
+		"set schedulers scheduler work-hours daily stop-time 09:00",
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
+		"set security policies from-zone trust to-zone untrust policy p match source-address any",
+		"set security policies from-zone trust to-zone untrust policy p match destination-address any",
+		"set security policies from-zone trust to-zone untrust policy p match application any",
+		"set security policies from-zone trust to-zone untrust policy p then permit",
+		"set security policies from-zone trust to-zone untrust policy p " + tail,
+	}
+	for _, command := range commands {
+		path, err := ParseSetCommand(command)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", command, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", command, err)
+		}
+	}
+	return tree
+}
+
+func TestPolicyScalarLeafNestedThenOrMatchRejected12634(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		flat bool
+		tail string
+		leaf string
+	}{
+		{name: "braced scheduler-name then deny", body: `scheduler-name work-hours { then deny; }`, leaf: "scheduler-name"},
+		{name: "braced scheduler-name match leaf", body: `scheduler-name work-hours { match source-address 10.0.0.1/32; }`, leaf: "scheduler-name"},
+		{name: "braced description then deny", body: `description d1 { then deny; }`, leaf: "description"},
+		{name: "flat scheduler-name match", tail: `scheduler-name work-hours match source-address 10.0.0.1/32`, flat: true, leaf: "scheduler-name"},
+		{name: "flat scheduler-name then deny", tail: `scheduler-name work-hours then deny`, flat: true, leaf: "scheduler-name"},
+		{name: "flat description then deny", tail: `description d1 then deny`, flat: true, leaf: "description"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var tree *ConfigTree
+			if tc.flat {
+				tree = flatNestedThenTree14681(t, tc.tail)
+			} else {
+				tree = nestedThenTree14681(t, tc.body)
+			}
+			cfg, err := CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient compile rejected policy: %v", err)
+			}
+			pol := policyPoisonPolicy11013(t, cfg)
+			// The control `then permit` stays the compiled action; the
+			// nested clause must surface as poison, never as a silent
+			// permit-with-narrowing or permit-with-deny-dropped.
+			if pol.Action != PolicyPermit {
+				t.Fatalf("control permit action = %v, want permit", pol.Action)
+			}
+			if !pol.LenientContentDropped {
+				t.Fatalf("nested container tail under scalar leaf %q was hoisted and dropped without poison", tc.leaf)
+			}
+			warnings := strings.Join(cfg.Warnings, "\n")
+			for _, want := range []string{tc.leaf, "#12634"} {
+				if !strings.Contains(warnings, want) {
+					t.Errorf("lenient warning %q does not name %q", warnings, want)
+				}
+			}
+			if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "#12634") {
+				t.Fatalf("strict compiler must reject nested container tail under %q, got %v", tc.leaf, err)
+			}
+			if err := SchemaValidate(tree, nil); err == nil {
+				t.Fatalf("strict schema must reject nested container tail under %q", tc.leaf)
+			}
+		})
+	}
+}
+
+// #14681 control: a legitimately resolved description/scheduler run stays
+// clean (also covered by TestKnownScalarLeafResolvedRunsStayClean12634) and
+// a nested scalar tail under a scalar head still expands.
+func TestPolicyScalarLeafNestedScalarRunStaysClean14681(t *testing.T) {
+	tree := nestedThenTree14681(t, `description d1 scheduler-name work-hours;`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile rejected policy: %v", err)
+	}
+	pol := policyPoisonPolicy11013(t, cfg)
+	if pol.LenientContentDropped {
+		t.Fatalf("resolved scalar run must not poison: warnings=%v", cfg.Warnings)
+	}
+	if pol.SchedulerName != "work-hours" || pol.Description != "d1" {
+		t.Fatalf("resolved run fields = scheduler %q description %q, want work-hours/d1", pol.SchedulerName, pol.Description)
+	}
+	if _, err := CompileConfig(tree); err != nil {
+		t.Fatalf("strict compiler must accept resolved scalar run: %v", err)
+	}
+}
