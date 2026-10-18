@@ -77,31 +77,49 @@ func ipsecVPNEffPSK(ipsec *IPsecConfig, vpn *IPsecVPN, gw *IPsecGateway) string 
 // ipsecVPNAuthNeedsPSK reports whether the VPN's effective IKE
 // authentication is pre-shared-key, mirroring resolveIKESettings: PSK by
 // default; when the gateway's ike-policy has defined proposals, their
-// (renderer-checked) authentication-method decides. A policy whose
-// proposals do not resolve leaves the auth undecided here (false), so
-// the chain gates and renderer skips own that VPN's diagnosis.
+// (renderer-checked) authentication-method decides.
+//
+// #14689: the walk mirrors the renderer — missing/nil entries are SKIPPED,
+// not treated as deciding the auth. Returning false on the first dangling
+// entry let `[dangling, prop-psk]` with no PSK pass this gate while
+// resolveIKESettings skipped the dangling entry and resolved prop-psk.
+// Only when NO proposal entry resolves (or every resolved entry carries an
+// unknown auth token the renderer would reject) is the auth undecided here
+// (false), so the chain gates and renderer skips own that VPN's diagnosis.
+// When resolved proposals disagree, PSK wins if any resolved proposal needs
+// it: the agreement gate rejects the conflict separately, and a missing key
+// must not be masked by whichever entry happens to come first.
 func ipsecVPNAuthNeedsPSK(ipsec *IPsecConfig, gw *IPsecGateway) bool {
 	if gw == nil || gw.IKEPolicy == "" {
 		return true
 	}
 	pol, ok := ipsec.IKEPolicies[gw.IKEPolicy]
 	if !ok || pol == nil || len(pol.Proposals) == 0 {
-		// Legacy direct-proposal fallback uses the PSK default.
+		// Legacy direct-proposal fallback (no authored ike-policy of
+		// this name) uses the PSK default.
 		if _, isLegacy := ipsec.Proposals[gw.IKEPolicy]; isLegacy {
 			return true
 		}
 		return false
 	}
+	needsPSK := false
+	anyResolved := false
 	for _, ref := range pol.Proposals {
 		prop, ok := ipsec.IKEProposals[ref]
 		if !ok || prop == nil {
-			return false
+			continue
 		}
 		auth, known := ikeConnectionAuthMethod(prop.AuthMethod)
 		if !known {
-			return false
+			continue
 		}
-		return auth == "psk"
+		anyResolved = true
+		if auth == "psk" {
+			needsPSK = true
+		}
 	}
-	return false
+	if !anyResolved {
+		return false
+	}
+	return needsPSK
 }

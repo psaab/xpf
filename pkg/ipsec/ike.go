@@ -265,7 +265,13 @@ func resolveIKESettings(cfg *config.IPsecConfig, gw *config.IPsecGateway) (authM
 		}
 	}
 
-	if !hasIKEChain(cfg, gw.IKEPolicy) {
+	// #14689: the legacy direct-proposal fallback applies only when NO
+	// ike-policy of this name was authored. An authored policy (even one
+	// whose proposals all dangle or were all skipped above) shadows a
+	// same-named ESP proposal — Phase-1 must never be rendered from
+	// cfg.Proposals when cfg.IKEPolicies[name] exists.
+	_, ikePolicyAuthored := cfg.IKEPolicies[gw.IKEPolicy]
+	if !ikePolicyAuthored && !hasIKEChain(cfg, gw.IKEPolicy) {
 		if prop, ok := cfg.Proposals[gw.IKEPolicy]; ok && prop != nil {
 			// #9919 F-161: the legacy direct-proposal form carries a DH
 			// group too; a bad one skips like the chain form.
