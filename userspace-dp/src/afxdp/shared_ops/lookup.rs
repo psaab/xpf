@@ -417,7 +417,84 @@ pub(in crate::afxdp) struct DeferredForwardingRevalidation {
     /// fabric redirect). `None` for terminal/non-forwarding resolutions.
     /// Persisted with the route so the forward entry's `egress_zone` and
     /// the reverse companion's `ingress_zone` move with the reroute.
+    /// #14941: DIRECTION-RELATIVE — this zone names the HIT packet's egress
+    /// leg. On a reverse hit that is the forward flow's ingress zone, not
+    /// its egress; persist sites map it through
+    /// `forward_egress_zone_for_hit` before handing it to the table.
     pub(in crate::afxdp) new_egress_zone: Option<u16>,
+}
+
+/// #14941: map a re-resolve's `new_egress_zone` for the hit direction.
+///
+/// The resolver's fresh lookup is anchored on the packet that hit the
+/// session, so the zone it derives names an egress **for that packet's
+/// direction**. The session table's
+/// `revalidate_forwarding_resolution_with_egress_zone` expects the
+/// FORWARD flow's egress zone (it writes forward `egress_zone` and the
+/// reverse companion's `ingress_zone`). For a FORWARD hit the two
+/// coincide. For a REVERSE hit they do not: a reverse packet's egress
+/// (its route back toward the original client) lives in the forward
+/// flow's INGRESS zone, so the zone the reverse lookup just resolved is
+/// the pair's updated FORWARD INGRESS zone — the reverse companion's
+/// own egress zone — while the forward egress zone (the reverse
+/// companion's `ingress_zone`, the zone ACKs must arrive from per
+/// #9519) is whatever the reverse companion already records.
+///
+/// Returns `Some(forward_egress_zone)` only when the forward egress leg
+/// actually moves; `None` preserves the recorded pair (terminal routes
+/// name no zone, and a reverse re-resolve never names the forward
+/// egress). The asymmetric sites below (FabricRedirect's recorded zone,
+/// the #9604 forward-companion re-derivations) judge a FORWARD route by
+/// construction and keep passing their zone unmapped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) enum ForwardEgressZone {
+    /// The zone to persist as the pair's forward egress zone.
+    Zone(u16),
+    /// No forward-egress move is named; preserve the recorded pair.
+    Preserve,
+}
+
+impl ForwardEgressZone {
+    /// The persistable zone, or `None` to preserve the recorded pair.
+    pub(in crate::afxdp) fn as_option(self) -> Option<u16> {
+        match self {
+            Self::Zone(zone) => Some(zone),
+            Self::Preserve => None,
+        }
+    }
+}
+
+/// #14941: direction-relative mapping for a hit-triggered re-resolve.
+///
+/// `hit_is_reverse` is the matched entry's direction; `resolved_zone` is
+/// the zone the fresh lookup named for the HIT packet's egress leg
+/// (`None` for terminal routes); `reverse_ingress_zone` is the matched
+/// reverse entry's recorded `ingress_zone` (the forward flow's egress
+/// zone). A forward hit maps straight through. A reverse hit maps to
+/// `Preserve`: its resolved zone belongs to the reverse egress leg
+/// (forward ingress), never to the forward egress leg — writing it
+/// there flipped `reverse.ingress_zone` WAN->LAN on an ordinary
+/// WAN->LAN reroute of the reply path, after which
+/// `session_hit_authority` judged every later ACK Foreign, skipped its
+/// refresh, and left the session to idle out (#14941/#14300).
+pub(in crate::afxdp) fn forward_egress_zone_for_hit(
+    hit_is_reverse: bool,
+    resolved_zone: Option<u16>,
+    reverse_ingress_zone: u16,
+) -> ForwardEgressZone {
+    if !hit_is_reverse {
+        return match resolved_zone {
+            Some(zone) => ForwardEgressZone::Zone(zone),
+            None => ForwardEgressZone::Preserve,
+        };
+    }
+    // Direction-relative invariant: the forward egress zone after a
+    // reverse revalidation is the zone the reverse companion already
+    // records as its ingress. Anything the reverse lookup resolved is
+    // the opposite leg and must not be written here.
+    let _ = resolved_zone;
+    let _ = reverse_ingress_zone;
+    ForwardEgressZone::Preserve
 }
 
 /// #12644: a synced-session promotion computed during `resolve`, NOT yet

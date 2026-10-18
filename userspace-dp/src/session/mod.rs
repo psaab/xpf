@@ -2180,7 +2180,10 @@ impl SessionTable {
     /// policy to-zone is known (locally-forwarding or fabric-redirect with a
     /// recorded egress); `None` preserves the recorded zones (terminal /
     /// non-forwarding resolutions name no flow egress, and a fabric
-    /// transport's zone is not the flow's).
+    /// transport's zone is not the flow's). The zone is always the FORWARD
+    /// flow's egress zone: hit-direction callers whose fresh lookup resolved
+    /// the opposite leg (reverse hits, #14941) map through
+    /// `forward_egress_zone_for_hit` and pass `None` here instead.
     ///
     /// When the hit entry is the FORWARD entry and its egress zone changes,
     /// the reverse companion's `ingress_zone` (the zone replies must arrive
@@ -2189,9 +2192,13 @@ impl SessionTable {
     /// its forwarding view if it needs the vintage). When the hit entry is
     /// itself the REVERSE companion (a reply-first re-resolve), its own
     /// `ingress_zone` is the forward flow's egress, so it is moved directly
-    /// and the forward companion's `egress_zone` follows. A missing or
-    /// non-companion sibling is left untouched — the hit entry still
-    /// rebinds, and a lone reverse keeps flowing under #9604.
+    /// and the forward companion's `egress_zone` follows — but ONLY when
+    /// the caller supplies a zone that IS the forward egress (the #9604
+    /// forward-companion re-derivations). A reverse packet's own fresh
+    /// lookup resolves the opposite leg and its callers pass `None`
+    /// (#14941). A missing or non-companion sibling is left untouched —
+    /// the hit entry still rebinds, and a lone reverse keeps flowing
+    /// under #9604.
     pub(crate) fn revalidate_forwarding_resolution_with_egress_zone(
         &mut self,
         key: &SessionKey,
