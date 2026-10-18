@@ -3002,7 +3002,172 @@ fn syn_flood_cookie_off_microburst_bounded_to_threshold() {
         "cookie-OFF instantaneous burst bounded to capacity (no double-quota)"
     );
 }
+/// #14635 (Y27-01) RED-ON-REVERT: two distinct (dst,port) services at 0.75x
+/// attack-threshold MUST NOT sum. Pre-fix the zone-aggregate counter /
+/// TokenBucket and zone-wide cookie latch made them drop/challenge.
+#[test]
+fn syn_flood_per_dst_port_under_threshold_not_summed_14635() {
+    const T: u32 = 200;
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = T;
+    let mut state = make_state("trust", profile);
+    let src = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1));
+    let dsts = [
+        (IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)), 80u16),
+        (IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2)), 443u16),
+    ];
+    for (dst, port) in dsts {
+        let pkt = tcp_pkt(src, dst, 1234, port, TCP_SYN);
+        for _ in 0..150 {
+            assert_eq!(
+                state.check_packet_with_zone_id_opts("trust", 3, &pkt, 5 * NS, 5, false),
+                ScreenVerdict::Pass
+            );
+        }
+    }
+    let pkt = tcp_pkt(
+        src,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+        1234,
+        443,
+        TCP_SYN,
+    );
+    for _ in 0..150 {
+        assert_eq!(
+            state.check_packet_with_zone_id_opts("trust", 3, &pkt, 5 * NS, 5, false),
+            ScreenVerdict::Pass
+        );
+    }
+}
 
+/// #14635 control: a single (dst,port) at 1.5x threshold still drops cookie-OFF.
+#[test]
+fn syn_flood_per_dst_port_over_threshold_drops_14635() {
+    const T: u32 = 200;
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = T;
+    let mut state = make_state("trust", profile);
+    let pkt = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+        1234,
+        80,
+        TCP_SYN,
+    );
+    let mut admitted = 0u32;
+    for _ in 0..300 {
+        if state.check_packet_with_zone_id_opts("trust", 3, &pkt, 5 * NS, 5, false)
+            == ScreenVerdict::Pass
+        {
+            admitted += 1;
+        }
+    }
+    assert!(
+        admitted < 300,
+        "over-threshold single dest must drop some: admitted {admitted}/300"
+    );
+}
+
+/// #14635 cookie-ON: two services under threshold get no challenge; one over does.
+#[test]
+fn syn_flood_cookie_challenge_is_per_dst_port_14635() {
+    const T: u32 = 4;
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = T;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    let src = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1));
+    for (rip, port) in [(1u8, 80u16), (2u8, 443u16)] {
+        let pkt = tcp_pkt(
+            src,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 2, rip)),
+            1234,
+            port,
+            TCP_SYN,
+        );
+        for _ in 0..3 {
+            assert_eq!(
+                state.check_packet_with_zone_id("trust", 3, &pkt, 100),
+                ScreenVerdict::Pass,
+                "under-threshold service must not be challenged"
+            );
+        }
+    }
+    let hot = tcp_pkt(
+        src,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+        1234,
+        80,
+        TCP_SYN,
+    );
+    let mut challenged = false;
+    for _ in 0..3 {
+        if matches!(
+            state.check_packet_with_zone_id("trust", 3, &hot, 100),
+            ScreenVerdict::SynCookieChallenge(_)
+        ) {
+            challenged = true;
+            break;
+        }
+    }
+    assert!(
+        challenged,
+        "single dest:port over attack-threshold must be challenged (#14635)"
+    );
+}
+
+/// #14635 alarm per (dst,port): under-alarm services do not raise, over-alarm single does.
+#[test]
+fn syn_flood_alarm_is_per_dst_port_14635() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 100;
+    profile.syn_flood_alarm_threshold = 3;
+    let mut state = make_state("trust", profile);
+    let src = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1));
+    for (rip, port) in [(1u8, 80u16), (2u8, 443u16)] {
+        let pkt = tcp_pkt(
+            src,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 2, rip)),
+            1234,
+            port,
+            TCP_SYN,
+        );
+        for _ in 0..3 {
+            assert_eq!(state.check_packet("trust", &pkt, 100), ScreenVerdict::Pass);
+        }
+    }
+    assert!(
+        !state.take_syn_alarm_event(),
+        "two services at alarm count must not sum to alarm (#14635)"
+    );
+    // A DIFFERENT service crossing its own alarm in the SAME second must
+    // also raise: alarm cadence is per (dst,port), not zone-wide (#14635).
+    let other_hot = tcp_pkt(
+        src,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2)),
+        1234,
+        443,
+        TCP_SYN,
+    );
+    assert_eq!(state.check_packet("trust", &other_hot, 100), ScreenVerdict::Pass);
+    assert!(
+        state.take_syn_alarm_event(),
+        "second service crossing its own alarm in same second must alarm (#14635)"
+    );
+    let hot = tcp_pkt(
+        src,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+        1234,
+        80,
+        TCP_SYN,
+    );
+    assert_eq!(state.check_packet("trust", &hot, 100), ScreenVerdict::Pass);
+    assert!(
+        state.take_syn_alarm_event(),
+        "single service crossing its own alarm must alarm (#14635)"
+    );
+}
 // ================================================================
 // SYN-flood sub-thresholds (#3315): source / destination / alarm
 // ================================================================
@@ -4095,15 +4260,25 @@ fn syn_cookie_whitelist_does_not_widen_past_the_validated_client_9419() {
         "a DIFFERENT source must not inherit the whitelist"
     );
 
+    // #14635: a different service now needs its OWN flood before it can be
+    // challenged — per-(dst,port) attack measurement no longer latches the
+    // whole zone. The whitelist itself must not widen into a bypass for
+    // that service (no SynCookieBypass); once its own threshold is crossed
+    // it is challenged on its own key.
     let mut other_service = syn.clone();
     other_service.dst_port = 8443;
     other_service.src_port = 49154;
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &other_service, 128),
+        ScreenVerdict::Pass,
+        "a DIFFERENT service must not inherit the whitelist bypass (#14635)"
+    );
     assert!(
         matches!(
             state.check_packet_with_zone_id("trust", 7, &other_service, 128),
             ScreenVerdict::SynCookieChallenge(_)
         ),
-        "a DIFFERENT destination service must not inherit the whitelist"
+        "a DIFFERENT destination service is challenged only after its own flood (#14635)"
     );
 }
 
