@@ -84,6 +84,11 @@ pub(super) struct CachedTxSelectionDescriptor {
     /// rewrite exists and no filter rewrite overrides it. When both flags are
     /// false, cache hits do no BA or LP lookup.
     pub(super) cos_lp_reclassify: bool,
+    /// #14636: global queue id of the filter-selected forwarding class that
+    /// pinned this flow, when one did. Cache hits key the egress rewrite by
+    /// this class before the packet's BA class. `None` when no filter class
+    /// pinned the queue (or the class is unknown to the CoS build).
+    pub(super) filter_class_queue_id: Option<u8>,
     /// #11787: a filter class missed the materialized class map, so this
     /// descriptor carries the default queue as a pinned fallback. Hits must not
     /// reclassify through a BA classifier.

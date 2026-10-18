@@ -31,6 +31,10 @@ pub(in crate::afxdp) struct CoSState {
     /// The queue/rewrite matrix is egress-owned; classifier LP tables are
     /// retained for locally generated packets that have no wire ingress.
     pub(in crate::afxdp) lp_rewrite: FastMap<i32, CoSLossPriorityRewrite>,
+    /// #14636: global forwarding-class name -> its queue id, retained from
+    /// snapshot build so a filter-selected class can key the egress rewrite
+    /// matrix directly. Empty for a CoS-less snapshot.
+    pub(in crate::afxdp) forwarding_class_queue: FastMap<String, u8>,
 }
 
 /// Integer-indexed classifier bindings on a logical ingress unit, independent

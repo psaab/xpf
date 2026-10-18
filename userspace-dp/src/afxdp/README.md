@@ -1291,6 +1291,9 @@ sync.
   no filter (input or output) forwarding class pins the queue. A filter-pinned
   queue stays fixed; the separate `cos_lp_reclassify` flag refreshes only the
   packet-dependent ingress LP rewrite when that queue has a rewrite entry.
+  #14636: a filter-selected class also keys that rewrite (filter class, then
+  BA class, then the pinned queue); the cached descriptor stores the filter
+  class's global queue id so cache hits resolve the same entry.
   Rewrite precedence is policer, filter, fresh CoS, then the seed CoS result;
   a fresh `None` also replaces a stale seed rewrite. Direct fixed-size
   code-point tables and a bitmap of the final materialized queue set preserve

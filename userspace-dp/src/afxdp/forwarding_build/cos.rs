@@ -1515,6 +1515,7 @@ pub(super) fn build_cos_state(
     state.ieee8021_classifier_tables = ieee8021_classifier_tables;
     state.inet_precedence_classifier_tables = inet_precedence_classifier_tables;
     state.dscp_rewrite_rules = tables.dscp_rewrite_rules;
+    state.forwarding_class_queue = tables.class_to_queue;
     Ok(state)
 }
 
