@@ -685,10 +685,18 @@ func (s *Server) configAnnotateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pathParts := strings.Fields(req.Path)
+	plantClass, err := s.mutationPlantClass(r)
+	if err != nil {
+		writeConfigMutationError(w, err)
+		return
+	}
 	// #5870: annotate mutates the candidate, so it runs under the REST holder
 	// identity and is rejected when a CLI/gRPC session owns the candidate. A
 	// holder conflict maps to 409 Conflict; other errors stay 400.
-	if err := s.store.AnnotateAs(sessionID, pathParts, req.Comment); err != nil {
+	// #14710: use AnnotateAsPlantClass like every sibling mutation handler
+	// (and the gRPC annotate path) so the annotation is not planted with
+	// empty (superuser) attribution, defeating the #9939/#9984 recheck.
+	if err := s.store.AnnotateAsPlantClass(sessionID, plantClass, pathParts, req.Comment); err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, configstore.ErrConfigLockedByOther) {
 			status = http.StatusConflict
