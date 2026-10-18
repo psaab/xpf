@@ -57,7 +57,13 @@ func (c *ctl) showInterfaces(args []string) error {
 	mod := split.Modifiers[0]
 
 	if mod == "terse" {
+		if split.Selector != "" {
+			return fmt.Errorf("`show interfaces terse` does not take an interface name (got %q)", split.Selector)
+		}
 		return c.showInterfacesDetailRPC(split.Selector, true)
+	}
+	if (mod == "statistics") && split.Selector != "" {
+		return fmt.Errorf("`show interfaces statistics` does not take an interface name (got %q)", split.Selector)
 	}
 	if mod == "tunnel" {
 		// `show interfaces tunnel` is an inventory of tunnel interfaces, not a

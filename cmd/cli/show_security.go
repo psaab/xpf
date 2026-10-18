@@ -106,6 +106,9 @@ func (c *ctl) handleShowSecurity(args []string) error {
 			return fmt.Errorf("unexpected argument %q: `show security zones` takes at "+
 				"most one zone name", zsplit.Extra[0])
 		}
+		if len(zsplit.Modifiers) > 1 {
+			return fmt.Errorf("`show security zones` takes one modifier, got %v", zsplit.Modifiers)
+		}
 		switch {
 		case zsplit.Has("detail"):
 			return c.showTextFiltered("zones-detail", zsplit.Selector)

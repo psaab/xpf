@@ -33,7 +33,7 @@ func TestParseCoSNameTypeArgs6848(t *testing.T) {
 		{"keyword type", []string{"type", "dscp"}, "", "dscp"},
 		{"both keywords", []string{"name", "rw-pcp", "type", "ieee-802.1"}, "rw-pcp", "ieee-802.1"},
 		{"bare name then type", []string{"rw-pcp", "type", "ieee-802.1"}, "rw-pcp", "ieee-802.1"},
-		{"keyword overrides bare", []string{"rw-dscp", "name", "rw-pcp"}, "rw-pcp", ""},
+		{"bare then type keyword-looking value", []string{"name", "type", "type", "dscp"}, "type", "dscp"},
 		{"comma in bare name", []string{"rw,x"}, "rw,x", ""},
 		{"keyword-looking name value name", []string{"name", "name"}, "name", ""},
 		{"keyword-looking name value type", []string{"name", "type"}, "type", ""},

@@ -44,8 +44,11 @@ const CoSNameTypeArgsUsage = "usage: show class-of-service classifier|rewrite-ru
 // ignored it and dumped every rule — completion promised a filter the parser
 // did not implement.
 //
-// A later explicit `name` keyword wins over the bare positional: the operator
-// typed the keyword form deliberately.
+// Each filter may be supplied at most once (#14688): a bare positional
+// counts as the name filter, so `public-cls name secret-cls` and any
+// repeated `name`/`type` keyword are rejected instead of overwriting
+// the first value — RBAC judged the first name, the handler rendered
+// the second.
 //
 // Parsing fails CLOSED (#11834): an unknown token or a filter keyword with no
 // value is an error, not a silently-ignored token that falls through to a
@@ -60,22 +63,32 @@ const CoSNameTypeArgsUsage = "usage: show class-of-service classifier|rewrite-ru
 // keyword-looking name with another filter, put the other filter first
 // (`type dscp name type`).
 func ParseCoSNameTypeArgs(args []string) (nameFilter, typeFilter string, err error) {
+	seenName, seenType := false, false
 	if len(args) > 0 && args[0] != "name" && args[0] != "type" {
 		nameFilter = args[0]
+		seenName = true
 		args = args[1:]
 	}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "name":
+			if seenName {
+				return "", "", fmt.Errorf("duplicate %q filter\n%s", "name", CoSNameTypeArgsUsage)
+			}
 			if i+1 >= len(args) {
 				return "", "", fmt.Errorf("missing value for %q\n%s", "name", CoSNameTypeArgsUsage)
 			}
+			seenName = true
 			nameFilter = args[i+1]
 			i++
 		case "type":
+			if seenType {
+				return "", "", fmt.Errorf("duplicate %q filter\n%s", "type", CoSNameTypeArgsUsage)
+			}
 			if i+1 >= len(args) {
 				return "", "", fmt.Errorf("missing value for %q\n%s", "type", CoSNameTypeArgsUsage)
 			}
+			seenType = true
 			typeFilter = args[i+1]
 			i++
 		default:
