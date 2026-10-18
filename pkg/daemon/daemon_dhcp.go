@@ -316,6 +316,9 @@ func (d *Daemon) reconcileDHCPClients(cfg *config.Config) {
 	// drop leases — renewals re-validate, and the RA sink refuses overlaps
 	// at emission time.
 	d.dhcp.SetProtectedIPv6Prefixes(config.ConfiguredIPv6Prefixes(cfg))
+	// #14728: v4 analogue — keep the DHCPv4 protected set current on the
+	// same apply, before reconcile, with the same non-fingerprint rule.
+	d.dhcp.SetProtectedIPv4Prefixes(config.ConfiguredIPv4Prefixes(cfg))
 	specs := buildDHCPClientSpecs(cfg)
 	if len(specs) == 0 {
 		// Reconcile(nil) stops any running clients; with none running

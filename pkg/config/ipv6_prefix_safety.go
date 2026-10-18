@@ -152,3 +152,68 @@ func ConfiguredIPv6Prefixes(cfg *Config) []netip.Prefix {
 	out = deduped
 	return out
 }
+
+// ConfiguredIPv4Prefixes collects every statically configured IPv4
+// interface-unit address prefix (#14728, v4 analogue of
+// ConfiguredIPv6Prefixes). A DHCPv4 lease whose connected prefix
+// overlaps any of them is refused by the DHCP manager. Only STATIC
+// configuration is collected: leases are runtime state, so collecting
+// them would make a lease overlap itself. Entries that do not parse
+// as IPv4 are skipped; a nil config yields nil. Sorted + deduped like
+// the v6 collector (#14153).
+func ConfiguredIPv4Prefixes(cfg *Config) []netip.Prefix {
+	if cfg == nil {
+		return nil
+	}
+	var out []netip.Prefix
+	add := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return
+		}
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			addr, addrErr := netip.ParseAddr(raw)
+			if addrErr != nil || !addr.Is4() {
+				return
+			}
+			prefix = netip.PrefixFrom(addr, 32)
+		}
+		if !prefix.IsValid() || !prefix.Addr().Is4() {
+			return
+		}
+		out = append(out, prefix.Masked())
+	}
+	for _, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		for _, unit := range ifc.Units {
+			if unit == nil {
+				continue
+			}
+			for _, addr := range unit.Addresses {
+				add(addr)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	deduped := out[:0]
+	for i, p := range out {
+		if i > 0 && p == out[i-1] {
+			continue
+		}
+		deduped = append(deduped, p)
+	}
+	return deduped
+}
+
+// IPv4PrefixesOverlap reports whether two valid IPv4 prefixes share any
+// address. Host bits are ignored (v4 analogue of IPv6PrefixesOverlap).
+func IPv4PrefixesOverlap(a, b netip.Prefix) bool {
+	if !a.IsValid() || !b.IsValid() || !a.Addr().Is4() || !b.Addr().Is4() {
+		return false
+	}
+	a, b = a.Masked(), b.Masked()
+	return a.Contains(b.Addr()) || b.Contains(a.Addr())
+}
