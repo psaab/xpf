@@ -146,7 +146,9 @@ func ntpServerSchema9792() *schemaNode {
 //   - its head is a DECLARED, value-bearing, single-valued leaf of the container;
 //   - EVERY statement in its run is a declared leaf of the container: each
 //     descendant's head in the nested (flat-set) shape, or the token at Keys[2]
-//     in the packed (braced) shape.
+//     in the packed (braced) shape. A descendant that is itself a container
+//     or wildcard of the container (policy `match`/`then`, #14681) is not a
+//     scalar statement and disqualifies the run, in both shapes.
 //
 // Anything else stays exactly as authored, for the reader's own diagnostics.
 func expandResolvingRuns9792(children []*Node, container *schemaNode) []*Node {
@@ -223,7 +225,25 @@ func packedOrNestedLeafRun9792(c *Node, container *schemaNode) bool {
 
 func allDescendantsDeclared9792(n *Node, container *schemaNode) bool {
 	for _, ch := range n.Children {
-		if ch == nil || len(ch.Keys) == 0 || container.children[ch.Keys[0]] == nil {
+		if ch == nil || len(ch.Keys) == 0 {
+			return false
+		}
+		child := container.children[ch.Keys[0]]
+		if child == nil {
+			return false
+		}
+		// #14681: a declared child that owns a body (a container such as
+		// policy `match`/`then`, or a wildcard instance) is not a scalar
+		// statement of this container. Hoisting it would lift its whole
+		// subtree into policyLeaves, where policyUnresolvedScalarLeafTails
+		// then sees only clean len-2 scalar leaves while compilePolicy
+		// reads `match`/`then` from the unexpanded node — the hoisted
+		// clause is compiled by nobody and a nested `then deny` is
+		// silently dropped to permit. The packed branch above already
+		// applies this guard (#13108); mirror it here. A `multi` child
+		// stays admissible: its children are its values (#2419), not a
+		// body the container compiles separately.
+		if len(child.children) > 0 || child.wildcard != nil {
 			return false
 		}
 		if !allDescendantsDeclared9792(ch, container) {

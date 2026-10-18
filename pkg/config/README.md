@@ -1309,7 +1309,11 @@ expansion honors `apply-groups-except`, while `apply-macro` is not compiled.
 Known scalar `description` and `scheduler-name` leaves with unresolved trailing
 tokens or children also poison the snapshot (#12634), because the packed-run
 expander leaves those tails uncompiled and can silently discard the scheduler
-binding. `compilePolicy` sets `Policy.LenientContentDropped` for these cases:
+binding. A container child (`match`/`then`) nested under either scalar leaf is
+likewise unresolved (#14681): the nested-run guard refuses to hoist a declared
+container/wildcard descendant, so the tail stays on the scalar leaf for the
+#12634 poison instead of being lifted into the expanded leaves and compiled
+by nobody. `compilePolicy` sets `Policy.LenientContentDropped` for these cases:
 shared AST predicates cover the existing match/permit gates,
 `policyUnsupportedThenSiblings` checks child and compact `then` tails,
 `policyUnsupportedThenLogTokens` checks log-leaf values and compact `then`

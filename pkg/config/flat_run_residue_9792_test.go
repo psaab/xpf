@@ -152,6 +152,16 @@ func TestPackedOrNestedLeafRunGuard9792(t *testing.T) {
 			with(leaf("named", "n1"), leaf("leaf", "v")), guardSchema9792(), false},
 		{"a MULTI head packed with a declared leaf token",
 			leaf("list", "a", "leaf", "v"), guardSchema9792(), false},
+		// #14681: the nested tail itself is a declared CONTAINER of the
+		// container (policy `then`/`match` shape). Only the descendant
+		// container/wildcard arm can reject it — the head and the tail
+		// head are both declared scalar leaves.
+		{"a nested tail that is a declared CONTAINER child (#14681)",
+			with(leaf("leaf", "v"), leaf("box", "name")), guardSchema9792(), false},
+		{"a nested tail that is a declared WILDCARD child (#14681)",
+			with(leaf("leaf", "v"), leaf("named", "n1")), guardSchema9792(), false},
+		{"a nested MULTI tail stays admissible (its children are values, #2419)",
+			with(leaf("leaf", "v"), leaf("list", "a")), guardSchema9792(), true},
 		{"POSITIVE CONTROL: a plain value leaf head with the same declared tail",
 			with(leaf("leaf", "v"), leaf("flag")), guardSchema9792(), true},
 	} {
