@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -292,12 +293,72 @@ const maxSourceNATPoolID uint8 = 255
 // every NAT setter and every stale-NAT deleter as `return nil` (loader.go), and
 // the AF_XDP helper receives NAT policy through the config snapshot instead.
 // The record construction was therefore pure work whose product was discarded.
-func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
-	// Clear stale persistent NAT pool configs before recompilation
-	if pnat := dp.GetPersistentNAT(); pnat != nil {
-		pnat.ClearPoolConfigs()
-	}
 
+// natPersistentStaging accumulates persistent-NAT registrations across
+// compileNAT and compileNAT64 so the live table is swapped only after both
+// succeed (#14679). Discarded pre-pass compiles have pnat==nil.
+type natPersistentStaging struct {
+	pnat        *PersistentNATTable
+	poolConfigs map[string]PersistentNATPoolInfo
+	natIPToPool map[netip.Addr]string
+	registered  map[string]bool
+}
+
+func newNATPersistentStaging(dp DataPlane) *natPersistentStaging {
+	s := &natPersistentStaging{
+		poolConfigs: make(map[string]PersistentNATPoolInfo),
+		natIPToPool: make(map[netip.Addr]string),
+		registered:  make(map[string]bool),
+	}
+	if dp != nil {
+		s.pnat = dp.GetPersistentNAT()
+	}
+	return s
+}
+
+func (s *natPersistentStaging) commit() {
+	if s == nil || s.pnat == nil {
+		return
+	}
+	s.pnat.ReplacePoolConfigs(s.poolConfigs, s.natIPToPool)
+}
+
+// registerPool stages one pool's persistent registration using exact
+// allocator semantics for the caller: expanded addresses for SNAT pools,
+// NAT64 host addresses for NAT64-only pools. Returns true when a config was
+// staged. Duplicate pool names keep the first staged config, mirroring
+// compileNAT's compiledPools de-duplication.
+func (s *natPersistentStaging) registerPool(pool *config.NATPool, effPNAT *config.PersistentNATConfig, addrs []netip.Addr, dp DataPlane) {
+	if s == nil || s.pnat == nil || pool == nil || effPNAT == nil {
+		return
+	}
+	if s.registered[pool.Name] {
+		return
+	}
+	s.registered[pool.Name] = true
+	timeout := config.SecondsToDuration(effPNAT.InactivityTimeout, 0)
+	if timeout == 0 {
+		timeout = 300 * time.Second
+	}
+	s.poolConfigs[pool.Name] = PersistentNATPoolInfo{Timeout: timeout, Permit: effPNAT.Permit}
+	for _, addr := range addrs {
+		s.natIPToPool[addr] = pool.Name
+	}
+	compileInfo(dp, "persistent NAT pool registered",
+		"pool", pool.Name,
+		"timeout", timeout,
+		"permit", string(effPNAT.Permit))
+}
+
+func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
+	return compileNATWithStaging(dp, cfg, result, nil)
+}
+
+func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResult, staging *natPersistentStaging) error {
+	ownStaging := staging == nil
+	if ownStaging {
+		staging = newNATPersistentStaging(dp)
+	}
 	natCfg := &cfg.Security.NAT
 
 	// Source NAT: allocate pool IDs and compile pools + rules
@@ -507,8 +568,7 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 					// fail-closed rather than a narrowed subset.
 					// #14626: rule-effective persistence (rule tail over pool).
 					if effPNAT, hasPNAT := rule.EffectivePersistentNAT(cfg); hasPNAT && effPNAT != nil {
-						pnat := dp.GetPersistentNAT()
-						if pnat != nil {
+						if staging.pnat != nil {
 							expanded, usable := config.SourceNATPoolExpandedAddresses(pool)
 							if usable && config.SourceNATAggregateOverBudgetPools(cfg)[pool.Name] {
 								usable = false
@@ -516,32 +576,9 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 							if !usable {
 								compileWarn(dp, "persistent NAT pool not registered: pool installs no dataplane allocator",
 									"pool", pool.Name)
+								staging.registered[pool.Name] = true
 							} else {
-								// #8642: assessed — the `== 0` guard is weaker than
-								// the `> 0` ones elsewhere in this family. A wrapped
-								// value is non-zero, so it does not even fall back to
-								// the 300s default; the lease inactivity window
-								// collapses to ~512ns and every persistent lease
-								// expires immediately.
-								timeout := config.SecondsToDuration(effPNAT.InactivityTimeout, 0)
-								if timeout == 0 {
-									timeout = 300 * time.Second
-								}
-								// #2823/#3193: carry the full three-way permit enum
-								// through the persistent NAT table so the operator
-								// SHOW path can distinguish target-host from
-								// target-host-port (was a binary any-remote-host flag).
-								pnat.SetPoolConfig(pool.Name, PersistentNATPoolInfo{
-									Timeout: timeout,
-									Permit:  effPNAT.Permit,
-								})
-								for _, addr := range expanded {
-									pnat.RegisterNATIP(addr, pool.Name)
-								}
-								compileInfo(dp, "persistent NAT pool registered",
-									"pool", pool.Name,
-									"timeout", timeout,
-									"permit", string(effPNAT.Permit))
+								staging.registerPool(pool, effPNAT, expanded, dp)
 							}
 						}
 					}
@@ -589,6 +626,9 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 	// Destination NAT
 	if natCfg.Destination != nil {
 		for _, rs := range natCfg.Destination.RuleSets {
+			if !rs.HasNATFromScopeStamp() {
+				return fmt.Errorf("destination NAT from-zone %q not found", rs.FromZone)
+			}
 			if rs.FromZone != "" {
 				if _, ok := result.ZoneIDs[rs.FromZone]; !ok {
 					return fmt.Errorf("destination NAT from-zone %q not found", rs.FromZone)
@@ -704,6 +744,9 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 	// Record highest pool ID so compileNAT64 can auto-assign additional pools.
 	result.NextPoolID = poolID
 
+	if ownStaging {
+		staging.commit()
+	}
 	return nil
 }
 
@@ -1010,8 +1053,24 @@ func compileNPTv6(dp DataPlane, cfg *config.Config) error {
 // operator surfaces read back) plus the prefix and source-pool rejections the
 // #4960 pre-pass surfaces before the first host mutation.
 func compileNAT64(dp DataPlane, cfg *config.Config, result *CompileResult) error {
+	return compileNAT64WithStaging(dp, cfg, result, nil)
+}
+
+func compileNAT64WithStaging(dp DataPlane, cfg *config.Config, result *CompileResult, staging *natPersistentStaging) error {
 	ruleSets := cfg.Security.NAT.NAT64
+	ownStaging := staging == nil
+	if ownStaging {
+		staging = newNATPersistentStaging(dp)
+	}
+	// When called standalone, stage any SNAT persistent pools already in
+	// PoolIDs so committing does not wipe them. Production passes shared staging.
+	if ownStaging && staging.pnat != nil {
+		stageExistingSNATPersistentPools14679(dp, cfg, result, staging)
+	}
 	if len(ruleSets) == 0 {
+		if ownStaging {
+			staging.commit()
+		}
 		return nil
 	}
 
@@ -1041,8 +1100,17 @@ func compileNAT64(dp DataPlane, cfg *config.Config, result *CompileResult) error
 		poolID, ok := result.PoolIDs[rs.SourcePool]
 		if !ok {
 			pool, poolExists := cfg.Security.NAT.SourcePools[rs.SourcePool]
-			if !poolExists {
+			if !poolExists || pool == nil {
 				return fmt.Errorf("NAT64 rule-set %q: source pool %q not found", rs.Name, rs.SourcePool)
+			}
+			// #14679: NAT64 installs only IPv4 host addresses (Rust
+			// parse_pool_v4, all-or-nothing). Members are singular Address
+			// plus Addresses; any non-host/IPv6/unparseable member poisons
+			// the whole pool, so it has no valid NAT64 addresses.
+			hosts, usable := config.NAT64PoolHostAddresses(pool)
+			if !usable {
+				return fmt.Errorf("NAT64 rule-set %q: source pool %q has no valid addresses",
+					rs.Name, pool.Name)
 			}
 			// Assign next pool ID (after those used by SNAT).
 			newID := result.NextPoolID
@@ -1050,34 +1118,11 @@ func compileNAT64(dp DataPlane, cfg *config.Config, result *CompileResult) error
 			result.PoolIDs[pool.Name] = newID
 			poolID = newID
 
-			// Count the pool's usable addresses. The addresses no longer reach
-			// nat_pool_ips_*, but an EMPTY pool is still a hard error.
-			var numV4, numV6 int
-			for _, addr := range pool.Addresses {
-				cidr := addr
-				if !strings.Contains(cidr, "/") {
-					if strings.Contains(cidr, ":") {
-						cidr += "/128"
-					} else {
-						cidr += "/32"
-					}
-				}
-				pip, _, perr := net.ParseCIDR(cidr)
-				if perr != nil {
-					continue
-				}
-				if pip4 := pip.To4(); pip4 != nil && numV4 < int(MaxNATPoolIPsPerPool) {
-					numV4++
-				} else if pip.To16() != nil && numV6 < int(MaxNATPoolIPsPerPool) {
-					numV6++
-				}
-			}
-			if numV4 == 0 && numV6 == 0 {
-				return fmt.Errorf("NAT64 rule-set %q: source pool %q has no valid addresses",
-					rs.Name, pool.Name)
+			if pool.PersistentNAT != nil && staging.pnat != nil && !staging.registered[pool.Name] {
+				staging.registerPool(pool, pool.PersistentNAT, hosts, dp)
 			}
 			compileInfo(dp, "auto-assigned NAT64 source pool",
-				"pool", pool.Name, "pool_id", newID, "v4_ips", numV4, "v6_ips", numV6)
+				"pool", pool.Name, "pool_id", newID, "v4_ips", len(hosts), "v6_ips", 0)
 		}
 
 		compileInfo(dp, "compiled NAT64 prefix",
@@ -1087,5 +1132,72 @@ func compileNAT64(dp DataPlane, cfg *config.Config, result *CompileResult) error
 	}
 
 	compileInfo(dp, "NAT64 compilation complete", "prefixes", count)
+	if ownStaging {
+		staging.commit()
+	}
 	return nil
+}
+
+// stageExistingSNATPersistentPools14679 stages SNAT pools already numbered in
+// result.PoolIDs for a standalone compileNAT64 commit. It mirrors compileNAT's
+// SNAT registration gate (expanded addresses + aggregate budget, rule-effective
+// persistence with pool fallback).
+func stageExistingSNATPersistentPools14679(dp DataPlane, cfg *config.Config, result *CompileResult, staging *natPersistentStaging) {
+	if cfg == nil || staging == nil || staging.pnat == nil {
+		return
+	}
+	overBudget := config.SourceNATAggregateOverBudgetPools(cfg)
+	// Pool-level fallback for pools with no SNAT rule (defensive; compileNAT
+	// normally registers rule-referenced pools).
+	seenRulePool := make(map[string]bool)
+	for _, rs := range cfg.Security.NAT.Source {
+		if rs == nil {
+			continue
+		}
+		for _, rule := range rs.Rules {
+			if rule == nil || rule.Then.PoolName == "" {
+				continue
+			}
+			if _, numbered := result.PoolIDs[rule.Then.PoolName]; !numbered {
+				continue
+			}
+			pool := cfg.Security.NAT.SourcePools[rule.Then.PoolName]
+			if pool == nil || staging.registered[pool.Name] {
+				continue
+			}
+			seenRulePool[pool.Name] = true
+			effPNAT, hasPNAT := rule.EffectivePersistentNAT(cfg)
+			if !hasPNAT || effPNAT == nil {
+				staging.registered[pool.Name] = true
+				continue
+			}
+			expanded, usable := config.SourceNATPoolExpandedAddresses(pool)
+			if usable && overBudget[pool.Name] {
+				usable = false
+			}
+			if !usable {
+				staging.registered[pool.Name] = true
+				continue
+			}
+			staging.registerPool(pool, effPNAT, expanded, dp)
+		}
+	}
+	for name := range result.PoolIDs {
+		if seenRulePool[name] || staging.registered[name] {
+			continue
+		}
+		pool := cfg.Security.NAT.SourcePools[name]
+		if pool == nil || pool.PersistentNAT == nil {
+			continue
+		}
+		expanded, usable := config.SourceNATPoolExpandedAddresses(pool)
+		if usable && overBudget[pool.Name] {
+			usable = false
+		}
+		if !usable {
+			staging.registered[pool.Name] = true
+			continue
+		}
+		staging.registerPool(pool, pool.PersistentNAT, expanded, dp)
+	}
 }

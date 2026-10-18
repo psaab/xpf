@@ -511,8 +511,10 @@ func CompileConfig(dp DataPlane, cfg *config.Config, isRecompile bool, beforeMut
 		return nil, fmt.Errorf("compile policies: %w", err)
 	}
 
-	// Phase 6: Compile NAT
-	if err := compileNAT(dp, cfg, result); err != nil {
+	// Phase 6: Compile NAT (#14679: persistent registrations staged across
+	// NAT+NAT64 and swapped atomically only after both succeed).
+	natStaging := newNATPersistentStaging(dp)
+	if err := compileNATWithStaging(dp, cfg, result, natStaging); err != nil {
 		return nil, fmt.Errorf("compile nat: %w", err)
 	}
 
@@ -529,9 +531,10 @@ func CompileConfig(dp DataPlane, cfg *config.Config, isRecompile bool, beforeMut
 	finalizeNATCounterIDs(result)
 
 	// Phase 6.6: Compile NAT64 prefixes
-	if err := compileNAT64(dp, cfg, result); err != nil {
+	if err := compileNAT64WithStaging(dp, cfg, result, natStaging); err != nil {
 		return nil, fmt.Errorf("compile nat64: %w", err)
 	}
+	natStaging.commit()
 
 	// Phase 6.7: Compile NPTv6 (RFC 6296) prefix translation rules
 	if err := compileNPTv6(dp, cfg); err != nil {

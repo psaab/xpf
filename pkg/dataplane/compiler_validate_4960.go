@@ -387,6 +387,7 @@ type validationPhase struct {
 // Adding or removing a row without updating that test -- and the coverage
 // paragraph above -- is a test failure by construction.
 func validationPhases(dp DataPlane, cfg *config.Config, result *CompileResult) []validationPhase {
+	natStaging := newNATPersistentStaging(dp)
 	return []validationPhase{
 		// FIRST, because compileZones is CompileConfig's first phase and
 		// validateZoneScreenReferences is the first thing inside it
@@ -413,9 +414,9 @@ func validationPhases(dp DataPlane, cfg *config.Config, result *CompileResult) [
 		{"address book", func() error { return compileAddressBook(dp, cfg, result) }},
 		{"applications", func() error { return compileApplications(dp, cfg, result) }},
 		{"policies", func() error { return compilePolicies(dp, cfg, result) }},
-		{"nat", func() error { return compileNAT(dp, cfg, result) }},
+		{"nat", func() error { return compileNATWithStaging(dp, cfg, result, natStaging) }},
 		{"static nat", func() error { return compileStaticNAT(dp, cfg, result) }},
-		{"nat64", func() error { return compileNAT64(dp, cfg, result) }},
+		{"nat64", func() error { return compileNAT64WithStaging(dp, cfg, result, natStaging) }},
 		{"nptv6", func() error { return compileNPTv6(dp, cfg) }},
 		{"screen profiles", func() error { return compileScreenProfiles(dp, cfg, result) }},
 		{"default policy", func() error { return compileDefaultPolicy(dp, cfg) }},
