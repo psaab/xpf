@@ -386,6 +386,8 @@ fn complete_conn_streams_completions() {
     assert_eq!(completions[0].bytes_written, 50);
     assert_eq!(completions[1].request_id, 2);
     assert_eq!(completions[1].outcome, ReinjectOutcome::Cancelled);
+    // #14678: the server commits only after this application ack.
+    client.write_all(&[REINJECT_COMPLETE_ACK]).unwrap();
     let ack_deadline = Instant::now() + Duration::from_secs(1);
     while core.live_count() != 0 && Instant::now() < ack_deadline {
         std::thread::sleep(Duration::from_millis(1));
@@ -490,10 +492,65 @@ fn complete_conn_delivers_after_idle_13715() {
     let completions = crate::slowpath_reinject_9506::decode_complete(&payload).unwrap();
     assert_eq!(completions.len(), 1);
     assert_eq!(completions[0].request_id, 21);
+    // #14678: Rust commits (ack_ready) only after the reader's
+    // application ack; send it, then the server may purge id 21.
+    client.write_all(&[REINJECT_COMPLETE_ACK]).unwrap();
     running.store(false, Ordering::SeqCst);
-    core.ack_ready(&[21]);
     drop(client);
     handle.join().unwrap();
+}
+
+#[test]
+fn complete_conn_releases_unacked_batch_on_disconnect_14678() {
+    // #14678: a completion written to the socket buffer but never
+    // acked by the Go reader must NOT be purged: when that reader
+    // disconnects, the batch is released and redelivered whole to
+    // the next reader, which acks it.
+    let core = open_core();
+    let running = Arc::new(AtomicBool::new(true));
+    let (mut client1, server) = UnixStream::pair().unwrap();
+    client1
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let worker_core = core.clone();
+    let worker_running = running.clone();
+    let handle = std::thread::spawn(move || {
+        serve_complete_conn(server, &worker_core, &worker_running);
+    });
+    make_completion_ready_13715(&core, 33);
+    let (ty, _payload) = read_message(&mut client1).unwrap();
+    assert_eq!(ty, MSG_COMPLETE);
+    // No ack: simulate the Go reader closing in the deadline window.
+    drop(client1);
+    handle.join().unwrap();
+    assert_eq!(core.ready_len(), 1, "unacked completion must survive for redelivery");
+
+    // Second reader receives the same completion and acks it.
+    let (mut client2, server2) = UnixStream::pair().unwrap();
+    client2
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let worker_core = core.clone();
+    let worker_running = running.clone();
+    let handle2 = std::thread::spawn(move || {
+        serve_complete_conn(server2, &worker_core, &worker_running);
+    });
+    let (ty, payload) = read_message(&mut client2).unwrap();
+    assert_eq!(ty, MSG_COMPLETE);
+    let completions = crate::slowpath_reinject_9506::decode_complete(&payload).unwrap();
+    assert_eq!(completions.len(), 1);
+    assert_eq!(completions[0].request_id, 33);
+    client2.write_all(&[REINJECT_COMPLETE_ACK]).unwrap();
+    // The acked entry is purged once the server processes the ack;
+    // poll briefly for the server thread to commit it.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while core.ready_len() != 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(core.ready_len(), 0, "acked completion must be purged");
+    running.store(false, Ordering::SeqCst);
+    drop(client2);
+    handle2.join().unwrap();
 }
 #[test]
 fn tempdir_sockets_bind_and_accept() {

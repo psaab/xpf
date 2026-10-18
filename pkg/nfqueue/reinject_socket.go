@@ -21,15 +21,19 @@ const (
 	reinjectMsgAnnounce    = 3
 	reinjectMsgAdmit       = 11
 	reinjectMsgComplete    = 12
-	reinjectMaxFrames      = 64
-	reinjectMaxData        = 65535
-	reinjectMaxMessage     = 1 << 20
-	reinjectMaxQueues      = 128
-	reinjectMaxRunID       = 64
-	reinjectOriginInet     = 1
-	reinjectOriginBridge   = 2
-	reinjectOriginForward  = 1
-	reinjectOriginInput    = 2
+	// reinjectCompleteAck is the #14678 per-frame application
+	// acknowledgement: Go sends it only after a full completion frame
+	// is buffered locally, and Rust ack_ready waits for it.
+	reinjectCompleteAck   = 0xAC
+	reinjectMaxFrames     = 64
+	reinjectMaxData       = 65535
+	reinjectMaxMessage    = 1 << 20
+	reinjectMaxQueues     = 128
+	reinjectMaxRunID      = 64
+	reinjectOriginInet    = 1
+	reinjectOriginBridge  = 2
+	reinjectOriginForward = 1
+	reinjectOriginInput   = 2
 	// The complete post-payload P-MECH suffix, including the absolute
 	// CLOCK_MONOTONIC acknowledgement deadline and its clock id.
 	reinjectDeadlineClockMonotonic = 1
@@ -119,6 +123,7 @@ type SocketReinjectSubmitter struct {
 
 	completeMu         sync.Mutex
 	complete           net.Conn
+	completeBuf        []byte
 	pendingCompletions []ReinjectCompletion
 }
 
@@ -221,30 +226,109 @@ func (s *SocketReinjectSubmitter) DrainReinjectCompletions(max uint32) ([]Reinje
 		}
 		s.complete = conn
 	}
-	_ = s.complete.SetReadDeadline(time.Now().Add(s.timeout))
-	typ, payload, err := readReinjectMessage(s.complete)
-	if err != nil {
-		if isTimeout(err) {
-			// readReinjectMessage may have consumed a partial header/body before
-			// the deadline. Never reuse that stream: the next frame would be
-			// decoded from the middle of the timed-out one.
+	// #14678: a zero-byte idle timeout must not destroy the connection.
+	// Rust ack_ready commits on socket-buffer write, so closing here
+	// destroys completions written between deadline expiry and Close
+	// unread, and Go then expires the pending entry as uncertain. The
+	// buffered reader below retains the stream across idle timeouts;
+	// only a partially consumed frame is treated as an error.
+	if msg, ok, err := s.tryBufferedCompletionLocked(); err != nil {
+		return nil, err
+	} else if ok {
+		return s.emitCompletionsLocked(msg, max)
+	}
+	for {
+		_ = s.complete.SetReadDeadline(time.Now().Add(s.timeout))
+		chunk := make([]byte, 8192)
+		n, readErr := s.complete.Read(chunk)
+		if n > 0 {
+			s.completeBuf = append(s.completeBuf, chunk[:n]...)
+			if msg, ok, err := s.tryBufferedCompletionLocked(); err != nil {
+				return nil, err
+			} else if ok {
+				return s.emitCompletionsLocked(msg, max)
+			}
+			continue
+		}
+		if readErr != nil {
+			if isTimeout(readErr) {
+				if len(s.completeBuf) == 0 {
+					// Zero-byte idle: keep the connection for the
+					// next Poll; nothing was consumed.
+					return nil, nil
+				}
+				// Partial header/body consumed and then stalled:
+				// with the ack-gated Rust side the frame is not
+				// yet committed, but this stream can no longer
+				// be trusted to complete it within the drain.
+				// Close and surface the error so Poll fails
+				// pending work closed instead of expiring it as
+				// an ack timeout; Rust releases the batch for
+				// redelivery on the next connection.
+				s.complete = nil
+				s.completeBuf = nil
+				return nil, fmt.Errorf("nfqueue: read reinject completion: %w", readErr)
+			}
 			_ = s.complete.Close()
 			s.complete = nil
-			return nil, nil
+			s.completeBuf = nil
+			return nil, fmt.Errorf("nfqueue: read reinject completion: %w", readErr)
 		}
+	}
+}
+
+// tryBufferedCompletionLocked reports whether completeBuf holds one
+// full framed message. On a protocol error it closes the stream and
+// returns the error; on an incomplete frame it returns ok=false.
+func (s *SocketReinjectSubmitter) tryBufferedCompletionLocked() (msg []byte, ok bool, err error) {
+	if len(s.completeBuf) < 4 {
+		return nil, false, nil
+	}
+	length := binary.BigEndian.Uint32(s.completeBuf[:4])
+	if length == 0 || length > reinjectMaxMessage {
 		_ = s.complete.Close()
 		s.complete = nil
-		return nil, fmt.Errorf("nfqueue: read reinject completion: %w", err)
+		s.completeBuf = nil
+		return nil, false, errors.New("nfqueue: invalid reinject message length")
 	}
+	total := 4 + int(length)
+	if len(s.completeBuf) < total {
+		return nil, false, nil
+	}
+	msg = append([]byte(nil), s.completeBuf[4:total]...)
+	rest := append([]byte(nil), s.completeBuf[total:]...)
+	s.completeBuf = rest
+	// #14678: acknowledge only now that the full frame is buffered
+	// locally; Rust ack_ready waits for this byte before purging.
+	// A failed ack write is not fatal: the frame is already safe
+	// locally, and Rust will release/redeliver its copy, whose
+	// duplicate Go resolves as a late completion.
+	_ = s.complete.SetWriteDeadline(time.Now().Add(s.timeout))
+	_, _ = s.complete.Write([]byte{reinjectCompleteAck})
+	return msg, true, nil
+}
+
+// emitCompletionsLocked decodes one framed complete message whose
+// first byte is the message type. Caller holds completeMu.
+func (s *SocketReinjectSubmitter) emitCompletionsLocked(msg []byte, max uint32) ([]ReinjectCompletion, error) {
+	if len(msg) == 0 {
+		_ = s.complete.Close()
+		s.complete = nil
+		s.completeBuf = nil
+		return nil, errors.New("nfqueue: empty reinject completion message")
+	}
+	typ, payload := msg[0], msg[1:]
 	if typ != reinjectMsgComplete {
 		_ = s.complete.Close()
 		s.complete = nil
+		s.completeBuf = nil
 		return nil, fmt.Errorf("nfqueue: unexpected reinject completion type %d", typ)
 	}
 	completions, err := decodeCompletions(payload)
 	if err != nil {
 		_ = s.complete.Close()
 		s.complete = nil
+		s.completeBuf = nil
 		return nil, err
 	}
 	if len(completions) > int(max) {
@@ -348,6 +432,7 @@ func (s *SocketReinjectSubmitter) Close() error {
 		s.complete = nil
 	}
 	s.pendingCompletions = nil
+	s.completeBuf = nil
 	s.completeMu.Unlock()
 	return firstErr
 }

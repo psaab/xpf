@@ -186,14 +186,19 @@ type AdjudicatedFrame struct {
 // pre-gate. The enforcing phase is fail-closed when the evaluator/snapshot
 // pair is absent; no frame can silently become a permit.
 type CapturePipelineConfig struct {
-	Registry             *OriginRegistry
-	LeaseMinter          LeaseMinter
-	Submitter            ReinjectSubmitter
-	Sink                 PacketVerdictSink
-	Phase                PipelinePhase
-	HandoffCap           int
-	BatchCap             int
-	AckDeadline          time.Duration
+	Registry    *OriginRegistry
+	LeaseMinter LeaseMinter
+	Submitter   ReinjectSubmitter
+	Sink        PacketVerdictSink
+	Phase       PipelinePhase
+	HandoffCap  int
+	BatchCap    int
+	AckDeadline time.Duration
+	// MaxFlowFrames bounds frames queued per flow FIFO, including
+	// the in-flight head. Zero selects defaultMaxFlowFrames; a
+	// negative value is rejected. Frames past the cap are
+	// terminal-DROPed by consumeFrames (fail-closed).
+	MaxFlowFrames        int
 	FragmentTombstoneCap int
 	OnUncertain          func(reason string)
 	ZoneEvaluator        ZoneEvaluator
@@ -203,12 +208,21 @@ type CapturePipelineConfig struct {
 }
 
 var (
-	ErrHandoffFull     = errors.New("nfqueue: capture handoff capacity exceeded")
-	ErrPipelineClosed  = errors.New("nfqueue: capture pipeline closed")
+	ErrHandoffFull    = errors.New("nfqueue: capture handoff capacity exceeded")
+	ErrPipelineClosed = errors.New("nfqueue: capture pipeline closed")
+
 	ErrNoSubmitter     = errors.New("nfqueue: adjudication submitter unavailable")
 	ErrNoLeaseMinter   = errors.New("nfqueue: adjudication lease minter unavailable")
 	ErrNoZoneEvaluator = errors.New("nfqueue: zone evaluator unavailable")
 )
+
+// defaultMaxFlowFrames is the production per-flow FIFO bound (#14678).
+// A flow behind a stalled pending head (5ms..1s ack window, extended
+// by drain stalls) can otherwise retain one CaptureFrame + packet
+// buffer per arrival without limit; 512 frames is far beyond any
+// burst that can be adjudicated within one ack window at BatchCap 64
+// while bounding worst-case retention to 512 frames per flow.
+const defaultMaxFlowFrames = 512
 
 // PipelineStats is a monotonic snapshot of fail-closed pipeline accounting.
 type PipelineStats struct {
@@ -230,6 +244,7 @@ type PipelineStats struct {
 	Stale                  uint64
 	Cancelled              uint64
 	Refused                uint64
+	FlowQueueDrops         uint64
 	Uncertain              uint64
 	Written                uint64
 	Timeouts               uint64
@@ -304,6 +319,7 @@ type CapturePipeline struct {
 	denyEvents           DenyEventSink
 	handoff              chan CaptureFrame
 	batchCap             int
+	maxFlowFrames        int
 	ackDeadline          time.Duration
 	fragmentTombstones   map[fragmentDenyKey]struct{}
 	fragmentTombstoneCap int
@@ -342,6 +358,12 @@ func NewCapturePipeline(cfg CapturePipelineConfig) (*CapturePipeline, error) {
 	if cfg.AckDeadline > reinjectMaxAckDeadline {
 		return nil, fmt.Errorf("nfqueue: ack deadline exceeds %s", reinjectMaxAckDeadline)
 	}
+	if cfg.MaxFlowFrames < 0 {
+		return nil, errors.New("nfqueue: max flow frames must not be negative")
+	}
+	if cfg.MaxFlowFrames == 0 {
+		cfg.MaxFlowFrames = defaultMaxFlowFrames
+	}
 	if cfg.FragmentTombstoneCap <= 0 {
 		cfg.FragmentTombstoneCap = 4096
 	}
@@ -360,6 +382,7 @@ func NewCapturePipeline(cfg CapturePipelineConfig) (*CapturePipeline, error) {
 		zoneEvaluator: cfg.ZoneEvaluator, zoneSnapshot: cfg.ZoneSnapshot,
 		denyEvents: cfg.DenyEvents,
 		handoff:    make(chan CaptureFrame, cfg.HandoffCap), batchCap: cfg.BatchCap,
+		maxFlowFrames:        cfg.MaxFlowFrames,
 		ackDeadline:          cfg.AckDeadline,
 		fragmentTombstones:   make(map[fragmentDenyKey]struct{}),
 		fragmentTombstoneCap: cfg.FragmentTombstoneCap,
@@ -651,6 +674,17 @@ func (p *CapturePipeline) enqueueFlowLocked(frame CaptureFrame) []CaptureFrame {
 	if flow == nil {
 		flow = &flowState{}
 		p.flows[flowKey] = flow
+	}
+	limit := p.maxFlowFrames
+	if limit <= 0 {
+		limit = defaultMaxFlowFrames
+	}
+	if len(flow.frames) >= limit {
+		// #14678: fail-closed drop of the excess frame. Returning it
+		// lets consumeFrames terminal-DROP it (shadow frames still
+		// ACCEPT per the drops loop); the queued FIFO is unchanged.
+		p.stats.FlowQueueDrops++
+		return []CaptureFrame{frame}
 	}
 	flow.frames = append(flow.frames, frame)
 	return nil
