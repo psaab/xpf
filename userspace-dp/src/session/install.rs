@@ -691,6 +691,7 @@ impl SessionTable {
                 first_held_ns: 0,
                 // #2501: a fresh entry has forwarded no packets yet.
                 counters: SessionCounters::default(),
+                closing_counters_seen: 0,
                 // #2749: seed the cumulative TCP control bits with the trigger
                 // packet's flags (typically the SYN) so even a flow that closes
                 // before any further forward packet is accounted reports a
@@ -1077,6 +1078,7 @@ impl SessionTable {
                 first_held_ns: 0,
                 // #2501: a fresh entry has forwarded no packets yet.
                 counters: SessionCounters::default(),
+                closing_counters_seen: 0,
                 // #2749: a re-imported synced entry observes its own ToS / TCP
                 // flags once local traffic forwards through it (the peer's
                 // observed values are not carried on the HA session-sync delta).

@@ -344,14 +344,25 @@ pub(super) fn tcp_payload_len(packet_frame: &[u8], meta: UserspaceDpMeta) -> u32
     if meta.protocol != crate::ip_proto::PROTO_TCP {
         return 0;
     }
-    let payload_offset = meta.payload_offset as usize;
-    if payload_offset == 0 {
-        return 0;
-    }
     let Some(declared_end) =
         declared_l3_end(packet_frame, meta.l3_offset as usize, meta.addr_family)
     else {
         return 0;
+    };
+    // #14937: an unstamped payload_offset (0) falls back to the
+    // frame-derived TCP header end instead of reporting "unknown".
+    // Some ingress/queue classes never stamp the offset; returning 0
+    // there froze CLOSING entries on those workers while stamped
+    // workers slid — the per-worker bimodal decay. The frame parse is
+    // fail-closed (None on truncated/malformed), so the fallback never
+    // invents payload.
+    let payload_offset = if meta.payload_offset == 0 {
+        match crate::afxdp::frame::tcp_payload_offset(packet_frame) {
+            Some(offset) => offset,
+            None => return 0,
+        }
+    } else {
+        meta.payload_offset as usize
     };
     u32::try_from(declared_end.saturating_sub(payload_offset)).unwrap_or(0)
 }
@@ -11787,5 +11798,75 @@ mod pptp_control_teardown_tests_11053 {
             None,
             "the queued channel close must follow and remove the queued install"
         );
+    }
+}
+
+#[cfg(test)]
+mod tcp_payload_len_14937_tests {
+    use super::*;
+
+    fn tcp_frame(payload_len: usize) -> Vec<u8> {
+        let total_len = 20 + 20 + payload_len;
+        let mut frame = vec![0u8; 14 + total_len];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        let l3 = 14;
+        frame[l3] = 0x45;
+        frame[l3 + 2..l3 + 4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        frame[l3 + 9] = crate::ip_proto::PROTO_TCP;
+        frame[l3 + 12..l3 + 16].copy_from_slice(&[10, 0, 0, 1]);
+        frame[l3 + 16..l3 + 20].copy_from_slice(&[8, 8, 8, 8]);
+        let l4 = l3 + 20;
+        frame[l4 + 12] = 5 << 4;
+        frame[l4 + 13] = crate::tcp_flags::TCP_ACK | crate::tcp_flags::TCP_PSH;
+        frame
+    }
+
+    fn meta(payload_offset: u16, frame: &[u8]) -> UserspaceDpMeta {
+        UserspaceDpMeta {
+            l3_offset: 14,
+            l4_offset: 34,
+            payload_offset,
+            protocol: crate::ip_proto::PROTO_TCP,
+            tcp_flags: crate::tcp_flags::TCP_ACK | crate::tcp_flags::TCP_PSH,
+            addr_family: libc::AF_INET as u8,
+            pkt_len: frame.len() as u16,
+            ..UserspaceDpMeta::default()
+        }
+    }
+
+    /// #14937 slow-path leg: stamped meta (the pre-#14937 happy path).
+    #[test]
+    fn stamped_meta_reports_payload_14937() {
+        let frame = tcp_frame(100);
+        assert_eq!(tcp_payload_len(&frame, meta(54, &frame)), 100);
+    }
+
+    /// #14937: unstamped meta (payload_offset=0, the suspect
+    /// ingress/queue class) must derive payload from the frame, not
+    /// report 0 — 0 froze CLOSING entries on those workers.
+    /// RED pre-fix: returns 0.
+    #[test]
+    fn unstamped_meta_derives_payload_from_frame_14937() {
+        let frame = tcp_frame(100);
+        assert_eq!(tcp_payload_len(&frame, meta(0, &frame)), 100);
+    }
+
+    /// Bare ACK (no payload) reports 0 on both stamped and unstamped
+    /// metas — the fallback must never invent payload progress.
+    #[test]
+    fn bare_ack_reports_zero_both_metas_14937() {
+        let frame = tcp_frame(0);
+        assert_eq!(tcp_payload_len(&frame, meta(54, &frame)), 0);
+        assert_eq!(tcp_payload_len(&frame, meta(0, &frame)), 0);
+    }
+
+    /// Truncated frame with unstamped meta fails closed (0).
+    #[test]
+    fn truncated_unstamped_reports_zero_14937() {
+        let frame = tcp_frame(100);
+        let short = &frame[..40];
+        let mut m = meta(0, &frame);
+        m.pkt_len = short.len() as u16;
+        assert_eq!(tcp_payload_len(short, m), 0);
     }
 }

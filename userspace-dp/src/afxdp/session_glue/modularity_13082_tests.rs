@@ -13,7 +13,7 @@ fn session_glue_is_split_into_focused_sibling_modules() {
     let root = std::fs::read_to_string(base.join("mod.rs")).unwrap();
     assert!(root.lines().count() < 500, "session_glue/mod.rs remains a monolith");
     let resolve = std::fs::read_to_string(base.join("resolve.rs")).unwrap();
-    assert!(resolve.contains("resolve_flow_session_decision_with_conntrack"));
+    assert!(resolve.contains("resolve_flow_session_decision_with_conntrack_and_payload"));
     assert!(!resolve.contains("apply_worker_commands"), "packet path still fused with control-plane dispatch");
 }
 

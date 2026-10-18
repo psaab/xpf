@@ -132,7 +132,7 @@ pub(super) use inspect::{
 #[allow(unused_imports)]
 pub(in crate::afxdp) use tcp::{
     build_reject_rst_frame, build_syn_cookie_ack_rst_frame, build_syn_cookie_syn_ack_frame,
-    frame_has_tcp_rst, tcp_payload_offset,
+    frame_has_tcp_rst, tcp_payload_offset, tcp_payload_offset_from_l3,
 };
 pub(super) use tcp::{extract_tcp_flags_and_window, extract_tcp_window, tcp_flags_str};
 // #4074: the ICMP identifier-bearing query-type gate shared with the quoted

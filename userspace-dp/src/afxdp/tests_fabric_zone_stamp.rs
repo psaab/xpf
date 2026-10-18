@@ -630,7 +630,7 @@ fn resolve_with_unique_reply_proof_12257(
         dst_ip: forward_key.dst_ip,
         forward_key,
     };
-    crate::afxdp::session_glue::resolve_flow_session_decision_with_conntrack(
+    crate::afxdp::session_glue::resolve_flow_session_decision_with_conntrack_and_payload(
         sessions,
         crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
         -1,
@@ -649,6 +649,7 @@ fn resolve_with_unique_reply_proof_12257(
         now_secs,
         PROTO_TCP,
         TCP_FLAG_ACK,
+        0,
         21,
         0,
         true,

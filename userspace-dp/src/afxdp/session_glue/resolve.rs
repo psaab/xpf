@@ -103,7 +103,9 @@ fabric_ingress: bool,
 ha_startup_grace_until_secs: u64,
 worker_id: u32,
 verdict: SessionHitVerdict,) -> Option<ResolvedFlowSessionDecision> {
-    let mut resolved = resolve_flow_session_decision_with_conntrack(
+    // #14937: test/non-worker caller — no packet frame, payload honestly 0.
+    // The production poll loop uses `_with_conntrack_and_payload`.
+    let mut resolved = resolve_flow_session_decision_with_conntrack_inner(
         sessions,
         session_map,
         -1,
@@ -122,6 +124,7 @@ verdict: SessionHitVerdict,) -> Option<ResolvedFlowSessionDecision> {
         now_secs,
         protocol,
         tcp_flags,
+        0,
         ingress_ifindex,
         ingress_vlan_id,
         fabric_ingress,
@@ -250,40 +253,6 @@ pub(in crate::afxdp::session_glue) fn apply_deferred_shared_materialization(
     }
 }
 
-pub(in crate::afxdp) fn resolve_flow_session_decision_with_conntrack(sessions: &mut SessionTable,
-session_map: SteeringMap<'_>,
-conntrack_v4_fd: c_int,
-conntrack_v6_fd: c_int,
-shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-worker_commands_by_id: &WorkerCommandQueues,
-forwarding: &ForwardingState,
-ha_state: &BTreeMap<i32, HAGroupRuntime>,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-flow: &SessionFlow,
-now_ns: u64,
-now_secs: u64,
-protocol: u8,
-tcp_flags: u8,
-ingress_ifindex: i32,
-ingress_vlan_id: u16,
-fabric_ingress: bool,
-fabric_link_ingress: bool,
-ha_startup_grace_until_secs: u64,
-worker_id: u32,
-prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) -> Option<ResolvedFlowSessionDecision> {
-    resolve_flow_session_decision_with_conntrack_inner(
-        sessions, session_map, conntrack_v4_fd, conntrack_v6_fd, shared_sessions,
-        shared_nat_sessions, shared_forward_wire_sessions, shared_owner_rg_indexes,
-        peer_worker_commands, worker_commands_by_id, forwarding, ha_state,
-        dynamic_neighbors, flow, now_ns, now_secs, protocol, tcp_flags, 0,
-        ingress_ifindex, ingress_vlan_id, fabric_ingress, fabric_link_ingress,
-        ha_startup_grace_until_secs, worker_id, prevalidated_forward_nat_match,
-    )
-}
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_flow_session_decision_with_conntrack_inner(sessions: &mut SessionTable,

@@ -653,29 +653,6 @@ pub(in crate::afxdp) fn evict_owner_closing_tcp_pair_for_syn(
     true
 }
 
-pub(in crate::afxdp) fn lookup_session_across_scopes_with_shared(
-    sessions: &mut SessionTable,
-    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    _shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-    key: &SessionKey,
-    now_ns: u64,
-    tcp_flags: u8,
-) -> Option<ResolvedSessionLookup> {
-    lookup_session_across_scopes_with_shared_and_payload(
-        sessions,
-        shared_sessions,
-        _shared_nat_sessions,
-        shared_forward_wire_sessions,
-        shared_owner_rg_indexes,
-        key,
-        now_ns,
-        tcp_flags,
-        0,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn lookup_session_across_scopes_with_shared_and_payload(
     sessions: &mut SessionTable,
@@ -751,7 +728,8 @@ pub(in crate::afxdp) fn lookup_session_across_scopes_for_test(
 ) -> Option<ResolvedSessionLookup> {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
-    lookup_session_across_scopes_with_shared(
+    // #14937: test-only — no packet frame, so payload is honestly 0.
+    lookup_session_across_scopes_with_shared_and_payload(
         sessions,
         shared_sessions,
         &shared_nat_sessions,
@@ -760,6 +738,7 @@ pub(in crate::afxdp) fn lookup_session_across_scopes_for_test(
         key,
         now_ns,
         tcp_flags,
+        0,
     )
 }
 
@@ -778,7 +757,8 @@ pub(in crate::afxdp) fn lookup_session_across_scopes_for_test_with_indexes(
     tcp_flags: u8,
 ) -> Option<ResolvedSessionLookup> {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
-    lookup_session_across_scopes_with_shared(
+    // #14937: test-only — no packet frame, so payload is honestly 0.
+    lookup_session_across_scopes_with_shared_and_payload(
         sessions,
         shared_sessions,
         &shared_nat_sessions,
@@ -787,10 +767,11 @@ pub(in crate::afxdp) fn lookup_session_across_scopes_for_test_with_indexes(
         key,
         now_ns,
         tcp_flags,
+        0,
     )
 }
 
-/// #9990: non-mutating counterpart to [`lookup_session_across_scopes_with_shared`].
+/// #9990: non-mutating counterpart to [`lookup_session_across_scopes_with_shared_and_payload`].
 ///
 /// Delete guards and embedded-error quote matching inspect an installed
 /// decision before deciding whether to remove, rewrite, or account for it.

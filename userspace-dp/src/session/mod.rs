@@ -1156,6 +1156,12 @@ struct SessionEntry {
     ///     the already-reserved [56:64]/[64:72]/[112:120]/[120:128] wire
     ///     slots (previously hard-zeroed with `(#2501)` markers).
     counters: SessionCounters,
+    /// #14937: packet total (`fwd+rev`) observed by the last expiry
+    /// pass that retained this CLOSING entry on counter evidence.
+    /// Change — not level — is the activity signal: a quiet flow's
+    /// historic volume must not retain it forever. Forward entry only
+    /// (counters fold there); 0 until first retention check.
+    closing_counters_seen: u64,
     /// #2749: the IP ToS byte observed on the FORWARD direction of this
     /// session (DSCP in the high 6 bits, ECN cleared — the shim meta carries
     /// only the 6-bit DSCP). Stamped from `meta.dscp << 2` on every forward

@@ -223,6 +223,9 @@ impl SessionTable {
                     // `entry` borrow is dropped.
                     let e_nat = entry.decision.nat;
                     let e_reset = entry.reset;
+                    let e_closing = entry.closing;
+                    let e_fin_own = entry.fin_own;
+                    let e_fin_peer = entry.fin_peer;
                     let e_is_opening = key.protocol == PROTO_TCP
                         && !entry.closing
                         && (!entry.established || entry.handshake_pending);
@@ -358,6 +361,24 @@ impl SessionTable {
                     // pass only. Gated to the owner-side Age / no-HA path
                     // (`companion_eligible`): the deliberate stale-synced /
                     // aged-owner reaps do not consult it.
+                    // #14937 belt-and-braces: a CLOSING (single-FIN,
+                    // non-RST) entry whose canonical forward counters
+                    // advanced since the last check must not be reaped
+                    // as idle even if every hit path missed payload
+                    // progress (unstamped offset, shared-scope
+                    // materialize, deferred replay). See
+                    // `closing_counters_keep_alive` for the
+                    // change-detection bound; TIME_WAIT/RST keep
+                    // their fixed fuse.
+                    if companion_eligible
+                        && e_closing
+                        && !e_reset
+                        && !(e_fin_own && e_fin_peer)
+                        && self.closing_counters_keep_alive(&key, e_nat, now_ns)
+                    {
+                        self.last_pop_stats.kept_alive_by_companion += 1;
+                        continue;
+                    }
                     if companion_eligible
                         && self.companion_keeps_alive(&key, e_nat, e_reset, now_ns)
                     {
@@ -527,6 +548,67 @@ impl SessionTable {
             scheduled_tick: new_target_tick,
         });
         self.last_pop_stats.re_bucketed += 1;
+    }
+
+    /// #14937: keep a CLOSING entry alive when its forward counters
+    /// ADVANCED since the last expiry check. `account_packet` folds
+    /// both directions onto the canonical FORWARD entry, so resolve
+    /// that entry (self if forward, companion if reverse) and compare
+    /// its packet total against `closing_counters_seen`. Change — not
+    /// historic level — is the signal: counters advancing within the
+    /// last GC interval prove activity at most one interval old, so
+    /// re-stamping this half to `now_ns` is bounded by that interval,
+    /// and a quiet flow (static counters) reaps on the next pass.
+    /// TIME_WAIT/RST never reach here (gated by the caller).
+    fn closing_counters_keep_alive(
+        &mut self,
+        key: &SessionKey,
+        entry_nat: NatDecision,
+        now_ns: u64,
+    ) -> bool {
+        let companion_key = reverse_session_key(key, entry_nat);
+        let forward_key = {
+            let Some(this) = self.entry_by_key(key) else {
+                return false;
+            };
+            if this.metadata.is_reverse {
+                companion_key.clone()
+            } else {
+                key.clone()
+            }
+        };
+        let total = {
+            let Some(forward) = self.entry_by_key(&forward_key) else {
+                return false;
+            };
+            forward
+                .counters
+                .fwd_packets
+                .saturating_add(forward.counters.rev_packets)
+        };
+        if total == 0 {
+            return false;
+        }
+        let advanced = {
+            let Some(forward) = self.entry_by_key_mut(&forward_key) else {
+                return false;
+            };
+            if forward.closing_counters_seen == total {
+                false
+            } else {
+                forward.closing_counters_seen = total;
+                true
+            }
+        };
+        if !advanced {
+            return false;
+        }
+        let Some(em) = self.entry_by_key_mut(key) else {
+            return false;
+        };
+        em.last_seen_ns = now_ns;
+        self.rebucket_alive_entry(key, now_ns);
+        true
     }
 
     /// #4380: keep an idle-crossed entry alive if its forward↔reverse
