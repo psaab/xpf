@@ -427,7 +427,7 @@ fn destination_nat_translation_still_valid(
                 )
                 .map(|(decision, _)| decision)
         })
-        .or_else(|| persistent_nat_destination(forwarding, forward_key, now_ns));
+        .or_else(|| persistent_nat_destination(forwarding, forward_key, now_ns, scope.zone_name));
     expected.is_some_and(|current| {
         current.rewrite_dst == Some(translated_dst)
             && current.rewrite_dst_port == nat.rewrite_dst_port
@@ -441,10 +441,19 @@ fn destination_nat_translation_still_valid(
 /// same first-match / conflict-denied semantics). `Miss`/`Denied` and
 /// conflicting candidates yield `None` (fail closed); a permitted binding
 /// yields the same `NatDecision` shape admission installed.
+///
+/// #14802/#14322: thread the same zone pair admission passes — the rule's
+/// own `from_zone` and the packet's ingress zone (`scope.zone_name`, resolved
+/// above exactly as admission resolves it). Passing empty strings would make
+/// the allocator treat the lookup as UNSCOPED (any grant bucket admits) and
+/// re-open the cross-zone grant leak #14322 closed on this mirror path; empty
+/// values arise only when a zone is genuinely unknown, which is the
+/// allocator's documented unscoped case.
 fn persistent_nat_destination(
     forwarding: &ForwardingState,
     forward_key: &SessionKey,
     now_ns: u64,
+    ingress_zone: &str,
 ) -> Option<NatDecision> {
     let mut persistent_dnat = None;
     for rule in &forwarding.source_nat_rules {
@@ -465,6 +474,8 @@ fn persistent_nat_destination(
             forward_key.src_ip,
             forward_key.src_port,
             now_ns,
+            &rule.from_zone,
+            ingress_zone,
         ) {
             crate::nat::PersistentInbound::Miss => {}
             crate::nat::PersistentInbound::Denied => return None,

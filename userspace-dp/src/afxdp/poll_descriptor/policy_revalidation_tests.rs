@@ -4196,6 +4196,117 @@ fn persistent_nat_inbound_survives_revalidation_14315() {
     );
 }
 
+/// (b2) #14802/#14322: revalidation must thread the real zone pair into
+/// `persistent_inbound_lookup`, not empty (unscoped) strings. Two rules
+/// share ONE pool/allocator: `trust->dmz` mints an `any-remote-host`
+/// grant, `trust->wan` is strict (`target-host-port`). An inbound session
+/// arriving on `wan` from an arbitrary remote must NOT validate on the dmz
+/// grant (empty args would admit any bucket and keep it alive), while the
+/// same tuple arriving on `dmz` must validate. The outbound mint below
+/// runs under zones (trust->dmz) that differ from the revalidation
+/// fixture metadata (ingress zone 2 = wan), so the allocator's grant is
+/// scoped (trust,dmz) and only a correctly-threaded (trust,wan) lookup
+/// misses it.
+#[test]
+fn persistent_nat_cross_zone_grant_does_not_validate_revalidation_14802() {
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "trust".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.zone_id_to_name.insert(3, "dmz".to_string());
+    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[
+        crate::protocol::SourceNATRuleSnapshot {
+            name: "dmz-any".to_string(),
+            from_zone: "trust".to_string(),
+            to_zone: "dmz".to_string(),
+            source_addresses: vec!["10.0.0.0/24".to_string()],
+            pool_name: "shared".to_string(),
+            pool_addresses: vec!["203.0.113.10".to_string()],
+            port_low: 40000,
+            port_high: 40010,
+            persistent_nat: true,
+            persistent_nat_permit: "any-remote-host".to_string(),
+            persistent_nat_inactivity_timeout: 300,
+            ..Default::default()
+        },
+        crate::protocol::SourceNATRuleSnapshot {
+            name: "wan-strict".to_string(),
+            from_zone: "trust".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["10.0.0.0/24".to_string()],
+            pool_name: "shared".to_string(),
+            pool_addresses: vec!["203.0.113.10".to_string()],
+            port_low: 40000,
+            port_high: 40010,
+            persistent_nat: true,
+            persistent_nat_permit: "target-host-port".to_string(),
+            persistent_nat_inactivity_timeout: 300,
+            ..Default::default()
+        },
+    ]);
+    assert_eq!(
+        forwarding.source_nat_rules.len(),
+        2,
+        "fixture: both shared-pool rules must parse"
+    );
+    // Mint the binding via trust->dmz (any-remote-host grant).
+    let mut counter = None;
+    let outbound = match crate::nat::match_source_nat_result_for_tuple(
+        &crate::nat::InterfaceNatAllocators::default(),
+        &forwarding.source_nat_rules,
+        &crate::nat::NatScopeCtx::default(),
+        "trust",
+        "dmz",
+        "10.0.0.5".parse().expect("internal host"),
+        "198.51.100.30".parse().expect("dmz remote"),
+        Some(6),
+        12345,
+        443,
+        None,
+        None,
+        NOW_14315,
+        false,
+        false,
+        crate::nat::NatHolder::Untracked,
+        &mut counter,
+    ) {
+        crate::nat::SourceNatLookup::Matched(decision) => decision,
+        other => panic!("expected matched persistent SNAT via dmz, got {other:?}"),
+    };
+    let public_ip = outbound.rewrite_src.expect("translated src");
+    let public_port = outbound.rewrite_src_port.expect("translated port");
+    // Unsolicited inbound from an arbitrary remote to the shared tuple.
+    let in_key = key_14315(6, "203.0.113.99", &public_ip.to_string(), 9999, public_port);
+    let in_decision = decision_14315(NatDecision {
+        rewrite_dst: Some("10.0.0.5".parse().expect("internal host")),
+        rewrite_dst_port: Some(12345),
+        ..NatDecision::default()
+    });
+    // Arriving on wan (zone 2): the dmz any-remote grant must NOT validate.
+    let wan_metadata = meta_14315(2, 1);
+    assert!(
+        !destination_nat_translation_still_valid(
+            &forwarding,
+            &in_decision,
+            &wan_metadata,
+            &in_key,
+            NOW_14315 + 1
+        ),
+        "dmz any-remote-host grant must not keep a wan-arriving session alive (#14802/#14322)"
+    );
+    // Arriving on dmz (zone 3): its own grant validates the same tuple.
+    let dmz_metadata = meta_14315(3, 1);
+    assert!(
+        destination_nat_translation_still_valid(
+            &forwarding,
+            &in_decision,
+            &dmz_metadata,
+            &in_key,
+            NOW_14315 + 1
+        ),
+        "dmz-arriving session must validate on its own any-remote-host grant (#14802)"
+    );
+}
+
 /// (c) Revalidation is read-only: TCP DNAT + static SNAT revalidation leaves
 /// every per-rule hit counter unchanged.
 #[test]
