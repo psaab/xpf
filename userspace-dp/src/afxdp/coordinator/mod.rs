@@ -796,6 +796,51 @@ impl Coordinator {
         }
     }
 
+    /// #14677: stop workers for a link DOWN/UP cycle (`stop_workers`,
+    /// driven by Go `PrepareLinkCycle`) while preserving the state the
+    /// subsequent `rebind` (`NotifyLinkCycle`) must replay/migrate:
+    /// `sessions.synced`/`nat`/`forward_wire`/`owner_rg_indexes`
+    /// (`clear_synced_state=false`), plus `forwarding` and `validation`.
+    ///
+    /// Restoring `forwarding` is not cosmetic. `stop_inner` runs
+    /// `retire_worker_holders` against `self.forwarding`'s allocators
+    /// while the (now-joined) worker records still name their holders,
+    /// then defaults `forwarding` — discarding the `PortAllocator`
+    /// instances (persistent-NAT leases in `persistent_by_source`, live
+    /// flow records) and the `tunnel_endpoints` baseline. The following
+    /// `rebind` -> `reconcile` builds its new forwarding with
+    /// `previous = Some(&coord.forwarding)` for allocator reuse and
+    /// captures `tunnel_owners`/`snapshot_was_installed` in `tear_down`
+    /// BEFORE its own `stop_inner(false)`; a defaulted forwarding makes
+    /// both see an empty baseline (no allocator carry-over, remap purge
+    /// blind). Preserving the struct across the worker stop keeps those
+    /// baselines intact until `tear_down` captures them. The allocator
+    /// objects themselves are `Arc`-shared, so the holder retirement
+    /// inside `stop_inner` still frees worker-held bits on the SAME
+    /// allocators the preserved forwarding (and the later rebuild, via
+    /// `previous`) will reuse — no leak, no double-free.
+    ///
+    /// `validation` is preserved for the same reason: `tear_down`
+    /// captures `snapshot_was_installed` from it, and defaulting it
+    /// would blind the tunnel-owner remap purge in `apply_snapshot`.
+    ///
+    /// The event stream is NOT torn down (same as `stop`): it must
+    /// survive XSK bind/unbind cycles.
+    pub fn stop_for_link_cycle(&mut self) {
+        let preserved_forwarding = std::mem::take(&mut self.forwarding);
+        let preserved_validation = self.validation;
+        self.stop_inner(false);
+        self.forwarding = preserved_forwarding;
+        self.validation = preserved_validation;
+        // `stop_inner` re-attached the shared SA store onto the defaulted
+        // forwarding; the preserved forwarding already carries its own.
+        // Republish so the worker-visible view pairs the preserved
+        // forwarding/validation instead of the defaulted pair stop_inner
+        // published. Workers are joined, so this is teardown-only.
+        self.publish_runtime_view();
+        self.last_reconcile_stage = ReconcileStage::Stopped;
+    }
+
     /// Start the event stream sender. The I/O thread connects to the daemon
     /// listener at `socket_path` and pushes binary-framed session events.
     pub fn start_event_stream(&mut self, socket_path: &str) {

@@ -1818,6 +1818,180 @@ fn rebind_preserves_synced_sessions() {
     );
 }
 
+// --- stop_workers link cycle (#14677) -----------------------------------
+
+#[test]
+fn stop_workers_preserves_synced_sessions_for_rebind() {
+    // #14677 regression (D6-05). The RETH MAC link cycle is
+    // PrepareLinkCycle (`stop_workers`) -> link DOWN/UP ->
+    // NotifyLinkCycle (`rebind`). `stop_workers::handle` used to call
+    // `guard.afxdp.stop()` (stop_inner(true)), wiping every HA-synced
+    // session BEFORE `rebind`'s reconcile could replay them. This pins
+    // the observable consequence across the exact verb sequence Go
+    // drives: a synced session installed before `stop_workers` must
+    // still be present after `stop_workers`, and after the following
+    // `rebind`.
+    //
+    // RED-on-revert: restore `guard.afxdp.stop()` in stop_workers (or
+    // pass clear_synced_state=true in stop_for_link_cycle) and the
+    // post-stop_workers assertion fails — the map is empty.
+    //
+    // Forwarding armed + supported for the same reason as
+    // `rebind_preserves_synced_sessions`: the rebind leg must take the
+    // real reconcile path, not the disarmed `afxdp.stop()` branch.
+    let state = new_state(ProcessStatus {
+        forwarding_armed: true,
+        capabilities: UserspaceCapabilities {
+            forwarding_supported: true,
+            unsupported_reasons: Vec::new(),
+        },
+        ..ProcessStatus::default()
+    });
+
+    let mut upsert = req("sync_session");
+    upsert.session_sync = Some(SessionSyncRequest {
+        operation: "upsert".to_string(),
+        addr_family: 2,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        ..SessionSyncRequest::default()
+    });
+    let upsert_resp = run_request(state.clone(), upsert);
+    assert!(upsert_resp.ok, "upsert failed: {}", upsert_resp.error);
+    let before = state
+        .lock()
+        .unwrap()
+        .afxdp
+        .snapshot_shared_session_entries();
+    assert!(!before.is_empty(), "synced session should be present after upsert");
+
+    let stop_resp = run_request(state.clone(), req("stop_workers"));
+    assert!(stop_resp.ok, "stop_workers failed: {}", stop_resp.error);
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .afxdp
+            .snapshot_shared_session_entries()
+            .len(),
+        before.len(),
+        "#14677: stop_workers wiped the synced-session map — the link-cycle \
+         stop must preserve it for rebind replay (stop_inner(true) clears it)"
+    );
+
+    let rebind_resp = run_request(state.clone(), req("rebind"));
+    assert!(rebind_resp.ok, "rebind failed: {}", rebind_resp.error);
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .afxdp
+            .snapshot_shared_session_entries()
+            .len(),
+        before.len(),
+        "#14677: synced sessions did not survive the stop_workers -> rebind \
+         link cycle"
+    );
+}
+
+#[test]
+fn stop_workers_preserves_forwarding_and_validation_baselines() {
+    // #14677: the forwarding/validation half of D6-05. `stop_inner(true)`
+    // also defaults `coord.forwarding` (discarding the PortAllocator
+    // instances holding persistent-NAT leases and the tunnel_endpoints
+    // baseline) and `coord.validation` (snapshot_installed), so the
+    // following rebind's build_reconcile_forwarding sees an empty
+    // `previous` (no allocator carry-over) and tear_down captures an
+    // empty tunnel_owners / snapshot_was_installed=false (remap purge
+    // blind). Seed non-default baselines, drive `stop_workers`, and
+    // assert they survive.
+    //
+    // RED-on-revert: restore `guard.afxdp.stop()` in stop_workers and
+    // both assertions fail (forwarding defaulted, validation defaulted).
+    let state = new_state(ProcessStatus::default());
+    {
+        let mut guard = state.lock().unwrap();
+        guard.afxdp.seed_link_cycle_baselines_for_test_14677();
+    }
+    let stop_resp = run_request(state.clone(), req("stop_workers"));
+    assert!(stop_resp.ok, "stop_workers failed: {}", stop_resp.error);
+    let guard = state.lock().unwrap();
+    let (tunnels, installed, pool_rules) = guard.afxdp.link_cycle_baselines_for_test_14677();
+    assert_eq!(
+        tunnels, 1,
+        "#14677: stop_workers wiped the tunnel-owner baseline \
+         (forwarding.tunnel_endpoints) that rebind's tear_down must capture"
+    );
+    assert!(
+        installed,
+        "#14677: stop_workers reset validation.snapshot_installed, blinding \
+         the tunnel-owner remap purge in apply_snapshot"
+    );
+    assert_eq!(
+        pool_rules, 1,
+        "#14677: stop_workers discarded the source-NAT rules (and their \
+         PortAllocator persistent-lease state) that rebind must migrate via \
+         previous-forwarding allocator reuse"
+    );
+}
+
+#[test]
+fn full_stop_still_wipes_synced_sessions_control_14677() {
+    // Control for the two cells above: the TERMINAL stop (`stop()` /
+    // shutdown / disarm) must still wipe synced state. If
+    // stop_for_link_cycle's preservation leaked into `stop()`, this
+    // fails — the preservation is link-cycle-only.
+    let state = new_state(ProcessStatus {
+        forwarding_armed: true,
+        capabilities: UserspaceCapabilities {
+            forwarding_supported: true,
+            unsupported_reasons: Vec::new(),
+        },
+        ..ProcessStatus::default()
+    });
+    let mut upsert = req("sync_session");
+    upsert.session_sync = Some(SessionSyncRequest {
+        operation: "upsert".to_string(),
+        addr_family: 2,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        ..SessionSyncRequest::default()
+    });
+    let upsert_resp = run_request(state.clone(), upsert);
+    assert!(upsert_resp.ok, "upsert failed: {}", upsert_resp.error);
+    assert!(
+        !state
+            .lock()
+            .unwrap()
+            .afxdp
+            .snapshot_shared_session_entries()
+            .is_empty(),
+        "fixture: synced session should be present after upsert"
+    );
+    state.lock().unwrap().afxdp.stop();
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .afxdp
+            .snapshot_shared_session_entries()
+            .is_empty(),
+        "control: terminal stop() must still wipe synced sessions"
+    );
+}
+
 // --- bump_fib_generation ------------------------------------------------
 
 #[test]

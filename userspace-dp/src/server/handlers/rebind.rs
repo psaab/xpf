@@ -31,9 +31,15 @@ pub(super) fn handle(
     // session map (which should be replayed into BPF maps on bringup) and
     // defaulting coord.forwarding/coord.validation before tear_down
     // captures tunnel_owners/snapshot_was_installed (which blinds the
-    // tunnel-owner remap purge in apply_snapshot). The RETH-MAC link-cycle
-    // path is unaffected: Go sends a separate stop_workers request before
-    // the link cycle and only sends rebind after link-up.
+    // tunnel-owner remap purge in apply_snapshot).
+    //
+    // #14677: the RETH-MAC link-cycle path reaches this handler only after
+    // Go's PrepareLinkCycle sent `stop_workers`. That leg used to call
+    // `guard.afxdp.stop()` (stop_inner(true)) and wiped exactly the state
+    // above BEFORE this reconcile ran, so the avoidance here did not save
+    // it. `stop_workers` now calls `stop_for_link_cycle`
+    // (stop_inner(false) + forwarding/validation preserved), so the state
+    // tear_down captures and bring-up replays survives the whole cycle.
     //
     // No settle wait — worker threads create sockets async.
     // The response returns immediately; sockets become ready
