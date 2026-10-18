@@ -472,8 +472,13 @@ fn fragment_nat64_ipv6_frame(
         frames.push(frame);
         return Some(frames);
     }
-    // IPv6 links have a 1280-byte minimum MTU. Reserve base + fragment headers.
-    let mtu = mtu.max(1280);
+    // #14658: fragment at the caller's ACTUAL egress MTU. The 1280 IPv6
+    // link minimum is a floor hosts must accept, not the configured
+    // egress MTU: a sub-1280 tunnel inner MTU (WireGuard/GRE underlay)
+    // is a genuine smaller budget. Flooring to 1280 emitted fragments
+    // over that MTU (a 1240-byte packet became one 1248-byte atomic
+    // fragment), which the WG/GRE outer-MTU guards then dropped with
+    // no PTB. Mirrors #5159, which removed the same floor elsewhere.
     let base_next = ip[6];
     let existing_fragment = base_next == 44;
     if existing_fragment && payload_len < 8 {
@@ -496,6 +501,9 @@ fn fragment_nat64_ipv6_frame(
     };
     let data = ip.get(data_offset..total_len)?;
     let max_data = mtu.saturating_sub(48) / 8 * 8;
+    if max_data == 0 {
+        return None;
+    }
     let mut offset = 0usize;
     while offset < data.len() {
         let len = (data.len() - offset).min(max_data);
