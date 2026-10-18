@@ -170,17 +170,25 @@ func validateIPsecProposalSettingsAgree(policyName string, refs []string, propos
 //     nothing dangles.
 //   - gateway -> defined ike-policy -> defined ike-proposal.
 //   - the legacy direct-proposal fallback: a gateway whose `ike-policy`
-//     value is itself the NAME of a defined IPsec (Phase 2) proposal, which
-//     resolveIKESettings renders via buildIKEProposal when the ike-policy
-//     chain is absent. Accepted so a config that genuinely renders a
-//     non-empty proposal is never rejected.
+//     value is itself the NAME of a defined IPsec (Phase 2) proposal AND
+//     names no defined ike-policy, which resolveIKESettings renders via
+//     buildIKEProposal when the ike-policy chain is absent. Accepted so
+//     a config that genuinely renders a non-empty proposal is never
+//     rejected. A defined ike-policy SHADOWS a same-named ESP proposal
+//     (#14689): the fallback is consulted only when no ike-policy of
+//     that name was authored, at commit and at render alike.
 //
 // Rejected:
 //   - a gateway whose `ike-policy` names no defined ike-policy AND is not a
 //     defined IPsec-proposal name (a typo / dangling reference).
 //   - a gateway whose `ike-policy` resolves to a defined ike-policy but
-//     that policy's `proposals` reference names no defined ike-proposal,
-//     and the ike-policy value is not also a defined IPsec-proposal name.
+//     that policy's `proposals` reference names no defined ike-proposal
+//     (including a partially-dangling list, and a policy with no
+//     `proposals` leaf) — even when an ESP proposal shares the policy
+//     name (#14689).
+//   - an authored policy whose RESOLVED proposals disagree on
+//     authentication method or lifetime, even when the list is also
+//     partially dangling (#14689).
 //
 // Only gateways actually referenced by a VPN are validated: an orphan
 // gateway never reaches render, so an unreferenced dangling chain is inert
@@ -209,32 +217,31 @@ func validateIKEPolicyChainReferencesStrict(cfg *Config) error {
 	espProposals := ipsec.Proposals
 
 	// chainResolves mirrors resolveIKESettings' acceptance: the
-	// ike-policy -> ike-proposal chain, OR the legacy direct-proposal
-	// fallback (the ike-policy value is itself a defined Phase-2 proposal
-	// name).
+	// ike-policy -> ike-proposal chain, OR — only when no ike-policy of
+	// that name was authored — the legacy direct-proposal fallback (the
+	// ike-policy value is itself a defined Phase-2 proposal name).
+	// #14689: when an ike-policy WAS authored, a same-named ESP proposal
+	// must not rescue its broken chain; the authored policy shadows the
+	// fallback exactly as it does at render.
 	chainResolves := func(ikePolicyName string) bool {
 		if pol, ok := ikePolicies[ikePolicyName]; ok && pol != nil {
 			// #3904: `proposals` is a list — the chain resolves only when
 			// EVERY referenced ike-proposal is defined. A partially-dangling
 			// list is an operator typo the commit-check must catch (the
 			// pre-#3904 scalar checked only the first reference).
-			if len(pol.Proposals) > 0 {
-				allResolve := true
-				for _, ref := range pol.Proposals {
-					if _, ok := ikeProposals[ref]; !ok {
-						allResolve = false
-						break
-					}
-				}
-				if allResolve {
-					return true
+			if len(pol.Proposals) == 0 {
+				return false
+			}
+			for _, ref := range pol.Proposals {
+				if prop, ok := ikeProposals[ref]; !ok || prop == nil {
+					return false
 				}
 			}
+			return true
 		}
 		// Legacy fallback: a gateway's ike-policy value naming an IPsec
-		// proposal directly. resolveIKESettings only consults this when the
-		// ike-policy chain is absent, so checking it unconditionally here is
-		// a superset that never wrongly rejects a renderable config.
+		// proposal directly, consulted only when no ike-policy of that
+		// name was authored (resolveIKESettings' precedence).
 		if _, ok := espProposals[ikePolicyName]; ok {
 			return true
 		}
@@ -264,21 +271,19 @@ func validateIKEPolicyChainReferencesStrict(cfg *Config) error {
 			// Intentional no-policy case (strongSwan defaults chosen).
 			continue
 		}
-		if chainResolves(gw.IKEPolicy) {
-			if pol, ok := ikePolicies[gw.IKEPolicy]; ok && pol != nil && len(pol.Proposals) > 0 {
-				allIKEProposalsResolve := true
-				for _, ref := range pol.Proposals {
-					if _, ok := ikeProposals[ref]; !ok {
-						allIKEProposalsResolve = false
-						break
-					}
-				}
-				if allIKEProposalsResolve {
-					if err := validateIKEProposalSettingsAgree(gw.IKEPolicy, pol.Proposals, ikeProposals); err != nil {
-						return fmt.Errorf("gateway %q (used by ipsec vpn %q): %w", gw.Name, vpnName, err)
-					}
-				}
+		// #14689: agreement is checked over every RESOLVED proposal of an
+		// authored policy BEFORE the chain verdict, so a partially-dangling
+		// list cannot hide an auth/lifetime conflict among its resolved
+		// entries (the pre-fix code skipped agreement whenever not every
+		// reference resolved, and the shadowed-ESP fallback skipped it
+		// entirely). The runtime enforces the same conflict among rendered
+		// entries (errProposalUnresolved).
+		if pol, ok := ikePolicies[gw.IKEPolicy]; ok && pol != nil && len(pol.Proposals) > 0 {
+			if err := validateIKEProposalSettingsAgree(gw.IKEPolicy, pol.Proposals, ikeProposals); err != nil {
+				return fmt.Errorf("gateway %q (used by ipsec vpn %q): %w", gw.Name, vpnName, err)
 			}
+		}
+		if chainResolves(gw.IKEPolicy) {
 			continue
 		}
 		// A gateway may be authored under either `security ike gateway` or
