@@ -293,10 +293,36 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
         // its entry out of `hit`; local-only hits read it from the table below.
         let shared_session_id = hit.shared_entry.as_ref().map(|entry| entry.session_id);
         let shared_leak_incarnation = hit.shared_entry.as_ref().map(|entry| entry.leak_incarnation);
+        // #14666: a local-first hit (UpsertSynced/Demote materialized the
+        // row, shared_entry None) still names a shared incarnation: the
+        // local row adopted the peer's session_id at import
+        // (into_session_install) and the shared entry under the same key
+        // carries that id. Look it up now (read-only clone under the
+        // shared lock) so the purge can conditionally remove it; the
+        // purge re-checks (session_id, generation) under the removal
+        // lock, so a replacement published meanwhile declines and is
+        // preserved. Generation is not stored on the local row, so for
+        // local hits the shared lookup is the only source — if the
+        // shared entry is already gone, identity stays None and the
+        // purge correctly takes the Absent/no-replicate branch.
         let shared_identity = hit
             .shared_entry
             .as_ref()
-            .map(|entry| (entry.session_id, entry.generation));
+            .map(|entry| (entry.session_id, entry.generation))
+            .or_else(|| {
+                if !hit_origin.is_peer_synced() {
+                    return None;
+                }
+                let local_id = hit.lookup.aux.session_id;
+                if local_id == 0 {
+                    return None;
+                }
+                let key = hit.key.as_ref(&flow.forward_key);
+                lock_shared_recover(shared_sessions)
+                    .get(key)
+                    .filter(|entry| entry.session_id == local_id)
+                    .map(|entry| (entry.session_id, entry.generation))
+            });
         let source_nat_static = match hit.shared_entry.as_ref() {
             Some(entry) => entry.source_nat_static,
             // #13079: reuse the lookup's aux snapshot, no re-probe.

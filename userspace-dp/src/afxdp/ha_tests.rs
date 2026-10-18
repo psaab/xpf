@@ -10221,6 +10221,7 @@ fn scoped_peer_delete_matched_removes_and_fans_out_conditional_10512() {
             key,
             expected_id,
             companion,
+            ..
         } => {
             assert_eq!(key, &fixture.forward.key, "command must name the forward");
             assert_eq!(

@@ -2911,7 +2911,7 @@ fn colliding_ordinary_close_retires_a_keeps_b10512() {
     let q = peer_queue.lock().expect("lock");
     assert!(
         q.iter().any(|c| matches!(c,
-            WorkerCommand::DeleteSyncedConditional { key, expected_id, companion }
+            WorkerCommand::DeleteSyncedConditional { key, expected_id, companion, .. }
             if key == &fx.key_a && *expected_id == fx.id_a && companion.as_ref() == Some(&expected_rev))),
         "stale close must replicate conditionally with the derived companion, got {q:?}"
     );

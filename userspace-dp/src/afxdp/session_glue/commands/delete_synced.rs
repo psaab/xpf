@@ -115,6 +115,8 @@ pub(in crate::afxdp::session_glue) fn handle_remove_policy_item(
         None,
     );
     if let Some(companion) = remove_companion {
+        // #14666: policy batch already validated companion identity above
+        // (captured id matched live), so carry it as the expected id.
         handle_delete_synced_with_guard(
             sessions,
             session_map,
@@ -125,12 +127,12 @@ pub(in crate::afxdp::session_glue) fn handle_remove_policy_item(
             now_secs,
             deleted_keys,
             worker_id,
-        false,
-        false,
-        &mut *deferred_redirects,
-        0,
-        None,
-    );
+            false,
+            false,
+            &mut *deferred_redirects,
+            item.companion_session_id,
+            None,
+        );
     }
     true
 }
@@ -261,6 +263,7 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_conditional(
     deleted_keys: &mut Vec<SessionKey>,
     worker_id: u32,
     companion: Option<SessionKey>,
+    companion_expected_id: u64,
 ) {
     handle_delete_synced_with_guard(
         sessions,
@@ -276,7 +279,7 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_conditional(
         true,
         &mut Vec::new(),
         expected_id,
-        companion,
+        companion.map(|k| (k, companion_expected_id)),
     );
 }
 pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
@@ -295,9 +298,11 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
     expected_id: u64,
     // #10512 scoped companion: torn down in this same handler after the
     // forward (never a standalone command — a declined forward must leave
-    // it untouched). Unconditional once the forward matched (plan-literal;
-    // same-thread atomic on the worker).
-    companion: Option<SessionKey>,
+    // it untouched). #14666: carries the companion incarnation captured
+    // with the forward (0 = not captured, legacy unconditional); a live
+    // companion with a different id is a replacement and is preserved,
+    // an absent companion (live id 0) is already converged.
+    companion: Option<(SessionKey, u64)>,
 ) {
     // #10512 scoped HA delete: only the captured incarnation may go — a
     // replacement installed after the shared remove (queue delay) keeps
@@ -448,26 +453,30 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
     // issues NO BPF here — phase 2 executes the covering forward intent
     // instead ("NO BPF under this fence, ever").
     // Scoped companion (see param doc): same-handler teardown after the
-    // forward, unconditional (legacy parity — the standalone reverse
-    // command it replaces never checked either). Reached only when the
-    // forward matched (mismatch returned at the top), so a declined
-    // forward leaves both halves untouched.
-    if let Some(companion_key) = companion {
-        handle_delete_synced_with_guard(
-            sessions,
-            session_map,
-            forwarding,
-            ha_state,
-            companion_key,
-            now_ns,
-            now_secs,
-            deleted_keys,
-            worker_id,
-            enforce_peer_owner,
-            remove_mirror,
-            deferred_redirects,
-            0,
-            None,
-        );
+    // forward. Reached only when the forward matched (mismatch returned
+    // at the top), so a declined forward leaves both halves untouched.
+    if let Some((companion_key, companion_expected_id)) = companion {
+        let live_companion_id = sessions.session_id_for(&companion_key);
+        if live_companion_id == 0
+            || companion_expected_id == 0
+            || live_companion_id == companion_expected_id
+        {
+            handle_delete_synced_with_guard(
+                sessions,
+                session_map,
+                forwarding,
+                ha_state,
+                companion_key,
+                now_ns,
+                now_secs,
+                deleted_keys,
+                worker_id,
+                enforce_peer_owner,
+                remove_mirror,
+                deferred_redirects,
+                if live_companion_id == 0 { 0 } else { companion_expected_id },
+                None,
+            );
+        }
     }
 }

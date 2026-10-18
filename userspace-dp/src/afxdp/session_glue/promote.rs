@@ -399,6 +399,7 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
             now_ns,
             session_id,
             None,
+            0,
         );
     }
     // #5295: return the pool reservation to the local allocator, exactly as

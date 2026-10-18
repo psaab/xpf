@@ -807,9 +807,16 @@ pub(super) fn flush_session_deltas(
                 // destructive-unconditional local ops above need Removed.
                 if stale {
                     // One conditional forward command carrying the derived
-                    // reverse key: siblings delete the companion only
-                    // after the forward's expected id matches (no
-                    // companion identity is capturable from a close).
+                    // reverse key. #14666: capture the companion
+                    // incarnation from the shared reverse entry at this
+                    // capture moment (same moment as scoped_id); 0 when
+                    // the shared map holds no reverse row (worker may
+                    // still hold a local companion the producer cannot
+                    // name — worker then preserves it, bounded leak).
+                    let companion_expected_id =
+                        super::shared_ops::lookup_shared_session(shared_sessions, &reverse_key)
+                            .map(|e| e.session_id)
+                            .unwrap_or(0);
                     super::session_glue::replicate_session_delete_conditional(
                         peer_worker_commands,
                         worker_commands_by_id,
@@ -820,6 +827,7 @@ pub(super) fn flush_session_deltas(
                         crate::afxdp::wg::counters::monotonic_now_ns(),
                         scoped_id,
                         Some(reverse_key),
+                        companion_expected_id,
                     );
                 } else {
                     // #8114 item 4: repair the sibling NAT holder bit a refused
