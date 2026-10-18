@@ -1421,6 +1421,28 @@ on a fragment's absent L4). Tests: `stale_local_delivery_policer_captures_with_p
 (`flowless_verdict_tests.rs`), `local_delivery_non_syn_ack_input_policer_drops_second_packet_14317`
 (`tests_gre_local_delivery.rs`).
 
+**#14659: PBR terms enforce their modifiers.** The TX-selection walk no
+longer returns before `merge_matched_tx_modifiers` on a matched
+`routing-instance` term: the term is terminal (`continue_term == false`),
+so its three-color policer meters, its forwarding-class/dscp-rewrite
+apply, and the `!continue_term` arm returns — on transit this walk is the
+sole enforcer. The cached TX-selection capture already merged the term
+(it never special-cased routing-instance), so flow-cache replay was
+already covered. The host-bound session replay capture
+(`capture_input_filter_policers_v4/v6`) extends the PBR term's policer
+handle before stopping, mirroring the #14121 counter capture, and the
+non-routing walk returns its accumulated `next term` modifiers (policer
+drop/log/FC/DSCP) instead of `FilterResult::default()` when it defers at
+a PBR term. Inline paths run the routing-bearing remainder only when the
+non-routing walk stayed green, so a fall-through policer is never
+double-charged; the tunnel outer gate meters through the PBR term only
+for a firewall-local outer destination (transit decap defers to its
+TX-selection leg). Tests:
+`pbr_input_term_enforces_three_color_policer_fc_and_dscp_on_runtime_tx_selection_14659`,
+`pbr_input_term_policer_replay_contains_pbr_term_14659`, and
+`non_routing_walk_preserves_next_term_policer_drop_before_pbr_14659`
+(`filter/tests.rs`).
+
 ### `then reject` synthesizes an active reply (#2521)
 
 `FilterAction::Reject` (`then reject`) normally synthesizes an active reply:

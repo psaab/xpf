@@ -159,7 +159,7 @@ fn evaluate_filter_ref_tx_selection_runtime<'a>(
     // count.
     count_terms: bool,
 ) -> TxSelectionFilterResult<'a> {
-    evaluate_filter_ref_tx_selection_runtime_bearing(
+    evaluate_filter_ref_tx_selection_runtime_inner(
         filter,
         src_ip,
         dst_ip,
@@ -171,13 +171,12 @@ fn evaluate_filter_ref_tx_selection_runtime<'a>(
         packet_bytes,
         now_ns,
         count_terms,
-        false,
     )
 }
 
 #[inline]
 #[allow(clippy::too_many_arguments)]
-fn evaluate_filter_ref_tx_selection_runtime_bearing<'a>(
+fn evaluate_filter_ref_tx_selection_runtime_inner<'a>(
     filter: &'a Filter,
     src_ip: IpAddr,
     dst_ip: IpAddr,
@@ -189,39 +188,15 @@ fn evaluate_filter_ref_tx_selection_runtime_bearing<'a>(
     packet_bytes: u64,
     now_ns: Option<u64>,
     count_terms: bool,
-    // #14120: when true, a matched routing-instance term does NOT stop the
-    // walk (its policer still meters); when false the walk defers there,
-    // mirroring the non-routing evaluator.
-    routing_bearing: bool,
 ) -> TxSelectionFilterResult<'a> {
     match (src_ip, dst_ip) {
         (IpAddr::V4(src), IpAddr::V4(dst)) => evaluate_filter_ref_tx_selection_counted_v4(
-            filter,
-            src,
-            dst,
-            protocol,
-            src_port,
-            dst_port,
-            dscp,
-            extra,
-            packet_bytes,
-            now_ns,
+            filter, src, dst, protocol, src_port, dst_port, dscp, extra, packet_bytes, now_ns,
             count_terms,
-            routing_bearing,
         ),
         (IpAddr::V6(src), IpAddr::V6(dst)) => evaluate_filter_ref_tx_selection_counted_v6(
-            filter,
-            src,
-            dst,
-            protocol,
-            src_port,
-            dst_port,
-            dscp,
-            extra,
-            packet_bytes,
-            now_ns,
+            filter, src, dst, protocol, src_port, dst_port, dscp, extra, packet_bytes, now_ns,
             count_terms,
-            routing_bearing,
         ),
         _ => TxSelectionFilterResult::default(),
     }
@@ -241,7 +216,6 @@ fn evaluate_filter_ref_tx_selection_counted_v4<'a>(
     packet_bytes: u64,
     now_ns: Option<u64>,
     count_terms: bool,
-    routing_bearing: bool,
 ) -> TxSelectionFilterResult<'a> {
     // #2544: accumulate modifiers across fall-through terms (forwarding-class,
     // dscp-rewrite, policer metering + drop, log). A matched fall-through term
@@ -260,9 +234,11 @@ fn evaluate_filter_ref_tx_selection_counted_v4<'a>(
         if count_terms && term.has_count {
             record_filter_counter(&term.counter, packet_bytes);
         }
-        if !routing_bearing && !term.routing_instance.is_empty() {
-            return acc;
-        }
+        // #14659: a matched routing-instance (PBR) term is terminal (its
+        // `continue_term` is false), so merge its modifiers — three-color
+        // policer meter, forwarding-class, dscp-rewrite, log — and let the
+        // `!continue_term` arm below return. Deferring here discarded all
+        // of them on the transit TX-selection leg, the sole enforcer.
         merge_matched_tx_modifiers(&mut acc, filter, term, now_ns, packet_bytes);
         if !term.continue_term {
             acc.action = term.action;
@@ -316,7 +292,6 @@ fn evaluate_filter_ref_tx_selection_counted_v6<'a>(
     packet_bytes: u64,
     now_ns: Option<u64>,
     count_terms: bool,
-    routing_bearing: bool,
 ) -> TxSelectionFilterResult<'a> {
     // #2544: see evaluate_filter_ref_tx_selection_counted_v4.
     let mut acc = TxSelectionFilterResult::default();
@@ -331,9 +306,7 @@ fn evaluate_filter_ref_tx_selection_counted_v6<'a>(
         if count_terms && term.has_count {
             record_filter_counter(&term.counter, packet_bytes);
         }
-        if !routing_bearing && !term.routing_instance.is_empty() {
-            return acc;
-        }
+        // #14659: see v4 — merge the PBR term's modifiers before terminating.
         merge_matched_tx_modifiers(&mut acc, filter, term, now_ns, packet_bytes);
         if !term.continue_term {
             acc.action = term.action;
@@ -343,48 +316,11 @@ fn evaluate_filter_ref_tx_selection_counted_v6<'a>(
     acc
 }
 
-/// #14120: routing-bearing TX-selection walk — like
-/// [`evaluate_filter_ref_tx_selection_runtime_uncounted`] (counter-suppressed,
-/// policer-metered) but does NOT stop at a matched routing-instance term: the
-/// non-routing walk defers there, so without this walk a policer on or after
-/// such a term would meter nowhere on the host-bound / Stage-11 paths. The
-/// caller owns the PBR verdict separately; only the meter (and the folded
-/// drop) is consumed from the result.
-/// #14120: the uncounted TX-selection walk with its DEFER-AT-PBR-TERM
-/// behavior exposed: `false` (transit) stops before a routing-instance term
-/// so the routing evaluator owns that term's policer; `true` (host-bound /
-/// Stage-11 remainder) meters through it, because no routing evaluator's
-/// TX-selection leg follows on those paths.
-#[inline]
-pub(crate) fn evaluate_filter_ref_tx_selection_runtime_uncounted_bearing<'a>(
-    filter: &'a Filter,
-    src_ip: IpAddr,
-    dst_ip: IpAddr,
-    protocol: u8,
-    src_port: u16,
-    dst_port: u16,
-    dscp: u8,
-    extra: TermMatchExtra<'_>,
-    packet_bytes: u64,
-    now_ns: u64,
-    routing_bearing: bool,
-) -> TxSelectionFilterResult<'a> {
-    evaluate_filter_ref_tx_selection_runtime_bearing(
-        filter,
-        src_ip,
-        dst_ip,
-        protocol,
-        src_port,
-        dst_port,
-        dscp,
-        extra,
-        packet_bytes,
-        Some(now_ns),
-        false,
-        routing_bearing,
-    )
-}
-
+/// #14120/#14659: counter-suppressed, policer-metered TX-selection walk for
+/// callers that own the PBR verdict separately (host-bound / Stage-11
+/// remainder and the tunnel outer gate). Since #14659 the walk merges a
+/// matched routing-instance term's modifiers, so only the meter (and the
+/// folded drop) is consumed from the result.
 #[inline]
 pub(crate) fn evaluate_filter_ref_tx_selection_runtime_routing_bearing<'a>(
     filter: &'a Filter,
@@ -398,7 +334,7 @@ pub(crate) fn evaluate_filter_ref_tx_selection_runtime_routing_bearing<'a>(
     packet_bytes: u64,
     now_ns: u64,
 ) -> TxSelectionFilterResult<'a> {
-    evaluate_filter_ref_tx_selection_runtime_bearing(
+    evaluate_filter_ref_tx_selection_runtime_inner(
         filter,
         src_ip,
         dst_ip,
@@ -410,7 +346,6 @@ pub(crate) fn evaluate_filter_ref_tx_selection_runtime_routing_bearing<'a>(
         packet_bytes,
         Some(now_ns),
         false,
-        true,
     )
 }
 

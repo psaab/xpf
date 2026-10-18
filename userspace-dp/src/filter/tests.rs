@@ -356,6 +356,232 @@ fn input_filter_counters_cached_includes_pbr_term_14121() {
     assert_eq!(filter.terms[0].counter.packets.load(Ordering::Relaxed), 1);
     assert_eq!(filter.terms[1].counter.packets.load(Ordering::Relaxed), 1);
 }
+// #14659 (D3-01): a PBR (`then routing-instance`) input term's three-color
+// policer, forwarding-class and dscp-rewrite must be enforced by the runtime
+// TX-selection walk — the sole enforcer on transit (poll_descriptor defers
+// there). Before the fix the walk returned `acc` before
+// `merge_matched_tx_modifiers` for any routing-instance term, so the policer
+// never metered and FC/DSCP were lost.
+#[test]
+fn pbr_input_term_enforces_three_color_policer_fc_and_dscp_on_runtime_tx_selection_14659() {
+    let state = parse_filter_state_with_three_color(
+        &[FirewallFilterSnapshot {
+            name: "pbr-ef".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "pbr-ef".into(),
+                protocols: vec!["tcp".into()],
+                destination_ports: vec!["443".into()],
+                action: "accept".into(),
+                routing_instance: "vrf-cust".into(),
+                forwarding_class: "expedited-forwarding".into(),
+                dscp_rewrite: Some(46),
+                policer: "tcp-10m".into(),
+                ..Default::default()
+            }],
+        }],
+        &[],
+        &[ThreeColorPolicerSnapshot {
+            name: "tcp-10m".into(),
+            mode: "single-rate".into(),
+            color_blind: true,
+            committed_rate_bytes_per_sec: 1,
+            committed_burst_bytes: 1_000,
+            peak_or_excess_burst_bytes: 50,
+            then_action: "discard".into(),
+            ..Default::default()
+        }],
+        &[crate::InterfaceSnapshot {
+            ifindex: 7,
+            filter_input_v4: "pbr-ef".into(),
+            ..Default::default()
+        }],
+        "",
+        "",
+    )
+    .expect("filter state compiles");
+    let filter = state.iface_filter_v4_fast.get(&7).expect("input filter");
+    let meter = |bytes: u64| {
+        evaluate_filter_ref_tx_selection_runtime_uncounted(
+            filter,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            PROTO_TCP,
+            40000,
+            443,
+            0,
+            TermMatchExtra::default(),
+            bytes,
+            0,
+        )
+    };
+    let first = meter(800);
+    assert_eq!(first.forwarding_class, Some("expedited-forwarding"));
+    assert_eq!(first.dscp_rewrite, Some(46));
+    assert!(!first.policer_drop, "conforming PBR packet must pass");
+    let second = meter(800);
+    assert!(
+        second.policer_drop,
+        "second oversized PBR packet must be red-dropped by its three-color policer (#14659)"
+    );
+    // Cached (flow-cache seed) capture must also contain the PBR term's policer.
+    let cached = evaluate_filter_ref_tx_selection_cached(
+        filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_TCP,
+        40000,
+        443,
+        0,
+    );
+    assert_eq!(
+        cached.three_color_policers.len(),
+        1,
+        "cached TX selection must carry the PBR term policer for replay"
+    );
+    assert_eq!(cached.forwarding_class.as_deref(), Some("expedited-forwarding"));
+    assert_eq!(cached.dscp_rewrite, Some(46));
+}
+
+// #14659: the host-bound session replay capture must include the PBR term's
+// policer handle (extend before the routing-instance return), mirroring the
+// #14121 counter capture. Before the fix it returned empty.
+#[test]
+fn pbr_input_term_policer_replay_contains_pbr_term_14659() {
+    let state = parse_filter_state_with_three_color(
+        &[FirewallFilterSnapshot {
+            name: "pbr-pol".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "pbr-pol".into(),
+                protocols: vec!["tcp".into()],
+                destination_ports: vec!["443".into()],
+                action: "accept".into(),
+                routing_instance: "vrf-cust".into(),
+                policer: "tcp-10m".into(),
+                ..Default::default()
+            }],
+        }],
+        &[],
+        &[ThreeColorPolicerSnapshot {
+            name: "tcp-10m".into(),
+            mode: "single-rate".into(),
+            color_blind: true,
+            committed_rate_bytes_per_sec: 1,
+            committed_burst_bytes: 1_000,
+            peak_or_excess_burst_bytes: 50,
+            then_action: "discard".into(),
+            ..Default::default()
+        }],
+        &[crate::InterfaceSnapshot {
+            ifindex: 7,
+            filter_input_v4: "pbr-pol".into(),
+            ..Default::default()
+        }],
+        "",
+        "",
+    )
+    .expect("filter state compiles");
+    let policers = evaluate_interface_input_filter_policers_cached(
+        &state,
+        7,
+        false,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_TCP,
+        40000,
+        443,
+        0,
+        TermMatchExtra::default(),
+    );
+    assert_eq!(
+        policers.len(),
+        1,
+        "policer replay must contain the PBR term (#14659)"
+    );
+    let first = apply_cached_three_color_policers(&policers, 0, 800);
+    assert!(!first.drop);
+    let second = apply_cached_three_color_policers(&policers, 0, 800);
+    assert!(second.drop, "replayed PBR policer must drop over-rate packet");
+}
+
+// #14659: a `next term` policer-drop/log accumulated before a PBR term must
+// survive the non-routing walk's deferral (return accumulated `acc`, not
+// `FilterResult::default()`).
+#[test]
+fn non_routing_walk_preserves_next_term_policer_drop_before_pbr_14659() {
+    let state = parse_filter_state_with_three_color(
+        &[FirewallFilterSnapshot {
+            name: "next-then-pbr".into(),
+            family: "inet".into(),
+            terms: vec![
+                FirewallTermSnapshot {
+                    name: "police-first".into(),
+                    protocols: vec!["tcp".into()],
+                    destination_ports: vec!["443".into()],
+                    action: String::new(),
+                    next_term: true,
+                    log: true,
+                    policer: "first-pol".into(),
+                    ..Default::default()
+                },
+                FirewallTermSnapshot {
+                    name: "steer".into(),
+                    protocols: vec!["tcp".into()],
+                    destination_ports: vec!["443".into()],
+                    action: "accept".into(),
+                    routing_instance: "vrf-cust".into(),
+                    ..Default::default()
+                },
+            ],
+        }],
+        &[],
+        &[ThreeColorPolicerSnapshot {
+            name: "first-pol".into(),
+            mode: "single-rate".into(),
+            color_blind: true,
+            committed_rate_bytes_per_sec: 1,
+            committed_burst_bytes: 100,
+            peak_or_excess_burst_bytes: 50,
+            then_action: "discard".into(),
+            ..Default::default()
+        }],
+        &[crate::InterfaceSnapshot {
+            ifindex: 7,
+            filter_input_v4: "next-then-pbr".into(),
+            ..Default::default()
+        }],
+        "",
+        "",
+    )
+    .expect("filter state compiles");
+    // Inline meter (host-bound): first term meters, second packet is red.
+    let eval = |bytes: u64| {
+        evaluate_interface_filter_non_routing_counted(
+            &state,
+            7,
+            false,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            PROTO_TCP,
+            40000,
+            443,
+            0,
+            TermMatchExtra::default(),
+            bytes,
+            NonRoutingCountPolicy::Always,
+            Some(0),
+        )
+    };
+    let _ = eval(80);
+    let second = eval(80);
+    assert!(
+        second.policer_drop,
+        "next-term policer drop must survive the PBR deferral (#14659)"
+    );
+    assert!(second.log, "next-term log must survive the PBR deferral");
+    assert!(second.log_match.is_some());
+}
 
 #[test]
 fn port_range_matching() {
