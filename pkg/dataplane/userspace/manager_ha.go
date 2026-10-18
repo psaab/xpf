@@ -992,10 +992,12 @@ func (m *Manager) syncDesiredForwardingStateLocked() error {
 	// #9629 scope: when a Go-side demotion or config-removal intent is
 	// recorded, haWatchdogGroupsLocked overlays Active=false and Rust's
 	// mismatch branch refuses to mint an expired stored-active lease. The
-	// matching branch intentionally renews a still-active owner when no
-	// demotion/removal intent exists; this guarantee does not cover that normal
-	// heartbeat path. For a recorded mismatch, a continuously renewed stale
-	// owner can last only until authoritative demotion or bounded recovery.
+	// matching branch renews an owner (including resurrecting an expired
+	// stored-active, #14943) when no demotion/removal intent exists — that
+	// overlay is exactly what makes matching-active safe to resurrect: a
+	// demotion can never arrive as matching-active. For a recorded
+	// mismatch, a continuously renewed stale owner can last only until
+	// authoritative demotion or bounded recovery.
 	//
 	// Fail closed and LOUD: a clustered helper that is never told its inventory
 	// simply does not forward, and the error surfaces on the poll caller's log
@@ -1237,7 +1239,10 @@ type haWatchdogSnapshot struct {
 // membership change. Keep the old helper keys until the next full main-path
 // publish lands. A known Go-side demotion intent is overlaid as inactive so
 // an expired stored-active lease cannot be renewed while the authoritative
-// main request is blocked; activation remains at the acknowledged value until
+// main request is blocked (#14943: this overlay is what licenses Rust's
+// matching-active branch to resurrect an expired stored-active on a fresh
+// heartbeat — matching-active therefore provably carries no demotion
+// intent); activation remains at the acknowledged value until
 // UpdateRGActive succeeds.
 func (m *Manager) haWatchdogGroupsLocked() []HAGroupStatus {
 	if !m.helperHAStatePublished || len(m.haWatchdogHelperInventory) == 0 {

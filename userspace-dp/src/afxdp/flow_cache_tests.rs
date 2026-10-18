@@ -240,12 +240,12 @@ fn cache_hit_accumulates_observed_bytes() {
     };
     assert!(
         cache
-            .lookup_counted(&key, lookup, 0, &rg_epochs, 1500)
+            .lookup_counted_without_ha(&key, lookup, 0, &rg_epochs, 1500)
             .is_some()
     );
     assert!(
         cache
-            .lookup_counted(&key, lookup, 0, &rg_epochs, 900)
+            .lookup_counted_without_ha(&key, lookup, 0, &rg_epochs, 900)
             .is_some()
     );
 
@@ -500,7 +500,10 @@ fn expired_owner_rg_lease_causes_miss_without_epoch_bump() {
         config_generation: 1,
         fib_generation: 1,
     };
-    let hit = cache.lookup(&key, lookup, 51, &rg_epochs);
+    // #14943: the frozen insert stamp alone no longer evicts — the gate
+    // is the CURRENT runtime lease on a provided map (expired here).
+    let ha = ha_active_until(1, 40);
+    let hit = cache.lookup_with_ha_state(&key, lookup, 51, &rg_epochs, &ha);
     assert!(hit.is_none(), "expected miss after HA lease expiry");
     assert_eq!(cache.evictions, 1);
 }
@@ -525,10 +528,130 @@ fn expired_owner_rg_lease_causes_miss_for_out_of_range_rg() {
         config_generation: 1,
         fib_generation: 1,
     };
-    let hit = cache.lookup(&key, lookup, 51, &rg_epochs);
+    // #14943: same current-lease gate for an out-of-range owner RG.
+    let ha = ha_active_until(MAX_RG_EPOCHS as i32 + 4, 40);
+    let hit = cache.lookup_with_ha_state(&key, lookup, 51, &rg_epochs, &ha);
     assert!(
         hit.is_none(),
         "expected miss after HA lease expiry even for out-of-range owner RG"
+    );
+    assert_eq!(cache.evictions, 1);
+}
+
+fn ha_active_until(rg_id: i32, until: u64) -> BTreeMap<i32, HAGroupRuntime> {
+    BTreeMap::from([(
+        rg_id,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 0,
+            lease: HAForwardingLease::ActiveUntil(until),
+        },
+    )])
+}
+
+/// #14943: a seeded entry whose insert-frozen lease (50) has passed must
+/// still HIT when the CURRENT runtime lease is fresh (200) — and the hit
+/// re-stamps the entry to the current lease, so the next hit past the old
+/// freeze also hits. Pre-fix the frozen check evicted at now > 50.
+#[test]
+fn hit_past_insert_lease_with_fresh_runtime_lease_stays_cached_14943() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let key = make_key();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 1,
+        owner_rg_epoch: 7,
+        owner_rg_lease_until: 50,
+    };
+    rg_epochs[1].store(7, Ordering::Relaxed);
+    cache.insert(make_entry(key.clone(), stamp, 1));
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        logical_ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    let ha = ha_active_until(1, 200);
+    let hit = cache
+        .lookup_with_ha_state(&key, lookup, 100, &rg_epochs, &ha)
+        .expect("hit past insert+10s with fresh runtime lease must stay cached");
+    assert_eq!(
+        hit.stamp.owner_rg_lease_until, 200,
+        "hit must re-stamp owner_rg_lease_until from the current runtime lease"
+    );
+    assert_eq!(cache.evictions, 0);
+    // Still cached well past the insert freeze.
+    assert!(cache
+        .lookup_with_ha_state(&key, lookup, 150, &rg_epochs, &ha)
+        .is_some());
+    assert_eq!(cache.evictions, 0);
+}
+
+/// #14943 fail-closed: the CURRENT runtime lease genuinely expired
+/// (current 80, now 100) still misses + evicts, even though the entry
+/// is otherwise valid.
+#[test]
+fn hit_with_genuinely_expired_runtime_lease_still_fails_closed_14943() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let key = make_key();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 1,
+        owner_rg_epoch: 7,
+        owner_rg_lease_until: 50,
+    };
+    rg_epochs[1].store(7, Ordering::Relaxed);
+    cache.insert(make_entry(key.clone(), stamp, 1));
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        logical_ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    let ha = ha_active_until(1, 80);
+    assert!(
+        cache
+            .lookup_with_ha_state(&key, lookup, 100, &rg_epochs, &ha)
+            .is_none(),
+        "genuinely expired runtime lease must fail closed"
+    );
+    assert_eq!(cache.evictions, 1);
+}
+
+/// #14943 fail-closed: a lease-carrying entry whose owner vanished from
+/// the runtime map (or was inactivated, lease -> 0) misses — the lease
+/// is gone, not merely unrecorded.
+#[test]
+fn hit_with_vanished_runtime_lease_fails_closed_14943() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let key = make_key();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 1,
+        owner_rg_epoch: 7,
+        owner_rg_lease_until: 50,
+    };
+    rg_epochs[1].store(7, Ordering::Relaxed);
+    cache.insert(make_entry(key.clone(), stamp, 1));
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        logical_ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    // Provided (non-empty) runtime map that no longer carries RG 1.
+    let ha_other = ha_active_until(2, 200);
+    assert!(
+        cache
+            .lookup_with_ha_state(&key, lookup, 30, &rg_epochs, &ha_other)
+            .is_none(),
+        "lease-carrying entry with no current runtime lease must fail closed"
     );
     assert_eq!(cache.evictions, 1);
 }
@@ -2700,7 +2823,7 @@ fn issue_1741_clamped_entry_recoverable_by_hit() {
     cache.insert(make_entry(key.clone(), issue_1741_stamp(), 1));
     assert!(
         cache
-            .lookup_counted(&key, lookup, 0, &rg_epochs, 1500)
+            .lookup_counted_without_ha(&key, lookup, 0, &rg_epochs, 1500)
             .is_some()
     );
     // Age out + clamp.
@@ -2712,7 +2835,7 @@ fn issue_1741_clamped_entry_recoverable_by_hit() {
     assert_eq!(active, 0);
     // Returning flow: hit re-stamps; counted again; bytes preserved.
     let hit = cache
-        .lookup_counted(&key, lookup, 0, &rg_epochs, 900)
+        .lookup_counted_without_ha(&key, lookup, 0, &rg_epochs, 900)
         .expect("clamped entry must still be a cache hit");
     assert_eq!(
         hit.observed_bytes, 2400,
@@ -3531,6 +3654,7 @@ fn expired_scheduler_lease_evicts_scheduled_deny_cache_entries() {
                 64,
                 &policy,
                 scheduler_expired,
+                &std::collections::BTreeMap::new(),
             )
             .is_none(),
         "a cache hit admitted by a scheduled rule must miss after lease expiry"
@@ -3545,6 +3669,7 @@ fn expired_scheduler_lease_evicts_scheduled_deny_cache_entries() {
                 64,
                 &policy,
                 scheduler_expired,
+                &std::collections::BTreeMap::new(),
             )
             .is_some(),
         "expiry must not evict a flow not admitted by a scheduler-bound rule"
@@ -3650,7 +3775,7 @@ fn scheduler_lease_recovery_evicts_fail_closed_unscheduled_deny() {
     assert!(
         cache
             .lookup_counted_with_scheduler_expiry(
-                &deny_key, lookup, 0, &rg_epochs, 64, &policy, true
+                &deny_key, lookup, 0, &rg_epochs, 64, &policy, true, &std::collections::BTreeMap::new()
             )
             .is_none()
     );
@@ -3659,7 +3784,7 @@ fn scheduler_lease_recovery_evicts_fail_closed_unscheduled_deny() {
     assert!(
         cache
             .lookup_counted_with_scheduler_expiry(
-                &deny_key, lookup, 0, &rg_epochs, 64, &policy, true
+                &deny_key, lookup, 0, &rg_epochs, 64, &policy, true, &std::collections::BTreeMap::new()
             )
             .is_some(),
         "the fail-closed deny must hit while the lease is expired"
@@ -3687,7 +3812,7 @@ fn scheduler_lease_recovery_evicts_fail_closed_unscheduled_deny() {
     assert!(
         cache
             .lookup_counted_with_scheduler_expiry(
-                &deny_key, lookup, 0, &rg_epochs, 64, &policy, false
+                &deny_key, lookup, 0, &rg_epochs, 64, &policy, false, &std::collections::BTreeMap::new()
             )
             .is_none(),
         "lease recovery must evict the fail-closed deny so the recovered scheduled permit can win (#13639)"

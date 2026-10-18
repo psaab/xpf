@@ -429,7 +429,7 @@ fn idle_debug_updater_ages_active_flow_snapshots() {
         binding
             .flow
             .flow_cache
-            .lookup_counted(&key, lookup, 0, &rg_epochs, 1500)
+            .lookup_counted_without_ha(&key, lookup, 0, &rg_epochs, 1500)
             .is_some(),
         "fixture flow must be active before idle-only aging starts"
     );

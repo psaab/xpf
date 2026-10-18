@@ -64,8 +64,7 @@ pub(crate) enum HaRefreshOutcome {
     /// membership.
     Served(usize),
     /// The refresh needs the locked main path (CLEAR, membership change,
-    /// stored-empty creation, expired matching stored-active, or pure no-op).
-    /// Caller must NOT store.
+    /// stored-empty creation, or pure no-op). Caller must NOT store.
     NeedsLock,
 }
 
@@ -1568,14 +1567,17 @@ impl SessionDomain {
     /// input parsing, no shared state); under the hold: incoming empty →
     /// NeedsLock (CLEAR owned by main); stored empty + any nonempty incoming
     /// → NeedsLock (watchdog must never create inventory — CLEAR-undo race);
-    /// stored nonempty: key-set inequality → NeedsLock (join/leave); match +
-    /// stored active + VALID lease → fresh `active_lease_until` from incoming
-    /// watchdog; match + EXPIRED stored-active → NeedsLock without storing any
-    /// RG state; mismatch + stored active + VALID lease → fresh lease for
-    /// STORED active/watchdog (liveness only, ownership stays); mismatch +
-    /// stored inactive OR EXPIRED stored-active → keep stored (owned by main);
-    /// zero refreshed → NeedsLock (pure no-op never recorded as publish), else
-    /// store + Served(count). Never changes active flags or membership off-lock.
+    /// stored nonempty: key-set inequality → NeedsLock (join/leave); match
+    /// (including EXPIRED stored-active with matching fresh heartbeat,
+    /// #14943: resurrected with a lease minted from the incoming watchdog,
+    /// exactly as the locked path would) → fresh `active_lease_until` from
+    /// incoming watchdog; mismatch + stored active + VALID lease → fresh
+    /// lease for STORED active/watchdog (liveness only, ownership stays);
+    /// mismatch + stored inactive OR EXPIRED stored-active → keep stored
+    /// (owned by main — an expired lease is never resurrected against a
+    /// demotion/removal intent); zero refreshed → NeedsLock (pure no-op
+    /// never recorded as publish), else store + Served(count). Never
+    /// changes active flags or membership off-lock.
     pub(crate) fn try_refresh_ha_leases(
         &self,
         groups: &[crate::HAGroupStatus],
@@ -1674,13 +1676,19 @@ impl SessionDomain {
             // Key-sets equal, so `get` cannot miss; the fallback is
             // unreachable (kept to avoid `expect` inside the hold).
             if stored_runtime.active == incoming_active {
-                // Match: full refresh from incoming (exactly like locked) —
-                // but an already-EXPIRED stored-active must use the locked
-                // path (#10787). Return before any RG state can be stored,
-                // even if another RG is otherwise refreshable.
-                if incoming_active && !stored_runtime.is_forwarding_active(now_secs) {
-                    return HaRefreshOutcome::NeedsLock;
-                }
+                // Match: full refresh from incoming (exactly like locked).
+                // #14943: an EXPIRED stored-active with a matching fresh
+                // heartbeat (incoming active) is resurrected here — the
+                // heartbeat itself is the fresh receipt, and the locked
+                // path would mint the identical lease from the identical
+                // inputs, so forcing NeedsLock only added a control-socket
+                // round-trip the watchdog treats as throttle-success (no
+                // retry), stranding the runtime expired forever (#14300).
+                // Demotion safety is preserved by construction: Go
+                // overlays any demotion/removal intent as inactive
+                // (haWatchdogGroupsLocked), so a matching active incoming
+                // can only arrive when no such intent exists; the
+                // mismatch-expired arm below still never resurrects.
                 state.insert(
                     *rg_id,
                     crate::afxdp::HAGroupRuntime {
@@ -2060,8 +2068,9 @@ mod session_domain_tests_7209 {
 /// #9629: timing-free decision table for `try_refresh_ha_leases`.
 ///
 /// Each cell pins one rule of the build-map-then-diff-then-maybe-store
-/// contract (stored-empty refuse-all, last-wins duplicates, valid-lease mint
-/// vs expired never-resurrect, zero-refreshed → NeedsLock).
+/// contract (stored-empty refuse-all, last-wins duplicates, valid-lease mint,
+/// expired matching-active resurrection on fresh heartbeat (#14943) vs
+/// expired mismatch never-resurrect, zero-refreshed → NeedsLock).
 /// No sleeps, no threads; the race-closer serialization cell lives in
 /// `server/tests.rs` with the `ha_mutex_for_test` handle.
 #[cfg(test)]
@@ -2193,10 +2202,18 @@ mod try_refresh_9629_tests {
         assert!(stored_forwarding_active(&coordinator, 2));
     }
 
-    /// An expired matching active RG forces NeedsLock before another healthy
-    /// RG can be published; neither stored runtime is changed.
+    /// #14943: an expired stored-active with a MATCHING fresh heartbeat
+    /// (incoming active, no demotion intent — Go overlays demotion intent
+    /// as inactive, so matching-active can only mean "still owner") is
+    /// resurrected on the fast path with a lease minted from the incoming
+    /// watchdog, exactly as the locked path would mint it. Pre-fix this
+    /// returned NeedsLock, which the watchdog treats as throttle-success
+    /// (no control retry), stranding the runtime lease expired forever
+    /// and demoting every flow-cache hit to HAInactive (#14300). The
+    /// whole-set store is atomic, so a healthy sibling RG is published
+    /// together with the resurrected one.
     #[test]
-    fn expired_matching_active_needs_lock_before_any_publish_10787() {
+    fn expired_matching_active_resurrected_by_fresh_heartbeat_14943() {
         let coordinator = Coordinator::new();
         let now_secs = crate::afxdp::monotonic_nanos() / 1_000_000_000;
         let expired = crate::afxdp::HAGroupRuntime {
@@ -2215,32 +2232,26 @@ mod try_refresh_9629_tests {
             .store(Arc::new(BTreeMap::from([(1, expired), (2, healthy)])));
         let domain = coordinator.session_domain().clone();
         assert_eq!(
-            domain.try_refresh_ha_leases(&[group(1, true, 0), group(2, true, 0)]),
-            HaRefreshOutcome::NeedsLock
+            domain.try_refresh_ha_leases(&[group(1, true, now_secs), group(2, true, now_secs)]),
+            HaRefreshOutcome::Served(2)
         );
         let stored = coordinator.ha.rg_runtime.load();
-        assert_eq!(
-            stored.get(&1).expect("expired runtime remains").lease,
-            expired.lease
+        let resurrected = stored.get(&1).expect("expired runtime remains");
+        assert!(resurrected.active);
+        assert_eq!(resurrected.watchdog_timestamp, now_secs);
+        assert!(
+            resurrected.is_forwarding_active(now_secs),
+            "fresh heartbeat must resurrect the expired stored-active lease"
         );
-        assert_eq!(
-            stored
-                .get(&1)
-                .expect("expired runtime remains")
-                .watchdog_timestamp,
-            expired.watchdog_timestamp
-        );
-        assert_eq!(
-            stored.get(&2).expect("healthy runtime remains").lease,
-            healthy.lease
-        );
-        assert_eq!(
-            stored
-                .get(&2)
-                .expect("healthy runtime remains")
-                .watchdog_timestamp,
-            healthy.watchdog_timestamp
-        );
+        assert!(matches!(
+            resurrected.lease,
+            crate::afxdp::HAForwardingLease::ActiveUntil(until)
+                if until >= now_secs.saturating_add(10)
+        ));
+        assert!(stored
+            .get(&2)
+            .expect("healthy runtime remains")
+            .is_forwarding_active(now_secs));
     }
 
     /// A matching active refresh still renews a valid stored lease.
