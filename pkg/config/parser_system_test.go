@@ -1325,7 +1325,7 @@ system {
 }
 
 func TestArchivalConfigSetSyntax(t *testing.T) {
-	lines := []string{"system archival configuration transfer-on-commit", "system archival configuration transfer-interval 30", "system archival configuration archive-sites /var/backup"}
+	lines := []string{"system archival configuration transfer-on-commit", "system archival configuration transfer-interval 30", "system archival configuration archive-sites backup:/var/backup"}
 	tree := &ConfigTree{}
 	for _, line := range lines {
 		cmd, err := ParseSetCommand(line)
@@ -1350,7 +1350,7 @@ func TestArchivalConfigSetSyntax(t *testing.T) {
 	if arch.TransferInterval != 30 {
 		t.Errorf("transfer-interval = %d, want 30", arch.TransferInterval)
 	}
-	if len(arch.ArchiveSites) != 1 || arch.ArchiveSites[0] != "/var/backup" {
+	if len(arch.ArchiveSites) != 1 || arch.ArchiveSites[0] != "backup:/var/backup" {
 		t.Errorf("archive-sites = %v", arch.ArchiveSites)
 	}
 }

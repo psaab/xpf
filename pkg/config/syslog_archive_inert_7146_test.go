@@ -250,7 +250,7 @@ func TestSyslogFileArchiveInertWarningNotOnCommonCase(t *testing.T) {
 		}},
 		{"config archival (a different, implemented feature)", []string{
 			"set system archival configuration transfer-interval 60",
-			"set system archival configuration archive-sites ftp://host/dir",
+			"set system archival configuration archive-sites scp://host/dir",
 		}},
 		{"no syslog block at all", []string{
 			"set system host-name fw0",

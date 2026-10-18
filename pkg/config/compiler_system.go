@@ -575,12 +575,19 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 						if URLHasPassword(site.url) {
 							return fmt.Errorf("system archival archive-sites %q: inline URL password is not supported; use SSH key authentication", RedactURL(site.url))
 						}
-						// #4589 A7 F-02: reject a leading-dash archive-site at
-						// commit. Runtime archival shells out to `scp <src> <dest>`;
-						// a `-`-prefixed URL is never a valid scp destination and,
-						// pre-`--`-separator, was parsed by scp's getopt as an OPTION.
-						if strings.HasPrefix(site.url, "-") {
-							return fmt.Errorf("system archival archive-sites %q: an archive-site URL must not begin with '-' (it is passed to scp as a destination, not an option)", site.url)
+						// #14691: require a remote scp destination. A
+						// colon-less or otherwise local destination makes
+						// OpenSSH scp perform a LOCAL copy of the unredacted
+						// ShowActive() staging file as root, overwriting an
+						// arbitrary local file and disclosing every secret
+						// in it — bypassing the #10298 host-key check, which
+						// a local copy never consults. The shared validator
+						// also carries the #4589 leading-dash gate (a
+						// `-`-prefixed destination is parsed by scp getopt
+						// as an option, including the user@-oProxyCommand
+						// host-position form).
+						if err := ArchiveDestinationError(site.url); err != nil {
+							return err
 						}
 						sys.Archival.ArchiveSites = append(sys.Archival.ArchiveSites, site.url)
 						if site.hasPassword {
