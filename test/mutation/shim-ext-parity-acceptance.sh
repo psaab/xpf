@@ -87,10 +87,10 @@ GOLD="$(mktemp -t ipv6_ext_walk.gold.XXXXXX)"
 # Fixed path, NOT ${TMPDIR}-derived: this repo documents TMPDIR=/tmp as a
 # workaround for unix-socket tests, so a TMPDIR-scoped lock is routinely two
 # different locks.
-LOCK="/tmp/xpf-4555-acceptance.lock"
-: "${CARGO_TARGET_DIR:=/dev/shm/cargo-4555-acceptance}"
+LOCK="/var/worktrees/.cache/tmpdir/xpf-4555-acceptance.lock"
+: "${CARGO_TARGET_DIR:=/var/worktrees/.cache/cargo-4555-acceptance}"
 export CARGO_TARGET_DIR
-export TMPDIR="${TMPDIR:-/tmp}"
+export TMPDIR="${TMPDIR:-/var/worktrees/.cache/tmpdir}"
 
 # The tests this harness scores. A name that does not appear in cargo's output
 # is a HARNESS ERROR, never a pass — see P2.

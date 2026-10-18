@@ -263,14 +263,14 @@ if ! $SG "incus file push --mode 0755 $LISTEN_SRC ${SINK_EXEC}${REMOTE_LISTEN}" 
 	early_void harness-void
 fi
 
-BASELINE_SNAP="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-baseline.XXXXXX")"
+BASELINE_SNAP="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-baseline.XXXXXX")"
 trap 'rm -f "$BASELINE_SNAP"' EXIT
 printf '%s\n' "$POLines" >"$BASELINE_SNAP"
 
 # Same-path baseline: all four twins forward pre-fixture (mini legs — a
 # liveness check, not the verdict).
 echo "--- same-path baseline burst (pre-fixture) ---"
-BASE_CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-basecap.XXXXXX")"
+BASE_CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-basecap.XXXXXX")"
 $SG "incus exec $SINK_EXEC -- timeout $STEP_TIMEOUT tcpdump -i any -n $(legs_filter)" >"$BASE_CAPLOG" 2>&1 &
 BASE_CAP_PID=$!
 sleep 3
@@ -355,7 +355,7 @@ trap 'do_restore; rm -f "$BASELINE_SNAP"' EXIT
 # handshakes; 8080 gets none — any SYN there is a leak). UDP legs as
 # datagram bursts. One capture window covers both sender runs.
 echo "--- capture window + twins (tcp permit $PERMIT_N/deny $DENY_N, udp permit $PERMIT_N/deny $DENY_N) ---"
-CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-cap.XXXXXX")"
+CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-cap.XXXXXX")"
 $SG "incus exec $SINK_EXEC -- timeout $STEP_TIMEOUT tcpdump -i any -n -vv $(legs_filter)" >"$CAPLOG" 2>&1 &
 CAP_PID=$!
 sleep 3
@@ -401,7 +401,7 @@ if ! grep -q "policy allow-all match application any" <<<"$NOW_LINES"; then
 	echo "RESTORE-DIRTY: baseline match line not back"
 	RESTORE_CLEAN=0
 fi
-RE_CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-recap.XXXXXX")"
+RE_CAPLOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-recap.XXXXXX")"
 $SG "incus exec $SINK_EXEC -- timeout 60 tcpdump -i any -n $(legs_filter)" >"$RE_CAPLOG" 2>&1 &
 RE_CAP_PID=$!
 sleep 3

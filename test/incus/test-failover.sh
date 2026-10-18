@@ -168,7 +168,7 @@ main_iperf_running() {
 	failover_main_iperf_running /tmp/iperf3-failover.pid "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS"
 }
 
-HA_CAPTURE_DIR="${TMPDIR:-/tmp}/test-failover-ha-$$"
+HA_CAPTURE_DIR="${TMPDIR:-/var/worktrees/.cache/tmpdir}/test-failover-ha-$$"
 declare -A RG1_STATS=()
 declare -A RG1_INTERFACES=()
 declare -A RG1_STATUS=()
@@ -1777,8 +1777,8 @@ failover_wait_main_iperf_result /tmp/iperf3-failover.log "$IPERF_DURATION" || tr
 # Missing, malformed, or incomplete metrics are VOID evidence, never a
 # zero-valued throughput FAIL; valid averages go through the anchored cell.
 # M1 JSON capture/gate fixture begin
-LOCAL_IPERF_LOG="${TMPDIR:-/tmp}/iperf3-failover.$$.json-stream.log"
-LOCAL_IPERF_METRICS="${TMPDIR:-/tmp}/iperf3-failover.$$.metrics.json"
+LOCAL_IPERF_LOG="${TMPDIR:-/var/worktrees/.cache/tmpdir}/iperf3-failover.$$.json-stream.log"
+LOCAL_IPERF_METRICS="${TMPDIR:-/var/worktrees/.cache/tmpdir}/iperf3-failover.$$.metrics.json"
 LOCAL_IPERF_GATE_ERR="${LOCAL_IPERF_METRICS}.gate.err"
 LOCAL_IPERF_PRODUCER_ERR="${LOCAL_IPERF_METRICS}.producer.err"
 iperf_gate_ok=false

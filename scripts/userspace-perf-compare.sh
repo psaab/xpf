@@ -8,7 +8,7 @@ ENV_FILE="${BPFRX_CLUSTER_ENV:-${PROJECT_ROOT}/test/incus/loss-userspace-cluster
 IPERF_DURATION=8
 IPERF_PARALLEL=4
 PERF_SECONDS=$((IPERF_DURATION + 4))
-OUTPUT_DIR="/tmp/userspace-perf-compare"
+OUTPUT_DIR="${OUTPUT_DIR:-/var/worktrees/.cache/tmpdir/userspace-perf-compare}"
 IPERF_METRICS="${PROJECT_ROOT}/scripts/iperf-json-metrics.py"
 
 while [[ $# -gt 0 ]]; do

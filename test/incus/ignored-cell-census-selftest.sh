@@ -28,7 +28,7 @@ FAIL=0
 ok() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 
-WORK=$(mktemp -d "${TMPDIR:-/var/tmp}/xpf-ignored-census.XXXXXX")
+WORK=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-ignored-census.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
 # fixture <name> <rust-source-body> — a tree with one crate dir and one .rs file

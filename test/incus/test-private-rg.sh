@@ -127,7 +127,7 @@ privrg_finish_full_cycle() {
 
 privrg_begin_full_cycle() {
 	# Keep the mode-preserving snapshot private even when CONF is world-readable.
-	PRIVRG_SNAPSHOT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/test-private-rg-conf.XXXXXX") || return 1
+	PRIVRG_SNAPSHOT_DIR=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/test-private-rg-conf.XXXXXX") || return 1
 	PRIVRG_SNAPSHOT="${PRIVRG_SNAPSHOT_DIR}/conf"
 	if ! privrg_snapshot_conf "$CONF" "$PRIVRG_SNAPSHOT"; then
 		rm -rf -- "$PRIVRG_SNAPSHOT_DIR"

@@ -68,7 +68,7 @@ command -v incus >/dev/null || { echo "missing incus" >&2; exit 2; }
 command -v timeout >/dev/null || { echo "missing timeout" >&2; exit 2; }
 
 if [[ -z "$ARTIFACT_DIR" ]]; then
-	ARTIFACT_DIR="/tmp/cut-stall-10023-$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
+	ARTIFACT_DIR="/var/worktrees/.cache/tmpdir/cut-stall-10023-$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
 fi
 if [[ "$ARTIFACT_DIR" == "/" || -z "$(basename -- "$ARTIFACT_DIR")" ]]; then
 	echo "--out must name a directory below root" >&2

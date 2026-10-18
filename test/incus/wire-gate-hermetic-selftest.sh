@@ -89,7 +89,7 @@ echo "=== A0: probe SENT accounting against loopback sinks ==="
 if ! command -v python3 >/dev/null 2>&1; then
 	skip_cell "probe accounting: python3 not installed"
 else
-	A0_DIR="$(mktemp -d "${TMPDIR:-/var/tmp}/xpf-wire-a0.XXXXXX")"
+	A0_DIR="$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-a0.XXXXXX")"
 	UP1=$((51000 + $$ % 4000))
 	UP2=$((UP1 + 1))
 	python3 - "$UP1" "$UP2" >"$A0_DIR/sink.out" 2>"$A0_DIR/sink.err" <<'PYEOF' &
@@ -270,7 +270,7 @@ if [[ "$run_live" != 1 ]]; then
 	skip_cell "live netns pipeline (real probes, real drop, real capture): $live_reason"
 else
 	echo "=== B: live netns pipeline (real probes, real drop, real capture) ==="
-	B_DIR="$(mktemp -d "${TMPDIR:-/var/tmp}/xpf-wire-hermetic.XXXXXX")"
+	B_DIR="$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-hermetic.XXXXXX")"
 	trap 'wire_hermetic_teardown; rm -rf "$B_DIR"' EXIT
 
 	wire_hermetic_netns() {

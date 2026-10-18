@@ -2342,7 +2342,7 @@ source "${SCRIPT_DIR}/deploy-lib.sh"
 source "${SCRIPT_DIR}/ipsec-9506-fixture.sh"
 NODE0="${FW0:-${INCUS_REMOTE:-loss}:xpf-userspace-fw0}"
 NODE1="${FW1:-${INCUS_REMOTE:-loss}:xpf-userspace-fw1}"
-ARCHIVE_DIR="${XPF_9506_T12_G2_ARCHIVE_DIR:-${TMPDIR:-/var/tmp}/xpf-t12-g2-9506-$(date +%s)}"
+ARCHIVE_DIR="${XPF_9506_T12_G2_ARCHIVE_DIR:-${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-t12-g2-9506-$(date +%s)}"
 mkdir -p "$ARCHIVE_DIR" || {
     echo "cannot create archive directory: $ARCHIVE_DIR" >&2
     exit 2

@@ -182,7 +182,7 @@ class SnippetBehaviorTests(unittest.TestCase):
     def setUp(self):
         if shutil.which("sh") is None:
             self.skipTest("no sh interpreter")
-        tmp = os.environ.get("TMPDIR", "/tmp")
+        tmp = os.environ.get("TMPDIR", "/var/worktrees/.cache/tmpdir")
         self.work = Path(tmp) / f"xpf-10171-{os.getpid()}"
         self.work.mkdir(parents=True, exist_ok=True)
         self.addCleanup(shutil.rmtree, self.work, ignore_errors=True)

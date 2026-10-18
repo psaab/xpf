@@ -71,7 +71,7 @@ contains "$sel" "github.com/psaab/xpf/pkg/memlockcensus" \
 # ── 3+4. Synthetic repo: always-append vs never-read allowlist ──
 # A throwaway clone at HEAD with two synthetic commits, so the legs do
 # not depend on finding suitable real commits for these shapes.
-tmp=$(mktemp -d)
+tmp=$(mkdir -p /var/worktrees/.cache/tmpdir && TMPDIR=/var/worktrees/.cache/tmpdir mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 git clone --quiet --no-hardlinks "$root" "$tmp/clone" 2>/dev/null
 git -C "$tmp/clone" checkout --quiet -B selftest HEAD

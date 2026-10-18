@@ -45,7 +45,7 @@ require_tool virt-make-fs "apt-get install libguestfs-tools"
 require_tool virt-filesystems "apt-get install libguestfs-tools"
 require_tool virt-cat "apt-get install libguestfs-tools"
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/xpf-dist-selftest.XXXXXX")
+WORK=$(mkdir -p /var/worktrees/.cache/tmpdir && mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-dist-selftest.XXXXXX")
 GNUPGHOME="$WORK/gnupg"; export GNUPGHOME
 mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
 cleanup() { rm -rf "$WORK"; }

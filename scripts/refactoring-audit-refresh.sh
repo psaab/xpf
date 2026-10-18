@@ -57,7 +57,7 @@ ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
 artifact="docs/refactoring-audit-current.txt"
-tmp="$(mktemp)"
+tmp="$(mkdir -p /var/worktrees/.cache/tmpdir && TMPDIR=/var/worktrees/.cache/tmpdir mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
 bash scripts/refactoring-audit.sh > "$tmp"

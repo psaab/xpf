@@ -8,7 +8,7 @@ SRC="${1:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 SCRIPT="${2:-$SRC/test/incus/test-private-rg.sh}"
 # shellcheck source=test/incus/private-rg-lib.sh
 source "$SRC/test/incus/private-rg-lib.sh"
-W=$(mktemp -d "${TMPDIR:-/tmp}/private-rg-fullcycle.XXXXXX")
+W=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/private-rg-fullcycle.XXXXXX")
 trap 'rm -rf "$W"' EXIT
 fails=0
 ok() { echo "PASS: $*"; }

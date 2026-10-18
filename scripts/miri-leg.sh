@@ -44,7 +44,7 @@ TOOLCHAIN=${MIRI_TOOLCHAIN:-+nightly}
 # #9920 F-148: the explicit +toolchain above overrides the userspace-dp pin
 # (rust-toolchain.toml) — this leg intentionally runs Miri's nightly, not the
 # Makefile's pinned helper toolchain.
-LOGDIR=${MIRI_LOG_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/miri-leg.XXXXXXXX")}
+LOGDIR=${MIRI_LOG_DIR:-$(mkdir -p /var/worktrees/.cache/tmpdir && mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/miri-leg.XXXXXXXX")}
 mkdir -p "$LOGDIR"
 
 [ -f "$REGISTRY" ] || { echo "miri leg: missing $REGISTRY" >&2; exit 1; }

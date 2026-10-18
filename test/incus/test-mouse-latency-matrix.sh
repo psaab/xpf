@@ -58,7 +58,7 @@ fi
 OUT_ROOT="$1"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-LOCK_FILE="/tmp/test-mouse-latency-matrix.lock"
+LOCK_FILE="/var/worktrees/.cache/tmpdir/test-mouse-latency-matrix.lock"
 exec 9>"$LOCK_FILE"
 flock -n 9 || {
     abort_matrix ABORTED-LOCK-CONTENTION \

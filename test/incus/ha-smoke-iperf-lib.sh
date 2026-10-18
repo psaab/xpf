@@ -28,7 +28,7 @@ ha_smoke_iperf_verdicts() {
 	local -a oracle_lines=()
 	local -a events=("$5" "$6")
 
-	work_dir=$(mktemp -d "${TMPDIR:-/tmp}/ha-smoke-iperf.XXXXXX") || {
+	work_dir=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/ha-smoke-iperf.XXXXXX") || {
 		printf 'FAIL iperf3 throughput: cannot create temporary metrics directory\n'
 		printf 'FAIL iperf3 completion: cannot create temporary metrics directory\n'
 		printf 'FAIL iperf3 intervals: cannot create temporary metrics directory\n'

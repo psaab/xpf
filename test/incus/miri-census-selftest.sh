@@ -54,7 +54,7 @@ bad()  { FAILN=$((FAILN + 1)); printf '  FAIL %s\n' "$*" >&2; }
 # other.
 mk_sandbox() {
 	local d
-	d=$(mktemp -d "${TMPDIR:-/tmp}/miri-census-cell.XXXXXXXX")
+	d=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/miri-census-cell.XXXXXXXX")
 	mkdir -p "$d/scripts" "$d/userspace-dp/src/afxdp/types" "$d/userspace-dp/src/afxdp/frame"
 	cp "$CENSUS" "$d/scripts/miri-census.sh"
 
@@ -186,7 +186,7 @@ echo "miri leg scoring cells -- the real scripts/miri-leg.sh over a stub cargo:"
 # interesting cases.
 leg_cell() {
 	local name="$1" want_rc="$2" want_msg="$3" log="$4"
-	local d; d=$(mktemp -d "${TMPDIR:-/tmp}/miri-leg-cell.XXXXXXXX")
+	local d; d=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/miri-leg-cell.XXXXXXXX")
 	mkdir -p "$d/scripts" "$d/userspace-dp" "$d/bin"
 	cp "$LEG" "$d/scripts/miri-leg.sh"
 	printf '%s\n' '# r' 'afxdp::types::cos::  12  reason.' >"$d/userspace-dp/MIRI.registry"

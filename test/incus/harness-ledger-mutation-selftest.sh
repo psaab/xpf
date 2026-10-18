@@ -55,7 +55,7 @@ if ! command -v python3 >/dev/null 2>&1; then
 	exit 77
 fi
 
-WORK=$(mktemp -d "${TMPDIR:-/var/tmp}/xpf-harness-mutation.XXXXXX")
+WORK=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-harness-mutation.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
 # deploy-lib.sh and cluster-env.sh are staged alongside because

@@ -1001,7 +1001,7 @@ wire_gate_finalize() {
 # FAIL, which then carries restore_failed=1 through at rc=1.
 wire_gate_finalizer_selftest() {
 	local tmp mode out rc expected_rc expected_out
-	tmp="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-finalizer.XXXXXX")" || return 1
+	tmp="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-finalizer.XXXXXX")" || return 1
 	export WIRE_GATE_FINALIZER_TEST_FILE="$tmp"
 	export -f wire_gate_finalize
 	for mode in green restore-fail sticky-fail; do

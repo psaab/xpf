@@ -4,8 +4,8 @@
 #
 # The loss userspace cluster (loss:xpf-userspace-fw0/fw1) is shared by
 # multiple cooperating agents on this dev box. Mutual exclusion is the
-# advisory flock on /tmp/xpf-cluster.lock; ownership *visibility* is
-# the metadata in /tmp/xpf-cluster.owner. Protocol (converged plan,
+# advisory flock on /var/worktrees/.cache/tmpdir/xpf-cluster.lock; ownership *visibility* is
+# the metadata in /var/worktrees/.cache/tmpdir/xpf-cluster.owner. Protocol (converged plan,
 # docs/pr/1875-cluster-ownership/plan.md):
 #
 #   - test/incus/with-cluster.sh is the ONLY long-lived, self-locking,
@@ -15,7 +15,7 @@
 #   - Scripts that self-lock (cluster-setup.sh mutating verbs,
 #     apply-cos-config.sh) re-exec through with-cluster.sh when the
 #     marker is absent and run lock-free when it is valid.
-#   - Standalone per-command `flock /tmp/xpf-cluster.lock <cmd>`
+#   - Standalone per-command `flock /var/worktrees/.cache/tmpdir/xpf-cluster.lock <cmd>`
 #     holders (wg-interop.sh inc(), ad-hoc one-liners around commands
 #     that do NOT self-lock) remain valid and never set the marker.
 #   - Owner-epoch witness (#10126): with-cluster.sh publishes one
@@ -41,15 +41,15 @@
 # no unguarded reads, no unguarded kill -0, no traps, no global state
 # beyond the four XPF_CLUSTER_* path variables.
 
-XPF_CLUSTER_LOCK="${XPF_CLUSTER_LOCK:-/tmp/xpf-cluster.lock}"
-XPF_CLUSTER_OWNER="${XPF_CLUSTER_OWNER:-/tmp/xpf-cluster.owner}"
+XPF_CLUSTER_LOCK="${XPF_CLUSTER_LOCK:-/var/worktrees/.cache/tmpdir/xpf-cluster.lock}"
+XPF_CLUSTER_OWNER="${XPF_CLUSTER_OWNER:-/var/worktrees/.cache/tmpdir/xpf-cluster.owner}"
 # The epoch witness is a persistent sidecar, not lock-inode content:
 # legacy/read-only probes open the lock path with `>` and may truncate
 # it, but must never erase an acquisition witness. Production uses a
 # cooperatively writable, NON-STICKY state directory so a different
 # user can atomically replace the 0666 epoch file; private hermetic
 # callers override XPF_CLUSTER_EPOCH to a path under their temp tree.
-XPF_CLUSTER_EPOCH_STATE_DIR="${XPF_CLUSTER_EPOCH_STATE_DIR:-/tmp/xpf-cluster-state}"
+XPF_CLUSTER_EPOCH_STATE_DIR="${XPF_CLUSTER_EPOCH_STATE_DIR:-/var/worktrees/.cache/tmpdir/xpf-cluster-state}"
 XPF_CLUSTER_EPOCH="${XPF_CLUSTER_EPOCH:-${XPF_CLUSTER_EPOCH_STATE_DIR}/epoch}"
 
 # True (0) iff XPF_CLUSTER_LOCK_HELD names THIS lock path and a holder

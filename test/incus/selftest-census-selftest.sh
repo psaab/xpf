@@ -20,7 +20,7 @@ FAIL=0
 ok() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 
-WORK=$(mktemp -d "${TMPDIR:-/var/tmp}/xpf-selftest-census-selftest.XXXXXX")
+WORK=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-selftest-census-selftest.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 n=0
 

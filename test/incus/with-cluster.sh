@@ -185,7 +185,7 @@ export XPF_CLUSTER_LOCK_HELD="${XPF_CLUSTER_LOCK}:$$"
 # a long cell can re-assert it before each sample rather than only at the
 # boundaries — the originating incident took both of its measurements
 # inside ONE cell, so boundary-only checking would not have caught it.
-XPF_CLUSTER_BUILD_BASELINE="$(mktemp "${TMPDIR:-/tmp}/xpf-cluster-build.XXXXXX")"
+XPF_CLUSTER_BUILD_BASELINE="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-cluster-build.XXXXXX")"
 export XPF_CLUSTER_BUILD_BASELINE
 xpf_cluster_build_record "$XPF_CLUSTER_BUILD_BASELINE"
 # SUPERSEDES the owner-only trap installed above (bash replaces, not

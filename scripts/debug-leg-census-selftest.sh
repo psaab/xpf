@@ -23,7 +23,7 @@ fi
 
 mk_fixture() {
 	local d
-	d=$(mktemp -d "${TMPDIR:-/tmp}/debug-leg-census-cell.XXXXXXXX")
+	d=$(mkdir -p /var/worktrees/.cache/tmpdir && mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/debug-leg-census-cell.XXXXXXXX")
 	cat >"$d/census.json" <<'EOF'
 {"targets":[{"name":"fixture-bin","kind":"bin","listed":["frame::keep","nat::ignored","nat::second_ignored"],"ignored":["nat::ignored","nat::second_ignored"]},{"name":"fixture-test","kind":"test","listed":["session::keep","checksum::excluded"],"ignored":[]}]}
 EOF

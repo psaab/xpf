@@ -1100,7 +1100,7 @@ harness_result_run() {
 
 	local root log t0 t1 rc
 	root="$(harness_result_root)"
-	log=$(mktemp "${TMPDIR:-/var/tmp}/xpf-harness-log.XXXXXX")
+	log=$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-harness-log.XXXXXX")
 	t0=$(date +%s)
 	# tee so the operator still sees the gate's output live; PIPESTATUS[0] is
 	# the gate's own status, not tee's.

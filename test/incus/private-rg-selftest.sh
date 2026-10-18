@@ -13,7 +13,7 @@ FAIL=0
 ok() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "FAIL: $1" >&2; FAIL=$((FAIL + 1)); }
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/private-rg-selftest.XXXXXX")
+WORK=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/private-rg-selftest.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 FAKE_JOURNAL="$WORK/journal.tsv"
 FAKE_CLI_CALLS="$WORK/cli-calls"
