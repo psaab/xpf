@@ -202,6 +202,96 @@ func TestReauthorizeHostUnmatchedActionIsMeaningless12879(t *testing.T) {
 	}
 }
 
+// #14697: reauthorizePolicyCandidates builds its query with ICMPType nil
+// (helper tuples store only the echo identifier in the ports), so an
+// icmp-type-constrained deny ordered before the candidate's own permit is
+// skipped and the session is wrongly discharged. It also never called
+// capturedTunnelDiscriminatorValid, so a GRE session with a zero
+// discriminator could be re-authorized the same way.
+func TestReauthorizeFailsClosedOnICMPAndGRE14697(t *testing.T) {
+	restored := reauthConfig12879(config.PolicyDeny, []string{"trust", "untrust"},
+		&config.ZonePairPolicies{FromZone: "trust", ToZone: "untrust", Policies: []*config.Policy{
+			{Name: "deny-ping", Action: config.PolicyDeny, Match: config.PolicyMatch{
+				SourceAddresses: []string{"any"}, DestinationAddresses: []string{"any"},
+				Applications: []string{"junos-icmp-ping"},
+			}},
+			{Name: "wide", Action: config.PolicyPermit, Match: config.PolicyMatch{
+				SourceAddresses: []string{"any"}, DestinationAddresses: []string{"any"},
+				Applications: []string{"junos-icmp-all"},
+			}},
+			{Name: "gre-wide", Action: config.PolicyPermit, Match: config.PolicyMatch{
+				SourceAddresses: []string{"any"}, DestinationAddresses: []string{"any"},
+				Applications: []string{"junos-gre"},
+			}},
+		}})
+	mk := func(proto uint8, key string) *policyInvalidationCapture {
+		match := dpuserspace.SessionPolicyMatch{
+			AddrFamily: 4,
+			Tuple: dpuserspace.SessionPolicyTuple{
+				AddrFamily: 4, Protocol: proto, SrcIP: "10.0.0.1", DstIP: "10.0.0.2",
+				SrcPort: 0x1234, DstPort: 0x1234,
+			},
+			ExpectedRTFlowSessionID: 97,
+			IngressZoneID:           config.StableZoneID("trust"),
+			EgressZoneID:            config.StableZoneID("untrust"),
+		}
+		capture := &policyInvalidationCapture{
+			candidateRuleIDs: map[policyInvalidationMatchIdentity]string{
+				policyInvalidationMatchID(match): key,
+			},
+		}
+		capture.deleted.policy = append(capture.deleted.policy, match)
+		return capture
+	}
+	d := &Daemon{}
+	// ICMP candidate whose captured identity is the broader permit: the
+	// earlier deny-ping must block discharge, but nil-type evaluation
+	// skips it pre-fix.
+	if kept, permitted := d.reauthorizePolicyCandidates(mk(1, "trust->untrust/wide"), restored, false); permitted != nil || kept.candidateCount() != 1 {
+		t.Fatalf("ICMP candidate discharged past icmp-type deny: kept=%d permitted=%v", kept.candidateCount(), permitted)
+	}
+	// ICMPv6-shaped protocol number on the same v4 tuple shape: the
+	// guard is protocol-based, so 58 fails closed too.
+	if kept, permitted := d.reauthorizePolicyCandidates(mk(58, "trust->untrust/wide"), restored, false); permitted != nil || kept.candidateCount() != 1 {
+		t.Fatalf("ICMPv6-protocol candidate discharged: kept=%d permitted=%v", kept.candidateCount(), permitted)
+	}
+	// GRE with zero discriminator: missing-guard consistency.
+	if kept, permitted := d.reauthorizePolicyCandidates(mk(47, "trust->untrust/gre-wide"), restored, false); permitted != nil || kept.candidateCount() != 1 {
+		t.Fatalf("GRE0 candidate discharged: kept=%d permitted=%v", kept.candidateCount(), permitted)
+	}
+	// TCP control: an ordinary candidate under its captured permit still
+	// discharges (the guard must not over-block non-lossy protocols).
+	tcpMatch := dpuserspace.SessionPolicyMatch{
+		AddrFamily: 4,
+		Tuple: dpuserspace.SessionPolicyTuple{
+			AddrFamily: 4, Protocol: 6, SrcIP: "10.0.0.1", DstIP: "10.0.0.2",
+			SrcPort: 2077, DstPort: 22,
+		},
+		ExpectedRTFlowSessionID: 98,
+		IngressZoneID:           config.StableZoneID("trust"),
+		EgressZoneID:            config.StableZoneID("untrust"),
+	}
+	tcpCapture := &policyInvalidationCapture{
+		candidateRuleIDs: map[policyInvalidationMatchIdentity]string{
+			policyInvalidationMatchID(tcpMatch): "trust->untrust/wide",
+		},
+	}
+	// "wide" here is junos-icmp-all (ICMP only), so use a dedicated TCP
+	// restored config for the control.
+	tcpRestored := reauthConfig12879(config.PolicyDeny, []string{"trust", "untrust"},
+		&config.ZonePairPolicies{FromZone: "trust", ToZone: "untrust", Policies: []*config.Policy{
+			reauthRule12879("wide", config.PolicyPermit, "junos-http"),
+		}})
+	tcpMatch.Tuple.DstPort = 80
+	tcpCapture.candidateRuleIDs = map[policyInvalidationMatchIdentity]string{
+		policyInvalidationMatchID(tcpMatch): "trust->untrust/wide",
+	}
+	tcpCapture.deleted.policy = append(tcpCapture.deleted.policy, tcpMatch)
+	if kept, permitted := d.reauthorizePolicyCandidates(tcpCapture, tcpRestored, false); permitted == nil || permitted.candidateCount() != 1 || kept.candidateCount() != 0 {
+		t.Fatalf("TCP control candidate not discharged: kept=%d permitted=%v", kept.candidateCount(), permitted)
+	}
+}
+
 // TestPolicyInvalidationRollbackCrossRulePermitDoesNotDischarge12879 is the
 // end-to-end decisive witness. C0 permits ssh under "narrow" and tcp/80 under
 // "wide"; C1 widens "narrow" to any application and admits sessions 7 (tcp/80)
