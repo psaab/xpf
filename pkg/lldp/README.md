@@ -180,6 +180,17 @@ Two properties keep this safe (#2372 review findings 3 + 6):
   The lookup goes through the `interfaceByNameFn` seam so the resolution
   is unit-tested (`TestApplyResolvesKernelIfName`, `socket_test.go`)
   without a host device present.
+- **One chassis ID per system (#14618).** The Chassis ID TLV identifies
+  the system (`lldpLocChassisId` is a scalar of the local system data),
+  not the transmitting port, so `Apply` resolves ONE chassis MAC per
+  generation (`LLDPConfig.ChassisMAC`, populated by the daemon from
+  fxp0/em0) and every port advertises it. Without an explicit value the
+  fallback is the deterministic smallest usable MAC among the resolved
+  LLDP interfaces. The Ethernet source and Port ID stay per-port;
+  `BuildFrame` keeps the one-MAC peer-modelling form and
+  `BuildFrameWithChassis` splits chassis from source. Regression:
+  `TestChassisIDStableAcrossPorts14618` (two fake interfaces, different
+  MACs, byte-identical Chassis ID TLVs).
 - TTL countdown is per-neighbor; expired entries auto-purge from the
   `Neighbors()` snapshot on the `expiryLoop` 10s tick.
 - **Immediate withdrawal on TTL=0 shutdown (#5123):** IEEE 802.1AB defines
