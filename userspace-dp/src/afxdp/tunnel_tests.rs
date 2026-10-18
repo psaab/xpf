@@ -1118,6 +1118,122 @@ fn tunnel_tcp_mss_wireguard_caps_inner_budget_by_route_mtu_11687() {
 
 // --- #2517 GRE MSS clamp survives a transient egress-map miss ---------
 
+// --- #14664 all-tcp is a ceiling on MTU-derived tunnel egress ---------
+
+fn tunnel_decision() -> SessionDecision {
+    SessionDecision {
+        resolution: gre_encap_resolution(),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
+}
+
+fn tunnel_meta() -> ForwardPacketMeta {
+    let mut meta = ForwardPacketMeta::default();
+    meta.addr_family = libc::AF_INET as u8;
+    meta
+}
+
+#[test]
+fn select_tcp_mss_gre_all_tcp_caps_mtu_derived_value_14664() {
+    // Fixture derived GRE MSS is 1416 (see the #2517 tests above).
+    let mut state = gre1881_state();
+    state.tcp_mss_all_tcp = 1200;
+    let decision = tunnel_decision();
+    assert_eq!(
+        select_tcp_mss(&state, &decision, &tunnel_meta()),
+        1200,
+        "all-tcp 1200 must cap the MTU-derived GRE MSS 1416 when no \
+         gre-out is configured (#14664)"
+    );
+}
+
+#[test]
+fn select_tcp_mss_gre_all_tcp_zero_keeps_derived_value_14664() {
+    let state = gre1881_state();
+    let decision = tunnel_decision();
+    assert_eq!(
+        select_tcp_mss(&state, &decision, &tunnel_meta()),
+        1416,
+        "all-tcp unset (0) must leave the MTU-derived GRE MSS unchanged"
+    );
+}
+
+#[test]
+fn select_tcp_mss_gre_explicit_gre_out_ignores_all_tcp_14664() {
+    // Explicit gre-out is more specific than all-tcp: it stays
+    // min(gre-out, derived) irrespective of all-tcp (#14664, pinned).
+    let mut state = gre1881_state();
+    state.tcp_mss_all_tcp = 1200;
+    state.tcp_mss_gre_out = 1300;
+    let decision = tunnel_decision();
+    assert_eq!(
+        select_tcp_mss(&state, &decision, &tunnel_meta()),
+        1300,
+        "gre-out 1300 must yield min(1300, derived 1416) = 1300, not \
+         the smaller all-tcp 1200"
+    );
+    // And a gre-out below all-tcp also wins unchanged: min(1100, 1416).
+    state.tcp_mss_gre_out = 1100;
+    assert_eq!(
+        select_tcp_mss(&state, &decision, &tunnel_meta()),
+        1100,
+        "gre-out 1100 must yield min(1100, derived 1416) = 1100"
+    );
+}
+
+#[test]
+fn select_tcp_mss_gre_all_tcp_above_derived_keeps_derived_14664() {
+    // all-tcp is a ceiling, not a floor: a larger all-tcp must not raise
+    // the tunnel-bound MSS above what the tunnel budget allows.
+    let mut state = gre1881_state();
+    state.tcp_mss_all_tcp = 1460;
+    let decision = tunnel_decision();
+    assert_eq!(
+        select_tcp_mss(&state, &decision, &tunnel_meta()),
+        1416,
+        "all-tcp 1460 must not raise the derived GRE MSS 1416"
+    );
+}
+
+#[test]
+fn select_tcp_mss_wg_all_tcp_caps_mtu_derived_value_14664() {
+    // WG arm: gre-out is a GRE knob and is never consulted for WG, so with
+    // no GRE knob in play the derived WG value is MTU-derived and all-tcp
+    // must cap it. Fixture endpoint is IPv6-outer, so the derived value is
+    // wg_tcp_mss(v6, v4, 1500) = 1500 - (40+8+16+16) - 15 - 20 - 20 = 1365.
+    // First assertion (capped to 1200) carries the RED; the controls below
+    // pin the uncapped value and the gre-out non-interference.
+    let mut state = gre1881_state();
+    state
+        .tunnel_endpoints
+        .get_mut(&1)
+        .expect("fixture endpoint")
+        .mode = "wireguard".to_string();
+    state.tcp_mss_all_tcp = 1200;
+    let decision = tunnel_decision();
+    assert_eq!(
+        select_tcp_mss(&state, &decision, &tunnel_meta()),
+        1200,
+        "all-tcp 1200 must cap the MTU-derived WG MSS 1365 (#14664)"
+    );
+    // Control: all-tcp unset leaves the derived WG value.
+    state.tcp_mss_all_tcp = 0;
+    assert_eq!(
+        select_tcp_mss(&state, &decision, &tunnel_meta()),
+        1365,
+        "all-tcp unset must leave the MTU-derived WG MSS 1365 unchanged"
+    );
+    // Control: gre-out set must not affect the WG value at all.
+    state.tcp_mss_gre_out = 1100;
+    assert_eq!(
+        select_tcp_mss(&state, &decision, &tunnel_meta()),
+        1365,
+        "gre-out is a GRE knob and must not cap the WG-derived MSS"
+    );
+}
+
 #[test]
 fn native_gre_inner_mtu_falls_back_to_1500_on_egress_miss() {
     // Reproduce the transient egress-map miss (re-reconciliation /
