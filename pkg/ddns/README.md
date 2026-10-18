@@ -1252,7 +1252,14 @@ P1b (closes **#2663, #2664, #2665**) builds on the P1a spine:
   other surface tears down → a residual sub-millisecond clobber) is accepted as-is:
   it is operator-repairable via `request system dynamic-dns update` (the #5710
   force-update), and the #6015 Surface A re-assert self-heals it on the next
-  deferred pass.
+  deferred pass. **Per-family authority (#14731):** the lease surface stores
+  the last resolved policy per family (`Manager.lastPolicies`) and stamps
+  each claim / owned comparison with that family's own #6755 authority via
+  `authorityForRecordLocked` — never the collapsed v4 aggregate used for
+  `Stats()` — so with distinct ddns4/ddns6 servers a v6 AAAA claim carries
+  the v6 fingerprint and co-owns only a Surface-A AAAA at the same v6
+  authority. (The stored `BackendFingerprint` is the #5814 namespace and is
+  not consulted for this comparison.)
 - **Source / VRF binding (#2665, `backend_bind.go`)** — the per-family
   `source-address` / `destination-interface` / `routing-instance` leaves build a
   custom `net.Dialer` (one `Control` hook: `unix.Bind` for the source IP +
