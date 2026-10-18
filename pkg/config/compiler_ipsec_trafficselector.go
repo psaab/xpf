@@ -175,8 +175,19 @@ func validateIPsecTrafficSelectorsStrict(nodes []*Node, lenient bool) ([]string,
 				// is spelled `local-identity`, which in Junos is an IDENTITY and is
 				// normally an FQDN or DN. The operator who writes the Junos-shaped
 				// value is the one who gets a silently dead tunnel.
+				// #14684: read the identities through the same run
+				// expansion the compiler uses (expandIPsecVPNRun9088).
+				// A chained flat run such as
+				// `set … vpn v1 gateway gw1 ipsec-policy epol1
+				// bind-interface st0.0 local-identity <fqdn>` nests
+				// local-identity/remote-identity inside the run, so
+				// FindChildren on direct children sees nothing while
+				// compileIPsec installs the values — bypassing
+				// #8003/#12507 (and the #4098 value rules). Iterating
+				// the expanded run sees every occurrence the compiler
+				// could install, in run order.
 				for _, leafName := range []string{"local-identity", "remote-identity"} {
-					for _, leaf := range vpnInst.node.FindChildren(leafName) {
+					for _, leaf := range findChildrenInRun9088(vpnInst.node, leafName) {
 						for _, val := range trafficSelectorValues(leaf) {
 							reason := trafficSelectorValueReject(val)
 							if reason == "" {
