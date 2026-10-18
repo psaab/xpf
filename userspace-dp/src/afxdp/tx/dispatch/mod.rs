@@ -1245,7 +1245,14 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                         dynamic_neighbors,
                     )
                 {
-                    drop(overlap_admissions.take());
+                    // #14661: segmented copies ride TxRequest with
+                    // overlap_admissions: None below, so the taken tokens
+                    // have no queue-service owner. Commit explicitly —
+                    // dropping them invoked the RAII fail() guard and
+                    // pinned a transmitted datagram as failed until TTL.
+                    if let Some(mut admissions) = overlap_admissions.take() {
+                        admissions.commit();
+                    }
                     for (frame, wg_commit) in segmented {
                         if cfg!(feature = "debug-log") {
                             let source_ports =

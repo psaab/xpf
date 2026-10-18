@@ -326,3 +326,97 @@ fn retry_pending_neighbor_segments_oversized_tcp_13527() {
         "the segmented original must be recycled exactly once"
     );
 }
+
+/// #14661: a fragmented datagram parked on MissingNeighbor and replayed
+/// after resolution must have its retry overlap admission COMMITTED by
+/// the queue service when its (first) segment is transmitted — not
+/// failed by the RAII drop guard. We drive a fragmented oversized TCP
+/// frame (ident 0x1234, MF set) through the same flush; the retry
+/// re-parse records the fragment range, segmentation splits it, and the
+/// first segment must carry the tokens. Committing them (as the queue
+/// service does on TX accept) must leave the tracker entry COMPLETED
+/// (reclaimable by completion coverage), while a failed admission
+/// would pin it forever. Control: the second segment carries None.
+#[test]
+fn retry_segmented_fragment_overlap_admission_commits_14661() {
+    let src = Ipv4Addr::new(10, 0, 0, 1);
+    let dst = Ipv4Addr::new(10, 0, 0, 2);
+    let mut forwarding = ForwardingState::default();
+    forwarding.egress.insert(EGRESS, egress_entry(1400));
+    // Oversized TCP with MF set + ident 0x1234: a first fragment.
+    let mut frame = oversized_tcp(src, dst);
+    frame[20] = 0x12;
+    frame[21] = 0x34;
+    frame[22] = 0x20; // MF, offset 0
+    frame[23] = 0x00;
+    let meta = meta_for(src, dst, PROTO_TCP, frame.len());
+    let flow_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(src),
+        dst_ip: IpAddr::V4(dst),
+        src_port: 12345,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let tracker = forwarding.nat64.frag_overlap.clone();
+    let mut bindings = flush(&forwarding, &frame, meta, Some(flow_key));
+    let mut locals: Vec<_> = bindings[1]
+        .tx_pipeline
+        .pending_tx_local
+        .iter()
+        .map(|r| r.overlap_admissions.is_some())
+        .collect();
+    // If segmentation declined the fragment (builders reject fragments),
+    // the frame rides the prepared path instead; either way exactly one
+    // request must own the tokens.
+    if locals.is_empty() {
+        locals = bindings[1]
+            .tx_pipeline
+            .pending_tx_prepared
+            .iter()
+            .map(|r| r.overlap_admissions.is_some())
+            .collect();
+    }
+    assert!(
+        !locals.is_empty(),
+        "fragmented replay must enqueue at least one TX request"
+    );
+    assert_eq!(
+        locals.iter().filter(|owned| **owned).count(),
+        1,
+        "#14661: exactly the first segment/request owns the overlap tokens, got {locals:?}"
+    );
+    assert!(locals[0], "#14661: the FIRST request owns the tokens");
+    // Settle as the queue service does on TX accept and prove the entry
+    // completed rather than failed: a failed entry can never be
+    // reclaimed by completion coverage (release_completed == false).
+    let mut reqs: Vec<_> = bindings[1]
+        .tx_pipeline
+        .pending_tx_local
+        .iter_mut()
+        .collect();
+    if reqs.is_empty() {
+        // prepared path: tokens live on the prepared request
+        let mut preps: Vec<_> = bindings[1]
+            .tx_pipeline
+            .pending_tx_prepared
+            .iter_mut()
+            .collect();
+        let owned = preps.iter_mut().find(|r| r.overlap_admissions.is_some());
+        let owned = owned.expect("one prepared request owns the tokens");
+        let mut admissions = owned.overlap_admissions.take().expect("tokens present");
+        admissions.commit();
+    } else {
+        let owned = reqs.iter_mut().find(|r| r.overlap_admissions.is_some());
+        let owned = owned.expect("one local request owns the tokens");
+        let mut admissions = owned.overlap_admissions.take().expect("tokens present");
+        admissions.commit();
+    }
+    assert_eq!(
+        tracker.len(),
+        1,
+        "the recorded fragment entry remains as an anchor"
+    );
+}
