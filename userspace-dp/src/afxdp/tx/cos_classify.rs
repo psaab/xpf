@@ -55,6 +55,20 @@ fn map_filter_forwarding_class_queue(
     }
 }
 
+/// #14663: effective ingress ifindex for the input-filter re-walk. A
+/// validated V2 fabric scope (`fabric_ingress_ifindex != 0`) names the
+/// customer logical ingress unit; the raw `ingress_ifindex` is then the
+/// fabric link, which carries no customer input filter. Unscoped packets
+/// resolve exactly as before.
+fn effective_ingress_ifindex(meta: impl Into<ForwardPacketMeta>) -> i32 {
+    let meta = meta.into();
+    if meta.fabric_ingress_ifindex != 0 {
+        meta.fabric_ingress_ifindex as i32
+    } else {
+        meta.ingress_ifindex as i32
+    }
+}
+
 /// #2238: classification verdict for a LOCALLY-GENERATED reply frame,
 /// derived from the reply's OWN egress 5-tuple + egress interface (not the
 /// triggering inbound packet's tuple). `drop == true` means an output
@@ -494,12 +508,13 @@ fn cached_cos_tx_selection_flowless(
     let mut filter_dscp_rewrite = None;
     let mut filter_forwarding_class = None;
     if has_input_tx_selection || has_input_three_color_policer {
+        let raw_ingress = effective_ingress_ifindex(meta);
         let ingress_ifindex = resolve_ingress_logical_ifindex(
             forwarding,
-            meta.ingress_ifindex as i32,
+            raw_ingress,
             meta.ingress_vlan_id,
         )
-        .unwrap_or(meta.ingress_ifindex as i32);
+        .unwrap_or(raw_ingress);
         let ingress_filter = if ingress_is_v6 {
             forwarding
                 .filter_state
@@ -677,12 +692,13 @@ fn resolve_cached_cos_tx_selection_impl(
     // `evaluate_interface_input_filter_counters_cached`, #3777/#4085), so the
     // `if output_filter.is_none()` gate on `filter_counters` is preserved.
     if has_input_tx_selection || has_input_three_color_policer {
+        let raw_ingress = effective_ingress_ifindex(meta);
         let ingress_ifindex = resolve_ingress_logical_ifindex(
             forwarding,
-            meta.ingress_ifindex as i32,
+            raw_ingress,
             meta.ingress_vlan_id,
         )
-        .unwrap_or(meta.ingress_ifindex as i32);
+        .unwrap_or(raw_ingress);
         let ingress_filter = if ingress_is_v6 {
             forwarding
                 .filter_state
@@ -1235,12 +1251,13 @@ fn resolve_cos_tx_selection_internal(
                 ingress_is_v6,
             );
         if has_input_tx_selection || has_input_three_color_policer {
+            let raw_ingress = effective_ingress_ifindex(meta);
             let ingress_ifindex = resolve_ingress_logical_ifindex(
                 forwarding,
-                meta.ingress_ifindex as i32,
+                raw_ingress,
                 meta.ingress_vlan_id,
             )
-            .unwrap_or(meta.ingress_ifindex as i32);
+            .unwrap_or(raw_ingress);
             let ingress_filter = if ingress_is_v6 {
                 forwarding
                     .filter_state
@@ -1371,12 +1388,9 @@ fn resolve_cos_tx_selection_internal(
     // (#4085), so evaluating the ingress leg here is side-effect free.
     let need_ingress_eval = has_input_tx_selection || has_input_three_color_policer;
     let ingress_ifindex = if need_ingress_eval {
-        resolve_ingress_logical_ifindex(
-            forwarding,
-            meta.ingress_ifindex as i32,
-            meta.ingress_vlan_id,
-        )
-        .unwrap_or(meta.ingress_ifindex as i32)
+        let raw_ingress = effective_ingress_ifindex(meta);
+        resolve_ingress_logical_ifindex(forwarding, raw_ingress, meta.ingress_vlan_id)
+            .unwrap_or(raw_ingress)
     } else {
         0
     };
@@ -2290,3 +2304,6 @@ fn enqueue_cos_item(
 #[cfg(test)]
 #[path = "cos_classify_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "cos_filter_fc_14663_tests.rs"]
+mod cos_filter_fc_14663_tests;
