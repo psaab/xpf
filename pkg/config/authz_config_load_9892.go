@@ -330,3 +330,39 @@ func AuthorizeConfigRollback(cfg *Config, class string, n int) error {
 		"rollback %d replaces the candidate with an older configuration whose paths cannot "+
 		"be adjudicated one by one; rollback 0 remains available (#9892)", class, n)
 }
+
+// PreflightConfigLoad reports whether a `load` in mode by class would be
+// refused WITHOUT examining the content (#14718): override/rescue for a
+// restricted class (they replace the whole candidate), or a class whose
+// deny-configuration matches every path. Callers that must read the
+// content from a privileged source (the CLI reading a file as root)
+// consult this BEFORE opening the source, so a categorically refused
+// caller never triggers the open and cannot use distinguishable read
+// errors as a filesystem existence/type oracle. A nil error means the
+// verdict is content-dependent (or unrestricted): the caller reads the
+// content and calls AuthorizeConfigLoad as before. The probe line used
+// for the deny-all check is fixed text carrying no caller data.
+func PreflightConfigLoad(cfg *Config, class, mode string) error {
+	if class == "" {
+		return nil
+	}
+	_, restricted, err := ConfigurationLoginRegexesFor(cfg, class)
+	if err != nil {
+		return fmt.Errorf("permission denied: login class %q has an invalid configuration regex: %w", class, err)
+	}
+	if !restricted {
+		return nil
+	}
+	if mode == "override" || mode == "rescue" {
+		return AuthorizeConfigLoad(cfg, class, mode, "")
+	}
+	// Deny-everything probe: adjudicate one synthetic mutation. Only a
+	// class that denies even this (deny ".*" / deny-all shape) is refused
+	// for every possible body, so only it is categorically refused here.
+	// A class denying merely some paths returns nil and falls through to
+	// the content-dependent AuthorizeConfigLoad after the read.
+	if err := AuthorizeConfigMutation(cfg, class, nil, "set system host-name xpf-load-preflight"); err != nil {
+		return err
+	}
+	return nil
+}

@@ -121,8 +121,10 @@ func TestLoadOverrideFlatRejectsAStraySettingLine7527(t *testing.T) {
 			"materializes a junk top-level node, which is the same class of defect " +
 			"one layer down (#7527/#3442 M3)")
 	}
-	if !strings.Contains(err.Error(), "not-a-set-line") {
-		t.Errorf("the error does not name the offending line: %v", err)
+	if strings.Contains(err.Error(), "not-a-set-line") {
+		t.Errorf("the error echoes the offending line (#14718, coordinates only): %v", err)
+	} else if !strings.Contains(err.Error(), "line 2") {
+		t.Errorf("the error does not retain the line coordinate: %v", err)
 	}
 
 	// ATOMIC: a rejected override must leave the candidate byte-identical.

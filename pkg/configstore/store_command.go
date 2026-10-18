@@ -2,6 +2,7 @@ package configstore
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -614,10 +615,10 @@ func parseOverrideContent(content string) (*config.ConfigTree, error) {
 		// Otherwise ParseSetVerb treats free text as a bare `set` path and
 		// materializes a junk node — which is the #7527 defect one layer down.
 		if !hasFlatVerb(trimmed) {
-			return nil, fmt.Errorf("line %d: %q is not a set/delete/deactivate/activate command", i+1, trimmed)
+			return nil, fmt.Errorf("line %d: is not a set/delete/deactivate/activate command", i+1)
 		}
 		if err := applyEditLine(tree, trimmed); err != nil {
-			return nil, fmt.Errorf("line %d: %q: %w", i+1, trimmed, err)
+			return nil, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
 		}
 	}
 	return tree, nil
@@ -685,10 +686,10 @@ func (s *Store) LoadMergeAsPlantClass(sessionID, plantClass, content string) err
 				continue
 			}
 			if !hasFlatVerb(trimmed) {
-				return fmt.Errorf("line %d: %q is not a set/delete/deactivate/activate command", i+1, trimmed)
+				return fmt.Errorf("line %d: is not a set/delete/deactivate/activate command", i+1)
 			}
 			if err := applyEditLine(working, trimmed); err != nil {
-				return fmt.Errorf("line %d: %q: %w", i+1, trimmed, err)
+				return fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
 			}
 		}
 	} else {
@@ -777,6 +778,27 @@ func applyEditLine(tree *config.ConfigTree, line string) error {
 	}
 }
 
+// loadLineError is the scrubbed form of a flat-load line failure (#14718).
+// It retains only the physical line coordinate — the same discipline
+// rescueParseError applies to rescue files — because the raw line and
+// the inner tree/parse errors can carry file-owned secrets (a denied
+// class whose `show configuration` is redacted under #4099 must not
+// recover denied lines one error at a time). The cause category is
+// fixed text, never input-derived.
+type loadLineError struct{ cause string }
+
+func (e loadLineError) Error() string { return e.cause }
+
+func scrubLoadLineError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, config.ErrPathNotFound) {
+		return loadLineError{cause: "path not found"}
+	}
+	return loadLineError{cause: "invalid set/delete/deactivate/activate command"}
+}
+
 // LoadSet applies multiple flat command lines to the candidate config.
 // Each line starting with a recognized verb — set, delete, deactivate, or
 // activate (#2008 H1) — is parsed and applied. Blank lines and `#` comments
@@ -841,10 +863,10 @@ func (s *Store) LoadSetAsPlantClass(sessionID, plantClass, content string) (int,
 		// dropping the intended command — the operator could commit a config
 		// missing it. Fail with a line-numbered error instead.
 		if !hasFlatVerb(line) {
-			return count, fmt.Errorf("line %d: %q is not a set/delete/deactivate/activate command", i+1, line)
+			return count, fmt.Errorf("line %d: is not a set/delete/deactivate/activate command", i+1)
 		}
 		if err := applyEditLine(working, line); err != nil {
-			return count, fmt.Errorf("line %d: %q: %w", i+1, line, err)
+			return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
 		}
 		count++
 	}
