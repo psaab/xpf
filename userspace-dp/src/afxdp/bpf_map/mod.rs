@@ -52,6 +52,28 @@ pub(crate) use tuple_gate::*;
 /// publishes on behalf of shared authority. See
 /// `docs/log/9517.md` for the two remedies that were tried and rejected, and
 /// `afxdp/forwarding/README.md` for the collision-surface list.
+
+/// #14648: may this session key become a row in the XDP steering map
+///
+/// False for exactly protocol 255 — `SHIM_PROTO_FRAGMENT_NO_L4`, the
+/// sentinel the shim substitutes for a non-first/short fragment's protocol
+/// (`userspace-xdp` `PROTO_FRAGMENT_NO_L4`, ports 0/0). 255 is IANA-Reserved,
+/// never a real upper-layer protocol a correct packet path resolves, and a
+/// steering row keyed `(family, 255, src, dst, 0, 0)` is precisely the tuple
+/// the shim probes for EVERY protocol's fragments. Publishing it — worst as
+/// `PASS_TO_KERNEL` for a peer-synced `LocalDelivery` session — hands those
+/// fragments to the kernel forward path with no zone policy evaluated.
+///
+/// This is the steering-map analogue of `v6_session_key_is_publishable`
+/// (#6923, the conntrack mirror): stated ONCE here, at the point where a key
+/// becomes shim-visible, so every present and future writer inherits it
+/// instead of having to remember it. Unlike the #6923 refusal it is not
+/// family-scoped: the shim substitutes 255 on both IPv4 and IPv6 fragment
+/// parses, so the gate applies to both families.
+pub(super) fn steering_key_is_publishable(key: &SessionKey) -> bool {
+    key.protocol != crate::session::SHIM_PROTO_FRAGMENT_NO_L4
+}
+
 pub(super) fn uses_kernel_local_session_map_entry(
     key: &SessionKey,
     decision: SessionDecision,
@@ -63,7 +85,8 @@ pub(super) fn uses_kernel_local_session_map_entry(
     // ones): the shim row would bypass the worker, so no terminal observation
     // could ever fire for it — the Codex-r3-F3 pre-removal escape. Table-less
     // (default) sessions are unaffected.
-    !has_routing_domains
+    steering_key_is_publishable(key)
+        && !has_routing_domains
         && key.discriminator.is_none()
         && origin.is_peer_synced()
         && !metadata.is_reverse
@@ -309,8 +332,13 @@ fn publish_session_rows(
     owner: &SessionKey,
     rows: &[(SessionKey, u8)],
 ) -> io::Result<()> {
+    // #14648 chokepoint: no 255 row reaches the map, whoever built the row
+    // set. Unpublishable rows are filtered, not errored — a publish that
+    // legitimately carries other rows still lands those, and a 255 owner
+    // with no other rows simply writes nothing.
     let claims: smallvec::SmallVec<[(SteeringRow, (&SessionKey, u8)); 4]> = rows
         .iter()
+        .filter(|(key, _)| steering_key_is_publishable(key))
         .map(|(key, value)| (session_map_row(key), (key, *value)))
         .collect();
     map.owners.publish_entry(
@@ -341,6 +369,10 @@ pub(super) fn publish_session_map_key(
     value: u8,
     owner: &SessionKey,
 ) -> io::Result<()> {
+    // #14648: the single-row sibling of the publish_session_rows chokepoint.
+    if !steering_key_is_publishable(key) {
+        return Ok(());
+    }
     // #9560: ONE row, claimed for `owner` without releasing its other rows. The write runs
     // under the row's shard lock, so a sibling's teardown can neither see the row ownerless
     // while the write lands nor delete it right after.

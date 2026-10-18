@@ -359,12 +359,19 @@ pub(super) fn publish_v6_session(
     //
     // Here it is expressed ONCE, at the point where a key becomes shim-visible,
     // so a third writer inherits it instead of having to remember it. This is
-    // the sole path by which a v6 key can enter the map the shim probes:
+    // the sole path by which a v6 key can enter the CONNTRACK mirror map:
     //   - `publish_bpf_conntrack_entry` -> here, `BPF_ANY` (creates)
     //   - `refresh_bpf_conntrack_last_seen`, `BPF_EXIST` — CANNOT create; that
     //     is demonstrated against a real map, not inferred from the flag's
     //     name, by `test/mutation/selftest-bpf-exist-cannot-create_6923.sh`
     //   - `delete_bpf_conntrack_entry` — a delete, which cannot mint a key
+    //
+    // #14648: this is NOT the sole path into the map the SHIM probes. The
+    // shim probes `userspace_sessions` (the steering map), whose writers go
+    // through `write_steering_row` in `bpf_map/mod.rs` — a different map from
+    // this conntrack mirror. That map's publishability gate is
+    // `steering_key_is_publishable` there; conflating the two maps is what
+    // left the steering publish ungated for protocol 255.
     //
     // DELIBERATELY UNREACHABLE TODAY. Both existing writers already decline, so
     // this refuses nothing that currently happens — it is a backstop, and its

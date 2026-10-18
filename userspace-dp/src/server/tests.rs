@@ -4855,6 +4855,45 @@ fn synced_import_allows_zero_ports_for_non_port_protocol_10720() {
     );
 }
 #[test]
+fn synced_import_refuses_fragment_sentinel_protocol_14648() {
+    for family in [libc::AF_INET as u8, libc::AF_INET6 as u8] {
+        let (src_ip, dst_ip) = if family == libc::AF_INET as u8 {
+            ("192.0.2.1", "192.0.2.2")
+        } else {
+            ("2001:db8::1", "2001:db8::2")
+        };
+        let request = SessionSyncRequest {
+            addr_family: family,
+            protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+            src_ip: src_ip.to_string(),
+            dst_ip: dst_ip.to_string(),
+            src_port: 0,
+            dst_port: 0,
+            ..SessionSyncRequest::default()
+        };
+        let err = super::helpers::build_synced_session_key(
+            &request,
+            0,
+            super::helpers::SyncedKeyIntent::Install,
+        )
+        .expect_err("#14648: a synced proto-255 Install must be refused on both families");
+        assert!(
+            err.contains("fragment-sentinel-protocol"),
+            "#14648: unexpected refusal reason {err}"
+        );
+        // A Delete only retracts and may under-match: never refused.
+        assert!(
+            super::helpers::build_synced_session_key(
+                &request,
+                0,
+                super::helpers::SyncedKeyIntent::Delete,
+            )
+            .is_ok(),
+            "#14648: a proto-255 Delete must still reconstruct (family {family})"
+        );
+    }
+}
+#[test]
 fn should_run_afxdp_requires_armed_and_supported() {
     let mut status = ProcessStatus {
         forwarding_armed: true,
