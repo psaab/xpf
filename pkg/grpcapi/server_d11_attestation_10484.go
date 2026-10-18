@@ -11,11 +11,17 @@ import (
 	"github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
+// d11LedgerPrincipalAllowed enforces the contract both D11 consumers
+// document: local root (uid 0 / Superuser) or the configured super-user
+// class (a class holding PermAll). A class holding only PermMaint — e.g.
+// a custom `permissions maintenance;` class — must NOT pass: the arm
+// consumer re-arms the D11 attestation authority, and PermMaint was
+// never the documented price for forging that proof-of-life (#14709).
 func d11LedgerPrincipalAllowed(principal authz.Principal, cfg *config.Config) bool {
 	return principal.Source == authz.SourcePeerUID &&
 		(principal.UID == 0 ||
 			principal.Superuser ||
-			config.ClassHasPermission(cfg, principal.Class, config.PermMaint))
+			config.ClassHasPermission(cfg, principal.Class, config.PermAll))
 }
 
 func (s *Server) d11AuthorizationConfig() *config.Config {
