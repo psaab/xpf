@@ -699,6 +699,14 @@ func pinnedFeedClient(base *http.Client, ips []netip.Addr, port string) (*http.C
 	return &client, nil
 }
 
+// escapedPathJoin joins two already-percent-escaped URL paths with
+// exactly one "/" between them. It operates on the ESCAPED form so an
+// encoded separator (%2F) survives the join end to end instead of being
+// decoded into a real path separator (#14723).
+func escapedPathJoin(baseEscaped, refEscaped string) string {
+	return strings.TrimSuffix(baseEscaped, "/") + "/" + strings.TrimPrefix(refEscaped, "/")
+}
+
 // joinFeedURL appends a per-feed path to a feed-server base URL,
 // preserving any query (and fragment) the base carries. Plain string
 // concatenation (baseURL + path) appends the path AFTER a base query:
@@ -710,12 +718,20 @@ func pinnedFeedClient(base *http.Client, ips []netip.Addr, port string) (*http.C
 // query-free bases), and the query is re-attached after it. A per-feed
 // path that itself carries a query replaces the base query for that
 // feed (the #7406 provider shape: the token lives on the path leaf);
-// otherwise the base query is inherited. A scheme or authority in the
-// per-feed path is dropped — only its path+query contribute, so a path
-// can never escape the configured origin. On any parse failure the raw
-// base is returned unchanged; readFeed then rejects an unconstructible
-// URL and the strict compiler gate rejects it at commit, so failure
-// stays fail-closed.
+// otherwise the base query is inherited.
+//
+// The per-feed path must be a plain relative path tail: an unparseable
+// value, a network-path reference ("//host/..."), or any scheme /
+// opaque form ("v1:prod/...", an absolute URL) is REJECTED by
+// returning "" (#14723). Apply treats "" as "register no feed", so the
+// failure stays fail-closed (bound name unresolvable, #5645) instead of
+// silently fetching the base endpoint and installing whatever prefixes
+// it serves as this feed's enforced policy. A malformed BASE, however,
+// is returned unchanged: readFeed then rejects the unconstructible URL
+// and the strict compiler gate rejects it at commit (#5183), so that
+// arm also stays fail-closed without masking which value is broken.
+// The join is performed on the escaped paths and RawPath is pinned, so
+// a %2F in either component reaches the wire as %2F.
 func joinFeedURL(baseURL, rawPath string) string {
 	if rawPath == "" {
 		return baseURL
@@ -726,11 +742,22 @@ func joinFeedURL(baseURL, rawPath string) string {
 	}
 	ref, err := url.Parse(rawPath)
 	if err != nil {
-		return baseURL
+		return ""
+	}
+	if ref.Scheme != "" || ref.Opaque != "" || ref.Host != "" || ref.User != nil {
+		return ""
 	}
 	joined := *base
-	joined.Path = strings.TrimSuffix(base.Path, "/") + "/" + strings.TrimPrefix(ref.Path, "/")
-	joined.RawPath = ""
+	joined.Path, joined.RawPath = "", ""
+	joinedPath := escapedPathJoin(base.EscapedPath(), ref.EscapedPath())
+	if decoded, derr := url.PathUnescape(joinedPath); derr == nil {
+		joined.Path = decoded
+		if joinedPath != decoded {
+			joined.RawPath = joinedPath
+		}
+	} else {
+		joined.Path = joinedPath
+	}
 	if ref.RawQuery != "" || ref.ForceQuery {
 		joined.RawQuery = ref.RawQuery
 		joined.ForceQuery = ref.ForceQuery
@@ -744,14 +771,33 @@ func joinFeedURL(baseURL, rawPath string) string {
 
 // resolveBaseURL returns the base URL for a feed server.
 // Prefers explicit URL; falls back to https://hostname.
+//
+// Trailing "/" is trimmed from the URL *path* only (#14723): trimming
+// the raw string cut a query or fragment token that itself ends in "/"
+// (https://h/base/?token=abc/ lost the token's slash; a query-free
+// https://h/base#frag/ lost the fragment's). An unparseable URL is
+// returned unchanged so readFeed / the strict gate report it as-is.
 func resolveBaseURL(fsCfg *config.FeedServer) string {
-	if fsCfg.URL != "" {
-		return strings.TrimRight(fsCfg.URL, "/")
+	raw := fsCfg.URL
+	if raw == "" && fsCfg.Hostname != "" {
+		raw = "https://" + fsCfg.Hostname
 	}
-	if fsCfg.Hostname != "" {
-		return "https://" + strings.TrimRight(fsCfg.Hostname, "/")
+	if raw == "" {
+		return ""
 	}
-	return ""
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" {
+		// No path component to trim (or unparseable): preserve the
+		// historical slash-trim so slash-only URLs still resolve to "".
+		return strings.TrimRight(raw, "/")
+	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	if u.Path == "" {
+		u.RawPath = ""
+	} else if u.RawPath != "" {
+		u.RawPath = strings.TrimRight(u.RawPath, "/")
+	}
+	return u.String()
 }
 
 // isPlaintextFeedURL reports whether url is a plaintext-http feed URL.
@@ -904,7 +950,19 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 			if len(fsCfg.FeedEntries) > 0 {
 				// Multiple named feeds with per-feed paths.
 				for _, fe := range fsCfg.FeedEntries {
-					plan(fe.Name, joinFeedURL(baseURL, fe.Path))
+					joined := joinFeedURL(baseURL, fe.Path)
+					if joined == "" {
+						// #14723: malformed / mistakable per-feed path.
+						// Register NO feed (fail-closed: the bound name
+						// stays unresolvable, #5645) rather than fetching
+						// the base endpoint under this feed's name. The
+						// strict compiler gate rejects the same config
+						// at commit; this covers lenient loads.
+						slog.Warn("dynamic-address: refusing feed with malformed path (no feed registered; bound address-name fails closed)",
+							"name", fe.Name, "server", fsCfg.Name, "path", config.RedactURL(fe.Path))
+						continue
+					}
+					plan(fe.Name, joined)
 				}
 			} else {
 				// Single feed (backward compat): keyed by FeedName or server name.
