@@ -412,8 +412,18 @@ impl EventFrame {
         // The zero-length prefix is explicit so #10888's handshake byte has a
         // stable position even when no rule identity is carried.
         let rule_id = policy_rule_id.as_bytes();
+        // #14839: reserve the whole remaining trailer, not just the rule_id:
+        // after the rule_id come the #10888 handshake byte (1), the #12187
+        // provenance byte (1), and the #13965 PPTP call-id pair (8). The old
+        // guard reserved only `+ 2` past the rule_id (the length prefix reads
+        // as the other 2 at a glance, but those bytes are before the rule_id),
+        // so a rule_id sized to fit exactly under the old guard passed it and
+        // then panicked past the 512-byte frame when the 8-byte pair was
+        // written. Reserving all 10 tail bytes makes the fallback correct:
+        // either the full trailer fits and is written, or rule_id_len is 0.
+        const RULE_ID_TRAILER_BYTES: usize = 1 + 1 + 8;
         let rule_id_len = if rule_id.len() <= u16::MAX as usize
-            && pos + 2 + rule_id.len() + 2 <= buf.len()
+            && pos + 2 + rule_id.len() + RULE_ID_TRAILER_BYTES <= buf.len()
         {
             rule_id.len()
         } else {
