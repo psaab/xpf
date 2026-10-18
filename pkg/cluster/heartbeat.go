@@ -208,6 +208,21 @@ const heartbeatGroupSize = 5
 // config (#4434).
 const maxHeartbeatGroups = 255
 
+// maxHeartbeatMonitors and maxHeartbeatMonitorNameSize are the monitor
+// section counterparts of maxHeartbeatGroups (#14704). NumMonitors and each
+// per-monitor NameLen are uint8 on the wire, so a 256th monitor or a
+// 256-byte interface name would wrap its length/count byte (256 -> 0,
+// 260 -> 4) while the full payload was still written. The receiver trusts
+// those bytes, so it then parsed monitor payload as the version trailer and
+// never reached the "XPFE" echo trailer — poisoning SoftwareVersion /
+// HAProtocolVersion and silently losing the echo lease. The commit gate
+// rejects unsupported names/counts in the normal path; these caps are the
+// defensive backstop for a leniently-loaded / peer-synced config, matching
+// the group and software-version clamps in marshalHeartbeatBody.
+const maxHeartbeatMonitors = 255
+
+const maxHeartbeatMonitorNameSize = 255
+
 const maxHeartbeatSoftwareVersionSize = 255
 
 // oversizeHeartbeatGroupsWarn logs the defensive group-count truncation in
@@ -356,6 +371,20 @@ func marshalHeartbeatBody(pkt *HeartbeatPacket, tailReserve int) []byte {
 	off++
 	numMon := 0
 	for _, mon := range pkt.Monitors {
+		// #14704: a name that cannot fit the uint8 NameLen byte must be
+		// skipped whole, never written with a wrapped length — the payload
+		// bytes would be parsed as the following monitors / version trailer.
+		// Skip rather than break so one oversize entry (e.g. from a
+		// peer-synced config) does not starve the monitors after it.
+		if len(mon.Interface) > maxHeartbeatMonitorNameSize {
+			continue
+		}
+		// #14704: the uint8 NumMonitors byte caps the section at 255;
+		// writing a 256th entry would wrap the count (256 -> 0) and desync
+		// it from the records actually written.
+		if numMon >= maxHeartbeatMonitors {
+			break
+		}
 		nameBytes := []byte(mon.Interface)
 		entrySize := 4 + len(nameBytes) // RGID + Flags + Weight + NameLen + name
 		if off+entrySize > maxHeartbeatSize-versionReserve-tailReserve {
