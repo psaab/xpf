@@ -1113,8 +1113,17 @@ impl SessionDomain {
     /// same-tuple installs, so no replacement can land between any phase 1
     /// and this execution. Each intent executes under ITS collecting
     /// worker's holder bit (claims are per-holder — Coordinator-holder
-    /// execution would strand worker claims and skip every delete). Every
-    /// intent is mechanically verified against the lease before its
+    /// execution would strand worker claims and skip every delete), AND
+    /// under the Coordinator holder: #14840 — a synced session's rows are
+    /// claimed twice, once by the coordinator at import and once by each
+    /// worker that applied the upsert, so releasing only the worker bit
+    /// leaves row(key) Remaining under Coordinator. The coordinator's
+    /// shared half (`remove_shared_policy_item`) releases that claim for
+    /// the entries it removes; this second execution covers intents for
+    /// worker-local entries with no shared counterpart. Releasing a
+    /// coordinator claim that does not exist is a no-op (Unregistered),
+    /// so executing both holders is safe for purely local sessions.
+    /// Every intent is mechanically verified against the lease before its
     /// execution — an uncovered intent is a caller bug that fails loud,
     /// never an unfenced delete. Returns false on any cover failure
     /// (attempts all intents, like the repair); BPF delete errors are
@@ -1135,6 +1144,17 @@ impl SessionDomain {
             crate::afxdp::bpf_map::delete_session_map_redirect_for_session(
                 crate::afxdp::bpf_map::SteeringMap {
                     holder: crate::afxdp::bpf_map::SteeringHolder::Worker(intent.worker_id),
+                    ..map
+                },
+                &intent.key,
+                intent.decision,
+                &intent.metadata,
+                intent.origin,
+            );
+            // #14840: also release the Coordinator claim (see above).
+            crate::afxdp::bpf_map::delete_session_map_redirect_for_session(
+                crate::afxdp::bpf_map::SteeringMap {
+                    holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
                     ..map
                 },
                 &intent.key,
