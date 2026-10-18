@@ -923,8 +923,24 @@ func (c *CLI) handleShowSystem(args []string) error {
 			if err != nil || n < 1 {
 				return fmt.Errorf("usage: show system rollback <N>")
 			}
-			rest := strings.Join(args[2:], " ")
-			if strings.Contains(rest, "| display set") {
+			// #14715/#13202: token-exact pipe parsing. Only
+			// `| display set` and a bare `compare` token are honoured;
+			// trailing tokens after a display format are a syntax error,
+			// never silently discarded (the substring check rendered the
+			// whole rollback slot for `| display set interfaces`).
+			_, rbFormat, rbPipe, rbPiped, rbErr := splitDisplayPipe(args[2:])
+			if rbErr != nil {
+				fmt.Println(rbErr.Error())
+				return nil
+			}
+			isCompare := false
+			for _, a := range args[2:] {
+				if a == "compare" {
+					isCompare = true
+				}
+			}
+			switch {
+			case rbPiped && rbFormat == displayPipeSet:
 				var content string
 				if redact {
 					content, err = c.store.ShowRollbackSetRedacted(n)
@@ -935,7 +951,11 @@ func (c *CLI) handleShowSystem(args []string) error {
 					return err
 				}
 				fmt.Print(content)
-			} else if strings.Contains(rest, "compare") {
+			case rbPiped && rbFormat != displayPipeNone:
+				fmt.Printf("syntax error: unknown display option '%s' for rollback (only 'set' is supported)\n", args[len(args)-1])
+			case rbPiped:
+				fmt.Printf("syntax error: unknown pipe command '%s'\n", rbPipe[0])
+			case isCompare:
 				var diff string
 				if redact {
 					diff, err = c.store.ShowCompareRollbackRedacted(n)
@@ -950,7 +970,7 @@ func (c *CLI) handleShowSystem(args []string) error {
 				} else {
 					fmt.Print(diff)
 				}
-			} else {
+			default:
 				var content string
 				if redact {
 					content, err = c.store.ShowRollbackRedacted(n)

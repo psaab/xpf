@@ -455,9 +455,6 @@ func (c *CLI) commitCtx() (context.Context, func()) {
 
 // #1044c Phase 1: handleConfigShow relocated from cli.go (no behavior change).
 func (c *CLI) handleConfigShow(args []string) error {
-	// Check for pipe commands
-	line := strings.Join(args, " ")
-
 	// Secret redaction (#4099): route config-mode display through the #4051
 	// *Redacted store methods whenever showConfigRedacted() flags. Custom
 	// `permissions all` classes can enter configure mode, but that grant does
@@ -467,32 +464,51 @@ func (c *CLI) handleConfigShow(args []string) error {
 	// mirror the cleartext siblings' nil-source defaults.
 	redact := c.showConfigRedacted()
 
-	if strings.Contains(line, "| compare") {
-		// Check for "| compare rollback N"
-		if idx := strings.Index(line, "| compare rollback"); idx >= 0 {
-			rest := strings.TrimSpace(line[idx+len("| compare rollback"):])
-			n, err := strconv.Atoi(rest)
-			if err != nil || n < 1 {
-				return fmt.Errorf("usage: show | compare rollback <N>")
+	// #14715: parse the pipe token-exactly. Split at the first bare `|`;
+	// only `| compare`, `| compare rollback <N>`, and
+	// `| display <json|set|xml|inheritance>` (no trailing tokens) are
+	// accepted. Substring selection silently discarded trailing tokens, so
+	// `show | display set interfaces` rendered the whole candidate.
+	_, format, pipeRest, piped, pipeErr := splitConfigShowPipe(args)
+	if pipeErr != nil {
+		fmt.Println(pipeErr.Error())
+		return nil
+	}
+	if piped {
+		switch {
+		case len(pipeRest) > 0 && pipeRest[0] == "compare":
+			if len(pipeRest) == 1 {
+				if redact {
+					fmt.Print(c.store.ShowCompareRedacted())
+				} else {
+					fmt.Print(c.store.ShowCompare())
+				}
+				return nil
 			}
-			var diff string
-			if redact {
-				diff, err = c.store.ShowCompareRollbackRedacted(n)
-			} else {
-				diff, err = c.store.ShowCompareRollback(n)
+			if len(pipeRest) == 3 && pipeRest[1] == "rollback" {
+				n, err := strconv.Atoi(pipeRest[2])
+				if err != nil || n < 1 {
+					return fmt.Errorf("usage: show | compare rollback <N>")
+				}
+				var diff string
+				if redact {
+					diff, err = c.store.ShowCompareRollbackRedacted(n)
+				} else {
+					diff, err = c.store.ShowCompareRollback(n)
+				}
+				if err != nil {
+					return err
+				}
+				fmt.Print(diff)
+				return nil
 			}
-			if err != nil {
-				return err
-			}
-			fmt.Print(diff)
+			return fmt.Errorf("usage: show | compare [rollback <N>]")
+		case format != displayPipeNone:
+			// handled below with displayPath
+		default:
+			fmt.Printf("syntax error: unknown pipe command '%s'\n", pipeRest[0])
 			return nil
 		}
-		if redact {
-			fmt.Print(c.store.ShowCompareRedacted())
-		} else {
-			fmt.Print(c.store.ShowCompare())
-		}
-		return nil
 	}
 
 	// Build path from editPath + args before the pipe (used by all formats).
@@ -509,8 +525,8 @@ func (c *CLI) handleConfigShow(args []string) error {
 	}
 
 	var output string
-	switch {
-	case strings.Contains(line, "| display json"):
+	switch format {
+	case displayPipeJSON:
 		switch {
 		case redact:
 			output = c.store.ShowCandidateJSONRedacted(displayPath)
@@ -519,7 +535,7 @@ func (c *CLI) handleConfigShow(args []string) error {
 		default:
 			output = c.store.ShowCandidateJSON()
 		}
-	case strings.Contains(line, "| display set"):
+	case displayPipeSet:
 		switch {
 		case redact:
 			output = c.store.ShowCandidateSetRedacted(displayPath)
@@ -528,7 +544,7 @@ func (c *CLI) handleConfigShow(args []string) error {
 		default:
 			output = c.store.ShowCandidateSet()
 		}
-	case strings.Contains(line, "| display xml"):
+	case displayPipeXML:
 		switch {
 		case redact:
 			output = c.store.ShowCandidateXMLRedacted(displayPath)
@@ -537,7 +553,7 @@ func (c *CLI) handleConfigShow(args []string) error {
 		default:
 			output = c.store.ShowCandidateXML()
 		}
-	case strings.Contains(line, "| display inheritance"):
+	case displayPipeInheritance:
 		switch {
 		case redact:
 			output = c.store.ShowCandidateInheritanceRedacted(displayPath)
@@ -546,16 +562,6 @@ func (c *CLI) handleConfigShow(args []string) error {
 		default:
 			output = c.store.ShowCandidateInheritance()
 		}
-	case strings.Index(line, "| ") >= 0:
-		// Unknown pipe command
-		idx := strings.Index(line, "| ")
-		pipeParts := strings.Fields(strings.TrimSpace(line[idx+2:]))
-		if len(pipeParts) >= 2 && pipeParts[0] == "display" {
-			fmt.Printf("syntax error: unknown display option '%s'\n", pipeParts[1])
-		} else if len(pipeParts) > 0 {
-			fmt.Printf("syntax error: unknown pipe command '%s'\n", pipeParts[0])
-		}
-		return nil
 	default:
 		// Show scoped to path (editPath + args), or the whole candidate.
 		switch {

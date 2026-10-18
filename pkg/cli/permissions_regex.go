@@ -162,6 +162,25 @@ func evaluateCommandRegex(
 				"a recognised filter, so the restriction cannot be evaluated",
 			class, verb)
 	}
+	// #14715: a `display` pipe is only authorizable in its exact form
+	// `| display <json|set|xml|inheritance>`, optionally followed by one
+	// recognised output filter (`| display set | match x` — dispatch
+	// SplitPipe splits the trailing filter off and the gate reassembles
+	// it, so both segments appear here). The handlers reject any longer
+	// form, and the gate must not authorize a shape the executor would
+	// reject (or, pre-fix, silently truncated): gate and executor must
+	// agree on what was run.
+	if len(pipeWords) > 1 && pipeWords[1] == "display" {
+		displayOK := len(pipeWords) >= 3 && isDisplayFormat(pipeWords[2]) &&
+			(len(pipeWords) == 3 ||
+				(len(pipeWords) >= 5 && pipeWords[3] == "|" && cliterm.IsPipeFilter(pipeWords[4])))
+		if !displayOK {
+			return fmt.Errorf(
+				"permission denied: login class %q restricts commands and the output pipe %q is not "+
+					"a recognised display format, so the restriction cannot be evaluated",
+				class, strings.Join(pipeWords[1:], " "))
+		}
+	}
 	command := strings.Join(canon, " ")
 	matched := command
 	if len(pipeWords) > 0 {
@@ -216,6 +235,16 @@ func splitAtPipe(words []string) (cmd, pipe []string) {
 // that a deny fails to match it.
 func authorizablePipe(verb string) bool {
 	return cliterm.IsPipeFilter(verb) || verb == "display"
+}
+
+// isDisplayFormat reports whether word is a configuration display format
+// the show/config handlers honour after `| display`.
+func isDisplayFormat(word string) bool {
+	switch word {
+	case "json", "set", "xml", "inheritance":
+		return true
+	}
+	return false
 }
 
 func firstWord(words []string) string {

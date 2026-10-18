@@ -11,6 +11,94 @@ import (
 	"github.com/psaab/xpf/pkg/cmdtree"
 )
 
+// displayPipeFormat identifies a configuration render format selected by a
+// `| display <format>` pipe.
+type displayPipeFormat int
+
+const (
+	displayPipeNone displayPipeFormat = iota
+	displayPipeJSON
+	displayPipeSet
+	displayPipeXML
+	displayPipeInheritance
+)
+
+// splitDisplayPipe splits configuration-show arguments at the first bare
+// `|` token and validates the pipe exactly.
+//
+// #14715: trailing tokens after a display format were silently discarded by
+// substring selection (`strings.Contains(rest, "| display set")`), so
+// `show configuration | display set interfaces` rendered the whole tree
+// instead of interfaces — and the authorization gate saw a different command
+// than the executor ran. Only `| display <json|set|xml|inheritance>` (with
+// no trailing tokens) is a display pipe; a single recognised output filter
+// may follow it (`| display set | match x`, which dispatch splits off
+// before dispatchOperational — see the chained-pipe cell in the #14715
+// regression). Any other pipe shape is returned as an unknown pipe so the
+// caller can name it in a syntax error instead of guessing a format.
+//
+// Returns path (tokens before `|`), the format, the remaining pipe tokens
+// when the pipe is not exactly a display pipe, and whether a pipe was present.
+func splitDisplayPipe(args []string) (path []string, format displayPipeFormat, rest []string, piped bool, err error) {
+	pipeIdx := -1
+	for i, a := range args {
+		if a == "|" {
+			pipeIdx = i
+			break
+		}
+	}
+	if pipeIdx < 0 {
+		return args, displayPipeNone, nil, false, nil
+	}
+	path = args[:pipeIdx]
+	pipe := args[pipeIdx+1:]
+	if len(pipe) == 0 {
+		return path, displayPipeNone, pipe, true, fmt.Errorf("syntax error: missing pipe command after '|'")
+	}
+	if pipe[0] == "display" {
+		if len(pipe) != 2 {
+			return path, displayPipeNone, pipe, true, fmt.Errorf("syntax error: '| display' requires exactly one of json, set, xml, inheritance")
+		}
+		if !isDisplayFormat(pipe[1]) {
+			return path, displayPipeNone, pipe, true, fmt.Errorf("syntax error: unknown display option '%s'", pipe[1])
+		}
+		switch pipe[1] {
+		case "json":
+			return path, displayPipeJSON, nil, true, nil
+		case "set":
+			return path, displayPipeSet, nil, true, nil
+		case "xml":
+			return path, displayPipeXML, nil, true, nil
+		default:
+			return path, displayPipeInheritance, nil, true, nil
+		}
+	}
+	return path, displayPipeNone, pipe, true, nil
+}
+
+// splitConfigShowPipe is splitDisplayPipe for config-mode `show`, whose pipe
+// additionally accepts `| compare [rollback <N>]`. It returns the same shape;
+// a compare pipe is reported as format=none with rest=["compare", ...] so
+// the caller renders the diff, and any other non-display pipe is an unknown
+// pipe for the caller to name.
+func splitConfigShowPipe(args []string) (path []string, format displayPipeFormat, rest []string, piped bool, err error) {
+	pipeIdx := -1
+	for i, a := range args {
+		if a == "|" {
+			pipeIdx = i
+			break
+		}
+	}
+	if pipeIdx < 0 {
+		return args, displayPipeNone, nil, false, nil
+	}
+	pipe := args[pipeIdx+1:]
+	if len(pipe) > 0 && pipe[0] == "compare" {
+		return args[:pipeIdx], displayPipeNone, pipe, true, nil
+	}
+	return splitDisplayPipe(args)
+}
+
 func (c *CLI) handleShow(args []string) error {
 	showTree := operationalTree["show"].Children
 	if len(args) == 0 {
@@ -33,14 +121,16 @@ func (c *CLI) handleShow(args []string) error {
 		return c.showChassis(args[1:])
 
 	case "configuration":
-		rest := strings.Join(args[1:], " ")
-		// Build path (everything after "configuration" before "|")
-		var cfgPath []string
-		for _, a := range args[1:] {
-			if a == "|" {
-				break
-			}
-			cfgPath = append(cfgPath, a)
+		// #14715: parse the display pipe token-exactly. Trailing tokens
+		// after a format are a syntax error, never silently discarded.
+		cfgPath, format, pipeRest, piped, pipeErr := splitDisplayPipe(args[1:])
+		if pipeErr != nil {
+			fmt.Println(pipeErr.Error())
+			return nil
+		}
+		if piped && format == displayPipeNone {
+			fmt.Printf("syntax error: unknown pipe command '%s'\n", pipeRest[0])
+			return nil
 		}
 		// Secret redaction (#4099): a VIEW-only read-only / config-viewer (and
 		// operator) login class must see ##SECRET-DATA## in place of IKE PSKs,
@@ -52,8 +142,8 @@ func (c *CLI) handleShow(args []string) error {
 		// subtree split for the privileged path.
 		redact := c.showConfigRedacted()
 		var output string
-		switch {
-		case strings.Contains(rest, "| display json"):
+		switch format {
+		case displayPipeJSON:
 			switch {
 			case redact:
 				output = c.store.ShowActiveJSONRedacted(cfgPath)
@@ -62,7 +152,7 @@ func (c *CLI) handleShow(args []string) error {
 			default:
 				output = c.store.ShowActiveJSON()
 			}
-		case strings.Contains(rest, "| display set"):
+		case displayPipeSet:
 			switch {
 			case redact:
 				output = c.store.ShowActiveSetRedacted(cfgPath)
@@ -71,7 +161,7 @@ func (c *CLI) handleShow(args []string) error {
 			default:
 				output = c.store.ShowActiveSet()
 			}
-		case strings.Contains(rest, "| display xml"):
+		case displayPipeXML:
 			switch {
 			case redact:
 				output = c.store.ShowActiveXMLRedacted(cfgPath)
@@ -80,7 +170,7 @@ func (c *CLI) handleShow(args []string) error {
 			default:
 				output = c.store.ShowActiveXML()
 			}
-		case strings.Contains(rest, "| display inheritance"):
+		case displayPipeInheritance:
 			switch {
 			case redact:
 				output = c.store.ShowActiveInheritanceRedacted(cfgPath)
@@ -89,15 +179,6 @@ func (c *CLI) handleShow(args []string) error {
 			default:
 				output = c.store.ShowActiveInheritance()
 			}
-		case strings.Index(rest, "| ") >= 0:
-			idx := strings.Index(rest, "| ")
-			pipeParts := strings.Fields(strings.TrimSpace(rest[idx+2:]))
-			if len(pipeParts) >= 2 && pipeParts[0] == "display" {
-				fmt.Printf("syntax error: unknown display option '%s'\n", pipeParts[1])
-			} else if len(pipeParts) > 0 {
-				fmt.Printf("syntax error: unknown pipe command '%s'\n", pipeParts[0])
-			}
-			return nil
 		default:
 			switch {
 			case redact:
