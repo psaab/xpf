@@ -54,16 +54,22 @@ func knownRedistProtocol(name string) bool {
 // when an export cannot be resolved to a source protocol we SKIP it and warn
 // rather than poison the managed reload.
 //
-// Cases after the no-from expansion (#14380):
+// Cases after the no-from expansion (#14380) and the reject-only
+// gate (#14698):
 //
 //   - A policy-statement whose explicit `from protocol` sources are
 //     all self or off-family at this node, or a policy-statement
 //     with no terms at all, still skips and warns: there is no
 //     per-source route-map to attach at this node.
-//     A term with NO `from protocol` is NOT in this class — it applies
-//     to every source (redistPolicyForProtocol) and enumerates the
-//     whole node-fitting keyword domain. Per-source maps are defined
-//     union-wide only for the node an export actually references.
+//     A term with NO `from protocol` that can accept is NOT in this
+//     class — it applies to every source (redistPolicyForProtocol)
+//     and enumerates the whole node-fitting keyword domain.
+//     Per-source maps are defined union-wide only for the node an
+//     export actually references.
+//   - #14698: a source named ONLY by reject terms (explicit or
+//     no-from) enrols nothing. `from protocol` in a reject term is a
+//     Junos filter condition, never a redistribution request; the
+//     reject term still rides in any enrolled source's filtered map.
 //   - The export is neither a known protocol token nor a defined
 //     policy-statement (a name that slipped past validation on a tolerant
 //     load / peer-sync path, opts.lenientRoutingExportRef in pkg/config).
@@ -92,21 +98,93 @@ func redistProtocolRouteMapName(policy, proto string) string {
 	return policy + "-" + normalizedRedistProtocol(proto) + config.ReservedRedistSuffix
 }
 
+// termCanAcceptForRedist14698 reports whether term can ever cause a
+// route to be accepted for redistribution. It mirrors the route-map
+// action mapping in renderPolicyTermSequences: a cost-set rejecting
+// term (`then reject`, incl. the contradictory NextPolicy+action form
+// that renders deny) only filters; every other term — terminating
+// accept, non-terminating fall-through (its set clauses run and the
+// route reaches a later term or the policy default, which may
+// accept), or bare `then next policy` (resume at the next policy,
+// which may accept) — can accept. In Junos, `from protocol` in a
+// reject term is a match condition, never a redistribution request
+// (#14698).
+func termCanAcceptForRedist14698(term *config.PolicyTerm) bool {
+	if term == nil {
+		return false
+	}
+	if term.NextPolicy && term.Action != "" {
+		return false // renders deny (contradictory actions)
+	}
+	return !(term.Action == "reject" && !term.NextPolicy)
+}
+
+// redistFilterPermitDominated14698 reports whether enrolling proto
+// for ps would attach a source the policy can never permit through
+// that source's filtered map, in the #14698 reject-only sense: proto
+// is NAMED by at least one cost-set rejecting term, no accept-capable
+// term can match proto (explicitly or no-from), and the policy
+// default is not accept. A reject term's `from protocol` is a Junos
+// filter condition, never a redistribution request, so such a source
+// must not be activated by the guard. Sources never named by a
+// reject term, sources an accept term can match, and sources under
+// an authored default-accept are NOT dominated — the #14369/#14586
+// contracts (keyword-named reject policies, no-from reject guards
+// under default-accept) keep their attachments and deny sequences.
+func redistFilterPermitDominated14698(ps *config.PolicyStatement, proto string) bool {
+	if ps.DefaultAction == "accept" {
+		return false
+	}
+	proto = normalizedRedistProtocol(proto)
+	namedByReject := false
+	for _, term := range ps.Terms {
+		if term == nil || termCanAcceptForRedist14698(term) {
+			continue
+		}
+		for _, p := range term.FromProtocols {
+			if normalizedRedistProtocol(p) == proto {
+				namedByReject = true
+			}
+		}
+	}
+	if !namedByReject {
+		return false
+	}
+	for _, term := range ps.Terms {
+		if !termCanAcceptForRedist14698(term) {
+			continue
+		}
+		if len(term.FromProtocols) == 0 {
+			return false
+		}
+		for _, p := range term.FromProtocols {
+			if normalizedRedistProtocol(p) == proto {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // redistProtocols is the explicit-only set: the per-source maps
 // generatePolicyOptions defines for every policy it renders and the
 // names redistProtocolMapCollision guards, where no export node is
 // in hand. A no-from term adds nothing here (see
-// redistProtocolsForNode).
+// redistProtocolsForNode). Only terms that can accept enrol a source
+// (#14698), and only known routing-protocol keywords enrol — an
+// unknown lenient-path token must never become a `redistribute
+// <unknown>` source.
 func redistProtocols(ps *config.PolicyStatement) []string {
 	return redistProtocolsFiltered(ps, "", "", false)
 }
 
 // redistProtocolsForNode is redistProtocols at one render node
-// (#14380): a term with no `from protocol` applies to every source
-// (redistPolicyForProtocol), so it adds the whole keyword domain,
-// filtered exactly like an explicit term — self excluded,
+// (#14380): a term with no `from protocol` that can accept applies to
+// every source (redistPolicyForProtocol), so it adds the whole keyword
+// domain, filtered exactly like an explicit term — self excluded,
 // redistSourceFitsNode(proto, node) required. With no enclosing
-// router (self/node both "") the whole domain renders.
+// router (self/node both "") the whole domain renders. A no-from
+// reject term adds nothing (#14698): it can only deny.
 func redistProtocolsForNode(ps *config.PolicyStatement, self, node string) []string {
 	return redistProtocolsFiltered(ps, self, node, true)
 }
@@ -122,9 +200,26 @@ func redistProtocolsFiltered(ps *config.PolicyStatement, self, node string, expa
 			continue
 		}
 		if len(term.FromProtocols) == 0 {
-			hasNoFromTerm = true
+			// #14698: only a term that can accept expands the domain;
+			// a no-from reject term is a pure filter and enrols no
+			// source (it still rides in any enrolled source's map
+			// via redistPolicyForProtocol, preserving deny order).
+			if termCanAcceptForRedist14698(term) {
+				hasNoFromTerm = true
+			}
+			continue
+		}
+		if !termCanAcceptForRedist14698(term) {
+			continue
 		}
 		for _, proto := range term.FromProtocols {
+			// #14698: gate explicit tokens through the same
+			// knownRedistProtocol allowlist the bare-export branch
+			// uses; unknown lenient-path tokens enrol nothing
+			// (normalizedRedistProtocol alone would pass them raw).
+			if !knownRedistProtocol(proto) {
+				continue
+			}
 			seen[normalizedRedistProtocol(proto)] = true
 		}
 	}
@@ -142,6 +237,15 @@ func redistProtocolsFiltered(ps *config.PolicyStatement, self, node string, expa
 				continue
 			}
 			seen[proto] = true
+		}
+	}
+	// #14698: drop permit-dominated sources — e.g. bgp named only by a
+	// reject guard while a no-from accept expands the domain. The
+	// guard still rides in other sources' maps; bgp itself originates
+	// nothing, so no `redistribute bgp` and no EXP-bgp map.
+	for proto := range seen {
+		if redistFilterPermitDominated14698(ps, proto) {
+			delete(seen, proto)
 		}
 	}
 	protocols := make([]string, 0, len(seen))
@@ -580,16 +684,37 @@ func (m *Manager) redistributeEntriesAt(export string, po *config.PolicyOptionsC
 					continue
 				}
 				// A term with no `from protocol` matches routes from
-				// every source (redistPolicyForProtocol), so it
-				// contributes the whole keyword domain below, filtered
-				// exactly like an explicit term: self excluded,
-				// redistSourceFitsNode(proto, node) required.
+				// every source (redistPolicyForProtocol), so a term
+				// that can accept contributes the whole keyword
+				// domain below, filtered exactly like an explicit
+				// term: self excluded, redistSourceFitsNode(proto,
+				// node) required. #14698: a no-from REJECT term is a
+				// pure filter — it enrols no source, though it still
+				// rides in any enrolled source's map via
+				// redistPolicyForProtocol.
 				if len(term.FromProtocols) == 0 {
-					hasNoFromTerm = true
+					if termCanAcceptForRedist14698(term) {
+						hasNoFromTerm = true
+					}
 					continue
 				}
-				for _, proto := range term.FromProtocols {
-					proto = normalizedRedistProtocol(proto)
+				// #14698: a reject term's `from protocol` is a match
+				// condition, never a redistribution request; only
+				// terms that can accept enrol their sources. The
+				// reject term itself is preserved in the per-source
+				// map by redistPolicyForProtocol, so its filtering
+				// is unchanged for enrolled sources.
+				if !termCanAcceptForRedist14698(term) {
+					continue
+				}
+				for _, rawProto := range term.FromProtocols {
+					// #14698: unknown lenient-path tokens enrol
+					// nothing — only the knownRedistProtocol
+					// allowlist may become a redistribute source.
+					if !knownRedistProtocol(rawProto) {
+						continue
+					}
+					proto := normalizedRedistProtocol(rawProto)
 					// Skip a policy term that matches the enclosing
 					// protocol's own routes — `redistribute ospf
 					// route-map X` under `router ospf` is self-
@@ -617,6 +742,15 @@ func (m *Manager) redistributeEntriesAt(export string, po *config.PolicyOptionsC
 				// protocol-less or mixed policy yields the union.
 				for _, proto := range redistProtocolsForNode(ps, self, node) {
 					protocols[proto] = true
+				}
+			}
+			// #14698: prune permit-dominated sources (redistProtocols-
+			// Filtered already drops them on the expansion path; this
+			// covers explicit-only enrollment, e.g. a bgp source whose
+			// every applying term rejects).
+			for proto := range protocols {
+				if redistFilterPermitDominated14698(ps, proto) {
+					delete(protocols, proto)
 				}
 			}
 			if len(protocols) > 0 {

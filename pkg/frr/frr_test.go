@@ -3099,10 +3099,15 @@ func TestGenerateProtocols_BGPExportPrefixOnly(t *testing.T) {
 			"adv-filter": {
 				Name: "adv-filter",
 				Terms: []*config.PolicyTerm{
-					// No FromProtocols — matches by community only.
-					{Name: "t1", FromCommunity: []string{"no-export"}, Action: "reject"},
+					// #14698: accept (was reject). A no-from reject
+					// term is a pure filter and enrols no source; the
+					// #2473/#14586 property (no-from policy originates
+					// the whole non-self domain through filtered maps,
+					// plus the peer route-map out) requires a term
+					// that can accept. DefaultAction accept below is
+					// unchanged.
+					{Name: "t1", FromCommunity: []string{"no-export"}, Action: "accept"},
 				},
-				DefaultAction: "accept",
 			},
 		},
 	}

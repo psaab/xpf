@@ -46,19 +46,40 @@ import (
 func TestRedistributeOperandsAreSanitized_8597(t *testing.T) {
 	m := New()
 
+	// #14698: the PROTOCOL-operand dirty token ("static\n line two")
+	// is now refused enrollment outright by the knownRedistProtocol
+	// allowlist gate — stronger than the #8597 sanitize belt (which
+	// remains on the render path for any token that does enrol). So
+	// that operand now renders NOTHING, and this cell pins the
+	// stronger outcome (no line, hence no injection) instead of the
+	// belt's sanitized line. The ROUTE-MAP operand subtest below
+	// still exercises the sanitize belt on a clean proto.
+	t.Run("control byte in the PROTOCOL operand", func(t *testing.T) {
+		po := &config.PolicyOptionsConfig{
+			PolicyStatements: map[string]*config.PolicyStatement{
+				"exp": {Name: "exp", Terms: []*config.PolicyTerm{
+					{Name: "t1", FromProtocols: []string{"static\n line two"}, Action: "accept"},
+				}},
+			},
+		}
+		got := m.resolveRedistribute("exp", po, "", nil)
+		if got != "" {
+			t.Errorf("dirty protocol token enrolled and rendered %q; the #14698 allowlist must enrol nothing", got)
+		}
+	})
+
 	for _, tc := range []struct {
 		name   string
 		export string
 		protos []string
 	}{
-		{"control byte in the PROTOCOL operand", "exp", []string{"static\n line two"}},
 		{"control byte in the ROUTE-MAP operand", "exp\nrouter bgp 65000", []string{"static"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			po := &config.PolicyOptionsConfig{
 				PolicyStatements: map[string]*config.PolicyStatement{
 					tc.export: {Name: tc.export, Terms: []*config.PolicyTerm{
-						{Name: "t1", FromProtocols: tc.protos},
+						{Name: "t1", FromProtocols: tc.protos, Action: "accept"},
 					}},
 				},
 			}

@@ -23,7 +23,14 @@ func keywordNamedPolicy14369(name string) *config.PolicyOptionsConfig {
 			name: {
 				Name: name,
 				Terms: []*config.PolicyTerm{
-					{Name: "reject-bad", FromProtocols: []string{"static"}, Action: "reject"},
+					// #14698: an accept term (was reject-only). A
+					// reject-only `from protocol` term is a filter,
+					// never a redistribution request, so it no longer
+					// enrols static; the #14369 precedence property
+					// (defined policy wins over the bare token, filtered
+					// map not bare line) is exercised identically with
+					// a positive term.
+					{Name: "accept-good", FromProtocols: []string{"static"}, Action: "accept"},
 				},
 			},
 		},
