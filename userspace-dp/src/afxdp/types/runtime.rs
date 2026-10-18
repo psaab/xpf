@@ -748,6 +748,11 @@ pub(in crate::afxdp) enum WorkerCommand {
         key: SessionKey,
         expected_id: u64,
         companion: Option<SessionKey>,
+        /// #14666: companion incarnation captured at producer capture time
+        /// (same capture as `expected_id`, e.g. `policy_companion` /
+        /// shared reverse entry). 0 = not captured (legacy producers);
+        /// worker deletes companion only when live id matches (or 0).
+        companion_expected_id: u64,
     },
     DeletePolicyBatch {
         items: Vec<PolicyDeleteItem>,

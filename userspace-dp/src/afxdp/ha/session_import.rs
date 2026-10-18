@@ -2238,10 +2238,25 @@ impl crate::afxdp::ha::SessionDomain {
                 // #10512: the identity + coordinator-derived companion travel
                 // to the worker so a replacement installed during queue delay
                 // survives the drain (forward mismatch skips both).
+                // #14666: the shared reverse entry was already removed
+                // above (reverse_teardown), so this read normally finds
+                // nothing and yields 0 = uncaptured; the worker then
+                // preserves a replaced companion (bounded leak, healed
+                // by the delete-drop sweep / age-out). A surviving
+                // reverse row (teardown declined) still names its id.
+                let companion_expected_id = reverse_key
+                    .as_ref()
+                    .and_then(|rk| {
+                        lock_shared_recover(&self.sessions.synced)
+                            .get(rk)
+                            .map(|e| e.session_id)
+                    })
+                    .unwrap_or(0);
                 WorkerCommand::DeleteSyncedConditional {
                     key: key.clone(),
                     expected_id,
                     companion: reverse_key.clone(),
+                    companion_expected_id,
                 }
             } else if peer_delete {
                 WorkerCommand::DeleteSynced(key.clone())

@@ -12778,7 +12778,7 @@ fn purge_translated_synced_hit_full_teardown_13674() {
         assert!(
             pending.iter().any(|cmd| matches!(
                 cmd,
-                WorkerCommand::DeleteSyncedConditional { key, expected_id, companion: None }
+                WorkerCommand::DeleteSyncedConditional { key, expected_id, companion: None, .. }
                     if *key == wire_key && *expected_id == 1
             )),
             "purge that removes the captured shared entry must queue an identity-conditional delete to siblings, got {pending:?}",
@@ -12791,6 +12791,221 @@ fn purge_translated_synced_hit_full_teardown_13674() {
     );
     // existing: local entry gone
     assert!(sessions.lookup(&wire_key, 1_000_000, TCP_FLAG_ACK).is_none());
+}
+
+// #14666 leg 1 RED: a local-first hit (shared_entry None, after UpsertSynced
+// materialized the row) must still purge shared authority + fan out.
+// Pre-fix resolve.rs derives shared_identity only from hit.shared_entry, so
+// purge sees None, takes Absent, and never replicates — sibling keeps state.
+#[test]
+fn local_hit_purge_removes_shared_and_replicates_14666() {
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    let forwarding = ForwardingState::default();
+    let orig_key = test_key();
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+        rewrite_src_port: Some(40000),
+        ..NatDecision::default()
+    };
+    let wire_key = forward_wire_key(&orig_key, nat);
+    let decision = SessionDecision {
+        resolution: test_local_delivery_decision().resolution,
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let metadata = test_metadata();
+    let mut sessions = SessionTable::new();
+    // Materialize as UpsertSynced does (peer-synced local row, session_id 42).
+    let entry = SyncedSessionEntry {
+        key: wire_key.clone(),
+        decision,
+        metadata: metadata.clone(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 7,
+        session_id: 42,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+    };
+    assert!(sessions.upsert_synced_with_origin(entry.clone().into_session_install(1_000_000), false));
+    let _ = sessions.drain_deltas(16);
+    let local_id = sessions.session_id_for(&wire_key);
+    assert_ne!(local_id, 0, "fixture: local row must carry an id");
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &entry);
+    // Drive through resolve with inactive RG (transient) — local hit path.
+    let ha_state: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
+    let flow = SessionFlow { src_ip: wire_key.src_ip, dst_ip: wire_key.dst_ip, forward_key: wire_key.clone() };
+    let peer_queue = Arc::new(Mutex::new(VecDeque::new()));
+    let peer_worker_commands = vec![peer_queue.clone()];
+    let by_id = {
+        let mut m = BTreeMap::new();
+        m.insert(9u32, peer_queue.clone());
+        crate::afxdp::WorkerCommandQueues::new(m)
+    };
+    let by_id_ref = &by_id;
+    // resolve_flow_session_decision uses empty by_id, so call with_conntrack directly then promote.
+    let resolved_opt = resolve_flow_session_decision_with_conntrack(
+        &mut sessions, SteeringMap::unshared_for_test(-1), -1, -1,
+        &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes,
+        &peer_worker_commands, by_id_ref, &forwarding, &ha_state, &Arc::new(ShardedNeighborMap::new()),
+        &flow, 1_000_000, 1, PROTO_TCP, TCP_FLAG_ACK, 0, 0, false, false, 0, 0, None,
+    );
+    let mut resolved = resolved_opt.expect("transient local hit must resolve");
+    assert!(resolved.deferred_synced_purge.is_some(), "fixture: transient purge must be deferred, got {resolved:?}");
+    let shared = SharedSessionRefs { sessions: &shared_sessions, nat_sessions: &shared_nat_sessions, forward_wire_sessions: &shared_forward_wire_sessions, owner_rg_indexes: &shared_owner_rg_indexes };
+    let mut evicted = Vec::new();
+    maybe_promote_synced_session_with_conntrack(&mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, shared, &peer_worker_commands, by_id_ref, &forwarding, 1_000_000, TCP_FLAG_ACK, 0, SessionHitVerdict::Owner, &mut resolved, &mut evicted);
+    assert!(lock_shared_recover(&shared_sessions).get(&wire_key).is_none(), "local-hit purge must remove shared entry (leaked pre-fix)");
+    assert!(sessions.lookup(&wire_key, 1_000_000, TCP_FLAG_ACK).is_none(), "local row must be purged");
+    let pending = peer_queue.lock().unwrap();
+    assert!(pending.iter().any(|cmd| matches!(cmd, WorkerCommand::DeleteSyncedConditional { key, expected_id, companion: None, .. } if *key == wire_key && *expected_id == local_id)), "purge must replicate conditional delete with local id {local_id}, got {pending:?}");
+}
+
+// #14666 leg 1 control: shared replacement with different id must survive.
+#[test]
+fn local_hit_purge_preserves_replacement_shared_entry_14666() {
+    let forwarding = ForwardingState::default();
+    let orig_key = test_key();
+    let nat = NatDecision { rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))), rewrite_src_port: Some(40000), ..NatDecision::default() };
+    let wire_key = forward_wire_key(&orig_key, nat);
+    let decision = SessionDecision { resolution: test_local_delivery_decision().resolution, nat, install_table_domain: 0, install_table_check: 0 };
+    let metadata = test_metadata();
+    let mut sessions = SessionTable::new();
+    let entry = SyncedSessionEntry { key: wire_key.clone(), decision, metadata: metadata.clone(), leak_incarnation: 0, origin: SessionOrigin::SyncImport, protocol: PROTO_TCP, tcp_flags: TCP_FLAG_ACK, generation: 7, session_id: 42, tcp_close_class: 0, tcp_handshake_state: 0, pptp_call_ids: 0, source_nat_static: None };
+    assert!(sessions.upsert_synced_with_origin(entry.clone().into_session_install(1_000_000), false));
+    let _ = sessions.drain_deltas(16);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let mut replacement = entry.clone();
+    replacement.session_id = 99;
+    replacement.generation = 8;
+    publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &replacement);
+    let ha_state: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
+    let flow = SessionFlow { src_ip: wire_key.src_ip, dst_ip: wire_key.dst_ip, forward_key: wire_key.clone() };
+    let peer_queue = Arc::new(Mutex::new(VecDeque::new()));
+    let peer_worker_commands = vec![peer_queue.clone()];
+    let by_id = {
+        let mut m = BTreeMap::new();
+        m.insert(9u32, peer_queue.clone());
+        crate::afxdp::WorkerCommandQueues::new(m)
+    };
+    let mut resolved = resolve_flow_session_decision_with_conntrack(&mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &peer_worker_commands, &by_id, &forwarding, &ha_state, &Arc::new(ShardedNeighborMap::new()), &flow, 1_000_000, 1, PROTO_TCP, TCP_FLAG_ACK, 0, 0, false, false, 0, 0, None).expect("hit resolves");
+    let shared = SharedSessionRefs { sessions: &shared_sessions, nat_sessions: &shared_nat_sessions, forward_wire_sessions: &shared_forward_wire_sessions, owner_rg_indexes: &shared_owner_rg_indexes };
+    let mut evicted = Vec::new();
+    maybe_promote_synced_session_with_conntrack(&mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, shared, &peer_worker_commands, &by_id, &forwarding, 1_000_000, TCP_FLAG_ACK, 0, SessionHitVerdict::Owner, &mut resolved, &mut evicted);
+    let live = lock_shared_recover(&shared_sessions).get(&wire_key).cloned().expect("replacement shared entry must survive");
+    assert_eq!(live.session_id, 99, "replacement must not be removed by stale local purge");
+    assert!(peer_queue.lock().unwrap().is_empty(), "no replicate when shared removal declined");
+}
+
+// #14666 leg 2 RED: queue-full conditional repair must not free a live
+// replacement's port. The live record on worker 3 uses the same
+// (key,nat) as the stale delete; the allocator cannot distinguish
+// incarnations, so a conditional repair must not release at all.
+// Pre-fix it releases worker 3's bit and frees the port.
+#[test]
+fn conditional_queue_full_repair_preserves_replacement_port_14666() {
+    let forwarding = drop8114_forwarding();
+    let nat = drop8114_reserve(&forwarding, 3);
+    let (peers, by_id) = drop8114_queues(3, true);
+    let outcome = replicate_session_delete_conditional(&peers, &by_id, &forwarding, &drop8114_key(), nat, false, 2_000, 42, None, 0);
+    assert_eq!(outcome.dropped, 1, "fixture: conditional delete must be refused");
+    assert!(forwarding.source_nat_rules[0].pool_allocator.debug_is_port_occupied(0, 20000), "conditional queue-full repair must NOT release the port: the live record may be a replacement (pre-fix freed)");
+}
+
+// #14666 leg 2 control: unconditional repairing delete still repairs.
+#[test]
+fn unconditional_queue_full_repair_still_releases_14666() {
+    let forwarding = drop8114_forwarding();
+    let nat = drop8114_reserve(&forwarding, 3);
+    let (peers, by_id) = drop8114_queues(3, true);
+    let outcome = replicate_session_delete_repairing(&peers, &by_id, &forwarding, &drop8114_key(), nat, false, 2_000);
+    assert_eq!(outcome.dropped, 1);
+    assert_eq!(outcome.repaired, 1);
+    assert!(!forwarding.source_nat_rules[0].pool_allocator.debug_is_port_occupied(0, 20000), "unconditional repair must still free the port");
+}
+
+// #14666 leg 3 RED: forward match whose companion was replaced must NOT
+// delete the replacement. Pre-fix companion recursion passes expected 0.
+#[test]
+fn conditional_delete_preserves_replaced_companion_14666() {
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    assert!(sessions.install_with_protocol_with_origin(key.clone(), test_decision(), test_metadata(), SessionOrigin::ForwardFlow, now_ns, PROTO_TCP, TCP_FLAG_ACK));
+    let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+    let mut comp_meta = test_metadata();
+    comp_meta.is_reverse = true;
+    assert!(sessions.install_with_protocol_with_origin(companion.clone(), test_decision(), comp_meta.clone(), SessionOrigin::ReverseFlow, now_ns, PROTO_TCP, TCP_FLAG_ACK));
+    let fwd_id = sessions.session_id_for(&key);
+    let stale_comp_id = sessions.session_id_for(&companion);
+    assert!(sessions.install_with_protocol_with_origin(companion.clone(), test_decision(), comp_meta, SessionOrigin::ReverseFlow, now_ns, PROTO_TCP, TCP_FLAG_ACK));
+    let live_comp_id = sessions.session_id_for(&companion);
+    assert_ne!(live_comp_id, stale_comp_id, "fixture: companion replaced");
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    commands.lock().unwrap().push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional { key: key.clone(), expected_id: fwd_id, companion: Some(companion.clone()), companion_expected_id: stale_comp_id });
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    apply_worker_commands(&commands, &mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, &forwarding, &ha_state, &dynamic_neighbors, 0, &mut VecDeque::new());
+    assert_eq!(sessions.session_id_for(&key), 0, "matched forward must be removed");
+    assert_eq!(sessions.session_id_for(&companion), live_comp_id, "replaced companion must survive");
+}
+
+// #14666 leg 3 control: matched companion is removed with its forward.
+#[test]
+fn conditional_delete_removes_matched_companion_14666() {
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    assert!(sessions.install_with_protocol_with_origin(key.clone(), test_decision(), test_metadata(), SessionOrigin::ForwardFlow, now_ns, PROTO_TCP, TCP_FLAG_ACK));
+    let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+    let mut comp_meta = test_metadata();
+    comp_meta.is_reverse = true;
+    assert!(sessions.install_with_protocol_with_origin(companion.clone(), test_decision(), comp_meta, SessionOrigin::ReverseFlow, now_ns, PROTO_TCP, TCP_FLAG_ACK));
+    let fwd_id = sessions.session_id_for(&key);
+    let comp_id = sessions.session_id_for(&companion);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    commands.lock().unwrap().push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional { key: key.clone(), expected_id: fwd_id, companion: Some(companion.clone()), companion_expected_id: comp_id });
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    apply_worker_commands(&commands, &mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, &forwarding, &ha_state, &dynamic_neighbors, 0, &mut VecDeque::new());
+    assert_eq!(sessions.session_id_for(&key), 0);
+    assert_eq!(sessions.session_id_for(&companion), 0, "matched companion must be removed");
+}
+
+// #14666 leg 3 absent control: companion already gone (id 0 capture for a
+// live-at-capture companion is impossible; absent live companion with
+// captured id must be a no-op, not a clobber of a later install is covered
+// above; here captured id matches nothing and forward still removes).
+#[test]
+fn conditional_delete_absent_companion_is_noop_14666() {
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    assert!(sessions.install_with_protocol_with_origin(key.clone(), test_decision(), test_metadata(), SessionOrigin::ForwardFlow, now_ns, PROTO_TCP, TCP_FLAG_ACK));
+    let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+    let fwd_id = sessions.session_id_for(&key);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    commands.lock().unwrap().push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional { key: key.clone(), expected_id: fwd_id, companion: Some(companion.clone()), companion_expected_id: 777 });
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    apply_worker_commands(&commands, &mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, &forwarding, &ha_state, &dynamic_neighbors, 0, &mut VecDeque::new());
+    assert_eq!(sessions.session_id_for(&key), 0, "forward removed even when companion absent");
+    assert_eq!(sessions.session_id_for(&companion), 0);
 }
 
 
@@ -17079,6 +17294,7 @@ fn scoped_worker_delete_mismatched_keeps_both_halves_10512() {
             key: key.clone(),
             expected_id: stale_forward_id,
             companion: Some(companion.clone()),
+            companion_expected_id: 0,
         });
     let forwarding = test_forwarding_state();
     let ha_state = BTreeMap::new();
@@ -17144,6 +17360,7 @@ fn scoped_worker_delete_matched_removes_both_halves_10512() {
             key: key.clone(),
             expected_id: forward_id,
             companion: Some(companion.clone()),
+            companion_expected_id: 0,
         });
     let forwarding = test_forwarding_state();
     let ha_state = BTreeMap::new();

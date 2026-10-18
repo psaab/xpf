@@ -560,7 +560,7 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                     None,
                 );
             }
-            WorkerCommand::DeleteSyncedConditional { key, expected_id, companion } => {
+            WorkerCommand::DeleteSyncedConditional { key, expected_id, companion, companion_expected_id } => {
                 commands::handle_delete_synced_conditional(
                     sessions,
                     session_map,
@@ -573,6 +573,7 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                     &mut deleted_synced_keys,
                     worker_id,
                     companion,
+                    companion_expected_id,
                 );
             }
             WorkerCommand::DeletePolicyBatch {
@@ -1226,10 +1227,21 @@ now_ns: u64,) -> DeleteReplicationOutcome {
 
 /// Stale-ordinary-close twin of [`replicate_session_delete_repairing`]:
 /// siblings delete only when the forward's live identity still matches
-/// the captured one, and the carried companion goes with it (same
-/// forward-match gate as the scoped HA path — no companion identity is
-/// capturable from a close delta). Drop repair mirrors the unconditional
-/// twin keystroke for keystroke (exact-keyed releases + epoch signal).
+/// the captured one, and the carried companion goes with it only when
+/// its captured identity also matches (#14666).
+///
+/// #14666 queue-full: NO on-behalf NAT repair. The unconditional twin's
+/// repair is sound because that delete will remove whatever incarnation
+/// the sibling holds; a conditional delete by definition may be stale
+/// for the sibling's live record, and the allocator keyed by
+/// (flow, translated) cannot distinguish the stale incarnation from a
+/// live replacement on the same worker — releasing worker_id's bit
+/// could free a live replacement's port. The epoch bump still arms the
+/// sibling's delete-drop sweep, which reconciles against shared
+/// authority (absent => its own conditional teardown will run when the
+/// queue drains, or the sweep drops the stale local row) without an
+/// unconditional cross-worker release. `repaired` therefore stays 0
+/// for conditional drops; `dropped` still counts them.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn replicate_session_delete_conditional(peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
 worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
@@ -1239,7 +1251,9 @@ nat: NatDecision,
 is_reverse: bool,
 now_ns: u64,
 expected_id: u64,
-companion: Option<SessionKey>,) -> DeleteReplicationOutcome {
+companion: Option<SessionKey>,
+companion_expected_id: u64,) -> DeleteReplicationOutcome {
+    let _ = (forwarding, nat, is_reverse, now_ns);
     let mut outcome = DeleteReplicationOutcome::default();
     for commands in peer_worker_commands {
         let mut pending = worker_queue::lock_recover(commands);
@@ -1249,6 +1263,7 @@ companion: Option<SessionKey>,) -> DeleteReplicationOutcome {
                 key: key.clone(),
                 expected_id,
                 companion: companion.clone(),
+                companion_expected_id,
             },
         );
         drop(pending);
@@ -1260,28 +1275,9 @@ companion: Option<SessionKey>,) -> DeleteReplicationOutcome {
         let Some(worker_id) = worker_id_for_command_queue(worker_commands_by_id, commands) else {
             continue;
         };
-        SESSION_DELETE_REPLICA_DROP_REPAIRED.fetch_add(1, Ordering::Relaxed);
-        outcome.repaired += 1;
         if let Some(epoch) = SESSION_DELETE_DROP_EPOCH.get(worker_id as usize) {
             epoch.fetch_add(1, Ordering::Relaxed);
         }
-        release_source_nat_allocation_for_worker(
-            &forwarding.iface_nat_allocators,
-            &forwarding.source_nat_rules,
-            key,
-            nat,
-            is_reverse,
-            now_ns,
-            worker_id,
-        );
-        crate::nat64::release_nat64_allocation_for_worker(
-            &forwarding.nat64,
-            key,
-            nat,
-            is_reverse,
-            now_ns,
-            worker_id,
-        );
     }
     outcome
 }
