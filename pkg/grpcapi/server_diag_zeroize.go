@@ -400,25 +400,32 @@ var (
 	}
 )
 
-// zeroizeProvisionedPasswordsDir and zeroizeProvisionedKeysDir are the two
-// RESOURCE-SPECIFIC ownership marker roots the #5841 split added alongside the
-// account registry (pkg/daemon.provisionedPasswordsDir / provisionedKeysDir):
-// provisioned-passwords records "xpf set this account's /etc/shadow password"
-// and provisioned-keys records "xpf wrote this account's authorized_keys". Like
-// their daemon counterparts they are computed as SIBLINGS of the account
-// registry, so overriding the single zeroizeProvisionedUsersDir seam in a test
-// relocates all three roots together. A factory reset must erase these two
-// roots too: a surviving per-account UID marker is the #5869/#5871 residue
-// class, and because reconcileAbsentLoginUsers unions all three roots, a
-// re-tenant's reused-UID account colliding with a surviving marker would be
-// deprovisioned (password locked / authorized_keys deleted) despite xpf never
-// provisioning it — the exact overclaim #5841 exists to kill.
+// zeroizeProvisionedPasswordsDir, zeroizeProvisionedKeysDir and
+// zeroizeProvisionedShellsDir are the RESOURCE-SPECIFIC ownership marker
+// roots the #5841 split added alongside the account registry
+// (pkg/daemon.provisionedPasswordsDir / provisionedKeysDir /
+// provisionedShellsDir): provisioned-passwords records "xpf set this
+// account's /etc/shadow password", provisioned-keys records "xpf wrote this
+// account's authorized_keys" and provisioned-shells records "xpf set this
+// account's login shell" (#14695). Like their daemon counterparts they are
+// computed as SIBLINGS of the account registry, so overriding the single
+// zeroizeProvisionedUsersDir seam in a test relocates all roots together. A
+// factory reset must erase these roots too: a surviving per-account UID
+// marker is the #5869/#5871 residue class, and because
+// reconcileAbsentLoginUsers unions all roots, a re-tenant's reused-UID
+// account colliding with a surviving marker would be deprovisioned
+// (password locked / authorized_keys deleted / shell reset) despite xpf
+// never provisioning it — the exact overclaim #5841 exists to kill.
 func zeroizeProvisionedPasswordsDir() string {
 	return filepath.Join(filepath.Dir(zeroizeProvisionedUsersDir), "provisioned-passwords")
 }
 
 func zeroizeProvisionedKeysDir() string {
 	return filepath.Join(filepath.Dir(zeroizeProvisionedUsersDir), "provisioned-keys")
+}
+
+func zeroizeProvisionedShellsDir() string {
+	return filepath.Join(filepath.Dir(zeroizeProvisionedUsersDir), "provisioned-shells")
 }
 
 // zeroizeRootAuthorizedKeysPath returns the xpf-managed ROOT authorized_keys
@@ -692,20 +699,24 @@ func zeroizeLoginAccounts() error {
 	// retained marker is fine and must not gate the factory reset).
 	_ = os.Remove(zeroizeProvisionedUsersDir)
 
-	// (C) #5841: erase the two resource-specific ownership roots
-	// (provisioned-passwords, provisioned-keys) too, so a factory reset leaves NO
-	// per-account marker in ANY of the three roots — no residue for a re-tenant's
-	// reused-UID account to collide with. The KEYS root additionally removes the
-	// xpf-written authorized_keys FILE itself, not just the marker (#6190): a
-	// KEY-ONLY account (a pre-existing operator/prior-tenant account xpf only
-	// added an SSH key to — a provisioned-keys marker but NO provisioned-users
-	// registry entry) is never iterated by the registry loop above, so its
-	// xpf-written key file would otherwise survive the reset and leave the prior
-	// tenant SSH login — the #4598 credential-leak class, asymmetric with the
-	// day-2 deprovisionLoginUser which enumerates the UNION and DOES remove that
-	// file.
+	// (C) #5841/#14695: erase the resource-specific ownership roots
+	// (provisioned-passwords, provisioned-keys, provisioned-shells) too, so a
+	// factory reset leaves NO per-account marker in ANY root — no residue for
+	// a re-tenant's reused-UID account to collide with. The KEYS root
+	// additionally removes the xpf-written authorized_keys FILE itself, not
+	// just the marker (#6190): a KEY-ONLY account (a pre-existing
+	// operator/prior-tenant account xpf only added an SSH key to — a
+	// provisioned-keys marker but NO provisioned-users registry entry) is
+	// never iterated by the registry loop above, so its xpf-written key file
+	// would otherwise survive the reset and leave the prior tenant SSH login
+	// — the #4598 credential-leak class, asymmetric with the day-2
+	// deprovisionLoginUser which enumerates the UNION and DOES remove that
+	// file. Shell-only markers need only marker erasure: the account itself
+	// is either userdel'd above (registry accounts) or is a pre-existing
+	// account whose shell the next tenant's apply will re-converge.
 	zeroizeSweepResourceMarkerRoot(zeroizeProvisionedPasswordsDir(), retained, fail, attest)
 	zeroizeSweepProvisionedKeys(zeroizeProvisionedKeysDir(), retained, fail, attest)
+	zeroizeSweepResourceMarkerRoot(zeroizeProvisionedShellsDir(), retained, fail, attest)
 	if len(hardlinks) > 0 {
 		hardErr := &configstore.FactoryResetHardlinkError{Paths: hardlinks}
 		if firstErr != nil {

@@ -57,6 +57,7 @@ const (
 //
 //   - provisionedPasswordsDir()  "xpf set this account's /etc/shadow password"
 //   - provisionedKeysDir()       "xpf wrote this account's authorized_keys"
+//   - provisionedShellsDir()     "xpf set this account's login shell" (#14695)
 //
 // The resource markers are written BEFORE their credential mutation
 // (marker-first atomicity, fail-visible) and gate the corresponding REVOCATION;
@@ -72,18 +73,26 @@ const (
 // apply legitimately made.
 var provisionedUsersDir = "/var/lib/xpf/provisioned-users"
 
-// provisionedPasswordsDir and provisionedKeysDir are the resource-specific
-// ownership marker roots, kept as SIBLINGS of provisionedUsersDir so overriding
-// provisionedUsersDir in a test relocates all three marker roots together
-// (there is exactly one seam to point at a throwaway tree). In production they
-// are /var/lib/xpf/provisioned-passwords and /var/lib/xpf/provisioned-keys.
-// #5841.
+// provisionedPasswordsDir, provisionedKeysDir and provisionedShellsDir are
+// the resource-specific ownership marker roots, kept as SIBLINGS of
+// provisionedUsersDir so overriding provisionedUsersDir in a test relocates
+// all marker roots together (there is exactly one seam to point at a
+// throwaway tree). In production they are /var/lib/xpf/provisioned-passwords,
+// /var/lib/xpf/provisioned-keys and /var/lib/xpf/provisioned-shells.
+// #5841, #14695.
 func provisionedPasswordsDir() string {
 	return filepath.Join(filepath.Dir(provisionedUsersDir), "provisioned-passwords")
 }
 
 func provisionedKeysDir() string {
 	return filepath.Join(filepath.Dir(provisionedUsersDir), "provisioned-keys")
+}
+
+// provisionedShellsDir is the login-shell ownership root (#14695): "xpf set
+// this account's /etc/passwd login shell". Like the other resource roots it
+// is a SIBLING of provisionedUsersDir so one test seam relocates all roots.
+func provisionedShellsDir() string {
+	return filepath.Join(filepath.Dir(provisionedUsersDir), "provisioned-shells")
 }
 
 // shadowPath and passwdPath are the OS account databases the password
@@ -416,8 +425,8 @@ func removeProvenanceMarker(dir, name string) error {
 	return nil
 }
 
-// forgetProvenance drops name's markers across ALL three ownership roots — the
-// account registry and both resource roots — once every xpf-owned resource for
+// forgetProvenance drops name's markers across ALL ownership roots — the
+// account registry and the resource roots — once every xpf-owned resource for
 // the account has been revoked (deprovision) or the account is proven gone.
 // It joins any per-root removal error (ENOENT excluded by removeProvenanceMarker)
 // so a caller that must know whether the reconcile fully converged (the #5874
@@ -427,6 +436,7 @@ func forgetProvenance(name string) error {
 		removeProvenanceMarker(provisionedUsersDir, name),
 		removeProvenanceMarker(provisionedPasswordsDir(), name),
 		removeProvenanceMarker(provisionedKeysDir(), name),
+		removeProvenanceMarker(provisionedShellsDir(), name),
 	)
 }
 
@@ -487,15 +497,34 @@ func keyProvisioned(name string, curUID int) (bool, error) {
 	return readProvenanceMarker(provisionedKeysDir(), name, curUID)
 }
 
-// provisionedNames returns the UNION of account names that appear in any of the
-// three ownership roots — the set of accounts xpf provisioned some resource
+// --- login-shell-ownership marker (xpf set the /etc/passwd shell) ---------
+
+// markShellProvisioned records that xpf set name's login shell, gating the
+// nologin reset on user removal so an operator shell xpf never set is left
+// untouched. The production apply path goes through
+// claimOwnership(provisionedShellsDir(), ...) so a failed usermod can
+// withdraw the claim (#6797 discipline). This remains the plain write
+// primitive, used by tests to seed fixtures. #14695.
+func markShellProvisioned(name string, uid int) error {
+	return writeProvenanceMarker(provisionedShellsDir(), name, uid)
+}
+
+// shellProvisioned reports whether xpf set name's login shell for UID curUID.
+// #14695.
+func shellProvisioned(name string, curUID int) (bool, error) {
+	return readProvenanceMarker(provisionedShellsDir(), name, curUID)
+}
+
+// provisionedNames returns the UNION of account names that appear in any of
+// the four ownership roots — the set of accounts xpf provisioned some resource
 // for. reconcileAbsentLoginUsers deprovisions each name in this set that is no
 // longer in config, so a pre-existing account xpf only added an SSH key to
-// (key marker, no account registry entry) is still revoked when removed. #5841.
+// (key marker, no account registry entry), or only elevated the shell of
+// (shell marker), is still revoked when removed. #5841, #14695.
 func provisionedNames() (map[string]struct{}, error) {
 	var readErr error
 	out := make(map[string]struct{})
-	for _, dir := range []string{provisionedUsersDir, provisionedPasswordsDir(), provisionedKeysDir()} {
+	for _, dir := range []string{provisionedUsersDir, provisionedPasswordsDir(), provisionedKeysDir(), provisionedShellsDir()} {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			// #6798: an ABSENT root is legitimately empty — a fresh install has
@@ -619,8 +648,9 @@ func (d *Daemon) reconcileAbsentLoginUsers(cfg *config.Config) (retErr error) {
 
 // deprovisionLoginUser revokes one removed account's xpf-owned credentials,
 // each gated on its OWN resource marker so xpf only ever locks a password it
-// set and only ever removes an authorized_keys it wrote — never an
-// operator-managed credential it did not provision (#5841). Once every owned
+// set, only ever removes an authorized_keys it wrote, and only ever resets a
+// login shell it set (or granted at useradd) to nologin (#5841, #14695) —
+// never an operator-managed credential it did not provision. Once every owned
 // resource is revoked it drops all provenance markers so xpf forgets the
 // account. It is fail-closed toward retry: any step that cannot be completed
 // safely leaves the markers in place so the next apply retries. #5128.
@@ -713,7 +743,8 @@ func (d *Daemon) deprovisionLoginUser(name string) (retErr error) {
 	ownsPassword, pwErr := passwordProvisioned(name, curUID)
 	ownsKey, keyErr := keyProvisioned(name, curUID)
 	ownsAccount, acctErr := xpfProvisioned(name, curUID)
-	if ownErr := errors.Join(pwErr, keyErr, acctErr); ownErr != nil {
+	ownsShell, shellErr := shellProvisioned(name, curUID)
+	if ownErr := errors.Join(pwErr, keyErr, acctErr, shellErr); ownErr != nil {
 		// #6798: a marker that could not be READ proves nothing. Before this,
 		// all three reads failing produced three falses, matched the
 		// "nothing owned" branch below, and returned nil — SUCCESS — leaving
@@ -727,7 +758,13 @@ func (d *Daemon) deprovisionLoginUser(name string) (retErr error) {
 		fail(fmt.Errorf("determine ownership for removed user %s: %w", name, ownErr))
 		return retErr
 	}
-	if !ownsPassword && !ownsKey && !ownsAccount {
+	// #14695: an xpf-CREATED account (account marker) had its shell chosen by
+	// xpf at useradd (-s <shell>), even if no explicit usermod ever ran, so
+	// account ownership implies shell ownership for the nologin reset. A
+	// pre-existing account is shell-owned only via the shell marker written
+	// when applySystemLogin actually changed its shell.
+	ownsShell = ownsShell || ownsAccount
+	if !ownsPassword && !ownsKey && !ownsAccount && !ownsShell {
 		// Nothing xpf-owned for the current account (markers absent, or a UID
 		// mismatch already cleaned inline). NEVER touch a non-xpf / out-of-band
 		// account.
@@ -873,6 +910,58 @@ func (d *Daemon) deprovisionLoginUser(name string) (retErr error) {
 		}
 	}
 
+	// Reset the xpf-owned login shell to nologin (#14695). Full deletion of a
+	// configured user must not leave an xpf-granted interactive /bin/bash in
+	// /etc/passwd: demotion already runs `usermod -s /usr/sbin/nologin`
+	// (applySystemLogin), and zeroize later enumerates only the account
+	// registry, so forgetting provenance here without resetting the shell
+	// would orphan the shell grant permanently. Gate on shell ownership
+	// (shell marker, or account ownership for xpf-created accounts) so a
+	// non-xpf shell is never touched; a re-presented user is fenced below
+	// before any marker cleanup, and a failed usermod retains markers for
+	// retry — the same fail-closed discipline as the password/key arms.
+	if ownsShell {
+		liveUser, liveDesired = d.liveDesiredLoginUser12169(name)
+		if liveDesired {
+			staleRevocationSuperseded12169("reset-user-shell", name)
+		} else {
+			currentShell, foundShell, shellReadErr := loginUserShell(name)
+			switch {
+			case shellReadErr != nil:
+				slog.Warn("cannot determine login shell for removed user; NOT resetting shell and NOT reporting convergence",
+					"user", name, "err", shellReadErr)
+				fail(fmt.Errorf("determine login shell for removed user %s: %w", name, shellReadErr))
+				return retErr
+			case !foundShell:
+				// Account vanished; shell grant gone with it.
+			case currentShell == loginShellNologin:
+				if err := removeProvenanceMarker(provisionedShellsDir(), name); err != nil {
+					fail(err)
+					return retErr
+				}
+			default:
+				if out, usermodErr := runCommandTimeout("usermod", "-s", loginShellNologin, "--", name); usermodErr != nil {
+					slog.Warn("failed to reset login shell for removed login user",
+						"user", name, "err", usermodErr, "output", strings.TrimSpace(string(out)))
+					fail(fmt.Errorf("reset login shell for removed user %s: %w", name, usermodErr))
+					return retErr
+				}
+				slog.Info("reset login shell for removed login user", "user", name, "shell", loginShellNologin)
+				if _, stillDesired := d.liveDesiredLoginUser12169(name); stillDesired {
+					staleRevocationSuperseded12169("restore-user-after-shell-reset", name)
+					if err := restoreLiveLogin(); err != nil {
+						fail(err)
+						return retErr
+					}
+					liveUser, liveDesired = d.liveDesiredLoginUser12169(name)
+				} else if err := removeProvenanceMarker(provisionedShellsDir(), name); err != nil {
+					fail(err)
+					return retErr
+				}
+			}
+		}
+	}
+
 	// A re-presented login remains xpf-owned. Keep account/password markers
 	// so later removals still have the provenance needed to revoke it; only a
 	// now-empty key list drops the independent key marker.
@@ -897,7 +986,7 @@ func (d *Daemon) deprovisionLoginUser(name string) (retErr error) {
 		return retErr
 	}
 	slog.Info("deprovisioned removed login user",
-		"user", name, "password_locked", ownsPassword, "keys_removed", ownsKey)
+		"user", name, "password_locked", ownsPassword, "keys_removed", ownsKey, "shell_reset", ownsShell)
 	return retErr
 }
 

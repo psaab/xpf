@@ -46,6 +46,11 @@ func stageDeprovisionEnv(t *testing.T, passwdContent, shadowContent string) stri
 	if err := os.WriteFile(filepath.Join(fakeBin, "chpasswd"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// #14695: deprovision also resets the xpf-owned shell via the real
+	// runCommandTimeout exec, so stage a no-op usermod alongside chpasswd.
+	if err := os.WriteFile(filepath.Join(fakeBin, "usermod"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 	return sentinel
 }

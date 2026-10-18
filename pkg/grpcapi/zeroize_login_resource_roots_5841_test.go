@@ -39,6 +39,7 @@ func TestZeroizeLoginAccountsErasesAllThreeMarkerRoots(t *testing.T) {
 	provDir := filepath.Join(root, "provisioned-users")
 	pwDir := filepath.Join(root, "provisioned-passwords")
 	keyDir := filepath.Join(root, "provisioned-keys")
+	shellDir := filepath.Join(root, "provisioned-shells")
 	sudoersDir := filepath.Join(root, "sudoers.d")
 	homeBase := filepath.Join(root, "home")
 	passwdPath := filepath.Join(root, "passwd")
@@ -51,9 +52,11 @@ func TestZeroizeLoginAccountsErasesAllThreeMarkerRoots(t *testing.T) {
 	usersMarker := filepath.Join(provDir, "alice")
 	pwMarker := filepath.Join(pwDir, "alice")
 	keyMarker := filepath.Join(keyDir, "alice")
+	shellMarker := filepath.Join(shellDir, "alice")
 	mustWriteFile(t, usersMarker, []byte("1001"))
 	mustWriteFile(t, pwMarker, []byte("1001"))
 	mustWriteFile(t, keyMarker, []byte("1001"))
+	mustWriteFile(t, shellMarker, []byte("1001"))
 
 	aliceKeys := filepath.Join(homeBase, "alice", ".ssh", "authorized_keys")
 	mustWriteFile(t, aliceKeys, []byte("ssh-ed25519 AAAAxpf alice\n"))
@@ -81,9 +84,11 @@ func TestZeroizeLoginAccountsErasesAllThreeMarkerRoots(t *testing.T) {
 	assertAbsent(t, usersMarker)
 	assertAbsent(t, pwMarker)  // RED on revert of the resource-root sweep
 	assertAbsent(t, keyMarker) // RED on revert of the resource-root sweep
+	assertAbsent(t, shellMarker)
 
-	// The now-empty root directories are cleaned up (all three).
+	// The now-empty root directories are cleaned up (all roots).
 	assertAbsent(t, provDir)
 	assertAbsent(t, pwDir)  // RED on revert of the resource-root sweep
 	assertAbsent(t, keyDir) // RED on revert of the resource-root sweep
+	assertAbsent(t, shellDir)
 }
