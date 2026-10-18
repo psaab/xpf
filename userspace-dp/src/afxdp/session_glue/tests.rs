@@ -17142,6 +17142,299 @@ fn policy_remove_unexpected_live_companion_refuses_before_removal_10650() {
     );
 }
 
+/// #14667: a reverse companion synthesized on one worker must carry ONE
+/// session identity to every worker. Both synthesis paths used to publish
+/// `session_id: 0`, so each sibling minted its own worker-namespaced id in
+/// `upsert_synced_with_origin`. `ListSessionsByPolicy` then captures the
+/// listing worker's companion id and `DeletePolicyBatch` identity-checks it
+/// on every worker: on W-1 workers the check misses, the companion survives
+/// as `partial`, and the coordinator probe/repair republishes its conntrack
+/// mirror. This fixture drives the exact chain for BOTH synthesis sites:
+/// synthesize -> replicate to a second worker -> capture the companion id
+/// from worker 0 (as the deduped READ does) -> identity-conditional policy
+/// remove on both workers -> both companions must be gone, cleanly.
+#[test]
+fn synthesized_reverse_companion_converges_session_id_across_workers_14667() {
+    use crate::afxdp::bpf_map::{RECORDER_ONLY_MAP_FD, SteeringMap};
+    let now_ns = 1_000_000_000u64;
+    let now_secs = 1u64;
+
+    // One worker-side policy remove, shaped exactly as DeletePolicyBatch
+    // dispatches it after the READ captured (forward_id, companion_id).
+    let run_policy_remove = |sessions: &mut SessionTable,
+                             key: &SessionKey,
+                             forward_id: u64,
+                             companion_id: u64,
+                             captured: SessionKey| {
+        let item = crate::afxdp::PolicyDeleteItem {
+            key: key.clone(),
+            session_id: forward_id,
+            forward_only: false,
+            companion_session_id: companion_id,
+            captured_companion: Some(captured),
+        };
+        let mut report = crate::afxdp::PolicyDeleteBatchReport {
+            cancelled: false,
+            partial: vec![false],
+            refused: vec![false],
+        };
+        let mut deleted_keys = Vec::new();
+        let mut deferred = Vec::new();
+        let removed = super::commands::handle_remove_policy_item(
+            sessions,
+            SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+            &ForwardingState::default(),
+            &BTreeMap::new(),
+            &item,
+            &mut report,
+            0,
+            now_ns,
+            now_secs,
+            &mut deleted_keys,
+            0,
+            &mut deferred,
+        );
+        (removed, report)
+    };
+
+    // --- Site 1: live reply synthesis
+    // (`install_reverse_session_from_forward_match`). Worker 0 installs the
+    // forward and synthesizes the companion; the published entry is fanned
+    // out to worker 1's queue and applied there as an UpsertSynced replica.
+    {
+        let forwarding = test_forwarding_state();
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        let sibling_queue = Arc::new(Mutex::new(VecDeque::new()));
+        let peer_queues = vec![Arc::clone(&sibling_queue)];
+
+        let forward_key = test_key();
+        let reverse_key = reverse_session_key(&forward_key, NatDecision::default());
+        let mut worker0 = SessionTable::new();
+        worker0.set_session_id_namespace(0, 0);
+        assert!(worker0.install_with_protocol_with_origin(
+            forward_key.clone(),
+            test_decision(),
+            test_metadata(),
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        let forward_id0 = worker0.session_id_for(&forward_key);
+        assert_ne!(forward_id0, 0, "fixture: worker0 forward must mint an id");
+
+        let forward_match = ForwardSessionMatch {
+            key: forward_key.clone(),
+            decision: test_decision(),
+            metadata: test_metadata(),
+            forwarding_generation: ForwardingGenerationStamp::default(),
+            aux: SessionLookupAux::default(),
+        };
+        let (_lookup, installed) = install_reverse_session_from_forward_match(
+            &mut worker0,
+            SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &peer_queues,
+            crate::afxdp::empty_worker_commands_by_id(),
+            &forwarding,
+            &BTreeMap::new(),
+            &dynamic_neighbors,
+            &reverse_key,
+            forward_match,
+            now_ns,
+            now_secs,
+            0,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        );
+        assert!(installed, "fixture: reverse synthesis must install on worker0");
+        let companion_id0 = worker0.session_id_for(&reverse_key);
+        assert_ne!(companion_id0, 0, "fixture: worker0 companion must mint an id");
+
+        // The shared authority must carry that same identity, not the 0
+        // sentinel that makes every sibling mint its own.
+        let shared_companion_id = shared_sessions
+            .lock()
+            .expect("shared lock")
+            .get(&reverse_key)
+            .map(|entry| entry.session_id)
+            .expect("synthesis must publish the companion to shared authority");
+        assert_eq!(
+            shared_companion_id, companion_id0,
+            "#14667: shared companion must carry the synthesizing worker's id"
+        );
+
+        // Worker 1: install the same forward (as its replica would), then
+        // apply the fanned-out companion replica.
+        let mut worker1 = SessionTable::new();
+        worker1.set_session_id_namespace(0, 1);
+        assert!(worker1.install_with_protocol_with_origin(
+            forward_key.clone(),
+            test_decision(),
+            test_metadata(),
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        apply_worker_commands(
+            &sibling_queue,
+            &mut worker1,
+            SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+            -1,
+            -1,
+            &forwarding,
+            &BTreeMap::new(),
+            &dynamic_neighbors,
+            1,
+            &mut VecDeque::new(),
+        );
+        assert_eq!(
+            worker1.session_id_for(&reverse_key),
+            companion_id0,
+            "#14667: sibling worker must adopt the synthesizer's companion id, \
+             not mint a worker-1-namespaced one"
+        );
+
+        // Capture from worker 0 (the deduped READ winner) and delete on
+        // both. The FORWARD half is a local ForwardFlow install on each
+        // worker, so each worker legitimately holds its OWN forward id;
+        // only the companion identity must converge. Delete each worker
+        // with its own forward id but the ONE captured companion id.
+        let forward_id1 = worker1.session_id_for(&forward_key);
+        assert_ne!(forward_id1, 0, "fixture: worker1 forward must mint an id");
+        for (label, worker, forward_id) in [
+            ("worker0", &mut worker0, forward_id0),
+            ("worker1", &mut worker1, forward_id1),
+        ] {
+            let (removed, report) = run_policy_remove(
+                worker,
+                &forward_key,
+                forward_id,
+                companion_id0,
+                reverse_key.clone(),
+            );
+            assert!(removed, "#14667: {label} forward must be removed");
+            assert!(
+                !report.partial[0] && !report.refused[0],
+                "#14667: {label} policy remove must be clean (partial={} refused={})",
+                report.partial[0], report.refused[0]
+            );
+            assert_eq!(
+                worker.session_id_for(&reverse_key),
+                0,
+                "#14667: {label} companion must be removed by the batch"
+            );
+            assert_eq!(
+                worker.session_id_for(&forward_key),
+                0,
+                "#14667: {label} forward must be removed by the batch"
+            );
+        }
+    }
+
+    // --- Site 2: HA-import synthesis
+    // (`synthesized_synced_reverse_entry_in_table`). The coordinator builds
+    // the companion from the imported forward entry and fans the SAME entry
+    // out to every worker; both must adopt one identity.
+    {
+        let forwarding = test_forwarding_state();
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+        // A peer forward import carrying the originating node's stable id.
+        let forward_id: u64 = (7u64 << 48) | 0x14667;
+        let forward_entry = SyncedSessionEntry {
+            key: test_key(),
+            decision: test_decision(),
+            metadata: test_metadata(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_ACK,
+            generation: 0,
+            session_id: forward_id,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            pptp_call_ids: 0,
+            source_nat_static: None,
+        };
+        let reverse = synthesized_synced_reverse_entry(
+            &forwarding,
+            &BTreeMap::new(),
+            &dynamic_neighbors,
+            &forward_entry,
+            now_secs,
+        )
+        .expect("synthesized companion");
+        assert_ne!(
+            reverse.session_id, 0,
+            "#14667: synthesized companion must carry a non-zero identity \
+             every worker can adopt verbatim"
+        );
+        assert_ne!(
+            reverse.session_id, forward_id,
+            "#14667: companion identity must be its own, not the forward's \
+             (the shared conditional remove checks it independently)"
+        );
+        let reverse_key = reverse.key.clone();
+        let companion_id = reverse.session_id;
+
+        // Both workers install the forward import and the SAME companion
+        // entry, exactly as the coordinator fan-out delivers them.
+        let mut tables = Vec::new();
+        for worker_id in 0..2u32 {
+            let mut table = SessionTable::new();
+            table.set_session_id_namespace(0, worker_id);
+            for entry in [&forward_entry, &reverse] {
+                assert!(
+                    table.upsert_synced_with_origin(
+                        entry.clone().into_session_install(now_ns),
+                        true,
+                    ),
+                    "fixture: worker{worker_id} must install the imported pair"
+                );
+            }
+            assert_eq!(
+                table.session_id_for(&forward_entry.key),
+                forward_id,
+                "fixture: worker{worker_id} must adopt the peer forward id"
+            );
+            assert_eq!(
+                table.session_id_for(&reverse_key),
+                companion_id,
+                "#14667: worker{worker_id} must adopt the synthesized \
+                 companion id, not mint a worker-local one"
+            );
+            tables.push(table);
+        }
+        for (index, worker) in tables.iter_mut().enumerate() {
+            let (removed, report) = run_policy_remove(
+                worker,
+                &forward_entry.key,
+                forward_id,
+                companion_id,
+                reverse_key.clone(),
+            );
+            assert!(removed, "#14667: worker{index} forward must be removed");
+            assert!(
+                !report.partial[0] && !report.refused[0],
+                "#14667: worker{index} policy remove must be clean"
+            );
+            assert_eq!(
+                worker.session_id_for(&reverse_key),
+                0,
+                "#14667: worker{index} companion must be removed by the batch"
+            );
+        }
+    }
+}
+
 /// #10512 advisory-25: the batch arm stashes redirect-delete intents into
 /// the shared handoff INSIDE the abort fence and issues NO BPF itself —
 /// phase 2 is coordinator-owned. What this pins through the real
