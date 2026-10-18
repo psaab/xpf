@@ -594,8 +594,10 @@ func TestRollback_ResumeMidRollback(t *testing.T) {
 	must(t, r.flip("2.0.0"))  // current -> 2.0.0 (the failed cut)
 	must(t, r.saveJournal(j)) // journal = ROLLINGBACK
 
-	if err := r.Run(Options{}); err != nil {
-		t.Fatalf("resume rollback: %v", err)
+	// #14721: a completed resumed rollback reports its outcome as a
+	// non-nil error — it is not a successful forward cut.
+	if err := r.Run(Options{}); err == nil || !strings.Contains(err.Error(), "rolled back to 1.0.0") {
+		t.Fatalf("resume rollback: %v; want rolled-back outcome", err)
 	}
 	target, _ := os.Readlink(filepath.Join(cfg.VersionsDir, "current"))
 	if filepath.Base(target) != "1.0.0" {
@@ -632,14 +634,13 @@ func TestRun_RollbackRestoresDBBeforeReflip(t *testing.T) {
 	fs.healthFailVersions["2.0.0"] = true
 
 	// Hook: corrupt the live DB to a too-new format AFTER the snapshot is
-	// taken but before rollback. We approximate the N+1 daemon's write by
-	// overwriting the live DB right after Run starts; simplest is to make
-	// StartUnit (called post-flip, before the failing health check) mutate
-	// the DB. We can't inject into the fake easily, so overwrite here is
-	// done via a custom health probe that writes the new-format DB then
-	// fails.
+	// taken but before rollback. The hook is one-shot: it fires on the
+	// failing 2.0.0 health probe only. Since #14721 rollback() also probes
+	// helper health (for 1.0.0, after the DB restore), a persistent hook
+	// would re-corrupt the just-restored DB and defeat the assertion.
 	newFormatContent := "#xpf-config-envelope v=1 writer=test ast=1 min-reader=99 rollback-fmt=1\n{}"
 	fs.healthHook = func() {
+		fs.healthHook = nil
 		mkfile(t, dbFile, newFormatContent)
 	}
 

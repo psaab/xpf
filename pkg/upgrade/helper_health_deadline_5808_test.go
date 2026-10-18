@@ -261,6 +261,10 @@ func TestCutover_WedgedHealthProbeBoundedRollbackAndFence_5808(t *testing.T) {
 	// wedgedHealthProbe wires the real HelperHealthProbe with a unit-active seam
 	// that blocks until the readiness ctx cancels, under a short 100ms deadline
 	// (ignoring the cfg's larger StartHealthDeadline to keep the test fast).
+	// The wedge applies only to the 2.0.0 probe: since #14721 rollback()
+	// also health-probes the rolled-back 1.0.0, and this fixture's point is
+	// that a healthy 1.0.0 accepts the rollback promptly.
+	healthy := newFakeSystem(t, "1.0.0")
 	wedgedHealthProbe := func() func(string, time.Duration) error {
 		real := HelperHealthProbe(HelperHealthDeps{
 			UnitActive:    func(ctx context.Context) (bool, error) { <-ctx.Done(); return false, ctx.Err() },
@@ -270,7 +274,12 @@ func TestCutover_WedgedHealthProbeBoundedRollbackAndFence_5808(t *testing.T) {
 			PollInterval:  5 * time.Millisecond,
 			StatusTimeout: time.Second,
 		})
-		return func(ver string, _ time.Duration) error { return real(ver, 100*time.Millisecond) }
+		return func(ver string, deadline time.Duration) error {
+			if ver != "2.0.0" {
+				return healthy.HelperHealthy(ver, deadline)
+			}
+			return real(ver, 100*time.Millisecond)
+		}
 	}
 
 	runToUnhealthy2 := func(t *testing.T, opts Options) (err error, elapsed time.Duration, current string) {

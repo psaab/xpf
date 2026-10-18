@@ -227,6 +227,8 @@ ExecStart=%s
 //     a too-new envelope DB and fatal-rejects)
 //  3. re-flip current/sbin/unit back to the previous version
 //  4. start the old daemon
+//  5. confirm the old daemon's helper is healthy (#14721) — only then
+//     clear the journal; on failure the journal stays StateRollingBack
 //
 // If there is no previous version (first cut) or no DB snapshot, rollback
 // is best-effort and surfaces a clear error.
@@ -288,10 +290,21 @@ func (r *Runner) rollback(j *Journal) error {
 	if err := r.cfg.Sys.StartUnit(r.cfg.Unit); err != nil {
 		return fmt.Errorf("rollback: start previous daemon: %w", err)
 	}
-	// 5. Terminal: clear the journal. The previous version is live; the
-	//    failed cut is abandoned. A re-run of `xpfd upgrade` starts fresh
-	//    against whatever is now staged (it will not resume the failed
-	//    target).
+	// 5. Confirm the rolled-back daemon's helper is healthy (#14721).
+	//    StartUnit success says nothing about the dataplane helper for a
+	//    Type=simple unit — the forward path (cutover.go) and the operator
+	//    rollback (executeRollback) both gate on HelperHealthy before
+	//    declaring success. Without this gate a dead-helper rollback was
+	//    declared clean and the journal — the only resume record — was
+	//    destroyed. On failure the journal stays at StateRollingBack so a
+	//    re-run resumes the rollback once the helper recovers.
+	if err := r.cfg.Sys.HelperHealthy(j.PreviousVersion, r.cfg.StartHealthDeadline); err != nil {
+		return fmt.Errorf("rollback: previous version %s started but helper health did not confirm: %w; rollback journal is preserved for operator recovery", j.PreviousVersion, err)
+	}
+	// 6. Terminal: clear the journal. The previous version is live and
+	//    helper-healthy; the failed cut is abandoned. A re-run of
+	//    `xpfd upgrade` starts fresh against whatever is now staged (it
+	//    will not resume the failed target).
 	return r.clearJournal()
 }
 

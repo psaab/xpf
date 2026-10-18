@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -104,8 +105,9 @@ func TestResumeRollbackAfterPublishRetainsStatus12143(t *testing.T) {
 	publishStagedGen(t, r)
 	path := filepath.Join(t.TempDir(), "upgrade-deferred")
 	writePendingVersionStatus12143(t, path, "3.0.0", "1.0.0")
-	if err := r.Run(Options{}); err != nil {
-		t.Fatalf("resume rollback: %v", err)
+	// #14721: a completed resumed rollback is a non-nil outcome.
+	if err := r.Run(Options{}); err == nil || !strings.Contains(err.Error(), "rolled back to 1.0.0") {
+		t.Fatalf("resume rollback: %v; want rolled-back outcome", err)
 	}
 	current, err := r.readCurrentVersion()
 	if err != nil || current != "1.0.0" {

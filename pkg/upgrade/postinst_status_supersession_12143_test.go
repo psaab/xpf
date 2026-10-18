@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -137,8 +138,8 @@ func TestFailedHealthRollbackDoesNotSupersedeDeferredStatus12143(t *testing.T) {
 	publishStagedGen(t, r)
 	path := filepath.Join(t.TempDir(), "upgrade-deferred")
 	writePendingVersionStatus12143(t, path, "3.0.0", "2.0.0")
-	if err := r.Run(Options{}); err != nil {
-		t.Fatalf("resume rollback: %v", err)
+	if err := r.Run(Options{}); err == nil || !strings.Contains(err.Error(), "rolled back to 1.0.0") {
+		t.Fatalf("resume rollback: %v; want rolled-back outcome (#14721)", err)
 	}
 	if s.running != "1.0.0" || slices.Contains(s.starts, "3.0.0") {
 		t.Fatalf("rollback process=%q starts=%v; want restore 1.0.0 without starting 3.0.0", s.running, s.starts)
