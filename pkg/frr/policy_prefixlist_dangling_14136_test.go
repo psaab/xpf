@@ -196,10 +196,10 @@ func TestNonTerminatingPrefixListSkipsDanglingMatch_14136(t *testing.T) {
 
 // TestMixedPrefixListPartiallyMalformed_14136 pins the per-family half: a
 // mixed list whose v6 entries are all malformed has no rendered v6
-// definition, so its ipv6 ref dangles even though its v4 ref is fine. Both
-// directions keep the fine v4 branch and drop only the dangling v6 ref; a
-// reject is NOT broadened to deny-all for routes its fine branch would not
-// have rejected (see the term-rule comment in policy_render.go).
+// definition, so its ipv6 ref dangles even though its v4 ref is fine.
+// Updated by #14700: for reject, the dropped family renders a bare
+// deny-all (its routes were exclusively that branch's responsibility);
+// for accept the dropped ref simply does not emit (subset direction).
 func TestMixedPrefixListPartiallyMalformed_14136(t *testing.T) {
 	defs := map[string]*config.PrefixList{
 		"PARTIAL": {Name: "PARTIAL", Prefixes: []string{"10.0.0.0/8", "2001:db8::/999"}},
@@ -212,11 +212,14 @@ func TestMixedPrefixListPartiallyMalformed_14136(t *testing.T) {
 	if !strings.Contains(got, "route-map P deny 10\n match ip address prefix-list PARTIAL\nexit\n") {
 		t.Fatalf("reject dropped the fine v4 branch:\n%s", got)
 	}
+	if !strings.Contains(got, "route-map P deny 20\nexit\n") {
+		t.Fatalf("reject must render deny-all for dropped v6 family:\n%s", got)
+	}
 	if strings.Contains(got, "match ipv6 address prefix-list PARTIAL") {
 		t.Fatalf("reject kept the dangling v6 branch:\n%s", got)
 	}
-	if n := strings.Count(got, "route-map P deny "); n != 2 {
-		t.Fatalf("expected 1 deny term sequence (v4 only) + trailing deny, got %d:\n%s", n, got)
+	if n := strings.Count(got, "route-map P deny "); n != 3 {
+		t.Fatalf("expected v4 deny + dropped-family deny-all + trailing deny, got %d:\n%s", n, got)
 	}
 
 	acceptPO := prefixListPolicyPO(defs, []*config.PolicyTerm{

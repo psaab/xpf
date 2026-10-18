@@ -135,19 +135,16 @@ func narrowedAliasEligible10129(site narrowedChainSite, po *config.PolicyOptions
 	return shape == "fall-through" || shape == "empty"
 }
 
-// narrowedAliasEligible10821 extends #10129's suffix-safe alias to non-suffix
-// fall-through and empty survivors. The private alias appends a trailing deny
-// after the retained chain, preserving all survivors in their original order;
-// it does not insert a terminating chain member at the ghost position.
+// narrowedAliasEligible10821 is the alias eligibility predicate. It is
+// deliberately identical to the suffix-safe predicate: a trailing deny
+// appended after all survivors cannot restore a ghost authored before or
+// between survivors, because that ghost was ordered to preempt the
+// survivors' permits. Refusing such sites in narrowedAliasCollision10129
+// (unless every ghost follows a provable terminator) is the only
+// fail-closed rendering; attaching survivors-then-trailing-deny would
+// accept routes the ghost would have rejected (#14700).
 func narrowedAliasEligible10821(site narrowedChainSite, po *config.PolicyOptionsConfig) bool {
-	if narrowedAliasEligible10129(site, po) {
-		return true
-	}
-	if len(site.Kept) == 0 {
-		return false
-	}
-	shape := narrowedSurvivorShape10129(site.Kept, po)
-	return shape == "fall-through" || shape == "empty"
+	return narrowedAliasEligible10129(site, po)
 }
 
 // narrowedGhostsAfterTerminator10821 reports whether every ghost is after a
@@ -325,11 +322,9 @@ func narrowedAliasChains10129(fc *FullConfig) map[string][]string {
 	return out
 }
 
-// narrowedAliasRef10129 swaps one eligible attachment to its prepared alias.
-// The #10821 extension attaches non-suffix fall-through/empty chains using a
-// trailing deny, preserving the surviving order. A non-suffix chain that
-// cannot reach that deny safely is rejected by the collision/apply guard
-// unless every ghost follows a terminating survivor.
+// narrowedAliasRef10129 swaps one eligible (suffix) attachment to its
+// prepared alias. Non-suffix chains are rejected by the collision/apply
+// guard unless every ghost follows a terminating survivor (#14700).
 func (m *Manager) narrowedAliasRef10129(n *config.BGPNeighbor, bgp *config.BGPConfig, global []string, po *config.PolicyOptionsConfig, export bool) string {
 	if n == nil || bgp == nil || po == nil {
 		return ""

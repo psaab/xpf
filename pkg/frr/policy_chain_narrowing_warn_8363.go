@@ -7,22 +7,23 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// policy_chain_narrowing_warn_8363.go — #8363 visibility and #10129/#10821 closure.
+// policy_chain_narrowing_warn_8363.go — #8363 visibility and #10129 closure
+// (#14700 narrows the #10821 extension).
 //
 // A NARROWED policy chain — some authored members resolve, some do not — is a
 // real deviation from authored intent: the renderer must not silently discard
-// missing members. Fall-through and empty survivors now attach a private
-// deny-terminated alias for both suffix and non-suffix ghosts (#10129/#10821).
-// The alias reproduces retained members in authored order and appends a trailing
-// deny; it does not insert a terminating member at the ghost position.
+// missing members. Suffix fall-through and empty survivors attach a private
+// deny-terminated alias (#10129). The alias reproduces retained members in
+// authored order and appends a trailing deny; it does not insert a
+// terminating member at the ghost position.
 //
-// Position still matters for chains whose surviving subset already terminates.
-// A non-suffix chain stays on the shared map only when every ghost is provably
-// after a match-all term or terminating policy default; otherwise the apply
-// fails closed because a trailing deny would be unreachable. A synthesized
-// terminating member inserted at a non-final ghost position would delete every
-// later survivor (#8363/#10129), which is why the production fix uses aliases
-// and never inserts at the ghost.
+// Position matters: a trailing deny cannot restore a ghost authored before
+// or between survivors. Non-suffix sites therefore fail closed in the apply
+// collision guard unless every ghost is provably after a match-all term or
+// terminating policy default (#14700). A synthesized terminating member
+// inserted at a non-final ghost position would delete every later survivor
+// (#8363/#10129), which is why the production fix uses aliases and never
+// inserts at the ghost.
 //
 // Rollout follows #10129 Phase 2's immediate-deny decision: the non-suffix
 // fall-through/empty remainder is closed in production without a mechanism
@@ -124,10 +125,10 @@ func narrowedChainSites(bgp *config.BGPConfig, po *config.PolicyOptionsConfig) [
 }
 
 // warnNarrowedChains emits one warning per narrowed attachment across fc and
-// rebuilds the operator-visible narrowed/shape gauges. Fall-through and empty
-// survivors (suffix or non-suffix) attach a trailing-deny alias in the same
-// managed-section build. A non-suffix terminal shape either has every ghost
-// after a provable terminator or fails closed in the apply collision guard.
+// rebuilds the operator-visible narrowed/shape gauges. Suffix fall-through
+// and empty survivors attach a trailing-deny alias in the same managed-section
+// build. Non-suffix sites fail closed in the apply collision guard unless
+// every ghost follows a provable terminator.
 func (m *Manager) warnNarrowedChains(fc *FullConfig) {
 	m.resetNarrowed()
 	if fc == nil {

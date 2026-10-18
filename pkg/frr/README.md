@@ -681,9 +681,13 @@ to reject.
 - Instead, a private route-map alias re-renders all retained members in order
   and appends an unconditional trailing deny. This preserves legitimate
   survivors while denying routes that otherwise fall off. Suffix fall-through
-  and empty survivors use this behavior since #10129; #10821 extends it to
-  non-suffix ghost-first/middle fall-through and empty survivors. Shared
+  and empty survivors use this behavior since #10129. Shared
   standalone/composed maps remain unchanged for intact attachments.
+- #14700: a trailing deny cannot restore a ghost authored before or between
+  survivors (it was ordered to preempt their permits), so non-suffix
+  fall-through/empty sites are refused by the collision belt instead of
+  attaching the alias — unless every ghost follows a provable terminator,
+  in which case the ghost is unreachable and the shared map is safe.
 - A trailing deny is unreachable when the retained chain already terminates
   for every route. A non-suffix attachment remains on its shared map only when
   every ghost is provably after a match-all term or terminating policy default;
@@ -702,7 +706,7 @@ narrowed shapes.
 | gauge | meaning |
 |---|---|
 | `xpf_frr_policy_chains_narrowed` | attachments filtered by less than authored. Alert on > 0. |
-| `xpf_frr_policy_chains_narrowed_deny_safe` | suffix-shaped subset only; non-suffix fall-through/empty chains are also closed by trailing aliases (#10821). |
+| `xpf_frr_policy_chains_narrowed_deny_safe` | suffix-shaped subset only; non-suffix sites are refused at apply (#14700). |
 
 They remain deliberately **separate** from `xpf_frr_route_maps_quarantined`,
 whose documented meaning is that every route on those neighbors is being
@@ -1351,13 +1355,15 @@ step. Both are required — neither sees the other's case:
   covers `/33`, bad-octet, and non-IP entries through both compile paths while
   checking valid siblings still render.
 - **Prefix-list references with no rendered entry are fail-closed at the
-  term (#14136).** `prefixListRefMissingAtRender` mirrors the #10823 belt
+  term (#14136, #14700).** `prefixListRefMissingAtRender` mirrors the #10823 belt
   per family: a `from prefix-list` name that is undefined, empty, or whose
   entries for a ref's family are all malformed has no rendered definition
   (including the #5730 inline access-list form). A reject term over a
-  fully-dangling name renders a bare deny-all; accept and non-terminating
-  terms skip the dangling branch; a mixed list with one rendered family
-  keeps that family and drops only the dangling ref. No dangling
+  fully-dangling name renders a bare deny-all; a reject term over a mixed
+  list with one all-malformed family keeps the fine family's deny and
+  renders a bare deny-all for the dropped family (#14700 — those routes
+  were exclusively the dropped branch's responsibility); accept and
+  non-terminating terms skip the dangling branch/ref. No dangling
   `match ip|ipv6 address prefix-list` (or inline-ACL) line is emitted —
   the prefix-list sibling of the #9881 as-path and #10822 community rules.
 - **Route-filter terms with no rendered entry are fail-closed at the

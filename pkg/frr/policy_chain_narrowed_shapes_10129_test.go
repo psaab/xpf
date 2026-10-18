@@ -207,12 +207,11 @@ func TestNarrowedSuffixSafePopulatedComposedAttachesDenyAlias10129(t *testing.T)
 	}
 }
 
-// Non-suffix narrowed chains use a private alias with a trailing deny. The
-// alias keeps every surviving member in order; it does not synthesize a chain
-// member at the ghost position (the #8363 insertion hazard). Cover ghost-first
-// and ghost-middle in both BGP directions and AFIs, asserting the attached map
-// really terminates with deny rather than merely checking the alias helper.
-func TestNarrowedGhostFirstMiddleAliasesDenyAcrossBGPContexts10821(t *testing.T) {
+// #14700 supersedes the #10821 alias for non-suffix fall-through/empty
+// chains: a trailing deny after all survivors cannot restore a ghost
+// authored before/between survivors, so those sites are refused by the
+// collision belt in every BGP direction/AFI instead of attaching an alias.
+func TestNarrowedGhostFirstMiddleRefusedAcrossBGPContexts14700(t *testing.T) {
 	positions := []struct {
 		name string
 		auth []string
@@ -252,36 +251,14 @@ func TestNarrowedGhostFirstMiddleAliasesDenyAcrossBGPContexts10821(t *testing.T)
 					if len(sites) != 1 || sites[0].GhostsAreSuffix {
 						t.Fatalf("want exactly one non-suffix narrowed site, got %+v", sites)
 					}
+					if err := narrowedAliasCollision10129(fc); err == nil {
+						t.Fatalf("non-suffix %s chain must be refused (#14700):\n%+v", direction, sites[0])
+					}
 					m := New()
 					section := m.buildManagedSection(fc)
 					alias := narrowedAliasName10129(position.kept)
-					action := "in"
-					if direction == "export" {
-						action = "out"
-					}
-					attachment := fmt.Sprintf("neighbor %s route-map %s %s\n", address, alias, action)
-					if !strings.Contains(section, attachment) {
-						t.Fatalf("non-suffix %s chain must attach deny alias %q:\n%s", direction, alias, section)
-					}
-					headers := routeMapHeaders6807(section, alias)
-					denySeq := (len(position.kept) + 1) * 10
-					if len(headers) != len(position.kept)+1 ||
-						!strings.HasSuffix(headers[len(headers)-1], fmt.Sprintf(" deny %d", denySeq)) {
-						t.Fatalf("attached alias trailing action must be deny-%d, got %v:\n%s", denySeq, headers, section)
-					}
-					if body := routeMapSeqBody10129(t, section, alias, denySeq); strings.Contains(body, "match ") {
-						t.Fatalf("trailing deny-%d must be unconditional:\n%s", denySeq, section)
-					}
-					for i, policy := range position.kept {
-						prefixList := "PL"
-						if policy == "B" {
-							prefixList = "PL2"
-						}
-						seq := (i + 1) * 10
-						want := fmt.Sprintf("route-map %s permit %d\n match ip address prefix-list %s\n", alias, seq, prefixList)
-						if !strings.Contains(section, want) {
-							t.Errorf("alias lost or reordered surviving policy %s:\n%s", policy, section)
-						}
+					if strings.Contains(section, "route-map "+alias+" ") {
+						t.Fatalf("refused chain must not emit/attach alias %q:\n%s", alias, section)
 					}
 					if got := m.NarrowedPolicyChainsSuffixShape(); len(got) != 0 {
 						t.Fatalf("non-suffix sites must remain outside the suffix-shape gauge, got %v", got)

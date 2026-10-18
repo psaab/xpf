@@ -763,9 +763,10 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 			// here beside the per-policy route-maps; FRR resolves the neighbor's
 			// `route-map <name>` reference regardless of definition order.
 			b.WriteString(m.renderComposedBGPChains(fc))
-			// #10129/#10821: narrowed fall-through and empty chains use a private
+			// #10129: suffix-narrowed fall-through and empty chains use a private
 			// alias with a trailing deny, preserving the kept member order and
 			// leaving standalone/composed maps shared by intact attachments.
+			// Non-suffix sites are refused by the collision belt (#14700).
 			b.WriteString(m.renderNarrowedAliases10129(fc))
 		}
 	}
@@ -774,10 +775,10 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 	// policy name a ghost, which is exactly when the deny is referenced and when
 	// skipping its definition would leave that reference dangling.
 	b.WriteString(m.renderEmptiedChainDeny(fc))
-	// #8363/#10129/#10821: narrowed chains record warnings and shape gauges.
-	// Fall-through/empty survivors attach trailing-deny aliases; an unsafe
-	// non-suffix terminal shape fails closed unless every ghost follows a
-	// provable terminator. Deny-inert shapes retain their shared map.
+	// #8363/#10129: narrowed chains record warnings and shape gauges.
+	// Suffix fall-through/empty survivors attach trailing-deny aliases;
+	// non-suffix sites fail closed unless every ghost follows a provable
+	// terminator (#14700). Deny-inert shapes retain their shared map.
 	m.warnNarrowedChains(fc)
 
 	// Resolve forwarding-table export policy for ECMP. Sets fc.ConsistentHash
