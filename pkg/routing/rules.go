@@ -2103,7 +2103,6 @@ func resolvePBRDirection(
 	}
 
 	var positive []string
-	hasPositiveRef := false
 	hasExcept := false
 	exceptCount := 0
 	hasUnresolvedExcept := false
@@ -2146,8 +2145,6 @@ func resolvePBRDirection(
 				if unresolvedExceptName == "" {
 					unresolvedExceptName = ref.Name
 				}
-			} else {
-				hasPositiveRef = true
 			}
 			continue
 		}
@@ -2155,7 +2152,6 @@ func resolvePBRDirection(
 			hasExcept = true
 			exceptCount += len(pl.Prefixes)
 		} else {
-			hasPositiveRef = true
 			for _, p := range pl.Prefixes {
 				if e := addNorm(p); e != nil {
 					slog.Warn("PBR: skipping unparseable prefix-list entry",
@@ -2173,31 +2169,47 @@ func resolvePBRDirection(
 			direction, filterName, termName, unresolvedExceptName)
 	}
 
-	// Pure-except: an `except` set is the SOLE scope for this direction.
-	if hasExcept && len(positive) == 0 && !hasPositiveRef && !unconstrainedSeen {
+	if hasExcept {
 		if exceptCount == 0 {
-			// "match every source NOT in {}" = match ALL.
+			// "match every source NOT in {}" = match ALL, regardless
+			// of an accompanying positive or match-any scope: the
+			// empty exclusion carves nothing out, so the direction
+			// reduces to its positive set (or match-all when the
+			// sole scope is the except, the match-any literal, or
+			// a resolved-empty positive ref).
+			if len(positive) > 0 {
+				// Deduplicate: the positive set may carry the same
+				// CIDR via both a literal and a prefix-list.
+				seen := make(map[string]struct{}, len(positive))
+				out := positive[:0]
+				for _, p := range positive {
+					if _, dup := seen[p]; dup {
+						continue
+					}
+					seen[p] = struct{}{}
+					out = append(out, p)
+				}
+				return out, false, nil
+			}
 			return []string{""}, false, nil
 		}
-		// "match every source NOT in <set>" — ip rule has no negated selector.
+		// A non-empty `except` set carves prefixes out of the
+		// positive (or match-any) scope: (P \ E). An ip rule has
+		// no negated from/to selector, so dropping the exclusion
+		// would WIDEN (P \ E) to P — steering the very prefixes
+		// Junos says to exclude (typically management/RFC1918).
+		// Fail closed: drop the term (under-steer to the main
+		// table) rather than steer excluded traffic. This covers
+		// the pure-except shape, the strict-valid #4338 idiom
+		// (`0.0.0.0/0` / `::/0` / `any` + except), an empty-positive
+		// ref + except, and the tolerant-only specific-positive +
+		// except shape — none can be represented faithfully.
 		return nil, false, fmt.Errorf(
 			"PBR %s scope of filter %s term %s uses a non-empty `except` prefix-list, "+
 				"which an ip rule cannot represent (no negated from/to); steering for "+
 				"this term is dropped — express the complement explicitly or use the "+
 				"userspace filter path", direction, filterName, termName)
 	}
-
-	if hasExcept {
-		// Mixed positive + except in one direction: commit-rejected
-		// (validateFilterAddressExceptStrict, #3359); reaches here only on the
-		// tolerant/peer-sync path. POSITIVE-WINS — ignore the except prefixes
-		// (mirrors resolvePrefixListAddrs); fail-safe (never widen the steer).
-		slog.Warn("PBR: filter term mixes positive addresses with an except "+
-			"prefix-list in one direction; the except modifier is ignored "+
-			"(positive-wins)",
-			"filter", filterName, "term", termName, "direction", direction)
-	}
-
 	if unconstrainedSeen {
 		// An `any` / 0.0.0.0/0 / ::/0 token widens the direction to match all.
 		return []string{""}, false, nil
