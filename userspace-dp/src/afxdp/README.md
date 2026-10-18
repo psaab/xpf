@@ -807,7 +807,7 @@ sync.
     the SNAT address and the embedded quote's destination address + L4
     port/echo id to the translated value (every affected checksum
     recomputed) — the remote associates the error with its session. A
-    DNAT-carrying or no-NAT flow keeps the pre-#6474 behavior bit-for-bit,
+    DNAT-only or no-NAT flow keeps the pre-#6474 behavior bit-for-bit,
     and an error quoting the REPLY wire tuple (as-is hit, `is_reverse ==
     true`) was already declined by the historical `rewrite_src.is_none()`
     gate into clean untranslated flowless forwarding. Both directions ride
@@ -816,6 +816,16 @@ sync.
     regardless of `allow_embedded_icmp`; the option is a legacy no-op in the
     userspace dataplane. Misses continue through ordinary flowless policy
     enforcement.
+    **#14665:** every same-family matcher (and the test-only session
+    matcher) now also requires the outer destination to equal the
+    quoted source — the translated equivalent (`rewrite_src`) on the
+    forward-NAT arm, the quoted source itself on the fallback arm —
+    porting the NAT64 RFC 792/4443 gate; a mismatch declines to
+    ordinary flowless enforcement instead of authorizing delivery to
+    an arbitrary outer destination. Composed SNAT+DNAT outbound
+    errors now carry the outbound mark too, and the SNAT-outbound
+    builders restore the wire destination into the outer destination,
+    the quoted source, and the quoted source port.
     The untranslated RELATED shortcut is zone-scoped (#10671) and type-scoped
     (#10684). Only a resolved, nonzero quoted-session arrival zone that matches
     the packet's actual zone can bypass the reverse flowless policy pair, and

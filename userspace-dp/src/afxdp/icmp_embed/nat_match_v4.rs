@@ -9,12 +9,18 @@ use super::return_resolution::{
 /// Mirrors `icmp_embed.rs:210-332` literally. Tries the forward-NAT
 /// (rewrite-aware) lookup first; on miss falls back to a plain
 /// session lookup in either direction.
+/// #14665: an ICMP error is addressed to the source of the offending
+/// packet (RFC 792), so the outer destination must equal the quoted
+/// source (or its translated equivalent on the forward-NAT arm; that
+/// arm's check is deferred to after the forward lookup). A mismatch
+/// means the error is not about the quoted packet — decline.
 pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     frame: &[u8],
     meta: UserspaceDpMeta,
     ctx: &mut NatMatchCtx<'_>,
     now_ns: u64,
 ) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
+    let l3 = meta.l3_offset as usize;
     let l4 = meta.l4_offset as usize;
     let embedded_ip_start = l4 + 8;
 
@@ -93,6 +99,22 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
             now_ns,
         )
     {
+        // #14665 forward-NAT arm: the quote is the post-NAT forward wire
+        // packet, so a genuine error is addressed to its translated
+        // source — `rewrite_src` when SNAT rewrote the source, else the
+        // quoted source itself (DNAT/static-only).
+        let outer_dst_v4 = frame
+            .get(l3 + 16..l3 + 20)
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map(Ipv4Addr::from);
+        let expected_outer_dst = match fwd.decision.nat.rewrite_src {
+            Some(IpAddr::V4(v4)) => Some(v4),
+            Some(_) => None,
+            None => Some(hdr.src),
+        };
+        if outer_dst_v4.is_none() || outer_dst_v4 != expected_outer_dst {
+            return EmbeddedMatchOutcome::NoMatch;
+        }
         let nat = fwd.decision.nat;
         let original_src = fwd.key.src_ip;
         let original_src_port = fwd.key.src_port;
@@ -139,6 +161,18 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
             budget_key: fwd.key.clone(),
         });
     }
+    // #14665 session-fallback gate: no post-NAT forward lookup matched,
+    // so the quote is in pre-NAT / untranslated form and a genuine error
+    // about it is addressed to the quoted source itself.
+    {
+        let outer_dst_v4 = frame
+            .get(l3 + 16..l3 + 20)
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map(Ipv4Addr::from);
+        if outer_dst_v4 != Some(hdr.src) {
+            return EmbeddedMatchOutcome::NoMatch;
+        }
+    }
 
     // Session-fallback path: look up the embedded packet as-is or in
     // reverse. An as-is hit on the forward half is a quote of the forward
@@ -162,7 +196,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     //     outer source and the quote to the session's external identity
     //     (RFC 5508 §4) instead of leaking the internal source with an
     //     unassociable quote.
-    //   * reply-key hit otherwise (a DNAT/composed flow): the pre-#6474
+    //   * reply-key hit otherwise (a DNAT-only flow): the pre-#6474
     //     behavior is preserved bit-for-bit.
     //
     // #14628: the as-is probe ALSO answers for an outbound error when the
@@ -258,18 +292,21 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
                 crate::session::reverse_session_key(&reverse_key, sl.decision.nat);
             ctx.sessions
                 .probe_with_origin_at(&forward_key, now_ns)
-                .map(|(lookup, _origin)| lookup)
-                .filter(|lookup| !lookup.metadata.is_reverse)
+                .map(|(lookup, _origin)| (forward_key, lookup))
+                .filter(|(_, lookup)| !lookup.metadata.is_reverse)
         })
     } else {
         None
     };
     let outbound_snat = if via_reply_key {
-        !sl.metadata.is_reverse
-            && sl.decision.nat.rewrite_src.is_some()
-            && sl.decision.nat.rewrite_dst.is_none()
+        // #14665: composed SNAT+DNAT included — a destination rewrite no
+        // longer excludes the outbound re-NAT; the SNAT-outbound builders
+        // restore the wire destination via `original_dst`.
+        !sl.metadata.is_reverse && sl.decision.nat.rewrite_src.is_some()
     } else if sl.metadata.is_reverse {
-        // Reverse-half shape of a pure source translation (incl. NPTv6).
+        // Reverse-half shape of a source translation (incl. NPTv6 and, per
+        // #14665, composed SNAT+DNAT: on the reverse half that is
+        // `rewrite_dst` + `rewrite_dst_port` set with a source rewrite).
         // Fabric-ingress frames are excluded: the redirecting node already
         // re-NAT'd them (#13772), so at the peer the quote is the post-NAT
         // wire form and the historical fabric policy-source path applies.
@@ -277,13 +314,14 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
             && forward_companion.is_some()
             && (sl.decision.nat.nptv6
                 || (sl.decision.nat.rewrite_dst.is_some()
-                    && sl.decision.nat.rewrite_src.is_none()))
+                    && (sl.decision.nat.rewrite_src.is_none()
+                        || sl.decision.nat.rewrite_dst_port.is_some())))
     } else {
         false
     };
     let resolution = if outbound_snat {
         match &forward_companion {
-            Some(companion) => companion.decision.resolution,
+            Some((_, companion)) => companion.decision.resolution,
             None => embedded_icmp_quoted_reply_resolution(
                 ctx,
                 &reverse_key,
@@ -301,8 +339,23 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     // #14628: hand the FORWARD decision to the outbound builders; every
     // other arm keeps the matched entry's own decision bit-for-bit.
     let match_nat = match &forward_companion {
-        Some(companion) if outbound_snat => companion.decision.nat,
+        Some((_, companion)) if outbound_snat => companion.decision.nat,
         _ => sl.decision.nat,
+    };
+    // #14665: on an outbound (reply-quote) match the builders restore the
+    // wire destination from `original_dst`/`original_dst_port` — the
+    // pre-DNAT VIP the remote sent from. The forward companion's key
+    // carries it; a forward-half hit's quote already names it (`emb_src`).
+    // Every other arm keeps the quoted dst bit-for-bit.
+    let (original_dst, original_dst_port) = if outbound_snat {
+        match &forward_companion {
+            Some((forward_key, _)) => (forward_key.dst_ip, forward_key.dst_port),
+            None => (emb_src, hdr.src_port),
+        }
+    } else {
+        // Plain (non-forward-NAT) match: no pre-DNAT public dst to
+        // recover, so the embedded dst stays as-is (#3112 no-op).
+        (emb_dst, hdr.dst_port)
     };
     // #10671: `quoted_is_reply` (above) already names the direction.
     // Inbound errors must arrive from the far-side (egress) zone;
@@ -318,10 +371,8 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         nat: match_nat,
         original_src: emb_src,
         original_src_port: hdr.src_port,
-        // Plain (non-forward-NAT) match: no pre-DNAT public dst to
-        // recover, so the embedded dst stays as-is (#3112 no-op).
-        original_dst: emb_dst,
-        original_dst_port: hdr.dst_port,
+        original_dst,
+        original_dst_port,
         embedded_proto: hdr.proto,
         resolution,
         metadata: sl.metadata,

@@ -390,6 +390,13 @@ pub(in crate::afxdp::icmp_embed) fn build_nat_reversed_icmp_error_v6(
 /// The outer destination and the quote's source are untouched — the
 /// error is addressed to the remote server, which is exactly who must
 /// associate it.
+///
+/// #14665: on a COMPOSED SNAT+DNAT session the quote additionally
+/// carries the DNAT translation, restored here from the match's
+/// `original_dst` / `original_dst_port` (the pre-DNAT wire destination
+/// the remote sent from): outer destination and embedded source →
+/// that address, embedded source port → that port. Without this the
+/// private backend/client leaked.
 pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v4(
     frame: &[u8],
     meta: UserspaceDpMeta,
@@ -443,6 +450,17 @@ pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v4(
         pkt[8] = ttl - 1;
     }
 
+    // #14665: composed SNAT+DNAT — outer destination → the wire
+    // destination (`original_dst`), not the private backend. No-op
+    // when the quoted source already is that address (pure SNAT).
+    let wire_dst = match icmp_match.original_dst {
+        IpAddr::V4(v4) => v4,
+        _ => return None,
+    };
+    if icmp_match.nat.rewrite_dst.is_some() {
+        pkt.get_mut(16..20)?.copy_from_slice(&wire_dst.octets());
+    }
+
     // Outer source → the SNAT (external) address.
     pkt.get_mut(12..16)?.copy_from_slice(&snat_ip.octets());
 
@@ -454,6 +472,12 @@ pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v4(
     let emb_ihl = ((pkt[emb_ip_offset] & 0x0f) as usize) * 4;
     if emb_ihl < 20 || pkt.len() < emb_ip_offset + emb_ihl {
         return None;
+    }
+
+    // #14665: composed SNAT+DNAT — quoted source → the wire destination.
+    if icmp_match.nat.rewrite_dst.is_some() {
+        pkt.get_mut(emb_ip_offset + 12..emb_ip_offset + 16)?
+            .copy_from_slice(&wire_dst.octets());
     }
 
     // Embedded destination → the SNAT address (the quote's destination is
@@ -490,6 +514,17 @@ pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v4(
         }
     }
 
+    // #14665: composed SNAT+DNAT — quoted source port → the wire
+    // destination port (`original_dst_port`).
+    if !emb_non_first_fragment && icmp_match.nat.rewrite_dst.is_some() {
+        let wire_dst_port = icmp_match.original_dst_port;
+        let emb_proto = icmp_match.embedded_proto;
+        if matches!(emb_proto, PROTO_TCP | PROTO_UDP) && pkt.len() >= emb_l4_offset + 4 {
+            pkt.get_mut(emb_l4_offset..emb_l4_offset + 2)?
+                .copy_from_slice(&wire_dst_port.to_be_bytes());
+        }
+    }
+
     pkt.get_mut(icmp_offset + 2..icmp_offset + 4)?
         .copy_from_slice(&[0, 0]);
     let icmp_data = pkt.get(icmp_offset..)?;
@@ -512,6 +547,10 @@ pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v4(
 /// `nat.rewrite_src_port`, outer ICMPv6 checksum recomputed with the
 /// pseudo-header (canonicalizing a computed 0x0000 to 0xFFFF, same as the
 /// #5690 v6 builder).
+///
+/// #14665: composed SNAT+DNAT additionally restores the outer
+/// destination, the quoted source, and the quoted source port from
+/// `original_dst` / `original_dst_port` — see the v4 twin.
 pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v6(
     frame: &[u8],
     meta: UserspaceDpMeta,
@@ -562,6 +601,17 @@ pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v6(
         pkt[7] = hop_limit - 1;
     }
 
+    // #14665: composed SNAT+DNAT — outer destination → the wire
+    // destination (`original_dst`). No-op without a destination rewrite.
+    let wire_dst_bytes = match icmp_match.original_dst {
+        IpAddr::V6(v6) => v6.octets(),
+        _ => return None,
+    };
+    let has_dst_nat = icmp_match.nat.rewrite_dst.is_some();
+    if has_dst_nat {
+        pkt.get_mut(24..40)?.copy_from_slice(&wire_dst_bytes);
+    }
+
     // Outer source → the translated (external) source.
     pkt.get_mut(8..24)?.copy_from_slice(&snat_bytes);
 
@@ -571,6 +621,16 @@ pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v6(
     let emb_ip_offset = icmp_offset.checked_add(8)?;
     if pkt.len() < emb_ip_offset + 40 {
         return None;
+    }
+
+    // #14665: quoted source → the wire destination (captured first for
+    // the checksum repair below).
+    let old_emb_src_out: [u8; 16] = pkt[emb_ip_offset + 8..emb_ip_offset + 24]
+        .try_into()
+        .unwrap_or([0; 16]);
+    if has_dst_nat {
+        pkt.get_mut(emb_ip_offset + 8..emb_ip_offset + 24)?
+            .copy_from_slice(&wire_dst_bytes);
     }
 
     // #13650: capture pre-rewrite quoted dst for checksum repair.
@@ -595,6 +655,19 @@ pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v6(
         }
     }
 
+    // #14665: composed SNAT+DNAT — quoted source port → the wire
+    // destination port (`original_dst_port`).
+    if has_dst_nat
+        && let Some((emb_rel_l4, _)) = emb_l4
+    {
+        let emb_l4_offset = emb_ip_offset.checked_add(emb_rel_l4)?;
+        let emb_proto = icmp_match.embedded_proto;
+        if matches!(emb_proto, PROTO_TCP | PROTO_UDP) && pkt.len() >= emb_l4_offset + 4 {
+            pkt.get_mut(emb_l4_offset..emb_l4_offset + 2)?
+                .copy_from_slice(&icmp_match.original_dst_port.to_be_bytes());
+        }
+    }
+
     // #13650: quoted ICMPv6 checksum repair -- standalone, NOT gated on
     // rewrite_src_port: the embedded dst above is rewritten to snat_bytes
     // whenever this builder runs (SNAT without a port rewrite still
@@ -613,6 +686,12 @@ pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v6(
             if old_emb_dst_out != snat_bytes {
                 wo.extend(crate::afxdp::frame::ipv6_words_from_octets(old_emb_dst_out));
                 wn.extend(crate::afxdp::frame::ipv6_words_from_octets(snat_bytes));
+            }
+            // #14665: quoted source rewrite (composed DNAT) also moves
+            // the quoted pseudo-header.
+            if has_dst_nat && old_emb_src_out != wire_dst_bytes {
+                wo.extend(crate::afxdp::frame::ipv6_words_from_octets(old_emb_src_out));
+                wn.extend(crate::afxdp::frame::ipv6_words_from_octets(wire_dst_bytes));
             }
             if bearing {
                 if let Some(xlated) = icmp_match.nat.rewrite_src_port {

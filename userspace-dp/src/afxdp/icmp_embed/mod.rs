@@ -62,8 +62,9 @@ pub(super) struct EmbeddedIcmpMatch {
     /// internal host emitted the error about the session's REPLY packet, so
     /// the quote carries the PRE-NAT tuple. The session-fallback matches
     /// either the FORWARD session via the quote's reply key
-    /// (`is_reverse == false`, `rewrite_src` set, no destination NAT) or —
-    /// #14628, when the local reverse half is installed — the REVERSE half
+    /// (`is_reverse == false`, `rewrite_src` set — #14665: composed
+    /// SNAT+DNAT included, the builders restore the wire destination
+    /// from `rewrite_dst`) or —
     /// via its translated alias, in which case the match carries the
     /// recovered FORWARD decision. The caller must re-NAT the
     /// outer source and the embedded quote to the session's external

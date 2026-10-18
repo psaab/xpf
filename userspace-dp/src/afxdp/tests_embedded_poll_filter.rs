@@ -5152,11 +5152,12 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_in_routing_instance_9162() 
     );
 }
 
-/// #6474 marker pin (match level): the OUTBOUND mark fires ONLY for a pure
-/// source-NAT flow (rewrite_src set, no dst NAT) matched via the quote's
-/// reply key. A DNAT-only flow's outbound-direction error keeps the
-/// pre-#6474 identity (`outbound_snat == false`), and the #5690 inbound
-/// matches never carry the mark.
+/// #6474 marker pin (match level): the OUTBOUND mark fires for a
+/// source-NAT flow (`rewrite_src` set) matched via the quote's reply
+/// key — #14665 includes composed SNAT+DNAT. A DNAT-only flow's
+/// outbound-direction error keeps the pre-#6474 identity
+/// (`outbound_snat == false`), and the #5690 inbound matches never
+/// carry the mark.
 #[test]
 fn embedded_icmp_outbound_snat_marker_scoping_6474() {
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
@@ -5272,7 +5273,7 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
     .expect("outbound-direction error still matches");
     assert!(
         !m.outbound_snat,
-        "a DNAT-carrying flow must NOT take the outbound re-NAT mark"
+        "a DNAT-only flow (no source rewrite) must NOT take the outbound re-NAT mark"
     );
 
     // (c) the INBOUND error (quote = the forward wire packet) never marks.
@@ -5307,6 +5308,347 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
     ).into_option()
     .expect("inbound error matches via the forward-NAT reverse arm");
     assert!(!m.outbound_snat, "inbound #5690 matches never carry the mark");
+}
+
+// ---------------------------------------------------------------------------
+// #14665: outer-destination validation (NAT64-style gate ported to the
+// same-family matchers + session matcher) and composed SNAT+DNAT
+// outbound re-NAT. The fixture helper ties outer dst == quoted src, so
+// mismatch cells patch the outer dst bytes (outer IP at 14, dst at
+// +16; embedded IP at 42) and refresh the outer IP / ICMP checksums.
+// ---------------------------------------------------------------------------
+
+fn n14665_patch_outer_dst_v4(frame: &mut [u8], new_outer_dst: Ipv4Addr) {
+    frame[30..34].copy_from_slice(&new_outer_dst.octets());
+    frame[24..26].copy_from_slice(&[0, 0]);
+    let csum = checksum16(&frame[14..34]);
+    frame[24..26].copy_from_slice(&csum.to_be_bytes());
+    frame[36..38].copy_from_slice(&[0, 0]);
+    let icmp_csum = checksum16(&frame[34..]);
+    frame[36..38].copy_from_slice(&icmp_csum.to_be_bytes());
+}
+
+fn n14665_install_composed_session(
+    sessions: &mut SessionTable,
+    client: IpAddr,
+    vip: IpAddr,
+    pool: IpAddr,
+    backend: IpAddr,
+    addr_family: u8,
+) {
+    let forward_key = SessionKey {
+        addr_family,
+        protocol: PROTO_TCP,
+        src_ip: client,
+        dst_ip: vip,
+        src_port: 12345,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let forward_nat = NatDecision {
+        rewrite_src: Some(pool),
+        rewrite_dst: Some(backend),
+        rewrite_src_port: Some(40000),
+        rewrite_dst_port: Some(8443),
+        source_nat_icmp: None,
+        nat64: false,
+        nptv6: false,
+    };
+    let resolution = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 12,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: Some(N6472_WAN_GW_MAC),
+        src_mac: Some(N6472_WAN_SRC_MAC),
+        tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
+    assert!(sessions.install_with_protocol(
+        forward_key.clone(),
+        SessionDecision {
+            resolution,
+            nat: forward_nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        SessionMetadata {
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        123_000_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+    // Production installs the reverse companion too (#14628): its key is
+    // the wire reply tuple (backend:8443 -> pool:40000) and its decision
+    // is the reversed forward decision.
+    let reverse_key = crate::session::reverse_session_key(&forward_key, forward_nat);
+    assert!(sessions.install_with_protocol_with_origin(
+        reverse_key,
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 24,
+                tx_ifindex: 24,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(client),
+                neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                src_mac: Some(TEST_LAN_MAC),
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: forward_nat.reverse(client, vip, 12345, 443),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        SessionMetadata {
+            ingress_zone: TEST_WAN_ZONE_ID,
+            egress_zone: TEST_LAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: true,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        crate::session::SessionOrigin::ReverseFlow,
+        123_000_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+}
+
+/// #14665 RED/GREEN (v4 outbound): an outbound SNAT error addressed to
+/// an arbitrary destination (outer dst != quoted reply source) must
+/// NOT match. Pre-fix it matched via the reply key and the SNAT
+/// builder left the forged outer dst untouched — an egress-policy
+/// bypass to any reachable host. Control: the genuine frame
+/// (outer dst == quoted src) still matches and marks outbound.
+#[test]
+fn embedded_icmp_outer_dst_mismatch_no_match_v4_14665() {
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let meta = icmp_err_meta_v4();
+    let forwarding = build_forwarding_state(&nat_snapshot());
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+
+    // Control: genuine outbound error matches.
+    let mut sessions = SessionTable::new();
+    n6474_install_snat_session(&mut sessions, IpAddr::V4(client_ip), IpAddr::V4(server_ip), IpAddr::V4(snat_ip), libc::AF_INET as u8, 0);
+    let frame = build_icmp_te_frame_v4_with_mac(client_ip, server_ip, client_ip, 80, 12345, PROTO_TCP, TEST_LAN_MAC);
+    let m = try_embedded_icmp_nat_match_from_frame(&frame, meta, &mut sessions, &forwarding, &neighbors, &shared_sessions, &shared_nat_sessions, &SharedSessionOwnerRgIndexes::default(), &shared_forward_wire_sessions, 1_000_000).into_option().expect("genuine outbound error must match (control)");
+    assert!(m.outbound_snat);
+
+    // Mismatch: outer dst forged to an unrelated host.
+    let mut sessions = SessionTable::new();
+    n6474_install_snat_session(&mut sessions, IpAddr::V4(client_ip), IpAddr::V4(server_ip), IpAddr::V4(snat_ip), libc::AF_INET as u8, 0);
+    let mut forged = frame.clone();
+    n14665_patch_outer_dst_v4(&mut forged, Ipv4Addr::new(198, 18, 0, 99));
+    let m = try_embedded_icmp_nat_match_from_frame(&forged, meta, &mut sessions, &forwarding, &neighbors, &shared_sessions, &shared_nat_sessions, &SharedSessionOwnerRgIndexes::default(), &shared_forward_wire_sessions, 1_000_000).into_option();
+    assert!(m.is_none(), "#14665: outer dst != quoted src must not match (RED pre-fix)");
+
+    // Session matcher twin: same forged frame must return None.
+    let mut sessions = SessionTable::new();
+    n6474_install_snat_session(&mut sessions, IpAddr::V4(client_ip), IpAddr::V4(server_ip), IpAddr::V4(snat_ip), libc::AF_INET as u8, 0);
+    assert!(try_embedded_icmp_session_match_from_frame(&forged, meta, &ForwardingState::default(), &mut sessions, 1_000_000, 0).is_none(), "#14665: session matcher must also decline a mismatched outer dst");
+    // Session matcher control: genuine frame matches.
+    let mut sessions = SessionTable::new();
+    n6474_install_snat_session(&mut sessions, IpAddr::V4(client_ip), IpAddr::V4(server_ip), IpAddr::V4(snat_ip), libc::AF_INET as u8, 0);
+    assert!(try_embedded_icmp_session_match_from_frame(&frame, meta, &ForwardingState::default(), &mut sessions, 1_000_000, 0).is_some(), "session matcher control: genuine error must match");
+}
+
+/// #14665 RED/GREEN (v4 inbound forward-NAT): an error quoting the
+/// post-NAT forward packet but addressed elsewhere must NOT match.
+/// Control: addressed to the SNAT address (the translated quoted
+/// source) it still matches — the gate uses the translated equivalent.
+#[test]
+fn embedded_icmp_outer_dst_mismatch_no_match_inbound_v4_14665() {
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let router_ip = Ipv4Addr::new(172, 16, 80, 1);
+    let meta = icmp_err_meta_v4();
+    let forwarding = build_forwarding_state(&nat_snapshot());
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+
+    let mut sessions = SessionTable::new();
+    n6474_install_snat_session(&mut sessions, IpAddr::V4(client_ip), IpAddr::V4(server_ip), IpAddr::V4(snat_ip), libc::AF_INET as u8, 0);
+    let frame = build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, 40000, 80, PROTO_TCP, TEST_LAN_MAC);
+    let m = try_embedded_icmp_nat_match_from_frame(&frame, meta, &mut sessions, &forwarding, &neighbors, &shared_sessions, &shared_nat_sessions, &SharedSessionOwnerRgIndexes::default(), &shared_forward_wire_sessions, 1_000_000).into_option().expect("genuine inbound error must match (control)");
+    assert!(!m.outbound_snat);
+
+    let mut sessions = SessionTable::new();
+    n6474_install_snat_session(&mut sessions, IpAddr::V4(client_ip), IpAddr::V4(server_ip), IpAddr::V4(snat_ip), libc::AF_INET as u8, 0);
+    let mut forged = frame.clone();
+    n14665_patch_outer_dst_v4(&mut forged, Ipv4Addr::new(198, 18, 0, 99));
+    forged[54..58].copy_from_slice(&snat_ip.octets());
+    forged[52..54].copy_from_slice(&[0, 0]);
+    let c = checksum16(&forged[42..62]);
+    forged[52..54].copy_from_slice(&c.to_be_bytes());
+    forged[36..38].copy_from_slice(&[0, 0]);
+    let ic = checksum16(&forged[34..]);
+    forged[36..38].copy_from_slice(&ic.to_be_bytes());
+    let m = try_embedded_icmp_nat_match_from_frame(&forged, meta, &mut sessions, &forwarding, &neighbors, &shared_sessions, &shared_nat_sessions, &SharedSessionOwnerRgIndexes::default(), &shared_forward_wire_sessions, 1_000_000).into_option();
+    assert!(m.is_none(), "#14665: inbound error addressed away from the translated quoted source must not match");
+}
+
+/// #14665 RED/GREEN (v6 outbound): twin of the v4 mismatch cell.
+#[test]
+fn embedded_icmp_outer_dst_mismatch_no_match_v6_14665() {
+    let client_v6: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("client");
+    let server_v6: Ipv6Addr = "2001:db8::1".parse().expect("server");
+    let snat_v6: Ipv6Addr = "2001:559:8585:80::8".parse().expect("snat");
+    let forwarding = build_forwarding_state(&nat_snapshot());
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+
+    let mut sessions = SessionTable::new();
+    n6474_install_snat_session(&mut sessions, IpAddr::V6(client_v6), IpAddr::V6(server_v6), IpAddr::V6(snat_v6), libc::AF_INET6 as u8, 0);
+    let frame = build_icmpv6_te_frame_with_mac(client_v6, server_v6, client_v6, 80, 12345, PROTO_TCP, TEST_LAN_MAC);
+    let meta = n6474_meta(24, libc::AF_INET6 as u8, PROTO_ICMPV6, frame.len());
+    let m = try_embedded_icmp_nat_match_from_frame(&frame, meta, &mut sessions, &forwarding, &neighbors, &shared_sessions, &shared_nat_sessions, &SharedSessionOwnerRgIndexes::default(), &shared_forward_wire_sessions, 1_000_000).into_option().expect("genuine v6 outbound error must match (control)");
+    assert!(m.outbound_snat);
+
+    let mut sessions = SessionTable::new();
+    n6474_install_snat_session(&mut sessions, IpAddr::V6(client_v6), IpAddr::V6(server_v6), IpAddr::V6(snat_v6), libc::AF_INET6 as u8, 0);
+    let mut forged = frame.clone();
+    let bad: Ipv6Addr = "2001:db8::99".parse().expect("bad dst");
+    forged[38..54].copy_from_slice(&bad.octets());
+    forged[56..58].copy_from_slice(&[0, 0]);
+    let c = checksum16_ipv6(client_v6, bad, PROTO_ICMPV6, &forged[54..]);
+    forged[56..58].copy_from_slice(&c.to_be_bytes());
+    let m = try_embedded_icmp_nat_match_from_frame(&forged, meta, &mut sessions, &forwarding, &neighbors, &shared_sessions, &shared_nat_sessions, &SharedSessionOwnerRgIndexes::default(), &shared_forward_wire_sessions, 1_000_000).into_option();
+    assert!(m.is_none(), "#14665: v6 outer dst != quoted wire src must not match");
+
+    // Session matcher twin.
+    let mut sessions = SessionTable::new();
+    n6474_install_snat_session(&mut sessions, IpAddr::V6(client_v6), IpAddr::V6(server_v6), IpAddr::V6(snat_v6), libc::AF_INET6 as u8, 0);
+    assert!(try_embedded_icmp_session_match_from_frame(&forged, meta, &ForwardingState::default(), &mut sessions, 1_000_000, 0).is_none(), "#14665: v6 session matcher must decline a mismatched outer dst");
+}
+
+/// #14665 RED/GREEN (composed SNAT+DNAT, v4): the outbound error must
+/// carry the outbound mark and the SNAT-outbound builder must emit
+/// only wire identities — outer src = pool, outer dst = VIP, quote
+/// src = VIP:443, quote dst = pool:40000. Pre-fix the mark was off,
+/// the reversed builder ran, and the private client/backend leaked.
+#[test]
+fn embedded_icmp_composed_snat_dnat_outbound_renat_v4_14665() {
+    let client_ip = Ipv4Addr::new(10, 1, 1, 5);
+    let vip_ip = Ipv4Addr::new(198, 51, 100, 80);
+    let pool_ip = Ipv4Addr::new(172, 16, 0, 1);
+    let backend_ip = Ipv4Addr::new(172, 16, 0, 50);
+    let meta = icmp_err_meta_v4();
+    let forwarding = build_forwarding_state(&nat_snapshot());
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+
+    let mut sessions = SessionTable::new();
+    n14665_install_composed_session(&mut sessions, IpAddr::V4(client_ip), IpAddr::V4(vip_ip), IpAddr::V4(pool_ip), IpAddr::V4(backend_ip), libc::AF_INET as u8);
+    // Outer client -> VIP (the quoted packet's source); quote = the
+    // pre-NAT reply VIP:443 -> client:12345.
+    let frame = build_icmp_te_frame_v4_with_mac(client_ip, vip_ip, client_ip, 443, 12345, PROTO_TCP, TEST_LAN_MAC);
+    let m = try_embedded_icmp_nat_match_from_frame(&frame, meta, &mut sessions, &forwarding, &neighbors, &shared_sessions, &shared_nat_sessions, &SharedSessionOwnerRgIndexes::default(), &shared_forward_wire_sessions, 1_000_000).into_option().expect("composed outbound error must match");
+    assert_eq!(m.original_dst, IpAddr::V4(vip_ip), "#14665: match carries the pre-DNAT wire destination");
+    assert_eq!(m.original_dst_port, 443, "#14665: match carries the pre-DNAT wire destination port");
+    assert!(m.outbound_snat, "#14665: composed SNAT+DNAT outbound error must carry the re-NAT mark (RED pre-fix)");
+    let out = build_snat_outbound_icmp_error_v4(&frame, meta, &m).expect("composed SNAT-outbound builder must build");
+    // Resolution carries tx_vlan_id 80, so the builder emits an 18-byte
+    // VLAN Ethernet header; parse the IP header after it.
+    assert_eq!(&out[16..18], &0x0800u16.to_be_bytes(), "VLAN-tagged egress");
+    let ip = &out[18..];
+    assert_eq!(&ip[12..16], &pool_ip.octets(), "outer src = SNAT pool");
+    assert_eq!(&ip[16..20], &vip_ip.octets(), "#14665: outer dst = wire destination (VIP), not the private backend");
+    let emb = &ip[28..];
+    assert_eq!(&emb[12..16], &vip_ip.octets(), "#14665: quoted src = wire destination (VIP), not the private backend");
+    assert_eq!(&emb[16..20], &pool_ip.octets(), "quoted dst = SNAT pool");
+    assert_eq!(&emb[20..22], &443u16.to_be_bytes(), "#14665: quoted src port = wire destination port");
+    assert_eq!(&emb[22..24], &40000u16.to_be_bytes(), "quoted dst port = translated SNAT port");
+    assert_eq!(checksum16(&ip[..20]), 0, "outer IPv4 checksum verifies");
+    assert_eq!(checksum16(&ip[20..]), 0, "outer ICMP checksum verifies");
+    assert_eq!(checksum16(&emb[..20]), 0, "embedded IPv4 checksum verifies");
+    assert_ne!(&ip[12..16], &client_ip.octets());
+    assert_ne!(&ip[16..20], &backend_ip.octets());
+    assert_ne!(&emb[12..16], &backend_ip.octets());
+    assert_ne!(&emb[16..20], &client_ip.octets());
+}
+
+/// #14665 RED/GREEN (composed SNAT+DNAT, v6): twin of the v4 cell.
+#[test]
+fn embedded_icmp_composed_snat_dnat_outbound_renat_v6_14665() {
+    let client_v6: Ipv6Addr = "2001:db8:1::5".parse().expect("client");
+    let vip_v6: Ipv6Addr = "2001:db8:2::80".parse().expect("vip");
+    let pool_v6: Ipv6Addr = "2001:db8:3::1".parse().expect("pool");
+    let backend_v6: Ipv6Addr = "2001:db8:4::50".parse().expect("backend");
+    let forwarding = build_forwarding_state(&nat_snapshot());
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+
+    let mut sessions = SessionTable::new();
+    n14665_install_composed_session(&mut sessions, IpAddr::V6(client_v6), IpAddr::V6(vip_v6), IpAddr::V6(pool_v6), IpAddr::V6(backend_v6), libc::AF_INET6 as u8);
+    let frame = build_icmpv6_te_frame_with_mac(client_v6, vip_v6, client_v6, 443, 12345, PROTO_TCP, TEST_LAN_MAC);
+    let meta = n6474_meta(24, libc::AF_INET6 as u8, PROTO_ICMPV6, frame.len());
+    let m = try_embedded_icmp_nat_match_from_frame(&frame, meta, &mut sessions, &forwarding, &neighbors, &shared_sessions, &shared_nat_sessions, &SharedSessionOwnerRgIndexes::default(), &shared_forward_wire_sessions, 1_000_000).into_option().expect("composed v6 outbound error must match");
+    assert_eq!(m.original_dst, IpAddr::V6(vip_v6), "#14665: v6 match carries the pre-DNAT wire destination");
+    assert_eq!(m.original_dst_port, 443, "#14665: v6 match carries the pre-DNAT wire destination port");
+    assert!(m.outbound_snat, "#14665: composed v6 outbound error must carry the re-NAT mark");
+    let out = build_snat_outbound_icmp_error_v6(&frame, meta, &m).expect("composed v6 SNAT-outbound builder must build");
+    // VLAN-tagged egress (tx_vlan_id 80): IP header after 18 bytes.
+    assert_eq!(&out[16..18], &0x86ddu16.to_be_bytes(), "VLAN-tagged egress");
+    let ip = &out[18..];
+    assert_eq!(&ip[8..24], &pool_v6.octets(), "outer src = SNAT pool");
+    assert_eq!(&ip[24..40], &vip_v6.octets(), "#14665: outer dst = wire destination (VIP)");
+    let emb = &ip[48..];
+    assert_eq!(&emb[8..24], &vip_v6.octets(), "#14665: quoted src = wire destination (VIP)");
+    assert_eq!(&emb[24..40], &pool_v6.octets(), "quoted dst = SNAT pool");
+    assert_eq!(&emb[40..42], &443u16.to_be_bytes(), "#14665: quoted src port = wire destination port");
+    assert_eq!(&emb[42..44], &40000u16.to_be_bytes(), "quoted dst port = translated SNAT port");
+    let s6 = Ipv6Addr::from(<[u8; 16]>::try_from(&ip[8..24]).unwrap());
+    let d6 = Ipv6Addr::from(<[u8; 16]>::try_from(&ip[24..40]).unwrap());
+    assert_eq!(checksum16_ipv6(s6, d6, PROTO_ICMPV6, &ip[40..]), 0, "outer ICMPv6 checksum verifies");
 }
 
 

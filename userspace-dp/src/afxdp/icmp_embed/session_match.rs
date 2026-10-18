@@ -37,6 +37,7 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
     now_ns: u64,
     routing_domain: u32,
 ) -> Option<SessionLookup> {
+    let l3 = meta.l3_offset as usize;
     let l4 = meta.l4_offset as usize;
 
     let icmp_type = *frame.get(l4)?;
@@ -45,7 +46,6 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
     }
 
     let embedded_ip_start = l4 + 8;
-
     match meta.protocol {
         PROTO_ICMP => {
             let hdr = parse_embedded_v4(
@@ -54,6 +54,17 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
                 outer_error_atomic(frame, &meta),
                 super::outer_datagram_end(frame, &meta),
             )?;
+            // #14665: RFC 792 — the error must be addressed to the
+            // quoted source (the NAT64 gate, ported).
+            {
+                let outer_dst = frame
+                    .get(l3 + 16..l3 + 20)
+                    .and_then(|b| <[u8; 4]>::try_from(b).ok())
+                    .map(Ipv4Addr::from)?;
+                if outer_dst != hdr.src {
+                    return None;
+                }
+            }
             let emb_src = IpAddr::V4(hdr.src);
             let emb_dst = IpAddr::V4(hdr.dst);
             // #9298: kept in step with the two PRODUCTION arms
@@ -103,6 +114,16 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
                 outer_error_atomic(frame, &meta),
                 super::outer_datagram_end(frame, &meta),
             )?;
+            // #14665: RFC 4443 twin of the v4 gate above.
+            {
+                let outer_dst = frame
+                    .get(l3 + 24..l3 + 40)
+                    .and_then(|b| <[u8; 16]>::try_from(b).ok())
+                    .map(Ipv6Addr::from)?;
+                if outer_dst != hdr.src_wire {
+                    return None;
+                }
+            }
             let emb_src = IpAddr::V6(hdr.src_wire);
             // #9298: see the v4 arm.
             let quoted_discriminator = super::resolve_quoted_pptp_discriminator_in_domain(
