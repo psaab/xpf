@@ -579,6 +579,11 @@ pub fn xdp_userspace_prog(ctx: XdpContext) -> u32 {
     }
 }
 
+// #14851: keep the entry body in its own subprogram. Without this,
+// outlining the helpers below lets LLVM merge this body back into
+// `xdp_userspace_prog`, and the #8249 stack guard's entry-plus-deepest
+// model then double-counts it against the GRE-inner subprogram.
+#[inline(never)]
 fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     let ctrl = USERSPACE_CTRL.get(0).ok_or(0i64)?;
     if ctrl.enabled == 0 || ctrl.metadata_version != USERSPACE_META_VERSION as u32 {
