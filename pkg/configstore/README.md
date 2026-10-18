@@ -987,10 +987,7 @@ per-path:
   `encodeConfirm` seals under `confirmEncryptionPRF(PrevTree, cover)`:
   the rollback target's own profile when it has one (a nested re-arm
   over an encrypted config keeps the profile it was armed under),
-  else the guarded tree's. Every other `WriteConfirm` path (tombstones,
-  migration rewrites, retries, the FIRST sentinel) leaves the cover
-  empty and keeps the `PrevTree` profile, so public `WriteConfirm`
-  compat and pre-fix readers are unchanged: the envelope is
+  else the guarded tree's. The envelope is
   self-describing (`env.PRF`) and the key comes from `master.key`, not
   from either tree. `ReadConfirm` now retains `decrypted` and logs the
   #4579-style unexpected-plaintext warning when a plaintext record's
@@ -1005,6 +1002,30 @@ per-path:
   sealing — the #6856 threat table) can recompute it; the encrypted
   form's integrity comes from AES-GCM. Tests:
   `confirm_encryption_guarded_14172_test.go`.
+- **Later confirm writes recover the armed profile from disk
+  (#14719 D18-01).** The #14172 cover lives only in the transient
+  `DB.writeConfirmCover`, set by `commitConfirmedLocked` and cleared
+  by defer on return — so every later `WriteConfirm` of the same
+  window (resolution tombstone on EVERY resolution in this
+  configuration, phase-3 finalization retry, boot rebind/migration
+  rewrites, FIRST sentinel) resolved PrevTree("") + cover("") =
+  plaintext and fsynced the full PrevTree secrets in cleartext,
+  defeating the operator's act of enabling master-password; crash or
+  delete-failure left the cleartext tombstone indefinitely. Now
+  `encodeConfirm`, when neither PrevTree nor the transient cover
+  yields a profile, recovers the profile from the confirm record
+  already on disk (`existingConfirmDiskPRF`: strip the confirm
+  envelope, read the self-describing AES-GCM envelope's `env.PRF`)
+  and re-seals under it. Fail-open to plaintext on absent/unreadable/
+  plaintext disk state: a legacy plaintext window stays plaintext
+  (no invented encryption, no master.key pressure) and a corrupt
+  prior record cannot fail a tombstone/retry write. Production
+  ordering (tombstone BEFORE delete; retry/rebind/sentinel rewrite an
+  existing record) makes the deleted-before-rewrite residual
+  unreachable on the named paths; closing it fully would need the
+  guarded profile persisted inside the record (a schema change
+  stranding pre-fix readers). Tests:
+  `confirm_encryption_cover_persist_14719_test.go`.
 - **`confirm.json` has strict outer version and field gates (#10723 F3).** New
   records carry a `#xpf-confirm-envelope v=1` prefix outside plaintext or
   encrypted JSON; readers reject unsupported versions and JSON fields they do
