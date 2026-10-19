@@ -4250,3 +4250,211 @@ fn cross_family_native_v6_binds_wildcard_not_specific_v4_14957() {
     assert_eq!(&decapped.frame[14..], &inner[..]);
 }
 
+// ---------------------------------------------------------------------------
+// #15123 (A86-04, #14326 residual): same-port WireGuard selection must prefer
+// an exact same-family owner over a same-family-mismatched specific listener.
+//
+// A dual-stack pair shares listen port 51820 on one ingress: tunnel 1 is
+// bound to a specific IPv4 source (172.16.80.8, ifindex 400) and tunnel 2 is
+// bound to a specific native IPv6 source (2001:db8::1, ifindex 401). A
+// native IPv6 destination (2001:db8::1) must select tunnel 2. Pre-#15123 the
+// single-pass scan returned the first FastMap entry whose source was
+// unspecified OR equal to dst OR cross-family (source.is_ipv4() !=
+// dst.is_ipv4()), so a v4-bound tunnel iterated first was admitted by
+// wg_outer_zone_matches on the destination zone alone and claimed the v6
+// record. Its AEAD then failed (wrong engine) and the record fell back to
+// the kernel/control-socket path, which drops transit (DropDegradedTransit).
+// Because FastMap iteration is hash order, both map layouts (v4 id first
+// and v6 id first) are exercised.
+// ---------------------------------------------------------------------------
+
+/// Snapshot: TWO WG tunnels sharing WG_PORT — tunnel 1 v4-bound
+/// (172.16.80.8, wg0/ifindex 400), tunnel 2 v6-bound (2001:db8::1,
+/// wg1/ifindex 401, transport inet6.0 which normalises to the same default
+/// transport instance "" as inet.0). Both outer addresses live on
+/// reth0.80 (WAN), so both are owned in the ingress zone.
+fn dual_stack_same_port_snapshot_15123() -> crate::ConfigSnapshot {
+    let mut snap = wg_outer_mtu_snapshot();
+    snap.interfaces[0]
+        .addresses
+        .push(crate::InterfaceAddressSnapshot {
+            family: "inet6".to_string(),
+            address: "2001:db8::1/64".to_string(),
+            scope: 0,
+        });
+    let mut ep2 = snap.tunnel_endpoints[0].clone();
+    ep2.id = 2;
+    ep2.interface = "wg1.0".to_string();
+    ep2.linux_name = "wg1".to_string();
+    ep2.ifindex = 401;
+    ep2.source = "2001:db8::1".to_string();
+    ep2.outer_family = "inet6".to_string();
+    ep2.transport_table = "inet6.0".to_string();
+    snap.tunnel_endpoints.push(ep2);
+    snap.interfaces.push(crate::InterfaceSnapshot {
+        name: "wg1.0".to_string(),
+        zone: "sfmix".to_string(),
+        linux_name: "wg1".to_string(),
+        ifindex: 401,
+        mtu: 1420,
+        redundancy_group: 1,
+        tunnel: true,
+        addresses: vec![crate::InterfaceAddressSnapshot {
+            family: "inet6".to_string(),
+            address: "2001:db8:1::1/128".to_string(),
+            scope: 0,
+        }],
+        ..Default::default()
+    });
+    snap
+}
+
+#[test]
+fn wg_same_port_dual_stack_native_v6_selects_v6_tunnel_15123() {
+    let local_v6: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let peer_v6: std::net::Ipv6Addr = "2001:db8::7".parse().unwrap();
+    let scratch = WgWorkerScratch::new(4096);
+    // Both id layouts: if FastMap iteration follows insertion, layout A
+    // visits the v4 tunnel first (the pre-fix wrong winner); layout B
+    // confirms the exact owner still wins when iterated second/first in
+    // the opposite order. The fix must be order-independent either way.
+    for v6_id_first in [false, true] {
+        let allowed_a: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+        let allowed_b: Vec<ipnet::IpNet> = vec!["10.124.0.0/24".parse().unwrap()];
+        let (init_v4, resp_v4, _ip4, rpub_v4) =
+            established_pair(allowed_a.clone(), allowed_a.clone());
+        let (init_v6, resp_v6, _ip6, rpub_v6) = established_pair(allowed_b.clone(), allowed_b);
+        let mut snap = dual_stack_same_port_snapshot_15123();
+        if v6_id_first {
+            // Swap ids: v6 tunnel becomes id 1 (ifindex 401), v4 tunnel
+            // becomes id 2 (ifindex 400).
+            snap.tunnel_endpoints[0].id = 2;
+            snap.tunnel_endpoints[1].id = 1;
+        }
+        let (v4_id, v6_id, v4_ifindex, v6_ifindex) = if v6_id_first {
+            (2u16, 1u16, 400i32, 401i32)
+        } else {
+            (1u16, 2u16, 400i32, 401i32)
+        };
+        let mut forwarding = build_forwarding_state(&snap);
+        assert_eq!(forwarding.tunnel_endpoints.len(), 2, "fixture: two tunnels");
+        assert_eq!(
+            forwarding.wg_local_address_zone_v6.get(&local_v6),
+            Some(&crate::test_zone_ids::TEST_WAN_ZONE_ID),
+            "fixture: v6 listener owned in WAN (ingress zone)"
+        );
+        forwarding
+            .wg_engines
+            .insert(v4_id, std::sync::Arc::new(resp_v4));
+        forwarding
+            .wg_engines
+            .insert(v6_id, std::sync::Arc::new(resp_v6));
+        let meta_probe = outer_meta_v6(60);
+        assert!(
+            super::decap::is_wg_listener_tuple(
+                WG_PORT,
+                std::net::IpAddr::V6(local_v6),
+                meta_probe,
+                &forwarding
+            ),
+            "#15123: v6 listener tuple must be recognised (v6_id_first={v6_id_first})"
+        );
+        // The v6 tunnel's authenticated record to the native v6 dst must
+        // decap via the v6 engine (logical ifindex 401), in both layouts.
+        let inner6 = inner_v4([10, 124, 0, 5], [10, 0, 61, 102]);
+        let mut wire6 = vec![0u8; 2048];
+        let enc6 = init_v6
+            .try_encap(&rpub_v6, &inner6, &mut wire6)
+            .expect("encap v6 peer");
+        let frame6 = outer_frame_v6(&wire6[..enc6.len], WG_PORT, peer_v6, local_v6);
+        let decapped6 = super::decap::try_wg_decap_from_frame(
+            &frame6,
+            outer_meta_v6(frame6.len()),
+            &forwarding,
+            &scratch,
+        )
+        .expect(
+            "#15123: native v6 record must decap via the v6-bound tunnel, not the v4-bound tunnel sharing the port",
+        );
+        assert_eq!(
+            decapped6.meta.ingress_ifindex as i32, v6_ifindex,
+            "#15123: v6 record must present the v6 tunnel logical ifindex (v6_id_first={v6_id_first})"
+        );
+        assert_eq!(&decapped6.frame[14..], &inner6[..]);
+        // Control: the v4 tunnel's record to its native v4 dst still decaps
+        // via the v4 engine — exact-first must not demote same-family exact.
+        let inner4 = inner_v4([10, 123, 0, 5], [10, 0, 61, 102]);
+        let mut wire4 = vec![0u8; 2048];
+        let enc4 = init_v4
+            .try_encap(&rpub_v4, &inner4, &mut wire4)
+            .expect("encap v4 peer");
+        let frame4 = outer_frame(&wire4[..enc4.len], WG_PORT);
+        let decapped4 = super::decap::try_wg_decap_from_frame(
+            &frame4,
+            outer_meta(frame4.len()),
+            &forwarding,
+            &scratch,
+        )
+        .expect("#15123: native v4 record must still decap via the v4-bound tunnel (control)");
+        assert_eq!(
+            decapped4.meta.ingress_ifindex as i32, v4_ifindex,
+            "#15123: v4 record must present the v4 tunnel logical ifindex (control)"
+        );
+        assert_eq!(&decapped4.frame[14..], &inner4[..]);
+        // Fail-closed leg: the v6 tunnel's record misaddressed to the v4
+        // tunnel's dst (and vice versa) must not decap via the other engine.
+        let frame_cross = outer_frame(&wire6[..enc6.len], WG_PORT);
+        assert!(
+            super::decap::try_wg_decap_from_frame(
+                &frame_cross,
+                outer_meta(frame_cross.len()),
+                &forwarding,
+                &scratch
+            )
+            .is_none(),
+            "#15123: v6-tunnel record to the v4 dst must fail closed"
+        );
+    }
+}
+
+#[test]
+fn wg_same_port_cross_family_only_when_no_same_family_listener_15123() {
+    // #10686 preserved: with NO same-family (v6) listener on the port, a
+    // SPECIFIC v4-bound listener may still claim a native v6 destination
+    // owned in the ingress zone (cross-family fallback), so this cell is
+    // the named control the exact-first probe must not break.
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, _ipub, rpub) = established_pair(allowed.clone(), allowed);
+    let mut snap = wg_outer_mtu_snapshot();
+    snap.interfaces[0]
+        .addresses
+        .push(crate::InterfaceAddressSnapshot {
+            family: "inet6".to_string(),
+            address: "2001:db8::1/64".to_string(),
+            scope: 0,
+        });
+    let mut forwarding = build_forwarding_state(&snap);
+    let id = *forwarding.wg_engines.keys().next().expect("wg tunnel");
+    forwarding.wg_engines.insert(id, std::sync::Arc::new(resp));
+    let local_v6: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let peer_v6: std::net::Ipv6Addr = "2001:db8::7".parse().unwrap();
+    let inner = inner_v4([10, 123, 0, 5], [10, 0, 61, 102]);
+    let mut wire = vec![0u8; 2048];
+    let enc = init.try_encap(&rpub, &inner, &mut wire).expect("encap");
+    let frame = outer_frame_v6(&wire[..enc.len], WG_PORT, peer_v6, local_v6);
+    let scratch = WgWorkerScratch::new(4096);
+    let decapped = super::decap::try_wg_decap_from_frame(
+        &frame,
+        outer_meta_v6(frame.len()),
+        &forwarding,
+        &scratch,
+    )
+    .expect(
+        "#15123/#10686: cross-family fallback must still decap when no same-family listener exists on the port",
+    );
+    assert_eq!(
+        decapped.meta.ingress_ifindex as i32, 400,
+        "#15123: cross-family fallback must present the v4 tunnel logical ifindex"
+    );
+    assert_eq!(&decapped.frame[14..], &inner[..]);
+}

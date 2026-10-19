@@ -105,19 +105,17 @@ fn wg_dst_is_mapped_or_compat(dst_ip: std::net::IpAddr) -> bool {
 ///
 /// #14326: the packet destination must also BE the endpoint's configured
 /// local source (or the endpoint must carry an unspecified source, the
-/// dual-stack wildcard — #14957 below).
+/// dual-stack wildcard).
 /// Without the equality, two tunnels sharing a listen port in one zone
 /// but bound to different local IPs satisfied this check for whichever
 /// endpoint the port scan happened to select first.
 ///
-/// #14957 (D26-01): a mapped/compat destination is rejected outright,
-/// and a SPECIFIC cross-family source (native v6 dst vs v4-bound source
-/// or vice versa) is rejected: pre-fix it was admitted on the v6
-/// destination's owner zone alone with the source-zone lookup skipped
-/// (ingress zone substituted), so a destination locally owned in a zone
-/// other than the listener's claimed the listener, exempted the frame
-/// from the #10686 mapped-v6 drop, decapsulated, and (post-AEAD) roamed
-/// the peer endpoint to the attacker's source. Only an UNSPECIFIED
+/// Mapped/compat destinations are rejected outright (#14957). A SPECIFIC
+/// cross-family source (native v6 dst vs v4-bound source or vice versa)
+/// is admitted on the destination's owner zone alone (#10686: the
+/// source-zone lookup is skipped, ingress zone substituted) — but only
+/// as the #15123 fallback when no exact same-family owner exists on
+/// that port/instance (see wg_endpoint_for_listen_port). An UNSPECIFIED
 /// (dual-stack wildcard, [::]:port) source may serve either family, and
 /// then only when the destination's owner zone equals the ingress zone.
 fn wg_outer_zone_matches(
@@ -137,19 +135,19 @@ fn wg_outer_zone_matches(
     if ingress_zone_id == 0 {
         return false;
     }
+    // Cross-family specific sources reach here only via the #15123
+    // fallback pass (no same-family owner on the port/instance).
     // Same-family with a specific source: the destination must BE the
     // endpoint's configured source, and the source's owner zone is
-    // consulted below. Cross-family with a SPECIFIC source: this
-    // endpoint is not the destination's listener (its source names
-    // another family's local address, e.g. a v4-bound endpoint claimed
-    // for a native-v6 destination owned in a different zone) — fail
-    // closed instead of the pre-#14957 short-circuit that admitted on
-    // the destination zone alone and substituted the ingress zone for
-    // the unconsulted source zone.
+    // consulted below. Cross-family with a SPECIFIC source: the
+    // destination's owner zone alone binds it (#10686) — the source
+    // names another family's local address, so its own family zone map
+    // has no entry for this destination and the source-zone lookup
+    // below is skipped (ingress zone substituted). #15123: such a
+    // candidate is only ever reached from the fallback pass of
+    // wg_endpoint_for_listen_port, when no exact same-family owner
+    // exists on that port/instance.
     let same_family = endpoint.source.is_ipv4() == dst_ip.is_ipv4();
-    if !same_family && !endpoint.source.is_unspecified() {
-        return false;
-    }
     if same_family && !endpoint.source.is_unspecified() && endpoint.source != dst_ip {
         return false;
     }
@@ -177,20 +175,22 @@ fn wg_outer_zone_matches(
         // #10686 mapped-v6 drop.
         return true;
     }
-    if !same_family {
-        return false;
-    }
-    let source_zone = match endpoint.source {
-        std::net::IpAddr::V4(ip) => forwarding
-            .wg_local_address_zone_v4
-            .get(&ip)
-            .copied()
-            .unwrap_or(0),
-        std::net::IpAddr::V6(ip) => forwarding
-            .wg_local_address_zone_v6
-            .get(&ip)
-            .copied()
-            .unwrap_or(0),
+
+    let source_zone = if same_family {
+        match endpoint.source {
+            std::net::IpAddr::V4(ip) => forwarding
+                .wg_local_address_zone_v4
+                .get(&ip)
+                .copied()
+                .unwrap_or(0),
+            std::net::IpAddr::V6(ip) => forwarding
+                .wg_local_address_zone_v6
+                .get(&ip)
+                .copied()
+                .unwrap_or(0),
+        }
+    } else {
+        ingress_zone_id
     };
     source_zone == ingress_zone_id
 }
@@ -233,11 +233,23 @@ pub(in crate::afxdp) fn is_wg_listener_tuple(
 /// instance before either decap or underlay exemption can claim the datagram.
 ///
 /// #14326: `(dst_port, transport_instance)` does not identify a listener
-/// when several tunnels share a port. A candidate must additionally be
-/// bound to `dst_ip` (`endpoint.source == dst_ip`, or an unspecified
-/// dual-stack wildcard source which `wg_outer_zone_matches` binds to the
-/// destination's owner zone) and pass the outer-zone ownership check for
-/// this ingress. Specific cross-family destinations never match (#14957).
+/// when several tunnels share a port. A candidate must additionally pass
+/// the outer-zone ownership check for this ingress.
+///
+/// #15123 (A86-04, #14326 residual): selection is two-pass and
+/// order-independent over the unordered `wg_engines` map.
+///   Pass 0 (exact): `endpoint.source == dst_ip` — the same-family owner.
+///   Pass 1 (#10686 fallback): a SPECIFIC cross-family source
+///   (`source.is_ipv4() != dst_ip.is_ipv4()`), admitted only when no exact
+///   owner exists on that port/instance, via `wg_outer_zone_matches`.
+/// An unspecified (dual-stack wildcard) source matches either family here;
+/// `wg_outer_zone_matches` then binds it to the destination owner zone
+/// equalling the ingress zone and rejects mapped destinations outright.
+/// Pre-#15123 the single pass returned the first FastMap entry whose
+/// source was unspecified OR equal OR cross-family, so a v4-bound tunnel
+/// iterated first claimed a native-v6 record that belonged to the v6-bound
+/// tunnel sharing the port; its AEAD failed and the record fell back to
+/// the kernel/control-socket path, which drops transit.
 /// An engine row whose endpoint row is missing is skipped
 /// (`continue`), never allowed to abort the scan for its siblings.
 fn wg_endpoint_for_listen_port(
@@ -251,28 +263,32 @@ fn wg_endpoint_for_listen_port(
         .get(&ingress_ifindex)
         .map(String::as_str)
         .unwrap_or("");
-    for (id, engine) in forwarding.wg_engines.iter() {
-        let Some(endpoint) = forwarding.tunnel_endpoints.get(id) else {
-            continue;
-        };
-        // #14957: a SPECIFIC source is family-exact. A v4-bound listener
-        // serves native v4 wire frames and a v6-bound listener native v6
-        // wire frames; a cross-family (incl. mapped-v6) destination is
-        // never this listener's wire destination. The pre-fix admission
-        // let a mapped destination owned in another zone claim the v4
-        // listener and bypass the mapped-v6 ingress drop. An UNSPECIFIED
-        // source is the dual-stack wildcard listener ([::]:port) and
-        // matches either family here; wg_outer_zone_matches then binds
-        // it to the destination owner zone equalling the ingress zone
-        // and rejects mapped destinations outright.
-        let source_matches = endpoint.source.is_unspecified() || endpoint.source == dst_ip;
-        if endpoint.wg_listen_port == dst_port
-            && tunnel_mode_kind(&endpoint.mode) == TunnelKind::WireGuard
-            && transport_instance_of_table(&endpoint.transport_table) == ingress_instance
-            && source_matches
-            && wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip)
-        {
-            return Some((endpoint, engine));
+    // 0 = exact same-family, 1 = cross-family (#10686). An unspecified
+    // source is the dual-stack wildcard and belongs to pass 0's family
+    // test via `source == dst_ip` being false but wildcard admitted in
+    // both passes' predicate below; rank it exact so a wildcard never
+    // defers to a specific cross-family candidate.
+    for pass in 0..2u8 {
+        for (id, engine) in forwarding.wg_engines.iter() {
+            let Some(endpoint) = forwarding.tunnel_endpoints.get(id) else {
+                continue;
+            };
+            let exact = endpoint.source == dst_ip;
+            let cross_family_specific =
+                !endpoint.source.is_unspecified() && endpoint.source.is_ipv4() != dst_ip.is_ipv4();
+            let source_matches = if pass == 0 {
+                exact || endpoint.source.is_unspecified()
+            } else {
+                cross_family_specific
+            };
+            if endpoint.wg_listen_port == dst_port
+                && tunnel_mode_kind(&endpoint.mode) == TunnelKind::WireGuard
+                && transport_instance_of_table(&endpoint.transport_table) == ingress_instance
+                && source_matches
+                && wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip)
+            {
+                return Some((endpoint, engine));
+            }
         }
     }
     None
