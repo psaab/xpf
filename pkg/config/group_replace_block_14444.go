@@ -36,13 +36,26 @@ import "regexp"
 // groupReplacePortLeaves14444 is the closed set of schema leaves that
 // are both groupReplace and ports, where range-free union is the
 // prescribed DR16-H1 behaviour. Keyed by schema node pointer.
+//
+// #14966: the set must cover every spelling of the firewall filter
+// grammar. `family any` (#9017) and the implicit `firewall filter`
+// tree (#9899) are deep copies with distinct schema pointers, so
+// enumerating only inet/inet6 left those spellings on OVERRIDE and
+// silently dropped range-free group ports there.
 var groupReplacePortLeaves14444 map[*schemaNode]bool
 
-func init() {
-	groupReplacePortLeaves14444 = map[*schemaNode]bool{}
+// groupReplacePortLeavesSet14444 builds the set on first use. It cannot
+// run in init(): Go runs this file's init before
+// schema_firewall_family_any_9017.go's init (file-name order), so the
+// `any` and implicit-filter deep copies do not exist yet at init time.
+func groupReplacePortLeavesSet14444() map[*schemaNode]bool {
+	if groupReplacePortLeaves14444 != nil {
+		return groupReplacePortLeaves14444
+	}
+	set := map[*schemaNode]bool{}
 	add := func(n *schemaNode) {
 		if n != nil {
-			groupReplacePortLeaves14444[n] = true
+			set[n] = true
 		}
 	}
 	child := func(n *schemaNode, k string) *schemaNode {
@@ -51,18 +64,26 @@ func init() {
 		}
 		return n.children[k]
 	}
-	// Firewall filter from ports, family inet + inet6.
-	for _, fam := range []string{"inet", "inet6"} {
+	// Firewall filter from ports: family inet, inet6 and any, plus the
+	// implicit `firewall filter` tree (a direct child of schemaFirewall).
+	portKeys := []string{"destination-port", "source-port", "destination-port-except", "source-port-except"}
+	for _, fam := range []string{"inet", "inet6", "any"} {
 		from := child(child(child(child(child(schemaFirewall, "family"), fam), "filter"), "term"), "from")
-		for _, k := range []string{"destination-port", "source-port", "destination-port-except", "source-port-except"} {
+		for _, k := range portKeys {
 			add(child(from, k))
 		}
+	}
+	implicitFrom := child(child(child(schemaFirewall, "filter"), "term"), "from")
+	for _, k := range portKeys {
+		add(child(implicitFrom, k))
 	}
 	// NAT match destination-port (source + destination rule-sets).
 	nat := child(schemaSecurity, "nat")
 	for _, dir := range []string{"source", "destination"} {
 		add(child(child(child(child(child(nat, dir), "rule-set"), "rule"), "match"), "destination-port"))
 	}
+	groupReplacePortLeaves14444 = set
+	return set
 }
 
 // groupReplaceSchema14444 resolves the schema leaf for key at
@@ -87,7 +108,7 @@ func groupReplaceLeafAt14444(ancestorPath [][]string, key string) bool {
 // one of the port groupReplace leaves (pointer identity).
 func isGroupReplacePortLeaf14444(ancestorPath [][]string, key string) bool {
 	leaf := groupReplaceSchema14444(ancestorPath, key)
-	return leaf != nil && groupReplacePortLeaves14444[leaf]
+	return leaf != nil && groupReplacePortLeavesSet14444()[leaf]
 }
 
 var hyphenRange14444 = regexp.MustCompile(`^\d+-\d+$`)
@@ -95,12 +116,19 @@ var hyphenRange14444 = regexp.MustCompile(`^\d+-\d+$`)
 // groupReplaceBlockCarriesRange14444 reports whether a block (or leaf)
 // node's members carry a range: any member token equal to the "to"
 // separator, any hyphen-range token (digits-digits — the form
-// leafListCarriesRange misses), a multi-token member (e.g. a child
-// leaf "1000 to 2000" whose Keys pack the separator), or a "port"
-// separator token (DNAT pool address packs `address <ip> port <n>`;
-// its presence means the value is not a plain member set — only
-// consulted for non-port leaves via the unconditional override, kept
-// here for completeness of the range predicate).
+// leafListCarriesRange misses), a "port" separator token (DNAT pool
+// address packs `address <ip> port <n>`; its presence means the value
+// is not a plain member set — only consulted for non-port leaves via
+// the unconditional override, kept here for completeness of the range
+// predicate), or any other separator/operation token packed alongside
+// multiple keys in one child.
+//
+// #14966: a child with more than one key is NOT by itself a range.
+// `destination-port { 80 443; }` packs two discrete members into one
+// child leaf; leafListMembers9627 flattens it to [80 443] and neither
+// token is a range, so it must union like `{ 80; 443; }`. Only a
+// multi-token child that actually packs a separator/operation token
+// (`1000 to 2000`, `address <ip> port <n>`) counts as packed.
 func groupReplaceBlockCarriesRange14444(n *Node) bool {
 	if n == nil {
 		return false
@@ -113,14 +141,15 @@ func groupReplaceBlockCarriesRange14444(n *Node) bool {
 			return true
 		}
 	}
-	// Multi-token child leaves: `1000 to 2000;` inside a block parses
-	// to a child with Keys [1000 to 2000]; leafListMembers9627 flattens
-	// it, so the "to" check above already sees it. A child with more
-	// than one key that is not flattened as separate members still
-	// counts as packed (defensive).
 	for _, c := range n.Children {
-		if c != nil && len(c.Keys) > 1 {
-			return true
+		if c == nil || len(c.Keys) <= 1 {
+			continue
+		}
+		for _, k := range c.Keys {
+			switch k {
+			case "to", "port", "add", "set", "delete", "none":
+				return true
+			}
 		}
 	}
 	return false
