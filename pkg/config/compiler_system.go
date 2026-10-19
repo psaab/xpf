@@ -2525,15 +2525,29 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 	// to erase an earlier block's prefixes, because an emptied list resolves to
 	// the unresolved arm and (lenient) quarantines every community that
 	// references it.
+	// #15706: a two-level container (`client-list { <L> { ... } }`) names its
+	// instances one level down. namedInstances peels that level (Keys<2 ->
+	// children are the instances); the named spelling (`client-list <L> ...`)
+	// passes through unchanged. Without this only the first?/named spelling
+	// was read and every two-level list was dropped, leaving referencing
+	// communities unresolved (strict reject / lenient quarantine).
 	for _, child := range snmpChildren {
 		if child.Name() != "client-list" {
 			continue
 		}
-		listName := snmpClientListName(child)
-		if listName == "" {
-			continue
+		for _, inst := range namedInstances([]*Node{child}) {
+			if inst.name == "" {
+				continue
+			}
+			// parseSNMPClientListPrefixes expects Keys[1]==list name.
+			// namedInstances returns the sub-node (Keys[0]==name) for the
+			// two-level shape, so synthesize the named node shape it reads.
+			node := inst.node
+			if len(node.Keys) < 2 || node.Keys[1] != inst.name {
+				node = &Node{Keys: append([]string{"client-list", inst.name}, node.Keys[1:]...), Children: node.Children}
+			}
+			snmp.ClientLists[inst.name] = append(snmp.ClientLists[inst.name], parseSNMPClientListPrefixes(node)...)
 		}
-		snmp.ClientLists[listName] = append(snmp.ClientLists[listName], parseSNMPClientListPrefixes(child)...)
 	}
 	// #9416: a malformed prefix inside a NAMED list gets the SAME treatment as
 	// one inside an inline `clients` run (#4834/#5833) -- strict rejects naming
@@ -2618,301 +2632,330 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 		case "description":
 			snmp.Description = nodeVal(child)
 		case "community":
-			commName := nodeVal(child)
-			if commName != "" {
-				commChildren := child.Children
-				if len(child.Keys) < 2 && len(child.Children) > 0 {
-					commChildren = child.Children[0].Children
-				}
-				// #15124: reject (strict) / warn + quarantine (lenient) on
-				// any UNKNOWN child of this community block, before the
-				// statement collection below silently skips it. Judged on
-				// the same expanded view the collection reads, plus the
-				// Keys-packed run on this node. A quarantined community is
-				// forced deny-all at the clientNets build below, sticky
-				// across same-name merge blocks like #5833's.
-				if unknown := snmpCommunityUnknownChildren15124(child, expandFlatRun(commChildren, snmpCommunitySchema9416()), snmpCommunityPermitted15124); len(unknown) > 0 {
-					for _, tok := range unknown {
-						msg := snmpCommunityUnknownMessage15124(tok, snmpCommunityDeclared15124, lenient)
+			// #15706: peel two-level containers (`community { <c> { ... } }`)
+			// via namedInstances so the 2nd+ instance is not dropped; the
+			// named spelling passes through as one instance. Body below is
+			// per-instance (named `child`/`commName` preserved).
+			for _, commInst15706 := range namedInstances([]*Node{child}) {
+				child := commInst15706.node
+				commName := commInst15706.name
+				if commName != "" {
+					commChildren := child.Children
+					if len(child.Keys) < 2 && len(child.Children) > 0 {
+						// Only peel when child is still the container (Keys<2);
+						// namedInstances already peeled two-level instances
+						// (their node is the instance, Keys[0]==name).
+						if child.Name() == "community" {
+							commChildren = child.Children[0].Children
+						}
+					}
+					// #15124: reject (strict) / warn + quarantine (lenient) on
+					// any UNKNOWN child of this community block, before the
+					// statement collection below silently skips it. Judged on
+					// the same expanded view the collection reads, plus the
+					// Keys-packed run on this node. A quarantined community is
+					// forced deny-all at the clientNets build below, sticky
+					// across same-name merge blocks like #5833's.
+					if unknown := snmpCommunityUnknownChildren15124(child, expandFlatRun(commChildren, snmpCommunitySchema9416()), snmpCommunityPermitted15124); len(unknown) > 0 {
+						for _, tok := range unknown {
+							msg := snmpCommunityUnknownMessage15124(tok, snmpCommunityDeclared15124, lenient)
+							if !lenient {
+								return fmt.Errorf("%s", msg)
+							}
+							if cfg != nil {
+								cfg.Warnings = append(cfg.Warnings, msg)
+							}
+						}
+						if lenient {
+							quarantinedComms[commName] = true
+						}
+					}
+					// Parse THIS block's authorization + clients into locals first.
+					// A same-name sibling block is then MERGED into any existing
+					// entry rather than overwriting it (#5472), so a later block
+					// cannot silently drop an earlier block's source-IP allowlist.
+					var blockAuth string
+					var blockClients []SNMPClient
+					// #8778: flat `set` builds a CHAIN, not siblings. The command
+					//   set snmp community public authorization read-only clients 10.0.0.0/8
+					// produces
+					//   community public
+					//     authorization read-only
+					//       clients 10.0.0.0/8        <- CHILD of authorization
+					// so a loop over one level sees `authorization` and never sees
+					// `clients` at all. The allowlist was silently dropped, and an
+					// empty allowlist is documented allow-all rather than deny —
+					// the operator's restriction inverted, on a commit that
+					// succeeded. Splitting the same statements across two `set`
+					// lines enforced correctly, so the difference was a line break.
+					//
+					// Descend only through keywords this switch recognises. A
+					// `clients` node's own children hold its VALUE tokens (prefixes
+					// and `restrict`), which parseSNMPClients reads and which must
+					// not be mistaken for statements.
+					//
+					// #9416: `client-list-name` and `routing-instance` join the
+					// descent set. They are not decoration -- a keyword this walk
+					// does not name is silently skipped, which is precisely how the
+					// named-list spelling reached AllowsSource as an empty (=
+					// allow-all) allowlist. `routing-instance` carries its own
+					// `clients` / `client-list-name` body, so the descent continues
+					// through it and those statements are collected as the
+					// community's own; the SCOPING is not enforced and
+					// snmpInertKnobWarnings says so.
+					//
+					// #9416: expandFlatRun FIRST. A flat `set` builds a CHAIN and
+					// packs its tail onto ONE node's Keys, so
+					//   set snmp community c client-list-name L authorization read-only
+					// arrives as a single node with
+					//   Keys = [client-list-name, L, authorization, read-only]
+					// and a reader that treats Keys[1:] as the leaf's values would
+					// take "authorization" and "read-only" as two more list NAMES --
+					// which then resolve to nothing and quarantine the community.
+					// That is fail-closed rather than fail-open, but it rejects a
+					// config the operator wrote correctly.
+					//
+					// The expansion is schema-gated: `clients` is `multi: true` so
+					// its value run is never cut, `routing-instance` declares
+					// children so its subtree stays whole, and `client-list-name`
+					// is `args: 1` so exactly one token follows it. That is the same
+					// information the SetPath walk already had; this reader simply
+					// never asked for it.
+					commChildren = expandFlatRun(commChildren, snmpCommunitySchema9416())
+					var stmts []*Node
+					var collect func(nodes []*Node)
+					collect = func(nodes []*Node) {
+						for _, n := range nodes {
+							switch n.Name() {
+							case "authorization", "clients", "client-list-name":
+								stmts = append(stmts, n)
+								collect(n.Children)
+							case "routing-instance":
+								stmts = append(stmts, n)
+								// The instance body has TWO packed shapes and both
+								// drop the restriction if unread.
+								//
+								// packedBodyChildren handles `routing-instance ri
+								// clients 10.0.0.0/8;` -- the brace-elided spelling,
+								// where the whole run sits on this node's own Keys
+								// and Children is empty (#2419).
+								//
+								// expandFlatRun handles the flat-set CHAIN, where
+								// `set ... routing-instance ri clients X
+								// client-list-name L` nests each leaf under the
+								// previous one instead of beside it (#8939).
+								//
+								// They are different shapes, not two names for one:
+								// the first is extra tokens on ONE node, the second
+								// is a chain of nodes. Reading only one leaves the
+								// other silently allow-all.
+								riSchema := snmpRoutingInstanceSchema9416()
+								collect(expandFlatRun(packedBodyChildren(n, riSchema), riSchema))
+							}
+						}
+					}
+					collect(commChildren)
+					blockListRefs := snmpCommunityListRefs(stmts)
+					for _, prop := range stmts {
+						switch prop.Name() {
+						case "authorization":
+							blockAuth = nodeVal(prop)
+						case "clients":
+							// #4289: Junos `clients` source-IP allowlist.
+							// parseSNMPClients handles both AST shapes and the
+							// per-entry `restrict` modifier. Accumulate so a
+							// clients block split across load-merge / flat-set
+							// replays is not dropped.
+							blockClients = append(blockClients, parseSNMPClients(prop)...)
+						}
+					}
+					// Flat form: the whole community body can arrive packed onto
+					// this node's Keys —
+					//   community public authorization read-only clients 10.0.0.0/8
+					// — which is what `set snmp community public authorization
+					// read-only clients 10.0.0.0/8` produces, and what the
+					// brace-elided hierarchical spelling produces too.
+					//
+					// #8778: this loop read `authorization` and NOT `clients`, so
+					// the one-line spelling compiled to an EMPTY allowlist. That is
+					// not a smaller allowlist, it is the INVERSE of one: AllowsSource
+					// documents `len(Clients) == 0` as allow-all (the Junos default),
+					// so the community became answerable from every source while the
+					// operator's config said otherwise and the commit reported
+					// success. Splitting the same statements across two `set` lines
+					// enforced correctly, so the difference was a line break.
+					//
+					// The run after `clients` is handed to parseSNMPClients rather
+					// than parsed here, so the `restrict` modifier and the #5898
+					// orphan-`restrict` fail-closed path behave identically to the
+					// braced spelling instead of being reimplemented beside them.
+					//
+					// #9416: `client-list-name` and `routing-instance` are cut
+					// points here for the same reason they are descent keywords
+					// above. Without them the `clients` run-scan would swallow a
+					// trailing `client-list-name L` as two more PREFIXES -- both
+					// unparseable, which (#4834) hard-rejects on the strict path
+					// and quarantines on the lenient one. That is fail-closed
+					// rather than fail-open, but it rejects a valid config, so the
+					// keyword set here must stay in step with the descent set.
+					snmpCommunityKeyword9416 := func(tok string) bool {
+						switch tok {
+						case "authorization", "clients", "client-list-name", "routing-instance":
+							return true
+						}
+						return false
+					}
+					for i := 2; i < len(child.Keys); i++ {
+						switch child.Keys[i] {
+						case "authorization":
+							if i+1 < len(child.Keys) {
+								blockAuth = child.Keys[i+1]
+							}
+						case "client-list-name":
+							if i+1 < len(child.Keys) {
+								blockListRefs = append(blockListRefs, child.Keys[i+1])
+							}
+						case "routing-instance":
+							// Skip the instance NAME; its body's keywords are read
+							// by the following iterations exactly as if they had
+							// been written at community level.
+							i++
+						case "clients":
+							j := i + 1
+							for j < len(child.Keys) && !snmpCommunityKeyword9416(child.Keys[j]) {
+								j++
+							}
+							run := append([]string{"clients"}, child.Keys[i+1:j]...)
+							blockClients = append(blockClients, parseSNMPClients(&Node{Keys: run})...)
+							i = j - 1
+						}
+					}
+					// #9416: resolve the named lists into the SAME `Clients` field
+					// the inline form populates, so AllowsSource, compileClientNets,
+					// the API surface and the reconcile hash all keep working on one
+					// field rather than acquiring a parallel enforcement path.
+					//
+					// An UNRESOLVABLE or EMPTY reference must never fall through to
+					// allow-all: strict hard-rejects, lenient warns and quarantines
+					// the community to deny-all, the same two-channel shape #5833
+					// settled on for a malformed inline token.
+					resolvedClients, unresolvedRefs := resolveSNMPClientListRefs(blockListRefs, snmp.ClientLists)
+					blockClients = append(blockClients, resolvedClients...)
+					if len(unresolvedRefs) > 0 {
 						if !lenient {
-							return fmt.Errorf("%s", msg)
+							return snmpUnresolvedClientListError(unresolvedRefs)
 						}
 						if cfg != nil {
-							cfg.Warnings = append(cfg.Warnings, msg)
+							cfg.Warnings = append(cfg.Warnings, snmpUnresolvedClientListMessage(unresolvedRefs, true))
 						}
-					}
-					if lenient {
 						quarantinedComms[commName] = true
 					}
-				}
-				// Parse THIS block's authorization + clients into locals first.
-				// A same-name sibling block is then MERGED into any existing
-				// entry rather than overwriting it (#5472), so a later block
-				// cannot silently drop an earlier block's source-IP allowlist.
-				var blockAuth string
-				var blockClients []SNMPClient
-				// #8778: flat `set` builds a CHAIN, not siblings. The command
-				//   set snmp community public authorization read-only clients 10.0.0.0/8
-				// produces
-				//   community public
-				//     authorization read-only
-				//       clients 10.0.0.0/8        <- CHILD of authorization
-				// so a loop over one level sees `authorization` and never sees
-				// `clients` at all. The allowlist was silently dropped, and an
-				// empty allowlist is documented allow-all rather than deny —
-				// the operator's restriction inverted, on a commit that
-				// succeeded. Splitting the same statements across two `set`
-				// lines enforced correctly, so the difference was a line break.
-				//
-				// Descend only through keywords this switch recognises. A
-				// `clients` node's own children hold its VALUE tokens (prefixes
-				// and `restrict`), which parseSNMPClients reads and which must
-				// not be mistaken for statements.
-				//
-				// #9416: `client-list-name` and `routing-instance` join the
-				// descent set. They are not decoration -- a keyword this walk
-				// does not name is silently skipped, which is precisely how the
-				// named-list spelling reached AllowsSource as an empty (=
-				// allow-all) allowlist. `routing-instance` carries its own
-				// `clients` / `client-list-name` body, so the descent continues
-				// through it and those statements are collected as the
-				// community's own; the SCOPING is not enforced and
-				// snmpInertKnobWarnings says so.
-				//
-				// #9416: expandFlatRun FIRST. A flat `set` builds a CHAIN and
-				// packs its tail onto ONE node's Keys, so
-				//   set snmp community c client-list-name L authorization read-only
-				// arrives as a single node with
-				//   Keys = [client-list-name, L, authorization, read-only]
-				// and a reader that treats Keys[1:] as the leaf's values would
-				// take "authorization" and "read-only" as two more list NAMES --
-				// which then resolve to nothing and quarantine the community.
-				// That is fail-closed rather than fail-open, but it rejects a
-				// config the operator wrote correctly.
-				//
-				// The expansion is schema-gated: `clients` is `multi: true` so
-				// its value run is never cut, `routing-instance` declares
-				// children so its subtree stays whole, and `client-list-name`
-				// is `args: 1` so exactly one token follows it. That is the same
-				// information the SetPath walk already had; this reader simply
-				// never asked for it.
-				commChildren = expandFlatRun(commChildren, snmpCommunitySchema9416())
-				var stmts []*Node
-				var collect func(nodes []*Node)
-				collect = func(nodes []*Node) {
-					for _, n := range nodes {
-						switch n.Name() {
-						case "authorization", "clients", "client-list-name":
-							stmts = append(stmts, n)
-							collect(n.Children)
-						case "routing-instance":
-							stmts = append(stmts, n)
-							// The instance body has TWO packed shapes and both
-							// drop the restriction if unread.
-							//
-							// packedBodyChildren handles `routing-instance ri
-							// clients 10.0.0.0/8;` -- the brace-elided spelling,
-							// where the whole run sits on this node's own Keys
-							// and Children is empty (#2419).
-							//
-							// expandFlatRun handles the flat-set CHAIN, where
-							// `set ... routing-instance ri clients X
-							// client-list-name L` nests each leaf under the
-							// previous one instead of beside it (#8939).
-							//
-							// They are different shapes, not two names for one:
-							// the first is extra tokens on ONE node, the second
-							// is a chain of nodes. Reading only one leaves the
-							// other silently allow-all.
-							riSchema := snmpRoutingInstanceSchema9416()
-							collect(expandFlatRun(packedBodyChildren(n, riSchema), riSchema))
-						}
-					}
-				}
-				collect(commChildren)
-				blockListRefs := snmpCommunityListRefs(stmts)
-				for _, prop := range stmts {
-					switch prop.Name() {
-					case "authorization":
-						blockAuth = nodeVal(prop)
-					case "clients":
-						// #4289: Junos `clients` source-IP allowlist.
-						// parseSNMPClients handles both AST shapes and the
-						// per-entry `restrict` modifier. Accumulate so a
-						// clients block split across load-merge / flat-set
-						// replays is not dropped.
-						blockClients = append(blockClients, parseSNMPClients(prop)...)
-					}
-				}
-				// Flat form: the whole community body can arrive packed onto
-				// this node's Keys —
-				//   community public authorization read-only clients 10.0.0.0/8
-				// — which is what `set snmp community public authorization
-				// read-only clients 10.0.0.0/8` produces, and what the
-				// brace-elided hierarchical spelling produces too.
-				//
-				// #8778: this loop read `authorization` and NOT `clients`, so
-				// the one-line spelling compiled to an EMPTY allowlist. That is
-				// not a smaller allowlist, it is the INVERSE of one: AllowsSource
-				// documents `len(Clients) == 0` as allow-all (the Junos default),
-				// so the community became answerable from every source while the
-				// operator's config said otherwise and the commit reported
-				// success. Splitting the same statements across two `set` lines
-				// enforced correctly, so the difference was a line break.
-				//
-				// The run after `clients` is handed to parseSNMPClients rather
-				// than parsed here, so the `restrict` modifier and the #5898
-				// orphan-`restrict` fail-closed path behave identically to the
-				// braced spelling instead of being reimplemented beside them.
-				//
-				// #9416: `client-list-name` and `routing-instance` are cut
-				// points here for the same reason they are descent keywords
-				// above. Without them the `clients` run-scan would swallow a
-				// trailing `client-list-name L` as two more PREFIXES -- both
-				// unparseable, which (#4834) hard-rejects on the strict path
-				// and quarantines on the lenient one. That is fail-closed
-				// rather than fail-open, but it rejects a valid config, so the
-				// keyword set here must stay in step with the descent set.
-				snmpCommunityKeyword9416 := func(tok string) bool {
-					switch tok {
-					case "authorization", "clients", "client-list-name", "routing-instance":
-						return true
-					}
-					return false
-				}
-				for i := 2; i < len(child.Keys); i++ {
-					switch child.Keys[i] {
-					case "authorization":
-						if i+1 < len(child.Keys) {
-							blockAuth = child.Keys[i+1]
-						}
-					case "client-list-name":
-						if i+1 < len(child.Keys) {
-							blockListRefs = append(blockListRefs, child.Keys[i+1])
-						}
-					case "routing-instance":
-						// Skip the instance NAME; its body's keywords are read
-						// by the following iterations exactly as if they had
-						// been written at community level.
-						i++
-					case "clients":
-						j := i + 1
-						for j < len(child.Keys) && !snmpCommunityKeyword9416(child.Keys[j]) {
-							j++
-						}
-						run := append([]string{"clients"}, child.Keys[i+1:j]...)
-						blockClients = append(blockClients, parseSNMPClients(&Node{Keys: run})...)
-						i = j - 1
-					}
-				}
-				// #9416: resolve the named lists into the SAME `Clients` field
-				// the inline form populates, so AllowsSource, compileClientNets,
-				// the API surface and the reconcile hash all keep working on one
-				// field rather than acquiring a parallel enforcement path.
-				//
-				// An UNRESOLVABLE or EMPTY reference must never fall through to
-				// allow-all: strict hard-rejects, lenient warns and quarantines
-				// the community to deny-all, the same two-channel shape #5833
-				// settled on for a malformed inline token.
-				resolvedClients, unresolvedRefs := resolveSNMPClientListRefs(blockListRefs, snmp.ClientLists)
-				blockClients = append(blockClients, resolvedClients...)
-				if len(unresolvedRefs) > 0 {
-					if !lenient {
-						return snmpUnresolvedClientListError(unresolvedRefs)
+					// #4834: reject/warn on an unparseable `clients` entry before
+					// it reaches compileClientNets. See validateSNMPClients for
+					// why this matters beyond a plain prefix typo: it also
+					// catches a mistyped "restrict" keyword, which otherwise
+					// silently detaches from the preceding prefix and turns a
+					// deny-except entry into an unrestricted allow (fail-open).
+					// Validate only THIS block's new entries: on the merge path an
+					// earlier block's entries were already validated (and, strict,
+					// would have aborted), so re-validating the accumulated list
+					// would double-report the same warning.
+					clientWarnings, blockMalformed, err := validateSNMPClients(blockClients, lenient)
+					if err != nil {
+						return err
 					}
 					if cfg != nil {
-						cfg.Warnings = append(cfg.Warnings, snmpUnresolvedClientListMessage(unresolvedRefs, true))
+						cfg.Warnings = append(cfg.Warnings, clientWarnings...)
 					}
-					quarantinedComms[commName] = true
-				}
-				// #4834: reject/warn on an unparseable `clients` entry before
-				// it reaches compileClientNets. See validateSNMPClients for
-				// why this matters beyond a plain prefix typo: it also
-				// catches a mistyped "restrict" keyword, which otherwise
-				// silently detaches from the preceding prefix and turns a
-				// deny-except entry into an unrestricted allow (fail-open).
-				// Validate only THIS block's new entries: on the merge path an
-				// earlier block's entries were already validated (and, strict,
-				// would have aborted), so re-validating the accumulated list
-				// would double-report the same warning.
-				clientWarnings, blockMalformed, err := validateSNMPClients(blockClients, lenient)
-				if err != nil {
-					return err
-				}
-				if cfg != nil {
-					cfg.Warnings = append(cfg.Warnings, clientWarnings...)
-				}
-				// #5833: a malformed token on the lenient path quarantines the
-				// community (strict already aborted above). Record it BEFORE the
-				// clientNets build below so the deny-all override wins.
-				if blockMalformed {
-					quarantinedComms[commName] = true
-				}
-				// #5472: same-name `community` blocks MERGE into one entry
-				// instead of a plain map overwrite. Junos treats two
-				// `community public { ... }` siblings as a single configuration
-				// node; the old `Communities[name] = comm` overwrite let a later
-				// duplicate with NO `clients` replace an earlier block that had
-				// an allowlist — and AllowsSource reads an empty allowlist as
-				// allow-all, so the source-IP restriction was silently erased
-				// (security fail-open: any source could then query the
-				// community). Accumulating the allowlist keeps the restriction
-				// on BOTH the strict commit and the lenient load / HA
-				// config-sync paths (a warn-and-keep-last-writer gate would
-				// still open the community on the lenient path).
-				comm := snmp.Communities[commName]
-				if comm == nil {
-					comm = &SNMPCommunity{Name: commName}
-					snmp.Communities[commName] = comm
-				}
-				comm.Clients = append(comm.Clients, blockClients...)
-				// #9416: preserve the authored references. This is what the
-				// reconcile hash reads -- a community whose only restriction is
-				// an UNRESOLVABLE reference has an empty Clients and is
-				// quarantined through clientNets, which the hash cannot see, so
-				// without this an edit that added such a reference to a
-				// previously-unrestricted community would hash EQUAL and the
-				// running agent would keep serving every source.
-				for _, ref := range blockListRefs {
-					if !containsString9416(comm.ClientListNames, ref) {
-						comm.ClientListNames = append(comm.ClientListNames, ref)
+					// #5833: a malformed token on the lenient path quarantines the
+					// community (strict already aborted above). Record it BEFORE the
+					// clientNets build below so the deny-all override wins.
+					if blockMalformed {
+						quarantinedComms[commName] = true
 					}
-				}
-				// A later block updates the authorization only when it
-				// explicitly states one; an omitted authorization must NOT
-				// clear a value an earlier block established (do not let an
-				// empty duplicate downgrade read-write back to the read-only
-				// default).
-				if blockAuth != "" {
-					comm.Authorization = blockAuth
-				}
-				if comm.Authorization == "" {
-					comm.Authorization = "read-only"
-				}
-				// #4711: (re)build the allocation-free client-prefix cache from
-				// the now-merged Clients, so AllowsSource does an
-				// allocation-free match per incoming v2c packet instead of
-				// re-parsing every prefix on every packet. Runs here, before
-				// the config is published to the SNMP agent, so the cache is
-				// set with no concurrent readers.
-				comm.clientNets = compileClientNets(comm.Clients)
-				// #5833: fail CLOSED for a quarantined community. compileClientNets
-				// above would drop the malformed token and leave the surviving
-				// broad allow live (fail-open); override the enforcement cache with
-				// an explicit deny-all so no source can query this community until
-				// the operator fixes the typo. Sticky across merge blocks, so a
-				// later well-formed block for the same community cannot reopen it.
-				if quarantinedComms[commName] {
-					comm.clientNets = snmpQuarantineClientNets()
+					// #5472: same-name `community` blocks MERGE into one entry
+					// instead of a plain map overwrite. Junos treats two
+					// `community public { ... }` siblings as a single configuration
+					// node; the old `Communities[name] = comm` overwrite let a later
+					// duplicate with NO `clients` replace an earlier block that had
+					// an allowlist — and AllowsSource reads an empty allowlist as
+					// allow-all, so the source-IP restriction was silently erased
+					// (security fail-open: any source could then query the
+					// community). Accumulating the allowlist keeps the restriction
+					// on BOTH the strict commit and the lenient load / HA
+					// config-sync paths (a warn-and-keep-last-writer gate would
+					// still open the community on the lenient path).
+					comm := snmp.Communities[commName]
+					if comm == nil {
+						comm = &SNMPCommunity{Name: commName}
+						snmp.Communities[commName] = comm
+					}
+					comm.Clients = append(comm.Clients, blockClients...)
+					// #9416: preserve the authored references. This is what the
+					// reconcile hash reads -- a community whose only restriction is
+					// an UNRESOLVABLE reference has an empty Clients and is
+					// quarantined through clientNets, which the hash cannot see, so
+					// without this an edit that added such a reference to a
+					// previously-unrestricted community would hash EQUAL and the
+					// running agent would keep serving every source.
+					for _, ref := range blockListRefs {
+						if !containsString9416(comm.ClientListNames, ref) {
+							comm.ClientListNames = append(comm.ClientListNames, ref)
+						}
+					}
+					// A later block updates the authorization only when it
+					// explicitly states one; an omitted authorization must NOT
+					// clear a value an earlier block established (do not let an
+					// empty duplicate downgrade read-write back to the read-only
+					// default).
+					if blockAuth != "" {
+						comm.Authorization = blockAuth
+					}
+					if comm.Authorization == "" {
+						comm.Authorization = "read-only"
+					}
+					// #4711: (re)build the allocation-free client-prefix cache from
+					// the now-merged Clients, so AllowsSource does an
+					// allocation-free match per incoming v2c packet instead of
+					// re-parsing every prefix on every packet. Runs here, before
+					// the config is published to the SNMP agent, so the cache is
+					// set with no concurrent readers.
+					comm.clientNets = compileClientNets(comm.Clients)
+					// #5833: fail CLOSED for a quarantined community. compileClientNets
+					// above would drop the malformed token and leave the surviving
+					// broad allow live (fail-open); override the enforcement cache with
+					// an explicit deny-all so no source can query this community until
+					// the operator fixes the typo. Sticky across merge blocks, so a
+					// later well-formed block for the same community cannot reopen it.
+					if quarantinedComms[commName] {
+						comm.clientNets = snmpQuarantineClientNets()
+					}
 				}
 			}
 		case "trap-group":
-			tgName := nodeVal(child)
-			if tgName != "" {
-				tg := &SNMPTrapGroup{Name: tgName}
-				tgChildren := child.Children
-				if len(child.Keys) < 2 && len(child.Children) > 0 {
-					tgChildren = child.Children[0].Children
+			// #15706: peel two-level containers and MERGE same-name blocks:
+			// look up or create the group, accumulate Targets/Categories,
+			// update Version only when non-empty. Zero-target validation is
+			// deferred until after the whole snmp loop (below) so a later
+			// same-name block can supply targets.
+			for _, tgInst15706 := range namedInstances([]*Node{child}) {
+				tgName := tgInst15706.name
+				if tgName == "" {
+					continue
+				}
+				instNode15706 := tgInst15706.node
+				tg := snmp.TrapGroups[tgName]
+				if tg == nil {
+					tg = &SNMPTrapGroup{Name: tgName}
+					snmp.TrapGroups[tgName] = tg
+				}
+				tgChildren := expandFlatRun(packedBodyChildren(instNode15706, schemaForPath("snmp", "trap-group")), schemaForPath("snmp", "trap-group"))
+				// packedBodyChildren on a named node with no packed tail
+				// returns its Children (the braced body); on a two-level
+				// instance node (Keys[0]==name) the schema walk declines
+				// and also returns Children. Fall back explicitly.
+				if len(tgChildren) == 0 {
+					tgChildren = instNode15706.Children
 				}
 				for _, prop := range tgChildren {
 					switch prop.Name() {
@@ -2928,7 +2971,9 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 						// Without this the version was parsed but dropped, so a
 						// `version v1` group silently emitted v2c traps that a
 						// v1-only receiver drops.
-						tg.Version = nodeVal(prop)
+						if v := nodeVal(prop); v != "" {
+							tg.Version = v
+						}
 					case "categories":
 						// #5522: retain the configured trap categories so the
 						// runtime can enforce the filter. `categories` is a
@@ -2961,50 +3006,48 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 						}
 					}
 				}
-				// #15256 A85-02: validate category tokens against the
-				// Junos vocabulary (compiler gate for direct callers;
-				// SchemaValidate enum is the commit-path twin) and warn
-				// when the group scopes to no category xpf emits (only
-				// `link` today) — a silent zero-trap group otherwise.
-				if len(tg.Categories) > 0 {
-					hasEmitted := false
-					for _, cat := range tg.Categories {
-						lc := strings.ToLower(strings.TrimSpace(cat))
-						if !validTrapCategory15256(lc) {
-							if !lenient {
-								return fmt.Errorf("snmp trap-group %q: invalid trap category %q (valid Junos categories: authentication, chassis, chassis-cluster, configuration, link, otn-alarms, remote-operations, rmon-alarm, routing, services, sonet-alarms, startup, timing-events, vrrp-events)", tgName, cat)
-							}
-							if cfg != nil {
-								cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("snmp trap-group %q: invalid trap category %q (downgraded to warning on tolerant path; ignored at runtime)", tgName, cat))
-							}
-						}
-						if lc == "link" {
-							hasEmitted = true
-						}
-					}
-					if !hasEmitted && cfg != nil {
-						cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("snmp trap-group %q: categories %v include no category xpf emits (only \"link\" is emitted today), so this group will receive no traps — add \"link\" or remove the categories scope if traps are expected (#15256)", tgName, tg.Categories))
-					}
-				}
-				// #2990: a trap group with no targets sends nothing. Strict:
-				// reject rather than presenting a configured-but-inert group
-				// (this also catches a bare `set snmp trap-group g1` with no
-				// children). Lenient: warn so an already-persisted zero-target
-				// group still boots — sendLinkTraps skips a zero-target group,
-				// so it is inert (#1960).
-				if len(tg.Targets) == 0 {
-					if !lenient {
-						return fmt.Errorf("snmp trap-group %q: no targets configured (a trap group with zero targets sends no notifications)", tgName)
-					}
-					if cfg != nil {
-						cfg.Warnings = append(cfg.Warnings,
-							fmt.Sprintf("snmp trap-group %q: no targets configured (downgraded to warning on tolerant path; sends no notifications)", tgName))
-					}
-				}
-				snmp.TrapGroups[tg.Name] = tg
+				// #15706: category vocabulary validation and the zero-target
+				// check are deferred to the post-loop validation below, once
+				// every same-name block has been merged — a later block may
+				// add the missing targets/categories.
 			}
 		case "v3":
 			compileSNMPv3(child, snmp)
+		}
+	}
+
+	// #15706/#2990/#15256: validate each MERGED trap group once, after all
+	// trap-group blocks have accumulated. Deterministic (sorted) order.
+	for _, tgName := range sortedTrapGroupNames15706(snmp.TrapGroups) {
+		tg := snmp.TrapGroups[tgName]
+		if len(tg.Categories) > 0 {
+			hasEmitted := false
+			for _, cat := range tg.Categories {
+				lc := strings.ToLower(strings.TrimSpace(cat))
+				if !validTrapCategory15256(lc) {
+					if !lenient {
+						return fmt.Errorf("snmp trap-group %q: invalid trap category %q (valid Junos categories: authentication, chassis, chassis-cluster, configuration, link, otn-alarms, remote-operations, rmon-alarm, routing, services, sonet-alarms, startup, timing-events, vrrp-events)", tgName, cat)
+					}
+					if cfg != nil {
+						cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("snmp trap-group %q: invalid trap category %q (downgraded to warning on tolerant path; ignored at runtime)", tgName, cat))
+					}
+				}
+				if lc == "link" {
+					hasEmitted = true
+				}
+			}
+			if !hasEmitted && cfg != nil {
+				cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("snmp trap-group %q: categories %v include no category xpf emits (only \"link\" is emitted today), so this group will receive no traps — add \"link\" or remove the categories scope if traps are expected (#15256)", tgName, tg.Categories))
+			}
+		}
+		if len(tg.Targets) == 0 {
+			if !lenient {
+				return fmt.Errorf("snmp trap-group %q: no targets configured (a trap group with zero targets sends no notifications)", tgName)
+			}
+			if cfg != nil {
+				cfg.Warnings = append(cfg.Warnings,
+					fmt.Sprintf("snmp trap-group %q: no targets configured (downgraded to warning on tolerant path; sends no notifications)", tgName))
+			}
 		}
 	}
 
@@ -3013,6 +3056,17 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 		cfg.Warnings = append(cfg.Warnings, snmpInertKnobWarnings(snmpChildren)...)
 	}
 	return nil
+}
+
+// sortedTrapGroupNames15706 returns trap-group names in deterministic order
+// for the deferred merged validation in compileSNMP (#15706).
+func sortedTrapGroupNames15706(m map[string]*SNMPTrapGroup) []string {
+	names := make([]string, 0, len(m))
+	for k := range m {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // snmpInertKnobWarnings emits accept-with-advisory notes for the top-level
@@ -3445,148 +3499,166 @@ func compileSNMPv3(node *Node, snmp *SNMPConfig) {
 	if engineNode == nil {
 		return
 	}
+	// #15706: peel two-level `user { <name> { ... } }` containers via
+	// namedInstances so the 2nd+ user is not dropped; the named spelling
+	// (`user <name> { ... }`) passes through as one instance.
+	var userNodes15706 []*Node
 	for _, child := range engineNode.Children {
 		if child.Name() != "user" {
 			continue
 		}
-		userName := nodeVal(child)
-		if userName == "" {
-			continue
+		for _, inst := range namedInstances([]*Node{child}) {
+			node := inst.node
+			if len(node.Keys) < 2 || node.Keys[1] != inst.name {
+				// Two-level instance node: Keys[0]==name. Synthesize the
+				// named `user <name>` node the body below reads (Keys[1],
+				// Keys[2:] packed tail, Children body).
+				node = &Node{Keys: append([]string{"user", inst.name}, node.Keys[1:]...), Children: node.Children}
+			}
+			userNodes15706 = append(userNodes15706, node)
 		}
-		user := snmp.V3Users[userName]
-		if user == nil {
-			user = &SNMPv3User{Name: userName}
-		}
-		userChildren := child.Children
-		if len(child.Keys) < 2 && len(child.Children) > 0 {
-			userChildren = child.Children[0].Children
-		}
-		// #7653: the body may be PACKED onto the user's own instance line
-		//   user ops authentication-sha256 authentication-password "s3cret";
-		// leaving Children empty. The user was still REGISTERED -- with no
-		// derived key -- and minimum-security enforcement keys on key
-		// presence, so a noAuthNoPriv request naming this user bypasses the
-		// authentication the operator authored. Route the trailing key run
-		// through the same parseSNMPv3UserKeys the flat-set form uses above,
-		// rather than a second copy of its table.
-		if len(child.Keys) > 2 {
-			parseSNMPv3UserKeys(child.Keys[2:], user)
-		}
-		// #9155-R02: EXPAND THE FLAT RUN before walking the user's body.
-		//
-		// `SetPath` builds a flat-set line as a NESTED CHAIN, not a packed run
-		// on one node. For
-		//
-		//   set snmp v3 usm local-engine user alice \
-		//       authentication-sha256 authentication-password A \
-		//       privacy-aes128 privacy-password P
-		//
-		// the tree is
-		//
-		//   [user alice] > [authentication-sha256] > [authentication-password A]
-		//                                             > [privacy-aes128 privacy-password P]
-		//
-		// so the privacy stanza is a GRANDCHILD of the password node and this
-		// loop -- which iterates the user's own children -- never reached it.
-		// The user compiled with authProto set and privProto EMPTY: the
-		// operator configured authPriv, the commit succeeded, and the agent
-		// served authNoPriv.
-		//
-		// IT EVADED BOTH #9155 COMMIT GATES, and the reason is structural: they
-		// read the COMPILED config and key on a protocol being NAMED, so
-		// `PrivProtocol != "" && PrivPassword == ""` cannot fire on a protocol
-		// the compiler discarded before the gate ran. A gate downstream of a
-		// dropping compiler is blind to exactly what it drops -- which is why
-		// this fix belongs here and not in a third gate.
-		//
-		// The schema already declares every cut point (`user` names all five
-		// protocol children, each with its `*-password`), so the shared #8939
-		// splitter needs no shim for this container -- only to be called.
-		// hoistAndSplitRun8939 rather than expandFlatRun: `authentication-sha256`
-		// legitimately OWNS A BODY (its declared `authentication-password`
-		// child), and expandFlatRun leaves body-owning leaves alone by design.
-		// The privacy stanza is nested UNDER that body, which is exactly the
-		// case hoistAndSplitRun8939 exists to lift.
-		userChildren = hoistAndSplitRun8939(userChildren,
-			schemaForPath("snmp", "v3", "usm", "local-engine", "user"))
-		for _, prop := range userChildren {
-			// #6822: the compact spelling
-			//   authentication-sha256 authentication-password "s3cret";
-			// flattens the credential onto this node's own Keys, where the
-			// FindChild reads below cannot see it. The result was NOT a skipped
-			// user -- the protocol comes from the case label, so the user was
-			// registered as requiring SHA-256 and AES-128 with EMPTY passwords.
+	}
+	for _, child := range userNodes15706 {
+		{
+			userName := nodeVal(child)
+			if userName == "" {
+				continue
+			}
+			user := snmp.V3Users[userName]
+			if user == nil {
+				user = &SNMPv3User{Name: userName}
+			}
+			userChildren := child.Children
+			if len(child.Keys) < 2 && len(child.Children) > 0 {
+				userChildren = child.Children[0].Children
+			}
+			// #7653: the body may be PACKED onto the user's own instance line
+			//   user ops authentication-sha256 authentication-password "s3cret";
+			// leaving Children empty. The user was still REGISTERED -- with no
+			// derived key -- and minimum-security enforcement keys on key
+			// presence, so a noAuthNoPriv request naming this user bypasses the
+			// authentication the operator authored. Route the trailing key run
+			// through the same parseSNMPv3UserKeys the flat-set form uses above,
+			// rather than a second copy of its table.
+			if len(child.Keys) > 2 {
+				parseSNMPv3UserKeys(child.Keys[2:], user)
+			}
+			// #9155-R02: EXPAND THE FLAT RUN before walking the user's body.
 			//
-			// parseSNMPv3UserKeys already reads exactly this key shape for the
-			// flat-set path. Route the compact block form through the same
-			// function rather than duplicating its table: a second copy is a
-			// second thing to keep in step, and a divergence here is a silent
-			// credential loss either way.
+			// `SetPath` builds a flat-set line as a NESTED CHAIN, not a packed run
+			// on one node. For
 			//
-			// packedBodyChildren (compact_tail.go) is the general expander and
-			// is used for the #6818/#6821 siblings. It is the wrong tool HERE:
-			// the protocol is carried by the case LABEL rather than by a value,
-			// so the reader below needs the whole key run, not a rebuilt child
-			// tree -- and parseSNMPv3UserKeys already consumes exactly that run.
-			if len(prop.Keys) >= 3 {
-				// Route ONLY the exact credential shape, and do NOT skip the
-				// switch below.
+			//   set snmp v3 usm local-engine user alice \
+			//       authentication-sha256 authentication-password A \
+			//       privacy-aes128 privacy-password P
+			//
+			// the tree is
+			//
+			//   [user alice] > [authentication-sha256] > [authentication-password A]
+			//                                             > [privacy-aes128 privacy-password P]
+			//
+			// so the privacy stanza is a GRANDCHILD of the password node and this
+			// loop -- which iterates the user's own children -- never reached it.
+			// The user compiled with authProto set and privProto EMPTY: the
+			// operator configured authPriv, the commit succeeded, and the agent
+			// served authNoPriv.
+			//
+			// IT EVADED BOTH #9155 COMMIT GATES, and the reason is structural: they
+			// read the COMPILED config and key on a protocol being NAMED, so
+			// `PrivProtocol != "" && PrivPassword == ""` cannot fire on a protocol
+			// the compiler discarded before the gate ran. A gate downstream of a
+			// dropping compiler is blind to exactly what it drops -- which is why
+			// this fix belongs here and not in a third gate.
+			//
+			// The schema already declares every cut point (`user` names all five
+			// protocol children, each with its `*-password`), so the shared #8939
+			// splitter needs no shim for this container -- only to be called.
+			// hoistAndSplitRun8939 rather than expandFlatRun: `authentication-sha256`
+			// legitimately OWNS A BODY (its declared `authentication-password`
+			// child), and expandFlatRun leaves body-owning leaves alone by design.
+			// The privacy stanza is nested UNDER that body, which is exactly the
+			// case hoistAndSplitRun8939 exists to lift.
+			userChildren = hoistAndSplitRun8939(userChildren,
+				schemaForPath("snmp", "v3", "usm", "local-engine", "user"))
+			for _, prop := range userChildren {
+				// #6822: the compact spelling
+				//   authentication-sha256 authentication-password "s3cret";
+				// flattens the credential onto this node's own Keys, where the
+				// FindChild reads below cannot see it. The result was NOT a skipped
+				// user -- the protocol comes from the case label, so the user was
+				// registered as requiring SHA-256 and AES-128 with EMPTY passwords.
 				//
-				// `len(Keys) >= 3` alone is not a discriminator: extra container
-				// keys survive schema walking, so
-				//   authentication-sha256 ignored ignored { authentication-password "good"; }
-				// matched it, parseSNMPv3UserKeys recognised SHA-256 but not
-				// `ignored`, left the password empty, and an unconditional
-				// `continue` then skipped the real password CHILD the switch
-				// would have compiled. That registers the user as requiring
-				// SHA-256 with an EMPTY credential -- which is the #6822 defect
-				// itself, reintroduced on a different shape.
+				// parseSNMPv3UserKeys already reads exactly this key shape for the
+				// flat-set path. Route the compact block form through the same
+				// function rather than duplicating its table: a second copy is a
+				// second thing to keep in step, and a divergence here is a silent
+				// credential loss either way.
 				//
-				// Falling through also fixes the precedence: a node can carry a
-				// packed tail AND a real child, and the child is the canonical
-				// block spelling, so it must win.
-				switch prop.Keys[1] {
-				case "authentication-password", "privacy-password":
-					parseSNMPv3UserKeys(prop.Keys, user)
+				// packedBodyChildren (compact_tail.go) is the general expander and
+				// is used for the #6818/#6821 siblings. It is the wrong tool HERE:
+				// the protocol is carried by the case LABEL rather than by a value,
+				// so the reader below needs the whole key run, not a rebuilt child
+				// tree -- and parseSNMPv3UserKeys already consumes exactly that run.
+				if len(prop.Keys) >= 3 {
+					// Route ONLY the exact credential shape, and do NOT skip the
+					// switch below.
+					//
+					// `len(Keys) >= 3` alone is not a discriminator: extra container
+					// keys survive schema walking, so
+					//   authentication-sha256 ignored ignored { authentication-password "good"; }
+					// matched it, parseSNMPv3UserKeys recognised SHA-256 but not
+					// `ignored`, left the password empty, and an unconditional
+					// `continue` then skipped the real password CHILD the switch
+					// would have compiled. That registers the user as requiring
+					// SHA-256 with an EMPTY credential -- which is the #6822 defect
+					// itself, reintroduced on a different shape.
+					//
+					// Falling through also fixes the precedence: a node can carry a
+					// packed tail AND a real child, and the child is the canonical
+					// block spelling, so it must win.
+					switch prop.Keys[1] {
+					case "authentication-password", "privacy-password":
+						parseSNMPv3UserKeys(prop.Keys, user)
+					}
+				}
+				// #14411: a wrapper container (`authentication { … }`) is not a
+				// modelled statement; its protocol children compile exactly as
+				// if written directly under the user. The strict gate rejects
+				// the wrapped spelling, but the tolerant path compiles it at
+				// the WRITTEN level rather than silently serving a bare user.
+				if prop.Name() == "authentication" && len(prop.Keys) == 1 {
+					applySNMPv3ProtocolChildren14411(prop.Children, user)
+				}
+				switch prop.Name() {
+				case "authentication-md5":
+					user.AuthProtocol = "md5"
+					if pw := prop.FindChild("authentication-password"); pw != nil {
+						user.AuthPassword = Secret(nodeVal(pw))
+					}
+				case "authentication-sha":
+					user.AuthProtocol = "sha"
+					if pw := prop.FindChild("authentication-password"); pw != nil {
+						user.AuthPassword = Secret(nodeVal(pw))
+					}
+				case "authentication-sha256":
+					user.AuthProtocol = "sha256"
+					if pw := prop.FindChild("authentication-password"); pw != nil {
+						user.AuthPassword = Secret(nodeVal(pw))
+					}
+				case "privacy-des":
+					user.PrivProtocol = "des"
+					if pw := prop.FindChild("privacy-password"); pw != nil {
+						user.PrivPassword = Secret(nodeVal(pw))
+					}
+				case "privacy-aes128":
+					user.PrivProtocol = "aes128"
+					if pw := prop.FindChild("privacy-password"); pw != nil {
+						user.PrivPassword = Secret(nodeVal(pw))
+					}
 				}
 			}
-			// #14411: a wrapper container (`authentication { … }`) is not a
-			// modelled statement; its protocol children compile exactly as
-			// if written directly under the user. The strict gate rejects
-			// the wrapped spelling, but the tolerant path compiles it at
-			// the WRITTEN level rather than silently serving a bare user.
-			if prop.Name() == "authentication" && len(prop.Keys) == 1 {
-				applySNMPv3ProtocolChildren14411(prop.Children, user)
-			}
-			switch prop.Name() {
-			case "authentication-md5":
-				user.AuthProtocol = "md5"
-				if pw := prop.FindChild("authentication-password"); pw != nil {
-					user.AuthPassword = Secret(nodeVal(pw))
-				}
-			case "authentication-sha":
-				user.AuthProtocol = "sha"
-				if pw := prop.FindChild("authentication-password"); pw != nil {
-					user.AuthPassword = Secret(nodeVal(pw))
-				}
-			case "authentication-sha256":
-				user.AuthProtocol = "sha256"
-				if pw := prop.FindChild("authentication-password"); pw != nil {
-					user.AuthPassword = Secret(nodeVal(pw))
-				}
-			case "privacy-des":
-				user.PrivProtocol = "des"
-				if pw := prop.FindChild("privacy-password"); pw != nil {
-					user.PrivPassword = Secret(nodeVal(pw))
-				}
-			case "privacy-aes128":
-				user.PrivProtocol = "aes128"
-				if pw := prop.FindChild("privacy-password"); pw != nil {
-					user.PrivPassword = Secret(nodeVal(pw))
-				}
-			}
+			snmp.V3Users[userName] = user
 		}
-		snmp.V3Users[userName] = user
 	}
 }
 
