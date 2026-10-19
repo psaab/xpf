@@ -70,14 +70,45 @@ type ipsecQueueAllocator struct {
 	lastEpoch map[uint16]uint64
 }
 
+const (
+	// ipsecCaptureMaxTunnels is the supported route-based VPN count in one
+	// capture generation. Each tunnel owns four provenance classes.
+	ipsecCaptureMaxTunnels           = 32
+	ipsecCaptureQueuesPerTunnel      = 4
+	ipsecCaptureMaxGenerationHandles = ipsecCaptureMaxTunnels * ipsecCaptureQueuesPerTunnel
+	// The guarded commit keeps the old generation live while the staged
+	// generation allocates, and old handles free only a tick after the old
+	// runtime closes. The allocator must therefore hold two complete
+	// generations at once.
+	ipsecQueueAllocatorCapacity = 2 * ipsecCaptureMaxGenerationHandles
+)
+
 func newIpsecQueueAllocator() *ipsecQueueAllocator {
 	return &ipsecQueueAllocator{
 		next:      1000,
 		max:       65534,
-		capacity:  128, // 32 tunnels × 4 provenance classes (r6 §3.5/T12).
+		capacity:  ipsecQueueAllocatorCapacity, // Two generations: old + staged (#15068).
 		entries:   make(map[uint16]*ipsecQueueEntry),
 		lastEpoch: make(map[uint16]uint64),
 	}
+}
+
+// generationHandleCount reports handles still consuming allocator capacity
+// for one capture generation, including retired handles awaiting their
+// freeing tick.
+func (a *ipsecQueueAllocator) generationHandleCount(generation uint64) int {
+	if a == nil || generation == 0 {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	count := 0
+	for _, entry := range a.entries {
+		if entry.handle.Key.Generation == generation {
+			count++
+		}
+	}
+	return count
 }
 
 func (a *ipsecQueueAllocator) allocate(key ipsecQueueKey) (ipsecQueueHandle, error) {

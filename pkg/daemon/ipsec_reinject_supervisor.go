@@ -746,6 +746,13 @@ func (s *ipsecSupervisor) allocateQueue(key ipsecQueueKey) (ipsecQueueHandle, er
 	return handle, nil
 }
 
+func (s *ipsecSupervisor) generationQueueHandleCount(generation uint64) int {
+	if s == nil || s.allocator == nil {
+		return 0
+	}
+	return s.allocator.generationHandleCount(generation)
+}
+
 func (s *ipsecSupervisor) retireQueue(handle ipsecQueueHandle, listenerExited, destroyConfirmed bool) error {
 	if s == nil || s.allocator == nil {
 		return errIpsecQueueStale
