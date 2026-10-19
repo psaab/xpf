@@ -252,12 +252,17 @@ func ImportLearnedRoutes(tableIDs []int) ([]LearnedRoute, error) {
 //     bare-gateway ifindex inference, where a wrongly-shaped connected route
 //     would resolve to the wrong egress. Blackhole routes carry no gateway and
 //     are handled separately.
-//   - AN ECMP ROUTE IS IMPORTED WHOLE OR NOT AT ALL. Kernel multipath legs
-//     live in RTA_MULTIPATH with route.Gw nil. Every leg with a gateway is
-//     collected; if a leg is present but carries no gateway the route is
-//     REJECTED rather than half-imported, because publishing a subset of an
-//     ECMP set is the same defect class as the #1827 half-override the
-//     overlay path is built to make impossible.
+//   - AN ECMP ROUTE'S LIVE LEGS ARE IMPORTED WHOLE OR NOT AT ALL. Kernel
+//     multipath legs live in RTA_MULTIPATH with route.Gw nil. Every live leg
+//     with a gateway is collected; if a live leg is present but carries no
+//     gateway the route is REJECTED rather than half-imported, because
+//     publishing a subset of an ECMP set is the same defect class as the
+//     #1827 half-override the overlay path is built to make impossible.
+//     DEAD/LINKDOWN legs (#14950) are not live: they are excluded, and a
+//     route with no live leg left is dropped.
+//   - DEAD/LINKDOWN SINGLE-PATH ROUTES ARE NOT ADOPTED (#14950), and every
+//     surviving gateway leg keeps its explicit LinkIndex binding as
+//     `gateway@<netdev>` — see learnedRouteNextHops.
 func importableRoute(r netlink.Route, family, tableID int) (LearnedRoute, bool) {
 	return importableRouteScoped(r, family, tableID, newLinkNameCache().lookup)
 }
@@ -335,12 +340,32 @@ func learnedRouteDestination(r netlink.Route, family int) (string, bool) {
 	return "0.0.0.0/0", true
 }
 
-// learnedRouteNextHops collects each gateway leg with its parallel Linux
-// weight (`uint32(Hops)+1` for multipath, 1 for a single path). Both slices
-// preserve kernel leg order.
+// deadOrLinkDownNexthopFlags are the rtnh_flags bits (rtm_flags for a
+// single-path route, rtnh_flags per RTA_MULTIPATH leg) that mark a nexthop
+// the kernel itself will not select: RTNH_F_DEAD and RTNH_F_LINKDOWN.
+// Other bits sharing the word (RTNH_F_ONLINK, RTM_F_CLONED, ...) do not
+// exclude a leg.
+const deadOrLinkDownNexthopFlags = int(unix.RTNH_F_DEAD | unix.RTNH_F_LINKDOWN)
+
+func nexthopDeadOrLinkDown(flags int) bool {
+	return flags&deadOrLinkDownNexthopFlags != 0
+}
+
+// learnedRouteNextHops collects each live gateway leg with its parallel
+// Linux weight (`uint32(Hops)+1` for multipath, 1 for a single path). Both
+// slices preserve kernel leg order over the surviving legs.
 //
-// Returns ok=false when the route is an ECMP set with at least one leg that
-// carries no gateway — see the all-or-nothing rule on importableRoute.
+// Returns ok=false when the route is an ECMP set with at least one live leg
+// that carries no gateway — see the all-or-nothing rule on importableRoute.
+// A set whose every leg is dead/linkdown returns no legs (ok=false), so the
+// caller drops the route rather than publishing an empty next-hop set.
+//
+// #14950 (dead/linkdown): DEAD/LINKDOWN legs are excluded before anything
+// else. The kernel does not select them, so importing them hands the
+// helper FIB egresses the kernel path would never take. Single-path: the
+// whole route is unusable. ECMP: only the dead legs drop; live legs keep
+// their weights and order. A gateway-less DEAD leg likewise cannot veto
+// live legs.
 //
 // #9512: an IPv6 LINK-LOCAL gateway is meaningless without its link, and the
 // wire form has a place for the link: `gateway@interface`, the form the
@@ -358,81 +383,75 @@ func learnedRouteDestination(r netlink.Route, family int) (string, bool) {
 //
 // #11389: an ECMP gateway shared by legs on distinct links is also scoped.
 // Without the link, identical `gateway` strings resolve by first matching
-// connected prefix and collapse those legs onto one egress. Other global and
-// IPv4 gateways remain bare so their existing connected-prefix inference is
-// unchanged.
+// connected prefix and collapse those legs onto one egress.
+//
+// #14950 (explicit binding): EVERY surviving leg carrying an explicit
+// LinkIndex is published as `gateway@<netdev>`, not just link-local or
+// ambiguous ones. Stripping the binding on an IPv4 or global-IPv6 gateway
+// forced the helper to re-infer the egress from connected prefixes, which
+// can bind a different interface than the kernel selected. An explicit
+// binding whose name cannot be resolved falls back to the bare gateway for
+// non-link-local legs (the pre-#14950 inference) rather than refusing a
+// route the kernel can use; link-local legs keep the #9512 refusal. Legs
+// with no LinkIndex stay bare, unchanged.
 func learnedRouteNextHops(r netlink.Route, linkName func(int) (string, bool)) (nhs []string, weights []uint32, ok bool, unscoped net.IP) {
 	if len(r.MultiPath) > 0 {
 		nhs = make([]string, 0, len(r.MultiPath))
 		weights = make([]uint32, 0, len(r.MultiPath))
-		gatewayLinks := learnedRouteGatewayLinks(r.MultiPath)
 		for _, nh := range r.MultiPath {
+			if nh != nil && nexthopDeadOrLinkDown(nh.Flags) {
+				continue
+			}
 			if nh == nil || nh.Gw == nil {
 				return nil, nil, false, nil
 			}
-			leg, scoped := scopeLearnedGateway(nh.Gw, nh.LinkIndex, linkName, gatewayLinks[nh.Gw.String()].ambiguous)
+			leg, scoped := scopeLearnedGateway(nh.Gw, nh.LinkIndex, linkName)
 			if !scoped {
 				return nil, nil, false, nh.Gw
 			}
 			nhs = append(nhs, leg)
 			weights = append(weights, uint32(nh.Hops)+1)
 		}
+		if len(nhs) == 0 {
+			return nil, nil, false, nil
+		}
 		return nhs, weights, true, nil
 	}
 	if r.Gw == nil {
 		return nil, nil, true, nil
 	}
-	leg, scoped := scopeLearnedGateway(r.Gw, r.LinkIndex, linkName, false)
+	if nexthopDeadOrLinkDown(r.Flags) {
+		return nil, nil, false, nil
+	}
+	leg, scoped := scopeLearnedGateway(r.Gw, r.LinkIndex, linkName)
 	if !scoped {
 		return nil, nil, false, r.Gw
 	}
 	return []string{leg}, []uint32{1}, true, nil
 }
 
-// learnedGatewayLinkState records whether an ECMP gateway is known on multiple
-// distinct interfaces. Missing indexes are not evidence of ambiguity.
-type learnedGatewayLinkState struct {
-	firstLinkIndex int
-	ambiguous      bool
-}
-
-func learnedRouteGatewayLinks(nextHops []*netlink.NexthopInfo) map[string]learnedGatewayLinkState {
-	if len(nextHops) < 2 {
-		return nil
-	}
-	links := make(map[string]learnedGatewayLinkState, len(nextHops))
-	for _, nh := range nextHops {
-		if nh == nil || nh.Gw == nil || nh.LinkIndex <= 0 {
-			continue
+// scopeLearnedGateway renders one gateway leg. A leg with an explicit
+// LinkIndex is published as `gateway@<netdev>` so the helper uses the
+// kernel-selected egress instead of re-inferring it (#14950); link-local
+// gateways always require that binding (#9512). scoped=false means a
+// required link has no resolvable name. A non-link-local leg whose explicit
+// binding cannot be named falls back to the bare gateway.
+func scopeLearnedGateway(gw net.IP, linkIndex int, linkName func(int) (string, bool)) (string, bool) {
+	if linkIndex <= 0 {
+		if gw.To4() == nil && gw.IsLinkLocalUnicast() {
+			return "", false
 		}
-		gateway := nh.Gw.String()
-		state := links[gateway]
-		if state.firstLinkIndex == 0 {
-			state.firstLinkIndex = nh.LinkIndex
-		} else if state.firstLinkIndex != nh.LinkIndex {
-			state.ambiguous = true
-		}
-		links[gateway] = state
-	}
-	return links
-}
-
-// scopeLearnedGateway renders one gateway leg. IPv6 link-local gateways always
-// require an interface; other gateways require one only when an ECMP set has
-// the same gateway on distinct links. scoped=false means the required link has
-// no resolvable name.
-func scopeLearnedGateway(gw net.IP, linkIndex int, linkName func(int) (string, bool), ambiguous bool) (string, bool) {
-	if !ambiguous && (gw.To4() != nil || !gw.IsLinkLocalUnicast()) {
 		return gw.String(), true
 	}
-	if linkIndex <= 0 || linkName == nil {
+	if linkName != nil {
+		if name, ok := linkName(linkIndex); ok && name != "" {
+			return gw.String() + "@" + name, true
+		}
+	}
+	if gw.To4() == nil && gw.IsLinkLocalUnicast() {
 		return "", false
 	}
-	name, ok := linkName(linkIndex)
-	if !ok || name == "" {
-		return "", false
-	}
-	return gw.String() + "@" + name, true
+	return gw.String(), true
 }
 
 // learnedRouteLinkNameFn resolves a kernel ifindex to its netdev name.
