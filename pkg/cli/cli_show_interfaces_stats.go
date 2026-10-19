@@ -106,7 +106,7 @@ func (c *CLI) showVlans() error {
 			if unit == nil { // #5068: nil unit value
 				continue
 			}
-			if unit.VlanID > 0 || ifc.VlanTagging {
+			if unit.VlanID > 0 || ifc.TaggingEnabled() {
 				// #5325: query with the SAME canonical "base.unit" key used
 				// when building ifZone; fall back to a base-only binding
 				// (which governs every unit) so a non-unit-qualified zone
@@ -120,7 +120,7 @@ func (c *CLI) showVlans() error {
 					unit:   unitNum,
 					vlanID: unit.VlanID,
 					zone:   zone,
-					trunk:  ifc.VlanTagging,
+					trunk:  ifc.TaggingEnabled(),
 				})
 			}
 		}

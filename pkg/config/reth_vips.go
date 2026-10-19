@@ -51,7 +51,7 @@ func (c *Config) RethVIPsForRG(rgID int) map[string][]string {
 		}
 		sort.Ints(unitNums)
 
-		if ifc.VlanTagging {
+		if ifc.TaggingEnabled() {
 			for _, n := range unitNums {
 				unit := ifc.Units[n]
 				// #6780: nil unit derefs at len(unit.Addresses).

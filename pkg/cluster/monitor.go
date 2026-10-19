@@ -733,7 +733,7 @@ func resolveProbeInterface(cfg *config.Config, iface string) (device string, add
 	if ifc := cfg.Interfaces.Interfaces[base]; ifc != nil {
 		if u := ifc.Units[unit]; u != nil {
 			unitAddrs = u.Addresses
-			if ifc.VlanTagging && u.VlanID > 0 {
+			if ifc.TaggingEnabled() && u.VlanID > 0 {
 				dev = dev + "." + itoa(u.VlanID)
 				return dev, unitAddrs
 			}

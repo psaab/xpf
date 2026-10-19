@@ -59,7 +59,7 @@ func validateBridgeDomainMembership11387(cfg *Config) error {
 				return fmt.Errorf("bridge-domain %s interface %q does not reference a configured unit", bd.Name, raw)
 			}
 			vid := unit.VlanID
-			if !ifc.VlanTagging || vid < 1 || vid > 4094 {
+			if !ifc.TaggingEnabled() || vid < 1 || vid > 4094 {
 				return fmt.Errorf("bridge-domain %s interface %q resolves to a unit with no VLAN ID (expected a tagged VLAN unit)", bd.Name, raw)
 			}
 			if !declaredVIDs[vid] {

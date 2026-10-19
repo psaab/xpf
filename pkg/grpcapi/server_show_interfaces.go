@@ -312,7 +312,7 @@ func (s *Server) ShowInterfacesDetail(_ context.Context, req *pb.ShowInterfacesD
 		fmt.Fprintf(&buf, "  Device flags   : %s\n", strings.Join(flags, " "))
 
 		// VLAN tagging
-		if ifCfg, ok := config.LookupInterface(cfg, physName); ok && ifCfg.VlanTagging {
+		if ifCfg, ok := config.LookupInterface(cfg, physName); ok && ifCfg.TaggingEnabled() {
 			fmt.Fprintln(&buf, "  VLAN tagging: Enabled")
 		}
 

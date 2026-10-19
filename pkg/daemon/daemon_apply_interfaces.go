@@ -532,7 +532,7 @@ func managementVRFVLANUnitSet(cfg *config.Config) map[string]bool {
 		return out
 	}
 	for name, ifc := range cfg.Interfaces.Interfaces {
-		if !config.IsManagementIfName(name) || ifc == nil || !ifc.VlanTagging {
+		if !config.IsManagementIfName(name) || ifc == nil || !ifc.TaggingEnabled() {
 			continue
 		}
 		linuxName := config.LinuxIfName(name)

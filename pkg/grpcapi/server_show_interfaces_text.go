@@ -490,7 +490,7 @@ func (s *Server) showVLANs(cfg *config.Config, buf *strings.Builder) {
 		// in-process daemon during a routine `show vlans`.
 		config.RangeInterfaces(cfg, func(_ string, ifc *config.InterfaceConfig) {
 			config.RangeUnits(ifc, func(unitNum int, unit *config.InterfaceUnit) {
-				if unit.VlanID > 0 || ifc.VlanTagging {
+				if unit.VlanID > 0 || ifc.TaggingEnabled() {
 					// #14364: query with the SAME canonical "base.unit"
 					// key used when building ifZone; fall back to a
 					// base-only binding (which governs every unit).
@@ -503,7 +503,7 @@ func (s *Server) showVLANs(cfg *config.Config, buf *strings.Builder) {
 						unit:   unitNum,
 						vlanID: unit.VlanID,
 						zone:   zone,
-						trunk:  ifc.VlanTagging,
+						trunk:  ifc.TaggingEnabled(),
 					})
 				}
 			})

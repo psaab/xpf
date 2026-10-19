@@ -224,7 +224,7 @@ func validateVRRPVIPCountStrict(cfg *Config) error {
 		if !rethVRRPActive || ifc.RedundancyGroup <= 0 {
 			continue
 		}
-		if ifc.VlanTagging {
+		if ifc.TaggingEnabled() {
 			// One instance per addressed unit.
 			for _, un := range unitNums {
 				unit := ifc.Units[un]
