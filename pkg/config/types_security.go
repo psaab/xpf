@@ -318,13 +318,19 @@ type ALGConfig struct {
 	FTPDisable  bool
 	SIPDisable  bool
 	TFTPDisable bool
+	// PPTPDisable records `security alg pptp disable` (#15655 V12-01). The
+	// Rust dataplane implements the RFC 2637 PPTP ALG (TCP/1723 control
+	// learning + GRE v1 Call-ID association); this flag gates it via
+	// ALG_DISABLE_PPTP (0x10) in algDisableFlags.
+	PPTPDisable bool
 	// UnsupportedProtos records `security alg <proto>` stanzas whose proto is
-	// NOT one of the four the compiler wires (dns/ftp/sip/tftp) — e.g. h323,
-	// msrpc, rsh, sql, talk, pptp (#4232, fable-167 P-4a). Junos configures ALG
-	// behavior for these; xpf silently dropped the whole stanza. compileALG now
-	// records the unrecognized proto names so validateSecurityAcceptedOnly
-	// (compiler_validate_warn.go) can emit an accepted-but-inert advisory. The
-	// names are recorded in config order so the warning is deterministic.
+	// NOT one of the five the compiler wires (dns/ftp/sip/tftp/pptp) — e.g.
+	// h323, msrpc, rsh, sql, talk (#4232, fable-167 P-4a). Junos configures
+	// ALG behavior for these; xpf silently dropped the whole stanza.
+	// compileALG now records the unrecognized proto names so
+	// validateSecurityAcceptedOnly (compiler_validate_warn.go) can emit an
+	// accepted-but-inert advisory. The names are recorded in config order so
+	// the warning is deterministic.
 	UnsupportedProtos []string
 }
 

@@ -458,10 +458,10 @@ pub(in crate::afxdp) struct ForwardingState {
     /// absence behavior because the receive gate is conditional on RI presence.
     pub(in crate::afxdp) allow_unstamped_fabric_ingress: bool,
     /// `security alg <proto> disable` bitfield (#2008 H3/H4): bit 0 DNS,
-    /// bit 1 FTP, bit 2 SIP, bit 3 TFTP. Read at session-create time to
-    /// suppress ALG-type tagging for a disabled ALG. Junos `alg disable`
-    /// turns the ALG off; it never drops traffic, so a set bit only
-    /// changes the session's reported alg_type to 0 (none).
+    /// bit 1 FTP, bit 2 SIP, bit 3 TFTP, bit 4 PPTP (#15655). Read at
+    /// session-create time to suppress ALG-type tagging for a disabled ALG
+    /// (DNS/FTP/SIP) and to gate PPTP control learning / GRE association.
+    /// Junos `alg disable` turns the ALG off; it never drops traffic.
     pub(in crate::afxdp) alg_disable_flags: u8,
     /// #2008 M5: L3/L4 application-identification catalog. Resolves a session's
     /// 5-tuple to the numeric app_id stamped on the conntrack session at
@@ -925,6 +925,13 @@ pub(in crate::afxdp) fn is_host_inbound_multicast_group(dst_ip: IpAddr) -> bool 
 }
 
 impl ForwardingState {
+    /// #15655: PPTP ALG is enabled unless `security alg pptp disable`
+    /// (bit 0x10) is set. Gates both TCP/1723 control learning and GRE v1
+    /// data association; neither is gated on gre-performance-acceleration.
+    pub(in crate::afxdp) fn pptp_enabled(&self) -> bool {
+        self.alg_disable_flags & 0x10 == 0
+    }
+
     /// #3071: true iff zone `zone_id` has Junos `tcp-rst` enabled. Used by the
     /// strict-SYN transit session-miss path to decide whether a non-SYN TCP
     /// packet whose ingress (from) zone is `zone_id` gets a TCP RST. An
@@ -932,7 +939,6 @@ impl ForwardingState {
     pub(in crate::afxdp) fn zone_tcp_rst_enabled(&self, zone_id: u16) -> bool {
         self.zone_tcp_rst.get(&zone_id).copied().unwrap_or(false)
     }
-
     /// #3651: the egress (to) zone id for `egress_ifindex`, or `0` when the
     /// interface is unknown / unzoned. THE single egress-zone resolver: the
     /// zone-pair resolver (`zone_pair_ids_for_flow_with_override`), the

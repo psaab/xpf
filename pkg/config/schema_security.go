@@ -1316,6 +1316,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 		"ftp":  {desc: "FTP ALG", packedTail: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{"disable": {desc: "Disable FTP ALG", children: nil}}},
 		"sip":  {desc: "SIP ALG", packedTail: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{"disable": {desc: "Disable SIP ALG", children: nil}}},
 		"tftp": {desc: "TFTP ALG", packedTail: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{"disable": {desc: "Disable TFTP ALG", children: nil}}},
+		"pptp": {desc: "PPTP ALG", packedTail: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{"disable": {desc: "Disable PPTP ALG", children: nil}}},
 	}, wildcard: &schemaNode{desc: "Unsupported ALG class (accepted-only; compiler warning)", closedWorldOpaque: true, children: map[string]*schemaNode{
 		"disable": {desc: "Disable this ALG class", children: nil},
 	}}},

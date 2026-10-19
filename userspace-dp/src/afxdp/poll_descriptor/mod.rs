@@ -1109,10 +1109,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // Gated on `flow.is_none()` so it is purely ADDITIVE: a packet
                 // that already has an identity is untouched, and a version-1
                 // GRE packet is flowless today, so the only reachable change is
-                // flowless -> identified. Gated on `gre_acceleration` for the
-                // same reason the sibling is — with the knob off this expression
-                // does nothing and the path is bit-identical.
-                if flow.is_none() && worker_ctx.forwarding.gre_acceleration {
+                // flowless -> identified. #15655: gated on the PPTP ALG being
+                // enabled (`security alg pptp disable` clears it), NOT on
+                // `gre-performance-acceleration` — that knob governs RFC 2890
+                // keyed GRE only, and coupling PPTP to it left the default
+                // PPTP ALG inert.
+                if flow.is_none() && worker_ctx.forwarding.pptp_enabled() {
                     let routing_domain = if absent_fabric_ingress_suspect {
                         0
                     } else {
@@ -9210,8 +9212,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // #11053: only an admitted control segment may teach
                         // a PPTP call association. A control close removes all
                         // calls learned through this channel on every worker.
+                        // #15655: `security alg pptp disable` stops control
+                        // learning entirely; a close still tears down any
+                        // previously learned calls.
                         if let Some(flow) = flow.as_ref()
                             && crate::afxdp::poll_stages::is_pptp_control_flow(flow)
+                            && (worker_ctx.forwarding.pptp_enabled()
+                                || crate::tcp_flags::is_closing(meta.tcp_flags))
                         {
                             if crate::tcp_flags::is_closing(meta.tcp_flags) {
                                 forget_pptp_control_channel(

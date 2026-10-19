@@ -41,6 +41,11 @@ const ALG_DISABLE_SIP: u8 = 0x04;
 // bit layout consistently across Go and Rust; intentionally unused.
 #[allow(dead_code)]
 const ALG_DISABLE_TFTP: u8 = 0x08;
+// PPTP's disable bit (#15655): gates TCP/1723 control learning and GRE v1
+// Call-ID association in poll_descriptor, not conntrack tagging (PPTP has
+// no alg_type). Defined here as the single Rust home of the bit layout so
+// the gate and the Go packer cannot drift.
+pub(in crate::afxdp) const ALG_DISABLE_PPTP: u8 = 0x10;
 
 // alg_type codes written into the conntrack session value, matching
 // bpf/headers/xpf_conntrack.h: 0=none, 1=FTP, 2=SIP, 3=DNS.

@@ -1069,49 +1069,84 @@ func compileServices(node *Node, svc *ServicesConfig, warnings *[]string) error 
 	return nil
 }
 
+// userIdentificationStanzas is the Junos user-identification sub-stanza set
+// shared by the `services` and `security` spellings (#15655 V15-04).
+var userIdentificationStanzas = map[string]bool{
+	"active-directory-access":    true,
+	"identity-management":        true,
+	"local-authentication-table": true,
+	"device-information":         true,
+	"authentication-source":      true,
+}
+
+// userIdentificationWarnings returns deduplicated accepted-only warnings for
+// user-identification under the given root ("services" or "security"). It
+// collects stanzas across ALL sibling nodes (flat `set` produces one child
+// per line) before emitting, so duplicates collapse and the generic fallback
+// fires only when no known stanza was named — never alongside specific ones.
+func userIdentificationWarnings(root string, node *Node) []string {
+	if node == nil {
+		return nil
+	}
+	var stanzas []string
+	seen := make(map[string]bool)
+	sawUserID := false
+	add := func(name string) {
+		if userIdentificationStanzas[name] && !seen[name] {
+			seen[name] = true
+			stanzas = append(stanzas, name)
+		}
+	}
+	var walk func(n *Node)
+	walk = func(n *Node) {
+		for _, child := range n.Children {
+			switch child.Name() {
+			case "user-identification":
+				sawUserID = true
+				if len(child.Keys) > 1 {
+					add(child.Keys[1])
+				}
+				for _, sub := range child.Children {
+					add(sub.Name())
+					// Deeper flat tails: `user-identification { authentication-source ... }`
+					if len(sub.Keys) > 1 {
+						add(sub.Keys[1])
+					}
+				}
+			default:
+				if userIdentificationStanzas[child.Name()] {
+					sawUserID = true
+					add(child.Name())
+				}
+			}
+		}
+	}
+	walk(node)
+	if !sawUserID {
+		return nil
+	}
+	if len(stanzas) == 0 {
+		return []string{fmt.Sprintf(
+			"%s user-identification configured but accepted-only — xpf does not implement identity-based policy mapping, so the stanza has no runtime effect (#10947)", root)}
+	}
+	warnings := make([]string, 0, len(stanzas))
+	for _, stanza := range stanzas {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s user-identification %s configured but accepted-only — xpf does not implement user-identification and this stanza has no runtime effect (#10947)",
+			root, stanza))
+	}
+	return warnings
+}
+
 // servicesAcceptedOnlyWarnings keeps unimplemented Junos service stanzas visible
 // without implying that xpf applies them. The raw config tree remains the
 // source for display and persistence; these stanzas have no runtime effect.
 func servicesAcceptedOnlyWarnings(node *Node) []string {
 	var warnings []string
+	warnings = append(warnings, userIdentificationWarnings("services", node)...)
 	seenSSLProxyProfiles := make(map[string]struct{})
 	for _, child := range node.Children {
-		switch child.Name() {
-		case "user-identification":
-			var stanzas []string
-			addStanza := func(name string) {
-				switch name {
-				case "active-directory-access", "identity-management", "local-authentication-table":
-					for _, existing := range stanzas {
-						if existing == name {
-							return
-						}
-					}
-					stanzas = append(stanzas, name)
-				}
-			}
-			// Flat-set paths under an unmodeled parent are retained in the
-			// parent's remaining Keys rather than split into child nodes.
-			if len(child.Keys) > 1 {
-				addStanza(child.Keys[1])
-			}
-			for _, stanza := range child.Children {
-				addStanza(stanza.Name())
-			}
-			if len(stanzas) == 0 {
-				warnings = append(warnings,
-					"services user-identification configured but accepted-only — xpf does not implement identity-based policy mapping, so the stanza has no runtime effect (#10947)")
-			}
-			for _, stanza := range stanzas {
-				warnings = append(warnings, fmt.Sprintf(
-					"services user-identification %s configured but accepted-only — xpf does not implement user-identification and this stanza has no runtime effect (#10947)",
-					stanza))
-			}
-		case "active-directory-access", "identity-management", "local-authentication-table":
-			warnings = append(warnings, fmt.Sprintf(
-				"services %s configured but accepted-only — xpf does not implement identity-based policy mapping, so this stanza has no runtime effect (#10947)",
-				child.Name()))
-		case "ssl":
+		if child.Name() == "ssl" {
 			warnings = append(warnings, servicesSSLProxyWarnings(child, seenSSLProxyProfiles)...)
 		}
 	}

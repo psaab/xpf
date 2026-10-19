@@ -9757,6 +9757,28 @@ fn build_forwarding_state_carries_alg_disable_flags() {
     );
 }
 
+// #15655: PPTP enablement is the 0x10 alg-disable bit alone — decoupled
+// from gre_acceleration. FAIL-ON-REVERT: gate pptp_enabled() on
+// gre_acceleration and the first assertion fails.
+#[test]
+fn pptp_enabled_follows_alg_disable_bit_15655() {
+    let mk = |flags: u8, gre: bool| {
+        let snapshot = ConfigSnapshot {
+            flow: crate::FlowSnapshot {
+                alg_disable_flags: flags,
+                gre_acceleration: gre,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        build_forwarding_state(&snapshot)
+    };
+    assert!(mk(0, false).pptp_enabled(), "default (no disable, no GRE accel) must enable PPTP");
+    assert!(!mk(0x10, false).pptp_enabled(), "pptp disable bit must disable PPTP");
+    assert!(!mk(0x10, true).pptp_enabled(), "GRE accel must not re-enable a disabled PPTP ALG");
+    assert!(mk(0x01 | 0x02 | 0x04 | 0x08, false).pptp_enabled(), "other ALG disables must not affect PPTP");
+}
+
 // #2008 H14: pin the snapshot -> runtime read of `power_mode_disable` in
 // forwarding_build/mod.rs (`state.power_mode_disable =
 // snapshot.flow.power_mode_disable`). MUTATION-VERIFY: dropping that

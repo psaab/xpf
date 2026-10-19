@@ -813,6 +813,30 @@ func (d *Daemon) IPFIXExportError() error {
 // emits an instance's groups consecutively) so the shared per-instance
 // counter advances exactly once per eligible flow.
 func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
+	// #15655: track session opens so active/inactive timeouts can emit
+	// interim/final records for long-lived flows. Close handling below
+	// forgets the tracker entry (the close record itself carries totals).
+	if rec.Type == "SESSION_OPEN" {
+		if b := d.flowBundle.Load(); b != nil {
+			srcIP, dstIP, isV6 := parseAddrPair(rec.SrcAddr, rec.DstAddr)
+			key := flowexport.FlowKeyFromClose(srcIP, dstIP, parseSrcPort(rec.SrcAddr), parseSrcPort(rec.DstAddr), rec.ProtocolNum, isV6)
+			for _, g := range b.groups {
+				if g.ec.GroupIsV6 == isV6 {
+					g.exp.TrackFlowOpen(key, rec.Time)
+				}
+			}
+		}
+		if b := d.ipfixBundlePtr.Load(); b != nil {
+			srcIP, dstIP, isV6 := parseAddrPair(rec.SrcAddr, rec.DstAddr)
+			key := flowexport.FlowKeyFromClose(srcIP, dstIP, parseSrcPort(rec.SrcAddr), parseSrcPort(rec.DstAddr), rec.ProtocolNum, isV6)
+			for _, g := range b.groups {
+				if g.ec.GroupIsV6 == isV6 {
+					g.exp.TrackFlowOpen(key, rec.Time)
+				}
+			}
+		}
+		return
+	}
 	if rec.Type != "SESSION_CLOSE" {
 		return
 	}
@@ -880,6 +904,7 @@ func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
 					continue
 				}
 				b.groups[k].exp.ExportSessionClose(rec, sd)
+				b.groups[k].exp.CloseFlow(flowexport.FlowKeyFromClose(sd.SrcIP, sd.DstIP, sd.SrcPort, sd.DstPort, rec.ProtocolNum, sd.IsIPv6))
 			}
 		}
 		i = j
@@ -948,6 +973,7 @@ func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
 					continue
 				}
 				b.groups[k].exp.ExportSessionClose(rec, sd)
+				b.groups[k].exp.CloseFlow(flowexport.FlowKeyFromClose(sd.SrcIP, sd.DstIP, sd.SrcPort, sd.DstPort, rec.ProtocolNum, sd.IsIPv6))
 			}
 		}
 		i = j
