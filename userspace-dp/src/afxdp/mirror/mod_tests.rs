@@ -1029,7 +1029,13 @@ fn mirror_vlan_snapshot(ingress_frame_vid: Option<u16>) -> (ConfigSnapshot, Vec<
             InterfaceSnapshot { ifindex: 22, parent_ifindex: 0, vlan_id: 0, hardware_addr: "02:00:00:00:00:16".to_string(), ..InterfaceSnapshot::default() },
             InterfaceSnapshot { ifindex: 200, parent_ifindex: 22, vlan_id: 90, ..InterfaceSnapshot::default() },
         ],
-        mirror_configs: vec![MirrorConfigSnapshot { ingress_ifindex: 20080, output_ifindex: 200, rate: 0, ..Default::default() }],
+        mirror_configs: vec![MirrorConfigSnapshot {
+            ingress_ifindex: 20080,
+            output_ifindex: 200,
+            rate: 0,
+            ingress_vlan_id: 0,
+            unit_scoped: false,
+        }],
         ..ConfigSnapshot::default()
     };
     (snapshot, tagged_mirror_frame(ingress_frame_vid))
