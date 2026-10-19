@@ -259,6 +259,26 @@ committed clean.
   kept pool is the first by name, not necessarily the older one; commit refuses
   the pair, so only a config that arrived through the tolerant path reaches it.
 
+## Duplicate group interfaces resolving to one device — #15028
+
+Every group's interface refs are resolved to kernel devices by the daemon
+(`Config.ResolveKernelIfName`) and emitted flat into `interfaces-config`.
+Different authored refs can name one device — `reth1.0` and `ge-0/0/1.0`
+both resolve to `ge-0-0-1`, a unit-0 ref and its bare parent collapse the
+same way, and one ref can repeat across groups — and Kea refuses a
+duplicate in the interfaces list, loading nothing for the family.
+
+- **Commit:** `validateDHCPGroupInterfacesUniqueStrict` (`pkg/config`)
+  resolves every ref of one family with the same resolver (one hoisted
+  tunnel map) and refuses a kernel device claimed twice, naming both
+  refs/groups and the device. `dhcp-local-server` and
+  `dhcpv6-local-server` are checked separately.
+- **Tolerant load and peer sync:** the gate downgrades to a `cfg.Warnings`
+  entry (`lenientDHCPGroupInterfaces`), so a persisted config still boots.
+- **Render belt:** `dedupKeaInterfaces` (`kea_duplicate_interface_15028.go`)
+  keeps the first occurrence of each device in the generators' stable
+  group order and drops later duplicates with a warning naming the device.
+
 ## Pool subnet / range / router / dns-server values — #14601
 
 The same whole-file blast radius was reachable through four more pool

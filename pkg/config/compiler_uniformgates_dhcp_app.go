@@ -68,6 +68,24 @@ func runUniformGatesDHCPApp(tree *ConfigTree, cfg *Config, opts compileOpts) err
 		}
 	}
 
+	// #15028 duplicate resolved group-interface gate. Strict on commit /
+	// commit-check: two group interface refs of one family that resolve to
+	// the same kernel device (a reth ref and its member ref, a unit-0 ref
+	// and its bare parent, one ref repeated) render twice into Kea's
+	// interfaces-config list, Kea refuses the duplicate, and every pool of
+	// the family stops while the commit reports success. The tolerant
+	// load / peer-sync paths warn so a persisted config still boots
+	// (#1960); the Kea renderer de-duplicates the list
+	// (dedupKeaInterfaces), so Kea still loads.
+	if err := validateDHCPGroupInterfacesUniqueStrict(cfg); err != nil {
+		if opts.lenientDHCPGroupInterfaces {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("DHCP group interface (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #2142 application-definition port/protocol fail-open gate. Strict on
 	// commit / commit-check (hard-reject a `set applications application` whose
 	// destination-port / source-port is malformed or whose protocol is unknown

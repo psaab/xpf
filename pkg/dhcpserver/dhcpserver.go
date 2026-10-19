@@ -1433,6 +1433,17 @@ func (m *Manager) generateKea4Config(cfg *config.DHCPServerConfig) error {
 	for _, group := range stableGroups(cfg.DHCPLocalServer.Groups) {
 		ifaces = append(ifaces, group.Interfaces...)
 	}
+	// #15028: a config that reached the renderer despite naming one kernel
+	// device twice (tolerant load / peer-sync) must render each device
+	// once — Kea refuses a duplicate in the interfaces list and then
+	// loads nothing. Commit refuses the pair
+	// (validateDHCPGroupInterfacesUniqueStrict).
+	var droppedIfaces []string
+	ifaces, droppedIfaces = dedupKeaInterfaces(ifaces)
+	for _, dup := range droppedIfaces {
+		m.warn("skipping duplicate DHCP interface in Kea interfaces list (Kea refuses a duplicate and stops serving every pool of the family)",
+			"interface", dup)
+	}
 
 	// #7318: `dhcp-socket-type` is emitted ONLY when the operator selected one.
 	// Omitting it is not the same as writing "raw" in the config file, but it
@@ -1611,6 +1622,13 @@ func (m *Manager) generateKea6Config(cfg *config.DHCPServerConfig) error {
 	var ifaces []string
 	for _, group := range stableGroups(cfg.DHCPv6LocalServer.Groups) {
 		ifaces = append(ifaces, group.Interfaces...)
+	}
+	// #15028: render each kernel device once; see the v4 twin above.
+	var droppedIfaces6 []string
+	ifaces, droppedIfaces6 = dedupKeaInterfaces(ifaces)
+	for _, dup := range droppedIfaces6 {
+		m.warn("skipping duplicate DHCPv6 interface in Kea interfaces list (Kea refuses a duplicate and stops serving every pool of the family)",
+			"interface", dup)
 	}
 
 	dhcp6 := map[string]any{
