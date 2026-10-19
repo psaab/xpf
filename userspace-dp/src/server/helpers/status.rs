@@ -249,6 +249,8 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.ipsec_inner_ecn_illegal_drops = ipsec_inner.ipsec_inner_ecn_illegal_drops;
     state.status.ipsec_inner_worker_queue_full_total =
         ipsec_inner.ipsec_inner_worker_queue_full_total;
+    state.status.ipsec_inner_worker_queue_busy_total =
+        ipsec_inner.ipsec_inner_worker_queue_busy_total;
     state.status.ipsec_inner_verdict_queue_full_total =
         ipsec_inner.ipsec_inner_verdict_queue_full_total;
     state.status.ipsec_inner_verdict_queue_contended_total =

@@ -646,6 +646,9 @@ pub(crate) struct ProcessStatus {
     /// provisional-journal reaps.
     #[serde(rename = "ipsec_inner_worker_queue_full_total", default)]
     pub ipsec_inner_worker_queue_full_total: u64,
+    /// #15151: lock contention counted apart from genuine full.
+    #[serde(rename = "ipsec_inner_worker_queue_busy_total", default)]
+    pub ipsec_inner_worker_queue_busy_total: u64,
     #[serde(rename = "ipsec_inner_verdict_queue_full_total", default)]
     pub ipsec_inner_verdict_queue_full_total: u64,
     /// #15150: verdict posts that failed only on mutex contention, never

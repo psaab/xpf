@@ -1503,10 +1503,14 @@ impl SlowPathReinjector {
             connection_id,
         );
         if let Err(reason) = self.ipsec_inner_transport.admit_descriptor(descriptor) {
+            // #15151: BUSY (61) is Rust-internal, never on the wire;
+            // map it to the same fail-closed ADMIT_FULL drop as FULL.
             let admit_reason = match reason {
                 ipsec_reason::STALE_GENERATION => ADMIT_STALE,
                 ipsec_reason::EVALUATOR_UNAVAILABLE => ADMIT_SHUTDOWN,
-                ipsec_reason::WORKER_QUEUE_FULL | ipsec_reason::SLAB_EXHAUSTED => ADMIT_FULL,
+                ipsec_reason::WORKER_QUEUE_FULL
+                | ipsec_reason::WORKER_QUEUE_BUSY
+                | ipsec_reason::SLAB_EXHAUSTED => ADMIT_FULL,
                 _ => ADMIT_BAD_LEASE,
             };
             refuse(&mut decision, admit_reason, "ipsec-inner transport refused");

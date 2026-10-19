@@ -66,6 +66,12 @@ pub(crate) mod reason {
     pub(crate) const DOMAIN_OVERLAP: u8 = 45;
     pub(crate) const OTHER_DOMAIN: u8 = 46;
     pub(crate) const WORKER_QUEUE_FULL: u8 = 47;
+    // #15151 (B12-03): distinct retryable-busy refusal. Deliberately
+    // OUTSIDE the closed §4.1 wire set {5,6} ∪ {32..=60}: it is never
+    // emitted on the wire / to Go (admit maps it to its ordinary
+    // fail-closed drop), only returned Rust-internally so callers and
+    // tests can distinguish contention from genuine depth exhaustion.
+    pub(crate) const WORKER_QUEUE_BUSY: u8 = 61;
     pub(crate) const VERDICT_UNCERTAIN: u8 = 48;
     pub(crate) const SLAB_EXHAUSTED: u8 = 49;
     pub(crate) const LEASE_EPOCH: u8 = 50;
@@ -130,6 +136,10 @@ pub(crate) mod reason {
 // §4.3 transport/lifecycle-owned counters (all u64). Worker-detected causes
 // increment ONLY here, never in Go.
 pub(crate) static IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL: AtomicU64 = AtomicU64::new(0);
+// #15151 (B12-03): lock contention is BUSY, never FULL. Counted apart so
+// operators can distinguish a momentary mutex race (retryable, queue may
+// be empty) from genuine depth exhaustion (E23 drop).
+pub(crate) static IPSEC_INNER_WORKER_QUEUE_BUSY_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(crate) static IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// #15150: verdict posts that failed only because the queue mutex was held,
 /// never because the queue was at depth. Separate from E24 so contention
@@ -472,10 +482,54 @@ impl Default for IpsecInnerSlabPool {
     }
 }
 
+/// #15151 (B12-03): why an enqueue was refused. `Busy` is lock
+/// contention (retryable, queue may be empty); `Full` is genuine
+/// depth exhaustion or a retired (closed) queue. Only `Full` counts
+/// E23 / `WORKER_QUEUE_FULL`; `Busy` counts the separate BUSY counter.
+#[derive(Debug)]
+pub(crate) enum IpsecInnerEnqueueError {
+    Busy(IpsecInnerDescriptor),
+    Full(IpsecInnerDescriptor),
+}
+
+impl IpsecInnerEnqueueError {
+    pub(crate) fn into_desc(self) -> IpsecInnerDescriptor {
+        match self {
+            Self::Busy(d) | Self::Full(d) => d,
+        }
+    }
+    pub(crate) fn is_busy(&self) -> bool {
+        matches!(self, Self::Busy(_))
+    }
+}
+
+/// #15151 (B12-03): why a verdict post was refused (same Busy/Full split).
+#[derive(Debug)]
+pub(crate) enum IpsecInnerPostError {
+    Busy(IpsecInnerVerdict),
+    Full(IpsecInnerVerdict),
+}
+
+impl IpsecInnerPostError {
+    pub(crate) fn into_verdict(self) -> IpsecInnerVerdict {
+        match self {
+            Self::Busy(v) | Self::Full(v) => v,
+        }
+    }
+    pub(crate) fn is_busy(&self) -> bool {
+        matches!(self, Self::Busy(_))
+    }
+}
+
 /// Per-worker bounded MPSC ingress queue carrying pool-slot descriptors.
 pub(crate) struct IpsecInnerIngressQueue {
     worker_id: u32,
     pending: Mutex<VecDeque<IpsecInnerDescriptor>>,
+    /// #15151: exact pending depth, maintained under `pending` on every
+    /// mutation. Lets producers/workers gate on emptiness with a single
+    /// atomic load instead of taking the queue mutex (the B12-03
+    /// cross-worker serialization point).
+    pending_count: std::sync::atomic::AtomicUsize,
     /// Retirement fence. Set under the `pending` lock by `close_and_drain`;
     /// checked under the same lock by `try_enqueue`. Closed queues stay
     /// permanently closed: worker-ID reuse installs a fresh queue object so a
@@ -489,6 +543,7 @@ impl IpsecInnerIngressQueue {
         Self {
             worker_id,
             pending: Mutex::new(VecDeque::with_capacity(IPSEC_INNER_QUEUE_DEPTH)),
+            pending_count: std::sync::atomic::AtomicUsize::new(0),
             closed: AtomicBool::new(false),
         }
     }
@@ -501,25 +556,41 @@ impl IpsecInnerIngressQueue {
         self.closed.load(Ordering::Acquire)
     }
 
-    /// Try-or-drop enqueue. Full, contended, or retired (closed) -> E23
-    /// DROP-and-count; the producer never waits on a worker-owned queue.
+    /// #15151: lock-free exact pending depth (maintained under the lock).
+    pub(crate) fn pending_len(&self) -> usize {
+        self.pending_count.load(Ordering::Acquire)
+    }
+
+    /// #15151: lock-free emptiness gate for the worker poll path.
+    pub(crate) fn has_pending(&self) -> bool {
+        self.pending_len() != 0
+    }
+
+    fn sync_pending_count(&self, pending: &VecDeque<IpsecInnerDescriptor>) {
+        self.pending_count.store(pending.len(), Ordering::Release);
+    }
+
+    /// Try-or-drop enqueue. The producer never waits on a worker-owned
+    /// queue. #15151: contention is `Busy` (BUSY counter, retryable),
+    /// never E23 FULL; only genuine depth exhaustion / closed counts FULL.
     pub(crate) fn try_enqueue(
         &self,
         desc: IpsecInnerDescriptor,
-    ) -> Result<(), IpsecInnerDescriptor> {
+    ) -> Result<(), IpsecInnerEnqueueError> {
         let Ok(mut pending) = self.pending.try_lock() else {
-            IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
-            return Err(desc);
+            IPSEC_INNER_WORKER_QUEUE_BUSY_TOTAL.fetch_add(1, Ordering::Relaxed);
+            return Err(IpsecInnerEnqueueError::Busy(desc));
         };
         if self.closed.load(Ordering::Acquire) {
             IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
-            return Err(desc);
+            return Err(IpsecInnerEnqueueError::Full(desc));
         }
         if pending.len() >= IPSEC_INNER_QUEUE_DEPTH {
             IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
-            return Err(desc);
+            return Err(IpsecInnerEnqueueError::Full(desc));
         }
         pending.push_back(desc);
+        self.sync_pending_count(&pending);
         Ok(())
     }
 
@@ -530,12 +601,15 @@ impl IpsecInnerIngressQueue {
     pub(crate) fn close_and_drain(&self) -> Vec<IpsecInnerDescriptor> {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         self.closed.store(true, Ordering::Release);
-        pending.drain(..).collect()
+        let drained: Vec<IpsecInnerDescriptor> = pending.drain(..).collect();
+        self.sync_pending_count(&pending);
+        drained
     }
 
     /// Drain up to `budget` descriptors into a caller-owned, preallocated
     /// batch (prefix, FIFO preserved). The worker owns two such batches and
     /// alternates them; this path performs no per-poll allocation.
+    /// #15151: an empty queue returns without taking the lock.
     pub(crate) fn drain_into(
         &self,
         scratch: &mut Vec<IpsecInnerDescriptor>,
@@ -546,10 +620,15 @@ impl IpsecInnerIngressQueue {
             "D11 worker scratch must be preallocated for its poll budget"
         );
         scratch.clear();
+        if !self.has_pending() {
+            return false;
+        }
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         let take = pending.len().min(budget);
         scratch.extend(pending.drain(..take));
-        !pending.is_empty()
+        let more = !pending.is_empty();
+        self.sync_pending_count(&pending);
+        more
     }
 
     /// Compatibility helper for cold tests/reaper paths. Production workers
@@ -565,15 +644,17 @@ impl IpsecInnerIngressQueue {
     /// the worker poll hot path).
     pub(crate) fn drain_all(&self) -> Vec<IpsecInnerDescriptor> {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        pending.drain(..).collect()
+        let drained: Vec<IpsecInnerDescriptor> = pending.drain(..).collect();
+        self.sync_pending_count(&pending);
+        drained
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.pending_len()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.len() == 0
+        !self.has_pending()
     }
 }
 
@@ -629,18 +710,34 @@ impl Default for IpsecInnerDoubleBatch {
 /// verdict unposted so the caller can retain it instead of denying.
 pub(crate) struct IpsecInnerVerdictQueue {
     pending: Mutex<VecDeque<IpsecInnerVerdict>>,
+    /// #15151: exact pending depth (maintained under `pending`); the
+    /// verdict drain gates on this instead of locking every iteration.
+    pending_count: std::sync::atomic::AtomicUsize,
 }
 
 impl IpsecInnerVerdictQueue {
     pub(crate) fn new() -> Self {
         Self {
             pending: Mutex::new(VecDeque::with_capacity(IPSEC_INNER_VERDICT_QUEUE_DEPTH)),
+            pending_count: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    pub(crate) fn pending_len(&self) -> usize {
+        self.pending_count.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn has_pending(&self) -> bool {
+        self.pending_len() != 0
+    }
+
+    fn sync_pending_count(&self, pending: &VecDeque<IpsecInnerVerdict>) {
+        self.pending_count.store(pending.len(), Ordering::Release);
     }
 
     /// Blocking post: the producer waits for the queue mutex rather than
     /// turning a momentary hold (the consumer drains every worker tick)
-    /// into a lost verdict. Only a true-full queue refuses.
+    /// into a lost verdict. Only a true-full queue refuses (#15150).
     pub(crate) fn post(&self, verdict: IpsecInnerVerdict) -> Result<(), IpsecInnerVerdict> {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         if pending.len() >= IPSEC_INNER_VERDICT_QUEUE_DEPTH {
@@ -648,37 +745,54 @@ impl IpsecInnerVerdictQueue {
             return Err(verdict);
         }
         pending.push_back(verdict);
+        self.sync_pending_count(&pending);
         Ok(())
     }
 
-    pub(crate) fn try_post(&self, verdict: IpsecInnerVerdict) -> Result<(), IpsecInnerVerdict> {
+    /// Try post: contention counts CONTENDED (#15150), never E24; the
+    /// verdict is returned unposted so the caller can retain it.
+    /// #15151: the Busy/Full error split is kept, with Busy counting
+    /// the #15150 contended counter.
+    pub(crate) fn try_post(
+        &self,
+        verdict: IpsecInnerVerdict,
+    ) -> Result<(), IpsecInnerPostError> {
         let Ok(mut pending) = self.pending.try_lock() else {
             IPSEC_INNER_VERDICT_QUEUE_CONTENDED_TOTAL.fetch_add(1, Ordering::Relaxed);
-            return Err(verdict);
+            return Err(IpsecInnerPostError::Busy(verdict));
         };
         if pending.len() >= IPSEC_INNER_VERDICT_QUEUE_DEPTH {
             IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
-            return Err(verdict);
+            return Err(IpsecInnerPostError::Full(verdict));
         }
         pending.push_back(verdict);
+        self.sync_pending_count(&pending);
         Ok(())
     }
 
     pub(crate) fn drain_budget(&self, budget: usize) -> Vec<IpsecInnerVerdict> {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         let take = pending.len().min(budget);
-        pending.drain(..take).collect()
+        let out: Vec<IpsecInnerVerdict> = pending.drain(..take).collect();
+        self.sync_pending_count(&pending);
+        out
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.pending_len()
     }
+    /// #15151: an empty queue returns without taking the lock.
     pub(crate) fn drain_into(&self, scratch: &mut Vec<IpsecInnerVerdict>, budget: usize) -> bool {
         scratch.clear();
+        if !self.has_pending() {
+            return false;
+        }
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         let take = pending.len().min(budget);
         scratch.extend(pending.drain(..take));
-        !pending.is_empty()
+        let more = !pending.is_empty();
+        self.sync_pending_count(&pending);
+        more
     }
 }
 
@@ -1611,6 +1725,7 @@ pub(crate) fn reap_orphan_descriptor(
     true
 }
 
+#[derive(Clone)]
 struct ActiveIpsecDescriptor {
     worker_id: u32,
     desc: IpsecInnerDescriptor,
@@ -1683,18 +1798,34 @@ impl IpsecInnerTombstones {
 /// `retire_worker` drains descriptors that never reached a worker; the
 /// separate `join_worker_after_termination` call is the quiescence witness
 /// that permits reclaiming worker-owned slabs.
+///
+/// #15151 (B12-03): the queue/active/uncertain tables are `ArcSwap`
+/// snapshots, not mutexes. The worker poll path loads them lock-free and
+/// skips the D11 block on atomic pending counters when idle; lifecycle
+/// mutation (prepare/publish/retire/join) is cold and publishes a fresh
+/// snapshot. Per-worker queue `Arc`s survive snapshots, so a producer
+/// holding a queue `Arc` keeps the exact object (closed queues stay
+/// closed; worker-ID reuse installs a fresh `Arc`).
 pub(crate) struct IpsecInnerWorkerTransport {
     pool: Arc<IpsecInnerSlabPool>,
-    queues: Mutex<BTreeMap<u32, Arc<IpsecInnerIngressQueue>>>,
+    queues: Arc<arc_swap::ArcSwap<BTreeMap<u32, Arc<IpsecInnerIngressQueue>>>>,
     verdicts: Arc<IpsecInnerVerdictQueue>,
     /// Fallback verdicts retain E24 results when the primary bounded queue is
     /// contended/full. Capacity matches the slab cap, so an active descriptor
     /// always has one bounded terminal handoff slot.
-    uncertain: Mutex<VecDeque<IpsecInnerVerdict>>,
+    uncertain: Arc<arc_swap::ArcSwap<VecDeque<IpsecInnerVerdict>>>,
+    /// #15151: exact `uncertain` depth (mutated only under `lifecycle_lock`).
+    uncertain_count: std::sync::atomic::AtomicUsize,
     authority: Arc<WorkerSetAuthority>,
     router: Arc<IpsecInnerRouter>,
     tombstones: IpsecInnerTombstones,
-    active: Mutex<Vec<ActiveIpsecDescriptor>>,
+    active: Arc<arc_swap::ArcSwap<Vec<ActiveIpsecDescriptor>>>,
+    /// #15151: exact active-descriptor count (maintained under
+    /// `lifecycle_lock` alongside every `active` publish). The verdict
+    /// drain gates its `active` lock-free load on verdict pending counts,
+    /// so this is observational; the drain still re-checks under the
+    /// lifecycle lock before mutating.
+    active_count: std::sync::atomic::AtomicUsize,
     retired: Mutex<BTreeMap<u32, Option<Arc<IpsecInnerIngressQueue>>>>,
     /// #15149: terminal Deny verdicts for descriptors reaped by
     /// `retire_worker` / `join_worker_after_termination`. The reaper has
@@ -1702,6 +1833,10 @@ pub(crate) struct IpsecInnerWorkerTransport {
     /// entry verdict drain; the coordinator sweep drains them to the
     /// Go-facing completion core.
     reaped_verdicts: Mutex<Vec<IpsecInnerVerdict>>,
+    /// #15151: serializes every ArcSwap read-modify-write publish
+    /// (queues/active/uncertain) plus `retired`. Never held across
+    /// adjudication; the idle poll path never takes it.
+    lifecycle_lock: Mutex<()>,
 }
 
 impl IpsecInnerWorkerTransport {
@@ -1723,23 +1858,57 @@ impl IpsecInnerWorkerTransport {
         authority.publish(live);
         Self {
             pool: Arc::new(IpsecInnerSlabPool::new()),
-            queues: Mutex::new(queues),
+            queues: Arc::new(arc_swap::ArcSwap::from_pointee(queues)),
             verdicts: Arc::new(IpsecInnerVerdictQueue::new()),
-            uncertain: Mutex::new(VecDeque::with_capacity(IPSEC_INNER_SLAB_CAP)),
+            uncertain: Arc::new(arc_swap::ArcSwap::from_pointee(VecDeque::with_capacity(
+                IPSEC_INNER_SLAB_CAP,
+            ))),
+            uncertain_count: std::sync::atomic::AtomicUsize::new(0),
             authority,
             router: Arc::new(IpsecInnerRouter::new()),
             tombstones: IpsecInnerTombstones::new(),
-            active: Mutex::new(Vec::with_capacity(IPSEC_INNER_SLAB_CAP)),
+            active: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::with_capacity(
+                IPSEC_INNER_SLAB_CAP,
+            ))),
+            active_count: std::sync::atomic::AtomicUsize::new(0),
             retired: Mutex::new(BTreeMap::new()),
             reaped_verdicts: Mutex::new(Vec::new()),
+            lifecycle_lock: Mutex::new(()),
         }
+    }
+
+    fn lock_lifecycle(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.lifecycle_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn queue_for(&self, worker_id: u32) -> Option<Arc<IpsecInnerIngressQueue>> {
+        self.queues.load().get(&worker_id).cloned()
+    }
+
+    /// #15151: lock-free pending depth for one worker (`None` = no such
+    /// queue in the current snapshot).
+    pub(crate) fn worker_pending(&self, worker_id: u32) -> Option<usize> {
+        self.queue_for(worker_id).map(|q| q.pending_len())
+    }
+
+    /// #15151: lock-free "any D11 work pending" gate for the worker poll
+    /// path: this worker's ingress queue, the shared verdict queue, or
+    /// the uncertain fallback. All three are atomic loads; an idle
+    /// iteration takes zero shared locks.
+    pub(crate) fn has_pending_work(&self, worker_id: u32) -> bool {
+        self.worker_pending(worker_id).unwrap_or(0) != 0
+            || self.verdicts.has_pending()
+            || self.uncertain_count.load(Ordering::Acquire) != 0
     }
 
     /// Prepare a queue before its worker is spawned. Preparation never
     /// publishes the worker-set authority; the complete live set is published
     /// only after the bring-up readiness barrier succeeds.
     pub(crate) fn prepare_worker(&self, worker_id: u32) {
-        let mut queues = self.queues.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.lock_lifecycle();
+        let mut queues = (*self.queues.load_full()).clone();
         let replace = queues
             .get(&worker_id)
             .map(|queue| queue.is_closed())
@@ -1749,6 +1918,7 @@ impl IpsecInnerWorkerTransport {
                 worker_id,
                 Arc::new(IpsecInnerIngressQueue::new(worker_id)),
             );
+            self.queues.store(Arc::new(queues));
         }
     }
 
@@ -1757,7 +1927,9 @@ impl IpsecInnerWorkerTransport {
     pub(crate) fn publish_workers(&self, worker_ids: impl IntoIterator<Item = u32>) {
         let live = worker_ids.into_iter().collect::<BTreeSet<_>>();
         {
-            let mut queues = self.queues.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = self.lock_lifecycle();
+            let mut queues = (*self.queues.load_full()).clone();
+            let mut changed = false;
             for worker_id in &live {
                 let replace = queues
                     .get(worker_id)
@@ -1768,7 +1940,11 @@ impl IpsecInnerWorkerTransport {
                         *worker_id,
                         Arc::new(IpsecInnerIngressQueue::new(*worker_id)),
                     );
+                    changed = true;
                 }
+            }
+            if changed {
+                self.queues.store(Arc::new(queues));
             }
         }
         self.authority.publish(live);
@@ -1788,7 +1964,10 @@ impl IpsecInnerWorkerTransport {
 
     /// Admit a descriptor after its socket bytes have been written to
     /// `slab_id`. All refusal paths return the slot to the pool and roll back
-    /// the per-flow reservation.
+    /// the per-flow reservation. #15151: a missing queue in the lock-free
+    /// snapshot or per-queue lock contention is BUSY (distinct retryable
+    /// reason, BUSY counter), never WORKER_QUEUE_FULL; only genuine depth
+    /// exhaustion / closed queues count FULL.
     pub(crate) fn admit_descriptor(&self, desc: IpsecInnerDescriptor) -> Result<u32, u8> {
         let generation = self.authority.generation();
         if generation == 0 {
@@ -1817,16 +1996,14 @@ impl IpsecInnerWorkerTransport {
         let slab_id = desc.slab_id;
         let flow_tag = desc.flow_tag;
         let request_id = desc.request_id;
-        let Some(queue) = self
-            .queues
-            .try_lock()
-            .ok()
-            .and_then(|queues| queues.get(&worker).cloned())
-        else {
+        // #15151: lock-free snapshot load replaces queues.try_lock();
+        // contention can no longer masquerade as a full queue.
+        let Some(queue) = self.queue_for(worker) else {
+            IPSEC_INNER_WORKER_QUEUE_BUSY_TOTAL.fetch_add(1, Ordering::Relaxed);
             self.tombstones.remove(request_id);
             self.router.release(flow_tag);
             self.pool.force_release(slab_id);
-            return Err(reason::WORKER_QUEUE_FULL);
+            return Err(reason::WORKER_QUEUE_BUSY);
         };
         if desc.worker_set_generation != self.authority.generation() {
             self.tombstones.remove(request_id);
@@ -1834,36 +2011,50 @@ impl IpsecInnerWorkerTransport {
             self.pool.force_release(slab_id);
             return Err(reason::STALE_GENERATION);
         }
-        if queue.try_enqueue(desc).is_err() {
-            self.tombstones.remove(request_id);
-            self.router.release(flow_tag);
-            // The queue owns no reference after a failed enqueue.
-            self.pool.force_release(slab_id);
-            return Err(reason::WORKER_QUEUE_FULL);
+        match queue.try_enqueue(desc) {
+            Ok(()) => Ok(worker),
+            Err(err) => {
+                let busy = err.is_busy();
+                self.tombstones.remove(request_id);
+                self.router.release(flow_tag);
+                // The queue owns no reference after a failed enqueue.
+                self.pool.force_release(slab_id);
+                Err(if busy {
+                    reason::WORKER_QUEUE_BUSY
+                } else {
+                    reason::WORKER_QUEUE_FULL
+                })
+            }
         }
-        Ok(worker)
     }
     /// Drain one worker's bounded ingress prefix into its reusable double
     /// batch and transfer each descriptor's hazard from ENQUEUED to
     /// WORKER_OWNED. This is the worker-side join point.
+    /// #15151: when the worker's queue is empty (atomic gate), return
+    /// without touching any shared lock/snapshot.
     pub(crate) fn drain_worker(
         &self,
         worker_id: u32,
         batch: &mut IpsecInnerDoubleBatch,
     ) -> usize {
-        let queue = self
-            .queues
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&worker_id)
-            .cloned();
-        let Some(queue) = queue else {
+        let Some(queue) = self.queue_for(worker_id) else {
             return 0;
         };
+        if !queue.has_pending() {
+            // Keep the double-batch cursor consistent for current().
+            batch.batches[batch.next].clear();
+            batch.last = batch.next;
+            batch.next ^= 1;
+            return 0;
+        }
         let _ = batch.drain_next(&queue);
         let batch_index = batch.last;
         let batch_len = batch.batches[batch_index].len();
-        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        if batch_len == 0 {
+            return 0;
+        }
+        let _guard = self.lock_lifecycle();
+        let mut active = (*self.active.load_full()).clone();
         let mut taken = 0;
         for read_index in 0..batch_len {
             let desc = batch.batches[batch_index][read_index].clone();
@@ -1894,6 +2085,8 @@ impl IpsecInnerWorkerTransport {
             taken += 1;
         }
         batch.batches[batch_index].truncate(taken);
+        self.active_count.store(active.len(), Ordering::Release);
+        self.active.store(Arc::new(active));
         taken
     }
     pub(crate) fn post_worker_verdict(
@@ -1901,15 +2094,13 @@ impl IpsecInnerWorkerTransport {
         worker_id: u32,
         verdict: IpsecInnerVerdict,
     ) -> Result<(), IpsecInnerVerdict> {
-        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(entry) = active
-            .iter_mut()
-            .find(|entry| {
-                entry.worker_id == worker_id
-                    && entry.desc.request_id == verdict.request_id()
-                    && entry.desc.connection_id == verdict.connection_id()
-            })
-        else {
+        let _guard = self.lock_lifecycle();
+        let mut active = (*self.active.load_full()).clone();
+        let Some(entry) = active.iter_mut().find(|entry| {
+            entry.worker_id == worker_id
+                && entry.desc.request_id == verdict.request_id()
+                && entry.desc.connection_id == verdict.connection_id()
+        }) else {
             return Err(verdict);
         };
         let _ = self.pool.mark_verdict_posted(entry.desc.slab_id);
@@ -1931,11 +2122,16 @@ impl IpsecInnerWorkerTransport {
                     policy_id: 0,
                 }
             };
-            let mut uncertain = self.uncertain.lock().unwrap_or_else(|e| e.into_inner());
+            let mut uncertain = (*self.uncertain.load_full()).clone();
             debug_assert!(uncertain.len() < IPSEC_INNER_SLAB_CAP);
             uncertain.push_back(fallback);
+            self.uncertain_count
+                .store(uncertain.len(), Ordering::Release);
+            self.uncertain.store(Arc::new(uncertain));
         }
         entry.posted = true;
+        self.active_count.store(active.len(), Ordering::Release);
+        self.active.store(Arc::new(active));
         Ok(())
     }
 
@@ -1950,18 +2146,16 @@ impl IpsecInnerWorkerTransport {
         worker_id: u32,
         verdict: IpsecInnerVerdict,
     ) -> bool {
-        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(entry) = active
-            .iter_mut()
-            .find(|entry| {
-                entry.worker_id == worker_id
-                    && entry.desc.request_id == verdict.request_id()
-                    && entry.desc.connection_id == verdict.connection_id()
-            })
-        else {
+        let _guard = self.lock_lifecycle();
+        let mut active = (*self.active.load_full()).clone();
+        let Some(entry) = active.iter_mut().find(|entry| {
+            entry.worker_id == worker_id
+                && entry.desc.request_id == verdict.request_id()
+                && entry.desc.connection_id == verdict.connection_id()
+        }) else {
             return false;
         };
-        let mut uncertain = self.uncertain.lock().unwrap_or_else(|e| e.into_inner());
+        let mut uncertain = (*self.uncertain.load_full()).clone();
         if uncertain.len() == IPSEC_INNER_SLAB_CAP {
             return false;
         }
@@ -1977,47 +2171,71 @@ impl IpsecInnerWorkerTransport {
             }
         };
         uncertain.push_back(fallback);
+        self.uncertain_count
+            .store(uncertain.len(), Ordering::Release);
+        self.uncertain.store(Arc::new(uncertain));
         entry.posted = true;
+        self.active_count.store(active.len(), Ordering::Release);
+        self.active.store(Arc::new(active));
         true
     }
     /// Drain bounded worker results into a caller-owned completion scratch.
     /// Stale verdicts from a joined worker are discarded by the tombstone and
     /// cannot release a reused slab.
+    /// #15151: when both verdict sources are empty (atomic gates), return
+    /// without touching any shared lock/snapshot.
     pub(crate) fn drain_verdicts_into(
         &self,
         queue_scratch: &mut Vec<IpsecInnerVerdict>,
         out: &mut Vec<IpsecInnerVerdict>,
         budget: usize,
     ) {
-        self.verdicts.drain_into(queue_scratch, budget);
-        if queue_scratch.len() < budget {
-            if let Ok(mut uncertain) = self.uncertain.try_lock() {
-                let room = budget - queue_scratch.len();
-                for _ in 0..room {
-                    let Some(verdict) = uncertain.pop_front() else {
-                        break;
-                    };
-                    queue_scratch.push(verdict);
-                }
-            }
+        if !self.verdicts.has_pending()
+            && self.uncertain_count.load(Ordering::Acquire) == 0
+        {
+            queue_scratch.clear();
+            return;
         }
-        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        self.verdicts.drain_into(queue_scratch, budget);
+        let _guard = self.lock_lifecycle();
+        if queue_scratch.len() < budget
+            && self.uncertain_count.load(Ordering::Acquire) != 0
+        {
+            let mut uncertain = (*self.uncertain.load_full()).clone();
+            let room = budget - queue_scratch.len();
+            for _ in 0..room {
+                let Some(verdict) = uncertain.pop_front() else {
+                    break;
+                };
+                queue_scratch.push(verdict);
+            }
+            self.uncertain_count
+                .store(uncertain.len(), Ordering::Release);
+            self.uncertain.store(Arc::new(uncertain));
+        }
+        if queue_scratch.is_empty() {
+            return;
+        }
+        let mut active = (*self.active.load_full()).clone();
+        let mut changed = false;
         for verdict in queue_scratch.drain(..) {
-            let Some(index) = active
-                .iter()
-                .position(|entry| {
-                    entry.desc.request_id == verdict.request_id()
-                        && entry.desc.connection_id == verdict.connection_id()
-                })
-            else {
+            let Some(index) = active.iter().position(|entry| {
+                entry.desc.request_id == verdict.request_id()
+                    && entry.desc.connection_id == verdict.connection_id()
+            }) else {
                 continue;
             };
             let entry = active.swap_remove(index);
+            changed = true;
             self.pool.ack_release(entry.desc.slab_id);
             self.router.release(entry.desc.flow_tag);
             if self.tombstones.complete(verdict.request_id()) {
                 out.push(verdict);
             }
+        }
+        if changed {
+            self.active_count.store(active.len(), Ordering::Release);
+            self.active.store(Arc::new(active));
         }
     }
 
@@ -2055,16 +2273,12 @@ impl IpsecInnerWorkerTransport {
     /// `join_worker_after_termination` proves that no late worker ACK exists.
     pub(crate) fn retire_worker(&self, worker_id: u32) -> Option<usize> {
         self.authority.retire_worker(worker_id)?;
-        let queue = self
-            .queues
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&worker_id)
-            .cloned();
+        let queue = self.queue_for(worker_id);
         let reaped = queue
             .as_ref()
             .map(|queue| self.reap_closed_queue(queue))
             .unwrap_or(0);
+        let _guard = self.lock_lifecycle();
         self.retired
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2077,24 +2291,29 @@ impl IpsecInnerWorkerTransport {
     /// queue is retained by Arc so a replacement queue for the same worker ID
     /// cannot be accidentally drained here.
     pub(crate) fn join_worker_after_termination(&self, worker_id: u32) -> usize {
-        let retired_queue = self
-            .retired
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&worker_id);
+        let retired_queue = {
+            let _guard = self.lock_lifecycle();
+            self.retired
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&worker_id)
+        };
         let Some(retired_queue) = retired_queue else {
             return 0;
         };
         let mut reaped = 0;
         {
-            let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = self.lock_lifecycle();
+            let mut active = (*self.active.load_full()).clone();
             let mut index = 0;
+            let mut changed = false;
             while index < active.len() {
                 if active[index].worker_id != worker_id {
                     index += 1;
                     continue;
                 }
                 let entry = active.swap_remove(index);
+                changed = true;
                 // #15149: only a successful stale claim terminalizes the
                 // request; an already-posted worker verdict (VERDICT_POSTED)
                 // must remain the single terminal, so no Deny is recorded
@@ -2115,6 +2334,10 @@ impl IpsecInnerWorkerTransport {
                     .reclaim_after_worker_death(entry.desc.slab_id);
                 self.router.release(entry.desc.flow_tag);
                 reaped += 1;
+            }
+            if changed {
+                self.active_count.store(active.len(), Ordering::Release);
+                self.active.store(Arc::new(active));
             }
         }
         if let Some(queue) = retired_queue {
@@ -2256,6 +2479,7 @@ where
         for desc in keep.into_iter().rev() {
             pending.push_front(desc);
         }
+        queue.sync_pending_count(&pending);
     }
     timed_out
 }
@@ -2334,29 +2558,40 @@ mod tests {
 
     #[test]
     fn contended_try_enqueue_refuses_without_waiting() {
+        // #15151: contention is Busy, so FULL must not move.
         let before = IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.load(Ordering::Relaxed);
+        let before_busy = IPSEC_INNER_WORKER_QUEUE_BUSY_TOTAL.load(Ordering::Relaxed);
         let queue = IpsecInnerIngressQueue::new(0);
         let guard = queue.pending.lock().unwrap_or_else(|e| e.into_inner());
-        assert!(queue.try_enqueue(test_desc(81, 0)).is_err());
+        assert!(matches!(
+            queue.try_enqueue(test_desc(81, 0)),
+            Err(IpsecInnerEnqueueError::Busy(_))
+        ));
         drop(guard);
         assert_eq!(
             IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.load(Ordering::Relaxed) - before,
+            0
+        );
+        assert_eq!(
+            IPSEC_INNER_WORKER_QUEUE_BUSY_TOTAL.load(Ordering::Relaxed) - before_busy,
             1
         );
     }
 
     #[test]
     fn contended_try_post_counts_contention_not_e24_15150() {
+        // #15151: contention arrives as Busy, so FULL (E24) must not move.
         let full_before = IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.load(Ordering::Relaxed);
         let contended_before = IPSEC_INNER_VERDICT_QUEUE_CONTENDED_TOTAL.load(Ordering::Relaxed);
         let queue = IpsecInnerVerdictQueue::new();
         let guard = queue.pending.lock().unwrap_or_else(|e| e.into_inner());
-        assert!(queue
-            .try_post(IpsecInnerVerdict::WouldPermit {
+        assert!(matches!(
+            queue.try_post(IpsecInnerVerdict::WouldPermit {
                 request_id: 81,
                 connection_id: 0,
-            })
-            .is_err());
+            }),
+            Err(IpsecInnerPostError::Busy(_))
+        ));
         drop(guard);
         assert_eq!(
             IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.load(Ordering::Relaxed) - full_before,
@@ -2396,6 +2631,107 @@ mod tests {
             }]
         );
     }
+    // #15151 (B12-03): per-queue lock contention at admit must be
+    // counted as BUSY, never as WORKER_QUEUE_FULL, even though the
+    // shared queues table itself is now lock-free. Pre-fix, the
+    // queues.try_lock() leg returned WORKER_QUEUE_FULL with an empty
+    // ingress queue; the surviving contention leg (per-queue pending
+    // mutex) is exercised here by holding that mutex.
+    #[test]
+    fn contended_queues_map_admits_as_busy_not_full() {
+        let transport = IpsecInnerWorkerTransport::new([0]);
+        let pool = transport.pool().clone();
+        let generation = transport.authority().generation();
+        let before_full = IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.load(Ordering::Relaxed);
+        let before_busy = IPSEC_INNER_WORKER_QUEUE_BUSY_TOTAL.load(Ordering::Relaxed);
+        let queue = transport.queue_for(0).expect("worker queue");
+        let slab_id = pool.acquire().expect("slab");
+        let mut desc = test_desc(151_510, slab_id);
+        desc.worker_set_generation = generation;
+        let guard = queue.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let result = transport.admit_descriptor(desc);
+        drop(guard);
+        assert_eq!(result, Err(reason::WORKER_QUEUE_BUSY));
+        assert_ne!(result, Err(reason::WORKER_QUEUE_FULL));
+        assert_eq!(
+            IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.load(Ordering::Relaxed) - before_full,
+            0,
+            "contention must not count as queue-full"
+        );
+        assert_eq!(
+            IPSEC_INNER_WORKER_QUEUE_BUSY_TOTAL.load(Ordering::Relaxed) - before_busy,
+            1,
+            "contention must count exactly once as busy"
+        );
+        // Rollback complete: slab returned, tombstone + inflight released.
+        assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP);
+        assert!(
+            !transport
+                .tombstones
+                .entries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|(id, _)| *id == 151_510)
+        );
+        // After the lock is released the same flow admits normally
+        // (control: legitimate traffic through the same path stays green).
+        let slab_id = pool.acquire().expect("slab2");
+        let mut desc = test_desc(151_511, slab_id);
+        desc.worker_set_generation = generation;
+        assert_eq!(transport.admit_descriptor(desc), Ok(0));
+    }
+
+    // #15151: an idle D11 pass must take zero shared locks: when the
+    // worker queue and both verdict sources are empty, drain_worker /
+    // drain_verdicts_into return on atomic gates alone. Holding every
+    // lock the pre-fix drains took (per-queue + verdict pending,
+    // lifecycle) must not block or alter the idle result.
+    #[test]
+    fn idle_drain_skips_shared_locks_when_empty() {
+        let transport = IpsecInnerWorkerTransport::new([0]);
+        let queue = transport.queue_for(0).expect("worker queue");
+        let _queue_guard = queue.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let _verdicts_guard = transport
+            .verdicts
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _lifecycle_guard = transport.lock_lifecycle();
+        let mut batch = IpsecInnerDoubleBatch::new();
+        assert_eq!(transport.drain_worker(0, &mut batch), 0);
+        let mut scratch = Vec::with_capacity(IPSEC_INNER_DRAIN_BUDGET);
+        let mut out = Vec::with_capacity(IPSEC_INNER_DRAIN_BUDGET);
+        transport.drain_verdicts_into(&mut scratch, &mut out, IPSEC_INNER_DRAIN_BUDGET);
+        assert!(out.is_empty());
+        assert_eq!(transport.worker_pending(0), Some(0));
+        assert!(!transport.has_pending_work(0));
+    }
+
+    // #15151: contended per-queue try_enqueue is BUSY, not FULL.
+    #[test]
+    fn contended_try_enqueue_counts_busy_not_full() {
+        let before_full = IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.load(Ordering::Relaxed);
+        let before_busy = IPSEC_INNER_WORKER_QUEUE_BUSY_TOTAL.load(Ordering::Relaxed);
+        let queue = IpsecInnerIngressQueue::new(0);
+        let guard = queue.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let refused = queue.try_enqueue(test_desc(151_512, 0));
+        drop(guard);
+        assert!(matches!(refused, Err(IpsecInnerEnqueueError::Busy(_))));
+        assert_eq!(
+            IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.load(Ordering::Relaxed) - before_full,
+            0
+        );
+        assert_eq!(
+            IPSEC_INNER_WORKER_QUEUE_BUSY_TOTAL.load(Ordering::Relaxed) - before_busy,
+            1
+        );
+        // Uncontended enqueue still succeeds and pending is exact.
+        queue.try_enqueue(test_desc(151_513, 0)).expect("fits");
+        assert_eq!(queue.pending_len(), 1);
+        assert!(queue.has_pending());
+    }
+
     #[test]
     fn ingress_queue_full_refuses_and_counts_once() {
         let before = IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.load(Ordering::Relaxed);
@@ -2403,7 +2739,11 @@ mod tests {
         for i in 0..IPSEC_INNER_QUEUE_DEPTH {
             queue.try_enqueue(test_desc(i as u64 + 1, 0)).expect("fits");
         }
-        let refused = queue.try_enqueue(test_desc(9999, 0)).unwrap_err();
+        let refused = match queue.try_enqueue(test_desc(9999, 0)) {
+            Ok(()) => panic!("full queue must refuse"),
+            Err(IpsecInnerEnqueueError::Full(d)) => d,
+            Err(other) => panic!("full queue must refuse Full, got {other:?}"),
+        };
         assert_eq!(refused.request_id, 9999);
         assert_eq!(queue.len(), IPSEC_INNER_QUEUE_DEPTH);
         assert_eq!(
@@ -2879,13 +3219,7 @@ mod tests {
     fn worker_transport_retirement_closes_old_queue_before_reuse() {
         let transport = IpsecInnerWorkerTransport::new([7]);
         let pool = transport.pool().clone();
-        let old_queue = transport
-            .queues
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&7)
-            .cloned()
-            .expect("old queue");
+        let old_queue = transport.queue_for(7).expect("old queue");
         let old_generation = transport.authority().generation();
         let id = pool.acquire().expect("old slab");
         let mut desc = test_desc(70, id);
@@ -2907,13 +3241,7 @@ mod tests {
 
         transport.prepare_worker(7);
         transport.publish_workers([7]);
-        let new_queue = transport
-            .queues
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&7)
-            .cloned()
-            .expect("new queue");
+        let new_queue = transport.queue_for(7).expect("new queue");
         assert!(!new_queue.is_closed());
         assert!(!std::sync::Arc::ptr_eq(&old_queue, &new_queue));
         let stale_id = pool.acquire().expect("stale slab");

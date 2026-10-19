@@ -15,8 +15,8 @@ use super::ipsec_inner_queue::{
     reason, IpsecInnerDescriptor, IpsecInnerSlabPool, IpsecInnerVerdict, IpsecInnerVerdictQueue,
     IPSEC_INNER_ORPHAN_PROVISIONAL_TOTAL, IPSEC_INNER_SLAB_EXHAUSTED_TOTAL,
     IPSEC_INNER_VERDICT_QUEUE_CONTENDED_TOTAL, IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL,
-    IPSEC_INNER_WORKER_ORPHAN_REAPED_TOTAL, IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL,
-    IPSEC_INNER_WORKER_RETIRED_TOTAL,
+    IPSEC_INNER_WORKER_ORPHAN_REAPED_TOTAL, IPSEC_INNER_WORKER_QUEUE_BUSY_TOTAL,
+    IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL, IPSEC_INNER_WORKER_RETIRED_TOTAL,
 };
 use super::{
     ForwardingDisposition, ForwardingState, IpsecTunnelRows, PMechInventory, RouteIdentity,
@@ -111,6 +111,8 @@ pub(crate) struct IpsecInnerCounterSnapshot {
     pub ipsec_inner_parse_drops_total: u64,
     pub ipsec_inner_ecn_illegal_drops: u64,
     pub ipsec_inner_worker_queue_full_total: u64,
+    // #15151: contention counted apart from genuine full.
+    pub ipsec_inner_worker_queue_busy_total: u64,
     pub ipsec_inner_verdict_queue_full_total: u64,
     pub ipsec_inner_verdict_queue_contended_total: u64,
     pub ipsec_inner_slab_exhausted_total: u64,
@@ -132,6 +134,8 @@ pub(crate) fn ipsec_inner_counters_snapshot() -> IpsecInnerCounterSnapshot {
         ipsec_inner_parse_drops_total: ipsec_inner_parse_drops_total.load(Ordering::Relaxed),
         ipsec_inner_ecn_illegal_drops: IPSEC_INNER_ECN_ILLEGAL_DROPS.load(Ordering::Relaxed),
         ipsec_inner_worker_queue_full_total: IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL
+            .load(Ordering::Relaxed),
+        ipsec_inner_worker_queue_busy_total: IPSEC_INNER_WORKER_QUEUE_BUSY_TOTAL
             .load(Ordering::Relaxed),
         ipsec_inner_verdict_queue_full_total: IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL
             .load(Ordering::Relaxed),
