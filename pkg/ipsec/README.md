@@ -34,7 +34,12 @@ the apply path pays no fsync (the file is regenerated on every apply).
   re-loaded**). Either way the recovered set is promoted (departed SAs
   torn down, `Loaded` not fired) and the partial error is still returned,
   so disk, `swanctl --list-conns`, and `prevConnNames` name the same set
-  when Apply returns. The commit path (`daemon_apply.go` step 6)
+  when Apply returns. A changed survivor of the partial load is
+  re-initiated exactly as on a full load when its new policy eagerly
+  initiates (#15129/#14140): its stale SA was terminated and its new
+  hash promoted, so without re-initiation an
+  `establish-tunnels immediately` tunnel would stay down with no trap
+  to revive it. The commit path (`daemon_apply.go` step 6)
   MUST surface this error rather than swallow it at WARN — otherwise a new config is
   reported committed while the enforced IPsec runtime is stale. The daemon joins it into
   `applyConfigLocked` tail result alongside networkd / Kea / host-inbound /

@@ -267,10 +267,10 @@ func (m *Manager) ApplyWithHooks(ipsecCfg *config.IPsecConfig, hooks ApplyHooks)
 // configstore digest of the active config it applies); anything else is written as
 // UnknownGeneration. Only a rendered config carries the marker: the empty-config clear
 // path removes the file, so charon then lists no marker at all.
-//
 // A successful apply runs Written, then Loaded. A write followed by a total reload
 // failure runs only Written, and the prior file is restored (#10712); a partial
-// load runs only Written and is reconciled to charon's loaded set (#14589), so
+// load runs only Written and is reconciled to charon's loaded set (#14589,
+// changed immediately survivors re-initiated per #15129), so
 // the disk again matches the generation charon still runs in both cases. A
 // render or write failure runs neither.
 // Both run on the caller's goroutine with no Manager lock held.
@@ -303,23 +303,45 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 			// it, e.g. the deleted b whose config charon unloaded),
 			// do NOT fire Loaded (the candidate generation did not
 			// load), and still return the partial error.
-			var removed []string
-			if pae.clear && pae.names == nil {
-				// Empty-set clear recovered with nothing loaded
-				// (clearConfig encodes that as names={}); pae.names
-				// is then already the recovered set.
-				removed, _ = m.promoteConnNames(map[string]bool{}, map[string]string{})
+			var removed, changed []string
+			if pae.clear {
+				if pae.names == nil {
+					// Empty-set clear recovered with nothing loaded
+					// (clearConfig encodes that as names={}); pae.names
+					// is then already the recovered set.
+					removed, _ = m.promoteConnNames(map[string]bool{}, map[string]string{})
+				} else {
+					// #15128: a clear partial that rolled charon back to
+					// the prior set carries that set in pae.names — the
+					// set charon still runs. Promote it (as Clear does);
+					// promoting {} here forgot VPNs charon still runs,
+					// so their SAs were never terminated.
+					removed, _ = m.promoteConnNames(pae.names, pae.hashes)
+				}
 			} else {
-				// #15128: a clear partial that rolled charon back to
-				// the prior set carries that set in pae.names — the
-				// set charon still runs. Promote it (as Clear does);
-				// promoting {} here forgot VPNs charon still runs,
-				// so their SAs were never terminated.
-				removed, _ = m.promoteConnNames(pae.names, pae.hashes)
+				removed, changed = m.promoteConnNames(pae.names, pae.hashes)
 			}
-			_, failed := m.terminateRemovedConns(removed)
+			terminated, failed := m.terminateRemovedConns(removed)
 			termErr := m.recordTerminateDebt(removed, failed)
-			return errors.Join(applyErr, termErr)
+			// #15129: a changed survivor is in `changed` exactly as on
+			// the full-load path: its stale SA was just terminated and
+			// its new hash promoted, so without re-initiation an
+			// establish-tunnels=immediately tunnel stays down (no
+			// start fires after load, no trap remains) and a later fix
+			// of the refused VPN cannot restore it. Re-initiate it
+			// with the CANDIDATE config — the survivor's VPN is in it
+			// with its new settings; the recovered subset on disk is
+			// that same VPN. The #14140 intent gate inside
+			// reinitiateChangedConnections still suppresses non-eager
+			// modes. The clear path has no candidate config (nil):
+			// reinitiateChangedConnections is a no-op for it because
+			// changed names cannot be in the empty promoted set, and
+			// the guard below keeps it that way explicitly.
+			var initiateErr error
+			if !pae.clear && ipsecCfg != nil {
+				initiateErr = m.reinitiateChangedConnections(ipsecCfg, changed, terminated)
+			}
+			return errors.Join(applyErr, termErr, initiateErr)
 		}
 		return applyErr
 	}
