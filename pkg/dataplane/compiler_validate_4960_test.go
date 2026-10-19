@@ -294,22 +294,31 @@ func failLaterNATPhaseConfig() *config.Config {
 }
 
 func TestNoHostMutationWhenNATPhaseFails_4960(t *testing.T) {
-	dp := &recordingDP{}
-
-	_, err := CompileConfig(dp, failLaterNATPhaseConfig(), false)
-	if err == nil {
-		t.Fatal("expected the unresolvable NAT pool to fail the compile")
+	// #15002 changed WHAT this fixture proves, and the change is
+	// recorded rather than silently re-purposed. The dangling SNAT
+	// pool is warn-and-skip on the validation pass now (the
+	// userspace builder ships the rule pool_unusable=missing_pool),
+	// so CompileConfig's pre-pass accepts it and compileZones runs
+	// — this fixture can no longer bind "the NAT phase is caught
+	// before the host mutation", because on the only production
+	// path (userspaceShimCompileDataplane) the NAT setters are
+	// no-ops and the snapshot builder disarms the rule. What stays
+	// bound, and is still load-bearing:
+	//
+	//   - the REAL pass (recordingDP, marker false) still rejects
+	//     the dangling pool — the strict apply never accepts it;
+	//   - the validation pass alone accepts it.
+	//
+	// The pre-mutation binding for the NAT family now lives in the
+	// "nat" row of TestEachValidationPhaseRowRunsItsOwnCompiler_4960
+	// (an unknown rule-set zone, still a hard pre-pass error).
+	cfg := failLaterNATPhaseConfig()
+	result := newValidationResult()
+	assignZoneIDs(result, cfg)
+	if err := compileNAT(&recordingDP{}, cfg, result); err == nil ||
+		!strings.Contains(err.Error(), "no-such-pool-4960") {
+		t.Fatalf("the real pass must still reject a dangling SNAT pool, got: %v", err)
 	}
-	assertNoHostMutation(t, dp)
-	if !strings.Contains(err.Error(), "no-such-pool-4960") {
-		t.Fatalf("failed for the wrong reason: %v", err)
-	}
-	// #15002: the same dangling pool is warn-and-skip on the
-	// validation pass (the userspace builder ships the rule
-	// pool_unusable=missing_pool), so the pre-pass alone must
-	// accept this fixture — the rejection above is the REAL
-	// pass's, reached only because CompileConfig runs it after
-	// the pre-pass.
 	if err := validateBeforeMutate(failLaterNATPhaseConfig()); err != nil {
 		t.Fatalf("the #15002 validation pass must warn-and-skip a "+
 			"dangling SNAT pool, got: %v", err)

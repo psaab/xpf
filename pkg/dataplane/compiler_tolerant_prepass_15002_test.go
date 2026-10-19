@@ -87,12 +87,12 @@ security {
 	}
 }
 
-// NAT64 rule-set referencing a source pool that does not exist. Strict
-// config compile has no gate for this reference (measured on master), so
-// the strict-rejects precondition of the other cells does not apply; the
-// tolerant-path acceptance (lenient keeps it, pre-pass must not abort)
-// still does — the userspace builder emits the rule-set with an empty
-// pool and the Rust loader installs no allocator for it.
+// NAT64 rule-set referencing a source pool that does not exist. Since
+// #15000 landed, strict config compile rejects this reference and the
+// dataplane warn-skips it on BOTH passes; this cell keeps the #15002
+// acceptance shape (lenient keeps it, pre-pass must not abort) pinned
+// alongside the #15000 cells, and exercises the #15002 validation-pass
+// arm that runs before the #15000 unconditional skip.
 func TestTolerantNAT64MissingPoolPrePass15002(t *testing.T) {
 	body := `
 security {
