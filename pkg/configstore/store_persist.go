@@ -1688,8 +1688,15 @@ func (s *Store) retryActiveConfigPersistLocked(backoff time.Duration) {
 			// nothing, and even a commit heal races a newer active rewrite.
 			// Rebinding unconditionally is idempotent (history unchanged,
 			// generation bumps) and guarantees sidecar matches disk.
-			s.rebindRollbackMetadataLocked()
-			// #5473: the active config is now durable. If a commit-confirmed
+			if s.rollbackPersistDelayed {
+				// #15190: the failed SyncApply deferred its shifted
+				// rollback save; the synced config is now durable, so
+				// persist the shifted ladder (clears the flag on
+				// success; a failure sets rollbackPersistDegraded).
+				s.saveRollbackFiles()
+			} else {
+				s.rebindRollbackMetadataLocked()
+			}
 			// resolution (rollback / boot recovery / sync supersede) deferred
 			// its confirm.json removal because the resolving write failed, that
 			// replacement target is exactly what just landed durably — drop the

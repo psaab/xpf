@@ -197,7 +197,16 @@ type Store struct {
 	// background retry goroutine (exactly one loop at a time). The
 	// backoff fields are test seams; zero means the production
 	// defaults (1s initial, doubling to a 60s cap).
-	persistDegraded            bool
+	persistDegraded bool
+	// rollbackPersistDelayed records that a degrade-not-fail SyncApply
+	// shifted s.history but its saveRollbackFiles was deferred because
+	// the synced active.json never landed (#15190): writing the shifted
+	// slots/sidecar then would bind rollback-meta.json to the unwritten
+	// tree and a pre-heal restart would refuse every slot. The persist
+	// retry saves the shifted ladder once the synced config is durable
+	// (its rebind covers the no-shift case; this flag covers the shift).
+	// Guarded by mu; cleared by any successful saveRollbackFiles.
+	rollbackPersistDelayed     bool
 	persistRetryActive         bool
 	persistRetryInitialBackoff time.Duration
 	// persistRefusedTree is the active tree the persist retry loop last saw
@@ -1142,11 +1151,13 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 	// handles legacy cleartext credentials whose fresh salts change the
 	// rendered digest. Real credential changes fail verification, and real
 	// non-credential changes fail structural equivalence, so both still push.
+	syncShiftedHistory := false
 	if configTextDigest(tree.Format()) != configTextDigest(s.active.Format()) && !syncEquivalentToActive {
 		s.history.Push(&HistoryEntry{
 			Config:    s.active.Clone(),
 			Timestamp: time.Now(),
 		})
+		syncShiftedHistory = true
 	}
 
 	s.active = tree
@@ -1211,7 +1222,14 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 	// retry loop) also stamps committed=1.
 	s.everCommitted = true
 	s.persistMarkerCommitted = true
+	syncPersisted := true
+	syncActiveVisible := false
 	if err := s.writeActive(s.active); err != nil {
+		syncPersisted = false
+		// #15190: a post-rename failure means the new tree IS visible on
+		// disk (a restart loads it); only pre-rename failures leave the
+		// old active.json in place.
+		syncActiveVisible = isPostRenameDurabilityFailure(err)
 		s.noteActivePersistFailureLocked("config_sync", err)
 		// #5473: the synced config that supersedes the pending confirm window
 		// is NOT durable. Keep confirm.json and defer its removal until the
@@ -1262,7 +1280,20 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 		Principal:  "system:cluster-sync",
 	})
 
-	s.saveRollbackFiles()
+	// #15190: on a pre-rename writeActive failure the synced tree never
+	// landed, so writing the shifted slots now would bind
+	// rollback-meta.json (via rollbackActiveBindingForWrite, which reads
+	// s.active) to the unwritten tree while active.json still holds the
+	// old tree — a pre-heal restart then refuses every slot. Defer the
+	// shifted save until the persist retry lands the synced config; the
+	// on-disk slots/sidecar still describe the old active, so a pre-heal
+	// restart yields its readable ladder. A post-rename failure already
+	// made the new tree visible, so the shifted save binds correctly.
+	if syncPersisted || syncActiveVisible {
+		s.saveRollbackFiles()
+	} else if syncShiftedHistory {
+		s.rollbackPersistDelayed = true
+	}
 	return compiled, nil
 }
 

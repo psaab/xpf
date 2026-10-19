@@ -1723,6 +1723,11 @@ func (s *Store) saveRollbackFiles() {
 		})
 	}
 	s.rollbackPersistDegraded = degraded
+	if !degraded {
+		// #15190: a fully successful save persists the current (possibly
+		// previously deferred) ladder, so the deferred-shift debt is paid.
+		s.rollbackPersistDelayed = false
+	}
 }
 
 // cleanupRollbackFiles removes stale rollback files starting at startN.
