@@ -325,19 +325,82 @@ func streamDiagCmd(ctx context.Context, timeout time.Duration, cmd []string, sen
 		}
 		scanDone <- scanner.Err()
 	}()
-
 	// Wait for the command to finish, then close the write end so scanner terminates.
-	cmdErr := c.Wait()
-	pw.Close()
-	scanErr := <-scanDone
-
-	if scanErr != nil {
-		return scanErr
+	//
+	// #15080 (A43-01): this wait must select, not join unconditionally.
+	// c.Wait() joins exec's copy goroutine, which stays blocked in
+	// pw.Write while the scanner goroutine is parked inside sendFn
+	// (it holds the io.Pipe read end and is not reading), so an
+	// unconditional c.Wait(); <-scanDone wedged until the full exec
+	// timeout behind a parked scanner — pinning the handler and its
+	// diagLimiter slot. Three legs, each bounded:
+	//   - waitDone first: the pre-#15080 normal path, unchanged.
+	//   - scanDone first: send/scanner failure; the scanner's deferred
+	//     cancel()+pr.Close() is already reaping the child, so Wait
+	//     returns promptly and scanErr (not the internal cancel's ctx
+	//     error) is reported.
+	//   - ctx.Done first: external cancel/timeout behind a parked
+	//     scanner; close both pipe ends, join only Wait under
+	//     requestExecWaitDelay, and abandon (never join) a scanner
+	//     parked in a ctx-independent sendFn to the caller's
+	//     per-write Send bound (#14980).
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- c.Wait() }()
+	var cmdErr error
+	select {
+	case cmdErr = <-waitDone:
+		// Normal path, exactly as before the bound: close the write end
+		// so the scanner terminates, then join it. scanErr (send failure
+		// or scanner error) wins over cmdErr; a child exit error is
+		// delivered as a final line (e.g. "ping: unknown host").
+		pw.Close()
+		scanErr := <-scanDone
+		if scanErr != nil {
+			return scanErr
+		}
+		if cmdErr != nil {
+			_ = sendFn(cmdErr.Error())
+		}
+		return nil
+	case scanErr := <-scanDone:
+		// The scanner finished FIRST. This is the send-failure and
+		// scanner-error fast path: the scanner goroutine's deferred
+		// cancel()+pr.Close() is already killing the child and
+		// unblocking the copy goroutine, so Wait returns promptly —
+		// join it (bounded by WaitDelay) and report scanErr, NOT the
+		// ctx error the internal cancel is about to produce. Selecting
+		// ctx.Done here instead would misreport every early scan error
+		// as a cancellation and could re-wedge on a Wait whose child
+		// was never signalled.
+		pw.Close()
+		cmdErr = <-waitDone
+		if scanErr != nil {
+			return scanErr
+		}
+		if cmdErr != nil {
+			_ = sendFn(cmdErr.Error())
+		}
+		return nil
+	case <-ctx.Done():
+		// External cancellation (parent/stream ctx or the exec
+		// timeout) while Wait is wedged behind a parked scanner.
+		// pr.Close() unblocks the copy goroutine's pw.Write; the
+		// CommandContext kill then lets Wait return. Do NOT drain
+		// scanDone here: the scanner may be parked inside sendFn
+		// independently of this ctx (a raw Send), and joining it
+		// would re-wedge the return — it is abandoned to the
+		// caller's Send bound (#14980), whose sever (or the
+		// handler-return stream cancel in real grpc-go) ends it.
+		// Bound only the Wait join by requestExecWaitDelay, the
+		// same post-kill pipe-drain window WaitDelay enforces.
+		_ = pr.Close()
+		pw.Close()
+		drain := time.NewTimer(requestExecWaitDelay)
+		defer drain.Stop()
+		select {
+		case <-waitDone:
+		case <-drain.C:
+		}
+		return ctx.Err()
 	}
-	if cmdErr != nil {
-		// Send the exit error as a final line rather than failing the RPC,
-		// so the client still sees partial output (e.g. "ping: unknown host").
-		_ = sendFn(cmdErr.Error())
-	}
-	return nil
 }
