@@ -448,8 +448,16 @@ func cosPriorityLowMinShareSchema() *schemaNode {
 }
 
 var schemaFirewall = &schemaNode{desc: "Firewall filters and policers", children: map[string]*schemaNode{
-	"policer": {desc: "Traffic policer", args: 1, multi: true, placeholder: "<name>", children: map[string]*schemaNode{
-		"if-exceeding": {desc: "Rate limits for the policer", packedStatements: true, children: map[string]*schemaNode{
+	"policer": {desc: "Traffic policer", args: 1, multi: true, placeholder: "<name>", closedWorld: true, children: map[string]*schemaNode{
+		// #15125: closedWorld on policer + if-exceeding. The grammar is
+		// leaf-complete (if-exceeding{bandwidth-limit,burst-size-limit},
+		// logical-interface-policer, then{discard,loss-priority,
+		// forwarding-class} — every child the compiler reads), so a typo
+		// such as if-exceding / bandwith-limit is refused at strict commit
+		// instead of compiling to a 0-limit fail-closed blackhole meter.
+		// Tolerant load downgrades closed-world violations to warnings
+		// (#1960); validateFirewallPolicerLimitsStrict warns there too.
+		"if-exceeding": {desc: "Rate limits for the policer", packedStatements: true, closedWorld: true, children: map[string]*schemaNode{
 			// #5299: both leaves were untyped (ValueAny), so the legacy
 			// parsers (parseBandwidthLimit / parseBurstSizeLimit) silently
 			// coerced garbage / zero / overflow to 0 bps/bytes. A typo like
@@ -480,7 +488,12 @@ var schemaFirewall = &schemaNode{desc: "Firewall filters and policers", children
 			},
 		}},
 		"logical-interface-policer": {desc: "Logical interface policer (shared across protocol families)", children: nil},
-		"then": {desc: "Action for traffic exceeding the limits", children: map[string]*schemaNode{
+		// closedWorldOpaque: the then grammar is compiler-owned (#9882
+		// UnknownActions gate owns unknown tokens, incl. block-form values
+		// such as loss-priority { high; }); closedWorld inheritance would
+		// read those values as unknown keywords. The then keyword itself
+		// stays closed by the policer parent (#15125).
+		"then": {desc: "Action for traffic exceeding the limits", closedWorldOpaque: true, children: map[string]*schemaNode{
 			"discard":          {desc: "Discard excess traffic (default)", children: nil},
 			"loss-priority":    {desc: "Set loss priority for excess traffic (high|medium-high|medium-low|low)", args: 1, placeholder: "<priority>", children: nil},
 			"forwarding-class": {desc: "Set forwarding class for excess traffic (marks and forwards; meter-only on this dataplane — #9882)", args: 1, placeholder: "<class>", children: nil},

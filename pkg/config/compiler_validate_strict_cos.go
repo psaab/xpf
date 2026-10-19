@@ -49,6 +49,51 @@ func validateThreeColorPolicersStrict(policers map[string]*ThreeColorPolicerConf
 	return nil
 }
 
+// validateFirewallPolicerLimitsStrict hard-rejects a single-rate policer
+// missing either `if-exceeding bandwidth-limit` or `burst-size-limit`
+// (#15125, A85-06).
+//
+// Before this gate a policer with no if-exceeding, an empty one, or only
+// one of the two limits compiled clean: the missing limit stayed 0, and
+// the dataplane lowers a 0 rate or 0 burst to a fail-closed meter
+// (userspace-dp filter/compiler.rs returns None for a 0 rate/burst, which
+// becomes fail_closed(true)) — dropping every packet the policed term
+// matches while the commit stayed green. #5299 validated the VALUES when
+// present; nothing required their presence. This is the single-rate twin
+// of validateThreeColorPolicersStrict, which already requires positive
+// CIR/CBS/PBS.
+//
+// Strict on commit / commit-check; lenient on load / peer-sync (warn —
+// #1960 no-brick: the compiled 0-limit policer drives the dataplane
+// exactly as before, only now diagnosed). Deterministic: sorted by name.
+func validateFirewallPolicerLimitsStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Firewall.Policers))
+	for name := range cfg.Firewall.Policers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		pol := cfg.Firewall.Policers[name]
+		if pol == nil {
+			continue
+		}
+		displayName := pol.Name
+		if displayName == "" {
+			displayName = name
+		}
+		if pol.BandwidthLimit == 0 {
+			return fmt.Errorf("firewall policer %q requires `if-exceeding bandwidth-limit` (missing bandwidth-limit compiles to a 0-rate policer that drops all policed traffic)", displayName)
+		}
+		if pol.BurstSizeLimit == 0 {
+			return fmt.Errorf("firewall policer %q requires `if-exceeding burst-size-limit` (missing burst-size-limit compiles to a 0-burst policer that drops all policed traffic)", displayName)
+		}
+	}
+	return nil
+}
+
 func validatePolicySchedulerReferencesStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil

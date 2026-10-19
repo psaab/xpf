@@ -125,6 +125,9 @@ func TestDuplicateBlocksMergeAtFourMoreSites9209(t *testing.T) {
 // second half of the fix. Merging sibling containers is only correct inside a
 // block a duplicate was folded into; running it over a config with no repeats
 // would re-answer questions the compilers already answer.
+// #15125: this fixture compiles on the tolerant path — its two policers
+// each carry only one limit, which the strict missing-limit gate now
+// rejects; the scoping property under test is path-independent.
 func TestSiblingContainerMergeIsScopedToFoldedBlocks9209(t *testing.T) {
 	// No duplicate anywhere: two DIFFERENT policers, each with one
 	// `if-exceeding`. Nothing may move.
@@ -133,7 +136,7 @@ func TestSiblingContainerMergeIsScopedToFoldedBlocks9209(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("parse: %v", perrs)
 	}
-	c, err := CompileConfig(&ConfigTree{Children: root.Children})
+	c, err := CompileConfigLenient(&ConfigTree{Children: root.Children})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

@@ -314,6 +314,20 @@ func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 		}
 	}
 
+	// #15125 single-rate policer missing-limit gate. A policer lacking
+	// either bandwidth-limit or burst-size-limit compiled to a 0 limit,
+	// which the dataplane lowers to a fail-closed drop-all meter. Runs
+	// after the then-action gates: an unknown/conflicting action means
+	// intent is already uncharacterized and is reported first.
+	if err := validateFirewallPolicerLimitsStrict(cfg); err != nil {
+		if opts.lenientPolicerMissingLimits {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("firewall policer missing limits (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #3309 firewall-filter DSCP / traffic-class range gate. Strict on commit /
 	// commit-check (hard-reject a `from dscp`/`from traffic-class` match or a
 	// `then dscp`/`then traffic-class` rewrite token that is neither a known

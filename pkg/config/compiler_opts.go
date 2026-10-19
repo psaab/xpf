@@ -1319,6 +1319,17 @@ type compileOpts struct {
 	// pre-gate three-color precedence, now visible instead of silent.
 	// Same doctrine as lenientPolicerThenConflict.
 	lenientPolicerNameCollision bool
+	// lenientPolicerMissingLimits (#15125) downgrades the single-rate
+	// policer missing-limit gate (validateFirewallPolicerLimitsStrict)
+	// from a hard compile error to a cfg.Warnings entry. The strict commit
+	// / commit-check path hard-rejects a policer lacking either
+	// bandwidth-limit or burst-size-limit, because the missing limit
+	// compiles to 0 and the dataplane lowers that to a fail-closed meter
+	// dropping all policed traffic. The tolerant load / peer-sync paths
+	// warn so an already-persisted or peer-synced config still BOOTS
+	// (#1960 no-brick); the 0-limit policer behaves exactly as before.
+	// Same doctrine as lenientPolicerUnknownActions.
+	lenientPolicerMissingLimits bool
 	// lenientFilterDSCP (#3309) downgrades the firewall-filter DSCP /
 	// traffic-class range gate (validateFilterDSCPStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check path
@@ -3589,6 +3600,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicerThenConflict:             true,
 		lenientPolicerUnknownActions:           true,
 		lenientPolicerNameCollision:           true,
+		lenientPolicerMissingLimits:           true,
 		lenientFilterDSCP:                      true,
 		lenientNPTv6:                           true,
 		lenientVRFOverlapPBR:                   true,

@@ -13174,6 +13174,61 @@ pre-existing #8992 packed-run guard (a schema-leaf node with children reads
 as an elided run there); deleting the whole `then` block works — both
 pinned, neither silent.
 
+### #15125 — firewall policer missing limits + `policer`/`if-exceeding` closedWorld (commit fail-closed)
+
+A single-rate `firewall policer` with no `bandwidth-limit`/`burst-size-limit`,
+an empty or single-limit `if-exceeding`, or a misspelt `if-exceding` /
+`bandwith-limit` passed strict commit. #5299 validated the limit VALUES when
+present; nothing required their presence, and the policer schema was
+open-world, so the typo'd container/leaf was silently dropped. The missing
+limit compiled to 0, and the dataplane lowers a 0 rate/burst to a fail-closed
+meter (`userspace-dp` filter compiler returns `None` for a 0 rate/burst,
+which becomes `fail_closed(true)`) — dropping every packet the policed term
+matches, with a green commit. A term with no `from` on an input filter
+blackholes the whole interface.
+
+**Fix.** Two halves, mirroring the three-color policer, which already
+requires positive CIR/CBS/PBS (`validateThreeColorPolicersStrict`):
+
+- `validateFirewallPolicerLimitsStrict` hard-rejects a policer with
+  `BandwidthLimit == 0` or `BurstSizeLimit == 0` at strict
+  `CompileConfig`, naming the policer and the missing leaf. Wired in
+  `runUniformGatesFilter` after the #9882/#8445 then-action gates;
+  `lenientPolicerMissingLimits` downgrades to a warning on tolerant
+  load / peer-sync (#1960 no-brick — the 0-limit policer behaves exactly
+  as before, only now diagnosed).
+- `closedWorld: true` on `policer` and `if-exceeding` in `schema_cos.go`.
+  The grammar is leaf-complete (`if-exceeding{bandwidth-limit,
+  burst-size-limit}`, `logical-interface-policer`, `then{discard,
+  loss-priority, forwarding-class}` — every child the compiler reads),
+  so `if-exceding`, `bandwith-limit`, and any other unmodelled policer
+  child are refused at `SchemaValidate` on the strict commit path.
+  The policer `then` node is `closedWorldOpaque`: its grammar is
+  compiler-owned (the #9882 UnknownActions gate owns unknown tokens,
+  including block-form values such as `loss-priority { high; }`, which
+  closedWorld inheritance would misread as unknown keywords); the
+  `then` keyword itself stays closed by the policer parent.
+  `/firewall/policer` moves from the #9091 blind baseline to the armed
+  baseline. Tolerant ingress downgrades the closed-world violation to a
+  warning, where the missing-limit warning above is the diagnostic.
+
+**Upgrade note.** A policer missing either limit, or carrying a typo'd
+`if-exceeding`/limit leaf, is newly REJECTED at commit; persisted or
+peer-synced copies still boot with a warning. The full positive control
+(`bandwidth-limit` + `burst-size-limit`, any `then`) is unchanged.
+Neighbouring fixtures whose policers intentionally carry a single limit
+for an unrelated scoping property (`TestSiblingContainerMergeIsScopedToFoldedBlocks9209`)
+now compile on the tolerant path.
+
+Regression coverage: `pkg/config/policer_missing_limits_15125_test.go`
+(omitted / empty / single-limit, `if-exceding`, `bandwith-limit`,
+`burst-size-limt`, and unknown-child cases REJECTED at strict commit in
+hierarchical and flat-set spellings; the compiled-config gate alone;
+the full positive control unchanged; lenient warn-not-hard-fail).
+FAIL-ON-REVERT: removing `closedWorld` re-admits the typos; removing
+`validateFirewallPolicerLimitsStrict` or its wiring re-admits the
+omitted/single-limit cases with a 0 limit.
+
 ### #3043 — Security-policy missing/conflicting terminal action (commit fail-closed)
 
 `PolicyAction`'s zero value is `PolicyPermit` (`types_security.go`:

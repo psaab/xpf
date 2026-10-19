@@ -167,10 +167,8 @@ var instanceNameBlindBaseline9091 = []string{
 	"/firewall/filter",
 	"/firewall/filter/term",
 	"/firewall/filter/term/from/flexible-match-range/range",
-	"/firewall/policer",
 	"/firewall/three-color-policer",
 	"/forwarding-options/dhcp-relay/group",
-	"/forwarding-options/dhcp-relay/dhcpv6/group",
 	"/forwarding-options/port-mirroring/instance",
 	"/forwarding-options/sampling/instance",
 	"/forwarding-options/sampling/instance/family/inet/output/flow-server",
@@ -277,6 +275,9 @@ var instanceNameBlindCeiling9091 = len(instanceNameBlindBaseline9091)
 // scheduler children instead of accepting a typo that the compiler ignores.
 // #12239 moves 52 -> 53: the time-range scheduler schema is closed-world, so
 // misspelled weekdays and window leaves no longer silently disappear.
+// #15125: /firewall/policer moves blind -> armed (closedWorld on policer);
+// its grammar is leaf-complete, so if-exceding/bandwith-limit typos are
+// refused instead of compiling to a 0-limit blackhole.
 var instanceNameArmedBaseline9091 = []string{
 	"/chassis/cluster/control-ports/fpc",
 	"/chassis/cluster/redundancy-group/node",
@@ -285,6 +286,7 @@ var instanceNameArmedBaseline9091 = []string{
 	"/class-of-service/schedulers",
 	"/class-of-service/schedulers/buffer-size",
 	"/class-of-service/schedulers/transmit-rate",
+	"/firewall/policer",
 	"/interfaces/*/unit/family/inet/address/vrrp-group/track-interface",
 	"/interfaces/*/unit/family/inet/address/vrrp-group/track/interface",
 	"/interfaces/*/unit/family/inet6/address/vrrp-group/track-interface",
