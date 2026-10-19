@@ -216,11 +216,14 @@ fn ext_walk_nonfirst_fragment_payload_is_not_walked_14116() {
         assert!(ipv6_is_non_first_fragment(&pkt), "{name}");
         assert!(ipv6_is_any_fragment(&pkt), "{name}");
         // No L4 is surrendered from payload bytes, but this is the
-        // non-first verdict, not truncation/over-limit.
+        // non-first verdict, not truncation/over-limit. #15787: the
+        // `_and_protocol` wrapper reports the fragment-no-L4 sentinel
+        // at the payload offset (48 = 40 + Fragment header) instead of
+        // failing closed; `packet_rel_l4_offset` still surrenders none.
         assert_eq!(packet_rel_l4_offset(&pkt, libc::AF_INET6 as u8), None, "{name}");
         assert_eq!(
             packet_rel_l4_offset_and_protocol(&pkt, libc::AF_INET6 as u8),
-            None,
+            Some((48, crate::session::SHIM_PROTO_FRAGMENT_NO_L4)),
             "{name}"
         );
         assert!(!ipv6_ext_chain_over_limit(

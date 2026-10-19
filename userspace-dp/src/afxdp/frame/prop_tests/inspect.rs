@@ -87,15 +87,30 @@ proptest! {
         frame in arb_garbage_frame(),
         af in super::strategies::arb_af(),
     ) {
+        // #15787: `frame_l4_offset` and the composed packet-relative
+        // walk both surrender no L4 offset for a non-first fragment;
+        // they agree (both None) — this assertion pins that agreement.
         let composed = frame_l3_offset(&frame)
             .and_then(|l3| packet_rel_l4_offset(&frame[l3..], af).map(|rel| l3 + rel));
         prop_assert_eq!(frame_l4_offset(&frame, af), composed);
-        let with_proto = frame_l3_offset(&frame)
-            .and_then(|l3| packet_rel_l4_offset_and_protocol(&frame[l3..], af))
-            .map(|(rel, _)| rel);
+        // #15787: a non-first fragment resolves via `_and_protocol` to
+        // the fragment-no-L4 sentinel at the payload offset, while the
+        // offset-only walk surrenders no L4 offset. A garbage terminal
+        // protocol byte of 255 is NOT a fragment, so gate the exception
+        // on the real fragment predicate.
+        let raw_with_proto = frame_l3_offset(&frame)
+            .and_then(|l3| packet_rel_l4_offset_and_protocol(&frame[l3..], af));
         let rel_only = frame_l3_offset(&frame)
             .and_then(|l3| packet_rel_l4_offset(&frame[l3..], af));
-        prop_assert_eq!(with_proto, rel_only);
+        let is_frag_sentinel = matches!(raw_with_proto, Some((_, p)) if p == crate::session::SHIM_PROTO_FRAGMENT_NO_L4)
+            && frame_l3_offset(&frame).is_some_and(|l3| {
+                frame.get(l3..).is_some_and(|pkt| is_non_first_fragment(pkt, af))
+            });
+        if is_frag_sentinel {
+            prop_assert_eq!(rel_only, None);
+        } else {
+            prop_assert_eq!(raw_with_proto.map(|(rel, _)| rel), rel_only);
+        }
     }
 
     #[test]

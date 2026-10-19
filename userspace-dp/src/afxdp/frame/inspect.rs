@@ -820,6 +820,10 @@ pub(in crate::afxdp) fn frame_l4_offset(frame: &[u8], addr_family: u8) -> Option
             if ihl < 20 || frame.len() < l3 + ihl {
                 return None;
             }
+            // #15787: no L4 offset for a non-first fragment (payload).
+            if ipv4_is_non_first_fragment(&frame[l3..]) {
+                return None;
+            }
             Some(l3 + ihl)
         }
         libc::AF_INET6 => {
@@ -968,6 +972,11 @@ pub(in crate::afxdp) fn packet_rel_l4_offset(packet: &[u8], addr_family: u8) -> 
             if ihl < 20 || packet.len() < ihl {
                 return None;
             }
+            // #15787: a non-first fragment has no L4 header at `ihl` —
+            // the bytes there are payload. Surrender no offset.
+            if ipv4_is_non_first_fragment(packet) {
+                return None;
+            }
             Some(ihl)
         }
         libc::AF_INET6 => {
@@ -1002,6 +1011,15 @@ pub(in crate::afxdp) fn packet_rel_l4_offset_and_protocol(
             if ihl < 20 || packet.len() < ihl {
                 return None;
             }
+            // #15787: port the XDP shim's `PROTO_FRAGMENT_NO_L4`
+            // substitution (userspace-xdp `parse_ipv4`) inward: a
+            // non-first fragment's bytes at `ihl` are payload, not an
+            // L4 header, so report the fragment-no-L4 sentinel at the
+            // payload offset instead of the header's Protocol byte.
+            // First/atomic fragments keep the real protocol.
+            if ipv4_is_non_first_fragment(packet) {
+                return Some((ihl, crate::session::SHIM_PROTO_FRAGMENT_NO_L4));
+            }
             Some((ihl, packet[9]))
         }
         libc::AF_INET6 => {
@@ -1012,8 +1030,22 @@ pub(in crate::afxdp) fn packet_rel_l4_offset_and_protocol(
             // local-origin metadata, NDP/TCP-flag helpers) then trusted as
             // a real L4 protocol. #6435: the walk is the shared
             // `walk_ipv6_ext_chain` over the L3-relative slice.
-            match walk_ipv6_ext_chain(packet, 0).outcome {
+            let walk = walk_ipv6_ext_chain(packet, 0);
+            match walk.outcome {
                 ExtChainOutcome::L4(offset, protocol) => Some((offset, protocol)),
+                // #15787: port the XDP shim's `PROTO_FRAGMENT_NO_L4`
+                // substitution (userspace-xdp `parse_ipv6`) inward: a
+                // readable non-first Fragment header ends the chain in
+                // payload, so report the fragment-no-L4 sentinel at the
+                // payload offset (first byte past the Fragment header)
+                // instead of failing closed. The recorded sighting
+                // carries the header offset; fail closed if unreadable.
+                ExtChainOutcome::NonFirstFragment => {
+                    let fragment = walk.fragment?;
+                    fragment.bytes?;
+                    let payload_offset = fragment.header_offset.checked_add(8)?;
+                    Some((payload_offset, crate::session::SHIM_PROTO_FRAGMENT_NO_L4))
+                }
                 _ => None,
             }
         }
