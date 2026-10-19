@@ -5199,12 +5199,68 @@ impl PortAllocator {
     /// configured. When `capture_previous_holders` is true, the incumbent mask
     /// is captured by `capture_and_replace` while the same live-state guard
     /// remains held through eviction and installation.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn reserve_flow_maybe_persistent_with_identity(
+        &self,
+        flow: SourceNatFlowKey,
+        translated: TranslatedTuple,
+        addr_index: usize,
+        deterministic: bool,
+        deterministic_identity: Option<super::idle_lease_sync_8121::DeterministicPortedIdentity>,
+        now_ns: u64,
+        holder: NatHolder,
+        persistent: Option<(PersistentSourceKey, u64)>,
+        capture_previous_holders: bool,
+        previous_snapshot: &mut Option<SourceNatReservationSnapshot>,
+    ) -> bool {
+        self.reserve_flow_maybe_persistent_inner(
+            flow,
+            translated,
+            addr_index,
+            deterministic,
+            deterministic_identity,
+            now_ns,
+            holder,
+            persistent,
+            capture_previous_holders,
+            previous_snapshot,
+        )
+    }
+
     pub(super) fn reserve_flow_maybe_persistent(
         &self,
         flow: SourceNatFlowKey,
         translated: TranslatedTuple,
         addr_index: usize,
         deterministic: bool,
+        now_ns: u64,
+        holder: NatHolder,
+        persistent: Option<(PersistentSourceKey, u64)>,
+        capture_previous_holders: bool,
+        previous_snapshot: &mut Option<SourceNatReservationSnapshot>,
+    ) -> bool {
+        self.reserve_flow_maybe_persistent_inner(
+            flow,
+            translated,
+            addr_index,
+            deterministic,
+            None,
+            now_ns,
+            holder,
+            persistent,
+            capture_previous_holders,
+            previous_snapshot,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reserve_flow_maybe_persistent_inner(
+        &self,
+        flow: SourceNatFlowKey,
+        translated: TranslatedTuple,
+        addr_index: usize,
+        deterministic: bool,
+        deterministic_identity: Option<super::idle_lease_sync_8121::DeterministicPortedIdentity>,
         now_ns: u64,
         holder: NatHolder,
         persistent: Option<(PersistentSourceKey, u64)>,
@@ -5434,11 +5490,14 @@ impl PortAllocator {
         // An IDLE lease (`active_flows == 0`, still inside its timeout) has no
         // session to be rebuilt from and is out of scope here — see #8121.
         // #10789-F4 (Q1, verified by call graph): the lease-touching branches
-        // of this function run only when `persistent` is `Some`, which
-        // production constructs solely in `reserve_synced_on_first_pool_owner`
-        // (synced.rs) — the `None` wrapper (`reserve_flow`) never touches
-        // `persistent_by_source`. So every lease minted here is peer-derived
-        // and needs no origin parameter: `imported: true`.
+        // of this function run only when `persistent` is `Some`. Production
+        // constructs it in `reserve_synced_on_first_pool_owner` (synced.rs)
+        // and in the NAT64 synced reserve (`nat64_ports.rs`) — the `None`
+        // wrapper (`reserve_flow`) never touches `persistent_by_source`. So
+        // every lease minted here is peer-derived and needs no origin
+        // parameter: `imported: true`. #15179: the NAT64 deterministic arm
+        // threads its prefix identity so the minted BIB is joinable by the
+        // local deterministic allocator after failover.
         let persistent_key = persistent.map(|(persistent_key, timeout_ns)| {
             let timeout_ns = bounded_persistent_nat_timeout_ns(timeout_ns);
             live.insert_persistent_lease(
@@ -5456,7 +5515,11 @@ impl PortAllocator {
                     activation_previous_timeout_ns: 0,
                     address_only: false,
                     deterministic,
-                    deterministic_identity: None,
+                    deterministic_identity: if deterministic {
+                        deterministic_identity
+                    } else {
+                        None
+                    },
                     // #10789-F4: rebuilt from a synced session — never re-exported.
                     imported: true,
                     revoked: false,

@@ -1981,7 +1981,7 @@ fn reserve_synced_nat64_port_unless_peer_owns(
             snat_v4,
             port,
             addr_index,
-            prefix.deterministic_v6.is_some(),
+            prefix.deterministic_v6,
             now_ns,
             holder,
         )
@@ -1993,7 +1993,7 @@ fn reserve_synced_nat64_port_unless_peer_owns(
                 snat_v4,
                 port,
                 addr_index,
-                prefix.deterministic_v6.is_some(),
+                prefix.deterministic_v6,
                 now_ns,
                 holder,
             ),
