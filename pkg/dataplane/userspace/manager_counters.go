@@ -7,6 +7,7 @@ package userspace
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -114,26 +115,83 @@ func sumBindingCounters(status *ProcessStatus) userspaceCounterSnapshot {
 	return s
 }
 
+// resolvedBindingIfindex maps a requested logical ifindex to the physical
+// binding that carries its traffic. A VLAN subinterface (ge-0/0/0.<vlan>) has
+// its own kernel ifindex, but the AF_XDP helper binds only the parent
+// physical netdev, so BindingStatus rows exist solely for the parent. When
+// the retained snapshot names a row whose Ifindex is the request and whose
+// ParentIfindex is bound, the parent binding is authoritative for that
+// logical interface. Returns 0 when no such row exists.
+func (m *Manager) resolvedBindingIfindex(ifindex int) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastSnapshot == nil {
+		return 0
+	}
+	for i := range m.lastSnapshot.Interfaces {
+		row := &m.lastSnapshot.Interfaces[i]
+		if row.Ifindex == ifindex && row.ParentIfindex > 0 {
+			return row.ParentIfindex
+		}
+	}
+	return 0
+}
+
 // ReadInterfaceCounters returns the helper's per-interface traffic counters,
 // aggregating all queue bindings. Unavailable helper status must not be
 // represented as an authoritative zero.
+//
+// #15656: a VLAN subinterface's kernel ifindex never appears as a
+// BindingStatus.Ifindex — the helper binds the parent physical netdev.
+// Exact matching therefore returned success+zero for every tagged unit even
+// while the parent carried traffic. When no binding matches directly and
+// the retained snapshot identifies the request as a VLAN child, resolve to
+// the parent binding and return its aggregated counters. When neither a
+// direct binding nor a snapshot parent covers the ifindex, fail closed
+// with an error rather than an authoritative zero; a genuinely idle bound
+// interface still matches directly and returns its real zero.
 func (m *Manager) ReadInterfaceCounters(ifindex int) (dataplane.InterfaceCounterValue, error) {
 	status, ok := m.CachedStatus()
 	if !ok {
 		return dataplane.InterfaceCounterValue{}, errors.New("userspace interface counters unavailable: helper status not available")
 	}
 	var total dataplane.InterfaceCounterValue
+	matched := false
 	for i := range status.Bindings {
 		b := &status.Bindings[i]
 		if b.Ifindex != ifindex {
 			continue
 		}
+		matched = true
 		total.RxPackets += b.RXPackets
 		total.RxBytes += b.RXBytes
 		total.TxPackets += b.TXPackets
 		total.TxBytes += b.TXBytes
 	}
-	return total, nil
+	if matched {
+		return total, nil
+	}
+	// No direct binding: a VLAN child is carried by its parent binding.
+	if parent := m.resolvedBindingIfindex(ifindex); parent > 0 && parent != ifindex {
+		for i := range status.Bindings {
+			b := &status.Bindings[i]
+			if b.Ifindex != parent {
+				continue
+			}
+			matched = true
+			total.RxPackets += b.RXPackets
+			total.RxBytes += b.RXBytes
+			total.TxPackets += b.TXPackets
+			total.TxBytes += b.TXBytes
+		}
+		if matched {
+			return total, nil
+		}
+	}
+	if ifindex <= 0 {
+		return total, nil
+	}
+	return dataplane.InterfaceCounterValue{}, fmt.Errorf("userspace interface counters unavailable: no binding covers ifindex %d", ifindex)
 }
 
 // syncBPFCountersPreIncrementObserver is a test-only seam: it fires inside
