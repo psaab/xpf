@@ -66,6 +66,51 @@ func validateInterfaceNumeric9899(min, max uint64) LeafValidator {
 	}
 }
 
+// vlanTagsOuterValue15035 extracts the raw value token(s) following the
+// `outer` keyword of a `vlan-tags` node, across every AST shape:
+// packed Keys (`vlan-tags outer 100`), hierarchical children
+// (`vlan-tags { outer 100; }`), and the one-deeper form
+// (`vlan-tags { outer { 100; } }`). Returns (nil, false) when the node
+// carries no `outer` keyword at all. #15035 helper: compileInterfaces is
+// the only consumer; the gates keep their own positive-tag predicates.
+func vlanTagsOuterValue15035(n *Node) ([]string, bool) {
+	for i, k := range n.Keys {
+		if k == "outer" {
+			return n.Keys[i+1:], true
+		}
+	}
+	for _, c := range n.Children {
+		if len(c.Keys) > 0 && c.Keys[0] == "outer" {
+			if len(c.Keys) > 1 {
+				return c.Keys[1:], true
+			}
+			// `outer { 100; }`: the value is the grandchild's key.
+			var vals []string
+			for _, g := range c.Children {
+				vals = append(vals, g.Keys...)
+			}
+			return vals, true
+		}
+	}
+	return nil, false
+}
+
+// parseVlanTagsOuter15035 parses a `vlan-tags outer` value into a VID.
+// A TPID-prefixed value (`0x88a8.100`, the Junos TPID.VID form) names a
+// tag protocol the single-tag dataplane cannot represent, so it is
+// rejected rather than compiled to the bare VID. Otherwise the value
+// shares the `vlan-id` canonical-digits 0..4094 contract (#9899).
+func parseVlanTagsOuter15035(raw string) (uint64, error) {
+	if strings.Contains(raw, ".") {
+		return 0, fmt.Errorf("TPID-prefixed vlan-tags outer value %q is not supported: the dataplane enforces a single 802.1Q tag; configure `vlan-id` or a bare `vlan-tags outer <vid>` instead (#15035)", raw)
+	}
+	n, err := parseInterfaceNumeric9899(raw, 0, 4094)
+	if err != nil {
+		return 0, fmt.Errorf("vlan-tags outer %s", err.Error())
+	}
+	return n, nil
+}
+
 func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, warnings *[]string) error {
 	// #6782: reth interfaces whose redundancy-group token was present but
 	// unusable. Only ever populated on the tolerant path — the strict compile
@@ -455,6 +500,9 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 				return fmt.Errorf("%s", msg)
 			}
 			unit := &InterfaceUnit{Number: unitNum}
+			// #15035: lenient numeric quarantine flag, shared by the
+			// tunnel reader and the vlan/vlan-tags readers below.
+			skipUnit9899 := false
 
 			// #14435 (DR17-H6): unpack the unit node's own Keys tail.
 			// `unit 0 point-to-point family inet { ... }` (and the
@@ -528,7 +576,6 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 					tc = ifc.Tunnel.cloneForUnit(linuxName)
 				}
 				// #9156: same expansion as the interface-level reader above.
-				skipUnit9899 := false
 				for _, tunnelNode := range unitTunnelNodes {
 					// #14440: same braced-scalar pre-pass as the interface-level
 					// reader, applied after cloneForUnit so only leaves the unit
@@ -633,6 +680,52 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 					return fmt.Errorf("%s", msg)
 				}
 				unit.VlanID = int(n)
+			}
+
+			// #15035: compile `vlan-tags outer N` (no inner tag — the
+			// QinQ gate has already rejected any inner-bearing stack in
+			// strict mode) into VlanID. The gates counted this spelling
+			// as a positive tag (#5879 single S-tag, #14574 tagging
+			// requirement) but no compiler consumer read it, so the unit
+			// silently compiled untagged. Nodes carrying an `inner`
+			// keyword are skipped here: strict compile never reaches
+			// them, and the lenient path must keep its historical shape
+			// (outer dropped, #5879 warning only). A `vlan-id` on the
+			// same unit wins; vlanTagsSeen makes first-wins hold for a
+			// bare `vlan-tags outer 0` too; skipUnit9899 (unit scope)
+			// quarantines the whole unit on the lenient path.
+			vlanTagsSeen := unitNode.FindChild("vlan-id") != nil
+			for _, vtNode := range unitNode.FindChildren("vlan-tags") {
+				if vlanTagsHasToken(vtNode, "inner") {
+					continue
+				}
+				vals, hasOuter := vlanTagsOuterValue15035(vtNode)
+				if !hasOuter {
+					continue
+				}
+				raw := ""
+				if len(vals) > 0 {
+					raw = vals[0]
+				}
+				n, perr := parseVlanTagsOuter15035(raw)
+				if perr != nil {
+					msg := fmt.Sprintf("interfaces %s unit %d: %s", ifName, unitNum, perr.Error())
+					if opts.lenientInterfaceNumericBounds {
+						if warnings != nil {
+							*warnings = append(*warnings, msg+fmt.Sprintf("; skipping unit %d", unitNum))
+						}
+						skipUnit9899 = true
+						break
+					}
+					return fmt.Errorf("%s", msg)
+				}
+				if !vlanTagsSeen {
+					unit.VlanID = int(n)
+					vlanTagsSeen = true
+				}
+			}
+			if skipUnit9899 {
+				continue
 			}
 
 			// Parse inner-vlan-id on unit (QinQ inner tag)
