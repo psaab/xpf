@@ -150,3 +150,15 @@ func TestFormatFIBDumpShowsReject15742(t *testing.T) {
 		t.Fatalf("FIB dump does not distinguish reject from discard:\n%s", out)
 	}
 }
+
+// #15742e: the FIB dump must prove the cluster-terminal import mark
+// reached the helper; a plain "discard" render hid the v57 failure.
+func TestFormatFIBDumpShowsClusterTerminal15742(t *testing.T) {
+	out := FormatFIBDump(9, []FibRouteWire{
+		{Table: "inet.0", Family: "inet", Destination: "0.0.0.0/0", Kind: "route", Discard: true, ClusterTerminal: true, Preference: 200},
+		{Table: "inet.0", Family: "inet", Destination: "10.0.0.0/8", Kind: "route", Discard: true, Preference: 200},
+	})
+	if !strings.Contains(out, "discard cluster-terminal") {
+		t.Fatalf("FIB dump does not show cluster-terminal mark:\n%s", out)
+	}
+}

@@ -8076,9 +8076,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         })
                     });
                     let policy_l3_ctx = post_nat_l3_flow.as_ref().or(l3_ctx.as_ref());
-                    let final_resolution = if base_resolution.disposition
-                        == ForwardingDisposition::HAInactive
-                        && !fabric_link_ingress
+                    let final_resolution = if matches!(
+                        base_resolution.disposition,
+                        ForwardingDisposition::HAInactive
+                            | ForwardingDisposition::ClusterTerminalHAInactive
+                    ) && !fabric_link_ingress
                     {
                         let arrival_logical = resolve_ingress_logical_ifindex(
                             worker_ctx.forwarding,

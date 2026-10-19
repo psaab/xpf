@@ -94,6 +94,7 @@ impl super::Coordinator {
                         .collect(),
                     discard: entry.discard,
                     reject: entry.reject,
+                    cluster_terminal: entry.cluster_terminal,
                     next_table: entry.next_table.clone(),
                     rule_priority: entry.rule_priority,
                     preference: entry.preference,
@@ -125,6 +126,7 @@ impl super::Coordinator {
                         .collect(),
                     discard: entry.discard,
                     reject: entry.reject,
+                    cluster_terminal: entry.cluster_terminal,
                     next_table: entry.next_table.clone(),
                     rule_priority: entry.rule_priority,
                     preference: entry.preference,
@@ -302,6 +304,33 @@ mod tests {
             discard.discard && !discard.reject,
             "discard row = {discard:?}"
         );
+    }
+
+    #[test]
+    fn fib_dump_carries_cluster_terminal_15742() {
+        let snapshot = crate::ConfigSnapshot {
+            fib_generation: 9,
+            routes: vec![crate::RouteSnapshot {
+                table: "inet.0".to_string(),
+                family: "inet".to_string(),
+                destination: "0.0.0.0/0".to_string(),
+                discard: true,
+                cluster_terminal: true,
+                preference: 200,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut coordinator = super::super::Coordinator::new();
+        coordinator
+            .refresh_runtime_snapshot_disarmed(&snapshot)
+            .expect("publish the test snapshot");
+        let (_, rows) = coordinator.dump_fib().expect("dump fits");
+        let row = rows
+            .iter()
+            .find(|row| row.destination == "0.0.0.0/0")
+            .expect("cluster row dumped");
+        assert!(row.discard && row.cluster_terminal, "cluster row = {row:?}");
     }
     #[test]
     fn fib_dump_reads_published_view_not_retained_fields_11767() {

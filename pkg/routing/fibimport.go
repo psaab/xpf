@@ -92,11 +92,24 @@ const haInactiveBlackholePriority = 4242
 // clusterNull0KernelPriority is the kernel RTA_PRIORITY of the
 // cluster-mode Null0 defaults (#15742). renderClusterModeDefaults
 // renders them at FRR admin distance 250 with tag 2500; FRR installs
-// them proto static at kernel metric 20. The tag does not survive
-// into the kernel route, so (default prefix, proto static, this
-// priority) is the import-time provenance discriminator for the
-// designed split-node terminal.
+// them at kernel metric 20. The tag does not survive into the kernel
+// route, so (default prefix, static protocol, this priority) is the
+// import-time provenance discriminator for the designed split-node
+// terminal. The protocol half MUST accept both static spellings:
+// a manual `ip route` blackhole is RTPROT_STATIC (4), but every
+// FRR/staticd route — including this Null0 — is stamped
+// RTPROT_ZSTATIC (196) by zebra2proto (see rtprotZStatic). Round-5
+// live netlink on the split node proves proto=196 metric=20; the
+// v57 check for RTPROT_STATIC only never fired live.
 const clusterNull0KernelPriority = 20
+
+// clusterStaticProtocol reports whether a kernel route protocol is a
+// static spelling: RTPROT_STATIC for manual routes, RTPROT_ZSTATIC
+// (196) for every FRR/staticd route. Both name the same provenance;
+// accepting only the former missed the live cluster Null0 (#15742e).
+func clusterStaticProtocol(p netlink.RouteProtocol) bool {
+	return p == netlink.RouteProtocol(unix.RTPROT_STATIC) || int(p) == rtprotZStatic
+}
 
 // mgmtVRFTableID is the kernel routing table backing the management VRF
 // (config.ManagementVRFTableID, #9622), named here to hard-exclude the table
@@ -169,11 +182,12 @@ type LearnedRoute struct {
 	// ClusterTerminal is true only for the cluster-mode Null0 defaults
 	// (#15742 round-4): a negative learned row whose (destination,
 	// protocol, kernel metric) exactly matches the shape
-	// renderClusterModeDefaults installs -- a default prefix, proto
-	// static, kernel priority 20 (FRR AD 250). The kernel route no
-	// longer carries the FRR tag 2500, so this triple is the only
-	// provenance discriminator available at import. It marks the row
-	// as the designed split-node terminal (fabric-redirect when the
+	// renderClusterModeDefaults installs -- a default prefix, static
+	// protocol (RTPROT_STATIC or FRR's RTPROT_ZSTATIC), kernel
+	// priority 20 (FRR AD 250). The kernel route no longer carries
+	// the FRR tag 2500, so this triple is the only provenance
+	// discriminator available at import. It marks the row as the
+	// designed split-node terminal (fabric-redirect when the
 	// would-be egress RG is peer-owned) rather than an operator
 	// discard/reject, whose semantics must stay a local drop.
 	ClusterTerminal bool
@@ -342,7 +356,7 @@ func importableRouteScoped(r netlink.Route, family, tableID int, linkName func(i
 			Discard:     blackhole,
 			Reject:      reject,
 			ClusterTerminal: (dst == "0.0.0.0/0" || dst == "::/0") &&
-				r.Protocol == netlink.RouteProtocol(unix.RTPROT_STATIC) &&
+				clusterStaticProtocol(r.Protocol) &&
 				r.Priority == clusterNull0KernelPriority,
 			Protocol: rtProtoName(r.Protocol),
 			MTU:      mtu,
