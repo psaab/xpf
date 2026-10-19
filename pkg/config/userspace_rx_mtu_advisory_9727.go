@@ -22,10 +22,15 @@ const (
 	// TestUserspaceUMEMConstantsMatchTheHelper9727 binds them.
 	userspaceUMEMFrameSize = 4096
 	userspaceUMEMHeadroom  = 256
+	// userspaceXDPacketHeadroom is the kernel's fixed XDP_PACKET_HEADROOM
+	// (256). xsk_pool_get_headroom sums it with the configured UMEM headroom,
+	// so the kernel's usable RX frame size is the frame size minus both.
+	userspaceXDPacketHeadroom = 256
 	// userspaceRxMTUBudget is the largest MTU whose frame fits one UMEM frame:
-	// the frame minus the XDP headroom, a 14-byte Ethernet header and one 4-byte
-	// 802.1Q tag (FCS is stripped before XDP).
-	userspaceRxMTUBudget = userspaceUMEMFrameSize - userspaceUMEMHeadroom - 14 - 4
+	// the frame minus both headroom terms (the kernel's XDP_PACKET_HEADROOM
+	// plus the configured UMEM headroom), a 14-byte Ethernet header and one
+	// 4-byte 802.1Q tag (FCS is stripped before XDP).
+	userspaceRxMTUBudget = userspaceUMEMFrameSize - (userspaceXDPacketHeadroom + userspaceUMEMHeadroom) - 14 - 4
 )
 
 // appendUserspaceRxMTUAdvisoryLocked warns once per interface the userspace
@@ -60,11 +65,13 @@ func appendUserspaceRxMTUAdvisoryLocked(cfg *Config, opts compileOpts) {
 	for _, base := range bases {
 		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
 			"interface %s has MTU %d, above the userspace dataplane's single-frame receive "+
-				"budget of %d bytes (a %d-byte UMEM frame minus %d bytes of headroom and the "+
+				"budget of %d bytes (a %d-byte UMEM frame minus %d bytes of headroom — "+
+				"%d bytes of kernel XDP_PACKET_HEADROOM plus %d bytes of UMEM headroom — and the "+
 				"Ethernet/VLAN header; AF_XDP is bound without multi-buffer support): frames "+
 				"larger than the budget cannot reach a worker. They are dropped and counted in "+
 				"kernel_rx_dropped, or a zero-copy driver refuses the AF_XDP bind (#9727).",
-			base, over[base], userspaceRxMTUBudget, userspaceUMEMFrameSize, userspaceUMEMHeadroom))
+			base, over[base], userspaceRxMTUBudget, userspaceUMEMFrameSize,
+			userspaceXDPacketHeadroom+userspaceUMEMHeadroom, userspaceXDPacketHeadroom, userspaceUMEMHeadroom))
 	}
 }
 
