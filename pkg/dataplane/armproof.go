@@ -905,8 +905,13 @@ var xdpLinkProgramID = func(l link.Link) (progID uint32, ok bool) {
 
 // attachedInstance reads back the program instance bound at ifidx.
 //
-// ok=false means no link is tracked for this ifindex, or the readback failed —
-// both degrade the surface to uncovered rather than being papered over.
+// ok=false means no link is tracked for this ifindex or the ifindex is in
+// detach debt (#15289), or the readback failed — all degrade the surface to
+// uncovered rather than being papered over. A detach-debt link is still
+// kernel-attached (its flag-clear/Unpin failed before Close), but the
+// accepted snapshot already dropped the interface, so proving it covered
+// would certify a dropped interface as armed; a VLAN child delegating
+// through a debt parent inherits that uncovered verdict via coverDelegated.
 //
 // The generic flag is the LIVE kernel attach mode (xdpLinkModeGeneric), not
 // anything this compile recorded, because the mode persists across compiles and
@@ -914,7 +919,7 @@ var xdpLinkProgramID = func(l link.Link) (progID uint32, ok bool) {
 func (m *Manager) attachedInstance(ifidx int) (progID uint32, generic bool, ok bool) {
 	// #6740: guarded read. xdpLinkModeGeneric / xdpLinkProgramID below issue
 	// netlink+BPF queries, so the lock is released before them.
-	l, exists := m.xdpLinkFor(ifidx)
+	l, exists := m.xdpLinkForAttached(ifidx)
 	if !exists {
 		return 0, false, false
 	}

@@ -169,6 +169,29 @@ func (m *Manager) xdpLinkFor(ifindex int) (link.Link, bool) {
 	return l, ok
 }
 
+// xdpLinkForAttached is the debt-aware variant of xdpLinkFor for
+// kernel-truth census and arm-proof lookups (#15289). It reports
+// not-exists for detach-debt members even when their link stays tracked
+// after a failed flag-clear/Unpin: the accepted snapshot already dropped
+// the interface, so the stale kernel attachment must never reopen the
+// transit gate, the fence census, or the arm-coverage proof. Debt and
+// membership are read under the same m.mu hold, so the answer is a
+// consistent pair, never membership-then-debt from different instants.
+// Detach/attach lifecycle paths keep using xdpLinkFor, which must still
+// SEE debt links to retry their DetachXDP recovery (#10519).
+func (m *Manager) xdpLinkForAttached(ifindex int) (link.Link, bool) {
+	if muAcquireProbeHook != nil {
+		muAcquireProbeHook("xdpLinkFor")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, owed := m.detachDebt[ifindex]; owed {
+		return nil, false
+	}
+	l, ok := m.xdpLinks[ifindex]
+	return l, ok
+}
+
 func (m *Manager) setXDPLink(ifindex int, l link.Link) {
 	m.mu.Lock()
 	m.xdpLinks[ifindex] = l

@@ -247,6 +247,54 @@ func TestArmProofUntrackedIfindexIsUncovered(t *testing.T) {
 	}
 }
 
+// TestArmProofDetachDebtIsUncovered15289 pins #15289: a required surface
+// whose link is in detach debt is intended-detached (the accepted snapshot
+// dropped it) even though the kernel still proves it attached. Proving it
+// covered would let arm proof certify a dropped interface, and a delegated
+// child resolving through that debt parent must not inherit coverage either.
+func TestArmProofDetachDebtIsUncovered15289(t *testing.T) {
+	swapArmProbes(t,
+		func(int) bool { return false },
+		func(link.Link) (uint32, bool) { return 42, true },
+	)
+
+	m := New()
+	m.xdpLinks[5] = nil
+	m.SetDetachDebtForTest(5)
+
+	rep := m.ProveArmCoverage(newProofResult([]int{5}))
+	if rep.Uncovered != 1 || rep.Direct != 0 {
+		t.Fatalf("detach-debt surface must be uncovered; got %+v", rep)
+	}
+	if !rep.WouldGate {
+		t.Fatal("detach-debt surface must be WOULD-GATE")
+	}
+}
+
+// TestArmProofDetachDebtParentNotDelegated15289 is the delegated half: a
+// VLAN child whose parent is in detach debt must stay uncovered, not
+// delegated-covered through the debt parent's live kernel attachment.
+func TestArmProofDetachDebtParentNotDelegated15289(t *testing.T) {
+	swapArmProbes(t,
+		func(int) bool { return false },
+		func(link.Link) (uint32, bool) { return 42, true },
+	)
+
+	m := New()
+	m.xdpLinks[10] = nil
+	m.SetDetachDebtForTest(10)
+
+	r := newProofResult([]int{10, 20})
+	vlanChild(r, 20, 10)
+	rep := m.ProveArmCoverage(r)
+	if rep.Delegated != 0 {
+		t.Fatalf("child of detach-debt parent must not be delegated; got %+v", rep)
+	}
+	if rep.Uncovered != 2 {
+		t.Fatalf("debt parent and its child must both be uncovered; got %+v", rep)
+	}
+}
+
 // TestArmProofDelegatedVlanChildResolvesToParent pins the third category the
 // plan's native/generic binary misses.
 //
