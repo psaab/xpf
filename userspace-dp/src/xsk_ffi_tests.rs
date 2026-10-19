@@ -12,6 +12,7 @@ fn private_constructor_rings_borrow_umem_ring_boxes() {
     let socket_comp_addr = (&*socket_comp) as *const XskRingCons;
 
     let rings = device_queue_rings_for_create(
+        XskCreateMode::PrivateUmem,
         Some((&mut umem_fill, &mut umem_comp)),
         socket_fill,
         socket_comp,
@@ -23,6 +24,122 @@ fn private_constructor_rings_borrow_umem_ring_boxes() {
     assert_ne!(rings.comp() as *const XskRingCons, socket_comp_addr);
     assert_eq!((&*umem_fill) as *const XskRingProd, umem_fill_addr);
     assert_eq!((&*umem_comp) as *const XskRingCons, umem_comp_addr);
+}
+
+// #15088 (A61-02): the shared OWNER must borrow the UMEM's ring boxes —
+// they are libxdp's fill_save/comp_save, whose mapping is the UMEM's only
+// FILL/COMP mapping. Routing the owner through the Owned arm (the pre-fix
+// behaviour, where the owner was created exactly like a secondary) leaves
+// the worker priming a detached per-socket copy while the kernel reads
+// the UMEM mapping — and after a failed first create unmapped that
+// mapping, the copy's producer/consumer pointed into freed memory.
+// Control: the shared SECONDARY keeps owning its per-socket structs.
+#[test]
+fn shared_owner_rings_borrow_umem_secondary_rings_owned_15088() {
+    // Owner: borrowed from the UMEM.
+    let mut umem_fill: Box<XskRingProd> = Box::new(unsafe { core::mem::zeroed() });
+    let mut umem_comp: Box<XskRingCons> = Box::new(unsafe { core::mem::zeroed() });
+    let umem_fill_addr = (&*umem_fill) as *const XskRingProd;
+    let umem_comp_addr = (&*umem_comp) as *const XskRingCons;
+    let owner_rings = device_queue_rings_for_create(
+        XskCreateMode::SharedOwnerUmem,
+        Some((&mut umem_fill, &mut umem_comp)),
+        Box::new(unsafe { core::mem::zeroed() }),
+        Box::new(unsafe { core::mem::zeroed() }),
+    );
+    assert_eq!(
+        owner_rings.fill() as *const XskRingProd, umem_fill_addr,
+        "#15088: owner fill ring must be the UMEM's fill_save box"
+    );
+    assert_eq!(
+        owner_rings.comp() as *const XskRingCons, umem_comp_addr,
+        "#15088: owner comp ring must be the UMEM's comp_save box"
+    );
+
+    // Secondary (control): owns the per-socket structs libxdp filled.
+    let socket_fill: Box<XskRingProd> = Box::new(unsafe { core::mem::zeroed() });
+    let socket_comp: Box<XskRingCons> = Box::new(unsafe { core::mem::zeroed() });
+    let socket_fill_addr = (&*socket_fill) as *const XskRingProd;
+    let socket_comp_addr = (&*socket_comp) as *const XskRingCons;
+    let secondary_rings = device_queue_rings_for_create(
+        XskCreateMode::SharedUmem,
+        None,
+        socket_fill,
+        socket_comp,
+    );
+    assert_eq!(
+        secondary_rings.fill() as *const XskRingProd, socket_fill_addr,
+        "shared secondary must keep owning its per-socket fill ring"
+    );
+    assert_eq!(
+        secondary_rings.comp() as *const XskRingCons, socket_comp_addr,
+        "shared secondary must keep owning its per-socket comp ring"
+    );
+}
+
+// #15088 (A61-02): the C owner bridge must hand libxdp NULL fill/comp so
+// libxdp substitutes the UMEM's fill_save/comp_save and takes the
+// unmap == false error path on a failed create; the secondary bridge
+// must keep handing libxdp the caller's ring structs. Driven through the
+// #9726 capture seam, which records the fill/comp nullness of the shared
+// create it intercepts and returns -EINVAL without creating a socket.
+#[test]
+fn shared_owner_bridge_passes_null_fill_comp_15088() {
+    use core::ptr::null_mut;
+    let mut xsk: *mut XskSocketOpaque = null_mut();
+    let mut fill: Box<XskRingProd> = Box::new(unsafe { core::mem::zeroed() });
+    let mut comp: Box<XskRingCons> = Box::new(unsafe { core::mem::zeroed() });
+    let mut rx: Box<XskRingCons> = Box::new(unsafe { core::mem::zeroed() });
+    let mut tx: Box<XskRingProd> = Box::new(unsafe { core::mem::zeroed() });
+
+    // Owner bridge: no fill/comp parameters exist to pass.
+    unsafe { bridge_xsk_capture_socket_create_for_test(1) };
+    let owner_rc = unsafe {
+        bridge_xsk_socket_create_shared_owner(
+            &mut xsk,
+            c"xpf-15088-owner".as_ptr(),
+            0,
+            null_mut(),
+            &mut *rx,
+            &mut *tx,
+            0,
+            0,
+            0,
+        )
+    };
+    let owner_null = unsafe { bridge_xsk_captured_shared_fill_is_null() };
+
+    // Secondary bridge (control): caller structs must reach libxdp.
+    unsafe { bridge_xsk_capture_socket_create_for_test(1) };
+    let secondary_rc = unsafe {
+        bridge_xsk_socket_create_shared(
+            &mut xsk,
+            c"xpf-15088-secondary".as_ptr(),
+            0,
+            null_mut(),
+            &mut *rx,
+            &mut *tx,
+            &mut *fill,
+            &mut *comp,
+            0,
+            0,
+            0,
+        )
+    };
+    let secondary_null = unsafe { bridge_xsk_captured_shared_fill_is_null() };
+    // Restore libxdp's functions before an assertion can unwind past here.
+    unsafe { bridge_xsk_capture_socket_create_for_test(0) };
+
+    assert_eq!(owner_rc, -libc::EINVAL, "owner create did not reach the capture seam");
+    assert_eq!(
+        owner_null, 1,
+        "#15088: owner create must pass NULL fill/comp so libxdp uses fill_save/comp_save"
+    );
+    assert_eq!(secondary_rc, -libc::EINVAL, "secondary create did not reach the capture seam");
+    assert_eq!(
+        secondary_null, 0,
+        "shared secondary must keep passing its per-socket fill/comp structs"
+    );
 }
 
 // ── Producer-ring append safety (#2383) ──────────────────────────
