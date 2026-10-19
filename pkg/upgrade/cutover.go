@@ -424,6 +424,47 @@ func (r *Runner) Run(opts Options) (err error) {
 				r.removeAllPartials()
 				j = &Journal{State: StateInit}
 			}
+		} else if j.State.atLeast(StateStarted) && !j.State.atLeast(StateCommitted) {
+			// #15280 (D05-02): a STARTED journal already health-confirmed its
+			// target (StateStarted is only transitioned after StartUnit +
+			// HelperHealthy pass) but the process died, or the COMMIT stamp
+			// write failed, before the journal reached COMMITTED — so the
+			// target still carries only its in-flight (committed:false)
+			// record. It is a verified-healthy stale cut, exactly like the
+			// finished FLIPPED arm above: stamp it committed, GC, and clear
+			// before starting fresh. Without this the version stays
+			// committed:false, so the fresh cut's committed predecessor chain
+			// skips it and defaultRollbackTarget from the newer version picks
+			// the version two steps back.
+			//
+			// The journal alone does not prove the target is still live:
+			// refuse (preserving the journal for operator recovery) if
+			// `current` no longer names it — stamping a non-live version
+			// committed would mint a rollback candidate that was never the
+			// verified-live base of the next cut.
+			current, currentErr := r.readCurrentVersion()
+			if currentErr != nil {
+				return fmt.Errorf("stale STARTED recovery: read current version: %w", currentErr)
+			}
+			if current != j.TargetVersion {
+				return fmt.Errorf("stale STARTED recovery: current version %q is not the "+
+					"health-confirmed target %q (previous %q); preserving journal for operator recovery",
+					current, j.TargetVersion, j.PreviousVersion)
+			}
+			r.logf("upgrade: committing health-confirmed stale cut to %s before the new %s cut",
+				j.TargetVersion, stagedVer)
+			if err := r.stampCommittedVersion(j); err != nil {
+				return fmt.Errorf("commit stale version %s: %w", j.TargetVersion, err)
+			}
+			if err := r.gc(j); err != nil {
+				r.logf("upgrade: WARN gc of committed stale cut failed: %v", err)
+			}
+			if err := r.clearJournal(); err != nil {
+				return fmt.Errorf("clear stale cut journal: %w", err)
+			}
+			r.recordCommittedCut(j.TargetVersion)
+			r.removeAllPartials()
+			j = &Journal{State: StateInit}
 		} else {
 			// STOPPED normally means current still names PreviousVersion, but
 			// FLIP 6a may have repointed it before the process was interrupted.
