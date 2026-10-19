@@ -288,16 +288,43 @@ pub(super) fn build_live_forward_request_from_frame_with_dynamic(
     // #919/#922: ID-keyed redirect — no `zone_id_to_name` round-trip.
     // #11337: preserve a validated V2 peer scope when this packet is punted
     // again; otherwise retain the V1 zone-only stamp.
+    // #15246 (A65-02): the frame's V2 source is trustworthy only on a
+    // fabric ingress — the receive-side stamp parser
+    // (`parse_zone_encoded_fabric_ingress_from_frame`) gates on
+    // `ingress_is_fabric` and peer-RG ownership before a stamp is ever
+    // admitted as this packet's identity. On a LAN port any host can
+    // emit a `02:bf:73:<id>` source MAC naming another same-zone
+    // interface, so preserving it here would let that host choose the
+    // interface scope the peer applies to punted packets. A non-fabric
+    // ingress therefore falls through to minting from the real ingress
+    // identity (the logical ingress ifindex's own V2 scope, or the V1
+    // zone-only stamp when it has none), exactly as a packet with no
+    // stamp at all does.
     if decision.resolution.disposition == ForwardingDisposition::FabricRedirect
         && let Some(ingress_zone_id) = fabric_ingress_zone
     {
-        let v2_source = frame
-            .get(6..12)
-            .and_then(|source_mac| {
+        let v2_source = if ingress_is_fabric(forwarding, ingress_ident.ifindex) {
+            frame.get(6..12).and_then(|source_mac| {
                 fabric_nat_scope_stamp_mac_for_zone(forwarding, source_mac, ingress_zone_id)
-            });
+            })
+        } else {
+            None
+        };
         if let Some(source_mac) = v2_source {
             decision.resolution.src_mac = Some(source_mac);
+        } else if let Some(scoped_redirect) = resolve_fabric_redirect_for_ingress_identity(
+            forwarding,
+            Some(ingress_zone_id),
+            Some(
+                resolve_ingress_logical_ifindex(
+                    forwarding,
+                    ingress_ident.ifindex,
+                    meta.ingress_vlan_id,
+                )
+                .unwrap_or(ingress_ident.ifindex),
+            ),
+        ) {
+            decision.resolution.src_mac = scoped_redirect.src_mac;
         } else if let Some(zone_redirect) =
             resolve_zone_encoded_fabric_redirect_by_id(forwarding, ingress_zone_id)
         {
