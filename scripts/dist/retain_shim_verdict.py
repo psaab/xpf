@@ -15,6 +15,38 @@ from typing import Callable
 
 _OBJECT = Path("pkg/dataplane/userspace_xdp_bpfel.o")
 _VERDICT = Path("pkg/dataplane/userspace_xdp_gate_verdict.json")
+_TOOLCHAIN_TOML = Path("userspace-xdp/rust-toolchain.toml")
+
+# Mirrors ShimPinnedBPFLinkerVersion in pkg/dataplane and
+# PINNED_BPF_LINKER_VERSION in build-userspace-xdp.sh (#15218).
+_PINNED_BPF_LINKER = "0.10.2"
+# SHA-256 of "RUSTFLAGS=\nCARGO_ENCODED_RUSTFLAGS=\n": the scrubbed
+# codegen environment build-userspace-xdp.sh enforces (#15218).
+_WELL_KNOWN_CODEGEN_ENV_DIGEST = hashlib.sha256(b"RUSTFLAGS=\nCARGO_ENCODED_RUSTFLAGS=\n").hexdigest()
+
+
+def _pinned_toolchain(repo_root: Path) -> str:
+    """Parse the pinned channel exactly as the build recipe does."""
+    try:
+        lines = (repo_root / _TOOLCHAIN_TOML).read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ValueError(f"cannot read toolchain pin: {exc}") from exc
+    in_toolchain = False
+    channels: list[str] = []
+    for line in lines:
+        trimmed = line.strip()
+        if trimmed.startswith("["):
+            in_toolchain = trimmed == "[toolchain]"
+            continue
+        if not in_toolchain or "=" not in trimmed:
+            continue
+        key, _, value = trimmed.partition("=")
+        if key.strip() != "channel":
+            continue
+        channels.append(value.split("#", 1)[0].strip().strip("\"'"))
+    if len(channels) != 1 or not channels[0].startswith("nightly-"):
+        raise ValueError("toolchain pin (rust-toolchain.toml) is missing or ambiguous")
+    return channels[0]
 
 
 def validate_verdict(repo_root: Path) -> Path:
@@ -30,7 +62,7 @@ def validate_verdict(repo_root: Path) -> Path:
     if (
         not isinstance(verdict, dict)
         or type(verdict.get("schema_version")) is not int
-        or verdict["schema_version"] != 1
+        or verdict["schema_version"] != 2
     ):
         raise ValueError("unsupported or missing shim gate-verdict schema")
     if verdict.get("object_sha256") != actual_hash:
@@ -49,6 +81,21 @@ def validate_verdict(repo_root: Path) -> Path:
         raise ValueError("shim gate verdict has no valid verification timestamp") from exc
     if verified_at.tzinfo is None:
         raise ValueError("shim gate verdict timestamp must include a timezone")
+
+    # #15218: provenance. A verdict that cannot prove a pinned build
+    # under the scrubbed codegen env is not retained: an unpinned or
+    # RUSTFLAGS-tainted install must not reach a release as a PASS.
+    provenance = verdict.get("provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError("shim gate verdict records no build provenance")
+    if provenance.get("pinned") is not True:
+        raise ValueError("shim gate verdict was built with an unpinned toolchain")
+    if provenance.get("toolchain") != _pinned_toolchain(repo_root):
+        raise ValueError("shim gate verdict toolchain does not match the rust-toolchain.toml pin")
+    if provenance.get("bpf_linker") != _PINNED_BPF_LINKER:
+        raise ValueError("shim gate verdict bpf-linker does not match the pin")
+    if provenance.get("codegen_env_digest") != _WELL_KNOWN_CODEGEN_ENV_DIGEST:
+        raise ValueError("shim gate verdict was built under an unscrubbed codegen environment")
 
     stats = verdict.get("stats")
     if not isinstance(stats, dict) or not isinstance(stats.get("measured"), bool):

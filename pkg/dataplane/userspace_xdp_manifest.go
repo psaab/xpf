@@ -51,6 +51,12 @@ const (
 	// userspaceXDPObjectRelPath is the tracked shim object embedded by
 	// userspace_xdp_rust.go (`//go:embed userspace_xdp_bpfel.o`).
 	userspaceXDPObjectRelPath = "pkg/dataplane/userspace_xdp_bpfel.o"
+	// ShimPinnedBPFLinkerVersion is the bpf-linker pin the build recipe
+	// enforces (PINNED_BPF_LINKER_VERSION in build-userspace-xdp.sh).
+	// Recorded in the gate verdict's provenance (#15218); both consumer
+	// gates compare against this value so a linker drift cannot be
+	// laundered into an adopted build digest.
+	ShimPinnedBPFLinkerVersion = "0.10.2"
 
 	// userspaceXDPSourceDir holds the Rust sources compiled into the
 	// shim. Every *.rs beneath it (recursively) is a freshness input, so
@@ -132,12 +138,25 @@ func userspaceXDPBuildDigest(entries []shimManifestEntry) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// userspaceXDPGateVerdictProvenance is the build provenance the
+// recipe records through shimverify (#15218): the toolchain cargo
+// actually ran, whether it was the pin, the bpf-linker version, and
+// a digest of the codegen environment.
+type userspaceXDPGateVerdictProvenance struct {
+	Toolchain        string `json:"toolchain"`
+	Pinned           bool   `json:"pinned"`
+	BPFLinker        string `json:"bpf_linker"`
+	CodegenEnvDigest string `json:"codegen_env_digest"`
+}
+
 // userspaceXDPGateVerdict is the subset of the #10909 gate-verdict
 // sidecar the freshness gate consumes: the object the verifier gated
-// and, from #13963, the build digest its build was gated under.
+// and, from #13963, the build digest its build was gated under, plus
+// from #15218 the provenance that build ran under.
 type userspaceXDPGateVerdict struct {
-	ObjectSHA256 string `json:"object_sha256"`
-	BuildDigest  string `json:"build_digest"`
+	ObjectSHA256 string                             `json:"object_sha256"`
+	BuildDigest  string                             `json:"build_digest"`
+	Provenance   *userspaceXDPGateVerdictProvenance `json:"provenance"`
 }
 
 func readUserspaceXDPGateVerdict(repoRoot string) (*userspaceXDPGateVerdict, error) {
@@ -150,6 +169,83 @@ func readUserspaceXDPGateVerdict(repoRoot string) (*userspaceXDPGateVerdict, err
 		return nil, fmt.Errorf("parse %s: %w", UserspaceXDPGateVerdictRelPath, err)
 	}
 	return &v, nil
+}
+
+// ShimCodegenEnvDigest is SHA-256 over the canonical codegen-env
+// stream "RUSTFLAGS=<v>\nCARGO_ENCODED_RUSTFLAGS=<v>\n" (#15218).
+// These two variables are the rustc-codegen inputs cargo honours from
+// the ambient environment; everything else that can steer codegen
+// for the bpfel target lives in hashed files (.cargo/config.toml,
+// Cargo.toml, the build recipe).
+func ShimCodegenEnvDigest(rustflags, encoded string) string {
+	sum := sha256.Sum256([]byte("RUSTFLAGS=" + rustflags + "\nCARGO_ENCODED_RUSTFLAGS=" + encoded + "\n"))
+	return hex.EncodeToString(sum[:])
+}
+
+// WellKnownCodegenEnvDigest is ShimCodegenEnvDigest("",""): the only
+// codegen environment a gated build may have, because
+// build-userspace-xdp.sh scrubs both variables before running cargo.
+func WellKnownCodegenEnvDigest() string { return ShimCodegenEnvDigest("", "") }
+
+// pinnedShimToolchain extracts the pinned channel from
+// rust-toolchain.toml with the same strictness as the build recipe:
+// exactly one channel key in the [toolchain] table, formatted
+// nightly-YYYY-MM-DD. Any drift fails closed.
+func pinnedShimToolchain(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	inToolchain := false
+	var channels []string
+	for _, line := range strings.Split(string(b), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			inToolchain = trimmed == "[toolchain]"
+			continue
+		}
+		if !inToolchain {
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, "=")
+		if !ok || strings.TrimSpace(key) != "channel" {
+			continue
+		}
+		if i := strings.Index(value, "#"); i >= 0 {
+			value = value[:i]
+		}
+		channels = append(channels, strings.Trim(strings.TrimSpace(value), `"'`))
+	}
+	if len(channels) != 1 || channels[0] == "" {
+		return "", fmt.Errorf("expected exactly one channel in [toolchain] of %s, got %v", path, channels)
+	}
+	c := channels[0]
+	if len(c) != len("nightly-2006-01-02") || !strings.HasPrefix(c, "nightly-") {
+		return "", fmt.Errorf("toolchain channel %q in %s is not a nightly-YYYY-MM-DD pin", c, path)
+	}
+	for _, r := range c[len("nightly-"):] {
+		if (r < '0' || r > '9') && r != '-' {
+			return "", fmt.Errorf("toolchain channel %q in %s is not a nightly-YYYY-MM-DD pin", c, path)
+		}
+	}
+	return c, nil
+}
+
+// verdictProvenanceClean reports whether a gate verdict's recorded
+// provenance (#15218) proves a pinned build under the scrubbed
+// codegen env with the pinned bpf-linker. Anything else — absent
+// provenance, unpinned, wrong toolchain/linker, foreign env digest —
+// is not provenance a consumer gate may trust.
+func verdictProvenanceClean(repoRoot string, v *userspaceXDPGateVerdict) bool {
+	p := v.Provenance
+	if p == nil || !p.Pinned {
+		return false
+	}
+	pin, err := pinnedShimToolchain(filepath.Join(repoRoot, "userspace-xdp", "rust-toolchain.toml"))
+	if err != nil || p.Toolchain != pin {
+		return false
+	}
+	return p.BPFLinker == ShimPinnedBPFLinkerVersion && p.CodegenEnvDigest == WellKnownCodegenEnvDigest()
 }
 
 // UserspaceXDPBuildDigest returns the canonical digest of all source and
@@ -247,7 +343,7 @@ func ComputeUserspaceXDPManifest(repoRoot string) (*shimFreshnessManifest, error
 		Inputs:    entries,
 	}
 	verdict, err := readUserspaceXDPGateVerdict(repoRoot)
-	if err == nil && verdict.ObjectSHA256 == objHash && verdict.BuildDigest == userspaceXDPBuildDigest(entries) {
+	if err == nil && verdict.ObjectSHA256 == objHash && verdict.BuildDigest == userspaceXDPBuildDigest(entries) && verdictProvenanceClean(repoRoot, verdict) {
 		manifest.BuildDigest = verdict.BuildDigest
 	}
 	return manifest, nil

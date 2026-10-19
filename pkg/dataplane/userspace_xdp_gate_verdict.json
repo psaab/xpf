@@ -1,8 +1,8 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "verified_at": "2026-10-19T04:48:29.972119513Z",
   "object_sha256": "d52f02d87afd8db87348d2731c76de9341504da9415215cd33825edbf3c1d23d",
-  "build_digest": "067d6ff581b126b2e1c91d05c162d0f002322e9cb9fd919b4ac6dbbef1764e07",
+  "build_digest": "895bae8d1b884ac7bbe32507bc8b52af09a8f596c1760642bcd6e878f49bddf8",
   "verdict": "OVERRIDDEN",
   "override_consumed": true,
   "reason": "measured headroom 12.70% is below the 15.0% floor; installed with XPF_SHIM_ALLOW_LOW_HEADROOM=1",
@@ -13,5 +13,11 @@
     "headroom_pct": 12.6958,
     "floor_pct": 15,
     "slack_to_floor_insns": -23042
+  },
+  "provenance": {
+    "toolchain": "nightly-2026-05-23",
+    "pinned": true,
+    "bpf_linker": "0.10.2",
+    "codegen_env_digest": "44d8a70acf9e98d41330740d3d7dccb0644235d84bcbc227c4845f44f61549b9"
   }
 }

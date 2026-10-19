@@ -27,6 +27,9 @@ class RetainShimVerdictTests(unittest.TestCase):
         self.object_path.parent.mkdir(parents=True)
         self.verdict_path.parent.mkdir(parents=True, exist_ok=True)
         self.object_path.write_bytes(b"release shim object")
+        toolchain_path = self.root / retain_shim_verdict._TOOLCHAIN_TOML
+        toolchain_path.parent.mkdir(parents=True, exist_ok=True)
+        toolchain_path.write_text('[toolchain]\nchannel = "nightly-2026-05-23"\n', encoding="utf-8")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -39,7 +42,7 @@ class RetainShimVerdictTests(unittest.TestCase):
         else:
             processed, limit, headroom, slack = 800000, 1000000, 20.0, 50000
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "verified_at": datetime.now(timezone.utc).isoformat(),
             "object_sha256": hashlib.sha256(self.object_path.read_bytes()).hexdigest(),
             "verdict": "OVERRIDDEN" if override else "PASS",
@@ -52,6 +55,12 @@ class RetainShimVerdictTests(unittest.TestCase):
                 "headroom_pct": headroom,
                 "floor_pct": 15.0,
                 "slack_to_floor_insns": slack,
+            },
+            "provenance": {
+                "toolchain": "nightly-2026-05-23",
+                "pinned": True,
+                "bpf_linker": "0.10.2",
+                "codegen_env_digest": hashlib.sha256(b"RUSTFLAGS=\nCARGO_ENCODED_RUSTFLAGS=\n").hexdigest(),
             },
         }
 
@@ -92,6 +101,38 @@ class RetainShimVerdictTests(unittest.TestCase):
     def test_unmeasured_verdict_without_override_is_rejected(self):
         self.write_verdict(self.verdict(measured=False, override=False))
         with self.assertRaisesRegex(ValueError, "not explicitly overridden"):
+            retain_shim_verdict.validate_verdict(self.root)
+
+    # #15218: provenance legs. Each defective-provenance verdict must
+    # be rejected before upload; the clean control is
+    # test_valid_pass_is_uploaded_as_release_asset above.
+    def test_missing_provenance_is_rejected_15218(self):
+        verdict = self.verdict()
+        del verdict["provenance"]
+        self.write_verdict(verdict)
+        with self.assertRaisesRegex(ValueError, "no build provenance"):
+            retain_shim_verdict.validate_verdict(self.root)
+
+    def test_unpinned_provenance_is_rejected_15218(self):
+        verdict = self.verdict()
+        verdict["provenance"]["pinned"] = False
+        verdict["provenance"]["toolchain"] = "nightly-2026-05-27"
+        self.write_verdict(verdict)
+        with self.assertRaisesRegex(ValueError, "unpinned toolchain"):
+            retain_shim_verdict.validate_verdict(self.root)
+
+    def test_unscrubbed_codegen_env_is_rejected_15218(self):
+        verdict = self.verdict()
+        verdict["provenance"]["codegen_env_digest"] = "0" * 64
+        self.write_verdict(verdict)
+        with self.assertRaisesRegex(ValueError, "unscrubbed codegen"):
+            retain_shim_verdict.validate_verdict(self.root)
+
+    def test_wrong_bpf_linker_is_rejected_15218(self):
+        verdict = self.verdict()
+        verdict["provenance"]["bpf_linker"] = "0.9.0"
+        self.write_verdict(verdict)
+        with self.assertRaisesRegex(ValueError, "bpf-linker does not match"):
             retain_shim_verdict.validate_verdict(self.root)
 
 

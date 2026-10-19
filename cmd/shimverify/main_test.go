@@ -389,8 +389,17 @@ func TestShimverifyWritesGateVerdict(t *testing.T) {
 				[]string{"shimverify", objectPath, "--gate-verdict", verdictPath},
 				&stdout, &stderr,
 				func(key string) string {
-					if key == "XPF_SHIM_BUILD_DIGEST" {
+					switch key {
+					case "XPF_SHIM_BUILD_DIGEST":
 						return strings.Repeat("a", 64)
+					case "XPF_SHIM_TOOLCHAIN":
+						return "nightly-2026-05-23"
+					case "XPF_SHIM_PINNED":
+						return "1"
+					case "XPF_SHIM_BPF_LINKER":
+						return "0.10.2"
+					case "XPF_SHIM_CODEGEN_ENV_DIGEST":
+						return dataplane.WellKnownCodegenEnvDigest()
 					}
 					return tc.override
 				},
@@ -414,8 +423,12 @@ func TestShimverifyWritesGateVerdict(t *testing.T) {
 				t.Fatalf("decode verdict: %v", err)
 			}
 			sum := sha256.Sum256(object)
-			if got.SchemaVersion != 1 || got.ObjectSHA256 != hex.EncodeToString(sum[:]) {
-				t.Errorf("schema/object binding = (%d, %q), want schema 1 and candidate SHA-256", got.SchemaVersion, got.ObjectSHA256)
+			if got.SchemaVersion != 2 || got.ObjectSHA256 != hex.EncodeToString(sum[:]) {
+				t.Errorf("schema/object binding = (%d, %q), want schema 2 and candidate SHA-256", got.SchemaVersion, got.ObjectSHA256)
+			}
+			if got.Provenance.Toolchain != "nightly-2026-05-23" || !got.Provenance.Pinned ||
+				got.Provenance.BPFLinker != "0.10.2" || got.Provenance.CodegenEnvDigest != dataplane.WellKnownCodegenEnvDigest() {
+				t.Errorf("#15218: recorded provenance = %+v, want pinned nightly-2026-05-23 / bpf-linker 0.10.2 / scrubbed-env digest", got.Provenance)
 			}
 			if got.BuildDigest != strings.Repeat("a", 64) {
 				t.Errorf("build digest = %q, want attested source digest", got.BuildDigest)
