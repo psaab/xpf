@@ -86,6 +86,24 @@ func runUniformGatesDHCPApp(tree *ConfigTree, cfg *Config, opts compileOpts) err
 		}
 	}
 
+	// #15206 (A17-03) undeclared DHCP-server group-interface gate, the
+	// #9407 residual. Strict on commit / commit-check: a group interface
+	// ref naming no configured interface or unit renders verbatim into
+	// Kea's interfaces-config as a device the kernel does not have; Kea
+	// refuses the whole rendered file and every pool of the family stops
+	// while the commit reports success. The #9407 advisory survives in
+	// ValidateConfig with the corrected whole-family wording for boxes
+	// already carrying the ref. The tolerant load / peer-sync paths warn
+	// so a persisted config still boots (#1960).
+	if err := validateDHCPServerInterfaceRefStrict(cfg); err != nil {
+		if opts.lenientDHCPServerIfaceRef {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("DHCP server group interface (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #2142 application-definition port/protocol fail-open gate. Strict on
 	// commit / commit-check (hard-reject a `set applications application` whose
 	// destination-port / source-port is malformed or whose protocol is unknown

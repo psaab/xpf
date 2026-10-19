@@ -12,7 +12,8 @@ import (
 func TestCheckTextRefusesDuplicateDHCPGroupInterface15028(t *testing.T) {
 	cluster := "chassis { cluster { authentication-key test-cluster-psk-15028; node 0; reth-count 2; redundancy-group 1 { node 0 priority 200; node 1 priority 100; } } } " +
 		"interfaces { ge-0/0/1 { gigether-options { redundant-parent reth1; } } " +
-		"reth1 { redundant-ether-options { redundancy-group 1; } unit 0 { family inet { address 10.0.61.1/24; } } } } "
+		"reth1 { redundant-ether-options { redundancy-group 1; } unit 0 { family inet { address 10.0.61.1/24; } } } " +
+		"ge-0/0/2 { unit 0 { family inet { address 10.0.62.1/24; } } } } "
 	v4dup := cluster + "system { services { dhcp-local-server { " +
 		"group g1 { interface reth1.0; pool p1 { subnet 10.0.61.0/24; address-range low 10.0.61.100 high 10.0.61.199; } } " +
 		"group g2 { interface ge-0/0/1.0; pool p1 { subnet 10.0.62.0/24; address-range low 10.0.62.100 high 10.0.62.199; } } } } }"

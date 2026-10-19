@@ -2,77 +2,60 @@ package config
 
 import (
 	"fmt"
-	"sort"
+	"strings"
 )
 
-// validateDHCPServerInterfaceRefWarnings closes the residual #9407 leaves.
+// validateDHCPServerInterfaceRefWarnings is the ValidateConfig twin of
+// the #15206 strict gate.
 //
 // `system services dhcp-local-server group <g> interface <ref>` (and the
-// DHCPv6 twin) names the segment Kea serves. The daemon resolves it to a kernel
-// device through Config.ResolveKernelIfName (#9407), and that resolver has an
-// honest limit: when the ref names a unit the config never declares, it cannot
-// know what device was meant and returns the ref verbatim — `reth1.0` stays
-// `ge-0-0-1.0`, which is not a device.
+// DHCPv6 twin) names the segment Kea serves. The daemon resolves it to a
+// kernel device through Config.ResolveKernelIfName (#9407), and that
+// resolver has an honest limit: when the ref names a unit the config
+// never declares, it cannot know what device was meant and returns the
+// ref verbatim — `reth1.7` stays `reth1.7`, which is not a device.
 //
-// That residual is not worth GUESSING at (a blanket ".0" strip would also
-// rewrite a legitimately dotted DECLARED interface name, the #8994 case). It is
-// worth SAYING. A group whose unit is undeclared has no address either, so Kea
-// could not have matched a subnet on it even with a perfect device name — the
-// config is broken, and the operator should hear that at commit rather than
-// discover it as a segment that never gets leases.
+// #9407 left this advisory-only, saying "the segment gets no leases".
+// That understated the blast radius (#15206, A17-03): Kea validates the
+// rendered file as one unit, so the phantom device makes it refuse the
+// whole file and every pool of the family stops serving. The strict
+// commit / commit-check path therefore hard-rejects the ref
+// (validateDHCPServerInterfaceRefStrict); this advisory remains because
+// the alarm surfaces recompute ValidateConfig from the ACTIVE config
+// rather than reading cfg.Warnings (the #4788/#4785 doctrine), so a box
+// already carrying the bad ref — committed by an older build, loaded
+// leniently per #1960 — still hears about it, now with the correct
+// whole-family consequence.
 //
-// Advisory rather than gate, per #1960, and for the same reason as the sibling
-// #9405 / #9406 advisories: the tolerant load and HA config-sync paths must
-// still accept a config whose interface set does not explain every reference.
-//
-// Families and groups are walked in sorted order so the message set is
-// deterministic.
+// The ref walk is shared with the strict gate
+// (dhcpServerGroupIfaceRefs15206) and families/groups are walked in
+// sorted order, so the message set is deterministic and the two
+// surfaces can never disagree about which refs exist.
 func validateDHCPServerInterfaceRefWarnings(cfg *Config) []string {
 	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
 		return nil
 	}
-	families := []struct {
-		label string
-		local *DHCPLocalServerConfig
-	}{
-		{"dhcp-local-server", cfg.System.DHCPServer.DHCPLocalServer},
-		{"dhcpv6-local-server", cfg.System.DHCPServer.DHCPv6LocalServer},
+	refs := dhcpServerGroupIfaceRefs15206(cfg)
+	if len(refs) == 0 {
+		return nil
 	}
-
-	var declared map[string]*InterfaceConfig
+	declared := declaredInterfaceIndex(cfg)
+	lifelines := HostInboundLifelineSet(cfg)
 	var warnings []string
-	for _, fam := range families {
-		if fam.local == nil || len(fam.local.Groups) == 0 {
+	for _, r := range refs {
+		if strings.HasSuffix(r.ref, "*") || HostInboundLifelineInterface(r.ref, lifelines) {
 			continue
 		}
-		if declared == nil {
-			declared = declaredInterfaceIndex(cfg)
+		reason := unresolvedInterfaceRef(declared, r.ref)
+		if reason == "" {
+			continue
 		}
-		names := make([]string, 0, len(fam.local.Groups))
-		for name := range fam.local.Groups {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			g := fam.local.Groups[name]
-			if g == nil {
-				continue
-			}
-			for _, ref := range g.Interfaces {
-				if ref == "" {
-					continue
-				}
-				reason := unresolvedInterfaceRef(declared, ref)
-				if reason == "" {
-					continue
-				}
-				warnings = append(warnings, fmt.Sprintf(
-					"system services %s group %s interface %s %s — Kea will be "+
-						"given a device name the kernel does not have, and the "+
-						"segment gets no leases (#9407).",
-					fam.label, name, ref, reason))
-			}
-		}
+		warnings = append(warnings, fmt.Sprintf(
+			"system services %s group %s interface %s %s — Kea will be "+
+				"given a device name the kernel does not have; Kea refuses "+
+				"to load the rendered file, so every pool of the %s family "+
+				"stops serving, not just this segment (#15206).",
+			r.family, r.group, r.ref, reason, r.family))
 	}
 	return warnings
 }

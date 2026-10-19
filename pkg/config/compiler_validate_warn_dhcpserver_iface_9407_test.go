@@ -5,11 +5,12 @@ import (
 	"testing"
 )
 
-// #9407 advisory. The kernel-name resolver cannot resolve a unit the config
-// never declares — it returns the reference verbatim, and `ge-0-0-1.0` is not a
-// device. Guessing (a blanket ".0" strip) would rewrite a legitimately dotted
-// DECLARED interface name too (#8994), so the residual is SAID rather than
-// guessed at.
+// #9407 advisory, corrected by #15206. The kernel-name resolver cannot
+// resolve a unit the config never declares — it returns the reference
+// verbatim, and `reth1.7` is not a device. #15206 hard-rejects the ref
+// at strict commit; this ValidateConfig twin keeps the alarm surfaces
+// honest for a config already carrying it, with the whole-family
+// consequence (Kea refuses the rendered file).
 
 const keaIfaces9407 = `
 interfaces {
@@ -45,7 +46,7 @@ system {
 	}
 	var out []string
 	for _, w := range ValidateConfig(cfg) {
-		if strings.Contains(w, "#9407") {
+		if strings.Contains(w, "#15206") {
 			out = append(out, w)
 		}
 	}
@@ -75,9 +76,9 @@ func TestDHCPServerInterfaceRefWarnings9407(t *testing.T) {
 			want: "interface reth9.0 names no configured interface",
 		},
 		{
-			name: "the consequence names Kea and the symptom",
+			name: "the consequence names Kea and the whole family (#15206)",
 			body: "interface reth9.0;",
-			want: "Kea will be given a device name the kernel does not have",
+			want: "Kea will be given a device name the kernel does not have; Kea refuses to load the rendered file, so every pool of the dhcp-local-server family stops serving, not just this segment",
 		},
 	}
 	for _, tc := range cases {
@@ -90,7 +91,7 @@ func TestDHCPServerInterfaceRefWarnings9407(t *testing.T) {
 				return
 			}
 			if len(got) == 0 {
-				t.Fatalf("no #9407 advisory; want one carrying %q", tc.want)
+				t.Fatalf("no #15206 advisory; want one carrying %q", tc.want)
 			}
 			if joined := strings.Join(got, "\n"); !strings.Contains(joined, tc.want) {
 				t.Fatalf("advisory %q does not carry %q", joined, tc.want)
@@ -120,12 +121,12 @@ system {
 	}
 	var got []string
 	for _, w := range ValidateConfig(cfg) {
-		if strings.Contains(w, "#9407") {
+		if strings.Contains(w, "#15206") {
 			got = append(got, w)
 		}
 	}
 	if len(got) == 0 {
-		t.Fatal("no #9407 advisory for a DHCPv6 group; the v6 family shares the " +
+		t.Fatal("no #15206 advisory for a DHCPv6 group; the v6 family shares the " +
 			"derivation, so a v4-only advisory covers half the surface")
 	}
 	if !strings.Contains(strings.Join(got, "\n"), "dhcpv6-local-server group g6") {

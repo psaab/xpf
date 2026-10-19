@@ -17,6 +17,7 @@ import (
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dhcpserver"
 	"github.com/psaab/xpf/pkg/ra"
 	"github.com/psaab/xpf/pkg/vrrp"
 )
@@ -2426,6 +2427,19 @@ func (d *Daemon) filterDHCPConfigForMasterRGsWithMasters(cfg *config.Config, mas
 	if result.DHCPLocalServer == nil && result.DHCPv6LocalServer == nil {
 		return nil
 	}
+	// #15206 belt: drop resolved names no declared interface produces
+	// before Kea sees them (Kea refuses the whole family file). Runs on
+	// the freshly-allocated filtered copy; cfg is never written.
+	warn := func(msg string, args ...any) { slog.Warn(msg, args...) }
+	if filtered, changed := dhcpserver.FilterKeaInterfaces15206(&result, cfg, "4", warn); changed {
+		result = *filtered
+	}
+	if filtered, changed := dhcpserver.FilterKeaInterfaces15206(&result, cfg, "6", warn); changed {
+		result = *filtered
+	}
+	if result.DHCPLocalServer == nil && result.DHCPv6LocalServer == nil {
+		return nil
+	}
 	return &result
 }
 
@@ -2890,7 +2904,18 @@ func desiredStandaloneDHCPConfig(cfg *config.Config) config.DHCPServerConfig {
 	if cfg == nil {
 		return config.DHCPServerConfig{}
 	}
-	return resolveDHCPRethInterfaces(cfg.System.DHCPServer, cfg)
+	resolved := resolveDHCPRethInterfaces(cfg.System.DHCPServer, cfg)
+	// #15206 belt: drop resolved names no declared interface produces
+	// before Kea sees them (Kea refuses the whole family file). Runs on
+	// the resolved COPY; the shared active config is never written.
+	warn := func(msg string, args ...any) { slog.Warn(msg, args...) }
+	if filtered, changed := dhcpserver.FilterKeaInterfaces15206(&resolved, cfg, "4", warn); changed {
+		resolved = *filtered
+	}
+	if filtered, changed := dhcpserver.FilterKeaInterfaces15206(&resolved, cfg, "6", warn); changed {
+		resolved = *filtered
+	}
+	return resolved
 }
 
 // resolveDHCPRethInterfaces RETURNS a copy of dhcpCfg whose DHCP server group

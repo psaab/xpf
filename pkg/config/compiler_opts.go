@@ -1778,6 +1778,16 @@ type compileOpts struct {
 	// family. The Kea renderer de-duplicates the list, so Kea still
 	// loads on the tolerant path.
 	lenientDHCPGroupInterfaces bool
+	// lenientDHCPServerIfaceRef (#15206) downgrades the undeclared
+	// group-interface-ref gate (validateDHCPServerInterfaceRefStrict)
+	// to a cfg.Warnings entry on the tolerant load / peer-sync paths, so
+	// a persisted config carrying a DHCP-server group ref that names no
+	// configured interface or unit still boots (#1960). The strict
+	// commit / commit-check path hard-rejects it: the ref renders into
+	// Kea's interfaces-config as a device the kernel does not have, Kea
+	// refuses the whole rendered file, and every pool of the family
+	// stops serving.
+	lenientDHCPServerIfaceRef bool
 	// lenientWireguardPeers (#1434 multi-peer) downgrades the WireGuard
 	// per-peer gate (validateWireguardPeersStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check
@@ -3645,6 +3655,7 @@ func lenientCompileOpts() compileOpts {
 		lenientDHCPPoolSubnets:                 true,
 		lenientDHCPPoolValues:                   true,
 		lenientDHCPGroupInterfaces:              true,
+		lenientDHCPServerIfaceRef:               true,
 		lenientWireguardPeers:                  true,
 		lenientTunnelOuterFamily:               true,
 		lenientGreDuplicateOuter:               true,
