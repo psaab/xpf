@@ -64,6 +64,27 @@ pub(in crate::afxdp) fn resolve_mirror_config(
         resolve_ingress_logical_ifindex(forwarding, ingress_ifindex, ingress_vlan_id)
             .filter(|ifindex| *ifindex > 0)
             .unwrap_or(ingress_ifindex);
+    // #15113: a unit-scoped row matches only its own VID. It wins over
+    // the bare fallback on the same bind port; a different VID must
+    // not fall through to a unit-0 row keyed by the shared ifindex.
+    // VID 0 also covers the native VID: ingress_logical resolution
+    // maps native traffic to its unit, whose scoped row is keyed by
+    // the parent bind ifindex here, so check both the raw and the
+    // logical bind keys at VID 0 and at the packet VID.
+    if let Some(cfg) = forwarding
+        .mirror_configs_scoped
+        .get(&(ingress_ifindex, ingress_vlan_id))
+        .or_else(|| {
+            forwarding
+                .mirror_configs_scoped
+                .get(&(logical_ifindex, ingress_vlan_id))
+        })
+    {
+        return Some(*cfg);
+    }
+    // Scoped rows live only in the scoped map, so the bare fallback
+    // below cannot return one: pre-fix the unit-0 row lived in the
+    // bare map under the shared ifindex and captured every VID.
     forwarding
         .mirror_configs
         .get(&logical_ifindex)

@@ -915,6 +915,13 @@ pub(crate) struct MirrorConfigSnapshot {
     pub output_ifindex: i32,
     #[serde(default)]
     pub rate: u32,
+    /// #15113: unit scope of the ingress. `unit_scoped` false is the
+    /// bare physical input (all units); true matches only
+    /// `ingress_vlan_id` (0 = untagged/native).
+    #[serde(rename = "ingress_vlan_id", default)]
+    pub ingress_vlan_id: i32,
+    #[serde(rename = "unit_scoped", default)]
+    pub unit_scoped: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

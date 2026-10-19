@@ -2368,6 +2368,8 @@ fn config_snapshot_tolerates_mirror_exclusions_7357() {
             ingress_ifindex: 11,
             output_ifindex: 22,
             rate: 100,
+            ingress_vlan_id: 0,
+            unit_scoped: false,
         }],
         "the unknown mirror_exclusions key must not disturb the entries the helper does consume"
     );
@@ -2401,11 +2403,15 @@ fn config_snapshot_mirror_configs_roundtrip() {
                 ingress_ifindex: 11,
                 output_ifindex: 22,
                 rate: 100,
+                ingress_vlan_id: 0,
+                unit_scoped: false,
             },
             MirrorConfigSnapshot {
                 ingress_ifindex: 12,
                 output_ifindex: 22,
                 rate: 0,
+                ingress_vlan_id: 0,
+                unit_scoped: false,
             },
         ],
         "Rust snapshot DTO must round-trip the Go mirror_configs wire shape"

@@ -261,7 +261,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // pool_unusable_reason; a v50 helper ignoring them would mint from an
 // unusable NAT64 pool, so exact equality fences the pairing.
 // v51 -> v52 (#14947): DestinationNATRuleSnapshot.lenient_match_dropped.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 52;
+// v52 -> v53 (#15113): MirrorConfigSnapshot carries ingress_vlan_id +
+// unit_scoped; a v52 helper keys mirrors by base ifindex alone and a
+// unit-0 input mirrors every tagged sibling on the port.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 53;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
