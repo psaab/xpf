@@ -375,6 +375,57 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	// #15121 (A86-03): routing-domain claims of unit rows keyed by the
+	// netdev they collapse onto. snapshotLinuxName can map a DIFFERENT
+	// interface's unit onto this interface's base netdev — reth0.0
+	// resolves through RethToPhysical to its member ge-0/0/1, whose own
+	// interface has no units at all — so the #14331 own-unit-0 lookup
+	// cannot see that claim. A unit only claims the netdev it actually
+	// lands on (snapshotLinuxName equality): a VLAN/tunnel unit on its
+	// own device claims that device, never the base. Disabled units own
+	// nothing, mirroring buildUserspaceIngressDomainEntries. Two
+	// different domains claiming one netdev is ambiguous: no claim is
+	// published and the base row keeps its own resolution, leaving the
+	// fail-closed ambiguity guards in maps_sync to adjudicate.
+	type sharedNetdevClaim struct {
+		instance  string
+		domain    uint32
+		ambiguous bool
+	}
+	sharedNetdevClaims := make(map[string]sharedNetdevClaim)
+	for _, ownerName := range names {
+		ownerIface := cfg.Interfaces.Interfaces[ownerName]
+		if ownerIface == nil || ownerIface.Disable {
+			continue
+		}
+		unitNums := make([]int, 0, len(ownerIface.Units))
+		for unitNum := range ownerIface.Units {
+			unitNums = append(unitNums, unitNum)
+		}
+		sort.Ints(unitNums)
+		for _, unitNum := range unitNums {
+			unit := ownerIface.Units[unitNum]
+			if unit == nil || unit.Disable {
+				continue
+			}
+			unitKey := fmt.Sprintf("%s.%d", ownerName, unitNum)
+			instance, claimed := ifaceRoutingInstance[unitKey]
+			_, quarantined := quarantinedKeys[unitKey]
+			if !claimed && !quarantined {
+				continue
+			}
+			linuxUnit := snapshotLinuxName(cfg, ownerName, ownerIface, unit)
+			domain := routingDomainForInterfaceKey(unitKey, ifaceRoutingInstance, quarantinedKeys)
+			if prior, exists := sharedNetdevClaims[linuxUnit]; exists {
+				if prior.domain != domain {
+					prior.ambiguous = true
+					sharedNetdevClaims[linuxUnit] = prior
+				}
+				continue
+			}
+			sharedNetdevClaims[linuxUnit] = sharedNetdevClaim{instance: instance, domain: domain}
+		}
+	}
 	out := make([]InterfaceSnapshot, 0, len(names))
 	for _, name := range names {
 		iface := cfg.Interfaces.Interfaces[name]
@@ -413,6 +464,21 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 		// routingDomainForInterfaceKey resolution). A VLAN/tunnel unit .0
 		// on its own netdev does not collapse and leaves the base row
 		// untouched. An explicit bare-key membership keeps precedence.
+		//
+		// #15121 (A86-03): the collapsing unit may belong to a DIFFERENT
+		// interface. reth0's base and unit-0 rows resolve through
+		// RethToPhysical onto the member ge-0/0/1, whose own interface
+		// typically has no units, so the own-unit-0 lookup above finds
+		// nothing and the member base row would keep domain 0 on the
+		// very netdev reth0.0 places in a VRF. When this row's own
+		// resolution left it in the default domain, inherit the single
+		// unambiguous routing-domain claim any unit row makes on this
+		// same netdev (quarantine sentinel included, resolved above).
+		// A base row with a nonzero domain of its own — including the
+		// quarantine sentinel — is never overridden, and a disabled
+		// interface owns no addresses to misclassify, so it is left
+		// untouched. Ambiguous (multi-domain) netdevs publish no claim
+		// and keep today's fail-closed behaviour.
 		baseRoutingInstance := ifaceRoutingInstance[name]
 		baseRoutingDomain := routingDomainForInterfaceKey(name, ifaceRoutingInstance, quarantinedKeys)
 		if _, bareClaimed := ifaceRoutingInstance[name]; !bareClaimed {
@@ -423,6 +489,12 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 					baseRoutingInstance = ifaceRoutingInstance[unitKey]
 					baseRoutingDomain = routingDomainForInterfaceKey(unitKey, ifaceRoutingInstance, quarantinedKeys)
 				}
+			}
+		}
+		if baseRoutingDomain == 0 && !iface.Disable {
+			if claim, ok := sharedNetdevClaims[linuxName]; ok && !claim.ambiguous {
+				baseRoutingInstance = claim.instance
+				baseRoutingDomain = claim.domain
 			}
 		}
 		out = append(out, InterfaceSnapshot{
