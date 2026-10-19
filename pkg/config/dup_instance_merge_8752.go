@@ -42,6 +42,29 @@ import "strings"
 // The narrowing direction (a later deny over an earlier permit) is left alone:
 // it admits nothing a statement denied, and it is the #8752 fixture this fold was
 // built for.
+//
+// #14968 (D30-02): THE SAME QUESTION, ASKED OF THE MATCH AND THE SCHEDULE.
+// #9571 compared the statements' ACTIONS against the merged action, but the
+// fold also overwrites WHAT the merged action applies to. Three ways, all
+// measured on the tolerant path:
+//   - CROSS-PRODUCT PERMIT WIDENING. Two PERMIT statements that differ in two
+//     or more match dimensions fold into source-union × destination-union ×
+//     application-union (compilePolicy accumulates every match block), so the
+//     merged permit covers source/destination/application combinations no
+//     statement permitted (#9571 passes over this: no statement restricts).
+//   - EXCLUDED-SET DENY DISARMING. An excluded-address flag/list authored on
+//     one statement is OR-ed/unioned onto the merged policy (compilePolicy
+//     sets the flag if any statement sets it and unions the lists), so a DENY
+//     that survives the fold matches the COMPLEMENT of that union and no
+//     longer covers traffic its own statement denied.
+//   - SCHEDULER NARROWING. A `scheduler-name` authored on one statement is
+//     inherited by the merged policy (last-wins), so an unconditional DENY
+//     that survives the fold is only active inside another statement's window.
+// Each still folds into one policy object, but is poisoned exactly like a
+// #9571 widening (LenientContentDropped; the helper refuses the snapshot).
+// Folds whose merged semantics ARE the union of the statements — a permit
+// pair differing in at most one dimension, a deny pair with identical
+// excluded sets, a pair sharing one scheduler — stay unpoisoned (#8752).
 
 // WHY MERGE RATHER THAN REPLACE, and it is not a preference. Flat `set` already
 // MERGES — pinned by TestFlatSetMergesWhereHierarchicalDuplicates — so the two
@@ -118,10 +141,10 @@ func mergeDuplicateNamedInstances(tree *ConfigTree) ([]string, []foldWidenedPoli
 			// global { policy … }
 			for _, g := range pol.FindChildren("global") {
 				merged, widened, conflicting = foldPolicyInstancesWith12820(g, askGlobal9571, merged,
-					func(names []string) []foldWidenedPolicy9571 {
+					func(names []foldWidenedName14968) []foldWidenedPolicy9571 {
 						out := make([]foldWidenedPolicy9571, 0, len(names))
-						for _, name := range names {
-							out = append(out, foldWidenedPolicy9571{global: true, name: name})
+						for _, n := range names {
+							out = append(out, foldWidenedPolicy9571{global: true, name: n.name, semantic: n.semantic})
 						}
 						return out
 					},
@@ -142,7 +165,9 @@ func foldPolicyInstances12820(parent *Node, fromKeys, toKeys []string,
 	ask policyActionAsk9571, merged []string, widened []foldWidenedPolicy9571,
 	conflicting []directTerminalActionConflict11063) ([]string, []foldWidenedPolicy9571, []directTerminalActionConflict11063) {
 	return foldPolicyInstancesWith12820(parent, ask, merged,
-		func(w []string) []foldWidenedPolicy9571 { return zonePairWidened9571(fromKeys, toKeys, w) },
+		func(w []foldWidenedName14968) []foldWidenedPolicy9571 {
+			return zonePairWidened9571(fromKeys, toKeys, w)
+		},
 		func(c []string) []directTerminalActionConflict11063 {
 			return zonePairDirectConflicts11063(fromKeys, toKeys, c)
 		}, widened, conflicting)
@@ -152,7 +177,7 @@ func foldPolicyInstances12820(parent *Node, fromKeys, toKeys []string,
 // peeled `policy { name { ... } }` wrappers into one scratch, so duplicates
 // across wrappers fold together.
 func foldPolicyInstancesWith12820(parent *Node, ask policyActionAsk9571, merged []string,
-	wrapW func([]string) []foldWidenedPolicy9571,
+	wrapW func([]foldWidenedName14968) []foldWidenedPolicy9571,
 	wrapC func([]string) []directTerminalActionConflict11063,
 	widened []foldWidenedPolicy9571,
 	conflicting []directTerminalActionConflict11063) ([]string, []foldWidenedPolicy9571, []directTerminalActionConflict11063) {
@@ -329,13 +354,17 @@ func mergeDirectConflicts11063(a, b []directTerminalActionConflict11063) []direc
 // each effective policy instance before folding. Conflicts created only by
 // combining otherwise valid instances are handled by the widening classifier.
 // The #9023 block sites pass askNone9571, so they do not inspect policy actions.
-func mergeInstancesUnder(parent *Node, keyword string, ask policyActionAsk9571) (names, widened, conflicting []string) {
+func mergeInstancesUnder(parent *Node, keyword string, ask policyActionAsk9571) (names []string, widened []foldWidenedName14968, conflicting []string) {
 	if parent == nil {
 		return nil, nil, nil
 	}
 	first := map[string]*Node{}
 	restrictive := map[string]bool{}
 	folded := map[string]bool{}
+	// #14968: every source statement's compiled policy, in fold order, so the
+	// post-fold classifier can compare the merged match/scheduler against the
+	// statements rather than against only the final action (#9571).
+	sources := map[string][]*Policy{}
 	var foldedNames []string
 	var kept []*Node
 	for _, child := range parent.Children {
@@ -358,6 +387,7 @@ func mergeInstancesUnder(parent *Node, keyword string, ask policyActionAsk9571) 
 				name string
 				node *Node
 			}{name, child}, isGlobal)
+			sources[name] = append(sources[name], sourcePolicy)
 			if policyRestricts9571(sourcePolicy) {
 				restrictive[name] = true
 			}
@@ -406,11 +436,30 @@ func mergeInstancesUnder(parent *Node, keyword string, ask policyActionAsk9571) 
 		parent.Children = kept
 	}
 	for _, name := range foldedNames {
-		if ask != askNone9571 && restrictive[name] && statementPermits9571(name, first[name], ask == askGlobal9571) {
-			widened = append(widened, name)
+		if ask == askNone9571 {
+			continue
+		}
+		isGlobal := ask == askGlobal9571
+		merged := compilePolicy(struct {
+			name string
+			node *Node
+		}{name, first[name]}, isGlobal)
+		if restrictive[name] && len(merged.terminalActions) > 0 && merged.Action == PolicyPermit {
+			widened = append(widened, foldWidenedName14968{name: name})
+			continue
+		}
+		if foldChangesPolicySemantics14968(sources[name], merged) {
+			widened = append(widened, foldWidenedName14968{name: name, semantic: true})
 		}
 	}
 	return names, widened, conflicting
+}
+
+// foldWidenedName14968 is a folded policy name plus whether the refusal is
+// the #14968 semantic (match/scheduler) leg rather than the #9571 action leg.
+type foldWidenedName14968 struct {
+	name     string
+	semantic bool
 }
 
 // policyActionAsk9571 says whether mergeInstancesUnder is folding security
@@ -433,12 +482,15 @@ type directTerminalActionConflict11063 struct {
 }
 
 // foldWidenedPolicy9571 names a policy the tolerant fold merged into a PERMIT
-// although one of its statements had restrictive effective semantics.
+// although one of its statements had restrictive effective semantics
+// (#9571), or whose merged match/scheduler semantics are not the union of
+// its statements (#14968, semantic=true).
 type foldWidenedPolicy9571 struct {
 	global           bool
 	anyPair          bool
 	fromZone, toZone string
 	name             string
+	semantic         bool
 }
 
 func (w foldWidenedPolicy9571) String() string {
@@ -459,7 +511,7 @@ func (w foldWidenedPolicy9571) String() string {
 // That errs toward refusal on purpose: marking a same-named policy in another
 // pair refuses a snapshot the helper would accept, while missing the widened one
 // enforces the permit this exists to stop.
-func zonePairWidened9571(fzKeys, tzKeys, names []string) []foldWidenedPolicy9571 {
+func zonePairWidened9571(fzKeys, tzKeys []string, names []foldWidenedName14968) []foldWidenedPolicy9571 {
 	if len(names) == 0 {
 		return nil
 	}
@@ -473,7 +525,8 @@ func zonePairWidened9571(fzKeys, tzKeys, names []string) []foldWidenedPolicy9571
 	out := make([]foldWidenedPolicy9571, 0, len(names))
 	for _, n := range names {
 		w := pair
-		w.name = n
+		w.name = n.name
+		w.semantic = n.semantic
 		out = append(out, w)
 	}
 	return out
@@ -529,6 +582,140 @@ func statementPermits9571(name string, n *Node, isGlobal bool) bool {
 	return ok && a == PolicyPermit
 }
 
+// foldChangesPolicySemantics14968 reports whether folding the source
+// statements into merged yields a policy whose gating is not the union of
+// the statements (#14968): the merged action applies in combinations, to
+// complements, or in time windows no statement authored for that action.
+// Action-only widening (restrictive to permit) is the #9571 leg and is
+// decided by the caller; this covers the folds that survive that check:
+//   - a merged PERMIT whose explicit-permit sources differ in two or more
+//     match dimensions (their dimension-wise union is a strict cross
+//     product of the statements' permitted tuples);
+//   - a surviving DENY/REJECT whose excluded-address flags/lists or whose
+//     scheduler set differ from a restrictive source's (the deny no longer
+//     covers exactly what that statement denied, or only inside a window
+//     that statement never named).
+func foldChangesPolicySemantics14968(sources []*Policy, merged *Policy) bool {
+	if len(sources) < 2 || merged == nil {
+		return false
+	}
+	if merged.Action == PolicyPermit {
+		var permits []*Policy
+		for _, s := range sources {
+			if s != nil && len(s.terminalActions) > 0 && s.Action == PolicyPermit {
+				permits = append(permits, s)
+			}
+		}
+		for i := range permits {
+			for _, other := range permits[i+1:] {
+				if matchDimensionsDiffer14968(permits[i], other) >= 2 {
+					return true
+				}
+			}
+		}
+	}
+	if merged.Action != PolicyDeny && merged.Action != PolicyReject {
+		return false
+	}
+	for _, s := range sources {
+		if s == nil {
+			continue
+		}
+		// A restrictive source statement (explicit or defaulted deny/reject).
+		if len(s.terminalActions) == 0 {
+			if s.Action != PolicyDeny {
+				continue
+			}
+		} else if s.Action == PolicyPermit {
+			continue
+		}
+		if s.Match.SourceAddressExcluded != merged.Match.SourceAddressExcluded ||
+			s.Match.DestinationAddressExcluded != merged.Match.DestinationAddressExcluded {
+			return true
+		}
+		if s.Match.SourceAddressExcluded &&
+			!sameStringSet14968(s.Match.SourceAddresses, merged.Match.SourceAddresses) {
+			return true
+		}
+		if s.Match.DestinationAddressExcluded &&
+			!sameStringSet14968(s.Match.DestinationAddresses, merged.Match.DestinationAddresses) {
+			return true
+		}
+		if len(s.schedulerNames) == 0 && len(merged.schedulerNames) > 0 {
+			return true
+		}
+		if len(s.schedulerNames) > 0 && !sameStringSet14968(s.schedulerNames, merged.schedulerNames) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchDimensionsDiffer14968 counts the match dimensions (source,
+// destination, application) in which neither statement's compiled value
+// set contains the other's. A dimension in which one statement's set is a
+// subset of the other's (including an explicit `any`, which covers every
+// value) cannot contribute a new combination: the merged union there is
+// the wider statement's set, so every merged tuple was already permitted
+// by that wider statement in that dimension.
+func matchDimensionsDiffer14968(a, b *Policy) int {
+	n := 0
+	if !valueSetSubset14968(a.Match.SourceAddresses, b.Match.SourceAddresses) &&
+		!valueSetSubset14968(b.Match.SourceAddresses, a.Match.SourceAddresses) {
+		n++
+	}
+	if !valueSetSubset14968(a.Match.DestinationAddresses, b.Match.DestinationAddresses) &&
+		!valueSetSubset14968(b.Match.DestinationAddresses, a.Match.DestinationAddresses) {
+		n++
+	}
+	if !valueSetSubset14968(a.Match.Applications, b.Match.Applications) &&
+		!valueSetSubset14968(b.Match.Applications, a.Match.Applications) {
+		n++
+	}
+	return n
+}
+
+// valueSetSubset14968 reports whether every value in a is in b, treating
+// `any` as the universal set (it covers every value, as the evaluator does).
+func valueSetSubset14968(a, b []string) bool {
+	bSet := make(map[string]struct{}, len(b))
+	for _, v := range b {
+		if v == "any" {
+			return true
+		}
+		bSet[v] = struct{}{}
+	}
+	for _, v := range a {
+		if v == "any" {
+			return false
+		}
+		if _, ok := bSet[v]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func sameStringSet14968(a, b []string) bool {
+	set := make(map[string]struct{}, len(a))
+	for _, v := range a {
+		set[v] = struct{}{}
+	}
+	other := make(map[string]struct{}, len(b))
+	for _, v := range b {
+		other[v] = struct{}{}
+	}
+	if len(set) != len(other) {
+		return false
+	}
+	for k := range set {
+		if _, ok := other[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // markFoldWidenedPolicies9571 poisons each compiled policy the fold widened.
 //
 // It sets the #5575 LenientContentDropped flag, which the userspace snapshot
@@ -540,6 +727,19 @@ func markFoldWidenedPolicies9571(cfg *Config, widened []foldWidenedPolicy9571) {
 	for _, w := range widened {
 		markPolicyLenientContentDropped11063(cfg, w.global, w.anyPair, w.fromZone, w.toZone, w.name)
 	}
+}
+
+// foldSemanticWarning14968 is the #14968 sibling of foldWidenedWarning9571:
+// the fold kept one policy object, but its match/scheduler semantics are
+// not the union of the statements, so it is refused rather than enforced.
+func foldSemanticWarning14968(w foldWidenedPolicy9571) string {
+	return "duplicate policy name in `" + w.String() + "` — merging the repeated statements " +
+		"would change what the merged policy's action applies to (a cross-product of the " +
+		"statements' match dimensions, an excluded-address set another statement authored, " +
+		"or a scheduler-name another statement authored), so the policy is refused instead: " +
+		"the dataplane rejects the whole policy snapshot (previous-good retained; fresh-boot " +
+		"default-deny) rather than enforce gating no statement authored. Rename one of the " +
+		"policies (#3473/#14968)"
 }
 
 func markDirectTerminalActionConflicts11063(cfg *Config, conflicts []directTerminalActionConflict11063) {

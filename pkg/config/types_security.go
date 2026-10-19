@@ -665,6 +665,12 @@ type Policy struct {
 	// that kept the permit off the denied traffic, which is the same harm (a
 	// permit broader than the operator configured), so it carries the same flag.
 	// markFoldWidenedPolicies9571 sets it after the compile.
+	// #14968 adds the semantic sibling: the fold merged statements whose
+	// match/scheduler gating is not the union of the statements (a
+	// cross-product permit, an excluded-set or scheduler inherited by a
+	// surviving deny), so the merged policy would enforce gating no
+	// statement authored even though no action was widened.
+	// foldChangesPolicySemantics14968 decides it; the same marking applies.
 	LenientContentDropped bool
 	// MalformedZonePairShapes carries the compiler-recorded malformed context
 	// diagnostics on the synthetic #12039 poison carrier so the userspace
