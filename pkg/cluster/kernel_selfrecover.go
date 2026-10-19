@@ -1,6 +1,9 @@
 package cluster
 
-import "sort"
+import (
+	"sort"
+	"time"
+)
 
 // Adapter predicates for the #1930 INC-2 kernel-channel bounded local
 // self-recovery (pkg/upgrade.KernelSelfRecovery). They are read-only views over
@@ -25,6 +28,38 @@ func (m *Manager) LocalDrained() bool {
 		}
 	}
 	return enabled > 0
+}
+
+// LocalDrainedSince returns the earliest ManualFailoverAt among the
+// drained RGs, or zero when this node is not drained or no drained RG
+// carries a start time. Self-recovery (#15181) requires the kernel-roll
+// lease it acts on to have been live when this drain began; a zero or
+// post-expiry drain start fails closed there. Uses the same drained
+// predicate as LocalDrained (every enabled RG ManualFailover + weight 0).
+func (m *Manager) LocalDrainedSince() time.Time {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	enabled := 0
+	var earliest time.Time
+	for _, rg := range m.groups {
+		if rg.State == StateDisabled {
+			continue
+		}
+		enabled++
+		if !rg.ManualFailover || rg.Weight != 0 {
+			return time.Time{}
+		}
+		if rg.ManualFailoverAt.IsZero() {
+			return time.Time{}
+		}
+		if earliest.IsZero() || rg.ManualFailoverAt.Before(earliest) {
+			earliest = rg.ManualFailoverAt
+		}
+	}
+	if enabled == 0 {
+		return time.Time{}
+	}
+	return earliest
 }
 
 // PeerHealthyPrimary reports whether the peer is alive AND currently owns at

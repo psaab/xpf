@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Kernel-channel HA bounded local self-recovery (#1930 INC-2).
@@ -53,6 +56,12 @@ type SelfRecoveryCluster interface {
 	// LocalDrained reports whether THIS node is drained (all enabled RGs in
 	// ManualFailover / weight 0 — the ForceSecondary state).
 	LocalDrained() (bool, error)
+	// LocalDrainedSince returns the earliest ManualFailoverAt among the
+	// drained RGs (zero when not drained or the start is unknown). It lets
+	// self-recovery require that the lease it acts on postdates the current
+	// drain (#15181): a lease that already expired before this drain began
+	// cannot be the fingerprint of the roll that caused this drain.
+	LocalDrainedSince() (time.Time, error)
 	// PeerHealthyPrimary reports whether the peer is alive AND owns the RGs
 	// (a real primary that can keep forwarding while we rejoin).
 	PeerHealthyPrimary() (bool, error)
@@ -109,6 +118,10 @@ type KernelSelfRecovery struct {
 	// drainedSince is when this node first observed the recoverable condition
 	// (drained + no active lease for us + healthy peer); zero when not observed.
 	drainedSince time.Time
+	// leaseExpiresAt is the ExpiresAt of the lease classified by the most
+	// recent readLeaseState call; Tick uses it for the drain-start gate and
+	// to consume exactly the lease it acted on (#15181).
+	leaseExpiresAt time.Time
 }
 
 // NewKernelSelfRecovery builds the self-recovery helper.
@@ -135,6 +148,7 @@ const (
 // drained node or a #1917 binary-rolling drain never wrote a kernel-roll lease,
 // so we leave it alone.
 func (s *KernelSelfRecovery) readLeaseState() leaseState {
+	s.leaseExpiresAt = time.Time{}
 	data, err := os.ReadFile(s.cfg.LeasePath)
 	if err != nil {
 		// A genuinely absent lease is the common case (no roll in progress) — not
@@ -173,11 +187,51 @@ func (s *KernelSelfRecovery) readLeaseState() leaseState {
 	if l.NodeID != s.cfg.NodeID {
 		return leaseOther
 	}
+	s.leaseExpiresAt = l.ExpiresAt
 	if s.cfg.Now().Before(l.ExpiresAt) {
 		return leaseActiveOurs
 	}
 	s.cfg.Logf("kernel self-recovery: EXPIRED lease for node %d (orchestrator crashed mid-roll?)", l.NodeID)
 	return leaseExpiredOurs
+}
+
+// consumeLease removes the lease self-recovery is about to act on, under
+// the same flock the orchestrator uses (kernel-roll.lock next to the
+// lease), and only when the on-disk lease still names this node with the
+// expiry that authorized recovery (#15181). A successor's renewed or
+// re-acquired lease (different expiry) is left untouched and reported as
+// not consumed. An already-missing lease counts as consumed. Consuming
+// BEFORE ResetFailover means a failed reset does not re-fire.
+func (s *KernelSelfRecovery) consumeLease() (bool, error) {
+	dir := filepath.Dir(s.cfg.LeasePath)
+	lock, err := os.OpenFile(filepath.Join(dir, "kernel-roll.lock"),
+		os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return false, fmt.Errorf("open kernel-roll lock: %w", err)
+	}
+	defer lock.Close()
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		return false, nil
+	}
+	defer func() { _ = unix.Flock(int(lock.Fd()), unix.LOCK_UN) }()
+	data, err := os.ReadFile(s.cfg.LeasePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("re-read kernel-roll lease: %w", err)
+	}
+	var l KernelRollLease
+	if err := json.Unmarshal(data, &l); err != nil {
+		return false, nil
+	}
+	if l.NodeID != s.cfg.NodeID || !l.ExpiresAt.Equal(s.leaseExpiresAt) {
+		return false, nil
+	}
+	if err := os.Remove(s.cfg.LeasePath); err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("consume kernel-roll lease: %w", err)
+	}
+	return true, nil
 }
 
 // Tick evaluates the recovery condition once. Call it at startup and on a timer.
@@ -235,6 +289,25 @@ func (s *KernelSelfRecovery) Tick() (bool, error) {
 		return false, nil
 	}
 
+	// #15181: the expired lease must postdate THIS drain. The orchestrator
+	// acquires the lease before draining, so a crashed roll that caused
+	// this drain wrote a lease expiring after the drain began. A lease
+	// that already expired before the drain began belongs to an earlier,
+	// unrelated roll and must not tear a later operator drain back into
+	// the election. An unknown drain start (zero) fails closed.
+	drainedSince, err := s.cl.LocalDrainedSince()
+	if err != nil {
+		s.drainedSince = time.Time{}
+		return false, fmt.Errorf("kernel self-recovery: local drained-since check: %w", err)
+	}
+	if drainedSince.IsZero() || !s.leaseExpiresAt.After(drainedSince) {
+		s.drainedSince = time.Time{}
+		s.cfg.Logf("kernel self-recovery: expired lease (expires %s) does not postdate "+
+			"the current drain (since %s); NOT recovering a later unrelated drain (#15181)",
+			s.leaseExpiresAt, drainedSince)
+		return false, nil
+	}
+
 	peerOK, err := s.cl.PeerHealthyPrimary()
 	if err != nil {
 		// Observation error -> reset the grace clock (see #4872 D above).
@@ -263,6 +336,18 @@ func (s *KernelSelfRecovery) Tick() (bool, error) {
 	}
 
 	// Condition held for Grace -> the orchestrator is gone and left us drained.
+	// Consume the lease BEFORE resetting (#15181): a lease left on disk
+	// would re-fire against every later operator drain of this node.
+	consumed, err := s.consumeLease()
+	if err != nil {
+		s.drainedSince = time.Time{}
+		return false, fmt.Errorf("kernel self-recovery: consume lease: %w", err)
+	}
+	if !consumed {
+		s.drainedSince = time.Time{}
+		s.cfg.Logf("kernel self-recovery: lease changed before consumption; NOT recovering this tick")
+		return false, nil
+	}
 	s.cfg.Logf("kernel self-recovery: drained+orphaned for %s with a healthy peer; " +
 		"auto-ResetFailover (rejoin as eligible)")
 	if err := s.cl.ResetFailover(); err != nil {

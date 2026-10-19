@@ -775,6 +775,13 @@ func (r *KernelRunner) verifyAndPromote(j *KernelJournal, candID, running string
 		r.logf("kernel-upgrade promote: PROMOTED journal rename landed but directory sync failed "+
 			"(durability across power loss is unknown): %v; clearing terminal journal", err)
 	}
+	// #15181: a promoted roll is complete — clear the orchestrator's
+	// kernel-roll lease so it cannot later be read as a crashed-roll
+	// fingerprint against an unrelated operator drain. Best-effort, like
+	// the marker write above (the orchestrator also clears on success).
+	if err := sys.ClearRollLease(); err != nil {
+		r.logf("kernel-upgrade promote: WARNING clear roll lease: %v", err)
+	}
 	r.logf("kernel-upgrade: PROMOTED candidate %s (slot %s now default)", running, j.InactiveSlot)
 	if err := r.clearKernelJournal(); err != nil {
 		return KernelRollOutcome{}, err
