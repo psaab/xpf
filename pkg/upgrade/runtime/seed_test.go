@@ -152,6 +152,56 @@ func TestSeed_ResumeAfterCopyCrash(t *testing.T) {
 	assertSeeded(t, cfg, "1.0.0")
 }
 
+// #15240: Seed's sbin repoint (step 4) must not destroy foreign content
+// the postinst preserved. A foreign symlink or a regular file at a
+// managed name survives Seed byte-identical; the remaining names are
+// still seeded through versions/current.
+func TestSeed_PreservesForeignSbinEntries_15240(t *testing.T) {
+	cfg := seedEnv(t, "1.0.0")
+	foreignTarget := filepath.Join(cfg.SbinDir, "..", "foreign-cli")
+	mkfile(t, foreignTarget, "foreign-tool")
+	if err := os.MkdirAll(cfg.SbinDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(foreignTarget, filepath.Join(cfg.SbinDir, "cli")); err != nil {
+		t.Fatal(err)
+	}
+	mkfile(t, filepath.Join(cfg.SbinDir, "xpf-userspace-dp"), "operator-file")
+	if err := Seed(cfg); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	if got, err := os.Readlink(filepath.Join(cfg.SbinDir, "cli")); err != nil || got != foreignTarget {
+		t.Fatalf("foreign cli symlink = %q, %v; want untouched %q", got, err, foreignTarget)
+	}
+	if got, err := os.ReadFile(filepath.Join(cfg.SbinDir, "xpf-userspace-dp")); err != nil || string(got) != "operator-file" {
+		t.Fatalf("foreign xpf-userspace-dp file = %q, %v; want untouched operator-file", got, err)
+	}
+	for _, b := range []string{"xpfd", "xpf-day0-config"} {
+		if _, err := os.ReadFile(filepath.Join(cfg.SbinDir, b)); err != nil {
+			t.Fatalf("uncontested sbin %s not seeded: %v", b, err)
+		}
+	}
+}
+
+// #15240 control: a symlink already pointing at OUR staged path (the
+// postinst's pre-seed launch link, or a retry) is repointed through
+// versions/current exactly as before.
+func TestSeed_RepointsOwnStagedSbinLink_15240(t *testing.T) {
+	cfg := seedEnv(t, "1.0.0")
+	if err := os.MkdirAll(cfg.SbinDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range managedBins {
+		if err := os.Symlink(filepath.Join(cfg.StagedDir, b), filepath.Join(cfg.SbinDir, b)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Seed(cfg); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	assertSeeded(t, cfg, "1.0.0")
+}
+
 func TestSeed_RefusesForeignOrIncompleteVersionDir(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

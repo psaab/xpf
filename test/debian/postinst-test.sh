@@ -221,6 +221,145 @@ EOF
     done
 }
 
+# === #15240: first install must not destroy foreign content at sbin names ===
+# /usr/local/sbin is admin-owned. A pre-existing regular file there must be
+# moved aside to <path>.xpf-saved (never overwritten) with a warning, and
+# the postinst must still link the managed name to staged. On the pre-fix
+# postinst the file is replaced by the staged symlink and lost.
+scenario_first_install_preserves_foreign_regular_file() {
+    build_first_install_success
+    mkdir -p "$SBIN"
+    printf 'operator-original\n' > "$SBIN/cli"
+    chmod 0600 "$SBIN/cli"
+    "$ROOT/postinst" configure "" 2> "$ROOT/stderr.txt"
+    [ ! -L "$SBIN/cli.xpf-saved" ] && [ -f "$SBIN/cli.xpf-saved" ] || {
+        echo "FAIL: foreign cli was not preserved as a regular file at cli.xpf-saved"; exit 1; }
+    [ "$(cat "$SBIN/cli.xpf-saved")" = "operator-original" ] || {
+        echo "FAIL: preserved cli.xpf-saved content changed"; exit 1; }
+    grep -q 'preserving existing' "$ROOT/stderr.txt" || {
+        echo "FAIL: postinst printed no preservation warning"; exit 1; }
+    [ -L "$SBIN/cli" ] || { echo "FAIL: first install omitted sbin/cli link"; exit 1; }
+    for b in $BINS; do
+        [ -L "$SBIN/$b" ] || { echo "FAIL: first install omitted sbin/$b"; exit 1; }
+    done
+}
+
+# A foreign SYMLINK at the xpfd name (operator's own tool wiring) must
+# survive the postinst's own linking step untouched — not repointed at
+# staged, not moved aside. The staged seed stub is invoked THROUGH this
+# symlink, so it cannot run; the postinst's link step is the behaviour
+# under test and it must leave the operator's wiring exactly as found.
+# (The Go seed's repoint of a preserved non-xpfd name is documented scope
+# in docs/log/15240.md; A57-04 anchors the shell clobber.)
+scenario_first_install_preserves_foreign_symlink() {
+    build_first_install_success
+    mkdir -p "$SBIN" "$ROOT/opt/tools"
+    printf 'foreign-tool\n' > "$ROOT/opt/tools/xpfd"
+    chmod 0755 "$ROOT/opt/tools/xpfd"
+    ln -s "$ROOT/opt/tools/xpfd" "$SBIN/xpfd"
+    # Rewrite the seed stub wholesale so it mirrors the real seed's
+    # #15240 behaviour: skip a sbin entry that is not its own
+    # staged/current link instead of repointing it through current.
+    cat > "$STAGED/xpfd" <<EOF
+#!/bin/sh
+case "\$1" in
+    seed-runtime)
+        mkdir -p "$VERSIONS/1.0.0"
+        for b in $BINS; do cp "$STAGED/\$b" "$VERSIONS/1.0.0/\$b"; done
+        ln -sfn 1.0.0 "$CURRENT"
+        for b in $BINS; do
+            if [ -L "$SBIN/\$b" ] && [ "\$(readlink "$SBIN/\$b")" != "$STAGED/\$b" ] && [ "\$(readlink "$SBIN/\$b")" != "$CURRENT/\$b" ]; then :; else ln -sfn "$CURRENT/\$b" "$SBIN/\$b"; fi
+        done
+        exit 0 ;;
+    *) exit 1 ;;
+esac
+EOF
+        chmod 0755 "$STAGED/xpfd"
+    "$ROOT/postinst" configure "" 2> "$ROOT/stderr.txt" || true
+    [ -L "$SBIN/xpfd" ] || { echo "FAIL: foreign xpfd symlink was removed"; exit 1; }
+    [ "$(readlink "$SBIN/xpfd")" = "$ROOT/opt/tools/xpfd" ] || {
+        echo "FAIL: foreign xpfd symlink was repointed to $(readlink "$SBIN/xpfd")"; exit 1; }
+    grep -q 'preserving existing symlink' "$ROOT/stderr.txt" || {
+        echo "FAIL: postinst printed no foreign-symlink preservation warning"; exit 1; }
+    [ ! -e "$SBIN/xpfd.xpf-saved" ] && [ ! -L "$SBIN/xpfd.xpf-saved" ] || {
+        echo "FAIL: foreign symlink was needlessly moved aside"; exit 1; }
+}
+
+# A REAL DIRECTORY at a managed name is foreign content too: it must be
+# moved aside whole (contents intact), not nested into or destroyed.
+scenario_first_install_preserves_foreign_directory() {
+    build_first_install_success
+    mkdir -p "$SBIN/xpfd/inner"
+    printf 'dir-content\n' > "$SBIN/xpfd/inner/data"
+    "$ROOT/postinst" configure "" 2> "$ROOT/stderr.txt"
+    [ -d "$SBIN/xpfd.xpf-saved" ] || {
+        echo "FAIL: foreign xpfd directory was not preserved at xpfd.xpf-saved"; exit 1; }
+    [ "$(cat "$SBIN/xpfd.xpf-saved/inner/data")" = "dir-content" ] || {
+        echo "FAIL: preserved directory content changed"; exit 1; }
+    [ -L "$SBIN/xpfd" ] || { echo "FAIL: first install omitted sbin/xpfd link"; exit 1; }
+}
+
+# If <path>.xpf-saved is already taken the postinst must refuse (non-zero)
+# rather than overwrite either file: the original at the managed name and
+# the earlier saved copy both survive byte-identical.
+scenario_first_install_refuses_when_saved_name_taken() {
+    build_first_install_success
+    mkdir -p "$SBIN"
+    printf 'second-original\n' > "$SBIN/cli"
+    printf 'first-saved\n' > "$SBIN/cli.xpf-saved"
+    if "$ROOT/postinst" configure "" 2> "$ROOT/stderr.txt"; then
+        echo "FAIL: postinst succeeded although cli.xpf-saved was already taken"; exit 1
+    fi
+    [ "$(cat "$SBIN/cli")" = "second-original" ] || {
+        echo "FAIL: original cli was modified on the refused install"; exit 1; }
+    [ "$(cat "$SBIN/cli.xpf-saved")" = "first-saved" ] || {
+        echo "FAIL: pre-existing cli.xpf-saved was overwritten on the refused install"; exit 1; }
+    grep -q 'refusing to overwrite' "$ROOT/stderr.txt" || {
+        echo "FAIL: postinst printed no refusal warning"; exit 1; }
+}
+
+# Control: a symlink already pointing at OUR staged path is our own prior
+# attempt (postinst retry after an interrupted first install) and must be
+# re-created idempotently — install succeeds and no .xpf-saved appears.
+scenario_first_install_recreates_own_staged_symlink() {
+    build_first_install_success
+    mkdir -p "$SBIN"
+    ln -s "$STAGED/cli" "$SBIN/cli"
+    "$ROOT/postinst" configure ""
+    [ -L "$SBIN/cli" ] || { echo "FAIL: own staged cli symlink was removed"; exit 1; }
+    [ "$(readlink "$SBIN/cli")" = "$CURRENT/cli" ] || {
+        echo "FAIL: seed did not adopt own cli link through versions/current"; exit 1; }
+    [ ! -e "$SBIN/cli.xpf-saved" ] && [ ! -L "$SBIN/cli.xpf-saved" ] || {
+        echo "FAIL: own staged symlink was needlessly moved aside"; exit 1; }
+}
+
+# Control: the seed-failure fallback still links every managed name
+# direct-to-staged when no foreign content is present.
+scenario_first_install_seed_failure_no_foreign_still_falls_back() {
+    mkdir -p "$STAGED"
+    for b in $BINS; do
+        printf 'staged-%s\n' "$b" > "$STAGED/$b"
+        chmod 0755 "$STAGED/$b"
+    done
+    cat > "$STAGED/xpfd" <<'EOF'
+#!/bin/sh
+case "$1" in
+    seed-runtime) exit 1 ;;
+    *) exit 1 ;;
+esac
+EOF
+    chmod 0755 "$STAGED/xpfd"
+    "$ROOT/postinst" configure "" 2> "$ROOT/stderr.txt"
+    for b in $BINS; do
+        [ -L "$SBIN/$b" ] || { echo "FAIL: fallback left sbin/$b absent"; exit 1; }
+        [ "$(readlink "$SBIN/$b")" = "$STAGED/$b" ] || {
+            echo "FAIL: fallback $b is not direct-staged"; exit 1; }
+    done
+    if grep -q 'preserving' "$ROOT/stderr.txt"; then
+        echo "FAIL: preservation warning printed with no foreign content present"; exit 1
+    fi
+}
+
 
 # === #2000 CORE: an absent sbin link is recovered THROUGH versions/current ===
 # Delete ONE sbin link, run the upgrade-configure branch, assert the repaired
@@ -934,6 +1073,12 @@ scenario_old_pid_temps_are_swept_after_ttl() {
 run_scenario first_install_configure_empty_seeds_layout
 run_scenario first_install_seed_failure_falls_back_to_staged
 run_scenario first_install_killed_during_seed_keeps_launch_links
+run_scenario first_install_preserves_foreign_regular_file
+run_scenario first_install_preserves_foreign_symlink
+run_scenario first_install_preserves_foreign_directory
+run_scenario first_install_refuses_when_saved_name_taken
+run_scenario first_install_recreates_own_staged_symlink
+run_scenario first_install_seed_failure_no_foreign_still_falls_back
 run_scenario first_install_starts_barrier_without_daemon
 run_scenario first_install_injects_barrier_with_active_unhanded_daemon
 run_scenario first_install_skips_barrier_when_table_live

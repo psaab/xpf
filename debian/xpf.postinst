@@ -169,6 +169,49 @@ clear_upgrade_failure() {
     fi
 }
 
+# #15240: preserve foreign content at the managed sbin names on first
+# install. $SBIN is admin-owned (/usr/local/sbin): a regular file, a
+# foreign symlink, or a directory at a managed name predates this package
+# and must survive install AND removal — the postrm removes only links
+# pointing at STAGED or versions/current, so content the postinst itself
+# overwrote with a staged link would be deleted on remove, taking the
+# operator's original with it. Each first-install link creation goes
+# through establish_sbin_link: a pre-existing non-symlink (regular file
+# or directory) is first moved aside to <path>.xpf-saved (never
+# overwritten; if that name is also taken the install aborts under set -e
+# rather than destroy anything), and a symlink pointing anywhere other
+# than our staged path is left untouched and never repointed. A symlink
+# already pointing at $STAGED/<bin> is our own prior attempt (postinst
+# retry after a partial first install) and is re-created idempotently.
+# Symlinks owned by us are replaced by seed-runtime / the fallback loop
+# exactly as before.
+establish_sbin_link() {
+    _b="$1"
+    _link="$SBIN/$_b"
+    _target="$STAGED/$_b"
+    if [ -L "$_link" ]; then
+        _existing=$(readlink "$_link" 2>/dev/null || true)
+        if [ "$_existing" = "$_target" ]; then
+            : # our own link from a prior attempt; recreated below
+        else
+            echo "xpf: preserving existing symlink $_link -> $_existing" \
+                 "(not an xpf-managed target); not replacing it" >&2
+            return 0
+        fi
+    elif [ -e "$_link" ]; then
+        if [ -e "$_link.xpf-saved" ] || [ -L "$_link.xpf-saved" ]; then
+            echo "xpf: $_link exists and $_link.xpf-saved is already" \
+                 "present; refusing to overwrite either — move one aside" \
+                 "and retry the install" >&2
+            return 1
+        fi
+        echo "xpf: preserving existing $_link as $_link.xpf-saved" \
+             "(pre-existing file moved aside for the xpf sbin link)" >&2
+        mv "$_link" "$_link.xpf-saved"
+    fi
+    ln -sfnT "$_target" "$_link"
+}
+
 case "$1" in
     configure)
         # $2 is the previously-configured version, empty on first install.
@@ -197,7 +240,7 @@ case "$1" in
             # staged binaries to exist at their stable sbin names.
             mkdir -p "$SBIN"
             for b in $BINS; do
-                ln -sfnT "$STAGED/$b" "$SBIN/$b"
+                establish_sbin_link "$b"
             done
 
             if "$STAGED/xpfd" seed-runtime; then
@@ -209,7 +252,10 @@ case "$1" in
                 for b in $BINS; do
                     # ln -sfnT replaces a pre-existing symlink atomically and
                     # FAILS (under set -e) rather than nesting a symlink
-                    # INSIDE a real directory at the link path.
+                    # INSIDE a real directory at the link path. Foreign
+                    # content was already moved aside or left untouched by
+                    # establish_sbin_link above (#15240), so this loop only
+                    # re-creates links it established.
                     ln -sfnT "$STAGED/$b" "$SBIN/$b"
                 done
             fi

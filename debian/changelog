@@ -1,5 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Preserve pre-existing foreign content at the four managed
+    /usr/local/sbin names on first install instead of replacing it
+    with the staged symlink: a regular file or directory is moved
+    aside to <path>.xpf-saved with a warning (refusing rather than
+    overwriting either file if that name is taken), a foreign
+    symlink is left untouched, and seed-runtime skips sbin entries
+    that are not its own staged/current links, so package removal
+    can no longer delete an operator's original file (#15240).
+
   * Reject a single-rate firewall policer missing either
     if-exceeding bandwidth-limit or burst-size-limit at strict
     commit, and close the policer/if-exceeding schema so typos such
