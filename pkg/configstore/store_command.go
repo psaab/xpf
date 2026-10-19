@@ -323,9 +323,19 @@ func (s *Store) RenameAsPlantClass(sessionID, plantClass string, srcPath, dstPat
 	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
 	s.touchConfigLockLocked()       // #4476: refresh the config-lock idle lease
 	s.bumpCandidateMutationLocked() // #5848: candidate changed — advance the generation
+	// #15757: record the destination the rename ACTUALLY created, not
+	// the raw typed slice. A bare destination (`policy new` for a
+	// zone-pair source) is placed under the source parent by
+	// RenamePath (BareDestinationParent); logging the bare slice made
+	// session-rematch lineage (policyRulePathKey/zoneRenamePath in the
+	// daemon) fail to recognise the destination, so renamed-policy
+	// sessions fell back to teardown instead of rematch. Resolve
+	// against the candidate BEFORE the mutation re-keys the source
+	// node (after it, the source identity no longer exists).
+	resolvedDst := before.ResolvedRenameDestination(srcPath, dstPath)
 	s.recordRenameAncestryLocked(s.candidateGen, RenameDescriptor{
 		SourcePath:      srcPath,
-		DestinationPath: dstPath,
+		DestinationPath: resolvedDst,
 	})
 	s.dirty = true
 	return nil

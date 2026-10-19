@@ -137,7 +137,19 @@ func configMutationPaths(editPath, parts []string, quoted []bool) ([]string, boo
 			// what that cell exists for.
 			break
 		}
-		return []string{resolve(src), resolve(dst)}, true
+		// #15757: a BARE destination (identity-only, #15237) is placed
+		// under the SOURCE parent by CopyPath/RenamePath
+		// (BareDestinationParent), not under the edit cursor. Adjudicate
+		// the destination the executor will act on: resolve(dst) alone
+		// tested e.g. `user root` (or `system user root` under
+		// `[edit system]`) against an anchored
+		// `^system login user root` deny and missed it — fail-open —
+		// while false-denying anchored allows. Full destinations are
+		// unaffected (ResolveBareCopyRenameDestination is identity).
+		resolvedSrc := resolve(src)
+		resolvedDst := strings.Join(ResolveBareCopyRenameDestination(
+			append(append([]string{}, editPath...), src...), dst), " ")
+		return []string{resolvedSrc, resolvedDst}, true
 
 	case "insert":
 		// `insert <element-path> before|after <ref>` moves the element; the ref
