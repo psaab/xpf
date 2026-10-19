@@ -87,6 +87,36 @@ func TestRPMConfigHashSensitivity(t *testing.T) {
 	}
 }
 
+// TestRPMConfigHashRedactedTargetFields15702 pins #15702: RPMTest's
+// secret-redacting MarshalJSON strips query, fragment, and userinfo
+// from an http-get target, so rpmConfigHash must not rely on that
+// JSON alone or those probe-effective edits hash-collide and
+// reconcileRPMMode skips d.rpm.Apply.
+func TestRPMConfigHashRedactedTargetFields15702(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+	}{
+		{"query", "http://probe.example/health?a=1", "http://probe.example/health?a=2"},
+		{"fragment", "http://probe.example/health#one", "http://probe.example/health#two"},
+		{"userinfo", "http://user1:secret1@probe.example/health", "http://user2:secret2@probe.example/health"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ha := rpmConfigHash(rpmTestConfig(tc.a).Services.RPM, nil)
+			hb := rpmConfigHash(rpmTestConfig(tc.b).Services.RPM, nil)
+			if ha == hb {
+				t.Fatalf("targets differing only in %s must hash differently: %q vs %q", tc.name, tc.a, tc.b)
+			}
+		})
+	}
+	// Identical raw targets must still hash equal (gate stays a no-op).
+	a := "http://user:secret@probe.example/health?a=1#frag"
+	if rpmConfigHash(rpmTestConfig(a).Services.RPM, nil) != rpmConfigHash(rpmTestConfig(a).Services.RPM, nil) {
+		t.Fatal("identical http-get target must hash equal")
+	}
+}
+
 // rpmPinnedTestConfig returns a config whose single test carries a
 // next-hop pin (so BuildProbePins yields one pin).
 func rpmPinnedTestConfig() *config.Config {
