@@ -40,7 +40,9 @@ func isStaticRouteNode12648(parent, grandparent, greatGrandparent *Node) bool {
 	case "rib":
 		return greatGrandparent != nil && greatGrandparent.Name() == "routing-options"
 	default:
-		return false
+		// #15777: hierarchical `rib { <name> { static ... } }` nests the
+		// table name between `rib` and `static`.
+		return greatGrandparent != nil && greatGrandparent.Name() == "rib"
 	}
 }
 
