@@ -68,37 +68,109 @@ pub(super) const EPOCH_DURATION_NS: u64 = 200_000;
 // pub(super): read by `rotate_epoch_v8.rs` (carry window math).
 pub(super) const MAX_ROTATION_LAG_EPOCHS: u64 = 8;
 
-/// #1630 (cause-1): cold-resume cutoff for the rotation credit carry,
-/// DECOUPLED from `MAX_ROTATION_LAG_EPOCHS`.
+/// #1630 (cause-1): cold-resume cutoff FLOOR for the rotation credit
+/// carry, DECOUPLED from `MAX_ROTATION_LAG_EPOCHS`.
 ///
-/// A lag beyond `STALL_THRESHOLD_EPOCHS` is not a legitimate intermittent
-/// visit gap — it is a worker/RG stall (GC pause, scheduler starvation)
-/// or an HA demote→promote gap on a REUSED lease (leases are reused when
-/// config matches, so `epoch_start` survives across a failover and the
-/// first post-promotion rotation sees `lag ≈ demotion_duration`). In that
-/// regime the rotation cold-resumes to a single-epoch grant and DROPS any
-/// banked carry, so a long-stalled or just-promoted worker cannot emit a
-/// `K`-epoch (let alone a stall-duration) burst. STALL must sit ABOVE any
-/// legitimate visit-lag tail and BELOW a failback gap: the failback path
-/// is ≥100 ms (≥500 epochs, CLAUDE.md "Failback timing ~130 ms"), so
-/// STALL = 256 epochs ≈ 51 ms has margin on both sides.
+/// A lag beyond the stall window is not a legitimate intermittent
+/// visit gap — it is a worker/RG stall (GC pause, scheduler
+/// starvation) or an HA demote→promote gap on a REUSED lease (leases
+/// are reused when config matches, so `epoch_start` survives across a
+/// failover and the first post-promotion rotation sees
+/// `lag ≈ demotion_duration`). In that regime the rotation cold-
+/// resumes to a single-epoch grant and DROPS any banked carry, so a
+/// long-stalled or just-promoted worker cannot emit a stall-duration
+/// burst.
+///
+/// #15100 (A70-02): the FIXED 256-epoch floor (51.2 ms) alone
+/// misclassifies a low-rate class's OWN self-scheduled park as a
+/// stall: a backlogged exact queue parks until a full frame refills at
+/// its configured rate (`cos_refill_ns_until`), which at 64 kbps is
+/// 187.5 ms for a 1500 B frame — beyond the fixed window — so every
+/// revisit cold-resumed and dropped the credit, blackholing the
+/// class. The effective window is therefore
+/// `max(floor, frame-refill time at this lease's rate)`, computed by
+/// `stall_window_ns_for_rate` below. The fixed floor keeps its
+/// original role for rates whose frame time is shorter: the failback
+/// path is ≥100 ms (≥500 epochs), so a genuinely stalled or
+/// just-promoted lease still cold-resumes once its lag exceeds BOTH.
 // pub(super): read by `rotate_epoch_v8.rs` (stall window math).
 pub(super) const STALL_THRESHOLD_EPOCHS: u64 = 256;
 
+/// #15100 (A70-02): the largest frame a scheduled queue can be
+/// waiting to refill, in bytes (one UMEM frame — the lease bank's own
+/// frame unit). The stall window's rate-relative term uses it
+/// (`stall_window_ns_for_rate`): a backlogged exact queue parks until
+/// its head frame refills, and head frames run to the full frame
+/// capacity, so the window must cover a full-capacity refill at the
+/// configured rate before a lag may be called a stall. At 8000 B/s
+/// that is 4096 B / 8000 B/s = 512 ms; at 1 Mbps, 32.8 ms (below the
+/// fixed floor, which then dominates).
+// pub(super): read by `rotate_epoch_v8.rs` (stall window math).
+pub(super) const FRAME_BYTES: u64 = 4096;
+
+/// #15100 (A70-02): self-scheduled park time at the largest frame
+/// this scheduler serves — alias kept for the stall-window helper.
+pub(super) const STALL_FRAME_BYTES: u64 = FRAME_BYTES;
+
+/// #15100 (A70-02): rate-relative lag (K) window for a lease at
+/// `rate_bytes` B/s: the fixed `K × EPOCH` window, or the time to
+/// refill one full frame at this rate, whichever is longer. A
+/// backlogged exact queue's revisit lag IS its frame refill time, so
+/// the recovery window must cover it or the rotation grants only
+/// `K × EPOCH` of credit per park and banks the rest into a carry the
+/// next equally-lagged visit cannot drain in time. The byte burst is
+/// still bounded: `rate × lag_window` never exceeds
+/// `max(K × rate × EPOCH, FRAME_BYTES)`. A rate of 0 yields the fixed
+/// window (a transparent lease has no self-park to protect).
+pub(super) fn lag_window_ns_for_rate(rate_bytes: u64) -> u64 {
+    let fixed_ns = EPOCH_DURATION_NS * MAX_ROTATION_LAG_EPOCHS;
+    if rate_bytes == 0 {
+        return fixed_ns;
+    }
+    let frame_ns = ((FRAME_BYTES as u128) * 1_000_000_000u128) / (rate_bytes as u128);
+    let frame_ns = frame_ns.min(u128::from(u64::MAX)) as u64;
+    fixed_ns.max(frame_ns)
+}
+
+/// #15100 (A70-02): effective stall (cold-resume) window for a lease
+/// at `rate_bytes` B/s: the fixed `STALL_THRESHOLD_EPOCHS` floor, or
+/// twice the rate-relative lag window, whichever is longer. The stall
+/// cutoff must sit ABOVE the lag window or a self-parked class whose
+/// lag lands between them cold-resumes and drops its banked carry on
+/// every revisit. A rate of 0 yields the fixed floor.
+pub(super) fn stall_window_ns_for_rate(rate_bytes: u64) -> u64 {
+    let floor_ns = EPOCH_DURATION_NS * STALL_THRESHOLD_EPOCHS;
+    if rate_bytes == 0 {
+        return floor_ns;
+    }
+    floor_ns.max(lag_window_ns_for_rate(rate_bytes).saturating_mul(2))
+}
+
 /// #1630 (cause-1): reservoir cap for the rotation credit carry — the
-/// MAXIMUM unbanked rate credit a class can ever owe, regardless of stall
-/// length. Bounds the post-stall catch-up burst. Sized at `K` epochs of
-/// rate (`MAX_ROTATION_LAG_EPOCHS × rate × EPOCH`, computed per-lease from
-/// `rate_bytes` in the rotation), matching the per-rotation K-epoch grant
-/// ceiling so the carry can never push a single rotation above the bound.
+/// MAXIMUM unbanked rate credit a class can ever owe. Bounds the
+/// post-stall catch-up burst.
 ///
-/// Per-epoch carry DRAIN is additionally capped at `(K − 1) × rate ×
-/// EPOCH` so a normal-recovery rotation can add at most `(K−1)` epochs of
-/// rate on top of a `K`-epoch base grant, keeping the single-rotation
-/// maximum at `(2K−1) × rate × EPOCH`.
+/// #15100 (A70-02): the reservoir is sized in BYTES at lease creation
+/// (`V8State::carry_max_bytes` / `carry_drain_max_bytes`), not in
+/// epochs: at low rates the epoch-sized cap
+/// (`MAX_ROTATION_LAG_EPOCHS × rate × EPOCH` = 12.8 B at 8000 B/s) is
+/// below one frame, so a banked residual could never reassemble even
+/// a single frame and the class blackholed. The byte cap is at least
+/// one frame so the self-parked class can always rebuild its next
+/// frame; the drain keeps the `(K−1)/K` proportion of the reservoir so
+/// a single rotation's carry draw stays a bounded fraction of the
+/// bank. For rates whose epoch-cap already exceeds a frame the byte
+/// caps equal the epoch caps exactly (no behaviour change).
 // pub(super): read by `rotate_epoch_v8.rs` (carry reservoir math).
 pub(super) const CARRY_MAX_EPOCHS: u64 = MAX_ROTATION_LAG_EPOCHS;
 pub(super) const CARRY_DRAIN_MAX_EPOCHS: u64 = MAX_ROTATION_LAG_EPOCHS - 1;
+
+/// #15100 (A70-02): reservoir floor in bytes — at least one maximum-
+/// size frame, so the banked credit of a self-parked class can always
+/// reassemble the frame it is parked waiting for. 4096 matches the
+/// UMEM frame capacity the lease bank already uses
+/// (`COS_EXACT_QUEUE_LEASE_BANK_BYTES` frames are 4096 B).
+pub(super) const CARRY_FRAME_BYTES: u64 = 4096;
 
 /// Bound on seqlock-snapshot retries.
 // pub(super): read by `lease.rs` (snapshot_epoch_v8 spin bound).
@@ -261,6 +333,27 @@ impl SharedCoSEpochState {
 pub(super) struct V8State {
     pub(super) epoch: SharedCoSEpochState,
     pub(super) rate_mode: V8RateMode,
+    /// #15100 (A70-02): rate-relative lag (recovery) window in
+    /// nanoseconds, computed once at lease creation:
+    /// `max(K × EPOCH, FRAME_BYTES × 1e9 / rate)`. The rotation grants
+    /// `rate × min(lag, lag_window)` per visit, so a self-parked
+    /// low-rate class recovers its full frame credit on revisit while
+    /// the byte burst stays bounded (`rate × lag_window` is at most
+    /// `max(K × rate × EPOCH, FRAME_BYTES)`). Equals the fixed
+    /// `K × EPOCH` window whenever that already covers a frame.
+    pub(super) lag_window_ns: u64,
+    /// #15100 (A70-02): carry reservoir cap in BYTES:
+    /// `rate × lag_window` (the largest deficit one lagged rotation
+    /// can owe), floored at one frame. Equals the pre-#15100
+    /// `CARRY_MAX_EPOCHS × rate × EPOCH` cap whenever the fixed window
+    /// dominates.
+    pub(super) carry_max_bytes: u64,
+    /// #15100 (A70-02): per-rotation carry DRAIN cap in bytes:
+    /// `carry_max_bytes × (K−1)/K`, floored at one frame when the
+    /// reservoir itself is floored so a banked frame can drain in a
+    /// single visit. Equals the pre-#15100 epoch drain cap whenever
+    /// the fixed window dominates.
+    pub(super) carry_drain_max_bytes: u64,
     /// #1746: equal-flow target policy. Read only by
     /// `publish_equal_flow_epoch_v8` (once per rotation, in
     /// EqualFlowSuppress mode only). `Slowest` is the byte-unchanged

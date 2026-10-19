@@ -592,8 +592,16 @@ pub(in crate::afxdp) fn estimate_cos_queue_wakeup_tick(
     } else {
         cos_refill_ns_until(root_tokens, need_bytes, root_rate_bytes)?
     };
+    // #15100 (A70-02): park-aware demand scheduling. Only a queue that
+    // is actually short of `need_bytes` is parked, and only for its
+    // own deficit refill time (`cos_refill_ns_until` already returns
+    // Some(0) when tokens cover the need — the `queue_tokens >=
+    // need_bytes` case below makes that contract explicit so a
+    // future helper change cannot reintroduce a full-frame park for
+    // a queue that is already serviceable). Transparent (rate 0)
+    // queues keep the #916 bypass.
     let queue_refill_ns = if require_queue_tokens {
-        if queue_rate_bytes == 0 {
+        if queue_rate_bytes == 0 || queue_tokens >= need_bytes {
             0
         } else {
             cos_refill_ns_until(queue_tokens, need_bytes, queue_rate_bytes)?

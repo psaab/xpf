@@ -1923,6 +1923,103 @@ fn v8_carry_cold_resume_drops_stale_carry_for_ha_failback() {
         "cold-resume drops the stale carry so it cannot replay across the gap"
     );
 }
+// === #15100 (A70-02): self-scheduled park lag vs the bounded carry ===
+//
+// A backlogged exact queue parks for its own refill time: the wakeup
+// estimator parks it until a full frame refills at its configured rate,
+// so a low-rate class's next visit lag is frame-scale, not epoch-scale
+// (1500 B at 8000 B/s = 187.5 ms; at 1 Mbps = 12 ms). The fixed
+// K x EPOCH (1.6 ms) / STALL (51.2 ms) windows cannot see that as a
+// legitimate visit gap: the lag is either credited only 1.6 ms with the
+// residual banked (and the bank is then dropped at the following
+// 187.5 ms revisit, which is beyond STALL), or cold-resumed to one
+// epoch with the credit dropped. The class is blackholed or held far
+// below its configured rate despite being continuously backlogged.
+
+#[test]
+fn v8_self_park_lag_grants_full_frame_15100() {
+    // THE #15100 acceptance cell: lease at 8000 B/s (64 kbps),
+    // acquiring at t0 and again at t0 + 187.5 ms (the self-park
+    // interval for one 1500 B frame) grants at least 1499 B.
+    let lease = SharedCoSQueueLease::new_v8(8_000, 64 * 1024, 1, 0);
+    lease.rehydrate_worker_active_count(0, 1);
+    let t0 = EPOCH_DURATION_NS;
+    let _ = lease.acquire_v8(0, t0, u64::MAX);
+    let park_ns = 187_500_000u64; // 1500 B at 8000 B/s
+    let g = lease.acquire_v8(0, t0 + park_ns, 1500);
+    assert!(
+        g >= 1499,
+        "self-park lag of 187.5 ms at 8000 B/s must grant >= 1499 B, got {g}"
+    );
+}
+
+#[test]
+fn v8_configured_frame_park_scales_stall_window_15100() {
+    // At lease creation for an 8000 B/s class the stall window covers
+    // at least the self-park for one 1500 B frame (187.5 ms), so the
+    // queue's own park is not classified as a worker stall / HA gap.
+    assert!(
+        stall_window_ns_for_rate(8_000) >= 187_500_000,
+        "8000 B/s stall window {} ns must cover the 187.5 ms frame park",
+        stall_window_ns_for_rate(8_000)
+    );
+    // High-rate control: the fixed 51.2 ms floor still dominates.
+    assert_eq!(
+        stall_window_ns_for_rate(RATE_100M),
+        EPOCH_DURATION_NS * STALL_THRESHOLD_EPOCHS,
+        "100 Mbps stall window stays at the fixed floor"
+    );
+    // Zero-rate (transparent) leases keep the fixed floor.
+    assert_eq!(
+        stall_window_ns_for_rate(0),
+        EPOCH_DURATION_NS * STALL_THRESHOLD_EPOCHS
+    );
+}
+
+#[test]
+fn v8_stall_burst_bound_still_holds_15100() {
+    // Control: a genuine stall far beyond even the rate-relative
+    // window still cold-resumes to exactly one epoch and drops carry.
+    let lease = carry_test_lease();
+    let t0 = EPOCH_DURATION_NS;
+    let _ = lease.acquire_v8(0, t0, u64::MAX);
+    let t1 = t0 + (MAX_ROTATION_LAG_EPOCHS + 3) * EPOCH_DURATION_NS;
+    let _ = lease.acquire_v8(0, t1, u64::MAX);
+    assert!(published_carry(&lease) > 0, "carry banked before stall");
+    let t2 = t1 + 2_000_000_000u64; // 2 s stall
+    let _ = lease.acquire_v8(0, t2, u64::MAX);
+    assert_eq!(
+        published_cap(&lease),
+        CAP_PER_EPOCH_100M,
+        "2 s stall still cold-resumes to one epoch"
+    );
+    assert_eq!(published_carry(&lease), 0, "stall still drops stale carry");
+}
+
+#[test]
+fn v8_sustained_self_park_delivery_15100() {
+    // Sustained backlogged delivery under the self-park cadence: at
+    // 1 Mbps (125000 B/s) a full 4096 B frame refills every 32.768 ms.
+    // Over 44 such parks (~1.44 s) the class must deliver >= 95% of
+    // the rate-implied bytes (consuming each grant so the
+    // outstanding-credit cap does not bind).
+    let lease = SharedCoSQueueLease::new_v8(125_000, 256 * 1024, 1, 0);
+    lease.rehydrate_worker_active_count(0, 1);
+    let t0 = EPOCH_DURATION_NS;
+    let _ = lease.acquire_v8(0, t0, u64::MAX);
+    let park_ns = 32_768_000u64; // 4096 B at 125000 B/s
+    let mut total = 0u64;
+    for i in 1..=44u64 {
+        let g = lease.acquire_v8(0, t0 + i * park_ns, 4096);
+        lease.consume(g);
+        total += g;
+    }
+    let expected = 125_000u64 * 144 / 100; // 180000 B over ~1.44 s
+    assert!(
+        total * 100 >= expected * 95,
+        "self-parked 1 Mbps class delivered {total} B, expected >= 95% of {expected} B"
+    );
+}
 
 #[test]
 fn v8_carry_field_is_reader_private() {
