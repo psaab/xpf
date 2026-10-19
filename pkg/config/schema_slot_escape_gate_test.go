@@ -512,6 +512,10 @@ func TestSlotEscapeCoverage(t *testing.T) {
 			refusedByDesign = append(refusedByDesign, s+"  ("+why+")")
 			continue
 		}
+		if why := portMirroringEgressRefusal15256(s); why != "" {
+			refusedByDesign = append(refusedByDesign, s+"  ("+why+")")
+			continue
+		}
 		t.Errorf("multi leaf %q carries NO slot-escape verdict: it does not commit clean under a "+
 			"synthetic parent path, and it has no row in slotEscapeRows. Add one — a prerequisite "+
 			"base config that commits clean, a value the leaf accepts, and one it must reject.", s)
@@ -613,4 +617,34 @@ func familyAnyRefusal9017(site string) string {
 		return ""
 	}
 	return "#4296 refuses family-specific matches under family any"
+}
+
+// portMirroringEgressRefusal15256: #15256 A85-04 declares
+// `input egress interface` only so the compiler gate can name it;
+// every value is rejected as unmodelled, so no slot row exists.
+// Measured like the helpers above.
+func portMirroringEgressRefusal15256(site string) string {
+	if site != "forwarding-options port-mirroring instance <*> input egress interface" {
+		return ""
+	}
+	tr := &ConfigTree{}
+	for _, l := range []string{
+		"set forwarding-options port-mirroring instance pm1 input ingress interface ge-0/0/0.0",
+		"set forwarding-options port-mirroring instance pm1 output interface ge-0/0/1.0",
+		"set forwarding-options port-mirroring instance pm1 input egress interface ge-0/0/2.0",
+	} {
+		pth, err := ParseSetCommand(l)
+		if err != nil {
+			return ""
+		}
+		tr.SetPath(pth)
+	}
+	_, err := CompileConfig(tr)
+	if err == nil {
+		return ""
+	}
+	if !strings.Contains(err.Error(), "egress") {
+		return ""
+	}
+	return "strict commits reject port-mirroring input egress as not modelled (#15256)"
 }

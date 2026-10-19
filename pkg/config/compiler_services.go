@@ -1862,7 +1862,7 @@ func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, o
 	}
 
 	if pmNode := node.FindChild("port-mirroring"); pmNode != nil {
-		if err := compilePortMirroring(pmNode, fo); err != nil {
+		if err := compilePortMirroring(pmNode, fo, opts.lenientPortMirroring15256, warnings); err != nil {
 			return err
 		}
 	}
@@ -1875,11 +1875,29 @@ func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, o
 	return nil
 }
 
-func compilePortMirroring(node *Node, fo *ForwardingOptionsConfig) error {
+func compilePortMirroring(node *Node, fo *ForwardingOptionsConfig, lenient bool, warnings *[]string) error {
 	pm := &PortMirroringConfig{
 		Instances: make(map[string]*PortMirrorInstance),
 	}
-
+	// #15256 A85-04: shape gate. Before this, any child other than
+	// instance/input{rate,ingress/interface}/output/interface was silently
+	// ignored: unknown statements compiled to no mirror, `family`/`egress`
+	// to a mirror without that scope, the instance-less global form to an
+	// empty table, and an instance with no ingress to a never-firing entry
+	// — all with a green commit. Strict rejects; lenient warns and keeps
+	// the modelled subset (#1960 no-brick).
+	var shapeErrs []string
+	shapeErr := func(format string, args ...any) {
+		shapeErrs = append(shapeErrs, fmt.Sprintf(format, args...))
+	}
+	for _, child := range node.Children {
+		if child.Name() != "instance" {
+			shapeErr("forwarding-options port-mirroring: statement %q is not modelled (only `instance <name>` is supported); it would compile to no mirror — remove it", child.Name())
+		}
+	}
+	if len(node.Keys) > 1 {
+		shapeErr("forwarding-options port-mirroring: statement %q is not modelled (only `instance <name>` is supported); it would compile to no mirror — remove it", node.Keys[1])
+	}
 	// #3972: an invalid port-mirroring entry is a HARD commit reject naming
 	// the offending instance, NOT a green commit that later fail-closes the
 	// WHOLE mirror table with only a warn in the snapshot builder. This
@@ -1900,7 +1918,40 @@ func compilePortMirroring(node *Node, fo *ForwardingOptionsConfig) error {
 
 	for _, inst := range namedInstances(node.FindChildren("instance")) {
 		mi := &PortMirrorInstance{Name: inst.name}
-
+		for _, child := range inst.node.Children {
+			switch child.Name() {
+			case "input", "output":
+			case "family":
+				shapeErr("port-mirroring instance %q: `family` is not modelled; the mirror would apply without the family scope — remove it", inst.name)
+			default:
+				shapeErr("port-mirroring instance %q: unknown statement %q is not modelled; it would be silently dropped — remove it", inst.name, child.Name())
+			}
+		}
+		if inputNode := inst.node.FindChild("input"); inputNode != nil {
+			for _, child := range inputNode.Children {
+				switch child.Name() {
+				case "rate", "ingress":
+				case "egress":
+					shapeErr("port-mirroring instance %q: `input egress` is not modelled (only ingress mirroring is supported); it would be silently dropped — remove it", inst.name)
+				default:
+					shapeErr("port-mirroring instance %q: unknown input statement %q is not modelled; it would be silently dropped — remove it", inst.name, child.Name())
+				}
+			}
+			if ingressNode := inputNode.FindChild("ingress"); ingressNode != nil {
+				for _, child := range ingressNode.Children {
+					if child.Name() != "interface" {
+						shapeErr("port-mirroring instance %q: unknown ingress statement %q is not modelled; it would be silently dropped — remove it", inst.name, child.Name())
+					}
+				}
+			}
+		}
+		if outputNode := inst.node.FindChild("output"); outputNode != nil {
+			for _, child := range outputNode.Children {
+				if child.Name() != "interface" {
+					shapeErr("port-mirroring instance %q: unknown output statement %q is not modelled; it would be silently dropped — remove it", inst.name, child.Name())
+				}
+			}
+		}
 		if inputNode := inst.node.FindChild("input"); inputNode != nil {
 			if rateNode := inputNode.FindChild("rate"); rateNode != nil {
 				if v := nodeVal(rateNode); v != "" {
@@ -1917,18 +1968,42 @@ func compilePortMirroring(node *Node, fo *ForwardingOptionsConfig) error {
 				}
 			}
 			if ingressNode := inputNode.FindChild("ingress"); ingressNode != nil {
+				addIngress := func(v string) error {
+					key := LinuxIfName(v)
+					if owner, dup := ingressOwner[key]; dup {
+						if owner == inst.name {
+							return fmt.Errorf("port-mirroring instance %q: duplicate ingress interface %q", inst.name, v)
+						}
+						return fmt.Errorf("port-mirroring: ingress interface %q is mirrored by both instance %q and %q (one output per ingress interface)", v, owner, inst.name)
+					}
+					ingressOwner[key] = inst.name
+					mi.Input = append(mi.Input, v)
+					return nil
+				}
+				// Flat-set spelling packs interfaces onto the ingress Keys.
+				for _, v := range ingressNode.Keys[1:] {
+					if v == "" || v == "interface" {
+						continue
+					}
+					if err := addIngress(v); err != nil {
+						return err
+					}
+				}
 				for _, child := range ingressNode.Children {
 					if child.Name() == "interface" {
-						if v := nodeVal(child); v != "" {
-							key := LinuxIfName(v)
-							if owner, dup := ingressOwner[key]; dup {
-								if owner == inst.name {
-									return fmt.Errorf("port-mirroring instance %q: duplicate ingress interface %q", inst.name, v)
-								}
-								return fmt.Errorf("port-mirroring: ingress interface %q is mirrored by both instance %q and %q (one output per ingress interface)", v, owner, inst.name)
+						vals := child.Keys[1:]
+						if len(vals) == 0 {
+							if v := nodeVal(child); v != "" {
+								vals = []string{v}
 							}
-							ingressOwner[key] = inst.name
-							mi.Input = append(mi.Input, v)
+						}
+						for _, v := range vals {
+							if v == "" {
+								continue
+							}
+							if err := addIngress(v); err != nil {
+								return err
+							}
 						}
 					}
 				}
@@ -1941,9 +2016,19 @@ func compilePortMirroring(node *Node, fo *ForwardingOptionsConfig) error {
 			}
 		}
 
+		if len(mi.Input) == 0 {
+			shapeErr("port-mirroring instance %q: no ingress interfaces configured (an instance with zero ingress interfaces mirrors nothing) — add `input ingress interface <if>` or remove the instance", inst.name)
+		}
 		pm.Instances[mi.Name] = mi
 	}
-
+	if len(shapeErrs) > 0 {
+		if !lenient {
+			return fmt.Errorf("%s", shapeErrs[0])
+		}
+		if warnings != nil {
+			*warnings = append(*warnings, shapeErrs...)
+		}
+	}
 	fo.PortMirroring = pm
 	return nil
 }

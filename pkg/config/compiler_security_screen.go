@@ -356,6 +356,25 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 					if profile.ICMP.FloodThreshold <= 0 {
 						profile.ICMP.FloodThreshold = defaultICMPFloodThreshold
 					}
+				case "ip-sweep":
+					// #15256 A85-01: Junos spells this `icmp ip-sweep`;
+					// xpf historically accepted only `ip ip-sweep`. Accept
+					// both onto IPSweepThreshold.
+					for _, swOpt := range opt.Children {
+						switch swOpt.Name() {
+						case "threshold":
+							recordKeyExtras("icmp ip-sweep threshold", swOpt, 2)
+							recordChildExtras("icmp ip-sweep threshold", swOpt)
+							if n, ok := parseThresh("icmp ip-sweep threshold", numVal(swOpt, 1)); ok {
+								profile.IP.IPSweepThreshold = n
+							}
+						default:
+							profile.UnknownLeaves = append(profile.UnknownLeaves, "icmp ip-sweep "+swOpt.Name())
+						}
+					}
+					if profile.IP.IPSweepThreshold <= 0 {
+						profile.IP.IPSweepThreshold = defaultIPSweepThreshold
+					}
 				default:
 					profile.UnknownLeaves = append(profile.UnknownLeaves, "icmp "+opt.Name())
 				}
@@ -424,7 +443,8 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 					profile.TCP.SynFin = true
 					recordKeyExtras("tcp syn-fin", opt, 1)
 					recordChildExtras("tcp syn-fin", opt)
-				case "no-flag":
+				case "no-flag", "tcp-no-flag":
+					// #15256 A85-01: Junos `tcp tcp-no-flag`; keep `no-flag`.
 					profile.TCP.NoFlag = true
 					recordKeyExtras("tcp no-flag", opt, 1)
 					recordChildExtras("tcp no-flag", opt)

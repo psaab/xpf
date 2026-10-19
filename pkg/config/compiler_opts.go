@@ -1330,6 +1330,9 @@ type compileOpts struct {
 	// (#1960 no-brick); the 0-limit policer behaves exactly as before.
 	// Same doctrine as lenientPolicerUnknownActions.
 	lenientPolicerMissingLimits bool
+	// lenientPortMirroring15256 (#15256 A85-04) downgrades the port-mirroring
+	// shape gate to a cfg.Warnings entry on tolerant load / peer-sync.
+	lenientPortMirroring15256 bool
 	// lenientFilterDSCP (#3309) downgrades the firewall-filter DSCP /
 	// traffic-class range gate (validateFilterDSCPStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check path
@@ -3615,6 +3618,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicerUnknownActions:           true,
 		lenientPolicerNameCollision:           true,
 		lenientPolicerMissingLimits:           true,
+		lenientPortMirroring15256: true,
 		lenientFilterDSCP:                      true,
 		lenientNPTv6:                           true,
 		lenientVRFOverlapPBR:                   true,

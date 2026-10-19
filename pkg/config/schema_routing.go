@@ -917,12 +917,26 @@ var schemaForwardingOptions = &schemaNode{desc: "Packet forwarding options", chi
 			}},
 		}},
 	}},
-	"port-mirroring": {desc: "Port mirroring", children: map[string]*schemaNode{
+	// #15256 A85-04: closedWorld so unknown/unmodelled statements (family,
+	// egress, instance-less global form, typos) are refused at strict
+	// SchemaValidate instead of compiling to no mirror. Grammar below is
+	// the modelled subset compilePortMirroring reads; family/egress are
+	// declared so the compiler gate can name them specifically.
+	"port-mirroring": {desc: "Port mirroring", closedWorld: true, children: map[string]*schemaNode{
 		"instance": {desc: "Port mirroring instance", args: 1, placeholder: "<instance-name>", children: map[string]*schemaNode{
 			"input": {desc: "Mirrored input traffic (rate, ingress interfaces)", children: map[string]*schemaNode{
-				"ingress": {desc: "Interfaces to mirror at ingress", children: nil},
+				"rate": {desc: "Sample 1-in-N packets (0 mirrors every packet)", args: 1, placeholder: "<rate>", children: nil},
+				"ingress": {desc: "Interfaces to mirror at ingress", children: map[string]*schemaNode{
+					"interface": {desc: "Ingress interface to mirror", args: 1, multi: true, placeholder: "<interface>", children: nil},
+				}},
+				"egress": {desc: "Egress mirroring (not modelled; rejected by compiler gate)", children: map[string]*schemaNode{
+					"interface": {desc: "Egress interface", args: 1, multi: true, placeholder: "<interface>", children: nil},
+				}},
 			}},
-			"output": {desc: "Mirror destination interface", children: nil},
+			"family": {desc: "Address family mirroring scope (not modelled; rejected by compiler gate)", args: 1, placeholder: "<family>", children: nil},
+			"output": {desc: "Mirror destination", children: map[string]*schemaNode{
+				"interface": {desc: "Mirror destination interface", args: 1, placeholder: "<interface>", children: nil},
+			}},
 		}},
 	}},
 	"dhcp-relay": {desc: "DHCP relay", children: map[string]*schemaNode{

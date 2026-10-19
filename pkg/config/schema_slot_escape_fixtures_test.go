@@ -228,8 +228,8 @@ var slotEscRibGroup = []string{
 var slotEscapeUngated = map[string]string{
 	"forwarding-options dhcp-relay group <*> interface": "" +
 		"v4 relay interfaces are accepted as tokens; semantic v4 validation checks servers and active-group links, not interface spelling",
-	"snmp trap-group <*> categories": "" +
-		"trap categories are an open token set at commit; no domain check exists to escape",
+	// #15256 A85-02 removed: `snmp trap-group <*> categories` now carries a
+	// Junos-vocabulary enum validator, so the row carries a real verdict.
 }
 
 // slotEscapeHistorical pins the instances that motivated this gate. They are
@@ -571,5 +571,10 @@ func slotEscapeRows() []slotEscapeRow {
 		{"snmp trap-group categories", "snmp trap-group <*> categories",
 			[]string{"set snmp trap-group tg1 targets 10.0.0.1"},
 			"set snmp trap-group tg1 categories", "link", "zzbogus"},
+		// #15256 A85-04: `input egress interface` is declared so the
+		// compiler gate can name it, but every value is rejected as
+		// unmodelled — there is no accepted value, so no slot row can
+		// be expressed; coverage excuses it via the measured refusal
+		// in portMirroringEgressRefusal15256 (gate test file).
 	}
 }

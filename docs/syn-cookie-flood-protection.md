@@ -20,6 +20,10 @@ set security screen ids-option SCREEN tcp syn-flood alarm-threshold 512 attack-t
 set security zones security-zone untrust screen SCREEN
 ```
 
+Junos spellings `icmp ip-sweep` and `tcp tcp-no-flag` are accepted as
+aliases of `ip ip-sweep` and `tcp no-flag` respectively (#15256 A85-01);
+both compile to the same screen fields.
+
 The `syn-flood-protection-mode` is a global flow setting. The per-zone screen
 `syn-flood` thresholds control when the mode activates. When the threshold is
 exceeded:
