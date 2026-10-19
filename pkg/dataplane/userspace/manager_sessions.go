@@ -633,6 +633,55 @@ func (m *Manager) DeleteSession(key dataplane.SessionKey) error {
 	return nil
 }
 
+// DeleteSessionScoped deletes one session carrying its routing domain and
+// PurgeTunnelVariants option (#14965). It never probes the surviving mirror
+// row for scope: the caller already knows both, and the mirror row may be a
+// colliding tenant's row or already gone. Used by the session-store per-key
+// batch-retry recovery so that path agrees with the batch leg.
+func (m *Manager) DeleteSessionScoped(sk dataplane.ScopedSessionKey) error {
+	m.mu.Lock()
+	if m.proc == nil || m.proc.Process == nil {
+		m.mu.Unlock()
+		return errSessionHelperUnreachable
+	}
+	err := m.syncDeleteScopedKeyV4Locked(sk)
+	m.mu.Unlock()
+	if err != nil {
+		return surfaceSingularHelperDeleteError("v4", err)
+	}
+	return nil
+}
+
+// DeleteSessionScopedV6 is the IPv6 analogue of DeleteSessionScoped (#14965).
+func (m *Manager) DeleteSessionScopedV6(sk dataplane.ScopedSessionKeyV6) error {
+	m.mu.Lock()
+	if m.proc == nil || m.proc.Process == nil {
+		m.mu.Unlock()
+		return errSessionHelperUnreachable
+	}
+	err := m.syncDeleteScopedKeyV6Locked(sk)
+	m.mu.Unlock()
+	if err != nil {
+		return surfaceSingularHelperDeleteError("v6", err)
+	}
+	return nil
+}
+
+// syncDeleteScopedKeyV4Locked sends one scoped singular helper delete
+// (#14965). m.mu must be held; m.proc must be non-nil (caller-checked).
+func (m *Manager) syncDeleteScopedKeyV4Locked(sk dataplane.ScopedSessionKey) error {
+	req := m.buildSessionSyncRequestV4("mirror_delete", sk.Key, deleteScopeVal(sk.RoutingDomain))
+	req.PurgeTunnelVariants = sk.PurgeTunnelVariants
+	return m.syncSessionRequestLocked(req)
+}
+
+// syncDeleteScopedKeyV6Locked is the IPv6 analogue (#14965).
+func (m *Manager) syncDeleteScopedKeyV6Locked(sk dataplane.ScopedSessionKeyV6) error {
+	req := m.buildSessionSyncRequestV6("mirror_delete", sk.Key, deleteScopeValV6(sk.RoutingDomain))
+	req.PurgeTunnelVariants = sk.PurgeTunnelVariants
+	return m.syncSessionRequestLocked(req)
+}
+
 // syncDeleteV4Locked sends the helper deletes for a removed v4 session: the
 // forward key, and the reverse companion SetSessionV4 pre-installed. Both name
 // the session's routing domain when one is known.

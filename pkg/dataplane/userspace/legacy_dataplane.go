@@ -613,6 +613,24 @@ func (a *LegacyDataPlaneAdapter) DeleteSessionV6(key dataplane.SessionKeyV6) err
 	return m.DeleteSessionV6(key)
 }
 
+// DeleteSessionScoped forwards the #14965 scoped singular delete.
+func (a *LegacyDataPlaneAdapter) DeleteSessionScoped(sk dataplane.ScopedSessionKey) error {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return err
+	}
+	return m.DeleteSessionScoped(sk)
+}
+
+// DeleteSessionScopedV6 forwards the IPv6 analogue (#14965).
+func (a *LegacyDataPlaneAdapter) DeleteSessionScopedV6(sk dataplane.ScopedSessionKeyV6) error {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return err
+	}
+	return m.DeleteSessionScopedV6(sk)
+}
+
 // BatchDeleteSessions overrides the promoted bpfShim batch delete so the
 // authoritative Rust helper is told to delete every key too (#5096). Without
 // this override Go method promotion routes policy-invalidation and cluster-

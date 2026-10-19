@@ -198,6 +198,19 @@ type sessionDomainBatchDeleter interface {
 	BatchDeleteSessionsScopedV6([]ScopedSessionKeyV6) (int, error)
 }
 
+// sessionScopedDeleter is the singular scoped-delete capability (#14965):
+// one key carrying its routing domain and PurgeTunnelVariants option, so the
+// per-key batch-retry recovery in batchDeleteExactV4/V6 does not silently
+// fall back to the bare DeleteSession — which re-derives the domain from
+// the surviving mirror row (wrong tenant when the tuple collides, and
+// nothing when the row is already gone) and cannot carry the tunnel-variant
+// flag at all. Implemented by the userspace Manager and LegacyDataPlaneAdapter;
+// dataplanes without it keep the bare DeleteSession fallback.
+type sessionScopedDeleter interface {
+	DeleteSessionScoped(ScopedSessionKey) error
+	DeleteSessionScopedV6(ScopedSessionKeyV6) error
+}
+
 // peerSyncedSessionDeleter (#9714) is the optional capability a dataplane offers
 // for deletes made on behalf of the PEER. It marks the helper request so the
 // helper can refuse a peer delete of a key it holds as a LOCAL session whose
@@ -744,12 +757,18 @@ func (s dataPlaneSessionStore) batchDeleteExactV4(keys []ScopedSessionKey, out [
 			// that key is already gone, but chunk[chunkDeleted+1:] were
 			// never attempted. Finish the remainder per-key so nothing is
 			// dropped (#5448).
-			// #9364: the per-key retry is domain-correct. DeleteSession on
-			// the userspace manager fetches the row's own value and names
-			// its domain (#9146), so no scope is needed here.
+			// #14965: the per-key retry must carry the SAME scoped key
+			// (routing domain + PurgeTunnelVariants) the batch leg was
+			// given. The bare DeleteSession re-derives the domain from
+			// the surviving mirror row — wrong tenant when the tuple
+			// collides, nothing when the row is already gone — and
+			// cannot carry PurgeTunnelVariants at all, so a GRE0 row
+			// deleted on this recovery path silently leaked. Prefer the
+			// scoped singular capability; dataplanes without it keep
+			// the bare fallback.
 			var firstErr error
 			for _, sk := range chunk[chunkDeleted:] {
-				if delErr := s.dp.DeleteSession(sk.Key); delErr == nil {
+				if delErr := s.deleteSessionScopedV4(sk); delErr == nil {
 					out = append(out, sk.Key)
 				} else if firstErr == nil && !sessionNotFound(delErr) {
 					firstErr = delErr
@@ -800,9 +819,11 @@ func (s dataPlaneSessionStore) batchDeleteExactV6(keys []ScopedSessionKeyV6, out
 			// The batch stopped at a missing key; retry the unattempted
 			// remainder one at a time, excluding absent keys and retaining
 			// later successful keys in the exact output.
+			// #14965: same scoped-retry rule as the V4 twin — carry the
+			// scoped key, never the bare DeleteSessionV6.
 			var firstErr error
 			for _, sk := range chunk[chunkDeleted:] {
-				if delErr := s.dp.DeleteSessionV6(sk.Key); delErr == nil {
+				if delErr := s.deleteSessionScopedV6(sk); delErr == nil {
 					out = append(out, sk.Key)
 				} else if firstErr == nil && !sessionNotFound(delErr) {
 					firstErr = delErr
@@ -843,6 +864,24 @@ func (s dataPlaneSessionStore) batchDeleteChunkV6(chunk []ScopedSessionKeyV6) (i
 	return s.dp.BatchDeleteSessionsV6(bareSessionKeysV6(chunk))
 }
 
+// deleteSessionScopedV4 issues one scoped singular delete (#14965), preferring
+// the sessionScopedDeleter capability and falling back to the bare
+// DeleteSession for dataplanes that cannot carry scope.
+func (s dataPlaneSessionStore) deleteSessionScopedV4(sk ScopedSessionKey) error {
+	if scoped, ok := s.dp.(sessionScopedDeleter); ok {
+		return scoped.DeleteSessionScoped(sk)
+	}
+	return s.dp.DeleteSession(sk.Key)
+}
+
+// deleteSessionScopedV6 is the IPv6 analogue of deleteSessionScopedV4 (#14965).
+func (s dataPlaneSessionStore) deleteSessionScopedV6(sk ScopedSessionKeyV6) error {
+	if scoped, ok := s.dp.(sessionScopedDeleter); ok {
+		return scoped.DeleteSessionScopedV6(sk)
+	}
+	return s.dp.DeleteSessionV6(sk.Key)
+}
+
 // deletePeerBatchKnownExactV4 is the exact V4 path for a delete made on behalf
 // of the PEER (#9714, #10598). The helper answers FIRST. A forward key it
 // refuses (a live local session whose owner RG is locally active: a dual-primary
@@ -853,8 +892,9 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownExactV4(dp peerSyncedSessionD
 	forwardKeys := make([]ScopedSessionKey, 0, len(entries))
 	for _, entry := range entries {
 		forwardKeys = append(forwardKeys, ScopedSessionKey{
-			Key:           entry.Key,
-			RoutingDomain: entry.Value.RoutingDomain,
+			Key:                 entry.Key,
+			RoutingDomain:       entry.Value.RoutingDomain,
+			PurgeTunnelVariants: entry.PurgeTunnelVariants,
 		})
 	}
 	deleted, applied, err := dp.BatchDeletePeerSyncedSessionsExactScoped(forwardKeys, forwardOnly)
@@ -869,7 +909,7 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownExactV4(dp peerSyncedSessionD
 	exact := make([]SessionKey, 0, len(deleted))
 	appliedEntries := make([]SessionEntryV4, 0, len(applied))
 	for _, entry := range entries {
-		scoped := ScopedSessionKey{Key: entry.Key, RoutingDomain: entry.Value.RoutingDomain}
+		scoped := ScopedSessionKey{Key: entry.Key, RoutingDomain: entry.Value.RoutingDomain, PurgeTunnelVariants: entry.PurgeTunnelVariants}
 		if _, ok := deletedSet[scoped]; ok {
 			exact = append(exact, scoped.Key)
 		}
@@ -878,12 +918,42 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownExactV4(dp peerSyncedSessionD
 		}
 	}
 	if err != nil {
+		// #14965: a partial peer batch (helper applied a prefix/suffix then
+		// failed) must still retire the applied half: reverse companions
+		// and dynamic dnat_table entries of helper-applied forwards are
+		// destroyed below. Falling through to the tail BEFORE returning
+		// the error is the fix; refusing the whole tail on error orphaned
+		// those companions/dnat rows. Applied-only filter (appliedEntries)
+		// keeps refused/absent forwards untouched.
 		if len(exact) == 0 {
 			exact = nil
 		}
-		return exact, err
+		if len(appliedEntries) == 0 {
+			return exact, err
+		}
+		peerErr := err
+		reverseKeys := make([]ScopedSessionKey, 0, len(appliedEntries))
+		for _, entry := range appliedEntries {
+			if !forwardOnly && entry.Value.ReverseKey.Protocol != 0 {
+				reverseKeys = append(reverseKeys, ScopedSessionKey{
+					Key:                 entry.Value.ReverseKey,
+					RoutingDomain:       entry.Value.RoutingDomain,
+					PurgeTunnelVariants: entry.PurgeTunnelVariants,
+				})
+			}
+		}
+		if len(reverseKeys) > 0 {
+			_, _, _ = dp.BatchDeletePeerSyncedSessionsExactScoped(reverseKeys, false)
+		}
+		for _, entry := range appliedEntries {
+			val := entry.Value
+			s.preservePersistentNATV4(entry.Key, val)
+			if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
+				_ = ignoreSessionNotFound(s.dp.DeleteDNATEntry(dnatKeyForSessionV4(entry.Key, val)))
+			}
+		}
+		return exact, peerErr
 	}
-
 	reverseKeys := make([]ScopedSessionKey, 0, len(appliedEntries))
 	for _, entry := range appliedEntries {
 		// #9752: a forward-only delete retires exactly the named keys; the
@@ -892,8 +962,9 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownExactV4(dp peerSyncedSessionD
 		if !forwardOnly && entry.Value.ReverseKey.Protocol != 0 {
 			// #9364: the reverse companion is the SAME flow in the SAME tenant.
 			reverseKeys = append(reverseKeys, ScopedSessionKey{
-				Key:           entry.Value.ReverseKey,
-				RoutingDomain: entry.Value.RoutingDomain,
+				Key:                 entry.Value.ReverseKey,
+				RoutingDomain:       entry.Value.RoutingDomain,
+				PurgeTunnelVariants: entry.PurgeTunnelVariants,
 			})
 		}
 	}
@@ -920,8 +991,9 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownExactV6(dp peerSyncedSessionD
 	forwardKeys := make([]ScopedSessionKeyV6, 0, len(entries))
 	for _, entry := range entries {
 		forwardKeys = append(forwardKeys, ScopedSessionKeyV6{
-			Key:           entry.Key,
-			RoutingDomain: entry.Value.RoutingDomain,
+			Key:                 entry.Key,
+			RoutingDomain:       entry.Value.RoutingDomain,
+			PurgeTunnelVariants: entry.PurgeTunnelVariants,
 		})
 	}
 	deleted, applied, err := dp.BatchDeletePeerSyncedSessionsExactScopedV6(forwardKeys, forwardOnly)
@@ -936,7 +1008,7 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownExactV6(dp peerSyncedSessionD
 	exact := make([]SessionKeyV6, 0, len(deleted))
 	appliedEntries := make([]SessionEntryV6, 0, len(applied))
 	for _, entry := range entries {
-		scoped := ScopedSessionKeyV6{Key: entry.Key, RoutingDomain: entry.Value.RoutingDomain}
+		scoped := ScopedSessionKeyV6{Key: entry.Key, RoutingDomain: entry.Value.RoutingDomain, PurgeTunnelVariants: entry.PurgeTunnelVariants}
 		if _, ok := deletedSet[scoped]; ok {
 			exact = append(exact, scoped.Key)
 		}
@@ -945,10 +1017,35 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownExactV6(dp peerSyncedSessionD
 		}
 	}
 	if err != nil {
+		// #14965: v6 twin of the partial-peer-batch tail above.
 		if len(exact) == 0 {
 			exact = nil
 		}
-		return exact, err
+		if len(appliedEntries) == 0 {
+			return exact, err
+		}
+		peerErr := err
+		reverseKeys := make([]ScopedSessionKeyV6, 0, len(appliedEntries))
+		for _, entry := range appliedEntries {
+			if !forwardOnly && entry.Value.ReverseKey.Protocol != 0 {
+				reverseKeys = append(reverseKeys, ScopedSessionKeyV6{
+					Key:                 entry.Value.ReverseKey,
+					RoutingDomain:       entry.Value.RoutingDomain,
+					PurgeTunnelVariants: entry.PurgeTunnelVariants,
+				})
+			}
+		}
+		if len(reverseKeys) > 0 {
+			_, _, _ = dp.BatchDeletePeerSyncedSessionsExactScopedV6(reverseKeys, false)
+		}
+		for _, entry := range appliedEntries {
+			val := entry.Value
+			s.preservePersistentNATV6(entry.Key, val)
+			if val.IsReverse == 0 && val.Flags&SessFlagSNAT != 0 && val.Flags&SessFlagStaticNAT == 0 {
+				_ = ignoreSessionNotFound(s.dp.DeleteDNATEntryV6(dnatKeyForSessionV6(entry.Key, val)))
+			}
+		}
+		return exact, peerErr
 	}
 
 	reverseKeys := make([]ScopedSessionKeyV6, 0, len(appliedEntries))
@@ -957,8 +1054,9 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownExactV6(dp peerSyncedSessionD
 		if !forwardOnly && entry.Value.ReverseKey.Protocol != 0 {
 			// #9364: the reverse companion is the SAME flow in the SAME tenant.
 			reverseKeys = append(reverseKeys, ScopedSessionKeyV6{
-				Key:           entry.Value.ReverseKey,
-				RoutingDomain: entry.Value.RoutingDomain,
+				Key:                 entry.Value.ReverseKey,
+				RoutingDomain:       entry.Value.RoutingDomain,
+				PurgeTunnelVariants: entry.PurgeTunnelVariants,
 			})
 		}
 	}
