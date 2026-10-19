@@ -398,6 +398,28 @@ func (m *Manager) IsPeerPrimary(rgID int) bool {
 	return false
 }
 
+// PeerPrimaryRGs returns the data redundancy groups the peer currently
+// owns as primary, per the last heartbeat-advertised peer group state,
+// in ascending RG order. It reports peerAlive=false when no peer
+// heartbeat is live, so a caller reconciling a timed-out forwarded
+// failover (#15081) can distinguish "unknown — peer unreachable" (no
+// verdict) from "peer reachable and not primary for these RGs" (the
+// transfer did not commit on the peer). RG0 (control plane) is not a
+// data failover target and is never included.
+func (m *Manager) PeerPrimaryRGs() (rgs []int, peerAlive bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if !m.peerAlive {
+		return nil, false
+	}
+	for _, rgID := range m.DataGroupIDs() {
+		if pg, ok := m.peerGroups[rgID]; ok && pg.State == StatePrimary {
+			rgs = append(rgs, rgID)
+		}
+	}
+	return rgs, true
+}
+
 // IsLocalPrimaryAny returns true if this node is primary for any RG.
 func (m *Manager) IsLocalPrimaryAny() bool {
 	m.mu.RLock()

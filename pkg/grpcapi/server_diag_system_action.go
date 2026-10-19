@@ -25,6 +25,23 @@ import (
 
 const maxDynamicAddressShrinkAckReasonBytes = 512
 
+// proxyPeerTimeout sizes the deadline for a forwarded SystemAction.
+// Ordinary actions keep the historical 5s budget. A forwarded
+// node-targeted cluster failover (#15081) runs the peer's full
+// RequestPeerFailover sequence — failover-ACK round-trip, local
+// commit-ready settle, and commit round-trip, each bounded well above
+// 5s (a bulk session sync alone can delay the barrier ACK by 30+s) —
+// so it is sized from the cluster budget
+// (clusterfailover.ProxyFailoverTimeout). The flat 5s deadline made the
+// proxy return a bare DeadlineExceeded while the peer completed the
+// ownership move, inviting a needless retry during maintenance.
+func proxyPeerTimeout(req *pb.SystemActionRequest) time.Duration {
+	if req != nil && clusterfailover.IsFailoverActionString(req.Action) {
+		return clusterfailover.ProxyFailoverTimeout
+	}
+	return 5 * time.Second
+}
+
 func (s *Server) proxyPeerSystemAction(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
 	return s.proxyPeerSystemActionWithPersistentNatGeneration(ctx, req, "", 0)
 }
@@ -35,7 +52,7 @@ func (s *Server) proxyPeerSystemActionWithPersistentNatGeneration(
 	origin string,
 	generation uint64,
 ) (*pb.SystemActionResponse, error) {
-	peerCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	peerCtx, cancel := context.WithTimeout(ctx, proxyPeerTimeout(req))
 	defer cancel()
 	// #14580: origin/generation ride inside the signed request body (see
 	// persistent_nat_clear_generation_14580.go), never unsigned metadata.
@@ -50,6 +67,107 @@ func (s *Server) proxyPeerSystemActionWithPersistentNatGeneration(
 	}
 	defer conn.Close()
 	return pb.NewBpfrxServiceClient(conn).SystemAction(peerCtx, forwardedReq)
+}
+
+// failoverProxyTimeoutOutcome reconciles a forwarded node-targeted
+// failover whose proxy leg reported a deadline outcome — the proxy
+// context expired (context.DeadlineExceeded) or the peer returned
+// codes.DeadlineExceeded — against current RG ownership (#15081).
+//
+// The forwarded call may have committed on the peer after the proxy
+// gave up, so a bare DeadlineExceeded would tell the operator the
+// failover failed and invite a retry of an already-completed move.
+// When the error is not a deadline outcome, or the op is not a
+// proxyable failover, it returns (nil, false) and the caller relays the
+// original error unchanged. Otherwise it returns a non-error response:
+//
+//   - ownership moved as requested (peer primary for an RG failover,
+//     or for every RG the data failover had to move): report success;
+//   - peer reachable but ownership did not move: report outcome
+//     unknown with the peer's current primary set;
+//   - peer unreachable / no cluster view: report outcome unknown with
+//     no verdict.
+//
+// In no case does a deadline outcome on this path surface as a bare
+// codes.DeadlineExceeded after the peer may have committed.
+func (s *Server) failoverProxyTimeoutOutcome(op clusterfailover.Op, err error) (*pb.SystemActionResponse, bool) {
+	if err == nil {
+		return nil, false
+	}
+	deadline := errors.Is(err, context.DeadlineExceeded) ||
+		status.Code(err) == codes.DeadlineExceeded
+	if !deadline || s.cluster == nil {
+		return nil, false
+	}
+	switch op.Kind {
+	case clusterfailover.KindRGFailoverNode:
+		if s.cluster.IsPeerPrimary(op.RG) {
+			return &pb.SystemActionResponse{
+				Message: fmt.Sprintf("Manual failover completed for redundancy group %d (transfer committed on node %d; proxy response timed out after the peer committed)", op.RG, op.Node),
+			}, true
+		}
+		if !s.cluster.PeerAlive() {
+			return &pb.SystemActionResponse{
+				Message: fmt.Sprintf("Cluster failover outcome unknown for redundancy group %d: forwarded request to node %d timed out and the peer is unreachable; verify redundancy group %d ownership before retrying", op.RG, op.Node, op.RG),
+			}, true
+		}
+		return &pb.SystemActionResponse{
+			Message: fmt.Sprintf("Cluster failover outcome unknown for redundancy group %d: forwarded request to node %d timed out; redundancy group %d is not primary on node %d — verify ownership before retrying", op.RG, op.Node, op.RG, op.Node),
+		}, true
+	case clusterfailover.KindDataFailover:
+		peerRGs, peerAlive := s.cluster.PeerPrimaryRGs()
+		if !peerAlive {
+			return &pb.SystemActionResponse{
+				Message: fmt.Sprintf("Data failover outcome unknown: forwarded request to node %d timed out and the peer is unreachable; verify redundancy group ownership before retrying", op.Node),
+			}, true
+		}
+		// The peer-side handler moves exactly the data RGs not already
+		// primary on the target; "committed" means every data RG is now
+		// primary on the peer. A partial set is reported as unknown.
+		if dataRGs := s.cluster.DataGroupIDs(); len(dataRGs) > 0 && len(peerRGs) == len(dataRGs) {
+			committed := true
+			for _, rgID := range dataRGs {
+				found := false
+				for _, prg := range peerRGs {
+					if prg == rgID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					committed = false
+					break
+				}
+			}
+			if committed {
+				return &pb.SystemActionResponse{
+					Message: fmt.Sprintf("Manual failover completed for data redundancy groups %v (transfer committed on node %d; proxy response timed out after the peer committed)", dataRGs, op.Node),
+				}, true
+			}
+		}
+		return &pb.SystemActionResponse{
+			Message: fmt.Sprintf("Data failover outcome unknown: forwarded request to node %d timed out; data redundancy groups now primary on node %d: %v — verify ownership before retrying", op.Node, op.Node, peerRGs),
+		}, true
+	}
+	return nil, false
+}
+
+// proxyClusterFailover forwards a validated node-targeted failover op
+// to the peer and reconciles a proxy deadline outcome against current
+// ownership (#15081), so the operator never receives a bare
+// DeadlineExceeded for a transfer the peer may have committed.
+func (s *Server) proxyClusterFailover(ctx context.Context, req *pb.SystemActionRequest, op clusterfailover.Op) (*pb.SystemActionResponse, error) {
+	resp, err := s.proxyPeerSystemAction(ctx, req)
+	if err != nil {
+		if outcome, ok := s.failoverProxyTimeoutOutcome(op, err); ok {
+			return outcome, nil
+		}
+		if st, ok := status.FromError(err); ok {
+			return nil, st.Err()
+		}
+		return nil, status.Errorf(codes.Unavailable, "peer cluster failover proxy failed: %v", err)
+	}
+	return resp, nil
 }
 
 // logSystemAction records a destructive maintenance action to the configstore
@@ -749,14 +867,7 @@ func (s *Server) executeClusterFailover(ctx context.Context, req *pb.SystemActio
 			if peerForwardedFromContext(ctx) {
 				return nil, status.Errorf(codes.FailedPrecondition, "forwarded cluster failover target node %d is not local", targetNode)
 			}
-			resp, err := s.proxyPeerSystemAction(ctx, req)
-			if err != nil {
-				if st, ok := status.FromError(err); ok {
-					return nil, st.Err()
-				}
-				return nil, status.Errorf(codes.Unavailable, "peer cluster failover proxy failed: %v", err)
-			}
-			return resp, nil
+			return s.proxyClusterFailover(ctx, req, op)
 		}
 		dataRGs := s.cluster.DataGroupIDs()
 		if len(dataRGs) == 0 {
@@ -792,14 +903,7 @@ func (s *Server) executeClusterFailover(ctx context.Context, req *pb.SystemActio
 			if peerForwardedFromContext(ctx) {
 				return nil, status.Errorf(codes.FailedPrecondition, "forwarded cluster failover target node %d is not local", targetNode)
 			}
-			resp, err := s.proxyPeerSystemAction(ctx, req)
-			if err != nil {
-				if st, ok := status.FromError(err); ok {
-					return nil, st.Err()
-				}
-				return nil, status.Errorf(codes.Unavailable, "peer cluster failover proxy failed: %v", err)
-			}
-			return resp, nil
+			return s.proxyClusterFailover(ctx, req, op)
 		}
 		// Target is local — make us primary.
 		if s.cluster.IsLocalPrimary(op.RG) {

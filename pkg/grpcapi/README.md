@@ -79,6 +79,21 @@ warning during grace and a critical alarm after expiry. `ClearSessions` and the
 admitted `SystemAction` verbs (cross-node failover and persistent-NAT clear)
 require a valid token even before peer-auth enforcement is armed.
 
+**Forwarded failover proxy budget (#15081).** `proxyPeerSystemAction` keeps
+the historical 5s deadline for ordinary forwarded actions, but a forwarded
+node-targeted cluster failover (`cluster-failover:<rg>:node<n>` /
+`cluster-failover-data:node<n>`) is sized from the cluster budget
+(`clusterfailover.ProxyFailoverTimeout` = 2× the 20s failover-ACK cap plus
+2× the 3s commit settle = 46s): the peer runs the full
+`RequestPeerFailover` sequence, whose barrier ACK alone can be delayed 30+s
+by bulk session sync. If the proxy leg still hits a deadline, the outcome
+is reconciled against heartbeat-advertised RG ownership
+(`IsPeerPrimary` / `PeerPrimaryRGs`): committed transfers report success,
+anything else reports "outcome unknown … verify ownership before
+retrying" — never a bare `DeadlineExceeded` after the peer may have
+committed. The CLI twin (`pkg/cli/peer.go`) applies the same sizing and
+reconciliation.
+
 ### Peer hop markers are a listener capability, not a header (#5883)
 
 Two internal metadata keys bound cluster forwarding to one hop:
