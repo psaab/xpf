@@ -2027,6 +2027,25 @@ owned by the `journal/` subpackage.
   Guarded by `rollback_rebind_14578_test.go` (runtime, boot, and retry paths)
   and `rollback_rebind_15023_test.go` (stale live slot, failed rewrite,
   tombstone, healthy-ladder control).
+- **A history shift without an active rewrite defers the sidecar (#15190).**
+  The inverse of #14578: `SyncApply` pushes the old active onto history
+  and then `writeActive` fails pre-rename (degrade-not-fail), so the
+  shifted slots were written with a sidecar bound (via
+  `rollbackActiveBindingForWrite`, which reads the in-memory tree) to
+  the unwritten synced config while `active.json` still held the old
+  tree. A restart before the persist retry healed refused every slot
+  on the generation mismatch, and the next save tombstoned the ladder
+  in memory — silent loss of the standby's rollback history with
+  `RollbackHistoryDegraded` false. `SyncApply` now defers the shifted
+  `saveRollbackFiles` on a pre-rename failure (`rollbackPersistDelayed`):
+  the on-disk slots/sidecar still describe the old active, so a pre-heal
+  restart yields its readable pre-sync ladder, and
+  `retryActiveConfigPersistLocked` saves the shifted ladder once the
+  synced config is durable (its #14578 rebind covers the no-shift case).
+  A post-rename failure already made the new tree visible, so the shifted
+  save still runs immediately. Guarded by
+  `sync_rollback_binding_15190_test.go` (degraded restart, retry heal,
+  post-rename control, successful-sync control).
 - Rollback-history degradation (#3441 L1): a rollback-slot write or the
   trailing dir-sync failing no longer just logs a warning. The commit
   still succeeds (the canonical active config already persisted via the
