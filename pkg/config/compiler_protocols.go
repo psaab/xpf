@@ -57,10 +57,23 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 		}
 	}
 
+	// #15776: LLDP must honour the same packed/chained shapes its
+	// protocol siblings do. packedTopChildren handles a packed tail
+	// beside a braced body (`lldp transmit-interval 10 { interface
+	// ...; }`) and the plain packed `lldp disable;`;
+	// flattenChainedChildren hoists flat-set chains nested under a
+	// terminating leaf (`set protocols lldp transmit-interval 10
+	// disable`, `... disable transmit-interval 10`); expandFlatRun
+	// splits packed runs (`transmit-interval 10 disable;` in braces).
+	// The "lldp disable" compact-normalize scope entry covers the
+	// brace-elided spelling before compile; this also covers tolerant
+	// load.
 	lldpNode := node.FindChild("lldp")
 	if lldpNode != nil {
 		proto.LLDP = &LLDPConfig{}
-		for _, child := range lldpNode.Children {
+		lldpSchema := schemaForPath("protocols", "lldp")
+		lldpChildren := expandFlatRun(flattenChainedChildren(packedTopChildren(lldpNode, lldpSchema), lldpSchema), lldpSchema)
+		for _, child := range lldpChildren {
 			switch child.Name() {
 			case "interface":
 				// #15138: an LLDP interface statement is only meaningful
@@ -115,7 +128,22 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 						break
 					}
 				}
-				proto.LLDP.Interfaces = append(proto.LLDP.Interfaces, iface)
+				// #15776: merge duplicate same-name entries; a
+				// disable on ANY entry wins, so an enabled duplicate
+				// cannot fail open into a second LLDP session.
+				merged := false
+				for i := range proto.LLDP.Interfaces {
+					if proto.LLDP.Interfaces[i].Name == iface.Name {
+						if iface.Disable {
+							proto.LLDP.Interfaces[i].Disable = true
+						}
+						merged = true
+						break
+					}
+				}
+				if !merged {
+					proto.LLDP.Interfaces = append(proto.LLDP.Interfaces, iface)
+				}
 			case "transmit-interval":
 				if v := nodeVal(child); v != "" {
 					if n, err := strconv.Atoi(v); err == nil {
