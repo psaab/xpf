@@ -275,8 +275,8 @@ func TestManagerPolicyReadConfigReturnsKnownAppliedSnapshot12072(t *testing.T) {
 	}
 }
 
-// Incomplete with no continuation is a stranded READ — error, not an
-// authoritative empty.
+// Incomplete with no continuation and zero rows is a stranded READ —
+// error, not an authoritative empty.
 func TestManagerReadIncompleteWithoutTokenErrors10512(t *testing.T) {
 	m, controlSock := newReadOnlyManager10512(t)
 	startScriptedReadFake10512(t, controlSock, []ControlResponse{
@@ -285,6 +285,75 @@ func TestManagerReadIncompleteWithoutTokenErrors10512(t *testing.T) {
 
 	if _, err := m.ListSessionsByPolicy(SessionPolicyListRequest{PolicyIDs: []uint32{1}}); err == nil {
 		t.Fatal("READ incomplete-without-continuation must error")
+	}
+}
+
+// #15162: a terminal incomplete page carrying rows returns the gathered
+// aggregate with complete=false and a nil error (partial beats zero), so
+// the daemon's eager commit-time revocation can delete them. Covers both
+// a single incomplete page and a paged capture whose last page is
+// incomplete.
+func TestManagerReadIncompleteWithRowsReturnsPartial15162(t *testing.T) {
+	m, controlSock := newReadOnlyManager10512(t)
+	startScriptedReadFake10512(t, controlSock, []ControlResponse{
+		{
+			OK: true,
+			SessionPolicyMatches: []SessionPolicyMatch{
+				readMatch10512(1, 100007, 0xA1),
+				readMatch10512(1, 100008, 0xB1),
+				readMatch10512(1, 100009, 0xC1),
+			},
+			SessionPolicyComplete:        false,
+			SessionPolicyPerWorkerErrors: []string{"worker-1:dead"},
+		},
+	})
+
+	resp, err := m.ListSessionsByPolicy(SessionPolicyListRequest{PolicyIDs: []uint32{1}})
+	if err != nil {
+		t.Fatalf("incomplete READ with rows must return nil error, got %v", err)
+	}
+	if resp.SessionPolicyComplete {
+		t.Fatal("incomplete READ must report complete=false")
+	}
+	if len(resp.SessionPolicyMatches) != 3 {
+		t.Fatalf("incomplete READ returned %d matches, want 3", len(resp.SessionPolicyMatches))
+	}
+	if len(resp.SessionPolicyPerWorkerErrors) != 1 || resp.SessionPolicyPerWorkerErrors[0] != "worker-1:dead" {
+		t.Fatalf("per-worker errors = %v, want [worker-1:dead]", resp.SessionPolicyPerWorkerErrors)
+	}
+}
+
+func TestManagerReadPagedIncompleteReturnsPartial15162(t *testing.T) {
+	m, controlSock := newReadOnlyManager10512(t)
+	startScriptedReadFake10512(t, controlSock, []ControlResponse{
+		{
+			OK:                        true,
+			SessionPolicyMatches:      []SessionPolicyMatch{readMatch10512(1, 100007, 0xA1)},
+			SessionPolicyContinuation: "c1",
+		},
+		{
+			OK: true,
+			SessionPolicyMatches: []SessionPolicyMatch{
+				readMatch10512(1, 100008, 0xB1),
+				readMatch10512(1, 100009, 0xC1),
+			},
+			SessionPolicyComplete:        false,
+			SessionPolicyPerWorkerErrors: []string{"capture-limit"},
+		},
+	})
+
+	resp, err := m.ListSessionsByPolicy(SessionPolicyListRequest{PolicyIDs: []uint32{1}})
+	if err != nil {
+		t.Fatalf("paged incomplete READ must return nil error, got %v", err)
+	}
+	if resp.SessionPolicyComplete {
+		t.Fatal("paged incomplete READ must report complete=false")
+	}
+	if len(resp.SessionPolicyMatches) != 3 {
+		t.Fatalf("paged incomplete READ returned %d matches, want 3", len(resp.SessionPolicyMatches))
+	}
+	if len(resp.SessionPolicyPerWorkerErrors) != 1 || resp.SessionPolicyPerWorkerErrors[0] != "capture-limit" {
+		t.Fatalf("per-worker errors = %v, want [capture-limit]", resp.SessionPolicyPerWorkerErrors)
 	}
 }
 

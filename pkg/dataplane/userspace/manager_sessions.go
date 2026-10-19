@@ -72,7 +72,11 @@ func (m *Manager) PolicyReadConfig() *config.Config {
 // the commit-time discovery boundary and must not be accepted on the dedicated
 // session socket, whose allowlist is limited to sync_session/ping/HA refresh.
 // Continuation pages share one absolute 30-second capture deadline. A complete
-// response with no continuation is the only authoritative result.
+// response with no continuation is authoritative for the whole table; a
+// terminal incomplete page (#15162) returns the gathered aggregate with
+// SessionPolicyComplete=false and a nil error so the daemon can revoke the
+// partial capture instead of losing it. Only a stranded READ with zero rows,
+// a repeated token, or a deadline stays a hard error.
 func (m *Manager) ListSessionsByPolicy(req SessionPolicyListRequest) (ControlResponse, error) {
 	deadline := time.Now().Add(policyReadDeadline)
 	pageReq := req
@@ -131,8 +135,12 @@ func (m *Manager) ListSessionsByPolicy(req SessionPolicyListRequest) (ControlRes
 			aggregate.SessionPolicyPerWorkerErrors, page.SessionPolicyPerWorkerErrors...)
 		if page.SessionPolicyContinuation == "" {
 			if !page.SessionPolicyComplete {
-				return ControlResponse{}, fmt.Errorf(
-					"policy session READ incomplete without continuation")
+				if len(aggregate.SessionPolicyMatches) == 0 {
+					return ControlResponse{}, fmt.Errorf(
+						"policy session READ incomplete without continuation")
+				}
+				aggregate.SessionPolicyComplete = false
+				return aggregate, nil
 			}
 			aggregate.SessionPolicyComplete = true
 			return aggregate, nil
