@@ -2321,11 +2321,20 @@ func validateNPTv6Strict(cfg *Config, lenient bool) ([]string, error) {
 	// Track already-validated prefixes per direction to reject overlaps (#2241).
 	// Outbound matches on the internal prefix; inbound matches on the external
 	// (match) prefix. Each direction is checked independently.
+	//
+	// #15266 (B09-01): fromZone partitions the overlap check exactly as the
+	// helper does (#5176). Two DISTINCT non-empty `from zone` scopes are
+	// disjoint -- a packet carries exactly one relevant zone -- so same-prefix
+	// rules in different zones are legitimate split-horizon, not an
+	// order-dependent overlap. The zone-aware predicate is the same one
+	// NPTv6OverlapConflict uses (zonesConflictNPTv6), so commit and helper
+	// share one answer.
 	type seenPrefix struct {
 		net         *net.IPNet
 		ones        int
 		ruleSetName string
 		ruleName    string
+		fromZone    string
 	}
 	var internalSeen, externalSeen []seenPrefix
 
@@ -2475,6 +2484,8 @@ func validateNPTv6Strict(cfg *Config, lenient bool) ([]string, error) {
 
 			// #2241: overlap rejection. Check the internal (outbound) and
 			// external (inbound) prefixes independently against prior rules.
+			// #15266: gated on zonesConflictNPTv6 -- distinct non-empty zones
+			// never see the same packet, so they cannot overlap (#5176).
 			//
 			// #4339: a rule is NEVER compared against itself. A single NPTv6
 			// rule in a rule-set with MULTIPLE from-scopes (`from zone A; from
@@ -2495,7 +2506,7 @@ func validateNPTv6Strict(cfg *Config, lenient bool) ([]string, error) {
 				if sameRule(prev) {
 					continue
 				}
-				if overlaps(prev.net, intNet) {
+				if overlaps(prev.net, intNet) && zonesConflictNPTv6(rs.FromZone, prev.fromZone) {
 					overlapFound = true
 					if err := emit(fmt.Sprintf(
 						"security nat static rule-set %q rule %q nptv6-prefix %q overlaps rule-set %q rule %q (outbound/internal prefixes overlap; first-match resolution would be order-dependent)",
@@ -2509,7 +2520,7 @@ func validateNPTv6Strict(cfg *Config, lenient bool) ([]string, error) {
 				if sameRule(prev) {
 					continue
 				}
-				if overlaps(prev.net, extNet) {
+				if overlaps(prev.net, extNet) && zonesConflictNPTv6(rs.FromZone, prev.fromZone) {
 					overlapFound = true
 					if err := emit(fmt.Sprintf(
 						"security nat static rule-set %q rule %q match destination-address %q overlaps rule-set %q rule %q (inbound/external prefixes overlap; first-match resolution would be order-dependent)",
@@ -2525,8 +2536,8 @@ func validateNPTv6Strict(cfg *Config, lenient bool) ([]string, error) {
 				continue
 			}
 
-			internalSeen = append(internalSeen, seenPrefix{net: intNet, ones: intOnes, ruleSetName: rs.Name, ruleName: rule.Name})
-			externalSeen = append(externalSeen, seenPrefix{net: extNet, ones: extOnes, ruleSetName: rs.Name, ruleName: rule.Name})
+			internalSeen = append(internalSeen, seenPrefix{net: intNet, ones: intOnes, ruleSetName: rs.Name, ruleName: rule.Name, fromZone: rs.FromZone})
+			externalSeen = append(externalSeen, seenPrefix{net: extNet, ones: extOnes, ruleSetName: rs.Name, ruleName: rule.Name, fromZone: rs.FromZone})
 		}
 	}
 

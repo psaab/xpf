@@ -1097,8 +1097,9 @@ func compileNPTv6(dp DataPlane, cfg *config.Config) error {
 	//     overlaps would name the wrong reason for a correct rejection.
 	//   - It partitions by zone exactly as `zones_conflict` does, so the #5176
 	//     split-horizon configurations the helper installs are NOT rejected.
-	//     Reusing validateNPTv6Strict's older overlap check would have failed
-	//     precisely those working configs: its `seenPrefix` carries no zone.
+	//     (Historically validateNPTv6Strict's overlap check was zone-blind and
+	//     would have failed precisely those configs; #15266 made it zone-aware
+	//     as well, so commit and this pre-pass now agree.)
 	if conflict := config.NPTv6OverlapConflict(cfg); conflict != "" {
 		return fmt.Errorf("%s; the userspace helper rejects the whole NPTv6 snapshot "+
 			"on an overlapping prefix pair (#2241), so the apply cannot succeed -- "+

@@ -16,16 +16,21 @@ import (
 // one answer, so Go and Rust cannot drift on a rejection whose whole purpose is
 // to predict the other side's verdict.
 //
-// # Why validateNPTv6Strict's overlap check could not be reused
+// # Why validateNPTv6Strict's overlap check could not be reused (historical)
 //
-// That one exists and is older, but its `seenPrefix` carries only
-// `{net, ones, ruleSetName, ruleName}` — NO zone. The helper partitions by zone
-// scope (#5176): `find_overlap` gates every candidate on `zones_conflict`, and
-// two DISTINCT non-empty `from zone` scopes are disjoint, because a packet
-// carries exactly one relevant zone. Reusing the unpartitioned check as the
-// pre-pass would hard-fail split-horizon configurations the helper installs
-// happily — converting a working apply into a failed one, which is the exact
-// over-rejection the #4960 guard's three properties exist to prevent.
+// That one exists and is older, but at the time this predicate was written
+// its `seenPrefix` carried only `{net, ones, ruleSetName, ruleName}` — NO
+// zone. The helper partitions by zone scope (#5176): `find_overlap` gates
+// every candidate on `zones_conflict`, and two DISTINCT non-empty `from
+// zone` scopes are disjoint, because a packet carries exactly one relevant
+// zone. Reusing the then-unpartitioned check as the pre-pass would have
+// hard-failed split-horizon configurations the helper installs happily —
+// converting a working apply into a failed one, the exact over-rejection
+// the #4960 guard's three properties exist to prevent. #15266 (B09-01)
+// has since made validateNPTv6Strict zone-aware too (its seenPrefix now
+// carries fromZone and its overlap leg is gated on zonesConflictNPTv6), so
+// commit and helper share one answer; this predicate remains the
+// dataplane pre-pass's answer and the two must stay in agreement.
 //
 // # Mirroring the helper
 //
@@ -92,8 +97,8 @@ func NPTv6OverlapConflict(cfg *Config) string {
 }
 
 // nptv6Seen is one already-admitted prefix, carrying the zone the helper's
-// `find_overlap` gates on. The zone is the field validateNPTv6Strict's
-// equivalent lacks, and its absence there is why that check could not be reused.
+// `find_overlap` gates on. (Historically validateNPTv6Strict's equivalent
+// lacked this field; #15266 added it there too.)
 type nptv6Seen struct {
 	words    [4]uint16
 	n        int
