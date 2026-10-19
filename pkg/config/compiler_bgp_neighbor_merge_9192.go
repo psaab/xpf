@@ -124,16 +124,94 @@ func bgpNeighborBody14409(child *Node, schema *schemaNode) []*Node {
 	//     the fused node arrives as a real child.
 	// In both, firewallMatchValues would install the keyword and the
 	// key as two extra policies while the key itself never arrives.
-	// Between two statements of a packed run the split is unambiguous —
-	// a bare, unbracketed neighbor-grammar keyword at a statement
-	// position cannot be a policy-name value (a policy actually named
-	// that way must be quoted, and bracketed lists are excluded below)
-	// — so split fused multi leaves at such keywords. This is safe for
-	// braced children too: a braced `export { EP; }` carries EP as a
-	// child node, not in Keys, so it never matches the scan; the only
-	// Keys-carrying shape is the fused one.
+	//
+	// #15137: the split must be decided from the run's own grammar, not
+	// from whether a VALUE spells a keyword. A standalone
+	// `import P;` / `export P;` (braced, packed or flat-set) with P in
+	// {passive, default-originate, remove-private, loops, description,
+	// ...} carries exactly one value and nothing after it: there is no
+	// fused statement, so P stays a policy name and no flag is
+	// installed. The old scan cut at ANY bare neighbor keyword from
+	// index 1, so that shape compiled to no policy plus the keyword's
+	// flag — and, because the first own export/import wipes the
+	// inherited group list (#5277), to an UNFILTERED peer under
+	// `no bgp ebgp-requires-policy` (#14584).
+	//
+	// A cut is therefore taken only where the keyword at j is FOLLOWED
+	// BY ITS OWN GRAMMAR (fusedCutValid15137): every token of the tail
+	// must partition into complete neighbor statements. A lone keyword
+	// value fails that partition — `loops` still needs its count,
+	// `description` its text, `peer-as` its number, `family` its
+	// `inet|inet6` — so it is never cut. A genuinely fused run
+	// (`export EP authentication-key K`, or `export passive
+	// authentication-key K` where the first policy is itself named
+	// `passive`) partitions cleanly and splits exactly as before.
+	// Bracketed lists and quoted values are never cut (the existing
+	// per-token guards), and a braced `export { EP; }` carries EP as a
+	// child node, not in Keys, so it never reaches the scan.
 	body = splitFusedMultiLeaves14409(body, schema)
 	return body
+}
+
+// fusedCutValid15137 reports whether keys, read as a packed run of
+// neighbor statements, partitions COMPLETELY into schema statements:
+// every head resolves under the neighbor schema, every valued head is
+// followed by its declared value tokens, and no token is left over.
+// It is the #15137 gate on a fused-multi cut — the cut keyword must be
+// followed by its own grammar, not merely spell a keyword.
+//
+// `family` is compound: it needs `inet` or `inet6`, and may then carry
+// `unicast` (with an optional prefix-limit body, which cannot appear
+// in a packed key span and so ends the statement).
+// `bfd-liveness-detection` may stand alone or carry
+// minimum-interval/multiplier pairs.
+func fusedCutValid15137(keys []string, schema *schemaNode) bool {
+	if len(keys) == 0 {
+		return false
+	}
+	for i := 0; i < len(keys); {
+		head := resolveSchemaChild(schema, keys[i])
+		if head == nil {
+			return false
+		}
+		n, _ := consumeNodeKeys(keys[i:], head)
+		if n <= 0 || i+n > len(keys) {
+			return false
+		}
+		// A multi leaf owns every following value token (#2419), so a
+		// statement headed by one would swallow the rest of the run.
+		// Inside a cut tail that means the partition is not a statement
+		// boundary at all — except for export/import themselves, whose
+		// values are exactly the tokens up to the next statement, which
+		// is what this walk is deciding. Treat a second export/import
+		// head as consuming one value (its first policy) and continue;
+		// any further values belong to it and are re-decided by the
+		// recursive split.
+		if head.multi && keys[i] != "export" && keys[i] != "import" {
+			return false
+		}
+		if keys[i] == "family" {
+			// consumeNodeKeys consumed `family inet|inet6`; an
+			// optional trailing `unicast` belongs to the statement.
+			if i+n < len(keys) && keys[i+n] == "unicast" {
+				n++
+			}
+		}
+		i += n
+		// export/import consume exactly one value in this walk; extra
+		// bare values of the same leaf are handled by continuing the
+		// walk — they fail head resolution (a policy name is not a
+		// neighbor keyword) unless quoted/bracketed, which the caller
+		// already excluded at the cut token only. To keep a fused
+		// `export A B authentication-key K` partition valid, absorb
+		// following non-keyword tokens as further values of this leaf.
+		if keys[i-n] == "export" || keys[i-n] == "import" {
+			for i < len(keys) && resolveSchemaChild(schema, keys[i]) == nil {
+				i++
+			}
+		}
+	}
+	return true
 }
 
 // splitFusedMultiLeaves14409 splits a synthesized multi-value leaf whose
@@ -155,10 +233,23 @@ func splitFusedMultiLeaves14409(body []*Node, schema *schemaNode) []*Node {
 			if prop.KeyBracketed(j) || prop.KeyQuoted(j) {
 				continue
 			}
-			if resolveSchemaChild(schema, prop.Keys[j]) != nil {
-				cut = j
-				break
+			if resolveSchemaChild(schema, prop.Keys[j]) == nil {
+				continue
 			}
+			// #15137: a lone keyword value (`import passive;`) is not
+			// a fused statement. Cut only when the tail from j
+			// partitions into complete neighbor statements AND at
+			// least one authored value precedes the cut (in a fused
+			// run the leaf's own value comes first; cutting at the
+			// first value token would leave a valueless leaf).
+			if j < 2 {
+				continue
+			}
+			if !fusedCutValid15137(prop.Keys[j:], schema) {
+				continue
+			}
+			cut = j
+			break
 		}
 		if cut < 0 {
 			continue
