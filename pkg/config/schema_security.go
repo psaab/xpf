@@ -1365,7 +1365,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			"packet-filter": {desc: "Trace packet filter name", args: 1, placeholder: "<filter-name>", children: map[string]*schemaNode{
 				"source-prefix":      {desc: "Source prefix to trace", args: 1, placeholder: "<prefix>", children: nil},
 				"destination-prefix": {desc: "Destination prefix to trace", args: 1, placeholder: "<prefix>", children: nil},
-				"protocol":           {desc: "Protocol to trace (name or number)", args: 1, placeholder: "<tcp|udp|icmp|icmp6|number>", children: nil},
+				"protocol":           {desc: "Protocol to trace (name or number 1..255)", args: 1, placeholder: "<tcp|udp|icmp|icmp6|number>", valueType: ValueIdentifier, valueDesc: "Protocol name or number (1..255)", valueExamples: []string{"tcp", "udp", "47", "ospf"}, validator: validateFlowTraceProtocol15679, children: nil},
 			}},
 		}},
 	}},

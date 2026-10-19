@@ -8,6 +8,19 @@ import (
 	"strings"
 )
 
+// validateFlowTraceProtocol15679 is the SchemaValidate leaf validator for
+// `packet-filter ... protocol <proto>` (#15679). It uses
+// filterProtocolResolvable, the in-package mirror of appid.ProtocolNumber
+// (pkg/config cannot import pkg/appid), and additionally rejects "0": HOPOPT
+// is resolvable in the SSOT but proto 0 cannot be distinguished from "any" by
+// the trace writer's presence-based selector, so accepting it would widen.
+func validateFlowTraceProtocol15679(raw string, _ *Config) error {
+	if raw == "" || raw == "0" || !filterProtocolResolvable(raw) {
+		return fmt.Errorf("invalid protocol %q (expected a protocol name like tcp/udp/icmp/ospf/gre or a number 1..255)", raw)
+	}
+	return nil
+}
+
 // flowTraceFileNameError reports why an operator-supplied
 // `security flow traceoptions file <name>` value is unsafe, or nil if the
 // value is an acceptable bare basename. The persistent flow-trace file always
@@ -190,7 +203,7 @@ func validateFlowTraceFlagsAndFiltersAST(nodes []*Node, prefix string, lenient b
 					}
 				}
 
-				// packet-filter source/destination prefixes
+				// packet-filter source/destination prefixes and protocol (#15679)
 				for _, pf := range namedInstances(toNode.FindChildren("packet-filter")) {
 					pfPath := joinNodePath(toPath, []string{"packet-filter", pf.name})
 					// #12888: read the same expanded body compileFlow reads,
@@ -244,6 +257,40 @@ func validateFlowTraceFlagsAndFiltersAST(nodes []*Node, prefix string, lenient b
 									" (ignored: filter set to match-none)")
 								continue
 							}
+							return fmt.Errorf("%s", msg)
+						}
+					}
+					// #15679: protocol validation. filterProtocolResolvable mirrors
+					// appid.ProtocolNumber (config cannot import appid). Numerical
+					// 0 is resolvable as HOPOPT in that SSOT but is not a usable trace
+					// selector: NewTraceWriter uses proto presence to distinguish
+					// "any" from a concrete filter, so 0 would widen to any. Reject
+					// empty, unknown, 0, and out-of-range (256+ already unresolvable).
+					spNode := pfNode.FindChild("source-prefix")
+					dpNode := pfNode.FindChild("destination-prefix")
+					protoNode := pfNode.FindChild("protocol")
+					if protoNode != nil {
+						v := nodeVal(protoNode)
+						path := joinNodePath(pfPath, []string{"protocol"})
+						if v == "" || !filterProtocolResolvable(v) || v == "0" {
+							msg := fmt.Sprintf("%s: invalid protocol %q "+
+								"(expected a protocol name like tcp/udp/icmp/ospf/gre or a number 1..255)", path, v)
+							if lenient {
+								warnings = append(warnings, msg+
+									" (ignored: filter set to match-none)")
+							} else {
+								return fmt.Errorf("%s", msg)
+							}
+						}
+					}
+					if spNode == nil && dpNode == nil && protoNode == nil {
+						msg := fmt.Sprintf("%s: packet-filter %s specifies no source-prefix, "+
+							"destination-prefix, or protocol; an unconstrained filter would match every event",
+							pfPath, pf.name)
+						if lenient {
+							warnings = append(warnings, msg+
+								" (ignored: filter set to match-none)")
+						} else {
 							return fmt.Errorf("%s", msg)
 						}
 					}
@@ -944,20 +991,32 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 			// (#3422 M01). Record the distinction here (present-but-empty vs the
 			// absent protocol-only case) so the runtime can fail it closed; the
 			// strict commit gate rejects it outright before it ever lands here.
-			if spNode := pfNode.FindChild("source-prefix"); spNode != nil {
+			spNode := pfNode.FindChild("source-prefix")
+			dpNode := pfNode.FindChild("destination-prefix")
+			protoNode := pfNode.FindChild("protocol")
+			if spNode != nil {
 				pf.SourcePrefix = nodeVal(spNode)
 				if pf.SourcePrefix == "" {
 					pf.InvalidPrefix = true
 				}
 			}
-			if dpNode := pfNode.FindChild("destination-prefix"); dpNode != nil {
+			if dpNode != nil {
 				pf.DestinationPrefix = nodeVal(dpNode)
 				if pf.DestinationPrefix == "" {
 					pf.InvalidPrefix = true
 				}
 			}
-			if protoNode := pfNode.FindChild("protocol"); protoNode != nil {
+			if protoNode != nil {
 				pf.Protocol = nodeVal(protoNode)
+				// #15679: leniently-loaded empty/unknown/0/out-of-range protocol
+				// must fail closed (match-none), not widen to any protocol.
+				if pf.Protocol == "" || pf.Protocol == "0" || !filterProtocolResolvable(pf.Protocol) {
+					pf.InvalidPrefix = true
+				}
+			}
+			if spNode == nil && dpNode == nil && protoNode == nil {
+				// #15679: a filter with no selector would match every event.
+				pf.InvalidPrefix = true
 			}
 			to.PacketFilters = append(to.PacketFilters, pf)
 		}

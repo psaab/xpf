@@ -1077,6 +1077,9 @@ func (c *CLI) showFlowTraceoptions() error {
 			if pf.DestinationPrefix != "" {
 				fmt.Printf(" dst=%s", pf.DestinationPrefix)
 			}
+			if pf.Protocol != "" {
+				fmt.Printf(" proto=%s", pf.Protocol)
+			}
 			fmt.Println()
 		}
 	}
