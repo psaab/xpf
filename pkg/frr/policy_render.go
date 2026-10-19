@@ -412,10 +412,26 @@ func (m *Manager) generatePolicyOptionsForSection(po *config.PolicyOptionsConfig
 // single-policy BGP export in an originating instance and whose
 // no-default tail must carve to permit-BGP-only.
 func (m *Manager) generatePolicyOptionsForSection15157(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string, carvedExport map[string]bool) string {
-	return m.generatePolicyOptionsWithRefNodes14380(po, bgpAcceptDefault, qnhMetrics, referencedNodes, carvedExport)
+	return m.generatePolicyOptionsWithRefNodes15158(po, bgpAcceptDefault, qnhMetrics, referencedNodes, carvedExport, false)
 }
 
+// generatePolicyOptionsForSectionCluster15158 is the cluster-mode section
+// variant (#15158): carved-export handling is unchanged, and generated
+// static redistribute maps plus QNH metric maps lead with the cluster
+// tag deny.
+func (m *Manager) generatePolicyOptionsForSectionCluster15158(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string, carvedExport map[string]bool) string {
+	return m.generatePolicyOptionsWithRefNodes15158(po, bgpAcceptDefault, qnhMetrics, referencedNodes, carvedExport, true)
+}
+
+// generatePolicyOptionsWithRefNodes14380 keeps the #15157 signature for
+// direct callers. #15158: clusterMode prepends the cluster tag deny to
+// generated static redistribute maps; only the cluster section variant
+// below passes it.
 func (m *Manager) generatePolicyOptionsWithRefNodes14380(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string, carvedExport map[string]bool) string {
+	return m.generatePolicyOptionsWithRefNodes15158(po, bgpAcceptDefault, qnhMetrics, referencedNodes, carvedExport, false)
+}
+
+func (m *Manager) generatePolicyOptionsWithRefNodes15158(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string, carvedExport map[string]bool, clusterMode bool) string {
 	var b strings.Builder
 	b.WriteString(qnhMetrics.renderPrefixLists())
 
@@ -607,17 +623,17 @@ func (m *Manager) generatePolicyOptionsWithRefNodes14380(po *config.PolicyOption
 		// to the whole node-fitting domain at its referencing nodes;
 		// nil (direct callers) keeps the explicit-only set.
 		for _, proto := range redistReferencedProtocols14380(ps, referencedNodes[name]) {
-			b.WriteString(renderRedistributePolicyMap(m, po, name, ps, proto))
+			b.WriteString(renderRedistributePolicyMapCluster15158(m, po, name, ps, proto, clusterMode))
 		}
 		for _, scope := range qnhMetrics.scopes() {
 			if routeMap := scope.policyMaps[name]; routeMap != "" {
-				b.WriteString(m.renderQNHMetricPolicyMap11447(po, routeMap, ps, scope))
+				b.WriteString(m.renderQNHMetricPolicyMapCluster15158(po, routeMap, ps, scope, clusterMode))
 				b.WriteString("!\n")
 			}
 		}
 	}
 
-	b.WriteString(m.generateQNHMetricStaticMaps11447(qnhMetrics))
+	b.WriteString(m.generateQNHMetricStaticMapsCluster15158(qnhMetrics, clusterMode))
 	return b.String()
 }
 

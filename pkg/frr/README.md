@@ -888,7 +888,18 @@ step. Both are required — neither sees the other's case:
   (`compiler_interfaces.go`) and is deliberately NOT parsed as an address.
 - In cluster mode the package emits a blackhole default at admin distance
   250 so traffic to the active fabric peer survives a brief
-  active/active overlap.
+  active/active overlap. **#15158:** those internal Null0 defaults carry
+  reserved route tag 2500 (`tag (1-4294967295)` on the FRR static line),
+  and every generated redistribute map — the per-source
+  `<policy>-static-xpf-redist` maps and the QNH metric static/policy maps
+  — leads with `deny 5 / match tag 2500` in cluster mode, so `from
+  protocol static` can never select them for BGP origination (#14586) or
+  RIP/OSPF/OSPFv3/IS-IS export. A bare `redistribute static` (no policy
+  map) attaches the generated `xpf-cluster-null0-xpf-redist` guard map
+  (deny-tag, then permit) instead of the unfiltered verb. Operator statics
+  are untagged and keep flowing, including an operator static default.
+  Non-cluster renders are byte-identical: no tag, no deny sequence, bare
+  redistribution stays bare.
 - **A DHCP route's `vrf` clause names the KERNEL namespace, not the Junos
   one (#9136).** `DHCPRoute.VRF` carries the BARE routing-instance name —
   the suppression maps in `renderDHCPDefaults` key on it and are internally

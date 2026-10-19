@@ -109,15 +109,7 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 	// into redistributeEntries. Its call sites count as "isis" ONLY if that
 	// hard-coding is proven below.
 	isisCallRE := regexp.MustCompile(`\.resolveISISRedistribute\(`)
-	isisSelfRE := regexp.MustCompile(`func \(m \*Manager\) resolveISISRedistribute\([^)]*\) string \{\s*return isisRedistributeLines\(m\.redistributeEntries\([^,()]+,\s*[^,()]+,\s*"isis",`)
-	// #12071: the QNH overlay generator reaches redistributeEntries through
-	// addExport, whose self parameter must pass through unchanged. Every
-	// addExport call must also pass a literal self this census can read.
-	// With the two wrappers and this proven closure, any fourth caller is an
-	// unseen router whose AFI coverage this census cannot establish.
-	qnhCallRE := regexp.MustCompile(`addExport\(`)
-	qnhLitRE := regexp.MustCompile(`addExport\([^,()]+,\s*"([a-z0-9]*)",`)
-	qnhSelfRE := regexp.MustCompile(`addExport := func\(daemon, self,[^)]*\) \{(?s:.*?)m\.redistributeEntries\(export, fc\.PolicyOptions, self, scope\)`)
+	isisSelfRE := regexp.MustCompile(`func \(m \*Manager\) resolveISISRedistribute\([^)]*\) string \{\s*return m\.resolveISISRedistributeCluster15158\([^,()]+,\s*[^,()]+,\s*[^,()]+,\s*[^,()]+,\s*false,`)
 	// #15156: chain resolvers forward a literal self into
 	// redistChainEntries15156 exactly like the single-export wrappers.
 	// Their <2-defined fallback calls resolveRedistribute(e, po, self, ...)
@@ -125,6 +117,25 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 	chainSelfRE := regexp.MustCompile(`resolveRedistribute\(e, po, self,`)
 	chainCallRE := regexp.MustCompile(`\.resolveRedistributeChain\([^,()]+,\s*[^,()]+,\s*"([a-z0-9]+)",`)
 	chainISISCallRE := regexp.MustCompile(`\.resolveISISRedistributeChain\(`)
+	// #15158: protocols_render.go reaches the chain resolution through
+	// the cluster wrappers, which forward the same literal self. Count
+	// those calls with the same literal-self requirement. The chain
+	// wrappers' own fallback forwards self non-literally, proven by
+	// chainClusterSelfRE below (mirrors chainSelfRE).
+	clusterChainCallRE := regexp.MustCompile(`\.resolveRedistributeChainCluster15158\([^,]+,\s*[^,]+,\s*"([a-z0-9]+)",`)
+	clusterChainISISCallRE := regexp.MustCompile(`WriteString\(m\.resolveISISRedistributeChainCluster15158\(`)
+	// #15158: BGP bare-token redistribution renders through
+	// resolveRedistributeCluster15158 with literal self "bgp" at the
+	// render site; count it so the positive control still sees BGP.
+	bgpClusterCallRE := regexp.MustCompile(`WriteString\(m\.resolveRedistributeCluster15158\(e, policyOptions, "bgp",`)
+	// #12071: the QNH overlay generator reaches redistributeEntries through
+	// addExport, whose self parameter must pass through unchanged. Every
+	// addExport call must also pass a literal self this census can read.
+	// With the wrappers and this proven closure, any further caller is an
+	// unseen router whose AFI coverage this census cannot establish.
+	qnhCallRE := regexp.MustCompile(`addExport\(`)
+	qnhLitRE := regexp.MustCompile(`addExport\([^,()]+,\s*"([a-z0-9]*)",`)
+	qnhSelfRE := regexp.MustCompile(`addExport := func\(daemon, self,[^)]*\) \{(?s:.*?)m\.redistributeEntries\(export, fc\.PolicyOptions, self, scope\)`)
 	entriesCallRE := regexp.MustCompile(`\.redistributeEntries\(`)
 	calls, lits := 0, map[string]int{}
 	isisCalls, isisSelfProven, entriesCalls := 0, false, 0
@@ -163,9 +174,21 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 			lits[string(mm[1])]++
 			calls++
 		}
+		for _, mm := range clusterChainCallRE.FindAllSubmatch(b, -1) {
+			lits[string(mm[1])]++
+			calls++
+		}
 		if n := len(chainISISCallRE.FindAllIndex(b, -1)); n > 0 {
 			calls += n
 			lits["isis"] += n
+		}
+		if n := len(clusterChainISISCallRE.FindAllIndex(b, -1)); n > 0 {
+			calls += n
+			lits["isis"] += n
+		}
+		if n := len(bgpClusterCallRE.FindAllIndex(b, -1)); n > 0 {
+			calls += n
+			lits["bgp"] += n
 		}
 	}
 	if isisCalls > 0 {
@@ -186,7 +209,7 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 	}
 	calls += qnhCalls
 	if entriesCalls != 3 {
-		t.Fatalf("redistributeEntries has %d callers, want exactly the two wrappers plus the proven QNH overlay closure; another caller would be a router this census cannot see", entriesCalls)
+		t.Fatalf("redistributeEntries has %d callers, want exactly the wrappers plus the proven QNH overlay closure; another caller would be a router this census cannot see", entriesCalls)
 	}
 	n := 0
 	for _, c := range lits {

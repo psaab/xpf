@@ -886,18 +886,64 @@ func (m *Manager) renderPreferredRoutes(b *strings.Builder, fc *FullConfig) {
 	b.WriteString("!\n")
 }
 
+// clusterNull0Tag15158 is the reserved FRR route tag carried only by the
+// internal cluster-mode Null0 defaults (#15158). FRR static routes accept
+// `tag (1-4294967295)` (stable/10.6 staticd DEFPY ip_route/ipv6_route), and
+// route-maps can `match tag` on it, so tagging is the mechanism that lets
+// redistribution tell the internal defaults apart from an operator static
+// default at the same prefix. The tag is never rendered on operator routes.
+const clusterNull0Tag15158 = 2500
+
+// clusterNull0DenySeq15158 is the leading sequence of every generated
+// redistribute map in cluster mode. It sits below every existing first
+// sequence (all generated maps start at 10), so prepending it renumbers
+// nothing and cannot push a map past the FRR sequence ceiling.
+const clusterNull0DenySeq15158 = 5
+
+// clusterNull0DenyRouteMap15158 guards a bare `redistribute static`, which
+// has no policy route-map to carry the tag deny. Its name ends in the
+// reserved redist suffix, so an operator policy-statement cannot claim it
+// at commit (config.ReservedRedistSuffix); ApplyFull also refuses a
+// tolerant-load collision.
+const clusterNull0DenyRouteMap15158 = "xpf-cluster-null0" + config.ReservedRedistSuffix
+
+// clusterTagDeny15158 renders the leading deny sequence that keeps the
+// tagged internal defaults out of a generated redistribute map. Untagged
+// routes (every operator static) do not match and fall through unchanged.
+func clusterTagDeny15158(routeMap string) string {
+	return fmt.Sprintf("route-map %s deny %d\n match tag %d\nexit\n", frrName(routeMap), clusterNull0DenySeq15158, clusterNull0Tag15158)
+}
+
+// renderClusterNull0DenyRouteMap15158 defines the bare-redistribute guard
+// map: deny the tagged internal defaults, permit everything else (the
+// bare token's historical unfiltered meaning for operator routes).
+func renderClusterNull0DenyRouteMap15158(fc *FullConfig) string {
+	if fc == nil || !fc.ClusterMode {
+		return ""
+	}
+	return clusterTagDeny15158(clusterNull0DenyRouteMap15158) +
+		fmt.Sprintf("route-map %s permit %d\nexit\n!\n", frrName(clusterNull0DenyRouteMap15158), clusterNull0DenySeq15158+5)
+}
+
 // renderClusterModeDefaults emits cluster-mode blackhole default routes
 // (admin distance 250) for both address families. When the WAN VIP moves to
 // the peer and FRR withdraws the real default, this blackhole makes
 // bpf_fib_lookup return BLACKHOLE (not NOT_FWDED), triggering zone-encoded
 // fabric redirect for new connections. AD=250 ensures real defaults (AD=5,
 // DHCP AD=200) take priority.
+//
+// #15158: the routes carry clusterNull0Tag15158 and every generated
+// redistribute map denies that tag first. They are an internal fabric
+// safety net, not operator routes: untagged they were selectable by
+// `from protocol static`, so BGP origination (#14586) and RIP/OSPF/IS-IS
+// export advertised a blackhole 0.0.0.0/0 / ::/0 whenever the real default
+// was lost. An operator static default stays untagged and exportable.
 func renderClusterModeDefaults(b *strings.Builder, fc *FullConfig) {
 	if !fc.ClusterMode {
 		return
 	}
-	fmt.Fprintf(b, "ip route 0.0.0.0/0 Null0 250\n")
-	fmt.Fprintf(b, "ipv6 route ::/0 Null0 250\n")
+	fmt.Fprintf(b, "ip route 0.0.0.0/0 Null0 tag %d 250\n", clusterNull0Tag15158)
+	fmt.Fprintf(b, "ipv6 route ::/0 Null0 tag %d 250\n", clusterNull0Tag15158)
 	b.WriteString("!\n")
 }
 

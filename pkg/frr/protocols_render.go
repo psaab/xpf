@@ -167,6 +167,14 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 }
 
 func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 *config.OSPFv3Config, bgp *config.BGPConfig, rip *config.RIPConfig, isis *config.ISISConfig, vrfName string, ecmpMaxPaths int, policyOptions *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricScope11447, shared ...*bfdSection) string {
+	return m.generateProtocolsCluster15158(ospf, ospfv3, bgp, rip, isis, vrfName, ecmpMaxPaths, policyOptions, bgpAcceptDefault, qnhMetrics, false, shared...)
+}
+
+// generateProtocolsCluster15158 is generateProtocolsWithQNH11447 with the
+// #15158 cluster flag: bare `redistribute static` attachments are rewritten
+// to the deny-tag guard map. Only buildManagedSection passes clusterMode,
+// from fc.ClusterMode; every direct caller keeps the historical render.
+func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 *config.OSPFv3Config, bgp *config.BGPConfig, rip *config.RIPConfig, isis *config.ISISConfig, vrfName string, ecmpMaxPaths int, policyOptions *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricScope11447, clusterMode bool, shared ...*bfdSection) string {
 	var b strings.Builder
 	var bfd *bfdSection
 	emitLocal := false
@@ -285,7 +293,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		if ecmpMaxPaths > 1 {
 			fmt.Fprintf(&b, " maximum-paths %d\n", ecmpMaxPaths)
 		}
-		b.WriteString(m.resolveRedistributeChain(ospf.Export, policyOptions, "ospf", qnhMetricScopeForDaemon11447(qnhMetrics, "ospf")))
+		b.WriteString(m.resolveRedistributeChainCluster15158(ospf.Export, policyOptions, "ospf", clusterMode, qnhMetricScopeForDaemon11447(qnhMetrics, "ospf")))
 		b.WriteString("exit\n!\n")
 		// OSPF interface settings + per-interface area activation. The
 		// "interface <name>" block is emitted UNCONDITIONALLY for each unique
@@ -506,7 +514,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				fmt.Fprintf(&b, " area %s %s\n", area.ID, area.AreaType)
 			}
 		}
-		b.WriteString(m.resolveRedistributeChain(ospfv3.Export, policyOptions, "ospf6", qnhMetricScopeForDaemon11447(qnhMetrics, "ospf6")))
+		b.WriteString(m.resolveRedistributeChainCluster15158(ospfv3.Export, policyOptions, "ospf6", clusterMode, qnhMetricScopeForDaemon11447(qnhMetrics, "ospf6")))
 		b.WriteString("exit\n!\n")
 		// OSPFv3 interface settings + per-interface area activation. FRR
 		// stable/10.6 moved area activation from the removed router-level
@@ -885,10 +893,10 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 					// keeps the historical skip-and-warn wording; a bare
 					// token has no route-map, so no entry can collide
 					// with the filtered policy entries below.
-					b.WriteString(m.resolveRedistribute(e, policyOptions, "bgp", bgpAcceptDefault))
+					b.WriteString(m.resolveRedistributeCluster15158(e, policyOptions, "bgp", bgpAcceptDefault, clusterMode))
 				}
 				if isProto && kw != "bgp" && fam&config.FamilyIPv6 != 0 {
-					bgpIPv6Redist.WriteString(m.resolveBGPIPv6Redistribute(e, policyOptions, bgpAcceptDefault))
+					bgpIPv6Redist.WriteString(m.resolveBGPIPv6RedistributeCluster15158(e, policyOptions, bgpAcceptDefault, clusterMode))
 				}
 			}
 		}
@@ -899,7 +907,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		// lines join bgpIPv6Redist for the address-family block below,
 		// de-duplicated against bare-token IPv6 lines already collected.
 		bgpPolicies14586 := bgpExportPolicies14586(bgp, policyOptions)
-		b.WriteString(formatRedistEntries(m.bgpPolicyRedistEntries14586(bgpPolicies14586, policyOptions)))
+		b.WriteString(formatRedistEntries(m.bgpPolicyRedistEntriesCluster15158(bgpPolicies14586, policyOptions, clusterMode)))
 		{
 			seen6 := make(map[redistEntry]bool)
 			for _, ln := range strings.Split(bgpIPv6Redist.String(), "\n") {
@@ -918,7 +926,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				}
 			}
 			var extra6 strings.Builder
-			for _, ent := range m.bgpPolicyIPv6RedistEntries14586(bgpPolicies14586, policyOptions) {
+			for _, ent := range m.bgpPolicyIPv6RedistEntriesCluster15158(bgpPolicies14586, policyOptions, clusterMode) {
 				if seen6[ent] {
 					continue
 				}
@@ -1222,7 +1230,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			for _, iface := range rip.Passive {
 				fmt.Fprintf(&b, " passive-interface %s\n", iface)
 			}
-			b.WriteString(m.resolveRedistributeChain(rip.Redistribute, policyOptions, "rip", qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
+			b.WriteString(m.resolveRedistributeChainCluster15158(rip.Redistribute, policyOptions, "rip", clusterMode, qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
 			b.WriteString("exit\n!\n")
 			// RIP per-interface authentication
 			if rip.AuthKey != "" {
@@ -1352,7 +1360,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				b.WriteString(" is-type level-2-only\n")
 			}
 			// #9666: isisd's grammar, not the OSPF-shaped line. #15156: chain-composed.
-			b.WriteString(m.resolveISISRedistributeChain(isis.Export, policyOptions, isis.Level, qnhMetricScopeForDaemon11447(qnhMetrics, "isis")))
+			b.WriteString(m.resolveISISRedistributeChainCluster15158(isis.Export, policyOptions, isis.Level, clusterMode, qnhMetricScopeForDaemon11447(qnhMetrics, "isis")))
 			if isis.WideMetricsOnly {
 				b.WriteString(" metric-style wide\n")
 			}
