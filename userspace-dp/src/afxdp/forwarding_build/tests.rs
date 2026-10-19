@@ -9093,6 +9093,66 @@ fn wg_endpoint_with_degenerate_key_is_dropped_14373() {
     assert!(state.wg_engines.contains_key(&7));
 }
 
+/// #15132 (A91-06, #14373 residual): a bit-255 twin of a small-order
+/// key — the same u-coordinate with byte 31's top bit set, which
+/// X25519 masks off — must ALSO drop the tunnel row at hydrate. Before
+/// the fix the denylist compared exact bytes, so a twin peer (or twin
+/// local private key / explicit PSK) hydrated clean. Fail-on-revert:
+/// removing the byte-31 mask in is_small_order_wg_peer_key installs
+/// the tunnel and turns this RED.
+#[test]
+fn wg_endpoint_with_bit255_twin_key_is_dropped_15132() {
+    // Twin of u=1 (order 4): canonical "01" + 31*"00" ends in 0x00;
+    // its twin ends in 0x80.
+    let twin_u1 = format!("01{}80", "00".repeat(30));
+    let mut snap = wg_snapshot(51820, &["10.0.0.0/24"], "203.0.113.1:51820");
+    snap.tunnel_endpoints[0].wg_peers[0].wg_peer_pubkey_hex = twin_u1;
+    let state = build_forwarding_state(&snap);
+    assert!(
+        !state.tunnel_endpoints.contains_key(&7),
+        "bit-255 twin peer public key must drop the WG row (#15132)"
+    );
+    assert!(!state.has_wg_tunnels);
+    assert!(!state.wg_engines.contains_key(&7));
+
+    // Twin of the all-zero key as the LOCAL private key: 31 zero bytes
+    // then 0x80.
+    let mut snap = wg_snapshot(51820, &["10.0.0.0/24"], "203.0.113.1:51820");
+    snap.tunnel_endpoints[0].wg_local_privkey_hex = format!("{}80", "00".repeat(31));
+    let state = build_forwarding_state(&snap);
+    assert!(
+        !state.tunnel_endpoints.contains_key(&7),
+        "bit-255 twin local private key must drop the WG row (#15132)"
+    );
+
+    // Twin of u=p-1 (ec ff..ff 7f) as an EXPLICIT preshared key: the
+    // canonical ends in 0x7f, its twin ends in 0xff.
+    let mut snap = wg_snapshot(51820, &["10.0.0.0/24"], "203.0.113.1:51820");
+    snap.tunnel_endpoints[0].wg_peers[0].wg_preshared_key_hex = format!("ec{}ff", "ff".repeat(30));
+    let state = build_forwarding_state(&snap);
+    assert!(
+        !state.tunnel_endpoints.contains_key(&7),
+        "bit-255 twin preshared key must drop the WG row (#15132)"
+    );
+
+    // Control: the valid fixture (bit 255 clear in both fixture keys)
+    // still hydrates, and a valid peer key with bit 255 SET — a
+    // different genuine point, not a denylist twin — still hydrates.
+    let snap = wg_snapshot(51820, &["10.0.0.0/24"], "203.0.113.1:51820");
+    let state = build_forwarding_state(&snap);
+    assert!(state.tunnel_endpoints.contains_key(&7));
+    assert!(state.wg_engines.contains_key(&7));
+
+    let mut snap = wg_snapshot(51820, &["10.0.0.0/24"], "203.0.113.1:51820");
+    snap.tunnel_endpoints[0].wg_peers[0].wg_peer_pubkey_hex =
+        format!("{}80", &WG_TEST_PEERKEY_HEX[..62]);
+    let state = build_forwarding_state(&snap);
+    assert!(
+        state.tunnel_endpoints.contains_key(&7),
+        "a valid peer key with bit 255 set is a genuine point and must hydrate (#15132)"
+    );
+}
+
 #[test]
 fn wg_reload_reuses_engine_when_identity_unchanged() {
     let snap = wg_snapshot(51820, &["10.0.0.0/24"], "203.0.113.1:51820");

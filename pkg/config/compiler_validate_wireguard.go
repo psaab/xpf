@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/netip"
@@ -474,8 +475,12 @@ func isWireguardKeyHex(s string) bool {
 // mod p) is a point of order dividing 8: u=0, u=1, the two order-8
 // points, u=p-1, and the non-canonical encodings that reduce to the
 // same points. A clamped scalar is a multiple of 8, so X25519 maps
-// each of these to the all-zero output. Mirrored byte-for-byte in the
-// Rust dataplane (wg::is_degenerate_wg_key_bytes).
+// each of these to the all-zero output. Every entry is stored in
+// canonical form (bit 255 clear); isDegenerateWireguardKeyHex masks
+// bit 255 of the candidate before comparing, so the seven bit-255
+// twins — same point, one-bit-different encoding — are refused too
+// (#15132). Mirrored byte-for-byte in the Rust dataplane
+// (wg::is_degenerate_wg_key_bytes).
 var wgSmallOrderKeyHex = []string{
 	"0000000000000000000000000000000000000000000000000000000000000000",
 	"0100000000000000000000000000000000000000000000000000000000000000",
@@ -498,8 +503,18 @@ func isDegenerateWireguardKeyHex(s string) bool {
 		return false
 	}
 	low := strings.ToLower(s)
+	// #15132: X25519 masks bit 255 (the top bit of byte 31, the last
+	// byte) of the u-coordinate, so a key with that bit set is the
+	// SAME point as its canonical twin below. Compare with the bit
+	// masked, or the seven twins pass this gate while yielding the
+	// identical zero DH secret.
+	masked := low
+	if raw, err := hex.DecodeString(low); err == nil && len(raw) == 32 {
+		raw[31] &= 0x7f
+		masked = hex.EncodeToString(raw)
+	}
 	for _, k := range wgSmallOrderKeyHex {
-		if low == k {
+		if masked == k {
 			return true
 		}
 	}
