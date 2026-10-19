@@ -374,7 +374,7 @@ const WG_TUN_ORIGIN_TOMBSTONE_RETAIN: usize = 8192;
 /// as an exempt LocalDelivery reverse — admitting future peer requests
 /// as "solicited replies" past tightening. So creation requires an
 /// initiating shape: TCP SYN-without-ACK, ICMP echo/timestamp request
-/// (v4 8/13, v6 128/133). UDP and everything else carry no direction
+/// (v4 8/13, v6 128). UDP and everything else carry no direction
 /// signal and always create (documented residual: a UDP response to
 /// inbound creates a pair — narrow: needs a fw UDP service + WG +
 /// entry loss or tightening-after-publish).
@@ -387,10 +387,27 @@ pub(in crate::afxdp) fn wg_tun_origin_packet_initiates(parsed: &WgTunOriginParse
             .unwrap_or(false),
         PROTO_ICMP => {
             let ty = parsed.frame.get(parsed.meta.l4_offset as usize).copied();
-            match parsed.meta.addr_family as i32 {
-                libc::AF_INET => matches!(ty, Some(8) | Some(13)),
-                _ => matches!(ty, Some(128) | Some(133)),
-            }
+            matches!(ty, Some(8) | Some(13))
+        }
+        PROTO_ICMPV6 => {
+            // #14958: ICMPv6 has protocol 58 (PROTO_ICMPV6), NOT 1.
+            // Before this, the ICMP arm matched only PROTO_ICMP, so every
+            // ICMPv6 packet fell to `_ => true` — including Echo Reply
+            // (129) answering an admitted peer request. Stamping that
+            // reply as TUN-origin minted its inverse as an exempt
+            // LocalDelivery reverse, so future unsolicited Echo Requests
+            // (128) from the peer bypassed host-inbound/junos-host
+            // revalidation via `tun_origin_reverse_exempt` (poisoning).
+            // Only Echo Request (128) initiates. 137 (Redirect) is NOT
+            // admitted: the identifier-keyed parser (#3067, inspect.rs)
+            // yields `parse_flow_ports == None` for 133-137, so such a
+            // packet never parses to a forward_key (see test cell:
+            // type 137 → None). Admitting 133 here would therefore be
+            // dead code and a false promise. Timestamp (133) is an
+            // NDP Router Solicitation, not an ICMPv6 echo timestamp —
+            // ICMPv6 has no timestamp query (RFC 4443).
+            let ty = parsed.frame.get(parsed.meta.l4_offset as usize).copied();
+            matches!(ty, Some(128))
         }
         _ => true,
     }
@@ -936,6 +953,138 @@ mod tests {
         assert_eq!(initiates(&inner_icmp_v4(3, FW, PEER, 1)), None);
         // UDP: directionless, always initiates.
         assert_eq!(initiates(&inner_udp_v4(FW, PEER, 5001, 5002)), Some(true));
+    }
+
+    /// A bare inner IPv6 ICMPv6 packet (TUN-shaped: no L2) with explicit type.
+    fn inner_icmpv6(
+        icmp_type: u8,
+        src: Ipv6Addr,
+        dst: Ipv6Addr,
+        ident: u16,
+    ) -> Vec<u8> {
+        let mut p = vec![0u8; 40 + 8];
+        p[0] = 0x60;
+        p[4..6].copy_from_slice(&8u16.to_be_bytes());
+        p[6] = PROTO_ICMPV6;
+        p[7] = 64;
+        p[8..24].copy_from_slice(&src.octets());
+        p[24..40].copy_from_slice(&dst.octets());
+        p[40] = icmp_type;
+        p[44..46].copy_from_slice(&ident.to_be_bytes());
+        p
+    }
+
+    fn wg_snapshot_with_v6() -> crate::ConfigSnapshot {
+        let mut snap = wg_outer_mtu_snapshot();
+        snap.interfaces
+            .iter_mut()
+            .find(|i| i.ifindex == 400)
+            .expect("wg0.0 row")
+            .addresses
+            .push(crate::InterfaceAddressSnapshot {
+                family: "inet6".to_string(),
+                address: "fd00::1/64".to_string(),
+                scope: 0,
+            });
+        snap
+    }
+
+    /// #14958 (D26-02): an ICMPv6 Echo Reply (129) — the kernel's answer
+    /// to an admitted peer-to-firewall Echo Request (128) — must NOT
+    /// initiate a TUN-origin pair. On master the ICMP arm matched only
+    /// PROTO_ICMP (1), so ICMPv6 (58) fell to the directionless arm and
+    /// poisoned the shared table with a TunOrigin reverse exempting
+    /// future unsolicited peer requests.
+    #[test]
+    fn wg_tun_origin_icmpv6_reply_does_not_initiate_14958() {
+        let forwarding = build_forwarding_state(&wg_snapshot_with_v6());
+        let initiates = |packet: &[u8]| {
+            parse_wg_tun_origin_flow(packet, &forwarding, 1)
+                .map(|parsed| wg_tun_origin_packet_initiates(&parsed))
+        };
+        let fw6: Ipv6Addr = "fd00::1".parse().unwrap();
+        let peer6: Ipv6Addr = "fd00::2".parse().unwrap();
+        assert_eq!(initiates(&inner_icmpv6(128, fw6, peer6, 1)), Some(true));
+        assert_eq!(initiates(&inner_icmpv6(129, fw6, peer6, 1)), Some(false));
+        // NDP / error types never even parse (query-only keying), same as
+        // the ICMPv4 error arm pinned above — unreachable gate.
+        assert_eq!(initiates(&inner_icmpv6(137, fw6, peer6, 1)), None);
+        assert_eq!(initiates(&inner_icmpv6(1, fw6, peer6, 1)), None);
+    }
+
+    /// #14958 (D26-02): production publish of the reply shape. Peer Echo
+    /// Request admitted normally, kernel replies Echo Reply on the TUN,
+    /// publish must SKIP creation (no TunOrigin pair, no tombstone). The
+    /// Echo-Request control must still CREATE (legitimate outbound ping).
+    #[test]
+    fn wg_tun_origin_icmpv6_reply_publish_skips_14958() {
+        let forwarding = build_forwarding_state(&wg_snapshot_with_v6());
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        let ha = txn_ha_state();
+        let peer_ep: SocketAddr = "203.0.113.7:51820".parse().unwrap();
+        let fw6: Ipv6Addr = "fd00::1".parse().unwrap();
+        let peer6: Ipv6Addr = "fd00::2".parse().unwrap();
+        let reply = inner_icmpv6(129, fw6, peer6, 1);
+        let reply_parsed =
+            parse_wg_tun_origin_flow(&reply, &forwarding, 1).expect("reply must parse");
+        assert!(!wg_tun_origin_packet_initiates(&reply_parsed));
+        let reply_entries = build_wg_tun_origin_entries(
+            &reply_parsed,
+            peer_ep,
+            1,
+            &forwarding,
+            &ha,
+            &neighbors,
+            123,
+        )
+        .expect("reply build must succeed");
+        let (shared, nat, wire, indexes) = fresh_shared_10038();
+        let mut dedup = FastMap::<SessionKey, u64>::default();
+        let mut tombstones = FastMap::<SessionKey, u64>::default();
+        publish_wg_tun_origin_entries(
+            &shared,
+            &nat,
+            &wire,
+            &indexes,
+            &mut dedup,
+            &mut tombstones,
+            &reply_entries,
+            wg_tun_origin_packet_initiates(&reply_parsed),
+            1_000_000_000,
+        );
+        assert!(shared.lock().expect("shared").is_empty());
+        assert!(dedup.is_empty() && tombstones.is_empty());
+        let request = inner_icmpv6(128, fw6, peer6, 1);
+        let req_parsed =
+            parse_wg_tun_origin_flow(&request, &forwarding, 1).expect("request must parse");
+        assert!(wg_tun_origin_packet_initiates(&req_parsed));
+        let req_entries = build_wg_tun_origin_entries(
+            &req_parsed,
+            peer_ep,
+            1,
+            &forwarding,
+            &ha,
+            &neighbors,
+            123,
+        )
+        .expect("request build must succeed");
+        let (shared, nat, wire, indexes) = fresh_shared_10038();
+        let mut dedup = FastMap::<SessionKey, u64>::default();
+        let mut tombstones = FastMap::<SessionKey, u64>::default();
+        publish_wg_tun_origin_entries(
+            &shared,
+            &nat,
+            &wire,
+            &indexes,
+            &mut dedup,
+            &mut tombstones,
+            &req_entries,
+            true,
+            1_000_000_000,
+        );
+        assert!(shared.lock().expect("shared").contains_key(&req_entries.forward.key));
+        assert!(dedup.contains_key(&req_entries.forward.key));
+        assert!(tombstones.contains_key(&req_entries.forward.key));
     }
 
     type SharedMaps10038 = (
