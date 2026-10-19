@@ -38,8 +38,10 @@ import "time"
 const (
 	HookPeerFailover            = "PeerFailoverFunc"
 	HookPeerFailoverCommit      = "PeerFailoverCommitFunc"
+	HookPeerFailoverAbort       = "PeerFailoverAbortFunc"
 	HookPeerFailoverBatch       = "PeerFailoverBatchFunc"
 	HookPeerFailoverCommitBatch = "PeerFailoverCommitBatchFunc"
+	HookPeerFailoverAbortBatch  = "PeerFailoverAbortBatchFunc"
 	HookPreManualFailover       = "PreManualFailoverHook"
 	HookLocalTransferCommitRdy  = "LocalTransferCommitReadyHook"
 	HookTransferReadiness       = "TransferReadinessFunc"
@@ -68,8 +70,10 @@ func (m *Manager) InstalledHooks() map[string]bool {
 	return map[string]bool{
 		HookPeerFailover:            m.peerFailoverFn != nil,
 		HookPeerFailoverCommit:      m.peerFailoverCommitFn != nil,
+		HookPeerFailoverAbort:       m.peerFailoverAbortFn != nil,
 		HookPeerFailoverBatch:       m.peerFailoverBatchFn != nil,
 		HookPeerFailoverCommitBatch: m.peerFailoverCommitBatchFn != nil,
+		HookPeerFailoverAbortBatch:  m.peerFailoverAbortBatchFn != nil,
 		HookPreManualFailover:       m.preManualFailoverFn != nil,
 		HookLocalTransferCommitRdy:  m.localTransferCommitReadyFn != nil,
 		HookTransferReadiness:       m.transferReadinessFn != nil,

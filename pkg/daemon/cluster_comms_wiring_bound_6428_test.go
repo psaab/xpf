@@ -113,6 +113,12 @@ func TestWireSessionSyncFailoverCallbacksInstallsHandles_6428(t *testing.T) {
 	if ss.OnRemoteFailoverCommitBatch == nil {
 		t.Error("wireSessionSyncFailoverCallbacks did not install ss.OnRemoteFailoverCommitBatch")
 	}
+	if ss.OnRemoteFailoverAbort == nil {
+		t.Error("wireSessionSyncFailoverCallbacks did not install ss.OnRemoteFailoverAbort")
+	}
+	if ss.OnRemoteFailoverAbortBatch == nil {
+		t.Error("wireSessionSyncFailoverCallbacks did not install ss.OnRemoteFailoverAbortBatch")
+	}
 	// #5640: the applied-ack must wait on real local actuation. An unwired
 	// WaitFailoverApplied silently reverts that gate to "ack immediately",
 	// reopening the two-owner window.

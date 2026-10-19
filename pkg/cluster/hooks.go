@@ -43,6 +43,15 @@ func (m *Manager) SetPeerFailoverCommitFunc(fn func(rgID int, reqID uint64) erro
 	m.peerFailoverCommitFn = fn
 }
 
+// SetPeerFailoverAbortFunc sets the callback used to send a reqID-bound
+// abort for a previously acknowledged transfer-out this node is abandoning
+// locally (#15164). Fire-and-forget: the owner lease stays as fallback.
+func (m *Manager) SetPeerFailoverAbortFunc(fn func(rgID int, reqID uint64) error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.peerFailoverAbortFn = fn
+}
+
 // SetPeerFailoverBatchFunc sets the callback used to send remote multi-RG
 // failover requests to the peer via the fabric sync connection.
 func (m *Manager) SetPeerFailoverBatchFunc(fn func(rgIDs []int) (uint64, error)) {
@@ -57,6 +66,13 @@ func (m *Manager) SetPeerFailoverCommitBatchFunc(fn func(rgIDs []int, reqID uint
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.peerFailoverCommitBatchFn = fn
+}
+
+// SetPeerFailoverAbortBatchFunc sets the batch form of the abort callback.
+func (m *Manager) SetPeerFailoverAbortBatchFunc(fn func(rgIDs []int, reqID uint64) error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.peerFailoverAbortBatchFn = fn
 }
 
 // SetPeerFenceFunc sets the callback used to send a fence message to the

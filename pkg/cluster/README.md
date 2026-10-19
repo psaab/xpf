@@ -3953,6 +3953,25 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   the lease. reqID is threaded
   into `OnRemoteFailover`/`OnRemoteFailoverBatch`/`OnRemoteFailoverCommit`/
   `OnRemoteFailoverCommitBatch` (`sync.go`) to arm/clear it.
+- **A requester-side abort must not re-promote the requester (#15164,
+  B22-01).** The lease above restores the OWNER, but it did nothing for the
+  requester: after `abortRequestedPeerFailover` the requester had reported
+  the failover as failed and demoted, yet the owner kept advertising
+  `StateSecondaryHold` under its lease, so `electRG`'s "Peer transfer out"
+  arm promoted the requester again on the next heartbeat — and under
+  preempt the owner reclaimed the RG at lease expiry, an unrequested second
+  move. Fix, both halves reqID-bound: (1) the abort now sends an abort frame
+  (`syncMsgFailoverAbort` / `syncMsgFailoverBatchAbort`, additive — an old
+  peer ignores it and the lease remains the fallback) and the owner
+  restores promptly in `AbortRemoteTransferOut`; a stale abort whose reqID
+  does not match the armed lease is a no-op, and a committed transfer has
+  already cleared the lease so a late abort cannot undo it. (2) The
+  requester records the aborted reqID (`abortedPeerTransferReqID`) and
+  `electRG` refuses "Peer transfer out" while the peer still advertises
+  that hold; the marker expires when the peer stops advertising
+  secondary-hold, on commit, on `ResetFailover`, on peer loss, and on RG
+  removal, so a later legitimate transfer-out still promotes. The abort
+  send is best-effort and never masks the original failover error.
 - **Every requester-side failure after `applyPeerTransferOutOverrideLocked`
   must roll the override back — including the commit's own election failure
   (#6527).** `commitRequestedPeerFailover` /
