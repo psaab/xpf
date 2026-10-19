@@ -35,5 +35,15 @@ func clearDroppedEnforcementZoneBindings11575(cfg *Config) {
 		zone.ScreenProfileConfigured = false
 		zone.HostInboundTraffic = nil
 		zone.TCPRst = false
+		// #15670: a poisoned zone must not retain accepted-only knob
+		// state either — it is unbound/quarantined, so surfacing these
+		// as configured would claim inert features on a dead zone.
+		zone.ApplicationTracking = false
+		zone.SourceIdentityLog = false
+		zone.EnableReverseReroute = false
+		zone.UnidirectionalRefresh = false
+		zone.AdvancePBRProfile = ""
+		zone.AdvancedConnectionTracking = nil
+		zone.WhiteList = nil
 	}
 }

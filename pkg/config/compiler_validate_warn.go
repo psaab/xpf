@@ -1966,7 +1966,60 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	warnings = append(warnings, samplingSourceAddressLocalityWarnings(cfg)...)
 	// #9917 F-136: single-DES privacy is deprecated; steer to AES-128.
 	warnings = append(warnings, snmpPrivacyDESWarnings9917(cfg)...)
+	// #15670 (V3-02): standard Junos zone children accepted-only advisory.
+	warnings = append(warnings, validateZoneChildren15670(cfg)...)
 
+	return warnings
+}
+
+// validateZoneChildren15670 emits the #15670 accepted-only advisory: the
+// standard Junos zone children are parsed onto ZoneConfig (so they commit
+// and never quarantine the zone), but xpf has no runtime for any of them
+// today — AppTrack/source-identity telemetry, reverse-reroute,
+// unidirectional session refresh, APBR, and the ACT table are not
+// implemented, and white-list's screen-bypass is not honoured (listed
+// sources still face every screen check). Naming each configured knob
+// keeps the operator from believing it is enforced. One line per zone,
+// knobs in authored-schema order, zones sorted (sortedZoneNames).
+func validateZoneChildren15670(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	var warnings []string
+	for _, name := range sortedZoneNames(cfg) {
+		z := cfg.Security.Zones[name]
+		if z == nil {
+			continue
+		}
+		var knobs []string
+		if z.ApplicationTracking {
+			knobs = append(knobs, "application-tracking")
+		}
+		if z.SourceIdentityLog {
+			knobs = append(knobs, "source-identity-log")
+		}
+		if z.EnableReverseReroute {
+			knobs = append(knobs, "enable-reverse-reroute")
+		}
+		if z.UnidirectionalRefresh {
+			knobs = append(knobs, "unidirectional-session-refreshing")
+		}
+		if z.AdvancePBRProfile != "" {
+			knobs = append(knobs, "advance-policy-based-routing-profile "+z.AdvancePBRProfile)
+		}
+		if z.AdvancedConnectionTracking != nil {
+			knobs = append(knobs, "advanced-connection-tracking")
+		}
+		if len(z.WhiteList) > 0 {
+			knobs = append(knobs, "white-list "+strings.Join(z.WhiteList, " "))
+		}
+		if len(knobs) == 0 {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"security zone %q: %s configured but accepted-only — xpf does not implement AppTrack/source-identity telemetry, reverse-reroute, unidirectional session refreshing, APBR, advanced-connection-tracking, or the white-list screen bypass, so these settings have no runtime effect (#15670)",
+			name, strings.Join(knobs, ", ")))
+	}
 	return warnings
 }
 
