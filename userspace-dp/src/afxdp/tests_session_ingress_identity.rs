@@ -114,7 +114,8 @@ fn ingress_identity_snapshot() -> crate::ConfigSnapshot {
             family: "inet".to_string(),
             address: "10.0.62.1/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot
@@ -671,7 +672,8 @@ fn local_miss_identity_snapshot() -> crate::ConfigSnapshot {
             family: "inet".to_string(),
             address: "10.0.70.1/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot

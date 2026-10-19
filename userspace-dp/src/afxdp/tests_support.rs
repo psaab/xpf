@@ -2409,7 +2409,8 @@ pub(super) fn gre_to_self_snapshot() -> ConfigSnapshot {
             family: "inet".to_string(),
             address: "10.255.0.1/30".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot.tunnel_endpoints = vec![crate::protocol::snapshot::TunnelEndpointSnapshot {

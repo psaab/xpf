@@ -1740,7 +1740,8 @@ fn two_vlan_snapshot() -> crate::ConfigSnapshot {
             family: "inet".to_string(),
             address: "172.16.50.8/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snap
@@ -2527,7 +2528,8 @@ fn two_vlan_distinct_zone_snapshot() -> crate::ConfigSnapshot {
             family: "inet".to_string(),
             address: "172.16.50.8/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snap
@@ -3825,7 +3827,8 @@ fn ike_gate_snapshot() -> crate::ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "10.0.61.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             crate::InterfaceSnapshot {
@@ -3838,7 +3841,8 @@ fn ike_gate_snapshot() -> crate::ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "172.16.80.8/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],

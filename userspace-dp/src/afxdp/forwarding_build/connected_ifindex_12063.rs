@@ -47,7 +47,8 @@ fn connected_marker_with_live_interface_remains_usable_12063() {
                 family: "inet".into(),
                 address: "10.77.0.1/24".into(),
                 scope: 0,
-            }],
+            ..Default::default()
+        }],
             ..Default::default()
         }],
         routes: vec![

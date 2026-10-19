@@ -3664,11 +3664,7 @@ fn v2_stamped_fabric_udp_policy_reject_suppresses_icmp_on_real_poll_12319() {
     // untouched.
     for iface in &mut snapshot.interfaces {
         if iface.ifindex == 21 {
-            iface.addresses.push(InterfaceAddressSnapshot {
-                family: "inet".to_string(),
-                address: "10.99.13.1/24".to_string(),
-                scope: 0,
-            });
+            iface.addresses.push(InterfaceAddressSnapshot { family: "inet".to_string(), address: "10.99.13.1/24".to_string(), scope: 0, ..Default::default() });
         }
     }
     let forwarding = build_forwarding_state(&snapshot);

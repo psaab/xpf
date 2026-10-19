@@ -43,6 +43,8 @@ mod tests;
 mod link_local_scope_11650;
 #[cfg(test)]
 mod connected_ifindex_12063;
+#[cfg(test)]
+mod primary_address_15155;
 
 pub(crate) use fib::neighbor_family_mismatch;
 pub(in crate::afxdp) use interfaces::{

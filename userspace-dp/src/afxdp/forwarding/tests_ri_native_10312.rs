@@ -70,12 +70,14 @@ fn base_snapshot() -> ConfigSnapshot {
                         family: "inet".to_string(),
                         address: "10.0.0.1/24".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                     InterfaceAddressSnapshot {
                         family: "inet6".to_string(),
                         address: "2001:db8:a::1/64".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                 ],
                 redundancy_group: RG1,
                 ..Default::default()
@@ -90,7 +92,8 @@ fn base_snapshot() -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "203.0.113.1/30".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 redundancy_group: RG1,
                 ..Default::default()
             },
@@ -104,7 +107,8 @@ fn base_snapshot() -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "192.168.1.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],

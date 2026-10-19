@@ -1512,16 +1512,8 @@ fn wg_encap_frame_sources_outer_from_physical_wan_primary_v6() {
     // (2001:559:8585:80::8) distinct from the logical wg0.0 v6 address.
     let mut snap = wg_outer_mtu_snapshot();
     // reth0.80 gets the WAN v6 primary; wg0.0 gets a tunnel v6 address.
-    snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot {
-        family: "inet6".to_string(),
-        address: "2001:559:8585:80::8/64".to_string(),
-        scope: 0,
-    });
-    snap.interfaces[1].addresses.push(crate::InterfaceAddressSnapshot {
-        family: "inet6".to_string(),
-        address: "fd00:dead::1/64".to_string(),
-        scope: 0,
-    });
+    snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:559:8585:80::8/64".to_string(), scope: 0, ..Default::default() });
+    snap.interfaces[1].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "fd00:dead::1/64".to_string(), scope: 0, ..Default::default() });
     // v6 route to the peer endpoint prefix, egressing reth0.80.
     snap.routes.push(crate::RouteSnapshot { reject: false, table: "inet6.0".to_string(),
     family: "inet6".to_string(),

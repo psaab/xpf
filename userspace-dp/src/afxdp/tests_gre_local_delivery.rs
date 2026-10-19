@@ -687,7 +687,8 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
         family: "inet".to_string(),
         address: "10.0.61.1/24".to_string(),
         scope: 0,
-    }];
+    ..Default::default()
+}];
 
     let forwarding = build_forwarding_state(&snapshot);
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
@@ -2513,7 +2514,8 @@ fn gre_decap_attributes_shared_identity_to_first_sibling_row_10816() {
             family: "inet".to_string(),
             address: "10.255.1.1/30".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     let mut sibling = snap.tunnel_endpoints[0].clone();

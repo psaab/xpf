@@ -164,11 +164,7 @@ fn mapped_ipv6_wg_underlay_candidate_stays_outside_inner_ingress_gate_10686() {
     snapshot.tunnel_endpoints[0].source = String::new();
     snapshot.interfaces[0]
         .addresses
-        .push(crate::InterfaceAddressSnapshot {
-            family: "inet6".to_string(),
-            address: "2001:db8::1/64".to_string(),
-            scope: 0,
-        });
+        .push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:db8::1/64".to_string(), scope: 0, ..Default::default() });
     let forwarding = build_forwarding_state(&snapshot);
     let local_v4: std::net::Ipv4Addr = "172.16.80.8".parse().unwrap();
     let local_v6: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
@@ -650,7 +646,8 @@ fn add_lan_ingress(snapshot: &mut crate::ConfigSnapshot) {
             family: "inet".to_string(),
             address: "192.0.2.1/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
 }
@@ -1450,11 +1447,7 @@ fn worker_wg_ipv6_listener_requires_matching_ingress_zone_11574() {
     let mut snapshot = wg_outer_mtu_snapshot();
     snapshot.interfaces[0]
         .addresses
-        .push(crate::InterfaceAddressSnapshot {
-            family: "inet6".to_string(),
-            address: "2001:db8::1/64".to_string(),
-            scope: 0,
-        });
+        .push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:db8::1/64".to_string(), scope: 0, ..Default::default() });
     snapshot.tunnel_endpoints[0].source = local_v6.to_string();
     snapshot.tunnel_endpoints[0].outer_family = "inet6".to_string();
     snapshot.tunnel_endpoints[0].transport_table = "inet6.0".to_string();
@@ -2045,11 +2038,7 @@ fn two_tunnel_snapshot() -> crate::ConfigSnapshot {
     let mut snap = wg_outer_mtu_snapshot();
     snap.interfaces[0]
         .addresses
-        .push(crate::InterfaceAddressSnapshot {
-            family: "inet".to_string(),
-            address: "172.16.80.9/24".to_string(),
-            scope: 0,
-        });
+        .push(crate::InterfaceAddressSnapshot { family: "inet".to_string(), address: "172.16.80.9/24".to_string(), scope: 0, ..Default::default() });
     snap.interfaces.push(crate::InterfaceSnapshot {
         name: "wg1.0".to_string(),
         zone: "sfmix".to_string(),
@@ -2062,7 +2051,8 @@ fn two_tunnel_snapshot() -> crate::ConfigSnapshot {
             family: "inet".to_string(),
             address: "10.124.0.1/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     let mut ep2 = snap.tunnel_endpoints[0].clone();
@@ -4028,11 +4018,7 @@ fn worker_decap_input_filter_denied_keepalive_and_malformed_do_not_roam_13663() 
 /// is owned in WAN. Ingress ifindex 24 (LAN) / 12 (WAN).
 fn cross_family_snapshot_14957() -> crate::ConfigSnapshot {
     let mut snap = wg_outer_mtu_snapshot();
-    snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot {
-        family: "inet6".to_string(),
-        address: "2001:db8::1/64".to_string(),
-        scope: 0,
-    });
+    snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:db8::1/64".to_string(), scope: 0, ..Default::default() });
     add_lan_ingress(&mut snap);
     // LAN owns the mapped form of the WAN v4 listener address.
     snap.interfaces
@@ -4040,11 +4026,7 @@ fn cross_family_snapshot_14957() -> crate::ConfigSnapshot {
         .find(|i| i.ifindex == 24)
         .expect("lan iface")
         .addresses
-        .push(crate::InterfaceAddressSnapshot {
-            family: "inet6".to_string(),
-            address: "::ffff:172.16.80.8/128".to_string(),
-            scope: 0,
-        });
+        .push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "::ffff:172.16.80.8/128".to_string(), scope: 0, ..Default::default() });
     snap
 }
 
@@ -4147,11 +4129,7 @@ fn cross_family_v6_listener_mapped_dst_rejected_v4_control_14957() {
     let local_v6: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
     let peer_v6: std::net::Ipv6Addr = "2001:db8::7".parse().unwrap();
     let mut snapshot = wg_outer_mtu_snapshot();
-    snapshot.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot {
-        family: "inet6".to_string(),
-        address: "2001:db8::1/64".to_string(),
-        scope: 0,
-    });
+    snapshot.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:db8::1/64".to_string(), scope: 0, ..Default::default() });
     snapshot.tunnel_endpoints[0].source = local_v6.to_string();
     snapshot.tunnel_endpoints[0].outer_family = "inet6".to_string();
     snapshot.tunnel_endpoints[0].transport_table = "inet6.0".to_string();
@@ -4194,11 +4172,7 @@ fn cross_family_native_v6_binds_wildcard_not_specific_v4_14957() {
     let (_init1, resp1, _p1, _r1) = established_pair(allowed.clone(), allowed.clone());
     let (init2, resp2, _p2, rpub2) = established_pair(allowed.clone(), allowed);
     let mut snapshot = wg_outer_mtu_snapshot();
-    snapshot.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot {
-        family: "inet6".to_string(),
-        address: "2001:db8::1/64".to_string(),
-        scope: 0,
-    });
+    snapshot.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:db8::1/64".to_string(), scope: 0, ..Default::default() });
     let mut ep2 = snapshot.tunnel_endpoints[0].clone();
     ep2.id = 2;
     ep2.interface = "wg1.0".to_string();
@@ -4218,7 +4192,8 @@ fn cross_family_native_v6_binds_wildcard_not_specific_v4_14957() {
             family: "inet".to_string(),
             address: "10.124.0.1/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     let mut forwarding = build_forwarding_state(&snapshot);
@@ -4281,7 +4256,8 @@ fn dual_stack_same_port_snapshot_15123() -> crate::ConfigSnapshot {
             family: "inet6".to_string(),
             address: "2001:db8::1/64".to_string(),
             scope: 0,
-        });
+        ..Default::default()
+    });
     let mut ep2 = snap.tunnel_endpoints[0].clone();
     ep2.id = 2;
     ep2.interface = "wg1.0".to_string();
@@ -4303,7 +4279,8 @@ fn dual_stack_same_port_snapshot_15123() -> crate::ConfigSnapshot {
             family: "inet6".to_string(),
             address: "2001:db8:1::1/128".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snap
@@ -4432,7 +4409,8 @@ fn wg_same_port_cross_family_only_when_no_same_family_listener_15123() {
             family: "inet6".to_string(),
             address: "2001:db8::1/64".to_string(),
             scope: 0,
-        });
+        ..Default::default()
+    });
     let mut forwarding = build_forwarding_state(&snap);
     let id = *forwarding.wg_engines.keys().next().expect("wg tunnel");
     forwarding.wg_engines.insert(id, std::sync::Arc::new(resp));

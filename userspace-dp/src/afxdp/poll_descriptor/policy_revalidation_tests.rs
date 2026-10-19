@@ -4420,7 +4420,8 @@ fn reverse_revalidation_forwarding_14941() -> ForwardingState {
             family: "inet".to_string(),
             address: "10.0.0.254/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot.routes = vec![

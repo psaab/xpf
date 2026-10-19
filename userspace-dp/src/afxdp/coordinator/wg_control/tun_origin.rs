@@ -645,11 +645,7 @@ mod tests {
             .find(|i| i.ifindex == 400)
             .expect("wg0.0 row")
             .addresses
-            .push(crate::InterfaceAddressSnapshot {
-                family: "inet6".to_string(),
-                address: "fd00::1/64".to_string(),
-                scope: 0,
-            });
+            .push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "fd00::1/64".to_string(), scope: 0, ..Default::default() });
         let forwarding = build_forwarding_state(&snap);
         let neighbors = Arc::new(ShardedNeighborMap::new());
         let ha = txn_ha_state();
@@ -981,11 +977,7 @@ mod tests {
             .find(|i| i.ifindex == 400)
             .expect("wg0.0 row")
             .addresses
-            .push(crate::InterfaceAddressSnapshot {
-                family: "inet6".to_string(),
-                address: "fd00::1/64".to_string(),
-                scope: 0,
-            });
+            .push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "fd00::1/64".to_string(), scope: 0, ..Default::default() });
         snap
     }
 

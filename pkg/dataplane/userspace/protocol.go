@@ -418,7 +418,11 @@ const (
 	// unit_scoped. A v52 helper ignores them and keys the mirror table by
 	// the shared base ifindex alone, so a unit-0 input mirrors every
 	// tagged sibling unit on the port to the analyzer — the defect.
-	ProtocolVersion = 53
+	// v53 -> v54 (#15155): InterfaceAddressSnapshot carries `primary`,
+	// the operator's designated address on a multi-address unit. A v53
+	// helper ignores it and picks the lexicographically-first address
+	// as primary_v4/v6 — the undesignated source interface SNAT used.
+	ProtocolVersion = 54
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -1509,6 +1513,14 @@ type InterfaceAddressSnapshot struct {
 	Family  string `json:"family"`
 	Address string `json:"address"`
 	Scope   int    `json:"scope,omitempty"`
+	// Primary marks the address the operator designated `primary` on
+	// the owning unit (#15155). The builders sort addresses for a
+	// deterministic wire, so without this marker the first-in-order
+	// pick in pickInterfaceSnapshotV4/V6 (and Rust pick_interface_v4/v6)
+	// used whichever address sorted first as a string, not the
+	// designated one. Omitted when false: an unmarked snapshot decodes
+	// exactly as before and every pick keeps the order-based rule.
+	Primary bool `json:"primary,omitempty"`
 }
 
 type UserspaceMapPins struct {

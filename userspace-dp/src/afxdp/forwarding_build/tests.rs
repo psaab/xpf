@@ -6087,6 +6087,7 @@ fn static_bare_link_local_gateway_refuses_ambiguous_interfaces_11322() {
                     family: "inet6".into(),
                     address: link_local.into(),
                     scope: 253, // Linux RT_SCOPE_LINK.
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -7028,7 +7029,8 @@ fn connected_directed_broadcast_snapshot_neighbor_is_not_installed_or_used_11033
                 family: "inet".into(),
                 address: "192.168.1.1/24".into(),
                 scope: 0,
-            }],
+            ..Default::default()
+        }],
             ..Default::default()
         }],
         neighbors: vec![
@@ -11264,11 +11266,7 @@ fn accepted_build_defers_the_flood_prune_to_the_commit_point_3651() {
 #[test]
 fn secure_tunnel_unit_ifindex_decides_route_disposition() {
     fn snapshot(st_unit_ifindex: i32) -> ConfigSnapshot {
-        let addr = |a: &str| crate::InterfaceAddressSnapshot {
-            family: "inet".into(),
-            address: a.into(),
-            scope: 0,
-        };
+        let addr = |a: &str| crate::InterfaceAddressSnapshot { family: "inet".into(), address: a.into(), scope: 0, ..Default::default() };
         ConfigSnapshot {
             zones: vec![
                 ZoneSnapshot {
@@ -11554,11 +11552,7 @@ fn next_table_target_uses_table_lpm_without_rule_restart_9955() {
 #[test]
 fn xfrmi_egress_resolves_a_negative_cache_key_6710() {
     fn snapshot(secure_tunnel: bool) -> ConfigSnapshot {
-        let addr = |a: &str| crate::InterfaceAddressSnapshot {
-            family: "inet".into(),
-            address: a.into(),
-            scope: 0,
-        };
+        let addr = |a: &str| crate::InterfaceAddressSnapshot { family: "inet".into(), address: a.into(), scope: 0, ..Default::default() };
         ConfigSnapshot {
             zones: vec![
                 ZoneSnapshot {
@@ -13160,7 +13154,8 @@ fn admin_disabled_interface_addresses_do_not_enter_fib_state_11463() {
                     family: "inet".into(),
                     address: "10.9.0.1/24".into(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             }],
             ..Default::default()

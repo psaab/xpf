@@ -4460,11 +4460,7 @@ fn t8_v6_dnat_to_self_ike_application_any_deny_drops_10585() {
     let gre_dst = "2001:db8:1058::1".parse::<Ipv6Addr>().unwrap();
     for interface in gre_snapshot.interfaces.iter_mut() {
         if interface.ifindex == 77 {
-            interface.addresses.push(InterfaceAddressSnapshot {
-                family: "inet6".to_string(),
-                address: "2001:db8:1058::1/128".to_string(),
-                scope: 0,
-            });
+            interface.addresses.push(InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:db8:1058::1/128".to_string(), scope: 0, ..Default::default() });
         }
         if interface.ifindex == 11 && interface.parent_ifindex == 0 {
             // The outer frame is untagged (VID 0): select native VLAN 80 on

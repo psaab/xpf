@@ -2202,7 +2202,8 @@ fn nat64_frag_snapshot_with_second_lan_iface() -> ConfigSnapshot {
             family: "inet6".to_string(),
             address: "2001:559:8585:ef01::1/64".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot

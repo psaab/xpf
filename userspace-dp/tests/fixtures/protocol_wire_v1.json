@@ -818,6 +818,7 @@
   "interface_address_snapshot": {
     "address": "",
     "family": "",
+    "primary": false,
     "scope": 0
   },
   "interface_snapshot": {
@@ -1083,6 +1084,7 @@
     "ipsec_inner_verdict_queue_contended_total": 0,
     "ipsec_inner_verdict_queue_full_total": 0,
     "ipsec_inner_worker_orphan_reaped_total": 0,
+    "ipsec_inner_worker_queue_busy_total": 0,
     "ipsec_inner_worker_queue_full_total": 0,
     "ipsec_inner_worker_retired_total": 0,
     "ipsec_sa_evictions_total": 0,
@@ -1395,6 +1397,7 @@
     "ipsec_inner_verdict_queue_contended_total": 0,
     "ipsec_inner_verdict_queue_full_total": 0,
     "ipsec_inner_worker_orphan_reaped_total": 0,
+    "ipsec_inner_worker_queue_busy_total": 0,
     "ipsec_inner_worker_queue_full_total": 0,
     "ipsec_inner_worker_retired_total": 0,
     "ipsec_sa_evictions_total": 0,
@@ -1710,6 +1713,7 @@
     "ipsec_inner_verdict_queue_contended_total": 0,
     "ipsec_inner_verdict_queue_full_total": 0,
     "ipsec_inner_worker_orphan_reaped_total": 0,
+    "ipsec_inner_worker_queue_busy_total": 0,
     "ipsec_inner_worker_queue_full_total": 0,
     "ipsec_inner_worker_retired_total": 0,
     "ipsec_sa_evictions_total": 0,

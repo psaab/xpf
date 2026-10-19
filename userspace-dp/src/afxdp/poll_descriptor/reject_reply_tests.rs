@@ -1546,7 +1546,8 @@ fn reject_reply_non_tcp_sources_from_logical_vlan_ifindex_3976() {
                 family: "inet".into(),
                 address: "172.16.80.8/24".into(),
                 scope: 0,
-            }],
+            ..Default::default()
+        }],
             ..Default::default()
         }],
         ..Default::default()
@@ -1651,7 +1652,8 @@ fn filter_reject_non_tcp_v6_sources_from_logical_vlan_ifindex_3976() {
                 family: "inet6".into(),
                 address: "2001:559:8585:80::8/64".into(),
                 scope: 0,
-            }],
+            ..Default::default()
+        }],
             ..Default::default()
         }],
         ..Default::default()

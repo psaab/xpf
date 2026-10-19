@@ -264,7 +264,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v52 -> v53 (#15113): MirrorConfigSnapshot carries ingress_vlan_id +
 // unit_scoped; a v52 helper keys mirrors by base ifindex alone and a
 // unit-0 input mirrors every tagged sibling on the port.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 53;
+// v53 -> v54 (#15155): InterfaceAddressSnapshot carries `primary`, the
+// operator's designated address on a multi-address unit. A v53 helper
+// ignores it and picks the lexicographically-first address as
+// primary_v4/v6 — the undesignated source interface SNAT used.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 54;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

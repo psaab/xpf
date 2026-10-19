@@ -84,7 +84,8 @@ fn pbr_snapshot() -> ConfigSnapshot {
                 family: "inet".to_string(),
                 address: "172.16.50.1/24".to_string(),
                 scope: 0,
-            }],
+            ..Default::default()
+        }],
             redundancy_group: RG1,
             ..Default::default()
         },
@@ -99,7 +100,8 @@ fn pbr_snapshot() -> ConfigSnapshot {
                 family: "inet".to_string(),
                 address: "172.16.60.1/24".to_string(),
                 scope: 0,
-            }],
+            ..Default::default()
+        }],
             redundancy_group: RG1,
             ..Default::default()
         },
