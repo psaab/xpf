@@ -16900,6 +16900,33 @@ MAC defaults even when the operator configured hardened algorithms.
   itself is left byte-untouched. Pinned by
   `pkg/daemon/ssh_faillock_15229_test.go`.
 
+## SSH password knobs + closed ssh subtree (#15282, V31-S1)
+
+Residual of #4305: `no-password-authentication` and `no-passwords` were not
+in the enumerated knob list, were modeled nowhere, and committed clean with
+no consumer — the xpf sshd drop-in never set `PasswordAuthentication`. The
+baked appliance already pins it off (`scripts/image/bake.py`), but a `.deb`
+install fell back to the host sshd default.
+
+- **schema** (`schema_system.go`) — `services ssh` gains the boolean leaves
+  `no-password-authentication` and `no-passwords`, and the ssh subtree is
+  `closedWorld`: an unknown leaf (e.g. `bogus-knob-xyz`) is rejected at
+  strict commit instead of silently dropped. The subtree is leaf-complete
+  (root-login, key-exchange, ciphers, macs, connection-limit, rate-limit,
+  client-alive-*, protocol-version, the two new leaves); every modelled
+  spelling still commits.
+- **compiler** (`compiler_system.go`) — presence of either leaf sets
+  `SSHServiceConfig.NoPasswordAuthentication` / `NoPasswords`.
+- **runtime** (`daemon_hostauth_apply.go buildSSHDConfigErr`) — either leaf
+  renders `PasswordAuthentication no`; `no-passwords` additionally renders
+  `KbdInteractiveAuthentication no` (keyboard-interactive carries passwords
+  through PAM). Absent leaves render nothing, so existing stanzas keep
+  host/factory posture. No advisory: the knobs are now enforced, not inert.
+- **tests** — `pkg/config/ssh_no_password_15282_test.go` (compile + schema,
+  flat and hierarchical, unknown-knob rejection) and
+  `pkg/daemon/ssh_no_password_15282_test.go` (drop-in rendering, exactly-once,
+  absent-leaf control).
+
 ## Grouped system/SNMP inert knobs — accept-with-advisory (#4306 S-5)
 
 A cluster of `system`/`snmp` knobs commit clean but do nothing, several

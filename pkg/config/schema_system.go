@@ -532,7 +532,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		}}},
 	}},
 	"services": {desc: "System services", children: map[string]*schemaNode{
-		"ssh": {desc: "SSH service", children: map[string]*schemaNode{
+		"ssh": {desc: "SSH service", closedWorld: true, children: map[string]*schemaNode{
 			// Only allow/deny/deny-password map to sshd
 			// PermitRootLogin values; anything else was a silent
 			// no-op (pkg/daemon/daemon_system.go:739-748). The old
@@ -592,6 +592,10 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 			"protocol-version": {desc: "SSH protocol version (sshd is SSH-2 only)", args: 1, placeholder: "<version>",
 				valueType: ValueEnumOf, valueDesc: "v1 | v2", valueExamples: []string{"v2"},
 				validator: ValidateEnum([]string{"v1", "v2"}), children: nil},
+			// #15282 (V31-S1, residual of #4305): boolean leaves, no value.
+			// Rendered by pkg/daemon buildSSHDConfigErr.
+			"no-password-authentication": {desc: "Forbid password authentication (sshd PasswordAuthentication no)", children: nil},
+			"no-passwords":               {desc: "Forbid password and keyboard-interactive authentication (sshd PasswordAuthentication no + KbdInteractiveAuthentication no)", children: nil},
 		}},
 		"netconf": {desc: "NETCONF service", children: map[string]*schemaNode{
 			"ssh": {desc: "NETCONF over SSH", children: nil},

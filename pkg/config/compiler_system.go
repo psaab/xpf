@@ -1041,6 +1041,13 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			if pv := sshNode.FindChild("protocol-version"); pv != nil {
 				sys.Services.SSH.ProtocolVersion = nodeVal(pv)
 			}
+			// #15282 (V31-S1): boolean leaves, presence is the value.
+			if sshNode.FindChild("no-password-authentication") != nil {
+				sys.Services.SSH.NoPasswordAuthentication = true
+			}
+			if sshNode.FindChild("no-passwords") != nil {
+				sys.Services.SSH.NoPasswords = true
+			}
 		}
 		// DNS service
 		if dnsNode := svcNode.FindChild("dns"); dnsNode != nil {
