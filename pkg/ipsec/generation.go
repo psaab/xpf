@@ -142,23 +142,27 @@ func expectedLoadedConns(ipsecCfg *config.IPsecConfig, runtime map[string]bool) 
 		return nil, err
 	}
 	for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
-		conn := sanitizeSwanctlValue(name)
+		vpn := ipsecCfg.VPNs[name]
+		_, _, gw, _ := resolveRemoteAddr(ipsecCfg, vpn)
+		conn := gatewayKeyFor(ipsecCfg, name, vpn, gw)
 		if !rendered[conn] {
 			continue
 		}
-		vpn := ipsecCfg.VPNs[name]
 		if vpn.LocalAddr == "" && runtime[vpn.Gateway] {
 			return nil, fmt.Errorf("%w: vpn %q, gateway %q", ErrGenerationUnvalidatable, name, vpn.Gateway)
 		}
-		remote, local, _, _ := resolveRemoteAddr(ipsecCfg, vpn)
-		lc := &LoadedConn{
-			LocalAddrs:  swanctlAddrList(local),
-			RemoteAddrs: swanctlAddrList(remote),
+		lc := conns[conn]
+		if lc == nil {
+			remote, local, _, _ := resolveRemoteAddr(ipsecCfg, vpn)
+			lc = &LoadedConn{
+				LocalAddrs:  swanctlAddrList(local),
+				RemoteAddrs: swanctlAddrList(remote),
+			}
+			conns[conn] = lc
 		}
 		for _, child := range effectiveTrafficSelectors(name, vpn) {
 			lc.Children = append(lc.Children, sanitizeSwanctlValue(child.Name))
 		}
-		conns[conn] = lc
 	}
 	return conns, nil
 }

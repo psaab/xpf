@@ -613,9 +613,11 @@ func filterIPsecCfg14589(src *config.IPsecConfig, keep map[string]bool) *config.
 	out := *src
 	vpns := make(map[string]*config.IPsecVPN, len(keep))
 	for name, vpn := range src.VPNs {
-		// Rendered names are sanitized; keep matching on both the raw
-		// and sanitized spellings.
-		if keep[name] || keep[sanitizeSwanctlValue(name)] {
+		// #15024: keep holds CONNECTION names (gateway names for groups).
+		// Keep every VPN whose rendered connection is kept, plus the legacy
+		// raw/sanitized VPN-name match for pre-grouping state.
+		_, _, gw, _ := resolveRemoteAddr(src, vpn)
+		if keep[name] || keep[sanitizeSwanctlValue(name)] || keep[gatewayKeyFor(src, name, vpn, gw)] {
 			vpns[name] = vpn
 		}
 	}
@@ -1028,15 +1030,18 @@ func (m *Manager) reinitiateChangedConnections(ipsecCfg *config.IPsecConfig, cha
 		terminatedSet[name] = true
 	}
 	var errs []error
+	done := make(map[string]bool)
 	for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
 		vpn := ipsecCfg.VPNs[name]
-		connName := sanitizeSwanctlValue(name)
-		if !changedSet[connName] || !terminatedSet[connName] {
+		_, _, gw, _ := resolveRemoteAddr(ipsecCfg, vpn)
+		connName := gatewayKeyFor(ipsecCfg, name, vpn, gw)
+		if done[connName] || !changedSet[connName] || !terminatedSet[connName] {
 			continue
 		}
 		if !vpnEagerlyInitiates(ipsecCfg, vpn) {
 			continue
 		}
+		done[connName] = true
 		for _, child := range effectiveTrafficSelectors(name, vpn) {
 			if err := m.InitiateConnection(child.Name); err != nil {
 				errs = append(errs, fmt.Errorf("reinitiate changed IPsec connection %s child %s: %w",

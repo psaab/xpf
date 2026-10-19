@@ -107,21 +107,31 @@ the apply path pays no fsync (the file is regenerated on every apply).
 - `ExpectedLoadedConns(cfg *config.Config) (LoadedConns, error)` — `generation.go`. What
   charon lists once it has COMPLETELY loaded cfg as xpf renders it, which is the
   validation a marker needs. The candidate renders as a whole: a hard render error is
-  returned, and a skipped VPN is excluded. Local addresses are replayed from configuration
+  returned, and a skipped VPN is excluded. Since #15024 the children of every VPN
+  sharing a gateway are unioned under the gateway-named connection. Local addresses are replayed from configuration
   alone (`prepareConfigFromConfig`, `policy_addr.go`, mirroring `PrepareConfig`'s
   configured-address-first resolution). When a rendered connection's local address could
   have come from the kernel (an unconfigured interface address, e.g. DHCP) or from a
   DNS-derived family hint, the result is `ErrGenerationUnvalidatable`. Checked against
   real 6.0.5 captures, including a local-address move that keeps every name.
+- `ConnectionNamesForVPN(cfg *config.Config) map[string]string`,
+  `RenderedVPNSet(cfg *config.Config) map[string]bool` — `policy.go` (#15024).
+  `ConnectionNamesForVPN` maps each surviving VPN to its swanctl connection
+  name (the gateway name for a named-gateway group, else the VPN name);
+  `RenderedVPNSet` is the VPN-keyed set built on it, so selector fences count
+  every grouped member. Nil means the render failed (UNKNOWN — fail closed).
 - `SANameIndex`, `BuildSANameIndex(ipsecCfg) SANameIndex`,
   `(SANameIndex).VPNs(saName) []string`, `(SANameIndex).Collisions() []string` —
   `policy.go`. The inverse of the render (#9511): every SA name
   `swanctl --list-sas` can report for a config (each rendered connection name and
   each rendered child SA name) mapped to the configured VPNs that render it.
+  Since #15024 the connection (IKE SA) name of a grouped VPN is its gateway
+  name, indexed to every member VPN; child names are unchanged.
   `ActiveConnectionNames` publishes child names once a connection has children (a
   multi-selector VPN's are `<vpn>-<selector>`), and the connection name only for an
   IKE SA with no child yet, so the HA per-RG attribution maps names back here.
-  Eligibility is decided by rendering each VPN on its own: a VPN the renderer skips
+  Eligibility is decided per VPN (a whole-config render decides grouping):
+  a VPN the renderer skips
   contributes no name; a VPN whose render fails outright keeps its names as
   candidates (a failed Apply leaves the previous swanctl config loaded); and two VPN
   names that sanitise alike cannot borrow each other's result. A name two VPNs
@@ -280,6 +290,16 @@ all files stay in `package ipsec`, so the public API is unchanged.
   empty even with active tunnels. Golden fixtures captured from real output
   live in `testdata/swanctl_list_sas_*.txt`; edit the parser only alongside a
   fixture so it can't silently drift from reality again.
+- **One swanctl connection per IKE gateway (#15024).** VPNs referencing the
+  same defined gateway render as children of a single gateway-named
+  connection (the first sorted member supplies the shared IKE parameters;
+  per-child ESP/DF/start/DPD/if_id stay per VPN), with one `ike-<gateway>`
+  secret comma-joining the members' distinct PSKs. Two per-VPN connections
+  made a peer that runs both VPNs as children of one IKE SA reject the
+  second child's traffic selectors (TS_UNACCEPTABLE). Inline
+  literal/hostname and empty endpoints keep per-VPN connections. Child SA
+  names are unchanged, so `--initiate --child` and the #9624 gate are
+  unaffected; the IKE SA name in `--list-sas` is now the gateway name.
 - IKE version negotiation supports v1-only, v2-only, or dual (default).
   Aggressive mode is opt-in.
 - NAT traversal modes: `disable`, `force`, `enable` (auto-detect).
