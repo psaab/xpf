@@ -666,6 +666,17 @@ compiler expands those leaves as sets. Zone-local inner names are rendered as
 Tolerant loading retains its warning downgrade; applying an older persisted
 invalid book still reaches the shared prepass.
 
+**Address-set graph validation and expansion are memoised (#15003):** the
+#12832 gate and the pre-#15003 expansion recursion previously enumerated every DAG path
+~B^6 per compile on commit, commit check (under the store read lock), boot
+load and SyncApply. Both walks now record, per set, the maximum nested
+edges below it (and, for expansion, the deduped result per ID-graph /
+leaf mode) after its subtree validates, and decide the depth cap for a
+revisited subtree arithmetically. Cycle and depth diagnostics are
+unchanged: depth errors still name the first over-deep node in DFS
+pre-order, and no result computed under one ancestor path is served as a
+success under a deeper one.
+
 **Policy wildcards are not address-set members (#12243):** `any` and the
 single-family `any-ipv4` / `any-ipv6` are policy match keywords, and `any4` /
 `any6` are internal short forms that the userspace matcher reads as family

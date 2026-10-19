@@ -115,15 +115,13 @@ func validateAddressSetMembersDefinedStrict(cfg *Config) error {
 	// instead of allowing a green commit to abort every apply; the validator
 	// follows cross-kind address members that resolve to sets (#12832), a
 	// superset of the apply-time ID-graph prepass.
-	for _, name := range names {
-		if err := validateAddressSetGraphDepthAndCycles12832(name, ab); err != nil {
-			detail := err.Error()
-			var expansionErr *addressSetExpansionError
-			if errors.As(err, &expansionErr) {
-				detail = expansionErr.displayName(show)
-			}
-			return fmt.Errorf("address-set %s cannot be expanded: %s", show(name), detail)
+	if root, err := validateAddressSetGraphForBook15003(names, ab); err != nil {
+		detail := err.Error()
+		var expansionErr *addressSetExpansionError
+		if errors.As(err, &expansionErr) {
+			detail = expansionErr.displayName(show)
 		}
+		return fmt.Errorf("address-set %s cannot be expanded: %s", show(root), detail)
 	}
 
 	return nil
