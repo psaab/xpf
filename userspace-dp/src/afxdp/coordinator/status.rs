@@ -972,6 +972,17 @@ impl super::Coordinator {
             .reassembled_decap_refusals()
     }
 
+    /// #15249: configured native-GRE endpoints that refused decapsulation
+    /// because the outer arrived on an interface that is not a live
+    /// member of the selected transport route row (#11567 binding widened
+    /// to the full ECMP member set). Surfaced as
+    /// `xpf_userspace_gre_decap_transport_egress_refusals_total`.
+    pub fn gre_decap_transport_egress_refusals_total(&self) -> u64 {
+        self.forwarding
+            .gre_decap_counters
+            .transport_egress_refusals()
+    }
+
     /// #2472: locally-generated ICMP/ICMPv6 Time Exceeded replies dropped
     /// because the per-reason token bucket was empty. The TTL/hop-limit error
     /// generator is rate-limited (global-per-reason, Linux `icmp_msgs_per_sec`

@@ -844,6 +844,12 @@ type ProcessStatus struct {
 	// xpf_userspace_gre_reassembled_decap_refusals_total. Omitempty for
 	// wire compat with older helpers.
 	GreReassembledDecapRefusalsTotal uint64 `json:"gre_reassembled_decap_refusals_total,omitempty"`
+	// #15249: configured native-GRE endpoints that refused decapsulation
+	// because the outer arrived on an interface that is not a live member
+	// of the selected transport route row. Surfaced as
+	// xpf_userspace_gre_decap_transport_egress_refusals_total. Omitempty
+	// for wire compat with older helpers.
+	GreDecapTransportEgressRefusalsTotal uint64 `json:"gre_decap_transport_egress_refusals_total,omitempty"`
 	// #10695 (#9506 counter slice): D14 zone-gate refusals — IPsec-inner
 	// frames refused before zone admission because no zone claimed the
 	// ingress (unzoned), the STN/ifid resolution was unknown or ambiguous,

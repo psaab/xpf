@@ -151,3 +151,40 @@ func TestGreReassembledDecapRefusalsWireKeyLockstepWithRust(t *testing.T) {
 		t.Errorf("%s does not contain the ProcessStatus wire key %q", fixture, rustKey)
 	}
 }
+
+// TestGreDecapTransportEgressRefusalsWireKeyLockstepWithRust pins the
+// #15249 ProcessStatus key to userspace-dp's serialized field.
+func TestGreDecapTransportEgressRefusalsWireKeyLockstepWithRust(t *testing.T) {
+	const rustField = "gre_decap_transport_egress_refusals_total"
+	const goField = "GreDecapTransportEgressRefusalsTotal"
+
+	rustKey := rustProcessStatusRename(t, rustField)
+	field, ok := reflect.TypeOf(ProcessStatus{}).FieldByName(goField)
+	if !ok {
+		t.Fatalf("ProcessStatus has no field %s", goField)
+	}
+	goKey, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+	if goKey != rustKey {
+		t.Fatalf("wire-key drift: Go ProcessStatus.%s emits/decodes %q, userspace-dp emits %q",
+			goField, goKey, rustKey)
+	}
+
+	var status ProcessStatus
+	payload := []byte(`{"` + rustKey + `":31}`)
+	if err := json.Unmarshal(payload, &status); err != nil {
+		t.Fatalf("unmarshal %s: %v", payload, err)
+	}
+	if status.GreDecapTransportEgressRefusalsTotal != 31 {
+		t.Fatalf("ProcessStatus.%s = %d after decoding %s, want 31",
+			goField, status.GreDecapTransportEgressRefusalsTotal, payload)
+	}
+
+	fixture := filepath.Join("..", "..", "..", "userspace-dp", "tests", "fixtures", "protocol_wire_v1.json")
+	raw, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatalf("read %s: %v", fixture, err)
+	}
+	if !strings.Contains(string(raw), `"`+rustKey+`"`) {
+		t.Errorf("%s does not contain the ProcessStatus wire key %q", fixture, rustKey)
+	}
+}

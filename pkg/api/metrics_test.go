@@ -1613,6 +1613,12 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		userspaceGreDecapTransportEgressRefusals: prometheus.NewDesc(
+			"xpf_userspace_gre_decap_transport_egress_refusals_total",
+			"gre decap transport egress refusals",
+			nil,
+			nil,
+		),
 		userspaceTimeExceededRateLimited: prometheus.NewDesc(
 			"xpf_userspace_time_exceeded_rate_limited_total",
 			"time-exceeded generated-error rate-limit drops",
@@ -1801,6 +1807,8 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		GreOuterFragDropsTotal:                14,
 		// #15095: reassembled-but-decap-refused counter, distinct value.
 		GreReassembledDecapRefusalsTotal: 15,
+		// #15249: transport-egress refusal counter, distinct value.
+		GreDecapTransportEgressRefusalsTotal: 16,
 		// #2472: per-reason generated-error rate-limit drop counters emitted
 		// unconditionally.
 		TimeExceededRateLimitedTotal: 11,
@@ -1969,13 +1977,14 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// lifecycle counters, for 108. #14374 adds the nat-reverse-ambiguous
 	// counter, for 109. #15150 adds the verdict-queue-contended counter,
 	// for 110. (The base census already drifted by +2 on origin/master:
-	// want 109, got 111 there; with this series the branch total is 112.)
+	// want 109, got 111 there.) #15249 adds the GRE transport-egress
+	// refusal counter, for 113.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
 	// claim still holds and the number moves with the population.
-	if len(got) != 112 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 112 metrics, got %d", len(got))
+	if len(got) != 113 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 113 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -2145,6 +2154,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceGreDecapPtNibbleMismatchRefusals, nil, 10)
 	assertCounterClose(t, got, c.userspaceGreOuterFragDrops, nil, 14)
 	assertCounterClose(t, got, c.userspaceGreReassembledDecapRefusals, nil, 15)
+	assertCounterClose(t, got, c.userspaceGreDecapTransportEgressRefusals, nil, 16)
 	// #2472: per-reason generated-error rate-limit drop counters emitted
 	// unconditionally.
 	assertCounterClose(t, got, c.userspaceTimeExceededRateLimited, nil, 11)
