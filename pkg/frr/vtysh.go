@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -91,6 +92,15 @@ type frrExecutor interface {
 	// real wiring. A nil return means the FULL diff (including removals)
 	// converged. (#1880 — replaces the retired SystemctlReload.)
 	FrrReloadPy(ctx context.Context, conf string) error
+
+	// FrrReloadPyTest runs `frr-reload.py --test <conf>` under ctx: it asks
+	// frr-reload.py to compute the diff against the LIVE running config
+	// WITHOUT applying it. A nil return means the running config already
+	// matches conf (no Lines To Add / Lines To Delete); a non-nil return
+	// means a diff remains (or the check itself failed). reloadLocked uses
+	// it after a failed --reload to tell a benign failure whose end state
+	// is already correct (#15203) from a genuine non-convergence.
+	FrrReloadPyTest(ctx context.Context, conf string) error
 
 	// VtyshLoad runs integrated `vtysh -f <conf>` and returns CombinedOutput.
 	// The load is additive and broadcasts config to connected daemons; callers
@@ -203,6 +213,58 @@ func (realExecutor) FrrReloadPy(ctx context.Context, conf string) error {
 		return fmt.Errorf("%s --reload %s: %w: %s", frrReloadScript, conf, err, out)
 	}
 	return nil
+}
+
+// FrrReloadPyTest runs `frr-reload.py --test <conf>` under ctx. Same
+// process-group teardown contract as FrrReloadPy: the script spawns vtysh
+// children to read the running config, and none may survive a cancel.
+func (realExecutor) FrrReloadPyTest(ctx context.Context, conf string) error {
+	cmd := exec.CommandContext(ctx, frrReloadScript, "--test", "--stdout", conf)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if len(out) > frrReloadOutputTail {
+			out = out[len(out)-frrReloadOutputTail:]
+		}
+		return fmt.Errorf("%s --test %s: %w: %s", frrReloadScript, conf, err, out)
+	}
+	// --test exits 0 even when a diff remains; the diff is in the output.
+	if len(out) > 0 && reloadTestHasDiff15203(out) {
+		return fmt.Errorf("%s --test %s: diff remains: %s", frrReloadScript, conf, out)
+	}
+	return nil
+}
+
+// reloadTestHasDiff15203 reports whether `frr-reload.py --test --stdout`
+// output lists any line to add or delete. The script prints a
+// "Lines To Add" / "Lines To Delete" section header followed by the
+// commands; an empty diff prints neither section with content.
+func reloadTestHasDiff15203(out []byte) bool {
+	lines := strings.Split(string(out), "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "Lines To Add" && trimmed != "Lines To Delete" {
+			continue
+		}
+		for _, next := range lines[i+1:] {
+			next = strings.TrimSpace(next)
+			if next == "" || strings.HasPrefix(next, "=") {
+				continue
+			}
+			if next == "Lines To Add" || next == "Lines To Delete" {
+				break
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // VtyshLoad runs `vtysh -f <conf>` under ctx and returns CombinedOutput.

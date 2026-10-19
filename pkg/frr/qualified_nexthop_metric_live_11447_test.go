@@ -427,6 +427,10 @@ func (liveQNHExecutor11447) FrrReloadPy(context.Context, string) error {
 	return fmt.Errorf("unexpected frr-reload.py call in QNH live transport test")
 }
 
+func (liveQNHExecutor11447) FrrReloadPyTest(context.Context, string) error {
+	return fmt.Errorf("unexpected frr-reload.py --test call in QNH live transport test")
+}
+
 func (e liveQNHExecutor11447) VtyshLoad(ctx context.Context, conf string) ([]byte, error) {
 	return e.runVTY(liveQNHTimeout11447(ctx), "-f", conf)
 }

@@ -2,6 +2,7 @@ package frr
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 )
@@ -25,6 +26,10 @@ type RecordingExecutor struct {
 	ReloadCalls int
 	// LastConf is the conf path of the most recent FrrReloadPy call.
 	LastConf string
+	// TestErr, when non-nil, is returned by FrrReloadPyTest (#15203 re-check).
+	TestErr error
+	// TestCalls counts FrrReloadPyTest invocations.
+	TestCalls int
 }
 
 func (r *RecordingExecutor) Vtysh(context.Context, string) (string, error) { return "", nil }
@@ -33,6 +38,17 @@ func (r *RecordingExecutor) FrrReloadPy(_ context.Context, conf string) error {
 	r.ReloadCalls++
 	r.LastConf = conf
 	return r.ReloadErr
+}
+
+func (r *RecordingExecutor) FrrReloadPyTest(_ context.Context, conf string) error {
+	r.TestCalls++
+	r.LastConf = conf
+	if r.TestErr != nil {
+		return r.TestErr
+	}
+	// Default: a diff remains, so the re-check never certifies a reload
+	// this double was not told converged (#15203 fail-closed default).
+	return errors.New("frr-reload.py --test: diff remains")
 }
 
 func (r *RecordingExecutor) VtyshLoad(_ context.Context, conf string) ([]byte, error) {

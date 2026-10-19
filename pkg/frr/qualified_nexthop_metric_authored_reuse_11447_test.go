@@ -2,6 +2,7 @@ package frr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -77,6 +78,9 @@ func (e *r9StateExecutor) FrrReloadPy(_ context.Context, conf string) error {
 		e.applyConfig(string(data), true)
 	}
 	return err
+}
+func (e *r9StateExecutor) FrrReloadPyTest(context.Context, string) error {
+	return errors.New("frr-reload.py --test: diff remains")
 }
 func (e *r9StateExecutor) VtyshLoad(_ context.Context, conf string) ([]byte, error) {
 	data, err := os.ReadFile(conf)

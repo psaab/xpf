@@ -460,6 +460,9 @@ func (hardFailFRRExec) Vtysh(context.Context, string) (string, error) { return "
 func (hardFailFRRExec) FrrReloadPy(context.Context, string) error {
 	return errors.New("frr-reload.py boom")
 }
+func (hardFailFRRExec) FrrReloadPyTest(context.Context, string) error {
+	return errors.New("frr-reload.py --test: diff remains")
+}
 func (hardFailFRRExec) VtyshLoad(context.Context, string) ([]byte, error) {
 	return nil, errors.New("vtysh -f boom")
 }

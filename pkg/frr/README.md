@@ -1801,6 +1801,20 @@ step. Both are required — neither sees the other's case:
   shutdown) cancels in-flight process groups and reaps the retry
   goroutine; `DisableDegradedRetry()` is the one-shot (`xpfd cleanup`)
   configuration.
+- Benign-reload re-check (#15203, A12-06): when the primary `--reload`
+  fails (and frr-pythontools is present), `reloadLocked` re-checks with
+  `frr-reload.py --test --stdout` before falling back. Removing IS-IS
+  from an interface makes the script delete `ip router isis` before the
+  per-interface `no isis circuit-type`, which isisd rejects (YANG
+  area-tag missing), so `--reload` exits non-zero for a correct end
+  state. An empty `--test` diff certifies convergence (QNH reconcile
+  still runs; no degraded gauge, no retry episode, commit returns nil).
+  A remaining diff, a failed re-check, or a missing script falls through
+  to the additive fallback exactly as before — the re-check can only
+  clear a failure it proves benign, never mask a real one. A failed
+  degraded-retry attempt is NOT re-checked: the retry loop keeps its
+  cadence and a later primary success (or a newer commit's re-check)
+  converges the episode.
 - Degraded alerting contract (#9947 F-007): alert if
   `xpf_frr_reload_degraded == 1` for more than 10 minutes (twice the
   5-minute slow retry cadence, so a transient primary failure that the
