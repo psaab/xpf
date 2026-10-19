@@ -1881,6 +1881,14 @@ owned by the `journal/` subpackage.
   `…[truncated N bytes]` marker) — without the bound an oversized line
   would exceed the 16 MiB tail-assembly cap above and the reverse-tail
   scanner would silently discard the record it was meant to preserve.
+- **Detail control characters (#15144)** — `CommitWithDescription`
+  also rejects any description that is not `termsafe.DisplaySafe`
+  (C0/DEL/C1 controls, U+2028/U+2029, invalid UTF-8) BEFORE
+  persist/promote, so a commit comment cannot forge a history row or
+  inject terminal escapes via `show system commit history`. Both
+  renderers (in-process CLI and gRPC ShowText) additionally escape
+  `e.Detail` with `termsafe.SanitizeForDisplay` so legacy journal
+  lines written before the rejection render as one escaped line.
 - **Rotation** — at append time, when the current segment reaches
   1 MiB it rotates to `.config.journal.1` (keep 2 rotated segments,
   oldest deleted). A pre-#1896 fat journal rotates to `.1` on the
