@@ -1204,6 +1204,28 @@ struct CompiledApplications {
     by_protocol: FxHashMap<u8, ProtoTerms>,
 }
 
+impl CompiledApplications {
+    /// #14956: does this app set carry a PROTOCOL-ONLY term for some
+    /// protocol — a term with no port and no ICMP type/code constraint
+    /// (empty src AND dst ranges, compiled as a match-all `range_terms`
+    /// entry)? Such a term matches on the known protocol alone, so
+    /// `matches()` returns it even for a flowless packet once the
+    /// protocol is known — but for the fragment-no-L4 sentinel
+    /// (protocol `255`) the protocol is unknown, so the term can neither
+    /// be confirmed nor excluded. `has_l4_constrained_term` uses this to
+    /// fail closed on the sentinel against protocol-only DENY/REJECT
+    /// rules without touching port-bearing or ICMP-typed terms.
+    fn has_any_protocol_term(&self) -> bool {
+        !self.match_any
+            && self.by_protocol.values().any(|terms| {
+                terms
+                    .range_terms
+                    .iter()
+                    .any(|(_, src, dst, _)| src.is_empty() && dst.is_empty())
+            })
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct ProtoTerms {
     /// Exact destination port set (single-port terms compiled for O(1) lookup).
@@ -4618,11 +4640,23 @@ fn try_match_rule(
         // flowless-L4 skip. Only the corresponding L3 overlap check remains;
         // return that result so fragment-deny handling never re-evaluates app
         // matching or addresses for this rule.
+        // #14956: a protocol-only term (no port, no ICMP constraint) matches
+        // on the known protocol alone, so for a known protocol `matches()`
+        // above already decided it — but for the fragment-no-L4 sentinel
+        // (protocol 255) the protocol is unknown, the term can neither be
+        // confirmed nor excluded, and a DENY/REJECT carrying it must fail
+        // closed exactly like a port-bearing term. Without this arm a
+        // protocol-only deny (e.g. `application junos-udp` / a bare
+        // `protocol udp` term) is silently skipped for the sentinel and
+        // the fragment falls through to a later permit / default-permit /
+        // host deliver fall-through.
         if track_frag_deny
             && matches!(rule.action, PolicyAction::Deny | PolicyAction::Reject)
-            && rule
+            && (rule
                 .compiled_apps
                 .has_l4_constrained_term(protocol, packet_icmp)
+                || (protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4
+                    && rule.compiled_apps.has_any_protocol_term()))
             && rule_l3_matches(rule, state, src_ip, dst_ip)
         {
             return RuleMatchOutcome::Miss(RuleMissReason::FragmentDenyOverlap);
