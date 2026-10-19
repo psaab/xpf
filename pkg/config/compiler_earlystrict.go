@@ -174,6 +174,22 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	// #14967 — reject an address-book entry authored with two distinct
+	// prefixes (repeated definitions, repeated bare children, or group
+	// definitions the inline definition must beat). MUST run here, on the
+	// PRISTINE books BEFORE the zone-local fold, for the same reason as
+	// the collision gate above. Strict on commit / commit-check;
+	// tolerant load / peer-sync downgrades to a warning so the config
+	// still boots, and UsableValue refuses the entry so no resolver
+	// enforces an arbitrarily chosen winner.
+	if err := validateAddressBookDuplicatePrefixStrict(cfg); err != nil {
+		if opts.lenientAddressBookDuplicatePrefix {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("address-book duplicate prefix (downgraded to warning on tolerant path; the entry resolves to no usable address): %v", err))
+		} else {
+			return err
+		}
+	}
 	// #3061 — fold zone-local address books into the global book under
 	// zone-qualified internal names and rewrite policy match tokens. Runs after
 	// the name gate (above) and before the policy match-address resolution

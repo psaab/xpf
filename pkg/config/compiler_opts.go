@@ -1908,6 +1908,16 @@ type compileOpts struct {
 	// reference is refused with the unsupported-address sentinel and rejection
 	// mirror. Same doctrine as lenientAddressBookNames.
 	lenientAddressBookNameCollision bool
+	// lenientAddressBookDuplicatePrefix (#14967) downgrades the duplicate-
+	// prefix gate (validateAddressBookDuplicatePrefixStrict) from a hard
+	// compile error to a cfg.Warnings entry. An address book entry authored
+	// with two distinct prefixes was previously folded last-wins /
+	// first-group-wins with no diagnostic, so a policy enforced an
+	// arbitrarily chosen subset. The strict commit / commit-check path
+	// hard-rejects the ambiguity. Tolerant load / peer-sync keeps the
+	// config bootable (#1960) but UsableValue refuses the entry so every
+	// resolver fails closed. Same doctrine as lenientAddressBookNameCollision.
+	lenientAddressBookDuplicatePrefix bool
 	// lenientZoneInterfaceMembership (#3072) downgrades the zone-interface
 	// membership gate (validateZoneInterfaceMembershipStrict) from a hard
 	// compile error to a cfg.Warnings entry. The strict commit / commit-check
@@ -3524,6 +3534,7 @@ func lenientCompileOpts() compileOpts {
 		lenientReservedAddressNames:            true,
 		lenientHelperStateFile:                 true,
 		lenientAddressBookNameCollision:        true,
+		lenientAddressBookDuplicatePrefix:      true,
 		lenientRIDualClaim11060:                true,
 		lenientRIMgmtMember11392:               true,
 		lenientZoneInterfaceMembership:         true,

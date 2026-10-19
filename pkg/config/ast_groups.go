@@ -588,6 +588,19 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			if handled {
 				continue
 			}
+			// #14967: no inline peer, but an earlier group may already have
+			// adopted a same-name address here. Route the pair through the
+			// same conflict recording instead of adopting beside it (which
+			// folded first-group-wins with no diagnostic).
+			if addressBookPeer14424(*dst, s) != nil {
+				handled, err := mergeAddressBookGroupInto14424(dst, s, ancestorPath, budget, group, vars, level, haveExcept, deferWildcards)
+				if err != nil {
+					return err
+				}
+				if handled {
+					continue
+				}
+			}
 		}
 		if s.IsLeaf {
 			// #14433 leaf arm: a group `then accept;` leaf beside an inline

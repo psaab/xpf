@@ -303,9 +303,10 @@ func policyMatchEmptyAppSetError(scope, policyName, name string) error {
 // The fail-closed semantics are copied verbatim from the runtime so the commit
 // gate and the runtime gate cannot diverge:
 //
-//   - a defined `address` with a non-empty Value resolves (accumulates one
-//     literal); an `address` with an EMPTY value does NOT (the runtime returns
-//     false on addr.Value == "").
+//   - a defined `address` with a non-empty UsableValue resolves (accumulates
+//     one literal); an `address` with an EMPTY usable value does NOT (the
+//     runtime returns false on addr.UsableValue() == "" — #14967 extends
+//     this to duplicate-prefix and trailing-token taints).
 //   - an `address-set` resolves only if EVERY direct and nested member resolves
 //     AND it has at least one member (resolvedAny). A dangling member (a name
 //     that is neither a defined address nor a defined set) fails the WHOLE set
@@ -333,7 +334,10 @@ func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
 			return false
 		}
 		if addr := ab.Addresses[ref]; addr != nil {
-			if addr.Value == "" {
+			// #14967: UsableValue (not raw Value) so a duplicate-prefix or
+			// trailing-token tainted entry fails closed here exactly as the
+			// runtime resolver (resolveUserspaceAddressBookEntry) refuses it.
+			if addr.UsableValue() == "" {
 				if firstErr == nil {
 					firstErr = fmt.Errorf("address %q has no configured prefix "+
 						"(it resolves to no usable address)", show(ref))

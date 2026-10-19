@@ -790,6 +790,37 @@ available to show surfaces. Regression coverage:
 `address_unimplemented_forms_9524_test.go` covers mixed known forms and the
 unknown-form default-deny path.
 
+**An address takes exactly one prefix; duplicates are explicit (#14967):**
+a Junos address names a single prefix, so two distinct prefixes for one
+name have no vendor precedence. Before #14967 the compiler folded every
+definition into one `Address` with last-wins — repeated `address A`
+stanzas, repeated bare children in one braced container, repeated
+containers — and apply-groups precedence was only partially honoured
+(#14424 covered single-group-vs-inline; two groups, two inline bare
+children, and a trailing token on a dropped group definition still
+resolved silently). The surviving prefix was whichever the fold order
+kept, so a permit/deny covered a different network than written with no
+diagnostic. `mergeAddressNode` now routes every prefix through
+`setAddressPrefix14967`, which records each distinct prefix in
+`Address.DuplicatePrefixes` (identical repeats — `load merge` re-stating
+the same prefix, flat-set re-`set`, group/inline agreement — collapse;
+disjoint prefix/description halves still union). The #14424 group merge
+records group-vs-inline and group-vs-group conflicts (and trailing
+tokens on a dropped definition) through an inert marker child consumed
+at compile time. `validateAddressBookDuplicatePrefixStrict` rejects the
+entry at commit on the pristine books before the zone-local fold, naming
+the entry, book, and prefixes; tolerant load / peer-sync warns
+(`lenientAddressBookDuplicatePrefix`) and `Address.UsableValue()` returns
+`""` for duplicate- and trailing-token-tainted entries, so every
+resolver (userspace `resolveUserspaceAddressBookEntry`, the #3149 strict
+mirror `policyMatchAddressBookResolves`, `nameRepresentability`, the
+junos-host projection, static-NAT) fails closed instead of enforcing a
+chosen winner. The zone-local fold carries both taints into the
+qualified global entry. `Value` stays available to show surfaces.
+Regression coverage: `address_book_duplicate_prefix_14967_test.go`;
+`TestDuplicateNameStillLastWins7524` updated (the pre-#14967 last-wins
+control is superseded).
+
 **Zone-local address books (#3061):** Junos supports both the global
 `security address-book global { ... }` and a per-zone book attached inline
 under `security zones security-zone <z> address-book { address ...;

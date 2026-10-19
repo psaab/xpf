@@ -1683,6 +1683,21 @@ type Address struct {
 	// after it. validateAddressBookTrailingStrict rejects these at commit
 	// (lenient downgrade on the tolerant load / peer-sync path).
 	TrailingTokens []string
+	// DuplicatePrefixes records every distinct prefix authored for this
+	// entry when more than one distinct prefix survives compilation
+	// (#14967): repeated `address <name>` definitions in one book (global
+	// or zone-local), repeated bare prefix children inside one braced
+	// container, or group definitions the inline definition must beat.
+	// A Junos address takes exactly one prefix, so two distinct prefixes
+	// are ambiguous — there is no vendor precedence to honour.
+	// validateAddressBookDuplicatePrefixStrict rejects such an entry at
+	// commit; on the tolerant load / peer-sync path the entry is warned
+	// about and UsableValue returns "" so no resolver enforces an
+	// arbitrarily chosen winner. Identical repeats (a `load merge`
+	// re-stating the same prefix, flat-set re-`set`, or a group and an
+	// inline definition agreeing on the prefix) collapse and are NOT
+	// recorded. Compiler metadata only, never persisted.
+	DuplicatePrefixes []string `json:"-"`
 	// UnimplementedForms records address value tokens the compiler cannot
 	// enforce: known Junos forms (`dns-name`, `wildcard-address`,
 	// `range-address`) and unknown future forms (#9524/#11508). The compiler
@@ -1696,13 +1711,15 @@ type Address struct {
 }
 
 // UsableValue returns the prefix a policy or NAT resolver may enforce:
-// Value, or "" if the entry has no prefix or carries any unsupported/unknown
-// value form (#9524/#11508). The default-deny taint keeps future forms from
-// bypassing policy/NAT agreement; "" is the existing "resolves to no usable
+// Value, or "" if the entry has no prefix, carries any unsupported/unknown
+// value form (#9524/#11508), was authored with two distinct prefixes
+// (#14967), or carries trailing tokens past its legitimate arity (#3332,
+// #14967). Each taint keeps an ambiguous entry from being enforced as an
+// arbitrarily chosen subset; "" is the existing "resolves to no usable
 // address" signal (#2229, #3149, #3261). Value itself remains available to
 // show surfaces so they can render what the operator configured.
 func (a *Address) UsableValue() string {
-	if a == nil || len(a.UnimplementedForms) > 0 {
+	if a == nil || len(a.UnimplementedForms) > 0 || len(a.DuplicatePrefixes) > 0 || len(a.TrailingTokens) > 0 {
 		return ""
 	}
 	return a.Value
