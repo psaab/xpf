@@ -1093,6 +1093,21 @@ synthesis is active. The tolerant path downgrades to a warning
 refuses the second claimant, so a leniently-loaded duplicate seats only one
 election.
 
+**VRRP instance identities must be unique (#15688):** `CollectInstances`
+keys each explicit group by its parent address, so the same VRID under two
+addresses of one unit+family (or under units resolving to one kernel device)
+emits two instances with one manager identity `(kernelIf, VRID, family)`;
+an explicit group whose VRID equals a RETH-derived `100+RG` VRID on the same
+kernel device overlaps the RETH empty-family election domain.
+`validateVRRPInstanceIdentityStrict`
+(`compiler_validate_strict_vrrp_identity.go`) walks the exact keys both
+collectors produce (family from the group key's parent address, RETH via
+`RethRGOwners`/`rethKernelIface`, synthesis-off modes skipped) and rejects
+either collision at commit. Dual-stack (same VRID, distinct families) and
+distinct kernel devices stay legal. The tolerant path downgrades to a warning
+(`lenientVRRPInstanceIdentity`, #1960 no-brick); `UpdateInstances` skips only
+the offending duplicate/overlap instead of aborting the whole node batch.
+
 **No-match default-policy is fail-closed (#3065):** the sibling of #3043
 for the implicit fallback. When a flow matches NO zone-pair, global, or
 default policy, the verdict is `SecurityConfig.DefaultPolicy`. Because the
