@@ -51,14 +51,20 @@
 // DHCP-client replies pass.
 //
 // BOOTSTRAP VARIANT. Bootstrap swaps this table for a lifeline-admitting
-// form (leading `iifname {lifelines} accept`): NON-lifeline data and
+// form (leading per-member `iifname {lifelines} accept` plus
+// `meta sdifname {lifelines} accept`): NON-lifeline data and
 // link-local ingress stay DROP-closed, but whole lifeline NICs — including
 // their link-local addresses — are open, and a default-route fallback NIC
 // is admitted whole when no verified management identity (record/leaf)
 // exists. The admit set prefers verified identity (persisted record,
 // explicit leaf, OQ-D fxp0 narrowing) over name guesses; the zero-identity
 // fallback is recovery necessity, logged. The first commit converges to
-// configured policy.
+// configured policy. The master device itself is NEVER admitted (#15286):
+// LOCAL_IN reports an enslaved packet's iifname as its VRF master, so a
+// master iifname rule would blanket-admit every co-enslaved member —
+// including a declared zoned non-lifeline fxp1 that steady state denies
+// (TestDHCPLeaseChangeRequiresRecompile_ZonedNonLifelineFxp1). sdifname
+// recovers the enslaved lifeline member instead.
 //
 // PRIORITY. 12 evaluates STRICTLY AFTER the whole local-delivery cluster
 // (lo0 0 < host-inbound 10 < gap 11). Before the first apply the barrier stands
@@ -123,12 +129,15 @@ func (in *netlinkInstaller) InstallEarlyInputBarrier() error {
 }
 
 // InstallEarlyInputBarrierWithLifelineAdmit installs the same barrier table
-// with one additional leading rule: `iifname {lifelines} accept`. Bootstrap
+// with additional leading per-member lifeline admits: `iifname {lifelines}
+// accept` plus `meta sdifname {lifelines} accept` (#15286). Bootstrap
 // swaps the global barrier for this variant (same table name, so the ordinary
 // apply handoff removes it unchanged): data and link-local ingress stay
-// DROP-closed while the management lifeline stays reachable for recovery.
-// Replace-on-call, like the base install. An empty lifeline set installs the
-// base shape.
+// DROP-closed while each management lifeline member stays reachable for
+// recovery — including an enslaved lifeline, via sdifname, without admitting
+// its VRF master or any co-enslaved non-lifeline member. The caller must
+// pass member names only (never a VRF master). Replace-on-call, like the
+// base install. An empty lifeline set installs the base shape.
 func (in *netlinkInstaller) InstallEarlyInputBarrierWithLifelineAdmit(lifelines []string) error {
 	return in.installEarlyInputBarrier(lifelines)
 }
@@ -200,12 +209,21 @@ func emitEarlyInputBarrierAdmits(p *nlPlan) {
 	emitEarlyInputBarrierAdmitsWithLifeline(p, nil)
 }
 
-// emitEarlyInputBarrierAdmitsWithLifeline adds a leading `iifname {lifelines}
-// accept` (bootstrap recovery) ahead of the base admits. Empty lifelines
-// emit the base shape unchanged.
+// emitEarlyInputBarrierAdmitsWithLifeline adds a leading per-member lifeline
+// admit (bootstrap recovery) ahead of the base admits: `iifname {lifelines}
+// accept` for unenslaved lifelines plus `meta sdifname {lifelines} accept`
+// for VRF-enslaved members (#15286). LOCAL_IN reports an enslaved packet's
+// iifname as its VRF master, so a lifeline-only iifname rule would miss an
+// enslaved fxp0 unless the master itself were listed — and listing the
+// master (vrf-mgmt) blanket-admits every co-enslaved member, including a
+// declared zoned non-lifeline fxp1 that steady state denies. sdifname
+// recovers the member without admitting the master, mirroring the gap
+// fence (buildHostInboundGapFenceNetlink) and the IPsec quarantine input
+// exception. Empty lifelines emit the base shape unchanged.
 func emitEarlyInputBarrierAdmitsWithLifeline(p *nlPlan, lifelines []string) {
 	if len(lifelines) > 0 {
 		p.rule().iifname(lifelines).emit(verdictAccept()...)
+		p.rule().sdifname(lifelines).emit(verdictAccept()...)
 	}
 	p.rule().iifname([]string{earlyInputBarrierLoopback}).emit(verdictAccept()...)
 	hostInboundFenceMandatoryAdmitsNetlink(p)

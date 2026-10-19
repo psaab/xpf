@@ -282,6 +282,25 @@ func assertEarlyInputBarrierInstalled10751(t *testing.T) {
 	}
 }
 
+// ifnameSetKeys15286 returns the sorted member names of an iifname/sdifname
+// set-lookup rule in p, for the barrier lifeline tests.
+func ifnameSetKeys15286(t *testing.T, p *nlPlan, rule []expr.Any) []string {
+	t.Helper()
+	lookup, ok := rule[1].(*expr.Lookup)
+	if !ok {
+		t.Fatalf("lifeline rule match = %#v, want a set lookup", rule[1])
+	}
+	elements, ok := p.sets[lookup.SetID]
+	if !ok {
+		t.Fatalf("lifeline rule references unrecorded nft set %d", lookup.SetID)
+	}
+	out := make([]string, 0, len(elements))
+	for _, el := range elements {
+		out = append(out, string(bytes.TrimRight(el.Key, "\x00")))
+	}
+	return out
+}
+
 func TestEarlyInputBarrierLifelineAdmit10751(t *testing.T) {
 	p := newBuildPlan(t, EarlyInputBarrierTableName, gnft.ChainPriority(earlyInputBarrierPriority))
 	p.chain = earlyInputBarrierChain(p.table)
@@ -289,42 +308,45 @@ func TestEarlyInputBarrierLifelineAdmit10751(t *testing.T) {
 	if p.err != nil {
 		t.Fatalf("build lifeline guard: %v", p.err)
 	}
-	// Base 8 rules plus the leading lifeline admit.
-	if len(p.rules) != 9 {
-		t.Fatalf("lifeline guard rule count = %d, want 9", len(p.rules))
+	// Base 8 rules plus the leading iifname + sdifname lifeline admits.
+	if len(p.rules) != 10 {
+		t.Fatalf("lifeline guard rule count = %d, want 10", len(p.rules))
 	}
 	first := p.rules[0]
 	meta, ok := first[0].(*expr.Meta)
 	if !ok || meta.Key != expr.MetaKeyIIFNAME {
 		t.Fatalf("first rule head = %#v, want iifname match", first[0])
 	}
-	lookup, ok := first[1].(*expr.Lookup)
-	if !ok {
-		t.Fatalf("first rule match = %#v, want an iifname set lookup for two lifelines", first[1])
-	}
-	elements, ok := p.sets[lookup.SetID]
-	if !ok {
-		t.Fatalf("lifeline rule references unrecorded nft set %d", lookup.SetID)
-	}
-	if len(elements) != 2 || !bytes.Equal(elements[0].Key, ifname16("fxp0")) || !bytes.Equal(elements[1].Key, ifname16("hb0")) {
-		t.Fatalf("lifeline set keys = %v, want fxp0 + hb0", elements)
+	if got := ifnameSetKeys15286(t, p, first); len(got) != 2 || got[0] != "fxp0" || got[1] != "hb0" {
+		t.Fatalf("lifeline iifname set keys = %v, want fxp0 + hb0", got)
 	}
 	assertInputBarrierAccepts10751(t, first)
-	// The base shape follows unchanged; a lifeline swap must not widen it.
+	// #15286: the companion sdifname admit recovers VRF-enslaved lifeline
+	// members behind the master without admitting the master itself.
 	second := p.rules[1]
-	if len(second) != 3 {
-		t.Fatalf("second rule has %d expressions, want the base loopback rule", len(second))
+	if m, ok := second[0].(*expr.Meta); !ok || m.Key != expr.MetaKey(metaKeySDIFNAME) {
+		t.Fatalf("second rule head = %#v, want sdifname match", second[0])
 	}
-	if m, ok := second[0].(*expr.Meta); !ok || m.Key != expr.MetaKeyIIFNAME {
-		t.Fatalf("second rule head = %#v, want base loopback iifname", second[0])
+	if got := ifnameSetKeys15286(t, p, second); len(got) != 2 || got[0] != "fxp0" || got[1] != "hb0" {
+		t.Fatalf("lifeline sdifname set keys = %v, want fxp0 + hb0", got)
+	}
+	assertInputBarrierAccepts10751(t, second)
+	// The base shape follows unchanged; a lifeline swap must not widen it.
+	third := p.rules[2]
+	if len(third) != 3 {
+		t.Fatalf("third rule has %d expressions, want the base loopback rule", len(third))
+	}
+	if m, ok := third[0].(*expr.Meta); !ok || m.Key != expr.MetaKeyIIFNAME {
+		t.Fatalf("third rule head = %#v, want base loopback iifname", third[0])
 	}
 }
 
 // TestEarlyInputBarrierNarrowedLifelineSet10751 pins the recovery-scope
 // contract at the ruleset level: with a narrowed admit set (repurposed fxp0
-// and detected data NIC excluded by the resolver), the iifname set carries
-// EXACTLY the members — non-member ingress matches no accept and falls to
-// the chain DROP policy — and the base shape is unchanged.
+// and detected data NIC excluded by the resolver), the iifname AND sdifname
+// sets carry EXACTLY the members — no VRF master (#15286), non-member
+// ingress matches no accept and falls to the chain DROP policy — and the
+// base shape is unchanged.
 func TestEarlyInputBarrierNarrowedLifelineSet10751(t *testing.T) {
 	p := newBuildPlan(t, EarlyInputBarrierTableName, gnft.ChainPriority(earlyInputBarrierPriority))
 	p.chain = earlyInputBarrierChain(p.table)
@@ -332,29 +354,55 @@ func TestEarlyInputBarrierNarrowedLifelineSet10751(t *testing.T) {
 	if p.err != nil {
 		t.Fatalf("build narrowed guard: %v", p.err)
 	}
-	if len(p.rules) != 9 {
-		t.Fatalf("narrowed guard rule count = %d, want 9", len(p.rules))
+	if len(p.rules) != 10 {
+		t.Fatalf("narrowed guard rule count = %d, want 10", len(p.rules))
 	}
 	if p.chain.Policy == nil || *p.chain.Policy != gnft.ChainPolicyDrop {
 		t.Fatal("narrowed guard chain must stay policy DROP (non-member fallthrough)")
 	}
-	first := p.rules[0]
-	lookup, ok := first[1].(*expr.Lookup)
-	if !ok {
-		t.Fatalf("first rule match = %#v, want an iifname set lookup", first[1])
+	for i, wantKey := range []expr.MetaKey{expr.MetaKeyIIFNAME, expr.MetaKey(metaKeySDIFNAME)} {
+		rule := p.rules[i]
+		if m, ok := rule[0].(*expr.Meta); !ok || m.Key != wantKey {
+			t.Fatalf("lifeline rule %d head = %#v, want meta key %v", i, rule[0], wantKey)
+		}
+		if got := ifnameSetKeys15286(t, p, rule); len(got) != 2 || got[0] != "em0" || got[1] != "hb0" {
+			t.Fatalf("lifeline rule %d set keys = %v, want exactly em0 + hb0 (no fxp0, no vrf-mgmt, no detected data)", i, got)
+		}
+		assertInputBarrierAccepts10751(t, rule)
 	}
-	elements, ok := p.sets[lookup.SetID]
-	if !ok {
-		t.Fatalf("lifeline rule references unrecorded nft set %d", lookup.SetID)
+	for i, rule := range p.rules {
+		for _, key := range ifnameRuleNames15286(t, p, rule) {
+			if key == "vrf-mgmt" {
+				t.Fatalf("rule %d admits the vrf-mgmt master (#15286 blanket): %#v", i, rule)
+			}
+		}
 	}
-	if len(elements) != 2 || !bytes.Equal(elements[0].Key, ifname16("em0")) || !bytes.Equal(elements[1].Key, ifname16("hb0")) {
-		t.Fatalf("lifeline set keys = %v, want exactly em0 + hb0 (no fxp0, no detected data)", elements)
+	third := p.rules[2]
+	if m, ok := third[0].(*expr.Meta); !ok || m.Key != expr.MetaKeyIIFNAME {
+		t.Fatalf("third rule head = %#v, want base loopback iifname", third[0])
 	}
-	assertInputBarrierAccepts10751(t, first)
-	second := p.rules[1]
-	if m, ok := second[0].(*expr.Meta); !ok || m.Key != expr.MetaKeyIIFNAME {
-		t.Fatalf("second rule head = %#v, want base loopback iifname", second[0])
+}
+
+// ifnameRuleNames15286 collects every ifname key a rule matches on (Cmp or
+// set Lookup), for the no-master sweep above.
+func ifnameRuleNames15286(t *testing.T, p *nlPlan, rule []expr.Any) []string {
+	t.Helper()
+	var out []string
+	for _, e := range rule {
+		switch m := e.(type) {
+		case *expr.Cmp:
+			if len(m.Data) == 16 {
+				out = append(out, string(bytes.TrimRight(m.Data, "\x00")))
+			}
+		case *expr.Lookup:
+			if elements, ok := p.sets[m.SetID]; ok {
+				for _, el := range elements {
+					out = append(out, string(bytes.TrimRight(el.Key, "\x00")))
+				}
+			}
+		}
 	}
+	return out
 }
 
 func scalarNFProto10751(t *testing.T, rule []expr.Any, i int) uint8 {

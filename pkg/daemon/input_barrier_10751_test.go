@@ -1098,19 +1098,19 @@ func TestResolveEarlyInputGuardLifelines10751(t *testing.T) {
 		wantAbsent []string
 	}{
 		{"defaults plus detected fallback", "", "", false, "ge-data", false,
-			[]string{"fxp0", "em0", "fab0", "fab1", "vrf-mgmt", "ge-data"}, nil},
+			[]string{"fxp0", "em0", "fab0", "fab1", "ge-data"}, []string{"vrf-mgmt"}},
 		{"leaf narrows fxp0 and excludes detected data", "hb0", "", false, "ge-data", false,
-			[]string{"hb0", "em0", "fab0", "fab1", "vrf-mgmt"}, []string{"fxp0", "ge-data"}},
+			[]string{"hb0", "em0", "fab0", "fab1"}, []string{"fxp0", "ge-data", "vrf-mgmt"}},
 		{"narrowed fxp0 stays out even when detected", "hb0", "", false, "fxp0", false,
-			[]string{"hb0", "em0", "fab0", "fab1", "vrf-mgmt"}, []string{"fxp0"}},
+			[]string{"hb0", "em0", "fab0", "fab1"}, []string{"fxp0", "vrf-mgmt"}},
 		{"record identity excludes detected data", "", "r1", true, "ge-data", false,
-			[]string{"fxp0", "em0", "fab0", "fab1", "vrf-mgmt", "r1"}, []string{"ge-data"}},
+			[]string{"fxp0", "em0", "fab0", "fab1", "r1"}, []string{"ge-data", "vrf-mgmt"}},
 		{"leaf plus record union", "hb0", "r1", true, "ge-data", false,
-			[]string{"hb0", "em0", "fab0", "fab1", "vrf-mgmt", "r1"}, []string{"fxp0", "ge-data"}},
+			[]string{"hb0", "em0", "fab0", "fab1", "r1"}, []string{"fxp0", "ge-data", "vrf-mgmt"}},
 		{"detection failure keeps verified set", "hb0", "", false, "", true,
-			[]string{"hb0", "em0", "fab0", "fab1", "vrf-mgmt"}, []string{"fxp0"}},
+			[]string{"hb0", "em0", "fab0", "fab1"}, []string{"fxp0", "vrf-mgmt"}},
 		{"detected member deduped", "", "", false, "fxp0", false,
-			[]string{"fxp0", "em0", "fab0", "fab1", "vrf-mgmt"}, nil},
+			[]string{"fxp0", "em0", "fab0", "fab1"}, []string{"vrf-mgmt"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			lifelineRecordNameFn = func() (string, bool) { return tc.record, tc.recordOK }
@@ -1138,6 +1138,46 @@ func TestResolveEarlyInputGuardLifelines10751(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestResolveEarlyInputGuardLifelinesExcludesMaster15286 pins #15286 at the
+// resolver level for the exact reported shape: a declared zoned fxp1 bound
+// to vrf-mgmt alongside the fxp0 lifeline. The guard set must carry the
+// lifeline member and must NEVER carry the vrf-mgmt master — an
+// `iifname "vrf-mgmt"` admit matches every enslaved member at LOCAL_IN, so
+// the master in the set IS the blanket admission of the zoned fxp1, even
+// though fxp1 itself is not (and must not become) a lifeline. Enslaved
+// lifeline reachability is preserved by the barrier's sdifname companion,
+// not by the master. Fail-on-revert: restoring ManagementVRFDeviceName to
+// the defaults makes every subtest fail on the master assertion.
+func TestResolveEarlyInputGuardLifelinesExcludesMaster15286(t *testing.T) {
+	origRecord := lifelineRecordNameFn
+	t.Cleanup(func() { lifelineRecordNameFn = origRecord })
+	lifelineRecordNameFn = func() (string, bool) { return "", false }
+	withFailClosedBootDetect(t, func() (string, bool, error) { return "", false, nil })
+
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"fxp0": {Name: "fxp0", Units: map[int]*config.InterfaceUnit{0: {}}},
+		"fxp1": {Name: "fxp1", Units: map[int]*config.InterfaceUnit{0: {}}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"trust": {Name: "trust", Interfaces: []string{"fxp1.0"}},
+	}
+	got := resolveEarlyInputGuardLifelines(cfg)
+	set := map[string]bool{}
+	for _, n := range got {
+		set[n] = true
+	}
+	if set[config.ManagementVRFDeviceName] {
+		t.Fatalf("guard lifelines %v admit the %s master: every enslaved member (incl. zoned non-lifeline fxp1) gains host ingress (#15286)", got, config.ManagementVRFDeviceName)
+	}
+	if !set["fxp0"] {
+		t.Fatalf("guard lifelines %v omit the fxp0 lifeline member", got)
+	}
+	if set["fxp1"] {
+		t.Fatalf("guard lifelines %v admit zoned non-lifeline fxp1 as a lifeline", got)
 	}
 }
 
