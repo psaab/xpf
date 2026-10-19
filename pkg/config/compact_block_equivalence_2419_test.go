@@ -389,6 +389,25 @@ func nest(path []string, inner string) string {
 	return path[0] + " { " + nest(path[1:], inner) + " }"
 }
 
+// compileTextPanicsafe15064 is compileText with the compiler's panic
+// surface folded into the census's own "did not compile" answer. The
+// braced-packed arm synthesizes a spelling no fixture authored before
+// (#15064); a compiler that panics on one such spelling must read as a
+// skipped/unruled cell here — crashing the whole census would hide every
+// other site's verdict behind one site's defect. A panic is never
+// counted equivalent: nil is also what an uncompilable spelling returns,
+// and the vacuity guard above has already run, so the cell is simply not
+// measured on this arm.
+func compileTextPanicsafe15064(t *testing.T, text string) (cfg *Config) {
+	t.Helper()
+	defer func() {
+		if recover() != nil {
+			cfg = nil
+		}
+	}()
+	return compileText(t, text)
+}
+
 func compileText(t *testing.T, text string) *Config {
 	t.Helper()
 	p := NewParser(text)
@@ -633,6 +652,11 @@ var filedFixed = map[string]string{
 	// now preserves the compiled value, and this fixed anchor keeps that repair
 	// checked in both directions.
 	"routing-options router-id": "#11314",
+	// #15064: the CoS schedulers compiler now expands a packed instance
+	// tail, so the valueless surplus-sharing flag survives both the compact
+	// and the braced-packed spellings. Moved here rather than deleted, for
+	// the same reason #6821 moved its two.
+	"class-of-service schedulers xpfarg surplus-sharing": "#15064",
 	// #13214: rate-container packed children are now expanded by the firewall
 	// compiler, so these valueless color flags survive the compact spelling.
 	"firewall three-color-policer xpfarg single-rate color-aware": "#13214",
@@ -842,7 +866,19 @@ var filedStillOpen = map[string]string{
 type censusResult struct {
 	divergent []string
 	checked   int
-	skipped   map[string]int
+	// bracedPackedDivergent / bracedPackedChecked record the SECOND arm
+	// added by #15064 (A01-03): for every named-instance site, the spelling
+	// that packs the leaf onto the INSTANCE line while the CONTAINER stays
+	// braced — `keyword { name leaf value; }` — compared against the fully
+	// braced twin. The original #2419 arm packs the CONTAINER line instead
+	// (`keyword name leaf value;`), which the normalizer mostly covers, so
+	// this depth of packing was measured nowhere and CoS instance bodies
+	// compiled to nothing inside intact braces. Kept OUT of `divergent`
+	// (and therefore out of the #2419 inventory equality) so this arm can
+	// only ADD a failure, never mask or re-baseline the original gate.
+	bracedPackedDivergent []string
+	bracedPackedChecked   int
+	skipped               map[string]int
 	// dropShape records, for each DIVERGENT site, what the compact spelling
 	// actually produced:
 	//
@@ -1059,6 +1095,23 @@ func runCompactBlockCensus(t *testing.T) censusResult {
 			}
 			continue
 		}
+		// #15064 braced-packed arm: `keyword { name leaf value; }`. Only a
+		// stanza carrying an instance slot (two or more fields) has this
+		// spelling; for a plain keyword stanza it IS the compact arm above.
+		if fields := strings.Fields(stanza); len(fields) >= 2 {
+			keyword := fields[0]
+			inst := strings.Join(fields[1:], " ")
+			bracedPacked := pre + nest(parent, ctx+keyword+" { "+inst+" "+s.leaf+" "+v1+"; }")
+			if s.flag {
+				bracedPacked = pre + nest(parent, ctx+keyword+" { "+inst+" "+s.leaf+"; }")
+			}
+			if cp := compileTextPanicsafe15064(t, bracedPacked); cp != nil {
+				res.bracedPackedChecked++
+				if !cfgEqual(cb1, cp) {
+					res.bracedPackedDivergent = append(res.bracedPackedDivergent, siteKey)
+				}
+			}
+		}
 		res.checked++
 		if !cfgEqual(cb1, cc) {
 			res.divergent = append(res.divergent, siteKey)
@@ -1160,6 +1213,39 @@ func readInventoryShapes(t *testing.T) map[string]string {
 //   - the CHECKED count is a ratchet, so sites cannot silently drain out of the
 //     tested population into the skip buckets (which is how an instrument stops
 //     measuring while still reporting success).
+//
+// cosBracedPackedSite15064 reports whether a census site belongs to one
+// of the CoS named-instance containers #15064 fixes. The `interfaces
+// ... unit ...` sites are excluded: their braced-packed fixture packs at
+// the unit while the enclosing interface stays compact, a mixed spelling
+// governed by the interface unit readers, and the dedicated
+// cos_packed_instance_15064_test.go cells cover the unit spellings
+// directly.
+func cosBracedPackedSite15064(site string) bool {
+	if strings.HasPrefix(site, "class-of-service interfaces xpfarg unit ") {
+		return false
+	}
+	// The shaping-rate value-in-braces spelling (`shaping-rate { 10m
+	// burst-size 1m; }`) packs a leaf VALUE, not an instance body; it is a
+	// different mechanism from the instance-line packing this issue fixes.
+	if site == "class-of-service interfaces xpfarg shaping-rate xpfarg burst-size" {
+		return false
+	}
+	for _, prefix := range []string{
+		"class-of-service schedulers xpfarg ",
+		"class-of-service traffic-control-profiles xpfarg ",
+		"class-of-service scheduler-maps xpfarg ",
+		"class-of-service classifiers ",
+		"class-of-service rewrite-rules ",
+		"class-of-service interfaces xpfarg ",
+	} {
+		if strings.HasPrefix(site, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCompactBlockEquivalenceInventory2419(t *testing.T) {
 	res := runCompactBlockCensus(t)
 	want, wantChecked := readInventory(t)
@@ -1221,6 +1307,31 @@ func TestCompactBlockEquivalenceInventory2419(t *testing.T) {
 			"filedFixed -- a count that falls because a population shrank is the "+
 			"fix working, and carrying the old number forward would demand entries "+
 			"that should no longer exist.", len(filedByDesign))
+	}
+
+	// #15064: for the CoS named-instance containers this issue fixes, the
+	// braced-packed arm must find NO divergence. The instance opens its
+	// braces and packs only its own line; a compiler that reads only the
+	// instance's Children compiles that body to nothing. This is asserted
+	// rather than inventoried: the arm exists because CoS shipped exactly
+	// this drop, and an expected-failure list here would licence the next
+	// CoS instance-body reader to do the same. Outside class-of-service
+	// the arm only RECORDS (report test): measured at this commit it
+	// diverges at hundreds of sites in other sections, which are other
+	// mechanisms with their own owners, not this issue's scope.
+	var cosBracedPackedDivergent []string
+	for _, site := range res.bracedPackedDivergent {
+		if cosBracedPackedSite15064(site) {
+			cosBracedPackedDivergent = append(cosBracedPackedDivergent, site)
+		}
+	}
+	if len(cosBracedPackedDivergent) > 0 {
+		t.Errorf("#15064: NEW braced-packed-blind CoS site(s) (the `keyword { name leaf value; }` spelling drops the value): %v\n"+
+			"    A CoS instance reader was added or changed to read only the instance node's Children.\n"+
+			"    Expand the instance's packed tail (see cosPackedInstanceBody) or fix the reader.", cosBracedPackedDivergent)
+	}
+	if res.bracedPackedChecked == 0 {
+		t.Errorf("#15064: braced-packed arm checked ZERO cells — the instance-site population vanished, so the arm above measures nothing")
 	}
 
 	// Positive control, both directions.
@@ -1286,6 +1397,8 @@ func TestCompactBlockCensusReport2419(t *testing.T) {
 	t.Logf("#2419 compact/block equivalence census")
 	t.Logf("  cells CHECKED (vacuity-guarded): %d", res.checked)
 	t.Logf("  cells DIVERGENT:                 %d", len(res.divergent))
+	t.Logf("  braced-packed cells CHECKED (#15064):   %d", res.bracedPackedChecked)
+	t.Logf("  braced-packed cells DIVERGENT (#15064): %d", len(res.bracedPackedDivergent))
 	keys := make([]string, 0, len(res.skipped))
 	for k := range res.skipped {
 		keys = append(keys, k)

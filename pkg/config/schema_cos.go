@@ -11,14 +11,14 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 		"queue": {desc: "Map a queue number to a forwarding-class name (one queue per class, one class per queue)", args: 2, multi: true, keyValidatorPos: ValidateForwardingClassQueueArg, children: nil},
 	}},
 	"classifiers": {desc: "Classifiers mapping incoming code points to forwarding classes", children: map[string]*schemaNode{
-		"dscp": {desc: "DSCP classifier", args: 1, multi: true, placeholder: "<classifier-name>", children: map[string]*schemaNode{
+		"dscp": {desc: "DSCP classifier", args: 1, multi: true, placeholder: "<classifier-name>", packedTail: true, children: map[string]*schemaNode{
 			"forwarding-class": {desc: "Forwarding class to assign to matching code points", args: 1, multi: true, placeholder: "<class-name>", keyValidator: ValidateForwardingClassName, children: map[string]*schemaNode{
 				"loss-priority": {desc: "Loss priority for packets matching this code point (ENFORCED: feeds dscp_lp_by_dscp, which selects the egress DSCP rewrite row)", args: 1, multi: true, placeholder: "<level>", children: map[string]*schemaNode{
 					"code-points": {desc: "DSCP code points to match (alias such as ef, af11, cs6, or numeric 0..63)", args: 1, multi: true, placeholder: "<code-points>", children: nil},
 				}},
 			}},
 		}},
-		"ieee-802.1": {desc: "IEEE 802.1p classifier", args: 1, multi: true, placeholder: "<classifier-name>", children: map[string]*schemaNode{
+		"ieee-802.1": {desc: "IEEE 802.1p classifier", args: 1, multi: true, placeholder: "<classifier-name>", packedTail: true, children: map[string]*schemaNode{
 			"forwarding-class": {desc: "Forwarding class to assign to matching code points", args: 1, multi: true, placeholder: "<class-name>", keyValidator: ValidateForwardingClassName, children: map[string]*schemaNode{
 				"loss-priority": {desc: "Loss priority for packets matching this code point (ENFORCED: feeds ieee8021_lp_by_pcp, which selects the egress DSCP rewrite row)", args: 1, multi: true, placeholder: "<level>", children: map[string]*schemaNode{
 					"code-points": {desc: "IEEE 802.1p code points to match (0..7)", args: 1, multi: true, placeholder: "<code-points>", children: nil},
@@ -31,7 +31,7 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 		// classifies on the top 3 bits of the DS field. The matching
 		// accepted-but-inert commit advisory was retracted with it. The
 		// `rewrite-rules inet-precedence` direction below is still inert.
-		"inet-precedence": {desc: "IP-precedence classifier (classify on the 3-bit IP precedence field)", args: 1, multi: true, placeholder: "<classifier-name>", children: map[string]*schemaNode{
+		"inet-precedence": {desc: "IP-precedence classifier (classify on the 3-bit IP precedence field)", args: 1, multi: true, placeholder: "<classifier-name>", packedTail: true, children: map[string]*schemaNode{
 			"forwarding-class": {desc: "Forwarding class to assign to matching code points", args: 1, multi: true, placeholder: "<class-name>", keyValidator: ValidateForwardingClassName, children: map[string]*schemaNode{
 				"loss-priority": {desc: "Loss priority for packets matching this precedence (ENFORCED: feeds inet_precedence_lp_by_prec, which selects the egress DSCP rewrite row)", args: 1, multi: true, placeholder: "<level>", children: map[string]*schemaNode{
 					"code-points": {desc: "IP-precedence code points to match (0..7)", args: 1, multi: true, placeholder: "<code-points>", children: nil},
@@ -40,7 +40,7 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 		}},
 	}},
 	"rewrite-rules": {desc: "Egress rewrite rules mapping forwarding classes to code points", children: map[string]*schemaNode{
-		"dscp": {desc: "DSCP rewrite rule", args: 1, multi: true, placeholder: "<rewrite-rule-name>", children: map[string]*schemaNode{
+		"dscp": {desc: "DSCP rewrite rule", args: 1, multi: true, placeholder: "<rewrite-rule-name>", packedTail: true, children: map[string]*schemaNode{
 			"forwarding-class": {desc: "Forwarding class whose packets get the rewritten code point", args: 1, multi: true, placeholder: "<class-name>", keyValidator: ValidateForwardingClassName, children: map[string]*schemaNode{
 				"loss-priority": {desc: "Loss priority this rewrite entry applies to (ENFORCED: the egress DSCP is chosen by (queue, loss-priority))", args: 1, multi: true, placeholder: "<level>", children: map[string]*schemaNode{
 					"code-point":  {desc: "DSCP code point to write (alias such as ef, af11, cs6, or numeric 0..63)", args: 1, placeholder: "<code-point>", children: nil},
@@ -55,7 +55,7 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 		// does not yet own the 802.1Q tag write (a commit advisory surfaces the
 		// inertness). Mirrors the `dscp` rewrite subtree; the classifier side
 		// (classifiers ieee-802.1) is already enforced.
-		"ieee-802.1": {desc: "IEEE 802.1p (PCP) rewrite rule (accepted for Junos compatibility; NOT yet enforced — the dataplane rewrites dscp only)", args: 1, multi: true, placeholder: "<rewrite-rule-name>", children: map[string]*schemaNode{
+		"ieee-802.1": {desc: "IEEE 802.1p (PCP) rewrite rule (accepted for Junos compatibility; NOT yet enforced — the dataplane rewrites dscp only)", args: 1, multi: true, placeholder: "<rewrite-rule-name>", packedTail: true, children: map[string]*schemaNode{
 			"forwarding-class": {desc: "Forwarding class whose packets get the rewritten code point", args: 1, multi: true, placeholder: "<class-name>", keyValidator: ValidateForwardingClassName, children: map[string]*schemaNode{
 				"loss-priority": {desc: "Loss priority (accepted for Junos compatibility; not enforced by the userspace dataplane)", args: 1, multi: true, placeholder: "<level>", children: map[string]*schemaNode{
 					"code-point":  {desc: "802.1p PCP code point to write (0..7)", args: 1, placeholder: "<code-point>", children: nil},
@@ -66,7 +66,7 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 		// #4316 (fable-167 F-3b): IP-precedence and MPLS EXP egress rewrite.
 		// Accepted for Junos compatibility (completion + ? help) but INERT —
 		// the userspace dataplane rewrites only dscp on egress. Commit advisory.
-		"inet-precedence": {desc: "IP-precedence rewrite rule (accepted for Junos compatibility; NOT enforced — the dataplane rewrites dscp only)", args: 1, multi: true, placeholder: "<rewrite-rule-name>", children: map[string]*schemaNode{
+		"inet-precedence": {desc: "IP-precedence rewrite rule (accepted for Junos compatibility; NOT enforced — the dataplane rewrites dscp only)", args: 1, multi: true, placeholder: "<rewrite-rule-name>", packedTail: true, children: map[string]*schemaNode{
 			"forwarding-class": {desc: "Forwarding class whose packets get the rewritten code point", args: 1, multi: true, placeholder: "<class-name>", keyValidator: ValidateForwardingClassName, children: map[string]*schemaNode{
 				"loss-priority": {desc: "Loss priority (accepted for Junos compatibility; not enforced by the userspace dataplane)", args: 1, multi: true, placeholder: "<level>", children: map[string]*schemaNode{
 					"code-point":  {desc: "IP-precedence code point to write (0..7)", args: 1, placeholder: "<code-point>", children: nil},
@@ -74,7 +74,7 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 				}},
 			}},
 		}},
-		"exp": {desc: "MPLS EXP rewrite rule (accepted for Junos compatibility; NOT enforced — the dataplane rewrites dscp only)", args: 1, multi: true, placeholder: "<rewrite-rule-name>", children: map[string]*schemaNode{
+		"exp": {desc: "MPLS EXP rewrite rule (accepted for Junos compatibility; NOT enforced — the dataplane rewrites dscp only)", args: 1, multi: true, placeholder: "<rewrite-rule-name>", packedTail: true, children: map[string]*schemaNode{
 			"forwarding-class": {desc: "Forwarding class whose packets get the rewritten code point", args: 1, multi: true, placeholder: "<class-name>", keyValidator: ValidateForwardingClassName, children: map[string]*schemaNode{
 				"loss-priority": {desc: "Loss priority (accepted for Junos compatibility; not enforced by the userspace dataplane)", args: 1, multi: true, placeholder: "<level>", children: map[string]*schemaNode{
 					"code-point":  {desc: "MPLS EXP code point to write (0..7)", args: 1, placeholder: "<code-point>", children: nil},
@@ -86,7 +86,7 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 	// #11800: this subtree closes the unknown-child path through the
 	// compiler's scheduler switch. Unsupported Junos children (such as
 	// drop-profile-map) are rejected rather than echoed and silently ignored.
-	"schedulers": {desc: "Scheduler definitions (transmit rate, priority, buffer)", args: 1, multi: true, placeholder: "<scheduler-name>", closedWorld: true, children: map[string]*schemaNode{
+	"schedulers": {desc: "Scheduler definitions (transmit rate, priority, buffer)", args: 1, multi: true, placeholder: "<scheduler-name>", closedWorld: true, packedTail: true, children: map[string]*schemaNode{
 		// #1319 typed leaves. Re-homed from the cmdtree overlay
 		// (cmdtree.ConfigClassOfServiceSchedulers, retired in this PR)
 		// onto setSchema so the live config-mode `set ... ?` completer
@@ -185,7 +185,7 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 			children:      nil,
 		},
 	}},
-	"scheduler-maps": {desc: "Scheduler map assigning schedulers to forwarding classes", args: 1, multi: true, placeholder: "<map-name>", children: map[string]*schemaNode{
+	"scheduler-maps": {desc: "Scheduler map assigning schedulers to forwarding classes", args: 1, multi: true, placeholder: "<map-name>", packedTail: true, children: map[string]*schemaNode{
 		"forwarding-class": {desc: "Forwarding class entry in this map", args: 1, multi: true, placeholder: "<class-name>", keyValidator: ValidateForwardingClassName, closedWorld: true, children: map[string]*schemaNode{
 			"scheduler": {desc: "Scheduler to apply to this forwarding class", args: 1, placeholder: "<scheduler-name>", children: nil},
 		}},
@@ -200,7 +200,7 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 	// delay-buffer-rate, not burst-size). guaranteed-rate / delay-buffer-rate
 	// are typed (garbage rejected at commit) but currently INERT — no
 	// per-unit dataplane consumer — and carry a commit advisory.
-	"traffic-control-profiles": {desc: "Hierarchical traffic-shaping profiles bound to an interface via output-traffic-control-profile", args: 1, multi: true, placeholder: "<profile-name>", children: map[string]*schemaNode{
+	"traffic-control-profiles": {desc: "Hierarchical traffic-shaping profiles bound to an interface via output-traffic-control-profile", args: 1, multi: true, placeholder: "<profile-name>", packedTail: true, children: map[string]*schemaNode{
 		// #4228 Gap 2: shaping-rate accepts an absolute bandwidth (10m) or the
 		// Junos `percent <n>` form (share of the bound interface's speed). The
 		// absolute form is enforced as the root shaper on the bound unit; the
@@ -242,8 +242,8 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 		},
 		"scheduler-map": {desc: "Scheduler map applied to the unit bound to this profile", args: 1, placeholder: "<map-name>", children: nil},
 	}},
-	"interfaces": {desc: "Apply CoS to an interface", args: 1, multi: true, placeholder: "<interface-name>", children: map[string]*schemaNode{
-		"unit": {desc: "Logical unit number", args: 1, multi: true, placeholder: "<unit-number>", children: map[string]*schemaNode{
+	"interfaces": {desc: "Apply CoS to an interface", args: 1, multi: true, placeholder: "<interface-name>", packedTail: true, children: map[string]*schemaNode{
+		"unit": {desc: "Logical unit number", args: 1, multi: true, placeholder: "<unit-number>", packedTail: true, children: map[string]*schemaNode{
 			// issue 8939: packedStatements so a run written on one line --
 			// `classifiers dscp c1 ieee-802.1 c2;` -- splits into siblings
 			// instead of landing whole on this node's Keys, where the compiler
