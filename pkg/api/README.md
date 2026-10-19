@@ -1624,9 +1624,22 @@ the drop fails loudly instead of going quietly vacuous.
     `SO_REUSEADDR`, not `SO_REUSEPORT`), and the TLS change could never converge
     without a restart — the same collision hit an HTTP-addr change that left the
     HTTPS bind unchanged. Each leg binds the new socket and serves it BEFORE
-    retiring the old (no unreachable window on that plane, no double-bind of an
     unchanged socket); a bind (or HTTPS cert) failure fail-closes to the retained
     previous leg.
+    **Multi-leg sets match BY ADDRESS, not by position (#14983, D36-03).**
+    `reconcileLegsLocked` adopts any serving leg already on a desired
+    address into that address's slot instead of re-binding it, so a pure
+    reorder of the bind set (`[A,B]` -> `[B,A]`, e.g. an address-family
+    re-resolution that flips the resolver's order) converges as a no-op.
+    Positional matching bound each replacement while its own address was
+    still served by the leg at the other slot — a self-inflicted
+    `EADDRINUSE` on both legs that no retry could clear. A displaced leg
+    is retired only after every slot is resolved (so a later slot can
+    still adopt it), duplicate desired addresses are rejected before any
+    leg is touched, and `ServingLegAddrs` exposes the requested address
+    of every serving leg so the daemon can sanction credential
+    publication against live ground truth rather than its recorded
+    fingerprint.
     **`ReconcileHTTPS` BINDS BEFORE IT BUILDS (#7041).** Building resolves the
     durable certificate, and `certGen` has no cache — `LoadX509KeyPair` re-reads
     the on-disk pair and `warnStaleLoadedCert` re-runs on every call. Because the

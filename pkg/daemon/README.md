@@ -820,6 +820,22 @@ explicit-config test seam.
     while some listener really is serving an unnamed address, so a later commit
     always exits it: converge that bind, or commit the address that is actually
     serving (which moves nothing and publishes whole).
+  - **The gate reads LIVE legs, and the fingerprint resyncs after every
+    reconcile** (#14983, D36-03). Since the multi-leg change (#14583) the
+    fingerprint is a per-plane SET whose fields advanced only on that
+    plane's whole-set success, so after a positional swap (which
+    self-collided `EADDRINUSE` pre-#14983 and never converged) or a
+    partial rebind it could skip or mis-order a still-serving leg.
+    `liveLegsSanctionedLocked` / `liveAllLoopbackLocked` now ask
+    `api.Server.ServingLegAddrs` (the requested address of every serving
+    leg) and fall back to the fingerprint only when no server exists;
+    `syncCurFromLiveLocked` rewrites `m.cur` from the serving legs after
+    each HTTP/HTTPS reconcile — the exact desired fingerprint on full
+    success, the converged-plus-retained union on partial failure, with
+    a plane that bound nothing keeping its previous fingerprint as retry
+    debt. The nil-direction gate (`publishNilDirectionLocked`) judges
+    loopback-ness against the same live set, so a retained off-loopback
+    leg can never be published nil by a fingerprint that dropped it.
 
     Both exits rest on the unnamed address being one a committed config CAN
     name. Round 13's predicate quietly assumed HTTP was always live at
