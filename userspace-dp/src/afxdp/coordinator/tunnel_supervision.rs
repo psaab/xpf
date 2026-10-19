@@ -1078,6 +1078,25 @@ impl super::Coordinator {
                     .collect()
             })
             .unwrap_or_default();
+        // #15101: the address family of the interface's LITERAL endpoints,
+        // preferring any IPv6 literal: the resolver's tie-break between A
+        // and AAAA answers on the dual-stack socket. `None` when the
+        // interface is hostname-only (the resolver then prefers AAAA).
+        // Unreachable in practice — the Go gate rejects mixed literals —
+        // but v6-first keeps a v6-configured interface v6.
+        let preferred_v6 = self
+            .forwarding
+            .tunnel_endpoints
+            .get(&id)
+            .and_then(|e| {
+                e.wg_peers.iter().filter_map(|p| p.endpoint).fold(
+                    None,
+                    |acc: Option<bool>, ep| match acc {
+                        Some(true) => Some(true),
+                        _ => Some(ep.is_ipv6()),
+                    },
+                )
+            });
         // #7936: resolver telemetry is created HERE, by the coordinator, and
         // REUSED across restarts of this tunnel's control thread. Creating it
         // inside the thread would reset the counters on every self-heal
@@ -1150,6 +1169,7 @@ impl super::Coordinator {
                     outer_mtu,
                     thread_per_peer_outer_mtu,
                     endpoint_hosts,
+                    preferred_v6,
                     thread_resolver_telemetry,
                     recent_exceptions,
                     stop_clone,

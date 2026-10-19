@@ -160,6 +160,10 @@ pub(super) fn wg_control_loop(
     // resolver's last-good endpoint in place; the UDP socket itself remains
     // correctly bound. A VRF-aware resolver is a separate follow-up.
     endpoint_hosts: Vec<([u8; 32], String)>,
+    // #15101: address family of the interface's literal endpoints
+    // (`Some(true)` = IPv6 literals, `Some(false)` = IPv4, `None` =
+    // hostname-only), forwarded to the resolver as its A/AAAA tie-break.
+    preferred_v6: Option<bool>,
     // #7936: coordinator-owned resolver telemetry. Passed in rather than
     // created here for the same reason `recent_exceptions` is: this thread
     // writes it and the 1 Hz status path reads it, and the reader must not
@@ -258,8 +262,9 @@ pub(super) fn wg_control_loop(
     }
 
     // #7158: spawn the endpoint resolver HERE rather than at the supervisor,
-    // because it needs `socket_is_v6` to filter answers to the family this
-    // interface's single UDP socket can actually send from — and that is only
+    // because it needs `socket_is_v6` to know which answers the interface's
+    // single UDP socket can actually send to — the dual-stack socket takes
+    // both families, the v4 fallback only IPv4 (#15101) — and that is only
     // known once the bind above has chosen it (the v6 bind falls back to v4).
     //
     // Dropped when this function returns, which joins the thread, so the
@@ -268,6 +273,7 @@ pub(super) fn wg_control_loop(
         &tunnel_name,
         endpoint_hosts,
         socket_is_v6,
+        preferred_v6,
         // #7936: the telemetry object is the COORDINATOR's, cloned in here.
         // The resolver is a local of this thread and dies with it, which is
         // why #7158's counters never reached the status wire; handing it an

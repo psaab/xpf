@@ -364,10 +364,11 @@ func validateOneWireguardTunnel(tc *TunnelConfig) error {
 			// family between themselves.
 			//
 			// The family a hostname actually resolves to is enforced where it
-			// becomes knowable: the control thread's resolver keeps only
-			// answers matching the interface socket's family, and counts the
-			// ones it discards, so a name that resolves to the wrong family is
-			// visible rather than a silent no-initiate.
+			// becomes knowable: the dual-stack socket accepts both families
+			// (the dataplane maps A answers to the v4-mapped form on send),
+			// so only the v4-fallback socket discards answers — AAAA there —
+			// and counts them, so an unusable name is visible rather than a
+			// silent no-initiate.
 			//
 			// NOT `continue`: this block sits inside the per-peer loop, above
 			// the allowed-ips validation, so skipping the rest of the iteration
