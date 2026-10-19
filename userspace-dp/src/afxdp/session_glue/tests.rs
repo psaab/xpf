@@ -22209,3 +22209,230 @@ fn resync_and_promote_do_not_reemit_session_create_15126() {
         "#15126 CONTROL: an admission Open must still emit SESSION_CREATE"
     );
 }
+
+// #15251 (A75-02): a PPTP replacement whose FIRST-LEARN local install
+// collides with a not-yet-applied CDN forget must still be broadcast and
+// recorded for retry (with the drainer's own queue id as unsent), so the
+// backlog arm learns it on both workers once the forget lands. Pre-fix the
+// drain `continue`d on the local error: no broadcast, no record, and the
+// call was learned on no worker for its lifetime.
+fn run_first_learn_collision_backlog_15251() -> (Option<u32>, Option<u32>, usize, usize) {
+    use crate::session::pptp::{ControlChannelId, PptpCall};
+    use crate::session::pptp_control::{
+        PendingControlSegment, PptpControlInbox,
+        fixtures_7699::{call_disconnect_notify, outgoing_call_reply},
+    };
+
+    let (pac, pns): (IpAddr, IpAddr) = (
+        "198.51.100.7".parse().unwrap(),
+        "203.0.113.9".parse().unwrap(),
+    );
+    let control = ControlChannelId::new(pac, 1723, pns, 49152);
+    let old_call = PptpCall::new(pac, 0x1111, pns, 0x2222);
+    let replacement = PptpCall::new(pac, 0x1111, pns, 0x3333);
+    let replacement_handle = replacement.handle();
+    let queues: Vec<_> = (0..2)
+        .map(|_| Arc::new(Mutex::new(VecDeque::new())))
+        .collect();
+    let q_id = Arc::as_ptr(&queues[0]) as usize;
+    let x_id = Arc::as_ptr(&queues[1]) as usize;
+    let mut q_sessions = SessionTable::new();
+    let mut x_sessions = SessionTable::new();
+    q_sessions
+        .pptp_mut()
+        .install(old_call, control, 10)
+        .expect("old Q association");
+    x_sessions
+        .pptp_mut()
+        .install(old_call, control, 10)
+        .expect("old X association");
+    // Backlog on BOTH workers: X's own queue holds a not-yet-applied CDN
+    // forget (plus filler), Q's queue is non-empty too.
+    {
+        let mut x_pending = queues[1].lock().expect("X queue");
+        x_pending.push_back(WorkerCommand::ForgetPptpCallByControl(
+            crate::session::pptp::PptpCallDisconnect {
+                allocator: pac,
+                call_id: 0x1111,
+                control,
+                disconnected_ns: 20,
+            },
+        ));
+        x_pending.push_back(WorkerCommand::VacateAllSharedExactSlots);
+    }
+    {
+        let mut q_pending = queues[0].lock().expect("Q queue");
+        q_pending.push_back(WorkerCommand::VacateAllSharedExactSlots);
+    }
+
+    let inbox = PptpControlInbox::default();
+    // Phase 1: the CDN alone. X's own queue is non-empty, so the CDN arm
+    // queues its self-forget behind the backlog (FIFO) rather than
+    // applying it directly — the not-yet-applied CDN of the claim.
+    assert!(inbox.push(PendingControlSegment {
+        src: pac,
+        dst: pns,
+        src_port: 1723,
+        dst_port: 49152,
+        captured_ns: 20,
+        payload: call_disconnect_notify(0x1111),
+    }));
+    assert_eq!(
+        crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
+            &inbox,
+            &mut x_sessions,
+            Some(&queues[1]),
+            std::slice::from_ref(&queues[0]),
+            1_000_000_000,
+        ),
+        0
+    );
+    // X's own table still holds the old call here: the CDN segment arm
+    // queues its self-forget behind the non-empty own queue (FIFO), it
+    // does not apply directly. That queued forget is exactly the
+    // not-yet-applied CDN the replacement below collides with.
+    assert_eq!(
+        x_sessions.pptp().resolve(pac, 0x1111),
+        Some(old_call.handle())
+    );
+    assert_eq!(
+        q_sessions.pptp().resolve(pac, 0x1111),
+        Some(old_call.handle()),
+        "Q has not applied the CDN yet"
+    );
+    // Phase 2: the replacement reply alone. X's local install collides
+    // with the old call. Pre-fix: learned=0, nothing broadcast, nothing
+    // recorded. Post-fix: broadcast to Q + retry recorded with X unsent.
+    assert!(inbox.push(PendingControlSegment {
+        src: pac,
+        dst: pns,
+        src_port: 1723,
+        dst_port: 49152,
+        captured_ns: 30,
+        payload: outgoing_call_reply(0x1111, 0x3333, 1),
+    }));
+    let learned = crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
+        &inbox,
+        &mut x_sessions,
+        Some(&queues[1]),
+        std::slice::from_ref(&queues[0]),
+        2_000_000_000,
+    );
+    assert_eq!(
+        x_sessions.pptp().counters().allocator_collisions,
+        1,
+        "#15251 fixture: the first-learn must hit exactly one AllocatorCollision"
+    );
+    assert_eq!(learned, 0, "a colliding first-learn is not a local learn");
+    assert_eq!(
+        x_sessions.pptp().resolve(pac, 0x1111),
+        Some(old_call.handle()),
+        "the old association must survive until the CDN forget applies"
+    );
+    // The phase-1 CDN broadcast already queued a forget on Q; the
+    // replacement broadcast is published from the same drain and the
+    // recorded retry + final both-workers resolution below prove it
+    // was not dropped with the local error (pre-fix there is no retry
+    // and neither worker ever resolves the replacement).
+    assert!(
+        queues[0].lock().expect("Q queue").iter().any(|command| matches!(
+            command,
+            WorkerCommand::ForgetPptpCallByControl(_)
+        )),
+        "#15251: fixture: Q must hold the phase-1 CDN broadcast"
+    );
+    // And a retry must be recorded with X's own queue id unsent.
+    let retries = inbox.take_call_install_retries(3_500_000_000);
+    assert!(
+        retries.iter().any(|retry| retry.call == replacement
+            && retry.unsent_queue_ids.contains(&x_id)),
+        "#15251: first-learn failure recorded no own-queue retry: {retries:?}"
+    );
+
+    let session_map = SteeringMap::unshared_for_test(-1);
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut scratch = VecDeque::new();
+    let mut apply_queue = |queue: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+                           sessions: &mut SessionTable| {
+        apply_worker_commands(
+            queue,
+            sessions,
+            session_map,
+            -1,
+            -1,
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            0,
+            &mut scratch,
+        )
+    };
+    // Apply X's queued CDN (frees the alias on X), then let retries run.
+    loop {
+        let result = apply_queue(&queues[1], &mut x_sessions);
+        if !result.commands_backlogged {
+            break;
+        }
+    }
+    assert_eq!(x_sessions.pptp().resolve(pac, 0x1111), None);
+    for secs in [5u64, 6, 7] {
+        crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
+            &inbox,
+            &mut x_sessions,
+            Some(&queues[1]),
+            std::slice::from_ref(&queues[0]),
+            secs * 1_000_000_000,
+        );
+        loop {
+            let result = apply_queue(&queues[0], &mut q_sessions);
+            if !result.commands_backlogged {
+                break;
+            }
+        }
+        loop {
+            let result = apply_queue(&queues[1], &mut x_sessions);
+            if !result.commands_backlogged {
+                break;
+            }
+        }
+    }
+    let _ = replacement_handle;
+    let pending_installs = inbox
+        .take_call_install_retries(100_000_000_000)
+        .iter()
+        .filter(|retry| {
+            retry.unsent_queue_ids.contains(&q_id) || retry.unsent_queue_ids.contains(&x_id)
+        })
+        .count();
+    (
+        q_sessions.pptp().resolve(pac, 0x1111),
+        x_sessions.pptp().resolve(pac, 0x1111),
+        pending_installs,
+        learned,
+    )
+}
+
+#[test]
+fn first_learn_collision_backlog_learns_replacement_on_both_workers_15251() {
+    let (q_res, x_res, pending, learned) = run_first_learn_collision_backlog_15251();
+    let (pac, pns): (IpAddr, IpAddr) = (
+        "198.51.100.7".parse().unwrap(),
+        "203.0.113.9".parse().unwrap(),
+    );
+    let replacement_handle =
+        crate::session::pptp::PptpCall::new(pac, 0x1111, pns, 0x3333).handle();
+    assert_eq!(learned, 0);
+    assert_eq!(
+        q_res,
+        Some(replacement_handle),
+        "#15251: peer worker never learned the replacement after a first-learn collision"
+    );
+    assert_eq!(
+        x_res,
+        Some(replacement_handle),
+        "#15251: draining worker never learned the replacement after its CDN forget applied"
+    );
+    assert_eq!(pending, 0, "#15251: install retry must clear after both workers learn");
+}

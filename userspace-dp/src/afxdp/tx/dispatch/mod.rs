@@ -1045,6 +1045,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
 
         // Fast path: prebuilt frame (e.g. ICMP error NAT reversal).
         // The frame is already fully rewritten — just enqueue for TX.
+        let mirror_sample_counter_pre = ingress_binding.mirror_sample_counter;
         if let PendingForwardFrame::Prebuilt(prebuilt) = &mut request.frame {
             // #1946: a Prebuilt frame (e.g. an embedded-ICMP NAT-reversed
             // error) can carry a FabricRedirect resolution
@@ -1084,6 +1085,10 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 recycle_ingress_frame(ingress_binding, source_offset, now_ns);
                 continue;
             };
+            // Clone BEFORE `core::mem::take` in the TxRequest below
+            // consumes the Vec — the mirror clone must carry the
+            // rewritten wire frame, not the emptied buffer.
+            let mirror_frame = prebuilt.clone();
             let frame_len = prebuilt.len();
             let req = TxRequest {
                 bytes: core::mem::take(prebuilt),
@@ -1098,6 +1103,18 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 overlap_admissions: overlap_admissions.take(),
                 enqueue_ns: 0,
             };
+            // #15251 (A75-04): a successfully enqueued Prebuilt transit
+            // frame (embedded-ICMP NAT reversal, incl. NAT64) must also be
+            // port-mirrored like Live/Owned frames. Stage/commit here,
+            // after the enqueue succeeds, honouring sampling and the
+            // analyzer output filter (inside commit). The frame bytes are
+            // the already-rewritten wire frame, so meta/flow_key from the
+            // request describe it (flow_key is None for flowless errors,
+            // which mirror_output_filter_drops handles fail-closed on
+            // port terms). Clone before enqueue consumes the Vec.
+            let mirror_meta = request.meta;
+            let mirror_flow_key = request.flow_key.clone();
+            let mirror_sample_counter = mirror_sample_counter_pre;
             if enqueue_local_request_to_target_or_owner(target_binding, req).is_err() {
                 if prebuilt_is_fabric_redirect {
                     ingress_live
@@ -1122,6 +1139,29 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
             dbg.tx_bytes_total += frame_len as u64;
             if (frame_len as u32) > dbg.tx_max_frame {
                 dbg.tx_max_frame = frame_len as u32;
+            }
+            if let Some(staged) = stage_sampled_mirror_clone(
+                forwarding,
+                mirror_meta.ingress_ifindex as i32,
+                mirror_meta.ingress_vlan_id,
+                mirror_sample_counter,
+                &mirror_frame,
+                mirror_meta,
+                mirror_flow_key.as_ref(),
+            ) {
+                commit_staged_mirror_clone(
+                    left,
+                    ingress_index,
+                    ingress_binding,
+                    right,
+                    binding_lookup,
+                    mirror_targets,
+                    forwarding,
+                    request.ingress_queue_id,
+                    staged,
+                    &mirror_frame,
+                    now_ns,
+                );
             }
             recycle_ingress_frame(ingress_binding, source_offset, now_ns);
             continue;
