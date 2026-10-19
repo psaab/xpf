@@ -76,23 +76,32 @@ func deriveFQDN(hostName, clientFQDN, identity, domain, source string) (string, 
 	return finalizeFQDN(name, domain)
 }
 
-// finalizeFQDN turns an offered name into a validated FQDN that is ALWAYS
-// contained in the configured zone (plan §4.3 + the never-publish-outside-
-// the-zone boundary). The client supplies the name; the firewall — not the
-// client — decides the zone, so a dotted name can never let a client escape
-// the configured domain:
+// finalizeFQDN turns an offered name into a validated FQDN that is ALWAYS a
+// single-label name directly under the configured zone (plan §4.3 + the
+// never-publish-outside-the-zone boundary). The client supplies the name;
+// the firewall — not the client — decides the zone. #14996 (D40-02): an
+// unprivileged DHCP client must never claim the zone apex itself or a
+// multi-label name inside the zone — both let one client publish A/AAAA
+// for names that do not belong to its single host (a delegated/customer
+// subdomain, a service name, or the apex), so the provider leg below
+// relabels them instead of rejecting the lease outright:
 //
 //   - No domain configured: only the FIRST label of the offered name is
 //     kept (a dotted name has no zone to be contained in, so we refuse to
 //     publish the client-supplied suffix). The result is a bare label.
-//   - Domain configured, dotted name already within the zone (its sanitized
-//     form ends in ".<domain>" or equals the domain's host part): keep it
-//     as-is (e.g. host.sub.example.com under example.com).
-//   - Domain configured, dotted name OUTSIDE the zone (foreign TLD, trailing
-//     dot escapes, double-dot, etc.): take only the FIRST sanitized label of
-//     the offered name and re-append the configured domain, so the published
-//     name is forced back inside the zone (relabel, never reject — a usable
-//     name is still derived).
+//   - Domain configured, name equals the domain (zone apex, e.g. a client
+//     claiming "example.com" under example.com): never publish the apex;
+//     relabel to <first-label>.<domain> ("example.example.com").
+//   - Domain configured, name carries MORE than one label before the
+//     domain (e.g. "host.sub.example.com", "www.example.com" is fine but
+//     "a.b.example.com" is not): take only the FIRST sanitized label and
+//     re-append the configured domain ("a.example.com").
+//   - Domain configured, dotted name OUTSIDE the zone (foreign TLD,
+//     trailing dot escapes, double-dot, etc.): same first-label relabel,
+//     so the published name is forced back inside the zone (relabel,
+//     never reject — a usable name is still derived).
+//   - Domain configured, single label directly under the domain (its
+//     sanitized form is exactly "<label>.<domain>"): keep it as-is.
 func finalizeFQDN(name, domain string) (string, error) {
 	name = strings.TrimSuffix(strings.TrimSpace(name), ".")
 
@@ -107,11 +116,12 @@ func finalizeFQDN(name, domain string) (string, error) {
 	}
 
 	if strings.Contains(name, ".") {
-		// Sanitize the full dotted name, then enforce zone containment. A
-		// name that does not land inside the configured domain is relabeled
-		// to <first-label>.<domain> rather than published outside the zone.
+		// Sanitize the full dotted name, then admit it ONLY when it is
+		// exactly one label directly under the configured domain (#14996).
+		// The zone apex (name == domain) and any multi-label descendant
+		// ("a.b.<domain>") fall through to the single-label relabel.
 		fqdn := sanitizeFQDN(name)
-		if fqdn != "" && fqdnWithinDomain(fqdn, domain) {
+		if fqdn != "" && fqdnDirectChildOfDomain(fqdn, domain) {
 			return fqdn, nil
 		}
 		lbl := firstSanitizedLabel(name)
@@ -128,16 +138,24 @@ func finalizeFQDN(name, domain string) (string, error) {
 	return joinLabelDomain(lbl, domain)
 }
 
-// fqdnWithinDomain reports whether the already-sanitized name is contained
-// in the (already-sanitized) configured domain: either it equals the domain
-// exactly (the zone apex) or it is a subdomain of it (ends in ".<domain>").
-// Both inputs are lower-case sanitized LDH forms, so a plain suffix compare
-// on label boundaries is sufficient and safe.
-func fqdnWithinDomain(name, domain string) bool {
+// fqdnDirectChildOfDomain reports whether the already-sanitized name is
+// exactly one label directly under the (already-sanitized) configured
+// domain: "<label>.<domain>" with no further dots in the label part. It
+// deliberately returns false for the zone apex itself (name == domain)
+// and for multi-label descendants ("a.b.<domain>") so an unprivileged
+// DHCP client can claim neither (#14996, D40-02). Both inputs are
+// lower-case sanitized LDH forms, so a plain suffix compare on label
+// boundaries is sufficient and safe.
+func fqdnDirectChildOfDomain(name, domain string) bool {
 	if name == domain {
-		return true
+		return false
 	}
-	return strings.HasSuffix(name, "."+domain)
+	suffix := "." + domain
+	if !strings.HasSuffix(name, suffix) {
+		return false
+	}
+	label := name[:len(name)-len(suffix)]
+	return label != "" && !strings.Contains(label, ".")
 }
 
 // firstSanitizedLabel returns the first label of a (possibly dotted) name

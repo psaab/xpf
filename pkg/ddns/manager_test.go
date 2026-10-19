@@ -147,11 +147,11 @@ func TestDeriveFQDN(t *testing.T) {
 	}{
 		{"plain host + domain", "laptop", "", "mac:aa", "example.com", "client-hostname", "laptop.example.com", false},
 		{"uppercase sanitized", "LapTop", "", "mac:aa", "example.com", "client-hostname", "laptop.example.com", false},
-		{"already fqdn passes through", "host.sub.example.com", "", "mac:aa", "example.com", "client-hostname", "host.sub.example.com", false},
+		{"dotted claim relabeled to single label (#14996)", "host.sub.example.com", "", "mac:aa", "example.com", "client-hostname", "host.example.com", false},
 		{"illegal chars stripped", "my_host!*", "", "mac:aa", "example.com", "client-hostname", "myhost.example.com", false},
 		{"no name no domain errors", "", "", "mac:aa", "example.com", "client-hostname", "", true},
 		{"fqdn source prefers client fqdn (relabeled into zone)", "ignored", "real.example.org", "mac:aa", "example.com", "fqdn", "real.example.com", false},
-		{"fqdn within zone kept", "ignored", "real.dept.example.com", "mac:aa", "example.com", "fqdn", "real.dept.example.com", false},
+		{"fqdn multi-label relabeled (#14996)", "ignored", "real.dept.example.com", "mac:aa", "example.com", "fqdn", "real.example.com", false},
 		{"mac-fallback synthesizes", "", "", "mac:aabbccddeeff", "example.com", "mac-fallback", "dhcp-macaabbccddeeff.example.com", false},
 		{"bare label no domain", "host", "", "mac:aa", "", "client-hostname", "host", false},
 	}
@@ -220,13 +220,22 @@ func TestDeriveFQDNEnforcesZoneContainment(t *testing.T) {
 		})
 	}
 
-	// A within-zone dotted name is preserved verbatim (no needless relabel).
+	// A within-zone MULTI-label name is no longer preserved verbatim
+	// (#14996, D40-02): it is relabeled to its first label under the zone.
 	got, err := deriveFQDN("host.dept.corp.example.com", "", "mac:aa", domain, "client-hostname")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "host.dept.corp.example.com" {
-		t.Fatalf("within-zone name relabeled: %q", got)
+	if got != "host.corp.example.com" {
+		t.Fatalf("multi-label within-zone name not relabeled to single label: %q", got)
+	}
+	// A within-zone SINGLE-label name is preserved verbatim.
+	got, err = deriveFQDN("host.corp.example.com", "", "mac:aa", domain, "client-hostname")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "host.corp.example.com" {
+		t.Fatalf("single-label within-zone name relabeled: %q", got)
 	}
 }
 
