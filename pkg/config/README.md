@@ -2185,8 +2185,17 @@ names. Both rules apply only to `security-zone` statements directly under
   the wildcard merge visited only non-leaf destinations, so
   `security-zone trust;` lost a group's screen that `security-zone trust { }`
   took.
+- A brace-elided interface instance (`ge-0/0/0 unit 0 family inet
+  address A;`, a packed leaf under `interfaces`) is promoted to its
+  braced shape before group merge (#15032,
+  `group_merge_interface_packed_15032.go`): a `<*>` group then binds
+  by interface name and an exact-name group container merges into it
+  instead of twinning it (the compiler's last-wins map assignment
+  previously kept only the group twin and lost the inline address).
+  A bare `ge-0/0/0;` has no tail to expand and stays a leaf for the
+  #9838 refusal; an unexpandable tail is left as authored.
 - Every other named instance keeps the keyword override. An interface or
-  routing instance written as a leaf compiles no instance at all (#9838). A
+  routing instance written as a bare leaf compiles no instance at all (#9838). A
   schema-generic identity rule was tried and withdrawn. It compiled a
   duplicate next hop for a value list (`next-hop [ a b ]`), misclassified
   `multi` named containers such as `class-of-service schedulers`, and split

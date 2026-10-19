@@ -904,6 +904,15 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			}
 			// Wildcard merge: apply to all matching containers in dst.
 			for _, d := range *dst {
+				// #15032: a brace-elided interface instance is a packed
+				// leaf; promote it to its braced shape first so the
+				// wildcard can bind by name as it does for the braced
+				// spelling. Bare leaves have no tail and stay for #9838.
+				if interfacePackedLeaf15032(ancestorPath, d) &&
+					keysMatchWildcard([]string{d.Keys[0]}, s.Keys) {
+					promoteInterfacePackedLeaf15032(d)
+					budget.notePromoted9855(d)
+				}
 				matches := keysMatchWildcard(d.Keys, s.Keys)
 				if !matches && zoneLeafHasApplyMacroTail13112(d) && len(s.Keys) == 2 {
 					matches = keysMatchWildcard(d.Keys[:2], s.Keys)
@@ -1088,6 +1097,11 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 		// without the group. The wildcard-keyed children go to every
 		// same-keyed container, because each may hold different instances;
 		// the rest go to the one that can receive them.
+		// #15032: promote a brace-elided interface instance in dst to
+		// its braced shape so an exact-name group container finds it
+		// instead of twinning it (compiler last-wins then lost the
+		// inline address).
+		promoteInterfacePackedLeaves15032(ancestorPath, *dst, budget)
 		found := false
 		if targets := sameKeyedContainers9802(*dst, s.Keys); len(targets) > 0 {
 			wild, rest := splitWildcardChildren9802(s.Children)
