@@ -665,8 +665,6 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 		return nil, schedulerWindowErr11358
 	}
 
-	usedNodeFallback := false
-
 	// Expand groups before compilation — resolve all apply-groups references.
 	// TAGGED (#9854): inherited nodes carry InheritedFrom so the syslog host
 	// coalescing can preserve apply-groups precedence (an inline explicit
@@ -675,28 +673,22 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	// above, never the caller's tree, and no reader except that coalescing
 	// (plus `| display inheritance`, which re-derives them on its own clone)
 	// branches on them — plain Format/validators never see them.
-	if err := tree.ExpandGroupsTagged(); err != nil {
-		if strings.Contains(err.Error(), `undefined group "${node}"`) {
-			vars := map[string]string{"node": "node0"}
-			if err2 := tree.ExpandGroupsWithVarsTagged(vars); err2 != nil {
-				return nil, fmt.Errorf("apply-groups: %w", err2)
-			}
-			usedNodeFallback = true
-		} else {
-			return nil, fmt.Errorf("apply-groups: %w", err)
-		}
+	//
+	// #15031: expand exactly once for the generic compile. A plain pass
+	// that fails midway on an undefined "${node}" group has already
+	// partially merged the tree, so retrying with node=node0 vars on
+	// that same tree drops the earlier groups' provenance and can
+	// accept a default-policy conflict the fresh node0 compile rejects.
+	fellBack, expandErr := tree.ExpandGroupsNodeFallback15031(true)
+	if expandErr != nil {
+		return nil, fmt.Errorf("apply-groups: %w", expandErr)
 	}
+	usedNodeFallback := fellBack
 	dupMergeWarnings = resolveDuplicateBlockMergeWarnings9023(tree, registeredMerges, dupMergeWarnings)
 
 	if expandedPolicySourceTree != nil {
-		if err := expandedPolicySourceTree.ExpandGroupsTagged(); err != nil {
-			if strings.Contains(err.Error(), `undefined group "${node}"`) {
-				err = expandedPolicySourceTree.ExpandGroupsWithVarsTagged(
-					map[string]string{"node": "node0"})
-			}
-			if err != nil {
-				return nil, fmt.Errorf("apply-groups: %w", err)
-			}
+		if _, err := expandedPolicySourceTree.ExpandGroupsNodeFallback15031(true); err != nil {
+			return nil, fmt.Errorf("apply-groups: %w", err)
 		}
 		expandedConflicts := collectDirectTerminalActionConflictsFromExpandedTree(
 			expandedPolicySourceTree)
