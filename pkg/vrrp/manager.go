@@ -1583,6 +1583,20 @@ func openAfPacketReceiver(ifIndex int) (int, error) {
 		slog.Debug("vrrp: failed to set allmulti", "err", err)
 	}
 
+	// Request PACKET_AUXDATA so recvmsg also delivers the VLAN TCI the
+	// kernel stripped into skb metadata (#15049). Without it a stripped
+	// 802.1Q tag is invisible to userspace: the frame arrives on the
+	// parent's ETH_P_ALL tap looking native, and a same-VRID sibling
+	// election on a tagged unit drives the untagged unit's instance.
+	// receiverAfPacket drops such frames on non-VLAN netdevs. Best-effort
+	// like PACKET_IGNORE_OUTGOING above: an old kernel that refuses the
+	// option keeps working, and the auxdata parser fails open (no cmsg ==
+	// not proven tagged) rather than deafening the native election.
+	if err := afPacketSetsockoptInt(fd, unix.SOL_PACKET, unix.PACKET_AUXDATA, 1); err != nil {
+		slog.Debug("vrrp: PACKET_AUXDATA unavailable; stripped-VLAN sibling frames cannot be filtered",
+			"ifindex", ifIndex, "err", err)
+	}
+
 	// cBPF prefilter: accept VRRP for untagged + single-tag {802.1Q, 802.1ad}
 	// variants (#5088). Built by vrrpCBPFFilter so the exact instruction array
 	// the kernel runs can be exercised against synthetic frames in a bpf.VM.
