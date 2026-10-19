@@ -443,15 +443,21 @@ func (m *Manager) RestoreShrinkHighWater(records []ShrinkHighWater) {
 		var hash [32]byte
 		copy(hash[:], raw)
 		hist := feedShrinkHistory{highWaterCount: record.Count, highWaterHash: hash}
-		// #14395 epoch content: accept only a canonical set whose digest
-		// matches the record hash, bounded by the feed entry cap. A corrupt
-		// or mismatched set is dropped (count epoch still restores; the
-		// content epoch then re-bootstraps with the usual audit warning).
+		// #14395 epoch content: accept only a canonical set, bounded by
+		// the feed entry cap. The set's digest is its own epoch hash: it
+		// need NOT equal the record Hash, which is the count high-water
+		// hash (the largest installed set, which an ordinary rotation may
+		// have advanced past the epoch set — #14994: requiring equality
+		// silently dropped every restored epoch whose high-water had
+		// moved, leaving churn unanchored on cold restart). A corrupt
+		// (non-canonical) set is dropped; the count epoch still restores
+		// and the content epoch then re-bootstraps under the #14994
+		// remembered-baseline guard.
 		if len(record.Prefixes) > 0 && len(record.Prefixes) <= maxFeedPrefixes {
 			canon := canonicalize(append([]string(nil), record.Prefixes...))
-			if len(canon) == len(record.Prefixes) && hashPrefixes(canon) == hash {
+			if len(canon) == len(record.Prefixes) {
 				hist.epochPrefixes = canon
-				hist.epochHash = hash
+				hist.epochHash = hashPrefixes(canon)
 			}
 		}
 		m.shrinkHistory[record.Name] = hist
@@ -2105,16 +2111,21 @@ func thresholdsForFeed(fs *feedState) shrinkGuardThresholds {
 // the apply. The retry fires on the normal refresh cadence (one publish attempt
 // per fetch), never a tight loop.
 // The shrink guard compares counts with the per-feed epoch high-water baseline
-// and also checks retained exact-prefix overlap with the current last-good set.
-// Refusals retain the installed set, mark stale, alarm, and publish nothing
-// until the exact candidate is acknowledged. Bootstrap is installable; a
-// same-manager re-created feed with fewer prefixes or changed same-sized
-// content is installed with an audit warning instead of a silent bootstrap.
-// A hold-interval drop does not release the refusal (#12882): the exact
-// refused candidate re-served after the drop is refused again (previous-good
-// enforcement persists via the omitted-binding preflight) until its exact
-// acknowledgement lands; a different candidate follows the bootstrap rule
-// above and its install clears the refusal.
+// and also checks retained exact-prefix overlap with the epoch content set.
+// Refusals retain the installed set (or, with no live snapshot, install
+// nothing), mark stale, alarm, and publish nothing until the exact candidate
+// is acknowledged. A true bootstrap (no remembered baseline) is installable;
+// a feed with no live snapshot but a remembered baseline — cold restart,
+// same-manager re-created, or post-hold-drop (#14994) — is NOT a true
+// bootstrap: a candidate that trips the remembered shrink/churn guards is
+// refused awaiting ack, and only a candidate at or above those floors
+// installs, with the bootstrap audit warning when it differs from the
+// remembered high-water. A hold-interval drop does not release the refusal
+// (#12882): the exact refused candidate re-served after the drop is refused
+// again (previous-good enforcement persists via the omitted-binding
+// preflight) until its exact acknowledgement lands; a different candidate
+// follows the #14994 remembered-baseline rule above and a successful
+// install clears the refusal.
 func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	m.mu.Lock()
 	// Staleness suppress (#9916 F-133): Apply swaps the producer set without
@@ -2157,6 +2168,20 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 		(fs.holdDropped && feedPublicationDebt(fs)) || fs.publishUnconfirmed
 	oldCount := len(fs.prefixes)
 	baselineHash := fs.hash
+	// #14994 (D39-01): a feed with no live snapshot but a remembered
+	// shrink baseline — cold restart (RestoreShrinkHighWater), same-manager
+	// delete/re-add (shrinkHistory via Apply), or post-hold-drop — is not a
+	// true bootstrap. Its first candidate is compared with the remembered
+	// high-water count/hash and, when restored, the remembered epoch
+	// content set, and a candidate that trips those guards is refused
+	// awaiting the exact acknowledgement exactly as a candidate over a
+	// live snapshot is. Comparing against that remembered baseline must
+	// not rebase it on growth before acknowledgement (#14395): the epoch
+	// non-rebase on ordinary growth is intentional and unchanged.
+	hasRememberedBaseline := !fs.hasSnapshot && fs.shrinkHighWaterCount > 0
+	if hasRememberedBaseline {
+		baselineHash = fs.shrinkHighWaterHash
+	}
 	if fs.hasSnapshot && fs.shrinkHighWaterCount == 0 {
 		fs.shrinkHighWaterCount = oldCount
 		fs.shrinkHighWaterHash = fs.hash
@@ -2166,7 +2191,7 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	if highWaterCount == 0 {
 		highWaterCount = oldCount
 	}
-	shrinkTripped := fs.hasSnapshot && fs.hash != res.hash &&
+	shrinkTripped := (fs.hasSnapshot || hasRememberedBaseline) && baselineHash != res.hash &&
 		shrinkGuardTrippedWithThresholds(highWaterCount, len(res.prefixes), thresholds)
 	// #14395: churn is measured against the EPOCH baseline, not the
 	// immediate predecessor. A 51%-retained rotation installs (51% of the
@@ -2174,12 +2199,13 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	// rotation retaining <50% of the epoch is refused even though it
 	// retains 51% of its predecessor. Fall back to fs.prefixes only while
 	// no epoch exists (snapshot predating the epoch field; the first
-	// install below then establishes the epoch).
+	// install below then establishes the epoch). On a no-snapshot feed
+	// the remembered epoch (when restored) is that baseline (#14994).
 	churnBaseline := fs.epochContentPrefixes
 	if len(churnBaseline) == 0 {
 		churnBaseline = fs.prefixes
 	}
-	churnTripped := fs.hasSnapshot &&
+	churnTripped := (fs.hasSnapshot || len(fs.epochContentPrefixes) > 0) &&
 		contentChurnTripped(churnBaseline, res.prefixes, thresholds)
 	epochChurnTripped := churnTripped && len(fs.epochContentPrefixes) > 0
 	bootstrapDiffersFromHighWater := !fs.hasSnapshot && fs.shrinkHighWaterCount > 0 &&
@@ -2187,12 +2213,13 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 		(len(res.prefixes) < fs.shrinkHighWaterCount || res.hash != fs.shrinkHighWaterHash)
 	// #12882: an outstanding refusal SURVIVES a hold-interval drop, so the
 	// exact refused candidate cannot return as an unacknowledged bootstrap.
-	// With no live snapshot the trip predicates above have nothing to compare
-	// against, so the pin matches the fetch against the remembered candidate
-	// tuple and anchors its baseline hash and old count on that tuple rather
-	// than the emptied installed state. A different candidate is NOT pinned:
-	// it takes the ordinary bootstrap path (audited against the remembered
-	// high-water) and a successful install clears the refusal, as before.
+	// The pin matches the fetch against the remembered candidate tuple and
+	// anchors its baseline hash and old count on that tuple rather than the
+	// emptied installed state. A different candidate is NOT pinned by this
+	// tuple, but under #14994 it is still compared with the remembered
+	// high-water/epoch above: only a candidate at or above those floors
+	// takes the bootstrap-with-audit path (and clears the refusal); a
+	// tripping candidate is refused as a fresh candidate, as before a drop.
 	refusedAfterDrop := !fs.hasSnapshot && fs.shrinkRefused &&
 		res.hash == fs.shrinkCandidateHash &&
 		len(res.prefixes) == fs.shrinkCandidateNewCount
@@ -2235,7 +2262,7 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 		baselineHash = fs.shrinkBaselineHash
 		candidateOldCount = fs.shrinkCandidateOldCount
 	}
-	if (fs.hasSnapshot && (shrinkTripped || churnTripped)) || refusedAfterDrop {
+	if shrinkTripped || churnTripped || refusedAfterDrop {
 		newCount := len(res.prefixes)
 		if fs.shrinkAckMatches(res.hash, baselineHash, candidateOldCount, newCount) {
 			guardBypass = true
@@ -2330,15 +2357,20 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 		fs.shrinkHighWaterCount = newCount
 		fs.shrinkHighWaterHash = res.hash
 	}
-	// #14395 epoch rebase: ONLY bootstrap (first install) or an
-	// acknowledged (guardBypass) install moves the content epoch. An
+	// #14395 epoch rebase: ONLY a true bootstrap (no remembered baseline)
+	// or an acknowledged (guardBypass) install moves the content epoch. An
 	// ordinary unacknowledged install — including equal-count rotations
 	// that pass the epoch floor — never rebases, so cumulative rotation
-	// cannot boil the frog. When the epoch rebases on acknowledgement,
-	// the count high-water rebases with it to the acknowledged set
-	// (mirrors the existing acknowledged-shrink epoch semantics).
+	// cannot boil the frog. The same non-rebase applies to growth on a
+	// remembered-baseline feed (#14994): comparing a growing candidate
+	// against the restored epoch must not move shrinkHighWaterHash/
+	// epochContentPrefixes ahead of that epoch before acknowledgement
+	// (#14395 intentional non-rebase on growth, preserved). When the epoch
+	// rebases on acknowledgement, the count high-water rebases with it to
+	// the acknowledged set (mirrors the existing acknowledged-shrink epoch
+	// semantics).
 	epochRebased := false
-	if wasBootstrap || guardBypass {
+	if (wasBootstrap && !hasRememberedBaseline) || guardBypass {
 		fs.epochContentPrefixes = append([]string(nil), res.prefixes...)
 		fs.epochContentHash = res.hash
 		epochRebased = true

@@ -82,27 +82,49 @@ func TestFeedShrinkHighWaterSurvivesColdDaemonRestart11755(t *testing.T) {
 	previousLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	// Superseded by #14994 (D39-01): the cold-boot 50000→500 candidate now
+	// trips the restored shrink guard and is refused (0 prefixes, refusal
+	// audit) instead of installing 500 with only a bootstrap audit warning.
+	// The durable restore itself (records above, high-water tuple below) is
+	// unchanged; only the bootstrap-install expectation changed.
 	second := newDaemon()
 	second.reconcileFeeds(cfg)
-	waitForPrefixes(second, 500)
+	waitForRefusal := func() {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if info, ok := second.feeds.AllFeeds()["cold-boot-feed"]; ok && info.ShrinkRefused {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatalf("cold-boot shrink was not refused: status=%+v logs:\n%s", second.feeds.AllFeeds()["cold-boot-feed"], logs.String())
+	}
+	waitForRefusal()
+	if got := len(second.feeds.GetPrefixes("cold-boot-feed")); got != 0 {
+		t.Fatalf("cold-boot drastic shrink installed %d prefixes, want 0 (refused, #14994)", got)
+	}
 	secondInfo := second.feeds.AllFeeds()["cold-boot-feed"]
 	if secondInfo.ShrinkGuardHighWaterCount != 50_000 || secondInfo.ShrinkGuardHighWaterHash != firstInfo.ShrinkGuardHighWaterHash {
 		t.Fatalf("cold daemon restart lost the epoch high-water: first=%+v second=%+v", firstInfo, secondInfo)
+	}
+	if secondInfo.ShrinkCandidateOldCount != 50_000 || secondInfo.ShrinkCandidateNewCount != 500 {
+		t.Fatalf("cold-boot refusal did not bind restored tuple: %+v", secondInfo)
 	}
 	waitForAuditWarning := func() string {
 		t.Helper()
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
 			captured := logs.String()
-			if strings.Contains(captured, "bootstrap below or changed from remembered high-water") {
+			if strings.Contains(captured, "drastic shrink REFUSED") {
 				return captured
 			}
 			time.Sleep(time.Millisecond)
 		}
 		return logs.String()
 	}
-	if !strings.Contains(waitForAuditWarning(), "bootstrap below or changed from remembered high-water") {
-		t.Fatalf("cold-boot shrink comparison emitted no audit warning:\n%s", logs.String())
+	if !strings.Contains(waitForAuditWarning(), "drastic shrink REFUSED") {
+		t.Fatalf("cold-boot shrink comparison emitted no refusal audit:\n%s", logs.String())
 	}
 }
 
