@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sort"
 	"syscall"
 	"time"
 
@@ -304,29 +305,35 @@ func (d *Daemon) addStableRethLinkLocal(rgID int) {
 		if owns, ok := rgOwners[ifName]; !ok || owns != rgID {
 			continue
 		}
-		// Skip interfaces with an explicitly configured link-local address —
-		// the user's configured LL replaces the auto-generated stable LL.
-		if rethUnitHasConfiguredLinkLocal(ifc, 0) {
-			slog.Debug("skipping stable LL (explicit LL configured)", "iface", ifName)
-			continue
-		}
+		// Per-unit (#15684): a configured link-local on one unit replaces the
+		// stable LL on THAT unit only. The pre-fix unit-0-only predicate
+		// suppressed the stable LL on every VLAN unit when unit 0 carried
+		// one, and added it on top of a VLAN unit's own configured LL.
 		physName := ifc.Name
 		if phys, ok := rethToPhys[ifc.Name]; ok {
 			physName = phys
 		}
 		linuxName := config.LinuxIfName(physName)
-		addStableLLToInterface(linuxName, stableLL)
+		if !rethUnitHasConfiguredLinkLocal(ifc, 0) {
+			addStableLLToInterfaceFn(linuxName, stableLL)
+		} else {
+			slog.Debug("skipping stable LL on unit 0 (explicit LL configured)", "iface", ifName)
+		}
 		for unitNum := range ifc.Units {
 			if unitNum > 0 && rethUnitHasIPv6(ifc, unitNum) {
 				unit := ifc.Units[unitNum]
 				if unit == nil { // #6780
 					continue
 				}
+				if rethUnitHasConfiguredLinkLocal(ifc, unitNum) {
+					slog.Debug("skipping stable LL on VLAN unit (explicit LL configured)", "iface", ifName, "unit", unitNum)
+					continue
+				}
 				subIface := linuxName
 				if unit.VlanID > 0 {
 					subIface = fmt.Sprintf("%s.%d", linuxName, unit.VlanID)
 				}
-				addStableLLToInterface(subIface, stableLL)
+				addStableLLToInterfaceFn(subIface, stableLL)
 			}
 		}
 	}
@@ -381,7 +388,7 @@ func (d *Daemon) removeStableRethLinkLocal(rgID int) {
 			physName = phys
 		}
 		linuxName := config.LinuxIfName(physName)
-		removeStableLLFromInterface(linuxName, stableLL)
+		removeStableLLFromInterfaceFn(linuxName, stableLL)
 		for unitNum := range ifc.Units {
 			if unitNum > 0 {
 				unit := ifc.Units[unitNum]
@@ -392,7 +399,7 @@ func (d *Daemon) removeStableRethLinkLocal(rgID int) {
 				if unit.VlanID > 0 {
 					subIface = fmt.Sprintf("%s.%d", linuxName, unit.VlanID)
 				}
-				removeStableLLFromInterface(subIface, stableLL)
+				removeStableLLFromInterfaceFn(subIface, stableLL)
 			}
 		}
 	}
@@ -490,6 +497,15 @@ var (
 	directGARPBurstFn    = cluster.SendGratuitousARPBurstGated
 	directNABurstFn      = cluster.SendGratuitousIPv6BurstGated
 	directProxyNABurstFn = cluster.SendProxyGratuitousIPv6BurstGated
+)
+
+// addStableLLToInterfaceFn / removeStableLLFromInterfaceFn are the netlink
+// side-effect seams for the stable link-local add/remove decisions. They are
+// package vars so a test can drive addStableRethLinkLocal /
+// removeStableRethLinkLocal without real netlink (#15684).
+var (
+	addStableLLToInterfaceFn      = addStableLLToInterface
+	removeStableLLFromInterfaceFn = removeStableLLFromInterface
 )
 
 // directARPProbeFn is the supplementary gateway ARP-probe sender used by
@@ -629,10 +645,11 @@ func (d *Daemon) directSendGARPs(rgID int) {
 		}
 	}
 
-	// Send NA burst for router link-local so hosts update neighbor cache for
-	// the router identity (not just VIPs). Uses the explicitly configured
-	// link-local if present, otherwise the auto-generated stable LL.
-	// Send on base interface AND all VLAN sub-interfaces (separate L2 domains).
+	// Per-unit router link-local NA (#15684): each unit announces its own
+	// configured link-local if present, otherwise the stable LL — never
+	// unit 0's address on a VLAN sub-interface. A unit with no IPv6 gets no
+	// NA at all; the pre-fix code announced unit 0's LL on every VLAN
+	// sub-interface, including IPv4-only units.
 	if cfg.Chassis.Cluster != nil {
 		stableLL := cluster.StableRethLinkLocal(cfg.Chassis.Cluster.ClusterID, rgID)
 		rethToPhys := cfg.RethToPhysical()
@@ -645,44 +662,43 @@ func (d *Daemon) directSendGARPs(rgID int) {
 			if owns, ok := rgOwners[ifName]; !ok || owns != rgID { // #6781
 				continue
 			}
-			// Use configured link-local if present, otherwise stable LL.
-			routerLL := stableLL
-			if unit, ok := ifc.Units[0]; ok {
-				for _, addr := range unit.Addresses {
-					ip, _, err := net.ParseCIDR(addr)
-					if err == nil && ip.IsLinkLocalUnicast() && ip.To4() == nil {
-						routerLL = ip
-						break
-					}
-				}
-			}
 			physName := ifc.Name
 			if phys, ok := rethToPhys[ifc.Name]; ok {
 				physName = phys
 			}
 			linuxName := config.LinuxIfName(physName)
-			// Send on base interface.
-			if !seen[linuxName] {
-				seen[linuxName] = true
-				if err := directNABurstFn(linuxName, routerLL, garpCount, stillValid); err != nil {
+			sendRouterNA := func(iface string, unitNum int, unit *config.InterfaceUnit) {
+				if unit == nil || seen[iface] {
+					return
+				}
+				if !rethUnitHasIPv6(ifc, unitNum) {
+					return
+				}
+				seen[iface] = true
+				routerLL := stableLL
+				if ll := unitConfiguredLinkLocal(unit); ll != "" {
+					routerLL = net.ParseIP(ll)
+				}
+				if err := directNABurstFn(iface, routerLL, garpCount, stillValid); err != nil {
 					slog.Warn("directSendGARPs: router link-local NA failed",
-						"iface", linuxName, "ip", routerLL, "err", err)
+						"iface", iface, "ip", routerLL, "err", err)
 				}
 			}
-			// Send on each VLAN sub-interface.
-			for _, unit := range ifc.Units {
+			// Base interface announces unit 0's router identity.
+			sendRouterNA(linuxName, 0, ifc.Units[0])
+			// Each VLAN sub-interface announces its own unit's identity.
+			unitNums := make([]int, 0, len(ifc.Units))
+			for n := range ifc.Units {
+				unitNums = append(unitNums, n)
+			}
+			sort.Ints(unitNums)
+			for _, unitNum := range unitNums {
+				unit := ifc.Units[unitNum]
 				if unit == nil { // #6780
 					continue
 				}
 				if unit.VlanID > 0 {
-					subIface := fmt.Sprintf("%s.%d", linuxName, unit.VlanID)
-					if !seen[subIface] {
-						seen[subIface] = true
-						if err := directNABurstFn(subIface, routerLL, garpCount, stillValid); err != nil {
-							slog.Warn("directSendGARPs: router link-local NA failed",
-								"iface", subIface, "ip", routerLL, "err", err)
-						}
-					}
+					sendRouterNA(fmt.Sprintf("%s.%d", linuxName, unit.VlanID), unitNum, unit)
 				}
 			}
 		}
