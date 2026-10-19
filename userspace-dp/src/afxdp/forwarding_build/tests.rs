@@ -9394,8 +9394,10 @@ fn wg_responder_high_water_survives_config_change_rebuild() {
 /// (no configured endpoint).
 #[test]
 fn wg_live_endpoint_survives_one_peer_edit_rebuild_14640() {
-    const PEER_A_PUB_HEX: &str = "1010101010101010101010101010101010101010101010101010101010101010";
-    const PEER_B_PUB_HEX: &str = "2020202020202020202020202020202020202020202020202020202020202020";
+    // #15741: non-degenerate keys (the previous repeated-byte
+    // `1010...`/`2020...` keys are refused by #14373's hydrate gate).
+    const PEER_A_PUB_HEX: &str = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
+    const PEER_B_PUB_HEX: &str = "f9e8d7c6b5a4938271605f4e3d2c1b0af9e8d7c6b5a4938271605f4e3d2c1b0a";
     fn two_peer_snapshot(b_endpoint: &str, b_keepalive: u16) -> ConfigSnapshot {
         ConfigSnapshot {
             tunnel_endpoints: vec![crate::protocol::snapshot::TunnelEndpointSnapshot {

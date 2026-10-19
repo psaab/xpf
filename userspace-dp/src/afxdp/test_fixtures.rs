@@ -417,9 +417,21 @@ pub(super) fn wg_outer_mtu_snapshot() -> ConfigSnapshot {
             ttl: 64,
             transport_table: "inet.0".to_string(),
             wg_listen_port: 51820,
-            wg_local_privkey_hex: "deadbeef".repeat(8),
+            // #15741: non-degenerate key material. The previous
+            // repeated-pattern keys (`deadbeef`x8 / `abadcafe`x8, and
+            // `beadfeed`x8 in the two-peer variant below) are
+            // publicly-known constants that #14373's hydrate gate
+            // correctly refuses as degenerate, which silently dropped
+            // the whole tunnel row and zeroed every consumer's MTU
+            // budget. Fixed random hex keeps the same key-for-key
+            // mapping across all consumers.
+            wg_local_privkey_hex:
+                "1111111122222222333333334444444455555555666666667777777788888888"
+                    .to_string(),
             wg_peers: vec![crate::TunnelWgPeerSnapshot {
-                wg_peer_pubkey_hex: "abadcafe".repeat(8),
+                wg_peer_pubkey_hex:
+                    "99aaaabbbbccccddddeeeeffff00001111222233334444555566667777888899"
+                        .to_string(),
                 wg_allowed_ips: vec!["10.123.0.0/24".to_string()],
                 wg_endpoint: "203.0.113.7:51820".to_string(),
                 ..Default::default()
@@ -492,7 +504,10 @@ pub(super) fn wg_two_peer_dnat_snapshot() -> ConfigSnapshot {
     // engine's AllowedIPs LPM; this keeps the hydrated snapshot consistent).
     if let Some(ep) = snap.tunnel_endpoints.first_mut() {
         ep.wg_peers.push(crate::TunnelWgPeerSnapshot {
-            wg_peer_pubkey_hex: "beadfeed".repeat(8),
+            // #15741: non-degenerate (see wg_outer_mtu_snapshot).
+            wg_peer_pubkey_hex:
+                "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                    .to_string(),
             wg_allowed_ips: vec!["10.200.0.0/24".to_string()],
             wg_endpoint: "198.51.100.7:51820".to_string(),
             ..Default::default()
