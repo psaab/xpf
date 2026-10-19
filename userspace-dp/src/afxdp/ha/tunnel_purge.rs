@@ -136,14 +136,30 @@ impl crate::afxdp::Coordinator {
         // an over-release hands a live worker's port to a new flow.
         let now_ns = crate::afxdp::wg::counters::monotonic_now_ns();
         for (key, nat) in &reservations {
-            if crate::nat::release_synced_source_nat_allocation_untracked(
+            // #14961 (D26-05): release BOTH allocator families. Before this
+            // fix only the source-NAT leg ran, so a purged NAT64 session
+            // stranded its translated `(pool v4, port)` for the life of the
+            // NAT64 allocator. Each helper is self-gated (SNAT on
+            // `rewrite_src`, NAT64 on `nat.nat64`), so a session in only
+            // one family no-ops in the other. The counter increments once
+            // per reservation actually freed in EITHER family — never per
+            // attempt (#8124 honesty rule).
+            let snat_freed = crate::nat::release_synced_source_nat_allocation_untracked(
                 &release_against.iface_nat_allocators,
                 &release_against.source_nat_rules,
                 key,
                 *nat,
                 false,
                 now_ns,
-            ) {
+            );
+            let nat64_freed = crate::nat64::release_synced_nat64_allocation_untracked_for_purge(
+                &release_against.nat64,
+                key,
+                *nat,
+                false,
+                now_ns,
+            );
+            if snat_freed || nat64_freed {
                 // Counted only on an ACTUAL free. #8124's removed repair
                 // incremented unconditionally, which reported a repair that did
                 // not happen — the specific dishonesty this counter must not

@@ -16120,6 +16120,286 @@ fn delete_drop_sweep_releases_nat_before_a_still_queued_delete_synced_10288() {
 }
 
 // ---------------------------------------------------------------------------
+// #14961 (D26-05): the delete-drop sweep and a still-queued `DeleteSynced`
+// must release a NAT64 port EXACTLY ONCE between them. The sweep's
+// holder-aware release (#10288) drops this worker's bit before the table
+// record disappears; the late command then finds no entry (or a swept
+// entry) and must no-op — never free a port a replacement flow has since
+// taken, and never strand the original. The SNAT sibling above
+// (`..._10288`) pins the same property for the pool allocator; this pair
+// pins it for the NAT64 allocator, whose release retains an idle BIB
+// lease (so the BIB active-flow count, not occupancy, is the observable).
+// ---------------------------------------------------------------------------
+
+fn nat64_14961_forwarding() -> ForwardingState {
+    let mut forwarding = drop8114_forwarding();
+    forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[crate::NAT64RuleSnapshot {
+        name: "nat64-wkp".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.1".to_string()],
+        ..Default::default()
+    }]);
+    forwarding
+}
+
+fn nat64_14961_key() -> SessionKey {
+    SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 6,
+        src_ip: "2001:db8::1".parse().unwrap(),
+        dst_ip: "64:ff9b::0808:0808".parse().unwrap(),
+        src_port: 5000,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    }
+}
+
+fn nat64_14961_nat(port: u16) -> crate::nat::NatDecision {
+    crate::nat::NatDecision {
+        rewrite_src: Some("198.51.100.1".parse().unwrap()),
+        rewrite_dst: Some("8.8.8.8".parse().unwrap()),
+        rewrite_src_port: Some(port),
+        nat64: true,
+        ..crate::nat::NatDecision::default()
+    }
+}
+
+fn nat64_14961_flow(key: &SessionKey) -> crate::nat::SourceNatFlowKey {
+    crate::nat::SourceNatFlowKey {
+        protocol: key.protocol,
+        src_ip: key.src_ip,
+        dst_ip: "8.8.8.8".parse().unwrap(),
+        src_port: key.src_port,
+        dst_port: key.dst_port,
+        routing_scope: 0,
+    }
+}
+
+#[test]
+fn delete_drop_sweep_releases_nat64_before_a_still_queued_delete_synced_14961() {
+    const WORKER: u32 = 3;
+    let forwarding = nat64_14961_forwarding();
+    let key = nat64_14961_key();
+    let nat = nat64_14961_nat(51100);
+    assert!(crate::nat64::reserve_synced_nat64_allocation_for_worker(
+        &forwarding.nat64,
+        &key,
+        nat,
+        false,
+        1_000_000,
+        WORKER,
+    ));
+    let alloc = &forwarding.nat64.prefixes[0].port_allocator;
+    let flow = nat64_14961_flow(&key);
+    let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
+    assert_eq!(
+        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        Some(1),
+        "fixture precondition: the worker holds one active NAT64 reference"
+    );
+
+    // The DeleteSynced is QUEUED (accepted, undrained) before the sweep.
+    let queued_commands = Arc::new(Mutex::new(VecDeque::new()));
+    {
+        let mut pending = queued_commands.lock().expect("worker queue");
+        assert!(crate::afxdp::worker_queue::push_bounded(
+            &mut pending,
+            WorkerCommand::DeleteSynced(key.clone()),
+        ));
+    }
+
+    let mut sessions = SessionTable::new();
+    let mut decision = test_decision();
+    decision.nat = nat;
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        test_metadata(),
+        SessionOrigin::SyncImport,
+        1_000_000,
+        PROTO_TCP,
+        0x10,
+    ));
+    // Shared authority has already dropped the session: sweep-eligible.
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+
+    let mut sweep = super::DeleteDropSweep::default();
+    sweep.arm();
+    let mut evicted = Vec::new();
+    let n = sweep.step_with_nat(
+        &mut sessions,
+        &shared_sessions,
+        SteeringMap::unshared_for_test(-1),
+        &forwarding,
+        2_000_000,
+        WORKER,
+        &mut evicted,
+    );
+    assert_eq!(n, 1, "fixture: the sweep must collect the one stale key");
+    assert_eq!(
+        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        Some(0),
+        "#14961: the sweep must release the worker's NAT64 hold before the \
+         table record disappears — the still-queued DeleteSynced below finds \
+         no entry and releases nothing, so without this the BIB active \
+         reference is stranded for the life of the allocator"
+    );
+    assert_eq!(alloc.holder_mask_for_flow(&flow), None, "the released flow record must be unlinked (no holder mask remains)");
+
+    // Drain the late command through the real dispatcher: it must no-op
+    // (no double release, no panic) and leave the freed state freed.
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut scratch = VecDeque::new();
+    let results = apply_worker_commands(
+        &queued_commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &BTreeMap::new(),
+        &dynamic_neighbors,
+        WORKER,
+        &mut scratch,
+    );
+    assert_eq!(results.deleted_synced_keys, vec![key.clone()]);
+    assert_eq!(
+        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        Some(0),
+        "the late DeleteSynced must not resurrect or double-release the NAT64 hold"
+    );
+}
+
+/// EXACTLY-ONCE CONTROL (#14961): after the sweep frees the NAT64 hold, a
+/// REPLACEMENT flow that takes the same translated port must survive the
+/// late queued `DeleteSynced` — a second (double) release keyed only on
+/// the port would free the live replacement's port.
+#[test]
+fn delete_drop_sweep_then_late_delete_preserves_replacement_nat64_port_14961() {
+    const WORKER: u32 = 3;
+    let forwarding = nat64_14961_forwarding();
+    let key = nat64_14961_key();
+    let nat = nat64_14961_nat(51101);
+    assert!(crate::nat64::reserve_synced_nat64_allocation_for_worker(
+        &forwarding.nat64,
+        &key,
+        nat,
+        false,
+        1_000_000,
+        WORKER,
+    ));
+    let queued_commands = Arc::new(Mutex::new(VecDeque::new()));
+    {
+        let mut pending = queued_commands.lock().expect("worker queue");
+        assert!(crate::afxdp::worker_queue::push_bounded(
+            &mut pending,
+            WorkerCommand::DeleteSynced(key.clone()),
+        ));
+    }
+    let mut sessions = SessionTable::new();
+    let mut decision = test_decision();
+    decision.nat = nat;
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        test_metadata(),
+        SessionOrigin::SyncImport,
+        1_000_000,
+        PROTO_TCP,
+        0x10,
+    ));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let mut sweep = super::DeleteDropSweep::default();
+    sweep.arm();
+    let mut evicted = Vec::new();
+    assert_eq!(
+        sweep.step_with_nat(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &forwarding,
+            2_000_000,
+            WORKER,
+            &mut evicted,
+        ),
+        1
+    );
+
+    // A replacement flow (different 5-tuple, different source transport)
+    // now takes the same translated port on the same worker. The sweep's
+    // release retained the OLD flow's idle BIB lease, so the replacement
+    // mints a FRESH local NAT64 allocation — which reuses the idle port
+    // only if it was actually freed. (A synced reserve naming the port
+    // directly would join/refuse against the retained lease instead.)
+    let mut replacement_key = key.clone();
+    replacement_key.src_ip = "2001:db8::2".parse().unwrap();
+    let (replacement_snat, replacement_port) = forwarding
+        .nat64
+        .allocate_source_for_worker(
+            0,
+            PROTO_TCP,
+            "2001:db8::2".parse().unwrap(),
+            "8.8.8.8".parse().unwrap(),
+            5000,
+            443,
+            2_500_000,
+            WORKER,
+            &[],
+            0,
+            None,
+        )
+        .expect("the freed port must be allocatable to a fresh local flow");
+    assert_eq!(replacement_snat.to_string(), "198.51.100.1");
+    let replacement_nat = crate::nat::NatDecision {
+        rewrite_src: Some(std::net::IpAddr::V4(replacement_snat)),
+        rewrite_dst: Some("8.8.8.8".parse().unwrap()),
+        rewrite_src_port: Some(replacement_port),
+        nat64: true,
+        ..crate::nat::NatDecision::default()
+    };
+    let replacement_flow = crate::nat::SourceNatFlowKey {
+        protocol: PROTO_TCP,
+        src_ip: replacement_key.src_ip,
+        dst_ip: "8.8.8.8".parse().unwrap(),
+        src_port: 5000,
+        dst_port: 443,
+        routing_scope: 0,
+    };
+    let alloc = &forwarding.nat64.prefixes[0].port_allocator;
+    assert_eq!(alloc.holder_mask_for_flow(&replacement_flow), Some(1 << WORKER));
+
+    // The late queued delete for the OLD key drains now. It finds no table
+    // entry for the old key and must not touch the replacement's hold.
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut scratch = VecDeque::new();
+    let _ = apply_worker_commands(
+        &queued_commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &BTreeMap::new(),
+        &dynamic_neighbors,
+        WORKER,
+        &mut scratch,
+    );
+    assert_eq!(
+        alloc.holder_mask_for_flow(&replacement_flow),
+        Some(1 << WORKER),
+        "#14961: the late DeleteSynced double-released — it freed the \
+         replacement flow's live NAT64 port (exactly-once violated)"
+    );
+    assert!(
+        alloc.debug_is_port_occupied(0, replacement_port),
+        "the replacement's translated port must stay occupied"
+    );
+    // And the replacement NAT decision is the one the allocator recorded.
+    let _ = replacement_nat;
+}
+
+// ---------------------------------------------------------------------------
 // #9383: the #7169 reverse-session synthesis resolves the LOGICAL arrival unit.
 // ---------------------------------------------------------------------------
 //

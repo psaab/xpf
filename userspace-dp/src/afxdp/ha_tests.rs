@@ -5679,6 +5679,182 @@ fn both_purge_call_sites_release_against_new_forwarding_8138() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// #14961 (D26-05): the tunnel-remap purge must release BOTH allocator
+// families. Before this fix `purge_remapped_tunnel_sessions` released only
+// the source-NAT leg, so a purged NAT64 session stranded its translated
+// `(pool v4, port)` for the life of the NAT64 allocator. The adopted-worker
+// control pins the untracked-release direction: a reservation a worker HAS
+// adopted must survive the purge (its own teardown frees it), and must not
+// be counted as freed.
+// ---------------------------------------------------------------------------
+
+fn purge14961_nat64_entry(src_port: u16, pool_port: u16, tunnel_id: u16) -> SyncedSessionEntry {
+    let mut e = SyncedSessionEntry {
+        key: SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            dst_ip: IpAddr::V6("64:ff9b::0808:0808".parse().unwrap()),
+            src_port,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+        decision: SessionDecision {
+            resolution: {
+                let mut r = test_resolution();
+                r.tunnel_endpoint_id = tunnel_id;
+                r
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))),
+                rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+                rewrite_src_port: Some(pool_port),
+                nat64: true,
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+    };
+    e.metadata.is_reverse = false;
+    e
+}
+
+fn purge14961_forwarding() -> ForwardingState {
+    let mut forwarding = reserve6600_forwarding();
+    forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[crate::NAT64RuleSnapshot {
+        name: "nat64-wkp".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.1".to_string()],
+        ..Default::default()
+    }]);
+    forwarding
+}
+
+fn purge14961_flow(key: &SessionKey) -> crate::nat::SourceNatFlowKey {
+    crate::nat::SourceNatFlowKey {
+        protocol: key.protocol,
+        src_ip: key.src_ip,
+        dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        src_port: key.src_port,
+        dst_port: key.dst_port,
+        routing_scope: 0,
+    }
+}
+
+/// THE BINDING (#14961): a tunnel-purged NAT64 session's import-time
+/// (Untracked) reservation must be released by the purge.
+///
+/// RED pre-fix: the purge released only SNAT, so the NAT64 BIB active
+/// reference stays at 1. (Occupancy alone cannot show this — a NAT64
+/// release retains the idle BIB lease — so the active-flow count is the
+/// observable.)
+#[test]
+fn tunnel_remap_purge_releases_nat64_reservation_14961() {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(purge14961_forwarding());
+    register_test_worker_7209(&mut coordinator);
+
+    let entry = purge14961_nat64_entry(42000, 51100, 7);
+    let key = entry.key.clone();
+    coordinator.upsert_synced_session(entry);
+
+    let alloc = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
+    let flow = purge14961_flow(&key);
+    let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
+    assert_eq!(
+        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        Some(1),
+        "precondition: the import must have taken the NAT64 reservation — \
+         without it every assertion below passes by never exercising anything"
+    );
+    assert_eq!(coordinator.tunnel_purge_reservations_released_total(), 0);
+
+    let purged = coordinator.purge_remapped_tunnel_sessions(&[7], &coordinator.forwarding.clone());
+    assert_eq!(purged, 1, "the remapped session must be purged");
+    assert_eq!(
+        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        Some(0),
+        "#14961: the purge stranded the NAT64 reservation — it released only \
+         the source-NAT leg, so the imported NAT64 (pool v4, port) stays held \
+         for the life of the allocator"
+    );
+    assert_eq!(
+        coordinator.tunnel_purge_reservations_released_total(),
+        1,
+        "exactly one reservation (the NAT64 one) was freed and must be counted once"
+    );
+}
+
+/// ADOPTED-WORKER CONTROL (#14961): if a worker HAS adopted the reservation
+/// (holds a bit), the purge's untracked release must NOT free it and must
+/// NOT count it — the worker's own teardown is the only safe releaser.
+#[test]
+fn tunnel_remap_purge_preserves_adopted_nat64_reservation_14961() {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(purge14961_forwarding());
+    register_test_worker_7209(&mut coordinator);
+
+    let entry = purge14961_nat64_entry(42010, 51110, 7);
+    let key = entry.key.clone();
+    let nat = entry.decision.nat;
+    coordinator.upsert_synced_session(entry);
+    // Worker 0 adopts the reservation, as its UpsertSynced would.
+    assert!(crate::nat64::reserve_synced_nat64_allocation_for_worker(
+        &coordinator.forwarding.nat64,
+        &key,
+        nat,
+        false,
+        1_500,
+        0,
+    ));
+
+    let purged = coordinator.purge_remapped_tunnel_sessions(&[7], &coordinator.forwarding.clone());
+    assert_eq!(purged, 1, "the session is still purged — this is about the port");
+    let alloc = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
+    let flow = purge14961_flow(&key);
+    assert_eq!(
+        alloc.holder_mask_for_flow(&flow),
+        Some(1),
+        "#14961: the purge's untracked release freed a reservation worker 0 \
+         still holds — an over-release that hands a live worker's port to a \
+         new flow"
+    );
+    assert_eq!(
+        coordinator.tunnel_purge_reservations_released_total(),
+        0,
+        "a release that freed nothing (adopted reservation) must not be counted"
+    );
+    // The worker's own release is what finally frees it.
+    crate::nat64::release_nat64_allocation_for_worker(
+        &coordinator.forwarding.nat64,
+        &key,
+        nat,
+        false,
+        2_000,
+        0,
+    );
+    let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
+    assert_eq!(
+        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        Some(0),
+        "the adopting worker's own release must retire the active reference"
+    );
+}
+
 // ── #8015: a standalone reverse import is refused ────────────────────────
 //
 // A reverse entry is DERIVED state. Every legitimate reverse companion in the
