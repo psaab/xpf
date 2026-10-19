@@ -2226,6 +2226,19 @@ never lock an operator out of a remote box it manages.
   drops the #5275 armed flag and closes kernel transit forwarding: leaving
   `ip_forward=1` would route transit for a dataplane that is no longer
   attached.
+- **Plain-commit gate is re-tested under `applySem` (#15055).** `commitAndApply`
+  checks `inBootstrap()` before `applySem.Acquire` and again after acquiring,
+  before any store promotion. A commit that passed the first check while a
+  first commit-confirmed rollback was mid-flight (executor holding `applySem`
+  across `PromoteRollback` + `enterBootstrapMode`) would otherwise bind the
+  rollback's reset candidate generation in `commitWithGenBinding` and promote
+  the empty candidate, reporting success and persisting `committed=1`-empty.
+  The first-commit `PromoteRollback` branch also bumps `holderEpoch`, so a
+  holder-bound commit authority minted before the timeout fails verification
+  at promotion instead of promoting the reset candidate; an ordinary
+  (non-first) rollback does not bump it. `InternalCommitter` authorities are
+  stopped by the daemon recheck, not the epoch. Regression:
+  `bootstrap_commit_race_15055_test.go`.
 
 ## Notable gotchas
 
