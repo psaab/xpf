@@ -50,8 +50,8 @@ var elidedInterfaceCells15062 = []struct {
 		`interfaces ge-0/0/0 unit 0 family inet dhcp;`,
 		`interfaces { ge-0/0/0 unit 0 family inet dhcp; }`},
 	{"two units",
-		`interfaces xe-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } unit 1 { family inet6 { address 2001:db8::1/64; } } }`,
-		`interfaces { xe-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } unit 1 { family inet6 { address 2001:db8::1/64; } } } }`},
+		`interfaces xe-0/0/0 { vlan-tagging; unit 0 { family inet { address 10.0.0.1/24; } } unit 1 { vlan-id 10; family inet6 { address 2001:db8::1/64; } } }`,
+		`interfaces { xe-0/0/0 { vlan-tagging; unit 0 { family inet { address 10.0.0.1/24; } } unit 1 { vlan-id 10; family inet6 { address 2001:db8::1/64; } } } }`},
 }
 
 func TestElidedInterfaceNormalizesToTheBracedTree15062(t *testing.T) {
