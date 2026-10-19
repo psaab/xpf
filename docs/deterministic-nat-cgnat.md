@@ -52,7 +52,11 @@ This allocates:
   (a v6 prefix, an IPv4-mapped literal) count nothing, and duplicate or
   overlapping v4 members count once -- #15177). For an IPv6 subscriber
   (mode 2) only bare or `/32` IPv4 pool hosts count, matching the NAT64
-  parser. A larger prefix such as `/22` (1024 hosts) is rejected
+  parser. An IPv4 `host address 0.0.0.0/0` is rejected outright (#15275):
+  its 2^32 subscribers exceed the 32-bit deterministic host count, so the
+  dataplane builder falls back to round-robin PAT -- it must not commit
+  silently unenforced (nor be misreported as a capacity shortfall); use
+  `/1` or narrower. A larger prefix such as `/22` (1024 hosts) is rejected
   `insufficient capacity (128 blocks) for 1024 subscribers` -- widen the
   pool (more public IPs) or shrink the block-size to add blocks.
 

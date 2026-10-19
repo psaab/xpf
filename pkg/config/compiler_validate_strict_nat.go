@@ -846,6 +846,17 @@ func validateSourceNATDeterministicStrict(cfg *Config) error {
 				return fmt.Errorf("pool %q: insufficient capacity (0 blocks) for IPv6 deterministic NAT", pool.Name)
 			}
 		} else {
+			// #15275 (C05-02): an IPv4 /0 subscriber prefix needs 2^32
+			// blocks and a 32-bit host count the dataplane cannot
+			// represent — deterministicSourceNATFields returns mode 0
+			// (hostBits >= 32) and pkg/nat poolParams refuses it, both
+			// falling back to round-robin PAT. Reject it per se rather
+			// than letting a pool large enough to satisfy the capacity
+			// arithmetic below commit silently unenforced (and rather
+			// than misreporting it as a capacity shortfall).
+			if ones == 0 {
+				return fmt.Errorf("pool %q: IPv4 deterministic host prefix /0 (%s) is not enforceable: the subscriber count (2^32) exceeds the 32-bit deterministic host range, so the dataplane would silently fall back to round-robin PAT; configure a /1 or narrower host prefix", pool.Name, det.HostAddress)
+			}
 			hostCount := uint64(1) << uint(bits-ones)
 			if totalBlocks < hostCount {
 				return fmt.Errorf("pool %q: insufficient capacity (%d blocks) for %d subscribers", pool.Name, totalBlocks, hostCount)
