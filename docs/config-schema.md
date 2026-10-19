@@ -14675,7 +14675,7 @@ the value sits in a single typed slot:
     advisory and all three render surfaces read it, so they cannot disagree, and
     a leaf that later gains a carrier loses its annotation everywhere at once.
     The fixed windows the dataplane applies instead (20s half-open, 30s FIN
-    close, 2s RST abort, 300s established fallback) are quoted in operator-facing
+    close, 2s RST abort, 1800s established fallback (#15127)) are quoted in operator-facing
     text, so a test re-reads them from `userspace-dp/src/session/mod.rs` and
     fails on drift; another in `pkg/dataplane/userspace` fails if any of the
     three starts reaching the wire snapshot without the table being updated. A

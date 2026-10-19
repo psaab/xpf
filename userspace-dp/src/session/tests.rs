@@ -551,8 +551,8 @@ fn missing_neighbor_seed_expire_emits_local_close_delta_13974() {
     assert_eq!(opens.len(), 1);
     assert_eq!(opens[0].kind, SessionDeltaKind::Open);
     assert_eq!(opens[0].origin, SessionOrigin::MissingNeighborSeed);
-    table.last_gc_ns = then + 301_000_000_000;
-    let expired = table.expire_stale_entries(then + 302_000_000_000);
+    table.last_gc_ns = then + 1_801_000_000_000;
+    let expired = table.expire_stale_entries(then + 1_802_000_000_000);
     assert_eq!(expired.len(), 1);
     assert_eq!(expired[0].key, key);
     let closes = table.drain_deltas(8);
@@ -906,7 +906,7 @@ fn synced_import_adopts_peer_session_id_5212() {
 /// #4380 RED-on-revert: a flow with traffic on ONLY the reverse direction
 /// (forward half frozen) must NOT reap its forward half while the reverse half
 /// is still within its idle window — the active companion keeps both alive.
-/// On revert (no companion probe) the forward half crosses its 300 s idle
+/// On revert (no companion probe) the forward half crosses its 1800 s idle (#15127)
 /// timeout and is removed, leaving a half-open session (and, under NAT, a
 /// later forward packet re-creating a session with a different translation).
 #[test]
@@ -914,16 +914,16 @@ fn reverse_activity_keeps_forward_half_alive() {
     let mut table = SessionTable::new();
     let forward = key_v4();
     let then = 1_000_000_000u64;
-    // ACK (not an initial SYN) installs both halves ESTABLISHED → 300 s window.
+    // ACK (not an initial SYN) installs both halves ESTABLISHED → 1800 s window (#15127).
     let reverse = install_forward_reverse_pair(&mut table, &forward, then, TCP_ACK);
     // Reverse-only traffic: the read path re-stamps ONLY the entry a packet's
     // wire tuple resolves, so a reverse packet touches the reverse half and
     // leaves the forward half frozen at `then`.
     let t_rev = then + 250_000_000_000; // 250 s: reverse still active
     table.touch(&reverse, t_rev);
-    // GC past the forward half's 300 s idle timeout while the reverse half is
-    // still fresh (idle 60 s < 300 s).
-    let now = then + 310_000_000_000; // 310 s
+    // GC past the forward half's 1800 s idle timeout (#15127) while the reverse half is
+    // still fresh (idle 60 s).
+    let now = then + 1_810_000_000_000; // 1810 s > 1800 s established window (#15127)
     table.last_gc_ns = now - 2_000_000_000;
     let expired = table.expire_stale_entries(now);
     assert!(
@@ -959,7 +959,7 @@ fn both_halves_idle_still_expire() {
     let then = 1_000_000_000u64;
     let _reverse = install_forward_reverse_pair(&mut table, &forward, then, TCP_ACK);
     // Neither half touched — both idle from `then`.
-    let now = then + 310_000_000_000; // 310 s > 300 s established window
+    let now = then + 1_810_000_000_000; // 1810 s > 1800 s established window (#15127)
     table.last_gc_ns = now - 2_000_000_000;
     let _ = table.expire_stale_entries(now);
     assert_eq!(table.len(), 0, "a fully-idle flow must reap BOTH halves");
@@ -992,7 +992,7 @@ fn symmetric_flow_unaffected_by_companion_retention() {
     let t_active = then + 250_000_000_000;
     table.touch(&forward, t_active);
     table.touch(&reverse, t_active);
-    let now = then + 310_000_000_000;
+    let now = then + 1_810_000_000_000;
     table.last_gc_ns = now - 2_000_000_000;
     let expired = table.expire_stale_entries(now);
     assert!(expired.is_empty(), "an actively-forwarding flow must not reap");
@@ -1076,7 +1076,7 @@ fn nat_flow_reverse_activity_keeps_forward_half_alive() {
     let t_rev = then + 250_000_000_000; // 250 s
     table.touch(&reverse, t_rev);
     // GC past the forward half's 300 s idle timeout while the reverse is fresh.
-    let now = then + 310_000_000_000; // 310 s
+    let now = then + 1_810_000_000_000; // 1810 s > 1800 s established window (#15127)
     table.last_gc_ns = now - 2_000_000_000;
     let expired = table.expire_stale_entries(now);
     assert!(
@@ -1892,8 +1892,8 @@ fn expire_stale_entries_returns_helper_only_local_sessions() {
         PROTO_TCP,
         0x10,
     ));
-    table.last_gc_ns = then + 301_000_000_000;
-    let expired = table.expire_stale_entries(then + 302_000_000_000);
+    table.last_gc_ns = then + 1_801_000_000_000;
+    let expired = table.expire_stale_entries(then + 1_802_000_000_000);
     assert_eq!(expired.len(), 1);
     assert_eq!(expired[0].key, key);
     assert_eq!(expired[0].decision, local_decision);
@@ -4728,11 +4728,56 @@ fn configurable_udp_timeout_changes_session_expiry() {
 #[test]
 fn default_timeouts_match_original_values() {
     let t = SessionTimeouts::default();
-    assert_eq!(t.tcp_established_ns, 300_000_000_000);
+    assert_eq!(t.tcp_established_ns, 1_800_000_000_000); // #15127: Junos 1800 s (was 300 s)
     // #3152: the half-open opening window defaults to 20 s (Junos parity).
     assert_eq!(t.tcp_opening_ns, 20_000_000_000);
     assert_eq!(t.udp_ns, 60_000_000_000);
     assert_eq!(t.icmp_ns, 60_000_000_000);
+}
+
+/// #15127 (A93-02): with no `tcp-session established-timeout` and no
+/// per-application inactivity-timeout, an established TCP session must
+/// survive 301 s idle — the Junos default is 1800 s, not the old 300 s
+/// fallback. Pre-fix this test RED-fails: `SessionTimeouts::default()`
+/// (and `from_seconds(0,0,0)`) stamp 300 s, so the pair reaps at +301 s.
+/// Controls: an explicit 300 s established-timeout still reaps at 301 s,
+/// and the opening/closing windows are untouched.
+#[test]
+fn unset_established_timeout_survives_301s_idle_15127() {
+    let t = SessionTimeouts::default();
+    assert_eq!(
+        t.tcp_established_ns, 1_800_000_000_000,
+        "#15127: unset established-timeout must default to 1800 s (Junos), not 300 s"
+    );
+    let t0 = SessionTimeouts::from_seconds(0, 0, 0);
+    assert_eq!(t0.tcp_established_ns, 1_800_000_000_000);
+    assert_eq!(t.tcp_opening_ns, 20_000_000_000);
+    assert_eq!(t.tcp_closing_ns, 30_000_000_000);
+    assert_eq!(t.udp_ns, 60_000_000_000);
+    assert_eq!(t.icmp_ns, 60_000_000_000);
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let then = 1_000_000_000u64;
+    let _reverse = install_forward_reverse_pair(&mut table, &forward, then, TCP_ACK);
+    let after_301 = then + 301_000_000_000;
+    table.last_gc_ns = after_301 - 2_000_000_000;
+    let expired = table.expire_stale_entries(after_301);
+    assert!(
+        expired.is_empty() && table.len() == 2,
+        "#15127: established pair with no configured timeout must survive 301 s idle (1800 s default); len={}",
+        table.len()
+    );
+    let after_1801 = then + 1_801_000_000_000;
+    table.last_gc_ns = after_1801 - 2_000_000_000;
+    let _ = table.expire_stale_entries(after_1801);
+    assert_eq!(table.len(), 0, "#15127: default established pair must reap after 1800 s idle");
+    // Control: explicit established-timeout 300 still reaps at 301 s.
+    let mut ctl = SessionTable::new();
+    ctl.set_timeouts(SessionTimeouts::from_seconds(300, 0, 0));
+    assert!(ctl.install_with_protocol(forward.clone(), decision(), metadata(), then, PROTO_TCP, TCP_ACK));
+    ctl.last_gc_ns = after_301 - 2_000_000_000;
+    let _ = ctl.expire_stale_entries(after_301);
+    assert_eq!(ctl.len(), 0, "control: explicit established-timeout 300 must still reap at 301 s");
 }
 
 #[test]
@@ -7015,6 +7060,11 @@ fn install_synced_tcp_origin(
     now_ns: u64,
     origin: SessionOrigin,
 ) {
+    // #15127: HA expiry tests drive past-timeout semantics; the production
+    // default is now 1800 s, which would make the wheel re-bucket ~7x per
+    // sweep and inflate held_standby counts. Pin a short 300 s timeout on
+    // these tables so past_tcp_timeout stays just past the window.
+    table.set_timeouts(SessionTimeouts::from_seconds(300, 0, 0));
     let mut md = metadata();
     md.owner_rg_id = rg;
     assert!(table.install_with_protocol_with_origin(
@@ -7081,6 +7131,7 @@ fn expire_ages_active_node_owned_session() {
     // A ForwardFlow (locally-created) session whose RG is active must
     // expire normally -- guards over-retention.
     let mut table = SessionTable::new();
+    table.set_timeouts(SessionTimeouts::from_seconds(300, 0, 0)); // #15127: keep past_tcp_timeout just past window
     let key = key_v4();
     let then = 1_000_000_000u64;
     let mut md = metadata();
@@ -7213,6 +7264,7 @@ fn expire_standalone_ages_normally() {
     // Standalone: ha=None path. A ForwardFlow owner_rg_id==0 session
     // must age exactly like the pre-#2120 wheel.
     let mut table = SessionTable::new();
+    table.set_timeouts(SessionTimeouts::from_seconds(300, 0, 0)); // #15127: keep past_tcp_timeout just past window
     let key = key_v4();
     let then = 1_000_000_000u64;
     let mut md = metadata();
@@ -7239,6 +7291,7 @@ fn expire_standalone_with_ctx_never_holds() {
     // that is NOT peer-synced and owner_rg_id<=0 must age
     // ((peer_synced || node_active) false). Standalone safety.
     let mut table = SessionTable::new();
+    table.set_timeouts(SessionTimeouts::from_seconds(300, 0, 0)); // #15127: keep past_tcp_timeout just past window
     let key = key_v4();
     let then = 1_000_000_000u64;
     let mut md = metadata();
@@ -7335,6 +7388,7 @@ fn expire_in_demotion_window_holds() {
     // NOT yet applied -> held via the FORWARDING gate (!forwards_here),
     // not aged, because the node is still active for another RG.
     let mut table = SessionTable::new();
+    table.set_timeouts(SessionTimeouts::from_seconds(300, 0, 0)); // #15127: keep past_tcp_timeout just past window
     let key = key_v4();
     let then = 1_000_000_000u64;
     let mut md = metadata();
@@ -7519,6 +7573,7 @@ fn expire_fabric_ingress_ages_normally() {
     // fabric_ingress synced entries are NOT held (matches the fabric-skip
     // convention) -- they age even on a non-forwarding node.
     let mut table = SessionTable::new();
+    table.set_timeouts(SessionTimeouts::from_seconds(300, 0, 0)); // #15127: keep past_tcp_timeout just past window
     let key = key_v4();
     let then = 1_000_000_000u64;
     let mut md = metadata();
@@ -8101,8 +8156,8 @@ fn session_limit_decrements_and_evicts_on_expire() {
     assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 1);
     assert_eq!(table.session_limit_src_map_len(), 1);
 
-    table.last_gc_ns = then + 301_000_000_000;
-    let expired = table.expire_stale_entries(then + 302_000_000_000);
+    table.last_gc_ns = then + 1_801_000_000_000;
+    let expired = table.expire_stale_entries(then + 1_802_000_000_000);
     assert_eq!(expired.len(), 1);
     assert_eq!(
         table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
@@ -8713,8 +8768,8 @@ fn session_limit_counts_match_live_counted_entries_invariant() {
     check_invariant(&table, "after demote RG1");
 
     // Expire everything; counts must drain to empty.
-    table.last_gc_ns = now + 600_000_000_000;
-    let _ = table.expire_stale_entries(now + 601_000_000_000);
+    table.last_gc_ns = now + 1_900_000_000_000; // #15127: past 1800s default
+    let _ = table.expire_stale_entries(now + 1_901_000_000_000);
     assert_eq!(table.session_limit_src_map_len(), 0);
     assert_eq!(table.session_limit_dst_map_len(), 0);
 }
@@ -9718,8 +9773,8 @@ fn close_delta_carries_harvested_counters() {
     table.account_packet(&key, 700, 0, 0);
 
     // Force expiry.
-    table.last_gc_ns = then + 301_000_000_000;
-    let expired = table.expire_stale_entries(then + 302_000_000_000);
+    table.last_gc_ns = then + 1_801_000_000_000;
+    let expired = table.expire_stale_entries(then + 1_802_000_000_000);
     assert_eq!(expired.len(), 1);
 
     let deltas = table.drain_deltas(8);
@@ -9763,10 +9818,10 @@ fn close_delta_carries_observed_tos_and_tcp_flags() {
     // forward ToS — the responder's class of service is irrelevant to srcTos).
     table.account_packet(&rev, 40, 0x11, 10);
 
-    table.last_gc_ns = then + 301_000_000_000;
+    table.last_gc_ns = then + 1_801_000_000_000;
     // Both halves expire; only the forward (is_reverse=false) entry produces a
     // Close delta (expire.rs gates the close delta on !is_reverse).
-    let expired = table.expire_stale_entries(then + 302_000_000_000);
+    let expired = table.expire_stale_entries(then + 1_802_000_000_000);
     assert_eq!(expired.len(), 2);
 
     let deltas = table.drain_deltas(8);

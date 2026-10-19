@@ -63,7 +63,7 @@ fn forwarding_state_includes_session_timeouts() {
     let snapshot = nat_snapshot();
     let state = build_forwarding_state(&snapshot);
     // Default timeouts when snapshot has 0 values
-    assert_eq!(state.session_timeouts.tcp_established_ns, 300_000_000_000);
+    assert_eq!(state.session_timeouts.tcp_established_ns, 1_800_000_000_000); // #15127
     assert_eq!(state.session_timeouts.udp_ns, 60_000_000_000);
     assert_eq!(state.session_timeouts.icmp_ns, 60_000_000_000);
 }

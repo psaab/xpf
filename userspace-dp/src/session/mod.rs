@@ -273,7 +273,11 @@ pub(crate) const DEFAULT_MAX_SESSIONS_PER_SOURCE: u32 = 4096;
 /// counted and makes the active export fail closed rather than growing an
 /// unbounded `ExpiredSession` queue.
 pub(crate) const MAX_TOMBSTONES_FOR_EXPORT: usize = 8192;
-const DEFAULT_TCP_SESSION_TIMEOUT_NS: u64 = 300_000_000_000;
+/// #15127 (A93-02): Junos `tcp-session established-timeout` default — an
+/// established TCP session with no configured established-timeout and no
+/// per-application inactivity-timeout idles out after 1800 s. The old
+/// 300 s fallback silently reaped idle SSH/DB/LDAP/SMB sessions at 5 min.
+const DEFAULT_TCP_SESSION_TIMEOUT_NS: u64 = 1_800_000_000_000;
 /// #3152: short half-open / opening timeout for a TCP session whose
 /// three-way handshake has not completed. A session created by a bare SYN
 /// (SYN set, ACK clear) starts in the OPENING state and is held only for
@@ -3406,7 +3410,7 @@ impl SessionTable {
     /// window actually in force — the Junos default for `established-timeout`,
     /// stamped by the conntrack publisher and never corrected. It was wrong in
     /// both directions at once: 1800 for an ESTABLISHED session whose real
-    /// window is 300 s unless configured, and 1800 for a half-closed session on
+    /// window is 1800 s unless configured, and 1800 for a half-closed session on
     /// a 30 s (or a configured 3 s) closing window. The reap behaviour proved
     /// the windows differed by an order of magnitude while the column read the
     /// same number for both.

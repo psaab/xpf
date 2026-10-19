@@ -56,7 +56,7 @@ structure.)
 
 | Class | Default | Operator leaf (#7342) |
 |-------|---------|-----------------------|
-| TCP established | 300 s | `security flow tcp-session established-timeout` |
+| TCP established | 1800 s (#15127, Junos default) | `security flow tcp-session established-timeout` |
 | TCP opening (half-open) | 20 s | `... initial-timeout` |
 | TCP CLOSING (FIN in one direction) | 30 s | `... closing-timeout` |
 | TCP TIME_WAIT (FIN in both directions) | 30 s | `... time-wait-timeout` |

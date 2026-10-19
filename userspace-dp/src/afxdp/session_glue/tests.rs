@@ -13088,7 +13088,7 @@ fn refresh_owner_rgs_skips_hainactive_hold_clock_5152() {
         "precondition: Case B has a live route and neighbor for the session key"
     );
     let then = 1_000_000_000u64;
-    let armed_ns = then + 302_000_000_000; // past the 300s TCP established timeout
+    let armed_ns = then + 1_802_000_000_000; // past the 1800s TCP established timeout (#15127)
     let act_ns = armed_ns + 1_000_000;
     let act_secs = act_ns / 1_000_000_000;
 

@@ -109,8 +109,8 @@ fn established_companion_still_keeps_quiet_half_alive_13679() {
         table.entry_by_key(&reverse).expect("reverse").established,
         "fixture: ACK install establishes both halves"
     );
-    table.touch(&reverse, now + 250 * SEC);
-    let gc_now = now + 310 * SEC;
+    table.touch(&reverse, now + 1750 * SEC);
+    let gc_now = now + 1810 * SEC; // forward idle 1810s > 1800s, reverse idle 60s
     table.last_gc_ns = gc_now - 2 * SEC;
     let expired = table.expire_stale_entries(gc_now);
     assert!(expired.is_empty(), "established flow must not reap its quiet half");

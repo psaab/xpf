@@ -1044,10 +1044,10 @@ fn c6_expire_ha_context_covers_hold_and_self_heal_10591() {
     let mut binding = binding(LAN_IFINDEX);
     admit_synced_pair(&install, &mut sessions, 0, T0_NS);
     let (forward_key, _decision, _metadata) = forward_record(&sessions);
-    // A standard established TCP row expires after the production 300s
+    // A standard established TCP row expires after the production 1800s (#15127)
     // timeout (`session/mod.rs:104`). The first idle-crossed pass is a
     // genuine standby HOLD.
-    let hold_now = T0_NS + 301 * GC_TICK_NS;
+    let hold_now = T0_NS + 1801 * GC_TICK_NS;
     let held = production_sweep_for_test(
         &mut sessions,
         std::slice::from_mut(&mut binding),
