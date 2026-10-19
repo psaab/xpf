@@ -894,6 +894,14 @@ pub(super) fn parse_neighbor_msg_with_reassert(
             let Some(mac) = mac else {
                 return NeighborMsgEffect::None;
             };
+            // #15769: `NUD_STALE` alone is not independent kernel
+            // confirmation for an already-leased entry — the dataplane
+            // itself installs STALE (`add_kernel_neighbor`, #4475) and
+            // this monitor socket (RTNLGRP_NEIGH) receives that install
+            // back, so a STALE echo of an unsolicited XSK learn must not
+            // clear its RX lease. REACHABLE / DELAY / PROBE / PERMANENT
+            // prove the kernel validated or owns the binding.
+            let kernel_confirmed = (state & !NUD_STALE) != 0;
             let key = (ifindex, ip);
             let changed = if family == libc::AF_INET as u8 {
                 // ARP itself reaches the kernel via the XDP shim's
@@ -947,7 +955,11 @@ pub(super) fn parse_neighbor_msg_with_reassert(
                 }
                 match result {
                     Some(changed) => {
-                        dynamic_neighbors.mark_kernel_backed_if_same(&key, mac);
+                        dynamic_neighbors.mark_kernel_backed_if_confirmed(
+                            &key,
+                            mac,
+                            kernel_confirmed,
+                        );
                         changed
                     }
                     None => {
@@ -1007,7 +1019,11 @@ pub(super) fn parse_neighbor_msg_with_reassert(
                 }
                 match result {
                     Some(changed) => {
-                        dynamic_neighbors.mark_kernel_backed_if_same(&key, mac);
+                        dynamic_neighbors.mark_kernel_backed_if_confirmed(
+                            &key,
+                            mac,
+                            kernel_confirmed,
+                        );
                         changed
                     }
                     None => {
@@ -3233,6 +3249,208 @@ mod monitored_neighbor_import_tests_11457 {
         );
     }
 }
+
+#[cfg(test)]
+mod neighbor_lease_promotion_15769_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    const NUD_PERMANENT: u16 = 0x80;
+
+    fn newneigh_body(ifindex: i32, ip: Ipv4Addr, mac: [u8; 6], state: u16) -> Vec<u8> {
+        let mut body = vec![0u8; 12];
+        body[0] = libc::AF_INET as u8;
+        body[4..8].copy_from_slice(&ifindex.to_ne_bytes());
+        body[8..10].copy_from_slice(&state.to_ne_bytes());
+        body.extend_from_slice(&8u16.to_ne_bytes());
+        body.extend_from_slice(&1u16.to_ne_bytes());
+        body.extend_from_slice(&ip.octets());
+        body.extend_from_slice(&10u16.to_ne_bytes());
+        body.extend_from_slice(&2u16.to_ne_bytes());
+        body.extend_from_slice(&mac);
+        body.extend_from_slice(&[0u8; 2]);
+        body
+    }
+
+    fn newneigh_v6_body(ifindex: i32, ip: Ipv6Addr, mac: [u8; 6], state: u16) -> Vec<u8> {
+        let mut body = vec![0u8; 12];
+        body[0] = libc::AF_INET6 as u8;
+        body[4..8].copy_from_slice(&ifindex.to_ne_bytes());
+        body[8..10].copy_from_slice(&state.to_ne_bytes());
+        body.extend_from_slice(&20u16.to_ne_bytes());
+        body.extend_from_slice(&1u16.to_ne_bytes());
+        body.extend_from_slice(&ip.octets());
+        body.extend_from_slice(&10u16.to_ne_bytes());
+        body.extend_from_slice(&2u16.to_ne_bytes());
+        body.extend_from_slice(&mac);
+        body.extend_from_slice(&[0u8; 2]);
+        body
+    }
+
+    fn age_all(map: &ShardedNeighborMap, now_ns: u64) -> usize {
+        map.age_rx_learned_neighbors(
+            now_ns,
+            crate::afxdp::sharded_neighbor::RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
+            &FastSet::default(),
+        )
+    }
+
+    fn leased_expiry(learn_ns: u64) -> u64 {
+        learn_ns
+            + crate::afxdp::sharded_neighbor::RX_LEARNED_NEIGHBOR_MAX_AGE_NS
+            + crate::afxdp::sharded_neighbor::RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS
+    }
+
+    /// #15769 fail-on-revert (self-promotion half): an unsolicited XSK
+    /// learn installs `NUD_STALE` into the kernel via
+    /// `add_kernel_neighbor`; the monitor (bound to RTNLGRP_NEIGH)
+    /// receives that install back as an RTM_NEWNEIGH notification.
+    /// Pre-fix, the echoed STALE same-MAC event ran
+    /// `mark_kernel_backed_if_same` and cleared the RX lease, so the
+    /// unsolicited learn became permanent. It must stay leased and age
+    /// out, while a state proving independent kernel reachability
+    /// (REACHABLE) still promotes. IPv4 and IPv6 arms.
+    #[test]
+    fn stale_echo_does_not_promote_xsk_learn_but_reachable_does_15769() {
+        let monitored = FastSet::from_iter([7]);
+        let mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x42];
+
+        // IPv4: unsolicited XSK ARP learn at t=100, echoed as STALE.
+        let ip4 = Ipv4Addr::new(10, 0, 157, 1);
+        let key4 = (7, IpAddr::V4(ip4));
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        assert_eq!(
+            neighbors.insert_arp_reply_if_solicited_allows_at(
+                key4,
+                NeighborEntry { mac },
+                false,
+                100,
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_body(7, ip4, mac, NUD_STALE),
+                &monitored,
+                &neighbors
+            ),
+            NeighborMsgEffect::None,
+            "the STALE echo itself is a same-MAC no-change"
+        );
+        assert_eq!(
+            age_all(&neighbors, leased_expiry(100)),
+            1,
+            "a self-installed NUD_STALE echo must not clear the XSK lease"
+        );
+        assert!(neighbors.get(&key4).is_none());
+
+        // IPv4 positive control: REACHABLE is independent confirmation.
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        assert_eq!(
+            neighbors.insert_arp_reply_if_solicited_allows_at(
+                key4,
+                NeighborEntry { mac },
+                false,
+                100,
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_body(7, ip4, mac, NUD_REACHABLE),
+                &monitored,
+                &neighbors
+            ),
+            NeighborMsgEffect::None,
+        );
+        assert_eq!(age_all(&neighbors, leased_expiry(100)), 0);
+        assert_eq!(neighbors.get(&key4).map(|e| e.mac), Some(mac));
+
+        // IPv6: unsolicited XSK NA learn at t=100, echoed as STALE.
+        let ip6 = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x42);
+        let key6 = (7, IpAddr::V6(ip6));
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        assert_eq!(
+            neighbors.insert_ndp_na_if_override_allows_at(
+                key6,
+                NeighborEntry { mac },
+                true,
+                false,
+                100,
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_v6_body(7, ip6, mac, NUD_STALE),
+                &monitored,
+                &neighbors
+            ),
+            NeighborMsgEffect::None,
+        );
+        assert_eq!(
+            age_all(&neighbors, leased_expiry(100)),
+            1,
+            "a self-installed NUD_STALE echo must not clear the XSK NA lease"
+        );
+        assert!(neighbors.get(&key6).is_none());
+
+        // IPv6 positive control: PERMANENT promotes.
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        assert_eq!(
+            neighbors.insert_ndp_na_if_override_allows_at(
+                key6,
+                NeighborEntry { mac },
+                true,
+                false,
+                100,
+            ),
+            Some(true)
+        );
+        parse_neighbor_msg(
+            28,
+            &newneigh_v6_body(7, ip6, mac, NUD_PERMANENT),
+            &monitored,
+            &neighbors,
+        );
+        assert_eq!(age_all(&neighbors, leased_expiry(100)), 0);
+        assert_eq!(neighbors.get(&key6).map(|e| e.mac), Some(mac));
+    }
+
+    /// #15769: a kernel-originated STALE first-learn (no prior leased
+    /// entry — e.g. a fresh dump/re-dump row) is kernel-backed at birth:
+    /// it must NOT acquire an RX lease, or quiet genuine neighbors would
+    /// age out. Pins that the STALE gate only suppresses promotion of
+    /// an already-leased entry, not the kernel first-insert itself.
+    #[test]
+    fn kernel_stale_first_learn_stays_kernel_backed_15769() {
+        let monitored = FastSet::from_iter([7]);
+        let mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x43];
+        let now = monotonic_nanos();
+        let ip4 = Ipv4Addr::new(10, 0, 157, 2);
+        let key4 = (7, IpAddr::V4(ip4));
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_body(7, ip4, mac, NUD_STALE),
+                &monitored,
+                &neighbors
+            ),
+            NeighborMsgEffect::Upserted,
+        );
+        assert_eq!(neighbors.get(&key4).map(|e| e.mac), Some(mac));
+        assert_eq!(
+            age_all(&neighbors, leased_expiry(now)),
+            0,
+            "a kernel-originated STALE first-learn must not age out"
+        );
+        assert_eq!(neighbors.get(&key4).map(|e| e.mac), Some(mac));
+    }
+}
+
 #[cfg(test)]
 mod kernel_neighbor_v6_unsolicited_13660_tests {
     use super::*;
