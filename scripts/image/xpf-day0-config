@@ -19,12 +19,22 @@
 #      defeated the fix-and-reboot retry contract (see Retriability
 #      below): after the first boot the empty .configdb existed, so a
 #      rejected/absent drive could never be retried.
-#   2. Probe attached block devices for a config medium: any volume
-#      labeled `xpf-config` (any filesystem type), plus any ISO9660
-#      medium (the vSRX cdrom convention). The medium must carry
-#      xpf.conf — or juniper.conf as the vSRX-parity alias — at its
-#      root. `node-id` is optional for standalone configs; an HA cluster
-#      config requires an explicit `0` or `1`, enforced by check-config.
+#   2. Probe attached block devices for a config medium, in priority
+#      order: (a) any volume labeled `xpf-config` (any filesystem type),
+#      (b) any OpenStack/Cloud-Init config drive labeled `config-2` or
+#      `cidata` (any filesystem type, including vfat — OpenStack writes
+#      config drives as vfat, Cloud-Init NoCloud as vfat/iso9660),
+#      (c) any ISO9660 medium (the vSRX cdrom convention). On the medium
+#      the loader tries, in order, `xpf.conf` and `juniper.conf` at the
+#      volume root, then the vSRX/OpenStack cloud paths
+#      `OpenStack/latest/junos-config/configuration.txt`,
+#      `openstack/latest/user_data`, and `user-data` (#15785). A config
+#      file whose first line is exactly `#junos-config` (the vSRX
+#      user-data marker) has that one line stripped before validation/
+#      install; a `#junos-config` anywhere else is ordinary config text.
+#      `node-id` at the volume root is optional for standalone configs;
+#      an HA cluster config requires an explicit `0` or `1`, enforced
+#      by check-config.
 #   3. Validate with the REAL commit-check gate (`xpfd check-config`,
 #      configstore.CheckText: strict parse + #1319 SchemaValidate +
 #      strict compile). Only a config that a real commit would accept
@@ -37,8 +47,9 @@
 #      ordering-only (Before=, no Requires=) with a start timeout.
 #
 # Security posture: the config drive is UNTRUSTED operator input. It is
-# mounted ro,nosuid,nodev,noexec; only two fixed filenames at the volume
-# root are considered, each opened ONCE with O_NOFOLLOW and fstat-checked on
+# mounted ro,nosuid,nodev,noexec; only a fixed list of relative config
+# paths are considered (the two root names plus the three OpenStack
+# cloud paths above), each opened ONCE with O_NOFOLLOW and fstat-checked on
 # the fd (a symlink/fifo/swap fails the read, never the guard — #9921 F-147);
 # the config is size-capped (here and again inside `xpfd check-config`);
 # node-id must be literally `0` or `1`; medium reads and validation run under
@@ -183,9 +194,13 @@ regen_ssh_host_keys() {
 	fi
 }
 
-# Candidate devices: labeled volumes first (explicit operator intent),
-# then any ISO9660 medium (vSRX cdrom parity). blkid is run under
-# timeout: a faulty/hung virtual medium must not consume the unit's
+# Candidate devices, in priority order: (1) volumes labeled `xpf-config`
+# (explicit operator intent, any filesystem), (2) OpenStack/Cloud-Init
+# config drives labeled `config-2` or `cidata` (any filesystem —
+# OpenStack writes config drives as vfat, Cloud-Init NoCloud as
+# vfat/iso9660 — so NO TYPE= filter may gate these labels), (3) any
+# ISO9660 medium (vSRX cdrom parity). blkid is run under timeout: a
+# faulty/hung virtual medium must not consume the unit's
 # TimeoutStartSec and delay xpfd/sshd by the full backstop.
 #
 # The dedup MUST NOT reorder (#6502). `| sort -u` alphabetized the merged
@@ -199,20 +214,57 @@ regen_ssh_host_keys() {
 # REJECT does not stamp; the wrong-winner case is both-valid-different.
 #
 # `awk 'NF && !seen[$0]++'` over the CONCATENATED stream keeps
-# first-appearance order, so pass 1 (labeled) is exhausted before pass 2
-# (ISO) contributes anything. It also dedups ACROSS the passes, which a
-# per-pass dedup would not: a medium that is BOTH labeled and iso9660
-# appears exactly once, in its LABELED position, so explicit intent still
-# wins for that device. NF drops blank lines from the raw output — hygiene,
-# not a behaviour change: `devs=$(probe_devices)` strips trailing newlines
-# and `for dev in $devs` word-splits, so a blank line could never have become
-# a probed device. It keeps the function's own output honest for anything
-# that reads it directly.
+# first-appearance order, so pass 1 (xpf-config) is exhausted before
+# pass 2 (config-2/cidata) and pass 3 (ISO) contribute anything. It also
+# dedups ACROSS the passes, which a per-pass dedup would not: a medium
+# that is BOTH labeled and iso9660 appears exactly once, in its LABELED
+# position, so explicit intent still wins for that device. NF drops
+# blank lines from the raw output — hygiene, not a behaviour change:
+# `devs=$(probe_devices)` strips trailing newlines and `for dev in $devs`
+# word-splits, so a blank line could never have become a probed device.
+# It keeps the function's own output honest for anything that reads it
+# directly.
 probe_devices() {
 	{
 		timeout 15 blkid -o device -t LABEL=xpf-config 2>/dev/null || true
+		timeout 15 blkid -o device -t LABEL=config-2 2>/dev/null || true
+		timeout 15 blkid -o device -t LABEL=cidata 2>/dev/null || true
 		timeout 15 blkid -o device -t TYPE=iso9660 2>/dev/null || true
 	} | awk 'NF && !seen[$0]++'
+}
+
+# strip_junos_config_header <file> — if the file's FIRST line is exactly
+# `#junos-config` (the vSRX cloud user-data marker: "the string
+# #junos-config must be the first line"), remove that one line (and its
+# CRLF, if any) so check-config sees the Junos config that follows.
+# Any other first line — including `#junos-config` with trailing text or
+# the marker on a later line — is left untouched and never rejects: the
+# parser treats a leading `#` line as a comment anyway, so the strip is
+# a normalization, not a gate. The rewrite reuses the validated-byte
+# discipline: it edits only the private tmpconf copy, never the medium.
+strip_junos_config_header() {
+	local file="$1" first=""
+	IFS= read -r first <"$file" || first=""
+	# `read` splits on \n only: a CRLF first line keeps its trailing CR.
+	# Normalize exactly that one trailing CR before the exact compare.
+	first="${first%$'\r'}"
+	if [ "$first" = "#junos-config" ]; then
+		log "stripping #junos-config user-data header from $(basename "$file") copy"
+		# tail starts at byte after first newline; if the file is ONLY
+		# the header, tail yields empty and the size check below rejects.
+		local stripped
+		stripped=$(mktemp /run/xpf-day0-stripped.XXXXXX) || return 1
+		if ! tail -n +2 "$file" >"$stripped"; then
+			rm -f "$stripped"
+			return 1
+		fi
+		if ! cat "$stripped" >"$file"; then
+			rm -f "$stripped"
+			return 1
+		fi
+		rm -f "$stripped"
+	fi
+	return 0
 }
 
 # try_device <dev> — returns 0 if a config was validated and installed.
@@ -240,7 +292,10 @@ try_device() {
 		return 1
 	}
 	local f
-	for f in xpf.conf juniper.conf; do
+	for f in xpf.conf juniper.conf \
+		OpenStack/latest/junos-config/configuration.txt \
+		openstack/latest/user_data \
+		user-data; do
 		# rc capture WITHOUT `!` (`if !` would negate $?): ENOENT(10)
 		# tries the alias silently; any other failure warns and tries it.
 		safe_read_medium "$MNT/$f" "$((MAX_CONF_BYTES + 1))" >"$tmpconf" 2>/dev/null
@@ -254,7 +309,13 @@ try_device() {
 		fi
 	done
 	if [ -z "$conf" ]; then
-		log "$dev carries no readable xpf.conf/juniper.conf at its root — skipping"
+		log "$dev carries no readable xpf.conf/juniper.conf/OpenStack/latest/junos-config/configuration.txt/openstack/latest/user_data/user-data — skipping"
+		rm -f "$tmpconf"
+		umount "$MNT"
+		return 1
+	fi
+	if ! strip_junos_config_header "$tmpconf"; then
+		warn "could not strip #junos-config header from $conf copy — skipping $dev"
 		rm -f "$tmpconf"
 		umount "$MNT"
 		return 1

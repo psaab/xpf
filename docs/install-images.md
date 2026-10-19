@@ -372,7 +372,7 @@ each VM its own copy-on-write overlay. Put the verified image there with
 |---|---|
 | First vNIC is fxp0 (OOB mgmt), rest map to ge-0/0/N in attach order | Identical: `enumerateAndRenameInterfaces()` assigns fxp0 / em0 (cluster) / ge-X-0-N by PCI bus order |
 | Factory default: fxp0 DHCP, root console login, no password | Identical: fxp0 DHCP bootstrap (gated on the `/etc/xpf/appliance` marker — see below); root login on the hypervisor console with empty password; sshd refuses empty/root-password auth |
-| Day-0 config: ISO with `juniper.conf` at the root, attached as CD-ROM | ISO (or any volume labeled `xpf-config`) with `xpf.conf` at the root — `juniper.conf` accepted as an alias; optional `node-id` file (`0`/`1`) for cluster members |
+| Day-0 config: ISO with `juniper.conf` at the root, attached as CD-ROM; OpenStack config drive / cloud-init user-data | ISO (or any volume labeled `xpf-config`, or an OpenStack/Cloud-Init drive labeled `config-2`/`cidata` including vfat) with `xpf.conf` at the root — `juniper.conf` accepted as an alias, plus `OpenStack/latest/junos-config/configuration.txt`, `openstack/latest/user_data`, and `user-data` (a leading `#junos-config` line is stripped); optional `node-id` file (`0`/`1`) at the volume root for cluster members |
 | Bad day-0 config: boots factory-default | Identical, but stricter: the config is validated with the REAL commit-check gate (`xpfd check-config`) BEFORE install; a REJECT logs loudly and the system stays factory-default |
 | Day-0 applied once | Applied at most once: stamped after success; never clobbers an existing config (a COMMITTED `.configdb/active.json` or a preseeded `xpf.conf`). A REJECTED medium does not stamp — fix the config and reboot to retry while the system is still factory-default |
 
@@ -380,19 +380,26 @@ Day-0 loader specifics (`scripts/image/xpf-day0-config`, oneshot unit
 `Before=xpfd.service`):
 
 - Probes volumes labeled `xpf-config` (any filesystem) **first**, then
-  any ISO9660 medium. That order is the contract, not an accident:
-  a labeled volume is explicit operator intent and the ISO is the
-  vSRX-parity fallback, so with two valid-but-different media attached
-  the **labeled volume's** config is the one installed and stamped.
-  The dedup deliberately preserves first-appearance order
+  OpenStack/Cloud-Init config drives labeled `config-2` or `cidata`
+  (any filesystem, including vfat — no filesystem-type gate on those
+  labels), then any ISO9660 medium (#15785). That order is the contract,
+  not an accident: a labeled volume is explicit operator intent and the
+  ISO is the vSRX-parity fallback, so with two valid-but-different media
+  attached the **earlier-probed medium's** config is the one installed
+  and stamped. The dedup deliberately preserves first-appearance order
   (`awk 'NF && !seen[$0]++'`) rather than sorting — `| sort -u`
   alphabetized the merged list, so an ISO at `/dev/sda` beat a labeled
   volume at `/dev/sdb`, and any `/dev/sd*` ISO beat a virtio-blk
   `/dev/vd*` volume (#6502). Kernel device-name order is not operator
   intent. A medium that is both labeled and ISO9660 is probed once, in
-  its labeled position. Mounted `ro,nosuid,nodev,noexec`; only the two
-  fixed filenames at the volume root are considered; 4 MiB size cap;
-  validation under timeout. Nothing on the medium is executed.
+  its labeled position. Mounted `ro,nosuid,nodev,noexec`; only five
+  fixed relative paths are considered, in order — `xpf.conf`,
+  `juniper.conf`, `OpenStack/latest/junos-config/configuration.txt`,
+  `openstack/latest/user_data`, `user-data` — each read once with
+  `O_NOFOLLOW`; a first line that is exactly `#junos-config` (the vSRX
+  user-data marker) is stripped from the private copy before
+  validation/install; 4 MiB size cap; validation under timeout.
+  Nothing on the medium is executed.
 - On PASS, the optional HA `node-id` is installed durably before
   `/etc/xpf/xpf.conf` becomes visible. The config is installed mode 0600
   (it may carry credential material) via a same-directory temporary file,
