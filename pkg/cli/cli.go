@@ -132,6 +132,12 @@ type CLI struct {
 	username              string
 	uid                   int
 	userClass             string
+	// configOwned records that THIS CLI session itself passed the gated
+	// `configure` verb and holds (or held) the local config lock under
+	// localConfigSessionID (#14986). dispatch must not infer ownership
+	// from the store-global InConfigMode flag, which any other surface's
+	// session flips.
+	configOwned bool
 	// pendingPipeSuffix carries the output-pipe suffix that cliterm.SplitPipe
 	// removed, so the #7172 command gate can match the command as the operator
 	// typed it. Junos counts the pipe as part of the command, and a gate that

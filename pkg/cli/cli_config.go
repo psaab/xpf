@@ -31,6 +31,19 @@ import (
 // snapshot keeps Config: cfg) and status/control readers observe it under
 // the userspace mutex, so a post-apply Warnings write would race readers
 // this goroutine holds no lock against, on BOTH paths below.
+
+// cliConfigSessionID returns the holder identity this CLI must present to
+// session-scoped store mutators (#14986): its own local lock when it
+// acquired configure itself, "" (internal) only for the legacy unset-class
+// path. A named holder lets ensureHolderLocked refuse mutation of a
+// candidate owned by another session instead of the empty-session bypass.
+func (c *CLI) cliConfigSessionID() string {
+	if c.configOwned {
+		return localConfigSessionID
+	}
+	return ""
+}
+
 func (c *CLI) commitApply(compiled *config.Config) *config.Config {
 	if c.applyConfigFn != nil {
 		// #9841: the daemon-backed hybrid. applyConfigFn reports no
@@ -86,9 +99,9 @@ func (c *CLI) handleCopyRename(line string) error {
 		dstPath = append(append([]string{}, editPath...), dstPath...)
 	}
 	if cmd == "rename" {
-		return c.store.RenameAsPlantClass("", config.EventPlantClassForMutation(c.userClass), srcPath, dstPath)
+		return c.store.RenameAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.userClass), srcPath, dstPath)
 	}
-	return c.store.CopyAsPlantClass("", config.EventPlantClassForMutation(c.userClass), srcPath, dstPath)
+	return c.store.CopyAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.userClass), srcPath, dstPath)
 }
 
 // handleInsert handles:
@@ -114,7 +127,7 @@ func (c *CLI) handleInsert(line string) error {
 		return nil
 	}
 	refPath := config.InsertRefPath(elemPath, refTokens)
-	return c.store.InsertAsPlantClass("", config.EventPlantClassForMutation(c.userClass), elemPath, refPath, isBefore)
+	return c.store.InsertAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.userClass), elemPath, refPath, isBefore)
 }
 
 // readLine reads one line of terminal input, honouring the readLineFn test
@@ -143,7 +156,7 @@ func (c *CLI) handleLoad(args []string) error {
 		if err := config.AuthorizeConfigLoad(loadCfg, c.userClass, "rescue", ""); err != nil {
 			return err
 		}
-		if err := c.store.LoadRescueAsPlantClass("", config.EventPlantClassForMutation(c.userClass)); err != nil {
+		if err := c.store.LoadRescueAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.userClass)); err != nil {
 			return fmt.Errorf("load rescue: %w", err)
 		}
 		fmt.Println("load rescue complete")
@@ -252,7 +265,7 @@ func (c *CLI) handleLoad(args []string) error {
 
 	switch mode {
 	case "set":
-		count, err := c.store.LoadSetAsPlantClass("", config.EventPlantClassForMutation(c.userClass), content)
+		count, err := c.store.LoadSetAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.userClass), content)
 		if err != nil {
 			return fmt.Errorf("load set: %w", err)
 		}
@@ -262,9 +275,9 @@ func (c *CLI) handleLoad(args []string) error {
 		var err error
 		switch mode {
 		case "override":
-			err = c.store.LoadOverrideAsPlantClass("", config.EventPlantClassForMutation(c.userClass), content)
+			err = c.store.LoadOverrideAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.userClass), content)
 		case "merge":
-			err = c.store.LoadMergeAsPlantClass("", config.EventPlantClassForMutation(c.userClass), content)
+			err = c.store.LoadMergeAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.userClass), content)
 		}
 		if err != nil {
 			return fmt.Errorf("load %s: %w", mode, err)
@@ -275,6 +288,14 @@ func (c *CLI) handleLoad(args []string) error {
 }
 
 func (c *CLI) handleCommit(args []string) error {
+	// #14986: commit is a PermConfig mutation; handleCommit is also
+	// reachable via `run commit`-style re-entry and direct callers.
+	if err := c.checkPermission([]string{"configure"}); err != nil {
+		return err
+	}
+	if holder, locked := c.store.ConfigHolder(); locked && holder != "" && holder != localConfigSessionID && (c.configOwned || c.userClass != "") {
+		return fmt.Errorf("permission denied: configuration is locked by another session")
+	}
 	if len(args) > 0 && args[0] == "check" {
 		compiled, err := c.store.CommitCheck()
 		if err != nil {
@@ -363,7 +384,7 @@ func (c *CLI) handleCommit(args []string) error {
 	// AND clears the confirm timer, so the edits are committed rather than
 	// silently dropped (the pre-#4000 intercept confirmed-and-discarded).
 	if c.store.IsConfirmPending() && !c.store.IsDirty() {
-		if err := c.store.ConfirmCommit(); err != nil {
+		if err := c.store.ConfirmCommitAs(c.cliConfigSessionID()); err != nil {
 			return fmt.Errorf("confirm commit: %w", err)
 		}
 		fmt.Println("commit confirmed")

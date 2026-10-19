@@ -15,12 +15,86 @@ import (
 
 var errExit = fmt.Errorf("exit")
 
+// localConfigSessionID is the config-lock holder identity the in-process
+// CLI stamps on its own configure/configure-exclusive acquisition (#14986).
+// Every other surface carries a peer/session holder; the console used to
+// acquire with "" / "cli", which effectiveHolderLocked could not tell
+// apart from the internal/system bypass and from another holder's lock.
+const localConfigSessionID = "local-cli"
+
+// configModeEntryAllowed reports whether THIS CLI session owns a
+// config-mode entry it acquired itself (via the gated `configure` verb)
+// or no RBAC is in force (unset class, legacy no-RBAC mode).
+// #14986: the store's config mode is GLOBAL — any gRPC/REST/daemon holder
+// flips it. Routing on that flag alone let a read-only console user ride
+// another holder's session into full PermConfig mutation.
+func (c *CLI) configModeEntryAllowed() bool {
+	return c.configOwned || c.userClass == ""
+}
+
+// checkConfigModePerm enforces the coarse PermConfig price of entering
+// and mutating inside config mode. dispatchConfig previously carried
+// only the *-configuration regex gate, which a built-in class with no
+// regexes (read-only/unauthorized/operator) passes trivially.
+// Read-only affordances (show, ?, help, exit, quit) stay available so a
+// view class caught in a globally-held config mode is not trapped.
+func (c *CLI) checkConfigModePerm(line string) error {
+	if c.userClass == "" {
+		return nil
+	}
+	verb := ""
+	if f := strings.Fields(line); len(f) > 0 {
+		verb = f[0]
+	}
+	switch verb {
+	case "show", "?", "help", "exit", "quit":
+		return nil
+	}
+	return c.checkPermission([]string{"configure"})
+}
+
 func (c *CLI) dispatch(line string) error {
 	if cmd, pipeType, pipeArg, ok := cliterm.SplitPipe(line); ok {
 		return c.dispatchWithPipe(cmd, pipeType, pipeArg)
 	}
 
 	if c.store.InConfigMode() {
+		// #14986: never route into config mode on the global flag
+		// alone. A session that did not itself pass the gated
+		// `configure` verb gets operational dispatch (whose
+		// checkPermission prices `configure` at PermConfig); if some
+		// other holder owns the lock it must not be mutated or
+		// committed through this CLI either.
+		foreign := false
+		if holder, locked := c.store.ConfigHolder(); locked && holder != "" && holder != localConfigSessionID {
+			foreign = true
+		}
+		if !c.configModeEntryAllowed() || foreign {
+			if err := c.checkConfigModePerm(line); err != nil {
+				return err
+			}
+			if foreign {
+				if f := strings.Fields(line); len(f) > 0 {
+					switch f[0] {
+					case "show", "?", "help":
+						return c.dispatchConfig(line)
+					}
+				}
+				return fmt.Errorf("permission denied: configuration is locked by another session")
+			}
+			// Non-foreign, not owned: a PermConfig class may use config
+			// verbs; a view class may still use config-mode `show`.
+			if f := strings.Fields(line); len(f) > 0 && (f[0] == "show" || f[0] == "?" || f[0] == "help") {
+				return c.dispatchConfig(line)
+			}
+			// Own-class PermConfig holder whose entry predates the
+			// session flag (tests / direct dispatchConfig callers):
+			// fall through to dispatchConfig below.
+			if err := c.checkPermission([]string{"configure"}); err == nil {
+				return c.dispatchConfig(line)
+			}
+			return c.dispatchOperational(line)
+		}
 		return c.dispatchConfig(line)
 	}
 
@@ -306,17 +380,23 @@ func (c *CLI) dispatchOperational(line string) error {
 			return fmt.Errorf("error: node is not primary for RG0, configure on the primary node")
 		}
 		if len(parts) >= 2 && parts[1] == "exclusive" {
-			if err := c.store.EnterConfigureExclusive("cli"); err != nil {
+			if err := c.store.EnterConfigureExclusive(localConfigSessionID); err != nil {
 				return err
 			}
-			c.rl.SetPrompt(c.configPrompt())
+			c.configOwned = true
+			if c.rl != nil {
+				c.rl.SetPrompt(c.configPrompt())
+			}
 			fmt.Println("Entering configuration mode (exclusive)")
 			fmt.Println("[edit]")
 		} else {
-			if err := c.store.EnterConfigure(); err != nil {
+			if err := c.store.EnterConfigureSession(localConfigSessionID); err != nil {
 				return err
 			}
-			c.rl.SetPrompt(c.configPrompt())
+			c.configOwned = true
+			if c.rl != nil {
+				c.rl.SetPrompt(c.configPrompt())
+			}
 			fmt.Println("Entering configuration mode")
 			fmt.Println("[edit]")
 		}
@@ -348,10 +428,25 @@ func (c *CLI) dispatchConfig(line string) error {
 		return nil
 	}
 
-	// #7172: deny-configuration. THE FIRST per-command authorization on this
-	// path — until now `configure` was all-or-nothing and every mutation inside
-	// config mode ran unchecked.
-	//
+	// #14986: coarse PermConfig gate. dispatch() already enforces this on
+	// the routed path, but direct callers (including `run …` re-entry and
+	// tests) must not reach a mutating verb on regexes alone.
+	if err := c.checkConfigModePerm(line); err != nil {
+		return err
+	}
+	// #14986: a candidate exclusively held by another session must not be
+	// mutated/committed from this CLI through the empty-session bypass.
+	if holder, locked := c.store.ConfigHolder(); locked && holder != "" && holder != localConfigSessionID {
+		switch parts[0] {
+		case "show", "?", "help":
+		default:
+			return fmt.Errorf("permission denied: configuration is locked by another session")
+		}
+	}
+	sessionID := ""
+	if c.configOwned {
+		sessionID = localConfigSessionID
+	}
 	// Before the switch, so one gate covers every mutating verb rather than
 	// nine copies drifting apart. The gate resolves the current edit path
 	// itself: each case below prefixes `store.GetEditPath()`, so matching the
@@ -415,25 +510,25 @@ func (c *CLI) dispatchConfig(line string) error {
 			return fmt.Errorf("set: missing path")
 		}
 		fullPath := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), parts[1:]...)
-		return c.store.SetFromInputAsPlantClass("", config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
+		return c.store.SetFromInputAsPlantClass(sessionID, config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
 	case "delete":
 		if len(parts) < 2 {
 			return fmt.Errorf("delete: missing path")
 		}
 		fullPath := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), parts[1:]...)
-		return c.store.DeleteFromInputAsPlantClass("", config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
+		return c.store.DeleteFromInputAsPlantClass(sessionID, config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
 	case "deactivate":
 		if len(parts) < 2 {
 			return fmt.Errorf("deactivate: missing path")
 		}
 		fullPath := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), parts[1:]...)
-		return c.store.DeactivateFromInputAsPlantClass("", config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
+		return c.store.DeactivateFromInputAsPlantClass(sessionID, config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
 	case "activate":
 		if len(parts) < 2 {
 			return fmt.Errorf("activate: missing path")
 		}
 		fullPath := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), parts[1:]...)
-		return c.store.ActivateFromInputAsPlantClass("", config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
+		return c.store.ActivateFromInputAsPlantClass(sessionID, config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
 	case "copy", "rename":
 		return c.handleCopyRename(line)
 	case "insert":
@@ -471,7 +566,7 @@ func (c *CLI) dispatchConfig(line string) error {
 		if err := config.AuthorizeConfigRollback(rbCfg, c.userClass, n); err != nil {
 			return err
 		}
-		if err := c.store.RollbackAsPlantClass("", config.EventPlantClassForMutation(c.userClass), n); err != nil {
+		if err := c.store.RollbackAsPlantClass(sessionID, config.EventPlantClassForMutation(c.userClass), n); err != nil {
 			return err
 		}
 		fmt.Println("configuration rolled back")
@@ -500,7 +595,7 @@ func (c *CLI) dispatchConfig(line string) error {
 			return nil
 		}
 		pathParts := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), relPath...)
-		if err := c.store.AnnotateAsPlantClass("", config.EventPlantClassForMutation(c.userClass), pathParts, comment); err != nil {
+		if err := c.store.AnnotateAsPlantClass(sessionID, config.EventPlantClassForMutation(c.userClass), pathParts, comment); err != nil {
 			return err
 		}
 		fmt.Println("annotation set")
@@ -509,8 +604,13 @@ func (c *CLI) dispatchConfig(line string) error {
 		if c.store.IsDirty() {
 			fmt.Println("warning: uncommitted changes will be discarded")
 		}
-		c.store.ExitConfigure()
-		c.rl.SetPrompt(c.operationalPrompt())
+		if c.configOwned {
+			c.store.ExitConfigure()
+			c.configOwned = false
+		}
+		if c.rl != nil {
+			c.rl.SetPrompt(c.operationalPrompt())
+		}
 		fmt.Println("Exiting configuration mode")
 		return nil
 	case "?", "help":

@@ -50,6 +50,21 @@ commit-accepts-any-string hole. The system-defined classes are:
 | `config-viewer` | view only (can display config; cannot enter `configure` to modify) |
 | `unauthorized` | nothing |
 
+**Config-mode entry is per-session, not global (#14986).** The config
+store's `InConfigMode()` is a single global flag flipped by ANY holder
+(a gRPC/REST session, the daemon, or the console). Routing console lines
+into config mode on that flag alone let a `read-only` / `unauthorized` /
+`operator` console user ride another holder's session and `set`/`commit`
+with full configure effect. The console now routes to config mode only
+when THIS session itself passed the gated `configure` verb (priced at
+`PermConfig`), stamps its acquisitions with the `local-cli` holder so
+another session's `configure exclusive` is honoured instead of bypassed
+via the empty-session store path, and prices every config-mode mutation
+verb (including `commit`) at `PermConfig` before the *-configuration
+regexes. View affordances (`show`, `?`, `help`, `exit`) remain available
+in a globally-held config mode; the unset-class legacy no-RBAC mode is
+unchanged.
+
 `super-user` is the only class that holds the destructive **maintenance**
 permission (`PermMaint`), which it reaches through `PermAll`. `operator` has
 `control` (so it can run benign `request`/`test` commands) but **not**
