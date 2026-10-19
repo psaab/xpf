@@ -895,7 +895,11 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 									case "client-type":
 										dc.ClientType = nodeVal(prop)
 									case "client-ia-type":
-										if v := nodeVal(prop); v != "" {
+										// #15063: multi leaf — accumulate every
+										// value across Keys[1:] and child nodes
+										// (bracket, block, flat and repeated
+										// spellings), not just nodeVal's first.
+										for _, v := range firewallMatchValues(prop) {
 											dc.ClientIATypes = append(dc.ClientIATypes, v)
 										}
 									case "prefix-delegating":

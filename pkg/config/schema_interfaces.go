@@ -294,7 +294,7 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 				"dynamic-dns": interfaceDynamicDNSSchema(),
 				"dhcpv6-client": {desc: "DHCPv6 client", children: map[string]*schemaNode{
 					"client-type":    {desc: "Client type", args: 1, placeholder: "<type>", children: nil},
-					"client-ia-type": {desc: "Client IA type", args: 1, placeholder: "<type>", children: nil},
+					"client-ia-type": {desc: "Client IA type", args: 1, multi: true, placeholder: "<type>", children: nil},
 					"prefix-delegating": {desc: "Prefix delegation", children: map[string]*schemaNode{
 						// #6587: both leaves were untyped `<length>` placeholders
 						// parsed with an unbounded strconv.Atoi whose error is
