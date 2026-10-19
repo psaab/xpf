@@ -19,6 +19,8 @@
 package frr
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net"
@@ -45,6 +47,232 @@ import (
 // constant here so the existing pkg/frr tests that reference it keep binding
 // the real value rather than being quietly decommissioned.
 const communityRegexChars = config.CommunityRegexChars
+
+// #15008 (A11-02): Junos names a community by its MEMBERS and requires
+// EVERY member to match a route: "The evaluation of all members must
+// be successful for the named community evaluation to be successful"
+// (Junos routing-policy community evaluation docs). One FRR
+// `bgp community-list ... permit <member>` line per member does NOT
+// express that: bgpd's community_list_match (bgpd/bgp_clist.c) walks
+// entries in order and returns on the FIRST permit entry whose set is
+// contained in the route, so any ONE member matched the whole list —
+// `from community X` was widened from ALL to ANY.
+//
+// The public name therefore renders as ONE permit entry whose value
+// is the conjunction:
+//   - all-literal (standard): all members space-joined on one line.
+//     bgpd parses the value with community_str2com into a SET and
+//     community_match requires every value of that set to be present
+//     in the route — exact AND over the literals.
+//   - any-regex (expanded): one entry whose pattern is a conjunction
+//     of positive lookaheads over the joined, sorted community string
+//     FRR matches expanded entries against (community_str joins the
+//     numerically sorted values with single spaces). Each member
+//     becomes its own factor: a literal member, whose textual form
+//     could appear as a substring of a longer value (65000:100 inside
+//     65000:1000) or split across a token boundary (1:2 inside the
+//     two tokens "65000:1 2:3"), is first anchored to a whole token —
+//     `(^| )member( |$)` — then wrapped as `(?=.*factor)`. A regex
+//     member is wrapped directly; its author-written anchors keep
+//     their meaning against the whole attribute string. Factors are
+//     joined with ".*" separators and the pattern ends with ".*": a
+//     pure sequence of lookaheads is not a consuming pattern, and
+//     FRR's unanchored regexec would otherwise have no match span to
+//     succeed on. This preserves the documented unanchored-regex
+//     semantics of single regex members (#2643) while requiring
+//     every member to be satisfied. Operational caveat: members that
+//     use backreferences, or an embedded "(?=" of their own, can
+//     interact with the wrapping; such members are vanishingly rare
+//     and the strict ValidCommunityMember gate still applies.
+//
+// `then community delete <name>` CANNOT reuse that AND entry: FRR's
+// community_list_match_delete strips a route value only when ONE
+// permit entry matches that single value, so an AND entry would
+// strip nothing. Delete therefore renders against a generated
+// per-member backing (communityDeleteListName) whose entries are
+// the separate per-member permit lines FRR needs to strip each
+// value, while the match-facing name stays conjunctive. The backing
+// is emitted for every multi-member definition (referenced or not)
+// so definition and reference can never drift; single-member
+// definitions render and delete exactly as before (the public name
+// IS the per-member entry).
+//
+// Both the match entry and the backing are keyed in FRR's flat
+// community-list namespace, so communityListCollision fails the apply
+// closed when two operator names normalize to the same FRR name, when
+// a generated backing would collide with any operator list, or when
+// two generated backings collide (mirroring routeFilterACLNameCollision).
+
+// communityListKind returns "expanded" when any member forces the
+// expanded kind (#2643 per-definition decision), else "standard".
+func communityListKind(members []string) string {
+	for _, member := range members {
+		if communityMemberIsRegex(member) {
+			return "expanded"
+		}
+	}
+	return "standard"
+}
+
+// communityListRenderable reports whether every member passes the
+// shared ValidCommunityMember predicate (#8449 belt).
+func communityListRenderable(members []string) bool {
+	for _, member := range members {
+		if err := config.ValidCommunityMember(member); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// communityDeleteNamespace marks every xpf-generated delete backing.
+const communityDeleteNamespace = "-xpf-del-"
+
+// communityDeleteListName derives the generated delete-backing name
+// for a multi-member community: the FRR-normalized public name, the
+// reserved marker, and a 64-bit digest of the RAW operator name (so
+// names that normalize alike still derive distinct backings — the
+// gate below refuses such configs anyway). Bounded well under FRR's
+// 128-byte identifier limit. The SAME value backs the backing
+// definition and every `set comm-list ... delete` reference.
+func communityDeleteListName(name string) string {
+	sum := sha256.Sum256([]byte(name))
+	var hashHex [16]byte
+	hex.Encode(hashHex[:], sum[:8])
+	const maxLen = 96
+	budget := maxLen - len(communityDeleteNamespace) - 16
+	base := frrName(name)
+	if len(base) > budget {
+		base = base[:budget]
+	}
+	return base + communityDeleteNamespace + string(hashHex[:])
+}
+
+// communityExpandedConjunction builds the single expanded permit
+// pattern requiring EVERY member (see the #15008 note above).
+// Duplicate members collapse to one factor. A single regex member
+// returns itself unchanged, preserving the pre-#15008 expanded render.
+func communityExpandedConjunction(members []string) string {
+	if len(members) == 1 {
+		return sanitizeFRRValue(members[0])
+	}
+	seen := make(map[string]bool, len(members))
+	factors := make([]string, 0, len(members))
+	for _, member := range members {
+		member = sanitizeFRRValue(member)
+		if seen[member] {
+			continue
+		}
+		seen[member] = true
+		factor := member
+		if !communityMemberIsRegex(member) {
+			factor = `(^| )` + factor + `( |$)`
+		}
+		factors = append(factors, `(?=.*`+factor+`)`)
+	}
+	return strings.Join(factors, ".*") + ".*"
+}
+
+// communityListCollision fails the apply CLOSED when rendered
+// community-lists would fuse in FRR's flat namespace: two operator
+// names normalizing to one FRR name, a generated delete backing
+// colliding with any operator list name, or two backings colliding.
+// Only multi-member definitions that actually render (renderable,
+// deduplicated non-empty) own a backing. Mirrors
+// routeFilterACLNameCollision; deterministic sorted order.
+func communityListCollision(po *config.PolicyOptionsConfig) error {
+	if po == nil || len(po.Communities) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(po.Communities))
+	for name := range po.Communities {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	seenFRR := make(map[string]string, len(names))
+	for _, name := range names {
+		fn := frrName(name)
+		if prev, ok := seenFRR[fn]; ok && prev != name {
+			return fmt.Errorf(
+				"communities %q and %q render as the same FRR community-list %q; "+
+					"FRR merges same-named lists and would silently alter a routing policy (#15008) — refusing to render",
+				prev, name, fn)
+		}
+		seenFRR[fn] = name
+	}
+	seenBacking := make(map[string]string, len(names))
+	for _, name := range names {
+		cd := po.Communities[name]
+		if cd == nil {
+			continue
+		}
+		uniq := dedupStrings(cd.Members)
+		if len(uniq) < 2 || !communityListRenderable(cd.Members) {
+			continue
+		}
+		backing := communityDeleteListName(name)
+		if prev, ok := seenFRR[backing]; ok {
+			return fmt.Errorf(
+				"community %q uses the generated delete-backing name %q reserved for community %q (#15008); "+
+					"FRR merges same-named lists and would silently alter a routing policy — rename the community",
+				prev, backing, name)
+		}
+		if prev, ok := seenBacking[backing]; ok && prev != name {
+			return fmt.Errorf(
+				"communities %q and %q map to the same generated delete-backing community-list %q (#15008); "+
+					"FRR would merge them and silently alter a routing policy — refusing to render",
+				prev, name, backing)
+		}
+		seenBacking[backing] = name
+	}
+	return nil
+}
+
+func dedupStrings(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// renderCommunityListDefinitions emits the match-facing conjunctive
+// entry for one community definition plus, for a multi-member
+// definition, its per-member delete backing. Unrenderable definitions
+// emit nothing (#8449). Empty/duplicate-collapsed single entries keep
+// the historical single-line render.
+func renderCommunityListDefinitions(b *strings.Builder, name string, cd *config.CommunityDef) {
+	if cd == nil || !communityListRenderable(cd.Members) {
+		return
+	}
+	members := dedupStrings(cd.Members)
+	if len(members) == 0 {
+		return
+	}
+	kind := communityListKind(cd.Members)
+	fn := frrName(name)
+	if kind == "expanded" {
+		fmt.Fprintf(b, "bgp community-list expanded %s permit %s\n", fn, communityExpandedConjunction(members))
+	} else {
+		vals := make([]string, len(members))
+		for i, member := range members {
+			vals[i] = sanitizeFRRValue(member)
+		}
+		fmt.Fprintf(b, "bgp community-list standard %s permit %s\n", fn, strings.Join(vals, " "))
+	}
+	if len(members) < 2 {
+		return
+	}
+	backing := communityDeleteListName(name)
+	for _, member := range members {
+		fmt.Fprintf(b, "bgp community-list %s %s permit %s\n", kind, backing, sanitizeFRRValue(member))
+	}
+}
 
 // communityMemberIsRegex reports whether a Junos community member value
 // contains regex / wildcard metacharacters and must be rendered into an
@@ -225,62 +453,14 @@ func (m *Manager) generatePolicyOptionsWithRefNodes14380(po *config.PolicyOption
 	sort.Strings(commNames)
 	for _, name := range commNames {
 		cd := po.Communities[name]
-		// FRR standard community-lists only accept literal community
-		// values (ASN:VALUE or well-known names); they REJECT regex /
-		// wildcard members (e.g. "65000:*", ".*") at config load, which
-		// fails the whole frr-reload of the managed section. An expanded
-		// community-list accepts a POSIX regex per member. FRR does NOT
-		// allow the same list NAME to be both standard and expanded, so
-		// the decision is per-DEFINITION: if ANY member is a regex/
-		// wildcard, the ENTIRE definition is rendered as `expanded`
-		// (literal members are valid regexes that match themselves);
-		// otherwise it stays `standard` (#2643).
-		listKind := "standard"
-		for _, member := range cd.Members {
-			if communityMemberIsRegex(member) {
-				listKind = "expanded"
-				break
-			}
-		}
-		// #8449 render-side belt, the community sibling of the #6686 as-path
-		// belt below. A member that forces the expanded list kind but is not a
-		// valid POSIX ERE fails FRR's regcomp — a CMD_WARNING_CONFIG_FAILED
-		// that exits the whole vtysh add-batch non-zero and fails the ENTIRE
-		// frr-reload, leaving every dynamic routing change stale. The strict
-		// commit gate (validatePolicyCommunityRegexStrict) hard-rejects it, but
-		// the tolerant Load / peer-sync paths only warn (#1960 no-brick), so the
-		// renderer must keep a leniently-loaded definition out of frr.conf.
-		//
-		// Omitting the list avoids poisoning the entire reload with a member
-		// FRR cannot compile, but omission alone does not settle how a dangling
-		// match behaves at each FRR stage. #10822 completes this belt below:
-		// reject terms over an absent community list render deny-all, while
-		// accept/non-terminating terms skip the dangling OR-branch.
-		//
-		// The omission is per-DEFINITION, not per-member, because FRR does not
-		// allow one list name to be both standard and expanded — a half-rendered
-		// list would change the kind decision made above. Same predicate as the
-		// commit gate: ValidCommunityMember is shared so the two cannot drift.
-		unrenderable := false
-		for _, member := range cd.Members {
-			if err := config.ValidCommunityMember(member); err != nil {
-				unrenderable = true
-				break
-			}
-		}
-		if unrenderable {
-			continue
-		}
-		for _, member := range cd.Members {
-			// #4097: sanitize the member so an embedded newline (from a
-			// leniently-loaded / peer-synced / rolled-back stored value)
-			// cannot inject an extra frr.conf line — parity with the auth
-			// / description fields. The listKind decision above reads the
-			// RAW members (a `\n` is not a regex metacharacter, so it does
-			// not by itself flip standard→expanded; the exploit's `^`/`$`
-			// do). The strict #1798 commit control-char gate rejects it outright.
-			fmt.Fprintf(&b, "bgp community-list %s %s permit %s\n", listKind, frrName(name), sanitizeFRRValue(member))
-		}
+		// #2643 per-definition kind and the #8449 unrenderable belt are
+		// applied inside renderCommunityListDefinitions (shared with
+		// communityListMissingAtRender via communityListKind /
+		// communityListRenderable so the two cannot drift). Emission is
+		// #15008: ONE conjunctive permit entry under the public name
+		// (all members must match), plus a per-member delete backing
+		// for multi-member definitions. See the #15008 note above.
+		renderCommunityListDefinitions(&b, name, cd)
 	}
 	if len(po.Communities) > 0 {
 		b.WriteString("!\n")
@@ -449,20 +629,30 @@ func asPathListMissingAtRender(po *config.PolicyOptionsConfig, name string) bool
 
 // communityListMissingAtRender reports whether `match community <name>` would
 // dangle: no such definition, or one the community-list loop omits because it
-// has no members or contains a member that fails ValidCommunityMember.
-// Keeping this predicate in step with the emission loop ensures every name
-// reported missing has no `bgp community-list` line in the render.
+// has no (deduplicated) members or contains a member that fails
+// ValidCommunityMember. Same predicates as renderCommunityListDefinitions
+// (communityListRenderable + dedup), so the two cannot drift.
 func communityListMissingAtRender(po *config.PolicyOptionsConfig, name string) bool {
 	cd := po.Communities[name]
-	if cd == nil || len(cd.Members) == 0 {
+	if cd == nil || len(dedupStrings(cd.Members)) == 0 {
 		return true
 	}
-	for _, member := range cd.Members {
-		if err := config.ValidCommunityMember(member); err != nil {
-			return true
+	return !communityListRenderable(cd.Members)
+}
+
+// communityDeleteTarget resolves a `then community delete <name>`
+// operand to the FRR list its delete clause must name: the generated
+// per-member backing for a rendered multi-member definition, else the
+// public FRR name (single-member, empty, and unrenderable definitions
+// keep the historical target — an unrenderable delete stays as
+// dangling as before, out of #15008 scope).
+func communityDeleteTarget(po *config.PolicyOptionsConfig, name string) string {
+	if po != nil {
+		if cd := po.Communities[name]; cd != nil && len(dedupStrings(cd.Members)) >= 2 && communityListRenderable(cd.Members) {
+			return communityDeleteListName(name)
 		}
 	}
-	return false
+	return frrName(name)
 }
 
 // prefixListRefMissingAtRender reports whether one per-family
@@ -1116,9 +1306,14 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				// community-list per line, so a multi-list
 				// `then community delete [ listA listB ]` emits one clause
 				// per referenced list — every name in order (#2902).
+				// #15008: a multi-member definition's public name is the
+				// conjunctive entry, which strips nothing per-value, so
+				// delete targets its generated per-member backing
+				// (communityDeleteTarget); single-member targets are
+				// unchanged.
 				for _, name := range term.CommunityDelete {
 					if name != "" {
-						fmt.Fprintf(&b, " set comm-list %s delete\n", frrName(name))
+						fmt.Fprintf(&b, " set comm-list %s delete\n", communityDeleteTarget(po, name))
 					}
 				}
 			default: // "" or "set" — whole-attribute replace

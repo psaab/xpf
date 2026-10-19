@@ -1600,6 +1600,35 @@ step. Both are required — neither sees the other's case:
   (uncommon); a literal-only definition stays `standard` (anchored exact
   match) and is unaffected. This is the same fail-closed-the-whole-reload
   class as the route-filter `ge`/`le` bounds above (#1880).
+- **Multi-member communities match ALL members (#15008, A11-02).**
+  Junos requires every member of a named community to match a route
+  ("The evaluation of all members must be successful for the named
+  community evaluation to be successful"). One FRR
+  `bgp community-list ... permit <member>` line per member does not
+  express that — bgpd's `community_list_match` returns on the first
+  permit entry contained in the route, so any one member matched the
+  whole list and `from community X` was widened from ALL to ANY.
+  `renderCommunityListDefinitions` therefore renders the public name
+  as ONE permit entry: all literals space-joined on a `standard`
+  line (bgpd's `community_match` requires every value of the parsed
+  set to be present — exact AND), or, when any member is a regex, one
+  `expanded` entry whose pattern is a conjunction of positive
+  lookaheads over the joined sorted community string, with literal
+  members first anchored to a whole token (`(^| )m( |$)`) so
+  `65000:100` cannot match inside `65000:1000` or across a token
+  boundary. Single-member and empty definitions render byte-identically
+  to before; duplicate members collapse. `then community delete X`
+  cannot use the AND entry (FRR's `community_list_match_delete` strips
+  a value only when one entry matches that single value), so delete
+  targets a generated per-member backing
+  (`<frrName>-xpf-del-<digest>`, `communityDeleteListName`) whose
+  per-member lines strip each value; `communityListCollision`
+  (wired into `ApplyFull`) fails the apply closed when two operator
+  names normalize to one FRR name or an operator name forges a
+  backing. Caveat: regex members using backreferences or an embedded
+  `(?=` interact with the lookahead wrapping; author-written `^`/`$`
+  keep whole-string meaning, which can be stricter than Junos's
+  per-value match for anchored multi-member regexes.
 - **Policy community references are validated at commit (#2881).** A
   policy-statement term's `from community <name>` renders `match community
   <name>` and `then community delete <name>` (the strip-by-list operation
