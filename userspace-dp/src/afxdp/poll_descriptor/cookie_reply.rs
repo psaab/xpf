@@ -54,6 +54,18 @@ pub(super) fn enqueue_syn_cookie_reply(
     reply: SynCookieReply,
     counters: &mut BatchCounters,
 ) -> bool {
+    // #15131 (#12864/#14642 parity): GRE/WireGuard decap replaces the
+    // inner frame with a synthetic Ethernet header whose MACs are zero
+    // and marks it TUNNEL_DECAP_INGRESS_FLAG. Both SYN-cookie legs
+    // reflect that header (write_reply_eth_header), so a challenged
+    // tunnel inner would emit an unencapsulated SYN-ACK / ACK-RST with
+    // dst/src MAC 00:00:00:00:00:00 on the physical underlay binding.
+    // Suppress before consuming the TX budget or counting as sent,
+    // exactly like the reject / ICMP-error / PTB gates.
+    if meta.meta_flags & crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG != 0 {
+        return false;
+    }
+
     // #12319 residual: both SYN-cookie SYN-ACK and ACK-RST reflect the
     // inbound source MAC. A stamped fabric source is synthetic, so such a
     // reply is unreachable backscatter; suppress it before consuming the TX
