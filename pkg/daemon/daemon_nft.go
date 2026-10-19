@@ -1106,11 +1106,19 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	}
 	// The real table now covers every desired destination, so any additive gap
 	// fence from a prior failed rerender is obsolete — a lingering gap would keep
-	// denying an address the real table now serves. Best effort: nftDeleteTable is
-	// idempotent (a no-op when absent, the common case), so a delete error here is
+	// denying an address the real table now serves. DeleteTable is idempotent
+	// (a no-op when absent, the common case). #15221 (A36-03): a delete error
+	// here means the gap table may STILL be installed and dropping, so track it
+	// exactly like the pre-activation delete below: retain the fence spec and
+	// OR the retention into GapFenceActive instead of swallowing the error into
+	// a Current report with no fence standing. Traffic stays fail-closed (the
+	// lingering fence only over-denies); the next successful real install
+	// retries the delete and clears the marker.
+	gapFenceRetained := false
 	if err := nftInstaller.DeleteTable(xnft.HostInboundGapTableName); err != nil {
 		slog.Warn("failed to delete obsolete host-inbound gap fence after successful real install",
 			"err", err)
+		gapFenceRetained = true
 	} else {
 		d.hostInboundGapFenceSpec = nil
 	}
@@ -1199,7 +1207,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		d.hostInboundEnforced.Store(true)
 		d.hostInboundCoveredAddrs = desiredDrop
 		d.hostInboundDHCPRetainedAddrs = hostInboundDestinationWideDropAddrs(views, unzonedV4, unzonedV6)
-		d.hostInboundGapFenceActive.Store(preActivationFenceRetained)
+		d.hostInboundGapFenceActive.Store(gapFenceRetained || preActivationFenceRetained)
 		d.noteHostInboundApplyFailed(time.Now())
 		return barrierHandoffErr
 	}
@@ -1213,7 +1221,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	d.noteHostInboundApplySucceeded()
 	// A successful real ruleset supersedes any prior failed gap-only attempt.
 	d.noteHostInboundGapApplyResult(nil)
-	d.hostInboundGapFenceActive.Store(preActivationFenceRetained)
+	d.hostInboundGapFenceActive.Store(gapFenceRetained || preActivationFenceRetained)
 	// #5789: the retained generation now covers EXACTLY this desired drop set.
 	// Record it so a later failed rerender can tell which destinations a
 	// subsequently-appeared address left uncovered.
@@ -1230,7 +1238,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			d.hostInboundEnforced.Store(true)
 			d.hostInboundCoveredAddrs = desiredDrop
 			d.hostInboundDHCPRetainedAddrs = hostInboundDestinationWideDropAddrs(views, unzonedV4, unzonedV6)
-			d.hostInboundGapFenceActive.Store(false)
+			d.hostInboundGapFenceActive.Store(gapFenceRetained || preActivationFenceRetained)
 			d.noteHostInboundApplyFailed(time.Now())
 			return fmt.Errorf("record early-input handoff after host-inbound install: %w", err)
 		}

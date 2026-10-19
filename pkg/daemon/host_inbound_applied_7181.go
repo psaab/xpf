@@ -54,12 +54,16 @@ type HostInboundAppliedState struct {
 	// from one that has been standing since boot.
 	LastFailureAt time.Time
 
-	// GapFenceActive reports that the #5789 ADDITIVE gap fence
-	// (inet xpf_hostinbound_gap) is installed — a later-appeared address is
-	// being denied by a separate table because the retained real generation has
-	// no rule for it. This is part of the applied truth: a box in this state is
-	// enforcing through two tables, and an operator diagnosing reachability
-	// needs to know which one is answering.
+	// GapFenceActive reports that a fence table stands beside the real
+	// host-inbound table: the #5789 ADDITIVE gap fence
+	// (inet xpf_hostinbound_gap — a later-appeared address is being denied
+	// by a separate table because the retained real generation has no rule
+	// for it), the pre-activation fence (#14356, same gap-table family), or
+	// a gap/pre-activation table whose delete FAILED after a successful
+	// real install and which therefore may still be dropping (#15221).
+	// This is part of the applied truth: a box in this state is enforcing
+	// through two tables, and an operator diagnosing reachability needs to
+	// know which one is answering.
 	GapFenceActive bool
 }
 
