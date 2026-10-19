@@ -102,13 +102,23 @@ func (s *Server) authorizeRPCCommand(cfg *config.Config, class, fullMethod strin
 
 	s.warnUnenforceableDenyPatternsOnce(class, rules)
 
+	// #14952: Complete is listed in configModeMethods9633, but it is NOT
+	// exempt from the operational gate. Unlike the other config-mode
+	// RPCs it carries the typed line, so there is an operational command
+	// to evaluate (`show configuration …`, or the line embedded after
+	// config-mode `run`). Adjudicate it below; an unreadable request
+	// denies for a restricted class.
+	if isConfigModeMethod9633(fullMethod) && !isCompleteMethod(fullMethod) {
+		return nil
+	}
+	if isCompleteMethod(fullMethod) {
+		return authorizeCompleteRPCCommand(class, rules, req)
+	}
+
 	// #9633: config-mode RPCs are governed by the `*-configuration` regexes
 	// (authorizeRPCConfigMutation), exactly as the on-box CLI's dispatchConfig
 	// applies only checkConfigRegex. Denying them here as "no canonical command"
 	// locked any class with an operational pattern out of configuration over gRPC.
-	if isConfigModeMethod9633(fullMethod) {
-		return nil
-	}
 
 	cmd, resolved := rpcCanonicalCommand(fullMethod, req)
 	if !resolved {
@@ -120,6 +130,98 @@ func (s *Server) authorizeRPCCommand(cfg *config.Config, class, fullMethod strin
 		return fmt.Errorf("login class %q denies %q (%s)", class, cmd, decision.Reason)
 	}
 	return nil
+}
+
+// isCompleteMethod reports whether fullMethod is the Complete RPC.
+func isCompleteMethod(fullMethod string) bool {
+	service, method, ok := splitFullMethod(fullMethod)
+	return ok && service == serviceName && method == completeMethodName
+}
+
+// authorizeCompleteRPCCommand applies the class's operational
+// allow/deny-commands rules to a Complete request (#14952).
+//
+// Unlike the other config-mode RPCs, Complete carries the typed line, so
+// there IS an operational command to evaluate: the line itself. The
+// handler adjudicates typed prefixes against these same rules for live
+// values (completionAuth.operationalAllowed), but that only suppresses
+// live candidates — the RPC itself was admitted at PermView with no
+// operational verdict at all, so a class with an allow-commands
+// allowlist that permits no completion line, or a deny on the bare
+// `show configuration` command, still received schema candidates for a
+// command it may not run. This gate is the admission verdict.
+//
+// The full line is adjudicated with EvaluateForms unanimity: the full
+// spelling plus the bare `show configuration` alternative where spelled
+// (so `^show configuration$` denies its sub-paths and an allowlist
+// exception written against the full command admits the line, mirroring
+// showConfigPathAllowed). Ancestor denies still fire because the deny
+// regexes match the full line partially unless anchored, and an
+// anchored ancestor deny is re-checked via the typed-prefix walk below
+// for the deny side only. Fail closed: an unreadable request denies
+// for a restricted class.
+func authorizeCompleteRPCCommand(class string, rules config.CompiledLoginRegexes, req any) error {
+	cr, isComplete := req.(*pb.CompleteRequest)
+	if !isComplete || cr == nil {
+		return fmt.Errorf(
+			"login class %q restricts commands and this Complete request cannot be "+
+				"read, so the restriction cannot be applied to it", class)
+	}
+	full, prefixes, isShowConfig := completeLineForms(cr)
+	if full == "" {
+		return nil
+	}
+	if isShowConfig {
+		if decision := rules.EvaluateForms(full, "show configuration"); !decision.Allowed {
+			return fmt.Errorf("login class %q denies %q (%s)", class, full, decision.Reason)
+		}
+	} else if decision := rules.Evaluate(full); !decision.Allowed {
+		return fmt.Errorf("login class %q denies %q (%s)", class, full, decision.Reason)
+	}
+	// Anchored ancestor deny: `^show configuration$`-style rules do not
+	// match the full line, so walk the typed prefixes for a tier denial.
+	// An allowlist-only miss on a prefix does not veto (EvaluateForms
+	// above already required the full line to be affirmatively allowed).
+	for _, prefix := range prefixes {
+		if decision := rules.Evaluate(prefix); !decision.Allowed && isTierDeny(decision) {
+			return fmt.Errorf("login class %q denies %q (%s)", class, prefix, decision.Reason)
+		}
+	}
+	return nil
+}
+
+// completeLineForms decomposes a Complete line into the full operational
+// command spelling, its typed prefixes, and whether it spells
+// `show configuration …`. Config-mode `run <line>` embeds a full
+// operational command, so the embedded line is the full form there.
+// Text after a `|` is pipe-filter text, not command text, and is dropped.
+func completeLineForms(req *pb.CompleteRequest) (full string, prefixes []string, isShowConfig bool) {
+	text := req.GetLine()
+	if req.GetPos() >= 0 && int(req.GetPos()) < len(text) {
+		text = text[:req.GetPos()]
+	}
+	if idx := strings.LastIndex(text, "|"); idx >= 0 {
+		text = text[:idx]
+	}
+	words := strings.Fields(text)
+	if req.GetConfigMode() && len(words) >= 2 && words[0] == "run" {
+		words = words[1:]
+	}
+	if len(words) == 0 {
+		return "", nil, false
+	}
+	full = strings.Join(words, " ")
+	for i := 1; i < len(words); i++ {
+		prefixes = append(prefixes, strings.Join(words[:i], " "))
+	}
+	_, isShowConfig = resolveShowConfigurationWords(words)
+	return full, prefixes, isShowConfig
+}
+
+// isTierDeny reports whether a decision was denied by a deny regex
+// winning/tieing the precedence tiers, as opposed to an allowlist miss.
+func isTierDeny(decision config.LoginRegexDecision) bool {
+	return !decision.Allowed && decision.DecidedBy == config.LoginRegexDeny
 }
 
 // rpcCanonicalCommand resolves the canonical operational command an RPC
