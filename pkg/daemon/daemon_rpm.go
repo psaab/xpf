@@ -12,10 +12,12 @@ package daemon
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,6 +30,15 @@ import (
 // the RETH→physical map (which affects destination-interface
 // resolution). Go's json.Marshal emits map keys in sorted order, so the
 // encoding is deterministic.
+//
+// The JSON payload alone is NOT sufficient (#15702): RPMTest.MarshalJSON
+// redacts Target via config.RedactURL, stripping query, fragment, and
+// userinfo, so an http-get target edit touching only those parts would
+// hash-collide and reconcileRPMMode would skip rpm.Apply. The raw
+// (unredacted) Target strings are therefore mixed into the digest in
+// sorted probe/test order with length prefixes, matching the raw-field
+// rationale of snmpConfigHash. The hash is in-memory only and is never
+// logged or persisted, so hashing the unredacted target leaks nothing.
 func rpmConfigHash(rpmCfg *config.RPMConfig, rethMap map[string]string) [32]byte {
 	payload := struct {
 		RPM     *config.RPMConfig
@@ -40,7 +51,44 @@ func rpmConfigHash(rpmCfg *config.RPMConfig, rethMap map[string]string) [32]byte
 		// silently skipping one.
 		return [32]byte{}
 	}
-	return sha256.Sum256(data)
+	h := sha256.New()
+	h.Write(data)
+	if rpmCfg != nil {
+		probeNames := make([]string, 0, len(rpmCfg.Probes))
+		for name := range rpmCfg.Probes {
+			probeNames = append(probeNames, name)
+		}
+		sort.Strings(probeNames)
+		writeRaw := func(s string) {
+			var l [8]byte
+			binary.LittleEndian.PutUint64(l[:], uint64(len(s)))
+			h.Write(l[:])
+			h.Write([]byte(s))
+		}
+		for _, probeName := range probeNames {
+			probe := rpmCfg.Probes[probeName]
+			if probe == nil {
+				continue
+			}
+			testNames := make([]string, 0, len(probe.Tests))
+			for name := range probe.Tests {
+				testNames = append(testNames, name)
+			}
+			sort.Strings(testNames)
+			for _, testName := range testNames {
+				test := probe.Tests[testName]
+				if test == nil {
+					continue
+				}
+				writeRaw(probeName)
+				writeRaw(testName)
+				writeRaw(test.Target)
+			}
+		}
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
 }
 
 // effectiveRPMConfig returns the RPM config that should actually run
