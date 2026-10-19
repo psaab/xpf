@@ -13,7 +13,10 @@ import (
 //
 // pkg/cluster deliberately holds no config, so the resolver is built here and
 // injected. It is rebuilt on every config apply, which is also when the ifindex
-// snapshot is taken.
+// snapshot is taken, and again on every interface-link snapshot refresh
+// (#15263: daemon_interface_link_refresh.go refreshIngressFoldClosures), so a
+// member netdev recreated without a commit does not leave the closures naming
+// its dead ifindex until the next commit.
 
 // buildIngressFoldFn returns the resolver SessionSync stamps outgoing sessions
 // with: a session's node-local {ifindex, vlan} to the fold of the interface's
@@ -24,10 +27,11 @@ import (
 // peer sends anyway. The failure mode of this whole path is degradation to the
 // #4792 zone approximation, never a wrong interface name.
 //
-// THE IFINDEX SNAPSHOT IS TAKEN ONCE PER APPLY, not per session: the send path
-// walks every session in a bulk sync, and a netlink round trip each would put a
-// syscall on that loop. A NIC that appears after this snapshot folds to 0 until
-// the next commit — it degrades, it does not lie. (A RECYCLED ifindex is the
+// THE IFINDEX SNAPSHOT IS TAKEN ONCE PER APPLY (and per link refresh,
+// #15263), not per session: the send path walks every session in a bulk sync,
+// and a netlink round trip each would put a syscall on that loop. A NIC that
+// appears after this snapshot folds to 0 until the next commit or link
+// refresh — it degrades, it does not lie. (A RECYCLED ifindex is the
 // one case that could name the wrong device; that is #6987, which predates this
 // change and is tracked separately for the local display path as well.)
 func buildIngressFoldResolver(cfg *config.Config) func(uint32) (uint32, uint16, bool) {

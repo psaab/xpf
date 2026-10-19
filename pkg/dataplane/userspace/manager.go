@@ -220,12 +220,12 @@ type Manager struct {
 	// persistentNatStaleDropLoggedAt rate-limits stale-batch (#14580)
 	// warnings per origin. Runtime-only; guarded by mu.
 	persistentNatStaleDropLoggedAt map[string]time.Time
-	cfg                                 config.UserspaceConfig
-	clusterHA                           bool
-	captureEpochProvider                CaptureEpochProvider
-	captureAuthorityCommitter           func(configGeneration uint64, snapshot *ConfigSnapshot)
-	policySnapshotCommitter             func(configGeneration uint64)
-	policySnapshotPrePublisher          func(generation uint64) error
+	cfg                            config.UserspaceConfig
+	clusterHA                      bool
+	captureEpochProvider           CaptureEpochProvider
+	captureAuthorityCommitter      func(configGeneration uint64, snapshot *ConfigSnapshot)
+	policySnapshotCommitter        func(configGeneration uint64)
+	policySnapshotPrePublisher     func(generation uint64) error
 	// policySnapshotPrepublishGeneration records the deferred full snapshot
 	// whose prepublish capture succeeded. Recovery reuses that proof only while
 	// its policy/rename identity remains unchanged, even if a partial publish
@@ -451,8 +451,11 @@ type Manager struct {
 
 	// ingressFoldResolver maps a peer's #7095 cluster-stable ingress fold to
 	// this node's own {ifindex, vlan}. Injected by the daemon, which owns both
-	// the config (reth -> local member) and the ifindex snapshot. Nil resolves
-	// nothing, which is the pre-#7095 import behaviour.
+	// the config (reth -> local member) and the ifindex snapshot; rebuilt on
+	// every apply and every interface-link refresh (#15263), and its answers
+	// are fenced against lastSnapshot in resolveIngressFoldLocked so a stale
+	// closure can never name a dead ifindex. Nil resolves nothing, which is
+	// the pre-#7095 import behaviour.
 	ingressFoldResolver func(uint32) (uint32, uint16, bool)
 	lastIngressIfaces   []uint32
 	// ingressInventoryAdopted records whether this Manager has reconciled

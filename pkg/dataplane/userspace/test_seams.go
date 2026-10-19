@@ -202,3 +202,14 @@ func (f *PolicySnapshotRecoveryFixtureForTest) StateForTest() PolicySnapshotReco
 		CtrlEnabled:   f.ctrl.value.Enabled,
 	}
 }
+
+// ResolveIngressFoldForTesting resolves a peer fold through the currently
+// installed ingress fold resolver under Manager.mu, exactly as the import
+// path does (including the #15263 snapshot fence). It lets daemon-level
+// cells observe that a link-refresh rebuild replaced the apply-time
+// closure without a helper round trip.
+func (m *Manager) ResolveIngressFoldForTesting(fold uint32) (uint32, uint16, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.resolveIngressFoldLocked(fold)
+}
