@@ -9705,6 +9705,8 @@ fn refresh_status_projects_ipsec_inner_counters() {
         .store(19, Ordering::Relaxed);
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL
         .store(23, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_VERDICT_QUEUE_CONTENDED_TOTAL
+        .store(43, Ordering::Relaxed);
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_SLAB_EXHAUSTED_TOTAL
         .store(29, Ordering::Relaxed);
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_RETIRED_TOTAL
@@ -9733,6 +9735,8 @@ fn refresh_status_projects_ipsec_inner_counters() {
         .store(before.ipsec_inner_worker_queue_full_total, Ordering::Relaxed);
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL
         .store(before.ipsec_inner_verdict_queue_full_total, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_VERDICT_QUEUE_CONTENDED_TOTAL
+        .store(before.ipsec_inner_verdict_queue_contended_total, Ordering::Relaxed);
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_SLAB_EXHAUSTED_TOTAL
         .store(before.ipsec_inner_slab_exhausted_total, Ordering::Relaxed);
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_RETIRED_TOTAL
@@ -9783,6 +9787,11 @@ fn refresh_status_projects_ipsec_inner_counters() {
         "the verdict-queue-full counter must reach its own status field"
     );
     assert_eq!(
+        guard.status.ipsec_inner_verdict_queue_contended_total,
+        43,
+        "the verdict-queue-contended counter must reach its own status field"
+    );
+    assert_eq!(
         guard.status.ipsec_inner_slab_exhausted_total,
         29,
         "the slab-exhausted counter must reach its own status field"
@@ -9822,6 +9831,7 @@ fn process_status_ipsec_inner_counters_serialize_under_snake_case_keys_9506() {
         ipsec_inner_ecn_illegal_drops: 17,
         ipsec_inner_worker_queue_full_total: 19,
         ipsec_inner_verdict_queue_full_total: 23,
+        ipsec_inner_verdict_queue_contended_total: 43,
         ipsec_inner_slab_exhausted_total: 29,
         ipsec_inner_worker_retired_total: 31,
         ipsec_inner_worker_orphan_reaped_total: 37,
@@ -9838,6 +9848,7 @@ fn process_status_ipsec_inner_counters_serialize_under_snake_case_keys_9506() {
         ("ipsec_inner_ecn_illegal_drops", 17),
         ("ipsec_inner_worker_queue_full_total", 19),
         ("ipsec_inner_verdict_queue_full_total", 23),
+        ("ipsec_inner_verdict_queue_contended_total", 43),
         ("ipsec_inner_slab_exhausted_total", 29),
         ("ipsec_inner_worker_retired_total", 31),
         ("ipsec_inner_worker_orphan_reaped_total", 37),

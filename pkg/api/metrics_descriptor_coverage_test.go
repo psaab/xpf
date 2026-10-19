@@ -673,6 +673,7 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_ipsec_inner_ecn_illegal_drops_total",
 		"xpf_userspace_ipsec_inner_worker_queue_full_total",
 		"xpf_userspace_ipsec_inner_verdict_queue_full_total",
+		"xpf_userspace_ipsec_inner_verdict_queue_contended_total", // #15150
 		"xpf_userspace_ipsec_inner_slab_exhausted_total",
 		"xpf_userspace_ipsec_inner_worker_retired_total",
 		"xpf_userspace_ipsec_inner_worker_orphan_reaped_total",

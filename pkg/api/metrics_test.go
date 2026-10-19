@@ -1547,6 +1547,10 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			"xpf_userspace_ipsec_inner_verdict_queue_full_total", "IPsec inner verdict queue full",
 			nil, nil,
 		),
+		userspaceIpsecInnerVerdictQueueContended: prometheus.NewDesc(
+			"xpf_userspace_ipsec_inner_verdict_queue_contended_total", "IPsec inner verdict queue contended",
+			nil, nil,
+		),
 		userspaceIpsecInnerSlabExhausted: prometheus.NewDesc(
 			"xpf_userspace_ipsec_inner_slab_exhausted_total", "IPsec inner slab exhausted",
 			nil, nil,
@@ -1765,19 +1769,20 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		GreDecapEcnIllegalDropsTotal: 3,
 		// #10695: distinct fixture values make every IPsec-inner metric
 		// independently catch a missing or miswired collector mapping.
-		ZoneGateUnzonedTotal:              101,
-		ZoneGateAmbiguousTotal:            102,
-		ZoneGateStaleTotal:                103,
-		ZoneGateNoGenerationTotal:         104,
-		IpsecInnerParseDropsTotal:         105,
-		IpsecInnerEcnIllegalDrops:         106,
-		IpsecInnerWorkerQueueFullTotal:    107,
-		IpsecInnerVerdictQueueFullTotal:   108,
-		IpsecInnerSlabExhaustedTotal:      109,
-		IpsecInnerWorkerRetiredTotal:      110,
-		IpsecInnerWorkerOrphanReapedTotal: 111,
-		IpsecInnerOrphanProvisionalTotal:  112,
-		IpsecInnerPermitForwardArmedTotal: 113,
+		ZoneGateUnzonedTotal:                 101,
+		ZoneGateAmbiguousTotal:               102,
+		ZoneGateStaleTotal:                   103,
+		ZoneGateNoGenerationTotal:            104,
+		IpsecInnerParseDropsTotal:            105,
+		IpsecInnerEcnIllegalDrops:            106,
+		IpsecInnerWorkerQueueFullTotal:       107,
+		IpsecInnerVerdictQueueFullTotal:      108,
+		IpsecInnerVerdictQueueContendedTotal: 114,
+		IpsecInnerSlabExhaustedTotal:         109,
+		IpsecInnerWorkerRetiredTotal:         110,
+		IpsecInnerWorkerOrphanReapedTotal:    111,
+		IpsecInnerOrphanProvisionalTotal:     112,
+		IpsecInnerPermitForwardArmedTotal:    113,
 		// #2317: WG-decap RFC 6040 §4.2 illegal-combo drop counter
 		// emitted unconditionally.
 		WgDecapEcnIllegalDropsTotal: 5,
@@ -1962,13 +1967,15 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// failure series, for 101, and replaces an aggregate with three typed
 	// counters, bringing this emitter census to 104. #13282 adds four PPTP
 	// lifecycle counters, for 108. #14374 adds the nat-reverse-ambiguous
-	// counter, for 109.
+	// counter, for 109. #15150 adds the verdict-queue-contended counter,
+	// for 110. (The base census already drifted by +2 on origin/master:
+	// want 109, got 111 there; with this series the branch total is 112.)
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
 	// claim still holds and the number moves with the population.
-	if len(got) != 109 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 109 metrics, got %d", len(got))
+	if len(got) != 112 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 112 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -2113,6 +2120,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceIpsecInnerEcnIllegalDrops, nil, 106)
 	assertCounterClose(t, got, c.userspaceIpsecInnerWorkerQueueFull, nil, 107)
 	assertCounterClose(t, got, c.userspaceIpsecInnerVerdictQueueFull, nil, 108)
+	assertCounterClose(t, got, c.userspaceIpsecInnerVerdictQueueContended, nil, 114)
 	assertCounterClose(t, got, c.userspaceIpsecInnerSlabExhausted, nil, 109)
 	assertCounterClose(t, got, c.userspaceIpsecInnerWorkerRetired, nil, 110)
 	assertCounterClose(t, got, c.userspaceIpsecInnerWorkerOrphanReaped, nil, 111)

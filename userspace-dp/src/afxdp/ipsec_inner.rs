@@ -14,8 +14,9 @@ use super::logical_ingress::{build_logical_ingress_packet, LogicalIngressParams}
 use super::ipsec_inner_queue::{
     reason, IpsecInnerDescriptor, IpsecInnerSlabPool, IpsecInnerVerdict, IpsecInnerVerdictQueue,
     IPSEC_INNER_ORPHAN_PROVISIONAL_TOTAL, IPSEC_INNER_SLAB_EXHAUSTED_TOTAL,
-    IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL, IPSEC_INNER_WORKER_ORPHAN_REAPED_TOTAL,
-    IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL, IPSEC_INNER_WORKER_RETIRED_TOTAL,
+    IPSEC_INNER_VERDICT_QUEUE_CONTENDED_TOTAL, IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL,
+    IPSEC_INNER_WORKER_ORPHAN_REAPED_TOTAL, IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL,
+    IPSEC_INNER_WORKER_RETIRED_TOTAL,
 };
 use super::{
     ForwardingDisposition, ForwardingState, IpsecTunnelRows, PMechInventory, RouteIdentity,
@@ -111,6 +112,7 @@ pub(crate) struct IpsecInnerCounterSnapshot {
     pub ipsec_inner_ecn_illegal_drops: u64,
     pub ipsec_inner_worker_queue_full_total: u64,
     pub ipsec_inner_verdict_queue_full_total: u64,
+    pub ipsec_inner_verdict_queue_contended_total: u64,
     pub ipsec_inner_slab_exhausted_total: u64,
     pub ipsec_inner_worker_retired_total: u64,
     pub ipsec_inner_worker_orphan_reaped_total: u64,
@@ -132,6 +134,8 @@ pub(crate) fn ipsec_inner_counters_snapshot() -> IpsecInnerCounterSnapshot {
         ipsec_inner_worker_queue_full_total: IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL
             .load(Ordering::Relaxed),
         ipsec_inner_verdict_queue_full_total: IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL
+            .load(Ordering::Relaxed),
+        ipsec_inner_verdict_queue_contended_total: IPSEC_INNER_VERDICT_QUEUE_CONTENDED_TOTAL
             .load(Ordering::Relaxed),
         ipsec_inner_slab_exhausted_total: IPSEC_INNER_SLAB_EXHAUSTED_TOTAL.load(Ordering::Relaxed),
         ipsec_inner_worker_retired_total: IPSEC_INNER_WORKER_RETIRED_TOTAL.load(Ordering::Relaxed),
@@ -542,13 +546,15 @@ pub(crate) fn verdict_from_decision(decision: &IpsecInnerDecision) -> IpsecInner
     }
 }
 
-/// Post one D11 verdict. This is the only Rust-side output for V1; a full
-/// verdict queue is an E24 uncertain terminal (never a retry or q0 fallback).
+/// Post one D11 verdict. This is the only Rust-side output for V1; a
+/// true-full verdict queue is an E24 uncertain terminal (never a retry or
+/// q0 fallback). Contention never reaches this mapping: `post` waits on
+/// the queue mutex (#15150).
 pub(crate) fn post_ipsec_inner_verdict(
     queue: &IpsecInnerVerdictQueue,
     decision: &IpsecInnerDecision,
 ) -> Result<(), IpsecInnerDecision> {
-    queue.try_post(verdict_from_decision(decision)).map_err(|_| {
+    queue.post(verdict_from_decision(decision)).map_err(|_| {
         IpsecInnerDecision::Deny {
             request_id: decision.request_id(),
             connection_id: decision.connection_id(),

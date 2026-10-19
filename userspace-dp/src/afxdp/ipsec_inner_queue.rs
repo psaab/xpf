@@ -131,6 +131,10 @@ pub(crate) mod reason {
 // increment ONLY here, never in Go.
 pub(crate) static IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(crate) static IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// #15150: verdict posts that failed only because the queue mutex was held,
+/// never because the queue was at depth. Separate from E24 so contention
+/// can no longer masquerade as a full queue.
+pub(crate) static IPSEC_INNER_VERDICT_QUEUE_CONTENDED_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(crate) static IPSEC_INNER_SLAB_EXHAUSTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(crate) static IPSEC_INNER_WORKER_RETIRED_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(crate) static IPSEC_INNER_WORKER_ORPHAN_REAPED_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -618,8 +622,11 @@ impl Default for IpsecInnerDoubleBatch {
         Self::new()
     }
 }
-/// Bounded verdict queue (worker -> ReinjectCore). Full counts E24, never
-/// silent; the affected frame terminalizes uncertain (no retry).
+/// Bounded verdict queue (worker -> ReinjectCore). A verdict post never
+/// converts contention into a verdict change: `post` waits on the mutex
+/// (#15150) and only a true-full queue at depth refuses, counting E24.
+/// Contention on the try path is counted separately and returns the
+/// verdict unposted so the caller can retain it instead of denying.
 pub(crate) struct IpsecInnerVerdictQueue {
     pending: Mutex<VecDeque<IpsecInnerVerdict>>,
 }
@@ -631,9 +638,22 @@ impl IpsecInnerVerdictQueue {
         }
     }
 
+    /// Blocking post: the producer waits for the queue mutex rather than
+    /// turning a momentary hold (the consumer drains every worker tick)
+    /// into a lost verdict. Only a true-full queue refuses.
+    pub(crate) fn post(&self, verdict: IpsecInnerVerdict) -> Result<(), IpsecInnerVerdict> {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if pending.len() >= IPSEC_INNER_VERDICT_QUEUE_DEPTH {
+            IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
+            return Err(verdict);
+        }
+        pending.push_back(verdict);
+        Ok(())
+    }
+
     pub(crate) fn try_post(&self, verdict: IpsecInnerVerdict) -> Result<(), IpsecInnerVerdict> {
         let Ok(mut pending) = self.pending.try_lock() else {
-            IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
+            IPSEC_INNER_VERDICT_QUEUE_CONTENDED_TOTAL.fetch_add(1, Ordering::Relaxed);
             return Err(verdict);
         };
         if pending.len() >= IPSEC_INNER_VERDICT_QUEUE_DEPTH {
@@ -1886,13 +1906,23 @@ impl IpsecInnerWorkerTransport {
             return Err(verdict);
         };
         let _ = self.pool.mark_verdict_posted(entry.desc.slab_id);
-        if self.verdicts.try_post(verdict.clone()).is_err() {
-            let fallback = IpsecInnerVerdict::Deny {
-                request_id: verdict.request_id(),
-                connection_id: verdict.connection_id(),
-                stage: "d11_verdict_queue_full",
-                reason: reason::VERDICT_UNCERTAIN,
-                policy_id: 0,
+        if self.verdicts.post(verdict.clone()).is_err() {
+            // True-full queue (E24 already counted by `post`). A WouldPermit
+            // whose write was armed must stay armed: converting it to an
+            // Uncertain deny would terminalize the Queued ReinjectCore entry
+            // and cancel the permitted write (#15150). Retain the original
+            // verdict in the bounded fallback instead; Deny verdicts keep
+            // the fail-closed Uncertain terminal.
+            let fallback = if matches!(verdict, IpsecInnerVerdict::WouldPermit { .. }) {
+                verdict.clone()
+            } else {
+                IpsecInnerVerdict::Deny {
+                    request_id: verdict.request_id(),
+                    connection_id: verdict.connection_id(),
+                    stage: "d11_verdict_queue_full",
+                    reason: reason::VERDICT_UNCERTAIN,
+                    policy_id: 0,
+                }
             };
             let mut uncertain = self.uncertain.lock().unwrap_or_else(|e| e.into_inner());
             debug_assert!(uncertain.len() < IPSEC_INNER_SLAB_CAP);
@@ -1905,7 +1935,9 @@ impl IpsecInnerWorkerTransport {
     /// Retry a worker-post failure through the guaranteed bounded E24
     /// handoff. The active descriptor is retained until the verdict drain
     /// terminalizes the matching request, so an admitted Go frame cannot
-    /// remain pending after a primary-queue refusal.
+    /// remain pending after a primary-queue refusal. A retained WouldPermit
+    /// stays a WouldPermit (#15150): only Deny verdicts map to the
+    /// fail-closed Uncertain terminal.
     pub(crate) fn requeue_worker_verdict(
         &self,
         worker_id: u32,
@@ -1926,13 +1958,18 @@ impl IpsecInnerWorkerTransport {
         if uncertain.len() == IPSEC_INNER_SLAB_CAP {
             return false;
         }
-        uncertain.push_back(IpsecInnerVerdict::Deny {
-            request_id: verdict.request_id(),
-            connection_id: verdict.connection_id(),
-            stage: "d11_verdict_queue_full",
-            reason: reason::VERDICT_UNCERTAIN,
-            policy_id: 0,
-        });
+        let fallback = if matches!(verdict, IpsecInnerVerdict::WouldPermit { .. }) {
+            verdict
+        } else {
+            IpsecInnerVerdict::Deny {
+                request_id: verdict.request_id(),
+                connection_id: verdict.connection_id(),
+                stage: "d11_verdict_queue_full",
+                reason: reason::VERDICT_UNCERTAIN,
+                policy_id: 0,
+            }
+        };
+        uncertain.push_back(fallback);
         entry.posted = true;
         true
     }
@@ -2253,8 +2290,9 @@ mod tests {
     }
 
     #[test]
-    fn contended_try_post_refuses_without_waiting() {
-        let before = IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.load(Ordering::Relaxed);
+    fn contended_try_post_counts_contention_not_e24_15150() {
+        let full_before = IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.load(Ordering::Relaxed);
+        let contended_before = IPSEC_INNER_VERDICT_QUEUE_CONTENDED_TOTAL.load(Ordering::Relaxed);
         let queue = IpsecInnerVerdictQueue::new();
         let guard = queue.pending.lock().unwrap_or_else(|e| e.into_inner());
         assert!(queue
@@ -2265,8 +2303,41 @@ mod tests {
             .is_err());
         drop(guard);
         assert_eq!(
-            IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.load(Ordering::Relaxed) - before,
+            IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.load(Ordering::Relaxed) - full_before,
+            0,
+            "contention must not move the E24 full counter"
+        );
+        assert_eq!(
+            IPSEC_INNER_VERDICT_QUEUE_CONTENDED_TOTAL.load(Ordering::Relaxed) - contended_before,
             1
+        );
+        assert_eq!(queue.len(), 0, "the contended verdict was not posted");
+    }
+
+    #[test]
+    fn contended_post_waits_and_delivers_would_permit_15150() {
+        let queue = std::sync::Arc::new(IpsecInnerVerdictQueue::new());
+        let guard = queue.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let poster = {
+            let queue = queue.clone();
+            std::thread::spawn(move || {
+                queue.post(IpsecInnerVerdict::WouldPermit {
+                    request_id: 82,
+                    connection_id: 0,
+                })
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(!poster.is_finished(), "post must wait out contention");
+        drop(guard);
+        assert!(poster.join().expect("poster thread").is_ok());
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue.drain_budget(1),
+            vec![IpsecInnerVerdict::WouldPermit {
+                request_id: 82,
+                connection_id: 0,
+            }]
         );
     }
     #[test]
@@ -2353,6 +2424,185 @@ mod tests {
             IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.load(Ordering::Relaxed) - before,
             1
         );
+    }
+
+    #[test]
+    fn contended_worker_would_permit_stays_would_permit_15150() {
+        // The verdict mutex is held by a helper thread across the post: the
+        // exact B12-02 contention state, without deadlocking the blocking
+        // producer. The verdict must survive as WouldPermit; the E24 delta
+        // is checked by the single-threaded queue cells (global counters
+        // race with sibling tests here).
+        let transport = std::sync::Arc::new(IpsecInnerWorkerTransport::new([3]));
+        let pool = transport.pool().clone();
+        let id = pool.acquire().expect("slot");
+        let generation = transport.authority().generation();
+        let mut desc = test_desc(83, id);
+        desc.worker_set_generation = generation;
+        assert_eq!(transport.admit_descriptor(desc), Ok(3));
+        let mut batch = IpsecInnerDoubleBatch::new();
+        assert_eq!(transport.drain_worker(3, &mut batch), 1);
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let transport = transport.clone();
+            std::thread::spawn(move || {
+                let _guard = transport
+                    .verdicts
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let _ = held_tx.send(());
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            })
+        };
+        held_rx.recv().expect("holder holds the verdict mutex");
+        assert!(transport
+            .post_worker_verdict(
+                3,
+                IpsecInnerVerdict::WouldPermit {
+                    request_id: 83,
+                    connection_id: 0,
+                },
+            )
+            .is_ok());
+        holder.join().expect("holder thread");
+        let mut queue_scratch = Vec::with_capacity(IPSEC_INNER_VERDICT_QUEUE_DEPTH);
+        let mut out = Vec::with_capacity(IPSEC_INNER_VERDICT_QUEUE_DEPTH);
+        transport.drain_verdicts_into(
+            &mut queue_scratch,
+            &mut out,
+            IPSEC_INNER_DRAIN_BUDGET,
+        );
+        assert_eq!(
+            out,
+            vec![IpsecInnerVerdict::WouldPermit {
+                request_id: 83,
+                connection_id: 0,
+            }],
+            "a contended WouldPermit must not become an Uncertain deny"
+        );
+        assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP);
+    }
+
+    #[test]
+    fn full_queue_worker_would_permit_stays_armed_15150() {
+        let full_before = IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.load(Ordering::Relaxed);
+        let transport = IpsecInnerWorkerTransport::new([3]);
+        let pool = transport.pool().clone();
+        let id = pool.acquire().expect("slot");
+        let generation = transport.authority().generation();
+        let mut desc = test_desc(84, id);
+        desc.worker_set_generation = generation;
+        assert_eq!(transport.admit_descriptor(desc), Ok(3));
+        let mut batch = IpsecInnerDoubleBatch::new();
+        assert_eq!(transport.drain_worker(3, &mut batch), 1);
+        for i in 0..IPSEC_INNER_VERDICT_QUEUE_DEPTH {
+            transport
+                .verdicts
+                .try_post(IpsecInnerVerdict::Deny {
+                    request_id: 10_000 + i as u64,
+                    connection_id: 0,
+                    stage: "test",
+                    reason: ZONE_UNZONED,
+                    policy_id: 0,
+                })
+                .expect("fits");
+        }
+        assert!(transport
+            .post_worker_verdict(
+                3,
+                IpsecInnerVerdict::WouldPermit {
+                    request_id: 84,
+                    connection_id: 0,
+                },
+            )
+            .is_ok());
+        assert!(
+            IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.load(Ordering::Relaxed) - full_before >= 1,
+            "E24 moves at true depth (sibling tests may add their own)"
+        );
+        let mut queue_scratch = Vec::with_capacity(IPSEC_INNER_VERDICT_QUEUE_DEPTH);
+        let mut out = Vec::with_capacity(IPSEC_INNER_VERDICT_QUEUE_DEPTH);
+        for _ in 0..5 {
+            transport.drain_verdicts_into(
+                &mut queue_scratch,
+                &mut out,
+                IPSEC_INNER_DRAIN_BUDGET,
+            );
+            if !out.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(
+            out,
+            vec![IpsecInnerVerdict::WouldPermit {
+                request_id: 84,
+                connection_id: 0,
+            }],
+            "a true-full WouldPermit must be retained, not Uncertain-denied"
+        );
+        assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP);
+    }
+
+    #[test]
+    fn full_queue_worker_deny_stays_uncertain_15150() {
+        let transport = IpsecInnerWorkerTransport::new([3]);
+        let pool = transport.pool().clone();
+        let id = pool.acquire().expect("slot");
+        let generation = transport.authority().generation();
+        let mut desc = test_desc(85, id);
+        desc.worker_set_generation = generation;
+        assert_eq!(transport.admit_descriptor(desc), Ok(3));
+        let mut batch = IpsecInnerDoubleBatch::new();
+        assert_eq!(transport.drain_worker(3, &mut batch), 1);
+        for i in 0..IPSEC_INNER_VERDICT_QUEUE_DEPTH {
+            transport
+                .verdicts
+                .try_post(IpsecInnerVerdict::Deny {
+                    request_id: 20_000 + i as u64,
+                    connection_id: 0,
+                    stage: "test",
+                    reason: ZONE_UNZONED,
+                    policy_id: 0,
+                })
+                .expect("fits");
+        }
+        assert!(transport
+            .post_worker_verdict(
+                3,
+                IpsecInnerVerdict::Deny {
+                    request_id: 85,
+                    connection_id: 0,
+                    stage: "d14_test",
+                    reason: ZONE_UNZONED,
+                    policy_id: 0,
+                },
+            )
+            .is_ok());
+        let mut queue_scratch = Vec::with_capacity(IPSEC_INNER_VERDICT_QUEUE_DEPTH);
+        let mut out = Vec::with_capacity(IPSEC_INNER_VERDICT_QUEUE_DEPTH);
+        for _ in 0..5 {
+            transport.drain_verdicts_into(
+                &mut queue_scratch,
+                &mut out,
+                IPSEC_INNER_DRAIN_BUDGET,
+            );
+            if !out.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(
+            out,
+            vec![IpsecInnerVerdict::Deny {
+                request_id: 85,
+                connection_id: 0,
+                stage: "d11_verdict_queue_full",
+                reason: reason::VERDICT_UNCERTAIN,
+                policy_id: 0,
+            }],
+            "a Deny keeps the fail-closed Uncertain terminal at true-full"
+        );
+        assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP);
     }
 
     #[test]

@@ -463,6 +463,7 @@ pub(crate) fn run() -> Result<(), String> {
             ipsec_inner_ecn_illegal_drops: 0,
             ipsec_inner_worker_queue_full_total: 0,
             ipsec_inner_verdict_queue_full_total: 0,
+            ipsec_inner_verdict_queue_contended_total: 0,
             ipsec_inner_slab_exhausted_total: 0,
             ipsec_inner_worker_retired_total: 0,
             ipsec_inner_worker_orphan_reaped_total: 0,
