@@ -2369,10 +2369,17 @@ connection is authenticated, then seals every subsequent frame.
 - **Handshake (`performSyncHandshake`).** Only a node that holds the PSK
   runs it. Since #7163 it is **Noise_NNpsk0**: the dialer writes msg1 in a
   `syncMsgAuthHello` (type 27) frame and the accepter answers with msg2 in a
-  `syncMsgAuthProof` (type 28) frame. The frame TYPES are unchanged; their
-  payloads are not, and neither is the turn order — under Noise the accepter is
-  the RESPONDER and speaks only after reading msg1, where the old handshake had
-  both symmetric peers writing a HELLO concurrently. See "Session-sync
+  `syncMsgAuthProof` (type 28) frame. Since #15140 the initiator then sends a
+  mandatory key confirmation in `syncMsgAuthConfirm` (type 44): HMAC-SHA256
+  under the initiator-to-responder frame key over the Noise channel binding.
+  The responder stays PENDING after msg2 — it records nothing and installs
+  nothing — until that confirmation verifies, because a passively captured
+  msg1 re-verifies under NNpsk0 with no PSK and would otherwise be installed
+  as a responder-authenticated connection. The frame TYPES 27/28 are
+  unchanged; their payloads are not, and neither is the turn order — under
+  Noise the accepter is the RESPONDER and speaks only after reading msg1,
+  where the old handshake had both symmetric peers writing a HELLO
+  concurrently. See "Session-sync
   authentication is Noise_NNpsk0 (#7163, closing #5078)" above for what each
   binding comes from, and for why this is a flag day rather than an additive
   change. The nonce exchange, `syncAuthProof`, `syncCheckPeerNonce` and
