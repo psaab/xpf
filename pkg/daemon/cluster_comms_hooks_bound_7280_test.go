@@ -82,8 +82,10 @@ func allWiredHooks7280() []string {
 	return []string{
 		cluster.HookPeerFailover,
 		cluster.HookPeerFailoverCommit,
+		cluster.HookPeerFailoverAbort,
 		cluster.HookPeerFailoverBatch,
 		cluster.HookPeerFailoverCommitBatch,
+		cluster.HookPeerFailoverAbortBatch,
 		cluster.HookPreManualFailover,
 		cluster.HookLocalTransferCommitRdy,
 		cluster.HookTransferReadiness,
@@ -109,8 +111,10 @@ func TestWireClusterPeerFailoverHooksInstallsManagerHooks_7280(t *testing.T) {
 	for _, name := range []string{
 		cluster.HookPeerFailover,
 		cluster.HookPeerFailoverCommit,
+		cluster.HookPeerFailoverAbort,
 		cluster.HookPeerFailoverBatch,
 		cluster.HookPeerFailoverCommitBatch,
+		cluster.HookPeerFailoverAbortBatch,
 		cluster.HookPreManualFailover,
 		cluster.HookLocalTransferCommitRdy,
 		cluster.HookTransferReadiness,

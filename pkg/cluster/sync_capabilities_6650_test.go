@@ -281,6 +281,7 @@ func liveSyncMessageTypesExcept(under int) []syncMessageType {
 		{syncMsgPersistentNatLeaseDeterministic, "PersistentNatLeaseDeterministic"},
 		{syncMsgDHCPLeaseV4Chunk, "DHCPLeaseV4Chunk"}, {syncMsgDHCPLeaseV6Chunk, "DHCPLeaseV6Chunk"},
 		{syncMsgBulkRequest, "BulkRequest"},
+		{syncMsgFailoverAbort, "FailoverAbort"}, {syncMsgFailoverBatchAbort, "FailoverBatchAbort"},
 	}
 	out := make([]syncMessageType, 0, len(all))
 	for _, m := range all {
