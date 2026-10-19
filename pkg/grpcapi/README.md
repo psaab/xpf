@@ -969,7 +969,15 @@ contract.
   is released via `defer` on every path (success, exec error, ctx
   timeout/cancel). `streamDiagCmd` is called through the `streamDiag`
   package-var seam so a test can inject a fake slow diagnostic and assert
-  the cap without real subprocesses.
+  the cap without real subprocesses. Each streamed line's `Send` is
+  additionally bounded per write by `sendDiagFrame` /
+  `diagStreamSendTimeout` (30s, #14980): grpc-go `Send` has no deadline,
+  so a non-draining client otherwise parked the scan goroutine, wedged
+  `streamDiagCmd`, and pinned its limiter slot indefinitely (four stuck
+  clients exhausted the shared budget). On sever the handler returns
+  `DeadlineExceeded` and the slot transfers to the Send worker, which
+  releases it when `Send` unblocks on the handler-return stream cancel —
+  the same transfer discipline as `sendMonitorInterfaceFrame` (#9891).
 
   **That aggregate cap now covers the READ-ONLY diagnostic forks too
   (#6552), and the default is bounded.** Ping/Traceroute were the only
