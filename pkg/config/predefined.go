@@ -495,7 +495,7 @@ func addressSetExpansionErrorf(name, format string, args ...any) error {
 // an unknown member statement is rejected rather than expanded to its surviving
 // subset (#11822). Max depth is five nested edges.
 func ExpandAddressSet(name string, ab *AddressBook) ([]string, error) {
-	return expandAddrSetMode(name, ab, make(map[string]bool), 0, false)
+	return expandAddrSetMemo15003(name, ab, false)
 }
 
 // expandAddressSetLeaves is for consumers that need literal address prefixes,
@@ -504,7 +504,7 @@ func ExpandAddressSet(name string, ab *AddressBook) ([]string, error) {
 // member naming a set therefore expands as a cross-kind reference. The
 // dataplane compiler intentionally keeps that member as the referenced set ID.
 func expandAddressSetLeaves(name string, ab *AddressBook) ([]string, error) {
-	return expandAddrSetMode(name, ab, make(map[string]bool), 0, true)
+	return expandAddrSetMemo15003(name, ab, true)
 }
 
 func addressSetForExpansion(
@@ -554,67 +554,285 @@ func addressSetForExpansion(
 	return as, nil
 }
 
-func expandAddrSet(name string, ab *AddressBook, visited map[string]bool, depth int) ([]string, error) {
-	return expandAddrSetMode(name, ab, visited, depth, false)
+// addrSetExpandMemo15003 (#15003, A04-02) collapses the repeated expansion
+// of the SAME address-set within one top-level expansion, the expansion
+// twin of the graph-gate memo in addrset_graph_validate_12832.go. Without
+// it, a nest of sets each referencing B others re-expands every shared
+// subtree on every path that reaches it, and the depth cap of 5 fixes the
+// exponent at ~B^5 per expansion.
+//
+// Subtree results are recorded per mode: a set's ID-graph result (direct
+// `address` members stay names) differs from its leaf result (cross-kind
+// members flatten), and one top-level call can produce both -- a leaf-mode
+// root reaches every descendant in leaf mode, while a nested `address-set`
+// edge from an ID-graph root stays in ID-graph mode, so both modes can
+// complete the same node within one call; each mode carries its own
+// subtree height alongside its result. A completed per-mode entry proves
+// the subtree is acyclic and every node in it passes
+// addressSetForExpansion. Re-entering it never re-expands the subtree:
+// the node's own addressSetForExpansion(depth) entry check (depth and
+// cycle vs. the current path) runs BEFORE the memo is consulted, and
+// the depth cap for the memoised subtree is then decided arithmetically
+// (depth+height). When that arithmetic overflows, depthErrorBelow
+// reconstructs the exact first-node-wins error the naive walker would
+// have produced (verified against naiveExpand15003 in
+// addrset_graph_memo_15003_test.go). Entries are recorded only on
+// success. Cached results are handed out as copies: callers dedupe into
+// their own slices.
+type addrSetExpandMemo15003 struct {
+	ab      *AddressBook
+	entries map[string]*addrSetExpandEntry15003
+	// bodies counts expansion bodies actually executed. It exists so the
+	// #15003 guard can assert the memoised curve (at most one body per set)
+	// instead of a wall-clock threshold alone.
+	bodies int
 }
 
-func expandAddrSetMode(
-	name string,
+type addrSetExpandEntry15003 struct {
+	graphResult []string
+	graphDone   bool
+	graphHeight int
+	leafResult  []string
+	leafDone    bool
+	leafHeight  int
+}
+
+func sameMode(entry *addrSetExpandEntry15003, resolveCrossKind bool) bool {
+	if resolveCrossKind {
+		return entry.leafDone
+	}
+	return entry.graphDone
+}
+
+func entryResult(entry *addrSetExpandEntry15003, resolveCrossKind bool) []string {
+	if resolveCrossKind {
+		return entry.leafResult
+	}
+	return entry.graphResult
+}
+
+func entryHeight(entry *addrSetExpandEntry15003, resolveCrossKind bool) int {
+	if resolveCrossKind {
+		return entry.leafHeight
+	}
+	return entry.graphHeight
+}
+
+func newAddrSetExpandMemo15003(ab *AddressBook) *addrSetExpandMemo15003 {
+	return &addrSetExpandMemo15003{ab: ab, entries: make(map[string]*addrSetExpandEntry15003)}
+}
+
+func expandAddrSetMemo15003(name string, ab *AddressBook, resolveCrossKind bool) ([]string, error) {
+	return newAddrSetExpandMemo15003(ab).expand(name, 0, resolveCrossKind, make(map[string]bool))
+}
+
+// expandEdges15003 returns the nested-set edges of set in the exact order
+// the pre-#15003 expansion traversed them: in leaf mode, cross-kind
+// `address` members that name a set (a same-named address wins and the
+// member stays a leaf), then every `address-set` member. Each edge carries
+// the resolveCrossKind the child is expanded with -- `true` for cross-kind
+// edges (pre-#15003 passed the literal true), the caller's mode for
+// `address-set` edges -- and whether it is a cross-kind (`address`-member)
+// edge, which the parent's interleave and the child's entry mode both
+// need: in leaf mode EVERY edge's child is leaf-expanded, so mode alone
+// cannot distinguish the two kinds.
+func expandEdges15003(
+	set *AddressSet,
 	ab *AddressBook,
-	visited map[string]bool,
+	resolveCrossKind bool,
+) []struct {
+	name      string
+	crossKind bool
+	viaAddr   bool
+} {
+	var edges []struct {
+		name      string
+		crossKind bool
+		viaAddr   bool
+	}
+	if resolveCrossKind {
+		for _, member := range set.Addresses {
+			if _, isAddress := ab.Addresses[member]; isAddress {
+				continue
+			}
+			if _, isSet := ab.AddressSets[member]; isSet {
+				edges = append(edges, struct {
+					name      string
+					crossKind bool
+					viaAddr   bool
+				}{member, true, true})
+			}
+		}
+	}
+	for _, nested := range set.AddressSets {
+		edges = append(edges, struct {
+			name      string
+			crossKind bool
+			viaAddr   bool
+		}{nested, resolveCrossKind, false})
+	}
+	return edges
+}
+
+// expandDepth expands the child at the next depth below a parent entered
+// at parentDepth, enforcing the child's own depth entry check at
+// parentDepth+1 before any memo shortcut. Parents call this (never expand
+// directly for children) so a memoised subtree is depth-checked at the
+// depth it is actually entered.
+func (m *addrSetExpandMemo15003) expandDepth(name string, parentDepth int, resolveCrossKind bool, visited map[string]bool) ([]string, error) {
+	return m.expand(name, parentDepth+1, resolveCrossKind, visited)
+}
+
+func (m *addrSetExpandMemo15003) expand(
+	name string,
 	depth int,
 	resolveCrossKind bool,
+	visited map[string]bool,
 ) ([]string, error) {
-	as, err := addressSetForExpansion(name, ab, visited, depth)
+	as, err := addressSetForExpansion(name, m.ab, visited, depth)
 	if err != nil {
 		return nil, err
+	}
+	if entry, ok := m.entries[name]; ok && sameMode(entry, resolveCrossKind) {
+		if depth+entryHeight(entry, resolveCrossKind) > maxAddressSetDepth {
+			return nil, m.depthErrorBelow(name, depth, resolveCrossKind)
+		}
+		cached := entryResult(entry, resolveCrossKind)
+		out := make([]string, len(cached))
+		copy(out, cached)
+		return out, nil
 	}
 
 	visited[name] = true
 	defer delete(visited, name)
+	m.bodies++
 
 	var result []string
 	seen := make(map[string]bool)
-
-	// Direct address members remain address names for the ID-graph API. Leaf
-	// consumers may opt into resolving a member that names a set.
-	for _, addrName := range as.Addresses {
-		if resolveCrossKind {
-			if _, isAddress := ab.Addresses[addrName]; !isAddress {
-				if _, isSet := ab.AddressSets[addrName]; isSet {
-					expanded, err := expandAddrSetMode(addrName, ab, visited, depth+1, true)
-					if err != nil {
-						return nil, err
-					}
-					for _, a := range expanded {
-						if !seen[a] {
-							seen[a] = true
-							result = append(result, a)
-						}
-					}
-					continue
-				}
-			}
-		}
-		if !seen[addrName] {
-			seen[addrName] = true
-			result = append(result, addrName)
+	add := func(member string) {
+		if !seen[member] {
+			seen[member] = true
+			result = append(result, member)
 		}
 	}
 
-	// Nested address-set members
-	for _, setName := range as.AddressSets {
-		expanded, err := expandAddrSetMode(setName, ab, visited, depth+1, resolveCrossKind)
+	// Direct address members remain address names for the ID-graph API.
+	// Leaf consumers resolve a member that names a set instead. Interleave
+	// exactly as the pre-#15003 code did: walk direct members in order,
+	// expanding a cross-kind set member at its member position, then walk
+	// `address-set` members. In ID-graph mode no direct member is an edge,
+	// so crossKindEdges is empty and this degenerates to the two loops.
+	// Partition by edge KIND (viaAddr): in leaf mode every child is
+	// leaf-expanded, so kind -- not child mode -- separates the
+	// interleaved cross-kind edges from the trailing address-set edges.
+	edges := expandEdges15003(as, m.ab, resolveCrossKind)
+	var crossKindEdges, setEdges []struct {
+		name      string
+		crossKind bool
+		viaAddr   bool
+	}
+	for _, edge := range edges {
+		if edge.viaAddr {
+			crossKindEdges = append(crossKindEdges, edge)
+		} else {
+			setEdges = append(setEdges, edge)
+		}
+	}
+	height := 0
+	walkEdge := func(edge struct {
+		name      string
+		crossKind bool
+		viaAddr   bool
+	}) error {
+		expanded, err := m.expandDepth(edge.name, depth, edge.crossKind, visited)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for _, a := range expanded {
-			if !seen[a] {
-				seen[a] = true
-				result = append(result, a)
+			add(a)
+		}
+		childHeight := 0
+		if ce, ok := m.entries[edge.name]; ok && sameMode(ce, edge.crossKind) {
+			childHeight = entryHeight(ce, edge.crossKind)
+		}
+		if childHeight+1 > height {
+			height = childHeight + 1
+		}
+		return nil
+	}
+	crossByMember := make(map[string]int, len(crossKindEdges))
+	for i, edge := range crossKindEdges {
+		crossByMember[edge.name] = i
+	}
+	expandedCross := make([]bool, len(crossKindEdges))
+	for _, addrName := range as.Addresses {
+		if idx, isEdge := crossByMember[addrName]; isEdge {
+			if expandedCross[idx] {
+				continue
 			}
+			expandedCross[idx] = true
+			if err := walkEdge(crossKindEdges[idx]); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		add(addrName)
+	}
+	for _, edge := range setEdges {
+		if err := walkEdge(edge); err != nil {
+			return nil, err
 		}
 	}
 
-	return result, nil
+	entry := m.entries[name]
+	if entry == nil {
+		entry = &addrSetExpandEntry15003{}
+		m.entries[name] = entry
+	}
+	if resolveCrossKind {
+		entry.leafResult, entry.leafDone, entry.leafHeight = result, true, height
+	} else {
+		entry.graphResult, entry.graphDone, entry.graphHeight = result, true, height
+	}
+	out := make([]string, len(result))
+	copy(out, result)
+	return out, nil
+}
+
+// depthErrorBelow reconstructs the naive expansion's depth error for a
+// fully memoised subtree entered at depth in the given mode. It descends
+// longest-path-first in naive traversal order (cross-kind edges at their
+// member positions, then address-set edges) and reports via
+// addressSetForExpansion so the message, error type and named node match
+// the live entry check: the first node that would be entered at depth
+// maxAddressSetDepth+1.
+func (m *addrSetExpandMemo15003) depthErrorBelow(name string, depth int, resolveCrossKind bool) error {
+	cur, curDepth, mode := name, depth, resolveCrossKind
+	for {
+		set := m.ab.AddressSets[cur]
+		if set == nil {
+			return addressSetExpansionErrorf(cur, "address-set nesting too deep (max %d): %s", maxAddressSetDepth, cur)
+		}
+		best, found := -1, false
+		var bestName string
+		var bestMode bool
+		for _, edge := range expandEdges15003(set, m.ab, mode) {
+			ce, ok := m.entries[edge.name]
+			if !ok || !sameMode(ce, edge.crossKind) {
+				continue
+			}
+			childHeight := entryHeight(ce, edge.crossKind)
+			if curDepth+1+childHeight <= maxAddressSetDepth {
+				continue
+			}
+			if childHeight > best {
+				best, bestName, bestMode, found = childHeight, edge.name, edge.crossKind, true
+			}
+		}
+		if !found {
+			_, err := addressSetForExpansion(cur, m.ab, make(map[string]bool), maxAddressSetDepth+1)
+			return err
+		}
+		cur, curDepth, mode = bestName, curDepth+1, bestMode
+	}
 }
