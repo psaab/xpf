@@ -101,9 +101,9 @@ var restConfigMutationRoutes = map[string]restConfigRoute{
 var restConfigRoutesUngated = map[string]string{
 	"POST /api/v1/config/enter":            "opens a candidate session; mutates nothing and carries no path",
 	"POST /api/v1/config/exit":             "closes the session; carries no path",
-	"POST /api/v1/config/commit":           "acts on the candidate as a whole; every path in it was adjudicated when it was written",
+	"POST /api/v1/config/commit":           "acts on the candidate as a whole; its group-expanded paths are adjudicated by authorizeRESTConfigCommit14981",
 	"POST /api/v1/config/commit-check":     "compiles the candidate and discards the result; writes nothing",
-	"POST /api/v1/config/commit-confirmed": "as commit; the confirm window carries no path",
+	"POST /api/v1/config/commit-confirmed": "as commit; its group-expanded paths are adjudicated by authorizeRESTConfigCommit14981",
 	"POST /api/v1/config/confirm":          "confirms an outstanding commit; carries no path",
 }
 
@@ -188,6 +188,8 @@ func (s *Server) authorizeRESTConfigLoad(r *http.Request, cfg *config.Config, p 
 		if err := decodeRESTConfigBody(r, &req); err != nil {
 			return err
 		}
+		// #14981: adjudicate the load body's group-expanded paths too —
+		// AuthorizeConfigLoad now does this itself, so this call covers it.
 		return config.AuthorizeConfigLoad(cfg, p.Class, req.Mode, req.Content)
 	case "rollback":
 		// ConfigRollbackRequest is the handler's exact type. In particular,
@@ -278,5 +280,64 @@ func (s *Server) authorizeRESTConfigMutation(r *http.Request, cfg *config.Config
 	}
 	// The edit path is empty: REST has no cursor, so the body carries the
 	// resolved path — which is exactly what the store will act on.
-	return config.AuthorizeConfigMutation(cfg, p.Class, nil, route.verb+" "+input)
+	line := route.verb + " " + input
+	if err := config.AuthorizeConfigMutation(cfg, p.Class, nil, line); err != nil {
+		return err
+	}
+	// #14981: a group/apply-groups line is judged above only literally.
+	// Adjudicate the candidate as it will stand after this mutation.
+	if s.store != nil && config.LineTouchesGroups14981(line) {
+		if tree := candidateAfterRESTMutation14981(s.store.CandidateTree(), line); tree != nil {
+			return config.AuthorizeExpandedTree(cfg, p.Class, tree)
+		}
+	}
+	return nil
+}
+
+// authorizeRESTConfigCommit14981 adjudicates the group-expanded candidate
+// for commit / commit-confirmed (#14981): inherited paths were never
+// written as adjudicated lines, so the old "already adjudicated when
+// written" justification does not cover them.
+func (s *Server) authorizeRESTConfigCommit14981(r *http.Request, cfg *config.Config, p authz.Principal) error {
+	route := r.Method + " " + r.URL.Path
+	if route != "POST /api/v1/config/commit" && route != "POST /api/v1/config/commit-confirmed" {
+		return nil
+	}
+	if p.Class == "" || p.Superuser || s.store == nil {
+		return nil
+	}
+	restricted, err := restConfigClassRestricted(cfg, p.Class)
+	if err != nil {
+		return err
+	}
+	if !restricted {
+		return nil
+	}
+	return config.AuthorizeExpandedCandidate(cfg, p.Class, s.store.CandidateTree(), s.store.ActiveTree())
+}
+
+// candidateAfterRESTMutation14981 replays a verb-led line onto a candidate
+// copy for expanded adjudication; unreplayable verbs yield nil (the
+// commit-time gate remains the backstop).
+func candidateAfterRESTMutation14981(tree *config.ConfigTree, line string) *config.ConfigTree {
+	if tree == nil {
+		return nil
+	}
+	verb, path, quoted, grouped, closed, err := config.ParseSetVerbGroupedClosed(line)
+	if err != nil {
+		return nil
+	}
+	switch verb {
+	case "delete":
+		_ = tree.DeletePathGrouped(path, grouped)
+	case "deactivate":
+		_ = tree.DeactivatePathGrouped(path, grouped)
+	case "activate":
+		_ = tree.ActivatePathGrouped(path, grouped)
+	case "copy", "rename", "insert", "annotate":
+		return nil
+	default:
+		_ = tree.SetPathQuotedGrouped(path, quoted, grouped, closed)
+	}
+	return tree
 }

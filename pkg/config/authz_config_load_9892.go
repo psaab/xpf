@@ -300,6 +300,13 @@ func AuthorizeConfigLoad(cfg *Config, class, mode, content string) error {
 			return err
 		}
 	}
+	// #14981: the literal lines above judge `groups …` and `apply-groups …`
+	// spellings, never the paths inheritance materializes. Parse the same
+	// body the store applies and adjudicate its group-expanded lines
+	// (including <*> wildcard fan-out against the body's own containers).
+	if err := authorizeConfigLoadExpansion14981(cfg, class, content); err != nil {
+		return err
+	}
 	return nil
 }
 

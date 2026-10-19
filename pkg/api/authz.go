@@ -1200,6 +1200,12 @@ func (s *Server) mutationAuthzGuard(next http.Handler) http.Handler {
 			deny(p, err)
 			return
 		}
+		// #14981: commit / commit-confirmed promote group-expanded paths
+		// that were never adjudicated as literal lines.
+		if err := s.authorizeRESTConfigCommit14981(r, cfg, p); err != nil {
+			deny(p, err)
+			return
+		}
 		// #9952: the operational command regexes, on the mutating side.
 		if err := s.authorizeRESTCommand(r, cfg, p); err != nil {
 			deny(p, err)
