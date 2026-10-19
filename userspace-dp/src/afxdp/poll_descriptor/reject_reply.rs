@@ -19,11 +19,13 @@
 // still drops the packet (fail-closed).
 
 use super::cookie_reply::syn_cookie_reply_budget_available;
+use super::filter::emit_generated_reply_filter_log;
 use super::worker::WorkerTxPipeline;
 use super::*;
 use crate::afxdp::event_emit::emit_policy_deny_event;
 use crate::afxdp::icmp::build_reject_icmp_unreachable;
 use crate::afxdp::icmp_ratelimit::allow_generated_reject;
+use crate::afxdp::tx::classify_generated_reply_deferred;
 use crate::event_stream::EventStreamWorkerHandle;
 use crate::nat::NatDecision;
 use crate::policy::PolicyAction;
@@ -49,6 +51,7 @@ pub(super) enum RejectReplySource {
 pub(super) fn enqueue_route_reject_reply(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
+    event_stream: Option<&EventStreamWorkerHandle>,
     ingress_ifindex: i32,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
@@ -61,6 +64,7 @@ pub(super) fn enqueue_route_reject_reply(
     enqueue_reject_reply(
         tx_pipeline,
         forwarding,
+        event_stream,
         ingress_ifindex,
         packet_frame,
         meta,
@@ -76,6 +80,7 @@ pub(super) fn enqueue_route_reject_reply(
 pub(super) fn enqueue_policy_reject_reply(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
+    event_stream: Option<&EventStreamWorkerHandle>,
     ingress_ifindex: i32,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
@@ -91,6 +96,7 @@ pub(super) fn enqueue_policy_reject_reply(
     enqueue_reject_reply(
         tx_pipeline,
         forwarding,
+        event_stream,
         ingress_ifindex,
         packet_frame,
         meta,
@@ -117,6 +123,7 @@ pub(super) fn enqueue_policy_reject_reply(
 pub(in crate::afxdp) fn enqueue_filter_reject_reply(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
+    event_stream: Option<&EventStreamWorkerHandle>,
     ingress_ifindex: i32,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
@@ -130,6 +137,7 @@ pub(in crate::afxdp) fn enqueue_filter_reject_reply(
     enqueue_reject_reply(
         tx_pipeline,
         forwarding,
+        event_stream,
         ingress_ifindex,
         packet_frame,
         meta,
@@ -154,6 +162,7 @@ pub(in crate::afxdp) fn enqueue_filter_reject_reply(
 pub(super) fn enqueue_deny_reply(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
+    event_stream: Option<&EventStreamWorkerHandle>,
     ingress_ifindex: i32,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
@@ -165,6 +174,7 @@ pub(super) fn enqueue_deny_reply(
         return enqueue_policy_reject_reply(
             tx_pipeline,
             forwarding,
+            event_stream,
             ingress_ifindex,
             packet_frame,
             meta,
@@ -186,6 +196,7 @@ pub(super) fn enqueue_deny_reply(
 pub(super) fn enqueue_session_miss_rst(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
+    event_stream: Option<&EventStreamWorkerHandle>,
     ingress_ifindex: i32,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
@@ -204,6 +215,7 @@ pub(super) fn enqueue_session_miss_rst(
     enqueue_reject_reply(
         tx_pipeline,
         forwarding,
+        event_stream,
         ingress_ifindex,
         packet_frame,
         meta,
@@ -247,6 +259,7 @@ pub(super) fn deny_reply_and_emit(
     let reject_reply_enqueued = enqueue_deny_reply(
         tx_pipeline,
         forwarding,
+        event_stream,
         ingress_ifindex,
         packet_frame,
         meta,
@@ -276,6 +289,7 @@ pub(super) fn deny_reply_and_emit(
 fn enqueue_reject_reply(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
+    event_stream: Option<&EventStreamWorkerHandle>,
     ingress_ifindex: i32,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
@@ -426,7 +440,12 @@ fn enqueue_reject_reply(
     // regardless (fail-closed — the caller drops on a `false` return); only
     // WHEN the token advances changed.
     let now_ns = monotonic_nanos();
-    let verdict = classify_generated_reply(forwarding, logical_ingress_ifindex, &bytes, now_ns);
+    // #15268: deferred classification — the walk neither counts nor meters,
+    // so a reply the zone limiter below discards leaves no counter/policer
+    // trace. Settlement (and the output filter log) run only once the
+    // token admits the reply.
+    let mut verdict =
+        classify_generated_reply_deferred(forwarding, logical_ingress_ifindex, &bytes);
     if verdict.drop {
         counters.touched = true;
         if verdict.parse_error {
@@ -442,6 +461,21 @@ fn enqueue_reject_reply(
                 RejectReplySource::Policy => counters.policy_reject_output_filter_drops += 1,
                 RejectReplySource::Filter => counters.filter_reject_output_filter_drops += 1,
                 RejectReplySource::SessionMiss | RejectReplySource::Route => {}
+            }
+            // #15268 (B13-03): the output-filter log fires even though the
+            // reply itself is dropped — exactly as transit logs a dropped
+            // packet's matched `then log` term.
+            if let Some(log_match) = verdict.filter_log {
+                emit_generated_reply_filter_log(
+                    forwarding,
+                    event_stream,
+                    &bytes,
+                    meta,
+                    logical_ingress_ifindex,
+                    log_match,
+                    false,
+                    now_ns,
+                );
             }
         }
         // Fail-closed to the silent drop the caller already performs. #5569:
@@ -507,6 +541,43 @@ fn enqueue_reject_reply(
         return false;
     }
 
+    // #15268: token admitted — replay the deferred counter/policer charges.
+    // A red meter suppresses the reply here (the token stays spent: the
+    // meter only runs for token-admitted replies).
+    if verdict.settle_deferred_side_effects(now_ns) {
+        counters.touched = true;
+        match source {
+            RejectReplySource::Policy => counters.policy_reject_output_filter_drops += 1,
+            RejectReplySource::Filter => counters.filter_reject_output_filter_drops += 1,
+            RejectReplySource::SessionMiss | RejectReplySource::Route => {}
+        }
+        if let Some(log_match) = verdict.filter_log {
+            emit_generated_reply_filter_log(
+                forwarding,
+                event_stream,
+                &bytes,
+                meta,
+                logical_ingress_ifindex,
+                log_match,
+                false,
+                now_ns,
+            );
+        }
+        return false;
+    }
+    if let Some(log_match) = verdict.filter_log {
+        emit_generated_reply_filter_log(
+            forwarding,
+            event_stream,
+            &bytes,
+            meta,
+            logical_ingress_ifindex,
+            log_match,
+            true,
+            now_ns,
+        );
+    }
+
     tx_pipeline.pending_tx_local.push_back(TxRequest {
         bytes,
         expected_ports: None,
@@ -546,6 +617,7 @@ pub(super) fn handle_route_reject_disposition(
     disposition: ForwardingDisposition,
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
+    event_stream: Option<&EventStreamWorkerHandle>,
     binding_ifindex: i32,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
@@ -558,6 +630,7 @@ pub(super) fn handle_route_reject_disposition(
     enqueue_route_reject_reply(
         tx_pipeline,
         forwarding,
+        event_stream,
         binding_ifindex,
         packet_frame,
         meta,

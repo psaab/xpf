@@ -151,6 +151,7 @@ fn nat64_build_none_attributes_exthdr_before_fragment_6922() {
         &mut post_recycles,
         1,
         &forwarding,
+        None,
         &ingress_ident,
         unsafe { &*ingress_live },
         None,
@@ -357,6 +358,7 @@ fn nat64_tunnel_marked_build_none_attributes_tunnel_first_8890() {
         &mut post_recycles,
         1,
         &forwarding,
+        None,
         &ingress_ident,
         unsafe { &*ingress_live },
         None,
@@ -502,7 +504,7 @@ fn run_nat64_dispatch_8890(frame: &[u8], tunnel_endpoint_id: u16) -> (DebugPollC
     let (ingress, right) = rest.split_first_mut().expect("ingress binding");
     enqueue_pending_forwards(
         left, 0, ingress, right, &lookup, &mirror_targets, &mut pending,
-        &mut post_recycles, 1, &forwarding, &ingress_ident,
+        &mut post_recycles, 1, &forwarding, None, &ingress_ident,
         unsafe { &*ingress_live }, None, &local_tunnel_deliveries,
         &recent_exceptions, &mut dbg, &mut counters, 0, &worker_commands_by_id,
     );

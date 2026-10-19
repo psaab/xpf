@@ -127,6 +127,7 @@ pub(super) fn filter_terminal(
         enqueue_filter_reject_reply(
             tx_pipeline,
             forwarding,
+            event_stream,
             ingress_ifindex,
             packet_frame,
             meta,
@@ -416,6 +417,7 @@ pub(super) fn enforce_tunnel_outer_input_filter(
             enqueue_filter_reject_reply(
                 tx_pipeline,
                 forwarding,
+                event_stream,
                 ingress_ifindex,
                 packet_frame,
                 meta,
@@ -1967,6 +1969,53 @@ pub(super) fn emit_input_filter_log_match(
         // filter-log RT_FLOW record carries the application, not UNKNOWN.
         // #14313: honour the evaluated packet's L4 presence.
         resolve_flow_app_id_l4(&forwarding.app_catalog, flow, cached_log.l4_present),
+        reject_reply_enqueued,
+        now_ns,
+    );
+}
+
+/// #15268: emit the output-filter log matched by a LOCALLY-GENERATED reply
+/// (reject / Time-Exceeded / SYN-cookie / PTB). The event is keyed on the
+/// REPLY's own egress tuple — built from the generated frame's parsed key,
+/// not the trigger's flow — and reports egress on both zone fields (the
+/// reply originates here). `reject_reply_enqueued` is the reply's actual
+/// admission outcome, so a `then reject` output term whose reply was
+/// suppressed logs the truthful DENY. Callers invoke this only for an
+/// admitted (or output-filter-dropped) reply, never for a rate-limited
+/// one, mirroring the deferred counter/policer settlement.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn emit_generated_reply_filter_log(
+    forwarding: &ForwardingState,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    egress_ifindex: i32,
+    log_match: crate::filter::FilterLogMatch,
+    reject_reply_enqueued: bool,
+    now_ns: u64,
+) {
+    let Some((key, _gen_meta)) = crate::afxdp::frame::generated_reply_session_key(frame) else {
+        return;
+    };
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key,
+    };
+    let egress_zone_id = forwarding.egress_zone_id(egress_ifindex);
+    emit_filter_log_event(
+        event_stream,
+        &flow,
+        meta,
+        egress_zone_id,
+        egress_zone_id,
+        log_match.filter_id,
+        log_match.term_id,
+        log_match.action,
+        FilterLogSource::Output,
+        resolve_flow_app_id(&forwarding.app_catalog, &flow),
         reject_reply_enqueued,
         now_ns,
     );

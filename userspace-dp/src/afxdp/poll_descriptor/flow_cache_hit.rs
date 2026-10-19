@@ -497,6 +497,7 @@ pub(super) fn stage_flow_cache_hit(
                 &worker_ctx.ident,
                 flow,
                 worker_ctx.forwarding,
+                worker_ctx.event_stream,
                 worker_ctx.dynamic_neighbors,
                 worker_ctx.ha_state,
                 now_secs,
@@ -584,6 +585,7 @@ pub(super) fn stage_flow_cache_hit(
             super::reject_reply::enqueue_filter_reject_reply(
                 tx.ingress.tx_pipeline,
                 worker_ctx.forwarding,
+                worker_ctx.event_stream,
                 worker_ctx.ident.ifindex,
                 packet_frame,
                 meta,

@@ -359,6 +359,7 @@ pub(super) fn junos_host_local_policy(
             let reject_reply_enqueued = enqueue_deny_reply(
                 tx_pipeline,
                 forwarding,
+                event_stream,
                 ingress_ifindex,
                 packet_frame,
                 meta,

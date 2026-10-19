@@ -261,6 +261,7 @@ fn policy_reject_udp_uses_port_unreachable_11303_v4() {
     assert!(enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -301,6 +302,7 @@ fn policy_reject_udp_uses_port_unreachable_11303_v6() {
     assert!(enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -338,6 +340,7 @@ fn policy_reject_non_udp_protocols_drop_silently_11303() {
             !enqueue_policy_reject_reply(
                 &mut pipeline,
                 &forwarding,
+                None,
                 5,
                 &frame,
                 meta,
@@ -362,6 +365,7 @@ fn policy_reject_non_udp_protocols_drop_silently_11303() {
             !enqueue_policy_reject_reply(
                 &mut pipeline,
                 &forwarding,
+                None,
                 5,
                 &frame,
                 meta,
@@ -385,6 +389,7 @@ fn reject_reply_budget_exhausted_fails_closed_no_send() {
     let sent = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -424,6 +429,7 @@ fn reject_tcp_with_egress_enqueues_rst() {
     let sent = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -509,6 +515,7 @@ fn reject_reply_dropped_by_egress_output_filter() {
     let sent = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -549,6 +556,7 @@ fn filter_reject_tcp_enqueues_rst_filter_counter() {
     let sent = enqueue_filter_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -646,6 +654,7 @@ fn filter_reject_non_tcp_enqueues_icmp_unreachable() {
     let sent = enqueue_filter_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -689,6 +698,7 @@ fn filter_reject_budget_exhausted_uses_filter_counter() {
     let sent = enqueue_filter_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -806,6 +816,7 @@ fn filter_reject_output_filter_drop_uses_filter_counter() {
     let sent = enqueue_filter_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -868,6 +879,7 @@ fn reject_reply_rate_limited_when_bucket_empty() {
     let sent = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -942,6 +954,7 @@ fn filter_reject_rate_limited_uses_filter_counter() {
     let sent = enqueue_filter_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -990,6 +1003,7 @@ fn reject_inbound_rst_is_not_answered() {
     let sent = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -1043,6 +1057,7 @@ fn unreplyable_reject_does_not_drain_bucket_3656() {
     let sent = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -1087,6 +1102,7 @@ fn unreplyable_reject_does_not_count_budget_drop_3656() {
     let sent = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -1169,6 +1185,7 @@ fn unreplyable_non_first_fragment_reject_untouched_3656() {
     let sent = enqueue_filter_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -1248,6 +1265,7 @@ fn deny_reply_zone_tcp_rst_policy_deny_is_silent_11304() {
     let sent = enqueue_deny_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -1271,6 +1289,7 @@ fn deny_reply_no_zone_tcp_rst_is_silent_drop() {
     let sent = enqueue_deny_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -1297,6 +1316,7 @@ fn deny_reply_plain_deny_non_tcp_is_silent_drop() {
     let sent = enqueue_deny_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -1391,6 +1411,7 @@ fn reject_reply_classifies_on_logical_vlan_ifindex_3035() {
     let sent = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         11, // physical parent ingress ifindex
         &frame,
         meta,
@@ -1437,6 +1458,7 @@ fn reject_reply_queues_on_logical_vlan_ifindex_11786() {
     assert!(enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         11,
         &frame,
         meta,
@@ -1501,6 +1523,7 @@ fn reject_reply_non_vlan_classify_unchanged_3035() {
     let sent = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5, // logical == physical for an untagged port
         &frame,
         meta,
@@ -1584,6 +1607,7 @@ fn reject_reply_non_tcp_sources_from_logical_vlan_ifindex_3976() {
     let sent = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         11, // physical parent ingress ifindex
         &frame,
         meta,
@@ -1703,6 +1727,7 @@ fn filter_reject_non_tcp_v6_sources_from_logical_vlan_ifindex_3976() {
     let sent = enqueue_filter_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         11, // physical parent ingress ifindex
         &frame,
         meta,
@@ -1765,6 +1790,7 @@ fn deny_reply_explicit_reject_still_resets_tcp() {
     let sent = enqueue_deny_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -2114,6 +2140,7 @@ fn stamp_shaped_native_policy_reject_still_enqueues_tcp_rst_12051() {
     assert!(enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -2152,6 +2179,7 @@ fn unstamped_fabric_policy_reject_still_enqueues_tcp_rst_12051() {
     assert!(enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         21,
         &frame,
         meta,
@@ -2641,6 +2669,7 @@ fn per_zone_reject_isolation_at_call_site_3618() {
     let sent_a = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         ifidx_a,
         &frame,
         meta,
@@ -2658,6 +2687,7 @@ fn per_zone_reject_isolation_at_call_site_3618() {
     let sent_b = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         ifidx_b,
         &frame,
         meta,
@@ -2785,6 +2815,7 @@ fn egress_filtered_reject_does_not_drain_zone_token_5569() {
         let sent = enqueue_policy_reject_reply(
             &mut pipeline,
             &forwarding,
+            None,
             5,
             &udp_frame,
             udp_meta,
@@ -2814,6 +2845,7 @@ fn egress_filtered_reject_does_not_drain_zone_token_5569() {
     let sent = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &tcp_frame,
         tcp_meta,
@@ -2886,6 +2918,7 @@ fn token_exhausted_reject_after_classify_survives_still_rate_limited_5569() {
     let sent = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -3023,6 +3056,7 @@ fn token_allowed_reject_enqueues_with_classify_verdict_5569() {
     let sent = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -3249,6 +3283,7 @@ fn stamped_fabric_reject_flood_consumes_no_budget_or_token_12051() {
         let sent = enqueue_policy_reject_reply(
             &mut pipeline,
             &forwarding,
+            None,
             21,
             &stamped_frame,
             stamped_meta,
@@ -3287,6 +3322,7 @@ fn stamped_fabric_reject_flood_consumes_no_budget_or_token_12051() {
     let sent = enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &native_frame,
         native_meta,
@@ -3311,6 +3347,7 @@ fn stamped_fabric_reject_flood_consumes_no_budget_or_token_12051() {
     let sent = enqueue_policy_reject_reply(
         &mut no_budget_pipeline,
         &forwarding,
+        None,
         21,
         &stamped_frame,
         stamped_meta,
@@ -3379,6 +3416,7 @@ fn tunnel_decap_reject_suppresses_unencapsulated_replies_12864() {
             !enqueue_policy_reject_reply(
                 &mut pipeline,
                 &forwarding,
+                None,
                 5,
                 &frame,
                 meta,
@@ -3407,6 +3445,7 @@ fn tunnel_decap_reject_suppresses_unencapsulated_replies_12864() {
     assert!(enqueue_policy_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -3442,6 +3481,7 @@ fn route_reject_tcp_and_udp_emit_icmp_unreachable_14021() {
     assert!(enqueue_route_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -3470,6 +3510,7 @@ fn route_reject_tcp_and_udp_emit_icmp_unreachable_14021() {
     assert!(enqueue_route_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -3496,6 +3537,7 @@ fn route_reject_tcp_and_udp_emit_icmp_unreachable_14021() {
     assert!(enqueue_route_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -3534,6 +3576,7 @@ fn route_reject_suppresses_synthetic_fabric_source_14021() {
     assert!(!enqueue_route_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         21,
         &frame,
         meta,
@@ -3603,6 +3646,7 @@ fn route_reject_disposition_arm_uses_physical_binding_ifindex_14237() {
             ForwardingDisposition::RejectRoute,
             &mut pipeline,
             &forwarding,
+            None,
             21,
             &frame,
             meta,
@@ -3627,6 +3671,7 @@ fn route_reject_disposition_arm_uses_physical_binding_ifindex_14237() {
         ForwardingDisposition::DiscardRoute,
         &mut pipeline,
         &forwarding,
+        None,
         21,
         &frame2,
         meta2,
@@ -3650,6 +3695,7 @@ fn route_reject_disposition_arm_uses_physical_binding_ifindex_14237() {
             ForwardingDisposition::RejectRoute,
             &mut pipeline,
             &forwarding,
+            None,
             21,
             &frame2,
             meta2,
@@ -3685,6 +3731,7 @@ fn route_reject_suppressed_and_rate_limited_fail_closed_14021() {
     assert!(!enqueue_route_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &multicast,
         meta,
@@ -3707,6 +3754,7 @@ fn route_reject_suppressed_and_rate_limited_fail_closed_14021() {
     assert!(!enqueue_route_reject_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -3779,6 +3827,7 @@ fn reject_snapshot_resolves_and_enqueues_icmp_unreachable_15098() {
             resolution.disposition,
             &mut pipeline,
             &forwarding,
+            None,
             5,
             &frame,
             meta,
@@ -3801,4 +3850,195 @@ fn reject_snapshot_resolves_and_enqueues_icmp_unreachable_15098() {
         crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
         0,
     );
+}
+
+// ---------------------------------------------------------------------------
+// #15268 (B13-02 + B13-03): a generated reject the zone limiter discards
+// leaves no output-filter counter/policer charge and no FILTER_LOG; an
+// admitted (or output-filter-dropped) reply settles exactly once and
+// emits one FILTER_LOG keyed on the reply's own tuple.
+// ---------------------------------------------------------------------------
+
+fn reject_15268_forwarding() -> (ForwardingState, std::sync::Arc<crate::filter::FilterTermCounter>) {
+    use crate::afxdp::icmp_ratelimit::ZoneLimiter;
+    use crate::afxdp::types::FastMap;
+    use std::sync::Arc;
+    let zone_a = 4_321u16;
+    let mut ifindex_to_zone_id: FastMap<i32, u16> = FastMap::default();
+    ifindex_to_zone_id.insert(5, zone_a);
+    let mut reject_buckets: FastMap<u16, Arc<ZoneLimiter>> = FastMap::default();
+    reject_buckets.insert(zone_a, Arc::new(ZoneLimiter::new()));
+    let filter_state = crate::filter::parse_filter_state(
+        &[crate::FirewallFilterSnapshot {
+            name: "fc".into(),
+            family: "inet".into(),
+            terms: vec![
+                crate::FirewallTermSnapshot {
+                    name: "count-log-icmp".into(),
+                    action: "".into(),
+                    protocols: vec!["icmp".into()],
+                    count: "reply-count".into(),
+                    log: true,
+                    next_term: true,
+                    ..Default::default()
+                },
+                crate::FirewallTermSnapshot {
+                    name: "allow-tcp".into(),
+                    action: "accept".into(),
+                    protocols: vec!["tcp".into()],
+                    ..Default::default()
+                },
+                crate::FirewallTermSnapshot {
+                    name: "drop-icmp".into(),
+                    action: "discard".into(),
+                    protocols: vec!["icmp".into()],
+                    ..Default::default()
+                },
+            ],
+        }],
+        &[],
+        &[crate::InterfaceSnapshot {
+            name: "ge-0/0/1.0".into(),
+            ifindex: 5,
+            filter_output_v4: "fc".into(),
+            ..Default::default()
+        }],
+        "",
+        "",
+    )
+    .expect("filter state compiles");
+    let mut forwarding = ForwardingState {
+        filter_state,
+        tx_selection_enabled_v4: true,
+        ifindex_to_zone_id,
+        reject_buckets,
+        ..ForwardingState::default()
+    };
+    forwarding.egress.insert(
+        5,
+        EgressInterface {
+            bind_ifindex: 5,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x61, 0x01],
+            zone_id: 0,
+            redundancy_group: 0,
+            primary_v4: Some(std::net::Ipv4Addr::new(10, 0, 61, 1)),
+            primary_v6: None,
+        },
+    );
+    let counter = forwarding
+        .filter_state
+        .iface_filter_out_v4_fast
+        .get(&5)
+        .expect("output filter")
+        .terms
+        .iter()
+        .find(|t| t.has_count)
+        .expect("count term")
+        .counter
+        .clone();
+    (forwarding, counter)
+}
+
+#[test]
+fn rate_limited_generated_reply_leaves_no_counter_or_log_15268() {
+    use crate::afxdp::icmp_ratelimit::{
+        GeneratedErrorReason, global_bucket_test_lock, reset_bucket_for_test,
+    };
+    let _g = global_bucket_test_lock();
+    reset_bucket_for_test(GeneratedErrorReason::Reject, 0);
+    let (forwarding, counter) = reject_15268_forwarding();
+    // Drain zone A's bucket so the token denies.
+    let far_future = u64::MAX / 2;
+    forwarding
+        .generated_error_bucket(GeneratedErrorReason::Reject, 4_321)
+        .expect("zone bucket")
+        .drain_aggregate_for_test(far_future, 1000, 1000);
+    let (handle, rx) = unlimited_event_handle();
+    // TCP SYN -> RST: the output filter's allow-tcp term admits it, so the
+    // reply reaches the (drained) zone token and dies there.
+    let (frame, meta, flow) = tcp_v4_syn();
+    let mut pipeline = tx_pipeline(
+        super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+    crate::filter::flush_recorded_filter_counters();
+    let sent = enqueue_policy_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        Some(&handle),
+        5,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+    );
+    assert!(!sent, "rate-limited reply must not enqueue");
+    assert_eq!(counters.policy_reject_rate_limit_drops, 1);
+    assert_eq!(counters.policy_reject_output_filter_drops, 0);
+    crate::filter::flush_recorded_filter_counters();
+    assert_eq!(
+        counter.packets.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "#15268: a limiter-discarded reply must not record `then count`"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "#15268: a limiter-discarded reply must not emit FILTER_LOG"
+    );
+    assert_eq!(handle.dataplane_event_stats().filter_log.sent, 0);
+    reset_bucket_for_test(GeneratedErrorReason::Reject, 0);
+}
+
+#[test]
+fn admitted_generated_reply_counts_and_logs_once_15268() {
+    use crate::afxdp::icmp_ratelimit::{
+        GeneratedErrorReason, global_bucket_test_lock, reset_bucket_for_test,
+    };
+    let _g = global_bucket_test_lock();
+    reset_bucket_for_test(GeneratedErrorReason::Reject, 0);
+    let (forwarding, counter) = reject_15268_forwarding();
+    let (handle, rx) = unlimited_event_handle();
+    // UDP trigger -> ICMP unreachable: the count+log fall-through term
+    // matches, then the discard terminal drops the reply. The drop arm
+    // logs once and never settles, so the counter stays 0.
+    let (frame, meta, flow) = policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
+    let mut pipeline = tx_pipeline(
+        super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+    crate::filter::flush_recorded_filter_counters();
+    let sent = enqueue_policy_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        Some(&handle),
+        5,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+    );
+    assert!(!sent, "output-filter-dropped reply must not enqueue");
+    assert_eq!(counters.policy_reject_output_filter_drops, 1);
+    crate::filter::flush_recorded_filter_counters();
+    assert_eq!(
+        counter.packets.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "#15268: an output-filter-dropped reply is never settled, so no count"
+    );
+    let event = rx
+        .try_recv()
+        .expect("#15268: output-filter-dropped reply must emit one FILTER_LOG")
+        .decode_dataplane_event()
+        .expect("filter log payload");
+    assert_eq!(event.kind, crate::event_stream::codec::DataplaneEventKind::FilterLog);
+    // Reply tuple: src is the firewall's egress address, dst the client.
+    assert_eq!(event.src_ip, std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 61, 1)));
+    assert_eq!(event.dst_ip, std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 61, 102)));
+    assert_eq!(handle.dataplane_event_stats().filter_log.sent, 1);
+    assert!(rx.try_recv().is_err(), "exactly one FILTER_LOG per generated reply");
+    reset_bucket_for_test(GeneratedErrorReason::Reject, 0);
 }

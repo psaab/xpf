@@ -37,7 +37,7 @@
 mod cookie_reply;
 mod debug_log_throttle;
 mod embedded_icmp;
-mod filter;
+pub(in crate::afxdp) mod filter;
 mod flow_cache_hit;
 mod flow_cache_seed;
 mod flowless_verdict;
@@ -1215,6 +1215,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             enqueue_syn_cookie_reply(
                                 &mut binding.tx_pipeline,
                                 worker_ctx.forwarding,
+                                worker_ctx.event_stream,
                                 binding.ifindex,
                                 packet_frame,
                                 meta,
@@ -2737,6 +2738,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     enqueue_filter_reject_reply(
                                         &mut binding.tx_pipeline,
                                         worker_ctx.forwarding,
+                                        worker_ctx.event_stream,
                                         binding.ifindex,
                                         packet_frame,
                                         meta,
@@ -3477,6 +3479,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 &worker_ctx.ident,
                                 flow,
                                 worker_ctx.forwarding,
+                                worker_ctx.event_stream,
                                 worker_ctx.dynamic_neighbors,
                                 worker_ctx.ha_state,
                                 now_secs,
@@ -3581,6 +3584,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     enqueue_syn_cookie_reply(
                                         &mut binding.tx_pipeline,
                                         worker_ctx.forwarding,
+                                        worker_ctx.event_stream,
                                         binding.ifindex,
                                         packet_frame,
                                         meta,
@@ -4118,6 +4122,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 enqueue_filter_reject_reply(
                                     &mut binding.tx_pipeline,
                                     worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
                                     binding.ifindex,
                                     packet_frame,
                                     meta,
@@ -4727,6 +4732,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             let _ = enqueue_session_miss_rst(
                                 &mut binding.tx_pipeline,
                                 worker_ctx.forwarding,
+                                worker_ctx.event_stream,
                                 binding.ifindex,
                                 packet_frame,
                                 meta,
@@ -5794,6 +5800,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     &worker_ctx.ident,
                                     flow,
                                     worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
                                     worker_ctx.dynamic_neighbors,
                                     worker_ctx.ha_state,
                                     now_secs,
@@ -9337,6 +9344,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 decision.resolution.disposition,
                                 &mut binding.tx_pipeline,
                                 worker_ctx.forwarding,
+                                worker_ctx.event_stream,
                                 binding.ifindex,
                                 packet_frame,
                                 meta,

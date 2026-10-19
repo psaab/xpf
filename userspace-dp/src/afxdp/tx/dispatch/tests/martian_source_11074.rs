@@ -92,6 +92,7 @@ fn final_live_tx_dispatch_rechecks_transit_source_martian_11074() {
         &mut post_recycles,
         1,
         &forwarding,
+        None,
         &ingress_ident,
         unsafe { &*ingress_live },
         None,

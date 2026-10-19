@@ -314,6 +314,7 @@ pub(super) fn poll_binding(
                 &mut scratch_post_recycles,
                 now_ns,
                 forwarding,
+                event_stream,
                 &ident,
                 unsafe { &*ingress_live },
                 slow_path,

@@ -293,7 +293,21 @@ fn merge_matched_tx_modifiers<'a>(
     now_ns: Option<u64>,
     packet_bytes: u64,
 ) {
-    let policer_action = apply_term_three_color_policer(term, now_ns, packet_bytes);
+    // #15268: deferrable walks (`now_ns == None`) collect the policer handle
+    // and meter at admission instead of metering a reply that may never be
+    // sent. Metered walks keep metering inline exactly as before.
+    let policer_action = if now_ns.is_some() {
+        apply_term_three_color_policer(term, now_ns, packet_bytes)
+    } else {
+        ThreeColorPolicerAction::default()
+    };
+    if let Some(runtime) = term.three_color_policer.as_ref() {
+        acc.three_color_policers
+            .push(std::sync::Arc::clone(runtime));
+    }
+    if term.has_count {
+        acc.counters.push(term.counter.clone());
+    }
     if !term.forwarding_class.is_empty() {
         acc.forwarding_class = Some(term.forwarding_class.as_ref());
     }
