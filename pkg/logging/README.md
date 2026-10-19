@@ -1017,6 +1017,17 @@ with no valueType and no validator, so any string reached the dialer's resolver.
   `DecodeRawEventRecord` already honored the wire stamp — under helper
   backlog or reconnect that drifted from the decision instant. Keep the two
   paths on the single `eventTimeFromWire` SSOT.
+- **Text-sink headers carry DECISION time too (#15699).** `logEvent`
+  passes `rec.Time` to `SyslogClient.SendFromEventReaderAt` and
+  `LocalLogWriter.SendFromEventReaderAt`; the timestamp rides
+  `syslogEventWrite.ts` / `auditItem.ts` through the async queues so
+  `SendAt` formats the RFC 5424 / RFC 3164 / local header from the
+  wire decision instant, not the worker's dequeue `time.Now()`.
+  Explicit stamps are normalized to local time (the location the
+  pre-#15699 `time.Now()` stamps carried); a zero stamp falls back to
+  now, so direct `Send` callers (aggregator, slog handler) keep
+  receive-time headers. Binary records already embed `rec.Time`.
+  Pins: `event_decision_time_15699_test.go`.
 - **SESSION_CLOSE log lines carry no `action` (#2513).** A session close
   is a termination event, not a forwarding decision, so it has no
   permit/deny/reject action — the userspace-dp producer writes the wire

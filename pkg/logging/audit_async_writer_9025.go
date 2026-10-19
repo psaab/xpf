@@ -53,6 +53,12 @@ const auditQueueDepth = 4096
 // both so the barrier is ordered behind every line already queued — FIFO is
 // what makes `syncForTest` sound rather than a sleep in disguise.
 type auditItem struct {
+	// ts is the event decision timestamp carried from EventReader
+	// (#15699): LocalLogWriter re-enters SendAt on the writer goroutine,
+	// so the header is stamped from ts, not the dequeue wall clock.
+	// Zero means "no event timestamp" (TraceWriter lines, direct paths)
+	// and SendAt falls back to time.Now().
+	ts time.Time
 	// severity is carried alongside the text because LocalLogWriter formats
 	// its line INSIDE Send (the RFC 5424 envelope needs the priority), so the
 	// writer goroutine has to re-enter Send rather than being handed a

@@ -153,20 +153,34 @@ func NewLocalLogWriter(cfg LocalLogConfig) (*LocalLogWriter, error) {
 			_ = lw.SendBinary(it.binary)
 			return
 		}
-		_ = lw.Send(it.severity, it.line)
+		_ = lw.SendAt(it.ts, it.severity, it.line)
 	})
 	return lw, nil
 }
 
-// Send writes a log message to the local file. It matches the SyslogClient.Send
-// signature pattern so it can be used as a drop-in replacement.
+// Send writes a log message to the local file, stamped with the current
+// time. It matches the SyslogClient.Send signature pattern so it can be
+// used as a drop-in replacement.
 func (lw *LocalLogWriter) Send(severity int, msg string) error {
+	return lw.SendAt(time.Time{}, severity, msg)
+}
+
+// SendAt is Send with an explicit header timestamp (#15699). A zero at
+// falls back to time.Now(), preserving the direct-caller contract;
+// EventReader passes rec.Time so a queued line keeps its dataplane
+// decision instant instead of the async writer's dequeue time.
+func (lw *LocalLogWriter) SendAt(at time.Time, severity int, msg string) error {
 	// #14732 / #6585 parity with SyslogClient.Send: this is the last
 	// boundary before the on-disk audit file. A bare LF forges an extra
 	// audit line, CR/ESC stored verbatim fire when an operator cats/tails
 	// the file. SanitizeForDisplay (single-line, not the LF-preserving
 	// block variant) has an allocation-free fast path for clean messages.
 	msg = termsafe.SanitizeForDisplay(msg)
+	if at.IsZero() {
+		at = time.Now()
+	} else {
+		at = at.Local() // match the pre-#15699 time.Now() (local) stamps
+	}
 	var line string
 	if lw.Format == "sd-syslog" {
 		// Junos sd-syslog (#14611), byte-for-byte identical to
@@ -174,14 +188,14 @@ func (lw *LocalLogWriter) Send(severity int, msg string) error {
 		// <PRI>1 TS HOST RT_FLOW - RT_FLOW_SESSION_* [junos@... SD].
 		// msg carries the structured body for firewall events.
 		priority := lw.Facility*8 + severity
-		ts := time.Now().Format("2006-01-02T15:04:05.000Z07:00")
+		ts := at.Format("2006-01-02T15:04:05.000Z07:00")
 		line = formatSDSyslogLine(priority, ts, lw.hostname, msg, msg) + "\n"
 	} else {
 		// Standard ("" / syslog) and structured (Junos RT_FLOW) bodies share the
 		// local-file timestamp+severity-tag prefix; only the msg body differs
 		// (chosen by the ringbuf fanout per Format). Strip the redundant
 		// "RT_FLOW - " lead-in from structured bodies (#14611).
-		ts := time.Now().Format("2006-01-02T15:04:05.000")
+		ts := at.Format("2006-01-02T15:04:05.000")
 		line = fmt.Sprintf("%s [%s] %s\n", ts, severityTag(severity), stripRTFlowLeadIn(msg))
 	}
 
@@ -302,12 +316,20 @@ func (lw *LocalLogWriter) ShouldSendEvent(severity int, categoryBit uint8) bool 
 // dropped (queue full or writer retired) and counted, which is the signal
 // #3478 established as the observable one.
 func (lw *LocalLogWriter) SendFromEventReader(severity int, msg string) bool {
+	return lw.SendFromEventReaderAt(time.Time{}, severity, msg)
+}
+
+// SendFromEventReaderAt is SendFromEventReader with the dataplane
+// decision timestamp (#15699): ts rides the auditItem queue so the
+// on-disk header records the decision instant, not the writer
+// goroutine's dequeue time. A zero ts falls back to now (see SendAt).
+func (lw *LocalLogWriter) SendFromEventReaderAt(ts time.Time, severity int, msg string) bool {
 	if lw.async == nil {
-		return lw.Send(severity, msg) == nil
+		return lw.SendAt(ts, severity, msg) == nil
 	}
-	// The line is formatted on the WRITER goroutine (Send does it), so the
+	// The line is formatted on the WRITER goroutine (SendAt does it), so the
 	// reader goroutine pays only the channel send.
-	if !lw.async.enqueue(auditItem{severity: severity, line: msg}) {
+	if !lw.async.enqueue(auditItem{ts: ts, severity: severity, line: msg}) {
 		lw.droppedWrites.Add(1)
 		// #14191: this warn runs WITHOUT lw.mu (holding it here would park
 		// the event reader behind a stalled writer — the stall #9025
