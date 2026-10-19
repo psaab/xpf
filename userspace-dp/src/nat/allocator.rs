@@ -818,8 +818,8 @@ pub(crate) struct DeterministicV6 {
     /// Ports per subscriber block (Junos `block-size`).
     pub(crate) block_size: u16,
     /// Blocks each external pool address carries
-    /// (`(port_high - port_low + 1) / block_size`), computed against the fixed
-    /// NAT64 translated-port range so block boundaries align with the allocator.
+    /// (`(port_high - port_low + 1) / block_size`), computed against the
+    /// pool's translated-port range so block boundaries align with the allocator.
     pub(crate) blocks_per_ip: u16,
     /// IPv6 subscriber-prefix length: 32 or 64. Selects the subscriber-index
     /// word offset (32 → octets[4..8], 64 → octets[8..12]).
@@ -4495,9 +4495,9 @@ impl PortAllocator {
         let translated_ip = IpAddr::V4(pool_v4[ip_idx]);
         // Block boundaries mirror the v4 path: [port_low + block_idx*block_size,
         // that + block_size - 1], clamped to port_high. The NAT64 allocator's
-        // port_low/port_high are the fixed NAT64 translated-port range, the same
-        // range the Go builder computes blocks_per_ip against, so boundaries
-        // align.
+        // port_low/port_high are the pool's translated-port range, the same
+        // range the Go builder computes blocks_per_ip against (#15283), so
+        // boundaries align.
         let port_start = self.port_low as u32 + block_idx * params.block_size as u32;
         if port_start > self.port_high as u32 {
             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);

@@ -150,10 +150,10 @@ set security nat nat64 rule-set rs1 prefix 64:ff9b::/96
 set security nat nat64 rule-set rs1 source-pool CGNAT64-POOL
 ```
 
-Block boundaries for mode 2 are computed against the FIXED NAT64 translated-port
-range (1024-65535, the per-prefix allocator range in `userspace-dp/src/nat64.rs`
-`NAT64_PORT_LOW`/`NAT64_PORT_HIGH`), NOT the source pool's own `port` range
-(which the NAT64 allocator ignores). The subscriber count is bounded by pool
+Block boundaries for mode 2 are computed against the source pool's translated-port
+range — its own `port range` when configured, else the NAT64 default 1024-65535
+(the per-prefix allocator default in `userspace-dp/src/nat64.rs`
+`NAT64_PORT_LOW`/`NAT64_PORT_HIGH`) (#15283). The subscriber count is bounded by pool
 capacity (`num_pool_ips * blocks_per_ip`): an IPv6 subscriber word extends far
 beyond the pool, so a subscriber past that capacity fails CLOSED rather than
 aliasing another subscriber's block. Go computes that product in 64 bits: a pool
@@ -408,7 +408,7 @@ reused while a session is alive.
 
 | Component | Change |
 |-----------|--------|
-| `pkg/dataplane/userspace/nat64.go` | `deterministicNAT64V6Fields()` computes `block_size`/`blocks_per_ip` (against the FIXED NAT64 range)/`host_prefix_len` (32 or 64)/`host_base_v6` from the referenced source pool, and `buildNAT64Snapshots` stamps them on `NAT64RuleSnapshot`. Only a `/32`-or-`/64` IPv6 host referenced by a NAT64 rule-set yields the params; anything else stays zero (round-robin + advisory). |
+| `pkg/dataplane/userspace/nat64.go` | `deterministicNAT64V6Fields()` computes `block_size`/`blocks_per_ip` (against the pool's `port range`, default 1024-65535; #15283)/`host_prefix_len` (32 or 64)/`host_base_v6` from the referenced source pool, and `buildNAT64Snapshots` stamps them plus `port_low`/`port_high` on `NAT64RuleSnapshot`. Only a `/32`-or-`/64` IPv6 host referenced by a NAT64 rule-set yields the params; anything else stays zero (round-robin + advisory). |
 | `pkg/dataplane/userspace/protocol.go` | `NAT64RuleSnapshot` gains the four additive `deterministic_*` wire fields (omitempty, #1961 skew-safe). |
 | `userspace-dp/src/protocol/nat.rs` | Rust mirror of the four NAT64 wire fields (`#[serde(default)]`). |
 | `userspace-dp/src/nat/allocator.rs` | `DeterministicV6` params; `deterministic_indices_v6()` (IPv6 subscriber → `(ip_idx, block_idx)` from the 32-bit word after the prefix — offset 4 for `/32`, offset 8 for `/64`; #4863 rejects sources whose prefix bytes before the subscriber word differ from `host_base`, so an out-of-prefix source sharing the subscriber word fails CLOSED instead of stealing the in-prefix subscriber's block); `allocate_deterministic_v6()` (mirrors the v4 claim, collision-free, not recycled); `reverse_deterministic_v6()` (`(external IPv4, port)` → subscriber IPv6 prefix, no per-flow state — same O(1) `PoolReverseIndex` for the external-IP→`ip_idx` step, #5660). |

@@ -128,6 +128,8 @@ fn napt64_deterministic_v6_routes_through_block_allocator() {
         deterministic_blocks_per_ip: 126,
         deterministic_host_prefix_len: 32,
         deterministic_host_base_v6: "2001:db8::".to_string(),
+        port_low: 0,
+        port_high: 0,
         pool_unusable: false,
         pool_unusable_reason: String::new(),
     };
@@ -234,6 +236,8 @@ fn napt64_deterministic_v6_unsupported_prefix_len_falls_back() {
         deterministic_blocks_per_ip: 126,
         deterministic_host_prefix_len: 48, // unsupported
         deterministic_host_base_v6: "2001:db8::".to_string(),
+        port_low: 0,
+        port_high: 0,
         pool_unusable: false,
         pool_unusable_reason: String::new(),
     }]);
@@ -282,6 +286,8 @@ fn napt64_deterministic_v6_host_count_overflow_warns_operator() {
         deterministic_blocks_per_ip: u16::MAX,
         deterministic_host_prefix_len: 32,
         deterministic_host_base_v6: "2001:db8::".to_string(),
+        port_low: 0,
+        port_high: 0,
         pool_unusable: false,
         pool_unusable_reason: String::new(),
     }]);
@@ -447,6 +453,8 @@ fn nat64_14624_deterministic_duplicate_pool_matches_single() {
         deterministic_blocks_per_ip: 126,
         deterministic_host_prefix_len: 32,
         deterministic_host_base_v6: "2001:db8::".to_string(),
+        port_low: 0,
+        port_high: 0,
         pool_unusable: false,
         pool_unusable_reason: String::new(),
     };
@@ -9121,6 +9129,8 @@ fn det_nat64_snap_15178(block_size: u16, host_base: &str, prefix_len: u8) -> NAT
         deterministic_blocks_per_ip: 2016,
         deterministic_host_prefix_len: prefix_len,
         deterministic_host_base_v6: host_base.to_string(),
+        port_low: 0,
+        port_high: 0,
         pool_unusable: false,
         pool_unusable_reason: String::new(),
     }
@@ -9262,4 +9272,130 @@ fn nat64_15178_tuple_matches_new_geometry_only() {
         ),
         "#15178: a destination matching no live prefix must fail closed"
     );
+}
+// #15283 (V52-S1): a NAT64 rule whose source pool carries `port range
+// 2000 to 3000` must translate ONLY within 2000..=3000. Before the fix the
+// snapshot carried no range and the allocator used the fixed
+// 1024..=65535 window, so the first flow deterministically got port 1024.
+// RED-on-revert: restoring the fixed-range allocator makes the first
+// assertion (port == 2000, the cursor start of the honoured window) fail.
+#[test]
+fn nat64_15283_pool_port_range_is_honoured() {
+    let snap = NAT64RuleSnapshot {
+        name: "nat64-ranged".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.1".to_string()],
+        port_low: 2000,
+        port_high: 3000,
+        ..Default::default()
+    };
+    let state = Nat64State::from_snapshots(&[snap]);
+    assert_eq!(
+        (state.prefixes[0].port_allocator.port_low, state.prefixes[0].port_allocator.port_high),
+        (2000, 3000),
+        "#15283: the allocator must be built over the pool's port range"
+    );
+    let dst_v4 = Ipv4Addr::new(203, 0, 113, 9);
+    for i in 0..8u16 {
+        let src: Ipv6Addr = format!("2001:db8::{:x}", i + 1).parse().unwrap();
+        let (_ip, port) = state
+            .allocate_source(0, crate::ip_proto::PROTO_TCP, src, dst_v4, 40000 + i, 443, 0)
+            .expect("ranged NAT64 allocation");
+        assert!(
+            (2000..=3000).contains(&port),
+            "#15283: translated port {port} outside the pool range 2000..=3000"
+        );
+        if i == 0 {
+            assert_eq!(port, 2000, "#15283: first flow starts at the honoured window low (1024 on revert)");
+        }
+    }
+}
+
+// #15283 deterministic leg: with range 2000..=3000 (1001 ports) and
+// block-size 100 the Go builder stamps blocks_per_ip = 10; subscriber
+// word 5 maps to block 5 = [2500, 2599] off the POOL low, not [3584, ...]
+// off the fixed 1024 low.
+#[test]
+fn nat64_15283_deterministic_blocks_use_pool_range() {
+    let snap = NAT64RuleSnapshot {
+        name: "napt64-ranged".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.1".to_string()],
+        port_low: 2000,
+        port_high: 3000,
+        deterministic_block_size: 100,
+        deterministic_blocks_per_ip: 10,
+        deterministic_host_prefix_len: 32,
+        deterministic_host_base_v6: "2001:db8::".to_string(),
+        ..Default::default()
+    };
+    let state = Nat64State::from_snapshots(&[snap]);
+    assert!(state.prefixes[0].deterministic_v6.is_some());
+    let (_ip, port) = state
+        .allocate_source(
+            0,
+            crate::ip_proto::PROTO_TCP,
+            "2001:db8:0:5::".parse().unwrap(),
+            Ipv4Addr::new(203, 0, 113, 9),
+            40001,
+            443,
+            0,
+        )
+        .expect("deterministic ranged allocation");
+    assert!(
+        (2500..=2599).contains(&port),
+        "#15283: deterministic port {port} must fall in block [2500,2599] (pool low 2000 + 5*100)"
+    );
+}
+
+// #15283 control: no range on the snapshot keeps the fixed default window.
+#[test]
+fn nat64_15283_default_range_unchanged() {
+    let state = Nat64State::from_snapshots(&[well_known_prefix()]);
+    assert_eq!(
+        (state.prefixes[0].port_allocator.port_low, state.prefixes[0].port_allocator.port_high),
+        (NAT64_PORT_LOW, NAT64_PORT_HIGH),
+    );
+    assert_eq!(
+        nat64_prefix_charge_for_range(1, 2000, 3000).port_capacity,
+        1001,
+        "#15283: the aggregate charge must follow the honoured range"
+    );
+}
+
+// #15283: a reload that CHANGES the port range must not reuse the old
+// allocator (its bitmap is indexed by the old window); the first flow on
+// the new state starts at the new low. Same-range reload still reuses.
+#[test]
+fn nat64_15283_range_change_resets_allocator() {
+    let ranged = |lo: u16, hi: u16| NAT64RuleSnapshot {
+        name: "nat64-ranged".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.1".to_string()],
+        port_low: lo,
+        port_high: hi,
+        ..Default::default()
+    };
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+    let c1: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let c2: Ipv6Addr = "2001:db8::2".parse().unwrap();
+    let state1 = Nat64State::from_snapshots(&[ranged(2000, 3000)]);
+    let (_sa, pa) = state1
+        .allocate_source(0, crate::ip_proto::PROTO_TCP, c1, dst_v4, 5000, 443, 1)
+        .expect("alloc A");
+    assert_eq!(pa, 2000);
+    // Same range: reuse — a new flow must not reclaim pa.
+    let state2 =
+        Nat64State::from_snapshots_with_previous(&[ranged(2000, 3000)], Some(&state1), 1, 0);
+    let (_sb, pb) = state2
+        .allocate_source(0, crate::ip_proto::PROTO_TCP, c2, dst_v4, 5000, 443, 2)
+        .expect("alloc B same range");
+    assert_ne!(pb, pa, "#15283: same-range reload must reuse the live allocator");
+    // Changed range: fresh allocator at the new low.
+    let state3 =
+        Nat64State::from_snapshots_with_previous(&[ranged(4000, 5000)], Some(&state1), 1, 0);
+    let (_sc, pc) = state3
+        .allocate_source(0, crate::ip_proto::PROTO_TCP, c2, dst_v4, 5000, 443, 2)
+        .expect("alloc C changed range");
+    assert_eq!(pc, 4000, "#15283: changed range must start a fresh allocator at the new low");
 }

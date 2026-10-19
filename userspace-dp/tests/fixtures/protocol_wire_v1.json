@@ -892,6 +892,8 @@
     "pool_addresses": [],
     "pool_unusable": false,
     "pool_unusable_reason": "",
+    "port_high": 0,
+    "port_low": 0,
     "prefix": ""
   },
   "nat_rule_counter_status": {

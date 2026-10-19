@@ -6,16 +6,31 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// nat64PortLow / nat64PortHigh mirror the FIXED NAT64 translated-port range the
-// Rust dataplane's per-prefix PortAllocator uses (userspace-dp/src/nat64.rs
-// NAT64_PORT_LOW / NAT64_PORT_HIGH). Deterministic NAPT64 (mode 2) block
-// boundaries MUST be computed against THIS range, not the source pool's own
-// `port` range (which the NAT64 allocator ignores), so the Go-computed
-// blocks_per_ip aligns with the block boundaries the allocator walks (#4559).
+// nat64PortLow / nat64PortHigh are the DEFAULT NAT64 translated-port range
+// (the Rust dataplane's per-prefix PortAllocator default in
+// userspace-dp/src/nat64.rs NAT64_PORT_LOW / NAT64_PORT_HIGH). A source pool
+// referenced by a NAT64 rule-set may narrow it with its own `port range`
+// (#15283): buildNAT64Snapshots stamps that range onto the snapshot and
+// deterministicNAT64V6Fields computes mode-2 block boundaries against it,
+// so blocks and the allocator's port window agree. A pool with no explicit
+// range falls back to this default, byte-identical to pre-#15283.
 const (
 	nat64PortLow  = 1024
 	nat64PortHigh = 65535
 )
+
+// nat64PoolPortRange returns the translated-port range a NAT64-referenced
+// source pool honours: its configured `port range` via the shared SSOT
+// (config.SourceNATPoolPortRange), or the fixed NAT64 default when the pool
+// carries none. An invalid configured range cannot reach here on a usable
+// pool (the builder marks it unusable first); the default keeps this helper
+// total on any direct call.
+func nat64PoolPortRange(pool *config.NATPool) (uint16, uint16) {
+	if lo, hi, ok := config.SourceNATPoolPortRange(pool); ok {
+		return lo, hi
+	}
+	return nat64PortLow, nat64PortHigh
+}
 
 // deterministicNAT64V6Fields computes the mode-2 (IPv6-subscriber / NAPT64)
 // deterministic block-allocation wire fields for a source pool referenced by a
@@ -49,7 +64,8 @@ func deterministicNAT64V6Fields(pool *config.NATPool) (blockSize, blocksPerIP ui
 	if bits != 128 || (ones != 32 && ones != 64) {
 		return 0, 0, 0, "", false
 	}
-	portRange := nat64PortHigh - nat64PortLow + 1
+	portLow, portHigh := nat64PoolPortRange(pool)
+	portRange := int(portHigh) - int(portLow) + 1
 	if det.BlockSize > portRange {
 		return 0, 0, 0, "", false
 	}
@@ -103,6 +119,10 @@ func buildNAT64Snapshots(cfg *config.Config) []NAT64RuleSnapshot {
 		// empty-pool state and stays unmarked, exactly as before.
 		var poolUnusable bool
 		var poolUnusableReason string
+		// #15283: the pool's translated-port range; 0/0 (omitted) when the
+		// rule has no usable referenced pool, in which case Rust keeps its
+		// fixed default and the prefix installs empty anyway.
+		var portLow, portHigh uint16
 		if rs.SourcePool != "" {
 			pool, ok := cfg.Security.NAT.SourcePools[rs.SourcePool]
 			if !ok || pool == nil {
@@ -116,8 +136,11 @@ func buildNAT64Snapshots(cfg *config.Config) []NAT64RuleSnapshot {
 				if reason := config.SourceNATPoolUnusableReason(pool); reason != "" {
 					poolUnusable = true
 					poolUnusableReason = reason
-				} else if bs, bpi, pl, base, okDet := deterministicNAT64V6Fields(pool); okDet {
-					detBlockSize, detBlocksPerIP, detHostPrefixLen, detHostBaseV6 = bs, bpi, pl, base
+				} else {
+					portLow, portHigh = nat64PoolPortRange(pool)
+					if bs, bpi, pl, base, okDet := deterministicNAT64V6Fields(pool); okDet {
+						detBlockSize, detBlocksPerIP, detHostPrefixLen, detHostBaseV6 = bs, bpi, pl, base
+					}
 				}
 			}
 		}
@@ -130,6 +153,8 @@ func buildNAT64Snapshots(cfg *config.Config) []NAT64RuleSnapshot {
 			DeterministicBlocksPerIP:   detBlocksPerIP,
 			DeterministicHostPrefixLen: detHostPrefixLen,
 			DeterministicHostBaseV6:    detHostBaseV6,
+			PortLow:                    portLow,
+			PortHigh:                   portHigh,
 			PoolUnusable:               poolUnusable,
 			PoolUnusableReason:         poolUnusableReason,
 		})
