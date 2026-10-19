@@ -1619,7 +1619,7 @@ func groupPackedLeafUnmodelledTail(ancestorPath [][]string, s *Node) []*Node {
 		tail.setKeysQuoted(append([]bool(nil), s.KeysQuoted[consumed:]...))
 	}
 	if len(s.KeysBracketed) == len(s.Keys) {
-		tail.setKeysBracketed(append([]bool(nil), s.KeysBracketed[consumed:]...))
+		tail.setKeysBracketed(append([]bool(nil), s.KeysBracketed[consumed:]...), s.BracketedClosed)
 	}
 	return []*Node{tail}
 }
