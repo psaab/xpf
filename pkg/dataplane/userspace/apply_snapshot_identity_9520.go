@@ -201,7 +201,29 @@ func (m *Manager) rebuildDerivedSectionsAfterRevalidate(snap *ConfigSnapshot) {
 // requestApplySnapshotLocked prepares interface rows before sending the snapshot.
 func (m *Manager) requestApplySnapshotLocked(snap *ConfigSnapshot, status *ProcessStatus) error {
 	m.prepareSnapshotForApply(snap)
+	m.consumeRevalidateAttachLocked(snap)
 	return m.requestApplySnapshotPreparedLocked(snap, status)
+}
+
+// consumeRevalidateAttachLocked runs the pre-publish XDP attach reconcile
+// when the most recent prepareSnapshotForApply revalidation moved a row to
+// a recreated/materialized ifindex, and clears the flag (#15042). Every
+// publisher that sends through requestApplySnapshotLocked or
+// requestApplySnapshotPreparedLocked must consume it: before this, only
+// applyCompiledSnapshot did, so a non-Compile republish (route-overlay,
+// policy-scheduler, capture-authority, deferred worker-arm, deferred sync)
+// adopted the new ifindex into lastSnapshot+hash without attaching, and
+// the later link refresh then deduped on that hash before its own attach
+// reconcile — leaving the interface unshimmed (fail-closed transit loss)
+// until the next full Compile. Attach failure is fail-closed and does not
+// fail the publish (see reconcileInterfaceAttachmentsForRefreshLocked).
+// Caller holds m.mu.
+func (m *Manager) consumeRevalidateAttachLocked(snap *ConfigSnapshot) {
+	if m == nil || !m.revalidateChangedIfindex {
+		return
+	}
+	m.reconcileInterfaceAttachmentsForRefreshLocked(snap)
+	m.revalidateChangedIfindex = false
 }
 
 // requestApplySnapshotPreparedLocked is the ONLY site that sends apply_snapshot

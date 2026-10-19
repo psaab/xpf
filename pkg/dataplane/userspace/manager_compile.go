@@ -542,10 +542,7 @@ func (m *Manager) applyCompiledSnapshot(
 	// interface, and the attach failure mode is fail-closed. This is the
 	// same reconcile RefreshInterfaceRowsForLink runs (#14133); the
 	// detach half stays at the post-acceptance syncInterfaceAttachments.
-	if m.revalidateChangedIfindex {
-		m.reconcileInterfaceAttachmentsForRefreshLocked(snap)
-		m.revalidateChangedIfindex = false
-	}
+	m.consumeRevalidateAttachLocked(snap)
 	prevPlanKey := snapshotBindingPlanKey(m.lastSnapshot)
 	newPlanKey := snapshotBindingPlanKey(snap)
 	pendingXSKStartup := m.proc != nil &&

@@ -290,6 +290,9 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	// (#9684): the hash then describes what Go last sent, not what the helper holds.
 	if h, ok := snapshotContentHash(&next); ok && h == m.lastSnapshotHash && !m.applySnapshotOutcomeUnknown &&
 		m.partialOutcomeUnknown == 0 {
+		// #15042: even on a dedup skip, a revalidation that moved a row
+		// must attach its recreated ifindex before adopting next's hash.
+		m.consumeRevalidateAttachLocked(&next)
 		slog.Debug("userspace: route overlay publish skipped (content unchanged)")
 		// No wire change was needed; the helper already enforces content
 		// equivalent to next, so commit scheduler metadata as converged.
@@ -306,6 +309,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	if err := m.disarmBeforeUnsupportedPublishLocked(&next); err != nil {
 		return false, err
 	}
+	m.consumeRevalidateAttachLocked(&publishSnap)
 	if err := m.requestApplySnapshotPreparedLocked(&publishSnap, &status); err != nil {
 		return false, fmt.Errorf("publish route overlay snapshot: %w", err)
 	}
@@ -370,6 +374,7 @@ func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
 		m.publishedSnapshot != 0 &&
 		!m.applySnapshotOutcomeUnknown &&
 		m.partialOutcomeUnknown == 0 {
+		m.consumeRevalidateAttachLocked(&next)
 		return false, nil
 	}
 
@@ -382,6 +387,7 @@ func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
 	publishSnap := next
 	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
 	var status ProcessStatus
+	m.consumeRevalidateAttachLocked(&publishSnap)
 	if err := m.requestApplySnapshotPreparedLocked(&publishSnap, &status); err != nil {
 		return false, fmt.Errorf("republish capture authority: %w", err)
 	}
