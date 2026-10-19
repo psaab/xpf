@@ -109,7 +109,10 @@ func (s *Server) showCommitHistory(buf *strings.Builder) error {
 	for i, e := range entries {
 		detail := ""
 		if e.Detail != "" {
-			detail = "  " + e.Detail
+			// #15144: legacy journal lines may carry control characters;
+			// escape Detail so one entry renders as one line (new
+			// descriptions are rejected at commit in configstore).
+			detail = "  " + termsafe.SanitizeForDisplay(e.Detail)
 		}
 		fmt.Fprintf(buf, "  %d  %s  %s%s\n", i, e.Timestamp.Format("2006-01-02 15:04:05"), e.Action, detail)
 	}

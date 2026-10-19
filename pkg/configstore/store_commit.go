@@ -12,6 +12,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/fsatomic"
+	"github.com/psaab/xpf/pkg/termsafe"
 )
 
 // isPostRenameDurabilityFailure reports whether err is fsatomic's
@@ -217,6 +218,18 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 	if len(description) > maxCommitDescriptionBytes {
 		return nil, fmt.Errorf("commit description too long: %d bytes (max %d)",
 			len(description), maxCommitDescriptionBytes)
+	}
+	// #15144 (B01-03): reject control characters in the commit description
+	// at the same boundary. A description is a single-line field rendered
+	// verbatim into `show system commit history` rows; an embedded LF
+	// forges a history row and ESC/C1 bytes inject terminal escapes into
+	// the viewer's terminal. termsafe.DisplaySafe is exactly the
+	// predicate SanitizeForDisplay escapes on (C0/DEL/C1 controls,
+	// U+2028/U+2029, invalid UTF-8), so admitting only display-safe
+	// descriptions keeps the stored Detail identical to its rendered form.
+	if !termsafe.DisplaySafe(description) {
+		return nil, fmt.Errorf("commit description contains control characters " +
+			"(newlines and other control characters are not allowed in commit descriptions)")
 	}
 
 	committedTree, compiled, err := s.compileAuthSafeCandidate(s.candidate)
