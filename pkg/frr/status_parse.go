@@ -686,7 +686,10 @@ type FRRRouteDetail struct {
 	Metric    int
 	Uptime    string
 	Table     string
-	NextHops  []FRRNextHop
+	// VRF is the FRR VRF name for a route from `show ip route vrf all`
+	// ("default" for the main table); "" on the flat legacy shape (#15774).
+	VRF      string
+	NextHops []FRRNextHop
 }
 
 // FRRNextHop holds next-hop detail from FRR JSON.
@@ -697,6 +700,9 @@ type FRRNextHop struct {
 	Active            bool
 	FIB               bool
 	Recursive         bool
+	// Type is the FRR nexthop type ("normal", "blackhole", "unreachable",
+	// ...); "" when FRR omits it (#15774).
+	Type string
 }
 
 // frrRouteJSON maps the JSON output of "show ip route json".
@@ -709,6 +715,7 @@ type frrRouteJSON struct {
 	Metric    int              `json:"metric"`
 	Uptime    string           `json:"uptime"`
 	Table     int              `json:"table"`
+	VRF       string           `json:"vrf"`
 	NextHops  []frrNextHopJSON `json:"nexthops"`
 }
 
@@ -719,20 +726,25 @@ type frrNextHopJSON struct {
 	Active            bool   `json:"active"`
 	FIB               bool   `json:"fib"`
 	Recursive         bool   `json:"recursive"`
+	Type              string `json:"type"`
 }
 
 // GetRouteDetailJSON queries FRR for detailed IPv4 and IPv6 routes via vtysh JSON output.
 //
+// The `vrf all` form is used so routing-instance (VRF) routes are not
+// omitted (#15774); FRR nests those payloads per VRF, while the flat
+// legacy shape is still accepted by parseRouteJSON.
+//
 // Each family is queried independently. A per-command vtysh or JSON-parse
 // failure is joined into the returned error (tagged with the failing
-// `show ip/ipv6 route json` command) instead of being swallowed, while the
-// family that DID succeed is still returned. A non-nil error alongside a
-// non-empty slice therefore means "partial result" — callers must render
-// the partial and surface the error rather than dropping it (#5125).
+// command) instead of being swallowed, while the family that DID succeed
+// is still returned. A non-nil error alongside a non-empty slice
+// therefore means "partial result" — callers must render the partial and
+// surface the error rather than dropping it (#5125).
 func (m *Manager) GetRouteDetailJSON(ctx context.Context) ([]FRRRouteDetail, error) {
 	var all []FRRRouteDetail
 	var errs error
-	for _, cmd := range []string{"show ip route json", "show ipv6 route json"} {
+	for _, cmd := range []string{"show ip route vrf all json", "show ipv6 route vrf all json"} {
 		output, err := m.vtysh(ctx, cmd)
 		if err != nil {
 			errs = errors.Join(errs, fmt.Errorf("%q: %w", cmd, err))
@@ -749,23 +761,27 @@ func (m *Manager) GetRouteDetailJSON(ctx context.Context) ([]FRRRouteDetail, err
 }
 
 // parseRouteJSON parses FRR's JSON route output into FRRRouteDetail entries.
+// It accepts both the flat shape ({"<prefix>": [...]}) and the
+// `vrf all` shape ({"<vrf>": {"<prefix>": [...]}}), stamping VRF from
+// the enclosing key or the entry's own vrf field (#15774).
 func parseRouteJSON(data string) ([]FRRRouteDetail, error) {
-	var raw map[string][]frrRouteJSON
-	if err := json.Unmarshal([]byte(data), &raw); err != nil {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(data), &top); err != nil {
 		return nil, err
 	}
-
-	// Sort prefixes for deterministic output.
-	prefixes := make([]string, 0, len(raw))
-	for p := range raw {
-		prefixes = append(prefixes, p)
+	keys := make([]string, 0, len(top))
+	for k := range top {
+		keys = append(keys, k)
 	}
-	sort.Strings(prefixes)
-
+	sort.Strings(keys)
 	var result []FRRRouteDetail
-	for _, prefix := range prefixes {
-		entries := raw[prefix]
+	appendEntries := func(vrf string, entries []frrRouteJSON) {
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Prefix < entries[j].Prefix })
 		for _, e := range entries {
+			routeVRF := vrf
+			if routeVRF == "" {
+				routeVRF = e.VRF
+			}
 			d := FRRRouteDetail{
 				Prefix:    e.Prefix,
 				Protocol:  e.Protocol,
@@ -775,6 +791,7 @@ func parseRouteJSON(data string) ([]FRRRouteDetail, error) {
 				Metric:    e.Metric,
 				Uptime:    e.Uptime,
 				Table:     strconv.Itoa(e.Table),
+				VRF:       routeVRF,
 			}
 			for _, nh := range e.NextHops {
 				d.NextHops = append(d.NextHops, FRRNextHop{
@@ -784,9 +801,29 @@ func parseRouteJSON(data string) ([]FRRRouteDetail, error) {
 					Active:            nh.Active,
 					FIB:               nh.FIB,
 					Recursive:         nh.Recursive,
+					Type:              nh.Type,
 				})
 			}
 			result = append(result, d)
+		}
+	}
+	for _, key := range keys {
+		var flat []frrRouteJSON
+		if err := json.Unmarshal(top[key], &flat); err == nil {
+			appendEntries("", flat)
+			continue
+		}
+		var byPrefix map[string][]frrRouteJSON
+		if err := json.Unmarshal(top[key], &byPrefix); err != nil {
+			return nil, err
+		}
+		prefixes := make([]string, 0, len(byPrefix))
+		for p := range byPrefix {
+			prefixes = append(prefixes, p)
+		}
+		sort.Strings(prefixes)
+		for _, p := range prefixes {
+			appendEntries(key, byPrefix[p])
 		}
 	}
 	return result, nil
@@ -801,6 +838,9 @@ func FormatRouteDetail(routes []FRRRouteDetail) string {
 			active = "*"
 		}
 		fmt.Fprintf(&b, "%s %s\n", active, r.Prefix)
+		if r.VRF != "" {
+			fmt.Fprintf(&b, "    VRF: %s\n", r.VRF)
+		}
 		fmt.Fprintf(&b, "    Protocol: %s\n", r.Protocol)
 		fmt.Fprintf(&b, "    Preference: %d/%d\n", r.Distance, r.Metric)
 		if r.Uptime != "" {
@@ -810,17 +850,22 @@ func FormatRouteDetail(routes []FRRRouteDetail) string {
 			b.WriteString("    State: installed\n")
 		}
 		for _, nh := range r.NextHops {
-			if nh.DirectlyConnected {
+			switch {
+			case nh.Type == "blackhole":
+				b.WriteString("    Next-hop: Discard\n")
+			case nh.Type == "unreachable":
+				b.WriteString("    Next-hop: Reject\n")
+			case nh.DirectlyConnected:
 				fmt.Fprintf(&b, "    Next-hop: directly connected via %s\n", nh.Interface)
-			} else if nh.IP != "" && nh.Interface != "" {
+			case nh.IP != "" && nh.Interface != "":
 				fmt.Fprintf(&b, "    Next-hop: %s via %s\n", nh.IP, nh.Interface)
-			} else if nh.IP != "" {
+			case nh.IP != "":
 				label := "Next-hop"
 				if nh.Recursive {
 					label = "    Resolved"
 				}
 				fmt.Fprintf(&b, "    %s: %s\n", label, nh.IP)
-			} else if nh.Interface != "" {
+			case nh.Interface != "":
 				fmt.Fprintf(&b, "    Next-hop: via %s\n", nh.Interface)
 			}
 		}

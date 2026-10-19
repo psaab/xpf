@@ -39,7 +39,7 @@ func TestGetRouteDetailJSONPerFamilyFailureSurfaces(t *testing.T) {
 	fake := &fakeExecutor{
 		// Only the IPv4 command is programmed; the IPv6 command falls through
 		// to vtyshErr, simulating a transient vtysh failure for that family.
-		vtyshResp: map[string]string{"show ip route json": v4RouteJSON},
+		vtyshResp: map[string]string{"show ip route vrf all json": v4RouteJSON},
 		vtyshErr:  errors.New("vtysh: connection refused"),
 	}
 	m := &Manager{exec: fake}
@@ -48,7 +48,7 @@ func TestGetRouteDetailJSONPerFamilyFailureSurfaces(t *testing.T) {
 	if err == nil {
 		t.Fatal("got nil error on a failed IPv6 dump; a per-family failure must surface")
 	}
-	if !strings.Contains(err.Error(), "show ipv6 route json") {
+	if !strings.Contains(err.Error(), "show ipv6 route vrf all json") {
 		t.Errorf("error should name the failing command; got %v", err)
 	}
 	// The successful IPv4 family's route must still be returned.
@@ -69,8 +69,8 @@ func TestGetRouteDetailJSONPerFamilyFailureSurfaces(t *testing.T) {
 func TestGetRouteDetailJSONParseFailureSurfaces(t *testing.T) {
 	fake := &fakeExecutor{
 		vtyshResp: map[string]string{
-			"show ip route json":   v4RouteJSON,
-			"show ipv6 route json": "{ this is not valid json",
+			"show ip route vrf all json":   v4RouteJSON,
+			"show ipv6 route vrf all json": "{ this is not valid json",
 		},
 	}
 	m := &Manager{exec: fake}
@@ -79,7 +79,7 @@ func TestGetRouteDetailJSONParseFailureSurfaces(t *testing.T) {
 	if err == nil {
 		t.Fatal("got nil error on a malformed IPv6 JSON payload; the parse failure must surface")
 	}
-	if !strings.Contains(err.Error(), "show ipv6 route json") || !strings.Contains(err.Error(), "parse") {
+	if !strings.Contains(err.Error(), "show ipv6 route vrf all json") || !strings.Contains(err.Error(), "parse") {
 		t.Errorf("error should name the failing command and mark it a parse failure; got %v", err)
 	}
 	var sawV4 bool
@@ -98,8 +98,8 @@ func TestGetRouteDetailJSONParseFailureSurfaces(t *testing.T) {
 func TestGetRouteDetailJSONBothFamiliesOKNoError(t *testing.T) {
 	fake := &fakeExecutor{
 		vtyshResp: map[string]string{
-			"show ip route json":   v4RouteJSON,
-			"show ipv6 route json": v6RouteJSON,
+			"show ip route vrf all json":   v4RouteJSON,
+			"show ipv6 route vrf all json": v6RouteJSON,
 		},
 	}
 	m := &Manager{exec: fake}

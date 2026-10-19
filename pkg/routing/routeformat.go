@@ -30,16 +30,30 @@ func protoTag(proto string) string {
 }
 
 // FormatRouteTerse formats routes in Junos "show route terse" style.
+// An ECMP route emits one row per leg so no equal-cost path is hidden
+// (#15774); a single-path route emits exactly one row as before.
 func FormatRouteTerse(entries []RouteEntry) string {
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Destination < entries[j].Destination
+	sorted := make([]RouteEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Destination < sorted[j].Destination
 	})
 
 	var buf strings.Builder
 	fmt.Fprintf(&buf, "%-3s %-40s %-4s %-20s %s\n", "A/S", "Destination", "P", "Next-hop", "Interface")
-	for _, e := range entries {
+	for _, e := range sorted {
 		tag := protoTag(e.Protocol)
 		marker := "* "
+		if len(e.NextHops) > 0 {
+			for _, nh := range e.NextHops {
+				gw := nh.Gateway
+				if gw == "" {
+					gw = ">"
+				}
+				fmt.Fprintf(&buf, "%-3s %-40s %-4s %-20s %s\n", marker, e.Destination, tag, gw, nh.Interface)
+			}
+			continue
+		}
 		nh := e.NextHop
 		if nh == "" {
 			nh = ">"
@@ -47,6 +61,22 @@ func FormatRouteTerse(entries []RouteEntry) string {
 		fmt.Fprintf(&buf, "%-3s %-40s %-4s %-20s %s\n", marker, e.Destination, tag, nh, e.Interface)
 	}
 	return buf.String()
+}
+
+// FlattenTableRoutes returns every entry across all tables in order.
+// Terse views share this flattening so VRF tables are not omitted
+// merely because the caller started from the main table (#15774).
+func FlattenTableRoutes(allTables []TableRoutes) []RouteEntry {
+	var entries []RouteEntry
+	for _, table := range allTables {
+		entries = append(entries, table.Entries...)
+	}
+	return entries
+}
+
+// FormatRouteEntriesTerse formats all tables in terse style.
+func FormatRouteEntriesTerse(allTables []TableRoutes) string {
+	return FormatRouteTerse(FlattenTableRoutes(allTables))
 }
 
 // appendSplitAF splits routes into inet.0 and inet6.0 tables and appends them.
@@ -78,7 +108,9 @@ func appendSplitAF(tables []TableRoutes, prefix string, entries []RouteEntry) []
 // The destination is an IP address (or CIDR prefix). For each table that has a
 // matching route, it prints a Junos-style header and route entries.
 // The modifier controls matching behavior:
-//   - "" (empty): default LPM — show routes whose prefix contains the destination
+//   - "" (empty) with a bare IP: LPM — routes whose prefix contains the IP
+//   - "" (empty) with a CIDR: routes contained within or equal to the prefix
+//     (docs/junos-cli-reference.md:2821, #15774)
 //   - "exact": only show routes matching the exact prefix (network + mask)
 //   - "longer": show routes with a strictly more-specific prefix (longer mask)
 //   - "orlonger": show routes with equal or more-specific prefix (equal or longer mask)
@@ -127,11 +159,14 @@ func FormatRouteDestination(allTables []TableRoutes, destination, modifier strin
 					matches = append(matches, e)
 				}
 			default:
-				// Default LPM behavior: show routes whose prefix contains the
-				// destination. For a CIDR input, match routes that contain the
-				// requested network (route prefix contains dest IP AND route mask
-				// is equal or shorter).
-				if destBits > 0 && routeOnes <= destOnes && routeNet.Contains(destNet.IP) {
+				if strings.Contains(destination, "/") {
+					// Bare CIDR: routes contained within or equal to the
+					// query prefix (Junos reference :2821).
+					if routeOnes >= destOnes && destNet.Contains(routeNet.IP) {
+						matches = append(matches, e)
+					}
+				} else if destBits > 0 && routeOnes <= destOnes && routeNet.Contains(destNet.IP) {
+					// Bare IP: LPM covering routes.
 					matches = append(matches, e)
 				}
 			}
@@ -259,7 +294,8 @@ func formatTableJunos(buf *strings.Builder, tableName string, entries []RouteEnt
 			dest = fmt.Sprintf("%-19s", dest)
 		}
 		fmt.Fprintf(buf, "%s *[%s/%d]\n", dest, proto, e.Preference)
-		if len(e.NextHops) > 0 {
+		switch {
+		case len(e.NextHops) > 0:
 			// ECMP route: one next-hop line per equal-cost path.
 			for _, nh := range e.NextHops {
 				switch {
@@ -271,12 +307,50 @@ func formatTableJunos(buf *strings.Builder, tableName string, entries []RouteEnt
 					fmt.Fprintf(buf, "                    >  via %s\n", nh.Interface)
 				}
 			}
-		} else if e.NextHop != "" && e.NextHop != "direct" {
+		case e.NextHop == "discard":
+			buf.WriteString("                    Discard\n")
+		case e.NextHop == "reject":
+			buf.WriteString("                    Reject\n")
+		case e.NextHop != "" && e.NextHop != "direct" && e.Interface != "":
 			fmt.Fprintf(buf, "                    >  to %s via %s\n", e.NextHop, e.Interface)
-		} else if e.Interface != "" {
+		case e.NextHop != "" && e.NextHop != "direct":
+			fmt.Fprintf(buf, "                    >  to %s\n", e.NextHop)
+		case e.Interface != "":
 			fmt.Fprintf(buf, "                    >  via %s\n", e.Interface)
 		}
 	}
+}
+
+// FormatRouteEntryRows renders the tabular Destination/Next-hop/Interface/
+// Proto/Pref rows shared by the local and gRPC protocol/instance views.
+// An ECMP entry emits one row per leg; discard/reject entries emit their
+// disposition label with no interface (#15774).
+func FormatRouteEntryRows(entries []RouteEntry) string {
+	var buf strings.Builder
+	for _, e := range entries {
+		if len(e.NextHops) > 0 {
+			for _, nh := range e.NextHops {
+				fmt.Fprintf(&buf, "  %-24s %-20s %-14s %-12s %d\n",
+					e.Destination, nh.Gateway, nh.Interface, e.Protocol, e.Preference)
+			}
+			continue
+		}
+		fmt.Fprintf(&buf, "  %-24s %-20s %-14s %-12s %d\n",
+			e.Destination, e.NextHop, e.Interface, e.Protocol, e.Preference)
+	}
+	return buf.String()
+}
+
+// FilterRouteEntriesByProtocol returns entries matching an already
+// normalized protocol via RouteProtocolMatches (#15774).
+func FilterRouteEntriesByProtocol(entries []RouteEntry, normalized string) []RouteEntry {
+	var out []RouteEntry
+	for _, e := range entries {
+		if RouteProtocolMatches(e.Protocol, normalized) {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // NormalizeRouteProtocol maps an operator `show route protocol <p>` token to
