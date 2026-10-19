@@ -51,6 +51,9 @@ func (c *CLI) handleRequestSystem(args []string) error {
 
 	switch args[0] {
 	case "reboot":
+		if len(args) > 1 {
+			return fmt.Errorf("request system reboot does not accept arguments (%q)", strings.Join(args[1:], " "))
+		}
 		fmt.Print("Reboot the system? [yes,no] (no) ")
 		if !c.confirmSystemAction() {
 			fmt.Println("Reboot cancelled")
@@ -61,6 +64,9 @@ func (c *CLI) handleRequestSystem(args []string) error {
 		return consolePowerAction("reboot")
 
 	case "halt":
+		if len(args) > 1 {
+			return fmt.Errorf("request system halt does not accept arguments (%q)", strings.Join(args[1:], " "))
+		}
 		fmt.Print("Halt the system? [yes,no] (no) ")
 		if !c.confirmSystemAction() {
 			fmt.Println("Halt cancelled")
@@ -71,6 +77,9 @@ func (c *CLI) handleRequestSystem(args []string) error {
 		return consolePowerAction("halt")
 
 	case "power-off":
+		if len(args) > 1 {
+			return fmt.Errorf("request system power-off does not accept arguments (%q)", strings.Join(args[1:], " "))
+		}
 		fmt.Print("Power off the system? [yes,no] (no) ")
 		if !c.confirmSystemAction() {
 			fmt.Println("Power-off cancelled")
@@ -81,6 +90,9 @@ func (c *CLI) handleRequestSystem(args []string) error {
 		return consolePowerAction("poweroff")
 
 	case "zeroize":
+		if len(args) > 1 {
+			return fmt.Errorf("request system zeroize does not accept arguments (%q)", strings.Join(args[1:], " "))
+		}
 		fmt.Println("WARNING: This will erase all configuration and return to factory defaults.")
 		fmt.Print("Zeroize the system? [yes,no] (no) ")
 		if !c.confirmSystemAction() {
@@ -285,10 +297,16 @@ func (c *CLI) handleRequestSystemDynamicDNS(args []string) error {
 	}
 	switch args[0] {
 	case "update":
+		if len(args) > 1 {
+			return fmt.Errorf("request system dynamic-dns update does not accept arguments (%q)", strings.Join(args[1:], " "))
+		}
 		_, msg := c.surfaceADDNSForceFn(true)
 		fmt.Println(msg)
 		return nil
 	case "check":
+		if len(args) > 1 {
+			return fmt.Errorf("request system dynamic-dns check does not accept arguments (%q)", strings.Join(args[1:], " "))
+		}
 		_, msg := c.surfaceADDNSForceFn(false)
 		fmt.Println(msg)
 		return nil
@@ -308,6 +326,10 @@ func (c *CLI) handleRequestSystemSoftware(args []string) error {
 		return fmt.Errorf("unknown request system software command: %s", args[0])
 	}
 
+	if len(args) > 1 {
+		return fmt.Errorf("request system software in-service-upgrade does not accept arguments (%q)", strings.Join(args[1:], " "))
+	}
+
 	if c.cluster == nil {
 		fmt.Println("Cluster not configured")
 		return nil
@@ -315,10 +337,7 @@ func (c *CLI) handleRequestSystemSoftware(args []string) error {
 
 	fmt.Println("WARNING: This will force this node to secondary for all redundancy groups.")
 	fmt.Print("Proceed with in-service upgrade? [yes,no] (no) ")
-	c.rl.SetPrompt("")
-	line, err := c.rl.Readline()
-	c.rl.SetPrompt(c.operationalPrompt())
-	if err != nil || strings.TrimSpace(strings.ToLower(line)) != "yes" {
+	if !c.confirmSystemAction() {
 		fmt.Println("ISSU cancelled")
 		return nil
 	}
@@ -372,6 +391,9 @@ func (c *CLI) handleRequestSystemConfiguration(args []string) error {
 
 	switch args[1] {
 	case "save":
+		if len(args) > 2 {
+			return fmt.Errorf("request system configuration rescue save does not accept arguments (%q)", strings.Join(args[2:], " "))
+		}
 		if err := c.store.SaveRescueConfig(); err != nil {
 			return err
 		}
@@ -379,8 +401,10 @@ func (c *CLI) handleRequestSystemConfiguration(args []string) error {
 		return nil
 
 	case "delete":
+		if len(args) > 2 {
+			return fmt.Errorf("request system configuration rescue delete does not accept arguments (%q)", strings.Join(args[2:], " "))
+		}
 		if err := c.store.DeleteRescueConfig(); err != nil {
-			return err
 		}
 		fmt.Println("Rescue configuration deleted")
 		return nil
