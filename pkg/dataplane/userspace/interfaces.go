@@ -575,7 +575,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 					rxQueues = parentRXQueues
 				}
 			}
-			addresses = mergeInterfaceAddressSnapshots(addresses, buildConfiguredAddressSnapshots(unit.Addresses, unit.PrimaryAddress))
+			addresses = mergeInterfaceAddressSnapshots(addresses, buildConfiguredAddressSnapshots(unit.Addresses, unit.PrimaryAddressForFamily(false), unit.PrimaryAddressForFamily(true)))
 			if iface.Disable || unit.Disable {
 				addresses = nil
 			}
@@ -1615,14 +1615,12 @@ func revalidateSnapshotIfindexesInPlace(snap *ConfigSnapshot) (refreshed, droppe
 }
 
 // buildConfiguredAddressSnapshots renders the unit's configured CIDRs
-// as snapshot rows. primaryCIDR is the config's PrimaryAddress: the one
-// row whose canonical form matches it carries Primary (#15155), so the
-// designated address survives the deterministic string sort below
-// instead of being silently replaced by whichever address sorts first.
-// A primaryCIDR that parses to no configured row marks nothing (the
-// #13549 stale-metadata shape must not manufacture one), and an empty
-// primaryCIDR leaves every row unmarked, preserving the order rule.
-func buildConfiguredAddressSnapshots(addrs []string, primaryCIDR string) []InterfaceAddressSnapshot {
+// as snapshot rows. primaryCIDRs are the per-family primaries (#15653,
+// #15155): each row whose canonical form matches its family's primary
+// carries Primary, so both families' designated addresses survive the
+// deterministic string sort. A primary that parses to no configured row
+// marks nothing, and empty primaries leave every row unmarked.
+func buildConfiguredAddressSnapshots(addrs []string, primaryCIDRs ...string) []InterfaceAddressSnapshot {
 	if len(addrs) == 0 {
 		return nil
 	}
@@ -1643,10 +1641,11 @@ func buildConfiguredAddressSnapshots(addrs []string, primaryCIDR string) []Inter
 			Scope:   int(netlink.SCOPE_UNIVERSE),
 		})
 	}
-	if primaryCIDR != "" {
+	for _, primaryCIDR := range primaryCIDRs {
+		if primaryCIDR == "" {
+			continue
+		}
 		if ip, netw, err := net.ParseCIDR(primaryCIDR); err == nil && netw != nil {
-			// Compare through the same canonicalisation as the rows
-			// (ParseCIDR + host bits kept), not the raw config string.
 			netw.IP = ip
 			want := netw.String()
 			for i := range out {

@@ -50,15 +50,17 @@ const (
 
 // InterfaceConfig describes a single interface for networkd generation.
 type InterfaceConfig struct {
-	Name             string   // interface name (trust0, untrust0, wan0, etc.)
-	MACAddress       string   // hardware MAC address (from kernel)
-	OriginalName     string   // kernel name before rename (for .link OriginalName= match)
-	Addresses        []string // CIDR addresses (10.0.1.10/24, 2001:db8::1/64, etc.)
-	PrimaryAddress   string   // address marked as primary (listed first for source selection)
-	PreferredAddress string   // address marked as preferred (listed first within its subnet for source selection)
-	IsVLANParent     bool     // true = don't assign addresses (they go on sub-interface)
-	DHCPv4           bool     // true = daemon runs DHCPv4 client (don't set static addr)
-	DHCPv6           bool     // true = daemon runs DHCPv6 client
+	Name               string   // interface name (trust0, untrust0, wan0, etc.)
+	MACAddress         string   // hardware MAC address (from kernel)
+	OriginalName       string   // kernel name before rename (for .link OriginalName= match)
+	Addresses          []string // CIDR addresses (10.0.1.10/24, 2001:db8::1/64, etc.)
+	PrimaryAddress     string   // IPv4 primary (listed first for source selection)
+	PrimaryAddressV6   string   // IPv6 primary (#15653)
+	PreferredAddress   string   // IPv4 preferred (first within its subnet)
+	PreferredAddressV6 string   // IPv6 preferred (#15653)
+	IsVLANParent       bool     // true = don't assign addresses (they go on sub-interface)
+	DHCPv4             bool     // true = daemon runs DHCPv4 client (don't set static addr)
+	DHCPv6             bool     // true = daemon runs DHCPv6 client
 	// DHCPv6Stateless / DHCPv6IATypes refine DHCPv6 for the #14594 keep
 	// decision: only a stateful client that owns an IA_NA address on THIS
 	// interface has a lease address for networkd to preserve. A stateless
@@ -1692,7 +1694,15 @@ func (m *Manager) generateNetwork(ifc InterfaceConfig) string {
 	// static address of the non-DHCP family because the gate keyed on
 	// whole-interface (!DHCPv4 && !DHCPv6).
 	if !ifc.IsVLANParent {
-		ordered := orderAddresses(ifc.Addresses, ifc.PrimaryAddress)
+		// #15653: order each family's primary first within its subnet.
+		// Legacy single-slot callers keep Primary first overall.
+		ordered := ifc.Addresses
+		if ifc.PrimaryAddressV6 != "" || ifc.PreferredAddressV6 != "" {
+			ordered = orderPreferredFirstPerSubnet(ordered, ifc.PrimaryAddress)
+			ordered = orderPreferredFirstPerSubnet(ordered, ifc.PrimaryAddressV6)
+		} else {
+			ordered = orderAddresses(ordered, ifc.PrimaryAddress)
+		}
 		addrs := make([]string, 0, len(ordered))
 		for _, addr := range ordered {
 			if addressIsIPv6(addr) {
@@ -1704,14 +1714,11 @@ func (m *Manager) generateNetwork(ifc InterfaceConfig) string {
 			}
 			addrs = append(addrs, addr)
 		}
-		// #15222: the Junos `preferred` leaf selects the source address
-		// for locally originated traffic on its subnet. On Linux the
-		// kernel picks the first address added in the subnet, so the
-		// preferred address must be first among its subnet peers —
-		// not global-first (that would steal another subnet's source)
-		// and not PreferredLifetime=forever, which is an IPv6 lifetime
-		// knob that never chooses an IPv4 source.
+		// #15222: preferred first within its subnet (per family, #15653).
 		addrs = orderPreferredFirstPerSubnet(addrs, ifc.PreferredAddress)
+		if ifc.PreferredAddressV6 != "" {
+			addrs = orderPreferredFirstPerSubnet(addrs, ifc.PreferredAddressV6)
+		}
 		for _, addr := range addrs {
 			fmt.Fprintf(&b, "Address=%s\n", addr)
 		}

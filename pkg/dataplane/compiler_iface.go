@@ -384,6 +384,46 @@ func isConfiguredVLANSubInterface(name string, cfg *config.Config) bool {
 	return false
 }
 
+// orderPrimariesFirst returns desired with each family's primary moved
+// ahead of its same-subnet peers (#15653), so a fresh AddrAdd installs
+// the primary before the kernel would mark it IFA_F_SECONDARY.
+func orderPrimariesFirst(desired []string, primaryV4, primaryV6 string) []string {
+	out := append([]string(nil), desired...)
+	for _, prim := range []string{primaryV4, primaryV6} {
+		if prim == "" {
+			continue
+		}
+		pa, err := netlink.ParseAddr(prim)
+		if err != nil || pa.IPNet == nil {
+			continue
+		}
+		subnet := (&net.IPNet{IP: pa.IP.Mask(pa.IPNet.Mask), Mask: pa.IPNet.Mask}).String()
+		idx, first := -1, -1
+		for i, s := range out {
+			a, err := netlink.ParseAddr(s)
+			if err != nil || a.IPNet == nil {
+				continue
+			}
+			if (&net.IPNet{IP: a.IP.Mask(a.IPNet.Mask), Mask: a.IPNet.Mask}).String() != subnet {
+				continue
+			}
+			if first < 0 {
+				first = i
+			}
+			if a.IPNet.String() == pa.IPNet.String() {
+				idx = i
+			}
+		}
+		if idx < 0 || first < 0 || idx == first {
+			continue
+		}
+		v := out[idx]
+		copy(out[first+1:idx+1], out[first:idx])
+		out[first] = v
+	}
+	return out
+}
+
 // reconcileInterfaceAddresses ensures the interface has exactly the configured
 // addresses. Stale addresses are removed and missing ones are added.
 // Link-local (fe80::/10) addresses are left untouched since the kernel manages them.
@@ -397,7 +437,7 @@ func isConfiguredVLANSubInterface(name string, cfg *config.Config) bool {
 //
 // A FAILED AddrDel/AddrAdd does not set it: the address list is unchanged in
 // that direction, and those failures already warn on their own line.
-func reconcileInterfaceAddresses(ifaceName string, desired []string) bool {
+func reconcileInterfaceAddresses(ifaceName string, desired []string, primaries ...string) bool {
 	link, err := addrLinkByNameSeam(ifaceName)
 	if err != nil {
 		slog.Warn("cannot find interface for address reconciliation",
@@ -422,7 +462,7 @@ func reconcileInterfaceAddresses(ifaceName string, desired []string) bool {
 	// is a redesign — and it is what makes the converged case testable without
 	// root: an empty plan is the discriminator that keeps the host-mutation
 	// flag meaningful.
-	del, add, dadfailedCount := planAddressReconcile(existing, desired, ifaceName)
+	del, add, dadfailedCount := planAddressReconcile(existing, desired, ifaceName, primaries...)
 	if dadfailedCount > 0 {
 		slog.Warn("repairing configured IPv6 addresses after DAD failure",
 			"name", ifaceName, "dadfailed_count", dadfailedCount)
@@ -481,8 +521,21 @@ func reconcileInterfaceAddresses(ifaceName string, desired []string) bool {
 // order, adds follow the order the addresses were authored, so the netlink call
 // sequence does not vary run to run. dadfailedCount counts flagged desired
 // IPv6 addresses the planner schedules for repair.
-func planAddressReconcile(existing []netlink.Addr, desired []string, ifaceName string) (del []*netlink.Addr, add []*netlink.Addr, dadfailedCount int) {
-	// Desired set keyed by "ip/mask", plus the authored order for the adds.
+//
+// #15653: primaries (optional per-family primary CIDRs) are ordered first
+// within their subnet for adds, and a desired IPv4 primary that currently
+// carries IFA_F_SECONDARY is deleted and re-added (after its subnet peers
+// are deleted) so the kernel promotes it instead of leaving the primary
+// flip a no-op.
+func planAddressReconcile(existing []netlink.Addr, desired []string, ifaceName string, primaries ...string) (del []*netlink.Addr, add []*netlink.Addr, dadfailedCount int) {
+	var primaryV4, primaryV6 string
+	if len(primaries) > 0 {
+		primaryV4 = primaries[0]
+	}
+	if len(primaries) > 1 {
+		primaryV6 = primaries[1]
+	}
+	desired = orderPrimariesFirst(desired, primaryV4, primaryV6)
 	want := make(map[string]*netlink.Addr, len(desired))
 	order := make([]string, 0, len(desired))
 	for _, addrStr := range desired {
@@ -498,8 +551,30 @@ func planAddressReconcile(existing []netlink.Addr, desired []string, ifaceName s
 		}
 		want[key] = addr
 	}
-
+	primaryKeys := map[string]bool{}
+	promoteSubnets := map[string]bool{}
+	for _, prim := range []string{primaryV4, primaryV6} {
+		if prim == "" {
+			continue
+		}
+		if pa, err := netlink.ParseAddr(prim); err == nil && pa.IPNet != nil {
+			primaryKeys[pa.IPNet.String()] = true
+		}
+	}
+	promote := map[string]bool{}
+	for i := range existing {
+		a := &existing[i]
+		if a.IP == nil || a.IP.To4() == nil || a.IPNet == nil {
+			continue
+		}
+		key := a.IPNet.String()
+		if _, ok := want[key]; ok && primaryKeys[key] && a.Flags&unix.IFA_F_SECONDARY != 0 {
+			promote[key] = true
+			promoteSubnets[(&net.IPNet{IP: a.IP.Mask(a.IPNet.Mask), Mask: a.IPNet.Mask}).String()] = true
+		}
+	}
 	present := make(map[string]bool, len(want))
+	var promoteDel []*netlink.Addr
 	for i := range existing {
 		addr := &existing[i]
 		if addr.IP.IsLinkLocalUnicast() || addr.IP.IsLinkLocalMulticast() {
@@ -513,12 +588,23 @@ func planAddressReconcile(existing []netlink.Addr, desired []string, ifaceName s
 				dadfailedCount++
 				continue
 			}
+			if promote[key] {
+				promoteDel = append(promoteDel, addr)
+				continue
+			}
+			if addr.IP.To4() != nil && addr.IPNet != nil && len(promote) > 0 {
+				subnet := (&net.IPNet{IP: addr.IP.Mask(addr.IPNet.Mask), Mask: addr.IPNet.Mask}).String()
+				if promoteSubnets[subnet] {
+					del = append(del, addr)
+					continue
+				}
+			}
 			present[key] = true
 			continue
 		}
 		del = append(del, addr)
 	}
-
+	del = append(del, promoteDel...)
 	for _, key := range order {
 		if addr, ok := want[key]; ok && !present[key] {
 			add = append(add, addr)
@@ -928,6 +1014,7 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 		// manages DHCP addresses, VRRP manages RETH VIP addresses.
 		subName := fmt.Sprintf("%s.%d", physName, vlanID)
 		var addrs []string
+		var subPrimaryV4, subPrimaryV6 string
 		isDHCPSub := false
 		isReth := false
 		if ifCfg, ok := cfg.Interfaces.Interfaces[cfgName]; ok && ifCfg != nil {
@@ -935,6 +1022,8 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 				// #14575: a unit-disabled unit reconciles to no addresses.
 				if !unit.Disable {
 					addrs = unit.Addresses
+					subPrimaryV4 = unit.PrimaryAddressForFamily(false)
+					subPrimaryV6 = unit.PrimaryAddressForFamily(true)
 				}
 				isDHCPSub = unit.DHCP || unitHasDHCPv6(unit)
 			}
@@ -943,7 +1032,7 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 			}
 		}
 		if !isDHCPSub && !isReth {
-			if reconcileInterfaceAddresses(subName, addrs) {
+			if reconcileInterfaceAddresses(subName, addrs, subPrimaryV4, subPrimaryV6) {
 				result.markHostMutated("reconciled VLAN sub-interface addresses")
 			}
 		}
@@ -1248,7 +1337,7 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 	if vlanID == 0 && !st.physReconciled[physName] {
 		st.physReconciled[physName] = true
 		if pd := st.physDesired[physName]; pd != nil && !pd.skipAddrs {
-			if reconcileInterfaceAddresses(physName, pd.addrs) {
+			if reconcileInterfaceAddresses(physName, pd.addrs, pd.primaryV4, pd.primaryV6) {
 				result.markHostMutated("reconciled interface addresses")
 			}
 		}
@@ -1343,26 +1432,32 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 				}
 				// #14575: a unit-disabled unit contributes no addresses/DHCP.
 				var stAddrs []string
-				var stPrimary, stPreferred string
+				var stPrimary, stPreferred, stPrimaryV6, stPreferredV6 string
 				var stIATypes []string
 				stDHCPv4, stDHCPv6, stDAD := false, false, false
 				if unit != nil && !unit.Disable {
-					stAddrs, stPrimary, stPreferred = unit.Addresses, unit.PrimaryAddress, unit.PreferredAddress
+					stAddrs = unit.Addresses
+					stPrimary = unit.PrimaryAddressForFamily(false)
+					stPrimaryV6 = unit.PrimaryAddressForFamily(true)
+					stPreferred = unit.PreferredAddressForFamily(false)
+					stPreferredV6 = unit.PreferredAddressForFamily(true)
 					stDHCPv4, stDHCPv6, stDAD = unit.DHCP, unitHasDHCPv6(unit), unit.DADDisable
 					stIATypes = unitDHCPv6IATypes(unit)
 				}
 				result.ManagedInterfaces = append(result.ManagedInterfaces, networkd.InterfaceConfig{
-					Name:             unitName,
-					Addresses:        stAddrs,
-					PrimaryAddress:   stPrimary,
-					PreferredAddress: stPreferred,
-					DHCPv4:           stDHCPv4,
-					DHCPv6:           stDHCPv6,
-					DHCPv6Stateless:  stDHCPv6 && unitDHCPv6Stateless(unit),
-					DHCPv6IATypes:    stIATypes,
-					DADDisable:       stDAD,
-					MTU:              unitMTU,
-					Description:      desc,
+					Name:               unitName,
+					Addresses:          stAddrs,
+					PrimaryAddress:     stPrimary,
+					PrimaryAddressV6:   stPrimaryV6,
+					PreferredAddress:   stPreferred,
+					PreferredAddressV6: stPreferredV6,
+					DHCPv4:             stDHCPv4,
+					DHCPv6:             stDHCPv6,
+					DHCPv6Stateless:    stDHCPv6 && unitDHCPv6Stateless(unit),
+					DHCPv6IATypes:      stIATypes,
+					DADDisable:         stDAD,
+					MTU:                unitMTU,
+					Description:        desc,
 				})
 			}
 			continue
@@ -1569,8 +1664,10 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 					if !seen[subName] {
 						seen[subName] = true
 						addrs := unit.Addresses
-						primaryAddr := unit.PrimaryAddress
-						preferredAddr := unit.PreferredAddress
+						primaryAddr := unit.PrimaryAddressForFamily(false)
+						primaryAddrV6 := unit.PrimaryAddressForFamily(true)
+						preferredAddr := unit.PreferredAddressForFamily(false)
+						preferredAddrV6 := unit.PreferredAddressForFamily(true)
 						dhcpv4, dhcpv6, dad := unit.DHCP, unitHasDHCPv6(unit), unit.DADDisable
 						var iaTypes []string
 						if dhcpv6 {
@@ -1578,34 +1675,31 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 						}
 						unitDisabled := unit != nil && unit.Disable
 						if unitDisabled {
-							// #14575: no addresses/DHCP on a unit-disabled unit;
-							// Disable keeps the sub-interface down.
-							addrs, primaryAddr, preferredAddr = nil, "", ""
+							addrs, primaryAddr, primaryAddrV6, preferredAddr, preferredAddrV6 = nil, "", "", "", ""
 							dhcpv4, dhcpv6, iaTypes = false, false, nil
 						}
 						if isVRRPReth && !unitDisabled {
-							// Replace VIP addresses with a link-local base for VRRP.
 							addrs = []string{fmt.Sprintf("169.254.%d.%d/32", effectiveCfg.RedundancyGroup, clusterNodeID+1)}
-							primaryAddr = ""
-							preferredAddr = ""
+							primaryAddr, primaryAddrV6, preferredAddr, preferredAddrV6 = "", "", "", ""
 						}
 						result.ManagedInterfaces = append(result.ManagedInterfaces, networkd.InterfaceConfig{
-							Name:             subName,
-							Addresses:        addrs,
-							PrimaryAddress:   primaryAddr,
-							PreferredAddress: preferredAddr,
-							DHCPv4:           dhcpv4,
-							DHCPv6:           dhcpv6,
-							DHCPv6Stateless:  dhcpv6 && unitDHCPv6Stateless(unit),
-							DHCPv6IATypes:    iaTypes,
-							DADDisable:       dad,
-							Disable:          unitDisabled,
-							MTU:              unit.MTU,
-							Description:      unit.Description,
-							KeepAddresses:    (isVRRPReth || unitCarriesStandaloneVRRP(unit)) && !unitDisabled,
-							// #15061: the standalone VIP is foreign to networkd.
-							KeepForeignStatic: unitCarriesStandaloneVRRP(unit) && !unitDisabled,
-							VRFName:           mgmtVRFName,
+							Name:               subName,
+							Addresses:          addrs,
+							PrimaryAddress:     primaryAddr,
+							PrimaryAddressV6:   primaryAddrV6,
+							PreferredAddress:   preferredAddr,
+							PreferredAddressV6: preferredAddrV6,
+							DHCPv4:             dhcpv4,
+							DHCPv6:             dhcpv6,
+							DHCPv6Stateless:    dhcpv6 && unitDHCPv6Stateless(unit),
+							DHCPv6IATypes:      iaTypes,
+							DADDisable:         dad,
+							Disable:            unitDisabled,
+							MTU:                unit.MTU,
+							Description:        unit.Description,
+							KeepAddresses:      (isVRRPReth || unitCarriesStandaloneVRRP(unit)) && !unitDisabled,
+							KeepForeignStatic:  unitCarriesStandaloneVRRP(unit) && !unitDisabled,
+							VRFName:            mgmtVRFName,
 						})
 					}
 				}
@@ -1620,7 +1714,7 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 				var dhcpv6Stateless bool
 				var dhcpv6IATypes []string
 				dhcpv6Seen := false
-				var primaryAddr, preferredAddr string
+				var primaryAddr, preferredAddr, primaryAddrV6, preferredAddrV6 string
 				unitMTU := 0
 				allUnitsDisabled := len(effectiveCfg.Units) > 0
 				for _, unit := range effectiveCfg.Units {
@@ -1669,11 +1763,17 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 					if unit.MTU > 0 && (unitMTU == 0 || unit.MTU < unitMTU) {
 						unitMTU = unit.MTU
 					}
-					if unit.PrimaryAddress != "" && primaryAddr == "" {
-						primaryAddr = unit.PrimaryAddress
+					if v := unit.PrimaryAddressForFamily(false); v != "" && primaryAddr == "" {
+						primaryAddr = v
 					}
-					if unit.PreferredAddress != "" && preferredAddr == "" {
-						preferredAddr = unit.PreferredAddress
+					if v := unit.PrimaryAddressForFamily(true); v != "" && primaryAddrV6 == "" {
+						primaryAddrV6 = v
+					}
+					if v := unit.PreferredAddressForFamily(false); v != "" && preferredAddr == "" {
+						preferredAddr = v
+					}
+					if v := unit.PreferredAddressForFamily(true); v != "" && preferredAddrV6 == "" {
+						preferredAddrV6 = v
 					}
 				}
 				// Unit-level MTU (family inet/inet6) overrides interface-level MTU
@@ -1685,29 +1785,28 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 				// link-local base; native VRRP manages the actual VIPs.
 				if isVRRPReth && !allUnitsDisabled {
 					addrs = []string{fmt.Sprintf("169.254.%d.%d/32", effectiveCfg.RedundancyGroup, clusterNodeID+1)}
-					primaryAddr = ""
-					preferredAddr = ""
+					primaryAddr, primaryAddrV6, preferredAddr, preferredAddrV6 = "", "", "", ""
 				}
-				// Management interfaces use the shared class predicate so
-				// networkctl preserves the daemon's management-VRF binding.
 				result.ManagedInterfaces = append(result.ManagedInterfaces, networkd.InterfaceConfig{
-					Name:             linuxName,
-					MACAddress:       mac,
-					OriginalName:     originalName,
-					Addresses:        addrs,
-					PrimaryAddress:   primaryAddr,
-					PreferredAddress: preferredAddr,
-					DHCPv4:           dhcpv4,
-					DHCPv6:           dhcpv6,
-					DHCPv6Stateless:  dhcpv6Stateless,
-					DHCPv6IATypes:    dhcpv6IATypes,
-					Disable:          ifCfg.Disable || allUnitsDisabled,
-					DADDisable:       dadDisable,
-					Speed:            ifCfg.Speed,
-					Duplex:           ifCfg.Duplex,
-					MTU:              mtu,
-					VRFName:          mgmtVRFName,
-					Description:      ifCfg.Description,
+					Name:               linuxName,
+					MACAddress:         mac,
+					OriginalName:       originalName,
+					Addresses:          addrs,
+					PrimaryAddress:     primaryAddr,
+					PrimaryAddressV6:   primaryAddrV6,
+					PreferredAddress:   preferredAddr,
+					PreferredAddressV6: preferredAddrV6,
+					DHCPv4:             dhcpv4,
+					DHCPv6:             dhcpv6,
+					DHCPv6Stateless:    dhcpv6Stateless,
+					DHCPv6IATypes:      dhcpv6IATypes,
+					Disable:            ifCfg.Disable || allUnitsDisabled,
+					DADDisable:         dadDisable,
+					Speed:              ifCfg.Speed,
+					Duplex:             ifCfg.Duplex,
+					MTU:                mtu,
+					VRFName:            mgmtVRFName,
+					Description:        ifCfg.Description,
 					// #15061: compose with the RETH keep — a standalone
 					// vrrp-group's VIPs are foreign to networkd on any row.
 					KeepAddresses: (isVRRPReth || interfaceCarriesStandaloneVRRP(effectiveCfg)) && !allUnitsDisabled,

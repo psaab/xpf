@@ -795,11 +795,10 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 						ifaces.MalformedAddresses = append(ifaces.MalformedAddresses, inetBad...)
 						for _, addrInst := range inetAddrs {
 							unit.Addresses = append(unit.Addresses, addrInst.name)
-							// Check for primary/preferred flags. Preferred
-							// is first-wins across families (#15222): the
-							// inet6 arm already guards on empty, and a
-							// last-wins overwrite here would silently
-							// discard the first authored `preferred`.
+							// Per-family primary/preferred (#15653): inet
+							// owns the legacy slots; inet6 owns the V6 slots
+							// below, so a dual-stack unit keeps both.
+							// Preferred is first-wins (#15222).
 							if addrInst.node.FindChild("primary") != nil {
 								unit.PrimaryAddress = addrInst.name
 							}
@@ -921,11 +920,21 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 						ifaces.MalformedAddresses = append(ifaces.MalformedAddresses, inet6Bad...)
 						for _, addrInst := range inet6Addrs {
 							unit.Addresses = append(unit.Addresses, addrInst.name)
-							if addrInst.node.FindChild("primary") != nil && unit.PrimaryAddress == "" {
-								unit.PrimaryAddress = addrInst.name
+							// #15653: inet6 primary/preferred go to the
+							// per-family V6 slots; the legacy slots are
+							// mirrored only while empty so single-family
+							// inet6 units keep working for legacy readers.
+							if addrInst.node.FindChild("primary") != nil && unit.PrimaryAddressV6 == "" {
+								unit.PrimaryAddressV6 = addrInst.name
+								if unit.PrimaryAddress == "" {
+									unit.PrimaryAddress = addrInst.name
+								}
 							}
-							if addrInst.node.FindChild("preferred") != nil && unit.PreferredAddress == "" {
-								unit.PreferredAddress = addrInst.name
+							if addrInst.node.FindChild("preferred") != nil && unit.PreferredAddressV6 == "" {
+								unit.PreferredAddressV6 = addrInst.name
+								if unit.PreferredAddress == "" {
+									unit.PreferredAddress = addrInst.name
+								}
 							}
 							// IPv6 VRRP groups (#2384): identical parse to the
 							// inet arm; the VIPs are IPv6 and the engine
@@ -1116,7 +1125,9 @@ func suppressInvalidRethAddresses(ifaces *InterfacesConfig, invalid map[string]b
 			}
 			unit.Addresses = nil
 			unit.PrimaryAddress = ""
+			unit.PrimaryAddressV6 = ""
 			unit.PreferredAddress = ""
+			unit.PreferredAddressV6 = ""
 		}
 	}
 	for name := range invalid {

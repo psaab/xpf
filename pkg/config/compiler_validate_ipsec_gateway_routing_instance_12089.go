@@ -364,7 +364,9 @@ func ipsecAddressUnitIndex12089(cfg *Config, tunnelNames map[string]string) map[
 			}
 			device := cfg.resolveKernelIfNameWith(fmt.Sprintf("%s.%d", base, unitNum), tunnelNames)
 			record(unit.PrimaryAddress, device)
+			record(unit.PrimaryAddressV6, device)
 			record(unit.PreferredAddress, device)
+			record(unit.PreferredAddressV6, device)
 			for _, address := range unit.Addresses {
 				record(address, device)
 			}
@@ -536,7 +538,9 @@ func ipsecUnitHasAddressFamily12089(unit *InterfaceUnit, family int) bool {
 		return false
 	}
 	if ipsecAddressMatchesFamily12089(unit.PrimaryAddress, family) ||
-		ipsecAddressMatchesFamily12089(unit.PreferredAddress, family) {
+		ipsecAddressMatchesFamily12089(unit.PrimaryAddressV6, family) ||
+		ipsecAddressMatchesFamily12089(unit.PreferredAddress, family) ||
+		ipsecAddressMatchesFamily12089(unit.PreferredAddressV6, family) {
 		return true
 	}
 	for _, address := range unit.Addresses {

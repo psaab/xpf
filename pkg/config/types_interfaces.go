@@ -98,21 +98,23 @@ type AggregatedEtherOptions struct {
 
 // InterfaceUnit represents a logical unit on an interface.
 type InterfaceUnit struct {
-	Number           int
-	Disable          bool             // unit-level `disable` — administratively disabled (#14575)
-	Description      string           // free-text unit description
-	VlanID           int              // 0 = native/untagged, >0 = 802.1Q tagged
-	InnerVlanID      int              // inner VLAN tag for QinQ (flexible-vlan-tagging)
-	PointToPoint     bool             // point-to-point link (for tunnels)
-	Addresses        []string         // CIDR notation
-	PrimaryAddress   string           // address marked as primary
-	PreferredAddress string           // address marked as preferred
-	MTU              int              // family-level MTU (0 = default)
-	DHCP             bool             // family inet { dhcp; }
-	DHCPOptions      *DHCPInetOptions // dhcp sub-options (lease-time, etc.)
-	DHCPv6           bool             // family inet6 { dhcpv6; }
-	DHCPv6Client     *DHCPv6ClientConfig
-	DADDisable       bool // family inet6 { dad-disable; }
+	Number             int
+	Disable            bool             // unit-level `disable` — administratively disabled (#14575)
+	Description        string           // free-text unit description
+	VlanID             int              // 0 = native/untagged, >0 = 802.1Q tagged
+	InnerVlanID        int              // inner VLAN tag for QinQ (flexible-vlan-tagging)
+	PointToPoint       bool             // point-to-point link (for tunnels)
+	Addresses          []string         // CIDR notation
+	PrimaryAddress     string           // IPv4 address marked as primary
+	PrimaryAddressV6   string           // IPv6 address marked as primary (#15653)
+	PreferredAddress   string           // IPv4 address marked as preferred
+	PreferredAddressV6 string           // IPv6 address marked as preferred (#15653)
+	MTU                int              // family-level MTU (0 = default)
+	DHCP               bool             // family inet { dhcp; }
+	DHCPOptions        *DHCPInetOptions // dhcp sub-options (lease-time, etc.)
+	DHCPv6             bool             // family inet6 { dhcpv6; }
+	DHCPv6Client       *DHCPv6ClientConfig
+	DADDisable         bool // family inet6 { dad-disable; }
 	// #4308 (fable-review-167 I-3): family inet parity knobs, typed +
 	// compiled so they stop silently vanishing but ACCEPTED-ONLY today
 	// (commit-time advisory; see validateInterfaceParityWarnings).
@@ -144,6 +146,57 @@ type InterfaceUnit struct {
 	// FamilyInet6 records authored inet6 presence for the IPv6 MTU gate.
 	// It is compiler evidence, not snapshot wire data.
 	FamilyInet6 bool `json:"-"`
+}
+
+// PrimaryAddressForFamily returns the unit's primary address for the
+// requested family (true = IPv6). IPv4 reads PrimaryAddress; IPv6 reads
+// PrimaryAddressV6, falling back to PrimaryAddress when no inet6 primary
+// was compiled (single-family inet6 units authored before #15653 stored
+// their primary in the shared slot). (#15653)
+func (u *InterfaceUnit) PrimaryAddressForFamily(ipv6 bool) string {
+	if u == nil {
+		return ""
+	}
+	if !ipv6 {
+		return u.PrimaryAddress
+	}
+	if u.PrimaryAddressV6 != "" {
+		return u.PrimaryAddressV6
+	}
+	if cidrIsIPv6(u.PrimaryAddress) {
+		return u.PrimaryAddress
+	}
+	return ""
+}
+
+// PreferredAddressForFamily is PrimaryAddressForFamily for `preferred`.
+func (u *InterfaceUnit) PreferredAddressForFamily(ipv6 bool) string {
+	if u == nil {
+		return ""
+	}
+	if !ipv6 {
+		return u.PreferredAddress
+	}
+	if u.PreferredAddressV6 != "" {
+		return u.PreferredAddressV6
+	}
+	if cidrIsIPv6(u.PreferredAddress) {
+		return u.PreferredAddress
+	}
+	return ""
+}
+
+// cidrIsIPv6 reports whether a CIDR string's address is IPv6.
+func cidrIsIPv6(cidr string) bool {
+	for i := range cidr {
+		if cidr[i] == ':' {
+			return true
+		}
+		if cidr[i] == '/' {
+			return false
+		}
+	}
+	return false
 }
 
 // InterfaceDynamicDNSConfig is one per-interface, per-family Surface A DDNS
