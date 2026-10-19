@@ -10296,6 +10296,285 @@ fn a_queued_deletesynced_leaves_the_release_to_the_worker_6979_f4() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// #14961 (D26-05): a dropped `DeleteSynced` must release BOTH allocator
+// families on the worker's behalf. Before this fix
+// `release_dropped_delete_for_worker` released only the source-NAT leg, so
+// a NAT64 session whose delete was queue-dropped stranded its translated
+// `(pool v4, port)` for the life of the NAT64 allocator — the worker is
+// ALIVE, so neither the dead-worker sweep nor generation teardown sees
+// its holder bit. The SNAT-occupied and NAT64 controls below pin the
+// holder semantics in both directions: a dropped delete frees only the
+// named worker's bit (a second holder's port stays held), and a QUEUED
+// delete leaves the release to the worker (no premature free).
+// ---------------------------------------------------------------------------
+
+fn nat64_14961_forwarding() -> ForwardingState {
+    let mut forwarding = ForwardingState::default();
+    forwarding.source_nat_rules = f4_pool_rules();
+    forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[crate::NAT64RuleSnapshot {
+        name: "nat64-wkp".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.1".to_string()],
+        ..Default::default()
+    }]);
+    forwarding
+}
+
+fn nat64_14961_key() -> crate::session::SessionKey {
+    crate::session::SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 6,
+        src_ip: "2001:db8::1".parse().unwrap(),
+        dst_ip: "64:ff9b::0808:0808".parse().unwrap(),
+        src_port: 5000,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    }
+}
+
+fn nat64_14961_nat(port: u16) -> crate::nat::NatDecision {
+    crate::nat::NatDecision {
+        rewrite_src: Some("198.51.100.1".parse().unwrap()),
+        rewrite_dst: Some("8.8.8.8".parse().unwrap()),
+        rewrite_src_port: Some(port),
+        nat64: true,
+        ..crate::nat::NatDecision::default()
+    }
+}
+
+/// Seed a NAT64 session in shared authority with `worker_id` holding its
+/// NAT64 reservation, exactly as an import followed by that worker's
+/// `UpsertSynced` would leave it.
+fn nat64_14961_seed(coordinator: &mut Coordinator, worker_id: u32, port: u16) {
+    coordinator.forwarding = nat64_14961_forwarding();
+    coordinator.publish_runtime_view();
+    let rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
+    coordinator.workers.register(worker_id, rec, None);
+    let key = nat64_14961_key();
+    let nat = nat64_14961_nat(port);
+    assert!(
+        crate::nat64::reserve_synced_nat64_allocation_for_worker(
+            &coordinator.forwarding.nat64,
+            &key,
+            nat,
+            false,
+            1_000,
+            worker_id,
+        ),
+        "fixture must take the NAT64 reservation, or every assertion below is vacuous"
+    );
+    let alloc = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
+    assert!(
+        alloc.debug_is_port_occupied(0, port),
+        "fixture precondition: the NAT64 port is occupied before the delete"
+    );
+    // Shared authority entry (the delete's NAT decision source).
+    let entry = crate::afxdp::worker::SyncedSessionEntry {
+        key: key.clone(),
+        decision: crate::afxdp::SessionDecision {
+            resolution: crate::afxdp::ForwardingResolution {
+                disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: crate::session::SessionMetadata {
+            ingress_zone: 1,
+            egress_zone: 2,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        leak_incarnation: 0,
+        origin: crate::afxdp::SessionOrigin::SyncImport,
+        protocol: key.protocol,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+    };
+    crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
+        .insert(key.clone(), entry);
+}
+
+fn nat64_14961_fill_queue(coordinator: &Coordinator, worker_id: u32) {
+    use crate::afxdp::worker_queue::{self, MAX_PENDING_WORKER_COMMANDS};
+    let records = coordinator.workers.records();
+    let rec = records.get(&worker_id).expect("record");
+    let mut pending = worker_queue::lock_recover(&rec.handle.commands);
+    for i in 0..MAX_PENDING_WORKER_COMMANDS {
+        let mut filler = nat64_14961_key();
+        filler.src_port = 30000 + (i as u16 % 20000);
+        pending.push_back(crate::afxdp::WorkerCommand::DeleteSynced(filler));
+    }
+    assert_eq!(
+        pending.len(),
+        MAX_PENDING_WORKER_COMMANDS,
+        "fixture: the queue must be exactly at capacity so the next push is dropped"
+    );
+}
+
+/// THE BINDING (#14961). A queue-dropped `DeleteSynced` for a NAT64 session
+/// must release that worker's NAT64 holder bit on its behalf.
+///
+/// RED pre-fix: `release_dropped_delete_for_worker` released only SNAT, so
+/// the NAT64 port stays occupied (asserted via the BIB active-flow count —
+/// a NAT64 release retains the idle BIB lease, so occupancy alone cannot
+/// distinguish released from stranded).
+#[test]
+fn a_dropped_deletesynced_releases_the_workers_nat64_reservation_14961() {
+    use crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS;
+    use std::sync::atomic::Ordering;
+
+    let mut coordinator = Coordinator::new();
+    nat64_14961_seed(&mut coordinator, 3, 51000);
+    nat64_14961_fill_queue(&coordinator, 3);
+
+    let key = nat64_14961_key();
+    let flow = crate::nat::SourceNatFlowKey {
+        protocol: key.protocol,
+        src_ip: key.src_ip,
+        dst_ip: "8.8.8.8".parse().unwrap(),
+        src_port: key.src_port,
+        dst_port: key.dst_port,
+        routing_scope: 0,
+    };
+    let alloc = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
+    let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
+    assert_eq!(
+        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        Some(1),
+        "fixture precondition: one active NAT64 flow reference before the delete"
+    );
+
+    let drops_before = WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed);
+    coordinator.session_domain.delete_synced_session(key.clone(), false);
+    assert!(
+        WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed) > drops_before,
+        "fixture: the DeleteSynced must actually have been DROPPED — if the queue \
+         accepted it, this cell is testing the ordinary path and proves nothing"
+    );
+    assert_eq!(
+        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        Some(0),
+        "#14961: the dropped DeleteSynced stranded the NAT64 reservation — the \
+         coordinator's on-behalf repair released only the source-NAT leg, so \
+         worker 3's NAT64 holder bit (and the BIB active reference) survived \
+         for the life of the allocator"
+    );
+    assert_eq!(
+        coordinator.session_delete_dropped_released_total(),
+        1,
+        "the repair must be counted once for the one dropped forward command"
+    );
+}
+
+/// OVER-RELEASE CONTROL (#14961): when a second worker still holds the same
+/// NAT64 reservation, the dropped-delete repair for worker 3 must NOT free
+/// the port — only worker 3's bit goes; worker 4's active reference stays.
+#[test]
+fn a_dropped_deletesynced_preserves_a_second_workers_nat64_hold_14961() {
+    let mut coordinator = Coordinator::new();
+    nat64_14961_seed(&mut coordinator, 3, 51001);
+    // Worker 4 adopts the same reservation (its own UpsertSynced).
+    let key = nat64_14961_key();
+    let nat = nat64_14961_nat(51001);
+    assert!(crate::nat64::reserve_synced_nat64_allocation_for_worker(
+        &coordinator.forwarding.nat64,
+        &key,
+        nat,
+        false,
+        1_500,
+        4,
+    ));
+    // Register worker 4 with an EMPTY queue (its delete will be queued).
+    let rec4 = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
+    coordinator.workers.register(4, rec4, None);
+    nat64_14961_fill_queue(&coordinator, 3);
+
+    let flow = crate::nat::SourceNatFlowKey {
+        protocol: key.protocol,
+        src_ip: key.src_ip,
+        dst_ip: "8.8.8.8".parse().unwrap(),
+        src_port: key.src_port,
+        dst_port: key.dst_port,
+        routing_scope: 0,
+    };
+    let alloc = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
+    let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
+    assert_eq!(
+        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        Some(1),
+        "fixture: both workers share ONE BIB active reference (transport-keyed)"
+    );
+    let mask_before = alloc.holder_mask_for_flow(&flow);
+    assert_eq!(mask_before, Some(0b11000), "fixture: workers 3 and 4 both hold");
+
+    coordinator.session_domain.delete_synced_session(key.clone(), false);
+
+    assert_eq!(
+        alloc.holder_mask_for_flow(&flow),
+        Some(0b10000),
+        "#14961: the repair must clear ONLY the dropped worker's (3) bit; \
+         clearing worker 4's too would hand a live worker's port to a new flow"
+    );
+    assert!(
+        alloc.debug_is_port_occupied(0, 51001),
+        "worker 4 still holds, so the translated port must stay occupied"
+    );
+}
+
+/// QUEUED CONTROL (#14961): a delete the queue ACCEPTS must leave the NAT64
+/// release to the worker — the coordinator repairing a queued delete would
+/// free the port while that worker still forwards through it.
+#[test]
+fn a_queued_deletesynced_leaves_the_nat64_release_to_the_worker_14961() {
+    let mut coordinator = Coordinator::new();
+    nat64_14961_seed(&mut coordinator, 3, 51002);
+    // Queue NOT filled: the push succeeds.
+    coordinator.session_domain.delete_synced_session(nat64_14961_key(), false);
+    let alloc = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
+    assert!(
+        alloc.debug_is_port_occupied(0, 51002),
+        "the coordinator released a NAT64 reservation the worker is still going \
+         to release itself — the command was queued, so the worker WILL run \
+         this teardown (#14961 over-release control)"
+    );
+    assert_eq!(
+        coordinator.session_delete_dropped_released_total(),
+        0,
+        "nothing was dropped, so the repair counter must stay at zero"
+    );
+}
+
 
 
 /// #8157: the bringup replay derives its set from the LIVE shared synced map,

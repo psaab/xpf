@@ -1656,6 +1656,34 @@ pub(crate) fn release_synced_nat64_allocation_untracked(
     )
 }
 
+/// #14961 (D26-05): production untracked release twin of
+/// [`release_synced_nat64_allocation_untracked`] for the tunnel-remap purge,
+/// mirroring `release_synced_source_nat_allocation_untracked` on the SNAT
+/// side. The coordinator's import-time reservation is `NatHolder::Untracked`
+/// (no holder bit), so a worker-id release is the wrong call: `Untracked`
+/// contributes no bit and `drop_holder_locked` keeps any record a worker
+/// HAS adopted, freeing only a record no worker ever claimed. That is the
+/// deliberate direction — an under-release leaks a bounded pool port, an
+/// over-release hands a live worker's port to a new flow. Returns whether
+/// the active flow reference was actually released (for honest counting).
+pub(crate) fn release_synced_nat64_allocation_untracked_for_purge(
+    nat64: &Nat64State,
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+) -> bool {
+    release_nat64_allocation_with_mode(
+        nat64,
+        key,
+        nat,
+        is_reverse,
+        now_ns,
+        false,
+        crate::nat::NatHolder::Untracked,
+    )
+}
+
 /// #4381: release a NAT64 forward flow's translated pool port on session
 /// teardown (reap / purge / delete-sync), mirroring
 /// `release_source_nat_allocation`.
