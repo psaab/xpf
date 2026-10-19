@@ -175,10 +175,14 @@ var schemaRoutingOptions = &schemaNode{desc: "Routing options", children: map[st
 		}},
 	}},
 	"generate": {desc: "Generated routes", children: map[string]*schemaNode{
-		"route": {desc: "Generated route", args: 1, placeholder: "<destination>", children: map[string]*schemaNode{
-			"policy":  {desc: "Policy", args: 1, placeholder: "<policy>", children: nil},
-			"discard": {desc: "Discard route", children: nil},
-		}},
+		"route": {desc: "Generated route", args: 1, placeholder: "<destination>",
+			keyValueType: ValueCIDR, keyValueDesc: "Generated route destination prefix (CIDR, e.g. 10.0.0.0/8 or 2001:db8::/32)",
+			keyValueExamples: []string{"10.0.0.0/8", "192.168.0.0/16", "2001:db8::/32"},
+			keyValidator:     ValidateRouteDestination,
+			children: map[string]*schemaNode{
+				"policy":  {desc: "Policy", args: 1, placeholder: "<policy>", children: nil},
+				"discard": {desc: "Discard route", children: nil},
+			}},
 	}},
 }}
 
