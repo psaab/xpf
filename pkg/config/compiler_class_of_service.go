@@ -490,12 +490,18 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 					})
 				}
 			}
-			if len(classifier.Entries) > 0 {
-				if cos.INetPrecedenceClassifierDefs == nil {
-					cos.INetPrecedenceClassifierDefs = make(map[string]*CoSINetPrecedenceClassifier)
-				}
-				cos.INetPrecedenceClassifierDefs[classifier.Name] = classifier
+			// #15681: populate Defs unconditionally (even with no entries),
+			// mirroring how the name list records definedness. Before this
+			// an entryless classifier was absent from Defs, so consumers
+			// keyed on Defs (queue-mapping warnings, unit-runtime check,
+			// dataplane snapshot emptiness) treated a defined-but-empty
+			// binding as undefined. Definedness checks that must accept
+			// entryless definitions already consult the name list; Defs
+			// now carries the (possibly empty) classifier object as well.
+			if cos.INetPrecedenceClassifierDefs == nil {
+				cos.INetPrecedenceClassifierDefs = make(map[string]*CoSINetPrecedenceClassifier)
 			}
+			cos.INetPrecedenceClassifierDefs[classifier.Name] = classifier
 		}
 	}
 

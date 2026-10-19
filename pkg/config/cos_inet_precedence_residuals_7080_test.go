@@ -144,11 +144,12 @@ func TestUndefinedINetPrecedenceClassifierWarns_7081(t *testing.T) {
 }
 
 // The other polarity, and the subtlety that decides WHICH field means
-// "defined": INetPrecedenceClassifierDefs is populated only when the classifier
-// has entries, so a classifier defined with a body that compiles to nothing is
-// absent from it while being perfectly well defined. Keying the warning on Defs
-// would report "references undefined ... classifier" for a classifier the
-// operator can see in their own config — a confident wrong name.
+// "defined": the warning keys on INetPrecedenceClassifiers, the NAME list.
+// #15681 populates INetPrecedenceClassifierDefs unconditionally, but a
+// classifier defined with a body that compiles to nothing still has zero
+// entries — keying the warning on entry-bearing Defs would report
+// "references undefined ... classifier" for a classifier the operator can
+// see in their own config — a confident wrong name.
 func TestDefinedINetPrecedenceClassifierDoesNotWarn_7081(t *testing.T) {
 	t.Run("with entries", func(t *testing.T) {
 		cfg := cosINetTree7080(t,
@@ -167,8 +168,11 @@ func TestDefinedINetPrecedenceClassifierDoesNotWarn_7081(t *testing.T) {
 			"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24",
 			"set class-of-service interfaces ge-0/0/0 unit 0 classifiers inet-precedence EMPTY",
 		)
-		if cfg.ClassOfService.INetPrecedenceClassifierDefs["EMPTY"] != nil {
-			t.Fatal("fixture is wrong: EMPTY has entries, so it cannot exercise the Defs-vs-names distinction")
+		// #15681: Defs is now populated unconditionally, so EMPTY is present
+		// with zero entries — the definedness distinction this subtest pins
+		// is that the warning keys on the name list, not on entry count.
+		if def := cfg.ClassOfService.INetPrecedenceClassifierDefs["EMPTY"]; def == nil || len(def.Entries) != 0 {
+			t.Fatalf("fixture is wrong: EMPTY should be in Defs with no entries after #15681, got %#v", def)
 		}
 		if cosHasWarning7080(ValidateConfig(cfg), "undefined inet-precedence classifier") {
 			t.Errorf("a classifier defined with no entries was reported as UNDEFINED — the warning is "+

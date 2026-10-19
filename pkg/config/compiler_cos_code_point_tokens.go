@@ -218,20 +218,35 @@ func collectCoS8021RewriteCodePoint(node *Node) (uint8, bool, error) {
 	return collectCoS3BitRewriteCodePoint(node, "ieee-802.1")
 }
 
-// collectCoS3BitRewriteCodePoint resolves a single 0..7 rewrite value. Exact-
-// width three-bit strings containing only 0/1 are binary for 802.1p; the
-// other numeric families retain decimal parsing. Both `code-point` and its
-// `code-points` alias are read; the first value wins, but every token is
-// checked so an invalid later token cannot hide behind a valid first one.
+// collectCoS3BitRewriteCodePoint resolves a single 0..7 rewrite value (#15681).
+// Every 3-bit family (ieee-802.1, inet-precedence, exp) accepts an exact-width
+// three-bit binary token (000..111); inet-precedence additionally resolves its
+// RFC 791 symbolic aliases (net-control, internet-control, ...). Other tokens
+// retain decimal parsing and 0..7 range checking — a 4-char token such as
+// `1111` or a decimal `8` stays a loud reject, never binary. Both `code-point`
+// and its `code-points` alias are read; the first value wins, but every token
+// is checked so an invalid later token cannot hide behind a valid first one.
 func collectCoS3BitRewriteCodePoint(node *Node, family string) (uint8, bool, error) {
 	parse := func(raw string) (uint8, bool, error) {
 		raw = strings.TrimSpace(strings.ToLower(raw))
 		if raw == "" {
 			return 0, false, nil
 		}
+		if family == "inet-precedence" {
+			if v, ok := coSINetPrecedenceCodePointValue(raw); ok {
+				if v < 0 || v > 7 {
+					return 0, false, newCodePointRangeError(
+						"class-of-service %s rewrite-rule code-point %d is out of range (must be 0..7)",
+						family, v)
+				}
+				return uint8(v), true, nil
+			}
+			return 0, false, newUnknownCodePointTokenError(
+				"class-of-service %s rewrite-rule code-point %q is not a valid 0..7 value, 3-bit binary (000..111) or IP-precedence alias",
+				family, raw)
+		}
 		v, err := strconv.Atoi(raw)
-		if family == "ieee-802.1" && len(raw) == 3 &&
-			strings.Trim(raw, "01") == "" {
+		if len(raw) == 3 && strings.Trim(raw, "01") == "" {
 			if binary, binaryErr := strconv.ParseUint(raw, 2, 3); binaryErr == nil {
 				v, err = int(binary), nil
 			}
