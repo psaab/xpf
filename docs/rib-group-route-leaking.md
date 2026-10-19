@@ -446,6 +446,23 @@ to `ApplyNextTableRules`. Strict on commit / commit-check; downgraded to a
 warning on the tolerant load / peer-sync paths (`opts.lenientNextTableRefs`,
 #1960 no-brick) since the applier keeps a dangling next-table inert.
 
+### Strict rejection — wrong-family or nonzero-index `next-table` suffix (#15201)
+
+A suffixed `next-table` target must name the unicast table of the route's
+own family at index 0: `blue.inet.0` for an IPv4 route, `blue.inet6.0` for
+an IPv6 route. `parseNextTableInstance` discarded the suffix entirely, so
+`blue.inet6.0` on an IPv4 route, `blue.inet.2` (Junos inet.2 is the RPF
+table, not a forwarding target), an IPv6 route to `blue.inet.0`, and
+malformed suffixes such as `blue.inetgarbage` all committed and leaked
+into blue's unicast table. `validateNextTableTargetReferencesStrict` now
+rejects any suffixed target that is not exactly the matching `.inet.0` /
+`.inet6.0` (via `parseNextTableSuffix`, which keeps the #5632 LastIndex
+instance extraction); the same check in `StaticRouteExcludedReason` keeps
+a tolerantly-loaded bad-suffix route unpublished in the userspace FIB.
+A bare instance name (no suffix) carries no family/index claim and is
+unchanged. Strict on commit; downgraded to a warning on tolerant load /
+peer-sync (#1960), like the definedness gate above.
+
 ### Strict rejection — per-instance `next-table` is unsupported (#5830)
 
 `next-table` is only implemented for the **global** `routing-options` static

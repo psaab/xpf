@@ -115,6 +115,23 @@ func StaticRouteExcludedReason(sr *StaticRoute, perInstance bool, definedInstanc
 	if perInstance {
 		return "next-table is not supported under a routing-instance — no ip rule is installed for it"
 	}
+	// #15201: a suffixed target that is not the unicast table of the
+	// destination's family (wrong family, nonzero index, or malformed
+	// suffix) names no forwarding table the applier programs — it resolves
+	// the bare instance name and installs the leak unconditionally. The
+	// strict gate rejects it; on the tolerant path it must stay unpublished
+	// rather than leak into the instance's unicast table.
+	if raw := sr.NextTableRaw; raw != "" {
+		if _, suffix, hasSuffix := parseNextTableSuffix(raw); hasSuffix {
+			want := ".inet.0"
+			if FRRAddrFamily(sr.Destination) == "v6" {
+				want = ".inet6.0"
+			}
+			if suffix != want {
+				return fmt.Sprintf("next-table %q has an invalid table suffix %q for destination %q (want <instance>%s)", raw, suffix, sr.Destination, want)
+			}
+		}
+	}
 	if _, ok := definedInstances[sr.NextTable]; !ok {
 		return fmt.Sprintf("next-table target routing-instance %q is not defined", sr.NextTable)
 	}
