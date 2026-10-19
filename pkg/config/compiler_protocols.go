@@ -63,32 +63,59 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 		for _, child := range lldpNode.Children {
 			switch child.Name() {
 			case "interface":
-				if v := nodeVal(child); v != "" {
-					iface := LLDPInterface{Name: v}
-					if child.FindChild("disable") != nil {
-						iface.Disable = true
+				// #15138: an LLDP interface statement is only meaningful
+				// with a name. The block spellings
+				//   interface { disable; }
+				//   interface { ge-0/0/1; }
+				//   interface { ge-0/0/1 { disable; } }
+				// carry Keys=["interface"] with the would-be name (or a
+				// bare disable) nested as a child. nodeVal falls back to
+				// that child's name, so it returned "disable"/"ge-0/0/1"
+				// as an interface name and the packed-tail read below
+				// sliced child.Keys[2:] on a 1-key node — panicking
+				// compileProtocols on the strict, override, lenient-load
+				// and HA-sync paths alike (no recover above any of them,
+				// so xpfd exited). Only a name packed on the statement
+				// itself (Keys[1], len >= 2) is a named interface; every
+				// other shape is nameless. Strict compile rejects it
+				// (fail closed — Junos requires the name), tolerant load
+				// warns and drops the nameless entry so a persisted
+				// config still boots (#1960), never a panic.
+				if len(child.Keys) < 2 {
+					err := fmt.Errorf("protocols lldp interface: an interface name is required")
+					if opts.lenientLLDPInterfaceTokens14616 {
+						*warnings = append(*warnings, err.Error()+" (ignored on tolerant load)")
+						continue
 					}
-					// #14616: the one-line spelling packs disable onto
-					// the interface node's own Keys. Strict rejects an
-					// unknown trailing token; tolerant warns and drops
-					// it, keeping a valid disable.
-					if err := validateLLDPInterfacePackedTokens(child, nil); err != nil {
-						if opts.lenientLLDPInterfaceTokens14616 {
-							*warnings = append(*warnings, fmt.Sprintf("protocols lldp interface %s: %v (ignored on tolerant load)", v, err))
-						} else {
-							return err
-						}
-					}
-					// Read packed disable even on the tolerant path
-					// (and after a strict pass it is known-valid).
-					for _, tok := range child.Keys[2:] {
-						if tok == "disable" {
-							iface.Disable = true
-							break
-						}
-					}
-					proto.LLDP.Interfaces = append(proto.LLDP.Interfaces, iface)
+					return err
 				}
+				v := child.Keys[1]
+				iface := LLDPInterface{Name: v}
+				if child.FindChild("disable") != nil {
+					iface.Disable = true
+				}
+				// #14616: the one-line spelling packs disable onto
+				// the interface node's own Keys. Strict rejects an
+				// unknown trailing token; tolerant warns and drops
+				// it, keeping a valid disable.
+				if err := validateLLDPInterfacePackedTokens(child, nil); err != nil {
+					if opts.lenientLLDPInterfaceTokens14616 {
+						*warnings = append(*warnings, fmt.Sprintf("protocols lldp interface %s: %v (ignored on tolerant load)", v, err))
+					} else {
+						return err
+					}
+				}
+				// Read packed disable even on the tolerant path
+				// (and after a strict pass it is known-valid). The
+				// len < 2 guard above guarantees Keys[2:] is in range
+				// (empty when len == 2).
+				for _, tok := range child.Keys[2:] {
+					if tok == "disable" {
+						iface.Disable = true
+						break
+					}
+				}
+				proto.LLDP.Interfaces = append(proto.LLDP.Interfaces, iface)
 			case "transmit-interval":
 				if v := nodeVal(child); v != "" {
 					if n, err := strconv.Atoi(v); err == nil {
