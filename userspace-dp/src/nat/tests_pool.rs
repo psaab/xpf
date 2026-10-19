@@ -1930,7 +1930,7 @@ fn assert_persistent_expiry_indexes_consistent(rule: &SourceNatRule) {
             Some(lease.translated.ip),
             "persistent lease translated address mismatch"
         );
-        if lease.active_flows == 0 {
+        if lease.active_flows == 0 && lease.inbound_flows == 0 {
             expected_global.insert(entry);
             expected_by_addr[lease.addr_index].insert(entry);
         }
@@ -2198,6 +2198,7 @@ fn persistent_inbound_permission_uses_remote_scope_not_mapping_key() {
                 internal_ip: "10.0.1.100".parse().unwrap(),
                 internal_port: 12345,
                 address_only: false,
+            lease_key: Some(lease_key(12345)),
             },
             "{permit} should admit its configured remote scope"
         );
@@ -2208,6 +2209,7 @@ fn persistent_inbound_permission_uses_remote_scope_not_mapping_key() {
                     internal_ip: "10.0.1.100".parse().unwrap(),
                     internal_port: 12345,
                     address_only: false,
+                lease_key: Some(lease_key(12345)),
                 }
             } else {
                 PersistentInbound::Denied
@@ -2221,12 +2223,81 @@ fn persistent_inbound_permission_uses_remote_scope_not_mapping_key() {
                     internal_ip: "10.0.1.100".parse().unwrap(),
                     internal_port: 12345,
                     address_only: false,
+                lease_key: Some(lease_key(12345)),
                 }
             } else {
                 PersistentInbound::Denied
             },
             "{permit} must constrain the remote host as configured"
         );
+    }
+}
+
+
+/// #15111 RED/GREEN: an inbound-only persistent session must keep its lease
+/// (and translated tuple) alive past the outbound inactivity expiry, and
+/// releasing the inbound hold must re-arm expiry so GC can reclaim it.
+/// Pre-fix there is no inbound reference, so the lookup after expiry is a
+/// Miss and a second internal host can be minted the same tuple.
+#[test]
+fn persistent_inbound_hold_keeps_lease_past_expiry_15111() {
+    let rules = persistent_pool_rules(1, 40000, 40010);
+    let alloc = &rules[0].pool_allocator;
+    // Outbound mint at t=1s (timeout 1s => expires 2s), then release outbound.
+    let first = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "8.8.8.8", 53, 1_000_000_000));
+    let public_ip = first.rewrite_src.unwrap();
+    let public_port = first.rewrite_src_port.unwrap();
+    let outbound_key = session_key(12345, "8.8.8.8", 53);
+    crate::nat::release_source_nat_allocation(
+        &InterfaceNatAllocators::default(),
+        &rules,
+        &outbound_key,
+        first,
+        false,
+        1_000_000_001,
+    );
+    // Lease is now idle; inbound lookup must permit and yield the lease key.
+    let lease_key = match alloc.persistent_inbound_lookup(6, public_ip, public_port, "8.8.8.8".parse().unwrap(), 53, 1_500_000_000, "", "") {
+        PersistentInbound::Permitted { lease_key, .. } => lease_key.expect("permitted inbound must carry its lease key"),
+        other => panic!("idle lease must permit inbound, got {other:?}"),
+    };
+    // Acquire the inbound hold (what poll does on inbound install).
+    assert!(alloc.acquire_persistent_inbound(lease_key, 1_500_000_000), "acquire must succeed on a live idle lease");
+    let held = alloc.debug_persistent_lease_for_flow(&crate::nat::SourceNatFlowKey { protocol: 6, src_ip: "10.0.1.100".parse().unwrap(), dst_ip: "8.8.8.8".parse().unwrap(), src_port: 12345, dst_port: 53, routing_scope: 0 }, PersistentNatPermit::AnyRemoteHost).expect("lease must survive while inbound-held");
+    assert_eq!(held.inbound_flows, 1);
+    assert_eq!(held.active_flows, 0);
+    // Past the original expiry (2s): lookup still permits (pre-fix: Miss).
+    match alloc.persistent_inbound_lookup(6, public_ip, public_port, "8.8.8.8".parse().unwrap(), 53, 3_000_000_000, "", "") {
+        PersistentInbound::Permitted { .. } => {}
+        other => panic!("#15111: inbound-held lease must still permit after outbound expiry, got {other:?}"),
+    }
+    // A second internal host must NOT be minted the held tuple.
+    let second = tuple_snat_lookup_from_src(&rules, "10.0.1.101", 12345, "8.8.8.8", 53, 3_000_000_000);
+    if let SourceNatLookup::Matched(d) = second {
+        assert_ne!((d.rewrite_src, d.rewrite_src_port), (Some(public_ip), Some(public_port)), "#15111: second host must not steal the inbound-held tuple");
+    }
+    assert_persistent_expiry_indexes_consistent(&rules[0]);
+    // Release the inbound hold: expiry re-arms, then lookup misses and GC reclaims.
+    alloc.release_persistent_inbound(lease_key, 3_000_000_000);
+    let released = alloc.debug_persistent_lease_for_flow(&crate::nat::SourceNatFlowKey { protocol: 6, src_ip: "10.0.1.100".parse().unwrap(), dst_ip: "8.8.8.8".parse().unwrap(), src_port: 12345, dst_port: 53, routing_scope: 0 }, PersistentNatPermit::AnyRemoteHost).expect("lease remains until its re-armed expiry");
+    assert_eq!(released.inbound_flows, 0);
+    match alloc.persistent_inbound_lookup(6, public_ip, public_port, "8.8.8.8".parse().unwrap(), 53, 5_000_000_000, "", "") {
+        PersistentInbound::Permitted { .. } => panic!("#15111: released lease must expire after its re-armed timeout"),
+        _ => {}
+    }
+    assert_persistent_expiry_indexes_consistent(&rules[0]);
+    // After the re-armed expiry, GC must reclaim the lease and free its port.
+    let reclaimed = alloc.debug_gc_expired_chunked(5_000_000_000, 16);
+    assert!(reclaimed >= 1, "#15111: released inbound lease must be GC-reclaimable, reclaimed={reclaimed}");
+    assert!(alloc.debug_persistent_lease_for_flow(&crate::nat::SourceNatFlowKey { protocol: 6, src_ip: "10.0.1.100".parse().unwrap(), dst_ip: "8.8.8.8".parse().unwrap(), src_port: 12345, dst_port: 53, routing_scope: 0 }, PersistentNatPermit::AnyRemoteHost).is_none(), "#15111: lease must be gone after GC");
+    // Control: a lease never inbound-held still expires normally.
+    let rules2 = persistent_pool_rules(1, 40000, 40010);
+    let f2 = expect_snat_decision(tuple_snat_lookup(&rules2, 12345, "8.8.8.8", 53, 1_000_000_000));
+    let k2 = session_key(12345, "8.8.8.8", 53);
+    crate::nat::release_source_nat_allocation(&InterfaceNatAllocators::default(), &rules2, &k2, f2, false, 1_000_000_001);
+    match rules2[0].pool_allocator.persistent_inbound_lookup(6, f2.rewrite_src.unwrap(), f2.rewrite_src_port.unwrap(), "8.8.8.8".parse().unwrap(), 53, 3_000_000_000, "", "") {
+        PersistentInbound::Permitted { .. } => panic!("control: never-held lease must expire"),
+        _ => {}
     }
 }
 
@@ -2267,6 +2338,7 @@ fn persistent_address_only_inbound_permission_is_checked() {
             internal_ip: "10.0.1.100".parse().unwrap(),
             internal_port: 40_000,
             address_only: true,
+        lease_key: Some(lease_key(40_000)),
         }
     );
     assert_eq!(lookup("8.8.8.8", 8443), PersistentInbound::Denied);
@@ -7078,6 +7150,7 @@ fn install_expired_idle_leases(
                     expires_at_ns,
                     timeout_ns: NS_PER_SEC,
                     active_flows: 0,
+                    inbound_flows: 0,
                     completed_flows: 1,
                     activation_saw_completion: true,
                     activation_previous_expires_at_ns: 0,
@@ -7183,6 +7256,7 @@ fn pool_snat_gc_chunked_spares_active_and_unexpired_leases() {
                 expires_at_ns: 500,
                 timeout_ns: NS_PER_SEC,
                 active_flows: 1,
+                inbound_flows: 0,
                 completed_flows: 0,
                 activation_saw_completion: false,
                 activation_previous_expires_at_ns: 0,
@@ -7207,6 +7281,7 @@ fn pool_snat_gc_chunked_spares_active_and_unexpired_leases() {
                 expires_at_ns: 10_000,
                 timeout_ns: NS_PER_SEC,
                 active_flows: 0,
+                inbound_flows: 0,
                 completed_flows: 1,
                 activation_saw_completion: true,
                 activation_previous_expires_at_ns: 0,

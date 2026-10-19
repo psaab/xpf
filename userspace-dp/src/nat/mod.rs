@@ -270,8 +270,8 @@ pub(crate) struct NatScopeCtx<'a> {
 
 pub(crate) use allocator::{
     DeterministicV4, DeterministicV6, MAX_NAT_HOLDER_WORKERS, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
-    MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PersistentInbound, PortAllocator,
-    PortAllocatorSnapshot, SourceNatReservationSnapshot,
+    MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PersistentInbound, PersistentSourceKey,
+    PortAllocator, PortAllocatorSnapshot, SourceNatReservationSnapshot,
 };
 #[cfg(test)]
 pub(crate) use allocator::PersistentLeaseDebugState;
@@ -295,6 +295,7 @@ pub(crate) use source::{
     match_source_nat_result_for_tuple, match_source_nat_result_for_tuple_with_icmp,
     parse_source_nat_rules,
     parse_source_nat_rules_with_previous, release_nat64_pool_port,
+    release_persistent_inbound_for_session,
     release_source_nat_allocation_for_worker, release_synced_source_nat_allocation_untracked,
     reserve_nat64_pool_port, reserve_nat64_pool_port_capture_and_replace,
     reserve_synced_source_nat_allocation_for_worker,
@@ -304,7 +305,7 @@ pub(crate) use source::{
     reserve_synced_source_nat_allocation_untracked,
     reserve_synced_source_nat_allocation_untracked_with_holder_snapshot, retained_pool_index_map,
     retained_pool_index_map_v4,
-    rollback_source_nat_allocation_for_worker,
+    rollback_persistent_inbound_for_session, rollback_source_nat_allocation_for_worker,
 };
 // #6211 F2: test-only untracked entry points (see their doc comments).
 // #9902 review: the address-only `match_source_nat*` wrappers allocate

@@ -47,6 +47,9 @@ pub(crate) fn release_source_nat_allocation(
     // #8138: returns whether a reservation was actually freed, so the tunnel-remap
     // purge can count repairs it performed rather than repairs it attempted.
     // Statement-position callers are unaffected.
+    if !is_reverse {
+        release_persistent_inbound_for_session(rules, key, nat, now_ns);
+    }
     release_source_nat_allocation_with_mode(
         iface_allocs,
         rules,
@@ -84,6 +87,10 @@ pub(crate) fn release_synced_source_nat_allocation_untracked(
     is_reverse: bool,
     now_ns: u64,
 ) -> bool {
+    // #15111: synced inbound persistent hold (coordinator import path).
+    if !is_reverse {
+        release_persistent_inbound_for_session(rules, key, nat, now_ns);
+    }
     release_source_nat_allocation_with_mode(
         iface_allocs,
         rules,
@@ -144,6 +151,12 @@ pub(crate) fn release_source_nat_allocation_for_worker(
     now_ns: u64,
     worker_id: u32,
 ) {
+    // #15111: an inbound persistent session carries only `rewrite_dst`, so
+    // the `rewrite_src` gate below would strand its lease hold. Release it
+    // first; no-op for every non-persistent / outbound decision.
+    if !is_reverse {
+        release_persistent_inbound_for_session(rules, key, nat, now_ns);
+    }
     release_source_nat_allocation_with_mode(
         iface_allocs,
         rules,
@@ -154,6 +167,47 @@ pub(crate) fn release_source_nat_allocation_for_worker(
         false,
         NatHolder::Worker(worker_id),
     );
+}
+
+/// #15111: release the persistent lease held by an inbound session.
+/// The inbound session's forward key is (remote -> public tuple) and its
+/// decision carries only `rewrite_dst` (internal host), so the outbound
+/// `rewrite_src` gate in `release_source_nat_allocation_with_mode` would
+/// return early and strand the hold. Derive the lease key from the
+/// decision: internal endpoint + session routing domain, then drop one
+/// inbound reference on every pool allocator that holds that lease.
+/// No-op for non-persistent DNAT/static decisions (no lease matches).
+pub(crate) fn release_persistent_inbound_for_session(
+    rules: &[SourceNatRule],
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    now_ns: u64,
+) {
+    let Some(internal_ip) = nat.rewrite_dst else { return; };
+    if nat.nat64 || nat.nptv6 { return; }
+    let internal_port = nat.rewrite_dst_port.unwrap_or(key.dst_port);
+    let lease_key = crate::nat::PersistentSourceKey {
+        protocol: key.protocol,
+        src_ip: internal_ip,
+        src_port: internal_port,
+        routing_scope: key.routing_domain,
+        remote: None,
+    };
+    for rule in rules {
+        if rule.pool_mode {
+            rule.pool_allocator.release_persistent_inbound(lease_key, now_ns);
+        }
+    }
+}
+
+/// #15111: rollback twin of `release_persistent_inbound_for_session`.
+pub(crate) fn rollback_persistent_inbound_for_session(
+    rules: &[SourceNatRule],
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    now_ns: u64,
+) {
+    release_persistent_inbound_for_session(rules, key, nat, now_ns);
 }
 
 /// Roll back an UNTRACKED (single-holder) source-NAT allocation. See
@@ -198,6 +252,10 @@ pub(crate) fn rollback_source_nat_allocation_for_worker(
     now_ns: u64,
     worker_id: u32,
 ) {
+    // #15111: undo a failed inbound install's lease hold (see release twin).
+    if !is_reverse {
+        rollback_persistent_inbound_for_session(rules, key, nat, now_ns);
+    }
     release_source_nat_allocation_with_mode(
         iface_allocs,
         rules,
