@@ -2702,14 +2702,37 @@ never lock an operator out of a remote box it manages.
       could still overwrite a later commit. The closeout runner now runs
       each owner under its launch generation (`hostAuthGeneration14969`,
       advanced by every closeout and every normal apply tail); the
-      host-mutation seams — the `runCommand*` exec seam and the seven
-      owner entries — refuse a superseded owner before it mutates, so it
-      abstains instead of installing stale state. The fence is checked at
-      the syscall boundary and never gates a later commit (which must
+      host-mutation seams refuse a superseded owner immediately before it
+      mutates, so it abstains instead of installing stale state. The fence
+      is checked at the syscall boundary and never gates a later commit (which must
       return while an old revocation is blocked, per #12169): a stale
       seam that passed before the newer authority began is ordered
       before it and overwritten by it. Pinned by
       `hostauth_fence_14969_test.go`.
+    - **The fence covers every direct write/install seam (#15539, the
+      #15219 residual).** #14969 checked the generation only at owner
+      entry plus the exec seam's check-then-exec instant, so an owner
+      superseded MID-OWNER could still be the last writer below its
+      entry. Now every seam re-checks immediately before its syscall:
+      the nft installs/deletes go through `guardedNftInstaller14969`
+      (the `nftInstallerGuard14969` the #14969 docs named — it wraps
+      `nftInstaller` at the lo0/host-inbound call sites in
+      `daemon_nft.go`); the exec seam (`runWithHostAuthExec15539` in
+      `exec_timeout.go`) re-validates BEFORE the spawn, kills an
+      in-flight child when a newer authority advances, and re-validates
+      after it returns; the direct filesystem writes in
+      `daemon_hostauth_apply.go` / `login_password.go` go through
+      `guardedWriteFileDurable14969` / `guardedWriteFileAtomic14969` /
+      `guardedRemove14969` / `guardedMkdirAllDurable14969` and the
+      fenced claim/forget helpers (authorized_keys, sudoers grant
+      write+removal, the sshd drop-in write/remove defaults, root's
+      authorized_keys, provenance markers); and
+      `reconcileAbsentLoginUsers` — previously unfenced — is fenced at
+      entry with its key/marker revocations fenced at their seams.
+      Uncaptured goroutines (the normal tail, direct reconciler tests)
+      are never refused. Pinned by `hostauth_fence_15539_test.go`,
+      which supersedes owners blocked INSIDE the seam/write rather
+      than only before entry.
     - **Unreadable ownership inventories now reach this closeout (#6798).**
       The reconcilers above could only report failures they could SEE, and an
       ownership read that failed was invisible to them: `hasProvenanceMarker`

@@ -38,6 +38,7 @@ var nftApplyPayload = func(payload string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "nft", "-f", "-")
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Stdin = strings.NewReader(payload)
+
 	return cmd.CombinedOutput()
 }
 
@@ -58,6 +59,146 @@ var nftDeleteTable = func(family, name string) ([]byte, error) {
 	payload := "add table " + family + " " + name + "\n" +
 		"delete table " + family + " " + name + "\n"
 	return nftApplyPayload(payload)
+}
+
+// guardedNftInstaller14969 wraps the nftInstaller seam so EVERY
+// install/delete re-checks the calling goroutine's host-auth generation
+// immediately before the netlink transaction (#15539; the
+// nftInstallerGuard14969 the #14969 docs named but never landed). The
+// owner-entry checks in applyLo0Filter / applyHostInboundFilterWithOverlay
+// alone left the installs below them unfenced: a stale owner could pass
+// its entry, be superseded while rendering, and still install/delete
+// last. Mutating methods refuse a superseded owner with
+// errHostAuthStaleOwner14969; read-only probes (barrier presence, table
+// enforcement) pass through — they mutate nothing. For uncaptured
+// goroutines (the normal tail and every non-host-auth installer user)
+// the guard never refuses, so behaviour is unchanged.
+type guardedNftInstaller14969 struct{ inner xnft.Installer }
+
+func (g guardedNftInstaller14969) InstallEarlyInputBarrier() error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return g.inner.InstallEarlyInputBarrier()
+}
+
+func (g guardedNftInstaller14969) RemoveEarlyInputBarrier() error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return g.inner.RemoveEarlyInputBarrier()
+}
+
+func (g guardedNftInstaller14969) EarlyInputBarrierPresent() (bool, error) {
+	return g.inner.EarlyInputBarrierPresent()
+}
+
+func (g guardedNftInstaller14969) InstallEarlyInputBarrierWithLifelineAdmit(lifelines []string) error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return g.inner.InstallEarlyInputBarrierWithLifelineAdmit(lifelines)
+}
+
+func (g guardedNftInstaller14969) InstallHostInbound(spec xnft.HostInboundSpec) error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return g.inner.InstallHostInbound(spec)
+}
+
+func (g guardedNftInstaller14969) VerifyHostInboundOverlay(overlay xnft.HostInputFenceOverlay) error {
+	return g.inner.VerifyHostInboundOverlay(overlay)
+}
+
+func (g guardedNftInstaller14969) InstallColdBootFence(spec xnft.FenceSpec) error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return g.inner.InstallColdBootFence(spec)
+}
+
+func (g guardedNftInstaller14969) InstallLo0ColdBootFence(spec xnft.FenceSpec) error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return g.inner.InstallLo0ColdBootFence(spec)
+}
+
+func (g guardedNftInstaller14969) InstallGapFence(spec xnft.GapFenceSpec) error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return g.inner.InstallGapFence(spec)
+}
+
+func (g guardedNftInstaller14969) InstallLo0(spec xnft.Lo0FilterSpec) (int, error) {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return 0, err
+	}
+	return g.inner.InstallLo0(spec)
+}
+
+func (g guardedNftInstaller14969) DeleteTable(name string) error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return g.inner.DeleteTable(name)
+}
+
+func (g guardedNftInstaller14969) TableEnforcing(name string) (bool, error) {
+	return g.inner.TableEnforcing(name)
+}
+
+func (g guardedNftInstaller14969) TableDropsInput(name string) (bool, error) {
+	return g.inner.TableDropsInput(name)
+}
+
+func (g guardedNftInstaller14969) InstallIpsecDivert(spec xnft.IpsecDivertSpec) error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return g.inner.InstallIpsecDivert(spec)
+}
+
+func (g guardedNftInstaller14969) RemoveIpsecDivert() error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return g.inner.RemoveIpsecDivert()
+}
+
+func (g guardedNftInstaller14969) InstallTransitBarrier() error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return g.inner.InstallTransitBarrier()
+}
+
+func (g guardedNftInstaller14969) InstallArmedTransitFence(spec xnft.ForwardFenceSpec) error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return g.inner.InstallArmedTransitFence(spec)
+}
+
+func (g guardedNftInstaller14969) RemoveTransitBarrier() error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return g.inner.RemoveTransitBarrier()
+}
+
+// hostAuthNftInstaller14969 returns nftInstaller wrapped in the #15539
+// generation guard. Call sites that install/delete host-auth nft state
+// (the lo0 / host-inbound owners and their fence helpers) go through
+// this accessor so the re-check lands immediately before the netlink
+// transaction rather than only at owner entry.
+func hostAuthNftInstaller14969() xnft.Installer {
+	if nftInstaller == nil {
+		return nil
+	}
+	return guardedNftInstaller14969{inner: nftInstaller}
 }
 
 // Base-chain hook-input priorities for the two daemon-generated local-delivery
@@ -145,7 +286,7 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 		// error here is a REAL teardown failure that left a stale lo0 input filter in
 		// the kernel: surface it so the commit fails closed rather than reporting that
 		// the lo0 filter was removed when it was not (#6387 PR-3: via netlink).
-		if err := nftInstaller.DeleteTable(xnft.Lo0TableName); err != nil {
+		if err := hostAuthNftInstaller14969().DeleteTable(xnft.Lo0TableName); err != nil {
 			// Teardown FAILED: a stale xpf_lo0 table (real filter OR a prior fence)
 			// may still be installed. Surface the failure (fail closed) and do NOT
 			// clear lo0Enforced — if a real filter was the live table it may
@@ -238,7 +379,7 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 	// CI). An unrepresentable port/DSCP token fails the build CLOSED (the installer
 	// returns an error and installs nothing), mirroring the oracle's nft rejection.
 	spec := toNftLo0Spec(cfg, filterV4, filterV6)
-	rules, err := nftInstaller.InstallLo0(spec)
+	rules, err := hostAuthNftInstaller14969().InstallLo0(spec)
 	if err != nil {
 		err = tagNftInstallErr(err)
 		slog.Warn("failed to apply lo0 filter", "err", err)
@@ -435,7 +576,7 @@ func (d *Daemon) installLo0ColdBootFence(sets dpuserspace.FenceAddrSets, wgZoneP
 		DHCPv6Admit:          sets.AdmitV6,
 		DHCPv6AdmitVRFSlaves: sets.AdmitVRFSlavesV6,
 	}
-	if err := nftInstaller.InstallLo0ColdBootFence(spec); err != nil {
+	if err := hostAuthNftInstaller14969().InstallLo0ColdBootFence(spec); err != nil {
 		err = tagNftInstallErr(err)
 		slog.Error("COLD-BOOT FAIL-OPEN GUARD: lo0 install failed AND the fail-closed "+
 			"fence could not be installed; host-bound services may be reachable without "+
@@ -747,7 +888,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				return fmt.Errorf("%w; preserving host-inbound tables", err)
 			}
 		}
-		if err := nftInstaller.DeleteTable(xnft.HostInboundTableName); err != nil {
+		if err := hostAuthNftInstaller14969().DeleteTable(xnft.HostInboundTableName); err != nil {
 			// Teardown FAILED: a stale xpf_hostinbound table may still be installed
 			// in the kernel. Surface the failure (fail closed) and — critically — do
 			// NOT clear hostInboundEnforced: the flag's meaning ("a real load or
@@ -764,13 +905,13 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		// the main teardown failure above: a table the delete could not remove may
 		// still be installed, so KEEP the coverage/enforced state and surface the
 		// error (fail closed) rather than clearing state over a live gap table.
-		if err := nftInstaller.DeleteTable(xnft.HostInboundGapTableName); err != nil {
+		if err := hostAuthNftInstaller14969().DeleteTable(xnft.HostInboundGapTableName); err != nil {
 			err = tagNftInstallErr(err)
 			slog.Warn("failed to delete stale host-inbound gap fence table", "err", err)
 			return fmt.Errorf("delete stale host-inbound gap fence nftables table: %w", err)
 		}
 		d.hostInboundGapFenceSpec = nil
-		if err := nftInstaller.DeleteTable(xnft.HostInboundPreActivationTableName); err != nil {
+		if err := hostAuthNftInstaller14969().DeleteTable(xnft.HostInboundPreActivationTableName); err != nil {
 			err = tagNftInstallErr(err)
 			slog.Warn("failed to delete stale host-inbound preactivation fence table", "err", err)
 			return fmt.Errorf("delete stale host-inbound preactivation fence nftables table: %w", err)
@@ -906,7 +1047,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	spec.UnleasedV4, spec.UnleasedV6 = unleasedV4, unleasedV6
 	spec.UnleasedVRFSlavesV4, spec.UnleasedVRFSlavesV6 = dhcpBackstops.VRFSlavesV4, dhcpBackstops.VRFSlavesV6
 	spec.DHCPv6Admit, spec.DHCPv6AdmitVRFSlaves = dhcpBackstops.AdmitV6, dhcpBackstops.AdmitVRFSlavesV6
-	if err := nftInstaller.InstallHostInbound(spec); err != nil {
+	if err := hostAuthNftInstaller14969().InstallHostInbound(spec); err != nil {
 		err = tagNftInstallErr(err)
 		slog.Warn("failed to apply host-inbound filter", "err", err)
 		// #5644 (M37) cold-boot fail-closed fence. The atomic `-f -` load leaves
@@ -1085,7 +1226,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// ownership for `ensure` (best-effort; absence only makes it install).
 	noteHostInboundInstalled()
 	if overlay != nil {
-		if verifyErr := nftInstaller.VerifyHostInboundOverlay(*overlay); verifyErr != nil {
+		if verifyErr := hostAuthNftInstaller14969().VerifyHostInboundOverlay(*overlay); verifyErr != nil {
 			verifyErr = tagNftInstallErr(verifyErr)
 			d.noteHostInboundApplyFailed(time.Now())
 			return fmt.Errorf("verify host-input fence overlay: %w", verifyErr)
@@ -1115,7 +1256,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// lingering fence only over-denies); the next successful real install
 	// retries the delete and clears the marker.
 	gapFenceRetained := false
-	if err := nftInstaller.DeleteTable(xnft.HostInboundGapTableName); err != nil {
+	if err := hostAuthNftInstaller14969().DeleteTable(xnft.HostInboundGapTableName); err != nil {
 		slog.Warn("failed to delete obsolete host-inbound gap fence after successful real install",
 			"err", err)
 		gapFenceRetained = true
@@ -1123,7 +1264,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		d.hostInboundGapFenceSpec = nil
 	}
 	preActivationFenceRetained := false
-	if err := nftInstaller.DeleteTable(xnft.HostInboundPreActivationTableName); err != nil {
+	if err := hostAuthNftInstaller14969().DeleteTable(xnft.HostInboundPreActivationTableName); err != nil {
 		slog.Warn("failed to delete obsolete host-inbound preactivation fence after successful real install",
 			"err", err)
 		preActivationFenceRetained = true
@@ -1267,7 +1408,7 @@ func (d *Daemon) installHostInboundGapFence(spec xnft.GapFenceSpec) error {
 	}
 	// #6387 PR-3: install via netlink (parity-proven equivalent to the exec-`nft`
 	// buildHostInboundGapFencePayload oracle).
-	if err := nftInstaller.InstallGapFence(spec); err != nil {
+	if err := hostAuthNftInstaller14969().InstallGapFence(spec); err != nil {
 		err = tagNftInstallErr(err)
 		slog.Error("COVERAGE-GAP FAIL-OPEN GUARD: host-inbound real install failed AND the additive "+
 			"gap fence for newly-appeared local addresses could not be installed; those addresses "+
@@ -1394,7 +1535,7 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 		UnzonedIngressNetdevs:   sets.UnzonedIngressNetdevs,
 		UnzonedIngressVRFSlaves: sets.UnzonedIngressVRFSlaves,
 	}
-	if err := nftInstaller.InstallColdBootFence(spec); err != nil {
+	if err := hostAuthNftInstaller14969().InstallColdBootFence(spec); err != nil {
 		err = tagNftInstallErr(err)
 		slog.Error("COLD-BOOT FAIL-OPEN GUARD: host-inbound install failed AND the fail-closed "+
 			"fence could not be installed; host-bound services may be reachable without "+

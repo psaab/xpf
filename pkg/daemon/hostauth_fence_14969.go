@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
 	"strconv"
 	"sync"
+
+	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
 // hostauth_fence_14969.go — #14969: generation fence for abandoned
-// host-auth closeout owners.
+// host-auth closeout owners; #15539 extends it to every direct
+// write/install seam (the #15219 residual).
 //
 // runHostAuthCloseoutOwners abandons an owner goroutine when the shared
 // budget expires. Since #14356 that abandonment also happens on LIVE
@@ -31,11 +35,18 @@ import (
 //   - The closeout runner runs each owner under its launch generation
 //     (runWithHostAuthGeneration14969), published for the calling
 //     goroutine in the cell below.
-//   - Every host-mutation seam the owners reach — the nft installer
-//     (nftInstallerGuard14969), the credential/sshd exec seam
-//     (runCommandTimeout / runCommandStdinTimeout), and the sshd
-//     drop-in write/remove seams — re-checks the calling goroutine's
-//     captured generation. Once a newer authority has advanced the
+//   - Every host-mutation seam the owners reach re-checks the calling
+//     goroutine's captured generation IMMEDIATELY before the mutation
+//     (not only at owner entry — #15539): the nft installer guard
+//     (guardedNftInstaller14969 wraps nftInstaller in daemon_nft.go),
+//     the exec seam (runCommandTimeout / runCommandStdinTimeout, via
+//     runWithHostAuthExec15539 which re-validates BOTH sides of the
+//     child spawn and kills a stale owner's in-flight command when a
+//     newer authority advances), and the direct filesystem seams in
+//     daemon_hostauth_apply.go / login_password.go (guardedWriteFile-
+//     Durable14969, guardedWriteFileAtomic14969, guardedRemove14969,
+//     the fenced provenance claim/forget helpers and the sshd drop-in
+//     write/remove seams). Once a newer authority has advanced the
 //     token, the stale seam returns errHostAuthStaleOwner14969 WITHOUT
 //     performing the syscall, and the owner abstains (its closeout
 //     outcome is already the fail-visible timed-out error).
@@ -127,4 +138,86 @@ func checkHostAuthSeam14969() error {
 		return fmt.Errorf("%w", errHostAuthStaleOwner14969)
 	}
 	return nil
+}
+
+// --- #15539: direct write/install seam guards ---------------------------
+//
+// The owner-entry checks alone left every direct write below them
+// unfenced: a stale owner already inside applySystemLogin /
+// reconcileSudoers / applySSHConfig / applyRootAuth (or inside an nft
+// owner, or reconcileAbsentLoginUsers, which had NO entry check) could
+// pass its entry, be superseded mid-owner, and still be the last writer
+// of authorized_keys, a sudoers grant, the sshd drop-in, root's keys, a
+// provenance marker, or an nft table. Each helper below re-checks the
+// calling goroutine's generation IMMEDIATELY before its syscall, so a
+// superseded owner abstains at the write itself. Uncaptured goroutines
+// (the normal tail, direct reconciler tests) are never refused — the
+// helpers are byte-identical to the raw calls for them.
+
+// guardedWriteFileDurable14969 is fsatomic.WriteFileDurable fenced at
+// the write: a superseded owner never creates/replaces the file.
+func guardedWriteFileDurable14969(path string, data []byte, perm os.FileMode, opts ...fsatomic.Option) error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return fsatomic.WriteFileDurable(path, data, perm, opts...)
+}
+
+// guardedWriteFileAtomic14969 is fsatomic.WriteFileAtomic fenced at the
+// write (the sshd drop-in install/revert seam default).
+func guardedWriteFileAtomic14969(path string, data []byte, perm os.FileMode, opts ...fsatomic.Option) error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return fsatomic.WriteFileAtomic(path, data, perm, opts...)
+}
+
+// guardedRemove14969 is os.Remove fenced at the unlink: a superseded
+// owner never removes a file (keys, sudoers grant, sshd drop-in,
+// provenance marker) a newer authority may have just (re)written.
+func guardedRemove14969(path string) error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return os.Remove(path)
+}
+
+// guardedMkdirAllDurable14969 is fsatomic.MkdirAllDurable fenced at the
+// call (authorized_keys / root .ssh directory creation).
+func guardedMkdirAllDurable14969(path string, perm os.FileMode) error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return fsatomic.MkdirAllDurable(path, perm)
+}
+
+// claimOwnershipFenced14969 is claimOwnership with the generation
+// re-checked immediately before the marker write: a superseded owner
+// must not (re)claim provenance for a credential it is about to be
+// refused from writing, and must not resurrect a marker a newer
+// authority's revocation already dropped.
+func claimOwnershipFenced14969(dir, name string, uid int) (ownershipClaim, error) {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return ownershipClaim{}, err
+	}
+	return claimOwnership(dir, name, uid)
+}
+
+// forgetProvenanceFenced14969 is forgetProvenance fenced at the marker
+// removals: a superseded owner's forget must not drop the provenance a
+// newer authority relies on to revoke the account it just re-created.
+func forgetProvenanceFenced14969(name string) error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return forgetProvenance(name)
+}
+
+// removeProvenanceMarkerFenced14969 is removeProvenanceMarker fenced at
+// the unlink, for the direct revocation call sites.
+func removeProvenanceMarkerFenced14969(dir, name string) error {
+	if err := checkHostAuthSeam14969(); err != nil {
+		return err
+	}
+	return removeProvenanceMarker(dir, name)
 }

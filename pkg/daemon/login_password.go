@@ -642,7 +642,7 @@ func removeManagedAuthorizedKeys(name string) error {
 	if err := checkSSHPathNotSymlink(keysFile); err != nil {
 		return err
 	}
-	return os.Remove(keysFile)
+	return guardedRemove14969(keysFile)
 }
 
 // reconcileAbsentLoginUsers revokes the host credentials of every
@@ -668,6 +668,13 @@ func removeManagedAuthorizedKeys(name string) error {
 // password and authorized_keys are still live is the exact failure this
 // reconciler exists to prevent, and nothing retries before the next boot.
 func (d *Daemon) reconcileAbsentLoginUsers(cfg *config.Config) (retErr error) {
+	// #15539: superseded abandoned owner abstains at entry — this owner
+	// previously had NO fence at all — and every direct revocation below
+	// (removeManagedAuthorizedKeys, the provenance forget/marker
+	// removals) re-checks at its own seam via the guarded helpers.
+	if seamErr := checkHostAuthSeam14969(); seamErr != nil {
+		return seamErr
+	}
 	// #6798: an unreadable inventory root is NOT "nothing provisioned". The
 	// previous form collapsed both into len(names)==0 and returned nil —
 	// SUCCESS — so a removed operator kept their password and authorized_keys
@@ -785,7 +792,7 @@ func (d *Daemon) deprovisionLoginUser(name string) (retErr error) {
 			}
 			return retErr
 		}
-		_ = forgetProvenance(name)
+		_ = forgetProvenanceFenced14969(name)
 		if _, stillDesired := d.liveDesiredLoginUser12169(name); stillDesired {
 			staleRevocationSuperseded12169("restore-user-after-marker-cleanup", name)
 			if err := restoreLiveLogin(); err != nil {
@@ -965,7 +972,7 @@ func (d *Daemon) deprovisionLoginUser(name string) (retErr error) {
 					return
 				}
 				liveUser, liveDesired = d.liveDesiredLoginUser12169(name)
-			} else if err := removeProvenanceMarker(provisionedKeysDir(), name); err != nil {
+			} else if err := removeProvenanceMarkerFenced14969(provisionedKeysDir(), name); err != nil {
 				fail(err)
 				return
 			}
@@ -997,7 +1004,7 @@ func (d *Daemon) deprovisionLoginUser(name string) (retErr error) {
 			case !foundShell:
 				// Account vanished; shell grant gone with it.
 			case currentShell == loginShellNologin:
-				if err := removeProvenanceMarker(provisionedShellsDir(), name); err != nil {
+				if err := removeProvenanceMarkerFenced14969(provisionedShellsDir(), name); err != nil {
 					fail(err)
 					return retErr
 				}
@@ -1016,7 +1023,7 @@ func (d *Daemon) deprovisionLoginUser(name string) (retErr error) {
 						return retErr
 					}
 					liveUser, liveDesired = d.liveDesiredLoginUser12169(name)
-				} else if err := removeProvenanceMarker(provisionedShellsDir(), name); err != nil {
+				} else if err := removeProvenanceMarkerFenced14969(provisionedShellsDir(), name); err != nil {
 					fail(err)
 					return retErr
 				}
@@ -1039,7 +1046,7 @@ func (d *Daemon) deprovisionLoginUser(name string) (retErr error) {
 	// Fully revoked — drop every provenance marker so xpf no longer manages
 	// this account. If the same user is later re-added, applySystemLogin
 	// recreates it and re-records the markers.
-	fail(forgetProvenance(name))
+	fail(forgetProvenanceFenced14969(name))
 	if _, stillDesired := d.liveDesiredLoginUser12169(name); stillDesired {
 		staleRevocationSuperseded12169("restore-user-after-marker-cleanup", name)
 		if err := restoreLiveLogin(); err != nil {
