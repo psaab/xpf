@@ -22,43 +22,33 @@ func (c *xpfCollector) emitFairnessRSSGauges(ch chan<- prometheus.Metric, status
 	if status.CoSActiveFlowCountsTruncated {
 		truncated = 1.0
 	}
-	ch <- prometheus.MustNewConstMetric(
-		c.fairnessCoSCountsTruncated,
+	c.emitConstMetric(ch, c.fairnessCoSCountsTruncated,
 		prometheus.GaugeValue,
-		truncated,
-	)
+		truncated)
 
 	for _, row := range dpuserspace.CoSFairnessRSSSummaries(status) {
 		ifindexLabel := strconv.Itoa(row.Ifindex)
 		queueLabel := strconv.FormatUint(uint64(row.QueueID), 10)
-		ch <- prometheus.MustNewConstMetric(
-			c.fairnessCstruct,
+		c.emitConstMetric(ch, c.fairnessCstruct,
 			prometheus.GaugeValue,
 			row.Cstruct,
 			ifindexLabel,
-			queueLabel,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.fairnessActiveWorkers,
+			queueLabel)
+		c.emitConstMetric(ch, c.fairnessActiveWorkers,
 			prometheus.GaugeValue,
 			float64(row.ActiveWorkers),
 			ifindexLabel,
-			queueLabel,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.fairnessActiveFlows,
+			queueLabel)
+		c.emitConstMetric(ch, c.fairnessActiveFlows,
 			prometheus.GaugeValue,
 			float64(row.ActiveFlows),
 			ifindexLabel,
-			queueLabel,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.fairnessMaxWorkerFlowShare,
+			queueLabel)
+		c.emitConstMetric(ch, c.fairnessMaxWorkerFlowShare,
 			prometheus.GaugeValue,
 			row.MaxWorkerFlowShare,
 			ifindexLabel,
-			queueLabel,
-		)
+			queueLabel)
 	}
 	c.emitFairnessRSSExpectationGauges(ch, status, c.configuredFairnessRSSExpectations())
 }
@@ -89,23 +79,19 @@ func (c *xpfCollector) emitFairnessRSSExpectationGauges(
 		}
 		ifindexLabel := strconv.Itoa(result.Ifindex)
 		queueLabel := strconv.FormatUint(uint64(result.QueueID), 10)
-		ch <- prometheus.MustNewConstMetric(
-			c.fairnessRSSExpectation,
+		c.emitConstMetric(ch, c.fairnessRSSExpectation,
 			prometheus.GaugeValue,
 			1,
 			ifindexLabel,
 			queueLabel,
-			result.ExpectationKind,
-		)
+			result.ExpectationKind)
 		if result.HasExpectationValue {
-			ch <- prometheus.MustNewConstMetric(
-				c.fairnessRSSExpectationValue,
+			c.emitConstMetric(ch, c.fairnessRSSExpectationValue,
 				prometheus.GaugeValue,
 				result.ExpectationValue,
 				ifindexLabel,
 				queueLabel,
-				result.ExpectationKind,
-			)
+				result.ExpectationKind)
 		}
 		// #9369: an indeterminate expectation (truncated snapshot) emits NO
 		// violation sample. A 0 would read as a clean fairness board and a 1 as
@@ -115,14 +101,12 @@ func (c *xpfCollector) emitFairnessRSSExpectationGauges(
 		if result.Indeterminate {
 			indeterminate = 1
 		}
-		ch <- prometheus.MustNewConstMetric(
-			c.fairnessRSSIndeterminate,
+		c.emitConstMetric(ch, c.fairnessRSSIndeterminate,
 			prometheus.GaugeValue,
 			indeterminate,
 			ifindexLabel,
 			queueLabel,
-			result.ExpectationKind,
-		)
+			result.ExpectationKind)
 		if result.Indeterminate {
 			continue
 		}
@@ -130,14 +114,12 @@ func (c *xpfCollector) emitFairnessRSSExpectationGauges(
 		if result.Pass {
 			violation = 0
 		}
-		ch <- prometheus.MustNewConstMetric(
-			c.fairnessRSSSkewViolation,
+		c.emitConstMetric(ch, c.fairnessRSSSkewViolation,
 			prometheus.GaugeValue,
 			violation,
 			ifindexLabel,
 			queueLabel,
-			result.ExpectationKind,
-		)
+			result.ExpectationKind)
 	}
 }
 
@@ -159,27 +141,21 @@ func (c *xpfCollector) emitFairnessThroughputGauges(ch chan<- prometheus.Metric,
 		if row.Saturated {
 			saturated = 1
 		}
-		ch <- prometheus.MustNewConstMetric(
-			c.fairnessSaturated,
+		c.emitConstMetric(ch, c.fairnessSaturated,
 			prometheus.GaugeValue,
 			saturated,
 			ifindexLabel,
-			queueLabel,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.fairnessObservedCoV,
+			queueLabel)
+		c.emitConstMetric(ch, c.fairnessObservedCoV,
 			prometheus.GaugeValue,
 			row.ObservedCoV,
 			ifindexLabel,
-			queueLabel,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.fairnessStarvedFlows,
+			queueLabel)
+		c.emitConstMetric(ch, c.fairnessStarvedFlows,
 			prometheus.CounterValue,
 			float64(row.StarvedFlowsTotal),
 			ifindexLabel,
-			queueLabel,
-		)
+			queueLabel)
 		c.emitFairnessEqualFlowEstimateGauges(ch, row, ifindexLabel, queueLabel)
 	}
 }
@@ -198,98 +174,74 @@ func (c *xpfCollector) emitFairnessEqualFlowEstimateGauges(
 	if estimate.Valid {
 		valid = 1
 	}
-	ch <- prometheus.MustNewConstMetric(
-		c.fairnessEqualFlowEstimateValid,
+	c.emitConstMetric(ch, c.fairnessEqualFlowEstimateValid,
 		prometheus.GaugeValue,
 		valid,
 		ifindexLabel,
-		queueLabel,
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.fairnessEqualFlowSampledActiveWorkers,
+		queueLabel)
+	c.emitConstMetric(ch, c.fairnessEqualFlowSampledActiveWorkers,
 		prometheus.GaugeValue,
 		float64(estimate.SampledActiveWorkers),
 		ifindexLabel,
-		queueLabel,
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.fairnessEqualFlowUnsampledActiveWorkers,
+		queueLabel)
+	c.emitConstMetric(ch, c.fairnessEqualFlowUnsampledActiveWorkers,
 		prometheus.GaugeValue,
 		float64(estimate.UnsampledActiveWorkers),
 		ifindexLabel,
-		queueLabel,
-	)
+		queueLabel)
 	if !estimate.Valid {
 		return
 	}
-	ch <- prometheus.MustNewConstMetric(
-		c.fairnessEqualFlowTargetPerFlowBPS,
+	c.emitConstMetric(ch, c.fairnessEqualFlowTargetPerFlowBPS,
 		prometheus.GaugeValue,
 		estimate.TargetPerFlowBPS,
 		ifindexLabel,
-		queueLabel,
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.fairnessEqualFlowObservedBPS,
+		queueLabel)
+	c.emitConstMetric(ch, c.fairnessEqualFlowObservedBPS,
 		prometheus.GaugeValue,
 		estimate.ObservedBPS,
 		ifindexLabel,
-		queueLabel,
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.fairnessEqualFlowCappedBPS,
+		queueLabel)
+	c.emitConstMetric(ch, c.fairnessEqualFlowCappedBPS,
 		prometheus.GaugeValue,
 		estimate.CappedBPS,
 		ifindexLabel,
-		queueLabel,
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.fairnessEqualFlowSuppressedBPS,
+		queueLabel)
+	c.emitConstMetric(ch, c.fairnessEqualFlowSuppressedBPS,
 		prometheus.GaugeValue,
 		estimate.SuppressedBPS,
 		ifindexLabel,
-		queueLabel,
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.fairnessEqualFlowThroughputLossRatio,
+		queueLabel)
+	c.emitConstMetric(ch, c.fairnessEqualFlowThroughputLossRatio,
 		prometheus.GaugeValue,
 		estimate.ThroughputLossRatio,
 		ifindexLabel,
-		queueLabel,
-	)
+		queueLabel)
 	for _, worker := range estimate.Workers {
 		workerLabel := strconv.FormatUint(uint64(worker.WorkerID), 10)
-		ch <- prometheus.MustNewConstMetric(
-			c.fairnessEqualFlowWorkerObservedBPS,
+		c.emitConstMetric(ch, c.fairnessEqualFlowWorkerObservedBPS,
 			prometheus.GaugeValue,
 			worker.ObservedBPS,
 			ifindexLabel,
 			queueLabel,
-			workerLabel,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.fairnessEqualFlowWorkerObservedPerFlowBPS,
+			workerLabel)
+		c.emitConstMetric(ch, c.fairnessEqualFlowWorkerObservedPerFlowBPS,
 			prometheus.GaugeValue,
 			worker.ObservedPerFlow,
 			ifindexLabel,
 			queueLabel,
-			workerLabel,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.fairnessEqualFlowWorkerCapBPS,
+			workerLabel)
+		c.emitConstMetric(ch, c.fairnessEqualFlowWorkerCapBPS,
 			prometheus.GaugeValue,
 			worker.CapBPS,
 			ifindexLabel,
 			queueLabel,
-			workerLabel,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.fairnessEqualFlowWorkerSuppressedBPS,
+			workerLabel)
+		c.emitConstMetric(ch, c.fairnessEqualFlowWorkerSuppressedBPS,
 			prometheus.GaugeValue,
 			worker.SuppressedBPS,
 			ifindexLabel,
 			queueLabel,
-			workerLabel,
-		)
+			workerLabel)
 	}
 }

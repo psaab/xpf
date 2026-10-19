@@ -37,15 +37,15 @@ func (c *xpfCollector) emitDataplaneSafety(ch chan<- prometheus.Metric) {
 	if !ok {
 		return
 	}
-	ch <- prometheus.MustNewConstMetric(c.dataplaneObsoleteRegistryAccesses, prometheus.CounterValue, float64(m.ObsoleteRegistryAccesses()))
-	ch <- prometheus.MustNewConstMetric(c.dataplaneXDPDetachDebtInterfaces, prometheus.GaugeValue, float64(len(m.DetachDebt())))
-	ch <- prometheus.MustNewConstMetric(c.dataplaneHostDivergenceMutations, prometheus.GaugeValue, float64(len(m.HostDivergence())))
+	c.emitConstMetric(ch, c.dataplaneObsoleteRegistryAccesses, prometheus.CounterValue, float64(m.ObsoleteRegistryAccesses()))
+	c.emitConstMetric(ch, c.dataplaneXDPDetachDebtInterfaces, prometheus.GaugeValue, float64(len(m.DetachDebt())))
+	c.emitConstMetric(ch, c.dataplaneHostDivergenceMutations, prometheus.GaugeValue, float64(len(m.HostDivergence())))
 	report, seen := m.ArmCoverageSnapshot()
 	if !seen || !report.Ran {
 		return
 	}
-	ch <- prometheus.MustNewConstMetric(c.dataplaneArmUncoveredSurfaces, prometheus.GaugeValue, float64(report.Uncovered))
-	ch <- prometheus.MustNewConstMetric(c.dataplaneArmTotalSurfaces, prometheus.GaugeValue, float64(len(report.Surfaces)))
+	c.emitConstMetric(ch, c.dataplaneArmUncoveredSurfaces, prometheus.GaugeValue, float64(report.Uncovered))
+	c.emitConstMetric(ch, c.dataplaneArmTotalSurfaces, prometheus.GaugeValue, float64(len(report.Surfaces)))
 	var driver, generic, skipped float64
 	for _, surface := range report.Surfaces {
 		switch surface.Kind {
@@ -63,6 +63,6 @@ func (c *xpfCollector) emitDataplaneSafety(ch chan<- prometheus.Metric) {
 		mode  string
 		value float64
 	}{{"driver", driver}, {"generic", generic}, {"skipped", skipped}} {
-		ch <- prometheus.MustNewConstMetric(c.dataplaneXDPAttachModeSurfaces, prometheus.GaugeValue, sample.value, sample.mode)
+		c.emitConstMetric(ch, c.dataplaneXDPAttachModeSurfaces, prometheus.GaugeValue, sample.value, sample.mode)
 	}
 }

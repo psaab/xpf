@@ -30,6 +30,6 @@ func (c *xpfCollector) emitZoneCounterOverflow(ch chan<- prometheus.Metric, stat
 	if status.ZoneCounterOverflowActive {
 		v = 1
 	}
-	ch <- prometheus.MustNewConstMetric(c.zoneCountersOverflowActive,
+	c.emitConstMetric(ch, c.zoneCountersOverflowActive,
 		prometheus.GaugeValue, v)
 }

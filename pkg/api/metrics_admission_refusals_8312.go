@@ -61,7 +61,7 @@ func (c *xpfCollector) emitAdmissionRefusals(ch chan<- prometheus.Metric) {
 		if l.Limiter == nil {
 			continue
 		}
-		ch <- prometheus.MustNewConstMetric(c.admissionRefusalsTotal,
+		c.emitConstMetric(ch, c.admissionRefusalsTotal,
 			prometheus.CounterValue, float64(l.Limiter.Refusals()), l.Name)
 	}
 }

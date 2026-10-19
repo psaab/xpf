@@ -14,6 +14,6 @@ func (c *xpfCollector) describeFabricStreamArgsUnbound(ch chan<- *prometheus.Des
 }
 
 func (c *xpfCollector) emitFabricStreamArgsUnbound(ch chan<- prometheus.Metric) {
-	ch <- prometheus.MustNewConstMetric(c.fabricStreamArgsUnboundTotal,
+	c.emitConstMetric(ch, c.fabricStreamArgsUnboundTotal,
 		prometheus.CounterValue, float64(grpcapi.FabricStreamArgsUnboundTotal()))
 }

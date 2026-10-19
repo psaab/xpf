@@ -29,13 +29,13 @@ func TestUserspaceScreenStateMetricsAggregateWorkerTransportSlots(t *testing.T) 
 	close(ch)
 
 	want := map[string]float64{
-		"xpf_userspace_screen_substituted_default_drops_total": 31,
-		"xpf_userspace_screen_syn_flood_dst_drops_total":        34,
-		"xpf_userspace_screen_syn_flood_src_drops_total":        42,
-		"xpf_userspace_screen_syn_flood_alarm_events_total":     48,
-		"xpf_userspace_screen_alarm_without_drop_events_total":  54,
-		"xpf_userspace_screen_profile_warns_total|missing":      60,
-		"xpf_userspace_screen_profile_warns_total|inert":        70,
+		"xpf_userspace_screen_substituted_default_drops_total":       31,
+		"xpf_userspace_screen_syn_flood_dst_drops_total":             34,
+		"xpf_userspace_screen_syn_flood_src_drops_total":             42,
+		"xpf_userspace_screen_syn_flood_alarm_events_total":          48,
+		"xpf_userspace_screen_alarm_without_drop_events_total":       54,
+		"xpf_userspace_screen_profile_warns_total|missing":           60,
+		"xpf_userspace_screen_profile_warns_total|inert":             70,
 		"xpf_userspace_screen_tracker_pressure_events_total|skipped": 78,
 		"xpf_userspace_screen_tracker_pressure_events_total|evicted": 84,
 	}
@@ -55,7 +55,7 @@ func TestUserspaceScreenStateMetricsAggregateWorkerTransportSlots(t *testing.T) 
 				labels := sample.GetLabel()
 				if len(labels) != 1 || labels[0].GetValue() != labelValue {
 					continue
-			}
+				}
 			}
 			if _, duplicate := got[key]; duplicate {
 				t.Fatalf("duplicate metric sample %q", key)

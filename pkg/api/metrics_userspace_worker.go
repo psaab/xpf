@@ -18,23 +18,23 @@ func (c *xpfCollector) emitWorkerRuntime(ch chan<- prometheus.Metric, status dpu
 	for _, w := range status.WorkerRuntime {
 		label := strconv.FormatUint(uint64(w.WorkerID), 10)
 		toSecs := func(ns uint64) float64 { return float64(ns) / 1e9 }
-		ch <- prometheus.MustNewConstMetric(c.workerWallSecs,
+		c.emitConstMetric(ch, c.workerWallSecs,
 			prometheus.CounterValue, toSecs(w.WallNS), label)
-		ch <- prometheus.MustNewConstMetric(c.workerActiveSecs,
+		c.emitConstMetric(ch, c.workerActiveSecs,
 			prometheus.CounterValue, toSecs(w.ActiveNS), label)
-		ch <- prometheus.MustNewConstMetric(c.workerIdleSpinSecs,
+		c.emitConstMetric(ch, c.workerIdleSpinSecs,
 			prometheus.CounterValue, toSecs(w.IdleSpinNS), label)
-		ch <- prometheus.MustNewConstMetric(c.workerIdleBlockSecs,
+		c.emitConstMetric(ch, c.workerIdleBlockSecs,
 			prometheus.CounterValue, toSecs(w.IdleBlockNS), label)
-		ch <- prometheus.MustNewConstMetric(c.workerThreadCPUSecs,
+		c.emitConstMetric(ch, c.workerThreadCPUSecs,
 			prometheus.CounterValue, toSecs(w.ThreadCPUNS), label)
-		ch <- prometheus.MustNewConstMetric(c.workerThreadCPUSecsLast60s,
+		c.emitConstMetric(ch, c.workerThreadCPUSecsLast60s,
 			prometheus.GaugeValue, toSecs(w.ThreadCPUNS60s), label)
-		ch <- prometheus.MustNewConstMetric(c.workerThreadCPUWindowSecs,
+		c.emitConstMetric(ch, c.workerThreadCPUWindowSecs,
 			prometheus.GaugeValue, toSecs(w.WindowNS), label)
-		ch <- prometheus.MustNewConstMetric(c.workerWorkLoops,
+		c.emitConstMetric(ch, c.workerWorkLoops,
 			prometheus.CounterValue, float64(w.WorkLoops), label)
-		ch <- prometheus.MustNewConstMetric(c.workerIdleLoops,
+		c.emitConstMetric(ch, c.workerIdleLoops,
 			prometheus.CounterValue, float64(w.IdleLoops), label)
 		// #7919: emitted ONLY when the helper reported it. An old helper omits
 		// the wire key, and a 0-valued series here would be read as "this worker
@@ -43,12 +43,12 @@ func (c *xpfCollector) emitWorkerRuntime(ch chan<- prometheus.Metric, status dpu
 		// helper emits for a genuine never-observed 0, since both mean the same
 		// thing: no positive evidence of volume.
 		if w.SessionVolumeHighWater != nil {
-			ch <- prometheus.MustNewConstMetric(c.workerSessionVolumeHighWater,
+			c.emitConstMetric(ch, c.workerSessionVolumeHighWater,
 				prometheus.GaugeValue, float64(*w.SessionVolumeHighWater), label)
 		}
-		ch <- prometheus.MustNewConstMetric(c.workerCoSQueueLeaseAcquireV8Calls,
+		c.emitConstMetric(ch, c.workerCoSQueueLeaseAcquireV8Calls,
 			prometheus.CounterValue, float64(w.CoSQueueLeaseAcquireV8Calls), label)
-		ch <- prometheus.MustNewConstMetric(c.workerCoSQueueLeaseAcquireV8GrantedBytes,
+		c.emitConstMetric(ch, c.workerCoSQueueLeaseAcquireV8GrantedBytes,
 			prometheus.CounterValue, float64(w.CoSQueueLeaseAcquireV8GrantedBytes), label)
 		// #1782 Step-1 cold-start CoS instruments. The wheel counters are
 		// emitted unconditionally (always-present series keep rate() and
@@ -56,9 +56,9 @@ func (c *xpfCollector) emitWorkerRuntime(ch chan<- prometheus.Metric, status dpu
 		// hence a gauge. The under-grant family emits all six causes per
 		// worker so a cause appearing for the first time has a zero
 		// baseline sample to rate() against.
-		ch <- prometheus.MustNewConstMetric(c.workerCoSWheelTicksAdvancedTotal,
+		c.emitConstMetric(ch, c.workerCoSWheelTicksAdvancedTotal,
 			prometheus.CounterValue, float64(w.CoSWheelTicksAdvancedTotal), label)
-		ch <- prometheus.MustNewConstMetric(c.workerCoSWheelTicksAdvancedMax,
+		c.emitConstMetric(ch, c.workerCoSWheelTicksAdvancedMax,
 			prometheus.GaugeValue, float64(w.CoSWheelTicksAdvancedMax), label)
 		for _, uc := range []struct {
 			cause string
@@ -71,39 +71,39 @@ func (c *xpfCollector) emitWorkerRuntime(ch chan<- prometheus.Metric, status dpu
 			{"class_cap", w.CoSQueueLeaseUndergrantClassCap},
 			{"outstanding_cap", w.CoSQueueLeaseUndergrantOutstandingCap},
 		} {
-			ch <- prometheus.MustNewConstMetric(c.workerCoSQueueLeaseUndergrant,
+			c.emitConstMetric(ch, c.workerCoSQueueLeaseUndergrant,
 				prometheus.CounterValue, float64(uc.value), label, uc.cause)
 		}
-		ch <- prometheus.MustNewConstMetric(c.workerSessionTableEntries,
+		c.emitConstMetric(ch, c.workerSessionTableEntries,
 			prometheus.GaugeValue, float64(w.SessionTableEntries), label)
-		ch <- prometheus.MustNewConstMetric(c.workerSessionTableCapacity,
+		c.emitConstMetric(ch, c.workerSessionTableCapacity,
 			prometheus.GaugeValue, float64(w.MaxSessions), label)
-		ch <- prometheus.MustNewConstMetric(c.workerNatReverseKeyCollisions,
+		c.emitConstMetric(ch, c.workerNatReverseKeyCollisions,
 			prometheus.CounterValue, float64(w.NatReverseKeyCollisions), label)
-		ch <- prometheus.MustNewConstMetric(c.workerNatReverseKeyCollisionsDistinctSrc,
+		c.emitConstMetric(ch, c.workerNatReverseKeyCollisionsDistinctSrc,
 			prometheus.CounterValue, float64(w.NatReverseKeyCollisionsDistinctSrc), label)
 		// #7919: by-key lookup misses, split by cause.
-		ch <- prometheus.MustNewConstMetric(c.workerSessionLookupMissNoHandle,
+		c.emitConstMetric(ch, c.workerSessionLookupMissNoHandle,
 			prometheus.CounterValue, float64(w.SessionLookupMissNoHandle), label)
-		ch <- prometheus.MustNewConstMetric(c.workerSessionLookupMissStaleHandle,
+		c.emitConstMetric(ch, c.workerSessionLookupMissStaleHandle,
 			prometheus.CounterValue, float64(w.SessionLookupMissStaleHandle), label)
-		ch <- prometheus.MustNewConstMetric(c.workerSessionLookupMissKeyMismatch,
+		c.emitConstMetric(ch, c.workerSessionLookupMissKeyMismatch,
 			prometheus.CounterValue, float64(w.SessionLookupMissKeyMismatch), label)
 		// #1861: per-worker install-refusal trio.
-		ch <- prometheus.MustNewConstMetric(c.workerSessionCreateDrops,
+		c.emitConstMetric(ch, c.workerSessionCreateDrops,
 			prometheus.CounterValue, float64(w.SessionCreateDrops), label)
-		ch <- prometheus.MustNewConstMetric(c.workerSessionInstallAdmissionRefused,
+		c.emitConstMetric(ch, c.workerSessionInstallAdmissionRefused,
 			prometheus.CounterValue, float64(w.SessionInstallAdmissionRefused), label)
-		ch <- prometheus.MustNewConstMetric(c.workerSessionInstallPartial,
+		c.emitConstMetric(ch, c.workerSessionInstallPartial,
 			prometheus.CounterValue, float64(w.SessionInstallPartial), label)
 		// #4800: per-worker transit new-flow installs — the skew signal.
-		ch <- prometheus.MustNewConstMetric(c.workerNewFlowInstalls,
+		c.emitConstMetric(ch, c.workerNewFlowInstalls,
 			prometheus.CounterValue, float64(w.NewFlowInstalls), label)
 		var deadValue float64
 		if w.Dead {
 			deadValue = 1
 		}
-		ch <- prometheus.MustNewConstMetric(c.workerDead,
+		c.emitConstMetric(ch, c.workerDead,
 			prometheus.GaugeValue, deadValue, label)
 		// #1621: cold-path histogram surface (#1612 step-3).
 		c.emitWorkerColdPath(ch, label, w)
@@ -138,10 +138,10 @@ func (c *xpfCollector) emitWorkerColdPath(
 		c.emitColdPathV1(ch, label, w)
 	case 3:
 		c.emitColdPathV3(ch, label, w)
-		ch <- prometheus.MustNewConstMetric(c.workerColdPathLayoutVersion,
+		c.emitConstMetric(ch, c.workerColdPathLayoutVersion,
 			prometheus.GaugeValue, 1.0, label, "3")
 	default:
-		ch <- prometheus.MustNewConstMetric(c.workerColdPathLayoutUnknownTotal,
+		c.emitConstMetric(ch, c.workerColdPathLayoutUnknownTotal,
 			prometheus.GaugeValue, 1.0, label,
 			strconv.FormatUint(uint64(w.ColdPathLayoutVersion), 10))
 	}
@@ -173,7 +173,7 @@ func (c *xpfCollector) emitColdPathV1(
 		var running uint64
 		for b := 0; b < len(w.ColdPathHist[slot]); b++ {
 			running += w.ColdPathHist[slot][b]
-			ch <- prometheus.MustNewConstMetric(c.workerColdPathBucket,
+			c.emitConstMetric(ch, c.workerColdPathBucket,
 				prometheus.CounterValue,
 				float64(running),
 				label, slotLabel, bucketLe(b))
@@ -181,10 +181,10 @@ func (c *xpfCollector) emitColdPathV1(
 	}
 	for slot, samples := range w.ColdPathSamples {
 		slotLabel := strconv.Itoa(slot)
-		ch <- prometheus.MustNewConstMetric(c.workerColdPathSamples,
+		c.emitConstMetric(ch, c.workerColdPathSamples,
 			prometheus.CounterValue, float64(samples), label, slotLabel)
 		if slot < len(w.ColdPathSumNS) {
-			ch <- prometheus.MustNewConstMetric(c.workerColdPathSumNS,
+			c.emitConstMetric(ch, c.workerColdPathSumNS,
 				prometheus.CounterValue,
 				float64(w.ColdPathSumNS[slot]),
 				label, slotLabel)
@@ -194,7 +194,7 @@ func (c *xpfCollector) emitColdPathV1(
 			if w.ColdPathAliasSeen[slot] {
 				alias = 1.0
 			}
-			ch <- prometheus.MustNewConstMetric(c.workerColdPathAliasSeen,
+			c.emitConstMetric(ch, c.workerColdPathAliasSeen,
 				prometheus.GaugeValue, alias, label, slotLabel)
 		}
 	}
@@ -221,16 +221,16 @@ func (c *xpfCollector) emitColdPathV3(
 			buckets := w.ColdPathActiveBuckets[i]
 			for b := 0; b < len(buckets); b++ {
 				running += buckets[b]
-				ch <- prometheus.MustNewConstMetric(c.workerColdPathBucketV3,
+				c.emitConstMetric(ch, c.workerColdPathBucketV3,
 					prometheus.CounterValue, float64(running),
 					label, fromZone, toZone, bucketLeV3(b))
 			}
 		}
-		ch <- prometheus.MustNewConstMetric(c.workerColdPathSamplesV3,
+		c.emitConstMetric(ch, c.workerColdPathSamplesV3,
 			prometheus.CounterValue, float64(w.ColdPathActiveSamples[i]),
 			label, fromZone, toZone)
 		if i < len(w.ColdPathActiveSumNS) {
-			ch <- prometheus.MustNewConstMetric(c.workerColdPathSumNSV3,
+			c.emitConstMetric(ch, c.workerColdPathSumNSV3,
 				prometheus.CounterValue, float64(w.ColdPathActiveSumNS[i]),
 				label, fromZone, toZone)
 		}
@@ -239,7 +239,7 @@ func (c *xpfCollector) emitColdPathV3(
 			if w.ColdPathActiveBuilderCollision[i] {
 				col = 1.0
 			}
-			ch <- prometheus.MustNewConstMetric(c.workerColdPathBuilderCollisionV3,
+			c.emitConstMetric(ch, c.workerColdPathBuilderCollisionV3,
 				prometheus.GaugeValue, col, label, fromZone, toZone)
 		}
 	}
@@ -247,7 +247,7 @@ func (c *xpfCollector) emitColdPathV3(
 	if w.ColdPathOverflowActive {
 		overflow = 1.0
 	}
-	ch <- prometheus.MustNewConstMetric(c.workerColdPathOverflowActive,
+	c.emitConstMetric(ch, c.workerColdPathOverflowActive,
 		prometheus.GaugeValue, overflow, label)
 }
 
@@ -259,16 +259,16 @@ func (c *xpfCollector) emitWorkerColdPathScalars(
 	w dpuserspace.WorkerRuntimeStatus,
 ) {
 	// Per-worker scalars.
-	ch <- prometheus.MustNewConstMetric(c.workerColdPathSamplePhase,
+	c.emitConstMetric(ch, c.workerColdPathSamplePhase,
 		prometheus.CounterValue,
 		float64(w.ColdPathSamplePhase), label)
-	ch <- prometheus.MustNewConstMetric(c.workerColdPathWrapperUnderflow,
+	c.emitConstMetric(ch, c.workerColdPathWrapperUnderflow,
 		prometheus.CounterValue,
 		float64(w.ColdPathWrapperUnderflowCount), label)
-	ch <- prometheus.MustNewConstMetric(c.workerColdPathWrapperNSBaseline,
+	c.emitConstMetric(ch, c.workerColdPathWrapperNSBaseline,
 		prometheus.GaugeValue,
 		float64(w.ColdPathWrapperNSBaseline), label)
-	ch <- prometheus.MustNewConstMetric(c.workerColdPathNSPerTSCQ32,
+	c.emitConstMetric(ch, c.workerColdPathNSPerTSCQ32,
 		prometheus.GaugeValue,
 		float64(w.ColdPathNSPerTSCQ32), label)
 	// clock_source gauge ALWAYS emitted (Claude SMR r1 F4): even
@@ -278,11 +278,11 @@ func (c *xpfCollector) emitWorkerColdPathScalars(
 	if src == "" {
 		src = "unset"
 	}
-	ch <- prometheus.MustNewConstMetric(c.workerColdPathClockSource,
+	c.emitConstMetric(ch, c.workerColdPathClockSource,
 		prometheus.GaugeValue, 1.0, label, src)
 	// snapshot_failed counter always emitted so operators can detect
 	// transient publish-contention starvation.
-	ch <- prometheus.MustNewConstMetric(c.workerColdPathSnapshotFailedTotal,
+	c.emitConstMetric(ch, c.workerColdPathSnapshotFailedTotal,
 		prometheus.CounterValue,
 		float64(w.ColdPathSnapshotFailed), label)
 }

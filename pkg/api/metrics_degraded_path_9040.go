@@ -40,7 +40,7 @@ func (c *xpfCollector) emitDegradedPathCounters(ch chan<- prometheus.Metric, sta
 		return
 	}
 	for reason, n := range statusPtr.DegradedPathCounters {
-		ch <- prometheus.MustNewConstMetric(c.degradedPathTotal,
+		c.emitConstMetric(ch, c.degradedPathTotal,
 			prometheus.CounterValue, float64(n), reason)
 	}
 }

@@ -25,13 +25,13 @@ func (c *xpfCollector) emitUserspaceScreenStateMetrics(ch chan<- prometheus.Metr
 		scanSweepSkippedPressure += b.ScreenScanSweepSkippedPressure
 		scanSweepEvictedPressure += b.ScreenScanSweepEvictedPressure
 	}
-	ch <- prometheus.MustNewConstMetric(c.userspaceScreenSubstitutedDefaultDrops, prometheus.CounterValue, float64(substitutedDefaultDrops))
-	ch <- prometheus.MustNewConstMetric(c.userspaceScreenSYNFloodDstDrops, prometheus.CounterValue, float64(synFloodDstDrops))
-	ch <- prometheus.MustNewConstMetric(c.userspaceScreenSYNFloodSrcDrops, prometheus.CounterValue, float64(synFloodSrcDrops))
-	ch <- prometheus.MustNewConstMetric(c.userspaceScreenSYNFloodAlarmEvents, prometheus.CounterValue, float64(synFloodAlarmEvents))
-	ch <- prometheus.MustNewConstMetric(c.userspaceScreenAlarmWithoutDropEvents, prometheus.CounterValue, float64(alarmWithoutDropEvents))
-	ch <- prometheus.MustNewConstMetric(c.userspaceScreenProfileWarns, prometheus.CounterValue, float64(missingProfileWarns), "missing")
-	ch <- prometheus.MustNewConstMetric(c.userspaceScreenProfileWarns, prometheus.CounterValue, float64(inertProfileWarns), "inert")
-	ch <- prometheus.MustNewConstMetric(c.userspaceScreenTrackerPressureEvents, prometheus.CounterValue, float64(scanSweepSkippedPressure), "skipped")
-	ch <- prometheus.MustNewConstMetric(c.userspaceScreenTrackerPressureEvents, prometheus.CounterValue, float64(scanSweepEvictedPressure), "evicted")
+	c.emitConstMetric(ch, c.userspaceScreenSubstitutedDefaultDrops, prometheus.CounterValue, float64(substitutedDefaultDrops))
+	c.emitConstMetric(ch, c.userspaceScreenSYNFloodDstDrops, prometheus.CounterValue, float64(synFloodDstDrops))
+	c.emitConstMetric(ch, c.userspaceScreenSYNFloodSrcDrops, prometheus.CounterValue, float64(synFloodSrcDrops))
+	c.emitConstMetric(ch, c.userspaceScreenSYNFloodAlarmEvents, prometheus.CounterValue, float64(synFloodAlarmEvents))
+	c.emitConstMetric(ch, c.userspaceScreenAlarmWithoutDropEvents, prometheus.CounterValue, float64(alarmWithoutDropEvents))
+	c.emitConstMetric(ch, c.userspaceScreenProfileWarns, prometheus.CounterValue, float64(missingProfileWarns), "missing")
+	c.emitConstMetric(ch, c.userspaceScreenProfileWarns, prometheus.CounterValue, float64(inertProfileWarns), "inert")
+	c.emitConstMetric(ch, c.userspaceScreenTrackerPressureEvents, prometheus.CounterValue, float64(scanSweepSkippedPressure), "skipped")
+	c.emitConstMetric(ch, c.userspaceScreenTrackerPressureEvents, prometheus.CounterValue, float64(scanSweepEvictedPressure), "evicted")
 }

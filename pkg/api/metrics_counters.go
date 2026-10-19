@@ -81,7 +81,7 @@ func (c *xpfCollector) collectHostInboundKernelDenies(ch chan<- prometheus.Metri
 		return
 	}
 	for _, ctr := range counts {
-		ch <- prometheus.MustNewConstMetric(c.hostInboundKernelDenies,
+		c.emitConstMetric(ch, c.hostInboundKernelDenies,
 			prometheus.CounterValue, float64(ctr.Packets), ctr.Zone, ctr.Family)
 	}
 }
@@ -106,7 +106,7 @@ func (c *xpfCollector) collectHostInboundJunosHostDenies(ch chan<- prometheus.Me
 		return
 	}
 	for _, ctr := range counts {
-		ch <- prometheus.MustNewConstMetric(c.hostInboundJunosHostDenies,
+		c.emitConstMetric(ch, c.hostInboundJunosHostDenies,
 			prometheus.CounterValue, float64(ctr.Packets), ctr.Scope, ctr.Family)
 	}
 }
@@ -132,7 +132,7 @@ func (c *xpfCollector) collectLo0Counters(ch chan<- prometheus.Metric) {
 		return
 	}
 	for _, ctr := range counts {
-		ch <- prometheus.MustNewConstMetric(c.lo0CounterHits,
+		c.emitConstMetric(ch, c.lo0CounterHits,
 			prometheus.CounterValue, float64(ctr.Packets), ctr.Counter)
 	}
 }
@@ -163,7 +163,7 @@ func (c *xpfCollector) collectHostInboundICMPNDAccepts(ch chan<- prometheus.Metr
 		return
 	}
 	for _, ctr := range counts {
-		ch <- prometheus.MustNewConstMetric(c.hostInboundICMPNDAccept,
+		c.emitConstMetric(ch, c.hostInboundICMPNDAccept,
 			prometheus.CounterValue, float64(ctr.Packets), ctr.Type)
 	}
 }
@@ -182,19 +182,19 @@ func (c *xpfCollector) collectPBRStatus(ch chan<- prometheus.Metric) {
 	desired := len(desiredRules)
 	// #7422 row 12: _installed and _desired are aliases emitted from this
 	// single build result, not separate computations.
-	ch <- prometheus.MustNewConstMetric(c.pbrRulesInstalled,
+	c.emitConstMetric(ch, c.pbrRulesInstalled,
 		prometheus.GaugeValue, float64(desired))
-	ch <- prometheus.MustNewConstMetric(c.pbrRulesDesired,
+	c.emitConstMetric(ch, c.pbrRulesDesired,
 		prometheus.GaugeValue, float64(desired))
 	// Band occupancy and the scoped structural mismatch are both omitted when
 	// either family readback fails. Never publish a partial or fabricated zero.
 	if applied, mismatched, ok := routing.PBRAppliedStatusLive(desiredRules); ok {
-		ch <- prometheus.MustNewConstMetric(c.pbrRulesApplied,
+		c.emitConstMetric(ch, c.pbrRulesApplied,
 			prometheus.GaugeValue, float64(applied))
-		ch <- prometheus.MustNewConstMetric(c.pbrRulesMismatched,
+		c.emitConstMetric(ch, c.pbrRulesMismatched,
 			prometheus.GaugeValue, float64(mismatched))
 	}
-	ch <- prometheus.MustNewConstMetric(c.pbrDegradedTerms,
+	c.emitConstMetric(ch, c.pbrDegradedTerms,
 		prometheus.GaugeValue, float64(degraded))
 }
 
@@ -246,7 +246,7 @@ func (c *xpfCollector) collectScreenUnresolvedProfileZones(ch chan<- prometheus.
 		return
 	}
 	for _, r := range dpuserspace.ScreenMissingProfileRefs(cfg) {
-		ch <- prometheus.MustNewConstMetric(c.screenUnresolvedProfileZones,
+		c.emitConstMetric(ch, c.screenUnresolvedProfileZones,
 			prometheus.GaugeValue, 1, r.Zone, r.Profile)
 	}
 }
@@ -280,7 +280,7 @@ func (c *xpfCollector) collectScreenInertProfileZones(ch chan<- prometheus.Metri
 		return
 	}
 	for _, r := range dpuserspace.ScreenInertProfileRefs(cfg) {
-		ch <- prometheus.MustNewConstMetric(c.screenInertProfileZones,
+		c.emitConstMetric(ch, c.screenInertProfileZones,
 			prometheus.GaugeValue, 1, r.Zone, r.Profile)
 	}
 }
@@ -311,7 +311,7 @@ func (c *xpfCollector) collectHostInboundAddresslessZones(ch chan<- prometheus.M
 		return
 	}
 	for _, z := range dpuserspace.AddresslessEnforcingZones(cfg) {
-		ch <- prometheus.MustNewConstMetric(c.hostInboundAddresslessZones,
+		c.emitConstMetric(ch, c.hostInboundAddresslessZones,
 			prometheus.GaugeValue, 1, z.Zone)
 	}
 }
@@ -337,7 +337,7 @@ func (c *xpfCollector) collectHostInboundAddresslessInterfaces(ch chan<- prometh
 		return
 	}
 	for _, i := range dpuserspace.AddresslessEnforcingInterfaces(cfg) {
-		ch <- prometheus.MustNewConstMetric(c.hostInboundAddresslessIface,
+		c.emitConstMetric(ch, c.hostInboundAddresslessIface,
 			prometheus.GaugeValue, 1, i.Zone, i.Interface, i.Family, i.Reason)
 	}
 }
@@ -366,7 +366,7 @@ func (c *xpfCollector) collectHostInboundAmbiguousAddresses(ch chan<- prometheus
 		return
 	}
 	for _, a := range dpuserspace.AmbiguousHostInboundAddresses(cfg) {
-		ch <- prometheus.MustNewConstMetric(c.hostInboundAmbiguousAddrs,
+		c.emitConstMetric(ch, c.hostInboundAmbiguousAddrs,
 			prometheus.GaugeValue, 1, a.Address, a.Family)
 	}
 }
@@ -408,7 +408,7 @@ func (c *xpfCollector) collectVRFOverlapPBRAdmitted(ch chan<- prometheus.Metric)
 			continue
 		}
 		seen[key] = true
-		ch <- prometheus.MustNewConstMetric(c.vrfOverlapPBRAdmitted,
+		c.emitConstMetric(ch, c.vrfOverlapPBRAdmitted,
 			prometheus.GaugeValue, 1, o.InstanceA, o.InstanceB, o.PrefixA)
 	}
 }
@@ -424,7 +424,7 @@ func (c *xpfCollector) collectRIMemberDeviceConflicts(ch chan<- prometheus.Metri
 	if cfg == nil {
 		return
 	}
-	ch <- prometheus.MustNewConstMetric(c.riMemberDeviceConflicts,
+	c.emitConstMetric(ch, c.riMemberDeviceConflicts,
 		prometheus.GaugeValue, float64(len(cfg.QuarantinedRIMemberDeviceConflicts)))
 }
 
@@ -445,7 +445,7 @@ func (c *xpfCollector) collectGlobalCounters(ch chan<- prometheus.Metric, dp api
 			}
 			return
 		}
-		ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue, float64(v), labels...)
+		c.emitConstMetric(ch, desc, prometheus.CounterValue, float64(v), labels...)
 	}
 
 	emit(c.packetsTotal, dataplane.GlobalCtrRxPackets, "rx")
@@ -499,7 +499,7 @@ func (c *xpfCollector) collectGlobalCounters(ch chan<- prometheus.Metric, dp api
 // boot. It reads only the atomic counter, so it is safe to call exactly once at
 // the end regardless of dataplane-loaded state.
 func (c *xpfCollector) emitCounterReadErrors(ch chan<- prometheus.Metric) {
-	ch <- prometheus.MustNewConstMetric(c.counterReadErrorsTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.counterReadErrorsTotal, prometheus.CounterValue,
 		float64(c.counterReadErrors.Load()))
 }
 
@@ -511,7 +511,7 @@ func (c *xpfCollector) emitCounterReadErrors(ch chan<- prometheus.Metric) {
 // Kept separate from emitCounterReadErrors because interface counters are out
 // of the #3345 security-counter contract.
 func (c *xpfCollector) emitInterfaceCounterReadErrors(ch chan<- prometheus.Metric) {
-	ch <- prometheus.MustNewConstMetric(c.interfaceCounterReadErrorsTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.interfaceCounterReadErrorsTotal, prometheus.CounterValue,
 		float64(c.interfaceCounterReadErrors.Load()))
 }
 
@@ -541,13 +541,13 @@ func (c *xpfCollector) collectInterfaceCounters(ch chan<- prometheus.Metric, dp 
 			c.interfaceCounterReadErrors.Add(1)
 			continue
 		}
-		ch <- prometheus.MustNewConstMetric(c.ifacePacketsTotal, prometheus.CounterValue,
+		c.emitConstMetric(ch, c.ifacePacketsTotal, prometheus.CounterValue,
 			float64(ctrs.RxPackets), ifName, "rx")
-		ch <- prometheus.MustNewConstMetric(c.ifacePacketsTotal, prometheus.CounterValue,
+		c.emitConstMetric(ch, c.ifacePacketsTotal, prometheus.CounterValue,
 			float64(ctrs.TxPackets), ifName, "tx")
-		ch <- prometheus.MustNewConstMetric(c.ifaceBytesTotal, prometheus.CounterValue,
+		c.emitConstMetric(ch, c.ifaceBytesTotal, prometheus.CounterValue,
 			float64(ctrs.RxBytes), ifName, "rx")
-		ch <- prometheus.MustNewConstMetric(c.ifaceBytesTotal, prometheus.CounterValue,
+		c.emitConstMetric(ch, c.ifaceBytesTotal, prometheus.CounterValue,
 			float64(ctrs.TxBytes), ifName, "tx")
 	}
 }
@@ -607,7 +607,7 @@ func (c *xpfCollector) collectZoneCounters(ch chan<- prometheus.Metric, dp apiRu
 	// did not run rather than "all zones healthy".
 	unpopulated := 0
 	defer func() {
-		ch <- prometheus.MustNewConstMetric(c.zoneCountersUnpopulatedZones,
+		c.emitConstMetric(ch, c.zoneCountersUnpopulatedZones,
 			prometheus.GaugeValue, float64(unpopulated))
 	}()
 
@@ -696,13 +696,13 @@ func (c *xpfCollector) collectZoneCounters(ch chan<- prometheus.Metric, dp apiRu
 			continue
 		}
 
-		ch <- prometheus.MustNewConstMetric(c.zonePacketsTotal, prometheus.CounterValue,
+		c.emitConstMetric(ch, c.zonePacketsTotal, prometheus.CounterValue,
 			float64(ingress.Packets), zoneName, "ingress")
-		ch <- prometheus.MustNewConstMetric(c.zonePacketsTotal, prometheus.CounterValue,
+		c.emitConstMetric(ch, c.zonePacketsTotal, prometheus.CounterValue,
 			float64(egress.Packets), zoneName, "egress")
-		ch <- prometheus.MustNewConstMetric(c.zoneBytesTotal, prometheus.CounterValue,
+		c.emitConstMetric(ch, c.zoneBytesTotal, prometheus.CounterValue,
 			float64(ingress.Bytes), zoneName, "ingress")
-		ch <- prometheus.MustNewConstMetric(c.zoneBytesTotal, prometheus.CounterValue,
+		c.emitConstMetric(ch, c.zoneBytesTotal, prometheus.CounterValue,
 			float64(egress.Bytes), zoneName, "egress")
 	}
 }
@@ -723,7 +723,7 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp api
 	// for the unloaded state.
 	unpublished := 0
 	defer func() {
-		ch <- prometheus.MustNewConstMetric(c.policyCountersUnpublishedRules,
+		c.emitConstMetric(ch, c.policyCountersUnpublishedRules,
 			prometheus.GaugeValue, float64(unpublished))
 	}()
 
@@ -832,7 +832,7 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp api
 				}
 				continue
 			}
-			ch <- prometheus.MustNewConstMetric(c.policyHitsTotal, prometheus.CounterValue,
+			c.emitConstMetric(ch, c.policyHitsTotal, prometheus.CounterValue,
 				float64(ctrs.Packets), fromZone, toZone, rule.Name)
 		}
 		policySetID++
@@ -878,7 +878,7 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp api
 		// authored side still has a survivor here).
 		fromZone := config.ScopeLabelOr(pruneQuarantinedScope(rule.Match.FromZones), "*")
 		toZone := config.ScopeLabelOr(pruneQuarantinedScope(rule.Match.ToZones), "*")
-		ch <- prometheus.MustNewConstMetric(c.policyHitsTotal, prometheus.CounterValue,
+		c.emitConstMetric(ch, c.policyHitsTotal, prometheus.CounterValue,
 			float64(ctrs.Packets), fromZone, toZone, rule.Name)
 	}
 
@@ -892,7 +892,7 @@ func (c *xpfCollector) collectPolicyCounters(ch chan<- prometheus.Metric, dp api
 		ctrs, err := readPolicy(dataplane.DefaultPolicySentinelID)
 		switch {
 		case err == nil:
-			ch <- prometheus.MustNewConstMetric(c.policyHitsTotal, prometheus.CounterValue,
+			c.emitConstMetric(ch, c.policyHitsTotal, prometheus.CounterValue,
 				float64(ctrs.Packets), "-", "-", dataplane.DefaultPolicyName)
 		case errors.Is(err, dpuserspace.ErrPolicyCounterUnpublished):
 			// #7016: see the zone-pair loop above.
@@ -1010,7 +1010,7 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 					continue
 				}
 				if hasMap || userspaceOk {
-					ch <- prometheus.MustNewConstMetric(c.filterHitsTotal, prometheus.CounterValue,
+					c.emitConstMetric(ch, c.filterHitsTotal, prometheus.CounterValue,
 						float64(totalPkts), name, family, term.Name)
 				}
 			}

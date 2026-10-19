@@ -20,14 +20,12 @@ import (
 // packet counter.
 func (c *xpfCollector) emitCoSActiveFlowCount(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
 	for _, row := range status.CoSActiveFlowCounts {
-		ch <- prometheus.MustNewConstMetric(
-			c.cosActiveFlowCount,
+		c.emitConstMetric(ch, c.cosActiveFlowCount,
 			prometheus.GaugeValue,
 			float64(row.ActiveFlowCount),
 			strconv.Itoa(row.Ifindex),
 			strconv.FormatUint(uint64(row.QueueID), 10),
-			strconv.FormatUint(uint64(row.WorkerID), 10),
-		)
+			strconv.FormatUint(uint64(row.WorkerID), 10))
 	}
 }
 
@@ -207,14 +205,14 @@ func (c *xpfCollector) emitCoSWaterfillInterface(
 	iface *dpuserspace.CoSInterfaceStatus,
 	ifindexLabel string,
 ) {
-	ch <- prometheus.MustNewConstMetric(c.cosWaterfillEpochs,
+	c.emitConstMetric(ch, c.cosWaterfillEpochs,
 		prometheus.CounterValue, float64(iface.WaterfillEpochs), ifindexLabel)
-	ch <- prometheus.MustNewConstMetric(c.cosWaterfillPhase1BudgetBreaks,
+	c.emitConstMetric(ch, c.cosWaterfillPhase1BudgetBreaks,
 		prometheus.CounterValue, float64(iface.WaterfillPhase1BudgetBreaks), ifindexLabel)
 	// The max sentinel means there is no active-backlog candidate, so it
 	// is omitted; zero is a real, alertable hard-lock-in value.
 	if iface.WaterfillMinEpochsPerWorker != math.MaxUint64 {
-		ch <- prometheus.MustNewConstMetric(c.cosWaterfillMinEpochsPerWorker,
+		c.emitConstMetric(ch, c.cosWaterfillMinEpochsPerWorker,
 			prometheus.GaugeValue, float64(iface.WaterfillMinEpochsPerWorker), ifindexLabel)
 	}
 }
@@ -228,69 +226,69 @@ func (c *xpfCollector) emitCoSQueueTelemetry(
 	if metrics&cosOwnerProfileMetric != 0 && queue.OwnerWorkerID != nil {
 		emitHistogram(ch, c.cosDrainLatencyBucket, queue.DrainLatencyHist, ifindexLabel, queueLabel)
 		emitHistogram(ch, c.cosRedirectAcquireBucket, queue.RedirectAcquireHist, ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosDrainInvocationsTotal,
+		c.emitConstMetric(ch, c.cosDrainInvocationsTotal,
 			prometheus.CounterValue, float64(queue.DrainInvocations), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosOwnerPPS,
+		c.emitConstMetric(ch, c.cosOwnerPPS,
 			prometheus.GaugeValue, float64(queue.OwnerPPS), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosPeerPPS,
+		c.emitConstMetric(ch, c.cosPeerPPS,
 			prometheus.GaugeValue, float64(queue.PeerPPS), ifindexLabel, queueLabel)
 	}
 	if metrics&cosDrainPhaseMetric != 0 {
-		ch <- prometheus.MustNewConstMetric(c.cosDrainGuaranteeSentBytes,
+		c.emitConstMetric(ch, c.cosDrainGuaranteeSentBytes,
 			prometheus.CounterValue, float64(queue.DrainGuaranteeSentBytes), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosDrainSurplusSentBytes,
+		c.emitConstMetric(ch, c.cosDrainSurplusSentBytes,
 			prometheus.CounterValue, float64(queue.DrainSurplusSentBytes), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosDrainNonExactSentBytesWhileExactBacklogged,
+		c.emitConstMetric(ch, c.cosDrainNonExactSentBytesWhileExactBacklogged,
 			prometheus.CounterValue, float64(queue.DrainNonExactSentBytesWhileExactBacklogged), ifindexLabel, queueLabel)
 	}
 	if metrics&cosParkReasonMetric != 0 {
-		ch <- prometheus.MustNewConstMetric(c.cosRootTokenStarvationParks,
+		c.emitConstMetric(ch, c.cosRootTokenStarvationParks,
 			prometheus.CounterValue, float64(queue.RootTokenStarvationParks), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosQueueTokenStarvationParks,
+		c.emitConstMetric(ch, c.cosQueueTokenStarvationParks,
 			prometheus.CounterValue, float64(queue.QueueTokenStarvationParks), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosDrainParkRootTokens,
+		c.emitConstMetric(ch, c.cosDrainParkRootTokens,
 			prometheus.CounterValue, float64(queue.DrainParkRootTokens), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosDrainParkQueueTokens,
+		c.emitConstMetric(ch, c.cosDrainParkQueueTokens,
 			prometheus.CounterValue, float64(queue.DrainParkQueueTokens), ifindexLabel, queueLabel)
 	}
 	if metrics&cosWaterfillMetric != 0 {
-		ch <- prometheus.MustNewConstMetric(c.cosWaterfillPhase1Admissions,
+		c.emitConstMetric(ch, c.cosWaterfillPhase1Admissions,
 			prometheus.CounterValue, float64(queue.WaterfillPhase1Admissions), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosWaterfillPhase2Admissions,
+		c.emitConstMetric(ch, c.cosWaterfillPhase2Admissions,
 			prometheus.CounterValue, float64(queue.WaterfillPhase2Admissions), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosWaterfillEligibleVisits,
+		c.emitConstMetric(ch, c.cosWaterfillEligibleVisits,
 			prometheus.CounterValue, float64(queue.WaterfillEligibleVisits), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosWaterfillPhase1SelectedNoProgress,
+		c.emitConstMetric(ch, c.cosWaterfillPhase1SelectedNoProgress,
 			prometheus.CounterValue, float64(queue.WaterfillPhase1SelectedNoProgress), ifindexLabel, queueLabel)
 	}
 	if metrics&cosLeaseClaimMetric != 0 {
 		for workerID, requested := range queue.LeaseV8WorkerRequestedBytes {
-			ch <- prometheus.MustNewConstMetric(c.cosLeaseV8RequestedBytes,
+			c.emitConstMetric(ch, c.cosLeaseV8RequestedBytes,
 				prometheus.CounterValue, float64(requested), ifindexLabel, queueLabel, strconv.Itoa(workerID))
 		}
 		for workerID, granted := range queue.LeaseV8WorkerGrantedBytes {
-			ch <- prometheus.MustNewConstMetric(c.cosLeaseV8GrantedBytes,
+			c.emitConstMetric(ch, c.cosLeaseV8GrantedBytes,
 				prometheus.CounterValue, float64(granted), ifindexLabel, queueLabel, strconv.Itoa(workerID))
 		}
-		ch <- prometheus.MustNewConstMetric(c.cosAdmissionFlowShareDrops,
+		c.emitConstMetric(ch, c.cosAdmissionFlowShareDrops,
 			prometheus.CounterValue, float64(queue.AdmissionFlowShareDrops), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosAdmissionBufferDrops,
+		c.emitConstMetric(ch, c.cosAdmissionBufferDrops,
 			prometheus.CounterValue, float64(queue.AdmissionBufferDrops), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosAdmissionEcnMarked,
+		c.emitConstMetric(ch, c.cosAdmissionEcnMarked,
 			prometheus.CounterValue, float64(queue.AdmissionEcnMarked), ifindexLabel, queueLabel)
 	}
 	if metrics&cosSojournMetric != 0 {
-		ch <- prometheus.MustNewConstMetric(c.cosSojournEwmaNS,
+		c.emitConstMetric(ch, c.cosSojournEwmaNS,
 			prometheus.GaugeValue, float64(queue.SojournEwmaNS), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosSojournPeakNS,
+		c.emitConstMetric(ch, c.cosSojournPeakNS,
 			prometheus.GaugeValue, float64(queue.SojournPeakNS), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosSojournWindowedMinNS,
+		c.emitConstMetric(ch, c.cosSojournWindowedMinNS,
 			prometheus.GaugeValue, float64(queue.SojournWindowedMinNS), ifindexLabel, queueLabel)
 	}
 	if metrics&cosFlowOccupancyMetric != 0 {
-		ch <- prometheus.MustNewConstMetric(c.cosFlowFairBucketsOccupied,
+		c.emitConstMetric(ch, c.cosFlowFairBucketsOccupied,
 			prometheus.GaugeValue, float64(queue.FlowFairBucketsOccupied), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosFlowFairFlowsActive,
+		c.emitConstMetric(ch, c.cosFlowFairFlowsActive,
 			prometheus.GaugeValue, float64(queue.FlowFairFlowsActive), ifindexLabel, queueLabel)
 	}
 	if metrics&cosEqualFlowMetric != 0 && queue.EqualFlowEnforcement {
@@ -298,29 +296,29 @@ func (c *xpfCollector) emitCoSQueueTelemetry(
 		if queue.EqualFlowEnforced {
 			enforced = 1.0
 		}
-		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowEnforcementEnabled,
+		c.emitConstMetric(ch, c.cosEqualFlowEnforcementEnabled,
 			prometheus.GaugeValue, 1, ifindexLabel, queueLabel)
 		if queue.EqualFlowTargetPolicy != "" {
-			ch <- prometheus.MustNewConstMetric(c.cosEqualFlowTargetPolicy,
+			c.emitConstMetric(ch, c.cosEqualFlowTargetPolicy,
 				prometheus.GaugeValue, 1, ifindexLabel, queueLabel, queue.EqualFlowTargetPolicy)
 		}
-		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowEnforced,
+		c.emitConstMetric(ch, c.cosEqualFlowEnforced,
 			prometheus.GaugeValue, enforced, ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowTargetPerFlowBPS,
+		c.emitConstMetric(ch, c.cosEqualFlowTargetPerFlowBPS,
 			prometheus.GaugeValue, float64(queue.EqualFlowTargetPerFlowBPS), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowMaxWorkerCapBytes,
+		c.emitConstMetric(ch, c.cosEqualFlowMaxWorkerCapBytes,
 			prometheus.GaugeValue, float64(queue.EqualFlowMaxWorkerCapBytes), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowCapHitEvents,
+		c.emitConstMetric(ch, c.cosEqualFlowCapHitEvents,
 			prometheus.CounterValue, float64(queue.EqualFlowCapHitEvents), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowSuppressedGrantBytes,
+		c.emitConstMetric(ch, c.cosEqualFlowSuppressedGrantBytes,
 			prometheus.CounterValue, float64(queue.EqualFlowSuppressedGrantBytes), ifindexLabel, queueLabel)
-		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowStaleOrTagMismatchEvents,
+		c.emitConstMetric(ch, c.cosEqualFlowStaleOrTagMismatchEvents,
 			prometheus.CounterValue, float64(queue.EqualFlowStaleOrTagMismatchEvents), ifindexLabel, queueLabel)
 		reason := queue.EqualFlowFailOpenReason
 		if reason == "" {
 			reason = "none"
 		}
-		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowFailOpen,
+		c.emitConstMetric(ch, c.cosEqualFlowFailOpen,
 			prometheus.GaugeValue, 1, ifindexLabel, queueLabel, reason)
 	}
 }

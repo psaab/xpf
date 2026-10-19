@@ -31,5 +31,5 @@ func (c *xpfCollector) emitLearnedRouteImportCapped(ch chan<- prometheus.Metric,
 	if *status.LearnedRouteImportCapped {
 		v = 1
 	}
-	ch <- prometheus.MustNewConstMetric(c.learnedRouteImportCapped, prometheus.GaugeValue, v)
+	c.emitConstMetric(ch, c.learnedRouteImportCapped, prometheus.GaugeValue, v)
 }

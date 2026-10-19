@@ -69,5 +69,20 @@ func (lane *metricsLane) Collect(ch chan<- prometheus.Metric) {
 		lane.ctx = nil
 		lane.owner.available <- lane
 	}()
+	// #15086 (A44-01): Registry.Gather runs Collect in its own goroutine,
+	// so a collector panic crashes the whole daemon — net/http recovery
+	// never applies. Label values are sanitized at the emit choke point
+	// (metrics_emit_15086.go), which makes the known panic unreachable;
+	// this recover is the fail-closed backstop for any residual panic:
+	// count it, let Gather return what it has (promhttp then answers a
+	// failed scrape), and still return the lane above. The deferred
+	// emits inside collectContext unwind through here while Gather may
+	// already have stopped receiving, so the count is certified by the
+	// next scrape's xpf_metrics_collector_panics_total sample.
+	defer func() {
+		if recover() != nil && lane.collector != nil {
+			lane.collector.collectorPanics.Add(1)
+		}
+	}()
 	lane.collector.collectContext(lane.ctx, ch)
 }

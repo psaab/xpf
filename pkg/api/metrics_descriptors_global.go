@@ -250,4 +250,27 @@ func (c *xpfCollector) initGlobalDescriptors() {
 		"Total NAT64 (IPv6<->IPv4) packet translations.",
 		nil, nil,
 	)
+	// #15086: scrape-health signals for the A44-01 fix. Always emitted,
+	// including at zero, so an alert on `> 0` distinguishes "bad label
+	// values are reaching the exporter" from "the exporter stopped
+	// reporting". invalidLabelValuesTotal counts label VALUES sanitized
+	// (one per value, not per byte); collectorPanicsTotal counts
+	// collector passes the metrics lane recovered — a nonzero value is
+	// always a bug, since sanitization should make panics unreachable.
+	c.invalidLabelValuesTotal = prometheus.NewDesc(
+		"xpf_metrics_invalid_label_values_total",
+		"Total Prometheus label values that carried invalid UTF-8 and "+
+			"were folded to U+FFFD at emit time (#15086). The sample is "+
+			"still published with the sanitized value; a nonzero count "+
+			"means a committed config identifier holds raw non-UTF-8 "+
+			"bytes.",
+		nil, nil,
+	)
+	c.collectorPanicsTotal = prometheus.NewDesc(
+		"xpf_metrics_collector_panics_total",
+		"Total metric collector passes recovered by the metrics lane "+
+			"after a panic (#15086). A panicking pass fails that scrape "+
+			"instead of crashing the daemon; any nonzero value is a bug.",
+		nil, nil,
+	)
 }

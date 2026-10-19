@@ -10,9 +10,9 @@ func (c *xpfCollector) emitUserspaceMapsSyncTelemetry(ch chan<- prometheus.Metri
 	if status.RSTSuppressionDegraded {
 		degraded = 1
 	}
-	ch <- prometheus.MustNewConstMetric(c.userspaceRSTSuppressionDegraded, prometheus.GaugeValue, degraded)
-	ch <- prometheus.MustNewConstMetric(c.userspaceRSTSuppressionFailures, prometheus.CounterValue, float64(status.RSTSuppressionFailures))
-	ch <- prometheus.MustNewConstMetric(c.userspaceBindingsWatchdogRepairs, prometheus.CounterValue, float64(status.BindingsWatchdogRepairs))
-	ch <- prometheus.MustNewConstMetric(c.userspaceBindingsWatchdogErrors, prometheus.CounterValue, float64(status.BindingsWatchdogErrors))
-	ch <- prometheus.MustNewConstMetric(c.userspaceLocalAddrPruneSkipped, prometheus.CounterValue, float64(status.LocalAddrPruneSkipped))
+	c.emitConstMetric(ch, c.userspaceRSTSuppressionDegraded, prometheus.GaugeValue, degraded)
+	c.emitConstMetric(ch, c.userspaceRSTSuppressionFailures, prometheus.CounterValue, float64(status.RSTSuppressionFailures))
+	c.emitConstMetric(ch, c.userspaceBindingsWatchdogRepairs, prometheus.CounterValue, float64(status.BindingsWatchdogRepairs))
+	c.emitConstMetric(ch, c.userspaceBindingsWatchdogErrors, prometheus.CounterValue, float64(status.BindingsWatchdogErrors))
+	c.emitConstMetric(ch, c.userspaceLocalAddrPruneSkipped, prometheus.CounterValue, float64(status.LocalAddrPruneSkipped))
 }

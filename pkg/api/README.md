@@ -2383,6 +2383,25 @@ the drop fails loudly instead of going quietly vacuous.
     report 0/stale while `show firewall filter` shows real hits (#3461); the
     per-term counter-slot stride is the shared
     `config.FilterTermExpansionCount` SSOT (#3459).
+  - **Invalid-UTF-8 label values cannot crash a scrape** (#15086): every
+    const-metric emit in this package goes through the single choke point
+    `emitConstMetric` (`metrics_emit_15086.go`), which folds any label
+    value carrying invalid UTF-8 to U+FFFD before calling the
+    error-returning `prometheus.NewConstMetric` — never the panicking
+    `Must*` form. A committed identifier with raw non-UTF-8 bytes (the
+    A44-01 probe's `web\xffallow` policy name) is therefore still
+    published, sanitized, instead of panicking inside
+    `Registry.Gather`'s goroutine and killing the daemon. Each sanitized
+    value bumps `xpf_metrics_invalid_label_values_total`; any residual
+    construction error (arity, invalid descriptor) skips the sample and
+    bumps `xpf_counter_read_errors_total` under the omit-plus-error
+    contract above. Legitimate values pass through byte-identical. As a
+    fail-closed backstop, `metricsLane.Collect` recovers any residual
+    collector panic, bumps `xpf_metrics_collector_panics_total`, returns
+    the lane to the pool, and lets that scrape fail instead of crashing
+    the process; the bumped count is certified by the next scrape's
+    sample. Both health counters are always emitted, including at zero.
+    Pinned by `metrics_invalid_utf8_15086_test.go`.
   - **Text commands** print a `warning: ... counter read failed ...` line
     instead of a clean zero: `show security screen` / `show security
     alarms` / `show security flow statistics` / `show chassis cluster

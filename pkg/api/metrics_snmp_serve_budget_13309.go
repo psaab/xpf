@@ -31,7 +31,7 @@ func (c *xpfCollector) emitSNMPServeBudget(ch chan<- prometheus.Metric) {
 		return
 	}
 	shed, evictions, tracked := c.srv.snmpServeBudgetStatsFn()
-	ch <- prometheus.MustNewConstMetric(c.snmpRequestsShedTotal, prometheus.CounterValue, float64(shed))
-	ch <- prometheus.MustNewConstMetric(c.snmpSourceBucketEvictionsTotal, prometheus.CounterValue, float64(evictions))
-	ch <- prometheus.MustNewConstMetric(c.snmpTrackedSources, prometheus.GaugeValue, float64(tracked))
+	c.emitConstMetric(ch, c.snmpRequestsShedTotal, prometheus.CounterValue, float64(shed))
+	c.emitConstMetric(ch, c.snmpSourceBucketEvictionsTotal, prometheus.CounterValue, float64(evictions))
+	c.emitConstMetric(ch, c.snmpTrackedSources, prometheus.GaugeValue, float64(tracked))
 }
