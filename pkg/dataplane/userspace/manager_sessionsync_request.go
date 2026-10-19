@@ -457,7 +457,26 @@ func (m *Manager) resolveIngressFoldLocked(fold uint32) (uint32, uint16, bool) {
 	if fn == nil {
 		return 0, 0, false
 	}
-	return fn(fold)
+	ifindex, vlan, ok := fn(fold)
+	if !ok {
+		return 0, 0, false
+	}
+	// #15263 (B05-02): the injected resolver is built from a net.Interfaces()
+	// snapshot taken once per config apply. A member netdev recreated without
+	// a commit (VF reset, re-probe) gets a NEW ifindex while the daemon
+	// closures still name the dead one; RefreshInterfaceRowsForLink rebuilds
+	// lastSnapshot's rows but never the closures. Without this check the
+	// importer confidently installs the session on the dead ifindex and
+	// owner RG 0 (sessionSyncEgressLocked misses the row). Fail closed to
+	// the zone approximation — naming no interface — when the resolved
+	// ifindex is absent from the CURRENT snapshot. A nil snapshot preserves
+	// the pre-existing behaviour (nothing published yet to check against).
+	if snap := m.lastSnapshot; snap != nil {
+		if _, present := findUserspaceEgressInterfaceSnapshot(snap, int(ifindex), vlan); !present {
+			return 0, 0, false
+		}
+	}
+	return ifindex, vlan, true
 }
 
 // resolveEgressFoldLocked maps the #12075 cluster-stable egress fold to this

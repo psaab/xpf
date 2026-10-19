@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
@@ -147,6 +148,45 @@ func debounceInterfaceLinkSnapshot(ctx context.Context, wake <-chan string, linu
 	}
 }
 
+// refreshIngressFoldClosures rebuilds and reinstalls the #7095/#12075 fold
+// closures from the CURRENT kernel interface table after a link-triggered
+// snapshot refresh (#15263 B05-02). buildIngressFoldResolver (receive side,
+// Manager) and buildIngressFoldFn (send side, SessionSync) capture
+// net.Interfaces() once per config apply; RefreshInterfaceRowsForLink
+// rebuilds the Manager's snapshot rows when a member netdev is recreated
+// without a commit (VF reset, re-probe) but never rebuilt the closures, so
+// the receive side kept resolving a peer fold to the dead ifindex (and the
+// importer installed the session with owner RG 0) and the send side
+// degraded to fold 0 until the next commit.
+//
+// The caller holds applySem (refreshInterfaceRowsForLink via
+// beginBackgroundApply), so this cannot interleave with a config apply's
+// own closure installation. buildZoneFoldRGMap is config-derived (no
+// ifindex state), so it cannot go stale; it is reinstalled anyway so the
+// SessionSync ownership snapshot stays one coherent generation.
+// Manager.SetIngressFoldResolver and SessionSync.SetZoneOwnership are each
+// internally locked; a session-sync object replaced after the nil check is
+// seeded from the applied config by its constructor, so no stale closure
+// can survive on the live object.
+func (d *Daemon) refreshIngressFoldClosures(cfg *config.Config, resolver func(*config.Config) func(uint32) (uint32, uint16, bool), foldFn func(*config.Config) func(uint32, uint16) uint32) {
+	if cfg == nil {
+		return
+	}
+	if resolver == nil {
+		resolver = buildIngressFoldResolver
+	}
+	if foldFn == nil {
+		foldFn = buildIngressFoldFn
+	}
+	if mgr := d.interfaceLinkSnapshotManager(); mgr != nil {
+		mgr.SetIngressFoldResolver(resolver(cfg))
+	}
+	if ss := d.getSessionSync(); ss != nil {
+		ss.SetZoneOwnership(buildZoneRGMap(cfg, buildZoneIDs(cfg)),
+			buildZoneFoldRGMap(cfg), foldFn(cfg))
+	}
+}
+
 func (d *Daemon) refreshInterfaceRowsForLink(ctx context.Context, linuxName string) (bool, error) {
 	if !d.beginBackgroundApply(ctx, "interface-link-snapshot-refresh") {
 		return false, nil
@@ -170,6 +210,16 @@ func (d *Daemon) refreshInterfaceRowsForLink(ctx context.Context, linuxName stri
 	if err != nil {
 		return false, err
 	}
+	// #15263 (B05-02): the link refresh may have published rows carrying a
+	// recreated netdev's NEW ifindex (or deduped to no publish). Either way
+	// the fold closures captured at the last commit still name the dead
+	// ifindex, so rebuild and reinstall them from the live interface table
+	// now — the acceptance is that the stale row equals the rebuilt row
+	// without a commit. This runs before the FIB bump so a bump failure
+	// (retried via pendingFIBBump) never leaves refreshed rows behind stale
+	// closures, and it also runs on the dedup path because the closures can
+	// be stale even when the snapshot content is unchanged.
+	d.refreshIngressFoldClosures(cfg, nil, nil)
 	if published {
 		d.pendingFIBBump = true
 	}

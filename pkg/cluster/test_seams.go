@@ -330,3 +330,11 @@ func (s *SessionSync) DeleteJournalGenerationV6ForTesting(key dataplane.SessionK
 	}
 	return 0, false
 }
+
+// StampIngressFoldForTesting stamps a local {ifindex, vlan} through the
+// currently installed ingress fold resolver, exactly as the send path does.
+// It lets daemon-level cells observe that a link-refresh rebuild
+// (#15263) replaced the apply-time closure without a wire round trip.
+func (s *SessionSync) StampIngressFoldForTesting(ifindex uint32, vlan uint16) uint32 {
+	return s.stampIngressIfaceFold(ifindex, vlan)
+}
