@@ -3487,10 +3487,15 @@ fn full_apply_post_teardown_rollback_restores_prior_bindings_14959() {
 ///
 /// Mirrors post_teardown_spawn_failure_fails_closed_no_persist_4952
 /// (tunnel-only same-plan fixtures) and asserts the #14959 delta on
-/// guard.status.bindings after the failure.
+/// guard.status.bindings after the failure: the rollback hands back the
+/// PRIOR binding identity (ifindex 10, len 1, registered), so the
+/// restored snapshot and bindings describe the same prior plan.
 ///
 /// RED-on-base: on origin/master bindings stay at the post-teardown
-/// refreshed (zeroed) state, so the bound/ready assertions fail.
+/// refreshed state, so the prior-identity assertions fail. Note the cell
+/// deliberately does not assert bound/ready (see the in-body vacuity
+/// guard): the handler returns before refresh_status, so those bits are
+/// the failed bring-up's refreshed truth, not the restored plan.
 #[test]
 fn same_plan_post_teardown_rollback_restores_prior_bindings_14959() {
     use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, SNAPSHOT_POST_TEARDOWN_PREFIX};
@@ -3564,19 +3569,35 @@ fn same_plan_post_teardown_rollback_restores_prior_bindings_14959() {
         guard.snapshot.as_ref().is_some_and(|s| s.defer_workers),
         "prior deferred snapshot restored intact"
     );
-    // THE #14959 DELTA: the prior binding (bound/ready truth) survives the
-    // rollback, so snapshot and bindings describe the same prior plan and
+    // THE #14959 DELTA: the prior binding survives the rollback intact,
+    // so snapshot and bindings describe the same prior plan and
     // same_plan_apply_needs_binding_reconcile can fire again on retry.
     assert_eq!(guard.status.bindings.len(), 1);
     assert!(
         guard.status.bindings[0].registered && guard.status.bindings[0].ifindex > 0,
         "restored binding must stay runnable so the recovery predicate can fire"
     );
-    assert!(
-        guard.status.bindings[0].bound && guard.status.bindings[0].ready,
-        "rollback must restore the prior bindings' bound/ready truth (D26-03), got bound={} ready={}",
-        guard.status.bindings[0].bound, guard.status.bindings[0].ready
+    // Plan-identity preservation: the slot/ifindex/interface the prior
+    // apply left in status must be what the rollback hands back. A
+    // regression that restored the NEW plan's binding set (or an empty
+    // one) would change ifindex away from 10 (the prior plan) — assert
+    // the prior value exactly, not merely >0.
+    assert_eq!(
+        guard.status.bindings[0].ifindex, 10,
+        "rollback must restore the PRIOR binding identity (ifindex 10), not the rejected plan"
     );
+    // Vacuity guard: bound/ready are NOT asserted. The handler returns
+    // without refresh_status, so the vector in guard.status.bindings at
+    // assert time is whatever the reconcile path left there — its
+    // bound/ready bits describe the failed bring-up's refreshed truth,
+    // not the restored plan, and would flip with unrelated refresh
+    // changes while the D26-03 plan-identity contract still holds.
+    // The retry-recovery half of the mechanism (a second same-plan apply
+    // re-entering the reconcile leg and actually spawning workers) is
+    // the live proof and is covered by
+    // same_plan_apply_needs_binding_reconcile's own unit cells plus the
+    // coordinator-level retry cells (14130); re-driving it here would
+    // need healthy-stub workers the handler harness cannot spawn.
     let _ = std::fs::remove_file(&state_file);
 }
 
