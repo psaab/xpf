@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Fix master unit suites: stop compileZones reading an apply-macro's
+    braced payload on a zone-interface member as a per-interface
+    host-inbound override (a real #12835 regression — macro content
+    hard-rejected strict compilation and minted a phantom deny-all
+    override on the tolerant path); migrate three test fixtures that
+    authored untagged non-zero / vlan-id units to the tagged shapes
+    the #14574/#15034 gates correctly require; regenerate the #9752
+    synced/installed session goldens for the zero-valued
+    NatScopeIfindex/NatScopeFold (#15176) and PptpCallIDs (#13965)
+    fields (#15731).
   * Accept Junos screen spellings `icmp ip-sweep` and
     `tcp tcp-no-flag` as aliases of `ip ip-sweep` / `tcp no-flag`;
     close the port-mirroring schema and reject unmodelled

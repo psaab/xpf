@@ -237,9 +237,13 @@ func TestHostInboundKnownPackedTailsAndBracketListsStillBind12219(t *testing.T) 
 }
 
 func TestHostInboundZoneApplyMetaNotUnknown12219(t *testing.T) {
+	// #15731: unit 1 must be tagged — the #15034 gate correctly rejects a
+	// non-zero untagged unit on an untagged parent. vlan-tagging + vlan-id 1
+	// keeps both units real devices; the apply-meta assertion is unchanged.
 	config := `interfaces { ge-0/0/0 {
+		vlan-tagging;
 		unit 0 { family inet { address 10.0.0.1/24; } }
-		unit 1 { family inet { address 10.0.1.1/24; } }
+		unit 1 { vlan-id 1; family inet { address 10.0.1.1/24; } }
 	} }
 	security { zones { security-zone trust {
 		host-inbound-traffic {
