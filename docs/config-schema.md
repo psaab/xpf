@@ -11856,6 +11856,31 @@ reserved for whole-dataplane selection where a rewrite shim
   `compileLog` and silently kept the default 514. No runtime/dataplane change.
   Regression coverage: `pkg/config/log_stream_config_3349_test.go`.
 
+  **#15270 (B19-02) — braced `host` and global `source-address`.** The vSRX
+  reference stanza (`security { log { mode stream; format sd-syslog;
+  source-address 192.168.99.1; stream syslog-server { host { 192.168.99.252;
+  port 514; } } } }`) previously failed `SchemaValidate` with `host: missing
+  value` (the `host` leaf was inline-only, `children: nil`) and rejected the
+  log-level `source-address` as an unknown keyword under the closed-world
+  `security` arm, even though `compileLog` already read both shapes. `host`
+  is now a value-or-container: the flat value is validated by
+  `ValidateSyslogHost` with a typed `port` modifier, and the braced form is
+  validated by `validateSecurityLogHostNode15270` (exactly one bare address
+  child, validated the same way, plus only `port` children in `[1..65535]`);
+  invalid hosts/ports still fail closed at both `SchemaValidate` and strict
+  compile (the #3349 port AST gate covers flat, packed, grouped and nested
+  locations). The global `source-address` is a typed `ValueIPAddress` leaf
+  compiled to `LogConfig.SourceAddress`; apply precedence per stream is
+  **stream `source-address` > stream `source-interface` > global
+  `source-address` > global `source-interface`** (daemon + CLI mirrors, both
+  syslog fingerprints include the global value). `FormatSet` renders the
+  braced host as `host <addr>` + `host port <n>` set lines, which replay to
+  the same stream. Regression coverage:
+  `pkg/config/security_log_braced_host_15270_test.go`. The #2419 census now
+  sees `security log report` / `security log source-address` as compact-blind
+  (pre-existing `FindChild` reader shape); both are classified `open` in the
+  #8690 register, not normalized here.
+
   **Event-mode format compatibility (cross-field).** The top-level
   `security log format` value feeds two different runtimes depending on
   `security log mode`. As of #3409 BOTH runtimes honor every schema format —

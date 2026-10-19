@@ -976,6 +976,14 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			valueType: ValueIdentifier, valueDesc: "interface name (optionally .<unit>)",
 			valueExamples: []string{"ge-0-0-0", "reth1.100"},
 			validator:     ValidateSyslogSourceInterface, children: nil},
+		// #15270 (B19-02): the global `security log source-address` from the
+		// vSRX reference stanza. compileLog stores it on LogConfig.SourceAddress;
+		// apply paths use it below per-stream source-address/source-interface and
+		// above the global source-interface. Typed so a bad address fails closed.
+		"source-address": {desc: "Source IP for security log streams (global)", args: 1, placeholder: "<address>",
+			valueType: ValueIPAddress, valueDesc: "source IP address for security log streams",
+			valueExamples: []string{"192.168.99.1", "2001:db8::1"},
+			validator:     ValidateIPAddress, children: nil},
 		// #14577 (Y03-02): `security log report` enables session
 		// aggregation reporting. compileLog reads it as a presence flag
 		// (compiler_security_log.go: sec.Log.Report) and daemon_system.go
@@ -1002,10 +1010,21 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			// #9326: TYPED. This was `args: 1` with no valueType and no
 			// validator, so any string reached the dialer's resolver on the
 			// commit path.
+			// #15270 (B19-02): value-or-container. Flat `host <addr>` carries the
+			// address in Keys[1] (validated as the typed value / `port` modifier);
+			// braced `host { <addr>; port <n>; }` carries it as a bare child.
+			// nodeValidator owns the braced shape; `port` is typed here so flat
+			// packed modifiers validate, and validateSecurityLogStreamPortsAST
+			// remains the range gate for both port locations.
 			"host": {desc: "Syslog server address", args: 1, placeholder: "<address>",
 				valueType: ValueHostname, valueDesc: "syslog server IP address or hostname",
 				valueExamples: []string{"192.0.2.10", "logs.example.net"},
-				validator:     ValidateSyslogHost, children: nil},
+				validator:     ValidateSyslogHost, nodeValidator: validateSecurityLogHostNode15270, children: map[string]*schemaNode{
+					"port": {desc: "Syslog server port (default 514)", args: 1, placeholder: "<port>",
+						valueType: ValueInteger, valueDesc: "syslog server port (1-65535)",
+						valueExamples: []string{"514", "5514"},
+						validator:     ValidateInteger(1, 65535), children: nil},
+				}},
 			// `port` validation (direct AND nested host{port}) lives in the
 			// validateSecurityLogStreamPortsAST compiler pass (#3349): the
 			// value has two AST locations the declarative schema walker cannot

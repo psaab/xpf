@@ -89,7 +89,11 @@ func expandFlatRun(children []*Node, container *schemaNode) []*Node {
 		leaf := resolveSchemaChild(container, n.Keys[0])
 		// Not a leaf of this container, or one that owns a body: leave it and
 		// its subtree exactly as authored.
-		if leaf == nil || len(leaf.children) > 0 || leaf.wildcard != nil {
+		// #15270 exception: `host` declares only the `port` modifier child —
+		// a value-plus-modifier leaf, not a body-owning container. It must
+		// still split (`host <addr> transport ...` chains) like other leaves.
+		hostPortOnly15270 := n.Keys[0] == "host" && leaf != nil && len(leaf.children) == 1 && leaf.children["port"] != nil
+		if leaf == nil || ((len(leaf.children) > 0 || leaf.wildcard != nil) && !hostPortOnly15270) {
 			out = append(out, n)
 			return
 		}

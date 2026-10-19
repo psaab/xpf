@@ -367,8 +367,12 @@ type LogConfig struct {
 	Mode            string // "stream" or "event"
 	Format          string // "sd-syslog", "syslog", "binary", "structured"
 	SourceInterface string // interface for source address
-	Streams         map[string]*SyslogStream
-	Report          bool // enable session aggregation reporting (security log report)
+	// SourceAddress is the global `security log source-address` (#15270).
+	// Apply precedence per stream: stream SourceAddress > stream
+	// SourceInterface > global SourceAddress > global SourceInterface.
+	SourceAddress string
+	Streams       map[string]*SyslogStream
+	Report        bool // enable session aggregation reporting (security log report)
 	// Profiles holds Junos `security log profile <name>` objects (#2008
 	// H7). Before this was added the whole `profile` stanza parsed but was
 	// silently discarded (no schema child, no compiler case) — a config

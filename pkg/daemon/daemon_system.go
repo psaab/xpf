@@ -55,9 +55,9 @@ func syslogClientFingerprint(cfg *config.Config) (string, bool) {
 	// #15078: the global source-interface has no single collector, so its
 	// fingerprint term keeps the family-blind resolution; per-stream terms
 	// below resolve against each stream's own collector family.
-	fmt.Fprintf(h, "mode=%s\nformat=%s\nsrcif=%s\nsrcaddr=%s\nhostname=%s\n",
+	fmt.Fprintf(h, "mode=%s\nformat=%s\nsrcif=%s\ngsrcaddr=%s\nsrcaddr=%s\nhostname=%s\n",
 		cfg.Security.Log.Mode, cfg.Security.Log.Format,
-		cfg.Security.Log.SourceInterface,
+		cfg.Security.Log.SourceInterface, cfg.Security.Log.SourceAddress,
 		config.ResolveSyslogSourceAddr(cfg, cfg.Security.Log.SourceInterface),
 		currentHostnameForFingerprint15231())
 	for _, name := range names {
@@ -84,10 +84,11 @@ func syslogStreamFingerprint15231(cfg *config.Config, name string, stream *confi
 		return name + "\x00NIL"
 	}
 	h := sha256.New()
-	fmt.Fprintf(h, "name=%s\nhost=%s\nport=%d\nproto=%s\nsev=%s\nfac=%s\ncat=%s\nfmt=%s\ngfmt=%s\nsa=%s\nsi=%s\nsrc=%s\nrsi=%s\ngsi=%s\ngsrc=%s\n",
+	fmt.Fprintf(h, "name=%s\nhost=%s\nport=%d\nproto=%s\nsev=%s\nfac=%s\ncat=%s\nfmt=%s\ngfmt=%s\nsa=%s\nsi=%s\nsrc=%s\nrsi=%s\ngsa=%s\ngsi=%s\ngsrc=%s\n",
 		name, stream.Host, stream.Port, protocol, stream.Severity, stream.Facility,
 		stream.Category, format, cfg.Security.Log.Format, stream.SourceAddress, stream.SourceInterface, srcAddr,
 		config.ResolveSyslogSourceAddrForCollector(cfg, stream.SourceInterface, stream.Host),
+		cfg.Security.Log.SourceAddress,
 		cfg.Security.Log.SourceInterface,
 		config.ResolveSyslogSourceAddrForCollector(cfg, cfg.Security.Log.SourceInterface, stream.Host))
 	return hex.EncodeToString(h.Sum(nil))
@@ -438,9 +439,14 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		// fail the dial, so no matching family leaves the bind unbound and
 		// the resolver warns. A hostname collector carries no family, so its
 		// global arm IS the legacy family-blind resolution.
+		// #15270 precedence: stream source-address > stream source-interface
+		// > global source-address > global source-interface.
 		srcAddr := stream.SourceAddress
 		if srcAddr == "" && stream.SourceInterface != "" {
 			srcAddr = config.ResolveSyslogSourceAddrForCollector(cfg, stream.SourceInterface, stream.Host)
+		}
+		if srcAddr == "" && cfg.Security.Log.SourceAddress != "" {
+			srcAddr = cfg.Security.Log.SourceAddress
 		}
 		if srcAddr == "" && cfg.Security.Log.SourceInterface != "" {
 			srcAddr = config.ResolveSyslogSourceAddrForCollector(cfg, cfg.Security.Log.SourceInterface, stream.Host)

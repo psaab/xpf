@@ -104,6 +104,9 @@ func compileLog(node *Node, sec *SecurityConfig) error {
 	if srcNode := node.FindChild("source-interface"); srcNode != nil {
 		sec.Log.SourceInterface = nodeVal(srcNode)
 	}
+	if srcAddrNode := node.FindChild("source-address"); srcAddrNode != nil {
+		sec.Log.SourceAddress = nodeVal(srcAddrNode)
+	}
 	if node.FindChild("report") != nil {
 		sec.Log.Report = true
 	}
@@ -119,9 +122,31 @@ func compileLog(node *Node, sec *SecurityConfig) error {
 		for _, prop := range expandFlatRun(inst.node.Children, securityLogStreamSchema9391()) {
 			switch prop.Name() {
 			case "host":
-				// Flat: host 192.168.99.3;
-				if v := nodeVal(prop); v != "" {
+				// #15270 flat sibling: `host port <n>` (FormatSet rendering of
+				// the braced port) carries no address; the address sibling
+				// supplies it. Skip "port" as a bogus host value.
+				if len(prop.Keys) >= 2 && prop.Keys[1] == "port" {
+					// Keys form (`host port 514`) or grouped child form
+					// (`host port` -> [514], the SetPath shape).
+					portRaw := ""
+					if len(prop.Keys) >= 3 {
+						portRaw = prop.Keys[2]
+					} else if len(prop.Children) == 1 && len(prop.Children[0].Keys) == 1 {
+						portRaw = prop.Children[0].Keys[0]
+					}
+					if n, err := strconv.Atoi(portRaw); err == nil && validSyslogPort(n) {
+						stream.Port = n
+					}
+				} else if v := nodeVal(prop); v != "" {
+					// Flat: host 192.168.99.3; (also packed `host <addr> port <n>`)
 					stream.Host = v
+					for i := 2; i+1 < len(prop.Keys); i++ {
+						if prop.Keys[i] == "port" {
+							if n, err := strconv.Atoi(prop.Keys[i+1]); err == nil && validSyslogPort(n) {
+								stream.Port = n
+							}
+						}
+					}
 				}
 				// Nested: host { 192.168.99.3; port 9006; }
 				for _, hc := range prop.Children {
@@ -285,6 +310,21 @@ func validateSecurityLogStreamPortsAST(nodes []*Node, prefix string, lenient boo
 							return warnings, err
 						}
 					case "host":
+						// #15270: flat `host port <n>` and packed
+						// `host <addr> port <n>` carry the port on Keys.
+						for i := 1; i+1 < len(prop.Keys); i++ {
+							if prop.Keys[i] == "port" {
+								if err := check(joinNodePath(streamPath, []string{"host", "port"}), prop.Keys[i+1]); err != nil {
+									return warnings, err
+								}
+							}
+						}
+						// Grouped flat form: `host port` -> child [514].
+						if len(prop.Keys) == 2 && prop.Keys[1] == "port" && len(prop.Children) == 1 && len(prop.Children[0].Keys) == 1 {
+							if err := check(joinNodePath(streamPath, []string{"host", "port"}), prop.Children[0].Keys[0]); err != nil {
+								return warnings, err
+							}
+						}
 						for _, hc := range prop.Children {
 							if hc.Name() == "port" {
 								if err := check(joinNodePath(streamPath, []string{"host", "port"}), nodeVal(hc)); err != nil {
