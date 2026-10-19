@@ -271,6 +271,13 @@ type Journal struct {
 	// unlinked the parked writer's fsync still succeeds and Log still returns
 	// SUCCESS for an audit record that no longer exists anywhere.
 	inflight map[uint64]int
+
+	// fenced is set true by Fence at the start of a factory reset
+	// (#15281 D08-03). Once set, Log is a silent no-op instead of
+	// recreating the journal file the zeroize erased (or is erasing)
+	// with the prior tenant's principal. Guarded by j.mu; cleared only
+	// by Unfence on the fail-closed recoverable-wipe path.
+	fenced bool
 }
 
 // Option configures a Journal.
@@ -666,6 +673,38 @@ func chmodOwnerOnly(path string) error {
 // appendLocked, then fsync in parallel with j.mu released; O_APPEND makes
 // each write land atomically at EOF, and every writer fsyncs its own fd,
 // so durability holds regardless of interleaving.
+// Fence latches the journal shut for a factory reset (#15281 D08-03).
+// Once fenced, Log is a silent no-op: it must not recreate the
+// .config.journal the zeroize erased (or is erasing) with the prior
+// tenant's principal. The check runs under j.mu inside Log (via
+// appendLocked), so an append already past the check has its bytes in
+// the page cache before the fence can latch — the wipe, which runs
+// after the daemon's QuiesceJournal returns, then erases those bytes,
+// and no append starting after the fence can recreate the file.
+func (j *Journal) Fence() {
+	j.mu.Lock()
+	j.fenced = true
+	j.mu.Unlock()
+}
+
+// Unfence clears the fence set by Fence. It is called ONLY on the
+// fail-closed recoverable-wipe path: a factory reset whose wipe failed
+// leaves the daemon running, and without re-enabling journaling a failed
+// zeroize would permanently silence the audit trail. On a SUCCESSFUL
+// wipe the daemon is stopped, so the fence is deliberately left latched.
+func (j *Journal) Unfence() {
+	j.mu.Lock()
+	j.fenced = false
+	j.mu.Unlock()
+}
+
+// Fenced reports whether the journal is currently fenced shut.
+func (j *Journal) Fenced() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.fenced
+}
+
 func (j *Journal) Log(entry *Entry) error {
 	if entry.Timestamp.IsZero() {
 		entry.Timestamp = time.Now()
@@ -691,6 +730,9 @@ func (j *Journal) Log(entry *Entry) error {
 
 	f, ino, created, rotated, err := j.appendLocked(data)
 	if err != nil {
+		if errors.Is(err, errJournalFenced) {
+			return nil
+		}
 		if created || rotated {
 			syncdir := j.syncDir
 			if syncdir == nil {
@@ -744,6 +786,13 @@ func (j *Journal) Log(entry *Entry) error {
 	return nil
 }
 
+// errJournalFenced marks an append refused because a factory reset has
+// fenced the journal shut (#15281 D08-03). Log swallows it silently:
+// journaling is best-effort, and after a completed reset the daemon is
+// stopping, so there is no operator left to warn — and warning would
+// only re-log the prior tenant's action the fence exists to suppress.
+var errJournalFenced = errors.New("journal fenced by factory reset")
+
 // appendLocked runs the lock-held part of Log: the one-time permission
 // repair, rotation when the current segment is over threshold, opening
 // the current segment, the torn-tail self-heal, and the buffered write of
@@ -753,9 +802,14 @@ func (j *Journal) Log(entry *Entry) error {
 // so the buffered f.Write completes and is visible in the page cache
 // before the lock is released — any concurrent Tail that then acquires
 // j.mu sees a complete record, never a torn one.
+
 func (j *Journal) appendLocked(data []byte) (f *os.File, ino uint64, created, rotated bool, err error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+
+	if j.fenced {
+		return nil, 0, false, false, errJournalFenced
+	}
 
 	j.migratePermsLocked()
 

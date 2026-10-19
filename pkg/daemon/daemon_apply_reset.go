@@ -466,8 +466,13 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 		// #10769 d05-F8: rescueAction's SaveRescueConfig bypasses applySem,
 		// so the daemon generation cannot fence it. Fence and join that
 		// store-owned writer before the wipe erases rescue.conf.
+		// #15281 D08-03: the audit journal was the one store writer left
+		// unfenced — a reboot/halt/power-off SystemAction in the stop
+		// window recreated .config.journal with the prior tenant's
+		// principal after the wipe erased it. Fence it here too.
 		d.store.QuiesceRescueWrites()
 		d.store.QuiesceArchival()
+		d.store.QuiesceJournal()
 	}
 	dhcpMayNeedRestore := false
 	ipsecMayNeedRestore := false
@@ -509,6 +514,7 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 			if d.store != nil {
 				d.store.ResumeArchival()
 				d.store.ResumeRescueWrites()
+				d.store.ResumeJournal()
 			}
 			d.exitResetGeneration()
 		}

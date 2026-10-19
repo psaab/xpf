@@ -1433,6 +1433,9 @@ func (s *Store) writeActiveMarker(tree *config.ConfigTree, committed bool) error
 // and the persist_error path must not recurse into journaling its own
 // failure (#1896).
 func (s *Store) journalLog(e *JournalEntry) {
+	if s.journalFenced.Load() {
+		return
+	}
 	// #4891 boundary belt: never hand the journal a Detail larger than the
 	// commit-description cap. An oversized JSONL line would be discarded by
 	// the journal's bounded reverse-tail scanner (maxTailLineBytes), silently
@@ -1445,6 +1448,44 @@ func (s *Store) journalLog(e *JournalEntry) {
 	}
 	if err := s.journal.Log(e); err != nil {
 		slog.Warn("config journal append failed", "action", e.Action, "err", err)
+	}
+}
+
+// QuiesceJournal fences the audit journal before a factory reset erases
+// it (#15281 D08-03). The journal was the one store writer the reset did
+// not fence: ArchiveConfig and SaveRescueConfig are fenced by
+// QuiesceArchival/QuiesceRescueWrites, but journalLog appended with
+// O_CREATE, so a reboot/halt/power-off SystemAction arriving in the
+// daemon's stop window (after the wipe, before systemctl stop) recreated
+// .config.journal with the prior tenant's principal (username, UID,
+// login class, session, action — audit-only, no secrets). QuiesceJournal
+// closes that window in two layers: it latches Store.journalFenced (new
+// journalLog calls no-op) and fences the journal itself under j.mu (an
+// append already past the Store check but not yet written is refused
+// inside appendLocked). An append already past BOTH checks has its bytes
+// in the page cache before the fence can latch; the wipe, which runs
+// after this returns, erases those bytes. It is idempotent and a no-op
+// on a nil journal. The daemon's factory-reset transaction calls it
+// AFTER entering the terminal reset generation and BEFORE the wipe,
+// alongside QuiesceRescueWrites/QuiesceArchival.
+func (s *Store) QuiesceJournal() {
+	s.journalFenced.Store(true)
+	if s.journal != nil {
+		s.journal.Fence()
+	}
+}
+
+// ResumeJournal clears the journal fence set by QuiesceJournal (#15281
+// D08-03). It is called ONLY on the fail-closed recoverable-wipe path:
+// daemon.factoryReset exits the terminal reset generation on a wipe
+// error so the box stays up and normal config work resumes, and without
+// re-enabling journaling a failed zeroize would permanently silence the
+// audit trail. On a SUCCESSFUL wipe the daemon is stopped, so the fence
+// is deliberately left latched and this is never called.
+func (s *Store) ResumeJournal() {
+	s.journalFenced.Store(false)
+	if s.journal != nil {
+		s.journal.Unfence()
 	}
 }
 

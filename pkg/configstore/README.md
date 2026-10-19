@@ -1377,6 +1377,20 @@ per-path:
   wiring (`request system configuration archive`) cannot bypass the zeroize
   fence. `daemon.factoryReset` calls `QuiesceArchival()` after entering the
   reset generation and before the wipe.
+- **Journal-writer fence (#15281 D08-03).** The audit journal was the one
+  store writer the reset did not fence: `journalLog` appended with
+  `O_CREATE|O_APPEND`, so a reboot/halt/power-off `SystemAction` in the
+  daemon's stop window (after the wipe erased `.config.journal`, before
+  `systemctl stop`) recreated it with the prior tenant's principal
+  (username, UID, login class, session, action — audit-only, no secrets).
+  `Store` gains `journalFenced`; `QuiesceJournal()` latches it (new
+  `journalLog` calls no-op) and fences the journal itself under `j.mu`
+  (an append already past the store check is refused inside
+  `appendLocked`; an append past both checks has its bytes in the page
+  cache before the fence latches, and the wipe erases them).
+  `ResumeJournal()` clears both only on the fail-closed recoverable-wipe
+  path. `daemon.factoryReset` calls `QuiesceJournal()` alongside
+  `QuiesceRescueWrites()`/`QuiesceArchival()`, before the wipe.
 - **`CommitConfirmed` ordering.** Confirm state is only touched after
   the persist succeeds: on failure the rollback timer is NOT armed and
   an existing pending confirm (timer + rollback target) is left fully

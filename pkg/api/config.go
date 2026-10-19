@@ -306,12 +306,7 @@ func (s *Server) configCommitHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	compiled, err := s.commitFn(r.Context(), authority, "")
 	if err != nil {
-		switch {
-		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-			writeError(w, http.StatusServiceUnavailable, "commit busy: "+err.Error())
-		default:
-			writeError(w, http.StatusBadRequest, err.Error())
-		}
+		writeCommitError(w, compiled, err)
 		return
 	}
 	writeOK(w, commitResponseFromConfig(compiled))
@@ -609,12 +604,7 @@ func (s *Server) configCommitConfirmedHandler(w http.ResponseWriter, r *http.Req
 	}
 	compiled, err := s.commitConfirmedFn(r.Context(), authority, req.Minutes)
 	if err != nil {
-		switch {
-		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-			writeError(w, http.StatusServiceUnavailable, "commit busy: "+err.Error())
-		default:
-			writeError(w, http.StatusBadRequest, err.Error())
-		}
+		writeCommitError(w, compiled, err)
 		return
 	}
 	writeOK(w, commitResponseFromConfig(compiled))
@@ -705,6 +695,54 @@ func (s *Server) configAnnotateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, Response{Success: true})
+}
+
+// commitCommittedResponse is the REST body for a commit that WAS promoted,
+// persisted and is live, but whose non-fatal apply tail (or peer push)
+// failed (#15281 D08-02). It is deliberately NOT the success envelope:
+// Success stays false and the HTTP status is 503 (retryable), so existing
+// clients that only check success/status do not mistake it for a clean
+// commit — but Data.committed=true plus the preserved error text let a
+// client distinguish "config is live, retry the tail" from a 400 config
+// reject (compiled == nil). This mirrors the gRPC commitApplyStatus
+// classification (#5742), which the REST handlers previously lacked:
+// they blanket-mapped every non-context error to 400 success:false,
+// indistinguishable from a reject, while the config was live.
+type commitCommittedResponse struct {
+	Status    string   `json:"status"`
+	Committed bool     `json:"committed"`
+	Error     string   `json:"error"`
+	Warnings  []string `json:"warnings,omitempty"`
+}
+
+// writeCommitError maps a non-nil commit-callback error (commitFn /
+// commitConfirmedFn) to the REST response, classifying structurally on
+// (compiled, err) exactly like grpcapi.commitApplyStatus (#5742):
+//
+//   - context.Canceled / DeadlineExceeded (checked FIRST): 503
+//     "commit busy: ..." — unchanged from the pre-#15281 mapping.
+//   - compiled != nil: the daemon committed+ persisted the config and
+//     returned it alongside a non-fatal tail/peer error. 503 with
+//     committed:true and the error text — retryable, NOT a reject.
+//   - compiled == nil (default): a real config reject. 400 — unchanged,
+//     fail-safe: an unclassifiable error is never told "committed".
+func writeCommitError(w http.ResponseWriter, compiled *config.Config, err error) {
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		writeError(w, http.StatusServiceUnavailable, "commit busy: "+err.Error())
+	case compiled != nil:
+		resp := commitCommittedResponse{
+			Status:    "committed_with_error",
+			Committed: true,
+			Error:     err.Error(),
+		}
+		if len(compiled.Warnings) > 0 {
+			resp.Warnings = append([]string(nil), compiled.Warnings...)
+		}
+		writeJSON(w, http.StatusServiceUnavailable, Response{Success: false, Data: resp, Error: err.Error()})
+	default:
+		writeError(w, http.StatusBadRequest, err.Error())
+	}
 }
 
 type configCommitResponse struct {
