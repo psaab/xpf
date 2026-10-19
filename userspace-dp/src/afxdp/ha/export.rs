@@ -247,17 +247,31 @@ impl crate::afxdp::Coordinator {
         let ha_state = self.ha.rg_runtime.load();
         let mut deltas = Vec::new();
         for entry in sessions.values() {
-            // Only forward (non-reverse), locally-originated sessions.
+            // #14960 (D26-04): admission must mirror the owner-RG export
+            // walk (`SessionTable::iter_export_budgeted`): forward,
+            // non-seed, non-TUN-origin rows in an exportable disposition.
+            // The pre-fix filter was a narrower ad-hoc set that dropped
+            // the failover population this export exists to serve.
             if entry.metadata.is_reverse {
                 continue;
             }
-            if entry.origin.is_peer_synced() {
+            // Node-local rows never cross HA (#10038 TunOrigin, #7770
+            // transient seeds): the pre-fix snapshot had no such gate, so
+            // a locally originated TUN forward on an active RG was leaked
+            // to the peer. A WorkerLocalImport row is only this worker's
+            // replica of a locally authored session, not its authority.
+            if entry.origin.is_local_tun_origin()
+                || entry.origin.is_transient_local_seed()
+                || entry.origin == crate::session::SessionOrigin::WorkerLocalImport
+            {
                 continue;
             }
-            // Skip fabric-ingress sessions (same exclusion as export_forward_sessions_for_owner_rgs).
-            if entry.metadata.fabric_ingress {
-                continue;
-            }
+            // Peer-synced rows are RETAINED, not skipped: after a demotion
+            // `demote_shared_owner_rgs` retags the surviving forward rows
+            // SyncImport, so excluding `is_peer_synced` dropped exactly
+            // the sessions a rejoining/new peer needs from this node.
+            // Fabric-ingress rows are likewise authoritative shared state
+            // (the owner-RG walk includes them), not an exclusion.
             // Only export for active RGs. Missing HA state entry = inactive.
             let rg_active = entry.metadata.owner_rg_id > 0
                 && ha_state
@@ -267,10 +281,15 @@ impl crate::afxdp::Coordinator {
             if !rg_active && entry.metadata.owner_rg_id > 0 {
                 continue;
             }
-            // Only exportable dispositions.
+            // Only exportable dispositions — the owner-RG set, including
+            // the unresolved NoRoute/MissingNeighbor rows retained by
+            // #10790 so a pending-resolution session survives BulkEnd.
             if !matches!(
                 entry.decision.resolution.disposition,
-                ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
+                ForwardingDisposition::ForwardCandidate
+                    | ForwardingDisposition::FabricRedirect
+                    | ForwardingDisposition::NoRoute
+                    | ForwardingDisposition::MissingNeighbor
             ) {
                 continue;
             }
@@ -284,7 +303,15 @@ impl crate::afxdp::Coordinator {
                 source_nat_static: entry.source_nat_static,
                 policy_generation: 0,
                 origin: entry.origin,
-                fabric_redirect_sync: true,
+                // #14960: derive the flag from the row's own disposition,
+                // exactly as both encoder legs compute it from
+                // `fabric_redirect_sync || disposition == FabricRedirect`.
+                // The pre-fix unconditional `true` encoded
+                // FLAG_FABRIC_REDIRECT on EVERY exported row, routing
+                // plain sessions through the peer's fabric-redirect
+                // ownership branch (and its forward-wire alias).
+                fabric_redirect_sync: entry.decision.resolution.disposition
+                    == ForwardingDisposition::FabricRedirect,
                 // #2465: Open delta from the HA bulk export — the synced entry
                 // carries no creation instant. The SESSION_CREATE frame reports
                 // no duration, so 0/unknown is correct here.
@@ -297,10 +324,13 @@ impl crate::afxdp::Coordinator {
                 // flags (and not routed through the RT_FLOW close exporter).
                 observed_tos: 0,
                 observed_tcp_flags: 0,
-                // #4915: HA bulk-export Open delta — feeds the session-sync
-                // dispatcher, NOT the RT_FLOW exporter, and the SyncedSessionEntry
-                // carries no session id. 0 (unknown).
-                session_id: 0,
+                // #14960: carry the shared entry's stable session id (the
+                // #5212 wire-adopted id a peer import threaded onto it), so
+                // the receiving node adopts the originating node's id
+                // instead of minting a divergent local one. Still 0 for
+                // local-origin publishes that never stamped it — the
+                // documented unknown/alloc-fallback sentinel.
+                session_id: entry.session_id,
                 bulk_resync: false,
                 tcp_close_class: entry.tcp_close_class,
                 tcp_handshake_state: entry.tcp_handshake_state,

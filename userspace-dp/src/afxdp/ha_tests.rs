@@ -2150,6 +2150,180 @@ fn bulk_exported_pptp_session_carries_its_call_id_pair_14303() {
         crate::session::TunnelDiscriminator::Pptp(call.handle())
     );
 }
+/// #14960 (D26-04): the coordinator bulk export on peer connect must mirror
+/// the owner-RG export's admission set and per-session stamps, not its own
+/// narrower ad-hoc filter. The pre-fix snapshot (a) stamped
+/// `fabric_redirect_sync: true` unconditionally, so a plain ForwardCandidate
+/// was encoded with FLAG_FABRIC_REDIRECT and took the Go fabric-redirect
+/// ownership branch, (b) zeroed `session_id` although the shared entry now
+/// carries the originating node's stable id, (c) dropped every peer-synced
+/// (SyncImport) row — exactly the failover population that survives a
+/// demotion — plus fabric-ingress and NoRoute/MissingNeighbor rows the
+/// owner-RG walk retains, and (d) leaked node-local TunOrigin forwards,
+/// which must never cross HA (#10038).
+///
+/// FAIL-ON-REVERT: restoring any one of the pre-fix predicates/stamps in
+/// `snapshot_all_sessions_export` (unconditional fabric flag, `session_id:
+/// 0`, `is_peer_synced` skip, fabric-ingress skip, the two-disposition
+/// allowlist, or the missing TunOrigin/seed exclusion) turns the matching
+/// assertion below RED.
+#[test]
+fn bulk_export_preserves_fabric_flag_session_id_and_failover_sessions_14960() {
+    const STABLE_ID: u64 = 0x14960;
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
+
+    let base = SyncedSessionEntry {
+        key: test_key(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: STABLE_ID,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+    };
+    let mut publish = |mut entry: SyncedSessionEntry, port: u16| {
+        entry.key.src_port = port;
+        // test_metadata() is fabric-ingress by default; plain rows clear it,
+        // fabric-ingress rows keep it, so both legs are exercised as-is.
+        publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            &entry,
+        );
+    };
+
+    // (1) Legitimate control: plain ForwardCandidate, locally originated,
+    // owner RG 0 (the `owner_rg_id == 0` arm the old code also exported).
+    let mut plain = base.clone();
+    plain.metadata.owner_rg_id = 0;
+    plain.metadata.fabric_ingress = false;
+    publish(plain, 55101);
+
+    // (2) Failover survivor: peer-synced import on active RG 1 — demoted
+    // rows are retagged SyncImport by demote_shared_owner_rgs, so this is
+    // the population a rejoining peer must be sent.
+    let mut failover = base.clone();
+    failover.origin = SessionOrigin::SyncImport;
+    failover.metadata.owner_rg_id = 1;
+    failover.metadata.fabric_ingress = false;
+    publish(failover, 55102);
+
+    // (3) Fabric-ingress authoritative row on RG 1 (owner-RG walk includes
+    // these; only the coordinator snapshot skipped them).
+    let mut fabric_ingress = base.clone();
+    fabric_ingress.metadata.owner_rg_id = 1;
+    publish(fabric_ingress, 55103);
+
+    // (4) Unresolved rows the owner-RG export retains (#10790).
+    for (port, disposition) in [
+        (55104, ForwardingDisposition::NoRoute),
+        (55105, ForwardingDisposition::MissingNeighbor),
+    ] {
+        let mut unresolved = base.clone();
+        unresolved.metadata.owner_rg_id = 1;
+        unresolved.metadata.fabric_ingress = false;
+        unresolved.decision.resolution.disposition = disposition;
+        publish(unresolved, port);
+    }
+
+    // (5) A genuine FabricRedirect row: its flag must survive as true.
+    let mut redirect = base.clone();
+    redirect.metadata.owner_rg_id = 1;
+    redirect.metadata.fabric_ingress = false;
+    redirect.decision.resolution.disposition = ForwardingDisposition::FabricRedirect;
+    publish(redirect, 55106);
+
+    // (6) Node-local rows that must NEVER cross HA: TunOrigin (#10038) and
+    // transient punt seeds (#7770). Both are ForwardCandidate on RG 1, so
+    // only the origin gate keeps them out.
+    for (port, origin) in [
+        (55107, SessionOrigin::TunOrigin),
+        (55108, SessionOrigin::FabricPuntSeed),
+    ] {
+        let mut local = base.clone();
+        local.origin = origin;
+        local.metadata.owner_rg_id = 1;
+        local.metadata.fabric_ingress = false;
+        publish(local, port);
+    }
+
+    // (7) Named controls that stay excluded: a reverse companion and a
+    // terminal PolicyDenied row.
+    let mut reverse = base.clone();
+    reverse.metadata.owner_rg_id = 1;
+    reverse.metadata.fabric_ingress = false;
+    reverse.metadata.is_reverse = true;
+    publish(reverse, 55109);
+    let mut denied = base.clone();
+    denied.metadata.owner_rg_id = 1;
+    denied.metadata.fabric_ingress = false;
+    denied.decision.resolution.disposition = ForwardingDisposition::PolicyDenied;
+    publish(denied, 55110);
+
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..HAGroupStatus::default()
+        }])
+        .expect("activate RG 1");
+    let (sender, _rx) = crate::event_stream::EventStreamSender::test_sender(true, 64);
+    coordinator.event_stream = Some(sender);
+
+    let export = coordinator
+        .snapshot_all_sessions_export()
+        .expect("bulk export");
+    let deltas = export.deltas_for_test();
+    let by_port: std::collections::BTreeMap<u16, &crate::session::SessionDelta> =
+        deltas.iter().map(|d| (d.key.src_port, d)).collect();
+
+    assert_eq!(
+        deltas.len(),
+        6,
+        "bulk export must retain exactly the owner-RG-visible forward set \
+         (plain, failover, fabric-ingress, NoRoute, MissingNeighbor, \
+         FabricRedirect); got ports {:?}",
+        by_port.keys().collect::<Vec<_>>()
+    );
+    for port in [55101u16, 55102, 55103, 55104, 55105, 55106] {
+        let delta = by_port
+            .get(&port)
+            .unwrap_or_else(|| panic!("port {port} must survive the bulk export (#14960)"));
+        assert_eq!(
+            delta.session_id, STABLE_ID,
+            "port {port}: bulk export must carry the shared entry's stable \
+             session_id, not 0, or the peer mints a divergent RT_FLOW id"
+        );
+    }
+    assert!(
+        !by_port[&55101].fabric_redirect_sync,
+        "plain ForwardCandidate must not be stamped fabric-redirect: the \
+         unconditional true encoded FLAG_FABRIC_REDIRECT for every row and \
+         routed plain sessions through the Go fabric-redirect ownership \
+         branch (#14960)"
+    );
+    assert!(
+        by_port[&55106].fabric_redirect_sync,
+        "a genuine FabricRedirect row must keep its fabric-redirect flag"
+    );
+    for port in [55107u16, 55108, 55109, 55110] {
+        assert!(
+            !by_port.contains_key(&port),
+            "port {port} (TunOrigin / punt seed / reverse / PolicyDenied) \
+             must stay out of the bulk export"
+        );
+    }
+}
+
 
 #[test]
 fn drain_export_deltas_from_workers_is_fair_across_workers_9856() {
