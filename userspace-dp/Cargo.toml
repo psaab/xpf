@@ -139,3 +139,8 @@ harness = false
 [[bench]]
 name = "allowed_ips_lookup"
 harness = false
+
+# Perf #14300: SessionKey derived vs manual single-write hash cost.
+[[bench]]
+name = "session_key_hash"
+harness = false

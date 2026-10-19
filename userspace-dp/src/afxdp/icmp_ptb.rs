@@ -191,15 +191,26 @@ pub(in crate::afxdp) fn clamp_next_hop_mtu(mtu: usize, addr_family: u8) -> u16 {
 /// still carries the original-family destination, while the builder selects
 /// its WG peer from the translated inner frame; use the NAT decision's output
 /// destination instead.
+///
+/// `needs_inner_dst` gates the frame parse (perf #14300): the destination
+/// is consumed ONLY by the WireGuard arm of `post_transform_inner_mtu`
+/// (per-peer underlay MTU, #2845). Plain forwards, NAT64-only (returns
+/// `rewrite_dst` above) and GRE tunnels never read it, so callers pass
+/// `post_transform_needs_inner_dst(..)` and skip parsing a value that
+/// would be dropped on the floor.
 #[inline(always)]
 pub(super) fn post_transform_inner_destination(
     source_frame: &[u8],
     meta: ForwardPacketMeta,
     decision: &SessionDecision,
     is_nat64: bool,
+    needs_inner_dst: bool,
 ) -> Option<std::net::IpAddr> {
     if is_nat64 {
         return decision.nat.rewrite_dst;
+    }
+    if !needs_inner_dst {
+        return None;
     }
     frame_l3_offset(source_frame)
         .or_else(|| {
@@ -211,6 +222,23 @@ pub(super) fn post_transform_inner_destination(
         })
         .and_then(|l3| source_frame.get(l3..))
         .and_then(|packet| crate::afxdp::gre::inner_dst_ip(packet, meta.addr_family))
+}
+
+/// Whether `post_transform_inner_mtu` will consume `inner_dst` for this
+/// decision: only a WireGuard tunnel endpoint reads it (per-peer MTU).
+/// Single source of truth for the PTB caller's parse-skip gate.
+#[inline]
+pub(in crate::afxdp) fn post_transform_needs_inner_dst(
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+) -> bool {
+    if decision.resolution.tunnel_endpoint_id == 0 {
+        return false;
+    }
+    forwarding
+        .tunnel_endpoints
+        .get(&decision.resolution.tunnel_endpoint_id)
+        .is_some_and(|e| matches!(tunnel_mode_kind(&e.mode), TunnelKind::WireGuard))
 }
 
 /// #2330: the inner-source post-transform MTU for a size-changing forward

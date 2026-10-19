@@ -65,7 +65,18 @@ fn reverse_direction_discriminator(d: TunnelDiscriminator) -> TunnelDiscriminato
     }
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+/// Perf #14300: manual `Hash` (not derived) so the common case pays ONE
+/// `write` over a fixed 42-byte (v4) / 66-byte (v6) stack image instead of
+/// the derived sequence of ~12 typed `write_*` calls — each of which, under
+/// `KeyedFxHasher`, is a full splitmix64 fold (~9 multiplies). The image
+/// layout is FIXED (family-tagged, zero-padded) so distinct keys never
+/// share an image: `src_ip`/`dst_ip` are encoded as (family, 16-byte
+/// v6-form) pairs, ports/domain as fixed-width LE, and the discriminator
+/// as (tag, value). Equality is unchanged (derived `PartialEq` on the
+/// same fields), and hash/Eq consistency holds because equal keys build
+/// byte-identical images. The hasher itself (keyed, per-process seed) is
+/// unchanged — only the number of folds per key drops (~12 → 6/9).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionKey {
     pub addr_family: u8,
     pub protocol: u8,
@@ -180,6 +191,46 @@ pub(crate) struct SessionScope {
     pub discriminator: TunnelDiscriminator,
 }
 
+impl std::hash::Hash for SessionKey {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Fixed image, no heap: [af, proto, src(1+16), dst(1+16),
+        // sport LE, dport LE, routing_domain LE, disc_tag, disc_val LE]
+        // = 2 + 17 + 17 + 2 + 2 + 4 + 1 + 4 = 49 bytes for both families
+        // (v4 addrs zero-padded into the 16-byte slot after a v4 tag, so
+        // a v4 addr can never alias the same bytes as a v6 addr).
+        let mut img = [0u8; 49];
+        img[0] = self.addr_family;
+        img[1] = self.protocol;
+        let mut put_ip = |slot: &mut [u8], ip: &IpAddr| match ip {
+            IpAddr::V4(v4) => {
+                slot[0] = 4;
+                slot[1..5].copy_from_slice(&v4.octets());
+            }
+            IpAddr::V6(v6) => {
+                slot[0] = 6;
+                slot[1..17].copy_from_slice(&v6.octets());
+            }
+        };
+        put_ip(&mut img[2..19], &self.src_ip);
+        put_ip(&mut img[19..36], &self.dst_ip);
+        img[36..38].copy_from_slice(&self.src_port.to_le_bytes());
+        img[38..40].copy_from_slice(&self.dst_port.to_le_bytes());
+        img[40..44].copy_from_slice(&self.routing_domain.to_le_bytes());
+        let (tag, val) = match self.discriminator {
+            TunnelDiscriminator::None => (0u8, 0u32),
+            TunnelDiscriminator::Unkeyed => (1, 0),
+            TunnelDiscriminator::Keyed(k) => (2, k),
+            TunnelDiscriminator::Pptp(h) => (3, h),
+            TunnelDiscriminator::Ipsec(id) => (4, id),
+            TunnelDiscriminator::Unparseable => (5, 0),
+        };
+        img[44] = tag;
+        img[45..49].copy_from_slice(&val.to_le_bytes());
+        state.write(&img);
+    }
+}
+
 impl SessionKey {
     pub(crate) fn bare_tuple(&self) -> BareSessionTuple {
         BareSessionTuple {
@@ -200,6 +251,97 @@ impl SessionKey {
     }
 }
 
+#[cfg(test)]
+mod session_key_hash_14300_tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    fn h(k: &SessionKey) -> u64 {
+        let mut s = DefaultHasher::new();
+        k.hash(&mut s);
+        s.finish()
+    }
+    fn key() -> SessionKey {
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: 6,
+            src_ip: IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+            dst_ip: IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 1234,
+            dst_port: 80,
+            discriminator: TunnelDiscriminator::None,
+            routing_domain: 0,
+        }
+    }
+    #[test]
+    fn equal_keys_hash_equal_and_every_field_splits_14300() {
+        let a = key();
+        assert_eq!(
+            h(&a),
+            h(&a.clone()),
+            "equal keys MUST hash equal (Hash/Eq contract)"
+        );
+        let mut variants: Vec<SessionKey> = Vec::new();
+        let mut v = key();
+        v.addr_family = libc::AF_INET6 as u8;
+        variants.push(v);
+        let mut v = key();
+        v.protocol = 17;
+        variants.push(v);
+        let mut v = key();
+        v.src_ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 9));
+        variants.push(v);
+        let mut v = key();
+        v.dst_ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 9));
+        variants.push(v);
+        let mut v = key();
+        v.src_port = 9999;
+        variants.push(v);
+        let mut v = key();
+        v.dst_port = 9999;
+        variants.push(v);
+        let mut v = key();
+        v.routing_domain = 7;
+        variants.push(v);
+        let mut v = key();
+        v.discriminator = TunnelDiscriminator::Unkeyed;
+        variants.push(v);
+        let mut v = key();
+        v.discriminator = TunnelDiscriminator::Keyed(0);
+        variants.push(v);
+        let mut v = key();
+        v.discriminator = TunnelDiscriminator::Keyed(1);
+        variants.push(v);
+        let mut v = key();
+        v.discriminator = TunnelDiscriminator::Pptp(1);
+        variants.push(v);
+        let mut v = key();
+        v.discriminator = TunnelDiscriminator::Ipsec(1);
+        variants.push(v);
+        let mut v = key();
+        v.discriminator = TunnelDiscriminator::Unparseable;
+        variants.push(v);
+        // v4 addr must never alias the v6 addr carrying the same low bytes.
+        let mut v = key();
+        v.src_ip = IpAddr::V6(std::net::Ipv6Addr::from([
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 1,
+        ]));
+        variants.push(v);
+        for (i, var) in variants.iter().enumerate() {
+            assert_ne!(h(&a), h(var), "variant {i} must hash differently: {var:?}");
+            assert_ne!(a, *var, "variant {i} fixture must actually differ");
+        }
+        // Keyed(0) vs Unkeyed vs None are distinct classes (#7188) and
+        // must stay distinct in the image (tags 2/1/0 above).
+        let mut k0 = key();
+        k0.discriminator = TunnelDiscriminator::Keyed(0);
+        let mut un = key();
+        un.discriminator = TunnelDiscriminator::Unkeyed;
+        assert_ne!(h(&k0), h(&un));
+        assert_ne!(h(&k0), h(&a));
+    }
+}
 
 pub(crate) fn reply_matches_forward_session(
     forward_key: &SessionKey,
@@ -624,12 +766,18 @@ mod discriminator_carry_tests_8103 {
         tcp.src_port = 51000;
         tcp.dst_port = 443;
         for (name, got) in [
-            ("forward_wire_key", forward_wire_key(&tcp, nat).discriminator),
+            (
+                "forward_wire_key",
+                forward_wire_key(&tcp, nat).discriminator,
+            ),
             (
                 "translated_session_key",
                 translated_session_key(&tcp, nat).discriminator,
             ),
-            ("reverse_wire_key", reverse_wire_key(&tcp, nat).discriminator),
+            (
+                "reverse_wire_key",
+                reverse_wire_key(&tcp, nat).discriminator,
+            ),
             (
                 "reverse_canonical_key",
                 reverse_canonical_key(&tcp, nat).discriminator,
