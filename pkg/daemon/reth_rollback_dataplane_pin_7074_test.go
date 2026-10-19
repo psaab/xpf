@@ -45,7 +45,7 @@ func TestRethAbortRollbackRebindsTheJOINEDDataplane_7074(t *testing.T) {
 		d.setDataplane(&abortRecoveryTestDP{link: second})
 	}
 
-	linkCycled, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103, nil)
+	linkCycled, _, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103, nil)
 
 	// Preconditions. Without these the assertions below could pass on a fixture
 	// that never reached the hook or never aborted, which is the vacuous shape.
@@ -97,7 +97,7 @@ func TestRethAbortRollbackSurvivesAClearedDataplaneCell_7074(t *testing.T) {
 	d.setDataplane(&abortRecoveryTestDP{link: joined})
 	joined.onPrepare = func() { d.setDataplane(nil) }
 
-	_, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103, nil)
+	_, _, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103, nil)
 
 	if joined.prepareCalls != 1 {
 		t.Fatalf("precondition: the hook must have joined the instance; calls = %d", joined.prepareCalls)

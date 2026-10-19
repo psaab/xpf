@@ -98,7 +98,7 @@ func TestRethMACJoinsWorkersBeforeLinkCycle_5103(t *testing.T) {
 	var events []string
 	withRethOps(t, newRecordingRethOps(t, &events, curMAC5103, true /* force the cycle */))
 
-	cycled, err := programRethMAC("ge-0-0-1", virtMAC5103, func() error {
+	cycled, _, err := programRethMAC("ge-0-0-1", virtMAC5103, func() error {
 		events = append(events, "stop_workers")
 		return nil
 	})
@@ -125,7 +125,7 @@ func TestRethMACAbortsCycleWhenJoinFails_5103(t *testing.T) {
 	var events []string
 	withRethOps(t, newRecordingRethOps(t, &events, curMAC5103, true))
 
-	cycled, err := programRethMAC("ge-0-0-1", virtMAC5103, func() error {
+	cycled, _, err := programRethMAC("ge-0-0-1", virtMAC5103, func() error {
 		events = append(events, "stop_workers")
 		return errors.New("stop_workers: helper did not respond")
 	})
@@ -159,7 +159,7 @@ func TestRethMACNoJoinWhenLiveSetSucceeds_5103(t *testing.T) {
 	withRethOps(t, newRecordingRethOps(t, &events, curMAC5103, false /* live set works */))
 
 	joined := false
-	cycled, err := programRethMAC("ge-0-0-1", virtMAC5103, func() error {
+	cycled, _, err := programRethMAC("ge-0-0-1", virtMAC5103, func() error {
 		joined = true
 		return nil
 	})
@@ -186,7 +186,7 @@ func TestRethMACNoJoinWhenMACAlreadyCorrect_5103(t *testing.T) {
 	withRethOps(t, newRecordingRethOps(t, &events, virtMAC5103, true))
 
 	joined := false
-	cycled, err := programRethMAC("ge-0-0-1", virtMAC5103, func() error {
+	cycled, _, err := programRethMAC("ge-0-0-1", virtMAC5103, func() error {
 		joined = true
 		return nil
 	})
@@ -264,7 +264,7 @@ func TestRethMACHookRunsOnTheCallersGoroutine_6871(t *testing.T) {
 
 	ran := false
 	var hookGoID uint64
-	cycled, err := programRethMAC("ge-0-0-1", virtMAC5103, func() error {
+	cycled, _, err := programRethMAC("ge-0-0-1", virtMAC5103, func() error {
 		ran = true
 		hookGoID = goIDFromStack()
 		return nil
@@ -296,7 +296,7 @@ func TestRethMACNilBeforeCycleStillCycles_5103(t *testing.T) {
 	var events []string
 	withRethOps(t, newRecordingRethOps(t, &events, curMAC5103, true))
 
-	cycled, err := programRethMAC("ge-0-0-1", virtMAC5103, nil)
+	cycled, _, err := programRethMAC("ge-0-0-1", virtMAC5103, nil)
 	if err != nil {
 		t.Fatalf("programRethMAC with a nil hook: %v", err)
 	}

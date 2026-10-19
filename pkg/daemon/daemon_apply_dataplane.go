@@ -386,6 +386,11 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// default gateway transitions. Must run AFTER networkd.Apply() so .link
 	// renames are applied first.
 	needLinkCycleRecovery := false
+	// #15276: redundancy groups whose RETH member MAC actually changed this
+	// apply, cycled or not. Step 2.6b announces for exactly these RGs: a live
+	// (no-cycle) MAC change flushes no address, so the cycle reconcile does
+	// not fire, yet neighbours still hold the old MAC.
+	macChangedRGs := make(map[int]bool)
 	// #7007: set when an aborted member's in-loop rollback rebound WITHOUT
 	// releasing the apply's lease. It is what makes the end-of-apply release
 	// below unconditional in effect — 2.6b2 is gated on needLinkCycleRecovery,
@@ -480,9 +485,13 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			ensureRethLinkOriginalName(linuxName)
 			setRethIPv6Knobs(linuxName)
 			mac := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, rethIndex, cc.NodeID)
-			networkdErr, needLinkCycleRecovery, rethRollbackKeptLease =
+			var memberMACChanged bool
+			networkdErr, needLinkCycleRecovery, rethRollbackKeptLease, memberMACChanged =
 				d.programRethMemberMAC(linuxName, mac, networkdErr,
 					needLinkCycleRecovery, rethRollbackKeptLease)
+			if memberMACChanged {
+				macChangedRGs[rethCfg.RedundancyGroup] = true
+			}
 			if err := d.finishRethMemberLinkTail(linuxName, mac, rethCfg); err != nil {
 				networkdErr = errors.Join(networkdErr, err)
 			}
@@ -490,10 +499,11 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	}
 
 	// 2.6b. Reconcile VRRP VIPs and stable link-locals after RETH MAC
-	// programming. Only needed when programRethMAC had to bring the
-	// interface DOWN/UP (link cycle), which removes all addresses
-	// including VRRP VIPs and stable link-locals.
-	d.reconcileAfterRethLinkCycle(cfg, needLinkCycleRecovery)
+	// programming. The address reconcile is needed only when programRethMAC
+	// had to bring the interface DOWN/UP (link cycle), which removes all
+	// addresses including VRRP VIPs and stable link-locals. The announce is
+	// owed whenever a member MAC changed (#15276), cycled or not.
+	d.reconcileAfterRethLinkCycle(cfg, needLinkCycleRecovery, macChangedRGs)
 
 	// 2.6b2. Rebind AF_XDP sockets after RETH MAC programming.
 	// Only needed when PrepareLinkCycle was called (macChangeNeeded=true
@@ -674,7 +684,8 @@ var errRethPrepareLinkCycle = errors.New("reth mac: link cycle failed after the 
 // accumulators step 2.6 carries across its loop: the commit error (networkdErr,
 // the tail-commit channel the device-map teardown (#5309) and the management-VRF
 // rebind (#5700) also use) and needLinkCycleRecovery (step 2.6b2's rebind gate).
-// It returns both, updated.
+// It returns both, updated, plus this member's macChanged fact (#15276) for the
+// caller to fold into the per-RG announce set.
 //
 // Only the class where the worker-join HOOK RAN produces a commit error; an
 // ordinary MAC-set failure stays warn-only, as it always has. (#6871: an earlier
@@ -706,9 +717,9 @@ var errRethPrepareLinkCycle = errors.New("reth mac: link cycle failed after the 
 // which reddened that gate correctly, since "reached from nowhere else" is the
 // property it pins.
 func (d *Daemon) programRethMemberMAC(ifName string, mac net.HardwareAddr,
-	commitErr error, needLinkCycleRecovery bool, leaseKept bool) (error, bool, bool) {
+	commitErr error, needLinkCycleRecovery bool, leaseKept bool) (error, bool, bool, bool) {
 	memberKeptLease := false
-	linkCycled, prepareErr := d.programRethMACWithWorkerJoin(ifName, mac, &memberKeptLease)
+	linkCycled, macChanged, prepareErr := d.programRethMACWithWorkerJoin(ifName, mac, &memberKeptLease)
 	if prepareErr != nil {
 		commitErr = errors.Join(commitErr, prepareErr)
 	}
@@ -746,7 +757,7 @@ func (d *Daemon) programRethMemberMAC(ifName string, mac net.HardwareAddr,
 	// cycle anywhere — is completely unaffected, and this cannot become a way to
 	// suppress the 1 Hz reconcile with nothing obliged to release it.
 	d.renewLinkCycleLease()
-	return commitErr, needLinkCycleRecovery || linkCycled, leaseKept || memberKeptLease
+	return commitErr, needLinkCycleRecovery || linkCycled, leaseKept || memberKeptLease, macChanged
 }
 
 // renewLinkCycleLease extends a link-cycle lease that is already held. It is the
@@ -998,7 +1009,8 @@ func (d *Daemon) reDisableRxVlanAfterLinkCycle(linuxName string, rethCfg *config
 
 // reconcileAfterRethLinkCycle re-adds the VRRP VIPs and stable link-locals that
 // a RETH MAC link cycle removed (the DOWN/UP drops every kernel address on the
-// member), then renews the link-cycle lease.
+// member), announces for every RG whose member MAC changed (#15276), then
+// renews the link-cycle lease.
 //
 // #6871 (round 7): this renewal covers the LAST unrenewed span, and it was the
 // worst one. The final member's tail is followed by this reconcile — netlink,
@@ -1026,28 +1038,53 @@ func (d *Daemon) reDisableRxVlanAfterLinkCycle(linuxName string, rethCfg *config
 // equivalent. Ungated is still the right shape — it does not depend on an
 // accumulator staying in sync with the lease — but the reason is "no gate is
 // needed", not "the gate would lose the abort path".
-func (d *Daemon) reconcileAfterRethLinkCycle(cfg *config.Config, needLinkCycleRecovery bool) {
-	if needLinkCycleRecovery && d.isNoRethVRRP() {
+func (d *Daemon) reconcileAfterRethLinkCycle(cfg *config.Config, needLinkCycleRecovery bool, macChangedRGs map[int]bool) {
+	if d.isNoRethVRRP() {
 		// Direct mode: re-add VIPs + stable link-locals for each RG
-		// where we are primary.
-		if d.cluster != nil {
+		// where we are primary when a cycle flushed them, and announce for
+		// exactly the RGs whose member MAC changed (#15276). A live MAC
+		// change flushes nothing, so the VIPs are already present and the
+		// announce is the only owed action; a cycled RG takes the same
+		// announce alongside its re-add, never a second one.
+		if d.cluster != nil && cfg.Chassis.Cluster != nil {
 			for _, rg := range cfg.Chassis.Cluster.RedundancyGroups {
-				if d.cluster.IsLocalPrimary(rg.ID) {
+				if rg == nil {
+					continue
+				}
+				if !d.cluster.IsLocalPrimary(rg.ID) {
+					continue
+				}
+				if needLinkCycleRecovery {
 					d.directAddVIPs(rg.ID)
 					d.addStableRethLinkLocal(rg.ID)
+				}
+				if needLinkCycleRecovery {
 					d.scheduleDirectAnnounce(rg.ID, "link-cycle-recovery")
+				} else if macChangedRGs[rg.ID] {
+					d.scheduleDirectAnnounce(rg.ID, "reth-mac-change")
 				}
 			}
 		}
-	} else if needLinkCycleRecovery && d.vrrpMgr != nil {
-		d.vrrpMgr.ReconcileVIPs()
-		// Re-add stable link-locals for active RGs after MAC bounce.
-		if d.cluster != nil && cfg.Chassis.Cluster != nil {
-			for _, rg := range cfg.Chassis.Cluster.RedundancyGroups {
-				s := d.getOrCreateRGState(rg.ID)
-				if s.IsActive() {
-					d.addStableRethLinkLocal(rg.ID)
+	} else if d.vrrpMgr != nil {
+		if needLinkCycleRecovery {
+			d.vrrpMgr.ReconcileVIPs()
+			// Re-add stable link-locals for active RGs after MAC bounce.
+			if d.cluster != nil && cfg.Chassis.Cluster != nil {
+				for _, rg := range cfg.Chassis.Cluster.RedundancyGroups {
+					if rg == nil {
+						continue
+					}
+					s := d.getOrCreateRGState(rg.ID)
+					if s.IsActive() {
+						d.addStableRethLinkLocal(rg.ID)
+					}
 				}
+			}
+		} else {
+			// #15276: no cycle flushed any address, so only the RGs whose
+			// member MAC changed owe a forced GARP/NA.
+			for rgID := range macChangedRGs {
+				d.vrrpMgr.ReconcileVIPsForRG(rgID)
 			}
 		}
 	}
@@ -1056,8 +1093,9 @@ func (d *Daemon) reconcileAfterRethLinkCycle(cfg *config.Config, needLinkCycleRe
 
 // programRethMACWithWorkerJoin programs a RETH member's virtual MAC with the
 // #5103 worker-join hook, and unwinds that join when the rest of the cycle then
-// failed. It returns whether the link was cycled and a COMMIT error, non-nil
-// only for the class where the hook had already run.
+// failed. It returns whether the link was cycled, whether the MAC changed
+// (#15276), and a COMMIT error, non-nil only for the class where the hook had
+// already run.
 //
 // The hook runs only when a cycle is actually required — programRethMAC calls it
 // after the live MAC set has been rejected and before setDown, the first
@@ -1135,7 +1173,7 @@ func (d *Daemon) reconcileAfterRethLinkCycle(cfg *config.Config, needLinkCycleRe
 // reddened that gate — correctly, since a moved acquisition site is exactly what
 // it is built to notice. Adding a parameter leaves the key, and therefore the
 // gate's containment proof, untouched.
-func (d *Daemon) programRethMACWithWorkerJoin(ifName string, mac net.HardwareAddr, leaseKept *bool) (linkCycled bool, commitErr error) {
+func (d *Daemon) programRethMACWithWorkerJoin(ifName string, mac net.HardwareAddr, leaseKept *bool) (linkCycled bool, macChanged bool, commitErr error) {
 	// joinRan, not joinFailed: set AFTER the nil-dataplane guard, so it means
 	// exactly "the hook ran, and the dataplane may be half torn down". A nil
 	// dataplane leaves it false, which keeps the joined.Link() deref below
@@ -1158,12 +1196,12 @@ func (d *Daemon) programRethMACWithWorkerJoin(ifName string, mac net.HardwareAdd
 		slog.Info("userspace: stopping workers before RETH MAC link cycle", "iface", ifName)
 		return rt.Link().PrepareLinkCycle()
 	}
-	linkCycled, err := programRethMAC(ifName, mac, beforeCycle)
+	linkCycled, macChanged, err := programRethMAC(ifName, mac, beforeCycle)
 	if err != nil {
 		slog.Warn("failed to set RETH MAC", "iface", ifName, "mac", mac, "err", err)
 	}
 	if err == nil || !joinRan {
-		return linkCycled, nil
+		return linkCycled, macChanged, nil
 	}
 	if linkCycled {
 		// The link went DOWN and back UP. Since #6915 that is TWO outcomes, not
@@ -1229,7 +1267,7 @@ func (d *Daemon) programRethMACWithWorkerJoin(ifName string, mac net.HardwareAdd
 		// returning, and NotifyLinkCycle pays an unconditional 1s NIC settle
 		// (pkg/dataplane/userspace/process_linkcycle.go) before it sends the
 		// rebind at all — twice the 500ms it may skip.
-		return linkCycled, fmt.Errorf("%w: %w", errRethPrepareLinkCycle, err)
+		return linkCycled, macChanged, fmt.Errorf("%w: %w", errRethPrepareLinkCycle, err)
 	}
 	slog.Warn("userspace: RETH MAC link cycle did not complete after the worker join; "+
 		"rebinding AF_XDP sockets so the prepare is not left half-applied",
@@ -1290,10 +1328,10 @@ func (d *Daemon) programRethMACWithWorkerJoin(ifName string, mac net.HardwareAdd
 		slog.Error("userspace: the RETH MAC rollback rebind ALSO failed; this node's "+
 			"AF_XDP workers are stopped with nothing left to re-arm them",
 			"iface", ifName, "err", rebindErr)
-		return linkCycled, fmt.Errorf("%w: %w", errRethPrepareLinkCycle,
+		return linkCycled, macChanged, fmt.Errorf("%w: %w", errRethPrepareLinkCycle,
 			errors.Join(err, rebindErr))
 	}
-	return linkCycled, fmt.Errorf("%w: %w", errRethPrepareLinkCycle, err)
+	return linkCycled, macChanged, fmt.Errorf("%w: %w", errRethPrepareLinkCycle, err)
 }
 
 func (d *Daemon) setDataplaneDeferWorkers(deferWorkers bool) {

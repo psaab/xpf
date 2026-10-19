@@ -1083,6 +1083,28 @@ func (m *Manager) ReconcileVIPs() {
 	}
 }
 
+// ReconcileVIPsForRG re-adds VIPs and forces a GARP/NA burst on MASTER
+// instances of the given redundancy group only. It is the RG-scoped sibling
+// of ReconcileVIPs for a RETH member MAC change confined to one RG (#15276):
+// the announce must reach exactly the RG whose MAC moved, and no other RG
+// may be re-announced by it. An out-of-range RG ID has no synthesized VRID
+// and reconciles nothing.
+func (m *Manager) ReconcileVIPsForRG(rgID int) {
+	vrid, validVRID := rethVRID(rgID)
+	if !validVRID {
+		slog.Warn("vrrp: refusing RG VIP reconcile for out-of-range VRID",
+			"rg_id", rgID, "valid_range", fmt.Sprintf("%d..%d", MinVRID, MaxVRID))
+		return
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, vi := range m.instances {
+		if isRethInstance(vi.cfg) && vi.cfg.GroupID == vrid {
+			vi.reconcileVIP()
+		}
+	}
+}
+
 // SetGARPSuppression enables or disables GARP/NA suppression for all VRRP
 // instances belonging to the given redundancy group. Used by strict-vip-ownership
 // mode to prevent duplicate GARP/NA during failover windows.

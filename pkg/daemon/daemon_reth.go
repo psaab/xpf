@@ -347,6 +347,16 @@ func renameRethMember(targetName string, expectedMAC, legacyMAC net.HardwareAddr
 // Skips if the interface already has the correct MAC.
 // The interface must be brought DOWN to change its MAC, then back UP.
 //
+// It reports two facts separately (#15276): linkCycled — the link went DOWN
+// and back UP, flushing every kernel address on the member — and macChanged
+// — the member's MAC actually changed, whether the live set succeeded or a
+// cycle was needed. They differ on the live-set path: the MAC changed but no
+// address was flushed, so no VIP/link-local reconcile or AF_XDP rebind is
+// owed, yet neighbours still hold the old MAC and step 2.6b must announce.
+// macChanged is true only where the target MAC was written (live set
+// succeeded, or the cycled set succeeded — including when the following
+// link-up failed). A failed MAC write leaves macChanged false.
+//
 // beforeCycle (#5103) is invoked at most once, on the ONLY path that cycles the
 // link, and strictly BEFORE the first mutation of that link. It exists because
 // whether a cycle is needed cannot be predicted: the live set is ATTEMPTED
@@ -372,18 +382,18 @@ func renameRethMember(targetName string, expectedMAC, legacyMAC net.HardwareAddr
 // pages. A nil beforeCycle means "no join needed" and is used by callers with
 // no dataplane attached.
 //
-// On a beforeCycle error programRethMAC returns (false, err) WITHOUT touching
-// the link: leaving the member on its old MAC is recoverable, cycling the link
-// out from under live workers is not.
-func programRethMAC(ifName string, mac net.HardwareAddr, beforeCycle func() error) (linkCycled bool, err error) {
+// On a beforeCycle error programRethMAC returns (false, false, err) WITHOUT
+// touching the link: leaving the member on its old MAC is recoverable, cycling
+// the link out from under live workers is not.
+func programRethMAC(ifName string, mac net.HardwareAddr, beforeCycle func() error) (linkCycled bool, macChanged bool, err error) {
 	ops := rethLinkOpsFn
 	link, err := ops.byName(ifName)
 	if err != nil {
-		return false, fmt.Errorf("interface %s: %w", ifName, err)
+		return false, false, fmt.Errorf("interface %s: %w", ifName, err)
 	}
 	current := link.Attrs().HardwareAddr
 	if bytes.Equal(current, mac) {
-		return false, nil
+		return false, false, nil
 	}
 	slog.Info("setting RETH virtual MAC", "iface", ifName, "mac", mac)
 	// Try setting MAC while link is UP (avoids link DOWN/UP cycle).
@@ -399,7 +409,7 @@ func programRethMAC(ifName string, mac net.HardwareAddr, beforeCycle func() erro
 	liveSetErr := ops.setHardwareAddr(link, mac)
 	if liveSetErr == nil {
 		slog.Info("RETH MAC set without link cycle", "iface", ifName)
-		return false, nil
+		return false, true, nil
 	}
 	// Fallback: bring link down, set MAC, bring back up.
 	//
@@ -421,11 +431,11 @@ func programRethMAC(ifName string, mac net.HardwareAddr, beforeCycle func() erro
 	// path is using the UMEM/rings the driver is about to unmap.
 	if beforeCycle != nil {
 		if err := beforeCycle(); err != nil {
-			return false, fmt.Errorf("prepare link cycle %s: %w", ifName, err)
+			return false, false, fmt.Errorf("prepare link cycle %s: %w", ifName, err)
 		}
 	}
 	if err := ops.setDown(link); err != nil {
-		return false, fmt.Errorf("link down %s: %w", ifName, err)
+		return false, false, fmt.Errorf("link down %s: %w", ifName, err)
 	}
 	if err := ops.setHardwareAddr(link, mac); err != nil {
 		ops.setUp(link) // best-effort restore
@@ -444,12 +454,12 @@ func programRethMAC(ifName string, mac net.HardwareAddr, beforeCycle func() erro
 		// outlier rather than a contract — the value differed on the two sides
 		// of one `if` for outcomes that are identical in the only respect this
 		// return describes.
-		return true, fmt.Errorf("set mac %s: %w", ifName, err)
+		return true, false, fmt.Errorf("set mac %s: %w", ifName, err)
 	}
 	if err := ops.setUp(link); err != nil {
-		return true, fmt.Errorf("link up %s: %w", ifName, err)
+		return true, true, fmt.Errorf("link up %s: %w", ifName, err)
 	}
-	return true, nil
+	return true, true, nil
 }
 
 // clearDadFailed removes any dadfailed IPv6 addresses and re-adds them with

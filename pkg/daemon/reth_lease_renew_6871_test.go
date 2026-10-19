@@ -117,7 +117,7 @@ func TestRethMemberMACSkipsRenewWithNoDataplane_6871(t *testing.T) {
 				"work on this path", r)
 		}
 	}()
-	got, needRecovery, _ := d.programRethMemberMAC("ge-0-0-1", virtMAC5103, errPriorCommit5103, false, false)
+	got, needRecovery, _, _ := d.programRethMemberMAC("ge-0-0-1", virtMAC5103, errPriorCommit5103, false, false)
 	if got != errPriorCommit5103 {
 		t.Errorf("commit error = %v, want the prior error passed through unchanged: with no "+
 			"dataplane the hook never runs, so this member cannot enter the fail-closed "+
@@ -299,7 +299,7 @@ func TestReconcileAfterRethLinkCycleRenewsTheLease_6871(t *testing.T) {
 
 			// No cluster manager and no VRRP manager, so neither reconcile branch
 			// has work to do; the renewal is the observable.
-			d.reconcileAfterRethLinkCycle(&config.Config{}, needLinkCycleRecovery)
+			d.reconcileAfterRethLinkCycle(&config.Config{}, needLinkCycleRecovery, nil)
 
 			if lc.renewCalls != 1 {
 				t.Errorf("RenewLinkCycle calls = %d, want 1: the post-cycle VIP/link-local "+
@@ -331,7 +331,7 @@ func TestRethLeaseRenewalIsNilDataplaneSafe_6871(t *testing.T) {
 		}
 	}()
 	d.finishRethMemberLinkTail("xpf6871-absent0", virtMAC5103, &config.InterfaceConfig{})
-	d.reconcileAfterRethLinkCycle(&config.Config{}, true)
+	d.reconcileAfterRethLinkCycle(&config.Config{}, true, nil)
 	d.renewLinkCycleLease()
 }
 
@@ -387,7 +387,7 @@ func TestRethMACFallbackLogsTheLiveSetError_6871(t *testing.T) {
 	}
 	withRethOps(t, ops)
 
-	linkCycled, err := programRethMAC("ge-0-0-1", virtMAC5103, nil)
+	linkCycled, _, err := programRethMAC("ge-0-0-1", virtMAC5103, nil)
 	if err != nil || !linkCycled {
 		t.Fatalf("programRethMAC = (%v, %v), want (true, nil): the fixture must take the "+
 			"fallback and complete it, or the log line under test never runs",
