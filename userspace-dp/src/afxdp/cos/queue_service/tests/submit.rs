@@ -30,8 +30,10 @@ fn t7_local_scratch_entry(offset: u64, len: usize) -> (u64, TxRequest) {
 #[test]
 fn settle_local_scratch_flow_fair_recycles_offsets_when_queue_gone() {
     let mut free_tx_frames: VecDeque<u64> = VecDeque::new();
-    let mut scratch_local_tx: Vec<(u64, TxRequest)> =
-        vec![t7_local_scratch_entry(64, 4), t7_local_scratch_entry(128, 4)];
+    let mut scratch_local_tx: Vec<(u64, TxRequest)> = vec![
+        t7_local_scratch_entry(64, 4),
+        t7_local_scratch_entry(128, 4),
+    ];
     let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
     let (packets, bytes) = settle_exact_local_scratch_submission_flow_fair(
         None,
@@ -55,8 +57,10 @@ fn settle_local_scratch_flow_fair_recycles_offsets_when_queue_gone() {
 #[test]
 fn restore_local_scratch_flow_fair_recycles_offsets_when_queue_gone() {
     let mut free_tx_frames: VecDeque<u64> = VecDeque::new();
-    let mut scratch_local_tx: Vec<(u64, TxRequest)> =
-        vec![t7_local_scratch_entry(64, 4), t7_local_scratch_entry(128, 4)];
+    let mut scratch_local_tx: Vec<(u64, TxRequest)> = vec![
+        t7_local_scratch_entry(64, 4),
+        t7_local_scratch_entry(128, 4),
+    ];
     restore_exact_local_scratch_to_queue_head_flow_fair(
         None,
         &mut free_tx_frames,
@@ -392,7 +396,12 @@ fn mirror_interior_drop_preserves_sidecar_attribution_5157() {
     // free_tx_frames.len() (64) <= reserve (64): any mirror_clone in the
     // batch is dropped by the reserve gate.
     let seed = test_flow_fair_state(
-        &binding.cos.cos_interfaces.get(&42).expect("cos root").queues[0],
+        &binding
+            .cos
+            .cos_interfaces
+            .get(&42)
+            .expect("cos root")
+            .queues[0],
     )
     .flow_hash_seed;
 
@@ -465,7 +474,10 @@ fn mirror_interior_drop_preserves_sidecar_attribution_5157() {
         now_ns,
         &mut shared_recycles,
     );
-    assert!(progress, "submit_local must report progress on the A+B commit");
+    assert!(
+        progress,
+        "submit_local must report progress on the A+B commit"
+    );
 
     // Exactly the two non-mirror packets shipped; the front mirror dropped.
     assert_eq!(
@@ -483,7 +495,12 @@ fn mirror_interior_drop_preserves_sidecar_attribution_5157() {
     );
 
     let ff = test_flow_fair_state(
-        &binding.cos.cos_interfaces.get(&42).expect("cos root").queues[0],
+        &binding
+            .cos
+            .cos_interfaces
+            .get(&42)
+            .expect("cos root")
+            .queues[0],
     );
     assert_eq!(
         ff.flow_bucket_tx_bytes[bucket_a], 100,
@@ -504,3 +521,303 @@ fn mirror_interior_drop_preserves_sidecar_attribution_5157() {
     );
 }
 
+/// #15172 fixture: flow-fair queue (root 42, queue 0) loaded via REAL
+/// cos_queue_push_back with A(1111,100), M(2222,150), B(3333,200).
+/// Returns (binding, pre_pop_head_a, bucket_a, bucket_m).
+fn mirror_orphan_fixture_15172() -> (BindingWorker, u64, usize, usize) {
+    let mut root = test_cos_runtime_with_queues(
+        10_000_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 0,
+            forwarding_class: "iperf-c".into(),
+            priority: 5,
+            transmit_rate_bytes: 10_000_000_000 / 8,
+            guarantee_enabled: true,
+            exact: false,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: COS_MIN_BURST_BYTES,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+    );
+    root.tokens = 10_000;
+    root.queues[0].hot.tokens = 10_000;
+    root.queues[0].hot.queued_bytes = 450;
+    enable_test_flow_fair(&mut root.queues[0]);
+    for (port, len) in [(1111u16, 100usize), (2222, 150), (3333, 200)] {
+        cos_queue_push_back(&mut root.queues[0], test_flow_cos_item(port, len));
+    }
+    let seed = test_flow_fair_state(&root.queues[0]).flow_hash_seed;
+    let bucket_a = cos_flow_bucket_index(seed, Some(&test_session_key(1111, 5201)));
+    let bucket_m = cos_flow_bucket_index(seed, Some(&test_session_key(2222, 5201)));
+    let bucket_b = cos_flow_bucket_index(seed, Some(&test_session_key(3333, 5201)));
+    assert!(
+        bucket_a != bucket_m && bucket_m != bucket_b && bucket_a != bucket_b,
+        "test premise: distinct buckets (a={bucket_a} m={bucket_m} b={bucket_b})",
+    );
+    let pre_pop_head_a =
+        test_flow_fair_state(&root.queues[0]).flow_bucket_head_finish_bytes[bucket_a];
+    assert_eq!(pre_pop_head_a, 100, "test premise: A head finish is 100");
+    let fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![(0, test_queue_fast_path(false, 0, None, None))],
+        None,
+        None,
+    );
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+    (binding, pre_pop_head_a, bucket_a, bucket_m)
+}
+
+fn build_mirror_batch_15172(binding: &mut BindingWorker) -> (VecDeque<TxRequest>, u64, usize) {
+    let queue = &mut binding
+        .cos
+        .cos_interfaces
+        .get_mut(&42)
+        .expect("cos root")
+        .queues[0];
+    let mut local_scratch = VecDeque::new();
+    let mut prepared_scratch = VecDeque::new();
+    let batch = build_cos_batch_from_queue(
+        queue,
+        0,
+        u64::MAX,
+        u64::MAX,
+        CoSServicePhase::Guarantee,
+        &mut local_scratch,
+        &mut prepared_scratch,
+    )
+    .expect("batch built");
+    let (mut items, batch_bytes) = match batch {
+        CoSBatch::Local {
+            items, batch_bytes, ..
+        } => (items, batch_bytes),
+        CoSBatch::Prepared { .. } => unreachable!("Local items expected"),
+    };
+    assert_eq!(items.len(), 3, "test premise: three items built");
+    assert_eq!(
+        test_flow_fair_state(
+            &binding
+                .cos
+                .cos_interfaces
+                .get(&42)
+                .expect("cos root")
+                .queues[0]
+        )
+        .pop_snapshot_stack
+        .len(),
+        3,
+        "test premise: one snapshot per built item",
+    );
+    let pos_of = |port: u16| {
+        items
+            .iter()
+            .position(|r| r.flow_key.as_ref().map(|k| k.src_port) == Some(port))
+            .expect("flow present")
+    };
+    let pos_a = pos_of(1111);
+    let pos_m = pos_of(2222);
+    assert!(
+        pos_a < pos_m,
+        "test premise: survivor A (pos {pos_a}) precedes mirror M (pos {pos_m})",
+    );
+    items[pos_m].mirror_clone = true;
+    (items, batch_bytes, pos_m)
+}
+
+fn fill_test_tx_ring_15172(binding: &mut BindingWorker) {
+    let mut writer = binding.xsk.tx.transmit(64);
+    let n = writer.insert((0..64).map(|i| crate::xsk_ffi::xdp::XdpDesc {
+        addr: i as u64,
+        len: 60,
+        options: 0,
+    }));
+    assert_eq!(n, 64, "test premise: dummy fill inserts 64");
+    writer.commit();
+}
+
+/// #15172 FAIL-ON-REVERT: batch [A, M(mirror), B] from a flow-fair
+/// queue; transmit_batch drops M at the reserve gate; the pre-filled
+/// test TX ring forces inserted==0, so both survivors restore LIFO.
+/// Pre-fix A's push_front consumes M's orphan snapshot (bucket
+/// mismatch assert!(false) panic); the fix removes M's snapshot
+/// positionally first, so A restores with its pre-pop head (100).
+#[test]
+fn mirror_drop_orphan_snapshot_removed_before_retry_restore_15172() {
+    let (mut binding, pre_pop_head_a, bucket_a, _m) = mirror_orphan_fixture_15172();
+    let (items, batch_bytes, _pos_m) = build_mirror_batch_15172(&mut binding);
+    fill_test_tx_ring_15172(&mut binding);
+    let mut shared_recycles = Vec::new();
+    let progress = submit_local(
+        &mut binding,
+        42,
+        0,
+        CoSServicePhase::Guarantee,
+        batch_bytes,
+        items,
+        1_000_000_000,
+        &mut shared_recycles,
+    );
+    assert!(!progress, "inserted==0 retry makes no progress");
+    assert_eq!(
+        binding
+            .live
+            .mirror_drops_tx_frame_reserve
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the middle mirror_clone must be dropped by the reserve gate",
+    );
+    let queue = &binding
+        .cos
+        .cos_interfaces
+        .get(&42)
+        .expect("cos root")
+        .queues[0];
+    let ff = test_flow_fair_state(queue);
+    assert_eq!(ff.flow_bucket_items[bucket_a].len(), 1, "A restored");
+    assert_eq!(
+        ff.flow_bucket_head_finish_bytes[bucket_a], pre_pop_head_a,
+        "#15172: A must restore with its OWN pre-pop head finish (100)",
+    );
+    assert!(
+        ff.pop_snapshot_stack.is_empty(),
+        "#15172: restore consumes every survivor snapshot",
+    );
+    assert_eq!(crate::afxdp::cos::queue_ops::cos_queue_len(queue), 2);
+}
+
+/// #15172 control: no mirror drop, same inserted==0 retry round-trips.
+#[test]
+fn no_mirror_drop_retry_restore_round_trips_15172_control() {
+    let (mut binding, pre_pop_head_a, bucket_a, _m) = mirror_orphan_fixture_15172();
+    let queue = &mut binding
+        .cos
+        .cos_interfaces
+        .get_mut(&42)
+        .expect("cos root")
+        .queues[0];
+    let mut local_scratch = VecDeque::new();
+    let mut prepared_scratch = VecDeque::new();
+    let batch = build_cos_batch_from_queue(
+        queue,
+        0,
+        u64::MAX,
+        u64::MAX,
+        CoSServicePhase::Guarantee,
+        &mut local_scratch,
+        &mut prepared_scratch,
+    )
+    .expect("batch built");
+    let (items, batch_bytes) = match batch {
+        CoSBatch::Local {
+            items, batch_bytes, ..
+        } => (items, batch_bytes),
+        CoSBatch::Prepared { .. } => unreachable!("Local items expected"),
+    };
+    fill_test_tx_ring_15172(&mut binding);
+    let mut shared_recycles = Vec::new();
+    let progress = submit_local(
+        &mut binding,
+        42,
+        0,
+        CoSServicePhase::Guarantee,
+        batch_bytes,
+        items,
+        1_000_000_000,
+        &mut shared_recycles,
+    );
+    assert!(!progress);
+    assert_eq!(
+        binding
+            .live
+            .mirror_drops_tx_frame_reserve
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "control: no mirror drop",
+    );
+    let queue = &binding
+        .cos
+        .cos_interfaces
+        .get(&42)
+        .expect("cos root")
+        .queues[0];
+    let ff = test_flow_fair_state(queue);
+    assert_eq!(ff.flow_bucket_items[bucket_a].len(), 1);
+    assert_eq!(ff.flow_bucket_head_finish_bytes[bucket_a], pre_pop_head_a);
+    assert!(ff.pop_snapshot_stack.is_empty());
+    assert_eq!(crate::afxdp::cos::queue_ops::cos_queue_len(queue), 3);
+}
+
+/// #15172 control: mirror drop with full commit — no restore occurs.
+#[test]
+fn mirror_drop_full_commit_no_restore_15172_control() {
+    let (mut binding, _pre, _a, _m) = mirror_orphan_fixture_15172();
+    let (items, batch_bytes, _pos_m) = build_mirror_batch_15172(&mut binding);
+    let mut shared_recycles = Vec::new();
+    let progress = submit_local(
+        &mut binding,
+        42,
+        0,
+        CoSServicePhase::Guarantee,
+        batch_bytes,
+        items,
+        1_000_000_000,
+        &mut shared_recycles,
+    );
+    assert!(progress, "full commit makes progress");
+    assert_eq!(
+        binding
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2,
+        "only the two survivors transmit",
+    );
+    assert_eq!(
+        binding
+            .live
+            .mirror_drops_tx_frame_reserve
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+    );
+    let queue = &binding
+        .cos
+        .cos_interfaces
+        .get(&42)
+        .expect("cos root")
+        .queues[0];
+    assert_eq!(crate::afxdp::cos::queue_ops::cos_queue_len(queue), 0);
+}
+
+/// #15172 control: positional removal on a FIFO queue is a no-op.
+#[test]
+fn orphan_removal_fifo_queue_noop_15172_control() {
+    let mut root = test_cos_runtime_with_queues(
+        10_000_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 0,
+            forwarding_class: "best-effort".into(),
+            priority: 5,
+            transmit_rate_bytes: 1_000_000_000 / 8,
+            guarantee_enabled: true,
+            exact: false,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: 8 * 1024 * 1024,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+    );
+    assert!(!root.queues[0].flow_fair(), "control premise: FIFO queue");
+    assert!(
+        !crate::afxdp::cos::queue_ops::cos_queue_remove_orphan_snapshot_at(&mut root.queues[0], 0,),
+        "FIFO queue has no snapshot to remove",
+    );
+}

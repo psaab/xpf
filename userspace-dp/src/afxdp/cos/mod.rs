@@ -25,7 +25,8 @@ pub(super) use queue_ops::{
     cos_exact_queue_serviceable, cos_item_len, cos_queue_clear_orphan_snapshot_after_drop,
     cos_queue_drain_all, cos_queue_front, cos_queue_front_with_cap, cos_queue_is_empty,
     cos_queue_len, cos_queue_peek_min_bucket, cos_queue_pop_front_no_snapshot,
-    cos_queue_pop_known_bucket, cos_queue_push_back, cos_queue_push_front, cos_queue_restore_front,
+    cos_queue_pop_known_bucket, cos_queue_push_back, cos_queue_push_front,
+    cos_queue_remove_orphan_snapshot_at, cos_queue_restore_front,
     cos_queue_v_min_consume_suspension, cos_queue_v_min_continue, publish_committed_queue_vtime,
 };
 // #1763: reference single-pop API retained for tests (fused out of the
