@@ -125,9 +125,14 @@ func buildSyslogClients(cfg *config.Config) []*logging.SyslogClient {
 		// TestSyslogSourcePrecedenceMatchesDaemon_6875 pins the agreement.
 		//
 		//	source-address  >  source-interface  >  global source-interface
+		// #15270: stream source-address > stream source-interface > global
+		// source-address > global source-interface (mirror daemon).
 		srcAddr := stream.SourceAddress
 		if srcAddr == "" && stream.SourceInterface != "" {
 			srcAddr = config.ResolveSyslogSourceAddrForCollector(cfg, stream.SourceInterface, stream.Host)
+		}
+		if srcAddr == "" && cfg.Security.Log.SourceAddress != "" {
+			srcAddr = cfg.Security.Log.SourceAddress
 		}
 		if srcAddr == "" && cfg.Security.Log.SourceInterface != "" {
 			srcAddr = config.ResolveSyslogSourceAddrForCollector(cfg, cfg.Security.Log.SourceInterface, stream.Host)
