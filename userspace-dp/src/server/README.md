@@ -767,8 +767,10 @@ binding.worker_id = (queue_id % workers.max(1)) as u32;
 
 so modulo assignment can map multiple queues onto the same worker
 when `queues > workers`. The Go side's
-`pkg/daemon/rss_indirection.go` reshapes RSS indirection only on
-**mlx5** drivers, concentrating traffic onto queues `0..active-1`
+`pkg/daemon/rss_indirection.go` reshapes RSS indirection on any
+allowlisted interface whose indirection table it can read (a
+per-interface `ethtool -x` capability probe since #9040, not a driver
+name), concentrating traffic onto queues `0..active-1`
 where `active = min(workers, bound)` and `bound = min(queues,
 BindingQueuesPerIface)` (it does not change the Rust planner's
 per-interface queue count).
@@ -790,15 +792,18 @@ queue 0 (#5124 — pinning would serialize the worker on one IRQ), but it
 spreads across the BOUND queues, not every hardware queue. When
 `active == queues` — everything bound and worker-served — it leaves the
 live RSS table untouched, since the round-robin default already feeds
-exactly that set. On
-non-mlx5 drivers (i40e, etc.) it doesn't reshape at all. The default
+exactly that set. On an interface whose table cannot be read (no
+indirection support, an unparseable table, or a missing ethtool) it
+doesn't reshape at all — the queue cap plus this planner's warning
+(#15253) and the `binding_missing` degraded-path counter are the whole
+remedy there. The default
 RSS table is restored either when the kill switch fires
 (`enabled == false`), or via `maybeRestoreDefault()` on the
 `active >= queues > 1` skip path — there to undo a
 concentrated table left by an earlier `workers < queues`
-configuration (#805). On non-mlx5 + `workers > 1 && workers <
-queues`, modulo collision can leave one worker bound to multiple
-queues. See PR #1243's kill record for why i40e doesn't reshape.
+configuration (#805). On an unreshaped interface with
+`workers > 1 && workers < queues`, modulo collision can leave one
+worker bound to multiple queues.
 
 ## Gotchas
 

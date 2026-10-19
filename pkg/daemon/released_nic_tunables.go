@@ -2,9 +2,10 @@
 //
 // # The ownership hole this closes
 //
-// Two per-interface tuning knobs are applied to the mlx5 NICs that the
+// Two per-interface tuning knobs are applied to the NICs that the
 // userspace dataplane binds AF_XDP on — the D3 RSS indirection table
-// (rss_indirection.go) and interrupt coalescence (coalescence.go). Both
+// (rss_indirection.go, capability-probed on any driver since #9040) and
+// interrupt coalescence (coalescence.go, genuinely mlx5-only). Both
 // derive their target set from ONE allowlist,
 // dpuserspace.UserspaceBoundLinuxInterfaces(cfg), recomputed from the
 // *new* compiled config on every reconcile.
@@ -72,12 +73,13 @@
 // # Interface disappearance
 //
 // If a released name is no longer an mlx5 netdev — unplugged, renamed by
-// a .link change, or rebound to another driver — the tuning went with it
-// (a driver rebind resets ring and coalescence configuration). Ownership
-// is dropped WITHOUT an ethtool call: that both honors the Codex H1
-// invariant (never invoke ethtool on a non-mlx5 netdev) and stops the
-// retry debt from growing without bound on a NIC that can never accept
-// the restore.
+// a .link change, or rebound to another driver — its coalescence tuning
+// went with it (a driver rebind resets ring and coalescence
+// configuration), so coalescence ownership is dropped WITHOUT an ethtool
+// call and its retry debt cannot grow without bound. RSS ownership is
+// handled separately below (#15253): a non-mlx5 name may be the very NIC
+// xpfd reshaped under the #9040 capability probe, so its default-table
+// restore is still attempted (and retained as retry debt on failure).
 package daemon
 
 import (
@@ -160,15 +162,35 @@ func releaseUnboundNICTunables(prior *priorHostTunables, current []string, users
 		_, rssHeld := prior.rssOwned[iface]
 		coalesce, coalesceHeld := prior.mlx5Adaptive[iface]
 
-		// The netdev must still be the mlx5 NIC we tuned. If it is gone
-		// or rebound, its ring/coalescence configuration went with it —
-		// drop ownership rather than accruing debt we can never settle.
-		if drv := execer.readDriver(iface); drv != mlx5Driver {
+		// If the netdev is gone or rebound to a non-mlx5 driver, its
+		// coalescence configuration went with it (a driver rebind resets
+		// ring and coalescence state), so that ownership is dropped
+		// without an ethtool call rather than accruing retry debt.
+		// RSS ownership is NOT dropped when a real non-mlx5 driver is
+		// still present (#15253): since #9040 such a netdev may carry a
+		// table xpfd reshaped, so the restore below must still run for
+		// it; skipping it here would strand that table exactly as the
+		// old claim guard did. A vanished netdev (driver "") is the
+		// remaining drop-without-call case for RSS too.
+		drv := execer.readDriver(iface)
+		if drv == "" {
+			// Vanished netdev: its state went with it.
 			delete(prior.rssOwned, iface)
 			delete(prior.mlx5Adaptive, iface)
 			slog.Info("linksetup: released interface is no longer an mlx5 netdev, dropping tuning ownership",
 				"iface", iface, "driver", drv)
 			continue
+		}
+		// Coalescence restore stays mlx5-only (applyCoalescence is): a
+		// captured mlx5 netdev rebound to another driver drops that
+		// ownership without an ethtool -C, while the RSS restore below
+		// still runs (#15253).
+		coalesceSkip := coalesceHeld && drv != mlx5Driver
+		if coalesceSkip {
+			delete(prior.mlx5Adaptive, iface)
+			slog.Info("linksetup: released interface is no longer an mlx5 netdev, dropping coalescence ownership",
+				"iface", iface, "driver", drv)
+			coalesceHeld = false
 		}
 
 		if rssHeld {
@@ -192,7 +214,7 @@ func releaseUnboundNICTunables(prior *priorHostTunables, current []string, users
 	}
 }
 
-// claimNICTunableOwnership records every mlx5 member of the current
+// claimNICTunableOwnership records every member of the current
 // userspace-dp allowlist as an interface whose RSS indirection table xpf
 // may have moved away from the kernel default.
 //
@@ -212,18 +234,22 @@ func releaseUnboundNICTunables(prior *priorHostTunables, current []string, users
 // removed the names it restored and kept the names whose restore failed,
 // and that retry debt must survive the claim.
 //
-// Scope is unchanged from the reconcilers this mirrors: `lo` is skipped
-// and every name passes the same mlx5 driver guard, so no netdev outside
-// the userspace-dp binding allowlist is ever recorded.
+// Scope is the userspace-dp binding allowlist itself: `lo` is skipped
+// and no netdev outside the allowlist is ever recorded. There is
+// deliberately NO mlx5 driver guard here (#15253): since #9040 the RSS
+// apply path reshapes any allowlisted interface with a readable
+// indirection table, so the claim set must equal that potential-apply
+// set or a reshaped non-mlx5 NIC (i40e/ice/...) would never be recorded
+// and never handed back. Over-claiming a NIC whose table was never
+// moved costs one idempotent `ethtool -X <iface> default` on release.
+// (Coalescence ownership in mlx5Adaptive is separate and stays mlx5-only:
+// applyCoalescence is genuinely mlx5-gated.)
 func claimNICTunableOwnership(prior *priorHostTunables, current []string, execer rssExecutor) {
 	if prior == nil || len(current) == 0 {
 		return
 	}
 	for _, iface := range current {
 		if iface == "lo" {
-			continue
-		}
-		if execer.readDriver(iface) != mlx5Driver {
 			continue
 		}
 		prior.claimRSSOwnership(iface)

@@ -73,9 +73,10 @@ func containsStr9040(h, n string) bool {
 
 // #9040: the drops an over-wide NIC takes on unbound queues were counted and
 // unexportable. `binding_missing` is the reason that matters: an interface with
-// more than 16 RX queues has its bound set silently capped, RSS is reshaped to
-// fit that bound only on mlx5_core, and transit landing on the rest is dropped
-// at roughly (Q-16)/Q while the box reads up.
+// more than 16 RX queues has its bound set capped at 16, and (since the #9040
+// capability probe) only an interface xpfd could not reshape keeps hashing
+// across all its queues, so transit landing on the unbound rest is dropped
+// at roughly (Q-16)/Q while the box reads up. (#15253)
 func TestDegradedPathCountersReachAScrape9040(t *testing.T) {
 	got := collectDegraded9040(t, map[string]uint64{
 		"binding_missing": 4242,

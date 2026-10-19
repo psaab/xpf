@@ -1310,7 +1310,7 @@ var OperationalTree = map[string]*Node{
 // schema here — tab-completion for siblings still falls through to
 // the schema walker.
 var ConfigSetDataplaneKnobs = map[string]*Node{
-	"rss-indirection":     {Desc: "mlx5 RSS indirection reshaping (enable|disable)"},
+	"rss-indirection":     {Desc: "RSS indirection reshaping (enable|disable)"},
 	"claim-host-tunables": {Desc: "Allow xpfd to write host-scope tunables (true|false; default false)"},
 	"cpu-governor":        {Desc: "Host cpufreq governor (performance|schedutil|default)"},
 	"netdev-budget":       {Desc: "net.core.netdev_budget value"},

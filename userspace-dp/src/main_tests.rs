@@ -6476,3 +6476,67 @@ fn build_synced_session_entry_defaults_install_table_for_legacy_peer_9752() {
     assert_eq!(entry.decision.install_table_domain, 0);
     assert_eq!(entry.decision.install_table_check, 0);
 }
+
+// ---------------------------------------------------------------------------
+// #15253 (A80-02) — the over-stride warning must not claim mlx5-only reshape
+// ---------------------------------------------------------------------------
+//
+// The warning is the operator's only bring-up signal that an over-wide NIC
+// may drop (Q-16)/Q of transit. Its old text ("RSS is only reshaped to fit
+// the bound set on mlx5_core, so on any other driver ... is DROPPED") was
+// wrong in both directions after #9040 (83acc21894) replaced the Go daemon's
+// driver-name gate with a per-interface `ethtool -x` capability probe: a
+// probed i40e/ice box that WAS reshaped was told it drops, and an mlx5 box
+// whose reshape was skipped (unreadable table, or no reshape needed for the
+// bound set) was implied safe. The fix makes the drop conditional on the
+// live table and names `ethtool -x <if>` as the check.
+#[test]
+fn over_stride_warning_is_conditional_not_mlx5_only_15253() {
+    use crate::server::helpers::over_stride_warning;
+
+    let w = over_stride_warning("ge-0-0-1", 32)
+        .expect("a 32-queue NIC must warn: it exceeds the 16 queue stride");
+    assert!(
+        !w.contains("mlx5"),
+        "#15253: warning must not name a driver as the reshape gate \
+         (capability probe replaced it in #9040): {w}"
+    );
+    assert!(
+        w.contains("Unless xpfd reshaped"),
+        "#15253: the drop must be CONDITIONAL on the reshape not having \
+         happened, not asserted for every non-mlx5 driver: {w}"
+    );
+    assert!(
+        w.contains("ethtool -x ge-0-0-1"),
+        "#15253: warning must tell the operator how to check the live \
+         indirection table: {w}"
+    );
+    // The remedy and the ongoing-cost signal must survive the rewrite.
+    assert!(
+        w.contains("ethtool -L ge-0-0-1 combined 16"),
+        "#15253: warning must keep the ethtool -L remedy: {w}"
+    );
+    assert!(
+        w.contains("binding_missing") && w.contains("xpf_dataplane_degraded_path_total"),
+        "#15253: warning must keep naming the degraded-path counter: {w}"
+    );
+    assert!(
+        w.contains("16..32"),
+        "#15253: warning must name the dropped queue range 16..32: {w}"
+    );
+
+    // Control: at/under the stride there is nothing to warn about, and a
+    // 17-queue NIC (the smallest over-stride case) still warns.
+    assert!(
+        over_stride_warning("ge-0-0-1", 16).is_none(),
+        "#15253 control: 16 queues fits the stride and must not warn"
+    );
+    assert!(
+        over_stride_warning("ge-0-0-1", 1).is_none(),
+        "#15253 control: a single-queue NIC must not warn"
+    );
+    assert!(
+        over_stride_warning("ge-0-0-1", 17).is_some(),
+        "#15253 control: 17 queues is over-stride and must warn"
+    );
+}

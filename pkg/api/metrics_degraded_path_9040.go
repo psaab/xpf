@@ -17,11 +17,18 @@ import (
 //
 // The reason that prompted this is `binding_missing`. An interface with more
 // than 16 RX queues has its bound set silently capped at
-// BINDING_QUEUES_PER_IFACE by the helper planner, and RSS is only reshaped to
-// fit that bound on mlx5_core -- every other driver is skipped by an explicit
-// driver guard. So the NIC keeps hashing across all Q queues while only 16 are
-// bound, and transit landing on the rest takes drop_degraded_transit. The loss
-// is roughly (Q-16)/Q on that interface, steady, while the box reads up.
+// BINDING_QUEUES_PER_IFACE by the helper planner. Since #9040 the daemon
+// reshapes RSS to fit that bound on any allowlisted interface whose
+// indirection table it can read (a per-interface `ethtool -x` capability
+// probe in pkg/daemon/rss_indirection.go, not a driver-name gate), so only
+// an interface whose table cannot be read -- or whose reshape does not
+// apply -- keeps hashing across all Q queues while only 16 are bound, and
+// transit landing on the rest takes drop_degraded_transit. The loss is
+// roughly (Q-16)/Q on such an interface, steady, while the box reads up.
+// (#15253: this comment and the helper's over-stride warning previously
+// claimed the reshape was mlx5_core-only; that was stale in both
+// directions -- a probed i40e/ice box that was reshaped was described as
+// dropping, and an mlx5 box whose reshape was skipped was implied safe.)
 //
 // EMITTED ONLY WHEN A STATUS WAS READ, and this is the deliberate half. The
 // map is reason-keyed and sparse: a reason that has never fired has no entry,

@@ -46,7 +46,7 @@ func (d *Daemon) setupInterfaceNaming() error {
 				nodeID = cfg.Chassis.Cluster.NodeID
 			}
 			// D3 (#785): pass userspace-dp worker count so linksetup can
-			// reshape mlx5 RSS indirection before any AF_XDP bind. Zero
+			// reshape RSS indirection (capability-probed, #9040) before any AF_XDP bind. Zero
 			// when userspace dataplane is not in use — applyRSSIndirection
 			// treats that as a no-op.
 			if dataplane.EffectiveType(cfg.System.DataplaneType) == dataplane.TypeUserspace &&

@@ -851,6 +851,41 @@ pub(crate) const MAX_BINDING_IFINDEX: i32 = 65536;
 /// (NAT-holder width, slot capacity, wild ifindex) is `Err(reason)` — never
 /// an empty `Ok` — so the caller cannot mistake a refused plan for an empty
 /// one and install zero bindings over a working config (GPT-6).
+/// #15253 (A80-02): the over-stride warning for one interface, or `None`
+/// when `rx` fits the bound set.
+///
+/// Extracted from the planner's `eprintln!` so the operator text is
+/// testable: the planner itself cannot be captured in a unit test, and
+/// this text was the defect — it claimed RSS is reshaped only on
+/// mlx5_core long after #9040 (83acc21894) replaced the driver-name gate
+/// with a per-interface `ethtool -x` capability probe in the Go daemon.
+/// That made it wrong in both directions: a capability-probed i40e/ice
+/// box that WAS reshaped was told its transit is dropped, and an mlx5
+/// box whose reshape was skipped (unreadable table, single worker
+/// spreading, or `active >= queues`) was implied safe.
+///
+/// The truth this text must carry is conditional: the drop happens only
+/// when xpfd did NOT reshape this interface's indirection table, so the
+/// check is the live table (`ethtool -x <if>`), not a driver name.
+pub(crate) fn over_stride_warning(name: &str, rx: usize) -> Option<String> {
+    if rx <= BINDING_QUEUES_PER_IFACE {
+        return None;
+    }
+    let bound = BINDING_QUEUES_PER_IFACE;
+    Some(format!(
+        "xpf-userspace-dp: WARNING {name}: {rx} RX queues exceeds the \
+         per-interface binding stride of {bound}; \
+         binding the first {bound}. Unless xpfd reshaped this interface's RSS \
+         indirection table to the bound set, the NIC keeps \
+         hashing across all {rx} queues and transit landing on queues \
+         {bound}..{rx} is DROPPED (degraded-path reason \
+         binding_missing, exported as \
+         xpf_dataplane_degraded_path_total). Check the live table with \
+         `ethtool -x {name}`; if it still feeds queues {bound}..{rx}, reduce \
+         the channel count with `ethtool -L {name} combined {bound}` to recover it."
+    ))
+}
+
 pub(crate) fn replan_bindings_from_candidates(
     workers: usize,
     existing: &[BindingStatus],
@@ -921,18 +956,8 @@ pub(crate) fn replan_bindings_from_candidates(
         .iter()
         .map(|(name, rx)| {
             let bound = (*rx).min(BINDING_QUEUES_PER_IFACE);
-            if *rx > BINDING_QUEUES_PER_IFACE {
-                eprintln!(
-                    "xpf-userspace-dp: WARNING {name}: {rx} RX queues exceeds the \
-                     per-interface binding stride of {BINDING_QUEUES_PER_IFACE}; \
-                     binding the first {bound}. RSS is only reshaped to fit the \
-                     bound set on mlx5_core, so on any other driver the NIC keeps \
-                     hashing across all {rx} queues and transit landing on queues \
-                     {bound}..{rx} is DROPPED (degraded-path reason \
-                     binding_missing, exported as \
-                     xpf_dataplane_degraded_path_total). Reduce the channel count \
-                     with `ethtool -L {name} combined {bound}` to recover it."
-                );
+            if let Some(warning) = over_stride_warning(name, *rx) {
+                eprintln!("{warning}");
             }
             (name.clone(), bound)
         })
