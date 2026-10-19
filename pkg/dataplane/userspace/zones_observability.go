@@ -3,6 +3,7 @@ package userspace
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -32,9 +33,23 @@ func hostInboundInterfaceAdminDisabled(cfg *config.Config, ref string) bool {
 	if cfg == nil {
 		return false
 	}
-	base, _, _ := strings.Cut(ref, ".")
+	base, unitRef, hasUnit := strings.Cut(ref, ".")
 	ifc := cfg.Interfaces.Interfaces[base]
-	return ifc != nil && ifc.Disable
+	if ifc == nil {
+		return false
+	}
+	if ifc.Disable {
+		return true
+	}
+	if !hasUnit {
+		return false
+	}
+	unitNum, err := strconv.Atoi(unitRef)
+	if err != nil {
+		return false
+	}
+	unit := ifc.Units[unitNum]
+	return unit != nil && unit.Disable
 }
 
 // addresslessEnforcingZonesFromSnapshots is the AddresslessEnforcingZones
@@ -82,7 +97,7 @@ func addresslessEnforcingZonesFromSnapshots(cfg *config.Config, snaps []Interfac
 			continue
 		}
 		for un, unit := range iface.Units {
-			if unit == nil || (!unit.DHCP && !unit.DHCPv6 && unit.DHCPv6Client == nil) {
+			if unit == nil || unit.Disable || (!unit.DHCP && !unit.DHCPv6 && unit.DHCPv6Client == nil) {
 				continue
 			}
 			unitRef := fmt.Sprintf("%s.%d", ifName, un)
@@ -283,7 +298,7 @@ func addresslessEnforcingInterfacesFromSnapshots(cfg *config.Config, snaps []Int
 			continue
 		}
 		for un, unit := range iface.Units {
-			if unit == nil {
+			if unit == nil || unit.Disable {
 				continue
 			}
 			unitName := fmt.Sprintf("%s.%d", ifName, un)
@@ -319,7 +334,7 @@ func addresslessEnforcingInterfacesFromSnapshots(cfg *config.Config, snaps []Int
 		sort.Ints(unitNums)
 		for _, un := range unitNums {
 			unit := iface.Units[un]
-			if unit == nil {
+			if unit == nil || unit.Disable {
 				continue
 			}
 			unitName := fmt.Sprintf("%s.%d", ifName, un)

@@ -150,7 +150,7 @@ func stableRethLinkLocalTargets(cfg *config.Config) []stableRethLinkLocalTarget 
 		sort.Ints(unitNums)
 		for _, unitNum := range unitNums {
 			unit := ifc.Units[unitNum]
-			if !stableRethUnitHasIPv6(unit) {
+			if unit == nil || unit.Disable || !stableRethUnitHasIPv6(unit) {
 				continue
 			}
 			out = append(out, stableRethLinkLocalTarget{
@@ -625,7 +625,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		sort.Ints(unitNums)
 		for _, un := range unitNums {
 			unit := iface.Units[un]
-			if unit == nil || len(unit.VRRPGroups) == 0 {
+			if unit == nil || unit.Disable || len(unit.VRRPGroups) == 0 {
 				continue
 			}
 			unitName := fmt.Sprintf("%s.%d", ifName, un)
@@ -1070,7 +1070,7 @@ func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []Interface
 			sort.Ints(unitNums)
 			for _, un := range unitNums {
 				unit := iface.Units[un]
-				if unit == nil {
+				if unit == nil || unit.Disable {
 					continue
 				}
 				unitName := fmt.Sprintf("%s.%d", ifName, un)
@@ -1150,6 +1150,9 @@ func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapsh
 	// detector (unconfigured scope-link rows never resolve).
 	hasFam := make(map[string]map[string]bool)
 	for _, snap := range snaps {
+		if snap.AdminDisabled {
+			continue
+		}
 		for _, a := range snap.Addresses {
 			if hostInboundScopeLinkUnresolved(snap.Name, a, configuredAddrs) {
 				continue
@@ -1184,7 +1187,7 @@ func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapsh
 		sort.Ints(unitNums)
 		for _, un := range unitNums {
 			unit := iface.Units[un]
-			if unit == nil {
+			if unit == nil || unit.Disable {
 				continue
 			}
 			unitRef := fmt.Sprintf("%s.%d", ifName, un)
@@ -1336,6 +1339,9 @@ func buildUnzonedVRFDHCPBackstops(cfg *config.Config, snaps []InterfaceSnapshot)
 	configuredAddrs := configuredHostInboundAddrKeys(cfg)
 	hasFam := make(map[string]map[string]bool)
 	for _, snap := range snaps {
+		if snap.AdminDisabled {
+			continue
+		}
 		for _, addr := range snap.Addresses {
 			if hostInboundScopeLinkUnresolved(snap.Name, addr, configuredAddrs) || hostIPFromCIDR(addr.Address) == "" {
 				continue
@@ -1352,7 +1358,7 @@ func buildUnzonedVRFDHCPBackstops(cfg *config.Config, snaps []InterfaceSnapshot)
 			continue
 		}
 		for number, unit := range iface.Units {
-			if unit == nil {
+			if unit == nil || unit.Disable {
 				continue
 			}
 			unitRef := fmt.Sprintf("%s.%d", ifName, number)
@@ -1411,7 +1417,7 @@ func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) (HostInboundDH
 		sort.Ints(unitNums)
 		for _, number := range unitNums {
 			unit := iface.Units[number]
-			if unit == nil {
+			if unit == nil || unit.Disable {
 				continue
 			}
 			unitRef := fmt.Sprintf("%s.%d", ifName, number)
@@ -1615,7 +1621,7 @@ func forEachFirewallLocalAddrFromSnaps(cfg *config.Config, snaps []InterfaceSnap
 		sort.Ints(unitNums)
 		for _, un := range unitNums {
 			unit := iface.Units[un]
-			if unit == nil || len(unit.VRRPGroups) == 0 {
+			if unit == nil || unit.Disable || len(unit.VRRPGroups) == 0 {
 				continue
 			}
 			unitName := fmt.Sprintf("%s.%d", ifName, un)
