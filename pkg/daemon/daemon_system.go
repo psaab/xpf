@@ -274,13 +274,10 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 	if er == nil {
 		return
 	}
-	// Update zone name map for structured syslog formatting
-	zoneNames := make(map[uint16]string)
-	zoneIDs := buildZoneIDs(cfg)
-	for name, id := range zoneIDs {
-		zoneNames[id] = name
-	}
-	er.SetZoneNames(zoneNames)
+	// #15269 C09-02: survivor/quarantine-aware map (shared with CLI
+	// syslogZoneNameMap via config.SyslogZoneNames); a naive loop let a
+	// collision loser claim the shared id nondeterministically.
+	er.SetZoneNames(config.SyslogZoneNames(cfg))
 
 	// Wire policy names and app names for structured logging.
 	// #2114: ONE cell load inside applyResult (LastApplyResultOf is

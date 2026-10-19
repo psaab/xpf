@@ -795,6 +795,11 @@ func (s *Server) showInterfacesTerse(cfg *config.Config, filterName string) (*pb
 			}
 			admin := "up"
 			link := "up"
+			// #15269 B18-05: disabled unit admin-down, addresses suppressed.
+			if config.TerseUnitDisabled(cfg, u.physName, u.unitNum) {
+				admin = "down"
+				v4Addrs, v6Addrs = nil, nil
+			}
 			kernelPhys := config.LinuxIfName(physMember)
 			iface, err := net.InterfaceByName(kernelPhys)
 			if err != nil {
@@ -862,6 +867,12 @@ func (s *Server) showInterfacesTerse(cfg *config.Config, filterName string) (*pb
 
 		admin := "up"
 		link := "up"
+		// #15269 B18-05: disabled unit admin-down, addresses suppressed
+		// (gRPC previously had no Disable check on any branch).
+		if config.TerseUnitDisabled(cfg, u.physName, u.unitNum) {
+			admin = "down"
+			v4Addrs, v6Addrs = nil, nil
+		}
 		if liface == nil {
 			link = "down"
 		} else {

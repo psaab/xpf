@@ -103,7 +103,12 @@ func (c *ctl) handleShowNAT(args []string) error {
 			return fmt.Errorf("%v", err)
 		}
 		for _, r := range resp.Rules {
-			fmt.Printf("  Rule: %s  dst=%s%s", r.Name, r.DstAddr, natDestPortsSuffix(r))
+			// #15269 C09-01: enforced source match; older daemons leave it empty.
+			src := r.SourceMatch
+			if src == "" {
+				src = "0.0.0.0/0"
+			}
+			fmt.Printf("  Rule: %s  src=%s dst=%s%s", r.Name, src, r.DstAddr, natDestPortsSuffix(r))
 			fmt.Printf(" -> %s", r.TranslateIp)
 			if r.TranslatePort > 0 {
 				fmt.Printf(":%d", r.TranslatePort)

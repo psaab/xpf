@@ -326,25 +326,8 @@ func (s *Server) showApplications(cfg *config.Config, buf *strings.Builder) {
 			if app.DestinationPort != "" {
 				fmt.Fprintf(buf, " dst-port=%s", app.DestinationPort)
 			}
-			if app.SourcePort != "" {
-				fmt.Fprintf(buf, " src-port=%s", app.SourcePort)
-			}
-			if app.ICMPType != nil {
-				// #12903: an ICMP/ICMPv6 application may be constrained to one
-				// message type/code (junos-icmp-ping = type 8, #11340). Omitting
-				// the constraint here widened the rendered application to every
-				// type/code — the operator could not see the narrowing the
-				// dataplane actually enforces.
-				fmt.Fprintf(buf, " icmp-type=%d", *app.ICMPType)
-			}
-			if app.ICMPCode != nil {
-				fmt.Fprintf(buf, " icmp-code=%d", *app.ICMPCode)
-			}
-			if app.InactivityTimeoutNever {
-				fmt.Fprintf(buf, " timeout=never")
-			} else if app.InactivityTimeout > 0 {
-				fmt.Fprintf(buf, " timeout=%ds", app.InactivityTimeout)
-			}
+			// #12903/#15269: shared suffix so REST/gRPC cannot drift.
+			buf.WriteString(config.ApplicationTermSuffix(app))
 			if app.ALG != "" {
 				fmt.Fprintf(buf, " alg=%s", app.ALG)
 			}
@@ -860,26 +843,11 @@ func (s *Server) showScreenIDSOptionDetail(req *pb.ShowTextRequest, cfg *config.
 			if profile.TCP.SynFlood != nil {
 				fmt.Fprintf(buf, "  %-45s %-12s %s\n", "TCP SYN flood protection", enabledS(true), "disabled")
 				fmt.Fprintf(buf, "  %-45s %-12d %s\n", "  Attack threshold", profile.TCP.SynFlood.AttackThreshold, "200")
-				if profile.TCP.SynFlood.AlarmThreshold > 0 {
-					fmt.Fprintf(buf, "  %-45s %-12d %s\n", "  Alarm threshold", profile.TCP.SynFlood.AlarmThreshold, "512")
-				} else {
-					fmt.Fprintf(buf, "  %-45s %-12s %s\n", "  Alarm threshold", "(default)", "512")
-				}
-				if profile.TCP.SynFlood.SourceThreshold > 0 {
-					fmt.Fprintf(buf, "  %-45s %-12d %s\n", "  Source threshold", profile.TCP.SynFlood.SourceThreshold, "4000")
-				} else {
-					fmt.Fprintf(buf, "  %-45s %-12s %s\n", "  Source threshold", "(default)", "4000")
-				}
-				if profile.TCP.SynFlood.DestinationThreshold > 0 {
-					fmt.Fprintf(buf, "  %-45s %-12d %s\n", "  Destination threshold", profile.TCP.SynFlood.DestinationThreshold, "4000")
-				} else {
-					fmt.Fprintf(buf, "  %-45s %-12s %s\n", "  Destination threshold", "(default)", "4000")
-				}
-				if profile.TCP.SynFlood.Timeout > 0 {
-					fmt.Fprintf(buf, "  %-45s %-12d %s\n", "  Timeout (seconds)", profile.TCP.SynFlood.Timeout, "20")
-				} else {
-					fmt.Fprintf(buf, "  %-45s %-12s %s\n", "  Timeout (seconds)", "(default)", "20")
-				}
+				// #15269 B18-01: unset = disabled, Junos default not applied; timeout = effective opening window.
+				fmt.Fprintf(buf, "  %-45s %-12s %s\n", "  Alarm threshold", dpuserspace.SynFloodSubThresholdValue(profile.TCP.SynFlood.AlarmThreshold), dpuserspace.SynFloodSubThresholdDefault(profile.TCP.SynFlood.AlarmThreshold, 512))
+				fmt.Fprintf(buf, "  %-45s %-12s %s\n", "  Source threshold", dpuserspace.SynFloodSubThresholdValue(profile.TCP.SynFlood.SourceThreshold), dpuserspace.SynFloodSubThresholdDefault(profile.TCP.SynFlood.SourceThreshold, 4000))
+				fmt.Fprintf(buf, "  %-45s %-12s %s\n", "  Destination threshold", dpuserspace.SynFloodSubThresholdValue(profile.TCP.SynFlood.DestinationThreshold), dpuserspace.SynFloodSubThresholdDefault(profile.TCP.SynFlood.DestinationThreshold, 4000))
+				fmt.Fprintf(buf, "  %-45s %-12d %s\n", "  Timeout (seconds)", dpuserspace.EffectiveSynFloodTimeout(profile, cfg), "20")
 			} else {
 				fmt.Fprintf(buf, "  %-45s %-12s %s\n", "TCP SYN flood protection", "disabled", "disabled")
 			}

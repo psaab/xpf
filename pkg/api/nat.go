@@ -216,6 +216,7 @@ func (s *Server) natDestHandler(w http.ResponseWriter, _ *http.Request) {
 			info := NATDestInfo{
 				Name:                rule.Name,
 				DstAddr:             natshow.RuleMatchDestination(rule),
+				SourceMatch:         natshow.RuleMatchSource(rule),
 				FromInterface:       rs.FromInterface,
 				FromRoutingInstance: rs.FromRoutingInstance,
 			}

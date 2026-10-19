@@ -255,6 +255,11 @@ func (c *CLI) showInterfacesTerse() error {
 			}
 			admin := "up"
 			link := "up"
+			// #15269 B18-05: disabled unit is admin down, addresses suppressed.
+			if config.TerseUnitDisabled(cfg, u.physName, u.unitNum) {
+				admin = "down"
+				v4Addrs, v6Addrs = nil, nil
+			}
 			kernelPhys := config.LinuxIfName(physMember)
 			iface, err := net.InterfaceByName(kernelPhys)
 			if err != nil {
@@ -321,11 +326,10 @@ func (c *CLI) showInterfacesTerse() error {
 
 		admin := "up"
 		link := "up"
-		// #14575: unit-level disable is admin-down for this logical row.
-		if ifCfg, ok := config.LookupInterface(cfg, u.physName); ok && ifCfg != nil {
-			if unit, ok := config.LookupUnit(ifCfg, u.unitNum); ok && unit != nil && unit.Disable {
-				admin = "down"
-			}
+		// #14575/#15269: disabled unit is admin-down, addresses suppressed.
+		if config.TerseUnitDisabled(cfg, u.physName, u.unitNum) {
+			admin = "down"
+			v4Addrs, v6Addrs = nil, nil
 		}
 		if liface == nil {
 			link = "down"
