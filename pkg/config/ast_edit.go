@@ -1040,7 +1040,27 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 			}
 		} else {
 			for _, n := range *current {
-				if !n.IsLeaf && keysEqual(n.Keys, nodeKeys) {
+				if keysEqual(n.Keys, nodeKeys) {
+					// #15682: an existing leaf with the same keys is the
+					// same statement now gaining children — the bare
+					// `feed-name <feed>` later refined with `path <path>`
+					// under the same feed-server. Promote it instead of
+					// appending a duplicate sibling container the compiler
+					// would read as two feeds.
+					//
+					// Scoped to that feed-name container under feed-server:
+					// other bare-leaf+extended pairs are meaningful
+					// two-node shapes the strict gates inspect verbatim
+					// (policy `then permit` + `then permit
+					// application-services …`, #3114/#3115/#3141 via
+					// #3377), and merging them would hide the specific
+					// diagnostic those gates exist to emit.
+					if n.IsLeaf && len(nodeKeys) >= 2 && nodeKeys[0] == "feed-name" &&
+						containsAnyOf(path, "feed-server") {
+						n.IsLeaf = false
+					} else if n.IsLeaf {
+						continue
+					}
 					current = &n.Children
 					found = true
 					break
