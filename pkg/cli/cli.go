@@ -45,6 +45,9 @@ import (
 // CLI is the interactive command-line interface.
 type CLI struct {
 	rl *readline.Instance
+	// historyFile is the on-disk (filtered) readline history path, set by
+	// Run; recorded via cliterm.RecordHistoryLine on each submitted line.
+	historyFile string
 	// readLineFn overrides rl.Readline for the multi-line terminal-input
 	// paths. It is a TEST SEAM, nil in production: the `load ... terminal`
 	// read loop is a security-relevant control flow (a Ctrl-C-aborted paste
@@ -492,9 +495,13 @@ func (c *CLI) Run() error {
 		return fmt.Errorf("secure readline history: %w", err)
 	}
 
-	c.rl, err = readline.NewEx(cliterm.DisableReadlineHistoryAutoSave(&readline.Config{
+	historySeed, err := cliterm.ReadHistorySeed(historyFile)
+	if err != nil {
+		return fmt.Errorf("read readline history: %w", err)
+	}
+	c.historyFile = historyFile
+	c.rl, err = readline.NewEx(cliterm.ConfigureReadlineHistory(&readline.Config{
 		Prompt:          c.operationalPrompt(),
-		HistoryFile:     historyFile,
 		HistoryLimit:    10000,
 		InterruptPrompt: "^C",
 		EOFPrompt:       "exit",
@@ -564,6 +571,9 @@ func (c *CLI) Run() error {
 		return fmt.Errorf("readline init: %w", err)
 	}
 	defer c.rl.Close()
+	if err := cliterm.SeedHistory(c.rl, historySeed); err != nil {
+		return err
+	}
 
 	// Commit-confirmed timeout rollback ownership (#1922 Item 1a).
 	//
@@ -675,6 +685,9 @@ func (c *CLI) Run() error {
 			return err
 		}
 
+		if recErr := cliterm.RecordHistoryLine(c.historyFile, line); recErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: record history: %v\n", recErr)
+		}
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
