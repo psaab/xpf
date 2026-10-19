@@ -19,7 +19,7 @@ are recorded.
 | Job | Command | Source of truth |
 |---|---|---|
 | Harness census and self-test | `sh scripts/harness-census.sh`, then `bash ./test/incus/harness-census-selftest.sh` (runnable-harness reachability census and mutation self-test; examines no packets) | `test.yml` job `census` |
-| Go build and affected tests | `go build ./...`, then `bash scripts/ci_affected_go_tests.sh "$BASE_SHA" "$HEAD_SHA"` (changed packages + reverse dependents; a changed path owned by no Go package and not on the selector's never-read allowlist seeds every package, and the tree-census packages `pkg/docsref`, `pkg/durationaudit`, `pkg/memlockcensus`, `pkg/refactoraudit`, `pkg/showaudit` always run -- #14647) | `test.yml` job `go` (`Go build and affected tests`) |
+| Go build and affected tests | `go build ./...`, then `bash scripts/ci_affected_go_tests.sh "$BASE_SHA" "$HEAD_SHA"` (changed packages + reverse dependents; a changed path owned by no Go package and not on the selector's never-read allowlist seeds every package, the tree-census packages `pkg/docsref`, `pkg/durationaudit`, `pkg/memlockcensus`, `pkg/refactoraudit`, `pkg/showaudit` always run -- #14647; tests that read another package's Go source by relative path are selected via reads-source-of edges derived from the path literals, and renames are diffed with `--no-renames` so the source package is selected too -- #15241 A58-01/A58-03) | `test.yml` job `go` (`Go build and affected tests`) |
 | Rust workspace compile check | `cargo check --manifest-path userspace-dp/Cargo.toml --workspace --all-targets` | `test.yml` job `rust`, step `Check Rust workspace and all targets` |
 
 That is the whole `CI tests` workflow gate. The selector's fallback and

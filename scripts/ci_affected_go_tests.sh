@@ -15,7 +15,7 @@ fi
 BASE=$1
 HEAD=$2
 
-if ! CHANGED=$(git diff --name-only "$BASE" "$HEAD"); then
+if ! CHANGED=$(git diff --name-only --no-renames "$BASE" "$HEAD"); then
   echo "unable to diff repository paths between $BASE and $HEAD" >&2
   exit 1
 fi
@@ -44,6 +44,7 @@ fi
 PKGS=$(printf '%s\n' "$CHANGED" | python3 -c '
 import json
 import os
+import re
 import pathlib
 import subprocess
 import sys
@@ -158,6 +159,60 @@ if missing_census:
     )
     sys.exit(1)
 seeds.update(census_packages)
+# Reads-source-of edges (#15241 A58-01): a test that opens another
+# package Go source by relative path (pkg/denyaudit reading
+# ../grpcapi/authz.go) has no import edge to that package -- denyaudit is
+# imported BY grpcapi, not the reverse -- so the reverse-import closure
+# below can never select it for a change to the file it reads. Derive
+# the missing edges from the test sources themselves: every relative
+# path literal in a *_test.go that resolves to a file inside another Go
+# package makes the test package a reader of that package.
+reads_source_of = {}
+_join_call = re.compile(r"filepath\.Join\(([^)]*)\)")
+_quoted = re.compile(r"\"((?:[^\"\\]|\\.)*)\"")
+for import_path, package in packages.items():
+    import_dir = os.path.realpath(package["Dir"])
+    for field in ("TestGoFiles", "XTestGoFiles"):
+        for filename in package.get(field, []):
+            test_path = os.path.join(import_dir, filename)
+            try:
+                with open(test_path, encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            targets = set()
+            for qm in _quoted.finditer(text):
+                raw = qm.group(1)
+                if raw == ".." or raw.startswith("../"):
+                    targets.add(raw)
+            for m in _join_call.finditer(text):
+                parts = _quoted.findall(m.group(1))
+                if parts and (parts[0] == ".." or parts[0].startswith("../")):
+                    targets.add("/".join(parts))
+            repo_root = os.path.realpath(".")
+            for raw in targets:
+                if raw in (".", "..") or ".." in raw.split("/")[1:]:
+                    continue
+                if not raw.startswith("../"):
+                    continue
+                resolved = os.path.normpath(os.path.join(import_dir, raw))
+                if os.path.isdir(resolved):
+                    owner = directories.get(os.path.realpath(resolved))
+                    if owner is not None and owner != import_path:
+                        reads_source_of.setdefault(owner, set()).add(import_path)
+                    continue
+                # A file read: the owning package is the nearest mapped
+                # ancestor directory, exactly as for changed paths.
+                directory = os.path.dirname(resolved)
+                owner = None
+                probe = directory
+                while True:
+                    owner = directories.get(os.path.realpath(probe))
+                    if owner is not None or probe == repo_root or os.path.dirname(probe) == probe:
+                        break
+                    probe = os.path.dirname(probe)
+                if owner is not None and owner != import_path:
+                    reads_source_of.setdefault(owner, set()).add(import_path)
 
 if not seeds:
     print("No changed Go source package; skipping affected Go tests.", file=sys.stderr)
@@ -170,6 +225,9 @@ for import_path, package in packages.items():
         dependencies.update(package.get(field, []))
     for dependency in dependencies:
         reverse_imports.setdefault(dependency, set()).add(import_path)
+# Merge the reads-source-of edges (#15241 A58-01) into the same closure.
+for dependency, readers in reads_source_of.items():
+    reverse_imports.setdefault(dependency, set()).update(readers)
 
 selected = set(seeds)
 queue = list(seeds)

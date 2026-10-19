@@ -88,6 +88,12 @@ func raceGateRunPattern(t *testing.T) string {
 		if !strings.Contains(line, "-run") {
 			continue
 		}
+		// The A58-04 go test -list guard lines carry -list, not the
+		// race run; the race line is the one invoking test -race (the
+		// guard lines only name test-race-dp in prose).
+		if !strings.Contains(line, "test -race") {
+			continue
+		}
 		m := regexp.MustCompile(`-run\s+'([^']*)'`).FindStringSubmatch(line)
 		if m == nil {
 			t.Fatalf("test-race-dp recipe line has -run but no single-quoted pattern: %q", line)

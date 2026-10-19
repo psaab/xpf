@@ -139,6 +139,7 @@ test:
 	$(MAKE) test-rust || status=$$?; \
 	$(MAKE) harness-census || status=$$?; \
 	$(MAKE) test-routing-kernel || status=$$?; \
+	$(MAKE) test-daemon-kernel || status=$$?; \
 	$(MAKE) go-skip-census || status=$$?; \
 	echo ""; \
 	echo "make test: NOT EXAMINED by this run — the XDP shim's behavioural"; \
@@ -385,9 +386,24 @@ test-go: test-race-dp
 # parses this line, and pkg/daemon's canary reads the FIRST -run line in
 # this recipe, so this leg must stay BELOW the pkg/daemon one.
 test-race-dp:
+	@for alt in DataplaneCell NATPoolAlarm ForwardingStatus BootstrapExit RuntimeDataplaneNeverBareRootManager EventStreamFallbackLoop RunUserspaceEventStream LiveDataPlane_ GRPCShowBuffers_ SystemAction_ GRPCServer_ RESTServer_ ManagementProbe ConsoleCLIProbeWiring FullResync ReconcilePassUsesOneDataplaneSnapshot ReconcileBlackholeWrappersStillReloadPerCall MTUWarningsCrossCommitRace; do \
+		$(GO) test -list "^Test.*($$alt)" ./pkg/daemon/ | grep -q '^Test' || { echo "test-race-dp: pkg/daemon -run alternative $$alt matches no test" >&2; exit 1; }; \
+	done
 	$(GO) test -race ./pkg/daemon/ -run 'DataplaneCell|NATPoolAlarm|ForwardingStatus|BootstrapExit|RuntimeDataplaneNeverBareRootManager|EventStreamFallbackLoop|RunUserspaceEventStream|LiveDataPlane_|GRPCShowBuffers_|SystemAction_|GRPCServer_|RESTServer_|ManagementProbe|ConsoleCLIProbeWiring|FullResync|ReconcilePassUsesOneDataplaneSnapshot|ReconcileBlackholeWrappersStillReloadPerCall|MTUWarningsCrossCommitRace' -count=2
+	@for alt in ArmedGate PreArm AllConcurrentSaveNoRace StatusPathReadRacesCompileWrite DetachXDPIsSerializedWithFenceLease; do \
+		$(GO) test -list "^Test.*($$alt)" ./pkg/dataplane/ | grep -q '^Test' || { echo "test-race-dp: pkg/dataplane -run alternative $$alt matches no test" >&2; exit 1; }; \
+	done
 	$(GO) test -race ./pkg/dataplane/ -run 'ArmedGate|PreArm|AllConcurrentSaveNoRace|StatusPathReadRacesCompileWrite|DetachXDPIsSerializedWithFenceLease' -count=2
-	$(GO) test -race ./pkg/cluster/ -run 'DoesNotRaceUpdateGroups6550|DoesNotHoldMuAcrossManagerCallback6550|DoesNotRaceStopHeartbeat7257|HeartbeatStartSuperseded' -count=2
+	@for alt in DoesNotRaceUpdateGroups6550 DoesNotHoldMuAcrossManagerCallback6550 DoesNotRaceStopHeartbeat7257 StartHeartbeatSupersededByStopDoesNotPublish7257; do \
+		$(GO) test -list "^Test.*($$alt)" ./pkg/cluster/ | grep -q '^Test' || { echo "test-race-dp: pkg/cluster -run alternative $$alt matches no test" >&2; exit 1; }; \
+	done
+	$(GO) test -race ./pkg/cluster/ -run 'DoesNotRaceUpdateGroups6550|DoesNotHoldMuAcrossManagerCallback6550|DoesNotRaceStopHeartbeat7257|StartHeartbeatSupersededByStopDoesNotPublish7257' -count=2
+
+# #15241 (A58-04): each alternative of every test-race-dp -run pattern is
+# selected with `go test -list` before the race run, so renaming a
+# race-leg test (or mistyping an alternative, as HeartbeatStartSuperseded
+# was mistyped for TestStartHeartbeatSupersededByStopDoesNotPublish7257)
+# fails the leg instead of silently losing its -race run.
 
 # Rust userspace-dp correctness suite (#4006). userspace-dp is a
 # binary-only crate (no [lib] target), so its unit tests live in the bin
@@ -975,6 +991,51 @@ test-routing-kernel:
 			exit 1; \
 		fi; \
 		echo "make test: NOT-EXAMINED — routing-kernel (#9420 next-table scope, #9819 VRF-miss terminator, #11319 PBR-before-leak, #12083 VRF-held-source keepalive)."; \
+		echo "  The host cannot create a private network namespace; the real-kernel cells did not run."; \
+		echo "  Run where unprivileged user namespaces are available, or set XPF_REQUIRE_NETNS=1 to fail instead."; \
+		exit 0; \
+	fi; \
+	exit $$rc
+
+# Self-test the #9637/#11409/#12034/#12229/#12087 daemon real-kernel
+# cells (#15241 A58-06).
+# They SKIP under plain `go test` without a usable netns; a skipped cell
+# reads like a pass, so this target runs them under `unshare -rn` with
+# XPF_REQUIRE_NETNS=1, where (since A58-06) a missing tool is a failure.
+# It SKIPS as a whole (not fails) where user namespaces are unavailable,
+# matching the other tool-gated legs. All six kernel cells are pinned BY
+# NAME inside the script, so a rotted -run predicate cannot report a
+# clean pass over nothing.
+# Single-sourced with the `make selftest` legs: each script here is the
+# SAME script the aggregate runs, so the target and the aggregate cannot
+# drift into testing different things. The probes pin the leg's
+# missing-tool and output-flag contracts hermetically (eleven fixtures).
+test-daemon-kernel-lib:
+	sh ./test/daemon/selftest-daemon-kernel_15241.sh
+	sh ./test/daemon/selftest-daemon-probes_15241.sh
+
+# #15241 (A58-06): the daemon real-kernel cells (9637 x2, 11409, 12034,
+# 12229, 12087) are part of `make test`, not only the opt-in
+# `make selftest` / `test-daemon-kernel-lib`. They exercise kernel
+# host-inbound behaviour that ordinary Go tests cannot observe. The
+# forcing leg's by-name check catches an empty or stale `-run` selection.
+#
+# `make test` must remain usable on hosts that cannot create a private
+# netns: on those hosts the leg returns 77 and this target publishes
+# NOT-EXAMINED rather than silently treating the run as coverage. A host
+# requiring these cells can set XPF_REQUIRE_NETNS=1; in that mode a
+# missing forcing prerequisite fails instead of being reported as
+# unexamined.
+.PHONY: test-daemon-kernel
+test-daemon-kernel:
+	@out=$$(sh ./test/daemon/selftest-daemon-kernel_15241.sh 2>&1); rc=$$?; \
+	echo "$$out"; \
+	if [ $$rc -eq 77 ]; then \
+		if [ -n "$${XPF_REQUIRE_NETNS:-}" ]; then \
+			echo "test-daemon-kernel: FAIL — XPF_REQUIRE_NETNS=1, but the forcing prerequisites are unavailable."; \
+			exit 1; \
+		fi; \
+		echo "make test: NOT-EXAMINED — daemon-kernel (#9637 ingress, #11409 unzoned-ingress, #9637 reinject, #12034 shared-VRF, #12229 lifeline, #12087 secure-tunnel)."; \
 		echo "  The host cannot create a private network namespace; the real-kernel cells did not run."; \
 		echo "  Run where unprivileged user namespaces are available, or set XPF_REQUIRE_NETNS=1 to fail instead."; \
 		exit 0; \

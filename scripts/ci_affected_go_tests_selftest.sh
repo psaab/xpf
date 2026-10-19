@@ -109,6 +109,45 @@ else
   bad "docs/log-only: want [$want] got [$sel]"
 fi
 
+# 4b. (#15241 A58-01) A change to a Go file another package's test reads
+#     by relative path selects the reading package. denyaudit's
+#     sites_9042_test.go opens ../grpcapi/authz.go and asserts denyRPC
+#     routes through denyaudit.Note; grpcapi imports denyaudit, so the
+#     reverse-import closure from grpcapi can never reach denyaudit.
+#     Appending a denyRPC mutant comment must still select denyaudit
+#     via the reads-source-of edge derived from the path literal. The
+#     mutant keeps the tree compiling, because the selector runs
+#     `go list` over the whole module; the test itself is never run
+#     here — selection is the property under test.
+printf '\n// selftest source-read mutant (#15241)\n' >> "$tmp/clone/pkg/grpcapi/authz.go"
+git -C "$tmp/clone" add pkg/grpcapi/authz.go
+git -C "$tmp/clone" commit --quiet -m "selftest: denyRPC source-read mutant"
+out=$(cd "$tmp/clone" && bash "$selector" --list HEAD^ HEAD 2>&1); rc=$?
+[ "$rc" -eq 0 ] && ok "source-read: selector exits 0" || bad "source-read: rc=$rc out=$out"
+sel=${out#Affected Go packages: }
+contains "$sel" "github.com/psaab/xpf/pkg/grpcapi" \
+  "source-read: owning pkg/grpcapi selected"
+contains "$sel" "github.com/psaab/xpf/pkg/denyaudit" \
+  "source-read: pkg/denyaudit selected via reads-source-of edge (A58-01)"
+git -C "$tmp/clone" reset --quiet --hard HEAD^
+
+# 4c. (#15241 A58-03) A cross-package rename selects BOTH packages. git
+#     diff --name-only reports only the destination of a rename, so the
+#     source package — whose tests may no longer compile — was never
+#     selected. --no-renames reports the delete and the add separately.
+#     git mv keeps the file content byte-identical so git detects the
+#     rename; the selector must still select the source package.
+git -C "$tmp/clone" mv cmd/shimverify/main.go cmd/shim-manifest/zz_main_15241.go
+git -C "$tmp/clone" commit --quiet -m "selftest: cross-package move"
+out=$(cd "$tmp/clone" && bash "$selector" --list HEAD^ HEAD 2>&1); rc=$?
+[ "$rc" -eq 0 ] && ok "rename: selector exits 0" || bad "rename: rc=$rc out=$out"
+sel=${out#Affected Go packages: }
+contains "$sel" "github.com/psaab/xpf/cmd/shimverify" \
+  "rename: source cmd/shimverify selected (A58-03)"
+contains "$sel" "github.com/psaab/xpf/cmd/shim-manifest" \
+  "rename: destination cmd/shim-manifest selected"
+git -C "$tmp/clone" reset --quiet --hard HEAD^
+
 # ── 5. census_packages matches the live census packages ──
 # The selector's census list must equal the pkg/ packages that declare
 # a repo-wide census (doc.go or census test header) and that no package

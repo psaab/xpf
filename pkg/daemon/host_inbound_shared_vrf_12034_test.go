@@ -71,10 +71,16 @@ func TestHostInboundSharedVRFMasterIngressAndFineDeny12034(t *testing.T) {
 		return
 	}
 	if findNft() == "" {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("nft not found (XPF_REQUIRE_NETNS is set)")
+		}
 		t.Skip("nft not found")
 	}
 	for _, tool := range []string{"unshare", "ip", "nsenter"} {
 		if _, err := exec.LookPath(tool); err != nil {
+			if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+				t.Fatalf("%s not available (XPF_REQUIRE_NETNS is set)", tool)
+			}
 			t.Skipf("%s not available", tool)
 		}
 	}
