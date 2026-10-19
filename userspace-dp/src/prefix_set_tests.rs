@@ -78,15 +78,15 @@ fn linear_variant_chosen_when_count_eq_threshold() {
 }
 
 #[test]
-fn trie_variant_chosen_when_count_gt_threshold() {
+fn ranges_variant_chosen_when_count_gt_threshold() {
     let prefixes: Vec<PrefixV4> = (0..17).map(|i| p4(&format!("10.{i}.0.0/16"))).collect();
     let set = PrefixSetV4::from_prefixes(prefixes);
-    assert!(matches!(set, PrefixSetV4::Trie(_)));
+    assert!(matches!(set, PrefixSetV4::Ranges(..)));
     assert_eq!(set.prefix_count(), 17);
 }
 
 #[test]
-fn trie_lookup_matches_linear_lookup_random_v4() {
+fn ranges_lookup_matches_linear_lookup_random_v4() {
     let mut rng = Lcg::new(0xCAFE_BABE_DEAD_BEEF);
     // Build 256 prefixes with random length 8..=32 — wider than
     // /32 only would hit the worst-case node count; we use a
@@ -103,7 +103,7 @@ fn trie_lookup_matches_linear_lookup_random_v4() {
     let linear = PrefixSetV4::from_prefixes(prefixes.iter().take(16).copied().collect());
     let trie = PrefixSetV4::from_prefixes(prefixes.clone());
     assert!(matches!(linear, PrefixSetV4::Linear(_)));
-    assert!(matches!(trie, PrefixSetV4::Trie(_)));
+    assert!(matches!(trie, PrefixSetV4::Ranges(..)));
     // Boolean equivalence: against a fresh linear scan on the
     // same input, the trie must produce the same answer for
     // every probe IP.
@@ -117,7 +117,7 @@ fn trie_lookup_matches_linear_lookup_random_v4() {
 }
 
 #[test]
-fn trie_lookup_matches_linear_lookup_random_v6() {
+fn ranges_lookup_matches_linear_lookup_random_v6() {
     let mut rng = Lcg::new(0xFACE_FEED_C0DE_BEEF);
     let mut prefixes: Vec<PrefixV6> = Vec::with_capacity(256);
     for _ in 0..256 {
@@ -127,7 +127,7 @@ fn trie_lookup_matches_linear_lookup_random_v6() {
         prefixes.push(PrefixV6::from_net(net));
     }
     let trie = PrefixSetV6::from_prefixes(prefixes.clone());
-    assert!(matches!(trie, PrefixSetV6::Trie(_)));
+    assert!(matches!(trie, PrefixSetV6::Ranges(..)));
     let reference: Vec<PrefixV6> = prefixes;
     for _ in 0..4096 {
         let ip = Ipv6Addr::from(rng.next_u128());
@@ -138,7 +138,7 @@ fn trie_lookup_matches_linear_lookup_random_v6() {
 }
 
 #[test]
-fn trie_short_circuits_on_covering_ancestor() {
+fn ranges_short_circuits_on_covering_ancestor() {
     // /16 + /24 nested: the /16 is a strict superset of /24.
     // Any IP within the /16 should match because of the /16
     // covers flag at depth 16, regardless of /24 membership.
@@ -147,7 +147,7 @@ fn trie_short_circuits_on_covering_ancestor() {
         .chain(std::iter::once(p4("10.0.0.0/16")))
         .collect();
     let set = PrefixSetV4::from_prefixes(prefixes);
-    assert!(matches!(set, PrefixSetV4::Trie(_)));
+    assert!(matches!(set, PrefixSetV4::Ranges(..)));
     // 10.0.99.42: second octet 0 → in 10.0.0.0/16 (depth-16
     // covers short-circuits before we ever check the /24 layer
     // for 10.0.99/24, which wasn't inserted).
@@ -164,7 +164,7 @@ fn trie_short_circuits_on_covering_ancestor() {
 }
 
 #[test]
-fn trie_handles_zero_prefix_via_match_any_shortcut() {
+fn ranges_handles_zero_prefix_via_match_any_shortcut() {
     // /0 must be filtered to MatchAny by the constructor —
     // even when mixed with other prefixes.
     let prefixes = vec![p4("10.0.0.0/24"), p4("0.0.0.0/0"), p4("192.168.1.0/24")];
@@ -174,11 +174,11 @@ fn trie_handles_zero_prefix_via_match_any_shortcut() {
 }
 
 #[test]
-fn trie_handles_full_host_prefix() {
+fn ranges_handles_full_host_prefix() {
     // A single /32 — only the exact host matches.
     let prefixes: Vec<PrefixV4> = (0..17).map(|i| p4(&format!("10.0.0.{i}/32"))).collect();
     let set = PrefixSetV4::from_prefixes(prefixes);
-    assert!(matches!(set, PrefixSetV4::Trie(_)));
+    assert!(matches!(set, PrefixSetV4::Ranges(..)));
     assert!(set.contains("10.0.0.5".parse().expect("ip")));
     assert!(!set.contains("10.0.0.20".parse().expect("ip")));
     assert!(!set.contains("10.0.0.100".parse().expect("ip")));
@@ -195,11 +195,14 @@ fn duplicate_prefixes_dont_corrupt_the_set() {
         .collect();
     let set = PrefixSetV4::from_prefixes(prefixes);
     match &set {
-        PrefixSetV4::Trie(t) => {
-            // 17 unique /24s + 1 deduped (10.0.0.0/24) = 18 unique.
-            assert_eq!(t.size, 18, "trie size should dedupe");
+        PrefixSetV4::Ranges(r, n) => {
+            // 17 unique /24s + 1 deduped (10.0.0.0/24): 18 distinct
+            // prefixes. The /24s are adjacent (5.5.0..5.5.16) so
+            // they merge into fewer disjoint ranges.
+            assert_eq!(*n, 18, "distinct prefix count should dedupe exact duplicates");
+            assert!(r.len() < 18, "adjacent /24s must merge: {} ranges", r.len());
         }
-        _ => panic!("expected trie variant"),
+        _ => panic!("expected ranges variant"),
     }
     assert!(set.contains("10.0.0.42".parse().expect("ip")));
     assert!(set.contains("5.5.16.1".parse().expect("ip")));
@@ -232,4 +235,115 @@ fn unsorted_input_works() {
         let ip: Ipv4Addr = ip_str.parse().expect("ip");
         assert_eq!(a.contains(ip), b.contains(ip), "disagree at {}", ip);
     }
+}
+
+// -----------------------------------------------------------------
+// #15091: range representation memory + budget regression cells.
+// These fail on origin/master: the old variant is `Trie` (one
+// Box per bit), so the `Ranges` shape, the <64 MiB heap bound for
+// 850k random /128s, and the typed budget error do not exist.
+// -----------------------------------------------------------------
+
+fn v6_15091(i: u64) -> PrefixV6 {
+    // Deterministic splitmix64 spread of /128 host prefixes.
+    let mut z = i.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    let hi = z as u128;
+    let lo = (z ^ 0xA076_1D64_78BD_642F) as u128;
+    let addr = (hi << 64) | lo;
+    p6(&format!("{}/128", Ipv6Addr::from(addr)))
+}
+
+#[test]
+fn ranges_memory_bound_850k_random_v6_15091() {
+    let prefixes: Vec<PrefixV6> = (0..850_000u64).map(v6_15091).collect();
+    let set = PrefixSetV6::from_v3_literals(prefixes);
+    assert!(
+        matches!(set, PrefixSetV6::Ranges(..)),
+        "850k prefixes must compile to Ranges, got a non-Ranges variant"
+    );
+    let heap = set.heap_bytes();
+    assert!(
+        heap < 64 * 1024 * 1024,
+        "850k random /128 heap {heap} bytes must stay under 64 MiB (#15091 acceptance)"
+    );
+    // Membership spot-checks against the retained ranges.
+    assert!(set.contains(Ipv6Addr::from({
+        let p = v6_15091(42);
+        u128::from(p.addr())
+    })));
+    assert!(!set.contains(Ipv6Addr::UNSPECIFIED));
+}
+
+#[test]
+fn ranges_budget_exceeded_is_typed_15091() {
+    // MAX+1 disjoint /128s cannot merge, so the merged count
+    // exceeds the budget and the fallible factory must refuse.
+    let n = MAX_PREFIX_SET_RANGES + 1;
+    let prefixes: Vec<PrefixV6> = (0..n as u64).map(v6_15091).collect();
+    match PrefixSetV6::try_from_v3_literals(prefixes) {
+        Err(e) => {
+            assert_eq!(e.limit, MAX_PREFIX_SET_RANGES);
+            assert!(e.ranges > MAX_PREFIX_SET_RANGES);
+        }
+        Ok(_) => panic!("over-budget set must return PrefixSetBudgetExceeded"),
+    }
+    // The infallible wrapper must fail closed to MatchNone,
+    // never widen to MatchAny.
+    let prefixes: Vec<PrefixV6> = (0..n as u64).map(v6_15091).collect();
+    let set = PrefixSetV6::from_v3_literals(prefixes);
+    assert!(set.is_match_none(), "over-budget wrapper must be MatchNone");
+    assert!(!set.contains(Ipv6Addr::LOCALHOST));
+}
+
+#[test]
+fn ranges_at_budget_still_compiles_15091() {
+    // Control: exactly at the merged-range budget compiles and
+    // matches. Adjacent /128s merge, so use spaced addresses
+    // (step 3) to keep ranges disjoint without exceeding it.
+    let prefixes: Vec<PrefixV6> = (0..MAX_PREFIX_SET_RANGES as u128)
+        .map(|i| {
+            let addr = 0x2001_0db8_0000_0000_0000_0000_0000_0000u128 + i * 3;
+            p6(&format!("{}/128", Ipv6Addr::from(addr)))
+        })
+        .collect();
+    let set = PrefixSetV6::try_from_v3_literals(prefixes)
+        .expect("at-budget set must compile");
+    assert_eq!(set.prefix_count(), MAX_PREFIX_SET_RANGES);
+    assert!(set.contains(Ipv6Addr::from(
+        0x2001_0db8_0000_0000_0000_0000_0000_0000u128
+    )));
+    assert!(!set.contains(Ipv6Addr::from(
+        0x2001_0db8_0000_0000_0000_0000_0000_0001u128
+    )));
+}
+
+#[test]
+fn ranges_merge_covered_and_adjacent_15091() {
+    // A covering /32 plus nested and adjacent prefixes collapse
+    // to one range; a disjoint /32 stays separate.
+    let mut prefixes: Vec<PrefixV6> = vec![
+        p6("2001:db8::/32"),
+        p6("2001:db8:1::/48"),
+        p6("2001:db8::1/128"),
+        p6("2001:db9::/32"),
+    ];
+    // Pad past the Linear threshold with prefixes inside the /32.
+    for i in 0..20u32 {
+        prefixes.push(p6(&format!("2001:db8:{i:x}::/48")));
+    }
+    let set = PrefixSetV6::from_v3_literals(prefixes);
+    match &set {
+        PrefixSetV6::Ranges(r, _) => assert_eq!(
+            r.len(),
+            1,
+            "all inputs lie in 2001:db8::/32 or the adjacent 2001:db9::/32 which merges adjacently"
+        ),
+        other => panic!("expected Ranges, got {other:?}"),
+    }
+    assert!(set.contains("2001:db8:ffff::1".parse().expect("ip")));
+    assert!(set.contains("2001:db9::1".parse().expect("ip")));
+    assert!(!set.contains("2001:dba::1".parse().expect("ip")));
 }

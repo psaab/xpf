@@ -1873,7 +1873,10 @@ pub(crate) struct PolicyState {
     concrete_zone_ids: Vec<u16>,
     /// #1606: deduplicated address-book table. Rules reference
     /// books by dense `u32` index (`PolicyRule::source_book_idxs`).
-    pub(crate) books: Vec<BookEntry>,
+    /// #15091: behind `Arc` so `ForwardingState::clone` in
+    /// `publish_runtime_view` bumps a refcount instead of
+    /// deep-cloning every feed-backed range vector on each publish.
+    pub(crate) books: Arc<Vec<BookEntry>>,
     /// #1606: wire-ID → dense-index map used at parse time only.
     book_id_to_idx: FxHashMap<u32, u32>,
     /// #3019: true iff at least one rule names `junos-host` as its from OR to
@@ -1951,7 +1954,7 @@ impl Default for PolicyState {
             // #3783: the Default state carries no zones, so the wildcard/global
             // histogram-slot expansion has an empty concrete-zone universe.
             concrete_zone_ids: Vec::new(),
-            books: Vec::new(),
+            books: Arc::new(Vec::new()),
             book_id_to_idx: FxHashMap::default(),
             has_junos_host_rules: false,
             has_scheduled_rules: false,
@@ -2675,7 +2678,7 @@ pub(crate) fn parse_policy_state_with_counters(
         // #3783: the concrete-zone universe backing the wildcard/global
         // histogram-slot expansion (computed above from `zone_name_to_id`).
         concrete_zone_ids,
-        books: Vec::with_capacity(address_books.len()),
+        books: Arc::new(Vec::with_capacity(address_books.len())),
         book_id_to_idx: FxHashMap::default(),
         // #3019: armed below if any rule names the `junos-host` self zone.
         has_junos_host_rules: false,
@@ -2747,12 +2750,34 @@ pub(crate) fn parse_policy_state_with_counters(
                 });
             }
         }
+        // #15091: fallible factories — a book whose merged range
+        // count exceeds the helper budget fails the whole snapshot
+        // closed (typed error, previous good state retained)
+        // instead of materialising an unbounded set.
         let entry = BookEntry {
-            v4: PrefixSetV4::from_v3_literals(v4),
-            v6: PrefixSetV6::from_v3_literals(v6),
+            v4: PrefixSetV4::try_from_v3_literals(v4).map_err(|e| {
+                SnapshotIntegrityError::AddressBookPrefixBudgetExceeded {
+                    book_id: snap.id,
+                    book_name: snap.name.clone(),
+                    family: "v4",
+                    ranges: e.ranges,
+                    limit: e.limit,
+                }
+            })?,
+            v6: PrefixSetV6::try_from_v3_literals(v6).map_err(|e| {
+                SnapshotIntegrityError::AddressBookPrefixBudgetExceeded {
+                    book_id: snap.id,
+                    book_name: snap.name.clone(),
+                    family: "v6",
+                    ranges: e.ranges,
+                    limit: e.limit,
+                }
+            })?,
         };
         let dense_idx = state.books.len() as u32;
-        state.books.push(entry);
+        Arc::get_mut(&mut state.books)
+            .expect("books Arc is uniquely owned during parse")
+            .push(entry);
         state.book_id_to_idx.insert(snap.id, dense_idx);
     }
 

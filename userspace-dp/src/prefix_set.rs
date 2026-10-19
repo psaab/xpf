@@ -9,27 +9,58 @@
 //!   collapse here) OR when any input prefix has length 0 (`/0`,
 //!   `::/0`).
 //! - `Linear(Vec)` — 1..=16 prefixes; cache-friendly linear scan.
-//! - `Trie` — >16 prefixes; uncompressed binary radix tree. Walk
-//!   the IP MSB→LSB bit-by-bit, short-circuit on the first node
-//!   whose `covers` flag is set.
+//! - `Ranges(Vec)` — >16 prefixes; sorted, merged, non-overlapping
+//!   `[lo, hi]` inclusive ranges with binary search (#15091).
 //!
 //! The semantics are exactly the legacy `nets_match_v4/v6`:
 //! "match if any prefix in the set covers the IP". No
 //! longest-prefix tiebreak is performed; this is a boolean-only
 //! membership test.
+//!
+//! #15091: the previous representation for >16 prefixes was an
+//! uncompressed one-`Box`-per-bit binary trie. A feed-backed book
+//! at the #3934 caps (1<<20 prefixes, random /128s) materialised
+//! ~2.9 GB of 24-byte nodes in the helper and was deep-cloned on
+//! every forwarding publish. Sorted merged ranges cost 32 B per
+//! retained v6 range (8 B per v4 range), need no per-bit nodes,
+//! and collapse covered/overlapping prefixes at build time.
 
 use crate::prefix::{PrefixV4, PrefixV6};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// Threshold below which a `Linear` variant is used. See
-/// `docs/pr/923-policy-prefix-set/plan.md` §"Threshold rationale".
-/// 16 is a starting tunable; the companion bench
-/// `benches/prefix_set_lookup.rs` gates the worst-case build cost
-/// (`Box<TrieNode>` allocation footprint for 256 random /32
-/// prefixes) at p95 ≤ 2 ms — it does NOT sweep thresholds yet.
-/// A threshold-sweep + lookup-cost microbench is a follow-up if
-/// the constant turns out to be poorly tuned in production traces.
+/// `docs/pr/923-policy-prefix-set/plan.md` \u00a7"Threshold rationale".
+/// 16 is a starting tunable. A threshold-sweep + lookup-cost
+/// microbench is a follow-up if the constant turns out to be
+/// poorly tuned in production traces.
 pub(crate) const PREFIX_SET_LINEAR_MAX: usize = 16;
+
+/// #15091: helper-side prefix/memory budget. Mirrors the Go feed
+/// cap (`config.MaxDynamicAddressFeedPrefixes` = 1<<20 in
+/// `pkg/config/schema_security_dynamic_address.go`, aliased as
+/// `maxFeedPrefixes` in `pkg/feeds/feeds.go`): a single feed may
+/// legally carry 1<<20 prefixes, so any in-cap book, literal set,
+/// or rule side at or below this count compiles. The budget is
+/// enforced on the MERGED range count (the retained, disjoint
+/// ranges after covered prefixes collapse), which is the
+/// representation actually stored: a set that merges above this
+/// many disjoint ranges exceeds the memory the cap was sized for
+/// and the snapshot build must fail closed. See
+/// `PrefixSetV4::try_from_prefixes` / `try_from_v3_literals`.
+pub(crate) const MAX_PREFIX_SET_RANGES: usize = 1 << 20;
+
+/// #15091: a prefix set whose merged range count exceeds
+/// [`MAX_PREFIX_SET_RANGES`]. Callers that build policy state map
+/// this to `SnapshotIntegrityError` so the whole snapshot is
+/// rejected (fail closed, previous good state retained) rather
+/// than materialising an unbounded representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrefixSetBudgetExceeded {
+    /// Merged disjoint ranges the set would retain.
+    pub ranges: usize,
+    /// The budget that was exceeded ([`MAX_PREFIX_SET_RANGES`]).
+    pub limit: usize,
+}
 
 /// IPv4 prefix membership set. See module docs.
 ///
@@ -43,7 +74,10 @@ pub(crate) enum PrefixSetV4 {
     MatchAny,
     MatchNone,
     Linear(Vec<PrefixV4>),
-    Trie(PrefixTrieV4),
+    /// Sorted merged ranges plus the distinct-prefix count
+    /// (`prefix_count` keeps its pre-#15091 cardinality meaning:
+    /// covered prefixes still count, exact duplicates do not).
+    Ranges(Vec<(u32, u32)>, usize),
 }
 
 #[derive(Debug, Clone)]
@@ -51,28 +85,130 @@ pub(crate) enum PrefixSetV6 {
     MatchAny,
     MatchNone,
     Linear(Vec<PrefixV6>),
-    Trie(PrefixTrieV6),
+    Ranges(Vec<(u128, u128)>, usize),
+}
+
+/// #15091: build sorted, merged, disjoint inclusive ranges from
+/// v4 prefixes. Returns `Err` when the merged count exceeds the
+/// budget; the caller fails the snapshot closed.
+fn merged_ranges_v4(
+    prefixes: &[PrefixV4],
+) -> Result<(Vec<(u32, u32)>, usize), PrefixSetBudgetExceeded> {
+    let mut distinct: Vec<(u32, u8)> = prefixes
+        .iter()
+        .map(|p| (u32::from(p.addr()), p.prefix_len()))
+        .collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    let distinct_count = distinct.len();
+    let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(prefixes.len());
+    for p in prefixes {
+        let lo = u32::from(p.addr());
+        let host = if p.prefix_len() == 0 {
+            u32::MAX
+        } else if p.prefix_len() >= 32 {
+            0
+        } else {
+            (1u32 << (32 - p.prefix_len())) - 1
+        };
+        ranges.push((lo, lo.wrapping_add(host)));
+    }
+    ranges.sort_unstable();
+    let mut out: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+    for (lo, hi) in ranges {
+        match out.last_mut() {
+            Some((_, prev_hi)) if lo <= prev_hi.saturating_add(1) => {
+                if hi > *prev_hi {
+                    *prev_hi = hi;
+                }
+            }
+            _ => {
+                out.push((lo, hi));
+                if out.len() > MAX_PREFIX_SET_RANGES {
+                    return Err(PrefixSetBudgetExceeded {
+                        ranges: out.len(),
+                        limit: MAX_PREFIX_SET_RANGES,
+                    });
+                }
+            }
+        }
+    }
+    Ok((out, distinct_count))
+}
+
+/// #15091: v6 mirror of `merged_ranges_v4`.
+fn merged_ranges_v6(
+    prefixes: &[PrefixV6],
+) -> Result<(Vec<(u128, u128)>, usize), PrefixSetBudgetExceeded> {
+    let mut distinct: Vec<(u128, u8)> = prefixes
+        .iter()
+        .map(|p| (u128::from(p.addr()), p.prefix_len()))
+        .collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    let distinct_count = distinct.len();
+    let mut ranges: Vec<(u128, u128)> = Vec::with_capacity(prefixes.len());
+    for p in prefixes {
+        let lo = u128::from(p.addr());
+        let host = if p.prefix_len() == 0 {
+            u128::MAX
+        } else if p.prefix_len() >= 128 {
+            0
+        } else {
+            (1u128 << (128 - p.prefix_len())) - 1
+        };
+        ranges.push((lo, lo.wrapping_add(host)));
+    }
+    ranges.sort_unstable();
+    let mut out: Vec<(u128, u128)> = Vec::with_capacity(ranges.len());
+    for (lo, hi) in ranges {
+        match out.last_mut() {
+            Some((_, prev_hi)) if lo <= prev_hi.saturating_add(1) => {
+                if hi > *prev_hi {
+                    *prev_hi = hi;
+                }
+            }
+            _ => {
+                out.push((lo, hi));
+                if out.len() > MAX_PREFIX_SET_RANGES {
+                    return Err(PrefixSetBudgetExceeded {
+                        ranges: out.len(),
+                        limit: MAX_PREFIX_SET_RANGES,
+                    });
+                }
+            }
+        }
+    }
+    Ok((out, distinct_count))
 }
 
 impl PrefixSetV4 {
     /// Legacy factory: empty input collapses to `MatchAny`. Used by
     /// the non-v3-shaped fallback path that parses fully-expanded
-    /// `source_addresses` from old-Go snapshots.
+    /// `source_addresses` from old-Go snapshots. Infallible
+    /// wrapper over `try_from_prefixes`: an over-budget set (only
+    /// reachable from a corrupt/hand-built snapshot, since the Go
+    /// producer is capped) degrades to `MatchNone` rather than
+    /// panicking \u2014 never `MatchAny`, so it cannot widen a deny.
     pub(crate) fn from_prefixes(prefixes: Vec<PrefixV4>) -> Self {
+        Self::try_from_prefixes(prefixes).unwrap_or(Self::MatchNone)
+    }
+
+    /// #15091 fallible legacy factory.
+    pub(crate) fn try_from_prefixes(prefixes: Vec<PrefixV4>) -> Result<Self, PrefixSetBudgetExceeded> {
         if prefixes.is_empty() {
-            return Self::MatchAny;
+            return Ok(Self::MatchAny);
         }
         if prefixes.iter().any(|p| p.prefix_len() == 0) {
-            return Self::MatchAny;
+            return Ok(Self::MatchAny);
         }
         if prefixes.len() <= PREFIX_SET_LINEAR_MAX {
-            Self::Linear(prefixes)
+            Ok(Self::Linear(prefixes))
         } else {
-            let mut trie = PrefixTrieV4::default();
-            for p in &prefixes {
-                trie.insert(p);
+            {
+                let (r, n) = merged_ranges_v4(&prefixes)?;
+                Ok(Self::Ranges(r, n))
             }
-            Self::Trie(trie)
         }
     }
 
@@ -80,21 +216,27 @@ impl PrefixSetV4 {
     /// breaking the legacy "empty Vec = MatchAny" coupling for
     /// v3-shaped rule sides + book entries. Used when the rule
     /// is v3-shaped on this side, and when building book entries.
+    /// Infallible wrapper over `try_from_v3_literals` (see
+    /// `from_prefixes` for the over-budget posture).
     pub(crate) fn from_v3_literals(prefixes: Vec<PrefixV4>) -> Self {
+        Self::try_from_v3_literals(prefixes).unwrap_or(Self::MatchNone)
+    }
+
+    /// #15091 fallible v3 factory.
+    pub(crate) fn try_from_v3_literals(prefixes: Vec<PrefixV4>) -> Result<Self, PrefixSetBudgetExceeded> {
         if prefixes.is_empty() {
-            return Self::MatchNone;
+            return Ok(Self::MatchNone);
         }
         if prefixes.iter().any(|p| p.prefix_len() == 0) {
-            return Self::MatchAny;
+            return Ok(Self::MatchAny);
         }
         if prefixes.len() <= PREFIX_SET_LINEAR_MAX {
-            Self::Linear(prefixes)
+            Ok(Self::Linear(prefixes))
         } else {
-            let mut trie = PrefixTrieV4::default();
-            for p in &prefixes {
-                trie.insert(p);
+            {
+                let (r, n) = merged_ranges_v4(&prefixes)?;
+                Ok(Self::Ranges(r, n))
             }
-            Self::Trie(trie)
         }
     }
 
@@ -105,7 +247,11 @@ impl PrefixSetV4 {
             Self::MatchAny => true,
             Self::MatchNone => false,
             Self::Linear(v) => v.iter().any(|p| p.contains(ip)),
-            Self::Trie(t) => t.contains(ip),
+            Self::Ranges(r, _) => {
+                let x = u32::from(ip);
+                let idx = r.partition_point(|&(_, hi)| hi < x);
+                matches!(r.get(idx), Some(&(lo, _)) if lo <= x)
+            }
         }
     }
 
@@ -119,50 +265,71 @@ impl PrefixSetV4 {
         matches!(self, Self::MatchNone)
     }
 
-    /// Set cardinality. Debug-only.
+    /// Retained disjoint range/prefix count. For `Ranges` this is
+    /// the merged range count (covered duplicates collapse), for
+    /// `Linear` the literal count. Debug/logging only.
     pub(crate) fn prefix_count(&self) -> usize {
         match self {
             Self::MatchAny | Self::MatchNone => 0,
             Self::Linear(v) => v.len(),
-            Self::Trie(t) => t.size,
+            Self::Ranges(_, n) => *n,
+        }
+    }
+
+    /// #15091: heap bytes retained by this set (variant payload
+    /// only, excluding the enum itself). `Ranges` costs 8 B/range
+    /// (v4) with no per-bit nodes.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        match self {
+            Self::MatchAny | Self::MatchNone => 0,
+            Self::Linear(v) => v.capacity() * std::mem::size_of::<PrefixV4>(),
+            Self::Ranges(r, _) => r.capacity() * std::mem::size_of::<(u32, u32)>(),
         }
     }
 }
 
 impl PrefixSetV6 {
     pub(crate) fn from_prefixes(prefixes: Vec<PrefixV6>) -> Self {
+        Self::try_from_prefixes(prefixes).unwrap_or(Self::MatchNone)
+    }
+
+    /// #15091 fallible legacy factory.
+    pub(crate) fn try_from_prefixes(prefixes: Vec<PrefixV6>) -> Result<Self, PrefixSetBudgetExceeded> {
         if prefixes.is_empty() {
-            return Self::MatchAny;
+            return Ok(Self::MatchAny);
         }
         if prefixes.iter().any(|p| p.prefix_len() == 0) {
-            return Self::MatchAny;
+            return Ok(Self::MatchAny);
         }
         if prefixes.len() <= PREFIX_SET_LINEAR_MAX {
-            Self::Linear(prefixes)
+            Ok(Self::Linear(prefixes))
         } else {
-            let mut trie = PrefixTrieV6::default();
-            for p in &prefixes {
-                trie.insert(p);
+            {
+                let (r, n) = merged_ranges_v6(&prefixes)?;
+                Ok(Self::Ranges(r, n))
             }
-            Self::Trie(trie)
         }
     }
 
     pub(crate) fn from_v3_literals(prefixes: Vec<PrefixV6>) -> Self {
+        Self::try_from_v3_literals(prefixes).unwrap_or(Self::MatchNone)
+    }
+
+    /// #15091 fallible v3 factory.
+    pub(crate) fn try_from_v3_literals(prefixes: Vec<PrefixV6>) -> Result<Self, PrefixSetBudgetExceeded> {
         if prefixes.is_empty() {
-            return Self::MatchNone;
+            return Ok(Self::MatchNone);
         }
         if prefixes.iter().any(|p| p.prefix_len() == 0) {
-            return Self::MatchAny;
+            return Ok(Self::MatchAny);
         }
         if prefixes.len() <= PREFIX_SET_LINEAR_MAX {
-            Self::Linear(prefixes)
+            Ok(Self::Linear(prefixes))
         } else {
-            let mut trie = PrefixTrieV6::default();
-            for p in &prefixes {
-                trie.insert(p);
+            {
+                let (r, n) = merged_ranges_v6(&prefixes)?;
+                Ok(Self::Ranges(r, n))
             }
-            Self::Trie(trie)
         }
     }
 
@@ -172,7 +339,11 @@ impl PrefixSetV6 {
             Self::MatchAny => true,
             Self::MatchNone => false,
             Self::Linear(v) => v.iter().any(|p| p.contains(ip)),
-            Self::Trie(t) => t.contains(ip),
+            Self::Ranges(r, _) => {
+                let x = u128::from(ip);
+                let idx = r.partition_point(|&(_, hi)| hi < x);
+                matches!(r.get(idx), Some(&(lo, _)) if lo <= x)
+            }
         }
     }
 
@@ -190,7 +361,16 @@ impl PrefixSetV6 {
         match self {
             Self::MatchAny | Self::MatchNone => 0,
             Self::Linear(v) => v.len(),
-            Self::Trie(t) => t.size,
+            Self::Ranges(_, n) => *n,
+        }
+    }
+
+    /// #15091: v6 `Ranges` costs 32 B/range. See v4 `heap_bytes`.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        match self {
+            Self::MatchAny | Self::MatchNone => 0,
+            Self::Linear(v) => v.capacity() * std::mem::size_of::<PrefixV6>(),
+            Self::Ranges(r, _) => r.capacity() * std::mem::size_of::<(u128, u128)>(),
         }
     }
 }
@@ -235,114 +415,6 @@ impl Default for PrefixSetV6 {
     }
 }
 
-// -------------------------------------------------------------
-// Uncompressed binary trie (NOT Patricia — no path compression).
-// -------------------------------------------------------------
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct PrefixTrieV4 {
-    root: TrieNode,
-    size: usize,
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct PrefixTrieV6 {
-    root: TrieNode,
-    size: usize,
-}
-
-#[derive(Debug, Clone, Default)]
-struct TrieNode {
-    /// True iff some inserted prefix has its END at this node
-    /// (depth equals the prefix's `prefix_len`). Lookup short-
-    /// circuits on the first `covers == true` along the bit walk.
-    covers: bool,
-    /// Children indexed by next bit (0 or 1).
-    children: [Option<Box<TrieNode>>; 2],
-}
-
-impl PrefixTrieV4 {
-    fn insert(&mut self, prefix: &PrefixV4) {
-        let bits = u32::from(prefix.addr());
-        let depth = prefix.prefix_len() as usize;
-        // /0 is filtered to MatchAny by `from_prefixes` before any
-        // call to insert(). In release a /0 insert is a no-op
-        // because the loop body runs zero iterations and `node`
-        // remains the root — root.covers gets set, but `contains()`
-        // never inspects root.covers (it always descends a child
-        // first), so a private bypass-insert of /0 would NOT match
-        // all. Behaviour is "silently ineffective", not unsafe.
-        debug_assert!(depth > 0, "/0 must be filtered to MatchAny");
-        let mut node = &mut self.root;
-        for i in 0..depth {
-            // MSB-first walk: bit at depth `i` is bit `31 - i`.
-            let bit = ((bits >> (31 - i)) & 1) as usize;
-            node = node.children[bit].get_or_insert_with(Box::default);
-        }
-        if !node.covers {
-            self.size += 1;
-        }
-        node.covers = true;
-    }
-
-    fn contains(&self, ip: Ipv4Addr) -> bool {
-        let bits = u32::from(ip);
-        let mut node = &self.root;
-        // Skip root: any covering prefix has length ≥ 1 and lives
-        // at depth ≥ 1. (See insert() for the /0-was-filtered note.)
-        for i in 0..32 {
-            let bit = ((bits >> (31 - i)) & 1) as usize;
-            match node.children[bit].as_deref() {
-                Some(next) => {
-                    if next.covers {
-                        return true;
-                    }
-                    node = next;
-                }
-                None => return false,
-            }
-        }
-        false
-    }
-}
-
-impl PrefixTrieV6 {
-    fn insert(&mut self, prefix: &PrefixV6) {
-        let bits = u128::from(prefix.addr());
-        let depth = prefix.prefix_len() as usize;
-        // See PrefixTrieV4::insert for the ::/0 filtering note.
-        debug_assert!(depth > 0, "::/0 must be filtered to MatchAny");
-        let mut node = &mut self.root;
-        for i in 0..depth {
-            let bit = ((bits >> (127 - i)) & 1) as usize;
-            node = node.children[bit].get_or_insert_with(Box::default);
-        }
-        if !node.covers {
-            self.size += 1;
-        }
-        node.covers = true;
-    }
-
-    fn contains(&self, ip: Ipv6Addr) -> bool {
-        let bits = u128::from(ip);
-        let mut node = &self.root;
-        // Skip root: any covering prefix has length ≥ 1. See
-        // PrefixTrieV4::contains.
-        for i in 0..128 {
-            let bit = ((bits >> (127 - i)) & 1) as usize;
-            match node.children[bit].as_deref() {
-                Some(next) => {
-                    if next.covers {
-                        return true;
-                    }
-                    node = next;
-                }
-                None => return false,
-            }
-        }
-        false
-    }
-}
 
 #[cfg(test)]
 #[path = "prefix_set_tests.rs"]

@@ -10776,3 +10776,105 @@ fn unzoned_ingress_deny_is_unattributed_not_default_policy_9989() {
          count means an interface fell out of its zone (#9989)",
     );
 }
+
+// -----------------------------------------------------------------
+// #15091: book budget + Arc sharing regression cells.
+// -----------------------------------------------------------------
+
+#[test]
+fn test_book_prefix_budget_exceeded_rejected_15091() {
+    // MAX+1 disjoint v6 /128s in one book must fail the whole
+    // snapshot closed with the typed budget error, not compile
+    // to an unbounded set. Pre-fix this built a one-Box-per-bit
+    // trie (~2.9 GB at feed scale) and succeeded.
+    let n = crate::prefix_set::MAX_PREFIX_SET_RANGES + 1;
+    let v6: Vec<String> = (0..n as u128)
+        .map(|i| {
+            let addr = 0x2001_0db8_0000_0000_0000_0000_0000_0000u128 + i * 3;
+            format!("{}/128", std::net::Ipv6Addr::from(addr))
+        })
+        .collect();
+    let v6_refs: Vec<&str> = v6.iter().map(|s| s.as_str()).collect();
+    let books = [book(91, "huge-feed", &[], &v6_refs)];
+    let counter_store = PolicyCounterStore::default();
+    let result = parse_policy_state_with_counters(
+        "deny",
+        &[],
+        &test_zone_name_to_id(),
+        &books,
+        &counter_store,
+    );
+    match result {
+        Err(SnapshotIntegrityError::AddressBookPrefixBudgetExceeded {
+            book_id,
+            family,
+            ranges,
+            limit,
+            ..
+        }) => {
+            assert_eq!(book_id, 91);
+            assert_eq!(family, "v6");
+            assert!(ranges > limit);
+            assert_eq!(limit, crate::prefix_set::MAX_PREFIX_SET_RANGES);
+        }
+        Err(e) => panic!("expected AddressBookPrefixBudgetExceeded, got {e:?}"),
+        Ok(_) => panic!("over-budget book must be rejected, not compiled"),
+    }
+}
+
+#[test]
+fn test_book_at_budget_still_enforces_15091() {
+    // Control: a large but in-budget book (5000 disjoint /128s)
+    // still parses and enforces a book-backed deny.
+    let v6: Vec<String> = (0..5000u128)
+        .map(|i| {
+            let addr = 0x2001_0db8_0000_0000_0000_0000_0000_0000u128 + i * 3;
+            format!("{}/128", std::net::Ipv6Addr::from(addr))
+        })
+        .collect();
+    let v6_refs: Vec<&str> = v6.iter().map(|s| s.as_str()).collect();
+    let books = [book(92, "feed-ok", &[], &v6_refs)];
+    let mut r = v3_rule("deny-feed", &[92], &[]);
+    r.action = "deny".to_string();
+    // v3_rule defaults destination to any; keep the v6 source book
+    // as the discriminating side.
+    let counter_store = PolicyCounterStore::default();
+    let state = parse_policy_state_with_counters(
+        "permit",
+        std::slice::from_ref(&r),
+        &test_zone_name_to_id(),
+        &books,
+        &counter_store,
+    )
+    .expect("in-budget book must parse");
+    assert_eq!(state.books.len(), 1);
+    assert_eq!(state.books[0].v6.prefix_count(), 5000);
+    assert!(state.books[0]
+        .v6
+        .contains(std::net::Ipv6Addr::from(
+            0x2001_0db8_0000_0000_0000_0000_0000_0000u128
+        )));
+}
+
+#[test]
+fn test_books_arc_survives_policy_state_clone_15091() {
+    // #15091: cloning PolicyState (the ForwardingState clone in
+    // publish_runtime_view) must share the book table, not
+    // deep-copy it. Arc::ptr_eq on the books proves O(1) publish.
+    let books = [book(93, "shared", &["10.0.0.0/8"], &[])];
+    let rules = [v3_rule("rule-a", &[93], &[])];
+    let counter_store = PolicyCounterStore::default();
+    let state = parse_policy_state_with_counters(
+        "deny",
+        &rules,
+        &test_zone_name_to_id(),
+        &books,
+        &counter_store,
+    )
+    .expect("parse");
+    let cloned = state.clone();
+    assert!(
+        std::sync::Arc::ptr_eq(&state.books, &cloned.books),
+        "cloned PolicyState must share the books Arc (O(1) publish)"
+    );
+}
