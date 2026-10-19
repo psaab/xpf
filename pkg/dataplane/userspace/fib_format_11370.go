@@ -20,7 +20,11 @@ func FormatFIBDump(generation uint32, routes []FibRouteWire) string {
 		"Table", "Family", "Destination", "Type", "Next-hop / action", "Preference", "MTU")
 	for _, route := range routes {
 		action := ""
-		if route.Discard {
+		if route.Discard && route.ClusterTerminal {
+			action = "discard cluster-terminal"
+		} else if route.Reject && route.ClusterTerminal {
+			action = "reject cluster-terminal"
+		} else if route.Discard {
 			action = "discard"
 		} else if route.Reject {
 			action = "reject"

@@ -275,7 +275,9 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // so the helper HA-filters connected transit prefixes on peer-owned RGs.
 // v56 -> v57 (#15742): RouteSnapshot carries cluster_terminal so the
 // helper demotes only the cluster Null0 default to fabric redirect.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 57;
+// v57 -> v58 (#15742): FibRouteWire carries cluster_terminal and the
+// flowless path fabric-redirects ClusterTerminalHAInactive.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 58;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
@@ -508,6 +510,8 @@ pub(crate) struct FibRouteWire {
     pub discard: bool,
     #[serde(default)]
     pub reject: bool,
+    #[serde(default)]
+    pub cluster_terminal: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub next_table: String,
     #[serde(default)]

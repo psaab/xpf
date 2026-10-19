@@ -11073,3 +11073,89 @@ fn v6_ah_policy_parity_with_v4_ah_10729() {
         "`ah` permit must fire for v6-AH transit"
     );
 }
+
+/// #15742 round-5 LIVE shape regression: fw1 in split placement
+/// (RG2@node1 / RG1@node0) has NO pref-5 forwarding default at all
+/// (HA-filtered), only the pref-200 marked cluster discard, and the
+/// WAN targets 172.16.80.200 / 2001:559:8585:80::200 are inside the
+/// peer-owned WAN connected prefixes (suppressed from transit, kept
+/// in connected_by_ifindex). The gateway of the would-be default is
+/// therefore unattributable via any forwarding row; demotion must
+/// fall back to the gateway's connected-prefix owner. Pre-fix,
+/// select_source_ifindex_* returned the suppressing connected
+/// ifindex only when a forwarding row existed, and with no sibling
+/// the HA gate restored DiscardRoute — the live blackhole. This
+/// cell uses the exact live destinations and no forwarding default.
+/// FAIL-ON-REVERT: remove the gateway-owner fallback and this
+/// resolves DiscardRoute instead of FabricRedirect.
+#[test]
+fn split_rg_live_shape_no_forwarding_default_fabric_redirects_15742() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    // Live split node: no forwarding default survives HA filtering.
+    snapshot.routes.retain(|r| r.destination != "0.0.0.0/0" && r.destination != "::/0");
+    for iface in &mut snapshot.interfaces {
+        if iface.name == "reth0.80" {
+            iface.connected_rg_peer_owned = true;
+        }
+    }
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: true,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: true,
+        next_table: String::new(),
+        preference: 200,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: true,
+        table: "inet6.0".to_string(),
+        family: "inet6".to_string(),
+        destination: "::/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: true,
+        next_table: String::new(),
+        preference: 200,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    let state = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let inactive = Arc::new(ArcSwap::from_pointee(BTreeMap::from([(
+        1,
+        inactive_ha_runtime(now_secs),
+    )])));
+    for dst in [
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 0x200)),
+    ] {
+        let raw = lookup_forwarding_resolution(&state, dst).resolution;
+        assert_eq!(
+            raw.disposition,
+            ForwardingDisposition::ClusterTerminalHAInactive,
+            "live-shape lookup must surface cluster terminal for {dst}, got {:?}",
+            raw.disposition
+        );
+        let blocked = enforce_ha_resolution(&state, &inactive, raw);
+        assert_eq!(
+            blocked.disposition,
+            ForwardingDisposition::ClusterTerminalHAInactive,
+            "live-shape demotion must survive HA enforcement for {dst}, got {:?}",
+            blocked.disposition
+        );
+        let redirected = redirect_via_fabric_if_needed(&state, blocked, 24, None);
+        assert_eq!(
+            redirected.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "live-shape split target {dst} must fabric-redirect, got {:?}",
+            redirected.disposition
+        );
+    }
+}

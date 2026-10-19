@@ -433,7 +433,11 @@ const (
 	// v56 -> v57 (#15742): RouteSnapshot carries ClusterTerminal so the
 	// helper demotes only the cluster Null0 default to fabric redirect;
 	// a v56 helper drops it terminally on the split node (the defect).
-	ProtocolVersion = 57
+	// v57 -> v58 (#15742): FibRouteWire carries ClusterTerminal and the
+	// flowless path fabric-redirects ClusterTerminalHAInactive; a v57
+	// helper drops split-RG ICMP at the flowless HAInactive-only gate
+	// and its FIB dump cannot prove the import mark (the defect).
+	ProtocolVersion = 58
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -767,17 +771,18 @@ type FibNextHopWire struct {
 // FibRouteWire is one installed route, connected prefix, or next-table rule
 // from the userspace helper's forwarding state (#11370).
 type FibRouteWire struct {
-	Table        string           `json:"table"`
-	Family       string           `json:"family"`
-	Destination  string           `json:"destination"`
-	Kind         string           `json:"kind"`
-	NextHops     []FibNextHopWire `json:"next_hops,omitempty"`
-	Discard      bool             `json:"discard"`
-	Reject       bool             `json:"reject"`
-	NextTable    string           `json:"next_table,omitempty"`
-	RulePriority uint32           `json:"rule_priority"`
-	Preference   int32            `json:"preference"`
-	MTU          uint32           `json:"mtu"`
+	Table           string           `json:"table"`
+	Family          string           `json:"family"`
+	Destination     string           `json:"destination"`
+	Kind            string           `json:"kind"`
+	NextHops        []FibNextHopWire `json:"next_hops,omitempty"`
+	Discard         bool             `json:"discard"`
+	Reject          bool             `json:"reject"`
+	ClusterTerminal bool             `json:"cluster_terminal,omitempty"`
+	NextTable       string           `json:"next_table,omitempty"`
+	RulePriority    uint32           `json:"rule_priority"`
+	Preference      int32            `json:"preference"`
+	MTU             uint32           `json:"mtu"`
 }
 
 // RouteTableIdentitySnapshot binds one canonical routing-table name to the

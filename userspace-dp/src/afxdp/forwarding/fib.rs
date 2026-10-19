@@ -1282,6 +1282,15 @@ enum ResolvedRouteV6<'a> {
 /// would-be RG. Returns 0 when no forwarding row or connected prefix
 /// matches.
 fn select_source_ifindex_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> i32 {
+    // #15742e: consult connected_by_ifindex, not only connected_v4.
+    // A peer-owned WAN prefix is suppressed from connected_v4 (transit)
+    // but remains in by_ifindex; the live split node has no forwarding
+    // default, so this map is the only attribution left.
+    let by_ifindex_connected = state
+        .connected_v4_by_ifindex
+        .iter()
+        .find(|(_, prefixes)| prefixes.iter().any(|prefix| prefix.contains(ip)))
+        .map(|(ifindex, _)| *ifindex);
     let connected = state
         .connected_v4
         .iter()
@@ -1342,11 +1351,26 @@ fn select_source_ifindex_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) 
             }
         }
     }
-    connected.map(|conn| conn.ifindex).unwrap_or(0)
+    // #15742e live shape: no forwarding row survives HA filtering on
+    // the split node, so the scan above finds nothing. The would-be
+    // egress is still attributable: the destination's own connected
+    // prefix (kept in connected_by_ifindex even when suppressed from
+    // transit) names the peer-owned WAN unit. Return it so HA
+    // enforcement can demote; 0 keeps the plain drop.
+    connected
+        .map(|conn| conn.ifindex)
+        .or(by_ifindex_connected)
+        .unwrap_or(0)
 }
 
 /// #15742: v6 twin of `select_source_ifindex_v4`.
 fn select_source_ifindex_v6(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> i32 {
+    // #15742e: see the v4 twin.
+    let by_ifindex_connected = state
+        .connected_v6_by_ifindex
+        .iter()
+        .find(|(_, prefixes)| prefixes.iter().any(|prefix| prefix.contains(ip)))
+        .map(|(ifindex, _)| *ifindex);
     let connected = state
         .connected_v6
         .iter()
@@ -1404,7 +1428,11 @@ fn select_source_ifindex_v6(state: &ForwardingState, ip: Ipv6Addr, table: &str) 
             }
         }
     }
-    connected.map(|conn| conn.ifindex).unwrap_or(0)
+    // #15742e: see the v4 twin.
+    connected
+        .map(|conn| conn.ifindex)
+        .or(by_ifindex_connected)
+        .unwrap_or(0)
 }
 
 /// Choose the most-specific route, then the first live preference/metric row.
