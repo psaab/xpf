@@ -132,3 +132,93 @@ func TestTopUpInvalidTrailingFailsClosed15082(t *testing.T) {
 		}
 	}
 }
+
+// #15759: a quoted value with interior (doubled) spaces must survive
+// a top/up prefix — the old strings.Join(inner, " ") dispatch split
+// it into separate tokens and stored a different value.
+func TestTopUpQuotedValueSurvives15759(t *testing.T) {
+	store := topUpStore15082(t)
+	c := cliTopUp15082(t, store)
+	store.SetEditPath([]string{"security", "policies"})
+	var err error
+	captureStdout(t, func() {
+		err = c.dispatchConfig(`top set system host-name "lab router"`)
+	})
+	if err != nil {
+		t.Fatalf("top set quoted host-name = %v (#15759)", err)
+	}
+	if out := store.ShowCandidateSet(); !strings.Contains(out, "lab router") {
+		t.Fatalf("quoted host-name not stored as one value (#15759):\n%s", out)
+	}
+	if got := store.GetEditPath(); len(got) != 2 {
+		t.Fatalf("edit path = %v, want cursor restored (#15759)", got)
+	}
+	// Doubled interior spaces are the discriminating case: a join
+	// round-trip collapses them even when it re-quotes.
+	store2 := topUpStore15082(t)
+	c2 := cliTopUp15082(t, store2)
+	store2.SetEditPath([]string{"interfaces", "ge-0/0/0"})
+	captureStdout(t, func() {
+		err = c2.dispatchConfig(`up set description "wan  uplink"`)
+	})
+	if err != nil {
+		t.Fatalf("up set quoted description = %v (#15759)", err)
+	}
+	if out := store2.ShowCandidateSet(); !strings.Contains(out, "wan  uplink") {
+		t.Fatalf("doubled-space description mangled by prefix (#15759):\n%s", out)
+	}
+}
+
+// #15759: `top show | compare` must reach the compare renderer; the
+// strict gate lexer stops at the pipe, so the old token re-join
+// dispatched a bare `show` (whole candidate, no diff).
+func TestTopShowComparePipeSurvives15759(t *testing.T) {
+	store := topUpStore15082(t)
+	c := cliTopUp15082(t, store)
+	store.SetEditPath([]string{"security", "policies"})
+	var err error
+	out := captureStdout(t, func() {
+		err = c.dispatchConfig("top show | compare")
+	})
+	if err != nil {
+		t.Fatalf("top show | compare = %v (#15759)", err)
+	}
+	if !strings.Contains(out, "keep15082") {
+		t.Fatalf("top show | compare diff missing staged change (#15759):\n%s", out)
+	}
+	if !strings.Contains(out, "[edit") {
+		t.Fatalf("top show | compare did not render a diff — pipe lost, bare show ran (#15759):\n%s", out)
+	}
+	// display set pipe likewise: flat `set ...` lines, no tree braces.
+	out = captureStdout(t, func() {
+		err = c.dispatchConfig("top show | display set")
+	})
+	if err != nil {
+		t.Fatalf("top show | display set = %v (#15759)", err)
+	}
+	if !strings.Contains(out, "set system host-name keep15082") {
+		t.Fatalf("top show | display set missing flat set line (#15759):\n%s", out)
+	}
+	if got := store.GetEditPath(); len(got) != 2 {
+		t.Fatalf("edit path = %v, want cursor restored (#15759)", got)
+	}
+}
+
+// #15759: bracket lists under a prefix keep their grouping — the
+// store lexer re-reads [ a b ] from the raw tail.
+func TestTopBracketListSurvives15759(t *testing.T) {
+	store := topUpStore15082(t)
+	c := cliTopUp15082(t, store)
+	store.SetEditPath([]string{"security", "policies"})
+	var err error
+	captureStdout(t, func() {
+		err = c.dispatchConfig(`top set security zones security-zone trust interfaces [ ge-0/0/0 ge-0/0/1 ]`)
+	})
+	if err != nil {
+		t.Fatalf("top set bracket list = %v (#15759)", err)
+	}
+	out := store.ShowCandidateSet()
+	if !strings.Contains(out, "ge-0/0/0") || !strings.Contains(out, "ge-0/0/1") {
+		t.Fatalf("bracket members not stored (#15759):\n%s", out)
+	}
+}

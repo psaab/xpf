@@ -630,11 +630,69 @@ func isAllDigits15082(tok string) bool {
 // strings.Fields but must consume the prefix exactly as the
 // authorization gate does (#15082). ok=false means the line is not
 // a well-formed top/up line; bare navigation yields inner=nil.
-func ParseTopUpPrefix15082(editPath []string, line string) (target, inner []string, ok bool) {
+//
+// innerLine is the unconsumed tail of the ORIGINAL line, sliced
+// after the consumed prefix tokens (#15759): quoted strings keep
+// their quotes and interior spacing, bracket lists keep their
+// brackets, and pipe modifiers (`| compare`, `| display set`)
+// survive, because the strict gate lexer (which stops at the
+// first pipe/bracket) never tokenizes them and a
+// strings.Join(inner, " ") round-trip destroys all three.
+// Executors must dispatch innerLine, never a re-join of inner;
+// inner/innerQuoted remain for callers that need token views.
+func ParseTopUpPrefix15082(editPath []string, line string) (target, inner []string, innerLine string, ok bool) {
+	// Validate the prefix with the SAME lexer the gate uses so a
+	// quoted "top"/"up" (a string token whose value coincides) is
+	// never consumed as the prefix verb, exactly as
+	// lexConfigMutationLine9938 sees it.
 	parts, quoted := lexConfigMutationLine9938(line)
 	if len(parts) == 0 || (parts[0] != "top" && parts[0] != "up") {
-		return nil, nil, false
+		return nil, nil, "", false
 	}
+	if len(quoted) > 0 && quoted[0] {
+		return nil, nil, "", false
+	}
+	// Consume exactly the prefix tokens the shared resolver will
+	// consume and slice the raw tail at that byte offset. The count
+	// classification replicates ResolveTopUpPrefix15082: an
+	// unquoted numeric token after `up` is a count only when it
+	// parses (a numeric-but-out-of-range token is malformed and
+	// fails closed in the resolver, so slicing is never reached
+	// for a dispatchable line — the resolver still adjudicates).
+	consume := 1
+	if parts[0] == "up" && len(parts) >= 2 && !(len(quoted) > 1 && quoted[1]) {
+		if _, err := parseUpCount15082(parts[1]); err == nil {
+			consume = 2
+		}
+	}
+	innerLine = rawTailAfterLexerTokens15759(line, consume)
 	target, inner, _, ok = ResolveTopUpPrefix15082(editPath, parts, quoted)
-	return target, inner, ok
+	if !ok {
+		return nil, nil, "", false
+	}
+	if len(inner) == 0 {
+		return target, nil, "", true
+	}
+	return target, inner, innerLine, true
+}
+
+// rawTailAfterLexerTokens15759 returns the raw remainder of line
+// after the first n lexer tokens (identifier/string), trimmed of
+// surrounding whitespace. Brackets and pipes are structural to the
+// lexer (stripped or tokenized, never part of a token value), so
+// they survive in the tail exactly as typed (#15759). It returns ""
+// when fewer than n tokens lex or a structural token intervenes,
+// matching the gate's token view.
+func rawTailAfterLexerTokens15759(line string, n int) string {
+	lex := NewLexer(line)
+	for range n {
+		tok := lex.Next()
+		if tok.Type != TokenIdentifier && tok.Type != TokenString {
+			return ""
+		}
+	}
+	if lex.Position() > len(line) {
+		return ""
+	}
+	return strings.TrimSpace(line[lex.Position():])
 }

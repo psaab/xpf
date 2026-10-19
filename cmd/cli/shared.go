@@ -686,7 +686,7 @@ func printConfigTreeHelp(header string, path ...string) {
 // is restored afterwards, including on error.
 func (c *ctl) dispatchTopUp15082(line string) error {
 	saved := append([]string{}, c.editPath...)
-	target, inner, ok := config.ParseTopUpPrefix15082(config.NormalizeEditPathTokens(saved), line)
+	target, inner, innerLine, ok := config.ParseTopUpPrefix15082(config.NormalizeEditPathTokens(saved), line)
 	if !ok {
 		return fmt.Errorf("%s: invalid up count or malformed prefix", strings.Fields(line)[0])
 	}
@@ -705,8 +705,10 @@ func (c *ctl) dispatchTopUp15082(line string) error {
 	if inner[0] == "top" || inner[0] == "up" || inner[0] == "edit" {
 		return fmt.Errorf("%s: %s cannot follow a top/up prefix", strings.Fields(line)[0], inner[0])
 	}
+	// #15759: dispatch the raw inner tail (quotes/brackets/pipes
+	// intact), not a re-join of lexed tokens.
 	c.editPath = append([]string{}, target...)
-	err := c.dispatchConfig(strings.Join(inner, " "))
+	err := c.dispatchConfig(innerLine)
 	c.editPath = saved
 	if c.rl != nil {
 		c.rl.SetPrompt(c.configPrompt())

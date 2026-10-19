@@ -667,7 +667,7 @@ func (c *CLI) exitConfigureTop() error {
 // execution here must act on exactly that command and cursor.
 func (c *CLI) dispatchTopUp15082(line string) error {
 	saved := c.store.GetEditPath()
-	target, inner, ok := config.ParseTopUpPrefix15082(saved, line)
+	target, inner, innerLine, ok := config.ParseTopUpPrefix15082(saved, line)
 	if !ok {
 		return fmt.Errorf("%s: invalid up count or malformed prefix", strings.Fields(line)[0])
 	}
@@ -686,8 +686,10 @@ func (c *CLI) dispatchTopUp15082(line string) error {
 	if inner[0] == "top" || inner[0] == "up" || inner[0] == "edit" {
 		return fmt.Errorf("%s: %s cannot follow a top/up prefix", strings.Fields(line)[0], inner[0])
 	}
+	// #15759: dispatch the raw inner tail, not a re-join of lexed
+	// tokens — the join stripped quotes, bracket lists, and pipes.
 	c.store.SetEditPath(target)
-	err := c.dispatchConfig(strings.Join(inner, " "))
+	err := c.dispatchConfig(innerLine)
 	c.store.SetEditPath(saved)
 	if c.rl != nil {
 		c.rl.SetPrompt(c.configPrompt())

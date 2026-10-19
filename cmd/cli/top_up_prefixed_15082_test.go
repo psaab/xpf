@@ -17,8 +17,9 @@ import (
 
 type topUpRecorder15082 struct {
 	pb.BpfrxServiceClient
-	setInputs    []string
-	deleteInputs []string
+	setInputs         []string
+	deleteInputs      []string
+	showConfigFormats []pb.ConfigFormat
 }
 
 func (f *topUpRecorder15082) Set(_ context.Context, in *pb.SetRequest, _ ...grpc.CallOption) (*pb.SetResponse, error) {
@@ -29,6 +30,11 @@ func (f *topUpRecorder15082) Set(_ context.Context, in *pb.SetRequest, _ ...grpc
 func (f *topUpRecorder15082) Delete(_ context.Context, in *pb.DeleteRequest, _ ...grpc.CallOption) (*pb.DeleteResponse, error) {
 	f.deleteInputs = append(f.deleteInputs, in.GetInput())
 	return &pb.DeleteResponse{}, nil
+}
+
+func (f *topUpRecorder15082) ShowConfig(_ context.Context, in *pb.ShowConfigRequest, _ ...grpc.CallOption) (*pb.ShowConfigResponse, error) {
+	f.showConfigFormats = append(f.showConfigFormats, in.GetFormat())
+	return &pb.ShowConfigResponse{}, nil
 }
 
 func TestRemoteTopDeleteSendsOneDelete15082(t *testing.T) {
@@ -115,5 +121,46 @@ func TestRemoteTopUpInvalidFailsClosed15082(t *testing.T) {
 		if got := strings.Join(c.editPath, " "); got != "security policies" {
 			t.Fatalf("%q: editPath = %q, want cursor restored", line, got)
 		}
+	}
+}
+
+// #15759: the remote surface must send the quoted value byte-for-
+// byte — the old token re-join split "wan  uplink" and collapsed
+// its doubled spaces before the Set RPC.
+func TestRemoteTopUpQuotedSurvives15759(t *testing.T) {
+	fake := &topUpRecorder15082{}
+	c := configModeCtl(fake)
+	c.editPath = []string{"interfaces", "ge-0/0/0"}
+	var err error
+	captureStdout(t, func() {
+		err = c.dispatchConfig(`up set description "wan  uplink"`)
+	})
+	if err != nil {
+		t.Fatalf("up set quoted = %v (#15759)", err)
+	}
+	want := `interfaces description "wan  uplink"`
+	if len(fake.setInputs) != 1 || fake.setInputs[0] != want {
+		t.Fatalf("Set inputs = %v, want exactly [%q] (#15759)", fake.setInputs, want)
+	}
+	if got := strings.Join(c.editPath, " "); got != "interfaces ge-0/0/0" {
+		t.Fatalf("editPath = %q, want cursor restored (#15759)", got)
+	}
+}
+
+// #15759: `top show | display set` on the remote surface must issue
+// the display-set ShowConfig RPC, not a bare show.
+func TestRemoteTopShowDisplaySet15759(t *testing.T) {
+	fake := &topUpRecorder15082{}
+	c := configModeCtl(fake)
+	c.editPath = []string{"security", "policies"}
+	var err error
+	captureStdout(t, func() {
+		err = c.dispatchConfig("top show | display set")
+	})
+	if err != nil {
+		t.Fatalf("top show | display set = %v (#15759)", err)
+	}
+	if len(fake.showConfigFormats) != 1 || fake.showConfigFormats[0] != pb.ConfigFormat_SET {
+		t.Fatalf("ShowConfig formats = %v, want [SET] (#15759)", fake.showConfigFormats)
 	}
 }
