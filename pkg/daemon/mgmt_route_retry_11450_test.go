@@ -217,8 +217,11 @@ func TestMgmtRouteRetryWiring11450(t *testing.T) {
 	requireBefore(apply, "applyMgmtVRFRoutes", "noteMgmtRouteReconcileResult",
 		"full config apply")
 
-	dhcp := calls("daemon_dhcp.go", "onDHCPAddressChange")
-	if len(dhcp["applyMgmtVRFRoutes"]) == 0 || len(dhcp["noteMgmtRouteReconcileResult"]) == 0 {
+	// #14976: the management-only refresh moved into
+	// managementOnlyLeaseRefresh, which drives the route reconcile via
+	// mgmtRouteRefreshFn under applySem; the debt latch must still fire.
+	dhcp := calls("daemon_dhcp.go", "managementOnlyLeaseRefresh")
+	if len(dhcp["mgmtRouteRefreshFn"]) == 0 || len(dhcp["noteMgmtRouteReconcileResult"]) == 0 {
 		t.Error("management-only DHCP refresh must latch failed management-route applies")
 	}
 
