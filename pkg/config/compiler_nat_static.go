@@ -1145,6 +1145,32 @@ func compileNATStatic(node *Node, sec *SecurityConfig) error {
 									rule.ThenRoutingInstance = ri
 									break
 								}
+								// #15278 (D02-03): hierarchical target
+								// `prefix { <ip>; routing-instance VR; }` /
+								// `prefix-name { <name>; routing-instance VR; }`
+								// carries the RI as a grandchild of the target
+								// child. Scan grandchildren (child node itself
+								// and its Keys) so the #4292 advisory fires.
+								if riNode := c.FindChild("routing-instance"); riNode != nil {
+									rule.ThenRoutingInstance = nodeVal(riNode)
+									break
+								}
+								found := false
+								for _, gc := range c.Children {
+									if ri := staticNATRoutingInstanceFromKeys(gc.Keys); ri != "" {
+										rule.ThenRoutingInstance = ri
+										found = true
+										break
+									}
+									if gc.Name() == "routing-instance" {
+										rule.ThenRoutingInstance = nodeVal(gc)
+										found = true
+										break
+									}
+								}
+								if found {
+									break
+								}
 							}
 						}
 					}

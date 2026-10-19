@@ -628,6 +628,11 @@ type Config struct {
 	// or JSON-round-tripped, losing the record) still fails closed there.
 	// Compile-time only; never serialized.
 	LenientNATUndefinedZoneRuleSets map[string]bool `json:"-"`
+	// LenientNATUndefinedScopeRuleSets records NAT rule-sets the TOLERANT
+	// path admitted despite an undefined interface/routing-instance scope
+	// (#15278 D02-02), as "kind\x00name" keys (kind: source/destination/static).
+	// Compile-time only; never serialized.
+	LenientNATUndefinedScopeRuleSets map[string]bool `json:"-"`
 }
 
 // LenientNATTerminalActionRule identifies one NAT rule admitted by the tolerant

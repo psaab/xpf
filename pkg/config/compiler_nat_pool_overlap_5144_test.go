@@ -307,33 +307,46 @@ func TestNAT5144NAT64LeadingZeroMaskSpellingAccepted(t *testing.T) {
 	assertNATOverlapAccepted(t, cmds...)
 }
 
-// TestNAT5144NAT64EmptyPrefixNotAnOwner: a NAT64 rule-set with NO prefix builds
-// no live allocator (nat64.rs skips it; validateNAT64PrefixStrict skips an empty
-// prefix rather than rejecting it), so it must NOT be enumerated as an overlap
-// owner. Here a source-NAT rule and an empty-prefix NAT64 rule-set share pool P;
-// only the source-NAT allocator is live, so there is no cross-feature collision
-// and the config must compile clean. Enumerating the empty-prefix rule-set as an
-// owner would falsely report the source-NAT-vs-NAT64 overlap.
+// #15278 supersedes the strict-accepted premise below: an empty-prefix NAT64
+// rule-set now strict-rejects (no prefix), so the overlap predicate is exercised
+// on the lenient path where the inert rule-set is admitted with a warning.
+// The predicate itself still must NOT enumerate an empty-prefix rule-set as
+// an overlap owner.
 func TestNAT5144NAT64EmptyPrefixNotAnOwner(t *testing.T) {
 	cmds := []string{
 		"set security nat source pool P address 100.64.0.7/32",
-		// NAT64 rule-set with a source-pool but NO prefix — inert (no allocator).
 		"set security nat nat64 rule-set N64 source-pool P",
 	}
 	cmds = append(cmds, srcRule("RS", "r1", "P")...)
-	assertNATOverlapAccepted(t, cmds...)
+	cfg, err := CompileConfigLenient(natOverlapTree(t, cmds...))
+	if err != nil {
+		t.Fatalf("lenient must admit empty-prefix NAT64 without overlap false positive: %v", err)
+	}
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "overlap") && strings.Contains(w, "N64") {
+			t.Fatalf("empty-prefix NAT64 must not be an overlap owner: %q", w)
+		}
+	}
+	if _, err := CompileConfig(natOverlapTree(t, cmds...)); err == nil {
+		t.Fatal("strict must now reject empty-prefix NAT64 (#15278)")
+	}
 }
 
-// TestNAT5144NAT64EmptyPrefixPairNotOverlap: two NAT64 rule-sets sharing one pool
-// but BOTH with empty prefixes are two inert (non-allocator) rule-sets, not a
-// collision — they must not false-reject.
 func TestNAT5144NAT64EmptyPrefixPairNotOverlap(t *testing.T) {
 	cmds := []string{
 		"set security nat source pool P address 100.64.0.7/32",
 		"set security nat nat64 rule-set A source-pool P",
 		"set security nat nat64 rule-set B source-pool P",
 	}
-	assertNATOverlapAccepted(t, cmds...)
+	cfg, err := CompileConfigLenient(natOverlapTree(t, cmds...))
+	if err != nil {
+		t.Fatalf("lenient empty-prefix pair must not overlap-reject: %v", err)
+	}
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "overlap") {
+			t.Fatalf("empty-prefix pair must not warn overlap: %q", w)
+		}
+	}
 }
 
 // --- MAJOR (#6414 fold): peer-effective strict view must run the overlap gate ---

@@ -260,6 +260,21 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 		}
 	}
 
+	// #15278 (D02-02) NAT undefined interface/RI scope gate, after the zone
+	// gate so zone errors keep priority. Strict rejects; tolerant warns and
+	// records the rule-sets.
+	if err := validateNATUndefinedScopeStrict(cfg); err != nil {
+		if opts.lenientNATUndefinedScope {
+			for _, offender := range natUndefinedScopeOffenders(cfg) {
+				cfg.Warnings = append(cfg.Warnings,
+					fmt.Sprintf("nat undefined scope (downgraded to warning on tolerant path): %s", offender))
+			}
+			cfg.LenientNATUndefinedScopeRuleSets = NATUndefinedScopeRuleSetNames(cfg)
+		} else {
+			return err
+		}
+	}
+
 	if err := runUniformGatesUnknownSecurityPoliciesChild12217(cfg, opts); err != nil {
 		return err
 	}

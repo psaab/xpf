@@ -42,6 +42,8 @@ import (
 // noise.
 func nptv6ScopeRuleSet(scopeLine string, extraRuleLines ...string) []string {
 	lines := []string{
+		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
+		"set routing-instances blue instance-type virtual-router",
 		"set security zones security-zone trust",
 		"set security nat static rule-set rs1 " + scopeLine,
 		"set security nat static rule-set rs1 rule r1 match destination-address 2001:db8:1::/48",
@@ -189,6 +191,7 @@ func TestNPTv6UnscopedGlobalStillCompiles_5818(t *testing.T) {
 // touch them.
 func TestStaticNATInterfaceScopeNotRejected_5818(t *testing.T) {
 	lines := []string{
+		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
 		"set security nat static rule-set rt from interface ge-0/0/1.0",
 		"set security nat static rule-set rt rule r1 match destination-address 198.51.100.5/32",
 		"set security nat static rule-set rt rule r1 match source-address 203.0.113.0/24",
