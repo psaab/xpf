@@ -350,6 +350,7 @@ fn reserve_synced_source_nat_allocation_with_holder(
             }
             return reserve_synced_interface_identity(
                 iface_allocs,
+                rules,
                 flow,
                 rewrite_src,
                 nat,
@@ -360,6 +361,7 @@ fn reserve_synced_source_nat_allocation_with_holder(
             );
         }
         match reserve_synced_on_first_pool_owner(
+            iface_allocs,
             rules,
             rules.iter().filter(|rule| {
                 rule.matches_ignoring_scope(
@@ -453,6 +455,7 @@ fn reserve_synced_source_nat_allocation_with_holder(
     // produces — is NOT a refusal, and is answered exactly like the
     // `rewrite_src == None` early return above.
     match reserve_synced_on_first_pool_owner(
+        iface_allocs,
         rules,
         rules.iter(),
         // PASS 2 keeps the pre-#6211 first-acceptor scan, byte-identical.
@@ -474,6 +477,7 @@ fn reserve_synced_source_nat_allocation_with_holder(
         SyncedReserveOutcome::NothingToReserve => {
             reserve_synced_interface_identity(
                 iface_allocs,
+                rules,
                 flow,
                 rewrite_src,
                 nat,
@@ -512,6 +516,7 @@ fn reserve_synced_source_nat_allocation_with_holder(
 /// one flow in two domains.
 fn reserve_synced_interface_identity(
     iface_allocs: &InterfaceNatAllocators,
+    rules: &[SourceNatRule],
     flow: SourceNatFlowKey,
     rewrite_src: IpAddr,
     nat: NatDecision,
@@ -531,6 +536,38 @@ fn reserve_synced_interface_identity(
         return false;
     };
     let translated_port = nat.rewrite_src_port.unwrap_or(flow.src_port);
+    // #15146: refuse when a pool/NAT64 peer already owns this identity.
+    // This is the synced twin of the #14367 interface-mint peer check
+    // (`peer_owns_for_interface`); without it an import lands on an
+    // identity a local pool or NAT64 flow holds.
+    {
+        let cand = TranslatedTuple {
+            ip: rewrite_src,
+            port: translated_port,
+        };
+        let iface_rule = rules.iter().find(|r| r.interface_mode);
+        let owners_combined = iface_rule
+            .and_then(|r| r.iface_overlap_owners.clone())
+            .or_else(|| rules.iter().find_map(|r| r.overlap_owners.clone()));
+        let peer_owned = super::nat64_ports::peer_owns_for_interface(
+            owners_combined.as_deref(),
+            &alloc,
+            flow,
+            cand,
+        ) || rules.iter().any(|r| {
+            r.overlap_owners.is_some()
+                && super::nat64_ports::peer_owns_for_interface(
+                    r.overlap_owners.as_deref(),
+                    &alloc,
+                    flow,
+                    cand,
+                )
+        });
+        if peer_owned {
+            crate::nat::INTERFACE_SNAT_SYNC_IDENTITY_CONFLICT_DROPS.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+    }
     // The active's decision names the translated port: `rewrite_src_port` when
     // it PAT'd the flow, the flow's own source port when it preserved it —
     // the same reconstruction `release_source_nat_allocation_with_mode` uses,
@@ -646,6 +683,7 @@ impl SyncedReserveOutcome {
 /// still live in the pool domain, so handing the same address to the
 /// interface domain would create two owners.
 fn reserve_synced_on_first_pool_owner<'a>(
+    iface_allocs: &InterfaceNatAllocators,
     all_rules: &[SourceNatRule],
     rules: impl Iterator<Item = &'a SourceNatRule>,
     stop_at_first_owner: bool,
@@ -801,6 +839,7 @@ fn reserve_synced_on_first_pool_owner<'a>(
                 // the peer-pool check (same gate, same reason it is gated).
                 if stop_at_first_owner
                     && (peer_owns_wire_identity(rule, flow, translated)
+                        || super::nat64_ports::iface_owns_for_pool(iface_allocs, flow, translated)
                         || static_owns_wire_identity(
                             rule.static_externals.as_deref(),
                             translated.ip,
@@ -906,6 +945,7 @@ fn reserve_synced_on_first_pool_owner<'a>(
             // same tuple in pool A.
             if stop_at_first_owner
                 && (peer_owns_wire_identity(rule, flow, translated)
+                    || super::nat64_ports::iface_owns_for_pool(iface_allocs, flow, translated)
                     || static_owns_wire_identity(
                         rule.static_externals.as_deref(),
                         translated.ip,
