@@ -92,6 +92,17 @@ pub(super) fn binding_frame_count_for_driver(driver: Option<&str>, ring_entries:
         .saturating_add(ring_entries.saturating_mul(2).max(1))
 }
 
+/// #15096: RX fill frames owned by one binding --- the frames the
+/// pending-neighbor park can actually pin. Derived from the SAME
+/// arithmetic as total frames (total minus reserved TX), never
+/// restated, so a change to the reserved-TX policy moves the park cap
+/// with it. At ring=1024: total = reserved (512 non-virtio, 1024
+/// virtio) + 2048, so fill = 2048 for every driver.
+pub(super) fn rx_fill_frames_for_driver(driver: Option<&str>, ring_entries: u32) -> u32 {
+    binding_frame_count_for_driver(driver, ring_entries)
+        .saturating_sub(reserved_tx_frames_for_driver(driver, ring_entries))
+}
+
 pub(super) fn ifinfo_from_binding(
     binding: &BindingStatus,
 ) -> Result<IfInfo, Box<dyn std::error::Error + Send + Sync>> {
@@ -1051,7 +1062,9 @@ mod fill_prime_tests {
 // reported `Private_Hugetlb: 2949120 kB` = 2880 MiB = 18 x 160 MiB.
 #[cfg(test)]
 mod umem_sizing_contract_tests {
-    use super::{binding_frame_count_for_driver, reserved_tx_frames_for_driver};
+    use super::{
+        binding_frame_count_for_driver, reserved_tx_frames_for_driver, rx_fill_frames_for_driver,
+    };
 
     const FRAME: u64 = 4096;
     const MIB: u64 = 1024 * 1024;
@@ -1137,6 +1150,28 @@ mod umem_sizing_contract_tests {
              topology ({measured_cluster} pages needed); the reservation must be \
              sized from the total binding count"
         );
+    }
+
+    /// #15096: the RX fill pool the pending-neighbor cap derives from
+    /// is total frames minus reserved TX — at the default ring=1024
+    /// that is 2048 frames for every driver: reserved TX is
+    /// ring/2 = 512 non-virtio (above the 256 floor) and ring = 1024
+    /// on virtio, while total is reserved + 2*ring — so fill is
+    /// 2048 in both cases, still below the old flat 4096 park cap.
+    #[test]
+    fn rx_fill_frames_is_total_minus_reserved_tx_15096() {
+        for driver in [None, Some("virtio_net"), Some("mlx5_core")] {
+            for ring in [64u32, 1024, 4096, 16384] {
+                assert_eq!(
+                    rx_fill_frames_for_driver(driver, ring),
+                    binding_frame_count_for_driver(driver, ring)
+                        - reserved_tx_frames_for_driver(driver, ring),
+                    "fill = total - reserved for {driver:?} ring={ring}",
+                );
+            }
+        }
+        assert_eq!(rx_fill_frames_for_driver(None, 1024), 2048);
+        assert_eq!(rx_fill_frames_for_driver(Some("virtio_net"), 1024), 2048);
     }
 }
 

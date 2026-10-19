@@ -192,7 +192,7 @@ use self::bind::bind_flag_candidates_for_driver;
 use self::bind::{
     AfXdpBindStrategy, XskSocketRole, binding_frame_count_for_driver, ifinfo_from_binding,
     interface_driver_name, open_binding_worker_rings, preferred_bind_strategy,
-    reserved_tx_frames_for_driver, umem_ring_size,
+    reserved_tx_frames_for_driver, rx_fill_frames_for_driver, umem_ring_size,
 };
 #[cfg(test)]
 use self::bind::{
@@ -569,15 +569,29 @@ const PENDING_NEIGH_TIMEOUT_NS: u64 = 2_000_000_000; // 2 seconds
 // unresolved next-hops per binding, and pins at most one UMEM frame per
 // hop — a SYN flood to one dead host holds 1 entry, not 4096.
 // PendingNeighPacket is 304 B on x86_64 after #11411 added selected-route and
-// tunnel-transport MTUs to the forwarding decision. The worst case is ~1.19
-// MiB per binding — reached only with 4096 *distinct* unresolved hops (a
-// scan-shaped workload), not a connect burst. The map is lazily allocated
+// tunnel-transport MTUs to the forwarding decision. The map is lazily allocated
 // (FastMap::default() at worker init — see worker/mod.rs), keeping idle-binding
 // RSS near zero.
 // History: pre-#1771 this was a per-packet VecDeque whose cap was bumped
 // 64 → 4096 (GEMINI-NEXT.md Section 3) so failback connect storms didn't
 // drop frames; post-#1771 sibling drops are by design and counted.
 const MAX_PENDING_NEIGH: usize = 4096;
+
+/// #15096: per-binding pending-neighbor cap, derived at bind time in
+/// `BindingWorker`. `MAX_PENDING_NEIGH` alone ignores the binding's RX
+/// frame budget: at the default ring-entries 1024 the whole RX fill
+/// pool is 2048 frames (2*ring for every driver, since total =
+/// reserved + 2*ring), so an uncapped 4096-entry park could pin twice
+/// the pool and stall all RX on the affected queues while an ingress
+/// sweep probes distinct next hops.
+/// The per-binding cap keeps at most one quarter of the fill pool
+/// parked, so three quarters always remain for RX/TX circulation.
+/// Refusals past the derived cap are counted in
+/// `pending_neigh_capacity_drops` (the existing #2375 counter), never
+/// silently parked.
+pub(super) fn pending_neigh_cap_for_rx_fill(rx_fill_frames: u32) -> usize {
+    MAX_PENDING_NEIGH.min((rx_fill_frames / 4).max(1) as usize)
+}
 
 // #1651 B3: dead-host negative neighbor cache (per binding). When a
 // pending_neigh entry times out after best-effort ARP/NDP probes without

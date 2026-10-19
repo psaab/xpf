@@ -206,10 +206,10 @@ impl super::Coordinator {
             .sum()
     }
 
-    /// #2375: sum of per-binding `pending_neigh_capacity_drops` across
-    /// every `BindingLiveState`. Counts MissingNeighbor packets for a
-    /// NEW distinct `(egress_ifindex, next_hop)` refused because
-    /// `pending_neigh` is at `MAX_PENDING_NEIGH` distinct hops — the
+    /// #2375/#15096: sum of per-binding `pending_neigh_capacity_drops`
+    /// across every `BindingLiveState`. Counts MissingNeighbor packets
+    /// for a NEW distinct `(egress_ifindex, next_hop)` refused because
+    /// `pending_neigh` is at the binding's effective cap — the
     /// distinct-hop exhaustion / scan failure mode. Kept separate from
     /// `pending_neigh_duplicate_drops_total` (normal cold-start
     /// coalescing). Surfaced as

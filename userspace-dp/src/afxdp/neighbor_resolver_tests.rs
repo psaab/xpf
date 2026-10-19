@@ -573,12 +573,12 @@ fn invariant_n1_negative_cache_does_not_stop_resolution() {
 
     // Buffering half: pending_neigh admits AT MOST ONE packet for K.
     assert_eq!(
-        pending_neigh_admission(false, 0),
+        pending_neigh_admission(false, 0, crate::afxdp::MAX_PENDING_NEIGH),
         PendingNeighAdmission::Buffer,
         "the first packet for K is buffered (the per-key representative)",
     );
     assert_eq!(
-        pending_neigh_admission(true, 1),
+        pending_neigh_admission(true, 1, crate::afxdp::MAX_PENDING_NEIGH),
         PendingNeighAdmission::DuplicateDrop,
         "a sibling for the already-pending K is dropped, not buffered",
     );

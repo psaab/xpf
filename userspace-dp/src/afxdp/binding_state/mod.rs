@@ -629,8 +629,9 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// removals and recycles cannot distinguish "visited every key and found
     /// nothing to do" from "visited nothing".
     pub(super) pending_neigh_visits: AtomicU64,
-    /// #2375: per-binding count of `pending_neigh` admissions REFUSED
-    /// because the map already holds `MAX_PENDING_NEIGH` distinct
+    /// #2375/#15096: per-binding count of `pending_neigh` admissions
+    /// REFUSED because the map already holds the binding's effective
+    /// cap (`min(MAX_PENDING_NEIGH, rx_fill_frames / 4)`) distinct
     /// unresolved `(egress_ifindex, next_hop)` hops — the capacity-drop
     /// case (a NEW distinct hop the worker cannot accept). Distinct from
     /// `pending_neigh_duplicate_drops` (the key was already pending —

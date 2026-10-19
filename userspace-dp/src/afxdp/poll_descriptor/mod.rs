@@ -11324,6 +11324,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     let admission = pending_neigh_admission(
                                         binding.pending_neigh.contains_key(&pending_key),
                                         binding.pending_neigh.len(),
+                                        binding.pending_neigh_cap,
                                     );
                                     // #2375: record the drop counters via the
                                     // extracted helper so both the duplicate and
@@ -11427,9 +11428,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             suppress_slow_path_reinject = true;
                                         }
                                         PendingNeighAdmission::CapacityDrop => {
-                                            // #2375: a NEW distinct hop refused
-                                            // because pending_neigh is at
-                                            // MAX_PENDING_NEIGH (distinct-hop
+                                            // #2375/#15096: a NEW distinct hop
+                                            // refused because pending_neigh is
+                                            // at the binding's effective cap
+                                            // (min(MAX_PENDING_NEIGH,
+                                            // rx_fill_frames/4) — distinct-hop
                                             // neighbor exhaustion — the
                                             // scan/upstream-outage failure mode).
                                             // The counter increment is the helper
