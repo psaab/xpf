@@ -7221,6 +7221,81 @@ fn clear_flood_counters_request_empties_the_store_6938() {
     );
 }
 
+/// The operator clear must reach the helper's live filter counters, not just
+/// the Go-side retired array. Binds the `clear_filter_counters` handler arm.
+///
+/// RED on revert: delete `guard.afxdp.clear_filter_counters();` from
+/// server/handlers/mod.rs and this fails — the request still returns ok,
+/// which is the whole failure mode (a clear that reports success and snaps
+/// back within one poll).
+#[test]
+fn clear_filter_counters_request_zeroes_term_and_policer_counters_15107() {
+    let state = new_state(ProcessStatus::default());
+    {
+        let mut guard = state.lock().expect("state");
+        guard.afxdp.seed_filter_counter_for_test();
+    }
+
+    // Control: both rows are published BEFORE the clear, so a post-clear
+    // zero cannot be explained by them never having been there.
+    let before = run_request(state.clone(), req("ping"));
+    assert!(before.ok, "ping failed: {}", before.error);
+    {
+        let guard = state.lock().expect("state");
+        let term = guard
+            .status
+            .filter_term_counters
+            .iter()
+            .find(|r| r.term_name == "count-web")
+            .expect("control failed: the seeded term counter was not published before the clear");
+        assert_eq!(
+            (term.packets, term.bytes),
+            (7, 700),
+            "control failed: seeded term counter published unexpected totals"
+        );
+        let policer = guard
+            .status
+            .three_color_policer_counters
+            .iter()
+            .find(|r| r.name == "wan-pol")
+            .expect("control failed: the seeded policer counter was not published before the clear");
+        assert_eq!(
+            policer.green_packets, 1,
+            "control failed: seeded policer published no green hit: {policer:?}"
+        );
+    }
+
+    let cleared = run_request(state.clone(), req("clear_filter_counters"));
+    assert!(cleared.ok, "clear_filter_counters failed: {}", cleared.error);
+
+    let guard = state.lock().expect("state");
+    for row in &guard.status.filter_term_counters {
+        assert_eq!(
+            (row.packets, row.bytes),
+            (0, 0),
+            "term {}/{} still publishes counts after `clear_filter_counters`. \
+             The handler's clear_filter_counters() call does not reach the \
+             helper's live filter counters, so the operator's clear is undone \
+             by the next 1 s status poll (#15107)",
+            row.filter_name, row.term_name
+        );
+    }
+    for row in &guard.status.three_color_policer_counters {
+        assert_eq!(
+            (
+                row.green_packets,
+                row.green_bytes,
+                row.yellow_packets,
+                row.red_packets,
+                row.drop_packets
+            ),
+            (0, 0, 0, 0, 0),
+            "policer {} still publishes counts after `clear_filter_counters` (#15107)",
+            row.name
+        );
+    }
+}
+
 /// The per-RX-batch fold is on the worker loop's own path.
 ///
 /// STRUCTURAL, and deliberately so: `worker_loop` takes five heavyweight

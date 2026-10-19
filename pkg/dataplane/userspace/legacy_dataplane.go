@@ -522,6 +522,30 @@ func (a *LegacyDataPlaneAdapter) ClearPolicyCounters() error {
 	return m.ClearPolicyCounters()
 }
 
+// ClearFilterCounters routes the operator filter hit-count clear through
+// the userspace Manager override rather than the embedded bpfShim method
+// (#15107, A64-03).
+//
+// Without this method the embedded dataplane.DataPlane (= bpfShim) is
+// PROMOTED here, and its ClearFilterCounters zeroes the retired-eBPF
+// `filter_counters` per-CPU array — slots that nothing has incremented
+// since the eBPF dataplane was retired (#1373/#1476). It returns nil, so
+// `clear firewall all` prints "Firewall filter counters cleared" while the
+// counters the display actually READS — the helper's live filter term
+// counters, mirrored via ProcessStatus.FilterTermCounters — are untouched.
+//
+// This is the filter member of the #6566 census: #2218 fixed
+// ClearNATRuleCounters, #3651 ClearZoneCounters and #6566
+// ClearPolicyCounters on this same adapter; ClearFilterCounters was the
+// residual member the census missed.
+func (a *LegacyDataPlaneAdapter) ClearFilterCounters() error {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return err
+	}
+	return m.ClearFilterCounters()
+}
+
 // ClearAllCounters routes the operator clear-all through the userspace Manager
 // override (#2218) so the helper NAT translation hit store is reset alongside
 // the BPF maps; otherwise the per-rule NAT totals snap back on the next poll.

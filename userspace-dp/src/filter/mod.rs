@@ -631,6 +631,17 @@ impl Filter {
 pub(crate) struct FilterTermCounter {
     pub(crate) packets: AtomicU64,
     pub(crate) bytes: AtomicU64,
+    /// #15107: clear epoch, the filter twin of
+    /// `policy::PolicyRuleCounter`'s generation (#3448). `clear firewall all`
+    /// resets the shared atomics but cannot reach the per-thread pending
+    /// batches buffered by `record_filter_counter` (up to
+    /// `FILTER_COUNTER_FLUSH_PACKETS`). Without an epoch, a pending batch
+    /// recorded before the clear would fold its stale pre-clear counts onto
+    /// the freshly-zeroed counter at the next flush, so the clear appeared
+    /// to fail. `reset()` bumps this generation; each pending batch records
+    /// the generation it was captured under and is DISCARDED (not flushed)
+    /// if the generation has advanced.
+    generation: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -643,6 +654,36 @@ impl ThreeColorPolicerCounter {
     fn record(&self, packet_bytes: u64) {
         self.packets.fetch_add(1, Ordering::Relaxed);
         self.bytes.fetch_add(packet_bytes, Ordering::Relaxed);
+    }
+}
+
+impl ThreeColorPolicerCounter {
+    /// #15107: remove exactly the observed pre-clear totals (the
+    /// `PolicyRuleCounter::reset` #3782 discipline), so a concurrent
+    /// post-clear `record` survives instead of being clobbered by a
+    /// `store(0)`. Totals only ever `fetch_add`, so the observed values
+    /// never exceed the current ones and neither `fetch_sub` underflows.
+    fn reset(&self) {
+        let observed_packets = self.packets.load(Ordering::Relaxed);
+        let observed_bytes = self.bytes.load(Ordering::Relaxed);
+        if observed_packets != 0 {
+            self.packets.fetch_sub(observed_packets, Ordering::Relaxed);
+        }
+        if observed_bytes != 0 {
+            self.bytes.fetch_sub(observed_bytes, Ordering::Relaxed);
+        }
+    }
+}
+
+impl ThreeColorPolicerCounters {
+    /// #15107: zero every colour's conform/exceed/drop totals. Called by the
+    /// operator filter-counter clear; the token-bucket state is untouched, so
+    /// rate limiting itself is unaffected — only the published counts reset.
+    fn reset(&self) {
+        self.green.reset();
+        self.yellow.reset();
+        self.red.reset();
+        self.drop.reset();
     }
 }
 
@@ -849,6 +890,12 @@ impl ThreeColorPolicerRuntime {
         self.state.same_runtime_shape(&other.state)
     }
 
+    /// #15107: zero this runtime's per-colour counters (operator
+    /// filter-counter clear). Token-bucket state is NOT touched.
+    pub(crate) fn clear_counters(&self) {
+        self.counters.reset();
+    }
+
     pub(crate) fn status(&self) -> crate::protocol::ThreeColorPolicerStatus {
         // #5390: shape reads are lock-free (immutable `config`); counters are
         // Relaxed atomics as before.
@@ -876,11 +923,44 @@ impl FilterTermCounter {
         self.packets.fetch_add(1, Ordering::Relaxed);
         self.bytes.fetch_add(packet_bytes, Ordering::Relaxed);
     }
+
+    /// #15107: operator clear of this term counter. Bumps the clear epoch
+    /// FIRST so any per-thread pending batch still holding pre-clear counts
+    /// (recorded under the previous generation) is discarded at its next
+    /// flush instead of replaying onto the counter, then removes EXACTLY the
+    /// observed pre-clear totals with `fetch_sub` rather than `store(0)` —
+    /// the `PolicyRuleCounter::reset` #3448/#3782 discipline — so a
+    /// legitimate post-clear increment landing in the window survives. The
+    /// only residual is a bounded ns-scale attribution skew for a count that
+    /// lands exactly at the clear instant.
+    pub(crate) fn reset(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        let observed_packets = self.packets.load(Ordering::Relaxed);
+        let observed_bytes = self.bytes.load(Ordering::Relaxed);
+        if observed_packets != 0 {
+            self.packets.fetch_sub(observed_packets, Ordering::Relaxed);
+        }
+        if observed_bytes != 0 {
+            self.bytes.fetch_sub(observed_bytes, Ordering::Relaxed);
+        }
+    }
+
+    /// #15107: current clear epoch. Stamped onto a per-thread pending batch
+    /// when it is captured and re-checked at flush time to drop stale
+    /// pre-clear counts.
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
 }
 
 #[derive(Default)]
 struct PendingFilterCounterRecord {
     counter: Option<Arc<FilterTermCounter>>,
+    /// #15107: clear epoch the buffered `packets`/`bytes` were recorded
+    /// under. Compared against the counter's current generation at flush
+    /// time so a clear that happened after this batch was captured discards
+    /// the pre-clear counts instead of replaying them.
+    generation: u64,
     packets: u64,
     bytes: u64,
 }
@@ -895,9 +975,10 @@ const FILTER_COUNTER_FLUSH_PACKETS: u64 = 64;
 /// production body survived the whole suite. This type is the single
 /// implementation both builds use; only the thin thread-local wrapper
 /// below differs from a direct value in tests, and tests drive this type
-/// (via the wrapper or directly) exactly as production does. Unlike
-/// `policy::PolicyHitCoalescer` there is no clear-generation guard here:
-/// filter term counters have no operator clear that resets them in place.
+/// (via the wrapper or directly) exactly as production does. The
+/// clear-generation guard (#15107) mirrors `policy::PolicyHitCoalescer`:
+/// filter term counters now have an operator clear that resets them in
+/// place, so a pending batch captured before it must be discarded.
 pub(crate) struct FilterCounterCoalescer {
     pending: PendingFilterCounterRecord,
     flush_packets: u64,
@@ -921,21 +1002,32 @@ impl FilterCounterCoalescer {
     }
 
     /// Record one packet against `counter`, coalesced. A different
-    /// counter flushes the pending batch first; reaching `flush_packets`
-    /// flushes immediately.
+    /// counter (or a changed clear generation) flushes — and, via the
+    /// generation guard in `flush`, possibly discards — the pending batch
+    /// first; reaching `flush_packets` flushes immediately.
     #[inline(always)]
     pub(crate) fn record(&mut self, counter: &Arc<FilterTermCounter>, packet_bytes: u64) {
+        let generation = counter.generation();
+        // #15107: continue the current batch only when it is the SAME
+        // counter AND the SAME clear epoch. A clear mid-batch advances the
+        // generation; the else branch then flushes (and discards, via the
+        // generation guard) the stale pre-clear tally and re-captures the
+        // counter under the new generation, so post-clear packets are
+        // counted fresh from zero instead of being dropped with the
+        // pre-clear batch.
         if self
             .pending
             .counter
             .as_ref()
             .is_some_and(|current| Arc::ptr_eq(current, counter))
+            && self.pending.generation == generation
         {
             self.pending.packets = self.pending.packets.saturating_add(1);
             self.pending.bytes = self.pending.bytes.saturating_add(packet_bytes);
         } else {
             flush_pending_filter_counter_record(&mut self.pending);
             self.pending.counter = Some(counter.clone());
+            self.pending.generation = generation;
             self.pending.packets = 1;
             self.pending.bytes = packet_bytes;
         }
@@ -944,7 +1036,8 @@ impl FilterCounterCoalescer {
         }
     }
 
-    /// Fold the pending batch into its shared counter.
+    /// Fold the pending batch into its shared counter (discarding it if
+    /// its clear generation is stale — #15107).
     #[inline(always)]
     pub(crate) fn flush(&mut self) {
         flush_pending_filter_counter_record(&mut self.pending);
@@ -961,8 +1054,15 @@ fn flush_pending_filter_counter_record(record: &mut PendingFilterCounterRecord) 
     let Some(counter) = record.counter.take() else {
         return;
     };
-    counter.packets.fetch_add(record.packets, Ordering::Relaxed);
-    counter.bytes.fetch_add(record.bytes, Ordering::Relaxed);
+    // #15107: only fold the pending batch into the shared counter if it was
+    // recorded under the counter's CURRENT clear epoch. If an operator clear
+    // bumped the generation between capture and this flush, these are
+    // pre-clear hits — discard them so the clear is durable and the
+    // freshly-zeroed counter does not snap back.
+    if record.generation == counter.generation() {
+        counter.packets.fetch_add(record.packets, Ordering::Relaxed);
+        counter.bytes.fetch_add(record.bytes, Ordering::Relaxed);
+    }
     record.packets = 0;
     record.bytes = 0;
 }
@@ -1125,6 +1225,25 @@ impl FilterState {
         }
         statuses.sort_by_key(|status| status.id);
         statuses
+    }
+
+    /// #15107: operator clear of every filter term counter and every
+    /// per-colour policer counter in this state (`clear firewall all` via
+    /// the `clear_filter_counters` IPC). Term counters are reset IN PLACE
+    /// through the shared `Arc`s — cached flow entries and interface fast
+    /// maps hold the same handles, so replacing them would leave workers
+    /// counting into orphaned counters the status path no longer sees.
+    /// Policer token-bucket state is untouched; only the published
+    /// conform/exceed/drop counts reset.
+    pub(crate) fn clear_filter_counters(&self) {
+        for filter in self.filters.values() {
+            for term in &filter.terms {
+                term.counter.reset();
+            }
+        }
+        for policer in &self.three_color_policers {
+            policer.clear_counters();
+        }
     }
 }
 

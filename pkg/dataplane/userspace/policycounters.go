@@ -395,6 +395,16 @@ func (m *Manager) ClearAllCounters() error {
 	if err := m.clearHelperFloodCountersLocked(); err != nil {
 		errs = append(errs, err)
 	}
+	// #15107: a clear-all must also reset the helper filter term counters
+	// (and the per-colour policer counters), for the same reason as the
+	// flood store above: the helper reports cumulative totals every poll
+	// and the Go surfaces mirror them, so without this IPC a route through
+	// `clear security counters` would leave `show firewall` hit counts at
+	// their pre-clear values. bpfShim.ClearAllCounters already zeroed the
+	// retired filter_counters array; this resets the live helper counters.
+	if err := m.clearHelperFilterCountersLocked(); err != nil {
+		errs = append(errs, err)
+	}
 
 	// #5098: restart the global-counter delta epoch. syncBPFCountersLocked
 	// ACCUMULATES each 1/s helper delta (cur - prevBindingCounters) into the

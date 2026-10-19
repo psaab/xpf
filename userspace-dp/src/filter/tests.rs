@@ -117,6 +117,53 @@ fn filter_thread_local_wrapper_buffers_until_flush_14656() {
     );
 }
 
+// -- #15107: the operator clear must discard pre-clear pending batches -------
+
+#[test]
+fn filter_coalescer_discards_pre_clear_pending_batch_15107() {
+    let counter = Arc::new(FilterTermCounter::default());
+    let mut coalescer = FilterCounterCoalescer::default();
+    for _ in 0..5 {
+        coalescer.record(&counter, 100);
+    }
+    counter.reset();
+    // The pending batch was captured under the pre-clear generation: the
+    // flush must DROP it, not fold 5 packets onto the freshly-zeroed counter.
+    coalescer.flush();
+    assert_eq!(
+        (counter.packets.load(Ordering::Relaxed), counter.bytes.load(Ordering::Relaxed)),
+        (0, 0),
+        "a pre-clear pending batch resurrected the cleared totals (#15107)"
+    );
+    // Post-clear hits count fresh from zero under the new generation.
+    coalescer.record(&counter, 50);
+    coalescer.flush();
+    assert_eq!(
+        (counter.packets.load(Ordering::Relaxed), counter.bytes.load(Ordering::Relaxed)),
+        (1, 50),
+        "post-clear hits must count fresh from zero (#15107)"
+    );
+}
+
+#[test]
+fn filter_counter_reset_preserves_post_clear_increments_15107() {
+    let counter = FilterTermCounter::default();
+    counter.record(100);
+    counter.record(100);
+    counter.reset();
+    assert_eq!(
+        (counter.packets.load(Ordering::Relaxed), counter.bytes.load(Ordering::Relaxed)),
+        (0, 0),
+        "reset must zero the observed pre-clear totals (#15107)"
+    );
+    counter.record(200);
+    assert_eq!(
+        (counter.packets.load(Ordering::Relaxed), counter.bytes.load(Ordering::Relaxed)),
+        (1, 200),
+        "a post-clear increment must survive (#15107)"
+    );
+}
+
 #[test]
 fn basic_accept_discard() {
     let state = make_filter_state(
