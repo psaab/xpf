@@ -17,8 +17,14 @@ type Lease struct {
 	Address   netip.Prefix
 	Gateway   netip.Addr
 	DNS       []netip.Addr
-	LeaseTime time.Duration
-	Obtained  time.Time
+	// DomainSearch holds the DHCPv6 Domain Search List (Option 24,
+	// RFC 3646) from the Reply — populated only when the client requested
+	// it via `req-option domain-name` (#15693; previously requested on the
+	// wire but never parsed). Consumed by the daemon's DNS merge as
+	// resolver search domains (validated there like static domain-search).
+	DomainSearch []string
+	LeaseTime    time.Duration
+	Obtained     time.Time
 
 	// ClasslessRoutes holds RFC 3442 routes learned from DHCPv4 option 121/249
 	// and IPv6 Route Information options learned from Router Advertisements.

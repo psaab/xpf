@@ -199,7 +199,7 @@ func TestCollectFRRClasslessRIBFailsClosedWithoutRoutingManager11426(t *testing.
 
 func TestAssembleFRRConfigMarksUnavailableRIODefaultInventoryFailed11738(t *testing.T) {
 	store := testStoreWithSetConfig(t, []string{
-		"set interfaces ge-0/0/1 unit 0 family inet6 dhcpv6-client client-type statefull",
+		"set interfaces ge-0/0/1 unit 0 family inet6 dhcpv6-client client-type stateful",
 	})
 	dhcpManager := dhcp.NewManagerForTesting(nil)
 	dhcpManager.SeedLeaseForTesting("ge-0-0-1", dhcp.AFInet6, &dhcp.Lease{

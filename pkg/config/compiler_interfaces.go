@@ -1027,8 +1027,15 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 											}
 										}
 									case "req-option":
-										if v := nodeVal(prop); v != "" {
-											dc.ReqOptions = append(dc.ReqOptions, v)
+										// #15693: multi leaf — accumulate every
+										// value across Keys[1:] and child nodes
+										// (bracket, block, flat and repeated
+										// spellings), not just nodeVal's first
+										// (same reader as client-ia-type, #15063).
+										for _, v := range firewallMatchValues(prop) {
+											if v != "" {
+												dc.ReqOptions = append(dc.ReqOptions, v)
+											}
 										}
 									case "update-router-advertisement":
 										uraNode := packedBody(prop,

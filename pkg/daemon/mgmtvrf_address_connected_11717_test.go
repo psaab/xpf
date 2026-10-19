@@ -54,7 +54,7 @@ func TestMgmtVRFClasslessAddressConnectedPrefixesWithoutKernelRoute11717(t *test
 		{
 			name: "IPv6 lease address",
 			config: []string{
-				"set interfaces fxp0 unit 0 family inet6 dhcpv6-client client-type statefull",
+				"set interfaces fxp0 unit 0 family inet6 dhcpv6-client client-type stateful",
 			},
 			family:    dhcp.AFInet6,
 			leaseAddr: "2001:db8:1::123/64",

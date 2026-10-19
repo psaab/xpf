@@ -292,3 +292,23 @@ func TestMergeDNSInputDeterministicLeaseOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeDNSInputDHCPDomainSearch15693(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.System.DomainSearch = []string{"corp.example.com"}
+	lease := &dhcp.Lease{
+		Interface:    "ge-0-0-1",
+		Family:       dhcp.AFInet6,
+		DomainSearch: []string{"example.com", "corp.example.com", "bad domain"},
+	}
+	in := mergeDNSInput(cfg, []*dhcp.Lease{lease})
+	want := []string{"corp.example.com", "example.com"}
+	if len(in.DomainSearch) != len(want) {
+		t.Fatalf("DomainSearch = %v, want %v (static first, DHCP appended, dup+invalid dropped)", in.DomainSearch, want)
+	}
+	for i := range want {
+		if in.DomainSearch[i] != want[i] {
+			t.Fatalf("DomainSearch[%d] = %q, want %q (full %v)", i, in.DomainSearch[i], want[i], in.DomainSearch)
+		}
+	}
+}

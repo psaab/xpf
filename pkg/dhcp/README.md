@@ -12,7 +12,8 @@ power cut cannot silently change the client identity across reboot.
 - `New(stateDir string, onAddressChange, onGatewayChange func()) (*Manager, error)`
   — `dhcp.go`. The `onAddressChange` callback fires (debounced 2 s)
   when any client's lease **content** changes — address, gateway, DNS,
-  or delegated prefixes; not on a content-identical renewal (#1777).
+  domain-search list, or delegated prefixes; not on a content-identical
+  renewal (#1777, #15693).
   The `onGatewayChange` callback (#1844, nil-able) fires —
   undebounced, always outside `m.mu` — on gateway-relevant lease
   state changes only: first lease committed, gateway delta on a

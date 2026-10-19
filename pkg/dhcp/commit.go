@@ -125,6 +125,7 @@ func leaseContentChanged(prev, next *Lease) bool {
 	return prev.Address != next.Address ||
 		prev.Gateway != next.Gateway ||
 		!slices.Equal(prev.DNS, next.DNS) ||
+		!slices.Equal(prev.DomainSearch, next.DomainSearch) ||
 		!sameLeaseRoutes(prev.ClasslessRoutes, next.ClasslessRoutes) ||
 		prev.serverID != next.serverID ||
 		!sameDUID(prev.v6ServerDUID, next.v6ServerDUID)
