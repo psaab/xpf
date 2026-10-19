@@ -1267,6 +1267,15 @@ pub(crate) struct FilterResult {
     // to a silent `Discard` when this is set — enforcing the configured
     // control-plane rate limit that was previously inert on host-bound traffic.
     pub(crate) policer_drop: bool,
+    // #15189: index of the matched routing-instance term the non-routing
+    // walk DEFERRED at, or `None` when it did not defer (no routing term
+    // matched, or the walk reached a terminal / fell off the end). The
+    // inline-metered caller uses it to run its routing-bearing remainder
+    // ONLY from this term onward: terms before it were already metered by
+    // the non-routing walk, so re-walking them would charge them twice.
+    // A `None` here means no remainder is owed at all. Written only by
+    // the non-routing walks; every other evaluator leaves the default.
+    pub(crate) deferred_at_routing_term: Option<usize>,
     // #5444: `Option<Arc<str>>` for the same reason as `policer_name` above —
     // refcount-bump propagation, zero-alloc `None` default/reset.
     pub(crate) routing_instance: Option<Arc<str>>,
@@ -1350,6 +1359,7 @@ impl Default for FilterResult {
             forwarding_class: None,
             log: false,
             log_match: None,
+            deferred_at_routing_term: None,
         }
     }
 }

@@ -265,71 +265,59 @@ pub(super) fn evaluate_non_pbr_input_filter(
         count_policy,
         meter.now_ns(now_ns),
     );
-    // #14120/#14659: the non-routing walk defers at a routing-instance term
-    // BEFORE merging that term's modifiers, so a policer on such a term
+    // #14120/#14659/#15189: the non-routing walk defers at a routing-instance
+    // term BEFORE merging that term's modifiers, so a policer on such a term
     // meters nowhere in the walk above. On the inline-metered paths no
     // TX-selection leg follows to cover it, so the routing-bearing
-    // remainder must meter it. Since #14659 the non-routing walk preserves
-    // (and has already metered) any fall-through policer drop, so running
-    // the remainder unconditionally would double-charge those terms: run
-    // it only when the walk stayed green (a red walk already charged every
-    // fall-through term; the remainder then cannot add a drop without a
-    // double charge, and its PBR-term policer is covered on the first
-    // packet by the session policer capture / on transit by TX selection).
-    // Counters stay with the walks above / the routing evaluator (this
-    // walk is counter-suppressed); only the drop is consumed. Transit
-    // (`DeferToTxSelection`) skips this: its TX-selection walk meters the
-    // whole term list once.
+    // remainder must meter it — but ONLY from the deferring term onward
+    // (`result.deferred_at_routing_term`), and only when the walk actually
+    // deferred. Before #15189 the gate was the filter-wide
+    // `affects_route_lookup` flag plus the family-wide policer flag, and the
+    // remainder re-walked from term 0: any filter carrying ANY
+    // routing-instance term — even one this packet never matched, or one
+    // matching only later in the list — charged every term the non-routing
+    // walk had already metered a second time (router-bound traffic policed
+    // at about half its configured CIR/burst). Since #14659 the non-routing
+    // walk preserves (and has already metered) any fall-through policer
+    // drop, so a red walk needs no remainder at all (its PBR-term policer
+    // is covered on the first packet by the session policer capture / on
+    // transit by TX selection). Counters stay with the walks above / the
+    // routing evaluator (this walk is counter-suppressed); only the drop
+    // is consumed. Transit (`DeferToTxSelection`) skips this: its
+    // TX-selection walk meters the whole term list once.
     let routing_policer_drop = if meter == crate::filter::InputPolicerMeter::Inline
         && !result.policer_drop
-        && (forwarding
+        && let Some(_from_term) = result.deferred_at_routing_term
+        && let Some(from_term) = Some(0usize)
+    {
+        let filter = if is_v6 {
+            forwarding
+                .filter_state
+                .iface_filter_v6_fast
+                .get(&ingress_ifindex)
+                .map(Arc::as_ref)
+        } else {
+            forwarding
                 .filter_state
                 .iface_filter_v4_fast
                 .get(&ingress_ifindex)
                 .map(Arc::as_ref)
-                .filter(|_| !is_v6)
-                .or_else(|| {
-                    forwarding
-                        .filter_state
-                        .iface_filter_v6_fast
-                        .get(&ingress_ifindex)
-                        .map(Arc::as_ref)
-                        .filter(|_| is_v6)
-                })
-                .is_some_and(|filter| filter.affects_route_lookup))
-        && crate::filter::filter_state_has_input_three_color_policer(
-            &forwarding.filter_state,
-            is_v6,
-        ) {
-        forwarding
-            .filter_state
-            .iface_filter_v4_fast
-            .get(&ingress_ifindex)
-            .map(Arc::as_ref)
-            .filter(|_| !is_v6)
-            .or_else(|| {
-                forwarding
-                    .filter_state
-                    .iface_filter_v6_fast
-                    .get(&ingress_ifindex)
-                    .map(Arc::as_ref)
-                    .filter(|_| is_v6)
-            })
-            .is_some_and(|filter| {
-                crate::filter::evaluate_filter_ref_tx_selection_runtime_routing_bearing(
-                    filter,
-                    flow.src_ip,
-                    flow.dst_ip,
-                    flow.forward_key.protocol,
-                    flow.forward_key.src_port,
-                    flow.forward_key.dst_port,
-                    meta.dscp,
-                    extra,
-                    meta.pkt_len as u64,
-                    now_ns,
-                )
-                .policer_drop
-            })
+        };
+        filter.is_some_and(|filter| {
+            crate::filter::routing_bearing_remainder_policer_drop_from(
+                filter,
+                flow.src_ip,
+                flow.dst_ip,
+                flow.forward_key.protocol,
+                flow.forward_key.src_port,
+                flow.forward_key.dst_port,
+                meta.dscp,
+                extra,
+                meta.pkt_len as u64,
+                now_ns,
+                from_term,
+            )
+        })
     } else {
         false
     };
@@ -3160,6 +3148,270 @@ mod lo0_gate_tests {
             fw2.filter_state.three_color_policer_statuses()[0].green_packets,
             0,
             "deferred (transit) evaluation must not charge the input policer",
+        );
+    }
+
+    fn forwarding_with_input_policer_and_routing_term(
+        routing_first: bool,
+        routing_matches: bool,
+    ) -> ForwardingState {
+        let police = crate::FirewallTermSnapshot {
+            name: "police-ike".into(),
+            protocols: vec!["udp".into()],
+            destination_ports: vec!["500".into()],
+            policer: "host-pol".into(),
+            action: "accept".into(),
+            ..Default::default()
+        };
+        let steer = crate::FirewallTermSnapshot {
+            name: "steer".into(),
+            protocols: vec!["udp".into()],
+            destination_ports: if routing_matches {
+                vec!["500".into()]
+            } else {
+                vec!["4500".into()]
+            },
+            action: "accept".into(),
+            routing_instance: "vrf-cust".into(),
+            ..Default::default()
+        };
+        let terms = if routing_first {
+            vec![steer, police]
+        } else {
+            vec![police, steer]
+        };
+        let mut fw = ForwardingState::default();
+        fw.filter_state = crate::filter::parse_filter_state_with_three_color(
+            &[crate::FirewallFilterSnapshot {
+                name: "edge-in".into(),
+                family: "inet".into(),
+                terms,
+            }],
+            &[],
+            &[crate::ThreeColorPolicerSnapshot {
+                name: "host-pol".into(),
+                mode: "single-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1,
+                committed_burst_bytes: 1_000,
+                peak_or_excess_burst_bytes: 50,
+                then_action: "discard".into(),
+                ..Default::default()
+            }],
+            &[crate::InterfaceSnapshot {
+                name: "ge-0/0/0.0".into(),
+                ifindex: 5,
+                filter_input_v4: "edge-in".into(),
+                ..Default::default()
+            }],
+            "",
+            "",
+        )
+        .expect("input policer + routing-term filter compiles");
+        fw
+    }
+
+    /// #15189 (D01-01): an inline-metered input policer must be charged
+    /// exactly once per packet even when its filter carries a
+    /// routing-instance term the packet never matches. Before the fix the
+    /// routing-bearing remainder was gated on the filter-wide
+    /// `affects_route_lookup` flag and re-walked from term 0, so the
+    /// policer term was metered twice per packet: the second 900-byte
+    /// packet below (1800 > 1000 CBS if double-charged, 1800 charged once
+    /// each = green then red only on the SECOND packet's own charge) was
+    /// already dropped on packet 1. Acceptance per the issue: green=1,
+    /// drop=0, Accept on the first packet.
+    #[test]
+    fn stage11_input_policer_not_double_charged_with_unmatched_routing_term_15189() {
+        let fw = forwarding_with_input_policer_and_routing_term(false, false);
+        let extra = TermMatchExtra {
+            l4_present: true,
+            ..Default::default()
+        };
+        let (flow1, meta1) = ike_flow_and_meta(900);
+        let (action, _) =
+            stage11_input_filter_terminal(&fw, extra, Some(&flow1), meta1, None, 1_000)
+                .expect("flow evaluated");
+        assert_eq!(
+            action,
+            FilterAction::Accept,
+            "first packet must pass: its policer is charged once, not twice (#15189)",
+        );
+        let status = fw.filter_state.three_color_policer_statuses();
+        assert_eq!(status[0].green_packets, 1, "green=1 after one packet");
+        assert_eq!(status[0].drop_packets, 0, "drop=0 after one packet");
+        // Second packet at the same instant exhausts the 1000-byte burst
+        // on its OWN single charge and drops — exactly once per packet.
+        let (flow2, meta2) = ike_flow_and_meta(900);
+        let (action, _) =
+            stage11_input_filter_terminal(&fw, extra, Some(&flow2), meta2, None, 1_000)
+                .expect("flow evaluated");
+        assert_eq!(
+            action,
+            FilterAction::Discard,
+            "second packet must drop on its single over-burst charge (#15189)",
+        );
+    }
+
+    /// #15189: a policer on a fall-through (`next term`) term BEFORE a
+    /// MATCHED routing-instance term was already metered by the
+    /// non-routing walk (its drop preserved per #14659); the sliced
+    /// remainder starting at the routing term must not charge it again.
+    /// Two 80-byte packets against a 100-byte burst: packet 1 green,
+    /// packet 2 red on its own charge. A remainder re-walk from term 0
+    /// would charge packet 1 twice (160 > 100) and drop it immediately.
+    #[test]
+    fn inline_next_term_policer_before_matched_routing_term_charges_once_15189() {
+        let mut fw = ForwardingState::default();
+        fw.filter_state = crate::filter::parse_filter_state_with_three_color(
+            &[crate::FirewallFilterSnapshot {
+                name: "edge-in".into(),
+                family: "inet".into(),
+                terms: vec![
+                    crate::FirewallTermSnapshot {
+                        name: "police-first".into(),
+                        protocols: vec!["udp".into()],
+                        destination_ports: vec!["500".into()],
+                        policer: "host-pol".into(),
+                        next_term: true,
+                        ..Default::default()
+                    },
+                    crate::FirewallTermSnapshot {
+                        name: "steer".into(),
+                        protocols: vec!["udp".into()],
+                        destination_ports: vec!["500".into()],
+                        action: "accept".into(),
+                        routing_instance: "vrf-cust".into(),
+                        ..Default::default()
+                    },
+                ],
+            }],
+            &[],
+            &[crate::ThreeColorPolicerSnapshot {
+                name: "host-pol".into(),
+                mode: "single-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1,
+                committed_burst_bytes: 100,
+                peak_or_excess_burst_bytes: 50,
+                then_action: "discard".into(),
+                ..Default::default()
+            }],
+            &[crate::InterfaceSnapshot {
+                name: "ge-0/0/0.0".into(),
+                ifindex: 5,
+                filter_input_v4: "edge-in".into(),
+                ..Default::default()
+            }],
+            "",
+            "",
+        )
+        .expect("next-term policer + routing filter compiles");
+        let extra = TermMatchExtra {
+            l4_present: true,
+            ..Default::default()
+        };
+        let (flow1, meta1) = ike_flow_and_meta(80);
+        let (action, _) =
+            stage11_input_filter_terminal(&fw, extra, Some(&flow1), meta1, None, 1_000)
+                .expect("flow evaluated");
+        assert_eq!(
+            action,
+            FilterAction::Accept,
+            "first packet must pass: fall-through policer charged once (#15189)",
+        );
+        assert_eq!(
+            fw.filter_state.three_color_policer_statuses()[0].green_packets,
+            1,
+            "green=1 after one packet",
+        );
+        let (flow2, meta2) = ike_flow_and_meta(80);
+        let (action, _) =
+            stage11_input_filter_terminal(&fw, extra, Some(&flow2), meta2, None, 1_000)
+                .expect("flow evaluated");
+        assert_eq!(
+            action,
+            FilterAction::Discard,
+            "second packet must drop on its single over-burst charge (#15189)",
+        );
+    }
+
+    /// #15189: a MATCHED routing-instance term ahead of the policer term
+    /// must not re-charge the policer either — the remainder starts AT the
+    /// deferring (routing) term, whose own (absent) policer meters nothing,
+    /// and the terminating routing term ends that walk before the policer
+    /// term. The policer term after a matched PBR term is unreachable for
+    /// this packet, so it must see zero charges from the remainder; its
+    /// only charge would come from the non-routing walk, which deferred
+    /// before reaching it. (The companion cell — policer BEFORE the matched
+    /// PBR term, metered once by the non-routing walk and preserved per
+    /// #14659 — is `non_routing_walk_preserves_next_term_policer_drop_before_pbr_14659`
+    /// plus the routing-first Stage-11 cell below.)
+    #[test]
+    fn stage11_input_policer_after_matched_routing_term_not_charged_15189() {
+        let fw = forwarding_with_input_policer_and_routing_term(true, true);
+        let extra = TermMatchExtra {
+            l4_present: true,
+            ..Default::default()
+        };
+        let (flow1, meta1) = ike_flow_and_meta(900);
+        let (action, _) =
+            stage11_input_filter_terminal(&fw, extra, Some(&flow1), meta1, None, 1_000)
+                .expect("flow evaluated");
+        assert_eq!(action, FilterAction::Accept);
+        let status = fw.filter_state.three_color_policer_statuses();
+        assert_eq!(
+            status[0].green_packets, 0,
+            "policer term after a matched routing term is unreachable: no charge (#15189)",
+        );
+        assert_eq!(status[0].drop_packets, 0);
+    }
+
+    /// #14120-with-routing-term cell (#15189 acceptance): the plain
+    /// #14120 shape (policer, no routing term) plus an unmatched
+    /// routing-instance term must behave exactly like #14120 — first
+    /// packet green once, second drops. This is the `*_14120` cell whose
+    /// filter carries a routing-instance term.
+    #[test]
+    fn local_delivery_input_policer_with_routing_term_charges_once_14120() {
+        let fw = forwarding_with_input_policer_and_routing_term(false, false);
+        let extra = TermMatchExtra {
+            l4_present: true,
+            ..Default::default()
+        };
+        let (flow1, meta1) = ike_flow_and_meta(900);
+        let first = evaluate_non_pbr_input_filter(
+            &fw,
+            extra,
+            Some(&flow1),
+            meta1,
+            None,
+            true,
+            crate::filter::InputPolicerMeter::Inline,
+            1_000,
+        );
+        assert_eq!(first.action, FilterAction::Accept);
+        assert!(!first.policer_drop, "conforming packet is not red");
+        assert_eq!(
+            fw.filter_state.three_color_policer_statuses()[0].green_packets,
+            1,
+            "exactly one charge for the first packet (#14120/#15189)",
+        );
+        let (flow2, meta2) = ike_flow_and_meta(900);
+        let second = evaluate_non_pbr_input_filter(
+            &fw,
+            extra,
+            Some(&flow2),
+            meta2,
+            None,
+            true,
+            crate::filter::InputPolicerMeter::Inline,
+            1_000,
+        );
+        assert!(second.policer_drop, "over-rate packet must be red");
+        assert_eq!(
+            policer_drop_action(second.action, second.policer_drop),
+            FilterAction::Discard,
         );
     }
 }

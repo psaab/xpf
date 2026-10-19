@@ -1450,6 +1450,31 @@ TX-selection leg). Tests:
 `non_routing_walk_preserves_next_term_policer_drop_before_pbr_14659`
 (`filter/tests.rs`).
 
+**#15189: the inline remainder meters only from the deferring term.** The
+#14120/#14659 remainder above was gated on the filter-wide
+`affects_route_lookup` flag (plus a family-wide policer flag) and re-walked
+from term 0, so an inline-metered policer was charged TWICE per packet
+whenever its filter carried ANY `routing-instance` term — including one
+the packet never matched, or one matching only after the policer term
+(router-bound traffic policed at about half its configured CIR/burst).
+The non-routing walks now record the term index they deferred at
+(`FilterResult::deferred_at_routing_term`, v4 and v6), and
+`evaluate_non_pbr_input_filter` runs the remainder only when that is
+`Some(idx)`, via
+`routing_bearing_remainder_policer_drop_from(.., idx)`:
+the policer on the deferring routing term (and any reordered later term
+the routing-bearing walk reaches) still meters exactly once, terms the
+non-routing walk already metered are never re-walked, and a packet that
+never defers pays no remainder at all. The tunnel outer gate keeps the
+full from-0 walk: its input evaluation defers the meter
+(`DeferToTxSelection`), so nothing there was charged twice. Tests:
+`stage11_input_policer_not_double_charged_with_unmatched_routing_term_15189`,
+`inline_next_term_policer_before_matched_routing_term_charges_once_15189`,
+`stage11_input_policer_after_matched_routing_term_not_charged_15189`, and
+`local_delivery_input_policer_with_routing_term_charges_once_14120` (the
+`*_14120` cell whose filter carries a routing-instance term)
+(`poll_descriptor/filter.rs`); the #14659 cells above stay green.
+
 ### `then reject` synthesizes an active reply (#2521)
 
 `FilterAction::Reject` (`then reject`) normally synthesizes an active reply:
