@@ -266,6 +266,14 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 	if err := validateClassOfServiceStrict(cfg.ClassOfService); err != nil {
 		strictErrs = append(strictErrs, err)
 	}
+	if err := validateSchedulerDateRangeStrict(cfg); err != nil {
+		if opts.lenientSchedulerDateRange15695 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("scheduler date range (downgraded to warning on tolerant path; the inverted range never activates): %v", err))
+		} else {
+			strictErrs = append(strictErrs, err)
+		}
+	}
 	if err := validateThreeColorPolicersStrict(cfg.Firewall.ThreeColorPolicers); err != nil {
 		strictErrs = append(strictErrs, err)
 	}

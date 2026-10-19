@@ -338,6 +338,13 @@ type compileOpts struct {
 	// preserves the fail-SAFE posture on that boot. Same doctrine as
 	// lenientIPsecPolicyProposalRef.
 	lenientSchedulerMapRef bool
+	// lenientSchedulerDateRange15695 downgrades an inverted scheduler
+	// start-date/stop-date range (validateSchedulerDateRangeStrict) from
+	// a hard error to a warning on tolerant load / peer-sync paths. An
+	// inverted range never matches any instant at runtime (fail-closed),
+	// so a persisted or synced config carrying one must still boot
+	// (#1960); commit / commit-check stay strict.
+	lenientSchedulerDateRange15695 bool
 	// lenientSchedulerWindowPairs11358 downgrades conflicting repeated
 	// start-time/stop-time boundaries (#11358) and weekday all-day, exclude,
 	// and time-window meanings split across separate weekday statements
@@ -3578,6 +3585,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecPolicyProposalRef:          true,
 		lenientPolicySchedulerRef:              true,
 		lenientSchedulerMapRef:                 true,
+		lenientSchedulerDateRange15695:         true,
 		lenientSchedulerWindowPairs11358:       true,
 		lenientDuplicateRootLogin14447:         true,
 		lenientCodelTarget11825:                true,

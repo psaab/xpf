@@ -1,5 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Fix scheduler date-range edges: an overnight window's post-midnight
+    tail no longer activates on the morning of `start-date` when the
+    window opened the day before the range began, a date-only
+    `stop-date` no longer leaks into exactly 00:00:00 of the following
+    day, and an inverted `start-date`/`stop-date` range is rejected at
+    strict commit (warning on tolerant load) instead of committing
+    clean and never activating (#15695).
+
   * Support standard Junos named address books
     (`security address-book <book> { ... attach { zone <z>; } }`) and
     book-level `description`: named books were schema-rejected on commit

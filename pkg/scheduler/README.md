@@ -51,10 +51,13 @@ A `config.SchedulerConfig` resolves to at most one window per instant:
   override fall back to the daily window.
 - **Date range** — `StartDate`/`StopDate` gate the whole scheduler. Date-only
   `YYYY-MM-DD` bounds keep their existing semantics: start at local midnight,
-  and stop inclusive through the entire stop date. Junos date-time bounds
+  and stop inclusive through the entire stop date (inactive from
+  `00:00:00` of the following day, #15695). Junos date-time bounds
   use `YYYY-MM-DD.HH:MM`, interpreted as local wall-clock instants. The start
   is inclusive and the date-time stop is exclusive; a date-only bound can
-  still be paired with a date-time bound.
+  still be paired with a date-time bound. An inverted range
+  (`start-date` not before the effective stop bound) is rejected at
+  strict commit (#15695).
 - A scheduler with only a date range (no time-of-day window) is active for
   the entire range.
 
@@ -125,6 +128,15 @@ window, so its tail is active every morning. An explicit `exclude` for
 today suppresses yesterday's tail; today's own window still governs
 today's daytime/evening. Previously `withinTimeOfDay`'s wraparound branch
 evaluated the tail against today's window, inverting the per-day cases.
+
+**Date-range gating of overnight tails (#15695).** The post-midnight
+tail belongs to the window that opened yesterday, so
+`overnightTailActive` also requires yesterday's open instant
+(yesterday's date plus the window start time) to lie inside the
+date range. A `start-date` of today therefore suppresses this
+morning's tail of a window that opened yesterday before the range
+began, while the tail of a window opened on/after `start-date`
+remains active.
 
 **Recovery pair consistency (#14726).** While `republishFailClosed` is
 latched, `evaluate` forces the authoritative map all-false. A successful
