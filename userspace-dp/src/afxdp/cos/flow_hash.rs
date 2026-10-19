@@ -21,12 +21,30 @@ fn mix_cos_flow_bucket(seed: &mut u64, value: u64) {
 }
 
 /// #9645: mix a u32 as its low and high 16-bit halves. The mix step carries
-/// only upward and the bucket index keeps the low bits, so a single mix of a
-/// u32 whose two values differ only above bit 15 cannot move the bucket.
+/// only upward, so without the avalanche finalizer below a single mix of
+/// a u32 whose two values differ only above bit 15 cannot move the low
+/// bucket bits.
 #[inline(always)]
 fn mix_u32_halves_for_cos_bucket(seed: &mut u64, value: u32) {
     mix_cos_flow_bucket(seed, u64::from(value & 0xffff));
     mix_cos_flow_bucket(seed, u64::from(value >> 16));
+}
+
+/// #15099 (A70-01): splitmix64 avalanche finalizer, the same finalizer
+/// shape as `forwarding::fib::ecmp_hash_bytes`. `mix_cos_flow_bucket`
+/// carries only upward (`seed << 6`, `seed >> 2`) and the bucket index
+/// keeps the low 12 bits, so before this finalizer IPv4 src bits 18-31,
+/// dst bits 16-31, sport bits 14-15, dport bits 12-15 and most IPv6
+/// bits could never reach the bucket: keys differing only there shared
+/// one bucket for every seed. Folding the finalized high bits down
+/// makes every mixed bit able to move the bucket. Not a security hash;
+/// the per-queue seed remains the secret salt.
+#[inline(always)]
+fn finalize_cos_flow_bucket(seed: u64) -> u64 {
+    let mut z = seed;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }
 
 /// Draw a fresh per-queue hash salt from the kernel.
@@ -78,14 +96,15 @@ fn exact_cos_flow_bucket(queue_seed: u64, flow_key: Option<&SessionKey>) -> u16 
     // so overlapping tenant address space split one fair share by
     // construction rather than by chance. Each field is mixed only when it is
     // not the default, so a flow in the default routing instance with no
-    // discriminator keeps exactly the pre-#9645 bucket mapping (the seed-0
-    // pins and the 5201 fairness baseline stay valid).
+    // discriminator mixes exactly the pre-#9645 field sequence. (#15099:
+    // the avalanche finalizer at the end deliberately moves every
+    // bucket, default-domain flows included — see below.)
     //
     // Tags are small values and every u32 is mixed as two 16-bit halves:
-    // `mix_cos_flow_bucket` only carries UPWARD and the bucket keeps the low
-    // bits, so a difference that lives only above bit 15 (a tag placed at
-    // bit 32, or two GRE keys that differ only in their upper half) would
-    // otherwise never reach the bucket.
+    // `mix_cos_flow_bucket` only carries UPWARD, so a difference that
+    // lives only above bit 15 (a tag placed at bit 32, or two GRE keys
+    // that differ only in their upper half) would otherwise never
+    // reach the bucket without the finalizer below.
     if flow_key.routing_domain != 0 {
         mix_cos_flow_bucket(&mut seed, 1);
         mix_u32_halves_for_cos_bucket(&mut seed, flow_key.routing_domain);
@@ -109,7 +128,12 @@ fn exact_cos_flow_bucket(queue_seed: u64, flow_key: Option<&SessionKey>) -> u16 
         }
         TunnelDiscriminator::Unparseable => mix_cos_flow_bucket(&mut seed, 5),
     }
-    seed as u16
+    // #15099: avalanche-finalize before truncating to u16 so the high
+    // bits of every mixed field (5-tuple included, not just the tags
+    // above) can move the low 12 bucket bits. This deliberately moves
+    // EVERY bucket; the pre-#15099 mapping was the defect (its high
+    // bits were dead), so there is no legacy mapping to preserve.
+    (finalize_cos_flow_bucket(seed) & 0xffff) as u16
 }
 
 #[inline]
