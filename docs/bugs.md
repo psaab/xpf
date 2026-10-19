@@ -207,6 +207,23 @@
   executes the shim's actual `early_filter` module on `fe80::/10` addresses,
   including the `febf::` upper boundary and adjacent non-link-local controls.
 
+### Shim early-passes exact-local IPv6 link-local before session/WG/GRE (#14955)
+- After #13983, an exact-local `fe80::/10` unicast still passed to the
+  kernel in `should_fallback_early`, before `USERSPACE_SESSIONS`, the
+  WireGuard `wg_worker_claim`, and native-GRE inner classification. A
+  live session, a WG transport-data claim, or a GRE inner disposition
+  for a link-local outer destination was therefore pre-empted.
+- **Fix:** `ipv6_early_pass_to_kernel` now passes only IPv6 multicast;
+  link-local unicast (owned or not) falls through to session lookup.
+  The session-miss `is_local_destination` arm, degraded local-control
+  path, and the pre-early WG steer still deliver genuinely local
+  traffic to the kernel; multicast/NDP early pass is preserved.
+- **Regression test:** `broadcast_multicast_and_v6_link_local_ownership_13983`
+  in `userspace-dp/src/afxdp/frame/tests_shim_early_filter_10640.rs` now
+  asserts `!ipv6_early_pass_to_kernel(dst, true)` for fe80/fe b0/febf
+  fixtures (RED on pre-fix, which returned true for exact-local).
+
+
 ### Worker transit forwards special destination classes (#11413)
 - A WG/GRE-decapped or injected inner packet addressed to IPv4 multicast,
   limited broadcast, loopback, reserved space, or IPv6 multicast could match a

@@ -8,10 +8,13 @@
 //! * IPv4 169.254/16 unicast must reach the session-miss path rather than
 //!   pass early. Scope alone never makes a destination local to this box;
 //!   genuinely local addresses still pass through `is_local_destination`.
-//! * IPv6 fe80::/10 unicast follows the same ownership rule (#13983). Only
-//!   an exact-local link-local destination passes early; non-owned link-local
-//!   destinations continue on the AF_XDP policy path rather than hairpinning
-//!   through the kernel.
+//! * IPv6 fe80::/10 unicast follows the same ownership rule (#13983) and is
+//!   never early-passed at all (#14955): even an exact-local link-local
+//!   destination continues to session, WireGuard, and native-GRE
+//!   classification rather than passing before them — the session-miss path
+//!   still delivers a genuinely local destination to the kernel. Non-owned
+//!   link-local destinations continue on the AF_XDP policy path rather than
+//!   hairpinning through the kernel.
 //! * ICMPv6 NDP types 133-137 were matched on TYPE alone with no destination
 //!   predicate. That arm is deleted, not moved here. Multicast NDP still
 //!   passes early, unicast NDP to a firewall-local address passes via
@@ -92,10 +95,13 @@ pub fn ipv4_early_pass_to_kernel(dst_v4: u32) -> bool {
 
 /// The IPv6 early kernel-pass verdict.
 ///
-/// Multicast passes for control traffic. A link-local unicast passes only if
-/// the shim's exact local-destination lookup succeeded; scope alone does not
-/// make it local to this firewall.
+/// Multicast passes for control traffic. Link-local (#14955) and global
+/// unicast never pass early — exact locality no longer arms this path, so a
+/// fe80::/10 destination reaches session/WireGuard/GRE classification first;
+/// `is_local` is accepted for source compatibility with the call site's
+/// ownership lookup (itself still used by the session-miss path) and is
+/// deliberately not consulted here.
 #[inline(always)]
-pub fn ipv6_early_pass_to_kernel(dst: [u8; 16], is_local: bool) -> bool {
-    is_ipv6_multicast(dst) || (is_local && is_ipv6_link_local(dst))
+pub fn ipv6_early_pass_to_kernel(dst: [u8; 16], _is_local: bool) -> bool {
+    is_ipv6_multicast(dst)
 }

@@ -7,6 +7,12 @@ xpf (0.0.0) unstable; urgency=medium
     replaced) now reports a stale bind instead of Listening and rebinds onto
     the interface address when it appears, instead of leaving off-box
     REST/J-Web silently down until a later commit (#14582).
+  * Stop early-passing exact-local IPv6 fe80::/10 unicast to the kernel
+    before session, WireGuard, and native-GRE classification. Link-local
+    unicast now reaches session lookup; exact-local destinations are
+    still delivered by the session-miss local arm and multicast control
+    traffic still passes early (#14955).
+
 
 xpf (0.0.0) unstable; urgency=medium
 

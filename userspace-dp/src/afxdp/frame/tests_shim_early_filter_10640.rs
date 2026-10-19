@@ -82,7 +82,10 @@ fn link_local_unicast_and_transit_ndp_do_not_pass_early_10640() {
 }
 
 /// THE PRESERVED HALF: limited broadcast and multicast still pass early.
-/// Link-local unicast is checked for exact local ownership after this filter.
+/// #14955: even exact-local link-local unicast must NOT pass early — it
+/// reaches session/WireGuard/native-GRE classification first, and the
+/// session-miss local arm (not this filter) still delivers it to the
+/// kernel. RED on pre-fix: the `is_local=true` cells below returned true.
 #[test]
 fn broadcast_multicast_and_v6_link_local_ownership_13983() {
     assert!(
@@ -115,8 +118,11 @@ fn broadcast_multicast_and_v6_link_local_ownership_13983() {
             "multicast NDP must still pass early"
         );
     }
-    // Non-owned link-local unicast must not bypass the exact ownership
-    // check. Both fe80 and febf addresses are in fe80::/10.
+    // #14955: neither non-owned nor exact-local link-local unicast passes
+    // early. Both fe80 and febf addresses are in fe80::/10. The
+    // is_local=true cells are the regression: pre-fix they passed before
+    // USERSPACE_SESSIONS, WireGuard wg_worker_claim, and native-GRE
+    // inner classification.
     for dst in [
         [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
         [0xfe, 0xb0, 0, 0, 0, 0, 0, 0, 0x02, 0xbf, 0x72, 0x01, 0x00, 0x01, 0x00, 0x01],
@@ -128,8 +134,8 @@ fn broadcast_multicast_and_v6_link_local_ownership_13983() {
             "non-owned link-local {dst:?} must reach exact ownership check, not pass early (#13983)"
         );
         assert!(
-            ipv6_early_pass_to_kernel(dst, true),
-            "owned link-local {dst:?} must retain local kernel delivery (#13983)"
+            !ipv6_early_pass_to_kernel(dst, true),
+            "exact-local link-local {dst:?} must not pass before session/WG/GRE classification (#14955)"
         );
     }
     for dst in [
