@@ -652,6 +652,24 @@ func (m *Manager) reclaimTombstoneWhenStopped(name string, s *sender, startEpoch
 // manager epoch has not changed in the meantime (a newer Withdraw/Clear would
 // have superseded this Apply; starting here would re-arm RA on a demoted node).
 func (m *Manager) Apply(configs []*config.RAInterfaceConfig) error {
+	// #15058: refuse duplicate interfaces before touching any sender state.
+	// The desired map below is keyed by interface, so a second config for
+	// the same interface would silently drop the first (its M/O flags,
+	// RDNSS and static prefixes) — buildRAConfigs merges PD prefixes into
+	// the static config by resolved name, so a duplicate here is a caller
+	// bug, and failing closed keeps every live sender at its last good
+	// config instead of advertising a partial one.
+	seen := make(map[string]struct{}, len(configs))
+	for _, cfg := range configs {
+		if cfg == nil {
+			continue
+		}
+		if _, dup := seen[cfg.Interface]; dup {
+			return fmt.Errorf("ra: duplicate router-advertisement config for interface %q", cfg.Interface)
+		}
+		seen[cfg.Interface] = struct{}{}
+	}
+
 	m.mu.Lock()
 
 	m.bumpEpoch()

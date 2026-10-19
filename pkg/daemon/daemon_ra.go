@@ -32,12 +32,28 @@ func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig 
 	for _, p := range protectedPD {
 		protectedPDStrings = append(protectedPDStrings, p.String())
 	}
-	// Start with static RA configs from the configuration.
+	// Start with static RA configs from the configuration. Key the merge
+	// map by the RESOLVED kernel name (#15058): a static RA authored as
+	// ge-0/0/1.0 and a PD target authored as ge-0/0/1 (or vice versa) name
+	// the same netdev once unit 0 collapses, so keying by the raw authored
+	// string produced two configs for one netdev whose static options
+	// ra.Apply's last-wins desired map then silently dropped. A resolved
+	// collision between two distinct static entries keeps the first entry
+	// (with a warning); ra.Apply refuses any residual duplicate outright.
 	raByIface := make(map[string]*config.RAInterfaceConfig)
 	var result []*config.RAInterfaceConfig
 	for _, ra := range cfg.Protocols.RouterAdvertisement {
+		if ra == nil {
+			continue
+		}
 		clone := cloneRAInterfaceConfig(ra)
-		raByIface[clone.Interface] = clone
+		key := cfg.ResolveKernelIfName(clone.Interface)
+		if prev, dup := raByIface[key]; dup {
+			slog.Warn("daemon: duplicate router-advertisement interfaces resolve to the same device; keeping the first",
+				"interface", clone.Interface, "kept", prev.Interface, "device", key)
+			continue
+		}
+		raByIface[key] = clone
 		result = append(result, clone)
 	}
 
@@ -83,7 +99,8 @@ func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig 
 				pfx.PreferredLifeSet = true
 			}
 
-			if existing, ok := raByIface[mapping.RAIface]; ok {
+			key := cfg.ResolveKernelIfName(mapping.RAIface)
+			if existing, ok := raByIface[key]; ok {
 				// Append prefix to existing RA interface config.
 				existing.Prefixes = append(existing.Prefixes, pfx)
 			} else {
@@ -92,7 +109,7 @@ func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig 
 					Interface: mapping.RAIface,
 					Prefixes:  []*config.RAPrefix{pfx},
 				}
-				raByIface[mapping.RAIface] = ra
+				raByIface[key] = ra
 				result = append(result, ra)
 			}
 
