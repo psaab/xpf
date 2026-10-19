@@ -44,7 +44,13 @@ The Routing-Instance Separation row is exercised by `test-wire-routing-separatio
 netns cells run in `make selftest` via #9812. The #11416 populated-RI positive
 leg covers only the existing IPv4/UDP shape; the IPv6 twin, TCP, and
 return-path legs stay blocked on the maintainer ruling recorded in #11416
-(HA-safe config-write environment, options A/B/C).
+(HA-safe config-write environment, options A/B/C). The populated GRE member
+lives in its own test-owned `wire-vrf` zone (with a dedicated lan->wire-vrf
+permit and interface-SNAT pair, mirroring lan->sfmix): placing it in the
+existing `wan` zone — which also carries MAIN-context reth0.50/.80 — makes
+the zone span two routing contexts and the #11061 strict validator rejects
+the commit, as the 2026-10-16 live attempt showed.
+
 
 ## 4. Adversarial Fault Injection & Landing Witnesses
 Only faults with an observable *landing witness* are admitted. Invariants are evaluated strictly after the fault is proven to have landed. Fault rows run under §2 oracles and §6 isolation.
