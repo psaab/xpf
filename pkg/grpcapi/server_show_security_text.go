@@ -422,22 +422,61 @@ func (s *Server) showApplicationsFiltered(cfg *config.Config, buf *strings.Build
 		buf.WriteString("No active configuration\n")
 		return
 	}
-	if app, ok := cfg.Applications.Applications[filter]; ok && app != nil {
+	// #15652: resolve via canonical resolver (user-first, then predefined;
+	// sets/term-parents expand) instead of direct map indexes.
+	if app, ok := config.ResolveApplication(filter, cfg.Applications.Applications); ok && app != nil {
 		fmt.Fprintf(buf, "Application: %s proto=%s", app.Name, app.Protocol)
 		if app.DestinationPort != "" {
 			fmt.Fprintf(buf, " dst-port=%s", app.DestinationPort)
 		}
+		buf.WriteString(config.ApplicationTermSuffix(app))
+		if app.ALG != "" {
+			fmt.Fprintf(buf, " alg=%s", app.ALG)
+		}
 		buf.WriteString("\n")
+		// Also note shadowed predefined twin if this is a predefined name.
+		if _, isPredef := config.PredefinedApplications[filter]; isPredef {
+			if _, inUser := cfg.Applications.Applications[filter]; inUser {
+				buf.WriteString("Predefined application (shadowed by user definition; not in effect):\n")
+				if papp := config.PredefinedApplications[filter]; papp != nil {
+					fmt.Fprintf(buf, "  %-24s proto=%-6s", papp.Name, papp.Protocol)
+					if papp.DestinationPort != "" {
+						fmt.Fprintf(buf, " dst-port=%s", papp.DestinationPort)
+					}
+					buf.WriteString("\n")
+				}
+			}
+		}
+		return
 	}
-	if set, ok := cfg.Applications.ApplicationSets[filter]; ok && set != nil {
-		fmt.Fprintf(buf, "Application set: %s members: %s\n", set.Name, strings.Join(set.Applications, ", "))
+	if _, isSet := config.ResolveApplicationSet(filter, cfg.Applications.ApplicationSets); isSet {
+		if expanded, err := config.ExpandApplicationSet(filter, &cfg.Applications); err == nil {
+			fmt.Fprintf(buf, "Application set: %s members: %s\n", filter, strings.Join(expanded, ", "))
+			for _, m := range expanded {
+				if app, ok := config.ResolveApplication(m, cfg.Applications.Applications); ok && app != nil {
+					fmt.Fprintf(buf, "  %-24s proto=%-6s", m, app.Protocol)
+					if app.DestinationPort != "" {
+						fmt.Fprintf(buf, " dst-port=%s", app.DestinationPort)
+					}
+					buf.WriteString(config.ApplicationTermSuffix(app))
+					if app.ALG != "" {
+						fmt.Fprintf(buf, " alg=%s", app.ALG)
+					}
+					buf.WriteString("\n")
+				}
+			}
+		} else if set, ok := config.ResolveApplicationSet(filter, cfg.Applications.ApplicationSets); ok && set != nil {
+			fmt.Fprintf(buf, "Application set: %s members: %s\n", set.Name, strings.Join(set.Applications, ", "))
+		}
+		if _, isPredefSet := config.PredefinedApplicationSets[filter]; isPredefSet {
+			if _, inUser := cfg.Applications.ApplicationSets[filter]; inUser {
+				buf.WriteString("Predefined application set (shadowed by user definition; not in effect):\n")
+			}
+		}
+		return
 	}
 	if app, ok := config.PredefinedApplications[filter]; ok && app != nil {
-		if _, shadowed := cfg.Applications.Applications[filter]; shadowed {
-			buf.WriteString("Predefined application (shadowed by user definition; not in effect):\n")
-		} else {
-			buf.WriteString("Predefined application:\n")
-		}
+		buf.WriteString("Predefined application:\n")
 		fmt.Fprintf(buf, "  %-24s proto=%-6s", app.Name, app.Protocol)
 		if app.DestinationPort != "" {
 			fmt.Fprintf(buf, " dst-port=%s", app.DestinationPort)
@@ -446,12 +485,17 @@ func (s *Server) showApplicationsFiltered(cfg *config.Config, buf *strings.Build
 		return
 	}
 	if set, ok := config.PredefinedApplicationSets[filter]; ok && set != nil {
-		if _, shadowed := cfg.Applications.ApplicationSets[filter]; shadowed {
-			buf.WriteString("Predefined application set (shadowed by user definition; not in effect):\n")
-		} else {
-			buf.WriteString("Predefined application set:\n")
-		}
+		buf.WriteString("Predefined application set:\n")
 		fmt.Fprintf(buf, "  %-24s members: %s\n", set.Name, strings.Join(set.Applications, ", "))
+		for _, m := range set.Applications {
+			if app, ok := config.ResolveApplication(m, cfg.Applications.Applications); ok && app != nil {
+				fmt.Fprintf(buf, "  %-24s proto=%-6s", m, app.Protocol)
+				if app.DestinationPort != "" {
+					fmt.Fprintf(buf, " dst-port=%s", app.DestinationPort)
+				}
+				buf.WriteString("\n")
+			}
+		}
 	}
 }
 

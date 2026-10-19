@@ -536,6 +536,8 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 				fmt.Fprintf(buf, "      Applications:\n")
 				for _, app := range pol.Match.Applications {
 					fmt.Fprintf(buf, "        %s\n", app)
+					// #15652: expand predefined/set/term apps like CLI printAppDetail.
+					printResolvedAppDetail15652(buf, cfg, app, "          ")
 				}
 				fmt.Fprintf(buf, "    Then:\n")
 				fmt.Fprintf(buf, "      %s\n", action)
@@ -638,6 +640,7 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 			fmt.Fprintf(buf, "      Applications:\n")
 			for _, app := range pol.Match.Applications {
 				fmt.Fprintf(buf, "        %s\n", app)
+				printResolvedAppDetail15652(buf, cfg, app, "          ")
 			}
 			fmt.Fprintf(buf, "    Then:\n")
 			fmt.Fprintf(buf, "      %s\n", action)
@@ -771,4 +774,42 @@ func policyCounterCell(v uint64, published bool) string {
 		return "n/a"
 	}
 	return strconv.FormatUint(v, 10)
+}
+
+// printResolvedAppDetail15652 renders protocol/port/ALG for a policy's
+// application via the canonical resolver (#15652): predefined, term-based
+// and set-backed names expand instead of printing the bare name only.
+func printResolvedAppDetail15652(buf *strings.Builder, cfg *config.Config, appName, indent string) {
+	if cfg == nil || appName == "any" {
+		return
+	}
+	one := func(app *config.Application) {
+		if app == nil {
+			return
+		}
+		fmt.Fprintf(buf, "%sIP protocol: %s", indent, app.Protocol)
+		if app.ALG != "" {
+			fmt.Fprintf(buf, ", ALG: %s", app.ALG)
+		}
+		buf.WriteString("\n")
+		dst := app.DestinationPort
+		if dst == "" {
+			dst = "0-0"
+		}
+		fmt.Fprintf(buf, "%s  Destination ports: [%s]\n", indent, dst)
+	}
+	if app, ok := config.ResolveApplication(appName, cfg.Applications.Applications); ok && app != nil {
+		one(app)
+		return
+	}
+	if _, isSet := config.ResolveApplicationSet(appName, cfg.Applications.ApplicationSets); isSet {
+		if members, err := config.ExpandApplicationSet(appName, &cfg.Applications); err == nil {
+			for _, m := range members {
+				if app, ok := config.ResolveApplication(m, cfg.Applications.Applications); ok && app != nil {
+					fmt.Fprintf(buf, "%sApplication member: %s\n", indent, m)
+					one(app)
+				}
+			}
+		}
+	}
 }

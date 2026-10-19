@@ -143,7 +143,38 @@ var applicationDirectLeafKeywords = map[string]bool{
 // the term's own opaque token stream, which parseApplicationTerms flattens (and
 // guards with UnknownTermLeaves, #3352).
 func applicationDirectLeaves(appNode *Node) (leaves []*Node, unknown []string, unknownTokens []string) {
+	flattenTokens := func(nodes []*Node) []string {
+		var out []string
+		var rec func(ns []*Node)
+		rec = func(ns []*Node) {
+			for _, c := range ns {
+				if c == nil {
+					continue
+				}
+				out = append(out, c.Keys...)
+				rec(c.Children)
+			}
+		}
+		rec(nodes)
+		return out
+	}
 	var walk func(nodes []*Node)
+	var walkChildren func(children []*Node)
+	walkChildren = func(children []*Node) {
+		for _, c := range children {
+			if c == nil || len(c.Keys) == 0 {
+				continue
+			}
+			kw := c.Keys[0]
+			if kw != "term" && applicationDirectLeafKeywords[kw] && len(c.Keys) == 1 && len(c.Children) > 0 {
+				if toks := flattenTokens(c.Children); len(toks) > 0 {
+					walk([]*Node{{Keys: append([]string{kw}, toks...)}})
+					continue
+				}
+			}
+			walk([]*Node{c})
+		}
+	}
 	walk = func(nodes []*Node) {
 		for _, n := range nodes {
 			if n == nil || len(n.Keys) == 0 || n.Keys[0] == "" {
@@ -292,14 +323,29 @@ func applicationDirectLeaves(appNode *Node) (leaves []*Node, unknown []string, u
 			if !descend || len(n.Children) == 0 {
 				continue
 			}
+			// #15652: a leaf with no value in its own Keys carries its
+			// value (and any chained leaves behind it) in its children
+			// — `protocol { tcp destination-port 8080; }`,
+			// `destination-port { [ 80 443 ]; }`. The original node's
+			// Keys scan already emitted this leaf valueless; drop that
+			// emission and re-emit from the flattened child tokens so
+			// the value is honoured and a bracket surplus is recorded
+			// as unknown (strict reject) instead of nodeVal taking
+			// only the first token.
+			if len(n.Keys) == 1 && n.Keys[0] != "term" && applicationDirectLeafKeywords[n.Keys[0]] {
+				if toks := flattenTokens(n.Children); len(toks) > 0 {
+					if len(leaves) > 0 && leaves[len(leaves)-1] == n {
+						leaves = leaves[:len(leaves)-1]
+					}
+					walk([]*Node{{Keys: append([]string{n.Keys[0]}, toks...)}})
+					continue
+				}
+			}
 			if len(n.Keys) < 2 {
-				// Value-in-child shape (nodeVal's Children[0] fallback): the
-				// first child IS this leaf's value, so only the rest continue
-				// the chain.
-				walk(n.Children[1:])
+				walkChildren(n.Children[1:])
 				continue
 			}
-			walk(n.Children)
+			walkChildren(n.Children)
 		}
 	}
 	walk(appNode.Children)

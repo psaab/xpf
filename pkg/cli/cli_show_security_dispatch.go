@@ -211,6 +211,10 @@ func resolveAddressDetail(cfg *config.Config, name string) string {
 }
 
 // printAppDetail prints Junos-style application detail lines (protocol, ports, timeout).
+// #15652 V12-04: resolve via canonical resolver — predefined, term-based
+// (implicit-set) and set-backed names expand via ExpandApplicationSet +
+// ResolveApplication (user-first) instead of a direct user-map index that
+// silently printed nothing for those names.
 func (c *CLI) printAppDetail(cfg *config.Config, appName string) {
 	if appName == "any" {
 		fmt.Printf("    IP protocol: 0, ALG: 0, Inactivity timeout: 0\n")
@@ -218,38 +222,61 @@ func (c *CLI) printAppDetail(cfg *config.Config, appName string) {
 		fmt.Printf("      Destination ports: [0-0]\n")
 		return
 	}
-	if cfg.Applications.Applications == nil {
+	if cfg == nil {
 		return
 	}
-	app, ok := cfg.Applications.Applications[appName]
-	if !ok {
+	printOne := func(app *config.Application) {
+		if app == nil {
+			return
+		}
+		proto := app.Protocol
+		if proto == "" {
+			proto = "0"
+		}
+		timeoutStr := "0"
+		if app.InactivityTimeoutNever {
+			timeoutStr = "never"
+		} else if app.InactivityTimeout > 0 {
+			timeoutStr = fmt.Sprintf("%d", app.InactivityTimeout)
+		}
+		algVal := "0"
+		if app.ALG != "" {
+			algVal = app.ALG
+		}
+		fmt.Printf("    IP protocol: %s, ALG: %s, Inactivity timeout: %s\n", proto, algVal, timeoutStr)
+		srcPort := "0-0"
+		if app.SourcePort != "" {
+			srcPort = app.SourcePort
+		}
+		dstPort := "0-0"
+		if app.DestinationPort != "" {
+			dstPort = app.DestinationPort
+		}
+		fmt.Printf("      Source port range: [%s]\n", srcPort)
+		fmt.Printf("      Destination ports: [%s]\n", dstPort)
+		if app.ICMPType != nil {
+			fmt.Printf("      ICMP type: %d\n", *app.ICMPType)
+		}
+		if app.ICMPCode != nil {
+			fmt.Printf("      ICMP code: %d\n", *app.ICMPCode)
+		}
+	}
+	if app, ok := config.ResolveApplication(appName, cfg.Applications.Applications); ok && app != nil {
+		printOne(app)
 		return
 	}
-	proto := app.Protocol
-	if proto == "" {
-		proto = "0"
+	if _, isSet := config.ResolveApplicationSet(appName, cfg.Applications.ApplicationSets); isSet {
+		members, err := config.ExpandApplicationSet(appName, &cfg.Applications)
+		if err != nil {
+			return
+		}
+		for _, m := range members {
+			if app, ok := config.ResolveApplication(m, cfg.Applications.Applications); ok && app != nil {
+				fmt.Printf("    Application member: %s\n", m)
+				printOne(app)
+			}
+		}
 	}
-	timeoutStr := "0"
-	if app.InactivityTimeoutNever {
-		timeoutStr = "never"
-	} else if app.InactivityTimeout > 0 {
-		timeoutStr = fmt.Sprintf("%d", app.InactivityTimeout)
-	}
-	algVal := "0"
-	if app.ALG != "" {
-		algVal = app.ALG
-	}
-	fmt.Printf("    IP protocol: %s, ALG: %s, Inactivity timeout: %s\n", proto, algVal, timeoutStr)
-	srcPort := "0-0"
-	if app.SourcePort != "" {
-		srcPort = app.SourcePort
-	}
-	dstPort := "0-0"
-	if app.DestinationPort != "" {
-		dstPort = app.DestinationPort
-	}
-	fmt.Printf("      Source port range: [%s]\n", srcPort)
-	fmt.Printf("      Destination ports: [%s]\n", dstPort)
 }
 
 func (c *CLI) handleShowSecurity(args []string) error {
