@@ -571,5 +571,10 @@ func slotEscapeRows() []slotEscapeRow {
 		{"snmp trap-group categories", "snmp trap-group <*> categories",
 			[]string{"set snmp trap-group tg1 targets 10.0.0.1"},
 			"set snmp trap-group tg1 categories", "link", "zzbogus"},
+		// #15256 A85-04: `input egress interface` is declared so the
+		// compiler gate can name it, but every value is rejected as
+		// unmodelled — there is no accepted value, so no slot row can
+		// be expressed; coverage excuses it via the measured refusal
+		// in portMirroringEgressRefusal15256 (gate test file).
 	}
 }
