@@ -338,8 +338,14 @@ fn overlap_sender(key: &OverlapKey) -> (u32, u8, IpAddr) {
 /// one zone must not poison or merge into another zone's entry even when
 /// the receiver tuple coincides. Post-translation keys inherit the
 /// arrival zone, so a datagram keeps one membership identity across NAT.
+/// Callers comparing a pre-translation key with its derived post key
+/// MUST use this datagram identity, never derived `PartialEq`:
+/// `translated_overlap_key` stamps `fairness_origin: Some(..)` on every
+/// post key while arrival keys carry `None`, so `post != pre` is always
+/// true and an identity address rewrite would re-record (and drop)
+/// its own datagram (#15788).
 #[inline]
-fn overlap_same_datagram(a: &OverlapKey, b: &OverlapKey) -> bool {
+pub(crate) fn overlap_same_datagram(a: &OverlapKey, b: &OverlapKey) -> bool {
     a.addr_family == b.addr_family
         && a.src == b.src
         && a.dst == b.dst
@@ -1776,6 +1782,58 @@ mod tests {
             TranslatedOverlapKey::NotApplicable
         );
     }
+    #[test]
+    fn translated_key_identity_rewrite_same_datagram_15788() {
+        // #15788: an identity address rewrite (rewrite addrs == arrival
+        // addrs, same egress domain) yields a post key that differs from
+        // the pre key ONLY in `fairness_origin` (pre: None, post: Some).
+        // The callers' post-check guard uses datagram identity
+        // (`overlap_same_datagram`), so it must skip the post-check:
+        // recording the same range under the post key would find the
+        // pre-recorded entry and drop the fragment against itself with
+        // FRAG_OVERLAP_POST_NAT_DROPPED. A genuinely different post key
+        // must still take the post-check and record.
+        let pre = v4_key();
+        let identity = NatDecision {
+            rewrite_src: Some(pre.src),
+            rewrite_dst: Some(pre.dst),
+            ..NatDecision::default()
+        };
+        let TranslatedOverlapKey::Key(post) =
+            translated_overlap_key(&pre, pre.protocol, &identity, pre.routing_domain)
+        else {
+            panic!("identity address rewrite requires a post-key");
+        };
+        // Fixture pin: the two keys really do differ under derived
+        // PartialEq (fairness_origin None vs Some) — that is the defect
+        // trigger — yet they are the same datagram.
+        assert_ne!(post, pre);
+        assert_eq!(post.fairness_origin, Some(overlap_sender(&pre)));
+        assert!(overlap_same_datagram(&post, &pre));
+        // Genuinely different post-NAT keys (src or routing domain
+        // changed) are NOT the same datagram and must still be recorded.
+        let mut moved = post;
+        moved.src = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8));
+        assert!(!overlap_same_datagram(&moved, &pre));
+        let mut other_domain = post;
+        other_domain.routing_domain = pre.routing_domain + 1;
+        assert!(!overlap_same_datagram(&other_domain, &pre));
+        // End-to-end consequence: record the pre key once; the identity
+        // post key is guarded out (never recorded), while the moved key
+        // is recorded — disjoint range passes, overlapping range drops.
+        let t = OverlapTracker::new();
+        assert!(!t.check_and_record(pre, 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+        let p0 = FRAG_OVERLAP_POST_NAT_DROPPED.load(Ordering::Relaxed);
+        if !overlap_same_datagram(&moved, &pre) {
+            assert!(!t.check_and_record(moved, 16, 32, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+            assert!(t.check_and_record(moved, 8, 24, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+        }
+        assert_eq!(
+            FRAG_OVERLAP_POST_NAT_DROPPED.load(Ordering::Relaxed).wrapping_sub(p0),
+            1
+        );
+    }
+
 
     #[test]
     fn translated_key_nat64_truncation_collision_9950() {

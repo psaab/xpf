@@ -8835,7 +8835,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         egress_domain,
                     ) {
                         crate::fragment_overlap::TranslatedOverlapKey::Key(post_key)
-                            if post_key != pre_key =>
+                            if !crate::fragment_overlap::overlap_same_datagram(
+                                &post_key, &pre_key,
+                            ) =>
                         {
                             let mut post_overlap = worker_ctx
                                 .forwarding
