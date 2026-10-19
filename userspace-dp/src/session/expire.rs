@@ -446,6 +446,7 @@ impl SessionTable {
                             // SESSION_CREATE did — the correlatable key.
                             session_id: removed.session_id,
                             bulk_resync: false,
+                            is_admission: false,
                             // #13971: preserve the TCP terminal class for the
                             // RT_FLOW close-reason projection.
                             tcp_close_class: close_class,

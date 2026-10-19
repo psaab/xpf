@@ -10438,6 +10438,7 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
     observed_tcp_flags: 0,
     session_id: 0,
     bulk_resync: false,
+    is_admission: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
     pptp_call_ids: 0,
@@ -10816,6 +10817,8 @@ fn flush_session_deltas_rt_flow_app_id_tracks_redefinition_by_session_id_12191()
         observed_tcp_flags: 0,
         session_id: SESSION_ID,
         bulk_resync: false,
+        // #15126: fresh admission Open, so CREATE may fire.
+        is_admission: true,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
@@ -11010,6 +11013,7 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
     observed_tcp_flags: 0,
     session_id: 0,
     bulk_resync: false,
+    is_admission: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
     pptp_call_ids: 0,
@@ -11131,6 +11135,7 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
     observed_tcp_flags: 0,
     session_id: 0,
     bulk_resync: false,
+    is_admission: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
     pptp_call_ids: 0,
@@ -11208,6 +11213,7 @@ mod flush_tuple_gate_contention_13654 {
         observed_tcp_flags: 0,
         session_id,
         bulk_resync: false,
+        is_admission: false,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
@@ -11447,6 +11453,7 @@ fn flush_session_deltas_bulk_resync_event_stream_loss_does_not_rearm_14646() {
         observed_tcp_flags: 0,
         session_id: 0,
         bulk_resync,
+        is_admission: false,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
@@ -11528,7 +11535,7 @@ fn flush_session_deltas_bulk_resync_event_stream_loss_does_not_rearm_14646() {
 ///
 /// Reverting the provenance guard makes the CommandExport case enqueue an HA
 /// session-sync frame. The LossResync case proves the full branch, including
-/// its RT_FLOW session-create frame, remains active.
+/// HA delivery, remains active (its RT_FLOW CREATE is now gated by #15126).
 #[test]
 fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
     let key = test_key();
@@ -11553,6 +11560,7 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
             observed_tcp_flags: 0,
             session_id: 0,
             bulk_resync: false,
+            is_admission: false,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
             pptp_call_ids: 0,
@@ -11658,18 +11666,21 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
         "LossResync event-stream delivery must remain lossless",
     );
     let loss_frames: Vec<_> = std::iter::from_fn(|| loss_rx.try_recv().ok()).collect();
+    // #15126: the LossResync delta is not an admission (is_admission=false
+    // above), so it retains its HA session-sync frame but must NOT re-emit
+    // an RT_FLOW SESSION_CREATE for an already-created session.
     assert_eq!(
         loss_frames.len(),
-        2,
-        "LossResync open must emit HA and RT_FLOW frames",
+        1,
+        "LossResync open must emit only its HA frame (#15126: no duplicate CREATE)",
     );
     assert_eq!(
         loss_frames
             .iter()
             .filter(|frame| frame.dataplane_event_payload().is_some())
             .count(),
-        1,
-        "LossResync open must retain its RT_FLOW frame",
+        0,
+        "#15126: LossResync open must not re-emit an RT_FLOW SESSION_CREATE",
     );
     assert_eq!(
         loss_frames
@@ -11737,6 +11748,7 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
     observed_tcp_flags: 0,
     session_id: 0,
     bulk_resync: false,
+    is_admission: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
     pptp_call_ids: 0,
@@ -11869,6 +11881,7 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
     observed_tcp_flags: 0,
     session_id: 0,
     bulk_resync: false,
+    is_admission: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
     pptp_call_ids: 0,
@@ -11999,6 +12012,7 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
         observed_tcp_flags: 0,
         session_id: 0,
         bulk_resync: false,
+        is_admission: false,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
@@ -15457,6 +15471,7 @@ fn delta_8593(key: &SessionKey, bulk_resync: bool) -> SessionDelta {
     observed_tcp_flags: 0,
     session_id: 0,
     bulk_resync,
+    is_admission: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
     pptp_call_ids: 0,
@@ -16941,6 +16956,8 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
     observed_tcp_flags: 0,
     session_id: 77,
     bulk_resync: false,
+    // #15126: only the Open control is a fresh admission; an Update never is.
+    is_admission: matches!(kind, SessionDeltaKind::Open),
     tcp_close_class: 2,
     tcp_handshake_state: 0,
     pptp_call_ids: 0,
@@ -21045,4 +21062,213 @@ fn control_plane_delete_emits_harvested_close_13972() {
         );
         assert!(sessions.drain_deltas(16).is_empty(), "peer-originated delete must emit no Close");
     }
+}
+
+/// #15126 (A93-01) FAIL-ON-REVERT: a LossResync owner-RG re-export and a
+/// peer-synced -> local promote of a `then log session-init` session must NOT
+/// emit a fresh RT_FLOW SESSION_CREATE — the session was already created and
+/// logged at admission. Only a fresh local admission may emit CREATE.
+///
+/// Producer pin: the install Open carries `is_admission=true`; the LossResync
+/// re-export (`open_export_delta`, bulk_resync) and the promote Open
+/// (`update_session` peer->local) carry `is_admission=false`.
+///
+/// Flush pin: driving each producer's drained delta through the production
+/// `flush_session_deltas` with a connected event stream yields exactly one
+/// RT_FLOW CREATE for the admission and zero for the re-export / promote,
+/// while every leg still delivers its HA session-sync frame (type-2 leg is
+/// not suppressed — only the duplicate CREATE is).
+///
+/// Fail-on-revert: dropping the `is_admission` requirement at the CREATE
+/// gate (or setting it on the re-export/promote producers) makes the
+/// resync/promote counts 1 and fails below; setting it false at install
+/// makes the control count 0 and fails the control.
+#[test]
+fn resync_and_promote_do_not_reemit_session_create_15126() {
+    use crate::session::SessionUpdate;
+
+    fn logged_metadata() -> SessionMetadata {
+        let mut metadata = test_metadata();
+        metadata.log_session_init = true;
+        metadata
+    }
+
+    // Drive deltas through the production flush and count (RT_FLOW CREATE
+    // frames, HA session-sync frames). CREATE is the dataplane-event payload
+    // with event type 1 at [52] (mirrors the #12191 harness).
+    fn flush_counts(deltas: &[SessionDelta]) -> (usize, usize) {
+        let (handle, rx) = crate::event_stream::test_worker_handle_connected(
+            16,
+            crate::event_stream::DataplaneEventRateLimitConfig {
+                events_per_second: 0,
+                burst: 0,
+                session_close_events_per_second: 0,
+                session_close_burst: 0,
+            },
+        );
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
+        let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+        let forwarding = ForwardingState::default();
+        let ident = BindingIdentity {
+            slot: 0,
+            queue_id: 0,
+            worker_id: 0,
+            interface: Arc::<str>::from("ge-0-0-2"),
+            ifindex: 7,
+        };
+        let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
+        let mut worker_lossless_wedged = false;
+        let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+        let __r3_reader = __r3_channel.reader();
+        flush_session_deltas(
+            &ident,
+            None,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &dnat_fds,
+            deltas,
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &recent_session_deltas,
+            &peer_worker_commands,
+            crate::afxdp::empty_worker_commands_by_id(),
+            &Some(handle),
+            &forwarding,
+            &__r3_reader,
+            &mut worker_lossless_wedged,
+            None,
+        );
+        let frames: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let creates = frames
+            .iter()
+            .filter_map(|f| f.dataplane_event_payload())
+            .filter(|p| p[52] == 1)
+            .count();
+        let syncs = frames
+            .iter()
+            .filter(|f| f.dataplane_event_payload().is_none())
+            .count();
+        (creates, syncs)
+    }
+
+    // CONTROL: fresh local admission emits exactly one CREATE.
+    let key = test_key();
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol(
+        key.clone(),
+        test_decision(),
+        logged_metadata(),
+        1_000_000,
+        PROTO_TCP,
+        0x10,
+    ));
+    let install_deltas = sessions.drain_deltas(16);
+    assert_eq!(install_deltas.len(), 1, "fixture: install emits one Open");
+    assert!(
+        install_deltas[0].is_admission,
+        "#15126: the install Open is the sole admission producer"
+    );
+    assert_eq!(
+        flush_counts(&install_deltas),
+        (1, 1),
+        "#15126 CONTROL: a fresh admission must emit exactly one SESSION_CREATE \
+         plus its HA sync frame"
+    );
+
+    // LEG 1: LossResync owner-RG re-export of the same live session.
+    sessions.emit_open_delta_with_origin(
+        key.clone(),
+        test_decision(),
+        logged_metadata(),
+        SessionOrigin::ForwardFlow,
+        true,
+    );
+    let resync_deltas = sessions.drain_deltas(16);
+    assert_eq!(resync_deltas.len(), 1, "fixture: re-export emits one Open");
+    assert!(resync_deltas[0].bulk_resync, "fixture: re-export is bulk_resync");
+    assert!(
+        !resync_deltas[0].is_admission,
+        "#15126: a LossResync re-export is not a fresh admission"
+    );
+    assert_eq!(
+        flush_counts(&resync_deltas),
+        (0, 1),
+        "#15126: a LossResync re-export must not re-emit SESSION_CREATE \
+         (resync_creates=0) while still delivering its HA sync frame"
+    );
+
+    // LEG 2: peer-synced -> local promote.
+    let mut promoted = SessionTable::new();
+    assert!(promoted.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        logged_metadata(),
+        SessionOrigin::SyncImport,
+        1_000_000,
+        PROTO_TCP,
+        0x10,
+    ));
+    let _ = promoted.drain_deltas(16);
+    assert!(promoted.update_session(
+        SessionUpdate {
+            key: &key,
+            decision: test_decision(),
+            metadata: logged_metadata(),
+            origin: SessionOrigin::ForwardFlow,
+            now_ns: 2_000_000,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+        },
+        false,
+    ));
+    let promote_deltas = promoted.drain_deltas(16);
+    assert_eq!(promote_deltas.len(), 1, "fixture: promote emits one Open");
+    assert!(
+        !promote_deltas[0].is_admission,
+        "#15126: a peer->local promote is not a fresh admission"
+    );
+    assert_eq!(
+        flush_counts(&promote_deltas),
+        (0, 1),
+        "#15126: a peer->local promote must not re-emit SESSION_CREATE \
+         (promote_creates=0) while still delivering its HA sync frame"
+    );
+
+    // CONTROL: a synthetic admission Open (the #9630/#9412 harness shape)
+    // still emits CREATE — the gate must not blanket-suppress Opens.
+    let admission = SessionDelta {
+        provenance: crate::session::ExportProvenance::Incremental,
+        kind: SessionDeltaKind::Open,
+        key: key.clone(),
+        decision: test_decision(),
+        metadata: logged_metadata(),
+        policy_generation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: 0,
+        bulk_resync: false,
+        is_admission: true,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        purge_retirement: false,
+        source_nat_static: None,
+    };
+    assert_eq!(
+        flush_counts(&[admission]),
+        (1, 1),
+        "#15126 CONTROL: an admission Open must still emit SESSION_CREATE"
+    );
 }

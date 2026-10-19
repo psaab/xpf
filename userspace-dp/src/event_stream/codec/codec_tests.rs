@@ -1608,6 +1608,7 @@ fn test_close_flags() {
         observed_tcp_flags: 0,
         session_id: 0,
         bulk_resync: false,
+        is_admission: false,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
