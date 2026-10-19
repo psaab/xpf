@@ -656,6 +656,12 @@ func isWithinWindow(now time.Time, sched *config.SchedulerConfig) bool {
 // now's time-of-day is before its stop. An explicit window for today has
 // already been checked by the caller for Exclude/AllDay, so an excluded
 // today suppresses the tail while an all-day today is active regardless.
+//
+// #15695: the tail belongs to the window that OPENED yesterday, so that
+// open instant must itself lie inside the scheduler's date range. The
+// caller's withinDateRange(now, ...) gate only proves now is in range;
+// when start-date is today, yesterday's 22:00 open predates the range
+// and must not activate this morning.
 func overnightTailActive(now time.Time, sched *config.SchedulerConfig) bool {
 	yesterday := time.Weekday((int(now.Weekday()) + 6) % 7)
 	win, have := effectiveDayWindow(sched, yesterday)
@@ -676,7 +682,17 @@ func overnightTailActive(now time.Time, sched *config.SchedulerConfig) bool {
 	if startTOD == stopTOD || !stopTOD.before(startTOD) {
 		return false
 	}
-	return timeOfDay(now).before(stopTOD)
+	if !timeOfDay(now).before(stopTOD) {
+		return false
+	}
+	// Gate on yesterday's open instant (#15695).
+	yDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).AddDate(0, 0, -1)
+	yStart := time.Date(yDate.Year(), yDate.Month(), yDate.Day(), startTOD.h, startTOD.m, startTOD.s, 0, now.Location())
+	inRange, ok := withinDateRange(yStart, sched)
+	if !ok || !inRange {
+		return false
+	}
+	return true
 }
 
 // withinDateRange reports whether now is inside sched's calendar range.
@@ -710,8 +726,9 @@ func withinDateRange(now time.Time, sched *config.SchedulerConfig) (inRange, ok 
 				return false, true
 			}
 		} else {
-			// Date-only StopDate remains inclusive through the full date.
-			if now.After(stop.AddDate(0, 0, 1)) {
+			// Date-only StopDate remains inclusive through the full date;
+			// the first instant of the next day is already outside (#15695).
+			if !now.Before(stop.AddDate(0, 0, 1)) {
 				return false, true
 			}
 		}
