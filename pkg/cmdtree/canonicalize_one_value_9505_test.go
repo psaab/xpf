@@ -126,10 +126,15 @@ func TestOperationalTreeOptionListsAndExtraWords9505(t *testing.T) {
 	}
 }
 
-// Options is honoured in Canonicalize and nowhere else, the same scope rule as
-// AcceptsArgs (#8304) and for the same reason: the completion walkers answer a
-// different question.
-func TestOptionsIsHonouredOnlyInCanonicalize9505(t *testing.T) {
+// Options was honoured in Canonicalize and nowhere else (#9505), the same
+// scope rule as AcceptsArgs (#8304). #15720 deliberately widened that
+// scope: the completion walkers and LookupDesc now honour it too, because
+// an option-map command's typed/dynamic/flag leaves otherwise ended those
+// walks and tab completion / `?` help omitted every remaining option. The
+// scope is now exactly these four walkers, pinned positively by
+// TestOptionsHonouredByCompletionWalkers15720; this guard keeps any FIFTH
+// reader out — a new reader must be a deliberate scope change, not drift.
+func TestOptionsScopeIsPinned9505(t *testing.T) {
 	if control := fieldReadSitesByFunc(t, "HasDynamic"); len(control) < 2 {
 		t.Fatalf("positive control failed: HasDynamic reads found in %v", sortedFuncs(control))
 	}
@@ -138,8 +143,10 @@ func TestOptionsIsHonouredOnlyInCanonicalize9505(t *testing.T) {
 		t.Fatal("no production code reads Options, so every declared option list is refused again")
 	}
 	for _, fn := range sortedFuncs(sites) {
-		if fn != "Canonicalize" {
-			t.Errorf("Options is read in %s(); it is honoured only in Canonicalize (sites %v)", fn, sites)
+		switch fn {
+		case "Canonicalize", "CompleteFromTree", "CompleteFromTreeWithDesc", "LookupDesc":
+		default:
+			t.Errorf("Options is read in %s(); its scope is Canonicalize plus the three completion walkers (#9505/#15720, sites %v)", fn, sites)
 		}
 	}
 }
