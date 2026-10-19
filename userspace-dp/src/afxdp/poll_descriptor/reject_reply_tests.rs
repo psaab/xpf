@@ -3716,3 +3716,87 @@ fn route_reject_suppressed_and_rate_limited_fail_closed_14021() {
     assert!(pipeline.pending_tx_local.is_empty());
     reset_bucket_for_test(GeneratedErrorReason::Reject, 0);
 }
+
+/// #15098: poll-level end-to-end — a reject snapshot built through the
+/// production `build_forwarding_state` resolves (via the production FIB)
+/// to `RejectRoute`, and feeding that disposition through the poll arm
+/// seam enqueues exactly one ICMP unreachable. Pre-fix the FIB returned
+/// `NoRoute` for the same snapshot, so no reply was ever generated.
+#[test]
+fn reject_snapshot_resolves_and_enqueues_icmp_unreachable_15098() {
+    use crate::afxdp::forwarding::lookup_forwarding_resolution;
+    use crate::afxdp::forwarding_build::build_forwarding_state;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    // Ingress interface ifindex 5 (matches the frame/meta fixtures below)
+    // plus a reject route for the frame's destination 1.1.1.1/32.
+    let snapshot = crate::ConfigSnapshot {
+        interfaces: vec![crate::InterfaceSnapshot {
+            name: "ge-0/0/0".into(),
+            ifindex: 5,
+            hardware_addr: "02:bf:72:00:00:05".into(),
+            addresses: vec![crate::InterfaceAddressSnapshot {
+                family: "inet".into(),
+                address: "10.0.61.1/24".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        routes: vec![crate::RouteSnapshot {
+            table: "inet.0".into(),
+            family: "inet".into(),
+            destination: "1.1.1.1/32".into(),
+            reject: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let forwarding = build_forwarding_state(&snapshot);
+    let resolution = lookup_forwarding_resolution(
+        &forwarding,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)),
+    )
+    .resolution;
+    assert_eq!(
+        resolution.disposition,
+        crate::afxdp::ForwardingDisposition::RejectRoute,
+        "reject snapshot must produce RejectRoute from the FIB (pre-fix: NoRoute)"
+    );
+
+    let (frame, meta, _flow) = policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
+    let mut pipeline = tx_pipeline(
+        super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+    assert!(
+        handle_route_reject_disposition(
+            resolution.disposition,
+            &mut pipeline,
+            &forwarding,
+            5,
+            &frame,
+            meta,
+            None,
+            &mut counters,
+        ),
+        "RejectRoute from a reject snapshot must enqueue an ICMP unreachable"
+    );
+    assert_eq!(pipeline.pending_tx_local.len(), 1);
+    let reply = pipeline
+        .pending_tx_local
+        .pop_front()
+        .expect("route reject reply");
+    assert_eq!(
+        &reply.bytes[34..36],
+        &[3, 1],
+        "enqueued reply must be ICMPv4 destination-unreachable"
+    );
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+}

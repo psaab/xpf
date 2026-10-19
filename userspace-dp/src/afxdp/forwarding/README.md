@@ -49,6 +49,19 @@ code-motion — functions moved verbatim, visibility preserved
   non-canonical passthrough owns a heap `String`.
 - `MAX_NEXT_TABLE_DEPTH = 8` — bounded recursion across `next-table`
   chains to keep a misconfigured loop from running forever.
+- **Reject routes are terminal (#15098).** `RouteEntryV*.reject` (stored
+  by `forwarding_build/fib.rs` since #13949) is honoured by
+  `select_v4_route`/`select_v6_route` exactly like `discard`: a
+  `discard || reject` row at the winning prefix is the terminal row
+  (subject to the same #13950 drivable-fallback preference gate), and
+  the `Static` arm maps it to `RejectRoute` when `reject` is set,
+  `DiscardRoute` otherwise (reject wins if both flags are set). A
+  reject row therefore never falls through to next-hop selection —
+  a reject+next-hop row rejects instead of forwarding — and a
+  next-table leak whose target LPM is a reject route returns
+  `RejectRoute` from the recursion (terminal, not a leak miss), so
+  the poll arm enqueues the ICMP unreachable. `DiscardRoute` stays
+  silent.
 
 ## FIB route model
 
