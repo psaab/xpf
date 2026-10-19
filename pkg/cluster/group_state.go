@@ -17,7 +17,6 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	wasKeyConfigured := len(m.controlAuthKey) > 0 || len(m.controlAuthKeyAlt) > 0
 
 	seen := make(map[int]bool)
 	for _, rg := range cfg.RedundancyGroups {
@@ -179,11 +178,31 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 		m.controlAuthKeyAlt = nil
 	}
 
+	// #15262: anchor the fabric rollout grace at the FIRST keying of the
+	// current accepted-key set, persisted in node state, not at this
+	// process's in-memory no-key -> key transition. A restart under an
+	// unchanged set restores the persisted first-keyed time (and keeps
+	// the earliest of it and any in-memory anchor, so a backwards clock
+	// step cannot extend the grace); a changed set is a new first keying
+	// and re-anchors. Clearing the set clears the anchor.
 	keyConfigured := len(m.controlAuthKey) > 0 || len(m.controlAuthKeyAlt) > 0
-	if !wasKeyConfigured && keyConfigured {
-		m.controlAuthKeyConfiguredAt = time.Now()
-	} else if !keyConfigured {
+	if !keyConfigured {
 		m.controlAuthKeyConfiguredAt = time.Time{}
+		m.controlAuthKeySetDigest = ""
+	} else {
+		digest := controlAuthKeySetDigest(m.controlAuthKey, m.controlAuthKeyAlt)
+		if digest != m.controlAuthKeySetDigest || m.controlAuthKeyConfiguredAt.IsZero() {
+			now := fabricAuthGraceNow()
+			anchor := now
+			if persisted := loadFabricAuthGraceAnchor(fabricAuthGraceStatePath, digest); !persisted.IsZero() && persisted.Before(anchor) {
+				anchor = persisted
+			}
+			m.controlAuthKeyConfiguredAt = anchor
+			m.controlAuthKeySetDigest = digest
+			if anchor.Equal(now) {
+				persistFabricAuthGraceAnchor(fabricAuthGraceStatePath, digest, anchor)
+			}
+		}
 	}
 
 	// Update peer fencing config.
