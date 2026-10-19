@@ -75,6 +75,16 @@ type Monitor struct {
 	ifaceState map[monitorKey]*monitorState
 	ipState    map[ipMonitorKey]*monitorState
 
+	// missingWarned records, per (rg, interface), that the
+	// "local interface missing" warning has already been emitted for the
+	// current absence episode (#15210). pollInterfaceMonitors runs every
+	// 1s; without this the warning fired every tick for every absent local
+	// monitor and flooded the journal. Cleared when the interface is seen
+	// again (or dropped by UpdateGroups), so a later absence warns once
+	// more. Guarded by mu (touched only in the dampening critical section
+	// and UpdateGroups).
+	missingWarned map[monitorKey]bool
+
 	// ipDebts is the authoritative record of the ip-monitoring election debts
 	// this Monitor currently has installed in the manager, per RG: a map of
 	// monitor-name → installed weight. Names are either a per-target
@@ -224,6 +234,7 @@ func NewMonitor(mgr *Manager, groups []*config.RedundancyGroup) *Monitor {
 		groups:           groups,
 		ifaceState:       make(map[monitorKey]*monitorState),
 		ipState:          make(map[ipMonitorKey]*monitorState),
+		missingWarned:    make(map[monitorKey]bool),
 		ipDebts:          make(map[int]map[string]int),
 		ipThresholdState: make(map[int]bool),
 	}
@@ -369,6 +380,11 @@ func (mon *Monitor) UpdateGroups(groups []*config.RedundancyGroup) {
 	for key := range mon.ifaceState {
 		if !desired[key] {
 			delete(mon.ifaceState, key)
+		}
+	}
+	for key := range mon.missingWarned {
+		if !desired[key] {
+			delete(mon.missingWarned, key)
 		}
 	}
 
@@ -529,6 +545,7 @@ func (mon *Monitor) pollInterfaceMonitors(rg *config.RedundancyGroup, statuses [
 		// Resolve the observed carrier state. A LinkByName error means the
 		// kernel has no such interface.
 		var up bool
+		missing := false
 		if err != nil {
 			// A monitor on a PEER's FPC slot is not ours to evaluate — the
 			// peer publishes that interface's status via heartbeat. Skip it.
@@ -543,8 +560,9 @@ func (mon *Monitor) pollInterfaceMonitors(rg *config.RedundancyGroup, statuses [
 			// primary while its data link is missing, blackholing traffic
 			// (#5080). Feed the absence through the same dampening machinery a
 			// carrier-down link uses so a transient netlink miss is debounced.
-			slog.Warn("cluster monitor: local interface missing, treating as down",
-				"rg", rg.ID, "interface", im.Interface)
+			// The warning itself is emitted once per absence episode below
+			// (#15210), not on every 1s poll tick.
+			missing = true
 			up = false
 		} else {
 			up = LinkAttrsUp(link.Attrs())
@@ -566,6 +584,18 @@ func (mon *Monitor) pollInterfaceMonitors(rg *config.RedundancyGroup, statuses [
 		// callbacks below are deliberately OUTSIDE it (see the lock-order note
 		// on beforeManagerApplyHook).
 		mon.mu.Lock()
+		if mon.missingWarned == nil {
+			mon.missingWarned = make(map[monitorKey]bool)
+		}
+		warnMissing := false
+		if missing {
+			if !mon.missingWarned[key] {
+				mon.missingWarned[key] = true
+				warnMissing = true
+			}
+		} else {
+			delete(mon.missingWarned, key)
+		}
 		state := mon.ifaceState[key]
 		if state == nil {
 			state = &monitorState{}
@@ -574,6 +604,11 @@ func (mon *Monitor) pollInterfaceMonitors(rg *config.RedundancyGroup, statuses [
 		transitioned := mon.evaluateTransition(state, !up)
 		nowDown := state.down
 		mon.mu.Unlock()
+
+		if warnMissing {
+			slog.Warn("cluster monitor: local interface missing, treating as down",
+				"rg", rg.ID, "interface", im.Interface)
+		}
 
 		if transitioned {
 			mon.beforeManagerApply()
