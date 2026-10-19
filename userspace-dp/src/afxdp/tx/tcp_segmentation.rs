@@ -102,6 +102,14 @@ pub(super) fn segment_forwarded_tcp_frames_into_prepared(
     if tcp_header_len < 20 || payload.len() < tcp_offset + tcp_header_len {
         return None;
     }
+    // #15119: never segment a TCP-MD5 (kind 19) or TCP-AO (kind 29)
+    // datagram — same rationale as the frame/tcp_segmentation.rs twin:
+    // the cloned authentication option cannot validate on any output
+    // segment, so decline to the PTB / forward-whole path instead.
+    let tcp_header_for_auth = payload.get(tcp_offset..tcp_offset + tcp_header_len)?;
+    if tcp_header_has_auth_option(tcp_header_for_auth, tcp_header_len) {
+        return None;
+    }
     let tcp_flags = *payload.get(tcp_offset + 13)?;
     // #9116: SYN and RST decline; FIN does not. See the twin in
     // `frame/tcp_segmentation.rs` for the full rationale — the two admission

@@ -42,6 +42,51 @@ const TCP_MIN_HEADER_LEN: usize = 20;
 #[cfg_attr(not(test), allow(dead_code))]
 const TCP_MSS_OPTION_LEN: usize = 4;
 
+/// #15119: TCP option kinds whose bytes are covered by a per-connection
+/// authentication trailer/digest: TCP MD5 (RFC 2385, kind 19) and TCP-AO
+/// (RFC 5925, kind 29). Replicating either onto artificially segmented
+/// outputs (or rewriting another option, e.g. MSS, on a SYN carrying one)
+/// produces segments the receiver's authentication check discards.
+pub(in crate::afxdp) const TCP_OPTION_KIND_MD5: u8 = 19;
+pub(in crate::afxdp) const TCP_OPTION_KIND_AO: u8 = 29;
+
+/// #15119: does this TCP header (starting at the first TCP byte, with
+/// `tcp_header_len` already validated by the caller) carry a TCP-MD5
+/// (kind 19) or TCP-AO (kind 29) option? Walks the option list exactly
+/// like `clamp_tcp_mss`: EOL terminates, NOP is single-byte, every other
+/// kind must carry a well-formed length inside the header; a malformed
+/// option stops the walk (fail-closed for that packet — it cannot prove
+/// authentication is absent, but the callers only use this to DECLINE a
+/// mutation, so stopping early is the safe direction).
+pub(in crate::afxdp) fn tcp_header_has_auth_option(tcp: &[u8], tcp_header_len: usize) -> bool {
+    if tcp_header_len < 20 || tcp.len() < tcp_header_len {
+        return false;
+    }
+    let mut pos = 20usize;
+    while pos < tcp_header_len {
+        let kind = tcp[pos];
+        if kind == 0 {
+            break; // EOL
+        }
+        if kind == 1 {
+            pos += 1; // NOP
+            continue;
+        }
+        if pos + 1 >= tcp_header_len {
+            break;
+        }
+        let opt_len = tcp[pos + 1] as usize;
+        if opt_len < 2 || pos + opt_len > tcp_header_len {
+            break;
+        }
+        if kind == TCP_OPTION_KIND_MD5 || kind == TCP_OPTION_KIND_AO {
+            return true;
+        }
+        pos += opt_len;
+    }
+    false
+}
+
 /// Check if a frame contains a TCP RST flag.
 ///
 /// #2148: the L4 offset is derived via the shared ext-aware
@@ -307,6 +352,11 @@ pub(super) fn clamp_tcp_mss(packet: &mut [u8], max_mss: u16) -> bool {
     if protocol != PROTO_TCP {
         return false;
     }
+    // #15119: IPv6 AH authenticates the payload — never clamp through it.
+    // Computed on the immutable packet before the mutable TCP borrow.
+    if version == 6 && ipv6_ah_sighted(packet, libc::AF_INET6 as u8, 0) {
+        return false;
+    }
     let tcp = match packet.get_mut(l4_offset..) {
         Some(s) if s.len() >= 20 => s,
         _ => return false,
@@ -318,6 +368,18 @@ pub(super) fn clamp_tcp_mss(packet: &mut [u8], max_mss: u16) -> bool {
     }
     let data_offset = ((tcp[12] >> 4) as usize) * 4;
     if data_offset < 20 || tcp.len() < data_offset {
+        return false;
+    }
+    // #15119: never rewrite the MSS of an authenticated SYN. TCP-AO
+    // (kind 29) MACs cover the TCP header including the MSS option, so
+    // clamping it invalidates the SYN's MAC; TCP-MD5 (kind 19) digests
+    // cover the pseudo-header + header + data likewise. An IPv6 chain
+    // sighting AH (protocol 51) authenticates the payload the same way
+    // (#13634/#10729 already gate the build/in-place call sites; gate
+    // here too so a future direct caller cannot bypass them). The AH
+    // sighting needs the immutable packet, so compute it before the
+    // mutable TCP borrow below is taken for the rewrite.
+    if tcp_header_has_auth_option(tcp, data_offset) {
         return false;
     }
     // Walk TCP options looking for MSS (kind=2, len=4)

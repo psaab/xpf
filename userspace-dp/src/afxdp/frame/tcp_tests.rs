@@ -561,6 +561,82 @@ fn clamp_tcp_mss_no_op_when_mss_already_smaller() {
     );
 }
 
+/// #15119: MSS + TCP-AO (kind 29) on a SYN — the AO MAC covers the MSS
+/// bytes, so clamp must be a byte-identical no-op. NOP control clamps.
+#[test]
+fn clamp_tcp_mss_no_op_on_tcp_ao_syn_15119() {
+    // MSS(4) then AO(8): kind 29, len 8, key-id/rnext + MAC prefix bytes.
+    let opts = [2, 4, 0x05, 0xb4, 29, 8, 1, 0, 0x11, 0x22, 0x33, 0x44];
+    let (mut packet, _src, _dst) = build_v4_ip_tcp_with_options(TCP_FLAG_SYN, &opts);
+    let pre = packet.clone();
+    assert!(
+        !clamp_tcp_mss(&mut packet, 1200),
+        "TCP-AO SYN must not be clamped"
+    );
+    assert_eq!(packet, pre, "TCP-AO SYN bytes must be untouched");
+}
+
+/// #15119: MSS + TCP-MD5 (kind 19) on a SYN — same no-op contract.
+#[test]
+fn clamp_tcp_mss_no_op_on_tcp_md5_syn_15119() {
+    let mut opts = vec![2u8, 4, 0x05, 0xb4, 19, 18];
+    opts.extend_from_slice(&[0xAB; 16]);
+    let (mut packet, _src, _dst) = build_v4_ip_tcp_with_options(TCP_FLAG_SYN, &opts);
+    let pre = packet.clone();
+    assert!(
+        !clamp_tcp_mss(&mut packet, 1200),
+        "TCP-MD5 SYN must not be clamped"
+    );
+    assert_eq!(packet, pre, "TCP-MD5 SYN bytes must be untouched");
+}
+
+/// #15119 control: NOPs before MSS still clamp (walker reaches MSS).
+#[test]
+fn clamp_tcp_mss_still_clamps_nop_control_15119() {
+    let opts = [1, 1, 2, 4, 0x05, 0xb4];
+    let (mut packet, _src, _dst) = build_v4_ip_tcp_with_options(TCP_FLAG_SYN, &opts);
+    assert!(
+        clamp_tcp_mss(&mut packet, 1200),
+        "NOP control must still clamp"
+    );
+}
+
+/// #15119: IPv6 SYN behind an AH header (next-header 51 → TCP) must not
+/// be clamped. Built manually: 40-byte v6 header + 12-byte AH + TCP.
+#[test]
+fn clamp_tcp_mss_no_op_on_ipv6_ah_syn_15119() {
+    let tcp_opts = [2u8, 4, 0x05, 0xb4];
+    let tcp_len = 20 + tcp_opts.len();
+    let payload_len = (12 + tcp_len) as u16;
+    let mut packet = Vec::new();
+    packet.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+    packet.extend_from_slice(&payload_len.to_be_bytes());
+    packet.push(51); // next header = AH
+    packet.push(64);
+    let mut src = [0u8; 16];
+    src[0] = 0x20;
+    src[15] = 0x05;
+    let mut dst = src;
+    dst[15] = 0x09;
+    packet.extend_from_slice(&src);
+    packet.extend_from_slice(&dst);
+    // AH: next=TCP(6), payload-len=1 (12B), reserved, SPI, seq.
+    packet.extend_from_slice(&[6, 0x01, 0x00, 0x00]);
+    packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+    packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+    // TCP header skeleton with SYN and data_offset covering opts.
+    let mut tcp = vec![0u8; tcp_len];
+    tcp[..20].copy_from_slice(&tcp_header_skeleton(TCP_FLAG_SYN, ((tcp_len / 4) as u8)));
+    tcp[20..].copy_from_slice(&tcp_opts);
+    packet.extend_from_slice(&tcp);
+    let pre = packet.clone();
+    assert!(
+        !clamp_tcp_mss(&mut packet, 1200),
+        "IPv6 AH SYN must not be clamped"
+    );
+    assert_eq!(packet, pre, "IPv6 AH SYN bytes must be untouched");
+}
+
 #[test]
 fn clamp_tcp_mss_v6_recomputes_with_pseudoheader() {
     let opts = [2, 4, 0x05, 0xb4];

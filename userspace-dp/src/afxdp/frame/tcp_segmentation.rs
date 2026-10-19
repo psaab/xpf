@@ -374,6 +374,17 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit_and_
     if tcp_header_len < 20 || payload.len() < tcp_offset + tcp_header_len {
         return None;
     }
+    // #15119: never segment a TCP-MD5 (kind 19) or TCP-AO (kind 29)
+    // datagram. The builder clones the full TCP header — authentication
+    // option included — onto every output segment while rewriting seq,
+    // lengths, payload and checksums, so each output fails the receiver's
+    // MD5 digest / AO MAC check and is discarded with no PTB. Declining
+    // routes the datagram to the DF/IPv6 PTB arm (or the no-DF
+    // forward-whole path), exactly like the AH decline above.
+    let tcp_header = payload.get(tcp_offset..tcp_offset + tcp_header_len)?;
+    if tcp_header_has_auth_option(tcp_header, tcp_header_len) {
+        return None;
+    }
     let tcp_flags = *payload.get(tcp_offset + 13)?;
     // #9116: SYN and RST still decline; FIN does NOT.
     //
