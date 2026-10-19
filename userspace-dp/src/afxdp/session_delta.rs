@@ -791,6 +791,21 @@ pub(super) fn flush_session_deltas(
             // outward leg (event-stream HA close, RT_FLOW, RPC, recent-deltas)
             // still run — only the shared teardowns (authorized up front) and
             if !delta.purge_retirement {
+                // #15784: capture the companion incarnation BEFORE the
+                // reverse shared entry is removed below — the stale-close
+                // replicate further down must name the incarnation that
+                // was live at capture time, not a post-delete re-read
+                // (which normally finds nothing and yields 0 = uncaptured).
+                let companion_expected_id = if stale {
+                    super::shared_ops::lookup_shared_session(
+                        shared_sessions,
+                        &reverse_session_key(&delta.key, delta.decision.nat),
+                    )
+                    .map(|e| e.session_id)
+                    .unwrap_or(0)
+                } else {
+                    0
+                };
                 let reverse_key = reverse_session_key(&delta.key, delta.decision.nat);
                 if !stale {
                     delete_live_session_entry(session_map, &reverse_key, delta.decision.nat, true);
@@ -816,16 +831,11 @@ pub(super) fn flush_session_deltas(
                 // destructive-unconditional local ops above need Removed.
                 if stale {
                     // One conditional forward command carrying the derived
-                    // reverse key. #14666: capture the companion
-                    // incarnation from the shared reverse entry at this
-                    // capture moment (same moment as scoped_id); 0 when
-                    // the shared map holds no reverse row (worker may
-                    // still hold a local companion the producer cannot
-                    // name — worker then preserves it, bounded leak).
-                    let companion_expected_id =
-                        super::shared_ops::lookup_shared_session(shared_sessions, &reverse_key)
-                            .map(|e| e.session_id)
-                            .unwrap_or(0);
+                    // reverse key, named with the companion incarnation
+                    // captured above (before the reverse removal); 0 when
+                    // the shared map held no reverse row at capture (the
+                    // worker then preserves any live companion, bounded
+                    // leak healed by sweep/age-out).
                     super::session_glue::replicate_session_delete_conditional(
                         peer_worker_commands,
                         worker_commands_by_id,
