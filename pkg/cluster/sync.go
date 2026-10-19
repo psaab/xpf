@@ -2232,6 +2232,13 @@ func NewDualSessionSync(local, peer, local1, peer1 string, rt clusterRuntime) *S
 	return s
 }
 
+// IsDualFabric reports whether this sync carries a secondary fabric
+// (fab1) transport -- i.e. it was built by NewDualSessionSync with a
+// non-empty fab1 pair. Read-only; the pair is fixed at construction.
+func (s *SessionSync) IsDualFabric() bool {
+	return s.localAddr1 != "" && s.peerAddr1 != ""
+}
+
 // SetVRFDevice sets the VRF device used for SO_BINDTODEVICE on sync sockets.
 func (s *SessionSync) SetVRFDevice(dev string) {
 	s.vrfDevice = dev

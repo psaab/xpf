@@ -1126,6 +1126,58 @@ func (d *Daemon) unpublishSessionSyncIfCurrent(gen uint64, ss *cluster.SessionSy
 	return true
 }
 
+// syncAddressPollAttempts / syncAddressPollDelay bound the primary sync
+// address wait, and fab1AddressPollAttempts the shorter secondary wait.
+// Package vars only so tests can exhaust the polls instantly (#15687);
+// production keeps 30x2s / 15x2s.
+var (
+	syncAddressPollAttempts = 30
+	syncAddressPollDelay    = 2 * time.Second
+	fab1AddressPollAttempts = 15
+)
+
+// markClusterTransportBindingChanged sets the epoch's sticky
+// BindingChanged flag iff gen is still current (#15687). Unlike
+// noteClusterTransportBinding it is unconditional: the caller is not
+// reporting an off-key socket bind but an epoch that finished
+// degraded, so there is no device to compare against. Step 20 compares
+// the live key (flag set) against a freshly computed key (flag clear),
+// so the mark makes the next apply restart comms; the #11448 reassert
+// restarts on the same flag when its gate fires. Only a new epoch
+// clears it.
+func (d *Daemon) markClusterTransportBindingChanged(gen uint64) {
+	if gen == 0 {
+		return
+	}
+	active := d.activeTransport()
+	if active.BindingChanged {
+		return
+	}
+	active.BindingChanged = true
+	d.setActiveTransportIfCurrent(gen, active)
+}
+
+// markClusterCommsAddressDebt records that the constructor's primary
+// address poll exhausted without binding session sync (#15687). Such
+// an epoch never built a SessionSync, so a later address arrival is
+// invisible to step 20 unless it is recorded as transport debt.
+func (d *Daemon) markClusterCommsAddressDebt(gen uint64) {
+	d.markClusterTransportBindingChanged(gen)
+}
+
+// markClusterCommsFab1Debt records that fab1 had no usable address when
+// its poll exhausted (#15687): the epoch comes up single-fabric and
+// wireSessionSyncTransportRefs latches syncPeerAddr1Disabled for it.
+// Without this mark nothing ever re-runs the constructor, so a fab1
+// address arriving later never upgrades SessionSync to
+// NewDualSessionSync. The config (hence the transport key) is
+// unchanged, so the debt travels on BindingChanged; the restarted
+// epoch's wireSessionSyncTransportRefs clears syncPeerAddr1Disabled
+// when it publishes the dual pair.
+func (d *Daemon) markClusterCommsFab1Debt(gen uint64) {
+	d.markClusterTransportBindingChanged(gen)
+}
+
 // sessionSyncStartAttempts / sessionSyncStartRetryDelay bound the Start retry
 // loop in startClusterComms. They are package vars only so tests can exhaust
 // the loop instantly (#13545); production keeps 30 attempts x 2s.
@@ -1244,7 +1296,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 		go func() {
 			defer d.clusterCommsWG.Done()
 			var syncIP string
-			for i := 0; i < 30; i++ {
+			for i := range syncAddressPollAttempts {
 				syncIP = resolveClusterInterfaceAddr(syncIface, syncPeerAddr, "")
 				if syncIP != "" {
 					break
@@ -1256,12 +1308,33 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 				select {
 				case <-commsCtx.Done():
 					return
-				case <-time.After(2 * time.Second):
+				case <-time.After(syncAddressPollDelay):
 				}
 			}
 			if syncIP == "" {
-				slog.Error("cluster: sync interface address not available after retries",
+				// #15687: do NOT return here without launching the loops
+				// below. startClusterSyncAuxLoops' loops are commsCtx-scoped
+				// and no-op until a peer/session exists, and
+				// populateFabricFwd resolves neighbours independently of a
+				// session-sync socket. Returning skipped them for the life
+				// of this comms epoch, so a node whose sync address arrived
+				// after the poll window lost config/DHCP/IPsec/NAT aux sync
+				// and cross-chassis redirect until an unrelated comms
+				// restart. Launch the context-scoped loops, then record
+				// transport debt (BindingChanged) so the next apply -- or
+				// the #11448 reassert when its gate fires -- restarts comms
+				// and re-resolves the address; only a new epoch can clear
+				// the sticky flag.
+				slog.Error("cluster: sync interface address not available after retries; "+
+					"starting aux/fabric loops and marking comms for restart on next apply",
 					"interface", syncIface)
+				d.startClusterSyncAuxLoops(commsCtx, cc)
+				fabRefreshCh := make(chan struct{}, 1)
+				fabRefreshCh1 := make(chan struct{}, 1)
+				if d.publishFabricRefreshChansIfCurrent(commsGen, fabRefreshCh, fabRefreshCh1) {
+					d.startFabricForwardingLoops(commsCtx, cc, fabRefreshCh, fabRefreshCh1)
+				}
+				d.markClusterCommsAddressDebt(commsGen)
 				return
 			}
 
@@ -1275,7 +1348,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 			var syncLocal1, syncPeer1 string
 			if syncTransport == "fabric" && cc.Fabric1Interface != "" && cc.Fabric1PeerAddress != "" {
 				var fab1IP string
-				for i := 0; i < 15; i++ {
+				for i := range fab1AddressPollAttempts {
 					fab1IP = resolveClusterInterfaceAddr(cc.Fabric1Interface, cc.Fabric1PeerAddress, "")
 					if fab1IP != "" {
 						break
@@ -1287,7 +1360,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 					select {
 					case <-commsCtx.Done():
 						return
-					case <-time.After(2 * time.Second):
+					case <-time.After(syncAddressPollDelay):
 					}
 				}
 				if fab1IP != "" {
@@ -1296,8 +1369,15 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 					slog.Info("cluster: dual fabric transport configured",
 						"fab0_local", syncLocal, "fab1_local", syncLocal1)
 				} else {
-					slog.Warn("cluster: fabric1 address not available, using single fabric only",
+					// #15687: single-fabric for THIS epoch only. Record
+					// transport debt below (after the epoch publishes its
+					// transport refs) so the next apply restarts comms and
+					// a late fab1 address upgrades to dual instead of
+					// being locked out for the epoch's life.
+					slog.Warn("cluster: fabric1 address not available, using single fabric only; "+
+						"marking comms for restart on next apply",
 						"interface", cc.Fabric1Interface)
+					d.markClusterCommsFab1Debt(commsGen)
 				}
 			}
 
