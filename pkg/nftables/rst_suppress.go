@@ -11,6 +11,7 @@ import (
 	"slices"
 
 	"github.com/google/nftables"
+	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
 	"golang.org/x/sys/unix"
 )
@@ -24,9 +25,13 @@ type rstSuppressionPlan struct {
 }
 
 // InstallRSTSuppression creates nftables rules to DROP outgoing TCP RSTs
-// from interface-NAT (SNAT) addresses. These addresses are owned by the
-// userspace dataplane; the kernel has no sockets for them and should never
-// emit RSTs.
+// from interface-NAT (SNAT) addresses, but ONLY for packets with no
+// conntrack entry (ct state 0 -- see rstDropExprs, #14949). These
+// addresses are owned by the userspace dataplane; the kernel has no
+// sockets for them and should never emit RSTs for the flows the
+// dataplane owns. Conntrack-tracked RSTs from the same addresses --
+// nft reject-with-tcp-reset (policy reject / ident-reset) and local
+// control-plane socket RSTs -- are legitimate and must survive.
 //
 // When the table already exists, delete + create is performed in a single
 // atomic netlink batch to eliminate the race window where no rules exist
@@ -125,7 +130,7 @@ func queueRSTSuppression(c *nftables.Conn, plan rstSuppressionPlan) bool {
 	return true
 }
 
-// addRSTDropRule adds: meta nfproto <family> ip/ip6 saddr <addr> tcp flags & rst != 0 counter drop
+// addRSTDropRule adds: meta nfproto <family> ip/ip6 saddr <addr> ct state & (invalid|established|related|new|untracked) == 0 tcp flags & rst != 0 counter drop
 func addRSTDropRule(c *nftables.Conn, table *nftables.Table, chain *nftables.Chain, addr netip.Addr) {
 	c.AddRule(&nftables.Rule{
 		Table: table,
@@ -134,9 +139,9 @@ func addRSTDropRule(c *nftables.Conn, table *nftables.Table, chain *nftables.Cha
 	})
 }
 
-// rstDropExprs builds the expression list for one RST-drop rule, deriving the
-// nfproto byte, the source-address payload offset and the address length from
-// the address itself.
+// rstDropExprs builds the expression list for one conntrack-less RST-drop
+// rule, deriving the nfproto byte, the source-address payload offset and
+// the address length from the address itself.
 //
 // Taking a netip.Addr rather than (bytes, len, offset, family) is what makes
 // the rule shape testable AND removes a defect class (#7171). Previously the
@@ -190,6 +195,33 @@ func rstDropExprs(addr netip.Addr) []expr.Any {
 			Op:       expr.CmpOpEq,
 			Register: 1,
 			Data:     addrBytes,
+		},
+		// ct state & (invalid|established|related|new|untracked) == 0 --
+		// no conntrack entry (#14949). The spurious RSTs this table
+		// exists to suppress (#450) belong to userspace-owned flows the
+		// kernel never tracked, so they arrive conntrack-less. Every
+		// legitimate RST from these addresses is tracked: an nft
+		// reject-with-tcp-reset (policy reject / ident-reset) creates
+		// a conntrack entry for the rejected connection before its
+		// synthesized RST traverses OUTPUT, and a local socket RST
+		// belongs to a tracked connection. Matching only ct state 0
+		// therefore drops the spurious RSTs and lets both legitimate
+		// classes through. The mask covers every known state bit so
+		// any tracked packet, whatever its single state, is excluded.
+		&expr.Ct{Register: 1, Key: expr.CtKeySTATE},
+		&expr.Bitwise{
+			SourceRegister: 1,
+			DestRegister:   1,
+			Len:            4,
+			Mask: binaryutil.NativeEndian.PutUint32(expr.CtStateBitINVALID |
+				expr.CtStateBitESTABLISHED | expr.CtStateBitRELATED |
+				expr.CtStateBitNEW | expr.CtStateBitUNTRACKED),
+			Xor: binaryutil.NativeEndian.PutUint32(0),
+		},
+		&expr.Cmp{
+			Op:       expr.CmpOpEq,
+			Register: 1,
+			Data:     []byte{0, 0, 0, 0},
 		},
 		// meta l4proto tcp
 		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
