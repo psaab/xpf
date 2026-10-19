@@ -176,10 +176,16 @@ func (s *Server) noteFabricAuthSkewForDigest(keys [][]byte, tokenHex string, now
 
 	skew, ok := measureFabricAuthSkewForDigest(keys, tokenHex, now, method, reqDigest)
 	if !ok {
-		// Not a clock problem. Clear any stale measurement so a status surface
-		// does not keep asserting a skew that no longer explains anything.
-		s.fabricSkew.atNanos.Store(0)
-		s.fabricSkew.reported.Store(false)
+		// Not a clock problem — and, #15274 C03-03, NOT evidence that a
+		// previously measured skew has gone away. This token is simply
+		// unverifiable (forged, wrong key, or garbage from the fabric
+		// segment); letting it store "no skew" would let any such token,
+		// once past the throttle, erase a real measured skew from
+		// `show chassis cluster status`. The measurement is cleared only
+		// by noteFabricAuthOK, when a token verifies normally and the
+		// clocks provably agree again. This rejection itself still
+		// carries no skew clause: an unverifiable token must not be
+		// labelled a clock problem.
 		return ""
 	}
 	s.fabricSkew.skewSeconds.Store(skew)

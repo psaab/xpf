@@ -481,10 +481,20 @@ func (s *SessionSync) classifyPrimeLocked(conn net.Conn, switched, priorKnown bo
 		// The boot id is unchanged, or this is the first incarnated prime. Either
 		// way the recorded boot id is now the current incarnation's, and no
 		// boot-id change is coming for it.
-		if !priorKnown {
-			if id, known := s.connPeerIdentityLocked(conn); known {
-				s.peerIdentity = id
-			}
+		//
+		// #15274 C03-02: record the priming connection's proven identity on
+		// EVERY accepted prime with a known identity, not only the first
+		// incarnated prime. When a restarted process's heartbeat epoch lands
+		// before its first install, the install retires via the epoch arm
+		// (recording rebootAwaitingBootID) while peerIdentity still names
+		// the previous process; a same-boot-id prime (daemon restart) then
+		// took this arm and left the stale identity in place, so the next
+		// retirement ran its #9818 predicate against the wrong retired
+		// process. The priming connection belongs to the current
+		// incarnation by construction (it is installed), so its proven
+		// identity is authoritative here.
+		if id, known := s.connPeerIdentityLocked(conn); known {
+			s.peerIdentity = id
 		}
 		if s.rebootAwaitingLocked(rebootAwaitingBootID) {
 			s.settleRebootEvidenceLocked()
@@ -493,6 +503,12 @@ func (s *SessionSync) classifyPrimeLocked(conn net.Conn, switched, priorKnown bo
 	}
 	if s.rebootAwaitingLocked(rebootAwaitingBootID) && !s.peerEpochRaisedLocked() {
 		s.settleRebootEvidenceLocked()
+		// #15274 C03-02: the consumed prime still belongs to the process
+		// the epoch arm established; adopt its proven identity so
+		// peerIdentity names that process, not the one it retired.
+		if id, known := s.connPeerIdentityLocked(conn); known {
+			s.peerIdentity = id
+		}
 		c.consumed = true
 		return c
 	}
@@ -1618,6 +1634,13 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		// probe-then-enforce order for each new peer: assume healthy until
 		// the CURRENT peer proves it acks.
 		s.peerHeartbeatAckEver.Store(false)
+		// #15274 C03-02: the authoritative peer process identity is
+		// incarnation-scoped exactly like the capability set above. A full
+		// disconnect ends the incarnation; leaving the identity latched
+		// makes the next process's first retirement run the #9818
+		// predicate against this dead process. Partial disconnects take
+		// the other branch: the survivor is the same process.
+		s.peerIdentity = peerProcessIdentity{}
 		s.clearPendingBulkAck()
 		s.bulkMu.Lock()
 		hadBulkInProgress := s.bulkInProgress

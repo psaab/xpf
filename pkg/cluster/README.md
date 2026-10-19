@@ -4852,6 +4852,24 @@ it.
   every arm shares (discharge on the peer's `BulkAck`, a generation the ack must
   match, a re-sent table limited to survivor-primary RGs) are #9626.
 
+  **The authoritative identity follows every prime, and dies with the
+  incarnation (#15274 C03-02).** `classifyPrimeLocked` originally recorded
+  `s.peerIdentity` only on the first incarnated prime, and
+  `handleDisconnect` never cleared it. When a restarted process's heartbeat
+  epoch landed before its first install, the epoch arm retired the old
+  incarnation while `peerIdentity` still named the dead process; a
+  same-boot-id prime (daemon restart) then left the stale identity in
+  place, so the next retirement ran the #9818 predicate against the wrong
+  retired identity — evicting a healthy fabric and re-stamping a corpse
+  current. Now every accepted prime whose connection carries a proven
+  identity adopts it, and the full-disconnect block clears `peerIdentity`
+  beside the other incarnation-scoped state (a partial disconnect does
+  not: the survivor is the same process). Cells:
+  `sync_peer_identity_15274_test.go` (restart-heartbeat-first adoption with
+  token 222, corpse evicted on the next restart, live fabric kept;
+  full-vs-partial disconnect clearing), with the #9818/#9636/#14951 cells
+  as controls.
+
   **Atomicity of the ack is bound, not merely asserted (#5718 fold r3).** Every
   scenario test calls `installConn` and `handleMessage` in sequence, so none of
   them opens the window `s.mu` exists to close — an implementation that checks
