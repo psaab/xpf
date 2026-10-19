@@ -317,7 +317,10 @@ func TestMultiLeafAbsorptionPopulation9206(t *testing.T) {
 	//	per-interface host-inbound-traffic: STRICT REJECT by its token gate.
 	// So those thirteen were refused-or-definitional before enforcement: 0
 	// reach. Arming remains a strict improvement for their keyword typos.
-	const wantAbsorbing, wantDistinct = 98, 58
+	// #15053: arming root-authentication + login user authentication brings
+	// their six ssh-* multi leaves inside a closed world (+12 structural
+	// including groups rehosts, +6 distinct).
+	const wantAbsorbing, wantDistinct = 110, 64
 	if absorbing != wantAbsorbing || distinct != wantDistinct {
 		t.Errorf("#9206: %d sites absorb at the schema walk (%d excluding `groups` "+
 			"rehosts), want %d (%d).\n  %s\n\n"+

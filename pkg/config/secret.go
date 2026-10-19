@@ -390,6 +390,8 @@ var secretLeafKeywords = map[string]bool{
 	"preshared-key":      true,
 	"private-key":        true,
 	"encrypted-password": true,
+	"plain-text-password": true,
+	"plain-text-password-value": true,
 	"password":           true,
 	"tsig-secret":        true,
 	"api-key":            true,
