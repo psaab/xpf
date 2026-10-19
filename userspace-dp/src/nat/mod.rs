@@ -221,6 +221,13 @@ mod tests_reseed_persistent_siblings_15110;
 #[cfg(test)]
 #[path = "tests_flowless_index_15116.rs"]
 mod tests_flowless_index_15116;
+// #15790 (G33-01): multi-port same-external-IP static NAT must keep
+// every port key in the `dnat_by_dst` index (entry-extend, not
+// insert), and the `snat` / `nat_local_match_possible` probes must be
+// index-routed rather than whole-map scans.
+#[cfg(test)]
+#[path = "tests_static_multiport_index_15790.rs"]
+mod tests_static_multiport_index_15790;
 #[path = "tests_synced_det_v4_15267.rs"]
 mod tests_synced_det_v4_15267;
 
