@@ -51,8 +51,13 @@ func TestRethDuplicateVlanIDStrictReject14573(t *testing.T) {
 // same reth also share one device. FAIL-ON-REVERT: a gate re-deriving only
 // base + "." + vlan-id accepts this.
 func TestRethUnitNumberVsVlanIDStrictReject14573(t *testing.T) {
+	// #15034 migration: reth1 now carries `vlan-tagging`. Without it the
+	// untagged unit 100 is the #15034 defect itself (rejected by that
+	// gate before this collision is reached); the tagged form keeps
+	// this cell exercising the #14573 unit-number-vs-vlan-id collision.
 	err := compileSet7795(t,
 		"set interfaces reth1 redundant-ether-options redundancy-group 1",
+		"set interfaces reth1 vlan-tagging",
 		"set interfaces reth1 unit 100 family inet address 10.0.100.1/24",
 		"set interfaces reth1 unit 200 vlan-id 100 family inet address 10.0.200.1/24",
 		"set chassis cluster reth-count 2",

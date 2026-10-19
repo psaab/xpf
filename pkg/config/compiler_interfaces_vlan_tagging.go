@@ -3,11 +3,13 @@ package config
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
 // compiler_interfaces_vlan_tagging.go carries the #14574 vlan-id-without-
-// tagging gate.
+// tagging gate and its #15034 sibling: a non-zero unit with no VLAN tag
+// on an untagged parent.
 //
 // Background: a unit carrying `vlan-id N` (N > 0) asks for an 802.1Q
 // sub-interface `<parent>.N`. That device only exists when the parent
@@ -37,17 +39,49 @@ import (
 // outer-tag values and only fires for a positive tag. `vlan-id 0` is
 // the untagged sentinel (see schema_interfaces.go) and stays legal
 // without tagging, as does `vlan-tags outer 0`.
-
+//
+// #15034 (residual of #14574, whose predicate keyed on a positive tag
+// only): a unit with NUMBER > 0, no positive tag and a parent without
+// tagging is the mirror-image split. ResolveKernelIfName and
+// snapshotLinuxName derive `kernelBase.<unit.Number>` for it — a
+// device nothing creates — while buildInterfaceNetworkdModels folds
+// every unit's addresses onto the untagged parent. The address lands
+// on the parent (unit 0's zone) while the unit's own zone and input
+// filter bind to the never-created `.<unit>` device, so the filter is
+// never installed. Junos rejects a non-zero untagged unit on an
+// untagged parent for the same reason; the gate below strict-rejects
+// it (lenient warns, #1960). Exemptions are exactly the shapes whose
+// device is created by another owner: a unit or interface `tunnel`
+// stanza (per-unit tunnel device, or the interface tunnel / WireGuard
+// device the unit shares), a secure-tunnel name (`st<N>`, whose unit
+// device is the xfrmi), a loopback name (`lo<N>`, Junos multi-unit
+// loopback), and `irb` (bridge-domain routing-interface). A `reth<N>`
+// unit is NOT exempt: it resolves onto the member's `.<unit>` device,
+// which only tagging creates, so an untagged non-zero reth unit splits
+// the same way.
 // vlanIDTaggingFinding records one (interface, unit) that carries a
-// positive VLAN tag while its parent enables neither tagging mode.
+// positive VLAN tag while its parent enables neither tagging mode, or
+// (#15034) a non-zero unit number with no positive tag on such a
+// parent. Exactly one of stmts / untaggedUnit is set.
 type vlanIDTaggingFinding struct {
-	iface string
-	unit  string
-	stmts []string // rendered tag statements contributing the positive tag
-	dev   string   // authored device name (LinuxIfName(iface).vid) the dataplane creates
+	iface        string
+	unit         string
+	stmts        []string // rendered tag statements contributing the positive tag
+	dev          string   // authored device name (LinuxIfName(iface).vid) the dataplane creates
+	untaggedUnit bool     // #15034: no positive tag; dev is the unit-number device
 }
 
 func (f vlanIDTaggingFinding) message() string {
+	if f.untaggedUnit {
+		return fmt.Sprintf("interfaces %s unit %s: non-zero unit without `vlan-id` on an untagged interface — "+
+			"unit %s carries no positive vlan-id/vlan-tags tag and interface %s enables neither "+
+			"`vlan-tagging` nor `flexible-vlan-tagging`, so the networkd writer would place the unit's "+
+			"addresses on the untagged parent %s while the zone/dataplane writers bind the unit's zone "+
+			"and filters to %s, a device nothing creates: the unit's filter is never installed and its "+
+			"subnet is attributed to the parent unit's zone. Add `vlan-tagging` with a `vlan-id` to "+
+			"unit %s, renumber it to unit 0, or remove the unit (#15034)",
+			f.iface, f.unit, f.unit, f.iface, f.iface, f.dev, f.unit)
+	}
 	return fmt.Sprintf("interfaces %s unit %s: `vlan-id` without `vlan-tagging` — unit carries `%s` "+
 		"but interface %s enables neither `vlan-tagging` nor `flexible-vlan-tagging`; "+
 		"the networkd writer would place the unit's addresses on the untagged parent %s "+
@@ -158,6 +192,30 @@ func authoredVlanDevice(ifName string, unit *Node) string {
 	return ""
 }
 
+// untaggedNonzeroUnit15034 reports whether a unit on an untagged parent
+// is the #15034 shape: unit number > 0, no positive tag (the caller has
+// already established that), and no other device owner. The tunnel test
+// is AST-level (a `tunnel` child on the unit or its parent), mirroring
+// how compileInterfaces creates unit.Tunnel / shares the interface
+// tunnel device; the name tests reuse the canonical class predicates
+// so a name no resolver treats as tunnel/loopback is not exempted.
+func untaggedNonzeroUnit15034(ifName string, iface, unit *Node, unitName string) bool {
+	n, err := strconv.Atoi(unitName)
+	if err != nil || n <= 0 {
+		return false
+	}
+	if ifName == "irb" || IsLoopbackIfName(ifName) || IsSecureTunnelIfName(ifName) {
+		return false
+	}
+	if len(iface.FindChildren("tunnel")) > 0 || len(unit.FindChildren("tunnel")) > 0 {
+		return false
+	}
+	// A packed `unit N tunnel ...` tail parses as a tunnel child too
+	// (packedBody consumers rely on it); the braced child test above is
+	// the same node set compileInterfaces reads.
+	return true
+}
+
 func collectVlanIDTaggingFromInterfacesNode(ifacesNode *Node, out map[string]vlanIDTaggingFinding) {
 	if ifacesNode == nil {
 		return
@@ -178,17 +236,37 @@ func collectVlanIDTaggingFromInterfacesNode(ifacesNode *Node, out map[string]vla
 		}
 		for _, unitInst := range namedInstances(iface.FindChildren("unit")) {
 			stmts := positiveTagStmts(unitInst.node)
+			key := ifName + "\x00" + unitInst.name
 			if len(stmts) == 0 {
+				// #15034: no positive tag — a non-zero unit number on
+				// this untagged parent derives a `.<unit>` device
+				// nothing creates. A unit already reported under a
+				// tag finding (other node view) keeps that finding.
+				if _, seen := out[key]; seen {
+					continue
+				}
+				if !untaggedNonzeroUnit15034(ifName, iface, unitInst.node, unitInst.name) {
+					continue
+				}
+				out[key] = vlanIDTaggingFinding{
+					iface: ifName, unit: unitInst.name, untaggedUnit: true,
+					dev: fmt.Sprintf("%s.%s", LinuxIfName(ifName), unitInst.name),
+				}
 				continue
 			}
 			// Authored device the dataplane writer creates: the
 			// linux name plus the tag value, e.g. ge-0-0-0.100.
 			dev := authoredVlanDevice(ifName, unitInst.node)
-			key := ifName + "\x00" + unitInst.name
 			finding, seen := out[key]
 			if !seen {
 				out[key] = vlanIDTaggingFinding{iface: ifName, unit: unitInst.name, stmts: stmts, dev: dev}
 				continue
+			}
+			if finding.untaggedUnit {
+				// The other node view carries the tag: the #14574
+				// finding is the precise one for the union.
+				finding.untaggedUnit = false
+				finding.dev = dev
 			}
 			finding.stmts = append(finding.stmts, stmts...)
 			out[key] = finding
@@ -209,7 +287,8 @@ func collectVlanIDTaggingFindingsForNode(tree *ConfigTree, nodeID int, out map[s
 	return true
 }
 
-// validateVlanIDTaggingAST is the #14574 gate. See file header.
+// validateVlanIDTaggingAST is the #14574 gate, extended by #15034 to
+// the untagged non-zero unit. See file header.
 func validateVlanIDTaggingAST(tree *ConfigTree, lenient bool) ([]string, error) {
 	findings := make(map[string]vlanIDTaggingFinding)
 	expandedAny := collectVlanIDTaggingFindingsForNode(tree, 0, findings)
