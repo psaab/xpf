@@ -8918,6 +8918,36 @@ malformed strict/lenient legs, and a tightening control that commits nine real
 AS-path regexes clean) and `pkg/frr/policy_aspath_regex_6686_test.go` (the
 multi-token regex renders whole; the unrenderable ones are omitted).
 
+### Junos AS-path patterns are TRANSLATED to FRR, never rendered verbatim (#15007)
+
+The validation above answers "can FRR compile this line"; it did not answer
+"does this line mean the same thing in FRR". Junos AS-path regular expressions
+match **whole AS numbers** under an implicit `^...$` anchor: `.` is any single
+AS number, a term is an AS number / `.` / `[...]` AS set / `(...)` group with
+`* + ? {m,n}` or `|` operators, `-` between AS numbers is a range, and `()`
+is the null (locally originated) path. FRR's `bgp as-path access-list` is an
+**unanchored character regex** over the space-separated path string. Rendering
+the Junos text verbatim therefore diverged on every row: `()` matched every
+path (the canonical anti-transit export policy — accept only `()`, reject
+else — leaked provider-learned routes to another eBGP peer), `65000` matched
+substrings (`165000`, `650001`), and `.* 65000 .*` was a character pattern,
+not a token pattern.
+
+`TranslateJunosASPathRegex` (`pkg/config/aspath_junos_translate.go`) parses
+the Junos grammar and emits the anchored FRR equivalent over whole AS tokens
+(`.* 65000 .*` → `^(([0-9]+( [0-9]+)*) )?65000( ([0-9]+( [0-9]+)*))?$`,
+`()` → `^$`, `65000` → `^65000$`). The renderer emits only the translation;
+the strict gate (`ValidJunosASPathRegex`) rejects anything outside the Junos
+grammar — character classes inside an AS number (`65[0-9]+`, `[0-9]+`),
+escapes, empty alternatives, invalid intervals, out-of-range AS numbers —
+with a diagnostic naming the Junos spelling (e.g. `[65000-65999]`). Tolerant
+load still warns and boots; the render belt omits an untranslatable list and
+its reject terms render deny-all, exactly as for #6686/#9881 omissions.
+Coverage: `pkg/config/aspath_translate_15007_test.go` (translation table +
+numeric-range brute-force oracle + commit gate) and
+`pkg/frr/policy_aspath_translate_15007_test.go` (exact rendered lines,
+rendered semantics, the anti-transit policy end to end).
+
 ### Repeated policy-statement blocks MERGE, not last-win (#5824)
 
 A single `policy-options policy-statement <name>` may be authored across MULTIPLE

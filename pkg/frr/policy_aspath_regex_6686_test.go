@@ -26,14 +26,16 @@ func aspathPO(t *testing.T, name, regex string) *config.PolicyOptionsConfig {
 }
 
 // TestASPathRender6686EmitsAMultiTokenRegex is the positive control: a
-// legitimate transit regex with spaces MUST still render, whole. FRR's
+// legitimate transit regex with spaces MUST still render, whole and
+// TRANSLATED (#15007): Junos "." is one AS token, the match is implicitly
+// anchored, so the FRR line carries ^...$ over [0-9]+ tokens. FRR's
 // `bgp as-path access-list` DEFUN ends in a variadic `LINE...` that
 // argv_concat rejoins with single spaces, which is what makes a multi-AS
 // pattern expressible at all — so the belt must not treat a space as
 // unrenderable.
 func TestASPathRender6686EmitsAMultiTokenRegex(t *testing.T) {
 	got := New().generatePolicyOptions(aspathPO(t, "AP1", `.* 65000 .*`))
-	if !strings.Contains(got, "bgp as-path access-list AP1 permit .* 65000 .*\n") {
+	if !strings.Contains(got, "bgp as-path access-list AP1 permit ^(([0-9]+( [0-9]+)*) )?65000( ([0-9]+( [0-9]+)*))?$\n") {
 		t.Fatalf("multi-token as-path regex not rendered whole:\n%s", got)
 	}
 }

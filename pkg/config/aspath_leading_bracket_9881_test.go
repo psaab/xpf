@@ -132,10 +132,10 @@ func TestLeadingBracketQuotedCommits_9881(t *testing.T) {
 		build func() *ConfigTree
 	}{
 		{"set flat", func() *ConfigTree {
-			return buildFlat9881(t, `set policy-options as-path AP1 "[0-9]+"`)
+			return buildFlat9881(t, `set policy-options as-path AP1 "[123-125]"`)
 		}},
 		{"hierarchical", func() *ConfigTree {
-			return buildHier9881(t, `policy-options { as-path AP1 "[0-9]+"; }`)
+			return buildHier9881(t, `policy-options { as-path AP1 "[123-125]"; }`)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -147,8 +147,8 @@ func TestLeadingBracketQuotedCommits_9881(t *testing.T) {
 			if ap == nil {
 				t.Fatalf("%s: no as-path compiled", tc.name)
 			}
-			if ap.Regex != `[0-9]+` {
-				t.Errorf("%s: compiled Regex=%q, want the authored %q", tc.name, ap.Regex, `[0-9]+`)
+			if ap.Regex != `[123-125]` {
+				t.Errorf("%s: compiled Regex=%q, want the authored %q", tc.name, ap.Regex, `[123-125]`)
 			}
 		})
 	}
@@ -159,8 +159,14 @@ func TestLeadingBracketQuotedCommits_9881(t *testing.T) {
 // on bracket provenance and why no validity tightening can close this.
 func TestMangledFormIsValidPOSIXPremise_9881(t *testing.T) {
 	if err := ValidASPathRegex("0-9 +"); err != nil {
-		t.Fatalf("premise broken: the mangled form is now invalid (%v) — the gate "+
-			"could key on validity and the provenance plumbing would be dead weight", err)
+		t.Fatalf("premise broken: the mangled form is no longer valid POSIX (%v)", err)
+	}
+	// #15007: the mangled form is now ALSO untranslatable as Junos (AS "0"),
+	// so the text gate rejects it too — but the provenance check still runs
+	// first, because its diagnostic (quote the regex) is the actionable one
+	// and a provenance-clean config must not be re-diagnosed by text.
+	if err := ValidJunosASPathRegex("0-9 +"); err == nil {
+		t.Fatalf("premise broken: the mangled form now translates as Junos")
 	}
 	if got := ASPathRegexFromTokens([]string{"0-9", "+"}); got != "0-9 +" {
 		t.Fatalf("ASPathRegexFromTokens([0-9 +]) = %q, want %q", got, "0-9 +")
@@ -173,9 +179,9 @@ func TestMangledFormIsValidPOSIXPremise_9881(t *testing.T) {
 // through the lenient-tolerant shape; this runs the STRICT verdict.
 func TestMidTokenAndMultitokenUnaffected_9881(t *testing.T) {
 	for _, tc := range []struct{ line, hier, want string }{
-		{`set policy-options as-path AP1 .*65000[0-9]*`,
-			`policy-options { as-path AP1 .*65000[0-9]*; }`,
-			`.*65000[0-9]*`},
+		{`set policy-options as-path AP1 65000 .*`,
+			`policy-options { as-path AP1 65000 .*; }`,
+			`65000 .*`},
 		{`set policy-options as-path AP1 .* 65000 .*`,
 			`policy-options { as-path AP1 .* 65000 .*; }`,
 			`.* 65000 .*`},
@@ -208,10 +214,10 @@ func TestQuotedInsideBracketsAccepted_9881(t *testing.T) {
 		build func() *ConfigTree
 	}{
 		{"set flat", func() *ConfigTree {
-			return buildFlat9881(t, `set policy-options as-path AP1 [ "[0-9]+" ]`)
+			return buildFlat9881(t, `set policy-options as-path AP1 [ "[123-125]" ]`)
 		}},
 		{"hierarchical", func() *ConfigTree {
-			return buildHier9881(t, `policy-options { as-path AP1 [ "[0-9]+" ]; }`)
+			return buildHier9881(t, `policy-options { as-path AP1 [ "[123-125]" ]; }`)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -219,8 +225,8 @@ func TestQuotedInsideBracketsAccepted_9881(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: strict commit rejected a QUOTED value in brackets: %v", tc.name, err)
 			}
-			if ap := cfg.PolicyOptions.ASPaths["AP1"]; ap == nil || ap.Regex != `[0-9]+` {
-				t.Fatalf("%s: compiled %+v, want Regex=%q", tc.name, ap, `[0-9]+`)
+			if ap := cfg.PolicyOptions.ASPaths["AP1"]; ap == nil || ap.Regex != `[123-125]` {
+				t.Fatalf("%s: compiled %+v, want Regex=%q", tc.name, ap, `[123-125]`)
 			}
 		})
 	}
@@ -242,19 +248,19 @@ func TestDuplicateSetLaterGroupingWins_9881(t *testing.T) {
 	}
 	t.Run("bare then bracketed rejects", func(t *testing.T) {
 		tree := &ConfigTree{}
-		set(tree, `set policy-options as-path AP1 0-9 +`)
+		set(tree, `set policy-options as-path AP1 65000`)
 		set(tree, `set policy-options as-path AP1 [0-9]+`)
 		strictRejects9881(t, "bare-then-bracketed", "AP1", tree)
 	})
 	t.Run("bracketed then bare commits", func(t *testing.T) {
 		tree := &ConfigTree{}
-		set(tree, `set policy-options as-path AP1 [0-9]+`)
-		set(tree, `set policy-options as-path AP1 0-9 +`)
+		set(tree, `set policy-options as-path AP1 [123-125]`)
+		set(tree, `set policy-options as-path AP1 65000 65001`)
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("a re-issued BARE line kept the stale bracket bit and was refused: %v", err)
 		}
-		if ap := cfg.PolicyOptions.ASPaths["AP1"]; ap == nil || ap.Regex != "0-9 +" {
+		if ap := cfg.PolicyOptions.ASPaths["AP1"]; ap == nil || ap.Regex != "65000 65001" {
 			t.Fatalf("compiled %+v, want the faithfully-joined bare Regex", ap)
 		}
 	})
@@ -287,9 +293,17 @@ func TestProvenancelessTailStillCompiles_9881(t *testing.T) {
 	}
 	for name, build := range builders {
 		t.Run(name, func(t *testing.T) {
-			cfg, err := CompileConfig(build())
+			// #15007: the TEXT "0-9 +" is untranslatable Junos, so strict
+			// commit rejects it on text grounds (naming AP1) — what this
+			// cell still pins is that the PROVENANCE gate does not fire:
+			// the error must not be the bracket diagnostic, and the
+			// tolerant path still boots with the regex intact.
+			if _, err := CompileConfig(build()); err == nil || strings.Contains(err.Error(), "UNQUOTED") {
+				t.Fatalf("%s: strict verdict = %v, want a non-provenance (text) rejection", name, err)
+			}
+			cfg, err := CompileConfigLenient(build())
 			if err != nil {
-				t.Fatalf("%s: strict commit refused a provenance-less tail: %v", name, err)
+				t.Fatalf("%s: tolerant load refused a provenance-less tail: %v", name, err)
 			}
 			if ap := cfg.PolicyOptions.ASPaths["AP1"]; ap == nil || ap.Regex != "0-9 +" {
 				t.Fatalf("%s: compiled %+v, want Regex=%q", name, ap, "0-9 +")
@@ -674,12 +688,12 @@ func TestTokenlessBracketsRejectAtCommit_9881(t *testing.T) {
 // the quotes delimit complete text and the empty brackets carry none — so
 // the quoted-defeats-bracketed carve-out extends to the trailing taint.
 func TestQuotedValueWithTrailingDebrisAccepted_9881(t *testing.T) {
-	tree := buildHier9881(t, `policy-options { as-path AP1 "x" []; }`)
+	tree := buildHier9881(t, `policy-options { as-path AP1 "65000" []; }`)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("a QUOTED value with trailing debris was refused: %v", err)
 	}
-	if ap := cfg.PolicyOptions.ASPaths["AP1"]; ap == nil || ap.Regex != "x" {
-		t.Fatalf("compiled %+v, want Regex=%q", ap, "x")
+	if ap := cfg.PolicyOptions.ASPaths["AP1"]; ap == nil || ap.Regex != "65000" {
+		t.Fatalf("compiled %+v, want Regex=%q", ap, "65000")
 	}
 }

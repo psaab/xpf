@@ -84,7 +84,7 @@ func ValidateISISNET(raw string, _ *Config) error {
 // ValidateASPathNameArg validates `policy-options as-path <name> <regex>` by
 // position: the name (arg 0) is rendered as an FRR access-list name and must be
 // one token. The regex (arg 1) is a rest-of-line operand FRR accepts with
-// spaces, and ValidASPathRegex already gates it, so it is not re-checked here.
+// spaces, and the Junos translation gate already covers it, so it is not re-checked here.
 func ValidateASPathNameArg(argIdx int, raw string, cfg *Config) error {
 	if argIdx == 0 {
 		return ValidateFRRObjectName(raw, cfg)

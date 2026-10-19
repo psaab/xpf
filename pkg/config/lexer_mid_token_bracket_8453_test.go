@@ -116,7 +116,7 @@ func TestASPathRegexSurvivesToTheCompiledConfig_8453(t *testing.T) {
 		if err := tree.SetPathQuoted(path, quoted); err != nil {
 			t.Fatalf("SetPathQuoted %q: %v", in, err)
 		}
-		cfg, err := CompileConfig(tree)
+		cfg, err := CompileConfigLenient(tree)
 		if err != nil {
 			t.Fatalf("compile %q: %v", in, err)
 		}
@@ -143,7 +143,7 @@ func TestCommunityMemberIsNotSplitByBrackets_8453(t *testing.T) {
 	if err := tree.SetPathQuoted(path, quoted); err != nil {
 		t.Fatalf("SetPathQuoted: %v", err)
 	}
-	cfg, err := CompileConfig(tree)
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestBracketedMembersListStillCompilesToTwoMembers_8453(t *testing.T) {
 	if err := tree.SetPathQuoted(path, quoted); err != nil {
 		t.Fatalf("SetPathQuoted: %v", err)
 	}
-	cfg, err := CompileConfig(tree)
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestMidTokenBracketsSurviveTheLoadMergePath_8453(t *testing.T) {
 		if err := tree.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
 			t.Fatalf("SetPathQuotedGrouped %q: %v", tc.in, err)
 		}
-		cfg, err := CompileConfig(tree)
+		cfg, err := CompileConfigLenient(tree)
 		if err != nil {
 			t.Fatalf("compile %q: %v", tc.in, err)
 		}

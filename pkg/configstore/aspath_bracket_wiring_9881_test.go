@@ -51,15 +51,15 @@ func TestSetFromInput9881QuotedTwinCommits(t *testing.T) {
 	if err := s.EnterConfigure(); err != nil {
 		t.Fatalf("EnterConfigure: %v", err)
 	}
-	if err := s.SetFromInput(`policy-options as-path AP1 "[0-9]+"`); err != nil {
+	if err := s.SetFromInput(`policy-options as-path AP1 "[123-125]"`); err != nil {
 		t.Fatalf("SetFromInput: %v", err)
 	}
 	cfg, err := config.CompileConfig(s.candidate)
 	if err != nil {
 		t.Fatalf("SetFromInput: strict commit rejected the QUOTED regex: %v", err)
 	}
-	if ap := cfg.PolicyOptions.ASPaths["AP1"]; ap == nil || ap.Regex != `[0-9]+` {
-		t.Fatalf("SetFromInput: compiled %+v, want Regex=%q", ap, `[0-9]+`)
+	if ap := cfg.PolicyOptions.ASPaths["AP1"]; ap == nil || ap.Regex != `[123-125]` {
+		t.Fatalf("SetFromInput: compiled %+v, want Regex=%q", ap, `[123-125]`)
 	}
 }
 
@@ -190,7 +190,7 @@ func TestInteractiveSetBareLinesCarryNoBracketProvenance_9881(t *testing.T) {
 	for _, line := range []string{
 		`system host-name fw1`,
 		`policy-options as-path AP1 .* 65000 .*`,
-		`policy-options as-path AP2 "[0-9]+"`,
+		`policy-options as-path AP2 "[123-125]"`,
 	} {
 		if err := s.SetFromInput(line); err != nil {
 			t.Fatalf("SetFromInput(%q): %v", line, err)

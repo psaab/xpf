@@ -3679,8 +3679,9 @@ func TestGeneratePolicyOptionsCommunityListAndMetricType(t *testing.T) {
 	got := m.generatePolicyOptions(po)
 
 	checks := []string{
-		"bgp community-list standard MY-COMM permit 65000:100",
-		"bgp community-list standard MY-COMM permit 65000:200",
+		// #15008: multi-member renders ONE conjunctive permit entry
+		// (all members must match), not one OR line per member.
+		"bgp community-list standard MY-COMM permit 65000:100 65000:200",
 		"route-map OSPF-EXPORT permit 10",
 		"match source-protocol connected",
 		"match community MY-COMM",
@@ -3704,6 +3705,9 @@ func TestGeneratePolicyOptionsCommunityListAndMetricType(t *testing.T) {
 // frr-reload). A literal-only definition stays `standard`, and a MIXED
 // definition (any regex member) renders the WHOLE list as `expanded`
 // because FRR forbids the same name being both standard and expanded.
+// #15008: a multi-member definition renders ONE conjunctive entry
+// under its name (see policy_community_multi_15008_test.go); the
+// per-member lines below live on its generated delete backing.
 func TestGeneratePolicyOptionsCommunityExpandedVsStandard(t *testing.T) {
 	m := &Manager{frrConf: "/dev/null"}
 	po := &config.PolicyOptionsConfig{
@@ -3737,16 +3741,17 @@ func TestGeneratePolicyOptionsCommunityExpandedVsStandard(t *testing.T) {
 	got := m.generatePolicyOptions(po)
 
 	wantLines := []string{
-		// Literal-only definition keeps standard.
-		"bgp community-list standard LIT-ONLY permit 65000:100",
-		"bgp community-list standard LIT-ONLY permit no-export",
+		// Literal-only definition keeps standard — as ONE conjunctive
+		// entry under its name (#15008), with per-member lines only on
+		// the generated delete backing.
+		"bgp community-list standard LIT-ONLY permit 65000:100 no-export",
 		// Wildcard member renders the member as-is into an expanded list.
 		"bgp community-list expanded WILD permit 65000:*",
-		// Mixed definition: BOTH members go into the expanded list — the
-		// literal member must NOT regress to a standard line, since the
-		// same list name cannot be both kinds in FRR.
-		"bgp community-list expanded MIXED permit 65000:100",
-		"bgp community-list expanded MIXED permit 65001:.*",
+		// Mixed definition: the conjunction goes into the expanded list
+		// under the name — the literal member must NOT regress to a
+		// standard line, since the same list name cannot be both kinds
+		// in FRR. Both members survive inside the conjunction.
+		"bgp community-list expanded MIXED permit (?=.*(^| )65000:100( |$)).*(?=.*65001:.*).*",
 		// Brace-bound member must render expanded, not standard.
 		"bgp community-list expanded BOUND permit 65000:1{2,3}",
 	}
@@ -3764,14 +3769,16 @@ func TestGeneratePolicyOptionsCommunityExpandedVsStandard(t *testing.T) {
 		if !strings.HasPrefix(line, "bgp community-list standard ") {
 			continue
 		}
-		// fields: bgp community-list standard <name> permit <member>
+		// fields: bgp community-list standard <name> permit <member...>
+		// (#15008 joins a multi-member AND value on one line).
 		fields := strings.Fields(line)
-		if len(fields) != 6 {
+		if len(fields) < 6 {
 			t.Fatalf("unexpected standard community-list line shape: %q", line)
 		}
-		member := fields[5]
-		if strings.ContainsAny(member, communityRegexChars) {
-			t.Errorf("FRR-invalid: regex member %q on a standard community-list line: %q", member, line)
+		for _, member := range fields[5:] {
+			if strings.ContainsAny(member, communityRegexChars) {
+				t.Errorf("FRR-invalid: regex member %q on a standard community-list line: %q", member, line)
+			}
 		}
 	}
 	if strings.Contains(got, "bgp community-list standard MIXED ") {
@@ -3826,7 +3833,7 @@ func TestGeneratePolicyOptionsASPath(t *testing.T) {
 	po := &config.PolicyOptionsConfig{
 		ASPaths: map[string]*config.ASPathDef{
 			"AS65000": {Name: "AS65000", Regex: "65000"},
-			"TRANSIT": {Name: "TRANSIT", Regex: "65[0-9]+"},
+			"TRANSIT": {Name: "TRANSIT", Regex: "[65000-65999]"},
 		},
 		PolicyStatements: map[string]*config.PolicyStatement{
 			"FILTER-AS": {
@@ -3846,8 +3853,8 @@ func TestGeneratePolicyOptionsASPath(t *testing.T) {
 	got := m.generatePolicyOptions(po)
 
 	checks := []string{
-		"bgp as-path access-list AS65000 permit 65000",
-		"bgp as-path access-list TRANSIT permit 65[0-9]+",
+		"bgp as-path access-list AS65000 permit ^65000$",
+		"bgp as-path access-list TRANSIT permit ^65[0-9][0-9]{2}$",
 		"route-map FILTER-AS permit 10",
 		"match as-path AS65000",
 		"route-map FILTER-AS deny 20",

@@ -285,7 +285,7 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 	// commit-check (hard reject naming the as-path and the line that would be
 	// rendered); lenient on load / peer-sync (warn so an already-persisted or
 	// peer-synced config still boots — #1960; the render path carries the
-	// ValidASPathRegex belt that keeps the unrenderable definition out of
+	// translation belt that keeps the untranslatable definition out of
 	// frr.conf on that path). Runs on the fully-compiled *Config so the
 	// as-path map is populated regardless of authoring order. Mirrors
 	// validatePolicyCommunityReferencesStrict.

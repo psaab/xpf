@@ -54,10 +54,12 @@ func TestGeneratePolicyOptions_InjectionSanitized_4097(t *testing.T) {
 		}
 	}
 
-	// The injected content survives, but collapsed onto the single permit line.
-	wantASPathEvil := "bgp as-path access-list evil permit ^1$  router bgp 65000  neighbor 6.6.6.6 remote-as 65000\n"
-	if !strings.Contains(got, wantASPathEvil) {
-		t.Errorf("as-path regex not sanitized onto one line; want %q in:\n%s", wantASPathEvil, got)
+	// #15007: the injected as-path text is not a translatable Junos
+	// AS-path regex (control characters collapsed by the AST layer leave
+	// non-AS tokens), so its definition is omitted entirely — strictly
+	// stronger than collapsing it onto one line.
+	if strings.Contains(got, "bgp as-path access-list evil") {
+		t.Errorf("an untranslatable injected as-path regex must omit its definition, got:\n%s", got)
 	}
 	// #9490: a community member that is not an FRR community literal now OMITS
 	// its definition at render, through the shared ValidCommunityMember
@@ -71,7 +73,7 @@ func TestGeneratePolicyOptions_InjectionSanitized_4097(t *testing.T) {
 	}
 
 	// The normal values render unchanged — a legitimate space is preserved.
-	if !strings.Contains(got, "bgp as-path access-list ok permit ^65001 65002$\n") {
+	if !strings.Contains(got, "bgp as-path access-list ok permit ^65001 65002$\n") { // translated Junos == same anchored text
 		t.Errorf("normal as-path regex altered:\n%s", got)
 	}
 	if !strings.Contains(got, "bgp community-list standard okc permit 65000:100\n") {

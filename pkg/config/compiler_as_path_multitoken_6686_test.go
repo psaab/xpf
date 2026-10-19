@@ -224,7 +224,7 @@ func TestASPath6686RealRegexesStillCommitClean(t *testing.T) {
 		`^65000 65001$`,    // an exact two-AS path (multi-token by nature)
 		`(65000|65001)`,    // alternation
 		`65000{1,3}`,       // POSIX ERE bound
-		`^65000 [0-9]+$`,   // character class
+		`[65000-65999]`,    // AS set with a range — one AS in 65000..65999
 		`.*`,               // an INTENTIONAL match-everything
 		`^$`,               // locally originated (empty AS path)
 		`^65000 .* 65010$`, // origin + transit

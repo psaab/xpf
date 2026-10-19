@@ -2849,7 +2849,7 @@ type compileOpts struct {
 	// as-path and the line that would be rendered); the tolerant load /
 	// peer-sync paths downgrade to a warning so an already-persisted or
 	// peer-synced config still BOOTS (#1960 fail-closed-on-load class), with
-	// pkg/frr's ValidASPathRegex belt keeping the unrenderable definition out
+	// pkg/frr's translation belt keeping the untranslatable definition out
 	// of frr.conf on that path so the reload survives. Runs on the
 	// fully-compiled *Config so the as-path map is populated regardless of
 	// authoring order. Same doctrine as lenientPolicyCommunityRef.
