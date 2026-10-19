@@ -615,6 +615,12 @@ system {
 	}
 }
 
+// #15260: the reverse binding is on reth1 unit 0 (the LAN RETH), not
+// the dash-form ge-0-0-1 member name — the latter collides with the
+// lab base's ge-0/0/1 RETH member under the #5832 gate when compiled
+// base+overlay, which the base+overlay guard in pkg/configstore
+// (TestA92Overlay*) exercises. This empty-tree guard pins the
+// fixture's internal wiring; it is NOT the commit guard.
 func TestCoSIperfSymmetricFixtureCompilesReverseSourcePortOutputFilter(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "test", "incus", "cos-iperf-symmetric.set"))
 	if err != nil {
@@ -647,15 +653,15 @@ func TestCoSIperfSymmetricFixtureCompilesReverseSourcePortOutputFilter(t *testin
 		t.Fatalf("reth0.80 scheduler-map = %q, want bandwidth-limit", got)
 	}
 
-	geCos := cfg.ClassOfService.Interfaces["ge-0-0-1"].Units[0]
-	if geCos == nil {
-		t.Fatal("expected reverse CoS shaper on ge-0-0-1 unit 0")
+	revCos := cfg.ClassOfService.Interfaces["reth1"].Units[0]
+	if revCos == nil {
+		t.Fatal("expected reverse CoS shaper on reth1 unit 0")
 	}
-	if got := geCos.ShapingRateBytes; got != parseBandwidthLimit("25g") {
-		t.Fatalf("ge-0-0-1.0 shaping-rate = %d, want %d", got, parseBandwidthLimit("25g"))
+	if got := revCos.ShapingRateBytes; got != parseBandwidthLimit("25g") {
+		t.Fatalf("reth1.0 shaping-rate = %d, want %d", got, parseBandwidthLimit("25g"))
 	}
-	if got := geCos.SchedulerMap; got != "bandwidth-limit" {
-		t.Fatalf("ge-0-0-1.0 scheduler-map = %q, want bandwidth-limit", got)
+	if got := revCos.SchedulerMap; got != "bandwidth-limit" {
+		t.Fatalf("reth1.0 scheduler-map = %q, want bandwidth-limit", got)
 	}
 
 	fwdUnit := cfg.Interfaces.Interfaces["reth0"].Units[80]
@@ -669,15 +675,15 @@ func TestCoSIperfSymmetricFixtureCompilesReverseSourcePortOutputFilter(t *testin
 		t.Fatalf("reth0.80 inet6 output filter = %q, want bandwidth-output", got)
 	}
 
-	revUnit := cfg.Interfaces.Interfaces["ge-0-0-1"].Units[0]
+	revUnit := cfg.Interfaces.Interfaces["reth1"].Units[0]
 	if revUnit == nil {
-		t.Fatal("expected ge-0-0-1 unit 0 interface config")
+		t.Fatal("expected reth1 unit 0 interface config")
 	}
 	if got := revUnit.FilterOutputV4; got != "bandwidth-output-reverse" {
-		t.Fatalf("ge-0-0-1.0 inet output filter = %q, want bandwidth-output-reverse", got)
+		t.Fatalf("reth1.0 inet output filter = %q, want bandwidth-output-reverse", got)
 	}
 	if got := revUnit.FilterOutputV6; got != "bandwidth-output-reverse" {
-		t.Fatalf("ge-0-0-1.0 inet6 output filter = %q, want bandwidth-output-reverse", got)
+		t.Fatalf("reth1.0 inet6 output filter = %q, want bandwidth-output-reverse", got)
 	}
 
 	revFilter := cfg.Firewall.FiltersInet["bandwidth-output-reverse"]

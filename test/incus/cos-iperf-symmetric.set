@@ -2,8 +2,12 @@
 #
 # Forward iperf and TCP echo traffic exits reth0.80 and matches
 # destination-port 5200..5211 and 6200..6211. Reverse iperf3 -R
-# and echo replies exit ge-0-0-1 with source-port 5200..5211 /
-# 6200..6211, so the reverse output filter matches source-port.
+# and echo replies exit reth1 unit 0 (the LAN RETH; its member is
+# ge-0/0/1 on node0 / ge-7/0/1 on node1) with source-port
+# 5200..5211 / 6200..6211, so the reverse output filter matches
+# source-port. Binding the reverse shaper/filter to the dash-form
+# ge-0-0-1 instead would collide with the base's ge-0/0/1 RETH
+# member under the #5832 Linux-name gate (#15260).
 
 delete class-of-service
 delete firewall family inet filter bandwidth-output
@@ -11,9 +15,9 @@ delete interfaces reth0 unit 80 family inet filter output
 delete firewall family inet6 filter bandwidth-output
 delete interfaces reth0 unit 80 family inet6 filter output
 delete firewall family inet filter bandwidth-output-reverse
-delete interfaces ge-0-0-1 unit 0 family inet filter output
+delete interfaces reth1 unit 0 family inet filter output
 delete firewall family inet6 filter bandwidth-output-reverse
-delete interfaces ge-0-0-1 unit 0 family inet6 filter output
+delete interfaces reth1 unit 0 family inet6 filter output
 
 set class-of-service forwarding-classes queue 0 best-effort
 set class-of-service forwarding-classes queue 1 iperf-100m
@@ -79,8 +83,8 @@ set class-of-service scheduler-maps bandwidth-limit forwarding-class iperf-uncap
 
 set class-of-service interfaces reth0 unit 80 scheduler-map bandwidth-limit
 set class-of-service interfaces reth0 unit 80 shaping-rate 25g
-set class-of-service interfaces ge-0-0-1 unit 0 scheduler-map bandwidth-limit
-set class-of-service interfaces ge-0-0-1 unit 0 shaping-rate 25g
+set class-of-service interfaces reth1 unit 0 scheduler-map bandwidth-limit
+set class-of-service interfaces reth1 unit 0 shaping-rate 25g
 
 set firewall family inet filter bandwidth-output term 0 from destination-port 5200
 set firewall family inet filter bandwidth-output term 0 from destination-port 6200
@@ -302,7 +306,7 @@ set firewall family inet filter bandwidth-output-reverse term 11 then forwarding
 set firewall family inet filter bandwidth-output-reverse term 11 then count iperf-uncapped-reverse
 set firewall family inet filter bandwidth-output-reverse term 11 then accept
 
-set interfaces ge-0-0-1 unit 0 family inet filter output bandwidth-output-reverse
+set interfaces reth1 unit 0 family inet filter output bandwidth-output-reverse
 
 set firewall family inet6 filter bandwidth-output-reverse term 0 from source-port 5200
 set firewall family inet6 filter bandwidth-output-reverse term 0 from source-port 6200
@@ -376,4 +380,4 @@ set firewall family inet6 filter bandwidth-output-reverse term 11 then forwardin
 set firewall family inet6 filter bandwidth-output-reverse term 11 then count iperf-uncapped-reverse
 set firewall family inet6 filter bandwidth-output-reverse term 11 then accept
 
-set interfaces ge-0-0-1 unit 0 family inet6 filter output bandwidth-output-reverse
+set interfaces reth1 unit 0 family inet6 filter output bandwidth-output-reverse

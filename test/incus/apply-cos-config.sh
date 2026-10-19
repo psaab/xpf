@@ -69,7 +69,8 @@ fi
 # default 520x/620x map and also preserves the legacy destination-port
 # 7 -> iperf-1g same-class echo override. #1250: --symmetric selects
 # cos-iperf-symmetric.set, which also shapes reverse iperf3 -R and
-# echo replies on ge-0-0-1 using source-port terms. Flags must be
+# echo replies on reth1 unit 0 using source-port terms (#15260:
+# reth1, not the dash-form ge-0-0-1 member name). Flags must be
 # parsed BEFORE the positional TARGET argument so they are not silently
 # treated as hostnames.
 SAME_CLASS=0
@@ -236,8 +237,10 @@ delete interfaces reth0 unit 80 family inet filter output
 delete firewall family inet6 filter bandwidth-output
 delete interfaces reth0 unit 80 family inet6 filter output
 delete firewall family inet filter bandwidth-output-reverse
-delete interfaces ge-0-0-1 unit 0 family inet filter output
+delete interfaces reth1 unit 0 family inet filter output
 delete firewall family inet6 filter bandwidth-output-reverse
+delete interfaces reth1 unit 0 family inet6 filter output
+delete interfaces ge-0-0-1 unit 0 family inet filter output
 delete interfaces ge-0-0-1 unit 0 family inet6 filter output
 load merge ${REMOTE_SETS}
 commit check
@@ -278,8 +281,10 @@ delete interfaces reth0 unit 80 family inet filter output
 delete firewall family inet6 filter bandwidth-output
 delete interfaces reth0 unit 80 family inet6 filter output
 delete firewall family inet filter bandwidth-output-reverse
-delete interfaces ge-0-0-1 unit 0 family inet filter output
+delete interfaces reth1 unit 0 family inet filter output
 delete firewall family inet6 filter bandwidth-output-reverse
+delete interfaces reth1 unit 0 family inet6 filter output
+delete interfaces ge-0-0-1 unit 0 family inet filter output
 delete interfaces ge-0-0-1 unit 0 family inet6 filter output
 load merge ${REMOTE_SETS}
 commit
