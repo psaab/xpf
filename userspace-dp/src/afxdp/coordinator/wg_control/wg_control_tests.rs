@@ -29,6 +29,31 @@ fn canonicalize_endpoint_passthrough() {
     assert_eq!(canonicalize_endpoint(nat64), nat64);
 }
 
+/// #15101 acceptance: an A-only answer adopted on the dual-stack socket must
+/// be DELIVERABLE through `wg_send_to` — adoption without delivery would
+/// just move the silent no-initiate from the resolver to the send path.
+/// The receiver binds a V4 loopback socket; the sender is the production
+/// `bind_wg_socket` dual-stack socket, and the target is the canonical V4
+/// form the resolver now stores. Skips (like the mapped-send test above)
+/// on hosts where the dual-stack bind falls back to v4.
+#[test]
+fn wg_send_to_delivers_resolved_v4_on_dual_stack_socket_15101() {
+    let rx = UdpSocket::bind("127.0.0.1:0").expect("bind v4 rx");
+    let rx_port = rx.local_addr().unwrap().port();
+    let (tx, tx_is_v6) = bind_wg_socket(0).expect("bind tx");
+    if !tx_is_v6 {
+        return;
+    }
+    let target: SocketAddr = format!("127.0.0.1:{rx_port}").parse().unwrap();
+    assert!(!target.is_ipv6(), "the resolver stores the canonical V4 form");
+    wg_send_to(&tx, tx_is_v6, b"wg-15101", target, None)
+        .expect("dual-stack send to the resolved A record must succeed");
+    rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let mut buf = [0u8; 16];
+    let (n, _) = rx.recv_from(&mut buf).expect("datagram must arrive");
+    assert_eq!(&buf[..n], b"wg-15101");
+}
+
 /// #1736 S2b regression (strace-proven live): a v4 target on the
 /// dual-stack AF_INET6 socket must be sent as its V4-MAPPED form —
 /// Linux returns EINVAL for an AF_INET destination sockaddr on an

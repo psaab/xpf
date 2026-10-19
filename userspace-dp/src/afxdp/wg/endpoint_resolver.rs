@@ -43,14 +43,25 @@
 //! tunnel would be in anyway, it self-corrects on the next successful lookup,
 //! and it is visible in the counters below rather than silent.
 //!
+//! ## Which families a socket can send to (#15101)
+//!
+//! `socket_is_v6 == true` is the DUAL-STACK socket: `bind_wg_socket` cleared
+//! `IPV6_V6ONLY` before bind, and `wg_send_to` maps an IPv4 target to its
+//! v4-mapped form, so that socket sends to BOTH families and the resolver
+//! accepts A and AAAA answers alike. `socket_is_v6 == false` is the
+//! v4-fallback socket (the v6 bind failed); it cannot send to IPv6 at all,
+//! so only A answers are usable there. Within the usable set the resolver
+//! prefers the family of the interface's literal endpoints when it has any
+//! (the operator pinned the outer family at commit), otherwise AAAA then A.
+//!
 //! ## Visibility
 //!
 //! An operator whose tunnel is down because DNS is broken must be able to see
 //! that from the box rather than infer it. Every outcome is counted
 //! ([`WgEndpointResolverCounters`]) and the most recent failure text is
-//! retained, including the family-mismatch case — a name that resolves only to
-//! the family the interface socket cannot send from is a configuration error
-//! that would otherwise present as a peer that simply never initiates.
+//! retained, including the family-mismatch case — on the v4-fallback socket
+//! a name that resolves only to AAAA is a configuration error that would
+//! otherwise present as a peer that simply never initiates.
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -117,9 +128,11 @@ pub(crate) struct WgEndpointResolverCounters {
     pub(crate) resolve_ok: AtomicU64,
     /// Lookups that returned an error or no addresses at all.
     pub(crate) resolve_fail: AtomicU64,
-    /// Lookups that SUCCEEDED but yielded no address of the interface socket's
-    /// family. Counted separately from `resolve_fail` because the operator
-    /// action differs: the name works and the record is wrong (or the tunnel is
+    /// Lookups that SUCCEEDED but yielded no address the interface socket
+    /// can send to. Only the v4-fallback socket can produce this (an
+    /// AAAA-only answer); the dual-stack socket accepts both families.
+    /// Counted separately from `resolve_fail` because the operator action
+    /// differs: the name works and the record is wrong (or the tunnel is
     /// bound to the wrong family), rather than the resolver being unreachable.
     pub(crate) family_mismatch: AtomicU64,
     /// Times a lookup produced an address DIFFERENT from the one held — the
@@ -147,6 +160,14 @@ pub(crate) struct WgEndpointResolver {
 impl WgEndpointResolver {
     /// Start resolving `targets` (peer pubkey -> authored `host:port`).
     ///
+    /// `socket_is_v6` distinguishes the dual-stack AF_INET6 socket (`true`,
+    /// sends to both families — see the module docs) from the v4-fallback
+    /// socket (`false`, IPv4 only). `preferred_v6` is the address family of
+    /// the interface's literal endpoints when it has any (`Some(true)` =
+    /// IPv6 literals, `Some(false)` = IPv4 literals, `None` = hostname-only
+    /// interface); it breaks the tie between A and AAAA answers on the
+    /// dual-stack socket.
+    ///
     /// Returns `None` when there is nothing to resolve, so a tunnel whose peers
     /// are all IP literals — every tunnel that existed before #7158 — starts no
     /// thread and is bit-identical to its previous behaviour.
@@ -154,6 +175,7 @@ impl WgEndpointResolver {
         tunnel_name: &str,
         targets: Vec<([u8; 32], String)>,
         socket_is_v6: bool,
+        preferred_v6: Option<bool>,
         telemetry: Arc<WgEndpointResolverTelemetry>,
     ) -> Option<Self> {
         if targets.is_empty() {
@@ -168,7 +190,7 @@ impl WgEndpointResolver {
         let name = format!("xpf-wg-dns-{tunnel_name}");
         let join = std::thread::Builder::new()
             .name(name)
-            .spawn(move || resolver_thread(thread_shared, targets, socket_is_v6))
+            .spawn(move || resolver_thread(thread_shared, targets, socket_is_v6, preferred_v6))
             .ok()?;
         Some(Self {
             shared,
@@ -240,10 +262,38 @@ fn resolve_once(
     shared: &ResolverShared,
     targets: &[([u8; 32], String)],
     socket_is_v6: bool,
+    preferred_v6: Option<bool>,
 ) -> usize {
-    resolve_once_with(shared, targets, socket_is_v6, |host_port| {
+    resolve_once_with(shared, targets, socket_is_v6, preferred_v6, |host_port| {
         host_port.to_socket_addrs().map(|a| a.collect::<Vec<_>>())
     })
+}
+
+/// Pick the answer the interface socket will actually send to (#15101).
+///
+/// The dual-stack socket (`socket_is_v6 == true`) sends to both families —
+/// `wg_send_to` maps an IPv4 target to its v4-mapped form — so every answer
+/// is usable; the tie is broken by `preferred_v6` (the family of the
+/// interface's literal endpoints) when known, else AAAA is preferred. The
+/// v4-fallback socket can only send to IPv4, so only A answers are usable
+/// and an AAAA-only answer yields `None` (the counted family mismatch).
+fn choose_endpoint(
+    addrs: Vec<SocketAddr>,
+    socket_is_v6: bool,
+    preferred_v6: Option<bool>,
+) -> Option<SocketAddr> {
+    if !socket_is_v6 {
+        return addrs.into_iter().find(|a| a.is_ipv4());
+    }
+    let want_v6 = preferred_v6.unwrap_or(true);
+    let mut fallback = None;
+    for addr in addrs {
+        if addr.is_ipv6() == want_v6 {
+            return Some(addr);
+        }
+        fallback.get_or_insert(addr);
+    }
+    fallback
 }
 
 /// Outcomes are applied as lookups complete. Per-peer last-good addresses and
@@ -254,14 +304,16 @@ fn apply_resolution(
     pubkey: &[u8; 32],
     host_port: &str,
     socket_is_v6: bool,
+    preferred_v6: Option<bool>,
     outcome: std::io::Result<Vec<SocketAddr>>,
 ) -> bool {
     match outcome {
         Ok(addrs) => {
-            // Keep only the family the interface's single UDP socket can
-            // send from. A dual-stack name on a v4 socket must yield its A
-            // record, not whichever answer happened to sort first.
-            let chosen = addrs.into_iter().find(|a| a.is_ipv6() == socket_is_v6);
+            // Keep only what the interface's single UDP socket can send
+            // to. The dual-stack socket takes either family (see
+            // `choose_endpoint`); only the v4-fallback socket discards
+            // answers, and only AAAA ones.
+            let chosen = choose_endpoint(addrs, socket_is_v6, preferred_v6);
             match chosen {
                 Some(addr) => {
                     shared
@@ -289,10 +341,8 @@ fn apply_resolution(
                     set_last_error(
                         shared,
                         format!(
-                            "{host_port} resolved, but to no {} address; \
-                             this WireGuard interface binds one {} UDP socket",
-                            if socket_is_v6 { "IPv6" } else { "IPv4" },
-                            if socket_is_v6 { "IPv6" } else { "IPv4" },
+                            "{host_port} resolved, but to no IPv4 address; \
+                             this WireGuard interface binds one IPv4 UDP socket"
                         ),
                     );
                 }
@@ -322,6 +372,7 @@ fn resolve_once_with<F>(
     shared: &ResolverShared,
     targets: &[([u8; 32], String)],
     socket_is_v6: bool,
+    preferred_v6: Option<bool>,
     lookup: F,
 ) -> usize
 where
@@ -337,7 +388,7 @@ where
             if shared.stop.load(Ordering::Relaxed) {
                 break;
             }
-            if apply_resolution(shared, pubkey, host_port, socket_is_v6, outcome) {
+            if apply_resolution(shared, pubkey, host_port, socket_is_v6, preferred_v6, outcome) {
                 held += 1;
             }
         }
@@ -390,7 +441,7 @@ where
                 break;
             }
             let (pubkey, host_port) = &targets[index];
-            if apply_resolution(shared, pubkey, host_port, socket_is_v6, outcome) {
+            if apply_resolution(shared, pubkey, host_port, socket_is_v6, preferred_v6, outcome) {
                 held += 1;
             }
         }
@@ -413,9 +464,10 @@ fn resolver_thread(
     shared: Arc<ResolverShared>,
     targets: Vec<([u8; 32], String)>,
     socket_is_v6: bool,
+    preferred_v6: Option<bool>,
 ) {
     while !shared.stop.load(Ordering::Relaxed) {
-        let held = resolve_once(&shared, &targets, socket_is_v6);
+        let held = resolve_once(&shared, &targets, socket_is_v6, preferred_v6);
         // Fast cadence while any peer still has no address at all: that
         // interval is tunnel downtime, not staleness.
         let wait_secs = if held < targets.len() {

@@ -1,4 +1,4 @@
-//! #7158 and #13666 endpoint-resolver tests.
+//! #7158, #13666 and #15101 endpoint-resolver tests.
 //!
 //! Existing resolution fixtures use IP literals or syntactically invalid
 //! targets, so they do not depend on DNS, `/etc/hosts`, or external network.
@@ -38,7 +38,7 @@ fn a_failed_lookup_retains_the_last_good_endpoint_7158() {
 
     // Pass 1: resolves.
     let good = vec![(PK_A, "203.0.113.7:51820".to_string())];
-    assert_eq!(resolve_once(&sh, &good, false), 1);
+    assert_eq!(resolve_once(&sh, &good, false, None), 1);
     let first = sh.resolved.lock().unwrap().get(&PK_A).copied();
     assert_eq!(
         first,
@@ -49,7 +49,7 @@ fn a_failed_lookup_retains_the_last_good_endpoint_7158() {
     // Pass 2: the SAME peer, now unresolvable.
     let bad = vec![(PK_A, UNRESOLVABLE.to_string())];
     assert_eq!(
-        resolve_once(&sh, &bad, false),
+        resolve_once(&sh, &bad, false, None),
         1,
         "the peer still HOLDS an address after a failed lookup, so it is not \
          counted as awaiting one — a peer with a stale address must not put \
@@ -75,30 +75,70 @@ fn a_failed_lookup_retains_the_last_good_endpoint_7158() {
     );
 }
 
-/// #7158: only addresses of the interface socket's family may be adopted, and a
-/// name that resolves to the wrong family is a COUNTED, named condition rather
-/// than a peer that silently never initiates.
+/// #15101 (was #7158's premise): a dual-stack (`socket_is_v6 == true`) socket
+/// can send to EITHER family — `wg_send_to` maps an IPv4 target to its
+/// v4-mapped form — so the resolver must ADOPT an A-only answer on it. The
+/// pre-#15101 filter required `is_ipv6() == socket_is_v6` and dropped every
+/// A record on the (normal) dual-stack socket, so an IPv4-only DDNS peer
+/// could never be initiated to. Only the v4-fallback socket
+/// (`socket_is_v6 == false`) rejects the family it cannot send: AAAA.
 ///
 /// This is what replaces the commit-time family gate for hostnames: the family
 /// is unknowable at commit, so it is enforced here, where it is known.
+///
+/// FAIL-ON-REVERT: restore `find(|a| a.is_ipv6() == socket_is_v6)` and the
+/// dual-stack A-only assertions below go RED (held == 0, empty map,
+/// family_mismatch == 1).
 #[test]
 fn only_addresses_of_the_socket_family_are_adopted_7158() {
-    // A v4-only target against a v6 socket.
+    // #15101 acceptance: an A-only answer on the dual-stack socket IS adopted
+    // as its canonical V4 form (the send path maps it; see
+    // `wg_send_to_maps_v4_target_on_v6_socket`).
     let sh = shared();
     let v4_target = vec![(PK_A, "203.0.113.7:51820".to_string())];
     assert_eq!(
-        resolve_once(&sh, &v4_target, true),
-        0,
-        "no address is held: the only answer is the wrong family"
+        resolve_once_with(&sh, &v4_target, true, None, |_| {
+            Ok(vec!["203.0.113.7:51820".parse().unwrap()])
+        }),
+        1,
+        "dual-stack socket must adopt the A record: it can send to IPv4 \
+         peers via the v4-mapped form"
     );
-    assert!(
-        sh.resolved.lock().unwrap().is_empty(),
-        "a v4 answer must not be adopted by a v6 socket — sending from it is \
-         impossible, so adopting it would present as a peer that initiates and \
-         never connects"
+    assert_eq!(
+        sh.resolved.lock().unwrap().get(&PK_A).copied(),
+        Some("203.0.113.7:51820".parse().unwrap()),
+        "the adopted address stays canonical V4 so MTU/overhead math and \
+         configured-endpoint comparisons see the real family"
     );
     assert_eq!(
         sh.telemetry
+            .counters
+            .family_mismatch
+            .load(Ordering::Relaxed),
+        0,
+        "an A answer on a dual-stack socket is usable, not a mismatch"
+    );
+    assert_eq!(
+        sh.telemetry.counters.resolve_fail.load(Ordering::Relaxed),
+        0
+    );
+
+    // The v4-fallback socket still rejects AAAA: it has no way to send to an
+    // IPv6 peer, so adopting it would present as a peer that initiates and
+    // never connects. The mismatch is COUNTED and named, not silent.
+    let sh4 = shared();
+    let v6_target = vec![(PK_A, "[2001:db8::7]:51820".to_string())];
+    assert_eq!(
+        resolve_once(&sh4, &v6_target, false, None),
+        0,
+        "no address is held: the v4-fallback socket cannot send to IPv6"
+    );
+    assert!(
+        sh4.resolved.lock().unwrap().is_empty(),
+        "an AAAA answer must not be adopted by the v4-fallback socket"
+    );
+    assert_eq!(
+        sh4.telemetry
             .counters
             .family_mismatch
             .load(Ordering::Relaxed),
@@ -107,21 +147,102 @@ fn only_addresses_of_the_socket_family_are_adopted_7158() {
          (or the tunnel's family) is wrong, which is a different operator action"
     );
     assert_eq!(
-        sh.telemetry.counters.resolve_fail.load(Ordering::Relaxed),
+        sh4.telemetry.counters.resolve_fail.load(Ordering::Relaxed),
         0,
         "a successful lookup of the wrong family is not a lookup failure"
     );
 
-    // Positive control: the same target on a v4 socket IS adopted, so the
+    // Positive control: the same v4 target on a v4 socket IS adopted, so the
     // emptiness above is the family filter and not a broken fixture.
-    let sh4 = shared();
-    assert_eq!(resolve_once(&sh4, &v4_target, false), 1);
+    let sh4b = shared();
+    assert_eq!(resolve_once(&sh4b, &v4_target, false, None), 1);
     assert_eq!(
-        sh4.resolved.lock().unwrap().get(&PK_A).copied(),
+        sh4b.resolved.lock().unwrap().get(&PK_A).copied(),
         Some("203.0.113.7:51820".parse().unwrap())
     );
     assert_eq!(
-        sh4.telemetry
+        sh4b.telemetry
+            .counters
+            .family_mismatch
+            .load(Ordering::Relaxed),
+        0
+    );
+}
+
+/// #15101: preference among a dual answer set. When the interface already
+/// carries literal endpoints their family wins (the operator pinned the
+/// outer family at commit — the Go mixed-literal gate guarantees they
+/// agree); with no literals, AAAA is preferred and A is the fallback.
+///
+/// FAIL-ON-REVERT: drop `preferred_v6` (always prefer AAAA) and the
+/// v4-pinned case goes RED; always prefer A and the other two go RED.
+#[test]
+fn dual_stack_answers_prefer_the_literal_family_then_aaaa_15101() {
+    let targets = vec![(PK_A, "dual.example:51820".to_string())];
+    // Lookup order is deliberately A-first: selection must not be
+    // "whichever answer happened to sort first".
+    let lookup = |_: &str| {
+        Ok(vec![
+            "203.0.113.7:51820".parse().unwrap(),
+            "[2001:db8::7]:51820".parse().unwrap(),
+        ])
+    };
+
+    // No literal endpoints on the interface: AAAA wins.
+    let sh = shared();
+    assert_eq!(resolve_once_with(&sh, &targets, true, None, lookup), 1);
+    assert_eq!(
+        sh.resolved.lock().unwrap().get(&PK_A).copied(),
+        Some("[2001:db8::7]:51820".parse().unwrap()),
+        "no literal pins the family: prefer AAAA"
+    );
+
+    // A v4 literal peer pins the outer family to IPv4.
+    let sh = shared();
+    assert_eq!(
+        resolve_once_with(&sh, &targets, true, Some(false), lookup),
+        1
+    );
+    assert_eq!(
+        sh.resolved.lock().unwrap().get(&PK_A).copied(),
+        Some("203.0.113.7:51820".parse().unwrap()),
+        "a v4 literal endpoint on the interface makes A win"
+    );
+
+    // A v6 literal peer pins the outer family to IPv6.
+    let sh = shared();
+    assert_eq!(
+        resolve_once_with(&sh, &targets, true, Some(true), lookup),
+        1
+    );
+    assert_eq!(
+        sh.resolved.lock().unwrap().get(&PK_A).copied(),
+        Some("[2001:db8::7]:51820".parse().unwrap()),
+        "a v6 literal endpoint on the interface makes AAAA win"
+    );
+}
+
+/// #15101: the v4-fallback socket keeps the pre-#15101 A-over-AAAA
+/// behaviour: from a dual answer set it takes the A record, and an
+/// AAAA-only answer is the counted family mismatch (covered above).
+#[test]
+fn v4_fallback_socket_still_prefers_a_15101() {
+    let sh = shared();
+    let targets = vec![(PK_A, "dual.example:51820".to_string())];
+    let held = resolve_once_with(&sh, &targets, false, None, |_| {
+        Ok(vec![
+            "[2001:db8::7]:51820".parse().unwrap(),
+            "203.0.113.7:51820".parse().unwrap(),
+        ])
+    });
+    assert_eq!(held, 1);
+    assert_eq!(
+        sh.resolved.lock().unwrap().get(&PK_A).copied(),
+        Some("203.0.113.7:51820".parse().unwrap()),
+        "the v4-fallback socket takes the A record from a dual answer"
+    );
+    assert_eq!(
+        sh.telemetry
             .counters
             .family_mismatch
             .load(Ordering::Relaxed),
@@ -138,9 +259,9 @@ fn only_addresses_of_the_socket_family_are_adopted_7158() {
 fn endpoint_changed_counts_changes_not_lookups_7158() {
     let sh = shared();
     let t1 = vec![(PK_A, "203.0.113.7:51820".to_string())];
-    resolve_once(&sh, &t1, false);
-    resolve_once(&sh, &t1, false);
-    resolve_once(&sh, &t1, false);
+    resolve_once(&sh, &t1, false, None);
+    resolve_once(&sh, &t1, false, None);
+    resolve_once(&sh, &t1, false, None);
     assert_eq!(
         sh.telemetry
             .counters
@@ -154,7 +275,7 @@ fn endpoint_changed_counts_changes_not_lookups_7158() {
 
     // The DDNS move.
     let t2 = vec![(PK_A, "198.51.100.9:51820".to_string())];
-    resolve_once(&sh, &t2, false);
+    resolve_once(&sh, &t2, false, None);
     assert_eq!(
         sh.telemetry
             .counters
@@ -176,7 +297,7 @@ fn endpoint_changed_counts_changes_not_lookups_7158() {
 #[test]
 fn a_tunnel_with_no_hostname_peers_starts_no_resolver_7158() {
     assert!(
-        WgEndpointResolver::spawn("wg0", Vec::new(), false, Default::default()).is_none(),
+        WgEndpointResolver::spawn("wg0", Vec::new(), false, None, Default::default()).is_none(),
         "no hostname peers means no thread: every tunnel that existed before \
          #7158 must not acquire one"
     );
@@ -191,7 +312,7 @@ fn one_peers_failure_does_not_disturb_another_7158() {
         (PK_A, "203.0.113.7:51820".to_string()),
         (PK_B, UNRESOLVABLE.to_string()),
     ];
-    let held = resolve_once(&sh, &targets, false);
+    let held = resolve_once(&sh, &targets, false, None);
     assert_eq!(held, 1, "only PK_A holds an address");
     assert_eq!(
         sh.resolved.lock().unwrap().get(&PK_A).copied(),
@@ -220,7 +341,7 @@ fn peer_endpoint_lookups_are_bounded_and_concurrent_13666() {
         .collect();
     let active = AtomicUsize::new(0);
     let peak = AtomicUsize::new(0);
-    let held = resolve_once_with(&sh, &targets, false, |_| {
+    let held = resolve_once_with(&sh, &targets, false, None, |_| {
         let now = active.fetch_add(1, Ordering::SeqCst) + 1;
         peak.fetch_max(now, Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(30));
@@ -252,7 +373,7 @@ fn panicking_endpoint_lookup_does_not_stop_sibling_updates_13666() {
         (PK_A, "panic-peer".to_string()),
         (PK_B, "healthy-peer".to_string()),
     ];
-    let held = resolve_once_with(&sh, &targets, false, |host| {
+    let held = resolve_once_with(&sh, &targets, false, None, |host| {
         if host == "panic-peer" {
             panic!("injected resolver panic");
         }
@@ -292,7 +413,7 @@ fn slow_endpoint_does_not_block_later_peers_13666() {
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Mutex::new(release_rx);
     let resolver = std::thread::spawn(move || {
-        resolve_once_with(&resolver_sh, &targets, false, |host| {
+        resolve_once_with(&resolver_sh, &targets, false, None, |host| {
             if host == "peer-0" {
                 release_rx.lock().unwrap().recv().unwrap();
             } else if host == "peer-8" {
@@ -347,7 +468,7 @@ fn dropping_resolver_does_not_wait_for_inflight_lookup_13666() {
         })
         .collect();
     let handle = std::thread::spawn(move || {
-        let _ = resolve_once_with(&worker_shared, &targets, false, |host| {
+        let _ = resolve_once_with(&worker_shared, &targets, false, None, |host| {
             let n: usize = host.strip_prefix("peer-").unwrap().parse().unwrap();
             if n < 8 {
                 worker_started_barrier.wait();
