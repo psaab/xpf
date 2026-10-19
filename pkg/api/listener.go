@@ -667,7 +667,16 @@ func (s *Server) ReconcileHTTPS(useTLS bool, addr string) error {
 func (s *Server) ReconcileHTTPSAddrs(useTLS bool, addrs []string) error {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
-	s.tlsDesired.Store(useTLS && len(addrs) > 0)
+	desired := useTLS && len(addrs) > 0
+	s.tlsDesiredConfigured.Store(desired)
+	if desired {
+		s.httpsDesiredAddrs = append([]string(nil), addrs...)
+	} else {
+		s.httpsDesiredAddrs = nil
+	}
+	if !desired {
+		s.tlsDesired.Store(false)
+	}
 	if !useTLS {
 		addrs = nil
 	}

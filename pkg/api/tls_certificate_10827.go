@@ -34,6 +34,7 @@ func (f *managementTLSCertificateFiles) custom() bool {
 type managementTLSCertificateState struct {
 	certificate tls.Certificate
 	leaf        *x509.Certificate
+	chain       []*x509.Certificate
 	fingerprint [32]byte
 	bindHost    string
 	source      string
@@ -74,6 +75,171 @@ func managementTLSCertificateLeaf(cert tls.Certificate) (tls.Certificate, *x509.
 	return cert, leaf, nil
 }
 
+// managementTLSCertificateChain parses every DER entry in cert. When
+// cert.Leaf is already set it is used as the first entry (it is the
+// parsed form of Certificate[0] for every loader in this package) and
+// the remaining entries are parsed from Certificate[1:]; a Leaf that
+// does not match Certificate[0], or a chain where Leaf is set but
+// Certificate is empty, is rejected so callers can trust chain[0] ==
+// leaf. Every entry must parse — an unparseable intermediate is a
+// preflight failure, not a handshake-time surprise.
+func managementTLSCertificateChain(cert tls.Certificate) (tls.Certificate, *x509.Certificate, []*x509.Certificate, error) {
+	if len(cert.Certificate) == 0 {
+		return cert, nil, nil, fmt.Errorf("certificate chain is empty")
+	}
+	var leaf *x509.Certificate
+	if cert.Leaf != nil {
+		parsed, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return cert, nil, nil, fmt.Errorf("parse leaf certificate: %w", err)
+		}
+		if !parsed.Equal(cert.Leaf) {
+			return cert, nil, nil, fmt.Errorf("certificate Leaf does not match Certificate[0]")
+		}
+		leaf = cert.Leaf
+	} else {
+		parsed, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return cert, nil, nil, fmt.Errorf("parse leaf certificate: %w", err)
+		}
+		leaf = parsed
+		cert.Leaf = leaf
+	}
+	chain := make([]*x509.Certificate, 0, len(cert.Certificate))
+	chain = append(chain, leaf)
+	for i, der := range cert.Certificate[1:] {
+		c, err := x509.ParseCertificate(der)
+		if err != nil {
+			return cert, nil, nil, fmt.Errorf("parse certificate chain entry %d: %w", i+1, err)
+		}
+		chain = append(chain, c)
+	}
+	return cert, leaf, chain, nil
+}
+
+func managementTLSCertificateValidityErrorFor(parsed *x509.Certificate, role string, now time.Time) error {
+	if parsed == nil {
+		return fmt.Errorf("certificate has no parsed %s", role)
+	}
+	if now.Before(parsed.NotBefore) {
+		if role == "leaf" {
+			return fmt.Errorf("certificate is not valid yet: now %s is before NotBefore %s",
+				now.UTC().Format(time.RFC3339), parsed.NotBefore.UTC().Format(time.RFC3339))
+		}
+		return fmt.Errorf("certificate chain %s is not valid yet: now %s is before NotBefore %s (subject %q)",
+			role, now.UTC().Format(time.RFC3339), parsed.NotBefore.UTC().Format(time.RFC3339), parsed.Subject.String())
+	}
+	if now.After(parsed.NotAfter) {
+		if role == "leaf" {
+			return fmt.Errorf("certificate has expired: now %s is after NotAfter %s",
+				now.UTC().Format(time.RFC3339), parsed.NotAfter.UTC().Format(time.RFC3339))
+		}
+		return fmt.Errorf("certificate chain %s has expired: now %s is after NotAfter %s (subject %q)",
+			role, now.UTC().Format(time.RFC3339), parsed.NotAfter.UTC().Format(time.RFC3339), parsed.Subject.String())
+	}
+	return nil
+}
+
+func managementTLSCertificateChainValidityError(chain []*x509.Certificate, now time.Time) error {
+	if len(chain) == 0 || chain[0] == nil {
+		return fmt.Errorf("certificate has no parsed leaf")
+	}
+	if err := managementTLSCertificateValidityErrorFor(chain[0], "leaf", now); err != nil {
+		return err
+	}
+	for i, c := range chain[1:] {
+		if err := managementTLSCertificateValidityErrorFor(c, fmt.Sprintf("intermediate %d", i+1), now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// managementTLSCertificatePreflightError is the full #15667 preflight:
+// every chain entry inside its validity window, leaf is not a CA and
+// carries ServerAuth (an absent ExtKeyUsage list means any usage and is
+// accepted, matching x509 semantics), every non-leaf entry is a CA
+// allowed to sign certificates, and every adjacent signature link
+// verifies (chain[i] was signed by chain[i+1]; the final entry, when
+// self-signed, must also verify against itself). Trust to a root is
+// deliberately NOT required: management clients pin/self-sign.
+func managementTLSCertificatePreflightError(chain []*x509.Certificate, now time.Time) error {
+	if err := managementTLSCertificateChainValidityError(chain, now); err != nil {
+		return err
+	}
+	leaf := chain[0]
+	if leaf.IsCA {
+		return fmt.Errorf("leaf certificate is a CA certificate (BasicConstraints CA=true); a CA certificate must not be served as the management TLS leaf")
+	}
+	if len(leaf.ExtKeyUsage) > 0 {
+		ok := false
+		for _, u := range leaf.ExtKeyUsage {
+			if u == x509.ExtKeyUsageServerAuth || u == x509.ExtKeyUsageAny {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return fmt.Errorf("leaf certificate does not allow ServerAuth extended key usage (ExtKeyUsage %v)", leaf.ExtKeyUsage)
+		}
+	}
+	for i, c := range chain[1:] {
+		role := fmt.Sprintf("intermediate %d", i+1)
+		if !c.IsCA || !c.BasicConstraintsValid {
+			return fmt.Errorf("certificate chain %s is not a CA certificate (subject %q)", role, c.Subject.String())
+		}
+		if c.KeyUsage != 0 && c.KeyUsage&x509.KeyUsageCertSign == 0 {
+			return fmt.Errorf("certificate chain %s does not allow certificate signing (subject %q, KeyUsage %v)", role, c.Subject.String(), c.KeyUsage)
+		}
+	}
+	for i := 0; i+1 < len(chain); i++ {
+		if err := chain[i].CheckSignatureFrom(chain[i+1]); err != nil {
+			return fmt.Errorf("certificate chain signature link %d->%d does not verify: %w", i, i+1, err)
+		}
+	}
+	if len(chain) > 0 {
+		last := chain[len(chain)-1]
+		if err := last.CheckSignatureFrom(last); err == nil {
+			// Self-signed final entry verified against itself; nothing more.
+		} else if len(chain) == 1 {
+			// A single self-signed leaf failing its own check has a
+			// corrupted signature (CheckSignatureFrom also enforces the
+			// parent IsCA constraint, which a non-CA leaf fails for an
+			// unrelated reason, so only report when it is a signature
+			// failure on a CA-shaped leaf).
+			if last.IsCA {
+				return fmt.Errorf("certificate chain signature link 0->0 does not verify: %w", err)
+			}
+		}
+		// A non-self-signed final root/intermediate is not an error:
+		// its issuer is simply not in the presented chain (normal for
+		// chains that omit the root).
+	}
+	// A non-CA leaf whose key usage is signing-only is rejected even
+	// though IsCA is false.
+	if !leaf.IsCA && leaf.KeyUsage != 0 && leaf.KeyUsage&x509.KeyUsageCertSign != 0 &&
+		leaf.KeyUsage&(x509.KeyUsageDigitalSignature|x509.KeyUsageKeyEncipherment|x509.KeyUsageKeyAgreement) == 0 && len(leaf.ExtKeyUsage) == 0 {
+		return fmt.Errorf("leaf certificate key usage is restricted to certificate signing")
+	}
+	return nil
+}
+
+// managementTLSSANDiagnostic returns a human-readable SAN summary for
+// logs, or the no-SAN marker when the leaf carries no SANs at all.
+func managementTLSSANDiagnostic(leaf *x509.Certificate) string {
+	if leaf == nil {
+		return ""
+	}
+	if len(leaf.DNSNames) == 0 && len(leaf.IPAddresses) == 0 && len(leaf.URIs) == 0 && len(leaf.EmailAddresses) == 0 {
+		return "no subjectAltName (covers nothing for modern clients)"
+	}
+	ips := make([]string, 0, len(leaf.IPAddresses))
+	for _, ip := range leaf.IPAddresses {
+		ips = append(ips, ip.String())
+	}
+	return fmt.Sprintf("dns=%v ip=%v", leaf.DNSNames, ips)
+}
+
 func managementTLSCertificateFingerprint(cert tls.Certificate) [32]byte {
 	hash := sha256.New()
 	for _, der := range cert.Certificate {
@@ -88,28 +254,18 @@ func managementTLSCertificateFingerprint(cert tls.Certificate) [32]byte {
 }
 
 func managementTLSCertificateValidityError(leaf *x509.Certificate, now time.Time) error {
-	if leaf == nil {
-		return fmt.Errorf("certificate has no parsed leaf")
-	}
-	if now.Before(leaf.NotBefore) {
-		return fmt.Errorf("certificate is not valid yet: now %s is before NotBefore %s",
-			now.UTC().Format(time.RFC3339), leaf.NotBefore.UTC().Format(time.RFC3339))
-	}
-	if now.After(leaf.NotAfter) {
-		return fmt.Errorf("certificate has expired: now %s is after NotAfter %s",
-			now.UTC().Format(time.RFC3339), leaf.NotAfter.UTC().Format(time.RFC3339))
-	}
-	return nil
+	return managementTLSCertificateValidityErrorFor(leaf, "leaf", now)
 }
 
 func newManagementTLSCertificateState(cert tls.Certificate, source, bindHost string) (*managementTLSCertificateState, error) {
-	cert, leaf, err := managementTLSCertificateLeaf(cert)
+	cert, leaf, chain, err := managementTLSCertificateChain(cert)
 	if err != nil {
 		return nil, err
 	}
 	return &managementTLSCertificateState{
 		certificate: cert,
 		leaf:        leaf,
+		chain:       chain,
 		fingerprint: managementTLSCertificateFingerprint(cert),
 		bindHost:    bindHost,
 		source:      source,
@@ -221,10 +377,11 @@ func (s *Server) loadManagementTLSCertificateWithGen(gen func(bindHosts []string
 			s.failManagementTLSCertificate(managementTLSCertificateCustom, bindHost, nil, err, now)
 			return nil, err
 		}
-		if err := managementTLSCertificateValidityError(state.leaf, now); err != nil {
+		if err := managementTLSCertificatePreflightError(state.chain, now); err != nil {
 			s.failManagementTLSCertificate(managementTLSCertificateCustom, bindHost, state.leaf, err, now)
 			return nil, err
 		}
+		slog.Info("custom management TLS certificate loaded", "source", managementTLSCertificateCustom, "bind_host", bindHost, "leaf_subject", state.leaf.Subject.String(), "sans", managementTLSSANDiagnostic(state.leaf), "chain_length", len(state.chain))
 		return state, nil
 	}
 
@@ -246,7 +403,7 @@ func (s *Server) loadManagementTLSCertificateWithGen(gen func(bindHosts []string
 		s.failManagementTLSCertificate(managementTLSCertificateGenerated, bindHost, nil, err, now)
 		return nil, err
 	}
-	if err := managementTLSCertificateValidityError(state.leaf, now); err != nil {
+	if err := managementTLSCertificatePreflightError(state.chain, now); err != nil {
 		s.failManagementTLSCertificate(managementTLSCertificateGenerated, bindHost, state.leaf, err, now)
 		return nil, err
 	}
@@ -261,6 +418,9 @@ func (s *Server) loadManagementTLSCertificateWithGen(gen func(bindHosts []string
 func (s *Server) installManagementTLSCertificate(state *managementTLSCertificateState) {
 	s.tlsCertificateSlot.state.Store(state)
 	s.tlsCertificateInvalid.Store(false)
+	if s.tlsDesiredConfigured.Load() {
+		s.tlsDesired.Store(true)
+	}
 }
 
 func (s *Server) failManagementTLSCertificate(source, bindHost string, leaf *x509.Certificate, err error, now time.Time) {
@@ -279,7 +439,7 @@ func (s *Server) failManagementTLSCertificate(source, bindHost string, leaf *x50
 		managementTLSCertificateInvalidEvents.Add(1)
 		slog.Error("management TLS certificate is outside its validity window or unusable",
 			"source", source, "bind_host", bindHost, "not_before", certificateTime(leaf, true),
-			"not_after", certificateTime(leaf, false), "now", now.UTC().Format(time.RFC3339), "err", err)
+			"not_after", certificateTime(leaf, false), "now", now.UTC().Format(time.RFC3339), "sans", managementTLSSANDiagnostic(leaf), "err", err)
 	}
 }
 
@@ -325,12 +485,12 @@ func (s *Server) managementTLSGetCertificateFromSlot(slot *managementTLSCertific
 		return nil, fmt.Errorf("management TLS certificate is unavailable: %s", state.reason)
 	}
 	now := s.managementTLSNow()
-	if err := managementTLSCertificateValidityError(state.leaf, now); err != nil {
+	if err := managementTLSCertificatePreflightError(state.chain, now); err != nil {
 		// Mark THIS slot invalid: a stale leg must not poison a live
 		// sibling's state (the pre-#14984 shared-store failure). The
 		// fallback likewise records the incident so the monitor and
 		// ReconcileTLSCertificate still see an expired serving plane.
-		iv := &managementTLSCertificateState{leaf: state.leaf, bindHost: state.bindHost, source: state.source, invalid: true, reason: err.Error()}
+		iv := &managementTLSCertificateState{leaf: state.leaf, chain: state.chain, bindHost: state.bindHost, source: state.source, invalid: true, reason: err.Error()}
 		if state.leaf != nil {
 			iv.fingerprint = sha256.Sum256(state.leaf.Raw)
 		}
@@ -365,7 +525,7 @@ func (s *Server) refreshManagementTLSCertificate() {
 }
 
 func (s *Server) refreshManagementTLSCertificateLocked() {
-	if !s.tlsDesired.Load() {
+	if !s.tlsDesired.Load() && !s.tlsDesiredConfigured.Load() {
 		return
 	}
 	files := s.managementTLSFiles()
@@ -378,7 +538,7 @@ func (s *Server) refreshManagementTLSCertificateLocked() {
 
 	invalidAlreadyCounted := current != nil && current.invalid
 	if current != nil && current.source == managementTLSCertificateGenerated && !current.invalid {
-		if err := managementTLSCertificateValidityError(current.leaf, now); err == nil {
+		if err := managementTLSCertificatePreflightError(current.chain, now); err == nil {
 			return
 		} else {
 			s.failManagementTLSCertificate(current.source, current.bindHost, current.leaf, err, now)
@@ -411,12 +571,13 @@ func (s *Server) refreshManagementTLSCertificateLocked() {
 		s.failManagementTLSCertificate(managementTLSCertificateGenerated, bindHost, nil, err, now)
 		return
 	}
-	if err := managementTLSCertificateValidityError(state.leaf, now); err != nil {
+	if err := managementTLSCertificatePreflightError(state.chain, now); err != nil {
 		s.failManagementTLSCertificate(managementTLSCertificateGenerated, bindHost, state.leaf, err, now)
 		return
 	}
 	s.installManagementTLSCertificate(state)
 	s.publishManagementTLSCertificateToLiveLegs(state)
+	s.recoverHTTPSLegsIfNeededLocked()
 }
 
 // publishManagementTLSCertificateToLiveLegs mirrors state into every live
@@ -431,6 +592,95 @@ func (s *Server) publishManagementTLSCertificateToLiveLegs(state *managementTLSC
 		}
 		return true
 	})
+}
+
+// recoverHTTPSLegsIfNeededLocked creates HTTPS legs that were never
+// built because the initial certificate load failed (#15667). The
+// periodic monitor calls it (via refresh) after a successful reload
+// when no leg is serving but TLS is configured-desired and the server
+// has a root context and configured HTTPS templates. It is a no-op
+// when any template leg is already serving, when there are no
+// templates (ReconcileHTTPSAddrs-built servers), or when no root
+// context exists (Run/serveBound path). Callers hold tlsCertificateMu;
+// it takes lifeMu — the only place that nests lifeMu inside
+// tlsCertificateMu (buildHTTPSServer never runs under this call: legs
+// are built directly from the already-validated state).
+func (s *Server) recoverHTTPSLegsIfNeededLocked() {
+	// tlsDesired is armed by installManagementTLSCertificate just
+	// before this runs, so it cannot gate recovery; the configured
+	// desire plus the absence of a serving leg is the gate.
+	if !s.tlsDesiredConfigured.Load() {
+		return
+	}
+	if len(s.httpsDesiredAddrs) == 0 || s.rootCtx == nil {
+		return
+	}
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	if len(s.httpsLegs) > 0 {
+		for _, leg := range s.httpsLegs {
+			if leg.serving() {
+				return
+			}
+		}
+	}
+	state := s.tlsCertificateSlot.state.Load()
+	if state == nil || state.invalid {
+		return
+	}
+	// Templates may be missing entirely (the boot failure shape:
+	// NewServer breaks before appending any httpsServer), so fall back
+	// to the recorded desired addresses and build fresh legs.
+	addrs := make([]string, len(s.httpsDesiredAddrs))
+	copy(addrs, s.httpsDesiredAddrs)
+	var legs []*listenerLeg
+	var servers []*http.Server
+	var slots []*authSlot
+	for i, addr := range addrs {
+		var srv *http.Server
+		if i < len(s.httpsServers) && s.httpsServers[i] != nil {
+			srv = s.httpsServers[i]
+		}
+		ln, err := s.listen("tcp", addr)
+		if err != nil {
+			slog.Error("api: HTTPS listener bind failed during certificate recovery; HTTPS disabled until the next reconcile", "addr", addr, "err", err)
+			legs = append(legs, nil)
+			servers = append(servers, srv)
+			slots = append(slots, nil)
+			continue
+		}
+		if srv == nil {
+			slot := s.newAuthSlot()
+			legSlot := &managementTLSCertificateSlot{}
+			legSlot.state.Store(state)
+			srv = trackHijackedConns(&http.Server{
+				Addr: addr, Handler: s.listenerHandler(addr, slot),
+				ReadHeaderTimeout: apiReadHeaderTimeout, ReadTimeout: apiReadTimeout,
+				IdleTimeout: apiIdleTimeout, MaxHeaderBytes: apiMaxHeaderBytes,
+				ConnContext: s.connContextForAuthSlot(slot),
+				TLSConfig:   &tls.Config{GetCertificate: s.managementTLSGetCertificateFor(legSlot), MinVersion: tls.VersionTLS12},
+			})
+			RegisterHTTPServerTLSState(srv, legSlot)
+			legs = append(legs, s.serveLegLocked(legPlan{srv: srv, slot: slot}, ln, true))
+			servers = append(servers, srv)
+			slots = append(slots, slot)
+		} else {
+			legSlot := &managementTLSCertificateSlot{}
+			legSlot.state.Store(state)
+			if srv.TLSConfig != nil {
+				srv.TLSConfig.GetCertificate = s.managementTLSGetCertificateFor(legSlot)
+			}
+			RegisterHTTPServerTLSState(srv, legSlot)
+			plan := s.httpsLegPlanAt(i)
+			legs = append(legs, s.serveLegLocked(plan, ln, true))
+			servers = append(servers, srv)
+			slots = append(slots, plan.slot)
+		}
+		slog.Info("HTTPS API server listening (recovered after certificate load)", "addr", addr)
+	}
+	s.httpsLegs = legs
+	s.httpsServers = servers
+	s.httpsSlots = slots
 }
 
 // ReconcileTLSCertificate installs new operator-provided paths from a committed
@@ -522,7 +772,7 @@ func (s *Server) refreshCustomManagementTLSCertificate(files *managementTLSCerti
 		s.failManagementTLSCertificate(managementTLSCertificateCustom, bindHost, nil, err, now)
 		return
 	}
-	if err := managementTLSCertificateValidityError(state.leaf, now); err != nil {
+	if err := managementTLSCertificatePreflightError(state.chain, now); err != nil {
 		s.failManagementTLSCertificate(managementTLSCertificateCustom, bindHost, state.leaf, err, now)
 		return
 	}
@@ -532,8 +782,9 @@ func (s *Server) refreshCustomManagementTLSCertificate(files *managementTLSCerti
 	}
 	s.installManagementTLSCertificate(state)
 	s.publishManagementTLSCertificateToLiveLegs(state)
+	s.recoverHTTPSLegsIfNeededLocked()
 	if current != nil && current.fingerprint != state.fingerprint {
-		slog.Info("custom management TLS certificate rotated", "not_after", state.leaf.NotAfter.UTC().Format(time.RFC3339))
+		slog.Info("custom management TLS certificate rotated", "not_after", state.leaf.NotAfter.UTC().Format(time.RFC3339), "sans", managementTLSSANDiagnostic(state.leaf))
 	}
 }
 
