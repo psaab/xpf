@@ -66,10 +66,19 @@ without DHCP no longer disables DHCP for the daemon's lifetime.
   No protocol RELEASE is sent — matching interface-deconfiguration
   behavior elsewhere in the daemon.
 - **Registry hygiene**: the run goroutine deregisters itself (and
-  cleans residual lease/address state) in a defer on every exit path —
-  cancellation, DHCPv4 max-retransmissions, DHCPv6 link-local abort —
+  cleans residual lease/address state) in a defer on every exit path,
   so a dead client can never permanently block a future `Start` for
   the same key.
+- **Terminal-acquisition self-recovery (#15070)**: neither initial-
+  acquisition failure is terminal any more. DHCPv6 exhausting its 30 s
+  link-local wait re-waits after a ctx-bound `terminalRetryBackoff`
+  (30 s, via the `after` seam) instead of returning; DHCPv4 exhausting
+  `retransmission-attempt` paces the same backoff, resets
+  attempt/backoff, and re-enters INIT — the attempt budget still bounds
+  one INIT cycle's DISCOVER burst. A held lease's expiry still bounds
+  the v4 recovery wait. Cancellation (Reconcile removal / Renew /
+  StopAll) terminates both promptly; no Reconcile is needed to recover
+  a client whose WAN/link simply was not ready at first try.
 
 ## Renewal semantics (#1777, RFC wire renewal #2994)
 
