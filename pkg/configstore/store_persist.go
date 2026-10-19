@@ -136,6 +136,7 @@ func (s *Store) Load() error {
 				return err
 			}
 			purgeAPIAuthArchives(s.apiAuthArchiveMigrationDir)
+			s.journal.ScrubLegacyPayloads() // #15143 journal arm of #10826
 			if !s.apiAuthMigrationStagingConsistent() {
 				slog.Warn("cannot safely migrate staged api-auth rollback history without its matching active config; preserving recovery files",
 					"path", s.apiAuthMigrationStagingPath(), "issue", "#10826")
@@ -154,6 +155,7 @@ func (s *Store) Load() error {
 			return err
 		}
 		purgeAPIAuthArchives(s.apiAuthArchiveMigrationDir)
+		s.journal.ScrubLegacyPayloads() // #15143 journal arm of #10826
 		return s.loadRescueFallbackLocked()
 	}
 	// #1922 step-0 marker: record whether the on-disk DB represents a
@@ -240,6 +242,7 @@ func (s *Store) Load() error {
 		return err
 	}
 	purgeAPIAuthArchives(s.apiAuthArchiveMigrationDir)
+	s.journal.ScrubLegacyPayloads() // #15143 journal arm of #10826
 	// Tolerant compile: an already-persisted config must boot through
 	// (see compileTreeLenient for the validator downgrades).
 	compiled, err := s.compileTreeLenient(tree)
@@ -2291,6 +2294,16 @@ func (s *Store) JournalPermsDegraded() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.journal.PermRepairDegraded()
+}
+
+// JournalLegacyScrubDegraded reports whether the #15143 legacy-payload
+// scrub is in a failed state: a pre-#1896 journal segment could not be
+// rewritten or purged and may still carry cleartext api-auth
+// credentials. Poll-through to the journal like JournalPermsDegraded.
+func (s *Store) JournalLegacyScrubDegraded() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.journal.LegacyScrubDegraded()
 }
 
 // rotateArchives keeps at most maxArchives recognized XPF snapshots and leaves

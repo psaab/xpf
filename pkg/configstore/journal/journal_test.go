@@ -355,8 +355,11 @@ func TestRotationGapTolerated(t *testing.T) {
 }
 
 // TestLegacyFatFileRotatesOnFirstAppend: upgrading over a huge v1
-// journal must rotate it intact to .1 on the first append — no
-// migration pass, history stays visible.
+// journal must scrub its before/after payloads on first use (#15143)
+// and then rotate the scrubbed segment to .1 on the first append —
+// history (timestamp/action/detail) stays visible, cleartext payload
+// does not. Pre-#15143 this asserted rotation "intact"; that intact
+// retention was the credential leak.
 func TestLegacyFatFileRotatesOnFirstAppend(t *testing.T) {
 	j := testJournal(t, WithMaxSegmentBytes(1024))
 	ts := time.Now()
@@ -371,20 +374,36 @@ func TestLegacyFatFileRotatesOnFirstAppend(t *testing.T) {
 
 	mustLog(t, j, &Entry{Action: "commit", Detail: "first v2"})
 
-	// Legacy content rotated to .1 intact; current holds only v2.
+	// Legacy payloads scrubbed; rotation still moves the (now compact)
+	// legacy segment to .1 and current holds only the new v2 entry.
+	// The scrubbed segment is ~3 compact lines (< 1 KiB threshold), so
+	// it may not rotate on this append at all — either way current must
+	// hold no before/after payload and history must stay whole. Read
+	// .1 if rotation happened; otherwise the scrubbed legacy lines are
+	// still in current ahead of the v2 line.
 	cur, err := os.ReadFile(j.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(cur, []byte("legacy")) {
-		t.Fatal("legacy content still in current segment after rotation")
+	if bytes.Contains(cur, []byte(`"before":`)) || bytes.Contains(cur, []byte(`"after":`)) {
+		t.Fatal("legacy payload still in current segment after scrub")
 	}
-	rot, err := os.ReadFile(j.segmentPath(1))
-	if err != nil {
-		t.Fatal(err)
+	if !bytes.Contains(cur, []byte("first v2")) {
+		t.Fatal("new v2 entry missing from current segment")
 	}
-	if !bytes.Equal(rot, []byte(sb.String())) {
-		t.Fatal("legacy journal not rotated intact")
+	// Wherever the legacy lines landed (rotated .1 or scrubbed in
+	// place in current), their details survive and payloads do not.
+	combined := cur
+	if rot, rerr := os.ReadFile(j.segmentPath(1)); rerr == nil {
+		if bytes.Contains(rot, []byte(`"before":`)) || bytes.Contains(rot, []byte(`"after":`)) {
+			t.Fatal("legacy journal rotated with before/after payloads intact (#15143)")
+		}
+		combined = append(combined, rot...)
+	}
+	for i := range 3 {
+		if !bytes.Contains(combined, []byte(fmt.Sprintf("legacy %d", i))) {
+			t.Fatalf("scrubbed journal lost legacy detail %d", i)
+		}
 	}
 
 	got, err := j.Tail(50)
