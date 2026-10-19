@@ -46,11 +46,15 @@ This allocates:
 - Block size 2016 = 32 blocks per IP
 - 4 IPs x 32 blocks = 128 subscriber slots
 - 100.64.0.0/25 = 128 hosts (must fit within the 128 blocks -- validated at
-  compile: `totalBlocks >= subscriberCount`, where `totalBlocks` counts EXPANDED
-  pool hosts, so a CIDR member counts every host it enumerates -- #9498). A larger prefix such as
-  `/22` (1024 hosts) is rejected `insufficient capacity (128 blocks) for
-  1024 subscribers` -- widen the pool (more public IPs) or shrink the
-  block-size to add blocks.
+  compile: `totalBlocks >= subscriberCount`, where `totalBlocks` counts only
+  the EXPANDED IPv4 pool hosts Rust places in `pool_addresses_v4`, so a CIDR
+  member counts every v4 host it enumerates -- #9498; other-family members
+  (a v6 prefix, an IPv4-mapped literal) count nothing, and duplicate or
+  overlapping v4 members count once -- #15177). For an IPv6 subscriber
+  (mode 2) only bare or `/32` IPv4 pool hosts count, matching the NAT64
+  parser. A larger prefix such as `/22` (1024 hosts) is rejected
+  `insufficient capacity (128 blocks) for 1024 subscribers` -- widen the
+  pool (more public IPs) or shrink the block-size to add blocks.
 
 The four `set` lines above are entered in flat-set order; `block-size` and
 `host address` are SEPARATE `set` lines under the same `port deterministic`
