@@ -651,6 +651,10 @@ pub(super) fn apply_snapshot(
     // reconciled table, so this publishes the new generation's coherent pair
     // through the single choke point — see `types/runtime_view.rs`.
     coord.publish_runtime_view();
+    // #15188 (C08-02): strip the retained single-use rename metadata now
+    // that this full apply's publish has shipped it, so helper-internal
+    // republishes cannot re-ship it. See `clear_single_use_policy_metadata`.
+    coord.clear_single_use_policy_metadata();
     // #15093: after the worker-visible store, record the scheduler era so a
     // re-introduced scheduled snapshot does not publish already expired.
     coord.publish_snapshot_policy();

@@ -490,6 +490,13 @@ pub(in crate::afxdp) struct ForwardingState {
     /// zone/policy rename. Kept on the immutable forwarding generation so
     /// rotation can consume it before the next generation is published.
     pub(in crate::afxdp) policy_rematch_extensive: bool,
+    /// #15188 (C08-02): single-use rename metadata. These two fields are
+    /// shipped on exactly one full-apply publish; the coordinator strips
+    /// them from its retained state immediately afterwards
+    /// (`Coordinator::clear_single_use_policy_metadata`) and each worker
+    /// consumes a generation's rebinds at most once
+    /// (`last_rebind_generation` in `worker/loop_body`), so helper-internal
+    /// republishes never re-apply them.
     pub(in crate::afxdp) policy_rename_ancestry: Vec<PolicyRenameAncestry>,
     pub(in crate::afxdp) policy_session_rebinds: Vec<PolicySessionRebind>,
     pub(in crate::afxdp) source_nat_rules: Vec<SourceNatRule>,

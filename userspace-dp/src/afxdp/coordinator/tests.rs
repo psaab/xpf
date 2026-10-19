@@ -3957,6 +3957,139 @@ fn fabric_link_superseded_by_snapshots_only_on_same_parent_different_peer_5686()
         &[fabric_snap_5686(80, "not-an-ip", "")]
     ));
 }
+// #15188 (C08-02): single-use rename metadata must not ride helper-internal
+// republishes. A full snapshot apply ships `policy_session_rebinds` /
+// `policy_rename_ancestry` exactly once; the next neighbor push or HA fabric
+// refresh clones `self.forwarding` into a new worker-visible Arc, and every
+// worker takes its rotation branch on that Arc and re-applies whatever
+// rebinds it still carries (a per-record restamp walk, with no generation
+// check). The coordinator therefore strips the metadata from its retained
+// forwarding immediately after a full-apply publish, so every helper clone
+// ships rebinds=0 / ancestry=0. Control: a LATER full apply with fresh
+// metadata still ships it (the strip is per-apply, not a latch).
+fn rebind_snapshot_15188(generation: u64) -> crate::ConfigSnapshot {
+    crate::ConfigSnapshot {
+        generation,
+        policy_rematch_extensive: true,
+        policy_session_rebinds: vec![crate::protocol::PolicySessionRebind {
+            family: "v4".to_string(),
+            src_ip: "10.0.61.102".to_string(),
+            dst_ip: "172.16.80.200".to_string(),
+            src_port: 40001,
+            dst_port: 5201,
+            protocol: 6,
+            policy_id: 0,
+            rule_id: "dmz->wan/p-new".to_string(),
+            ingress_zone: 3,
+            egress_zone: 2,
+            ..Default::default()
+        }],
+        policy_rename_ancestry: vec![crate::protocol::PolicyRenameAncestry {
+            source_rule_id: "lan->wan/p-first".to_string(),
+            destination_rule_id: "dmz->wan/p-new".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn neighbor_push_after_full_apply_ships_no_rebinds_15188() {
+    let mut coord = Coordinator::new();
+    // Real full apply: its publish ships the single-use metadata once.
+    coord.refresh_runtime_snapshot_disarmed(&rebind_snapshot_15188(7)).expect("full apply must succeed");
+    // Vacuity guard: the full apply itself ships the metadata, and the
+    // retained state is already stripped for the next helper republish.
+    {
+        let view = coord.ha.runtime.load_full();
+        assert_eq!(view.forwarding().policy_session_rebinds.len(), 1);
+        assert_eq!(view.forwarding().policy_rename_ancestry.len(), 1);
+    }
+    assert!(
+        coord.forwarding.policy_session_rebinds.is_empty() && coord.forwarding.policy_rename_ancestry.is_empty(),
+        "#15188: retained forwarding must not carry single-use metadata after the full-apply publish"
+    );
+    // Helper-internal republish: a neighbor push.
+    let applied = coord.apply_manager_neighbors(
+        false,
+        0,
+        &[(
+            80,
+            IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2)),
+            NeighborEntry { mac: [2, 0, 0, 0, 0, 2] },
+        )],
+    );
+    assert!(applied, "neighbor push must be applied");
+    let view = coord.ha.runtime.load_full();
+    assert_eq!(
+        view.forwarding().policy_session_rebinds.len(),
+        0,
+        "#15188: neighbor push after a full apply must ship rebinds=0, not re-ship the single-use records"
+    );
+    assert_eq!(
+        view.forwarding().policy_rename_ancestry.len(),
+        0,
+        "#15188: neighbor push after a full apply must ship ancestry=0"
+    );
+    assert!(
+        view.forwarding().neighbors.contains_key(&(80, IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2)))),
+        "control: the neighbor itself must still be published"
+    );
+}
+
+#[test]
+fn fabric_refresh_after_full_apply_ships_no_rebinds_15188() {
+    let mut coord = Coordinator::new();
+    coord.refresh_runtime_snapshot_disarmed(&rebind_snapshot_15188(7)).expect("full apply must succeed");
+    {
+        let view = coord.ha.runtime.load_full();
+        assert_eq!(view.forwarding().policy_session_rebinds.len(), 1);
+    }
+    // Helper-internal republish: HA fabric refresh (replace path).
+    coord.refresh_fabric_links(&[fabric_snap_5686(80, "10.99.0.2", "02:00:00:00:00:02")]);
+    let view = coord.ha.runtime.load_full();
+    assert_eq!(
+        view.forwarding().fabrics.len(),
+        1,
+        "control: the resolved fabric link must still be published"
+    );
+    assert_eq!(
+        view.forwarding().policy_session_rebinds.len(),
+        0,
+        "#15188: fabric refresh after a full apply must ship rebinds=0"
+    );
+    assert_eq!(
+        view.forwarding().policy_rename_ancestry.len(),
+        0,
+        "#15188: fabric refresh after a full apply must ship ancestry=0"
+    );
+}
+
+#[test]
+fn later_full_apply_still_ships_fresh_rebinds_15188() {
+    // Control: stripping is per-apply. A subsequent full snapshot apply
+    // carrying fresh single-use metadata ships it exactly once, and the
+    // retained state is stripped again for the next helper republish.
+    let snap = rebind_snapshot_15188;
+    let mut coord = Coordinator::new();
+    coord.refresh_runtime_snapshot_disarmed(&snap(7)).expect("first full apply");
+    {
+        let view = coord.ha.runtime.load_full();
+        assert_eq!(view.forwarding().policy_session_rebinds.len(), 1, "first full apply ships its rebinds");
+    }
+    coord.refresh_runtime_snapshot_disarmed(&snap(8)).expect("second full apply");
+    let view = coord.ha.runtime.load_full();
+    assert_eq!(
+        view.forwarding().policy_session_rebinds.len(),
+        1,
+        "control: a later full apply must still ship its fresh rebinds exactly once"
+    );
+    assert_eq!(view.forwarding().policy_rename_ancestry.len(), 1);
+    assert!(
+        coord.forwarding.policy_session_rebinds.is_empty(),
+        "#15188: retained forwarding stripped again after the second full apply"
+    );
+}
 
 #[test]
 fn queue_warm_pass_noop_without_worker_queue() {

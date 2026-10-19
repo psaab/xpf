@@ -69,6 +69,10 @@ mod expiry_shared_retire_10419_tests;
 mod bpf_ok_teardown_10590_tests;
 
 #[cfg(test)]
+#[path = "rebind_once_per_generation_15188_tests.rs"]
+mod rebind_once_per_generation_15188_tests;
+
+#[cfg(test)]
 #[path = "p2_deadline_9506_tests.rs"]
 mod p2_deadline_9506_tests;
 #[cfg(test)]
@@ -431,6 +435,13 @@ pub(crate) fn worker_loop(
     // pass.
     let mut last_delete_drop_epoch =
         crate::afxdp::session_glue::session_delete_drop_epoch(worker_id);
+    // #15188 (C08-02): the config generation whose single-use
+    // `policy_session_rebinds` this worker has already consumed. Seeded to
+    // the startup forwarding's generation: the startup seed is not a
+    // rotation, so its rebinds (if any) belong to a generation no rotation
+    // will re-deliver; the first genuine rotation to a NEW generation
+    // consumes that generation's records exactly once.
+    let mut last_rebind_generation: u64 = forwarding.config_generation;
     // #9327: the delete-drop sweep is resumable and budgeted. Declared beside
     // the epoch it is armed by, and carried across passes so no single pass
     // exceeds the RX-ring fill time.
@@ -1006,10 +1017,27 @@ pub(crate) fn worker_loop(
                 );
             }
             forwarding = new_forwarding;
+            // #15188 (C08-02): consume this generation's single-use rebinds
+            // exactly once. The coordinator strips the retained metadata
+            // after a full apply publishes it, so helper-internal republishes
+            // (neighbor push, HA fabric refresh) already arrive with
+            // `rebinds=0`; this generation guard is the worker-side half of
+            // the same invariant — a republished forwarding Arc that still
+            // carries rebinds for the config generation this worker already
+            // consumed must not re-run the per-record restamp walk. The
+            // record is applied exactly once per generation.
+            let rebind_generation = forwarding.config_generation;
+            let rebind_records: &[crate::protocol::PolicySessionRebind] =
+                if rebind_generation == last_rebind_generation {
+                    &[]
+                } else {
+                    last_rebind_generation = rebind_generation;
+                    &forwarding.policy_session_rebinds
+                };
             let rebound_policy_sessions = rebind_policy_sessions_from_snapshot(
                 &mut sessions,
                 &forwarding,
-                &forwarding.policy_session_rebinds,
+                rebind_records,
                 &session_map,
                 conntrack_v4_fd,
                 conntrack_v6_fd,
