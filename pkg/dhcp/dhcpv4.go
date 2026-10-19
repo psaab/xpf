@@ -34,6 +34,14 @@ const dhcpClasslessTrustOverrideEnv = "XPF_DHCP_TRUST_CLASSLESS_OVERRIDE"
 // and returns to the T1 wait (#1777). After a generic T2 failure it starts
 // another DORA immediately, retaining the held lease until it is renewed,
 // replaced by a new acquisition, or reaches Obtained+LeaseTime.
+//
+// With `force-discover` (#15692) the T1/T2 steps instead run a full DORA
+// (exchangeAcquire): the operator explicitly opted out of RENEWING/
+// REBINDING REQUESTs. Timing and failure handling are unchanged — a
+// failed DISCOVER at T1 still waits for T2, a failed DISCOVER at T2
+// still falls through to re-acquisition — and the held lease stays
+// installed until a DISCOVER replaces it or Obtained+LeaseTime is
+// reached (the leaseCtx / leaseExpiryAt machinery below).
 func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 	key := clientKey{iface: ifaceName, family: AFInet}
 
@@ -56,6 +64,12 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 	if opts != nil && opts.RetransmissionAttempt > 0 {
 		maxAttempts = opts.RetransmissionAttempt
 	}
+	// #15692: `force-discover` opts renewal out of RENEWING/REBINDING
+	// REQUESTs in favour of a full DORA. Captured once at goroutine
+	// start (like baseBackoff/maxAttempts above): the reconcile
+	// fingerprint already includes ForceDiscover, so toggling it
+	// restarts this goroutine with the new value.
+	forceDiscover := opts != nil && opts.ForceDiscover
 
 	backoff := baseBackoff
 	attempt := 0
@@ -253,8 +267,15 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 			}
 
 			// T1 renewal attempt — unicast RENEW to the granting server,
-			// NOT a fresh DISCOVER (#2994).
-			renewed, rerr := m.v4Exchange(leaseCtx, ifaceName, exchangeRenew, committed)
+			// NOT a fresh DISCOVER (#2994) — unless `force-discover` is
+			// set (#15692), in which case a full DORA replaces it. The
+			// held lease stays installed either way until the exchange
+			// replaces it or the lease deadline below is reached.
+			t1Mode := exchangeRenew
+			if forceDiscover {
+				t1Mode = exchangeAcquire
+			}
+			renewed, rerr := m.v4Exchange(leaseCtx, ifaceName, t1Mode, committed)
 			if rerr == nil {
 				if cerr := m.commitLease(key, renewed, committed, nil, nil, false); cerr != nil {
 					slog.Warn("DHCPv4: failed to apply renewed lease, re-acquiring",
@@ -285,7 +306,12 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 			// T2 (#3956). In RENEWING only the granting server's NAK
 			// matches; in REBINDING any server's NAK matches (#14600). A
 			// genuine renew TIMEOUT still falls through to the T2 rebind.
-			if errors.Is(rerr, errDHCPNAK) {
+			// Under force-discover the T1 exchange is a DORA, whose NAK
+			// handling lives inside the acquire exchange (nclient4's
+			// Request rejects it / re-discovers) and never surfaces as
+			// errDHCPNAK; the `!forceDiscover` guard keeps that contract
+			// explicit rather than relying on it implicitly.
+			if !forceDiscover && errors.Is(rerr, errDHCPNAK) {
 				slog.Warn("DHCPv4: RENEWING NAK — lease revoked, deconfiguring and restarting DISCOVER",
 					"interface", ifaceName)
 				m.abandonLeaseAfterNAK(key, committed)
@@ -315,8 +341,13 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 			}
 
 			// T2 rebind attempt — broadcast REBIND (#2994), bounded by the
-			// same absolute lease deadline as the wait and T1 exchange.
-			renewed, rerr = m.v4Exchange(leaseCtx, ifaceName, exchangeRebind, committed)
+			// same absolute lease deadline as the wait and T1 exchange —
+			// or a full DORA under `force-discover` (#15692).
+			t2Mode := exchangeRebind
+			if forceDiscover {
+				t2Mode = exchangeAcquire
+			}
+			renewed, rerr = m.v4Exchange(leaseCtx, ifaceName, t2Mode, committed)
 			if rerr == nil {
 				if cerr := m.commitLease(key, renewed, committed, nil, nil, false); cerr != nil {
 					slog.Warn("DHCPv4: failed to apply rebound lease, re-acquiring",
@@ -345,8 +376,11 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 			// INIT with no prior lease. A rebind TIMEOUT is left to the
 			// lease-expiry fallback, retaining the address and routes until
 			// a new acquisition replaces it or Obtained+LeaseTime is reached.
-			// In REBINDING any server's NAK matches (#14600).
-			if errors.Is(rerr, errDHCPNAK) {
+			// In REBINDING any server's NAK matches (#14600). Under
+			// force-discover the T2 exchange is a DORA (no errDHCPNAK,
+			// see the T1 note above), so this branch is unreachable and
+			// the `!forceDiscover` guard states that explicitly.
+			if !forceDiscover && errors.Is(rerr, errDHCPNAK) {
 				slog.Warn("DHCPv4: REBINDING NAK — lease revoked, deconfiguring and restarting DISCOVER",
 					"interface", ifaceName)
 				m.abandonLeaseAfterNAK(key, committed)

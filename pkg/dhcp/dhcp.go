@@ -70,7 +70,7 @@ type DHCPv4Options struct {
 	LeaseTime              int  // requested lease time in seconds (0 = server default)
 	RetransmissionAttempt  int  // max retransmission attempts (0 = unlimited)
 	RetransmissionInterval int  // base interval in seconds between retransmissions (0 = 1s default)
-	ForceDiscover          bool // always start with DISCOVER (skip REQUEST for renewal)
+	ForceDiscover          bool // renew/rebind via full DISCOVER (DORA) instead of RENEWING/REBINDING REQUEST (#15692)
 }
 
 // DHCPv6Options holds client behavior options for DHCPv6.
