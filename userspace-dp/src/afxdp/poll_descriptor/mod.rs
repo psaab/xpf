@@ -75,7 +75,7 @@ pub(in crate::afxdp) use embedded_icmp::{
     EmbeddedIcmpReversal, enforce_queued_embedded_icmp_policy, related_forward_zones,
     try_reverse_embedded_icmp_error,
 };
-use flow_cache_hit::{FlowCacheOutcome, stage_flow_cache_hit};
+use flow_cache_hit::{FlowCacheOutcome, InlineTxBindings, InlineTxTarget, stage_flow_cache_hit};
 use flow_cache_seed::{stage_flow_cache_deny_seed, stage_flow_cache_seed};
 use flowless_verdict::{
     FlowlessLocalVerdict, flowless_base_resolution, flowless_local_delivery_verdict,
@@ -556,6 +556,8 @@ fn should_record_rx_descriptor_telemetry(is_injected: bool, was_replay: bool) ->
 pub(super) fn poll_binding_process_descriptor_with_injection(
     binding: &mut BindingWorker,
     binding_index: usize,
+    left: &mut [BindingWorker],
+    right: &mut [BindingWorker],
     area: *const MmapArea,
     available: u32,
     injected_packet: Option<(Vec<u8>, UserspaceDpMeta)>,
@@ -1907,15 +1909,23 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     && !crate::afxdp::poll_stages::is_pptp_control_flow(flow)
                 {
                     let non_host_unicast_ip = l2_group_unicast_ip && owned_packet_frame.is_none();
+                    let mut inline_tx = InlineTxBindings {
+                        ingress: InlineTxTarget {
+                            tx_pipeline: &mut binding.tx_pipeline,
+                            tx_counters: &mut binding.tx_counters,
+                        },
+                        left,
+                        right,
+                    };
                     match stage_flow_cache_hit(
                         &mut binding.flow,
-                        &mut binding.tx_pipeline,
-                        &mut binding.tx_counters,
+                        &mut inline_tx,
                         &mut binding.scratch,
                         &mut binding.mirror_sample_counter,
                         &binding.live,
                         binding.slot,
                         binding_index,
+                        &binding.umem,
                         desc,
                         area,
                         raw_frame,
@@ -11590,6 +11600,8 @@ pub(super) fn poll_binding_process_descriptor(
     poll_binding_process_descriptor_with_injection(
         binding,
         binding_index,
+        &mut [],
+        &mut [],
         area,
         available,
         None,

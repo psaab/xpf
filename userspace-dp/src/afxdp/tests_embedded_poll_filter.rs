@@ -1538,6 +1538,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
         super::poll_descriptor::poll_binding_process_descriptor_with_injection(
             &mut binding,
             0,
+            &mut [],
+            &mut [],
             area_ptr,
             0,
             Some((frame.clone(), meta)),

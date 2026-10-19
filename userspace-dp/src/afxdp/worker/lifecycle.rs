@@ -225,9 +225,14 @@ pub(super) fn poll_binding(
             dbg,
             counters: &mut counters,
         };
+        // #14945 (3): hand the stage the split sibling bindings so a
+        // cross-binding cache hit that shares this UMEM can take the
+        // inline TX path. `binding` is disjoint from `left`/`right`.
         poll_binding_process_descriptor_with_injection(
             binding,
             binding_index,
+            left,
+            right,
             area,
             available,
             injected_packet.take(),
@@ -323,9 +328,9 @@ pub(super) fn poll_binding(
             binding.scratch.scratch_post_recycles = scratch_post_recycles;
         }
         binding.scratch.scratch_forwards = pending_forwards;
-        // Reserved: cross-binding in-place TX from flow cache fast path.
-        // Currently only self-target (hairpin) uses the inline path;
-        // cross-binding goes through enqueue_pending_forwards above.
+        // #14945 (3): cross-binding in-place TX from the flow-cache fast
+        // path is live above (shared-UMEM targets only); a foreign-UMEM
+        // target still goes through enqueue_pending_forwards.
         // Eager TX completion reaping: free TX frames immediately after
         // enqueueing forwards so they can be recycled to fill ring within
         // the same poll cycle. Without this, completions wait until next
