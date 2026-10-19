@@ -432,6 +432,9 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 				children:      nil,
 			},
 		}},
+		// #15047: preemption defaults ON (Junos/RFC 5798); `no-preempt`
+		// is the explicit opt-out that compiles Preempt=false.
+		"no-preempt":  {desc: "Disable preemption (preempt is on by default)", children: nil},
 		"accept-data": {desc: "Accept packets sent to the virtual address", children: nil},
 		// Seconds. xpf-DIVERGENT from Junos (1..255 s): the value is
 		// converted seconds→ms (pkg/vrrp/vrrp.go:58) then ms→centiseconds

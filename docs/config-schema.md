@@ -10449,7 +10449,15 @@ reserved for whole-dataplane selection where a rewrite shim
   (seconds; `compiler_interfaces.go` parses both the braced child and the
   flat-set `preempt hold-time <n>` Keys-run), plumbed to
   `vrrp.Instance.PreemptHoldTime`. Bare `preempt` (no hold-time) keeps
-  PreemptHoldTime 0 = immediate preemption (unchanged). At runtime a
+  PreemptHoldTime 0 = immediate preemption (unchanged).
+  **#15047 — preempt default:** a generic `vrrp-group` without any
+  preempt statement compiles `Preempt=true` (Junos and RFC 5798 default
+  Preempt_Mode to TRUE); the new `no-preempt` leaf is the explicit
+  opt-out and compiles `Preempt=false`. Previously the constructor left
+  the Go zero value, so a backup never took over from a
+  track-interface-demoted master. RETH/redundancy-group collection is
+  unchanged (its preempt still comes only from an explicit chassis
+  `redundancy-group <id> preempt`). At runtime a
   higher-priority backup reclaiming mastership from a STILL-LIVE
   lower-priority master defers the takeover by hold-time seconds (so
   dynamic routing converges before failback); a dead/silent master or a
