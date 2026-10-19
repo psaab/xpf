@@ -2291,6 +2291,172 @@ fn changed_snapshot_shape_resets_three_color_runtime_state() {
     assert_eq!(status[0].green_bytes, 200);
 }
 
+// -- #15108: term hit counters survive an unchanged snapshot refresh -------
+//
+// `parse_term` used to mint a fresh `Arc<FilterTermCounter>` on every
+// rebuild and `previous` was consulted only for three-color policer
+// runtimes, so any committed config change or HA config-sync apply
+// silently zeroed `show firewall` hit counts.
+
+fn counted_filter_15108(count_name: &str, action: &str) -> Vec<FirewallFilterSnapshot> {
+    vec![FirewallFilterSnapshot {
+        name: "edge".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "web".into(),
+            action: action.into(),
+            count: count_name.into(),
+            destination_ports: vec!["80".into()],
+            ..Default::default()
+        }],
+    }]
+}
+
+fn hit_web_15108(state: &FilterState, hits: usize) {
+    for _ in 0..hits {
+        let _ = evaluate_filter_counted(
+            state,
+            "inet:edge",
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            PROTO_TCP,
+            40000,
+            80,
+            0,
+            TermMatchExtra::default(),
+            100,
+        );
+    }
+    flush_recorded_filter_counters();
+}
+
+fn web_counter_15108(state: &FilterState) -> (u64, u64) {
+    let term = &state.filters["inet:edge"].terms[0];
+    (
+        term.counter.packets.load(Ordering::Relaxed),
+        term.counter.bytes.load(Ordering::Relaxed),
+    )
+}
+
+#[test]
+fn unchanged_refresh_preserves_term_counter_15108() {
+    let filters = counted_filter_15108("hits", "accept");
+    let state = make_filter_state(&filters, &[]);
+    hit_web_15108(&state, 7);
+    assert_eq!(web_counter_15108(&state), (7, 700));
+
+    let refreshed = parse_filter_state_with_three_color_preserving(
+        &filters,
+        &[],
+        &[],
+        &[],
+        "",
+        "",
+        Some(&state),
+    )
+    .expect("filter state compiles");
+    assert!(
+        Arc::ptr_eq(
+            &state.filters["inet:edge"].terms[0].counter,
+            &refreshed.filters["inet:edge"].terms[0].counter,
+        ),
+        "unchanged term must carry its counter Arc across the refresh (#15108)"
+    );
+    assert_eq!(
+        web_counter_15108(&refreshed),
+        (7, 700),
+        "the probe must still show 7 after the refresh (#15108)"
+    );
+
+    // Traffic recorded through the refreshed handle keeps accumulating on
+    // the same counter (the old handle observes it too).
+    hit_web_15108(&refreshed, 1);
+    assert_eq!(web_counter_15108(&state), (8, 800));
+}
+
+#[test]
+fn changed_term_gets_fresh_counter_15108() {
+    // Counter-name change: same match/action, different `then count` name.
+    let state = make_filter_state(&counted_filter_15108("hits", "accept"), &[]);
+    hit_web_15108(&state, 7);
+    assert_eq!(web_counter_15108(&state), (7, 700));
+    let renamed = parse_filter_state_with_three_color_preserving(
+        &counted_filter_15108("renamed", "accept"),
+        &[],
+        &[],
+        &[],
+        "",
+        "",
+        Some(&state),
+    )
+    .expect("filter state compiles");
+    assert!(
+        !Arc::ptr_eq(
+            &state.filters["inet:edge"].terms[0].counter,
+            &renamed.filters["inet:edge"].terms[0].counter,
+        ),
+        "a renamed counter must not inherit the old counter (#15108)"
+    );
+    assert_eq!(web_counter_15108(&renamed), (0, 0));
+
+    // Match change: destination port 80 -> 443.
+    let mut moved = counted_filter_15108("hits", "accept");
+    moved[0].terms[0].destination_ports = vec!["443".into()];
+    let moved = parse_filter_state_with_three_color_preserving(
+        &moved,
+        &[],
+        &[],
+        &[],
+        "",
+        "",
+        Some(&state),
+    )
+    .expect("filter state compiles");
+    assert_eq!(
+        web_counter_15108(&moved),
+        (0, 0),
+        "a changed match must start from zero (#15108)"
+    );
+
+    // Action change: accept -> discard.
+    let discarded = parse_filter_state_with_three_color_preserving(
+        &counted_filter_15108("hits", "discard"),
+        &[],
+        &[],
+        &[],
+        "",
+        "",
+        Some(&state),
+    )
+    .expect("filter state compiles");
+    assert_eq!(
+        web_counter_15108(&discarded),
+        (0, 0),
+        "a changed action must start from zero (#15108)"
+    );
+}
+
+#[test]
+fn renamed_term_does_not_inherit_counter_15108() {
+    // A different term name at the same position is a different identity:
+    // (family, filter, term) lookup must not carry the old counter.
+    let state = make_filter_state(&counted_filter_15108("hits", "accept"), &[]);
+    hit_web_15108(&state, 7);
+    let mut renamed_term = counted_filter_15108("hits", "accept");
+    renamed_term[0].terms[0].name = "web2".into();
+    let refreshed = parse_filter_state_with_three_color_preserving(
+        &renamed_term,
+        &[],
+        &[],
+        &[],
+        "",
+        "",
+        Some(&state),
+    )
+    .expect("filter state compiles");
+    assert_eq!(web_counter_15108(&refreshed), (0, 0));
+}
+
 #[test]
 fn unsupported_three_color_snapshots_fail_closed_in_rust_compiler() {
     let cases = vec![
