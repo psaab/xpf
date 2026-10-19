@@ -1192,9 +1192,25 @@ func renderedConnectionHashes(cfg string, rendered map[string]bool) (map[string]
 // renderedSectionEntry returns one top-level, two-space-indented section
 // block. Rendered values are single-line, so the exact top-level closing
 // indentation cannot occur inside a value or nested child block.
+//
+// The start marker is anchored to a line start at exactly two spaces
+// ("<two spaces><name> {\n" preceded by a newline, or at offset 0 of the
+// section): a name like local, remote or children also appears as a
+// nested four-space block ("    local {\n") inside every connection, and
+// an unanchored strings.Index of "  local {\n" matches that nested
+// header at its third space, returning an earlier connection's tail
+// instead of the named connection's own block (#15180). Searching
+// "\n"+"  <name> {\n" only matches a header that starts a line; the
+// four nested spaces can never satisfy it, because the two characters
+// before the name would be spaces, not "\n"+two spaces at line start.
 func renderedSectionEntry(section, name string) (string, bool) {
 	marker := "  " + name + " {\n"
-	start := strings.Index(section, marker)
+	start := -1
+	if strings.HasPrefix(section, marker) {
+		start = 0
+	} else if idx := strings.Index(section, "\n"+marker); idx >= 0 {
+		start = idx + 1
+	}
 	if start < 0 {
 		return "", false
 	}
