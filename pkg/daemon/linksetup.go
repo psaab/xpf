@@ -218,14 +218,14 @@ func livePositionalHolders(nics []pciNIC, clusterMode bool) ([]string, error) {
 //
 // userspaceWorkers is the userspace-dp worker count from the active
 // config (0 if userspace dataplane is not configured). Used by D3 RSS
-// indirection to constrain mlx5 RSS to queues 0..workers-1 before any
-// AF_XDP socket binds.
+// indirection to constrain RSS to queues 0..workers-1 on every
+// capability-probed bound interface before any AF_XDP socket binds.
 // rssEnabled is the operator kill switch for D3 (#797 review feedback);
 // false skips D3 entirely even when userspace-dp has multiple workers.
 // rssAllowedInterfaces is the authoritative set of Linux interface
 // names that userspace-dp will bind AF_XDP on; D3 only touches
 // interfaces in that set (Codex H1 — prevents ethtool from reshaping
-// sibling mlx5 PFs or non-userspace-dp netdevs).
+// sibling PFs or non-userspace-dp netdevs).
 func enumerateAndRenameInterfaces(nodeID int, clusterMode bool, userspaceWorkers int, rssEnabled bool, rssAllowedInterfaces []string) error {
 	// #5842: through the injectable seam (shared with the device-map path) so
 	// the positional error channel is testable end to end, not only per-helper.
@@ -305,13 +305,14 @@ func enumerateAndRenameInterfaces(nodeID int, clusterMode bool, userspaceWorkers
 	// different channels.
 	nameErrs = append(nameErrs, verifyPositionalNames(fpc, clusterMode)...)
 
-	// D3 (#785): constrain mlx5 RSS indirection to queues 0..workers-1
-	// on every mlx5_core interface that userspace-dp will bind on.
+	// D3 (#785): constrain RSS indirection to queues 0..workers-1 on
+	// every capability-probed interface that userspace-dp will bind on
+	// (#9040: eligibility is a readable indirection table, not mlx5_core).
 	// Must run strictly before any AF_XDP bind — that ordering is
 	// structurally guaranteed because the dataplane is loaded later in
 	// daemon.Run(). The allowlist was derived from the compiled
 	// userspace-dp binding plan (Codex H1) so we never touch sibling
-	// mlx5 PFs that xpf is not driving.
+	// PFs that xpf is not driving.
 	applyRSSIndirection(rssEnabled, userspaceWorkers, rssAllowedInterfaces, realRSSExecutor{})
 
 	// #5842: surface any rename / .link-write / reload failure, mirroring the

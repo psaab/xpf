@@ -575,8 +575,9 @@ type priorHostTunables struct {
 	// that path; restore does nothing on it. Stored as a string so the
 	// exact byte form the kernel served is round-tripped on restore.
 	neighRetrans map[string]string
-	// rssOwned is the set of mlx5 interfaces whose RSS indirection
-	// table xpfd may have moved away from the kernel default (#6801).
+	// rssOwned is the set of interfaces (any driver, #15253) whose RSS
+	// indirection table xpfd may have moved away from the kernel
+	// default (#6801; the capability-probed apply set since #9040).
 	// Unlike the maps above this holds no captured VALUE: the restore
 	// action is `ethtool -X <iface> default`, the same idempotent call
 	// the rss-indirection kill switch issues, so the pre-xpfd table

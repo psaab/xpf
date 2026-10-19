@@ -340,11 +340,14 @@ func TestReleaseFailure_RetainsOwnershipAndRetries_6801(t *testing.T) {
 }
 
 // TestReleasedNICGone_DropsOwnershipWithoutEthtool_6801: a released name
-// that is no longer an mlx5 netdev (unplugged, renamed, or rebound) took
-// its ring/coalescence configuration with it. Ownership must be dropped
-// WITHOUT an ethtool call — both to honor the "never ethtool a non-mlx5
-// netdev" invariant and to stop the retry debt growing without bound on
-// a NIC that can never accept the restore.
+// whose driver can no longer be read (unplugged, renamed, or rebound --
+// readDriver returns "") took its ring/coalescence configuration with
+// it. Ownership must be dropped WITHOUT an ethtool call, so the retry
+// debt cannot grow without bound on a NIC that can never accept the
+// restore. RE-ANCHORED by #15253: a name that still reads as a real
+// non-mlx5 driver is different -- xpfd may have reshaped it under the
+// #9040 capability probe, so its RSS restore DOES run (see the 15253
+// cells); only the vanished case drops without a call.
 func TestReleasedNICGone_DropsOwnershipWithoutEthtool_6801(t *testing.T) {
 	d, fs, execer := seedTwoBoundNICs(t)
 
@@ -373,10 +376,13 @@ func TestReleasedNICGone_DropsOwnershipWithoutEthtool_6801(t *testing.T) {
 	}
 }
 
-// TestClaimNICTunableOwnership_SkipsNonMlx5_6801 pins the claim scope:
-// the userspace-dp allowlist legitimately carries virtio / i40e / iavf
-// names, and recording one as RSS-owned would make a later teardown
-// invoke ethtool on a netdev the RSS reconciler never touches.
+// TestClaimNICTunableOwnership_SkipsNonMlx5_6801 pins the claim scope.
+// RE-ANCHORED by #15253: since #9040 the RSS reconciler DOES touch
+// non-mlx5 netdevs (capability-probed), so the original expectation --
+// a non-mlx5 allowlist member must NOT be claimed -- was itself the
+// stale-driver-guard defect. What survives is the narrower true
+// contract: every allowlisted member is claimed (the potential-apply
+// set), and `lo` is never claimed.
 func TestClaimNICTunableOwnership_SkipsNonMlx5_6801(t *testing.T) {
 	d := &Daemon{}
 	fs := newFakeHostFS()
@@ -398,8 +404,9 @@ func TestClaimNICTunableOwnership_SkipsNonMlx5_6801(t *testing.T) {
 	if _, ok := d.priorTunables.rssOwned["ge-0-0-1"]; !ok {
 		t.Errorf("#6801: the mlx5 member must be claimed, got %v", d.priorTunables.rssOwned)
 	}
-	if _, ok := d.priorTunables.rssOwned["ge-0-0-3"]; ok {
-		t.Errorf("#6801: a non-mlx5 allowlist member must NOT be claimed, got %v", d.priorTunables.rssOwned)
+	if _, ok := d.priorTunables.rssOwned["ge-0-0-3"]; !ok {
+		t.Errorf("#15253: a non-mlx5 allowlist member MUST be claimed (capability-probed "+
+			"apply set), got %v", d.priorTunables.rssOwned)
 	}
 	if _, ok := d.priorTunables.rssOwned["lo"]; ok {
 		t.Errorf("#6801: lo must never be claimed, got %v", d.priorTunables.rssOwned)

@@ -451,7 +451,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		// (including typos) silently meant the enabled default.
 		"rss-indirection": {
 			args:          1,
-			desc:          "mlx5 RSS indirection reshaping (enable|disable)",
+			desc:          "RSS indirection reshaping (enable|disable)",
 			valueType:     ValueEnumOf,
 			valueDesc:     "RSS indirection reshaping (enable | disable; default enable)",
 			valueExamples: []string{"enable", "disable"},

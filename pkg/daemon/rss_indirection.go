@@ -2,11 +2,13 @@
 //
 // This file implements D3 RSS indirection persistence (issue #785).
 //
-// For mlx5_core-driven interfaces that will be bound to userspace-dp with
-// N workers, we reshape the hardware RSS indirection table so that hash
-// outputs land only on queues 0..N-1. Queues N..RX_count-1 are weighted 0
-// and never receive traffic. This avoids the wasted kernel-fallback path
-// on queues that no userspace worker consumes.
+// For interfaces that will be bound to userspace-dp with N workers and
+// that expose a readable RSS indirection table (probed per interface with
+// `ethtool -x`, #9040 -- not gated on the driver name), we reshape the
+// hardware RSS indirection table so that hash outputs land only on queues
+// 0..N-1. Queues N..RX_count-1 are weighted 0 and never receive traffic.
+// This avoids the wasted kernel-fallback path on queues that no userspace
+// worker consumes.
 //
 // Why a sibling file to linksetup.go (not inline): the weight-vector
 // computation is a pure function with several edge cases that deserve
@@ -265,8 +267,10 @@ func restoreDefaultRSSIndirection(allowed []string, execer rssExecutor) {
 //
 // Split out of restoreDefaultRSSIndirection's loop so the
 // released-interface teardown can release ownership only on success and
-// retain a failure as retry debt. The caller is responsible for the
-// mlx5 driver guard, exactly as it was when this body was inline.
+// retain a failure as retry debt. The caller is responsible for its own
+// eligibility check (allowlist membership, and for the released-NIC path
+// the still-mlx5 check that guards the coalescence restore sharing that
+// loop), exactly as it was when this body was inline.
 //
 // Idempotent: restoring an already-default table is a no-op ethtool
 // call, which is why this is a safe restore action for an interface
