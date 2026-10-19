@@ -666,3 +666,243 @@ fn submit_disconnect_purges_owned_inflight_entries_13195() {
     assert_eq!(core.live_count(), 0, "disconnect must purge owned entries");
     assert_eq!(core.stats_snapshot().purged_queued, 1);
 }
+// ---- #15112 (A73-01): reinject accept loops must survive accept errors ----
+//
+// The submit/complete threads used to `Err(_) => break` on every non-WouldBlock
+// accept error. An idle EMFILE (fd pressure with an empty backlog: the kernel
+// reserves the result descriptor before looking at the backlog) therefore
+// killed the thread permanently; its UnixListener was dropped and every later
+// IPsec FORWARD flow using the #9506 re-entry black-holed behind a healthy
+// control socket until a helper restart nothing triggers. The fix drives both
+// loops through lifecycle::accept_step with retry_unclassified = true (as the
+// session loop does): resource errors retry with backoff, unclassified errors
+// log-and-continue, and a later connection is served once pressure releases.
+//
+// These cells exercise the REAL spawn_reinject_socket_servers loops. EMFILE
+// is induced by exhausting this process's RLIMIT_NOFILE with /dev/null
+// duplicates while the sockets have no pending connection, then releasing
+// the duplicates and proving a fresh connection is still accepted and served
+// (submit: ANNOUNCE applies; complete: a queued completion is delivered).
+// Fd exhaustion is process-wide, so both cells share one lock.
+use std::sync::Mutex as StdMutex;
+static FD_PRESSURE_LOCK_15112: StdMutex<()> = StdMutex::new(());
+
+/// Lower this process's soft RLIMIT_NOFILE to `soft` for the duration of the
+/// guard (restored on drop). The test binary runs with a huge ambient limit
+/// (524288 here), far above what a freshly spawned thread stack of open
+/// /dev/null duplicates needs to be practical; lowering the soft limit is
+/// the deterministic, unprivileged way to make accept() return EMFILE.
+/// Callers must already hold FD_PRESSURE_LOCK_15112 so no sibling cell sees
+/// the lowered limit.
+struct RlimitGuard15112 {
+    saved: libc::rlimit,
+}
+
+impl RlimitGuard15112 {
+    fn lower_to(soft: u64) -> Self {
+        let mut saved = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit/setrlimit with valid pointers have no other
+        // preconditions; lowering the soft limit needs no privilege.
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut saved) }, 0);
+        assert!(soft <= saved.rlim_max, "soft limit must not exceed hard limit");
+        let lowered = libc::rlimit {
+            rlim_cur: soft,
+            rlim_max: saved.rlim_max,
+        };
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lowered) }, 0);
+        Self { saved }
+    }
+}
+
+impl Drop for RlimitGuard15112 {
+    fn drop(&mut self) {
+        // SAFETY: restoring the saved limit saved above.
+        unsafe {
+            libc::setrlimit(libc::RLIMIT_NOFILE, &self.saved);
+        }
+    }
+}
+
+fn count_open_fds_15112() -> usize {
+    std::fs::read_dir("/proc/self/fd").unwrap().count()
+}
+
+fn exhaused_fds_15112() -> Vec<std::fs::File> {
+    // Leave a small number of free slots so test-harness bookkeeping (result
+    // reporting, the client connect below) still works while accept() itself
+    // is starved: accept reserves its result descriptor from the same pool,
+    // so with only a handful of slots free and no other consumer racing,
+    // the accept loops still observe EMFILE once the pool is drained by the
+    // duplicates held here. We drain to within 2 of the (lowered) limit.
+    let mut held = Vec::new();
+    loop {
+        match std::fs::File::open("/dev/null") {
+            Ok(f) => held.push(f),
+            Err(e) => {
+                assert!(
+                    e.raw_os_error() == Some(libc::EMFILE)
+                        || e.raw_os_error() == Some(libc::ENFILE),
+                    "fd exhaustion must fail with EMFILE/ENFILE, got {e}"
+                );
+                break;
+            }
+        }
+    }
+    assert!(!held.is_empty(), "must hold fds to induce EMFILE");
+    held
+}
+
+#[test]
+fn reinject_submit_accept_survives_idle_emfile_15112() {
+    let _guard = FD_PRESSURE_LOCK_15112.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "xpf-reinject-15112-submit-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let control = dir.join("control.sock").to_string_lossy().to_string();
+    let core = open_core();
+    let target = live_target(&core);
+    let running = Arc::new(AtomicBool::new(true));
+    let servers =
+        spawn_reinject_socket_servers(&control, core.clone(), target, running.clone()).unwrap();
+    // Exhaust fds with NO connection pending (idle EMFILE), give both accept
+    // loops time to hit the error, then release the pressure.
+    let held = exhaused_fds_15112();
+    std::thread::sleep(Duration::from_millis(300));
+    drop(held);
+    std::thread::sleep(Duration::from_millis(100));
+    // The submit listener must still accept and serve: an ANNOUNCE on a fresh
+    // connection must apply its permit epoch to the fallback core.
+    let submit_path = derive_reinject_submit_path(&control);
+    let mut client = UnixStream::connect(&submit_path).unwrap_or_else(|e| {
+        panic!("submit listener dead after idle EMFILE (accept loop exited): {e}")
+    });
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let announcement = crate::slowpath_reinject_9506::AuthorityAnnouncement {
+        run_id: "run-15112".to_string(),
+        generation: 9,
+        permit_epoch: 4242,
+        permit_open: true,
+        queue_epochs: vec![(1, QEPOCH)],
+    };
+    client
+        .write_all(&encode_message(
+            MSG_ANNOUNCE,
+            &crate::slowpath_reinject_9506::encode_announce(&announcement),
+        ))
+        .unwrap();
+    let mut served = false;
+    for _ in 0..200 {
+        if core.authority_snapshot().2 == 4242 {
+            served = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        served,
+        "ANNOUNCE after idle EMFILE must be served (submit accept loop must survive)"
+    );
+    running.store(false, Ordering::Release);
+    drop(client);
+    let _ = servers.submit_thread.join();
+    let _ = servers.complete_thread.join();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn reinject_complete_accept_survives_idle_emfile_15112() {
+    let _guard = FD_PRESSURE_LOCK_15112.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "xpf-reinject-15112-complete-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let control = dir.join("control.sock").to_string_lossy().to_string();
+    let core = open_core();
+    let target = live_target(&core);
+    let running = Arc::new(AtomicBool::new(true));
+    let _rlimit = RlimitGuard15112::lower_to((count_open_fds_15112() + 64) as u64);
+    let servers =
+        spawn_reinject_socket_servers(&control, core.clone(), target, running.clone()).unwrap();
+    let held = exhaused_fds_15112();
+    std::thread::sleep(Duration::from_millis(300));
+    drop(held);
+    std::thread::sleep(Duration::from_millis(100));
+    // Queue a completion, then prove a fresh complete connection still
+    // receives it.
+    make_completion_ready_13715(&core, 15112);
+    let complete_path = derive_reinject_complete_path(&control);
+    let mut client = UnixStream::connect(&complete_path).unwrap_or_else(|e| {
+        panic!("complete listener dead after idle EMFILE (accept loop exited): {e}")
+    });
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let (message_type, payload) = read_message(&mut client).unwrap();
+    assert_eq!(message_type, MSG_COMPLETE);
+    let completions = crate::slowpath_reinject_9506::decode_complete(&payload).unwrap();
+    assert!(
+        completions.iter().any(|c| c.request_id == 15112),
+        "completion after idle EMFILE must be delivered: {completions:?}"
+    );
+    // Ack so ack_ready commits instead of releasing for redelivery.
+    client.write_all(&[REINJECT_COMPLETE_ACK]).unwrap();
+    running.store(false, Ordering::Release);
+    drop(client);
+    let _ = servers.submit_thread.join();
+    let _ = servers.complete_thread.join();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn reinject_accept_loops_are_wired_through_accept_step_15112() {
+    // Same textual-wiring shape as the #9172 lifecycle cell, extended to the
+    // #9506 loops in this file: every accept() result must go through
+    // accept_step with retry_unclassified = true. Patterns are built at
+    // runtime so this test's own text does not match.
+    let file = include_str!("reinject_9506.rs");
+    let spawn_sig = ["fn ", "spawn_reinject_socket_servers", "("].concat();
+    let start = file
+        .find(spawn_sig.as_str())
+        .expect("spawn_reinject_socket_servers not found");
+    let src = &file[start..];
+    let bare = [".", "accept", "()"].concat();
+    let call = ["accept_step", "("].concat();
+    let total = src.matches(bare.as_str()).count();
+    let mut calls = Vec::new();
+    for (i, _) in src.match_indices(call.as_str()) {
+        let args_end = src[i..]
+            .find(");")
+            .map(|e| i + e)
+            .expect("unterminated accept_step call");
+        calls.push(&src[i + call.len()..args_end]);
+    }
+    let wired = calls.iter().filter(|a| a.contains(bare.as_str())).count();
+    assert_eq!(
+        total, 2,
+        "spawn must accept on exactly the two reinject listeners, found {total}"
+    );
+    assert_eq!(
+        wired, total,
+        "every reinject accept() result must go through accept_step"
+    );
+    for name in ["\"reinject submit socket\"", "\"reinject complete socket\""] {
+        let c = calls
+            .iter()
+            .find(|a| a.contains(name))
+            .unwrap_or_else(|| panic!("{name} accept_step call missing"));
+        assert!(
+            c.trim_end().trim_end_matches(',').ends_with("true"),
+            "{name} loop must retry unclassified errors (retry_unclassified=true)"
+        );
+    }
+}
