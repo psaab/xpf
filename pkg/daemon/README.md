@@ -3,7 +3,8 @@
 Daemon lifecycle and orchestration. Loads the configured dataplane backend,
 applies compiled config to all subsystems (routing, NAT, DHCP, cluster, ...),
 handles signals
-(SIGHUP reload, SIGTERM shutdown), and wires the commit-atomicity
+(SIGTERM/SIGINT shutdown; SIGHUP explicitly ignored — no reload-on-HUP,
+configuration changes go through commit, #15084), and wires the commit-atomicity
 semaphore (#846) so `Store.Commit()` and `applyConfig()` always run
 together.
 
@@ -2708,6 +2709,31 @@ never lock an operator out of a remote box it manages.
     `d.daemonCtx` (the raw, signal-uncancelled parent), NOT the phase signal
     context — the teardown needs them live — so `initManagers` /
     `setupDataplaneAndInitialConfig` no longer take a `ctx` parameter.
+  - **SIGHUP is captured and ignored (#15084).** `Run` installs
+    `ignoreSIGHUP()` at the same TOP-of-Run point as the shutdown set.
+    SIGHUP has no reload semantics (no `ExecReload`; changes go through
+    commit), and before this capture nothing notified or ignored it, so
+    the default action killed xpfd with NO `runShutdownSequence` — no
+    HA fence, no `rg_active` clear, no priority-0 advert, no RA
+    goodbye — and systemd scored the death clean, so the unit's
+    `Restart=on-failure` never revived it: one stray
+    `systemctl kill -s HUP xpfd` (or a closing controlling terminal)
+    was an indefinite forwarding outage, or on HA an ungraceful
+    peer-loss failover after which the node never rejoined. The
+    capture is a `signal.Notify` channel (both modes, buffered 1):
+    each HUP is logged ("use commit") and discarded; the daemon keeps
+    forwarding. SIGHUP is deliberately kept OUT of the shutdown set
+    (`daemonSignals`) — an orderly exit-0 stop would still score
+    clean. As defence in depth the shipped unit
+    (`test/incus/xpfd.service`, staged by `debian/rules`) now carries
+    `RestartForceExitStatus=SIGHUP SIGPIPE`, so even a HUP death in a
+    window the capture cannot cover (pre-`Run`, an older binary under
+    the upgraded unit) is treated as a failure and restarted within
+    `RestartSec`. The version drop-in (`pkg/upgrade/flip.go`) rewrites
+    only `ExecStart`/`ExecStartPre`, so the directive survives cuts.
+    Pinned by `sighup_15084_test.go`: the shutdown set excludes SIGHUP
+    (and keeps SIGTERM/SIGINT), a real delivered HUP leaves the
+    process alive, and the parsed unit forces the restart.
   - **Wiring (the part that makes this actually fire on `systemctl stop`).**
     `applyCancelCtx` deliberately does **not** return `d.daemonCtx`. In
     production `cmd/xpfd` passes `context.Background()` into `Run`, and that
