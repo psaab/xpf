@@ -100,7 +100,10 @@ func ReplaceControlBytes(s string, repl byte) string {
 //     does not use it. A pre-gate config carrying one keeps booting.
 //
 // Glob metacharacters pass because each is one pattern. Callers that require
-// one literal pattern must also reject FirstGlobMetacharacter (#10089).
+// one literal pattern must also reject FirstGlobMetacharacter (#10089). A
+// leading '!' likewise passes: it occupies one slot, but inverts the whole
+// list — callers rendering a literal name must also reject
+// IsNegatedMatchPattern (#15079).
 func RendersAsOnePattern(name string) bool {
 	return name != "" && !strings.ContainsAny(name, " \t\n\v\f\r")
 }
@@ -133,6 +136,35 @@ func FirstGlobMetacharacter(name string) string {
 	return ""
 }
 
+// IsNegatedMatchPattern reports whether name, rendered as the first (or only)
+// word of a systemd [Match] Name=/OriginalName= value, carries systemd's
+// list-inversion prefix.
+//
+// systemd.network(5) and systemd.link(5) document those keys as a
+// whitespace-separated list of shell-style globs and add: "If the list is
+// prefixed with a \"!\", the test is inverted." The prefix is a property of
+// the LIST, not of any one glob, so a single rendered word "!eth0" does not
+// match the device eth0 — it matches every device EXCEPT eth0. A unit whose
+// [Network] body is the unmanaged always-down stanza (ActivationPolicy=
+// always-down, DHCP=no) rendered with such a name therefore claims, and
+// downs, every interface on the box other than the one it names — including
+// the management lifeline — and the 10-xpf- prefix makes that unit sort
+// first on every subsequent boot (#15079).
+//
+// Only the LEADING byte matters: systemd reads '!' anywhere else as an
+// ordinary glob character, so "eth0!" is one literal-ish pattern and
+// "e!th0" is inert. "!!x" is still one inverted test (the parser collapses
+// a run of leading '!' — see #14701), so any leading '!' reports true.
+//
+// This predicate is deliberately separate from RendersAsOnePattern and
+// SafeInterfaceName, exactly as the glob class is (#10089): "!eth0" IS one
+// pattern and control-free, so those predicates answer their own questions
+// truthfully by passing it. Whether a "yes" here means refuse is the
+// per-consumer decision at each render call site.
+func IsNegatedMatchPattern(name string) bool {
+	return strings.HasPrefix(name, "!")
+}
+
 // containsControlBytes reports whether s carries any ASCII control byte (C0
 // set or DEL). The byte-wise scan is correct for UTF-8 input because
 // multi-byte sequences never contain bytes below 0x80.
@@ -162,7 +194,9 @@ func containsControlBytes(s string) bool {
 // the lenient path scrubs them), and the recovery is a rename.
 //
 // What this predicate does NOT check: glob metacharacters (*?[]) PASS — they
-// are one pattern and control-free. Render-side glob refusal is #10089.
+// are one pattern and control-free. Render-side glob refusal is #10089. A
+// leading '!' (systemd's list-inversion prefix) likewise PASSes — it is one
+// slot. Render-side negation refusal is #15079 (IsNegatedMatchPattern).
 func SafeInterfaceName(name string) bool {
 	return SafeUnitToken(name)
 }

@@ -33,6 +33,10 @@ func fixRethLinkFile(ifName, kernelName string) {
 		slog.Warn("refusing glob RETH OriginalName", "iface", ifName, "kernelName", kernelName, "glob", glob)
 		return
 	}
+	if rendersafe.IsNegatedMatchPattern(kernelName) {
+		slog.Warn("refusing negated RETH OriginalName", "iface", ifName, "kernelName", kernelName)
+		return
+	}
 	path := filepath.Join(linkDir, linkPrefix+ifName+".link")
 	content := fmt.Sprintf("# Managed by xpfd — do not edit\n[Match]\nOriginalName=%s\n\n[Link]\nName=%s\n", kernelName, ifName)
 	// AtomicGeneratedConfig: regenerated each apply/boot; a torn file is
