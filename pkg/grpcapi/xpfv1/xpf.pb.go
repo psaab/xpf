@@ -4769,9 +4769,13 @@ type ScreenInfo struct {
 	// sub-thresholds). Only explicitly-configured positive values appear, so a
 	// consumer can distinguish a default threshold from an intentionally tight or
 	// accidentally clamped one (#3327).
-	Thresholds    map[string]int64 `protobuf:"bytes,3,rep,name=thresholds,proto3" json:"thresholds,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Thresholds map[string]int64 `protobuf:"bytes,3,rep,name=thresholds,proto3" json:"thresholds,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	// alarm_without_drop is the profile-wide Junos `alarm-without-drop`
+	// audit mode (#15175): when true every check alarms/logs but drops
+	// nothing. Additive: absent/false is the drop-enforcing default.
+	AlarmWithoutDrop bool `protobuf:"varint,4,opt,name=alarm_without_drop,json=alarmWithoutDrop,proto3" json:"alarm_without_drop,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *ScreenInfo) Reset() {
@@ -4823,6 +4827,13 @@ func (x *ScreenInfo) GetThresholds() map[string]int64 {
 		return x.Thresholds
 	}
 	return nil
+}
+
+func (x *ScreenInfo) GetAlarmWithoutDrop() bool {
+	if x != nil {
+		return x.AlarmWithoutDrop
+	}
+	return false
 }
 
 type GetEventsRequest struct {
@@ -10047,14 +10058,15 @@ const file_xpf_proto_rawDesc = "" +
 	" \x01(\tR\x13fromRoutingInstance\"\x12\n" +
 	"\x10GetScreenRequest\"A\n" +
 	"\x11GetScreenResponse\x12,\n" +
-	"\ascreens\x18\x01 \x03(\v2\x12.xpf.v1.ScreenInfoR\ascreens\"\xbb\x01\n" +
+	"\ascreens\x18\x01 \x03(\v2\x12.xpf.v1.ScreenInfoR\ascreens\"\xe9\x01\n" +
 	"\n" +
 	"ScreenInfo\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06checks\x18\x02 \x03(\tR\x06checks\x12B\n" +
 	"\n" +
 	"thresholds\x18\x03 \x03(\v2\".xpf.v1.ScreenInfo.ThresholdsEntryR\n" +
-	"thresholds\x1a=\n" +
+	"thresholds\x12,\n" +
+	"\x12alarm_without_drop\x18\x04 \x01(\bR\x10alarmWithoutDrop\x1a=\n" +
 	"\x0fThresholdsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"\x8b\x01\n" +

@@ -306,7 +306,9 @@ destination rule`, unknown selectors deny), matching the gRPC charges for
     #3328 REST exposed only the flattened list and no `configured` flag at all.
   - `GET /api/v1/security/screen` enumerates the configured screen
     profiles. Each `ScreenInfo` carries the profile `name`, a `checks`
-    string list, and a `thresholds` map (keyed by check name). The
+    string list, a `thresholds` map (keyed by check name), and
+    `alarm_without_drop` (#15175: the profile-wide audit mode in which
+    every check alarms/logs but nothing is dropped; omitted when false). The
     `checks` list and the shared helper are the single source of truth
     with gRPC `GetScreen` (`config.ScreenChecks` /
     `config.ScreenThresholds`, #3327) — before #3327 each API carried a

@@ -539,6 +539,9 @@ func (s *Server) GetScreen(_ context.Context, _ *pb.GetScreenRequest) (*pb.GetSc
 			Name:   name,
 			Checks: screenChecks(profile),
 		}
+		if profile != nil {
+			si.AlarmWithoutDrop = profile.AlarmWithoutDrop
+		}
 		if si.Checks == nil {
 			si.Checks = []string{}
 		}

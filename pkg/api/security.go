@@ -572,6 +572,9 @@ func (s *Server) screenHandler(w http.ResponseWriter, _ *http.Request) {
 	var result []ScreenInfo
 	for name, profile := range cfg.Security.Screen {
 		si := ScreenInfo{Name: name}
+		if profile != nil {
+			si.AlarmWithoutDrop = profile.AlarmWithoutDrop
+		}
 		si.Checks = screenChecks(profile)
 		if si.Checks == nil {
 			si.Checks = []string{}

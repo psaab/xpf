@@ -822,3 +822,33 @@ func screenRefsForProfile(refs []ScreenMissingProfileRef, profileName string) []
 	}
 	return out
 }
+
+// ScreenAlarmModeLine is the shared operator-facing mode line for a
+// profile carrying the profile-wide `alarm-without-drop` modifier
+// (#15175, B18-04). It returns "" for a nil or drop-enforcing profile,
+// so a caller can print it unconditionally after its profile header.
+// Before #15175 no show renderer read AlarmWithoutDrop: a profile whose
+// every check is log-only rendered with the same `enabled` values and
+// the same zone binding as a drop-enforcing one, and only
+// `show configuration` (or a Prometheus counter moving under attack)
+// revealed that the zone's screen drops nothing. One helper, beside
+// ScreenInertProfileLines, so the CLI, gRPC-text and REST-adjacent text
+// surfaces emit one wording and cannot drift.
+func ScreenAlarmModeLine(p *config.ScreenProfile) string {
+	if p == nil || !p.AlarmWithoutDrop {
+		return ""
+	}
+	return "Mode: alarm-without-drop (checks alarm; nothing is dropped)"
+}
+
+// ScreenCheckValue renders the Value-column token for one enabled screen
+// check under a profile: `alarm-only` when the profile alarms without
+// dropping, `enabled` otherwise (#15175). Threshold values are numeric
+// and are rendered by the caller unchanged — only the boolean
+// enabled token changes meaning under the modifier.
+func ScreenCheckValue(p *config.ScreenProfile) string {
+	if p != nil && p.AlarmWithoutDrop {
+		return "alarm-only"
+	}
+	return "enabled"
+}

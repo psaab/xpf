@@ -1166,8 +1166,9 @@ contract.
   Before #3328 this RPC exposed only the flattened list and no `configured`
   flag at all.
 - `GetScreen` enumerates the configured screen profiles. `ScreenInfo`
-  carries `name`, the `checks` string list, and a `map<string,int64>
-  thresholds`. The `checks` list and thresholds come from the shared
+  carries `name`, the `checks` string list, a `map<string,int64>
+  thresholds`, and `alarm_without_drop` (#15175: the profile-wide audit
+  mode in which every check alarms/logs but nothing is dropped). The `checks` list and thresholds come from the shared
   `config.ScreenChecks` / `config.ScreenThresholds` helpers — the same
   single source of truth the REST `GET /api/v1/security/screen` handler
   uses (#3327). Before #3327 this RPC and the REST handler each carried a
