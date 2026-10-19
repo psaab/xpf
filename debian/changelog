@@ -5,6 +5,16 @@ xpf (0.0.0) unstable; urgency=medium
     collector, and single-track-interface gates exactly like
     `vrrp-group`, instead of committing authentication and duplicate
     track statements that were silently ignored (#15762).
+  * Scope the embedded-ICMP error return fallback to the flow's own
+    routing domain / installing table: when the companion session is
+    absent, `embedded_icmp_return_resolution` and
+    `embedded_icmp_quoted_reply_resolution` resolved the original /
+    quoted source in the default `inet.0`/`inet6.0`, leaking VRF flows
+    onto the default table's egress (or blackholing them). The fallback
+    now resolves in the validated installing table or the native
+    routing-instance table and fails closed (`TableUnavailable`) when
+    no domain-scoped table exists; default-domain flows are unchanged
+    (#15771).
   * Reject the packed flat-set spelling of the Junos `sample`
     binding under unconsumed interface families as well: the braced
     spelling was rejected by #15654 but `family ethernet-switching
