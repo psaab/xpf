@@ -3816,6 +3816,19 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   the requester to normal election, and `ResetFailover` on the old owner clears
   its secondary pin so its higher priority may reclaim. Weight-zero, peer loss,
   and a new explicit transfer retain their normal precedence.
+- **`ResetFailover` ends ALL of the RG's transfer-commit state (#14979,
+  D34-04).** The reset cleared only `ManualFailover` / the role pin / the
+  remote lease, leaving `peerTransferOutOverride` (+ snapshot),
+  `peerTransferCommitGraceUntil`, and `localTransferOutHoldUntil` armed.
+  The override has no expiry and re-forces the peer to `SecondaryHold` on
+  every heartbeat, so a peer that reclaimed primary after the reset was
+  still rewritten down and the requester stayed dual-primary; and because
+  `suppressPeerTimeoutForTransferCommitLocked` scans the whole hold map,
+  one RG's stale hold suppressed peer-loss detection cluster-wide.
+  `ResetFailover` now clears all three for the reset RG only (via
+  `clearPeerTransferOutOverrideLocked`, keeping the override/snapshot
+  pairing), before its election runs; other RGs' live transfers are
+  untouched. `ResetAllFailover` inherits this via `ResetFailover`.
 - **Removing an RG must stop its armed hold timer (#5245).** `SetRGReady`
   arms a per-RG `time.AfterFunc` takeover-hold timer whose closure captures
   the `*RedundancyGroupState` and re-runs election on expiry. `UpdateConfig`'s

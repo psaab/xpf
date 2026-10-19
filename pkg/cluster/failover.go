@@ -380,6 +380,34 @@ func (m *Manager) ResetFailover(rgID int) error {
 	rg.ManualFailover = false
 	rg.transferCommitRolePinned = false
 	rg.ManualFailoverAt = time.Time{}
+	// Drop every piece of transfer-commit state for this RG (#14979, D34-04).
+	// ResetFailover is the operator's explicit declaration that the
+	// transfer this state describes is over and normal election resumes.
+	// Leaving any of it armed means stale transfer authority outlives the
+	// reset it was granted under:
+	//
+	//   - peerTransferOutOverride has NO expiry: it re-forces the peer to
+	//     SecondaryHold on every heartbeat (#6527/#6656), so electRG takes
+	//     its "Peer transfer out" arm and self-elects primary regardless
+	//     of what the peer reports — dual-primary if the peer has also
+	//     reclaimed (e.g. its own preempt reclaim after this reset).
+	//   - peerTransferCommitGraceUntil likewise rewrites every peer
+	//     heartbeat to SecondaryHold until it expires (~10s floor).
+	//   - localTransferOutHoldUntil is cluster-wide peer-timeout
+	//     suppression state (suppressPeerTimeoutForTransferCommitLocked
+	//     scans the whole map, not per-RG): one RG's leftover hold
+	//     suppresses peer-loss detection for the ENTIRE cluster, and it
+	//     also keeps a transferCommitRolePinned secondary parked via
+	//     electRG's committed-secondary arm.
+	//
+	// clearPeerTransferOutOverrideLocked also drops the reqID-matched
+	// peerTransferOutPrevious snapshot, keeping the override pair in
+	// lockstep (same pairing as notePeerTransferCommitted /
+	// FinalizePeerTransferOut / the RG-removal purge #8435). A later
+	// abort restore for a pre-reset reqID then no-ops on reqID mismatch.
+	m.clearPeerTransferOutOverrideLocked(rgID)
+	delete(m.peerTransferCommitGraceUntil, rgID)
+	delete(m.localTransferOutHoldUntil, rgID)
 	// Drop any armed remote transfer-out lease for this RG, mirroring the
 	// ManualFailover / ForceSecondary(ISSU) / ManualFailoverBatch reset paths.
 	// The lease's electRG auto-restore is gated on ManualFailover, so a leftover
