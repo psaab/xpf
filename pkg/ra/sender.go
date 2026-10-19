@@ -1220,7 +1220,7 @@ func (s *sender) randomAdvInterval() time.Duration {
 
 // eui64LinkLocal derives the EUI-64 IPv6 link-local address (fe80::/64) from a
 // 6-byte MAC. It returns nil if the MAC is not exactly 6 bytes. This mirrors
-// the daemon's ensureRethLinkLocal (pkg/daemon/daemon_reth.go) so the RA sender
+// the daemon's ensureRethLinkLocalExcluding (pkg/daemon/daemon_reth.go) so the RA sender
 // and the apply path converge on one well-reviewed derivation. Kept as a pure
 // function so the byte math is unit-testable without a netlink socket.
 func eui64LinkLocal(mac net.HardwareAddr) net.IP {
@@ -1240,7 +1240,7 @@ func eui64LinkLocal(mac net.HardwareAddr) net.IP {
 // If a link-local is already present (a daemon-managed stable or EUI-64 LLA, or
 // a kernel-generated one on a non-suppressed interface), this returns early. If
 // none exists, it adds the EUI-64 link-local directly via netlink with
-// IFA_F_NODAD — the same primitive the daemon uses in ensureRethLinkLocal /
+// IFA_F_NODAD — the same primitive the daemon uses in ensureRethLinkLocalExcluding /
 // addStableLLToInterface. It never mutates addr_gen_mode and never cycles the
 // link: addr_gen_mode=1 is a contract the apply path sets deliberately, and an
 // out-of-band link DOWN/UP from inside the RA manager would un-reconcile VIPs /
@@ -1262,7 +1262,7 @@ func ensureLinkLocal(iface *net.Interface) error {
 
 	// No link-local. Synthesize the EUI-64 fe80::/64 from the MAC and add it
 	// with NODAD — the same primitive the daemon uses for RETH link-locals
-	// (ensureRethLinkLocal / addStableLLToInterface). NODAD is set for
+	// (ensureRethLinkLocalExcluding / addStableLLToInterface). NODAD is set for
 	// consistency with that apply path and to suppress the DAD / MLDv2 solicit
 	// noise on addr_gen_mode=1 interfaces; it is not required to avoid a
 	// peer collision here, because the EUI-64 derivation folds in the RETH

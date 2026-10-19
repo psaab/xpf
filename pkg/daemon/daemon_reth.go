@@ -485,51 +485,122 @@ func clearDadFailed(ifName string) {
 	}
 }
 
-// removeAutoLinkLocal removes the kernel auto-generated link-local IPv6 address
-// from a RETH member interface. With addr_gen_mode=1 set, no new link-local will
-// be created on link-up, but a stale one may remain from before the sysctl change.
-func removeAutoLinkLocal(ifName string) {
-	link, err := netlink.LinkByName(ifName)
-	if err != nil {
-		return
+// rethLinkAddrsFn / rethLinkAddrDelFn / rethLinkAddrAddFn are the netlink
+// side-effect seams for the RETH link-local repair. They are package vars so
+// a test can drive removeAutoLinkLocalExcluding / ensureRethLinkLocalExcluding
+// decision logic without a privileged netdev.
+var (
+	rethLinkAddrsFn = func(ifName string) (netlink.Link, []netlink.Addr, error) {
+		link, err := netlink.LinkByName(ifName)
+		if err != nil {
+			return nil, nil, err
+		}
+		addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
+		if err != nil {
+			return nil, nil, err
+		}
+		return link, addrs, nil
 	}
-	addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
+	rethLinkAddrDelFn = func(link netlink.Link, addr *netlink.Addr) error {
+		return netlink.AddrDel(link, addr)
+	}
+	rethLinkAddrAddFn = func(link netlink.Link, addr *netlink.Addr) error {
+		return netlink.AddrAdd(link, addr)
+	}
+)
+
+// configuredRethLinkLocalIPs returns every configured IPv6 link-local
+// unicast address on the given RETH unit, in config order and de-duplicated.
+// A configured fe80::/64 is the operator's router link-local (installed as
+// an RG VIP on the primary), not a kernel auto address.
+func configuredRethLinkLocalIPs(rethCfg *config.InterfaceConfig, unitNum int) []net.IP {
+	if rethCfg == nil {
+		return nil
+	}
+	unit, ok := rethCfg.Units[unitNum]
+	if !ok || unit == nil {
+		return nil
+	}
+	var ips []net.IP
+	seen := make(map[string]bool)
+	for _, addr := range unit.Addresses {
+		ip, _, err := net.ParseCIDR(addr)
+		if err != nil {
+			continue
+		}
+		if ip.IsLinkLocalUnicast() && ip.To4() == nil && !seen[ip.String()] {
+			seen[ip.String()] = true
+			ips = append(ips, ip)
+		}
+	}
+	return ips
+}
+
+func ipInList(ip net.IP, list []net.IP) bool {
+	for _, candidate := range list {
+		if ip.Equal(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+// linkLocalShouldKeep reports whether a live link-local must survive the
+// auto-link-local strip: the auto stable pattern, or any address the
+// operator configured on that RETH unit (#15148).
+func linkLocalShouldKeep(ip net.IP, configured []net.IP) bool {
+	if cluster.IsStableRethLinkLocal(ip) {
+		return true
+	}
+	return ipInList(ip, configured)
+}
+
+// removeAutoLinkLocalExcluding removes kernel auto-generated link-local
+// IPv6 addresses from a RETH member interface, preserving the stable
+// pattern and any configured addresses passed in. With addr_gen_mode=1
+// set, no new link-local will be created on link-up, but a stale one may
+// remain from before the sysctl change.
+// Without the configured exemption, a configured fe80::1/64 was deleted
+// on every apply and only re-added by the 2s direct-mode VIP reconcile,
+// while a per-node EUI-64 stayed on the owner (#15148).
+func removeAutoLinkLocalExcluding(ifName string, configured []net.IP) {
+	link, addrs, err := rethLinkAddrsFn(ifName)
 	if err != nil {
 		return
 	}
 	for _, addr := range addrs {
 		if addr.IP.IsLinkLocalUnicast() {
-			// Preserve stable router link-locals managed by addStableRethLinkLocal.
-			if cluster.IsStableRethLinkLocal(addr.IP) {
+			if linkLocalShouldKeep(addr.IP, configured) {
 				continue
 			}
-			if err := netlink.AddrDel(link, &addr); err == nil {
+			addrCopy := addr
+			if err := rethLinkAddrDelFn(link, &addrCopy); err == nil {
 				slog.Info("removed auto link-local from RETH member", "iface", ifName, "addr", addr.IP)
 			}
 		}
 	}
 }
 
-// ensureRethLinkLocal adds a link-local IPv6 address to a RETH member
-// interface (or its VLAN sub-interface) if one is missing. RETH interfaces
-// have addr_gen_mode=1 to suppress MLDv2 noise, but the kernel needs a
-// link-local source address for NDP Neighbor Solicitations when forwarding
-// IPv6 traffic to on-link destinations. Without this, bpf_fib_lookup returns
-// NO_NEIGH and the kernel can never resolve the neighbor.
+// ensureRethLinkLocalExcluding adds a link-local IPv6 address to a RETH
+// member interface (or its VLAN sub-interface) if one is missing and no
+// configured link-local replaces it. RETH interfaces have addr_gen_mode=1
+// to suppress MLDv2 noise, but the kernel needs a link-local source
+// address for NDP Neighbor Solicitations when forwarding IPv6 traffic to
+// on-link destinations. Without this, bpf_fib_lookup returns NO_NEIGH and
+// the kernel can never resolve the neighbor.
 //
-// Computes EUI-64 link-local from the interface MAC and adds it with NODAD.
-func ensureRethLinkLocal(ifName string) {
-	link, err := netlink.LinkByName(ifName)
+// When a configured link-local exists it is the link-local for the unit,
+// so no per-node EUI-64 may be added (#15148).
+func ensureRethLinkLocalExcluding(ifName string, configured []net.IP) {
+	if len(configured) > 0 {
+		return
+	}
+	link, addrs, err := rethLinkAddrsFn(ifName)
 	if err != nil {
 		return
 	}
 	mac := link.Attrs().HardwareAddr
 	if len(mac) != 6 {
-		return
-	}
-	// Check if link-local already exists.
-	addrs, err := netlink.AddrList(link, netlink.FAMILY_V6)
-	if err != nil {
 		return
 	}
 	for _, a := range addrs {
@@ -545,12 +616,23 @@ func ensureRethLinkLocal(ifName string) {
 		IPNet: &net.IPNet{IP: ll, Mask: net.CIDRMask(64, 128)},
 		Flags: unix.IFA_F_NODAD,
 	}
-	if err := netlink.AddrAdd(link, addr); err != nil {
+	if err := rethLinkAddrAddFn(link, addr); err != nil {
 		slog.Warn("failed to add link-local to RETH interface",
 			"iface", ifName, "addr", ll, "err", err)
 	} else {
 		slog.Info("added link-local for NDP on RETH interface",
 			"iface", ifName, "addr", ll)
+	}
+}
+
+// rethParentLinkLocalRepair strips stale auto link-locals from a RETH parent
+// member, preserving configured unit-0 link-locals, and re-adds an EUI-64
+// only when unit 0 has IPv6 and no configured link-local (#15148).
+func rethParentLinkLocalRepair(linuxName string, rethCfg *config.InterfaceConfig) {
+	configured := configuredRethLinkLocalIPs(rethCfg, 0)
+	removeAutoLinkLocalFn(linuxName, configured)
+	if rethUnitHasIPv6(rethCfg, 0) {
+		ensureRethLinkLocalFn(linuxName, configured)
 	}
 }
 
@@ -674,24 +756,68 @@ func rethSubIfaceNameNeedsLinkLocal(rethCfg *config.InterfaceConfig, subName str
 }
 
 // removeAutoLinkLocalFn / ensureRethLinkLocalFn are the live wiring for the two
-// netlink side-effects of rethSubIfaceLinkLocalRepair. They are package vars
+// netlink side-effects of the RETH link-local repairs. They are package vars
 // (mirroring the device_map.go seam idiom) so a test can drive the repair
 // decision without real netlink and assert which sub-interface got a link-local.
+// The configured argument carries the unit's configured link-locals that
+// must survive the strip and suppress the EUI-64 (#15148).
 var (
-	removeAutoLinkLocalFn = removeAutoLinkLocal
-	ensureRethLinkLocalFn = ensureRethLinkLocal
+	removeAutoLinkLocalFn = removeAutoLinkLocalExcluding
+	ensureRethLinkLocalFn = ensureRethLinkLocalExcluding
 )
+
+// configuredRethLinkLocalIPsForVlan resolves a kernel VLAN sub-interface name
+// to every configured link-local on any unit mapped to its vlan-id
+// (duplicate vlan-ids scan all mapped units, mirroring
+// rethSubIfaceNeedsLinkLocal). A name with no numeric vlan-id, or a vlan-id
+// no unit carries, yields nil.
+func configuredRethLinkLocalIPsForVlan(rethCfg *config.InterfaceConfig, subName string) []net.IP {
+	if rethCfg == nil {
+		return nil
+	}
+	dotIdx := strings.LastIndex(subName, ".")
+	if dotIdx < 0 {
+		return nil
+	}
+	vid, err := strconv.Atoi(subName[dotIdx+1:])
+	if err != nil {
+		return nil
+	}
+	if _, ok := rethUnitForVlanID(rethCfg, vid); !ok {
+		return nil
+	}
+	var ips []net.IP
+	for unitNum, unit := range rethCfg.Units {
+		if unit == nil || unit.VlanID != vid {
+			continue
+		}
+		ips = append(ips, configuredRethLinkLocalIPs(rethCfg, unitNum)...)
+	}
+	// De-duplicate while preserving order.
+	seen := make(map[string]bool)
+	out := ips[:0]
+	for _, ip := range ips {
+		if !seen[ip.String()] {
+			seen[ip.String()] = true
+			out = append(out, ip)
+		}
+	}
+	return out
+}
 
 // rethSubIfaceLinkLocalRepair performs the per-VLAN-sub-interface link-local
 // repair the post-MAC loop in applyDataplaneAndHACore runs for each child of a
-// RETH member: always strip any stale kernel auto link-local, then re-add a
-// stable one IF the sub-interface carries IPv6 in config (resolved vlan-id ->
-// unit, #5107). Extracting the whole decision+action here keeps the netlink
-// enumeration loop a trivial one-line delegation and lets a spy-driven test bind
-// the parse/resolve/scan and the repair ordering without real netlink.
+// RETH member: strip any stale kernel auto link-local (preserving the auto
+// stable pattern and any configured link-local of the resolved unit), then
+// re-add an EUI-64 IF the sub-interface carries IPv6 in config (resolved
+// vlan-id -> unit, #5107) and no configured link-local replaces it (#15148).
+// Extracting the whole decision+action here keeps the netlink enumeration
+// loop a trivial one-line delegation and lets a spy-driven test bind the
+// parse/resolve/scan and the repair ordering without real netlink.
 func rethSubIfaceLinkLocalRepair(rethCfg *config.InterfaceConfig, subName string) {
-	removeAutoLinkLocalFn(subName)
+	configured := configuredRethLinkLocalIPsForVlan(rethCfg, subName)
+	removeAutoLinkLocalFn(subName, configured)
 	if rethSubIfaceNameNeedsLinkLocal(rethCfg, subName) {
-		ensureRethLinkLocalFn(subName)
+		ensureRethLinkLocalFn(subName, configured)
 	}
 }

@@ -3,6 +3,7 @@ package daemon
 import (
 	"io"
 	"log/slog"
+	"net"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -295,8 +296,8 @@ func TestRethSubIfaceNameNeedsLinkLocal(t *testing.T) {
 
 // TestRethSubIfaceLinkLocalRepairDrivesEnsureByVlanID binds the per-sub-interface
 // repair ACTION that the post-MAC loop in applyDataplaneAndHACore delegates to:
-// removeAutoLinkLocal runs for every child (unconditional stale-LL strip) and
-// ensureRethLinkLocal runs ONLY when the resolved vlan-id carries IPv6. The two
+// removeAutoLinkLocalExcluding runs for every child (stale-LL strip) and
+// ensureRethLinkLocalExcluding runs ONLY when the resolved vlan-id carries IPv6. The two
 // netlink side-effects are swapped for spies so the decision path (parse +
 // vlan-id->unit resolve + all-units scan + repair ordering) is driven without
 // real netlink. The remaining unbound surface is just the netlink LinkList/
@@ -309,8 +310,8 @@ func TestRethSubIfaceLinkLocalRepairDrivesEnsureByVlanID(t *testing.T) {
 	var removed, ensured []string
 	origRemove := removeAutoLinkLocalFn
 	origEnsure := ensureRethLinkLocalFn
-	removeAutoLinkLocalFn = func(n string) { removed = append(removed, n) }
-	ensureRethLinkLocalFn = func(n string) { ensured = append(ensured, n) }
+	removeAutoLinkLocalFn = func(n string, _ []net.IP) { removed = append(removed, n) }
+	ensureRethLinkLocalFn = func(n string, _ []net.IP) { ensured = append(ensured, n) }
 	t.Cleanup(func() {
 		removeAutoLinkLocalFn = origRemove
 		ensureRethLinkLocalFn = origEnsure
