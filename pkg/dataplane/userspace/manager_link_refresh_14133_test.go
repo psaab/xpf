@@ -147,13 +147,26 @@ func TestInterfaceLinkRefreshAttachesRecreatedIfindex14133(t *testing.T) {
 	if !found {
 		t.Fatalf("no AttachXDP attempt for recreated ifindex 29; attaches=%v (#14133)", attaches)
 	}
-	// Control: an unchanged refresh must not re-attach.
+	// Control (#15042): an unchanged refresh must not re-attach. The
+	// hook now simulates the production tracked state by reporting the
+	// ifindex already attached, which reconcile treats as attached —
+	// a second successful attach (e.g. if the pre-dedup reconcile ran
+	// twice) would record a duplicate here via the closure below.
 	attaches = nil
+	m.attachInterfaceXDPHook = func(ifindex int, forceGeneric bool) error {
+		if ifindex == 29 {
+			return errAlreadyAttachedForTest15042
+		}
+		attaches = append(attaches, ifindex)
+		return nil
+	}
 	published, err = m.RefreshInterfaceRowsForLink(cfg, "ge-0-0-0")
 	if err != nil {
 		t.Fatalf("unchanged refresh err = %v", err)
 	}
-	_ = published
+	if published {
+		t.Fatalf("unchanged refresh published; want dedup no-publish (#15042)")
+	}
 	if len(attaches) != 0 {
 		t.Fatalf("unchanged refresh re-attached: %v", attaches)
 	}

@@ -204,6 +204,7 @@ func (m *Manager) syncSnapshotLocked() error {
 	// unknown; see the catch-up above.
 	if hashOK && hash == m.lastSnapshotHash && m.publishedSnapshot != 0 && !m.applySnapshotOutcomeUnknown &&
 		m.partialOutcomeUnknown == 0 {
+		m.consumeRevalidateAttachLocked(&retained)
 		// Still update the published generation so subsequent checks pass.
 		m.pendingFullSnapshotMetadata = false
 		m.publishedSnapshot = m.lastSnapshot.Generation

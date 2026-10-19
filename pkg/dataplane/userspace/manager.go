@@ -101,8 +101,9 @@ type Manager struct {
 	// revalidateChangedIfindex records that the most recent
 	// prepareSnapshotForApply revalidation (or interface-row rebuild)
 	// moved at least one row's Ifindex/ParentIfindex (#14333). Guarded
-	// by mu; consumed and cleared by applyCompiledSnapshot to decide
-	// whether the pre-publish XDP attach reconciliation must run.
+	// by mu; consumed and cleared by consumeRevalidateAttachLocked in
+	// the shared send path (and applyCompiledSnapshot) to decide whether
+	// the pre-publish XDP attach reconciliation must run (#15042).
 	revalidateChangedIfindex bool
 
 	mu           sync.Mutex

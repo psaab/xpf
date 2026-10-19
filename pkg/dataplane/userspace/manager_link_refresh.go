@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cilium/ebpf/link"
 	"github.com/psaab/xpf/pkg/config"
 )
 
@@ -183,7 +184,14 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 	next.FIBGeneration = m.readFIBGeneration()
 	resampled := m.resampleUnresolvedSectionsLocked(&next)
 	m.refreshCaptureAuthorityLocked(&next)
-
+	// #15042: run the attach reconcile BEFORE (independent of) the hash
+	// dedup below. A prior non-Compile republish may have already adopted
+	// this recreated ifindex into lastSnapshot+hash without attaching
+	// (the pre-#15042 shared-send bug, or any attach that failed then);
+	// deduping first would return (false, nil) and leave the interface
+	// unshimmed until the next full Compile. The reconcile is a no-op
+	// for tracked ifindexes, so an unchanged refresh issues no attach.
+	m.reconcileInterfaceAttachmentsForRefreshLocked(&next)
 	if h, ok := snapshotContentHash(&next); ok && h == m.lastSnapshotHash &&
 		!m.applySnapshotOutcomeUnknown && m.partialOutcomeUnknown == 0 && resampled == 0 {
 		return false, nil
@@ -203,15 +211,9 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 		return false, err
 	}
 
-	// #14133: reconcile the kernel XDP attachment set against the snapshot
-	// being published. A recreated link carries a new ifindex with no shim,
-	// and the Rust helper never attaches XDP itself (it only binds AF_XDP
-	// sockets to interfaces the shim already covers), so without this the
-	// published interface would have no tracked XDP ingress until the next
-	// full Compile. Runs BEFORE publish (the helper cannot bind a socket to
-	// an unshimmed interface; the attach failure mode is an extra fail-closed
-	// drop, not a bypass — Compile's documented rationale).
-	m.reconcileInterfaceAttachmentsForRefreshLocked(&next)
+	// #14133/#15042: the attach reconcile already ran above, before the
+	// hash dedup, so it covers both the deduped and the publishing path;
+	// it is a no-op for already-tracked ifindexes.
 	publishSnap := next
 	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
 	var status ProcessStatus
@@ -267,7 +269,13 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 	if m == nil || next == nil {
 		return
 	}
-	tracked := m.bpfShim.XDPLinks()
+	if m.bpfShim == nil && m.attachInterfaceXDPHook == nil {
+		return
+	}
+	var tracked map[int]link.Link
+	if m.bpfShim != nil {
+		tracked = m.bpfShim.XDPLinks()
+	}
 	for _, ifindex := range buildUserspaceIngressIfindexes(next) {
 		if ifindex == 0 {
 			continue
@@ -277,9 +285,15 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 		}
 		row := interfaceRowForIfindex(next, ifindex)
 		forceGeneric := row != nil && (row.SecureTunnel || row.ParentIfindex > 0 || row.Tunnel)
-		attach := m.bpfShim.AttachXDP
+		var attach func(int, bool) error
+		if m.bpfShim != nil {
+			attach = m.bpfShim.AttachXDP
+		}
 		if m.attachInterfaceXDPHook != nil {
 			attach = m.attachInterfaceXDPHook
+		}
+		if attach == nil {
+			continue
 		}
 		if err := attach(int(ifindex), forceGeneric); err != nil {
 			if attachErrIsAlreadyAttached(err) {
