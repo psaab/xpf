@@ -91,8 +91,8 @@ use binding_index::{
 };
 use gre_classify::{
     InnerSessionAction, OuterDestinationLocal, USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
-    degraded_general_local_pass_applies, native_gre_fragment_stays_on_helper,
-    native_gre_inner_pass_steers_to_kernel_typed,
+    degraded_general_local_pass_applies, gre_inner_fragment_or_length_rejected,
+    native_gre_fragment_stays_on_helper, native_gre_inner_pass_steers_to_kernel_typed,
 };
 use ipv4_key::ipv4_map_key;
 use ipv4_len_gate::{ipv4_declared_len_covers_header, ipv4_declared_read_end};
@@ -1297,47 +1297,80 @@ fn classify_native_gre_inner_ipv4(data: usize, data_end: usize, l3_offset: usize
         return 0;
     }
     let protocol = iph[9];
+    // #14954: inner fragment / declared-length / LAND guards, decided in
+    // the host-executed `gre_classify` module. A fragmented inner has no
+    // complete L4 in this packet; a span past the declared total length
+    // is outer slack, not inner bytes; an inner LAND must not ride a
+    // session/DNAT/local hit to the kernel decapsulated unscreened.
+    let frag_field = u16::from_be_bytes([iph[6], iph[7]]);
+    let total_len = u16::from_be_bytes([iph[2], iph[3]]);
+    if (total_len as usize) < ihl {
+        return 0;
+    }
+    let Some(l4_offset) = l3_offset.checked_add(ihl) else {
+        return 0;
+    };
+    let is_frag = (frag_field & 0x3fff) != 0;
+    // Read the tuple ports first; the key is then built once with its
+    // final fields, so it is not live (and mutated) across the L4 reads.
+    // The fragment/declared-length verdict is judged per arm with the
+    // arm's constant span (host-executed via gre_classify).
+    let (src_port, dst_port) = match protocol {
+        PROTO_TCP => {
+            if gre_inner_fragment_or_length_rejected(is_frag, 0, total_len as usize, ihl, 14) {
+                return 0;
+            }
+            let Some(tcp) = (unsafe { read_bytes(data, data_end, l4_offset, 14) }) else {
+                return 0;
+            };
+            (
+                u16::from_be_bytes([tcp[0], tcp[1]]),
+                u16::from_be_bytes([tcp[2], tcp[3]]),
+            )
+        }
+        PROTO_UDP => {
+            if gre_inner_fragment_or_length_rejected(is_frag, 0, total_len as usize, ihl, 8) {
+                return 0;
+            }
+            let Some(udp) = (unsafe { read_bytes(data, data_end, l4_offset, 8) }) else {
+                return 0;
+            };
+            (
+                u16::from_be_bytes([udp[0], udp[1]]),
+                u16::from_be_bytes([udp[2], udp[3]]),
+            )
+        }
+        PROTO_ICMP => {
+            if gre_inner_fragment_or_length_rejected(is_frag, 0, total_len as usize, ihl, 8) {
+                return 0;
+            }
+            let Some(icmp) = (unsafe { read_bytes(data, data_end, l4_offset, 8) }) else {
+                return 0;
+            };
+            (u16::from_be_bytes([icmp[4], icmp[5]]), 0)
+        }
+        _ => {
+            if gre_inner_fragment_or_length_rejected(is_frag, 0, total_len as usize, ihl, 0) {
+                return 0;
+            }
+            (0, 0)
+        }
+    };
     let mut key = UserspaceSessionKey {
         addr_family: AF_INET,
         protocol,
         pad: 0,
-        src_port: 0,
-        dst_port: 0,
+        src_port,
+        dst_port,
         src_addr: [0; 16],
         dst_addr: [0; 16],
     };
     key.src_addr[..4].copy_from_slice(&iph[12..16]);
     key.dst_addr[..4].copy_from_slice(&iph[16..20]);
-    // #14323: big-endian to match Go's binary.BigEndian.Uint32() used
-    // for BPF map keys (DNAT_TABLE, USERSPACE_INTERFACE_NAT_V4, USERSPACE_LOCAL_V4)
-    // and parse_ipv4's dst_v4. See ipv4_key.rs.
-    let dst_v4 = ipv4_map_key([iph[16], iph[17], iph[18], iph[19]]);
-    let Some(l4_offset) = l3_offset.checked_add(ihl) else {
+    if key.src_addr == key.dst_addr {
         return 0;
-    };
-    match protocol {
-        PROTO_TCP => {
-            let Some(tcp) = (unsafe { read_bytes(data, data_end, l4_offset, 14) }) else {
-                return 0;
-            };
-            key.src_port = u16::from_be_bytes([tcp[0], tcp[1]]);
-            key.dst_port = u16::from_be_bytes([tcp[2], tcp[3]]);
-        }
-        PROTO_UDP => {
-            let Some(udp) = (unsafe { read_bytes(data, data_end, l4_offset, 8) }) else {
-                return 0;
-            };
-            key.src_port = u16::from_be_bytes([udp[0], udp[1]]);
-            key.dst_port = u16::from_be_bytes([udp[2], udp[3]]);
-        }
-        PROTO_ICMP => {
-            let Some(icmp) = (unsafe { read_bytes(data, data_end, l4_offset, 8) }) else {
-                return 0;
-            };
-            key.src_port = u16::from_be_bytes([icmp[4], icmp[5]]);
-        }
-        _ => {}
     }
+    // dst_v4 (the #14323 big-endian map key) is derived below from key.dst_addr.
     let action = session_action_for_key(&key);
     if action != 0 {
         return action;
@@ -1346,11 +1379,9 @@ fn classify_native_gre_inner_ipv4(data: usize, data_end: usize, l3_offset: usize
     // session-key shape. Dynamic SNAT-return DNAT entries use that identifier
     // as the port key, so native GRE must use the same field here or the first
     // reply falls through to the kernel path.
-    let dnat_port = if protocol == PROTO_ICMP {
-        key.src_port
-    } else {
-        key.dst_port
-    };
+    let dnat_port = if protocol == PROTO_ICMP { key.src_port } else { key.dst_port };
+    // #14323 big-endian map key, derived from the key's dst bytes.
+    let dst_v4 = ipv4_map_key([key.dst_addr[0], key.dst_addr[1], key.dst_addr[2], key.dst_addr[3]]);
     if dnat_lookup_v4(protocol, dst_v4, dnat_port).is_some() {
         return USERSPACE_SESSION_ACTION_REDIRECT;
     }
@@ -1419,23 +1450,33 @@ fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize
         return 0;
     }
     let protocol = ip6[6];
-    // #6886: bail out unless the inner next-header is a genuine L4 TERMINAL.
-    //
-    // This used to hand-list `HOP | ROUTING | DEST | AUTH | FRAGMENT`, which
-    // was the complete extension-header set when it was written and stopped
-    // being complete when #4517 added Mobility (135), HIP (139), Shim6 (140)
-    // and the two experimental values (253/254) to the walker. It also never
-    // covered No-Next-Header (59). Those six fell through to `_ => {}` and
-    // built a session key whose `protocol` field held an EXTENSION-HEADER
-    // type — an identity the real L4 hides behind, not an L4 identity.
-    //
-    // `eh_class` is the shim's own single classifier: its doc says the walk
-    // dispatches on it AND the emitted class table is generated from it, so it
-    // cannot describe a different set than the walk treats specially.
-    // Deferring to it is what stops this site drifting again the next time the
-    // walker learns a type — which is exactly how it drifted the first time,
-    // because #4517 swept the walker and not this shortcut.
+    let payload_len = u16::from_be_bytes([ip6[4], ip6[5]]);
+    // payload_len == 0 is the jumbogram escape: no finite declared end
+    // exists for the shim to bound reads by, and the worker declines the
+    // same shape in `packet_trimmed_len`, so miss rather than trust the
+    // capture length.
+    if payload_len == 0 {
+        return 0;
+    }
+    // #6886: bail unless the first next-header is a genuine L4 terminal.
+    // Every extension header — Fragment (44) included, direct or later in
+    // a chain — is non-terminal here, so a fragmented inner can never
+    // mint a key from this classifier: a direct Fragment bails below,
+    // and a Fragment behind Hop/Routing/Dest/AH equally bails because
+    // the FIRST header is already non-terminal. The helper adjudicates
+    // such inners after decap/reassembly.
     if eh_class(protocol) != EH_CLASS_TERMINAL {
+        return 0;
+    }
+    let Some(l4_offset) = l3_offset.checked_add(40) else {
+        return 0;
+    };
+    let l4_span_len = match protocol {
+        PROTO_TCP => 14,
+        PROTO_UDP | PROTO_ICMPV6 => 8,
+        _ => 0,
+    };
+    if l4_span_len > payload_len as usize {
         return 0;
     }
     let mut key = UserspaceSessionKey {
@@ -1449,10 +1490,9 @@ fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize
     };
     key.src_addr.copy_from_slice(&ip6[8..24]);
     key.dst_addr.copy_from_slice(&ip6[24..40]);
-    let dst_key = UserspaceInterfaceNatV6Key { domain: ingress_domain, addr: key.dst_addr };
-    let Some(l4_offset) = l3_offset.checked_add(40) else {
+    if key.src_addr == key.dst_addr {
         return 0;
-    };
+    }
     match protocol {
         PROTO_TCP => {
             let Some(tcp) = (unsafe { read_bytes(data, data_end, l4_offset, 14) }) else {
@@ -1486,15 +1526,11 @@ fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize
     // v4 path so the GRE-inner classify steers it to userspace for embedded-
     // ICMP reverse-NAT (#2406). ICMPv6 echo flows key the dnat entry on the
     // identifier (stored in src_port), matching publish_dnat_table_entry.
-    let dnat_port = if protocol == PROTO_ICMPV6 {
-        key.src_port
-    } else {
-        key.dst_port
-    };
+    let dnat_port = if protocol == PROTO_ICMPV6 { key.src_port } else { key.dst_port };
     if dnat_lookup_v6(protocol, &key.dst_addr, dnat_port).is_some() {
         return USERSPACE_SESSION_ACTION_REDIRECT;
     }
-    if unsafe { USERSPACE_INTERFACE_NAT_V6.get(&dst_key) }.is_some() {
+    if unsafe { USERSPACE_INTERFACE_NAT_V6.get(&UserspaceInterfaceNatV6Key { domain: ingress_domain, addr: key.dst_addr }) }.is_some() {
         return USERSPACE_SESSION_ACTION_REDIRECT;
     }
     if unsafe { USERSPACE_LOCAL_V6.get(&UserspaceLocalV6Key { domain: ingress_domain, addr: key.dst_addr }) }.is_some() {

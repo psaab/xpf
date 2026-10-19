@@ -209,8 +209,11 @@ pub struct ExtWalk {
     /// sighting; that would make the shim the more permissive side, which is
     /// the direction this issue exists to close.
     pub non_first_fragment: bool,
-    /// #14645: any Fragment header was sighted (first or non-first). A first
-    /// fragment (offset 0, M set) is still a fragment of a larger datagram.
+    /// #14645: a non-atomic Fragment header was sighted (first with M set,
+    /// or any with a non-zero offset). An atomic header (offset 0, M clear)
+    /// carries a whole datagram and does not set this; #14954: an atomic
+    /// header later in the chain must not erase an earlier non-atomic
+    /// sighting.
     pub fragment_seen: bool,
 }
 
@@ -300,6 +303,7 @@ pub fn walk_ipv6_ext_headers(
                 // screen and userspace walkers.
                 let word = u16::from_be_bytes([frag[2], frag[3]]);
                 let non_first_fragment_sighting = (word & 0xFFF8) != 0;
+                let fragment_seen_before = fragment_seen;
                 fragment_seen = true;
                 protocol = frag[0];
                 offset = offset.checked_add(mem::size_of::<FragHdr>() as u16)?;
@@ -308,8 +312,16 @@ pub fn walk_ipv6_ext_headers(
                     break;
                 }
                 // A first fragment with M clear is an atomic fragment: a
-                // whole datagram, not a piece of a larger one.
-                if word & 0x0001 == 0 {
+                // whole datagram, not a piece of a larger one. #14954:
+                // clear the sighting only when THIS header is the first
+                // Fragment header in the chain. Resetting on every atomic
+                // header let a chain [non-atomic Fragment][atomic
+                // Fragment] erase the earlier sighting, so a fragmented
+                // datagram reported `fragment_seen == false` (whole) and
+                // downstream fragment dispositions — notably the GRE
+                // inner classifier's fragment rejection and the shim's
+                // outer `is_fragment` — treated it as unfragmented.
+                if word & 0x0001 == 0 && !fragment_seen_before {
                     fragment_seen = false;
                 }
             }
