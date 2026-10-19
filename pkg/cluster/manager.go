@@ -249,7 +249,15 @@ type Manager struct {
 	// worst-case post-ACK commit latency; see DefaultRemoteTransferOutLease and
 	// SetRemoteTransferOutLeaseDuration.
 	remoteTransferOutLease time.Duration
-	peerMonitors           []InterfaceMonitorInfo
+	// abortedPeerTransferReqID records, per RG, the reqID of a peer-transfer
+	// request this node aborted locally after the owner ACKed (#15164). While
+	// the peer still advertises StateSecondaryHold, electRG must not take its
+	// "Peer transfer out" arm for that hold: the requester already reported
+	// the failover as failed and demoted. The entry is cleared when the peer
+	// stops advertising secondary-hold, on a committed transfer, on
+	// ResetFailover, on peer loss, and on RG removal. Read/written under m.mu.
+	abortedPeerTransferReqID map[int]uint64
+	peerMonitors             []InterfaceMonitorInfo
 
 	// lastDupNodeIDWarn rate-limits the duplicate-node-id warning (#4549 F11).
 	// A peer advertising the local node's own node-id is an invalid cluster
@@ -509,6 +517,12 @@ type Manager struct {
 	// node has explicitly assumed primary ownership.
 	peerFailoverCommitFn func(rgID int, reqID uint64) error
 
+	// peerFailoverAbortFn sends a reqID-bound abort for a previously
+	// acknowledged transfer-out this node is abandoning locally (#15164).
+	// Best-effort and fire-and-forget: the owner lease remains the crash
+	// fallback when it cannot be delivered.
+	peerFailoverAbortFn func(rgID int, reqID uint64) error
+
 	// peerFailoverBatchFn sends an explicit transfer-out request for multiple
 	// redundancy groups that must move together in one handoff unit.
 	peerFailoverBatchFn func(rgIDs []int) (uint64, error)
@@ -516,6 +530,9 @@ type Manager struct {
 	// peerFailoverCommitBatchFn sends the ownership-commit message for a
 	// previously acknowledged multi-RG transfer.
 	peerFailoverCommitBatchFn func(rgIDs []int, reqID uint64) error
+
+	// peerFailoverAbortBatchFn is the batch form of peerFailoverAbortFn.
+	peerFailoverAbortBatchFn func(rgIDs []int, reqID uint64) error
 
 	// peerFenceFn sends a fence (disable-rg) message to the peer.
 	// Set by daemon after sessionSync creation.
@@ -780,6 +797,7 @@ func NewManager(nodeID, clusterID int) *Manager {
 		peerTransferOutPrevious:        make(map[int]peerGroupSnapshot),
 		remoteTransferOutLeaseUntil:    make(map[int]time.Time),
 		remoteTransferOutLeaseReqID:    make(map[int]uint64),
+		abortedPeerTransferReqID:       make(map[int]uint64),
 		remoteTransferOutLease:         DefaultRemoteTransferOutLease,
 		localHAProtocolVersion:         CurrentHAProtocolVersion,
 		hbInterval:                     DefaultHeartbeatInterval,

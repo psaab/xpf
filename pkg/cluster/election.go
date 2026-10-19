@@ -178,10 +178,18 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 	// normal priority/tie-break election instead of unconditionally claiming
 	// primary on both nodes.
 	if peerGroup.State == StateSecondaryHold && !clearedManualFailover {
-		if rg.State != StatePrimary {
-			return electLocalPrimary, "Peer transfer out"
+		// #15164: a hold left by a request THIS node aborted must not
+		// re-promote us. The requester already reported the failover as
+		// failed; taking "Peer transfer out" here moves ownership contrary
+		// to that outcome (and under preempt the owner reclaims it at lease
+		// expiry, an unrequested second move). Fall through to normal
+		// election while the aborted hold is still what the peer advertises.
+		if _, aborted := m.abortedPeerTransferReqID[rg.GroupID]; !aborted {
+			if rg.State != StatePrimary {
+				return electLocalPrimary, "Peer transfer out"
+			}
+			return electNoChange, ""
 		}
-		return electNoChange, ""
 	}
 
 	// A completed operator transfer pins both ownership roles until the

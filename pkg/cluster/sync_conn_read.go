@@ -1243,6 +1243,23 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		}
 		slog.Info("cluster sync: batch failover commit ack received", "rgs", rgIDs, "req_id", reqID, "status", status, "detail", detail)
 		s.completeFailoverBatchCommitWait(failoverBatchKey(rgIDs), reqID, failoverAck{status: status, detail: detail})
+	case syncMsgFailoverAbort:
+		if len(payload) < 9 {
+			slog.Warn("cluster sync: failover abort message too short")
+			return
+		}
+		rgID := int(payload[0])
+		reqID := binary.LittleEndian.Uint64(payload[1:9])
+		slog.Info("cluster sync: remote failover abort received", "rg", rgID, "req_id", reqID)
+		go s.handleRemoteFailoverAbort(rgID, reqID)
+	case syncMsgFailoverBatchAbort:
+		rgIDs, reqID, err := decodeFailoverBatchRequestPayload(payload)
+		if err != nil {
+			slog.Warn("cluster sync: batch failover abort message decode failed", "err", err)
+			return
+		}
+		slog.Info("cluster sync: remote batch failover abort received", "rgs", rgIDs, "req_id", reqID)
+		go s.handleRemoteFailoverAbortBatch(rgIDs, reqID)
 	case syncMsgFence:
 		s.stats.FencesReceived.Add(1)
 		// #7147: a fence may carry an 8-byte sequence number asking for a

@@ -954,6 +954,11 @@ func (m *Manager) handlePeerTimeout() {
 		slog.Info("cluster: clearing peer transfer-out override (peer lost)", "rg", rgID)
 		m.clearPeerTransferOutOverrideLocked(rgID)
 	}
+	// #15164: peer loss also ends any aborted-request marker — the next peer
+	// incarnation's holds are not the request this node aborted.
+	for rgID := range m.abortedPeerTransferReqID {
+		delete(m.abortedPeerTransferReqID, rgID)
+	}
 
 	// #7147: under `disable-rg-confirmed` the fence runs BEFORE the election
 	// and this node waits, bounded, for the peer to confirm it relinquished

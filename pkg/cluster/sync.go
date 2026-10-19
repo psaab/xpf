@@ -255,6 +255,17 @@ const (
 	// above), so the chunk types take 45/46.
 	syncMsgDHCPLeaseV4Chunk = 45
 	syncMsgDHCPLeaseV6Chunk = 46
+	// syncMsgFailoverAbort / syncMsgFailoverBatchAbort (#15164) carry the
+	// reqID-bound abort of a previously acknowledged transfer-out: the
+	// requester abandoned the transfer locally after the ACK, so the owner
+	// restores promptly instead of waiting for its #5079 lease. Payloads
+	// mirror the commit frames ({rg u8, reqID u64} / batch encoding).
+	// ADDITIVE and version-bump-free on the #2239 precedent: an old peer
+	// hits the default receive case and ignores it, and the lease remains
+	// the fallback that restores the owner. 47/48: 45/46 are the #15160
+	// DHCP lease chunk types above.
+	syncMsgFailoverAbort      = 47
+	syncMsgFailoverBatchAbort = 48
 )
 
 // syncHeader is the wire header for each sync message.
@@ -1004,6 +1015,12 @@ type SessionSync struct {
 	// reqID identifies the request being committed so the owner can clear the
 	// matching auto-restore lease (#5079).
 	OnRemoteFailoverCommit func(rgID int, reqID uint64) error
+	// OnRemoteFailoverAbort restores this node after the requester aborted a
+	// previously acknowledged transfer-out (#15164). reqID-bound like the
+	// commit, so a stale abort cannot restore a newer request's hold.
+	OnRemoteFailoverAbort func(rgID int, reqID uint64) error
+	// OnRemoteFailoverAbortBatch is the multi-RG form.
+	OnRemoteFailoverAbortBatch func(rgIDs []int, reqID uint64) error
 	// OnRemoteFailoverBatch is called when the peer requests a multi-RG transfer-out.
 	OnRemoteFailoverBatch func(rgIDs []int, reqID uint64) error
 	// OnRemoteFailoverCommitBatch finalizes a previously acknowledged multi-RG handoff.

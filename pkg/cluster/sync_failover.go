@@ -481,6 +481,84 @@ func (s *SessionSync) handleRemoteFailoverCommitBatch(conn net.Conn, rgIDs []int
 	}
 	s.sendFailoverBatchResult(conn, syncMsgFailoverBatchCommitAck, rgIDs, reqID, failoverAckApplied, "")
 }
+
+// SendFailoverAbort notifies the owner that a previously acknowledged
+// transfer-out is abandoned (#15164). Fire-and-forget: there is no abort
+// ack, and the owner's #5079 lease restores it if this frame is lost.
+func (s *SessionSync) SendFailoverAbort(rgID int, reqID uint64) error {
+	if err := validateFailoverProtocolRGID(rgID); err != nil {
+		return err
+	}
+	conn := s.getActiveConn()
+	if conn == nil {
+		return fmt.Errorf("peer not connected")
+	}
+	payload := make([]byte, 9)
+	payload[0] = byte(rgID)
+	binary.LittleEndian.PutUint64(payload[1:9], reqID)
+	s.writeMu.Lock()
+	err := writeMsg(conn, syncMsgFailoverAbort, payload)
+	s.writeMu.Unlock()
+	if err != nil {
+		slog.Warn("cluster sync: failover abort send error", "err", err, "rg", rgID, "req_id", reqID)
+		s.stats.Errors.Add(1)
+		s.handleDisconnect(conn)
+		return fmt.Errorf("failed to send failover abort: %w", err)
+	}
+	slog.Info("cluster sync: failover abort sent to peer", "rg", rgID, "req_id", reqID)
+	return nil
+}
+
+// SendFailoverAbortBatch is the multi-RG form of SendFailoverAbort.
+func (s *SessionSync) SendFailoverAbortBatch(rgIDs []int, reqID uint64) error {
+	ids, err := normalizeFailoverRGIDs(rgIDs)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 1 {
+		return s.SendFailoverAbort(ids[0], reqID)
+	}
+	if err := validateFailoverProtocolRGIDs(ids); err != nil {
+		return err
+	}
+	if err := validateFailoverBatchRGCount(ids); err != nil {
+		return err
+	}
+	conn := s.getActiveConn()
+	if conn == nil {
+		return fmt.Errorf("peer not connected")
+	}
+	payload := encodeFailoverBatchRequestPayload(ids, reqID)
+	s.writeMu.Lock()
+	err = writeMsg(conn, syncMsgFailoverBatchAbort, payload)
+	s.writeMu.Unlock()
+	if err != nil {
+		slog.Warn("cluster sync: batch failover abort send error", "err", err, "rgs", ids, "req_id", reqID)
+		s.stats.Errors.Add(1)
+		s.handleDisconnect(conn)
+		return fmt.Errorf("failed to send batch failover abort: %w", err)
+	}
+	slog.Info("cluster sync: batch failover abort sent to peer", "rgs", ids, "req_id", reqID)
+	return nil
+}
+
+func (s *SessionSync) handleRemoteFailoverAbort(rgID int, reqID uint64) {
+	if s.OnRemoteFailoverAbort == nil {
+		return
+	}
+	if err := s.OnRemoteFailoverAbort(rgID, reqID); err != nil {
+		slog.Warn("cluster sync: remote failover abort failed", "rg", rgID, "req_id", reqID, "err", err)
+	}
+}
+
+func (s *SessionSync) handleRemoteFailoverAbortBatch(rgIDs []int, reqID uint64) {
+	if s.OnRemoteFailoverAbortBatch == nil {
+		return
+	}
+	if err := s.OnRemoteFailoverAbortBatch(rgIDs, reqID); err != nil {
+		slog.Warn("cluster sync: remote batch failover abort failed", "rgs", rgIDs, "req_id", reqID, "err", err)
+	}
+}
 func (s *SessionSync) sendFailoverResult(conn net.Conn, msgType uint8, rgID int, reqID uint64, status uint8, detail string) {
 	ackConn := s.getActiveConn()
 	if ackConn == nil {

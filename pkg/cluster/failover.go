@@ -406,6 +406,7 @@ func (m *Manager) ResetFailover(rgID int) error {
 	// FinalizePeerTransferOut / the RG-removal purge #8435). A later
 	// abort restore for a pre-reset reqID then no-ops on reqID mismatch.
 	m.clearPeerTransferOutOverrideLocked(rgID)
+	delete(m.abortedPeerTransferReqID, rgID)
 	delete(m.peerTransferCommitGraceUntil, rgID)
 	delete(m.localTransferOutHoldUntil, rgID)
 	// Drop any armed remote transfer-out lease for this RG, mirroring the
@@ -512,6 +513,7 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 	m.failoverInProgress[rgID] = owner
 	fn := m.peerFailoverFn
 	commitFn := m.peerFailoverCommitFn
+	abortFn := m.peerFailoverAbortFn
 	transferReadyFn := m.transferReadinessFn
 	peerAlive := m.peerAlive
 	localCommitReadyFn := m.localTransferCommitReadyFn
@@ -577,17 +579,17 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 		// The commit applies peerTransferOutOverride before running the
 		// election. Roll back the reqID-matched override and restore the
 		// preexisting local manual-failover hold on every commit failure.
-		m.abortRequestedPeerFailover(rgID, reqID, hold)
+		m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn)
 		return err
 	}
 	if localCommitReadyFn != nil {
 		if err := localCommitReadyFn([]int{rgID}); err != nil {
-			m.abortRequestedPeerFailover(rgID, reqID, hold)
+			m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn)
 			return err
 		}
 	}
 	if err := commitFn(rgID, reqID); err != nil {
-		m.abortRequestedPeerFailover(rgID, reqID, hold)
+		m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn)
 		return err
 	}
 	m.notePeerTransferCommitted(rgID)
@@ -617,6 +619,7 @@ func (m *Manager) commitRequestedPeerFailover(rgID int, reqID uint64) error {
 	}
 
 	m.applyPeerTransferOutOverrideLocked(rgID, reqID)
+	delete(m.abortedPeerTransferReqID, rgID)
 	delete(m.peerTransferCommitGraceUntil, rgID)
 	delete(m.localTransferOutHoldUntil, rgID)
 	peerGroup := m.peerGroups[rgID]
@@ -635,16 +638,26 @@ func (m *Manager) commitRequestedPeerFailover(rgID int, reqID uint64) error {
 	return nil
 }
 
-func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold manualFailoverHoldSnapshot) {
+func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold manualFailoverHoldSnapshot, abortFn func(rgID int, reqID uint64) error) {
+	// #15164: record the aborted reqID BEFORE any election can re-run, so a
+	// heartbeat that still advertises the owner's secondary-hold under this
+	// request cannot re-promote us via "Peer transfer out". Then notify the
+	// owner (best-effort, outside m.mu) so it restores promptly; its lease
+	// remains the fallback if the frame is lost.
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	m.abortedPeerTransferReqID[rgID] = reqID
 	restoredOverride := m.restorePeerTransferOutOverrideLocked(rgID, reqID)
 	if restoredOverride {
 		delete(m.peerTransferCommitGraceUntil, rgID)
 		m.runElection()
 	}
 	m.restoreManualFailoverHoldLocked(rgID, hold)
+	m.mu.Unlock()
+	if abortFn != nil {
+		if err := abortFn(rgID, reqID); err != nil {
+			slog.Warn("cluster: peer failover abort send failed; owner lease remains as fallback", "rg", rgID, "req_id", reqID, "err", err)
+		}
+	}
 }
 
 func (m *Manager) notePeerTransferCommitted(rgID int) {
@@ -652,6 +665,7 @@ func (m *Manager) notePeerTransferCommitted(rgID int) {
 	defer m.mu.Unlock()
 
 	m.clearPeerTransferOutOverrideLocked(rgID)
+	delete(m.abortedPeerTransferReqID, rgID)
 	if rg := m.groups[rgID]; rg != nil {
 		rg.transferCommitRolePinned = true
 		rg.transferCommitRole = StatePrimary
@@ -739,6 +753,54 @@ func (m *Manager) clearRemoteTransferOutLeaseLocked(rgID int) {
 	delete(m.remoteTransferOutLeaseReqID, rgID)
 }
 
+// AbortRemoteTransferOut restores this node after the requester aborted a
+// previously acknowledged transfer-out (#15164). It is reqID-bound exactly
+// like the lease clear: only the request that armed the current lease may
+// abort it, so a stale abort cannot restore an owner demoted by a newer
+// request. Restoring clears the manual hold, restores monitor-derived
+// weight, and re-runs election promptly instead of waiting for lease
+// expiry. A committed transfer has already cleared the lease, so a late
+// abort after commit is a no-op.
+func (m *Manager) AbortRemoteTransferOut(rgID int, reqID uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rg, ok := m.groups[rgID]
+	if !ok {
+		return fmt.Errorf("redundancy group %d not found", rgID)
+	}
+	cur, leased := m.remoteTransferOutLeaseReqID[rgID]
+	if !leased || cur != reqID {
+		return nil
+	}
+	m.clearRemoteTransferOutLeaseLocked(rgID)
+	if !rg.ManualFailover {
+		return nil
+	}
+	rg.ManualFailover = false
+	rg.ManualFailoverAt = time.Time{}
+	m.manualFailoverRestoreWeightLocked(rg)
+	slog.Info("cluster: remote transfer-out aborted by requester, restoring owner", "rg", rgID, "req_id", reqID)
+	m.runElection()
+	return nil
+}
+
+// AbortRemoteTransferOutBatch is the multi-RG form of AbortRemoteTransferOut.
+func (m *Manager) AbortRemoteTransferOutBatch(rgIDs []int, reqID uint64) error {
+	ids, err := normalizeFailoverRGIDs(rgIDs)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 1 {
+		return m.AbortRemoteTransferOut(ids[0], reqID)
+	}
+	for _, rgID := range ids {
+		if err := m.AbortRemoteTransferOut(rgID, reqID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // debtDerivedWeightLocked returns the monitor-derived weight for an RG without
 // changing it. Caller must hold m.mu.
 func (m *Manager) debtDerivedWeightLocked(rg *RedundancyGroupState) int {
@@ -786,6 +848,7 @@ func (m *Manager) FinalizePeerTransferOut(rgID int) error {
 	// secondary-hold here, the next heartbeat can immediately re-elect the
 	// old owner during rapid failback/failover sequences.
 	delete(m.peerTransferOutOverride, rgID)
+	delete(m.abortedPeerTransferReqID, rgID)
 	delete(m.peerTransferCommitGraceUntil, rgID)
 	m.localTransferOutHoldUntil[rgID] = time.Now().Add(m.transferCommitGracePeriodLocked())
 	if oldState != rg.State {
@@ -1090,6 +1153,7 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 	}
 	fn := m.peerFailoverBatchFn
 	commitFn := m.peerFailoverCommitBatchFn
+	abortFn := m.peerFailoverAbortBatchFn
 	transferReadyFn := m.transferReadinessFn
 	peerAlive := m.peerAlive
 	localCommitReadyFn := m.localTransferCommitReadyFn
@@ -1154,17 +1218,17 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 	m.mu.Unlock()
 
 	if err := m.commitRequestedPeerFailoverBatch(ids, reqID); err != nil {
-		m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots)
+		m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots, abortFn)
 		return err
 	}
 	if localCommitReadyFn != nil {
 		if err := localCommitReadyFn(ids); err != nil {
-			m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots)
+			m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots, abortFn)
 			return err
 		}
 	}
 	if err := commitFn(ids, reqID); err != nil {
-		m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots)
+		m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots, abortFn)
 		return err
 	}
 	m.notePeerTransferCommittedBatch(ids)
@@ -1197,6 +1261,7 @@ func (m *Manager) commitRequestedPeerFailoverBatch(rgIDs []int, reqID uint64) er
 
 	for _, rgID := range rgIDs {
 		m.applyPeerTransferOutOverrideLocked(rgID, reqID)
+		delete(m.abortedPeerTransferReqID, rgID)
 		delete(m.peerTransferCommitGraceUntil, rgID)
 		delete(m.localTransferOutHoldUntil, rgID)
 	}
@@ -1221,12 +1286,11 @@ func (m *Manager) commitRequestedPeerFailoverBatch(rgIDs []int, reqID uint64) er
 	return nil
 }
 
-func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64, holds map[int]manualFailoverHoldSnapshot) {
+func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64, holds map[int]manualFailoverHoldSnapshot, abortFn func(rgIDs []int, reqID uint64) error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	restoredOverride := false
 	for _, rgID := range rgIDs {
+		m.abortedPeerTransferReqID[rgID] = reqID
 		if m.restorePeerTransferOutOverrideLocked(rgID, reqID) {
 			delete(m.peerTransferCommitGraceUntil, rgID)
 			restoredOverride = true
@@ -1238,6 +1302,12 @@ func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64, hol
 	for _, rgID := range rgIDs {
 		m.restoreManualFailoverHoldLocked(rgID, holds[rgID])
 	}
+	m.mu.Unlock()
+	if abortFn != nil {
+		if err := abortFn(rgIDs, reqID); err != nil {
+			slog.Warn("cluster: peer failover batch abort send failed; owner lease remains as fallback", "rgs", rgIDs, "req_id", reqID, "err", err)
+		}
+	}
 }
 
 func (m *Manager) notePeerTransferCommittedBatch(rgIDs []int) {
@@ -1246,6 +1316,7 @@ func (m *Manager) notePeerTransferCommittedBatch(rgIDs []int) {
 
 	for _, rgID := range rgIDs {
 		m.clearPeerTransferOutOverrideLocked(rgID)
+		delete(m.abortedPeerTransferReqID, rgID)
 		if rg := m.groups[rgID]; rg != nil {
 			rg.transferCommitRolePinned = true
 			rg.transferCommitRole = StatePrimary
@@ -1297,6 +1368,7 @@ func (m *Manager) FinalizePeerTransferOutBatch(rgIDs []int) error {
 		// heartbeat can still force the peer into secondary-hold and snap the
 		// RG back during rapid alternating moves.
 		delete(m.peerTransferOutOverride, rgID)
+		delete(m.abortedPeerTransferReqID, rgID)
 		delete(m.peerTransferCommitGraceUntil, rgID)
 		m.localTransferOutHoldUntil[rgID] = time.Now().Add(m.transferCommitGracePeriodLocked())
 		if oldState != rg.State {
@@ -1442,6 +1514,17 @@ func (m *Manager) suppressPeerTimeoutForTransferCommitLocked(now time.Time) (boo
 // read/mutated through the *Manager receiver as before. Caller must hold
 // m.mu write-locked (matching the existing handlePeerHeartbeat protocol).
 func (m *Manager) applyTransferCommitOverridesOnPeerStateLocked(newPeerGroups map[int]PeerGroupState, now time.Time) {
+	// #15164: an aborted-request marker lives only while the peer still
+	// advertises the hold it was recorded against (raw wire state, before
+	// the override/grace rewrites below). Once the peer reports any other
+	// state the abort has taken effect (or been superseded) and a later,
+	// legitimate transfer-out must promote normally again.
+	for rgID := range m.abortedPeerTransferReqID {
+		peerGroup, ok := newPeerGroups[rgID]
+		if !ok || peerGroup.State != StateSecondaryHold {
+			delete(m.abortedPeerTransferReqID, rgID)
+		}
+	}
 	for rgID := range m.peerTransferOutOverride {
 		peerGroup, ok := newPeerGroups[rgID]
 		if !ok {

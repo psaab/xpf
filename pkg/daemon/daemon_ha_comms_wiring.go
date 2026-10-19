@@ -573,6 +573,14 @@ func (d *Daemon) wireSessionSyncFailoverCallbacks(ss *cluster.SessionSync) {
 		}
 		return nil
 	}
+	// #15164: the requester aborted after our ACK — restore promptly
+	// instead of waiting for the #5079 lease to expire.
+	ss.OnRemoteFailoverAbort = func(rgID int, reqID uint64) error {
+		return d.cluster.AbortRemoteTransferOut(rgID, reqID)
+	}
+	ss.OnRemoteFailoverAbortBatch = func(rgIDs []int, reqID uint64) error {
+		return d.cluster.AbortRemoteTransferOutBatch(rgIDs, reqID)
+	}
 	// #5640: gate the transfer-out applied-ack on the local demotion
 	// actually being actuated (VRRP resigned / rg_active cleared),
 	// closing the two-owner window where the peer promoted off an ack
@@ -593,8 +601,10 @@ func (d *Daemon) wireClusterPeerFailoverHooks(ss *cluster.SessionSync) {
 	// failover requests via the fabric sync connection.
 	d.cluster.SetPeerFailoverFunc(ss.SendFailover)
 	d.cluster.SetPeerFailoverCommitFunc(ss.SendFailoverCommit)
+	d.cluster.SetPeerFailoverAbortFunc(ss.SendFailoverAbort)
 	d.cluster.SetPeerFailoverBatchFunc(ss.SendFailoverBatch)
 	d.cluster.SetPeerFailoverCommitBatchFunc(ss.SendFailoverCommitBatch)
+	d.cluster.SetPeerFailoverAbortBatchFunc(ss.SendFailoverAbortBatch)
 	d.cluster.SetPreManualFailoverHook(d.prepareUserspaceManualFailover)
 	d.cluster.SetLocalTransferCommitReadyHook(d.waitLocalFailoverCommitReady)
 	// #5079: size the owner-side transfer-out lease above the requester's

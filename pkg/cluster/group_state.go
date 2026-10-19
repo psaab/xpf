@@ -139,6 +139,7 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 			delete(m.peerTransferOutPrevious, id)
 			delete(m.remoteTransferOutLeaseUntil, id)
 			delete(m.remoteTransferOutLeaseReqID, id)
+			delete(m.abortedPeerTransferReqID, id)
 			delete(m.groups, id)
 		}
 	}
