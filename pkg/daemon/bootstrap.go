@@ -1306,6 +1306,26 @@ func (d *Daemon) applianceFactoryBoot() bool {
 
 // Returns the current kernel name of the lifeline NIC and ok=false when no
 // default route exists.
+// isDefaultRoute reports whether r is a true default route: a nil
+// destination, or an unspecified destination with prefix length 0
+// (0.0.0.0/0 or ::/0). A split-default route such as 0.0.0.0/1 or ::/1
+// carries an unspecified address but a non-zero mask, so it is NOT a
+// default route (#15220). Checking only IsUnspecified admitted such
+// tunnel routes as the management lifeline.
+func isDefaultRoute(r *netlink.Route) bool {
+	if r.Dst == nil {
+		return true
+	}
+	if len(r.Dst.IP) == 0 {
+		return true
+	}
+	if !r.Dst.IP.IsUnspecified() {
+		return false
+	}
+	ones, _ := r.Dst.Mask.Size()
+	return ones == 0
+}
+
 func detectLifelineInterface() (name string, ok bool, err error) {
 	var firstErr error
 	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
@@ -1321,8 +1341,7 @@ func detectLifelineInterface() (name string, ok bool, err error) {
 		}
 		for i := range routes {
 			r := &routes[i]
-			// A default route has a nil/zero-length destination.
-			if r.Dst != nil && len(r.Dst.IP) != 0 && !r.Dst.IP.IsUnspecified() {
+			if !isDefaultRoute(r) {
 				continue
 			}
 			if r.LinkIndex <= 0 {
@@ -1934,7 +1953,7 @@ func snapshotLifelineAddrs(name string) (lifelineAddrSnapshot, error) {
 		}
 		for i := range routes {
 			r := &routes[i]
-			if r.Dst != nil && len(r.Dst.IP) != 0 && !r.Dst.IP.IsUnspecified() {
+			if !isDefaultRoute(r) {
 				continue
 			}
 			if r.Gw == nil {
