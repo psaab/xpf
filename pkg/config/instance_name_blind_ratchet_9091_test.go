@@ -231,6 +231,11 @@ var instanceNameBlindBaseline9091 = []string{
 	"/services/ip-monitoring/policy/then/preferred-route/routing-instance/route",
 	"/services/rpm/probe",
 	"/services/rpm/probe/test",
+	// #15124: /snmp/community stays SCHEMA-blind on purpose — arming
+	// closedWorld was measured to refuse the legal flat-set chain and the
+	// deliberate `view` advisory (#9265) — and is closed instead by the
+	// scoped compiler gate in compileSNMP (strict reject, lenient warn +
+	// deny-all quarantine). Schema-blind here no longer means fail-open.
 	"/snmp/community",
 	"/snmp/trap-group",
 	"/snmp/v3/usm/local-engine/user",

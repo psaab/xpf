@@ -143,27 +143,22 @@ func instanceNameArmed9265Rows() []instanceNameArmed9265Row {
 			clean:  "security { zones { security-zone z1 { address-book { address a1 10.0.0.0/24; address-set s1 { address a1; } } } } }",
 			bogus:  "security { zones { security-zone z1 { address-book { address a1 10.0.0.0/24; address-set s1 { address a1; xpfbogus 5; } } } } }"},
 
-		// NOT armed, REFUSED BY AN ACCEPTANCE ROW RATHER THAN BY THE UPPER-BOUND
-		// ARGUMENT. Both were armed in a first pass and `go test ./...` caught
-		// them; they are the reason criterion 3 exists.
-		//
-		//	/snmp/community  fails TWICE.
-		//	  #4306 S-5 deliberately ACCEPTS an undeclared `view` knob with an
-		//	  advisory (TestSNMPInertKnobAdvisories); a closed world refuses it.
-		//	  And #9416's supported packed spelling
-		//	  `community <c> client-list-name <n> authorization read-only` puts a
-		//	  legal community-level keyword UNDER the terminal
-		//	  `client-list-name` leaf via the flat-set chain, where the INHERITED
-		//	  closed world refuses it
-		//	  (TestSNMPClientListFlatSetSpellings9416/reference_BEFORE_authorization).
-		//	/protocols/router-advertisement/interface/prefix
-		//	  the packed flag spelling `prefix <p> no-autonomous no-onlink` is
-		//	  ACCEPTED today and a closed world refuses it -- "unknown
-		//	  configuration keyword \"no-onlink\" under closed-world subtree".
-		//
-		// Both rows stay, as `stillFailOpen`, so the bogus keyword they still
-		// accept is RECORDED rather than quietly dropped from the board.
-		{path: "/snmp/community", verdict: stillFailOpen,
+		// #15124 closes /snmp/community WITHOUT arming it. `closedWorld: true`
+		// was measured and refused twice (see the history below the row):
+		// #4306 deliberately ACCEPTS an undeclared `view` knob with an
+		// advisory, and #9416's supported packed spelling
+		// `community <c> client-list-name <n> authorization read-only` puts a
+		// legal community-level keyword UNDER the terminal `client-list-name`
+		// leaf via the flat-set chain, where the INHERITED closed world
+		// refuses it. The #15124 gate is scoped to the community level in
+		// compileSNMP (strict reject / lenient warn + deny-all quarantine,
+		// permitted set read from the schema), so the bogus keyword below is
+		// now refused by that DOWNSTREAM gate — hence coveredDownstream, the
+		// same verdict /snmp/trap-group carries for its #2990 gate. The
+		// `clean` row still carries `view myview`: it must keep committing
+		// (advisory, not reject), which is what stops anyone closing this
+		// container with the schema flag instead.
+		{path: "/snmp/community", verdict: coveredDownstream,
 			// #9416's supported packed spelling. This line is the FAIL-ON-REVERT
 			// guard for the decision not to arm `snmp community`: arming it makes
 			// the inherited closed world refuse `authorization` under the terminal
