@@ -229,6 +229,11 @@ func syncPrimeProgressObserved(current, baseline cluster.SyncStatsSnapshot) bool
 		current.DeletesReceived > baseline.DeletesReceived
 }
 
+// syncPrimeRetryIntervalsForTest overrides the prime-retry sleep schedule
+// so the #15686 regression can fire the first attempt without waiting out
+// the production 10s first interval. Nil in production.
+var syncPrimeRetryIntervalsForTest []time.Duration
+
 func (d *Daemon) startSessionSyncPrimeRetry(gen uint64) {
 	ss := d.getSessionSync()
 	if ss == nil || d.dataplane() == nil {
@@ -236,6 +241,9 @@ func (d *Daemon) startSessionSyncPrimeRetry(gen uint64) {
 	}
 	go func() {
 		intervals := []time.Duration{10 * time.Second, 20 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second}
+		if syncPrimeRetryIntervalsForTest != nil {
+			intervals = syncPrimeRetryIntervalsForTest
+		}
 		// #9626: the same bound the sweep's owed cold-prime re-drive waits for.
 		retryWhileAckPendingAfter := cluster.BulkAckPendingRetryAfter
 		maxAttempts := len(intervals)
@@ -331,36 +339,28 @@ func (d *Daemon) startSessionSyncPrimeRetry(gen uint64) {
 	}()
 }
 
-// bulkSyncViaEventStreamOrFallback attempts to export all sessions via the
-// event stream (fast path — sessions flow through the existing event stream
-// callback into QueueSessionV4/V6). Falls back to the old BulkSync path
-// (iterating BPF maps from Go) when the event stream isn't available.
+// bulkSyncViaEventStreamOrFallback runs the authoritative bulk window for
+// a prime-retry attempt (#15686).
+//
+// It MUST NOT take the legacy event-stream export
+// (ExportAllSessionsViaEventStream): that path pushes unframed,
+// non-owner-filtered Open deltas through the incremental stream, so it
+// produces no BulkStart/BulkEnd, no BulkAck, and therefore never sets
+// syncPeerBulkPrimed nor discharges the cold-prime debt — the retry loop
+// would burn every attempt and exhaust with the peer still unprimed.
+// wireSessionSyncPeerCallbacks retired that path for cold-prime in
+// #5085/#6031 and wires BulkSnapshotSource instead; the retry must go
+// through the same authoritative window (DoBulkSync), which frames
+// BulkStart + the BulkSnapshotSource (or store-walk) sessions + BulkEnd
+// and whose matching BulkAck discharges ColdPrimeOwed.
+//
+// The name is retained because the retry call site and its tests name
+// it; it no longer probes userspaceEventStreamExporter at all.
 func (d *Daemon) bulkSyncViaEventStreamOrFallback(ss *cluster.SessionSync) error {
-	// userspaceEventStreamExporter is a local probe satisfied by
-	// *dataplane/userspace.LegacyDataPlaneAdapter via
-	// ExportAllSessionsViaEventStream (legacy_dataplane.go:422).
-	// Type-assertion target is the published dataplane directly — the
-	// legacyDP() round-trip retired in #1519 added no method-set coverage.
-	// #2114: ONE snapshot feeds the nil-check, the assertion, and the %T
-	// log below (plan §5.3 rules 3/9).
-	rt := d.dataplane()
-	if rt != nil {
-		if exporter, ok := rt.(userspaceEventStreamExporter); ok {
-			slog.Info("cluster: using event stream export for bulk sync")
-			if err := exporter.ExportAllSessionsViaEventStream(); err != nil {
-				slog.Warn("cluster: event stream bulk export failed, falling back to BulkSync", "err", err)
-			} else {
-				slog.Info("cluster: exported sessions via event stream for bulk sync")
-				return nil
-			}
-		}
-	}
-	slog.Info("cluster: event stream export not available, falling back to BulkSync",
-		"dp_type", fmt.Sprintf("%T", rt))
 	if ss == nil {
 		return fmt.Errorf("session sync not initialized")
 	}
-	return ss.BulkSync()
+	return ss.DoBulkSync()
 }
 
 // rg0ConfigSyncAuthority is the SINGLE, transport-independent rule for whether
