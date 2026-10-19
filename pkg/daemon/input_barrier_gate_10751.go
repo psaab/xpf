@@ -78,16 +78,22 @@ func ensureEarlyInputProtectionForNaming(cfg *config.Config) bool {
 // without sysfs.
 var lifelineRecordNameFn = resolveLifelineCurrentName
 
-// resolveEarlyInputGuardLifelines computes the iifname admit set for the
+// resolveEarlyInputGuardLifelines computes the member admit set for the
 // pre-handoff lifeline guard, from most- to least-verified identity:
 //
-//   - Canonical defaults: em0, fab0, fab1, the vrf-mgmt master, and fxp0
-//     unless an explicit non-fxp0 management leaf narrows it out (OQ-D: a
-//     repurposed fxp0 is revenue, not management). vrf-mgmt is admitted
-//     because Linux VRF receive switches skb->dev to the master for
-//     ordinary local delivery on enslaved interfaces — slave names alone
-//     need not match (B4); both master and slaves stay listed so either
-//     observed path matches.
+//   - Canonical defaults: em0, fab0, fab1, and fxp0 unless an explicit
+//     non-fxp0 management leaf narrows it out (OQ-D: a repurposed fxp0 is
+//     revenue, not management). The vrf-mgmt MASTER is deliberately NOT
+//     admitted (#15286): Linux VRF receive switches skb->dev to the master
+//     for ordinary local delivery on enslaved interfaces, so an
+//     `iifname "vrf-mgmt"` admit would blanket-admit every co-enslaved
+//     member — including a declared zoned non-lifeline fxp1 that is NOT a
+//     host-inbound lifeline (TestDHCPLeaseChangeRequiresRecompile_
+//     ZonedNonLifelineFxp1) yet would gain host ingress for the whole
+//     bootstrap/pre-handoff window. The barrier emits a companion
+//     `meta sdifname {lifelines} accept` (cf. the gap fence in
+//     netlink_fence.go) that recovers each enslaved lifeline member
+//     behind the master without admitting the master or its other members.
 //   - Verified protected set (B6): the persisted lifeline record plus the
 //     explicit management-interface leaf, via the same pure core the fence
 //     builders use — record/leaf over name guesses.
@@ -99,18 +105,19 @@ var lifelineRecordNameFn = resolveLifelineCurrentName
 //     opens that NIC for the bootstrap window — inherent without config;
 //     the first commit converges to configured policy).
 //
-// The returned set is sorted and deduplicated. Whole-NIC (not
-// destination-scoped) admits are deliberate: daddr scoping from a live
-// snapshot goes stale on DHCP renewal, while no config exists to tell
-// revenue IPs from management IPs on one NIC — interface identity plus
-// narrowing is the finest verifiable boundary available pre-config.
+// The returned set is sorted and deduplicated, contains member names only
+// (never a VRF master), and feeds BOTH the iifname and sdifname admits.
+// Whole-NIC (not destination-scoped) admits are deliberate: daddr scoping
+// from a live snapshot goes stale on DHCP renewal, while no config exists
+// to tell revenue IPs from management IPs on one NIC — interface identity
+// plus narrowing is the finest verifiable boundary available pre-config.
 func resolveEarlyInputGuardLifelines(cfg *config.Config) []string {
 	mgmtLeaf := ""
 	if cfg != nil {
 		mgmtLeaf = cfg.System.ManagementInterface
 	}
 	set := map[string]bool{}
-	for _, d := range []string{"em0", "fab0", "fab1", config.ManagementVRFDeviceName} {
+	for _, d := range []string{"em0", "fab0", "fab1"} {
 		set[d] = true
 	}
 	if mgmtLeaf == "" || mgmtLeaf == defaultMgmtInterface {

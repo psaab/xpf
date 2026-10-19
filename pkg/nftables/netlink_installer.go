@@ -56,9 +56,13 @@ type Installer interface {
 	// cannot prove the table survived.
 	EarlyInputBarrierPresent() (bool, error)
 	// InstallEarlyInputBarrierWithLifelineAdmit installs the same barrier
-	// table with a leading `iifname {lifelines} accept` (bootstrap recovery:
-	// data stays closed, the management lifeline stays reachable). The
-	// ordinary handoff removes the table unchanged.
+	// table with leading per-member lifeline admits: `iifname {lifelines}
+	// accept` plus `meta sdifname {lifelines} accept` (#15286 — bootstrap
+	// recovery: data stays closed, each lifeline member stays reachable,
+	// including an enslaved member via sdifname, without admitting its VRF
+	// master or co-enslaved non-lifeline members; callers pass member names
+	// only, never a VRF master). The ordinary handoff removes the table
+	// unchanged.
 	InstallEarlyInputBarrierWithLifelineAdmit(lifelines []string) error
 	// InstallHostInbound installs the real host-inbound table (#3070/#3333).
 	InstallHostInbound(spec HostInboundSpec) error

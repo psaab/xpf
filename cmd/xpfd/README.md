@@ -82,8 +82,11 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
   before networkd. It admits loopback, mandatory L3, family-split DHCP-client
   replies, and established flows; all host services remain blocked until
   host-inbound handoff. Bootstrap swaps in a lifeline-admitting variant
-  (whole lifeline NICs, including their link-locals — em0/fab0/fab1/
-  fxp0/vrf-mgmt by name assumption plus the persisted record; the internal
+  (whole lifeline NICs, including their link-locals — em0/fab0/fab1/fxp0
+  member names by assumption plus the persisted record, matched per member
+  via `iifname` plus `meta sdifname` so an enslaved lifeline is admitted
+  without admitting the vrf-mgmt master or any co-enslaved non-lifeline
+  member such as a zoned fxp1 (#15286); the internal
   `system management-interface` field can also contribute when populated, but
   its config-mode grammar is deferred, so operators cannot use it to narrow
   fxp0 out); a default-route fallback NIC is admitted whole only when no
