@@ -504,6 +504,16 @@ the userspace dataplane admission boundary is in
   fail-open in exactly the same way — applies its source restriction to the
   community and carries a commit advisory saying the routing-instance SCOPING
   itself is not enforced (the agent binds one socket in the default instance).
+  An UNKNOWN community child — `client 10.0.0.0/8`, `clinets …`,
+  `client-list-nam L`, or any other undeclared keyword — is REJECTED at
+  strict commit naming the token and, on the tolerant path, warns and
+  QUARANTINES the community to deny-all (#15124, A85-05): prior fixes in
+  this family each repaired a named spelling, and this is the default
+  arm they all lacked, scoped to the community level in the compiler
+  (not `closedWorld`, whose inheritance would refuse the legal flat-set
+  chain and the `view` advisory). A defined-but-unreferenced
+  `snmp client-list` is likewise named at commit instead of sitting
+  silently inert.
   The remaining SNMP source-restriction axes are named at commit rather than
   silently ignored: `snmp interface` / `filter-interfaces` (restrict by arrival
   interface), `snmp routing-instance-access`, and `community <c> logical-system`

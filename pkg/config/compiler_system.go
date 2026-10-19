@@ -2166,6 +2166,192 @@ func normalizeSharedUMEMArtifactInterfaceMap(artifact map[string]interface{}, ke
 	return nil
 }
 
+// #15124 (A85-05): an UNKNOWN child of `snmp community <c>` — `client
+// 10.0.0.0/8`, `clinets …`, `client-list-nam L`, or any other undeclared
+// keyword — was skipped by both community walks with no error or warning,
+// so a one-letter typo in the operator-authored source ACL left the
+// community answering EVERY source (AllowsSource reads an empty allowlist
+// as allow-all) on a green commit. Prior fixes (#4289, #4834, #5472,
+// #5833, #5898, #8778, #9416, #10687) each fixed a NAMED spelling; none
+// added a default arm. This gate is that default arm.
+//
+// NOT closedWorld on the community schema: that flag INHERITS, and the
+// recorded #9265 measurement shows it would refuse the legal flat-set
+// chain `community <c> client-list-name L authorization read-only`
+// (the inherited walk sees `authorization` under the terminal
+// `client-list-name` leaf) and the deliberate accept-with-advisory
+// `view` knob (#4306). This gate is scoped to the community level,
+// inherits nothing, and reads its permitted set from the schema
+// (snmpCommunitySchema9416) so a child declared later is permitted
+// automatically. The inert knobs `view` and `logical-system` stay
+// accept-with-advisory (snmpInertKnobWarnings) and are permitted here.
+//
+// Strict (commit / commit-check): hard-reject naming the token.
+// Lenient (load / peer-sync): warn AND quarantine the community to
+// deny-all, the #5833 shape — the authored restriction (if any) cannot
+// be trusted, so the community must not answer any source until the
+// operator fixes the typo. Never echoes the community NAME (a secret).
+
+// snmpCommunityKnownChildren15124 returns the permitted child keywords
+// of `snmp community <c>`: the schema-declared children plus the inert
+// knobs the compiler deliberately accepts with an advisory.
+func snmpCommunityKnownChildren15124() (permitted map[string]bool, declared []string) {
+	permitted = map[string]bool{}
+	if schema := snmpCommunitySchema9416(); schema != nil {
+		for k := range schema.children {
+			permitted[k] = true
+		}
+	}
+	// Inert knobs accepted with an advisory by snmpInertKnobWarnings
+	// (#4306/#9416): modelled nowhere, enforced nowhere, but NAMED at
+	// commit — not unknown, and not source restrictions to quarantine
+	// over (a `logical-system` block's nested restriction already gets
+	// its own explicit fail-open advisory there).
+	permitted["view"] = true
+	permitted["logical-system"] = true
+	declared = make([]string, 0, len(permitted))
+	for k := range permitted {
+		declared = append(declared, k)
+	}
+	sort.Strings(declared)
+	return permitted, declared
+}
+
+// snmpCommunityUnknownMessage renders the operator-facing text for an
+// unknown community child. `lenient` appends the quarantine note, so the
+// two paths cannot describe the same condition differently. Only the
+// offending TOKEN is named — never the community name (a secret).
+func snmpCommunityUnknownMessage15124(tok string, declared []string, lenient bool) string {
+	msg := fmt.Sprintf(
+		"snmp community: %q is not a community statement xpf implements (known: %s) — it compiles to NOTHING: it commits clean, renders in `show configuration`, and has no effect; a mistyped source restriction (e.g. `client` for `clients`, `client-list-nam` for `client-list-name`) would leave the community answering every source (#15124)",
+		tok, strings.Join(declared, ", "))
+	if lenient {
+		msg += "; the affected community is quarantined to deny-all until the statement is fixed"
+	}
+	return msg
+}
+
+// snmpCommunityUnknownChildren15124 reports the unknown child keywords
+// authored under one community block, across every AST shape
+// compileSNMP accepts:
+//
+//   - braced / hierarchical children (after expandFlatRun, the same view
+//     the statement collection reads, so flat-set chains are judged as
+//     the statements they flatten to);
+//   - the Keys-packed run on the community node itself
+//     (`community <c> client 10.0.0.0/8;` brace-elided), scanned with the
+//     schema's arity so a declared leaf's VALUE is never mistaken for a
+//     keyword — including a `clients` value run, which ends only at the
+//     next declared keyword;
+//   - children nested under a leaf the walk descends through
+//     (`authorization`, `routing-instance`): a flat-set chain nests the
+//     next statement there, and an unknown token in that position is the
+//     same typo one level down. `routing-instance`'s own body is
+//     closedWorld in the schema, so only its chain-nested siblings are
+//     judged here, not its declared body.
+//
+// Apply statements are skipped (Junos permits them at any level, #7029).
+// A declared leaf's value children (e.g. the braced `clients { … }`
+// entries) are VALUES, never judged.
+func snmpCommunityUnknownChildren15124(child *Node, commChildren []*Node, permitted map[string]bool) []string {
+	var unknown []string
+	seen := map[string]bool{}
+	report := func(tok string) {
+		if tok == "" || seen[tok] {
+			return
+		}
+		seen[tok] = true
+		unknown = append(unknown, tok)
+	}
+	// Keys-packed run on the community node: Keys[0]=="community",
+	// Keys[1]==<name>, the rest is the packed body.
+	packedSchema := snmpCommunitySchema9416()
+	for i := 2; i < len(child.Keys); i++ {
+		tok := child.Keys[i]
+		if isApplyStatementKeyword(tok) {
+			break
+		}
+		if !permitted[tok] {
+			report(tok)
+			break
+		}
+		leaf := resolveSchemaChild(packedSchema, tok)
+		if leaf == nil {
+			break
+		}
+		if leaf.multi {
+			// A multi leaf (`clients`) owns the whole value run: it ends
+			// only at the next DECLARED keyword.
+			j := i + 1
+			for j < len(child.Keys) && resolveSchemaChild(packedSchema, child.Keys[j]) == nil && !isApplyStatementKeyword(child.Keys[j]) {
+				j++
+			}
+			i = j - 1
+			continue
+		}
+		i += leaf.args
+		// A container leaf (`routing-instance`) packs its body's first
+		// keyword next; the following iterations judge it, because the
+		// container's declared body keywords are not community children.
+		if len(leaf.children) > 0 {
+			for k := i + 1; k < len(child.Keys); k++ {
+				inner := child.Keys[k]
+				if isApplyStatementKeyword(inner) {
+					break
+				}
+				if _, ok := leaf.children[inner]; !ok {
+					report(inner)
+					break
+				}
+				innerLeaf := leaf.children[inner]
+				if innerLeaf.multi {
+					m := k + 1
+					for m < len(child.Keys) && resolveSchemaChild(packedSchema, child.Keys[m]) == nil && leaf.children[child.Keys[m]] == nil && !isApplyStatementKeyword(child.Keys[m]) {
+						m++
+					}
+					k = m - 1
+					continue
+				}
+				k += innerLeaf.args
+			}
+			break
+		}
+	}
+	// Expanded child statements, plus any statement nested under a leaf
+	// the statement collection descends through (flat-set chain links).
+	var walkNested func(nodes []*Node)
+	walkNested = func(nodes []*Node) {
+		for _, n := range nodes {
+			if n == nil || len(n.Keys) == 0 {
+				continue
+			}
+			tok := n.Name()
+			if isApplyStatementKeyword(tok) {
+				continue
+			}
+			if !permitted[tok] {
+				report(tok)
+				continue
+			}
+			// Only the descent keywords can carry a chain-nested sibling;
+			// a declared leaf's children are its VALUES.
+			switch tok {
+			case "authorization", "routing-instance":
+				walkNested(n.Children)
+			}
+		}
+	}
+	walkNested(commChildren)
+	return unknown
+}
+
+// snmpCommunityPermitted15124 / snmpCommunityDeclared15124 cache the
+// gate's permitted set (schema-derived + inert knobs) so compileSNMP
+// does not rebuild and re-sort it per community block.
+var snmpCommunityPermitted15124, snmpCommunityDeclared15124 = func() (map[string]bool, []string) {
+	return snmpCommunityKnownChildren15124()
+}()
+
 func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error {
 	snmp := sys.SNMP
 	if snmp == nil {
@@ -2256,6 +2442,49 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 		}
 	}
 
+	// #15124: an UNREFERENCED `snmp client-list` (no community names it via
+	// `client-list-name`) restricts nothing. That is not fail-open by
+	// itself — no community claims the restriction — but it is the usual
+	// residue of a `client-list-nam` typo on the community side, so name it
+	// on BOTH paths rather than letting the definition sit silently inert.
+	// Referenced names are collected from the same statement views the
+	// community loop resolves (children, expanded chains, packed runs).
+	if cfg != nil && len(snmp.ClientLists) > 0 {
+		referenced := map[string]bool{}
+		for _, child := range snmpChildren {
+			if child.Name() != "community" {
+				continue
+			}
+			commChildren := child.Children
+			if len(child.Keys) < 2 && len(child.Children) > 0 {
+				commChildren = child.Children[0].Children
+			}
+			var stmts []*Node
+			var collectRefs func(nodes []*Node)
+			collectRefs = func(nodes []*Node) {
+				for _, n := range nodes {
+					stmts = append(stmts, n)
+					collectRefs(n.Children)
+				}
+			}
+			collectRefs(expandFlatRun(commChildren, snmpCommunitySchema9416()))
+			for _, ref := range snmpCommunityListRefs(stmts) {
+				referenced[ref] = true
+			}
+			for i := 2; i+1 < len(child.Keys); i++ {
+				if child.Keys[i] == "client-list-name" {
+					referenced[child.Keys[i+1]] = true
+				}
+			}
+		}
+		for _, listName := range sortedClientListNames9416(snmp.ClientLists) {
+			if !referenced[listName] {
+				cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
+					"snmp client-list %q is not referenced by any community `client-list-name` — it restricts no community, so every community without its own `clients` restriction answers every source; if a community was meant to use it, check the `client-list-name` spelling (#15124)", listName))
+			}
+		}
+	}
+
 	// #5833: communities whose `clients` allowlist carried a malformed token on
 	// the tolerant load / peer-sync path are quarantined to deny-all. Sticky
 	// across same-name merge blocks (#5472): once a community is quarantined a
@@ -2281,6 +2510,27 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 				commChildren := child.Children
 				if len(child.Keys) < 2 && len(child.Children) > 0 {
 					commChildren = child.Children[0].Children
+				}
+				// #15124: reject (strict) / warn + quarantine (lenient) on
+				// any UNKNOWN child of this community block, before the
+				// statement collection below silently skips it. Judged on
+				// the same expanded view the collection reads, plus the
+				// Keys-packed run on this node. A quarantined community is
+				// forced deny-all at the clientNets build below, sticky
+				// across same-name merge blocks like #5833's.
+				if unknown := snmpCommunityUnknownChildren15124(child, expandFlatRun(commChildren, snmpCommunitySchema9416()), snmpCommunityPermitted15124); len(unknown) > 0 {
+					for _, tok := range unknown {
+						msg := snmpCommunityUnknownMessage15124(tok, snmpCommunityDeclared15124, lenient)
+						if !lenient {
+							return fmt.Errorf("%s", msg)
+						}
+						if cfg != nil {
+							cfg.Warnings = append(cfg.Warnings, msg)
+						}
+					}
+					if lenient {
+						quarantinedComms[commName] = true
+					}
 				}
 				// Parse THIS block's authorization + clients into locals first.
 				// A same-name sibling block is then MERGED into any existing
