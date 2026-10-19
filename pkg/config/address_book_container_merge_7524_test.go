@@ -162,10 +162,12 @@ func TestNoGlobalBlockLeavesAddressBookNil7524(t *testing.T) {
 	}
 }
 
-// WITHIN a block, a repeated NAME still resolves last-wins. That is the
-// existing #4706 semantics and this change must not alter it; without the
-// control, a merge could be "fixed" by making duplicates first-wins and no
-// other cell would notice.
+// WITHIN a block, a repeated NAME with a DISTINCT prefix is now a
+// #14967 duplicate: strict commit rejects it instead of the pre-#14967
+// last-wins fold. The original #7524 control pinned last-wins; #14967
+// deliberately supersedes that semantics (see
+// address_book_duplicate_prefix_14967_test.go). An identical repeat
+// still collapses and commits.
 func TestDuplicateNameStillLastWins7524(t *testing.T) {
 	cfg := `security {
     address-book {
@@ -178,16 +180,19 @@ func TestDuplicateNameStillLastWins7524(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse: %v", errs[0])
 	}
-	c, err := CompileConfig(tree)
+	if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "duplicate prefixes") {
+		t.Fatalf("CompileConfig = %v, want #14967 duplicate-prefix rejection", err)
+	}
+	// Tolerant path: boots, keeps the first prefix for show, refuses use.
+	c, err := CompileConfigLenient(tree)
 	if err != nil {
-		t.Fatalf("CompileConfig: %v", err)
+		t.Fatalf("CompileConfigLenient: %v", err)
 	}
 	a := c.Security.AddressBook.Addresses["A"]
 	if a == nil {
 		t.Fatal("address A missing entirely")
 	}
-	if !strings.Contains(a.Value, "10.9.9.9") {
-		t.Errorf("A = %q, want the LAST definition (10.9.9.9/32). Merging containers "+
-			"must not change same-name resolution, which is #4706's semantics", a.Value)
+	if a.Value != "10.0.0.1/32" || a.UsableValue() != "" || len(a.DuplicatePrefixes) != 2 {
+		t.Errorf("A = %+v, want first prefix kept, usable refused, both prefixes recorded", a)
 	}
 }

@@ -17,6 +17,61 @@ import (
 // CollidingNames so policy references are refused rather than misbound.
 const zoneLocalNamePrefix = "zone-local/"
 
+// setAddressPrefix14967 records a prefix candidate for addr (#14967).
+// The first distinct prefix wins Value; a second DISTINCT prefix is
+// recorded in DuplicatePrefixes (authoring order, deduplicated) instead
+// of silently overwriting the first. An identical repeat collapses —
+// a `load merge` re-stating the same prefix, flat-set re-`set`, or a
+// group and an inline definition agreeing on the prefix stay legal.
+// Strict commit rejects a recorded duplicate; the tolerant path keeps
+// Value for show surfaces but UsableValue refuses enforcement.
+func setAddressPrefix14967(addr *Address, prefix string) {
+	if addr == nil || prefix == "" {
+		return
+	}
+	if addr.Value == "" {
+		if len(addr.DuplicatePrefixes) == 0 {
+			addr.Value = prefix
+			return
+		}
+		// A duplicate was already recorded (e.g. a group prefix that
+		// lost to the inline prefix): keep Value as the first winner
+		// and only extend the recorded set.
+		for _, p := range addr.DuplicatePrefixes {
+			if p == prefix {
+				return
+			}
+		}
+		addr.DuplicatePrefixes = append(addr.DuplicatePrefixes, prefix)
+		return
+	}
+	if prefix == addr.Value {
+		return
+	}
+	if len(addr.DuplicatePrefixes) == 0 {
+		addr.DuplicatePrefixes = []string{addr.Value, prefix}
+		return
+	}
+	for _, p := range addr.DuplicatePrefixes {
+		if p == prefix {
+			return
+		}
+	}
+	addr.DuplicatePrefixes = append(addr.DuplicatePrefixes, prefix)
+}
+
+// recordAddressTrailing14967 records tokens that rode past an address
+// prefix (#14967). Unlike a plain append it is used on paths where the
+// prefix slot was routed through setAddressPrefix14967, so a duplicate
+// definition's trailing tokens are still captured even when its prefix
+// did not win the value slot.
+func recordAddressTrailing14967(addr *Address, tokens ...string) {
+	if addr == nil || len(tokens) == 0 {
+		return
+	}
+	addr.TrailingTokens = append(addr.TrailingTokens, tokens...)
+}
+
 // zoneLocalQualify mints the global-book key for a zone-local address-book
 // entry. The `/`-free zone segment makes the qualified key unambiguous even
 // when the entry name contains `/`. Strict validation reserves the prefix,
@@ -199,8 +254,13 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 				continue
 			}
 			// #9524: carry the unimplemented-form taint, or a zone-local mixed
-			// entry would resolve to its prefix alone once folded.
+			// entry would resolve to its prefix alone once folded. #14967:
+			// likewise carry the duplicate-prefix and trailing-token taints,
+			// or a folded entry would resolve to an arbitrarily chosen winner
+			// (or its prefix alone) once qualified.
 			gb.Addresses[q] = &Address{Name: q, Value: addr.Value, Description: addr.Description,
+				TrailingTokens:     append([]string(nil), addr.TrailingTokens...),
+				DuplicatePrefixes:  append([]string(nil), addr.DuplicatePrefixes...),
 				UnimplementedForms: append([]string(nil), addr.UnimplementedForms...)}
 		}
 		for name, set := range z.AddressBook.AddressSets {
@@ -324,8 +384,11 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 // LAZY ALLOCATION IS PRESERVED: the book is materialized only when a `global`
 // block actually exists, so a config with no address-book still compiles to a
 // nil AddressBook and every `!= nil` check downstream keeps its meaning.
-// Within a block, later entries with the same NAME still win, which is the
-// existing #4706 semantics and unchanged.
+// Within a block, #14967 changed same-name resolution: a second DISTINCT
+// prefix for one name is recorded as a duplicate and rejected at commit
+// (the pre-#14967 last-wins fold silently narrowed the entry to the last
+// prefix); identical repeats and disjoint prefix/description halves
+// still merge as before.
 func compileAddressBook(node *Node, sec *SecurityConfig) error {
 	globals := node.FindChildren("global")
 	if len(globals) == 0 {
@@ -686,8 +749,12 @@ func mergeAddressNode(addr *Address, node *Node) {
 		// description value: `address a1 description "d" 10.0.0.1/32`.
 		if len(node.Keys) > 4 {
 			if looksLikeIPOrCIDR(node.Keys[4]) {
-				addr.Value = node.Keys[4]
-				addr.TrailingTokens = append(addr.TrailingTokens, node.Keys[5:]...)
+				setAddressPrefix14967(addr, node.Keys[4])
+				// #14967: tokens after a packed prefix are trailing even
+				// when a duplicate prefix superseded the value slot.
+				if len(node.Keys) > 5 {
+					recordAddressTrailing14967(addr, node.Keys[5:]...)
+				}
 			} else {
 				addr.TrailingTokens = append(addr.TrailingTokens, node.Keys[4:]...)
 			}
@@ -710,11 +777,11 @@ func mergeAddressNode(addr *Address, node *Node) {
 
 	// Prefix-bearing leaf: Keys[2] is the prefix iff it parses as an IP/CIDR.
 	if valueIsPrefix {
-		addr.Value = valueToken
+		setAddressPrefix14967(addr, valueToken)
 		// #3332: a named address takes exactly one prefix; anything after it
 		// (Keys[3:]) is operator garbage the compiler silently dropped.
 		if len(node.Keys) > 3 {
-			addr.TrailingTokens = append(addr.TrailingTokens, node.Keys[3:]...)
+			recordAddressTrailing14967(addr, node.Keys[3:]...)
 		}
 	}
 
@@ -729,19 +796,41 @@ func mergeAddressNode(addr *Address, node *Node) {
 			// description leaf, with the prefix after its text.
 			if len(sub.Keys) > 2 {
 				if looksLikeIPOrCIDR(sub.Keys[2]) {
-					addr.Value = sub.Keys[2]
-					addr.TrailingTokens = append(addr.TrailingTokens, sub.Keys[3:]...)
+					setAddressPrefix14967(addr, sub.Keys[2])
+					if len(sub.Keys) > 3 {
+						recordAddressTrailing14967(addr, sub.Keys[3:]...)
+					}
 				} else {
 					addr.TrailingTokens = append(addr.TrailingTokens, sub.Keys[2:]...)
 				}
 			}
 		default:
+			// #14967: the apply-groups duplicate marker carries the losing
+			// prefix (and one trailing exemplar) for an entry whose inline
+			// and group definitions conflict. Route it into the same
+			// taints instead of the unknown-form default-deny below.
+			if sub.Name() == "__xpf_duplicate_address_14967__" {
+				for _, k := range sub.Keys[1:] {
+					if looksLikeIPOrCIDR(k) {
+						setAddressPrefix14967(addr, k)
+					} else {
+						addr.TrailingTokens = append(addr.TrailingTokens, k)
+					}
+				}
+				continue
+			}
 			// A bare value leaf (the hierarchical block prefix) is usable only
 			// when it parses as an IP/CIDR. Every other sub-stanza is a known
 			// unsupported or future value form, so record it for default-deny
 			// resolution instead of silently ignoring it.
-			if len(sub.Keys) == 1 && looksLikeIPOrCIDR(sub.Keys[0]) {
-				addr.Value = sub.Keys[0]
+			if len(sub.Keys) >= 1 && looksLikeIPOrCIDR(sub.Keys[0]) {
+				setAddressPrefix14967(addr, sub.Keys[0])
+				// #14967: extra keys on a bare prefix child (the #14424
+				// group-leaf fold packs trailing tokens there) are trailing
+				// tokens, not a second prefix.
+				if len(sub.Keys) > 1 {
+					recordAddressTrailing14967(addr, sub.Keys[1:]...)
+				}
 				continue
 			}
 			addr.UnimplementedForms = appendUniqueForm9524(addr.UnimplementedForms, sub.Name())

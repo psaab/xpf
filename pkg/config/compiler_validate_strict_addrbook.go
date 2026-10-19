@@ -227,3 +227,74 @@ func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
 	}
 	return nil
 }
+
+// validateAddressBookDuplicatePrefixStrict (#14967) hard-rejects an
+// address-book entry authored with two distinct prefixes.
+//
+// A Junos address takes exactly one prefix. Before #14967 the compiler
+// folded repeated definitions last-wins (repeated `address A` stanzas,
+// repeated bare children in one braced container, repeated containers),
+// and apply-groups precedence was only partially honoured (#14424 fixed
+// the single-group-vs-inline shapes; two groups, two inline bare
+// children, and a dropped group prefix beside an inline winner still
+// resolved silently). The surviving prefix was whichever the fold order
+// happened to pick, so a permit/deny built on the name covered a
+// different network than the operator wrote with no diagnostic.
+//
+// The compiler now records every distinct prefix in
+// Address.DuplicatePrefixes (identical repeats collapse). This gate
+// rejects the ambiguity at commit, naming the entry, the book, and both
+// prefixes. It runs on the PRISTINE books before the zone-local fold so
+// a zone-local duplicate is named against the clean zone. Strict on
+// commit / commit-check; the tolerant load / peer-sync path warns
+// (lenientAddressBookDuplicatePrefix, #1960 no-brick) and UsableValue
+// refuses the entry so no resolver enforces a chosen winner.
+func validateAddressBookDuplicatePrefixStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	check := func(scope string, book *AddressBook) error {
+		if book == nil {
+			return nil
+		}
+		names := make([]string, 0, len(book.Addresses))
+		for name := range book.Addresses {
+			if strings.HasPrefix(name, zoneLocalNamePrefix) {
+				continue
+			}
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			a := book.Addresses[name]
+			if a == nil || len(a.DuplicatePrefixes) == 0 {
+				continue
+			}
+			return fmt.Errorf(
+				"security %saddress-book address %q has duplicate prefixes %q: "+
+					"a Junos address takes exactly one prefix, and the extra "+
+					"definition would be silently dropped (the entry would "+
+					"enforce only one of them and cover different traffic "+
+					"than configured); keep exactly one prefix for %q and "+
+					"remove the other definition (#14967)",
+				scope, name, strings.Join(a.DuplicatePrefixes, ", "), name)
+		}
+		return nil
+	}
+	if err := check("", cfg.Security.AddressBook); err != nil {
+		return err
+	}
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	sort.Strings(zoneNames)
+	for _, zn := range zoneNames {
+		if z := cfg.Security.Zones[zn]; z != nil {
+			if err := check(fmt.Sprintf("zones security-zone %s ", zn), z.AddressBook); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}

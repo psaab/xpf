@@ -73,6 +73,139 @@ func addressBookPeer14424(dst []*Node, s *Node) *Node {
 	return nil
 }
 
+// barePrefixValue14424 returns the first bare prefix carried by n (leaf
+// Keys[2] or a bare-leaf child), or "".
+func barePrefixValue14424(n *Node) string {
+	if n == nil {
+		return ""
+	}
+	if n.IsLeaf {
+		if len(n.Keys) >= 3 && looksLikeIPOrCIDR(n.Keys[2]) {
+			return n.Keys[2]
+		}
+		return ""
+	}
+	for _, c := range n.Children {
+		if isBarePrefixLeaf14424(c) {
+			return c.Keys[0]
+		}
+	}
+	return ""
+}
+
+// hasDistinctBarePrefix14424 reports whether n carries more than one
+// distinct bare prefix (repeated bare children in one container).
+func hasDistinctBarePrefix14424(n *Node) bool {
+	if n == nil || n.IsLeaf {
+		return false
+	}
+	seen := ""
+	for _, c := range n.Children {
+		if !isBarePrefixLeaf14424(c) {
+			continue
+		}
+		if seen == "" {
+			seen = c.Keys[0]
+			continue
+		}
+		if c.Keys[0] != seen {
+			return true
+		}
+	}
+	return false
+}
+
+// hasTrailingPastPrefix14424 reports whether n carries tokens past its
+// prefix slot (leaf Keys[3:], packed description-child extras, or extra
+// keys on a bare prefix child) — the #14967 trailing-token taint source
+// on the group path.
+func hasTrailingPastPrefix14424(n *Node) bool {
+	if n == nil {
+		return false
+	}
+	if n.IsLeaf {
+		if len(n.Keys) >= 3 && n.Keys[2] == "description" {
+			// description <text> [<prefix> [<extra>...]]
+			return len(n.Keys) > 5
+		}
+		return len(n.Keys) > 3 && len(n.Keys) >= 3 && looksLikeIPOrCIDR(n.Keys[2])
+	}
+	for _, c := range n.Children {
+		if isBarePrefixLeaf14424(c) {
+			if len(c.Keys) > 1 {
+				return true
+			}
+			continue
+		}
+		if c.Name() == "description" && len(c.Keys) > 3 && looksLikeIPOrCIDR(c.Keys[2]) {
+			return true
+		}
+	}
+	return false
+}
+
+// trailingExemplar14424 returns one token past n's prefix slot, or "".
+func trailingExemplar14424(n *Node) string {
+	if n == nil || !hasTrailingPastPrefix14424(n) {
+		return ""
+	}
+	if n.IsLeaf {
+		return n.Keys[len(n.Keys)-1]
+	}
+	for _, c := range n.Children {
+		if isBarePrefixLeaf14424(c) && len(c.Keys) > 1 {
+			return c.Keys[len(c.Keys)-1]
+		}
+		if c.Name() == "description" && len(c.Keys) > 3 {
+			return c.Keys[len(c.Keys)-1]
+		}
+	}
+	return ""
+}
+
+// markAddressDuplicate14967 records a #14967 duplicate/trailing conflict
+// between the inline peer and the group source s by appending an inert
+// duplicate marker child to the peer. mergeAddressNode routes the marker
+// child's prefix through setAddressPrefix14967 (recording the duplicate)
+// and its trailing keys into TrailingTokens, so the compiled entry is
+// rejected at strict commit and refused on the tolerant path instead of
+// silently resolving to one side. The marker is consumed at compile
+// time; it never reaches the dataplane.
+func markAddressDuplicate14967(peer, s *Node) {
+	if peer == nil || s == nil {
+		return
+	}
+	groupPrefix := barePrefixValue14424(s)
+	peerPrefix := barePrefixValue14424(peer)
+	dup := groupPrefix != "" && peerPrefix != "" && groupPrefix != peerPrefix
+	// A side carrying two distinct bare prefixes is itself a duplicate,
+	// even when the other side agrees with one of them.
+	if hasDistinctBarePrefix14424(s) || hasDistinctBarePrefix14424(peer) {
+		dup = true
+	}
+	if !dup && !hasTrailingPastPrefix14424(peer) && !hasTrailingPastPrefix14424(s) {
+		return
+	}
+	// Promote a leaf peer so the marker can ride as a child. Capture the
+	// peer's trailing exemplar before promotion packs it onto the value
+	// child (where mergeAddressNode records it as trailing anyway).
+	peerExemplar := trailingExemplar14424(peer)
+	if peer.IsLeaf {
+		promoteAddressLeaf14424(peer)
+	}
+	markerKeys := []string{"__xpf_duplicate_address_14967__"}
+	if dup && groupPrefix != "" && groupPrefix != peerPrefix {
+		markerKeys = append(markerKeys, groupPrefix)
+	}
+	if ex := trailingExemplar14424(s); ex != "" {
+		markerKeys = append(markerKeys, ex)
+	} else if peerExemplar != "" {
+		markerKeys = append(markerKeys, peerExemplar)
+	}
+	marker := &Node{Keys: markerKeys, IsLeaf: true, InheritedFrom: s.InheritedFrom}
+	peer.Children = append(peer.Children, marker)
+}
+
 // mergeAddressBookGroupInto14424 merges group source s into inline peer with
 // inline precedence, recursively reusing mergeNodes for container children so
 // nested apply-groups-except / wildcard handling stays identical. It reports
@@ -83,6 +216,11 @@ func mergeAddressBookGroupInto14424(dst *[]*Node, s *Node, ancestorPath [][]stri
 	if peer == nil {
 		return false, nil
 	}
+	// #14967: a distinct group prefix, repeated bare prefixes on either
+	// side, or trailing tokens past a prefix must not silently resolve
+	// to one side. Record the conflict on the peer before the precedence
+	// merge below drops the losing half.
+	markAddressDuplicate14967(peer, s)
 	childPath := appendPath(ancestorPath, peer.Keys)
 	if !s.IsLeaf && !peer.IsLeaf {
 		// Container vs container: merge children. Repeated bare prefix

@@ -12,9 +12,16 @@ import "testing"
 // after the inline node) won. A policy referencing A then matched the
 // group's prefix instead of the operator's inline prefix.
 //
+// #14967 supersedes the silent half of that resolution: a DISTINCT group
+// prefix beside an inline one no longer resolves to either side — strict
+// commit rejects the duplicate and the tolerant path refuses the entry.
+// The inline prefix remains the recorded (first) value. Tests below pin
+// that explicit contract; disjoint-attribute union is unchanged.
+//
 // FAIL-ON-REVERT: removing addressBookAddressNodes14424 registration (or
 // returning false from the guard so mergeNodes falls back to adoption)
 // makes the C<-L, L<-C, C<-C cells below compile A to the group prefix.
+// Dropping the #14967 duplicate recording makes them commit silently.
 
 func compileAddressBook14424(t *testing.T, text string) *AddressBook {
 	t.Helper()
@@ -45,13 +52,28 @@ func TestAddressBookSameNameInlineWins14424(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			text := `groups { G { security { address-book { global { ` + tc.group + ` } } } } } apply-groups G; security { address-book { global { ` + tc.inline + ` } } }`
-			ab := compileAddressBook14424(t, text)
-			a := ab.Addresses["A"]
+			// #14967: a distinct group prefix no longer wins OR loses
+			// silently — strict commit rejects the duplicate.
+			tree := parseHierarchical(t, text)
+			if _, err := CompileConfig(tree); err == nil {
+				t.Fatalf("CompileConfig accepted group+inline distinct prefixes, want #14967 rejection")
+			}
+			// Tolerant path: the inline prefix stays the recorded value
+			// (the #14424 precedence), but the entry refuses enforcement.
+			ltree := parseHierarchical(t, text)
+			cfg, err := CompileConfigLenient(ltree)
+			if err != nil {
+				t.Fatalf("CompileConfigLenient: %v", err)
+			}
+			a := cfg.Security.AddressBook.Addresses["A"]
 			if a == nil {
-				t.Fatalf("address A missing, book=%v", ab.Addresses)
+				t.Fatalf("address A missing, book=%v", cfg.Security.AddressBook.Addresses)
 			}
 			if a.Value != inlinePrefix {
-				t.Fatalf("address A = %q, want inline %q (group %q must not win)", a.Value, inlinePrefix, groupPrefix)
+				t.Fatalf("address A = %q, want inline %q recorded (group %q must not win)", a.Value, inlinePrefix, groupPrefix)
+			}
+			if a.UsableValue() != "" {
+				t.Fatalf("address A usable = %q, want refused duplicate", a.UsableValue())
 			}
 		})
 	}
@@ -75,17 +97,25 @@ func TestAddressBookDifferentNameBothSurvive14424(t *testing.T) {
 // schema shape, same parseAddressBookEntries folding).
 func TestZoneLocalAddressBookSameNameInlineWins14424(t *testing.T) {
 	text := `groups { G { security { zones { security-zone trust { address-book { address A 10.2.0.1/32; } } } } } } apply-groups G; security { zones { security-zone trust { address-book { address A { 10.1.0.1/32; } } } } }`
+	// #14967: strict rejects the distinct group prefix (see global cells).
 	tree := parseHierarchical(t, text)
-	cfg, err := CompileConfig(tree)
+	if _, err := CompileConfig(tree); err == nil {
+		t.Fatalf("CompileConfig accepted zone-local group+inline distinct prefixes, want #14967 rejection")
+	}
+	ltree := parseHierarchical(t, text)
+	cfg, err := CompileConfigLenient(ltree)
 	if err != nil {
-		t.Fatalf("CompileConfig: %v", err)
+		t.Fatalf("CompileConfigLenient: %v", err)
 	}
 	z := cfg.Security.Zones["trust"]
 	if z == nil || z.AddressBook == nil || z.AddressBook.Addresses["A"] == nil {
 		t.Fatalf("zone-local address A missing: %+v", z)
 	}
 	if got := z.AddressBook.Addresses["A"].Value; got != "10.1.0.1/32" {
-		t.Fatalf("zone-local A = %q, want inline 10.1.0.1/32", got)
+		t.Fatalf("zone-local A = %q, want inline 10.1.0.1/32 recorded", got)
+	}
+	if got := z.AddressBook.Addresses["A"].UsableValue(); got != "" {
+		t.Fatalf("zone-local A usable = %q, want refused duplicate", got)
 	}
 }
 
