@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -113,18 +114,22 @@ type Monitor struct {
 	newNlHandle func() (nlHandleCloser, error)
 
 	// icmpDialer can be overridden for testing.
-	// network is "udp4" or "udp6".
-	icmpDialer func(network string) (icmpConn, error)
+	// network is "udp4" or "udp6"; src is the source address to bind
+	// ("" = wildcard, the legacy unbound probe).
+	icmpDialer func(network, src string) (icmpConn, error)
 
-	// probeFn performs a single reachability probe for one target address.
+	// probeFn performs a single reachability probe for one target.
 	// It reports (reachable, completed); completed is false only when the
 	// probe was aborted by context cancellation (Stop or the overall cycle
-	// deadline) rather than run to a natural conclusion — the caller then
+	// deadline) or could not be sent from this node's source (#15038)
+	// rather than run to a natural conclusion — the caller then
 	// skips it this cycle (no dampening advance), keeping the sweep
 	// failover-neutral. nil means use probeICMP (the real ICMP path).
 	// Overridable for tests so probe latency/cancellation can be injected
-	// without real sockets.
-	probeFn func(ctx context.Context, addr string) (reachable, completed bool)
+	// without real sockets. src is the resolved source address for the
+	// target ("" = unbound); device is the Linux device to bind to
+	// ("" = none).
+	probeFn func(ctx context.Context, target *config.IPMonitorTarget, src, device string) (reachable, completed bool)
 
 	// icmpSeq is a monotonically increasing per-probe ICMP echo sequence
 	// counter. Each probe stamps a fresh sequence into its request so a
@@ -155,6 +160,11 @@ type Monitor struct {
 	// inverts it and deadlocks a commit against a poll cycle. Called with no
 	// Monitor lock held.
 	beforeManagerApplyHook func()
+
+	// cfg is the full compiled config, used to resolve a target's
+	// interface/VIP/secondary source (#15038). Set via SetConfig; nil
+	// means targets probe unbound (legacy behavior).
+	cfg *config.Config
 }
 
 // beforeManagerApply fires the #6550 lock-order test seam. Production installs
@@ -217,6 +227,21 @@ func NewMonitor(mgr *Manager, groups []*config.RedundancyGroup) *Monitor {
 		ipDebts:          make(map[int]map[string]int),
 		ipThresholdState: make(map[int]bool),
 	}
+}
+
+// SetConfig records the full compiled config so probe source resolution
+// (#15038) can map a target's interface to its unit addresses and the RG's
+// RETH VIPs. Called on every config apply; safe concurrently with poll.
+func (mon *Monitor) SetConfig(cfg *config.Config) {
+	mon.mu.Lock()
+	mon.cfg = cfg
+	mon.mu.Unlock()
+}
+
+func (mon *Monitor) config() *config.Config {
+	mon.mu.Lock()
+	defer mon.mu.Unlock()
+	return mon.cfg
 }
 
 func (mon *Monitor) failThreshold() int {
@@ -418,19 +443,23 @@ func (mon *Monitor) pollCycle(ctx context.Context) {
 	groups := mon.groups
 	mon.mu.Unlock()
 
-	// Phase 1: immutable IP-target snapshot in stable order.
-	var ipAddrs []string
+	// Phase 1: immutable IP-target snapshot in stable order. Each task
+	// carries the resolved probe source/device for its RG+target (#15038):
+	// the primary probes from the RG's VIP on the target interface, the
+	// secondary from secondary-ip-address; unbound targets keep src="".
+	var ipTasks []ipProbeTask
 	for _, rg := range groups {
 		if rg.IPMonitoring == nil || len(rg.IPMonitoring.Targets) == 0 {
 			continue
 		}
 		for _, target := range rg.IPMonitoring.Targets {
-			ipAddrs = append(ipAddrs, target.Address)
+			src, device := mon.probeSourceFor(rg, target)
+			ipTasks = append(ipTasks, ipProbeTask{target: target, rgID: rg.ID, src: src, device: device})
 		}
 	}
 
 	// Phase 2: parallel probe.
-	ipResults := mon.probeIPTargets(ctx, ipAddrs)
+	ipResults := mon.probeIPTargets(ctx, ipTasks)
 
 	// Phase 3: serial apply in stable order. Rebuild local statuses into a
 	// local slice, then swap under lock to avoid racing with
@@ -565,11 +594,21 @@ func (mon *Monitor) pollInterfaceMonitors(rg *config.RedundancyGroup, statuses [
 }
 
 // ipProbeResult is one target's probe outcome. completed is false when the
-// probe was aborted by the cycle deadline or Stop (not run to a natural
-// conclusion), in which case the caller skips it for this cycle.
+// probe was aborted by the cycle deadline or Stop, or could not be sent
+// from this node's source (#15038) — in either case the caller skips it
+// for this cycle (no dampening advance).
 type ipProbeResult struct {
 	reachable bool
 	completed bool
+}
+
+// ipProbeTask is one snapshot entry: the target plus its resolved probe
+// source/device for this cycle (#15038).
+type ipProbeTask struct {
+	target *config.IPMonitorTarget
+	rgID   int
+	src    string
+	device string
 }
 
 // ipCycleTimeout returns the overall deadline for one IP-probe sweep. A caller-
@@ -594,52 +633,145 @@ func (mon *Monitor) ipCycleTimeout(numTargets int) time.Duration {
 	return time.Duration(waves)*ipProbeReadDeadline + ipProbeCycleSlack
 }
 
-// probe dispatches one reachability probe, honoring the probeFn test seam.
-func (mon *Monitor) probe(ctx context.Context, addr string) (reachable, completed bool) {
-	if mon.probeFn != nil {
-		return mon.probeFn(ctx, addr)
+// probeSourceFor resolves the source address and egress device a probe of
+// target should use on THIS node (#15038):
+//
+//   - No interface configured: ("", "") — the legacy unbound probe.
+//   - This node is primary for the RG: the unit's VIP (the RETH address
+//     the daemon installs only on the primary) on the resolved device.
+//   - Otherwise: secondary-ip-address (an address the secondary actually
+//     holds) on the resolved device; without one, ("", device) so the
+//     probe is device-bound but source-free.
+//
+// The device is the Linux name of the target interface with any RETH
+// resolved to its local physical member (VLAN sub-interface when the
+// unit is tagged), matching RethVIPsForRG's key derivation.
+func (mon *Monitor) probeSourceFor(rg *config.RedundancyGroup, target *config.IPMonitorTarget) (src, device string) {
+	if target == nil || target.Interface == "" {
+		return "", ""
 	}
-	return mon.probeICMP(ctx, addr)
+	cfg := mon.config()
+	device, unitAddrs := resolveProbeInterface(cfg, target.Interface)
+	if mon.mgr != nil && mon.mgr.IsLocalPrimary(rg.ID) {
+		if cfg != nil {
+			if vips := cfg.RethVIPsForRG(rg.ID)[device]; len(vips) > 0 {
+				return stripCIDR(vips[0]), device
+			}
+		}
+		if len(unitAddrs) > 0 {
+			return stripCIDR(unitAddrs[0]), device
+		}
+		return "", device
+	}
+	if target.SecondaryIPAddress != "" {
+		return target.SecondaryIPAddress, device
+	}
+	return "", device
+}
+
+func stripCIDR(s string) string {
+	if i := strings.Index(s, "/"); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// resolveProbeInterface maps a Junos unit ref ("reth0.0", "ge-0/0/0.1")
+// to its Linux device name and configured unit addresses. cfg may be nil.
+func resolveProbeInterface(cfg *config.Config, iface string) (device string, addrs []string) {
+	base, unit := splitUnitRef(iface)
+	if cfg == nil {
+		// No config: still device-bind by name so an unsendable probe is
+		// classified correctly; RETH resolution needs the config.
+		dev := config.LinuxIfName(base)
+		if unit > 0 {
+			dev = dev + "." + itoa(unit)
+		}
+		return dev, nil
+	}
+	phys := base
+	if p, ok := cfg.RethToPhysical()[base]; ok {
+		phys = p
+	}
+	dev := config.LinuxIfName(phys)
+	var unitAddrs []string
+	if ifc := cfg.Interfaces.Interfaces[base]; ifc != nil {
+		if u := ifc.Units[unit]; u != nil {
+			unitAddrs = u.Addresses
+			if ifc.VlanTagging && u.VlanID > 0 {
+				dev = dev + "." + itoa(u.VlanID)
+				return dev, unitAddrs
+			}
+		}
+	}
+	if unit > 0 {
+		// Non-VLAN logical unit: Linux sub-interface by unit number when
+		// the unit is not unit 0. Matches the snapshot fallback shape.
+		if !(len(unitAddrs) > 0 && unit == 0) {
+			dev = dev + "." + itoa(unit)
+		}
+	}
+	return dev, unitAddrs
+}
+
+func splitUnitRef(ref string) (base string, unit int) {
+	i := strings.LastIndex(ref, ".")
+	if i < 0 {
+		return ref, 0
+	}
+	n, err := strconv.Atoi(ref[i+1:])
+	if err != nil {
+		return ref, 0
+	}
+	return ref[:i], n
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }
+
+// (VIPs for an RG are collected by config.Config.RethVIPsForRG, shared
+// with pkg/vrrp's wrapper so the probe source cannot drift from the
+// installed set.)
+
+// probe dispatches one reachability probe, honoring the probeFn test seam.
+func (mon *Monitor) probe(ctx context.Context, task ipProbeTask) (reachable, completed bool) {
+	if mon.probeFn != nil {
+		return mon.probeFn(ctx, task.target, task.src, task.device)
+	}
+	return mon.probeICMP(ctx, task)
 }
 
 // probeIPTargets bounds concurrent probes under one cycle deadline. Probes
 // incomplete at the deadline are deferred to the next cycle, keeping the sweep
 // failover-neutral.
-func (mon *Monitor) probeIPTargets(ctx context.Context, addrs []string) []ipProbeResult {
-	results := make([]ipProbeResult, len(addrs))
-	if len(addrs) == 0 {
+func (mon *Monitor) probeIPTargets(ctx context.Context, tasks []ipProbeTask) []ipProbeResult {
+	results := make([]ipProbeResult, len(tasks))
+	if len(tasks) == 0 {
 		return results
 	}
-
-	cycleCtx, cancel := context.WithTimeout(ctx, mon.ipCycleTimeout(len(addrs)))
+	cycleCtx, cancel := context.WithTimeout(ctx, mon.ipCycleTimeout(len(tasks)))
 	defer cancel()
-
 	conc := ipProbeConcurrency
-	if len(addrs) < conc {
-		conc = len(addrs)
+	if len(tasks) < conc {
+		conc = len(tasks)
 	}
 	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
-
 launch:
-	for i, addr := range addrs {
+	for i, task := range tasks {
 		select {
 		case <-cycleCtx.Done():
-			// Deadline exceeded or parent Stop: stop launching. Unlaunched
-			// results stay completed=false (skipped by the caller).
 			break launch
 		case sem <- struct{}{}:
 		}
 		wg.Add(1)
-		go func(i int, addr string) {
+		go func(i int, task ipProbeTask) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			reachable, completed := mon.probe(cycleCtx, addr)
+			reachable, completed := mon.probe(cycleCtx, task)
 			results[i] = ipProbeResult{reachable: reachable, completed: completed}
-		}(i, addr)
+		}(i, task)
 	}
 	wg.Wait()
-
 	return results
 }
 
@@ -1040,16 +1172,23 @@ func (mon *Monitor) recordIPDebtChange(rgID int, name string, installed bool, we
 		"rg", rgID, "monitor", name, "installed", installed, "weight", weight)
 }
 
-// probeICMP sends one ICMP echo to addr and reports (reachable, completed).
-// completed is false only when ctx was cancelled (Stop or the overall cycle
-// deadline) and aborted an in-flight probe; a natural conclusion — a matching
-// reply, a dial/marshal failure, or the 800ms read deadline — reports
-// completed=true. The per-socket matching and 800ms read-deadline behavior are
-// unchanged; ctx only adds prompt cancellation of the active socket (#5301).
-func (mon *Monitor) probeICMP(ctx context.Context, addr string) (reachable, completed bool) {
+// probeICMP sends one ICMP echo for task and reports (reachable, completed).
+// completed is false when ctx was cancelled (Stop or the overall cycle
+// deadline), when the socket could not be opened/bound to the required
+// source, or — on a non-primary — when the write fails: the probe never
+// reached the wire from an address this node holds, so it is not a path
+// measurement (#15038). A natural conclusion — a matching reply, or the
+// 800ms read deadline on a probe that WAS sent — reports completed=true.
+// The per-socket matching and 800ms read-deadline behavior are unchanged;
+// ctx only adds prompt cancellation of the active socket (#5301).
+func (mon *Monitor) probeICMP(ctx context.Context, task ipProbeTask) (reachable, completed bool) {
 	dialer := mon.icmpDialer
 	if dialer == nil {
 		dialer = defaultICMPDialer
+	}
+	addr := ""
+	if task.target != nil {
+		addr = task.target.Address
 	}
 
 	ip := net.ParseIP(addr)
@@ -1076,11 +1215,23 @@ func (mon *Monitor) probeICMP(ctx context.Context, addr string) (reachable, comp
 		proto = 1 // ICMPv4
 	}
 
-	conn, err := dialer(network)
+	conn, err := dialer(network, task.src)
 	if err != nil {
-		return false, true
+		// Could not open/bind the probe socket. With a required source
+		// this means the node does not hold the address (the #15038
+		// secondary case): not a measurement. Without one it is an
+		// environment failure; holding state is still the safe choice —
+		// a capability regression must not demote the RG.
+		return false, false
 	}
 	defer conn.Close()
+	if task.device != "" {
+		if bc, ok := conn.(interface{ BindToDevice(string) error }); ok {
+			if err := bc.BindToDevice(task.device); err != nil {
+				return false, false
+			}
+		}
+	}
 
 	// Cancellation watcher: closing the socket unblocks an in-flight ReadFrom
 	// so Stop() (or the overall cycle deadline) aborts this probe promptly
@@ -1135,9 +1286,20 @@ func (mon *Monitor) probeICMP(ctx context.Context, addr string) (reachable, comp
 
 	dst := &net.UDPAddr{IP: ip}
 	if _, err := conn.WriteTo(b, dst); err != nil {
-		// A write error is a natural probe failure unless ctx cancellation
-		// closed the socket out from under us (then the probe did not complete).
-		return false, ctx.Err() == nil
+		if ctx.Err() != nil {
+			return false, false
+		}
+		// #15038: a send failure on a node that is NOT primary for the
+		// target's RG means the probe could not be sent from an address
+		// this node holds (RETH VIPs live only on the primary) — it never
+		// reached the wire as a measurement, so it is NOT completed and
+		// must not accrue election debt. On the primary (or with no
+		// manager/role information, e.g. unit tests of the probe itself)
+		// a write error stays a natural completed failure.
+		if task.rgID >= 0 && mon.mgr != nil && !mon.mgr.IsLocalPrimary(task.rgID) {
+			return false, false
+		}
+		return false, true
 	}
 
 	// Read replies until one matches the request or the deadline expires.
@@ -1198,19 +1360,44 @@ func icmpPeerMatchesTarget(peer net.Addr, target net.IP) bool {
 	return pip != nil && pip.Equal(target)
 }
 
-func defaultICMPDialer(network string) (icmpConn, error) {
-	var listenAddr string
-	if network == "udp6" {
-		listenAddr = "::"
-	} else {
-		listenAddr = "0.0.0.0"
+// deviceBoundICMPConn wraps the production ICMP conn. BindToDevice is a
+// no-op success: x/net/icmp offers no socket-option hook for its
+// SOCK_DGRAM ping socket, so SO_BINDTODEVICE cannot be applied after
+// creation, and the enforceable pin is the source bind (see
+// defaultICMPDialer). The type exists so probeICMP's bind seam has a
+// concrete production implementation; test fakes implement
+// BindToDevice themselves to observe or fail the bind, and a fake that
+// reports a bind failure makes the probe not-completed (#15038).
+type deviceBoundICMPConn struct {
+	icmpConn
+}
+
+func (c *deviceBoundICMPConn) BindToDevice(string) error { return nil }
+
+func defaultICMPDialer(network, src string) (icmpConn, error) {
+	listenAddr := src
+	if listenAddr == "" {
+		if network == "udp6" {
+			listenAddr = "::"
+		} else {
+			listenAddr = "0.0.0.0"
+		}
 	}
 	c, err := icmp.ListenPacket(network, listenAddr)
 	if err != nil {
 		return nil, err
 	}
-	return c, nil
+	return &deviceBoundICMPConn{icmpConn: c}, nil
 }
+
+// NOTE on device binding: golang.org/x/net/icmp offers no socket-option
+// hook for its SOCK_DGRAM ICMP socket, so SO_BINDTODEVICE cannot be
+// applied to the production probe socket. The source bind (src) is the
+// enforceable pin: binding to the VIP/secondary address fails the dial
+// when the node does not hold it (not-completed), and the kernel routes
+// the probe out the interface owning that source. The device is still
+// resolved and carried so test fakes honor it, and so the unsendable
+// classification keys off role+source rather than an unbound send.
 
 // RGInterfaceReady checks if all local required interfaces for the given RG
 // exist and are operationally up. Returns (true, nil) if all ready, or

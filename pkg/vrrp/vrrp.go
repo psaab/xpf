@@ -297,76 +297,12 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 }
 
 // RethVIPsForRG returns the VIPs (CIDR strings) per Linux interface name for
-// RETH interfaces belonging to the given redundancy group. Used by
-// direct VIP mode (when no-reth-vrrp is set) where the daemon manages VIPs without VRRP.
+// RETH interfaces belonging to the given redundancy group. The derivation
+// lives in pkg/config (Config.RethVIPsForRG) so the cluster ip-monitor
+// probe source (#15038) shares exactly the installed set; this wrapper
+// keeps the historical vrrp call sites unchanged.
 func RethVIPsForRG(cfg *config.Config, rgID int) map[string][]string {
-	if cfg == nil {
-		return nil
-	}
-	rethToPhys := cfg.RethToPhysical()
-
-	result := make(map[string][]string)
-	// #6781: the same structural ownership predicate the VRRP-backed collector
-	// uses. This replaces a `strings.HasPrefix(name, "reth")` filter whose
-	// stated purpose — "skip fabric, control, and management interfaces that
-	// default to RedundancyGroup 0" — is already served by the predicate (those
-	// interfaces own no group), but which ALSO excluded a structurally valid
-	// redundant pair whose owner is not spelled "reth*", leaving that group
-	// with no VIPs installed at all.
-	rgOwners := cfg.RethRGOwners()
-
-	for _, name := range sortedIfNames(cfg) {
-		ifc := cfg.Interfaces.Interfaces[name]
-		// #6780: skip a present-but-nil interface — this is the direct
-		// (no-reth-vrrp / private-rg-election) ownership mode's collector, and
-		// it carried the same raw deref as the VRRP-mode one above.
-		if ifc == nil {
-			continue
-		}
-		if owns, ok := rgOwners[name]; !ok || owns != rgID {
-			continue
-		}
-
-		physName := ifc.Name
-		if phys, ok := rethToPhys[ifc.Name]; ok {
-			physName = phys
-		}
-		linuxName := config.LinuxIfName(physName)
-
-		unitNums := make([]int, 0, len(ifc.Units))
-		for n := range ifc.Units {
-			unitNums = append(unitNums, n)
-		}
-		sort.Ints(unitNums)
-
-		if ifc.VlanTagging {
-			for _, n := range unitNums {
-				unit := ifc.Units[n]
-				// #6780: nil unit derefs at len(unit.Addresses).
-				if unit == nil || len(unit.Addresses) == 0 {
-					continue
-				}
-				subIface := linuxName
-				if unit.VlanID > 0 {
-					subIface = fmt.Sprintf("%s.%d", linuxName, unit.VlanID)
-				}
-				result[subIface] = append(result[subIface], unit.Addresses...)
-			}
-		} else {
-			var vips []string
-			for _, n := range unitNums {
-				unit := ifc.Units[n]
-				if unit == nil { // #6780
-					continue
-				}
-				vips = append(vips, unit.Addresses...)
-			}
-			if len(vips) > 0 {
-				result[linuxName] = append(result[linuxName], vips...)
-			}
-		}
-	}
-	return result
+	return cfg.RethVIPsForRG(rgID)
 }
 
 // StateKey builds the map key that Manager.States() / RXDropStats() index a

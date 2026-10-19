@@ -3729,8 +3729,8 @@ func monitorEntryNodes(cfgNode *Node, skip int) []*Node {
 		var names, attrs []string
 		for i := 0; i < len(cand.Keys); {
 			tok := cand.Keys[i]
-			if tok == monitorWeightKeyword && len(names) > 0 {
-				// Reserve the value slot: `weight` consumes exactly one
+			if isMonitorAttrKeyword(tok) && len(names) > 0 {
+				// Reserve the value slot: the keyword consumes exactly one
 				// following token even when that token spells a name.
 				attrs = append(attrs, tok)
 				if i+1 < len(cand.Keys) {
@@ -3760,10 +3760,23 @@ func monitorEntryNodes(cfgNode *Node, skip int) []*Node {
 	return entries
 }
 
-// monitorWeightKeyword is the only attribute a monitored entry carries. It is
+// monitorWeightKeyword is the weight attribute a monitored entry carries. It is
 // named so monitorEntryNodes and validateMonitorWeightTokensAST cannot drift
 // apart from the compiler's reader.
 const monitorWeightKeyword = "weight"
+
+// isMonitorAttrKeyword reports whether tok opens a per-entry attribute
+// (keyword + one value token) rather than a new entry name. `weight` is the
+// historical attribute; #15038 adds the ip-monitoring probe binding
+// (`interface`, `secondary-ip-address`). Without reserving their value
+// slots, a packed target shredded into one phantom entry per token.
+func isMonitorAttrKeyword(tok string) bool {
+	switch tok {
+	case monitorWeightKeyword, "interface", "secondary-ip-address":
+		return true
+	}
+	return false
+}
 
 // monitorWeightTokens returns every `weight` VALUE an entry carries, across
 // both locations the value can occupy (#6588):
@@ -4275,10 +4288,43 @@ func compileRGIPMonitoring(rg *RedundancyGroup, child *Node) {
 					target.Weight = n
 				}
 			}
+			// #15038: `interface <unit>` / `secondary-ip-address <addr>`
+			// bind the probe to a unit and give the non-primary a source
+			// it actually holds. Read from BOTH locations (inline Keys and
+			// child leaves) like the weight, first-wins.
+			if v := ipMonitorTargetProp(addrChild, "interface"); v != "" {
+				target.Interface = v
+			}
+			if v := ipMonitorTargetProp(addrChild, "secondary-ip-address"); v != "" {
+				target.SecondaryIPAddress = v
+			}
 			ipm.Targets = append(ipm.Targets, target)
 		}
 	}
 	rg.IPMonitoring = ipm
+}
+
+// ipMonitorTargetProp returns the first value of the named per-target
+// ip-monitoring property (`interface` / `secondary-ip-address`) across both
+// spellings: inline on the entry's Keys (`10.0.0.1 interface reth0.0`) and as
+// a child leaf (`10.0.0.1 { interface reth0.0; }`). First-wins, mirroring
+// monitorWeightTokens. Empty when absent.
+func ipMonitorTargetProp(entry *Node, name string) string {
+	for i := 1; i < len(entry.Keys); i++ {
+		if entry.Keys[i] != name {
+			continue
+		}
+		if i+1 < len(entry.Keys) {
+			return entry.Keys[i+1]
+		}
+		return ""
+	}
+	for _, c := range entry.Children {
+		if len(c.Keys) > 0 && c.Keys[0] == name {
+			return nodeVal(c)
+		}
+	}
+	return ""
 }
 
 // isIPMonitoringProp reports whether tok opens an `ip-monitoring` property.

@@ -321,6 +321,7 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, networkdErr, applyErr, 
 	// 19. Update chassis cluster state machine
 	if d.cluster != nil && cfg.Chassis.Cluster != nil {
 		d.cluster.UpdateConfig(cfg.Chassis.Cluster)
+		d.cluster.SetMonitorConfig(cfg)
 		// Re-evaluate immediately after RG creation: UpdateConfig initializes
 		// new groups at the non-winning dataplane-ready floor, and the same
 		// kernel-truth verdict raises them only once an XDP link is proven.

@@ -194,6 +194,14 @@ type IPMonitoring struct {
 type IPMonitorTarget struct {
 	Address string
 	Weight  int
+	// Interface is the Junos logical unit the probe is bound to
+	// (`interface reth0.0`, #15038). Empty means unbound (legacy).
+	Interface string
+	// SecondaryIPAddress is the source address a non-primary node uses
+	// for the probe (`secondary-ip-address`, #15038): the primary probes
+	// from the unit's VIP, the secondary from this address, which it
+	// actually holds. Empty means no secondary source is configured.
+	SecondaryIPAddress string
 }
 
 // EventPolicy defines an event-driven policy (event-options).

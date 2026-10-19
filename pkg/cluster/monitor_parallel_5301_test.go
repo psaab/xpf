@@ -65,7 +65,7 @@ func TestMonitor_IPProbesRunConcurrently_5301(t *testing.T) {
 	// deadline curtailing a slow serial loop.
 	mon.IPMonitorCycleTimeout = 10 * time.Second
 	// Each probe blocks ~block then reports unreachable, unless aborted.
-	mon.probeFn = func(ctx context.Context, _ string) (bool, bool) {
+	mon.probeFn = func(ctx context.Context, _ *config.IPMonitorTarget, _ string, _ string) (bool, bool) {
 		select {
 		case <-time.After(block):
 			return false, true
@@ -108,8 +108,8 @@ func TestMonitor_IPProbeStableApplyOrder_5301(t *testing.T) {
 	mon := NewMonitor(m, cfg.RedundancyGroups)
 	injectFakeNl(mon)
 	setNoDampening(mon)
-	mon.probeFn = func(_ context.Context, addr string) (bool, bool) {
-		return reach[addr], true
+	mon.probeFn = func(_ context.Context, target *config.IPMonitorTarget, _ string, _ string) (bool, bool) {
+		return reach[target.Address], true
 	}
 
 	mon.poll()
@@ -148,7 +148,7 @@ func TestMonitor_IPProbeCycleOverrun_5301(t *testing.T) {
 	mon.IPMonitorCycleTimeout = 50 * time.Millisecond
 	// Every probe blocks far longer than the cycle budget; the cycle deadline
 	// aborts them (completed=false).
-	mon.probeFn = func(ctx context.Context, _ string) (bool, bool) {
+	mon.probeFn = func(ctx context.Context, _ *config.IPMonitorTarget, _ string, _ string) (bool, bool) {
 		select {
 		case <-time.After(2 * time.Second):
 			return false, true
@@ -192,7 +192,7 @@ func TestMonitor_StopCancelsInflightProbe_5301(t *testing.T) {
 	// Stop's context cancellation, not the cycle deadline.
 	mon.IPMonitorCycleTimeout = 30 * time.Second
 	probeStarted := make(chan struct{}, 8)
-	mon.probeFn = func(ctx context.Context, _ string) (bool, bool) {
+	mon.probeFn = func(ctx context.Context, _ *config.IPMonitorTarget, _ string, _ string) (bool, bool) {
 		select {
 		case probeStarted <- struct{}{}:
 		default:

@@ -211,6 +211,7 @@ func (d *Daemon) initManagers(failClosed bool) error {
 
 		d.cluster.UpdateConfig(cc)
 		d.cluster.Start(d.daemonCtx)
+		d.cluster.SetMonitorConfig(cfg)
 		// Wire event-drop callback: on dropped cluster events, trigger
 		// immediate reconciliation so the safety net doesn't wait 2s.
 		d.cluster.SetOnEventDrop(d.triggerReconcile)

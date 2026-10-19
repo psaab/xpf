@@ -26,9 +26,9 @@ func thresholdRG(id, globalWeight, globalThreshold, perTargetWeight int, addrs .
 }
 
 // reachSet is a per-address reachability probe seam shared by these tests.
-func reachProbeFn(reach map[string]bool) func(context.Context, string) (bool, bool) {
-	return func(_ context.Context, addr string) (bool, bool) {
-		return reach[addr], true
+func reachProbeFn(reach map[string]bool) func(context.Context, *config.IPMonitorTarget, string, string) (bool, bool) {
+	return func(_ context.Context, target *config.IPMonitorTarget, _ string, _ string) (bool, bool) {
+		return reach[target.Address], true
 	}
 }
 
