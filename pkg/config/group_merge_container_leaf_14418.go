@@ -105,6 +105,62 @@ var terminalThenActions14418 = map[string]bool{
 	"accept": true, "reject": true, "discard": true,
 }
 
+// #15259: `then next policy` is a flow-control peer of a routing
+// terminal, so it is kept beside the inline terminal for the #11780
+// gate rather than dropped as a conflicting terminal here. The drop
+// below therefore treats `next` as a terminal-class peer on the group
+// side (a group `next` beside an inline accept/reject is kept), while
+// a group terminal beside an inline `next policy` is also kept so the
+// same gate sees it. Routing-only: firewall `then` has no `next
+// policy`, and `next term` there stays a non-terminal fall-through.
+func routingThenPeerKeepsNext15259(peer *Node, children []*Node) bool {
+	if peer == nil {
+		return false
+	}
+	inlineHasNext := false
+	inlineHasTerminal := false
+	for _, c := range peer.Children {
+		for _, a := range thenActionKeys14418(c) {
+			if a == "next" {
+				inlineHasNext = true
+			}
+			if terminalThenActions14418[a] {
+				inlineHasTerminal = true
+			}
+		}
+		// Packed `then next ...` on the promoted inline peer.
+		if c != nil && len(c.Keys) > 2 && c.Keys[0] == "then" && c.Keys[1] == "next" {
+			inlineHasNext = true
+		}
+	}
+	if !inlineHasNext && !inlineHasTerminal {
+		return false
+	}
+	// Only routing peers qualify: the inline `then` must carry a
+	// routing terminal or a next clause (firewall discard/next-term
+	// shapes never carry `next policy`, and a group firewall `next`
+	// child is `next term`, which must keep its current drop/keep
+	// behaviour — it is not in terminalThenActions14418, so it is
+	// already kept; this helper only widens routing).
+	for _, c := range children {
+		if c == nil || len(c.Keys) == 0 || c.Keys[0] != "then" {
+			continue
+		}
+		if routingTermThenNextPolicy15259(c) && inlineHasTerminal {
+			return true
+		}
+		for _, a := range thenActionKeys14418(c) {
+			if terminalThenActions14418[a] && inlineHasNext {
+				return true
+			}
+		}
+		if len(c.Keys) > 2 && c.Keys[1] == "next" && inlineHasTerminal {
+			return true
+		}
+	}
+	return false
+}
+
 // dropConflictingTerminalThen14418 filters a group terminal action that
 // conflicts with the inline peer's (caller passes clones, so the group
 // source is never mutated). thenActionKeys14418 returns the action heads
@@ -130,6 +186,9 @@ func thenActionKeys14418(c *Node) []string {
 }
 
 func dropConflictingTerminalThen14418(peer *Node, children []*Node) []*Node {
+	if routingThenPeerKeepsNext15259(peer, children) {
+		return children
+	}
 	inline := terminalActionsInThen14418(peer)
 	if len(inline) == 0 {
 		return children

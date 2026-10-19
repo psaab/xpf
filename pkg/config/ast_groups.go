@@ -899,6 +899,16 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				*dst = append(*dst, s)
 				continue
 			}
+			// #15259: a group routing-term `then next ...` beside any
+			// peer must likewise materialise so the #11780 gate judges
+			// next-policy vs terminal (and malformed next) identically
+			// in both group/inline directions. Without this the
+			// inline-wins override silently dropped the group flow
+			// control and only the inline terminal survived.
+			if peer != nil && isRoutingTermThenNextPolicy15259(ancestorPath, s) {
+				*dst = append(*dst, s)
+				continue
+			}
 			if bracketedPeer := bracketedAddressPeer9859(ancestorPath, *dst, s); bracketedPeer != nil &&
 				mergeBracketedAddressInto9859(ancestorPath, *dst, bracketedPeer, s) {
 				appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{bracketedPeer}, markers)
@@ -1416,7 +1426,8 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				(!isDefaultPolicyGroupStanza12923(ancestorPath, s) ||
 					!groupDefaultPolicyStanzaAdopted12923(budget, *dst)) &&
 				!packedTailLeafExempts4325(ancestorPath, *dst, s) &&
-				!isRoutingTermThenAction14425(ancestorPath, s) {
+				!isRoutingTermThenAction14425(ancestorPath, s) &&
+				!isRoutingTermThenNextPolicy15259(ancestorPath, s) {
 				// #15033: a deeper group's container replaces a shallower
 				// adopted leaf peer (nested wins); inline keeps winning.
 				if rpeer, rkey, ok := budget.shallowerAdoptedPeer15033(*dst, s, budget.applyOriginLevel15033); ok &&
