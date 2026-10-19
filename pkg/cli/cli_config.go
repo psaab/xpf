@@ -599,13 +599,18 @@ func (c *CLI) handleConfigShow(args []string) error {
 			output = c.store.ShowCandidateXML()
 		}
 	case displayPipeInheritance:
+		var inhErr error
 		switch {
 		case redact:
-			output = c.store.ShowCandidateInheritanceRedacted(displayPath)
+			output, inhErr = c.store.ShowCandidateInheritanceRedacted(displayPath)
 		case len(displayPath) > 0:
-			output = c.store.ShowCandidatePathInheritance(displayPath)
+			output, inhErr = c.store.ShowCandidatePathInheritance(displayPath)
 		default:
-			output = c.store.ShowCandidateInheritance()
+			output, inhErr = c.store.ShowCandidateInheritance()
+		}
+		if inhErr != nil {
+			fmt.Printf("%% display inheritance failed: %v\n", inhErr)
+			return nil
 		}
 	default:
 		// Show scoped to path (editPath + args), or the whole candidate.

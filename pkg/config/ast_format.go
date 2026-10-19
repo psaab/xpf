@@ -8,59 +8,96 @@ import (
 	"strings"
 )
 
-// FormatInheritance returns the config with inherited groups expanded and
-// annotated with "## 'X' was inherited from group 'Y'" comments, matching
-// Junos "show configuration | display inheritance" output.
-func (t *ConfigTree) FormatInheritance() string {
-	// Strip inactive subtrees BEFORE group expansion so an `inactive:`
-	// apply-groups is not shown as inherited and inactive nodes don't pull in
-	// group content the compiler will never apply — mirrors the
-	// strip-before-expand path the compiler/commit-check use (configstore
-	// schemaValidateExpandedTreeForNode). #2008 H1. cloneForExpansion does a
-	// single deep copy and never aliases t.
+// expandForInheritance prepares the display clone (strip inactive, then
+// normalize — see #2008 H1 / #9743 below) and expands its groups for the
+// given node identity. nodeID >= 0 resolves apply-groups "${node}" to that
+// node's group (node0/node1); nodeID < 0 is the standalone view and uses
+// the generic node0 fallback (#15031), exactly as the generic compile does.
+// An expansion failure is returned, never hidden: the old code fell back
+// to the raw Format()/FormatPath() on error, so every ${node} HA config
+// silently rendered unexpanded (no inherited leaves, no annotation) and a
+// genuinely broken apply-groups looked like a plain config (#15197).
+func (t *ConfigTree) expandForInheritance(nodeID int) (*ConfigTree, error) {
 	clone := t.cloneForExpansion()
 	// #9743: normalize the clone before expanding, because both compile cores
 	// do (compiler.go, and schema_walk.go via normalizeCompactForValidation).
 	// Since #9620 the #8662 normalizer rewrites a brace-elided routing instance
 	// into its braced shape, and group expansion binds against that shape. A
 	// display that expands the RAW tree therefore omits properties the commit
-	// applies:
-	//
-	//	groups { G { routing-instances { blue instance-type forwarding description inherited; } } }
-	//
-	// compiled `blue` with InstanceType=forwarding and Description=inherited,
-	// while `display inheritance` showed neither; the same group body written
-	// braced showed both. `instance-type forwarding` is among the omitted
-	// properties, and it decides whether the daemon creates a VRF at all -- so
-	// the display was wrong exactly where an operator checks what a group
-	// contributes.
-	//
-	// The clone is fresh (cloneForExpansion never aliases t), so normalizing it
-	// in place cannot reach the caller's tree.
+	// applies (the elided `routing-instances { blue instance-type forwarding
+	// description inherited; } }` group body compiled with both properties
+	// while the display showed neither). The clone is fresh
+	// (cloneForExpansion never aliases t), so normalizing it in place cannot
+	// reach the caller's tree.
 	normalizeCompactStanzas(clone)
-	if err := clone.ExpandGroupsTagged(); err != nil {
-		return t.Format() // fallback to plain format on error
+	if nodeID >= 0 {
+		vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
+		if err := clone.ExpandGroupsWithVarsTagged(vars); err != nil {
+			return nil, fmt.Errorf("apply-groups: %w", err)
+		}
+		return clone, nil
+	}
+	if _, err := clone.ExpandGroupsNodeFallback15031(true); err != nil {
+		return nil, fmt.Errorf("apply-groups: %w", err)
+	}
+	return clone, nil
+}
+
+// FormatInheritance returns the config with inherited groups expanded and
+// annotated with "## 'X' was inherited from group 'Y'" comments, matching
+// Junos "show configuration | display inheritance" output. It renders the
+// standalone view (${node} resolved to node0, #15031); cluster callers
+// that know their node identity use FormatInheritanceForNode. Expansion
+// failures render as an explicit error line instead of silently falling
+// back to the raw config (#15197).
+func (t *ConfigTree) FormatInheritance() string {
+	out, err := t.FormatInheritanceForNode(-1)
+	if err != nil {
+		return fmt.Sprintf("%% display inheritance failed: %v\n", err)
+	}
+	return out
+}
+
+// FormatInheritanceForNode is FormatInheritance for the given cluster node
+// (nodeID >= 0), or the standalone view (nodeID < 0). It returns the
+// expansion error instead of hiding it behind the raw tree (#15197).
+func (t *ConfigTree) FormatInheritanceForNode(nodeID int) (string, error) {
+	clone, err := t.expandForInheritance(nodeID)
+	if err != nil {
+		return "", err
 	}
 	var b strings.Builder
 	formatNodesInheritance(&b, clone.Children, 0)
-	return b.String()
+	return b.String(), nil
 }
 
 // FormatPathInheritance is like FormatPath but with inheritance annotations.
+// It renders the standalone view; see FormatInheritance.
 func (t *ConfigTree) FormatPathInheritance(path []string) string {
-	// Strip inactive before expansion (see FormatInheritance). #2008 H1.
-	clone := t.cloneForExpansion()
-	// #9743, same reason as FormatInheritance above.
-	normalizeCompactStanzas(clone)
-	if err := clone.ExpandGroupsTagged(); err != nil {
-		return t.FormatPath(path)
+	out, err := t.FormatPathInheritanceForNode(path, -1)
+	if err != nil {
+		return fmt.Sprintf("%% display inheritance failed: %v\n", err)
+	}
+	return out
+}
+
+// FormatPathInheritanceForNode is FormatPathInheritance for the given
+// cluster node (nodeID >= 0), or the standalone view (nodeID < 0). It
+// returns the expansion error instead of rendering the unexpanded subtree
+// (#15197). An unmatched path returns "" with no error, as before.
+func (t *ConfigTree) FormatPathInheritanceForNode(path []string, nodeID int) (string, error) {
+	clone, err := t.expandForInheritance(nodeID)
+	if err != nil {
+		return "", err
 	}
 	if len(path) == 0 {
-		return clone.FormatInheritance()
+		var b strings.Builder
+		formatNodesInheritance(&b, clone.Children, 0)
+		return b.String(), nil
 	}
 	matches := navigatePath(clone.Children, path)
 	if len(matches) == 0 {
-		return ""
+		return "", nil
 	}
 	var b strings.Builder
 	for _, n := range matches {
@@ -72,7 +109,7 @@ func (t *ConfigTree) FormatPathInheritance(path []string) string {
 			fmt.Fprintf(&b, "}\n")
 		}
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 func formatNodesInheritance(b *strings.Builder, nodes []*Node, indent int) {

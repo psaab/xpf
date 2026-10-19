@@ -241,38 +241,40 @@ func (s *Store) ShowCandidatePathXML(path []string) string {
 }
 
 // ShowCandidateInheritance returns the candidate with groups expanded and
-// annotated with "## inherited from" comments.
-func (s *Store) ShowCandidateInheritance() string {
+// annotated with "## inherited from" comments, resolved for this store's
+// cluster node (s.nodeID, #15197). An expansion failure is returned as an
+// error, never hidden behind the raw candidate.
+func (s *Store) ShowCandidateInheritance() (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.candidate != nil {
-		return s.candidate.FormatInheritance()
+		return s.candidate.FormatInheritanceForNode(s.nodeID)
 	}
-	return ""
+	return "", nil
 }
 
 // ShowCandidatePathInheritance returns a subtree with inheritance annotations.
-func (s *Store) ShowCandidatePathInheritance(path []string) string {
+func (s *Store) ShowCandidatePathInheritance(path []string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.candidate != nil {
-		return s.candidate.FormatPathInheritance(path)
+		return s.candidate.FormatPathInheritanceForNode(path, s.nodeID)
 	}
-	return ""
+	return "", nil
 }
 
 // ShowActiveInheritance returns the active config with inheritance annotations.
-func (s *Store) ShowActiveInheritance() string {
+func (s *Store) ShowActiveInheritance() (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.active.FormatInheritance()
+	return s.active.FormatInheritanceForNode(s.nodeID)
 }
 
 // ShowActivePathInheritance returns an active config subtree with inheritance annotations.
-func (s *Store) ShowActivePathInheritance(path []string) string {
+func (s *Store) ShowActivePathInheritance(path []string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.active.FormatPathInheritance(path)
+	return s.active.FormatPathInheritanceForNode(path, s.nodeID)
 }
 
 // ShowRollback returns the content of rollback slot n (1-based) as hierarchical text.
@@ -391,10 +393,10 @@ func (s *Store) ShowActiveXMLRedacted(path []string) string {
 
 // ShowActiveInheritanceRedacted renders the active config (optional subtree)
 // with inheritance annotations and secrets masked.
-func (s *Store) ShowActiveInheritanceRedacted(path []string) string {
+func (s *Store) ShowActiveInheritanceRedacted(path []string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return forDisplay(s.active).FormatPathInheritance(path)
+	return forDisplay(s.active).FormatPathInheritanceForNode(path, s.nodeID)
 }
 
 // ShowCandidateRedacted renders the candidate config (optional subtree) as
@@ -451,13 +453,13 @@ func (s *Store) ShowCandidateXMLRedacted(path []string) string {
 
 // ShowCandidateInheritanceRedacted renders the candidate config (optional
 // subtree) with inheritance annotations and secrets masked.
-func (s *Store) ShowCandidateInheritanceRedacted(path []string) string {
+func (s *Store) ShowCandidateInheritanceRedacted(path []string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.candidate == nil {
-		return ""
+		return "", nil
 	}
-	return forDisplay(s.candidate).FormatPathInheritance(path)
+	return forDisplay(s.candidate).FormatPathInheritanceForNode(path, s.nodeID)
 }
 
 // ShowRollbackRedacted renders rollback slot n (1-based) as hierarchical text

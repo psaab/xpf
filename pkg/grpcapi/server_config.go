@@ -414,6 +414,7 @@ func (s *Server) ShowConfig(_ context.Context, req *pb.ShowConfigRequest) (*pb.S
 		path = req.Path
 	}
 	var output string
+	var inhErr error
 	switch {
 	case req.Target == pb.ConfigTarget_ACTIVE && req.Format == pb.ConfigFormat_JSON:
 		output = s.store.ShowActiveJSONRedacted(path)
@@ -422,7 +423,7 @@ func (s *Server) ShowConfig(_ context.Context, req *pb.ShowConfigRequest) (*pb.S
 	case req.Target == pb.ConfigTarget_ACTIVE && req.Format == pb.ConfigFormat_XML:
 		output = s.store.ShowActiveXMLRedacted(path)
 	case req.Target == pb.ConfigTarget_ACTIVE && req.Format == pb.ConfigFormat_INHERITANCE:
-		output = s.store.ShowActiveInheritanceRedacted(path)
+		output, inhErr = s.store.ShowActiveInheritanceRedacted(path)
 	case req.Target == pb.ConfigTarget_ACTIVE:
 		output = s.store.ShowActiveRedacted(path)
 	case req.Format == pb.ConfigFormat_JSON:
@@ -432,9 +433,12 @@ func (s *Server) ShowConfig(_ context.Context, req *pb.ShowConfigRequest) (*pb.S
 	case req.Format == pb.ConfigFormat_XML:
 		output = s.store.ShowCandidateXMLRedacted(path)
 	case req.Format == pb.ConfigFormat_INHERITANCE:
-		output = s.store.ShowCandidateInheritanceRedacted(path)
+		output, inhErr = s.store.ShowCandidateInheritanceRedacted(path)
 	default:
 		output = s.store.ShowCandidateRedacted(path)
+	}
+	if inhErr != nil {
+		return nil, inhErr
 	}
 	return &pb.ShowConfigResponse{Output: output}, nil
 }

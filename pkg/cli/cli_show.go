@@ -171,13 +171,18 @@ func (c *CLI) handleShow(args []string) error {
 				output = c.store.ShowActiveXML()
 			}
 		case displayPipeInheritance:
+			var inhErr error
 			switch {
 			case redact:
-				output = c.store.ShowActiveInheritanceRedacted(cfgPath)
+				output, inhErr = c.store.ShowActiveInheritanceRedacted(cfgPath)
 			case len(cfgPath) > 0:
-				output = c.store.ShowActivePathInheritance(cfgPath)
+				output, inhErr = c.store.ShowActivePathInheritance(cfgPath)
 			default:
-				output = c.store.ShowActiveInheritance()
+				output, inhErr = c.store.ShowActiveInheritance()
+			}
+			if inhErr != nil {
+				fmt.Printf("%% display inheritance failed: %v\n", inhErr)
+				return nil
 			}
 		default:
 			switch {
