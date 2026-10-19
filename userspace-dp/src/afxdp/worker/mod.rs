@@ -1479,6 +1479,9 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) umem_slice_dropped: u64,
     pub(crate) unknown_vlan_dropped: u64,
     pub(crate) dst_mac_dropped: u64,
+    /// #15243 (A60-01): native GRE/WG-decapsulated reverse packets refused
+    /// at the PMech hold site (recycled, not held).
+    pub(crate) pmech_decap_hold_refused: u64,
     pub(crate) neighbor_miss_packets: u64,
     pub(crate) discard_route_packets: u64,
     pub(crate) next_table_packets: u64,

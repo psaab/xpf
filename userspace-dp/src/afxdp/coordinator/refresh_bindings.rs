@@ -126,6 +126,7 @@ fn copy_live_snapshot(binding: &mut BindingStatus, snap: BindingLiveSnapshot) {
     binding.umem_slice_dropped = snap.umem_slice_dropped;
     binding.unknown_vlan_dropped = snap.unknown_vlan_dropped;
     binding.dst_mac_dropped = snap.dst_mac_dropped;
+    binding.pmech_decap_hold_refused = snap.pmech_decap_hold_refused;
     binding.neighbor_miss_packets = snap.neighbor_miss_packets;
     binding.discard_route_packets = snap.discard_route_packets;
     binding.next_table_packets = snap.next_table_packets;
@@ -392,6 +393,7 @@ fn zero_unbound_slot(binding: &mut BindingStatus) {
     binding.umem_slice_dropped = 0;
     binding.unknown_vlan_dropped = 0;
     binding.dst_mac_dropped = 0;
+    binding.pmech_decap_hold_refused = 0;
     binding.neighbor_miss_packets = 0;
     binding.discard_route_packets = 0;
     binding.next_table_packets = 0;

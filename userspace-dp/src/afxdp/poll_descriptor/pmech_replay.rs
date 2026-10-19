@@ -14,6 +14,25 @@ use crate::session::{PMechSessionDirectory, PMechTokenProbe};
 /// the RX list hands a TX address to the RX fill ring and strands the TX
 /// frame — the #10597 contract). Native RX descriptors go to
 /// `scratch_recycle` and return to the RX fill ring.
+
+/// #15243 (A60-01): whether a reverse packet may be admitted to the hold
+/// queue. Only packets whose `meta` still describes the frame referenced
+/// by their descriptor may be held:
+///
+/// - a native packet (`is_injected == false`) with
+///   `owned_frame.is_some()` was decapsulated at stage 6/6b (GRE/WG):
+///   `meta` is the INNER packet's meta while `desc` still references the
+///   OUTER UMEM frame. Replaying it would slice the outer frame at inner
+///   offsets and re-run decap against inner bytes (`NotGre`/`NotWg`), so
+///   the held packet could never be delivered. Refuse it (the caller
+///   recycles the descriptor and counts `pmech_decap_hold_refused`).
+/// - an injected packet's descriptor already holds its owned frame bytes
+///   in a TX-pool frame, so it is always admissible.
+#[inline]
+pub(super) fn pmech_hold_admissible(is_injected: bool, owned_frame_is_some: bool) -> bool {
+    is_injected || !owned_frame_is_some
+}
+
 #[inline(never)]
 pub(super) fn drain_pending_pmech_replays(
     directory: &PMechSessionDirectory,

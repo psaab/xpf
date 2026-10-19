@@ -156,6 +156,11 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) umem_slice_dropped: AtomicU64,
     pub(super) unknown_vlan_dropped: AtomicU64,
     pub(super) dst_mac_dropped: AtomicU64,
+    /// #15243 (A60-01): native GRE/WG-decapsulated reverse packets refused
+    /// at the PMech hold site (recycled, not held) because the held
+    /// descriptor still references the outer UMEM frame while `meta`
+    /// already describes the inner packet; replay would mis-parse it.
+    pub(super) pmech_decap_hold_refused: AtomicU64,
     pub(super) neighbor_miss_packets: AtomicU64,
     pub(super) discard_route_packets: AtomicU64,
     pub(super) next_table_packets: AtomicU64,
@@ -1051,9 +1056,12 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // both sentinels; offsets advance by 8 bytes, size unchanged.
 // #15285 adds one unconditional u64 kernel_rx_ring_full counter before both
 // sentinels; offsets advance by 8 bytes, size unchanged.
-const _: [(); 2624] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2488] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2617] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+// #15243 adds one unconditional u64 pmech_decap_hold_refused counter before
+// both sentinels; offsets advance by 8 bytes while size grows a 64-byte
+// alignment unit (the previous unit was full).
+const _: [(); 2688] = [(); std::mem::size_of::<BindingLiveState>()];
+const _: [(); 2496] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2625] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1090,6 +1098,7 @@ impl BindingLiveState {
             umem_slice_dropped: AtomicU64::new(0),
             unknown_vlan_dropped: AtomicU64::new(0),
             dst_mac_dropped: AtomicU64::new(0),
+            pmech_decap_hold_refused: AtomicU64::new(0),
             neighbor_miss_packets: AtomicU64::new(0),
             discard_route_packets: AtomicU64::new(0),
             next_table_packets: AtomicU64::new(0),
