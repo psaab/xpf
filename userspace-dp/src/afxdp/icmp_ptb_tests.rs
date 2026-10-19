@@ -1967,12 +1967,8 @@ fn post_transform_wg_inner_mtu_is_per_peer_underlay() {
     nat64_decision.nat.nat64 = true;
     nat64_decision.nat.rewrite_dst = Some(IpAddr::V4(peer_b_dst_v4));
     let source_meta = ForwardPacketMeta::from(source_meta);
-    let nat64_dst = post_transform_inner_destination(
-        &source_frame,
-        source_meta,
-        &nat64_decision,
-        true,
-    );
+    let nat64_dst =
+        post_transform_inner_destination(&source_frame, source_meta, &nat64_decision, true, true);
     assert_eq!(nat64_dst, Some(IpAddr::V4(peer_b_dst_v4)));
     assert_eq!(
         post_transform_inner_mtu(
@@ -2206,5 +2202,27 @@ fn ptb_suppressed_for_tunnel_decap_inner_14642() {
     assert!(
         build_packet_too_big_v6(&frame6_c, meta6_c, PTB_IFINDEX, &fwd, 1280).is_some(),
         "control: native oversize v6 must still build Packet Too Big"
+    );
+}
+
+/// `needs_inner_dst=false` MUST NOT parse the frame — it returns `None`
+/// even for a perfectly parseable frame, because every non-WireGuard
+/// consumer drops the value. Guards the parse-skip gate against a
+/// regression that reintroduces the per-packet parse on plain/GRE paths.
+/// The `true` control proves the fixture IS parseable, so a `None`
+/// under `false` can only come from the gate.
+#[test]
+fn post_transform_inner_destination_skips_parse_when_not_needed_14300() {
+    let (frame, meta) = inbound_v6_udp(1280);
+    let meta = ForwardPacketMeta::from(meta);
+    let decision = tunnel_decision();
+    assert!(
+        post_transform_inner_destination(&frame, meta, &decision, false, true).is_some(),
+        "CONTROL: parseable fixture must yield a destination when the gate is open"
+    );
+    assert_eq!(
+        post_transform_inner_destination(&frame, meta, &decision, false, false),
+        None,
+        "gate closed: destination must be skipped without parsing"
     );
 }

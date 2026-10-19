@@ -205,11 +205,15 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb_with_dynamic(
     let egress_mtu = forwarded_egress_mtu(decision, forwarding);
     // WG's MTU lookup must use the destination in the transformed inner frame:
     // NAT64 still has the original-family destination in `source_frame`.
+    // Perf #14300: inner_dst is consumed only by the WireGuard arm of
+    // `post_transform_inner_mtu`; skip the frame parse on every other
+    // path (plain / NAT64-only / GRE), where it was computed and dropped.
     let inner_dst = crate::afxdp::icmp_ptb::post_transform_inner_destination(
         source_frame,
         meta,
         decision,
         is_nat64,
+        crate::afxdp::icmp_ptb::post_transform_needs_inner_dst(decision, forwarding),
     );
     let mtu = if is_nat64 || uses_native_tunnel {
         crate::afxdp::icmp_ptb::post_transform_inner_mtu_with_dynamic(
@@ -225,9 +229,13 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb_with_dynamic(
         egress_mtu
     };
     let ptb_meta: UserspaceDpMeta = meta.into();
-    let l3 = frame_l3_offset(source_frame).or_else(|| {
+    // Perf #14300: prefer the shim-stamped L3 offset (one nibble check,
+    // already trusted by every other hot-path consumer) and only fall
+    // back to the ethertype walk on a distrusted stamp — the previous
+    // order walked the ethertype first and discarded the stamp check.
+    let l3 =
         crate::afxdp::frame::nibble_trusted_stamp(source_frame, meta.l3_offset, meta.addr_family)
-    });
+            .or_else(|| frame_l3_offset(source_frame));
     if let Some(l3) = l3 {
         // #9901 (F-074): the decision below runs with NO known MTU — it will
         // fail-open to `Forward` (never invent an MTU smaller than the link).
@@ -2084,6 +2092,7 @@ fn nat64_v4_egress_mtu_with_dynamic(
             meta,
             decision,
             true,
+            crate::afxdp::icmp_ptb::post_transform_needs_inner_dst(decision, forwarding),
         ),
         dynamic_neighbors,
     )
@@ -2123,6 +2132,7 @@ fn nat64_v6_egress_mtu_with_dynamic(
             meta,
             decision,
             true,
+            crate::afxdp::icmp_ptb::post_transform_needs_inner_dst(decision, forwarding),
         ),
         dynamic_neighbors,
     );
