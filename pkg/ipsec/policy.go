@@ -587,21 +587,21 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 		}
 		remoteAddr, _, gw, _ := resolveRemoteAddr(ipsecCfg, gc.vpn)
 		fmt.Fprintf(&b, "  ike-%s {\n", gc.name)
-		// #15027 (A16-04): each comma-list element keeps its own
-		// encoding — a hexadecimal value renders as its bare
-		// `0x<hex>` token (raw bytes, validated hex so no quoting
-		// needed), an ascii-text value as the quoted #2126-escaped
-		// string. Elements are joined with ", " so every element
-		// parses independently.
-		parts := make([]string, len(gc.pskValues))
-		for i, v := range gc.pskValues {
-			if strings.HasPrefix(v, "0x") {
-				parts[i] = v
-			} else {
-				parts[i] = "\"" + escapeSwanctlQuoted(sanitizeSwanctlValue(v)) + "\""
-			}
+		if len(gc.pskValues) == 1 && strings.HasPrefix(gc.pskValues[0], "0x") {
+			// #15027 (A16-04): a lone hexadecimal PSK renders as
+			// raw bytes — swanctl's `0x` prefix makes strongSwan
+			// hex-decode the value (validated hex, no quoting
+			// needed), matching the peer holding the same Junos
+			// hex key. Quoting it derived the ASCII digits.
+			fmt.Fprintf(&b, "    secret = %s\n", gc.pskValues[0])
+		} else {
+			// All-ASCII (the #15024 grouped shape): one quoted
+			// comma-joined value, byte-identical to the pre-#15027
+			// render. A mixed hex/ASCII group (not constructible
+			// from one Junos gateway stanza today) falls back to
+			// element-wise quoting so no hex token is mis-derived.
+			fmt.Fprintf(&b, "    secret = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(strings.Join(gc.pskValues, ","))))
 		}
-		fmt.Fprintf(&b, "    secret = %s\n", strings.Join(parts, ", "))
 		// Scope this PSK to its peer with id selectors (#3952). A PSK
 		// secret with NO id matches ANY peer, so with two or more PSK
 		// VPNs strongSwan can bind the wrong secret to a peer and IKE
