@@ -250,7 +250,7 @@ func (r *Runner) executeRollback(plan rollbackPlan, j *Journal, opts RollbackOpt
 		}
 		r.logf("upgrade: resuming rollback with restored config DB from %s", plan.snapshotDir)
 	}
-	if err := r.flip(plan.toVersion); err != nil {
+	if err := r.flipToleratingKernelArmRestamp(plan.toVersion); err != nil {
 		return fmt.Errorf("upgrade --rollback: re-flip to target %s: %w", plan.toVersion, err)
 	}
 	if err := r.cfg.Sys.StartUnit(r.cfg.Unit); err != nil {
