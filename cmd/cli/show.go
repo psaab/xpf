@@ -42,25 +42,19 @@ func (c *ctl) handleShow(args []string) error {
 			case "cluster":
 				if len(args) >= 3 {
 					switch args[2] {
-					case "status":
-						return c.showCommand("show chassis cluster status")
-					case "interfaces":
-						return c.showCommand("show chassis cluster interfaces")
-					case "information":
-						return c.showCommand("show chassis cluster information")
-					case "statistics":
-						return c.showCommand("show chassis cluster statistics")
+					case "status", "interfaces", "information", "statistics", "fence-status":
+						if len(args) > 3 {
+							return fmt.Errorf("unknown chassis cluster target: %s", strings.Join(args[3:], " "))
+						}
+						return c.showCommand("show chassis cluster " + args[2])
 					case "control-plane", "data-plane", "ip-monitoring", "fabric":
-						// #5459: an UNRECOGNIZED sub-arg must surface a
-						// usage error, not silently render the default
-						// view (mirrors the strict #1827 `show services
-						// ip-monitoring` handler). A bare subsystem with
-						// no sub-arg keeps its historical default view.
 						topic, filter, err := clusterSubsystemView(args[2], args[3:])
 						if err != nil {
 							return err
 						}
 						return c.showTextFiltered(topic, filter)
+					default:
+						return fmt.Errorf("unknown chassis cluster target: %s (expected `status`, `interfaces`, `information`, `statistics`, `fence-status`, `fabric`, `control-plane`, `data-plane`, or `ip-monitoring`)", args[2])
 					}
 				}
 				return c.showCommand("show chassis cluster")
@@ -508,6 +502,11 @@ func clusterSubsystemView(sub string, rest []string) (topic, filter string, err 
 			return "", "", fmt.Errorf("unknown fabric target: %s (expected `statistics`)", rest[0])
 		}
 		return "chassis-cluster-fabric-statistics", "", nil
+	case "fence-status":
+		if len(rest) > 0 {
+			return "", "", fmt.Errorf("unknown fence-status target: %s", strings.Join(rest, " "))
+		}
+		return "chassis-cluster-fence-status", "", nil
 	}
 	return "", "", fmt.Errorf("unknown cluster subsystem: %s", sub)
 }

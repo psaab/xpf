@@ -136,6 +136,7 @@ var showTextTopicCommand = map[string]string{
 	"chassis-cluster-data-plane-fairness":      "show chassis cluster data-plane fairness",
 	"chassis-cluster-data-plane-flows":         "show chassis cluster data-plane flows",
 	"chassis-cluster-fabric-statistics":        "show chassis cluster fabric statistics",
+	"chassis-cluster-fence-status":             "show chassis cluster fence-status",
 	"chassis-cluster-ip-monitoring-status":     "show chassis cluster ip-monitoring status",
 
 	// `show class-of-service ...`. The bare `class-of-service` topic is the

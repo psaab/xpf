@@ -303,3 +303,22 @@ func (s *Server) showChassisClusterFabricStatistics(buf *strings.Builder) {
 	fmt.Fprintln(buf, "Note: XDP-redirected packets bypass AF_PACKET (tcpdump).")
 	fmt.Fprintln(buf, "Use these counters or 'monitor interface <fab>' for fabric telemetry.")
 }
+
+// showChassisClusterFenceStatus renders peer fencing config and history
+// (#15775). With no live manager it falls back to the configured action.
+func (s *Server) showChassisClusterFenceStatus(buf *strings.Builder) {
+	if s.cluster != nil {
+		buf.WriteString(s.cluster.FormatFenceStatus())
+		return
+	}
+	action := "disabled"
+	if s.store != nil {
+		if cfg := s.store.ActiveConfig(); cfg != nil && cfg.Chassis.Cluster != nil && cfg.Chassis.Cluster.PeerFencing != "" {
+			action = cfg.Chassis.Cluster.PeerFencing
+		}
+	}
+	fmt.Fprintln(buf, "Peer fencing:")
+	fmt.Fprintf(buf, "  Action: %s\n", action)
+	fmt.Fprintln(buf, "  Attempts: none")
+	fmt.Fprintln(buf)
+}

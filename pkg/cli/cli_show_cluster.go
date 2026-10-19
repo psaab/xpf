@@ -156,57 +156,106 @@ func (c *CLI) showChassisDeviceMapCandidates() error {
 // showChassisCluster shows cluster/HA configuration and status.
 
 func (c *CLI) showChassisCluster(args []string) error {
-	if len(args) > 0 {
-		switch args[0] {
-		case "status":
-			return c.showChassisClusterStatus()
-		case "interfaces":
-			return c.showChassisClusterInterfaces()
-		case "information":
-			return c.showChassisClusterInformation()
-		case "statistics":
-			return c.showChassisClusterStatistics()
-		case "fabric":
-			if len(args) > 1 && args[1] == "statistics" {
-				return c.showChassisClusterFabricStatistics()
-			}
-			cmdtree.PrintTreeHelp("show chassis cluster fabric:", operationalTree, "show", "chassis", "cluster", "fabric")
-			return nil
-		case "control-plane":
-			if len(args) > 1 && args[1] == "statistics" {
-				return c.showChassisClusterControlPlaneStats()
-			}
-			cmdtree.PrintTreeHelp("show chassis cluster control-plane:", operationalTree, "show", "chassis", "cluster", "control-plane")
-			return nil
-		case "data-plane":
-			if len(args) > 1 {
-				switch args[1] {
-				case "statistics":
-					return c.showChassisClusterDataPlaneStats()
-				case "interfaces":
-					return c.showChassisClusterDataPlaneInterfaces()
-				case "fairness":
-					return c.showChassisClusterDataPlaneFairness()
-				case "flows":
-					limit, err := dpformat.ParseFlowWorkerMapLimitSpec(strings.Join(args[2:], " "))
-					if err != nil {
-						return err
-					}
-					return c.showChassisClusterDataPlaneFlows(limit)
-				}
-			}
-			cmdtree.PrintTreeHelp("show chassis cluster data-plane:", operationalTree, "show", "chassis", "cluster", "data-plane")
-			return nil
-		case "ip-monitoring":
-			if len(args) > 1 && args[1] == "status" {
-				return c.showChassisClusterIPMonitoringStatus()
-			}
-			cmdtree.PrintTreeHelp("show chassis cluster ip-monitoring:", operationalTree, "show", "chassis", "cluster", "ip-monitoring")
-			return nil
-		}
+	if len(args) == 0 {
+		return c.showChassisClusterStatus()
 	}
-	// Default: show status
-	return c.showChassisClusterStatus()
+	rejectExtra := func(extra []string) error {
+		if len(extra) > 0 {
+			return fmt.Errorf("unknown chassis cluster target: %s", strings.Join(extra, " "))
+		}
+		return nil
+	}
+	switch args[0] {
+	case "status":
+		if err := rejectExtra(args[1:]); err != nil {
+			return err
+		}
+		return c.showChassisClusterStatus()
+	case "interfaces":
+		if err := rejectExtra(args[1:]); err != nil {
+			return err
+		}
+		return c.showChassisClusterInterfaces()
+	case "information":
+		if err := rejectExtra(args[1:]); err != nil {
+			return err
+		}
+		return c.showChassisClusterInformation()
+	case "statistics":
+		if err := rejectExtra(args[1:]); err != nil {
+			return err
+		}
+		return c.showChassisClusterStatistics()
+	case "fence-status":
+		if err := rejectExtra(args[1:]); err != nil {
+			return err
+		}
+		return c.showChassisClusterFenceStatus()
+	case "fabric":
+		// Bare subsystem renders its default view (parity with remote
+		// #5459/#15775); a present token must be `statistics`.
+		if len(args) == 1 || (len(args) == 2 && args[1] == "statistics") {
+			return c.showChassisClusterFabricStatistics()
+		}
+		return fmt.Errorf("unknown fabric target: %s (expected `statistics`)", strings.Join(args[1:], " "))
+	case "control-plane":
+		if len(args) == 1 || (len(args) == 2 && args[1] == "statistics") {
+			return c.showChassisClusterControlPlaneStats()
+		}
+		return fmt.Errorf("unknown control-plane target: %s (expected `statistics`)", strings.Join(args[1:], " "))
+	case "data-plane":
+		if len(args) == 1 {
+			return c.showChassisClusterDataPlaneStats()
+		}
+		switch args[1] {
+		case "statistics":
+			if err := rejectExtra(args[2:]); err != nil {
+				return err
+			}
+			return c.showChassisClusterDataPlaneStats()
+		case "interfaces":
+			if err := rejectExtra(args[2:]); err != nil {
+				return err
+			}
+			return c.showChassisClusterDataPlaneInterfaces()
+		case "fairness":
+			if err := rejectExtra(args[2:]); err != nil {
+				return err
+			}
+			return c.showChassisClusterDataPlaneFairness()
+		case "flows":
+			limit, err := dpformat.ParseFlowWorkerMapLimitSpec(strings.Join(args[2:], " "))
+			if err != nil {
+				return err
+			}
+			return c.showChassisClusterDataPlaneFlows(limit)
+		}
+		return fmt.Errorf("unknown data-plane target: %s (expected `statistics`, `interfaces`, `fairness`, or `flows`)", args[1])
+	case "ip-monitoring":
+		if len(args) == 1 || (len(args) == 2 && args[1] == "status") {
+			return c.showChassisClusterIPMonitoringStatus()
+		}
+		return fmt.Errorf("unknown ip-monitoring target: %s (expected `status`)", strings.Join(args[1:], " "))
+	}
+	return fmt.Errorf("unknown chassis cluster target: %s (expected `status`, `interfaces`, `information`, `statistics`, `fence-status`, `fabric`, `control-plane`, `data-plane`, or `ip-monitoring`)", args[0])
+}
+
+func (c *CLI) showChassisClusterFenceStatus() error {
+	if c.cluster == nil {
+		// Config-only fallback: report the configured action (or disabled)
+		// with no live history, mirroring FormatFenceStatus semantics.
+		action := "disabled"
+		if cfg := c.store.ActiveConfig(); cfg != nil && cfg.Chassis.Cluster != nil && cfg.Chassis.Cluster.PeerFencing != "" {
+			action = cfg.Chassis.Cluster.PeerFencing
+		}
+		fmt.Println("Peer fencing:")
+		fmt.Printf("  Action: %s\n", action)
+		fmt.Println("  Attempts: none")
+		fmt.Println()
+		return nil
+	}
+	fmt.Print(c.cluster.FormatFenceStatus())
+	return nil
 }
 
 func (c *CLI) showChassisClusterStatus() error {

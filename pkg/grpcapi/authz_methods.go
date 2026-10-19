@@ -409,6 +409,7 @@ var showTextViewTopics = map[string]bool{
 	"chassis-cluster-data-plane-interfaces":    true,
 	"chassis-cluster-data-plane-statistics":    true,
 	"chassis-cluster-fabric-statistics":        true,
+	"chassis-cluster-fence-status":             true,
 	"chassis-cluster-information":              true,
 	"chassis-cluster-interfaces":               true,
 	"chassis-cluster-ip-monitoring-status":     true,
