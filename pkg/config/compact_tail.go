@@ -223,7 +223,7 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 			next.setKeysQuoted(append([]bool(nil), tailQuoted[:n]...))
 		}
 		if len(tailBracketed) == len(tail) {
-			next.setKeysBracketed(append([]bool(nil), tailBracketed[:n]...))
+			next.setKeysBracketed(append([]bool(nil), tailBracketed[:n]...), node.BracketedClosed)
 		}
 		if levels[at].node == nil {
 			// The run's first statement, or one that popped all the way back to
