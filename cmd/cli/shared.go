@@ -305,27 +305,13 @@ func (c *ctl) dispatchConfig(line string) error {
 		fmt.Printf("[edit %s]\n", strings.Join(c.editPath, " "))
 		return nil
 
-	case "top":
-		c.editPath = nil
-		if c.rl != nil {
-			c.rl.SetPrompt(c.configPrompt())
-		}
-		fmt.Println("[edit]")
-		return nil
-
-	case "up":
-		if len(c.editPath) > 0 {
-			c.editPath = c.editPath[:len(c.editPath)-1]
-		}
-		if c.rl != nil {
-			c.rl.SetPrompt(c.configPrompt())
-		}
-		if len(c.editPath) > 0 {
-			fmt.Printf("[edit %s]\n", strings.Join(c.editPath, " "))
-		} else {
-			fmt.Println("[edit]")
-		}
-		return nil
+	case "top", "up":
+		// #15082: prefixed form executes at the target level and
+		// restores the cursor; bare form is pure navigation.
+		// Previously trailing tokens were ignored with a nil
+		// return and no RPC, so `top delete ... allow-all`
+		// silently kept the permit policy.
+		return c.dispatchTopUp15082(line)
 
 	case "set":
 		if len(parts) < 2 {
@@ -650,4 +636,39 @@ func printRemoteTreeHelp(header string, path ...string) {
 // printConfigTreeHelp prints self-generating help from the config tree.
 func printConfigTreeHelp(header string, path ...string) {
 	cmdtree.PrintTreeHelp(header, cmdtree.ConfigTopLevel, path...)
+}
+
+// dispatchTopUp15082 handles bare and prefixed top/up (#15082) on
+// the remote surface. The inner command re-enters dispatchConfig
+// with the target cursor installed, so it issues exactly the RPC
+// the un-prefixed command would issue at that level; the cursor
+// is restored afterwards, including on error.
+func (c *ctl) dispatchTopUp15082(line string) error {
+	saved := append([]string{}, c.editPath...)
+	target, inner, ok := config.ParseTopUpPrefix15082(config.NormalizeEditPathTokens(saved), line)
+	if !ok {
+		return fmt.Errorf("%s: invalid up count or malformed prefix", strings.Fields(line)[0])
+	}
+	if len(inner) == 0 {
+		c.editPath = target
+		if c.rl != nil {
+			c.rl.SetPrompt(c.configPrompt())
+		}
+		if len(target) > 0 {
+			fmt.Printf("[edit %s]\n", strings.Join(target, " "))
+		} else {
+			fmt.Println("[edit]")
+		}
+		return nil
+	}
+	if inner[0] == "top" || inner[0] == "up" || inner[0] == "edit" {
+		return fmt.Errorf("%s: %s cannot follow a top/up prefix", strings.Fields(line)[0], inner[0])
+	}
+	c.editPath = append([]string{}, target...)
+	err := c.dispatchConfig(strings.Join(inner, " "))
+	c.editPath = saved
+	if c.rl != nil {
+		c.rl.SetPrompt(c.configPrompt())
+	}
+	return err
 }

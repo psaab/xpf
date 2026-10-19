@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -56,7 +57,9 @@ var configMutationVerbs = map[string]bool{
 //
 // NOT GATED, and each for a stated reason rather than by omission:
 //
-//   - `edit`/`top`/`up` — navigation, no change (see configMutationVerbs).
+//   - `edit`, bare `top`/`up` — navigation, no change (see
+//     configMutationVerbs). A `top`/`up` PREFIX carrying a command
+//     (#15082) is gated as that command at the target level.
 //   - `commit`/`rollback` — they act on the candidate as a whole, not on a
 //     path, so there is nothing for a path regex to match. A deny that stopped
 //     `commit` would be denying the operator's own already-authorized edits.
@@ -68,6 +71,18 @@ var configMutationVerbs = map[string]bool{
 func configMutationPaths(editPath, parts []string, quoted []bool) ([]string, bool) {
 	if len(parts) == 0 {
 		return nil, false
+	}
+	// #15082: `top <cmd>` / `up [n] <cmd>` execute cmd at the target
+	// level. Adjudicate the inner command against the TARGET cursor,
+	// not the navigation verb against the current cursor — otherwise
+	// a denied delete rides through ungated while the dispatcher
+	// (now) executes it.
+	if parts[0] == "top" || parts[0] == "up" {
+		target, inner, innerQuoted, ok := ResolveTopUpPrefix15082(editPath, parts, quoted)
+		if !ok || len(inner) == 0 {
+			return nil, false
+		}
+		return configMutationPaths(target, inner, innerQuoted)
 	}
 	verb := parts[0]
 	if !configMutationVerbs[verb] {
@@ -353,6 +368,14 @@ func authorizeConfigMutationDepth9939(cfg *Config, class string, editPath []stri
 	// and this line — so the adjudicated path is the path the store
 	// lexer will execute, never the raw spelling.
 	editPath, parts, quoted = normalizeEditPath14716(editPath, parts, quoted)
+	// #15082: unwrap a top/up prefix so the embedded-payload scan
+	// below sees the inner command at its target cursor, exactly
+	// as configMutationPaths adjudicated it.
+	if len(parts) > 0 && (parts[0] == "top" || parts[0] == "up") {
+		if target, inner, innerQuoted, ok := ResolveTopUpPrefix15082(editPath, parts, quoted); ok && len(inner) > 0 {
+			editPath, parts, quoted = target, inner, innerQuoted
+		}
+	}
 	paths, gated := configMutationPaths(editPath, parts, quoted)
 	if !gated {
 		return nil
@@ -414,4 +437,109 @@ func configAuditRoot(path string) string {
 		return "<empty>"
 	}
 	return fields[0]
+}
+
+// ResolveTopUpPrefix15082 splits a Junos `top <cmd>` / `up [n] <cmd>`
+// config-mode prefix (#15082). target is the edit cursor the inner
+// command runs against (root for top; n levels up for up, default 1,
+// clamped to root), inner/innerQuoted the remaining command tokens
+// (nil for bare navigation), and ok=false when the prefix is
+// malformed (a non-numeric or out-of-range up count, or a count with
+// no following command token to consume it as a count). Callers
+// that execute must fail closed on !ok with trailing tokens present;
+// bare `top`/`up` (no trailing tokens) returns inner=nil, ok=true.
+func ResolveTopUpPrefix15082(editPath, parts []string, quoted []bool) (target, inner []string, innerQuoted []bool, ok bool) {
+	if len(parts) == 0 || (parts[0] != "top" && parts[0] != "up") {
+		return nil, nil, nil, false
+	}
+	quoteAt := func(i int) bool {
+		return i < len(quoted) && quoted[i]
+	}
+	if parts[0] == "top" {
+		if len(parts) == 1 {
+			return nil, nil, nil, true
+		}
+		innerQuoted = nil
+		if len(quoted) == len(parts) {
+			innerQuoted = quoted[1:]
+		}
+		return nil, parts[1:], innerQuoted, true
+	}
+	// up [n] [cmd...]
+	n := 1
+	rest := 1
+	if len(parts) >= 2 && !quoteAt(1) {
+		if v, err := parseUpCount15082(parts[1]); err == nil {
+			// A bare number is a count only when a command follows
+			// or it is the whole line (`up 2`); `up 1` alone is
+			// navigation. With a command, consume it.
+			n = v
+			rest = 2
+		} else if isAllDigits15082(parts[1]) {
+			// Numeric but out of range: malformed, never guess.
+			return nil, nil, nil, false
+		}
+		// Non-numeric: it is the inner command's verb.
+	}
+	if rest >= len(parts) {
+		// Bare navigation: `up` or `up n` (count clamped to root).
+		if n > len(editPath) {
+			return nil, nil, nil, true
+		}
+		if n == 0 {
+			return append([]string{}, editPath...), nil, nil, true
+		}
+		return append([]string{}, editPath[:len(editPath)-n]...), nil, nil, true
+	}
+	if n > len(editPath) {
+		return nil, nil, nil, false
+	}
+	target = append([]string{}, editPath[:len(editPath)-n]...)
+	innerQuoted = nil
+	if len(quoted) == len(parts) {
+		innerQuoted = quoted[rest:]
+	}
+	return target, parts[rest:], innerQuoted, true
+}
+
+func parseUpCount15082(tok string) (int, error) {
+	if tok == "" {
+		return 0, strconv.ErrSyntax
+	}
+	for _, r := range tok {
+		if r < '0' || r > '9' {
+			return 0, strconv.ErrSyntax
+		}
+	}
+	v, err := strconv.Atoi(tok)
+	if err != nil {
+		return 0, err
+	}
+	return v, nil
+}
+
+func isAllDigits15082(tok string) bool {
+	if tok == "" {
+		return false
+	}
+	for _, r := range tok {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// ParseTopUpPrefix15082 lexes a full config-mode line and splits a
+// leading top/up prefix, for executors that tokenize with
+// strings.Fields but must consume the prefix exactly as the
+// authorization gate does (#15082). ok=false means the line is not
+// a well-formed top/up line; bare navigation yields inner=nil.
+func ParseTopUpPrefix15082(editPath []string, line string) (target, inner []string, ok bool) {
+	parts, quoted := lexConfigMutationLine9938(line)
+	if len(parts) == 0 || (parts[0] != "top" && parts[0] != "up") {
+		return nil, nil, false
+	}
+	target, inner, _, ok = ResolveTopUpPrefix15082(editPath, parts, quoted)
+	return target, inner, ok
 }
