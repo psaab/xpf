@@ -67,6 +67,17 @@ pub(in crate::afxdp) fn policy_packet_icmp(
 /// configured or none matched; the caller then keeps the default no-policy
 /// local-session metadata. Callers that only gate (drop on deny/reject) inspect
 /// `result.action` themselves.
+/// #15664: `recheck_established` marks an ESTABLISHED-session re-check (the
+/// session-HIT gate). It re-derives the verdict WITHOUT counting
+/// (`PolicyHitCount::Never` via `rederive_junos_host_policy_l3_aware_at`):
+/// a permitted hit is counted exactly once by the poll path through the
+/// session's admission-bound counter handle, so counting the live
+/// first-match here would re-attribute established traffic after an
+/// `insert` reorder and would count foreign-arrival packets against a rule
+/// that never admitted them. A matched Deny/Reject on the re-check is
+/// counted by [`junos_host_local_policy`] itself. Session-MISS and
+/// flowless callers pass `false` and keep the counting evaluation (the
+/// cold path counts the first packet exactly once).
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn junos_host_policy_eval(
@@ -81,20 +92,36 @@ pub(super) fn junos_host_policy_eval(
     l4_present: bool,
     packet_icmp: Option<(u8, u8)>,
     now_ns: u64,
+    recheck_established: bool,
 ) -> Option<crate::policy::PolicyEvaluationResult> {
-    crate::policy::evaluate_junos_host_policy_l3_aware_at(
-        &forwarding.policy,
-        from_zone_id,
-        flow.src_ip,
-        policy_dst.0,
-        flow.forward_key.protocol,
-        flow.forward_key.src_port,
-        policy_dst.1,
-        packet_icmp,
-        packet_len,
-        l4_present,
-        now_ns,
-    )
+    if recheck_established {
+        crate::policy::rederive_junos_host_policy_l3_aware_at(
+            &forwarding.policy,
+            from_zone_id,
+            flow.src_ip,
+            policy_dst.0,
+            flow.forward_key.protocol,
+            flow.forward_key.src_port,
+            policy_dst.1,
+            packet_icmp,
+            l4_present,
+            now_ns,
+        )
+    } else {
+        crate::policy::evaluate_junos_host_policy_l3_aware_at(
+            &forwarding.policy,
+            from_zone_id,
+            flow.src_ip,
+            policy_dst.0,
+            flow.forward_key.protocol,
+            flow.forward_key.src_port,
+            policy_dst.1,
+            packet_icmp,
+            packet_len,
+            l4_present,
+            now_ns,
+        )
+    }
 }
 
 /// #3706: verdict of the flow-backed `to-zone junos-host` security-policy gate
@@ -314,6 +341,13 @@ pub(super) fn session_host_bound_policy_dst(
     )
 }
 
+/// #15664: `recheck_established` is true only on the ESTABLISHED-session
+/// HIT re-check. The evaluation then re-derives the verdict without
+/// counting a PERMIT (see [`junos_host_policy_eval`]); a matched
+/// Deny/Reject IS counted here, positionally against the live rule that
+/// now denies the packet (it never admitted the session, so no bound
+/// handle applies). MISS/flowless callers pass `false` and keep the
+/// counting evaluation.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn junos_host_local_policy(
@@ -332,6 +366,7 @@ pub(super) fn junos_host_local_policy(
     from_zone_id: u16,
     packet_len: u64,
     now_ns: u64,
+    recheck_established: bool,
 ) -> JunosHostLocalPolicy {
     let policy_icmp = policy_packet_icmp(packet_frame, meta);
     match junos_host_policy_eval(
@@ -344,6 +379,7 @@ pub(super) fn junos_host_local_policy(
         true,
         policy_icmp,
         now_ns,
+        recheck_established,
     ) {
         // #3706: a matching PERMIT carries its `then log` selection, admitting
         // policy_id, and hit-counter handle back to the caller so the installed
@@ -353,6 +389,19 @@ pub(super) fn junos_host_local_policy(
         }
         Some(result) => {
             let action = result.action;
+            // #15664: on an established re-check the evaluation counted
+            // nothing; count the denying/rejecting rule itself (resolved
+            // positionally — it is the live first-match, not the admitting
+            // rule). On the counting (miss) path the evaluation already
+            // counted this packet, so counting again would double-count.
+            if recheck_established
+                && matches!(action, PolicyAction::Deny | PolicyAction::Reject)
+                && let Some(counter) = forwarding
+                    .policy
+                    .hit_counter_by_idx(result.policy_counter_idx)
+            {
+                crate::policy::record_policy_hit_counter(counter, packet_len);
+            }
             // #3615: enqueue an explicit reject reply FIRST, then emit the
             // junos-host deny with the ACTUAL reply outcome so a suppressed
             // reject logs the truthful DENY; plain `deny` stays silent.

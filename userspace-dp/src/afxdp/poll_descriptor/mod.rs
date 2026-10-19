@@ -1829,6 +1829,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     from_zone_id,
                                     meta.pkt_len as u64,
                                     now_ns,
+                                    false,
                                 ),
                                 JunosHostLocalPolicy::Dropped
                             ) {
@@ -2492,23 +2493,33 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // reorder cannot re-attribute this established flow's
                         // packets to a different rule.
                         //
-                        // #3706: EXCEPT on the LocalDelivery (host-bound) path.
-                        // A host-local session re-checks `to-zone junos-host`
-                        // on EVERY hit for teardown. That re-eval's
-                        // `apply_frag_deny_override_and_count` already counts
-                        // this packet on the admitting rule's hit counter,
-                        // as it did pre-#3706, when a
-                        // host-local session carried no bound counter and this
-                        // line was a no-op (`resolve_session_hit_counter(None, 0)`
-                        // -> None). Now that a junos-host permit stamps a bound
-                        // counter (#3706), counting HERE too would double-count
-                        // every established host-local permit packet. Transit has
-                        // no per-hit policy re-eval, so it counts solely here.
-                        // Gate on disposition so the count fires exactly once on
-                        // both paths (parity with transit) while the #3706 permit
-                        // attribution — policy_id / log flags / the bound counter
-                        // handle used for close-time re-resolution + HA sync —
-                        // stays stamped on the session.
+                        // #3706/#15664: on the LocalDelivery (host-bound)
+                        // path the established-hit junos-host re-check below
+                        // re-derives the verdict WITHOUT counting a permit
+                        // (#15664): it counts only a matched Deny/Reject.
+                        // A permitted (or unmatched) LocalDelivery hit is
+                        // therefore counted HERE, through this session's
+                        // admission-bound handle, exactly once — the same
+                        // site that counts transit hits. Before #15664 the
+                        // re-check counted through the LIVE first-match, so
+                        // an `insert` reorder re-attributed established
+                        // host-bound traffic to the inserted rule and a
+                        // foreign-arrival packet (which skips this block
+                        // via the `foreign_arrival_zone.is_none()` guard)
+                        // still incremented a junos-host counter through
+                        // the re-check. The #3706 permit attribution —
+                        // policy_id / log flags / the bound counter handle
+                        // used for close-time re-resolution + HA sync —
+                        // stays stamped on the session. A LocalDelivery hit
+                        // the re-check DENIES is counted on the denying
+                        // rule by the re-check and dropped below before
+                        // delivery; counting it here too (on the admitting
+                        // permit) would charge a dropped packet to a rule
+                        // that did not drop it — the pre-#15664 shape
+                        // charged it to the live deny instead, which the
+                        // re-check now preserves. Solicited-exempt hits
+                        // skip the re-check entirely and are counted here
+                        // like any other permitted hit.
                         //
                         // #5445: the bound hit-counter Arc is NO LONGER carried
                         // on the per-packet established-hit `SessionLookup`
@@ -2537,10 +2548,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         };
                         // #9519: a foreign packet is not the admitting rule's
                         // traffic, whatever its own zone decides below.
-                        if resolved.decision.resolution.disposition
-                            != ForwardingDisposition::LocalDelivery
-                            && foreign_arrival_zone.is_none()
-                        {
+                        // #15664: LocalDelivery is no longer excluded — its
+                        // permitted hits count through the bound handle here
+                        // (the hit re-check below counts only Deny/Reject).
+                        if foreign_arrival_zone.is_none() {
                             if let Some(counter) =
                                 worker_ctx.forwarding.policy.resolve_session_hit_counter(
                                     bound_policy_counter.as_ref(),
@@ -3436,6 +3447,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // already installed (with the miss-time permit metadata),
                         // so only the DROP verdict matters here — a permit /
                         // no-match leaves the established session untouched.
+                        // #15664: this is an established re-check — the
+                        // evaluation re-derives the verdict WITHOUT counting
+                        // a permit (counted once above through the bound
+                        // handle); only a matched Deny/Reject is counted,
+                        // by the gate itself on the live denying rule.
                         // #10038: solicited replies skip this gate too (see the
                         // exemption above — self-originated runs no junos-host
                         // policy either). Non-exempt HITs re-check unchanged.
@@ -3461,6 +3477,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     authority_zone,
                                     meta.pkt_len as u64,
                                     now_ns,
+                                    true,
                                 ),
                                 JunosHostLocalPolicy::Dropped
                             )
@@ -5017,6 +5034,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     from_zone_id,
                                     meta.pkt_len as u64,
                                     now_ns,
+                                    false,
                                 )
                             } else {
                                 JunosHostLocalPolicy::NoMatch
