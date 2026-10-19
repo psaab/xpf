@@ -33,7 +33,11 @@ power cut cannot silently change the client identity across reboot.
   by the daemon on every config apply.
 - `Start(ctx context.Context, ifaceName string, af AddressFamily)` —
   `dhcp.go`. Spawn a per-interface client goroutine.
-- `Renew(ifaceName string) error` — `dhcp.go`.
+- `Renew(ifaceName string) error` — `dhcp.go`. Takes the LEASE KEY
+  (`config.DHCPLeaseIfName`), not an operator spelling: the operator
+  surfaces resolve `ge-0/0/0` / `ge-0/0/3.7` / Linux forms through
+  `Config.ResolveDHCPRenewTarget` first (#15227 A43-04), so a raw Junos
+  target reaching Renew directly still honestly reports no client.
 - `StopAll()` — `dhcp.go`. Cancels every client; a cancelled client runs
   `finishClient` → `removeAddress`, so this DROPS the address. Never call it on
   the shutdown path — see `Quiesce`.

@@ -1087,6 +1087,11 @@ func (c *CLI) handleMonitorSecurityPacketDrop(args []string) error {
 			if rec.Type != "POLICY_DENY" && rec.Type != "SCREEN_DROP" {
 				continue
 			}
+			// #15227 A43-05 (#2298 residual): SCREEN action=permit is a
+			// forwarded alarm, not a drop (twin of the gRPC renderer).
+			if rec.Type == "SCREEN_DROP" && strings.EqualFold(rec.Action, "permit") {
+				continue
+			}
 
 			// Apply filters.
 			if srcIP != nil {
