@@ -212,9 +212,13 @@ func main() {
 	}
 
 	rc := &remoteCompleter{ctl: c}
-	rl, err := readline.NewEx(cliterm.DisableReadlineHistoryAutoSave(&readline.Config{
+	historySeed, err := cliterm.ReadHistorySeed(historyFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cli: read history: %v\n", err)
+		os.Exit(1)
+	}
+	rl, err := readline.NewEx(cliterm.ConfigureReadlineHistory(&readline.Config{
 		Prompt:          c.operationalPrompt(),
-		HistoryFile:     historyFile,
 		HistoryLimit:    10000,
 		InterruptPrompt: "^C",
 		EOFPrompt:       "exit",
@@ -264,6 +268,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "cli: readline: %v\n", err)
 		os.Exit(1)
 	}
+	if err := cliterm.SeedHistory(rl, historySeed); err != nil {
+		fmt.Fprintf(os.Stderr, "cli: seed history: %v\n", err)
+		os.Exit(1)
+	}
 	defer rl.Close()
 	c.rl = rl
 
@@ -301,6 +309,9 @@ func main() {
 			break
 		}
 
+		if recErr := cliterm.RecordHistoryLine(historyFile, line); recErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: record history: %v\n", recErr)
+		}
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
