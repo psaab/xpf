@@ -1147,7 +1147,7 @@ func (c *CLI) handleShowSystem(args []string) error {
 		return c.showBootstrapImport()
 
 	case "license":
-		fmt.Println("License: open-source (no license required)")
+		config.LicenseText(c.store.ActiveConfig(), os.Stdout)
 		return nil
 
 	case "backup-router":

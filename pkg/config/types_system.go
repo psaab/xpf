@@ -101,8 +101,12 @@ type SystemConfig struct {
 	// master key is node-local + HKDF-derived and never stored in config (see
 	// compiler_system.go / configstore/crypto.go), so this field is not a
 	// secret and is intentionally a plain string, not config.Secret (#2053).
-	MasterPassword           string   // PRF algorithm-selector name (not a secret)
-	LicenseAutoUpdate        string   // license autoupdate URL
+	MasterPassword    string // PRF algorithm-selector name (not a secret)
+	LicenseAutoUpdate string // first license autoupdate URL (== LicenseAutoUpdateURLs[0] when set)
+	// LicenseAutoUpdateURLs holds EVERY `system license autoupdate url`
+	// value (#15782). Previously the scalar alone kept only one value
+	// and extra URLs vanished silently.
+	LicenseAutoUpdateURLs    []string
 	DisabledProcesses        []string // processes marked "disable"
 	PersistGroupsInheritance bool     // system commit persist-groups-inheritance (syntax accepted, runtime no-op)
 
@@ -296,6 +300,9 @@ func (s SystemConfig) MarshalJSON() ([]byte, error) {
 	type alias SystemConfig
 	v := alias(s)
 	v.LicenseAutoUpdate = RedactURL(v.LicenseAutoUpdate)
+	if v.LicenseAutoUpdateURLs != nil {
+		v.LicenseAutoUpdateURLs = redactURLSlice(v.LicenseAutoUpdateURLs)
+	}
 	return json.Marshal(v)
 }
 

@@ -132,9 +132,10 @@ func (c *ctl) handleRequest(args []string) error {
 		}
 		fmt.Println(resp.Message)
 		return nil
+	case "license":
+		return fmt.Errorf("request system license: not implemented — xpf is open-source, requires no license, and has no licensing runtime (#15782)")
 	case "configuration":
 		return c.handleRequestSystemConfiguration(args[2:])
-
 	case "dynamic-dns":
 		// #3276: operator force-now / check-now. `update` forces an immediate
 		// publish of all owned DDNS records; `check` re-observes and publishes

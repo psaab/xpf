@@ -535,6 +535,9 @@ func (s *Server) showText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 	case "login":
 		s.showLogin(cfg, &buf)
 
+	case "license":
+		s.showSystemLicense(cfg, &buf)
+
 	case "screen":
 		s.showScreen(cfg, &buf)
 

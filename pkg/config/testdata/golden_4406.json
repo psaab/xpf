@@ -352,6 +352,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -729,6 +730,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -1106,6 +1108,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -1483,6 +1486,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -1860,6 +1864,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -2237,6 +2242,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -2450,6 +2456,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -2667,6 +2674,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -2884,6 +2892,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -4279,6 +4288,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -5740,6 +5750,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -7200,6 +7211,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -8660,6 +8672,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -10124,6 +10137,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -11587,6 +11601,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -12678,6 +12693,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -13766,6 +13782,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -14853,6 +14870,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -15940,6 +15958,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -17031,6 +17050,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -18121,6 +18141,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -18491,6 +18512,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -18777,6 +18799,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -19063,6 +19086,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -19376,6 +19400,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -19678,6 +19703,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""
@@ -19980,6 +20006,7 @@
         "Archival": null,
         "MasterPassword": "",
         "LicenseAutoUpdate": "",
+        "LicenseAutoUpdateURLs": null,
         "DisabledProcesses": null,
         "PersistGroupsInheritance": false,
         "ManagementInterface": ""

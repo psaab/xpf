@@ -517,6 +517,12 @@ func (s *Server) showRootAuthentication(cfg *config.Config, buf *strings.Builder
 	}
 }
 
+// showSystemLicense renders `show system license` over ShowText (#15782),
+// via the shared config.LicenseText so local and remote cannot diverge.
+func (s *Server) showSystemLicense(cfg *config.Config, buf *strings.Builder) {
+	config.LicenseText(cfg, buf)
+}
+
 func (s *Server) showCoreDumps(cfg *config.Config, buf *strings.Builder) {
 	dirs := coreDumpDirs
 	var found bool

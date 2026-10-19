@@ -1260,6 +1260,15 @@ var OperationalTree = map[string]*Node{
 			"software": {Desc: "Software management", Children: map[string]*Node{
 				"in-service-upgrade": {Desc: "Prepare node for in-service software upgrade (ISSU)"},
 			}},
+			"license": {Desc: "License operations (not implemented — xpf has no licensing runtime)", Children: map[string]*Node{
+				"add":    {Desc: "Add a license (not implemented)"},
+				"delete": {Desc: "Delete a license (not implemented)"},
+				"renew":  {Desc: "Renew a license (not implemented)"},
+				"save": {Desc: "Save license keys (not implemented)", Children: map[string]*Node{
+					"filename": {Desc: "Destination filename", AcceptsArgs: true},
+				}},
+				"update": {Desc: "Update licenses from the configured autoupdate URL (not implemented)"},
+			}},
 			"dynamic-dns": {Desc: "Force a dynamic-DNS update out-of-band of the poll cycle (#3276)", Children: map[string]*Node{
 				"update": {Desc: "Force an immediate publish of all DDNS records owned by this node"},
 				"check":  {Desc: "Re-check the WAN/interface address now and publish only if it changed"},

@@ -162,6 +162,7 @@ var showTextTopicCommand = map[string]string{
 	"core-dumps":          "show system core-dumps",
 	"internet-options":    "show system internet-options",
 	"kernel-upgrade":      "show system kernel-upgrade",
+	"license":             "show system license",
 	"login":               "show system login",
 	"ntp":                 "show system ntp",
 	"root-authentication": "show system root-authentication",

@@ -464,6 +464,7 @@ var showTextViewTopics = map[string]bool{
 	"lldp-neighbors":                           true,
 	"log":                                      true,
 	"log:":                                     true,
+	"license":                                  true,
 	"login":                                    true,
 	"monitor-security-flow":                    true,
 	"nat-dest-rule-detail":                     true,

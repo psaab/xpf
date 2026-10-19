@@ -180,7 +180,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 	}},
 	"license": {desc: "License configuration", children: map[string]*schemaNode{
 		"autoupdate": {desc: "Autoupdate", children: map[string]*schemaNode{
-			"url": {desc: "Autoupdate URL", args: 1, placeholder: "<url>", children: nil},
+			"url": {desc: "Autoupdate URL", args: 1, multi: true, placeholder: "<url>", children: nil},
 		}},
 	}},
 	"processes": {desc: "Process information", children: nil},
