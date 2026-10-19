@@ -1028,6 +1028,104 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 	return warnings, nil
 }
 
+// validateFirewallFilterDuplicateTermsAST rejects a repeated term name
+// inside ONE firewall filter (#15192, D07-01).
+//
+// compileFirewall appends one FirewallFilterTerm per hierarchical `term`
+// stanza with no name check and no merge, so
+//
+//	firewall { family inet { filter F {
+//	    term T { from { protocol tcp; } then accept; }
+//	    term T { from { destination-port 80; } then discard; } } } }
+//
+// strict-committed with zero warnings as TWO terms named T. Flat-set and
+// `load merge` produce ONE merged term instead, so the installed filter
+// differs from what was authored: a first stanza carrying the action plus
+// a second carrying another match widens the filter in either direction.
+// The duplicate (filter,family,term) key also produced two identical
+// xpf_filter_hits_total series, failing every Prometheus scrape.
+//
+// Junos requires a term name to be unique within a filter. Strict
+// (commit / commit-check, lenient=false) rejects the first duplicate
+// naming the filter, family and term. Lenient (load / peer-sync,
+// lenient=true) warns and compilation keeps both terms, so an
+// already-persisted config an older binary accepted still BOOTS (#1960);
+// the metrics collector aggregates the duplicated key into one series.
+//
+// The walk mirrors compileFirewall exactly: every top-level `firewall`
+// node, firewallFamilyMembers9883 for both AST shapes (including the
+// implicit-inet `firewall { filter F { ... } }` spelling, whose terms
+// compileFirewall's family loop never installs today but which is still
+// an authored duplicate), quarantined families skipped, and
+// namedInstances for filter/term instances. Scope is the immediate
+// filter: the same term name in two different filters, or in the same
+// filter name under two families, is legitimate and not reported.
+func validateFirewallFilterDuplicateTermsAST(nodes []*Node, lenient bool) ([]string, error) {
+	firewallPermitted := firewallFamilyPermitted9017()
+	var warnings []string
+	var firstErr string
+	type dupKey struct {
+		family, filter, term string
+	}
+	reported := map[dupKey]bool{}
+	checkFilter := func(family string, filterName string, filterNode *Node) {
+		if filterName == "" || filterNode == nil {
+			return
+		}
+		seen := map[string]bool{}
+		for _, termInst := range namedInstances(filterNode.FindChildren("term")) {
+			if termInst.name == "" {
+				continue
+			}
+			if !seen[termInst.name] {
+				seen[termInst.name] = true
+				continue
+			}
+			key := dupKey{family, filterName, termInst.name}
+			if reported[key] {
+				continue
+			}
+			reported[key] = true
+			msg := fmt.Sprintf(
+				"firewall family %s filter %q has duplicate term %q — a term name must be unique within a filter; "+
+					"combine the repeated term stanzas into one term (flat `set` and `load merge` merge them, "+
+					"the hierarchical spelling installed both) (#15192)",
+				family, filterName, termInst.name)
+			if !lenient {
+				if firstErr == "" {
+					firstErr = msg
+				}
+				return
+			}
+			warnings = append(warnings, msg)
+		}
+	}
+	for _, fwNode := range nodes {
+		if fwNode == nil || fwNode.Name() != "firewall" {
+			continue
+		}
+		// Explicit families (both AST shapes, shared extractor).
+		for _, familyNode := range fwNode.FindChildren("family") {
+			for _, m := range firewallFamilyMembers9883(familyNode) {
+				if firewallFamilyQuarantined9883(m, firewallPermitted) {
+					continue
+				}
+				for _, filterInst := range namedInstances(m.AfNode.FindChildren("filter")) {
+					checkFilter(m.Af, filterInst.name, filterInst.node)
+				}
+			}
+		}
+		// Implicit-inet filters directly under `firewall`.
+		for _, filterInst := range namedInstances(fwNode.FindChildren("filter")) {
+			checkFilter("inet", filterInst.name, filterInst.node)
+		}
+	}
+	if !lenient && firstErr != "" {
+		return nil, fmt.Errorf("%s", firstErr)
+	}
+	return warnings, nil
+}
+
 // familyAnySpecificMatches is the set of firewall-filter `from` match leaves
 // that only make sense for ONE address family and must not appear under a
 // `family any` filter (#4296):
