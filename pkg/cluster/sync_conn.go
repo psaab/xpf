@@ -259,7 +259,7 @@ func (s *SessionSync) connIsCurrentIncarnationLocked(conn net.Conn) bool {
 //
 // keepIdx names the priming connection's slot; it is re-stamped and never
 // evicted. Returns whether anything was evicted, for the caller's log.
-func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
+func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int, retiredOverride ...peerProcessIdentity) bool {
 	// #10782: this alternate-fabric boot-id edge also retires the learned
 	// snapshot version. Serialize the incarnation advance and clear against an
 	// outgoing queue that already passed its final authorization check.
@@ -294,7 +294,14 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	s.peerSessionSyncWire.Store(sessionSyncWire)
 	s.scopedPolicySuppressionWarned.Store(false)
 	s.peerSnapshotProtocolWriteMu.Unlock()
+	// #14951: retiredIdentity is the process this switch retires.
+	// classifyPrimeLocked passes it explicitly, captured before it advances
+	// s.peerIdentity to the priming connection's proven identity; direct
+	// callers fall back to the current authoritative identity.
 	retiredIdentity := s.peerIdentity
+	if len(retiredOverride) != 0 {
+		retiredIdentity = retiredOverride[0]
+	}
 	s.peerHeartbeatAckEver.Store(false)
 	// Clock provenance (fold-2 HIGH-1): the kept conn primed the new boot —
 	// its BulkStart carried the changed id that triggered this switch (the
@@ -490,7 +497,21 @@ func (s *SessionSync) classifyPrimeLocked(conn net.Conn, switched, priorKnown bo
 		return c
 	}
 	c.retired = true
-	c.evicted = s.applyPeerIncarnationSwitchLocked(idx)
+	// #14951: advance the authoritative peerIdentity to the priming
+	// connection's proven identity BEFORE the switch evicts, passing the
+	// pre-advance value as the retired identity. If a previous
+	// installConn retirement already advanced peerIdentity to an
+	// intermediate process B, the switch would otherwise capture B as
+	// both the authoritative and the retired identity, preserve B's
+	// sibling as proven-newer (staleConnPreserve), and leave
+	// peerIdentity at B — so B's own later reboot preserves its corpses
+	// forever. The priming connection's BulkStart boot id just switched,
+	// so its capabilities identity is the new authoritative process.
+	retiredBeforeAdvance := s.peerIdentity
+	if primingID, primingKnown := s.connPeerIdentityLocked(conn); primingKnown {
+		s.peerIdentity = primingID
+	}
+	c.evicted = s.applyPeerIncarnationSwitchLocked(idx, retiredBeforeAdvance)
 	// A connection whose own install drove an owed cold prime has already had
 	// its OnPeerConnected, and the callback is not idempotent: on a cold start
 	// it bumps the readiness-timer generation outside the timer mutex.
