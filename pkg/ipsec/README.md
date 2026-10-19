@@ -218,6 +218,14 @@ all files stay in `package ipsec`, so the public API is unchanged.
   `make test-ipsec-content-change-10878`; it rotates the PSK and narrows a
   same-name selector, then verifies the old SPI and selector are absent from
   `swanctl --list-sas` and `ip xfrm state/policy`.
+  The fingerprint lookup anchors each connection header to a line start
+  at exactly two spaces (#15180): a VPN named `local`, `remote` or
+  `children` must hash its own top-level block, not the nested
+  `local {`/`remote {`/`children {` block rendered inside an
+  earlier-sorting connection — otherwise its own security changes left
+  the fingerprint unchanged (no teardown) and the earlier VPN's edits
+  tore it down spuriously. Covered by
+  `rendered_section_anchor_15180_test.go`.
 
 - **A FAILED terminate is teardown DEBT, not a log line (#6542/#10878).**
 
