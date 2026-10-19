@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1217,6 +1218,112 @@ func TestBulkSyncFallbackWhenDPIsNil(t *testing.T) {
 	err := d.bulkSyncViaEventStreamOrFallback(nil)
 	if err == nil {
 		t.Fatal("expected error from nil session sync fallback")
+	}
+}
+
+// primeRetryDualExporterDP is a publishable RuntimeDataPlane that satisfies
+// BOTH the legacy userspaceEventStreamExporter probe and the authoritative
+// userspaceSessionExporter (BulkSnapshotSource) surface (#15686). It counts
+// which export the prime-retry actually invoked.
+type primeRetryDualExporterDP struct {
+	runtimeOnlyApplyTestDP
+	eventStreamCalls atomic.Int64
+	ownerRGCalls     atomic.Int64
+	deltas           []dpuserspace.SessionDeltaInfo
+}
+
+func (p *primeRetryDualExporterDP) ExportAllSessionsViaEventStream() error {
+	p.eventStreamCalls.Add(1)
+	return nil
+}
+
+func (p *primeRetryDualExporterDP) ExportOwnerRGSessionsPaged(rgIDs []int) ([]dpuserspace.SessionDeltaInfo, dpuserspace.ProcessStatus, error) {
+	p.ownerRGCalls.Add(1)
+	return append([]dpuserspace.SessionDeltaInfo(nil), p.deltas...), dpuserspace.ProcessStatus{}, nil
+}
+
+var _ userspaceEventStreamExporter = (*primeRetryDualExporterDP)(nil)
+var _ userspaceSessionExporter = (*primeRetryDualExporterDP)(nil)
+
+// TestStartSessionSyncPrimeRetryUsesAuthoritativeBulkSyncOnUserspaceAdapter
+// is the #15686 regression: startSessionSyncPrimeRetry must frame an
+// authoritative BulkStart/BulkEnd window via BulkSnapshotSource, not invoke
+// the legacy unframed ExportAllSessionsViaEventStream.
+//
+// RED on pre-fix: bulkSyncViaEventStreamOrFallback type-asserts
+// userspaceEventStreamExporter first and returns nil on its success, so
+// eventStreamCalls==1, ownerRGCalls==0, no BulkSyncs are counted, no
+// pending BulkAck exists, and ColdPrimeOwedWithoutPendingBulk stays true.
+func TestStartSessionSyncPrimeRetryUsesAuthoritativeBulkSyncOnUserspaceAdapter(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	oldIntervals := syncPrimeRetryIntervalsForTest
+	syncPrimeRetryIntervalsForTest = []time.Duration{0}
+	t.Cleanup(func() { syncPrimeRetryIntervalsForTest = oldIntervals })
+
+	local := connectedSyncPairForDrainTest(t, ctx)
+	if !local.ColdPrimeOwedWithoutPendingBulk() {
+		t.Fatal("FIXTURE: connected pair must owe a cold prime with no bulk pending before the retry fires")
+	}
+
+	exported := transitDelta6031(39906)
+	exported.OwnerRGID = 0
+	dp := &primeRetryDualExporterDP{deltas: []dpuserspace.SessionDeltaInfo{exported}}
+
+	d := &Daemon{
+		cluster: clusterManagerPrimaryForRGs(0),
+		store: testStoreWithSetConfig(t, []string{
+			"set chassis cluster cluster-id 1",
+			"set chassis cluster authentication-key test-cluster-psk-15686",
+			"set chassis cluster node 0",
+			"set chassis cluster redundancy-group 0 node 0 priority 200",
+			"set security zones security-zone lan",
+			"set security zones security-zone wan",
+		}),
+		sessionSync: local,
+	}
+	d.setDataplane(dp)
+	local.BulkSnapshotSource = d.userspaceBulkSnapshot
+	local.OnBulkSyncAckReceived = func() { d.onSessionSyncBulkAckReceived() }
+	local.IsPrimaryFn = func() bool { return true }
+	local.IsPrimaryForRGFn = func(rgID int) bool { return rgID == 0 }
+
+	gen := d.syncPrimeRetryGen.Add(1)
+	d.startSessionSyncPrimeRetry(gen)
+	t.Cleanup(func() { d.syncPrimeRetryGen.Add(1) })
+
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, _, ok := local.PendingBulkAck(); ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_, _, pending := local.PendingBulkAck()
+	if !pending {
+		t.Fatalf("#15686: prime retry framed no authoritative bulk (no pending BulkAck); "+
+			"eventStreamCalls=%d ownerRGCalls=%d bulkSyncs=%d — the retry took the legacy "+
+			"unframed event-stream export, which can never produce BulkEnd/BulkAck",
+			dp.eventStreamCalls.Load(), dp.ownerRGCalls.Load(), local.Stats().BulkSyncs)
+	}
+	if got := dp.eventStreamCalls.Load(); got != 0 {
+		t.Fatalf("#15686: ExportAllSessionsViaEventStream called %d times, want 0 — prime retry must not use the legacy unframed export", got)
+	}
+	if got := dp.ownerRGCalls.Load(); got == 0 {
+		t.Fatal("#15686: BulkSnapshotSource never invoked ExportOwnerRGSessionsPaged — the framed window was not sourced from table truth")
+	}
+	if got := local.Stats().BulkSyncs; got == 0 {
+		t.Fatal("#15686: no BulkSyncs counted — no BulkStart/BulkEnd window was framed")
+	}
+	if local.ColdPrimeOwedWithoutPendingBulk() {
+		t.Fatal("#15686: cold prime still owed without pending bulk after the retry framed its window")
+	}
+	if local.OnBulkSyncAckReceived != nil {
+		local.OnBulkSyncAckReceived()
+	}
+	if !d.syncPeerBulkPrimed.Load() {
+		t.Fatal("#15686: syncPeerBulkPrimed not set after BulkAck — the retry loop would never stop on ack")
 	}
 }
 

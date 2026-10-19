@@ -62,6 +62,19 @@ func (s *SessionSync) doBulkSync() error {
 	return s.doBulkSyncWithBulkSend(false)
 }
 
+// DoBulkSync runs the authoritative cold-prime / re-drive bulk window for
+// callers outside pkg/cluster (#15686). It is doBulkSync under an exported
+// name: when BulkSnapshotSource is wired the window is framed from table
+// truth, otherwise from the backend session store, and a snapshot-source
+// error fails closed with no window framed. Daemon prime-retry must use
+// this entry rather than BulkSync, whose store walk alone would frame a
+// mirror-sourced window on a userspace node even when a table-truth
+// source is wired, and rather than any unframed event-stream export,
+// which produces no BulkEnd, no BulkAck, and no cold-prime discharge.
+func (s *SessionSync) DoBulkSync() error {
+	return s.doBulkSync()
+}
+
 // doBulkSyncWithBulkSend runs the authoritative cold-start bulk. When
 // bulkSendHeld is true, the caller owns bulkSendMu across this function; that
 // scope is used by the survivor re-drive to close the clear-then-replace gap

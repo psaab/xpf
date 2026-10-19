@@ -25,6 +25,11 @@ type userspaceSessionExporter interface {
 	ExportOwnerRGSessionsPaged(rgIDs []int) ([]dpuserspace.SessionDeltaInfo, dpuserspace.ProcessStatus, error)
 }
 
+// userspaceEventStreamExporter is retained only as the documented legacy
+// probe shape (#15686): the prime-retry path no longer asserts it, because
+// ExportAllSessionsViaEventStream emits unframed deltas with no BulkEnd.
+// The interface stays so the Manager's conformance remains named in one
+// place; no production caller type-asserts it any more.
 type userspaceEventStreamExporter interface {
 	ExportAllSessionsViaEventStream() error
 }
