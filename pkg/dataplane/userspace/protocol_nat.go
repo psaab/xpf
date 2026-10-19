@@ -377,6 +377,19 @@ type NAT64RuleSnapshot struct {
 	// derives the subscriber word from and reverses against. Empty => not a
 	// deterministic NAPT64 pool.
 	DeterministicHostBaseV6 string `json:"deterministic_host_base_v6,omitempty"`
+	// #14962: the referenced source pool's fail-closed verdict, stamped from
+	// the same SSOT the SNAT snapshot uses
+	// (config.SourceNATPoolUnusableReason) and by the interface-SNAT overlap
+	// quarantine (reportInterfaceSNATPoolOverlaps). Without it the Rust
+	// NAT64 loader installed/minted from a pool the control plane already
+	// declared unusable — or SKIPPED the whole rule on an unparseable
+	// member, so prefix traffic fell through to NoPrefixMatch and was
+	// ROUTED as ordinary IPv6. Additive wire fields riding the v51 protocol
+	// bump (#14962): an old helper ignoring them would mint from an
+	// unusable pool, which is the defect, so exact-equality versioning
+	// fences the pairing instead of degrading silently.
+	PoolUnusable       bool   `json:"pool_unusable,omitempty"`
+	PoolUnusableReason string `json:"pool_unusable_reason,omitempty"`
 }
 
 // Nptv6RuleSnapshot captures an NPTv6 (RFC 6296) stateless prefix translation

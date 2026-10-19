@@ -257,7 +257,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // The manager gates both lease-control verbs on an observed v50 helper;
 // without that gate an old helper would ignore the field and merge two
 // egress zones' permissions into one lease.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 50;
+// v50 -> v51 (#14962): NAT64RuleSnapshot gained pool_unusable /
+// pool_unusable_reason; a v50 helper ignoring them would mint from an
+// unusable NAT64 pool, so exact equality fences the pairing.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 51;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

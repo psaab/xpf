@@ -885,6 +885,8 @@
     "name": "",
     "no_v6_frag_header": false,
     "pool_addresses": [],
+    "pool_unusable": false,
+    "pool_unusable_reason": "",
     "prefix": ""
   },
   "nat_rule_counter_status": {

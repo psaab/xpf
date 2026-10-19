@@ -44,8 +44,10 @@ func TestInterfaceSNATPoolOverlapNAT64_14367(t *testing.T) {
 }
 
 func TestInterfaceSNATNAT64ReportDoesNotPanic14367(t *testing.T) {
-	// report must not quarantine NAT64 (no PoolUnusable transport on NAT64 snapshot);
-	// it only records findings. Just ensure no panic and source pools untouched.
+	// The report quarantines the NAT64 rule itself (#14962 added the
+	// PoolUnusable transport to NAT64RuleSnapshot); it must not quarantine
+	// an unrelated source pool. Full NAT64 quarantine assertions live in
+	// nat64_pool_unusable_14962_test.go.
 	snap := overlapSnapshot(ifaceModeRule(), poolRuleOn("198.51.100.7"), wanUnit())
 	snap.NAT64 = []NAT64RuleSnapshot{{Name: "n64", Prefix: "64:ff9b::/96", PoolAddresses: []string{overlapEgress}}}
 	reportInterfaceSNATPoolOverlaps(snap)
