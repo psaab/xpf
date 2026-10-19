@@ -524,6 +524,7 @@ pub(crate) fn run() -> Result<(), String> {
             gre_decap_pt_nibble_mismatch_refusals_total: 0,
             gre_outer_frag_drops_total: 0,
             gre_reassembled_decap_refusals_total: 0,
+            gre_decap_transport_egress_refusals_total: 0,
             time_exceeded_rate_limited_total: 0,
             packet_too_big_rate_limited_total: 0,
             reject_rate_limited_total: 0,

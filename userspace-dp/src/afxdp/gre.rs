@@ -328,6 +328,10 @@ pub(in crate::afxdp) struct GreDecapCounters {
     /// the stage-6 recycle site; transit fragments that never enter the
     /// pool are not counted here (they take the ordinary flowless path).
     reassembled_decap_refusals: std::sync::Arc<AtomicU64>,
+    /// #15249: decap candidates that matched tuple/key/transport-VRF but
+    /// whose ingress matched no live member of the selected transport
+    /// route row (the #11567 binding, widened to the ECMP member set).
+    transport_egress_refusals: std::sync::Arc<AtomicU64>,
 }
 
 impl GreDecapCounters {
@@ -363,6 +367,19 @@ impl GreDecapCounters {
 
     pub(in crate::afxdp) fn reassembled_decap_refusals(&self) -> u64 {
         self.reassembled_decap_refusals.load(Ordering::Relaxed)
+    }
+
+    /// #15249: account one transport-egress binding refusal. The only
+    /// mutator for this counter; called from the decap matcher (and the
+    /// refusal-attribution probes that mirror it) when a tuple/key/VRF
+    /// candidate's ingress is not a live transport member.
+    pub(in crate::afxdp) fn note_transport_egress_refusal(&self) {
+        self.transport_egress_refusals
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(in crate::afxdp) fn transport_egress_refusals(&self) -> u64 {
+        self.transport_egress_refusals.load(Ordering::Relaxed)
     }
 }
 
@@ -856,26 +873,230 @@ fn gre_outer_host_inbound_admits(
 /// an unzoned egress; the zone alternative requires the nonzero, unambiguous
 /// egress zone. The latter covers a physical-parent ingress whose configured
 /// transport is a VLAN subinterface in the same zone.
+///
+/// #15249 (A68-02): `resolve_tunnel_outer` picks ONE ECMP member by a
+/// per-destination hash (`None` flow hash in `forwarding/tunnel.rs`), so
+/// the single-member predicate refused the real peer on every underlay
+/// leg but the hashed one when the legs are in different zones. Accept
+/// the ingress if it matches the ifindex, or the nonzero unambiguous
+/// zone, of ANY live member of the selected transport route row — the
+/// same neighbor/liveness view the encap FIB uses (`select_v*_route`).
+/// A member is live under exactly the encap rules: interface-only
+/// members need a present, link-up egress row; gateway members need an
+/// installed neighbor (static view only — decap passes no dynamic map,
+/// matching the existing single-member call); tunnel members need a
+/// forwardable outer of their own. Non-live members do not bind, dead
+/// legs do not widen acceptance, and a route with no live member falls
+/// back to the hashed member exactly as encap's MissingNeighbor cold
+/// path does, so the pre-#15249 single-member behaviour is preserved
+/// when nothing is live. Connected transport routes have no member
+/// list; their single egress keeps the original check. Refusals of an
+/// otherwise tuple/key/VRF-matched candidate are counted
+/// (`transport_egress_refusals`) so the ECMP misbinding is observable
+/// instead of a silent availability loss.
 fn gre_transport_egress_matches(
     forwarding: &ForwardingState,
     endpoint: &TunnelEndpoint,
     ingress_logical_ifindex: i32,
     ingress_zone_id: u16,
 ) -> bool {
-    let Some(outer) = resolve_tunnel_outer(forwarding, None, endpoint.id, 0) else {
+    let egress_ifindexes = gre_transport_egress_ifindexes(forwarding, endpoint);
+    if egress_ifindexes.is_empty() {
+        forwarding
+            .gre_decap_counters
+            .note_transport_egress_refusal();
         return false;
+    }
+    let matched = egress_ifindexes.iter().any(|&egress_ifindex| {
+        if ingress_logical_ifindex == egress_ifindex {
+            return true;
+        }
+        let egress_zone_id = forwarding.egress_zone_id(egress_ifindex);
+        egress_zone_id != 0 && egress_zone_id == ingress_zone_id
+    });
+    if !matched {
+        forwarding
+            .gre_decap_counters
+            .note_transport_egress_refusal();
+    }
+    matched
+}
+
+/// #15249: every egress ifindex that may legitimately carry this
+/// endpoint's outer transport — the live members of the selected
+/// transport route row (see `gre_transport_egress_matches`), or the
+/// single hashed/connected resolution when the route is not a static
+/// ECMP row or no member is live. Empty when the outer does not
+/// resolve to a forwardable disposition (fail closed, as before).
+fn gre_transport_egress_ifindexes(
+    forwarding: &ForwardingState,
+    endpoint: &TunnelEndpoint,
+) -> Vec<i32> {
+    let Some(outer) = resolve_tunnel_outer(forwarding, None, endpoint.id, 0) else {
+        return Vec::new();
     };
     if !matches!(
         outer.resolution.disposition,
         ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
     ) {
+        return Vec::new();
+    }
+    let hashed_ifindex = outer.resolution.egress_ifindex;
+    // The member set of the route row the hashed resolution selected.
+    // Re-derive it from the endpoint destination in its transport table
+    // with the same table canonicalisation the FIB lookup applies, so
+    // v4/v6 and per-VRF tables name the same rows the encap path read.
+    let members: Vec<i32> = match endpoint.destination {
+        IpAddr::V4(ip) => {
+            let table = canonical_route_table(&endpoint.transport_table, false);
+            gre_transport_live_members_v4(forwarding, ip, &table)
+        }
+        IpAddr::V6(ip) => {
+            let table = canonical_route_table(&endpoint.transport_table, true);
+            gre_transport_live_members_v6(forwarding, ip, &table)
+        }
+    };
+    if members.is_empty() {
+        // Connected route, discard/reject row, a leak-resolved route in
+        // another table, or an ECMP row with no live member: the hashed
+        // resolution is the only binding (encap's fallback shape).
+        if hashed_ifindex > 0 {
+            return vec![hashed_ifindex];
+        }
+        return Vec::new();
+    }
+    members
+}
+
+/// #15249: live egress ifindexes of the most-specific static route row
+/// for `ip` in `table`, replicating `select_v4_route`'s row choice
+/// (longest prefix, first live preference/metric tier) and its member
+/// liveness rules against the static neighbor view. Empty when no
+/// static row matches or the selected tier has no live member.
+fn gre_transport_live_members_v4(
+    forwarding: &ForwardingState,
+    ip: Ipv4Addr,
+    table: &str,
+) -> Vec<i32> {
+    let Some(routes) = forwarding.routes_v4.get(table) else {
+        return Vec::new();
+    };
+    let mut matched_prefix_len: Option<u8> = None;
+    for route in routes {
+        let prefix_len = route.prefix.prefix_len();
+        if matched_prefix_len.is_some_and(|best| prefix_len < best) {
+            break;
+        }
+        if !route.next_table.is_empty() || !route.prefix.contains(ip) {
+            continue;
+        }
+        matched_prefix_len = Some(prefix_len);
+        if route.discard || route.reject {
+            return Vec::new();
+        }
+        let live: Vec<i32> = route
+            .next_hops
+            .iter()
+            .filter(|nh| gre_transport_member_live_v4(forwarding, nh, ip))
+            .map(|nh| nh.ifindex)
+            .filter(|&ifindex| ifindex > 0)
+            .collect();
+        if !live.is_empty() {
+            return live;
+        }
+        // No live member in this tier: encap falls through to the next
+        // same-prefix tier, so keep scanning.
+    }
+    Vec::new()
+}
+
+/// #15249: v6 twin of `gre_transport_live_members_v4`.
+fn gre_transport_live_members_v6(
+    forwarding: &ForwardingState,
+    ip: Ipv6Addr,
+    table: &str,
+) -> Vec<i32> {
+    let Some(routes) = forwarding.routes_v6.get(table) else {
+        return Vec::new();
+    };
+    let mut matched_prefix_len: Option<u8> = None;
+    for route in routes {
+        let prefix_len = route.prefix.prefix_len();
+        if matched_prefix_len.is_some_and(|best| prefix_len < best) {
+            break;
+        }
+        if !route.next_table.is_empty() || !route.prefix.contains(ip) {
+            continue;
+        }
+        matched_prefix_len = Some(prefix_len);
+        if route.discard || route.reject {
+            return Vec::new();
+        }
+        let live: Vec<i32> = route
+            .next_hops
+            .iter()
+            .filter(|nh| gre_transport_member_live_v6(forwarding, nh, ip))
+            .map(|nh| nh.ifindex)
+            .filter(|&ifindex| ifindex > 0)
+            .collect();
+        if !live.is_empty() {
+            return live;
+        }
+    }
+    Vec::new()
+}
+
+/// #15249: one ECMP member's liveness under the encap rules
+/// (`select_v4_route`'s `is_live` closure), static neighbor view.
+fn gre_transport_member_live_v4(
+    forwarding: &ForwardingState,
+    nh: &RouteNextHopV4,
+    destination: Ipv4Addr,
+) -> bool {
+    if nh.tunnel_endpoint_id != 0 {
+        return gre_transport_tunnel_member_live(forwarding, nh.tunnel_endpoint_id);
+    }
+    if nh.next_hop.is_none() {
+        return nh.ifindex > 0
+            && forwarding.egress.contains_key(&nh.ifindex)
+            && !forwarding.egress_link_down.contains(&nh.ifindex);
+    }
+    let target = nh.next_hop.unwrap_or(destination);
+    nh.ifindex > 0
+        && lookup_neighbor_entry(forwarding, None, nh.ifindex, IpAddr::V4(target)).is_some()
+}
+
+/// #15249: v6 twin of `gre_transport_member_live_v4`.
+fn gre_transport_member_live_v6(
+    forwarding: &ForwardingState,
+    nh: &RouteNextHopV6,
+    destination: Ipv6Addr,
+) -> bool {
+    if nh.tunnel_endpoint_id != 0 {
+        return gre_transport_tunnel_member_live(forwarding, nh.tunnel_endpoint_id);
+    }
+    if nh.next_hop.is_none() {
+        return nh.ifindex > 0
+            && forwarding.egress.contains_key(&nh.ifindex)
+            && !forwarding.egress_link_down.contains(&nh.ifindex);
+    }
+    let target = nh.next_hop.unwrap_or(destination);
+    nh.ifindex > 0
+        && lookup_neighbor_entry(forwarding, None, nh.ifindex, IpAddr::V6(target)).is_some()
+}
+
+/// #15249: a tunnel ECMP member is live iff its own outer transport
+/// resolves forwardable — the `tunnel_next_hop_live` rule, minus the
+/// dynamic-neighbor view decap does not carry.
+fn gre_transport_tunnel_member_live(forwarding: &ForwardingState, tunnel_endpoint_id: u16) -> bool {
+    if forwarding.tunnel_endpoints_down.contains(&tunnel_endpoint_id) {
         return false;
     }
-    if ingress_logical_ifindex == outer.resolution.egress_ifindex {
-        return true;
-    }
-    let egress_zone_id = forwarding.egress_zone_id(outer.resolution.egress_ifindex);
-    egress_zone_id != 0 && egress_zone_id == ingress_zone_id
+    matches!(
+        resolve_tunnel_outer(forwarding, None, tunnel_endpoint_id, 0)
+            .map(|outer| outer.resolution.disposition),
+        Some(ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor)
+    )
 }
 
 /// Match a received GRE (proto-47) outer tuple to a GRE-mode tunnel

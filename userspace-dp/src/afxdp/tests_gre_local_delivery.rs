@@ -1778,6 +1778,171 @@ fn gre_decap_transport_ingress_decaps_v6_11567() {
     assert_eq!(decapped.meta.addr_family, libc::AF_INET as u8);
 }
 
+/// #15249 (A68-02): ECMP transport underlay with per-leg zones. The
+/// transport route to the GRE peer (203.0.113.9) gains a second live
+/// member via ge-0/0/1 (ifindex 11, parent of the VLAN unit 12) in a
+/// DIFFERENT zone (`lan`, id 1) than the hashed member's zone (`wan`,
+/// id 2, reth0.80 ifindex 12). `resolve_tunnel_outer` hashes the
+/// destination to exactly one member; pre-fix the decap binding only
+/// accepted that member, so the real peer arriving on the other leg
+/// was refused. Both live legs must decap; the #11567 non-member
+/// interface (reth1.0, ifindex 24, also `lan`) must still refuse.
+///
+/// FAIL-ON-REVERT: restore the single-member predicate in
+/// `gre_transport_egress_matches` and exactly one of the two leg cells
+/// below goes RED (which one depends on the destination hash), while
+/// the non-member cell stays green.
+fn gre_ecmp_transport_snapshot_15249() -> ConfigSnapshot {
+    let mut snapshot = gre_to_self_snapshot();
+    // Second underlay leg: ge-0/0/1 in `lan` with a gateway toward the peer.
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "ge-0/0/1".to_string(),
+        zone: "lan".to_string(),
+        linux_name: "ge-0-0-1".to_string(),
+        ifindex: 13,
+        hardware_addr: "02:bf:72:01:00:13".to_string(),
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "192.0.2.1/24".to_string(),
+            scope: 0,
+            primary: false,
+        }],
+        ..Default::default()
+    });
+    // ECMP: default route via both gateways (existing reth0.80 leg plus
+    // the new ge-0/0/1 leg). The destination 203.0.113.9 matches 0.0.0.0/0.
+    for route in &mut snapshot.routes {
+        if route.family == "inet" && route.destination == "0.0.0.0/0" {
+            route.next_hops = vec![
+                "172.16.80.1@reth0.80".to_string(),
+                "192.0.2.254@ge-0/0/1".to_string(),
+            ];
+        }
+    }
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-1".to_string(),
+        ifindex: 13,
+        family: "inet".to_string(),
+        ip: "192.0.2.254".to_string(),
+        mac: "00:11:22:33:44:66".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        link_local: false,
+        ..Default::default()
+    });
+    snapshot
+}
+
+fn gre_ecmp_frame_15249() -> Vec<u8> {
+    let inner = build_gre_inner_v4(PROTO_UDP, 8 + 4);
+    build_gre_checksum_present_outer_frame_v4(
+        0,
+        0x2000,
+        GRE_TRANSPORT_BINDING_KEY_11567,
+        0,
+        &inner,
+        false,
+    )
+}
+
+#[test]
+fn gre_decap_ecmp_both_live_legs_decap_15249() {
+    let mut snapshot = gre_ecmp_transport_snapshot_15249();
+    let forwarding = gre_transport_binding_forwarding_11567(&mut snapshot);
+    let frame = gre_ecmp_frame_15249();
+
+    // Fixture sanity: the two legs really are different zones, and both
+    // members are live in the built route row.
+    assert_eq!(
+        forwarding.ifindex_to_zone_id.get(&12).copied(),
+        Some(TEST_WAN_ZONE_ID),
+        "hashed-leg fixture: reth0.80 must be wan"
+    );
+    assert_eq!(
+        forwarding.ifindex_to_zone_id.get(&13).copied(),
+        Some(TEST_LAN_ZONE_ID),
+        "second-leg fixture: ge-0/0/1 must be lan"
+    );
+    let route = forwarding
+        .routes_v4
+        .get("inet.0")
+        .and_then(|routes| routes.iter().find(|r| r.prefix.prefix_len() == 0))
+        .expect("default route row");
+    assert_eq!(route.next_hops.len(), 2, "ECMP fixture must retain both members");
+
+    for leg in [12, 13] {
+        let mut meta = gre_to_self_outer_meta(0, frame.len());
+        // Ingress on the physical parent resolves to the logical unit;
+        // use the logical ifindexes directly (11 is the parent of 12,
+        // so stamp the unit itself to name the leg unambiguously).
+        meta.ingress_ifindex = leg as u32;
+        let decapped = try_native_gre_decap_from_frame(&frame, meta, &forwarding)
+            .unwrap_or_else(|| panic!("GRE outer arriving on live ECMP leg {leg} must decap"));
+        assert_eq!(decapped.meta.addr_family, libc::AF_INET as u8);
+    }
+    assert_eq!(
+        forwarding.gre_decap_counters.transport_egress_refusals(),
+        0,
+        "live ECMP legs must not count transport-egress refusals"
+    );
+}
+
+#[test]
+fn gre_decap_ecmp_non_member_still_refused_and_counted_15249() {
+    let mut snapshot = gre_ecmp_transport_snapshot_15249();
+    let forwarding = gre_transport_binding_forwarding_11567(&mut snapshot);
+    let frame = gre_ecmp_frame_15249();
+    // An ingress that is no member and in no member's zone: ifindex 999
+    // has no interface row and zone 0, so neither the ifindex nor the
+    // per-member zone alternative can match. (A non-member sharing a
+    // member's zone WOULD match by that member's zone — the deliberate
+    // #11567 VLAN-parent shape — so it is not a refusal cell.)
+    let mut meta = gre_to_self_outer_meta(0, frame.len());
+    meta.ingress_ifindex = 999;
+    assert!(
+        try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_none(),
+        "a non-member ingress must not decap"
+    );
+    assert_eq!(
+        forwarding.gre_decap_counters.transport_egress_refusals(),
+        1,
+        "the non-member refusal must be counted exactly once"
+    );
+}
+
+#[test]
+fn gre_decap_ecmp_dead_leg_does_not_bind_15249() {
+    let mut snapshot = gre_ecmp_transport_snapshot_15249();
+    // Kill the second leg's neighbor: without an installed neighbor the
+    // gateway member is not live (encap would not select it either).
+    snapshot.neighbors.retain(|n| n.ip != "192.0.2.254");
+    let forwarding = gre_transport_binding_forwarding_11567(&mut snapshot);
+    let frame = gre_ecmp_frame_15249();
+
+    // The surviving leg still decaps.
+    let mut meta = gre_to_self_outer_meta(0, frame.len());
+    meta.ingress_ifindex = 12;
+    assert!(
+        try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_some(),
+        "the surviving live leg must still decap"
+    );
+
+    // The dead leg no longer binds on its own ifindex. Its zone (lan)
+    // also differs from the surviving member's zone (wan), so neither
+    // the ifindex nor the zone alternative can match.
+    let mut meta = gre_to_self_outer_meta(0, frame.len());
+    meta.ingress_ifindex = 13;
+    assert!(
+        try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_none(),
+        "a dead ECMP leg must not bind decap"
+    );
+    assert_eq!(
+        forwarding.gre_decap_counters.transport_egress_refusals(),
+        1,
+        "the dead-leg refusal must be counted"
+    );
+}
+
 /// #11054: the outer GRE packet must pass host-inbound on its actual ingress
 /// zone before it can be reattributed as the tunnel's logical ingress zone.
 /// The tuple, key, and transport VRF still match in the refused leg; only the

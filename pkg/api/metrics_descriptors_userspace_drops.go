@@ -117,6 +117,15 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 			"not counted (#15095).",
 		nil, nil,
 	)
+	c.userspaceGreDecapTransportEgressRefusals = prometheus.NewDesc(
+		"xpf_userspace_gre_decap_transport_egress_refusals_total",
+		"Native-GRE frames refused for decapsulation because the outer "+
+			"arrived on an interface that is not a live member of the "+
+			"selected transport route row for the configured tunnel "+
+			"endpoint, while the outer tuple, key, and transport domain "+
+			"matched. This is a refusal, not a drop (#15249).",
+		nil, nil,
+	)
 	c.userspaceTimeExceededRateLimited = prometheus.NewDesc(
 		"xpf_userspace_time_exceeded_rate_limited_total",
 		"Locally-generated ICMP/ICMPv6 Time Exceeded (TTL/hop-limit) "+

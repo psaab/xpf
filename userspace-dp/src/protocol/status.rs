@@ -959,6 +959,13 @@ pub(crate) struct ProcessStatus {
     /// defaulted for backward compatibility.
     #[serde(rename = "gre_reassembled_decap_refusals_total", default)]
     pub gre_reassembled_decap_refusals_total: u64,
+    /// #15249: configured native-GRE endpoints refusing decapsulation
+    /// because the outer arrived on an interface that is not a live
+    /// member of the selected transport route row. Surfaced as
+    /// `xpf_userspace_gre_decap_transport_egress_refusals_total`.
+    /// Additive / defaulted for backward compatibility.
+    #[serde(rename = "gre_decap_transport_egress_refusals_total", default)]
+    pub gre_decap_transport_egress_refusals_total: u64,
     /// #2472: locally-generated ICMP Time Exceeded / PTB / `reject` replies
     /// dropped because the per-reason token bucket was empty. Each reason has
     /// an independent global-per-reason bucket (Linux `icmp_msgs_per_sec`
