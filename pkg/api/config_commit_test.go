@@ -21,11 +21,14 @@ func newAPIEBPFRejectStore(t *testing.T) *configstore.Store {
 	t.Helper()
 
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
-	if err := store.EnterConfigure(); err != nil {
-		t.Fatalf("EnterConfigure() error = %v", err)
+	// #14990: the commit handlers mint authority for the REST session in the
+	// request header, so the candidate must be held by that session — an
+	// unowned internal candidate is no longer committable by a named session.
+	if err := store.EnterConfigureSession(testRESTConfigSessionID); err != nil {
+		t.Fatalf("EnterConfigureSession() error = %v", err)
 	}
-	if _, err := store.LoadSet("set system dataplane-type ebpf"); err != nil {
-		t.Fatalf("LoadSet() error = %v", err)
+	if _, err := store.LoadSetAs(testRESTConfigSessionID, "set system dataplane-type ebpf"); err != nil {
+		t.Fatalf("LoadSetAs() error = %v", err)
 	}
 	return store
 }

@@ -712,6 +712,19 @@ keep writing, and committing, into the candidate that replaced its own. The refu
 `ErrConfigLockedByOther` and says to re-enter configure. Re-entering, shared or exclusive, clears
 it. The set is capped at 64 entries.
 
+A named session that holds nothing gets no authority at all (#14990). `AuthorizeCommitAs`
+previously minted `InternalCommitterAs` for a non-empty sessionID that passed only via the
+`!configDir` / empty-holder bypasses — an unexpiring authority that `verifyCommitAuthorityLocked`
+accepts unconditionally — so a non-holder or evicted session could promote another operator's
+candidate at any later time. Now only `sessionID == ""` (the explicit internal/system caller)
+receives internal authority; a named session must be the recorded holder and receives a
+holder-bound, epoch-bound authority, otherwise it is refused with `ErrConfigLockedByOther`.
+Named sessions may still *edit* an unowned local-CLI candidate (#5059) via the `*As` mutators;
+they may not commit it — committing it requires the internal caller or taking the lock.
+`ForceExitConfigure` (`clear system config-lock`) now also records the evicted holder in
+`reclaimedHolders`, like the idle-lease reclaim, so an operator force-clear does not leave the
+evicted session able to ride the empty-holder pass back into the next internal candidate.
+
 Generation binding does not close it, and the retry loop makes it worse. A
 turnover that completes *before* the daemon's `CompileCandidateGen` — i.e. while
 the commit waits on the apply semaphore, which is where a busy daemon actually
