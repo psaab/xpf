@@ -218,23 +218,15 @@ func TestGenerateNetwork_PreferredAddress(t *testing.T) {
 		PreferredAddress: "10.0.1.20/24",
 	}
 	got := m.generateNetwork(ifc)
-	// Should use [Address] sections
-	if !strings.Contains(got, "[Address]\n") {
-		t.Fatalf("expected [Address] sections, got:\n%s", got)
+	// #15222: preferred is first in its subnet as a plain Address= line;
+	// PreferredLifetime=forever was inert for source selection.
+	if strings.Contains(got, "PreferredLifetime") || strings.Contains(got, "[Address]") {
+		t.Errorf("preferred must render as ordered plain Address= lines, got:\n%s", got)
 	}
-	// Preferred address should have PreferredLifetime=forever
-	if !strings.Contains(got, "Address=10.0.1.20/24\nPreferredLifetime=forever\n") {
-		t.Errorf("preferred address should have PreferredLifetime=forever, got:\n%s", got)
-	}
-	// Non-preferred address should NOT have PreferredLifetime
-	// Find the [Address] section for 10.0.1.10
-	sections := strings.Split(got, "[Address]\n")
-	for _, sec := range sections {
-		if strings.HasPrefix(sec, "Address=10.0.1.10/24\n") {
-			if strings.Contains(sec, "PreferredLifetime") {
-				t.Errorf("non-preferred address should not have PreferredLifetime")
-			}
-		}
+	idxPref := strings.Index(got, "Address=10.0.1.20/24")
+	idxOther := strings.Index(got, "Address=10.0.1.10/24")
+	if idxPref < 0 || idxOther < 0 || idxPref > idxOther {
+		t.Errorf("preferred address should be first in its subnet, got:\n%s", got)
 	}
 }
 
@@ -247,14 +239,13 @@ func TestGenerateNetwork_PrimaryAndPreferred(t *testing.T) {
 		PreferredAddress: "10.0.1.20/24",
 	}
 	got := m.generateNetwork(ifc)
-	// Primary should be first [Address] section
-	sections := strings.Split(got, "[Address]\n")
-	if len(sections) < 2 {
-		t.Fatalf("expected [Address] sections, got:\n%s", got)
+	if strings.Contains(got, "PreferredLifetime") || strings.Contains(got, "[Address]") {
+		t.Errorf("primary+preferred must render as ordered plain Address= lines, got:\n%s", got)
 	}
-	// First [Address] section should be the primary+preferred
-	if !strings.HasPrefix(sections[1], "Address=10.0.1.20/24\nPreferredLifetime=forever\n") {
-		t.Errorf("first address section should be primary+preferred, got:\n%s", got)
+	// Primary+preferred should be the first Address= line.
+	idx := strings.Index(got, "Address=")
+	if idx < 0 || !strings.HasPrefix(got[idx:], "Address=10.0.1.20/24\n") {
+		t.Errorf("first address should be primary+preferred, got:\n%s", got)
 	}
 }
 

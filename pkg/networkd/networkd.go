@@ -55,7 +55,7 @@ type InterfaceConfig struct {
 	OriginalName     string   // kernel name before rename (for .link OriginalName= match)
 	Addresses        []string // CIDR addresses (10.0.1.10/24, 2001:db8::1/64, etc.)
 	PrimaryAddress   string   // address marked as primary (listed first for source selection)
-	PreferredAddress string   // address marked as preferred (gets PreferredLifetime=forever)
+	PreferredAddress string   // address marked as preferred (listed first within its subnet for source selection)
 	IsVLANParent     bool     // true = don't assign addresses (they go on sub-interface)
 	DHCPv4           bool     // true = daemon runs DHCPv4 client (don't set static addr)
 	DHCPv6           bool     // true = daemon runs DHCPv6 client
@@ -1698,19 +1698,16 @@ func (m *Manager) generateNetwork(ifc InterfaceConfig) string {
 			}
 			addrs = append(addrs, addr)
 		}
-		if ifc.PreferredAddress != "" {
-			// Use [Address] sections so we can set PreferredLifetime
-			for _, addr := range addrs {
-				b.WriteString("\n[Address]\n")
-				fmt.Fprintf(&b, "Address=%s\n", addr)
-				if addr == ifc.PreferredAddress {
-					b.WriteString("PreferredLifetime=forever\n")
-				}
-			}
-		} else {
-			for _, addr := range addrs {
-				fmt.Fprintf(&b, "Address=%s\n", addr)
-			}
+		// #15222: the Junos `preferred` leaf selects the source address
+		// for locally originated traffic on its subnet. On Linux the
+		// kernel picks the first address added in the subnet, so the
+		// preferred address must be first among its subnet peers —
+		// not global-first (that would steal another subnet's source)
+		// and not PreferredLifetime=forever, which is an IPv6 lifetime
+		// knob that never chooses an IPv4 source.
+		addrs = orderPreferredFirstPerSubnet(addrs, ifc.PreferredAddress)
+		for _, addr := range addrs {
+			fmt.Fprintf(&b, "Address=%s\n", addr)
 		}
 	}
 
@@ -1828,6 +1825,58 @@ func orderAddresses(addrs []string, primaryAddr string) []string {
 	}
 	if found {
 		ordered = append([]string{primaryAddr}, ordered...)
+	}
+	return ordered
+}
+
+// subnetKey15222 returns the masked network of a CIDR address, or "" when
+// the address cannot be parsed (such addresses keep config order and
+// never match a preferred subnet).
+func subnetKey15222(addr string) string {
+	_, ipNet, err := net.ParseCIDR(addr)
+	if err != nil || ipNet == nil {
+		return ""
+	}
+	return ipNet.String()
+}
+
+// orderPreferredFirstPerSubnet returns addrs with preferred moved to the
+// front of its own subnet group, preserving every other address's
+// relative order (#15222). Primary ordering has already run, so a
+// primary that is also preferred stays first overall; a distinct
+// primary keeps the global head and the preferred leads only its subnet.
+func orderPreferredFirstPerSubnet(addrs []string, preferred string) []string {
+	if preferred == "" || len(addrs) <= 1 {
+		return addrs
+	}
+	key := subnetKey15222(preferred)
+	if key == "" {
+		return addrs
+	}
+	idx := -1
+	firstInSubnet := -1
+	for i, a := range addrs {
+		if subnetKey15222(a) != key {
+			continue
+		}
+		if firstInSubnet < 0 {
+			firstInSubnet = i
+		}
+		if a == preferred {
+			idx = i
+		}
+	}
+	if idx < 0 || idx == firstInSubnet {
+		return addrs
+	}
+	ordered := make([]string, 0, len(addrs))
+	ordered = append(ordered, addrs[:firstInSubnet]...)
+	ordered = append(ordered, preferred)
+	for i, a := range addrs[firstInSubnet:] {
+		if firstInSubnet+i == idx {
+			continue
+		}
+		ordered = append(ordered, a)
 	}
 	return ordered
 }
