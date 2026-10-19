@@ -82,7 +82,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 	// as DNS names so a space/control/malformed value cannot inject an extra
 	// resolver directive token.
 	"domain-name":   {desc: "Domain name", args: 1, valueType: ValueHostname, valueDesc: "DNS domain name", valueExamples: []string{"example.net"}, validator: ValidateDNSDomain, placeholder: "<domain>", children: nil},
-	"domain-search": {desc: "Domain search list", args: 1, multi: true, valueType: ValueHostname, valueDesc: "DNS domain name", valueExamples: []string{"example.net", "corp.example.net"}, validator: ValidateDNSDomain, placeholder: "<domain>", children: nil},
+	"domain-search": {desc: "Domain search list", args: 1, multi: true, valueType: ValueHostname, valueDesc: "DNS domain name", valueExamples: []string{"example.net", "corp.example.net"}, validator: ValidateDNSDomain, placeholder: "<domain>", children: nil, allChildKeysAreValues: true},
 	// #5011: time-zone is rendered into the /etc/localtime symlink target
 	// (/usr/share/zoneinfo/<value>). Type it as a zoneinfo name so a `..`
 	// component / absolute path / space cannot turn the symlink target into a
@@ -103,6 +103,12 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		valueExamples: []string{"8.8.8.8", "2001:4860:4860::8888"},
 		validator:     ValidateIPAddress,
 		children:      nil,
+		// #15204: compiler_system.go reads this leaf via
+		// firewallMatchValues, which consumes EVERY key of each block-list
+		// child. Validate the same tail or a Junos modifier packed onto a
+		// block child (`1.1.1.1 source-address 10.0.0.2;`) would commit
+		// clean and compile the modifier's IP in as an extra resolver.
+		allChildKeysAreValues: true,
 	},
 	"backup-router": {desc: "Backup router", args: 1, placeholder: "<address>", closedWorld: true, children: map[string]*schemaNode{
 		"destination": {desc: "Destination network", args: 1, placeholder: "<network>", children: nil},
