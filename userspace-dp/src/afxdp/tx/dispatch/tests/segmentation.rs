@@ -868,3 +868,182 @@ fn segmentation_pat_translation_survives_expected_ports_9782() {
         );
     }
 }
+
+// #15119 helpers: oversized IPv4/TCP frame whose TCP header carries a
+// caller-supplied option trailer (MD5 kind 19 / AO kind 29 / NOP control).
+fn oversized_ipv4_tcp_frame_with_options_15119(options: &[u8], data_len: usize, df: bool) -> Vec<u8> {
+    let mut opts = options.to_vec();
+    let pad = (4 - (opts.len() % 4)) % 4;
+    opts.resize(opts.len() + pad, 0);
+    let tcp_header_len = 20 + opts.len();
+    let total_len = (20 + tcp_header_len + data_len) as u16;
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    frame.extend_from_slice(&[0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]);
+    frame.extend_from_slice(&0x0800u16.to_be_bytes());
+    let flags_frag: u16 = if df { 0x4000 } else { 0x0000 };
+    frame.extend_from_slice(&[
+        0x45, 0x00, (total_len >> 8) as u8, total_len as u8, 0x00, 0x01,
+        (flags_frag >> 8) as u8, flags_frag as u8, 64, PROTO_TCP, 0x00, 0x00,
+    ]);
+    frame.extend_from_slice(&[10, 0, 0, 5]);
+    frame.extend_from_slice(&[10, 0, 0, 9]);
+    frame.extend_from_slice(&40000u16.to_be_bytes());
+    frame.extend_from_slice(&5201u16.to_be_bytes());
+    let data_offset_word = ((tcp_header_len / 4) as u8) << 4;
+    frame.extend_from_slice(&[
+        0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, data_offset_word, 0x10, 0x00, 0x3f,
+        0x00, 0x00, 0x00, 0x00,
+    ]);
+    // TCP skeleton is exactly 20 bytes (ports + the 16-byte literal above);
+    // options follow at TCP offset 20 and payload after the full header.
+    frame.extend_from_slice(&opts);
+    frame.extend(std::iter::repeat(0x41u8).take(data_len));
+    let ip_sum = crate::afxdp::frame::checksum16(&frame[14..34]);
+    frame[24] = (ip_sum >> 8) as u8;
+    frame[25] = ip_sum as u8;
+    frame
+}
+
+fn meta_v4_tcp_15119(frame: &[u8]) -> UserspaceDpMeta {
+    UserspaceDpMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        l3_offset: 14,
+        l4_offset: 34,
+        pkt_len: frame.len() as u16,
+        ..UserspaceDpMeta::default()
+    }
+}
+
+/// #15119 RED-on-revert: an oversized datagram carrying a TCP-MD5 (kind 19)
+/// or TCP-AO (kind 29) option must NOT be admitted for segmentation, must
+/// NOT be segmented by either builder, and must reach the PTB arm. The NOP
+/// control through the same builders must still segment. Pre-fix the gate
+/// admitted and the builders cloned the auth option onto every segment.
+#[test]
+fn tcp_auth_options_decline_segmentation_and_reach_ptb_15119() {
+    let _rate_limit = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    // kind 19 len 18 (16-byte digest); kind 29 len varies; NOP control.
+    let md5_opts: Vec<u8> = {
+        let mut v = vec![19u8, 18];
+        v.extend_from_slice(&[0xAB; 16]);
+        v
+    };
+    let ao_opts: Vec<u8> = vec![29, 8, 1, 0, 0x11, 0x22, 0x33, 0x44];
+    let nop_opts: Vec<u8> = vec![1, 1, 1, 1];
+    let forwarding = test_forwarding_with_egress_mtu(1400);
+    // test_forwarding_with_egress_mtu installs egress 80 @ mtu; builders use
+    // egress_ifindex 80 via test_forwarding_decision_to_bound_ifindex.
+    for (name, opts) in [("md5", &md5_opts), ("ao", &ao_opts)] {
+        let frame = oversized_ipv4_tcp_frame_with_options_15119(opts, 1600, true);
+        let meta = meta_v4_tcp_15119(&frame);
+        assert!(
+            !forwarded_tcp_may_need_segmentation(&frame, meta, &test_decision(), &forwarding),
+            "{name}: admission gate must decline authenticated TCP"
+        );
+        // Copy-path builder declines.
+        let decision = test_forwarding_decision_to_bound_ifindex(11);
+        // Builders resolve MTU from egress_ifindex 80 (in forwarding above).
+        assert!(
+            segment_forwarded_tcp_frames_from_frame(
+                &frame,
+                meta,
+                &decision,
+                &forwarding,
+                false,
+                None
+            )
+            .is_none(),
+            "{name}: copy-path builder must decline authenticated TCP"
+        );
+        // Prepared-TX builder declines and queues nothing.
+        let mut target_binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+        let mut post_recycles: Vec<(u32, u64)> = Vec::new();
+        let worker_commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> =
+            BTreeMap::new();
+        let prepared = segment_forwarded_tcp_frames_into_prepared(
+            &mut target_binding,
+            &frame,
+            meta,
+            &decision,
+            &forwarding,
+            false,
+            Some((40000, 5201)),
+            None,
+            None,
+            None,
+            1,
+            &mut post_recycles,
+            0,
+            &worker_commands_by_id,
+        );
+        assert!(
+            prepared.is_none(),
+            "{name}: prepared-TX builder must decline"
+        );
+        assert_eq!(
+            target_binding.tx_pipeline.pending_tx_prepared.len(),
+            0,
+            "{name}: no prepared segments may be queued"
+        );
+        // DF-set oversize now reaches the PTB arm with the egress MTU.
+        let mut ptb_forwarding = test_forwarding_with_egress_mtu(1400);
+        ptb_forwarding.egress.insert(
+            11,
+            EgressInterface {
+                bind_ifindex: 11,
+                vlan_id: 0,
+                mtu: 1500,
+                src_mac: [0x02, 0xbf, 0x72, 0x16, 0, 1],
+                zone_id: TEST_TRUST_ZONE_ID,
+                redundancy_group: 0,
+                primary_v4: Some(std::net::Ipv4Addr::new(10, 0, 1, 1)),
+                primary_v6: None,
+            },
+        );
+        let ingress = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+        let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+        let (ptb, mtu_signalled) = compute_forwarded_egress_ptb(
+            &frame,
+            meta.into(),
+            &decision,
+            &ptb_forwarding,
+            false,
+            false,
+            &ingress.identity(),
+            &recent_exceptions,
+        );
+        assert!(mtu_signalled, "{name}: DF oversize must signal MTU");
+        let ptb = ptb.expect("DF oversize must emit Frag-Needed");
+        let icmp = 14 + 20;
+        assert_eq!(ptb[icmp], 3, "{name}: ICMP type 3");
+        assert_eq!(ptb[icmp + 1], 4, "{name}: code 4 Frag Needed");
+        assert_eq!(
+            u16::from_be_bytes([ptb[icmp + 6], ptb[icmp + 7]]),
+            1400,
+            "{name}: PTB must advertise the egress MTU"
+        );
+    }
+    // NOP control: identical shape without an auth option still segments.
+    let control = oversized_ipv4_tcp_frame_with_options_15119(&nop_opts, 1600, true);
+    let meta = meta_v4_tcp_15119(&control);
+    assert!(
+        forwarded_tcp_may_need_segmentation(&control, meta, &test_decision(), &forwarding),
+        "NOP-only control must still be admitted for segmentation"
+    );
+    let decision = test_forwarding_decision_to_bound_ifindex(11);
+    let segmented = segment_forwarded_tcp_frames_from_frame(
+        &control,
+        meta,
+        &decision,
+        &forwarding,
+        false,
+        None,
+    )
+    .expect("NOP-only control must segment");
+    assert!(
+        segmented.len() > 1,
+        "control must produce multiple segments"
+    );
+}

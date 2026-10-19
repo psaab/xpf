@@ -135,6 +135,11 @@ pub(in crate::afxdp) use tcp::{
     frame_has_tcp_rst, tcp_payload_offset, tcp_payload_offset_from_l3,
 };
 pub(super) use tcp::{extract_tcp_flags_and_window, extract_tcp_window, tcp_flags_str};
+// #15119: segmentation builders and the dispatch admission gate decline
+// TCP-MD5/TCP-AO datagrams via this shared option walk.
+pub(in crate::afxdp) use tcp::{
+    TCP_OPTION_KIND_AO, TCP_OPTION_KIND_MD5, tcp_header_has_auth_option,
+};
 // #4074: the ICMP identifier-bearing query-type gate shared with the quoted
 // ICMP parser and NAT identifier rewriter.
 pub(in crate::afxdp) use inspect::icmp_identifier_bearing;

@@ -2147,6 +2147,27 @@ fn forwarded_tcp_may_need_segmentation(
     let Some(l3_end) = declared_l3_end(frame, l3, meta.addr_family) else {
         return false;
     };
+    // #15119: never admit a TCP-MD5 (kind 19) or TCP-AO (kind 29)
+    // datagram for segmentation. Both builders clone the authentication
+    // option onto every output while rewriting seq/lengths/checksums, so
+    // every segment fails the receiver's authentication check. Declining
+    // here (in lockstep with both builders' own guards) routes the frame
+    // to `compute_forwarded_egress_ptb`: DF-set IPv4 / IPv6 emit
+    // Frag-Needed/PTB, DF-clear IPv4 forwards whole (#9328).
+    if let Some(tcp) = frame
+        .get(l3..l3_end)
+        .and_then(|payload| {
+            packet_rel_l4_offset(payload, meta.addr_family).map(|off| (payload, off))
+        })
+        .and_then(|(payload, off)| {
+            let header_len = ((payload.get(off + 12)? >> 4) as usize) * 4;
+            payload.get(off..off + header_len).map(|h| (h, header_len))
+        })
+    {
+        if tcp_header_has_auth_option(tcp.0, tcp.1) {
+            return false;
+        }
+    }
     l3_end.saturating_sub(l3) > mtu
 }
 
