@@ -1,0 +1,18 @@
+# xpf (#15089, A57-01) — refresh the A/B ESP slot loaders whenever
+# Ubuntu's signed bootloader files change on disk.
+#
+# The bake copies shim/grub/mm from /boot/efi/EFI/ubuntu into
+# /boot/efi/EFI/xpf-A and /boot/efi/EFI/xpf-B exactly once, and BootOrder
+# boots the xpf slots — so a shim-signed / grub-efi-amd64-signed update
+# (which installs only to EFI/ubuntu) would otherwise leave the booted
+# Secure-Boot chain on the bake-time loader forever. These file
+# triggers make dpkg invoke `xpf.postinst triggered` after any package
+# unpacks a changed loader file; the postinst runs
+# `xpf-uefi-slots --sync-only`, which atomically re-copies the loaders
+# into both slots. interest-noawait: the refresh is not crucial enough
+# to hold the triggering package in triggers-awaited, and the boot-time
+# sync in xpf-uefi-slots.service is the backstop if a trigger run is
+# ever missed.
+interest-noawait /boot/efi/EFI/ubuntu/shimx64.efi
+interest-noawait /boot/efi/EFI/ubuntu/grubx64.efi
+interest-noawait /boot/efi/EFI/ubuntu/mmx64.efi

@@ -647,6 +647,35 @@ clustered node. There is no separate `xpf-upgrade` wrapper. See
 `docs/in-place-upgrade.md` for the full state machine and rollback
 contract (`test/incus/cluster-setup.sh deploy_vm()` exercises it).
 
+### A/B ESP slot loader refresh (#15089)
+
+The #1930 A/B slots (`/boot/efi/EFI/xpf-A`, `/boot/efi/EFI/xpf-B`) each
+hold a copy of the signed `shimx64.efi` / `grubx64.efi` / `mmx64.efi`
+from `/boot/efi/EFI/ubuntu`, staged once by the bake. Ubuntu's
+`shim-signed` / `grub-efi-amd64-signed` updates install only to
+`EFI/ubuntu`, while BootOrder boots the xpf slots — so the slot copies
+are refreshed, never left at the bake-time version:
+
+- **On every boot**, `xpf-uefi-slots` re-copies any loader whose bytes
+  differ from `EFI/ubuntu` into both slots (temp file in the slot dir +
+  atomic rename, so a power cut cannot leave a truncated loader at the
+  booted path) before it verifies/registers the slots.
+- **Immediately on a bootloader package update**, the dpkg file
+  triggers in `debian/xpf.triggers` (interest on the three
+  `EFI/ubuntu` loader files) invoke `xpf.postinst triggered`, which
+  runs the same refresh via `xpf-uefi-slots --sync-only` — no reboot
+  needed. The trigger is `interest-noawait` and best-effort: it never
+  blocks the bootloader package's configure, and the boot-time sync is
+  the backstop.
+- **At image-validation time**, `scripts/image/validate.py` hashes
+  every slot loader against `EFI/ubuntu` and fails the Tier-1 gate on
+  any mismatch, so a stale slot cannot ship green on presence alone.
+
+`xpf.selector` is per-slot kernel state, not loader state, and is never
+touched by the refresh. A loader present in `EFI/ubuntu` must land in
+both slots; `mmx64.efi` absent from `EFI/ubuntu` (the bake's fallback
+shape) is left as-is rather than treated as drift.
+
 ### #7163 — session-sync is a FLAG DAY at wire version 2
 
 **Upgrading to a build carrying #7163 DROPS SYNCED SESSIONS. Both nodes must

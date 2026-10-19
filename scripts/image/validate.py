@@ -503,6 +503,95 @@ def _ab_slot_esp_verdict(out, kver, slots=_AB_SLOTS):
                   f"with selectors seeded at the running kernel {kver}")
 
 
+# ── #15089 A/B slot loader freshness (A57-01) ─────────────────────────
+# Presence is not freshness. The bake copies shim/grub/mm from
+# EFI/ubuntu into both slots once; shim-signed / grub-efi-amd64-signed
+# updates install only to EFI/ubuntu, so a slot can hold every required
+# file (and pass _ab_slot_esp_verdict) while booting a bake-time
+# bootloader that a SBAT/dbx revocation has already superseded. The
+# refresh paths (boot-time sync + dpkg file trigger, #15089) keep the
+# copies equal; this verdict PROVES equality by hash at gate time, so a
+# refresh regression fails the Tier-1 gate instead of shipping stale.
+#
+# Loader set: the files EFI/ubuntu is the source of truth for. Unlike
+# _AB_SLOT_FILES this includes mmx64.efi — but only conditionally: the
+# bake's fallback stages shim+grub alone when mm cannot be copied, so
+# mm absent from BOTH source and slot is that legitimate shape, while
+# mm present in the source but absent (or different) in a slot is drift.
+_AB_LOADER_FILES = ("shimx64.efi", "grubx64.efi", "mmx64.efi")
+
+# In-guest probe feeding _ab_slot_loader_hash_verdict. Same flat line
+# protocol discipline as _AB_SLOT_ESP_PROBE: every loader in every dir
+# is reported either way (digest or MISSING), so a probe that silently
+# produced nothing cannot be mistaken for a clean run.
+_AB_SLOT_HASH_PROBE = (
+    "for d in ubuntu " + " ".join(_AB_SLOTS) + "; do "
+    "for f in " + " ".join(_AB_LOADER_FILES) + "; do "
+    'p="/boot/efi/EFI/$d/$f"; '
+    'if [ -f "$p" ]; then echo "HASH $d $f $(sha256sum "$p" | cut -d\' \' -f1)"; '
+    'else echo "HASH $d $f MISSING"; fi; done; done'
+)
+
+
+def _ab_slot_loader_hash_verdict(out, slots=_AB_SLOTS):
+    """Pure verdict over the in-guest hash probe: does each slot loader
+    byte-match EFI/ubuntu? Returns (ok, reason).
+
+    `out` is the probe's line protocol:
+        HASH <dir> <name> <sha256-hex|MISSING>
+    where <dir> is `ubuntu` or a slot label.
+
+    Rules (each names its own defect):
+      - a loader missing from a slot while present in ubuntu is drift
+        (for shim/grub the presence verdict also catches it; mm only
+        this verdict sees);
+      - a digest mismatch is a stale slot: BootOrder boots the old
+        loader while dpkg reports the new one installed (A57-01);
+      - a loader absent from ubuntu entirely is NOT judged here — the
+        ESP presence verdict owns the not-staged diagnosis, and an
+        ubuntu-less ESP must not acquire a second misleading failure.
+    An empty probe fails rather than passing vacuously.
+    """
+    digests = {}  # (dir, name) -> hex digest
+    seen = set()  # dirs that reported at least one loader line
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if len(parts) == 4 and parts[0] == "HASH":
+            _, d, fname, digest = parts
+            seen.add(d)
+            if digest != "MISSING":
+                digests[(d, fname)] = digest
+
+    if "ubuntu" not in seen:
+        return False, ("no HASH lines for EFI/ubuntu in the probe output "
+                       "— cannot prove the A/B slot loaders match the "
+                       "installed shim/grub")
+
+    problems = []
+    for fname in _AB_LOADER_FILES:
+        want = digests.get(("ubuntu", fname))
+        if want is None:
+            continue  # not shipped by ubuntu; presence verdict's domain
+        for slot in slots:
+            got = digests.get((slot, fname))
+            if got is None:
+                problems.append(
+                    f"{slot}: {fname} missing from the slot but present "
+                    "in EFI/ubuntu — the slot loader set diverged from "
+                    "the installed bootloader")
+            elif got != want:
+                problems.append(
+                    f"{slot}: {fname} is stale — its hash differs from "
+                    "EFI/ubuntu, so this slot boots the bake-time loader "
+                    "while dpkg reports the updated shim/grub as "
+                    "installed (#15089)")
+
+    if problems:
+        return False, "; ".join(problems)
+    return True, ("both A/B slot loaders byte-match EFI/ubuntu "
+                  f"({', '.join(_AB_LOADER_FILES)})")
+
+
 # ── #1930 INC-0 kernel hold (#6498) ───────────────────────────────────
 # The bake HOLDS the kernel so an unattended apt run cannot move the running
 # kernel out from under the verifier-gated shim .o (#1864): a kernel the .o was
@@ -1414,6 +1503,14 @@ class Harness:
             fail("#1930 A/B slot ESP staging FAILED in-guest: " + reason +
                  "\n--- probe ---\n" + esp)
         info(f"  ESP OK: {reason}")
+
+        hashes = guest(inst, "sh", "-c", _AB_SLOT_HASH_PROBE,
+                       check=False, capture=True).stdout
+        ok, reason = _ab_slot_loader_hash_verdict(hashes)
+        if not ok:
+            fail("#15089 A/B slot loader freshness FAILED in-guest: " + reason +
+                 "\n--- hash probe ---\n" + hashes)
+        info(f"  loader hashes OK: {reason}")
 
         got = guest(inst, "efibootmgr", check=False, capture=True)
         if got.returncode != 0:

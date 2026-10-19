@@ -510,6 +510,20 @@ case "$1" in
         # State under /etc/xpf (.configdb, node-id, master.key) is runtime
         # state, NOT package-owned. Do not create, seed, or modify it here.
         ;;
+    triggered)
+        # #15089 (A57-01): a shim-signed / grub-efi-amd64-signed update
+        # unpacked a changed loader under /boot/efi/EFI/ubuntu (dpkg
+        # file trigger, debian/xpf.triggers). Refresh both A/B slot
+        # copies now so BootOrder does not keep booting the bake-time
+        # bootloader. Best-effort by contract: the helper exits 0 on
+        # every path, a host without the bake substrate (no helper, no
+        # ESP ubuntu dir) is a no-op, and the boot-time sync in
+        # xpf-uefi-slots.service retries on the next boot — so this arm
+        # must never fail the triggering package's configure.
+        if [ -x /usr/local/sbin/xpf-uefi-slots ]; then
+            /usr/local/sbin/xpf-uefi-slots --sync-only || true
+        fi
+        ;;
     abort-upgrade|abort-remove|abort-deconfigure)
         ;;
     *)
