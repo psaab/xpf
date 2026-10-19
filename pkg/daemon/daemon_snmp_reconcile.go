@@ -32,13 +32,16 @@ const snmpBindTimeout = 5 * time.Second
 // agent. It is the SINGLE source of truth shared by the boot start block
 // (daemon_run.go) and the day-2 reconcile (reconcileSNMP) so the two can never
 // diverge on what "SNMP is on" means: an SNMP stanza with at least one
-// community or v3 user, and the snmpd process not administratively disabled.
+// community, v3 user, or trap group (#15232 A48-03: a trap-group-only
+// config must still start the agent + link monitor or its configured
+// linkUp/linkDown notifications are silently never sent), and the snmpd
+// process not administratively disabled.
 func snmpEnabled(cfg *config.Config) bool {
 	if cfg == nil || cfg.System.SNMP == nil {
 		return false
 	}
 	s := cfg.System.SNMP
-	if len(s.Communities) == 0 && len(s.V3Users) == 0 {
+	if len(s.Communities) == 0 && len(s.V3Users) == 0 && len(s.TrapGroups) == 0 {
 		return false
 	}
 	return !isProcessDisabled(cfg, "snmpd")
@@ -347,13 +350,181 @@ func (t *warnThrottle) reset() (wasActive bool, suppressed int) {
 	return wasActive, suppressed
 }
 
+// snmpRethIndexBase is the base for synthetic ifIndexes of bondless
+// RETH rows (#15232 A48-04). Kernel ifIndexes are small positive ints;
+// 1<<24 is far above any real NIC count and stable across polls, so a
+// rethN row always sorts after kernel rows and never collides.
+const snmpRethIndexBase = 1 << 24
+
+// snmpRethInfo describes one configured reth for ifTable synthesis.
+type snmpRethInfo struct {
+	Name            string // authored reth name, e.g. "reth0"
+	Index           int    // numeric suffix, e.g. 0 for reth0
+	RedundancyGroup int
+	MemberName      string // Linux name of the owning local member
+	Primary         bool   // this node is RG primary
+}
+
+// snmpRethSource supplies reth rows + the daemon whose store/cluster
+// resolve them. Nil in tests that inject their own source; production
+// installs a closure over the running daemon in startSNMPLocked.
+var snmpRethSource func() ([]snmpRethInfo, []snmp.IfData)
+
+// snmpLastChangeTracker records, per ifIndex, the oper status last seen
+// and the TimeTicks (hundredths since the tracker epoch) of its last
+// change (#15232 A48-02 ifLastChange). The epoch is daemon start
+// (process start approximates agent start for the boot agent; a day-2
+// agent inherits an earlier epoch, so values are a lower bound on the
+// agent-relative TimeTicks — still monotonic and flap-detectable).
+var snmpLastChangeTracker = newLastChangeTracker(time.Now())
+
+type lastChangeTracker struct {
+	mu       sync.Mutex
+	epoch    time.Time
+	prevOper map[int]int
+	changed  map[int]uint32
+}
+
+// snmpRethSourceMu guards snmpRethSource (installed per agent start).
+var snmpRethSourceMu sync.Mutex
+
+func newLastChangeTracker(epoch time.Time) *lastChangeTracker {
+	return &lastChangeTracker{epoch: epoch, prevOper: map[int]int{}, changed: map[int]uint32{}}
+}
+
+// observe records oper for ifIndex and returns its ifLastChange value.
+func (t *lastChangeTracker) observe(ifIndex, oper int, now time.Time) uint32 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if prev, ok := t.prevOper[ifIndex]; ok && prev != oper {
+		t.changed[ifIndex] = uint32(now.Sub(t.epoch).Milliseconds() / 10)
+	}
+	t.prevOper[ifIndex] = oper
+	return t.changed[ifIndex]
+}
+
+func (t *lastChangeTracker) reset() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.prevOper = map[int]int{}
+	t.changed = map[int]uint32{}
+	// Move the epoch into the past so a transition observed immediately
+	// after a reset yields a non-zero TimeTicks (a same-hundredth
+	// transition would otherwise be indistinguishable from "never").
+	t.epoch = time.Now().Add(-time.Second)
+}
+
+// resetSNMPLastChangeForTest clears ifLastChange state between tests.
+func resetSNMPLastChangeForTest() { snmpLastChangeTracker.reset() }
+
+// buildSNMPIfDataForTest is buildSNMPIfData (kept as a named seam in tests).
+func buildSNMPIfDataForTest() []snmp.IfData { return buildSNMPIfData() }
+
+// parseRethIndex extracts N from "rethN"; ok=false for other names.
+func parseRethIndex(name string) (int, bool) {
+	if len(name) <= 4 || name[:4] != "reth" {
+		return 0, false
+	}
+	n := 0
+	for _, c := range name[4:] {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, true
+}
+
+// daemonSNMPRethInfos resolves configured reths against the active
+// config + cluster state. A reth is synthesized only when it has a
+// local owning member (RethToPhysical) — bondless reths have no
+// kernel device, so without synthesis they had no ifTable row at all.
+func (d *Daemon) daemonSNMPRethInfos() []snmpRethInfo {
+	if d == nil || d.store == nil {
+		return nil
+	}
+	cfg := d.store.ActiveConfig()
+	if cfg == nil {
+		return nil
+	}
+	rethToPhys := cfg.RethToPhysical()
+	names := make([]string, 0, len(rethToPhys))
+	for name := range rethToPhys {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []snmpRethInfo
+	for _, name := range names {
+		idx, ok := parseRethIndex(name)
+		if !ok {
+			continue
+		}
+		rg := 0
+		if ifc := cfg.Interfaces.Interfaces[name]; ifc != nil {
+			rg = ifc.RedundancyGroup
+		}
+		primary := true // standalone / no cluster: locally active
+		if d.cluster != nil && rg > 0 {
+			primary = d.cluster.IsLocalPrimary(rg)
+		}
+		out = append(out, snmpRethInfo{
+			Name: name, Index: idx, RedundancyGroup: rg,
+			MemberName: config.LinuxIfName(rethToPhys[name]), Primary: primary,
+		})
+	}
+	return out
+}
+
+// synthesizeRethRows appends one synthetic row per reth whose owning
+// member is present in kernelRows. Counters/speed/MTU are copied from
+// the owning member; oper = RG-primary && member-up; admin follows the
+// member. Rows are appended (the agent sorts by IfIndex per PDU).
+func synthesizeRethRows(kernelRows []snmp.IfData, reths []snmpRethInfo, now time.Time) []snmp.IfData {
+	if len(reths) == 0 {
+		return kernelRows
+	}
+	byName := make(map[string]*snmp.IfData, len(kernelRows))
+	for i := range kernelRows {
+		byName[kernelRows[i].IfDescr] = &kernelRows[i]
+	}
+	out := kernelRows
+	for _, r := range reths {
+		member, ok := byName[r.MemberName]
+		if !ok {
+			continue
+		}
+		oper := 2
+		if r.Primary && member.OperStatus == 1 {
+			oper = 1
+		}
+		synthIndex := snmpRethIndexBase + r.Index
+		row := *member // copy counters, speed, MTU, error/discard fields
+		row.IfIndex = synthIndex
+		row.IfDescr = r.Name
+		row.IfName = r.Name
+		row.IfType = 53 // propVirtual
+		row.AdminStatus = member.AdminStatus
+		row.OperStatus = oper
+		row.IfAlias = ""
+		row.LastChange = snmpLastChangeTracker.observe(synthIndex, oper, now)
+		out = append(out, row)
+	}
+	return out
+}
+
+// buildSNMPKernelIfData returns only kernel (netlink) rows, without
+// reth synthesis. It is the member-row source for synthesizeRethRows.
+func buildSNMPKernelIfData() []snmp.IfData { return buildSNMPIfDataInternal(false) }
+
 // buildSNMPIfData returns the live interface table for the SNMP ifTable /
 // ifXTable, read from netlink at call time. It is the SetIfDataFn callback
 // wired onto every agent the daemon starts (both the boot start and a day-2
 // reconcile start), so the agent always reports the current kernel interface
 // state regardless of when it was started (#3967 extracted this from the boot
 // block so the two start paths share one implementation).
-func buildSNMPIfData() []snmp.IfData {
+func buildSNMPIfData() []snmp.IfData { return buildSNMPIfDataInternal(true) }
+
+func buildSNMPIfDataInternal(withReth bool) []snmp.IfData {
 	links, err := snmpLinkLister()
 	if err != nil {
 		// #5523 C179-123: a transient netlink failure must NOT masquerade as a
@@ -428,7 +599,17 @@ func buildSNMPIfData() []snmp.IfData {
 		if stats != nil {
 			deriveIfCounters(&entry, stats)
 		}
+		entry.LastChange = snmpLastChangeTracker.observe(attrs.Index, oper, time.Now())
 		result = append(result, entry)
+	}
+	if withReth {
+		snmpRethSourceMu.Lock()
+		src := snmpRethSource
+		snmpRethSourceMu.Unlock()
+		if src != nil {
+			reths, _ := src()
+			result = synthesizeRethRows(result, reths, time.Now())
+		}
 	}
 	return result
 }
@@ -462,6 +643,11 @@ func deriveIfCounters(entry *snmp.IfData, stats *netlink.LinkStatistics) {
 		inUcast -= stats.Multicast
 	}
 	entry.HCInUcastPkts = inUcast
+	entry.InUcastPkts = uint32(inUcast)
+	entry.InNonUcastPkts = uint32(stats.Multicast)
+	entry.InErrors = uint32(stats.RxErrors)
+	entry.InDiscards = uint32(stats.RxDropped)
+	entry.InUnknownProtos = 0
 
 	// OUT unicast: rtnl_link_stats exposes no TX multicast/broadcast
 	// breakdown, so an exact TX unicast count is unavailable. TxPackets is
@@ -470,6 +656,10 @@ func deriveIfCounters(entry *snmp.IfData, stats *netlink.LinkStatistics) {
 	// is a documented approximation, not a relabelled total for a counter we
 	// could otherwise split.
 	entry.HCOutUcastPkts = stats.TxPackets
+	entry.OutUcastPkts = uint32(stats.TxPackets)
+	entry.OutNonUcastPkts = 0
+	entry.OutErrors = uint32(stats.TxErrors)
+	entry.OutDiscards = uint32(stats.TxDropped)
 
 	// ifInMulticastPkts is the only non-unicast class Linux exposes. The
 	// broadcast columns and the TX class columns stay 0 because
@@ -619,6 +809,13 @@ func (d *Daemon) startSNMPLocked(cfg *config.Config) error {
 		slog.Warn("SNMP management VRF is not configured; serving from main routing table")
 	}
 	agent.SetVRFDevice(vrfDevice)
+	// #15232 A48-04: install the reth source so buildSNMPIfData can
+	// synthesize bondless reth rows from this daemon's active config.
+	snmpRethSourceMu.Lock()
+	snmpRethSource = func() ([]snmpRethInfo, []snmp.IfData) {
+		return d.daemonSNMPRethInfos(), nil
+	}
+	snmpRethSourceMu.Unlock()
 	agent.SetIfDataFn(buildSNMPIfData)
 
 	// The serve seam binds UDP/161 and then serves for the lifetime of ctx. It
