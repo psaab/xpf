@@ -288,8 +288,7 @@ pub(super) fn evaluate_non_pbr_input_filter(
     // TX-selection walk meters the whole term list once.
     let routing_policer_drop = if meter == crate::filter::InputPolicerMeter::Inline
         && !result.policer_drop
-        && let Some(_from_term) = result.deferred_at_routing_term
-        && let Some(from_term) = Some(0usize)
+        && let Some(from_term) = result.deferred_at_routing_term
     {
         let filter = if is_v6 {
             forwarding
