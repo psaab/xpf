@@ -148,7 +148,13 @@ func NewLocalLogWriter(cfg LocalLogConfig) (*LocalLogWriter, error) {
 	}
 	// #9025: started last, once the handle and size are set, so the writer
 	// goroutine can never observe a half-built writer.
-	lw.async = newAsyncAuditWriter(func(it auditItem) { _ = lw.Send(it.severity, it.line) })
+	lw.async = newAsyncAuditWriter(func(it auditItem) {
+		if it.binary != nil {
+			_ = lw.SendBinary(it.binary)
+			return
+		}
+		_ = lw.Send(it.severity, it.line)
+	})
 	return lw, nil
 }
 
@@ -309,6 +315,31 @@ func (lw *LocalLogWriter) SendFromEventReader(severity int, msg string) bool {
 		// safe against the writer goroutine's under-mu warns.
 		lw.warnRateLimited(&lw.lastDropWarn,
 			"local security-log write dropped: writer queue full or retired", errFileUnavailable)
+		return false
+	}
+	return true
+}
+
+// SendBinaryFromEventReader is the #14999 binary counterpart of
+// SendFromEventReader. logEvent's binary local-log branch previously called
+// the synchronous SendBinary directly on the EventStream reader goroutine,
+// so its file.Write plus inline rotate() (generation renames, directory
+// fsync, reopen) parked HA session sync behind disk distress — the exact
+// stall #9025 removed for the text branch (D40-05). The record is copied so
+// the queue owns immutable bytes (the caller in logEvent formats per event
+// and may reuse its buffer), then handed to the same bounded queue; the
+// writer goroutine re-enters SendBinary, preserving rotation and #3478
+// failure accounting under lw.mu. Direct SendBinary callers keep the
+// synchronous contract. False means dropped (queue full or retired) and
+// counted, mirroring SendFromEventReader.
+func (lw *LocalLogWriter) SendBinaryFromEventReader(data []byte) bool {
+	if lw.async == nil {
+		return lw.SendBinary(data) == nil
+	}
+	if !lw.async.enqueue(auditItem{binary: append([]byte(nil), data...)}) {
+		lw.droppedWrites.Add(1)
+		lw.warnRateLimited(&lw.lastDropWarn,
+			"local security-log binary write dropped: writer queue full or retired", errFileUnavailable)
 		return false
 	}
 	return true

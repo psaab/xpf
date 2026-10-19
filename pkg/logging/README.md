@@ -272,15 +272,16 @@ See `docs/feature-gaps.md`.
 `SyslogClient.Send` / `SendBinary` retain their synchronous contract for direct
 callers. The shared EventStream reader uses `SendFromEventReader` /
 `SendBinaryFromEventReader`, which hand each formatted record to a dedicated
-per-client writer goroutine. Firewall-event slog records emitted by that reader
+per-client writer goroutine. For local event-mode writers the same split
+applies (#14999/D40-05): `LocalLogWriter.Send` / `SendBinary` stay synchronous
+for direct callers, while `logEvent` uses `SendFromEventReader` /
+`SendBinaryFromEventReader` so neither text formatting nor binary
+`file.Write`+`rotate()` (generation renames, directory fsync, reopen) runs on
+the reader goroutine that also carries HA session sync. Binary records are
+copied into the bounded `asyncAuditWriter` queue (4096 per writer); overflow
+or a retired writer drops and counts via `DroppedWrites()`. Firewall-event slog records emitted by that reader
 carry an internal context marker so `SyslogSlogHandler` uses the same queue;
 ordinary slog callers keep synchronous forwarding. Each queue is bounded to 128
-records; an enqueue never waits for the network, and overflow is counted by
-`DroppedWrites()`. Dropped EventReader records are intentionally not warned
-inline: `slog` can forward back through syslog and would put a blocking path on
-the reader again. The async writer preserves FIFO order within each client,
-while EventStream continues applying HA session deltas and telemetry
-independently of a stalled collector.
 
 **Write deadlines still apply to the writer and direct callers (#9025).** They
 apply to UDP too — a connected-UDP `Write` can block indefinitely on a full
