@@ -155,6 +155,13 @@ fn forwarding_with_engine(resp: WgEngine) -> (ForwardingState, u16) {
 #[test]
 fn mapped_ipv6_wg_underlay_candidate_stays_outside_inner_ingress_gate_10686() {
     let mut snapshot = wg_outer_mtu_snapshot();
+    // #14957: this cell's listener is the dual-stack WILDCARD (unspecified
+    // source): its native-v6 destination 2001:db8::1 is owned in the
+    // arrival zone, which is exactly the zone binding for a wildcard
+    // listener. A SPECIFIC v4-bound listener claiming a native-v6 dst is
+    // rejected by cross_family_native_v6_binds_wildcard_not_specific_v4_14957,
+    // and a mapped destination by cross_family_mapped_v6_wg_decap_rejected_14957.
+    snapshot.tunnel_endpoints[0].source = String::new();
     snapshot.interfaces[0]
         .addresses
         .push(crate::InterfaceAddressSnapshot {
@@ -191,8 +198,10 @@ fn mapped_ipv6_wg_underlay_candidate_stays_outside_inner_ingress_gate_10686() {
             .get(&1)
             .expect("WG endpoint")
             .source,
-        std::net::IpAddr::V4(local_v4)
+        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        "#14957: fixture listener is the unspecified dual-stack wildcard"
     );
+    let _ = local_v4;
     assert_eq!(
         forwarding.wg_local_address_zone_v4.get(&local_v4),
         Some(&crate::test_zone_ids::TEST_WAN_ZONE_ID)
@@ -234,6 +243,10 @@ fn mapped_ipv6_wg_underlay_candidate_stays_outside_inner_ingress_gate_10686() {
         ingress_vlan_id: 80,
         ..UserspaceDpMeta::default()
     };
+    // #14957: the underlay candidate's destination is the NATIVE v6
+    // address 2001:db8::1 (not a mapped form); the mapped form appears
+    // only as the peer SOURCE below. A mapped DESTINATION is rejected
+    // outright by cross_family_mapped_v6_wg_decap_rejected_14957.
     assert!(
         super::decap::is_wg_underlay_frame(&frame, meta, &forwarding),
         "the local WG listen-port datagram is underlay transport, not the \
@@ -3988,5 +4001,252 @@ fn worker_decap_input_filter_denied_keepalive_and_malformed_do_not_roam_13663() 
     assert!(rejected2, "#13663: denied malformed-inner must set input_filter_rejected");
     assert_eq!(decap_outcomes_observed(&engine2), 0, "#13663: denied malformed-inner must not reach decap");
     assert_eq!(engine2.take_worker_observed_endpoint(&init2_pub), None, "#13663: denied malformed-inner must not roam");
+}
+
+// ---------------------------------------------------------------------------
+// #14957 (D26-01): cross-family WireGuard decap must be bound to the zone
+// listener, and a mapped-v6 destination must not bypass the #10686 filter.
+//
+// The WG socket is dual-stack ([::]:port, #10686), so a v4 peer's records
+// arrive on a native v4 frame (AF_INET dst = the v4 listener address) or,
+// via the kernel socket path, are reported mapped. On the AF_XDP wire a
+// v4-bound listener NEVER legitimately receives a native IPv6 frame whose
+// destination is ::ffff:<v4-listener>: that wire form is exactly the
+// mapped-v6 identity #10686 drops at ingress. Pre-fix, the cross-family
+// short-circuit in wg_outer_zone_matches / wg_endpoint_for_listen_port
+// admitted it on the v6 destination's owner zone alone (skipping the v4
+// source-zone check), and is_wg_underlay_frame then exempted it from the
+// mapped-v6 drop — so an attacker in a DIFFERENT zone (or a zone where the
+// mapped address is locally owned but the v4 listener is not) could hijack
+// the peer endpoint (post-AEAD roam) and decap through a listener that does
+// not belong to the arrival zone.
+// ---------------------------------------------------------------------------
+
+/// Snapshot: v4 WG listener 172.16.80.8 on reth0.80 (WAN), plus a native
+/// v6 address ::ffff:172.16.80.8 configured on the LAN interface (reth1.0)
+/// so the mapped destination is locally owned in LAN while the v4 listener
+/// is owned in WAN. Ingress ifindex 24 (LAN) / 12 (WAN).
+fn cross_family_snapshot_14957() -> crate::ConfigSnapshot {
+    let mut snap = wg_outer_mtu_snapshot();
+    snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot {
+        family: "inet6".to_string(),
+        address: "2001:db8::1/64".to_string(),
+        scope: 0,
+    });
+    add_lan_ingress(&mut snap);
+    // LAN owns the mapped form of the WAN v4 listener address.
+    snap.interfaces
+        .iter_mut()
+        .find(|i| i.ifindex == 24)
+        .expect("lan iface")
+        .addresses
+        .push(crate::InterfaceAddressSnapshot {
+            family: "inet6".to_string(),
+            address: "::ffff:172.16.80.8/128".to_string(),
+            scope: 0,
+        });
+    snap
+}
+
+#[test]
+fn cross_family_mapped_v6_wg_decap_rejected_14957() {
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, init_pub, rpub) = established_pair(allowed.clone(), allowed);
+    let mut forwarding = build_forwarding_state(&cross_family_snapshot_14957());
+    let id = *forwarding.wg_engines.keys().next().expect("wg tunnel");
+    forwarding.wg_engines.insert(id, std::sync::Arc::new(resp));
+    let engine = std::sync::Arc::clone(&forwarding.wg_engines[&id]);
+    // Preconditions: v4 listener owned in WAN, mapped v6 form owned in LAN,
+    // native v6 WAN address also present (control leg below).
+    assert_eq!(
+        forwarding.wg_local_address_zone_v4.get(&std::net::Ipv4Addr::new(172, 16, 80, 8)),
+        Some(&crate::test_zone_ids::TEST_WAN_ZONE_ID),
+        "fixture: v4 listener owner is WAN"
+    );
+    let mapped: std::net::Ipv6Addr = "::ffff:172.16.80.8".parse().unwrap();
+    assert_eq!(
+        forwarding.wg_local_address_zone_v6.get(&mapped),
+        Some(&crate::test_zone_ids::TEST_LAN_ZONE_ID),
+        "fixture: mapped destination owner is LAN (different zone than the v4 listener)"
+    );
+    assert!(forwarding.owns_configured_ip(std::net::IpAddr::V6(mapped)));
+    let inner = inner_v4([10, 123, 0, 5], [10, 0, 61, 102]);
+    let mut wire = vec![0u8; 2048];
+    let enc = init.try_encap(&rpub, &inner, &mut wire).expect("initiator encap");
+    let scratch = WgWorkerScratch::new(4096);
+    let peer_v6: std::net::Ipv6Addr = "::ffff:203.0.113.7".parse().unwrap();
+
+    // (a) Mapped-v6 destination on LAN ingress: must not be WG underlay,
+    // must not decap, must not roam the peer endpoint, no AEAD consumed.
+    let before = decap_outcomes_observed(&engine);
+    let frame_lan = outer_frame_v6(&wire[..enc.len], WG_PORT, peer_v6, mapped);
+    let mut meta_lan = outer_meta_v6(frame_lan.len());
+    meta_lan.ingress_ifindex = 24;
+    meta_lan.ingress_vlan_id = 0;
+    assert!(
+        !super::decap::is_wg_underlay_frame(&frame_lan, meta_lan, &forwarding),
+        "#14957: mapped-v6 dst in a foreign zone must not be exempted as WG underlay (mapped-v6 filter bypass)"
+    );
+    assert!(
+        !super::decap::is_wg_listener_tuple(
+            WG_PORT,
+            std::net::IpAddr::V6(mapped),
+            meta_lan,
+            &forwarding
+        ),
+        "#14957: mapped-v6 listener tuple in a foreign zone must not be claimed"
+    );
+    assert!(
+        super::decap::try_wg_decap_from_frame(&frame_lan, meta_lan, &forwarding, &scratch).is_none(),
+        "#14957: cross-family record arriving in LAN must not decap via the WAN v4 listener"
+    );
+    assert_eq!(decap_outcomes_observed(&engine), before, "#14957: rejection must precede AEAD");
+    assert_eq!(
+        engine.take_worker_observed_endpoint(&init_pub),
+        None,
+        "#14957: rejected cross-family record must not hijack/roam the peer endpoint"
+    );
+
+    // (b) Same mapped-v6 destination on WAN ingress (the destination's own
+    // zone, but still not the v4 listener's wire form): also rejected —
+    // a v4-bound listener decaps native v4 frames, not mapped-v6 wire frames.
+    let frame_wan = outer_frame_v6(&wire[..enc.len], WG_PORT, peer_v6, mapped);
+    let meta_wan = outer_meta_v6(frame_wan.len());
+    assert!(
+        !super::decap::is_wg_underlay_frame(&frame_wan, meta_wan, &forwarding),
+        "#14957: mapped-v6 wire destination must never be WG underlay for a v4-bound listener"
+    );
+    assert!(
+        super::decap::try_wg_decap_from_frame(&frame_wan, meta_wan, &forwarding, &scratch).is_none(),
+        "#14957: mapped-v6 wire record must not decap via the v4 listener even in the mapped dst zone"
+    );
+    assert_eq!(decap_outcomes_observed(&engine), before, "#14957: WAN mapped rejection must precede AEAD");
+    assert_eq!(engine.take_worker_observed_endpoint(&init_pub), None);
+
+    // (c) Control: the SAME authenticated record on its native v4 wire form
+    // in the listener's WAN zone still decaps (legitimate dual-stack peer).
+    let frame_v4 = outer_frame(&wire[..enc.len], WG_PORT);
+    let decapped = super::decap::try_wg_decap_from_frame(
+        &frame_v4,
+        outer_meta(frame_v4.len()),
+        &forwarding,
+        &scratch,
+    )
+    .expect("#14957: native v4 record in the listener zone must still decap (control)");
+    assert_eq!(&decapped.frame[14..], &inner[..]);
+    assert_eq!(decapped.meta.ingress_zone, TEST_SFMIX_ZONE_ID);
+}
+
+#[test]
+fn cross_family_v6_listener_mapped_dst_rejected_v4_control_14957() {
+    // Mirror leg: a v6-bound listener must not decap a mapped-v6 wire frame
+    // either (mapped is not a native v6 endpoint identity), while its native
+    // v6 form in-zone still decaps.
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, _ipub, rpub) = established_pair(allowed.clone(), allowed);
+    let local_v6: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let peer_v6: std::net::Ipv6Addr = "2001:db8::7".parse().unwrap();
+    let mut snapshot = wg_outer_mtu_snapshot();
+    snapshot.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot {
+        family: "inet6".to_string(),
+        address: "2001:db8::1/64".to_string(),
+        scope: 0,
+    });
+    snapshot.tunnel_endpoints[0].source = local_v6.to_string();
+    snapshot.tunnel_endpoints[0].outer_family = "inet6".to_string();
+    snapshot.tunnel_endpoints[0].transport_table = "inet6.0".to_string();
+    let mut forwarding = build_forwarding_state(&snapshot);
+    let id = *forwarding.wg_engines.keys().next().expect("wg tunnel");
+    forwarding.wg_engines.insert(id, std::sync::Arc::new(resp));
+    let inner = inner_v4([10, 123, 0, 5], [203, 0, 113, 50]);
+    let mut wire = vec![0u8; 2048];
+    let enc = init.try_encap(&rpub, &inner, &mut wire).expect("initiator encap");
+    let scratch = WgWorkerScratch::new(4096);
+    // Mapped destination naming the v4 listener address space must not claim
+    // the v6 listener.
+    let mapped: std::net::Ipv6Addr = "::ffff:172.16.80.8".parse().unwrap();
+    let frame_mapped = outer_frame_v6(&wire[..enc.len], WG_PORT, peer_v6, mapped);
+    let meta_mapped = outer_meta_v6(frame_mapped.len());
+    assert!(
+        super::decap::try_wg_decap_from_frame(&frame_mapped, meta_mapped, &forwarding, &scratch).is_none(),
+        "#14957: mapped-v6 wire record must not decap via any listener"
+    );
+    // Control: native v6 destination in-zone decaps.
+    let frame_v6 = outer_frame_v6(&wire[..enc.len], WG_PORT, peer_v6, local_v6);
+    let decapped = super::decap::try_wg_decap_from_frame(
+        &frame_v6,
+        outer_meta_v6(frame_v6.len()),
+        &forwarding,
+        &scratch,
+    )
+    .expect("#14957: native v6 record in the listener zone must still decap (control)");
+    assert_eq!(&decapped.frame[14..], &inner[..]);
+}
+
+#[test]
+fn cross_family_native_v6_binds_wildcard_not_specific_v4_14957() {
+    // A native (non-mapped) v6 destination owned in WAN must not claim a
+    // SPECIFIC v4-bound listener (pre-fix admitted on the v6 dst zone
+    // alone); an UNSPECIFIED (dual-stack wildcard) listener for that same
+    // v6 destination in its owner zone still decaps, presenting its own
+    // logical ifindex.
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (_init1, resp1, _p1, _r1) = established_pair(allowed.clone(), allowed.clone());
+    let (init2, resp2, _p2, rpub2) = established_pair(allowed.clone(), allowed);
+    let mut snapshot = wg_outer_mtu_snapshot();
+    snapshot.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot {
+        family: "inet6".to_string(),
+        address: "2001:db8::1/64".to_string(),
+        scope: 0,
+    });
+    let mut ep2 = snapshot.tunnel_endpoints[0].clone();
+    ep2.id = 2;
+    ep2.interface = "wg1.0".to_string();
+    ep2.linux_name = "wg1".to_string();
+    ep2.ifindex = 401;
+    ep2.source = String::new();
+    snapshot.tunnel_endpoints.push(ep2);
+    snapshot.interfaces.push(crate::InterfaceSnapshot {
+        name: "wg1.0".to_string(),
+        zone: "sfmix".to_string(),
+        linux_name: "wg1".to_string(),
+        ifindex: 401,
+        mtu: 1420,
+        redundancy_group: 1,
+        tunnel: true,
+        addresses: vec![crate::InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "10.124.0.1/24".to_string(),
+            scope: 0,
+        }],
+        ..Default::default()
+    });
+    let mut forwarding = build_forwarding_state(&snapshot);
+    forwarding.wg_engines.insert(1, std::sync::Arc::new(resp1));
+    forwarding.wg_engines.insert(2, std::sync::Arc::new(resp2));
+    assert_eq!(
+        forwarding.tunnel_endpoints.get(&2).expect("wildcard ep").source,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        "fixture: empty source parses to the unspecified wildcard"
+    );
+    let local_v6: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let peer_v6: std::net::Ipv6Addr = "2001:db8::7".parse().unwrap();
+    let scratch = WgWorkerScratch::new(4096);
+    let inner = inner_v4([10, 123, 0, 5], [10, 0, 61, 102]);
+    let mut wire2 = vec![0u8; 2048];
+    let enc2 = init2.try_encap(&rpub2, &inner, &mut wire2).expect("encap wildcard peer");
+    let frame_wild = outer_frame_v6(&wire2[..enc2.len], WG_PORT, peer_v6, local_v6);
+    let decapped = super::decap::try_wg_decap_from_frame(
+        &frame_wild,
+        outer_meta_v6(frame_wild.len()),
+        &forwarding,
+        &scratch,
+    )
+    .expect("#14957: wildcard dual-stack listener must decap native v6 in its dst owner zone");
+    assert_eq!(
+        decapped.meta.ingress_ifindex as i32, 401,
+        "#14957: native v6 record must bind to the wildcard listener, not the specific v4 listener (400)"
+    );
+    assert_eq!(&decapped.frame[14..], &inner[..]);
 }
 
