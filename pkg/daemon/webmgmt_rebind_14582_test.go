@@ -328,10 +328,12 @@ func TestWebMgmtPostNetworkdReconcileResolvesInSameApply14582(t *testing.T) {
 		t.Fatalf("the second web-management reconcile (offset %d) does not follow "+
 			"applyDataplaneAndHACore (offset %d) (#14582)", late, dataplane)
 	}
-	// The DHCP fast path must also carry the rebind.
+	// The DHCP fast path must also carry the rebind (#14976: via the
+	// applySem-held management-only refresh, which gates on the fresh
+	// snapshot — the pre-#14976 spelling passed the pre-wait activeCfg).
 	dhcpSrc := stripLineComments6791(readDaemonSource(t, "daemon_dhcp.go"))
-	if !strings.Contains(dhcpSrc, "d.rebindWebMgmtForLeaseChange(activeCfg)") {
-		t.Fatal("onDHCPAddressChange's management-only branch does not re-resolve " +
+	if !strings.Contains(dhcpSrc, "d.rebindWebMgmtLocked(cfg)") {
+		t.Fatal("managementOnlyLeaseRefresh does not re-resolve " +
 			"the web-management bind (#14582 DHCP sibling)")
 	}
 }

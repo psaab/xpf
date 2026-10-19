@@ -71,6 +71,15 @@ func buildDHCPClientSpecs(cfg *config.Config) []dhcp.ClientSpec {
 	return specs
 }
 
+// mgmtRouteRefreshFn is the management-VRF route reconcile driven on the
+// management-only lease-refresh path under applySem (#14976). A package var
+// (like mgmtVRFRouteReconcileFn / webMgmtRebindApply) so a test can observe
+// WHETHER the serialized refresh drove the route reconcile without opening
+// netlink. Production code must never mutate it.
+var mgmtRouteRefreshFn = func(d *Daemon) error {
+	return d.applyMgmtVRFRoutes()
+}
+
 // onDHCPAddressChange is the (debounced) lease-change callback for the
 // DHCP manager. It re-enters applyConfig, which is why the client
 // reconcile must key on config identity only — see reconcileDHCPClients.
@@ -108,37 +117,12 @@ func (d *Daemon) onDHCPAddressChange() {
 			}
 			d.applyActiveConfig()
 		} else {
-			// #5867: no commit to fail on this DHCP-callback path (it is a
-			// lease-change refresh, not a config commit). #11450 latches a
-			// failure into management-route debt for the 30s retry owner.
-			if err := d.applyMgmtVRFRoutes(); err != nil {
-				d.noteMgmtRouteReconcileResult(err)
-				slog.Warn("mgmt VRF routes: refresh on DHCP lease change had errors", "err", err)
-			} else {
-				d.noteMgmtRouteReconcileResult(nil)
-			}
-			// #1715 (fw0 class): a management-only interface (e.g.
-			// fxp0 DHCPv4) takes this branch and does NOT recompile,
-			// so DNS would never reconcile without this call. Route
-			// the DHCP-learned DNS through the locked reconciler so
-			// the box always picks up DHCP nameservers, not just on
-			// dataplane-relevant interfaces.
-			d.reconcileDNSFromDHCP()
-			// #2884: the full recompile is skipped on this branch, so an
-			// IPsec gateway that binds local_addrs to a management-only
-			// DHCP interface would otherwise keep the stale lease address
-			// after a renew. The dataplane-facing branch above already
-			// re-renders IPsec via applyConfig (step 6); this closes the
-			// management-only gap so swanctl re-binds to the new IP.
-			d.reapplyIPsecForLeaseChange(activeCfg)
-			// #14582: same management-only gap for web-management. A lifeline
-			// (e.g. fxp0) lease change to a new address does not recompile, so
-			// a `web-management https interface fxp0` leg would otherwise keep
-			// the stale lease address (or the loopback fallback) until a later
-			// commit. Re-resolve the bind from the active config; the seam
-			// gates on the bound interface actually being DHCP-managed so an
-			// unrelated renew never churns the listener.
-			d.rebindWebMgmtForLeaseChange(activeCfg)
+			// #14976: managementOnlyLeaseRefresh holds applySem across
+			// the management-route reconcile and the gated IPsec /
+			// web-management rebinds, reading the fresh active config
+			// AFTER acquiring it (#6716 discipline).
+			d.managementOnlyLeaseRefresh()
+
 		}
 	}
 }
@@ -151,6 +135,65 @@ func (d *Daemon) onDHCPUnchangedLease() {
 	if d.hostInboundGapOwed() {
 		d.applyActiveConfig()
 	}
+}
+
+// managementOnlyLeaseRefresh drives the management-only lease-change work
+// that does not need a full recompile (#14976): the management-VRF route
+// reconcile, the DNS reconcile, and the gated IPsec / web-management
+// rebinds. It holds ONE applySem acquisition across the route reconcile,
+// the fresh-snapshot re-read, and both gated rebinds, so a commit landing
+// while this path waits is never reverted by a pre-wait snapshot: the
+// rebind gates and applies see the config active AFTER acquiring, not the
+// one onDHCPAddressChange read to choose the branch. Pre-fix the route
+// reconcile ran with no semaphore and both rebinds received the pre-wait
+// snapshot (their own per-call acquisitions did not help — the gate was
+// already fixed by then). DNS keeps its own acquisition in
+// reconcileDNSFromDHCP (nested semaphore takes deadlock), so it runs
+// after this hold is released; DNS merges the live lease set rather than
+// the gated-rebind snapshot, so the ordering is immaterial there.
+// Callers MUST hold no applySem.
+func (d *Daemon) managementOnlyLeaseRefresh() {
+	if d.applySem == nil {
+		return
+	}
+	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+		slog.Warn("mgmt VRF routes: failed to acquire apply lock for DHCP lease refresh", "err", err)
+		return
+	}
+	func() {
+		defer d.applySem.Release(1)
+		// #5867: no commit to fail on this DHCP-callback path (it is a
+		// lease-change refresh, not a config commit). #11450 latches a
+		// failure into management-route debt for the 30s retry owner.
+		if err := mgmtRouteRefreshFn(d); err != nil {
+			d.noteMgmtRouteReconcileResult(err)
+			slog.Warn("mgmt VRF routes: refresh on DHCP lease change had errors", "err", err)
+		} else {
+			d.noteMgmtRouteReconcileResult(nil)
+		}
+		if d.store == nil {
+			return
+		}
+		cfg := d.store.ActiveConfig()
+		if cfg == nil {
+			return
+		}
+		d.reapplyIPsecLocked(cfg)
+		// #14582: same management-only gap for web-management. A
+		// lifeline (e.g. fxp0) lease change to a new address does not
+		// recompile, so a `web-management https interface fxp0` leg
+		// would otherwise keep the stale lease address (or the
+		// loopback fallback) until a later commit.
+		d.rebindWebMgmtLocked(cfg)
+	}()
+	// #1715 (fw0 class): a management-only interface (e.g. fxp0 DHCPv4)
+	// takes this branch and does NOT recompile, so DNS would never
+	// reconcile without this call. Route the DHCP-learned DNS through
+	// the locked reconciler so the box always picks up DHCP
+	// nameservers, not just on dataplane-relevant interfaces.
+	// reconcileDNSFromDHCP acquires applySem itself, so it runs outside
+	// the hold above (nested semaphore takes deadlock).
+	d.reconcileDNSFromDHCP()
 }
 
 // reapplyIPsecForLeaseChange re-renders + reloads swanctl when a DHCP
@@ -178,6 +221,9 @@ func (d *Daemon) reapplyIPsecForLeaseChange(cfg *config.Config) {
 	if d.ipsec == nil || cfg == nil {
 		return
 	}
+	// Pre-acquire gate (preserves the pre-#14976 contract for direct
+	// callers); the authoritative gate re-runs under the semaphore in
+	// reapplyIPsecLocked on the fresh snapshot.
 	if !ipsec.HasDHCPBoundGateway(cfg) {
 		return
 	}
@@ -186,6 +232,20 @@ func (d *Daemon) reapplyIPsecForLeaseChange(cfg *config.Config) {
 		return
 	}
 	defer d.applySem.Release(1)
+	d.reapplyIPsecLocked(cfg)
+}
+
+// reapplyIPsecLocked is the swanctl re-render under a HELD applySem
+// (#14976). The caller MUST hold applySem. The gate lives here (not in
+// the acquiring wrapper) so the management-only path's gate is evaluated
+// against the fresh snapshot read under the semaphore.
+func (d *Daemon) reapplyIPsecLocked(cfg *config.Config) {
+	if d.ipsec == nil || cfg == nil {
+		return
+	}
+	if !ipsec.HasDHCPBoundGateway(cfg) {
+		return
+	}
 	slog.Info("DHCP address changed on IPsec-bound interface, re-rendering swanctl local_addrs")
 	if err := d.ipsecApplyForLeaseChange(cfg); err != nil {
 		slog.Warn("failed to re-apply IPsec config after DHCP address change; "+
@@ -265,13 +325,14 @@ func interfaceRefHasDHCPUnit(cfg *config.Config, ref string) bool {
 // keeps the previous listener (fail-safe in reconcileTo) and the degraded
 // state keeps the 30s re-assert owner re-driving until it converges.
 func (d *Daemon) rebindWebMgmtForLeaseChange(cfg *config.Config) {
-	if cfg == nil || d.mgmt.Load() == nil {
-		return
-	}
-	if !webMgmtBindsToDHCPInterface(cfg) {
-		return
-	}
 	if d.applySem == nil {
+		return
+	}
+	// Pre-acquire gate: a config that binds no DHCP-managed interface is
+	// never re-driven (preserves the pre-#14976 contract for direct
+	// callers); the authoritative gate re-runs under the semaphore in
+	// rebindWebMgmtLocked on the fresh snapshot.
+	if !webMgmtBindsToDHCPInterface(cfg) {
 		return
 	}
 	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
@@ -288,6 +349,19 @@ func (d *Daemon) rebindWebMgmtForLeaseChange(cfg *config.Config) {
 		if active := d.store.ActiveConfig(); active != nil {
 			cfg = active
 		}
+	}
+	d.rebindWebMgmtLocked(cfg)
+}
+
+// rebindWebMgmtLocked re-resolves the web-management bind under a HELD
+// applySem (#14976). The caller MUST hold applySem. The gate lives here
+// so the management-only path evaluates it against the fresh snapshot.
+func (d *Daemon) rebindWebMgmtLocked(cfg *config.Config) {
+	if cfg == nil || d.mgmt.Load() == nil {
+		return
+	}
+	if !webMgmtBindsToDHCPInterface(cfg) {
+		return
 	}
 	slog.Info("DHCP address changed on web-management interface, re-resolving management bind")
 	if err := webMgmtRebindApply(d, cfg); err != nil {
