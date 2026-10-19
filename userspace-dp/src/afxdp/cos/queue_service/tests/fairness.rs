@@ -227,3 +227,136 @@ fn shared_exact_surplus_build_is_v_min_throttled() {
         "a passing V_min check resets the hard-cap accumulator",
     );
 }
+
+/// #15187 (C08-01): a shaped non-exact flow-fair queue with mixed
+/// Local/Prepared heads must not wedge when the capped min-finish
+/// selection disagrees with the uncapped head. Bucket A (Local,
+/// 500 B head, finish 500) is over the per-bucket cap; bucket B
+/// (Prepared, 1500 B) is under it. The capped peek therefore picks B
+/// while uncapped cos_queue_front picks A. Pre-fix the builder chose
+/// the Local arm from the uncapped head, its first capped peek returned
+/// the Prepared item, the arm-mismatch break left the Local scratch
+/// empty, and the build returned None with both items resident — every
+/// later pass repeated this, blackholing the whole class (including
+/// newcomers) until a CoS config change. The fix chooses the arm from
+/// the same capped peek the pop will use.
+///
+/// RED-on-revert: with the uncapped arm choice restored the build is
+/// None and both items stay resident.
+#[test]
+fn nonexact_mixed_local_prepared_capped_head_does_not_wedge() {
+    let mut root = test_cos_runtime_with_queues(
+        100_000_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 4,
+            forwarding_class: "best-effort".into(),
+            priority: 5,
+            transmit_rate_bytes: 125_000_000,
+            guarantee_enabled: true,
+            exact: false,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: 8 * 1024 * 1024,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+    );
+    let queue = &mut root.queues[0];
+    enable_test_flow_fair(queue);
+
+    let src_a: u16 = 9999;
+    let bucket_a = cos_flow_bucket_index(0, Some(&test_session_key(src_a, 5201)));
+    let mut src_b: u16 = 9000;
+    let bucket_b = loop {
+        let b = cos_flow_bucket_index(0, Some(&test_session_key(src_b, 5201)));
+        if b != bucket_a { break b; }
+        src_b += 1;
+    };
+
+    cos_queue_push_back(queue, test_flow_cos_item(src_a, 500));
+    cos_queue_push_back(queue, test_flow_prepared_cos_item(src_b, 1500, 0));
+    assert_eq!(test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_a], 500);
+    assert_eq!(test_flow_fair_state(queue).flow_bucket_head_finish_bytes[bucket_b], 1500);
+
+    {
+        let ff = test_flow_fair_state_mut(queue);
+        ff.flow_bucket_observed_bps[bucket_a] = 1_000_000_000;
+        ff.flow_bucket_observed_bps[bucket_b] = 0;
+    }
+
+    let mut local_scratch = VecDeque::new();
+    let mut prepared_scratch = VecDeque::new();
+    let batch = build_cos_batch_from_queue(
+        &mut root.queues[0], 0, u64::MAX, u64::MAX, CoSServicePhase::Guarantee,
+        &mut local_scratch, &mut prepared_scratch,
+    ).expect("#15187: capped mixed queue must deliver the under-cap Prepared item on the first pass, not wedge");
+    match batch {
+        CoSBatch::Prepared { items, batch_bytes, .. } => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(batch_bytes, 1500);
+            assert_eq!(items[0].flow_key.as_ref().expect("flow key").src_port, src_b);
+        }
+        CoSBatch::Local { .. } => panic!("#15187: capped selection picks the Prepared bucket, so the batch must be Prepared"),
+    }
+}
+
+/// #15187 (C08-01) mirror: under-cap Local head behind an over-cap
+/// Prepared lower-finish head must deliver as Local, not wedge in the
+/// Prepared arm.
+#[test]
+fn nonexact_mixed_prepared_local_capped_head_does_not_wedge() {
+    let mut root = test_cos_runtime_with_queues(
+        100_000_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 4,
+            forwarding_class: "best-effort".into(),
+            priority: 5,
+            transmit_rate_bytes: 125_000_000,
+            guarantee_enabled: true,
+            exact: false,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: 8 * 1024 * 1024,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+    );
+    let queue = &mut root.queues[0];
+    enable_test_flow_fair(queue);
+
+    let src_a: u16 = 9999;
+    let bucket_a = cos_flow_bucket_index(0, Some(&test_session_key(src_a, 5201)));
+    let mut src_b: u16 = 9000;
+    let bucket_b = loop {
+        let b = cos_flow_bucket_index(0, Some(&test_session_key(src_b, 5201)));
+        if b != bucket_a { break b; }
+        src_b += 1;
+    };
+
+    cos_queue_push_back(queue, test_flow_prepared_cos_item(src_a, 500, 0));
+    cos_queue_push_back(queue, test_flow_cos_item(src_b, 1500));
+    {
+        let ff = test_flow_fair_state_mut(queue);
+        ff.flow_bucket_observed_bps[bucket_a] = 1_000_000_000;
+        ff.flow_bucket_observed_bps[bucket_b] = 0;
+    }
+
+    let mut local_scratch = VecDeque::new();
+    let mut prepared_scratch = VecDeque::new();
+    let batch = build_cos_batch_from_queue(
+        &mut root.queues[0], 0, u64::MAX, u64::MAX, CoSServicePhase::Guarantee,
+        &mut local_scratch, &mut prepared_scratch,
+    ).expect("#15187 mirror: capped mixed queue must deliver the under-cap Local item on the first pass");
+    match batch {
+        CoSBatch::Local { items, batch_bytes, .. } => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(batch_bytes, 1500);
+            assert_eq!(items[0].flow_key.as_ref().expect("flow key").src_port, src_b);
+        }
+        CoSBatch::Prepared { .. } => panic!("#15187 mirror: capped selection picks the Local bucket, so the batch must be Local"),
+    }
+}
