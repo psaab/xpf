@@ -288,3 +288,113 @@ fn vmin_publish_after_settle_keeps_vacated_slot_empty() {
         "publish with active buckets must broadcast queue_vtime",
     );
 }
+
+fn b14_exact_queue() -> CoSQueueConfig {
+    CoSQueueConfig {
+        queue_id: 0,
+        forwarding_class: "iperf-c".into(),
+        priority: 5,
+        transmit_rate_bytes: 10_000_000_000 / 8,
+        guarantee_enabled: true,
+        exact: true,
+        surplus_sharing: false,
+        equal_flow_enforcement: false,
+        equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+        surplus_weight: 1,
+        buffer_bytes: 4 * 1024 * 1024,
+        dscp_rewrite: None,
+        codel_target_ns: 0,
+    }
+}
+
+/// #15154 (B14-01): a worker that vacated (last bucket drained) and then
+/// re-enters must reseed its frozen `queue_vtime` to the peer frontier
+/// BEFORE the bucket anchor is computed. Without the reseed the re-entrant
+/// keeps its stale-low vtime, and its first post-settle publish becomes
+/// the cross-worker V_min, trapping busy peers in the throttle duty cycle.
+///
+/// RED pre-fix: re-entrant `queue_vtime` stays at the frozen value, not
+/// `FRONTIER`, and the survivor gate throttles.
+#[test]
+fn v42_b14_vacate_reentry_traps_survivor() {
+    const FRONTIER: u64 = 100 * 1024 * 1024 * 1024;
+    const FROZEN: u64 = 42_424;
+    let floor = Arc::new(SharedCoSQueueVtimeFloor::new(2));
+    floor.slots[0].publish(FRONTIER);
+    let mut root = test_cos_runtime_with_queues(10_000_000_000 / 8, vec![b14_exact_queue()]);
+    let queue = &mut root.queues[0];
+    queue.v_min.vtime_floor = Some(Arc::clone(&floor));
+    queue.v_min.worker_id = 1;
+    queue.config.shared_exact = true;
+    enable_test_flow_fair(queue);
+    assert!(queue.shared_exact());
+    assert!(
+        floor.slots[1].read().is_none(),
+        "vacated slot must be NOT_PARTICIPATING"
+    );
+    test_flow_fair_state_mut(queue).queue_vtime = FROZEN;
+    assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 0);
+    account_cos_queue_flow_enqueue(queue, Some(&test_session_key(1234, 5201)), 1500);
+    assert_eq!(
+        test_flow_fair_state(queue).queue_vtime,
+        FRONTIER,
+        "B14-01: re-entry after vacate must reseed queue_vtime to the peer frontier",
+    );
+    assert!(
+        floor.slots[1].read().is_none(),
+        "re-entry reseed must not publish on enqueue",
+    );
+    publish_committed_queue_vtime(Some(&*queue));
+    assert_eq!(floor.slots[1].read(), Some(FRONTIER));
+    let mut survivor = test_cos_runtime_with_queues(10_000_000_000 / 8, vec![b14_exact_queue()]);
+    {
+        let q = &mut survivor.queues[0];
+        enable_test_flow_fair(q);
+        q.v_min.vtime_floor = Some(Arc::clone(&floor));
+        q.v_min.worker_id = 0;
+        q.config.shared_exact = true;
+        test_flow_fair_state_mut(q).queue_vtime = FRONTIER;
+    }
+    assert!(
+        cos_queue_v_min_continue(&mut survivor.queues[0], 1),
+        "B14-01: busy survivor must not be trapped by a vacate re-entrant",
+    );
+    assert_eq!(survivor.queues[0].v_min.v_min_throttles_scratch, 0);
+}
+
+/// #15154 (B14-01) control: a re-entrant already ahead of every peer
+/// (`queue_vtime > frontier`) must keep its own vtime (max semantics),
+/// and a re-entry with no participating peer keeps the frozen value.
+#[test]
+fn v42_b14_vacate_reentry_max_and_no_peer_controls() {
+    const FRONTIER: u64 = 100 * 1024 * 1024 * 1024;
+    let floor = Arc::new(SharedCoSQueueVtimeFloor::new(2));
+    floor.slots[0].publish(FRONTIER);
+    let mut root = test_cos_runtime_with_queues(10_000_000_000 / 8, vec![b14_exact_queue()]);
+    let queue = &mut root.queues[0];
+    queue.v_min.vtime_floor = Some(Arc::clone(&floor));
+    queue.v_min.worker_id = 1;
+    queue.config.shared_exact = true;
+    enable_test_flow_fair(queue);
+    test_flow_fair_state_mut(queue).queue_vtime = FRONTIER + 777;
+    account_cos_queue_flow_enqueue(queue, Some(&test_session_key(1234, 5201)), 1500);
+    assert_eq!(
+        test_flow_fair_state(queue).queue_vtime,
+        FRONTIER + 777,
+        "reseed is a max: an ahead re-entrant must not be pulled down",
+    );
+    let cold_floor = Arc::new(SharedCoSQueueVtimeFloor::new(2));
+    let mut cold = test_cos_runtime_with_queues(10_000_000_000 / 8, vec![b14_exact_queue()]);
+    let cq = &mut cold.queues[0];
+    cq.v_min.vtime_floor = Some(Arc::clone(&cold_floor));
+    cq.v_min.worker_id = 1;
+    cq.config.shared_exact = true;
+    enable_test_flow_fair(cq);
+    test_flow_fair_state_mut(cq).queue_vtime = 42_424;
+    account_cos_queue_flow_enqueue(cq, Some(&test_session_key(1234, 5201)), 1500);
+    assert_eq!(
+        test_flow_fair_state(cq).queue_vtime,
+        42_424,
+        "no participating peer -> no reseed (cold / sole-worker re-entry)",
+    );
+}
