@@ -630,6 +630,10 @@ COMPARED	routing-instances <*> protocols rip neighbor
 COMPARED	routing-instances <*> protocols rip passive-interface
 COMPARED	routing-instances <*> protocols rip redistribute
 advisory (read, value ignored, warning says so)	routing-instances <*> route-distinguisher
+COMPARED	routing-instances <*> routing-options autonomous-system
+COMPARED	routing-instances <*> routing-options forwarding-table export
+flag (read, but value-less)	routing-instances <*> routing-options generate route <*> discard
+COMPARED	routing-instances <*> routing-options generate route <*> policy
 COMPARED	routing-instances <*> routing-options interface-routes rib-group inet
 COMPARED	routing-instances <*> routing-options interface-routes rib-group inet6
 unreachable (leaf changed nothing)	routing-instances <*> routing-options rib <*> static route <*> discard
@@ -642,6 +646,8 @@ unreachable (leaf changed nothing)	routing-instances <*> routing-options rib <*>
 unreachable (leaf changed nothing)	routing-instances <*> routing-options rib <*> static route <*> qualified-next-hop <*> preference
 unreachable (leaf changed nothing)	routing-instances <*> routing-options rib <*> static route <*> reject
 advisory (read, value ignored, warning says so)	routing-instances <*> routing-options rib <*> static route <*> rib-group
+unreachable (leaf changed nothing)	routing-instances <*> routing-options rib-groups <*> import-policy
+COMPARED	routing-instances <*> routing-options rib-groups <*> import-rib
 flag (read, but value-less)	routing-instances <*> routing-options static route <*> discard
 COMPARED	routing-instances <*> routing-options static route <*> next-hop <*> interface
 COMPARED	routing-instances <*> routing-options static route <*> next-table

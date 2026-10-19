@@ -1015,6 +1015,30 @@ var schemaRoutingInstanceProtocols = &schemaNode{desc: "Protocols configuration"
 	"isis":  schemaProtocols.children["isis"],
 }}
 
+// schemaRoutingInstanceRoutingOptions is the `routing-instances <name>
+// routing-options` grammar (#15065). Every carried subtree is the GLOBAL
+// node, SHARED BY POINTER — it is deliberately not a re-declaration. Before
+// this, the per-instance copy declared only static/rib/interface-routes, so
+// SetPath packed a flat-set `generate` / `forwarding-table` tail where no
+// compiler reads it (the #9351 mechanism, one hierarchy up): a VRF's
+// generated routes and FIB export policy vanished in the flat spelling and
+// on every display-set restore, on a clean commit. The member set is the
+// COMPILER's: exactly the routing-options children compileRoutingOptions
+// reads and compileRoutingInstances copies into RoutingInstanceConfig.
+// `router-id` is excluded — compileRoutingOptions reads it only when
+// instanceName is empty, and no per-instance slot carries it — so declaring
+// it would offer completion for a discarded keyword. TestRoutingInstance-
+// RoutingOptionsShareGlobalGrammar15065 binds both sides.
+var schemaRoutingInstanceRoutingOptions = &schemaNode{desc: "Routing options", children: map[string]*schemaNode{
+	"static":            schemaRoutingOptions.children["static"],
+	"rib":               schemaRoutingOptions.children["rib"],
+	"autonomous-system": schemaRoutingOptions.children["autonomous-system"],
+	"rib-groups":        schemaRoutingOptions.children["rib-groups"],
+	"interface-routes":  schemaRoutingOptions.children["interface-routes"],
+	"generate":          schemaRoutingOptions.children["generate"],
+	"forwarding-table":  schemaRoutingOptions.children["forwarding-table"],
+}}
+
 var schemaRoutingInstances = &schemaNode{desc: "Routing instance configuration", // #9323: the admissible children of `routing-instances <name>` are gated by
 	// validateRoutingInstanceChildTokensAST (compiler_routing_children_9323.go),
 	// NOT by `closedWorld: true` on this wildcard.
@@ -1104,22 +1128,24 @@ var schemaRoutingInstances = &schemaNode{desc: "Routing instance configuration",
 
 		"instance-type": {desc: "Routing instance type", args: 1, placeholder: "<type>", valueType: ValueEnumOf, valueDesc: "Routing instance type (forwarding | virtual-router | vrf)", valueExamples: []string{"forwarding", "virtual-router", "vrf"}, validator: ValidateRoutingInstanceType9814, children: nil},
 		"interface":     {desc: "Interfaces bound to this routing instance", args: 1, multi: true, placeholder: "<interface>", children: nil},
-		"routing-options": {desc: "Routing options", children: map[string]*schemaNode{
-			"static": {desc: "Static routes", children: map[string]*schemaNode{
-				"route": staticRouteNode(),
-			}},
-			"rib": {desc: "Routing information base", args: 1, placeholder: "<rib-name>", children: map[string]*schemaNode{
-				"static": {desc: "Static routes", children: map[string]*schemaNode{
-					"route": staticRouteNode(),
-				}},
-			}},
-			"interface-routes": {desc: "Interface routes", children: map[string]*schemaNode{
-				"rib-group": {desc: "RIB group", children: map[string]*schemaNode{
-					"inet":  {desc: "IPv4 RIB group", args: 1, placeholder: "<group-name>", children: nil},
-					"inet6": {desc: "IPv6 RIB group", args: 1, placeholder: "<group-name>", children: nil},
-				}},
-			}},
-		}},
+		// #15065: the per-instance routing-options grammar IS the global one
+		// for every field the compiler carries into the instance — the same
+		// compileRoutingOptions reads both, and compileRoutingInstances
+		// copies static/rib, autonomous-system, generate, rib-groups,
+		// forwarding-table and interface-routes out of the result. This node
+		// used to be a drifted subset (static/rib/interface-routes only), so
+		// SetPath packed a flat-set `generate`/`forwarding-table` tail where
+		// no compiler reads it: a VRF's generated routes and FIB export
+		// policy silently vanished in the flat spelling and on every
+		// display-set restore of a working hierarchical VRF. The braced
+		// spelling was unaffected, which is why #11782's hierarchical-only
+		// test stayed green. Sharing by pointer removes the class, as
+		// #9351 did for protocols above; `router-id` stays global-only
+		// because compileRoutingOptions reads it only when instanceName is
+		// empty and compileRoutingInstances carries no router-id slot, so
+		// declaring it here would offer a discarded keyword. TestRouting-
+		// InstanceRoutingOptionsShareGlobalGrammar15065 binds both sides.
+		"routing-options": schemaRoutingInstanceRoutingOptions,
 		// #9351: the per-instance protocol grammar IS the global one — the same
 		// compiler reads both. compileRoutingInstances' `case "protocols"` calls
 		// compileProtocols on this node and copies OSPF/OSPFv3/BGP/RIP/ISIS out of

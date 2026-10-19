@@ -410,7 +410,13 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // differential, moving it from flag to compared; tighten both ratchets.
 // #13538 moves the two deterministic source-pool validations from compiler-time
 // errors to uniform strict gates, so the spelling differential can compare them.
-const gateCoverageFloor = 791
+// #15065 tightens it 791 -> 792: the per-instance `routing-options` node now
+// shares the global subtree, so its newly enumerated leaves join the census and
+// one net-compared leaf arrives (`routing-options autonomous-system`/`forwarding-
+// table export`/`generate route policy`/`rib-groups import-rib` compare; the
+// `generate route discard` flag and `rib-groups import-policy` advisory/blind
+// rows are recorded in testdata/spelling_gate_members_7484.txt).
+const gateCoverageFloor = 792
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent
@@ -616,7 +622,12 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// rejection, so the differential can observe no difference between
 	// them. If OSPF ever gains a real `authentication-key`, these two
 	// must LEAVE this class and the ceiling must come back down by two.
-	gateBlindUnreachable: 135,
+	// #15065 raises this 135 -> 136, deliberately, for the newly enumerated
+	// `routing-instances <*> routing-options rib-groups <*> import-policy`:
+	// the per-instance schema now shares the global rib-groups subtree, whose
+	// import-policy is strict-rejected by design, so the differential observes
+	// no output change. Its global twin already sits in this/advisory class.
+	gateBlindUnreachable: 136,
 	// #8830: read, value deliberately ignored, advisory says so. Measured at
 	// this head: vrrp-group track-interface priority-cost (inet and inet6),
 	// security log stream transport tls-profile, system dataplane
@@ -740,7 +751,7 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// named in the members registry diff, not just counted.
 	// #10078's four modeled ALG `disable` leaves are value-less flags, raising
 	// the measured ceiling 239 -> 243; their kind roots leave `unreachable`.
-	gateBlindFlag: 194, // #12937: 194 -> 195; daily exclude moved here (#12822). #13112 moves zone tcp-rst out.
+	gateBlindFlag: 195, // #12937: 194 -> 195; daily exclude moved here (#12822). #13112 moves zone tcp-rst out. #15065: +1 for the newly shared per-instance `routing-options generate route <*> discard` (value-less flag, same class as its global twin).
 	// #9882 raises it 43 -> 44. The three-color twin,
 	// `firewall three-color-policer <*> then forwarding-class`, lands here
 	// because the differential's three-color parent stanza does not compile
