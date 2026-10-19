@@ -925,11 +925,57 @@ func (d *Daemon) refreshFabricFwd1(ctx context.Context, fabIface, overlay string
 			break
 		}
 	}
-	// fab1 has no link-local fallback leg — its only resolution is
-	// address-matched — but record the identity anyway so the two slots keep
-	// the same contract if a fallback is ever added here (#6554).
+	// An address-matched hit is a real identity binding: this MAC answered for
+	// the CONFIGURED peer address. Remember it so the link-local fallback below
+	// has a peer identity to check against on a later refresh (#6554).
 	if peerMAC != nil {
 		d.rememberFabricPeerMAC(1, peerMAC)
+	}
+
+	// Fallback: if overlay ARP failed, try the parent interface's neighbor
+	// tables (both IPv4 and IPv6). After crash recovery, the IPVLAN overlay
+	// may not resolve ARP due to stale MAC or VRF isolation, but the parent
+	// (ge-X-0-0) is a real NIC on the same L2 — its ARP/NDP is reliable.
+	// Mirrors refreshFabricFwd slot 0 (#15683).
+	if peerMAC == nil {
+		parentIdx := neighLink.Attrs().ParentIndex
+		if parentIdx == 0 {
+			parentIdx = link.Attrs().Index // use fabric parent directly
+		}
+		// Check parent IPv4 neighbors for the peer IP.
+		parentNeighs, _ := d.fabricNeighList(parentIdx, neighFamily)
+		for _, n := range parentNeighs {
+			if n.IP.Equal(peerIP) && dpuserspace.FabricNeighUsable(n) {
+				peerMAC = n.HardwareAddr
+				// Still address-matched — same identity binding as above.
+				d.rememberFabricPeerMAC(1, peerMAC)
+				slog.Info("cluster: fabric1 peer MAC resolved via parent ARP",
+					"peer_mac", peerMAC, "overlay", overlay)
+				break
+			}
+		}
+		// Check parent IPv6 NDP neighbors (populated via the ff02::1 probe).
+		// This leg has NO peer address to match on, so it is constrained to the
+		// peer's identity by selectFabricPeerLinkLocalMAC and fails closed when
+		// the segment cannot be shown to hold exactly the peer (#6554).
+		if peerMAC == nil {
+			v6Neighs, _ := d.fabricNeighList(parentIdx, netlink.FAMILY_V6)
+			mac, peerLL, nCandidates, reason := selectFabricPeerLinkLocalMAC(
+				v6Neighs, localMAC, d.fabricPeerMACHint(1))
+			switch {
+			case mac != nil:
+				peerMAC = mac
+				slog.Info("cluster: fabric1 peer MAC resolved via parent IPv6 NDP",
+					"peer_mac", peerMAC, "peer_ll", peerLL, "overlay", overlay)
+			case nCandidates > 0:
+				// Candidates existed but none could be attributed to the peer.
+				// Throttled: this runs on every neighbour event plus the 30s tick.
+				d.logFabricRefreshFailure(1,
+					"cluster: fabric1 peer MAC NDP fallback refused (unidentified neighbour)",
+					"reason", reason, "candidates", nCandidates,
+					"peer", peerIP, "overlay", overlay)
+			}
+		}
 	}
 	if peerMAC == nil {
 		if d.retainFabricFwdOnNeighborMiss(1, peerIP, overlay, logWaiting) {
