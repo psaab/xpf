@@ -2378,6 +2378,7 @@ fn post_dnat_source_nat_matches_translated_destination() {
         match_icmp_type: None,
         match_icmp_code: None,
         off: false,
+        lenient_match_dropped: false,
     }];
     snapshot.policies.push(PolicyRuleSnapshot {
         name: "allow-inbound".to_string(),

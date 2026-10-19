@@ -106,6 +106,9 @@ mod tests_static;
 #[path = "tests_destination.rs"]
 mod tests_destination;
 #[cfg(test)]
+#[path = "tests_dnat_poison_14947.rs"]
+mod tests_dnat_poison_14947;
+#[cfg(test)]
 #[path = "tests_idle_lease_sync_8121.rs"]
 mod tests_idle_lease_sync_8121;
 #[cfg(test)]
@@ -260,7 +263,7 @@ pub(crate) use allocator::{
 };
 #[cfg(test)]
 pub(crate) use allocator::PersistentLeaseDebugState;
-pub(crate) use destination::{DnatKey, DnatTable, DnatValue};
+pub(crate) use destination::{DnatKey, DnatLookup, DnatTable, DnatValue};
 pub(crate) use iface_registry::{
     conflicts_with_local_control_tuple, INTERFACE_SNAT_IDENTITY_EXHAUSTION,
     INTERFACE_SNAT_PAT_COLLISIONS, INTERFACE_SNAT_REGISTRY_CAP_EXHAUSTION,

@@ -251,6 +251,7 @@ fn parsed_nat_rules_share_store_counters() {
             match_icmp_type: None,
             match_icmp_code: None,
             off: false,
+            lenient_match_dropped: false,
         }],
         &store,
     );

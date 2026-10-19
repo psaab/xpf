@@ -326,6 +326,13 @@ pub(crate) struct DestinationNATRuleSnapshot {
     /// parse and is dropped as before.
     #[serde(default)]
     pub off: bool,
+    /// #14947: fail-closed poison for a DNAT rule whose address-name closure
+    /// is poisoned or whose referenced dynamic feed is present-but-empty.
+    /// The Go builder still emits the rule's entries with this marker; the
+    /// DnatTable drops a flow claimed by a marked entry instead of
+    /// translating it or exempting it via `off`. Rides the v52 bump.
+    #[serde(rename = "lenient_match_dropped", default)]
+    pub lenient_match_dropped: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -379,7 +386,7 @@ pub(crate) struct NAT64RuleSnapshot {
     /// an EMPTY pool — prefix traffic classifies MatchUnavailable (drop) —
     /// instead of minting from the unusable pool or skipping the rule
     /// (which would route the synthetic destination as ordinary IPv6).
-    /// Rides the v51 protocol bump: an old helper ignoring it would mint
+    /// Rides the v52 protocol bump: an old helper ignoring it would mint
     /// from an unusable pool, so exact-equality versioning fences it.
     #[serde(rename = "pool_unusable", default)]
     pub pool_unusable: bool,

@@ -43,15 +43,26 @@ pub(crate) struct DnatValue {
     pub new_dst_port: u16,
 }
 
+/// #14947: tri-state DNAT lookup result. `Poisoned` means a poisoned rule
+/// claimed the flow: the caller must drop it (fail closed) rather than
+/// forwarding it untranslated. `NoMatch` (including a healthy `off`
+/// exemption) forwards untranslated as before.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DnatLookup {
+    NoMatch,
+    Matched(NatDecision),
+    Poisoned,
+}
+
 /// #3844: outcome of matching a DNAT entry within one proto/port tier.
 ///
 /// The lookup probes tiers with `.or_else` (exact `(proto, dst, port)` →
 /// wildcard port → `PROTO_ANY` → prefix LPM). A `None` from a tier means "no
-/// rule matched" and `.or_else` continues to the next tier. `Some(Exempt)` and
-/// `Some(Translate)` are BOTH matches, so either one halts the `.or_else`
-/// chain — this is what gives a matched `then destination-nat off` rule the
-/// Junos "stop evaluation" semantic: it short-circuits the broader tiers and
-/// the caller then maps `Exempt` to no-DNAT.
+/// rule matched" and `.or_else` continues to the next tier. `Some(Exempt)`,
+/// `Some(Translate)` and `Some(Poisoned)` are ALL matches, so any one halts
+/// the `.or_else` chain — this is what gives a matched `then destination-nat
+/// off` rule the Junos "stop evaluation" semantic: it short-circuits the
+/// broader tiers and the caller then maps `Exempt` to no-DNAT.
 enum DnatOutcome {
     /// A translate rule matched — apply the pool translation (and its counter).
     Translate(DnatValue, Option<Arc<NatRuleCounter>>),
@@ -59,6 +70,8 @@ enum DnatOutcome {
     /// remaining tiers are short-circuited (they are never probed because this
     /// is a non-`None` `.or_else` result).
     Exempt,
+    /// #14947: a poisoned rule matched — drop (see `DnatLookup::Poisoned`).
+    Poisoned(Option<Arc<NatRuleCounter>>),
 }
 
 #[derive(Clone, Debug)]
@@ -120,6 +133,8 @@ struct DnatEntry {
     /// registration — the exempted destination is a real routed host, not a
     /// VIP the firewall should proxy-ARP/ND for.
     off: bool,
+    /// #14947: poisoned address-name closure / unready feed. A match drops.
+    lenient_match_dropped: bool,
     value: DnatValue,
     /// #2218: per-rule translation hit counter (None for counter_id 0).
     hit_counter: Option<Arc<NatRuleCounter>>,
@@ -212,10 +227,12 @@ impl DnatEntry {
         true
     }
 
-    /// #3844: map a matched entry to its lookup outcome. An `off` entry is a
-    /// no-translate exemption; any other entry translates to its pool value.
+    /// #3844/#14947: map a matched entry to its lookup outcome. Poison wins
+    /// over `off`: a poisoned exemption drops instead of exempting.
     fn to_outcome(&self) -> DnatOutcome {
-        if self.off {
+        if self.lenient_match_dropped {
+            DnatOutcome::Poisoned(self.hit_counter.clone())
+        } else if self.off {
             DnatOutcome::Exempt
         } else {
             DnatOutcome::Translate(self.value, self.hit_counter.clone())
@@ -790,6 +807,7 @@ impl DnatTable {
                 match_icmp_type: snap.match_icmp_type,
                 match_icmp_code: snap.match_icmp_code,
                 off: snap.off,
+                lenient_match_dropped: snap.lenient_match_dropped,
                 value: DnatValue {
                     new_dst_ip: pool_ip,
                     new_dst_port: if snap.pool_port != 0 {
@@ -1008,7 +1026,7 @@ impl DnatTable {
         // rule cannot re-translate the exempted flow.
         let (value, hit_counter) = match outcome {
             Some(DnatOutcome::Translate(v, c)) => (v, c),
-            Some(DnatOutcome::Exempt) | None => return None,
+            Some(DnatOutcome::Exempt) | Some(DnatOutcome::Poisoned(_)) | None => return None,
         };
         // #4074: gate the destination-port translation on the protocol actually
         // carrying an L4 port. A port-less protocol (ICMP/ICMPv6/GRE/...) keeps
@@ -1034,6 +1052,128 @@ impl DnatTable {
             },
             hit_counter,
         ))
+    }
+    /// #14947: tri-state variant of `lookup_with_counter_scoped`. A poisoned
+    /// match returns `Poisoned` (drop); a healthy `off` exemption and no
+    /// match both return `NoMatch` (forward untranslated).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn lookup_result_with_counter_scoped(
+        &self,
+        protocol: u8,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        src_port: u16,
+        dst_port: u16,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+        packet_icmp: Option<(u8, u8)>,
+    ) -> (DnatLookup, Option<Arc<NatRuleCounter>>) {
+        if let Some((decision, counter)) = self.lookup_with_counter_scoped(
+            protocol,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            ingress_zone,
+            ingress_ifname,
+            ingress_routing_instance,
+            packet_icmp,
+        ) {
+            return (DnatLookup::Matched(decision), counter);
+        }
+        if self.poisoned_claims(
+            protocol,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            ingress_zone,
+            ingress_ifname,
+            ingress_routing_instance,
+            packet_icmp,
+        ) {
+            (DnatLookup::Poisoned, None)
+        } else {
+            (DnatLookup::NoMatch, None)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn poisoned_claims(
+        &self,
+        protocol: u8,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        src_port: u16,
+        dst_port: u16,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+        packet_icmp: Option<(u8, u8)>,
+    ) -> bool {
+        let protocol_u16 = u16::from(protocol);
+        let outcome = self
+            .match_entries(
+                self.entries.get(&DnatKey {
+                    protocol: protocol_u16,
+                    dst_ip,
+                    dst_port,
+                }),
+                src_ip,
+                src_port,
+                dst_port,
+                ingress_zone,
+                ingress_ifname,
+                ingress_routing_instance,
+                packet_icmp,
+            )
+            .or_else(|| {
+                self.match_entries(
+                    self.entries.get(&DnatKey {
+                        protocol: protocol_u16,
+                        dst_ip,
+                        dst_port: 0,
+                    }),
+                    src_ip,
+                    src_port,
+                    dst_port,
+                    ingress_zone,
+                    ingress_ifname,
+                    ingress_routing_instance,
+                    packet_icmp,
+                )
+            })
+            .or_else(|| {
+                self.match_entries(
+                    self.entries.get(&DnatKey {
+                        protocol: PROTO_ANY,
+                        dst_ip,
+                        dst_port: 0,
+                    }),
+                    src_ip,
+                    src_port,
+                    dst_port,
+                    ingress_zone,
+                    ingress_ifname,
+                    ingress_routing_instance,
+                    packet_icmp,
+                )
+            })
+            .or_else(|| {
+                self.match_prefix_lpm(
+                    protocol_u16,
+                    src_ip,
+                    dst_ip,
+                    src_port,
+                    dst_port,
+                    ingress_zone,
+                    ingress_ifname,
+                    ingress_routing_instance,
+                    packet_icmp,
+                )
+            });
+        matches!(outcome, Some(DnatOutcome::Poisoned(_)))
     }
     /// Whether a fragment whose shim metadata carries the protocol-unknown
     /// sentinel would match any same-family DNAT translation. Probe concrete
@@ -1292,6 +1432,7 @@ impl DnatTable {
                 // Deduping them would collapse one onto the other and either
                 // drop the exemption (fail-open) or drop the translation.
                 && existing.entry.off == new_slot.entry.off
+                && existing.entry.lenient_match_dropped == new_slot.entry.lenient_match_dropped
         }) {
             *existing = new_slot;
             return;
@@ -1335,6 +1476,7 @@ impl DnatTable {
                 // insert_prefix_slot. Both are retained; the earlier-inserted
                 // (config-order-first) entry wins in match_entries' `.find()`.
                 && existing.off == entry.off
+                && existing.lenient_match_dropped == entry.lenient_match_dropped
         }) {
             *existing = entry;
             return;
@@ -1399,7 +1541,7 @@ impl DnatTable {
                 // exempted destination is a real host reachable via routing,
                 // not a VIP the firewall owns, so proxy-ARP/ND for it would
                 // hijack that host's traffic on a directly-connected segment.
-                if entry.off {
+                if entry.off || entry.lenient_match_dropped {
                     continue;
                 }
                 out.push((
@@ -1440,7 +1582,7 @@ impl DnatTable {
             .collect();
         for (proto_port, slots) in &self.prefix_entries {
             for slot in slots {
-                if slot.entry.off {
+                if slot.entry.off || slot.entry.lenient_match_dropped {
                     continue;
                 }
                 let instance = slot.entry.from_routing_instance.as_ref();

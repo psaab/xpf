@@ -556,6 +556,7 @@
     "from_interface": "",
     "from_routing_instance": "",
     "from_zone": "",
+    "lenient_match_dropped": false,
     "match_destination_ports": [],
     "match_icmp_code": null,
     "match_icmp_type": null,

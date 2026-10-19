@@ -115,6 +115,23 @@ func buildSourceNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map[stri
 				destAddrs = nil
 				lenientMatchDropped = true
 			}
+			// #14947: a present-but-empty (unready) dynamic feed referenced by
+			// an `off` exemption poisons it — the exemption must drop rather
+			// than match unconditionally while its feed has no entries. Only
+			// `off` rules poison here: a translate rule scoped to an empty
+			// feed already matches nothing via its fallback token, and a
+			// fail-mode-drop present-empty feed is intentional match-none
+			// (#12965, excluded by natAddressNameEmptyPoisons).
+			if rule.Then.Off && !lenientMatchDropped {
+				for _, name := range append(rule.Match.SourceAddressNameList(), rule.Match.DestinationAddressNameList()...) {
+					if natAddressNameEmptyPoisons(cfg, feedOverlay, name) {
+						slog.Warn("userspace snapshot: source NAT off exemption references an empty dynamic feed; shipping fail-closed (#14947)",
+							"ruleset", rs.Name, "rule", rule.Name, "address_name", name)
+						lenientMatchDropped = true
+						break
+					}
+				}
+			}
 			var poolAddresses []string
 			var portLow, portHigh uint16
 			var poolNoTranslation bool
