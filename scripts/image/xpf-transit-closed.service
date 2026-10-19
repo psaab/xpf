@@ -17,7 +17,13 @@
 # #9725 daemon gate; this unit is scoped to the bridged-transit nftables leg.
 # The xpfd subcommand reads no config and takes no daemon lock.
 [Unit]
+Description=xpf early bridge-transit barrier (fail-closed before networkd)
 DefaultDependencies=no
+# /usr/local/sbin/xpfd resolves through /var/lib/xpf/versions/current
+# after first-install seeding; on a separate-/var host the fence must not
+# exec before that mount. RequiresMountsFor pulls in and orders after the
+# backing mount(s) while staying pre-networkd (#15090).
+RequiresMountsFor=/var/lib/xpf /usr/local/sbin
 After=nftables.service
 Before=network-pre.target systemd-networkd.service frr.service xpfd.service
 Wants=network-pre.target
