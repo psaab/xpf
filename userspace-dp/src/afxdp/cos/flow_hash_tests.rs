@@ -52,8 +52,7 @@ fn exact_cos_flow_bucket_preserves_legacy_behavior_at_zero_seed() {
     // with a zero seed. The pre-seed hash initialized `seed = protocol ^
     // (addr_family << 8)`; the seeded hash initializes `seed = queue_seed
     // ^ protocol ^ (addr_family << 8)`. At `queue_seed = 0` the two are
-    // byte-identical. Pin this so a future refactor that reorders the
-    // mix cannot silently change the bucket mapping under zero seed.
+    // byte-identical before the finalizer step.
     let flow_v4 = test_session_key(1111, 5201);
     let mut flow_v6 = test_session_key(2222, 5201);
     flow_v6.src_ip = IpAddr::V6("2001:db8::1".parse().unwrap());
@@ -61,26 +60,14 @@ fn exact_cos_flow_bucket_preserves_legacy_behavior_at_zero_seed() {
     flow_v6.addr_family = libc::AF_INET6 as u8;
     let b_v4 = cos_flow_bucket_index(0, Some(&flow_v4));
     let b_v6 = cos_flow_bucket_index(0, Some(&flow_v6));
-    // #711 + GEMINI-NEXT.md fairness: hash-mix regression pins,
-    // updated for the bucket-count grow 1024 → 4096. The hash
-    // function itself is unchanged at seed=0; the values move only
-    // because the mask widens from 10 bits (0x3FF) to 12 bits
-    // (0xFFF). Under the original 6-bit (64-bucket) mask these were
-    // 26 (v4) and 4 (v6); under the 10-bit (1024-bucket) mask they
-    // were 410 and 260; under the new 12-bit (4096-bucket) mask
-    // they are 410 (unchanged — its bits 10/11 are zero) and 1284
-    // (= 260 + 1024).
-    // A refactor that reorders the mix or adds a term still fails
-    // here and becomes an explicit decision. Update baselines only
-    // after live re-validation of 5201 fairness on the loss HA
-    // cluster.
-    // Sanity: low 6 bits of the new pins equal the old pins
-    // (26 and 4 respectively), confirming the mask-widening
-    // interpretation above.
-    assert_eq!(b_v4 & 0x3F, 26);
-    assert_eq!(b_v6 & 0x3F, 4);
-    assert_eq!(b_v4, 410);
-    assert_eq!(b_v6, 1284);
+    // #15099: hash-mix regression pins. The splitmix64 avalanche
+    // finalizer before the `as u16` truncation moves every bucket,
+    // including these seed-0 pins (pre-#15099 they were 410 and 1284
+    // under the 12-bit mask; 26 and 4 under the original 6-bit mask).
+    // Update baselines only after live re-validation of 5201 fairness
+    // on the loss HA cluster.
+    assert_eq!(b_v4, 2649);
+    assert_eq!(b_v6, 127);
 }
 
 #[test]
@@ -351,9 +338,10 @@ fn flow_fair_bucket_separates_tunnel_discriminators_9645() {
     }
 }
 
-/// The pre-#9645 bucket function, kept verbatim so the cell below can prove
-/// the default key space did not move.
-fn legacy_exact_cos_flow_bucket_9645(queue_seed: u64, flow_key: &SessionKey) -> u16 {
+/// The pre-#9645 hash state (no routing-domain / discriminator mixing,
+/// no avalanche finalizer), kept verbatim so the cell below can prove
+/// the default key space moves ONLY by the #15099 finalizer.
+fn legacy_cos_flow_seed_9645(queue_seed: u64, flow_key: &SessionKey) -> u64 {
     let mut seed = queue_seed ^ (flow_key.protocol as u64) ^ ((flow_key.addr_family as u64) << 8);
     for ip in [flow_key.src_ip, flow_key.dst_ip] {
         match ip {
@@ -367,7 +355,7 @@ fn legacy_exact_cos_flow_bucket_9645(queue_seed: u64, flow_key: &SessionKey) -> 
     }
     mix_cos_flow_bucket(&mut seed, flow_key.src_port as u64);
     mix_cos_flow_bucket(&mut seed, flow_key.dst_port as u64);
-    seed as u16
+    seed
 }
 
 #[test]
@@ -382,13 +370,90 @@ fn flow_fair_bucket_is_unchanged_for_default_domain_without_discriminator_9645()
             let mut v6p = v6.clone();
             v6p.src_port = 30_000 + port;
             for key in [&v4, &v6p] {
+                // #9645 invariant, restated for #15099: a default-domain
+                // key with no discriminator mixes no tag fields, so its
+                // bucket is exactly the legacy field sequence passed
+                // through the #15099 avalanche finalizer — the ONLY
+                // movement #15099 introduces for these keys.
                 assert_eq!(
                     exact_cos_flow_bucket(seed, Some(key)),
-                    legacy_exact_cos_flow_bucket_9645(seed, key),
-                    "the default routing domain with no discriminator must keep the pre-#9645 bucket (seed {seed:#x}, key {key:?})"
+                    (finalize_cos_flow_bucket(legacy_cos_flow_seed_9645(seed, key)) & 0xffff)
+                        as u16,
+                    "the default routing domain with no discriminator must keep the pre-#9645 field sequence (seed {seed:#x}, key {key:?})"
                 );
             }
         }
     }
 }
 
+// #15099 (A70-01): the upward-only mix plus the 12-bit bucket mask made
+// IPv4 src bits 18-31, dst bits 16-31, sport bits 14-15, dport bits
+// 12-15 and most IPv6 bits dead in the flow-fair bucket hash: two keys
+// differing ONLY in one of those bits shared one bucket for EVERY seed,
+// so a separating seed cannot exist on the pre-fix code. Sibling of the
+// #9645 routing-domain / discriminator cells. On the fixed code (the
+// splitmix64 avalanche finalizer before the `as u16`) a chance collision
+// survives 256 independent seeds with probability about (1/4096)^256.
+#[test]
+fn flow_fair_bucket_separates_high_bit_only_tuples_15099() {
+    let base_v4 = test_session_key(9000, 5201);
+    let flip_v4 = |ip: IpAddr, bit: u32| -> IpAddr {
+        match ip {
+            IpAddr::V4(v4) => IpAddr::V4(std::net::Ipv4Addr::from(u32::from(v4) ^ (1u32 << bit))),
+            IpAddr::V6(_) => unreachable!(),
+        }
+    };
+    let mut src_bit31 = base_v4.clone();
+    src_bit31.src_ip = flip_v4(base_v4.src_ip, 31);
+    let mut src_bit18 = base_v4.clone();
+    src_bit18.src_ip = flip_v4(base_v4.src_ip, 18);
+    let mut dst_bit31 = base_v4.clone();
+    dst_bit31.dst_ip = flip_v4(base_v4.dst_ip, 31);
+    let mut dst_bit16 = base_v4.clone();
+    dst_bit16.dst_ip = flip_v4(base_v4.dst_ip, 16);
+    let mut sport_bit14 = base_v4.clone();
+    sport_bit14.src_port ^= 1u16 << 14;
+    // Keep src_ip canonical: test_session_key derives its low octet
+    // from src_port, and the pair must differ ONLY in the port bit.
+    sport_bit14.src_ip = base_v4.src_ip;
+    let mut sport_bit15 = base_v4.clone();
+    sport_bit15.src_port ^= 1u16 << 15;
+    sport_bit15.src_ip = base_v4.src_ip;
+    let mut dport_bit15 = base_v4.clone();
+    dport_bit15.dst_port ^= 1u16 << 15;
+    let mut dport_bit12 = base_v4.clone();
+    dport_bit12.dst_port ^= 1u16 << 12;
+    let mut base_v6 = test_session_key(2222, 5201);
+    base_v6.src_ip = IpAddr::V6("2001:db8::1".parse().unwrap());
+    base_v6.dst_ip = IpAddr::V6("2001:db8::2".parse().unwrap());
+    base_v6.addr_family = libc::AF_INET6 as u8;
+    let mut v6_src_high = base_v6.clone();
+    v6_src_high.src_ip = IpAddr::V6("a001:db8::1".parse().unwrap());
+    let mut v6_src_low_chunk_high = base_v6.clone();
+    v6_src_low_chunk_high.src_ip = IpAddr::V6("2001:db8::8000:0:0:1".parse().unwrap());
+    let mut v6_dst_high = base_v6.clone();
+    v6_dst_high.dst_ip = IpAddr::V6("a001:db8::2".parse().unwrap());
+    let pairs: [(&str, &SessionKey, &SessionKey); 11] = [
+        ("IPv4 src bit 31", &base_v4, &src_bit31),
+        ("IPv4 src bit 18", &base_v4, &src_bit18),
+        ("IPv4 dst bit 31", &base_v4, &dst_bit31),
+        ("IPv4 dst bit 16", &base_v4, &dst_bit16),
+        ("sport bit 14", &base_v4, &sport_bit14),
+        ("sport bit 15", &base_v4, &sport_bit15),
+        ("dport bit 15", &base_v4, &dport_bit15),
+        ("dport bit 12", &base_v4, &dport_bit12),
+        ("IPv6 src high bits", &base_v6, &v6_src_high),
+        (
+            "IPv6 src low-chunk high bit",
+            &base_v6,
+            &v6_src_low_chunk_high,
+        ),
+        ("IPv6 dst high bits", &base_v6, &v6_dst_high),
+    ];
+    for (label, a, b) in pairs {
+        assert!(
+            first_separating_seed_9645(a, b).is_some(),
+            "{label}: keys differing only in {label} share one flow-fair bucket for every seed"
+        );
+    }
+}
