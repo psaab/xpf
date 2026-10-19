@@ -178,6 +178,8 @@ func bareMember9809(member string) []string {
 		"set routing-instances RI-B instance-type virtual-router",
 		"set routing-instances RI-B interface ge-0/0/2.0",
 		"set firewall family inet filter fbf term t1 then routing-instance RI-B",
+		"set interfaces ge-0/0/3 unit 0 family inet address 192.168.97.1/24",
+		"set interfaces ge-0/0/3 unit 0 family inet filter input fbf",
 	}
 }
 

@@ -197,6 +197,8 @@ func TestVRFOverlapWarnsViaPBRTerms(t *testing.T) {
 		"set firewall family inet filter fbf term to-a then routing-instance RI-A",
 		"set firewall family inet filter fbf term to-b from destination-address 172.16.9.0/24",
 		"set firewall family inet filter fbf term to-b then routing-instance RI-B",
+		"set interfaces ge-0/0/1 unit 0 family inet address 192.168.1.1/24",
+		"set interfaces ge-0/0/1 unit 0 family inet filter input fbf",
 	})
 	if len(warns) != 1 {
 		t.Fatalf("expected one #2387 overlap warning from PBR terms, got %d: %v", len(warns), warns)

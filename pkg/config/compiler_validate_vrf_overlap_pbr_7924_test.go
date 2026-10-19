@@ -28,6 +28,8 @@ func TestVRFOverlapRejectedOnlyWithPBRSteering_7924(t *testing.T) {
 		riB   = "set routing-instances RI-B instance-type virtual-router"
 		riBif = "set routing-instances RI-B interface ge-0/0/2.0"
 		pbr   = "set firewall family inet filter fbf term t1 then routing-instance RI-B"
+		pbrIf = "set interfaces ge-0/0/3 unit 0 family inet filter input fbf"
+		ifD   = "set interfaces ge-0/0/3 unit 0 family inet address 192.168.7.1/24"
 	)
 
 	for _, tc := range []struct {
@@ -39,7 +41,7 @@ func TestVRFOverlapRejectedOnlyWithPBRSteering_7924(t *testing.T) {
 		{
 			// overlap YES, PBR YES -> reject.
 			name:       "overlap_and_pbr_steering",
-			cmds:       []string{ifA, ifB, riA, riAif, riB, riBif, pbr},
+			cmds:       []string{ifA, ifB, riA, riAif, riB, riBif, pbr, ifD, pbrIf},
 			wantReject: true,
 			why: "this is the live cross-tenant policy bypass: the fast path skips " +
 				"the PBR table override, so a colliding 5-tuple inherits the other " +
@@ -58,7 +60,7 @@ func TestVRFOverlapRejectedOnlyWithPBRSteering_7924(t *testing.T) {
 		{
 			// overlap NO, PBR YES -> commits clean.
 			name:       "pbr_steering_without_overlap",
-			cmds:       []string{ifA, ifC, riA, riAif, riB, riBif, pbr},
+			cmds:       []string{ifA, ifC, riA, riAif, riB, riBif, pbr, ifD, pbrIf},
 			wantReject: false,
 			why: "PBR steering into a VRF whose address space is disjoint cannot " +
 				"produce a 5-tuple collision at all",
@@ -102,6 +104,8 @@ func TestVRFOverlapPBRRejectionIsLenientDowngraded_7924(t *testing.T) {
 		"set routing-instances RI-B instance-type virtual-router",
 		"set routing-instances RI-B interface ge-0/0/2.0",
 		"set firewall family inet filter fbf term t1 then routing-instance RI-B",
+		"set interfaces ge-0/0/3 unit 0 family inet address 192.168.7.1/24",
+		"set interfaces ge-0/0/3 unit 0 family inet filter input fbf",
 	}
 	tree := buildTree(t, cmds)
 

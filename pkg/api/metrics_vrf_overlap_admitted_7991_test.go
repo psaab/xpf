@@ -37,6 +37,8 @@ func vrfOverlapStore(t *testing.T, withPBRSteering bool) *configstore.Store {
 		lines = append(lines,
 			"set firewall family inet filter steer term t1 from source-address 10.9.9.0/24",
 			"set firewall family inet filter steer term t1 then routing-instance tenant-b",
+			"set interfaces ge-0/0/2 unit 0 family inet address 192.168.9.1/24",
+			"set interfaces ge-0/0/2 unit 0 family inet filter input steer",
 		)
 	}
 	tree := &config.ConfigTree{}
