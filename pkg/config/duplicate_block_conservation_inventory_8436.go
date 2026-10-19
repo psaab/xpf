@@ -252,6 +252,7 @@ var dupConservationSkipped8436 = []string{
 	"security nat destination rule-set",
 	"security nat destination rule-set xpfname rule",
 	"security nat proxy-arp interface",
+	"security nat proxy-ndp interface",
 	"security nat source rule-set",
 	"security nat source rule-set xpfname rule",
 	"security nat static rule-set",

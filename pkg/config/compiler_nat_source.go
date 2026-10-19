@@ -106,10 +106,21 @@ func compileNAT(node *Node, sec *SecurityConfig) error {
 		return err
 	}
 
-	// proxy-arp { interface <name> { address <addr>; } }
+	// proxy-arp / proxy-ndp { interface <name> { address <addr>; } }
+	// #15677: proxy-ndp is the Junos IPv6 spelling; both compile into
+	// ProxyARP (installer keys ARP vs NDP per address family).
 	//
 	// proxyARPAddressValues is defined below compileNAT (see #6659).
-	if err := forEachChild(node.Children, "proxy-arp", func(proxyNode *Node) error {
+	for _, stanza := range []string{"proxy-arp", "proxy-ndp"} {
+		if err := compileProxyARPStanza(node, sec, stanza); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func compileProxyARPStanza(node *Node, sec *SecurityConfig, stanza string) error {
+	if err := forEachChild(node.Children, stanza, func(proxyNode *Node) error {
 		for _, inst := range bracketedGroupInstances8794(proxyNode.FindChildren("interface")) {
 			entry := &ProxyARPEntry{Interface: inst.name}
 			for _, prop := range inst.node.Children {
@@ -127,7 +138,7 @@ func compileNAT(node *Node, sec *SecurityConfig) error {
 						entry.OversizedRangeSpecs = append(entry.OversizedRangeSpecs,
 							fmt.Sprintf("%s to %s: %v", prop.Keys[1], prop.Keys[3], err))
 					case err != nil:
-						return fmt.Errorf("proxy-arp interface %s: %w", inst.name, err)
+						return fmt.Errorf("%s interface %s: %w", stanza, inst.name, err)
 					default:
 						entry.Addresses = append(entry.Addresses, expanded...)
 					}
@@ -146,7 +157,7 @@ func compileNAT(node *Node, sec *SecurityConfig) error {
 							entry.OversizedRangeSpecs = append(entry.OversizedRangeSpecs,
 								fmt.Sprintf("%s to %s: %v", low, high, err))
 						case err != nil:
-							return fmt.Errorf("proxy-arp interface %s: %w", inst.name, err)
+							return fmt.Errorf("%s interface %s: %w", stanza, inst.name, err)
 						default:
 							entry.Addresses = append(entry.Addresses, expanded...)
 						}

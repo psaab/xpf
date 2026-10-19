@@ -311,6 +311,7 @@ var instanceNameArmedBaseline9091 = []string{
 	"/security/ipsec/vpn/traffic-selector",
 	"/security/nat/nat64/rule-set",
 	"/security/nat/proxy-arp/interface",
+	"/security/nat/proxy-ndp/interface",
 	"/security/policies/from-zone",
 	"/security/policies/from-zone/policy",
 	"/security/policies/global/policy",

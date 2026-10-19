@@ -969,6 +969,14 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"address": {desc: "Address, prefix or range to answer ARP for", args: 1, multi: true, placeholder: "<address>", children: nil},
 			}},
 		}},
+		// #15677: Junos `security nat proxy-ndp` is the IPv6 spelling of
+		// proxy-arp. Same interface/address subtree; compiles into the
+		// same ProxyARP entries (installer keys family per address).
+		"proxy-ndp": {desc: "Proxy NDP for NAT pool addresses", children: map[string]*schemaNode{
+			"interface": {desc: "Interface to answer proxy NDP on", args: 1, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", closedWorld: true, children: map[string]*schemaNode{
+				"address": {desc: "Address, prefix or range to answer NDP for", args: 1, multi: true, placeholder: "<address>", children: nil},
+			}},
+		}},
 	}},
 	"address-book": {desc: "Address books", children: map[string]*schemaNode{
 		"global": {desc: "Global address book", packedStatements: true, children: map[string]*schemaNode{
