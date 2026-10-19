@@ -119,12 +119,14 @@ pub(crate) fn release_nat64_pool_port(
 /// another flow or incompatible BIB lease owns the translated tuple, in which
 /// case the caller tries the next prefix).
 ///
-/// #5178: `deterministic` is `true` when the prefix runs a NAPT64 (mode 2)
-/// deterministic pool (`prefix.deterministic_v6.is_some()`), so the reservation
-/// is tagged deterministic (mode identity for BIB/lease bookkeeping; #14625:
-/// release recycles every port) — matching the active node's
-/// `allocate_deterministic_v6` release. A round-robin NAT64 pool passes
-/// `false`.
+/// #5178: `deterministic` carries the prefix's NAPT64 (mode 2) params when
+/// the prefix runs a deterministic pool (`prefix.deterministic_v6`), so the
+/// reservation is tagged deterministic (mode identity for BIB/lease
+/// bookkeeping; #14625: release recycles every port) — matching the active
+/// node's `allocate_deterministic_v6` release. A round-robin NAT64 pool
+/// passes `None`. #15179: the params are threaded (not just a bool) so the
+/// minted lease carries `deterministic_identity: Some(V6(params))` and the
+/// local deterministic allocator can join it after failover.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn reserve_nat64_pool_port(
     allocator: &PortAllocator,
@@ -132,7 +134,7 @@ pub(crate) fn reserve_nat64_pool_port(
     snat_v4: Ipv4Addr,
     port: u16,
     addr_index: usize,
-    deterministic: bool,
+    deterministic: Option<DeterministicV6>,
     // #6528: threaded to `reserve_flow` for its stale-tuple eviction.
     now_ns: u64,
     // #6211 F2: the worker taking this reservation. The synced NAT64 entry is
@@ -149,11 +151,12 @@ pub(crate) fn reserve_nat64_pool_port(
         300 * 1_000_000_000,
     ));
     let mut previous_snapshot = None;
-    allocator.reserve_flow_maybe_persistent(
+    allocator.reserve_flow_maybe_persistent_with_identity(
         flow,
         translated,
         addr_index,
-        deterministic,
+        deterministic.is_some(),
+        deterministic.map(|p| crate::nat::DeterministicPortedIdentity::V6(p)),
         now_ns,
         holder,
         persistent,
@@ -172,7 +175,7 @@ pub(crate) fn reserve_nat64_pool_port_capture_and_replace(
     snat_v4: Ipv4Addr,
     port: u16,
     addr_index: usize,
-    deterministic: bool,
+    deterministic: Option<DeterministicV6>,
     now_ns: u64,
     holder: NatHolder,
 ) -> (bool, Option<u128>) {
@@ -181,11 +184,12 @@ pub(crate) fn reserve_nat64_pool_port_capture_and_replace(
         port,
     };
     let mut previous_snapshot = None;
-    let reserved = allocator.reserve_flow_maybe_persistent(
+    let reserved = allocator.reserve_flow_maybe_persistent_with_identity(
         flow,
         translated,
         addr_index,
-        deterministic,
+        deterministic.is_some(),
+        deterministic.map(|p| crate::nat::DeterministicPortedIdentity::V6(p)),
         now_ns,
         holder,
         Some((
