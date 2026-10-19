@@ -161,6 +161,10 @@ func mergeDNSInput(cfg *config.Config, leases []*dhcp.Lease) system.ResolvedDrop
 }
 
 func mergeDNSInputWithMgmtDNSRules(cfg *config.Config, leases []*dhcp.Lease, mgmtSet, ready map[string]bool) system.ResolvedDropinInput {
+	return mergeDNSInputWithMgmtDNSRulesRefused(cfg, leases, mgmtSet, ready, nil)
+}
+
+func mergeDNSInputWithMgmtDNSRulesRefused(cfg *config.Config, leases []*dhcp.Lease, mgmtSet, ready, refused map[string]bool) system.ResolvedDropinInput {
 	seen := make(map[string]struct{})
 	var servers []string
 	add := func(s string) {
@@ -229,6 +233,11 @@ func mergeDNSInputWithMgmtDNSRules(cfg *config.Config, leases []*dhcp.Lease, mgm
 			for _, ip := range l.DNS {
 				if !validLeaseDNSServer(ip) {
 					slog.Warn("skipping non-global-unicast DHCP name-server",
+						"interface", l.Interface, "server", ip.String())
+					continue
+				}
+				if refused[ip.String()] {
+					slog.Warn("skipping management DHCP name-server refused as main-covered or control-plane peer (#15059)",
 						"interface", l.Interface, "server", ip.String())
 					continue
 				}
@@ -492,7 +501,23 @@ func (d *Daemon) dnsInputLocked(cfg *config.Config) system.ResolvedDropinInput {
 			"err", err)
 		ready = map[string]bool{}
 	}
-	return mergeDNSInputWithMgmtDNSRules(cfg, leases, mgmtSet, ready)
+	mainRoutes, mainErr := mgmtDNSMainRoutes()
+	var refused map[string]bool
+	if mainErr != nil {
+		slog.Warn("DNS: cannot verify main-table coverage; skipping management DHCP name-servers (#15059)",
+			"err", mainErr)
+		refused = make(map[string]bool)
+		for _, l := range leases {
+			if l != nil && mgmtSet[l.Interface] {
+				for _, ip := range l.DNS {
+					refused[ip.String()] = true
+				}
+			}
+		}
+	} else {
+		refused = mgmtDNSRefusedSet(leases, mgmtSet, mainRoutes, cfg)
+	}
+	return mergeDNSInputWithMgmtDNSRulesRefused(cfg, leases, mgmtSet, ready, refused)
 }
 
 // reconcileDNSFromDHCP is the DHCP-callback entry point. It acquires

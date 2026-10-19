@@ -3,9 +3,11 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/netip"
 	"sort"
+	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dhcp"
@@ -283,6 +285,123 @@ type mgmtDNSRulePair struct {
 // DNS traffic is steered — non-DNS host traffic to the same IP keeps its
 // main-table route. Tenant-VRF local traffic reaches the existing l3mdev
 // miss terminator at priority 2000 before these rules can match.
+
+// mgmtDNSRefusedNameserver reports whether a management-DHCP nameserver
+// must be refused steering/publication (#15059, A36-01 residual). Even
+// DNS-scoped steering is wrong when the address is already reachable via
+// the default context: a main-table connected (RTPROT_KERNEL, no gateway)
+// or static (RTPROT_STATIC) route covering it, or an exact configured
+// control-plane peer (cluster control/fabric peers). Refusing keeps its
+// DNS on the main route the operator/peer topology already selected,
+// instead of diverting it into table 999. Peer matching is exact-address
+// only — a peer's connected prefix does not refuse unrelated hosts.
+func mgmtDNSRefusedNameserver(ip netip.Addr, mainRoutes []netlink.Route, cfg *config.Config) (string, bool) {
+	if !ip.IsValid() {
+		return "", false
+	}
+	family := netlink.FAMILY_V6
+	if ip.Is4() {
+		family = netlink.FAMILY_V4
+	}
+	for _, route := range mainRoutes {
+		if route.Table != unix.RT_TABLE_MAIN && route.Table != 0 {
+			continue
+		}
+		if route.Protocol != unix.RTPROT_KERNEL && route.Protocol != unix.RTPROT_STATIC {
+			continue
+		}
+		if route.Protocol == unix.RTPROT_KERNEL && !mgmtRouteIsConnected(route, family) {
+			continue
+		}
+		prefix, ok := mgmtRoutePrefix(route, family)
+		if !ok || !prefix.Contains(ip) {
+			continue
+		}
+		kind := "static"
+		if route.Protocol == unix.RTPROT_KERNEL {
+			kind = "connected"
+		}
+		return fmt.Sprintf("covered by main-table %s route %s", kind, prefix.String()), true
+	}
+	if cfg != nil && cfg.Chassis.Cluster != nil {
+		cc := cfg.Chassis.Cluster
+		for _, raw := range []string{cc.PeerAddress, cc.FabricPeerAddress, cc.Fabric1PeerAddress} {
+			peer, err := netip.ParseAddr(strings.TrimSpace(raw))
+			if err != nil {
+				continue
+			}
+			if peer.Unmap() == ip.Unmap() {
+				return "matches configured control-plane peer " + peer.String(), true
+			}
+		}
+	}
+	return "", false
+}
+
+// mgmtDNSRulePairsFiltered is mgmtDNSRulePairs with #15059 refusal: refused
+// nameservers get no pairs (so reconcile also removes any stale pairs for
+// them, since they leave the wanted set) and are warned about once per
+// distinct server.
+func mgmtDNSRulePairsFiltered(leases []*dhcp.Lease, mgmtSet map[string]bool, mainRoutes []netlink.Route, cfg *config.Config) []mgmtDNSRulePair {
+	warned := make(map[netip.Addr]bool)
+	filtered := make([]*dhcp.Lease, 0, len(leases))
+	for _, lease := range leases {
+		if lease == nil {
+			filtered = append(filtered, lease)
+			continue
+		}
+		kept := *lease
+		kept.DNS = nil
+		for _, ip := range lease.DNS {
+			if mgmtSet[lease.Interface] {
+				if reason, refused := mgmtDNSRefusedNameserver(ip, mainRoutes, cfg); refused {
+					if !warned[ip] {
+						warned[ip] = true
+						slog.Warn("SECURITY: refusing management DHCP nameserver "+reason+" (#15059); its DNS will use the main-table route, not table 999",
+							"interface", lease.Interface, "server", ip.String(), "reason", reason)
+					}
+					continue
+				}
+			}
+			kept.DNS = append(kept.DNS, ip)
+		}
+		filtered = append(filtered, &kept)
+	}
+	return mgmtDNSRulePairs(filtered, mgmtSet)
+}
+
+// mgmtDNSMainRoutes lists main-table routes for both families. A list
+// failure returns an error so the caller fails closed (no steering, no
+// publication) rather than steering a possibly-covered nameserver.
+func mgmtDNSMainRoutes() ([]netlink.Route, error) {
+	var out []netlink.Route
+	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
+		routes, err := netlink.RouteListFiltered(family, &netlink.Route{Table: unix.RT_TABLE_MAIN}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			return nil, fmt.Errorf("list main-table routes family %d: %w", family, err)
+		}
+		out = append(out, routes...)
+	}
+	return out, nil
+}
+
+// mgmtDNSRefusedSet returns refused nameserver strings for the publication
+// gate (#15059): even a complete installed pair must not make a
+// covered/peer nameserver publishable.
+func mgmtDNSRefusedSet(leases []*dhcp.Lease, mgmtSet map[string]bool, mainRoutes []netlink.Route, cfg *config.Config) map[string]bool {
+	refused := make(map[string]bool)
+	for _, lease := range leases {
+		if lease == nil || !mgmtSet[lease.Interface] {
+			continue
+		}
+		for _, ip := range lease.DNS {
+			if _, ok := mgmtDNSRefusedNameserver(ip, mainRoutes, cfg); ok {
+				refused[ip.String()] = true
+			}
+		}
+	}
+	return refused
+}
 func mgmtDNSRulePairs(leases []*dhcp.Lease, mgmtSet map[string]bool) []mgmtDNSRulePair {
 	seen := make(map[mgmtDNSRuleKey]struct{})
 	pairs := make([]mgmtDNSRulePair, 0)
@@ -348,11 +467,28 @@ func (d *Daemon) applyMgmtDNSRules() error {
 	if d.dhcp != nil {
 		leases = d.dhcp.Leases()
 	}
-	return reconcileMgmtDNSRules(netlinkMgmtDNSRuleOps{}, leases, d.mgmtVRFIfaceSet())
+	var cfg *config.Config
+	if d.store != nil {
+		cfg = d.store.ActiveConfig()
+	}
+	mainRoutes, err := mgmtDNSMainRoutes()
+	if err != nil {
+		// Fail closed (#15059): without the main inventory we cannot prove
+		// a nameserver is not already main-covered, so install nothing.
+		// Existing rules are left for the next successful reconcile; the
+		// publication gate independently refuses covered/peer servers.
+		slog.Warn("SECURITY: refusing management DNS steering without main-table inventory (#15059)", "err", err)
+		return err
+	}
+	return reconcileMgmtDNSRulesFiltered(netlinkMgmtDNSRuleOps{}, leases, d.mgmtVRFIfaceSet(), mainRoutes, cfg)
 }
 
 func reconcileMgmtDNSRules(ops mgmtDNSRuleOps, leases []*dhcp.Lease, mgmtSet map[string]bool) error {
-	pairs := mgmtDNSRulePairs(leases, mgmtSet)
+	return reconcileMgmtDNSRulesFiltered(ops, leases, mgmtSet, nil, nil)
+}
+
+func reconcileMgmtDNSRulesFiltered(ops mgmtDNSRuleOps, leases []*dhcp.Lease, mgmtSet map[string]bool, mainRoutes []netlink.Route, cfg *config.Config) error {
+	pairs := mgmtDNSRulePairsFiltered(leases, mgmtSet, mainRoutes, cfg)
 	wanted := make(map[mgmtDNSRuleKey]struct{}, len(pairs))
 	for _, pair := range pairs {
 		wanted[pair.key] = struct{}{}
