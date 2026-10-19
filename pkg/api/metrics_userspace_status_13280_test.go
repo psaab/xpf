@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
@@ -15,6 +16,10 @@ func TestUserspaceOperationalAndHACountersEmit13280(t *testing.T) {
 		IoUringWriteRefusedBytesTotal:      13,
 		RouteChangeUnrejudgedSessionsTotal: 14,
 		OwnerRGFilingsDeclinedTotal:        15,
+		SharedNatAmbiguityKeys:             101,
+		SharedNatAmbiguitySaturated:        1,
+		SharedWireAmbiguityKeys:            102,
+		SharedWireAmbiguitySaturated:       0,
 		HATransitionDemoteDropped:          16,
 		HATransitionRefreshDropped:         17,
 		HATransitionVacateDropped:          18,
@@ -44,8 +49,36 @@ func TestUserspaceOperationalAndHACountersEmit13280(t *testing.T) {
 	for metric := range ch {
 		got = append(got, metric)
 	}
-	if len(got) != 30 {
-		t.Fatalf("emitted %d metrics, want 30 counters / labeled series", len(got))
+	if len(got) != 34 {
+		t.Fatalf("emitted %d metrics, want 34 counters / labeled series / gauges", len(got))
+	}
+	// #15104: the four ambiguity gauges carry live values, not counters.
+	for _, gauge := range []struct {
+		desc  *prometheus.Desc
+		value float64
+	}{
+		{c.userspaceSharedNatAmbiguityKeys, 101},
+		{c.userspaceSharedNatAmbiguitySaturated, 1},
+		{c.userspaceSharedWireAmbiguityKeys, 102},
+		{c.userspaceSharedWireAmbiguitySaturated, 0},
+	} {
+		found := false
+		for _, m := range got {
+			if m.Desc() != gauge.desc {
+				continue
+			}
+			var pb dto.Metric
+			if err := m.Write(&pb); err != nil {
+				t.Fatalf("write gauge metric: %v", err)
+			}
+			if pb.Gauge == nil || pb.Gauge.GetValue() != gauge.value {
+				t.Fatalf("gauge %s got %v, want %v", gauge.desc, pb.Gauge.GetValue(), gauge.value)
+			}
+			found = true
+		}
+		if !found {
+			t.Fatalf("gauge %s not emitted", gauge.desc)
+		}
 	}
 	for _, counter := range []struct {
 		desc  *prometheus.Desc

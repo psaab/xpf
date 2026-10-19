@@ -462,6 +462,18 @@ pub(crate) struct ProcessStatus {
     /// whole status parse.
     #[serde(rename = "owner_rg_filings_declined_total", default)]
     pub owner_rg_filings_declined_total: u64,
+    /// #15104: live size and saturation (0/1) of the shared NAT and wire
+    /// ambiguity indexes. Saturation is computed from the live population
+    /// and clears once removals drop it below 16,384 keys. `default` so an
+    /// older helper that does not send these fields decodes as 0.
+    #[serde(rename = "shared_nat_ambiguity_keys", default)]
+    pub shared_nat_ambiguity_keys: u64,
+    #[serde(rename = "shared_nat_ambiguity_saturated", default)]
+    pub shared_nat_ambiguity_saturated: u64,
+    #[serde(rename = "shared_wire_ambiguity_keys", default)]
+    pub shared_wire_ambiguity_keys: u64,
+    #[serde(rename = "shared_wire_ambiguity_saturated", default)]
+    pub shared_wire_ambiguity_saturated: u64,
     #[serde(rename = "shared_session_publish_lock_acquisitions_total", default)]
     pub shared_session_publish_lock_acquisitions_total: u64,
     #[serde(rename = "shared_session_publish_lock_contended_total", default)]

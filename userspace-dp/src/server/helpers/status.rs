@@ -131,6 +131,11 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // replication legs. The NAT-allocator leg rides source_nat_pools.
     state.status.shared_session_publishes_total = state.afxdp.shared_session_publishes_total();
     state.status.owner_rg_filings_declined_total = state.afxdp.owner_rg_filings_declined_total();
+    // #15104: live ambiguity-index saturation gauges.
+    state.status.shared_nat_ambiguity_keys = state.afxdp.shared_nat_ambiguity_keys();
+    state.status.shared_nat_ambiguity_saturated = state.afxdp.shared_nat_ambiguity_saturated();
+    state.status.shared_wire_ambiguity_keys = state.afxdp.shared_wire_ambiguity_keys();
+    state.status.shared_wire_ambiguity_saturated = state.afxdp.shared_wire_ambiguity_saturated();
     state.status.shared_session_publish_lock_acquisitions_total =
         state.afxdp.shared_session_publish_lock_acquisitions_total();
     state.status.shared_session_publish_lock_contended_total =
