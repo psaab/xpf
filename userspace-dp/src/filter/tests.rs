@@ -7698,6 +7698,82 @@ fn filter_crossfield_3723_satisfiable_compiles() {
 }
 
 #[test]
+fn filter_crossfamily_icmp_15045_rejected_and_controls_compile() {
+    // #15045 (A05-01): inet6 + proto 1 (icmp) + icmp-type, and inet + proto
+    // 58 (icmpv6) + icmp-type, are never-matches: the family's packets carry
+    // the other ICMP number. The backstop must fail the snapshot closed.
+    // RED on revert of the family-aware icmp arm.
+    for (family, proto_tok, proto_num, types) in [
+        ("inet6", "icmp", 1u8, vec![128u8]),
+        ("inet6", "1", 1u8, vec![128u8]),
+        ("inet", "icmpv6", 58u8, vec![8u8]),
+        ("inet", "58", 58u8, vec![8u8]),
+    ] {
+        let err = crossfield_filter(family, vec![proto_tok.into()], vec![], None, types)
+            .expect_err("cross-family ICMP term must fail the build closed (#15045)");
+        match err {
+            SnapshotIntegrityError::UnsatisfiableFilterCrossField {
+                family: fam,
+                predicate,
+                protocol,
+                ..
+            } => {
+                assert_eq!(fam, family);
+                assert_eq!(predicate, "icmp-type/code");
+                assert_eq!(protocol, proto_num);
+            }
+            other => panic!("expected UnsatisfiableFilterCrossField, got {other:?}"),
+        }
+    }
+    // Mixed list naming both ICMP numbers in one family still fails (the
+    // sibling number can never match).
+    let err = crossfield_filter(
+        "inet6",
+        vec!["icmp".into(), "icmpv6".into()],
+        vec![],
+        None,
+        vec![128],
+    )
+    .expect_err("inet6 [icmp icmpv6] + icmp-type must fail closed (#15045)");
+    match err {
+        SnapshotIntegrityError::UnsatisfiableFilterCrossField {
+            predicate,
+            protocol,
+            ..
+        } => {
+            assert_eq!(predicate, "icmp-type/code");
+            assert_eq!(protocol, 1);
+        }
+        other => panic!("expected UnsatisfiableFilterCrossField, got {other:?}"),
+    }
+    // Controls: family-correct ICMP compiles, incl. icmp-code shape.
+    crossfield_filter("inet6", vec!["icmpv6".into()], vec![], None, vec![128])
+        .expect("inet6 + icmpv6 + icmp-type compiles");
+    crossfield_filter("inet6", vec!["58".into()], vec![], None, vec![128])
+        .expect("inet6 + 58 + icmp-type compiles");
+    crossfield_filter_full(
+        "inet6",
+        vec!["icmpv6".into()],
+        vec![],
+        vec![],
+        None,
+        None,
+        vec![128],
+        vec![0],
+    )
+    .expect("inet6 + icmpv6 + icmp-type/code compiles");
+    crossfield_filter("inet", vec!["icmp".into()], vec![], None, vec![8])
+        .expect("inet + icmp + icmp-type compiles");
+    crossfield_filter("inet", vec!["1".into()], vec![], None, vec![8])
+        .expect("inet + 1 + icmp-type compiles");
+    // Wrong-family protocol WITHOUT an icmp predicate stays out of scope.
+    crossfield_filter("inet6", vec!["icmp".into()], vec![], None, vec![])
+        .expect("inet6 + icmp without icmp-type compiles");
+    crossfield_filter("inet", vec!["icmpv6".into()], vec![], None, vec![])
+        .expect("inet + icmpv6 without icmp-type compiles");
+}
+
+#[test]
 fn filter_crossfield_3723_no_protocol_is_enforceable() {
     // A port / tcp-flags / icmp predicate with NO protocol is legitimate and
     // enforceable for a FILTER (the matcher matches the port on whatever

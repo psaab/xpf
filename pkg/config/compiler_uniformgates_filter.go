@@ -54,7 +54,8 @@ func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// #3723 firewall-filter cross-field satisfiability gate. Strict on commit /
 	// commit-check (hard-reject a term whose `from` block combines a port with a
 	// non-port protocol, tcp-flags with a non-TCP protocol, or icmp-type/code with
-	// a non-ICMP protocol — or an icmp-code with no icmp-type, or (#14445) a
+	// a non-ICMP protocol — or, since #15045, the sibling family's ICMP protocol
+	// (1 in inet6, 58 in inet) — or an icmp-code with no icmp-type, or (#14445) a
 	// no-protocol port/tcp-flags + icmp-type/code disjoint pair). Such a term
 	// compiles cleanly but the dataplane matcher (userspace-dp engine/matching.rs)
 	// can NEVER satisfy the cross-field pair, so a `then discard`/`reject` term

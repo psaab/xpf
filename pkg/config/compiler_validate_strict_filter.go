@@ -736,17 +736,28 @@ func firstIncompatibleProtocol(protocols []string, pred func(string) bool) (stri
 // cross-field combinations at commit, so accepting them is also a config-language
 // parity gap — xpf can express a term the dataplane cannot faithfully enforce.
 //
-// The gate reuses the same protocolIsPortBearing / protocolIsICMPFamily SSOT the
-// application gate uses (plus protocolIsTCP for the tcp-flags arm), so the two
-// compatibility gates stay aligned (the TestApplicationAndFilterCrossFieldGates-
-// UseSharedSSOT canary pins that). It fires only when a protocol is PRESENT: a
-// SINGLE port / tcp-flags / icmp match with NO protocol is legitimate and
-// enforceable for a FILTER (unlike an application, whose matcher keys on
-// protocol+port, a filter matches the port on whatever L4-port-bearing packet
-// arrives and the tcp-flags/icmp arms self-gate on the packet protocol).
-// next-header (the inet6 spelling) is covered because compileFilterFrom routes
-// BOTH protocol and next-header into term.Protocols (M02).
+// The gate reuses the same protocolIsPortBearing SSOT the application gate
+// uses (plus protocolIsTCP for the tcp-flags arm, and — since #15045 — the
+// family-aware protocolIsICMPForFamily for the icmp arm: inet admits only
+// 1/icmp aliases, inet6 only 58/icmp6 aliases), so the compatibility gates
+// stay aligned (the TestApplicationAndFilterCrossFieldGatesUseSharedSSOT
+// canary pins the shared helpers). It fires only when a protocol is
+// PRESENT: a SINGLE port / tcp-flags / icmp match with NO protocol is
+// legitimate and enforceable for a FILTER (unlike an application, whose
+// matcher keys on protocol+port, a filter matches the port on whatever
+// L4-port-bearing packet arrives and the tcp-flags/icmp arms self-gate on
+// the packet protocol). next-header (the inet6 spelling) is covered because
+// compileFilterFrom routes BOTH protocol and next-header into term.Protocols
+// (M02).
 //
+// #15045 (A05-01): the icmp arm is additionally FAMILY-aware. protocolIsICMPFamily
+// is family-blind (1 and 58 both pass in either family), but an inet6 filter
+// never sees a proto-1 packet and an inet filter never sees proto 58, and
+// compileFilterFrom resolves icmp-type names with the filter family's table —
+// so inet6 + `next-header icmp` + `icmp-type echo-request` pinned protocol 1
+// with type 128 and inet + `protocol icmpv6` + echo-request pinned 58 with
+// type 8: both never-match. The arm therefore judges each token with
+// protocolIsICMPForFamily(token, family).
 // #14445 (DR19-H1): a NO-protocol term that combines predicates from DISJOINT
 // protocol families is a never-match even though each predicate ALONE is
 // enforceable: the matcher ANDs its per-packet arms, and
@@ -823,19 +834,22 @@ func validateFilterCrossFieldStrict(cfg *Config) error {
 							family, name, term.Name, proto)
 					}
 				}
-				// H03: an icmp-type / icmp-code match requires ICMP/ICMPv6. If ANY
-				// protocol token is not an ICMP protocol the term is a never-match on
-				// that protocol.
+				// H03 + #15045 (A05-01): an icmp-type / icmp-code match requires
+				// the ICMP protocol OF THIS FAMILY. If ANY protocol token names a
+				// non-ICMP protocol, OR the sibling family's ICMP protocol (1 in
+				// inet6, 58 in inet), the term is a never-match.
 				if len(term.ICMPTypes) > 0 || len(term.ICMPCodes) > 0 {
-					if proto, bad := firstIncompatibleProtocol(term.Protocols, protocolIsICMPFamily); bad {
+					if proto, bad := firstIncompatibleProtocol(term.Protocols, func(tok string) bool {
+						return protocolIsICMPForFamily(tok, family)
+					}); bad {
 						return fmt.Errorf(
 							"firewall family %s filter %q term %q: an icmp-type/icmp-code match is "+
-								"set with protocol %q, which is not an ICMP protocol — icmp-type/"+
-								"icmp-code are valid only on icmp/icmpv6 (the dataplane matches them "+
-								"only when the packet is ICMP/ICMPv6, so the term would never match; a "+
-								"`then discard`/`reject` then fails OPEN. Remove the constraint or set "+
-								"protocol icmp/icmpv6)",
-							family, name, term.Name, proto)
+								"set with protocol %q, which is not the %s ICMP protocol — icmp-type/"+
+								"icmp-code are valid only on icmp (inet) / icmpv6 (inet6) (the "+
+								"dataplane matches them only when the packet is that family's ICMP, so "+
+								"the term would never match; a `then discard`/`reject` then fails OPEN. "+
+								"Remove the constraint or set the family ICMP protocol)",
+							family, name, term.Name, proto, family)
 					}
 				}
 				// #14445 (DR19-H1): a NO-protocol term combining predicates
@@ -2097,6 +2111,46 @@ func protocolIsTCP(token string) bool {
 // used by XPF's custom-app compatibility extension. Numeric protocol numbers 1
 // (ICMP) and 58 (ICMPv6) are accepted too. This mirrors the ICMP arm of
 // filterProtocolResolvable.
+// protocolIsICMPForFamily reports whether a protocol token names the ICMP
+// protocol OF THE FILTER FAMILY — the only ICMP protocol on which an
+// icmp-type/icmp-code constraint can ever match inside that family (#15045,
+// A05-01). inet carries ICMP (1: icmp / junos-icmp-all / junos-ping); inet6
+// carries ICMPv6 (58: icmpv6 / icmp6 / icmp-v6 / junos-icmp6-all /
+// junos-pingv6). The sibling family's ICMP token passes the family-blind
+// protocolIsICMPFamily but can never match here: an inet6 packet's protocol
+// is 58, never 1 (and vice versa), and compileFilterFrom resolves the
+// icmp-type NAME with the filter family's table (echo-request -> 128 under
+// inet6), so inet6+icmp(1)+echo-request pins protocol 1 + type 128 — a set
+// no packet satisfies. An unknown family keeps the #3723 either-ICMP
+// verdict so this helper is never stricter than protocolIsICMPFamily
+// outside the two known families.
+func protocolIsICMPForFamily(token, family string) bool {
+	switch family {
+	case "inet":
+		switch strings.ToLower(strings.TrimSpace(token)) {
+		case "icmp", "junos-icmp-all", "junos-ping":
+			return true
+		default:
+			if n, err := ParseCanonicalUint(token); err == nil {
+				return n == 1
+			}
+			return false
+		}
+	case "inet6":
+		switch strings.ToLower(strings.TrimSpace(token)) {
+		case "icmpv6", "icmp6", "icmp-v6", "junos-icmp6-all", "junos-pingv6":
+			return true
+		default:
+			if n, err := ParseCanonicalUint(token); err == nil {
+				return n == 58
+			}
+			return false
+		}
+	default:
+		return protocolIsICMPFamily(token)
+	}
+}
+
 func protocolIsICMPFamily(token string) bool {
 	switch strings.ToLower(strings.TrimSpace(token)) {
 	case "icmp", "junos-icmp-all", "junos-ping",

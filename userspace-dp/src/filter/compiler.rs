@@ -1179,10 +1179,20 @@ fn check_cross_field_satisfiability(
         }
     }
     if icmp_present {
-        if let Some(&proto) = protocols
-            .iter()
-            .find(|&&p| p != crate::ip_proto::PROTO_ICMP && p != crate::ip_proto::PROTO_ICMPV6)
-        {
+        // #15045 (A05-01): the ICMP protocol must be THIS family's. An inet
+        // term carrying 58 (or inet6 carrying 1) can never match — the
+        // packet's protocol in that family is the other value, and Go
+        // resolves icmp-type names with the family table. Unknown families
+        // keep the #3723 either-ICMP verdict.
+        let expected = match filter_family {
+            "inet" => Some(crate::ip_proto::PROTO_ICMP),
+            "inet6" => Some(crate::ip_proto::PROTO_ICMPV6),
+            _ => None,
+        };
+        if let Some(&proto) = protocols.iter().find(|&&p| match expected {
+            Some(want) => p != want,
+            None => p != crate::ip_proto::PROTO_ICMP && p != crate::ip_proto::PROTO_ICMPV6,
+        }) {
             return Err(SnapshotIntegrityError::UnsatisfiableFilterCrossField {
                 family: filter_family.to_string(),
                 filter: filter_name.to_string(),
