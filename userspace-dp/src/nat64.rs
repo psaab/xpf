@@ -2004,6 +2004,29 @@ fn reserve_synced_nat64_port_unless_peer_owns(
     if !reserved {
         return false;
     }
+    // #15146: refuse a synced import the interface registry already owns.
+    // This is the synced twin of the #14367 mint-time check in
+    // `allocate_source_with_holder`; without it an import lands on an
+    // identity a local interface-SNAT flow holds.
+    if let Some(ia) = prefix.iface_allocs.as_deref() {
+        let eff_owners = prefix
+            .iface_overlap_owners
+            .as_deref()
+            .or(prefix.overlap_owners.as_deref());
+        if crate::nat::nat64_refuse_if_interface_owns(
+            &prefix.port_allocator,
+            eff_owners,
+            ia,
+            flow,
+            (snat_v4, port),
+            now_ns,
+            holder,
+        )
+        .is_err()
+        {
+            return false;
+        }
+    }
     // #14368: refuse a synced import a static external already covers.
     if crate::nat::nat64_refuse_if_static_owns(
         &prefix.port_allocator,
