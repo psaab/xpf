@@ -651,6 +651,9 @@ pub(super) fn apply_snapshot(
     // reconciled table, so this publishes the new generation's coherent pair
     // through the single choke point — see `types/runtime_view.rs`.
     coord.publish_runtime_view();
+    // #15093: after the worker-visible store, record the scheduler era so a
+    // re-introduced scheduled snapshot does not publish already expired.
+    coord.publish_snapshot_policy();
     coord.slow_path = if let Some(slow_path) = preserved_slow_path {
         // #5801: the preserved reinjector kept the MTU its TUN was created
         // with. A day-2 config MTU change updates the accepted snapshot but

@@ -63,6 +63,78 @@ fn pmech_inventory_for(
     }
 }
 
+/// #15093: driving the real coordinator publish path — a stale lease from
+/// an earlier scheduled era, a no-schedule publication, then a scheduled
+/// re-introduction — must leave the published state unexpired before any
+/// post-apply heartbeat. Reverting `publish_snapshot_policy` (or its call
+/// in `refresh_runtime_snapshot_inner`) makes the final assertion fail.
+#[test]
+fn scheduled_reintroduction_through_refresh_is_not_expired_15093() {
+    use crate::protocol::snapshot::ZoneSnapshot;
+    let zone_snaps = vec![
+        ZoneSnapshot { name: "lan".into(), id: 100, ..Default::default() },
+        ZoneSnapshot { name: "wan".into(), id: 200, ..Default::default() },
+    ];
+    let scheduled_rule = |name: &str| crate::PolicyRuleSnapshot {
+        name: name.into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        scheduler_name: "workhours".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["any".into()],
+        action: "permit".into(),
+        ..Default::default()
+    };
+    let snap = |generation: u64, policies: Vec<crate::PolicyRuleSnapshot>| crate::ConfigSnapshot {
+        generation,
+        zones: zone_snaps.clone(),
+        default_policy: "deny".into(),
+        policies,
+        ..Default::default()
+    };
+
+    let mut coord = Coordinator::new();
+    // Era 1: scheduled, heartbeat lands.
+    coord
+        .refresh_runtime_snapshot_disarmed(&snap(1, vec![scheduled_rule("era1")]))
+        .expect("era1 refresh");
+    let stale = crate::afxdp::monotonic_nanos()
+        .saturating_sub(crate::policy::SCHEDULER_HEARTBEAT_LEASE_NS + 60_000_000_000);
+    assert!(coord.scheduler_lease.apply(1, stale));
+    assert!(coord.forwarding.policy.scheduler_rules_expired_at(crate::afxdp::monotonic_nanos()));
+
+    // Era 2: no scheduled rules.
+    coord
+        .refresh_runtime_snapshot_disarmed(&snap(2, vec![crate::PolicyRuleSnapshot {
+            name: "plain".into(),
+            from_zone: "lan".into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["any".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["any".into()],
+            action: "permit".into(),
+            ..Default::default()
+        }]))
+        .expect("era2 refresh");
+
+    // Era 3: scheduled rules return; no heartbeat has been sent since.
+    coord
+        .refresh_runtime_snapshot_disarmed(&snap(3, vec![scheduled_rule("era3")]))
+        .expect("era3 refresh");
+    assert!(
+        coord.forwarding.policy.has_scheduled_rules(),
+        "era3 fixture must carry scheduled rules"
+    );
+    assert!(
+        !coord
+            .forwarding
+            .policy
+            .scheduler_rules_expired_at(crate::afxdp::monotonic_nanos()),
+        "re-introduced scheduled snapshot must not publish already expired"
+    );
+}
+
 fn main_route_table_identities() -> Vec<crate::protocol::RouteTableIdentitySnapshot> {
     ["inet.0", "inet6.0"]
         .into_iter()

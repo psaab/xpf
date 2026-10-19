@@ -807,6 +807,136 @@ fn scheduler_lease_never_publishes_version_before_receipt_stamp_13703() {
     );
 }
 
+/// #15093: a scheduler lease stamped in an earlier scheduled era must not
+/// make a snapshot that re-introduces scheduled rules publish already
+/// expired. The coordinator re-hands the same lease Arc to every parse, and
+/// Go skips heartbeats while no snapshot carries scheduled policy, so only
+/// a per-era receipt marker distinguishes a fresh era from a stale lease.
+#[test]
+fn scheduled_reintroduction_rebases_stale_lease_15093() {
+    // Era transitions publish through the coordinator in
+    // scheduled_reintroduction_through_refresh_is_not_expired_15093
+    // (coordinator/tests.rs); this cell pins the lease + evaluation
+    // semantics that publish hook relies on, sharing one lease Arc the
+    // way PreparedPolicyState::parse_snapshot does.
+    let lease = Arc::new(SchedulerHeartbeatLease::default());
+    let old = crate::afxdp::monotonic_nanos()
+        .saturating_sub(SCHEDULER_HEARTBEAT_LEASE_NS + 60_000_000_000);
+    assert!(lease.apply(7, old));
+    assert!(lease.expired_at(crate::afxdp::monotonic_nanos()));
+    lease.note_snapshot_published(false);
+    lease.note_snapshot_published(true);
+    let now = crate::afxdp::monotonic_nanos();
+    assert!(
+        !lease.expired_at(now),
+        "re-introduction must rebase the stale receipt stamp"
+    );
+    let mut state = parse_policy_state(
+        "deny",
+        &[scheduled_allow_snapshot("scheduled-allow", false)],
+        &test_zone_name_to_id(),
+    );
+    state.scheduler_lease = Arc::clone(&lease);
+    assert!(!state.scheduler_rules_expired_at(now));
+    let result = evaluate_policy_result_l3_aware_at(
+        &state,
+        TEST_LAN_ZONE_ID,
+        TEST_WAN_ZONE_ID,
+        "10.0.61.100".parse().expect("src"),
+        "172.16.80.200".parse().expect("dst"),
+        PROTO_TCP,
+        12345,
+        5201,
+        None,
+        64,
+        true,
+        now,
+    );
+    assert_eq!(
+        result.action,
+        PolicyAction::Permit,
+        "re-introduced scheduled permit must be eligible before the post-apply heartbeat"
+    );
+}
+
+#[test]
+fn scheduled_reintroduction_inactive_deny_stays_out_15093() {
+    let lease = SchedulerHeartbeatLease::default();
+    let old = crate::afxdp::monotonic_nanos()
+        .saturating_sub(SCHEDULER_HEARTBEAT_LEASE_NS + 60_000_000_000);
+    assert!(lease.apply(7, old));
+    lease.note_snapshot_published(false);
+    lease.note_snapshot_published(true);
+    let now = crate::afxdp::monotonic_nanos();
+    assert!(!lease.expired_at(now), "rebase must leave the lease fresh");
+    let mut state = parse_policy_state(
+        "permit",
+        &[PolicyRuleSnapshot {
+            policy_id: 15093,
+            action: "deny".to_string(),
+            ..scheduled_allow_snapshot("era3-deny", true)
+        }],
+        &test_zone_name_to_id(),
+    );
+    state.scheduler_lease = Arc::new(lease);
+    let result = evaluate_policy_result_l3_aware_at(
+        &state,
+        TEST_LAN_ZONE_ID,
+        TEST_WAN_ZONE_ID,
+        "10.0.61.100".parse().expect("src"),
+        "172.16.80.200".parse().expect("dst"),
+        PROTO_TCP,
+        12345,
+        5201,
+        None,
+        64,
+        true,
+        now,
+    );
+    assert_eq!(
+        result.action,
+        PolicyAction::Permit,
+        "inactive scheduled deny must not be enforced in the re-introduction window"
+    );
+    assert_ne!(result.policy_id, 15093);
+}
+
+
+/// #15093 controls: (a) same-era republication must not extend the window
+/// past the real heartbeat expiry; (b) a stale lease from continuous
+/// scheduled eras (no intervening no-schedule publication) still expires;
+/// (c) version zero (no heartbeat ever) never expires.
+#[test]
+fn scheduled_rebase_controls_15093() {
+    let t0 = 1_000_000_000_u64;
+    let lease = SchedulerHeartbeatLease::default();
+    lease.note_snapshot_published(false);
+    lease.note_snapshot_published(true);
+    assert!(lease.apply(3, t0));
+    lease.note_snapshot_published(true);
+    assert!(
+        lease.expired_at(t0 + SCHEDULER_HEARTBEAT_LEASE_NS + 1),
+        "same-era republication must not extend the lease past heartbeat expiry"
+    );
+    assert!(
+        !lease.expired_at(t0 + SCHEDULER_HEARTBEAT_LEASE_NS),
+        "lease still valid at exactly the boundary"
+    );
+    let lease2 = SchedulerHeartbeatLease::default();
+    lease2.note_snapshot_published(true);
+    assert!(lease2.apply(4, t0));
+    assert!(
+        lease2.expired_at(t0 + SCHEDULER_HEARTBEAT_LEASE_NS + 1),
+        "continuous scheduled era must still expire on a stale heartbeat"
+    );
+    let lease3 = SchedulerHeartbeatLease::default();
+    lease3.note_snapshot_published(false);
+    lease3.note_snapshot_published(true);
+    assert!(
+        !lease3.expired_at(u64::MAX),
+        "no heartbeat ever received: version-zero compatibility must not expire"
+    );
+}
 #[test]
 fn inactive_rule_falls_through_to_next_match() {
     let state = parse_policy_state(

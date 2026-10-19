@@ -40,6 +40,72 @@ func TestScheduledSnapshotSeedsBestEffortHeartbeat11285(t *testing.T) {
 	}
 }
 
+// #15093: a snapshot that re-introduces scheduled policy after a
+// no-schedule era that had heartbeats must send its heartbeat BEFORE the
+// apply, so the helper never publishes the new snapshot against a stale
+// lease. Controls: a first-ever scheduled snapshot does not pre-send (no
+// stale stamp exists; the version-zero lease never expires), a continuous
+// scheduled era does not pre-send, and a no-schedule snapshot never sends.
+func TestScheduledReintroductionSendsHeartbeatBeforeApply15093(t *testing.T) {
+	scheduled := &ConfigSnapshot{Policies: []PolicyRuleSnapshot{{SchedulerName: "workhours"}}}
+	plain := &ConfigSnapshot{Policies: []PolicyRuleSnapshot{{Name: "plain"}}}
+
+	run := func(t *testing.T, snaps ...*ConfigSnapshot) []ControlRequest {
+		t.Helper()
+		m := New()
+		var requests []ControlRequest
+		m.controlRequestHook = func(request ControlRequest, _ *ProcessStatus) error {
+			requests = append(requests, request)
+			return nil
+		}
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for _, snap := range snaps[:len(snaps)-1] {
+			if err := m.requestApplySnapshotLocked(snap, nil); err != nil {
+				t.Fatalf("setup apply: %v", err)
+			}
+		}
+		requests = nil
+		if err := m.requestApplySnapshotLocked(snaps[len(snaps)-1], nil); err != nil {
+			t.Fatalf("final apply: %v", err)
+		}
+		return requests
+	}
+
+	types := func(reqs []ControlRequest) []string {
+		out := make([]string, len(reqs))
+		for i, r := range reqs {
+			out[i] = r.Type
+		}
+		return out
+	}
+	equal := func(a, b []string) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	// scheduled -> plain -> scheduled: the last apply re-introduces.
+	if got := types(run(t, scheduled, plain, scheduled)); !equal(got, []string{"scheduler_heartbeat", "apply_snapshot", "scheduler_heartbeat"}) {
+		t.Fatalf("re-introduction order = %v, want heartbeat, apply_snapshot, heartbeat", got)
+	}
+	if got := types(run(t, scheduled, scheduled)); !equal(got, []string{"apply_snapshot", "scheduler_heartbeat"}) {
+		t.Fatalf("continuous scheduled era order = %v, want apply_snapshot, heartbeat (no pre-send)", got)
+	}
+	if got := types(run(t, plain, scheduled)); !equal(got, []string{"apply_snapshot", "scheduler_heartbeat"}) {
+		t.Fatalf("first-ever scheduled order = %v, want apply_snapshot, heartbeat (no pre-send)", got)
+	}
+	if got := types(run(t, scheduled, plain)); !equal(got, []string{"apply_snapshot"}) {
+		t.Fatalf("no-schedule snapshot order = %v, want apply_snapshot only", got)
+	}
+}
+
 func TestSchedulerHeartbeatThrottleRetriesUntilSuccessful11285(t *testing.T) {
 	m := New()
 	m.hasScheduledPolicySnapshot = true
