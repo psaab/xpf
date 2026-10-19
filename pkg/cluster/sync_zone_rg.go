@@ -81,9 +81,13 @@ func zoneRGSet(zoneID uint16, zoneRG ZoneRGMap) ([]int, bool) {
 // ANY RG in the set) would claim a peer-owned RG2 row on an RG1-primary node
 // as locally owned, so sweep/bulk would re-export it (echo) and bulk
 // reconcile would never purge it. Such a row is therefore NOT locally owned:
-// return false. Local rows (no ClusterSynced bit) keep the zone fallback,
-// and so do cluster-synced rows in single-RG/unmapped zones, where the zone
-// answer is unambiguous.
+// return false — but only when ownership across the zone's RGs is mixed
+// (#15122). A node primary for EVERY RG owns the row whichever RG created
+// it (ANY == ALL), and judging it not-owned deletes inherited live rows at
+// the next BulkEnd; a node primary for none is already false under the zone
+// answer. Local rows (no ClusterSynced bit) keep the zone fallback, and so
+// do cluster-synced rows in single-RG/unmapped zones, where the zone answer
+// is unambiguous.
 func (s *SessionSync) ShouldSyncSessionV4(val dataplane.SessionValue) bool {
 	if s.IsPrimaryForRGFn == nil {
 		if s.IsPrimaryFn != nil {
@@ -101,7 +105,7 @@ func (s *SessionSync) ShouldSyncSessionV4(val dataplane.SessionValue) bool {
 		return isPrimaryForRG(rg)
 	}
 	if val.Flags&dataplane.SessFlagClusterSynced != 0 {
-		if rgs, ok := zoneRGSet(val.IngressZone, zoneRG); ok && len(rgs) > 1 {
+		if rgs, ok := zoneRGSet(val.IngressZone, zoneRG); ambiguousClusterSyncedZone(rgs, ok, isPrimaryForRG) {
 			return false
 		}
 	}
@@ -126,14 +130,36 @@ func (s *SessionSync) ShouldSyncSessionV6(val dataplane.SessionValueV6) bool {
 		return isPrimaryForRG(rg)
 	}
 	if val.Flags&dataplane.SessFlagClusterSynced != 0 {
-		if rgs, ok := zoneRGSet(val.IngressZone, zoneRG); ok && len(rgs) > 1 {
+		if rgs, ok := zoneRGSet(val.IngressZone, zoneRG); ambiguousClusterSyncedZone(rgs, ok, isPrimaryForRG) {
 			return false
 		}
 	}
 	return zoneSetSyncs(val.IngressZone, zoneRG, isPrimaryForRG, s.IsPrimaryFn)
 }
 
-// zoneSetSyncs is the zone-approximation fallback shared by the live row
+// ambiguousClusterSyncedZone reports whether the zone approximation cannot
+// safely judge an unattributable cluster-synced row (#14357/#15122): the
+// zone maps to more than one RG and this node's primary answers across that
+// set are mixed (primary for some, peer for others). Primary-for-all and
+// primary-for-none are both unambiguous under the zone answer.
+func ambiguousClusterSyncedZone(rgs []int, ok bool, isPrimaryForRG func(int) bool) bool {
+	if !ok || len(rgs) <= 1 || isPrimaryForRG == nil {
+		return false
+	}
+	primary, peer := false, false
+	for _, rg := range rgs {
+		if isPrimaryForRG(rg) {
+			primary = true
+		} else {
+			peer = true
+		}
+		if primary && peer {
+			return true
+		}
+	}
+	return false
+}
+
 // predicates: a mapped zone syncs when this node is primary for ANY RG in its
 // set, and an unmapped zone uses the RG 0 fallback, matching ShouldSyncZone.
 func zoneSetSyncs(zoneID uint16, zoneRG ZoneRGMap, isPrimaryForRG func(int) bool, isPrimary func() bool) bool {
@@ -158,17 +184,26 @@ func (z *zoneOwnershipSnapshot) zoneRGs(zoneID uint16) ([]int, bool) {
 	return rgs, ok
 }
 
+// ambiguousZone reports whether the snapshot's bulk-start primary answers
+// across zoneID's RG set are mixed (#15122), so the #14357 guard fires.
+func (z *zoneOwnershipSnapshot) ambiguousZone(zoneID uint16) bool {
+	rgs, ok := z.zoneRGs(zoneID)
+	return ambiguousClusterSyncedZone(rgs, ok, func(rg int) bool { return z.primary[rg] })
+}
+
 // shouldSyncV4 judges one v4 row by the bulk-start ownership answers this
 // snapshot was taken from. A resolved RG outside the bulk-start universe (a
 // skew the map-generation check did not catch) keeps the row: deleting on a
 // guess is the failure this reconcile can cause.
 //
 // Cluster-synced safety (#14357): as in ShouldSyncSessionV4, an unattributable
-// cluster-synced row in a multi-RG zone must not be kept by the zone
-// approximation — BulkEnd would never purge a stale peer RG row. Return
-// false so ReconcileClusterBulk treats it as not-locally-owned and, when it
-// was not received in this bulk, deletes it. Local unattributable rows keep
-// the zone fallback (fail-closed: never delete on a guess).
+// cluster-synced row in a multi-RG zone with mixed RG ownership must not be
+// kept by the zone approximation — BulkEnd would never purge a stale peer RG
+// row. Return false so ReconcileClusterBulk treats it as
+// not-locally-owned and, when it was not received in this bulk, deletes it.
+// When this node was primary for every RG at bulk start the row is owned
+// whichever RG created it (#15122) and must be kept. Local unattributable
+// rows keep the zone fallback (fail-closed: never delete on a guess).
 func (z *zoneOwnershipSnapshot) shouldSyncV4(val dataplane.SessionValue) bool {
 	if z.useRG {
 		if rg, ok := resolveSessionRG(val.IngressIfindex, val.IngressVlanID, val.IngressIfaceFold, z.foldFn, z.foldRG); ok {
@@ -178,7 +213,7 @@ func (z *zoneOwnershipSnapshot) shouldSyncV4(val dataplane.SessionValue) bool {
 			return true
 		}
 		if val.Flags&dataplane.SessFlagClusterSynced != 0 {
-			if rgs, ok := z.zoneRGs(val.IngressZone); ok && len(rgs) > 1 {
+			if z.ambiguousZone(val.IngressZone) {
 				return false
 			}
 		}
@@ -196,7 +231,7 @@ func (z *zoneOwnershipSnapshot) shouldSyncV6(val dataplane.SessionValueV6) bool 
 			return true
 		}
 		if val.Flags&dataplane.SessFlagClusterSynced != 0 {
-			if rgs, ok := z.zoneRGs(val.IngressZone); ok && len(rgs) > 1 {
+			if z.ambiguousZone(val.IngressZone) {
 				return false
 			}
 		}
