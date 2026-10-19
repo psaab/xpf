@@ -985,6 +985,47 @@ Regression coverage:
   `apply-groups` naming an undefined group; a next-hop and a description
   inherited from a group; and a multi-token `vrf-target`.
 
+### Brace-elided top-level interfaces (#15062)
+
+`interfaces ge-0/0/0 { unit 0 { ... } }` packs the interface NAME onto
+the `interfaces` node's own Keys. The scoped fold admits by
+(container keyword, head) pair, and no scope entry can name an
+operator-chosen interface name (#8879) — the same bound as routing
+instances. So `normalizeCompactNodes` hands a top-level `interfaces`
+node with extra keys to `normalizeElidedInterface15062`, which folds
+it into the braced shape `interfaces { ge-0/0/0 { ... } }` before any
+reader sees the tree. The braced body moves under a synthesized
+`<name>` node verbatim; a packed tail past the name
+(`interfaces ge-0/0/0 unit 0 { ... }`) stays on that node, where the
+interface compiler's schema expansion (`packedBody`, #14442) reads it
+exactly as in the braced spelling.
+
+Before this fold, `compileSections` dispatched on `node.Name()` and
+ignored `Keys[1:]`, so `compileInterfaces` received the `interfaces`
+node itself and turned every body child into a phantom interface:
+`unit` (with no units) replaced `ge-0/0/0`, and the named interface's
+address, DHCP and MTU were lost on a clean commit — including through
+`configstore.CheckText`, the day-0 gate, where an elided `fxp0`
+silently dropped the management interface.
+
+Not rewritten: `interfaces { ... }` (already braced), a bare leaf
+`interfaces <name>;` (no body to lose; both spellings agree), and
+top-level apply statements (`interfaces apply-groups G;`, #9685),
+which are not interface names.
+
+Regression coverage:
+
+- `pkg/config/interfaces_elided_normalize_15062_test.go`: elided and
+  braced spellings normalize to one tree (top level and inside
+  `groups`) and compile to identical interface/unit/address/DHCP/MTU
+  digests with no phantom; neighbour shapes are untouched.
+- `pkg/configstore/interfaces_elided_commit_gate_15062_test.go`: both
+  spellings reach the same `CheckText` verdict, including `fxp0` and
+  an invalid interface name refused in both spellings.
+- `pkg/config/elision_admissions_8879_test.go`
+  (`TestInstanceNamePairCannotBeAdmitted8879`): the former
+  `err == nil`-only cell now compares compiled values.
+
 ### Where it is NOT done
 
 Expansion is deliberately not done in the parser. `show configuration` renders

@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -943,17 +944,41 @@ func TestInstanceNamePairCannotBeAdmitted8879(t *testing.T) {
 	// leaf, the elided spelling is NOT refused. Asserting this keeps the
 	// decline honest — if someone later reads the sweep row and concludes
 	// "declined because loud", this cell contradicts them.
+	//
+	// #15062 (A01-01): err==nil alone was NOT sufficient — the elided
+	// spelling compiled clean while producing a phantom `unit`
+	// interface and losing ge-0/0/0 entirely, because the scoped fold
+	// cannot name an instance and nothing folded the top-level node.
+	// normalizeElidedInterface15062 now folds it in the normalizer, so
+	// this cell compares VALUES: the elided spelling must compile to
+	// the same interface, unit and address as the braced spelling.
 	txt := `interfaces ge-0/0/0 { unit 0 { family inet { address 10.9.9.1/24; } } }`
 	tree, perrs := NewParser(txt).Parse()
 	if len(perrs) > 0 {
 		t.Fatalf("fixture must parse: %v", perrs[0])
 	}
-	if _, err := CompileConfig(tree); err != nil {
+	cfg, err := CompileConfig(tree)
+	if err != nil {
 		t.Errorf("the elided `interfaces <name>` spelling is now refused at "+
 			"strict commit (%v). If that is deliberate the decline reason in "+
 			"this cell should move to the gate; as measured for #8879 it was "+
 			"accepted, and the decline rests on the instance-name bound "+
 			"instead.", err)
+	} else {
+		bracedTree, bperrs := NewParser(`interfaces { ge-0/0/0 { unit 0 { family inet { address 10.9.9.1/24; } } } }`).Parse()
+		if len(bperrs) > 0 {
+			t.Fatalf("braced fixture must parse: %v", bperrs[0])
+		}
+		bracedCfg, berr := CompileConfig(bracedTree)
+		if berr != nil {
+			t.Fatalf("braced fixture must compile: %v", berr)
+		}
+		if got, want := ifaceDigest15062(cfg), ifaceDigest15062(bracedCfg); !reflect.DeepEqual(got, want) {
+			t.Errorf("elided `interfaces <name>` compiled %+v, want braced %+v (#15062)", got, want)
+		}
+		if _, phantom := cfg.Interfaces.Interfaces["unit"]; phantom {
+			t.Errorf("elided `interfaces <name>` compiled phantom interface `unit` (#15062)")
+		}
 	}
 }
 
