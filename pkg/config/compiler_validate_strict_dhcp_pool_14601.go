@@ -138,6 +138,15 @@ func validateDHCPPoolValuesStrict(cfg *Config) error {
 				if haveLow && haveHigh && low.Compare(high) > 0 {
 					return fmt.Errorf("%s address-range low %q is greater than address-range high %q (Kea refuses an inverted pool and stops serving every pool on the node)", where, pool.RangeLow, pool.RangeHigh)
 				}
+				// #15691: a one-sided range renders NO Kea pool (the
+				// generators require both bounds), so the bound the
+				// operator committed would silently serve nothing.
+				// Refuse it at commit instead of letting it commit
+				// clean and take effect only when its sibling is
+				// later added.
+				if haveLow != haveHigh {
+					return fmt.Errorf("%s address-range requires both low and high bounds (only one is set; Kea renders no pool for a one-sided range, so the configured bound would silently serve nothing)", where)
+				}
 
 				// Router: v4 `routers` option only; the v6 renderer
 				// emits no router option, so the leaf is inert there.

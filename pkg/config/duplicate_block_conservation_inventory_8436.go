@@ -68,7 +68,10 @@ var dupConservationInventory8436 = []string{
 	// same two-block vs merged reduction, same verdict as the inet row.
 	"firewall filter xpfname term",
 	"security screen ids-option",
-	"system services dhcpv6-local-server group",
+	// #15691: `system services dhcpv6-local-server group` was here as a
+	// divergent site; it now CONSERVES via the dupBlockMergeSites9023
+	// registration (both families merge repeated group blocks), so the
+	// row is deleted — a stale entry hides the next regression there.
 	// #15255: genuinely SILENT (no dup gate fires, merged twin compiles).
 	// Recorded as divergent, NOT as refused — the pre-#15255 census
 	// scored this row rejected-at-commit because strict compile errored
@@ -277,8 +280,11 @@ var dupConservationSkipped8436 = []string{
 	"snmp trap-group",
 	"system backup-router",
 	"system ntp threshold",
-	"system services dhcp-local-server group xpfname pool",
-	"system services dhcpv6-local-server group xpfname pool",
+	// #15691: `... group xpfname pool` (both families) was skipped here;
+	// the census can now build a pool fixture from the declared pool
+	// leaves and the site CONSERVES via the {"group","pool"} merge
+	// registration plus find-or-create in compileDHCPLocalServer, so
+	// both rows are deleted rather than kept as stale skips.
 
 	// ---- "a spelling did not parse or compile" (3). ----
 	//

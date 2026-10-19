@@ -1262,7 +1262,78 @@ func dhcpLocalServerGroupSchema(fam string) *schemaNode {
 					"upgrade-server": {desc: "Per-interface upgrade server (parsed, not implemented)", args: 1, placeholder: "<address>", children: nil},
 				},
 			},
-			"pool": {desc: "Address pool", args: 1, placeholder: "<pool-name>", children: map[string]*schemaNode{
+			// packedStatements (#15691): a compact pool line
+			// (`pool p1 subnet ... router ...;`) packs several leaf
+			// statements onto the pool node's tail; the compact
+			// normalizer must split them into sibling leaves, which
+			// requires this opt-in (splitPackedStatements8768).
+			"pool": {desc: "Address pool", args: 1, placeholder: "<pool-name>", packedStatements: true, children: map[string]*schemaNode{
+				// #15691: the five pool leaves below were undeclared, so
+				// SetPath had no grammar for them: a two-line
+				// `address-range low <ip>` / `address-range high <ip>`
+				// pair landed as two 3-token leaves the compiler's
+				// packed len>=5 check dropped, and re-setting a scalar
+				// leaf appended a duplicate instead of replacing it.
+				// Declaring them makes SetPath group/replace correctly
+				// and gives SchemaValidate a typed slot to check.
+				"subnet": {
+					desc:          "Pool subnet offered to clients of this pool",
+					args:          1,
+					placeholder:   "<subnet>",
+					valueType:     ValueCIDR,
+					valueDesc:     "Pool subnet with prefix length",
+					valueExamples: []string{"10.0.1.0/24", "2001:db8:1::/64"},
+					validator:     ValidateRouteDestination,
+					children:      nil,
+				},
+				"address-range": {
+					desc: "Dynamic address range within the pool subnet",
+					// Flat `address-range low <ip> high <ip>` (either
+					// order) packs 4 value tokens onto this node; the
+					// braced `address-range { low <ip>; high <ip>; }`
+					// and two-line set spellings carry low/high as
+					// child leaves. tailValidator owns the whole tail
+					// because neither a single-value validator nor
+					// child-leaf validators see every shape.
+					args:          4,
+					placeholder:   "low <address> high <address>",
+					valueType:     ValueIPAddress,
+					valueDesc:     "Range bounds as `low <address> high <address>`",
+					valueExamples: []string{"low 10.0.1.100 high 10.0.1.200"},
+					tailValidator: validateDHCPAddressRangeTail15691,
+					children: map[string]*schemaNode{
+						"low": {
+							desc:          "Lowest address of the dynamic range",
+							args:          1,
+							placeholder:   "<address>",
+							valueType:     ValueIPAddress,
+							valueDesc:     "Range low IP address",
+							valueExamples: []string{"10.0.1.100", "2001:db8:1::100"},
+							validator:     ValidateIPAddress,
+							children:      nil,
+						},
+						"high": {
+							desc:          "Highest address of the dynamic range",
+							args:          1,
+							placeholder:   "<address>",
+							valueType:     ValueIPAddress,
+							valueDesc:     "Range high IP address",
+							valueExamples: []string{"10.0.1.200", "2001:db8:1::200"},
+							validator:     ValidateIPAddress,
+							children:      nil,
+						},
+					},
+				},
+				"router": {
+					desc:          "Default router offered to clients of this pool (DHCPv4)",
+					args:          1,
+					placeholder:   "<address>",
+					valueType:     ValueIPAddress,
+					valueDesc:     "Router IP address",
+					valueExamples: []string{"10.0.1.1"},
+					validator:     ValidateIPAddress,
+					children:      nil,
+				},
 				"dns-server": {
 					desc:          "DNS resolver offered to clients of this pool (repeatable; accepts a bracketed list)",
 					args:          1,
@@ -1272,6 +1343,26 @@ func dhcpLocalServerGroupSchema(fam string) *schemaNode {
 					valueDesc:     "Resolver IP address",
 					valueExamples: []string{"192.0.2.53", "2001:db8::53"},
 					validator:     ValidateIPAddress,
+					children:      nil,
+				},
+				"lease-time": {
+					desc:          "Lease lifetime offered to clients of this pool, in seconds",
+					args:          1,
+					placeholder:   "<seconds>",
+					valueType:     ValueInteger,
+					valueDesc:     "Lease time in seconds (>= 1)",
+					valueExamples: []string{"3600", "86400"},
+					validator:     ValidateIntegerMin(1),
+					children:      nil,
+				},
+				"domain-name": {
+					desc:          "Domain name offered to clients of this pool",
+					args:          1,
+					placeholder:   "<domain>",
+					valueType:     ValueHostname,
+					valueDesc:     "DNS domain name",
+					valueExamples: []string{"example.local"},
+					validator:     ValidateDNSDomain,
 					children:      nil,
 				},
 				"static-binding": dhcpStaticBindingSchema(),
