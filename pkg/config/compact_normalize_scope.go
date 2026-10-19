@@ -1292,6 +1292,11 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"isis is-type",
 		"isis level",
 		"isis net",
+		// #15776: "lldp disable" was the missing entry — brace-elided
+		// `protocols { lldp disable; }` packed disable onto the lldp
+		// node and dropped it. (Zero-arg flag head, like other flags
+		// the #9056 census adjudicates directly.)
+		"lldp disable",
 		"lldp hold-multiplier",
 		"lldp interface",
 		"lldp transmit-interval",

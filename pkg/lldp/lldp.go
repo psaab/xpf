@@ -93,6 +93,29 @@ type LLDPConfig struct {
 	ChassisMAC net.HardwareAddr
 }
 
+// dedupInterfaces15776 collapses duplicate same-name entries (#15776).
+// A disable on ANY entry wins (fail closed), keyed by kernel name so
+// `ge-0/0/0` and `ge-0-0-0` spellings of one device also merge. First
+// occurrence order is preserved. Defense-in-depth behind the
+// config compiler merge: a hand-built or future-producer config with
+// duplicates must not spawn duplicate sessions for one interface.
+func dedupInterfaces15776(ifaces []LLDPInterface) []LLDPInterface {
+	seen := make(map[string]int, len(ifaces))
+	out := make([]LLDPInterface, 0, len(ifaces))
+	for _, ifc := range ifaces {
+		k := config.LinuxIfName(ifc.Name)
+		if i, ok := seen[k]; ok {
+			if ifc.Disable {
+				out[i].Disable = true
+			}
+			continue
+		}
+		seen[k] = len(out)
+		out = append(out, ifc)
+	}
+	return out
+}
+
 // neighborKey identifies a learned LLDP neighbor.
 //
 // It is a STRUCT rather than a separator-joined string, and that is the whole
@@ -369,7 +392,9 @@ func (m *Manager) Apply(ctx context.Context, cfg *LLDPConfig) (unresolved []stri
 	// and minus interfaces explicitly enabled (started once, below).
 	// Without this, "all" was handed to InterfaceByName as a kernel device
 	// name, never resolved, and LLDP ran nowhere with only a Warn.
-	effective, allUnresolved := expandAllInterfaces(cfg.Interfaces)
+	// #15776: collapse duplicates (disable wins) before expansion so
+	// one interface never gets duplicate sessions.
+	effective, allUnresolved := expandAllInterfaces(dedupInterfaces15776(cfg.Interfaces))
 	if allUnresolved {
 		unresolved = append(unresolved, "all")
 	}
