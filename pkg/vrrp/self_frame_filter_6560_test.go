@@ -177,18 +177,18 @@ func TestReceiverAfPacketDropsSelfFrameWithNilSnapshot_6560(t *testing.T) {
 		{peerFrame, unix.PACKET_MULTICAST}, // a real peer advert
 	}
 
-	orig := afPacketRecvfrom
-	defer func() { afPacketRecvfrom = orig }()
+	orig := afPacketRecvmsg
+	defer func() { afPacketRecvmsg = orig }()
 	idx := 0
-	afPacketRecvfrom = func(_ int, p []byte, _ int) (int, unix.Sockaddr, error) {
+	afPacketRecvmsg = func(_ int, p, _ []byte, _ int) (int, int, int, unix.Sockaddr, error) {
 		if idx >= len(queue) {
 			close(vi.stopCh)
-			return 0, nil, unix.EAGAIN
+			return 0, 0, 0, nil, unix.EAGAIN
 		}
 		d := queue[idx]
 		idx++
 		n := copy(p, d.frame)
-		return n, &unix.SockaddrLinklayer{Pkttype: d.pkttype}, nil
+		return n, 0, 0, &unix.SockaddrLinklayer{Pkttype: d.pkttype}, nil
 	}
 
 	done := make(chan struct{})

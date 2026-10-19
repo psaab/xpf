@@ -4,9 +4,11 @@ import (
 	"encoding/binary"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -316,8 +318,24 @@ func (vi *vrrpInstance) receiverIPv6() {
 // Uses SOCK_RAW + ETH_P_ALL (same as tcpdump) — receives full Ethernet frames.
 // Handles IPv4, IPv6, and 802.1Q-tagged variants. Detects VLAN tags and
 // adjusts header skip: 14 bytes untagged, 18 bytes single-tagged.
+//
+// #15049: a frame whose 802.1Q tag the kernel stripped into skb metadata is
+// indistinguishable in-data from a native untagged frame. The socket asks
+// for PACKET_AUXDATA (openAfPacketReceiver); when auxdata reports
+// TP_STATUS_VLAN_VALID and this instance is bound to a non-VLAN (parent)
+// netdev, the frame belongs to a tagged sibling election and is dropped
+// before either parser runs. A VLAN child (bound to the .N sub-interface)
+// is exempt: the tag is its own, and on its tap the tag is normally still
+// in-data anyway. This mirrors the #2886 arrival-ifindex fail-open rule:
+// no auxdata / no VLAN_VALID means "not proven tagged", so native delivery
+// is never regressed on a kernel that omits the cmsg.
 func (vi *vrrpInstance) receiverAfPacket() {
 	buf := make([]byte, 1500)
+	oob := make([]byte, unix.CmsgSpace(int(unsafe.Sizeof(unix.TpacketAuxdata{}))))
+	// The bound netdev's VLAN-ness is fixed for the life of the socket
+	// (openSocketWith derives the same value from the same spelling), so
+	// resolve it once outside the per-packet loop.
+	boundToVLAN := isVLANInterfaceName(vi.cfg.Interface)
 	for {
 		select {
 		case <-vi.stopCh:
@@ -325,7 +343,7 @@ func (vi *vrrpInstance) receiverAfPacket() {
 		default:
 		}
 
-		n, from, err := afPacketRecvfrom(vi.afPacketFD, buf, 0)
+		n, oobn, _, from, err := afPacketRecvmsg(vi.afPacketFD, buf, oob, 0)
 		if err != nil {
 			select {
 			case <-vi.stopCh:
@@ -344,6 +362,16 @@ func (vi *vrrpInstance) receiverAfPacket() {
 		// address-snapshot comparison further down cannot cover it.
 		if afPacketFrameIsOutgoing(from) {
 			continue
+		}
+
+		// Drop a stripped-tag frame on a non-VLAN netdev (#15049). The
+		// in-data ethertype below reads untagged for such a frame, so this
+		// out-of-band check is the only place the sibling election can be
+		// kept out of the native instance's state machine.
+		if !boundToVLAN {
+			if _, tagged := afPacketAuxdataVLANTag(oob, oobn); tagged {
+				continue
+			}
 		}
 
 		// Need at least 14 bytes to read the ethertype.
@@ -370,6 +398,46 @@ func (vi *vrrpInstance) receiverAfPacket() {
 			vi.parseAfPacketIPv4(buf, n, ethHeaderLen)
 		}
 	}
+}
+
+// isVLANInterfaceName reports whether an instance's kernel interface name
+// denotes a VLAN sub-interface (name contains ".", e.g. ge-0-0-0.100). It
+// is the single spelling openSocketWith routes to maybeBindToDevice, kept
+// as a named helper so the #15049 AF_PACKET drop and the socket-open path
+// cannot drift apart.
+func isVLANInterfaceName(ifName string) bool {
+	return strings.Contains(ifName, ".")
+}
+
+// afPacketAuxdataVLANTag parses the PACKET_AUXDATA control message a
+// recvmsg on the AF_PACKET socket delivered and reports the VLAN TCI the
+// kernel stripped into skb metadata, if any. The second return is false
+// when no auxdata cmsg is present, the cmsg is truncated, or
+// TP_STATUS_VLAN_VALID is clear — all of which mean "not proven tagged"
+// and fail open for native delivery (see receiverAfPacket).
+func afPacketAuxdataVLANTag(oob []byte, oobn int) (uint16, bool) {
+	if oobn <= 0 || oobn > len(oob) {
+		return 0, false
+	}
+	msgs, err := unix.ParseSocketControlMessage(oob[:oobn])
+	if err != nil {
+		return 0, false
+	}
+	for i := range msgs {
+		m := &msgs[i]
+		if m.Header.Level != unix.SOL_PACKET || m.Header.Type != unix.PACKET_AUXDATA {
+			continue
+		}
+		if len(m.Data) < int(unsafe.Sizeof(unix.TpacketAuxdata{})) {
+			return 0, false
+		}
+		aux := (*unix.TpacketAuxdata)(unsafe.Pointer(&m.Data[0]))
+		if aux.Status&unix.TP_STATUS_VLAN_VALID == 0 {
+			return 0, false
+		}
+		return aux.Vlan_tci, true
+	}
+	return 0, false
 }
 
 // parseAfPacketIPv4 parses an IPv4 VRRP packet from a raw Ethernet frame.
@@ -599,11 +667,14 @@ func (vi *vrrpInstance) warnRXDrop() {
 		"key", vi.key(), "total_drops", drops)
 }
 
-// afPacketRecvfrom is the recvfrom(2) entry point used by receiverAfPacket.
-// Package var for the same reason as afPacketSocket in manager.go: it lets a
-// test drive the receive LOOP — including the #6560 self-frame drop, which lives
-// in the loop and not in the parsers — deterministically and without CAP_NET_RAW.
-var afPacketRecvfrom = unix.Recvfrom
+// afPacketRecvmsg is the recvmsg(2) entry point used by receiverAfPacket.
+// It replaces the plain recvfrom so the loop also receives the
+// PACKET_AUXDATA control message (#15049): Recvfrom cannot surface the
+// VLAN TCI the kernel stripped into skb metadata. Package var so a test
+// can drive the receive LOOP — including the #15049 stripped-tag drop and
+// the #6560 self-frame drop, which live in the loop and not in the
+// parsers — deterministically and without CAP_NET_RAW.
+var afPacketRecvmsg = unix.Recvmsg
 
 // afPacketFrameIsOutgoing reports whether a frame the AF_PACKET capture socket
 // delivered is one this host TRANSMITTED, using the sll_pkttype the kernel

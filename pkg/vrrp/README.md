@@ -1242,6 +1242,31 @@ ethertype (#5088):
   waking the RX goroutine only for the Go walker to drop them. The cBPF is
   only a volume reducer; authoritative validation is in Go.
 
+- **Stripped-tag sibling frames are dropped on the parent (#15049).**
+  An untagged unit on a `vlan-tagging` parent binds its AF_PACKET tap to
+  the parent netdev. A peer advert for a tagged sibling (VLAN N) arrives
+  on the wire 802.1Q-tagged, but the NIC strips the tag into skb metadata
+  before the parent's `ETH_P_ALL` tap, so the frame reads untagged in
+  data and — before this fix — a same-VRID sibling election drove the
+  native instance (native MASTER demoted / master-down timer perpetually
+  reset, native VIP ownerless). The socket now requests
+  `PACKET_AUXDATA` (`openAfPacketReceiver`) and `receiverAfPacket` reads
+  it via `recvmsg` (`afPacketAuxdataVLANTag`): `TP_STATUS_VLAN_VALID` on
+  a non-VLAN netdev drops the frame before either parser runs. A VLAN
+  child is exempt (the tag is its own; its tap normally still carries it
+  in-data), and missing/invalid auxdata fails open exactly like the
+  #2886 arrival-ifindex helper — no cmsg means "not proven tagged", so
+  native delivery is never regressed. The issue's cBPF `ld vlan_avail`
+  alternative was not used: the same cBPF array is attached to parent and
+  child sockets, so it cannot express "drop tagged only on the parent",
+  and `golang.org/x/net/bpf`'s VM cannot execute the ancillary load, so
+  the exact mechanism would be untestable in the bpf.VM harness the
+  #5088 tests rely on. The userspace auxdata check is the per-instance
+  half of the issue's stated `PACKET_AUXDATA and TP_STATUS_VLAN_VALID`
+  option and is exercised end-to-end through the `afPacketRecvmsg` seam
+  (`vlan_tag_present_15049_test.go`: parent drops vlan_tci=100, untagged
+  control kept, child keeps its own VLAN).
+
 `parseAfPacketIPv6` performs a **bounded** IPv6 ext-header walk
 (`walkIPv6ExtHeaders`) to locate the real proto-112 payload offset
 instead of assuming the old fixed 40-byte base header. Conventions and
