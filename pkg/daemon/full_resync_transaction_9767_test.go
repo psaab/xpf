@@ -437,8 +437,10 @@ func TestUserspaceDeltaQueueCallsitesUseLockedHelper_9766(t *testing.T) {
 	if !handlerFound {
 		t.Fatal("handleEventStreamDelta is not in daemon_ha_userspace_stream.go")
 	}
-	if locked != 2 || old != 0 {
-		t.Fatalf("#9766: queue helper callsites = locked:%d old:%d, want locked:2 old:0", locked, old)
+	if locked != 3 || old != 0 {
+		t.Fatalf("#9766: queue helper callsites = locked:%d old:%d, want locked:3 old:0 "+
+			"(handler, drain success path, and the #15217 drain status-error path — all under userspaceDeltaSyncMu)",
+			locked, old)
 	}
 	if handlerQueue != 1 || lockPos == 0 || queuePos == 0 || unlockPos == 0 ||
 		!(lockPos < queuePos && queuePos < unlockPos) {
