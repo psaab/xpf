@@ -4059,7 +4059,9 @@ never lock an operator out of a remote box it manages.
   back it after a later link-up. The managed loop retries on the next tick
   (30 s fallback), resubscribes closed link/address channels after backoff,
   then verifies all pins to resync. Also owns the §4.4 HA gating scope
-  (`filterRPMForHAGating`).
+  (`filterRPMForHAGating`): gating is per RPM test (#15074) — a probe whose
+  tests bind RETHs in different RGs runs exactly the tests this node is
+  primary for, deterministically, instead of picking one probe-wide RG.
 - `daemon_ipmon.go` — `assembleFRRConfig` (the SOLE `frr.FullConfig`
   constructor, shared by the full apply path and the routes-only
   actuator) + `actuateRouteOverlay` (FRR re-render → snapshot publish

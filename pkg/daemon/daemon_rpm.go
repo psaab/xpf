@@ -45,8 +45,8 @@ func rpmConfigHash(rpmCfg *config.RPMConfig, rethMap map[string]string) [32]byte
 
 // effectiveRPMConfig returns the RPM config that should actually run
 // on this node: in cluster mode the §4.4 ip-monitoring gating scope
-// removes gated probes while the node is not primary for their data
-// RG; everything else (and all standalone probes) keeps today's
+// removes gated tests while the node is not primary for their data
+// RG; everything else (and all standalone tests) keeps today's
 // run-everywhere behavior.
 func (d *Daemon) effectiveRPMConfig(cfg *config.Config) *config.RPMConfig {
 	if cfg == nil {
@@ -56,44 +56,85 @@ func (d *Daemon) effectiveRPMConfig(cfg *config.Config) *config.RPMConfig {
 }
 
 // filterRPMForHAGating implements the §4.4 primary-only gating scope
-// (#1827 PR-1b). Gating applies ONLY to probes that are (a) referenced
-// by a `services ip-monitoring` policy, or (b) bound via
+// (#1827 PR-1b). Gating applies ONLY to tests that are (a) in a probe
+// referenced by a `services ip-monitoring` policy, or (b) bound via
 // destination-interface / source-address to a VIP-owned (RETH)
 // interface — uplink addresses are VRRP-owned VIPs, so a standby probe
-// would fail structurally, not informatively. All other probes are
-// untouched. Within the gated scope, a probe runs only on the node
-// that is primary for the probe's redundancy group.
+// would fail structurally, not informatively (#15074).
+//
+// Gating is PER TEST, not per probe: a probe whose tests resolve to
+// different RGs keeps exactly the tests this node is primary for and
+// stops the rest. Junos keys a probe to a single routing instance and
+// has no multi-RG probe spelling, so the mixed shape is an xpf
+// artefact; running the locally-owned tests and stopping the foreign
+// ones is preferred to dropping the whole probe (which loses the owned
+// RG's monitoring) or picking one gate RG by map iteration order
+// (the pre-#15074 last-writer-wins behaviour — the probe then ran on
+// both nodes, on neither, or flipped across reconciles). Tests are
+// only removed, never added, so the filtered probe's runs stay a
+// subset of the authored probe.
 func (d *Daemon) filterRPMForHAGating(cfg *config.Config) *config.RPMConfig {
 	rpmCfg := cfg.Services.RPM
 	if rpmCfg == nil || d.cluster == nil || cfg.Chassis.Cluster == nil {
 		return rpmCfg
 	}
 
-	gatedRG := rpmProbeGatingRGs(cfg)
-	if len(gatedRG) == 0 {
+	gating := rpmProbeTestGating(cfg)
+	if len(gating) == 0 {
 		return rpmCfg
 	}
 
 	filtered := &config.RPMConfig{Probes: make(map[string]*config.RPMProbe, len(rpmCfg.Probes))}
-	dropped := 0
+	droppedTests, droppedProbes := 0, 0
 	for name, probe := range rpmCfg.Probes {
-		if rgID, gated := gatedRG[name]; gated && !d.cluster.IsLocalPrimary(rgID) {
-			dropped++
+		if probe == nil {
+			filtered.Probes[name] = probe
 			continue
 		}
-		filtered.Probes[name] = probe
+		kept := make(map[string]*config.RPMTest, len(probe.Tests))
+		for testName, test := range probe.Tests {
+			if rgID, gated := gating[probeTestKey{name, testName}]; gated && !d.cluster.IsLocalPrimary(rgID) {
+				droppedTests++
+				continue
+			}
+			kept[testName] = test
+		}
+		if len(kept) == 0 {
+			droppedProbes++
+			continue
+		}
+		if len(kept) == len(probe.Tests) {
+			filtered.Probes[name] = probe
+			continue
+		}
+		filtered.Probes[name] = &config.RPMProbe{Name: probe.Name, Tests: kept}
 	}
-	if dropped > 0 {
-		slog.Info("RPM probes gated off while secondary", "gated", dropped)
+	if droppedTests > 0 {
+		slog.Info("RPM probe tests gated off while secondary",
+			"tests", droppedTests, "probes", droppedProbes)
 	}
 	return filtered
 }
 
-// rpmProbeGatingRGs returns the probes inside the §4.4 gating scope,
-// mapped to the redundancy group whose primaryship gates them: the RG
-// of a bound RETH interface when one exists, otherwise the lowest
-// configured data RG.
-func rpmProbeGatingRGs(cfg *config.Config) map[string]int {
+// probeTestKey identifies one RPM test inside its probe; used as the
+// key of the per-test gating map (#15074).
+type probeTestKey struct {
+	// probe is the authored probe name, test the test name inside it.
+	probe, test string
+}
+
+// rpmProbeTestGating returns the gated tests, keyed per test and mapped
+// to the redundancy group whose primaryship gates them: the test's own
+// bound RETH RG when it has one, otherwise the lowest configured data
+// RG for a test that is in the gating scope only through its probe's
+// ip-monitoring reference.
+//
+// Every test resolves independently, so the result cannot depend on
+// the iteration order of probe.Tests (a Go map): a test bound to
+// reth0.50 in RG1 is gated by RG1 regardless of what another test binds
+// (#15074). Iteration order of the input maps is irrelevant because
+// each key is written exactly once from that key's own test.
+func rpmProbeTestGating(cfg *config.Config) map[probeTestKey]int {
 	rpmCfg := cfg.Services.RPM
 	if rpmCfg == nil {
 		return nil
@@ -134,36 +175,61 @@ func rpmProbeGatingRGs(cfg *config.Config) map[string]int {
 
 	defaultRG := lowestDataRG(cfg)
 
-	gated := make(map[string]int)
+	gated := make(map[probeTestKey]int)
 	for probeName, probe := range rpmCfg.Probes {
 		if probe == nil {
 			continue
 		}
-		rgID, inScope := defaultRG, false
-		if referenced[probeName] {
-			inScope = true
-		}
-		for _, test := range probe.Tests {
+		probeReferenced := referenced[probeName]
+		for testName, test := range probe.Tests {
+			key := probeTestKey{probeName, testName}
 			if test == nil {
+				if probeReferenced {
+					gated[key] = defaultRG
+				}
 				continue
 			}
+			// A test's own binding wins over its probe-sibling's: the
+			// destination-interface pin is the test's egress contract,
+			// then the source-address VIP contract.
 			if test.DestinationInterface != "" {
 				base := test.DestinationInterface
 				if i := strings.IndexByte(base, '.'); i >= 0 {
 					base = base[:i]
 				}
 				if rg, ok := rethRG[base]; ok {
-					inScope, rgID = true, rg
+					gated[key] = rg
+					continue
 				}
 			}
 			if test.SourceAddress != "" {
 				if rg, ok := rethVIPs[test.SourceAddress]; ok {
-					inScope, rgID = true, rg
+					gated[key] = rg
+					continue
 				}
 			}
+			if probeReferenced {
+				gated[key] = defaultRG
+			}
 		}
-		if inScope {
-			gated[probeName] = rgID
+	}
+	return gated
+}
+
+// rpmProbeGatingRGs returns the probes inside the §4.4 gating scope,
+// mapped to a representative gating RG: the lowest RG among the
+// probe's gated tests. Probes whose tests span several RGs have no
+// single gating RG — gating itself is per test (see
+// rpmProbeTestGating) — so this probe-level view is retained only for
+// call sites that ask "is this probe in scope, and on which RG does it
+// (at least partly) run": the HA takeover burst and the issue #3764
+// publish comment. The minimum is deterministic (the pre-#15074
+// last-writer-wins-over-map-order pick was not).
+func rpmProbeGatingRGs(cfg *config.Config) map[string]int {
+	gated := make(map[string]int)
+	for key, rg := range rpmProbeTestGating(cfg) {
+		if cur, ok := gated[key.probe]; !ok || rg < cur {
+			gated[key.probe] = rg
 		}
 	}
 	return gated
@@ -758,6 +824,14 @@ func (d *Daemon) reconcileRPMMode(cfg *config.Config, haTransition bool) bool {
 	slog.Info("RPM probe set applied", "probes", probes)
 	return true
 }
+
+// newlyEnabledIPMonProbeNames reports ip-monitoring probes that gained at
+// least one runnable test in effective versus previous, for the HA takeover
+// burst. The gate is probe-membership (rpmProbeGatingRGs is only an
+// in-scope marker here): with per-test gating (#15074) a probe that was
+// already partly running on this node is not re-burst — its newly enabled
+// tests join on the normal hash-gated apply — while a probe that becomes
+// runnable at all still bursts as before.
 func newlyEnabledIPMonProbeNames(cfg *config.Config, previous, effective *config.RPMConfig) map[string]struct{} {
 	if cfg == nil || previous == nil || effective == nil || cfg.Services.IPMonitoring == nil {
 		return nil
