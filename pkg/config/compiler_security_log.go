@@ -58,6 +58,39 @@ func securityLogStreamSchema9391() *schemaNode {
 	return n
 }
 
+// securityLogProfileSchema resolves the `security log profile <p>` body so a
+// flat/compact run of its own leaves can be expanded before the reader walks
+// it (the profile counterpart of securityLogStreamSchema9391).
+func securityLogProfileSchema() *schemaNode {
+	return schemaForPath("security", "log", "profile")
+}
+
+// securityLogInstanceBody returns the expanded property nodes for a named
+// `stream` or `profile` instance across both the named spelling
+// (`stream s1 ...`, body in inst.node.Children / Keys tail) and the
+// hierarchical named-instance compact spelling
+// (`stream { s1 host ... port ...; }`), where namedInstances hands back the
+// instance sub-node with the WHOLE body packed onto its Keys after the
+// name. instanceValueTail anchors on the name, so it recovers that tail for
+// both shapes; expandFlatRun then splits the tail into one node per leaf
+// under the instance schema. Without this the compact body was dropped:
+// the stream compiled host-less (and was discarded), its port/tls-profile
+// never reached the #3349/#3350 gates, and a compact profile's stream-name
+// never reached the #2008 cross-reference (#15701). Inline properties are
+// placed before the braced children so a braced body wins on duplicate
+// scalars, matching author order.
+func securityLogInstanceBody(inst struct {
+	name string
+	node *Node
+}, schema *schemaNode) []*Node {
+	body := inst.node.Children
+	if tail := instanceValueTail(inst.node, inst.name); len(tail) > 0 {
+		inline := expandFlatRun([]*Node{{Keys: tail}}, schema)
+		body = append(inline, body...)
+	}
+	return expandFlatRun(body, schema)
+}
+
 func securityLogTransportSchema() *schemaNode {
 	n := setSchema
 	for _, k := range []string{"security", "log", "stream"} {
@@ -94,21 +127,30 @@ func compileLog(node *Node, sec *SecurityConfig) error {
 	// Lenient path only (the schema gate refuses this spelling at commit).
 	node = expandRun9235(node, securityLogSchema9235())
 
-	// Top-level log settings
-	if modeNode := node.FindChild("mode"); modeNode != nil {
-		sec.Log.Mode = nodeVal(modeNode)
-	}
-	if fmtNode := node.FindChild("format"); fmtNode != nil {
-		sec.Log.Format = nodeVal(fmtNode)
-	}
-	if srcNode := node.FindChild("source-interface"); srcNode != nil {
-		sec.Log.SourceInterface = nodeVal(srcNode)
-	}
-	if srcAddrNode := node.FindChild("source-address"); srcAddrNode != nil {
-		sec.Log.SourceAddress = nodeVal(srcAddrNode)
-	}
-	if node.FindChild("report") != nil {
-		sec.Log.Report = true
+	// Top-level log settings. #15701: iterate children in order (last-wins,
+	// Junos repeated-scalar semantics) instead of first-wins FindChild, which
+	// kept `mode stream` over a later `mode event`.
+	for _, child := range node.Children {
+		switch child.Name() {
+		case "mode":
+			if v := nodeVal(child); v != "" {
+				sec.Log.Mode = v
+			}
+		case "format":
+			if v := nodeVal(child); v != "" {
+				sec.Log.Format = v
+			}
+		case "source-interface":
+			if v := nodeVal(child); v != "" {
+				sec.Log.SourceInterface = v
+			}
+		case "source-address":
+			if v := nodeVal(child); v != "" {
+				sec.Log.SourceAddress = v
+			}
+		case "report":
+			sec.Log.Report = true
+		}
 	}
 
 	for _, inst := range namedInstances(node.FindChildren("stream")) {
@@ -119,7 +161,7 @@ func compileLog(node *Node, sec *SecurityConfig) error {
 		// #9391: expand the flat-set run before reading it — `port` is an
 		// untyped ADMISSION HEAD, so `port 5514 category policy` arrived as a
 		// nested chain and this loop kept only the head.
-		for _, prop := range expandFlatRun(inst.node.Children, securityLogStreamSchema9391()) {
+		for _, prop := range securityLogInstanceBody(inst, securityLogStreamSchema9391()) {
 			switch prop.Name() {
 			case "host":
 				// #15270 flat sibling: `host port <n>` (FormatSet rendering of
@@ -229,7 +271,7 @@ func compileLog(node *Node, sec *SecurityConfig) error {
 	// is not yet used to alter the emitted structured data (out of scope).
 	for _, inst := range namedInstances(node.FindChildren("profile")) {
 		p := &LogProfile{Name: inst.name}
-		for _, prop := range inst.node.Children {
+		for _, prop := range securityLogInstanceBody(inst, securityLogProfileSchema()) {
 			switch prop.Name() {
 			case "stream-name":
 				p.StreamName = nodeVal(prop)
@@ -303,7 +345,7 @@ func validateSecurityLogStreamPortsAST(nodes []*Node, prefix string, lenient boo
 				// walk saw the UNexpanded children it would validate a
 				// different set of statements than the one that gets compiled
 				// — which is how a value can be both checked and dropped.
-				for _, prop := range expandFlatRun(inst.node.Children, securityLogStreamSchema9391()) {
+				for _, prop := range securityLogInstanceBody(inst, securityLogStreamSchema9391()) {
 					switch prop.Name() {
 					case "port":
 						if err := check(joinNodePath(streamPath, []string{"port"}), nodeVal(prop)); err != nil {
@@ -385,15 +427,11 @@ func validateSecurityLogStreamTLSProfileAST(nodes []*Node, prefix string, lenien
 			logPath := joinNodePath(secPath, []string{"log"})
 			for _, inst := range namedInstances(logNode.FindChildren("stream")) {
 				streamPath := joinNodePath(logPath, []string{"stream", inst.name})
-				// #12887: same flat-run expansion compileLog reads, so a
-				// packed `stream s transport tls-profile X;` cannot slip
-				// past the gate as an unexpanded chain head. An elided
-				// stream carries its whole body in the node's own Keys.
-				streamBody := inst.node.Children
-				if len(streamBody) == 0 && len(inst.node.Keys) > 2 {
-					streamBody = []*Node{{Keys: inst.node.Keys[2:]}}
-				}
-				for _, prop := range expandFlatRun(streamBody, securityLogStreamSchema9391()) {
+				// #12887/#15701: same shared expansion compileLog reads,
+				// so a packed or compact-container stream
+				// (`stream { s host ... transport tls-profile X; }`)
+				// cannot slip past the gate as an unexpanded chain head.
+				for _, prop := range securityLogInstanceBody(inst, securityLogStreamSchema9391()) {
 					if prop.Name() != "transport" {
 						continue
 					}
