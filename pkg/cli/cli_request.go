@@ -78,10 +78,21 @@ func (c *CLI) handleRequestDHCP(args []string) error {
 	if c.dhcp == nil {
 		return fmt.Errorf("DHCP manager not available")
 	}
-	if err := c.dhcp.Renew(args[1]); err != nil {
+	// #15227 A43-04: resolve through the active config like the gRPC
+	// surface; the raw Junos spelling never matches the manager's lease
+	// key. Nil store keeps the raw target (manager diagnosis stands).
+	renewTarget := args[1]
+	if c.store != nil {
+		resolved, rerr := c.store.ActiveConfig().ResolveDHCPRenewTarget(args[1])
+		if rerr != nil {
+			return rerr
+		}
+		renewTarget = resolved
+	}
+	if err := c.dhcp.Renew(renewTarget); err != nil {
 		return err
 	}
-	fmt.Printf("DHCP renewal initiated on %s\n", args[1])
+	fmt.Printf("DHCP renewal initiated on %s\n", renewTarget)
 	return nil
 }
 

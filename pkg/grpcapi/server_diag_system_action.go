@@ -696,11 +696,25 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 		if req.Target == "" {
 			return nil, status.Errorf(codes.InvalidArgument, "dhcp-renew requires target interface")
 		}
-		if err := s.dhcp.Renew(req.Target); err != nil {
+		// #15227 A43-04: resolve the operator spelling (config key,
+		// ifd.unit, Linux form) through the active config to the lease
+		// key the manager runs the client under. Passing req.Target raw
+		// missed every Junos-spelled target with a false "no DHCP client
+		// running" refusal. A nil store keeps the raw target so the
+		// manager's own diagnosis stands in no-daemon builds.
+		renewTarget := req.Target
+		if s.store != nil {
+			resolved, rerr := s.store.ActiveConfig().ResolveDHCPRenewTarget(req.Target)
+			if rerr != nil {
+				return nil, status.Errorf(codes.NotFound, "%v", rerr)
+			}
+			renewTarget = resolved
+		}
+		if err := s.dhcp.Renew(renewTarget); err != nil {
 			return nil, status.Errorf(codes.NotFound, "%v", err)
 		}
 		return &pb.SystemActionResponse{
-			Message: fmt.Sprintf("DHCP renewal initiated on %s", req.Target),
+			Message: fmt.Sprintf("DHCP renewal initiated on %s", renewTarget),
 		}, nil
 
 	case "in-service-upgrade":

@@ -1138,14 +1138,11 @@ var OperationalTree = map[string]*Node{
 		}},
 		"dhcp": {Desc: "Perform DHCP operations", Children: map[string]*Node{
 			"renew": {Desc: "Renew DHCP lease on an interface", DynamicFn: func(cfg *config.Config) []string {
-				if cfg == nil || cfg.Interfaces.Interfaces == nil {
-					return nil
-				}
-				names := make([]string, 0, len(cfg.Interfaces.Interfaces))
-				for name := range cfg.Interfaces.Interfaces {
-					names = append(names, name)
-				}
-				return names
+				// #15227 A43-04: offer the resolvable config-key unit
+				// spellings (ge-0/0/3.7), not bare interface names whose
+				// renew the daemon then refused, and never the hidden
+				// Linux lease keys.
+				return config.DHCPRenewCompletionNames(cfg)
 			}},
 		}},
 		"protocols": {Desc: "Protocol operations", Children: map[string]*Node{

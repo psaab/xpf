@@ -541,6 +541,15 @@ func (s *Server) MonitorPacketDrop(req *pb.MonitorPacketDropRequest, stream grpc
 			if rec.Type != "POLICY_DENY" && rec.Type != "SCREEN_DROP" {
 				continue
 			}
+			// #15227 A43-05 (#2298 residual): a SCREEN record with
+			// action=permit is an alarm — the packet forwarded — not a
+			// drop. Admitting it here rendered "Dropped by SCREEN:..."
+			// for forwarded traffic during the incident this command is
+			// used for. Skip it; only real screen drops (deny/reject)
+			// and policy denies are packet drops.
+			if rec.Type == "SCREEN_DROP" && strings.EqualFold(rec.Action, "permit") {
+				continue
+			}
 			if srcNet != nil {
 				host, _, _ := net.SplitHostPort(rec.SrcAddr)
 				if host == "" {
