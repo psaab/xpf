@@ -242,9 +242,12 @@ func FormatCoSClassifiers(cfg *config.Config, nameFilter, typeFilter string) str
 	// Three bits, like ieee-802.1, so the existing cpRow rendering needs no
 	// change. The type filter accepts the same token the config uses.
 	if typeFilter == "" || typeFilter == "inet-precedence" {
-		// The compiler records every configured name, but only creates a Defs
-		// entry when it contains at least one valid forwarding-class/code-point
-		// mapping. Union both sources so entryless classifiers remain visible.
+		// Since #15681 the compiler creates a Defs entry for every defined
+		// classifier, entryless ones with zero entries; older/hand-built
+		// configs may carry the name only in INetPrecedenceClassifiers.
+		// Union both sources so entryless classifiers remain visible in
+		// either shape, and mark a classifier entryless when it has no
+		// entries (not merely when Defs lacks it).
 		names := sortedMapKeys(cos.INetPrecedenceClassifierDefs)
 		seen := make(map[string]struct{}, len(names)+len(cos.INetPrecedenceClassifiers))
 		for _, name := range names {
@@ -263,7 +266,7 @@ func FormatCoSClassifiers(cfg *config.Config, nameFilter, typeFilter string) str
 				continue
 			}
 			c := cos.INetPrecedenceClassifierDefs[name]
-			blk := classifierBlock{name: name, cpType: "inet-precedence", entryless: c == nil}
+			blk := classifierBlock{name: name, cpType: "inet-precedence", entryless: c == nil || len(c.Entries) == 0}
 			if c != nil {
 				for _, e := range c.Entries {
 					if e == nil {
@@ -861,7 +864,9 @@ func FormatCoSForwardingClasses(cfg *config.Config) string {
 }
 
 // formatSchedulerBuffer renders a scheduler's buffer sizing for display: an
-// explicit byte size, the Junos percent form, or "-" when unset.
+// explicit byte size, the Junos percent form, the temporal form (#15681,
+// rendered as "<us>us"), or "-" when unset. Before #15681 a temporal-only
+// scheduler rendered "Buffer: -", hiding the configured sizing.
 func formatSchedulerBuffer(sched *config.CoSScheduler) string {
 	if sched == nil {
 		return "-"
@@ -871,6 +876,9 @@ func formatSchedulerBuffer(sched *config.CoSScheduler) string {
 	}
 	if sched.BufferSizePercent > 0 {
 		return strconv.FormatFloat(sched.BufferSizePercent, 'f', -1, 64) + "%"
+	}
+	if sched.BufferSizeTemporalUS > 0 {
+		return strconv.FormatUint(sched.BufferSizeTemporalUS, 10) + "us"
 	}
 	return "-"
 }

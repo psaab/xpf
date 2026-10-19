@@ -8,15 +8,15 @@ import (
 )
 
 // #11833 ([C-12]): an entryless `classifiers inet-precedence <name>` is recorded
-// in INetPrecedenceClassifiers (names list, compiler_class_of_service.go:323)
-// but has no entry in INetPrecedenceClassifierDefs (map, only populated when
-// len(Entries) > 0 at :363). It commits, binds, and completes, yet the
-// renderer iterated Defs only, so `show` omitted it unfiltered and reported
-// "No matches" by name — a show-vs-commit contradiction.
+// in INetPrecedenceClassifiers (names list). Before #15681 it had no entry in
+// INetPrecedenceClassifierDefs (map, only populated when len(Entries) > 0);
+// #15681 populates Defs unconditionally, so a compiled entryless classifier
+// now has a Defs entry with zero entries. It commits, binds, and completes,
+// and the renderer must show it in both shapes (hand-built names-only config
+// and compiled config) — a show-vs-commit contradiction otherwise.
 //
-// These cells pin the real compiler-emitted shape (names entry, nil Defs map)
-// and require the renderer to show it. Renderer-side fix only: tree.go is
-// EE-owned and MUST NOT be touched.
+// These cells pin both shapes and require the renderer to show it.
+// Renderer-side tests only: tree.go is EE-owned and MUST NOT be touched.
 func cosCfgEntryless11833(names ...string) *config.Config {
 	return &config.Config{ClassOfService: &config.ClassOfServiceConfig{
 		INetPrecedenceClassifiers: names,
@@ -48,8 +48,10 @@ func TestCompiledEntrylessINetPrecedenceShownUnfilteredAndByName_11833(t *testin
 	if cos == nil || len(cos.INetPrecedenceClassifiers) != 1 || cos.INetPrecedenceClassifiers[0] != "empty-cl" {
 		t.Fatalf("compiled classifier names = %#v, want [empty-cl]", cos)
 	}
-	if cos.INetPrecedenceClassifierDefs["empty-cl"] != nil {
-		t.Fatalf("entryless classifier unexpectedly has a Defs entry: %#v", cos.INetPrecedenceClassifierDefs["empty-cl"])
+	// #15681: Defs is populated unconditionally — entryless means zero
+	// entries, not absence from the map.
+	if def := cos.INetPrecedenceClassifierDefs["empty-cl"]; def == nil || len(def.Entries) != 0 {
+		t.Fatalf("entryless classifier Defs = %#v, want present with no entries (#15681)", def)
 	}
 	for _, tc := range []struct {
 		name       string

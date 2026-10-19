@@ -1655,16 +1655,15 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 				// was the only one that committed silently.
 				//
 				// DEFINEDNESS comes from INetPrecedenceClassifiers, the NAME
-				// list, not from INetPrecedenceClassifierDefs. The Defs map is
-				// populated only `if len(classifier.Entries) > 0`
-				// (compiler_class_of_service.go), so a classifier defined with
-				// an empty or wholly-rejected body is absent from it while being
-				// perfectly well defined. Keying on Defs would report
-				// "references undefined ... classifier" for a classifier the
-				// operator can see in their own config -- a confident wrong
-				// name, which is worse than the silence being fixed. A
-				// defined-but-empty classifier is a separate condition and not
-				// this warning's subject.
+				// list, not from INetPrecedenceClassifierDefs. Since #15681
+				// Defs is populated unconditionally, but a classifier defined
+				// with an empty or wholly-rejected body still has zero
+				// entries; keying definedness on entry-bearing Defs would
+				// report "references undefined ... classifier" for a
+				// classifier the operator can see in their own config -- a
+				// confident wrong name, which is worse than the silence
+				// being fixed. A defined-but-empty classifier is a separate
+				// condition and not this warning's subject.
 				if unit.INetPrecedenceClassifier != "" {
 					if !slices.Contains(cos.INetPrecedenceClassifiers, unit.INetPrecedenceClassifier) {
 						warnings = append(warnings, fmt.Sprintf(
