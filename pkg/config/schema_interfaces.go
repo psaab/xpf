@@ -525,7 +525,7 @@ func tunnelSchemaChildren() map[string]*schemaNode {
 			valueType:     ValueIPAddress,
 			valueDesc:     "Tunnel source IP address (IPv4 or IPv6)",
 			valueExamples: []string{"10.0.2.10", "2001:db8::1"},
-			validator:     ValidateIPAddress,
+			validator:     ValidateTunnelEndpoint,
 			children:      nil,
 		},
 		"destination": {
@@ -535,7 +535,7 @@ func tunnelSchemaChildren() map[string]*schemaNode {
 			valueType:     ValueIPAddress,
 			valueDesc:     "Tunnel destination IP address (IPv4 or IPv6)",
 			valueExamples: []string{"192.0.2.1", "2001:db8::2"},
-			validator:     ValidateIPAddress,
+			validator:     ValidateTunnelEndpoint,
 			children:      nil,
 		},
 		"mode": {

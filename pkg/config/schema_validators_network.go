@@ -49,6 +49,26 @@ func ValidateBGPLocalAddress(raw string, _ *Config) error {
 	return ValidateIPAddress(raw, nil)
 }
 
+// ValidateTunnelEndpoint accepts a GRE/IPIP tunnel `source`/`destination`
+// IP literal WITHOUT surrounding whitespace (#15196 A02-01). The tunnel
+// consumers parse the RAW string — pkg/routing/tunnel.go
+// applyKernelTunnelLocked (`net.ParseIP(tc.Source)`) warns "invalid tunnel
+// endpoints" and creates nothing, and the userspace snapshot producer
+// (pkg/dataplane/userspace/tunnels.go) / Rust helper likewise skip an
+// unparseable endpoint — so the generic ValidateIPAddress trimming before
+// parsing let `source " 192.0.2.1 "` commit clean while the tunnel was
+// silently absent. Refuse padding at commit so the operator fixes the
+// spelling. Scoped to the tunnel leaves only: the generic
+// ValidateIPAddress keeps its trimmed leniency for its other leaves
+// (mirrors ValidateBGPLocalAddress / #14377). Migration: remove
+// quotes/padding and use the bare address.
+func ValidateTunnelEndpoint(raw string, _ *Config) error {
+	if raw != strings.TrimSpace(raw) {
+		return fmt.Errorf("invalid tunnel endpoint %q (leading or trailing whitespace is not allowed; use a bare IP address)", raw)
+	}
+	return ValidateIPAddress(raw, nil)
+}
+
 // ValidateBGPClusterID accepts a BGP route-reflector cluster-id in exactly the
 // two forms FRR/vtysh's `bgp cluster-id <A.B.C.D | (1-4294967295)>` grammar
 // accepts: an IPv4 dotted-quad, or a 32-bit unsigned integer in 1..4294967295.
