@@ -762,6 +762,107 @@ func validatePolicyZoneReferencesStrict(cfg *Config) error {
 // Duplicate names across DIFFERENT zone-pairs stay legal (each pair is its own
 // namespace), as does a zone-pair name reused in the global rulebase. Iteration
 // is in compiled (config) order so the first-reported duplicate is deterministic.
+// validateStablePolicyRuleIdentityStrict hard-rejects a security-zone name
+// containing "->" and a security-policy name (zone-pair or global)
+// containing "->" or "/" (#15004, A07-01).
+//
+// The stable policy rule identity is built by unescaped concatenation,
+// StablePolicyRuleID = fmt.Sprintf("%s->%s/%s", from, to, name)
+// (pkg/dataplane/userspace/policies_ids.go), mirrored in Rust by
+// stable_policy_rule_id (userspace-dp/src/policy.rs). That construction is
+// injective only if no component contains a separator: a zone named "a->b"
+// paired to "c" and a zone "a" paired to "b->c" both mint "a->b->c/p", and
+// a policy name containing "/" shifts the name boundary the daemon's
+// re-parse (SplitN on "/" then "->", daemon_policy_invalidate_capture.go)
+// relies on. The consumers key on the string — the Rust PolicyCounterStore
+// get-or-inserts one Arc<PolicyRuleCounter> per rule_id and
+// rule_id_to_policy_id is last-write-wins — and the helper's integrity
+// preflight rejects the WHOLE snapshot on a duplicate rule_id
+// (SnapshotIntegrityError::DuplicateRuleId). Before this gate such a config
+// committed strict-clean and was then refused whole by the helper: no new
+// policy snapshot applied (default-deny after a fresh boot) with a
+// misleading diagnosis. The only pre-existing zone-name charset gate banned
+// "/" (the zone-local address-book namespace, #3061/#4340); nothing banned
+// the "->" separator. Rejecting the separators in the components at commit
+// makes every compiled (from, to, name) tuple map injectively onto its
+// stable id while preserving the wire format every consumer already parses.
+//
+// Zone DEFINITIONS (cfg.Security.Zones keys), zone-pair from/to references,
+// and global policies are all checked. A single "-" is fine; only the
+// two-character "->" separator (and "/" in a policy name) is banned.
+//
+// Strict on the commit / commit-check path (CompileConfig — hard-reject);
+// downgraded to a cfg.Warnings entry on the tolerant load / peer-sync paths
+// (CompileConfigLenient / CompileConfigForNodeLenient, flag
+// lenientStablePolicyRuleIdentity) so an already-persisted or peer-synced
+// config an older binary accepted still BOOTS (#1960 no-brick). A
+// leniently-loaded aliasing config keeps the pre-existing behaviour — the
+// helper refuses its snapshot closed — now with an operator-visible warning.
+// Iteration is deterministic: zones in sorted name order, then zone-pair
+// policies and global policies in compiled order.
+func validateStablePolicyRuleIdentityStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	sort.Strings(zoneNames)
+	for _, name := range zoneNames {
+		if strings.Contains(name, "->") {
+			return fmt.Errorf(
+				"security-zone name %q must not contain \"->\"; \"->\" is the separator in the stable policy rule identity \"<from-zone>-><to-zone>/<policy-name>\", so such a zone aliases distinct zone pairs onto one rule id and the userspace helper refuses the whole policy snapshot — rename the zone (#15004)",
+				name)
+		}
+	}
+	checkZoneRef := func(scope, zone string) error {
+		if strings.Contains(zone, "->") {
+			return fmt.Errorf(
+				"security policies %s references zone %q whose name contains \"->\", the separator in the stable policy rule identity \"<from-zone>-><to-zone>/<policy-name>\"; distinct zone pairs would alias onto one rule id and the userspace helper would refuse the whole policy snapshot — rename the zone (#15004)",
+				scope, zone)
+		}
+		return nil
+	}
+	checkPolicyName := func(scope, name string) error {
+		if strings.Contains(name, "->") || strings.Contains(name, "/") {
+			return fmt.Errorf(
+				"security policies %s has policy name %q containing \"->\" or \"/\", the separators in the stable policy rule identity \"<from-zone>-><to-zone>/<policy-name>\"; such a name aliases this rule onto another rule's identity (or breaks its re-parse) and the userspace helper refuses the whole policy snapshot — rename the policy (#15004)",
+				scope, name)
+		}
+		return nil
+	}
+	for _, zpp := range cfg.Security.Policies {
+		if zpp == nil {
+			continue
+		}
+		scope := fmt.Sprintf("from-zone %q to-zone %q", zpp.FromZone, zpp.ToZone)
+		if err := checkZoneRef(scope, zpp.FromZone); err != nil {
+			return err
+		}
+		if err := checkZoneRef(scope, zpp.ToZone); err != nil {
+			return err
+		}
+		for _, p := range zpp.Policies {
+			if p == nil {
+				continue
+			}
+			if err := checkPolicyName(scope, p.Name); err != nil {
+				return err
+			}
+		}
+	}
+	for _, p := range cfg.Security.GlobalPolicies {
+		if p == nil {
+			continue
+		}
+		if err := checkPolicyName("global", p.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func validateDuplicatePolicyNamesStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil

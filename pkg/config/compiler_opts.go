@@ -2309,6 +2309,19 @@ type compileOpts struct {
 	// merge that would turn a statement's deny into a permit is poisoned rather
 	// than enforced (#9571). Same doctrine as lenientPolicyLogAction.
 	lenientDuplicatePolicyNames bool
+	// lenientStablePolicyRuleIdentity (#15004) downgrades the stable
+	// policy rule identity gate (validateStablePolicyRuleIdentityStrict)
+	// from a hard compile error to a cfg.Warnings entry. The strict commit /
+	// commit-check path hard-rejects a security-zone name containing "->"
+	// and a security-policy name containing "->" or "/", because
+	// StablePolicyRuleID ("<from>-><to>/<name>") is unescaped concatenation
+	// and such components alias distinct rules onto one identity the
+	// userspace helper keys counters on and refuses whole snapshots over
+	// (DuplicateRuleId). The tolerant load / peer-sync paths downgrade to a
+	// warning so an already-persisted or peer-synced config an older binary
+	// accepted still BOOTS (#1960 no-brick); the helper still refuses that
+	// snapshot closed. Same doctrine as lenientDuplicatePolicyNames.
+	lenientStablePolicyRuleIdentity bool
 	// lenientDuplicatePolicySchedulerName14449 downgrades the duplicate
 	// `scheduler-name` gate (validateDuplicatePolicySchedulerName14449)
 	// from a hard compile error to a cfg.Warnings entry. The strict
@@ -3567,6 +3580,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyTerminalAction:            true,
 		lenientPolicyLogAction:                 true,
 		lenientDuplicatePolicyNames:              true,
+		lenientStablePolicyRuleIdentity:          true,
 		lenientDuplicatePolicySchedulerName14449: true,
 		lenientScreenProfileRefs:               true,
 		lenientScreenNumeric:                   true,
