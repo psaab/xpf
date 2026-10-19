@@ -2185,6 +2185,20 @@ func (s *SessionSync) initGenState() {
 	// guarded >=1 above, so a stamped frame never collides with the (0,0)
 	// legacy sentinel.
 	s.syncEpoch = seed
+	// #15182 (C03-01): seed the bulk-transfer epoch counter from the same
+	// monotonic base. bulkSendNext was the one within-boot counter left at
+	// zero, so a restarted daemon process re-emitted epoch 1 while a peer
+	// that survived the restart (any prior-process socket still installed)
+	// held bulkRecvEpoch at a high-water from the dead process. With the
+	// boot incarnation unchanged across a daemon-only restart, `switched`
+	// is false, so bulkStartStaleLocked refused the restarted peer's
+	// authoritative re-prime between bulks: its pre-existing sessions were
+	// never bulk-transferred and no BulkEnd reconcile ran. Seeding from
+	// MonotonicNanos — exactly as genCounter/configGenCounter above — makes
+	// the first epoch of a restarted process strictly newer than any epoch
+	// its predecessor emitted within the same boot, while a cross-boot
+	// restart still restarts lower and is admitted via `switched`.
+	s.bulkSendNext.Store(seed)
 }
 
 // NewDualSessionSync creates a session sync manager with dual-fabric transport.
