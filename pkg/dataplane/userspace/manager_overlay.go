@@ -247,10 +247,11 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	// Carrying a stale `true` keeps the helper delegating NoRoute after the
 	// table shrank back under the cap; carrying a stale `false` re-opens the
 	// blackhole this issue is about.
-	next.Routes, next.LearnedRouteImportCapped, err = buildRouteSnapshots(cfg, next.Interfaces, desiredOverlay)
+	next.Routes, next.LearnedRouteImportCapped, err = buildRouteSnapshotsWithRGPrimary(cfg, next.Interfaces, desiredOverlay, m.rgPrimaryProvider)
 	if err != nil {
 		return false, fmt.Errorf("build route overlay snapshot: %w", err)
 	}
+	next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryProvider)
 
 	// #5328 (A6-b2-F4): when the caller supplies a policy-scheduler active-state
 	// map, refresh the policy snapshot's inactive bits from that map in THIS

@@ -196,6 +196,11 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 				mgr.SetPolicySnapshotCommitter(d.policyInvalidationSnapshotPublished)
 				mgr.SetPolicySnapshotPublishFailure(d.rejectDeferredSnapshotPublish)
 				mgr.SetPolicySnapshotPrePublisher(d.capturePolicyInvalidationBeforeDeferredPublish)
+				if d.cluster != nil {
+					mgr.SetRGPrimaryProvider(d.cluster.LocalGroupPrimary)
+				} else {
+					mgr.SetRGPrimaryProvider(nil)
+				}
 			}
 		}
 	}

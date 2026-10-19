@@ -942,13 +942,15 @@ pub(super) fn populate_interfaces(
                         .entry(iface.ifindex)
                         .or_default()
                         .push(prefix);
-                    state.connected_v4.push(ConnectedRouteV4 {
-                        prefix,
-                        host: v4.addr(),
-                        ifindex: iface.ifindex,
-                        tunnel_endpoint_id,
-                        table: connected_table_v4.clone(),
-                    });
+                    if !iface.connected_rg_peer_owned {
+                        state.connected_v4.push(ConnectedRouteV4 {
+                            prefix,
+                            host: v4.addr(),
+                            ifindex: iface.ifindex,
+                            tunnel_endpoint_id,
+                            table: connected_table_v4.clone(),
+                        });
+                    }
                 }
                 IpNet::V6(v6) => {
                     // #3182: NAT-decoupled full interface-IP set (see the V4
@@ -1000,14 +1002,16 @@ pub(super) fn populate_interfaces(
                         .entry(iface.ifindex)
                         .or_default()
                         .push(prefix);
-                    state.connected_v6.push(ConnectedRouteV6 {
-                        prefix,
-                        host: v6.addr(),
-                        scope: addr.scope,
-                        ifindex: iface.ifindex,
-                        tunnel_endpoint_id,
-                        table: connected_table_v6.clone(),
-                    });
+                    if !iface.connected_rg_peer_owned {
+                        state.connected_v6.push(ConnectedRouteV6 {
+                            prefix,
+                            host: v6.addr(),
+                            scope: addr.scope,
+                            ifindex: iface.ifindex,
+                            tunnel_endpoint_id,
+                            table: connected_table_v6.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -1092,7 +1096,6 @@ pub(super) fn populate_interfaces(
             true
         }
     });
-
 
     // #10503: contested-ifindex host-inbound fail-closed backstop — SYMMETRY
     // with the #5659 addressed-empty-zone backstop above. Despite its historical
@@ -1497,9 +1500,7 @@ pub(super) fn populate_egress(
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(zone_id);
             }
-            std::collections::btree_map::Entry::Occupied(mut entry)
-                if *entry.get() != zone_id =>
-            {
+            std::collections::btree_map::Entry::Occupied(mut entry) if *entry.get() != zone_id => {
                 entry.insert(None);
             }
             std::collections::btree_map::Entry::Occupied(_) => {}
@@ -1509,8 +1510,7 @@ pub(super) fn populate_egress(
         .into_iter()
         .filter_map(|(ifindex, zone_id)| {
             let zone_id = zone_id?;
-            (state.ifindex_unambiguous_zone_id.get(&ifindex) == Some(&zone_id))
-                .then_some(ifindex)
+            (state.ifindex_unambiguous_zone_id.get(&ifindex) == Some(&zone_id)).then_some(ifindex)
         })
         .collect();
 
@@ -1867,7 +1867,11 @@ pub(super) fn populate_egress(
             // candidate) can lose its VID-0 key here; an ordinary untagged
             // port's unit 0 (e.g. st0.0, #12250) is not in this builder's
             // tagged-only scope and its key is left to the general logic.
-            if is_unit0 && iface.vlan_id == 0 && bind_ifindex > 0 && tagged_only_ingress_ifindexes.contains(&bind_ifindex) {
+            if is_unit0
+                && iface.vlan_id == 0
+                && bind_ifindex > 0
+                && tagged_only_ingress_ifindexes.contains(&bind_ifindex)
+            {
                 // Only prune when this excluded row is the recorded owner;
                 // a surviving zoned/enabled owner on the same key stays.
                 if state.ingress_logical_ifindex.get(&(bind_ifindex, 0)) == Some(&iface.ifindex) {

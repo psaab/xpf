@@ -174,9 +174,30 @@ func configNextTableRulePriorities(cfg *config.Config, exclusions map[*config.St
 // was imported": the helper may deliberately omit an over-budget group while
 // retaining unrelated protocols' routes.
 func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, overlay []config.RouteOverlayEntry) ([]RouteSnapshot, bool, error) {
+	return buildRouteSnapshotsWithRGPrimary(cfg, interfaces, overlay, nil)
+}
+
+// connectedRowPeerOwned reports whether a connected prefix from iface is
+// transit-ineligible on this node (#15742). Consistent with InterfaceSnapshot
+// marking: standalone (no chassis cluster) never filters; RG<=0 never
+// filters; a clustered RG>0 row needs a provider verdict of local primary.
+func connectedRowPeerOwned(cfg *config.Config, iface InterfaceSnapshot, provider RGPrimaryProvider) bool {
+	if cfg == nil || cfg.Chassis.Cluster == nil || iface.RedundancyGroup <= 0 {
+		return false
+	}
+	if provider == nil {
+		return true
+	}
+	primary, known := provider(iface.RedundancyGroup)
+	return !(known && primary)
+}
+
+func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []InterfaceSnapshot, overlay []config.RouteOverlayEntry, provider RGPrimaryProvider) ([]RouteSnapshot, bool, error) {
 	if cfg == nil {
 		return nil, false, nil
 	}
+	// Stamp rows for the Rust connected filter before deriving Go rows.
+	interfaces = markConnectedRGPeerOwned(cfg, interfaces, provider)
 	out := make([]RouteSnapshot, 0)
 	seen := make(map[string]struct{})
 	configLeakSnapshotKeys := make(map[string]struct{})
@@ -305,6 +326,13 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		// Configured interface identities can survive without their kernel netdev.
 		// Their addresses must not publish connected rows or cover learned-route gaps.
 		if iface.Ifindex <= 0 {
+			continue
+		}
+		// #15742: a peer-owned RETH unit's connected prefix must not enter
+		// the helper FIB as a transit prefix. Zebra withdraws it with the
+		// VIPs; leaving it in makes LPM shadow the default (and hence the
+		// HA fabric redirect) for every destination inside the WAN prefix.
+		if iface.ConnectedRGPeerOwned {
 			continue
 		}
 		v4Table := interfaceTablesV4[iface.Name]

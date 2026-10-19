@@ -93,6 +93,7 @@ impl super::Coordinator {
                         })
                         .collect(),
                     discard: entry.discard,
+                    reject: entry.reject,
                     next_table: entry.next_table.clone(),
                     rule_priority: entry.rule_priority,
                     preference: entry.preference,
@@ -123,6 +124,7 @@ impl super::Coordinator {
                         })
                         .collect(),
                     discard: entry.discard,
+                    reject: entry.reject,
                     next_table: entry.next_table.clone(),
                     rule_priority: entry.rule_priority,
                     preference: entry.preference,
@@ -256,6 +258,50 @@ mod tests {
         assert!(route.discard);
         assert_eq!(route.preference, 17);
         assert_eq!(route.mtu, 1400);
+    }
+
+    #[test]
+    fn fib_dump_carries_reject_distinct_from_discard_15742() {
+        let snapshot = crate::ConfigSnapshot {
+            fib_generation: 9,
+            routes: vec![
+                crate::RouteSnapshot {
+                    table: "inet.0".to_string(),
+                    family: "inet".to_string(),
+                    destination: "0.0.0.0/0".to_string(),
+                    reject: true,
+                    preference: 200,
+                    ..Default::default()
+                },
+                crate::RouteSnapshot {
+                    table: "inet.0".to_string(),
+                    family: "inet".to_string(),
+                    destination: "10.0.0.0/8".to_string(),
+                    discard: true,
+                    preference: 200,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut coordinator = super::super::Coordinator::new();
+        coordinator
+            .refresh_runtime_snapshot_disarmed(&snapshot)
+            .expect("publish the test snapshot");
+        let (_, rows) = coordinator.dump_fib().expect("dump fits");
+        let reject = rows
+            .iter()
+            .find(|row| row.destination == "0.0.0.0/0")
+            .expect("reject row dumped");
+        assert!(reject.reject && !reject.discard, "reject row = {reject:?}");
+        let discard = rows
+            .iter()
+            .find(|row| row.destination == "10.0.0.0/8")
+            .expect("discard row dumped");
+        assert!(
+            discard.discard && !discard.reject,
+            "discard row = {discard:?}"
+        );
     }
     #[test]
     fn fib_dump_reads_published_view_not_retained_fields_11767() {

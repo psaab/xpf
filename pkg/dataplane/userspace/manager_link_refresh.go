@@ -115,10 +115,11 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 			"refreshed", refreshed, "dropped", dropped)
 	}
 	var err error
-	next.Routes, next.LearnedRouteImportCapped, err = buildRouteSnapshots(cfg, next.Interfaces, m.routeOverlay)
+	next.Routes, next.LearnedRouteImportCapped, err = buildRouteSnapshotsWithRGPrimary(cfg, next.Interfaces, m.routeOverlay, m.rgPrimaryProvider)
 	if err != nil {
 		return false, fmt.Errorf("build interface-link refresh routes: %w", err)
 	}
+	next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryProvider)
 	next.Fabrics = buildFabricSnapshotsFrom(cfg, liveXfrm)
 	next.TunnelEndpoints = buildTunnelEndpointSnapshots(cfg, next.Interfaces)
 	next.MirrorConfigs, next.MirrorExclusions = buildMirrorConfigSnapshots(cfg, next.Interfaces)

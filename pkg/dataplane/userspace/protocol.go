@@ -426,7 +426,11 @@ const (
 	// the referenced source pool's `port range`. A v54 helper ignores
 	// them and keeps the fixed 1024..65535 NAT64 allocator, silently
 	// dropping the operator's translated-port window — the defect.
-	ProtocolVersion = 55
+	// v55 -> v56 (#15742): InterfaceSnapshot carries
+	// ConnectedRGPeerOwned so the helper HA-filters connected transit
+	// prefixes on peer-owned RGs; a v55 helper keeps the peer-owned
+	// connected prefix and it shadows the default into a blackhole.
+	ProtocolVersion = 56
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -766,6 +770,7 @@ type FibRouteWire struct {
 	Kind         string           `json:"kind"`
 	NextHops     []FibNextHopWire `json:"next_hops,omitempty"`
 	Discard      bool             `json:"discard"`
+	Reject       bool             `json:"reject"`
 	NextTable    string           `json:"next_table,omitempty"`
 	RulePriority uint32           `json:"rule_priority"`
 	Preference   int32            `json:"preference"`
@@ -1233,6 +1238,13 @@ type InterfaceSnapshot struct {
 	NativeVLANID    int    `json:"native_vlan_id,omitempty"`
 	LocalFabric     string `json:"local_fabric_member,omitempty"`
 	RedundancyGroup int    `json:"redundancy_group,omitempty"`
+	// ConnectedRGPeerOwned marks this RG>0 interface row peer-owned at
+	// snapshot build (#15742). Go sets it from the daemon's cluster
+	// LocalGroupPrimary provider (nil provider + clustered config => true,
+	// fail-closed; standalone => false). Rust honors it only when dropping
+	// connected_v4/v6 transit prefixes; local-delivery/by-ifindex state is
+	// never dropped. Old helpers ignore it (v56-only helper is refused).
+	ConnectedRGPeerOwned bool `json:"connected_rg_peer_owned,omitempty"`
 	// EgressZone is the security zone this row's IFINDEX egresses into, or "" for
 	// none (#6722). It is the ANSWER, decided in stampEgressZones (interfaces.go)
 	// where the operator's authored `security-zone ... interfaces <ref>` bindings

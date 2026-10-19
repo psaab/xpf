@@ -370,6 +370,12 @@ type Manager struct {
 	// a feed change so the duplicate-publish gate lets the refresh through.
 	feedOverlay map[string][]string
 	haGroups    map[int]HAGroupStatus
+	// rgPrimaryProvider reports local RG primacy for the route builder
+	// (#15742). Nil means no provider wired: the builder then applies the
+	// conservative unknown-is-inactive rule (clustered config + RG>0 row
+	// with no verdict is filtered). Wired by the daemon from cluster state,
+	// mirroring frrHADemotionState's IsLocalPrimary source.
+	rgPrimaryProvider func(rgID int) (primary bool, known bool)
 	// haWatchdogMapWrite writes the watchdog timestamp into the Go-owned
 	// ha_watchdog map. It runs on EVERY heartbeat tick — never throttled — so
 	// Go's own HA refresh paths (refreshHAStateFromMapsLocked,
@@ -794,6 +800,34 @@ func (m *Manager) SetColdPathSampleMask(mask *uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.coldPathSampleMask = mask
+}
+
+// RGPrimaryProvider reports whether this node is primary for rgID and
+// whether that group is known (#15742). The userspace route builder uses
+// it to HA-filter connected prefixes: a RETH unit's connected prefix on a
+// peer-owned RG must not shadow the default on the non-owner, aligning
+// the helper FIB with zebra (which withdraws the prefix with the VIPs).
+type RGPrimaryProvider func(rgID int) (primary bool, known bool)
+
+// SetRGPrimaryProvider wires the daemon's cluster-ownership source into
+// the route builder. Nil clears it (tests / standalone pre-wiring).
+func (m *Manager) SetRGPrimaryProvider(provider RGPrimaryProvider) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rgPrimaryProvider = provider
+}
+
+// rgPrimaryNow snapshots the wired provider under m.mu, or nil.
+func (m *Manager) rgPrimaryNow() RGPrimaryProvider {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rgPrimaryProvider
 }
 
 const rstSuppressionRetryBackoff = 5 * time.Second

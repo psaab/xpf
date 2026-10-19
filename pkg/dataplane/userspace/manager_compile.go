@@ -307,9 +307,9 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		// the helper here would change process/BPF state even if Phase 2 later
 		// fails, so the existing post-start gate remains authoritative for that
 		// otherwise-unknowable case.
-		preflightSnapshot, err := buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(
+		preflightSnapshot, err := buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(
 			cfg, ucfg, 0, 0, activeState,
-			m.routeOverlaySnapshot(), m.feedSnapshotOverlay(), natCounterIDs, schedulerFailClosed,
+			m.routeOverlaySnapshot(), m.feedSnapshotOverlay(), natCounterIDs, schedulerFailClosed, m.rgPrimaryNow(),
 		)
 		if err != nil {
 			return fmt.Errorf("userspace: build config snapshot: %w", err)
@@ -362,9 +362,9 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	// Rebuild from post-compile host state and the actual CompileResult. A new
 	// VLAN may have been absent during preflight, and its tunnel endpoint must
 	// not be lost just because the validation snapshot lacked a live ifindex.
-	snap, err := buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(
+	snap, err := buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(
 		cfg, ucfg, m.bumpGeneration(), m.readFIBGeneration(), activeState,
-		m.routeOverlaySnapshot(), m.feedSnapshotOverlay(), result.NATCounterIDs, schedulerFailClosed,
+		m.routeOverlaySnapshot(), m.feedSnapshotOverlay(), result.NATCounterIDs, schedulerFailClosed, m.rgPrimaryNow(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("userspace: build config snapshot: %w", err)

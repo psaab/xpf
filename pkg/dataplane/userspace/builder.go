@@ -170,26 +170,24 @@ func buildSnapshotWithEpochProvider(cfg *config.Config, ucfg config.UserspaceCon
 }
 
 func buildSnapshotWithSchedulerState(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, activeState map[string]bool, routeOverlay []config.RouteOverlayEntry, feedOverlay map[string][]string) (*ConfigSnapshot, error) {
-	return buildSnapshotWithSchedulerStateAndNATCounters(cfg, ucfg, generation, fibGeneration, activeState, routeOverlay, feedOverlay, nil)
+	return buildSnapshotWithSchedulerStateAndRGPrimary(cfg, ucfg, generation, fibGeneration, activeState, routeOverlay, feedOverlay, nil, false, nil)
 }
 
-// buildSnapshotWithSchedulerStateAndNATCounters builds the config snapshot and
-// stamps the compiler-assigned per-rule NAT translation hit counter IDs (#2218)
-// onto the SNAT/DNAT/static rule snapshots so the userspace dataplane can
-// attribute a translation to the matched rule. natCounterIDs is the
-// CompileResult.NATCounterIDs map (NATCounterKey "natType/ruleset/rule" ->
-// stable key-derived counter ID, #2255); a nil map leaves every CounterID at 0
-// ("no counter"), reproducing pre-#2218 wire shape for callers that do not have
-// a compile result (tests, partial syncs).
+func buildSnapshotWithSchedulerStateAndRGPrimary(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, activeState map[string]bool, routeOverlay []config.RouteOverlayEntry, feedOverlay map[string][]string, natCounterIDs map[string]uint32, failClosed bool, provider RGPrimaryProvider) (*ConfigSnapshot, error) {
+	return buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg, ucfg, generation, fibGeneration, activeState, routeOverlay, feedOverlay, natCounterIDs, failClosed, provider)
+}
+
 func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, activeState map[string]bool, routeOverlay []config.RouteOverlayEntry, feedOverlay map[string][]string, natCounterIDs map[string]uint32) (*ConfigSnapshot, error) {
-	return buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(
-		cfg, ucfg, generation, fibGeneration, activeState, routeOverlay, feedOverlay, natCounterIDs, false,
-	)
+	return buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg, ucfg, generation, fibGeneration, activeState, routeOverlay, feedOverlay, natCounterIDs, false, nil)
 }
 
 // buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed carries the
 // scheduler's action-aware stale-republish disposition through full lowering.
 func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, activeState map[string]bool, routeOverlay []config.RouteOverlayEntry, feedOverlay map[string][]string, natCounterIDs map[string]uint32, failClosed bool) (*ConfigSnapshot, error) {
+	return buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg, ucfg, generation, fibGeneration, activeState, routeOverlay, feedOverlay, natCounterIDs, failClosed, nil)
+}
+
+func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, activeState map[string]bool, routeOverlay []config.RouteOverlayEntry, feedOverlay map[string][]string, natCounterIDs map[string]uint32, failClosed bool, provider RGPrimaryProvider) (*ConfigSnapshot, error) {
 	if cfg == nil {
 		return &ConfigSnapshot{
 			Version:                 ProtocolVersion,
@@ -234,10 +232,11 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 	// #3772 (M9): a kernel ip-rule enumeration failure fails the snapshot
 	// closed so the apply path retains the prior dataplane state rather
 	// than shipping a snapshot missing every route-leak route.
-	routes, learnedRoutesCapped, err := buildRouteSnapshots(cfg, interfaces, routeOverlay)
+	routes, learnedRoutesCapped, err := buildRouteSnapshotsWithRGPrimary(cfg, interfaces, routeOverlay, provider)
 	if err != nil {
 		return nil, err
 	}
+	interfaces = markConnectedRGPeerOwned(cfg, interfaces, provider)
 	mirrorConfigs, mirrorExclusions := buildMirrorConfigSnapshots(cfg, interfaces)
 	synCookieKey, synCookieKeyRing := buildSYNCookieKeys(cfg, synCookieNow())
 	bindlessSelectorRows := buildBindlessSelectorRows(cfg)
