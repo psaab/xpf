@@ -378,3 +378,221 @@ fn cancelled_prepared_foreign_fill_without_sink_parks_masked_base_9900() {
     );
     assert_eq!(free_tx_frames, VecDeque::from([4096, 8192]));
 }
+
+// #15786: a single invalid prepared frame must drop ONLY that frame.
+// Batch [valid A, oversized BAD, valid B]: pre-fix the stage phase
+// drained + recycled A as collateral and returned Err(Drop) with
+// nothing transmitted; post-fix A and B transmit, BAD alone is
+// recycled, and exactly one drop is counted.
+//
+// FAIL-ON-REVERT: restoring the drain-all + Err(Drop) stage behavior
+// makes the result Err(Drop), tx_packets 0, and both valid offsets
+// recycled — every assert below goes RED.
+#[test]
+fn prepared_single_oversized_drops_only_offender_15786() {
+    use crate::afxdp::tx::test_support::{
+        test_cos_fast_interfaces, test_cos_runtime_with_queues, test_queue_fast_path,
+    };
+    use std::sync::atomic::Ordering;
+
+    let root = test_cos_runtime_with_queues(10_000_000, vec![]);
+    let fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![(0, test_queue_fast_path(false, 0, None, None))],
+        None,
+        None,
+    );
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+    binding.telemetry.dbg_sendto_err = 100; // suppress wake eprintln
+
+    let off_a = 40u64 << crate::afxdp::UMEM_FRAME_SHIFT;
+    let off_bad = 41u64 << crate::afxdp::UMEM_FRAME_SHIFT;
+    let off_b = 42u64 << crate::afxdp::UMEM_FRAME_SHIFT;
+    for off in [off_a, off_bad, off_b] {
+        binding.tx_pipeline.free_tx_frames.retain(|&o| o != off);
+    }
+    let mk = |offset: u64, len: u32, id: u64| PreparedTxRequest {
+        offset,
+        len,
+        recycle: PreparedTxRecycle::FreeTxFrame,
+        expected_ports: None,
+        expected_addr_family: libc::AF_INET as u8,
+        expected_protocol: PROTO_TCP,
+        flow_key: None,
+        egress_ifindex: 42,
+        cos_queue_id: None,
+        dscp_rewrite: None,
+        mirror_clone: false,
+        overlap_admissions: None,
+        enqueue_ns: id,
+    };
+    let mut pending = VecDeque::from([
+        mk(off_a, 100, 1),
+        mk(off_bad, (tx_frame_capacity() + 1) as u32, 2),
+        mk(off_b, 150, 3),
+    ]);
+    let mut shared_recycles = Vec::new();
+    let (packets, bytes) =
+        transmit_prepared_queue(&mut binding, &mut pending, 0, &mut shared_recycles)
+            .expect("#15786: valid survivors must transmit, not Err(Drop)");
+    assert_eq!(packets, 2, "only the two valid frames transmit");
+    assert_eq!(bytes, 250, "100 + 150 valid bytes");
+    assert!(pending.is_empty(), "all three requests consumed");
+    assert_eq!(
+        binding.live.tx_submit_error_drops.load(Ordering::Relaxed),
+        1,
+        "exactly the offender is counted as a drop",
+    );
+    assert_eq!(binding.live.tx_errors.load(Ordering::Relaxed), 1);
+    // BAD alone recycled into the free pool; A/B are in flight.
+    assert_eq!(binding.tx_pipeline.free_tx_frames.len(), 61 + 1);
+    assert!(binding.tx_pipeline.free_tx_frames.contains(&off_bad));
+    assert!(!binding.tx_pipeline.free_tx_frames.contains(&off_a));
+    assert!(!binding.tx_pipeline.free_tx_frames.contains(&off_b));
+    assert!(binding.tx_pipeline.in_flight_untracked_tx.contains(&off_a));
+    assert!(binding.tx_pipeline.in_flight_untracked_tx.contains(&off_b));
+    assert_eq!(
+        binding.scratch.scratch_prepared_dropped_orig_idx,
+        vec![1u16],
+        "the offender is original position 1",
+    );
+    assert_eq!(
+        binding.scratch.scratch_prepared_committed_orig_idx.len(),
+        2,
+        "two committed identities recorded",
+    );
+    let mut committed = binding.scratch.scratch_prepared_committed_orig_idx.clone();
+    committed.sort_unstable();
+    assert_eq!(committed, vec![0u16, 2u16], "A (0) and B (2) committed");
+}
+
+// #15786 slice variant: a staged frame whose UMEM slice is out of
+// range (offset beyond the test UMEM) with a DSCP rewrite set trips
+// the REWRITE phase per-frame drop; the other valid frame (no
+// rewrite) still transmits.
+#[test]
+fn prepared_single_slice_oob_drops_only_offender_15786() {
+    use crate::afxdp::tx::test_support::{
+        test_cos_fast_interfaces, test_cos_runtime_with_queues, test_queue_fast_path,
+    };
+    use std::sync::atomic::Ordering;
+
+    let root = test_cos_runtime_with_queues(10_000_000, vec![]);
+    let fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![(0, test_queue_fast_path(false, 0, None, None))],
+        None,
+        None,
+    );
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+    binding.telemetry.dbg_sendto_err = 100;
+
+    let off_a = 40u64 << crate::afxdp::UMEM_FRAME_SHIFT;
+    binding.tx_pipeline.free_tx_frames.retain(|&o| o != off_a);
+    // Test UMEM is 64 frames: offset 100 frames is out of range.
+    let off_bad = 100u64 << crate::afxdp::UMEM_FRAME_SHIFT;
+    let mk = |offset: u64, len: u32, dscp: Option<u8>, id: u64| PreparedTxRequest {
+        offset,
+        len,
+        recycle: PreparedTxRecycle::FreeTxFrame,
+        expected_ports: None,
+        expected_addr_family: libc::AF_INET as u8,
+        expected_protocol: PROTO_TCP,
+        flow_key: None,
+        egress_ifindex: 42,
+        cos_queue_id: None,
+        dscp_rewrite: dscp,
+        mirror_clone: false,
+        overlap_admissions: None,
+        enqueue_ns: id,
+    };
+    let mut pending = VecDeque::from([mk(off_bad, 64, Some(5), 1), mk(off_a, 120, None, 2)]);
+    let mut shared_recycles = Vec::new();
+    let (packets, bytes) =
+        transmit_prepared_queue(&mut binding, &mut pending, 0, &mut shared_recycles)
+            .expect("#15786: the valid frame must transmit");
+    assert_eq!((packets, bytes), (1, 120));
+    assert_eq!(
+        binding.live.tx_submit_error_drops.load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        binding.scratch.scratch_prepared_dropped_orig_idx,
+        vec![0u16]
+    );
+    assert!(binding.tx_pipeline.free_tx_frames.contains(&off_bad));
+    assert!(binding.tx_pipeline.in_flight_untracked_tx.contains(&off_a));
+}
+
+// #15786 all-invalid: every frame oversized → Err(Drop) with the
+// first reason, each frame counted exactly once, all recycled.
+#[test]
+fn prepared_all_invalid_drops_each_once_15786() {
+    use crate::afxdp::tx::test_support::{
+        test_cos_fast_interfaces, test_cos_runtime_with_queues, test_queue_fast_path,
+    };
+    use std::sync::atomic::Ordering;
+
+    let root = test_cos_runtime_with_queues(10_000_000, vec![]);
+    let fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![(0, test_queue_fast_path(false, 0, None, None))],
+        None,
+        None,
+    );
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+    binding.telemetry.dbg_sendto_err = 100;
+
+    let off0 = 40u64 << crate::afxdp::UMEM_FRAME_SHIFT;
+    let off1 = 41u64 << crate::afxdp::UMEM_FRAME_SHIFT;
+    for off in [off0, off1] {
+        binding.tx_pipeline.free_tx_frames.retain(|&o| o != off);
+    }
+    let mk = |offset: u64, id: u64| PreparedTxRequest {
+        offset,
+        len: (tx_frame_capacity() + 1) as u32,
+        recycle: PreparedTxRecycle::FreeTxFrame,
+        expected_ports: None,
+        expected_addr_family: libc::AF_INET as u8,
+        expected_protocol: PROTO_TCP,
+        flow_key: None,
+        egress_ifindex: 42,
+        cos_queue_id: None,
+        dscp_rewrite: None,
+        mirror_clone: false,
+        overlap_admissions: None,
+        enqueue_ns: id,
+    };
+    let mut pending = VecDeque::from([mk(off0, 1), mk(off1, 2)]);
+    let mut shared_recycles = Vec::new();
+    let result = transmit_prepared_queue(&mut binding, &mut pending, 0, &mut shared_recycles);
+    assert!(
+        matches!(
+            result,
+            Err(TxError::Drop(
+                TxDropReason::PreparedFrameExceedsCapacity { .. }
+            ))
+        ),
+        "all-invalid batch surfaces the first Drop, got {result:?}",
+    );
+    assert_eq!(
+        binding.live.tx_submit_error_drops.load(Ordering::Relaxed),
+        2
+    );
+    assert_eq!(binding.live.tx_errors.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        binding.scratch.scratch_prepared_dropped_orig_idx,
+        vec![0u16, 1u16]
+    );
+    assert!(binding.tx_pipeline.free_tx_frames.contains(&off0));
+    assert!(binding.tx_pipeline.free_tx_frames.contains(&off1));
+}

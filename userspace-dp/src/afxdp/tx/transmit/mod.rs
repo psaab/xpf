@@ -177,6 +177,36 @@ pub(in crate::afxdp) fn remember_prepared_recycle(
     }
 }
 
+/// Record one prepared per-frame validation drop (#15786): recycle the
+/// frame immediately, count the single drop, remember its ORIGINAL
+/// `pending` position for the CoS pop-snapshot unwind, and stash the
+/// FIRST drop's TxDropReason (its position is
+/// `scratch_prepared_dropped_orig_idx[0]`) so the orchestrator can
+/// surface it if the whole batch ends up dropped. The caller
+/// continues with the valid survivors.
+#[inline]
+pub(super) fn record_prepared_drop(
+    binding: &mut BindingWorker,
+    req: &PreparedTxRequest,
+    orig_idx: u16,
+    reason: TxDropReason,
+    shared_recycles: &mut Vec<(u32, u64)>,
+) {
+    recycle_prepared_immediately_with_shared(binding, req, Some(shared_recycles));
+    if binding.scratch.scratch_prepared_dropped_orig_idx.is_empty() {
+        binding.scratch.scratch_prepared_first_drop_reason = Some(reason);
+    }
+    binding
+        .scratch
+        .scratch_prepared_dropped_orig_idx
+        .push(orig_idx);
+    binding
+        .live
+        .tx_submit_error_drops
+        .fetch_add(1, Ordering::Relaxed);
+    binding.live.tx_errors.fetch_add(1, Ordering::Relaxed);
+}
+
 pub(in crate::afxdp) fn transmit_batch(
     binding: &mut BindingWorker,
     pending: &mut VecDeque<TxRequest>,
@@ -452,24 +482,52 @@ pub(super) fn transmit_prepared_batch(
 /// stage → DSCP rewrite → UMEM slice re-verify → optional RST log →
 /// reserve+write+commit+stamp → finalise (success accounting / retry
 /// recovery / TX kick). See `transmit/{stage,rewrite,verify,write,
-/// finalise}.rs` for each phase's invariants. Pure code motion of
-/// the prior monolithic body (#1354); semantics, ordering, and drop
-/// accounting are byte-identical to the pre-split function.
+/// finalise}.rs` for each phase's invariants.
+///
+/// #15786: per-frame validation drops (stage oversized, rewrite/verify
+/// slice-out-of-range) recycle + count ONLY the offending frame and
+/// remove it from the staged batch; the valid survivors continue to
+/// the ring. The batch as a whole therefore returns `Ok` (or a ring
+/// `Retry`) instead of the pre-fix collateral `Err(Drop)` that drained
+/// every staged frame. Each dropped ORIGINAL position is recorded in
+/// `scratch_prepared_dropped_orig_idx` and each committed one in
+/// `scratch_prepared_committed_orig_idx` so the CoS submit path can
+/// unwind pop snapshots / charge accounting by identity. An all-invalid
+/// batch returns the FIRST drop as `Err(Drop)` (every frame already
+/// recycled + counted per frame) so the caller's Drop handling still
+/// unwinds the snapshots; a partially-invalid batch returns `Ok`.
 pub(in crate::afxdp) fn transmit_prepared_queue(
     binding: &mut BindingWorker,
     pending: &mut VecDeque<PreparedTxRequest>,
     now_ns: u64,
     shared_recycles: &mut Vec<(u32, u64)>,
 ) -> Result<(u64, u64), TxError> {
+    // #15786: all three identity sets are rebuilt from scratch on every
+    // call. Cleared HERE (before any early return) so an all-dropped /
+    // empty short-circuit leaves them empty rather than stale, and
+    // `submit_prepared` never removes a prior batch's snapshots or
+    // charges a prior batch's flows.
+    binding.scratch.scratch_prepared_committed_orig_idx.clear();
+    binding.scratch.scratch_prepared_dropped_orig_idx.clear();
+    binding.scratch.scratch_prepared_first_drop_reason = None;
     if pending.is_empty() {
         return Ok((0, 0));
     }
-    stage::stage_batch_into_scratch(binding, pending, shared_recycles)?;
+    stage::stage_batch_into_scratch(binding, pending, shared_recycles);
     if binding.scratch.scratch_prepared_tx.is_empty() {
-        return Ok((0, 0));
+        return match binding.scratch.scratch_prepared_first_drop_reason {
+            Some(reason) => Err(TxError::Drop(reason)),
+            None => Ok((0, 0)),
+        };
     }
-    rewrite::apply_dscp_rewrites_to_staged(binding, shared_recycles)?;
-    verify::verify_umem_slices_for_staged(binding, shared_recycles)?;
+    rewrite::apply_dscp_rewrites_to_staged(binding, shared_recycles);
+    verify::verify_umem_slices_for_staged(binding, shared_recycles);
+    if binding.scratch.scratch_prepared_tx.is_empty() {
+        return match binding.scratch.scratch_prepared_first_drop_reason {
+            Some(reason) => Err(TxError::Drop(reason)),
+            None => Ok((0, 0)),
+        };
+    }
     if cfg!(feature = "debug-log") {
         log_rst_frames_prepared(binding);
     }
