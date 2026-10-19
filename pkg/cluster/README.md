@@ -173,7 +173,9 @@ only reporting the divergence) is the remaining half and is tracked
 separately — it belongs with the control-link auth posture in the
 comms restart key.
 - Group-state accessors (`UpdateConfig`, `GroupStates`,
-  `DataGroupIDs`, `GroupState`, `IsLocalPrimary`,
+  `DataGroupIDs`, `GroupState`, `IsLocalPrimary`, `IsPeerPrimary`,
+  `PeerPrimaryRGs` (#15081: peer-primary data RGs + liveness for
+  forwarded-failover outcome reconciliation),
   `IsLocalPrimaryAny`, `LocalPriorities`) — `group_state.go`.
 - Peer-state accessors (`PeerAlive`, `PeerNodeID`,
   `PeerGroupStates`, software/HA-protocol version,
