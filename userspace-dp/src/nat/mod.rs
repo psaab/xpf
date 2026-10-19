@@ -211,6 +211,10 @@ mod tests_persistent_zone_14322;
 #[cfg(test)]
 #[path = "tests_empty_match_poison_9874.rs"]
 mod tests_empty_match_poison_9874;
+// #15110: persistent siblings must carry as lease joins on a pool reseed.
+#[cfg(test)]
+#[path = "tests_reseed_persistent_siblings_15110.rs"]
+mod tests_reseed_persistent_siblings_15110;
 
 const NAT_SCOPE_TIER_INTERFACE: u8 = 0;
 const NAT_SCOPE_TIER_ZONE: u8 = 1;
