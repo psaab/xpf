@@ -756,7 +756,7 @@ pub(super) fn retry_pending_neigh(
                 egress_domain,
             ) {
                 crate::fragment_overlap::TranslatedOverlapKey::Key(post_key)
-                    if post_key != okey =>
+                    if !crate::fragment_overlap::overlap_same_datagram(&post_key, &okey) =>
                 {
                     let mut post_overlap = forwarding
                         .nat64
