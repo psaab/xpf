@@ -587,8 +587,9 @@ pub(crate) fn nat64_prefix_charge(pool_len: usize) -> Nat64AggregateUse {
     }
 }
 
-/// #6982 phase 1 helper: the (prefix, pool) IDENTITY of a snapshot, or `None`
-/// if the rule is one the build loop will skip as malformed.
+/// #6982 phase 1 helper: the (prefix, pool, deterministic) IDENTITY of a
+/// snapshot, or `None` if the rule is one the build loop will skip as
+/// malformed.
 ///
 /// SILENT by design. The build loop below logs each skip loudly (#3888
 /// all-or-nothing); this pass runs first, over the same snapshots, purely to
@@ -596,7 +597,28 @@ pub(crate) fn nat64_prefix_charge(pool_len: usize) -> Nat64AggregateUse {
 /// every malformed-rule warning. It must stay in lockstep with the loop's own
 /// parse — `nat64_6982_identity_parser_matches_the_build_loop` binds that, so
 /// a rule the loop accepts can never be invisible to the budget.
-fn nat64_rule_identity(snap: &NAT64RuleSnapshot) -> Option<([u8; 12], Vec<Ipv4Addr>)> {
+///
+/// #15178: the reuse identity for a NAT64 rule: prefix bytes, deduped pool,
+/// AND the deterministic identity the new prefix will carry. Pre-fix this
+/// returned only `(prefix_bytes, pool_v4)`, so a block-size / host-base /
+/// /32<->/64 / deterministic<->round-robin edit on the same pool reused the
+/// old allocator with its stale BIB leases. `None` deterministic covers both
+/// the round-robin mode and the over-budget/unusable downgrade (both build
+/// `deterministic_v6: None` below); including the derived `DeterministicV6`
+/// (which folds in pool length via `host_count`) makes any geometry change
+/// a reuse miss while a true no-op re-apply still hits.
+/// #15178 helper: was the previous prefix for `prefix_bytes` deterministic?
+/// Used to gate the #6765 reseed: deterministic on either side of a
+/// geometry/mode change starts fresh (see the build loop).
+fn prev_prefix_is_deterministic(previous: Option<&Nat64State>, prefix_bytes: &[u8; 12]) -> bool {
+    previous
+        .and_then(|prev| prev.prefixes.iter().find(|p| &p.prefix_bytes == prefix_bytes))
+        .is_some_and(|p| p.deterministic_v6.is_some())
+}
+
+fn nat64_rule_identity(
+    snap: &NAT64RuleSnapshot,
+) -> Option<([u8; 12], Vec<Ipv4Addr>, Option<DeterministicV6>)> {
     // #14962: an unusable pool installs with an empty pool (see the build
     // loop), so it has no reusable allocator identity and no #6982 charge.
     // Returning None here keeps phase 1 from reserving/charging a pool the
@@ -629,7 +651,8 @@ fn nat64_rule_identity(snap: &NAT64RuleSnapshot) -> Option<([u8; 12], Vec<Ipv4Ad
             pool_v4.push(addr);
         }
     }
-    Some((prefix_bytes, pool_v4))
+    let deterministic_v6 = build_deterministic_v6(snap, pool_v4.len());
+    Some((prefix_bytes, pool_v4, deterministic_v6))
 }
 
 /// #6982: prefixes refused by the aggregate budget since boot.
@@ -779,8 +802,8 @@ impl Nat64State {
         let mut used = Nat64AggregateUse::default();
         if let Some(prev) = previous {
             for snap in snaps {
-                if let Some((pb, pool)) = nat64_rule_identity(snap) {
-                    if prev.reuse_allocator(&pb, &pool).is_some() {
+                if let Some((pb, pool, det)) = nat64_rule_identity(snap) {
+                    if prev.reuse_allocator(&pb, &pool, det).is_some() {
                         used = used.saturating_with(nat64_prefix_charge(pool.len()));
                     }
                 }
@@ -981,7 +1004,17 @@ impl Nat64State {
             // translations. A NEW one is admitted only if it fits the remaining
             // budget; a refused prefix commits nothing (first-fit), so a later
             // smaller prefix can still install.
-            let reused = previous.and_then(|prev| prev.reuse_allocator(&prefix_bytes, &pool_v4));
+            // #15178: reuse only when the deterministic identity the new
+            // prefix will carry equals the previous prefix's. Computed
+            // BEFORE the over-budget clear below: a refused prefix builds
+            // with an empty pool and `deterministic_v6: None`, so it must
+            // never reuse (its identity here uses the real pool; the
+            // `reused.is_none()` arm then charges/refuses it). A geometry
+            // change falls through to a fresh allocator; the #6765 reseed
+            // below is skipped for deterministic prefixes (see there).
+            let new_deterministic_v6 = build_deterministic_v6(snap, pool_v4.len());
+            let reused = previous
+                .and_then(|prev| prev.reuse_allocator(&prefix_bytes, &pool_v4, new_deterministic_v6));
             let mut over_budget = false;
             if reused.is_none() {
                 match used.admitted_with(nat64_prefix_charge(pool_v4.len()), &NAT64_AGGREGATE_BUDGET)
@@ -1028,11 +1061,24 @@ impl Nat64State {
                     // A fully-disjoint pool yields an empty map and re-seeds
                     // nothing, which is the reset
                     // `nat64_4518_pool_change_resets_allocator` pins.
-                    if let Some(prev_prefix) = previous.and_then(|prev| {
-                        prev.prefixes
-                            .iter()
-                            .find(|p| p.prefix_bytes == prefix_bytes)
-                    }) {
+                    // #15178: a deterministic geometry/mode change must NOT
+                    // reseed either. `reseed_retained_from` carries live
+                    // flows lease-less (deterministic leases are excluded
+                    // there) and a later same-socket flow would re-mint a
+                    // BIB under the new identity while the carried flow
+                    // still forwards on the old tuple — the exact stale
+                    // lease this issue retires. Deterministic on either
+                    // side of the change therefore starts fresh; the
+                    // session-hit revalidation tears the old session down.
+                    let deterministic_change = prev_prefix_is_deterministic(previous, &prefix_bytes)
+                        || new_deterministic_v6.is_some();
+                    if !deterministic_change
+                        && let Some(prev_prefix) = previous.and_then(|prev| {
+                            prev.prefixes
+                                .iter()
+                                .find(|p| p.prefix_bytes == prefix_bytes)
+                        })
+                    {
                         let map = crate::nat::retained_pool_index_map_v4(
                             &prev_prefix.pool_v4,
                             &pool_v4,
@@ -1094,7 +1140,7 @@ impl Nat64State {
             let deterministic_v6 = if over_budget || snap.pool_unusable {
                 None
             } else {
-                build_deterministic_v6(snap, pool_v4.len())
+                new_deterministic_v6
             };
             if !over_budget && !snap.pool_unusable && deterministic_v6.is_none() && !snap.deterministic_host_base_v6.is_empty() {
                 DETERMINISTIC_V6_DOWNGRADE_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -1161,15 +1207,122 @@ impl Nat64State {
     /// [`from_snapshots_with_previous`]). Returns `None` when no compatible
     /// prefix exists (rule added, prefix changed, or pool changed) — the caller
     /// then builds a fresh allocator.
+    ///
+    /// #15178: the deterministic identity must ALSO match. `DeterministicV6`
+    /// folds in mode (`Some` vs `None`), block_size, blocks_per_ip,
+    /// host_prefix_len, host_base and the pool-derived host_count, so a
+    /// block-size, host-base, /32<->/64 or round-robin<->deterministic edit
+    /// on an unchanged pool is a reuse miss and the stale BIB leases in the
+    /// old allocator are abandoned with it. A no-op re-apply derives the
+    /// identical params and still reuses, preserving EIM.
     fn reuse_allocator(
         &self,
         prefix_bytes: &[u8; 12],
         pool_v4: &[Ipv4Addr],
+        deterministic_v6: Option<DeterministicV6>,
     ) -> Option<PortAllocator> {
         self.prefixes
             .iter()
-            .find(|p| p.prefix_bytes == *prefix_bytes && p.pool_v4.as_slice() == pool_v4)
+            .find(|p| {
+                p.prefix_bytes == *prefix_bytes
+                    && p.pool_v4.as_slice() == pool_v4
+                    && p.deterministic_v6 == deterministic_v6
+            })
             .map(|p| p.port_allocator.clone())
+    }
+
+    /// #15178: is a stored NAT64 source translation still produced by the
+    /// live deterministic geometry for the session's synthetic v6
+    /// destination? Read-only; never allocates.
+    ///
+    /// The prefix is selected exactly as the forward mint selects it —
+    /// `match_ipv6_dest` on the PRE-translation synthetic destination —
+    /// so a session whose destination matches no live prefix (or whose
+    /// prefix no longer holds the translated address) fails closed, and
+    /// a session is never judged against an unrelated prefix that merely
+    /// shares a pool address.
+    ///
+    /// Round-robin prefixes (`deterministic_v6: None`) carry no geometry
+    /// to invalidate a tuple — pool membership + in-range port stays
+    /// valid (the pre-#15178 behaviour for that mode). A deterministic
+    /// prefix validates through `deterministic_v6_tuple_matches`, the
+    /// same predicate the synced reserve and idle-lease import already
+    /// use: the translated address must be the subscriber's deterministic
+    /// pool address (at its pool index) and the port must lie in the
+    /// subscriber's CURRENT block. A missing translated port fails closed.
+    pub(crate) fn nat64_source_translation_still_valid(
+        &self,
+        src_v6: Ipv6Addr,
+        dst_v6: Ipv6Addr,
+        translated_src: Ipv4Addr,
+        translated_port: Option<u16>,
+    ) -> bool {
+        let Some(port) = translated_port else {
+            return false;
+        };
+        let Some((prefix_idx, _)) = self.match_ipv6_dest(dst_v6) else {
+            return false;
+        };
+        let Some(prefix) = self.prefixes.get(prefix_idx) else {
+            return false;
+        };
+        let Some(&addr_index) = prefix.pool_index_v4.get(&translated_src) else {
+            return false;
+        };
+        match prefix.deterministic_v6 {
+            Some(params) => prefix.port_allocator.deterministic_v6_tuple_matches(
+                params,
+                src_v6,
+                &prefix.pool_v4,
+                addr_index,
+                translated_src,
+                port,
+            ),
+            None => (NAT64_PORT_LOW..=NAT64_PORT_HIGH).contains(&port),
+        }
+    }
+
+    /// #15178: positive-mismatch form for session-hit revalidation.
+    /// Returns `true` ONLY when the live prefix selected by `dst_v6` is
+    /// deterministic, carries the translated port, and the stored tuple
+    /// is outside the subscriber's CURRENT deterministic block (or the
+    /// prefix no longer holds the translated address). Every other shape
+    /// — no live prefix for the destination, a round-robin prefix, a
+    /// missing translated port — is NOT a positive mismatch: those were
+    /// exempt before #15178 and stay exempt here, so neighbouring
+    /// zone-policy revalidation (#9604/#13910 fixtures included) keeps
+    /// its own verdict instead of being pre-empted by a source-NAT
+    /// revocation it never had.
+    pub(crate) fn nat64_deterministic_translation_mismatch(
+        &self,
+        src_v6: Ipv6Addr,
+        dst_v6: Ipv6Addr,
+        translated_src: Ipv4Addr,
+        translated_port: Option<u16>,
+    ) -> bool {
+        let Some(port) = translated_port else {
+            return false;
+        };
+        let Some((prefix_idx, _)) = self.match_ipv6_dest(dst_v6) else {
+            return false;
+        };
+        let Some(prefix) = self.prefixes.get(prefix_idx) else {
+            return false;
+        };
+        let Some(params) = prefix.deterministic_v6 else {
+            return false;
+        };
+        let Some(&addr_index) = prefix.pool_index_v4.get(&translated_src) else {
+            return true;
+        };
+        !prefix.port_allocator.deterministic_v6_tuple_matches(
+            params,
+            src_v6,
+            &prefix.pool_v4,
+            addr_index,
+            translated_src,
+            port,
+        )
     }
 
     /// Returns true if any NAT64 prefixes are configured.

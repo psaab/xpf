@@ -4937,3 +4937,151 @@ fn local_scoped_snat_survives_unchanged_15176() {
         "local scoped SNAT must survive the unchanged rule"
     );
 }
+
+// #15178: an established deterministic NAT64 session whose tuple is outside
+// its subscriber's block under the LIVE geometry is revoked on its first
+// stale hit; the same tuple under its minting geometry, and a round-robin
+// NAT64 tuple, survive. Pre-fix the nat64 arm returned valid unconditionally.
+#[test]
+fn nat64_deterministic_stale_geometry_revokes_15178() {
+    use std::net::Ipv6Addr;
+    let mk_nat64 = |block_size: u16| {
+        crate::nat64::Nat64State::from_snapshots(&[crate::NAT64RuleSnapshot {
+            name: "napt64-15178".to_string(),
+            prefix: "64:ff9b::/96".to_string(),
+            pool_addresses: vec!["198.51.100.1".to_string()],
+            deterministic_block_size: block_size,
+            deterministic_blocks_per_ip: 2016,
+            deterministic_host_prefix_len: 32,
+            deterministic_host_base_v6: "2001:db8::".to_string(),
+            ..Default::default()
+        }])
+    };
+    // Mint under block 32: subscriber word 5 -> port in [1184,1215].
+    let old_state = mk_nat64(32);
+    let sub: Ipv6Addr = "2001:db8:0:5::".parse().unwrap();
+    let (pool_ip, old_port) = old_state
+        .allocate_source(0, 6, sub, Ipv4Addr::new(8, 8, 8, 8), 40001, 443, 1_000_000_000)
+        .expect("mint old tuple");
+    assert!((1184..=1215).contains(&old_port));
+
+    let key = SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 6,
+        src_ip: IpAddr::V6(sub),
+        dst_ip: "64:ff9b::808:808".parse().expect("synthetic dst"),
+        src_port: 40001,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: crate::nat::NatDecision {
+            rewrite_src: Some(IpAddr::V4(pool_ip)),
+            rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+            rewrite_src_port: Some(old_port),
+            rewrite_dst_port: None,
+            source_nat_icmp: None,
+            nat64: true,
+            nptv6: false,
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let metadata = SessionMetadata {
+        ingress_zone: 1,
+        egress_zone: 2,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 24,
+        ingress_vlan_id: 0,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None,
+    };
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision,
+        metadata: metadata.clone(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: 6,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 15178,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+    };
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let run = |nat64: crate::nat64::Nat64State| {
+        let mut forwarding = ForwardingState::default();
+        forwarding.nat64 = nat64;
+        let mut sessions = SessionTable::new();
+        sessions.set_forwarding_revalidation_gen(1, 1);
+        assert!(sessions.upsert_synced_with_origin(entry.clone().into_session_install(1), false));
+        source_nat_revocation_on_session_hit(
+            &forwarding,
+            &mut sessions,
+            &key,
+            &metadata,
+            decision,
+            &flow,
+            SessionOrigin::SyncImport,
+            None,
+            None,
+            1_000_000_000,
+        )
+    };
+    assert!(run(mk_nat64(32)).is_none(), "#15178 control: minting geometry survives");
+    let revocation = run(mk_nat64(1024)).expect("#15178: stale geometry must revoke");
+    assert!(matches!(revocation.reason, PolicyRevocationReason::StaleSourceNat));
+    // The mismatch predicate itself: positive only under the new geometry.
+    assert!(mk_nat64(1024).nat64_deterministic_translation_mismatch(
+        sub,
+        "64:ff9b::808:808".parse().unwrap(),
+        pool_ip,
+        Some(old_port)
+    ));
+    assert!(!mk_nat64(32).nat64_deterministic_translation_mismatch(
+        sub,
+        "64:ff9b::808:808".parse().unwrap(),
+        pool_ip,
+        Some(old_port)
+    ));
+    // Control: round-robin NAT64 (no deterministic geometry) still survives.
+    let rr = crate::nat64::Nat64State::from_snapshots(&[crate::NAT64RuleSnapshot {
+        name: "nat64-rr".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.1".to_string()],
+        ..Default::default()
+    }]);
+    assert!(run(rr).is_none(), "#15178 control: round-robin NAT64 survives");
+}

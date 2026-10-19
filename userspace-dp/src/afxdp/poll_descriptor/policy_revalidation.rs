@@ -643,7 +643,37 @@ fn source_nat_translation_still_valid(
         return (destination_valid, None);
     };
     if nat.nat64 {
-        return (destination_valid, None);
+        // #15178: NAT64 source translations are no longer BLANKET-exempt,
+        // but the revocation fires only on a POSITIVE deterministic
+        // mismatch. A stored tuple minted under a previous deterministic
+        // geometry (block-size, host-base, /32<->/64, or
+        // deterministic<->round-robin edit on the same pool) must be torn
+        // down: the stateless reverse map now assigns it to a different
+        // subscriber, and keeping it makes a same-socket new-remote flow
+        // join the stale BIB lease and fail AllocatorExhausted. The
+        // mismatch is judged against the LIVE prefix selected by the
+        // synthetic destination, through `deterministic_v6_tuple_matches`
+        // — the predicate the synced reserve already uses.
+        //
+        // Everything else keeps the pre-#15178 exemption: no live prefix
+        // for the destination, a round-robin prefix, or a missing
+        // translated port is not a geometry mismatch, and revoking there
+        // would pre-empt the zone-policy gate (#9604 declines, #13910
+        // provenance) with a source-NAT verdict those paths never had.
+        // The destination side stays exempt (prefix-driven, see
+        // `destination_nat_translation_still_valid`).
+        let mismatch = match (forward_key.src_ip, forward_key.dst_ip, translated_src) {
+            (IpAddr::V6(src_v6), IpAddr::V6(dst_v6), IpAddr::V4(translated_v4)) => forwarding
+                .nat64
+                .nat64_deterministic_translation_mismatch(
+                    src_v6,
+                    dst_v6,
+                    translated_v4,
+                    nat.rewrite_src_port,
+                ),
+            _ => false,
+        };
+        return (!mismatch && destination_valid, None);
     }
     if nat.nptv6 {
         // #14315: an NPTv6 source rewrite is re-derived from live state.
