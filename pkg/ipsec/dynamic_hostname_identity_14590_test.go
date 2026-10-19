@@ -101,7 +101,9 @@ func TestGenerateConfig_DynamicHostnameExplicitRemoteIDWins14590(t *testing.T) {
 }
 
 // A defined gateway address still dials; only dynamic-hostname gateways
-// become responder-only identities.
+// become responder-only identities. Since #15193 the fixed-address PSK
+// render also pins the Junos default remote identity (the peer address)
+// so an initiator-side PSK lookup can select the secret.
 func TestGenerateConfig_AddressGatewayStillDials14590(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
@@ -113,5 +115,5 @@ func TestGenerateConfig_AddressGatewayStillDials14590(t *testing.T) {
 	}
 	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "gw")
 	conn.requireSetting(t, "remote_addrs", "203.0.113.1")
-	conn.at(t, "remote").hasNoSetting(t, "id")
+	conn.at(t, "remote").requireSetting(t, "id", `"203.0.113.1"`)
 }

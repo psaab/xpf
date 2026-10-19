@@ -11021,6 +11021,20 @@ reserved for whole-dataplane selection where a rewrite shim
     the tunnel by claiming that peer's identity. Commit rejects that
     bare shape (`validateIPsecResponderIdentityStrict`); tolerant loads
     warn and the renderer skips the connection.
+  - **#15193 (fixed-address default identity / initiator PSK lookup):** a
+    fixed-address (`address <ip>`) PSK gateway with neither
+    `remote-identity` nor `local-identity` — the Junos default shape,
+    accepted by strict commit — now renders the Junos default remote
+    identity `remote { id = "<first gateway address>" }` in swanctl and
+    scopes the PSK by every gateway address PLUS a local owner (the
+    configured `local-id`, else the pinned local address, else `%any`).
+    Without the local owner charon-as-initiator found no secret for its
+    `(<local ip>, %any)` lookup and aborted IKE_AUTH, so every
+    xpf-initiated tunnel in the default shape failed. Explicit
+    `remote-identity`/`local-identity`, `dynamic hostname` gateways,
+    responder-only gateways (#14591) and certificate gateways render
+    exactly as before. No new configuration knob is introduced — the
+    identities remain optional on a fixed-address gateway.
   - `security nat static rule-set rule match` — declared the
     `source-address` / `destination-address` children the static-NAT
     compiler reads (the subtree was previously unreachable by the walker).
