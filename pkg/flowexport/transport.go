@@ -26,7 +26,6 @@ import (
 // the string/time fields and the healthy edge-detect flag so a concurrent
 // status reader gets a consistent snapshot (run -race).
 type collectorConn struct {
-	conn net.Conn
 	addr string
 	// srcAddr is the local bind (source) address this connection was
 	// dialed with ("" = OS-selected). Surfaced in the health snapshot so
@@ -43,7 +42,8 @@ type collectorConn struct {
 	// backoff" from a real per-flush failure.
 	skipped atomic.Uint64
 
-	mu              sync.Mutex
+	mu              sync.RWMutex
+	conn            net.Conn
 	lastError       string
 	lastErrorTime   time.Time
 	lastFailureTime time.Time
@@ -61,6 +61,114 @@ type collectorConn struct {
 	// costs one bounded probe per unhealthyProbeInterval instead of a full
 	// collectorWriteTimeout stall on every flush. Zero on a healthy collector.
 	nextRetryAt time.Time
+	// dialedAt is stamped on every (re)dial (#15073): after a renumber
+	// drops the old source the canary cannot spot the drop until the
+	// stale grace below has elapsed on the current socket.
+	dialedAt time.Time
+	// stale tracks a parked, known-stale redial failure so health() can
+	// report the collector unhealthy while it is dead rather than
+	// leaving the stale write state visible (#15073).
+	stale bool
+}
+
+// localAddrsFn enumerates the host's currently assigned addresses. It is the
+// canary seam: tests inject the renumbering view so a write-failure redial and
+// a still-assigned check never touch the real interface table (#15073). Nil in
+// production selects net.InterfaceAddrs.
+var localAddrsFn func() ([]net.Addr, error)
+
+func realLocalAddrs() ([]net.Addr, error) { return net.InterfaceAddrs() }
+
+// staleSourceGrace is the quiet window after a (re)dial during which a
+// proven-write failure still redials unconditionally rather than taking the
+// cheaper still-assigned check (#15073): most often a renumber drops the old
+// source only once the replacement address exists, so an EADDRNOTAVAIL-class
+// failure right behind the new bind lands in this grace too.
+var staleSourceGrace = 2 * time.Minute
+
+// addrIsAssigned reports whether the IP literal ip (from a dialed socket's
+// LocalAddr) is still among the host's assigned addresses. A bare IP with no
+// CIDR matches an assigned address whose IP equals it or whose prefix
+// contains it.
+func addrIsAssigned(ip string) bool {
+	addrsFn := localAddrsFn
+	if addrsFn == nil {
+		addrsFn = realLocalAddrs
+	}
+	addrs, err := addrsFn()
+	if err != nil || len(addrs) == 0 {
+		return true // enumeration failure: never churn or mark stale on no data
+	}
+	needle, err := netip.ParseAddr(ip)
+	if err != nil {
+		return true
+	}
+	for _, a := range addrs {
+		switch v := a.(type) {
+		case *net.IPNet:
+			if v.IP != nil {
+				if addr, ok := netipxFromIP(v.IP); ok && (addr == needle || netip.PrefixFrom(addr, addr.BitLen()).Contains(needle)) {
+					return true
+				}
+				if pfx, err := netip.ParsePrefix(v.String()); err == nil && pfx.Contains(needle) {
+					return true
+				}
+			}
+		case *net.IPAddr:
+			if v.IP != nil {
+				if addr, ok := netipxFromIP(v.IP); ok && addr == needle {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func netipxFromIP(ip net.IP) (netip.Addr, bool) {
+	if ip4 := ip.To4(); ip4 != nil {
+		return netip.AddrFrom4([4]byte(ip4)), true
+	}
+	if ip16 := ip.To16(); ip16 != nil {
+		return netip.AddrFrom16([16]byte(ip16)), true
+	}
+	return netip.Addr{}, false
+}
+
+// localAddrOf returns conn.LocalAddr(), recovering the panic a fake conn
+// with a nil embedded net.Conn raises so health/write paths never crash on
+// a test double (#15073).
+func localAddrOf(conn net.Conn) (addr net.Addr) {
+	defer func() {
+		if recover() != nil {
+			addr = nil
+		}
+	}()
+	return conn.LocalAddr()
+}
+
+// sourceStale reports whether c's currently dialed source is no longer
+// assigned. c.mu must NOT be held. No staleness signal exists while netip
+// parsing fails or enumeration yields nothing.
+func (c *collectorConn) sourceStale() bool {
+	c.mu.RLock()
+	stale, dialedAt, conn := c.stale, c.dialedAt, c.conn
+	c.mu.RUnlock()
+	if stale && !dialedAt.IsZero() && time.Since(dialedAt) < staleSourceGrace {
+		return false
+	}
+	if conn == nil {
+		return false
+	}
+	la := localAddrOf(conn)
+	if la == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(la.String())
+	if err != nil {
+		return false
+	}
+	return !addrIsAssigned(host)
 }
 
 // ExporterCollectorHealth is one collector's write-health snapshot
@@ -228,42 +336,63 @@ func dialCollectors(collectors []CollectorConfig) (*collectorConns, error) {
 		return nil, err
 	}
 	for _, c := range collectors {
-		ctx, cancel := context.WithTimeout(context.Background(), collectorDialTimeout)
-		var conn net.Conn
-		var err error
-		if c.SourceAddress != "" {
-			// A misconfigured SourceAddress must be surfaced, not
-			// silently dropped to a nil local bind (which would let
-			// the OS pick an arbitrary source and mask the
-			// misconfiguration). JoinHostPort brackets an IPv6
-			// source-address literal so the context-aware resolver can
-			// parse it; "addr:0" leaves an IPv6 address unbracketed
-			// and unparseable (sibling of #2183).
-			laddr, err2 := resolveUDPAddrContext(ctx, "udp", net.JoinHostPort(c.SourceAddress, "0"))
-			if err2 != nil {
-				cancel()
-				return fail(fmt.Errorf("resolve collector %s source-address %s: %w", c.Address, c.SourceAddress, err2))
-			}
-			raddr, err2 := resolveUDPAddrContext(ctx, "udp", c.Address)
-			if err2 != nil {
-				cancel()
-				return fail(fmt.Errorf("resolve collector %s: %w", c.Address, err2))
-			}
-			conn, err = dialUDPResolvedContext(ctx, "udp", laddr, raddr)
-		} else {
-			// Pass the hostname directly to DialContext so the net
-			// package retains its candidate-list fallback behavior.
-			conn, err = dialUDPContext(ctx, "udp", nil, c.Address)
-		}
-		cancel()
+		now := time.Now()
+		conn, err := dialCollector(c)
 		if err != nil {
-			return fail(fmt.Errorf("dial collector %s: %w", c.Address, err))
+			return fail(err)
 		}
 		// A collector starts healthy (optimistic) so the FIRST failed write
 		// is the unhealthy edge that warns (#2464).
-		cc.conns = append(cc.conns, &collectorConn{conn: conn, addr: c.Address, srcAddr: c.SourceAddress, healthy: true})
+		cc.conns = append(cc.conns, &collectorConn{conn: conn, addr: c.Address, srcAddr: c.SourceAddress, healthy: true, dialedAt: now})
 	}
 	return cc, nil
+}
+
+// dialCollector dials a single collector, source-bound when cfg carries a
+// SourceAddress and OS-selected otherwise (#15073). It is the single dial
+// path shared by dialCollectors (build) and redialCollector (recovery), so a
+// re-dial re-resolves the destination and re-picks the implicit source
+// exactly as a fresh build would.
+func dialCollector(cfg CollectorConfig) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), collectorDialTimeout)
+	defer cancel()
+	var conn net.Conn
+	var err error
+	if cfg.SourceAddress != "" {
+		// A misconfigured SourceAddress must be surfaced, not
+		// silently dropped to a nil local bind (which would let
+		// the OS pick an arbitrary source and mask the
+		// misconfiguration). JoinHostPort brackets an IPv6
+		// source-address literal so the context-aware resolver can
+		// parse it; "addr:0" leaves an IPv6 address unbracketed
+		// and unparseable (sibling of #2183).
+		laddr, err2 := resolveUDPAddrContext(ctx, "udp", net.JoinHostPort(cfg.SourceAddress, "0"))
+		if err2 != nil {
+			return nil, fmt.Errorf("resolve collector %s source-address %s: %w", cfg.Address, cfg.SourceAddress, err2)
+		}
+		raddr, err2 := resolveUDPAddrContext(ctx, "udp", cfg.Address)
+		if err2 != nil {
+			return nil, fmt.Errorf("resolve collector %s: %w", cfg.Address, err2)
+		}
+		conn, err = dialUDPResolvedContext(ctx, "udp", laddr, raddr)
+	} else {
+		// Pass the hostname directly to DialContext so the net
+		// package retains its candidate-list fallback behavior.
+		conn, err = dialUDPContext(ctx, "udp", nil, cfg.Address)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("dial collector %s: %w", cfg.Address, err)
+	}
+	return conn, nil
+}
+
+// redialCollector re-dials c's collector and swaps the live socket on
+// success, closing the old one (#15073). On failure it reports the error and
+// leaves the old socket and c.cfg untouched, so the caller can park the
+// collector unhealthy and retry at the normal probe cadence. The old socket
+// is retired only after the replacement is confirmed usable for a write.
+func (c *collectorConn) redialCollector() (net.Conn, error) {
+	return dialCollector(CollectorConfig{Address: c.addr, SourceAddress: c.srcAddr})
 }
 
 // collectorWriteTimeout BOUNDS how long a single collector write may block
@@ -350,6 +479,55 @@ func templateRefreshInterval(d time.Duration) time.Duration {
 // once when it recovers. errMsg disambiguates the protocol/path
 // (template vs data) in the debug line kept for deep tracing.
 func (cc *collectorConns) writeAll(pkt []byte, errMsg string) bool {
+	// #15073: a still-healthy collector whose implicit source was
+	// renumbered away keeps succeeding on IPv6 (and counts exported
+	// with a dead source on IPv4) because the socket is never
+	// re-dialed. Re-dial those canary-stale sockets BEFORE the write
+	// fan-out so the write below lands on the live source; a failed
+	// re-dial parks the collector unhealthy instead of writing from
+	// the removed address. Unhealthy/probing sockets are handled by
+	// the write-failure redial below, so the canary stays off them.
+	for _, c := range cc.conns {
+		c.mu.RLock()
+		healthy := c.healthy
+		c.mu.RUnlock()
+		if !healthy {
+			continue
+		}
+		if !c.sourceStale() {
+			continue
+		}
+		if nc, rerr := c.redialCollector(); rerr != nil {
+			now := time.Now()
+			c.failures.Add(1)
+			c.mu.Lock()
+			wasHealthy := c.healthy
+			c.healthy = false
+			c.stale = true
+			c.lastError = rerr.Error()
+			c.lastErrorTime = now
+			c.lastFailureTime = now
+			c.consecFail++
+			c.nextRetryAt = now.Add(unhealthyProbeInterval)
+			c.mu.Unlock()
+			slog.Debug(errMsg, "collector", c.addr, "err", rerr)
+			if wasHealthy {
+				slog.Warn("flow-export collector stale source; re-dial failed",
+					"collector", c.addr, "err", rerr)
+			}
+		} else {
+			c.mu.Lock()
+			old := c.conn
+			c.conn = nc
+			c.dialedAt = time.Now()
+			c.mu.Unlock()
+			if old != nil {
+				_ = old.Close()
+			}
+			slog.Info("flow-export collector re-dialed after source renumbering",
+				"collector", c.addr)
+		}
+	}
 	succeeded := false
 	for _, c := range cc.conns {
 		// Backoff gate: an unhealthy collector still inside its probe window is
@@ -363,15 +541,60 @@ func (cc *collectorConns) writeAll(pkt []byte, errMsg string) bool {
 		}
 		c.mu.Unlock()
 
+		c.mu.RLock()
+		conn := c.conn
+		c.mu.RUnlock()
 		// Bound the write so a full send buffer on one collector cannot park
 		// the shared goroutine indefinitely (#4423 H07). A write that trips
 		// the deadline returns a timeout error handled by the failure branch
 		// below, exactly like any other unreachable-collector error.
-		_ = c.conn.SetWriteDeadline(time.Now().Add(collectorWriteTimeout))
-		_, err := c.conn.Write(pkt)
+		_ = conn.SetWriteDeadline(time.Now().Add(collectorWriteTimeout))
+		_, err := conn.Write(pkt)
 		c.attempts.Add(1)
 		now := time.Now()
 		if err != nil {
+			// #15073: a write failure on a proven-healthy socket may
+			// mean its implicit source was renumbered away (IPv4
+			// EADDRNOTAVAIL / ENETUNREACH). Re-dial once — re-resolving
+			// the destination and re-picking the live source — and
+			// retry this packet on the fresh socket before parking
+			// the collector. A collector whose source is still
+			// assigned keeps today's behaviour (no churn).
+			recovered := false
+			c.mu.RLock()
+			wasHealthyForRedial := c.healthy
+			c.mu.RUnlock()
+			if wasHealthyForRedial && c.sourceStale() {
+				if nc, rerr := c.redialCollector(); rerr == nil {
+					_ = nc.SetWriteDeadline(time.Now().Add(collectorWriteTimeout))
+					if _, werr := nc.Write(pkt); werr == nil {
+						c.mu.Lock()
+						old := c.conn
+						c.conn = nc
+						c.dialedAt = time.Now()
+						c.lastSuccessTime = now
+						c.nextRetryAt = time.Time{}
+						wasUnhealthy := !c.healthy
+						c.healthy = true
+						c.stale = false
+						c.consecFail = 0
+						c.mu.Unlock()
+						if old != nil && old != nc {
+							_ = old.Close()
+						}
+						succeeded = true
+						recovered = true
+						if wasUnhealthy {
+							slog.Info("flow-export collector recovered", "collector", c.addr)
+						}
+					} else {
+						_ = nc.Close()
+					}
+				}
+			}
+			if recovered {
+				continue
+			}
 			c.failures.Add(1)
 			c.mu.Lock()
 			c.lastError = err.Error()
@@ -399,6 +622,7 @@ func (cc *collectorConns) writeAll(pkt []byte, errMsg string) bool {
 		c.nextRetryAt = time.Time{}
 		wasUnhealthy := !c.healthy
 		c.healthy = true
+		c.stale = false
 		c.consecFail = 0
 		succeeded = true
 		c.mu.Unlock()
@@ -418,15 +642,21 @@ func (cc *collectorConns) health() []CollectorHealth {
 	}
 	out := make([]CollectorHealth, 0, len(cc.conns))
 	for _, c := range cc.conns {
+		stale := c.sourceStale()
 		c.mu.Lock()
+		healthy := c.healthy && !stale
+		lastErr := c.lastError
+		if stale && lastErr == "" {
+			lastErr = "flow-export collector source address no longer assigned"
+		}
 		out = append(out, CollectorHealth{
 			Address:         c.addr,
 			SourceAddress:   c.srcAddr,
 			WriteAttempts:   c.attempts.Load(),
 			WriteFailures:   c.failures.Load(),
 			WriteSkipped:    c.skipped.Load(),
-			Healthy:         c.healthy,
-			LastError:       c.lastError,
+			Healthy:         healthy,
+			LastError:       lastErr,
 			LastErrorTime:   c.lastErrorTime,
 			LastFailureTime: c.lastFailureTime,
 			LastSuccessTime: c.lastSuccessTime,
@@ -439,7 +669,12 @@ func (cc *collectorConns) health() []CollectorHealth {
 // close shuts down all collector connections.
 func (cc *collectorConns) close() {
 	for _, c := range cc.conns {
-		c.conn.Close()
+		c.mu.RLock()
+		conn := c.conn
+		c.mu.RUnlock()
+		if conn != nil {
+			_ = conn.Close()
+		}
 	}
 }
 

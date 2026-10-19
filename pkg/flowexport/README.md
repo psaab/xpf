@@ -795,6 +795,19 @@ a per-write warn would flood the journal (project logging rule: no
 Warn/Info in a per-tick loop). The per-write `slog.Debug` line is kept
 for deep tracing.
 
+Since #15073 the dialed socket is not terminal: `dialCollector` is the
+single dial path shared by the build (`dialCollectors`) and recovery.
+A write failure on a proven-healthy socket whose `LocalAddr()` is no
+longer assigned re-dials once (re-resolving the destination and
+re-picking the live implicit source) and retries that packet on the
+fresh socket; a healthy socket whose source was renumbered away but
+whose writes still succeed (the IPv6 leg) is re-dialed by the
+pre-write canary, and `health()` reports it unhealthy with a
+not-assigned reason. A failure with the source still assigned keeps
+the unhealthy+backoff behaviour with no re-dial churn. A failed
+re-dial parks the collector unhealthy behind the existing probe
+backoff instead of writing from the removed address.
+
 The snapshot is surfaced through `Exporter.CollectorHealth()` /
 `IPFIXExporter.CollectorHealth()` → `Daemon.FlowCollectorHealth()`
 (annotated with protocol / instance / template via
