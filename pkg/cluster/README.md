@@ -3084,6 +3084,11 @@ Read the scope literally:
   this as a confidential channel.
 - Against a peer that predates #6629 the push falls back to CLEARTEXT, with a
   warning. During a mixed-version window the old behaviour applies in full.
+- On an AUTHENTICATED (Noise-keyed) connection there is no cleartext
+  fallback at all (#15041): the config key is derived from the handshake
+  secret, so suppressing the ephemeral key-exchange frames cannot force
+  a cleartext push. The cleartext fallback below applies only to
+  unauthenticated (legacy/unkeyed) connections.
 - This build latches an alarm and increments its sender counter after a
   successful cleartext send; it also latches and increments a receiver
   counter on a legacy cleartext receive. The counters are visible in `show

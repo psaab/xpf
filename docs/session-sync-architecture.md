@@ -611,6 +611,21 @@ drops it, so a reconnect derives a different key and a key recovered later
 cannot open a capture taken on an earlier connection
 (`TestConfigCryptoReconnectDerivesFreshKey6629`).
 
+**Authenticated links (#15041).** On a connection that completed the
+Noise_NNpsk0 handshake, the ephemeral exchange is not the key source: it
+is an ordinary droppable frame, `verifyFrame` admits sequence gaps, and
+an active relay could suppress both type-30 frames and let the bounded
+wait lapse into cleartext type 8 — disclosing the PSK on a link that IS
+authenticated. Authenticated connections instead derive the config key
+from the handshake secret (`configKeyFromHandshake`: HKDF over the
+canonically ordered pair of directional frame keys, purpose-bound info
+string), which both ends already hold and no wire frame can suppress.
+The ephemeral exchange and its cleartext fallback remain only for
+unauthenticated (legacy/unkeyed) connections, preserving the mixed-version
+behaviour below. A pre-#15041 peer on an authenticated link never derives
+the handshake key, so its sealed pushes fail to open here and are dropped
+(re-pushed on reconcile) rather than silently accepted in cleartext.
+
 **What it does NOT close.** An ACTIVE man-in-the-middle. The ephemeral
 exchange on an unkeyed link is itself unauthenticated — there is nothing to
 authenticate it WITH, which is the bootstrap problem — so an attacker who can

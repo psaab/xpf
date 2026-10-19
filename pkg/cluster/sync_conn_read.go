@@ -723,7 +723,12 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// must never diverge in ordering, generation accounting or apply
 		// admission, and a divergence there would always be a bug, so there is
 		// one implementation rather than two kept in agreement.
-		key := s.configKeyForConn(conn)
+		// #15041: authenticated connections derive the key from the
+		// handshake secret; unauthenticated ones use the ephemeral key.
+		key := configKeyFromHandshake(conn)
+		if key == nil {
+			key = s.configKeyForConn(conn)
+		}
 		if key == nil {
 			// A sealed payload arrived on a connection with no derived key:
 			// either the exchange never completed or this is a stale
