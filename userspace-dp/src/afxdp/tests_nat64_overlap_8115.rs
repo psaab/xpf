@@ -431,6 +431,103 @@ fn a_synced_nat64_import_over_disjoint_pools_is_unaffected_9021() {
 }
 
 // ---------------------------------------------------------------------------
+// #15145 — a refused synced NAT64 RE-decision must not evict the incumbent.
+//
+// Same caller-side residual on the NAT64 twin: the reserve evicted the same
+// flow's incumbent lease before the peer/static recheck rolled the
+// replacement back. The pre-reserve ownership check now refuses first.
+// A second port is needed so the incumbent and the contended identity
+// differ; this snapshot widens both pools to 1024..=1025.
+fn snapshot_two_ports() -> ConfigSnapshot {
+    let mut snapshot = snapshot_with(SHARED_V4, SHARED_V4);
+    snapshot.source_nat_rules[0].port_high = PORT + 1;
+    snapshot
+}
+
+fn import_synced_at(state: &ForwardingState, key: &crate::session::SessionKey, port: u16) -> bool {
+    let decision = crate::nat64::Nat64State::forward_decision(
+        SHARED_V4.parse::<Ipv4Addr>().expect("shared v4"),
+        "8.8.8.8".parse::<Ipv4Addr>().expect("v4 dst"),
+        port,
+    );
+    crate::nat64::reserve_synced_nat64_allocation(&state.nat64, key, decision, false, 0)
+}
+
+#[test]
+fn a_refused_synced_nat64_redecision_keeps_the_incumbent_15145() {
+    let state = build_forwarding_state(&snapshot_two_ports());
+    let key = synced_nat64_key_9021("2001:db8::7");
+    // Incumbent: the synced flow holds (SHARED, PORT+1) in the NAT64 allocator.
+    // Reserve it at the allocator level so the port choice is exact (the
+    // round-robin mint would take PORT).
+    assert!(
+        import_synced_at(&state, &key, PORT + 1),
+        "fixture: the incumbent NAT64 import must reserve"
+    );
+    assert!(
+        state.nat64.prefixes[0]
+            .port_allocator
+            .debug_is_port_occupied(0, PORT + 1),
+        "fixture: the NAT64 allocator must hold the incumbent port"
+    );
+    // A local SNAT flow takes (SHARED, PORT) in the overlapping source pool.
+    let local = snat_mint(&state, "10.0.61.7");
+    assert_eq!(
+        snat_identity(&local),
+        Some((SHARED_V4.parse::<IpAddr>().unwrap(), Some(PORT))),
+        "fixture: the source-NAT flow must own the contended identity"
+    );
+    // The peer re-decides the same NAT64 flow onto PORT — peer-owned.
+    assert!(
+        !import_synced_at(&state, &key, PORT),
+        "the re-decision must still be REFUSED (#9021 peer ownership)"
+    );
+    assert!(
+        state.nat64.prefixes[0]
+            .port_allocator
+            .debug_is_port_occupied(0, PORT + 1),
+        "#15145: the refused re-decision must leave the incumbent NAT64 \
+         reservation intact — on master the reserve evicted it first"
+    );
+    assert_eq!(
+        state.nat64.prefixes[0].port_allocator.live_flow_count(),
+        1,
+        "exactly the incumbent NAT64 record survives"
+    );
+}
+
+/// #15145 CONTROL: an admissible NAT64 import on an unowned tuple still
+/// reserves, alongside the incumbent.
+///
+/// Note: a same-flow tuple change is refused by the BIB lease-mismatch
+/// check inside the allocator (the lease names the incumbent tuple;
+/// pre-existing #13691 behaviour, not this issue), so the admissible
+/// control shape is a fresh flow importing the other port.
+#[test]
+fn an_admissible_synced_nat64_redecision_still_replaces_15145() {
+    let state = build_forwarding_state(&snapshot_two_ports());
+    let key = synced_nat64_key_9021("2001:db8::7");
+    assert!(import_synced_at(&state, &key, PORT + 1), "fixture: incumbent");
+    let fresh = synced_nat64_key_9021("2001:db8::8");
+    assert!(
+        import_synced_at(&state, &fresh, PORT),
+        "an unowned tuple must still be reserved for a fresh flow (#15145 control)"
+    );
+    assert!(
+        state.nat64.prefixes[0]
+            .port_allocator
+            .debug_is_port_occupied(0, PORT + 1),
+        "the incumbent port is still held"
+    );
+    assert!(
+        state.nat64.prefixes[0]
+            .port_allocator
+            .debug_is_port_occupied(0, PORT),
+        "the fresh flow's port is held"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // #10706 — HA-synced NAT64 imports mis-booked under a dual SNAT reference
 // ---------------------------------------------------------------------------
 //

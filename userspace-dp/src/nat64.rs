@@ -184,8 +184,9 @@ use crate::afxdp::MAX_IPV6_EXT_HEADERS;
 use crate::afxdp::{ExtChainOutcome, ipv6_ext_header_is_traversable, walk_ipv6_ext_chain};
 use crate::nat::{
     DeterministicV6, NatDecision, PortAllocator, SourceNatFailureReason, SourceNatFlowKey,
-    allocate_nat64_pool_port, allocate_nat64_pool_port_deterministic_v6, release_nat64_pool_port,
-    reserve_nat64_pool_port,
+    TranslatedTuple, allocate_nat64_pool_port, allocate_nat64_pool_port_deterministic_v6,
+    peer_owns_identity_in, release_nat64_pool_port, reserve_nat64_pool_port,
+    static_owns_wire_identity,
 };
 use crate::session::SessionDecision;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -2156,6 +2157,31 @@ fn reserve_synced_nat64_port_unless_peer_owns(
             &prefix.pool_v4,
             addr_index,
             snat_v4,
+            port,
+        ) {
+            return false;
+        }
+    }
+    // #15145: ownership is known before the reserve — ask first so a
+    // peer/static refusal never evicts this flow's incumbent NAT64
+    // reservation. The post-reserve rechecks below stay for races; on that
+    // path the incumbent snapshot is not plumbed to this twin (the
+    // coordinator's strict-mirror rollback restores it), so the recheck
+    // helpers keep their rollback-only behaviour. The interface-registry
+    // refusal (#15146) likewise stays post-reserve: its helper rolls back.
+    {
+        let tuple = TranslatedTuple {
+            ip: IpAddr::V4(snat_v4),
+            port,
+        };
+        if peer_owns_identity_in(
+            prefix.overlap_owners.as_deref(),
+            &prefix.port_allocator,
+            flow,
+            tuple,
+        ) || static_owns_wire_identity(
+            prefix.static_externals.as_deref(),
+            IpAddr::V4(snat_v4),
             port,
         ) {
             return false;

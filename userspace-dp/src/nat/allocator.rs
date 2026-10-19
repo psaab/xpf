@@ -1036,6 +1036,13 @@ pub(crate) struct SourceNatReservationSnapshot {
     promotion_timeout_ns: Option<u64>,
     holders: u128,
     persistent_lease: Option<PersistentLease>,
+    // #15145: the complete incumbent record, captured so a post-reserve
+    // refusal (peer/static/interface ownership) can restore it exactly
+    // instead of leaving the flow with no reservation.
+    allocation: Option<LiveAllocation>,
+    addr_index: usize,
+    deterministic: bool,
+    address_only: bool,
 }
 
 #[cfg(test)]
@@ -2591,6 +2598,10 @@ impl PortAllocator {
                     promotion_timeout_ns: allocation.promotion_timeout_ns,
                     holders: allocation.holders,
                     persistent_lease,
+                    allocation: Some(allocation),
+                    addr_index: allocation.addr_index,
+                    deterministic: allocation.deterministic,
+                    address_only: allocation.address_only,
                 }
             })
         } else {
@@ -7160,6 +7171,103 @@ impl SourceNatReservationSnapshot {
             return false;
         };
         current.promotion_timeout_ns = self.promotion_timeout_ns;
+        true
+    }
+    /// #15145: restore the incumbent captured by `capture_and_replace` after
+    /// a post-reserve refusal rolled back the replacement. The snapshot must
+    /// have been taken with `capture_previous_holders` (the coordinator path);
+    /// without the full allocation record there is nothing exact to restore.
+    ///
+    /// Returns false — leaving whatever state is present untouched — when
+    /// the flow no longer names the replacement tuple, when its slot was
+    /// retaken, or when the incumbent's tuple / persistent lease was claimed
+    /// by another flow in the interim.
+    pub(crate) fn restore_displaced(&self, replacement: TranslatedTuple, now_ns: u64) -> bool {
+        let Some(previous) = self.allocation else {
+            return false;
+        };
+        if previous.translated == replacement {
+            return true;
+        }
+        let previous_lease = match (self.persistent_key, self.persistent_lease) {
+            (None, None) => None,
+            (Some(key), Some(lease)) => Some((key, lease)),
+            _ => return false,
+        };
+        let owns_old_bit = previous.persistent_key.is_none() && !previous.address_only;
+        if owns_old_bit {
+            let Some(occ) = self.allocator.shared.occupancy.get(previous.addr_index) else {
+                return false;
+            };
+            match occ.offset_of(previous.translated.port) {
+                Some(offset) => {
+                    if occ.is_occupied(offset) {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        let mut live = self.allocator.lock_live();
+        let Some(current) = live.live_by_flow.get(&self.flow).copied() else {
+            return false;
+        };
+        if current.translated != replacement {
+            return false;
+        }
+        if let Some((key, previous_lease_rec)) = previous_lease {
+            let Some(cur_lease) = live.persistent_by_source.get(&key).copied() else {
+                return false;
+            };
+            if cur_lease.translated != previous_lease_rec.translated
+                || cur_lease.addr_index != previous_lease_rec.addr_index
+                || cur_lease.active_flows == 0
+            {
+                return false;
+            }
+            if cur_lease != previous_lease_rec {
+                PortAllocator::remove_lease_expiration_locked(
+                    &mut live,
+                    previous_lease_rec.addr_index,
+                    cur_lease.expires_at_ns,
+                    key,
+                );
+                live.insert_persistent_lease(key, previous_lease_rec);
+            }
+            if let Some(slot) = live.live_by_flow.get_mut(&self.flow) {
+                slot.holders |= previous.holders;
+            }
+            let _ = now_ns;
+            return true;
+        }
+        if live.live_by_flow.contains_key(&self.flow) {
+            return false;
+        }
+        if owns_old_bit
+            && !self
+                .allocator
+                .shared
+                .occupancy
+                .get(previous.addr_index)
+                .is_some_and(|occ| occ.reserve(previous.translated.port))
+        {
+            return false;
+        }
+        if previous.address_only {
+            live.insert_address_only_owner(
+                AddressOnlyReverseKey {
+                    protocol: self.flow.protocol,
+                    translated_ip: previous.translated.ip,
+                    translated_port: previous.translated.port,
+                    dst_ip: self.flow.dst_ip,
+                    dst_port: self.flow.dst_port,
+                },
+                self.flow,
+            );
+        } else if previous.persistent_key.is_none() {
+            live.record_pat_owner(&self.flow, previous.translated);
+        }
+        live.live_by_flow.insert(self.flow, previous);
         true
     }
 }
