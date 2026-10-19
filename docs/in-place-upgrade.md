@@ -403,7 +403,14 @@ exist.
   `versions/current`. No cut/verify/stop. Idempotent + crash-safe (`.partial`
   + atomic rename; symlinks via temp+rename; a re-run converges). If
   seeding fails the postinst falls back to legacy direct-staged links (the
-  next upgrade migrates) and never fails the install.
+  next upgrade migrates) and never fails the install. Foreign content at
+  the managed sbin names survives first install (#15240): a pre-existing
+  non-symlink is moved aside to `<path>.xpf-saved` with a warning (the
+  postinst refuses rather than overwrite either file if that name is
+  taken), a symlink pointing anywhere other than our staged path is left
+  untouched, and `seed-runtime` likewise skips sbin entries that are not
+  its own staged/current links. Package removal deletes only links the
+  package owns, so preserved operator files are never lost.
 - **B — legacy-migration snapshot (`debian/xpf.preinst`, self-contained
   shell).** A host installed BEFORE this layout has sbin → `staged/` and no
   `versions/current`. On its next upgrade the preinst — running BEFORE

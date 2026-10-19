@@ -164,12 +164,38 @@ func Seed(cfg Config) (err error) {
 	//    same crash-safety reason. Pointing through `current` (not the
 	//    concrete version dir) matches the cut-over flip layout so a later
 	//    upgrade's flip is a no-op-shaped repoint of the same link.
+	//
+	//    #15240: foreign content the postinst moved aside or left
+	//    untouched must survive the seed too. A symlink already pointing
+	//    at our staged path or through versions/current is ours and is
+	//    repointed idempotently; any other pre-existing entry (a foreign
+	//    symlink, or a non-symlink that reappeared after the postinst
+	//    cleared the name) belongs to the operator and is left exactly
+	//    as found — repointing it would silently destroy admin-owned
+	//    wiring under /usr/local/sbin, the same loss A57-04 reports
+	//    through the shell loop. Absent names are created normally.
 	if err := fsatomic.MkdirAllDurable(cfg.SbinDir, 0o755); err != nil {
 		return fmt.Errorf("seed: create sbin dir: %w", err)
 	}
 	for _, b := range managedBins {
 		link := filepath.Join(cfg.SbinDir, b)
 		target := filepath.Join(cfg.VersionsDir, currentLink, b)
+		if fi, lerr := os.Lstat(link); lerr == nil {
+			stagedLink := filepath.Join(cfg.StagedDir, b)
+			ours := false
+			if fi.Mode()&os.ModeSymlink != 0 {
+				if cur, rerr := os.Readlink(link); rerr == nil &&
+					(cur == stagedLink || cur == target) {
+					ours = true
+				}
+			}
+			if !ours {
+				logf("seed: preserving existing sbin %s (not an xpf-managed target); not replacing it", link)
+				continue
+			}
+		} else if !os.IsNotExist(lerr) {
+			return fmt.Errorf("seed: stat sbin %s: %w", b, lerr)
+		}
 		if err := atomicAbsSymlink(link, target); err != nil {
 			return fmt.Errorf("seed: repoint sbin %s: %w", b, err)
 		}
