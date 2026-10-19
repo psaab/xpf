@@ -235,6 +235,23 @@ func ParseConfigMutationLine(line string) (tokens []string, quoted []bool, ok bo
 	return lexConfigMutationLineStrict15167(line)
 }
 
+// ParseDeactivateActivateCommand lexes a full deactivate/activate line and
+// returns the verb and the lexed remainder path (#15166). It is the split
+// every deactivate/activate executor must use, so the path acted on is the
+// path the gate adjudicated: routing on strings.Fields splits on Unicode
+// whitespace the config lexer rejects, acting on a path nobody authorized.
+// ok=false when the line is not a well-formed `<verb> <path...>` lexing.
+func ParseDeactivateActivateCommand(line string) (verb string, path []string, ok bool) {
+	tokens, _, lexOK := lexConfigMutationLineStrict15167(line)
+	if !lexOK || len(tokens) < 2 {
+		return "", nil, false
+	}
+	if tokens[0] != "deactivate" && tokens[0] != "activate" {
+		return "", nil, false
+	}
+	return tokens[0], tokens[1:], true
+}
+
 // ParseConfigPath lexes a typed configuration-path fragment (for example
 // the argument of an interactive `edit` command) the way the store lexer
 // does: block and line comments are skipped and quoted strings are
@@ -411,6 +428,8 @@ func authorizeConfigMutationDepth9939(cfg *Config, class string, editPath []stri
 	// would act on the remainder. Treat a bare gated verb on a
 	// non-lexing line as gated here; the restricted-class arm below
 	// refuses it. Clean bare verbs (`set` alone) keep the arity error.
+	// #15166 is the deactivate/activate instance of the same mechanism on
+	// the gRPC surface; the arm below covers it via the shared decision.
 	verbOnly15167 := !lexOK && len(parts) == 1 && configMutationVerbs[parts[0]]
 	paths, gated := configMutationPaths(editPath, parts, quoted)
 	if !gated && verbOnly15167 {

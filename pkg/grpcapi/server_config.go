@@ -171,26 +171,29 @@ func (s *Server) Set(ctx context.Context, req *pb.SetRequest) (*pb.SetResponse, 
 			return s.handleCopyRename(sessionID, plantClass, input)
 		case "insert":
 			return s.handleInsert(sessionID, plantClass, input)
+		case "deactivate", "activate":
+			// #15166: split on the lexed remainder, not strings.Fields.
+			// Fields is Unicode-aware, so "deactivate\u00a0system login"
+			// reached DeactivatePath on a path the lexer-based gate never
+			// lexed. ParseDeactivateActivateCommand requires the same
+			// well-formed lexing the gate adjudicated; anything else is a
+			// usage error, never a Fields-split execution.
+			_, path, ok := config.ParseDeactivateActivateCommand(input)
+			if !ok {
+				return nil, status.Errorf(codes.InvalidArgument,
+					"%s requires a configuration path", verb)
+			}
+			var err error
+			if verb == "deactivate" {
+				err = s.store.DeactivateFromInputAsPlantClass(sessionID, plantClass, strings.Join(path, " "))
+			} else {
+				err = s.store.ActivateFromInputAsPlantClass(sessionID, plantClass, strings.Join(path, " "))
+			}
+			if err != nil {
+				return nil, configMutationStatus(err)
+			}
+			return &pb.SetResponse{}, nil
 		}
-	}
-	if fields := strings.Fields(input); len(fields) > 0 &&
-		(fields[0] == "deactivate" || fields[0] == "activate") {
-		verb := fields[0]
-		rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), verb))
-		if rest == "" {
-			return nil, status.Errorf(codes.InvalidArgument,
-				"%s requires a configuration path", verb)
-		}
-		var err error
-		if verb == "deactivate" {
-			err = s.store.DeactivateFromInputAsPlantClass(sessionID, plantClass, rest)
-		} else {
-			err = s.store.ActivateFromInputAsPlantClass(sessionID, plantClass, rest)
-		}
-		if err != nil {
-			return nil, configMutationStatus(err)
-		}
-		return &pb.SetResponse{}, nil
 	}
 	if err := s.store.SetFromInputAsPlantClass(sessionID, plantClass, input); err != nil {
 		return nil, configMutationStatus(err)
