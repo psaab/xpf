@@ -910,6 +910,65 @@ func (m *Manager) handlePeerTimeout() {
 	// disable-rg and no fencing that election still precedes any fence, so their
 	// events and end state are unchanged
 	// (TestPeerLossWithManualFailoverKeepsTodaysOutcome9640).
+	// #15211 (A22-01): snapshot the operator intent cleared below BEFORE
+	// the disable-rg-confirmed fence wait. If awaitPeerFenceLocked aborts
+	// the takeover (#14158: a heartbeat arrived during the wait and the
+	// fence did not confirm), the peer is alive and never relinquished, so
+	// the clears must be undone or the operator's transfer-out is silently
+	// lost and a later peer-aware election can move the RG contrary to it
+	// (under preempt, an unrequested move back). Only restore on abort;
+	// a takeover that proceeds keeps the clears exactly as before.
+	type peerLossHoldSnapshot15211 struct {
+		rg            *RedundancyGroupState
+		manual        bool
+		at            time.Time
+		state         NodeState
+		weight        int
+		overrideReqID uint64
+		hasOverride   bool
+		previous      peerGroupSnapshot
+		hasPrevious   bool
+		abortedReqID  uint64
+		hasAborted    bool
+	}
+	holds15211 := make(map[int]peerLossHoldSnapshot15211)
+	if m.peerFencing == PeerFencingDisableRGConfirmed {
+		for _, rg := range m.groups {
+			snap := peerLossHoldSnapshot15211{rg: rg, manual: rg.ManualFailover, at: rg.ManualFailoverAt, state: rg.State, weight: rg.Weight}
+			if reqID, ok := m.peerTransferOutOverride[rg.GroupID]; ok {
+				snap.overrideReqID, snap.hasOverride = reqID, true
+			}
+			if prev, ok := m.peerTransferOutPrevious[rg.GroupID]; ok {
+				snap.previous, snap.hasPrevious = prev, true
+			}
+			if reqID, ok := m.abortedPeerTransferReqID[rg.GroupID]; ok {
+				snap.abortedReqID, snap.hasAborted = reqID, true
+			}
+			holds15211[rg.GroupID] = snap
+		}
+		// Overrides/aborted markers keyed by an RG no longer in m.groups
+		// are cleared by the loops below too; snapshot them (rg == nil)
+		// so an abort restores them as well.
+		for rgID, reqID := range m.peerTransferOutOverride {
+			if _, ok := holds15211[rgID]; ok {
+				continue
+			}
+			snap := peerLossHoldSnapshot15211{overrideReqID: reqID, hasOverride: true}
+			if prev, ok := m.peerTransferOutPrevious[rgID]; ok {
+				snap.previous, snap.hasPrevious = prev, true
+			}
+			if aborted, ok := m.abortedPeerTransferReqID[rgID]; ok {
+				snap.abortedReqID, snap.hasAborted = aborted, true
+			}
+			holds15211[rgID] = snap
+		}
+		for rgID, reqID := range m.abortedPeerTransferReqID {
+			if _, ok := holds15211[rgID]; ok {
+				continue
+			}
+			holds15211[rgID] = peerLossHoldSnapshot15211{abortedReqID: reqID, hasAborted: true}
+		}
+	}
 	for _, rg := range m.groups {
 		if rg.ManualFailover {
 			slog.Info("cluster: clearing manual failover (peer lost)", "rg", rg.GroupID)
@@ -973,6 +1032,44 @@ func (m *Manager) handlePeerTimeout() {
 	// election or the (disable-rg-only) fence tail.
 	if m.peerFencing == PeerFencingDisableRGConfirmed {
 		if !m.awaitPeerFenceLocked() {
+			// #15211 (A22-01): the takeover is aborted — the peer is
+			// alive and never fenced — so restore the operator intent
+			// cleared above. Restoring State here corrects the
+			// heartbeat election's outcome where that election read
+			// the cleared hold (e.g. preempt promoted this node);
+			// re-apply the override to the rebuilt peer view so it
+			// (and status) again force the peer to secondary-hold,
+			// then re-run the peer-aware election so ownership
+			// reconverges under the restored holds — the same
+			// election a subsequent heartbeat would run.
+			for rgID, snap := range holds15211 {
+				if snap.rg != nil && m.groups[rgID] == snap.rg && snap.manual {
+					oldState := snap.rg.State
+					snap.rg.ManualFailover = true
+					snap.rg.ManualFailoverAt = snap.at
+					snap.rg.Weight = snap.weight
+					snap.rg.State = snap.state
+					if snap.rg.State != oldState {
+						m.sendEvent(rgID, oldState, snap.rg.State, "Manual failover restored after aborted peer fence")
+					}
+				}
+				if snap.hasOverride {
+					m.peerTransferOutOverride[rgID] = snap.overrideReqID
+					if snap.hasPrevious {
+						m.peerTransferOutPrevious[rgID] = snap.previous
+					}
+					if pg, ok := m.peerGroups[rgID]; ok {
+						pg.State = StateSecondaryHold
+						pg.StateOverriddenLocally = true
+						pg.OverrideReason = "transfer-out override"
+						m.peerGroups[rgID] = pg
+					}
+				}
+				if snap.hasAborted {
+					m.abortedPeerTransferReqID[rgID] = snap.abortedReqID
+				}
+			}
+			m.runElection()
 			return
 		}
 	}
@@ -1036,6 +1133,12 @@ func (m *Manager) handlePeerNeverSeen() {
 		return
 	}
 	m.peerConfirmedAbsent = true
+	// #15211 (A22-02): a never-seen peer cannot be fenced under ANY
+	// policy — there is no peer incarnation to fence. Mark the
+	// single-node takeover degraded, like the unconfirmed takeovers in
+	// handlePeerTimeout (#10701), so status never renders this
+	// cold-boot split-brain shape as a cleanly fenced failover.
+	m.markFenceUnconfirmedLocked("peer never seen; no fence possible")
 	slog.Info("cluster: peer never seen after heartbeat timeout, proceeding with election")
 	m.history.Record(EventHeartbeat, -1, "Peer never seen (timeout)")
 	m.electSingleNode()

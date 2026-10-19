@@ -3416,6 +3416,24 @@ takeover gate, and the marker clears when a peer heartbeat returns.
     two-group sibling pin the ordering.
   - `TestPeerLossWithManualFailoverKeepsTodaysOutcome9640` pins the other policies to
     master's measured events.
+- **An aborted confirmed fence restores the operator intent cleared before the wait (#15211 A22-01).**
+  `handlePeerTimeout` clears `ManualFailover` (+weight/state), the peer
+  transfer-out override (+snapshot) and aborted-request markers before
+  `awaitPeerFenceLocked`. When the fence aborts (#14158: heartbeat during
+  the wait, fence unconfirmed) those clears are restored from a pre-wait
+  snapshot, the override is re-applied to the rebuilt peer view, and the
+  peer-aware election re-runs — the peer is alive and never fenced, so the
+  operator's transfer-out must survive. A takeover that proceeds
+  (confirmed, or fail-open with no heartbeat) keeps the clears.
+  `TestFenceAbortRestoresOperatorIntent15211` (both preempt values) pins
+  the restore; the confirmed/fail-open controls pin the clears.
+- **A never-seen takeover is marked DEGRADED (#15211 A22-02).**
+  `handlePeerNeverSeen` cannot fence a peer that was never seen under any
+  policy, so it marks the single-node takeover
+  `peer never seen; no fence possible` via `markFenceUnconfirmedLocked`
+  (#10701 rendering) before `electSingleNode`.
+  `TestNeverSeenTakeoverMarkedDegraded15211` pins all three policies;
+  sync-fresh suppression takes no takeover and marks nothing.
 - **A CONFIRMED ack proves dataplane suppression, not relinquishment (#9120).**
   `fenceAllRedundancyGroups` drives `rg_active=false` and re-arms the RG state
   machine. It does not release VIPs (the peer keeps answering ARP/ND and keeps
