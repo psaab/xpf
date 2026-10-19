@@ -604,8 +604,8 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 			"no-password-authentication": {desc: "Forbid password authentication (sshd PasswordAuthentication no)", children: nil},
 			"no-passwords":               {desc: "Forbid password and keyboard-interactive authentication (sshd PasswordAuthentication no + KbdInteractiveAuthentication no)", children: nil},
 		}},
-		"netconf": {desc: "NETCONF service", children: map[string]*schemaNode{
-			"ssh": {desc: "NETCONF over SSH", children: nil},
+		"netconf": {desc: "NETCONF service (accepted but NOT served — xpf has no NETCONF daemon; commit warns, see #15781)", children: map[string]*schemaNode{
+			"ssh": {desc: "NETCONF over SSH (accepted but NOT served — no NETCONF daemon on tcp/830)", children: nil},
 		}},
 		"web-management": {desc: "Web management", children: map[string]*schemaNode{
 			"http": {desc: "HTTP service", children: map[string]*schemaNode{

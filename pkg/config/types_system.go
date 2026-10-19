@@ -356,9 +356,16 @@ type InternetOptionsConfig struct {
 
 // SystemServicesConfig holds system services (SSH, web-management).
 type SystemServicesConfig struct {
-	SSH                *SSHServiceConfig
-	WebManagement      *WebManagementConfig
-	DNSEnabled         bool // system services dns
+	SSH           *SSHServiceConfig
+	WebManagement *WebManagementConfig
+	DNSEnabled    bool // system services dns
+	// NetconfSSH records `system services netconf ssh` (#15781). xpf has
+	// no NETCONF daemon (docs/feature-gaps.md: NETCONF/YANG Missing), so
+	// the statement is accept-with-advisory: it compiles to this flag,
+	// draws an inert-knob warning naming tcp/830 as NOT served, and
+	// `show system services` reports it as configured but not served.
+	// Host-inbound admission of tcp/830 stays in operator control.
+	NetconfSSH         bool
 	DNSProxyConfigured bool // system services dns dns-proxy (syntax accepted, runtime no-op)
 	// DynamicDNS is the `system services dynamic-dns` provider catalog + engine
 	// tunables (#2691 P2, plan §5.9). It is the OPERATOR-FACING shared catalog
