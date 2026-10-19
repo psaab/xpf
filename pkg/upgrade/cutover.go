@@ -839,6 +839,18 @@ func (r *Runner) Run(opts Options) (err error) {
 			"would leave the daemon offline with no recovery target. Re-seed the "+
 			"versioned runtime (xpfd seed-runtime), then re-run the upgrade", j.TargetVersion)
 	}
+	// ---- KERNEL-ARM RE-STAMP PRE-STOP GATE (#15170, B17-01) ----
+	// Probe the #6639 6d re-stamp BEFORE STOP on every Run that has not yet
+	// stopped — fresh and pre-STOP resumes alike. A corrupt/unreadable
+	// kernel journal (or an ARMED gate binary that is not usable) refuses
+	// here with the daemon live; without this gate the same condition was
+	// discovered at 6d, after STOP, and the rollback re-flip hit it again.
+	if !j.State.atLeast(StateStopped) {
+		if err := r.validateKernelArmRestampPreStop(j); err != nil {
+			r.restoreCommittedPredecessorBackup(predecessorBackup)
+			return err
+		}
+	}
 	if !j.State.atLeast(StateStopped) {
 		if err := r.validateForwardEnvelopeCompatibility(j.TargetVersion,
 			filepath.Join(r.versionDir(j.TargetVersion), "xpfd")); err != nil {
@@ -1126,7 +1138,7 @@ func (r *Runner) restoreStaleStoppedPrevious(j *Journal) error {
 	if err := r.requireStaleStoppedPreviousReadsDB(j, "the unit was stopped and is left down"); err != nil {
 		return err
 	}
-	if err := r.flip(j.PreviousVersion); err != nil {
+	if err := r.flipToleratingKernelArmRestamp(j.PreviousVersion); err != nil {
 		return fmt.Errorf("stale STOPPED recovery: restore known-good version %s: %w",
 			j.PreviousVersion, err)
 	}

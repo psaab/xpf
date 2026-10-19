@@ -3,6 +3,7 @@ package upgrade
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -32,7 +33,48 @@ const unitDropinName = "10-xpf-version.conf"
 // leave dir(os.Args[0]) = /usr/local/sbin and a helper respawn would grab
 // the flipped /usr/local/sbin/xpf-userspace-dp. Pinning the version dir
 // makes dir(os.Args[0]) the matching-version dir.
+// flip performs the journaled-idempotent FLIP substeps (plan §6.1 step 6 /
+// §8 inv. 2) plus 6d. All are DERIVED from ver so a crash between substeps
+// re-runs idempotently to the same target:
+//
+//	6a. repoint versions/current -> <ver> (atomic symlink rename)
+//	6b. repoint /usr/local/sbin/<bin> -> versions/current/<bin>
+//	6c. template the xpfd unit ExecStart/ExecStartPre to the CONCRETE
+//	    versions/<ver>/xpfd path + daemon-reload
+//	6d. (#6639) re-stamp the kernel-arm record at versions/<ver>/xpfd
+//
+// The pre-existing 6a-6c comment above this function describes why 6c pins
+// the concrete versioned path.
 func (r *Runner) flip(ver string) error {
+	if err := r.flipSteps(ver); err != nil {
+		return err
+	}
+	// 6d (#6639): if a kernel candidate is ARMED, re-stamp the arm record at
+	// the binary this cut just made live.
+	//
+	// LAST, deliberately. The record must never name a binary the unit does not
+	// yet point at, so a crash between 6c and here leaves the OLD record — which
+	// is today's behaviour: safe, refusing, and repaired by re-running the cut.
+	if err := r.restampKernelArmRecord(ver); err != nil {
+		return fmt.Errorf("re-stamp kernel arm record: %w", &restampError{err: err})
+	}
+	return nil
+}
+
+// restampError marks a flip() failure that came from step 6d alone
+// (restampKernelArmRecord), after 6a-6c already succeeded. The rollback
+// paths unwrap it via errors.As to tolerate the failure (the daemon must
+// still start); every other failure of flip() is a genuine 6a-6c failure
+// and stays fatal everywhere.
+type restampError struct{ err error }
+
+func (e *restampError) Error() string { return e.err.Error() }
+func (e *restampError) Unwrap() error { return e.err }
+
+// flipSteps performs FLIP substeps 6a-6c only (no 6d). Shared by flip()
+// (which adds the fail-closed 6d) and documented for the rollback paths,
+// which call flip() via flipToleratingKernelArmRestamp.
+func (r *Runner) flipSteps(ver string) error {
 	// 6a: current -> <ver>
 	if err := r.repointSymlink(r.currentPath(), ver); err != nil {
 		return fmt.Errorf("flip current symlink: %w", err)
@@ -51,15 +93,6 @@ func (r *Runner) flip(ver string) error {
 	}
 	if err := r.cfg.Sys.DaemonReload(); err != nil {
 		return fmt.Errorf("daemon-reload after unit template: %w", err)
-	}
-	// 6d (#6639): if a kernel candidate is ARMED, re-stamp the arm record at
-	// the binary this cut just made live.
-	//
-	// LAST, deliberately. The record must never name a binary the unit does not
-	// yet point at, so a crash between 6c and here leaves the OLD record — which
-	// is today's behaviour: safe, refusing, and repaired by re-running the cut.
-	if err := r.restampKernelArmRecord(ver); err != nil {
-		return fmt.Errorf("re-stamp kernel arm record: %w", err)
 	}
 	return nil
 }
@@ -120,8 +153,7 @@ func (r *Runner) restampKernelArmRecord(ver string) error {
 		// this cut is about to invalidate. Refuse rather than cut past it.
 		return fmt.Errorf("read kernel journal: %w", err)
 	}
-	if !j.State.atLeast(KernelStateArmed) ||
-		j.State == KernelStatePromoted || j.State == KernelStateReverted {
+	if !kernelArmRecordArmed(j.State) {
 		return nil // nothing armed — no record exists to re-stamp
 	}
 	bin := filepath.Join(r.cfg.VersionsDir, ver, "xpfd")
@@ -137,6 +169,111 @@ func (r *Runner) restampKernelArmRecord(ver string) error {
 		return fmt.Errorf("create arm-record dir: %w", err)
 	}
 	return fsatomic.WriteFileDurable(path, []byte(bin+"\n"), 0o644)
+}
+
+// kernelArmRecordArmed reports whether state is an in-flight kernel trial
+// whose arm record exists to re-stamp: at least ARMED, but not a terminal
+// PROMOTED/REVERTED. A journal at ARMING or below recorded only INTENT (no
+// confirmed one-shot, no promote binary recorded), so there is no record to
+// move — the same predicate restampKernelArmRecord applies at 6d.
+func kernelArmRecordArmed(s KernelState) bool {
+	return s.atLeast(KernelStateArmed) &&
+		s != KernelStatePromoted && s != KernelStateReverted
+}
+
+// probeKernelArmRestamp reads and validates what restampKernelArmRecord
+// (#6639, step 6d) will need, mutating nothing (#15170, B17-01).
+//
+// THE DEFECT. 6d runs LAST inside flip() — after STOP, after 6a-6c have
+// already repointed current/sbin/ExecStart. loadKernelJournal errors on any
+// non-ENOENT read or parse failure, so a corrupt or unreadable
+// /var/lib/xpf/kernel-upgrade.state made flip() fail at 6d with the daemon
+// already down. recoverFromFlipFailure then re-flipped to the previous
+// version — which ran 6d AGAIN against the same corrupt journal — so the
+// rollback flip failed too, StartUnit never ran, and the standalone daemon
+// stayed offline across the cut, the auto-rollback, a STOPPED resume and
+// `upgrade --rollback`: every recovery path funnels through flip(), and
+// every flip re-ran the same failing 6d.
+//
+// Probing BEFORE StopUnit refuses the cut while the old daemon is still
+// live and the journal, current and the DB are untouched, so the operator
+// can repair or remove the kernel journal and retry. That preserves #6639's
+// forward fail-closed cell exactly: a cut that cannot prove the candidate's
+// gate binary still refuses — it just refuses BEFORE the STOP instead of
+// stranding the box after it.
+//
+// When a candidate is ARMED, the gate binary of BOTH versions whose flip is
+// already planned — the cut target and PreviousVersion, the auto-rollback
+// target — must be usable, so a preflight that proved only the forward leg
+// could still strand the box on the rollback leg. When nothing is armed
+// (no journal, or a state that is not an in-flight trial) this is a no-op,
+// exactly like the 6d it guards.
+func (r *Runner) probeKernelArmRestamp(vers ...string) error {
+	kr := &KernelRunner{cfg: KernelConfig{JournalPath: kernelArmRestampJournalPath}}
+	j, err := kr.loadKernelJournal()
+	if err != nil {
+		return fmt.Errorf("read kernel journal: %w", err)
+	}
+	if !kernelArmRecordArmed(j.State) {
+		return nil // nothing armed — no record exists to re-stamp
+	}
+	for _, ver := range vers {
+		bin := filepath.Join(r.cfg.VersionsDir, ver, "xpfd")
+		if err := validateGateBin(bin); err != nil {
+			return fmt.Errorf("version %s (%s) is not usable as the promotion gate: %w", ver, bin, err)
+		}
+	}
+	return nil
+}
+
+// validateKernelArmRestampPreStop is Run's pre-STOP gate for the #6639
+// re-stamp (#15170): refuse the cut while the daemon is still live when 6d
+// could not run, rather than discovering it after STOP. It probes the cut
+// target and the recorded rollback target (PreviousVersion) together.
+func (r *Runner) validateKernelArmRestampPreStop(j *Journal) error {
+	vers := []string{j.TargetVersion}
+	if j.PreviousVersion != "" {
+		vers = append(vers, j.PreviousVersion)
+	}
+	if err := r.probeKernelArmRestamp(vers...); err != nil {
+		return fmt.Errorf("refuse-before-STOP: the kernel-arm re-stamp that flip step 6d "+
+			"must run cannot be validated before STOP (%v); refusing the %s cut with the "+
+			"daemon still running. Repair or remove the kernel journal "+
+			"(/var/lib/xpf/kernel-upgrade.state) and its arm record, then retry", err, j.TargetVersion)
+	}
+	return nil
+}
+
+// flipToleratingKernelArmRestamp is flip() for the ROLLBACK paths (auto-
+// rollback, `upgrade --rollback`, stale-STOPPED recovery): substeps 6a-6c
+// run identically, but a step-6d re-stamp failure is logged and tolerated
+// so the caller's StartUnit still runs (#15170, B17-01).
+//
+// WHY TOLERATE HERE AND NOT IN THE FORWARD CUT. A forward cut can refuse
+// BEFORE STOP (validateKernelArmRestampPreStop), so 6d stays fail-closed
+// there and #6639's gate holds. A rollback is already past its STOP with
+// the daemon down and the DB restored: its only remaining job is to get a
+// known-good daemon running. Failing it on an ancillary kernel-channel
+// record strands the box offline over state the rollback binary may not
+// even be able to repair (the journal is corrupt by hypothesis). The trade
+// is safe in this direction: the old record is left untouched and keeps
+// naming a retained, executable xpfd, so the candidate boot's gate refuses
+// exactly as it did before #6639 — the candidate is lost, never an
+// unvalidated kernel promoted. The daemon being back is strictly better.
+func (r *Runner) flipToleratingKernelArmRestamp(ver string) error {
+	err := r.flip(ver)
+	if err == nil {
+		return nil
+	}
+	var re *restampError
+	if !errors.As(err, &re) {
+		return err
+	}
+	r.logf("upgrade: rollback re-flip to %s: kernel-arm re-stamp failed (%v); "+
+		"continuing so the rolled-back daemon starts — the kernel candidate's "+
+		"arm record still names the previous binary and its boot gate will refuse "+
+		"until the kernel journal is repaired", ver, re.err)
+	return nil
 }
 
 // kernelArmRestampJournalPath is the kernel journal the cut re-stamps against.
@@ -283,7 +420,7 @@ func (r *Runner) rollback(j *Journal) error {
 		r.logf("upgrade: rollback restored config DB from %s", j.DBSnapshotPath)
 	}
 	// 3. re-flip to the previous version.
-	if err := r.flip(j.PreviousVersion); err != nil {
+	if err := r.flipToleratingKernelArmRestamp(j.PreviousVersion); err != nil {
 		return fmt.Errorf("rollback: re-flip to previous version %s: %w", j.PreviousVersion, err)
 	}
 	// 4. start the old daemon.
