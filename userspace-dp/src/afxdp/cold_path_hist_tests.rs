@@ -510,6 +510,47 @@ fn build_flags_overflow_only_on_slot_capacity_exhaustion() {
     );
 }
 
+/// #15092: the production build path (`configured_zone_pairs_bounded` →
+/// `ColdPathSlotMap`) must keep `overflow_active` set when the wildcard
+/// expansion exceeds capacity BEFORE the capped input reaches `build`.
+/// Feeding `build` only the 255 capped pairs would otherwise look like
+/// an exact fit and the starvation flag would never fire. This mirrors
+/// the `|=` wiring in `forwarding_build`.
+#[test]
+fn bounded_pairs_overflow_reaches_slot_map_15092() {
+    use crate::protocol::PolicyRuleSnapshot;
+    use rustc_hash::FxHashMap;
+
+    // 20 zones ⇒ 400 both-any pairs ≫ 255 slots.
+    let mut zone_name_to_id: FxHashMap<String, u16> = FxHashMap::default();
+    for id in 1..=20u16 {
+        zone_name_to_id.insert(format!("z{id}"), id);
+    }
+    let rules = vec![PolicyRuleSnapshot {
+        name: "catch-all".to_string(),
+        from_zone: "any".to_string(),
+        to_zone: "any".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        action: "permit".to_string(),
+        ..Default::default()
+    }];
+    let state = crate::policy::parse_policy_state("deny", &rules, &zone_name_to_id);
+    let configured = state.configured_zone_pairs_bounded(COLD_PATH_ASSIGNABLE_SLOTS);
+    assert_eq!(configured.pairs.len(), COLD_PATH_ASSIGNABLE_SLOTS);
+    assert!(configured.overflow);
+    let (mut map, _) = ColdPathSlotMap::build(None, &configured.pairs);
+    map.overflow_active |= configured.overflow;
+    assert!(
+        map.overflow_active,
+        "capped wildcard expansion must surface overflow to operators"
+    );
+    let occupied = map.inverse.iter().filter(|s| s.is_some()).count();
+    assert_eq!(occupied, COLD_PATH_ASSIGNABLE_SLOTS);
+    assert!(lookup_slot(&map, 1, 1).is_some());
+}
+
 /// Codex code-r1 finding 1: A assigns slot 0; B frees it (no reuse);
 /// C reassigns slot 0 to a NEW pair. C's `previous` (= B) shows
 /// slot 0 free, but the worker-local accumulator may still carry

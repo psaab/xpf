@@ -9918,6 +9918,183 @@ fn configured_zone_pairs_exact_only_not_overbroadened() {
     );
 }
 
+// === #15092: configured_zone_pairs must not materialise the cross product ===
+
+/// Bounded output must equal the unbounded oracle's prefix on a small
+/// mixed config: exact pairs first, then wildcard/global pairs sorted,
+/// with no overflow while everything fits.
+#[test]
+fn configured_zone_pairs_bounded_matches_unbounded_prefix_15092() {
+    let zmap = test_zone_name_to_id();
+    let rules = vec![
+        PolicyRuleSnapshot {
+            name: "exact".to_string(),
+            from_zone: "trust".to_string(),
+            to_zone: "untrust".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            action: "permit".to_string(),
+            ..Default::default()
+        },
+        PolicyRuleSnapshot {
+            name: "wild".to_string(),
+            from_zone: "any".to_string(),
+            to_zone: "untrust".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            action: "permit".to_string(),
+            ..Default::default()
+        },
+        PolicyRuleSnapshot {
+            name: "glob".to_string(),
+            from_zone: "junos-global".to_string(),
+            to_zone: "junos-global".to_string(),
+            match_from_zone: "lan".to_string(),
+            match_to_zone: "wan".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            action: "permit".to_string(),
+            ..Default::default()
+        },
+    ];
+    let state = parse_policy_state("deny", &rules, &zmap);
+    let full = state.configured_zone_pairs();
+    // Exact (trust,untrust) first; wildcard adds every (f,untrust); the
+    // scoped global adds (lan,wan). 1 + 4 + 1 = 6 distinct pairs.
+    assert_eq!(full.len(), 6, "mixed config pair count: {full:?}");
+    assert_eq!(full[0], (TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID));
+
+    let capped = state.configured_zone_pairs_bounded(3);
+    assert_eq!(
+        capped.pairs,
+        full[..3].to_vec(),
+        "bounded(3) must be the unbounded prefix"
+    );
+    assert!(capped.overflow, "3 of 6 pairs fit ⇒ overflow");
+
+    let exact_fit = state.configured_zone_pairs_bounded(6);
+    assert_eq!(exact_fit.pairs, full);
+    assert!(!exact_fit.overflow, "exact fit ⇒ no overflow");
+
+    let roomy = state.configured_zone_pairs_bounded(255);
+    assert_eq!(roomy.pairs, full);
+    assert!(!roomy.overflow);
+}
+
+/// Acceptance shape from #15092: 8000 concrete zones, one both-any rule
+/// and 256 unscoped globals. The old code materialised 8000² pairs per
+/// Any×Any scope (×257 scopes) into a BTreeSet; the bounded form must
+/// return the first 255 pairs in order, report overflow, and finish
+/// well under the 50 ms acceptance bound. RED on revert: the pre-fix
+/// `configured_zone_pairs` has no bounded entry point, and calling the
+/// unbounded path at this scale does not finish in the budget (the
+/// length/overflow assertions below cannot even be reached).
+#[test]
+fn configured_zone_pairs_bounded_8000_zones_15092() {
+    use std::time::Instant;
+
+    const ZONES: u16 = 8000;
+    let mut zmap: FxHashMap<String, u16> = FxHashMap::default();
+    for id in 1..=ZONES {
+        zmap.insert(format!("z{id}"), id);
+    }
+    let mut rules: Vec<PolicyRuleSnapshot> = Vec::with_capacity(257);
+    rules.push(PolicyRuleSnapshot {
+        name: "catch-all".to_string(),
+        from_zone: "any".to_string(),
+        to_zone: "any".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        action: "permit".to_string(),
+        ..Default::default()
+    });
+    for i in 0..256 {
+        rules.push(PolicyRuleSnapshot {
+            name: format!("glob-{i}"),
+            policy_id: (i + 1) as u32,
+            from_zone: "junos-global".to_string(),
+            to_zone: "junos-global".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            action: "permit".to_string(),
+            ..Default::default()
+        });
+    }
+    let state = parse_policy_state("deny", &rules, &zmap);
+
+    let start = Instant::now();
+    let bounded = state.configured_zone_pairs_bounded(255);
+    let elapsed = start.elapsed();
+
+    assert_eq!(bounded.pairs.len(), 255, "must cap at the slot budget");
+    assert!(bounded.overflow, "8000² pairs ≫ 255 slots ⇒ overflow");
+    // Ascending (from, to): (1,1)..(1,255).
+    assert_eq!(bounded.pairs[0], (1, 1));
+    assert_eq!(bounded.pairs[254], (1, 255));
+    assert!(
+        bounded.pairs.windows(2).all(|w| w[0] < w[1]),
+        "pairs must be strictly ascending"
+    );
+    assert!(
+        elapsed.as_millis() < 50,
+        "bounded expansion at 8000 zones took {elapsed:?} (acceptance: <50 ms)"
+    );
+}
+
+/// Exact pairs keep slot priority even when they sort AFTER the
+/// wildcard pairs that fill the budget, and exact-tier members reached
+/// again by the wildcard merge do not consume budget.
+#[test]
+fn configured_zone_pairs_bounded_exact_priority_15092() {
+    let zmap = test_zone_name_to_id();
+    let rules = vec![
+        PolicyRuleSnapshot {
+            name: "exact-hi".to_string(),
+            from_zone: "sfmix".to_string(),
+            to_zone: "sfmix".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            action: "permit".to_string(),
+            ..Default::default()
+        },
+        PolicyRuleSnapshot {
+            name: "catch-all".to_string(),
+            from_zone: "any".to_string(),
+            to_zone: "any".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            action: "permit".to_string(),
+            ..Default::default()
+        },
+    ];
+    let state = parse_policy_state("deny", &rules, &zmap);
+    // 5 zones ⇒ 25 wildcard pairs; limit 4: the exact pair plus the
+    // first 3 wildcard pairs (1,1),(1,2),(1,3); (5,5) is exact-only.
+    let bounded = state.configured_zone_pairs_bounded(4);
+    assert_eq!(
+        bounded.pairs,
+        vec![
+            (TEST_SFMIX_ZONE_ID, TEST_SFMIX_ZONE_ID),
+            (TEST_LAN_ZONE_ID, TEST_LAN_ZONE_ID),
+            (TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+            (TEST_LAN_ZONE_ID, TEST_TRUST_ZONE_ID),
+        ],
+        "exact pair first regardless of sort order"
+    );
+    assert!(bounded.overflow);
+    // Limit 26 ≥ 1 exact + 24 remaining wildcard pairs ⇒ everything fits.
+    let all = state.configured_zone_pairs_bounded(26);
+    assert_eq!(all.pairs.len(), 25);
+    assert!(!all.overflow, "exact duplicates must not consume budget");
+}
+
 #[test]
 fn duplicate_synthesized_rule_id_fails_closed() {
     // #3713: two rules with the SAME (from,to,name) synthesize the identical

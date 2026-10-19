@@ -2212,7 +2212,25 @@ impl PolicyState {
         }
         first
     }
+}
 
+/// #15092: the configured zone pairs within the cold-path histogram's
+/// assignable-slot budget, plus whether wildcard/global expansion had
+/// more distinct pairs than the budget could hold.
+///
+/// `overflow` is true exactly when the distinct wildcard/global pairs
+/// beyond the exact tier exceed the slots left after the exact tier
+/// (capped at [`crate::afxdp::cold_path_hist::COLD_PATH_ASSIGNABLE_SLOTS`]).
+/// The caller ORs it into `ColdPathSlotMap::overflow_active`: without it,
+/// capping the input at 255 would make an over-capacity config
+/// indistinguishable from an exactly-at-capacity one and the operator
+/// starvation flag would never fire for the wildcard/global tier.
+pub(crate) struct ConfiguredZonePairs {
+    pub(crate) pairs: Vec<(u16, u16)>,
+    pub(crate) overflow: bool,
+}
+
+impl PolicyState {
     /// #9526: whether this snapshot still contains the rule with stable id
     /// `rule_id`.
     pub(crate) fn has_rule_id(&self, rule_id: &str) -> bool {
@@ -2249,7 +2267,37 @@ impl PolicyState {
     /// 255-slot capacity the surplus is dropped by `ColdPathSlotMap::build`
     /// (its `overflow_active` flag surfaces the starvation to operators) —
     /// exact pairs win because they are assigned first.
+    ///
+    /// Retained as the slot-budget view for small-config tests (every
+    /// pre-#15092 test config fits in 255 pairs, so it equals the old
+    /// unbounded set there); production builds the slot map via
+    /// [`Self::configured_zone_pairs_bounded`] (#15092) for the
+    /// `overflow` flag, which never materialises more than the budget.
     pub(crate) fn configured_zone_pairs(&self) -> Vec<(u16, u16)> {
+        self.configured_zone_pairs_bounded(crate::afxdp::cold_path_hist::COLD_PATH_ASSIGNABLE_SLOTS)
+            .pairs
+    }
+
+    /// #15092: bounded form of [`Self::configured_zone_pairs`]. Returns at
+    /// most `limit` pairs — every exact pair first (slot priority), then
+    /// wildcard/global pairs in ascending `(from, to)` order — and reports
+    /// in `overflow` whether any distinct pair beyond the exact tier did
+    /// not fit. `limit` is clamped to
+    /// [`crate::afxdp::cold_path_hist::COLD_PATH_ASSIGNABLE_SLOTS`]: the
+    /// histogram cannot assign more, so materialising more only stalls the
+    /// snapshot build (at 8000 zones one both-any scope is 64M pairs).
+    ///
+    /// The wildcard/global tier is generated directly in ascending order
+    /// without a materialised cross-product set: every scope contributes a
+    /// sorted sub-stream of pairs (a `Zones` side contributes its concrete
+    /// members sorted; `Any` contributes the concrete universe in order),
+    /// the sub-streams are merged with dedup, and generation stops once
+    /// `limit` output pairs are known plus one overflow probe. An
+    /// `Any`x`Any` scope (both-any or an unscoped global) subsumes every
+    /// other wildcard/global scope, so when one is present it is the only
+    /// sub-stream needed. Pairs already in the exact tier are skipped
+    /// without consuming budget (they are emitted by tier 1).
+    pub(crate) fn configured_zone_pairs_bounded(&self, limit: usize) -> ConfiguredZonePairs {
         use std::collections::BTreeSet;
 
         // A concrete, addressable transit zone id: non-zero and outside the
@@ -2258,6 +2306,9 @@ impl PolicyState {
         fn is_concrete(id: u16) -> bool {
             id != 0 && id < ZONE_ID_RESERVED_MIN
         }
+
+        let cap = crate::afxdp::cold_path_hist::COLD_PATH_ASSIGNABLE_SLOTS;
+        let limit = limit.min(cap);
 
         // Tier 1: exact configured pairs (historical behavior).
         let exact: BTreeSet<(u16, u16)> = self
@@ -2268,7 +2319,8 @@ impl PolicyState {
             .collect();
 
         // The concrete-zone universe a wildcard `any` / unscoped-global side
-        // can resolve to at runtime.
+        // can resolve to at runtime. `concrete_zone_ids` is sorted at parse
+        // time; the filter preserves that order.
         let concrete: Vec<u16> = self
             .concrete_zone_ids
             .iter()
@@ -2276,66 +2328,181 @@ impl PolicyState {
             .filter(|&z| is_concrete(z))
             .collect();
 
-        // Tier 2: expand the wildcard/global scopes into the concrete pairs
-        // they match. Kept in a separate set so tier-1 retains slot priority.
-        let mut wildcard: BTreeSet<(u16, u16)> = BTreeSet::new();
+        // Tier 2 scopes as sorted (froms, tos) side lists. Each scope's pair
+        // stream is its cross product in ascending (from, to) order. An
+        // `Any` side borrows the concrete universe; a `Zones` side owns
+        // its filtered, sorted members.
+        enum Side<'a> {
+            Universe(&'a [u16]),
+            List(Vec<u16>),
+        }
+        impl Side<'_> {
+            fn as_slice(&self) -> &[u16] {
+                match self {
+                    Side::Universe(s) => s,
+                    Side::List(v) => v,
+                }
+            }
+            fn is_empty(&self) -> bool {
+                self.as_slice().is_empty()
+            }
+        }
+
+        let scope_side = |scope: &GlobalZoneScope| -> Side<'_> {
+            match scope {
+                GlobalZoneScope::Any => Side::Universe(&concrete),
+                GlobalZoneScope::Zones(zs) => {
+                    let mut v: Vec<u16> = zs.iter().copied().filter(|&z| is_concrete(z)).collect();
+                    v.sort_unstable();
+                    v.dedup();
+                    Side::List(v)
+                }
+            }
+        };
+
+        // One sorted sub-stream per wildcard/global scope.
+        struct ScopeStream<'a> {
+            froms: Side<'a>,
+            tos: Side<'a>,
+            fi: usize,
+            ti: usize,
+        }
+        impl ScopeStream<'_> {
+            fn peek(&self) -> Option<(u16, u16)> {
+                let from = *self.froms.as_slice().get(self.fi)?;
+                let to = *self.tos.as_slice().get(self.ti)?;
+                Some((from, to))
+            }
+            fn advance(&mut self) {
+                self.ti += 1;
+                if self.ti >= self.tos.as_slice().len() {
+                    self.ti = 0;
+                    self.fi += 1;
+                }
+            }
+        }
+
+        let mut streams: Vec<ScopeStream<'_>> = Vec::new();
+        let mut subsumes_all = false;
 
         // `from-zone any to-zone <Z>`: any concrete ingress zone -> Z.
-        for &to_id in self.from_any_index.keys() {
-            if !is_concrete(to_id) {
-                continue;
-            }
-            for &from in &concrete {
-                wildcard.insert((from, to_id));
-            }
+        // Keys come from an FxHashMap (arbitrary order); sort for a
+        // deterministic merge.
+        let mut from_any_tos: Vec<u16> = self
+            .from_any_index
+            .keys()
+            .copied()
+            .filter(|&z| is_concrete(z))
+            .collect();
+        from_any_tos.sort_unstable();
+        from_any_tos.dedup();
+        for to_id in from_any_tos {
+            streams.push(ScopeStream {
+                froms: Side::Universe(&concrete),
+                tos: Side::List(vec![to_id]),
+                fi: 0,
+                ti: 0,
+            });
         }
         // `to-zone any from-zone <F>`: F -> any concrete egress zone.
-        for &from_id in self.to_any_index.keys() {
-            if !is_concrete(from_id) {
-                continue;
-            }
-            for &to in &concrete {
-                wildcard.insert((from_id, to));
-            }
+        let mut to_any_froms: Vec<u16> = self
+            .to_any_index
+            .keys()
+            .copied()
+            .filter(|&z| is_concrete(z))
+            .collect();
+        to_any_froms.sort_unstable();
+        to_any_froms.dedup();
+        for from_id in to_any_froms {
+            streams.push(ScopeStream {
+                froms: Side::List(vec![from_id]),
+                tos: Side::Universe(&concrete),
+                fi: 0,
+                ti: 0,
+            });
         }
-        // `from-zone any to-zone any`: every concrete pair.
+        // `from-zone any to-zone any` subsumes every other scope.
         if !self.both_any_indices.is_empty() {
-            for &from in &concrete {
-                for &to in &concrete {
-                    wildcard.insert((from, to));
+            subsumes_all = true;
+        }
+        // `junos-global` rules, each scoped by its optional `match
+        // from-zone` / `match to-zone` context (#3148/#4626).
+        if !subsumes_all {
+            for &idx in &self.global_indices {
+                let rule = &self.rules[idx];
+                if matches!(rule.global_from_zone, GlobalZoneScope::Any)
+                    && matches!(rule.global_to_zone, GlobalZoneScope::Any)
+                {
+                    subsumes_all = true;
+                    break;
                 }
+                let froms = scope_side(&rule.global_from_zone);
+                let tos = scope_side(&rule.global_to_zone);
+                if froms.is_empty() || tos.is_empty() {
+                    continue;
+                }
+                streams.push(ScopeStream {
+                    froms,
+                    tos,
+                    fi: 0,
+                    ti: 0,
+                });
             }
         }
-        // `junos-global` rules, each scoped by its optional `match from-zone` /
-        // `match to-zone` context (#3148/#4626). `Any` expands to the full
-        // concrete universe; a `Zones` SET expands to each of its CONCRETE
-        // members (a reserved id like junos-host contributes no transit pair).
-        for &idx in &self.global_indices {
-            let rule = &self.rules[idx];
-            let expand_side = |scope: &GlobalZoneScope| -> Vec<u16> {
-                match scope {
-                    GlobalZoneScope::Any => concrete.clone(),
-                    GlobalZoneScope::Zones(zs) => {
-                        zs.iter().copied().filter(|&z| is_concrete(z)).collect()
-                    }
-                }
-            };
-            let from_ids = expand_side(&rule.global_from_zone);
-            let to_ids = expand_side(&rule.global_to_zone);
-            for &from in &from_ids {
-                for &to in &to_ids {
-                    wildcard.insert((from, to));
-                }
-            }
+        if subsumes_all {
+            streams.clear();
+            streams.push(ScopeStream {
+                froms: Side::Universe(&concrete),
+                tos: Side::Universe(&concrete),
+                fi: 0,
+                ti: 0,
+            });
         }
 
-        // Exact pairs first (slot priority), then the additional wildcard/global
-        // pairs not already covered by an exact pair. Both halves are sorted
-        // (BTreeSet), so the whole assignment is deterministic and HA-symmetric.
-        let mut pairs: Vec<(u16, u16)> = Vec::with_capacity(exact.len() + wildcard.len());
+        // K-way merge of the sorted sub-streams with dedup. Emits at most
+        // `slots_left` wildcard pairs; one further distinct pair (skipping
+        // exact-tier members, which consume no budget) proves overflow.
+        // Cost is O((emitted + exact-skips) x streams): streams is bounded
+        // by distinct wildcard keys + global rules, emitted by the budget.
+        let slots_left = limit.saturating_sub(exact.len());
+        let mut wildcard_pairs: Vec<(u16, u16)> =
+            Vec::with_capacity(slots_left.min(concrete.len().saturating_mul(2)));
+        let mut overflow = false;
+        let mut last_emitted: Option<(u16, u16)> = None;
+        loop {
+            let mut best: Option<(u16, u16)> = None;
+            for s in &streams {
+                if let Some(p) = s.peek() {
+                    best = Some(match best {
+                        None => p,
+                        Some(b) => b.min(p),
+                    });
+                }
+            }
+            let Some(pair) = best else { break };
+            for s in &mut streams {
+                while s.peek() == Some(pair) {
+                    s.advance();
+                }
+            }
+            if last_emitted == Some(pair) || exact.contains(&pair) {
+                continue;
+            }
+            last_emitted = Some(pair);
+            if wildcard_pairs.len() >= slots_left {
+                overflow = true;
+                break;
+            }
+            wildcard_pairs.push(pair);
+        }
+
+        // Exact pairs first (slot priority), then the additional
+        // wildcard/global pairs. Both halves are sorted, so the whole
+        // assignment is deterministic and HA-symmetric.
+        let mut pairs: Vec<(u16, u16)> = Vec::with_capacity(exact.len() + wildcard_pairs.len());
         pairs.extend(exact.iter().copied());
-        pairs.extend(wildcard.into_iter().filter(|p| !exact.contains(p)));
-        pairs
+        pairs.extend(wildcard_pairs);
+        ConfiguredZonePairs { pairs, overflow }
     }
 }
 

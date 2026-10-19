@@ -175,7 +175,7 @@ mod umem;
 // primitives the follow-ups will consume.
 #[allow(dead_code)]
 #[path = "cold_path_hist.rs"]
-mod cold_path_hist;
+pub(crate) mod cold_path_hist;
 // #3651: per-zone ingress/egress traffic counters (POPULATE half of #3643).
 mod zone_counters;
 // #3651: per-zone SYN/ICMP/UDP flood-event counters — the flood half of the

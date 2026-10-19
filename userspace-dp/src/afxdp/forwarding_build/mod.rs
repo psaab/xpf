@@ -866,10 +866,16 @@ fn build_fallible_forwarding_state(
     // the build's `slots_to_zero` return is unused here — only the map
     // is stored.
     {
-        use crate::afxdp::cold_path_hist::ColdPathSlotMap;
-        let pairs = state.policy.configured_zone_pairs();
+        use crate::afxdp::cold_path_hist::{COLD_PATH_ASSIGNABLE_SLOTS, ColdPathSlotMap};
+        // #15092: never materialise more pairs than the histogram can
+        // assign; `overflow` preserves the starvation signal the capped
+        // input would otherwise hide from `ColdPathSlotMap::build`.
+        let configured = state
+            .policy
+            .configured_zone_pairs_bounded(COLD_PATH_ASSIGNABLE_SLOTS);
         let prev_map = previous.map(|p| p.cold_path_slot_map.as_ref());
-        let (slot_map, _slots_to_zero) = ColdPathSlotMap::build(prev_map, &pairs);
+        let (mut slot_map, _slots_to_zero) = ColdPathSlotMap::build(prev_map, &configured.pairs);
+        slot_map.overflow_active |= configured.overflow;
         state.cold_path_slot_map = std::sync::Arc::new(slot_map);
     }
     // #3651 per-zone traffic counters — and, since the flood half landed, the
