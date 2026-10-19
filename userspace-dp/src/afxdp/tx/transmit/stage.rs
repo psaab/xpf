@@ -2,62 +2,59 @@
 // requests from `pending` into `binding.scratch.scratch_prepared_tx`,
 // dropping any whose `req.len` exceeds the UMEM frame capacity.
 //
-// Drop semantics on oversized request: orphan-recycle every already-
-// staged entry plus the offender via
-// `recycle_prepared_immediately_with_shared`, account orphan count
-// against `tx_submit_error_drops` + `tx_errors` (#710 — the orphan
-// list here does NOT include the offender; the caller's `+= 1` for
-// the Drop return covers it), then return Err(Drop).
+// #15786: drop semantics on an oversized request are PER-FRAME — the
+// offender alone is recycled + counted via `record_prepared_drop`
+// (which also records its ORIGINAL `pending` position for the CoS
+// pop-snapshot unwind) and staging CONTINUES with the remaining
+// requests. The pre-fix code drained + recycled every already-staged
+// valid entry and returned `Err(Drop)`, collaterally destroying up to
+// TX_BATCH_SIZE-1 valid packets and orphaning their CoS pop snapshots.
+//
+// Original positions: `scratch_prepared_tx_orig_idx[i]` is the
+// ORIGINAL `pending` position of `scratch_prepared_tx[i]`. An interior
+// drop breaks the prefix identity, so later phases index accounting
+// through this sidecar (mirrors `transmit_batch`'s `staged_orig_idx`).
 
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
 
 use crate::afxdp::tx_frame_capacity;
 use crate::afxdp::types::PreparedTxRequest;
 use crate::afxdp::worker::BindingWorker;
 use crate::afxdp::TX_BATCH_SIZE;
 
-use super::{recycle_prepared_immediately_with_shared, TxDropReason, TxError};
+use super::{record_prepared_drop, TxDropReason};
 
 #[inline]
 pub(super) fn stage_batch_into_scratch(
     binding: &mut BindingWorker,
     pending: &mut VecDeque<PreparedTxRequest>,
     shared_recycles: &mut Vec<(u32, u64)>,
-) -> Result<(), TxError> {
+) {
+    binding.scratch.scratch_prepared_tx_orig_idx = [0; TX_BATCH_SIZE];
     let batch_size = pending.len().min(TX_BATCH_SIZE);
     binding.scratch.scratch_prepared_tx.clear();
-    while binding.scratch.scratch_prepared_tx.len() < batch_size {
+    let mut orig_idx: u16 = 0;
+    while orig_idx < batch_size as u16 {
         let Some(req) = pending.pop_front() else {
             break;
         };
         if req.len as usize > tx_frame_capacity() {
-            let orphaned: Vec<_> = binding.scratch.scratch_prepared_tx.drain(..).collect();
-            recycle_prepared_immediately_with_shared(binding, &req, Some(shared_recycles));
-            for r in &orphaned {
-                recycle_prepared_immediately_with_shared(binding, r, Some(shared_recycles));
-            }
-            // #710: each orphan is a silently-recycled packet that will
-            // not reach the TX ring. The caller's post-return `+= 1`
-            // covers the offender (`req`); this accounts for the
-            // orphans so `tx_submit_error_drops` matches the actual
-            // packet count lost on this Drop return.
-            if !orphaned.is_empty() {
-                binding
-                    .live
-                    .tx_submit_error_drops
-                    .fetch_add(orphaned.len() as u64, Ordering::Relaxed);
-                binding
-                    .live
-                    .tx_errors
-                    .fetch_add(orphaned.len() as u64, Ordering::Relaxed);
-            }
-            return Err(TxError::Drop(TxDropReason::PreparedFrameExceedsCapacity {
-                len: req.len,
-                cap: tx_frame_capacity(),
-            }));
+            record_prepared_drop(
+                binding,
+                &req,
+                orig_idx,
+                TxDropReason::PreparedFrameExceedsCapacity {
+                    len: req.len,
+                    cap: tx_frame_capacity(),
+                },
+                shared_recycles,
+            );
+            orig_idx = orig_idx.saturating_add(1);
+            continue;
         }
+        let stage_pos = binding.scratch.scratch_prepared_tx.len();
+        binding.scratch.scratch_prepared_tx_orig_idx[stage_pos] = orig_idx;
         binding.scratch.scratch_prepared_tx.push(req);
+        orig_idx = orig_idx.saturating_add(1);
     }
-    Ok(())
 }

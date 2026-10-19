@@ -58,8 +58,40 @@ pub(super) fn submit_prepared(
     // #4973: capture the batch outcome so the drained `items` deque can be
     // stored back into the per-worker Prepared batch scratch after the match,
     // retaining the ring-buffer allocation `build_cos_batch_from_queue` reused.
-    let made_progress = match transmit_prepared_queue(binding, &mut items, now_ns, shared_recycles) {
+    let made_progress = match transmit_prepared_queue(binding, &mut items, now_ns, shared_recycles)
+    {
         Ok((packets, bytes)) => {
+            // #15786: snapshot the committed identities (ORIGINAL-input
+            // positions actually shipped) into a local fixed array
+            // BEFORE the mutable borrows below. A per-frame validation
+            // drop is an interior removal, so the committed set is no
+            // longer a prefix — charge through THESE indices, not
+            // `sidecar[..packets]`.
+            let mut committed = [0u16; TX_BATCH_SIZE];
+            let committed_len = {
+                let src = &binding.scratch.scratch_prepared_committed_orig_idx;
+                let n = src.len().min(TX_BATCH_SIZE);
+                committed[..n].copy_from_slice(&src[..n]);
+                n
+            };
+            debug_assert_eq!(
+                committed_len, packets as usize,
+                "prepared committed identity count must equal the transmitted packet count",
+            );
+            // #15786: remove validation-drop orphan snapshots BEFORE
+            // apply restores the retry tail — its LIFO push_fronts must
+            // consume survivor snapshots, not a dropped frame's.
+            let (dropped, dropped_len) = dropped_prepared_positions(binding);
+            if dropped_len > 0 {
+                if let Some(queue) = binding
+                    .cos
+                    .cos_interfaces
+                    .get_mut(&root_ifindex)
+                    .and_then(|root| root.queues.get_mut(queue_idx))
+                {
+                    remove_dropped_prepared_snapshots(queue, &dropped[..dropped_len], items.len());
+                }
+            }
             items = apply_cos_prepared_result(
                 binding,
                 root_ifindex,
@@ -69,7 +101,7 @@ pub(super) fn submit_prepared(
                 bytes,
                 items,
             );
-            if packets > 0 && sidecar_len > 0 {
+            if committed_len > 0 && sidecar_len > 0 {
                 if let Some(ff) = binding
                     .cos
                     .cos_interfaces
@@ -77,34 +109,29 @@ pub(super) fn submit_prepared(
                     .and_then(|root| root.queues.get_mut(queue_idx))
                     .and_then(|q| q.flow_fair_state.as_mut())
                 {
-                    // #8597 K36: clamp to the FILLED prefix, mirroring the
-                    // `enq_sidecar` line below. `sidecar` is a fixed
-                    // [(u16, u64); TX_BATCH_SIZE] and `packets` is a count
-                    // returned by `finalise_prepared`; today three independent
-                    // invariants keep it <= `sidecar_len` (the batch build caps
-                    // at TX_BATCH_SIZE, the fill covers the whole batch, and
-                    // sent never exceeds staged), so this cannot currently
-                    // overrun. It is clamped because the cost of being wrong is
-                    // an index-OOB panic on a TX worker -- a fail-closed stall
-                    // with no restart, the supervisor being detection-only --
-                    // and because a `.min()` is a single cmp/cmov on a
-                    // per-batch path. The sibling line already pays it.
-                    for &(bucket, bytes) in &sidecar[..(packets as usize).min(sidecar_len)] {
-                        account_flow_bucket_tx(ff, bucket, bytes, now_ns);
+                    for &oi in &committed[..committed_len] {
+                        let oi = oi as usize;
+                        if oi < sidecar_len {
+                            let (bucket, bytes) = sidecar[oi];
+                            account_flow_bucket_tx(ff, bucket, bytes, now_ns);
+                        }
                     }
                 }
             }
-            // #1829: committed-prefix-only sojourn samples — see the
-            // matching block in submit_local.rs.
-            if packets > 0 {
+            // #1829 + #15786: committed-only sojourn samples by
+            // ORIGINAL identity (see the sidecar comment above).
+            if committed_len > 0 {
                 if let Some(queue) = binding
                     .cos
                     .cos_interfaces
                     .get_mut(&root_ifindex)
                     .and_then(|root| root.queues.get_mut(queue_idx))
                 {
-                    for &enqueue_ns in &enq_sidecar[..(packets as usize).min(enq_len)] {
-                        queue.telemetry.sojourn.record(enqueue_ns, now_ns);
+                    for &oi in &committed[..committed_len] {
+                        let oi = oi as usize;
+                        if oi < enq_len {
+                            queue.telemetry.sojourn.record(enq_sidecar[oi], now_ns);
+                        }
                     }
                 }
             }
@@ -140,30 +167,35 @@ pub(super) fn submit_prepared(
             // #4971: expected TX backpressure — lock-free status, no
             // `last_error` mutex on the send hot path.
             binding.live.set_tx_retry_status(reason);
+            // #15786: `items` holds the staged survivors; remove any
+            // validation-drop orphans before the LIFO restore.
+            let (dropped, dropped_len) = dropped_prepared_positions(binding);
             items = restore_cos_prepared_items(
                 binding,
                 root_ifindex,
                 queue_idx,
                 batch_bytes,
                 items,
+                &dropped[..dropped_len],
             );
             cos_batch_tx_made_progress(Err(TxError::Retry(reason)))
         }
         Err(TxError::Drop(reason)) => {
-            binding.live.tx_errors.fetch_add(1, Ordering::Relaxed);
-            binding
-                .live
-                .tx_submit_error_drops
-                .fetch_add(1, Ordering::Relaxed);
-            // #4971: exceptional drop path (rare) still renders the
-            // diagnostic message via the mutex-backed set_error.
+            // #15786: all-invalid batch — every frame was already
+            // recycled + counted per frame in `record_prepared_drop`,
+            // and `items` is empty, so there is nothing to restore.
+            // (Counting again here would double-count.) The Drop
+            // reason is still surfaced for the operator message; the
+            // snapshot unwind happens in restore_cos_prepared_items.
             binding.live.set_error(reason.message());
+            let (dropped, dropped_len) = dropped_prepared_positions(binding);
             items = restore_cos_prepared_items(
                 binding,
                 root_ifindex,
                 queue_idx,
                 batch_bytes,
                 items,
+                &dropped[..dropped_len],
             );
             cos_batch_tx_made_progress(Err(TxError::Drop(reason)))
         }
@@ -173,6 +205,41 @@ pub(super) fn submit_prepared(
     // allocating a fresh `VecDeque`.
     binding.cos.cos_prepared_batch_scratch = items;
     made_progress
+}
+
+/// #15786: copy the validation-dropped original positions out of the
+/// per-binding scratch (pop order). No allocation — fixed stack array.
+fn dropped_prepared_positions(binding: &BindingWorker) -> ([u16; TX_BATCH_SIZE], usize) {
+    let mut dropped = [0u16; TX_BATCH_SIZE];
+    let src = &binding.scratch.scratch_prepared_dropped_orig_idx;
+    let n = src.len().min(TX_BATCH_SIZE);
+    dropped[..n].copy_from_slice(&src[..n]);
+    (dropped, n)
+}
+
+/// #15786: remove the orphaned pop snapshots of validation-dropped
+/// items from `queue` (DESCENDING original position, so each
+/// positional removal only touches already-removed-above entries —
+/// the #15172 contract). No-op when nothing was dropped.
+fn remove_dropped_prepared_snapshots(
+    queue: &mut crate::afxdp::types::CoSQueueRuntime,
+    dropped: &[u16],
+    retry_len: usize,
+) {
+    if dropped.is_empty() {
+        return;
+    }
+    for &pos in dropped.iter().rev() {
+        let _ = cos_queue_remove_orphan_snapshot_at(queue, usize::from(pos));
+    }
+    if let Some(ff) = queue.flow_fair_state.as_ref() {
+        debug_assert!(
+            ff.pop_snapshot_stack.len() >= retry_len,
+            "#15786: pop_snapshot_stack ({}) shorter than the {} restored items at restore entry after validation-drop orphan removal",
+            ff.pop_snapshot_stack.len(),
+            retry_len,
+        );
+    }
 }
 
 // Moved from queue_service/mod.rs (pre-refactor L1511-L1532). Sole
@@ -189,12 +256,16 @@ fn restore_cos_prepared_items(
     queue_idx: usize,
     batch_bytes: u64,
     mut retry: VecDeque<PreparedTxRequest>,
+    dropped_prepared: &[u16],
 ) -> VecDeque<PreparedTxRequest> {
     {
         let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) else {
             return retry;
         };
         if let Some(queue) = root.queues.get_mut(queue_idx) {
+            // #15786: orphan removal BEFORE the LIFO restore inside
+            // restore_cos_prepared_items_inner.
+            remove_dropped_prepared_snapshots(queue, dropped_prepared, retry.len());
             let retry_bytes = restore_cos_prepared_items_inner(queue, &mut retry);
             queue.hot.queued_bytes = queue
                 .hot

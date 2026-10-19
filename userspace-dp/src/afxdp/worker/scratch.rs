@@ -55,6 +55,39 @@ pub(crate) struct WorkerScratch {
     /// accounting to the correct flow); other `transmit_batch` callers
     /// ignore it.
     pub(crate) scratch_committed_orig_idx: Vec<u16>,
+    /// #15786: ORIGINAL-`pending` positions `transmit_prepared_queue`
+    /// actually committed, as 0-based positions in the order the caller
+    /// built its per-item sidecars. Filled fresh on every
+    /// `transmit_prepared_queue` call (cleared at entry). Needed because
+    /// a per-frame validation drop is an INTERIOR removal — the valid
+    /// survivors after the offender shift down, so the committed set is
+    /// no longer a prefix of the input. Only `submit_prepared` reads
+    /// it (to charge flow-bucket / sojourn accounting to the correct
+    /// flow); other `transmit_prepared_queue` callers ignore it.
+    pub(crate) scratch_prepared_committed_orig_idx: Vec<u16>,
+    /// #15786: ORIGINAL-`pending` position of each STAGED prepared
+    /// entry, indexed by its position in `scratch_prepared_tx`.
+    /// Fixed-size (TX_BATCH_SIZE) so staging never allocates; rewritten
+    /// on every `stage_batch_into_scratch` call for the staged prefix.
+    pub(crate) scratch_prepared_tx_orig_idx: [u16; crate::afxdp::TX_BATCH_SIZE],
+    /// #15786: reason of the FIRST per-frame validation drop in the
+    /// current `transmit_prepared_queue` batch (`None` when nothing
+    /// dropped). Surfaced by the orchestrator only when the whole
+    /// batch ends up dropped, so the caller's existing Drop handling
+    /// (counter + operator message + snapshot unwind) still runs.
+    pub(crate) scratch_prepared_first_drop_reason: Option<crate::afxdp::tx::TxDropReason>,
+    /// #15786: ORIGINAL-`pending` positions `transmit_prepared_queue`
+    /// DROPPED via per-frame validation (oversized / slice-out-of-range,
+    /// interior, neither committed nor returned to `pending`), in pop
+    /// order. Filled fresh on every `transmit_prepared_queue` call
+    /// (cleared at entry, beside `scratch_prepared_committed_orig_idx`).
+    /// Only `submit_prepared` reads it: a dropped item's queue-side pop
+    /// snapshot is orphaned on the queue's `pop_snapshot_stack`, and the
+    /// submit path removes those snapshots (descending) before any
+    /// restore can `push_front` a survivor against the wrong top entry.
+    /// Other callers (the unshaped backup drain) ignore it — their
+    /// items never came from a CoS queue pop, so no snapshot exists.
+    pub(crate) scratch_prepared_dropped_orig_idx: Vec<u16>,
     /// #15172: ORIGINAL-`pending` positions `transmit_batch` DROPPED
     /// via the mirror-reserve `continue` (interior, neither committed
     /// nor returned to `pending`), in pop order. Filled fresh on every
@@ -124,6 +157,10 @@ impl WorkerScratch {
             scratch_prepared_tx: Vec::with_capacity(TX_BATCH_SIZE),
             scratch_local_tx: Vec::with_capacity(TX_BATCH_SIZE),
             scratch_committed_orig_idx: Vec::with_capacity(TX_BATCH_SIZE),
+            scratch_prepared_committed_orig_idx: Vec::with_capacity(TX_BATCH_SIZE),
+            scratch_prepared_tx_orig_idx: [0; TX_BATCH_SIZE],
+            scratch_prepared_first_drop_reason: None,
+            scratch_prepared_dropped_orig_idx: Vec::with_capacity(TX_BATCH_SIZE),
             scratch_dropped_mirror_orig_idx: Vec::with_capacity(TX_BATCH_SIZE),
             scratch_exact_prepared_tx: Vec::with_capacity(TX_BATCH_SIZE),
             scratch_exact_local_tx: Vec::with_capacity(TX_BATCH_SIZE),

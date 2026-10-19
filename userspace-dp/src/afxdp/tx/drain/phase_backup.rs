@@ -106,13 +106,11 @@ fn backup_drain_prepared(
                 return Some(BackupOutcome::EarlyReturnRetry);
             }
             Err(TxError::Drop(reason)) => {
-                binding.live.tx_errors.fetch_add(1, Ordering::Relaxed);
-                // #710: frame-level submit error (capacity / slice /
-                // other `TxError::Drop`). Subset of tx_errors.
-                binding
-                    .live
-                    .tx_submit_error_drops
-                    .fetch_add(1, Ordering::Relaxed);
+                // #15786: an all-invalid prepared batch reaches here
+                // with every frame already recycled + counted per
+                // frame in `record_prepared_drop`; counting again
+                // would double-count. Only the operator message is
+                // still latched.
                 // #4971: exceptional drop path (rare) may still render
                 // the diagnostic message via the mutex-backed set_error.
                 binding.live.set_error(reason.message());

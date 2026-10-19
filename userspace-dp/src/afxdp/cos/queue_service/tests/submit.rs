@@ -821,3 +821,325 @@ fn orphan_removal_fifo_queue_noop_15172_control() {
         "FIFO queue has no snapshot to remove",
     );
 }
+
+// #15786 fixture: flow-fair queue (root 42, queue 0) loaded via REAL
+// cos_queue_push_back with three Prepared items in distinct buckets:
+// A(port 1111, 100B), BAD(port 2222, claimed len exceeds the UMEM frame
+// capacity), B(port 3333, 200B). The UMEM frames for A/B are populated
+// in the binding's own UMEM; BAD never reaches a frame (stage drops
+// it on len). Returns (binding, pre_pop_head_a, bucket_a).
+fn prepared_drop_fixture_15786() -> (BindingWorker, u64, usize) {
+    let mut root = test_cos_runtime_with_queues(
+        10_000_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 0,
+            forwarding_class: "iperf-c".into(),
+            priority: 5,
+            transmit_rate_bytes: 10_000_000_000 / 8,
+            guarantee_enabled: true,
+            exact: false,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: COS_MIN_BURST_BYTES,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+    );
+    root.tokens = 10_000;
+    root.queues[0].hot.tokens = 10_000;
+    // queued_bytes is reconciled by the settle from batch_bytes
+    // (100 + (capacity+1) + 200 at build); reset to the sent sum here
+    // so the post-settle value is directly assertable.
+    root.queues[0].hot.queued_bytes = 0;
+    enable_test_flow_fair(&mut root.queues[0]);
+    let off_a = 40u64 << crate::afxdp::UMEM_FRAME_SHIFT;
+    let off_bad = 41u64 << crate::afxdp::UMEM_FRAME_SHIFT;
+    let off_b = 42u64 << crate::afxdp::UMEM_FRAME_SHIFT;
+    cos_queue_push_back(
+        &mut root.queues[0],
+        test_flow_prepared_cos_item(1111, 100, off_a),
+    );
+    cos_queue_push_back(
+        &mut root.queues[0],
+        test_flow_prepared_cos_item(
+            2222,
+            (crate::afxdp::tx_frame_capacity() + 1) as u32,
+            off_bad,
+        ),
+    );
+    cos_queue_push_back(
+        &mut root.queues[0],
+        test_flow_prepared_cos_item(3333, 200, off_b),
+    );
+    let seed = test_flow_fair_state(&root.queues[0]).flow_hash_seed;
+    let bucket_a = cos_flow_bucket_index(seed, Some(&test_session_key(1111, 5201)));
+    let bucket_bad = cos_flow_bucket_index(seed, Some(&test_session_key(2222, 5201)));
+    let bucket_b = cos_flow_bucket_index(seed, Some(&test_session_key(3333, 5201)));
+    assert!(
+        bucket_a != bucket_bad && bucket_bad != bucket_b && bucket_a != bucket_b,
+        "test premise: distinct buckets (a={bucket_a} bad={bucket_bad} b={bucket_b})",
+    );
+    let pre_pop_head_a =
+        test_flow_fair_state(&root.queues[0]).flow_bucket_head_finish_bytes[bucket_a];
+    let fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![(0, test_queue_fast_path(false, 0, None, None))],
+        None,
+        None,
+    );
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+    binding.telemetry.dbg_sendto_err = 100; // suppress wake eprintln
+    for (off, len) in [(off_a, 100usize), (off_b, 200usize)] {
+        let frame = unsafe { binding.umem.area().slice_mut_unchecked(off as usize, len) }
+            .expect("umem frame slice");
+        frame.fill(0);
+    }
+    for off in [off_a, off_bad, off_b] {
+        binding.tx_pipeline.free_tx_frames.retain(|&o| o != off);
+    }
+    (binding, pre_pop_head_a, bucket_a)
+}
+
+// #15786 FAIL-ON-REVERT: batch [A, BAD(oversized), B] from a flow-fair
+// queue. Pre-fix, stage drained + recycled ALL THREE frames and
+// returned Err(Drop); submit then restored an EMPTY deque, leaving
+// BAD's (and every) pop snapshot orphaned on the stack — the next
+// build's LIFO restore would consume the wrong top entry
+// (bucket-mismatch panic). Post-fix: A and B transmit, BAD alone is
+// recycled + counted once, and no snapshot is orphaned.
+#[test]
+fn prepared_oversized_drops_only_offender_no_orphan_15786() {
+    let (mut binding, _pre, _bucket_a) = prepared_drop_fixture_15786();
+    let queue = &mut binding
+        .cos
+        .cos_interfaces
+        .get_mut(&42)
+        .expect("cos root")
+        .queues[0];
+    let mut local_scratch = VecDeque::new();
+    let mut prepared_scratch = VecDeque::new();
+    let batch = build_cos_batch_from_queue(
+        queue,
+        0,
+        u64::MAX,
+        u64::MAX,
+        CoSServicePhase::Guarantee,
+        &mut local_scratch,
+        &mut prepared_scratch,
+    )
+    .expect("batch built");
+    let (items, batch_bytes) = match batch {
+        CoSBatch::Prepared {
+            items, batch_bytes, ..
+        } => (items, batch_bytes),
+        CoSBatch::Local { .. } => unreachable!("Prepared items expected"),
+    };
+    assert_eq!(items.len(), 3, "test premise: three items built");
+    let mut shared_recycles = Vec::new();
+    let progress = submit_prepared(
+        &mut binding,
+        42,
+        0,
+        CoSServicePhase::Guarantee,
+        batch_bytes,
+        items,
+        1_000_000_000,
+        &mut shared_recycles,
+    );
+    assert!(progress, "the two valid frames must transmit");
+    assert_eq!(
+        binding
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2,
+        "only A and B transmit",
+    );
+    assert_eq!(
+        binding
+            .live
+            .tx_bytes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        300,
+        "100 + 200 valid bytes",
+    );
+    assert_eq!(
+        binding
+            .live
+            .tx_submit_error_drops
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "exactly the offender counted once",
+    );
+    let off_bad = 41u64 << crate::afxdp::UMEM_FRAME_SHIFT;
+    assert!(
+        binding.tx_pipeline.free_tx_frames.contains(&off_bad),
+        "BAD's frame recycled",
+    );
+    let queue = &binding
+        .cos
+        .cos_interfaces
+        .get(&42)
+        .expect("cos root")
+        .queues[0];
+    assert_eq!(
+        crate::afxdp::cos::queue_ops::cos_queue_len(queue),
+        0,
+        "queue drained: survivors sent, offender dropped, none restored",
+    );
+    assert_eq!(
+        test_flow_fair_state(queue).pop_snapshot_stack.len(),
+        2,
+        "only the two committed snapshots remain (cleared at next build); the dropped frame's snapshot was removed, not orphaned above them",
+    );
+    let dropped = binding.scratch.scratch_prepared_dropped_orig_idx.clone();
+    assert_eq!(dropped.len(), 1, "one dropped original position");
+    let committed = binding.scratch.scratch_prepared_committed_orig_idx.clone();
+    assert_eq!(committed.len(), 2, "two committed original positions");
+}
+
+// #15786 FAIL-ON-REVERT (retry variant): same batch with a pre-filled
+// TX ring forcing inserted==0. Pre-fix (collateral Drop) and a naive
+// per-frame fix WITHOUT the snapshot unwind both leave BAD's snapshot
+// on top of the stack, so A's LIFO restore consumes it →
+// bucket-mismatch assert!(false) panic (or a wrong head restore).
+// Post-fix: A and B restore with their own snapshots, BAD's is
+// removed, and the stack empties exactly.
+#[test]
+fn prepared_oversized_retry_restore_no_orphan_15786() {
+    let (mut binding, pre_pop_head_a, bucket_a) = prepared_drop_fixture_15786();
+    let queue = &mut binding
+        .cos
+        .cos_interfaces
+        .get_mut(&42)
+        .expect("cos root")
+        .queues[0];
+    let mut local_scratch = VecDeque::new();
+    let mut prepared_scratch = VecDeque::new();
+    let batch = build_cos_batch_from_queue(
+        queue,
+        0,
+        u64::MAX,
+        u64::MAX,
+        CoSServicePhase::Guarantee,
+        &mut local_scratch,
+        &mut prepared_scratch,
+    )
+    .expect("batch built");
+    let (items, batch_bytes) = match batch {
+        CoSBatch::Prepared {
+            items, batch_bytes, ..
+        } => (items, batch_bytes),
+        CoSBatch::Local { .. } => unreachable!("Prepared items expected"),
+    };
+    fill_test_tx_ring_15172(&mut binding);
+    let mut shared_recycles = Vec::new();
+    let progress = submit_prepared(
+        &mut binding,
+        42,
+        0,
+        CoSServicePhase::Guarantee,
+        batch_bytes,
+        items,
+        1_000_000_000,
+        &mut shared_recycles,
+    );
+    assert!(!progress, "inserted==0 retry makes no progress");
+    assert_eq!(
+        binding
+            .live
+            .tx_submit_error_drops
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the offender counted once even on the retry path",
+    );
+    let queue = &binding
+        .cos
+        .cos_interfaces
+        .get(&42)
+        .expect("cos root")
+        .queues[0];
+    let ff = test_flow_fair_state(queue);
+    assert_eq!(ff.flow_bucket_items[bucket_a].len(), 1, "A restored");
+    assert_eq!(
+        ff.flow_bucket_head_finish_bytes[bucket_a], pre_pop_head_a,
+        "#15786: A restores with its OWN pre-pop head finish",
+    );
+    assert!(
+        ff.pop_snapshot_stack.is_empty(),
+        "#15786: restore consumes every survivor snapshot; BAD's orphan was removed",
+    );
+    assert_eq!(crate::afxdp::cos::queue_ops::cos_queue_len(queue), 2);
+}
+
+// #15786 control: clean prepared batch (no invalid frame) — no drops,
+// no snapshot removal, both frames transmit.
+#[test]
+fn prepared_clean_batch_no_drop_15786_control() {
+    let (mut binding, _pre, _a) = prepared_drop_fixture_15786();
+    // Rebuild without BAD: drain the fixture queue and enqueue two
+    // clean prepared items directly through the queue.
+    let queue = &mut binding
+        .cos
+        .cos_interfaces
+        .get_mut(&42)
+        .expect("cos root")
+        .queues[0];
+    let _ = crate::afxdp::cos::queue_ops::cos_queue_drain_all(queue);
+    let off_a = 40u64 << crate::afxdp::UMEM_FRAME_SHIFT;
+    let off_b = 42u64 << crate::afxdp::UMEM_FRAME_SHIFT;
+    cos_queue_push_back(queue, test_flow_prepared_cos_item(1111, 100, off_a));
+    cos_queue_push_back(queue, test_flow_prepared_cos_item(3333, 200, off_b));
+    queue.hot.queued_bytes = 300;
+    let mut local_scratch = VecDeque::new();
+    let mut prepared_scratch = VecDeque::new();
+    let batch = build_cos_batch_from_queue(
+        queue,
+        0,
+        u64::MAX,
+        u64::MAX,
+        CoSServicePhase::Guarantee,
+        &mut local_scratch,
+        &mut prepared_scratch,
+    )
+    .expect("batch built");
+    let (items, batch_bytes) = match batch {
+        CoSBatch::Prepared {
+            items, batch_bytes, ..
+        } => (items, batch_bytes),
+        CoSBatch::Local { .. } => unreachable!("Prepared items expected"),
+    };
+    let mut shared_recycles = Vec::new();
+    let progress = submit_prepared(
+        &mut binding,
+        42,
+        0,
+        CoSServicePhase::Guarantee,
+        batch_bytes,
+        items,
+        1_000_000_000,
+        &mut shared_recycles,
+    );
+    assert!(progress);
+    assert_eq!(
+        binding
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        binding
+            .live
+            .tx_submit_error_drops
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "control: no drops",
+    );
+    assert!(binding.scratch.scratch_prepared_dropped_orig_idx.is_empty());
+}

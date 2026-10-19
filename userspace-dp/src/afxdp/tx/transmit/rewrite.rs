@@ -1,63 +1,59 @@
 // #1354 phase split: REWRITE — iterate `scratch_prepared_tx` and
 // apply per-frame DSCP rewrite mutations to the UMEM frame slice.
 //
-// Drop semantics on slice-out-of-range: orphan-recycle EVERY staged
-// entry (including the offender; the failing iteration's `req` is
-// still in `scratch_prepared_tx` at the point of failure, so the
-// drain captures it). Account `orphan_count.saturating_sub(1)`
-// against `tx_submit_error_drops` + `tx_errors` because the caller's
-// post-return `+= 1` covers the offender (#710).
-
-use std::sync::atomic::Ordering;
+// #15786: drop semantics on slice-out-of-range are PER-FRAME — the
+// offender alone is removed from the staged batch, recycled + counted
+// via `record_prepared_drop` (recording its ORIGINAL position from
+// `scratch_prepared_tx_orig_idx` for the CoS pop-snapshot unwind), and
+// the valid survivors continue to verify/write. The pre-fix code
+// drained + recycled EVERY staged entry and returned `Err(Drop)`.
 
 use crate::afxdp::frame::apply_dscp_rewrite_to_frame;
 use crate::afxdp::worker::BindingWorker;
 
-use super::{recycle_prepared_immediately_with_shared, TxDropReason, TxError};
+use super::{record_prepared_drop, TxDropReason};
 
 #[inline]
 pub(super) fn apply_dscp_rewrites_to_staged(
     binding: &mut BindingWorker,
     shared_recycles: &mut Vec<(u32, u64)>,
-) -> Result<(), TxError> {
-    for idx in 0..binding.scratch.scratch_prepared_tx.len() {
+) {
+    let mut idx = 0usize;
+    while idx < binding.scratch.scratch_prepared_tx.len() {
         let req = &binding.scratch.scratch_prepared_tx[idx];
         let Some(dscp_rewrite) = req.dscp_rewrite else {
+            idx += 1;
             continue;
         };
         let req_offset = req.offset;
         let req_len = req.len;
-        let Some(frame) = (unsafe {
+        let frame = unsafe {
             binding
                 .umem
                 .area()
                 .slice_mut_unchecked(req_offset as usize, req_len as usize)
-        }) else {
-            let err_offset = req_offset;
-            let err_len = req_len;
-            let orphaned: Vec<_> = binding.scratch.scratch_prepared_tx.drain(..).collect();
-            for r in &orphaned {
-                recycle_prepared_immediately_with_shared(binding, r, Some(shared_recycles));
-            }
-            // #710: each orphan is a silently-recycled packet. Caller
-            // will `+= 1` for the offender; this accounts for the rest.
-            let orphan_count = orphaned.len();
-            if orphan_count > 0 {
-                binding
-                    .live
-                    .tx_submit_error_drops
-                    .fetch_add(orphan_count.saturating_sub(1) as u64, Ordering::Relaxed);
-                binding
-                    .live
-                    .tx_errors
-                    .fetch_add(orphan_count.saturating_sub(1) as u64, Ordering::Relaxed);
-            }
-            return Err(TxError::Drop(TxDropReason::PreparedSliceOutOfRange {
-                offset: err_offset,
-                len: err_len,
-            }));
+        };
+        let Some(frame) = frame else {
+            let orig_idx = binding.scratch.scratch_prepared_tx_orig_idx[idx];
+            let req = binding.scratch.scratch_prepared_tx.remove(idx);
+            let staged_len = binding.scratch.scratch_prepared_tx.len();
+            binding
+                .scratch
+                .scratch_prepared_tx_orig_idx
+                .copy_within(idx + 1..=staged_len, idx);
+            record_prepared_drop(
+                binding,
+                &req,
+                orig_idx,
+                TxDropReason::PreparedSliceOutOfRange {
+                    offset: req_offset,
+                    len: req_len,
+                },
+                shared_recycles,
+            );
+            continue;
         };
         let _ = apply_dscp_rewrite_to_frame(frame, dscp_rewrite);
+        idx += 1;
     }
-    Ok(())
 }

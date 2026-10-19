@@ -28,6 +28,9 @@ pub(super) fn finalise_prepared(
         while let Some(req) = binding.scratch.scratch_prepared_tx.pop() {
             pending.push_front(req);
         }
+        // #15786: validation-phase drops were already recycled +
+        // counted in `record_prepared_drop`; the caller's Retry arm
+        // unwinds their pop snapshots before restoring `pending`.
         return Err(TxError::Retry(TxRetryReason::PreparedTxRingInsertFailed));
     }
     binding.telemetry.dbg_tx_ring_submitted += inserted as u64;
@@ -44,6 +47,13 @@ pub(super) fn finalise_prepared(
     // the ORIGINAL front-to-back FIFO at the head of `pending` —
     // identical ordering to the prior `retry_tail` + `.rev()`, now
     // allocation-free.
+    //
+    // #15786: `scratch_prepared_tx_orig_idx[idx]` (read after the pop;
+    // the new `len()` equals the popped item's index) is the committed
+    // entry's ORIGINAL position — pushed into
+    // `scratch_prepared_committed_orig_idx` so the CoS submit path
+    // charges accounting by identity, not by a prefix shifted by an
+    // interior validation drop.
     while let Some(mut req) = binding.scratch.scratch_prepared_tx.pop() {
         let idx = binding.scratch.scratch_prepared_tx.len();
         if idx < inserted as usize {
@@ -55,6 +65,10 @@ pub(super) fn finalise_prepared(
                 &mut binding.tx_pipeline.in_flight_untracked_tx,
                 &req,
             );
+            binding
+                .scratch
+                .scratch_prepared_committed_orig_idx
+                .push(binding.scratch.scratch_prepared_tx_orig_idx[idx]);
             sent_packets += 1;
             sent_bytes += req.len as u64;
         } else {
