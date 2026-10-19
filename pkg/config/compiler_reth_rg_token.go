@@ -69,9 +69,11 @@ const MaxRethRedundancyGroupOctet = MaxHeartbeatRedundancyGroupID
 //     Requiring presence is a separate policy question with a real
 //     over-rejection surface.
 //   - A positive id that names no DECLARED `chassis cluster redundancy-group`
-//     is not flagged. It does not trigger this fail-open at all — it still reads
-//     as RG-scoped and still takes the link-local substitution — so rejecting it
-//     would be a new restriction rather than a fix for the reported failure.
+//     is not flagged BY THIS GATE. It does not trigger the #6782 fail-open —
+//     it still reads as RG-scoped and still takes the link-local substitution.
+//     #15199 (A05-03) separately strict-rejects that shape in
+//     validateRethRedundancyGroupStrict, because an undefined data group has
+//     no election on either node.
 //   - The 1..155 VRID ceiling stays owned by validateRethVRRPGroupIDStrict,
 //     which is correctly scoped to the modes that actually derive a VRID.
 //

@@ -91,6 +91,25 @@ func warnUnknownRoutingLeaves10707(tree *ConfigTree) []string {
 				continue
 			}
 			keyword := node.Keys[0]
+			// Apply statements are permitted at any hierarchy level
+			// (#7029/#9685) and are not config keywords to warn on.
+			if isApplyStatementKeyword(keyword) {
+				continue
+			}
+			// #15199 interfaces walk: vrrp-group children are owned by
+			// the #15046 closed gate (strict reject / lenient warn);
+			// descending here would double-report unknown children.
+			if len(path) > 0 && path[0] == "interfaces" &&
+				(keyword == "vrrp-group" || keyword == "vrrp-inet6-group") {
+				continue
+			}
+			// #15199: filter/simple-filter under interfaces are owned by
+			// the #12090/#10293 strict gates (single diagnostic contract,
+			// #12656); the generic advisory must not double-report them.
+			if len(path) > 0 && path[0] == "interfaces" &&
+				(keyword == "filter" || keyword == "simple-filter") {
+				continue
+			}
 			// BGP SAFI diagnostics belong to the compiler gate, not this
 			// child walker: a hierarchical one-liner can carry the SAFI in
 			// node.Keys without a child keyword to visit.
@@ -187,6 +206,17 @@ func warnUnknownRoutingLeaves10707(tree *ConfigTree) []string {
 					instancePath = instancePath[:pathLen]
 				}
 			}
+		case "interfaces":
+			// #15199 (A05-06): extend the #10707 open-world advisory to
+			// the interfaces subtree. Unknown interface/unit/family
+			// keywords (ether-options, family bridge, filtr, arbitrary
+			// tokens) previously committed with zero warnings and
+			// compiled to nothing — including the fail-open
+			// `family inet filtr input f1` shape, which left the unit
+			// unfiltered. Warn-only on both paths, like the routing
+			// grammars above: the schema stays open-world, but the
+			// silent drop becomes visible.
+			walkChildren(node.Children, schemaInterfaces, []string{"interfaces"})
 		}
 	}
 	return warnings

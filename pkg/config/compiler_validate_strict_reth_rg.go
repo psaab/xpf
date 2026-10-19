@@ -61,6 +61,25 @@ func validateRethRedundancyGroupStrict(cfg *Config) error {
 			count, MaxRethCount)
 	}
 
+	// #15199 (A05-03): the configured data redundancy groups — the
+	// `chassis cluster redundancy-group <N>` definitions the cluster
+	// manager creates elections for (pkg/cluster UpdateConfig builds
+	// groups only from this list; an unknown id never becomes primary
+	// on either node). A reth pointing at an undefined group is dark on
+	// both nodes even though every interface-level spelling is valid.
+	// A nil Cluster means a standalone config, where no group can be
+	// defined at all and the reference is inert rather than wrong; the
+	// chassis RG gates own that shape.
+	var configuredRG map[int]bool
+	if cfg.Chassis.Cluster != nil {
+		configuredRG = make(map[int]bool, len(cfg.Chassis.Cluster.RedundancyGroups))
+		for _, rg := range cfg.Chassis.Cluster.RedundancyGroups {
+			if rg != nil {
+				configuredRG[rg.ID] = true
+			}
+		}
+	}
+
 	names := make([]string, 0, len(cfg.Interfaces.Interfaces))
 	for name := range cfg.Interfaces.Interfaces {
 		names = append(names, name)
@@ -73,6 +92,9 @@ func validateRethRedundancyGroupStrict(cfg *Config) error {
 			continue
 		}
 		if _, hasMembers := rethToPhys[name]; hasMembers {
+			if err := validateRethRGDefined15199(name, ifc.RedundancyGroup, configuredRG); err != nil {
+				return err
+			}
 			continue
 		}
 		// A `reth*`-named interface with no members yet is DELIBERATELY not
@@ -90,6 +112,9 @@ func validateRethRedundancyGroupStrict(cfg *Config) error {
 		// netdev that does not exist (RETH is bondless), so this is strictly
 		// quieter than what it replaces.
 		if strings.HasPrefix(name, "reth") {
+			if err := validateRethRGDefined15199(name, ifc.RedundancyGroup, configuredRG); err != nil {
+				return err
+			}
 			continue
 		}
 		return fmt.Errorf(
@@ -110,4 +135,27 @@ func validateRethRedundancyGroupStrict(cfg *Config) error {
 			name, name)
 	}
 	return nil
+}
+
+// validateRethRGDefined15199 rejects a reth whose redundancy-group id has
+// no `chassis cluster redundancy-group <id>` definition (#15199 A05-03).
+// The cluster manager creates groups only from the configured list, so an
+// undefined id can never be primary on either node and the reth stays dark
+// despite committing cleanly. The caller only reaches here for ids above 0;
+// RG0 is the control-plane group and is never a valid reth target.
+func validateRethRGDefined15199(name string, rgID int, configuredRG map[int]bool) error {
+	if configuredRG == nil {
+		return nil
+	}
+	if configuredRG[rgID] {
+		return nil
+	}
+	return fmt.Errorf(
+		"interface %q sets `redundant-ether-options redundancy-group %d`, "+
+			"but no `chassis cluster redundancy-group %d` is configured, so the "+
+			"group has no election on either node and the reth never becomes "+
+			"active. Add `chassis cluster redundancy-group %d node <n> "+
+			"priority <p>` for both nodes, or point %q at a configured "+
+			"redundancy-group (#15199)",
+		name, rgID, rgID, rgID, name)
 }

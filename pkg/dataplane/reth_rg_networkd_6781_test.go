@@ -33,6 +33,8 @@ func rethRGNetworkdCfg(t *testing.T) *config.Config {
 		"set chassis cluster authentication-key test-cluster-psk-6781",
 		"set chassis cluster node 0",
 		"set chassis cluster reth-count 2",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		// Neither a reth member nor a reth owner, but carries a group.
 		"set interfaces ge-0/0/5 redundant-ether-options redundancy-group 1",
 		"set interfaces ge-0/0/5 unit 0 family inet address 10.0.99.1/24",

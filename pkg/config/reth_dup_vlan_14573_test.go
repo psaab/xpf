@@ -26,6 +26,8 @@ func rethDupVlanLines14573() []string {
 		"set interfaces reth1 unit 200 vlan-id 100 family inet address 10.0.200.1/24",
 		"set chassis cluster reth-count 2",
 		"set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
 	}
 }
@@ -62,6 +64,8 @@ func TestRethUnitNumberVsVlanIDStrictReject14573(t *testing.T) {
 		"set interfaces reth1 unit 200 vlan-id 100 family inet address 10.0.200.1/24",
 		"set chassis cluster reth-count 2",
 		"set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
 	)
 	if err == nil {
@@ -83,6 +87,8 @@ func TestRethSingleVlanUnitAndDottedAliasStillCompile14573(t *testing.T) {
 		"set interfaces reth1 unit 100 vlan-id 100 family inet address 10.0.61.1/24",
 		"set chassis cluster reth-count 2",
 		"set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
 		"set interfaces ge-0/0/1.100 gigether-options redundant-parent reth1",
 	); err != nil {
@@ -102,6 +108,8 @@ func TestRethDistinctVlanIDsStillCompile14573(t *testing.T) {
 		"set interfaces reth1 unit 200 vlan-id 200 family inet address 10.0.200.1/24",
 		"set chassis cluster reth-count 2",
 		"set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
 	); err != nil {
 		t.Fatalf("two reth units with distinct vlan-ids must compile: %v", err)
@@ -121,6 +129,8 @@ func TestSameVlanIDOnDifferentRethsStillCompiles14573(t *testing.T) {
 		"set interfaces reth2 unit 100 vlan-id 100 family inet address 10.1.100.1/24",
 		"set chassis cluster reth-count 3",
 		"set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
 		"set interfaces ge-0/0/2 gigether-options redundant-parent reth2",
 	); err != nil {

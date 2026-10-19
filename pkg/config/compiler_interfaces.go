@@ -13,17 +13,18 @@ import (
 // a vrrp-group block. Used to delimit multi-value runs (virtual-address)
 // when properties are packed into a single node's Keys (#1813).
 var vrrpGroupPropertyKeywords = map[string]bool{
-	"virtual-address":     true,
-	"priority":            true,
-	"preempt":             true,
-	"no-preempt":          true,
-	"accept-data":         true,
-	"advertise-interval":  true,
-	"authentication-type": true,
-	"authentication-key":  true,
-	"track-interface":     true,
-	"track":               true,
-	"track-priority-cost": true,
+	"virtual-address":       true,
+	"virtual-inet6-address": true,
+	"priority":              true,
+	"preempt":               true,
+	"no-preempt":            true,
+	"accept-data":           true,
+	"advertise-interval":    true,
+	"authentication-type":   true,
+	"authentication-key":    true,
+	"track-interface":       true,
+	"track":                 true,
+	"track-priority-cost":   true,
 }
 
 // parseInterfaceNumeric9899 parses a canonical unsigned decimal token in
@@ -1502,7 +1503,13 @@ func parseMSSValue(node *Node) int {
 // node's Keys[2:] (legacy flat-set leaves) AND properties as child
 // nodes (hierarchical blocks + schema-structured flat-set).
 func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
-	for _, vrrpInst := range namedInstances(addrNode.FindChildren("vrrp-group")) {
+	// #15199 (A05-07): the Junos IPv6 spelling `vrrp-inet6-group` is an
+	// alias of `vrrp-group` under family inet6; both names feed the same
+	// keyed VRRPGroup so the two spellings merge exactly like repeated
+	// vrrp-group statements.
+	vrrpNodes := addrNode.FindChildren("vrrp-group")
+	vrrpNodes = append(vrrpNodes, addrNode.FindChildren("vrrp-inet6-group")...)
+	for _, vrrpInst := range namedInstances(vrrpNodes) {
 		groupID, err := strconv.Atoi(vrrpInst.name)
 		if err != nil {
 			continue
@@ -1527,7 +1534,7 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 		keys := vrrpInst.node.Keys
 		for i := 2; i < len(keys); i++ {
 			switch keys[i] {
-			case "virtual-address":
+			case "virtual-address", "virtual-inet6-address":
 				// Multi-value (#1813): consume every
 				// following token up to the next
 				// recognized property keyword —
@@ -1649,10 +1656,13 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 		// run is represented as a chain of child nodes. Expand it against the
 		// group schema before reading properties so every property is visible
 		// to this loop, just as it is in the braced spelling.
-		props := expandFlatRun(vrrpInst.node.Children, vrrpGroupSchemaNode(false))
+		// #15199: expand against the v6 node so a Junos-spelling chain
+		// (`vrrp-inet6-group 1 virtual-inet6-address ...`) splits at the
+		// alias leaf too; the v6 node is a superset of the v4 leaf set.
+		props := expandFlatRun(vrrpInst.node.Children, vrrpGroupSchemaNode(true))
 		for _, prop := range props {
 			switch prop.Name() {
-			case "virtual-address":
+			case "virtual-address", "virtual-inet6-address":
 				// Multi-value spellings (#1813):
 				// bracketed `virtual-address [ a b ];`
 				// packs all addresses into Keys[1:]

@@ -111,6 +111,8 @@ func TestVRRPCrossGroupExplicitVsRethFailsCommit(t *testing.T) {
 		"set chassis cluster authentication-key test-cluster-psk-14407",
 		"set chassis cluster reth-count 1",
 		"set chassis cluster no-private-rg-election",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces reth0 redundant-ether-options redundancy-group 1",
 		"set interfaces reth0 unit 0 family inet address 10.0.0.100/24 vrrp-group 1 virtual-address 10.0.0.100/24",
 	}

@@ -183,6 +183,8 @@ func TestRethUnitCollapseStillCompiles7795(t *testing.T) {
 		// this one runs, which would make these cells pass or fail for the
 		// wrong reason.
 		"set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces ge-0/0/0 gigether-options redundant-parent reth1",
 	); err != nil {
 		t.Fatalf("a RETH unit resolves onto its physical member's device BY DESIGN and "+
@@ -213,6 +215,8 @@ func TestRethVlanAliasOfAuthoredNameStillCompiles7795(t *testing.T) {
 		"set interfaces reth0 unit 50 family inet address 172.16.50.8/24",
 		"set chassis cluster reth-count 2",
 		"set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces ge-0/0/2 gigether-options redundant-parent reth0",
 		"set interfaces ge-0/0/2.50 unit 0 family inet address 10.0.9.1/24",
 	); err != nil {

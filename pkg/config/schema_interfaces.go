@@ -281,6 +281,11 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 						"primary":    {desc: "Primary address", children: nil},
 						"preferred":  {desc: "Preferred address", children: nil},
 						"vrrp-group": vrrpGroupSchemaNode(true),
+						// #15199 (A05-07): Junos spells the IPv6 group
+						// `vrrp-inet6-group <id> { virtual-inet6-address ...; }`.
+						// Same node shape as vrrp-group; parseVRRPGroups
+						// reads both names into the same VRRPGroup.
+						"vrrp-inet6-group": vrrpGroupSchemaNode(true),
 					},
 				},
 				"sampling": {desc: "Traffic sampling", children: map[string]*schemaNode{
@@ -379,7 +384,7 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 	// A same-line flat `set ... priority <n> virtual-address <vip>` nests
 	// virtual-address under priority in SetPath. The schema walker and
 	// parseVRRPGroups both expand this declared packed run.
-	return &schemaNode{desc: "VRRP group", args: 1, placeholder: "<group-id>", keyValidator: ValidateVRRPGroupID, packedFlatRun: true, children: map[string]*schemaNode{
+	children := map[string]*schemaNode{
 		"virtual-address": {
 			desc:          "Virtual IP address",
 			args:          1,
@@ -391,19 +396,6 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 			validator:     vaValidator,
 			children:      nil,
 		},
-		// VRRP priority is one wire byte (pkg/vrrp/instance.go:918
-		// uint8); 0 is the "unset → default 100" compiler sentinel and
-		// also the RFC 5798 resignation value, 255 is the valid IP-owner
-		// priority (instance.go:256). Junos: 1..255 — identical.
-		// NOTE (#5184): this leaf validator gates only the STRUCTURED
-		// spellings (flat-set / braced). The hierarchical PACKED one-liner
-		// `vrrp-group 1 priority 256;` packs the priority onto the instance
-		// node's Keys, which walkInstanceChildren consumes as an
-		// unvalidated identity token (same residual as the vrrp-group <id>
-		// slot) — it is backstopped by the semantic commit gate
-		// validateVRRPGroupPriorityStrict on the compiled *Config
-		// (compiler_validate_strict_vrrp_priority.go), the analog of
-		// validateVRRPGroupIDStrict (#4573).
 		"priority": {
 			desc:          "VRRP priority",
 			args:          1,
@@ -414,12 +406,6 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 			validator:     ValidateInteger(1, 255),
 			children:      nil,
 		},
-		// Junos `preempt { hold-time <seconds>; }`: a higher-priority
-		// backup that comes back up waits hold-time seconds before
-		// preempting a still-live lower-priority master, so failback is
-		// deferred until dynamic routing converges (avoids a transient
-		// blackhole). 0/unset hold-time = immediate preemption (today's
-		// behavior). Bare `preempt` (no hold-time) is still valid.
 		"preempt": {desc: "Allow preemption", children: map[string]*schemaNode{
 			"hold-time": {
 				desc:          "Seconds to wait before preempting a live lower-priority master",
@@ -432,16 +418,8 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 				children:      nil,
 			},
 		}},
-		// #15047: preemption defaults ON (Junos/RFC 5798); `no-preempt`
-		// is the explicit opt-out that compiles Preempt=false.
 		"no-preempt":  {desc: "Disable preemption (preempt is on by default)", children: nil},
 		"accept-data": {desc: "Accept packets sent to the virtual address", children: nil},
-		// Seconds. xpf-DIVERGENT from Junos (1..255 s): the value is
-		// converted seconds→ms (pkg/vrrp/vrrp.go:58) then ms→centiseconds
-		// (instance.go:915) into the 12-bit VRRPv3 Max Advert Int field,
-		// so 40 s (4000 cs) is the last whole-second value that encodes;
-		// 41 s (4100 cs) overflows the 0x0FFF wire mask and aliases. 0 =
-		// unset → default 1 s (vrrp.go:55).
 		"advertise-interval": {
 			desc:          "Advertisement interval",
 			args:          1,
@@ -454,26 +432,33 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 		},
 		"authentication-type": {desc: "Authentication type", args: 1, placeholder: "<type>", children: nil},
 		"authentication-key":  {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
-		// priority-cost stays untyped: the #1814 AST pre-walk in the
-		// compiler already strict-rejects out-of-range costs with curated
-		// errors (validateVRRPTrackInterfaceAST / parseTrackCost,
-		// compiler_interfaces.go); typing it here would shadow them.
 		"track-interface": {desc: "Interface to track", args: 1, placeholder: "<interface>", closedWorld: true, children: map[string]*schemaNode{
 			"priority-cost": {desc: "Priority cost subtracted while the tracked interface is down", args: 1, placeholder: "<1..254>", children: nil},
 		}},
-		// Junos container spelling (#15046):
-		// `track { interface <if> { priority-cost <n>; } }` — an alias
-		// of the xpf `track-interface <if> { priority-cost <n>; }`
-		// leaf. Accepted in both braced and flat-set spellings; the
-		// compiler gives it the same single-track slot as
-		// track-interface (duplicate across spellings is #1814's gate).
 		"track": {desc: "Interface tracking (Junos track container)", children: map[string]*schemaNode{
 			"interface": {desc: "Interface to track", args: 1, placeholder: "<interface>", closedWorld: true, children: map[string]*schemaNode{
 				"priority-cost": {desc: "Priority cost subtracted while the tracked interface is down", args: 1, placeholder: "<1..254>", children: nil},
 			}},
 		}},
 		"track-priority-cost": {desc: "Priority cost when tracked interface fails", args: 1, placeholder: "<cost>", children: nil},
-	}}
+		// #15199 (A05-07): the Junos IPv6 spelling carries its VIPs under
+		// `virtual-inet6-address` inside `vrrp-inet6-group`. Declared only
+		// on the v6 node so the v4 group keeps rejecting it as unknown.
+	}
+	if v6 {
+		children["virtual-inet6-address"] = &schemaNode{
+			desc:          "Virtual IPv6 address (Junos vrrp-inet6-group spelling)",
+			args:          1,
+			multi:         true,
+			placeholder:   "<address>",
+			valueType:     ValueCIDR,
+			valueDesc:     vaDesc,
+			valueExamples: vaExamples,
+			validator:     vaValidator,
+			children:      nil,
+		}
+	}
+	return &schemaNode{desc: "VRRP group", args: 1, placeholder: "<group-id>", keyValidator: ValidateVRRPGroupID, packedFlatRun: true, children: children}
 }
 
 // tunnelSchemaChildren returns the config-mode schema children for the

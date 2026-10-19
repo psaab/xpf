@@ -11,10 +11,11 @@ import (
 // canonical identity for these sites: aliases merge with inline precedence,
 // while unequal instances remain separate.
 var canonicalAlias9859 = map[*schemaNode]bool{
-	schemaProtocols.children["ospf"].children["area"]:                                                                          true,
-	schemaProtocols.children["ospf3"].children["area"]:                                                                         true,
-	schemaInterfaces.wildcard.children["unit"].children["family"].children["inet"].children["address"].children["vrrp-group"]:  true,
-	schemaInterfaces.wildcard.children["unit"].children["family"].children["inet6"].children["address"].children["vrrp-group"]: true,
+	schemaProtocols.children["ospf"].children["area"]:                                                                                true,
+	schemaProtocols.children["ospf3"].children["area"]:                                                                               true,
+	schemaInterfaces.wildcard.children["unit"].children["family"].children["inet"].children["address"].children["vrrp-group"]:        true,
+	schemaInterfaces.wildcard.children["unit"].children["family"].children["inet6"].children["address"].children["vrrp-group"]:       true,
+	schemaInterfaces.wildcard.children["unit"].children["family"].children["inet6"].children["address"].children["vrrp-inet6-group"]: true,
 	// #10234 P1: chassis RG IDs fold by Atoi int with last-wins (compileChassis
 	// byID), so 01 and 1 share one identity while different IDs remain distinct.
 	schemaChassis.children["cluster"].children["redundancy-group"]: true,

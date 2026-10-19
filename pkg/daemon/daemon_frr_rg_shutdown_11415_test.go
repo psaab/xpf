@@ -225,6 +225,8 @@ func (*frrHAEventExecutor11415) VtyshStream(context.Context, string) (io.ReadClo
 func TestClusterDemotionReconcilesFRR11415(t *testing.T) {
 	const setConfig = fenceStartupClusterSet +
 		"set chassis cluster no-reth-vrrp\n" +
+		"set chassis cluster redundancy-group 1 node 0 priority 200\n" +
+		"set chassis cluster redundancy-group 1 node 1 priority 100\n" +
 		"set interfaces ge-0/0/1 gigether-options redundant-parent reth0\n" +
 		"set interfaces reth0 redundant-ether-options redundancy-group 1\n" +
 		"set interfaces reth0 unit 0 family inet address 198.51.100.1/24\n" +
