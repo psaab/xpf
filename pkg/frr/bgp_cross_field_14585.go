@@ -28,7 +28,8 @@ func renderBGPRouteReflectorClient14585(b *strings.Builder, routerAS uint32, n *
 	}
 	if n.PeerAS != 0 && !bgpNeighborIBGP14585(routerAS, n) {
 		slog.Warn("frr: omitting route-reflector-client for an eBGP neighbor (#14585)",
-			"neighbor", sanitizeFRRValue(n.Address), "peer_as", n.PeerAS, "router_as", routerAS)
+			"neighbor", sanitizeFRRValue(n.Address), "peer_as", n.PeerAS, "router_as", routerAS,
+			"local_as", config.BGPNeighborEffectiveLocalAS15663(routerAS, n))
 		return
 	}
 	fmt.Fprintf(b, "  neighbor %s route-reflector-client\n", n.Address)
@@ -49,7 +50,8 @@ func renderBGPRemovePrivate14585(b *strings.Builder, routerAS uint32, n *config.
 	}
 	if bgpNeighborIBGP14585(routerAS, n) {
 		slog.Warn("frr: omitting remove-private-AS for an iBGP neighbor (#14585)",
-			"neighbor", sanitizeFRRValue(n.Address), "peer_as", n.PeerAS, "router_as", routerAS)
+			"neighbor", sanitizeFRRValue(n.Address), "peer_as", n.PeerAS, "router_as", routerAS,
+			"local_as", config.BGPNeighborEffectiveLocalAS15663(routerAS, n))
 		return
 	}
 	fmt.Fprintf(b, "  neighbor %s remove-private-AS all\n", n.Address)

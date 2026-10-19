@@ -27,11 +27,30 @@ func bgpDampeningEffective14585(bgp *BGPConfig) (halfLife, reuse, suppress, maxS
 	return halfLife, reuse, suppress, maxSuppress
 }
 
+// BGPNeighborEffectiveLocalAS15663 resolves the effective local AS for a
+// neighbor: the per-neighbor LocalAS when set, else the router AS. The
+// compiler stamps a group's local-as onto each neighbor's LocalAS at
+// create time (compiler_protocols.go), so the group's value is already
+// folded into n.LocalAS and no separate group lookup is needed; this
+// matches bgpNeighborBFDMultihop14587 (pkg/frr/protocols_render.go).
+func BGPNeighborEffectiveLocalAS15663(routerAS uint32, n *BGPNeighbor) uint32 {
+	if n != nil && n.LocalAS != 0 {
+		return n.LocalAS
+	}
+	return routerAS
+}
+
 // BGPNeighborIsIBGP14585 reports whether the neighbor is internal: its
-// effective peer-as equals the router AS. PeerAS 0 is the missing-peer-as
-// case owned by validateBGPNeighborPeerASStrict, not an iBGP peer.
+// peer-as equals the effective local AS (per-neighbor/group local-as when
+// set, else the router AS; #15663). PeerAS 0 is the missing-peer-as case
+// owned by validateBGPNeighborPeerASStrict, not an iBGP peer. An effective
+// local AS of 0 (no router AS and no local-as) is never iBGP.
 func BGPNeighborIsIBGP14585(routerAS uint32, n *BGPNeighbor) bool {
-	return n != nil && routerAS != 0 && n.PeerAS == routerAS
+	if n == nil || n.PeerAS == 0 {
+		return false
+	}
+	effective := BGPNeighborEffectiveLocalAS15663(routerAS, n)
+	return effective != 0 && n.PeerAS == effective
 }
 
 // validateBGPCrossFieldStrict rejects BGP/OSPF knob combinations that FRR
@@ -117,18 +136,19 @@ func validateBGPCrossFieldStrict(cfg *Config) error {
 					"number\"), failing the frr-reload; remove local-as or set a different AS",
 					detail, n.LocalAS, bgp.LocalAS, n.Address, n.LocalAS)
 			}
+			effectiveLocalAS := BGPNeighborEffectiveLocalAS15663(bgp.LocalAS, n)
 			ibgp := BGPNeighborIsIBGP14585(bgp.LocalAS, n)
 			if n.RouteReflectorClient && n.PeerAS != 0 && !ibgp {
 				return fmt.Errorf("%s: route-reflector-client is only valid for iBGP peers "+
 					"(peer-as %d != local-as %d) — FRR bgpd rejects it for external neighbors "+
 					"(\"Not an internal neighbor\"), failing the frr-reload; remove "+
-					"route-reflector-client or fix peer-as", detail, n.PeerAS, bgp.LocalAS)
+					"route-reflector-client or fix peer-as", detail, n.PeerAS, effectiveLocalAS)
 			}
 			if n.RemovePrivateAS && ibgp {
 				return fmt.Errorf("%s: remove-private is only valid for eBGP peers "+
 					"(peer-as %d == local-as %d, iBGP) — FRR bgpd rejects remove-private-AS "+
 					"for IBGP peers, failing the frr-reload; remove remove-private (Junos "+
-					"treats it as a no-op for iBGP)", detail, n.PeerAS, bgp.LocalAS)
+					"treats it as a no-op for iBGP)", detail, n.PeerAS, effectiveLocalAS)
 			}
 		}
 		return nil
