@@ -7,6 +7,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/appid"
 	"github.com/psaab/xpf/pkg/config"
 )
 
@@ -237,13 +238,21 @@ func TestMatchFiltersProtocol(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f := traceFilter{name: "f"}
 			if tt.filterProto != "" {
-				f.proto = normalizeTraceProto(tt.filterProto)
+				n, ok := appid.ProtocolNumber(tt.filterProto)
+				if !ok {
+					t.Fatalf("filter proto %q unresolvable", tt.filterProto)
+				}
+				f.protoNum, f.hasProto = n, true
 			}
 			tw := &TraceWriter{filters: []traceFilter{f}}
+			// Production records carry ProtocolNum; derive it from the rendered
+			// name here the same way ringbuf does (protoName inverse for these).
+			recNum, _ := appid.ProtocolNumber(tt.recProto)
 			rec := EventRecord{
-				SrcAddr:  "10.0.1.5:1000",
-				DstAddr:  "10.0.2.5:80",
-				Protocol: tt.recProto,
+				SrcAddr:     "10.0.1.5:1000",
+				DstAddr:     "10.0.2.5:80",
+				Protocol:    tt.recProto,
+				ProtocolNum: recNum,
 			}
 			if got := tw.matchFilters(rec); got != tt.want {
 				t.Errorf("matchFilters(proto-filter=%q, rec=%q) = %v, want %v",
@@ -257,11 +266,12 @@ func TestMatchFiltersProtocol(t *testing.T) {
 // existing source/destination prefix match: a record matches only when it
 // satisfies prefix AND protocol.
 func TestMatchFiltersProtocolWithPrefix(t *testing.T) {
+	tcpNum, _ := appid.ProtocolNumber("tcp")
 	tw := &TraceWriter{
 		filters: []traceFilter{{
-			name:   "f",
-			srcNet: netip.MustParsePrefix("10.0.1.0/24"),
-			proto:  normalizeTraceProto("tcp"),
+			name:     "f",
+			srcNet:   netip.MustParsePrefix("10.0.1.0/24"),
+			protoNum: tcpNum, hasProto: true,
 		}},
 	}
 

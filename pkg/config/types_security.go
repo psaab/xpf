@@ -303,19 +303,17 @@ type TracePacketFilter struct {
 	SourcePrefix      string
 	DestinationPrefix string
 	Protocol          string // protocol name (tcp|udp|icmp|...) or number
-	// InvalidPrefix marks a filter whose source-prefix or destination-prefix
-	// node was PRESENT in the config but carried an empty value (e.g.
-	// `source-prefix ""`). An empty prefix string is indistinguishable from an
-	// absent one once it reaches the runtime (PacketFilter carries only
-	// strings), but the two have opposite intent: an absent prefix is a
-	// legitimate protocol-only filter, while a present-but-empty prefix is
-	// malformed and — if treated as "no constraint" — collapses the filter to
-	// match EVERY event (the #3422 M01 fail-open in a smaller costume). The
-	// compiler, which alone sees the AST and can tell present-empty from
-	// absent, sets this so the runtime (NewTraceWriter) can fail the filter
-	// closed (match-none) without over-rejecting a protocol-only filter. The
-	// strict commit gate rejects present-but-empty loudly; this carries the
-	// conclusion through the lenient load / peer-sync path.
+	// InvalidPrefix marks a filter that must fail closed (match-none): a
+	// source/destination prefix node PRESENT but empty, an empty/unknown/0/
+	// out-of-range protocol, or no selector at all (no prefix and no protocol).
+	// An empty string alone is indistinguishable from an absent selector once
+	// it reaches the runtime, but the two have opposite intent: an absent
+	// selector on an otherwise-constrained filter is legitimate, while any of
+	// the above would — if treated as "no constraint" — collapse the filter to
+	// match EVERY event (#3422 M01, #15679). The compiler, which alone sees
+	// the AST, sets this so NewTraceWriter can fail the filter closed. The
+	// strict commit gate rejects these loudly; this carries the conclusion
+	// through the lenient load / peer-sync path.
 	InvalidPrefix bool
 }
 

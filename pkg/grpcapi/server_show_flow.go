@@ -433,6 +433,9 @@ func (s *Server) showFlowTraceoptions(cfg *config.Config, buf *strings.Builder) 
 			if pf.DestinationPrefix != "" {
 				fmt.Fprintf(buf, " dst=%s", pf.DestinationPrefix)
 			}
+			if pf.Protocol != "" {
+				fmt.Fprintf(buf, " proto=%s", pf.Protocol)
+			}
 			buf.WriteString("\n")
 		}
 	}

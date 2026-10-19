@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/psaab/xpf/pkg/appid"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/fsatomic"
 )
@@ -200,17 +201,18 @@ func (tw *TraceWriter) SyncForTest() {
 func (tw *TraceWriter) FailedRotations() uint64 { return tw.failedRotations.Load() }
 
 type traceFilter struct {
-	name   string
-	srcNet netip.Prefix
-	dstNet netip.Prefix
-	proto  string // normalized protocol name (e.g. "TCP"); "" = any
-	// invalid marks a filter whose configured source/destination prefix did
-	// not parse OR was present-but-empty (`source-prefix ""`, flagged by the
-	// compiler as InvalidPrefix). Such a filter is kept (so the writer still
-	// has a non-empty filter set) but never matches — a typo'd or empty prefix
-	// must NARROW tracing to nothing, not be silently dropped which would leave
-	// tw.filters empty and trace EVERYTHING (#3422 M01). The commit-time gate
-	// (validateFlowTraceFlagsAndFiltersAST) rejects this loudly; this keeps a
+	name     string
+	srcNet   netip.Prefix
+	dstNet   netip.Prefix
+	protoNum uint8 // resolved protocol number; valid only when hasProto is true
+	hasProto bool  // distinguishes "any protocol" from an explicit protocol 0 filter
+	// invalid marks a filter whose configured prefix did not parse, was
+	// present-but-empty, carried an unresolvable protocol, or had no selector
+	// at all (flagged by the compiler as InvalidPrefix). Such a filter is kept
+	// (so the writer still has a non-empty filter set) but never matches — a
+	// typo'd/empty value must NARROW tracing to nothing, not be silently dropped
+	// which would leave tw.filters empty and trace EVERYTHING (#3422 M01,
+	// #15679). The commit-time gate rejects this loudly; this keeps a
 	// leniently-loaded / peer-synced config fail-safe.
 	invalid bool
 }
@@ -323,7 +325,7 @@ func NewTraceWriter(opts *config.FlowTraceoptions) (*TraceWriter, error) {
 		// prefixes, a protocol) stays valid and matches on its protocol.
 		f := traceFilter{name: pf.Name, invalid: pf.InvalidPrefix}
 		if pf.InvalidPrefix {
-			slog.Warn("empty trace filter prefix; filter set to match-none",
+			slog.Warn("invalid trace filter; filter set to match-none",
 				"filter", pf.Name)
 		}
 		if pf.SourcePrefix != "" {
@@ -347,7 +349,18 @@ func NewTraceWriter(opts *config.FlowTraceoptions) (*TraceWriter, error) {
 			}
 		}
 		if pf.Protocol != "" {
-			f.proto = normalizeTraceProto(pf.Protocol)
+			// #15679: resolve via the appid SSOT so numeric (47) and named
+			// (ospf/gre/...) filters match the record's raw ProtocolNum, not a
+			// rendered-string comparison that only knew tcp/udp/icmp/icmpv6.
+			// An unresolvable token (leniently-loaded bogus/empty-widened value)
+			// fails closed instead of widening to any protocol.
+			if n, ok := appid.ProtocolNumber(pf.Protocol); ok {
+				f.protoNum, f.hasProto = n, true
+			} else {
+				slog.Warn("invalid trace filter protocol; filter set to match-none",
+					"filter", pf.Name, "protocol", pf.Protocol)
+				f.invalid = true
+			}
 		}
 		tw.filters = append(tw.filters, f)
 	}
@@ -480,42 +493,34 @@ func (tw *TraceWriter) matchFilters(rec EventRecord) bool {
 	srcAddr := extractAddr(rec.SrcAddr)
 	dstAddr := extractAddr(rec.DstAddr)
 
-	recProto := normalizeTraceProto(rec.Protocol)
+	// #15679: compare raw protocol numbers. ProtocolNum is authoritative when
+	// non-zero (including named protocols with no rendered trace name, e.g.
+	// GRE/OSPF). Hand-built/legacy records may leave it 0: fall back to
+	// resolving the rendered Protocol string. That fallback makes a proto-0
+	// record indistinguishable from an unset number, but production records
+	// always populate ProtocolNum (ringbuf.go), and proto 0 is rejected at
+	// commit for trace filters, so the ambiguity is confined to hand-built
+	// proto-0 test records.
+	recProto, recHasProto := rec.ProtocolNum, rec.ProtocolNum != 0
+	if !recHasProto {
+		if n, ok := appid.ProtocolNumber(rec.Protocol); ok {
+			recProto, recHasProto = n, true
+		}
+	}
 
 	for _, f := range tw.filters {
 		if f.invalid {
-			// A filter with an unparseable prefix never matches (#3422 M01).
+			// A filter with an unparseable prefix/protocol never matches.
 			continue
 		}
 		srcMatch := !f.srcNet.IsValid() || (srcAddr.IsValid() && f.srcNet.Contains(srcAddr))
 		dstMatch := !f.dstNet.IsValid() || (dstAddr.IsValid() && f.dstNet.Contains(dstAddr))
-		protoMatch := f.proto == "" || f.proto == recProto
+		protoMatch := !f.hasProto || (recHasProto && f.protoNum == recProto)
 		if srcMatch && dstMatch && protoMatch {
 			return true
 		}
 	}
 	return false
-}
-
-// normalizeTraceProto canonicalizes a protocol identifier so a config filter
-// value (a Junos name like "tcp" or a numeric value like "6") compares equal
-// to the EventRecord.Protocol string (which protoName renders as "TCP",
-// "UDP", "ICMP", "ICMPv6", or a decimal string). Names are upper-cased and
-// known numbers are mapped to their canonical name.
-func normalizeTraceProto(p string) string {
-	up := strings.ToUpper(strings.TrimSpace(p))
-	switch up {
-	case "1", "ICMP":
-		return "ICMP"
-	case "6", "TCP":
-		return "TCP"
-	case "17", "UDP":
-		return "UDP"
-	case "58", "ICMPV6", "ICMP6":
-		return "ICMPv6"
-	default:
-		return up
-	}
 }
 
 // extractAddr parses an IP address from "IP:port" or "[IPv6]:port" format.
