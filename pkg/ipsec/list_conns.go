@@ -1,6 +1,8 @@
 package ipsec
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -16,6 +18,13 @@ type LoadedConn struct {
 	Children    []string
 	LocalAddrs  []string
 	RemoteAddrs []string
+	// Content is a fingerprint of the connection's loaded content as
+	// --list-conns --raw reports it beyond names/children/addresses:
+	// its auth subsections and proposals (#15141). Two loads of the
+	// same name with different credentials/proposals differ here,
+	// which is what a NAME set cannot see. Empty for hand-built
+	// LoadedConns that never went through the parser.
+	Content string
 }
 
 // LoadedConns maps each loaded connection name to what charon reports for it. It
@@ -76,7 +85,28 @@ func parseListConnsRaw(out string) (LoadedConns, error) {
 	var stack []string
 	listDepth := 0
 	listKey := ""
+	// content accumulates every token inside the current connection
+	// event (its own level and below, in wire order) so Content is a
+	// stable fingerprint of what charon loaded for that connection:
+	// auth classes/ids/certs, proposals, and child settings — the
+	// content a same-name refusal keeps at its OLD value (#15141).
+	// Address tokens are included too; callers that compare Content
+	// across two listings of the same charon state compare like with
+	// like.
+	var content []string
+	flush := func() {
+		if len(stack) >= 2 && stack[0] == "event" && stack[1] != "" {
+			if lc := conns[stack[1]]; lc != nil {
+				sum := sha256.Sum256([]byte(strings.Join(content, " ")))
+				lc.Content = hex.EncodeToString(sum[:])
+			}
+		}
+		content = content[:0]
+	}
 	for i, tok := range toks {
+		if len(stack) >= 2 && stack[0] == "event" {
+			content = append(content, tok)
+		}
 		switch tok {
 		case "[":
 			listDepth++
@@ -117,6 +147,9 @@ func parseListConnsRaw(out string) (LoadedConns, error) {
 			}
 			if len(stack) == 0 {
 				return nil, fmt.Errorf("list-conns raw output: unbalanced '}' at token %d", i)
+			}
+			if len(stack) == 2 && stack[0] == "event" {
+				flush()
 			}
 			stack = stack[:len(stack)-1]
 		default:

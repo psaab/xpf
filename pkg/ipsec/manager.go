@@ -504,12 +504,25 @@ func (m *Manager) recoverPartialLoad14589(ipsecCfg *config.IPsecConfig, generati
 		loadedSet[n] = true
 	}
 	// Candidate subset (includes empty set when nothing loaded but
-	// other loaders failed, and the full set cannot happen here).
+	// other loaders failed, and the full set when the summary lied /
+	// raced to full). A full NAME-set match is NOT proof the candidate
+	// loaded (#15141): when charon refuses a CHANGED EXISTING
+	// connection (e.g. its new certificate fails), the connection
+	// stays loaded under its OLD content, so ListLoadedConns still
+	// reports its name and the name set equals the rendered set
+	// while the content is the prior generation's. The old full-set
+	// shortcut returned the refused candidate's hashes, so
+	// prevConnHashes adopted a rotation charon never loaded and the
+	// stale SA was never torn down (#10878 lost). Never shortcut on
+	// names: the subset path re-files exactly what charon reports
+	// and re-loads it. If charon really did load the full candidate,
+	// the re-filed file is the candidate itself, so the verification
+	// reload is a content no-op; the confirm step below then
+	// compares loaded CONTENT before/after that reload (see
+	// loadedContentStale15141) and only a content change — proof
+	// charon had been running prior content for a same-name
+	// connection — diverts to the true rollback.
 	if isSubset14589(loadedSet, rendered) {
-		if len(loadedSet) == len(rendered) {
-			// Summary lied / raced to full: candidate file already correct.
-			return rendered, hashes, nil
-		}
 		text, _, ferr := m.renderSubsetFile14589(ipsecCfg, generation, loadedSet)
 		if ferr != nil {
 			if rbErr := m.rollbackReload14589(prior, havePrior); rbErr != nil {
@@ -544,6 +557,22 @@ func (m *Manager) recoverPartialLoad14589(ipsecCfg *config.IPsecConfig, generati
 				names, phs := m.priorSet14589(prior, havePrior)
 				return names, phs, nil
 			}
+			// #15141: the NAME set agrees, but on a full-set
+			// match name agreement is not content agreement.
+			// If re-loading the candidate changed any loaded
+			// connection's content, charon had been running
+			// the prior generation's content for it (a refused
+			// changed-existing connection): roll back to the
+			// prior file so disk, charon, and the promoted
+			// prior hashes agree, and the stale SA stays in
+			// the diff for a later loadable generation.
+			if len(loadedSet) == len(rendered) && loadedContentStale15141(loaded, confirm) {
+				if rbErr := m.rollbackReload14589(prior, havePrior); rbErr != nil {
+					return nil, nil, errors.Join(perr, rbErr)
+				}
+				names, phs := m.priorSet14589(prior, havePrior)
+				return names, phs, nil
+			}
 		}
 		subHashes := make(map[string]string, len(loadedSet))
 		for n := range loadedSet {
@@ -566,6 +595,34 @@ func (m *Manager) recoverPartialLoad14589(ipsecCfg *config.IPsecConfig, generati
 		return nil, nil, errors.Join(perr, rbErr)
 	}
 	return priorNames, priorHashes, nil
+}
+
+// loadedContentStale15141 reports whether the connection content
+// charon reported BEFORE recovery (before) differs from what it
+// reports AFTER the candidate subset file was written and re-loaded
+// (after), for any name present in both (#15141). Before a
+// refused-existing partial, charon runs the prior generation's
+// content for the refused name; re-filing and re-loading the
+// candidate replaces it with the candidate's content, so the two
+// fingerprints differ. When the partial summary merely lied (charon
+// had already loaded the full candidate), the re-load is a content
+// no-op and the fingerprints agree. A name whose content is empty
+// on either side (a listing that never went through the parser)
+// cannot prove staleness and does not count.
+func loadedContentStale15141(before, after LoadedConns) bool {
+	for name, b := range before {
+		if b == nil || b.Content == "" {
+			continue
+		}
+		a, ok := after[name]
+		if !ok || a == nil || a.Content == "" {
+			continue
+		}
+		if a.Content != b.Content {
+			return true
+		}
+	}
+	return false
 }
 
 // rollbackReload14589 restores the prior file (or removes it) and
