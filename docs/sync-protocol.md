@@ -45,6 +45,8 @@ All multi-byte integers in the wire format are **little-endian**, matching the n
 | 9    | IPsecSA          | Primary→Secondary | Variable (UTF-8) + 1B delim + 24B seq framing | Newline-separated SA names (child SA names; the IKE connection name only for an IKE SA with no child yet, #9511) + `\n` delimiter + full-set (incarnation, seq) ordering trailer (#5706) |
 | 25   | DHCPLeaseV4      | Primary→Secondary | count+records + 24B seq framing | Full-set v4 lease push (#2239) + (incarnation, seq) ordering trailer (#5706) |
 | 26   | DHCPLeaseV6      | Primary→Secondary | count+records + 24B seq framing | Full-set v6 lease push (#2239) + (incarnation, seq) ordering trailer (#5706) |
+| 45   | DHCPLeaseV4Chunk | Primary→Secondary | 20B chunk header + count+records (+ authority trailer on last chunk) + 24B seq framing | One chunk of an over-`maxSyncPayload` v4 lease full-set (#15160); assembled and committed atomically by the receiver |
+| 46   | DHCPLeaseV6Chunk | Primary→Secondary | 20B chunk header + count+records (+ authority trailer on last chunk) + 24B seq framing | One chunk of an over-`maxSyncPayload` v6 lease full-set (#15160); assembled and committed atomically by the receiver |
 
 ## A wire-advertised `count` is untrusted (#7175, #8792)
 

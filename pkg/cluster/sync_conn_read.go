@@ -11,6 +11,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/dhcpserver"
 )
 
 // malformedRecordWarnDetector bounds the "dropping malformed session record"
@@ -961,6 +962,10 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			snapshot.Leases = leases
 			snapshot.Received = true
 			s.storePeerDHCPLeaseSnapshot(4, snapshot)
+			// #15160: a committed legacy set supersedes every in-flight
+			// chunk assembly for this family (its seq is newer by the
+			// guard that just advanced).
+			s.dhcpChunkState4.discardAll()
 		}
 		s.recvSeqMu.Unlock()
 		if !applied {
@@ -1042,6 +1047,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			snapshot.Leases = leases
 			snapshot.Received = true
 			s.storePeerDHCPLeaseSnapshot(6, snapshot)
+			s.dhcpChunkState6.discardAll()
 		}
 		s.recvSeqMu.Unlock()
 		if !applied {
@@ -1055,6 +1061,114 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		slog.Debug("cluster sync: received DHCP v6 lease set", "count", len(leases), "incarnation", incarnation, "seq", seq)
 		if s.OnDHCPLeasesReceived != nil {
 			s.OnDHCPLeasesReceived(6, leases)
+		}
+		s.dhcpApplyMu.Unlock()
+	case syncMsgDHCPLeaseV4Chunk, syncMsgDHCPLeaseV6Chunk:
+		// #15160: one chunk of an over-cap DHCP full-set. Chunks are
+		// admitted in per-frame seq order, assembled by
+		// (incarnation, generation), and committed atomically only
+		// when the last chunk lands; anything else leaves the held
+		// set and high-water untouched.
+		family := 4
+		guard := &s.dhcpV4RecvSeq
+		state := &s.dhcpChunkState4
+		if msgType == syncMsgDHCPLeaseV6Chunk {
+			family = 6
+			guard = &s.dhcpV6RecvSeq
+			state = &s.dhcpChunkState6
+		}
+		s.stats.DHCPLeasesReceived.Add(1)
+		base, incarnation, seq := stripFullSetSeq(payload)
+		s.recvSeqMu.Lock()
+		admit := guard.newer(incarnation, seq)
+		commitEpoch := s.recvEpoch
+		s.recvSeqMu.Unlock()
+		if !admit {
+			s.stats.DHCPLeasesStaleIgnored.Add(1)
+			slog.Warn("cluster sync: dropping out-of-order DHCP lease chunk (stale sequence)",
+				"family", family, "incarnation", incarnation, "seq", seq)
+			return
+		}
+		// The #10170 authority trailer rides the last chunk only; strip
+		// it (from the reassembled base tail) before header parsing is
+		// impossible — it sits AFTER the chunk body, so parse the chunk
+		// header first from the front, then strip the trailer from the
+		// body tail.
+		generation, index, total, totalLeases, chunkBody, ok := decodeDHCPLeaseChunkHeader(base)
+		if !ok {
+			s.stats.MalformedRecordsDropped.Add(1)
+			slog.Warn("cluster sync: dropping malformed DHCP lease chunk header",
+				"family", family, "incarnation", incarnation, "seq", seq, "bytes", len(base))
+			return
+		}
+		var snapshot dhcpserver.LeaseSyncSnapshot
+		isLast := index == total-1
+		if isLast {
+			var metadataPresent, metadataValid bool
+			chunkBody, snapshot, metadataPresent, metadataValid = stripDHCPLeaseSnapshotMeta(chunkBody)
+			if !metadataValid || (metadataPresent && !validDHCPLeaseSnapshotFamily(snapshot, family)) {
+				s.stats.MalformedRecordsDropped.Add(1)
+				slog.Warn("cluster sync: dropping malformed DHCP lease chunk authority snapshot", "family", family)
+				return
+			}
+		}
+		leases, decoded := decodeDHCPLeasePayload(chunkBody)
+		if !decoded {
+			s.stats.MalformedRecordsDropped.Add(1)
+			slog.Warn("cluster sync: dropping malformed DHCP lease chunk — prior set retained",
+				"family", family, "generation", generation, "index", index)
+			return
+		}
+		origCount := len(leases)
+		var semanticallyDropped int
+		leases, semanticallyDropped = filterDHCPLeasesBySemantics(family, leases)
+		if semanticallyDropped > 0 {
+			s.stats.MalformedRecordsDropped.Add(uint64(semanticallyDropped))
+		}
+		var identityDropped int
+		leases, identityDropped = filterDHCPLeasesByIdentity(family, leases)
+		if identityDropped > 0 {
+			s.stats.DHCPLeasesDroppedNoIdentity.Add(uint64(identityDropped))
+		}
+		if len(leases) == 0 && origCount > 0 {
+			// A chunk filtered to empty can never satisfy totalLeases;
+			// refuse the generation outright (the sender counts drops
+			// at encode time, so this is a corrupt/forged stream).
+			slog.Warn("cluster sync: DHCP lease chunk filtered to empty — generation refused, prior set retained",
+				"family", family, "generation", generation, "index", index)
+			return
+		}
+		// Advance the per-frame high-water for every admitted chunk
+		// (monotone stream), then assemble; commit only on completion.
+		if s.testDHCPPreCommit != nil {
+			s.testDHCPPreCommit()
+		}
+		s.dhcpApplyMu.Lock()
+		s.recvSeqMu.Lock()
+		chunkApplied := s.recvEpoch == commitEpoch && guard.advanceIfNewer(incarnation, seq)
+		if !chunkApplied {
+			s.recvSeqMu.Unlock()
+			s.dhcpApplyMu.Unlock()
+			s.stats.DHCPLeasesStaleIgnored.Add(1)
+			slog.Warn("cluster sync: dropping out-of-order DHCP lease chunk (stale sequence) — prior set retained",
+				"family", family, "incarnation", incarnation, "seq", seq)
+			return
+		}
+		key := dhcpChunkGeneration{incarnation: incarnation, generation: generation}
+		complete, closed := state.addChunk(key, index, total, totalLeases, leases)
+		if !closed {
+			s.recvSeqMu.Unlock()
+			s.dhcpApplyMu.Unlock()
+			return
+		}
+		snapshot.Leases = complete
+		snapshot.Received = true
+		s.storePeerDHCPLeaseSnapshot(family, snapshot)
+		s.recvSeqMu.Unlock()
+		slog.Debug("cluster sync: received chunked DHCP lease set", "family", family,
+			"count", len(complete), "chunks", total, "incarnation", incarnation, "generation", generation)
+		if s.OnDHCPLeasesReceived != nil {
+			s.OnDHCPLeasesReceived(family, complete)
 		}
 		s.dhcpApplyMu.Unlock()
 	case syncMsgFailover:

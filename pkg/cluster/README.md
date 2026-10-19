@@ -3512,6 +3512,28 @@ mechanism (PATH C of `docs/research/2239-dhcp-ha-lease-sync/plan.md`):
   rows for scopes not currently served are excluded while served, unknown,
   and unmatched rows are kept. Omitted, mixed, moved, malformed, or
   unproven scopes retain the conservative whole-union behavior.
+- **Chunked over-cap sets (#15160, B03-01)** — the receive loop refuses any
+  frame over `maxSyncPayload` (16 MiB) by returning, which tears down the
+  whole session-sync connection, so no sender may emit one. When a family's
+  encoded set (authority trailer + full-set trailer included) exceeds the
+  cap, `queueDHCPLeaseSnapshot` splits the lease records across additive
+  chunk types `syncMsgDHCPLeaseV4Chunk = 45` / `syncMsgDHCPLeaseV6Chunk = 46`
+  (`sync_dhcp_chunk_15160.go`, the #14607 persistent-NAT precedent). Each
+  chunk payload is `{generation u64, index u32, total u32, totalLeases u32}`
+  plus a standard count-prefixed lease body; `generation` is the set's first
+  full-set sequence, every chunk carries its own increasing seq, and the
+  #10170 authority trailer rides the last chunk only. The receiver admits
+  chunks in seq order, assembles by `(incarnation, generation)` under
+  `dhcpApplyMu`, and commits the concatenated set atomically (held-set
+  store + high-water + callback) only when every chunk has arrived — an
+  unclosed or inconsistent generation never commits and the prior set is
+  retained (the #7175 posture); a committed legacy set discards pending
+  assemblies. Sets that fit one frame keep the exact legacy
+  `syncMsgDHCPLeaseV4/V6` shape, and a pre-#15160 peer ignores the unknown
+  chunk types, so a mixed pair loses only over-cap lease pushes (never the
+  connection) until both sides upgrade. A lease whose single record cannot
+  fit any frame is dropped and counted via `MalformedRecordsDropped`, never
+  emitted over-cap. Cells: `dhcp_lease_chunk_15160_test.go`.
 - **Clock invariant** — each lease carries REMAINING LIFETIME, never an
   absolute wall-clock expiry (the channel only syncs a MONOTONIC offset). The
   promoting node re-anchors to its LOCAL clock at seed (`expire = now + remaining`),
