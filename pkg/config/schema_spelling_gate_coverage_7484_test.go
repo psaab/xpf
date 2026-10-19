@@ -416,7 +416,7 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // table export`/`generate route policy`/`rib-groups import-rib` compare; the
 // `generate route discard` flag and `rib-groups import-policy` advisory/blind
 // rows are recorded in testdata/spelling_gate_members_7484.txt).
-const gateCoverageFloor = 792
+const gateCoverageFloor = 801 // #15199: +9 compared leaves from the vrrp-inet6-group alias and virtual-inet6-address
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent
@@ -675,7 +675,7 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// #12825 adds `security policy-stats system-wide` to this class after its
 	// accepted value began warning as ignored; the member registry records it.
 	// #12937 measures this population at 45.
-	gateBlindAdvisory: 47, // #15046: +2 Junos track interface priority-cost (inet/inet6), same advisory class as track-interface priority-cost.
+	gateBlindAdvisory: 49, // #15046: +2 Junos track interface priority-cost (inet/inet6), same advisory class as track-interface priority-cost. #15199: +2 for the vrrp-inet6-group alias track rows.
 	// #7132 raised this 175 -> 176 for `system ntp server ... prefer`.
 	//
 	// Raised deliberately, and it is the one kind of raise that is not a
@@ -767,7 +767,7 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// named in the members registry diff, not just counted.
 	// #10078's four modeled ALG `disable` leaves are value-less flags, raising
 	// the measured ceiling 239 -> 243; their kind roots leave `unreachable`.
-	gateBlindFlag: 195, // #12937: 194 -> 195; daily exclude moved here (#12822). #13112 moves zone tcp-rst out. #15065: +1 for the newly shared per-instance `routing-options generate route <*> discard` (value-less flag, same class as its global twin). #15047 already counted the two no-preempt flags in this 195; #15046 adds none here.
+	gateBlindFlag: 197, // #12937: 194 -> 195; daily exclude moved here (#12822). #13112 moves zone tcp-rst out. #15065: +1 for the newly shared per-instance `routing-options generate route <*> discard` (value-less flag, same class as its global twin). #15047 already counted the two no-preempt flags in this 195; #15046 adds none here. #15199: +2 for vrrp-inet6-group accept-data/no-preempt flags.
 	// #9882 raises it 43 -> 44. The three-color twin,
 	// `firewall three-color-policer <*> then forwarding-class`, lands here
 	// because the differential's three-color parent stanza does not compile

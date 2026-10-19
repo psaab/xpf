@@ -122,8 +122,22 @@ func TestRethRedundancyGroupValidTokensStillCommit6782(t *testing.T) {
 		{"explicit-plus-sign", "+3", 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := rethRGTree(t, rethRGSet(tc.tok))
-			cfg, err := CompileConfig(tree)
+			lines := rethRGSet(tc.tok)
+			compile := CompileConfig
+			if tc.want == 255 {
+				// #15199 + #8317: RG255 cannot be a configured chassis group
+				// (dataplane cap is 15), so the #6782 token boundary at 255
+				// is exercised on the tolerant path, which warns but must
+				// still compile the token verbatim.
+				compile = CompileConfigLenient
+			} else if tc.want != 1 {
+				// #15199: a valid token must also name a configured group.
+				lines = append(lines,
+					"set chassis cluster redundancy-group "+tc.tok+" node 0 priority 200",
+					"set chassis cluster redundancy-group "+tc.tok+" node 1 priority 100")
+			}
+			tree := rethRGTree(t, lines)
+			cfg, err := compile(tree)
 			if err != nil {
 				t.Fatalf("redundancy-group %q is a usable data-plane group and must "+
 					"COMMIT — over-rejecting here takes a working cluster down: %v",
@@ -168,20 +182,25 @@ func TestRethMissingRedundancyGroupStanzaStillCommits6782(t *testing.T) {
 	}
 }
 
-// TestRethUndeclaredButPositiveGroupStillCommits6782 is the other half of the
-// scope boundary. A positive group that names no declared `chassis cluster
-// redundancy-group` does NOT trigger this fail-open — it still reads as
-// RG-scoped and still takes the link-local substitution — so rejecting it would
-// be a new restriction rather than a fix, and would break configs that declare
-// interfaces before groups.
+// TestRethUndeclaredButPositiveGroupStillCommits6782 was the #6782 scope
+// boundary: a positive undeclared group did not trigger the #6782 fail-open.
+// #15199 (A05-03) supersedes that boundary: an undefined data group has no
+// election on either node, so strict commit now rejects it and the tolerant
+// path warns while still compiling the group verbatim.
 func TestRethUndeclaredButPositiveGroupStillCommits6782(t *testing.T) {
 	tree := rethRGTree(t, rethRGSet("7"))
-	cfg, err := CompileConfig(tree)
+	if _, err := CompileConfig(tree); err == nil {
+		t.Fatal("#15199: an undeclared redundancy-group 7 must reject at strict commit")
+	}
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
-		t.Fatalf("a positive group that is merely undeclared must still commit: %v", err)
+		t.Fatalf("lenient must not brick: %v", err)
 	}
 	if got := cfg.Interfaces.Interfaces["reth0"].RedundancyGroup; got != 7 {
-		t.Fatalf("the undeclared-but-positive group must compile verbatim; got %d", got)
+		t.Fatalf("the undeclared-but-positive group must compile verbatim on lenient; got %d", got)
+	}
+	if !warningsContain(cfg.Warnings, "redundancy-group 7") {
+		t.Fatalf("lenient must warn about RG7; %v", cfg.Warnings)
 	}
 }
 

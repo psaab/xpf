@@ -346,6 +346,19 @@ advisory (read, value ignored, warning says so)	interfaces <*> unit <*> family i
 advisory (read, value ignored, warning says so)	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> track-interface <*> priority-cost
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> track-priority-cost
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> virtual-address
+COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> virtual-inet6-address
+flag (read, but value-less)	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> accept-data
+COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> advertise-interval
+COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> authentication-key
+COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> authentication-type
+flag (read, but value-less)	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> no-preempt
+COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> preempt hold-time
+COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> priority
+advisory (read, value ignored, warning says so)	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> track interface <*> priority-cost
+advisory (read, value ignored, warning says so)	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> track-interface <*> priority-cost
+COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> track-priority-cost
+COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> virtual-address
+COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-inet6-group <*> virtual-inet6-address
 flag (read, but value-less)	interfaces <*> unit <*> family inet6 dad-disable
 COMPARED	interfaces <*> unit <*> family inet6 dhcpv6-client client-ia-type
 COMPARED	interfaces <*> unit <*> family inet6 dhcpv6-client client-identifier duid-type

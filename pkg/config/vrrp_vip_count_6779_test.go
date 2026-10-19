@@ -183,6 +183,8 @@ func rethVIPCountSetLines(n int) []string {
 		"set chassis cluster authentication-key test-cluster-psk-6779",
 		"set chassis cluster reth-count 1",
 		"set chassis cluster no-private-rg-election",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces reth0 redundant-ether-options redundancy-group 1",
 	}
 	for _, vip := range vipCountV4(n) {

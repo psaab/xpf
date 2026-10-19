@@ -37,7 +37,17 @@ import (
 // vrrpGroupChildTokens15046 returns the sorted keywords the vrrp-group
 // schema declares.
 func vrrpGroupChildTokens15046() []string {
-	node := vrrpGroupSchemaNode(false)
+	return vrrpGroupChildTokensFrom(vrrpGroupSchemaNode(false))
+}
+
+// vrrpGroupChildTokens15046V6 returns the sorted keywords the Junos
+// `vrrp-inet6-group` schema declares (the shared set plus
+// `virtual-inet6-address`, #15199).
+func vrrpGroupChildTokens15046V6() []string {
+	return vrrpGroupChildTokensFrom(vrrpGroupSchemaNode(true))
+}
+
+func vrrpGroupChildTokensFrom(node *schemaNode) []string {
 	if node == nil {
 		return nil
 	}
@@ -82,6 +92,13 @@ func validateVRRPGroupChildrenAST15046(nodes []*Node, prefix string, lenient boo
 	for _, tok := range declared {
 		permitted[tok] = true
 	}
+	// #15199 (A05-07): the Junos `vrrp-inet6-group` alias permits the
+	// v6-only `virtual-inet6-address` leaf in addition to the shared set.
+	declared6 := vrrpGroupChildTokens15046V6()
+	permitted6 := make(map[string]bool, len(declared6))
+	for _, tok := range declared6 {
+		permitted6[tok] = true
+	}
 	trackDeclared := vrrpTrackChildTokens15046()
 	trackPermitted := make(map[string]bool, len(trackDeclared))
 	for _, tok := range trackDeclared {
@@ -114,6 +131,12 @@ func validateVRRPGroupChildrenAST15046(nodes []*Node, prefix string, lenient boo
 					return err
 				}
 			}
+			if n.Name() == "vrrp-inet6-group" {
+				idPath := joinNodePath(prefix, vrrpGroupIDKeys(n))
+				if err := checkVRRPGroupChildren15046(n, idPath, permitted6, declared6, trackPermitted, trackDeclared, report); err != nil {
+					return err
+				}
+			}
 			if err := walk(n.Children, nodePath); err != nil {
 				return err
 			}
@@ -142,8 +165,9 @@ func checkVRRPGroupChildren15046(vg *Node, idPath string, permitted map[string]b
 		if !permitted[tok] {
 			return report(idPath, tok, declared)
 		}
-		// Skip this property's value span.
-		if child := vrrpGroupSchemaNode(false).children[tok]; child != nil {
+		// Skip this property's value span. The v6 node is a superset of
+		// the v4 leaf set, so one lookup covers both group spellings.
+		if child := vrrpGroupSchemaNode(true).children[tok]; child != nil {
 			i += child.args
 			// A multi-value leaf (`virtual-address`, args=1, multi)
 			// packs a whole bracketed list into the run: skip every
@@ -164,8 +188,10 @@ func checkVRRPGroupChildren15046(vg *Node, idPath string, permitted map[string]b
 		}
 	}
 	// Child-node spellings, in the same expanded view the compiler
-	// reads (flat-set chains become one node per property).
-	props := expandFlatRun(vg.Children, vrrpGroupSchemaNode(false))
+	// reads (flat-set chains become one node per property). The v6 node
+	// is a superset of the v4 leaf set (#15199), so one expansion covers
+	// both group spellings.
+	props := expandFlatRun(vg.Children, vrrpGroupSchemaNode(true))
 	for _, prop := range props {
 		if prop == nil || len(prop.Keys) == 0 {
 			continue

@@ -400,6 +400,7 @@ var arityAdjudicated8807 = map[string]arityVerdict8807{
 	// The completion residue that made it worth fixing is recorded on `reject`
 	// below, which keeps it: the compiler was AHEAD of the schema, so nothing
 	// dropped and `?` help under-offered instead — the mirror of the #8773 rule.
+	"preempt": {"measured-benign", "#15199: the combined `virtual-address, virtual-inet6-address` case in parseVRRPGroups reads Keys[i+2] while scanning a packed run, so the name-keyed predicate re-attributes that index to the sibling `preempt` case in the same switch. The preempt sites themselves read only the documented optional `hold-time <n>` pair (braced child or Keys[1:]/Keys[2] packed form, both declared under preempt in the schema); braced and packed spellings compile identically (vrrp tests). No argument is dropped."},
 }
 
 // arityGenuineFloor8807 is a RATCHET, not an equality. It fails in BOTH

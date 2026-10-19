@@ -254,12 +254,12 @@
 #     stay divergent but their compact spelling now PARTIALLY compiles
 #     (shape empty -> partial) under it.
 #
-# checked: 1202
+# checked: 1226
 #
-# skipped (leaf value not observable in the typed config): 239
-# skipped (a spelling did not parse or compile): 19
-# skipped (no two distinct synthesizable values): 14
-# skipped (under groups (schema re-host, duplicate coverage)): 1165
+# skipped (leaf value not observable in the typed config): 259
+# skipped (a spelling did not parse or compile): 20
+# skipped (no two distinct synthesizable values): 40
+# skipped (under groups (schema re-host, duplicate coverage)): 1196
 #
 bridge-domains xpfname domain-type	partial
 bridge-domains xpfname routing-interface	partial
@@ -281,6 +281,7 @@ interfaces xpfname unit xpfarg family inet unnumbered-address	partial
 interfaces xpfname unit xpfarg family inet6 address xpfarg preferred	empty
 interfaces xpfname unit xpfarg family inet6 address xpfarg primary	empty
 interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group	empty
+interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-inet6-group	empty
 interfaces xpfname unit xpfarg family inet6 dad-disable	partial
 interfaces xpfname unit xpfarg family inet6 mtu	partial
 protocols bgp graceful-restart	empty
@@ -288,11 +289,11 @@ protocols bgp log-updown	empty
 protocols bgp multipath ibgp	empty
 protocols bgp multipath multiple-as	empty
 protocols lldp disable	empty
-protocols lldp interface xpfarg disable	empty
 routing-instances xpfname protocols bgp graceful-restart	empty
 routing-instances xpfname protocols bgp log-updown	empty
 routing-instances xpfname protocols bgp multipath ibgp	empty
 routing-instances xpfname protocols bgp multipath multiple-as	empty
+security log report	empty
 security nat destination pool xpfarg port	empty
 security policies from-zone xpfarg xpfarg xpfarg policy xpfarg scheduler-name	empty
 security policies from-zone xpfarg xpfarg xpfarg policy xpfarg then permit	empty

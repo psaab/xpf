@@ -155,6 +155,8 @@ func rgOwnerTestConfig(t *testing.T) *config.Config {
 		"set chassis cluster authentication-key test-cluster-psk-6781",
 		"set chassis cluster reth-count 2",
 		"set chassis cluster no-private-rg-election",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 1 priority 100",
 		"set interfaces ge-0/0/1 gigether-options redundant-parent bond0",
 		"set interfaces bond0 redundant-ether-options redundancy-group 1",
 		"set interfaces bond0 unit 0 family inet address 10.0.61.1/24",
