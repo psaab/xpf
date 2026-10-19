@@ -1265,7 +1265,27 @@ func (m *Manager) UpdatePolicyScheduleStateWithLatch(cfg *config.Config, activeS
 		// retries autonomously on the next scheduler tick.
 		return fmt.Errorf("userspace: publish policy scheduler snapshot: %w", err)
 	}
+	// #15043: retain the prepared struct, not just its Interfaces.
+	// requestApplySnapshotLocked revalidated the rows and rebuilt every
+	// derived section (#14209) into publishSnap; copying back only
+	// Interfaces would keep the stale mirror/tunnel/route rows in
+	// m.lastSnapshot for every later republish while the hash below
+	// describes the rebuilt copy. Neighbors stays uncaptured: publishSnap
+	// carries the publishable-only filter, not the retained set.
 	next.Interfaces = publishSnap.Interfaces
+	next.Routes = publishSnap.Routes
+	next.LearnedRouteImportCapped = publishSnap.LearnedRouteImportCapped
+	next.Fabrics = publishSnap.Fabrics
+	next.TunnelEndpoints = publishSnap.TunnelEndpoints
+	next.MirrorConfigs = publishSnap.MirrorConfigs
+	next.MirrorExclusions = publishSnap.MirrorExclusions
+	next.SourceNAT = publishSnap.SourceNAT
+	next.Zones = publishSnap.Zones
+	next.Summary = publishSnap.Summary
+	next.ZoneSetValidated = publishSnap.ZoneSetValidated
+	next.zoneIDCollisions = publishSnap.zoneIDCollisions
+	next.wgFanUpBaseRows = publishSnap.wgFanUpBaseRows
+	next.xfrmDumpFailed = publishSnap.xfrmDumpFailed
 	// The helper accepted the snapshot, so its scheduler bits now match the
 	// desired state carried by this snapshot. Commit the applied/show cache only
 	// at this success boundary; every return above leaves it unchanged.

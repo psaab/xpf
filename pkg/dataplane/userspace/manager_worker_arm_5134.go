@@ -89,7 +89,23 @@ func (m *Manager) retryDeferredWorkerArmLocked() error {
 		// Debt stays set — the status loop retries on the next tick.
 		return fmt.Errorf("re-arm deferred workers: %w", err)
 	}
+	// #15043: retain every section the apply-time rebuild rewrote
+	// (#14209), not just Interfaces; see UpdatePolicyScheduleState.
+	// Neighbors stays uncaptured (publishable-only filter copy).
 	next.Interfaces = publishSnap.Interfaces
+	next.Routes = publishSnap.Routes
+	next.LearnedRouteImportCapped = publishSnap.LearnedRouteImportCapped
+	next.Fabrics = publishSnap.Fabrics
+	next.TunnelEndpoints = publishSnap.TunnelEndpoints
+	next.MirrorConfigs = publishSnap.MirrorConfigs
+	next.MirrorExclusions = publishSnap.MirrorExclusions
+	next.SourceNAT = publishSnap.SourceNAT
+	next.Zones = publishSnap.Zones
+	next.Summary = publishSnap.Summary
+	next.ZoneSetValidated = publishSnap.ZoneSetValidated
+	next.zoneIDCollisions = publishSnap.zoneIDCollisions
+	next.wgFanUpBaseRows = publishSnap.wgFanUpBaseRows
+	next.xfrmDumpFailed = publishSnap.xfrmDumpFailed
 	// The helper accepted the re-arm snapshot, so commit any scheduler state
 	// it carries to the applied/show cache (mirrors the overlay publish).
 	m.commitPolicySchedulerActiveStateFromSnapshotLocked(&next)

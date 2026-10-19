@@ -263,7 +263,14 @@ func (m *Manager) syncSnapshotLocked() error {
 		}
 		return err
 	}
-	m.lastSnapshot.Interfaces = publishSnap.Interfaces
+	// #15043: retained was prepared before the send (its interface rows
+	// were revalidated and every derived section rebuilt, #14209), so
+	// retain the whole prepared struct — not just publishSnap.Interfaces,
+	// which left the stale mirror/tunnel/route rows in m.lastSnapshot
+	// while hash below was taken from retained. Neighbors/Fabrics keep
+	// the resampled-only write-back below: publishSnap.Neighbors is the
+	// publishable-only filter, not the retained set.
+	*m.lastSnapshot = retained
 	// The deferred snapshot has now landed in the helper. Commit its scheduler
 	// state only after the successful request; all failure returns above retain
 	// the prior applied/show cache.
