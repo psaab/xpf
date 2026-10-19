@@ -1765,6 +1765,24 @@ directive and the SSH keys remain independent: this branch touches only
 `authorized_keys`, and removing the `encrypted-password` directive still only
 locks the password.
 
+### A symlinked `.ssh` is refused, never followed (#14970)
+
+`/home/<user>/.ssh` is writable by the login user, but the daemon creates,
+chowns, writes, and removes paths under it as root. A user (or a process
+running as that user) who replaces `.ssh` — or `authorized_keys` inside it —
+with a symlink could otherwise steer those root operations at an arbitrary
+target: `os.Chown` would re-own the target directory, the durable
+`authorized_keys` write would land in the target, and the revocation
+`os.Remove` would delete the resolved victim file (D31-02). Every daemon
+operation on a login user's `.ssh` therefore `Lstat`s the `.ssh` directory
+(and, for writes/removals, `authorized_keys` itself) first and **refuses a
+symlink**: the apply or revocation fails, the provenance markers are kept so
+the next apply retries, and nothing outside the user's own `.ssh` tree is
+touched. This covers the key install in `applySystemLogin`, the emptied-key
+revocation for a retained user, and `deprovisionLoginUser`'s key removal for
+a deleted user. A link swapped in between the check and the operation is the
+same TOCTOU residual accepted by the repo's other `Lstat`-then-act guards.
+
 ### Scope — only xpf-managed accounts
 
 The per-user lock-on-removal applies **only to the exact account xpf

@@ -424,6 +424,16 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 			// persists the file's entry in .ssh, not .ssh's own entry in
 			// its parent, so a power cut could otherwise drop the
 			// just-created .ssh directory (Codex r1, fsatomic README).
+			// #14970: .ssh is user-writable; a planted symlink here would
+			// make the Chown below re-own the link TARGET and the durable
+			// write below land in the target. Refuse before any mutation.
+			if err := ensureSSHDirSafeForWrite(sshDir); err != nil {
+				slog.Warn("refusing authorized_keys apply: .ssh path is a symlink",
+					"user", user.Name, "dir", sshDir, "err", err)
+				keyClaim.rollback()
+				fail(fmt.Errorf("refuse symlinked .ssh for %s: %w", user.Name, err))
+				continue
+			}
 			if err := fsatomic.MkdirAllDurable(sshDir, 0700); err != nil {
 				slog.Warn("failed to create .ssh dir", "user", user.Name, "dir", sshDir, "err", err)
 				keyClaim.rollback() // #6797: no key file was written
@@ -464,6 +474,16 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 			keysFile := sshDir + "/authorized_keys"
 			current, _ := os.ReadFile(keysFile)
 			if string(current) != keysContent {
+				// #14970: re-check immediately before the write; a link
+				// planted between the pre-MkdirAll check and here must still
+				// be refused rather than written through.
+				if err := ensureSSHDirSafeForWrite(sshDir); err != nil {
+					slog.Warn("refusing authorized_keys write: .ssh path is a symlink",
+						"user", user.Name, "dir", sshDir, "err", err)
+					keyClaim.rollback()
+					fail(fmt.Errorf("refuse symlinked .ssh for %s: %w", user.Name, err))
+					continue
+				}
 				// DurableState authorized_keys: SSH access must survive a
 				// power cut. WriteFileDurable replaces the inode with a
 				// root-owned temp; WithOwner chowns the temp fd BEFORE the
@@ -519,7 +539,11 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 					fail(restoreLiveLoginKeys(user.Name))
 				} else {
 					keysFile := managedAuthorizedKeysPath(user.Name)
-					switch err := os.Remove(keysFile); {
+					// #14970: removeManagedAuthorizedKeys refuses a symlinked
+					// .ssh/authorized_keys instead of deleting the resolved
+					// victim file; the refusal lands in the default arm below
+					// (fail + marker retained, retry next apply).
+					switch err := removeManagedAuthorizedKeys(user.Name); {
 					case err == nil:
 						slog.Info("revoked SSH keys (last key removed from config)",
 							"user", user.Name)
