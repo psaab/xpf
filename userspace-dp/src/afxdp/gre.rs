@@ -321,6 +321,13 @@ pub(in crate::afxdp) struct GreDecapCounters {
     unsupported_version_refusals: std::sync::Arc<AtomicU64>,
     /// #10865: PT/nibble mismatch refusals offered to a configured GRE endpoint.
     pt_nibble_mismatch_refusals: std::sync::Arc<AtomicU64>,
+    /// #15095: complete outer-fragmented GRE datagrams that reassembled but
+    /// whose decap then refused (no configured endpoint matched the
+    /// reassembled outer tuple / key / transport domain, or the inner was
+    /// otherwise undecapsulable). Counted once per completed datagram at
+    /// the stage-6 recycle site; transit fragments that never enter the
+    /// pool are not counted here (they take the ordinary flowless path).
+    reassembled_decap_refusals: std::sync::Arc<AtomicU64>,
 }
 
 impl GreDecapCounters {
@@ -343,6 +350,51 @@ impl GreDecapCounters {
     pub(in crate::afxdp) fn pt_nibble_mismatch_refusals(&self) -> u64 {
         self.pt_nibble_mismatch_refusals.load(Ordering::Relaxed)
     }
+
+    /// #15095: account one reassembled-but-decap-refused datagram. The
+    /// only mutator for this counter; called once per completed datagram
+    /// whose post-reassembly decap returned `None` (endpoint/key/domain
+    /// mismatch or malformed inner). The fragments were consumed by the
+    /// pool, so without this the drop is silent.
+    pub(in crate::afxdp) fn note_reassembled_decap_refusal(&self) {
+        self.reassembled_decap_refusals
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(in crate::afxdp) fn reassembled_decap_refusals(&self) -> u64 {
+        self.reassembled_decap_refusals.load(Ordering::Relaxed)
+    }
+}
+
+/// #15095: is this frame addressed to a configured native-GRE endpoint?
+///
+/// The reassembly pool must only buffer fragments whose outer datagram
+/// is destined for decap here. The index key is built exactly as the
+/// decap lookup builds it — `(addr_family, outer_dst, outer_src)` from
+/// the FRAME bytes (not the stamped meta flow addresses, which a tail
+/// fragment may carry differently) — so the probe and the decap can
+/// never disagree about which tuple names an endpoint. Returns `false`
+/// for a malformed outer header: fail-closed (no buffering) and the
+/// fragment falls through to the ordinary flowless path, which owns
+/// malformed-fragment disposition.
+///
+/// This is an index-presence probe only, deliberately weaker than
+/// `match_tunnel_endpoint`: key, transport-domain, egress and
+/// host-inbound checks still run at decap on the reassembled datagram,
+/// and a mismatch there is counted by
+/// `note_reassembled_decap_refusal`. Probing deeper here would duplicate
+/// the matcher on every fragment.
+pub(in crate::afxdp) fn outer_frame_targets_gre_endpoint(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    forwarding: &ForwardingState,
+) -> bool {
+    let Some((outer_src, outer_dst)) = parse_outer_addresses(frame, meta) else {
+        return false;
+    };
+    forwarding
+        .gre_decap_index
+        .contains_key(&(meta.addr_family as i32, outer_dst, outer_src))
 }
 
 /// Cold-path bookkeeping for the version refusal above.

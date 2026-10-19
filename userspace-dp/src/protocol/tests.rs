@@ -933,6 +933,29 @@ fn process_status_gre_outer_frag_drops_roundtrip() {
     assert_eq!(legacy.gre_outer_frag_drops_total, 0);
 }
 
+#[test]
+fn process_status_gre_reassembled_decap_refusals_roundtrip() {
+    let status = ProcessStatus {
+        gre_reassembled_decap_refusals_total: 23,
+        ..Default::default()
+    };
+    let value: serde_json::Value =
+        serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
+    assert_eq!(value["gre_reassembled_decap_refusals_total"], 23);
+    let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
+    assert_eq!(back.gre_reassembled_decap_refusals_total, 23);
+    let mut legacy_value =
+        serde_json::to_value(ProcessStatus::default()).expect("serialize default ProcessStatus");
+    legacy_value
+        .as_object_mut()
+        .expect("ProcessStatus serializes to an object")
+        .remove("gre_reassembled_decap_refusals_total")
+        .expect("new key present before strip");
+    let legacy: ProcessStatus =
+        serde_json::from_value(legacy_value).expect("pre-#15095 payload decodes");
+    assert_eq!(legacy.gre_reassembled_decap_refusals_total, 0);
+}
+
 // #2472: round-trip + backward-compat pin for the per-reason
 // generated-error rate-limit drop counters. The wire keys feed
 // pkg/dataplane/userspace/protocol.go and the Prometheus counters

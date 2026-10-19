@@ -831,6 +831,15 @@ type ProcessStatus struct {
 	// #14645: outer-fragmented native-GRE datagrams dropped by the bounded
 	// reassembly pool. Omitempty for wire compat with older helpers.
 	GreOuterFragDropsTotal uint64 `json:"gre_outer_frag_drops_total,omitempty"`
+	// #15095: complete outer-fragmented GRE datagrams that reassembled
+	// but whose decap then refused (index hit at buffer time, then key /
+	// transport-domain / egress / host-inbound mismatch or a malformed
+	// inner). The fragments were consumed by the pool, so this is a
+	// counted drop; transit fragments never enter the pool and are not
+	// counted. Surfaced as
+	// xpf_userspace_gre_reassembled_decap_refusals_total. Omitempty for
+	// wire compat with older helpers.
+	GreReassembledDecapRefusalsTotal uint64 `json:"gre_reassembled_decap_refusals_total,omitempty"`
 	// #10695 (#9506 counter slice): D14 zone-gate refusals — IPsec-inner
 	// frames refused before zone admission because no zone claimed the
 	// ingress (unzoned), the STN/ifid resolution was unknown or ambiguous,

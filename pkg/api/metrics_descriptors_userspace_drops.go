@@ -105,6 +105,18 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 			"malformed) before decap (#14645).",
 		nil, nil,
 	)
+	c.userspaceGreReassembledDecapRefusals = prometheus.NewDesc(
+		"xpf_userspace_gre_reassembled_decap_refusals_total",
+		"Outer-fragmented GRE datagrams that completed reassembly "+
+			"but were then refused by decapsulation (the reassembled "+
+			"outer tuple matched the decap index at buffer time, then "+
+			"key, transport-domain, egress, or host-inbound checks "+
+			"failed, or the inner packet was malformed). The fragments "+
+			"were consumed by the reassembly pool, so this is a counted "+
+			"drop; transit GRE fragments never enter the pool and are "+
+			"not counted (#15095).",
+		nil, nil,
+	)
 	c.userspaceTimeExceededRateLimited = prometheus.NewDesc(
 		"xpf_userspace_time_exceeded_rate_limited_total",
 		"Locally-generated ICMP/ICMPv6 Time Exceeded (TTL/hop-limit) "+

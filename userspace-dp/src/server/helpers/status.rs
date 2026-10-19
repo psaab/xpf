@@ -384,6 +384,11 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.gre_decap_pt_nibble_mismatch_refusals_total =
         state.afxdp.gre_decap_pt_nibble_mismatch_refusals_total();
     state.status.gre_outer_frag_drops_total = state.afxdp.gre_outer_frag_drops_total();
+    // #15095: reassembled-but-decap-refused GRE datagrams. The fragments
+    // were consumed by the pool, so this is a counted drop; transit
+    // fragments never enter the pool and are not counted.
+    state.status.gre_reassembled_decap_refusals_total =
+        state.afxdp.gre_reassembled_decap_refusals_total();
     // #2472: locally-generated error-reply per-reason token-bucket drops.
     // Nonzero = an error-amplification / reflection flood (or a routing loop)
     // being clamped before it emits unbounded generated ICMP/RST errors.
