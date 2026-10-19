@@ -3323,20 +3323,20 @@ func TestGenerateProtocols_ProtocolLessPolicyExport(t *testing.T) {
 	// #14380: under router ospf the no-from policy expands to every
 	// IPv4-fitting, non-self source (ospf excluded as self; ospf6 and
 	// ripng excluded as off-family).
-	for _, proto := range []string{"bgp", "connected", "isis", "kernel", "rip", "static"} {
+	for _, proto := range []string{"bgp", "connected", "isis", "kernel", "rip"} {
 		want := " redistribute " + proto + " route-map export-comm-" + proto + "-xpf-redist\n"
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q, got:\n%s", want, got)
 		}
 	}
-	for _, bad := range []string{" redistribute ospf ", " redistribute ospf6 ", " redistribute ripng "} {
-		if strings.Contains(got, bad) {
-			t.Errorf("self/off-family source %q must not render, got:\n%s", bad, got)
-		}
+	// #15156: static is shared by both policies in the chain, so it
+	// composes into one line naming the composed per-source map.
+	composedStatic := "export-comm-export-static" + ReservedChainSuffix + "-static" + config.ReservedRedistSuffix
+	if !strings.Contains(got, " redistribute static route-map "+composedStatic+"\n") {
+		t.Errorf("missing composed static line %q, got:\n%s", composedStatic, got)
 	}
-	// The well-formed export must still render correctly.
-	if !strings.Contains(got, "redistribute static route-map export-static-static-xpf-redist\n") {
-		t.Errorf("missing valid `redistribute static route-map export-static-static-xpf-redist`, got:\n%s", got)
+	if strings.Contains(got, "redistribute static route-map export-static-static-xpf-redist") {
+		t.Errorf("chain-shared static must not keep the single-policy map, got:\n%s", got)
 	}
 
 	// Belt: no redistribute line in the managed output may name a policy

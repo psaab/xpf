@@ -617,6 +617,9 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		if err := narrowedAliasCollision10129(fc); err != nil {
 			return err
 		}
+		if err := redistChainMapCollision15156(fc); err != nil {
+			return err
+		}
 		if err := redistProtocolMapCollision(fc.PolicyOptions); err != nil {
 			return err
 		}
@@ -770,6 +773,7 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 			// here beside the per-policy route-maps; FRR resolves the neighbor's
 			// `route-map <name>` reference regardless of definition order.
 			b.WriteString(m.renderComposedBGPChains(fc))
+			b.WriteString(m.renderRedistComposedMaps15156(fc))
 			// #10129: suffix-narrowed fall-through and empty chains use a private
 			// alias with a trailing deny, preserving the kept member order and
 			// leaving standalone/composed maps shared by intact attachments.

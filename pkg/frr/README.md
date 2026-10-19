@@ -1170,6 +1170,18 @@ step. Both are required — neither sees the other's case:
   `redistReferencedNodes14380` includes both nodes so a referenced
   no-from policy's expanded maps are defined. Regression cells:
   `bgp_export_redistribute_14586_test.go`.
+  **Chain composition (#15156).** FRR keeps one route-map per
+  (router, AF, source), so an IGP `export [ P1 P2 ]` chain and the
+  #14586 BGP origination union now emit exactly one `redistribute` per
+  source: a single-policy source keeps `<policy>-<proto>-xpf-redist`, a
+  multi-policy source names the composed
+  `<P1>-<P2>-xpf-chain-<proto>-xpf-redist` map (chain order for IGP,
+  sorted OR-union for BGP), whose per-source terms run in order with
+  terminal actions terminal and fall-off-the-end deny.
+  `redistChainMapCollision15156` fails the apply closed on a name
+  collision. Regression cells: `redistribute_chain_15156_test.go`.
+  Composed-chain QNH metric overlay is not applied (single-policy and
+  bare static entries keep their metric maps).
   Both `route-map out` emit sites (ipv4 + ipv6 AF) are guarded by
   `isDefinedPolicyStatement` (#2539, sibling of the #2490 inbound guard):
   `globalExport` is already restricted to defined policy-statements, but a
