@@ -4788,26 +4788,64 @@ impl PortAllocator {
         self.carry_persistent_nat_clear_fences_from(prev, now_ns);
         // Snapshot the previous live set and RELEASE its lock before touching
         // this allocator's, so the two mutexes are never held at once.
-        let carried = {
+        let (carried, carried_leases) = {
             let prev_live = prev.lock_live();
+            let carried: Vec<_> = prev_live
+                .live_by_flow
+                .iter()
+                .filter(|(_, a)| index_map.contains_key(&a.addr_index))
+                .map(|(f, a)| (*f, *a))
+                .collect();
+            // #15110: a persistent lease is CARRIED (not dropped) only when
+            // at least one of its live flows is itself carried in range.
+            // Deterministic leases stay on the old counted-drop path: their
+            // BIB identity (`deterministic_identity`) is not reconstructible
+            // from a flow record, and minting a plain lease under the key
+            // would corrupt that linkage.
+            let carried_lease_keys: std::collections::HashSet<PersistentSourceKey> = carried
+                .iter()
+                .filter_map(|(_, a)| {
+                    let key = a.persistent_key?;
+                    let lease = prev_live.persistent_by_source.get(&key)?;
+                    if lease.deterministic {
+                        return None;
+                    }
+                    let &new_index = index_map.get(&a.addr_index)?;
+                    if a.address_only || self.port_in_range(new_index, a.translated.port) {
+                        Some(key)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let carried_leases: rustc_hash::FxHashMap<PersistentSourceKey, PersistentLease> =
+                carried_lease_keys
+                    .iter()
+                    .filter_map(|key| {
+                        prev_live
+                            .persistent_by_source
+                            .get(key)
+                            .map(|lease| (*key, *lease))
+                    })
+                    .collect();
             // #7560: count the persistent leases this pass is about to drop,
             // split by whether their address survived the pool change. Done
             // under the SAME lock acquisition as the live-set snapshot so the
             // two counts describe one consistent instant, and so no second
-            // lock/release is added to a config-apply path.
-            for lease in prev_live.persistent_by_source.values() {
+            // lock/release is added to a config-apply path. #15110: a lease
+            // in `carried_leases` is rejoined by its live flows below, so it
+            // is not dropped and must not be counted (or reported) as such.
+            for (key, lease) in &prev_live.persistent_by_source {
+                if carried_leases.contains_key(key) {
+                    continue;
+                }
                 if index_map.contains_key(&lease.addr_index) {
                     out.dropped_persistent_on_retained += 1;
                 } else {
                     out.dropped_persistent_on_removed += 1;
                 }
             }
-            prev_live
-                .live_by_flow
-                .iter()
-                .filter(|(_, a)| index_map.contains_key(&a.addr_index))
-                .map(|(f, a)| (*f, *a))
-                .collect::<Vec<_>>()
+            (carried, carried_leases)
         };
         for (flow, alloc) in carried {
             let Some(&new_index) = index_map.get(&alloc.addr_index) else {
@@ -4872,13 +4910,23 @@ impl PortAllocator {
                 out.skipped_out_of_range += 1;
                 continue;
             }
-            // #7360: this pass calls the NON-persistent `reserve_flow`, which
-            // preserves today's allocation behaviour. It still does not carry
-            // `persistent_by_source` or attach this flow to a lease the NEW
-            // allocator does not hold. The independent clear-replay fence is
-            // carried above, so a stale import cannot restore the dropped pin.
-            // #7360 rebuilds leases on the HA IMPORT path; it does not change
-            // what a config-apply re-seed carries.
+            // #15110: a record naming a persistent lease must be carried as
+            // a LEASE JOIN, not through the non-persistent `reserve_flow`.
+            // Two flows from one source share one lease and one tuple, so
+            // the snapshot holds one entry per sibling: the first claimed
+            // the bit as a plain PAT record and every later sibling was
+            // REFUSED by the occupied-bit check, and the survivor's release
+            // then freed a tuple the refused siblings still forwarded on —
+            // the #6765 reissue hazard through an ordinary pool edit.
+            // Joining via `reserve_flow_maybe_persistent` mints the lease
+            // on the first sibling and joins it on the rest, so the bit
+            // frees only when the lease's last flow releases. This also
+            // exactly covers single-flow persistent records, which the old
+            // path carried lease-less (their release freed the bit with no
+            // lease behind it). NOT carried this way: deterministic
+            // leases (`carried_leases` excludes them above — their BIB
+            // identity cannot be rebuilt from a flow record), which keep
+            // the plain path and the #7560 counted drop.
             //
             // Preserve the holder set: an HA-synced flow is reserved once per
             // WORKER (#6211 F2) and the port must not be freed until the LAST
@@ -4886,29 +4934,61 @@ impl PortAllocator {
             // the first release free a port the other N-1 still forward
             // through. Untracked (holders == 0) is a LOCAL allocation and
             // re-seeds once.
+            let persistent = alloc.persistent_key.and_then(|key| {
+                carried_leases
+                    .get(&key)
+                    .map(|lease| (key, lease.timeout_ns))
+            });
+            let mut previous_snapshot = None;
             let mut reserved = false;
             if alloc.holders == 0 {
-                reserved = self.reserve_flow(
-                    flow,
-                    alloc.translated,
-                    new_index,
-                    alloc.deterministic,
-                    now_ns,
-                    NatHolder::Untracked,
-                );
-            } else {
-                for worker in 0..MAX_NAT_HOLDER_WORKERS {
-                    if alloc.holders & (1u128 << worker) == 0 {
-                        continue;
-                    }
-                    reserved |= self.reserve_flow(
+                reserved = match persistent {
+                    Some(persistent) => self.reserve_flow_maybe_persistent(
                         flow,
                         alloc.translated,
                         new_index,
                         alloc.deterministic,
                         now_ns,
-                        NatHolder::Worker(worker),
-                    );
+                        NatHolder::Untracked,
+                        Some(persistent),
+                        false,
+                        &mut previous_snapshot,
+                    ),
+                    None => self.reserve_flow(
+                        flow,
+                        alloc.translated,
+                        new_index,
+                        alloc.deterministic,
+                        now_ns,
+                        NatHolder::Untracked,
+                    ),
+                };
+            } else {
+                for worker in 0..MAX_NAT_HOLDER_WORKERS {
+                    if alloc.holders & (1u128 << worker) == 0 {
+                        continue;
+                    }
+                    reserved |= match persistent {
+                        Some(persistent) => self.reserve_flow_maybe_persistent(
+                            flow,
+                            alloc.translated,
+                            new_index,
+                            alloc.deterministic,
+                            now_ns,
+                            NatHolder::Worker(worker),
+                            Some(persistent),
+                            false,
+                            &mut previous_snapshot,
+                        ),
+                        None => self.reserve_flow(
+                            flow,
+                            alloc.translated,
+                            new_index,
+                            alloc.deterministic,
+                            now_ns,
+                            NatHolder::Worker(worker),
+                        ),
+                    };
                 }
             }
             if reserved {

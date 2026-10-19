@@ -10836,11 +10836,15 @@ fn retained_pool_reseed_prunes_expired_clear_fences_10784() {
     );
 }
 
-/// THE BINDER. Two leases, one on the address the pool RETAINS and one on the
-/// address it REMOVES, are both counted — in their own buckets.
+/// THE BINDER. Two leases, one on the address the pool RETAINS and one on
+/// the address it REMOVES. #15110 carries the retained lease through its
+/// live flow, so only the removed-address lease is counted dropped — in
+/// its own bucket.
 ///
-/// FAIL-ON-REVERT: delete the counting loop in `reseed_retained_from` and both
-/// assertions read 0, which is exactly the silence #7560 is about.
+/// FAIL-ON-REVERT: delete the counting loop in `reseed_retained_from` and
+/// the removed assertion reads 0, which is exactly the silence #7560 is
+/// about; restore the pre-#15110 non-persistent carry and the retained
+/// assertion reads 1 while the rebuilt allocator holds no lease.
 #[test]
 fn partial_overlap_counts_dropped_persistent_leases_by_bucket_7560() {
     let now = NS_PER_SEC;
@@ -10888,10 +10892,15 @@ fn partial_overlap_counts_dropped_persistent_leases_by_bucket_7560() {
     let outcome = fresh.reseed_retained_from(&rules[0].pool_allocator, &index_map, now);
 
     assert_eq!(
-        outcome.dropped_persistent_on_retained, 1,
-        "a persistent lease on a RETAINED address was dropped and not counted. That is \
-         the population the #7560 decision is about — the operator changed a DIFFERENT \
-         address and this subscriber loses its binding anyway",
+        outcome.dropped_persistent_on_retained, 0,
+        "#15110: a persistent lease on a RETAINED address whose live flow \
+         is carried must be rejoined, not counted dropped",
+    );
+    assert_eq!(
+        fresh.debug_live().persistent_by_source.len(),
+        1,
+        "#15110: the carried retained-address lease must exist in the \
+         rebuilt allocator",
     );
     assert_eq!(
         outcome.dropped_persistent_on_removed, 1,
@@ -10937,9 +10946,10 @@ fn partial_overlap_counts_zero_dropped_leases_when_there_are_none_7560() {
 /// The BEHAVIOUR the counters describe, asserted through the ordinary path so
 /// the count is not merely an internal number that agrees with itself.
 ///
-/// A persistent source pinned to a RETAINED address is re-mapped after a
-/// partial-overlap change. This cell states today's behaviour; if the #7560
-/// decision later carries leases over, it reds and is the announcement.
+/// #15110: a persistent source pinned to a RETAINED address KEEPS its lease
+/// (and therefore its mapping) after a partial-overlap change, because its
+/// live flow is carried as a lease join. Before #15110 this cell pinned the
+/// drop; the carry is the fix, and this cell is where it announces itself.
 #[test]
 fn partial_overlap_drops_the_lease_of_a_retained_address_source_7560() {
     let rules = parse_source_nat_rules(&[persistent_pool_snapshot_7560(vec![
@@ -10963,10 +10973,9 @@ fn partial_overlap_drops_the_lease_of_a_retained_address_source_7560() {
 
     assert_eq!(
         refreshed[0].pool_allocator.debug_live().persistent_by_source.len(),
-        0,
-        "the rebuilt allocator carried a persistent lease. That may be the RIGHT \
-         behaviour — it is the open #7560 decision — but it is a change, and this cell \
-         is where it announces itself rather than arriving silently",
+        1,
+        "#15110: the rebuilt allocator must carry the retained-address \
+         persistent lease through its live flow",
     );
 }
 
