@@ -275,6 +275,11 @@ func TestPreflipFailedRunInvalidatesEarlierEvidence12143(t *testing.T) {
 	proof := a.LastCommittedCut()
 	// A later VERIFY-REJECTED Run through a second runner: verify is pure
 	// (pre-STOP, no rollback), so only the Run begin advances the fence.
+	// Stage a NEW version (5.0.0) for this run: re-running the already-live
+	// 4.0.0 is now an idempotent no-op (#15186), not a verify-rejected cut.
+	stageStatusVersion12143(t, cfg, "5.0.0")
+	s.stagedVersion = "5.0.0"
+	publishStagedGen(t, a)
 	b, err := NewRunner(a.cfg)
 	if err != nil {
 		t.Fatal(err)

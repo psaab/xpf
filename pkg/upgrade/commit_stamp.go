@@ -64,9 +64,17 @@ func (r *Runner) stampCommittedVersion(j *Journal) error {
 	if j.TargetVersion == "" {
 		return fmt.Errorf("cannot stamp a commit record without a target version")
 	}
+	// #15186 defence in depth: never write Predecessor == Version. A
+	// same-version cut (PreviousVersion == TargetVersion) has no distinct
+	// predecessor to record; the reader rejects a self-predecessor, which
+	// would erase the real predecessor from rollback history. Omit it.
+	predecessor := j.PreviousVersion
+	if predecessor == j.TargetVersion {
+		predecessor = ""
+	}
 	return r.writeCommitStamp(committedStamp{
 		Version:             j.TargetVersion,
-		Predecessor:         j.PreviousVersion,
+		Predecessor:         predecessor,
 		Committed:           true,
 		CommittedAtUnixNano: r.cfg.Sys.Now().UnixNano(),
 	})

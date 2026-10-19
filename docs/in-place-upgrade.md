@@ -999,8 +999,17 @@ window for ALL FOUR managed binaries:
   `versions/<ver>` (reusing the proven guarded-delete), or REFUSES
   pre-PREFLIGHT if `versions/<ver>` is the live `current`/rollback target
   (cannot safely mutate a live version dir mid-cut). Recovery on a
-  refusal: re-stage under a distinct version tag, or `dpkg-reconfigure
-  xpf` to realign the generation.
+  refusal: re-stage under a distinct version tag. Do NOT use
+  `dpkg-reconfigure xpf` for this: it always mints a new generation, so
+  the same-version refusal would recur (#15186).
+- **Already-live re-run (#15186).** When the staged version already equals
+  `versions/current`, the pinned generation's managed binaries are
+  byte-identical to the live dir, and a valid committed stamp exists, a
+  bare `xpfd upgrade` (and `xpfd upgrade --rolling`, checked before
+  ForceSecondary) returns "already at <ver>; nothing to do" — no journal,
+  no DB snapshot, no stop/start, and the live `.<ver>.dbsnap` and commit
+  record (with its real predecessor) are left untouched. Different bytes
+  refuse pre-PREFLIGHT as above.
 - **Crash-safety.** A crash before the `staged-gen/<genid>` rename leaves
   a `.partial` (pre-swept on the next publish); a crash after the dir
   rename but before the `current-gen` repoint leaves a

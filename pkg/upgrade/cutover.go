@@ -587,16 +587,64 @@ func (r *Runner) Run(opts Options) (err error) {
 		// before refusing in copyStaged (re-introducing the wedge this guard
 		// prevents). `prev` is both the rollback target AND the live current
 		// here, so a single comparison covers both (Copilot r4).
-		if _, statErr := os.Stat(r.versionDir(stagedVer)); statErr == nil {
-			existingGen, gerr := r.readSrcGen(stagedVer)
-			if gerr == nil && existingGen != srcGen && stagedVer == prev {
-				if cerr := r.clearJournal(); cerr != nil {
-					r.logf("upgrade: WARN clear stale journal on live-dir-replace refuse: %v", cerr)
+		// #15186 (D05-01): bare re-run when the staged version is already the
+		// live, committed version. If the pinned generation's managed binaries
+		// are byte-identical to the live dir and a valid committed stamp
+		// exists, there is nothing to cut: return before writing a journal or
+		// a snapshot, and without STOP/START. If the bytes differ (different
+		// generation, absent stamp, or any managed-binary mismatch), refuse
+		// with re-version guidance only — dpkg-reconfigure always mints a new
+		// generation and would be refused again, so it is not advice.
+		// An unreadable live dir / stamp lookup that cannot prove identity
+		// falls through to the mismatch refusal (fail closed, no journal).
+		if stagedVer == prev {
+			if _, statErr := os.Stat(r.versionDir(stagedVer)); statErr == nil {
+				existingGen, gerr := r.readSrcGen(stagedVer)
+				if gerr != nil {
+					if cerr := r.clearJournal(); cerr != nil {
+						r.logf("upgrade: WARN clear stale journal on same-version refuse: %v", cerr)
+					}
+					return fmt.Errorf("refuse-before-PREFLIGHT: cannot prove the live version dir %s matches this cut (read source-generation stamp: %v); re-stage under a DISTINCT version tag", r.versionDir(stagedVer), gerr)
 				}
-				return fmt.Errorf("refuse-before-PREFLIGHT: cannot replace the live/rollback "+
-					"version dir %s (its bytes come from source generation %q but this cut pins "+
-					"%q); re-stage under a DISTINCT version tag, or `dpkg-reconfigure xpf` to "+
-					"realign the generation", r.versionDir(stagedVer), existingGen, srcGen)
+				sameVersionNoOp := false
+				if existingGen == srcGen {
+					if stamp, present := r.readCommittedStamp(stagedVer); present && stamp != nil && stamp.Committed {
+						if srcGen == "" {
+							sameVersionNoOp = true
+						} else if mismatch, merr := r.mismatchedManagedBinary(stagedVer, srcDir); merr == nil && mismatch == "" {
+							// A sanctioned first cut records no predecessor. When the
+							// operator re-runs WITH the first-cut flag, this may be the
+							// flip-failure retry that must do a real STOP/flip, not a
+							// no-op; only re-runs without the flag no-op here.
+							sameVersionNoOp = !(stamp.Predecessor == "" && opts.AllowNoRollbackFirstCut)
+						} else if merr != nil {
+							r.logf("upgrade: same-version live dir %s cannot be proven identical to pinned generation %q: %v", r.versionDir(stagedVer), srcGen, merr)
+						}
+					}
+				}
+				if sameVersionNoOp {
+					if cerr := r.clearJournal(); cerr != nil {
+						r.logf("upgrade: WARN clear stale journal on already-live no-op: %v", cerr)
+					}
+					r.logf("upgrade: already at %s; nothing to do", stagedVer)
+					// Deliberately no recordCommittedCut: this run health-confirmed
+					// nothing, so it must not mint fresh committed-cut evidence
+					// that could clear a pending deferred-status record (#12143).
+					return nil
+				}
+				// Sanctioned first-cut retry (see above): fall through to a
+				// real fresh cut rather than refusing the only sanctioned path.
+				// sanctionedFirstCut is false here (current is present, so the
+				// INIT sanction gate above does not apply); the retry carries
+				// the invocation flag itself (TestFlipFailure_FirstCutRestartsDaemon).
+				if !(existingGen == srcGen && opts.AllowNoRollbackFirstCut) {
+					if cerr := r.clearJournal(); cerr != nil {
+						r.logf("upgrade: WARN clear stale journal on live-dir-replace refuse: %v", cerr)
+					}
+					return fmt.Errorf("refuse-before-PREFLIGHT: cannot replace the live/rollback "+
+						"version dir %s (its bytes come from source generation %q but this cut pins "+
+						"%q); re-stage under a DISTINCT version tag", r.versionDir(stagedVer), existingGen, srcGen)
+				}
 			}
 		}
 		// REFUSE-AT-INIT: prove the staged binary can read the live config DB
@@ -1561,8 +1609,7 @@ func (r *Runner) copyStaged(j *Journal, predecessorBackups ...*predecessorStampB
 		if ver == cur || ver == j.PreviousVersion {
 			return fmt.Errorf("refuse: cannot replace the live/rollback version dir %s "+
 				"(its bytes come from source generation %q but this cut pins %q); re-stage "+
-				"under a DISTINCT version tag, or `dpkg-reconfigure xpf` to realign the "+
-				"generation", dst, existingGen, j.SourceGeneration)
+				"under a DISTINCT version tag", dst, existingGen, j.SourceGeneration)
 		}
 		// Stale non-live: reuse the proven guarded delete, then recopy.
 		r.logf("upgrade: replacing stale version dir %s (source generation %q -> %q)",
@@ -1852,7 +1899,13 @@ func (r *Runner) cleanupFailedVerifyCopy(j *Journal, predecessorBackups ...*pred
 	// orphan: it is the live version's rollback snapshot (#14720). The
 	// restore above already reinstalled the backup copy if this cut's
 	// PREFLIGHT overwrote it; skipping the removal keeps that restore.
-	if firstPredecessorBackup(predecessorBackups) == nil {
+	// #15186: never remove the live version's snapshot, nor the snapshot of
+	// the journal's PreviousVersion (the rollback target) — a same-version
+	// VERIFY failure must not delete the live .<ver>.dbsnap while claiming
+	// the live dataplane is untouched. `cur` is "" when indeterminate, in
+	// which case the guarded branch above already skipped dir removal and
+	// this check still protects ver == j.PreviousVersion.
+	if firstPredecessorBackup(predecessorBackups) == nil && ver != cur && ver != j.PreviousVersion {
 		_ = os.RemoveAll(filepath.Join(r.cfg.VersionsDir, "."+ver+".dbsnap"))
 	}
 }

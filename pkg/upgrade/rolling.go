@@ -81,6 +81,59 @@ func checkStagedTargetCompatible(r *Runner, cl RollingCluster) error {
 	return checkTargetCompatible(r, cl, filepath.Join(srcDir, "xpfd"), "rolling")
 }
 
+// alreadyAtStagedVersion reports whether the staged version is already the
+// live, committed version with byte-identical managed binaries (#15186).
+// (true,nil) = nothing to do; (false,nil) = a real cut is pending;
+// (false,err) = same-version but bytes/stamp cannot prove identity — refuse
+// before any demotion. An in-flight journal (non-INIT) is never a no-op:
+// the inner Run must resume it.
+func (r *Runner) alreadyAtStagedVersion() (bool, error) {
+	j, err := r.loadJournal()
+	if err != nil {
+		return false, fmt.Errorf("rolling: load journal for already-live check: %w", err)
+	}
+	if j.State != StateInit {
+		return false, nil
+	}
+	srcGen, srcDir, err := r.resolveSource(j)
+	if err != nil {
+		return false, fmt.Errorf("rolling: resolve staged target for already-live check: %w", err)
+	}
+	stagedVer, err := r.cfg.Sys.BinaryVersion(filepath.Join(srcDir, "xpfd"))
+	if err != nil {
+		return false, fmt.Errorf("rolling: read staged version for already-live check: %w", err)
+	}
+	if verr := ValidateVersionSegment(stagedVer); verr != nil {
+		return false, fmt.Errorf("rolling: staged version is not a safe path segment: %w", verr)
+	}
+	prev, err := r.readCurrentVersion()
+	if err != nil {
+		return false, fmt.Errorf("rolling: read current version for already-live check: %w", err)
+	}
+	if stagedVer != prev {
+		return false, nil
+	}
+	existingGen, gerr := r.readSrcGen(stagedVer)
+	if gerr != nil {
+		return false, fmt.Errorf("refuse-before-PREFLIGHT: cannot prove the live version dir %s matches this cut (read source-generation stamp: %v); re-stage under a DISTINCT version tag", r.versionDir(stagedVer), gerr)
+	}
+	if existingGen == srcGen {
+		if stamp, present := r.readCommittedStamp(stagedVer); present && stamp != nil && stamp.Committed {
+			if srcGen == "" {
+				return true, nil
+			}
+			if mismatch, merr := r.mismatchedManagedBinary(stagedVer, srcDir); merr == nil && mismatch == "" {
+				return true, nil
+			} else if merr != nil {
+				r.logf("upgrade: same-version live dir %s cannot be proven identical to pinned generation %q: %v", r.versionDir(stagedVer), srcGen, merr)
+			}
+		}
+	}
+	return false, fmt.Errorf("refuse-before-PREFLIGHT: cannot replace the live/rollback "+
+		"version dir %s (its bytes come from source generation %q but this cut pins "+
+		"%q); re-stage under a DISTINCT version tag", r.versionDir(stagedVer), existingGen, srcGen)
+}
+
 // RollingCluster is the cluster-control surface the rolling driver needs.
 // It is satisfied by a CLI/gRPC-backed implementation in production
 // (cluster_cli.go) and a fake in tests. Every method acts on the LOCAL
@@ -449,6 +502,18 @@ func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) 
 			"documented connection loss", syncWhy)
 	}
 
+	// #15186 (D05-01): if the staged version is already live and committed
+	// with byte-identical binaries, there is no cut to drain for. Check
+	// BEFORE ForceSecondary so a bare rolling re-run does not fail the node
+	// over for nothing. A non-nil error here is a refusal (different bytes
+	// / unprovable identity) and likewise precedes any demotion.
+	if done, err := r.alreadyAtStagedVersion(); err != nil {
+		return err
+	} else if done {
+		logf("rolling: already at staged version; nothing to do")
+		return nil
+	}
+
 	// 2. Peer-takeover-ready precheck BEFORE demoting (else VIP stranding).
 	ready, err := cl.PeerTakeoverReady()
 	if err != nil {
@@ -459,7 +524,6 @@ func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) 
 			"monitors / hold) — demoting now would strand VIPs; aborting without " +
 			"draining (local node still forwarding)")
 	}
-
 	// 3. Start the drain.
 	logf("rolling: peer ready; forcing local secondary (drain start)")
 	if err := cl.ForceSecondary(); err != nil {
