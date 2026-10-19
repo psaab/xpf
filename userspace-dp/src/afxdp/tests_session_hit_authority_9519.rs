@@ -53,6 +53,12 @@ struct Posture {
     dmz_host_inbound: bool,
     dmz_junos_host_deny: bool,
     lo0_discards_ssh: bool,
+    // #15664: a `lan -> junos-host then permit` rule (any application) that
+    // admits the host-bound SSH session, so its counter can be watched.
+    lan_junos_host_permit: bool,
+    // #15664: a `dmz -> junos-host then permit` rule, so a foreign (dmz)
+    // arrival's own re-check PERMITS (and pre-fix counted) the packet.
+    dmz_junos_host_permit: bool,
 }
 
 const WAN_ONLY: Posture = Posture {
@@ -62,6 +68,8 @@ const WAN_ONLY: Posture = Posture {
     dmz_host_inbound: true,
     dmz_junos_host_deny: false,
     lo0_discards_ssh: false,
+    lan_junos_host_permit: false,
+    dmz_junos_host_permit: false,
 };
 
 fn forwarding(p: Posture) -> ForwardingState {
@@ -132,6 +140,32 @@ fn forwarding(p: Posture) -> ForwardingState {
             applications: vec!["any".to_string()],
             application_terms: Vec::new(),
             action: "deny".to_string(),
+            ..Default::default()
+        });
+    }
+    if p.lan_junos_host_permit {
+        s.policies.push(PolicyRuleSnapshot {
+            name: "lan-host-permit".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "junos-host".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            application_terms: Vec::new(),
+            action: "permit".to_string(),
+            ..Default::default()
+        });
+    }
+    if p.dmz_junos_host_permit {
+        s.policies.push(PolicyRuleSnapshot {
+            name: "dmz-host-permit".to_string(),
+            from_zone: "dmz".to_string(),
+            to_zone: "junos-host".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            application_terms: Vec::new(),
+            action: "permit".to_string(),
             ..Default::default()
         });
     }
@@ -1248,6 +1282,70 @@ fn a_foreign_zone_is_held_to_its_own_junos_host_policy_9519() {
          is dmz's own"
     );
     assert_eq!(session_count(&sessions), 1);
+}
+
+/// #15664 foreign-arrival counting: a packet arriving on a FOREIGN zone
+/// (dmz) that HITs an established `to-zone junos-host` session must not
+/// increment ANY junos-host counter for that packet. dmz admits SSH
+/// (any-service) and has its OWN `dmz-host-permit` junos-host permit, so
+/// the foreign packet is DELIVERED through its own zone's re-check —
+/// pre-fix the counting re-eval incremented `dmz-host-permit` for a
+/// packet that is not an admitted session of that rule (the session was
+/// admitted from lan); this goes RED (dmz rule reads 1). Post-fix
+/// neither junos-host counter moves for the foreign packet. The owner's
+/// own ACK is the positive control: it counts through lan's bound
+/// handle.
+#[test]
+fn a_foreign_junos_host_hit_is_not_counted_15664() {
+    let fw = forwarding(Posture {
+        lan_junos_host_permit: true,
+        dmz_junos_host_permit: true,
+        ..WAN_ONLY
+    });
+    let mut sessions = host_bound_ssh_session(&fw);
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(
+        rule_hits(&fw, "lan-host-permit"),
+        1,
+        "the admitting SYN counts once against lan-host-permit"
+    );
+    assert_eq!(rule_hits(&fw, "dmz-host-permit"), 0);
+    let foreign = drive(&fw, &mut sessions, ssh(TCP_ACK, DMZ_IFINDEX));
+    assert_eq!(
+        foreign.session_hit, 1,
+        "the dmz packet must HIT lan's host-bound session"
+    );
+    assert_eq!(
+        (foreign.host_inbound_deny, foreign.policy_deny, foreign.local),
+        (0, 0, 1),
+        "control: dmz admits the packet (its own junos-host permit), so \
+         it is delivered — the question is purely whether it was CHARGED"
+    );
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(
+        rule_hits(&fw, "dmz-host-permit"),
+        0,
+        "#15664: a foreign-arrival packet must not increment the \
+         foreign zone's junos-host counter through the hit re-check \
+         (pre-fix the counting re-eval reads 1)"
+    );
+    assert_eq!(
+        rule_hits(&fw, "lan-host-permit"),
+        1,
+        "#15664: ...nor the admitting rule's counter"
+    );
+    let owner = drive(&fw, &mut sessions, ssh(TCP_ACK, LAN_IFINDEX));
+    assert_eq!(owner.session_hit, 1, "control: the owner's ACK hits");
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(
+        rule_hits(&fw, "lan-host-permit"),
+        2,
+        "control: the OWNER's established packet IS counted through the \
+         bound handle, or the zero deltas above measure nothing"
+    );
 }
 
 /// A terminal lo0 verdict on a FOREIGN packet drops that packet and does not tear

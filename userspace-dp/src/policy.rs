@@ -4361,6 +4361,44 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware_without_counting(
     )
 }
 
+/// #15664: re-derive host-bound policy for an ESTABLISHED-session re-check
+/// without counting the matched PERMIT. The session-hit gate only needs the
+/// current verdict (a tightened deny/reject must still tear the session
+/// down); a permitted packet is counted exactly once through the session's
+/// admission-bound counter handle by the poll path, so counting the live
+/// first-match here would re-attribute established traffic after an
+/// `insert` reorder and would count foreign-arrival packets. The caller
+/// counts a matched Deny/Reject itself (that rule was never the admitting
+/// rule, so its counter is resolved positionally at re-check time).
+/// Alias of the without-counting re-derivation, named for the
+/// established-session call site.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rederive_junos_host_policy_l3_aware_at(
+    state: &PolicyState,
+    from_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    l4_present: bool,
+    now_ns: u64,
+) -> Option<PolicyEvaluationResult> {
+    evaluate_junos_host_policy_l3_aware_without_counting_at(
+        state,
+        from_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        l4_present,
+        now_ns,
+    )
+}
+
 /// Re-derive host-bound policy without changing packet or rule counters.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_junos_host_policy_l3_aware_without_counting_at(

@@ -368,17 +368,18 @@ fn poll_descriptor_junos_host_permit_stamps_application_inactivity_timeout() {
     }
 }
 
-/// #3706 fail-on-revert (established session-HIT double-count): a
-/// `to-zone junos-host then permit` host-local session must count each packet
-/// against the admitting rule's hit counter EXACTLY ONCE — parity with transit.
-/// The #3706 MISS-install stamps a bound `policy_counter`, and the LocalDelivery
-/// session-HIT re-checks junos-host for teardown on every hit, counting via
-/// `apply_frag_deny_override_and_count`.
-/// Counting at the generic session-hit `record_policy_hit_counter` site TOO
-/// would double-count every established host-local permit packet (2N for N
-/// hits). This drives 1 SYN (miss) + 3 established ACKs (hits) and asserts the
-/// rule's packet counter == 4. Remove the `!= LocalDelivery` guard on the
-/// session-hit counter and this goes RED (reads 7).
+/// #3706/#15664 fail-on-revert (established session-HIT exactly-once): a
+/// `to-zone junos-host then permit` host-local session must count each
+/// packet against the admitting rule's hit counter EXACTLY ONCE — parity
+/// with transit. The #3706 MISS-install stamps a bound `policy_counter`;
+/// #15664 counts permitted established hits through that bound handle at
+/// the generic session-hit site, while the LocalDelivery junos-host
+/// re-check re-derives the verdict WITHOUT counting a permit (it counts
+/// only a matched Deny/Reject). Counting at BOTH sites would double-count
+/// every established host-local permit packet (2N for N hits). This drives
+/// 1 SYN (miss) + 3 established ACKs (hits) and asserts the rule's packet
+/// counter == 4. Restore the counting re-eval (or drop the bound count)
+/// and this goes RED (reads 7 or 1 respectively).
 #[test]
 fn poll_descriptor_junos_host_permit_established_hit_counts_once() {
     // No `then log`; policy id 55. Counting is orthogonal to the log flags.
@@ -460,12 +461,162 @@ fn poll_descriptor_junos_host_permit_established_hit_counts_once() {
         );
     }
 
+    // #15664: hit counts are coalesced per worker thread; flush before
+    // reading (the snapshots read the shared counter, not the pending
+    // batch).
+    crate::policy::flush_recorded_policy_hit_counters();
     assert_eq!(
         hit_packets(&forwarding),
         4,
-        "#3706: 1 miss + 3 established hits must count EXACTLY 4 packets against \
-         the admitting junos-host rule; double-counting the session-hit path \
-         reads 7 (the pre-fix regression)"
+        "#3706/#15664: 1 miss + 3 established hits must count EXACTLY 4 \
+         packets against the admitting junos-host rule; double-counting \
+         reads 7, counting only the miss reads 1"
+    );
+}
+
+fn junos_host_two_rule_snapshot(inserted_first: bool) -> ConfigSnapshot {
+    let inserted = PolicyRuleSnapshot {
+        name: "allow-mgmt-subnet".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "junos-host".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        application_terms: Vec::new(),
+        action: "permit".to_string(),
+        policy_id: 9001,
+        ..Default::default()
+    };
+    let admitting = PolicyRuleSnapshot {
+        name: "host-permit-log".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "junos-host".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["host-bgp-179".to_string()],
+        application_terms: vec![crate::PolicyApplicationSnapshot {
+            name: "host-bgp-179".to_string(),
+            protocol: "tcp".to_string(),
+            source_port: String::new(),
+            destination_port: "179".to_string(),
+            icmp_type: None,
+            icmp_code: None,
+            inactivity_timeout: None,
+        }],
+        action: "permit".to_string(),
+        policy_id: 55,
+        ..Default::default()
+    };
+    let mut snapshot = gre_to_self_snapshot();
+    if inserted_first {
+        snapshot.policies.push(inserted);
+        snapshot.policies.push(admitting);
+    } else {
+        snapshot.policies.push(admitting);
+    }
+    snapshot
+}
+
+/// #15664 fail-on-revert (insert reorder): an established `to-zone
+/// junos-host` session must keep counting against its ADMISSION-BOUND rule
+/// after an `insert ... before` reorder, not the live first-match. The
+/// session is admitted under `host-permit-log` (the only junos-host rule);
+/// the forwarding state is then rebuilt with a broader `allow-mgmt-subnet`
+/// permit inserted ahead of it through the SAME persistent counter store
+/// (the coordinator's rebuild shape), so the admitting rule's Arc survives
+/// while its positional index shifts. Pre-fix the hit re-eval counted the
+/// live first-match, so the inserted rule would read 1 and the admitting
+/// rule would stay at 1 — this goes RED. Post-fix the bound count reads
+/// admitting == 2 / inserted == 0.
+#[test]
+fn local_delivery_session_hit_counts_bound_admitting_rule_across_insert_reorder_15664() {
+    use crate::afxdp::forwarding_build::build_forwarding_state_with_policy_counters;
+
+    let store = crate::policy::PolicyCounterStore::default();
+    let admit_fw =
+        build_forwarding_state_with_policy_counters(&junos_host_two_rule_snapshot(false), &store);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+
+    let hits = |f: &ForwardingState, name: &str| -> u64 {
+        f.policy
+            .counter_snapshots()
+            .into_iter()
+            .find(|c| c.rule_id.ends_with(name))
+            .map(|c| c.packets)
+            .unwrap_or_else(|| panic!("missing policy counter for {name}"))
+    };
+    let syn = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 0, 1),
+        12345,
+        179,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
+    let (_b, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &admit_fw,
+        &ha_state,
+        &syn,
+        syn_meta,
+        true,
+    );
+    assert_eq!(dbg.local, 1, "SYN must take the LocalDelivery arm");
+    assert_eq!(sessions.len(), 1, "the permitted SYN installs one session");
+    assert_eq!(
+        hits(&admit_fw, "host-permit-log"),
+        1,
+        "the miss SYN counts once against the admitting rule"
+    );
+
+    let live_fw =
+        build_forwarding_state_with_policy_counters(&junos_host_two_rule_snapshot(true), &store);
+    assert!(
+        live_fw.policy.rules[0]
+            .rule_id
+            .ends_with("allow-mgmt-subnet"),
+        "the inserted rule must occupy the live first-match slot"
+    );
+    let ack = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 0, 1),
+        12345,
+        179,
+        0x10_u8,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let ack_meta = txn_meta_v4(24, 0x10_u8, (ack.len() - 14) as u16);
+    let (_b, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &live_fw,
+        &ha_state,
+        &ack,
+        ack_meta,
+        true,
+    );
+    assert_eq!(
+        dbg.session_hit, 1,
+        "the ACK must HIT the established host-local session"
+    );
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(
+        hits(&live_fw, "host-permit-log"),
+        2,
+        "#15664: the established hit must count against the ADMITTING rule \
+         through its bound handle, across the insert reorder (pre-fix the \
+         live first-match re-eval leaves this at 1)"
+    );
+    assert_eq!(
+        hits(&live_fw, "allow-mgmt-subnet"),
+        0,
+        "#15664: the INSERTED rule must not inherit the established \
+         session's traffic (pre-fix it reads 1)"
     );
 }
 
