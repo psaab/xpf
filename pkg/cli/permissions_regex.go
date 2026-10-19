@@ -187,10 +187,16 @@ func evaluateCommandRegex(
 	// after a recognised first stage cannot be evaluated, so fail
 	// closed rather than matching only the recognised prefix. A `|`
 	// inside a quoted/typed filter argument is not a stage separator
-	// for this check beyond the verb position — SplitPipe itself
-	// splits at the last " | " for exactly that reason — so only a
-	// `|` immediately followed by a bare verb token is inspected,
-	// which is precisely how dispatch recursed over the chain.
+	// for this check beyond the verb position — #15722: SplitPipe is
+	// quote-aware and does not split there, while this gate tokenises
+	// with strings.Fields, so a quoted `"a | b"` argument still
+	// reaches this loop as bare `|` words whose following word
+	// (`b"`) is not an authorised verb: the check fails CLOSED for
+	// restricted classes. That over-refusal is pre-existing (see
+	// docs/log/14714.md) and the fail-closed direction matches #9628;
+	// unrestricted classes skip this gate entirely. Only a `|`
+	// immediately followed by a bare verb token is inspected, which
+	// is how dispatch recursed over the chain.
 	for i := 0; i+2 < len(pipeWords); i++ {
 		if pipeWords[i] == "|" && !authorizablePipe(pipeWords[i+1]) {
 			return fmt.Errorf(

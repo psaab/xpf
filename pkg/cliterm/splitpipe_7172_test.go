@@ -52,9 +52,13 @@ func TestSplitPipeCorpus7172(t *testing.T) {
 		{name: "trailing token is not a filter, whole line returned",
 			line: "show log | match a | b",
 			cmd:  "show log | match a | b", ok: false},
-		{name: "pipe inside a quoted arg, whole line returned",
+
+		// #15722: a QUOTED argument pipe is data, not a delimiter: the
+		// split lands on the pipe before `match` and the quotes are
+		// stripped, so the filter receives the literal `a | b`.
+		{name: "pipe inside a quoted arg splits and unquotes",
 			line: `show log | match "a | b"`,
-			cmd:  `show log | match "a | b"`, ok: false},
+			cmd:  "show log", pipeType: "match", pipeArg: "a | b", ok: true},
 
 		// A bare "|" without surrounding spaces is not a pipe separator.
 		{name: "no spaces around bar", line: "show interfaces|match ge-",
