@@ -135,6 +135,12 @@ func (l *Lexer) LastGapClosed() bool { return l.gapClosed }
 // distinguish balanced key spans from a list that remains open at `;` or EOF.
 func (l *Lexer) PeekBracketDepth() int { return l.peekBracketDepth }
 
+// Position returns the lexer's current byte offset into the input
+// (#15759). Callers that consumed a known number of tokens can slice
+// the original text at this offset to recover the unconsumed tail
+// byte-for-byte instead of re-joining token values.
+func (l *Lexer) Position() int { return l.pos }
+
 // NewLexer creates a new Lexer for the given input string.
 func NewLexer(input string) *Lexer {
 	return &Lexer{

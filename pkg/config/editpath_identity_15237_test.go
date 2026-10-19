@@ -32,7 +32,7 @@ func TestPopEditPathIdentity15237(t *testing.T) {
 		t.Fatalf("PopEditPathIdentity(nil) = %v, want empty", got)
 	}
 	// up n via the shared prefix resolver: two identities up from the zone cursor.
-	target, inner, ok := ParseTopUpPrefix15082([]string{"security", "zones", "security-zone", "trust"}, "up 1")
+	target, inner, _, ok := ParseTopUpPrefix15082([]string{"security", "zones", "security-zone", "trust"}, "up 1")
 	if !ok || inner != nil || strings.Join(target, " ") != "security zones" {
 		t.Fatalf("up 1 from zone cursor = %v,%v,%v, want [security zones] bare (#15237 A53-02)", target, inner, ok)
 	}
