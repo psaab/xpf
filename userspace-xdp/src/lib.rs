@@ -93,6 +93,7 @@ use gre_classify::{
     InnerSessionAction, OuterDestinationLocal, USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
     degraded_general_local_pass_applies, gre_inner_fragment_or_length_rejected,
     native_gre_fragment_stays_on_helper, native_gre_inner_pass_steers_to_kernel_typed,
+    wg_fragment_stays_on_helper,
 };
 use ipv4_key::ipv4_map_key;
 use ipv4_len_gate::{ipv4_declared_len_covers_header, ipv4_declared_read_end};
@@ -742,6 +743,21 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         parsed.is_fragment,
         (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0,
     );
+    // #15102: a fragmented WG outer likewise stays on the XSK path. Only
+    // the TAIL needs this bit: a head (protocol UDP) already reaches the
+    // worker through wg_worker_claim / ordinary session-miss fallthrough,
+    // and computing the head row here spent verifier state for no
+    // disposition change. The tail has no port/type, so this predicate
+    // keeps it off every kernel-pass arm and the worker buffers it only
+    // against an admitted head.
+    let wg_fragment = parsed.is_fragment
+        && parsed.protocol == PROTO_FRAGMENT_NO_L4
+        && wg_fragment_stays_on_helper(
+            parsed.protocol,
+            parsed.wire_protocol,
+            parsed.is_fragment,
+            (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0,
+        );
 
     // #5173: wrap the coordinate at the ONE point it leaves the context, so
     // nothing downstream can reduce it — `RawRxQueue` has a private field and no
@@ -894,7 +910,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     {
         return Ok(cpumap_or_pass(ctrl));
     }
-    if !native_gre_fragment && should_fallback_early(&parsed, ingress_domain) {
+    if !native_gre_fragment && !wg_fragment && should_fallback_early(&parsed, ingress_domain) {
         record_trace(
             ctrl.flags,
             ingress_ifindex,
@@ -920,7 +936,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // is_local_destination arm of the session-miss path. A remote
     // destination continues to the AF_XDP redirect and is adjudicated by
     // the worker.
-    if !native_gre && !native_gre_fragment {
+    if !native_gre && !native_gre_fragment && !wg_fragment {
         let session_action = if wg_steer_candidate {
             wg_steer_session_action
         } else {
@@ -1035,9 +1051,9 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 // session (new flow) or drop (stale non-SYN TCP / policy deny).
             }
         }
-    } else if native_gre_fragment {
-        // A fragmented head cannot be inner-classified for decap; the
-        // helper reassembles the whole datagram first.
+    } else if native_gre_fragment || wg_fragment {
+        // A fragmented head cannot be inner-classified / decapped; the
+        // helper reassembles the whole datagram first (#14645/#15102).
     } else {
         let inner_action = classify_native_gre_inner(data, data_end, &parsed, ingress_domain);
         if inner_action == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL
@@ -1690,13 +1706,22 @@ fn is_degraded_local_or_control(
     parsed: &ParsedPacket,
     ingress_domain: u32,
 ) -> bool {
-    // #14645: a native-GRE fragment has no kernel terminator; in degraded
-    // mode it drops with its head rather than passing to the kernel.
+    // #14645/#15102: a tunnel fragment has no kernel terminator for its
+    // inner; in degraded mode it drops with its head rather than passing
+    // to the kernel.
     if native_gre_fragment_stays_on_helper(
         parsed.protocol,
         parsed.wire_protocol,
         parsed.is_fragment,
         (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0,
+    ) {
+        return false;
+    }
+    if wg_fragment_stays_on_helper(
+        parsed.protocol,
+        parsed.wire_protocol,
+        parsed.is_fragment,
+        (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0,
     ) {
         return false;
     }
@@ -1857,8 +1882,8 @@ struct ParsedPacket {
     udp_wg_transport_data: bool,
     // #14645: this packet is one fragment (first or non-first) of a larger
     // IP datagram. Set from the IPv4 flags/offset or the IPv6 Fragment
-    // header; false for a whole datagram. Read only by the native-GRE
-    // fragment disposition.
+    // header; false for a whole datagram. Read by the native-GRE and
+    // WireGuard fragment dispositions.
     is_fragment: bool,
     vlan_id: u16,
     vlan_pcp: u8,

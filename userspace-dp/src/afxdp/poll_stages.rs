@@ -465,19 +465,72 @@ pub(super) fn stage_native_gre_decap(
 ///
 /// A `None` frame with the third return value set is instead a terminal outer
 /// input-filter denial; the caller recycles the descriptor.
-///
-/// The peer identity travels with the decapsulated packet rather than being
-/// discarded: the control thread learns a peer's endpoint from authenticated
-/// datagrams, and moving transport-data records off its socket takes its
-/// dominant source of that signal away. The caller reports it back.
+/// #15102 outcome of the WG stage: decap produced a packet, the packet was
+/// an outer fragment buffered for reassembly (caller must recycle without
+/// further adjudication), or neither.
+pub(super) enum WgDecapStage {
+    Decapped(UserspaceDpMeta, Vec<u8>),
+    Buffered,
+    NotWg(UserspaceDpMeta),
+    FilterDropped,
+}
+
 #[inline]
 pub(super) fn stage_wg_decap(
     raw_frame: &[u8],
     meta: UserspaceDpMeta,
     forwarding: &ForwardingState,
     wg_scratch: &crate::afxdp::wg::WgWorkerScratch,
+    reassembler: &mut crate::afxdp::gre_reassembly::GreReassembler,
+    now_ns: u64,
     outer_input_filter_allows: &mut impl FnMut(&[u8], UserspaceDpMeta) -> bool,
-) -> (UserspaceDpMeta, Option<Vec<u8>>, bool) {
+) -> WgDecapStage {
+    // #15102: an outer-fragmented WG datagram must be reassembled before
+    // decap. Heads keep protocol UDP; tails carry the 255 sentinel with
+    // UDP recoverable from the Fragment header / IP Protocol byte.
+    if crate::afxdp::gre_reassembly::frame_is_fragment_for_protocol(
+        raw_frame,
+        meta,
+        crate::ip_proto::PROTO_UDP,
+    ) {
+        let has_head = reassembler.has_admitted_head(raw_frame, meta, crate::ip_proto::PROTO_UDP);
+        if crate::afxdp::wg::decap::is_wg_fragment_candidate(raw_frame, meta, forwarding, has_head)
+        {
+            return match reassembler.offer_for_protocol(
+                raw_frame,
+                meta,
+                now_ns,
+                crate::ip_proto::PROTO_UDP,
+            ) {
+                Some((frame, rmeta)) => {
+                    let mut filtered = false;
+                    let pkt = crate::afxdp::wg::decap::try_wg_decap_from_frame_with_input_filter(
+                        &frame,
+                        rmeta,
+                        forwarding,
+                        wg_scratch,
+                        outer_input_filter_allows,
+                        &mut filtered,
+                    );
+                    if filtered {
+                        return WgDecapStage::FilterDropped;
+                    }
+                    match pkt {
+                        Some(p) => WgDecapStage::Decapped(p.meta, p.frame),
+                        // Reassembled but not a WG record for us (e.g. a
+                        // handshake fragment the head check admitted on
+                        // port alone): fail closed, do not fall through
+                        // with a synthetic frame downstream stages would
+                        // misread as a native packet.
+                        None => WgDecapStage::Buffered,
+                    }
+                }
+                None => WgDecapStage::Buffered,
+            };
+        }
+        // A UDP fragment that is not a WG candidate (stray tail, transit,
+        // non-listener port) keeps its ordinary disposition below.
+    }
     let mut filtered = false;
     let decapped = crate::afxdp::wg::decap::try_wg_decap_from_frame_with_input_filter(
         raw_frame,
@@ -487,9 +540,13 @@ pub(super) fn stage_wg_decap(
         outer_input_filter_allows,
         &mut filtered,
     );
-    let new_meta = decapped.as_ref().map(|p| p.meta).unwrap_or(meta);
-    let owned_packet_frame = decapped.map(|p| p.frame);
-    (new_meta, owned_packet_frame, filtered)
+    if filtered {
+        return WgDecapStage::FilterDropped;
+    }
+    match decapped {
+        Some(p) => WgDecapStage::Decapped(p.meta, p.frame),
+        None => WgDecapStage::NotWg(meta),
+    }
 }
 
 /// Stage 7+8 — parse session flow and learn the source-side

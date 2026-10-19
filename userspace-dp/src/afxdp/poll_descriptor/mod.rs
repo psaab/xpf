@@ -878,6 +878,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // zone instead of being written to the wgN TUN for the kernel
                 // to forward with no zone policy at all.
                 if !is_injected && owned_packet_frame.is_none() {
+                    let mut wg_buffered = false;
                     let (wg_meta, wg_frame, wg_filter_drop) = {
                         let mut input_filter_allows =
                             |outer_frame: &[u8], outer_meta: UserspaceDpMeta| {
@@ -905,14 +906,34 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     }
                                 }
                             };
-                        stage_wg_decap(
+                        match stage_wg_decap(
                             raw_frame,
                             meta,
                             worker_ctx.forwarding,
                             &binding.wg_scratch,
+                            &mut binding.gre_reassembler,
+                            now_ns,
                             &mut input_filter_allows,
-                        )
+                        ) {
+                            crate::afxdp::poll_stages::WgDecapStage::Decapped(m, f) => {
+                                (m, Some(f), false)
+                            }
+                            crate::afxdp::poll_stages::WgDecapStage::NotWg(m) => {
+                                (m, None, false)
+                            }
+                            crate::afxdp::poll_stages::WgDecapStage::FilterDropped => {
+                                (meta, None, true)
+                            }
+                            crate::afxdp::poll_stages::WgDecapStage::Buffered => {
+                                wg_buffered = true;
+                                (meta, None, false)
+                            }
+                        }
                     };
+                    if wg_buffered {
+                        binding.scratch.scratch_recycle.push(desc.addr);
+                        continue;
+                    }
                     if wg_filter_drop {
                         telemetry.counters.touched = true;
                         binding.scratch.scratch_recycle.push(desc.addr);
