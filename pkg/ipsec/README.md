@@ -86,6 +86,11 @@ the apply path pays no fsync (the file is regenerated on every apply).
   (#15194) resolves the IKE connection owning a named SA from the live list
   and issues `swanctl --terminate --ike <conn> --force`; no matching live SA
   is a no-op and a failed list is returned rather than guessed.
+  `TerminateAllSAs` (#15279) attempts every live IKE SA, counts the
+  successful terminates, and returns a joined error naming each connection
+  whose terminate failed (it never reports success over a failed kill);
+  it lists and terminates through the Manager seams
+  (`listSAsForTerminate`/`sc`) like `TerminateConnection`.
 - `PrepareConfig(cfg *config.Config) *config.IPsecConfig` — `policy.go`.
 - `ApplyWithHooks(ipsecCfg, hooks ApplyHooks) error`, `ApplyHooks{Written, Loaded}` and
   `ApplyNotifyLoaded(ipsecCfg, loaded func()) error` — `manager.go`. `Apply` with callbacks
