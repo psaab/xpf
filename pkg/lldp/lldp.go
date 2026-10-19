@@ -192,6 +192,14 @@ type ifSession struct {
 	recvFn func(buf []byte) (int, int, error)
 }
 
+// txProtocol is the protocol argument for the LLDP TX socket. It is 0, not
+// ETH_P_ALL: a non-zero protocol on an unbound AF_PACKET socket registers
+// a global packet tap, so every frame on the host would be cloned to each
+// LLDP TX socket until its receive buffer fills (#15235 A51-04). Sendto
+// supplies the LLDP ethertype and interface explicitly, so TX needs no
+// protocol filter and no bind.
+const txProtocol = 0
+
 // IsAllInterface reports whether name is the Junos `all` wildcard for
 // `protocols lldp interface all` (#14617). Matching is exact and
 // case-sensitive: interface names are case-sensitive kernel names, and
@@ -230,7 +238,7 @@ func newIfSession(iface *net.Interface) (*ifSession, error) {
 	// No SO_RCVTIMEO: recv blocks indefinitely and is unblocked by closing the
 	// fd in close(), not by a polling timeout.
 
-	txFD, err := linuxsock.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htons(unix.ETH_P_ALL)))
+	txFD, err := linuxsock.Socket(unix.AF_PACKET, unix.SOCK_RAW, txProtocol)
 	if err != nil {
 		unix.Close(rxFD)
 		return nil, fmt.Errorf("lldp: tx socket: %w", err)

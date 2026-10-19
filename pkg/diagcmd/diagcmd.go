@@ -12,9 +12,11 @@
 package diagcmd
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // PingRequestOptions is the validated CLI ping selector set. Numeric values
@@ -23,6 +25,41 @@ type PingRequestOptions struct {
 	Target, Source, RoutingInstance string
 	Count, Size                     int
 	SizeSet                         bool
+}
+
+func isRangeErr(err error) bool { return errors.Is(err, strconv.ErrRange) }
+
+// Ping budget shared by the server handlers and the remote CLI client
+// (#15235 A51-02). The server sizes its exec budget as count*1s+15s
+// (30s floor, 150s ceiling); the client must outlive that plus stream
+// slack or a count-100 ping loses its summary when the 60s client
+// deadline fires first.
+const (
+	pingPacketInterval = 1 * time.Second
+	pingExecSlack      = 15 * time.Second
+	pingFloor          = 30 * time.Second
+	pingCeiling        = 150 * time.Second
+	// PingClientSlack is the extra client-side margin over the server
+	// budget for round-trip/stream delivery of the final summary.
+	PingClientSlack = 15 * time.Second
+)
+
+// PingExecTimeout is the server-side request-sized ping budget.
+func PingExecTimeout(count int) time.Duration {
+	d := time.Duration(ClampPingCount(count))*pingPacketInterval + pingExecSlack
+	if d < pingFloor {
+		d = pingFloor
+	}
+	if d > pingCeiling {
+		d = pingCeiling
+	}
+	return d
+}
+
+// PingClientTimeout is the remote-CLI deadline for one Ping RPC: the
+// server budget for the clamped count plus PingClientSlack.
+func PingClientTimeout(count int) time.Duration {
+	return PingExecTimeout(count) + PingClientSlack
 }
 
 // TracerouteRequestOptions is the validated CLI traceroute selector set.
@@ -58,13 +95,25 @@ func ParsePingOptions(args []string) (PingRequestOptions, error) {
 		case "count":
 			n, err := strconv.Atoi(value)
 			if err != nil {
+				if isRangeErr(err) && !strings.HasPrefix(value, "-") {
+					out.Count = MaxPingCount
+					break
+				}
 				return PingRequestOptions{}, fmt.Errorf("ping: invalid count %q: must be a number", value)
 			}
-			out.Count = n
+			out.Count = ClampPingCount(n)
 		case "size":
 			n, err := strconv.Atoi(value)
 			if err != nil {
+				if isRangeErr(err) && !strings.HasPrefix(value, "-") {
+					out.Size = MaxPingSize
+					out.SizeSet = true
+					break
+				}
 				return PingRequestOptions{}, fmt.Errorf("ping: invalid size %q: must be a number", value)
+			}
+			if n > MaxPingSize {
+				n = MaxPingSize
 			}
 			out.Size = n
 			out.SizeSet = true
