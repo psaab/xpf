@@ -75,7 +75,7 @@ func TestOSPFAreaBeltWellFormedByteIdentical_9820(t *testing.T) {
 	got := m.generateProtocols(ospfWellFormed9820(), nil, nil, nil, nil, "", 0, nil, nil)
 	for _, want := range []string{
 		" area 0.0.0.1 stub\n",
-		" area 0.0.0.0 virtual-link 10.0.0.2\n",
+		" area 0.0.0.2 virtual-link 10.0.0.2\n",
 		"interface trust0\n ip ospf area 0.0.0.1\nexit\n",
 	} {
 		if !strings.Contains(got, want) {
@@ -94,8 +94,14 @@ func ospfWellFormed9820() *config.OSPFConfig {
 				{Name: "trust0"},
 			},
 			VirtualLinks: []*config.OSPFVirtualLink{
-				{NeighborID: "10.0.0.2", TransitArea: "0.0.0.0"},
+				// #15016: a VL cannot transit the backbone or a
+				// stub/NSSA area; point it at the normal area below
+				// (the pre-#15016 fixture used transit 0.0.0.0,
+				// exactly the refused backbone shape).
+				{NeighborID: "10.0.0.2", TransitArea: "0.0.0.2"},
 			},
+		}, {
+			ID: "0.0.0.2",
 		}},
 	}
 }
