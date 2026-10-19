@@ -675,7 +675,11 @@ all files stay in `package ipsec`, so the public API is unchanged.
   (`basic` is DH group 1 in Phase-1, `compatible`/`standard` are DH group 2
   — weak by modern standards and possibly not loaded in a hardened
   strongSwan, but expanded faithfully because the operator asked for the
-  legacy set); `suiteb-gcm-128` / `suiteb-gcm-256` are RFC 6379
+  legacy set); on the ESP side `standard` is Junos's group-2 PFS set
+  (g2-esp-3des / g2-esp-aes128), so its members carry DH group 2 and render
+  `-modp1024`, while `basic`/`compatible` carry no PFS — a Junos peer's PFS
+  child rekey otherwise fails NO_PROPOSAL_CHOSEN (#15026);
+  `suiteb-gcm-128` / `suiteb-gcm-256` are RFC 6379
   Suite-B (AES-GCM + ECDSA + ECP group 19/20). An explicit `proposals` list
   wins (proposal-set only fills an empty list); an unknown set keyword is
   rejected by the schema enum at commit. The crypto is an explicit, tested

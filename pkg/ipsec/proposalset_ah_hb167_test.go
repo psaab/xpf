@@ -50,12 +50,17 @@ func TestProposalSetStandardRenders_4297(t *testing.T) {
 		"set security ipsec vpn tun1 bind-interface st0",
 		"set security ipsec vpn tun1 ike ipsec-policy esp-pol",
 	})
-	conn := parseSwanctlDoc(t, New().generateConfig(prepared)).at(t, "connections", "tun1")
+	// #15024: a VPN via a named gateway renders under the gateway-named
+	// connection (gw1), the VPN as its child.
+	conn := parseSwanctlDoc(t, New().generateConfig(prepared)).at(t, "connections", "gw1")
 
 	// Phase-1: 3des-sha1-modp1024 (group2) and aes128-sha1-modp1024, comma-joined.
 	conn.requireMembers(t, "proposals", "3des-sha1-modp1024", "aes128-sha1-modp1024")
 
-	// Phase-2: 3des-sha1 and aes128-sha1, on the CHILD section.
+	// Phase-2: Junos `standard` is the group-2 PFS set (g2-esp-*), so each
+	// member renders its -modp1024 PFS term (#15026). Without DH group 2 on
+	// the ESP members this renders bare 3des-sha1 / aes128-sha1 and a Junos
+	// peer's PFS child rekey fails NO_PROPOSAL_CHOSEN.
 	//
 	// #6824: the old spelling asked whether "3des-sha1" appeared anywhere in
 	// the document -- which the Phase-1 member `3des-sha1-modp1024` satisfies
@@ -67,7 +72,7 @@ func TestProposalSetStandardRenders_4297(t *testing.T) {
 	if len(kids.order) != 1 {
 		t.Fatalf("expected exactly one child SA section, got %v\n%s", kids.childNames(), kids)
 	}
-	kids.at(t, kids.order[0]).requireMembers(t, "esp_proposals", "3des-sha1", "aes128-sha1")
+	kids.at(t, kids.order[0]).requireMembers(t, "esp_proposals", "3des-sha1-modp1024", "aes128-sha1-modp1024")
 }
 
 // V-1: suiteb-gcm-128 renders the RFC 6379 AEAD tokens (aes128gcm16 + ecp256).
@@ -83,7 +88,7 @@ func TestProposalSetSuiteB128Renders_4297(t *testing.T) {
 		"set security ipsec vpn tun1 bind-interface st0",
 		"set security ipsec vpn tun1 ike ipsec-policy esp-sb",
 	})
-	conn := parseSwanctlDoc(t, New().generateConfig(prepared)).at(t, "connections", "tun1")
+	conn := parseSwanctlDoc(t, New().generateConfig(prepared)).at(t, "connections", "gw1")
 	// #6824: `aes128gcm16-ecp256` is not a substring of
 	// `aes128gcm16-prfsha256-ecp256`, so the two old needles did not collide --
 	// but neither said WHICH line carried its token. Pin the phase.
@@ -121,6 +126,8 @@ func TestRenderConfig_AHProposalSkipsVPN_4298(t *testing.T) {
 		},
 	}
 	conns := parseSwanctlDoc(t, New().generateConfig(cfg)).at(t, "connections")
-	conns.hasNoChild(t, "tun-ah")
-	conns.at(t, "tun-esp")
+	// #15024: connections are named by gateway (gw-ah skipped with the AH
+	// VPN; gw-esp survives carrying tun-esp as its child).
+	conns.hasNoChild(t, "gw-ah")
+	conns.at(t, "gw-esp")
 }

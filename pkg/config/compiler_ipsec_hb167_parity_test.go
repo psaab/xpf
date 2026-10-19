@@ -91,11 +91,36 @@ func TestProposalSetStandardExpands_4297(t *testing.T) {
 	if len(esp) != 2 {
 		t.Fatalf("ESP standard set = %d proposals, want 2", len(esp))
 	}
-	if esp[0].Protocol != "esp" || esp[0].EncryptionAlg != "3des-cbc" || esp[0].AuthAlg != "hmac-sha1-96" {
-		t.Errorf("ESP standard[0] = %+v, want esp/3des-cbc/hmac-sha1-96", esp[0])
+	// #15026: Junos `standard` is the group-2 PFS set (g2-esp-*), so both
+	// ESP members carry DH group 2. With group 0 here (pre-fix) these
+	// assertions are RED and the render carried no -modp1024 term.
+	if esp[0].Protocol != "esp" || esp[0].EncryptionAlg != "3des-cbc" || esp[0].AuthAlg != "hmac-sha1-96" || esp[0].DHGroup != 2 {
+		t.Errorf("ESP standard[0] = %+v, want esp/3des-cbc/hmac-sha1-96/g2-PFS", esp[0])
 	}
-	if esp[1].EncryptionAlg != "aes-128-cbc" || esp[1].AuthAlg != "hmac-sha1-96" {
-		t.Errorf("ESP standard[1] = %+v, want aes-128-cbc/hmac-sha1-96", esp[1])
+	if esp[1].EncryptionAlg != "aes-128-cbc" || esp[1].AuthAlg != "hmac-sha1-96" || esp[1].DHGroup != 2 {
+		t.Errorf("ESP standard[1] = %+v, want aes-128-cbc/hmac-sha1-96/g2-PFS", esp[1])
+	}
+}
+
+// #15026 control: `compatible` (and `basic`, covered by
+// TestProposalSetBasicDHGroup1_4297) stays no-PFS — only `standard`
+// gains the group-2 PFS term.
+func TestProposalSetCompatibleStaysNoPFS_15026(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set security ipsec policy esp-c proposal-set compatible",
+	})
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("proposal-set compatible must compile, got: %v", err)
+	}
+	esp := resolvedESP(t, cfg, "esp-c")
+	if len(esp) != 4 {
+		t.Fatalf("ESP compatible set = %d proposals, want 4", len(esp))
+	}
+	for i, p := range esp {
+		if p.DHGroup != 0 {
+			t.Errorf("ESP compatible[%d] = %+v, want no PFS (DHGroup 0)", i, p)
+		}
 	}
 }
 
