@@ -84,6 +84,15 @@ var dupBlockMergeSites9023 = []struct{ parent, keyword string }{
 	{"ospf", "area"},
 	{"ipsec", "policy"},
 	{"dhcp-local-server", "group"},
+	// #15691 residual (G50-02): the v6 twin was omitted, so a repeated
+	// `dhcpv6-local-server group <g>` block overwrote the first in
+	// compileDHCPLocalServer's map assignment instead of merging.
+	{"dhcpv6-local-server", "group"},
+	// #15691: a repeated `pool <name>` block under one group merges
+	// (subnet in one block, range in the next), for both families.
+	// compileDHCPLocalServer also find-or-creates by pool name, so the
+	// merge holds even where this registry does not run.
+	{"group", "pool"},
 }
 
 // dupUnnamedRoutingMergeSites12043 lists the two unnamed-container sites

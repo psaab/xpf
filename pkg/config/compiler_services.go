@@ -548,18 +548,50 @@ func compileDHCPLocalServer(node *Node, dhcp *DHCPServerConfig, isV6 bool) error
 			case "pool":
 				poolName := nodeVal(prop)
 				if poolName != "" {
-					pool := &DHCPPool{Name: poolName}
+					// #15691: find-or-create. A repeated `pool <name>`
+					// block, or one leaf per set line after SetPath
+					// grouping, must merge into ONE pool — the pre-fix
+					// code appended a fresh pool per node, so a compact
+					// or split spelling produced several pools and the
+					// strict gate then read an empty first one.
+					var pool *DHCPPool
+					for _, existing := range group.Pools {
+						if existing.Name == poolName {
+							pool = existing
+							break
+						}
+					}
+					if pool == nil {
+						pool = &DHCPPool{Name: poolName}
+						group.Pools = append(group.Pools, pool)
+					}
 					poolChildren := prop.Children
 					if len(prop.Keys) < 2 && len(prop.Children) > 0 {
 						poolChildren = prop.Children[0].Children
 					}
+					// #15691: a compact pool line (`pool p1 subnet ...
+					// router ...;`) packs its leaves onto prop's own
+					// tail or nests them under the first leaf. Expand
+					// with the live pool schema so every packed leaf
+					// becomes a sibling this loop reads; braced and
+					// flat-set shapes are already siblings and pass
+					// through unchanged.
+					// packedBodyChildren returns the node's own
+					// Children when there is no packed tail, so this
+					// is safe for braced and flat-set shapes; the
+					// nested-run expansion then hoists any leaf a
+					// compact line nested under the first leaf.
+					poolChildren = packedBodyChildren(prop, dhcpPoolSchema15691(isV6))
+					poolChildren = expandRunChildren9235(poolChildren, dhcpPoolSchema15691(isV6))
 					for _, pp := range poolChildren {
 						switch pp.Name() {
 						case "address-range":
-							if len(pp.Keys) >= 5 && pp.Keys[1] == "low" && pp.Keys[3] == "high" {
-								pool.RangeLow = pp.Keys[2]
-								pool.RangeHigh = pp.Keys[4]
-							}
+							// #15691: every range spelling — packed
+							// `low <ip> high <ip>` in either order, the
+							// two-line set pair (one bound per node),
+							// and braced child leaves. The pre-fix
+							// len>=5 packed check dropped the last two.
+							applyDHCPAddressRange15691(pool, pp)
 						case "subnet":
 							pool.Subnet = nodeVal(pp)
 						case "router":
@@ -615,7 +647,6 @@ func compileDHCPLocalServer(node *Node, dhcp *DHCPServerConfig, isV6 bool) error
 							}
 						}
 					}
-					group.Pools = append(group.Pools, pool)
 				}
 			}
 		}

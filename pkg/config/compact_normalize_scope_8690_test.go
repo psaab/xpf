@@ -544,15 +544,14 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 			"accepted either way. A leaf GROUP whose later member is spelled tcp-rst is different: the " +
 			"fold reads that member as the flag and the zone is silently lost, a pre-existing loss this gate " +
 			"cannot see after the fold (measured at ed313e4c9; #9635).",
-		"system services dhcp-local-server group xpfarg pool xpfarg static-binding xpfarg fixed-address": "the gate refuses the CONSEQUENCE of the " +
-			"drop. Measured with the pass disabled, elided `static-binding b1 " +
-			"fixed-address 10.0.1.50;` loses the address and the compiler rejects with " +
-			"\"static-binding \\\"b1\\\" has no fixed-address — a reservation cannot be " +
-			"empty\"; with the pass enabled it survives and the same gate accepts. " +
-			"Braced is accepted either way. ONE key covers the dhcp and dhcpv6 twins " +
-			"because they share dhcpStaticBindingSchema(); the v4 twin is what this arm " +
-			"grades, and the v6 twin is hand-measured in knownFixtureLimited8690 " +
-			"because the census fixture cannot give it a type-valid address.",
+		// #15691: the former `... pool xpfarg static-binding xpfarg
+		// fixed-address` benign entry is deleted. It graded the elided
+		// spelling against the #2243 "has no fixed-address" gate, but
+		// the census fixture for that site carries no pool subnet, so
+		// since #15029 both spellings are refused earlier by the
+		// missing-subnet gate and the site no longer disarms anything.
+		// The elided static-binding spelling itself still compiles
+		// (pinned by TestDHCPStaticBindingFlatSet / the #9235 reader).
 		"snmp trap-group xpfarg targets": "the gate refuses the CONSEQUENCE of the drop, not " +
 			"the spelling. Measured: with the pass disabled the elided " +
 			"`trap-group tg1 targets 10.0.0.1;` loses its targets and snmp rejects with " +
@@ -1192,6 +1191,20 @@ var knownFixtureLimited8690 = map[string]string{
 		"admitted at that time. It is live NOW, in this commit, because this change " +
 		"admits it.",
 
+	// #15691: the v4 twin of the site below. The census fixture for
+	// `... pool xpfarg static-binding xpfarg fixed-address` supplies no
+	// pool subnet, so with the pass enabled it fails the #15029
+	// missing-subnet validator instead of grading the #2243 gate.
+	// Hand-measured with a subnet present: braced compiles both ways;
+	// elided is refused without the pass ("has no fixed-address") and
+	// compiles with it — the gate refuses the drop the pass repairs.
+	"system services dhcp-local-server group xpfarg pool xpfarg static-binding xpfarg fixed-address": "HAND-MEASURED: " +
+		"BENIGN, and the twin of the dhcpv6-local-server site below. With a pool " +
+		"subnet present, elided `static-binding b1 fixed-address 10.0.1.50;` is " +
+		"refused without the pass (\"has no fixed-address — a reservation cannot be " +
+		"empty\") and compiles with it; BRACED is accepted both ways. The census " +
+		"fixture cannot grade it because it supplies no subnet, so both spellings " +
+		"are refused earlier by the #15029 missing-subnet gate.",
 	"system services dhcpv6-local-server group xpfarg pool xpfarg static-binding xpfarg fixed-address": "HAND-MEASURED: " +
 		"BENIGN, and the twin of the dhcp-local-server site this arm grades " +
 		"directly. With a real IPv6 address, elided `static-binding b1 fixed-address " +
