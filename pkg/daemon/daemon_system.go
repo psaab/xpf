@@ -1210,18 +1210,18 @@ func (d *Daemon) applyKernelTuning(cfg *config.Config) {
 	applyNoRedirectsPosture()
 
 	// system { internet-options { no-ipv6-reject-zero-hop-limit; } }
-	// Normally Linux drops IPv6 packets with hop-limit=0 and sends ICMPv6
-	// time exceeded. This sysctl raises the ratelimit to effectively
-	// accept them without generating errors (Junos compatibility).
-	if cfg.System.InternetOptions != nil && cfg.System.InternetOptions.NoIPv6RejectZeroHopLimit {
-		path := "/proc/sys/net/ipv6/icmp/ratelimit"
-		current, _ := os.ReadFile(path)
-		if strings.TrimSpace(string(current)) != "0" {
-			if err := os.WriteFile(path, []byte("0\n"), 0644); err != nil {
-				slog.Warn("failed to set sysctl", "path", path, "err", err)
-			}
-		}
-	}
+	// #15707: this knob suppresses the ICMPv6 Time Exceeded a hop-limit=0
+	// packet would otherwise draw. The userspace dataplane enforces it
+	// from the snapshot (ForwardingState.no_ipv6_reject_zero_hop_limit);
+	// the kernel path must NOT be touched: writing 0 to
+	// /proc/sys/net/ipv6/icmp/ratelimit DISABLES ICMPv6 error rate
+	// limiting entirely (0 = unlimited in icmpv6_xrlim_allow), the
+	// opposite of suppressing one error class, and the old code never
+	// restored it on unset. Reconcile the knob back to the kernel
+	// default (1000 ms) whenever this daemon previously zeroed it, so
+	// deleting the stanza — or never having set it after an older
+	// binary zeroed it — leaves rate limiting intact.
+	reconcileICMPv6Ratelimit()
 
 	// Kernel TRANSIT forwarding, gated on the arm (#5275) and, since #9725, a
 	// live XDP link proven by a fresh kernel census.
@@ -1231,6 +1231,32 @@ func (d *Daemon) applyKernelTuning(cfg *config.Config) {
 	// apply/writer call sites.
 	d.evaluateArmCoverage("apply")
 	d.reassertTransitGate("apply-tail")
+}
+
+// icmpv6RatelimitPath is the kernel ICMPv6 error rate-limit knob
+// (milliseconds; 0 = unlimited). Overridable in tests.
+var icmpv6RatelimitPath = "/proc/sys/net/ipv6/icmp/ratelimit"
+
+// defaultICMPv6Ratelimit is the kernel default (1000 ms, net/ipv6/icmp.c).
+const defaultICMPv6Ratelimit = "1000"
+
+// reconcileICMPv6Ratelimit repairs the damage the pre-#15707
+// applyKernelTuning did: it wrote "0" (rate limiting DISABLED) when
+// `no-ipv6-reject-zero-hop-limit` was set and never restored it. If the
+// knob is still at 0, restore the kernel default; any other value is
+// the operator's/kernel's own and is left alone. Best-effort: a failed
+// write is logged, never fatal to the apply.
+func reconcileICMPv6Ratelimit() {
+	current, err := os.ReadFile(icmpv6RatelimitPath)
+	if err != nil {
+		return
+	}
+	if strings.TrimSpace(string(current)) != "0" {
+		return
+	}
+	if err := os.WriteFile(icmpv6RatelimitPath, []byte(defaultICMPv6Ratelimit+"\n"), 0644); err != nil {
+		slog.Warn("failed to restore sysctl", "path", icmpv6RatelimitPath, "err", err)
+	}
 }
 
 // sshKnownHostsPath is the OpenSSH global known-hosts file xpfd owns and fully

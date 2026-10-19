@@ -452,6 +452,11 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) fabric_skips: Vec<FabricLinkSkip>,
     pub(in crate::afxdp) allow_dns_reply: bool,
     pub(in crate::afxdp) allow_embedded_icmp: bool,
+    /// #15707: `system internet-options no-ipv6-reject-zero-hop-limit`.
+    /// When true, `build_local_time_exceeded_v6` must not originate an
+    /// ICMPv6 Time Exceeded for a packet whose hop limit expired at zero
+    /// (the Junos no-reject posture). IPv4 TTL handling is unaffected.
+    pub(in crate::afxdp) no_ipv6_reject_zero_hop_limit: bool,
     /// `security flow allow-unstamped-fabric-ingress` preserves the historical
     /// domain-0 behavior for absent fabric stamps on routing-instance nodes.
     /// False is fail-closed; single-table deployments still retain legacy

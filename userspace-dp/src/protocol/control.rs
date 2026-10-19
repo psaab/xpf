@@ -283,7 +283,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v59 -> v60 (#15678): NAT64RuleSnapshot carries from_zone /
 // from_routing_instance / source_addresses ingress scoping; a v59 helper
 // ignores them and translates for every zone/VRF/source — the defect.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 60;
+// v60 -> v61 (#15707): ConfigSnapshot carries
+// no_ipv6_reject_zero_hop_limit; a v60 helper ignores it and keeps
+// originating ICMPv6 Time Exceeded for hop-limit=0 packets.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 61;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

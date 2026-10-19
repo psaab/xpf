@@ -194,6 +194,22 @@ pub(super) fn packet_ttl_would_expire(frame: &[u8], meta: UserspaceDpMeta) -> Op
     }
 }
 
+/// #15707: the IPv6 hop limit carried by `frame`, or `None` when the
+/// frame is not a parseable IPv6 packet. Used to distinguish a packet
+/// that ARRIVED with hop limit 0 (the `no-ipv6-reject-zero-hop-limit`
+/// case) from one that merely expires after the forwarding decrement
+/// (hop limit 1).
+pub(super) fn packet_hop_limit_v6(frame: &[u8], meta: UserspaceDpMeta) -> Option<u8> {
+    if meta.addr_family as i32 != libc::AF_INET6 {
+        return None;
+    }
+    let l3 = match meta.l3_offset {
+        14 | 18 => meta.l3_offset as usize,
+        _ => frame_l3_offset(frame)?,
+    };
+    frame.get(l3 + 7).copied()
+}
+
 pub(super) fn build_local_time_exceeded_request(
     frame: &[u8],
     desc: XdpDesc,
@@ -208,6 +224,16 @@ pub(super) fn build_local_time_exceeded_request(
     counters: &mut BatchCounters,
 ) -> Option<PendingForwardRequest> {
     if !matches!(packet_ttl_would_expire(frame, meta), Some(true)) {
+        return None;
+    }
+    // #15707: `system internet-options no-ipv6-reject-zero-hop-limit` —
+    // a packet that arrived with hop limit 0 must not draw an ICMPv6
+    // Time Exceeded (the Junos no-reject posture). A hop-limit-1 packet
+    // still expires normally. The trigger packet's disposition is
+    // unchanged (dropped here either way); only the error is suppressed.
+    if forwarding.no_ipv6_reject_zero_hop_limit
+        && packet_hop_limit_v6(frame, meta) == Some(0)
+    {
         return None;
     }
     // #2237: RFC 1812 §4.3.2.7 / RFC 4443 §2.4 suppression — do not
@@ -591,6 +617,14 @@ pub(super) fn build_local_time_exceeded_v6(
     ingress_ifindex: i32,
     forwarding: &ForwardingState,
 ) -> Option<Vec<u8>> {
+    // #15707: `no-ipv6-reject-zero-hop-limit` suppresses the ICMPv6 Time
+    // Exceeded for a packet that arrived with hop limit 0. Direct
+    // callers of this builder get the same posture as the request path.
+    if forwarding.no_ipv6_reject_zero_hop_limit
+        && packet_hop_limit_v6(frame, meta) == Some(0)
+    {
+        return None;
+    }
     // ICMPv6 Time Exceeded: type 3, code 0.
     build_local_icmp_error_v6(frame, meta, ingress_ifindex, forwarding, 3, 0)
 }

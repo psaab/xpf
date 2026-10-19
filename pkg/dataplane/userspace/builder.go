@@ -280,7 +280,9 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg *con
 		// dataplane so a default-PERMIT session emits session-init/close records.
 		DefaultLogSessionInit:  cfg.Security.DefaultPolicyLogSessionInit,
 		DefaultLogSessionClose: cfg.Security.DefaultPolicyLogSessionClose,
-		Policies:               policies,
+		// #15707: `system internet-options no-ipv6-reject-zero-hop-limit`
+		// suppresses the helper's ICMPv6 Time Exceeded for hop-limit=0.
+		NoIPv6RejectZeroHopLimit: cfg.System.InternetOptions != nil && cfg.System.InternetOptions.NoIPv6RejectZeroHopLimit,
 		PolicyRematchExtensive: cfg.Security.PolicyRematchExtensive,
 		// #3303: thread feedOverlay into the NAT builders so a NAT rule scoped
 		// to a feed-backed `match {source,destination}-address-name` resolves the

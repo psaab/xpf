@@ -694,8 +694,23 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			if sys.InternetOptions == nil {
 				sys.InternetOptions = &InternetOptionsConfig{}
 			}
+			// #15707: accept the leaf in every spelling — braced child,
+			// packed on the internet-options line (`internet-options
+			// no-ipv6-reject-zero-hop-limit;`, whose tokens ride
+			// child.Keys[1:]), or nested under a packed run. FindChild
+			// alone dropped the compact spelling.
 			if child.FindChild("no-ipv6-reject-zero-hop-limit") != nil {
 				sys.InternetOptions.NoIPv6RejectZeroHopLimit = true
+			}
+			for _, k := range child.Keys[1:] {
+				if k == "no-ipv6-reject-zero-hop-limit" {
+					sys.InternetOptions.NoIPv6RejectZeroHopLimit = true
+				}
+			}
+			for _, c := range packedBodyChildren(child, schemaForPath("system", "internet-options")) {
+				if c.Name() == "no-ipv6-reject-zero-hop-limit" {
+					sys.InternetOptions.NoIPv6RejectZeroHopLimit = true
+				}
 			}
 		case "dataplane":
 			switch effectiveDataplaneType(sys.DataplaneType) {
@@ -3331,6 +3346,12 @@ func collectInternetOptionsExtras13089(n *Node, extra *[]string) {
 	for _, c := range n.Children {
 		if c.Name() != "no-ipv6-reject-zero-hop-limit" {
 			*extra = append(*extra, c.Name())
+		} else if len(c.Keys) > 1 {
+			// #15707: a packed tail on the modelled leaf itself
+			// (`no-ipv6-reject-zero-hop-limit tcp-mss 1400`, the flat-set
+			// chain / compact shape) — its head is an unmodelled extra
+			// even though the leaf node is the modelled one.
+			*extra = append(*extra, c.Keys[1])
 		}
 		collectInternetOptionsExtras13089(c, extra)
 	}

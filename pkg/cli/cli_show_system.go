@@ -1186,7 +1186,15 @@ func (c *CLI) handleShowSystem(args []string) error {
 		if cfg == nil {
 			return fmt.Errorf("no active configuration")
 		}
-		fmt.Print(c.showActiveConfigPath([]string{"system", "internet-options"}))
+		// #15707: render the same typed view as the gRPC path
+		// (server_show_system.go showInternetOptions) instead of the raw
+		// config text, so local CLI and gRPC agree on the knob's state.
+		if cfg.System.InternetOptions == nil {
+			fmt.Print("No internet-options configured\n")
+			return nil
+		}
+		fmt.Print("Internet options:\n")
+		fmt.Printf("  no-ipv6-reject-zero-hop-limit: %s\n", enabledStr(cfg.System.InternetOptions.NoIPv6RejectZeroHopLimit))
 		return nil
 
 	case "root-authentication":
