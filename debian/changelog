@@ -1,5 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Fail closed on L2 interface families: authored content under
+    `family ethernet-switching` / `family bridge` (interface-mode/
+    port-mode, native VLAN, vlan members) and policer/sample bindings
+    under any address family the interface compiler does not build
+    (only inet/inet6 are built) now reject at strict commit and warn
+    on tolerant load, instead of committing as warned no-ops that
+    bypassed the #12090/#12656 filter/policer guards. Bare families
+    with no authored content keep the warn-only posture (#15654).
   * Stop reporting authoritative zero traffic for VLAN subinterfaces
     in userspace mode: ReadInterfaceCounters resolved only the exact
     BindingStatus.Ifindex, which the helper sets solely on the parent

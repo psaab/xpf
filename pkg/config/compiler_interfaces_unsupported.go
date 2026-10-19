@@ -29,6 +29,14 @@ import (
 //     `filter`, and `simple-filter` are not consumed by an InterfaceUnit hook.
 //     Only one-name `filter input|output` under family inet|inet6 is wired;
 //     every other spelling would silently leave the interface unfiltered.
+//   - #15654: L2 content under `family ethernet-switching` / `family bridge`
+//     (interface-mode/port-mode, native VLAN, `vlan members`/`vlan-id`), and
+//     policer/sample bindings under every AF compileInterfaces does not
+//     build (only inet/inet6 are built; feature-gaps.md Transparent Mode:
+//     Missing). The access/trunk VLAN intent compiled to nothing, and
+//     policers under those families bypassed the #12656 policer arm —
+//     which named only mpls/any even though its AF list already admitted
+//     bridge/ethernet-switching and the other unconsumed AFs.
 //   - #2354 / #5879: a QinQ / stacked-VLAN (802.1ad S-tag + 802.1Q C-tag)
 //     inner tag. The AF_XDP shim's parse_l2 unwinds exactly ONE VLAN tag,
 //     so a double-tagged frame keeps eth_proto=0x8100 → the dispatch `_`
@@ -337,6 +345,20 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 									bindings = append(bindings, "policer "+leaf.Name())
 								}
 							}
+						case "sample":
+							// Junos `sample` (no -ing) is the L2-family
+							// sampling spelling; same unconsumed-binding
+							// class as `filter`/`policer`. #15654.
+							for i := 1; i < len(child.Keys); i++ {
+								if child.Keys[i] == "input" || child.Keys[i] == "output" {
+									bindings = append(bindings, "sample "+child.Keys[i])
+								}
+							}
+							for _, leaf := range child.Children {
+								if leaf.Name() == "input" || leaf.Name() == "output" {
+									bindings = append(bindings, "sample "+leaf.Name())
+								}
+							}
 						case "filter":
 							for i := 1; i < len(child.Keys); i++ {
 								if isFilterDirection12090(child.Keys[i]) {
@@ -360,6 +382,18 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 						}
 						continue
 					}
+					// #15654: align the unsupported-AF validator with the
+					// AFs compileInterfaces actually builds (inet/inet6
+					// only). Filter/policer/sample bindings under every
+					// other named AF (ethernet-switching/bridge L2
+					// families, ccc/tcc/vpls/evpn/iso/inet-vpn, ...) and
+					// authored L2 VLAN content previously bypassed this
+					// arm (it named only mpls/any for policer) and compiled
+					// to nothing. Filter keeps its single #12090 diagnostic
+					// (the keyword walk above already rejects it); the
+					// remaining bindings and any L2 content fail closed
+					// here with #15654. A bare family with no content
+					// stays on the #10707 warn-only path (#15199).
 					if afName == "mpls" || afName == "any" {
 						for _, binding := range bindings {
 							if strings.HasPrefix(binding, "policer ") {
@@ -367,6 +401,31 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 									"interfaces %s unit %s family %s: `%s` is not supported "+
 										"(xpf has no consumer for this interface binding; remove it) (#12656)",
 									ifName, unitID, afName, binding); err != nil {
+									return nil, err
+								}
+							}
+						}
+					}
+					// Every remaining named AF in the admitted list is
+					// unconsumed (mpls/any policer stays #12656 above).
+					if afName != "mpls" && afName != "any" {
+						for _, binding := range bindings {
+							if strings.HasPrefix(binding, "filter ") {
+								continue
+							}
+							if err := emit(
+								"interfaces %s unit %s family %s: `%s` is not supported "+
+									"(xpf has no consumer for this interface binding; remove it) (#15654)",
+								ifName, unitID, afName, binding); err != nil {
+								return nil, err
+							}
+						}
+						if afName == "ethernet-switching" || afName == "bridge" {
+							if label, ok := l2FamilyContentLabel15654(af); ok {
+								if err := emit(
+									"interfaces %s unit %s family %s: `%s` is not supported "+
+										"(xpf has no L2 switching/bridging consumer for this family; remove it) (#15654)",
+									ifName, unitID, afName, label); err != nil {
 									return nil, err
 								}
 							}
@@ -1121,4 +1180,51 @@ func unitHasMACDescendant(unit *Node) bool {
 		}
 	}
 	return false
+}
+
+// l2FamilyContentLabel15654 reports the first authored L2 statement under
+// a `family ethernet-switching` / `family bridge` AF node, across the
+// flat-set packed Keys tail, hierarchical children, and the split
+// `family { ethernet-switching { ... } }` child-AF shape (whose AF node
+// may itself be pasted). The packed scan keys only on the known L2
+// keyword heads before the first `vlan members` value tail, so a member
+// VALUE spelled `filter` is never reported as content. Returns the fixed
+// keyword label (never an operator-authored value such as a VLAN member
+// name) and whether any L2 content was authored. #15654.
+func l2FamilyContentLabel15654(af *Node) (string, bool) {
+	if af == nil {
+		return "", false
+	}
+	start := 1
+	if af.Name() == "family" && len(af.Keys) > 1 {
+		start = 2
+	}
+	for i := start; i < len(af.Keys); i++ {
+		switch af.Keys[i] {
+		case "interface-mode", "port-mode":
+			return af.Keys[i], true
+		case "native-vlan-id":
+			return "native-vlan-id", true
+		case "vlan":
+			return "vlan members", true
+		case "vlan-id":
+			return "vlan-id", true
+		}
+	}
+	for _, child := range af.Children {
+		if child == nil {
+			continue
+		}
+		switch child.Name() {
+		case "interface-mode", "port-mode":
+			return child.Name(), true
+		case "native-vlan-id":
+			return "native-vlan-id", true
+		case "vlan-id":
+			return "vlan-id", true
+		case "vlan":
+			return "vlan members", true
+		}
+	}
+	return "", false
 }

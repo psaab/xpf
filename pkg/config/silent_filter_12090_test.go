@@ -424,26 +424,12 @@ func testFilterKeywordValueCases12090(t *testing.T) {
 		set  string
 		hier string
 	}{
-		{
-			name: "vlan-member-braced",
-			set:  "set interfaces ge-0/0/0 unit 0 family ethernet-switching vlan members filter",
-			hier: "interfaces { ge-0/0/0 { unit 0 { family ethernet-switching { vlan { members filter; } } } } }",
-		},
-		{
-			name: "vlan-member-list-braced",
-			set:  "set interfaces ge-0/0/0 unit 0 family ethernet-switching vlan members [ filter v20 ]",
-			hier: "interfaces { ge-0/0/0 { unit 0 { family ethernet-switching { vlan { members [ filter v20 ]; } } } } }",
-		},
-		{
-			name: "vlan-member-singleton-list",
-			set:  "set interfaces ge-0/0/0 unit 0 family ethernet-switching vlan members [ filter ]",
-			hier: "interfaces { ge-0/0/0 { unit 0 { family ethernet-switching { vlan { members [ filter ]; } } } } }",
-		},
-		{
-			name: "vlan-member-simple-filter",
-			set:  "set interfaces ge-0/0/0 unit 0 family ethernet-switching vlan members simple-filter",
-			hier: "interfaces { ge-0/0/0 { unit 0 { family ethernet-switching { vlan { members simple-filter; } } } } }",
-		},
+		// #15654: the former vlan-member-* rows used real
+		// ethernet-switching VLAN content as the carrier for the
+		// filter-as-value contract. That content now fails closed
+		// under #15654, so the value contract is exercised with the
+		// memberless-range row below and the #15654 gate tests assert
+		// that no #15654 diagnostic ever names the member VALUE.
 		{
 			name: "memberless-vlan-members",
 			set:  "set interfaces interface-range r vlan members filter",
