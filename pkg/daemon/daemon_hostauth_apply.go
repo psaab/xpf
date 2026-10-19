@@ -339,7 +339,7 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 				var shellClaim ownershipClaim
 				if uidOK {
 					var claimErr error
-					if shellClaim, claimErr = claimOwnership(provisionedShellsDir(), user.Name, uidForShell); claimErr != nil {
+					if shellClaim, claimErr = claimOwnershipFenced14969(provisionedShellsDir(), user.Name, uidForShell); claimErr != nil {
 						slog.Warn("skipping login shell update: cannot record shell ownership marker",
 							"user", user.Name, "err", claimErr)
 						fail(fmt.Errorf("mark shell provisioned %s: %w", user.Name, claimErr))
@@ -414,7 +414,7 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 			// key marker gates os.Remove(authorized_keys) below, so a marker
 			// left behind by a write that never happened makes a later
 			// directive removal delete an operator's pre-existing key file.
-			keyClaim, err := claimOwnership(provisionedKeysDir(), user.Name, uid)
+			keyClaim, err := claimOwnershipFenced14969(provisionedKeysDir(), user.Name, uid)
 			if err != nil {
 				slog.Warn("skipping authorized_keys apply: cannot record key ownership marker",
 					"user", user.Name, "err", err)
@@ -439,7 +439,7 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 				fail(fmt.Errorf("refuse symlinked .ssh for %s: %w", user.Name, err))
 				continue
 			}
-			if err := fsatomic.MkdirAllDurable(sshDir, 0700); err != nil {
+			if err := guardedMkdirAllDurable14969(sshDir, 0700); err != nil {
 				slog.Warn("failed to create .ssh dir", "user", user.Name, "dir", sshDir, "err", err)
 				keyClaim.rollback() // #6797: no key file was written
 				fail(fmt.Errorf("create .ssh dir for %s: %w", user.Name, err))
@@ -495,7 +495,7 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 				// rename so the file is correctly-owned at install time —
 				// closing the crash window that would otherwise leave
 				// root-owned 0600 keys sshd refuses (EACCES → lockout).
-				if err := fsatomic.WriteFileDurable(keysFile, []byte(keysContent), 0600, fsatomic.WithOwner(uid, gid)); err != nil {
+				if err := guardedWriteFileDurable14969(keysFile, []byte(keysContent), 0600, fsatomic.WithOwner(uid, gid)); err != nil {
 					slog.Warn("failed to write authorized_keys",
 						"user", user.Name, "err", err)
 					keyClaim.rollback() // #6797: the key file was not written
@@ -555,7 +555,7 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 						if liveUser, liveDesired := d.liveDesiredLoginUser12169(user.Name); liveDesired && len(liveUser.SSHKeys) > 0 {
 							staleRevocationSuperseded12169("repair-retained-user-keys", user.Name)
 							fail(restoreLiveLoginKeys(user.Name))
-						} else if err := removeProvenanceMarker(provisionedKeysDir(), user.Name); err != nil {
+						} else if err := removeProvenanceMarkerFenced14969(provisionedKeysDir(), user.Name); err != nil {
 							fail(fmt.Errorf("remove key marker for %s: %w", user.Name, err))
 						} else if liveUser, liveDesired := d.liveDesiredLoginUser12169(user.Name); liveDesired && len(liveUser.SSHKeys) > 0 {
 							staleRevocationSuperseded12169("restore-retained-user-keys-after-marker-cleanup", user.Name)
@@ -567,7 +567,7 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 						if liveUser, liveDesired := d.liveDesiredLoginUser12169(user.Name); liveDesired && len(liveUser.SSHKeys) > 0 {
 							staleRevocationSuperseded12169("repair-retained-user-keys", user.Name)
 							fail(restoreLiveLoginKeys(user.Name))
-						} else if err := removeProvenanceMarker(provisionedKeysDir(), user.Name); err != nil {
+						} else if err := removeProvenanceMarkerFenced14969(provisionedKeysDir(), user.Name); err != nil {
 							fail(fmt.Errorf("remove key marker for %s: %w", user.Name, err))
 						} else if liveUser, liveDesired := d.liveDesiredLoginUser12169(user.Name); liveDesired && len(liveUser.SSHKeys) > 0 {
 							staleRevocationSuperseded12169("restore-retained-user-keys-after-marker-cleanup", user.Name)
@@ -733,7 +733,7 @@ func (d *Daemon) reconcileSudoers(cfg *config.Config) (err error) {
 			continue
 		}
 		path := filepath.Join(sudoersDir, name)
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		if err := guardedRemove14969(path); err != nil && !os.IsNotExist(err) {
 			slog.Warn("failed to revoke stale sudoers grant",
 				"file", name, "err", err)
 			fail(fmt.Errorf("revoke stale sudoers grant %s: %w", name, err))
@@ -775,13 +775,13 @@ func writeSudoersGrant(user string) error {
 	}
 	// DurableState: a torn or lost sudoers file is a management-access
 	// (sudo) hazard, so it must survive a power cut.
-	if err := fsatomic.WriteFileDurable(path, []byte(line), 0440); err != nil {
+	if err := guardedWriteFileDurable14969(path, []byte(line), 0440); err != nil {
 		return err
 	}
 	if err := validateSudoersFile(path); err != nil {
 		// Fail closed toward availability of sudo itself: never leave an
 		// invalid drop-in that would break every sudo invocation.
-		os.Remove(path)
+		guardedRemove14969(path)
 		return fmt.Errorf("generated sudoers grant rejected: %w", err)
 	}
 	return nil
@@ -838,7 +838,7 @@ func (d *Daemon) reconcileUserPassword(user *config.LoginUser) (err error) {
 		var pwClaim, acctClaim ownershipClaim
 		if uidOK {
 			var err error
-			if pwClaim, err = claimOwnership(provisionedPasswordsDir(), user.Name, curUID); err != nil {
+			if pwClaim, err = claimOwnershipFenced14969(provisionedPasswordsDir(), user.Name, curUID); err != nil {
 				slog.Warn("skipping password apply: cannot record password ownership marker",
 					"user", user.Name, "err", err)
 				// Fail-visible for the #5874 closeout: chpasswd was skipped, so
@@ -846,7 +846,7 @@ func (d *Daemon) reconcileUserPassword(user *config.LoginUser) (err error) {
 				fail(fmt.Errorf("mark password provisioned %s: %w", user.Name, err))
 				break
 			}
-			if acctClaim, err = claimOwnership(provisionedUsersDir, user.Name, curUID); err != nil {
+			if acctClaim, err = claimOwnershipFenced14969(provisionedUsersDir, user.Name, curUID); err != nil {
 				slog.Warn("skipping password apply: cannot record account marker",
 					"user", user.Name, "err", err)
 				pwClaim.rollback() // the password mutation will not run
@@ -953,8 +953,8 @@ func sshdLegacyConfPath() string {
 // Mirrors the listenFn/ensureLinkLocalFn seam in pkg/ra.
 var (
 	sshdReadFile   = os.ReadFile
-	sshdWriteFile  = fsatomic.WriteFileAtomic
-	sshdRemoveFile = os.Remove
+	sshdWriteFile  = guardedWriteFileAtomic14969
+	sshdRemoveFile = guardedRemove14969
 	sshdMkdirAll   = os.MkdirAll
 	sshdReloadCmd  = func() ([]byte, error) {
 		return runCommandTimeout("systemctl", "reload", "sshd")
@@ -1515,7 +1515,7 @@ func (d *Daemon) applyRootAuth(cfg *config.Config) (retErr error) {
 		// whichever THIS pass created. The key marker gates the root
 		// authorized_keys removal below, so a stale claim deletes an
 		// operator-installed root key file xpf never wrote.
-		rootKeyClaim, err := claimOwnership(provisionedKeysDir(), "root", 0)
+		rootKeyClaim, err := claimOwnershipFenced14969(provisionedKeysDir(), "root", 0)
 		if err != nil {
 			slog.Warn("skipping root authorized_keys apply: cannot record key ownership marker", "err", err)
 			// Fail-visible for the #5874 closeout: root's key write was skipped,
@@ -1524,7 +1524,7 @@ func (d *Daemon) applyRootAuth(cfg *config.Config) (retErr error) {
 			fail(fmt.Errorf("mark root key provisioned: %w", err))
 			return
 		}
-		rootAcctClaim, err := claimOwnership(provisionedUsersDir, "root", 0)
+		rootAcctClaim, err := claimOwnershipFenced14969(provisionedUsersDir, "root", 0)
 		if err != nil {
 			slog.Warn("skipping root authorized_keys apply: cannot record account marker", "err", err)
 			rootKeyClaim.rollback() // the key write will not run
@@ -1534,7 +1534,7 @@ func (d *Daemon) applyRootAuth(cfg *config.Config) (retErr error) {
 		// MkdirAllDurable: root authorized_keys is DurableState written into
 		// this dir, so the dir's own entry must survive a power cut too
 		// (Codex r1).
-		if err := fsatomic.MkdirAllDurable(rootSSHDir, 0700); err != nil {
+		if err := guardedMkdirAllDurable14969(rootSSHDir, 0700); err != nil {
 			slog.Warn("failed to create /root/.ssh dir", "err", err)
 			rootKeyClaim.rollback() // #6797: no key file was written
 			rootAcctClaim.rollback()
@@ -1550,7 +1550,7 @@ func (d *Daemon) applyRootAuth(cfg *config.Config) (retErr error) {
 			// DurableState: root SSH access must survive a power cut.
 			// WithOwner(0,0) is harmless/explicit (root keys are already
 			// uid 0) and keeps the install correctly-owned at rename.
-			if err := fsatomic.WriteFileDurable(keysFile, []byte(keysContent), 0600, fsatomic.WithOwner(0, 0)); err != nil {
+			if err := guardedWriteFileDurable14969(keysFile, []byte(keysContent), 0600, fsatomic.WithOwner(0, 0)); err != nil {
 				slog.Warn("failed to write root authorized_keys", "err", err)
 				rootKeyClaim.rollback() // #6797: the key file was not written
 				rootAcctClaim.rollback()
@@ -1577,7 +1577,7 @@ func (d *Daemon) applyRootAuth(cfg *config.Config) (retErr error) {
 			fail(restoreLiveRootAuth())
 		} else {
 			keysFile := rootAuthorizedKeysPath()
-			switch err := os.Remove(keysFile); {
+			switch err := guardedRemove14969(keysFile); {
 			case err == nil:
 				slog.Info("revoked root SSH keys (root-authentication keys removed from config)")
 			case os.IsNotExist(err):
@@ -1591,7 +1591,7 @@ func (d *Daemon) applyRootAuth(cfg *config.Config) (retErr error) {
 				staleRevocationSuperseded12169("repair-root-keys", "root")
 				fail(restoreLiveRootAuth())
 			} else {
-				fail(removeProvenanceMarker(provisionedKeysDir(), "root"))
+				fail(removeProvenanceMarkerFenced14969(provisionedKeysDir(), "root"))
 				// A promotion can race the key-marker unlink itself. Re-run
 				// root auth under applySem to restore live keys and ownership.
 				if current := d.liveDesiredRootAuth12169(); current != nil && len(current.SSHKeys) > 0 {

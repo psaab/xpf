@@ -35,14 +35,15 @@ type hostAuthOwnerOutcome struct {
 // hostAuthCloseoutBudget bounds the TOTAL wall-clock time the #5643/M35 cancel
 // closeout may spend reconciling host authorization. It is a backstop against a
 // wedged reconciler hanging the daemon-stop path: each external command already
-// carries its own 15s(+5s) ceiling (externalCommandTimeout), but the closeout
-// fans across two nft loads plus five credential reconcilers, so a per-command
-// timeout does not bound the sum. On the cancel path boundedness beats
-// completeness — an owner that outruns the budget is reported timed-out (its
-// convergence unknown) rather than allowed to block shutdown indefinitely. A
-// package var so tests can shrink it. 30s stays well under the daemon-stop
-// window while giving a healthy box (every reconcile completes in ms) enormous
-// headroom.
+// carries its own 15s(+5s WaitDelay)=20s hard ceiling (externalCommandTimeout,
+// exec_timeout.go), but the closeout fans across two nft loads plus five
+// credential reconcilers, so a per-command timeout does not bound the sum. On
+// the cancel path boundedness beats completeness — an owner that outruns the
+// budget is reported timed-out (its convergence unknown) rather than allowed to
+// block shutdown indefinitely. A package var so tests can shrink it. 30s stays
+// well under the daemon-stop window while giving a healthy box (every
+// reconcile completes in ms) enormous headroom. (The 20s figure sometimes
+// quoted for this budget is the per-command ceiling above, not this 30s total.)
 var hostAuthCloseoutBudget = 30 * time.Second
 
 // hostAuthCloseoutOwners is the ORDERED list of host-authorization owners the
@@ -73,11 +74,15 @@ func (d *Daemon) hostAuthCloseoutOwners() []hostAuthOwner {
 // the remaining owners are then recorded timed-out (never silently skipped).
 //
 // When an owner outruns the budget its goroutine is abandoned (at most one at a
-// time — no further owner is launched concurrently). That is acceptable only on
-// the daemon-stop path this serves: every reconciler step is an individually
-// atomic durable write, so an abandoned owner leaves consistent partial state
-// that is HONESTLY reported timed-out (convergence unknown), the fail-visible
-// outcome M35 requires.
+// time — no further owner is launched concurrently). Since #14356 this
+// abandonment ALSO happens on live post-promotion aborts — NOT only on the
+// daemon-stop path: the closeout returns, applySem is released, and the stale
+// owner keeps running with its captured config. That is exactly why the
+// #14969 generation fence (extended to every write/install seam by #15539)
+// exists: every reconciler step is an individually atomic durable write, the
+// abandoned owner is fenced at its next seam once a newer authority begins,
+// and its state is HONESTLY reported timed-out (convergence unknown), the
+// fail-visible outcome M35 requires.
 //
 // Each owner's goroutine carries a defer/recover (#6184): a panic in one owner's
 // reconcile is recovered, logged with the owner id, and converted into that
