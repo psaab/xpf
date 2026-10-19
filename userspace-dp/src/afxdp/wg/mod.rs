@@ -166,8 +166,12 @@ pub(crate) fn encode_wg_key_hex(key: &[u8; WG_KEY_LEN]) -> String {
 /// dividing 8: u=0, u=1, the two order-8 points, u=p-1, and the
 /// non-canonical encodings that reduce to the same points. A clamped
 /// scalar is a multiple of 8, so X25519 maps each to the all-zero
-/// output. Mirrored byte-for-byte from the Go commit gate
-/// (pkg/config wgSmallOrderKeyHex).
+/// output. Every entry is stored in canonical form (bit 255 clear);
+/// is_small_order_wg_peer_key masks bit 255 of the candidate before
+/// comparing, so the seven bit-255 twins — same point, one-bit-
+/// different encoding — are refused too (#15132). Mirrored
+/// byte-for-byte from the Go commit gate (pkg/config
+/// wgSmallOrderKeyHex).
 pub(crate) const WG_SMALL_ORDER_KEYS: [[u8; WG_KEY_LEN]; 7] = [
     // u = 0 (order 2)
     [0u8; 32],
@@ -236,7 +240,14 @@ pub(crate) fn is_degenerate_wg_key_bytes(key: &[u8; WG_KEY_LEN]) -> bool {
 /// not small-order is a weird but genuine point (the commit gate
 /// refuses it as a known constant; the engine need not).
 pub(crate) fn is_small_order_wg_peer_key(key: &[u8; WG_KEY_LEN]) -> bool {
-    WG_SMALL_ORDER_KEYS.contains(key)
+    // #15132: X25519 masks bit 255 (the top bit of byte 31) of the
+    // u-coordinate, so a key with that bit set is the SAME point as
+    // its canonical twin in the table. Compare with the bit masked,
+    // or the seven twins pass this gate while yielding the identical
+    // zero DH secret.
+    let mut masked = *key;
+    masked[31] &= 0x7f;
+    WG_SMALL_ORDER_KEYS.contains(&masked)
 }
 
 /// Canonicalize a WG peer endpoint address: unmap a V4-MAPPED IPv6

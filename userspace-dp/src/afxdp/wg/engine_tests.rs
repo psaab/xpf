@@ -196,6 +196,116 @@ fn small_order_keys_yield_zero_dh_14373() {
     assert!(!super::super::is_degenerate_wg_key_bytes(&pub_k));
 }
 
+/// #15132 (A91-06, #14373 residual): the small-order denylist was an
+/// exact-byte match, so the seven bit-255 twins — each listed key with
+/// byte 31's top bit set — passed the engine and hydrate gates.
+/// X25519 masks bit 255 of the u-coordinate (RFC 7748), so a twin is
+/// the SAME small-order point and yields the same all-zero DH secret;
+/// only its encoding differs by one bit. The gates must compare with
+/// byte 31 masked (k[31] &= 0x7f).
+/// Fail-on-revert: removing the mask in is_small_order_wg_peer_key
+/// installs the twin peers / hydrates the twin rows and turns this RED.
+#[test]
+fn bit255_twins_are_small_order_15132() {
+    let (priv_k, pub_k) = keypair();
+    // Executable cryptographic pin: a twin really is the same point —
+    // X25519 DH against it is all-zero, exactly like the canonical key.
+    for key in WG_SMALL_ORDER_KEYS.iter() {
+        let mut twin = *key;
+        twin[31] |= 0x80;
+        assert_ne!(twin, *key, "twin must differ in encoding");
+        let dh = MontgomeryPoint(twin).mul_clamped(priv_k).to_bytes();
+        assert_eq!(
+            dh, [0u8; 32],
+            "bit-255 twin must yield an all-zero DH output (#15132)"
+        );
+        assert!(
+            super::super::is_small_order_wg_peer_key(&twin),
+            "bit-255 twin of a small-order key must be refused as small-order (#15132)"
+        );
+        assert!(
+            super::super::is_degenerate_wg_key_bytes(&twin),
+            "bit-255 twin must be degenerate at the hydrate gate (#15132)"
+        );
+        // Canonical spellings stay refused (no regression).
+        assert!(super::super::is_small_order_wg_peer_key(key));
+    }
+    // Controls: masking must not over-refuse. A valid key with bit 255
+    // SET is a different, genuine point — it must stay admissible.
+    let mut valid_twin = pub_k;
+    valid_twin[31] |= 0x80;
+    assert!(!super::super::is_small_order_wg_peer_key(&valid_twin));
+    assert!(!super::super::is_degenerate_wg_key_bytes(&valid_twin));
+    assert!(!super::super::is_degenerate_wg_key_bytes(&pub_k));
+    // Near-miss: flipping a LOW bit of a canonical key is a genuinely
+    // different point and must not be refused by the small-order leg.
+    let mut near_miss = WG_SMALL_ORDER_KEYS[1];
+    near_miss[0] = 2;
+    assert!(!super::super::is_small_order_wg_peer_key(&near_miss));
+}
+
+/// #15132: the ENGINE reconcile gate must refuse every bit-255 twin
+/// peer (counted), while a valid peer and a bit-255-set valid peer
+/// stay installed. Mirrors reconcile_refuses_degenerate_peer_14373 for
+/// the twin spellings that bypassed the exact-match denylist.
+#[test]
+fn reconcile_refuses_bit255_twin_peers_15132() {
+    let (init_priv, _init_pub) = keypair();
+    let (_peer_priv, peer_pub) = keypair();
+    let mut valid_twin = peer_pub;
+    valid_twin[31] |= 0x80;
+    let mut configs: Vec<WgPeerConfig> = WG_SMALL_ORDER_KEYS
+        .iter()
+        .enumerate()
+        .map(|(i, key)| {
+            let mut twin = *key;
+            twin[31] |= 0x80;
+            WgPeerConfig {
+                pubkey: twin,
+                endpoint: None,
+                persistent_keepalive: 0,
+                allowed_ips: vec![ipnet::IpNet::from_str(&format!("10.32.{}.0/24", i)).unwrap()],
+                preshared_key: [0u8; 32].into(),
+            }
+        })
+        .collect();
+    configs.push(WgPeerConfig {
+        pubkey: peer_pub,
+        endpoint: None,
+        persistent_keepalive: 0,
+        allowed_ips: vec![ipnet::IpNet::from_str("10.32.100.0/24").unwrap()],
+        preshared_key: [0u8; 32].into(),
+    });
+    configs.push(WgPeerConfig {
+        pubkey: valid_twin,
+        endpoint: None,
+        persistent_keepalive: 0,
+        allowed_ips: vec![ipnet::IpNet::from_str("10.32.101.0/24").unwrap()],
+        preshared_key: [0u8; 32].into(),
+    });
+    let engine = WgEngine::new(WgEngineConfig {
+        local_private_key: init_priv.into(),
+        listen_port: 51820,
+        peers: configs,
+    });
+    let table = engine.table_for_test();
+    assert_eq!(
+        table.peers.len(),
+        2,
+        "only the valid peer and its bit-255-set variant may be installed (#15132)"
+    );
+    assert!(table.peer_index_by_pubkey.contains_key(&peer_pub));
+    assert!(table.peer_index_by_pubkey.contains_key(&valid_twin));
+    assert_eq!(
+        engine
+            .counters()
+            .hs_refused_degenerate_key
+            .load(Ordering::Relaxed),
+        7,
+        "each bit-255 twin peer refusal must be counted (#15132)"
+    );
+}
+
 #[test]
 fn inner_src_ip_v4() {
     let mut pkt = [0u8; 40];
