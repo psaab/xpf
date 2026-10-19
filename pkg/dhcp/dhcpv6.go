@@ -23,8 +23,10 @@ import (
 // errV6AddrInvalidated signals that a DHCPv6 Reply EXPLICITLY invalidated the
 // held IA_NA address: the reply carried IA_NA IAADDR option(s) that were ALL
 // valid-lifetime 0 (RFC 8415 §18.2.10.1 — the address is no longer valid and
-// MUST be discarded), with no live IA_NA address and no live delegated prefix
-// to fall back to. It is DISTINCT from the generic "no usable IA_NA / live
+// MUST be discarded), with no live IA_NA address to replace it. Co-held IA_PD
+// prefixes do NOT suppress the sentinel (#14998): the address must be
+// discarded even when a delegation survives, otherwise the kernel WAN
+// address is orphaned and renewal timers derive from the PD lifetime. It is DISTINCT from the generic "no usable IA_NA / live
 // IA_PD" error, which means the reply carried NO usable IAADDR at all (an
 // ABSENT / transient reply — server omission or packet loss). The
 // discriminator is errors.Is(err, errV6AddrInvalidated): on an EXPLICIT
@@ -275,13 +277,20 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 				leaseCtx, cancelLease = context.WithDeadline(ctx, deadline)
 			}
 
+			// #14998 Path A: anchor T1/T2 to absolute instants derived from
+			// Obtained so a PD-expiry prune resumes with the remaining time,
+			// never a fresh full-tier wait. Past-expiry safety stays bounded
+			// by the lease deadline (leaseCtx) — unchanged.
+			t1At := committed.Obtained.Add(t1)
+			t2At := t1At.Add(t2Remaining)
+
 			// #14598: wake at the earliest PD expiry as well as T1. A PD
 			// prune loops (re-derive timers, recompute T1 wait) without
 			// renewing the still-live IA_NA lease or abandoning it. Loop
 			// with a fresh T1 wait until T1 actually expires.
 		t1WaitLoop:
 			for {
-				t1Wait := m.after(t1)
+				t1Wait := m.after(remainingTimer(t1At, time.Now()))
 				var outcome pdWaitOutcome
 				committed, committedPDs, outcome = m.waitForIPv6TimerOrRAWithPD(
 					leaseCtx, t1Wait, key, ifaceName, committed, committedPDs,
@@ -386,9 +395,10 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 				"interface", ifaceName, "err", rerr)
 
 			// Keep RA state current until T2; also wake at PD expiry (#14598).
+			// #14998: resume with remainingTimer(t2At), not a fresh t2Remaining.
 		t2WaitLoop:
 			for {
-				t2Wait := m.after(t2Remaining)
+				t2Wait := m.after(remainingTimer(t2At, time.Now()))
 				var outcome pdWaitOutcome
 				committed, committedPDs, outcome = m.waitForIPv6TimerOrRAWithPD(
 					leaseCtx, t2Wait, key, ifaceName, committed, committedPDs,
@@ -996,6 +1006,15 @@ func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv
 		}
 	}
 
+	// #14998: an explicitly invalidated IA_NA fires the sentinel even when
+	// the same Reply carries a live IA_PD prefix. Returning a success
+	// address-less lease here would orphan the held kernel WAN address
+	// (commitLease's address handling keyed on the new lease's address)
+	// and re-derive T1/T2/deadline from the PD lifetime / 3600s floor.
+	if iaNAExplicitlyInvalidated {
+		return nil, fmt.Errorf("DHCPv6 reply on %s: %w", ifaceName, errV6AddrInvalidated)
+	}
+
 	// A usable reply must yield either an IA_NA address or at least one
 	// LIVE delegated prefix. Count live PDs regardless of wantNA so a
 	// PD-only client (wantNA=false) whose reply carried only withdrawn
@@ -1004,15 +1023,6 @@ func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv
 	// Codex F6). The trailing wantNA||wantPD guard keeps a degenerate
 	// no-IA config on its prior no-reject path.
 	if !addr.IsValid() && len(result.prefixes) == 0 && (wantNA || wantPD) {
-		// #5927: distinguish an EXPLICIT invalidation (the reply carried an
-		// IA_NA whose IAADDR(s) were all valid-lifetime 0 — RFC 8415
-		// §18.2.10.1, stop using the address) from an ABSENT / transient reply
-		// (no usable IAADDR at all). Only the former returns the
-		// errV6AddrInvalidated sentinel, on which the renew/rebind loop
-		// deconfigures the held address; the generic error keeps it + retries.
-		if iaNAExplicitlyInvalidated {
-			return nil, fmt.Errorf("DHCPv6 reply on %s: %w", ifaceName, errV6AddrInvalidated)
-		}
 		return nil, fmt.Errorf("no usable IA_NA address or live IA_PD prefix in DHCPv6 reply on %s", ifaceName)
 	}
 

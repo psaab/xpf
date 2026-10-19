@@ -84,6 +84,17 @@ func renewalTimers(leaseTime time.Duration) (t1, t2Remaining time.Duration, ok b
 	return t1, t2Remaining, true
 }
 
+// remainingTimer returns how long remains until deadline as observed at
+// now, clamped at zero. A renewal wait interrupted by a delegated-prefix
+// prune must resume with this remainder anchored to the lease's absolute
+// T1/T2 instant, never restart the full tier wait (#14998 Path A).
+func remainingTimer(deadline, now time.Time) time.Duration {
+	if d := deadline.Sub(now); d > 0 {
+		return d
+	}
+	return 0
+}
+
 // reacquireBackstop paces DHCP re-acquisition after a server grants a
 // lease with a non-positive lifetime (see renewalTimers). Such a lease is
 // unusable, so the run loop abandons the renewal cycle and re-acquires
@@ -229,10 +240,14 @@ func reconcileDelegatedPDs(prior, live, withdrawn []DelegatedPrefix, now ...time
 // store when applyPDs is true. On error (address apply failed) nothing is
 // stored and the caller falls back to re-acquisition.
 func (m *Manager) commitLease(key clientKey, lease, prev *Lease, prefixes, prevPDs []DelegatedPrefix, applyPDs bool) error {
+	// #14998: an address-less successor over a held address (explicit
+	// IA_NA invalidation that still carried a live IA_PD) must remove the
+	// old kernel address; otherwise the WAN address is orphaned while the
+	// stored lease no longer carries it.
+	if prev != nil && prev.Address.IsValid() && prev.Address != lease.Address {
+		m.removeAddress(key.iface, prev)
+	}
 	if lease.Address.IsValid() {
-		if prev != nil && prev.Address.IsValid() && prev.Address != lease.Address {
-			m.removeAddress(key.iface, prev)
-		}
 		if err := m.applyAddress(key.iface, lease); err != nil {
 			return err
 		}

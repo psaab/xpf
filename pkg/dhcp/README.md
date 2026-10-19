@@ -136,6 +136,16 @@ the debounced `onAddressChange` callback when content changed.
   `LeaseTime == 0 → 3600s` default in `parseV6Reply` is NOT this path — it
   only applies to a degenerate no-IA config; the explicit-0 invalidation
   is handled before it.
+- **Co-held IA_NA invalidation (#14998)**: when a RENEW/REBIND Reply carries
+  an IA_NA whose IAADDR(s) are all valid-lifetime 0 together with a live
+  IA_PD prefix, the explicit invalidation still fires
+  `errV6AddrInvalidated` (the PD does not mask it) and the held WAN kernel
+  address is removed before re-acquisition; `commitLease` also removes a
+  held address when committing an address-less successor. T1/T2 waits are
+  anchored to their absolute `Obtained`-derived instants, so a delegated-
+  prefix expiry that interrupts the T1 or T2 wait resumes with the
+  remaining time (`remainingTimer`) instead of restarting the full tier
+  wait; past-expiry safety remains bounded by the lease deadline.
 - **DHCPv6 default-router discovery (#10763, #11425)**: because DHCPv6
   carries no default-router option and managed interfaces disable kernel RA
   acceptance, the client sends Router Solicitations and reads answering RAs
