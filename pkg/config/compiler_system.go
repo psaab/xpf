@@ -514,15 +514,42 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			if len(child.Keys) >= 2 {
 				sys.BackupRouter = child.Keys[1]
 			}
-			// destination keyword: backup-router 192.168.50.1 destination 192.168.0.0/16
+			// #15780: retain EVERY destination prefix. Junos spells the
+			// list three ways and all must compile to the same set:
+			//   - packed flat: `backup-router <nh> destination p1` — the
+			//     values ride on child.Keys after "destination"; a bracket
+			//     list packs further values onto a child of the
+			//     destination node (see below);
+			//   - hierarchical: one `destination` child per prefix, each
+			//     carrying its values on Keys[1:] plus any bracket child.
+			// The old scalar read kept only the first packed value (or
+			// the last repeated leaf), silently dropping the rest and
+			// bypassing validateBackupRouterDst on them.
+			var dsts []string
 			for i, k := range child.Keys {
-				if k == "destination" && i+1 < len(child.Keys) {
-					sys.BackupRouterDst = child.Keys[i+1]
+				if k == "destination" {
+					dsts = append(dsts, child.Keys[i+1:]...)
+					break
 				}
 			}
-			// Also check children for hierarchical format
-			if dstNode := child.FindChild("destination"); dstNode != nil && len(dstNode.Keys) >= 2 {
-				sys.BackupRouterDst = dstNode.Keys[1]
+			for _, dstNode := range child.FindChildren("destination") {
+				dsts = append(dsts, firewallMatchValues(dstNode)...)
+			}
+			// Deduplicate exact repeats (a bracket list repeated as a
+			// second leaf installs one route, not two identical ones).
+			seenDst := make(map[string]bool, len(dsts))
+			sys.BackupRouterDsts = sys.BackupRouterDsts[:0]
+			for _, d := range dsts {
+				if d == "" || seenDst[d] {
+					continue
+				}
+				seenDst[d] = true
+				sys.BackupRouterDsts = append(sys.BackupRouterDsts, d)
+			}
+			if len(sys.BackupRouterDsts) > 0 {
+				sys.BackupRouterDst = sys.BackupRouterDsts[0]
+			} else {
+				sys.BackupRouterDst = ""
 			}
 		case "commit":
 			for _, key := range child.Keys[1:] {
@@ -4666,15 +4693,15 @@ func findNamedNode(nodes []*Node, name string) *Node {
 	return nil
 }
 
-// validateBackupRouterDst (#2911, extended by #4808, #9820) rejects a
+// validateBackupRouterDst (#2911, extended by #4808, #9820, #15780) rejects a
 // `system backup-router` whose next-hop is malformed, IPv4-mapped, or
-// whose EXPLICIT `destination` is malformed or of a different address
+// whose ANY EXPLICIT `destination` is malformed or of a different address
 // family than the next-hop.
 //
 // Runtime: pkg/daemon reconciles the backup-router through netlink as a
 // config.ManagementVRFMultipathStaticProtocol route in management table 999
-// with metric 250 (#14972). An empty destination defaults to the next-hop
-// family (v6 → ::/0, v4 → 0.0.0.0/0).
+// with metric 250 (#14972) — one route per destination (#15780). An empty
+// destination list defaults to the next-hop family (v6 → ::/0, v4 → 0.0.0.0/0).
 // The route must be excluded when either operand is malformed or their
 // families disagree so an unusable fallback is never acknowledged.
 //
@@ -4683,13 +4710,13 @@ func findNamedNode(nodes []*Node, name string) *Node {
 //  2. next-hop must not be an IPv4-mapped IPv6 literal (#9820: product
 //     restriction — a single fallback default that never resolves is a
 //     silent lockout risk).
-//  3. an EXPLICIT destination must parse as a CIDR prefix at all (#4808) —
+//  3. EACH EXPLICIT destination must parse as a CIDR prefix at all (#4808) —
 //     net.ParseCIDR validates the whole token (mask included).
-//  4. an EXPLICIT destination of a different address family than the
+//  4. EACH EXPLICIT destination of a different address family than the
 //     next-hop is rejected (#2911), once both sides are known to parse.
 //
-// Only an EXPLICIT destination is format/family checked. An empty
-// destination is left to #2907's next-hop-family-aware default (v6
+// Only EXPLICIT destinations are format/family checked. An empty
+// destination list is left to #2907's next-hop-family-aware default (v6
 // next-hop → ::/0, v4 → 0.0.0.0/0) and is never malformed or a mismatch.
 //
 // Family classification uses FRRAddrFamily (netip; IPv4-mapped IPv6 literals
@@ -4705,7 +4732,14 @@ func validateBackupRouterDst(cfg *Config, lenient bool) ([]string, error) {
 		return nil, nil
 	}
 	nh := cfg.System.BackupRouter
-	dst := cfg.System.BackupRouterDst
+	// #15780: validate EVERY explicit destination, not just the scalar
+	// first. Fall back to the scalar for configs constructed without the
+	// compiler (hand-built Config values in tests / older persisted
+	// state decoded into the struct).
+	dsts := cfg.System.BackupRouterDsts
+	if len(dsts) == 0 && cfg.System.BackupRouterDst != "" {
+		dsts = []string{cfg.System.BackupRouterDst}
+	}
 	if nh == "" {
 		// No backup-router configured — nothing to validate.
 		return nil, nil
@@ -4722,7 +4756,7 @@ func validateBackupRouterDst(cfg *Config, lenient bool) ([]string, error) {
 		if !lenient {
 			return nil, fmt.Errorf("%s", msg)
 		}
-		warnings = append(warnings, msg+" (ignored: backup-router default route not installed until corrected)")
+		warnings = append(warnings, msg+" (ignored: backup-router route not installed until corrected)")
 	}
 
 	// #9820: an IPv4-mapped IPv6 literal is not supported as a
@@ -4737,48 +4771,52 @@ func validateBackupRouterDst(cfg *Config, lenient bool) ([]string, error) {
 		if !lenient {
 			return nil, fmt.Errorf("%s", msg)
 		}
-		warnings = append(warnings, msg+" (ignored: backup-router default route not installed until corrected)")
+		warnings = append(warnings, msg+" (ignored: backup-router route not installed until corrected)")
 	}
 
-	if dst == "" {
+	if len(dsts) == 0 {
 		// #2907's next-hop-family-aware default applies; never malformed or
 		// a mismatch.
 		return warnings, nil
 	}
 
-	// #4808: an explicit destination must be a well-formed CIDR prefix.
-	// net.ParseCIDR validates the mask too (natCIDRIPPart below only takes
-	// the address portion, so "10.0.0.0/99" would otherwise slip through).
-	if _, _, err := net.ParseCIDR(dst); err != nil {
-		msg := fmt.Sprintf(
-			"system backup-router destination %s: not a valid CIDR prefix; "+
-				"the management table-999 backup route cannot be installed", dst)
-		if !lenient {
-			return nil, fmt.Errorf("%s", msg)
-		}
-		warnings = append(warnings, msg+" (ignored: backup-router default route not installed until corrected)")
-	}
-
 	nhFam := FRRAddrFamily(nh)
-	dstFam := FRRAddrFamily(dst)
-	// One side did not parse as an IP at all — already reported above (or
-	// pre-existing address-book-name handling that is not this validator's
-	// concern); skip the family comparison, it would be meaningless.
-	if nhFam == "" || dstFam == "" {
-		return warnings, nil
+	for _, dst := range dsts {
+		// #4808: an explicit destination must be a well-formed CIDR prefix.
+		// net.ParseCIDR validates the mask too (natCIDRIPPart below only takes
+		// the address portion, so "10.0.0.0/99" would otherwise slip through).
+		if _, _, err := net.ParseCIDR(dst); err != nil {
+			msg := fmt.Sprintf(
+				"system backup-router destination %s: not a valid CIDR prefix; "+
+					"the management table-999 backup route cannot be installed", dst)
+			if !lenient {
+				return nil, fmt.Errorf("%s", msg)
+			}
+			warnings = append(warnings, msg+" (ignored: backup-router route not installed until corrected)")
+			continue
+		}
+
+		dstFam := FRRAddrFamily(dst)
+		// The next-hop did not parse as an IP at all — already reported
+		// above; skip the family comparison, it would be meaningless.
+		if nhFam == "" || dstFam == "" {
+			continue
+		}
+		if nhFam == dstFam {
+			continue
+		}
+		msg := fmt.Sprintf(
+			"system backup-router %s destination %s: destination family (%s) "+
+				"does not match next-hop family (%s); backup-router requires a "+
+				"next-hop and destination of the same address family",
+			nh, dst, dstFam, nhFam)
+		if lenient {
+			warnings = append(warnings, msg+" (ignored: backup-router route not installed until corrected)")
+			continue
+		}
+		return nil, fmt.Errorf("%s", msg)
 	}
-	if nhFam == dstFam {
-		return warnings, nil
-	}
-	msg := fmt.Sprintf(
-		"system backup-router %s destination %s: destination family (%s) "+
-			"does not match next-hop family (%s); backup-router requires a "+
-			"next-hop and destination of the same address family",
-		nh, dst, dstFam, nhFam)
-	if lenient {
-		return append(warnings, msg+" (ignored: backup-router default route not installed until corrected)"), nil
-	}
-	return nil, fmt.Errorf("%s", msg)
+	return warnings, nil
 }
 
 // ntpServerModifierNames returns the modifier keywords modeled as children of
