@@ -1501,6 +1501,13 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"policy-options as-path",
 		"services application-identification",
 		"system internet-options",
+		// #15707: the modelled leaf under internet-options. Without this
+		// pair the compact spelling `system internet-options
+		// no-ipv6-reject-zero-hop-limit;` was dropped by the compiler's
+		// FindChild-only reader; admitting it lets the brace-elision fold
+		// deliver the leaf as a child. (The compiler also reads Keys[1:]
+		// directly, so both paths agree.)
+		"internet-options no-ipv6-reject-zero-hop-limit",
 		// #8879 batch 9, the last of the population. `services ip-monitoring`
 		// is the SECOND validation-suppressing elision found (after
 		// `routing-options forwarding-table` in batch 6): its elided spelling

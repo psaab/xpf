@@ -673,6 +673,9 @@ mod tests_icmp_te;
 #[path = "tests_icmp_reject_reversal.rs"]
 mod tests_icmp_reject_reversal;
 #[cfg(test)]
+#[path = "tests_icmp_zero_hop_15707.rs"]
+mod tests_icmp_zero_hop_15707;
+#[cfg(test)]
 #[path = "tests_named_pre_l3_10498.rs"]
 mod tests_named_pre_l3_10498;
 // #8486: the peer-supplied owner_rg_id filing bound.

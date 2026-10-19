@@ -668,6 +668,7 @@ fn build_fallible_forwarding_state(
     state.policy.default_log_session_close = snapshot.default_log_session_close;
     state.allow_dns_reply = snapshot.flow.allow_dns_reply;
     state.allow_embedded_icmp = snapshot.flow.allow_embedded_icmp;
+    state.no_ipv6_reject_zero_hop_limit = snapshot.no_ipv6_reject_zero_hop_limit;
     state.allow_unstamped_fabric_ingress = snapshot.flow.allow_unstamped_fabric_ingress;
     state.alg_disable_flags = snapshot.flow.alg_disable_flags;
     // #2008 M5: compile the application-identification catalog so session

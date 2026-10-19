@@ -446,7 +446,12 @@ const (
 	// from_routing_instance / source_addresses ingress scoping. A v59
 	// helper ignores them and translates for every zone/VRF/source —
 	// the fail-open defect — so exact-equality versioning fences it.
-	ProtocolVersion = 60
+	// v60 -> v61 (#15707): ConfigSnapshot carries
+	// no_ipv6_reject_zero_hop_limit. A v60 helper ignores it and keeps
+	// originating ICMPv6 Time Exceeded for hop-limit=0 packets the
+	// operator configured it not to reject — so exact-equality
+	// versioning fences the pairing instead of degrading silently.
+	ProtocolVersion = 61
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -962,9 +967,15 @@ type ConfigSnapshot struct {
 	// fields rather than silently preserving either stale-ownership behavior.
 	LearnedRouteImportCapped bool `json:"learned_route_import_capped,omitempty"`
 
-	DefaultLogSessionInit  bool                 `json:"default_log_session_init,omitempty"`
-	DefaultLogSessionClose bool                 `json:"default_log_session_close,omitempty"`
-	Policies               []PolicyRuleSnapshot `json:"policies,omitempty"`
+	DefaultLogSessionInit  bool `json:"default_log_session_init,omitempty"`
+	DefaultLogSessionClose bool `json:"default_log_session_close,omitempty"`
+	// NoIPv6RejectZeroHopLimit carries `system internet-options
+	// no-ipv6-reject-zero-hop-limit` (#15707): when true the helper must
+	// not originate an ICMPv6 Time Exceeded for a packet that arrived
+	// with hop limit 0. Additive/omitempty: an old helper ignores it
+	// (pre-#15707 behaviour), an old Go binary leaves it false.
+	NoIPv6RejectZeroHopLimit bool                 `json:"no_ipv6_reject_zero_hop_limit,omitempty"`
+	Policies                 []PolicyRuleSnapshot `json:"policies,omitempty"`
 	// PolicyRematchExtensive enables the conditional retain/rebind rotation arm.
 	PolicyRematchExtensive bool                         `json:"policy_rematch_extensive,omitempty"`
 	PolicyRenameAncestry   []PolicyRenameAncestry       `json:"policy_rename_ancestry,omitempty"`
@@ -1156,16 +1167,16 @@ type FlowSnapshot struct {
 	// #10703: TCP session-MISS SYN admission. The v34 version fence prevents a
 	// v33 helper from ignoring no-syn-check and silently keeping the default
 	// drop; strict-syn-check takes precedence when both fields are set.
-	TCPNoSynCheck      bool `json:"tcp_no_syn_check,omitempty"`
-	TCPStrictSynCheck  bool `json:"tcp_strict_syn_check,omitempty"`
+	TCPNoSynCheck     bool `json:"tcp_no_syn_check,omitempty"`
+	TCPStrictSynCheck bool `json:"tcp_strict_syn_check,omitempty"`
 	// #15753: tunnel SYN opt-out, RST invalidate, sequence-check controls.
 	TCPNoSynCheckInTunnel bool `json:"tcp_no_syn_check_in_tunnel,omitempty"`
 	TCPRstInvalidate      bool `json:"tcp_rst_invalidate_session,omitempty"`
 	TCPNoSequenceCheck    bool `json:"tcp_no_sequence_check,omitempty"`
 	TCPRstSequenceCheck   bool `json:"tcp_rst_sequence_check,omitempty"`
 	TCPMaximumWindow      int  `json:"tcp_maximum_window,omitempty"`
-	UDPSessionTimeout  int  `json:"udp_session_timeout,omitempty"`  // seconds, 0=default
-	ICMPSessionTimeout int  `json:"icmp_session_timeout,omitempty"` // seconds, 0=default
+	UDPSessionTimeout     int  `json:"udp_session_timeout,omitempty"`  // seconds, 0=default
+	ICMPSessionTimeout    int  `json:"icmp_session_timeout,omitempty"` // seconds, 0=default
 	// GREAcceleration carries `security flow gre-performance-acceleration`
 	// (#3360). On vSRX this extracts the GRE key/call-id into the session tuple
 	// so multiple GRE tunnels between the same endpoints map to distinct
@@ -1448,9 +1459,9 @@ type InterfaceSnapshot struct {
 	// back to the zone-keyed check (pre-#3362 behaviour); an old Go binary omits
 	// them (omitempty). HostInboundConfigured distinguishes a present-but-empty
 	// override (enforcing, deny-all) from an absent one (zone-keyed fallback).
-	HostInboundConfigured     bool     `json:"host_inbound_configured,omitempty"`
-	HostInboundSystemServices []string `json:"host_inbound_system_services,omitempty"`
-	HostInboundProtocols      []string `json:"host_inbound_protocols,omitempty"`
+	HostInboundConfigured      bool     `json:"host_inbound_configured,omitempty"`
+	HostInboundSystemServices  []string `json:"host_inbound_system_services,omitempty"`
+	HostInboundProtocols       []string `json:"host_inbound_protocols,omitempty"`
 	HostInboundProtocolsExcept []string `json:"host_inbound_protocols_except,omitempty"` // #15671
 	// IsUnit is the STRUCTURAL row identity: true when this row was emitted
 	// for a logical unit, false for an interface (base) row (#9821 #22).
