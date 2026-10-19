@@ -1815,47 +1815,40 @@ func validatePolicyReservedChainNameStrict(cfg *Config) error {
 }
 
 // validatePolicyASPathRegexStrict hard-rejects a `policy-options as-path
-// <name>` whose regular expression cannot be rendered into frr.conf at
-// all — an EMPTY regex, or one that is not a valid POSIX extended regular
-// expression (#6686) — or whose tokens were authored inside an UNQUOTED
-// `[ ... ]` list, which the lexer strips as list sugar so the compiled
-// pattern differs from the written one while staying valid POSIX (#9881).
+// <name>` whose Junos regular expression cannot be translated to FRR —
+// an EMPTY regex, a malformed one, or one outside the Junos AS-path
+// grammar (#6686, #15007) — or whose tokens were authored inside an
+// UNQUOTED `[ ... ]` list, which the lexer strips as list sugar so the
+// compiled pattern differs from the written one (#9881).
 //
 // xpf renders one `bgp as-path access-list <name> permit <regex>` line per
-// definition (pkg/frr/policy_render.go). FRR's DEFUN for that command ends
-// in a variadic `LINE...` parameter which argv_concat joins back with
-// single spaces, which is what makes a multi-AS regex like `.* 65000 .*`
-// expressible at all — but it also means an ABSENT regex is an incomplete
-// command, and a malformed one fails FRR's regcomp. Either is a
-// CMD_WARNING_CONFIG_FAILED, and a single such failure exits the whole
-// vtysh add-batch non-zero: it does not merely drop this one access-list,
-// it fails the ENTIRE frr-reload and leaves every dynamic routing change
-// stale.
+// definition (pkg/frr/policy_render.go), carrying the TRANSLATED pattern
+// (TranslateJunosASPathRegex): Junos matches whole AS numbers under an
+// implicit ^...$ anchor, FRR matches an unanchored character regex, so a
+// verbatim render loads fine yet matches the wrong paths (#15007). An
+// untranslatable pattern must never reach that line: the renderer omits
+// it, and this gate rejects it at commit so the operator learns why
+// instead of silently losing the filter. An absent regex would also be
+// an incomplete FRR command, and any malformed rendered line is a
+// CMD_WARNING_CONFIG_FAILED that fails the ENTIRE frr-reload.
 //
-// An empty regex was reachable with no diagnostic at all: `set
-// policy-options as-path AP1` with no value compiled to an ASPathDef with
-// Regex "" and committed clean.
-//
-// An unquoted leading bracket was reachable the same silent way: `set
+// An unquoted leading bracket was reachable silently: `set
 // policy-options as-path AP1 [0-9]+` lexes `[`/`]` as list sugar and joins
-// the surviving tokens to `0-9 +` — valid POSIX, so neither the #6686
-// validity check nor FRR's regcomp can catch it, and the definition matches
-// a different set than the operator wrote. The signal is bracket PROVENANCE
-// (ASPathDef.RegexUnquotedBracket), never the regex text: the mangled form
-// is byte-identical to a legitimately-authored bare `0-9 +`. Faithful
-// reconstruction is impossible (`[0-9]+` and `[0-9] +` lex identically), so
-// this rejects with a quote-the-regex diagnostic instead of guessing. A tree
-// with no provenance answers false and behaves exactly as before — the gate
-// fires only on a positive bracket bit.
+// the surviving tokens to `0-9 +`. The signal is bracket PROVENANCE
+// (ASPathDef.RegexUnquotedBracket), checked first, never the regex text:
+// the mangled form can be byte-identical to authored text, and faithful
+// reconstruction is impossible post-lex, so this rejects with a
+// quote-the-regex diagnostic instead of guessing.
 //
 // On the tolerant load / peer-sync paths the call site downgrades this to
 // a warning (opts.lenientPolicyASPathRegex) so an already-persisted or
 // peer-synced config still boots (#1960 fail-closed-on-load class);
-// pkg/frr's ValidASPathRegex belt then keeps the unrenderable definition
+// pkg/frr's translation belt then keeps the unrenderable definition
 // out of frr.conf on that path, so the reload survives. Commit /
 // commit-check stay strict. Runs on the fully-compiled *Config so the
 // as-path map is populated regardless of authoring order. Mirrors
 // validatePolicyCommunityReferencesStrict.
+//
 // validatePolicyCommunityRegexStrict hard-rejects a `policy-options community`
 // member that xpf cannot render into a loadable frr.conf line — the sibling of
 // validatePolicyASPathRegexStrict that #6686 never got (#8449).
@@ -1935,18 +1928,23 @@ func validatePolicyASPathRegexStrict(cfg *Config) error {
 			return fmt.Errorf("policy-options as-path %s: compiled regular expression "+
 				"%q came from an UNQUOTED '[' — the lexer strips brackets as list "+
 				"sugar, so the committed pattern differs from the text written "+
-				"(e.g. `[0-9]+` becomes `0-9 +`); write the regular expression "+
-				"as a QUOTED value, e.g. `set policy-options as-path %s \"[0-9]+\"`, "+
+				"(e.g. `[123-125]` becomes `123-125` only when quoted; unquoted "+
+				"it joins differently); write the regular expression "+
+				"as a QUOTED value, e.g. `set policy-options as-path %s \"[123-125]\"`, "+
 				"or drop the brackets if they were grouping rather than pattern text",
 				name, ap.Regex, name)
 		}
-		if err := ValidASPathRegex(ap.Regex); err != nil {
-			return fmt.Errorf("policy-options as-path %s: %v — xpf renders "+
-				"`bgp as-path access-list %s permit %s`, which frr-reload "+
-				"rejects (failing the entire FRR config load); write the "+
-				"regular expression as a QUOTED value, e.g. "+
-				"`set policy-options as-path %s \".* 65000 .*\"`",
-				name, err, name, ap.Regex, name)
+		if err := ValidJunosASPathRegex(ap.Regex); err != nil {
+			return fmt.Errorf("policy-options as-path %s: %v — Junos AS-path "+
+				"regular expressions match whole AS numbers with an implicit "+
+				"^...$ anchor (\".\" is one AS number, \"()\" is the null path); "+
+				"xpf translates the pattern to FRR at render and cannot do so "+
+				"for this one, so it would be omitted from frr.conf and its "+
+				"terms would not fire as written; write the pattern in Junos "+
+				"AS-path syntax, e.g. `set policy-options as-path %s \".* 65000 .*\"` "+
+				"(character classes inside an AS number, e.g. \"65[0-9]+\", have "+
+				"no Junos AS-path meaning — use a range like \"65000-65999\")",
+				name, err, name)
 		}
 	}
 	return nil

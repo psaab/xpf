@@ -484,24 +484,23 @@ func (m *Manager) generatePolicyOptionsWithRefNodes14380(po *config.PolicyOption
 		sort.Strings(aspNames)
 		for _, name := range aspNames {
 			ap := po.ASPaths[name]
-			// #6686 render-side belt: an as-path whose regex is EMPTY or
-			// not a valid POSIX ERE renders a line FRR rejects — an
-			// incomplete command or a regcomp failure — and a single
-			// CMD_WARNING_CONFIG_FAILED exits the whole vtysh add-batch
-			// non-zero, failing the ENTIRE frr-reload and leaving every
-			// dynamic routing change stale. The strict commit gate
+			// #6686/#15007 render-side belt: an as-path whose Junos regex
+			// is EMPTY, malformed, or untranslatable to FRR renders a line
+			// FRR either rejects (poisoning the whole reload) or — worse,
+			// #15007 — a line that loads but matches a different set of AS
+			// paths than Junos would ("()" matching every path, "65000"
+			// matching substrings). The strict commit gate
 			// (validatePolicyASPathRegexStrict, pkg/config) hard-rejects
 			// it, but the tolerant load / peer-sync paths only warn (#1960
 			// no-brick), so the renderer must keep a leniently-loaded
-			// definition out of frr.conf entirely. Omitting the list is
-			// strictly better than poisoning the reload: FRR resolves a
-			// `match as-path <name>` with no such list to NO MATCH, which
-			// confines the damage to the terms that reference it. Same
-			// predicate as the commit gate — ValidASPathRegex is shared so
-			// the two cannot drift. Mirrors validRouterID (render_validate.go).
-			if err := config.ValidASPathRegex(ap.Regex); err != nil {
-				slog.Warn("frr: omitting unrenderable as-path access-list",
-					"as_path", name, "reason", err)
+			// definition out of frr.conf entirely; a translatable one is
+			// emitted ONLY in its translated, anchored form below. Same
+			// predicate as the commit gate — TranslateJunosASPathRegex is
+			// shared so the two cannot drift.
+			translated, terr := config.RenderableASPathRegex(ap.Regex)
+			if terr != nil {
+				slog.Warn("frr: omitting as-path access-list with untranslatable Junos regex",
+					"as_path", name, "regex", ap.Regex, "reason", terr)
 				continue
 			}
 			// #9881 belt, the same shape for a different failure: an as-path
@@ -529,7 +528,7 @@ func (m *Manager) generatePolicyOptionsWithRefNodes14380(po *config.PolicyOption
 			// token, so a legitimate space (multi-AS path) survives; only
 			// control chars (incl. the newline injection vector) collapse
 			// to a space. The strict #1798 commit control-char gate rejects it.
-			fmt.Fprintf(&b, "bgp as-path access-list %s permit %s\n", frrName(name), sanitizeFRRValue(ap.Regex))
+			fmt.Fprintf(&b, "bgp as-path access-list %s permit %s\n", frrName(name), sanitizeFRRValue(translated))
 		}
 		b.WriteString("!\n")
 	}
@@ -633,7 +632,8 @@ func asPathListMissingAtRender(po *config.PolicyOptionsConfig, name string) bool
 	if ap.RegexUnquotedBracket {
 		return true
 	}
-	return config.ValidASPathRegex(ap.Regex) != nil
+	_, err := config.RenderableASPathRegex(ap.Regex)
+	return err != nil
 }
 
 // communityListMissingAtRender reports whether `match community <name>` would

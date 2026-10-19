@@ -3963,7 +3963,7 @@ func TestMetricTypeAndCommunityListSetSyntax(t *testing.T) {
 }
 
 func TestASPathSetSyntax(t *testing.T) {
-	cmds := []string{`set policy-options as-path AS65000 "65000"`, `set policy-options as-path TRANSIT "65[0-9]+"`, "set policy-options policy-statement FILTER-AS term t1 from as-path AS65000", "set policy-options policy-statement FILTER-AS term t1 then accept", "set policy-options policy-statement FILTER-AS then reject"}
+	cmds := []string{`set policy-options as-path AS65000 "65000"`, `set policy-options as-path TRANSIT "[65000-65999]"`, "set policy-options policy-statement FILTER-AS term t1 from as-path AS65000", "set policy-options policy-statement FILTER-AS term t1 then accept", "set policy-options policy-statement FILTER-AS then reject"}
 	tree := &ConfigTree{}
 	for _, cmd := range cmds {
 		path, err := ParseSetCommand(cmd)
@@ -3992,8 +3992,8 @@ func TestASPathSetSyntax(t *testing.T) {
 	if tr == nil {
 		t.Fatal("TRANSIT as-path not found")
 	}
-	if tr.Regex != "65[0-9]+" {
-		t.Errorf("TRANSIT regex = %q, want 65[0-9]+", tr.Regex)
+	if tr.Regex != "[65000-65999]" {
+		t.Errorf("TRANSIT regex = %q, want [65000-65999]", tr.Regex)
 	}
 	ps := cfg.PolicyOptions.PolicyStatements["FILTER-AS"]
 	if ps == nil {

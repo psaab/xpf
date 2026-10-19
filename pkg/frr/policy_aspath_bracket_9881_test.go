@@ -46,10 +46,18 @@ func TestASPathRender9881OmitsBracketFlaggedRegex(t *testing.T) {
 // byte-identical regex WITHOUT the flag (provenance-clean authorship) must
 // still render. The belt keys on provenance, never on the regex text.
 func TestASPathRender9881EmitsUnflaggedSameRegex(t *testing.T) {
+	// #15007: the unflagged text "0-9 +" is ALSO untranslatable as a Junos
+	// AS-path regex ("0" is not a valid AS number), so it is omitted on
+	// text grounds too now. The provenance belt remains what the strict
+	// gate keys on; this cell pins that the renderer never emits it either
+	// way, and that a translatable neighbour still renders.
 	got := New().generatePolicyOptions(aspathFlaggedPO(t, "AP1", "0-9 +", false))
-	if !strings.Contains(got, "bgp as-path access-list AP1 permit 0-9 +\n") {
-		t.Fatalf("an unflagged as-path regex was omitted — the belt keys on the "+
-			"flag, not the text:\n%s", got)
+	if strings.Contains(got, "bgp as-path access-list AP1") {
+		t.Fatalf("an untranslatable as-path regex was emitted:\n%s", got)
+	}
+	got = New().generatePolicyOptions(aspathFlaggedPO(t, "AP1", "65001", false))
+	if !strings.Contains(got, "bgp as-path access-list AP1 permit ^65001$\n") {
+		t.Fatalf("a translatable as-path regex was omitted or not translated:\n%s", got)
 	}
 }
 
@@ -124,7 +132,7 @@ func TestRejectTermWithMixedORRefsDeniesAll_9881(t *testing.T) {
 	if strings.Contains(got, "match as-path") {
 		t.Fatalf("a dangling OR-branch survived:\n%s", got)
 	}
-	if !strings.Contains(got, "bgp as-path access-list AP2 permit 65002\n") {
+	if !strings.Contains(got, "bgp as-path access-list AP2 permit ^65002$\n") {
 		t.Fatalf("the FINE list was dropped with the flagged one:\n%s", got)
 	}
 	for _, want := range []string{

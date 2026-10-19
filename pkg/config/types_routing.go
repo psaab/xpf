@@ -22,7 +22,7 @@ type PolicyOptionsConfig struct {
 // ASPathDef defines a named AS-path regular expression for route matching.
 type ASPathDef struct {
 	Name  string
-	Regex string // AS-path regex pattern (e.g. "65000", "65[0-9]+")
+	Regex string // Junos AS-path regex pattern (e.g. "65000", "[65000-65999]", ".* 65000 .*"); translated to FRR at render (#15007)
 	// RegexUnquotedBracket reports that a token of the span Regex was joined
 	// from was authored inside an UNQUOTED `[ ... ]` list (#9881). The lexer
 	// strips brackets as list sugar, so such a Regex is the JOIN of the

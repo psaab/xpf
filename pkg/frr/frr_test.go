@@ -3834,7 +3834,7 @@ func TestGeneratePolicyOptionsASPath(t *testing.T) {
 	po := &config.PolicyOptionsConfig{
 		ASPaths: map[string]*config.ASPathDef{
 			"AS65000": {Name: "AS65000", Regex: "65000"},
-			"TRANSIT": {Name: "TRANSIT", Regex: "65[0-9]+"},
+			"TRANSIT": {Name: "TRANSIT", Regex: "[65000-65999]"},
 		},
 		PolicyStatements: map[string]*config.PolicyStatement{
 			"FILTER-AS": {
@@ -3854,8 +3854,8 @@ func TestGeneratePolicyOptionsASPath(t *testing.T) {
 	got := m.generatePolicyOptions(po)
 
 	checks := []string{
-		"bgp as-path access-list AS65000 permit 65000",
-		"bgp as-path access-list TRANSIT permit 65[0-9]+",
+		"bgp as-path access-list AS65000 permit ^65000$",
+		"bgp as-path access-list TRANSIT permit ^65[0-9][0-9]{2}$",
 		"route-map FILTER-AS permit 10",
 		"match as-path AS65000",
 		"route-map FILTER-AS deny 20",

@@ -66,11 +66,17 @@ func ASPathRegexFromTokens(tokens []string) string {
 	return strings.Join(parts, " ")
 }
 
-// ValidASPathRegex reports why an as-path regex cannot be rendered into
-// frr.conf, or nil when it can.
+// ValidASPathRegex is the legacy POSIX-only predicate (#6686): it reports
+// why a pattern cannot be compiled as a POSIX ERE at all. Since #15007 the
+// commit gate and the FRR renderer use ValidJunosASPathRegex /
+// TranslateJunosASPathRegex instead — a pattern can be perfectly valid
+// POSIX yet mean something entirely different (or nothing) as a Junos
+// AS-path expression, and rendering it verbatim was the route-leak bug.
+// This helper is retained only for the integer-parse premise pinned by
+// pkg/grpcapi (its POSIX dialect note) and the #9881 premise test; new
+// gates MUST NOT key renderability on it.
 //
-// xpf renders one `bgp as-path access-list <name> permit <regex>` line per
-// definition. Two values break that line rather than narrowing it:
+// Historically it rejected two values that break the rendered line:
 //
 //   - an EMPTY regex renders `bgp as-path access-list AP1 permit` with no
 //     argument, which FRR rejects as an incomplete command;
@@ -94,7 +100,7 @@ func ASPathRegexFromTokens(tokens []string) string {
 //
 // Control characters are NOT re-checked here: the strict #1798 commit
 // control-char gate already rejects them, and pkg/frr's sanitizeFRRValue
-// is the render-side belt for the leniently-loaded case.
+// is one render-side belt for the leniently-loaded case.
 func ValidASPathRegex(regex string) error {
 	if strings.TrimSpace(regex) == "" {
 		return fmt.Errorf("empty regular expression")
