@@ -537,14 +537,26 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 			// negotiate. PSK only — pubkey peer verification is
 			// certificate-based and must not gain an invented id, and a
 			// responder-only peer has no fixed address to default to.
-			if id := defaultRemoteID(gw); id != "" {
-				fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(id)))
-			} else if gw == nil && gc.remoteAddr != "" && gc.remoteAddr != "%any" {
-				// Inline endpoint (no gateway object): the dialed
-				// address is likewise the default peer identity.
-				if first, _, _ := strings.Cut(gc.remoteAddr, ","); strings.TrimSpace(first) != "" {
-					fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(strings.TrimSpace(first))))
+			//
+			// #15766: that default is only sound for a SINGLE-address
+			// peer. swanctl `remote.id` takes exactly one identity, so
+			// pinning the first address of a multi-address gateway
+			// rejects the same peer presenting from any other
+			// configured address (address fallback / dual-homed peer).
+			// With no single identity to pin, omit the default and let
+			// charon negotiate the peer's presented address identity;
+			// the PSK stays scoped by one id-<n> selector per peer
+			// address (pskIDSelectorsLocal, #14139), so no unscoped
+			// secret results.
+			if gw != nil {
+				if id := defaultRemoteID(gw); id != "" {
+					fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(id)))
 				}
+			} else if addrs := config.SplitIPsecEndpointList(gc.remoteAddr); len(addrs) == 1 && addrs[0] != "%any" {
+				// Inline endpoint (no gateway object): the dialed
+				// address is likewise the default peer identity — for
+				// a single-address endpoint only (#15766).
+				fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(addrs[0])))
 			}
 		}
 		b.WriteString("    }\n")
@@ -697,9 +709,11 @@ func resolveRemoteAddr(ipsecCfg *config.IPsecConfig, vpn *config.IPsecVPN) (
 		// no remote_addrs line (unchanged behavior).
 		return "", localAddr, nil, true
 	}
-	if config.IsUsableIPsecEndpoint(vpn.Gateway) {
+	if config.IsUsableIPsecEndpointList(vpn.Gateway) {
 		// Legacy inline shape: the VPN names the peer endpoint directly
-		// as a literal IP or dotted hostname, with no Gateways entry.
+		// as a literal IP or dotted hostname, with no Gateways entry —
+		// possibly a comma-separated multi-address list (#15766), which
+		// remote_addrs renders verbatim.
 		return vpn.Gateway, localAddr, nil, true
 	}
 	// Dangling / dotless single-label name — not a known gateway and not
@@ -1178,24 +1192,29 @@ func pskIDSelectorsLocal(remoteAddr, localAddr string, gw *config.IPsecGateway) 
 
 // defaultRemoteID returns the implicit remote identity for a gateway that
 // carries no explicit remote-identity and no dynamic hostname and is not
-// responder-only: the first address of its fixed Address list. Junos
-// defaults the peer's IKE identity to the gateway address; strongSwan
-// likewise keys the peer by its IP when no id is negotiated. Rendering it
-// explicitly pins what charon, acting as initiator, sends/expects as IDr
-// and what swanctl matches the PSK against (#15193). The caller must have
-// already established the gateway is a fixed-address, non-responder peer;
-// this helper stays pure so the connection render and the secret scoping
-// can never disagree. An empty/unparseable first entry yields "".
+// responder-only: its sole fixed address. Junos defaults the peer's IKE
+// identity to the gateway address; strongSwan likewise keys the peer by
+// its IP when no id is negotiated. Rendering it explicitly pins what
+// charon, acting as initiator, sends/expects as IDr and what swanctl
+// matches the PSK against (#15193). The caller must have already
+// established the gateway is a fixed-address, non-responder peer; this
+// helper stays pure so the connection render and the secret scoping can
+// never disagree.
+//
+// #15766: a multi-address gateway yields "" — swanctl remote.id is
+// single-valued, so pinning the first address would reject the same peer
+// presenting from any other configured address. The caller then omits
+// remote.id; the PSK selectors still carry one entry per peer address.
+// An empty gateway address likewise yields "".
 func defaultRemoteID(gw *config.IPsecGateway) string {
 	if gw == nil || gw.RemoteIDValue != "" || gw.DynamicHostname != "" {
 		return ""
 	}
-	for _, addr := range strings.Split(gw.Address, ",") {
-		if addr = strings.TrimSpace(addr); addr != "" {
-			return addr
-		}
+	addrs := config.SplitIPsecEndpointList(gw.Address)
+	if len(addrs) != 1 {
+		return ""
 	}
-	return ""
+	return addrs[0]
 }
 
 // formatIdentity formats an IKE identity for strongSwan.

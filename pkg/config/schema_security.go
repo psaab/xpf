@@ -1429,7 +1429,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 		// local-identity and the rest as separate statements; the packed spelling
 		// collapsed them into one node and lost everything after the first.
 		"gateway": {desc: "IKE gateway (VPN peer) name", args: 1, placeholder: "<gateway-name>", packedStatements: true, children: map[string]*schemaNode{
-			"address":            {desc: "Remote gateway address", args: 1, placeholder: "<address>", children: nil},
+			"address":            {desc: "Remote gateway address(es)", args: 1, multi: true, placeholder: "<address>", children: nil},
 			"local-address":      {desc: "Local IKE address", args: 1, placeholder: "<address>", children: nil},
 			"ike-policy":         {desc: "IKE policy reference", args: 1, placeholder: "<policy-name>", children: nil},
 			"external-interface": {desc: "External interface for IKE (derives local address)", args: 1, placeholder: "<interface-name>", children: nil},
@@ -1596,7 +1596,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 		// needs the same opt-in. Fixing one and not the other leaves the defect
 		// live at a spelling an operator reaches the same way.
 		"gateway": {desc: "IKE gateway (VPN peer) name", args: 1, packedStatements: true, placeholder: "<gateway-name>", children: map[string]*schemaNode{
-			"address":            {desc: "Remote gateway address", args: 1, placeholder: "<address>", children: nil},
+			"address":            {desc: "Remote gateway address(es)", args: 1, multi: true, placeholder: "<address>", children: nil},
 			"local-address":      {desc: "Local IKE address", args: 1, placeholder: "<address>", children: nil},
 			"ike-policy":         {desc: "IKE policy reference", args: 1, placeholder: "<policy-name>", children: nil},
 			"external-interface": {desc: "External interface for IKE (derives local address)", args: 1, placeholder: "<interface-name>", children: nil},

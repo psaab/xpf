@@ -613,11 +613,18 @@ func validateIPsecEndpointsStrict(cfg *Config) error {
 		if gw == nil {
 			continue
 		}
-		if gw.Address != "" && !IsUsableIPsecEndpoint(gw.Address) {
-			return fmt.Errorf("security ike gateway %q address %q is not a "+
-				"valid IP address or hostname; strongSwan would reject the "+
-				"generated remote_addrs and the tunnel would never load",
-				name, gw.Address)
+		// #15766: a multi-address gateway holds a comma-joined list;
+		// every element must independently be a usable endpoint. The
+		// joined string itself is neither an IP nor a hostname, so
+		// testing it wholesale both rejected legitimate lists and
+		// could not name the malformed element.
+		for _, addr := range SplitIPsecEndpointList(gw.Address) {
+			if !IsUsableIPsecEndpoint(addr) {
+				return fmt.Errorf("security ike gateway %q address %q is not a "+
+					"valid IP address or hostname; strongSwan would reject the "+
+					"generated remote_addrs and the tunnel would never load",
+					name, addr)
+			}
 		}
 		if gw.DynamicHostname != "" && !IsUsableIPsecEndpoint(gw.DynamicHostname) {
 			return fmt.Errorf("security ike gateway %q dynamic hostname %q is "+

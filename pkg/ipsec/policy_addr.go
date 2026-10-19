@@ -466,14 +466,23 @@ func zoneQualify(addr, ifaceName string) string {
 }
 
 func addressFamilyHint(addr string) int {
-	ip := net.ParseIP(addr)
-	if ip == nil {
-		return 0
+	// #15766: a multi-address gateway holds a comma-joined list; the
+	// hint is the family of the first literal element (net.ParseIP on
+	// the joined string always failed, silently yielding the
+	// family-agnostic hint and resolving the wrong local address).
+	// Hostname elements carry no family without DNS, so they are
+	// skipped in favour of the first literal when one exists.
+	for _, part := range config.SplitIPsecEndpointList(addr) {
+		ip := net.ParseIP(part)
+		if ip == nil {
+			continue
+		}
+		if ip.To4() != nil {
+			return 4
+		}
+		return 6
 	}
-	if ip.To4() != nil {
-		return 4
-	}
-	return 6
+	return 0
 }
 
 func matchFamily(ip net.IP, family int) string {

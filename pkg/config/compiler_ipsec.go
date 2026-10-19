@@ -22,6 +22,78 @@ func validHexPSK(s string) bool {
 	return err == nil
 }
 
+// SplitIPsecEndpointList splits a gateway address field into its
+// individual peer endpoints (#15766). The compiled form is a
+// comma-joined list (the exact `remote_addrs` value strongSwan
+// renders), but every consumer that validates, classifies by family,
+// or scopes an identity must see the elements, not the joined string:
+// "198.51.100.1,198.51.100.2" is neither a valid IP nor a hostname, so
+// testing the whole string rejects a legitimate multi-address gateway
+// (and, inverted, must never launder a malformed element). Empty
+// elements (leading/trailing/doubled commas, "a, b" spacing) are
+// dropped; order is preserved.
+func SplitIPsecEndpointList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// gatewayAddressValues extracts every peer endpoint carried by one
+// `address` leaf across the parser's shapes (#15766, #2419):
+//
+//   - repeated leaves      `address a` + `address b`  -> one leaf per
+//     value under the multi schema (the caller invokes this per leaf)
+//   - bracket list         `address [ a b ]`          -> Keys=[address a b]
+//   - comma list           `address a,b` / bracket    -> each Keys tail
+//     token may itself be comma-joined, so every token is comma-split
+//
+// It mirrors firewallMatchValues (Keys[1:] plus child tokens), which
+// is why bracket lists nested in a block form are covered too. The
+// caller accumulates with accumulateGatewayAddresses; duplicates are
+// dropped there so the compiled list names each peer once.
+func gatewayAddressValues(p *Node) []string {
+	var out []string
+	add := func(tok string) {
+		out = append(out, SplitIPsecEndpointList(tok)...)
+	}
+	for _, k := range p.Keys[1:] {
+		add(k)
+	}
+	for _, c := range p.Children {
+		for _, k := range c.Keys {
+			add(k)
+		}
+	}
+	return out
+}
+
+// accumulateGatewayAddresses appends distinct endpoints to the
+// gateway's comma-joined Address list in authored order (#15766).
+// A repeated `address` leaf, a bracket list, and re-compilation over
+// an already-populated gateway (compileIKE then compileIPsec both
+// read the same gateway) must not duplicate or drop peers; the
+// pre-fix `gw.Address = v` kept only the last leaf.
+func accumulateGatewayAddresses(gw *IPsecGateway, values []string) {
+	seen := make(map[string]bool)
+	for _, a := range SplitIPsecEndpointList(gw.Address) {
+		seen[a] = true
+	}
+	for _, v := range values {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		if gw.Address != "" {
+			gw.Address += ","
+		}
+		gw.Address += v
+	}
+}
+
 // classifyPSKQualifier maps one authored `pre-shared-key` qualifier +
 // value onto the compiled PSK triple (#15027, A16-04):
 //
@@ -286,9 +358,7 @@ func compileIKE(node *Node, sec *SecurityConfig) error {
 			v := nodeVal(p)
 			switch p.Name() {
 			case "address":
-				if v != "" {
-					gw.Address = v
-				}
+				accumulateGatewayAddresses(gw, gatewayAddressValues(p))
 			case "local-address":
 				if v != "" {
 					gw.LocalAddress = v
@@ -612,9 +682,7 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 			v := nodeVal(p)
 			switch p.Name() {
 			case "address":
-				if v != "" {
-					gw.Address = v
-				}
+				accumulateGatewayAddresses(gw, gatewayAddressValues(p))
 			case "local-address":
 				if v != "" {
 					gw.LocalAddress = v
@@ -858,13 +926,32 @@ func validateIPsecGatewayReferencesStrict(cfg *Config) error {
 			// legitimately omits remote_addrs and renders %any (#2404).
 			continue // resolves to a defined, addressed (or responder-only) gateway
 		}
-		if IsUsableIPsecEndpoint(vpn.Gateway) {
-			continue // legacy inline literal IP / dotted hostname
+		if IsUsableIPsecEndpointList(vpn.Gateway) {
+			continue // legacy inline literal IP / dotted hostname (possibly a multi-address list, #15766)
 		}
 		return fmt.Errorf("security ipsec vpn %s: ike gateway %q is not "+
 			"defined and is not a valid address or hostname", name, vpn.Gateway)
 	}
 	return nil
+}
+
+// IsUsableIPsecEndpointList reports whether s is a usable swanctl
+// `remote_addrs` value: a single endpoint (IsUsableIPsecEndpoint) or a
+// comma-separated list whose EVERY element is usable (#15766). A list
+// with any malformed element, or a bare config-object name, is not
+// usable — the same fail-closed rule as the single-endpoint predicate,
+// applied per element so a comma cannot launder a bad endpoint.
+func IsUsableIPsecEndpointList(s string) bool {
+	parts := SplitIPsecEndpointList(s)
+	if len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		if !IsUsableIPsecEndpoint(part) {
+			return false
+		}
+	}
+	return true
 }
 
 // IsUsableIPsecEndpoint reports whether s is something strongSwan can

@@ -496,8 +496,21 @@ func ipsecGatewayExternalDevices12089(cfg *Config, tunnelNames map[string]string
 }
 
 func ipsecGatewayRemoteFamilies12089(gateway *IPsecGateway) []int {
-	if family := ipsecAddressFamily12089(gateway.Address); family != 0 || gateway.Address != "" {
-		return []int{family}
+	// #15766: gateway.Address may be a comma-joined multi-address
+	// list; each element contributes its own family (a mixed-family
+	// peer must not collapse to the family-agnostic hint from parsing
+	// the joined string).
+	var families []int
+	seenFamily := make(map[int]bool)
+	for _, addr := range SplitIPsecEndpointList(gateway.Address) {
+		family := ipsecAddressFamily12089(addr)
+		if !seenFamily[family] {
+			seenFamily[family] = true
+			families = append(families, family)
+		}
+	}
+	if len(families) > 0 {
+		return families
 	}
 	if family := ipsecAddressFamily12089(gateway.DynamicHostname); family != 0 {
 		return []int{family}

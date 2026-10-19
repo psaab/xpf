@@ -26,9 +26,10 @@ import (
 //     are exactly {peer address, local address} — the peer selector keeps
 //     #3952/#14591 isolation (no cross-peer claim) and the local address is
 //     the exact initiator lookup key.
-//   - multi-address GW: remote.id is the FIRST address (Junos default
-//     remote identity = gateway address) and the secret carries one selector
-//     per peer address plus the local address.
+//   - multi-address GW: remote.id is NOT pinned to one address (#15766
+//     supersedes the first-address pin — swanctl remote.id is
+//     single-valued and the peer may present from either address);
+//     the secret carries one selector per peer address plus local.
 //   - local-identity configured (no remote-identity): local.id unchanged,
 //     remote.id defaults to the peer address, secret owners include the
 //     configured local identity (never re-adds the raw local address when an
@@ -118,15 +119,16 @@ func TestInitiatorDefaultIdentity15193(t *testing.T) {
 		}
 	})
 
-	t.Run("multi address defaults remote id to first and scopes every address", func(t *testing.T) {
+	t.Run("multi address pins no remote id and scopes every address", func(t *testing.T) {
 		cfg := initiatorCfg15193(&config.IPsecGateway{
 			Name: "gw", Address: "203.0.113.1, 203.0.113.2", LocalAddress: "198.51.100.1",
 		}, "site-secret")
 		text := m.generateConfig(cfg)
 		conn := parseSwanctlDoc(t, text).at(t, "connections", "gw")
-		// remote.id is single-valued in swanctl: Junos's default is the
-		// gateway address — the first of the list.
-		conn.at(t, "remote").requireSetting(t, "id", `"203.0.113.1"`)
+		// #15766: remote.id is single-valued in swanctl; pinning the
+		// first address would reject the peer presenting from the
+		// second, so no default id is rendered for a multi-address GW.
+		conn.at(t, "remote").hasNoSetting(t, "id")
 
 		blk := parseSecretBlocks(t, text)["ike-gw"]
 		for _, want := range []string{"203.0.113.1", "203.0.113.2", "198.51.100.1"} {
