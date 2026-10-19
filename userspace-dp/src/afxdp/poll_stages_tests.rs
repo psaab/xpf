@@ -2406,6 +2406,92 @@ fn rx_learn_non_unicast_src_ip_rejected_4889() {
     );
 }
 
+/// #14945: the pre-cache learn in `stage_parse_flow_and_learn` is gated on
+/// the per-worker dedup state. A repeat packet from the same source inside
+/// the refresh interval must not re-enter the sharded-map learn: the map
+/// entry (removed between calls) stays removed and `insert_generation`
+/// does not advance, while the first packet after the interval runs the
+/// full learn again. The frame is written into a fresh `MmapArea` at
+/// addr 0, exactly as the poll loop hands the UMEM descriptor to the
+/// stage; the first call learns `(12, src) -> src_mac` under the resolved
+/// logical ifindex (parent 11 / VLAN 80 in the `nat_snapshot` fixture).
+#[test]
+fn pre_cache_learn_skips_sharded_map_inside_dedup_interval_14945() {
+    let forwarding = build_forwarding_state(&super::super::test_fixtures::nat_snapshot());
+    with_neighbor_learn_ctx(&forwarding, |ctx, neighbors| {
+        let src = Ipv4Addr::new(172, 16, 80, 9);
+        let src_ip = IpAddr::V4(src);
+        let src_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x09];
+        let mut frame = tcp_v4_frame(src, Ipv4Addr::new(10, 0, 0, 5), 12345, 443, 0x10, 1, 1);
+        // The frame builder writes its own source MAC; stamp the
+        // learnable source MAC the dedup key is derived from.
+        frame[6..12].copy_from_slice(&src_mac);
+        let mut meta = tcp_v4_meta(&frame, 0x10);
+        meta.ingress_ifindex = 11;
+        meta.ingress_vlan_id = 80;
+
+        let mut area = MmapArea::new(4096).expect("mmap");
+        area.slice_mut(0, frame.len())
+            .expect("umem slice")
+            .copy_from_slice(&frame);
+        let desc = crate::xsk_ffi::XdpDesc {
+            addr: 0,
+            len: frame.len() as u32,
+            options: 0,
+        };
+        let t0 = 1_000_000_000u64;
+        let mut dedup = LearnedNeighborDedup::default();
+
+        // First packet: full learn lands under the logical ifindex.
+        let flow = stage_parse_flow_and_learn(&area, desc, &frame, meta, true, t0, &mut dedup, ctx);
+        assert!(flow.is_some(), "fixture frame must parse to a flow");
+        assert_eq!(
+            neighbors.get(&(12, src_ip)).map(|e| e.mac),
+            Some(src_mac),
+            "first packet must learn the source neighbor"
+        );
+        assert!(
+            dedup.key.is_some(),
+            "the learn must stamp the per-worker dedup state"
+        );
+        let generation_after_first = neighbors.insert_generation();
+
+        // Remove the learned entry. A gated repeat must NOT recreate it —
+        // that is the observable difference between "the sharded-map learn
+        // ran" and "the dedup gate skipped it".
+        neighbors.remove(&(12, src_ip));
+        neighbors.remove(&(11, src_ip));
+        let repeat_ns = t0 + super::sharded_neighbor::RX_LEARNED_NEIGHBOR_REFRESH_INTERVAL_NS / 2;
+        let flow = stage_parse_flow_and_learn(
+            &area, desc, &frame, meta, true, repeat_ns, &mut dedup, ctx,
+        );
+        assert!(flow.is_some());
+        assert!(
+            neighbors.get(&(12, src_ip)).is_none() && neighbors.get(&(11, src_ip)).is_none(),
+            "#14945: a dedup-matching repeat inside the refresh interval must \
+             skip the sharded-map learn (the removed entry must stay removed)"
+        );
+        assert_eq!(
+            neighbors.insert_generation(),
+            generation_after_first,
+            "the gated repeat must not advance the neighbor insert generation"
+        );
+
+        // After the refresh interval elapses the full learn runs again and
+        // recreates the entry.
+        let refresh_ns = t0 + super::sharded_neighbor::RX_LEARNED_NEIGHBOR_REFRESH_INTERVAL_NS + 1;
+        let flow = stage_parse_flow_and_learn(
+            &area, desc, &frame, meta, true, refresh_ns, &mut dedup, ctx,
+        );
+        assert!(flow.is_some());
+        assert_eq!(
+            neighbors.get(&(12, src_ip)).map(|e| e.mac),
+            Some(src_mac),
+            "once the refresh interval elapses the learn must run again"
+        );
+    });
+}
+
 // ===================================================================
 // #3021 / #3022 — the ingress ZONE lookup (zone-pair policy for
 // forwarding, and screen/SYN-cookie zone resolution) must key on the

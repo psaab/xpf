@@ -518,16 +518,45 @@ pub(super) fn stage_parse_flow_and_learn(
         None => None,
     };
     if learn_from_live_frame && let Some(flow) = flow.as_ref() {
-        learn_dynamic_neighbor_from_packet(
-            area,
-            desc,
-            meta,
-            flow.src_ip,
-            now_ns,
-            last_learned_neighbor,
-            worker_ctx.forwarding,
-            worker_ctx.dynamic_neighbors,
-        );
+        // #14945: gate the pre-cache (pre-policy) source-neighbor learn on
+        // the per-worker dedup state. When the last-learned key matches
+        // this packet's source and the refresh interval has not elapsed,
+        // the sharded-map learn underneath would only re-confirm the same
+        // `(ingress, src_ip) -> src_mac` pair: `learn_dynamic_neighbor_with_mac`
+        // already elides that case through its dedup leg, but reaching it
+        // still pays the frame slice, the on-link check, and the epoch
+        // snapshot. The cheap key is derivable here from the frame's
+        // Ethernet source (bytes 6..12, same slice the learn reads); a
+        // short frame leaves the key unmatched and the full learn runs.
+        // Epoch/key changes are not visible to this gate — the dedup leg
+        // inside the learn remains the authority on those, and the first
+        // packet after the interval (or after any key change) runs it.
+        let src_mac: Option<[u8; 6]> = packet_frame
+            .get(6..12)
+            .and_then(|bytes| bytes.try_into().ok());
+        let dedup_hit = src_mac.is_some_and(|src_mac| {
+            last_learned_neighbor.key
+                == Some(super::LearnedNeighborKey {
+                    ingress_ifindex: meta.ingress_ifindex as i32,
+                    ingress_vlan_id: meta.ingress_vlan_id,
+                    src_ip: flow.src_ip,
+                    src_mac,
+                })
+                && now_ns.saturating_sub(last_learned_neighbor.last_refresh_ns)
+                    < super::sharded_neighbor::RX_LEARNED_NEIGHBOR_REFRESH_INTERVAL_NS
+        });
+        if !dedup_hit {
+            learn_dynamic_neighbor_from_packet(
+                area,
+                desc,
+                meta,
+                flow.src_ip,
+                now_ns,
+                last_learned_neighbor,
+                worker_ctx.forwarding,
+                worker_ctx.dynamic_neighbors,
+            );
+        }
     }
     // #11053: capture happens only after the session/policy path admits the
     // packet. Capturing here teaches from a pre-policy segment, so a denied

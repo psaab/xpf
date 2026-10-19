@@ -3357,6 +3357,139 @@ impl SessionTable {
             self.push_to_wheel(key, now_ns);
         }
     }
+    /// #14945: fused flow-cache-hit session probe. One `record_by_key_mut`
+    /// borrow performs the liveness check, the throttled keepalive
+    /// (including #14939 handshake completion and the #14935/#10885 closing
+    /// gates), and the packet accounting that the cache-hit path used to
+    /// pay three separate key probes for (`session_is_live_at` +
+    /// `touch_if_stale_with_payload` + `account_packet`).
+    ///
+    /// Returns `false` when the key is absent or idle-crossed — the caller
+    /// must fall through exactly as it did on a failed liveness or
+    /// keepalive probe, before any filter/policer/log/accounting side
+    /// effect. On `true` the session was live at `now_ns`; the keepalive
+    /// refresh and handshake completion land exactly as
+    /// `touch_if_stale_with_payload` would have done them, and the
+    /// accounting charge is applied under the same borrow. The caller may
+    /// still drop the packet at the cached filter/policer replay below
+    /// the probe site; the pre-fusion path charged such a packet's
+    /// keepalive but not its counters, so probe-before-replay moves only
+    /// the accounting earlier by those side-effect-free replay steps.
+    ///
+    /// Reverse-direction packets still pay the companion hop inside the
+    /// accounting leg (`reverse_session_key` + forward-entry probe),
+    /// exactly as `account_packet` did — only the forward-key probe is
+    /// shared. Handshake completion likewise keeps its companion
+    /// propagation. The canonical-key clone matches the pre-existing
+    /// `touch_if_stale_with_payload` / `account_packet` clones on the
+    /// paths that need the key after the borrow ends; the forward
+    /// accounting leg itself clones nothing.
+    #[inline]
+    pub fn probe_hit(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        len: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        dscp: u8,
+    ) -> bool {
+        let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
+        let mut canonical_refresh_key: Option<SessionKey> = None;
+        let mut reverse_fold: Option<(SessionKey, crate::nat::NatDecision)> = None;
+        match self.record_by_key_mut(key) {
+            Some(record) => {
+                let entry = &mut record.entry;
+                let age = now_ns.saturating_sub(entry.last_seen_ns);
+                if age > entry.expires_after_ns {
+                    return false;
+                }
+                // #14939 handshake completion (mirrors
+                // `touch_if_stale_with_payload`): not a keepalive refresh,
+                // so it applies even inside the throttle window.
+                if entry.handshake_pending
+                    && !entry.closing
+                    && matches!(key.protocol, PROTO_TCP)
+                    && crate::tcp_flags::has_ack(tcp_flags)
+                    && !crate::tcp_flags::has_syn(tcp_flags)
+                    && !is_closing(tcp_flags)
+                    && (entry.syn_ack_first == entry.metadata.is_reverse)
+                {
+                    completing = Some((record.key.clone(), entry.decision.nat));
+                }
+                let refresh_after = entry.expires_after_ns.max(SESSION_KEEPALIVE_DIVISOR)
+                    / SESSION_KEEPALIVE_DIVISOR;
+                let payload_progress = entry.closing
+                    && !entry.reset
+                    && !(entry.fin_own && entry.fin_peer)
+                    && crate::tcp_flags::has_payload_progress(tcp_flags, payload_len);
+                let refresh_allowed = !entry.closing
+                    || (!entry.reset && !entry.fin_own)
+                    || payload_progress;
+                if age >= refresh_after && refresh_allowed {
+                    canonical_refresh_key = Some(record.key.clone());
+                }
+                // #2501/#2749 accounting, folded onto the canonical
+                // forward entry exactly as `account_packet`.
+                if !entry.metadata.is_reverse {
+                    entry.counters.account(false, len);
+                    entry.observed_tos = dscp << 2;
+                    entry.observed_tcp_flags |= tcp_flags;
+                } else {
+                    reverse_fold = Some((record.key.clone(), entry.decision.nat));
+                }
+            }
+            None => return false,
+        }
+        if let Some((matched_key, nat)) = completing {
+            let timeouts = self.timeouts;
+            let opening_override_ns = self
+                .entry_by_key(&matched_key)
+                .map(|entry| entry.metadata.ingress_zone)
+                .and_then(|zone| self.opening_override_for(zone));
+            if let Some(entry) = self.entry_by_key_mut(&matched_key) {
+                entry.established = true;
+                entry.handshake_pending = false;
+                entry.syn_ack_first = false;
+                entry.last_seen_ns = now_ns;
+                entry.expires_after_ns = session_timeout_ns(
+                    matched_key.protocol,
+                    tcp_flags,
+                    true,
+                    &timeouts,
+                    entry.metadata.inactivity_timeout_ns,
+                    opening_override_ns,
+                );
+            }
+            self.propagate_tcp_state_to_companion(
+                &matched_key,
+                now_ns,
+                TcpStatePropagation {
+                    nat,
+                    close: false,
+                    reset: false,
+                    fin: false,
+                    established: false,
+                    handshake_completed: true,
+                },
+            );
+            self.push_to_wheel(&matched_key, now_ns);
+        } else if let Some(canonical_key) = canonical_refresh_key {
+            self.touch(&canonical_key, now_ns);
+        }
+        if let Some((record_key, nat)) = reverse_fold {
+            let fwd_key = reverse_session_key(&record_key, nat);
+            if let Some(entry) = self.entry_by_key_mut(&fwd_key) {
+                entry.counters.account(true, len);
+                entry.observed_tcp_flags |= tcp_flags;
+            } else if let Some(entry) = self.entry_by_key_mut(key) {
+                entry.counters.account(true, len);
+                entry.observed_tcp_flags |= tcp_flags;
+            }
+        }
+        true
+    }
+
 
     /// Return whether a local backing session exists and is within its
     /// protocol-specific idle deadline. This probe is read-only so callers
@@ -5458,3 +5591,11 @@ mod rst_ack_handshake_14630_tests;
 #[cfg(test)]
 #[path = "handshake_cache_hit_14939_tests.rs"]
 mod handshake_cache_hit_14939_tests;
+
+// #14945: the fused cache-hit probe (`probe_hit`) must be observably
+// identical to the liveness + keepalive + accounting sequence it
+// replaces, across forward/reverse/alias, throttle, handshake, and
+// closing-gate axes.
+#[cfg(test)]
+#[path = "probe_hit_14945_tests.rs"]
+mod probe_hit_14945_tests;
