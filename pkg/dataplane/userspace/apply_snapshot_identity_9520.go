@@ -250,6 +250,15 @@ func (m *Manager) requestApplySnapshotPreparedLocked(snap *ConfigSnapshot, statu
 		return stampErr
 	}
 	defer func() { m.recordApplySnapshotOutcomeLocked(err) }()
+	// #15093: if this snapshot re-introduces scheduled policy after a
+	// no-schedule era, send the heartbeat BEFORE the apply so the helper
+	// never publishes the new snapshot against a stale lease. Best-effort:
+	// an old helper rejects the verb and the snapshot still applies; the
+	// post-apply seed below then runs as before.
+	preHeartbeat := m.snapshotReintroducesScheduledLocked(snap)
+	if preHeartbeat {
+		m.sendSchedulerHeartbeatLocked()
+	}
 	err = m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: snap}, status)
 	if err == nil {
 		m.recordSchedulerSnapshotAppliedLocked(snap)
@@ -285,23 +294,39 @@ func (m *Manager) requestApplySnapshotPreparedLocked(snap *ConfigSnapshot, statu
 	return err
 }
 
-// recordSchedulerSnapshotAppliedLocked seeds a fresh dataplane lease after a
-// successful scheduled-policy snapshot. The extra control verb is best-effort:
-// older helpers reject it, while the accepted snapshot remains successful.
-func (m *Manager) recordSchedulerSnapshotAppliedLocked(snap *ConfigSnapshot) {
-	hasScheduledPolicies := false
-	if snap != nil {
-		for _, policy := range snap.Policies {
-			if policy.SchedulerName != "" {
-				hasScheduledPolicies = true
-				break
-			}
+// snapshotHasScheduledPolicies reports whether the snapshot carries any
+// scheduler-bound policy rule.
+func snapshotHasScheduledPolicies(snap *ConfigSnapshot) bool {
+	if snap == nil {
+		return false
+	}
+	for _, policy := range snap.Policies {
+		if policy.SchedulerName != "" {
+			return true
 		}
 	}
-	m.hasScheduledPolicySnapshot = hasScheduledPolicies
-	if !hasScheduledPolicies {
-		return
-	}
+	return false
+}
+
+// snapshotReintroducesScheduledLocked reports whether this snapshot brings
+// scheduled policy back after a no-schedule era that had heartbeats
+// (#15093). The previous published snapshot's scheduled presence is
+// tracked in hasScheduledPolicySnapshot, which
+// recordSchedulerSnapshotAppliedLocked updates on every successful apply
+// (including no-schedule applies). A zero policySchedulerVersion means no
+// scheduled snapshot ever succeeded, so there is no stale stamp to rebase
+// and the helper's version-zero lease never expires — no pre-send.
+func (m *Manager) snapshotReintroducesScheduledLocked(snap *ConfigSnapshot) bool {
+	return snapshotHasScheduledPolicies(snap) && !m.hasScheduledPolicySnapshot &&
+		m.policySchedulerVersion != 0
+}
+
+// sendSchedulerHeartbeatLocked bumps the publication version and sends one
+// best-effort heartbeat. A refused verb (old helper) leaves the version
+// bumped — the helper ignores unknown verbs without state change, and the
+// next successful heartbeat reuses the version — but does not advance the
+// successful-send timestamp.
+func (m *Manager) sendSchedulerHeartbeatLocked() {
 	if m.policySchedulerVersion < ^uint64(0) {
 		m.policySchedulerVersion++
 	}
@@ -315,6 +340,18 @@ func (m *Manager) recordSchedulerSnapshotAppliedLocked(snap *ConfigSnapshot) {
 	}, nil); err == nil {
 		m.lastSchedulerHeartbeatAt = time.Now()
 	}
+}
+
+// recordSchedulerSnapshotAppliedLocked seeds a fresh dataplane lease after a
+// successful scheduled-policy snapshot. The extra control verb is best-effort:
+// older helpers reject it, while the accepted snapshot remains successful.
+func (m *Manager) recordSchedulerSnapshotAppliedLocked(snap *ConfigSnapshot) {
+	hasScheduledPolicies := snapshotHasScheduledPolicies(snap)
+	m.hasScheduledPolicySnapshot = hasScheduledPolicies
+	if !hasScheduledPolicies {
+		return
+	}
+	m.sendSchedulerHeartbeatLocked()
 }
 
 // recordApplySnapshotOutcomeLocked tracks whether the helper may hold content

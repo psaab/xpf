@@ -214,6 +214,18 @@ impl super::Coordinator {
             Arc::clone(&self.scheduler_lease),
         )
     }
+
+    /// #15093: drive the scheduler-lease era marker at a publish commit
+    /// point. Must run AFTER the worker-visible `RuntimeView` store (or, on
+    /// the disarmed path, after the forwarding swap that a later arming
+    /// seeds from), so a rejected or not-yet-visible snapshot never rebases
+    /// the lease a live reader is using. Reads the just-published state's
+    /// scheduled-rule presence through the forwarding table the caller
+    /// installed.
+    pub(crate) fn publish_snapshot_policy(&self) {
+        self.scheduler_lease
+            .note_snapshot_published(self.forwarding.policy.has_scheduled_rules());
+    }
     #[cfg(test)]
     pub(crate) fn policy_parse_calls_for_test(&self) -> usize {
         self.policy_counters.parse_calls_for_test()
@@ -514,6 +526,9 @@ impl super::Coordinator {
         // `store_runtime_view` records the intended pair + the previous view
         // for the RED-on-revert test.
         self.publish_runtime_view();
+        // #15093: after the worker-visible store, record the era so a
+        // re-introduced scheduled snapshot does not publish already expired.
+        self.publish_snapshot_policy();
         // #9506 S5: rotate reinject authority at the same committed
         // snapshot boundary as the worker-visible runtime view.
         if let Some(slow_path) = self.slow_path.as_ref() {

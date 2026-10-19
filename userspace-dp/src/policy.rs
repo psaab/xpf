@@ -39,6 +39,16 @@ pub(crate) const SCHEDULER_HEARTBEAT_LEASE_NS: u64 = 300_000_000_000;
 pub(crate) struct SchedulerHeartbeatLease {
     version: AtomicU64,
     received_at_ns: AtomicU64,
+    /// #15093: whether the most recently published snapshot carried
+    /// scheduled rules. A heartbeat's receipt stamp is only meaningful for
+    /// the scheduled era it was sent in: Go sends no heartbeats while no
+    /// snapshot carries scheduled policy (`heartbeatPolicySchedulerAt`
+    /// returns early), so without this marker a stamp from an earlier era
+    /// would make a snapshot that re-introduces scheduled rules publish
+    /// already expired. Armed only on a no-schedule -> schedule transition
+    /// so same-era republication cannot extend the window past the real
+    /// heartbeat expiry.
+    prev_snapshot_scheduled: std::sync::atomic::AtomicBool,
 }
 
 impl SchedulerHeartbeatLease {
@@ -75,6 +85,32 @@ impl SchedulerHeartbeatLease {
         // arrived after this evaluation time.
         now_ns >= received_at_ns
             && now_ns - received_at_ns > SCHEDULER_HEARTBEAT_LEASE_NS
+    }
+
+    /// #15093: record that a snapshot was published, rebasing the receipt
+    /// stamp when scheduled rules return after a no-schedule era. Called at
+    /// the publish commit point (after the worker-visible store), never at
+    /// parse/preflight time, so a rejected snapshot cannot rebase the live
+    /// lease. The swap makes the rebase fire exactly once per era
+    /// transition; a second scheduled publication in the same era is a
+    /// no-op and cannot extend the window. Version zero (no heartbeat ever
+    /// received) is left untouched — `expired_at` already never expires it.
+    /// When the lease is already fresh the stamp is not moved, so a
+    /// heartbeat that landed during the apply keeps its earlier (more
+    /// conservative) receipt time.
+    pub(crate) fn note_snapshot_published(&self, has_scheduled_rules: bool) {
+        let was_scheduled = self
+            .prev_snapshot_scheduled
+            .swap(has_scheduled_rules, Ordering::AcqRel);
+        if has_scheduled_rules && !was_scheduled && self.version.load(Ordering::Acquire) != 0 {
+            let now_ns = crate::afxdp::monotonic_nanos();
+            if self.expired_at(now_ns) {
+                // Same publish order as `apply`: stamp before any reader
+                // can rely on it. The version is unchanged; only the
+                // receipt time moves to the re-introduction instant.
+                self.received_at_ns.store(now_ns, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Test-only paired snapshot of the publication version and its receipt
@@ -1938,6 +1974,14 @@ impl PolicyState {
     #[inline]
     pub(crate) fn scheduler_rules_expired_at(&self, now_ns: u64) -> bool {
         self.has_scheduled_rules && self.scheduler_lease.expired_at(now_ns)
+    }
+
+    /// #15093: whether this snapshot carries any scheduler-bound rule.
+    /// The coordinator's publish commit points read this to drive the
+    /// lease era marker (`SchedulerHeartbeatLease::note_snapshot_published`).
+    #[inline]
+    pub(crate) fn has_scheduled_rules(&self) -> bool {
+        self.has_scheduled_rules
     }
 
     #[inline]
