@@ -370,7 +370,7 @@ func ikeConnectionAuthMethod(method string) (string, bool) {
 	switch method {
 	case "", "pre-shared-keys":
 		return "psk", true
-	case "rsa-signatures", "ecdsa-signatures":
+	case "rsa-signatures", "ecdsa-signatures", "ecdsa-signatures-256", "ecdsa-signatures-384":
 		return "pubkey", true
 	default:
 		return "", false

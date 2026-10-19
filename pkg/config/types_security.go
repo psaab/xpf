@@ -178,15 +178,22 @@ type SecurityConfig struct {
 	// shape for strict diagnostics and tolerant quarantine warnings.
 	EnforcementPoliciesContent []string `json:"-"`
 	// GlobalPolicies are global rules applied to all zone pairs.
-	GlobalPolicies     []*Policy
-	DefaultPolicy      PolicyAction // global fallback policy (permit-all or deny-all)
-	NAT                NATConfig
-	Screen             map[string]*ScreenProfile // keyed by profile name
-	AddressBook        *AddressBook
-	Log                LogConfig
-	Flow               FlowConfig
-	ALG                ALGConfig
-	IPsec              IPsecConfig
+	GlobalPolicies []*Policy
+	DefaultPolicy  PolicyAction // global fallback policy (permit-all or deny-all)
+	NAT            NATConfig
+	Screen         map[string]*ScreenProfile // keyed by profile name
+	AddressBook    *AddressBook
+	Log            LogConfig
+	Flow           FlowConfig
+	ALG            ALGConfig
+	IPsec          IPsecConfig
+	// PKI (#15752, G18-01) captures `security pki` ca-profiles. xpf has no
+	// SCEP/CMPv2/CRL lifecycle runtime: the stanza is captured so
+	// ValidateConfig can emit the accepted-only advisory instead of the
+	// gateway local-certificate dangling with no defining subsystem and
+	// no warning. Certificate files themselves are operator-provisioned
+	// under the swanctl x509 directories (strongSwan loads by filename).
+	PKI                *PKIConfig
 	DynamicAddress     DynamicAddressConfig
 	SSHKnownHosts      map[string][]SSHKnownHostKey // host -> keys
 	PolicyStatsEnabled bool                         // policy-stats system-wide enable
@@ -1996,6 +2003,23 @@ type Application struct {
 	UnknownDirectTokens []string
 }
 
+// PKIConfig captures `security pki` (#15752, G18-01). Accepted-only:
+// see SecurityConfig.PKI.
+type PKIConfig struct {
+	CAProfiles map[string]*PKICAProfile
+}
+
+// PKICAProfile is one `security pki ca-profile <name>` stanza.
+type PKICAProfile struct {
+	Name                    string
+	CAIDentity              string // ca-identity <id>
+	EnrollmentURL           string // enrollment url <url>
+	EnrollmentRetry         string // enrollment retry <n> (captured verbatim)
+	EnrollmentRetryInterval string // enrollment retry-interval <seconds>
+	RevocationCheck         string // "crl", "use-ocsp", "disable", or ""
+	CRLURL                  string // revocation-check crl url <url>
+}
+
 // IPsecConfig holds IPsec VPN configuration.
 type IPsecConfig struct {
 	// Phase 1 (IKE)
@@ -2064,7 +2088,13 @@ type IKEPolicy struct {
 	// crypto negotiation so a peer requiring the second proposal could not
 	// establish. Rendered comma-joined into the swanctl `proposals =` line.
 	Proposals []string
-	PSK       Secret // pre-shared key; redacted on JSON/YAML marshal (#2053)
+	// LocalCertificate (#15752, G18-02) is the Junos
+	// `security ike policy <pol> local-certificate <cert>` leaf: the
+	// certificate counterpart to pre-shared-key. The effective cert for a
+	// VPN is the gateway's LocalCertificate when set, else this policy
+	// value (EffectiveLocalCertificate) — mirroring ipsecVPNEffPSK.
+	LocalCertificate string
+	PSK              Secret // pre-shared key; redacted on JSON/YAML marshal (#2053)
 	// PSKHex (#15027, A16-04) records that PSK was authored as
 	// `pre-shared-key hexadecimal <hex>`: PSK holds the hex digits and
 	// the swanctl renderer must emit them as raw bytes (`secret =
@@ -2149,7 +2179,7 @@ type IPsecGateway struct {
 	LocalAddress     string // local IP
 	IKEPolicy        string // IKE policy reference
 	ExternalIface    string // external-facing interface
-	LocalCertificate string // local certificate name for pubkey auth
+	LocalCertificate string // local certificate name for pubkey auth (gateway wins over ike-policy, #15752)
 	Version          string // "v1-only", "v2-only" (empty = both)
 	NoNATTraversal   bool   // disable NAT-T (legacy, use NATTraversal)
 	NATTraversal     string // "enable" (default), "disable", "force"
@@ -2162,10 +2192,15 @@ type IPsecGateway struct {
 	DeadPeerDetect string // explicit mode: "always-send", "optimized", "probe-idle-tunnel" (empty = Junos default / bare stanza)
 	DPDInterval    int    // seconds
 	DPDThreshold   int    // retry count before peer is considered dead
-	LocalIDType    string // "hostname", "inet", "fqdn"
-	LocalIDValue   string // identity value
-	RemoteIDType   string // "hostname", "inet", "fqdn"
-	RemoteIDValue  string // identity value
+	LocalIDType    string // "hostname", "inet", "fqdn", "key-id", "distinguished-name", ...
+	LocalIDValue   string // identity value (empty for bare distinguished-name, #15752)
+	// LocalDNModifier / RemoteDNModifier (#15752, G18-03) record the Junos
+	// distinguished-name qualifier: "" (bare/direct DN), "container" or
+	// "wildcard". The DN itself rides in LocalIDValue/RemoteIDValue.
+	LocalDNModifier  string
+	RemoteIDType     string // "hostname", "inet", "fqdn", "key-id", "distinguished-name", ...
+	RemoteIDValue    string // identity value (empty for bare distinguished-name, #15752)
+	RemoteDNModifier string
 	// DynamicHostnameExtras holds tokens that rode past the FQDN on a
 	// compact-hierarchical `dynamic hostname <fqdn> <extra>` line (#3332).
 	// The flat-set form lands `hostname <fqdn>` as a scalar child the generic

@@ -199,6 +199,13 @@ type schemaNode struct {
 	// the maximum flat-token consumption, while this flag models Junos leaves
 	// that accept both a value and an enable form (#9553).
 	allowEmptyValue bool
+	// identityBareDN (#15752) marks the gateway local/remote-identity
+	// leaves: their value-dependent arity is 1 when token[1] is
+	// distinguished-name with no DN following (bare, cert-derived) and
+	// up to 3 otherwise (type + qualifier + value). Flat-run and packed
+	// splitters consult effectiveArgs so a bare DN never steals the next
+	// statement's keyword as its value.
+	identityBareDN bool
 	valueHint       ValueHint // hint for dynamic value completion (when args > 0)
 	desc            string    // description shown in completion help
 	placeholder     string    // Junos-style placeholder (e.g., "<interface-name>")

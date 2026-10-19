@@ -564,7 +564,7 @@ xpf uses strongSwan for IPsec. Basic certificate-auth IKE generation exists, but
 | **CA Profile Management** | `security pki ca-profile ... ca-identity ... enrollment url ...` | CA certificate profiles with SCEP/CMPv2 enrollment, revocation checking (CRL/OCSP) | Medium | Missing |
 | **Local Certificate Management** | `security pki local-certificate ...` | Generate CSRs, load certificates, auto-enrollment, renewal tracking | Medium | Missing |
 | **CRL Management** | `security pki ca-profile ... revocation-check crl ...` | Certificate revocation list download, caching, periodic refresh | Low | Missing |
-| **Certificate-Based IPsec** | `security ike gateway ... local-certificate ...` | IPsec authentication using X.509 certificates instead of PSK | Medium | Partial (gateway `local-certificate` and pubkey auth compile into swanctl, but xpf still lacks Junos PKI/local-certificate object lifecycle management) |
+| **Certificate-Based IPsec** | `security ike gateway ... local-certificate ...` | IPsec authentication using X.509 certificates instead of PSK | Medium | Partial (gateway and IKE-policy `local-certificate` compile into swanctl `certs =` on pubkey only, credential-less pubkey is refused, #15752; xpf still lacks Junos PKI/local-certificate object lifecycle management — `security pki` is captured accepted-only with a warning) |
 
 ---
 

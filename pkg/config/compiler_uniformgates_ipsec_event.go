@@ -347,5 +347,18 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 		}
 	}
 
+	// #15752 (G18-02/03): a pubkey VPN with no effective local-certificate
+	// (gateway, else ike-policy) renders credential-less pubkey; an unknown
+	// gateway identity type renders verbatim as an IP/FQDN identity.
+	// Strict on commit; lenient warns and the render belt skips the VPN.
+	if err := validateIPsecCertAuthStrict(cfg); err != nil {
+		if opts.lenientIPsecCertAuth {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec cert-auth (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	return nil
 }

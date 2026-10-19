@@ -720,6 +720,12 @@ type compileOpts struct {
 	// digits as an ASCII secret.
 	lenientIPsecPSKQualifier bool
 
+	// lenientIPsecCertAuth (#15752) downgrades the pubkey-without-cert /
+	// unknown-identity-type reject (validateIPsecCertAuthStrict) to a
+	// warning on tolerant paths; the render belt skips the cert-less
+	// pubkey VPN so no credential-less pubkey connection loads.
+	lenientIPsecCertAuth bool
+
 	// lenientLogProfileStreamRef (#2008 H7) downgrades the
 	// `security log profile <name> stream-name <stream>` cross-reference
 	// from a hard error to a warning on the tolerant load / peer-sync
@@ -3590,6 +3596,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecPSKPresence:                true,
 		lenientIPsecResponderIdentity:          true,
 		lenientIPsecPSKQualifier:               true,
+		lenientIPsecCertAuth:                   true,
 		lenientLogProfileStreamRef:             true,
 		lenientAuthTypeAbsent:                  true,
 		lenientISISAuthTypeRequiresKey14399:    true,

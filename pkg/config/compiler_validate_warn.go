@@ -870,6 +870,54 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 		}
 	}
 
+	// #15752 (G18-01): `security pki` is captured (compiler_security_pki.go)
+	// but xpf implements no CA enrollment (SCEP/CMPv2), local-certificate
+	// generation/load, or CRL/OCSP lifecycle, and no request/show/clear
+	// security pki operational surface. Warn accepted-only so the stanza
+	// is not silently believed to provision the certificates that gateway
+	// local-certificate renders into swanctl certs = (files are
+	// operator-provisioned under the swanctl x509 directories).
+	if cfg.Security.PKI != nil && len(cfg.Security.PKI.CAProfiles) > 0 {
+		var pkiNames []string
+		for name := range cfg.Security.PKI.CAProfiles {
+			pkiNames = append(pkiNames, name)
+		}
+		sort.Strings(pkiNames)
+		warnings = append(warnings, fmt.Sprintf(
+			"security pki ca-profile %s configured but accepted-only "+
+				"— xpf does not implement PKI enrollment (SCEP/CMPv2), "+
+				"local-certificate lifecycle, or CRL/OCSP checking; "+
+				"provision certificate/key files under the swanctl x509 "+
+				"directories directly (config-only parity, #15752)",
+			strings.Join(pkiNames, ", ")))
+	}
+	// #15752: a gateway/policy local-certificate names a file strongSwan
+	// loads from its x509 directory; with no PKI lifecycle in xpf the name
+	// is accepted-only as an object reference — warn when any cert is
+	// configured so the dangling-reference risk is operator-visible.
+	{
+		var certRefs []string
+		for name, gw := range cfg.Security.IPsec.Gateways {
+			if gw != nil && gw.LocalCertificate != "" {
+				certRefs = append(certRefs, name+"="+gw.LocalCertificate)
+			}
+		}
+		for name, pol := range cfg.Security.IPsec.IKEPolicies {
+			if pol != nil && pol.LocalCertificate != "" {
+				certRefs = append(certRefs, "policy:"+name+"="+pol.LocalCertificate)
+			}
+		}
+		if len(certRefs) > 0 {
+			sort.Strings(certRefs)
+			warnings = append(warnings, fmt.Sprintf(
+				"local-certificate %s configured but accepted-only as a PKI "+
+					"object reference — xpf has no security pki lifecycle; "+
+					"the named certificate file must exist under the swanctl "+
+					"x509 directory or IKE pubkey authentication fails (#15752)",
+				strings.Join(certRefs, ", ")))
+		}
+	}
+
 	// #4313: `security ipsec proposal <p> lifetime-kilobytes <kb>` is now typed
 	// + captured (schema leaf + compileIPsec) so the closed-world flip on the
 	// Phase-2 proposal is leaf-complete, but the ESP child SA is not yet

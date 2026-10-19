@@ -401,6 +401,16 @@ var arityAdjudicated8807 = map[string]arityVerdict8807{
 	// below, which keeps it: the compiler was AHEAD of the schema, so nothing
 	// dropped and `?` help under-offered instead — the mirror of the #8773 rule.
 	"preempt": {"measured-benign", "#15199: the combined `virtual-address, virtual-inet6-address` case in parseVRRPGroups reads Keys[i+2] while scanning a packed run, so the name-keyed predicate re-attributes that index to the sibling `preempt` case in the same switch. The preempt sites themselves read only the documented optional `hold-time <n>` pair (braced child or Keys[1:]/Keys[2] packed form, both declared under preempt in the schema); braced and packed spellings compile identically (vrrp tests). No argument is dropped."},
+	"disable": {"false-pairing", "#15752: compiler_security_pki.go reads Keys[1] (nodeVal) inside " +
+		"`revocation-check` case clauses for the PKI crl/use-ocsp/disable mode tokens; the matched " +
+		"args:0 leaves are the ALG `disable` flags and the pki revocation-check `disable` child itself " +
+		"(a bare flag whose sibling mode token is consumed by the parent case, not by a disable leaf). " +
+		"No disable argument is dropped: braced and flat PKI spellings compile identically " +
+		"(pki_cert_auth_15752_test.go)."},
+	"use-ocsp": {"false-pairing", "#15752: same PKI revocation-check site as `disable` above — " +
+		"`use-ocsp` is a bare mode flag under `security pki ca-profile revocation-check` (args:0 by " +
+		"design); the compiler reads the MODE from the parent node's Keys/children, never a value " +
+		"under a use-ocsp leaf. No argument is dropped."},
 }
 
 // arityGenuineFloor8807 is a RATCHET, not an equality. It fails in BOTH
@@ -559,7 +569,8 @@ func TestArityCensusMutationControl8807(t *testing.T) {
 		t.Fatalf("`local-identity` fires under the conservative aggregation on an " +
 			"UNMUTATED tree. Either #8796 has regressed -- both `security ike " +
 			"gateway <g> local-identity` and `security ipsec gateway <g> " +
-			"local-identity` should be args:2 -- or this control now measures " +
+			"local-identity` should be args:3 (#15752 DN qualifier arity; was " +
+			"args:2 at #8796) -- or this control now measures " +
 			"something else and every count in this file is unfalsifiable.")
 	}
 
@@ -567,8 +578,8 @@ func TestArityCensusMutationControl8807(t *testing.T) {
 	saved := make([]int, len(nodes))
 	for i, n := range nodes {
 		saved[i] = n.args
-		if n.args != 2 {
-			t.Fatalf("mutation control expected args:2 at %v, found %d -- the "+
+		if n.args != 3 {
+			t.Fatalf("mutation control expected args:3 (#15752) at %v, found %d -- the "+
 				"control is anchored to a declaration that has changed shape and "+
 				"must be re-derived, not adjusted", paths[i], n.args)
 		}
