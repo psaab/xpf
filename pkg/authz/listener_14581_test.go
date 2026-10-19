@@ -162,11 +162,11 @@ func TestListenerOwnerPrivilegedMatrix_14581(t *testing.T) {
 	}
 }
 
-// The client half: a loopback server owned by another uid is refused
-// before any RPC. Driven over real loopback sockets owned by THIS test
-// process, so the "own uid" arm is what passes; the refusal arms are
-// driven through the fixture table (the only way to get a foreign-uid
-// row without a second uid).
+// The client half: a loopback server owned by a non-root uid is refused
+// before any RPC (#14581 foreign uid; #14982 same uid). Driven through
+// the fixture table (the only way to get a foreign-uid row without a
+// second uid); a real-socket own-uid server is refused post-#14982
+// unless the suite itself runs as root (see client_14982_test.go).
 func TestVerifyLoopbackServerConnRefusesForeignUID_14581(t *testing.T) {
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -221,6 +221,13 @@ func TestVerifyLoopbackServerConnOwnUIDPasses_14581(t *testing.T) {
 		}
 	}()
 	// Real tables: the server socket is owned by this process.
+	// Post-#14982 only uid 0 is trusted, so this passes only when the
+	// suite runs as root (own uid == 0); a non-root own-uid server is
+	// now refused — pinned by TestVerifyLoopbackServerConnRefusesSameUIDSquatter_14982.
+	if os.Getuid() != 0 {
+		t.Skip("post-#14982 a non-root own-uid loopback server is refused; " +
+			"covered by TestVerifyLoopbackServerConnRefusesSameUIDSquatter_14982")
+	}
 	conn, err := net.Dial("tcp", lis.Addr().String())
 	if err != nil {
 		t.Fatal(err)

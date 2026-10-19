@@ -1,5 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Refuse a loopback management server that merely shares the
+    caller's own non-root uid in the CLI/upgrade dial verification:
+    only uid 0 (what xpfd runs as) is trusted on loopback, so a
+    same-uid squatter on 127.0.0.1:50051 no longer receives the
+    operator's management RPCs and secrets (#14982).
   * Re-resolve the web-management interface bind after networkd applies
     addresses in the same commit, on DHCP lifeline lease changes, and via
     the 30s management re-assert owner. A bind that fell back to loopback
