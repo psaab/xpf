@@ -6,6 +6,7 @@
 #![allow(unused_imports)]
 
 use super::test_fixtures::*;
+use super::tests_support::*;
 use super::worker::WorkerTxPipeline;
 use super::*;
 use crate::test_zone_ids::*;
@@ -18,7 +19,6 @@ use crate::{
     InterfaceAddressSnapshot, NeighborSnapshot, PolicyRuleSnapshot, RouteSnapshot,
     SourceNATRuleSnapshot, StaticNATRuleSnapshot, ThreeColorPolicerSnapshot, ZoneSnapshot,
 };
-use super::tests_support::*;
 
 /// The reject path now routes through the same gate: an inbound ICMP
 /// error still draws no reject reply, and a non-first fragment is
@@ -30,7 +30,12 @@ fn reject_unreachable_routes_through_shared_gate() {
     let fwd = reject_egress_forwarding(Some(Ipv4Addr::new(10, 0, 61, 1)), None);
     // Multicast destination — suppressed (was NOT covered by the old
     // inline reject checks, only the new shared gate catches it).
-    let mcast = build_udp_frame_v4_full([0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb], client, Ipv4Addr::new(224, 0, 0, 251), 64);
+    let mcast = build_udp_frame_v4_full(
+        [0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb],
+        client,
+        Ipv4Addr::new(224, 0, 0, 251),
+        64,
+    );
     let meta = UserspaceDpMeta {
         l3_offset: 14,
         l4_offset: 34,
@@ -45,7 +50,8 @@ fn reject_unreachable_routes_through_shared_gate() {
             5,
             &fwd,
             crate::filter::RejectMessage::ADMIN_PROHIBITED,
-        ).is_none(),
+        )
+        .is_none(),
         "reject path must suppress a multicast destination via the shared gate"
     );
     // A plain unicast UDP reject still works.
@@ -57,11 +63,11 @@ fn reject_unreachable_routes_through_shared_gate() {
             5,
             &fwd,
             crate::filter::RejectMessage::ADMIN_PROHIBITED,
-        ).is_some(),
+        )
+        .is_some(),
         "reject path still replies to a normal unicast packet"
     );
 }
-
 
 /// #2242: the ICMPv6 error builder must quote enough of the invoking
 /// packet to reach the transport header even when IPv6 extension headers
@@ -138,7 +144,6 @@ fn icmp_error_v6_quote_includes_transport_header_behind_ext_headers() {
     );
 }
 
-
 /// #2242: a large invoking IPv6 packet is quoted up to the 1232-byte cap
 /// (not truncated to 48), keeping the total error within 1280.
 #[test]
@@ -188,7 +193,6 @@ fn icmp_error_v6_quote_bounded_to_min_mtu() {
 
 // --- #2089 reject ICMP-unreachable builder tests ---
 
-
 #[test]
 fn reject_icmp_unreachable_v4_is_type3_code13_admin_prohibited() {
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
@@ -209,7 +213,7 @@ fn reject_icmp_unreachable_v4_is_type3_code13_admin_prohibited() {
         &forwarding,
         crate::filter::RejectMessage::ADMIN_PROHIBITED,
     )
-        .expect("reject ICMP unreachable v4");
+    .expect("reject ICMP unreachable v4");
     // MAC reflect: reply dst = inbound src (client).
     assert_eq!(&out[0..6], &[0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
     assert_eq!(&out[6..12], &[0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]);
@@ -224,7 +228,6 @@ fn reject_icmp_unreachable_v4_is_type3_code13_admin_prohibited() {
     assert_eq!(out[35], 13);
 }
 
-
 #[test]
 fn reject_icmp_unreachable_v6_is_type1_code1_admin_prohibited() {
     let client_ip: Ipv6Addr = "2001:559:8585:ef00::102".parse().unwrap();
@@ -232,7 +235,12 @@ fn reject_icmp_unreachable_v6_is_type1_code1_admin_prohibited() {
     // Reuse the echo-frame helper (ICMPv6 echo request = a query, not an
     // error) so the suppression guard does NOT fire: a rejected query
     // gets an unreachable.
-    let frame = build_icmp_echo_frame_v6(client_ip, dst_ip, 64, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_icmp_echo_frame_v6(
+        client_ip,
+        dst_ip,
+        64,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let meta = UserspaceDpMeta {
         l3_offset: 14,
         l4_offset: 54,
@@ -248,19 +256,23 @@ fn reject_icmp_unreachable_v6_is_type1_code1_admin_prohibited() {
         &forwarding,
         crate::filter::RejectMessage::ADMIN_PROHIBITED,
     )
-        .expect("reject ICMPv6 unreachable v6");
+    .expect("reject ICMPv6 unreachable v6");
     // ICMPv6 type 1 (dest unreachable), code 1 (admin prohibited).
     assert_eq!(out[54], 1);
     assert_eq!(out[55], 1);
 }
-
 
 #[test]
 fn reject_icmp_unreachable_suppressed_for_inbound_icmp_error() {
     // An inbound ICMPv4 error (type 3) must NOT draw a reject reply.
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
     let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
-    let mut frame = build_icmp_echo_frame_v4(client_ip, dst_ip, 64, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let mut frame = build_icmp_echo_frame_v4(
+        client_ip,
+        dst_ip,
+        64,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     // Rewrite the ICMP type byte (at l4_offset = 34) to 3 (dest unreach).
     frame[34] = 3;
     let meta = UserspaceDpMeta {
@@ -278,7 +290,8 @@ fn reject_icmp_unreachable_suppressed_for_inbound_icmp_error() {
             5,
             &forwarding,
             crate::filter::RejectMessage::ADMIN_PROHIBITED,
-        ).is_none(),
+        )
+        .is_none(),
         "must not reply to an inbound ICMP error"
     );
     // Direct guard checks.
@@ -292,7 +305,6 @@ fn reject_icmp_unreachable_suppressed_for_inbound_icmp_error() {
 }
 
 // --- ICMP error NAT reversal tests ---
-
 
 #[test]
 fn icmp_te_nat_reversal_v4_rewrites_outer_dst_and_embedded_src() {
@@ -362,6 +374,7 @@ fn icmp_te_nat_reversal_v4_rewrites_outer_dst_and_embedded_src() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         related_expected_zone: 0,
         outbound_snat: false,
@@ -387,17 +400,12 @@ fn icmp_te_nat_reversal_v4_rewrites_outer_dst_and_embedded_src() {
     fabric_frame[14 + 10..14 + 12].copy_from_slice(&[0, 0]);
     let fabric_csum = checksum16(&fabric_frame[14..34]);
     fabric_frame[14 + 10..14 + 12].copy_from_slice(&fabric_csum.to_be_bytes());
-    let fabric_result = build_nat_reversed_icmp_error_v4(
-        &fabric_frame,
-        fabric_meta,
-        &icmp_match,
-    )
-    .expect("fabric-ingress reversal must preserve peer-decremented TTL");
+    let fabric_result = build_nat_reversed_icmp_error_v4(&fabric_frame, fabric_meta, &icmp_match)
+        .expect("fabric-ingress reversal must preserve peer-decremented TTL");
     assert_eq!(
         fabric_result[22], 1,
         "fabric-ingress reversal must not decrement TTL again"
     );
-
 
     // Verify Ethernet header
     assert_eq!(&result[0..6], &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // dst MAC
@@ -465,7 +473,6 @@ fn icmp_te_nat_reversal_v4_rewrites_outer_dst_and_embedded_src() {
     );
 }
 
-
 #[test]
 fn icmp_te_nat_reversal_v4_with_port_snat() {
     // Same as above but verifying UDP port reversal specifically
@@ -531,6 +538,7 @@ fn icmp_te_nat_reversal_v4_with_port_snat() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         related_expected_zone: 0,
         outbound_snat: false,
@@ -555,7 +563,6 @@ fn icmp_te_nat_reversal_v4_with_port_snat() {
     let icmp_csum_check = checksum16(&result[34..]);
     assert_eq!(icmp_csum_check, 0, "outer ICMP checksum should be valid");
 }
-
 
 #[test]
 fn icmp_dest_unreach_nat_reversal_v4() {
@@ -665,6 +672,7 @@ fn icmp_dest_unreach_nat_reversal_v4() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         related_expected_zone: 0,
         outbound_snat: false,
@@ -690,7 +698,6 @@ fn icmp_dest_unreach_nat_reversal_v4() {
 }
 
 // === #3112: embedded-DESTINATION reversal for DNAT/static-NAT ===
-
 
 #[test]
 fn icmp_dnat_reversal_v4_rewrites_embedded_dst_and_outer_src() {
@@ -743,16 +750,32 @@ fn icmp_dnat_reversal_v4_rewrites_embedded_dst_and_outer_src() {
 
     // Outer src is now the public address the client used.
     let outer_src = Ipv4Addr::new(result[26], result[27], result[28], result[29]);
-    assert_eq!(outer_src, public_p, "outer src must be un-DNAT'd to public P");
+    assert_eq!(
+        outer_src, public_p,
+        "outer src must be un-DNAT'd to public P"
+    );
     // Outer dst is still the client.
     let outer_dst = Ipv4Addr::new(result[30], result[31], result[32], result[33]);
     assert_eq!(outer_dst, client_c, "outer dst stays the client");
 
     let emb = 42; // eth(14)+outer ip(20)+icmp(8)
-    let emb_src = Ipv4Addr::new(result[emb + 12], result[emb + 13], result[emb + 14], result[emb + 15]);
+    let emb_src = Ipv4Addr::new(
+        result[emb + 12],
+        result[emb + 13],
+        result[emb + 14],
+        result[emb + 15],
+    );
     assert_eq!(emb_src, client_c, "embedded src (client) unchanged");
-    let emb_dst = Ipv4Addr::new(result[emb + 16], result[emb + 17], result[emb + 18], result[emb + 19]);
-    assert_eq!(emb_dst, public_p, "embedded dst must be un-DNAT'd to public P");
+    let emb_dst = Ipv4Addr::new(
+        result[emb + 16],
+        result[emb + 17],
+        result[emb + 18],
+        result[emb + 19],
+    );
+    assert_eq!(
+        emb_dst, public_p,
+        "embedded dst must be un-DNAT'd to public P"
+    );
 
     // Embedded transport ports: src unchanged (no SNAT), dst un-DNAT'd.
     let emb_l4 = emb + 20;
@@ -770,9 +793,12 @@ fn icmp_dnat_reversal_v4_rewrites_embedded_dst_and_outer_src() {
     // All checksums valid.
     assert_eq!(checksum16(&result[14..34]), 0, "outer IP checksum");
     assert_eq!(checksum16(&result[34..]), 0, "outer ICMP checksum");
-    assert_eq!(checksum16(&result[emb..emb + 20]), 0, "embedded IP checksum");
+    assert_eq!(
+        checksum16(&result[emb..emb + 20]),
+        0,
+        "embedded IP checksum"
+    );
 }
-
 
 #[test]
 fn icmp_static_nat_reversal_v4_rewrites_embedded_dst() {
@@ -819,7 +845,12 @@ fn icmp_static_nat_reversal_v4_rewrites_embedded_dst() {
     let outer_src = Ipv4Addr::new(result[26], result[27], result[28], result[29]);
     assert_eq!(outer_src, public_p, "outer src un-NAT'd to public P");
     let emb = 42;
-    let emb_dst = Ipv4Addr::new(result[emb + 16], result[emb + 17], result[emb + 18], result[emb + 19]);
+    let emb_dst = Ipv4Addr::new(
+        result[emb + 16],
+        result[emb + 17],
+        result[emb + 18],
+        result[emb + 19],
+    );
     assert_eq!(emb_dst, public_p, "embedded dst un-NAT'd to public P");
     let emb_l4 = emb + 20;
     assert_eq!(
@@ -831,7 +862,6 @@ fn icmp_static_nat_reversal_v4_rewrites_embedded_dst() {
     assert_eq!(checksum16(&result[34..]), 0);
     assert_eq!(checksum16(&result[emb..emb + 20]), 0);
 }
-
 
 #[test]
 fn icmp_snat_only_reversal_v4_leaves_destination_untouched() {
@@ -876,7 +906,12 @@ fn icmp_snat_only_reversal_v4_leaves_destination_untouched() {
     let outer_src = Ipv4Addr::new(result[26], result[27], result[28], result[29]);
     assert_eq!(outer_src, router, "SNAT-only: outer src untouched");
     let emb = 42;
-    let emb_dst = Ipv4Addr::new(result[emb + 16], result[emb + 17], result[emb + 18], result[emb + 19]);
+    let emb_dst = Ipv4Addr::new(
+        result[emb + 16],
+        result[emb + 17],
+        result[emb + 18],
+        result[emb + 19],
+    );
     assert_eq!(emb_dst, server_ip, "SNAT-only: embedded dst untouched");
     let emb_l4 = emb + 20;
     assert_eq!(
@@ -885,7 +920,12 @@ fn icmp_snat_only_reversal_v4_leaves_destination_untouched() {
         "SNAT-only: embedded dst port untouched"
     );
     // Source-side reversal still applies (unchanged behaviour).
-    let emb_src = Ipv4Addr::new(result[emb + 12], result[emb + 13], result[emb + 14], result[emb + 15]);
+    let emb_src = Ipv4Addr::new(
+        result[emb + 12],
+        result[emb + 13],
+        result[emb + 14],
+        result[emb + 15],
+    );
     assert_eq!(emb_src, client_ip, "SNAT-only: source still reversed");
     assert_eq!(
         u16::from_be_bytes([result[emb_l4], result[emb_l4 + 1]]),
@@ -895,7 +935,6 @@ fn icmp_snat_only_reversal_v4_leaves_destination_untouched() {
     assert_eq!(checksum16(&result[34..]), 0);
     assert_eq!(checksum16(&result[emb..emb + 20]), 0);
 }
-
 
 #[test]
 fn icmpv6_te_nat_reversal_v6_rewrites_outer_dst_and_embedded_src() {
@@ -962,6 +1001,7 @@ fn icmpv6_te_nat_reversal_v6_rewrites_outer_dst_and_embedded_src() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         related_expected_zone: 0,
         outbound_snat: false,
@@ -970,7 +1010,10 @@ fn icmpv6_te_nat_reversal_v6_rewrites_outer_dst_and_embedded_src() {
 
     let result = build_nat_reversed_icmp_error_v6(&frame, meta, &icmp_match)
         .expect("should build NAT-reversed ICMPv6 frame");
-    assert_eq!(result[21], 63, "same-family IPv6 reversal decrements hop-limit");
+    assert_eq!(
+        result[21], 63,
+        "same-family IPv6 reversal decrements hop-limit"
+    );
     let mut expired_frame = frame.clone();
     expired_frame[14 + 7] = 1;
     assert!(
@@ -981,12 +1024,8 @@ fn icmpv6_te_nat_reversal_v6_rewrites_outer_dst_and_embedded_src() {
     fabric_meta.meta_flags |= FABRIC_INGRESS_FLAG;
     let mut fabric_frame = frame.clone();
     fabric_frame[14 + 7] = 1;
-    let fabric_result = build_nat_reversed_icmp_error_v6(
-        &fabric_frame,
-        fabric_meta,
-        &icmp_match,
-    )
-    .expect("fabric-ingress reversal must preserve peer-decremented hop-limit");
+    let fabric_result = build_nat_reversed_icmp_error_v6(&fabric_frame, fabric_meta, &icmp_match)
+        .expect("fabric-ingress reversal must preserve peer-decremented hop-limit");
     assert_eq!(
         fabric_result[21], 1,
         "fabric-ingress reversal must not decrement hop-limit again"
@@ -1052,7 +1091,6 @@ fn icmpv6_te_nat_reversal_v6_rewrites_outer_dst_and_embedded_src() {
         "ICMPv6 checksum should be valid"
     );
 }
-
 
 #[test]
 fn icmpv6_dnat66_reversal_v6_rewrites_embedded_dst_and_outer_src() {
@@ -1160,7 +1198,6 @@ fn icmpv6_dnat66_reversal_v6_rewrites_embedded_dst_and_outer_src() {
     assert_eq!(actual, expected, "ICMPv6 checksum valid after dst reversal");
 }
 
-
 /// #1838 §5.7: an ICMPv6 error whose OUTER packet carries an extension
 /// header. The NAT match is ext-aware (reads the ICMP type at
 /// meta.l4_offset), so this input matched — and the old fixed-40
@@ -1227,7 +1264,6 @@ fn icmpv6_te_nat_reversal_outer_ext_header_lands_at_real_offsets() {
     );
 }
 
-
 /// #1838 §5.7 (Codex r2): a quoted NON-FIRST fragment has no L4
 /// header — the builder must not write "ports" into its payload
 /// bytes. A quoted FIRST/atomic fragment does carry the L4 header
@@ -1290,7 +1326,6 @@ fn icmpv6_te_nat_reversal_embedded_fragment_handling() {
         "first/atomic fragment: port restored after the fragment header"
     );
 }
-
 
 /// #1838 §5.7 (Codex r2 medium 2): the builder's final ICMPv6 checksum
 /// recompute canonicalizes a computed 0x0000 to 0xFFFF — representation
@@ -1358,7 +1393,6 @@ fn icmpv6_te_nat_reversal_computed_zero_checksum_stored_as_ffff() {
     );
 }
 
-
 #[test]
 fn icmpv6_te_nptv6_reverse_lookup_restores_internal_client() {
     let router_ip: Ipv6Addr = "2001:db8::1".parse().unwrap();
@@ -1395,19 +1429,32 @@ fn icmpv6_te_nptv6_reverse_lookup_restores_internal_client() {
         external_prefix: "2602:fd41:0070::/48".to_string(),
     }]);
 
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 24,
-        tx_ifindex: 24,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V6(internal_client)),
-        neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision { rewrite_src: Some(IpAddr::V6(external_client)), rewrite_dst: None, rewrite_src_port: None, rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: true }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 24,
+            tx_ifindex: 24,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V6(internal_client)),
+            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V6(external_client)),
+            rewrite_dst: None,
+            rewrite_src_port: None,
+            rewrite_dst_port: None,
+            source_nat_icmp: None,
+            nat64: false,
+            nptv6: true,
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
@@ -1426,6 +1473,7 @@ fn icmpv6_te_nptv6_reverse_lookup_restores_internal_client() {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     };
     let mut sessions = SessionTable::new();
     assert!(sessions.install_with_protocol(
@@ -1436,8 +1484,8 @@ fn icmpv6_te_nptv6_reverse_lookup_restores_internal_client() {
             dst_ip: IpAddr::V6(server_ip),
             src_port: echo_id,
             dst_port: 0,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
         decision,
         metadata,
@@ -1461,7 +1509,8 @@ fn icmpv6_te_nptv6_reverse_lookup_restores_internal_client() {
         &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
-    ).into_option()
+    )
+    .into_option()
     .expect("should match embedded ICMPv6 error");
 
     assert_eq!(icmp_match.original_src, IpAddr::V6(internal_client));
@@ -1512,9 +1561,9 @@ fn icmpv6_te_nptv6_reverse_lookup_uses_logical_vlan_unit_zone_not_physical_paren
 
     const PHYSICAL_IFINDEX: i32 = 11;
     const UNIT_A_IFINDEX: i32 = 12; // VLAN 50, "zone-a" — the first unit, so
-                                     // the physical parent inherits ITS zone.
+    // the physical parent inherits ITS zone.
     const UNIT_B_IFINDEX: i32 = 13; // VLAN 80, "zone-b" — the traffic's real
-                                     // unit; must NOT be shadowed by zone-a.
+    // unit; must NOT be shadowed by zone-a.
     const ZONE_A_ID: u16 = 41;
     const ZONE_B_ID: u16 = 42;
 
@@ -1591,19 +1640,24 @@ fn icmpv6_te_nptv6_reverse_lookup_uses_logical_vlan_unit_zone_not_physical_paren
     // zone-gated NPTv6 reverse translation feeding `embedded_key` (see the
     // doc comment above for why a recorded `rewrite_src` would mask the bug
     // via the `reverse_translated_index` alias).
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 24,
-        tx_ifindex: 24,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V6(internal_client)),
-        neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 24,
+            tx_ifindex: 24,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V6(internal_client)),
+            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let metadata = SessionMetadata {
         ingress_zone: ZONE_B_ID,
         egress_zone: TEST_WAN_ZONE_ID,
@@ -1622,6 +1676,7 @@ fn icmpv6_te_nptv6_reverse_lookup_uses_logical_vlan_unit_zone_not_physical_paren
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     };
     let mut sessions = SessionTable::new();
     assert!(sessions.install_with_protocol(
@@ -1632,8 +1687,8 @@ fn icmpv6_te_nptv6_reverse_lookup_uses_logical_vlan_unit_zone_not_physical_paren
             dst_ip: IpAddr::V6(server_ip),
             src_port: echo_id,
             dst_port: 0,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
         decision,
         metadata,
@@ -1657,7 +1712,8 @@ fn icmpv6_te_nptv6_reverse_lookup_uses_logical_vlan_unit_zone_not_physical_paren
         &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
-    ).into_option()
+    )
+    .into_option()
     .expect(
         "must resolve the embedded ICMPv6 error via the LOGICAL vlan unit's \
          zone (zone-b), not the physical parent's inherited zone-a",
@@ -1710,22 +1766,35 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         dst_ip: IpAddr::V6(server_ip),
         src_port: echo_id,
         dst_port: 0,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
-    let forward_decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 11,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V6(server_ip)),
-        neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-        tx_vlan_id: 80,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision { rewrite_src: Some(IpAddr::V6(external_client)), rewrite_dst: None, rewrite_src_port: None, rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: true }, install_table_domain: 0, install_table_check: 0 };
+    let forward_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V6(server_ip)),
+            neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+            tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V6(external_client)),
+            rewrite_dst: None,
+            rewrite_src_port: None,
+            rewrite_dst_port: None,
+            source_nat_icmp: None,
+            nat64: false,
+            nptv6: true,
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let forward_metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
@@ -1744,6 +1813,7 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     };
 
     let reverse_key = reverse_session_key(&forward_key, forward_decision.nat);
@@ -1760,12 +1830,17 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         route_mtu: 0,
         transport_route_mtu: 0,
     };
-    let reverse_decision = SessionDecision { resolution: reverse_resolution, nat: forward_decision.nat.reverse(
-        forward_key.src_ip,
-        forward_key.dst_ip,
-        forward_key.src_port,
-        forward_key.dst_port,
-    ), install_table_domain: 0, install_table_check: 0 };
+    let reverse_decision = SessionDecision {
+        resolution: reverse_resolution,
+        nat: forward_decision.nat.reverse(
+            forward_key.src_ip,
+            forward_key.dst_ip,
+            forward_key.src_port,
+            forward_key.dst_port,
+        ),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let reverse_metadata = SessionMetadata {
         ingress_zone: TEST_WAN_ZONE_ID,
         egress_zone: TEST_LAN_ZONE_ID,
@@ -1784,6 +1859,7 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     };
 
     let mut sessions = SessionTable::new();
@@ -1819,7 +1895,8 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
-    ).into_option()
+    )
+    .into_option()
     .expect("should match embedded ICMPv6 error");
 
     assert_eq!(icmp_match.original_src, IpAddr::V6(internal_client));
@@ -1835,7 +1912,6 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
     );
 }
 
-
 /// #13650: embedded-ICMP NAT builders must not rewrite bytes 4..6 of a
 /// QUOTED ICMP/ICMPv6 message unless it is identifier-bearing. For a
 /// quoted Destination-Unreachable those bytes are the unused/MTU word,
@@ -1849,32 +1925,53 @@ fn icmp_embed_builder_nonbearing_quoted_icmp_keeps_word_13650() {
     let server_ip = Ipv4Addr::new(1, 1, 1, 1);
     let snat_port: u16 = 40000;
     let client_port: u16 = 12345;
-    let mut frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_ICMP);
+    let mut frame =
+        build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_ICMP);
     let emb_l4 = 14 + 20 + 8 + 20;
     frame[emb_l4] = 3;
     frame[emb_l4 + 4..emb_l4 + 6].copy_from_slice(&0x1234u16.to_be_bytes());
     let m4 = EmbeddedIcmpMatch {
-        nat: NatDecision { rewrite_src: Some(IpAddr::V4(snat_ip)), rewrite_src_port: Some(snat_port), ..NatDecision::default() },
-        original_src: IpAddr::V4(client_ip), original_src_port: client_port,
-        original_dst: IpAddr::V4(server_ip), original_dst_port: 80,
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(snat_ip)),
+            rewrite_src_port: Some(snat_port),
+            ..NatDecision::default()
+        },
+        original_src: IpAddr::V4(client_ip),
+        original_src_port: client_port,
+        original_dst: IpAddr::V4(server_ip),
+        original_dst_port: 80,
         embedded_proto: PROTO_ICMP,
         resolution: icmp_err_resolution_v4(client_ip),
-        metadata: icmp_err_metadata(), related_expected_zone: 0, outbound_snat: false,
+        metadata: icmp_err_metadata(),
+        related_expected_zone: 0,
+        outbound_snat: false,
         budget_key: icmp_budget_test_key(),
     };
-    let out = build_nat_reversed_icmp_error_v4(&frame, icmp_err_meta_v4(), &m4).expect("v4 reversal builds");
-    assert_eq!(&out[emb_l4 + 4..emb_l4 + 6], &0x1234u16.to_be_bytes(),
-        "#13650: quoted ICMPv4 Dest-Unreach bytes 4..6 must not be rewritten as an identifier");
+    let out = build_nat_reversed_icmp_error_v4(&frame, icmp_err_meta_v4(), &m4)
+        .expect("v4 reversal builds");
+    assert_eq!(
+        &out[emb_l4 + 4..emb_l4 + 6],
+        &0x1234u16.to_be_bytes(),
+        "#13650: quoted ICMPv4 Dest-Unreach bytes 4..6 must not be rewritten as an identifier"
+    );
     assert_eq!(out[emb_l4], 3);
     let mut echo_frame = frame.clone();
     echo_frame[emb_l4] = 8;
     echo_frame[emb_l4 + 4..emb_l4 + 6].copy_from_slice(&snat_port.to_be_bytes());
-    let out_echo = build_nat_reversed_icmp_error_v4(&echo_frame, icmp_err_meta_v4(), &m4).expect("v4 echo reversal builds");
-    assert_eq!(&out_echo[emb_l4 + 4..emb_l4 + 6], &client_port.to_be_bytes(),
-        "quoted Echo Request identifier must still be restored");
-    let out_snat = build_snat_outbound_icmp_error_v4(&frame, icmp_err_meta_v4(), &m4).expect("v4 snat-outbound builds");
-    assert_eq!(&out_snat[emb_l4 + 4..emb_l4 + 6], &0x1234u16.to_be_bytes(),
-        "#13650: SNAT-outbound quoted ICMPv4 Dest-Unreach bytes 4..6 must not be rewritten");
+    let out_echo = build_nat_reversed_icmp_error_v4(&echo_frame, icmp_err_meta_v4(), &m4)
+        .expect("v4 echo reversal builds");
+    assert_eq!(
+        &out_echo[emb_l4 + 4..emb_l4 + 6],
+        &client_port.to_be_bytes(),
+        "quoted Echo Request identifier must still be restored"
+    );
+    let out_snat = build_snat_outbound_icmp_error_v4(&frame, icmp_err_meta_v4(), &m4)
+        .expect("v4 snat-outbound builds");
+    assert_eq!(
+        &out_snat[emb_l4 + 4..emb_l4 + 6],
+        &0x1234u16.to_be_bytes(),
+        "#13650: SNAT-outbound quoted ICMPv4 Dest-Unreach bytes 4..6 must not be rewritten"
+    );
 
     let router6: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let snat6: Ipv6Addr = "2001:db8:1::100".parse().unwrap();
@@ -1892,25 +1989,47 @@ fn icmp_embed_builder_nonbearing_quoted_icmp_keeps_word_13650() {
     m6.original_dst = IpAddr::V6(server6);
     let meta6 = icmpv6_te_meta(54);
     let out6 = build_nat_reversed_icmp_error_v6(&frame6, meta6, &m6).expect("v6 reversal builds");
-    assert_eq!(&out6[emb6_l4 + 4..emb6_l4 + 6], &0x1234u16.to_be_bytes(),
-        "#13650: quoted ICMPv6 Dest-Unreach bytes 4..6 must not be rewritten as an identifier");
+    assert_eq!(
+        &out6[emb6_l4 + 4..emb6_l4 + 6],
+        &0x1234u16.to_be_bytes(),
+        "#13650: quoted ICMPv6 Dest-Unreach bytes 4..6 must not be rewritten as an identifier"
+    );
     let stored = u16::from_be_bytes([out6[emb6_l4 + 2], out6[emb6_l4 + 3]]);
     let verify = checksum16_ipv6(client6, server6, PROTO_ICMPV6, &out6[emb6_l4..emb6_l4 + 8]);
-    assert_eq!(verify, 0, "#13650: quoted ICMPv6 checksum must verify over egress pseudo-header (stored {stored:#06x})");
+    assert_eq!(
+        verify, 0,
+        "#13650: quoted ICMPv6 checksum must verify over egress pseudo-header (stored {stored:#06x})"
+    );
     let mut echo6 = frame6.clone();
     echo6[emb6_l4] = 128;
     echo6[emb6_l4 + 4..emb6_l4 + 6].copy_from_slice(&snat_port.to_be_bytes());
     echo6[emb6_l4 + 2..emb6_l4 + 4].copy_from_slice(&[0, 0]);
     let ec = checksum16_ipv6(snat6, server6, PROTO_ICMPV6, &echo6[emb6_l4..emb6_l4 + 8]);
     echo6[emb6_l4 + 2..emb6_l4 + 4].copy_from_slice(&ec.to_be_bytes());
-    let out6_echo = build_nat_reversed_icmp_error_v6(&echo6, meta6, &m6).expect("v6 echo reversal builds");
-    assert_eq!(&out6_echo[emb6_l4 + 4..emb6_l4 + 6], &client_port.to_be_bytes(),
-        "quoted ICMPv6 Echo Request identifier must still be restored");
-    let verify_echo = checksum16_ipv6(client6, server6, PROTO_ICMPV6, &out6_echo[emb6_l4..emb6_l4 + 8]);
-    assert_eq!(verify_echo, 0, "quoted ICMPv6 echo checksum must verify over egress pseudo-header after address+identifier delta");
-    let out6_snat = build_snat_outbound_icmp_error_v6(&frame6, meta6, &m6).expect("v6 snat-outbound builds");
-    assert_eq!(&out6_snat[emb6_l4 + 4..emb6_l4 + 6], &0x1234u16.to_be_bytes(),
-        "#13650: SNAT-outbound quoted ICMPv6 Dest-Unreach bytes 4..6 must not be rewritten");
+    let out6_echo =
+        build_nat_reversed_icmp_error_v6(&echo6, meta6, &m6).expect("v6 echo reversal builds");
+    assert_eq!(
+        &out6_echo[emb6_l4 + 4..emb6_l4 + 6],
+        &client_port.to_be_bytes(),
+        "quoted ICMPv6 Echo Request identifier must still be restored"
+    );
+    let verify_echo = checksum16_ipv6(
+        client6,
+        server6,
+        PROTO_ICMPV6,
+        &out6_echo[emb6_l4..emb6_l4 + 8],
+    );
+    assert_eq!(
+        verify_echo, 0,
+        "quoted ICMPv6 echo checksum must verify over egress pseudo-header after address+identifier delta"
+    );
+    let out6_snat =
+        build_snat_outbound_icmp_error_v6(&frame6, meta6, &m6).expect("v6 snat-outbound builds");
+    assert_eq!(
+        &out6_snat[emb6_l4 + 4..emb6_l4 + 6],
+        &0x1234u16.to_be_bytes(),
+        "#13650: SNAT-outbound quoted ICMPv6 Dest-Unreach bytes 4..6 must not be rewritten"
+    );
 }
 
 /// #13650 advisory: quoted ICMPv6 checksum repair must be incremental.
@@ -1957,13 +2076,21 @@ fn icmp_embed_v6_truncated_quote_incremental_checksum_13650() {
     let mut wn = crate::afxdp::frame::ipv6_words_from_octets(client6.octets()).to_vec();
     wn.push(client_port);
     let mut expected = checksum16_adjust(orig_csum, &wo, &wn);
-    if expected == 0 { expected = 0xffff; }
+    if expected == 0 {
+        expected = 0xffff;
+    }
     let stored = u16::from_be_bytes([out[emb_l4 + 2], out[emb_l4 + 3]]);
-    assert_eq!(stored, expected, "#13650: truncated quote must keep RFC1624-incremental checksum, not a recompute over captured bytes");
+    assert_eq!(
+        stored, expected,
+        "#13650: truncated quote must keep RFC1624-incremental checksum, not a recompute over captured bytes"
+    );
     // And it verifies against the reconstructed full datagram:
     let mut full_out = vec![0u8; 100];
     full_out[..8].copy_from_slice(&out[emb_l4..emb_l4 + 8]);
-    assert_eq!(checksum16_ipv6(client6, server6, PROTO_ICMPV6, &full_out), 0);
+    assert_eq!(
+        checksum16_ipv6(client6, server6, PROTO_ICMPV6, &full_out),
+        0
+    );
     // (b) non-Echo type 1: bytes kept, address-delta repair applied.
     let mut f2 = build_icmpv6_te_frame(router6, snat6, server6, snat_port, 80, PROTO_ICMPV6);
     f2[emb_l4] = 1;
@@ -1978,12 +2105,19 @@ fn icmp_embed_v6_truncated_quote_incremental_checksum_13650() {
     let mut wo2 = crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()).to_vec();
     let mut wn2 = crate::afxdp::frame::ipv6_words_from_octets(client6.octets()).to_vec();
     let _ = (&mut wo2, &mut wn2);
-    let mut exp2 = checksum16_adjust(err_csum,
+    let mut exp2 = checksum16_adjust(
+        err_csum,
         &crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()),
-        &crate::afxdp::frame::ipv6_words_from_octets(client6.octets()));
-    if exp2 == 0 { exp2 = 0xffff; }
-    assert_eq!(u16::from_be_bytes([out2[emb_l4 + 2], out2[emb_l4 + 3]]), exp2,
-        "#13650: non-Echo quoted ICMPv6 must get address-delta checksum repair");
+        &crate::afxdp::frame::ipv6_words_from_octets(client6.octets()),
+    );
+    if exp2 == 0 {
+        exp2 = 0xffff;
+    }
+    assert_eq!(
+        u16::from_be_bytes([out2[emb_l4 + 2], out2[emb_l4 + 3]]),
+        exp2,
+        "#13650: non-Echo quoted ICMPv6 must get address-delta checksum repair"
+    );
 }
 
 /// #13650: SNAT-outbound v6 quoted non-Echo must keep bytes 4..6 AND
@@ -2015,15 +2149,26 @@ fn icmp_embed_v6_snat_outbound_non_echo_addr_delta_13650() {
     m6.embedded_proto = PROTO_ICMPV6;
     m6.original_dst = IpAddr::V6(server6);
     m6.nat.rewrite_src_port = Some(snat_port);
-    let out = build_snat_outbound_icmp_error_v6(&f, icmpv6_te_meta(54), &m6).expect("snat v6 builds");
-    assert_eq!(&out[emb_l4 + 4..emb_l4 + 6], &0x1234u16.to_be_bytes(),
-        "outbound non-Echo bytes 4..6 kept");
-    let mut exp = checksum16_adjust(c0,
+    let out =
+        build_snat_outbound_icmp_error_v6(&f, icmpv6_te_meta(54), &m6).expect("snat v6 builds");
+    assert_eq!(
+        &out[emb_l4 + 4..emb_l4 + 6],
+        &0x1234u16.to_be_bytes(),
+        "outbound non-Echo bytes 4..6 kept"
+    );
+    let mut exp = checksum16_adjust(
+        c0,
         &crate::afxdp::frame::ipv6_words_from_octets(server6.octets()),
-        &crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()));
-    if exp == 0 { exp = 0xffff; }
-    assert_eq!(u16::from_be_bytes([out[emb_l4 + 2], out[emb_l4 + 3]]), exp,
-        "#13650: outbound non-Echo must get dst address-delta repair");
+        &crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()),
+    );
+    if exp == 0 {
+        exp = 0xffff;
+    }
+    assert_eq!(
+        u16::from_be_bytes([out[emb_l4 + 2], out[emb_l4 + 3]]),
+        exp,
+        "#13650: outbound non-Echo must get dst address-delta repair"
+    );
 }
 
 /// #13650: address-delta quoted-checksum repair must NOT be gated on a
@@ -2062,16 +2207,26 @@ fn icmp_embed_v6_addr_delta_without_port_rewrite_13650() {
     m.nat.rewrite_src_port = None;
     m.nat.rewrite_dst = Some(IpAddr::V6(server6));
     m.original_dst = IpAddr::V6(public6);
-    let out = build_nat_reversed_icmp_error_v6(&f, icmpv6_te_meta(54), &m).expect("dnat-only builds");
+    let out =
+        build_nat_reversed_icmp_error_v6(&f, icmpv6_te_meta(54), &m).expect("dnat-only builds");
     // emb dst now public6, emb src client6
     let mut wo = crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()).to_vec();
-    wo.extend(crate::afxdp::frame::ipv6_words_from_octets(server6.octets()));
+    wo.extend(crate::afxdp::frame::ipv6_words_from_octets(
+        server6.octets(),
+    ));
     let mut wn = crate::afxdp::frame::ipv6_words_from_octets(client6.octets()).to_vec();
-    wn.extend(crate::afxdp::frame::ipv6_words_from_octets(public6.octets()));
+    wn.extend(crate::afxdp::frame::ipv6_words_from_octets(
+        public6.octets(),
+    ));
     let mut exp = checksum16_adjust(c0, &wo, &wn);
-    if exp == 0 { exp = 0xffff; }
-    assert_eq!(u16::from_be_bytes([out[emb_l4 + 2], out[emb_l4 + 3]]), exp,
-        "#13650: DNAT-only (no src/port rewrite) must still repair quoted checksum for address deltas");
+    if exp == 0 {
+        exp = 0xffff;
+    }
+    assert_eq!(
+        u16::from_be_bytes([out[emb_l4 + 2], out[emb_l4 + 3]]),
+        exp,
+        "#13650: DNAT-only (no src/port rewrite) must still repair quoted checksum for address deltas"
+    );
     assert_eq!(&out[emb_l4 + 4..emb_l4 + 6], &client_port.to_be_bytes());
 
     // (b) Outbound, rewrite_src_port=None
@@ -2087,13 +2242,21 @@ fn icmp_embed_v6_addr_delta_without_port_rewrite_13650() {
     m2.embedded_proto = PROTO_ICMPV6;
     m2.original_dst = IpAddr::V6(server6);
     m2.nat.rewrite_src_port = None;
-    let out2 = build_snat_outbound_icmp_error_v6(&f2, icmpv6_te_meta(54), &m2).expect("outbound no-port builds");
-    let mut exp2 = checksum16_adjust(c1,
+    let out2 = build_snat_outbound_icmp_error_v6(&f2, icmpv6_te_meta(54), &m2)
+        .expect("outbound no-port builds");
+    let mut exp2 = checksum16_adjust(
+        c1,
         &crate::afxdp::frame::ipv6_words_from_octets(server6.octets()),
-        &crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()));
-    if exp2 == 0 { exp2 = 0xffff; }
-    assert_eq!(u16::from_be_bytes([out2[emb_l4 + 2], out2[emb_l4 + 3]]), exp2,
-        "#13650: outbound SNAT without port rewrite must still repair quoted checksum for dst delta");
+        &crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()),
+    );
+    if exp2 == 0 {
+        exp2 = 0xffff;
+    }
+    assert_eq!(
+        u16::from_be_bytes([out2[emb_l4 + 2], out2[emb_l4 + 3]]),
+        exp2,
+        "#13650: outbound SNAT without port rewrite must still repair quoted checksum for dst delta"
+    );
     assert_eq!(&out2[emb_l4 + 4..emb_l4 + 6], &0x1234u16.to_be_bytes());
 }
 /// #13773 (regression from #13650): a genuinely-zero quoted ICMPv6 checksum
@@ -2122,8 +2285,11 @@ fn icmp_embed_v6_zero_quoted_checksum_adjusted_13773() {
         let seq = found.expect("a seq yielding zero quoted checksum exists");
         f[emb_l4 + 6..emb_l4 + 8].copy_from_slice(&seq.to_be_bytes());
         f[emb_l4 + 2..emb_l4 + 4].copy_from_slice(&[0, 0]);
-        assert_eq!(checksum16_ipv6(snat6, server6, PROTO_ICMPV6, &f[emb_l4..emb_l4 + 8]), 0,
-            "fixture: quoted checksum genuinely zero");
+        assert_eq!(
+            checksum16_ipv6(snat6, server6, PROTO_ICMPV6, &f[emb_l4..emb_l4 + 8]),
+            0,
+            "fixture: quoted checksum genuinely zero"
+        );
         f
     };
     // Reverse: adjust source address and echo identifier.
@@ -2131,16 +2297,22 @@ fn icmp_embed_v6_zero_quoted_checksum_adjusted_13773() {
     let mut m = icmpv6_te_match_fixture(snat6, client6, snat_port, client_port);
     m.embedded_proto = PROTO_ICMPV6;
     m.original_dst = IpAddr::V6(server6);
-    let out = build_nat_reversed_icmp_error_v6(&frame, icmpv6_te_meta(54), &m).expect("v6 reverse builds");
+    let out = build_nat_reversed_icmp_error_v6(&frame, icmpv6_te_meta(54), &m)
+        .expect("v6 reverse builds");
     let mut wo = crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()).to_vec();
     wo.push(snat_port);
     let mut wn = crate::afxdp::frame::ipv6_words_from_octets(client6.octets()).to_vec();
     wn.push(client_port);
     let mut exp = checksum16_adjust(0, &wo, &wn);
-    if exp == 0 { exp = 0xffff; }
+    if exp == 0 {
+        exp = 0xffff;
+    }
     assert_ne!(exp, 0);
-    assert_eq!(u16::from_be_bytes([out[emb_l4 + 2], out[emb_l4 + 3]]), exp,
-        "#13773: reverse builder must adjust a genuinely-zero quoted ICMPv6 checksum");
+    assert_eq!(
+        u16::from_be_bytes([out[emb_l4 + 2], out[emb_l4 + 3]]),
+        exp,
+        "#13773: reverse builder must adjust a genuinely-zero quoted ICMPv6 checksum"
+    );
     assert_eq!(
         checksum16_ipv6(client6, server6, PROTO_ICMPV6, &out[emb_l4..emb_l4 + 8]),
         0,
@@ -2152,14 +2324,22 @@ fn icmp_embed_v6_zero_quoted_checksum_adjusted_13773() {
     m2.embedded_proto = PROTO_ICMPV6;
     m2.original_dst = IpAddr::V6(server6);
     m2.nat.rewrite_src_port = Some(snat_port);
-    let out2 = build_snat_outbound_icmp_error_v6(&frame2, icmpv6_te_meta(54), &m2).expect("v6 snat builds");
-    let mut exp2 = checksum16_adjust(0,
+    let out2 = build_snat_outbound_icmp_error_v6(&frame2, icmpv6_te_meta(54), &m2)
+        .expect("v6 snat builds");
+    let mut exp2 = checksum16_adjust(
+        0,
         &crate::afxdp::frame::ipv6_words_from_octets(server6.octets()),
-        &crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()));
-    if exp2 == 0 { exp2 = 0xffff; }
+        &crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()),
+    );
+    if exp2 == 0 {
+        exp2 = 0xffff;
+    }
     assert_ne!(exp2, 0);
-    assert_eq!(u16::from_be_bytes([out2[emb_l4 + 2], out2[emb_l4 + 3]]), exp2,
-        "#13773: SNAT-outbound builder must adjust a genuinely-zero quoted ICMPv6 checksum");
+    assert_eq!(
+        u16::from_be_bytes([out2[emb_l4 + 2], out2[emb_l4 + 3]]),
+        exp2,
+        "#13773: SNAT-outbound builder must adjust a genuinely-zero quoted ICMPv6 checksum"
+    );
     assert_eq!(
         checksum16_ipv6(snat6, snat6, PROTO_ICMPV6, &out2[emb_l4..emb_l4 + 8]),
         0,

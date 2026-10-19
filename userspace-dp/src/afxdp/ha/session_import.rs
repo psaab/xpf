@@ -1782,20 +1782,21 @@ impl crate::afxdp::ha::SessionDomain {
         {
             let maps = self.bpf_maps.load();
             if let Some(session_map_fd) = maps.session_map_fd.as_ref() {
-                let steering = |key: &SessionKey,
-                                decision: crate::session::SessionDecision,
-                                metadata: &crate::session::SessionMetadata| {
-                    delete_session_map_entry_for_removed_session(
-                        SteeringMap {
-                            fd: session_map_fd.fd,
-                            owners: &self.steering_owners,
-                            holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
-                        },
-                        key,
-                        decision,
-                        metadata,
-                    );
-                };
+                let steering =
+                    |key: &SessionKey,
+                     decision: crate::session::SessionDecision,
+                     metadata: &crate::session::SessionMetadata| {
+                        delete_session_map_entry_for_removed_session(
+                            SteeringMap {
+                                fd: session_map_fd.fd,
+                                owners: &self.steering_owners,
+                                holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+                            },
+                            key,
+                            decision,
+                            metadata,
+                        );
+                    };
                 steering(
                     &removed_forward.key,
                     removed_forward.decision,
@@ -1803,9 +1804,7 @@ impl crate::afxdp::ha::SessionDomain {
                 );
                 if let Some(reverse) = removed_companion.as_ref() {
                     steering(&reverse.key, reverse.decision, &reverse.metadata);
-                } else if !partial
-                    && let Some(companion) = companion_key.as_ref()
-                {
+                } else if !partial && let Some(companion) = companion_key.as_ref() {
                     // Companion was already absent (converged): its
                     // coordinator claim, if any, must still go. Derive
                     // the reverse metadata from the forward incarnation.
@@ -2564,6 +2563,7 @@ impl crate::afxdp::ha::SessionDomain {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         };
         let _ = self.upsert_synced_session(SyncedSessionEntry {
             key,
@@ -2729,6 +2729,7 @@ mod rejected_mirror_reservation_10790_tests {
                 inactivity_timeout_ns: None,
                 policy_counter_idx: 0,
                 policy_counter: None,
+                nat_scope_ifindex: None,
             },
             leak_incarnation: 0,
             origin: SessionOrigin::SyncImport,
@@ -2864,6 +2865,7 @@ mod rejected_mirror_reservation_10790_tests {
                 inactivity_timeout_ns: None,
                 policy_counter_idx: 0,
                 policy_counter: None,
+                nat_scope_ifindex: None,
             },
             leak_incarnation: 0,
             origin: SessionOrigin::SyncImport,

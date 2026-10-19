@@ -75,6 +75,7 @@ mod flow_cache_invalidation_tests {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         }
     }
 
@@ -509,14 +510,14 @@ mod flow_cache_invalidation_tests {
     }
     #[test]
     fn conntrack_delete_refusal_is_retained_and_revalidated_13671() {
+        use crate::afxdp::bpf_map::global_tuple_gate;
         use crate::afxdp::bpf_map::{
             CONNTRACK_TEST_MAP_FD, conntrack_row_for_test,
             publish_bpf_conntrack_entry_with_source_nat,
         };
-        use crate::afxdp::bpf_map::global_tuple_gate;
+        use crate::afxdp::worker::SyncedSessionEntry;
         use crate::session::SessionTable;
         use std::sync::{Arc, Mutex};
-        use crate::afxdp::worker::SyncedSessionEntry;
 
         for (port, old_id, replacement_id) in [(62001, 71001, None), (62002, 71002, Some(71003))] {
             crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
@@ -1063,6 +1064,7 @@ mod gc_reap_source_nat_release_tests_6901 {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         }
     }
 
@@ -1276,6 +1278,7 @@ mod gc_reap_nat64_release_tests_7740 {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         }
     }
 
@@ -1439,11 +1442,13 @@ mod gc_reap_nat64_release_tests_7740 {
             "reap must retire only the first flow's active BIB reference"
         );
         assert_eq!(
-            forwarding.nat64.prefixes[0].port_allocator.snapshot().live_flows,
+            forwarding.nat64.prefixes[0]
+                .port_allocator
+                .snapshot()
+                .live_flows,
             1,
             "the second flow remains active"
         );
-
 
         let fresh1 = forwarding
             .nat64

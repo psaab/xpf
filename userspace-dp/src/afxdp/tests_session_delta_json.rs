@@ -22,64 +22,74 @@ use crate::session::{
 use std::net::{IpAddr, Ipv4Addr};
 
 fn delta_with_session_id(session_id: u64) -> SessionDelta {
-    SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Open,
-    key: SessionKey {
-        addr_family: libc::AF_INET as u8,
-        protocol: 6,
-        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
-        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-        src_port: 12345,
-        dst_port: 5201,
-                discriminator: Default::default(),
-                routing_domain: 0,
-    },
-    decision: SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 2,
-        egress_ifindex: 3,
-        tx_ifindex: 3,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 },
-    metadata: SessionMetadata {
-        ingress_zone: 1,
-        egress_zone: 2,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 1,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-    },
-    policy_generation: 0,
-    origin: SessionOrigin::ForwardFlow,
-    fabric_redirect_sync: false,
-    created_ns: 0,
-    last_seen_ns: 0,
-    counters: SessionCounters::default(),
-    observed_tos: 0,
-    observed_tcp_flags: 0,
-    session_id,
-    bulk_resync: false,
-    is_admission: false,
-    tcp_close_class: 0,
-    tcp_handshake_state: 0,
-    pptp_call_ids: 0,
-    purge_retirement: false, source_nat_static: None }
+    SessionDelta {
+        provenance: crate::session::ExportProvenance::Incremental,
+        kind: SessionDeltaKind::Open,
+        key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: 6,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            src_port: 12345,
+            dst_port: 5201,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 2,
+                egress_ifindex: 3,
+                tx_ifindex: 3,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: SessionMetadata {
+            ingress_zone: 1,
+            egress_zone: 2,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None,
+        },
+        policy_generation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id,
+        bulk_resync: false,
+        is_admission: false,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        purge_retirement: false,
+        source_nat_static: None,
+    }
 }
 
 fn test_binding_identity() -> BindingIdentity {
@@ -117,7 +127,10 @@ fn session_delta_info_carries_rt_flow_session_id_6312() {
     );
     // Positive control: this really is the delta -> JSON conversion, so a
     // mismatch above cannot be a wrongly-built fixture.
-    assert_eq!(info.src_port, 12345, "conversion produced the delta's tuple");
+    assert_eq!(
+        info.src_port, 12345,
+        "conversion produced the delta's tuple"
+    );
     assert_eq!(info.ingress_zone, "lan", "conversion resolved zone names");
 }
 
@@ -219,8 +232,8 @@ fn delta_with_attribution() -> SessionDelta {
         dst_ip: IpAddr::V6("64:ff9b::c0a8:101".parse::<Ipv6Addr>().unwrap()),
         src_port: 5001,
         dst_port: 80,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     // #7239: a NON-DEFAULT domain, so the two legs have something to disagree
     // ABOUT. With 0 here both legs would emit the same encoded default marker
@@ -283,7 +296,7 @@ fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
         .policy_counter
         .as_ref()
         .map_or("", |counter| counter.rule_id());
-    let rule_id_end = payload.len() - 2; // handshake state and provenance trail the policy rule ID
+    let rule_id_end = payload.len() - 6; // handshake, provenance, PPTP pair and #15176 scope trail the rule ID
     let id_start = rule_id_end - expected_rule_id.len();
     let rule_id_prefix = id_start - 2;
     let encoded_len = u16::from_le_bytes(
@@ -470,12 +483,17 @@ fn session_delta_json_and_binary_agree_on_policy_attribution_6949() {
 
     // Positive controls: the binary side really did carry the fixture, so an
     // equality above cannot be two legs agreeing on nothing.
-    assert_eq!(want.policy_id, 4242, "binary leg carried the fixture policy");
-    assert_eq!(want.ingress_ifindex, 4242, "binary leg carried ingress ifindex");
+    assert_eq!(
+        want.policy_id, 4242,
+        "binary leg carried the fixture policy"
+    );
+    assert_eq!(
+        want.ingress_ifindex, 4242,
+        "binary leg carried ingress ifindex"
+    );
     assert_eq!(want.ingress_vlan_id, 51, "binary leg carried ingress VLAN");
     assert_eq!(
-        want.policy_rule_id,
-        "lan->wan/allow-web",
+        want.policy_rule_id, "lan->wan/allow-web",
         "binary leg carried the stable rule ID"
     );
     assert_eq!(
@@ -577,13 +595,20 @@ fn sync_attribution_exhaustive_destructure_6949() {
         .lines()
         .filter_map(|line| line.trim().strip_suffix(','))
         .filter_map(|line| line.strip_prefix("pub(crate) "))
-        .map(|field| field.split(':').next().unwrap_or_default().trim().to_string())
+        .map(|field| {
+            field
+                .split(':')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        })
         .filter(|field| !field.is_empty())
         .collect();
     expected.sort();
     assert_eq!(
         expected.len(),
-        7,
+        8,
         "expected the seven HA-carried attribution fields, parsed {expected:?}"
     );
 
@@ -715,7 +740,6 @@ fn session_delta_info_states_none_explicitly_for_non_tunnel_protocols_7188() {
     );
 }
 
-
 /// #7239: the two delta legs must agree on the ROUTING DOMAIN, for the reason
 /// #6949 exists on this same struct — a field carried by the binary leg and not
 /// the JSON one is not an error anywhere, it is a 0 at the consumer, and 0 here
@@ -776,10 +800,19 @@ fn session_delta_info_carries_the_close_class_and_names_an_update_9412() {
     delta.kind = crate::session::SessionDeltaKind::Update;
     delta.tcp_close_class = 2;
     let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
-    assert_eq!(info.tcp_close_class, 2, "the JSON leg must carry the close class (#9412)");
-    assert_eq!(info.event, "update", "a close-state Update must be named \"update\" on the JSON leg (#9412)");
+    assert_eq!(
+        info.tcp_close_class, 2,
+        "the JSON leg must carry the close class (#9412)"
+    );
+    assert_eq!(
+        info.event, "update",
+        "a close-state Update must be named \"update\" on the JSON leg (#9412)"
+    );
     // Positive control: this really is the delta -> JSON conversion.
-    assert_eq!(info.src_port, 12345, "conversion produced the delta's tuple");
+    assert_eq!(
+        info.src_port, 12345,
+        "conversion produced the delta's tuple"
+    );
 }
 
 /// #9752: the two delta legs must agree on the installing-table identity, for
@@ -815,9 +848,7 @@ fn session_delta_json_and_binary_agree_on_the_install_table_9752() {
     let json_check = json
         .get("install_table_check")
         .unwrap_or_else(|| {
-            panic!(
-                "the JSON session-delta leg carries no `install_table_check` key at all: {json}"
-            )
+            panic!("the JSON session-delta leg carries no `install_table_check` key at all: {json}")
         })
         .as_u64()
         .expect("install_table_check is a number") as u32;
@@ -900,7 +931,10 @@ fn producer_delta_json_matches_the_shared_golden_9752() {
     );
     // Pin the load-bearing keys the chain downstream consumes.
     assert_eq!(json.get("event").and_then(|v| v.as_str()), Some("open"));
-    assert_eq!(json.get("src_ip").and_then(|v| v.as_str()), Some("10.0.61.102"));
+    assert_eq!(
+        json.get("src_ip").and_then(|v| v.as_str()),
+        Some("10.0.61.102")
+    );
     assert_eq!(json.get("dst_ip").and_then(|v| v.as_str()), Some("8.8.8.8"));
     assert_eq!(
         json.get("install_table_domain").and_then(|v| v.as_u64()),

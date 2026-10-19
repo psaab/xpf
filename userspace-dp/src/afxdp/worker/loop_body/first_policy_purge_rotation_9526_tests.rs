@@ -216,6 +216,7 @@ fn entry(
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: counter,
+            nat_scope_ifindex: None,
         },
         // `UpsertLocal` requires a sync-family origin; the purge does not look
         // at origin, only at the forward half's bound rule handle.

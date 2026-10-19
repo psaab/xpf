@@ -307,7 +307,7 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	// tail. #12075: a nonzero egress fold extends it after an explicit
 	// handshake byte, so legacy decoders read the same handshake and ignore
 	// the new trailing fold.
-	return appendSessionSyncMetadataTail(buf[:off], val.PolicyRuleID, val.TCPHandshakeState, val.EgressIfaceFold, val.PptpCallIDs)
+	return appendSessionSyncMetadataTail(buf[:off], val.PolicyRuleID, val.TCPHandshakeState, val.EgressIfaceFold, val.PptpCallIDs, val.NatScopeFold)
 }
 func encodeSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) []byte {
 	payload := encodeSessionV6Payload(key, val)
@@ -482,7 +482,7 @@ func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionVal
 	buf[off] = val.SourceNatICMPCode
 	off++
 	// #11070/#10888/#12075: v6 uses the same rule-ID/handshake/egress-fold tail.
-	return appendSessionSyncMetadataTail(buf[:off], val.PolicyRuleID, val.TCPHandshakeState, val.EgressIfaceFold, val.PptpCallIDs)
+	return appendSessionSyncMetadataTail(buf[:off], val.PolicyRuleID, val.TCPHandshakeState, val.EgressIfaceFold, val.PptpCallIDs, val.NatScopeFold)
 }
 
 // appendSessionSyncMetadataTail preserves the optional legacy rule-ID and
@@ -490,11 +490,11 @@ func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionVal
 // explicit handshake byte followed by a u32 fold. The handshake byte is
 // present even when its value is zero, so an older decoder reads the correct
 // handshake and safely ignores the new trailing fold.
-func appendSessionSyncMetadataTail(payload []byte, ruleID string, handshakeState uint8, egressFold uint32, pptpCallIDs uint64) []byte {
+func appendSessionSyncMetadataTail(payload []byte, ruleID string, handshakeState uint8, egressFold uint32, pptpCallIDs uint64, natScopeFold uint32) []byte {
 	if len(ruleID) > int(^uint16(0)) {
 		ruleID = ""
 	}
-	if egressFold != 0 {
+	if egressFold != 0 || natScopeFold != 0 {
 		var ruleIDLen [2]byte
 		binary.LittleEndian.PutUint16(ruleIDLen[:], uint16(len(ruleID)))
 		payload = append(payload, ruleIDLen[:]...)
@@ -503,6 +503,11 @@ func appendSessionSyncMetadataTail(payload []byte, ruleID string, handshakeState
 		var fold [4]byte
 		binary.LittleEndian.PutUint32(fold[:], egressFold)
 		payload = append(payload, fold[:]...)
+		if natScopeFold != 0 {
+			var scopeFold [4]byte
+			binary.LittleEndian.PutUint32(scopeFold[:], natScopeFold)
+			payload = append(payload, scopeFold[:]...)
+		}
 		return appendPptpCallIDs(payload, pptpCallIDs)
 	}
 	if len(ruleID) != 0 || handshakeState != dataplane.TCPHandshakeStateAbsent {
@@ -950,7 +955,12 @@ func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.Ses
 			}
 			off += ruleIDLen
 			remaining := tailEnd - off
-			if remaining >= 5 {
+			if remaining >= 9 {
+				val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
+				off++
+				val.EgressIfaceFold = binary.LittleEndian.Uint32(payload[off:])
+				val.NatScopeFold = binary.LittleEndian.Uint32(payload[off+4:])
+			} else if remaining >= 5 {
 				val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
 				off++
 				val.EgressIfaceFold = binary.LittleEndian.Uint32(payload[off:])
@@ -1173,7 +1183,12 @@ func decodeSessionV6Payload(payload []byte) (dataplane.SessionKeyV6, dataplane.S
 			}
 			off += ruleIDLen
 			remaining := tailEnd - off
-			if remaining >= 5 {
+			if remaining >= 9 {
+				val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
+				off++
+				val.EgressIfaceFold = binary.LittleEndian.Uint32(payload[off:])
+				val.NatScopeFold = binary.LittleEndian.Uint32(payload[off+4:])
+			} else if remaining >= 5 {
 				val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
 				off++
 				val.EgressIfaceFold = binary.LittleEndian.Uint32(payload[off:])

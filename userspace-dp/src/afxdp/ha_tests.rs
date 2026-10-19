@@ -306,31 +306,30 @@ fn test_key() -> SessionKey {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 55068,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
 fn test_metadata() -> SessionMetadata {
-    SessionMetadata {
-        ingress_zone: TEST_LAN_ZONE_ID,
-        egress_zone: TEST_WAN_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 1,
-        fabric_ingress: true,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-    }
+    SessionMetadata { ingress_zone: TEST_LAN_ZONE_ID,
+    egress_zone: TEST_WAN_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 1,
+    fabric_ingress: true,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None }
 }
 
 fn test_forwarding_state_with_fabric() -> ForwardingState {
@@ -1061,10 +1060,10 @@ fn upsert_peer_against_local_arriving_during_snapshot_window_keeps_local_13709()
     let coordinator = Coordinator::new();
     let key = test_key();
     let now_secs = monotonic_nanos() / 1_000_000_000;
-    coordinator.ha.rg_runtime.store(Arc::new(BTreeMap::from([(
-        1,
-        active_ha_runtime(now_secs),
-    )])));
+    coordinator
+        .ha
+        .rg_runtime
+        .store(Arc::new(BTreeMap::from([(1, active_ha_runtime(now_secs))])));
     let domain = coordinator.session_domain().clone();
     let mut local = synced_entry_with_generation(5);
     local.origin = SessionOrigin::ForwardFlow;
@@ -1173,9 +1172,10 @@ fn upsert_synced_session_rejects_over_ceiling_import_and_does_not_fan_out() {
     // sessions. In production the logical ceiling is
     // `worker_count * DEFAULT_MAX_SESSIONS` and the entry cap is 2× that.
     const LOGICAL_CEILING: u16 = 3;
-    coordinator
-        .synced_import_cap_override
-        .store(LOGICAL_CEILING as usize, std::sync::atomic::Ordering::Relaxed);
+    coordinator.synced_import_cap_override.store(
+        LOGICAL_CEILING as usize,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let commands = Arc::new(Mutex::new(VecDeque::new()));
     coordinator.workers.register(
         0,
@@ -1294,9 +1294,10 @@ fn upsert_synced_session_rejects_over_ceiling_import_and_does_not_fan_out() {
 fn over_ceiling_import_rejected_on_poisoned_shared_mutex() {
     let mut coordinator = Coordinator::new();
     const LOGICAL_CEILING: u16 = 3;
-    coordinator
-        .synced_import_cap_override
-        .store(LOGICAL_CEILING as usize, std::sync::atomic::Ordering::Relaxed);
+    coordinator.synced_import_cap_override.store(
+        LOGICAL_CEILING as usize,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let commands = Arc::new(Mutex::new(VecDeque::new()));
     coordinator.workers.register(
         0,
@@ -1819,10 +1820,12 @@ fn synced_snat_install_publishes_and_delete_releases_dnat_table_entry() {
     // the syscall a harmless EBADF after the keyed attempt is counted.
     // #7209: the descriptor set is published as a whole, so a test seeds it
     // with one store rather than assigning a field.
-    coordinator.bpf_maps.store(std::sync::Arc::new(crate::afxdp::coordinator::BpfMaps {
-        dnat_table_fd: Some(OwnedFd { fd: -1 }),
-        ..Default::default()
-    }));
+    coordinator
+        .bpf_maps
+        .store(std::sync::Arc::new(crate::afxdp::coordinator::BpfMaps {
+            dnat_table_fd: Some(OwnedFd { fd: -1 }),
+            ..Default::default()
+        }));
     let key = test_key();
 
     // Forward SNAT synced install must publish the reverse-SNAT entry.
@@ -2324,7 +2327,6 @@ fn bulk_export_preserves_fabric_flag_session_id_and_failover_sessions_14960() {
     }
 }
 
-
 #[test]
 fn drain_export_deltas_from_workers_is_fair_across_workers_9856() {
     use crate::afxdp::binding_state::ExportBufferState;
@@ -2713,17 +2715,18 @@ fn every_shared_session_lock_in_production_recovers_from_poison_6653() {
 /// pool port that a local flow can contend for.
 fn reserve6600_forwarding() -> ForwardingState {
     let mut forwarding = ForwardingState::default();
-    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
-        name: "pool-snat".to_string(),
-        from_zone: "lan".to_string(),
-        to_zone: "wan".to_string(),
-        source_addresses: vec!["0.0.0.0/0".to_string()],
-        pool_name: "p".to_string(),
-        pool_addresses: vec!["203.0.113.1/32".to_string()],
-        port_low: 1024,
-        port_high: 65535,
-        ..crate::SourceNATRuleSnapshot::default()
-    }]);
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+            name: "pool-snat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            pool_name: "p".to_string(),
+            pool_addresses: vec!["203.0.113.1/32".to_string()],
+            port_low: 1024,
+            port_high: 65535,
+            ..crate::SourceNATRuleSnapshot::default()
+        }]);
     forwarding
 }
 
@@ -2856,11 +2859,16 @@ fn reserve6600_entry(src_port: u16, pool_port: u16) -> SyncedSessionEntry {
             src_port,
             ..test_key()
         },
-        decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
-            rewrite_src_port: Some(pool_port),
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+                rewrite_src_port: Some(pool_port),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         metadata: test_metadata(),
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
@@ -3051,15 +3059,14 @@ fn upsert_synced_session_skips_pre_publish_reserve_with_no_workers_6600() {
 fn upsert_synced_session_rolls_back_source_nat_when_nat64_refuses_6600() {
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(reserve6600_forwarding());
-    coordinator.forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[
-        crate::NAT64RuleSnapshot {
+    coordinator.forwarding.nat64 =
+        crate::nat64::Nat64State::from_snapshots(&[crate::NAT64RuleSnapshot {
             name: "nat64-wkp".to_string(),
             prefix: "64:ff9b::/96".to_string(),
             pool_addresses: vec!["203.0.113.1".to_string()],
             no_v6_frag_header: false,
             ..Default::default()
-        },
-    ]);
+        }]);
     let commands = Arc::new(Mutex::new(VecDeque::new()));
     coordinator.workers.register(
         0,
@@ -3074,12 +3081,17 @@ fn upsert_synced_session_rolls_back_source_nat_when_nat64_refuses_6600() {
             src_port,
             ..test_key()
         },
-        decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
-            rewrite_src_port: Some(nat64_port),
-            nat64: true,
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+                rewrite_src_port: Some(nat64_port),
+                nat64: true,
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         metadata: test_metadata(),
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
@@ -3405,9 +3417,10 @@ fn upsert_synced_session_reports_stale_generation_refusal_6785() {
 fn upsert_synced_session_reports_capacity_refusal_6785() {
     let mut coordinator = Coordinator::new();
     const LOGICAL_CEILING: u16 = 2;
-    coordinator
-        .synced_import_cap_override
-        .store(LOGICAL_CEILING as usize, std::sync::atomic::Ordering::Relaxed);
+    coordinator.synced_import_cap_override.store(
+        LOGICAL_CEILING as usize,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let commands = Arc::new(Mutex::new(VecDeque::new()));
     coordinator.workers.register(
         0,
@@ -3469,8 +3482,8 @@ fn full_worker_queue_import_reports_repair_and_applies_latest_intent_11360() {
         );
     }
 
-    let drops_before = crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS
-        .load(Ordering::Relaxed);
+    let drops_before =
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed);
     assert_eq!(
         coordinator.upsert_synced_session(first),
         SyncedImportOutcome::AppliedRepairPending,
@@ -3847,9 +3860,9 @@ fn refused_import_records_repair_before_queue_unlock_11718() {
     {
         std::thread::yield_now();
     }
-    let reached_record = crate::afxdp::worker_queue::session_import_repair_record_attempts_for_test(
-        WORKER_ID,
-    ) > attempts_before;
+    let reached_record =
+        crate::afxdp::worker_queue::session_import_repair_record_attempts_for_test(WORKER_ID)
+            > attempts_before;
     let queue_still_locked = if reached_record {
         match commands.try_lock() {
             Err(std::sync::TryLockError::WouldBlock) => true,
@@ -3880,7 +3893,6 @@ fn refused_import_records_repair_before_queue_unlock_11718() {
     crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
 }
 
-
 /// A full per-worker repair latch escalates the shared-only import explicitly.
 #[test]
 fn full_worker_repair_latch_reports_overflow_instead_of_applied_11360() {
@@ -3905,11 +3917,7 @@ fn full_worker_repair_latch_reports_overflow_instead_of_applied_11360() {
     for offset in 0..2 * crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
         let key = synced_entry_port(20_000 + offset as u16, 0).key;
         assert!(
-            crate::afxdp::worker_queue::record_session_import_repair(
-                WORKER_ID,
-                &key,
-                u64::MAX,
-            ),
+            crate::afxdp::worker_queue::record_session_import_repair(WORKER_ID, &key, u64::MAX,),
             "fixture: repair slot {offset} must fit within the bound"
         );
     }
@@ -3950,8 +3958,7 @@ fn synced_import_outcome_reason_tokens_are_distinct_6785() {
         "repair-overflow is not a semantic refusal"
     );
     assert_ne!(
-        SYNCED_IMPORT_REPAIR_PREFIX,
-        SYNCED_IMPORT_REFUSED_PREFIX,
+        SYNCED_IMPORT_REPAIR_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX,
         "legacy Go readers map the refusal prefix to a rollback-class result"
     );
     let repair_tokens = [
@@ -4259,10 +4266,12 @@ fn synced_import_unpublished_counts_the_absent_map_not_the_owner_decision_7209()
     // --- Leg C: a map IS present -> the gap counter must stay still. -------
     let mut with_map = Coordinator::new();
     register_test_worker_7209(&mut with_map);
-    with_map.bpf_maps.store(std::sync::Arc::new(crate::afxdp::coordinator::BpfMaps {
-        session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd { fd: -1 }),
-        ..Default::default()
-    }));
+    with_map
+        .bpf_maps
+        .store(std::sync::Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd { fd: -1 }),
+            ..Default::default()
+        }));
     let before_c = with_map.synced_import_unpublished_total();
     with_map.upsert_synced_session(reserve6600_entry(42002, 22002));
     assert_eq!(
@@ -4637,7 +4646,9 @@ fn deleting_one_synced_session_leaves_its_neighbours_in_the_reverse_prewarm_inde
              the failover the index exists to serve (#7209)"
         );
         assert!(
-            !index.get(&rg).is_some_and(|keys| keys.contains(&doomed.key)),
+            !index
+                .get(&rg)
+                .is_some_and(|keys| keys.contains(&doomed.key)),
             "the deleted session is still in RG {rg}'s bucket"
         );
     }
@@ -4973,8 +4984,7 @@ fn a_refresh_never_drops_a_prewarm_filing_the_current_fib_cannot_rederive_7209()
     // the question right now.
     coordinator.forwarding.egress.remove(&6);
     assert_eq!(
-        reverse_prewarm_owner_rg_candidates_for_test(&coordinator, &entry)
-            .contains(&2),
+        reverse_prewarm_owner_rg_candidates_for_test(&coordinator, &entry).contains(&2),
         false,
         "fixture no longer makes the FIB BLIND to RG 2 — with RG 2 still \
          derivable this cell would pass without exercising anything"
@@ -5418,8 +5428,7 @@ fn stop_inner_empties_the_forwarding_table_that_a_released_lock_would_expose_720
     coordinator.stop_inner(false);
 
     assert!(
-        coordinator.forwarding.egress.is_empty()
-            && coordinator.forwarding.connected_v4.is_empty(),
+        coordinator.forwarding.egress.is_empty() && coordinator.forwarding.connected_v4.is_empty(),
         "stop_inner(false) no longer empties the forwarding table. If that is \
          now true the window this issue's item 2 is blocked on has closed, and \
          the two cells above describe a state that can no longer be reached — \
@@ -5437,7 +5446,6 @@ fn stop_inner_empties_the_forwarding_table_that_a_released_lock_would_expose_720
          reachable afterwards because this map survives"
     );
 }
-
 
 // ===== #8138: the tunnel-remap purge must release the import-time reservation
 
@@ -5517,7 +5525,9 @@ fn purge8138_port_held(
 #[test]
 fn tunnel_remap_purge_releases_untracked_reservation_on_refresh_8138() {
     let mut coordinator = Coordinator::new();
-    coordinator.set_forwarding_for_test(crate::afxdp::forwarding_build::build_forwarding_state(&purge8138_snapshot(true)));
+    coordinator.set_forwarding_for_test(crate::afxdp::forwarding_build::build_forwarding_state(
+        &purge8138_snapshot(true),
+    ));
     coordinator.validation.snapshot_installed = true;
     assert!(
         coordinator.forwarding.tunnel_endpoints.contains_key(&7),
@@ -5586,7 +5596,9 @@ fn tunnel_remap_purge_releases_untracked_reservation_on_refresh_8138() {
 #[test]
 fn purge_release_against_defaulted_forwarding_frees_nothing_and_counts_nothing_8138() {
     let mut coordinator = Coordinator::new();
-    coordinator.set_forwarding_for_test(crate::afxdp::forwarding_build::build_forwarding_state(&purge8138_snapshot(true)));
+    coordinator.set_forwarding_for_test(crate::afxdp::forwarding_build::build_forwarding_state(
+        &purge8138_snapshot(true),
+    ));
     register_test_worker_7209(&mut coordinator);
 
     let allocs = std::sync::Arc::clone(&coordinator.forwarding.iface_nat_allocators);
@@ -5601,7 +5613,10 @@ fn purge_release_against_defaulted_forwarding_frees_nothing_and_counts_nothing_8
     // Exactly what the reconcile caller would pass if it read `self.forwarding`.
     let purged = coordinator.purge_remapped_tunnel_sessions(&[7], &ForwardingState::default());
 
-    assert_eq!(purged, 1, "the session is still purged — this is about the port");
+    assert_eq!(
+        purged, 1,
+        "the session is still purged — this is about the port"
+    );
     assert!(
         purge8138_port_held(&allocs, &rules, 41012, 50110, 2_000),
         "a release against a DEFAULTED forwarding has no allocators to free from"
@@ -5621,7 +5636,9 @@ fn purge_release_against_defaulted_forwarding_frees_nothing_and_counts_nothing_8
 #[test]
 fn purge_of_a_session_without_snat_counts_no_release_8138() {
     let mut coordinator = Coordinator::new();
-    coordinator.set_forwarding_for_test(crate::afxdp::forwarding_build::build_forwarding_state(&purge8138_snapshot(true)));
+    coordinator.set_forwarding_for_test(crate::afxdp::forwarding_build::build_forwarding_state(
+        &purge8138_snapshot(true),
+    ));
     register_test_worker_7209(&mut coordinator);
 
     // Same session shape, but no source-NAT rewrite: nothing was ever reserved.
@@ -5630,10 +5647,7 @@ fn purge_of_a_session_without_snat_counts_no_release_8138() {
     entry.decision.nat.rewrite_src_port = None;
     coordinator.upsert_synced_session(entry);
 
-    let purged = coordinator.purge_remapped_tunnel_sessions(
-        &[7],
-        &coordinator.forwarding.clone(),
-    );
+    let purged = coordinator.purge_remapped_tunnel_sessions(&[7], &coordinator.forwarding.clone());
 
     assert_eq!(purged, 1, "the session is purged");
     assert_eq!(
@@ -5788,7 +5802,9 @@ fn tunnel_remap_purge_releases_nat64_reservation_14961() {
     let flow = purge14961_flow(&key);
     let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
     assert_eq!(
-        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        alloc
+            .debug_persistent_lease_for_flow(&flow, permit)
+            .map(|l| l.active_flows),
         Some(1),
         "precondition: the import must have taken the NAT64 reservation — \
          without it every assertion below passes by never exercising anything"
@@ -5798,7 +5814,9 @@ fn tunnel_remap_purge_releases_nat64_reservation_14961() {
     let purged = coordinator.purge_remapped_tunnel_sessions(&[7], &coordinator.forwarding.clone());
     assert_eq!(purged, 1, "the remapped session must be purged");
     assert_eq!(
-        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        alloc
+            .debug_persistent_lease_for_flow(&flow, permit)
+            .map(|l| l.active_flows),
         Some(0),
         "#14961: the purge stranded the NAT64 reservation — it released only \
          the source-NAT leg, so the imported NAT64 (pool v4, port) stays held \
@@ -5835,7 +5853,10 @@ fn tunnel_remap_purge_preserves_adopted_nat64_reservation_14961() {
     ));
 
     let purged = coordinator.purge_remapped_tunnel_sessions(&[7], &coordinator.forwarding.clone());
-    assert_eq!(purged, 1, "the session is still purged — this is about the port");
+    assert_eq!(
+        purged, 1,
+        "the session is still purged — this is about the port"
+    );
     let alloc = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
     let flow = purge14961_flow(&key);
     assert_eq!(
@@ -5861,7 +5882,9 @@ fn tunnel_remap_purge_preserves_adopted_nat64_reservation_14961() {
     );
     let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
     assert_eq!(
-        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        alloc
+            .debug_persistent_lease_for_flow(&flow, permit)
+            .map(|l| l.active_flows),
         Some(0),
         "the adopting worker's own release must retire the active reference"
     );
@@ -6016,9 +6039,10 @@ fn cap_rejected_forward_leaves_no_orphan_reverse_8015() {
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
     const LOGICAL_CEILING: u16 = 1;
-    coordinator
-        .synced_import_cap_override
-        .store(LOGICAL_CEILING as usize, std::sync::atomic::Ordering::Relaxed);
+    coordinator.synced_import_cap_override.store(
+        LOGICAL_CEILING as usize,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let commands = Arc::new(Mutex::new(VecDeque::new()));
     coordinator.workers.register(
         0,
@@ -6397,10 +6421,12 @@ fn synced_with_nat_9514(key: SessionKey, nat: NatDecision, generation: u64) -> S
 
 fn coordinator_with_dnat_fd_9514() -> Coordinator {
     let coordinator = Coordinator::new();
-    coordinator.bpf_maps.store(std::sync::Arc::new(crate::afxdp::coordinator::BpfMaps {
-        dnat_table_fd: Some(OwnedFd { fd: -1 }),
-        ..Default::default()
-    }));
+    coordinator
+        .bpf_maps
+        .store(std::sync::Arc::new(crate::afxdp::coordinator::BpfMaps {
+            dnat_table_fd: Some(OwnedFd { fd: -1 }),
+            ..Default::default()
+        }));
     coordinator
 }
 
@@ -6416,7 +6442,7 @@ fn same_row_sibling_9514(key: &SessionKey) -> SessionKey {
 /// Before the fix: a_after_replace=1, a_after_delete=1, later_row_a_deletes=0.
 #[test]
 fn ha_same_key_replace_changing_the_snat_row_releases_the_old_holder_9514() {
-    use crate::afxdp::checksum::{dnat_steering_holder_count, DNAT_DELETE_ATTEMPTS};
+    use crate::afxdp::checksum::{DNAT_DELETE_ATTEMPTS, dnat_steering_holder_count};
     let _g = crate::afxdp::checksum::dnat_counter_guard();
     let coordinator = coordinator_with_dnat_fd_9514();
     let key = test_key();
@@ -6427,15 +6453,26 @@ fn ha_same_key_replace_changing_the_snat_row_releases_the_old_holder_9514() {
         "precondition: A and B must be DIFFERENT steering rows, or this cell cannot \
          distinguish a released holder from a re-acquired one"
     );
-    assert_eq!(dnat_steering_holder_count(&key, a), 0, "row A must start empty");
+    assert_eq!(
+        dnat_steering_holder_count(&key, a),
+        0,
+        "row A must start empty"
+    );
 
     coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), a, 1));
-    assert_eq!(dnat_steering_holder_count(&key, a), 1, "precondition: import holds row A");
+    assert_eq!(
+        dnat_steering_holder_count(&key, a),
+        1,
+        "precondition: import holds row A"
+    );
 
     coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), b, 2));
     let a_after_replace = dnat_steering_holder_count(&key, a);
     let b_after_replace = dnat_steering_holder_count(&key, b);
-    assert_eq!(b_after_replace, 1, "precondition: the replacement landed and holds row B");
+    assert_eq!(
+        b_after_replace, 1,
+        "precondition: the replacement landed and holds row B"
+    );
 
     coordinator.delete_synced_session(key.clone(), false);
     let a_after_delete = dnat_steering_holder_count(&key, a);
@@ -6449,7 +6486,10 @@ fn ha_same_key_replace_changing_the_snat_row_releases_the_old_holder_9514() {
     let later_row_a_deletes = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d1;
 
     assert!(
-        a_after_replace == 0 && a_after_delete == 0 && b_after_delete == 0 && later_row_a_deletes == 1,
+        a_after_replace == 0
+            && a_after_delete == 0
+            && b_after_delete == 0
+            && later_row_a_deletes == 1,
         "#9514: a same-key HA replacement that MOVES the steering row must release the old \
          row's holder. Measured: a_after_replace={a_after_replace} a_after_delete={a_after_delete} \
          b_after_delete={b_after_delete} later_row_a_deletes={later_row_a_deletes} (1 = a later \
@@ -6463,12 +6503,16 @@ fn ha_same_key_replace_changing_the_snat_row_releases_the_old_holder_9514() {
 /// hold and delete its row.
 #[test]
 fn ha_same_key_replace_with_the_same_snat_row_holds_exactly_once_9514() {
-    use crate::afxdp::checksum::{dnat_steering_holder_count, DNAT_DELETE_ATTEMPTS};
+    use crate::afxdp::checksum::{DNAT_DELETE_ATTEMPTS, dnat_steering_holder_count};
     let _g = crate::afxdp::checksum::dnat_counter_guard();
     let coordinator = coordinator_with_dnat_fd_9514();
     let key = test_key();
     let a = snat_row_9514(49516);
-    assert_eq!(dnat_steering_holder_count(&key, a), 0, "row must start empty");
+    assert_eq!(
+        dnat_steering_holder_count(&key, a),
+        0,
+        "row must start empty"
+    );
 
     coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), a, 1));
     let d0 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
@@ -6486,7 +6530,10 @@ fn ha_same_key_replace_with_the_same_snat_row_holds_exactly_once_9514() {
          it would blackhole a live session's return traffic until it republished"
     );
     assert_eq!(after_delete, 0, "the delete must release the single hold");
-    assert_eq!(deletes_on_delete, 1, "the last holder's delete must issue exactly one map delete");
+    assert_eq!(
+        deletes_on_delete, 1,
+        "the last holder's delete must issue exactly one map delete"
+    );
 }
 
 /// OVER-RELEASE CONTROL: migrating K off a SHARED row must leave the sibling's
@@ -6494,17 +6541,25 @@ fn ha_same_key_replace_with_the_same_snat_row_holds_exactly_once_9514() {
 /// a raw map delete, so row A survives while K2 still steers through it.
 #[test]
 fn ha_replace_migrating_off_a_shared_row_keeps_the_siblings_hold_9514() {
-    use crate::afxdp::checksum::{dnat_steering_holder_count, DNAT_DELETE_ATTEMPTS};
+    use crate::afxdp::checksum::{DNAT_DELETE_ATTEMPTS, dnat_steering_holder_count};
     let _g = crate::afxdp::checksum::dnat_counter_guard();
     let coordinator = coordinator_with_dnat_fd_9514();
     let key = test_key();
     let k2 = same_row_sibling_9514(&key);
     let (a, b) = (snat_row_9514(49517), snat_row_9514(49518));
-    assert_eq!(dnat_steering_holder_count(&key, a), 0, "row A must start empty");
+    assert_eq!(
+        dnat_steering_holder_count(&key, a),
+        0,
+        "row A must start empty"
+    );
 
     coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), a, 1));
     coordinator.upsert_synced_session(synced_with_nat_9514(k2.clone(), a, 1));
-    assert_eq!(dnat_steering_holder_count(&key, a), 2, "precondition: both sessions hold row A");
+    assert_eq!(
+        dnat_steering_holder_count(&key, a),
+        2,
+        "precondition: both sessions hold row A"
+    );
 
     let d0 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
     coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), b, 2));
@@ -6526,19 +6581,27 @@ fn ha_replace_migrating_off_a_shared_row_keeps_the_siblings_hold_9514() {
     );
     assert_eq!(dnat_steering_holder_count(&k2, a), 0);
     coordinator.delete_synced_session(key.clone(), false);
-    assert_eq!(dnat_steering_holder_count(&key, b), 0, "K's close releases row B");
+    assert_eq!(
+        dnat_steering_holder_count(&key, b),
+        0,
+        "K's close releases row B"
+    );
 }
 
 /// The migration also covers a replacement that DROPS the source rewrite: the
 /// new decision publishes no row at all, so the old one must be released.
 #[test]
 fn ha_same_key_replace_dropping_snat_releases_the_old_row_9514() {
-    use crate::afxdp::checksum::{dnat_steering_holder_count, DNAT_DELETE_ATTEMPTS};
+    use crate::afxdp::checksum::{DNAT_DELETE_ATTEMPTS, dnat_steering_holder_count};
     let _g = crate::afxdp::checksum::dnat_counter_guard();
     let coordinator = coordinator_with_dnat_fd_9514();
     let key = test_key();
     let a = snat_row_9514(49519);
-    assert_eq!(dnat_steering_holder_count(&key, a), 0, "row A must start empty");
+    assert_eq!(
+        dnat_steering_holder_count(&key, a),
+        0,
+        "row A must start empty"
+    );
 
     coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), a, 1));
     let d0 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
@@ -6575,12 +6638,18 @@ fn ha_same_key_replace_changing_nat_retires_old_reverse_companion_13710() {
     let (a, b) = (snat_row_9514(49530), snat_row_9514(49531));
     let old_reverse = reverse_session_key(&key, a);
     let new_reverse = reverse_session_key(&key, b);
-    assert_ne!(old_reverse, new_reverse, "precondition: A and B derive different reverse keys");
+    assert_ne!(
+        old_reverse, new_reverse,
+        "precondition: A and B derive different reverse keys"
+    );
 
     let mut first = synced_with_nat_9514(key.clone(), a, 1);
     first.session_id = 1371001;
     coordinator.upsert_synced_session(first);
-    assert!(synced_13710_contains(&coordinator, &old_reverse), "precondition: gen1 installs rev(A)");
+    assert!(
+        synced_13710_contains(&coordinator, &old_reverse),
+        "precondition: gen1 installs rev(A)"
+    );
 
     let mut replacement = synced_with_nat_9514(key.clone(), b, 2);
     replacement.session_id = 1371002;
@@ -6589,8 +6658,14 @@ fn ha_same_key_replace_changing_nat_retires_old_reverse_companion_13710() {
         !synced_13710_contains(&coordinator, &old_reverse),
         "#13710: replacing K's NAT decision must retire the orphaned rev(A) companion"
     );
-    assert!(synced_13710_contains(&coordinator, &new_reverse), "the replacement must install rev(B)");
-    assert!(synced_13710_contains(&coordinator, &key), "the forward session must survive replacement");
+    assert!(
+        synced_13710_contains(&coordinator, &new_reverse),
+        "the replacement must install rev(B)"
+    );
+    assert!(
+        synced_13710_contains(&coordinator, &key),
+        "the forward session must survive replacement"
+    );
 
     coordinator.delete_synced_session(key.clone(), false);
     assert!(
@@ -6719,7 +6794,10 @@ fn coordinator_9678(
     (coordinator, commands, key)
 }
 
-fn shared_origin_9678(coordinator: &Coordinator, key: &SessionKey) -> Option<(SessionOrigin, NatDecision)> {
+fn shared_origin_9678(
+    coordinator: &Coordinator,
+    key: &SessionKey,
+) -> Option<(SessionOrigin, NatDecision)> {
     coordinator
         .sessions
         .synced
@@ -6799,7 +6877,10 @@ fn peer_upsert_replaces_and_reserves_when_the_rg_is_not_locally_active_9678() {
         Some((SessionOrigin::SyncImport, snat_9678(PEER_PORT_9678))),
         "with the RG not locally active the peer's session must replace the local one"
     );
-    assert!(queued_upsert_9678(&commands, &key), "the replace must be fanned out");
+    assert!(
+        queued_upsert_9678(&commands, &key),
+        "the replace must be fanned out"
+    );
     assert!(
         !port_is_free_9678(&coordinator, 40203, PEER_PORT_9678),
         "the replacing import must reserve its translated port"
@@ -6811,13 +6892,15 @@ fn peer_upsert_still_reserves_on_an_active_node_with_no_local_flow_9678() {
     // Control: an active RG alone must not skip the #6600 pre-publish reservation.
     let (coordinator, commands, key) = coordinator_9678(true, false);
     coordinator.upsert_synced_session(peer_entry_9678());
-    assert!(queued_upsert_9678(&commands, &key), "the import must be fanned out");
+    assert!(
+        queued_upsert_9678(&commands, &key),
+        "the import must be fanned out"
+    );
     assert!(
         !port_is_free_9678(&coordinator, 40204, PEER_PORT_9678),
         "an import with no local session must still reserve before it publishes (#6600)"
     );
 }
-
 
 // #9714: under a dual-primary split a PEER delete must not tear down a flow this
 // node forwards as a LOCAL session while that session's owner RG is locally
@@ -6932,17 +7015,13 @@ impl Fixture9714 {
 
     fn queued_delete(&self, key: &SessionKey) -> bool {
         [&self.worker_a, &self.worker_b].iter().any(|queue| {
-            queue
-                .lock()
-                .expect("commands")
-                .iter()
-                .any(|cmd| {
-                    matches!(
-                        cmd,
-                        WorkerCommand::DeleteSynced(k) | WorkerCommand::DeleteLocalControl(k)
-                            if k == key
-                    )
-                })
+            queue.lock().expect("commands").iter().any(|cmd| {
+                matches!(
+                    cmd,
+                    WorkerCommand::DeleteSynced(k) | WorkerCommand::DeleteLocalControl(k)
+                        if k == key
+                )
+            })
         })
     }
 
@@ -6953,7 +7032,10 @@ impl Fixture9714 {
     }
 
     fn dnat_holds(&self) -> usize {
-        crate::afxdp::checksum::dnat_steering_holder_count(&self.forward.key, self.forward.decision.nat)
+        crate::afxdp::checksum::dnat_steering_holder_count(
+            &self.forward.key,
+            self.forward.decision.nat,
+        )
     }
 }
 
@@ -7013,7 +7095,8 @@ fn a_peer_delete_of_a_live_local_session_with_an_unresolved_owner_rg_is_refused_
     }
     if !(fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key)) {
         violations.push(
-            "a peer delete removed the shared rows of an unresolved-owner local session".to_string(),
+            "a peer delete removed the shared rows of an unresolved-owner local session"
+                .to_string(),
         );
     }
     if fixture.steering_deleted(&writes) {
@@ -7185,7 +7268,10 @@ fn a_declined_removal_leaves_the_session_live_and_filed_9714() {
         |_| false,
     );
 
-    assert!(matches!(outcome, SharedRemoval::Declined), "the predicate declined");
+    assert!(
+        matches!(outcome, SharedRemoval::Declined),
+        "the predicate declined"
+    );
     assert!(
         fixture.shared_has(&key),
         "a DECLINED removal removed the entry anyway"
@@ -7220,8 +7306,14 @@ fn an_accepted_removal_still_removes_and_unfiles_9714() {
         |_| true,
     );
 
-    assert!(matches!(outcome, SharedRemoval::Removed(_)), "the predicate accepted");
-    assert!(!fixture.shared_has(&key), "an accepted removal left the entry behind");
+    assert!(
+        matches!(outcome, SharedRemoval::Removed(_)),
+        "the predicate accepted"
+    );
+    assert!(
+        !fixture.shared_has(&key),
+        "an accepted removal left the entry behind"
+    );
     assert!(
         !prewarm_filed_9714(&fixture, &key),
         "an accepted removal left the key FILED, which is the #7209 strand: a filing with no \
@@ -7404,7 +7496,10 @@ fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
         "fixture: the local forward and reverse entries must be in the shared maps"
     );
     let holds_before = fixture.dnat_holds();
-    assert!(holds_before >= 1, "fixture: the forward session must hold its DNAT steering row");
+    assert!(
+        holds_before >= 1,
+        "fixture: the forward session must hold its DNAT steering row"
+    );
     let refused_before = PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed);
     crate::afxdp::bpf_map::clear_session_map_writes();
 
@@ -7761,12 +7856,8 @@ fn activation_fan_out_collects_live_queues_only_9900() {
             commands: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             session_export_ack: Arc::new(AtomicU64::new(0)),
             cos_status: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
-            runtime_atomics: Arc::new(
-                crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new(),
-            ),
-            cold_path_atomics: Arc::new(
-                crate::afxdp::cold_path_hist::WorkerColdPathAtomics::new(),
-            ),
+            runtime_atomics: Arc::new(crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new()),
+            cold_path_atomics: Arc::new(crate::afxdp::cold_path_hist::WorkerColdPathAtomics::new()),
         }
     }
 
@@ -7870,8 +7961,15 @@ fn authoritative_shared_install_preserves_stamp_over_local_origin_9752() {
     // pinned by the install-table stamp matrix).
     let (domain, check) = crate::session::install_table_identity("blue");
     {
-        let mut synced = fixture.coordinator.sessions.synced.lock().expect("synced map");
-        let stored = synced.get_mut(&fixture.forward.key).expect("forward row present");
+        let mut synced = fixture
+            .coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("synced map");
+        let stored = synced
+            .get_mut(&fixture.forward.key)
+            .expect("forward row present");
         stored.decision.install_table_domain = domain;
         stored.decision.install_table_check = check;
     }
@@ -7893,7 +7991,10 @@ fn authoritative_shared_install_preserves_stamp_over_local_origin_9752() {
         .expect("shared row must survive a resend")
         .clone();
     assert_eq!(
-        (stored.decision.install_table_domain, stored.decision.install_table_check),
+        (
+            stored.decision.install_table_domain,
+            stored.decision.install_table_check
+        ),
         (domain, check),
         "a stamp-less resend must not overwrite shared authority with zeros"
     );
@@ -7906,8 +8007,15 @@ fn authoritative_shared_install_new_incarnation_applies_zero_9752() {
     let fixture = fixture_9714_with_origin(false, SessionOrigin::SyncImport);
     let (domain, check) = crate::session::install_table_identity("blue");
     {
-        let mut synced = fixture.coordinator.sessions.synced.lock().expect("synced map");
-        let stored = synced.get_mut(&fixture.forward.key).expect("forward row present");
+        let mut synced = fixture
+            .coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("synced map");
+        let stored = synced
+            .get_mut(&fixture.forward.key)
+            .expect("forward row present");
         stored.decision.install_table_domain = domain;
         stored.decision.install_table_check = check;
         stored.session_id = 77;
@@ -7929,7 +8037,10 @@ fn authoritative_shared_install_new_incarnation_applies_zero_9752() {
         .expect("shared row must survive a resend")
         .clone();
     assert_eq!(
-        (stored.decision.install_table_domain, stored.decision.install_table_check),
+        (
+            stored.decision.install_table_domain,
+            stored.decision.install_table_check
+        ),
         (0, 0),
         "a new incarnation stating (0,0) must apply it, not inherit"
     );
@@ -8221,6 +8332,7 @@ fn rg_activation_at_full_queue_refreshes_worker_9720() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         SessionOrigin::SyncImport,
         now_ns,
@@ -8652,25 +8764,24 @@ fn queued_stale_reverse_upsert_healed_by_positioned_refresh_9720() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        metadata: SessionMetadata {
-            ingress_zone: 2,
-            egress_zone: 1,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            owner_rg_id: 2,
-            fabric_ingress: false,
-            is_reverse: true,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-        },
+        metadata: SessionMetadata { ingress_zone: 2,
+        egress_zone: 1,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 2,
+        fabric_ingress: false,
+        is_reverse: true,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        nat_scope_ifindex: None },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -8789,7 +8900,8 @@ fn queued_forward_upsert_demoted_by_positioned_demote_9720() {
             &Arc::new(ShardedNeighborMap::new()),
             &flow,
             test_decision(),
-        ).resolution;
+        )
+        .resolution;
     assert_eq!(
         live_resolution.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -8818,10 +8930,8 @@ fn queued_forward_upsert_demoted_by_positioned_demote_9720() {
     let forward_upsert = SyncedSessionEntry {
         key: key.clone(),
         decision: test_decision(),
-        metadata: SessionMetadata {
-            fabric_ingress: false,
-            ..test_metadata()
-        },
+        metadata: SessionMetadata { fabric_ingress: false,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -9081,6 +9191,7 @@ fn split_debt_supersedes_and_dispatches_per_rg_9720() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         SessionOrigin::SyncImport,
         now_ns,
@@ -9334,7 +9445,9 @@ fn declined_synced_delete_keeps_steering_row_9960() {
     let (fixture, _key, _reverse_key, _holds_before, _outcome, writes, _refused_before) =
         declined_delete_fixture_9960();
     assert!(
-        !writes.iter().any(|write| write.value.is_none() && write.key == fixture.forward.key),
+        !writes
+            .iter()
+            .any(|write| write.value.is_none() && write.key == fixture.forward.key),
         "DECLINED delete removed the live replacement's steering row; writes: {writes:?}"
     );
 }
@@ -9615,11 +9728,9 @@ impl Fixture10512Lease {
 #[test]
 fn policy_match_carries_rename_rematch_inputs_10626() {
     let key = test_key();
-    let metadata = SessionMetadata {
-        ingress_zone: 7,
-        egress_zone: 9,
-        ..test_metadata()
-    };
+    let metadata = SessionMetadata { ingress_zone: 7,
+    egress_zone: 9,
+    nat_scope_ifindex: None, ..test_metadata() };
     let nat = NatDecision {
         rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
         rewrite_dst_port: Some(8443),
@@ -9663,13 +9774,16 @@ fn policy_batch_lease_covers_forward_key_10512() {
     let held = crate::afxdp::bpf_map::global_tuple_gate()
         .acquire_lease([fixture.forward.key.clone()])
         .expect("test lease on the forward tuple");
-    let (outcomes, complete, errors) = domain.delete_policy_batch_matches(&fixture.capture(), false);
+    let (outcomes, complete, errors) =
+        domain.delete_policy_batch_matches(&fixture.capture(), false);
     assert!(
         !complete && outcomes.is_empty(),
         "a fenced forward key must fail the batch with no usable outcomes"
     );
     assert!(
-        errors.iter().any(|e| e.starts_with("policy-batch-lease-refused")),
+        errors
+            .iter()
+            .any(|e| e.starts_with("policy-batch-lease-refused")),
         "failure must name the lease refusal, got {errors:?}"
     );
     assert!(
@@ -9681,7 +9795,8 @@ fn policy_batch_lease_covers_forward_key_10512() {
     // the only failure left is the mirror write wanting BPF fds unit tests
     // cannot create. That error proves post-lease progress, not a second
     // refusal.
-    let (outcomes, complete, errors) = domain.delete_policy_batch_matches(&fixture.capture(), false);
+    let (outcomes, complete, errors) =
+        domain.delete_policy_batch_matches(&fixture.capture(), false);
     assert!(!complete && outcomes.is_empty());
     assert!(
         errors.iter().any(|e| e == "policy-batch-mirror-failed"),
@@ -9700,13 +9815,16 @@ fn policy_batch_lease_covers_companion_key_10512() {
     let held = crate::afxdp::bpf_map::global_tuple_gate()
         .acquire_lease([fixture.reverse.key.clone()])
         .expect("test lease on the companion tuple");
-    let (outcomes, complete, errors) = domain.delete_policy_batch_matches(&fixture.capture(), false);
+    let (outcomes, complete, errors) =
+        domain.delete_policy_batch_matches(&fixture.capture(), false);
     assert!(
         !complete && outcomes.is_empty(),
         "a fenced companion key must fail the batch with no usable outcomes"
     );
     assert!(
-        errors.iter().any(|e| e.starts_with("policy-batch-lease-refused")),
+        errors
+            .iter()
+            .any(|e| e.starts_with("policy-batch-lease-refused")),
         "failure must name the lease refusal, got {errors:?}"
     );
     assert!(
@@ -9714,7 +9832,8 @@ fn policy_batch_lease_covers_companion_key_10512() {
         "lease-before-mutation: a refused lease must leave shared authority intact"
     );
     drop(held);
-    let (outcomes, complete, errors) = domain.delete_policy_batch_matches(&fixture.capture(), false);
+    let (outcomes, complete, errors) =
+        domain.delete_policy_batch_matches(&fixture.capture(), false);
     assert!(!complete && outcomes.is_empty());
     assert!(
         errors.iter().any(|e| e == "policy-batch-mirror-failed"),
@@ -9746,7 +9865,8 @@ fn policy_batch_lease_ignores_unrelated_tuple_10512() {
     // A held UNRELATED tuple must not disturb the batch: it proceeds past
     // acquisition (shared rows removed) and stops only at the mirror write
     // unit tests cannot perform.
-    let (outcomes, complete, errors) = domain.delete_policy_batch_matches(&fixture.capture(), false);
+    let (outcomes, complete, errors) =
+        domain.delete_policy_batch_matches(&fixture.capture(), false);
     assert!(!complete && outcomes.is_empty());
     assert!(
         errors.iter().any(|e| e == "policy-batch-mirror-failed"),
@@ -9825,9 +9945,13 @@ fn policy_shared_absent_companion_is_applied_not_partial_10512() {
             &forward,
         );
         let captured = reverse_session_key(&key, NatDecision::default());
-        let outcome = coordinator
-            .session_domain()
-            .remove_shared_policy_item(&key, 0xF40512, 0xC40512, Some(&captured), false);
+        let outcome = coordinator.session_domain().remove_shared_policy_item(
+            &key,
+            0xF40512,
+            0xC40512,
+            Some(&captured),
+            false,
+        );
         assert!(
             matches!(outcome, SyncedDeleteOutcome::Applied),
             "absent companion is converged, not partial; got {outcome:?}"
@@ -9846,8 +9970,7 @@ fn policy_shared_absent_companion_is_applied_not_partial_10512() {
     // removed, companion preserved, PartialCompanion.
     {
         let fixture = fixture_10512_lease(222, 42293, 52293, 0xF50512, 0xC50512);
-        let captured =
-            reverse_session_key(&fixture.forward.key, fixture.forward.decision.nat);
+        let captured = reverse_session_key(&fixture.forward.key, fixture.forward.decision.nat);
         let outcome = fixture
             .coordinator
             .session_domain()
@@ -9863,16 +9986,14 @@ fn policy_shared_absent_companion_is_applied_not_partial_10512() {
             "a LIVE different companion incarnation must report partial; got {outcome:?}"
         );
         assert!(
-            !fixture.shared_has(&fixture.forward.key)
-                && fixture.shared_has(&fixture.reverse.key),
+            !fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse.key),
             "forward gone, live companion preserved"
         );
     }
     // (C) Companion present with the expected incarnation: both removed, Applied.
     {
         let fixture = fixture_10512_lease(223, 42393, 52393, 0xF60512, 0xC60512);
-        let captured =
-            reverse_session_key(&fixture.forward.key, fixture.forward.decision.nat);
+        let captured = reverse_session_key(&fixture.forward.key, fixture.forward.decision.nat);
         let outcome = fixture
             .coordinator
             .session_domain()
@@ -9942,9 +10063,13 @@ fn policy_shared_absent_companion_is_applied_not_partial_10512() {
             &coordinator.sessions.owner_rg_indexes,
             &forward,
         );
-        let outcome = coordinator
-            .session_domain()
-            .remove_shared_policy_item(&key, 0xF70512, 0xF70512, Some(&key), false);
+        let outcome = coordinator.session_domain().remove_shared_policy_item(
+            &key,
+            0xF70512,
+            0xF70512,
+            Some(&key),
+            false,
+        );
         assert!(
             matches!(outcome, SyncedDeleteOutcome::Applied),
             "self-reversing removal must be Applied, not partial; got {outcome:?}"
@@ -10016,11 +10141,10 @@ fn policy_batch_dead_abort_quiesces_shared_then_fails_loud_10512() {
         .runtime_atomics
         .dead
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    fixture.coordinator.workers.register(
-        0,
-        WorkerRuntimeRecord::for_test(handle),
-        None,
-    );
+    fixture
+        .coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
     let (outcomes, complete, errors) = fixture
         .coordinator
         .session_domain()
@@ -10068,13 +10192,8 @@ fn policy_batch_abort_probe_retries_once_then_fails_loud_10512() {
         std::thread::spawn(move || {
             let mut probes_acked = 0usize;
             while !stop.load(std::sync::atomic::Ordering::Acquire) {
-                let drained: Vec<WorkerCommand> = {
-                    commands
-                        .lock()
-                        .expect("commands")
-                        .drain(..)
-                        .collect()
-                };
+                let drained: Vec<WorkerCommand> =
+                    { commands.lock().expect("commands").drain(..).collect() };
                 for cmd in drained {
                     match cmd {
                         WorkerCommand::DeletePolicyBatch { .. } => {
@@ -10125,10 +10244,7 @@ fn policy_batch_abort_probe_retries_once_then_fails_loud_10512() {
         2,
         "the abort probe must retry exactly once after the first stalls"
     );
-    assert_eq!(
-        probes_acked, 1,
-        "exactly the retried probe must be acked"
-    );
+    assert_eq!(probes_acked, 1, "exactly the retried probe must be acked");
 }
 
 /// #10512 advisory-25/2: coordinator-owned phase 2 executes each intent
@@ -10158,7 +10274,11 @@ fn policy_deferred_redirects_execute_under_collecting_worker_holder_10512() {
             || Ok(()),
         )
         .expect("pre-claim publishes");
-    assert_eq!(owners.held_row_count(&key, 1), 1, "fixture must pre-claim one row");
+    assert_eq!(
+        owners.held_row_count(&key, 1),
+        1,
+        "fixture must pre-claim one row"
+    );
     // Base holder is Coordinator: the helper must override per-intent.
     let map = crate::afxdp::bpf_map::SteeringMap {
         fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
@@ -10173,8 +10293,7 @@ fn policy_deferred_redirects_execute_under_collecting_worker_holder_10512() {
         worker_id: 1,
     };
     crate::afxdp::bpf_map::clear_session_map_writes();
-    let ok =
-        crate::afxdp::SessionDomain::execute_deferred_redirects(map, &lease, &[intent]);
+    let ok = crate::afxdp::SessionDomain::execute_deferred_redirects(map, &lease, &[intent]);
     assert!(ok, "covered intent must execute cleanly");
     assert!(
         crate::afxdp::bpf_map::session_map_writes()
@@ -10212,8 +10331,7 @@ fn policy_deferred_redirects_execute_under_collecting_worker_holder_10512() {
         worker_id: 1,
     };
     crate::afxdp::bpf_map::clear_session_map_writes();
-    let ok =
-        crate::afxdp::SessionDomain::execute_deferred_redirects(map, &lease, &[outside]);
+    let ok = crate::afxdp::SessionDomain::execute_deferred_redirects(map, &lease, &[outside]);
     assert!(!ok, "uncovered intent must fail loud");
     assert!(
         crate::afxdp::bpf_map::session_map_writes().is_empty(),
@@ -10262,9 +10380,8 @@ fn policy_batch_covered_intent_executes_then_reports_mirror_10512() {
         let stop = Arc::clone(&stop);
         std::thread::spawn(move || {
             while !stop.load(std::sync::atomic::Ordering::Acquire) {
-                let drained: Vec<WorkerCommand> = {
-                    commands.lock().expect("commands").drain(..).collect()
-                };
+                let drained: Vec<WorkerCommand> =
+                    { commands.lock().expect("commands").drain(..).collect() };
                 for cmd in drained {
                     match cmd {
                         WorkerCommand::DeletePolicyBatch {
@@ -10274,16 +10391,15 @@ fn policy_batch_covered_intent_executes_then_reports_mirror_10512() {
                             pending,
                             ..
                         } => {
-                            intents
-                                .lock()
-                                .expect("intents")
-                                .push(crate::afxdp::DeferredRedirectDelete {
+                            intents.lock().expect("intents").push(
+                                crate::afxdp::DeferredRedirectDelete {
                                     key: items[0].key.clone(),
                                     decision: decision.clone(),
                                     metadata: metadata.clone(),
                                     origin,
                                     worker_id: 0,
-                                });
+                                },
+                            );
                             applied.lock().expect("applied")[0] = true;
                             pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
                         }
@@ -10360,9 +10476,8 @@ fn policy_batch_uncovered_intent_fails_loud_then_quiesces_shared_10512() {
         let stop = Arc::clone(&stop);
         std::thread::spawn(move || {
             while !stop.load(std::sync::atomic::Ordering::Acquire) {
-                let drained: Vec<WorkerCommand> = {
-                    commands.lock().expect("commands").drain(..).collect()
-                };
+                let drained: Vec<WorkerCommand> =
+                    { commands.lock().expect("commands").drain(..).collect() };
                 for cmd in drained {
                     match cmd {
                         WorkerCommand::DeletePolicyBatch {
@@ -10374,16 +10489,15 @@ fn policy_batch_uncovered_intent_fails_loud_then_quiesces_shared_10512() {
                         } => {
                             let mut outside = items[0].key.clone();
                             outside.src_port = outside.src_port.wrapping_add(1);
-                            intents
-                                .lock()
-                                .expect("intents")
-                                .push(crate::afxdp::DeferredRedirectDelete {
+                            intents.lock().expect("intents").push(
+                                crate::afxdp::DeferredRedirectDelete {
                                     key: outside,
                                     decision: decision.clone(),
                                     metadata: metadata.clone(),
                                     origin,
                                     worker_id: 0,
-                                });
+                                },
+                            );
                             applied.lock().expect("applied")[0] = true;
                             pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
                         }
@@ -10476,9 +10590,8 @@ fn policy_batch_mapless_intent_still_retires_registry_10512() {
         let stop = Arc::clone(&stop);
         std::thread::spawn(move || {
             while !stop.load(std::sync::atomic::Ordering::Acquire) {
-                let drained: Vec<WorkerCommand> = {
-                    commands.lock().expect("commands").drain(..).collect()
-                };
+                let drained: Vec<WorkerCommand> =
+                    { commands.lock().expect("commands").drain(..).collect() };
                 for cmd in drained {
                     match cmd {
                         WorkerCommand::DeletePolicyBatch {
@@ -10488,16 +10601,15 @@ fn policy_batch_mapless_intent_still_retires_registry_10512() {
                             pending,
                             ..
                         } => {
-                            intents
-                                .lock()
-                                .expect("intents")
-                                .push(crate::afxdp::DeferredRedirectDelete {
+                            intents.lock().expect("intents").push(
+                                crate::afxdp::DeferredRedirectDelete {
                                     key: items[0].key.clone(),
                                     decision: decision.clone(),
                                     metadata: metadata.clone(),
                                     origin,
                                     worker_id: 0,
-                                });
+                                },
+                            );
                             applied.lock().expect("applied")[0] = true;
                             pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
                         }
@@ -10580,7 +10692,11 @@ fn scoped_peer_delete_matched_removes_and_fans_out_conditional_10512() {
         "matched forward row must be gone"
     );
     let queued: Vec<WorkerCommand> = commands.lock().expect("commands").drain(..).collect();
-    assert_eq!(queued.len(), 1, "exactly the conditional fan-out, got {queued:?}");
+    assert_eq!(
+        queued.len(),
+        1,
+        "exactly the conditional fan-out, got {queued:?}"
+    );
     match &queued[0] {
         WorkerCommand::DeleteSyncedConditional {
             key,
@@ -10615,17 +10731,11 @@ fn scoped_peer_delete_mismatched_survives_and_counts_10512() {
         WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
         None,
     );
-    let before = fixture
-        .coordinator
-        .session_delete_refused_identity_total();
+    let before = fixture.coordinator.session_delete_refused_identity_total();
     let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session_mirror_scoped(
-            fixture.forward.key.clone(),
-            false,
-            0xDEADBEEF,
-        );
+        .delete_peer_synced_session_mirror_scoped(fixture.forward.key.clone(), false, 0xDEADBEEF);
     assert!(
         matches!(outcome, SyncedDeleteOutcome::RefusedIdentity),
         "mismatched scoped delete must refuse identity, got {outcome:?}"
@@ -10635,9 +10745,7 @@ fn scoped_peer_delete_mismatched_survives_and_counts_10512() {
         "live entry must survive a mismatched delete"
     );
     assert_eq!(
-        fixture
-            .coordinator
-            .session_delete_refused_identity_total(),
+        fixture.coordinator.session_delete_refused_identity_total(),
         before + 1,
         "identity refusal must count"
     );
@@ -10761,13 +10869,7 @@ fn call_list_with_pump10512(
     Vec<String>,
     String,
 ) {
-    call_list_with_forwarding_pump10512(
-        domain,
-        req,
-        queues,
-        tables,
-        &ForwardingState::default(),
-    )
+    call_list_with_forwarding_pump10512(domain, req, queues, tables, &ForwardingState::default())
 }
 
 /// Run a policy list with a worker forwarding snapshot that matches the
@@ -10920,15 +11022,24 @@ fn coord_list_bound_shared_only_row_reports_incomplete_12072() {
         std::slice::from_mut(&mut table),
         &forwarding,
     );
-    assert!(rows.is_empty(), "the shared-only row is absent from workers");
-    assert!(!complete, "the shared-only bound tmp row makes coverage incomplete");
+    assert!(
+        rows.is_empty(),
+        "the shared-only row is absent from workers"
+    );
+    assert!(
+        !complete,
+        "the shared-only bound tmp row makes coverage incomplete"
+    );
     assert!(
         errors
             .iter()
             .any(|error| error == "shared-synced-map-uncovered"),
         "the coverage gap must name the shared synced map: {errors:?}"
     );
-    assert!(continuation.is_empty(), "an empty response has no page token");
+    assert!(
+        continuation.is_empty(),
+        "an empty response has no page token"
+    );
 }
 
 /// A bound SyncImport whose admission-time scalar aliases tmp must list only
@@ -10998,9 +11109,15 @@ fn coord_list_bound_sync_import_resolves_current_policy_id_12072() {
         rows.is_empty(),
         "LIST[1] must not match web's admission-time scalar"
     );
-    assert!(complete, "the excluded scalar alias does not make coverage incomplete");
+    assert!(
+        complete,
+        "the excluded scalar alias does not make coverage incomplete"
+    );
     assert!(errors.is_empty(), "unexpected LIST[1] errors: {errors:?}");
-    assert!(continuation.is_empty(), "an empty response has no page token");
+    assert!(
+        continuation.is_empty(),
+        "an empty response has no page token"
+    );
 
     let (rows, complete, errors, continuation) = call_list_with_forwarding_pump10512(
         &domain,
@@ -11016,7 +11133,6 @@ fn coord_list_bound_sync_import_resolves_current_policy_id_12072() {
     assert_eq!(rows[0].policy_id, 2, "wire policy_id is the current web id");
     assert_eq!(rows[0].expected_rt_flow_session_id, session_id);
 }
-
 
 /// Coordinator fan-out merges rows across workers and dedups the same
 /// (key, identity) replica found in two tables.
@@ -11054,7 +11170,10 @@ fn coord_list_fans_out_merges_and_dedups_10512() {
         &[q0, q1],
         &mut [t0, t1],
     );
-    assert!(errs.is_empty(), "clean fan-out must error nothing, got {errs:?}");
+    assert!(
+        errs.is_empty(),
+        "clean fan-out must error nothing, got {errs:?}"
+    );
     assert!(complete, "pumped fan-out must complete");
     assert!(cont.is_empty(), "two rows need no continuation");
     assert_eq!(rows.len(), 2, "merged rows with the replica deduped");
@@ -11277,10 +11396,14 @@ fn coord_list_unacked_worker_times_out_incomplete_10512() {
 fn coord_list_empty_ids_returns_authoritative_empty_10512() {
     let coordinator = Coordinator::new();
     let domain = coordinator.session_domain();
-    let (rows, complete, errs, cont) = domain.list_sessions_by_policy(&list_req_ha10512(Vec::new()));
+    let (rows, complete, errs, cont) =
+        domain.list_sessions_by_policy(&list_req_ha10512(Vec::new()));
     assert!(rows.is_empty());
     assert!(complete, "empty ids must complete");
-    assert!(errs.is_empty(), "empty ids must error nothing, got {errs:?}");
+    assert!(
+        errs.is_empty(),
+        "empty ids must error nothing, got {errs:?}"
+    );
     assert!(cont.is_empty());
 }
 
@@ -11326,7 +11449,12 @@ fn clear_mirror_removes_same_tuple_in_two_domains_10512() {
     let counts = domain.clear_mirror().expect("clear must succeed");
     assert_eq!(counts, (0, 0), "no BPF maps bound in unit tests");
     assert!(
-        coordinator.sessions.synced.lock().expect("synced").is_empty(),
+        coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("synced")
+            .is_empty(),
         "clear must empty the shared synced map"
     );
     assert!(
@@ -11334,7 +11462,12 @@ fn clear_mirror_removes_same_tuple_in_two_domains_10512() {
         "clear must empty the shared nat map"
     );
     assert!(
-        coordinator.sessions.forward_wire.lock().expect("wire").is_empty(),
+        coordinator
+            .sessions
+            .forward_wire
+            .lock()
+            .expect("wire")
+            .is_empty(),
         "clear must empty the shared forward-wire map"
     );
 }
@@ -11370,19 +11503,28 @@ fn clear_mirror_bpf_failure_retains_authority_10512() {
     );
     // i32::MAX: a bound-but-bogus fd (EBADF on first syscall, #10590
     // precedent) — exercises the production error leg unprivileged.
-    coordinator.bpf_maps.store(Arc::new(crate::afxdp::coordinator::BpfMaps {
-        conntrack_v4_fd: Some(crate::afxdp::bpf_map::OwnedFd { fd: i32::MAX }),
-        conntrack_v6_fd: Some(crate::afxdp::bpf_map::OwnedFd { fd: i32::MAX }),
-        ..Default::default()
-    }));
+    coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            conntrack_v4_fd: Some(crate::afxdp::bpf_map::OwnedFd { fd: i32::MAX }),
+            conntrack_v6_fd: Some(crate::afxdp::bpf_map::OwnedFd { fd: i32::MAX }),
+            ..Default::default()
+        }));
     let domain = coordinator.session_domain();
-    let err = domain.clear_mirror().expect_err("BPF failure must fail the clear");
+    let err = domain
+        .clear_mirror()
+        .expect_err("BPF failure must fail the clear");
     assert!(
         err.contains("conntrack"),
         "error must name the failing sweep, got {err}"
     );
     assert!(
-        coordinator.sessions.synced.lock().expect("synced").contains_key(&key),
+        coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("synced")
+            .contains_key(&key),
         "failed clear must retain shared authority"
     );
 }
@@ -11448,8 +11590,12 @@ fn clear_mirror_over_cap_fails_closed_untouched_10512() {
 fn upsert_synced_session_refuses_stale_zone_replay_10612() {
     let mut coordinator = Coordinator::new();
     let mut forwarding = test_forwarding_state_with_fabric();
-    forwarding.zone_id_to_name.insert(TEST_LAN_ZONE_ID, "lan".to_string());
-    forwarding.zone_id_to_name.insert(TEST_WAN_ZONE_ID, "wan".to_string());
+    forwarding
+        .zone_id_to_name
+        .insert(TEST_LAN_ZONE_ID, "lan".to_string());
+    forwarding
+        .zone_id_to_name
+        .insert(TEST_WAN_ZONE_ID, "wan".to_string());
     forwarding.zone_set_validated = true;
     coordinator.set_forwarding_for_test(forwarding);
     let commands = Arc::new(Mutex::new(VecDeque::new()));
@@ -11506,9 +11652,9 @@ fn upsert_synced_session_refuses_stale_zone_replay_10612() {
         "a refused stale replay must not be fanned out to any worker queue"
     );
     assert!(
-        pending.iter().any(
-            |cmd| matches!(cmd, WorkerCommand::UpsertSynced(entry) if entry.key == live_key),
-        ),
+        pending
+            .iter()
+            .any(|cmd| matches!(cmd, WorkerCommand::UpsertSynced(entry) if entry.key == live_key),),
         "the admitted forward must still reach the worker queue — without this the \
          cell would pass for a helper that stopped fanning out entirely"
     );
@@ -11536,10 +11682,7 @@ fn remove_shared_session_if_declined_preserves_live_entry_10612() {
         |_| false,
     );
     assert!(
-        matches!(
-            outcome,
-            crate::afxdp::shared_ops::SharedRemoval::Declined
-        ),
+        matches!(outcome, crate::afxdp::shared_ops::SharedRemoval::Declined),
         "a predicate-false removal must report Declined"
     );
     assert!(
@@ -11564,8 +11707,12 @@ fn remove_shared_session_if_declined_preserves_live_entry_10612() {
 fn purge_stale_replay_counts_removals_not_declines_10612() {
     let mut coordinator = Coordinator::new();
     let mut forwarding = test_forwarding_state_with_fabric();
-    forwarding.zone_id_to_name.insert(TEST_LAN_ZONE_ID, "lan".to_string());
-    forwarding.zone_id_to_name.insert(TEST_WAN_ZONE_ID, "wan".to_string());
+    forwarding
+        .zone_id_to_name
+        .insert(TEST_LAN_ZONE_ID, "lan".to_string());
+    forwarding
+        .zone_id_to_name
+        .insert(TEST_WAN_ZONE_ID, "wan".to_string());
     forwarding.zone_set_validated = true;
     coordinator.set_forwarding_for_test(forwarding);
 
@@ -11581,20 +11728,25 @@ fn purge_stale_replay_counts_removals_not_declines_10612() {
         &coordinator.sessions.owner_rg_indexes,
         &stale,
     );
-    let drops_before =
-        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let drops_before = crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS
+        .load(std::sync::atomic::Ordering::Relaxed);
     crate::afxdp::coordinator::purge_stale_replayed_synced_sessions(
         &coordinator,
         std::slice::from_ref(&stale),
     );
-    let drops_after =
-        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let drops_after = crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS
+        .load(std::sync::atomic::Ordering::Relaxed);
     assert!(
         drops_after > drops_before,
         "purge of a present stale entry must bump the fence-drop counter"
     );
     assert!(
-        !coordinator.sessions.synced.lock().expect("shared").contains_key(&stale.key),
+        !coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("shared")
+            .contains_key(&stale.key),
         "a present stale entry must be removed by the purge"
     );
 
@@ -11616,7 +11768,12 @@ fn purge_stale_replay_counts_removals_not_declines_10612() {
         std::slice::from_ref(&stale_snapshot),
     );
     assert!(
-        coordinator.sessions.synced.lock().expect("shared").contains_key(&live_key),
+        coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("shared")
+            .contains_key(&live_key),
         "a Declined live replacement must survive the purge"
     );
 }
@@ -11722,13 +11879,17 @@ fn pbr_stamped_split_rg_reverse_prewarm_uses_native_table_12086() {
     assert!(reverse.metadata.is_reverse);
     assert_eq!(reverse.metadata.owner_rg_id, 2);
     assert!(
-        worker_commands.lock().expect("commands").iter().any(|command| {
-            matches!(
-                command,
-                WorkerCommand::UpsertSynced(session)
-                    if session.metadata.is_reverse && session.metadata.owner_rg_id == 2
-            )
-        }),
+        worker_commands
+            .lock()
+            .expect("commands")
+            .iter()
+            .any(|command| {
+                matches!(
+                    command,
+                    WorkerCommand::UpsertSynced(session)
+                        if session.metadata.is_reverse && session.metadata.owner_rg_id == 2
+                )
+            }),
         "activation of RG 2 must enqueue its reverse companion for prewarm",
     );
 }
@@ -11939,9 +12100,9 @@ fn synced_delete_refuses_when_nat_lands_after_candidate_read_13712() {
     }
     drop(synced);
     let queued_delete = [&worker_a, &worker_b].iter().any(|queue| {
-        queue.lock().expect("commands").iter().any(|cmd| {
-            matches!(cmd, WorkerCommand::DeleteSynced(k) if *k == key || *k == reverse_key)
-        })
+        queue.lock().expect("commands").iter().any(
+            |cmd| matches!(cmd, WorkerCommand::DeleteSynced(k) if *k == key || *k == reverse_key),
+        )
     });
     if queued_delete {
         violations.push(
@@ -12065,7 +12226,6 @@ fn zero_worker_import_refuses_interface_control_tuple_14084() {
                 if entry.key == key || entry.key == reverse_key)),
         "replay must not queue either forbidden direction for worker installation (#14084)"
     );
-
 
     // Control: a non-aliasing interface identity (egress:5000) still imports.
     let ok = SyncedSessionEntry {
@@ -12302,7 +12462,11 @@ fn policy_deferred_redirects_release_coordinator_claim_14840() {
             || Ok(()),
         )
         .expect("coordinator pre-claim");
-    assert_eq!(owners.owner_count(&row), 2, "fixture: worker + coordinator claims");
+    assert_eq!(
+        owners.owner_count(&row),
+        2,
+        "fixture: worker + coordinator claims"
+    );
     let map = crate::afxdp::bpf_map::SteeringMap {
         fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
         owners: &owners,

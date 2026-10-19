@@ -1,8 +1,8 @@
 use super::*;
-mod fib_dump;
 mod bpf_maps;
 mod cos_leases;
 mod cos_state;
+mod fib_dump;
 mod ha_state;
 mod idle_lease_sync_8121;
 mod inject;
@@ -46,9 +46,9 @@ use cos_leases::{
     build_shared_cos_root_leases_reusing_existing, build_worker_binding_ifindexes_from_identities,
     unique_interface_owner_worker_id,
 };
-pub(crate) use cos_state::SharedCoSState;
 #[cfg(test)]
 pub(crate) use cos_state::PrePublishSiblings;
+pub(crate) use cos_state::SharedCoSState;
 pub(in crate::afxdp) use ha_state::HaState;
 pub(in crate::afxdp) use ha_state::lock_ha_recover;
 pub(in crate::afxdp) use routing_domain::{configured_routing_domains, synced_routing_domain_in};
@@ -56,6 +56,7 @@ pub(in crate::afxdp) use routing_domain::{configured_routing_domains, synced_rou
 // so the end-to-end cell in `wg/decap_tests.rs` can drive production code
 // without widening `mod wg_control` itself.
 pub(crate) use neighbor_manager::NeighborManager;
+pub(crate) use neighbor_manager::WarmItem;
 /// #7413: re-exported so `main_tests.rs` — the one `neigh-monitor` spawner
 /// outside `coordinator/tests.rs` — can take the same guard. `mod
 /// neighbor_manager` is private, and `mod coordinator` is private in
@@ -63,7 +64,6 @@ pub(crate) use neighbor_manager::NeighborManager;
 /// crate-wide; see `afxdp/mod.rs` for the second one.
 #[cfg(test)]
 pub(crate) use neighbor_manager::neigh_monitor_test_serial;
-pub(crate) use neighbor_manager::WarmItem;
 pub(in crate::afxdp) use neighbor_manager::{
     WARM_GC_INTERVAL_NS, WARM_GC_MAX_AGE_NS, WARM_PER_KEY_RATE_LIMIT_NS, WARM_QUEUE_DEPTH,
     WARM_SWEEP_RATE_LIMIT_NS,
@@ -266,8 +266,7 @@ pub(in crate::afxdp) fn purge_stale_replayed_synced_sessions(
             crate::afxdp::session_glue::note_stale_replay_fence_drop();
         }
         if !entry.metadata.is_reverse {
-            let reverse_key =
-                crate::session::reverse_session_key(&entry.key, entry.decision.nat);
+            let reverse_key = crate::session::reverse_session_key(&entry.key, entry.decision.nat);
             if matches!(
                 crate::afxdp::shared_ops::remove_shared_session_if(
                     &coord.sessions.synced,
@@ -331,9 +330,7 @@ pub(in crate::afxdp) fn log_fabric_skip_transition(
     let old_set = fabric_skip_set_summary(old);
     let new_set = fabric_skip_set_summary(new);
     if old_set != new_set {
-        eprintln!(
-            "xpf-userspace-dp: fabric skip set changed ({path}): [{old_set}] => [{new_set}]"
-        );
+        eprintln!("xpf-userspace-dp: fabric skip set changed ({path}): [{old_set}] => [{new_set}]");
     }
 }
 
@@ -391,8 +388,9 @@ pub struct Coordinator {
     /// these bounded per-worker queues. The ArcSwap is shared by the WG
     /// control threads and workers; reconcile publishes a fresh live set,
     /// while stop_inner stores an empty set before old workers are joined.
-    pub(crate) wg_uncovered_queues:
-        Arc<ArcSwap<BTreeMap<u32, Arc<crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue>>>>,
+    pub(crate) wg_uncovered_queues: Arc<
+        ArcSwap<BTreeMap<u32, Arc<crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue>>>,
+    >,
     /// #1881: GRE local-origin thread lifecycle entries keyed by
     /// tunnel_endpoint_id. Reconciled by the same three-pass shape as
     /// `wg_control_threads` (finished sweep → attachment-stale prune →
@@ -908,8 +906,14 @@ impl Coordinator {
     }
 
     /// See [`Coordinator::upsert_synced_session`].
-    pub fn delete_synced_session_gen(&self, key: crate::session::SessionKey, delete_gen: u64, forward_only: bool) {
-        self.session_domain.delete_synced_session_gen(key, delete_gen, forward_only)
+    pub fn delete_synced_session_gen(
+        &self,
+        key: crate::session::SessionKey,
+        delete_gen: u64,
+        forward_only: bool,
+    ) {
+        self.session_domain
+            .delete_synced_session_gen(key, delete_gen, forward_only)
     }
 
     /// See [`Coordinator::upsert_synced_session`].
@@ -993,7 +997,8 @@ impl Coordinator {
                 // The mirror is not evidence that a changed MAC was solicited.
                 // The monitor applies its CAS before the debounced replace;
                 // a matching dynamic entry is its probe-confirmed signal.
-                if !permanent && dynamic != Some(*entry)
+                if !permanent
+                    && dynamic != Some(*entry)
                     && prior.is_some_and(|prior| prior.mac != entry.mac)
                 {
                     return prior_static.map(|prior| (*ifindex, *ip, prior));
@@ -1132,8 +1137,7 @@ impl Coordinator {
         // queue lock while flipping the producer gate, so no descriptor is
         // stranded between the two operations.
         let old_wg_queues = self.wg_uncovered_queues.load_full();
-        self.wg_uncovered_queues
-            .store(Arc::new(BTreeMap::new()));
+        self.wg_uncovered_queues.store(Arc::new(BTreeMap::new()));
         for queue in old_wg_queues.values() {
             let orphaned = queue.close_and_drain();
             crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_ORPHAN_TOTAL
@@ -1182,10 +1186,8 @@ impl Coordinator {
         // #7209: ONE load bound to a local — two loads could straddle a store
         // and mix generations, and the local keeps the fds alive for the call.
         let maps = self.bpf_maps.load();
-        self.workers.stop_and_clear(
-            maps.map_fd.as_ref(),
-            maps.heartbeat_map_fd.as_ref(),
-        );
+        self.workers
+            .stop_and_clear(maps.map_fd.as_ref(), maps.heartbeat_map_fd.as_ref());
         if let Some(transport) = ipsec_inner_transport.as_ref() {
             for worker_id in &ipsec_inner_worker_ids {
                 let _ = transport.join_worker_after_termination(*worker_id);
@@ -1308,9 +1310,7 @@ impl Coordinator {
             // teardown must leave every surface empty, poisoned or not.
             lock_shared_recover(&self.sessions.nat).clear();
             lock_shared_recover(&self.sessions.forward_wire).clear();
-            self.sessions
-                .owner_rg_indexes
-                .clear(&self.sessions.synced);
+            self.sessions.owner_rg_indexes.clear(&self.sessions.synced);
         }
         if let Ok(mut recent) = self.recent_exceptions.lock() {
             recent.clear();
@@ -1962,13 +1962,15 @@ impl Coordinator {
     #[cfg(test)]
     pub(crate) fn seed_flood_counter_for_test(&mut self, zone: u16, name: &str) {
         use crate::afxdp::flood_counters::{
-            flush_recorded_flood_counters, record_zone_flood_drop, FloodCounterSlotMap,
+            FloodCounterSlotMap, flush_recorded_flood_counters, record_zone_flood_drop,
         };
         let map = FloodCounterSlotMap::build(&[zone], &self.forwarding.flood_counter_store);
         record_zone_flood_drop(&map, zone, "syn-flood");
         flush_recorded_flood_counters(&self.forwarding.flood_counter_store, &map);
         self.forwarding.flood_counter_slot_map = std::sync::Arc::new(map);
-        self.forwarding.zone_id_to_name.insert(zone, name.to_string());
+        self.forwarding
+            .zone_id_to_name
+            .insert(zone, name.to_string());
     }
 
     /// #6983: the zone-TRAFFIC twin of `seed_flood_counter_for_test`, opened
@@ -1978,13 +1980,15 @@ impl Coordinator {
     #[cfg(test)]
     pub(crate) fn seed_zone_traffic_counter_for_test(&mut self, zone: u16, name: &str, bytes: u64) {
         use crate::afxdp::zone_counters::{
-            flush_recorded_zone_counters, record_zone_traffic, ZoneCounterSlotMap,
+            ZoneCounterSlotMap, flush_recorded_zone_counters, record_zone_traffic,
         };
         let map = ZoneCounterSlotMap::build(&[zone], &self.forwarding.zone_counter_store);
         record_zone_traffic(&map, zone, 0, bytes);
         flush_recorded_zone_counters(&self.forwarding.zone_counter_store, &map);
         self.forwarding.zone_counter_slot_map = std::sync::Arc::new(map);
-        self.forwarding.zone_id_to_name.insert(zone, name.to_string());
+        self.forwarding
+            .zone_id_to_name
+            .insert(zone, name.to_string());
     }
 
     /// Current in-memory FIB generation (the value flow-cache lookups
@@ -2013,17 +2017,13 @@ impl Coordinator {
     /// before the next RuntimeView store. Missing or malformed authority stays
     /// present but incomplete, so D14 rejects it rather than borrowing an old
     /// inventory.
-    pub(crate) fn set_ipsec_tunnel_rows_from_snapshot(
-        &mut self,
-        snapshot: &ConfigSnapshot,
-    ) {
-        let rows = IpsecTunnelRows::new(snapshot.ipsec_tunnel_rows.iter().map(|row| {
-            IpsecTunnelRow {
+    pub(crate) fn set_ipsec_tunnel_rows_from_snapshot(&mut self, snapshot: &ConfigSnapshot) {
+        let rows =
+            IpsecTunnelRows::new(snapshot.ipsec_tunnel_rows.iter().map(|row| IpsecTunnelRow {
                 stn: row.stn.clone(),
                 if_id: row.if_id,
                 logical_ifindex: row.logical_ifindex,
-            }
-        }));
+            }));
         let generation = if rows.is_empty() {
             0
         } else {
@@ -2187,10 +2187,7 @@ impl Coordinator {
     }
     /// Apply a route-only FIB bump and its P-MECH authority as one worker-view
     /// publication. Rollbacks are checked before either authority is changed.
-    pub(crate) fn bump_fib_generation_with_snapshot(
-        &mut self,
-        snapshot: &ConfigSnapshot,
-    ) -> bool {
+    pub(crate) fn bump_fib_generation_with_snapshot(&mut self, snapshot: &ConfigSnapshot) -> bool {
         if snapshot.fib_generation < self.validation.fib_generation {
             return false;
         }
@@ -2199,7 +2196,6 @@ impl Coordinator {
         self.republish_runtime_validation();
         true
     }
-
 }
 
 /// #2218: collect the nonzero per-rule NAT counter ids referenced by a
@@ -2262,7 +2258,8 @@ impl Coordinator {
         // #6242: register the whole runtime record (handle + empty
         // observability slots) as one op — the export test only drives the
         // handle's `session_export_ack`.
-        self.workers.register(worker_id, WorkerRuntimeRecord::for_test(handle), None);
+        self.workers
+            .register(worker_id, WorkerRuntimeRecord::for_test(handle), None);
         ack
     }
 
@@ -2328,7 +2325,8 @@ mod tests;
 /// populated coordinator without widening afxdp worker plumbing.
 #[cfg(test)]
 pub(crate) struct ListTestWorker {
-    queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<crate::afxdp::WorkerCommand>>>,
+    queue:
+        std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<crate::afxdp::WorkerCommand>>>,
     table: crate::session::SessionTable,
 }
 
@@ -2402,6 +2400,7 @@ impl ListTestWorker {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         };
         assert!(self.table.install_with_protocol_with_origin(
             key.clone(),

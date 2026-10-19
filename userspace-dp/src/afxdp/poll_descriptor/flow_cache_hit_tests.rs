@@ -67,8 +67,8 @@ fn test_key() -> crate::session::SessionKey {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 50, 200)),
         src_port: 45678,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -332,19 +332,24 @@ fn cached_entry() -> FlowCacheEntry {
             apply_nat_on_fabric: false,
             last_queue_id: None,
         },
-        decision: SessionDecision { resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: EGRESS_IFINDEX,
-            tx_ifindex: EGRESS_IFINDEX,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-            neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
-            tx_vlan_id: INGRESS_VLAN_ID,
-            route_mtu: 0,
-            transport_route_mtu: 0,
-        }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 },
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: EGRESS_IFINDEX,
+                tx_ifindex: EGRESS_IFINDEX,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
+                tx_vlan_id: INGRESS_VLAN_ID,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         metadata: SessionMetadata {
             ingress_zone: TEST_TRUST_ZONE_ID,
             egress_zone: TEST_UNTRUST_ZONE_ID,
@@ -368,6 +373,7 @@ fn cached_entry() -> FlowCacheEntry {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         stamp: FlowCacheStamp {
             config_generation: 0,
@@ -682,9 +688,10 @@ impl LiveCallSiteFixture {
 
         let mut forwarding = ForwardingState::default();
         // (physical 6, VLAN 80) -> logical unit 20080.
-        forwarding
-            .ingress_logical_ifindex
-            .insert((PHYS_INGRESS_IFINDEX, INGRESS_VLAN_ID), LOGICAL_INGRESS_IFINDEX);
+        forwarding.ingress_logical_ifindex.insert(
+            (PHYS_INGRESS_IFINDEX, INGRESS_VLAN_ID),
+            LOGICAL_INGRESS_IFINDEX,
+        );
         forwarding.connected_v4_by_ifindex.insert(
             LOGICAL_INGRESS_IFINDEX,
             vec![crate::prefix::PrefixV4::from_net(
@@ -743,9 +750,7 @@ impl LiveCallSiteFixture {
             recent_exceptions: Arc::new(Mutex::new(ExceptionEventRing::new())),
             last_resolution: Arc::new(Mutex::new(None)),
             peer_worker_commands: Vec::new(),
-            pptp_control: Arc::new(
-                crate::session::pptp_control::PptpControlInbox::default(),
-            ),
+            pptp_control: Arc::new(crate::session::pptp_control::PptpControlInbox::default()),
             dnat_fds: DnatTableFds::default(),
             rg_epochs: std::array::from_fn(|_| AtomicU32::new(0)),
         }
@@ -947,11 +952,7 @@ struct StageRun {
 /// clone carries the PRE-rewrite frame" true for free — the
 /// capture-before-rewrite ordering at `flow_cache_hit.rs` would be unbound.
 /// The caller's `frame` stays pristine as the comparison value.
-fn run_stage(
-    fixture: &LiveCallSiteFixture,
-    frame: &[u8],
-    initial_sample_counter: u64,
-) -> StageRun {
+fn run_stage(fixture: &LiveCallSiteFixture, frame: &[u8], initial_sample_counter: u64) -> StageRun {
     let meta = test_meta(frame);
     run_stage_with_meta(fixture, frame, meta, initial_sample_counter)
 }
@@ -1122,20 +1123,14 @@ fn run_stage_seeded(
     // #14945 (3): the ingress UMEM identity the inline gate compares
     // against; a bare mmap area suffices for the hairpin arm, while a
     // cross-binding run clones this handle into the target binding.
-    let ingress_umem =
-        WorkerUmem::new_for_test(256).expect("ingress test umem");
+    let ingress_umem = WorkerUmem::new_for_test(256).expect("ingress test umem");
     let mut tx_pipeline_state = tx_pipeline();
     if let Some((free_frames, max_pending)) = seed.tx_headroom {
         tx_pipeline_state.free_tx_frames = (0..free_frames as u64).collect();
         tx_pipeline_state.max_pending_tx = max_pending;
     }
     let mut tx_counters_state = tx_counters();
-    let mut target_binding = BindingWorker::new_for_mirror_test(
-        1,
-        0,
-        EGRESS_IFINDEX,
-        0,
-    );
+    let mut target_binding = BindingWorker::new_for_mirror_test(1, 0, EGRESS_IFINDEX, 0);
     if seed.cross_umem_shared == Some(true) {
         target_binding.umem = ingress_umem.clone();
     }
@@ -1149,8 +1144,7 @@ fn run_stage_seeded(
         // describes rather than an unrelated fixture.
         assert!(
             sessions.install_with_protocol(
-                seed
-                    .install_key
+                seed.install_key
                     .clone()
                     .unwrap_or_else(|| entry_for_session.key.clone()),
                 entry_for_session.decision.clone(),
@@ -1449,7 +1443,10 @@ fn live_flow_cache_callsite_nonsampled_produces_no_clone_6304() {
          reservation back, which is why that mutation needs the attempt count.)"
     );
     assert_eq!(
-        fixture.ingress_live.mirrored_packets.load(Ordering::Relaxed),
+        fixture
+            .ingress_live
+            .mirrored_packets
+            .load(Ordering::Relaxed),
         0,
         "#6304: and it must not be accounted as mirrored"
     );
@@ -1556,7 +1553,10 @@ fn live_flow_cache_callsite_selected_full_queue_advances_sampler_6304() {
          the sampler's first slot and restores the O(PPS) shared-CAS hit"
     );
     assert_eq!(
-        fixture.ingress_live.mirrored_packets.load(Ordering::Relaxed),
+        fixture
+            .ingress_live
+            .mirrored_packets
+            .load(Ordering::Relaxed),
         0,
         "a clone that was never admitted must not be counted as mirrored"
     );
@@ -1595,7 +1595,10 @@ fn live_flow_cache_callsite_selected_admitted_clone_reaches_target_6304() {
 
     // --- THE DISCRIMINATOR: the admitted clone must actually be delivered.
     assert_eq!(
-        fixture.ingress_live.mirrored_packets.load(Ordering::Relaxed),
+        fixture
+            .ingress_live
+            .mirrored_packets
+            .load(Ordering::Relaxed),
         1,
         "#6304: a SELECTED packet whose cross-worker target has room must have \
          its clone enqueued; dropping the Sampled(Ok) arm silently stops port \
@@ -1741,7 +1744,10 @@ fn live_flow_cache_callsite_rewrite_failure_rolls_back_sampler_6304() {
          the target from the declined fast path"
     );
     assert_eq!(
-        fixture.ingress_live.mirrored_packets.load(Ordering::Relaxed),
+        fixture
+            .ingress_live
+            .mirrored_packets
+            .load(Ordering::Relaxed),
         0,
         "#6304: and nothing is accounted as mirrored"
     );
@@ -2002,7 +2008,10 @@ fn live_flow_cache_callsite_leaves_no_admission_stranded_on_target_6304() {
         "control: the in-place hairpin rewrite must have SUCCEEDED"
     );
     assert_eq!(
-        admitted.ingress_live.mirrored_packets.load(Ordering::Relaxed),
+        admitted
+            .ingress_live
+            .mirrored_packets
+            .load(Ordering::Relaxed),
         1,
         "control: the clone must have been admitted and enqueued"
     );
@@ -2070,7 +2079,11 @@ fn live_flow_cache_callsite_ip_options_frame_takes_the_in_place_path_6304() {
     // IHL 15: 10 option words on top of the 20-byte base header.
     let frame = vlan_tagged_tcp_v4_frame(10);
     assert_eq!(frame.len(), 98, "18 L2 + 60 IPv4 (options) + 20 TCP");
-    assert_eq!(frame[18] & 0x0f, 15, "the IHL nibble the rollback frame fakes");
+    assert_eq!(
+        frame[18] & 0x0f,
+        15,
+        "the IHL nibble the rollback frame fakes"
+    );
     let run = run_stage(&fixture, &frame, 0);
 
     assert!(
@@ -2119,10 +2132,7 @@ fn live_flow_cache_callsite_accounts_debug_forward_and_tx_6304() {
         in_place.dbg_forward, 1,
         "#6304: the in-place staging arm accounts one forwarded packet"
     );
-    assert_eq!(
-        in_place.dbg_tx, 1,
-        "#6304: ...and one TX, on the same arm"
-    );
+    assert_eq!(in_place.dbg_tx, 1, "#6304: ...and one TX, on the same arm");
 
     let fallback = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
     let pristine = tcp_v4_ack_frame();
@@ -2871,7 +2881,6 @@ fn live_flow_cache_callsite_served_hit_still_counts_as_a_hit_5190() {
     );
 }
 
-
 // ─────────────────────────────────────────────────────────────────────────────
 // #6997 / #6999: the four remaining unbound production calls at this call site.
 //
@@ -3004,7 +3013,8 @@ fn live_flow_cache_callsite_accounts_the_packet_onto_the_session_6997() {
          tcpControlBits is a fabricated zero (#6997)"
     );
     assert_eq!(
-        tos, PKT_DSCP << 2,
+        tos,
+        PKT_DSCP << 2,
         "the forward-direction ToS byte must be the packet's DSCP shifted left \
          two (#2749). 0 means the `meta.dscp` argument never arrived; any other \
          value means a neighbouring field was passed in its place (#6997)"
@@ -3798,14 +3808,22 @@ fn cached_martian_source_is_dropped_before_forward_side_effects_10689() {
         },
     );
 
-    assert_eq!(run.flow_cache_tallies, (1, 0, 0), "must be a real cache hit");
+    assert_eq!(
+        run.flow_cache_tallies,
+        (1, 0, 0),
+        "must be a real cache hit"
+    );
     assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
     assert_eq!(run.scratch.scratch_recycle.len(), 1);
     assert!(run.scratch.scratch_forwards.is_empty());
     assert!(run.tx_pipeline.pending_tx_prepared.is_empty());
     assert_eq!(run.dbg_forward, 0);
     assert_eq!(run.dbg_tx, 0);
-    assert_eq!(run.sessions.len(), 1, "the gate must preserve the live session");
+    assert_eq!(
+        run.sessions.len(),
+        1,
+        "the gate must preserve the live session"
+    );
 }
 
 #[test]
@@ -3838,7 +3856,11 @@ fn cached_martian_destination_is_dropped_before_forward_side_effects_11413() {
         },
     );
 
-    assert_eq!(run.flow_cache_tallies, (1, 0, 0), "must be a real cache hit");
+    assert_eq!(
+        run.flow_cache_tallies,
+        (1, 0, 0),
+        "must be a real cache hit"
+    );
     assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
     assert_eq!(run.scratch.scratch_recycle.len(), 1);
     assert!(run.scratch.scratch_forwards.is_empty());
@@ -3846,7 +3868,11 @@ fn cached_martian_destination_is_dropped_before_forward_side_effects_11413() {
     assert_eq!(run.dbg_forward, 0);
     assert_eq!(run.dbg_tx, 0);
     assert_eq!(run.counters.martian_dropped, 1);
-    assert_eq!(run.sessions.len(), 1, "the gate must preserve the live session");
+    assert_eq!(
+        run.sessions.len(),
+        1,
+        "the gate must preserve the live session"
+    );
 }
 
 /// #10854: the admitted cache-hit learn must retain the original RX source MAC
@@ -3930,35 +3956,35 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
         "fixture precondition: FAILED/INCOMPLETE removes a present binding"
     );
     let missing_neighbor_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
-    let epoch_before_first_learn =
-        missing_neighbor_snapshot.epoch_for(&(EGRESS_IFINDEX, next_hop));
+    let epoch_before_first_learn = missing_neighbor_snapshot.epoch_for(&(EGRESS_IFINDEX, next_hop));
     let worker_ctx = fixture.worker_ctx();
     let policy_counter: Option<Arc<crate::policy::PolicyRuleCounter>> = None;
-    let seed = |cache: &mut FlowCache,
-                decision: SessionDecision,
-                neighbor_epoch_snapshot: &crate::afxdp::sharded_neighbor::ShardEpochSnapshot| {
-        stage_flow_cache_seed(
-            cache,
-            &flow,
-            meta,
-            ValidationState::default(),
-            decision,
-            None,
-            0,
-            Some(TEST_TRUST_ZONE_ID),
-            false,
-            false,
-            0,
-            &policy_counter,
-            crate::filter::TermMatchExtra::default(),
-            None,
-            0,
-            0,
-            false,
-            neighbor_epoch_snapshot,
-            &worker_ctx,
-        );
-    };
+    let seed =
+        |cache: &mut FlowCache,
+         decision: SessionDecision,
+         neighbor_epoch_snapshot: &crate::afxdp::sharded_neighbor::ShardEpochSnapshot| {
+            stage_flow_cache_seed(
+                cache,
+                &flow,
+                meta,
+                ValidationState::default(),
+                decision,
+                None,
+                0,
+                Some(TEST_TRUST_ZONE_ID),
+                false,
+                false,
+                0,
+                &policy_counter,
+                crate::filter::TermMatchExtra::default(),
+                None,
+                0,
+                0,
+                false,
+                neighbor_epoch_snapshot,
+                &worker_ctx,
+            );
+        };
     let lookup_present = |cache: &mut FlowCache| {
         cache
             .lookup(
@@ -3994,11 +4020,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
     );
 
     let mut stale_cache = FlowCache::new();
-    seed(
-        &mut stale_cache,
-        stale_decision,
-        &live_neighbor_snapshot,
-    );
+    seed(&mut stale_cache, stale_decision, &live_neighbor_snapshot);
     assert!(
         !lookup_present(&mut stale_cache),
         "a stale-MAC decision must not seed after the first learn either"
@@ -4079,8 +4101,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
         "fixture precondition: FAILED/INCOMPLETE removes a present v6 binding"
     );
     let missing_neighbor_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
-    let epoch_before_first_learn =
-        missing_neighbor_snapshot.epoch_for(&(EGRESS_IFINDEX, next_hop));
+    let epoch_before_first_learn = missing_neighbor_snapshot.epoch_for(&(EGRESS_IFINDEX, next_hop));
     let decision = |mac| SessionDecision {
         resolution: ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,
@@ -4101,31 +4122,32 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
     };
     let worker_ctx = fixture.worker_ctx();
     let policy_counter: Option<Arc<crate::policy::PolicyRuleCounter>> = None;
-    let seed = |cache: &mut FlowCache,
-                d: SessionDecision,
-                neighbor_epoch_snapshot: &crate::afxdp::sharded_neighbor::ShardEpochSnapshot| {
-        stage_flow_cache_seed(
-            cache,
-            &flow,
-            meta,
-            ValidationState::default(),
-            d,
-            None,
-            0,
-            Some(TEST_TRUST_ZONE_ID),
-            false,
-            false,
-            0,
-            &policy_counter,
-            crate::filter::TermMatchExtra::default(),
-            None,
-            0,
-            0,
-            false,
-            neighbor_epoch_snapshot,
-            &worker_ctx,
-        );
-    };
+    let seed =
+        |cache: &mut FlowCache,
+         d: SessionDecision,
+         neighbor_epoch_snapshot: &crate::afxdp::sharded_neighbor::ShardEpochSnapshot| {
+            stage_flow_cache_seed(
+                cache,
+                &flow,
+                meta,
+                ValidationState::default(),
+                d,
+                None,
+                0,
+                Some(TEST_TRUST_ZONE_ID),
+                false,
+                false,
+                0,
+                &policy_counter,
+                crate::filter::TermMatchExtra::default(),
+                None,
+                0,
+                0,
+                false,
+                neighbor_epoch_snapshot,
+                &worker_ctx,
+            );
+        };
     let lookup_present = |cache: &mut FlowCache| {
         cache
             .lookup(
@@ -4160,22 +4182,14 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
     );
 
     let mut stale_cache = FlowCache::new();
-    seed(
-        &mut stale_cache,
-        decision(mac_a),
-        &live_neighbor_snapshot,
-    );
+    seed(&mut stale_cache, decision(mac_a), &live_neighbor_snapshot);
     assert!(
         !lookup_present(&mut stale_cache),
         "a stale IPv6 decision must not seed after the first learn either"
     );
 
     let mut fresh_cache = FlowCache::new();
-    seed(
-        &mut fresh_cache,
-        decision(mac_b),
-        &live_neighbor_snapshot,
-    );
+    seed(&mut fresh_cache, decision(mac_b), &live_neighbor_snapshot);
     assert!(
         lookup_present(&mut fresh_cache),
         "a current IPv6 MAC must still seed the flow cache"
@@ -4279,8 +4293,7 @@ fn flow_cache_hit_defers_oversized_tcp_to_segmentation_path_11376() {
 fn policy_deny_cache_hit_replays_counts_logs_and_exception_without_session_11073() {
     use crate::event_stream::codec::DataplaneEventKind;
 
-    let fixture =
-        LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
     let frame = tcp_v4_ack_frame();
     let input_counter = Arc::new(crate::filter::FilterTermCounter::default());
     let policy_counter = Arc::new(crate::policy::PolicyRuleCounter::default());
@@ -4342,7 +4355,11 @@ fn policy_deny_cache_hit_replays_counts_logs_and_exception_without_session_11073
         .iter()
         .filter(|event| event.kind == DataplaneEventKind::PolicyDeny)
         .collect();
-    assert_eq!(deny_events.len(), 1, "each hit must replay RT_FLOW policy deny");
+    assert_eq!(
+        deny_events.len(),
+        1,
+        "each hit must replay RT_FLOW policy deny"
+    );
     assert_eq!(deny_events[0].action, 0, "plain deny remains a silent DENY");
     assert_eq!(deny_events[0].policy_id, 77);
     assert_eq!(deny_events[0].application_id, 19);
@@ -4384,8 +4401,7 @@ fn policy_deny_cache_hit_replays_counts_logs_and_exception_without_session_11073
 fn discard_route_cache_hit_replays_drop_accounting_without_policy_event_11073() {
     use crate::event_stream::codec::DataplaneEventKind;
 
-    let fixture =
-        LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
     let frame = tcp_v4_ack_frame();
     let entry = cached_deny_entry(ForwardingDisposition::DiscardRoute, None);
     let run = run_stage_seeded(
@@ -4538,11 +4554,8 @@ fn cached_no_route_reject_is_silent_and_logs_deny_not_reject_11073() {
     );
 }
 
-fn cos_cache_fixture(
-    built: &crate::afxdp::types::ForwardingState,
-) -> LiveCallSiteFixture {
-    let mut fixture =
-        LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+fn cos_cache_fixture(built: &crate::afxdp::types::ForwardingState) -> LiveCallSiteFixture {
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
     fixture.forwarding.cos = built.cos.clone();
     fixture.forwarding.filter_state = built.filter_state.clone();
     fixture.forwarding.tx_selection_enabled_v4 = built.tx_selection_enabled_v4;
@@ -4566,14 +4579,13 @@ fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
         buffer_size_bytes: 128_000,
         ..Default::default()
     };
-    let classifier_entry =
-        |forwarding_class: &str, loss_priority: &str, dscp_value| {
-            crate::CoSDSCPClassifierEntrySnapshot {
-                forwarding_class: forwarding_class.into(),
-                loss_priority: loss_priority.into(),
-                dscp_values: vec![dscp_value],
-            }
-        };
+    let classifier_entry = |forwarding_class: &str, loss_priority: &str, dscp_value| {
+        crate::CoSDSCPClassifierEntrySnapshot {
+            forwarding_class: forwarding_class.into(),
+            loss_priority: loss_priority.into(),
+            dscp_values: vec![dscp_value],
+        }
+    };
     let classifier = |name: &str, entries| crate::CoSDSCPClassifierSnapshot {
         name: name.into(),
         entries,
@@ -4658,10 +4670,7 @@ fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
                         classifier_entry("bulk-data", "low", 10),
                     ],
                 ),
-                classifier(
-                    "vlan81",
-                    vec![classifier_entry("bulk-data", "high", 10)],
-                ),
+                classifier("vlan81", vec![classifier_entry("bulk-data", "high", 10)]),
             ],
             dscp_rewrite_rules: vec![crate::CoSDSCPRewriteRuleSnapshot {
                 name: "wan-rw".into(),
@@ -4725,7 +4734,10 @@ fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
             &test_key(),
         );
         assert_eq!(seed_selection.queue_id, Some(1), "filter pins bulk queue 1");
-        assert!(!seed_selection.ba_reclassify, "the filter-pinned queue stays fixed");
+        assert!(
+            !seed_selection.ba_reclassify,
+            "the filter-pinned queue stays fixed"
+        );
         assert!(seed_selection.cos_lp_reclassify);
         assert_eq!(
             seed_selection.dscp_rewrite,
@@ -4741,16 +4753,27 @@ fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
         hit_meta.dscp = hit_dscp;
         let run = run_stage_with_entry(&fixture, &hit_frame, hit_meta, entry, 0);
 
-        assert_eq!(run.flow_cache_tallies, (1, 0, 0), "must drive a real cache hit");
+        assert_eq!(
+            run.flow_cache_tallies,
+            (1, 0, 0),
+            "must drive a real cache hit"
+        );
         assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
         let prepared = run
             .tx_pipeline
             .pending_tx_prepared
             .front()
             .expect("the cache hit must stage the packet for TX");
-        assert_eq!(prepared.cos_queue_id, Some(1), "the output filter keeps queue 1 pinned");
+        assert_eq!(
+            prepared.cos_queue_id,
+            Some(1),
+            "the output filter keeps queue 1 pinned"
+        );
         assert_eq!(prepared.dscp_rewrite, Some(expected_dscp));
-        assert!(run.tx_frame.is_some(), "the in-place production path stages bytes");
+        assert!(
+            run.tx_frame.is_some(),
+            "the in-place production path stages bytes"
+        );
     }
     // A second VLAN on the same physical ingress resolves a different unit and
     // therefore a different classifier, even though the packet tuple is equal.
@@ -4789,7 +4812,10 @@ fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
         .expect("VLAN-specific cache hit stages TX");
     assert_eq!(prepared.cos_queue_id, Some(1));
     assert_eq!(prepared.dscp_rewrite, Some(42));
-    assert!(vlan_run.tx_frame.is_some(), "VLAN-specific hit stages bytes");
+    assert!(
+        vlan_run.tx_frame.is_some(),
+        "VLAN-specific hit stages bytes"
+    );
 
     // A filter class that has no materialized scheduler queue is pinned to the
     // interface default. That fallback remains fixed while the selected
@@ -4818,8 +4844,7 @@ fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
             dscp_value: 42,
         },
     ]);
-    let fallback_built =
-        crate::afxdp::forwarding_build::build_forwarding_state(&fallback_snapshot);
+    let fallback_built = crate::afxdp::forwarding_build::build_forwarding_state(&fallback_snapshot);
     let fallback_fixture = cos_cache_fixture(&fallback_built);
     for (seed_dscp, hit_dscp, expected_dscp) in [(46_u8, 10_u8, 17_u8), (10, 46, 42)] {
         let mut seed_frame = vlan_tagged_tcp_v4_frame(0);
@@ -4832,7 +4857,11 @@ fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
             seed_meta,
             &test_key(),
         );
-        assert_eq!(selection.queue_id, Some(0), "fallback pins the default queue");
+        assert_eq!(
+            selection.queue_id,
+            Some(0),
+            "fallback pins the default queue"
+        );
         assert!(selection.filter_forwarding_class_fallback_pinned);
         assert!(selection.cos_lp_reclassify);
         let mut entry = cached_entry();
@@ -4872,20 +4901,18 @@ fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
     clamp_cos.scheduler_maps[0]
         .entries
         .retain(|entry| entry.forwarding_class == "best-effort");
-    clamp_cos.dscp_rewrite_rules[0]
-        .entries
-        .extend([
-            crate::CoSDSCPRewriteRuleEntrySnapshot {
-                forwarding_class: "best-effort".into(),
-                loss_priority: "low".into(),
-                dscp_value: 17,
-            },
-            crate::CoSDSCPRewriteRuleEntrySnapshot {
-                forwarding_class: "best-effort".into(),
-                loss_priority: "high".into(),
-                dscp_value: 42,
-            },
-        ]);
+    clamp_cos.dscp_rewrite_rules[0].entries.extend([
+        crate::CoSDSCPRewriteRuleEntrySnapshot {
+            forwarding_class: "best-effort".into(),
+            loss_priority: "low".into(),
+            dscp_value: 17,
+        },
+        crate::CoSDSCPRewriteRuleEntrySnapshot {
+            forwarding_class: "best-effort".into(),
+            loss_priority: "high".into(),
+            dscp_value: 42,
+        },
+    ]);
     let clamp_built = crate::afxdp::forwarding_build::build_forwarding_state(&clamp_snapshot);
     let clamp_fixture = cos_cache_fixture(&clamp_built);
     for (seed_dscp, hit_dscp, expected_dscp) in [(46_u8, 10_u8, 17_u8), (10, 46, 42)] {
@@ -5032,8 +5059,7 @@ fn expired_scheduler_lease_revalidates_cached_unscheduled_permit12273() {
 /// slot, reclassifies the hit as a miss, and falls through.
 #[test]
 fn policy_deny_cache_hit_falls_through_when_live_session_backs_flow_13635() {
-    let fixture =
-        LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
     let frame = tcp_v4_ack_frame();
     let entry = cached_deny_entry(
         ForwardingDisposition::PolicyDenied,
@@ -5072,8 +5098,7 @@ fn policy_deny_cache_hit_falls_through_when_live_session_backs_flow_13635() {
 /// #13635: same guard for DiscardRoute deny entries.
 #[test]
 fn discard_route_cache_hit_falls_through_when_live_session_backs_flow_13635() {
-    let fixture =
-        LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
     let frame = tcp_v4_ack_frame();
     let entry = cached_deny_entry(ForwardingDisposition::DiscardRoute, None);
     let run = run_stage_seeded(
@@ -5101,8 +5126,7 @@ fn discard_route_cache_hit_falls_through_when_live_session_backs_flow_13635() {
 fn policy_deny_cache_hit_falls_through_for_live_reverse_nat_alias_13635() {
     use crate::afxdp::NatDecision;
 
-    let fixture =
-        LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
     let frame = tcp_v4_ack_frame();
     let canonical = test_key();
     let mut nat = NatDecision::default();

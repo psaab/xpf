@@ -6,10 +6,8 @@
 // session_glue/mod.rs.
 
 use super::*;
-use crate::session::{
-    ForwardingGenerationStamp, PolicyRevalidationKind, PolicyRevalidationTarget,
-};
 use crate::afxdp::worker_queue::WORKER_COMMAND_DRAIN_BUDGET;
+use crate::session::{ForwardingGenerationStamp, PolicyRevalidationKind, PolicyRevalidationTarget};
 
 // #7201: `apply_worker_commands` now drains a BOUNDED PREFIX
 // (`WORKER_COMMAND_DRAIN_BUDGET` = 256) into a caller-owned scratch deque
@@ -64,25 +62,24 @@ fn test_resolution() -> ForwardingResolution {
 }
 
 fn test_metadata() -> SessionMetadata {
-    SessionMetadata {
-        ingress_zone: 1,
-        egress_zone: 2,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 1,
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-    }
+    SessionMetadata { ingress_zone: 1,
+    egress_zone: 2,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 1,
+    fabric_ingress: false,
+    is_reverse: false,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None }
 }
 
 fn test_decision() -> SessionDecision {
@@ -210,8 +207,8 @@ fn session_key_has_lo0_filter_matches_packet_family() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
         src_port: 12345,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let v6_key = SessionKey {
         addr_family: libc::AF_INET6 as u8,
@@ -220,8 +217,8 @@ fn session_key_has_lo0_filter_matches_packet_family() {
         dst_ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
         src_port: 12345,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
 
     assert!(!session_key_has_lo0_filter(&forwarding, &v4_key));
@@ -244,8 +241,8 @@ fn republish_local_delivery_sessions_for_lo0_filter_respects_change_gate() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
         src_port: 12345,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let mut sessions = SessionTable::new();
     assert!(sessions.install_with_protocol_with_origin(
@@ -302,12 +299,7 @@ fn lo0_republish_false_gate_avoids_full_table_scan_in_release() {
         let key = SessionKey {
             addr_family: libc::AF_INET as u8,
             protocol: PROTO_TCP,
-            src_ip: IpAddr::V4(Ipv4Addr::new(
-                10,
-                0,
-                (index >> 8) as u8,
-                index as u8,
-            )),
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, (index >> 8) as u8, index as u8)),
             dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
             src_port: (index + 1) as u16,
             dst_port: 5201,
@@ -378,8 +370,8 @@ fn purge_sessions_for_input_dscp_filter_revalidation_removes_family() {
         dst_ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
         src_port: 12345,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     assert!(sessions.install_with_protocol_with_origin(
         v4_key.clone(),
@@ -436,19 +428,24 @@ fn purge_sessions_for_input_dscp_filter_revalidation_removes_family() {
 }
 
 fn test_local_delivery_decision() -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::LocalDelivery,
-        local_ifindex: 12,
-        egress_ifindex: 12,
-        tx_ifindex: 12,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::LocalDelivery,
+            local_ifindex: 12,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 fn test_forwarding_state_with_fabric() -> ForwardingState {
@@ -505,8 +502,8 @@ fn test_key() -> SessionKey {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 55068,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -681,7 +678,11 @@ fn promote_republishes_the_session_id_for_replicas_to_adopt_9582() {
         },
         false,
     ));
-    assert_eq!(sessions.session_id_for(&key), PEER_ID, "FIXTURE: the import must adopt the peer's id");
+    assert_eq!(
+        sessions.session_id_for(&key),
+        PEER_ID,
+        "FIXTURE: the import must adopt the peer's id"
+    );
 
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -712,14 +713,22 @@ fn promote_republishes_the_session_id_for_replicas_to_adopt_9582() {
         0x10,
         SessionHitVerdict::Owner,
     );
-    assert_eq!(sessions.session_id_for(&key), PEER_ID, "FIXTURE: the promote must keep the live entry's id");
+    assert_eq!(
+        sessions.session_id_for(&key),
+        PEER_ID,
+        "FIXTURE: the promote must keep the live entry's id"
+    );
     let published = shared_sessions
         .lock()
         .expect("shared sessions")
         .get(&key)
         .cloned()
         .expect("FIXTURE: the promote must republish into the shared map");
-    assert_eq!(published.origin, SessionOrigin::SharedPromote, "FIXTURE: the shared entry is the promote's");
+    assert_eq!(
+        published.origin,
+        SessionOrigin::SharedPromote,
+        "FIXTURE: the shared entry is the promote's"
+    );
     assert_eq!(
         published.session_id, PEER_ID,
         "#9582: the promote republished session id {:#x}, not the live id, so a \
@@ -827,19 +836,22 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
 
     let shared_entry = SyncedSessionEntry {
         key: key.clone(),
-        decision: SessionDecision { resolution: resolve_fabric_redirect(&forwarding).expect("fabric redirect"), nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
-        metadata: SessionMetadata {
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            fabric_ingress: false,
-            owner_rg_id: 0,
-            ..test_metadata()
+        decision: SessionDecision {
+            resolution: resolve_fabric_redirect(&forwarding).expect("fabric redirect"),
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                rewrite_src_port: Some(key.src_port),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
+        metadata: SessionMetadata { ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        fabric_ingress: false,
+        owner_rg_id: 0,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -934,7 +946,12 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         "Foreign must not stamp fabric ingress"
     );
     assert_eq!(
-        shared_sessions.lock().expect("shared sessions").get(&key).unwrap().origin,
+        shared_sessions
+            .lock()
+            .expect("shared sessions")
+            .get(&key)
+            .unwrap()
+            .origin,
         SessionOrigin::SyncImport
     );
     maybe_promote_synced_session_with_conntrack(
@@ -1019,18 +1036,21 @@ fn quarantined_reply_domain_not_synthesized_from_main_forward_11061() {
 
         let shared_entry = SyncedSessionEntry {
             key: key.clone(),
-            decision: SessionDecision { resolution: resolve_fabric_redirect(&forwarding).expect("fabric redirect"), nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-                rewrite_src_port: Some(key.src_port),
-                ..NatDecision::default()
-            }, install_table_domain: 0, install_table_check: 0 },
-            metadata: SessionMetadata {
-                ingress_ifindex: 0,
-                ingress_vlan_id: 0,
-                forward_ingress_vlan_id: None,
-                fabric_ingress: true,
-                ..test_metadata()
+            decision: SessionDecision {
+                resolution: resolve_fabric_redirect(&forwarding).expect("fabric redirect"),
+                nat: NatDecision {
+                    rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                    rewrite_src_port: Some(key.src_port),
+                    ..NatDecision::default()
+                },
+                install_table_domain: 0,
+                install_table_check: 0,
             },
+            metadata: SessionMetadata { ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            fabric_ingress: true,
+            nat_scope_ifindex: None, ..test_metadata() },
             leak_incarnation: 0,
             origin: SessionOrigin::SyncImport,
             protocol: PROTO_TCP,
@@ -1057,27 +1077,29 @@ fn quarantined_reply_domain_not_synthesized_from_main_forward_11061() {
             dst_ip: reply_key.dst_ip,
             forward_key: reply_key,
         };
-        let resolved = resolve_flow_session_decision(&mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &forwarding,
-        &ha_state,
-        &dynamic_neighbors,
-        &flow,
-        1_000_000,
-        1,
-        PROTO_TCP,
-        0x18,
-        21,
-        0,
-        true,
-        0,
-        0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner);
+        let resolved = resolve_flow_session_decision(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &peer_worker_commands,
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            &flow,
+            1_000_000,
+            1,
+            PROTO_TCP,
+            0x18,
+            21,
+            0,
+            true,
+            0,
+            0,
+            crate::afxdp::session_glue::SessionHitVerdict::Owner,
+        );
         assert_eq!(
             resolved.is_some(),
             expect_some,
@@ -1138,7 +1160,10 @@ fn stale_local_nat_match_does_not_resurrect_shared_alias_9991() {
         },
     );
     assert!(
-        !shared_nat_sessions.lock().expect("shared NAT map").is_empty(),
+        !shared_nat_sessions
+            .lock()
+            .expect("shared NAT map")
+            .is_empty(),
         "the stale local candidate must have a published shared alias"
     );
     assert!(
@@ -1165,7 +1190,10 @@ fn stale_local_nat_match_does_not_resurrect_shared_alias_9991() {
         src_ip: forward_key.dst_ip,
         dst_ip: decision.nat.rewrite_src.unwrap_or(forward_key.src_ip),
         src_port: forward_key.dst_port,
-        dst_port: decision.nat.rewrite_src_port.unwrap_or(forward_key.src_port),
+        dst_port: decision
+            .nat
+            .rewrite_src_port
+            .unwrap_or(forward_key.src_port),
         discriminator: forward_key.discriminator,
         routing_domain: forward_key.routing_domain,
     };
@@ -1174,8 +1202,14 @@ fn stale_local_nat_match_does_not_resurrect_shared_alias_9991() {
         protocol: forward_key.protocol,
         src_ip: decision.nat.rewrite_src.unwrap_or(forward_key.src_ip),
         dst_ip: decision.nat.rewrite_dst.unwrap_or(forward_key.dst_ip),
-        src_port: decision.nat.rewrite_src_port.unwrap_or(forward_key.src_port),
-        dst_port: decision.nat.rewrite_dst_port.unwrap_or(forward_key.dst_port),
+        src_port: decision
+            .nat
+            .rewrite_src_port
+            .unwrap_or(forward_key.src_port),
+        dst_port: decision
+            .nat
+            .rewrite_dst_port
+            .unwrap_or(forward_key.dst_port),
         discriminator: forward_key.discriminator,
         routing_domain: forward_key.routing_domain,
     };
@@ -1191,31 +1225,33 @@ fn stale_local_nat_match_does_not_resurrect_shared_alias_9991() {
         .is_none(),
         "an idle-crossed local wire alias must not fall through to its shared clone"
     );
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &forwarding,
-    &ha_state,
-    &dynamic_neighbors,
-    &SessionFlow {
-        src_ip: reply_key.src_ip,
-        dst_ip: reply_key.dst_ip,
-        forward_key: reply_key.clone(),
-    },
-    now_ns,
-    now_secs,
-    PROTO_TCP,
-    TCP_FLAG_ACK,
-    6,
-    0,
-    false,
-    0,
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &SessionFlow {
+            src_ip: reply_key.src_ip,
+            dst_ip: reply_key.dst_ip,
+            forward_key: reply_key.clone(),
+        },
+        now_ns,
+        now_secs,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        6,
         0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner);
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    );
     assert!(
         resolved.is_none(),
         "an idle-crossed local NAT candidate must not fall through to its shared clone"
@@ -1247,7 +1283,7 @@ fn cached_session_resolution_skips_fabric_redirect() {
         transport_route_mtu: 0,
     };
 
-        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     assert!(cached_session_resolution(&forwarding, &dynamic_neighbors, cached).is_none());
 }
 
@@ -1258,7 +1294,8 @@ fn lookup_session_across_scopes_returns_shared_entry() {
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision: test_decision(),
-        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -1491,31 +1528,33 @@ fn resolve_flow_syn_on_closing_tuple_preserves_pair_before_authority_10886() {
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let now_ns = 3_000_000u64;
     let ha_state = BTreeMap::from([(1, active_ha_runtime(0))]);
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &forwarding,
-    &ha_state,
-    &dynamic_neighbors,
-    &SessionFlow {
-        src_ip: forward.src_ip,
-        dst_ip: forward.dst_ip,
-        forward_key: forward.clone(),
-    },
-    now_ns,
-    0,
-    PROTO_TCP,
-    TCP_SYN,
-    6,
-    0,
-    false,
-    0,
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &SessionFlow {
+            src_ip: forward.src_ip,
+            dst_ip: forward.dst_ip,
+            forward_key: forward.clone(),
+        },
+        now_ns,
         0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner);
+        PROTO_TCP,
+        TCP_SYN,
+        6,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    );
     assert!(
         resolved.is_some(),
         "the low-level resolver must preserve the closing hit before authority"
@@ -1694,15 +1733,21 @@ fn syn_with_close_bit_does_not_evict_closing_tuple_10287() {
 fn lookup_session_across_scopes_returns_shared_forward_wire_entry() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(key.src_port),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -1751,11 +1796,16 @@ fn lookup_session_across_scopes_returns_shared_forward_wire_entry() {
 fn lookup_session_across_scopes_preserves_local_forward_wire_synced_origin() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(key.src_port),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     assert!(sessions.install_with_protocol_with_origin(
         key.clone(),
         decision,
@@ -1787,11 +1837,16 @@ fn lookup_session_across_scopes_preserves_local_forward_wire_synced_origin() {
 fn lookup_session_across_scopes_prefers_shared_entry_over_fabric_wire_placeholder() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(key.src_port),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let translated_key = forward_wire_key(&key, decision.nat);
     assert!(sessions.install_with_protocol_with_origin(
         translated_key.clone(),
@@ -1811,7 +1866,8 @@ fn lookup_session_across_scopes_prefers_shared_entry_over_fabric_wire_placeholde
     let shared_entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -1865,16 +1921,21 @@ fn lookup_forward_nat_across_scopes_returns_shared_nat_entry() {
         dst_ip: IpAddr::V6("2607:f8b0:4005:814::200e".parse::<Ipv6Addr>().unwrap()),
         src_port: 0x8234,
         dst_port: 0,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
-    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V6(
-            "2602:fd41:70:100::102".parse::<Ipv6Addr>().unwrap(),
-        )),
-        nptv6: true,
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V6(
+                "2602:fd41:70:100::102".parse::<Ipv6Addr>().unwrap(),
+            )),
+            nptv6: true,
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
@@ -1916,7 +1977,7 @@ fn lookup_forward_nat_across_scopes_returns_shared_nat_entry() {
         // has its own cells.
         crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
     )
-        .expect("shared forward nat hit");
+    .expect("shared forward nat hit");
     assert_eq!(hit.key, entry.key);
     assert_eq!(hit.decision, entry.decision);
     assert_eq!(hit.metadata, entry.metadata);
@@ -1995,8 +2056,7 @@ fn zone_matching_reverse_reply_uses_forward_egress_domain_11298() {
         TCP_FLAG_ACK,
     ));
 
-    let mut reply_b_to_default =
-        reverse_session_key(&default_forward, default_egress_decision.nat);
+    let mut reply_b_to_default = reverse_session_key(&default_forward, default_egress_decision.nat);
     reply_b_to_default.routing_domain = DOMAIN_B;
     assert!(
         super::lookup_forward_nat_across_scopes(
@@ -2409,19 +2469,22 @@ fn embedded_quote_reverse_lookup_rejects_cross_domain_collision_11298() {
          and a different shared routing domain; got {:?}",
         mixed_hit.map(|hit| hit.key.routing_domain)
     );
-
 }
-
 
 #[test]
 fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeholder() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(key.src_port),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let translated_key = forward_wire_key(&key, decision.nat);
     assert!(sessions.install_with_protocol_with_origin(
         translated_key,
@@ -2441,7 +2504,8 @@ fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeh
     let shared_entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -2479,7 +2543,7 @@ fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeh
         // has its own cells.
         crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
     )
-        .expect("shared nat hit");
+    .expect("shared nat hit");
     assert_eq!(hit.key, shared_entry.key);
     assert_eq!(hit.decision, shared_entry.decision);
     assert_eq!(hit.metadata, shared_entry.metadata);
@@ -2489,11 +2553,16 @@ fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeh
 fn lookup_forward_nat_across_scopes_ignores_fabric_wire_placeholder_without_shared_entry() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(key.src_port),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let translated_key = forward_wire_key(&key, decision.nat);
     assert!(sessions.install_with_protocol_with_origin(
         translated_key,
@@ -2515,17 +2584,18 @@ fn lookup_forward_nat_across_scopes_ignores_fabric_wire_placeholder_without_shar
 
     assert!(
         lookup_forward_nat_across_scopes(
-        &sessions,
-        &shared_nat_sessions,
-        &ForwardingState::default(),
-        &SharedSessionOwnerRgIndexes::default(),
-        &reply_key,
-        // #7169: these cells predate the ingress revalidation and test
-        // TUPLE matching, which is a separate property. Unconstrained keeps
-        // each one asserting exactly what it asserted before; the new check
-        // has its own cells.
-        crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
-    ).is_none()
+            &sessions,
+            &shared_nat_sessions,
+            &ForwardingState::default(),
+            &SharedSessionOwnerRgIndexes::default(),
+            &reply_key,
+            // #7169: these cells predate the ingress revalidation and test
+            // TUPLE matching, which is a separate property. Unconstrained keeps
+            // each one asserting exactly what it asserted before; the new check
+            // has its own cells.
+            crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
+        )
+        .is_none()
     );
 }
 
@@ -2533,15 +2603,21 @@ fn lookup_forward_nat_across_scopes_ignores_fabric_wire_placeholder_without_shar
 fn lookup_forward_nat_across_scopes_returns_shared_canonical_reverse_entry() {
     let sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(key.src_port),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -2579,7 +2655,7 @@ fn lookup_forward_nat_across_scopes_returns_shared_canonical_reverse_entry() {
         // has its own cells.
         crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
     )
-        .expect("shared canonical reverse hit");
+    .expect("shared canonical reverse hit");
     assert_eq!(hit.key, entry.key);
     assert_eq!(hit.decision, entry.decision);
     assert_eq!(hit.metadata, entry.metadata);
@@ -2809,11 +2885,16 @@ fn publish_and_remove_shared_session_tracks_forward_wire_alias() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let key = test_key();
-    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(key.src_port),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
@@ -2854,12 +2935,14 @@ fn publish_and_remove_shared_session_tracks_forward_wire_alias() {
         &shared_owner_rg_indexes,
         &entry.key,
     );
-    assert!(lookup_shared_forward_wire_match(
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &translated_key,
-    )
-    .is_none());
+    assert!(
+        lookup_shared_forward_wire_match(
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &translated_key,
+        )
+        .is_none()
+    );
 }
 
 // #14383 (DR5-H4): the shared forward-wire map is a single-value map over a
@@ -2981,7 +3064,10 @@ fn shared_forward_wire_lookup_fails_closed_on_ambiguity_and_resolves_14383() {
         &shared_owner_rg_indexes,
         &f1.key,
     );
-    assert!(lookup().is_none(), "with both owners gone the wire lookup must miss");
+    assert!(
+        lookup().is_none(),
+        "with both owners gone the wire lookup must miss"
+    );
 }
 
 #[test]
@@ -3042,11 +3128,16 @@ fn remove_shared_session_if_resolves_wire_survivor_from_owner_index_15106() {
         let mut key = test_key();
         key.src_ip = IpAddr::V4(Ipv4Addr::from(0x0a10_0000_u32 + index));
         key.src_port = (index % 60_000) as u16;
-        let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))),
-            rewrite_src_port: Some(50_000),
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 };
+        let decision = SessionDecision {
+            resolution: test_resolution(),
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))),
+                rewrite_src_port: Some(50_000),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
         let entry = SyncedSessionEntry {
             key,
             decision,
@@ -3073,10 +3164,27 @@ fn remove_shared_session_if_resolves_wire_survivor_from_owner_index_15106() {
 
     // The colliding pair under test, published through the real path so the
     // owner multiset records both.
-    publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &f1);
-    publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &f2);
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &f1,
+    );
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &f2,
+    );
     assert!(
-        lookup_shared_forward_wire_match(&shared_forward_wire_sessions, &shared_owner_rg_indexes, &wire_key).is_none(),
+        lookup_shared_forward_wire_match(
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &wire_key
+        )
+        .is_none(),
         "two-owner wire key must fail closed before removal"
     );
 
@@ -3091,9 +3199,17 @@ fn remove_shared_session_if_resolves_wire_survivor_from_owner_index_15106() {
         &f2.key,
         |_| true,
     );
-    assert!(matches!(outcome, SharedRemoval::Removed(_)), "removal must be accepted");
+    assert!(
+        matches!(outcome, SharedRemoval::Removed(_)),
+        "removal must be accepted"
+    );
     assert_eq!(
-        lookup_shared_forward_wire_match(&shared_forward_wire_sessions, &shared_owner_rg_indexes, &wire_key).map(|e| e.key),
+        lookup_shared_forward_wire_match(
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &wire_key
+        )
+        .map(|e| e.key),
         Some(f1.key.clone()),
         "sole survivor F1 must resolve after F2 removal"
     );
@@ -3101,33 +3217,91 @@ fn remove_shared_session_if_resolves_wire_survivor_from_owner_index_15106() {
     // Roster bookkeeping: F1 remains the one live owner of the wire key.
     {
         let idx = lock_shared_recover(&shared_owner_rg_indexes.wire_ambiguities);
-        assert_eq!(idx.wire_owner_count(&wire_key), 1, "one live wire owner must remain");
-        assert!(idx.is_unique_for(&wire_key, &f1.key), "survivor must be the unique wire owner");
+        assert_eq!(
+            idx.wire_owner_count(&wire_key),
+            1,
+            "one live wire owner must remain"
+        );
+        assert!(
+            idx.is_unique_for(&wire_key, &f1.key),
+            "survivor must be the unique wire owner"
+        );
     }
 
     // Three-owner leg: add a third collider, remove down to two (stays
     // ambiguous), then to one (resolves).
     let f3 = wire_ambiguity_entry(Ipv4Addr::new(172, 16, 80, 93), backend);
-    publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &f2);
-    publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &f3);
-    remove_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &f3.key);
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &f2,
+    );
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &f3,
+    );
+    remove_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &f3.key,
+    );
     assert!(
-        lookup_shared_forward_wire_match(&shared_forward_wire_sessions, &shared_owner_rg_indexes, &wire_key).is_none(),
+        lookup_shared_forward_wire_match(
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &wire_key
+        )
+        .is_none(),
         "two remaining owners must stay ambiguous"
     );
-    remove_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &f2.key);
+    remove_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &f2.key,
+    );
     assert_eq!(
-        lookup_shared_forward_wire_match(&shared_forward_wire_sessions, &shared_owner_rg_indexes, &wire_key).map(|e| e.key),
+        lookup_shared_forward_wire_match(
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &wire_key
+        )
+        .map(|e| e.key),
         Some(f1.key.clone()),
         "after draining to one owner, F1 resolves"
     );
 
     // Last owner removal drops the alias and the record.
-    remove_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &f1.key);
-    assert!(lookup_shared_forward_wire_match(&shared_forward_wire_sessions, &shared_owner_rg_indexes, &wire_key).is_none());
+    remove_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &f1.key,
+    );
+    assert!(
+        lookup_shared_forward_wire_match(
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &wire_key
+        )
+        .is_none()
+    );
     {
         let idx = lock_shared_recover(&shared_owner_rg_indexes.wire_ambiguities);
-        assert_eq!(idx.wire_owner_count(&wire_key), 0, "wire roster must be empty after last removal");
+        assert_eq!(
+            idx.wire_owner_count(&wire_key),
+            0,
+            "wire roster must be empty after last removal"
+        );
     }
 }
 
@@ -3152,25 +3326,58 @@ fn remove_shared_session_if_nat_removal_cost_15106() {
             let mut key = test_key();
             key.src_ip = IpAddr::V4(Ipv4Addr::from(0x0a20_0000_u32 + index));
             key.src_port = (index % 60_000) as u16;
-            let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))),
-                rewrite_src_port: Some(50_000),
-                ..NatDecision::default()
-            }, install_table_domain: 0, install_table_check: 0 };
-            publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &SyncedSessionEntry {
-                key, decision, metadata: test_metadata(), leak_incarnation: 0,
-                origin: SessionOrigin::SyncImport, protocol: PROTO_TCP, tcp_flags: 0,
-                generation: 0, session_id: 0, tcp_close_class: 0, tcp_handshake_state: 0,
-                pptp_call_ids: 0, source_nat_static: None,
-            });
+            let decision = SessionDecision {
+                resolution: test_resolution(),
+                nat: NatDecision {
+                    rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))),
+                    rewrite_src_port: Some(50_000),
+                    ..NatDecision::default()
+                },
+                install_table_domain: 0,
+                install_table_check: 0,
+            };
+            publish_shared_session(
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &SyncedSessionEntry {
+                    key,
+                    decision,
+                    metadata: test_metadata(),
+                    leak_incarnation: 0,
+                    origin: SessionOrigin::SyncImport,
+                    protocol: PROTO_TCP,
+                    tcp_flags: 0,
+                    generation: 0,
+                    session_id: 0,
+                    tcp_close_class: 0,
+                    tcp_handshake_state: 0,
+                    pptp_call_ids: 0,
+                    source_nat_static: None,
+                },
+            );
         }
         let mut samples: Vec<u128> = Vec::new();
         for round in 0..16u32 {
             let vip = Ipv4Addr::new(172, 16, 80, 100 + round as u8);
             let victim = wire_ambiguity_entry(vip, backend);
-            publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &victim);
+            publish_shared_session(
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &victim,
+            );
             let start = Instant::now();
-            let outcome = remove_shared_session_if(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &victim.key, |_| true);
+            let outcome = remove_shared_session_if(
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &victim.key,
+                |_| true,
+            );
             samples.push(start.elapsed().as_nanos());
             assert!(matches!(outcome, SharedRemoval::Removed(_)));
         }
@@ -3179,8 +3386,14 @@ fn remove_shared_session_if_nat_removal_cost_15106() {
     }
     let small = median_close_ns(1_000);
     let large = median_close_ns(100_000);
-    eprintln!("15106 NAT-removal median: 1k={small}ns 100k={large}ns ratio={:.2}", large as f64 / small.max(1) as f64);
-    assert!(large <= small.saturating_mul(2), "NAT'd removal cost grew with table size: 1k={small}ns 100k={large}ns (bound: 100k <= 2x 1k)");
+    eprintln!(
+        "15106 NAT-removal median: 1k={small}ns 100k={large}ns ratio={:.2}",
+        large as f64 / small.max(1) as f64
+    );
+    assert!(
+        large <= small.saturating_mul(2),
+        "NAT'd removal cost grew with table size: 1k={small}ns 100k={large}ns (bound: 100k <= 2x 1k)"
+    );
 }
 
 #[test]
@@ -3190,11 +3403,16 @@ fn publish_and_remove_shared_session_tracks_canonical_reverse_alias() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let key = test_key();
-    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(key.src_port),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
@@ -3236,13 +3454,15 @@ fn publish_and_remove_shared_session_tracks_canonical_reverse_alias() {
         &shared_owner_rg_indexes,
         &entry.key,
     );
-    assert!(lookup_shared_forward_nat_match(
-        &ForwardingState::default(),
-        &shared_nat_sessions,
-        &shared_owner_rg_indexes,
-        &canonical_reply,
-    )
-    .is_none());
+    assert!(
+        lookup_shared_forward_nat_match(
+            &ForwardingState::default(),
+            &shared_nat_sessions,
+            &shared_owner_rg_indexes,
+            &canonical_reply,
+        )
+        .is_none()
+    );
 }
 
 fn assert_shared_nat_mixed_zero_reverse_matches_worker_local_11361(
@@ -3412,8 +3632,14 @@ fn shared_nat_mixed_zero_refuses_ambiguous_tenant_alias_11361() {
     zero_domain_reply.routing_domain = 0;
     {
         let shared_nat = shared_nat_sessions.lock().expect("shared NAT lock");
-        assert_eq!(shared_nat.get(&wire_a).expect("tenant-A wire alias").key, key_a);
-        assert_eq!(shared_nat.get(&wire_b).expect("tenant-B wire alias").key, key_b);
+        assert_eq!(
+            shared_nat.get(&wire_a).expect("tenant-A wire alias").key,
+            key_a
+        );
+        assert_eq!(
+            shared_nat.get(&wire_b).expect("tenant-B wire alias").key,
+            key_b
+        );
         assert!(
             !shared_nat.contains_key(&zero_domain_reply),
             "publishing tenant aliases must not insert a colliding domain-zero wire key"
@@ -3554,11 +3780,16 @@ fn publish_and_remove_shared_session_tracks_owner_rg_indexes() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let key = test_key();
-    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(key.src_port),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
@@ -3768,16 +3999,22 @@ fn publish_shared_session_heals_missing_owner_rg_index_on_same_owner_update() {
 fn resolve_flow_session_decision_uses_canonical_key_for_translated_forward_hit() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(key.src_port),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let translated_key = forward_wire_key(&key, decision.nat);
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -3810,27 +4047,29 @@ fn resolve_flow_session_decision_uses_canonical_key_for_translated_forward_hit()
     let forwarding = ForwardingState::default();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let peer_worker_commands = Vec::new();
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &forwarding,
-    &BTreeMap::new(),
-    &dynamic_neighbors,
-    &flow,
-    1_000_000,
-    1,
-    PROTO_TCP,
-    0x10,
-    0,
-    0, // #9383: arrival VLAN (untagged in this fixture)
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &BTreeMap::new(),
+        &dynamic_neighbors,
+        &flow,
+        1_000_000,
+        1,
+        PROTO_TCP,
+        0x10,
+        0,
+        0, // #9383: arrival VLAN (untagged in this fixture)
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("translated forward hit should resolve");
 
     assert!(!resolved.created);
@@ -3847,17 +4086,23 @@ fn resolve_flow_session_decision_uses_canonical_key_for_translated_forward_hit()
 fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric_ingress() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision { resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
-        .expect("fabric redirect"), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(key.src_port),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+            .expect("fabric redirect"),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let translated_key = forward_wire_key(&key, decision.nat);
     let entry = SyncedSessionEntry {
         key: translated_key.clone(),
         decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -3905,27 +4150,29 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
         dst_ip: translated_key.dst_ip,
         forward_key: translated_key.clone(),
     };
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &forwarding,
-    &ha_state,
-    &dynamic_neighbors,
-    &flow,
-    1_000_000,
-    1,
-    PROTO_TCP,
-    0x18,
-    21,
-    0, // #9383: arrival VLAN (untagged in this fixture)
-    true,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &flow,
+        1_000_000,
+        1,
+        PROTO_TCP,
+        0x18,
+        21,
+        0, // #9383: arrival VLAN (untagged in this fixture)
+        true,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("translated shared hit should resolve");
 
     assert_eq!(
@@ -3952,17 +4199,25 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
 fn resolve_flow_session_decision_promotes_local_synced_translated_hit_on_active_fabric_ingress() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision { resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
-        .expect("fabric redirect"), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(key.src_port),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+            .expect("fabric redirect"),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let translated_key = forward_wire_key(&key, decision.nat);
     assert!(sessions.install_with_protocol_with_origin(
         translated_key.clone(),
         decision,
-        SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
+        SessionMetadata {
+            forward_ingress_vlan_id: None,
+            ..test_metadata()
+        },
         SessionOrigin::SyncImport,
         1_000_000,
         PROTO_TCP,
@@ -3996,27 +4251,29 @@ fn resolve_flow_session_decision_promotes_local_synced_translated_hit_on_active_
         dst_ip: translated_key.dst_ip,
         forward_key: translated_key.clone(),
     };
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &forwarding,
-    &ha_state,
-    &dynamic_neighbors,
-    &flow,
-    1_000_000,
-    1,
-    PROTO_TCP,
-    0x18,
-    21,
-    0, // #9383: arrival VLAN (untagged in this fixture)
-    true,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &flow,
+        1_000_000,
+        1,
+        PROTO_TCP,
+        0x18,
+        21,
+        0, // #9383: arrival VLAN (untagged in this fixture)
+        true,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("translated local hit should resolve");
 
     assert_eq!(
@@ -4033,20 +4290,26 @@ fn resolve_flow_session_decision_promotes_local_synced_translated_hit_on_active_
 
 #[test]
 fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inactive_fabric_ingress_10582_t4()
-{
+ {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision { resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
-        .expect("fabric redirect"), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(key.src_port),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+            .expect("fabric redirect"),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let translated_key = forward_wire_key(&key, decision.nat);
     let entry = SyncedSessionEntry {
         key: translated_key.clone(),
         decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -4094,27 +4357,29 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         dst_ip: translated_key.dst_ip,
         forward_key: translated_key.clone(),
     };
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &forwarding,
-    &ha_state,
-    &dynamic_neighbors,
-    &flow,
-    1_000_000,
-    1,
-    PROTO_TCP,
-    0x18,
-    21,
-    0, // #9383: arrival VLAN (untagged in this fixture)
-    true,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &flow,
+        1_000_000,
+        1,
+        PROTO_TCP,
+        0x18,
+        21,
+        0, // #9383: arrival VLAN (untagged in this fixture)
+        true,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("translated shared hit should resolve");
 
     // T4 branch A: a packet arriving on the fabric link is held HAInactive.
@@ -4139,20 +4404,26 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
 
 #[test]
 fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inactive_non_fabric_ingress_10582_t4()
-{
+ {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision { resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
-        .expect("fabric redirect"), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(key.src_port),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+            .expect("fabric redirect"),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let translated_key = forward_wire_key(&key, decision.nat);
     let entry = SyncedSessionEntry {
         key: translated_key.clone(),
         decision,
-        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -4204,27 +4475,29 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         dst_ip: translated_key.dst_ip,
         forward_key: translated_key.clone(),
     };
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &forwarding,
-    &ha_state,
-    &dynamic_neighbors,
-    &flow,
-    1_000_000,
-    1,
-    PROTO_TCP,
-    0x18,
-    12,
-    0, // #9383: arrival VLAN (untagged in this fixture)
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &flow,
+        1_000_000,
+        1,
+        PROTO_TCP,
+        0x18,
+        12,
+        0, // #9383: arrival VLAN (untagged in this fixture)
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("translated shared hit should resolve");
 
     // T4 branch B is the actual cacheable residual: non-fabric owner ingress
@@ -4250,10 +4523,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         ..UserspaceDpMeta::default()
     };
     assert!(
-        crate::afxdp::flow_cache::FlowCacheEntry::should_cache(
-            actual_meta,
-            resolved.decision
-        ),
+        crate::afxdp::flow_cache::FlowCacheEntry::should_cache(actual_meta, resolved.decision),
         "the pre-fix FabricRedirect shape is cache-eligible"
     );
     assert!(
@@ -4274,7 +4544,6 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         0,
         "sessionless deny must not materialize or tear down a local row"
     );
-
 }
 
 #[test]
@@ -4282,17 +4551,25 @@ fn resolve_flow_session_decision_keeps_local_synced_translated_hit_transient_on_
  {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision { resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
-        .expect("fabric redirect"), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(key.src_port),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+            .expect("fabric redirect"),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let translated_key = forward_wire_key(&key, decision.nat);
     assert!(sessions.install_with_protocol_with_origin(
         translated_key.clone(),
         decision,
-        SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
+        SessionMetadata {
+            forward_ingress_vlan_id: None,
+            ..test_metadata()
+        },
         SessionOrigin::SyncImport,
         1_000_000,
         PROTO_TCP,
@@ -4326,27 +4603,29 @@ fn resolve_flow_session_decision_keeps_local_synced_translated_hit_transient_on_
         dst_ip: translated_key.dst_ip,
         forward_key: translated_key.clone(),
     };
-    let _resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &forwarding,
-    &ha_state,
-    &dynamic_neighbors,
-    &flow,
-    1_000_000,
-    1,
-    PROTO_TCP,
-    0x18,
-    12,
-    0, // #9383: arrival VLAN (untagged in this fixture)
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let _resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &flow,
+        1_000_000,
+        1,
+        PROTO_TCP,
+        0x18,
+        12,
+        0, // #9383: arrival VLAN (untagged in this fixture)
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("translated local hit should resolve");
 
     assert!(sessions.lookup(&translated_key, 1_000_000, 0x18).is_none());
@@ -4366,7 +4645,8 @@ fn apply_worker_commands_replaces_stale_local_session_for_inactive_owner_rg() {
         PROTO_TCP,
         0x10,
     ));
-    let synced_metadata = SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() };
+    let synced_metadata = SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() };
     let synced_decision = SessionDecision {
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
@@ -4416,8 +4696,12 @@ fn apply_worker_commands_replaces_stale_local_session_for_inactive_owner_rg() {
     // With #326, synced sessions are always re-resolved with local egress
     // info even on standby — so tx_vlan_id picks up the local egress VLAN.
     let expected_decision = SessionDecision {
-        resolution: ForwardingResolution { tx_vlan_id: 80,
-        route_mtu: 0, transport_route_mtu: 0, ..synced_decision.resolution },
+        resolution: ForwardingResolution {
+            tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+            ..synced_decision.resolution
+        },
         ..synced_decision
     };
     assert_eq!(hit.decision, expected_decision);
@@ -4452,7 +4736,8 @@ fn apply_worker_commands_preserves_local_session_for_active_owner_rg() {
         .push_back(WorkerCommand::UpsertSynced(SyncedSessionEntry {
             key: key.clone(),
             decision: synced_decision,
-            metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
+            metadata: SessionMetadata { forward_ingress_vlan_id: None,
+            nat_scope_ifindex: None, ..test_metadata() },
             leak_incarnation: 0,
             origin: SessionOrigin::SyncImport,
             protocol: PROTO_TCP,
@@ -4598,9 +4883,11 @@ fn apply_worker_commands_refusal_preserves_lifetime_state_9990() {
         0x02,
     ));
     let _ = sessions.drain_deltas(8);
-    assert!(sessions
-        .lookup(&reverse, install_ns + 1_000_000, 0x12)
-        .is_some());
+    assert!(
+        sessions
+            .lookup(&reverse, install_ns + 1_000_000, 0x12)
+            .is_some()
+    );
 
     let before = sessions
         .lifetime_state_for(&forward)
@@ -4622,7 +4909,6 @@ fn apply_worker_commands_refusal_preserves_lifetime_state_9990() {
         "#9990: refusing a peer delete must leave session lifetime state byte-identical"
     );
 }
-
 
 // ARM 1 of the conjunction: a PEER-SYNCED entry is deleted normally. Without
 // this, a guard that simply refused every delete would pass the cell above —
@@ -4873,27 +5159,29 @@ fn demoted_local_session_promotes_as_synced_on_failback_lookup() {
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     let active_state = BTreeMap::from([(1, active_ha_runtime(1))]);
 
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &forwarding,
-    &active_state,
-    &dynamic_neighbors,
-    &flow,
-    2_000_000,
-    2,
-    PROTO_TCP,
-    0x10,
-    6,
-    0, // #9383: arrival VLAN (untagged in this fixture)
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &active_state,
+        &dynamic_neighbors,
+        &flow,
+        2_000_000,
+        2,
+        PROTO_TCP,
+        0x10,
+        6,
+        0, // #9383: arrival VLAN (untagged in this fixture)
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("resolved demoted session");
 
     assert!(!resolved.created);
@@ -4908,13 +5196,11 @@ fn epoch_based_flow_cache_invalidation_for_demoted_owner_rg() {
     let rg_epochs: [AtomicU32; MAX_RG_EPOCHS] = std::array::from_fn(|_| AtomicU32::new(0));
     let mut flow_cache = FlowCache::new();
     let key = test_key();
-    let metadata = SessionMetadata {
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 1,
-        ..test_metadata()
-    };
+    let metadata = SessionMetadata { ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 1,
+    nat_scope_ifindex: None, ..test_metadata() };
     // Insert with current epoch (0).
     flow_cache.insert(FlowCacheEntry {
         key: key.clone(),
@@ -5004,13 +5290,11 @@ fn epoch_based_flow_cache_unrelated_rg_not_invalidated() {
     let rg_epochs: [AtomicU32; MAX_RG_EPOCHS] = std::array::from_fn(|_| AtomicU32::new(0));
     let mut flow_cache = FlowCache::new();
     let key = test_key();
-    let metadata = SessionMetadata {
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 1,
-        ..test_metadata()
-    };
+    let metadata = SessionMetadata { ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 1,
+    nat_scope_ifindex: None, ..test_metadata() };
     flow_cache.insert(FlowCacheEntry {
         key: key.clone(),
         ingress_ifindex: 7,
@@ -5128,11 +5412,17 @@ fn export_owner_rg_command_does_not_overflow_ring_unbounded() {
     // The installs themselves overflowed the ring (n > cap) and latched loss;
     // clear that pre-existing state so the assertions below measure ONLY what
     // the export command does.
-    assert!(sessions.delta_drops() > 0, "installing > cap deltas overflows");
+    assert!(
+        sessions.delta_drops() > 0,
+        "installing > cap deltas overflows"
+    );
     let _ = sessions.take_delta_loss();
     while !sessions.drain_deltas(256).is_empty() {}
     let drops_before_export = sessions.delta_drops();
-    assert!(!sessions.take_delta_loss(), "loss latch cleared before export");
+    assert!(
+        !sessions.take_delta_loss(),
+        "loss latch cleared before export"
+    );
 
     commands
         .lock()
@@ -5183,7 +5473,8 @@ fn export_owner_rg_command_does_not_overflow_ring_unbounded() {
     // (c) driving the recorded RGs through the chunked drain-as-you-export the
     // worker loop runs ships the COMPLETE snapshot with zero new drops.
     let owner_rgs = results.export_owner_rgs.clone();
-    let candidates = crate::afxdp::forward_export_candidates_for_owner_rgs(&sessions, &owner_rgs, u64::MAX);
+    let candidates =
+        crate::afxdp::forward_export_candidates_for_owner_rgs(&sessions, &owner_rgs, u64::MAX);
     let mut exported = 0usize;
     for chunk in candidates.chunks(RESYNC_EXPORT_CHUNK) {
         for (key, decision, metadata, origin) in chunk.iter().cloned() {
@@ -5194,7 +5485,10 @@ fn export_owner_rg_command_does_not_overflow_ring_unbounded() {
             if d.is_empty() {
                 break;
             }
-            exported += d.iter().filter(|x| x.kind == SessionDeltaKind::Open).count();
+            exported += d
+                .iter()
+                .filter(|x| x.kind == SessionDeltaKind::Open)
+                .count();
         }
     }
     assert_eq!(
@@ -5206,7 +5500,10 @@ fn export_owner_rg_command_does_not_overflow_ring_unbounded() {
         drops_before_export,
         "the chunked export drops nothing (drain-as-you-export never overflows)"
     );
-    assert!(!sessions.take_delta_loss(), "no spurious re-arm after export");
+    assert!(
+        !sessions.take_delta_loss(),
+        "no spurious re-arm after export"
+    );
 }
 
 /// #9856 (primary): one worker owning MORE than the 4096-slot binding
@@ -5667,17 +5964,20 @@ fn apply_worker_commands_exports_owner_rg_forward_sessions_without_teardown() {
     let commands = Arc::new(Mutex::new(VecDeque::new()));
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision { resolution: test_decision().resolution, nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
-    let metadata = SessionMetadata {
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 1,
-        ..test_metadata()
+    let decision = SessionDecision {
+        resolution: test_decision().resolution,
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
     };
+    let metadata = SessionMetadata { ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 1,
+    nat_scope_ifindex: None, ..test_metadata() };
     assert!(sessions.install_with_protocol(
         key.clone(),
         decision,
@@ -5742,13 +6042,11 @@ fn apply_worker_commands_does_not_export_missing_neighbor_seed_sessions() {
     let commands = Arc::new(Mutex::new(VecDeque::new()));
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let metadata = SessionMetadata {
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 1,
-        ..test_metadata()
-    };
+    let metadata = SessionMetadata { ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 1,
+    nat_scope_ifindex: None, ..test_metadata() };
     assert!(sessions.install_with_protocol_with_origin(
         key,
         test_decision(),
@@ -5867,13 +6165,11 @@ fn demote_shared_owner_rgs_preserves_reverse_entries_and_marks_all_synced() {
     let reverse = SyncedSessionEntry {
         key: reverse_session_key(&forward.key, forward.decision.nat),
         decision: test_decision(),
-        metadata: SessionMetadata {
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            is_reverse: true,
-            ..test_metadata()
-        },
+        metadata: SessionMetadata { ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        is_reverse: true,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -6238,14 +6534,14 @@ fn demote_reactivate_preserves_tun_origin_across_shared_aliases_10405() {
 
     // Per-alias provenance after the full demote→reactivate cycle. Each
     // alias names itself so a RED run identifies the regressed loop.
-    let origin_in =
-        |map: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>, key: &SessionKey| {
-            map.lock()
-                .expect("shared map")
-                .get(key)
-                .cloned()
-                .map(|entry| entry.origin)
-        };
+    let origin_in = |map: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+                     key: &SessionKey| {
+        map.lock()
+            .expect("shared map")
+            .get(key)
+            .cloned()
+            .map(|entry| entry.origin)
+    };
     let assert_aliases = |entry: &SyncedSessionEntry, expected: SessionOrigin, label: &str| {
         // Primary alias.
         assert_eq!(
@@ -6348,13 +6644,11 @@ fn demoted_shared_local_forward_session_enters_reverse_prewarm_index() {
     let mut entry = SyncedSessionEntry {
         key: test_key(),
         decision: test_decision(),
-        metadata: SessionMetadata {
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            fabric_ingress: true,
-            ..test_metadata()
-        },
+        metadata: SessionMetadata { ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        fabric_ingress: true,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::ForwardFlow,
         protocol: PROTO_TCP,
@@ -6409,13 +6703,11 @@ fn prewarm_reverse_synced_sessions_after_demotion_recomputes_split_owner_reverse
     let mut entry = SyncedSessionEntry {
         key: test_key(),
         decision: test_decision(),
-        metadata: SessionMetadata {
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            fabric_ingress: true,
-            ..test_metadata()
-        },
+        metadata: SessionMetadata { ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        fabric_ingress: true,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::ForwardFlow,
         protocol: PROTO_TCP,
@@ -6635,6 +6927,7 @@ fn apply_worker_commands_demote_split_reverse_owner_rg_rewrites_to_fabric_redire
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         SessionOrigin::SyncImport,
         now_ns,
@@ -6723,6 +7016,7 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_rewrites_to_forward_cand
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         SessionOrigin::SyncImport,
         now_ns,
@@ -6816,6 +7110,7 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_updates_stale_indexed_se
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         SessionOrigin::SyncImport,
         now_ns,
@@ -6912,6 +7207,7 @@ fn apply_worker_commands_refresh_owner_rg_updates_reverse_session_owned_by_other
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         SessionOrigin::SharedPromote,
         now_ns,
@@ -7008,6 +7304,7 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_remote_reverse_session_on_pee
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         SessionOrigin::SyncImport,
         now_ns,
@@ -7099,6 +7396,7 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_shared_promote_reverse_on_pee
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         SessionOrigin::SharedPromote,
         now_ns,
@@ -7338,18 +7636,23 @@ fn synthesized_synced_reverse_entry_inherits_nat64_reverse_4565() {
             dst_ip: IpAddr::V6(orig_dst_v6),
             src_port: 5001,
             dst_port: 80,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
-        decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))),
-            rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
-            rewrite_src_port: Some(40000),
-            rewrite_dst_port: None,
-            source_nat_icmp: None,
-            nat64: true,
-            nptv6: false,
-        }, install_table_domain: 0, install_table_check: 0 },
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))),
+                rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
+                rewrite_src_port: Some(40000),
+                rewrite_dst_port: None,
+                source_nat_icmp: None,
+                nat64: true,
+                nptv6: false,
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         metadata,
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
@@ -7388,7 +7691,10 @@ fn synthesized_synced_reverse_entry_inherits_nat64_reverse_4565() {
         reverse.key.src_ip,
         IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))
     );
-    assert_eq!(reverse.key.dst_ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)));
+    assert_eq!(
+        reverse.key.dst_ip,
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))
+    );
 }
 
 // #5153: the synthesized/failover reverse companion must inherit the forward
@@ -7429,9 +7735,14 @@ fn reverse_companion_inherits_forward_inactivity_timeout_5153() {
         source_nat_static: None,
     };
 
-    let reverse =
-        synthesized_synced_reverse_entry(&forwarding, &BTreeMap::new(), &dynamic_neighbors, &entry, 1)
-            .expect("reverse companion");
+    let reverse = synthesized_synced_reverse_entry(
+        &forwarding,
+        &BTreeMap::new(),
+        &dynamic_neighbors,
+        &entry,
+        1,
+    )
+    .expect("reverse companion");
 
     assert!(reverse.metadata.is_reverse);
     assert_eq!(
@@ -7470,10 +7781,18 @@ fn reverse_companion_inherits_forward_close_class_9412() {
             pptp_call_ids: 0,
             source_nat_static: None,
         };
-        let reverse =
-            synthesized_synced_reverse_entry(&forwarding, &BTreeMap::new(), &dynamic_neighbors, &entry, 1)
-                .expect("reverse companion");
-        assert!(reverse.metadata.is_reverse, "FIXTURE: the synthesizer must build the reverse half");
+        let reverse = synthesized_synced_reverse_entry(
+            &forwarding,
+            &BTreeMap::new(),
+            &dynamic_neighbors,
+            &entry,
+            1,
+        )
+        .expect("reverse companion");
+        assert!(
+            reverse.metadata.is_reverse,
+            "FIXTURE: the synthesizer must build the reverse half"
+        );
         assert_eq!(
             reverse.tcp_close_class, class,
             "#9412: the reverse companion must carry the forward import's close class {class}"
@@ -7766,44 +8085,48 @@ fn reverse_session_from_tunnel_forward_bypasses_unseeded_ha_during_startup_grace
                 dst_ip: IpAddr::V4(Ipv4Addr::new(10, 255, 192, 41)),
                 src_port: 42424,
                 dst_port: 5201,
-                            discriminator: Default::default(),
-                            routing_domain: 0,
+                discriminator: Default::default(),
+                routing_domain: 0,
             },
-            decision: SessionDecision { resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 12,
-                tunnel_endpoint_id: 1,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 192, 41))),
-                neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x02]),
-                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-                tx_vlan_id: 80,
-                route_mtu: 0,
-                transport_route_mtu: 0,
-            }, nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 192, 42))),
-                ..NatDecision::default()
-            }, install_table_domain: 0, install_table_check: 0 },
-            metadata: SessionMetadata {
-                ingress_zone: 1,
-                egress_zone: 5,
-                ingress_zone_check: 0,
-                egress_zone_check: 0,
-                ingress_ifindex: 0,
-                ingress_vlan_id: 0,
-                forward_ingress_vlan_id: None,
-                owner_rg_id: 2,
-                fabric_ingress: false,
-                is_reverse: false,
-                nat64_reverse: None,
-                log_session_init: false,
-                log_session_close: false,
-                policy_id: 0,
-                inactivity_timeout_ns: None,
-                policy_counter_idx: 0,
-                policy_counter: None,
+            decision: SessionDecision {
+                resolution: ForwardingResolution {
+                    disposition: ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex: 12,
+                    tx_ifindex: 12,
+                    tunnel_endpoint_id: 1,
+                    next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 192, 41))),
+                    neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x02]),
+                    src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+                    tx_vlan_id: 80,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                },
+                nat: NatDecision {
+                    rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 192, 42))),
+                    ..NatDecision::default()
+                },
+                install_table_domain: 0,
+                install_table_check: 0,
             },
+            metadata: SessionMetadata { ingress_zone: 1,
+            egress_zone: 5,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 2,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None },
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
         },
@@ -7832,13 +8155,11 @@ fn prewarm_reverse_synced_sessions_for_owner_rgs_adds_reverse_companion() {
     let entry = SyncedSessionEntry {
         key: test_key(),
         decision: test_decision(),
-        metadata: SessionMetadata {
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            fabric_ingress: true,
-            ..test_metadata()
-        },
+        metadata: SessionMetadata { ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        fabric_ingress: true,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -7993,13 +8314,11 @@ fn prewarm_reverse_synced_sessions_recomputes_when_reverse_owner_rg_activates() 
     let mut entry = SyncedSessionEntry {
         key: test_key(),
         decision: test_decision(),
-        metadata: SessionMetadata {
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            fabric_ingress: true,
-            ..test_metadata()
-        },
+        metadata: SessionMetadata { ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        fabric_ingress: true,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -8066,13 +8385,11 @@ fn reverse_prewarm_index_tracks_split_reverse_owner_rg_candidate() {
     let mut entry = SyncedSessionEntry {
         key: test_key(),
         decision: test_decision(),
-        metadata: SessionMetadata {
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            fabric_ingress: true,
-            ..test_metadata()
-        },
+        metadata: SessionMetadata { ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        fabric_ingress: true,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -8120,44 +8437,48 @@ fn reverse_session_from_split_owner_fabric_redirect_uses_fabric_return_when_clie
                 dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
                 src_port: 42424,
                 dst_port: 5201,
-                            discriminator: Default::default(),
-                            routing_domain: 0,
+                discriminator: Default::default(),
+                routing_domain: 0,
             },
-            decision: SessionDecision { resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::FabricRedirect,
-                local_ifindex: 0,
-                egress_ifindex: 21,
-                tx_ifindex: 21,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
-                neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
-                src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
-                tx_vlan_id: 0,
-                route_mtu: 0,
-                transport_route_mtu: 0,
-            }, nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-                ..NatDecision::default()
-            }, install_table_domain: 0, install_table_check: 0 },
-            metadata: SessionMetadata {
-                ingress_zone: 1,
-                egress_zone: 2,
-                ingress_zone_check: 0,
-                egress_zone_check: 0,
-                ingress_ifindex: 0,
-                ingress_vlan_id: 0,
-                forward_ingress_vlan_id: None,
-                owner_rg_id: 1,
-                fabric_ingress: false,
-                is_reverse: false,
-                nat64_reverse: None,
-                log_session_init: false,
-                log_session_close: false,
-                policy_id: 0,
-                inactivity_timeout_ns: None,
-                policy_counter_idx: 0,
-                policy_counter: None,
+            decision: SessionDecision {
+                resolution: ForwardingResolution {
+                    disposition: ForwardingDisposition::FabricRedirect,
+                    local_ifindex: 0,
+                    egress_ifindex: 21,
+                    tx_ifindex: 21,
+                    tunnel_endpoint_id: 0,
+                    next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
+                    neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+                    src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
+                    tx_vlan_id: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                },
+                nat: NatDecision {
+                    rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                    ..NatDecision::default()
+                },
+                install_table_domain: 0,
+                install_table_check: 0,
             },
+            metadata: SessionMetadata { ingress_zone: 1,
+            egress_zone: 2,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None },
             forwarding_generation: ForwardingGenerationStamp::default(),
             aux: SessionLookupAux::default(),
         },
@@ -8187,13 +8508,11 @@ fn republish_bpf_session_entries_covers_all_sessions_in_owner_rg_index() {
     let entry = SyncedSessionEntry {
         key: test_key(),
         decision: test_decision(),
-        metadata: SessionMetadata {
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            owner_rg_id: 1,
-            ..test_metadata()
-        },
+        metadata: SessionMetadata { ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 1,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -8276,19 +8595,24 @@ fn synced_session_hit_recomputes_local_resolution_after_failover() {
             mac: [0x56, 0x4a, 0xe8, 0x1e, 0xa8, 0x32],
         },
     );
-    let stale_fabric_decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::FabricRedirect,
-        local_ifindex: 0,
-        egress_ifindex: 21,
-        tx_ifindex: 21,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
-        neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let stale_fabric_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::FabricRedirect,
+            local_ifindex: 0,
+            egress_ifindex: 21,
+            tx_ifindex: 21,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
+            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -8329,31 +8653,33 @@ fn synced_session_hit_recomputes_local_resolution_after_failover() {
         },
     )]);
 
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &forwarding,
-    &ha_state,
-    &dynamic_neighbors,
-    &SessionFlow {
-        src_ip: key.src_ip,
-        dst_ip: key.dst_ip,
-        forward_key: key.clone(),
-    },
-    1_000_000,
-    monotonic_nanos() / 1_000_000_000,
-    PROTO_TCP,
-    0x10,
-    5,
-    0, // #9383: arrival VLAN (untagged in this fixture)
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &SessionFlow {
+            src_ip: key.src_ip,
+            dst_ip: key.dst_ip,
+            forward_key: key.clone(),
+        },
+        1_000_000,
+        monotonic_nanos() / 1_000_000_000,
+        PROTO_TCP,
+        0x10,
+        5,
+        0, // #9383: arrival VLAN (untagged in this fixture)
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("synced session should resolve");
 
     assert_eq!(
@@ -8396,8 +8722,8 @@ fn reverse_materialized_shared_hit_adopts_replica_session_id_6313() {
         dst_ip: forward.src_ip,
         src_port: forward.dst_port,
         dst_port: forward.src_port,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     // A second reverse companion (different client port) for the negative
     // control below.
@@ -8453,31 +8779,33 @@ fn reverse_materialized_shared_hit_adopts_replica_session_id_6313() {
     let ha_state = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
 
     for key in [&reverse, &reverse_legacy] {
-        resolve_flow_session_decision(&mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &forwarding,
-        &ha_state,
-        &dynamic_neighbors,
-        &SessionFlow {
-            src_ip: key.src_ip,
-            dst_ip: key.dst_ip,
-            forward_key: key.clone(),
-        },
-        1_000_000,
-        now_secs,
-        PROTO_TCP,
-        TCP_FLAG_ACK,
-        5,
-        0, // #9383: arrival VLAN (untagged in this fixture)
-        false,
-        0,
-        0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner)
+        resolve_flow_session_decision(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &peer_worker_commands,
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            &SessionFlow {
+                src_ip: key.src_ip,
+                dst_ip: key.dst_ip,
+                forward_key: key.clone(),
+            },
+            1_000_000,
+            now_secs,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+            5,
+            0, // #9383: arrival VLAN (untagged in this fixture)
+            false,
+            0,
+            0,
+            crate::afxdp::session_glue::SessionHitVerdict::Owner,
+        )
         .expect("the reverse shared-session hit should resolve");
     }
 
@@ -8760,12 +9088,7 @@ fn apply_worker_commands_demote_dedup_is_linear_not_quadratic() {
     // under the old linear scan.
     for i in 0..N {
         let key = SessionKey {
-            src_ip: IpAddr::V4(Ipv4Addr::new(
-                10,
-                200,
-                (i >> 8) as u8,
-                (i & 0xff) as u8,
-            )),
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 200, (i >> 8) as u8, (i & 0xff) as u8)),
             ..test_key()
         };
         let mut metadata = test_metadata();
@@ -8818,11 +9141,7 @@ fn apply_worker_commands_demote_dedup_is_linear_not_quadratic() {
         "all {N} unique demoted keys must be cancelled exactly once"
     );
     let unique: std::collections::HashSet<_> = results.cancelled_keys.iter().collect();
-    assert_eq!(
-        unique.len(),
-        N,
-        "cancelled_keys must contain no duplicates"
-    );
+    assert_eq!(unique.len(), N, "cancelled_keys must contain no duplicates");
 
     // Fail-on-revert: the O(N) fix finishes in tens of ms; the O(N^2)
     // `Vec::contains` revert runs for many seconds at this N. A 3s bound
@@ -8994,14 +9313,19 @@ fn w3_forward_entry(src_host: u8, src_port: u16, snat_ip: Ipv4Addr) -> SyncedSes
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
-        decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(snat_ip)),
-            rewrite_src_port: None,
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(snat_ip)),
+                rewrite_src_port: None,
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         metadata: test_metadata(),
         leak_incarnation: 0,
         origin: SessionOrigin::ForwardFlow,
@@ -9179,13 +9503,18 @@ fn shared_nat_displacement_counter_counts_collisions_not_republishes() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 91)), // VIP
             src_port: 40_003,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
-        decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
-            rewrite_dst: Some(backend),
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat: NatDecision {
+                rewrite_dst: Some(backend),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         metadata: test_metadata(),
         leak_incarnation: 0,
         origin: SessionOrigin::ForwardFlow,
@@ -9366,31 +9695,33 @@ fn capped_shared_hit_fixture_10582(
             source_nat_static: None,
         },
     );
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &[],
-    &forwarding,
-    &BTreeMap::from([(1, active_ha_runtime(1_000))]),
-    &Arc::new(ShardedNeighborMap::new()),
-    &SessionFlow {
-        src_ip: key.src_ip,
-        dst_ip: key.dst_ip,
-        forward_key: key.clone(),
-    },
-    1_000_000,
-    1_000,
-    PROTO_TCP,
-    TCP_FLAG_ACK,
-    24,
-    0,
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &[],
+        &forwarding,
+        &BTreeMap::from([(1, active_ha_runtime(1_000))]),
+        &Arc::new(ShardedNeighborMap::new()),
+        &SessionFlow {
+            src_ip: key.src_ip,
+            dst_ip: key.dst_ip,
+            forward_key: key.clone(),
+        },
+        1_000_000,
+        1_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        24,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("at-cap shared hit should materialize");
     (forwarding, sessions, key, resolved)
 }
@@ -9405,7 +9736,11 @@ fn at_cap_shared_hit_revalidates_and_revokes_10582_t1() {
         !resolved.install_failed,
         "sync-family materialization is uncapped; the upsert must succeed"
     );
-    assert_eq!(sessions.len(), 2, "the shared hit must be installed past cap");
+    assert_eq!(
+        sessions.len(),
+        2,
+        "the shared hit must be installed past cap"
+    );
     assert_eq!(
         sessions.policy_revalidation_target(&key),
         PolicyRevalidationTarget::Stale(key.clone()),
@@ -9507,7 +9842,7 @@ fn shared_hit_local_clobber_sets_install_failed_10582() {
             decision: test_decision(),
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
-                aux: SessionLookupAux::default(),
+            aux: SessionLookupAux::default(),
         },
         shared_entry: Some(SyncedSessionEntry {
             key: key.clone(),
@@ -9527,8 +9862,13 @@ fn shared_hit_local_clobber_sets_install_failed_10582() {
         origin: SessionOrigin::SyncImport,
         authority_deferred: false,
     };
-    let (_, install_failed) =
-        super::materialize_shared_session_hit(&mut sessions, &mut resolved, &forwarding, 2_000_000, TCP_FLAG_ACK);
+    let (_, install_failed) = super::materialize_shared_session_hit(
+        &mut sessions,
+        &mut resolved,
+        &forwarding,
+        2_000_000,
+        TCP_FLAG_ACK,
+    );
     assert!(
         install_failed,
         "a live local row must turn the refused shared repair into install_failed"
@@ -9576,7 +9916,10 @@ fn resolve_shared_hit_clobber_fixture_with_paths(
         table: "inet.0".to_string(),
     });
     forwarding.neighbors.insert(
-        (candidate_egress_ifindex, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        (
+            candidate_egress_ifindex,
+            IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        ),
         NeighborEntry {
             mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x02],
         },
@@ -9584,16 +9927,19 @@ fn resolve_shared_hit_clobber_fixture_with_paths(
     // The candidate path needs a local egress row or live re-resolution
     // degrades to FabricRedirect (non-promotable) and the fence goes
     // untested. Mirror 12's WAN row; a no-op for the base (99, 12) pins.
-    forwarding.egress.entry(candidate_egress_ifindex).or_insert(EgressInterface {
-        bind_ifindex: 11,
-        vlan_id: 80,
-        mtu: 1500,
-        src_mac: [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08],
-        zone_id: TEST_WAN_ZONE_ID,
-        redundancy_group: 1,
-        primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)),
-        primary_v6: None,
-    });
+    forwarding
+        .egress
+        .entry(candidate_egress_ifindex)
+        .or_insert(EgressInterface {
+            bind_ifindex: 11,
+            vlan_id: 80,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08],
+            zone_id: TEST_WAN_ZONE_ID,
+            redundancy_group: 1,
+            primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)),
+            primary_v6: None,
+        });
     let key = test_key();
     let mut decision = test_decision();
     decision.nat = NatDecision {
@@ -9603,21 +9949,17 @@ fn resolve_shared_hit_clobber_fixture_with_paths(
     };
     let wire_key = forward_wire_key(&key, decision.nat);
     let mut sessions = SessionTable::new();
-    let placeholder_metadata = SessionMetadata {
-        forward_ingress_vlan_id: None,
-        fabric_ingress: true,
-        ..test_metadata()
-    };
+    let placeholder_metadata = SessionMetadata { forward_ingress_vlan_id: None,
+    fabric_ingress: true,
+    nat_scope_ifindex: None, ..test_metadata() };
     let mut incumbent_decision = test_decision();
     incumbent_decision.resolution.egress_ifindex = incumbent_egress_ifindex;
     incumbent_decision.resolution.tx_ifindex = incumbent_egress_ifindex;
-    let incumbent_metadata = SessionMetadata {
-        forward_ingress_vlan_id: None,
-        ingress_zone: 91,
-        egress_zone: 92,
-        policy_id: 777,
-        ..test_metadata()
-    };
+    let incumbent_metadata = SessionMetadata { forward_ingress_vlan_id: None,
+    ingress_zone: 91,
+    egress_zone: 92,
+    policy_id: 777,
+    nat_scope_ifindex: None, ..test_metadata() };
     assert!(sessions.install_with_protocol_with_origin(
         wire_key.clone(),
         decision,
@@ -9669,31 +10011,33 @@ fn resolve_shared_hit_clobber_fixture_with_paths(
     // observe step) so the fail-closed wire lookup can prove it unique.
     lock_shared_recover(&shared_owner_rg_indexes.wire_ambiguities)
         .observe(wire_key.clone(), key.clone());
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &[],
-    &forwarding,
-    &BTreeMap::from([(1, active_ha_runtime(1_000))]),
-    &Arc::new(ShardedNeighborMap::new()),
-    &SessionFlow {
-        src_ip: wire_key.src_ip,
-        dst_ip: wire_key.dst_ip,
-        forward_key: wire_key,
-    },
-    2_000_000,
-    1_000,
-    PROTO_TCP,
-    TCP_FLAG_ACK,
-    24,
-    0,
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &[],
+        &forwarding,
+        &BTreeMap::from([(1, active_ha_runtime(1_000))]),
+        &Arc::new(ShardedNeighborMap::new()),
+        &SessionFlow {
+            src_ip: wire_key.src_ip,
+            dst_ip: wire_key.dst_ip,
+            forward_key: wire_key,
+        },
+        2_000_000,
+        1_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        24,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("fabric-wire shared hit must resolve");
     (
         sessions,
@@ -9721,13 +10065,11 @@ fn resolve_shared_hit_clobber_sets_install_failed_10582_r4() {
         .entry_with_origin(&key)
         .expect("canonical incumbent must survive resolve");
     assert_eq!(
-        actual_decision.resolution.egress_ifindex,
-        incumbent_decision.resolution.egress_ifindex,
+        actual_decision.resolution.egress_ifindex, incumbent_decision.resolution.egress_ifindex,
         "resolve-level clobber must preserve incumbent decision"
     );
     assert_eq!(
-        actual_metadata.policy_id,
-        incumbent_metadata.policy_id,
+        actual_metadata.policy_id, incumbent_metadata.policy_id,
         "resolve-level clobber must preserve incumbent metadata"
     );
     assert_eq!(
@@ -9762,13 +10104,11 @@ fn resolve_shared_hit_sync_import_clobbers_incumbent_10613_repro() {
         .entry_with_origin(&key)
         .expect("canonical incumbent must remain addressable");
     assert_eq!(
-        actual_decision.resolution.egress_ifindex,
-        incumbent_decision.resolution.egress_ifindex,
+        actual_decision.resolution.egress_ifindex, incumbent_decision.resolution.egress_ifindex,
         "#10613: promotion must not overwrite the incumbent decision"
     );
     assert_eq!(
-        actual_metadata.policy_id,
-        incumbent_metadata.policy_id,
+        actual_metadata.policy_id, incumbent_metadata.policy_id,
         "#10613: promotion must not overwrite the incumbent metadata"
     );
     assert_eq!(
@@ -9798,13 +10138,11 @@ fn resolve_shared_hit_sync_import_fence_preserves_incumbent_10613() {
         .entry_with_origin(&key)
         .expect("the canonical incumbent must survive");
     assert_eq!(
-        actual_decision.resolution.egress_ifindex,
-        incumbent_decision.resolution.egress_ifindex,
+        actual_decision.resolution.egress_ifindex, incumbent_decision.resolution.egress_ifindex,
         "the refusal fence must retain the incumbent decision"
     );
     assert_eq!(
-        actual_metadata.policy_id,
-        incumbent_metadata.policy_id,
+        actual_metadata.policy_id, incumbent_metadata.policy_id,
         "the refusal fence must retain the incumbent metadata"
     );
     assert_eq!(
@@ -9863,11 +10201,8 @@ fn resolve_shared_materialize_refusal_fences_promotion_10613() {
 /// materializes and resolves promotable (ForwardCandidate) instead of
 /// refusing, pinning resolve-level success promotion in the same forwarding
 /// shape the refusal cells use.
-fn resolve_shared_hit_no_incumbent_fixture_10613() -> (
-    SessionTable,
-    ResolvedFlowSessionDecision,
-    SessionKey,
-) {
+fn resolve_shared_hit_no_incumbent_fixture_10613()
+-> (SessionTable, ResolvedFlowSessionDecision, SessionKey) {
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.connected_v4.push(ConnectedRouteV4 {
         prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
@@ -9933,31 +10268,33 @@ fn resolve_shared_hit_no_incumbent_fixture_10613() -> (
     // observe step) so the fail-closed wire lookup can prove it unique.
     lock_shared_recover(&shared_owner_rg_indexes.wire_ambiguities)
         .observe(wire_key.clone(), key.clone());
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &[],
-    &forwarding,
-    &BTreeMap::from([(1, active_ha_runtime(1_000))]),
-    &Arc::new(ShardedNeighborMap::new()),
-    &SessionFlow {
-        src_ip: wire_key.src_ip,
-        dst_ip: wire_key.dst_ip,
-        forward_key: wire_key,
-    },
-    2_000_000,
-    1_000,
-    PROTO_TCP,
-    TCP_FLAG_ACK,
-    24,
-    0,
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &[],
+        &forwarding,
+        &BTreeMap::from([(1, active_ha_runtime(1_000))]),
+        &Arc::new(ShardedNeighborMap::new()),
+        &SessionFlow {
+            src_ip: wire_key.src_ip,
+            dst_ip: wire_key.dst_ip,
+            forward_key: wire_key,
+        },
+        2_000_000,
+        1_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        24,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("no-incumbent shared hit must resolve");
     (sessions, resolved, key)
 }
@@ -10068,7 +10405,7 @@ fn shared_hit_materialization_marks_stale_before_policy_revalidation_10582_t5() 
             decision: test_decision(),
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
-                aux: SessionLookupAux::default(),
+            aux: SessionLookupAux::default(),
         },
         shared_entry: Some(SyncedSessionEntry {
             key: key.clone(),
@@ -10418,31 +10755,34 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
     );
 
     // One peer-worker command queue — the HA delete-replication sink.
-    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> = Arc::new(Mutex::new(VecDeque::new()));
     let peer_worker_commands = vec![peer_queue.clone()];
     let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
     let forwarding = ForwardingState::default();
 
-    let delta = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
-    key: key.clone(),
-    decision,
-    metadata,
-    policy_generation: 0,
-    origin: SessionOrigin::ForwardFlow,
-    fabric_redirect_sync: false,
-    created_ns: 0,
-    last_seen_ns: 0,
-    counters: crate::session::SessionCounters::default(),
-    observed_tos: 0,
-    observed_tcp_flags: 0,
-    session_id: 0,
-    bulk_resync: false,
-    is_admission: false,
-    tcp_close_class: 0,
-    tcp_handshake_state: 0,
-    pptp_call_ids: 0,
-    purge_retirement: false, source_nat_static: None };
+    let delta = SessionDelta {
+        provenance: crate::session::ExportProvenance::Incremental,
+        kind: SessionDeltaKind::Close,
+        key: key.clone(),
+        decision,
+        metadata,
+        policy_generation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: 0,
+        bulk_resync: false,
+        is_admission: false,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        purge_retirement: false,
+        source_nat_static: None,
+    };
 
     // Synthesize a binding identity with labels only — exactly what the
     // worker loop does when `bindings` is empty — and flush with NO live
@@ -10555,8 +10895,7 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
     assert_eq!(overflow_deltas.len(), N - RING_CAP);
     use std::sync::atomic::Ordering;
     let _dnat_guard = crate::afxdp::checksum::dnat_counter_guard();
-    let dnat_before = crate::afxdp::checksum::DNAT_DELETE_ATTEMPTS
-        .load(Ordering::Relaxed);
+    let dnat_before = crate::afxdp::checksum::DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
     let snat = NatDecision {
         rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
         rewrite_src_port: Some(54_321),
@@ -10676,8 +11015,7 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
         queue.clear();
     }
     drop(flush);
-    let dnat_after = crate::afxdp::checksum::DNAT_DELETE_ATTEMPTS
-        .load(Ordering::Relaxed);
+    let dnat_after = crate::afxdp::checksum::DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
     assert_eq!(
         dnat_after - dnat_before,
         1,
@@ -10692,14 +11030,21 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
             .expect("shared forward-wire")
             .is_empty()
     );
-    assert_eq!(delete_count, N * 2, "forward and reverse HA deletes must survive");
+    assert_eq!(
+        delete_count,
+        N * 2,
+        "forward and reverse HA deletes must survive"
+    );
     let recent_close_count = recent_session_deltas
         .lock()
         .expect("recent deltas")
         .iter()
         .filter(|delta| delta.event == "close")
         .count();
-    assert!(recent_close_count > 0, "Close deltas must reach recent history");
+    assert!(
+        recent_close_count > 0,
+        "Close deltas must reach recent history"
+    );
     let frames: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
     assert_eq!(
         frames
@@ -10739,7 +11084,9 @@ fn worker_loop_routes_expiry_overflow_to_close_flush_10309() {
         .expect("worker loop must extract returned expiry Close records");
     let chunk_loop = executable_lines
         .iter()
-        .position(|line| line.starts_with("let mut overflow_chunks = expiry_overflow_deltas.chunks(256)"))
+        .position(|line| {
+            line.starts_with("let mut overflow_chunks = expiry_overflow_deltas.chunks(256)")
+        })
         .expect("worker loop must flush expiry overflow in bounded chunks");
     let flush = executable_lines
         .iter()
@@ -10999,25 +11346,29 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
     metadata.policy_id = 5;
     metadata.policy_counter = Some(bound_bee);
 
-    let delta = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
-    key: test_key(),
-    decision: test_decision(),
-    metadata,
-    policy_generation: 0,
-    origin: SessionOrigin::ForwardFlow,
-    fabric_redirect_sync: false,
-    created_ns: 0,
-    last_seen_ns: 0,
-    counters: crate::session::SessionCounters::default(),
-    observed_tos: 0,
-    observed_tcp_flags: 0,
-    session_id: 0,
-    bulk_resync: false,
-    is_admission: false,
-    tcp_close_class: 0,
-    tcp_handshake_state: 0,
-    pptp_call_ids: 0,
-    purge_retirement: false, source_nat_static: None };
+    let delta = SessionDelta {
+        provenance: crate::session::ExportProvenance::Incremental,
+        kind: SessionDeltaKind::Close,
+        key: test_key(),
+        decision: test_decision(),
+        metadata,
+        policy_generation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: 0,
+        bulk_resync: false,
+        is_admission: false,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        purge_retirement: false,
+        source_nat_static: None,
+    };
 
     let (handle, rx) = crate::event_stream::test_worker_handle(
         8,
@@ -11121,25 +11472,29 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
     );
     let event_stream = Some(handle);
 
-    let open = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Open,
-    key: key.clone(),
-    decision,
-    metadata,
-    policy_generation: 0,
-    origin: SessionOrigin::ForwardFlow,
-    fabric_redirect_sync: false,
-    created_ns: 0,
-    last_seen_ns: 0,
-    counters: crate::session::SessionCounters::default(),
-    observed_tos: 0,
-    observed_tcp_flags: 0,
-    session_id: 0,
-    bulk_resync: false,
-    is_admission: false,
-    tcp_close_class: 0,
-    tcp_handshake_state: 0,
-    pptp_call_ids: 0,
-    purge_retirement: false, source_nat_static: None };
+    let open = SessionDelta {
+        provenance: crate::session::ExportProvenance::Incremental,
+        kind: SessionDeltaKind::Open,
+        key: key.clone(),
+        decision,
+        metadata,
+        policy_generation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: 0,
+        bulk_resync: false,
+        is_admission: false,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        purge_retirement: false,
+        source_nat_static: None,
+    };
 
     let ident = BindingIdentity {
         slot: 0,
@@ -11199,27 +11554,30 @@ mod flush_tuple_gate_contention_13654 {
     use super::*;
 
     fn close_delta(key: &SessionKey, session_id: u64, purge_retirement: bool) -> SessionDelta {
-        SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
-        key: key.clone(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        policy_generation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        fabric_redirect_sync: false,
-        created_ns: 0,
-        last_seen_ns: 0,
-        counters: crate::session::SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id,
-        bulk_resync: false,
-        is_admission: false,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        purge_retirement, source_nat_static: None }
+        SessionDelta {
+            provenance: crate::session::ExportProvenance::Incremental,
+            kind: SessionDeltaKind::Close,
+            key: key.clone(),
+            decision: test_decision(),
+            metadata: test_metadata(),
+            policy_generation: 0,
+            origin: SessionOrigin::ForwardFlow,
+            fabric_redirect_sync: false,
+            created_ns: 0,
+            last_seen_ns: 0,
+            counters: crate::session::SessionCounters::default(),
+            observed_tos: 0,
+            observed_tcp_flags: 0,
+            session_id,
+            bulk_resync: false,
+            is_admission: false,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            pptp_call_ids: 0,
+            purge_retirement,
+            source_nat_static: None,
+        }
     }
-
 
     fn flush_gate_contention(
         deltas: &[SessionDelta],
@@ -11288,12 +11646,25 @@ mod flush_tuple_gate_contention_13654 {
         let deltas = [close_delta(&key, 41, false)];
         let mut wedged = false;
         let (out_of_sync, slot) = flush_gate_contention(&deltas, true, 0, &mut wedged);
-        assert!(!out_of_sync, "#13654: a requeued close must not latch LossResync");
-        assert!(!wedged, "#13654: a requeued close must not wedge the drain cycle");
+        assert!(
+            !out_of_sync,
+            "#13654: a requeued close must not latch LossResync"
+        );
+        assert!(
+            !wedged,
+            "#13654: a requeued close must not wedge the drain cycle"
+        );
         let mut slot = slot.expect("retry slot returned");
-        assert!(!slot.take_delta_loss(), "#13654: no delta may be recorded lost");
+        assert!(
+            !slot.take_delta_loss(),
+            "#13654: no delta may be recorded lost"
+        );
         let retry = slot.drain_deltas(8);
-        assert_eq!(retry.len(), 1, "#13654: the contended close must stay queued");
+        assert_eq!(
+            retry.len(),
+            1,
+            "#13654: the contended close must stay queued"
+        );
         assert_eq!(retry[0].key, key);
         assert_eq!(retry[0].session_id, 41);
     }
@@ -11313,7 +11684,10 @@ mod flush_tuple_gate_contention_13654 {
             out_of_sync,
             "#13654: with no retry slot the contended close is lost and must resync"
         );
-        assert!(wedged, "#13654: the unrecoverable close must wedge the drain cycle");
+        assert!(
+            wedged,
+            "#13654: the unrecoverable close must wedge the drain cycle"
+        );
 
         // Monotonicity: an already-wedged cycle keeps its latch even when
         // this flush only requeues.
@@ -11339,11 +11713,18 @@ mod flush_tuple_gate_contention_13654 {
         ];
         let mut wedged = false;
         let (out_of_sync, slot) = flush_gate_contention(&deltas, true, 0, &mut wedged);
-        assert!(!out_of_sync, "#13654: a fully requeued suffix must stay in sync");
+        assert!(
+            !out_of_sync,
+            "#13654: a fully requeued suffix must stay in sync"
+        );
         let mut slot = slot.expect("retry slot returned");
         let retry = slot.drain_deltas(8);
         let ids: Vec<u64> = retry.iter().map(|delta| delta.session_id).collect();
-        assert_eq!(ids, [51, 52, 53], "#13654: the suffix must retry in FIFO order");
+        assert_eq!(
+            ids,
+            [51, 52, 53],
+            "#13654: the suffix must retry in FIFO order"
+        );
     }
 
     #[test]
@@ -11357,12 +11738,25 @@ mod flush_tuple_gate_contention_13654 {
         let deltas = [close_delta(&key, 57, false)];
         let mut wedged = false;
         let (out_of_sync, slot) = flush_gate_contention(&deltas, true, 4096, &mut wedged);
-        assert!(out_of_sync, "#13767: a dropped retry delta must request LossResync");
-        assert!(wedged, "#13767: a dropped retry delta must wedge this drain cycle");
+        assert!(
+            out_of_sync,
+            "#13767: a dropped retry delta must request LossResync"
+        );
+        assert!(
+            wedged,
+            "#13767: a dropped retry delta must wedge this drain cycle"
+        );
         let mut slot = slot.expect("full retry slot returned");
         assert_eq!(slot.delta_drops(), 1, "#13767: count the unretained close");
-        assert!(slot.take_delta_loss(), "#13767: latch requeue overflow loss");
-        assert_eq!(slot.drain_deltas(4096).len(), 4096, "keep the existing full ring");
+        assert!(
+            slot.take_delta_loss(),
+            "#13767: latch requeue overflow loss"
+        );
+        assert_eq!(
+            slot.drain_deltas(4096).len(),
+            4096,
+            "keep the existing full ring"
+        );
     }
 
     #[test]
@@ -11376,11 +11770,24 @@ mod flush_tuple_gate_contention_13654 {
         let deltas = [close_delta(&key, 59, false), close_delta(&key, 60, false)];
         let mut wedged = false;
         let (out_of_sync, slot) = flush_gate_contention(&deltas, true, 4095, &mut wedged);
-        assert!(out_of_sync, "#13767: a dropped retry suffix must request LossResync");
-        assert!(wedged, "#13767: a dropped retry suffix must wedge this drain cycle");
+        assert!(
+            out_of_sync,
+            "#13767: a dropped retry suffix must request LossResync"
+        );
+        assert!(
+            wedged,
+            "#13767: a dropped retry suffix must wedge this drain cycle"
+        );
         let mut slot = slot.expect("near-full retry slot returned");
-        assert_eq!(slot.delta_drops(), 1, "#13767: count only the unretained suffix");
-        assert!(slot.take_delta_loss(), "#13767: latch partial requeue overflow");
+        assert_eq!(
+            slot.delta_drops(),
+            1,
+            "#13767: count only the unretained suffix"
+        );
+        assert!(
+            slot.take_delta_loss(),
+            "#13767: latch partial requeue overflow"
+        );
         let retry = slot.drain_deltas(3);
         let ids: Vec<u64> = retry.iter().map(|delta| delta.session_id).collect();
         assert_eq!(
@@ -11411,7 +11818,6 @@ mod flush_tuple_gate_contention_13654 {
             "#13654: ordinary closes keep the reverse-tuple fence"
         );
     }
-
 }
 
 /// #14646 FAIL-ON-REVERT: the LossResync export's own deltas must not
@@ -11527,7 +11933,6 @@ fn flush_session_deltas_bulk_resync_event_stream_loss_does_not_rearm_14646() {
          genuine-drop recovery"
     );
 }
-
 
 /// #9630 FAIL-ON-REVERT: a CommandExport already delivered the complete
 /// paged control response, so its event-stream echo must not be sent again.
@@ -11734,25 +12139,29 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
         crate::event_stream::DataplaneEventRateLimitConfig::default(),
     );
 
-    let open = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Open,
-    key: key.clone(),
-    decision,
-    metadata,
-    policy_generation: 0,
-    origin: SessionOrigin::ForwardFlow,
-    fabric_redirect_sync: false,
-    created_ns: 0,
-    last_seen_ns: 0,
-    counters: crate::session::SessionCounters::default(),
-    observed_tos: 0,
-    observed_tcp_flags: 0,
-    session_id: 0,
-    bulk_resync: false,
-    is_admission: false,
-    tcp_close_class: 0,
-    tcp_handshake_state: 0,
-    pptp_call_ids: 0,
-    purge_retirement: false, source_nat_static: None };
+    let open = SessionDelta {
+        provenance: crate::session::ExportProvenance::Incremental,
+        kind: SessionDeltaKind::Open,
+        key: key.clone(),
+        decision,
+        metadata,
+        policy_generation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: 0,
+        bulk_resync: false,
+        is_admission: false,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        purge_retirement: false,
+        source_nat_static: None,
+    };
 
     // Saturate the channel: fill every slot with a best-effort filler push so the
     // subsequent worker-loop lossless send finds it Full and enters the bounded
@@ -11867,25 +12276,29 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
         crate::event_stream::DataplaneEventRateLimitConfig::default(),
     );
 
-    let open = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Open,
-    key: key.clone(),
-    decision,
-    metadata,
-    policy_generation: 0,
-    origin: SessionOrigin::ForwardFlow,
-    fabric_redirect_sync: false,
-    created_ns: 0,
-    last_seen_ns: 0,
-    counters: crate::session::SessionCounters::default(),
-    observed_tos: 0,
-    observed_tcp_flags: 0,
-    session_id: 0,
-    bulk_resync: false,
-    is_admission: false,
-    tcp_close_class: 0,
-    tcp_handshake_state: 0,
-    pptp_call_ids: 0,
-    purge_retirement: false, source_nat_static: None };
+    let open = SessionDelta {
+        provenance: crate::session::ExportProvenance::Incremental,
+        kind: SessionDeltaKind::Open,
+        key: key.clone(),
+        decision,
+        metadata,
+        policy_generation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: 0,
+        bulk_resync: false,
+        is_admission: false,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        purge_retirement: false,
+        source_nat_static: None,
+    };
     for _ in 0..capacity {
         handle.push_delta(&open, &forwarding.zone_name_to_id);
     }
@@ -11983,7 +12396,7 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
 /// over-deleting on flows that never published a reverse-NAT entry.
 #[test]
 fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
-    use crate::afxdp::checksum::{DnatTableFds, DNAT_DELETE_ATTEMPTS};
+    use crate::afxdp::checksum::{DNAT_DELETE_ATTEMPTS, DnatTableFds};
     use std::sync::atomic::Ordering;
 
     // #6872: the SHARED guard — see checksum::DNAT_COUNTER_GUARD.
@@ -11998,25 +12411,29 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
             install_table_domain: 0,
             install_table_check: 0,
         };
-        SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
-        key,
-        decision,
-        metadata,
-        policy_generation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        fabric_redirect_sync: false,
-        created_ns: 0,
-        last_seen_ns: 0,
-        counters: crate::session::SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id: 0,
-        bulk_resync: false,
-        is_admission: false,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        purge_retirement: false, source_nat_static: None }
+        SessionDelta {
+            provenance: crate::session::ExportProvenance::Incremental,
+            kind: SessionDeltaKind::Close,
+            key,
+            decision,
+            metadata,
+            policy_generation: 0,
+            origin: SessionOrigin::ForwardFlow,
+            fabric_redirect_sync: false,
+            created_ns: 0,
+            last_seen_ns: 0,
+            counters: crate::session::SessionCounters::default(),
+            observed_tos: 0,
+            observed_tcp_flags: 0,
+            session_id: 0,
+            bulk_resync: false,
+            is_admission: false,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            pptp_call_ids: 0,
+            purge_retirement: false,
+            source_nat_static: None,
+        }
     };
 
     let ident = BindingIdentity {
@@ -12115,34 +12532,37 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
 // single site feeding that argument on the activation path — rather than
 // reading the map byte back.
 fn synced_local_delivery_forward_metadata(owner_rg_id: i32) -> SessionMetadata {
-    SessionMetadata {
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id,
-        is_reverse: false,
-        fabric_ingress: false,
-        ..test_metadata()
-    }
+    SessionMetadata { ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id,
+    is_reverse: false,
+    fabric_ingress: false,
+    nat_scope_ifindex: None, ..test_metadata() }
 }
 
 // A LocalDelivery decision whose egress_ifindex is not in the forwarding egress
 // map, so `owner_rg_for_resolution` returns 0 and the refreshed metadata keeps
 // the session's original owner RG (the standby RG under test).
 fn synced_local_delivery_decision_unowned_egress() -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::LocalDelivery,
-        local_ifindex: 0,
-        egress_ifindex: 0,
-        tx_ifindex: 0,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::LocalDelivery,
+            local_ifindex: 0,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 #[test]
@@ -12155,7 +12575,9 @@ fn refresh_owner_rgs_standby_local_delivery_forces_live_redirect_4805() {
     let now_secs = now_ns / 1_000_000_000;
     let forwarding = test_forwarding_state_with_local_destination(local_ip);
     assert_eq!(
-        lookup_forwarding_resolution(&forwarding, IpAddr::V4(local_ip)).resolution.disposition,
+        lookup_forwarding_resolution(&forwarding, IpAddr::V4(local_ip))
+            .resolution
+            .disposition,
         ForwardingDisposition::LocalDelivery,
         "precondition: 192.0.2.10 is modeled as an inet.0 local address"
     );
@@ -12223,7 +12645,9 @@ fn refresh_owner_rgs_active_owner_local_delivery_publishes_kernel_local_4805() {
     let now_secs = now_ns / 1_000_000_000;
     let forwarding = test_forwarding_state_with_local_destination(local_ip);
     assert_eq!(
-        lookup_forwarding_resolution(&forwarding, IpAddr::V4(local_ip)).resolution.disposition,
+        lookup_forwarding_resolution(&forwarding, IpAddr::V4(local_ip))
+            .resolution
+            .disposition,
         ForwardingDisposition::LocalDelivery,
         "precondition: 192.0.2.10 is modeled as an inet.0 local address"
     );
@@ -12296,8 +12720,8 @@ fn delete_terminal_filtered_session_releases_companion_and_allocator_5622() {
         // A single-address pool source-NAT rule so the translated flow holds a
         // real pool port that the teardown must return.
         let mut forwarding = ForwardingState::default();
-        forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[
-            crate::SourceNATRuleSnapshot {
+        forwarding.source_nat_rules =
+            crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
                 name: "pool-snat".to_string(),
                 from_zone: "lan".to_string(),
                 to_zone: "wan".to_string(),
@@ -12307,8 +12731,7 @@ fn delete_terminal_filtered_session_releases_companion_and_allocator_5622() {
                 port_low: 1024,
                 port_high: 65535,
                 ..crate::SourceNATRuleSnapshot::default()
-            },
-        ]);
+            }]);
 
         // Forward: a source-NAT-translated flow that is locally delivered.
         let fwd_key = test_key();
@@ -12406,7 +12829,10 @@ fn delete_terminal_filtered_session_releases_companion_and_allocator_5622() {
             hit_key
         };
         if alias_hit {
-            assert_eq!(sessions.revalidation_canonical_key(&hit_key), Some(rev_key.clone()));
+            assert_eq!(
+                sessions.revalidation_canonical_key(&hit_key),
+                Some(rev_key.clone())
+            );
         }
         delete_terminal_filtered_session(
             &mut sessions,
@@ -12490,17 +12916,18 @@ fn purge_translated_synced_hit_releases_source_nat_reservation_5295() {
     // Single-address pool source-NAT rule so the translated flow holds a real
     // pool port the purge must return.
     let mut forwarding = ForwardingState::default();
-    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
-        name: "pool-snat".to_string(),
-        from_zone: "lan".to_string(),
-        to_zone: "wan".to_string(),
-        source_addresses: vec!["0.0.0.0/0".to_string()],
-        pool_name: "p".to_string(),
-        pool_addresses: vec!["203.0.113.1/32".to_string()],
-        port_low: 1024,
-        port_high: 65535,
-        ..crate::SourceNATRuleSnapshot::default()
-    }]);
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+            name: "pool-snat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            pool_name: "p".to_string(),
+            pool_addresses: vec!["203.0.113.1/32".to_string()],
+            port_low: 1024,
+            port_high: 65535,
+            ..crate::SourceNATRuleSnapshot::default()
+        }]);
 
     // A source-NAT-translated forward flow. The synced session is keyed on its
     // post-NAT WIRE tuple (`forward_wire_key`: src == pool addr), which is both
@@ -12578,7 +13005,9 @@ fn purge_translated_synced_hit_releases_source_nat_reservation_5295() {
 
     // (a) existing behaviour: the transient session entry is gone.
     assert!(
-        sessions.lookup(&wire_key, 1_000_000, TCP_FLAG_ACK).is_none(),
+        sessions
+            .lookup(&wire_key, 1_000_000, TCP_FLAG_ACK)
+            .is_none(),
         "purged transient synced session must be removed from the table",
     );
     // (b) THE #5295 FIX: the pool reservation is returned to the allocator.
@@ -12618,8 +13047,8 @@ fn purge_translated_synced_hit_releases_nat64_reservation_5295() {
         dst_ip: IpAddr::V6("64:ff9b::0808:0808".parse().unwrap()),
         src_port: 5000,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let nat = crate::nat64::Nat64State::forward_decision(snat, dst_v4, 1024);
     let wire_key = forward_wire_key(&orig_key, nat); // post-NAT v4 wire tuple
@@ -12708,17 +13137,18 @@ fn purge_translated_synced_hit_releases_nat64_reservation_5295() {
 #[test]
 fn purge_translated_synced_hit_reverse_entry_releases_nothing_5295() {
     let mut forwarding = ForwardingState::default();
-    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
-        name: "pool-snat".to_string(),
-        from_zone: "lan".to_string(),
-        to_zone: "wan".to_string(),
-        source_addresses: vec!["0.0.0.0/0".to_string()],
-        pool_name: "p".to_string(),
-        pool_addresses: vec!["203.0.113.1/32".to_string()],
-        port_low: 1024,
-        port_high: 65535,
-        ..crate::SourceNATRuleSnapshot::default()
-    }]);
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+            name: "pool-snat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            pool_name: "p".to_string(),
+            pool_addresses: vec!["203.0.113.1/32".to_string()],
+            port_low: 1024,
+            port_high: 65535,
+            ..crate::SourceNATRuleSnapshot::default()
+        }]);
 
     let orig_key = test_key();
     let fwd_nat = NatDecision {
@@ -12975,7 +13405,11 @@ fn purge_translated_synced_hit_full_teardown_13674() {
         "purge must record the key in evicted_keys for flow-cache invalidation, got {evicted_keys:?}",
     );
     // existing: local entry gone
-    assert!(sessions.lookup(&wire_key, 1_000_000, TCP_FLAG_ACK).is_none());
+    assert!(
+        sessions
+            .lookup(&wire_key, 1_000_000, TCP_FLAG_ACK)
+            .is_none()
+    );
 }
 
 // #14666 leg 1 RED: a local-first hit (shared_entry None, after UpsertSynced
@@ -13017,7 +13451,9 @@ fn local_hit_purge_removes_shared_and_replicates_14666() {
         pptp_call_ids: 0,
         source_nat_static: None,
     };
-    assert!(sessions.upsert_synced_with_origin(entry.clone().into_session_install(1_000_000), false));
+    assert!(
+        sessions.upsert_synced_with_origin(entry.clone().into_session_install(1_000_000), false)
+    );
     let _ = sessions.drain_deltas(16);
     let local_id = sessions.session_id_for(&wire_key);
     assert_ne!(local_id, 0, "fixture: local row must carry an id");
@@ -13025,10 +13461,20 @@ fn local_hit_purge_removes_shared_and_replicates_14666() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
-    publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &entry);
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
     // Drive through resolve with inactive RG (transient) — local hit path.
     let ha_state: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
-    let flow = SessionFlow { src_ip: wire_key.src_ip, dst_ip: wire_key.dst_ip, forward_key: wire_key.clone() };
+    let flow = SessionFlow {
+        src_ip: wire_key.src_ip,
+        dst_ip: wire_key.dst_ip,
+        forward_key: wire_key.clone(),
+    };
     let peer_queue = Arc::new(Mutex::new(VecDeque::new()));
     let peer_worker_commands = vec![peer_queue.clone()];
     let by_id = {
@@ -13039,18 +13485,73 @@ fn local_hit_purge_removes_shared_and_replicates_14666() {
     let by_id_ref = &by_id;
     // resolve_flow_session_decision uses empty by_id, so call with_conntrack directly then promote.
     let resolved_opt = resolve_flow_session_decision_with_conntrack_and_payload(
-        &mut sessions, SteeringMap::unshared_for_test(-1), -1, -1,
-        &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes,
-        &peer_worker_commands, by_id_ref, &forwarding, &ha_state, &Arc::new(ShardedNeighborMap::new()),
-        &flow, 1_000_000, 1, PROTO_TCP, TCP_FLAG_ACK, 0, 0, 0, false, false, 0, 0, None,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        by_id_ref,
+        &forwarding,
+        &ha_state,
+        &Arc::new(ShardedNeighborMap::new()),
+        &flow,
+        1_000_000,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        0,
+        0,
+        0,
+        false,
+        false,
+        0,
+        0,
+        None,
     );
     let mut resolved = resolved_opt.expect("transient local hit must resolve");
-    assert!(resolved.deferred_synced_purge.is_some(), "fixture: transient purge must be deferred, got {resolved:?}");
-    let shared = SharedSessionRefs { sessions: &shared_sessions, nat_sessions: &shared_nat_sessions, forward_wire_sessions: &shared_forward_wire_sessions, owner_rg_indexes: &shared_owner_rg_indexes };
+    assert!(
+        resolved.deferred_synced_purge.is_some(),
+        "fixture: transient purge must be deferred, got {resolved:?}"
+    );
+    let shared = SharedSessionRefs {
+        sessions: &shared_sessions,
+        nat_sessions: &shared_nat_sessions,
+        forward_wire_sessions: &shared_forward_wire_sessions,
+        owner_rg_indexes: &shared_owner_rg_indexes,
+    };
     let mut evicted = Vec::new();
-    maybe_promote_synced_session_with_conntrack(&mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, shared, &peer_worker_commands, by_id_ref, &forwarding, 1_000_000, TCP_FLAG_ACK, 0, SessionHitVerdict::Owner, &mut resolved, &mut evicted);
-    assert!(lock_shared_recover(&shared_sessions).get(&wire_key).is_none(), "local-hit purge must remove shared entry (leaked pre-fix)");
-    assert!(sessions.lookup(&wire_key, 1_000_000, TCP_FLAG_ACK).is_none(), "local row must be purged");
+    maybe_promote_synced_session_with_conntrack(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        shared,
+        &peer_worker_commands,
+        by_id_ref,
+        &forwarding,
+        1_000_000,
+        TCP_FLAG_ACK,
+        0,
+        SessionHitVerdict::Owner,
+        &mut resolved,
+        &mut evicted,
+    );
+    assert!(
+        lock_shared_recover(&shared_sessions)
+            .get(&wire_key)
+            .is_none(),
+        "local-hit purge must remove shared entry (leaked pre-fix)"
+    );
+    assert!(
+        sessions
+            .lookup(&wire_key, 1_000_000, TCP_FLAG_ACK)
+            .is_none(),
+        "local row must be purged"
+    );
     let pending = peer_queue.lock().unwrap();
     assert!(pending.iter().any(|cmd| matches!(cmd, WorkerCommand::DeleteSyncedConditional { key, expected_id, companion: None, .. } if *key == wire_key && *expected_id == local_id)), "purge must replicate conditional delete with local id {local_id}, got {pending:?}");
 }
@@ -13060,13 +13561,38 @@ fn local_hit_purge_removes_shared_and_replicates_14666() {
 fn local_hit_purge_preserves_replacement_shared_entry_14666() {
     let forwarding = ForwardingState::default();
     let orig_key = test_key();
-    let nat = NatDecision { rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))), rewrite_src_port: Some(40000), ..NatDecision::default() };
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+        rewrite_src_port: Some(40000),
+        ..NatDecision::default()
+    };
     let wire_key = forward_wire_key(&orig_key, nat);
-    let decision = SessionDecision { resolution: test_local_delivery_decision().resolution, nat, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: test_local_delivery_decision().resolution,
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let metadata = test_metadata();
     let mut sessions = SessionTable::new();
-    let entry = SyncedSessionEntry { key: wire_key.clone(), decision, metadata: metadata.clone(), leak_incarnation: 0, origin: SessionOrigin::SyncImport, protocol: PROTO_TCP, tcp_flags: TCP_FLAG_ACK, generation: 7, session_id: 42, tcp_close_class: 0, tcp_handshake_state: 0, pptp_call_ids: 0, source_nat_static: None };
-    assert!(sessions.upsert_synced_with_origin(entry.clone().into_session_install(1_000_000), false));
+    let entry = SyncedSessionEntry {
+        key: wire_key.clone(),
+        decision,
+        metadata: metadata.clone(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 7,
+        session_id: 42,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+    };
+    assert!(
+        sessions.upsert_synced_with_origin(entry.clone().into_session_install(1_000_000), false)
+    );
     let _ = sessions.drain_deltas(16);
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -13075,9 +13601,19 @@ fn local_hit_purge_preserves_replacement_shared_entry_14666() {
     let mut replacement = entry.clone();
     replacement.session_id = 99;
     replacement.generation = 8;
-    publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &replacement);
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &replacement,
+    );
     let ha_state: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
-    let flow = SessionFlow { src_ip: wire_key.src_ip, dst_ip: wire_key.dst_ip, forward_key: wire_key.clone() };
+    let flow = SessionFlow {
+        src_ip: wire_key.src_ip,
+        dst_ip: wire_key.dst_ip,
+        forward_key: wire_key.clone(),
+    };
     let peer_queue = Arc::new(Mutex::new(VecDeque::new()));
     let peer_worker_commands = vec![peer_queue.clone()];
     let by_id = {
@@ -13085,13 +13621,70 @@ fn local_hit_purge_preserves_replacement_shared_entry_14666() {
         m.insert(9u32, peer_queue.clone());
         crate::afxdp::WorkerCommandQueues::new(m)
     };
-    let mut resolved = resolve_flow_session_decision_with_conntrack_and_payload(&mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &peer_worker_commands, &by_id, &forwarding, &ha_state, &Arc::new(ShardedNeighborMap::new()), &flow, 1_000_000, 1, PROTO_TCP, TCP_FLAG_ACK, 0, 0, 0, false, false, 0, 0, None).expect("hit resolves");
-    let shared = SharedSessionRefs { sessions: &shared_sessions, nat_sessions: &shared_nat_sessions, forward_wire_sessions: &shared_forward_wire_sessions, owner_rg_indexes: &shared_owner_rg_indexes };
+    let mut resolved = resolve_flow_session_decision_with_conntrack_and_payload(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &by_id,
+        &forwarding,
+        &ha_state,
+        &Arc::new(ShardedNeighborMap::new()),
+        &flow,
+        1_000_000,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        0,
+        0,
+        0,
+        false,
+        false,
+        0,
+        0,
+        None,
+    )
+    .expect("hit resolves");
+    let shared = SharedSessionRefs {
+        sessions: &shared_sessions,
+        nat_sessions: &shared_nat_sessions,
+        forward_wire_sessions: &shared_forward_wire_sessions,
+        owner_rg_indexes: &shared_owner_rg_indexes,
+    };
     let mut evicted = Vec::new();
-    maybe_promote_synced_session_with_conntrack(&mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, shared, &peer_worker_commands, &by_id, &forwarding, 1_000_000, TCP_FLAG_ACK, 0, SessionHitVerdict::Owner, &mut resolved, &mut evicted);
-    let live = lock_shared_recover(&shared_sessions).get(&wire_key).cloned().expect("replacement shared entry must survive");
-    assert_eq!(live.session_id, 99, "replacement must not be removed by stale local purge");
-    assert!(peer_queue.lock().unwrap().is_empty(), "no replicate when shared removal declined");
+    maybe_promote_synced_session_with_conntrack(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        shared,
+        &peer_worker_commands,
+        &by_id,
+        &forwarding,
+        1_000_000,
+        TCP_FLAG_ACK,
+        0,
+        SessionHitVerdict::Owner,
+        &mut resolved,
+        &mut evicted,
+    );
+    let live = lock_shared_recover(&shared_sessions)
+        .get(&wire_key)
+        .cloned()
+        .expect("replacement shared entry must survive");
+    assert_eq!(
+        live.session_id, 99,
+        "replacement must not be removed by stale local purge"
+    );
+    assert!(
+        peer_queue.lock().unwrap().is_empty(),
+        "no replicate when shared removal declined"
+    );
 }
 
 // #14666 leg 2 RED: queue-full conditional repair must not free a live
@@ -13104,9 +13697,28 @@ fn conditional_queue_full_repair_preserves_replacement_port_14666() {
     let forwarding = drop8114_forwarding();
     let nat = drop8114_reserve(&forwarding, 3);
     let (peers, by_id) = drop8114_queues(3, true);
-    let outcome = replicate_session_delete_conditional(&peers, &by_id, &forwarding, &drop8114_key(), nat, false, 2_000, 42, None, 0);
-    assert_eq!(outcome.dropped, 1, "fixture: conditional delete must be refused");
-    assert!(forwarding.source_nat_rules[0].pool_allocator.debug_is_port_occupied(0, 20000), "conditional queue-full repair must NOT release the port: the live record may be a replacement (pre-fix freed)");
+    let outcome = replicate_session_delete_conditional(
+        &peers,
+        &by_id,
+        &forwarding,
+        &drop8114_key(),
+        nat,
+        false,
+        2_000,
+        42,
+        None,
+        0,
+    );
+    assert_eq!(
+        outcome.dropped, 1,
+        "fixture: conditional delete must be refused"
+    );
+    assert!(
+        forwarding.source_nat_rules[0]
+            .pool_allocator
+            .debug_is_port_occupied(0, 20000),
+        "conditional queue-full repair must NOT release the port: the live record may be a replacement (pre-fix freed)"
+    );
 }
 
 // #14666 leg 2 control: unconditional repairing delete still repairs.
@@ -13115,10 +13727,23 @@ fn unconditional_queue_full_repair_still_releases_14666() {
     let forwarding = drop8114_forwarding();
     let nat = drop8114_reserve(&forwarding, 3);
     let (peers, by_id) = drop8114_queues(3, true);
-    let outcome = replicate_session_delete_repairing(&peers, &by_id, &forwarding, &drop8114_key(), nat, false, 2_000);
+    let outcome = replicate_session_delete_repairing(
+        &peers,
+        &by_id,
+        &forwarding,
+        &drop8114_key(),
+        nat,
+        false,
+        2_000,
+    );
     assert_eq!(outcome.dropped, 1);
     assert_eq!(outcome.repaired, 1);
-    assert!(!forwarding.source_nat_rules[0].pool_allocator.debug_is_port_occupied(0, 20000), "unconditional repair must still free the port");
+    assert!(
+        !forwarding.source_nat_rules[0]
+            .pool_allocator
+            .debug_is_port_occupied(0, 20000),
+        "unconditional repair must still free the port"
+    );
 }
 
 // #14666 leg 3 RED: forward match whose companion was replaced must NOT
@@ -13128,24 +13753,75 @@ fn conditional_delete_preserves_replaced_companion_14666() {
     let now_ns = 1_000_000_000u64;
     let mut sessions = SessionTable::new();
     let key = test_key();
-    assert!(sessions.install_with_protocol_with_origin(key.clone(), test_decision(), test_metadata(), SessionOrigin::ForwardFlow, now_ns, PROTO_TCP, TCP_FLAG_ACK));
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK
+    ));
     let companion = crate::session::reverse_session_key(&key, NatDecision::default());
     let mut comp_meta = test_metadata();
     comp_meta.is_reverse = true;
-    assert!(sessions.install_with_protocol_with_origin(companion.clone(), test_decision(), comp_meta.clone(), SessionOrigin::ReverseFlow, now_ns, PROTO_TCP, TCP_FLAG_ACK));
+    assert!(sessions.install_with_protocol_with_origin(
+        companion.clone(),
+        test_decision(),
+        comp_meta.clone(),
+        SessionOrigin::ReverseFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK
+    ));
     let fwd_id = sessions.session_id_for(&key);
     let stale_comp_id = sessions.session_id_for(&companion);
-    assert!(sessions.install_with_protocol_with_origin(companion.clone(), test_decision(), comp_meta, SessionOrigin::ReverseFlow, now_ns, PROTO_TCP, TCP_FLAG_ACK));
+    assert!(sessions.install_with_protocol_with_origin(
+        companion.clone(),
+        test_decision(),
+        comp_meta,
+        SessionOrigin::ReverseFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK
+    ));
     let live_comp_id = sessions.session_id_for(&companion);
     assert_ne!(live_comp_id, stale_comp_id, "fixture: companion replaced");
     let commands = Arc::new(Mutex::new(VecDeque::new()));
-    commands.lock().unwrap().push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional { key: key.clone(), expected_id: fwd_id, companion: Some(companion.clone()), companion_expected_id: stale_comp_id });
+    commands
+        .lock()
+        .unwrap()
+        .push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional {
+            key: key.clone(),
+            expected_id: fwd_id,
+            companion: Some(companion.clone()),
+            companion_expected_id: stale_comp_id,
+        });
     let forwarding = test_forwarding_state();
     let ha_state = BTreeMap::new();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    apply_worker_commands(&commands, &mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, &forwarding, &ha_state, &dynamic_neighbors, 0, &mut VecDeque::new());
-    assert_eq!(sessions.session_id_for(&key), 0, "matched forward must be removed");
-    assert_eq!(sessions.session_id_for(&companion), live_comp_id, "replaced companion must survive");
+    apply_worker_commands(
+        &commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
+    assert_eq!(
+        sessions.session_id_for(&key),
+        0,
+        "matched forward must be removed"
+    );
+    assert_eq!(
+        sessions.session_id_for(&companion),
+        live_comp_id,
+        "replaced companion must survive"
+    );
 }
 
 // #14666 leg 3 control: matched companion is removed with its forward.
@@ -13154,21 +13830,60 @@ fn conditional_delete_removes_matched_companion_14666() {
     let now_ns = 1_000_000_000u64;
     let mut sessions = SessionTable::new();
     let key = test_key();
-    assert!(sessions.install_with_protocol_with_origin(key.clone(), test_decision(), test_metadata(), SessionOrigin::ForwardFlow, now_ns, PROTO_TCP, TCP_FLAG_ACK));
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK
+    ));
     let companion = crate::session::reverse_session_key(&key, NatDecision::default());
     let mut comp_meta = test_metadata();
     comp_meta.is_reverse = true;
-    assert!(sessions.install_with_protocol_with_origin(companion.clone(), test_decision(), comp_meta, SessionOrigin::ReverseFlow, now_ns, PROTO_TCP, TCP_FLAG_ACK));
+    assert!(sessions.install_with_protocol_with_origin(
+        companion.clone(),
+        test_decision(),
+        comp_meta,
+        SessionOrigin::ReverseFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK
+    ));
     let fwd_id = sessions.session_id_for(&key);
     let comp_id = sessions.session_id_for(&companion);
     let commands = Arc::new(Mutex::new(VecDeque::new()));
-    commands.lock().unwrap().push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional { key: key.clone(), expected_id: fwd_id, companion: Some(companion.clone()), companion_expected_id: comp_id });
+    commands
+        .lock()
+        .unwrap()
+        .push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional {
+            key: key.clone(),
+            expected_id: fwd_id,
+            companion: Some(companion.clone()),
+            companion_expected_id: comp_id,
+        });
     let forwarding = test_forwarding_state();
     let ha_state = BTreeMap::new();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    apply_worker_commands(&commands, &mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, &forwarding, &ha_state, &dynamic_neighbors, 0, &mut VecDeque::new());
+    apply_worker_commands(
+        &commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
     assert_eq!(sessions.session_id_for(&key), 0);
-    assert_eq!(sessions.session_id_for(&companion), 0, "matched companion must be removed");
+    assert_eq!(
+        sessions.session_id_for(&companion),
+        0,
+        "matched companion must be removed"
+    );
 }
 
 // #14666 leg 3 absent control: companion already gone (id 0 capture for a
@@ -13180,19 +13895,49 @@ fn conditional_delete_absent_companion_is_noop_14666() {
     let now_ns = 1_000_000_000u64;
     let mut sessions = SessionTable::new();
     let key = test_key();
-    assert!(sessions.install_with_protocol_with_origin(key.clone(), test_decision(), test_metadata(), SessionOrigin::ForwardFlow, now_ns, PROTO_TCP, TCP_FLAG_ACK));
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK
+    ));
     let companion = crate::session::reverse_session_key(&key, NatDecision::default());
     let fwd_id = sessions.session_id_for(&key);
     let commands = Arc::new(Mutex::new(VecDeque::new()));
-    commands.lock().unwrap().push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional { key: key.clone(), expected_id: fwd_id, companion: Some(companion.clone()), companion_expected_id: 777 });
+    commands
+        .lock()
+        .unwrap()
+        .push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional {
+            key: key.clone(),
+            expected_id: fwd_id,
+            companion: Some(companion.clone()),
+            companion_expected_id: 777,
+        });
     let forwarding = test_forwarding_state();
     let ha_state = BTreeMap::new();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    apply_worker_commands(&commands, &mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, &forwarding, &ha_state, &dynamic_neighbors, 0, &mut VecDeque::new());
-    assert_eq!(sessions.session_id_for(&key), 0, "forward removed even when companion absent");
+    apply_worker_commands(
+        &commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
+    assert_eq!(
+        sessions.session_id_for(&key),
+        0,
+        "forward removed even when companion absent"
+    );
     assert_eq!(sessions.session_id_for(&companion), 0);
 }
-
 
 // #5152 FAIL-ON-REVERT: activating one redundancy group must NOT reset the
 // standby bounded-leak HOLD clock (`first_held_ns`, #2120 §6.4) of an UNRELATED
@@ -13237,8 +13982,8 @@ fn arm_standby_hold_clock_5152(table: &mut SessionTable, now_ns: u64) {
 fn install_synced_forward_5152(table: &mut SessionTable, key: &SessionKey, now_ns: u64) {
     assert!(table.install_with_protocol_with_origin(
         key.clone(),
-        test_decision(),   // ForwardCandidate, egress 12 -> owner RG1
-        test_metadata(),   // owner_rg_id = 1, not fabric_ingress, not reverse
+        test_decision(), // ForwardCandidate, egress 12 -> owner RG1
+        test_metadata(), // owner_rg_id = 1, not fabric_ingress, not reverse
         SessionOrigin::SyncImport,
         now_ns,
         PROTO_TCP,
@@ -13490,8 +14235,8 @@ fn handle_upsert_synced_resolves_active_zone_pair_for_snat_reserve_6211() {
         dst_ip: "8.8.8.8".parse().unwrap(),
         src_port: 40000,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let mut decision = test_decision();
     decision.nat = NatDecision {
@@ -13504,13 +14249,11 @@ fn handle_upsert_synced_resolves_active_zone_pair_for_snat_reserve_6211() {
         decision,
         // ingress_zone 1 = "lan", egress_zone 2 = "wan" — the ACTIVE's pair,
         // as carried by SessionSyncRequest's ingress_zone_id/egress_zone_id.
-        metadata: SessionMetadata {
-            forward_ingress_vlan_id: None,
-            ingress_zone: 1,
-            egress_zone: 2,
-            is_reverse: false,
-            ..test_metadata()
-        },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        ingress_zone: 1,
+        egress_zone: 2,
+        is_reverse: false,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -13613,8 +14356,8 @@ fn delete_synced_frees_both_allocators_end_to_end_6211() {
         dst_ip: "8.8.8.8".parse().unwrap(),
         src_port: 40000,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let mut decision = test_decision();
     decision.nat = NatDecision {
@@ -13625,13 +14368,11 @@ fn delete_synced_frees_both_allocators_end_to_end_6211() {
     let make_entry = || SyncedSessionEntry {
         key: key.clone(),
         decision,
-        metadata: SessionMetadata {
-            forward_ingress_vlan_id: None,
-            ingress_zone: 1,
-            egress_zone: 2,
-            is_reverse: false,
-            ..test_metadata()
-        },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        ingress_zone: 1,
+        egress_zone: 2,
+        is_reverse: false,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -13705,7 +14446,11 @@ fn delete_synced_frees_both_allocators_end_to_end_6211() {
          deleting the release call from handle_delete_synced, or restoring the \
          first-hit `break`, strands one of them"
     );
-    assert_eq!(deleted_keys, vec![key], "control: the key was recorded (#6457)");
+    assert_eq!(
+        deleted_keys,
+        vec![key],
+        "control: the key was recorded (#6457)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -13729,13 +14474,18 @@ fn nat_reverse_fixture_7169() -> (
         dst_ip: IpAddr::V4("203.0.113.9".parse().unwrap()),
         src_port: 40000,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
-    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4("198.51.100.8".parse().unwrap())),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4("198.51.100.8".parse().unwrap())),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
@@ -14218,8 +14968,8 @@ fn apply_worker_commands_7201_empty_and_contended_passes_report_no_backlog() {
 
 fn f3_forwarding_6979() -> ForwardingState {
     let mut forwarding = ForwardingState::default();
-    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[
-        crate::SourceNATRuleSnapshot {
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
             name: "snat-lan".to_string(),
             from_zone: "lan".to_string(),
             to_zone: "wan".to_string(),
@@ -14229,8 +14979,7 @@ fn f3_forwarding_6979() -> ForwardingState {
             port_low: 20000,
             port_high: 20099,
             ..crate::SourceNATRuleSnapshot::default()
-        },
-    ]);
+        }]);
     forwarding.zone_id_to_name.insert(1, "lan".to_string());
     forwarding.zone_id_to_name.insert(2, "wan".to_string());
     forwarding
@@ -14257,13 +15006,11 @@ fn f3_entry_6979(nat: NatDecision) -> SyncedSessionEntry {
     SyncedSessionEntry {
         key: f3_key_6979(),
         decision,
-        metadata: SessionMetadata {
-            forward_ingress_vlan_id: None,
-            ingress_zone: 1,
-            egress_zone: 2,
-            is_reverse: false,
-            ..test_metadata()
-        },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        ingress_zone: 1,
+        egress_zone: 2,
+        is_reverse: false,
+        nat_scope_ifindex: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -14382,7 +15129,11 @@ fn synced_replace_changing_nat_port_keeps_exactly_one_reservation_6979_f3() {
 #[test]
 fn synced_refresh_with_identical_nat_keeps_its_reservation_6979_f3() {
     let (used, installed) = f3_replace_6979(f3_nat_on_port_6979(20000));
-    assert_eq!(installed, Some(Some(20000)), "the refresh keeps the same tuple");
+    assert_eq!(
+        installed,
+        Some(Some(20000)),
+        "the refresh keeps the same tuple"
+    );
     assert_eq!(
         used, 1,
         "a same-tuple refresh must keep its reservation — `reserve_flow` takes \
@@ -14553,8 +15304,7 @@ fn a_cdn_forgets_both_aliases_everywhere_and_allows_reuse_11601() {
     let forwarding = test_forwarding_state();
     let ha_state = BTreeMap::new();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    let apply = |commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
-                 sessions: &mut SessionTable| {
+    let apply = |commands: &Arc<Mutex<VecDeque<WorkerCommand>>>, sessions: &mut SessionTable| {
         let _ = apply_worker_commands(
             commands,
             sessions,
@@ -14659,10 +15409,7 @@ fn a_cdn_forgets_both_aliases_everywhere_and_allows_reuse_11601() {
     for sessions in [&local, &worker_one, &worker_two] {
         assert_eq!(sessions.pptp().resolve(pac, 0xAAAA), None);
         assert_eq!(sessions.pptp().resolve(pns, 0xBBBB), None);
-        assert_eq!(
-            sessions.pptp().resolve(pns, 0xFFFF),
-            Some(unrelated_handle)
-        );
+        assert_eq!(sessions.pptp().resolve(pns, 0xFFFF), Some(unrelated_handle));
     }
 
     assert!(inbox.push(PendingControlSegment {
@@ -14691,10 +15438,7 @@ fn a_cdn_forgets_both_aliases_everywhere_and_allows_reuse_11601() {
         assert_eq!(sessions.pptp().resolve(pac, 0xAAAA), Some(new_handle));
         assert_eq!(sessions.pptp().resolve(pns, 0xCCCC), Some(new_handle));
         assert_eq!(sessions.pptp().resolve(pns, 0xBBBB), None);
-        assert_eq!(
-            sessions.pptp().resolve(pns, 0xFFFF),
-            Some(unrelated_handle)
-        );
+        assert_eq!(sessions.pptp().resolve(pns, 0xFFFF), Some(unrelated_handle));
     }
 }
 
@@ -14712,8 +15456,7 @@ fn a_cdn_forgets_both_aliases_everywhere_and_allows_reuse_11601() {
 fn a_refused_pptp_install_reaches_the_worker_on_retry_12133() {
     use crate::session::pptp::PptpCall;
     use crate::session::pptp_control::{
-        PendingControlSegment, PptpControlInbox,
-        fixtures_7699::outgoing_call_reply,
+        PendingControlSegment, PptpControlInbox, fixtures_7699::outgoing_call_reply,
     };
 
     let (pac, pns): (IpAddr, IpAddr) = (
@@ -14730,8 +15473,7 @@ fn a_refused_pptp_install_reaches_the_worker_on_retry_12133() {
     let forwarding = test_forwarding_state();
     let ha_state = BTreeMap::new();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    let apply = |commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
-                 sessions: &mut SessionTable| {
+    let apply = |commands: &Arc<Mutex<VecDeque<WorkerCommand>>>, sessions: &mut SessionTable| {
         let _ = apply_worker_commands(
             commands,
             sessions,
@@ -14888,8 +15630,7 @@ fn run_own_pptp_retry_behind_queued_cdn_12133(own_retry: bool) -> (Option<u32>, 
         assert!(
             !pending.iter().any(|command| matches!(
                 command,
-                WorkerCommand::ForgetPptpCallByControl(_)
-                    | WorkerCommand::InstallPptpCall { .. }
+                WorkerCommand::ForgetPptpCallByControl(_) | WorkerCommand::InstallPptpCall { .. }
             )),
             "both the CDN and install must be refused by Q's full queue"
         );
@@ -15145,8 +15886,8 @@ fn drop8114_filler_key(i: usize) -> SessionKey {
 /// "the port is occupied" is a yes/no an assertion can read directly.
 fn drop8114_forwarding() -> ForwardingState {
     let mut forwarding = ForwardingState::default();
-    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[
-        crate::SourceNATRuleSnapshot {
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
             name: "snat".to_string(),
             from_zone: "lan".to_string(),
             to_zone: "wan".to_string(),
@@ -15156,8 +15897,7 @@ fn drop8114_forwarding() -> ForwardingState {
             port_low: 20000,
             port_high: 20000,
             ..crate::SourceNATRuleSnapshot::default()
-        },
-    ]);
+        }]);
     forwarding
 }
 
@@ -15191,7 +15931,14 @@ fn drop8114_reserve_for(
     };
     let alloc = &forwarding.source_nat_rules[0].pool_allocator;
     assert!(
-        alloc.reserve_flow(flow, translated, 0, false, 1_000, NatHolder::Worker(worker_id)),
+        alloc.reserve_flow(
+            flow,
+            translated,
+            0,
+            false,
+            1_000,
+            NatHolder::Worker(worker_id)
+        ),
         "fixture must take the reservation, or every assertion below is vacuous"
     );
     assert!(
@@ -15406,7 +16153,6 @@ fn saturated_live_8593() -> Arc<BindingLiveState> {
     live
 }
 
-
 /// THE PRODUCER (#8593). `bulk_resync` is only useful if the export's own
 /// deltas carry it and nothing else does. `emit_open_delta_with_origin` is the
 /// sole producer — its only production caller is the worker loop's chunked
@@ -15460,25 +16206,29 @@ fn only_the_owner_rg_export_produces_a_bulk_resync_delta_8593() {
 }
 
 fn delta_8593(key: &SessionKey, bulk_resync: bool) -> SessionDelta {
-    SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
-    key: key.clone(),
-    decision: test_decision(),
-    metadata: test_metadata(),
-    policy_generation: 0,
-    origin: SessionOrigin::ForwardFlow,
-    fabric_redirect_sync: false,
-    created_ns: 0,
-    last_seen_ns: 0,
-    counters: crate::session::SessionCounters::default(),
-    observed_tos: 0,
-    observed_tcp_flags: 0,
-    session_id: 0,
-    bulk_resync,
-    is_admission: false,
-    tcp_close_class: 0,
-    tcp_handshake_state: 0,
-    pptp_call_ids: 0,
-    purge_retirement: false, source_nat_static: None }
+    SessionDelta {
+        provenance: crate::session::ExportProvenance::Incremental,
+        kind: SessionDeltaKind::Close,
+        key: key.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        policy_generation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: 0,
+        bulk_resync,
+        is_admission: false,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        purge_retirement: false,
+        source_nat_static: None,
+    }
 }
 
 /// Drive `flush_session_deltas` once against a SATURATED fallback buffer and
@@ -15588,10 +16338,7 @@ fn install8586(sessions: &mut SessionTable, key: &SessionKey, origin: SessionOri
     );
 }
 
-fn publish8586(
-    shared: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    key: &SessionKey,
-) {
+fn publish8586(shared: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>, key: &SessionKey) {
     shared.lock().expect("shared sessions").insert(
         key.clone(),
         SyncedSessionEntry {
@@ -15668,11 +16415,11 @@ fn the_reconcile_sweeps_only_peer_synced_origins_8586() {
 
     let mut evicted = Vec::new();
     let n = reconcile_peer_synced_against_shared(
-            &mut sessions,
-            &shared_sessions,
-            SteeringMap::unshared_for_test(-1),
-            &mut evicted,
-        );
+        &mut sessions,
+        &shared_sessions,
+        SteeringMap::unshared_for_test(-1),
+        &mut evicted,
+    );
 
     assert_eq!(n, swept.len(), "exactly the peer-synced origins are swept");
     for (origin, key) in &swept {
@@ -15712,11 +16459,11 @@ fn the_reconcile_keeps_a_peer_synced_entry_the_shared_map_still_holds_8586() {
 
     let mut evicted = Vec::new();
     let n = reconcile_peer_synced_against_shared(
-            &mut sessions,
-            &shared_sessions,
-            SteeringMap::unshared_for_test(-1),
-            &mut evicted,
-        );
+        &mut sessions,
+        &shared_sessions,
+        SteeringMap::unshared_for_test(-1),
+        &mut evicted,
+    );
 
     assert_eq!(n, 1, "only the one shared authority dropped");
     assert!(
@@ -15799,7 +16546,10 @@ fn only_a_refused_delete_moves_the_worker_epoch_8586() {
         false,
         2_000,
     );
-    assert_eq!(outcome.dropped, 1, "fixture: the delete must have been refused");
+    assert_eq!(
+        outcome.dropped, 1,
+        "fixture: the delete must have been refused"
+    );
     assert_eq!(outcome.repaired, 1, "fixture: and attributed to worker {W}");
     assert_eq!(
         crate::afxdp::session_glue::session_delete_drop_epoch(W),
@@ -15826,7 +16576,10 @@ fn only_a_refused_delete_moves_the_worker_epoch_8586() {
 #[ignore = "MEASUREMENT: #9327 reconcile sweep cost; prints numbers, asserts nothing (run with --release --ignored --nocapture)"]
 fn reconcile_cost_9327() {
     use std::time::Instant;
-    eprintln!("size_of::<SessionKey>() = {}", std::mem::size_of::<SessionKey>());
+    eprintln!(
+        "size_of::<SessionKey>() = {}",
+        std::mem::size_of::<SessionKey>()
+    );
     for n in [4096usize, 16384, 60000] {
         // FINDS NOTHING: every peer-synced session is still in the shared map,
         // so `stale` is empty and the sweep deletes nothing. This is the case
@@ -15880,8 +16633,7 @@ fn reconcile_cost_9327() {
 fn the_delete_drop_sweep_releases_the_swept_sessions_steering_claims_9560() {
     use crate::afxdp::bpf_map::{
         RECORDER_ONLY_MAP_FD, SteeringHolder, SteeringMap, SteeringRowOwners,
-        clear_session_map_writes, publish_live_session_entry, session_map_row,
-        session_map_writes,
+        clear_session_map_writes, publish_live_session_entry, session_map_row, session_map_writes,
     };
 
     let owners = SteeringRowOwners::default();
@@ -15911,13 +16663,12 @@ fn the_delete_drop_sweep_releases_the_swept_sessions_steering_claims_9560() {
 
     clear_session_map_writes();
     let mut evicted = Vec::new();
-    let n = reconcile_peer_synced_against_shared(
-        &mut sessions,
-        &shared_sessions,
-        handle,
-        &mut evicted,
+    let n =
+        reconcile_peer_synced_against_shared(&mut sessions, &shared_sessions, handle, &mut evicted);
+    assert_eq!(
+        n, 1,
+        "fixture: exactly the one key without shared authority is swept"
     );
-    assert_eq!(n, 1, "fixture: exactly the one key without shared authority is swept");
 
     assert_eq!(
         owners.held_row_count(&swept, 0),
@@ -15944,7 +16695,9 @@ fn key9327(i: usize) -> SessionKey {
     let mut k = test_key();
     k.src_port = (i % 65535) as u16;
     k.dst_port = ((i / 65535) % 65535) as u16;
-    k.src_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::from((i as u32).wrapping_add(0x0a00_0000)));
+    k.src_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::from(
+        (i as u32).wrapping_add(0x0a00_0000),
+    ));
     k
 }
 
@@ -15972,7 +16725,7 @@ fn key9327(i: usize) -> SessionKey {
 #[test]
 fn one_sweep_pass_is_bounded_by_the_budget_9327() {
     let n = super::DELETE_DROP_SWEEP_BUDGET * 40; // >> budget, so a whole-table
-                                                  // walk is plainly distinguishable
+    // walk is plainly distinguishable
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let mut sessions = SessionTable::new();
     for i in 0..n {
@@ -15988,11 +16741,11 @@ fn one_sweep_pass_is_bounded_by_the_budget_9327() {
     sweep.arm();
     let mut evicted = Vec::new();
     let first = sweep.step(
-            &mut sessions,
-            &shared_sessions,
-            SteeringMap::unshared_for_test(-1),
-            &mut evicted,
-        );
+        &mut sessions,
+        &shared_sessions,
+        SteeringMap::unshared_for_test(-1),
+        &mut evicted,
+    );
 
     assert!(
         first <= super::DELETE_DROP_SWEEP_BUDGET,
@@ -16056,7 +16809,11 @@ fn the_budgeted_sweep_still_sweeps_everything_9327() {
         "NON-VACUITY: {n} sessions were swept in {passes} pass(es), so the \
          multi-pass path this cell exists to check never ran"
     );
-    assert_eq!(evicted.len(), n, "every swept key must reach the flow-cache eviction list");
+    assert_eq!(
+        evicted.len(),
+        n,
+        "every swept key must reach the flow-cache eviction list"
+    );
 }
 
 /// NO PER-PASS ALLOCATION. The pre-#9327 code allocated two full key-clone Vecs
@@ -16091,11 +16848,11 @@ fn the_sweep_reuses_its_buffer_across_passes_9327() {
     let mut evicted = Vec::new();
 
     let first = sweep.step(
-            &mut sessions,
-            &shared_sessions,
-            SteeringMap::unshared_for_test(-1),
-            &mut evicted,
-        );
+        &mut sessions,
+        &shared_sessions,
+        SteeringMap::unshared_for_test(-1),
+        &mut evicted,
+    );
     let cap_after_first = sweep.stale_capacity_for_test();
     assert!(
         first > 0 && cap_after_first > 0,
@@ -16103,11 +16860,11 @@ fn the_sweep_reuses_its_buffer_across_passes_9327() {
     );
 
     let second = sweep.step(
-            &mut sessions,
-            &shared_sessions,
-            SteeringMap::unshared_for_test(-1),
-            &mut evicted,
-        );
+        &mut sessions,
+        &shared_sessions,
+        SteeringMap::unshared_for_test(-1),
+        &mut evicted,
+    );
     assert_eq!(
         second, 0,
         "fixture: the second window is entirely present in the shared map, so          this pass must collect NOTHING — that is what makes a retained buffer          distinguishable from a fresh one"
@@ -16133,12 +16890,15 @@ fn arming_restarts_an_in_flight_sweep_9327() {
     sweep.arm();
     let mut evicted = Vec::new();
     sweep.step(
-            &mut sessions,
-            &shared_sessions,
-            SteeringMap::unshared_for_test(-1),
-            &mut evicted,
-        );
-    assert!(sweep.cursor_for_test() > 0, "fixture: the first pass must advance the cursor");
+        &mut sessions,
+        &shared_sessions,
+        SteeringMap::unshared_for_test(-1),
+        &mut evicted,
+    );
+    assert!(
+        sweep.cursor_for_test() > 0,
+        "fixture: the first pass must advance the cursor"
+    );
     sweep.arm();
     assert_eq!(
         sweep.cursor_for_test(),
@@ -16258,7 +17018,9 @@ fn delete_drop_sweep_releases_nat_before_a_still_queued_delete_synced_10288() {
          dropped worker 3's holder bit"
     );
     assert_eq!(
-        forwarding.source_nat_rules[0].pool_allocator.live_flow_count(),
+        forwarding.source_nat_rules[0]
+            .pool_allocator
+            .live_flow_count(),
         0,
         "#10288: the live_by_flow slot must be reclaimed — it counts against \
          max_tracked_flows until the allocator reports AllocatorExhausted"
@@ -16379,7 +17141,9 @@ fn delete_drop_sweep_releases_nat64_before_a_still_queued_delete_synced_14961() 
     let flow = nat64_14961_flow(&key);
     let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
     assert_eq!(
-        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        alloc
+            .debug_persistent_lease_for_flow(&flow, permit)
+            .map(|l| l.active_flows),
         Some(1),
         "fixture precondition: the worker holds one active NAT64 reference"
     );
@@ -16423,14 +17187,20 @@ fn delete_drop_sweep_releases_nat64_before_a_still_queued_delete_synced_14961() 
     );
     assert_eq!(n, 1, "fixture: the sweep must collect the one stale key");
     assert_eq!(
-        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        alloc
+            .debug_persistent_lease_for_flow(&flow, permit)
+            .map(|l| l.active_flows),
         Some(0),
         "#14961: the sweep must release the worker's NAT64 hold before the \
          table record disappears — the still-queued DeleteSynced below finds \
          no entry and releases nothing, so without this the BIB active \
          reference is stranded for the life of the allocator"
     );
-    assert_eq!(alloc.holder_mask_for_flow(&flow), None, "the released flow record must be unlinked (no holder mask remains)");
+    assert_eq!(
+        alloc.holder_mask_for_flow(&flow),
+        None,
+        "the released flow record must be unlinked (no holder mask remains)"
+    );
 
     // Drain the late command through the real dispatcher: it must no-op
     // (no double release, no panic) and leave the freed state freed.
@@ -16450,7 +17220,9 @@ fn delete_drop_sweep_releases_nat64_before_a_still_queued_delete_synced_14961() 
     );
     assert_eq!(results.deleted_synced_keys, vec![key.clone()]);
     assert_eq!(
-        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        alloc
+            .debug_persistent_lease_for_flow(&flow, permit)
+            .map(|l| l.active_flows),
         Some(0),
         "the late DeleteSynced must not resurrect or double-release the NAT64 hold"
     );
@@ -16552,7 +17324,10 @@ fn delete_drop_sweep_then_late_delete_preserves_replacement_nat64_port_14961() {
         routing_scope: 0,
     };
     let alloc = &forwarding.nat64.prefixes[0].port_allocator;
-    assert_eq!(alloc.holder_mask_for_flow(&replacement_flow), Some(1 << WORKER));
+    assert_eq!(
+        alloc.holder_mask_for_flow(&replacement_flow),
+        Some(1 << WORKER)
+    );
 
     // The late queued delete for the OLD key drains now. It finds no table
     // entry for the old key and must not touch the replacement's hold.
@@ -16699,8 +17474,7 @@ fn trunk_snapshot_9383() -> crate::ConfigSnapshot {
 /// arrivals would resolve to the same zone and the cells would pass for free.
 #[test]
 fn a_trunk_parent_carries_its_zoned_units_zone_while_a_sibling_has_none_9383() {
-    let forwarding =
-        crate::afxdp::forwarding_build::build_forwarding_state(&trunk_snapshot_9383());
+    let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(&trunk_snapshot_9383());
     assert_eq!(
         forwarding
             .ifindex_to_zone_id
@@ -16749,8 +17523,7 @@ fn a_trunk_parent_carries_its_zoned_units_zone_while_a_sibling_has_none_9383() {
 /// a "no reverse session" outcome attributable to the zone check rather than to
 /// an empty table.
 fn drive_trunk_reply_9383(arrival_vlan: u16) -> (bool, usize) {
-    let forwarding =
-        crate::afxdp::forwarding_build::build_forwarding_state(&trunk_snapshot_9383());
+    let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(&trunk_snapshot_9383());
     let mut sessions = SessionTable::new();
     let fwd_key = SessionKey {
         addr_family: libc::AF_INET as u8,
@@ -16767,27 +17540,30 @@ fn drive_trunk_reply_9383(arrival_vlan: u16) -> (bool, usize) {
         rewrite_src_port: Some(40001),
         ..NatDecision::default()
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: TRUNK_ZONED_UNIT_IFINDEX,
-        tx_ifindex: TRUNK_PARENT_IFINDEX,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-        src_mac: Some([6, 7, 8, 9, 10, 11]),
-        tx_vlan_id: TRUNK_ZONED_VLAN,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: TRUNK_ZONED_UNIT_IFINDEX,
+            tx_ifindex: TRUNK_PARENT_IFINDEX,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: Some([6, 7, 8, 9, 10, 11]),
+            tx_vlan_id: TRUNK_ZONED_VLAN,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     // The forward flow: lan -> wan. `egress_zone` is what the #7169 arrival-zone
     // check compares against.
-    let metadata = SessionMetadata {
-        forward_ingress_vlan_id: None,
-        ingress_zone: TEST_LAN_ZONE_ID,
-        egress_zone: TEST_WAN_ZONE_ID,
-        ..test_metadata()
-    };
+    let metadata = SessionMetadata { forward_ingress_vlan_id: None,
+    ingress_zone: TEST_LAN_ZONE_ID,
+    egress_zone: TEST_WAN_ZONE_ID,
+    nat_scope_ifindex: None, ..test_metadata() };
     assert!(
         sessions.install_with_protocol_with_origin(
             fwd_key.clone(),
@@ -16806,7 +17582,9 @@ fn drive_trunk_reply_9383(arrival_vlan: u16) -> (bool, usize) {
 
     let reply_key = reverse_session_key(&fwd_key, nat);
     assert!(
-        sessions.find_forward_nat_match(&reply_key, |_| reply_key.routing_domain).is_some(),
+        sessions
+            .find_forward_nat_match(&reply_key, |_| reply_key.routing_domain)
+            .is_some(),
         "the reply tuple must find the forward NAT match BEFORE the arrival-zone \
          check runs — otherwise a `None` result says nothing about the zone (#9383)"
     );
@@ -16824,29 +17602,31 @@ fn drive_trunk_reply_9383(arrival_vlan: u16) -> (bool, usize) {
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let ha_state = BTreeMap::new();
 
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &forwarding,
-    &ha_state,
-    &dynamic_neighbors,
-    &flow,
-    1_000_000,
-    1,
-    PROTO_TCP,
-    TCP_FLAG_ACK,
-    // The reply arrives on the trunk PARENT — the physical bind port — which
-    // is exactly what `meta.ingress_ifindex` carries for a tagged frame.
-    TRUNK_PARENT_IFINDEX,
-    arrival_vlan,
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner);
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &flow,
+        1_000_000,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        // The reply arrives on the trunk PARENT — the physical bind port — which
+        // is exactly what `meta.ingress_ifindex` carries for a tagged frame.
+        TRUNK_PARENT_IFINDEX,
+        arrival_vlan,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    );
     (resolved.is_some(), sessions.len())
 }
 
@@ -16945,26 +17725,30 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
     };
     let mut metadata = test_metadata();
     metadata.log_session_init = true;
-    let make_delta = |kind| SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind,
-    key: key.clone(),
-    decision: test_decision(),
-    metadata: metadata.clone(),
-    policy_generation: 0,
-    origin: SessionOrigin::ForwardFlow,
-    fabric_redirect_sync: false,
-    created_ns: 0,
-    last_seen_ns: 0,
-    counters: crate::session::SessionCounters::default(),
-    observed_tos: 0,
-    observed_tcp_flags: 0,
-    session_id: 77,
-    bulk_resync: false,
-    // #15126: only the Open control is a fresh admission; an Update never is.
-    is_admission: matches!(kind, SessionDeltaKind::Open),
-    tcp_close_class: 2,
-    tcp_handshake_state: 0,
-    pptp_call_ids: 0,
-    purge_retirement: false, source_nat_static: None };
+    let make_delta = |kind| SessionDelta {
+        provenance: crate::session::ExportProvenance::Incremental,
+        kind,
+        key: key.clone(),
+        decision: test_decision(),
+        metadata: metadata.clone(),
+        policy_generation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: 77,
+        bulk_resync: false,
+        // #15126: only the Open control is a fresh admission; an Update never is.
+        is_admission: matches!(kind, SessionDeltaKind::Open),
+        tcp_close_class: 2,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        purge_retirement: false,
+        source_nat_static: None,
+    };
     let flush = |delta: SessionDelta| {
         let (handle, rx) = // CONNECTED, so the lossless peer-sync push can queue; the unconnected handle
         // refuses it before any frame reaches the channel.
@@ -17015,7 +17799,9 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
 
     let open = flush(make_delta(SessionDeltaKind::Open));
     assert!(
-        open.iter().filter_map(|f| f.dataplane_event_payload()).any(|p| p[52] == 1),
+        open.iter()
+            .filter_map(|f| f.dataplane_event_payload())
+            .any(|p| p[52] == 1),
         "CONTROL: an Open with log_session_init must emit an RT_FLOW SESSION_CREATE in this harness"
     );
 
@@ -17025,7 +17811,11 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
         "#9412: a close-state Update emitted an RT_FLOW record, a spurious SESSION_CREATE"
     );
     let sync: Vec<_> = update.iter().filter(|f| f.as_bytes()[4] == 3 /* MSG_SESSION_UPDATE; the #9412 golden lockstep pins this byte in both languages */).collect();
-    assert_eq!(sync.len(), 1, "#9412: the Update must be queued to the peer exactly once as MSG_SESSION_UPDATE");
+    assert_eq!(
+        sync.len(),
+        1,
+        "#9412: the Update must be queued to the peer exactly once as MSG_SESSION_UPDATE"
+    );
     assert_eq!(
         sync[0].as_bytes()[sync[0].as_bytes().len() - 22],
         2,
@@ -17060,14 +17850,29 @@ fn removing_a_displaced_session_keeps_the_survivors_shared_aliases_9679() {
 
     let slots = |e: &SyncedSessionEntry| {
         [
-            ("reverse-wire", reverse_session_key(&e.key, e.decision.nat), true),
-            ("reverse-canonical", reverse_canonical_key(&e.key, e.decision.nat), true),
-            ("forward-wire", forward_wire_key(&e.key, e.decision.nat), false),
+            (
+                "reverse-wire",
+                reverse_session_key(&e.key, e.decision.nat),
+                true,
+            ),
+            (
+                "reverse-canonical",
+                reverse_canonical_key(&e.key, e.decision.nat),
+                true,
+            ),
+            (
+                "forward-wire",
+                forward_wire_key(&e.key, e.decision.nat),
+                false,
+            ),
         ]
     };
     let mut covered = std::collections::BTreeSet::new();
     for (label, (removed, survivor)) in [("snat", &snat_pair), ("routing-domain", &domain_pair)] {
-        assert_ne!(removed.key, survivor.key, "{label}: the pair must be two sessions");
+        assert_ne!(
+            removed.key, survivor.key,
+            "{label}: the pair must be two sessions"
+        );
         let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
         let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
         let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -17082,15 +17887,24 @@ fn removing_a_displaced_session_keeps_the_survivors_shared_aliases_9679() {
             );
         }
         let owner = |slot: &SessionKey, nat: bool| {
-            let map = if nat { &shared_nat_sessions } else { &shared_forward_wire_sessions };
-            map.lock().expect("alias map").get(slot).map(|entry| entry.key.clone())
+            let map = if nat {
+                &shared_nat_sessions
+            } else {
+                &shared_forward_wire_sessions
+            };
+            map.lock()
+                .expect("alias map")
+                .get(slot)
+                .map(|entry| entry.key.clone())
         };
         let removed_slots = slots(removed);
         let survivor_slots = slots(survivor);
         let shared: Vec<_> = removed_slots
             .iter()
             .zip(survivor_slots.iter())
-            .filter(|((name, key, _), (_, other, _))| key == other && !(*name == "forward-wire" && key == &removed.key))
+            .filter(|((name, key, _), (_, other, _))| {
+                key == other && !(*name == "forward-wire" && key == &removed.key)
+            })
             .map(|((name, key, nat), _)| (*name, key.clone(), *nat))
             .collect();
         remove_shared_session(
@@ -17120,7 +17934,11 @@ fn removing_a_displaced_session_keeps_the_survivors_shared_aliases_9679() {
             if *name == "forward-wire" && key == &survivor.key {
                 continue;
             }
-            assert_eq!(owner(key, *nat), None, "{label}: the owner's removal left its {name} alias behind");
+            assert_eq!(
+                owner(key, *nat),
+                None,
+                "{label}: the owner's removal left its {name} alias behind"
+            );
         }
     }
     assert_eq!(
@@ -17129,7 +17947,6 @@ fn removing_a_displaced_session_keeps_the_survivors_shared_aliases_9679() {
         "the collision pairs must share every alias slot between them, or a slot's ownership check is untested"
     );
 }
-
 
 // F-149 (#9904): the session-cancel path routes unknown slots through the
 // same single-region backstop as the dispatch paths (it previously dropped
@@ -17279,18 +18096,21 @@ fn policy_remove_absent_companion_is_applied_not_partial_10512() {
         let companion = crate::session::reverse_session_key(&key, NatDecision::default());
         let (removed, report, deferred) =
             run_item(&mut sessions, &key, forward_id, 0xC0FFEE, Some(companion));
-        assert_eq!(deferred.len(), 1, "absent companion: only the forward intent");
+        assert_eq!(
+            deferred.len(),
+            1,
+            "absent companion: only the forward intent"
+        );
         assert_eq!(deferred[0].key, key, "intent must name the removed forward");
-        assert!(removed, "forward with an absent expected companion must be removed");
+        assert!(
+            removed,
+            "forward with an absent expected companion must be removed"
+        );
         assert!(
             !report.partial[0],
             "absent companion is converged, not partial"
         );
-        assert_eq!(
-            sessions.session_id_for(&key),
-            0,
-            "forward row must be gone"
-        );
+        assert_eq!(sessions.session_id_for(&key), 0, "forward row must be gone");
     }
     // (B) Companion present with a different live incarnation: forward
     // removed, companion preserved, partial set.
@@ -17321,20 +18141,25 @@ fn policy_remove_absent_companion_is_applied_not_partial_10512() {
         ));
         let live_companion_id = sessions.session_id_for(&companion);
         assert_ne!(live_companion_id, 0, "fixture must mint a live companion");
-        let (removed, report, deferred) =
-            run_item(&mut sessions, &key, forward_id, 0xC0FFEE, Some(companion.clone()));
-        assert_eq!(deferred.len(), 1, "refused companion: only the forward intent");
+        let (removed, report, deferred) = run_item(
+            &mut sessions,
+            &key,
+            forward_id,
+            0xC0FFEE,
+            Some(companion.clone()),
+        );
+        assert_eq!(
+            deferred.len(),
+            1,
+            "refused companion: only the forward intent"
+        );
         assert_eq!(deferred[0].key, key, "intent must name the removed forward");
         assert!(removed, "forward must be removed");
         assert!(
             report.partial[0],
             "a LIVE different companion incarnation must report partial"
         );
-        assert_eq!(
-            sessions.session_id_for(&key),
-            0,
-            "forward row must be gone"
-        );
+        assert_eq!(sessions.session_id_for(&key), 0, "forward row must be gone");
         assert_eq!(
             sessions.session_id_for(&companion),
             live_companion_id,
@@ -17375,7 +18200,11 @@ fn policy_remove_absent_companion_is_applied_not_partial_10512() {
             live_companion_id,
             Some(companion.clone()),
         );
-        assert_eq!(deferred.len(), 2, "matched companion: forward + companion intents");
+        assert_eq!(
+            deferred.len(),
+            2,
+            "matched companion: forward + companion intents"
+        );
         assert!(
             deferred.iter().any(|intent| intent.key == key),
             "forward intent present"
@@ -17385,15 +18214,8 @@ fn policy_remove_absent_companion_is_applied_not_partial_10512() {
             "companion intent present"
         );
         assert!(removed, "forward must be removed");
-        assert!(
-            !report.partial[0],
-            "matched companion must remove cleanly"
-        );
-        assert_eq!(
-            sessions.session_id_for(&key),
-            0,
-            "forward row must be gone"
-        );
+        assert!(!report.partial[0], "matched companion must remove cleanly");
+        assert_eq!(sessions.session_id_for(&key), 0, "forward row must be gone");
         assert_eq!(
             sessions.session_id_for(&companion),
             0,
@@ -17459,7 +18281,10 @@ fn policy_remove_absent_companion_is_applied_not_partial_10512() {
         assert_eq!(deferred.len(), 1, "one removal produces one intent");
         let intent = &deferred[0];
         assert_eq!(intent.key, key, "intent names the removed entry");
-        assert_eq!(intent.decision, decision, "intent carries the removed decision");
+        assert_eq!(
+            intent.decision, decision,
+            "intent carries the removed decision"
+        );
         assert_eq!(
             intent.metadata.ingress_zone, 0xA11C,
             "intent clones the entry metadata (ingress)"
@@ -17468,7 +18293,11 @@ fn policy_remove_absent_companion_is_applied_not_partial_10512() {
             intent.metadata.egress_zone, 0xE61E,
             "intent clones the entry metadata (egress)"
         );
-        assert_eq!(intent.origin, SessionOrigin::ForwardFlow, "intent carries the origin");
+        assert_eq!(
+            intent.origin,
+            SessionOrigin::ForwardFlow,
+            "intent carries the origin"
+        );
         assert_eq!(intent.worker_id, 7, "intent names the collecting worker");
     }
     // (E) Self-reversing tuple (forward and companion are the SAME key):
@@ -17496,14 +18325,23 @@ fn policy_remove_absent_companion_is_applied_not_partial_10512() {
         ));
         let forward_id = sessions.session_id_for(&key);
         assert_ne!(forward_id, 0, "fixture must mint a live identity");
-        let (removed, report, deferred) =
-            run_item(&mut sessions, &key, forward_id, forward_id, Some(key.clone()));
+        let (removed, report, deferred) = run_item(
+            &mut sessions,
+            &key,
+            forward_id,
+            forward_id,
+            Some(key.clone()),
+        );
         assert!(removed, "self-reversing entry must be removed");
         assert!(
             !report.partial[0] && !report.refused[0],
             "self-reversing removal must be clean"
         );
-        assert_eq!(deferred.len(), 1, "companion deduped: exactly the forward intent");
+        assert_eq!(
+            deferred.len(),
+            1,
+            "companion deduped: exactly the forward intent"
+        );
         assert_eq!(deferred[0].key, key, "intent must name the removed entry");
         assert_eq!(
             sessions.session_id_for(&key),
@@ -17588,7 +18426,10 @@ fn policy_remove_unexpected_live_companion_refuses_before_removal_10650() {
         session_map_writes().is_empty(),
         "a refused item must issue no BPF"
     );
-    assert!(!removed, "unexpected live companion must refuse, not remove");
+    assert!(
+        !removed,
+        "unexpected live companion must refuse, not remove"
+    );
     assert!(report.refused[0], "refusal must set the refused flag");
     assert!(
         !report.partial[0],
@@ -17722,9 +18563,15 @@ fn synthesized_reverse_companion_converges_session_id_across_workers_14667() {
             PROTO_TCP,
             TCP_FLAG_ACK,
         );
-        assert!(installed, "fixture: reverse synthesis must install on worker0");
+        assert!(
+            installed,
+            "fixture: reverse synthesis must install on worker0"
+        );
         let companion_id0 = worker0.session_id_for(&reverse_key);
-        assert_ne!(companion_id0, 0, "fixture: worker0 companion must mint an id");
+        assert_ne!(
+            companion_id0, 0,
+            "fixture: worker0 companion must mint an id"
+        );
 
         // The shared authority must carry that same identity, not the 0
         // sentinel that makes every sibling mint its own.
@@ -17793,7 +18640,8 @@ fn synthesized_reverse_companion_converges_session_id_across_workers_14667() {
             assert!(
                 !report.partial[0] && !report.refused[0],
                 "#14667: {label} policy remove must be clean (partial={} refused={})",
-                report.partial[0], report.refused[0]
+                report.partial[0],
+                report.refused[0]
             );
             assert_eq!(
                 worker.session_id_for(&reverse_key),
@@ -17939,10 +18787,8 @@ fn policy_delete_batch_arm_stashes_intents_without_bpf_10512() {
     }));
     let intents = Arc::new(Mutex::new(Vec::new()));
     let commands = Arc::new(Mutex::new(VecDeque::new()));
-    commands
-        .lock()
-        .expect("commands lock")
-        .push_back(crate::afxdp::WorkerCommand::DeletePolicyBatch {
+    commands.lock().expect("commands lock").push_back(
+        crate::afxdp::WorkerCommand::DeletePolicyBatch {
             items: vec![crate::afxdp::PolicyDeleteItem {
                 key: key.clone(),
                 session_id: forward_id,
@@ -17954,7 +18800,8 @@ fn policy_delete_batch_arm_stashes_intents_without_bpf_10512() {
             pending: Arc::clone(&pending),
             report: Arc::clone(&report),
             intents: Arc::clone(&intents),
-        });
+        },
+    );
     let forwarding = test_forwarding_state();
     let ha_state = BTreeMap::new();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
@@ -17972,19 +18819,31 @@ fn policy_delete_batch_arm_stashes_intents_without_bpf_10512() {
         &mut VecDeque::new(),
     );
     // Wiring: applied, acked, table row gone, report clean.
-    assert!(applied.lock().expect("applied lock")[0], "arm must mark applied");
+    assert!(
+        applied.lock().expect("applied lock")[0],
+        "arm must mark applied"
+    );
     assert_eq!(pending.load(Ordering::SeqCst), 0, "arm must ack");
     assert_eq!(sessions.session_id_for(&key), 0, "forward row must be gone");
     {
         let guard = report.lock().expect("report lock");
-        assert!(!guard.partial[0] && !guard.refused[0], "report must be clean");
+        assert!(
+            !guard.partial[0] && !guard.refused[0],
+            "report must be clean"
+        );
     }
     // Handoff: the intent landed in the SHARED vec (fence-scoped stash).
     {
         let stashed = intents.lock().expect("intents lock");
         assert_eq!(stashed.len(), 1, "arm must stash exactly one intent");
-        assert_eq!(stashed[0].key, key, "stashed intent must name the removed forward");
-        assert_eq!(stashed[0].worker_id, 0, "stashed intent must name the collecting worker");
+        assert_eq!(
+            stashed[0].key, key,
+            "stashed intent must name the removed forward"
+        );
+        assert_eq!(
+            stashed[0].worker_id, 0,
+            "stashed intent must name the collecting worker"
+        );
     }
     // Abort-quiescence: the worker issued NO BPF — the recorder is empty.
     // (Execution belongs to the coordinator; ha_tests pins it there.)
@@ -18046,17 +18905,19 @@ fn scoped_worker_delete_mismatched_keeps_both_halves_10512() {
     ));
     let live_forward_id = sessions.session_id_for(&key);
     let live_companion_id = sessions.session_id_for(&companion);
-    assert_ne!(live_forward_id, stale_forward_id, "reinstall must re-identify");
+    assert_ne!(
+        live_forward_id, stale_forward_id,
+        "reinstall must re-identify"
+    );
     let commands = Arc::new(Mutex::new(VecDeque::new()));
-    commands
-        .lock()
-        .expect("commands lock")
-        .push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional {
+    commands.lock().expect("commands lock").push_back(
+        crate::afxdp::WorkerCommand::DeleteSyncedConditional {
             key: key.clone(),
             expected_id: stale_forward_id,
             companion: Some(companion.clone()),
             companion_expected_id: 0,
-        });
+        },
+    );
     let forwarding = test_forwarding_state();
     let ha_state = BTreeMap::new();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
@@ -18114,15 +18975,14 @@ fn scoped_worker_delete_matched_removes_both_halves_10512() {
     ));
     let forward_id = sessions.session_id_for(&key);
     let commands = Arc::new(Mutex::new(VecDeque::new()));
-    commands
-        .lock()
-        .expect("commands lock")
-        .push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional {
+    commands.lock().expect("commands lock").push_back(
+        crate::afxdp::WorkerCommand::DeleteSyncedConditional {
             key: key.clone(),
             expected_id: forward_id,
             companion: Some(companion.clone()),
             companion_expected_id: 0,
-        });
+        },
+    );
     let forwarding = test_forwarding_state();
     let ha_state = BTreeMap::new();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
@@ -18196,11 +19056,7 @@ fn deferred_absent_branch_issues_no_bpf_10512() {
 fn run_list_scan10512(
     sessions: &mut SessionTable,
     req: crate::protocol::SessionPolicyListRequest,
-) -> (
-    Vec<crate::protocol::SessionPolicyMatch>,
-    Vec<String>,
-    usize,
-) {
+) -> (Vec<crate::protocol::SessionPolicyMatch>, Vec<String>, usize) {
     let collected = Arc::new(Mutex::new(crate::afxdp::PolicyReadCollector::default()));
     let overflow = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let errors = Arc::new(Mutex::new(Vec::new()));
@@ -18229,10 +19085,7 @@ fn run_list_scan10512(
         0,
         &mut VecDeque::new(),
     );
-    let rows = collected
-        .lock()
-        .expect("collector")
-        .take_rows();
+    let rows = collected.lock().expect("collector").take_rows();
     let errs = errors.lock().expect("errors").clone();
     let left = pending.load(Ordering::Acquire);
     (rows, errs, left)
@@ -18294,7 +19147,10 @@ fn worker_list_returns_matching_policy_with_identity_10512() {
         &mut sessions,
         list_req10512(vec![5], "prepublish", None, Vec::new(), Vec::new()),
     );
-    assert!(errs.is_empty(), "clean scan must error nothing, got {errs:?}");
+    assert!(
+        errs.is_empty(),
+        "clean scan must error nothing, got {errs:?}"
+    );
     assert_eq!(left, 0, "worker must ack the scan");
     assert_eq!(rows.len(), 1, "only the requested policy is returned");
     assert_eq!(rows[0].policy_id, 5);
@@ -18320,7 +19176,9 @@ fn worker_list_row_carries_live_dnat_rematch_inputs_10626() {
     meta.egress_zone = 9;
     let mut decision = test_decision();
     decision.nat = crate::nat::NatDecision {
-        rewrite_dst: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 61, 102))),
+        rewrite_dst: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            10, 0, 61, 102,
+        ))),
         rewrite_dst_port: Some(8443),
         ..Default::default()
     };
@@ -18337,7 +19195,10 @@ fn worker_list_row_carries_live_dnat_rematch_inputs_10626() {
         &mut sessions,
         list_req10512(vec![5], "prepublish", None, Vec::new(), Vec::new()),
     );
-    assert!(errs.is_empty(), "clean scan must error nothing, got {errs:?}");
+    assert!(
+        errs.is_empty(),
+        "clean scan must error nothing, got {errs:?}"
+    );
     assert_eq!(left, 0, "worker must ack the scan");
     assert_eq!(rows.len(), 1, "only the requested policy is returned");
     assert!(rows[0].dnat, "a translated dst is a DNAT row");
@@ -18382,7 +19243,13 @@ fn worker_list_legacy_cutoff_zero_unbounded_nil_rejected_10512() {
     // Far future: returned.
     let (rows, _, _) = run_list_scan10512(
         &mut sessions,
-        list_req10512(vec![5], "legacy", Some(now_secs + 3600), Vec::new(), Vec::new()),
+        list_req10512(
+            vec![5],
+            "legacy",
+            Some(now_secs + 3600),
+            Vec::new(),
+            Vec::new(),
+        ),
     );
     assert_eq!(rows.len(), 1, "row created before the fence must return");
     // None in legacy mode: caller bug, error, no scan.
@@ -18432,9 +19299,18 @@ fn worker_list_forward_class_excludes_reverse_10512() {
     let live = sessions.session_id_for(&key);
     let (rows, errs, _) = run_list_scan10512(
         &mut sessions,
-        list_req10512(vec![5], "prepublish", None, Vec::new(), vec!["forward".to_string()]),
+        list_req10512(
+            vec![5],
+            "prepublish",
+            None,
+            Vec::new(),
+            vec!["forward".to_string()],
+        ),
     );
-    assert!(errs.is_empty(), "clean scan must error nothing, got {errs:?}");
+    assert!(
+        errs.is_empty(),
+        "clean scan must error nothing, got {errs:?}"
+    );
     assert_eq!(rows.len(), 1, "only the forward row is discovered");
     assert_eq!(
         rows[0].expected_rt_flow_session_id, live,
@@ -18970,8 +19846,8 @@ fn prewarm_skips_stale_zone_entries_10612() {
     let worker_commands = vec![Arc::new(Mutex::new(VecDeque::new()))];
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, active_ha_runtime(1));
-    let drops_before =
-        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let drops_before = crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS
+        .load(std::sync::atomic::Ordering::Relaxed);
     prewarm_reverse_synced_sessions_for_owner_rgs(
         &shared_sessions,
         &shared_nat_sessions,
@@ -18985,8 +19861,8 @@ fn prewarm_skips_stale_zone_entries_10612() {
         &[1],
         1,
     );
-    let drops_after =
-        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let drops_after = crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS
+        .load(std::sync::atomic::Ordering::Relaxed);
     assert!(
         drops_after > drops_before,
         "prewarm of a stale entry must bump the fence-drop counter"
@@ -19051,8 +19927,8 @@ fn promote_skips_republish_for_stale_zone_rows_10612() {
         owner_rg_indexes: &shared_owner_rg_indexes,
     };
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
-    let drops_before =
-        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let drops_before = crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS
+        .load(std::sync::atomic::Ordering::Relaxed);
     let promoted = crate::afxdp::session_glue::maybe_promote_synced_session(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
@@ -19069,8 +19945,8 @@ fn promote_skips_republish_for_stale_zone_rows_10612() {
         0x10,
         SessionHitVerdict::Owner,
     );
-    let drops_after =
-        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let drops_after = crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS
+        .load(std::sync::atomic::Ordering::Relaxed);
     assert!(
         drops_after > drops_before,
         "promote of a stale-zone row must bump the fence-drop counter"
@@ -19130,8 +20006,8 @@ fn republish_bpf_skips_stale_zone_rows_10612() {
         &shared_owner_rg_indexes,
         &stale,
     );
-    let drops_before =
-        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let drops_before = crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS
+        .load(std::sync::atomic::Ordering::Relaxed);
     let count = republish_bpf_session_entries_for_owner_rgs(
         &shared_sessions,
         &shared_owner_rg_indexes,
@@ -19139,9 +20015,12 @@ fn republish_bpf_skips_stale_zone_rows_10612() {
         &[1],
         &forwarding,
     );
-    let drops_after =
-        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(count, 0, "a stale row must not republish (fd -1 publishes nothing either way; the counter below proves the skip)");
+    let drops_after = crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        count, 0,
+        "a stale row must not republish (fd -1 publishes nothing either way; the counter below proves the skip)"
+    );
     assert!(
         drops_after > drops_before,
         "republish of a stale-zone row must bump the fence-drop counter"
@@ -19167,7 +20046,7 @@ fn materialize_stale_zone_shared_hit_returns_miss_10612() {
             decision: test_decision(),
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
-                aux: SessionLookupAux::default(),
+            aux: SessionLookupAux::default(),
         },
         shared_entry: Some(SyncedSessionEntry {
             key: key.clone(),
@@ -19187,12 +20066,17 @@ fn materialize_stale_zone_shared_hit_returns_miss_10612() {
         origin: SessionOrigin::SyncImport,
         authority_deferred: false,
     };
-    let drops_before =
-        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
-    let (lookup, install_failed) =
-        super::materialize_shared_session_hit(&mut sessions, &mut resolved, &forwarding, 2_000_000, TCP_FLAG_ACK);
-    let drops_after =
-        crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let drops_before = crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let (lookup, install_failed) = super::materialize_shared_session_hit(
+        &mut sessions,
+        &mut resolved,
+        &forwarding,
+        2_000_000,
+        TCP_FLAG_ACK,
+    );
+    let drops_after = crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS
+        .load(std::sync::atomic::Ordering::Relaxed);
     assert!(
         !install_failed,
         "a stale-zone shared hit must materialize as a miss (no failure, just no install)"
@@ -19294,7 +20178,8 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v4_11315() {
         .epoch_for(&(ifindex, next_hop));
     assert!(dynamic_neighbors.remove_if_present(&(ifindex, next_hop)));
     let absent =
-        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored).resolution;
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored)
+            .resolution;
     assert_eq!(
         absent.disposition,
         ForwardingDisposition::MissingNeighbor,
@@ -19319,7 +20204,8 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v4_11315() {
     );
     // The same stored decision (stale A) must now re-resolve to live B.
     let served_b =
-        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored).resolution;
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored)
+            .resolution;
     assert_eq!(
         served_b.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -19418,7 +20304,8 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v6_11315() {
         .epoch_for(&(ifindex, next_hop));
     assert!(dynamic_neighbors.remove_if_present(&(ifindex, next_hop)));
     let absent =
-        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored).resolution;
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored)
+            .resolution;
     assert_eq!(
         absent.disposition,
         ForwardingDisposition::MissingNeighbor,
@@ -19442,7 +20329,8 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v6_11315() {
         "the first learn after removal does not bump the shard epoch (v6)"
     );
     let served_b =
-        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored).resolution;
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored)
+            .resolution;
     assert_eq!(
         served_b.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -19556,27 +20444,29 @@ fn session_hit_reresolves_after_manager_replace_removes_snapshot_neighbor_12255(
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, active_ha_runtime(1));
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &coordinator.forwarding,
-    &ha_state,
-    &dynamic,
-    &flow,
-    2_000_000,
-    1,
-    PROTO_TCP,
-    TCP_FLAG_ACK,
-    24,
-    0,
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &coordinator.forwarding,
+        &ha_state,
+        &dynamic,
+        &flow,
+        2_000_000,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        24,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("established local ForwardFlow hit");
     assert_eq!(
         resolved.decision.resolution.disposition,
@@ -19605,7 +20495,10 @@ fn established_session_re_resolves_after_fib_generation_changes_11373() {
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let initial = lookup_forwarding_resolution(&original_forwarding, flow.dst_ip).resolution;
     assert_eq!(initial.disposition, ForwardingDisposition::ForwardCandidate);
-    assert_eq!(initial.next_hop, Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))));
+    assert_eq!(
+        initial.next_hop,
+        Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1)))
+    );
     let decision = SessionDecision {
         resolution: initial,
         nat: NatDecision::default(),
@@ -19654,30 +20547,34 @@ fn established_session_re_resolves_after_fib_generation_changes_11373() {
     snapshot.interfaces[0].addresses.clear();
     let withdrawn_forwarding = build_forwarding_state(&snapshot);
     sessions.set_forwarding_revalidation_gen(1, 2);
-    assert!(withdrawn_forwarding
-        .neighbors
-        .contains_key(&(12, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1)))));
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &withdrawn_forwarding,
-    &ha_state,
-    &dynamic_neighbors,
-    &flow,
-    2_000_000,
-    2,
-    PROTO_TCP,
-    TCP_FLAG_ACK,
-    12,
-    0,
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    assert!(
+        withdrawn_forwarding
+            .neighbors
+            .contains_key(&(12, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))))
+    );
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &withdrawn_forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &flow,
+        2_000_000,
+        2,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        12,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("established session hit");
     assert_eq!(
         resolved.decision.resolution.disposition,
@@ -19703,27 +20600,29 @@ fn established_session_re_resolves_after_fib_generation_changes_11373() {
         },
         "and stamp it with the live generation"
     );
-    let local_resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &withdrawn_forwarding,
-    &ha_state,
-    &dynamic_neighbors,
-    &local_flow,
-    2_000_001,
-    2,
-    PROTO_TCP,
-    TCP_FLAG_ACK,
-    12,
-    0,
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let local_resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &withdrawn_forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &local_flow,
+        2_000_001,
+        2,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        12,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("established local-delivery session hit");
     assert_eq!(
         local_resolved.decision.resolution.disposition,
@@ -19773,42 +20672,49 @@ fn established_session_re_resolves_discard_and_next_hop_changes_11373() {
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let peer_worker_commands = Vec::new();
     let ha_state = BTreeMap::new();
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "8.8.8.8/32".to_string(),
-    next_hop_weights: vec![],
-    next_hops: vec![],
-    discard: true,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0,
-    mtu: 0, });
+    snapshot.routes.push(crate::RouteSnapshot {
+        reject: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "8.8.8.8/32".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: true,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     let discard_forwarding = build_forwarding_state(&snapshot);
     sessions.set_forwarding_revalidation_gen(1, 2);
-    assert!(discard_forwarding
-        .neighbors
-        .contains_key(&(12, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1)))));
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &discard_forwarding,
-    &ha_state,
-    &dynamic_neighbors,
-    &flow,
-    2_000_000,
-    2,
-    PROTO_TCP,
-    TCP_FLAG_ACK,
-    12,
-    0,
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    assert!(
+        discard_forwarding
+            .neighbors
+            .contains_key(&(12, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))))
+    );
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &discard_forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &flow,
+        2_000_000,
+        2,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        12,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("established session hit");
     assert_eq!(
         resolved.decision.resolution.disposition,
@@ -19867,30 +20773,34 @@ fn established_session_re_resolves_discard_and_next_hop_changes_11373() {
     snapshot.routes[0].next_hops = vec!["172.16.50.2@ge-0/0/0.50".to_string()];
     let moved_forwarding = build_forwarding_state(&snapshot);
     sessions.set_forwarding_revalidation_gen(1, 2);
-    assert!(moved_forwarding
-        .neighbors
-        .contains_key(&(12, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1)))));
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &moved_forwarding,
-    &ha_state,
-    &dynamic_neighbors,
-    &flow,
-    2_000_000,
-    2,
-    PROTO_TCP,
-    TCP_FLAG_ACK,
-    12,
-    0,
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    assert!(
+        moved_forwarding
+            .neighbors
+            .contains_key(&(12, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))))
+    );
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &moved_forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &flow,
+        2_000_000,
+        2,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        12,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("established session hit");
     assert_eq!(
         resolved.decision.resolution.disposition,
@@ -19917,7 +20827,8 @@ fn refresh_owner_rgs_resolves_live_route_before_restamp_11373() {
         dst_ip: key.dst_ip,
         forward_key: key.clone(),
     };
-    let initial_resolution = lookup_forwarding_resolution(&forwarding_before, flow.dst_ip).resolution;
+    let initial_resolution =
+        lookup_forwarding_resolution(&forwarding_before, flow.dst_ip).resolution;
     assert_eq!(
         initial_resolution.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -19940,8 +20851,7 @@ fn refresh_owner_rgs_resolves_live_route_before_restamp_11373() {
     ));
     let _ = sessions.drain_deltas(8);
 
-    snapshot.routes[1].next_hops =
-        vec!["172.16.50.2@ge-0/0/0.50".to_string()];
+    snapshot.routes[1].next_hops = vec!["172.16.50.2@ge-0/0/0.50".to_string()];
     snapshot.neighbors.push(crate::NeighborSnapshot {
         interface: "ge-0-0-0.50".to_string(),
         ifindex: 12,
@@ -20015,8 +20925,7 @@ fn demote_owner_rgs_resolves_live_route_before_restamp_11373() {
     ));
     let _ = sessions.drain_deltas(8);
 
-    snapshot.routes[1].next_hops =
-        vec!["172.16.50.2@ge-0/0/0.50".to_string()];
+    snapshot.routes[1].next_hops = vec!["172.16.50.2@ge-0/0/0.50".to_string()];
     snapshot.neighbors.push(crate::NeighborSnapshot {
         interface: "ge-0-0-0.50".to_string(),
         ifindex: 12,
@@ -20159,8 +21068,7 @@ fn run_both_refused_pptp_retry_resolves_replacement_12133(
         assert!(
             !pending.iter().any(|command| matches!(
                 command,
-                WorkerCommand::ForgetPptpCallByControl(_)
-                    | WorkerCommand::InstallPptpCall { .. }
+                WorkerCommand::ForgetPptpCallByControl(_) | WorkerCommand::InstallPptpCall { .. }
             )),
             "fixture: neither the CDN nor the install reached Q's queue"
         );
@@ -20477,8 +21385,14 @@ fn same_pass_cdn_does_not_resurrect_queued_install_12133() {
         observed.push((backlog, result));
     }
     for (backlog, (q_res, x_res, pending)) in observed {
-        assert_eq!(q_res, None, "backlog={backlog}: torn-down call resurrected on Q");
-        assert_eq!(x_res, None, "backlog={backlog}: X must also forget the call");
+        assert_eq!(
+            q_res, None,
+            "backlog={backlog}: torn-down call resurrected on Q"
+        );
+        assert_eq!(
+            x_res, None,
+            "backlog={backlog}: X must also forget the call"
+        );
         assert_eq!(pending, 0, "backlog={backlog}: retry must not linger");
     }
 }
@@ -20885,7 +21799,10 @@ fn across_scopes_absent_exact_key_uses_one_primary_index_probe_13078() {
 #[test]
 fn resolved_flow_callers_reuse_snapshots_without_reprobing_13079() {
     let glue = include_str!("resolve.rs");
-    let resolver = function_body(glue, "fn resolve_flow_session_decision_with_conntrack_and_payload(");
+    let resolver = function_body(
+        glue,
+        "fn resolve_flow_session_decision_with_conntrack_and_payload(",
+    );
     let poll = include_str!("../poll_descriptor/mod.rs");
     let descriptor = function_body(poll, "fn poll_binding_process_descriptor_with_injection(");
     let keyed_probe_sites = [
@@ -20969,7 +21886,11 @@ fn control_plane_delete_emits_harvested_close_13972() {
             None,
         );
         let deltas = sessions.drain_deltas(16);
-        assert_eq!(deltas.len(), 1, "local control-plane delete must emit one Close: {deltas:?}");
+        assert_eq!(
+            deltas.len(),
+            1,
+            "local control-plane delete must emit one Close: {deltas:?}"
+        );
         let close = &deltas[0];
         assert_eq!(close.kind, crate::session::SessionDeltaKind::Close);
         assert_eq!(close.key, key);
@@ -21013,7 +21934,11 @@ fn control_plane_delete_emits_harvested_close_13972() {
             &mut deferred,
         ));
         let deltas = sessions.drain_deltas(16);
-        assert_eq!(deltas.len(), 1, "policy delete must emit one Close: {deltas:?}");
+        assert_eq!(
+            deltas.len(),
+            1,
+            "policy delete must emit one Close: {deltas:?}"
+        );
         assert_eq!(deltas[0].counters.fwd_bytes, 10_000);
         assert_eq!(deltas[0].tcp_close_class, 8);
     }
@@ -21039,7 +21964,10 @@ fn control_plane_delete_emits_harvested_close_13972() {
             0,
             None,
         );
-        assert!(sessions.drain_deltas(16).is_empty(), "peer-synced delete must emit no Close");
+        assert!(
+            sessions.drain_deltas(16).is_empty(),
+            "peer-synced delete must emit no Close"
+        );
     }
     // Peer-originated delete of locally owned entry (peer_delete=true): silent.
     {
@@ -21063,7 +21991,10 @@ fn control_plane_delete_emits_harvested_close_13972() {
             0,
             None,
         );
-        assert!(sessions.drain_deltas(16).is_empty(), "peer-originated delete must emit no Close");
+        assert!(
+            sessions.drain_deltas(16).is_empty(),
+            "peer-originated delete must emit no Close"
+        );
     }
 }
 
@@ -21195,7 +22126,10 @@ fn resync_and_promote_do_not_reemit_session_create_15126() {
     );
     let resync_deltas = sessions.drain_deltas(16);
     assert_eq!(resync_deltas.len(), 1, "fixture: re-export emits one Open");
-    assert!(resync_deltas[0].bulk_resync, "fixture: re-export is bulk_resync");
+    assert!(
+        resync_deltas[0].bulk_resync,
+        "fixture: re-export is bulk_resync"
+    );
     assert!(
         !resync_deltas[0].is_admission,
         "#15126: a LossResync re-export is not a fresh admission"

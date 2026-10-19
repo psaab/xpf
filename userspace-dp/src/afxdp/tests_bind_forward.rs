@@ -6,6 +6,7 @@
 #![allow(unused_imports)]
 
 use super::test_fixtures::*;
+use super::tests_support::*;
 use super::worker::WorkerTxPipeline;
 use super::*;
 use crate::test_zone_ids::*;
@@ -18,7 +19,6 @@ use crate::{
     InterfaceAddressSnapshot, NeighborSnapshot, PolicyRuleSnapshot, RouteSnapshot,
     SourceNATRuleSnapshot, StaticNATRuleSnapshot, ThreeColorPolicerSnapshot, ZoneSnapshot,
 };
-use super::tests_support::*;
 
 #[test]
 fn mlx5_keeps_umem_owner_bind_strategy() {
@@ -31,7 +31,6 @@ fn mlx5_keeps_umem_owner_bind_strategy() {
         None
     );
 }
-
 
 #[test]
 fn virtio_uses_auto_mode_umem_owner_strategy() {
@@ -60,17 +59,13 @@ fn virtio_uses_auto_mode_umem_owner_strategy() {
     }
 }
 
-
 #[test]
 fn shared_umem_socket_roles_use_kernel_legal_bind_flags() {
     let mut info = IfInfo::invalid();
     info.set_queue(0);
 
-    let owner = bind_flag_candidates_for_socket_role(
-        &info,
-        Some("mlx5_core"),
-        XskSocketRole::SharedOwner,
-    );
+    let owner =
+        bind_flag_candidates_for_socket_role(&info, Some("mlx5_core"), XskSocketRole::SharedOwner);
     assert_eq!(owner, &[XSK_BIND_FLAGS_ZEROCOPY]);
     assert_ne!(
         owner[0] & SocketConfig::XDP_BIND_ZEROCOPY,
@@ -86,8 +81,8 @@ fn shared_umem_socket_roles_use_kernel_legal_bind_flags() {
     // owner UMEM (`umem->zc`) and its wake behavior from the owner pool's
     // `uses_need_wakeup`; this positive row pins both inherited bits, rather
     // than only pinning that the secondary request omits forbidden flags.
-    let inherited = owner[0]
-        & (SocketConfig::XDP_BIND_ZEROCOPY | SocketConfig::XDP_BIND_NEED_WAKEUP);
+    let inherited =
+        owner[0] & (SocketConfig::XDP_BIND_ZEROCOPY | SocketConfig::XDP_BIND_NEED_WAKEUP);
     assert_eq!(inherited, XSK_BIND_FLAGS_ZEROCOPY);
 
     let secondary = bind_flag_candidates_for_socket_role(
@@ -97,16 +92,16 @@ fn shared_umem_socket_roles_use_kernel_legal_bind_flags() {
     );
     assert_eq!(secondary, &[SocketConfig::XDP_BIND_SHARED_UMEM]);
     assert_eq!(
-        secondary[0] & (SocketConfig::XDP_BIND_COPY
-            | SocketConfig::XDP_BIND_ZEROCOPY
-            | SocketConfig::XDP_BIND_NEED_WAKEUP),
+        secondary[0]
+            & (SocketConfig::XDP_BIND_COPY
+                | SocketConfig::XDP_BIND_ZEROCOPY
+                | SocketConfig::XDP_BIND_NEED_WAKEUP),
         0,
         "Linux rejects mode/wakeup flags on a shared-UMEM bind; the \
          owner pool supplies those effective properties"
     );
     assert_eq!(describe_bind_flags(secondary[0]), "shared-umem");
 }
-
 
 #[test]
 fn shared_umem_group_key_is_same_device_mlx5_only() {
@@ -130,55 +125,62 @@ fn shared_umem_group_key_is_same_device_mlx5_only() {
     );
 }
 
-
 #[test]
 fn split_owner_fabric_redirect_skips_local_reverse_placeholder() {
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::FabricRedirect,
-        local_ifindex: 0,
-        egress_ifindex: 21,
-        tx_ifindex: 21,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
-        neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
-        src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::FabricRedirect,
+            local_ifindex: 0,
+            egress_ifindex: 21,
+            tx_ifindex: 21,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
+            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+            src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
 
     assert!(!should_install_local_reverse_session(decision, true));
     assert!(!should_install_local_reverse_session(decision, false));
 }
 
-
 #[test]
 fn fabric_redirect_reply_from_real_fabric_ingress_keeps_local_reverse() {
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::FabricRedirect,
-        local_ifindex: 0,
-        egress_ifindex: 21,
-        tx_ifindex: 21,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
-        neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
-        src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::FabricRedirect,
+            local_ifindex: 0,
+            egress_ifindex: 21,
+            tx_ifindex: 21,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
+            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+            src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
 
     assert!(should_install_local_reverse_session(decision, true));
     assert!(!should_install_local_reverse_session(decision, false));
 }
-
 
 #[test]
 fn cloned_worker_umem_shares_allocation_identity() {
@@ -201,7 +203,6 @@ fn cloned_worker_umem_shares_allocation_identity() {
     assert!(!shared.shares_allocation_with(&private));
 }
 
-
 #[test]
 fn worker_binding_lookup_prefers_same_queue_binding() {
     let mut lookup = WorkerBindingLookup::default();
@@ -214,7 +215,6 @@ fn worker_binding_lookup_prefers_same_queue_binding() {
     assert_eq!(lookup.target_index(2, 7, 3, 5), Some(0));
     assert_eq!(lookup.target_index(2, 5, 1, 5), Some(2));
 }
-
 
 #[test]
 fn worker_binding_lookup_hashes_fabric_target_across_queues() {
@@ -230,7 +230,6 @@ fn worker_binding_lookup_hashes_fabric_target_across_queues() {
     assert_eq!(indices, [Some(10), Some(11), Some(12), Some(13)]);
 }
 
-
 #[test]
 fn worker_binding_lookup_resolves_slot_index() {
     let mut lookup = WorkerBindingLookup::default();
@@ -238,7 +237,6 @@ fn worker_binding_lookup_resolves_slot_index() {
     assert_eq!(lookup.slot_index(11), Some(3));
     assert_eq!(lookup.slot_index(99), None);
 }
-
 
 #[test]
 fn build_live_forward_request_from_frame_uses_precomputed_hints() {
@@ -263,19 +261,24 @@ fn build_live_forward_request_from_frame_uses_precomputed_hints() {
         protocol: PROTO_TCP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 11,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
-        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-        tx_vlan_id: 80,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let hints = PendingForwardHints {
         expected_ports: Some((12345, 5201)),
         target_binding_index: Some(9),
@@ -350,19 +353,32 @@ fn build_live_forward_request_threads_nat64_reverse_info_5606() {
     // NAT64 reverse decision (nat64 = true): the reply is translated v4 -> v6.
     // `NatDecision::reverse` restores the original v6 src/dst; here we assemble
     // the equivalent decision directly.
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 11,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V6(orig_client)),
-        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision { rewrite_src: Some(IpAddr::V6(orig_server)), rewrite_dst: Some(IpAddr::V6(orig_client)), rewrite_src_port: None, rewrite_dst_port: Some(5000), source_nat_icmp: None, nat64: true, nptv6: false }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V6(orig_client)),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V6(orig_server)),
+            rewrite_dst: Some(IpAddr::V6(orig_client)),
+            rewrite_src_port: None,
+            rewrite_dst_port: Some(5000),
+            source_nat_icmp: None,
+            nat64: true,
+            nptv6: false,
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let reverse_info = Nat64ReverseInfo {
         orig_src_v6: orig_client,
         orig_dst_v6: orig_server,
@@ -430,7 +446,6 @@ fn build_live_forward_request_threads_nat64_reverse_info_5606() {
     );
 }
 
-
 #[test]
 fn build_live_forward_request_from_frame_drops_logged_output_filter_discard() {
     let lookup = WorkerBindingLookup::default();
@@ -451,19 +466,24 @@ fn build_live_forward_request_from_frame_drops_logged_output_filter_discard() {
         pkt_len: 60,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 11,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
-        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-        tx_vlan_id: 80,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let flow = SessionFlow {
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
@@ -474,8 +494,8 @@ fn build_live_forward_request_from_frame_drops_logged_output_filter_discard() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let forwarding = build_forwarding_state(&ConfigSnapshot {
@@ -553,7 +573,6 @@ fn build_live_forward_request_from_frame_drops_logged_output_filter_discard() {
     );
 }
 
-
 /// #3608 RED-on-revert: an OUTPUT firewall-filter `then reject` on the transit
 /// forward path must synthesize an ACTIVE reject reply (a TCP RST here), NOT the
 /// historical silent drop. On revert (the `CoSTxSelection.reject` flag or the
@@ -626,19 +645,24 @@ fn build_live_forward_request_from_frame_output_filter_reject_sends_rst_3608() {
         tcp_flags: 0x02,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 11,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(dst_ip)),
-        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-        tx_vlan_id: 80,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(dst_ip)),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let flow = SessionFlow {
         src_ip: IpAddr::V4(src_ip),
         dst_ip: IpAddr::V4(dst_ip),
@@ -649,8 +673,8 @@ fn build_live_forward_request_from_frame_output_filter_reject_sends_rst_3608() {
             dst_ip: IpAddr::V4(dst_ip),
             src_port,
             dst_port,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let forwarding = build_forwarding_state(&ConfigSnapshot {
@@ -817,19 +841,24 @@ fn output_filter_reject_carries_the_configured_icmp_code_6854() {
         protocol: PROTO_UDP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 11,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(dst_ip)),
-        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-        tx_vlan_id: 80,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(dst_ip)),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let flow = SessionFlow {
         src_ip: IpAddr::V4(src_ip),
         dst_ip: IpAddr::V4(dst_ip),
@@ -840,8 +869,8 @@ fn output_filter_reject_carries_the_configured_icmp_code_6854() {
             dst_ip: IpAddr::V4(dst_ip),
             src_port,
             dst_port,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let mut forwarding = build_forwarding_state(&ConfigSnapshot {
@@ -1097,8 +1126,8 @@ fn output_filter_matches_post_snat_source_forward_leg_3642() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let forwarding = build_forwarding_state(&ConfigSnapshot {
@@ -1180,7 +1209,6 @@ fn output_filter_matches_post_snat_source_forward_leg_3642() {
     );
 }
 
-
 /// #3642 reverse leg: for the SNAT reply the flow's `forward_key` is the reply's
 /// own ingress tuple (src = responder, dst = the SNAT address). The reverse
 /// `decision.nat` restores the original client address (rewrite_dst =
@@ -1235,8 +1263,8 @@ fn output_filter_matches_post_snat_dest_reverse_leg_3642() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
             src_port: 443,
             dst_port: 12345,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let forwarding = build_forwarding_state(&ConfigSnapshot {
@@ -1317,7 +1345,6 @@ fn output_filter_matches_post_snat_dest_reverse_leg_3642() {
     );
 }
 
-
 /// #3642 DNAT: a DNAT'd flow's egress `filter output` must match the TRANSLATED
 /// (post-DNAT) DESTINATION. The filter discards TCP `to destination-address
 /// 10.0.61.50` (the internal server); the pre-NAT dst is the public VIP
@@ -1367,8 +1394,8 @@ fn output_filter_matches_post_dnat_dest_3642() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)),
             src_port: 40000,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let forwarding = build_forwarding_state(&ConfigSnapshot {
@@ -1448,7 +1475,6 @@ fn output_filter_matches_post_dnat_dest_3642() {
     );
 }
 
-
 #[test]
 fn icmp_reverse_key_keeps_identifier_position() {
     let flow = SessionFlow {
@@ -1461,8 +1487,8 @@ fn icmp_reverse_key_keeps_identifier_position() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 0x1234,
             dst_port: 0,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let reverse = flow.reverse_key_with_nat(NatDecision {
@@ -1475,7 +1501,6 @@ fn icmp_reverse_key_keeps_identifier_position() {
     assert_eq!(reverse.dst_port, 0);
 }
 
-
 #[test]
 fn synced_replica_entry_keeps_peer_synced_entries_promotable() {
     let entry = SyncedSessionEntry {
@@ -1486,14 +1511,22 @@ fn synced_replica_entry_keeps_peer_synced_entries_promotable() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
-        decision: SessionDecision { resolution: lookup_forwarding_resolution(&build_forwarding_state(&nat_snapshot()),
-        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),).resolution, nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
+        decision: SessionDecision {
+            resolution: lookup_forwarding_resolution(
+                &build_forwarding_state(&nat_snapshot()),
+                IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            )
+            .resolution,
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
@@ -1512,6 +1545,7 @@ fn synced_replica_entry_keeps_peer_synced_entries_promotable() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
@@ -1532,7 +1566,6 @@ fn synced_replica_entry_keeps_peer_synced_entries_promotable() {
     assert_eq!(replica.decision, entry.decision);
 }
 
-
 #[test]
 fn synced_replica_entry_marks_local_entries_worker_local() {
     let entry = SyncedSessionEntry {
@@ -1543,14 +1576,22 @@ fn synced_replica_entry_marks_local_entries_worker_local() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
-        decision: SessionDecision { resolution: lookup_forwarding_resolution(&build_forwarding_state(&nat_snapshot()),
-        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),).resolution, nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
+        decision: SessionDecision {
+            resolution: lookup_forwarding_resolution(
+                &build_forwarding_state(&nat_snapshot()),
+                IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            )
+            .resolution,
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
@@ -1569,6 +1610,7 @@ fn synced_replica_entry_marks_local_entries_worker_local() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         leak_incarnation: 0,
         origin: SessionOrigin::ForwardFlow,
@@ -1590,7 +1632,6 @@ fn synced_replica_entry_marks_local_entries_worker_local() {
     assert_eq!(replica.decision, entry.decision);
 }
 
-
 #[test]
 fn reconcile_stop_preserves_shared_synced_sessions() {
     let mut coordinator = Coordinator::new();
@@ -1602,14 +1643,22 @@ fn reconcile_stop_preserves_shared_synced_sessions() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
-        decision: SessionDecision { resolution: lookup_forwarding_resolution(&build_forwarding_state(&nat_snapshot()),
-        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),).resolution, nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
+        decision: SessionDecision {
+            resolution: lookup_forwarding_resolution(
+                &build_forwarding_state(&nat_snapshot()),
+                IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            )
+            .resolution,
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
@@ -1628,6 +1677,7 @@ fn reconcile_stop_preserves_shared_synced_sessions() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
@@ -1660,7 +1710,6 @@ fn reconcile_stop_preserves_shared_synced_sessions() {
     assert!(coordinator.snapshot_shared_session_entries().is_empty());
 }
 
-
 #[test]
 fn replay_synced_sessions_requeues_preserved_entries_for_new_workers() {
     let coordinator = Coordinator::new();
@@ -1672,14 +1721,22 @@ fn replay_synced_sessions_requeues_preserved_entries_for_new_workers() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
-        decision: SessionDecision { resolution: lookup_forwarding_resolution(&build_forwarding_state(&nat_snapshot()),
-        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),).resolution, nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
+        decision: SessionDecision {
+            resolution: lookup_forwarding_resolution(
+                &build_forwarding_state(&nat_snapshot()),
+                IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            )
+            .resolution,
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
@@ -1698,6 +1755,7 @@ fn replay_synced_sessions_requeues_preserved_entries_for_new_workers() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
@@ -1805,6 +1863,7 @@ fn replay_synced_sessions_publishes_kernel_local_for_local_delivery_13675() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
@@ -1830,13 +1889,15 @@ fn replay_synced_sessions_publishes_kernel_local_for_local_delivery_13675() {
     assert_eq!(replayed, 1);
     let writes = session_map_writes();
     assert!(
-        writes.iter().any(|w| w.key == key
-            && w.value == Some(USERSPACE_SESSION_ACTION_PASS_TO_KERNEL)),
+        writes
+            .iter()
+            .any(|w| w.key == key && w.value == Some(USERSPACE_SESSION_ACTION_PASS_TO_KERNEL)),
         "replay must publish PASS_TO_KERNEL for active LocalDelivery, got {writes:?}"
     );
     assert!(
-        !writes.iter().any(|w| w.key == key
-            && w.value == Some(USERSPACE_SESSION_ACTION_REDIRECT)),
+        !writes
+            .iter()
+            .any(|w| w.key == key && w.value == Some(USERSPACE_SESSION_ACTION_REDIRECT)),
         "replay must not publish forward REDIRECT for kernel-local session, got {writes:?}"
     );
     // SNAT reverse-wire row: kernel-local publish adds exactly one
@@ -1852,7 +1913,6 @@ fn replay_synced_sessions_publishes_kernel_local_for_local_delivery_13675() {
     );
 }
 
-
 #[test]
 fn resolution_target_uses_rewritten_destination_for_reverse_dnat() {
     let flow = SessionFlow {
@@ -1865,35 +1925,39 @@ fn resolution_target_uses_rewritten_destination_for_reverse_dnat() {
             dst_ip: IpAddr::V6("2001:559:8585:80::8".parse().expect("dst")),
             src_port: 0x1234,
             dst_port: 0,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 5,
-        tx_ifindex: 5,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V6(
-            "2001:559:8585:ef00::100".parse().expect("next hop"),
-        )),
-        neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
-        src_mac: None,
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision {
-        rewrite_src: None,
-        rewrite_dst: Some(IpAddr::V6("2001:559:8585:ef00::100".parse().expect("lan"))),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 5,
+            tx_ifindex: 5,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V6(
+                "2001:559:8585:ef00::100".parse().expect("next hop"),
+            )),
+            neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision {
+            rewrite_src: None,
+            rewrite_dst: Some(IpAddr::V6("2001:559:8585:ef00::100".parse().expect("lan"))),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     assert_eq!(
         resolution_target_for_session(&flow, decision),
         IpAddr::V6("2001:559:8585:ef00::100".parse().expect("lan"))
     );
 }
-
 
 #[test]
 fn session_resolution_absent_neighbor_is_stale_live_binding_reuses_cache_12255() {
@@ -1909,23 +1973,28 @@ fn session_resolution_absent_neighbor_is_stale_live_binding_reuses_cache_12255()
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 0,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
-        neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
-        src_mac: None,
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 0,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     // #11315: an absent live binding is stale -> re-resolve (no cached MAC).
     let absent = lookup_forwarding_resolution_for_session(
         &state,
@@ -1962,11 +2031,11 @@ fn session_resolution_absent_neighbor_is_stale_live_binding_reuses_cache_12255()
     assert_eq!(resolved.tx_vlan_id, 80);
 }
 
-
 #[test]
 fn build_forwarded_frame_rewrites_l2_and_decrements_ttl() {
     let state = build_forwarding_state(&forwarding_snapshot(true));
-    let resolution = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution;
+    let resolution =
+        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution;
     assert_eq!(
         resolution.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -2023,11 +2092,11 @@ fn build_forwarded_frame_rewrites_l2_and_decrements_ttl() {
     assert_eq!(out[22], 63);
 }
 
-
 #[test]
 fn rewrite_forwarded_frame_in_place_reuses_rx_frame() {
     let state = build_forwarding_state(&forwarding_snapshot(true));
-    let resolution = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution;
+    let resolution =
+        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution;
     let mut frame = Vec::new();
     write_eth_header(
         &mut frame,
@@ -2084,7 +2153,6 @@ fn rewrite_forwarded_frame_in_place_reuses_rx_frame() {
     assert_eq!(out[22], 63);
 }
 
-
 #[test]
 fn build_forwarded_frame_uses_fabric_header_without_nat() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
@@ -2124,22 +2192,27 @@ fn build_forwarded_frame_uses_fabric_header_without_nat() {
             options: 0,
         },
         meta,
-        &SessionDecision { resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::FabricRedirect,
-            local_ifindex: 0,
-            egress_ifindex: 21,
-            tx_ifindex: 21,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
-            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
-            tx_vlan_id: 0,
-            route_mtu: 0,
-            transport_route_mtu: 0,
-        }, nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
+        &SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::FabricRedirect,
+                local_ifindex: 0,
+                egress_ifindex: 21,
+                tx_ifindex: 21,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
+                neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         &state,
         None,
     )
@@ -2151,7 +2224,6 @@ fn build_forwarded_frame_uses_fabric_header_without_nat() {
 }
 
 // --- Static NAT integration tests ---
-
 
 #[test]
 fn static_nat_external_ip_recognized_as_local() {
@@ -2165,7 +2237,6 @@ fn static_nat_external_ip_recognized_as_local() {
         "static NAT external IP must be in local_v4"
     );
 }
-
 
 #[test]
 fn static_nat_dnat_routes_to_internal_ip() {
@@ -2186,11 +2257,11 @@ fn static_nat_dnat_routes_to_internal_ip() {
     // After DNAT translation, resolution target is internal IP
     let internal_ip: IpAddr = "192.168.1.10".parse().unwrap();
     let resolution =
-        lookup_forwarding_resolution_with_dynamic(&state, &Default::default(), internal_ip).resolution;
+        lookup_forwarding_resolution_with_dynamic(&state, &Default::default(), internal_ip)
+            .resolution;
     // Should resolve to trust interface (ifindex 5) via connected route
     assert_eq!(resolution.egress_ifindex, 5);
 }
-
 
 #[test]
 fn static_nat_snat_rewrites_outbound_source() {
@@ -2212,7 +2283,6 @@ fn static_nat_snat_rewrites_outbound_source() {
         Some("203.0.113.10".parse::<IpAddr>().unwrap())
     );
 }
-
 
 #[test]
 fn static_nat_snat_matches_when_zone_is_empty() {
@@ -2244,7 +2314,6 @@ fn static_nat_snat_matches_when_zone_is_empty() {
     );
     assert!(snat.rewrite_dst.is_none());
 }
-
 
 #[test]
 fn static_nat_takes_priority_over_interface_snat() {
@@ -2285,7 +2354,6 @@ fn static_nat_takes_priority_over_interface_snat() {
         Some("203.0.113.10".parse::<IpAddr>().unwrap())
     );
 }
-
 
 #[test]
 fn static_nat_v6_dnat_and_snat() {
@@ -2338,7 +2406,6 @@ fn static_nat_v6_dnat_and_snat() {
         Some("2001:db8::10".parse::<IpAddr>().unwrap())
     );
 }
-
 
 #[test]
 fn post_dnat_source_nat_matches_translated_destination() {
@@ -2401,8 +2468,8 @@ fn post_dnat_source_nat_matches_translated_destination() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
             src_port: 54321,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let dnat = state
@@ -2445,7 +2512,6 @@ fn post_dnat_source_nat_matches_translated_destination() {
     );
     assert_eq!(merged.rewrite_dst_port, Some(8443));
 }
-
 
 // ---------------------------------------------------------------------------
 // #7174 C19 MEASUREMENT: can a FLOWLESS packet (a non-first fragment) reach the
@@ -2820,6 +2886,7 @@ fn a_sibling_workers_replica_carries_zero_counters_for_a_live_session_7919() {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     };
     let t0 = 1_000_000_000u64;
 

@@ -6,6 +6,7 @@
 #![allow(unused_imports)]
 
 use super::test_fixtures::*;
+use super::tests_support::*;
 use super::worker::WorkerTxPipeline;
 use super::*;
 use crate::test_zone_ids::*;
@@ -18,7 +19,6 @@ use crate::{
     InterfaceAddressSnapshot, NeighborSnapshot, PolicyRuleSnapshot, RouteSnapshot,
     SourceNATRuleSnapshot, StaticNATRuleSnapshot, ThreeColorPolicerSnapshot, ZoneSnapshot,
 };
-use super::tests_support::*;
 
 /// #1885 session-HIT pin: the live keepalive/echo-reply stream rides
 /// an EXISTING session (the first packet installs it), so the
@@ -67,7 +67,6 @@ fn gre_to_self_session_hit_delivery_is_inner_packet_exactly_once() {
     }
 }
 
-
 /// #1885: VLAN-tagged underlay (the live reth0.80 topology). Pre-fix
 /// the LocalDelivery arm sliced the ORIGINAL tagged outer frame at the
 /// post-decap inner meta's l3_offset (14) — the payload started with
@@ -78,7 +77,6 @@ fn gre_to_self_vlan_tagged_local_delivery_is_inner_packet_exactly_once() {
     assert_gre_to_self_delivers_inner_exactly_once(80);
 }
 
-
 /// #1885 blast radius: on an UNTAGGED underlay the mis-paired slice
 /// started at the outer L3 header — a valid version nibble, so the TUN
 /// write SUCCEEDED but delivered the still-encapsulated OUTER packet.
@@ -87,7 +85,6 @@ fn gre_to_self_vlan_tagged_local_delivery_is_inner_packet_exactly_once() {
 fn gre_to_self_untagged_local_delivery_is_inner_packet_exactly_once() {
     assert_gre_to_self_delivers_inner_exactly_once(0);
 }
-
 
 /// #1885 blast radius: NON-decapped local delivery was enqueued TWICE
 /// (the in-arm desc-based call duplicated the leg's trailing
@@ -148,7 +145,6 @@ fn unencapsulated_local_delivery_reinjects_slow_path_exactly_once() {
          (#1885 duplicate-enqueue pin — the in-arm call would make it 2)"
     );
 }
-
 
 /// #3019 LITERAL fail-on-revert (session-MISS): a `from-zone lan to-zone
 /// junos-host then deny` policy DROPS a host-bound packet on the LocalDelivery
@@ -215,7 +211,6 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_miss() {
     );
 }
 
-
 /// #3019 lifeline fail-safe (session-MISS GREEN pair): with NO junos-host
 /// policy configured, a host-bound packet keeps pre-#3019 behavior — admitted
 /// (dbg.policy_deny == 0) and reinjected to the slow path (slow_path_drops ==
@@ -272,7 +267,6 @@ fn poll_descriptor_no_junos_host_policy_local_delivery_unchanged_session_miss() 
     assert!(rx.try_recv().is_err());
 }
 
-
 /// #3706 LITERAL fail-on-revert (session-MISS): a `from-zone lan to-zone
 /// junos-host then permit log session-init session-close` policy admits a
 /// host-bound flow, and the installed local-delivery session MUST carry BOTH
@@ -318,7 +312,6 @@ fn poll_descriptor_junos_host_permit_log_stamps_local_delivery_session_miss() {
     );
 }
 
-
 /// #3706 GREEN pair (session-MISS): a `to-zone junos-host then permit` policy
 /// with NO `then log` clause installs the host-local session but MUST NOT set
 /// either log flag — proving the #3706 stamp propagates the policy's ACTUAL log
@@ -342,7 +335,10 @@ fn poll_descriptor_junos_host_permit_no_log_local_delivery_no_overlog() {
         policy_id, 77,
         "the admitting junos-host policy id is stamped even without `then log`"
     );
-    assert_eq!(timeout_ns, None, "unset application timeout uses global timeout");
+    assert_eq!(
+        timeout_ns, None,
+        "unset application timeout uses global timeout"
+    );
 }
 
 /// #12863 regression: a matched `to-zone junos-host` permit must propagate the
@@ -371,7 +367,6 @@ fn poll_descriptor_junos_host_permit_stamps_application_inactivity_timeout() {
         );
     }
 }
-
 
 /// #3706 fail-on-revert (established session-HIT double-count): a
 /// `to-zone junos-host then permit` host-local session must count each packet
@@ -474,7 +469,6 @@ fn poll_descriptor_junos_host_permit_established_hit_counts_once() {
     );
 }
 
-
 /// #3326 LITERAL fail-on-revert (session-MISS): a host-bound packet denied by
 /// the zone host-inbound admission gate must increment the
 /// `host_inbound_denied_packets` batch counter (which `syncBPFCountersLocked`
@@ -490,7 +484,10 @@ fn poll_descriptor_host_inbound_deny_counts_local_delivery_session_miss() {
     // the TCP/179 host-bound packet is denied (Junos deny-all posture).
     let mut forwarding = build_forwarding_state(&gre_to_self_snapshot());
     let zone_ids: Vec<u16> = forwarding.zone_id_to_name.keys().copied().collect();
-    assert!(!zone_ids.is_empty(), "fixture must define at least one zone");
+    assert!(
+        !zone_ids.is_empty(),
+        "fixture must define at least one zone"
+    );
     for id in zone_ids {
         forwarding
             .zone_host_inbound
@@ -534,7 +531,6 @@ fn poll_descriptor_host_inbound_deny_counts_local_delivery_session_miss() {
     );
 }
 
-
 /// #3610 fail-on-revert (session-MISS, poll loop): a host-bound packet denied by
 /// the zone host-inbound admission gate must emit a tuple-rich RT_FLOW deny event
 /// — the #3615 policy-deny event kind carried with the DISTINCT host-inbound
@@ -547,7 +543,10 @@ fn poll_descriptor_host_inbound_deny_counts_local_delivery_session_miss() {
 fn poll_descriptor_host_inbound_deny_emits_tuple_event_session_miss() {
     let mut forwarding = build_forwarding_state(&gre_to_self_snapshot());
     let zone_ids: Vec<u16> = forwarding.zone_id_to_name.keys().copied().collect();
-    assert!(!zone_ids.is_empty(), "fixture must define at least one zone");
+    assert!(
+        !zone_ids.is_empty(),
+        "fixture must define at least one zone"
+    );
     for id in zone_ids {
         forwarding
             .zone_host_inbound
@@ -619,7 +618,6 @@ fn poll_descriptor_host_inbound_deny_emits_tuple_event_session_miss() {
     assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
 }
 
-
 /// #3326 GREEN companion: with an admit-all host-inbound zone (the fixture zones
 /// carry `system-services all` since #3705 — every known zone is enforcing, so
 /// admit-all is now explicit rather than the removed configured=false default),
@@ -660,7 +658,6 @@ fn poll_descriptor_host_inbound_admit_does_not_count_deny_session_miss() {
         "admit-all host-inbound must NOT bump the host-inbound deny counter"
     );
 }
-
 
 /// #3019 LITERAL fail-on-revert (session-HIT): a tightened `to-zone junos-host
 /// then deny` tears down an ALREADY ESTABLISHED host-bound session on the next
@@ -762,7 +759,8 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
             session_close_burst: 0,
         },
     );
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -796,22 +794,27 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
         src_port: 12345,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
-    let local_decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::LocalDelivery,
-        local_ifindex: 24,
-        egress_ifindex: 24,
-        tx_ifindex: 24,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let local_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::LocalDelivery,
+            local_ifindex: 24,
+            egress_ifindex: 24,
+            tx_ifindex: 24,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let local_metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_LAN_ZONE_ID,
@@ -830,6 +833,7 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     };
     assert!(sessions.install_with_protocol_with_origin(
         flow_key.clone(),
@@ -906,7 +910,11 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
     assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
     assert_eq!(event.src_port, 12345);
     assert_eq!(event.dst_port, 5201);
-    assert_eq!(sessions.len(), 0, "junos-host deny must tear down the cached session");
+    assert_eq!(
+        sessions.len(),
+        0,
+        "junos-host deny must tear down the cached session"
+    );
     let deltas = sessions.drain_deltas(16);
     assert_eq!(deltas.len(), 1);
     assert_eq!(deltas[0].kind, SessionDeltaKind::Close);
@@ -914,7 +922,6 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
     assert!(telemetry.dbg.policy_deny >= 1);
     assert_eq!(event_handle.dataplane_event_stats().policy_deny.sent, 1);
 }
-
 
 /// #1885 decap-level consistency pin: on VLAN-TAGGED ingress the decap
 /// must produce a synthetic frame and an inner meta that describe EACH
@@ -1054,7 +1061,6 @@ fn native_gre_decap_classifies_from_inner_dscp_11809() {
     }
 }
 
-
 /// #2782 fail-on-revert: a Checksum-Present GRE frame (C bit set, valid
 /// checksum) MUST decap to the inner packet — exactly the inner bytes at
 /// the correct offset. Before #2782 the decap path returned `None` the
@@ -1092,7 +1098,6 @@ fn native_gre_decap_checksum_present_yields_inner_packet() {
         "a VALID checksum must not bump the invalid-drop counter"
     );
 }
-
 
 /// An unkeyed endpoint matches only a GRE header with the K bit clear.
 /// Keyed endpoints still match their exact nonzero 32-bit key.
@@ -1193,7 +1198,6 @@ fn native_gre_decap_checksum_key_sequence_present_yields_inner_packet() {
     );
 }
 
-
 /// #2782: a Checksum-Present frame whose checksum does NOT verify is a
 /// COUNTED drop (not a silent blackhole, not a misforward). The
 /// `gre_decap_checksum_invalid_drops_total` counter must advance by one
@@ -1226,7 +1230,6 @@ fn native_gre_decap_checksum_invalid_drops_and_counts() {
     );
 }
 
-
 /// #2782 fail-closed: a Checksum-Present frame truncated past the 4-byte
 /// Checksum+Reserved1 field must NOT over-read — it returns `None`. Here
 /// the outer IP Total Length lies (claims a full frame) but the captured
@@ -1255,7 +1258,6 @@ fn native_gre_decap_checksum_present_truncated_header_fails_closed() {
         "a truncated checksum-present GRE header must fail closed (no over-read)"
     );
 }
-
 
 /// #2327 fail-on-revert: a GRE (proto-47) frame whose outer tuple/key
 /// match ONLY a non-GRE (here: WireGuard) tunnel row must NOT be
@@ -1289,7 +1291,6 @@ fn gre_decap_does_not_match_wireguard_row_with_same_outer_tuple() {
     );
 }
 
-
 /// #2327 fail-on-revert (defense-in-depth pin): even if the build-side
 /// index were wrong and surfaced a non-GRE endpoint id for the inbound
 /// tuple, the per-candidate `tunnel_mode_kind` re-check in
@@ -1314,7 +1315,6 @@ fn gre_decap_rejects_non_gre_candidate_even_if_indexed() {
          even when the decap index lists it"
     );
 }
-
 
 /// #2327 fail-on-revert: a genuine GRE frame matching a GRE-mode row
 /// still decaps (the kind-segregation must not break the happy path).
@@ -1352,7 +1352,6 @@ fn gre_decap_still_matches_genuine_gre_row() {
 // decap chokepoint, not a downstream consumer.
 // ====================================================================
 
-
 /// A GRE packet whose IPv4 inner declares UDP but its IP-declared length
 /// ends before the 8-byte UDP header (total_len = ihl + 2). Pre-#2376
 /// this stamped `protocol = UDP`, `l4_offset = ihl`, and
@@ -1373,7 +1372,6 @@ fn gre_decap_drops_truncated_udp_inner_v4() {
     );
 }
 
-
 /// Same as above for an IPv4 ICMP inner shorter than its 8-byte header.
 #[test]
 fn gre_decap_drops_truncated_icmp_inner_v4() {
@@ -1387,7 +1385,6 @@ fn gre_decap_drops_truncated_icmp_inner_v4() {
          header must fail closed (no decap)"
     );
 }
-
 
 /// IPv6 inner declaring UDP but with payload_len < 8 (the UDP header does
 /// not fit). FAILS if the IPv6 `packet.len() >= l4 + 8` guard is removed.
@@ -1404,7 +1401,6 @@ fn gre_decap_drops_truncated_udp_inner_v6() {
     );
 }
 
-
 /// IPv6 inner declaring ICMPv6 but with payload_len < 8.
 #[test]
 fn gre_decap_drops_truncated_icmpv6_inner_v6() {
@@ -1418,7 +1414,6 @@ fn gre_decap_drops_truncated_icmpv6_inner_v6() {
          header must fail closed (no decap)"
     );
 }
-
 
 /// #2376 anti-over-reject: a WELL-FORMED GRE-tunneled UDP inner (full
 /// 8-byte UDP header + payload) still decaps and stamps the correct
@@ -1481,9 +1476,7 @@ fn gre_decap_refuses_pt_v4_inner_nibble_v6_mismatch() {
     inner[11] = sum as u8;
     let frame = build_gre_to_self_outer_frame_with_inner(0x0800, &inner);
     let meta = gre_to_self_outer_meta(0, frame.len());
-    let before = forwarding
-        .gre_decap_counters
-        .pt_nibble_mismatch_refusals();
+    let before = forwarding.gre_decap_counters.pt_nibble_mismatch_refusals();
     assert!(
         try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_none(),
         "PT=IPv4 with an inner version nibble of 6 must fail closed \
@@ -1509,9 +1502,7 @@ fn gre_decap_refuses_pt_v6_inner_nibble_v4_mismatch() {
     inner[0] = 0x40; // version 4, TC-high 0 — PT still claims IPv6
     let frame = build_gre_to_self_outer_frame_with_inner(0x86dd, &inner);
     let meta = gre_to_self_outer_meta(0, frame.len());
-    let before = forwarding
-        .gre_decap_counters
-        .pt_nibble_mismatch_refusals();
+    let before = forwarding.gre_decap_counters.pt_nibble_mismatch_refusals();
     assert!(
         try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_none(),
         "PT=IPv6 with an inner version nibble of 4 must fail closed \
@@ -1598,7 +1589,10 @@ fn gre_decap_pt_v6_inner_nibble_v6_still_decaps() {
 /// transport-domain gate an outer carrying the tunnel's addresses and key
 /// decaps in ANY routing domain and its inner is judged as the tunnel's
 /// zone. These cells pin the gate: same VRF decaps, cross-VRF refuses.
-fn gre_vrf_snapshot_10653(transport_table: &str, ingress_instance: Option<(&str, u32)>) -> ConfigSnapshot {
+fn gre_vrf_snapshot_10653(
+    transport_table: &str,
+    ingress_instance: Option<(&str, u32)>,
+) -> ConfigSnapshot {
     let mut snapshot = gre_to_self_snapshot();
     snapshot.tunnel_endpoints[0].transport_table = transport_table.to_string();
     if let Some((instance, domain)) = ingress_instance {
@@ -1695,8 +1689,14 @@ fn gre_decap_non_transport_ingress_refused_v4_11567() {
     meta.ingress_ifindex = 24; // lan zone, still the default transport VRF
 
     assert_eq!(
-        forwarding.ifindex_to_routing_instance.get(&24).map(String::as_str),
-        forwarding.ifindex_to_routing_instance.get(&12).map(String::as_str),
+        forwarding
+            .ifindex_to_routing_instance
+            .get(&24)
+            .map(String::as_str),
+        forwarding
+            .ifindex_to_routing_instance
+            .get(&12)
+            .map(String::as_str),
         "fixture must keep wrong ingress and transport egress in the same VRF"
     );
     assert!(
@@ -1742,8 +1742,14 @@ fn gre_decap_non_transport_ingress_refused_v6_11567() {
     meta.ingress_ifindex = 24; // lan zone, still the default transport VRF
 
     assert_eq!(
-        forwarding.ifindex_to_routing_instance.get(&24).map(String::as_str),
-        forwarding.ifindex_to_routing_instance.get(&12).map(String::as_str),
+        forwarding
+            .ifindex_to_routing_instance
+            .get(&24)
+            .map(String::as_str),
+        forwarding
+            .ifindex_to_routing_instance
+            .get(&12)
+            .map(String::as_str),
         "fixture must keep wrong ingress and transport egress in the same VRF"
     );
     assert!(
@@ -1817,7 +1823,6 @@ fn gre_outer_host_inbound_denial_blocks_decap_11054() {
     );
 }
 
-
 /// #10516 required poll composition: native GRE decapsulation must expose the
 /// inner local UDP/4500 ESP payload to the Stage-11 SA gate, which may then
 /// delegate the packet only after a matching SA hit.
@@ -1837,7 +1842,9 @@ fn gre_inner_ipsec_sa_hit_reaches_delegated_outlet_10516() {
     let key = ipsec_sa_key(dst, spi, src).expect("same-family GRE-inner SA fixture");
     forwarding.ipsec_sa.upsert(key);
 
-    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(
+        1500,
+    ));
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
     binding.interface = Arc::<str>::from("ge-0-0-0");
@@ -1861,12 +1868,15 @@ fn gre_inner_ipsec_sa_hit_reaches_delegated_outlet_10516() {
     assert_eq!(reinjector.delegated_status().queued_packets, 1);
     assert_eq!(reinjector.test_enqueued_delegated(), vec![true]);
     assert_eq!(
-        forwarding.ipsec_sa.counters.snapshot().sa_miss_dropped_packets,
+        forwarding
+            .ipsec_sa
+            .counters
+            .snapshot()
+            .sa_miss_dropped_packets,
         0
     );
     assert_eq!(binding.scratch.scratch_recycle.len(), 1);
 }
-
 
 /// #2376 anti-over-reject: a well-formed GRE-tunneled ICMP echo inner
 /// still decaps (mirrors `build_gre_inner_icmp_packet_v4`, full 8-byte
@@ -1882,7 +1892,6 @@ fn gre_decap_well_formed_icmp_inner_v4_still_decaps() {
     assert_eq!(decap.meta.protocol, PROTO_ICMP);
     assert_eq!(decap.meta.l4_offset, 14 + 20);
 }
-
 
 /// #2486 fail-on-revert: native GRE decap MUST stamp
 /// `GRE_DECAP_INGRESS_FLAG` on the inner packet's meta so the
@@ -1911,7 +1920,6 @@ fn gre_decap_marks_inner_meta_with_gre_in_flag() {
     );
 }
 
-
 /// #2376 composition / no-regression: the pre-existing TCP guard must
 /// still drop a GRE inner declaring TCP but shorter than the 20-byte TCP
 /// header — the UDP/ICMP fix must not weaken the TCP path.
@@ -1928,7 +1936,6 @@ fn gre_decap_drops_truncated_tcp_inner_v4_no_regression() {
     );
 }
 
-
 /// #2327 fail-on-revert: the egress encap dispatcher must FAIL CLOSED on
 /// an unknown tunnel mode — a row whose mode is neither GRE nor
 /// WireGuard must NOT be silently GRE-encapsulated (the pre-#2327
@@ -1938,7 +1945,7 @@ fn gre_decap_drops_truncated_tcp_inner_v4_no_regression() {
 /// contract without standing up a full forwarded-frame fixture.
 #[test]
 fn unknown_tunnel_mode_classifies_as_unknown_not_gre() {
-    use crate::afxdp::{tunnel_mode_kind, TunnelKind};
+    use crate::afxdp::{TunnelKind, tunnel_mode_kind};
     assert_eq!(tunnel_mode_kind("gre"), TunnelKind::Gre);
     assert_eq!(tunnel_mode_kind("ip6gre"), TunnelKind::Gre);
     assert_eq!(tunnel_mode_kind("wireguard"), TunnelKind::WireGuard);
@@ -1951,7 +1958,6 @@ fn unknown_tunnel_mode_classifies_as_unknown_not_gre() {
         );
     }
 }
-
 
 /// #5140 LITERAL fail-on-revert (security): the post-GRE-decap host-inbound
 /// admission gate MUST read the ICMP/ICMPv6 type from the decapped inner
@@ -1989,7 +1995,10 @@ fn gre_decap_inner_icmp_echo_denied_by_host_inbound_reads_inner_type() {
     // what makes the outer-vs-inner read observable: outer flags 0x0B decodes to
     // error type 11 (admit-exempt); inner type 8 is echo (deny).
     let zone_ids: Vec<u16> = forwarding.zone_id_to_name.keys().copied().collect();
-    assert!(!zone_ids.is_empty(), "fixture must define at least one zone");
+    assert!(
+        !zone_ids.is_empty(),
+        "fixture must define at least one zone"
+    );
     for id in zone_ids {
         forwarding
             .zone_host_inbound
@@ -2060,7 +2069,6 @@ fn gre_decap_inner_icmp_echo_denied_by_host_inbound_reads_inner_type() {
     );
 }
 
-
 // ── #5615: direct GRE-decap fail-on-revert coverage for the other 6 #5140
 // post-decap inner-read sites. #5140/PR #5613 swapped 7 `raw_frame`→
 // `packet_frame` inner reads but shipped a direct fail-on-revert test for only
@@ -2070,7 +2078,6 @@ fn gre_decap_inner_icmp_echo_denied_by_host_inbound_reads_inner_type() {
 // OUTER byte at the same inner-relative `meta` offset — so a revert of that
 // site to `raw_frame` (reading the outer) flips the observable. See the issue
 // #5615 body for the 7-site map. ─────────────────────────────────────────────
-
 
 /// #5615 fail-on-revert (session-HIT host-inbound ICMP type,
 /// `poll_descriptor/mod.rs` ~1622). Sibling of the covered session-MISS test
@@ -2143,7 +2150,10 @@ fn gre_decap_session_hit_host_inbound_reads_inner_icmp_type_5615() {
 
     // Tighten to a ping-less (present-but-EMPTY) host-inbound set on every zone.
     let zone_ids: Vec<u16> = forwarding.zone_id_to_name.keys().copied().collect();
-    assert!(!zone_ids.is_empty(), "fixture must define at least one zone");
+    assert!(
+        !zone_ids.is_empty(),
+        "fixture must define at least one zone"
+    );
     for id in zone_ids {
         forwarding
             .zone_host_inbound
@@ -2187,7 +2197,6 @@ fn gre_decap_session_hit_host_inbound_reads_inner_icmp_type_5615() {
         "the session-HIT host-inbound deny must tear down the cached session"
     );
 }
-
 
 /// #5615 helper: a VLAN-tagged GRE-to-self OUTER frame (outer TTL 64) wrapping an
 /// inner IPv4 ICMP echo request 10.255.0.2 -> `dst` with the given inner TTL.
@@ -2265,7 +2274,6 @@ fn gre_to_self_outer_meta_wan(frame_len: usize) -> UserspaceDpMeta {
     gre_to_self_outer_meta(80, frame_len)
 }
 
-
 /// #5615 fail-on-revert (session-MISS TTL, `poll_descriptor/mod.rs` ~3240).
 /// A GRE-tunnelled inner ICMP echo to a TRANSIT destination (8.8.8.8) whose
 /// INNER TTL is 1 must generate an ICMP Time Exceeded on the session-MISS
@@ -2296,7 +2304,10 @@ fn gre_decap_session_miss_ttl_expiry_reads_inner_ttl_5615() {
 
     // Inner ICMP echo to transit 8.8.8.8, inner TTL = 1 (would expire).
     let frame = gre_frame_inner_icmp_echo_v4(Ipv4Addr::new(8, 8, 8, 8), 1);
-    assert_eq!(frame[26], 64, "outer IPv4 TTL byte must be 64 (differs from inner 1)");
+    assert_eq!(
+        frame[26], 64,
+        "outer IPv4 TTL byte must be 64 (differs from inner 1)"
+    );
     let meta = gre_to_self_outer_meta_wan(frame.len());
 
     let (batch, dbg) = txn_run_descriptor_checked(
@@ -2308,9 +2319,18 @@ fn gre_decap_session_miss_ttl_expiry_reads_inner_ttl_5615() {
         meta,
         true,
     );
-    assert_eq!(dbg.rx, 1, "the tagged GRE descriptor must reach the poll path");
-    assert_eq!(batch.metadata_packets, 1, "the tagged GRE metadata must parse");
-    assert_eq!(batch.validated_packets, 1, "the tagged GRE packet must validate");
+    assert_eq!(
+        dbg.rx, 1,
+        "the tagged GRE descriptor must reach the poll path"
+    );
+    assert_eq!(
+        batch.metadata_packets, 1,
+        "the tagged GRE metadata must parse"
+    );
+    assert_eq!(
+        batch.validated_packets, 1,
+        "the tagged GRE packet must validate"
+    );
     assert_eq!(
         dbg.session_miss, 1,
         "the decapped transit echo must reach the session-MISS TTL path"
@@ -2330,7 +2350,6 @@ fn gre_decap_session_miss_ttl_expiry_reads_inner_ttl_5615() {
          session install; the raw_frame revert would forward it and cache a session"
     );
 }
-
 
 /// #5615 fail-on-revert (session-HIT TTL, `poll_descriptor/mod.rs` ~1803).
 /// Two passes on one (binding, sessions) pair. Pass 1 (inner TTL 64) forwards
@@ -2375,7 +2394,10 @@ fn gre_decap_session_hit_ttl_expiry_reads_inner_ttl_5615() {
 
     // Pass 2: same 5-tuple, inner TTL 1 — session-HIT TTL check.
     let frame_hit = gre_frame_inner_icmp_echo_v4(Ipv4Addr::new(8, 8, 8, 8), 1);
-    assert_eq!(frame_hit[26], 64, "outer IPv4 TTL byte must be 64 (differs from inner 1)");
+    assert_eq!(
+        frame_hit[26], 64,
+        "outer IPv4 TTL byte must be 64 (differs from inner 1)"
+    );
     let meta_hit = gre_to_self_outer_meta_wan(frame_hit.len());
     let (batch_hit, dbg_hit) = txn_run_descriptor_checked(
         &mut binding,
@@ -2387,8 +2409,14 @@ fn gre_decap_session_hit_ttl_expiry_reads_inner_ttl_5615() {
         true,
     );
     assert_eq!(dbg_hit.rx, 1, "the tagged GRE hit must reach the poll path");
-    assert_eq!(batch_hit.validated_packets, 1, "the tagged GRE hit must validate");
-    assert_eq!(dbg_hit.session_hit, 1, "pass 2 must reach the session-HIT TTL path");
+    assert_eq!(
+        batch_hit.validated_packets, 1,
+        "the tagged GRE hit must validate"
+    );
+    assert_eq!(
+        dbg_hit.session_hit, 1,
+        "pass 2 must reach the session-HIT TTL path"
+    );
 
     assert_eq!(
         prebuilt_te_count(&binding),
@@ -2398,7 +2426,6 @@ fn gre_decap_session_hit_ttl_expiry_reads_inner_ttl_5615() {
          read sees the outer TTL (64) and forwards the echo with no TE"
     );
 }
-
 
 /// #5615 fail-on-revert (flow-cache-HIT TTL, `poll_descriptor/flow_cache_hit.rs`
 /// ~158 `packet_ttl_would_expire` + ~167 `build_local_time_exceeded_request`).
@@ -2464,7 +2491,10 @@ fn gre_decap_flow_cache_hit_ttl_expiry_reads_inner_ttl_5615() {
         frame_hit[outer_l3 + 4] > 1,
         "outer IPv4 ID high byte must exceed inner TTL 1 so a raw_frame revert is non-expiring"
     );
-    assert_eq!(frame_hit[26], 64, "outer IPv4 TTL byte must be 64 (differs from inner 1)");
+    assert_eq!(
+        frame_hit[26], 64,
+        "outer IPv4 TTL byte must be 64 (differs from inner 1)"
+    );
     let meta_hit = gre_to_self_outer_meta_wan(frame_hit.len());
     let (batch_hit, dbg_hit) = txn_run_descriptor_checked(
         &mut binding,
@@ -2476,7 +2506,10 @@ fn gre_decap_flow_cache_hit_ttl_expiry_reads_inner_ttl_5615() {
         true,
     );
     assert_eq!(dbg_hit.rx, 1, "the tagged GRE hit must reach the poll path");
-    assert_eq!(batch_hit.validated_packets, 1, "the tagged GRE hit must validate");
+    assert_eq!(
+        batch_hit.validated_packets, 1,
+        "the tagged GRE hit must validate"
+    );
     assert_eq!(
         binding.flow.flow_cache.hits, 1,
         "pass 2 must reach the flow-cache-HIT TTL path"
@@ -2946,7 +2979,8 @@ fn gre_decapped_slow_path_hit_counters_charge_inner_length_13970() {
         meta,
     );
     assert_eq!(
-        dbg.forward, 1,
+        dbg.forward,
+        1,
         "#13970 fixture must forward one decapped packet \
          (rx={}, validated={}, policy_deny={}, local={}, no_route={}, \
          missing_neigh={}, disposition_other={}, tx_err={}, build_fail={})",
@@ -2967,7 +3001,11 @@ fn gre_decapped_slow_path_hit_counters_charge_inner_length_13970() {
         .iter()
         .find(|r| r.rule_id.contains("allow-lan-wan"))
         .expect("allow-lan-wan rule must exist");
-    assert_eq!(rule.hit_counter.test_packet_count(), 1, "#13970: one policy hit");
+    assert_eq!(
+        rule.hit_counter.test_packet_count(),
+        1,
+        "#13970: one policy hit"
+    );
     assert_eq!(
         rule.hit_counter.test_byte_count(),
         inner_pkt_len,
@@ -2976,10 +3014,15 @@ fn gre_decapped_slow_path_hit_counters_charge_inner_length_13970() {
     );
 
     let snaps = nat_counters.snapshots();
-    assert_eq!(snaps.len(), 1, "#13970: exactly one SNAT counter, got {snaps:?}");
+    assert_eq!(
+        snaps.len(),
+        1,
+        "#13970: exactly one SNAT counter, got {snaps:?}"
+    );
     assert_eq!(snaps[0].packets, 1, "#13970: one NAT hit");
     assert_eq!(
-        snaps[0].bytes, inner_pkt_len,
+        snaps[0].bytes,
+        inner_pkt_len,
         "#13970: NAT bytes must be the inner pkt_len, not outer desc.len={}",
         frame.len()
     );

@@ -97,6 +97,7 @@ fn test_metadata() -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -349,7 +350,7 @@ fn test_encode_session_close_rt_flow_v4_wire_layout() {
         0xB8,                      // #2749: src ToS (DSCP EF=46 << 2)
         0x13,                      // #2749: TCP control bits (SYN|FIN|ACK)
         9,                         // #2749: egress ifindex
-        0xA1B2_C3D4_E5F6_0708, // #4915: stable session id (rides [152:160])
+        0xA1B2_C3D4_E5F6_0708,     // #4915: stable session id (rides [152:160])
         RT_FLOW_CLOSE_REASON_NONE,
     );
 
@@ -461,10 +462,7 @@ fn test_encode_session_close_rt_flow_v4_wire_layout() {
         u32::from_le_bytes(p[140..144].try_into().unwrap()),
         POLICY_CONFIG_GENERATION_MARKER
     );
-    assert_eq!(
-        u64::from_le_bytes(p[160..168].try_into().unwrap()),
-        41
-    );
+    assert_eq!(u64::from_le_bytes(p[160..168].try_into().unwrap()), 41);
     assert_eq!(u32::from_le_bytes(p[136..140].try_into().unwrap()), 88);
     // [136:140] must NOT collide with the #2853 created-subsec-nanos in [44:48].
     assert_eq!(
@@ -966,7 +964,11 @@ fn test_encode_session_open_carries_nat64_flag_and_snat_v4() {
         0,
     );
     let pp = &frame_plain.data[FRAME_HEADER_SIZE..frame_plain.len as usize];
-    assert_eq!(pp[26] & FLAG_NAT64, 0, "non-nat64 must leave the flag clear");
+    assert_eq!(
+        pp[26] & FLAG_NAT64,
+        0,
+        "non-nat64 must leave the flag clear"
+    );
     let m = pp.len() - 30; // Same empty-rule-ID session-open suffix as above.
     assert_eq!(&pp[m - 24..m - 20], &[0, 0, 0, 0], "non-nat64 snat is zero");
 }
@@ -1166,7 +1168,7 @@ fn session_open_rule_id_at_capacity_boundary_14839() {
     let zones = test_zone_map();
     // Bytes from the END of the rule_id field to the end of the frame:
     // handshake (1) + provenance (1) + PPTP pair (8).
-    const TRAILER: usize = 10;
+    const TRAILER: usize = 14;
     for key in [test_key_v4(), test_key_v6()] {
         // Baseline: no counter -> rule_id_len 0. The rule_id field's start
         // (where the u16 length prefix sits) is len - 2 - TRAILER.
@@ -1226,11 +1228,11 @@ fn session_open_rule_id_at_capacity_boundary_14839() {
                 .all(|&b| b == b'x')
         );
         // Trailer intact after the id: handshake, provenance, PPTP pair.
-        assert_eq!(fit.data[fit.len as usize - 10], 3);
-        assert_eq!(fit.data[fit.len as usize - 9], 2);
+        assert_eq!(fit.data[fit.len as usize - 14], 3);
+        assert_eq!(fit.data[fit.len as usize - 13], 2);
         assert_eq!(
             u64::from_le_bytes(
-                fit.data[fit.len as usize - 8..fit.len as usize]
+                fit.data[fit.len as usize - 12..fit.len as usize - 4]
                     .try_into()
                     .unwrap()
             ),
@@ -1256,11 +1258,11 @@ fn session_open_rule_id_at_capacity_boundary_14839() {
             // The frame is then byte-identical in length to the baseline and
             // the trailer still lands at its baseline position.
             assert_eq!(frame.len, base.len);
-            assert_eq!(frame.data[frame.len as usize - 10], 3);
-            assert_eq!(frame.data[frame.len as usize - 9], 2);
+            assert_eq!(frame.data[frame.len as usize - 14], 3);
+            assert_eq!(frame.data[frame.len as usize - 13], 2);
             assert_eq!(
                 u64::from_le_bytes(
-                    frame.data[frame.len as usize - 8..frame.len as usize]
+                    frame.data[frame.len as usize - 12..frame.len as usize - 4]
                         .try_into()
                         .unwrap()
                 ),
@@ -1321,7 +1323,7 @@ fn session_open_rule_id_at_capacity_boundary_14839() {
 #[test]
 fn session_open_update_rule_id_len_sweep_never_panics_14621() {
     let zones = test_zone_map();
-    const TRAILER: usize = 10; // handshake 1 + provenance 1 + PPTP pair 8
+    const TRAILER: usize = 14; // handshake 1 + provenance 1 + PPTP pair 8
     const PPTP: u64 = 0x0102_0304_0506_0708;
     for key in [test_key_v4(), test_key_v6()] {
         // Baseline empty-id frame: rule_id prefix sits TRAILER + 2 bytes
@@ -1394,9 +1396,9 @@ fn session_open_update_rule_id_len_sweep_never_panics_14621() {
                     prefix_off + 2 <= payload.len(),
                     "rule_id len {id_len}: prefix outside payload"
                 );
-                let carried = u16::from_le_bytes(
-                    payload[prefix_off..prefix_off + 2].try_into().unwrap(),
-                ) as usize;
+                let carried =
+                    u16::from_le_bytes(payload[prefix_off..prefix_off + 2].try_into().unwrap())
+                        as usize;
                 let want_carried = if id_len <= max_fit { id_len } else { 0 };
                 assert_eq!(carried, want_carried, "rule_id len {id_len}");
                 let id_end = prefix_off + 2 + carried;
@@ -1597,6 +1599,7 @@ fn test_close_flags() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         policy_generation: 0,
         origin: crate::session::SessionOrigin::ForwardFlow,
@@ -1707,8 +1710,7 @@ fn session_open_frames_carry_distinct_tunnel_discriminators_7188() {
     // The discriminator precedes the routing domain and all following
     // close-class/install-table/ICMP/ingress/rule-ID/handshake/provenance
     // trailers; the common prefix stops 34 bytes before the #13965 pair trailer.
-    let body =
-        |frame: &EventFrame| frame.data[FRAME_HEADER_SIZE..frame.len as usize - 42].to_vec();
+    let body = |frame: &EventFrame| frame.data[FRAME_HEADER_SIZE..frame.len as usize - 42].to_vec();
     assert_eq!(
         body(&first),
         body(&second),
@@ -1867,12 +1869,20 @@ fn test_encode_session_update_matches_the_shared_golden_9412() {
         "#9412: the close class precedes the session-sync trailers"
     );
     assert_eq!(
-        u32::from_le_bytes(bytes[bytes.len() - 29..bytes.len() - 25].try_into().unwrap()),
+        u32::from_le_bytes(
+            bytes[bytes.len() - 29..bytes.len() - 25]
+                .try_into()
+                .unwrap()
+        ),
         525_590,
         "#9752: the golden tail carries the domain"
     );
     assert_eq!(
-        u32::from_le_bytes(bytes[bytes.len() - 25..bytes.len() - 21].try_into().unwrap()),
+        u32::from_le_bytes(
+            bytes[bytes.len() - 25..bytes.len() - 21]
+                .try_into()
+                .unwrap()
+        ),
         3_318_534_811,
         "#9752: the golden tail carries the check"
     );

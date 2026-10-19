@@ -110,17 +110,20 @@ fn snapshot_with_lan_rule(lan_action: Option<&str>) -> crate::ConfigSnapshot {
         tunnel: true,
         ..Default::default()
     });
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".into(),
-    family: "inet".into(),
-    destination: "198.51.100.0/24".into(),
-    // #12036: interface-only next hops use `@interface`; a bare name is unresolved.
-    next_hops: vec!["@st0.0".into()],
-    next_hop_weights: vec![],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0,
-    mtu: 0, });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        table: "inet.0".into(),
+        family: "inet".into(),
+        destination: "198.51.100.0/24".into(),
+        // #12036: interface-only next hops use `@interface`; a bare name is unresolved.
+        next_hops: vec!["@st0.0".into()],
+        next_hop_weights: vec![],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     if let Some(action) = lan_action {
         snapshot.policies.push(PolicyRuleSnapshot {
             name: "lan-out".into(),
@@ -283,6 +286,7 @@ fn metadata(is_reverse: bool) -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -1916,7 +1920,6 @@ fn a_denied_reverse_icmp_request_cannot_ride_the_query_session_10637() {
     assert_eq!(
         session_count(&sessions),
         2,
-
         "the admitted ICMP flow must install forward and reverse entries"
     );
 
@@ -1954,7 +1957,10 @@ fn typeblind_reverse_icmp_request_is_judged_by_reverse_policy_13940() {
     );
 
     let denied = drive_reverse_icmp_type_10637(&forwarding, &mut sessions, 8);
-    assert_eq!(denied.session_hit, 1, "reverse request hits the query companion");
+    assert_eq!(
+        denied.session_hit, 1,
+        "reverse request hits the query companion"
+    );
     assert_eq!(
         (denied.tx, denied.policy_deny),
         (0, 1),
@@ -2629,6 +2635,7 @@ fn descriptor_path_stale_dnat_hit_restamps_conntrack_app_id_12191() {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     };
     let mut sessions = SessionTable::new();
     assert!(sessions.install_with_protocol_with_origin(
@@ -3071,6 +3078,7 @@ fn drive_moved_interface_9384(
         ingress_zone: entry_ingress_zone,
         egress_zone: TEST_WAN_ZONE_ID,
         forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None,
         ..metadata(false)
     };
     assert!(
@@ -3179,6 +3187,7 @@ fn a_move_into_a_still_permitted_zone_does_not_revoke_9384() {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
         forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None,
         ..metadata(false)
     };
     assert!(sessions.install_with_protocol_with_origin(
@@ -3307,6 +3316,7 @@ fn an_arrival_with_no_interface_identity_still_declines_9513() {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
         forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None,
         ..metadata(false)
     };
     assert!(sessions.install_with_protocol_with_origin(
@@ -4083,6 +4093,7 @@ fn reverse_metadata_for_9604(fwd_ingress_zone: u16, fwd_egress_zone: u16) -> Ses
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -6519,16 +6530,19 @@ fn forwarding_with_fabric_dmz_10507() -> ForwardingState {
     }],
         ..Default::default()
     });
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "203.0.113.0/24".to_string(),
-    next_hops: vec!["203.0.113.2@reth2.0".to_string()],
-    next_hop_weights: vec![],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0,
-    mtu: 0, });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "203.0.113.0/24".to_string(),
+        next_hops: vec!["203.0.113.2@reth2.0".to_string()],
+        next_hop_weights: vec![],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "ge-0-0-2".to_string(),
         ifindex: DMZ_IFINDEX,
@@ -6600,11 +6614,14 @@ fn forwarding_without_fabric_dmz_10507() -> ForwardingState {
     }],
         ..Default::default()
     });
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "203.0.113.0/24".to_string(),
-    next_hops: vec!["203.0.113.2@reth2.0".to_string()],
-    ..Default::default() });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "203.0.113.0/24".to_string(),
+        next_hops: vec!["203.0.113.2@reth2.0".to_string()],
+        ..Default::default()
+    });
     snapshot.neighbors.extend([
         NeighborSnapshot {
             interface: "ge-0-0-2".to_string(),
@@ -6965,16 +6982,19 @@ fn forwarding_with_fabric_dmz_armed_10507() -> ForwardingState {
     }],
         ..Default::default()
     });
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "203.0.113.0/24".to_string(),
-    next_hops: vec!["203.0.113.2@reth2.0".to_string()],
-    next_hop_weights: vec![],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0,
-    mtu: 0, });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "203.0.113.0/24".to_string(),
+        next_hops: vec!["203.0.113.2@reth2.0".to_string()],
+        next_hop_weights: vec![],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "ge-0-0-2".to_string(),
         ifindex: DMZ_IFINDEX,
@@ -9464,11 +9484,7 @@ fn txn_run_descriptor_at_generation_11600(
         config_generation,
         fib_generation,
     };
-    let mut meta = txn_meta_v4(
-        LAN_IFINDEX as u32,
-        tcp_flags,
-        frame.len() as u16,
-    );
+    let mut meta = txn_meta_v4(LAN_IFINDEX as u32, tcp_flags, frame.len() as u16);
     meta.config_generation = config_generation;
     meta.fib_generation = fib_generation;
     let (_batch, dbg) = txn_run_descriptor_with_validation(
@@ -9485,24 +9501,29 @@ fn txn_run_descriptor_at_generation_11600(
 
 fn drive_removed_source_nat_rule_11600(
     update: SourceNatUpdate11600,
-) -> (SessionTable, DebugPollCounters, SessionKey, SessionKey, NatDecision) {
+) -> (
+    SessionTable,
+    DebugPollCounters,
+    SessionKey,
+    SessionKey,
+    NatDecision,
+) {
     let mut admitted_snapshot = nat_snapshot();
     admitted_snapshot.generation = 7;
     admitted_snapshot.fib_generation = 9;
     admitted_snapshot.source_nat_rules = vec![source_nat_rule_11600()];
     let remote = Ipv4Addr::new(8, 8, 8, 8);
     let external_remote = Ipv4Addr::new(198, 51, 100, 200);
-    admitted_snapshot.destination_nat_rules =
-        vec![crate::DestinationNATRuleSnapshot {
-            name: "dnat-before-snat-11600".into(),
-            from_zone: "lan".into(),
-            destination_address: external_remote.to_string(),
-            destination_port: DPORT,
-            protocol: "tcp".into(),
-            pool_address: remote.to_string(),
-            pool_port: 8443,
-            ..Default::default()
-        }];
+    admitted_snapshot.destination_nat_rules = vec![crate::DestinationNATRuleSnapshot {
+        name: "dnat-before-snat-11600".into(),
+        from_zone: "lan".into(),
+        destination_address: external_remote.to_string(),
+        destination_port: DPORT,
+        protocol: "tcp".into(),
+        pool_address: remote.to_string(),
+        pool_port: 8443,
+        ..Default::default()
+    }];
     let admitted_forwarding = build_forwarding_state(&admitted_snapshot);
     let mut sessions = SessionTable::new();
     let mut admission_binding = binding_for_9604(LAN_IFINDEX, "reth1.0");
@@ -9728,7 +9749,10 @@ fn drive_static_snat_session_11600() -> (SessionTable, SessionKey, SessionKey, N
         syn_meta,
         true,
     );
-    assert_eq!(admitted_dbg.tx, 1, "static SNAT must admit the control flow");
+    assert_eq!(
+        admitted_dbg.tx, 1,
+        "static SNAT must admit the control flow"
+    );
     assert_eq!(session_count(&sessions), 2, "static SNAT installs its pair");
 
     let mut forward_key = None;
@@ -9745,7 +9769,10 @@ fn drive_static_snat_session_11600() -> (SessionTable, SessionKey, SessionKey, N
     let forward_key = forward_key.expect("static flow has a forward entry");
     let reverse_key = reverse_key.expect("static flow has a reverse entry");
     let static_nat = static_nat.expect("static flow stores its translation");
-    assert_eq!(static_nat.rewrite_src, Some("203.0.113.10".parse().unwrap()));
+    assert_eq!(
+        static_nat.rewrite_src,
+        Some("203.0.113.10".parse().unwrap())
+    );
 
     let mut updated_snapshot = admitted_snapshot;
     updated_snapshot.generation = 8;
@@ -9773,7 +9800,10 @@ fn drive_static_snat_session_11600() -> (SessionTable, SessionKey, SessionKey, N
         updated_snapshot.generation,
         updated_snapshot.fib_generation,
     );
-    assert_eq!(dbg.session_hit, 1, "static control uses the established hit path");
+    assert_eq!(
+        dbg.session_hit, 1,
+        "static control uses the established hit path"
+    );
     (sessions, forward_key, reverse_key, static_nat)
 }
 
@@ -9788,7 +9818,10 @@ fn static_snat_remains_valid_without_a_dynamic_snat_rule_11600() {
     let (decision, _, _) = sessions
         .entry_with_origin(&forward_key)
         .expect("unchanged static translation keeps the forward entry");
-    assert_eq!(decision.nat, static_nat, "static translation stays unchanged");
+    assert_eq!(
+        decision.nat, static_nat,
+        "static translation stays unchanged"
+    );
     assert!(
         sessions.entry_with_origin(&reverse_key).is_some(),
         "static session keeps its reverse companion"
@@ -9822,7 +9855,10 @@ fn interface_snat_revalidates_fib_generation_egress_address_change_11600() {
         syn_meta,
         true,
     );
-    assert_eq!(admitted_dbg.tx, 1, "interface SNAT admits the baseline flow");
+    assert_eq!(
+        admitted_dbg.tx, 1,
+        "interface SNAT admits the baseline flow"
+    );
     let mut forward_key = None;
     let mut original_nat = None;
     sessions.iter_with_origin(|key, decision, metadata, _origin| {
@@ -9833,7 +9869,10 @@ fn interface_snat_revalidates_fib_generation_egress_address_change_11600() {
     });
     let forward_key = forward_key.expect("interface-SNAT forward session is installed");
     let original_nat = original_nat.expect("interface-SNAT decision is stored");
-    assert_eq!(original_nat.rewrite_src, Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))));
+    assert_eq!(
+        original_nat.rewrite_src,
+        Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)))
+    );
 
     let mut updated_snapshot = admitted_snapshot;
     updated_snapshot.fib_generation = 10;
@@ -9935,16 +9974,19 @@ fn add_fib_move_route_12074(
     gateway: &str,
     interface_name: &str,
 ) {
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".into(),
-    family: "inet".into(),
-    destination: format!("{destination}/32"),
-    next_hops: vec![format!("{gateway}@{interface_name}")],
-    next_hop_weights: vec![],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0,
-    mtu: 0, });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        table: "inet.0".into(),
+        family: "inet".into(),
+        destination: format!("{destination}/32"),
+        next_hops: vec![format!("{gateway}@{interface_name}")],
+        next_hop_weights: vec![],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
 }
 
 #[test]
@@ -9965,19 +10007,15 @@ fn fib_only_cross_zone_route_move_rejudges_existing_session_12074() {
 
     let mut moved = initial.clone();
     moved.fib_generation = 10;
-    add_fib_move_route_12074(
-        &mut moved,
-        FIB_MOVE_DST_12074,
-        "203.0.113.2",
-        "reth2.0",
-    );
+    add_fib_move_route_12074(&mut moved, FIB_MOVE_DST_12074, "203.0.113.2", "reth2.0");
     let forwarding_moved = build_forwarding_state(&moved);
     assert_eq!(
         crate::afxdp::forwarding::lookup_forwarding_resolution(
             &forwarding_initial,
             IpAddr::V4(FIB_MOVE_DST_12074),
         )
-        .resolution.egress_ifindex,
+        .resolution
+        .egress_ifindex,
         WAN_IFINDEX,
     );
     assert_eq!(
@@ -9985,11 +10023,18 @@ fn fib_only_cross_zone_route_move_rejudges_existing_session_12074() {
             &forwarding_moved,
             IpAddr::V4(FIB_MOVE_DST_12074),
         )
-        .resolution.egress_ifindex,
+        .resolution
+        .egress_ifindex,
         DMZ_IFINDEX,
     );
-    assert_eq!(forwarding_initial.egress_zone_id(DMZ_IFINDEX), TEST_DMZ_ZONE_ID);
-    assert_eq!(forwarding_moved.egress_zone_id(DMZ_IFINDEX), TEST_DMZ_ZONE_ID);
+    assert_eq!(
+        forwarding_initial.egress_zone_id(DMZ_IFINDEX),
+        TEST_DMZ_ZONE_ID
+    );
+    assert_eq!(
+        forwarding_moved.egress_zone_id(DMZ_IFINDEX),
+        TEST_DMZ_ZONE_ID
+    );
 
     let mut sessions = SessionTable::new();
     sessions.set_timeouts(forwarding_initial.session_timeouts);
@@ -10019,7 +10064,10 @@ fn fib_only_cross_zone_route_move_rejudges_existing_session_12074() {
         validation_initial,
     );
     assert_eq!(batch1.validated_packets, 1);
-    assert_eq!(dbg1.tx, 1, "the permitted WAN route admits the initial flow");
+    assert_eq!(
+        dbg1.tx, 1,
+        "the permitted WAN route admits the initial flow"
+    );
     assert_eq!(session_count(&sessions), 2);
 
     let ack = build_txn_tcp_syn_frame_v4(
@@ -10236,23 +10284,25 @@ fn fib_only_same_zone_route_move_keeps_forwarding_and_nat_12074() {
 
     let mut moved = initial.clone();
     moved.fib_generation = 10;
-    add_fib_move_route_12074(
-        &mut moved,
-        FIB_MOVE_DST_12074,
-        "203.0.113.2",
-        "reth2.0",
-    );
+    add_fib_move_route_12074(&mut moved, FIB_MOVE_DST_12074, "203.0.113.2", "reth2.0");
     let forwarding_moved = build_forwarding_state(&moved);
     assert_eq!(
         crate::afxdp::forwarding::lookup_forwarding_resolution(
             &forwarding_moved,
             IpAddr::V4(FIB_MOVE_DST_12074),
         )
-        .resolution.egress_ifindex,
+        .resolution
+        .egress_ifindex,
         DMZ_IFINDEX,
     );
-    assert_eq!(forwarding_initial.egress_zone_id(DMZ_IFINDEX), TEST_WAN_ZONE_ID);
-    assert_eq!(forwarding_moved.egress_zone_id(DMZ_IFINDEX), TEST_WAN_ZONE_ID);
+    assert_eq!(
+        forwarding_initial.egress_zone_id(DMZ_IFINDEX),
+        TEST_WAN_ZONE_ID
+    );
+    assert_eq!(
+        forwarding_moved.egress_zone_id(DMZ_IFINDEX),
+        TEST_WAN_ZONE_ID
+    );
 
     let mut sessions = SessionTable::new();
     sessions.set_timeouts(forwarding_initial.session_timeouts);
@@ -10351,7 +10401,10 @@ fn fib_only_same_zone_route_move_keeps_forwarding_and_nat_12074() {
     assert_eq!(session_count(&sessions), 2);
     let (resolved, _, _) = sessions.entry_with_origin(&forward_key).unwrap();
     assert_eq!(resolved.resolution.egress_ifindex, DMZ_IFINDEX);
-    assert_eq!(resolved.nat, original_nat, "the established SNAT mapping is retained");
+    assert_eq!(
+        resolved.nat, original_nat,
+        "the established SNAT mapping is retained"
+    );
     assert_eq!(
         sessions.policy_revalidation_target(&forward_key),
         crate::session::PolicyRevalidationTarget::Fresh,
@@ -10390,37 +10443,44 @@ fn fib_only_reply_route_move_12074(same_zone: bool, warm_reply: bool) {
     add_fib_move_egress_12074(
         &mut initial,
         if same_zone { "wan" } else { "dmz" },
-        if same_zone { TEST_WAN_ZONE_ID } else { TEST_DMZ_ZONE_ID },
+        if same_zone {
+            TEST_WAN_ZONE_ID
+        } else {
+            TEST_DMZ_ZONE_ID
+        },
         "203.0.113.1/24",
         "203.0.113.2",
     );
     let forwarding_initial = build_forwarding_state(&initial);
     let mut moved = initial.clone();
     moved.fib_generation = 10;
-    add_fib_move_route_12074(
-        &mut moved,
-        FIB_MOVE_DST_12074,
-        "203.0.113.2",
-        "reth2.0",
-    );
+    add_fib_move_route_12074(&mut moved, FIB_MOVE_DST_12074, "203.0.113.2", "reth2.0");
     let forwarding_moved = build_forwarding_state(&moved);
     assert_eq!(
         crate::afxdp::forwarding::lookup_forwarding_resolution(
             &forwarding_initial,
             IpAddr::V4(FIB_MOVE_DST_12074),
-        ).resolution.egress_ifindex,
+        )
+        .resolution
+        .egress_ifindex,
         WAN_IFINDEX,
     );
     assert_eq!(
         crate::afxdp::forwarding::lookup_forwarding_resolution(
             &forwarding_moved,
             IpAddr::V4(FIB_MOVE_DST_12074),
-        ).resolution.egress_ifindex,
+        )
+        .resolution
+        .egress_ifindex,
         DMZ_IFINDEX,
     );
     assert_eq!(
         forwarding_moved.egress_zone_id(DMZ_IFINDEX),
-        if same_zone { TEST_WAN_ZONE_ID } else { TEST_DMZ_ZONE_ID },
+        if same_zone {
+            TEST_WAN_ZONE_ID
+        } else {
+            TEST_DMZ_ZONE_ID
+        },
     );
     let validation_initial = ValidationState {
         snapshot_installed: true,
@@ -10433,9 +10493,8 @@ fn fib_only_reply_route_move_12074(same_zone: bool, warm_reply: bool) {
     let mut forward_binding = binding_for_9604(LAN_IFINDEX, "reth1.0");
     // Real admission and a forward hit earn LiveEgress before the route move.
     for flags in [TCP_SYN, TCP_ACK] {
-        let frame = build_txn_tcp_syn_frame_v4(
-            SRC, FIB_MOVE_DST_12074, SPORT, DPORT, flags, TEST_LAN_MAC,
-        );
+        let frame =
+            build_txn_tcp_syn_frame_v4(SRC, FIB_MOVE_DST_12074, SPORT, DPORT, flags, TEST_LAN_MAC);
         let (batch, dbg) = txn_run_descriptor_with_validation(
             &mut forward_binding,
             &mut sessions,
@@ -10489,7 +10548,10 @@ fn fib_only_reply_route_move_12074(same_zone: bool, warm_reply: bool) {
             validation_initial,
         );
         assert_eq!(batch.validated_packets, 1);
-        assert_eq!((dbg.session_hit, dbg.tx, dbg.policy_revoked_sessions), (1, 1, 0));
+        assert_eq!(
+            (dbg.session_hit, dbg.tx, dbg.policy_revoked_sessions),
+            (1, 1, 0)
+        );
         assert_eq!(
             sessions.policy_revalidation_target(&reverse_key),
             crate::session::PolicyRevalidationTarget::Fresh,
@@ -10522,7 +10584,11 @@ fn fib_only_reply_route_move_12074(same_zone: bool, warm_reply: bool) {
     assert_eq!(dbg.foreign_authority_drops, 0);
     if !same_zone {
         assert_eq!(
-            (dbg.policy_revoked_sessions, dbg.tx, session_count(&sessions)),
+            (
+                dbg.policy_revoked_sessions,
+                dbg.tx,
+                session_count(&sessions)
+            ),
             (1, 0, 0),
             "reply-only cross-zone move must revoke the forward pair; warm_reply={warm_reply}",
         );
@@ -10544,7 +10610,10 @@ fn fib_only_reply_route_move_12074(same_zone: bool, warm_reply: bool) {
         DMZ_IFINDEX,
         "the reverse permit must persist the current forward route",
     );
-    assert_eq!(sessions.entry_with_origin(&forward_key).unwrap().0.nat, original_nat);
+    assert_eq!(
+        sessions.entry_with_origin(&forward_key).unwrap().0.nat,
+        original_nat
+    );
     let original_reverse_nat = sessions.entry_with_origin(&reverse_key).unwrap().0.nat;
     assert_eq!(
         sessions.policy_revalidation_target(&reverse_key),
@@ -10562,7 +10631,10 @@ fn fib_only_reply_route_move_12074(same_zone: bool, warm_reply: bool) {
     );
     assert_eq!((next.policy_revoked_sessions, next.tx), (0, 1));
     assert_eq!(session_count(&sessions), 2);
-    assert_eq!(sessions.entry_with_origin(&forward_key).unwrap().0.nat, original_nat);
+    assert_eq!(
+        sessions.entry_with_origin(&forward_key).unwrap().0.nat,
+        original_nat
+    );
     assert_eq!(
         sessions.entry_with_origin(&reverse_key).unwrap().0.nat,
         original_reverse_nat,
@@ -10616,16 +10688,19 @@ fn fib_only_reply_nonforwarding_route_12074(
     }
     moved.fib_generation = 10;
     if discard {
-        moved.routes.push(RouteSnapshot { reject: false, table: "inet.0".into(),
-        family: "inet".into(),
-        destination: format!("{FIB_MOVE_DST_12074}/32"),
-        next_hops: vec![],
-        next_hop_weights: vec![],
-        discard: true,
-        next_table: String::new(),
-        preference: 0,
-        rule_priority: 0,
-        mtu: 0, });
+        moved.routes.push(RouteSnapshot {
+            reject: false,
+            table: "inet.0".into(),
+            family: "inet".into(),
+            destination: format!("{FIB_MOVE_DST_12074}/32"),
+            next_hops: vec![],
+            next_hop_weights: vec![],
+            discard: true,
+            next_table: String::new(),
+            preference: 0,
+            rule_priority: 0,
+            mtu: 0,
+        });
     } else {
         moved.routes.retain(|route| route.family != "inet");
     }
@@ -10635,7 +10710,8 @@ fn fib_only_reply_nonforwarding_route_12074(
             &forwarding_moved,
             IpAddr::V4(FIB_MOVE_DST_12074),
         )
-        .resolution.disposition,
+        .resolution
+        .disposition,
         if discard {
             crate::afxdp::ForwardingDisposition::DiscardRoute
         } else {
@@ -10665,14 +10741,8 @@ fn fib_only_reply_nonforwarding_route_12074(
     let ha_state = txn_ha_state();
     let mut forward_binding = binding_for_9604(LAN_IFINDEX, "reth1.0");
     for flags in [TCP_SYN, TCP_ACK] {
-        let frame = build_txn_tcp_syn_frame_v4(
-            SRC,
-            FIB_MOVE_DST_12074,
-            SPORT,
-            DPORT,
-            flags,
-            TEST_LAN_MAC,
-        );
+        let frame =
+            build_txn_tcp_syn_frame_v4(SRC, FIB_MOVE_DST_12074, SPORT, DPORT, flags, TEST_LAN_MAC);
         let (_batch, dbg) = txn_run_descriptor_with_validation(
             &mut forward_binding,
             &mut sessions,
@@ -10701,7 +10771,10 @@ fn fib_only_reply_nonforwarding_route_12074(
             reply_meta,
             validation(7, 9),
         );
-        assert_eq!((dbg.session_hit, dbg.tx, dbg.policy_revoked_sessions), (1, 1, 0));
+        assert_eq!(
+            (dbg.session_hit, dbg.tx, dbg.policy_revoked_sessions),
+            (1, 1, 0)
+        );
     }
     if recorded_fwd {
         sessions.mark_policy_revalidated(
@@ -10770,16 +10843,9 @@ fn fib_only_reply_nonforwarding_route_12074(
         return;
     }
 
-    let forward_ack = build_txn_tcp_syn_frame_v4(
-        SRC,
-        FIB_MOVE_DST_12074,
-        SPORT,
-        DPORT,
-        TCP_ACK,
-        TEST_LAN_MAC,
-    );
-    let mut forward_meta =
-        txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, forward_ack.len() as u16);
+    let forward_ack =
+        build_txn_tcp_syn_frame_v4(SRC, FIB_MOVE_DST_12074, SPORT, DPORT, TCP_ACK, TEST_LAN_MAC);
+    let mut forward_meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, forward_ack.len() as u16);
     forward_meta.config_generation = recovered_config_generation;
     forward_meta.fib_generation = 11;
     let (_batch, restored_dbg) = txn_run_descriptor_with_validation(
@@ -10876,7 +10942,8 @@ fn reverse_sessionless_no_route_fib_stale_12074(
             &forwarding,
             IpAddr::V4(FIB_MOVE_DST_12074),
         )
-        .resolution.disposition,
+        .resolution
+        .disposition,
         crate::afxdp::ForwardingDisposition::NoRoute,
     );
 
@@ -10963,7 +11030,6 @@ fn reverse_sessionless_no_route_fib_stale_nonlive_permits_12074() {
             "a stored-pair NoRoute permit must not stamp the old forward resolution fresh; kind={kind:?}",
         );
     }
-
 }
 
 fn no_local_entry_current_route_12074(
@@ -11018,16 +11084,19 @@ fn no_local_entry_current_route_12074(
                 link_local: false,
                 ..Default::default()
             });
-            current.routes.push(RouteSnapshot { reject: false, table: "inet.0".into(),
-            family: "inet".into(),
-            destination: format!("{FIB_MOVE_DST_12074}/32"),
-            next_hops: vec!["203.0.113.2@reth2.0".into()],
-            next_hop_weights: vec![],
-            discard: false,
-            next_table: String::new(),
-            preference: 0,
-            rule_priority: 0,
-            mtu: 0, });
+            current.routes.push(RouteSnapshot {
+                reject: false,
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: format!("{FIB_MOVE_DST_12074}/32"),
+                next_hops: vec!["203.0.113.2@reth2.0".into()],
+                next_hop_weights: vec![],
+                discard: false,
+                next_table: String::new(),
+                preference: 0,
+                rule_priority: 0,
+                mtu: 0,
+            });
             if permit_new_zone {
                 let mut permit = current
                     .policies
@@ -11056,7 +11125,8 @@ fn no_local_entry_current_route_12074(
     let current_resolution = crate::afxdp::forwarding::lookup_forwarding_resolution(
         &forwarding,
         IpAddr::V4(FIB_MOVE_DST_12074),
-    ).resolution;
+    )
+    .resolution;
     let mut sessions = SessionTable::new();
     sessions.set_policy_revalidation_gen(7);
     sessions.set_forwarding_revalidation_gen(7, 9);
@@ -11144,8 +11214,7 @@ fn reverse_no_local_entry_fib_stale_cross_zone_permit_persists_12074() {
 
 #[test]
 fn reverse_no_local_entry_local_delivery_stored_deny_revokes_12074() {
-    let (canonical, _, forward_key, current) =
-        no_local_entry_current_route_12074("local", false);
+    let (canonical, _, forward_key, current) = no_local_entry_current_route_12074("local", false);
     assert_eq!(current.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(canonical, Some(forward_key));
 }
@@ -11156,12 +11225,7 @@ fn stale_live_reverse_fence_12074(
     reverse_kind: crate::session::PolicyRevalidationKind,
     fib_stale: bool,
     permit: bool,
-) -> (
-    Option<SessionKey>,
-    SessionKey,
-    SessionKey,
-    bool,
-) {
+) -> (Option<SessionKey>, SessionKey, SessionKey, bool) {
     let mut current = policy_deny_snapshot();
     current.generation = 7;
     current.fib_generation = if fib_stale { 10 } else { 9 };
@@ -11194,8 +11258,7 @@ fn stale_live_reverse_fence_12074(
         dst_port: if icmp { 0 } else { base.dst_port },
         ..base
     };
-    let reverse_key =
-        crate::session::reverse_session_key(&forward_key, NatDecision::default());
+    let reverse_key = crate::session::reverse_session_key(&forward_key, NatDecision::default());
     let mut sessions = SessionTable::new();
     sessions.set_policy_revalidation_gen(7);
     sessions.set_forwarding_revalidation_gen(7, 9);
@@ -11266,7 +11329,10 @@ fn reverse_fib_stale_stored_pair_icmp_obeys_reverse_fence_12074() {
     ] {
         let (canonical, _, reverse_key, fenced) =
             stale_live_reverse_fence_12074(true, false, reverse_kind, true, true);
-        assert!(fenced, "fixture must carry a fenced reverse row: {reverse_kind:?}");
+        assert!(
+            fenced,
+            "fixture must carry a fenced reverse row: {reverse_kind:?}"
+        );
         assert_eq!(
             canonical,
             Some(reverse_key),
@@ -11283,7 +11349,10 @@ fn reverse_fib_stale_stored_pair_decline_obeys_reverse_fence_12074() {
     ] {
         let (canonical, _, reverse_key, fenced) =
             stale_live_reverse_fence_12074(false, true, reverse_kind, true, true);
-        assert!(fenced, "fixture must carry a fenced reverse row: {reverse_kind:?}");
+        assert!(
+            fenced,
+            "fixture must carry a fenced reverse row: {reverse_kind:?}"
+        );
         assert_eq!(
             canonical,
             Some(reverse_key),
@@ -11314,7 +11383,10 @@ fn reverse_fib_stale_stored_pair_permit_and_deny_controls_12074() {
         true,
         true,
     );
-    assert_eq!(permit, None, "the stored-pair Permit must retain the session");
+    assert_eq!(
+        permit, None,
+        "the stored-pair Permit must retain the session"
+    );
     let (deny, forward_key, _, _) = stale_live_reverse_fence_12074(
         false,
         false,

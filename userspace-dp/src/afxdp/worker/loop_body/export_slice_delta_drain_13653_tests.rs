@@ -66,6 +66,7 @@ fn gate_metadata() -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -120,12 +121,10 @@ fn steady_state_contention_flushes_prefix_and_requeues_suffix() {
     let mut worker_lossless_wedged = false;
 
     let mut flushed: Vec<SessionKey> = Vec::new();
-    let mut flush_deltas = |_: &mut SessionTable,
-                            _: &mut [BindingWorker],
-                            _: &mut bool,
-                            deltas: &[SessionDelta]| {
-        flushed.extend(deltas.iter().map(|d| d.key.clone()));
-    };
+    let mut flush_deltas =
+        |_: &mut SessionTable, _: &mut [BindingWorker], _: &mut bool, deltas: &[SessionDelta]| {
+            flushed.extend(deltas.iter().map(|d| d.key.clone()));
+        };
 
     let (skip_tick, _did_work) = run_export_slice(
         &mut sessions,

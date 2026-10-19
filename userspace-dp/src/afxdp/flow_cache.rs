@@ -239,12 +239,9 @@ impl FlowCacheLookup {
         // discriminator even when tunnel decapsulation has rebound the packet
         // metadata's ingress ifindex to the tunnel logical device.
         let meta_ingress = meta.ingress_ifindex as i32;
-        let logical = resolve_ingress_logical_ifindex(
-            forwarding,
-            meta_ingress,
-            meta.ingress_vlan_id,
-        )
-        .unwrap_or(meta_ingress);
+        let logical =
+            resolve_ingress_logical_ifindex(forwarding, meta_ingress, meta.ingress_vlan_id)
+                .unwrap_or(meta_ingress);
         Self {
             ingress_ifindex: meta_ingress,
             logical_ingress_ifindex: logical,
@@ -724,6 +721,7 @@ impl FlowCacheEntry {
                 // from the established flow's metadata after construction.
                 policy_counter_idx: 0,
                 policy_counter: None,
+                nat_scope_ifindex: None,
             },
             stamp: FlowCacheStamp::capture(
                 validation.config_generation,
@@ -842,6 +840,7 @@ impl FlowCacheEntry {
                 inactivity_timeout_ns: None,
                 policy_counter_idx,
                 policy_counter,
+                nat_scope_ifindex: None,
             },
             stamp: FlowCacheStamp::capture(
                 validation.config_generation,
@@ -1078,7 +1077,11 @@ impl FlowCache {
     /// unchanged; the per-packet hash remains allocation-free.
     #[inline]
     pub(super) fn set_index(key: &crate::session::SessionKey, ingress_ifindex: i32) -> usize {
-        Self::set_index_seeded(crate::hot_hash_seed::hot_path_hash_seed(), key, ingress_ifindex)
+        Self::set_index_seeded(
+            crate::hot_hash_seed::hot_path_hash_seed(),
+            key,
+            ingress_ifindex,
+        )
     }
 
     /// Seed-parameterized core of `set_index`. Split out so adversarial
@@ -1364,9 +1367,7 @@ impl FlowCache {
                     self.misses += 1;
                     return None;
                 }
-                if entry.deny_expires_at_secs != 0
-                    && now_secs >= entry.deny_expires_at_secs
-                {
+                if entry.deny_expires_at_secs != 0 && now_secs >= entry.deny_expires_at_secs {
                     self.entries[entry_idx] = None;
                     self.evictions += 1;
                     self.demote_lru(set, way as u8);

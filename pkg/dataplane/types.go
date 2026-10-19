@@ -242,6 +242,12 @@ type SessionValue struct {
 	// Also part of the on-map C conntrack ABI.
 	IngressVlanID uint16
 
+	// NatScopeIfindex is the #15176 node-local logical NAT-scope ingress
+	// ifindex recorded at admission (helper SessionMetadata), carried on
+	// the helper delta so Go can fold it cluster-stably for the peer.
+	// 0 = no scope recorded. Sync-only; not part of the BPF ABI.
+	NatScopeIfindex int32
+
 	// RoutingDomain is the #7239 (#7160/#2387) session-key ROUTING DOMAIN.
 	//
 	// #9546: it is ALSO part of the on-map C conntrack ABI
@@ -399,6 +405,16 @@ type SessionValue struct {
 	// It is HA-wire metadata only and is not part of the on-map C conntrack
 	// ABI.
 	EgressIfaceFold uint32
+
+	// NatScopeFold is the #15176 cluster-stable fold of the session's
+	// validated NAT-scope ingress interface (the V2 fabric scope identity's
+	// stable name, or the admitting logical unit's cluster-stable name).
+	// Carried on the HA wire so the importing node resolves it to its own
+	// logical ifindex and session-hit NAT revalidation rebuilds the SAME
+	// interface/RI scope admission used. 0 = no scope recorded (legacy
+	// peer, V1/unstamped fabric, unfoldable name): revalidation declines
+	// to revoke on scope grounds. Sync-only; not part of the BPF ABI.
+	NatScopeFold uint32
 
 	// TunnelDiscriminator is the #7188 tunnel session-identity discriminator,
 	// as encoded by the Rust helper's TunnelDiscriminator::to_wire
@@ -709,6 +725,9 @@ type SessionValueV6 struct {
 	// Also part of the on-map C conntrack ABI.
 	IngressVlanID uint16
 
+	// NatScopeIfindex is the #15176 v6 twin. See SessionValue.
+	NatScopeIfindex int32
+
 	// RoutingDomain is the #7239 (#7160/#2387) session-key ROUTING DOMAIN.
 	//
 	// #9546: it is ALSO part of the on-map C conntrack ABI
@@ -821,6 +840,10 @@ type SessionValueV6 struct {
 	// Fold-zero local rows retain their local FibIfindex path.
 	// This is sync-only and MUST NOT enter the BPF/C conntrack ABI.
 	EgressIfaceFold uint32
+
+	// NatScopeFold is the #15176 v6 twin of the field on SessionValue.
+	// Same contract: 0 = no scope recorded.
+	NatScopeFold uint32
 
 	// TunnelDiscriminator is the #7188 tunnel session-identity discriminator,
 	// as encoded by the Rust helper's TunnelDiscriminator::to_wire

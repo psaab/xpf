@@ -178,7 +178,10 @@ pub(in crate::afxdp) fn neighbor_state_usable(state: &str) -> bool {
     matches!(classify_neighbor_state(state), NeighborStateClass::Usable)
 }
 
-pub(in crate::afxdp) fn ingress_is_fabric(forwarding: &ForwardingState, ingress_ifindex: i32) -> bool {
+pub(in crate::afxdp) fn ingress_is_fabric(
+    forwarding: &ForwardingState,
+    ingress_ifindex: i32,
+) -> bool {
     forwarding.fabrics.iter().any(|fabric| {
         fabric.parent_ifindex == ingress_ifindex || fabric.overlay_ifindex == ingress_ifindex
     })
@@ -202,9 +205,7 @@ pub(in crate::afxdp) fn ingress_has_synthetic_fabric_source(
     frame: &[u8],
 ) -> bool {
     ingress_is_fabric(forwarding, ingress_ifindex)
-        && frame
-            .get(6..12)
-            .is_some_and(is_synthetic_fabric_source_mac)
+        && frame.get(6..12).is_some_and(is_synthetic_fabric_source_mac)
 }
 /// Returns whether the Ethernet destination is accepted on the observed
 /// ingress link. The AF_XDP shim normally receives only frames accepted by
@@ -271,13 +272,17 @@ pub(in crate::afxdp) fn ingress_l2_group_unicast_ip(
     frame: &[u8],
     ingress_meta: UserspaceDpMeta,
 ) -> bool {
-    let Some(dst_mac) = frame.get(..6).and_then(|dst| <&[u8; 6]>::try_from(dst).ok()) else {
+    let Some(dst_mac) = frame
+        .get(..6)
+        .and_then(|dst| <&[u8; 6]>::try_from(dst).ok())
+    else {
         return false;
     };
     if !crate::afxdp::frame::l2_dst_is_group_or_broadcast(dst_mac) {
         return false;
     }
-    let Some(dst_ip) = crate::afxdp::frame::parse_packet_destination_from_frame(frame, ingress_meta)
+    let Some(dst_ip) =
+        crate::afxdp::frame::parse_packet_destination_from_frame(frame, ingress_meta)
     else {
         return false;
     };
@@ -302,8 +307,6 @@ pub(in crate::afxdp) fn ingress_l2_group_unicast_ip(
         IpAddr::V6(dst) => !dst.is_unspecified() && !dst.is_multicast(),
     }
 }
-
-
 
 /// #6458: the fabric link whose parent OR overlay ifindex is
 /// `ingress_ifindex`, or `None` when the ingress is not a fabric. Single
@@ -801,11 +804,19 @@ pub(in crate::afxdp) fn prefer_local_forward_candidate_for_fabric_ingress(
             // #9752: probe in the installing table. Deliberately the
             // non-flow lookup (existing per-destination hash semantics —
             // the session path's ECMP spread comes from the main lookup).
-            Some(table) => lookup_forwarding_resolution_in_table_with_dynamic(forwarding,
-            dynamic_neighbors,
-            target_ip,
-            Some(table),).resolution,
-            None => lookup_forwarding_resolution_with_dynamic(forwarding, dynamic_neighbors, target_ip).resolution,
+            Some(table) => {
+                lookup_forwarding_resolution_in_table_with_dynamic(
+                    forwarding,
+                    dynamic_neighbors,
+                    target_ip,
+                    Some(table),
+                )
+                .resolution
+            }
+            None => {
+                lookup_forwarding_resolution_with_dynamic(forwarding, dynamic_neighbors, target_ip)
+                    .resolution
+            }
         },
     );
     let local_owner_rg = owner_rg_for_resolution(forwarding, local_resolution);
@@ -822,7 +833,6 @@ pub(in crate::afxdp) fn prefer_local_forward_candidate_for_fabric_ingress(
 
     resolution
 }
-
 
 /// #7770: does this session-MISS packet qualify to leave a PUNT SEED behind?
 ///
@@ -1023,5 +1033,6 @@ pub(in crate::afxdp) fn fabric_punt_seed_metadata(
         ),
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     })
 }

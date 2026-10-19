@@ -39,6 +39,10 @@ func (m *Manager) buildSessionSyncRequestV4(op string, key dataplane.SessionKey,
 			req.IngressIfindex = int(ifindex)
 			req.IngressVLANID = vlan
 		}
+		// #15176: resolve the NAT-scope fold to this node's logical unit.
+		if ifindex, _, ok := m.resolveIngressFoldLocked(val.NatScopeFold); ok {
+			req.NatScopeIfindex = int32(ifindex)
+		}
 		// #7239 (#7160/#2387): hand the helper the domain the SENDER stamped at
 		// install, so it does not have to re-derive one from the fold resolved
 		// just above. The fold is computed on the sender's SEND path against
@@ -177,6 +181,10 @@ func (m *Manager) buildSessionSyncRequestV6(op string, key dataplane.SessionKeyV
 		if ifindex, vlan, ok := m.resolveIngressFoldLocked(val.IngressIfaceFold); ok {
 			req.IngressIfindex = int(ifindex)
 			req.IngressVLANID = vlan
+		}
+		// #15176: resolve the NAT-scope fold to this node's logical unit.
+		if ifindex, _, ok := m.resolveIngressFoldLocked(val.NatScopeFold); ok {
+			req.NatScopeIfindex = int32(ifindex)
 		}
 		// #7239 (#7160/#2387): hand the helper the domain the SENDER stamped at
 		// install, so it does not have to re-derive one from the fold resolved

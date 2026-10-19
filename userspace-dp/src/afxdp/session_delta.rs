@@ -163,9 +163,9 @@ pub(super) fn close_delta_is_stale_incarnation(
     if delta.session_id == 0 {
         return false;
     }
-    sessions.get(&delta.key).is_some_and(|entry| {
-        entry.session_id != 0 && entry.session_id != delta.session_id
-    })
+    sessions
+        .get(&delta.key)
+        .is_some_and(|entry| entry.session_id != 0 && entry.session_id != delta.session_id)
 }
 
 pub(super) fn purge_retirement_close_is_stale(
@@ -271,9 +271,15 @@ pub(super) fn purge_queued_flows_for_closed_deltas(
             // Pressure-shed closes can invalidate other per-binding cache
             // copies too; the descriptor path evicts its current binding
             // synchronously, and this worker-loop barrier covers its peers.
-            binding.flow.flow_cache.invalidate_slot(&forward_key, binding.ifindex);
+            binding
+                .flow
+                .flow_cache
+                .invalidate_slot(&forward_key, binding.ifindex);
             if reverse_key != forward_key {
-                binding.flow.flow_cache.invalidate_slot(&reverse_key, binding.ifindex);
+                binding
+                    .flow
+                    .flow_cache
+                    .invalidate_slot(&reverse_key, binding.ifindex);
             }
         }
         apply_shared_recycles_to_bindings(bindings, binding_lookup, shared_recycles);
@@ -322,6 +328,7 @@ pub(in crate::afxdp) fn session_delta_info(
         nat64,
         nat64_snat_v4,
         source_nat_icmp,
+        nat_scope_ifindex,
     } = SessionSyncAttribution::from_session(&delta.decision, &delta.metadata);
     SessionDeltaInfo {
         timestamp: Utc::now(),
@@ -343,6 +350,7 @@ pub(in crate::afxdp) fn session_delta_info(
         egress_zone_id: delta.metadata.egress_zone,
         ingress_ifindex: i32::try_from(delta.metadata.ingress_ifindex).unwrap_or(i32::MAX),
         ingress_vlan_id: delta.metadata.ingress_vlan_id,
+        nat_scope_ifindex,
         owner_rg_id: delta.metadata.owner_rg_id,
         disposition: match delta.decision.resolution.disposition {
             ForwardingDisposition::ForwardCandidate => "forward_candidate",
@@ -968,9 +976,7 @@ pub(super) fn flush_session_deltas(
                 } else {
                     !event_stream_out_of_sync
                 };
-                if gate_open
-                    && delta.origin != crate::session::SessionOrigin::MissingNeighborSeed
-                {
+                if gate_open && delta.origin != crate::session::SessionOrigin::MissingNeighborSeed {
                     if let Err(err) = es.push_delta_lossless_within(
                         delta,
                         zone_name_to_id,
@@ -1088,9 +1094,7 @@ pub(super) fn flush_session_deltas(
                 }
             }
         }
-        if !telemetry_only_seed
-            && let Ok(mut recent) = recent_session_deltas.lock()
-        {
+        if !telemetry_only_seed && let Ok(mut recent) = recent_session_deltas.lock() {
             push_recent_session_delta(&mut recent, info);
         }
     }

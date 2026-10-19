@@ -592,6 +592,7 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 	// row serialization.
 	val.IngressIfaceFold = s.stampIngressIfaceFold(val.IngressIfindex, val.IngressVlanID)
 	val.EgressIfaceFold = s.stampEgressIfaceFold(val.FibIfindex, val.FibVlanID)
+	val.NatScopeFold = s.stampNatScopeFold(val.NatScopeIfindex)
 	// #5274/#11055: preserve the RG0 config-authority namespace and mark its
 	// source so a receiver can compare only when both nodes agree on the role.
 	val.ConfigEpoch = s.stampConfigEpoch()
@@ -697,6 +698,7 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 	// row serialization.
 	val.IngressIfaceFold = s.stampIngressIfaceFold(val.IngressIfindex, val.IngressVlanID)
 	val.EgressIfaceFold = s.stampEgressIfaceFold(val.FibIfindex, val.FibVlanID)
+	val.NatScopeFold = s.stampNatScopeFold(val.NatScopeIfindex)
 	// #5274/#11055: v6 twin of the authority-relative v4 stamp.
 	val.ConfigEpoch = s.stampConfigEpoch()
 	s.genSentMu.Lock()

@@ -12,12 +12,12 @@
 use super::test_fixtures::*;
 use super::tests_support::*;
 use super::*;
+use crate::slowpath::SlowPathReinjector;
 use crate::test_zone_ids::*;
 use crate::{
     FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceAddressSnapshot, InterfaceSnapshot,
     PolicyRuleSnapshot,
 };
-use crate::slowpath::SlowPathReinjector;
 use std::sync::atomic::Ordering;
 
 /// The generation the sessions below are STAMPED under: the config the operator
@@ -69,27 +69,33 @@ fn revocation_metadata() -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
 fn revocation_decision(snat_port: Option<u16>) -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 12,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
-        neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-        tx_vlan_id: 80,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision {
-        rewrite_src: snat_port.map(|_| IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: snat_port,
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision {
+            rewrite_src: snat_port.map(|_| IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: snat_port,
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 /// Build the shared LAN->WAN topology with `terms` as `reth1.0`'s inet INPUT
@@ -201,7 +207,6 @@ fn inbound_reply_source_pbr_term() -> FirewallTermSnapshot {
     }
 }
 
-
 fn per_packet_pbr_term(name: &str, dport: &str) -> FirewallTermSnapshot {
     let mut term = pbr_term(name, dport);
     term.tcp_flags = Some(TCP_FLAG_SYN);
@@ -307,7 +312,8 @@ fn drive_packets(
         },
     );
     let slow_path = second_packet.then(|| Arc::new(SlowPathReinjector::new_without_worker(1500)));
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -481,25 +487,17 @@ fn static_discard_revokes_the_established_session_end_to_end_7212() {
 fn mixed_filter_static_discard_revokes_the_established_pair_13651() {
     let mut dscp_accept = term("ef-accept", "5201", "accept");
     dscp_accept.dscp_values = vec![46];
-    let out = drive_one_packet(vec![
-        term("blocked-5201", "5201", "discard"),
-        dscp_accept,
-    ]);
+    let out = drive_one_packet(vec![term("blocked-5201", "5201", "discard"), dscp_accept]);
 
     let mut sessions = out.sessions;
     let forward_key = flow_key(FLOW_DST_PORT);
-    let reverse_key =
-        crate::session::reverse_session_key(&forward_key, NatDecision::default());
+    let reverse_key = crate::session::reverse_session_key(&forward_key, NatDecision::default());
     assert!(
-        sessions
-            .lookup(&forward_key, 124_000_000_000, 0)
-            .is_none(),
+        sessions.lookup(&forward_key, 124_000_000_000, 0).is_none(),
         "the flow-invariant deny must tear down the forward session"
     );
     assert!(
-        sessions
-            .lookup(&reverse_key, 124_000_000_000, 0)
-            .is_none(),
+        sessions.lookup(&reverse_key, 124_000_000_000, 0).is_none(),
         "the flow-invariant deny must tear down the reverse companion too"
     );
     assert_eq!(
@@ -568,8 +566,7 @@ fn inbound_first_reply_uses_its_ingress_pbr_without_tearing_down_pair_11324() {
         discriminator: Default::default(),
         routing_domain: 0,
     };
-    let reverse_key =
-        crate::session::reverse_session_key(&forward_key, NatDecision::default());
+    let reverse_key = crate::session::reverse_session_key(&forward_key, NatDecision::default());
     let mut forward_metadata = revocation_metadata();
     forward_metadata.ingress_zone = TEST_WAN_ZONE_ID;
     forward_metadata.egress_zone = TEST_LAN_ZONE_ID;
@@ -617,7 +614,10 @@ fn inbound_first_reply_uses_its_ingress_pbr_without_tearing_down_pair_11324() {
         .lookup(&reverse_key, 123_000_000_000, 0)
         .expect("the first inbound reply must preserve the reverse companion");
     assert_eq!(
-        (reply.decision.install_table_domain, reply.decision.install_table_check),
+        (
+            reply.decision.install_table_domain,
+            reply.decision.install_table_check
+        ),
         (blue_domain, blue_check),
         "the reverse entry must remember the reply-ingress PBR table"
     );
@@ -630,13 +630,9 @@ fn inbound_first_reply_uses_its_ingress_pbr_without_tearing_down_pair_11324() {
             .scratch
             .scratch_filter_revoked_keys
             .contains(&reverse_key)
-            && !binding
-                .scratch
-                .scratch_filter_revoked_keys
-                .contains(&crate::session::reverse_session_key(
-                    &reverse_key,
-                    reverse_decision.nat,
-                )),
+            && !binding.scratch.scratch_filter_revoked_keys.contains(
+                &crate::session::reverse_session_key(&reverse_key, reverse_decision.nat,)
+            ),
         "steering the reverse half must not queue pair teardown or cache eviction"
     );
     assert_eq!(
@@ -682,8 +678,7 @@ fn stale_reverse_pbr_route_does_not_skip_new_static_discard_11324() {
         discriminator: Default::default(),
         routing_domain: 0,
     };
-    let reverse_key =
-        crate::session::reverse_session_key(&forward_key, NatDecision::default());
+    let reverse_key = crate::session::reverse_session_key(&forward_key, NatDecision::default());
     let mut forward_metadata = revocation_metadata();
     forward_metadata.ingress_zone = TEST_WAN_ZONE_ID;
     forward_metadata.egress_zone = TEST_LAN_ZONE_ID;
@@ -751,11 +746,7 @@ fn stale_reverse_pbr_route_does_not_skip_new_static_discard_11324() {
 /// the cached MAIN decision.
 #[test]
 fn fresh_per_packet_pbr_hit_revokes_cached_main_route_10467() {
-    let out = drive_packets(
-        vec![per_packet_pbr_term("pbr-syn", "5201")],
-        false,
-        true,
-    );
+    let out = drive_packets(vec![per_packet_pbr_term("pbr-syn", "5201")], false, true);
     let mut sessions = out.sessions;
     assert!(
         sessions
@@ -781,12 +772,18 @@ fn stale_pbr_empty_vrf_drops_the_followup_miss_10467() {
         "the post-revocation MISS must not reinject the explicit-table NoRoute \
          frame into MAIN"
     );
-    assert_eq!(out.no_route, 1, "the follow-up MISS must resolve in the empty RI");
+    assert_eq!(
+        out.no_route, 1,
+        "the follow-up MISS must resolve in the empty RI"
+    );
     assert_eq!(
         out.policy_deny, 0,
         "the follow-up must reach route NoRoute, not fall through to policy deny"
     );
-    assert_eq!(out.session_miss, 1, "the second packet must be a session MISS");
+    assert_eq!(
+        out.session_miss, 1,
+        "the second packet must be a session MISS"
+    );
     assert_eq!(out.revoked_count, 1);
     assert!(out.revoked_scratch.contains(&flow_key(FLOW_DST_PORT)));
 }
@@ -853,7 +850,7 @@ fn a_static_accept_filter_revokes_nothing_end_to_end_7212() {
 #[cfg(test)]
 mod reverse_native_identity_12058_tests {
     use super::*;
-    use crate::session::{install_table_identity, SessionKey, SessionOrigin};
+    use crate::session::{SessionKey, SessionOrigin, install_table_identity};
     use crate::{InterfaceAddressSnapshot, InterfaceSnapshot, NeighborSnapshot};
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -1047,14 +1044,11 @@ mod reverse_native_identity_12058_tests {
             crate::ip_proto::PROTO_TCP,
             0,
         ));
-        let mut reply_key = crate::session::reverse_session_key(
-            &forward_key,
-            crate::nat::NatDecision::default(),
-        );
+        let mut reply_key =
+            crate::session::reverse_session_key(&forward_key, crate::nat::NatDecision::default());
         reply_key.routing_domain = arrival_domain;
         let ha_state = std::collections::BTreeMap::new();
-        let mut binding =
-            BindingWorker::new_for_mirror_test(0, 0, arrival_ifindex, 0);
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, arrival_ifindex, 0);
         binding.interface = if forward_is_blue {
             std::sync::Arc::<str>::from("reth0.80")
         } else {
@@ -1067,22 +1061,12 @@ mod reverse_native_identity_12058_tests {
         };
 
         let make_reply = |tcp_flags| match (client, server) {
-            (IpAddr::V4(client), IpAddr::V4(server)) => build_txn_tcp_syn_frame_v4(
-                server,
-                client,
-                5201,
-                12345,
-                tcp_flags,
-                reply_dst_mac,
-            ),
-            (IpAddr::V6(client), IpAddr::V6(server)) => build_txn_tcp_frame_v6(
-                server,
-                client,
-                5201,
-                12345,
-                tcp_flags,
-                reply_dst_mac,
-            ),
+            (IpAddr::V4(client), IpAddr::V4(server)) => {
+                build_txn_tcp_syn_frame_v4(server, client, 5201, 12345, tcp_flags, reply_dst_mac)
+            }
+            (IpAddr::V6(client), IpAddr::V6(server)) => {
+                build_txn_tcp_frame_v6(server, client, 5201, 12345, tcp_flags, reply_dst_mac)
+            }
             _ => unreachable!("client and server families are selected together"),
         };
         let run_reply = |binding: &mut BindingWorker, sessions: &mut SessionTable, flags| {
@@ -1098,20 +1082,14 @@ mod reverse_native_identity_12058_tests {
                 meta.ingress_vlan_id = 80;
             }
             meta.tcp_flags = flags;
-            txn_run_descriptor(
-                binding,
-                sessions,
-                &forwarding,
-                &ha_state,
-                &frame,
-                meta,
-            )
+            txn_run_descriptor(binding, sessions, &forwarding, &ha_state, &frame, meta)
         };
 
         let (_, first_dbg) = run_reply(&mut binding, &mut sessions, 0x12);
         assert_eq!(first_dbg.rx, 1, "first reply must reach poll path");
         assert_eq!(
-            first_dbg.tx, 1,
+            first_dbg.tx,
+            1,
             "repair must transmit (v6={v6}, forward_is_blue={forward_is_blue}, hit={}, miss={}, create={}, forward={}, no_route={}, missing_neigh={}, policy_deny={})",
             first_dbg.session_hit,
             first_dbg.session_miss,
@@ -1136,8 +1114,7 @@ mod reverse_native_identity_12058_tests {
             .first()
             .expect("repair must queue one reply transmission");
         assert_eq!(
-            first_forward.decision.resolution.egress_ifindex,
-            expected_egress_ifindex,
+            first_forward.decision.resolution.egress_ifindex, expected_egress_ifindex,
             "repair must resolve to the forward ingress interface"
         );
         assert_eq!(
@@ -1164,7 +1141,10 @@ mod reverse_native_identity_12058_tests {
 
         let (_, hit_dbg) = run_reply(&mut binding, &mut sessions, 0x10);
         assert_eq!(hit_dbg.rx, 1, "second reply must reach poll path");
-        assert_eq!(hit_dbg.session_hit, 1, "second reply must hit the repaired row");
+        assert_eq!(
+            hit_dbg.session_hit, 1,
+            "second reply must hit the repaired row"
+        );
         assert_eq!(
             hit_dbg.tx, 1,
             "revalidation must keep the reply routed to the forward ingress"
@@ -1175,8 +1155,7 @@ mod reverse_native_identity_12058_tests {
             .first()
             .expect("revalidated reply must queue one transmission");
         assert_eq!(
-            hit_forward.decision.resolution.egress_ifindex,
-            expected_egress_ifindex,
+            hit_forward.decision.resolution.egress_ifindex, expected_egress_ifindex,
             "revalidation must not steer the reply into the arrival-domain table"
         );
         let repaired = sessions

@@ -134,6 +134,7 @@ fn test_close_delta(kind: crate::session::SessionDeltaKind) -> crate::session::S
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         policy_generation: 0,
         origin: SessionOrigin::ForwardFlow,

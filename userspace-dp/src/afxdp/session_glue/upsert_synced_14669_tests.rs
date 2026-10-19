@@ -62,18 +62,14 @@ fn split_rg_forwarding() -> ForwardingState {
         },
     );
     forwarding.connected_v4.push(ConnectedRouteV4 {
-        prefix: PrefixV4::from_net(
-            ipnet::Ipv4Net::new(Ipv4Addr::new(172, 16, 50, 0), 24).unwrap(),
-        ),
+        prefix: PrefixV4::from_net(ipnet::Ipv4Net::new(Ipv4Addr::new(172, 16, 50, 0), 24).unwrap()),
         host: Ipv4Addr::new(172, 16, 50, 0),
         ifindex: RG1_IFINDEX,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
     });
     forwarding.connected_v4.push(ConnectedRouteV4 {
-        prefix: PrefixV4::from_net(
-            ipnet::Ipv4Net::new(Ipv4Addr::new(172, 16, 60, 0), 24).unwrap(),
-        ),
+        prefix: PrefixV4::from_net(ipnet::Ipv4Net::new(Ipv4Addr::new(172, 16, 60, 0), 24).unwrap()),
         host: Ipv4Addr::new(172, 16, 60, 0),
         ifindex: RG2_IFINDEX,
         tunnel_endpoint_id: 0,
@@ -84,9 +80,7 @@ fn split_rg_forwarding() -> ForwardingState {
         .entry("inet.0".to_string())
         .or_default()
         .push(RouteEntryV4::single(
-            PrefixV4::from_net(
-                ipnet::Ipv4Net::new(Ipv4Addr::new(8, 8, 8, 8), 32).unwrap(),
-            ),
+            PrefixV4::from_net(ipnet::Ipv4Net::new(Ipv4Addr::new(8, 8, 8, 8), 32).unwrap()),
             RG1_IFINDEX,
             0,
             Some(Ipv4Addr::new(172, 16, 50, 254)),
@@ -99,9 +93,7 @@ fn split_rg_forwarding() -> ForwardingState {
         .entry("inet.0".to_string())
         .or_default()
         .push(RouteEntryV4::single(
-            PrefixV4::from_net(
-                ipnet::Ipv4Net::new(Ipv4Addr::new(9, 9, 9, 9), 32).unwrap(),
-            ),
+            PrefixV4::from_net(ipnet::Ipv4Net::new(Ipv4Addr::new(9, 9, 9, 9), 32).unwrap()),
             RG2_IFINDEX,
             0,
             Some(Ipv4Addr::new(172, 16, 60, 254)),
@@ -111,11 +103,15 @@ fn split_rg_forwarding() -> ForwardingState {
         ));
     forwarding.neighbors.insert(
         (RG1_IFINDEX, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 254))),
-        NeighborEntry { mac: [0, 0, 0, 0, 0, 1] },
+        NeighborEntry {
+            mac: [0, 0, 0, 0, 0, 1],
+        },
     );
     forwarding.neighbors.insert(
         (RG2_IFINDEX, IpAddr::V4(Ipv4Addr::new(172, 16, 60, 254))),
-        NeighborEntry { mac: [0, 0, 0, 0, 0, 2] },
+        NeighborEntry {
+            mac: [0, 0, 0, 0, 0, 2],
+        },
     );
     let local = Ipv4Addr::new(10, 0, 0, 1);
     forwarding.local_v4.insert(local);
@@ -163,6 +159,7 @@ fn metadata(owner: i32) -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -407,7 +404,10 @@ fn upsert_synced_cross_pool_replacement_releases_old_pool_14669() {
     apply_upsert(&mut sessions, &forwarding, &ha, second);
     let used_a = crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules)[0].used_ports;
     let used_b = crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules)[1].used_ports;
-    assert_eq!(used_a, 0, "cross-pool replacement must release Pool A (#14669)");
+    assert_eq!(
+        used_a, 0,
+        "cross-pool replacement must release Pool A (#14669)"
+    );
     assert_eq!(used_b, 1, "replacement must reserve Pool B");
 }
 
@@ -420,17 +420,18 @@ fn upsert_synced_same_tuple_refresh_keeps_reservation_14669() {
     forwarding.zone_id_to_name.insert(2, "wan".to_string());
     forwarding.zone_name_to_id.insert("lan".to_string(), 1);
     forwarding.zone_name_to_id.insert("wan".to_string(), 2);
-    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
-        name: "snat-a".to_string(),
-        from_zone: "lan".to_string(),
-        to_zone: "wan".to_string(),
-        source_addresses: vec!["0.0.0.0/0".to_string()],
-        pool_name: "pool-a".to_string(),
-        pool_addresses: vec!["203.0.113.10/32".to_string()],
-        port_low: 20000,
-        port_high: 20000,
-        ..crate::SourceNATRuleSnapshot::default()
-    }]);
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+            name: "snat-a".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            pool_name: "pool-a".to_string(),
+            pool_addresses: vec!["203.0.113.10/32".to_string()],
+            port_low: 20000,
+            port_high: 20000,
+            ..crate::SourceNATRuleSnapshot::default()
+        }]);
     let ha = split_ha();
     let mut sessions = SessionTable::new();
     let key = key_for(Ipv4Addr::new(8, 8, 8, 8));

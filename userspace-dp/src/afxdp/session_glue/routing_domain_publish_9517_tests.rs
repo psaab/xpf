@@ -42,19 +42,24 @@ pub(super) fn host_bound_key() -> SessionKey {
 }
 
 fn local_delivery() -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::LocalDelivery,
-        local_ifindex: 0,
-        egress_ifindex: 0,
-        tx_ifindex: 0,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::LocalDelivery,
+            local_ifindex: 0,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 fn synced_forward_metadata() -> SessionMetadata {
@@ -76,13 +81,17 @@ fn synced_forward_metadata() -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
 /// What the worker publish path attempts for one peer-synced, host-bound,
 /// non-tunnel forward session — the exact shape the kernel-local predicate
 /// selects — on a node whose forwarding state says `has_routing_domains`.
-fn worker_publish_writes(has_routing_domains: bool, allow_replace_local: bool) -> Vec<SessionMapWriteRecord> {
+fn worker_publish_writes(
+    has_routing_domains: bool,
+    allow_replace_local: bool,
+) -> Vec<SessionMapWriteRecord> {
     worker_publish_writes_for(host_bound_key(), has_routing_domains, allow_replace_local)
 }
 
@@ -180,8 +189,9 @@ fn the_worker_publish_reads_this_nodes_routing_domain_flag_9517() {
          to REDIRECT (#9517). Writes: {multi_instance:?}"
     );
     assert!(
-        multi_instance.iter().any(|w| w.key == host_bound_key()
-            && w.value == Some(USERSPACE_SESSION_ACTION_REDIRECT)),
+        multi_instance.iter().any(
+            |w| w.key == host_bound_key() && w.value == Some(USERSPACE_SESSION_ACTION_REDIRECT)
+        ),
         "the demoted session must still be PUBLISHED, as REDIRECT — demotion \
          routes it through the helper, it must not drop the steering row. \
          Writes: {multi_instance:?}"
@@ -246,8 +256,14 @@ fn a_keyed_gre_session_is_demoted_on_a_single_instance_node_9517() {
          Writes: {writes:?}"
     );
     assert!(
-        writes.iter().any(|w| w.key == keyed && w.value == Some(USERSPACE_SESSION_ACTION_REDIRECT)),
+        writes
+            .iter()
+            .any(|w| w.key == keyed && w.value == Some(USERSPACE_SESSION_ACTION_REDIRECT)),
         "and still PUBLISHED, as REDIRECT. Writes: {writes:?}"
     );
-    assert_eq!(deletes(&writes), 0, "with no stale kernel-local row deleted first. Writes: {writes:?}");
+    assert_eq!(
+        deletes(&writes),
+        0,
+        "with no stale kernel-local row deleted first. Writes: {writes:?}"
+    );
 }

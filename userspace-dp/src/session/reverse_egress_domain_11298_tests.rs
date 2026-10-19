@@ -95,6 +95,7 @@ fn metadata() -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -120,7 +121,11 @@ fn mixed_zero_reply_domains_are_not_wildcards_11298() {
     // from B. The ordinary default-domain reply remains valid.
     let mut table = SessionTable::new();
     let forward_zero = forward_key_v4(0);
-    install(&mut table, &forward_zero, decision(IFINDEX_EGRESS_DEFAULT, nat));
+    install(
+        &mut table,
+        &forward_zero,
+        decision(IFINDEX_EGRESS_DEFAULT, nat),
+    );
     let reply_b = reply_key(&forward_zero, nat, DOMAIN_B);
     assert!(
         table
@@ -160,7 +165,11 @@ fn mixed_zero_reply_domains_are_not_wildcards_11298() {
     // domain, not a reply that happens to match its ingress key.
     let mut table = SessionTable::new();
     let forward_a = forward_key_v4(DOMAIN_A);
-    install(&mut table, &forward_a, decision(IFINDEX_EGRESS_DEFAULT, nat));
+    install(
+        &mut table,
+        &forward_a,
+        decision(IFINDEX_EGRESS_DEFAULT, nat),
+    );
     let reply_a = reply_key(&forward_a, nat, DOMAIN_A);
     assert!(
         table
@@ -225,7 +234,11 @@ fn assert_nat_reply_uses_egress_domain(forward: SessionKey, nat: NatDecision) {
     let mut table = SessionTable::new();
     let mut forward_zero = forward.clone();
     forward_zero.routing_domain = 0;
-    install(&mut table, &forward_zero, decision(IFINDEX_EGRESS_DEFAULT, nat));
+    install(
+        &mut table,
+        &forward_zero,
+        decision(IFINDEX_EGRESS_DEFAULT, nat),
+    );
     let reply_b = reply_key(&forward_zero, nat, DOMAIN_B);
     assert!(
         table
@@ -258,7 +271,11 @@ fn assert_nat_reply_uses_egress_domain(forward: SessionKey, nat: NatDecision) {
     // accept its domain-0 reply, not a reply in its ingress-key domain.
     let mut table = SessionTable::new();
     let forward_default_egress = forward;
-    install(&mut table, &forward_default_egress, decision(IFINDEX_EGRESS_DEFAULT, nat));
+    install(
+        &mut table,
+        &forward_default_egress,
+        decision(IFINDEX_EGRESS_DEFAULT, nat),
+    );
     let reply_a = reply_key(&forward_default_egress, nat, DOMAIN_A);
     assert!(
         table
@@ -273,7 +290,6 @@ fn assert_nat_reply_uses_egress_domain(forward: SessionKey, nat: NatDecision) {
             .is_some(),
         "the matching default-domain NAT reply must still resolve"
     );
-
 }
 
 #[test]
@@ -331,8 +347,8 @@ fn shared_egress_overlapping_tenants_are_ambiguous_14374() {
 
     // The reply arrives in W, the shared egress interface's domain.
     let reply_w = reply_key(&forward_a, nat, DOMAIN_W);
-    let before = crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let before =
+        crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
     assert!(
         table
             .find_forward_nat_match(&reply_w, egress_routing_domain_shared)
@@ -350,8 +366,8 @@ fn shared_egress_overlapping_tenants_are_ambiguous_14374() {
         ),
         "#14374: expiry matcher must also fail closed on shared-egress ambiguity"
     );
-    let after = crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let after =
+        crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
     assert!(
         after > before,
         "#14374: ambiguity must count a nat_reverse_ambiguous event"

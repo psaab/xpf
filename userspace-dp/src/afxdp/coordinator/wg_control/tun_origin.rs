@@ -304,6 +304,7 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         leak_incarnation: 0,
         origin: SessionOrigin::TunOrigin,
@@ -952,12 +953,7 @@ mod tests {
     }
 
     /// A bare inner IPv6 ICMPv6 packet (TUN-shaped: no L2) with explicit type.
-    fn inner_icmpv6(
-        icmp_type: u8,
-        src: Ipv6Addr,
-        dst: Ipv6Addr,
-        ident: u16,
-    ) -> Vec<u8> {
+    fn inner_icmpv6(icmp_type: u8, src: Ipv6Addr, dst: Ipv6Addr, ident: u16) -> Vec<u8> {
         let mut p = vec![0u8; 40 + 8];
         p[0] = 0x60;
         p[4..6].copy_from_slice(&8u16.to_be_bytes());
@@ -1050,16 +1046,9 @@ mod tests {
         let req_parsed =
             parse_wg_tun_origin_flow(&request, &forwarding, 1).expect("request must parse");
         assert!(wg_tun_origin_packet_initiates(&req_parsed));
-        let req_entries = build_wg_tun_origin_entries(
-            &req_parsed,
-            peer_ep,
-            1,
-            &forwarding,
-            &ha,
-            &neighbors,
-            123,
-        )
-        .expect("request build must succeed");
+        let req_entries =
+            build_wg_tun_origin_entries(&req_parsed, peer_ep, 1, &forwarding, &ha, &neighbors, 123)
+                .expect("request build must succeed");
         let (shared, nat, wire, indexes) = fresh_shared_10038();
         let mut dedup = FastMap::<SessionKey, u64>::default();
         let mut tombstones = FastMap::<SessionKey, u64>::default();
@@ -1074,7 +1063,12 @@ mod tests {
             true,
             1_000_000_000,
         );
-        assert!(shared.lock().expect("shared").contains_key(&req_entries.forward.key));
+        assert!(
+            shared
+                .lock()
+                .expect("shared")
+                .contains_key(&req_entries.forward.key)
+        );
         assert!(dedup.contains_key(&req_entries.forward.key));
         assert!(tombstones.contains_key(&req_entries.forward.key));
     }

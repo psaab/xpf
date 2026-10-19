@@ -41,7 +41,7 @@ fn flush_v_min_scratches_sums_and_zeros_per_queue_counters() {
                 surplus_weight: 1,
                 buffer_bytes: 64 * 1024,
                 dscp_rewrite: None,
-            codel_target_ns: 0,
+                codel_target_ns: 0,
             },
             crate::afxdp::types::CoSQueueConfig {
                 queue_id: 1,
@@ -56,7 +56,7 @@ fn flush_v_min_scratches_sums_and_zeros_per_queue_counters() {
                 surplus_weight: 1,
                 buffer_bytes: 64 * 1024,
                 dscp_rewrite: None,
-            codel_target_ns: 0,
+                codel_target_ns: 0,
             },
         ],
         oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
@@ -149,7 +149,7 @@ fn flush_v_min_scratches_no_op_when_all_zero() {
             surplus_weight: 1,
             buffer_bytes: 64 * 1024,
             dscp_rewrite: None,
-        codel_target_ns: 0,
+            codel_target_ns: 0,
         }],
         oversubscription_policy: crate::afxdp::types::CoSOversubscriptionPolicy::Proportional,
         oversubscription_guarantee_fraction: 0.0,
@@ -204,7 +204,7 @@ fn active_flow_debug_test_queue_config(queue_id: u8) -> crate::afxdp::types::CoS
         surplus_weight: 1,
         buffer_bytes: 64 * 1024,
         dscp_rewrite: None,
-    codel_target_ns: 0,
+        codel_target_ns: 0,
     }
 }
 
@@ -249,8 +249,8 @@ fn active_flow_debug_test_key() -> crate::session::SessionKey {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 5205,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -301,19 +301,24 @@ fn active_flow_debug_test_entry(
             apply_nat_on_fabric: false,
             last_queue_id: None,
         },
-        decision: SessionDecision { resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 14,
-            tx_ifindex: 14,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
-            neighbor_mac: Some([0x56, 0x4a, 0xe8, 0x1e, 0xa8, 0x32]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x00]),
-            tx_vlan_id: 80,
-            route_mtu: 0,
-            transport_route_mtu: 0,
-        }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 },
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 14,
+                tx_ifindex: 14,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+                neighbor_mac: Some([0x56, 0x4a, 0xe8, 0x1e, 0xa8, 0x32]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x00]),
+                tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         metadata: SessionMetadata {
             ingress_zone: TEST_TRUST_ZONE_ID,
             egress_zone: TEST_UNTRUST_ZONE_ID,
@@ -332,6 +337,7 @@ fn active_flow_debug_test_entry(
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         stamp,
         policy_deny: None,

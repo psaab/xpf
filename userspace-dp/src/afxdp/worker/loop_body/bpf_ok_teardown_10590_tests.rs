@@ -201,6 +201,7 @@ fn metadata(
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: counter,
+        nat_scope_ifindex: None,
     }
 }
 

@@ -71,6 +71,7 @@ fn marker_forward_10038() -> (SessionDecision, SessionMetadata, SessionOrigin) {
             policy_counter_idx: 0,
             policy_counter: None,
             forward_ingress_vlan_id: None,
+            nat_scope_ifindex: None,
         },
         SessionOrigin::TunOrigin,
     )
@@ -431,6 +432,7 @@ fn gate_current_splits_noegress_from_nonlocal_10507() {
 
 fn imported_snat_forwarding(with_static: bool) -> ForwardingState {
     let mut forwarding = ForwardingState::default();
+    forwarding.ifindex_to_config_name.insert(21, "ge-0/0/0.0".to_string());
     forwarding.zone_id_to_name.insert(1, "lan".to_string());
     forwarding.zone_id_to_name.insert(2, "wan".to_string());
     forwarding.egress.insert(
@@ -543,7 +545,8 @@ fn imported_snat_request(
         "nat_src_ip": "203.0.113.10",
         "nat_src_port": 45000,
         "session_id": 12_187_001,
-        "source_nat_provenance": source_nat_provenance
+        "source_nat_provenance": source_nat_provenance,
+        "nat_scope_ifindex": 21
     }))
     .expect("HA session-sync wire request")
 }
@@ -1271,6 +1274,7 @@ fn permitted_stale_hit_restamps_conntrack_app_id_12191() {
         policy_counter_idx: 0,
         policy_counter: None,
         forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None,
     };
 
     let mut snapshot = crate::afxdp::test_fixtures::policy_deny_snapshot();
@@ -1501,6 +1505,7 @@ fn reverse_stale_hit_restamps_forward_ipv6_conntrack_row_12191() {
         policy_counter_idx: 0,
         policy_counter: None,
         forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None,
     };
     let mut reverse_metadata = metadata.clone();
     reverse_metadata.is_reverse = true;
@@ -1663,6 +1668,7 @@ fn app_id_revalidation_metadata(is_reverse: bool) -> SessionMetadata {
         policy_counter_idx: 0,
         policy_counter: None,
         forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -2225,6 +2231,7 @@ fn snat_vlan_trunk_case_12861(
         policy_counter_idx: 0,
         policy_counter: None,
         forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None,
     };
     (forwarding, decision, metadata, key)
 }
@@ -2970,6 +2977,7 @@ fn reverse_snat_case_from_production_13771(
                 .get(&11)
                 .map(|iface| iface.vlan_id)
                 .expect("LAN interface"),
+            nat_scope_ifindex: Some(11),
             ..forward_metadata.clone()
         },
         forwarding_generation: crate::session::ForwardingGenerationStamp::default(),
@@ -3545,6 +3553,7 @@ fn reverse_only_icmp_pat_survives_revalidation_14128() {
         policy_counter_idx: 0,
         policy_counter: None,
         forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None,
     };
     // Production reverse synthesis (also exercises the `reverse()` at
     // shared_ops/reverse_synth.rs, not just the revalidation one).
@@ -3554,6 +3563,7 @@ fn reverse_only_icmp_pat_survives_revalidation_14128() {
         metadata: SessionMetadata {
             ingress_ifindex: 11,
             ingress_vlan_id: 0,
+            nat_scope_ifindex: None,
             ..forward_metadata.clone()
         },
         forwarding_generation: crate::session::ForwardingGenerationStamp::default(),
@@ -3917,6 +3927,7 @@ fn meta_14315(ingress_zone: u16, egress_zone: u16) -> SessionMetadata {
         policy_counter_idx: 0,
         policy_counter: None,
         forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -4499,6 +4510,7 @@ fn pair_14941(
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     };
     let mut rev_meta = fwd_meta.clone();
     rev_meta.is_reverse = true;
@@ -4769,5 +4781,159 @@ fn forward_hit_revalidation_still_rebinds_pair_14941() {
         stored_rev.ingress_zone,
         crate::test_zone_ids::TEST_DMZ_ZONE_ID,
         "reverse ingress follows the forward egress on a forward reroute"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #15176: session-hit NAT revalidation must rebuild the SAME ingress
+// interface/RI scope admission used. A fabric-ingress (or identity-less
+// imported) forward row records (0,0) ingress identity; evaluating the
+// scoped rule against that empty scope revoked every interface/RI-scoped
+// SNAT/DNAT/static session at the first generation change. The fix records
+// the validated NAT-scope ifindex at admission and, when none is recorded,
+// declines to revoke on scope grounds.
+// ---------------------------------------------------------------------------
+
+/// #15176 fixture: LAN unit 21 named `ge-0/0/0.0` in RI `cust-a`; WAN 12.
+/// The pool SNAT rule is scoped `from interface ge-0/0/0.0` AND
+/// `from routing-instance cust-a`, so it matches ONLY under the recorded
+/// scope (21) — never under the empty scope a (0,0) row rebuilds.
+fn scoped_snat_forwarding_15176() -> ForwardingState {
+    let mut forwarding = imported_snat_forwarding(false);
+    forwarding
+        .ifindex_to_config_name
+        .insert(21, "ge-0/0/0.0".to_string());
+    forwarding
+        .ifindex_to_routing_instance
+        .insert(21, "cust-a".to_string());
+    forwarding.ifindex_to_zone_id.insert(21, 1);
+    forwarding
+        .ifindex_to_config_name
+        .insert(12, "ge-0/0/1.0".to_string());
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::protocol::SourceNATRuleSnapshot {
+            name: "scoped-pool".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            from_interface: "ge-0/0/0.0".to_string(),
+            from_routing_instance: "cust-a".to_string(),
+            source_addresses: vec!["10.0.0.1/32".to_string()],
+            pool_addresses: vec!["203.0.113.10/32".to_string()],
+            port_low: 45_000,
+            port_high: 45_000,
+            ..Default::default()
+        }]);
+    forwarding
+}
+
+fn scoped_snat_case_15176(
+    fabric_ingress: bool,
+    nat_scope_ifindex: Option<i32>,
+) -> (SessionDecision, SessionMetadata, SessionKey) {
+    let (forwarding, decision, mut metadata, key) =
+        snat_vlan_trunk_case_12861(scoped_snat_forwarding_15176(), 0, 0, fabric_ingress);
+    let _ = forwarding;
+    metadata.nat_scope_ifindex = nat_scope_ifindex;
+    (decision, metadata, key)
+}
+
+fn scoped_snat_hit_15176(
+    forwarding: &ForwardingState,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    key: &SessionKey,
+) -> Option<PolicyRevocation> {
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        metadata.clone(),
+        SessionOrigin::SyncImport,
+        1_000_000,
+        key.protocol,
+        0x02,
+    ));
+    sessions.set_source_nat_static(key, Some(false));
+    sessions.set_forwarding_revalidation_gen(2, 2);
+    source_nat_revocation_on_session_hit(
+        forwarding,
+        &mut sessions,
+        key,
+        metadata,
+        decision,
+        &flow,
+        SessionOrigin::SyncImport,
+        Some(false),
+        None,
+        1_000_000_000,
+    )
+}
+
+/// #15176 RED (fabric): a fabric-ingress SNAT session whose recorded scope
+/// is the peer's LAN unit survives an unchanged scoped rule. Pre-fix the
+/// (0,0) identity rebuilt an empty scope and the session was revoked.
+#[test]
+fn fabric_scoped_snat_survives_with_recorded_scope_15176() {
+    let (decision, metadata, key) = scoped_snat_case_15176(true, Some(21));
+    assert!(
+        scoped_snat_hit_15176(&scoped_snat_forwarding_15176(), decision, &metadata, &key).is_none(),
+        "fabric SNAT with recorded scope must survive the unchanged scoped rule"
+    );
+}
+
+/// #15176 RED (imported): an identity-less imported SNAT session (no scope
+/// recorded) is kept, not revoked against an empty scope.
+#[test]
+fn imported_scopeless_snat_kept_without_recorded_scope_15176() {
+    let (decision, metadata, key) = scoped_snat_case_15176(false, None);
+    assert!(
+        scoped_snat_hit_15176(&scoped_snat_forwarding_15176(), decision, &metadata, &key).is_none(),
+        "identity-less imported SNAT must be kept when no scope is recorded"
+    );
+}
+
+/// #15176 anti-mutant: with a scope recorded, withdrawing the scoped rule
+/// still revokes — the keep is scoped to the no-scope case only.
+#[test]
+fn recorded_scope_snat_revoked_when_rule_withdrawn_15176() {
+    let (decision, metadata, key) = scoped_snat_case_15176(true, Some(21));
+    let mut no_rules = scoped_snat_forwarding_15176();
+    no_rules.source_nat_rules = crate::nat::parse_source_nat_rules(&[]);
+    let revocation = scoped_snat_hit_15176(&no_rules, decision, &metadata, &key)
+        .expect("recorded-scope SNAT must revoke when its rule is withdrawn");
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+}
+
+/// #15176 anti-mutant: a recorded scope that no longer matches the rule's
+/// interface (rescoped to another unit) still revokes.
+#[test]
+fn recorded_scope_snat_revoked_when_rescoped_15176() {
+    let (decision, metadata, key) = scoped_snat_case_15176(true, Some(22));
+    let revocation =
+        scoped_snat_hit_15176(&scoped_snat_forwarding_15176(), decision, &metadata, &key)
+            .expect("SNAT recorded under a different scope must revoke when rescoped");
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+}
+
+/// #15176 control: a local (non-fabric, non-imported) scoped SNAT session
+/// with its scope recorded is unchanged — survives when the rule stands.
+#[test]
+fn local_scoped_snat_survives_unchanged_15176() {
+    let (decision, metadata, key) = scoped_snat_case_15176(false, Some(21));
+    assert!(
+        scoped_snat_hit_15176(&scoped_snat_forwarding_15176(), decision, &metadata, &key).is_none(),
+        "local scoped SNAT must survive the unchanged rule"
     );
 }

@@ -390,6 +390,10 @@ fn destination_nat_translation_still_valid(
         return nptv6_destination_still_valid(forwarding, metadata, forward_key, translated_dst);
     }
 
+    // #15176: the recorded NAT scope (or, for a legacy row, the resolved
+    // logical unit) — never the empty scope a fabric/identity-less row
+    // would rebuild from (0, 0).
+    let scope_ifindex = metadata.nat_scope_ifindex;
     let ingress_ifindex = metadata.ingress_ifindex as i32;
     let zone_override =
         (metadata.fabric_ingress || ingress_ifindex == 0).then_some(metadata.ingress_zone);
@@ -398,7 +402,7 @@ fn destination_nat_translation_still_valid(
         ingress_ifindex,
         metadata.ingress_vlan_id,
         zone_override,
-        None,
+        scope_ifindex,
     );
     let expected = forwarding
         .static_nat
@@ -566,7 +570,7 @@ fn nptv6_destination_still_valid(
         ingress_ifindex,
         metadata.ingress_vlan_id,
         zone_override,
-        None,
+        metadata.nat_scope_ifindex,
     );
     let mut candidate = wire_dst;
     forwarding
@@ -684,7 +688,7 @@ fn source_nat_translation_still_valid(
         forwarding,
         ingress_ifindex,
         metadata.ingress_vlan_id,
-        None,
+        metadata.nat_scope_ifindex,
         egress_ifindex,
         forward_key.routing_domain,
     );
@@ -901,6 +905,28 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                         });
                     };
                     forward_metadata.ingress_vlan_id = forward_ingress_vlan_id;
+                    // #13789/#15176: the reverse row's scope was recorded
+                    // against the forward physical ingress; resolve it to
+                    // the logical unit for the forward VLAN (the validator
+                    // would otherwise re-resolve via the reverse row's
+                    // zero ingress and lose the VLAN unit).
+                    if forward_metadata.nat_scope_ifindex.is_some() {
+                        forward_metadata.nat_scope_ifindex =
+                            crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
+                                forwarding,
+                                forward_ingress_ifindex,
+                                forward_ingress_vlan_id,
+                            )
+                            .or(forward_metadata.nat_scope_ifindex);
+                    }
+                    // #15176: the synthesized forward row inherits the
+                    // reverse row's recorded scope; with none recorded,
+                    // decline to revoke on scope grounds (keep).
+                    if metadata.nat_scope_ifindex.is_none()
+                        && (metadata.fabric_ingress || forward_ingress_ifindex == 0)
+                    {
+                        return None;
+                    }
                     std::mem::swap(
                         &mut forward_metadata.ingress_zone,
                         &mut forward_metadata.egress_zone,
@@ -973,6 +999,23 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         }
     };
 
+    // #15176: when the judged forward row carries a translation whose
+    // validity depends on an interface/RI scope but records no scope
+    // (fabric-ingress V1/unstamped, identity-less import, legacy peer),
+    // decline to revoke on scope grounds — keep the session rather than
+    // evaluate the empty scope `stamped_ingress_identity` left behind.
+    // Scope-independent translations (no rewrite, NAT64) and rows that DO
+    // record a scope are judged normally below, so a withdrawn/rescoped
+    // rule still revokes whenever a scope was actually recorded.
+    let scope_dependent =
+        forward_decision.nat.rewrite_src.is_some() || forward_decision.nat.rewrite_dst.is_some();
+    // Only rows whose ingress identity is structurally absent (fabric
+    // (0,0) stamp or identity-less import) get the keep; locally-authored
+    // rows have a derivable scope and are judged normally.
+    let identity_absent = forward_metadata.fabric_ingress || forward_metadata.ingress_ifindex == 0;
+    if scope_dependent && identity_absent && forward_metadata.nat_scope_ifindex.is_none() {
+        return None;
+    }
     let (valid, static_nat) = source_nat_translation_still_valid(
         forwarding,
         &forward_decision,
@@ -2006,11 +2049,15 @@ fn reverse_hit_zone_policy(
                         // #14318: the judged resolution is the CURRENT
                         // forward route; its live egress zone is the pair's
                         // new egress (fabric already excluded above).
-                        let new_zone = if resolution_is_locally_forwarding(input.decision.resolution) {
-                            Some(forwarding.egress_zone_id(input.decision.resolution.egress_ifindex))
-                        } else {
-                            None
-                        };
+                        let new_zone =
+                            if resolution_is_locally_forwarding(input.decision.resolution) {
+                                Some(
+                                    forwarding
+                                        .egress_zone_id(input.decision.resolution.egress_ifindex),
+                                )
+                            } else {
+                                None
+                            };
                         sessions.revalidate_forwarding_resolution_with_egress_zone(
                             &fwd_key,
                             input.decision.resolution,

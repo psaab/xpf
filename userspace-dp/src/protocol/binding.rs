@@ -1452,6 +1452,9 @@ pub(crate) struct SessionDeltaInfo {
     pub ingress_ifindex: i32,
     #[serde(rename = "ingress_vlan_id", default)]
     pub ingress_vlan_id: u16,
+    /// #15176: node-local logical NAT-scope ingress ifindex (0 = none).
+    #[serde(rename = "nat_scope_ifindex", default)]
+    pub nat_scope_ifindex: i32,
     #[serde(rename = "owner_rg_id", default)]
     pub owner_rg_id: i32,
     #[serde(default)]

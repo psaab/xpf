@@ -251,8 +251,9 @@ pub(in crate::afxdp) fn transit_destination_class_drop(
         fabric_ingress_zone,
     );
     crate::afxdp::frame::transit_dst_is_martian(forwarding, destination, routing_domain)
-        || translated_destination
-            .is_some_and(|d| crate::afxdp::frame::transit_dst_is_martian(forwarding, d, routing_domain))
+        || translated_destination.is_some_and(|d| {
+            crate::afxdp::frame::transit_dst_is_martian(forwarding, d, routing_domain)
+        })
 }
 
 #[inline]
@@ -937,9 +938,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             crate::afxdp::poll_stages::WgDecapStage::Decapped(m, f) => {
                                 (m, Some(f), false)
                             }
-                            crate::afxdp::poll_stages::WgDecapStage::NotWg(m) => {
-                                (m, None, false)
-                            }
+                            crate::afxdp::poll_stages::WgDecapStage::NotWg(m) => (m, None, false),
                             crate::afxdp::poll_stages::WgDecapStage::FilterDropped => {
                                 (meta, None, true)
                             }
@@ -1372,9 +1371,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             }
-                            crate::afxdp::forwarding::RouteOverride::Table {
-                                table, ..
-                            } => Some(table),
+                            crate::afxdp::forwarding::RouteOverride::Table { table, .. } => {
+                                Some(table)
+                            }
                             crate::afxdp::forwarding::RouteOverride::None => None,
                         }
                     }
@@ -2164,34 +2163,35 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 let mut fragment_association_hit = false;
                 let mut decision = if let Some(flow) = flow.as_ref() {
                     if !owner_syn_reuse
-                        && let Some(mut resolved) = resolve_flow_session_decision_with_conntrack_and_payload(
-                            sessions,
-                            binding.bpf_maps.session_map.handle(),
-                            conntrack_v4_fd,
-                            conntrack_v6_fd,
-                            worker_ctx.shared_sessions,
-                            worker_ctx.shared_nat_sessions,
-                            worker_ctx.shared_forward_wire_sessions,
-                            &worker_ctx.shared_owner_rg_indexes,
-                            worker_ctx.peer_worker_commands,
-                            worker_ctx.worker_commands_by_id,
-                            worker_ctx.forwarding,
-                            worker_ctx.ha_state,
-                            worker_ctx.dynamic_neighbors,
-                            flow,
-                            now_ns,
-                            now_secs,
-                            meta.protocol,
-                            meta.tcp_flags,
-                            tcp_payload_len(packet_frame, meta),
-                            meta.ingress_ifindex as i32,
-                            meta.ingress_vlan_id,
-                            fabric_ingress_for_session,
-                            fabric_link_ingress,
-                            ha_startup_grace_until_secs,
-                            worker_id,
-                            unique_unstamped_fabric_nat_match.take(),
-                        )
+                        && let Some(mut resolved) =
+                            resolve_flow_session_decision_with_conntrack_and_payload(
+                                sessions,
+                                binding.bpf_maps.session_map.handle(),
+                                conntrack_v4_fd,
+                                conntrack_v6_fd,
+                                worker_ctx.shared_sessions,
+                                worker_ctx.shared_nat_sessions,
+                                worker_ctx.shared_forward_wire_sessions,
+                                &worker_ctx.shared_owner_rg_indexes,
+                                worker_ctx.peer_worker_commands,
+                                worker_ctx.worker_commands_by_id,
+                                worker_ctx.forwarding,
+                                worker_ctx.ha_state,
+                                worker_ctx.dynamic_neighbors,
+                                flow,
+                                now_ns,
+                                now_secs,
+                                meta.protocol,
+                                meta.tcp_flags,
+                                tcp_payload_len(packet_frame, meta),
+                                meta.ingress_ifindex as i32,
+                                meta.ingress_vlan_id,
+                                fabric_ingress_for_session,
+                                fabric_link_ingress,
+                                ha_startup_grace_until_secs,
+                                worker_id,
+                                unique_unstamped_fabric_nat_match.take(),
+                            )
                     {
                         // #10597 G5: a queued WireGuard record may only enter
                         // the worker's local-delivery path. Use the pipeline's
@@ -2345,12 +2345,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // `egress_zone` / reverse `ingress_zone`, or every
                             // later ACK classifies Foreign and stops
                             // refreshing the session.
-                            let forward_zone = crate::afxdp::shared_ops::forward_egress_zone_for_hit(
-                                resolved.metadata.is_reverse,
-                                revalidation.new_egress_zone,
-                                resolved.metadata.ingress_zone,
-                            )
-                            .as_option();
+                            let forward_zone =
+                                crate::afxdp::shared_ops::forward_egress_zone_for_hit(
+                                    resolved.metadata.is_reverse,
+                                    revalidation.new_egress_zone,
+                                    resolved.metadata.ingress_zone,
+                                )
+                                .as_option();
                             sessions.revalidate_forwarding_resolution_with_egress_zone(
                                 &resolved.key,
                                 revalidation.resolution,
@@ -5144,6 +5145,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // host-local session).
                                 policy_counter_idx: host_policy_counter_idx,
                                 policy_counter: host_policy_counter,
+                                nat_scope_ifindex: None,
                             };
                             let local_session_capacity_available =
                                 if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
@@ -6231,6 +6233,25 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         .policy
                                         .hit_counter_by_idx(policy_result.policy_counter_idx)
                                         .cloned();
+                                    // #15176: record the validated NAT-scope
+                                    // logical ingress admission used (the V2
+                                    // fabric identity, or the locally resolved
+                                    // logical unit), so session-hit revalidation
+                                    // rebuilds the SAME scope instead of an
+                                    // empty one. `None` when no scope was
+                                    // validated (V1/unstamped fabric).
+                                    let nat_scope_ifindex = if fabric_ingress {
+                                        ingress_nat_scope_ifindex
+                                    } else {
+                                        Some(
+                                            resolve_ingress_logical_ifindex(
+                                                worker_ctx.forwarding,
+                                                meta.ingress_ifindex as i32,
+                                                meta.ingress_vlan_id,
+                                            )
+                                            .unwrap_or(meta.ingress_ifindex as i32),
+                                        )
+                                    };
                                     let (stamped_ifindex, stamped_vlan) =
                                         crate::session::stamped_ingress_identity(
                                             meta.ingress_ifindex,
@@ -6296,6 +6317,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         policy_counter_idx: policy_result.policy_counter_idx,
                                         // #3322: the reorder-stable bound handle.
                                         policy_counter: bound_policy_counter.clone(),
+                                        nat_scope_ifindex,
                                     };
                                     // #3073: carry the admitting rule's handle so
                                     // the flow-cache entry populated for this new
@@ -6718,6 +6740,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // mirror the reorder-stable bound handle too.
                                         policy_counter_idx: policy_result.policy_counter_idx,
                                         policy_counter: bound_policy_counter.clone(),
+                                        nat_scope_ifindex,
                                     };
                                     // #1861 §5.2: the reverse install is gated on
                                     // forward_installed (was track_in_userspace —
@@ -10579,7 +10602,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // resolver re-reads the SAME throttle entry
                                     // and bumps it once, so the probe above and
                                     // this enqueue share one window per key.
-                                    if outer_if_distinct && !is_probe_throttled && !suppress_neighbor_probe_14661 {
+                                    if outer_if_distinct
+                                        && !is_probe_throttled
+                                        && !suppress_neighbor_probe_14661
+                                    {
                                         if let Some(resolver) = worker_ctx.neighbor_resolver {
                                             try_enqueue_resolver(
                                                 resolver,
@@ -10908,8 +10934,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         };
                                     // #14661: capture before the lease
                                     // branches consume the shed vec.
-                                    let shed_nonempty_14661 =
-                                        !pressure_shed_sessions.is_empty();
+                                    let shed_nonempty_14661 = !pressure_shed_sessions.is_empty();
                                     let shed_keys: Vec<_> = pressure_shed_sessions
                                         .iter()
                                         .map(|shed| shed.key.clone())
@@ -11038,13 +11063,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     let seed_gate_refused_14661 =
                                         shed_lease.is_err() && shed_nonempty_14661;
                                     let mut seed_install_permit_14661 =
-                                        if pending_capacity_available
-                                            && !seed_gate_refused_14661
-                                        {
+                                        if pending_capacity_available && !seed_gate_refused_14661 {
                                             match crate::afxdp::bpf_map::global_tuple_gate()
-                                                .try_acquire_installs([flow
-                                                    .forward_key
-                                                    .clone()])
+                                                .try_acquire_installs([flow.forward_key.clone()])
                                             {
                                                 Ok(mut permits) => permits.pop(),
                                                 Err(_) => None,
@@ -11052,13 +11073,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         } else {
                                             None
                                         };
-                                    let seed_gate_admitted_14661 =
-                                        pending_capacity_available
-                                            && !seed_gate_refused_14661
-                                            && seed_install_permit_14661.is_some();
-                                    if pending_capacity_available
-                                        && !seed_gate_admitted_14661
-                                    {
+                                    let seed_gate_admitted_14661 = pending_capacity_available
+                                        && !seed_gate_refused_14661
+                                        && seed_install_permit_14661.is_some();
+                                    if pending_capacity_available && !seed_gate_admitted_14661 {
                                         sessions.note_admission_refused();
                                         // #14661: a lease/gate refusal is an
                                         // at-cap-class refusal: refuse the
@@ -11270,9 +11288,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 // suppress itself. The record IS
                                                 // the window; this single fire is
                                                 // the probe it was bounding.
-                                                let already = binding
-                                                    .pending_neigh
-                                                    .contains_key(&key);
+                                                let already =
+                                                    binding.pending_neigh.contains_key(&key);
                                                 let tunnel_marked =
                                                     pending_decision.resolution.tunnel_endpoint_id
                                                         != 0;
@@ -11284,8 +11301,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                             .egress_ifindex;
                                                 let tunnel_without_outer =
                                                     tunnel_marked && !outer_distinct;
-                                                if !already && !tunnel_without_outer
-                                                {
+                                                if !already && !tunnel_without_outer {
                                                     if let Some(name) = worker_ctx
                                                         .forwarding
                                                         .ifindex_to_name
@@ -11310,11 +11326,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     {
                                                         try_enqueue_resolver(
                                                             resolver,
-                                                            &mut binding
-                                                                .resolver_enqueue_throttle,
-                                                            &worker_ctx
-                                                                .forwarding
-                                                                .ifindex_to_name,
+                                                            &mut binding.resolver_enqueue_throttle,
+                                                            &worker_ctx.forwarding.ifindex_to_name,
                                                             key,
                                                             now_ns,
                                                         );

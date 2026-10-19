@@ -1,11 +1,13 @@
 use super::*;
 
-pub(in crate::afxdp) fn build_reverse_session_from_forward_match(forwarding: &ForwardingState,
-ha_state: &BTreeMap<i32, HAGroupRuntime>,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-forward_match: ForwardSessionMatch,
-now_secs: u64,
-ha_startup_grace_until_secs: u64,) -> SessionLookup {
+pub(in crate::afxdp) fn build_reverse_session_from_forward_match(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    forward_match: ForwardSessionMatch,
+    now_secs: u64,
+    ha_startup_grace_until_secs: u64,
+) -> SessionLookup {
     // #10312: an RI-native forward stores its ingress routing domain on the
     // key. Use that domain for the reply target, not the PBR installing table:
     // PBR is directional, while the reply must find the original client in
@@ -58,13 +60,15 @@ ha_startup_grace_until_secs: u64,) -> SessionLookup {
 /// native-RI derivation (#10312).
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(forwarding: &ForwardingState,
-ha_state: &BTreeMap<i32, HAGroupRuntime>,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-forward_match: ForwardSessionMatch,
-now_secs: u64,
-ha_startup_grace_until_secs: u64,
-table: Option<&str>,) -> SessionLookup {
+pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    forward_match: ForwardSessionMatch,
+    now_secs: u64,
+    ha_startup_grace_until_secs: u64,
+    table: Option<&str>,
+) -> SessionLookup {
     let requires_fabric_return = forward_match.metadata.fabric_ingress
         || forward_match.decision.resolution.disposition == ForwardingDisposition::FabricRedirect;
     let resolution = reverse_resolution_for_session_in_table(
@@ -160,6 +164,7 @@ table: Option<&str>,) -> SessionLookup {
         // even after a live policy reorder.
         policy_counter_idx: forward_match.metadata.policy_counter_idx,
         policy_counter: forward_match.metadata.policy_counter.clone(),
+        nat_scope_ifindex: forward_match.metadata.nat_scope_ifindex,
     };
     let decision = SessionDecision {
         resolution: redirect_session_resolution_for_metadata(forwarding, resolution, &metadata),
@@ -183,11 +188,13 @@ table: Option<&str>,) -> SessionLookup {
     }
 }
 
-pub(in crate::afxdp) fn synthesized_synced_reverse_entry(forwarding: &ForwardingState,
-ha_state: &BTreeMap<i32, HAGroupRuntime>,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-entry: &SyncedSessionEntry,
-now_secs: u64,) -> Option<SyncedSessionEntry> {
+pub(in crate::afxdp) fn synthesized_synced_reverse_entry(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    entry: &SyncedSessionEntry,
+    now_secs: u64,
+) -> Option<SyncedSessionEntry> {
     let table_context = crate::afxdp::forwarding::native_route_table_for_flow_target(
         forwarding,
         entry.key.routing_domain,
@@ -231,12 +238,14 @@ now_secs: u64,) -> Option<SyncedSessionEntry> {
 /// default-instance behavior while the untabled wrapper performs native-RI
 /// derivation (#10312); explicit table-scoped callers include both the
 /// TUN-origin builders and the native-RI wrapper.
-pub(in crate::afxdp) fn synthesized_synced_reverse_entry_in_table(forwarding: &ForwardingState,
-ha_state: &BTreeMap<i32, HAGroupRuntime>,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-entry: &SyncedSessionEntry,
-now_secs: u64,
-table: Option<&str>,) -> Option<SyncedSessionEntry> {
+pub(in crate::afxdp) fn synthesized_synced_reverse_entry_in_table(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    entry: &SyncedSessionEntry,
+    now_secs: u64,
+    table: Option<&str>,
+) -> Option<SyncedSessionEntry> {
     if entry.metadata.is_reverse {
         return None;
     }
@@ -298,16 +307,18 @@ pub(in crate::afxdp) struct ReverseSessionResolution {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::afxdp) fn reverse_resolution_for_flow(forwarding: &ForwardingState,
-ha_state: &BTreeMap<i32, HAGroupRuntime>,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-flow: &SessionFlow,
-ingress_ifindex: i32,
-ingress_vlan_id: u16,
-ingress_zone: u16,
-fabric_ingress: bool,
-now_secs: u64,
-allow_unseeded_tunnel_local: bool,) -> ReverseSessionResolution {
+pub(in crate::afxdp) fn reverse_resolution_for_flow(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    flow: &SessionFlow,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    ingress_zone: u16,
+    fabric_ingress: bool,
+    now_secs: u64,
+    allow_unseeded_tunnel_local: bool,
+) -> ReverseSessionResolution {
     let table_context = crate::afxdp::forwarding::native_route_table_for_flow_target(
         forwarding,
         flow.forward_key.routing_domain,
@@ -351,14 +362,16 @@ allow_unseeded_tunnel_local: bool,) -> ReverseSessionResolution {
     }
 }
 
-pub(in crate::afxdp) fn reverse_resolution_for_session(forwarding: &ForwardingState,
-ha_state: &BTreeMap<i32, HAGroupRuntime>,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-target_ip: IpAddr,
-ingress_zone: u16,
-fabric_ingress: bool,
-now_secs: u64,
-allow_unseeded_tunnel_local: bool,) -> ForwardingResolution {
+pub(in crate::afxdp) fn reverse_resolution_for_session(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    target_ip: IpAddr,
+    ingress_zone: u16,
+    fabric_ingress: bool,
+    now_secs: u64,
+    allow_unseeded_tunnel_local: bool,
+) -> ForwardingResolution {
     reverse_resolution_for_session_in_table(
         forwarding,
         ha_state,
@@ -376,17 +389,19 @@ allow_unseeded_tunnel_local: bool,) -> ForwardingResolution {
 /// stamp together prevents a caller from resolving in one VRF and storing a
 /// zero-stamped decision that later falls back to MAIN.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::afxdp) fn reverse_session_decision_for_flow(forwarding: &ForwardingState,
-ha_state: &BTreeMap<i32, HAGroupRuntime>,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-flow: &SessionFlow,
-ingress_ifindex: i32,
-ingress_vlan_id: u16,
-ingress_zone: u16,
-fabric_ingress: bool,
-now_secs: u64,
-allow_unseeded_tunnel_local: bool,
-nat: NatDecision,) -> (ReverseSessionResolution, SessionDecision) {
+pub(in crate::afxdp) fn reverse_session_decision_for_flow(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    flow: &SessionFlow,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    ingress_zone: u16,
+    fabric_ingress: bool,
+    now_secs: u64,
+    allow_unseeded_tunnel_local: bool,
+    nat: NatDecision,
+) -> (ReverseSessionResolution, SessionDecision) {
     let context = reverse_resolution_for_flow(
         forwarding,
         ha_state,
@@ -421,15 +436,17 @@ nat: NatDecision,) -> (ReverseSessionResolution, SessionDecision) {
 /// builders, the native-RI reverse synthesis (#10312) passes `Some`;
 /// remaining transit/HA VRF synthesis gaps are out of scope.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(forwarding: &ForwardingState,
-ha_state: &BTreeMap<i32, HAGroupRuntime>,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-target_ip: IpAddr,
-ingress_zone: u16,
-fabric_ingress: bool,
-now_secs: u64,
-allow_unseeded_tunnel_local: bool,
-table: Option<&str>,) -> ForwardingResolution {
+pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    target_ip: IpAddr,
+    ingress_zone: u16,
+    fabric_ingress: bool,
+    now_secs: u64,
+    allow_unseeded_tunnel_local: bool,
+    table: Option<&str>,
+) -> ForwardingResolution {
     let resolved = super::interface_nat_local_resolution(forwarding, target_ip, table)
         .unwrap_or_else(|| {
             super::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
@@ -462,24 +479,26 @@ table: Option<&str>,) -> ForwardingResolution {
     enforced
 }
 
-pub(in crate::afxdp) fn install_reverse_session_from_forward_match(sessions: &mut SessionTable,
-session_map: SteeringMap<'_>,
-shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-worker_commands_by_id: &WorkerCommandQueues,
-forwarding: &ForwardingState,
-ha_state: &BTreeMap<i32, HAGroupRuntime>,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-reverse_key: &SessionKey,
-forward_match: ForwardSessionMatch,
-now_ns: u64,
-now_secs: u64,
-ha_startup_grace_until_secs: u64,
-protocol: u8,
-tcp_flags: u8,) -> (SessionLookup, bool) {
+pub(in crate::afxdp) fn install_reverse_session_from_forward_match(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &WorkerCommandQueues,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    reverse_key: &SessionKey,
+    forward_match: ForwardSessionMatch,
+    now_ns: u64,
+    now_secs: u64,
+    ha_startup_grace_until_secs: u64,
+    protocol: u8,
+    tcp_flags: u8,
+) -> (SessionLookup, bool) {
     let reverse = build_reverse_session_from_forward_match(
         forwarding,
         ha_state,
@@ -551,4 +570,3 @@ tcp_flags: u8,) -> (SessionLookup, bool) {
     }
     (reverse, installed)
 }
-

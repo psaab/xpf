@@ -41,9 +41,9 @@
 // in a wider context that forced a multiline layout). No logic,
 // side-effect ordering, counter increments, or allocation sites change.
 
-use super::*;
 use super::reject_reply::enqueue_filter_reject_reply;
 use super::worker::WorkerTxPipeline;
+use super::*;
 use crate::afxdp::frame::term_match_extra_from_frame;
 use crate::filter::TermMatchExtra;
 
@@ -361,10 +361,7 @@ pub(super) fn policer_drop_action(
 /// arms with the state available here (interface primaries are covered by
 /// `ingress_interface_local_resolution` and interface-NAT claims by its
 /// sibling above; a plain FIB local route is the remaining arm).
-fn routing_instance_local_delivery_expected(
-    forwarding: &ForwardingState,
-    dst: IpAddr,
-) -> bool {
+fn routing_instance_local_delivery_expected(forwarding: &ForwardingState, dst: IpAddr) -> bool {
     crate::afxdp::forwarding::lookup_forwarding_resolution(forwarding, dst)
         .resolution
         .disposition
@@ -611,7 +608,6 @@ pub(super) fn input_filter_would_deny_before_screen(
     )
     .is_some_and(|result| result.action != crate::filter::FilterAction::Accept)
 }
-
 
 #[cold]
 #[inline(never)]
@@ -930,8 +926,10 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
     // Static filters are generation-scoped; per-packet route predicates must
     // be evaluated on every HIT, even when the static stamp is Fresh.
     let target = sessions.filter_revalidation_target(session_key, ingress_ifindex);
-    let no_local_entry =
-        matches!(&target, crate::session::FilterRevalidationTarget::NoLocalEntry);
+    let no_local_entry = matches!(
+        &target,
+        crate::session::FilterRevalidationTarget::NoLocalEntry
+    );
     let route_filter = crate::filter::interface_filter_route_lookup_affecting(
         &forwarding.filter_state,
         ingress_ifindex,
@@ -1146,8 +1144,7 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
         .as_ref()
             == Some(&decision.resolution);
     if local_arm_unchanged
-        && desired_identity
-            == (decision.install_table_domain, decision.install_table_check)
+        && desired_identity == (decision.install_table_domain, decision.install_table_check)
     {
         return None;
     }
@@ -1204,7 +1201,6 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
         install_table_check: desired_identity.1,
     })
 }
-
 
 /// Re-evaluate the ingress interface's INPUT filter for an established-session
 /// hit, when it owes one.
@@ -2546,8 +2542,8 @@ mod lo0_gate_tests {
                 dst_ip: dst,
                 src_port: 40000,
                 dst_port: 443,
-                            discriminator: Default::default(),
-                            routing_domain: 0,
+                discriminator: Default::default(),
+                routing_domain: 0,
             },
         };
         (flow, meta)
@@ -2802,7 +2798,8 @@ mod lo0_gate_tests {
         // zones looks like.
         let mut fw = logging_lo0();
         fw.ifindex_to_zone_id.insert(LOGICAL_IFINDEX, UNIT_ZONE);
-        fw.ifindex_to_zone_id.insert(PHYS_IFINDEX as i32, PARENT_ZONE);
+        fw.ifindex_to_zone_id
+            .insert(PHYS_IFINDEX as i32, PARENT_ZONE);
         assert_eq!(
             zone_of(&fw),
             UNIT_ZONE,
@@ -2818,7 +2815,8 @@ mod lo0_gate_tests {
         // and a fix that simply DELETED it would satisfy the subject above while
         // silently zeroing the zone on every untagged port.
         let mut fw = logging_lo0();
-        fw.ifindex_to_zone_id.insert(PHYS_IFINDEX as i32, PARENT_ZONE);
+        fw.ifindex_to_zone_id
+            .insert(PHYS_IFINDEX as i32, PARENT_ZONE);
         assert_eq!(
             zone_of(&fw),
             PARENT_ZONE,
@@ -2909,8 +2907,8 @@ mod lo0_gate_tests {
                     dst_ip: dst,
                     src_port: 40000,
                     dst_port: 5000,
-                                    discriminator: Default::default(),
-                                    routing_domain: 0,
+                    discriminator: Default::default(),
+                    routing_domain: 0,
                 },
             };
             (flow, meta)
@@ -3489,8 +3487,8 @@ mod filter_terminal_tests {
                 dst_ip: dst,
                 src_port: 40000,
                 dst_port: 443,
-                            discriminator: Default::default(),
-                            routing_domain: 0,
+                discriminator: Default::default(),
+                routing_domain: 0,
             },
         }
     }
@@ -3614,8 +3612,8 @@ mod filter_terminal_tests {
                 dst_ip: IpAddr::V4(server),
                 src_port: 0x1234,
                 dst_port: 0,
-                            discriminator: Default::default(),
-                            routing_domain: 0,
+                discriminator: Default::default(),
+                routing_domain: 0,
             },
         };
         let filter_state = crate::filter::parse_filter_state(
@@ -3889,8 +3887,8 @@ mod filter_log_egress_zone_tests {
                     dst_ip: dst,
                     src_port: 40000,
                     dst_port: 443,
-                                    discriminator: Default::default(),
-                                    routing_domain: 0,
+                    discriminator: Default::default(),
+                    routing_domain: 0,
                 },
             };
             let meta = UserspaceDpMeta {
@@ -3938,6 +3936,7 @@ mod filter_log_egress_zone_tests {
                 inactivity_timeout_ns: None,
                 policy_counter: None,
                 policy_counter_idx: 0,
+                nat_scope_ifindex: None,
             };
 
             emit_cached_output_filter_log_tail(

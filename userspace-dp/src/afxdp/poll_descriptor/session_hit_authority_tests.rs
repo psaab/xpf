@@ -6,8 +6,8 @@ use super::*;
 use crate::InterfaceSnapshot;
 use crate::afxdp::forwarding_build::build_forwarding_state;
 use crate::afxdp::test_fixtures::policy_deny_snapshot;
-use crate::test_zone_ids::*;
 use crate::ip_proto::PROTO_ICMP;
+use crate::test_zone_ids::*;
 
 /// `reth1.0`, zone `lan`, in `policy_deny_snapshot`.
 const LAN_A: i32 = 24;
@@ -92,6 +92,7 @@ fn session(zone: u16, ingress_ifindex: i32, vlan: u16, is_reverse: bool) -> Sess
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -471,8 +472,7 @@ fn scheduled_icmp_forwarding() -> ForwardingState {
     }
     let fw = build_forwarding_state(&snapshot);
     assert!(
-        fw.policy
-            .icmp_packet_verdict_may_depend_on_type(PROTO_ICMP),
+        fw.policy.icmp_packet_verdict_may_depend_on_type(PROTO_ICMP),
         "fixture must arm the type-dependent owner check"
     );
     assert!(
@@ -550,14 +550,26 @@ fn owner_forward_icmp_verdict_uses_descriptor_time_12868() {
     let decision = forward_decision();
     assert_eq!(
         owner_hit_icmp_verdict(
-            &fw, &metadata, decision, &flow, icmp_meta(), &frame, SCHED_RECEIPT_NS,
+            &fw,
+            &metadata,
+            decision,
+            &flow,
+            icmp_meta(),
+            &frame,
+            SCHED_RECEIPT_NS,
         ),
         Some(OwnerHitIcmpVerdict::Forward),
         "at the fresh descriptor time the scheduled permit is live"
     );
     assert!(matches!(
         owner_hit_icmp_verdict(
-            &fw, &metadata, decision, &flow, icmp_meta(), &frame, SCHED_EXPIRED_NS,
+            &fw,
+            &metadata,
+            decision,
+            &flow,
+            icmp_meta(),
+            &frame,
+            SCHED_EXPIRED_NS,
         ),
         Some(OwnerHitIcmpVerdict::Drop(_))
     ));
@@ -573,14 +585,26 @@ fn owner_reverse_icmp_verdict_uses_descriptor_time_12868() {
     let decision = forward_decision();
     assert_eq!(
         owner_hit_icmp_verdict(
-            &fw, &metadata, decision, &flow, icmp_meta(), &frame, SCHED_RECEIPT_NS,
+            &fw,
+            &metadata,
+            decision,
+            &flow,
+            icmp_meta(),
+            &frame,
+            SCHED_RECEIPT_NS,
         ),
         Some(OwnerHitIcmpVerdict::Forward),
         "reverse non-answer at fresh descriptor time uses the scheduled permit"
     );
     assert!(matches!(
         owner_hit_icmp_verdict(
-            &fw, &metadata, decision, &flow, icmp_meta(), &frame, SCHED_EXPIRED_NS,
+            &fw,
+            &metadata,
+            decision,
+            &flow,
+            icmp_meta(),
+            &frame,
+            SCHED_EXPIRED_NS,
         ),
         Some(OwnerHitIcmpVerdict::Drop(_))
     ));
@@ -599,15 +623,33 @@ fn foreign_hit_verdict_uses_descriptor_time_12868() {
     // `allow-other` permit.
     assert!(matches!(
         foreign_hit_verdict(
-            &fw, &sessions, &key, &metadata, decision, &flow, icmp_meta(), &frame,
-            TEST_DMZ_ZONE_ID, false, SCHED_RECEIPT_NS,
+            &fw,
+            &sessions,
+            &key,
+            &metadata,
+            decision,
+            &flow,
+            icmp_meta(),
+            &frame,
+            TEST_DMZ_ZONE_ID,
+            false,
+            SCHED_RECEIPT_NS,
         ),
         ForeignHitVerdict::Forward
     ));
     assert!(matches!(
         foreign_hit_verdict(
-            &fw, &sessions, &key, &metadata, decision, &flow, icmp_meta(), &frame,
-            TEST_DMZ_ZONE_ID, false, SCHED_EXPIRED_NS,
+            &fw,
+            &sessions,
+            &key,
+            &metadata,
+            decision,
+            &flow,
+            icmp_meta(),
+            &frame,
+            TEST_DMZ_ZONE_ID,
+            false,
+            SCHED_EXPIRED_NS,
         ),
         ForeignHitVerdict::Drop(_)
     ));

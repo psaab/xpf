@@ -48,23 +48,29 @@ fn metadata() -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
 fn decision() -> SessionDecision {
-    SessionDecision { resolution: crate::afxdp::ForwardingResolution {
-        disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 12,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-        src_mac: None,
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: crate::nat::NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: crate::afxdp::ForwardingResolution {
+            disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: crate::nat::NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 fn table_with_one_session(live_gen: u64) -> (SessionTable, SessionKey) {
@@ -291,9 +297,18 @@ fn fresh_live_local_coasts_10507() {
     let gate = table.policy_revalidation_gate(&k, PolicyGateCurrent::LocalForwarding);
     assert_eq!(gate.target, PolicyRevalidationTarget::Fresh);
     assert_eq!(gate.kind, PolicyRevalidationKind::LiveEgress);
-    assert!(!gate.force_cold, "Fresh Live + local must coast, not cold-walk");
-    assert!(!gate.fail_closed_decline, "no forced walk, no fail-closed Decline");
-    assert!(!gate.fail_closed_icmp, "Live keeps the #8618 type-sensitive Decline");
+    assert!(
+        !gate.force_cold,
+        "Fresh Live + local must coast, not cold-walk"
+    );
+    assert!(
+        !gate.fail_closed_decline,
+        "no forced walk, no fail-closed Decline"
+    );
+    assert!(
+        !gate.fail_closed_icmp,
+        "Live keeps the #8618 type-sensitive Decline"
+    );
 }
 
 /// #10507 gate rule 4: Fresh Live + would-forward WITHOUT egress fails
@@ -303,11 +318,16 @@ fn fresh_live_local_coasts_10507() {
 fn fresh_live_noegress_fails_closed_10507() {
     let (mut table, k) = table_with_one_session(41);
     table.mark_policy_revalidated(&k, PolicyRevalidationKind::LiveEgress);
-    let gate =
-        table.policy_revalidation_gate(&k, PolicyGateCurrent::LocalForwardingNoEgress);
+    let gate = table.policy_revalidation_gate(&k, PolicyGateCurrent::LocalForwardingNoEgress);
     assert_eq!(gate.target, PolicyRevalidationTarget::Fresh);
-    assert!(gate.force_cold, "Fresh + no-egress must cold-walk even when live");
-    assert!(gate.fail_closed_decline, "Fresh + no-egress Decline must revoke");
+    assert!(
+        gate.force_cold,
+        "Fresh + no-egress must cold-walk even when live"
+    );
+    assert!(
+        gate.fail_closed_decline,
+        "Fresh + no-egress Decline must revoke"
+    );
     assert!(gate.fail_closed_icmp, "Fresh + no-egress ICMP must revoke");
 }
 
@@ -319,11 +339,16 @@ fn stale_live_noegress_fails_closed_10507() {
     let (mut table, k) = table_with_one_session(41);
     table.mark_policy_revalidated(&k, PolicyRevalidationKind::LiveEgress);
     table.set_policy_revalidation_gen(42);
-    let gate =
-        table.policy_revalidation_gate(&k, PolicyGateCurrent::LocalForwardingNoEgress);
+    let gate = table.policy_revalidation_gate(&k, PolicyGateCurrent::LocalForwardingNoEgress);
     assert_eq!(gate.target, PolicyRevalidationTarget::Stale(k.clone()));
-    assert!(!gate.force_cold, "stale already runs cold; no force bit needed");
-    assert!(gate.fail_closed_decline, "stale + no-egress Decline must revoke");
+    assert!(
+        !gate.force_cold,
+        "stale already runs cold; no force bit needed"
+    );
+    assert!(
+        gate.fail_closed_decline,
+        "stale + no-egress Decline must revoke"
+    );
     assert!(gate.fail_closed_icmp, "stale + no-egress ICMP must revoke");
 }
 
@@ -335,12 +360,20 @@ fn stale_recorded_noegress_fails_closed_10507() {
     let (mut table, k) = table_with_one_session(41);
     table.mark_policy_revalidated(&k, PolicyRevalidationKind::RecordedEgress);
     table.set_policy_revalidation_gen(42);
-    let gate =
-        table.policy_revalidation_gate(&k, PolicyGateCurrent::LocalForwardingNoEgress);
+    let gate = table.policy_revalidation_gate(&k, PolicyGateCurrent::LocalForwardingNoEgress);
     assert_eq!(gate.target, PolicyRevalidationTarget::Stale(k.clone()));
-    assert!(!gate.force_cold, "stale already runs cold; no force bit needed");
-    assert!(gate.fail_closed_decline, "stale Recorded + no-egress Decline must revoke");
-    assert!(gate.fail_closed_icmp, "stale Recorded + no-egress ICMP must revoke");
+    assert!(
+        !gate.force_cold,
+        "stale already runs cold; no force bit needed"
+    );
+    assert!(
+        gate.fail_closed_decline,
+        "stale Recorded + no-egress Decline must revoke"
+    );
+    assert!(
+        gate.fail_closed_icmp,
+        "stale Recorded + no-egress ICMP must revoke"
+    );
 }
 
 /// #10507 gate rule 3: Fresh Recorded + local forces a live re-judge.
@@ -353,7 +386,10 @@ fn fresh_recorded_local_forces_cold_10507() {
     assert_eq!(gate.target, PolicyRevalidationTarget::Fresh);
     assert!(gate.force_cold, "Fresh Recorded + local must cold-walk");
     assert!(gate.fail_closed_decline, "forced walk Decline must revoke");
-    assert!(gate.fail_closed_icmp, "recorded + local + type-armed must revoke");
+    assert!(
+        gate.fail_closed_icmp,
+        "recorded + local + type-armed must revoke"
+    );
 }
 
 /// #10507 gate: Stale Recorded + local fails closed on both exits.
@@ -387,8 +423,14 @@ fn stale_unvalidated_local_keeps_decline_10507() {
     assert_eq!(gate.target, PolicyRevalidationTarget::Stale(k.clone()));
     assert_eq!(gate.kind, PolicyRevalidationKind::Unvalidated);
     assert!(!gate.force_cold);
-    assert!(!gate.fail_closed_decline, "never-validated stale keeps Decline");
-    assert!(!gate.fail_closed_icmp, "never-validated stale keeps #8618 Decline");
+    assert!(
+        !gate.fail_closed_decline,
+        "never-validated stale keeps Decline"
+    );
+    assert!(
+        !gate.fail_closed_icmp,
+        "never-validated stale keeps #8618 Decline"
+    );
 }
 
 /// #10507 gate A1/A2 shape: Fresh Unvalidated (generation-equal, provenance
@@ -411,12 +453,17 @@ fn fresh_unvalidated_local_forces_cold_10507() {
 #[test]
 fn stale_unvalidated_noegress_fails_closed_10507() {
     let (table, k) = table_with_one_session(41);
-    let gate =
-        table.policy_revalidation_gate(&k, PolicyGateCurrent::LocalForwardingNoEgress);
+    let gate = table.policy_revalidation_gate(&k, PolicyGateCurrent::LocalForwardingNoEgress);
     assert_eq!(gate.target, PolicyRevalidationTarget::Stale(k.clone()));
     assert!(!gate.force_cold, "stale already runs cold");
-    assert!(gate.fail_closed_decline, "no-egress Decline must revoke even when stale");
-    assert!(gate.fail_closed_icmp, "no-egress ICMP must revoke even when stale");
+    assert!(
+        gate.fail_closed_decline,
+        "no-egress Decline must revoke even when stale"
+    );
+    assert!(
+        gate.fail_closed_icmp,
+        "no-egress ICMP must revoke even when stale"
+    );
 }
 
 /// #10507 gate: Fresh Recorded + non-local coasts (no local intent, no
@@ -438,8 +485,7 @@ fn fresh_recorded_nonlocal_coasts_10507() {
 #[test]
 fn gate_nolocalentry_is_inert_10507() {
     let (table, _k) = table_with_one_session(41);
-    let gate =
-        table.policy_revalidation_gate(&key(8443), PolicyGateCurrent::LocalForwarding);
+    let gate = table.policy_revalidation_gate(&key(8443), PolicyGateCurrent::LocalForwarding);
     assert_eq!(gate.target, PolicyRevalidationTarget::NoLocalEntry);
     assert_eq!(gate.kind, PolicyRevalidationKind::Unvalidated);
     assert!(!gate.force_cold);
@@ -456,9 +502,20 @@ fn a1_promotion_resets_fresh_provenance_10507() {
     let mut table = SessionTable::new();
     table.set_policy_revalidation_gen(41);
     let k = key(443);
-    assert!(table.upsert_synced(k.clone(), decision(), metadata(), 122_000_000_000, PROTO_TCP, 0, true));
+    assert!(table.upsert_synced(
+        k.clone(),
+        decision(),
+        metadata(),
+        122_000_000_000,
+        PROTO_TCP,
+        0,
+        true
+    ));
     table.mark_policy_revalidated(&k, PolicyRevalidationKind::RecordedEgress);
-    assert_eq!(table.policy_revalidation_target(&k), PolicyRevalidationTarget::Fresh);
+    assert_eq!(
+        table.policy_revalidation_target(&k),
+        PolicyRevalidationTarget::Fresh
+    );
     assert!(table.promote_synced_with_origin(SessionUpdate {
         key: &k,
         decision: decision(),
@@ -488,7 +545,15 @@ fn a1_promotion_preserves_stale_provenance_10507() {
     let mut table = SessionTable::new();
     table.set_policy_revalidation_gen(41);
     let k = key(443);
-    assert!(table.upsert_synced(k.clone(), decision(), metadata(), 122_000_000_000, PROTO_TCP, 0, true));
+    assert!(table.upsert_synced(
+        k.clone(),
+        decision(),
+        metadata(),
+        122_000_000_000,
+        PROTO_TCP,
+        0,
+        true
+    ));
     table.mark_policy_revalidated(&k, PolicyRevalidationKind::RecordedEgress);
     table.set_policy_revalidation_gen(42);
     assert_eq!(
@@ -558,7 +623,10 @@ fn fresh_live_nonlocal_coasts_10507() {
     let gate = table.policy_revalidation_gate(&k, PolicyGateCurrent::NonLocal);
     assert_eq!(gate.target, PolicyRevalidationTarget::Fresh);
     assert!(!gate.force_cold, "non-local must not force a local walk");
-    assert!(!gate.fail_closed_decline, "non-local never fails Decline closed");
+    assert!(
+        !gate.fail_closed_decline,
+        "non-local never fails Decline closed"
+    );
     assert!(!gate.fail_closed_icmp, "non-local never fails ICMP closed");
 }
 
@@ -571,7 +639,15 @@ fn accepted_reimport_starts_unvalidated_10507() {
     let mut table = SessionTable::new();
     table.set_policy_revalidation_gen(41);
     let k = key(443);
-    assert!(table.upsert_synced(k.clone(), decision(), metadata(), 122_000_000_000, PROTO_TCP, 0, true));
+    assert!(table.upsert_synced(
+        k.clone(),
+        decision(),
+        metadata(),
+        122_000_000_000,
+        PROTO_TCP,
+        0,
+        true
+    ));
     assert_eq!(
         table.policy_revalidation_target(&k),
         PolicyRevalidationTarget::Stale(k.clone()),
@@ -592,8 +668,19 @@ fn accepted_reimport_starts_unvalidated_10507() {
 fn rejected_reimport_preserves_local_live_10507() {
     let (mut table, k) = table_with_one_session(41);
     table.mark_policy_revalidated(&k, PolicyRevalidationKind::LiveEgress);
-    assert_eq!(table.policy_revalidation_target(&k), PolicyRevalidationTarget::Fresh);
-    assert!(!table.upsert_synced(k.clone(), decision(), metadata(), 123_000_000_000, PROTO_TCP, 0, false));
+    assert_eq!(
+        table.policy_revalidation_target(&k),
+        PolicyRevalidationTarget::Fresh
+    );
+    assert!(!table.upsert_synced(
+        k.clone(),
+        decision(),
+        metadata(),
+        123_000_000_000,
+        PROTO_TCP,
+        0,
+        false
+    ));
     assert_eq!(
         table.policy_revalidation_target(&k),
         PolicyRevalidationTarget::Fresh,
@@ -670,10 +757,8 @@ fn fenced_matches_gate_fail_closed_bits_10635() {
 fn fib_zone_invalidation_preserves_fresh_non_live_fence_12074() {
     let (mut unvalidated, unvalidated_key) = table_with_one_session(41);
     unvalidated.mark_policy_revalidated(&unvalidated_key, PolicyRevalidationKind::Unvalidated);
-    let before = unvalidated.policy_revalidation_gate(
-        &unvalidated_key,
-        PolicyGateCurrent::LocalForwarding,
-    );
+    let before =
+        unvalidated.policy_revalidation_gate(&unvalidated_key, PolicyGateCurrent::LocalForwarding);
     assert_eq!(before.target, PolicyRevalidationTarget::Fresh);
     assert!(unvalidated.policy_revalidation_fenced(&unvalidated_key));
     assert!(before.force_cold);
@@ -681,10 +766,8 @@ fn fib_zone_invalidation_preserves_fresh_non_live_fence_12074() {
     assert!(before.fail_closed_icmp);
 
     unvalidated.invalidate_policy_revalidation(&unvalidated_key);
-    let after = unvalidated.policy_revalidation_gate(
-        &unvalidated_key,
-        PolicyGateCurrent::LocalForwarding,
-    );
+    let after =
+        unvalidated.policy_revalidation_gate(&unvalidated_key, PolicyGateCurrent::LocalForwarding);
     assert_eq!(
         after.target,
         PolicyRevalidationTarget::Fresh,

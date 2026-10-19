@@ -273,6 +273,7 @@ fn transit_martian_destination_gate_drops_preexisting_session_hit_11413() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         SessionOrigin::ForwardFlow,
         122_000_000_000,

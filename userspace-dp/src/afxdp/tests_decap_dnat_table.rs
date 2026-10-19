@@ -6,6 +6,7 @@
 #![allow(unused_imports)]
 
 use super::test_fixtures::*;
+use super::tests_support::*;
 use super::worker::WorkerTxPipeline;
 use super::*;
 use crate::test_zone_ids::*;
@@ -18,7 +19,6 @@ use crate::{
     InterfaceAddressSnapshot, NeighborSnapshot, PolicyRuleSnapshot, RouteSnapshot,
     SourceNATRuleSnapshot, StaticNATRuleSnapshot, ThreeColorPolicerSnapshot, ZoneSnapshot,
 };
-use super::tests_support::*;
 
 /// #1902: VLAN-tagged underlay (the live reth0.80 shape, #1885
 /// parity) — the buffered outer frame's L3 sits at 18 while the inner
@@ -27,7 +27,6 @@ use super::tests_support::*;
 fn txn_decapped_missing_neighbor_not_buffered_tagged() {
     assert_decapped_missing_neighbor_never_buffered_or_retried(80);
 }
-
 
 /// #1902: untagged underlay — `outer_frame[14..]` IS the outer L3
 /// header (valid version nibble), so the pre-fix retry TXed the
@@ -38,7 +37,6 @@ fn txn_decapped_missing_neighbor_not_buffered_tagged() {
 fn txn_decapped_missing_neighbor_not_buffered_untagged() {
     assert_decapped_missing_neighbor_never_buffered_or_retried(0);
 }
-
 
 /// #1902 regression pin for the UNCHANGED path: a NON-decapped packet
 /// (desc and meta describe the same UMEM frame) with a cold neighbor
@@ -169,7 +167,6 @@ fn txn_non_decap_missing_neighbor_buffers_and_retries_correctly() {
     );
 }
 
-
 /// #1873 replay-filter companion pin (AGY code r4 HIGH): filtering the
 /// preserved synced-session replay list by purged tunnel ids must
 /// mirror delete_synced_session's companion semantics — the derived
@@ -191,8 +188,8 @@ fn replay_filter_drops_purged_forward_and_derived_reverse_companion() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 12345,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let reverse_key = crate::session::reverse_session_key(&forward_key, nat);
     let tunnel_resolution = ForwardingResolution {
@@ -208,8 +205,12 @@ fn replay_filter_drops_purged_forward_and_derived_reverse_companion() {
         route_mtu: 0,
         transport_route_mtu: 0,
     };
-    let plain_resolution = ForwardingResolution { tunnel_endpoint_id: 0,
-    route_mtu: 0, transport_route_mtu: 0, ..tunnel_resolution };
+    let plain_resolution = ForwardingResolution {
+        tunnel_endpoint_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+        ..tunnel_resolution
+    };
     let make =
         |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| SyncedSessionEntry {
             key: key.clone(),
@@ -237,6 +238,7 @@ fn replay_filter_drops_purged_forward_and_derived_reverse_companion() {
                 inactivity_timeout_ns: None,
                 policy_counter_idx: 0,
                 policy_counter: None,
+                nat_scope_ifindex: None,
             },
             leak_incarnation: 0,
             origin: SessionOrigin::SyncImport,
@@ -320,8 +322,8 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 10000,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let key_at = |src_port: u16| SessionKey {
         src_port,
@@ -340,8 +342,8 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
         route_mtu: 0,
         transport_route_mtu: 0,
     };
-    let make = |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| {
-        SyncedSessionEntry {
+    let make =
+        |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| SyncedSessionEntry {
             key: key.clone(),
             decision: SessionDecision {
                 resolution,
@@ -367,6 +369,7 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
                 inactivity_timeout_ns: None,
                 policy_counter_idx: 0,
                 policy_counter: None,
+                nat_scope_ifindex: None,
             },
             leak_incarnation: 0,
             origin: SessionOrigin::SyncImport,
@@ -378,8 +381,7 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
             tcp_handshake_state: 0,
             pptp_call_ids: 0,
             source_nat_static: None,
-        }
-    };
+        };
 
     // Purge ids 100..=131 (a large drop set). Build many purged forward
     // entries interleaved with survivors. One survivor (`survivor_shares_ip`)
@@ -481,13 +483,15 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
 // regress, and these tests fail.
 // ---------------------------------------------------------------------------
 
-
 #[test]
 fn publish_dnat_table_entry_noops_return_true() {
     // No SNAT rewrite → nothing to publish, treated as success.
     let no_snat = NatDecision::default();
     assert!(publish_dnat_table_entry(
-        &DnatTableFds { v4: Some(-1), v6: None },
+        &DnatTableFds {
+            v4: Some(-1),
+            v6: None
+        },
         &dnat_v4_key(),
         no_snat,
     ));
@@ -503,18 +507,23 @@ fn publish_dnat_table_entry_noops_return_true() {
     let mut v6_key = dnat_v4_key();
     v6_key.addr_family = libc::AF_INET6 as u8;
     assert!(publish_dnat_table_entry(
-        &DnatTableFds { v4: Some(-1), v6: None },
+        &DnatTableFds {
+            v4: Some(-1),
+            v6: None
+        },
         &v6_key,
         dnat_snat_decision(),
     ));
 }
 
-
 #[test]
 fn publish_dnat_table_entry_reports_syscall_failure() {
     // An invalid map fd forces bpf_map_update_elem to fail (EBADF). The
     // function must now report that failure instead of swallowing it.
-    let fds = DnatTableFds { v4: Some(-1), v6: None };
+    let fds = DnatTableFds {
+        v4: Some(-1),
+        v6: None,
+    };
     let ok = publish_dnat_table_entry(&fds, &dnat_v4_key(), dnat_snat_decision());
     assert!(
         !ok,
@@ -532,7 +541,6 @@ fn publish_dnat_table_entry_reports_syscall_failure() {
 // delete diverge) and the byte-equality assertions go red.
 // ---------------------------------------------------------------------------
 
-
 #[test]
 fn dnat_v4_key_bytes_matches_publish_encoding() {
     // protocol, snat_ip = 172.16.80.8, snat_port = 54321 (host-order native).
@@ -542,7 +550,10 @@ fn dnat_v4_key_bytes_matches_publish_encoding() {
     want[0] = PROTO_TCP;
     want[4..8].copy_from_slice(&Ipv4Addr::new(172, 16, 80, 8).octets());
     want[8..10].copy_from_slice(&54321u16.to_ne_bytes());
-    assert_eq!(dk, want, "v4 dnat_table key encoding drifted from the publish path");
+    assert_eq!(
+        dk, want,
+        "v4 dnat_table key encoding drifted from the publish path"
+    );
 
     // No SNAT -> no key (close is a no-op for plain flows).
     assert!(dnat_v4_key_bytes(&dnat_v4_key(), NatDecision::default()).is_none());
@@ -551,7 +562,6 @@ fn dnat_v4_key_bytes_matches_publish_encoding() {
     v6_key.addr_family = libc::AF_INET6 as u8;
     assert!(dnat_v4_key_bytes(&v6_key, dnat_snat_decision()).is_none());
 }
-
 
 #[test]
 fn dnat_v6_key_bytes_matches_entry_bytes_key_half() {
@@ -564,8 +574,8 @@ fn dnat_v6_key_bytes_matches_entry_bytes_key_half() {
         dst_ip: IpAddr::V6("2001:559:8585:80::200".parse().unwrap()),
         src_port: 12345,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let nat = NatDecision {
         rewrite_src: Some(IpAddr::V6(snat_v6)),
@@ -574,14 +584,12 @@ fn dnat_v6_key_bytes_matches_entry_bytes_key_half() {
     };
     let dk = dnat_v6_key_bytes(&key, nat).expect("SNAT66 flow must yield a key");
     // The delete key MUST byte-match the KEY half of the publish-path encoder.
-    let (entry_key, _entry_val) =
-        dnat_v6_entry_bytes(PROTO_TCP, snat_v6, 54321, orig_v6, 12345);
+    let (entry_key, _entry_val) = dnat_v6_entry_bytes(PROTO_TCP, snat_v6, 54321, orig_v6, 12345);
     assert_eq!(
         dk, entry_key,
         "v6 dnat_table_v6 delete key drifted from publish (dnat_v6_entry_bytes)"
     );
 }
-
 
 #[test]
 fn delete_dnat_table_entry_noops_without_snat_or_fd() {
@@ -595,19 +603,25 @@ fn delete_dnat_table_entry_noops_without_snat_or_fd() {
     let before = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
     // No SNAT decision -> nothing was published -> no delete attempt.
     delete_dnat_table_entry(
-        &DnatTableFds { v4: Some(-1), v6: None },
+        &DnatTableFds {
+            v4: Some(-1),
+            v6: None,
+        },
         &dnat_v4_key(),
         NatDecision::default(),
     );
     // SNAT present but no table fd -> no delete attempt.
-    delete_dnat_table_entry(&DnatTableFds::default(), &dnat_v4_key(), dnat_snat_decision());
+    delete_dnat_table_entry(
+        &DnatTableFds::default(),
+        &dnat_v4_key(),
+        dnat_snat_decision(),
+    );
     assert_eq!(
         DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed),
         before,
         "delete_dnat_table_entry must be a no-op for non-SNAT flows and absent fds"
     );
 }
-
 
 #[test]
 fn publish_dnat_table_entry_failure_increments_counter() {
@@ -618,7 +632,11 @@ fn publish_dnat_table_entry_failure_increments_counter() {
     assert_eq!(live.dnat_publish_errors.load(Ordering::Relaxed), 0);
 
     // Success / no-op path: no increment.
-    if !publish_dnat_table_entry(&DnatTableFds::default(), &dnat_v4_key(), dnat_snat_decision()) {
+    if !publish_dnat_table_entry(
+        &DnatTableFds::default(),
+        &dnat_v4_key(),
+        dnat_snat_decision(),
+    ) {
         live.dnat_publish_errors.fetch_add(1, Ordering::Relaxed);
     }
     assert_eq!(
@@ -628,7 +646,10 @@ fn publish_dnat_table_entry_failure_increments_counter() {
     );
 
     // Failing publish (bad fd): increment fires.
-    let fds = DnatTableFds { v4: Some(-1), v6: None };
+    let fds = DnatTableFds {
+        v4: Some(-1),
+        v6: None,
+    };
     if !publish_dnat_table_entry(&fds, &dnat_v4_key(), dnat_snat_decision()) {
         live.dnat_publish_errors.fetch_add(1, Ordering::Relaxed);
     }
@@ -663,7 +684,6 @@ fn publish_dnat_table_entry_failure_increments_counter() {
 // v6 fd).
 // ---------------------------------------------------------------------------
 
-
 #[test]
 fn dnat_v6_entry_bytes_matches_struct_layout() {
     // Reverse mapping: inbound return packet carries dst = SNAT addr/port;
@@ -690,12 +710,19 @@ fn dnat_v6_entry_bytes_matches_struct_layout() {
 
     // struct dnat_value_v6 (20B): 16B new_dst_ip, new_dst_port, flags, pad.
     // VALUE is never read by the shim; encoding is inert (kept network-order).
-    assert_eq!(&dv[0..16], &orig.octets(), "value new_dst_ip = original source");
-    assert_eq!(&dv[16..18], &12345u16.to_be_bytes(), "value new_dst_port (inert)");
+    assert_eq!(
+        &dv[0..16],
+        &orig.octets(),
+        "value new_dst_ip = original source"
+    );
+    assert_eq!(
+        &dv[16..18],
+        &12345u16.to_be_bytes(),
+        "value new_dst_port (inert)"
+    );
     assert_eq!(dv[18], 0, "value flags = 0 (dynamic SNAT-return)");
     assert_eq!(dv[19], 0, "value pad = 0");
 }
-
 
 // #2406 Go<->Rust dnat-key PARITY: the bytes the Rust publisher writes for
 // the dnat_table_v6 KEY (port field) must EXACTLY equal what the AF_XDP shim
@@ -727,9 +754,11 @@ fn dnat_v6_key_port_parity_with_shim_reader() {
     );
     // Numeric sanity: 443 host-order on LE x86 is [0xbb,0x01]; the OLD network
     // encoding (to_be_bytes) would be [0x01,0xbb] and FAIL this parity check.
-    assert_eq!(shim_host_numeric, 443, "from_be_bytes of network wire yields host numeric");
+    assert_eq!(
+        shim_host_numeric, 443,
+        "from_be_bytes of network wire yields host numeric"
+    );
 }
-
 
 #[test]
 fn publish_dnat_table_entry_v6_attempts_publish() {
@@ -738,7 +767,10 @@ fn publish_dnat_table_entry_v6_attempts_publish() {
     // present-but-invalid v6 fd forces bpf_map_update_elem to fail (EBADF),
     // which the function reports as `false` — proving the arm runs and the
     // syscall is attempted for v6.
-    let fds = DnatTableFds { v4: None, v6: Some(-1) };
+    let fds = DnatTableFds {
+        v4: None,
+        v6: Some(-1),
+    };
     let ok = publish_dnat_table_entry(&fds, &dnat_v6_key(), dnat_snat_decision_v6());
     assert!(
         !ok,
@@ -747,12 +779,23 @@ fn publish_dnat_table_entry_v6_attempts_publish() {
 
     // No v6 fd → nothing to publish, success (the noops contract still holds).
     let no_fd = DnatTableFds { v4: None, v6: None };
-    assert!(publish_dnat_table_entry(&no_fd, &dnat_v6_key(), dnat_snat_decision_v6()));
+    assert!(publish_dnat_table_entry(
+        &no_fd,
+        &dnat_v6_key(),
+        dnat_snat_decision_v6()
+    ));
 
     // v6 SNAT decision present but no v6 fd, with a v4 fd set, must NOT use
     // the v4 fd for a v6 flow (no cross-family publish).
-    let v4_only = DnatTableFds { v4: Some(-1), v6: None };
-    assert!(publish_dnat_table_entry(&v4_only, &dnat_v6_key(), dnat_snat_decision_v6()));
+    let v4_only = DnatTableFds {
+        v4: Some(-1),
+        v6: None,
+    };
+    assert!(publish_dnat_table_entry(
+        &v4_only,
+        &dnat_v6_key(),
+        dnat_snat_decision_v6()
+    ));
 }
 
 // =====================================================================
@@ -788,7 +831,6 @@ fn publish_dnat_table_entry_v6_attempts_publish() {
 // still say `synthetic_v6`, a pre-#2358 misnomer. See
 // `docs/next-features/twice-nat.md`.
 // =====================================================================
-
 
 // #6745: the reverse-NAT steering row is SHARED and the close was not.
 //
@@ -829,7 +871,6 @@ fn colliding_sessions_share_one_steering_key_6745() {
     assert_eq!(a.src_ip, b.src_ip);
     assert_eq!(a.src_port, b.src_port);
 }
-
 
 /// #8291: a SNAT decision whose steering key is unique to one cell.
 ///
@@ -885,7 +926,6 @@ fn a_shared_steering_row_survives_the_first_close_6745() {
     let _g = crate::afxdp::checksum::dnat_counter_guard();
     use std::sync::atomic::Ordering;
 
-
     let (a, b) = colliding_pair_6745();
     let nat = isolated_snat_decision_8291(1);
     assert_eq!(
@@ -902,7 +942,11 @@ fn a_shared_steering_row_survives_the_first_close_6745() {
 
     publish_dnat_table_entry(&fds, &a, nat);
     publish_dnat_table_entry(&fds, &b, nat);
-    assert_eq!(dnat_steering_holder_count(&a, nat), 2, "both sessions must hold the row");
+    assert_eq!(
+        dnat_steering_holder_count(&a, nat),
+        2,
+        "both sessions must hold the row"
+    );
 
     // A closes. The row is still B's only steering path, so NO map delete.
     let before = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
@@ -935,14 +979,25 @@ fn republishing_one_session_does_not_add_a_second_hold_6745() {
     let key = dnat_v4_key();
     let nat = isolated_snat_decision_8291(2);
     let fds = DnatTableFds::default();
-    assert_eq!(dnat_steering_holder_count(&key, nat), 0, "#8291: row starts empty");
+    assert_eq!(
+        dnat_steering_holder_count(&key, nat),
+        0,
+        "#8291: row starts empty"
+    );
 
     publish_dnat_table_entry(&fds, &key, nat);
     publish_dnat_table_entry(&fds, &key, nat);
     publish_dnat_table_entry(&fds, &key, nat);
-    assert_eq!(dnat_steering_holder_count(&key, nat), 1, "holds must be per SESSION, not per publish");
+    assert_eq!(
+        dnat_steering_holder_count(&key, nat),
+        1,
+        "holds must be per SESSION, not per publish"
+    );
 
-    assert!(release_dnat_steering_holder(&key, nat), "one close must release a singly-held row");
+    assert!(
+        release_dnat_steering_holder(&key, nat),
+        "one close must release a singly-held row"
+    );
 }
 
 #[test]
@@ -990,8 +1045,16 @@ fn the_v6_steering_row_is_held_independently_6745() {
     let nat4 = isolated_snat_decision_8291(4);
     let nat6 = isolated_snat_decision_v6_8291(4);
     let fds = DnatTableFds::default();
-    assert_eq!(dnat_steering_holder_count(&v4, nat4), 0, "#8291: v4 row starts empty");
-    assert_eq!(dnat_steering_holder_count(&v6, nat6), 0, "#8291: v6 row starts empty");
+    assert_eq!(
+        dnat_steering_holder_count(&v4, nat4),
+        0,
+        "#8291: v4 row starts empty"
+    );
+    assert_eq!(
+        dnat_steering_holder_count(&v6, nat6),
+        0,
+        "#8291: v6 row starts empty"
+    );
 
     publish_dnat_table_entry(&fds, &v4, nat4);
     publish_dnat_table_entry(&fds, &v6, nat6);
@@ -1117,6 +1180,7 @@ fn replay_filter_drops_stale_zone_pair_and_keeps_tunnel_semantics_10612() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
