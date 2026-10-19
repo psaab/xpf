@@ -136,6 +136,19 @@ type Manager struct {
 	// recreating retry debt after ClearInterfacesWithoutGoodbye suppresses it.
 	// A later Apply that desires the interface clears this marker.
 	goodbyeSuppressed map[string]bool
+
+	// wantedNotStarted holds desired interfaces whose most recent
+	// startLocked failed BEFORE a sender could be inserted (e.g. the netdev
+	// was absent at Apply — re-created outside a commit, or not yet created),
+	// so no sender exists for HasDeadSenders to see (#15214, the residual
+	// #6793/#2865 miss). An entry means "this interface is still desired but
+	// has never started"; the #6793 retry owners gate on HasDeadSenders, so
+	// recording it here is what makes a missing-netdev interface retry at
+	// all instead of waiting for an unrelated commit. It is pruned whenever
+	// the interface leaves the desired set or is withdrawn/cleared, and
+	// cleared by a successful start, so it can never drive the retry loop
+	// for a config that is gone.
+	wantedNotStarted map[string]*config.RAInterfaceConfig
 }
 
 // goodbyeDebt is one interface's outstanding final-goodbye retry debt (#6777).
@@ -164,8 +177,11 @@ type goodbyeDebt struct {
 // with a single Warn — we tried, we said so, we stop.
 const maxGoodbyeRetries = 3
 
-// HasDeadSenders reports whether any live sender's ASYNCHRONOUS conn open
-// failed, so it will never emit an RA (#2865's dead-sender state, #6793).
+// HasDeadSenders reports whether any wanted interface will never emit an
+// RA: a live sender whose ASYNCHRONOUS conn open failed (#2865's dead-sender
+// state, #6793), a wanted interface that never started because its netdev
+// was absent at Apply (#15214), or a live sender whose repeated ENODEV/ENXIO
+// send failures prove its netdev vanished after the conn opened (#15214).
 //
 // It exists because a dead sender has no retry owner of its own. `openConn`
 // runs in the owner goroutine with a bounded bind retry (~2s, for a link-local
@@ -191,6 +207,9 @@ const maxGoodbyeRetries = 3
 func (m *Manager) HasDeadSenders() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if len(m.wantedNotStarted) > 0 {
+		return true
+	}
 	for _, s := range m.senders {
 		if s.dead() {
 			return true
@@ -199,13 +218,16 @@ func (m *Manager) HasDeadSenders() bool {
 	return false
 }
 
-// DeadSenderInterfaces returns the interfaces whose sender is dead, sorted, for
-// logging. Separate from HasDeadSenders so the hot always-on probe allocates
-// nothing.
+// DeadSenderInterfaces returns the interfaces whose sender is dead (or
+// wanted but never started, #15214), sorted, for logging. Separate from
+// HasDeadSenders so the hot always-on probe allocates nothing.
 func (m *Manager) DeadSenderInterfaces() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var names []string
+	for name := range m.wantedNotStarted {
+		names = append(names, name)
+	}
 	for name, s := range m.senders {
 		if s.dead() {
 			names = append(names, name)
@@ -213,6 +235,33 @@ func (m *Manager) DeadSenderInterfaces() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// noteWantedLocked records cfg as wanted-but-not-started. Callers hold m.mu.
+func (m *Manager) noteWantedLocked(cfg *config.RAInterfaceConfig) {
+	if cfg == nil {
+		return
+	}
+	if m.wantedNotStarted == nil {
+		m.wantedNotStarted = make(map[string]*config.RAInterfaceConfig)
+	}
+	m.wantedNotStarted[cfg.Interface] = cfg
+}
+
+// clearWantedLocked drops any wanted-but-not-started record for name.
+// Callers hold m.mu.
+func (m *Manager) clearWantedLocked(name string) {
+	delete(m.wantedNotStarted, name)
+}
+
+// pruneWantedLocked drops wanted records for interfaces no longer desired.
+// Callers hold m.mu.
+func (m *Manager) pruneWantedLocked(desired map[string]*config.RAInterfaceConfig) {
+	for name := range m.wantedNotStarted {
+		if _, ok := desired[name]; !ok {
+			delete(m.wantedNotStarted, name)
+		}
+	}
 }
 
 // New creates a new RA manager.
@@ -223,6 +272,7 @@ func New() *Manager {
 		ifaceEpoch:        make(map[string]uint64),
 		goodbyeOwed:       make(map[string]*goodbyeDebt),
 		goodbyeSuppressed: make(map[string]bool),
+		wantedNotStarted:  make(map[string]*config.RAInterfaceConfig),
 	}
 }
 
@@ -681,6 +731,7 @@ func (m *Manager) Apply(configs []*config.RAInterfaceConfig) error {
 		// stale default route until Router Lifetime (default 1800s) expires.
 		// Same graceful path as Withdraw(); Clear() remains the explicit
 		// no-goodbye primitive for a forced/unsafe stop.
+		clear(m.wantedNotStarted)
 		owned, epoch := m.collectGracefulWithdrawLocked()
 		m.mu.Unlock()
 		var errs []error
@@ -704,9 +755,16 @@ func (m *Manager) Apply(configs []*config.RAInterfaceConfig) error {
 	// Build desired map.
 	desired := make(map[string]*config.RAInterfaceConfig, len(configs))
 	for _, cfg := range configs {
+		if cfg == nil {
+			continue
+		}
 		desired[cfg.Interface] = cfg
 		delete(m.goodbyeSuppressed, cfg.Interface)
 	}
+	// #15214: an interface that left the desired set is no longer wanted;
+	// dropping its record here is what lets a later retry pass stop
+	// re-driving Apply for a config the operator removed.
+	m.pruneWantedLocked(desired)
 
 	// A pending stop. tomb=true means a tombstone was installed for the
 	// interface and must be cleared after the join (removal) or after the
@@ -748,6 +806,7 @@ func (m *Manager) Apply(configs []*config.RAInterfaceConfig) error {
 	for name, cfg := range desired {
 		existing, ok := m.senders[name]
 		if ok && !existing.dead() && configEqual(existing.cfg, cfg) {
+			m.clearWantedLocked(name)
 			continue // No change — keep running, no RA gap.
 		}
 
@@ -918,11 +977,15 @@ func (m *Manager) waitTombstoneClear(name string) bool {
 	}
 }
 
-// startLocked starts a sender for cfg and records it in m.senders. Callers must
-// hold m.mu.
+// startLocked starts a sender for cfg and records it in m.senders. Callers
+// must hold m.mu. On any pre-insertion failure it records the interface as
+// wanted-but-not-started (#15214) so HasDeadSenders — and therefore the
+// #6793 retry owners — can see an interface that never got a sender at all;
+// a successful start clears the record.
 func (m *Manager) startLocked(cfg *config.RAInterfaceConfig) error {
 	iface, err := net.InterfaceByName(cfg.Interface)
 	if err != nil {
+		m.noteWantedLocked(cfg)
 		slog.Warn("ra: interface not found, skipping",
 			"interface", cfg.Interface, "err", err)
 		return fmt.Errorf("interface %s: %w", cfg.Interface, err)
@@ -930,12 +993,14 @@ func (m *Manager) startLocked(cfg *config.RAInterfaceConfig) error {
 
 	s := newSender(cfg, iface)
 	if err := s.start(); err != nil {
+		m.noteWantedLocked(cfg)
 		slog.Warn("ra: failed to start sender",
 			"interface", cfg.Interface, "err", err)
 		return fmt.Errorf("start %s: %w", cfg.Interface, err)
 	}
 
 	m.senders[cfg.Interface] = s
+	m.clearWantedLocked(cfg.Interface)
 	slog.Info("ra: sender started", "interface", cfg.Interface,
 		"prefixes", len(cfg.Prefixes))
 	return nil
@@ -957,6 +1022,7 @@ type ownedDrain struct {
 func (m *Manager) Withdraw() error {
 	m.mu.Lock()
 	m.bumpEpoch()
+	clear(m.wantedNotStarted)
 	owned, epoch := m.collectGracefulWithdrawLocked()
 	m.mu.Unlock()
 	// #6777: aggregate the per-interface outcomes instead of returning a
@@ -1008,6 +1074,7 @@ func (m *Manager) WithdrawInterfaces(names []string) {
 	// interface). Interface-scoped supersession is now scoped to `names`.
 	for _, name := range names {
 		m.bumpIfaceEpoch(name)
+		m.clearWantedLocked(name)
 	}
 	owned := m.claimGracefulLocked(names)
 	epoch := m.epoch
@@ -1042,6 +1109,7 @@ func (m *Manager) ClearInterfacesWithoutGoodbye(names []string) error {
 		}
 		seen[name] = struct{}{}
 		m.bumpIfaceEpoch(name)
+		m.clearWantedLocked(name)
 		m.goodbyeSuppressed[name] = true
 		delete(m.goodbyeOwed, name)
 		if s, ok := m.senders[name]; ok {
@@ -1270,6 +1338,10 @@ func (m *Manager) claimWithdrawOnceLocked(configs []*config.RAInterfaceConfig) [
 		}
 		m.bumpIfaceEpoch(cfg.Interface)
 		m.draining[cfg.Interface] = &drainEntry{cfg: cfg, goodbyeClaimed: true}
+		// #15214: a claimed goodbye supersedes any wanted-but-not-started
+		// record for this interface. Cleared AFTER the tombstone installs so
+		// the interface is never absent mid-claim.
+		m.clearWantedLocked(cfg.Interface)
 		toGoodbye = append(toGoodbye, cfg)
 	}
 	return toGoodbye
@@ -1326,6 +1398,7 @@ func (m *Manager) Clear() error {
 // racing graceful Withdraw flipped goodbyeWanted on an entry, clearLocked's
 // release path emits the standalone goodbye (claim-once, held across the emit).
 func (m *Manager) clearLocked() error {
+	clear(m.wantedNotStarted)
 	if len(m.senders) == 0 {
 		return nil
 	}
@@ -1380,10 +1453,12 @@ type SenderInfo struct {
 	Managed     bool
 	Other       bool
 	LastRA      string // time since last RA
-	// State is "active" for a running sender or "draining" for an interface
-	// whose sender is tearing down / emitting its goodbye (#2033). A draining
-	// interface is deliberately reported as distinct from active so operators
-	// do not read a withdrawing router as still advertising.
+	// State is "active" for a running sender, "failed" for a sender that
+	// will never emit (dead open, repeated ENODEV/ENXIO send failure) or a
+	// wanted interface that never started (#15214), or "draining" for an
+	// interface whose sender is tearing down / emitting its goodbye
+	// (#2033). Non-active states are deliberately distinct so operators do
+	// not read a silent router as still advertising.
 	State string
 	// JoinTimedOut is set on a draining entry whose owner wedged past
 	// claimWaitTimeout, so releaseDrain handed the owed goodbye/replacement to
@@ -1417,6 +1492,9 @@ func (m *Manager) Status() []SenderInfo {
 			Preference:  s.cfg.Preference,
 			NAT64Prefix: s.cfg.NAT64Prefix,
 			State:       "active",
+		}
+		if s.dead() {
+			info.State = "failed"
 		}
 		if info.MaxInterval <= 0 {
 			info.MaxInterval = defaultMaxAdvInterval
@@ -1461,6 +1539,47 @@ func (m *Manager) Status() []SenderInfo {
 			LastRA:       "n/a",
 			JoinTimedOut: e.joinTimedOut,
 		})
+	}
+	// #15214: a wanted interface that never started has no sender and no
+	// tombstone, so without this it was invisible — operators saw a
+	// successful commit and no entry at all while the LAN got no RAs.
+	for name, cfg := range m.wantedNotStarted {
+		if _, ok := m.senders[name]; ok {
+			continue
+		}
+		if _, ok := m.draining[name]; ok {
+			continue
+		}
+		info := SenderInfo{
+			Interface: name,
+			State:     "failed",
+			LastRA:    "never",
+		}
+		if cfg != nil {
+			info.SrcAddr = cfg.SourceLinkLocal
+			info.Lifetime = cfg.EffectiveRouterLifetime()
+			info.MaxInterval = cfg.MaxAdvInterval
+			info.MinInterval = cfg.MinAdvInterval
+			info.LinkMTU = cfg.LinkMTU
+			info.Managed = cfg.ManagedConfig
+			info.Other = cfg.OtherStateful
+			info.Preference = cfg.Preference
+			info.NAT64Prefix = cfg.NAT64Prefix
+			for _, pfx := range cfg.Prefixes {
+				info.Prefixes = append(info.Prefixes, pfx.Prefix)
+			}
+			info.DNSServers = cfg.DNSServers
+		}
+		if info.MaxInterval <= 0 {
+			info.MaxInterval = defaultMaxAdvInterval
+		}
+		if info.MinInterval <= 0 {
+			info.MinInterval = info.MaxInterval / 3
+		}
+		if info.Preference == "" {
+			info.Preference = "medium"
+		}
+		result = append(result, info)
 	}
 	return result
 }

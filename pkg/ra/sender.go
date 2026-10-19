@@ -177,12 +177,34 @@ type sender struct {
 	// resurrected). This makes "exactly one goodbye per withdrawn interface" a
 	// post-mortem fact, not a timing gamble (#2033 MAJOR 2 / restart window).
 	goodbyeEmitted atomic.Bool
+	// sendDead records that repeated ENODEV/ENXIO RA writes proved the
+	// netdev vanished after the conn opened (#15214). Once set, dead()
+	// reports true so the #6793 retry owner rebuilds the sender instead of
+	// leaving it "active" while it silently sends nothing.
+	sendDead atomic.Bool
+	// consecutiveSendFailures counts back-to-back ENODEV/ENXIO sendRA
+	// failures; any successful RA resets it. Owner-only (sendRA runs on the
+	// owner goroutine, and tests driving it hold no manager lock).
+	consecutiveSendFailures int
 	// pref64LifetimeWarned limits the fallback-lifetime saturation warning to
 	// one per sender.
 	pref64LifetimeWarned atomic.Bool
 
 	lastRAMu sync.Mutex
 	lastRA   time.Time // rate-limit RS responses; owner writes, Status reads
+}
+
+// maxConsecutiveDeviceGoneFailures is how many back-to-back ENODEV/ENXIO
+// RA writes mark a sender dead (#15214). One failure can be a transient
+// link flap mid-write; three in a row with no intervening success means
+// the netdev is gone. Counted on the normal RA path only — a failed
+// goodbye already has its own retry-debt owner (#5093/#6777).
+const maxConsecutiveDeviceGoneFailures = 3
+
+// isDeviceGone reports whether err proves the netdev no longer exists
+// (ENODEV / ENXIO), as opposed to a transient write error.
+func isDeviceGone(err error) bool {
+	return errors.Is(err, syscall.ENODEV) || errors.Is(err, syscall.ENXIO)
 }
 
 func newSender(cfg *config.RAInterfaceConfig, iface *net.Interface) *sender {
@@ -506,6 +528,9 @@ func (s *sender) refreshInterfaceForBurst() bool {
 // failure (link still doing DAD / link-local not yet present) then recovers on
 // the next reconcile without any config change.
 func (s *sender) dead() bool {
+	if s.sendDead.Load() {
+		return true
+	}
 	select {
 	case <-s.connReady:
 		return !s.connOpened.Load()
@@ -782,8 +807,19 @@ func (s *sender) sendRA() {
 	if err := s.conn.WriteTo(ra, nil, allNodes); err != nil {
 		slog.Warn("ra: failed to send RA",
 			"interface", s.cfg.Interface, "err", err)
+		// #15214: repeated ENODEV/ENXIO writes prove the netdev was deleted
+		// outside a commit. Mark the sender dead so HasDeadSenders drives
+		// the #6793 rebuild instead of reporting it "active" forever. Any
+		// other error is transient and leaves the sender alive.
+		if isDeviceGone(err) {
+			s.consecutiveSendFailures++
+			if s.consecutiveSendFailures >= maxConsecutiveDeviceGoneFailures {
+				s.sendDead.Store(true)
+			}
+		}
 		return
 	}
+	s.consecutiveSendFailures = 0
 	s.setLastRA(time.Now())
 	slog.Debug("ra: sent RA", "interface", s.cfg.Interface)
 }
