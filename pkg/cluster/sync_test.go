@@ -3358,8 +3358,11 @@ func TestPendingBulkAckTracksNewestOutboundEpoch(t *testing.T) {
 	if !ok {
 		t.Fatal("expected pending bulk ack after BulkSync")
 	}
-	if epoch != 1 {
-		t.Fatalf("pending bulk epoch = %d, want 1", epoch)
+	// #15182: epochs are seeded from MonotonicNanos, so the first bulk's
+	// epoch is the seed+1 rather than 1. The contract is a pending epoch
+	// drawn from this sync's counter, not the literal value.
+	if want := ss.bulkSendNext.Load(); epoch != want {
+		t.Fatalf("pending bulk epoch = %d, want %d (the epoch this bulk drew)", epoch, want)
 	}
 	if age < 0 {
 		t.Fatalf("pending bulk age = %v, want >= 0", age)
@@ -4550,8 +4553,10 @@ func TestHandleNewConnectionColdStartTriggersBulkSync(t *testing.T) {
 	if !ok {
 		t.Fatal("expected bulk sync on cold start connection")
 	}
-	if epoch != 1 {
-		t.Fatalf("pending bulk epoch = %d, want 1", epoch)
+	// #15182: epochs are seeded from MonotonicNanos, so the first bulk's
+	// epoch is the seed+1 rather than 1.
+	if want := ss.bulkSendNext.Load(); epoch != want {
+		t.Fatalf("pending bulk epoch = %d, want %d (the epoch this bulk drew)", epoch, want)
 	}
 
 	cancel()
@@ -4625,8 +4630,10 @@ func TestHandleNewConnectionReconnectRePrimesBulkSync(t *testing.T) {
 	if !ok {
 		t.Fatal("reconnect after a full disconnect must RE-PUSH the authoritative bulk so a rebooted peer is re-primed (#5480); bulk was wrongly skipped")
 	}
-	if epoch != 1 {
-		t.Fatalf("pending bulk epoch = %d, want 1 (one re-prime bulk sent)", epoch)
+	// #15182: epochs are seeded from MonotonicNanos, so the re-prime bulk's
+	// epoch is the seed+1 rather than 1 (one re-prime bulk sent).
+	if want := ss.bulkSendNext.Load(); epoch != want {
+		t.Fatalf("pending bulk epoch = %d, want %d (one re-prime bulk sent)", epoch, want)
 	}
 
 	cancel()
