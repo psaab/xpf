@@ -1,5 +1,12 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Fix the WireGuard per-peer underlay PTB test failing on master
+    (0 vs 1425): the #14373 degenerate-key hydrate gate correctly
+    drops tunnel rows whose peer keys are repeated-byte placeholders,
+    and the shared WG MTU fixtures (plus the per-peer asymmetric and
+    #14640 two-peer fixtures) still used such keys, so the row was
+    dropped and the inner MTU resolved to 0. Migrate those fixtures
+    to fixed non-degenerate keys; no production change (#15741).
   * Fix master unit suites: stop compileZones reading an apply-macro's
     braced payload on a zone-interface member as a per-interface
     host-inbound override (a real #12835 regression — macro content

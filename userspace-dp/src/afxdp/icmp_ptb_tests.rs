@@ -1880,12 +1880,21 @@ fn wg_two_peer_asymmetric_snapshot() -> crate::ConfigSnapshot {
         let ep = &mut snap.tunnel_endpoints[0];
         // Peer A: give it the smaller pubkey so it is first in any sorted order
         // (the first-peer revert path resolves here).
-        ep.wg_peers[0].wg_peer_pubkey_hex = "0a0a0a0a".repeat(8);
+        // #15741: non-degenerate keys (the previous `0a0a...`/`0b0b...`
+        // repeated-byte keys are refused by #14373's hydrate gate, which
+        // dropped the whole row). Ordering is preserved: peer A still
+        // sorts first (`0a1b...` < `f9e8...`), so the first-peer
+        // revert path still resolves to peer A.
+        ep.wg_peers[0].wg_peer_pubkey_hex =
+            "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9"
+                .to_string();
         ep.wg_peers[0].wg_allowed_ips = vec!["10.123.0.0/24".to_string()];
         ep.wg_peers[0].wg_endpoint = "203.0.113.7:51820".to_string();
         // Peer B: distinct prefix + endpoint routing over the smaller underlay.
         ep.wg_peers.push(crate::TunnelWgPeerSnapshot {
-            wg_peer_pubkey_hex: "0b0b0b0b".repeat(8),
+            wg_peer_pubkey_hex:
+                "f9e8d7c6b5a4938271605f4e3d2c1b0af9e8d7c6b5a4938271605f4e3d2c1b0a"
+                    .to_string(),
             wg_allowed_ips: vec!["10.124.0.0/24".to_string()],
             wg_endpoint: "198.51.100.7:51820".to_string(),
             ..Default::default()
