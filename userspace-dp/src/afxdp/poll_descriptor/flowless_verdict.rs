@@ -311,6 +311,17 @@ pub(super) fn flowless_base_resolution(
                 dnat_counter: None,
             });
         }
+        super::frag_assoc::FlowlessPreRoutingNat::Poisoned { counter } => {
+            // #15534: poisoned DNAT claims the flowless packet — drop it
+            // (returning None recycles the descriptor in the caller, the
+            // same terminal signal the Untranslatable-local miss uses).
+            // The poisoned rule's hit counter is counted here because no
+            // session is ever installed for a dropped packet.
+            if let Some(counter) = &counter {
+                counter.add(meta.pkt_len as u64);
+            }
+            return None;
+        }
     };
     let dst = nat.rewrite_dst.unwrap_or(l3_flow.dst_ip);
     // #14662: HA enforcement applies to a local hit exactly as to a FIB

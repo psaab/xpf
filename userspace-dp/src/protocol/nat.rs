@@ -386,7 +386,7 @@ pub(crate) struct NAT64RuleSnapshot {
     /// an EMPTY pool — prefix traffic classifies MatchUnavailable (drop) —
     /// instead of minting from the unusable pool or skipping the rule
     /// (which would route the synthetic destination as ordinary IPv6).
-    /// Rides the v52 protocol bump: an old helper ignoring it would mint
+    /// Rides the v51 protocol bump: an old helper ignoring it would mint
     /// from an unusable pool, so exact-equality versioning fences it.
     #[serde(rename = "pool_unusable", default)]
     pub pool_unusable: bool,

@@ -412,6 +412,12 @@ pub(super) enum FlowlessPreRoutingNat {
         counter: Option<std::sync::Arc<crate::nat::NatRuleCounter>>,
     },
     Untranslatable,
+    /// #15534: a poisoned DNAT entry (#14947 `lenient_match_dropped`)
+    /// claims this flowless packet — drop it instead of forwarding it
+    /// untranslated (or NPTv6/NAT64-translated) past the poison.
+    Poisoned {
+        counter: Option<std::sync::Arc<crate::nat::NatRuleCounter>>,
+    },
 }
 /// Protocol facts recovered from the packet bytes for the selected flowless
 /// destination rewrite. `UserspaceDpMeta::protocol == 255` is only an unknown
@@ -645,6 +651,25 @@ pub(super) fn flowless_pre_routing_destination_nat(
     }
 
     if !forwarding.dnat_table.is_empty() {
+        // #15534: a poisoned DNAT claim drops before the L4-possible
+        // fences below — those fences return Untranslatable (which the
+        // caller may still LocalDeliver), and an address-only poisoned
+        // rule has no L4 selector for them to see anyway. The Option
+        // lookup also maps Poisoned to None and mis-keys port-scoped
+        // poison at ports 0/0, so without this the packet fell through
+        // to NPTv6 / untranslated forwarding.
+        let (poisoned, counter) = forwarding.dnat_table.flowless_poisoned_claim(
+            meta.protocol,
+            l3_flow.src_ip,
+            l3_flow.dst_ip,
+            scope.zone_name,
+            scope.ifname,
+            scope.routing_instance,
+            packet_icmp,
+        );
+        if poisoned {
+            return FlowlessPreRoutingNat::Poisoned { counter };
+        }
         if l4_identity_missing
             && forwarding.dnat_table.flowless_l4_precedence_possible(
                 meta.protocol,
@@ -918,6 +943,23 @@ fn flowless_destination_nat_requires_translation(
                 .is_some()
         };
         if dnat_match {
+            return true;
+        }
+        // #15534: a poisoned DNAT claim is also a required drop — the
+        // Option probes above map Poisoned to no-translation.
+        if forwarding
+            .dnat_table
+            .flowless_poisoned_claim(
+                meta.protocol,
+                l3_flow.src_ip,
+                l3_flow.dst_ip,
+                scope.zone_name,
+                scope.ifname,
+                scope.routing_instance,
+                packet_icmp,
+            )
+            .0
+        {
             return true;
         }
     }
@@ -1590,3 +1632,7 @@ mod flowless_icmp_nat_tests_11509;
 #[cfg(test)]
 #[path = "flowless_ndp_nat_tests_15117.rs"]
 mod flowless_ndp_nat_tests_15117;
+
+#[cfg(test)]
+#[path = "flowless_poison_dnat_tests_15534.rs"]
+mod flowless_poison_dnat_tests_15534;
