@@ -177,6 +177,27 @@ func runUniformGatesPolicy(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 		}
 	}
 
+	// #15004 stable policy rule identity gate. Strict on commit /
+	// commit-check (hard-reject a security-zone name containing "->" and a
+	// security-policy name containing "->" or "/" — StablePolicyRuleID is
+	// unescaped "<from>-><to>/<name>" concatenation, so such components alias
+	// distinct zone pairs / rules onto one identity; the userspace helper
+	// keys hit counters on it and its integrity preflight refuses the WHOLE
+	// snapshot on a duplicate, so the config committed clean and was then
+	// refused whole with a misleading diagnosis). Lenient on load /
+	// peer-sync (warn so an already-persisted config still boots — #1960
+	// no-brick; the helper still refuses that snapshot closed). Runs after
+	// the duplicate-name gate so an earlier policy-structural error still
+	// wins the first-error slot.
+	if err := validateStablePolicyRuleIdentityStrict(cfg); err != nil {
+		if opts.lenientStablePolicyRuleIdentity {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("stable policy rule identity (downgraded to warning on tolerant path; the userspace helper refuses an aliasing policy snapshot): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #14449 duplicate `scheduler-name` gate. Strict on commit /
 	// commit-check (hard-reject a policy carrying two differing
 	// scheduler-name values — compilePolicy previously read only the
