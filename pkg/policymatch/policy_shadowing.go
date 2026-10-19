@@ -200,6 +200,15 @@ func analyzeCrossTierGlobalShadowing(cfg *config.Config, pairs []*config.ZonePai
 		// lexicographical pair sort — "any" < "trust" would let a
 		// wildcard stanza claim coverage the runtime gives to an exact
 		// stanza first, inverting SHADOWED vs REDUNDANT.
+		// #15238 A55-01: WITHIN the single-wildcard tier the runtime
+		// merges its two sub-buckets in CONFIG order (Match tier 2), so
+		// the walk inside tier 1 must iterate cfg.Security.Policies
+		// (authored order), not the lexically sorted `pairs` — otherwise
+		// a ("trust","any") deny authored before an ("any","untrust")
+		// permit loses to the permit and SHADOWED is downgraded to
+		// REDUNDANT. Exact and both-any stanzas occur at most in one
+		// wildcard shape per (f,t), so iterating cfg directly preserves
+		// tiers 0/2 as well.
 		tierOf := func(zpp *config.ZonePairPolicies, f, t string) int {
 			exact := zpp.FromZone == f && zpp.ToZone == t
 			if exact {
@@ -215,7 +224,7 @@ func analyzeCrossTierGlobalShadowing(cfg *config.Config, pairs []*config.ZonePai
 				k := [2]string{f, t}
 				for tier := 0; tier <= 2; tier++ {
 					recorded := false
-					for _, zpp := range pairs {
+					for _, zpp := range cfg.Security.Policies {
 						if zpp == nil || tierOf(zpp, f, t) != tier {
 							continue
 						}

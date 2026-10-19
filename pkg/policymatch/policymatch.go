@@ -961,23 +961,31 @@ type Result struct {
 	HostInbound *dpuserspace.HostInboundAdmission
 
 	// RouteDropBeforePolicy is true when a transit Result carries the
-	// route-drop / neighbor-delivery advisory. For #4373 classes, forwarding
-	// drops at route lookup before policy: multicast, limited broadcast,
-	// unspecified, and loopback. Directed-broadcast (#11004/#11033) is
-	// different: when its connected route wins, policy is evaluated on that
-	// egress before neighbor resolution. The dataplane now refuses to resolve
-	// this connected broadcast destination even if snapshot or runtime neighbor
-	// state contains a usable-looking entry, so a permit is not forwarded.
+	// route-drop / martian / neighbor-delivery advisory. For #4373 classes,
+	// forwarding drops at route lookup before policy: multicast, limited
+	// broadcast, unspecified, and loopback. #15238 A55-02 extends the stamp
+	// to the full Rust transit martian sets (addr_class.rs
+	// transit_src_is_martian / transit_dst_is_martian, gated in
+	// poll_descriptor before policy) on BOTH sides: source and destination
+	// this-network, loopback, link-local, multicast, and reserved classes,
+	// plus connected directed broadcasts. Directed-broadcast
+	// (#11004/#11033) is different: when its connected route wins, policy
+	// is evaluated on that egress before neighbor resolution. The
+	// dataplane now refuses to resolve this connected broadcast
+	// destination even if snapshot or runtime neighbor state contains a
+	// usable-looking entry, so a permit is not forwarded.
 	// This flag is advisory only; it does not change Matched / Action /
 	// DefaultUsed. Every surface must render RouteDropNote. Host-bound
 	// (junos-host) queries take the local-delivery gate and are never stamped.
 	// The route / neighbor behavior is enforced in userspace-dp; a route-drop
 	// counter remains the deferred Rust half of #4373.
 	RouteDropBeforePolicy bool
-	// RouteDropClass names the destination class ("multicast", "broadcast",
-	// "directed-broadcast", "unspecified", or "loopback") when the advisory
-	// flag is set; empty otherwise. RouteDropNote describes the class-specific
-	// route-drop or neighbor-delivery behavior.
+	// RouteDropClass names the martian class ("multicast", "broadcast",
+	// "directed-broadcast", "unspecified", "loopback", "this-network",
+	// "link-local", or "reserved") when the advisory flag is set; empty
+	// otherwise. A source-side class wins over a destination-side class
+	// (the source gate precedes the destination gate in the helper).
+	// RouteDropNote describes the class-specific behavior.
 	RouteDropClass string
 	// FragmentAssociatedDeny is true when this verdict is a #5572 non-first
 	// fragment whose PERMIT (matched or default) was OVERRIDDEN to the DENY or
@@ -1072,7 +1080,7 @@ func (r Result) RouteDropNote() string {
 		class = "non-routable"
 	}
 	if class == "directed-broadcast" {
-		return fmt.Sprintf("%s destination is %s — when the connected prefix wins, "+
+		return fmt.Sprintf("%s address is %s — when the connected prefix wins, "+
 			"policy is evaluated on its egress before neighbor resolution; the "+
 			"dataplane refuses to resolve this destination even if snapshot or runtime "+
 			"neighbor state contains a usable-looking entry, so the packet is not "+
@@ -1081,50 +1089,81 @@ func (r Result) RouteDropNote() string {
 			"targeted-broadcast` (#4308). This is a neighbor-resolution drop, not a "+
 			"pre-policy route drop.", RouteDropNotePrefix, class)
 	}
-	return fmt.Sprintf("%s destination is %s — transit traffic to this address is "+
+	return fmt.Sprintf("%s address is %s — transit traffic with this address is "+
 		"dropped at route lookup BEFORE security-policy evaluation, so this verdict "+
 		"does not describe real forwarding (the packet is dropped at route regardless "+
 		"of the matching policy / filter-accept log)", RouteDropNotePrefix, class)
 }
 
-// routeDropClass classifies a query DESTINATION address into the transit
-// forwarding class carrying a route-drop or neighbor-delivery advisory. It
-// returns "" for ordinary unicast. Multicast (IPv4 224.0.0.0/4, IPv6 ff00::/8),
-// the IPv4 limited broadcast 255.255.255.255, unspecified (0.0.0.0 / ::), and
-// loopback (127.0.0.0/8 / ::1) are dropped at route lookup before policy. A nil
-// dst (the "unspecified destination" simulator wildcard) is NOT classified: it
-// means the operator did not pin a destination, not that it is 0.0.0.0.
+// transitMartianClass is the #15238 A55-02 shared classifier: it mirrors
+// the Rust transit martian sets (userspace-dp/src/afxdp/frame/
+// addr_class.rs transit_src_is_martian / transit_dst_is_martian, gated
+// pre-policy for transit dispositions in poll_descriptor/mod.rs) so
+// `show security match-policies` flags a flow the helper drops before
+// policy instead of reporting a plain permit. One classifier serves both
+// sides. It returns "" for ordinary unicast. A nil IP (the operator
+// omitted that side) is NOT classified: omitted != 0.0.0.0. The
+// simulator has no routing domain, so the connected directed-broadcast
+// test is the domain-free static-prefix scan
+// (isDirectedBroadcastOfConnected, #11004: IPv4-only, prefix length
+// 1..30 — /31 has no broadcast per RFC 3021; /32's all-ones host is the
+// host itself; a nil cfg carries no connected prefixes).
 //
-// #11004/#11033 classify IPv4 subnet-directed broadcasts of connected prefixes
-// (for example 10.2.0.255 on 10.2.0.0/24). When the connected route wins, its
-// MissingNeighbor path evaluates policy on the selected egress before neighbor
-// resolution. Snapshot import and runtime lookup both reject a neighbor on
-// that connected egress for this destination, including an otherwise usable
-// stale/permanent entry, so the note does not rely on the dynamic-event NOARP
-// gate (#10690). The address-based classifier scans static interface-unit
-// prefixes; the simulator query has no selected FIB table or egress and cannot account for a more-
-// specific static route or distinguish routing-instance tables. It mirrors the Rust
-// v4_addr_is_directed_broadcast guards: IPv4-only, prefix length 1..30 (/31 has
-// no broadcast per RFC 3021; /32's all-ones host is the host itself). A nil cfg
-// carries no connected prefixes and therefore never classifies this advisory.
-func routeDropClass(cfg *config.Config, dst net.IP) string {
-	if dst == nil {
+// Class spellings are shared with the old dst-only list where the sets
+// overlap; "this-network" (0.0.0.0/8), "reserved" (240.0.0.0/4), and
+// "link-local" (169.254.0.0/16, fe80::/10) are the classes it missed.
+func transitMartianClass(cfg *config.Config, ip net.IP) string {
+	if ip == nil {
 		return ""
 	}
+	if v4 := ip.To4(); v4 != nil {
+		switch {
+		case v4[0] == 0:
+			return "this-network"
+		case ip.IsMulticast():
+			return "multicast"
+		case ip.Equal(net.IPv4bcast):
+			return "broadcast"
+		case ip.IsLoopback():
+			return "loopback"
+		case ip.IsLinkLocalUnicast():
+			return "link-local"
+		case v4[0] >= 240:
+			return "reserved"
+		case isDirectedBroadcastOfConnected(cfg, ip):
+			return "directed-broadcast"
+		default:
+			return ""
+		}
+	}
 	switch {
-	case dst.IsMulticast():
-		return "multicast"
-	case dst.Equal(net.IPv4bcast):
-		return "broadcast"
-	case dst.IsUnspecified():
+	case ip.IsUnspecified():
 		return "unspecified"
-	case dst.IsLoopback():
+	case ip.IsLoopback():
 		return "loopback"
-	case isDirectedBroadcastOfConnected(cfg, dst):
-		return "directed-broadcast"
+	case ip.IsMulticast():
+		return "multicast"
+	case ip.IsLinkLocalUnicast():
+		return "link-local"
 	default:
 		return ""
 	}
+}
+
+// routeDropClassForQuery stamps the transit martian advisory for a
+// query: the source side is tested first (the helper's source gate
+// precedes the destination gate on the new-flow path), then the
+// destination. An unspecified destination (0.0.0.0 / ::) keeps its
+// established #4373 "unspecified" spelling rather than the v4
+// this-network arm, which 0.0.0.0 also satisfies.
+func routeDropClassForQuery(cfg *config.Config, q Query) string {
+	if class := transitMartianClass(cfg, q.SrcIP); class != "" {
+		return class
+	}
+	if q.DstIP != nil && q.DstIP.IsUnspecified() {
+		return "unspecified"
+	}
+	return transitMartianClass(cfg, q.DstIP)
 }
 
 // isDirectedBroadcastOfConnected reports whether dst is the all-ones host
@@ -1389,12 +1428,15 @@ func Match(cfg *config.Config, q Query) (res Result) {
 	// #4373 (E4/H2/H7): multicast / broadcast / unspecified / loopback transit
 	// destinations are dropped at ROUTE LOOKUP before policy. #11004 adds a
 	// directed-broadcast neighbor-delivery caveat: when the connected route wins,
-	// policy is evaluated on its egress before neighbor resolution fails. Stamp
-	// either advisory onto every Result via defer, without threading it through
-	// each construction. Host-bound (junos-host) queries use the local-delivery
-	// gate rather than transit routing and are exempt.
+	// policy is evaluated on its egress before neighbor resolution fails.
+	// #15238 A55-02: the stamp now covers the full Rust transit martian sets
+	// on BOTH sides (source and destination) via transitMartianClass, matching
+	// the helper's pre-policy src/dst gates. Stamp the advisory onto every
+	// Result via defer, without threading it through each construction.
+	// Host-bound (junos-host) queries use the local-delivery gate rather
+	// than transit routing and are exempt.
 	if q.ToZone != JunosHostZone {
-		if class := routeDropClass(cfg, q.DstIP); class != "" {
+		if class := routeDropClassForQuery(cfg, q); class != "" {
 			defer func() {
 				res.RouteDropBeforePolicy = true
 				res.RouteDropClass = class
@@ -1964,16 +2006,30 @@ func DefinedZoneNames(cfg *config.Config) map[string]bool {
 // globalScopeSetMatches replicates GlobalZoneScope::matches + build_global_zone_scope
 // (policy.rs, #3148/#4626) for a zone SET scope. An empty scope or one that
 // contains "any" (config.IsWildcardZoneSet) applies to every zone. Otherwise the
-// flow's zone must equal some DEFINED element of the set; an undefined element
-// (typo'd, or reserved like junos-host) contributes nothing — it never silently
-// widens the scope to all-zones, matching the runtime fail-closed backstop.
+// flow's zone must equal some DEFINED, surviving element of the set; an
+// undefined element (typo'd, or reserved like junos-host) contributes nothing
+// — it never silently widens the scope to all-zones, matching the runtime
+// fail-closed backstop.
+//
+// #15238 A55-03: a QUARANTINED element (StableZoneID collision loser or
+// reserved name, config.ZoneQuarantineExclusionsForConfig) contributes
+// nothing either. The snapshot builder drops a global whose configured
+// side is fully quarantined (walkPolicyRuleSlots
+// globalScopeFullyQuarantined / scrubPoliciesForQuarantinedZones), so
+// the published snapshot has zero such rules; testing raw
+// cfg.Security.Zones membership matched the deny while the runtime
+// applies none. A mixed scope still matches on its surviving members.
 func globalScopeSetMatches(cfg *config.Config, scope []string, flowZone string) bool {
 	if config.IsWildcardZoneSet(scope) {
 		return true
 	}
+	quarantined := quarantinedZoneNames(cfg)
 	for _, z := range scope {
 		if _, ok := cfg.Security.Zones[z]; !ok {
 			continue // Unresolved element → contributes nothing
+		}
+		if _, drop := quarantined[z]; drop {
+			continue // Quarantined element → rule dropped by the builder
 		}
 		if z == flowZone {
 			return true
