@@ -44,6 +44,21 @@ var errV6AddrInvalidated = errors.New("DHCPv6 reply explicitly invalidated the h
 // carry-forward until its valid expiry (#1844 anti-outage).
 var errV6NoBinding = errors.New("DHCPv6 server has no binding for the held IA_NA (Status NoBinding)")
 
+// errV6PDRefused signals that a Reply explicitly refused the IA_PD
+// delegation (non-Success IA_PD status, e.g. NoPrefixAvail) and granted
+// neither a usable IA_NA address nor a live IA_PD prefix (#15224,
+// A39-02). On the mixed ia-na+ia-pd path parse succeeds via the address
+// and the run loop clears held PDs through the pdRefused arm; on the
+// PD-only path (wantNA=false) the generic "no usable" guard would
+// otherwise swallow the refusal as a transient failure and the refused
+// prefix would stay advertised until its own lifetime ends. The
+// discriminator is errors.Is(err, errV6PDRefused): on an EXPLICIT
+// refusal the renew/rebind loop clears the delegated set immediately;
+// on silence (no IA_PD at all) it keeps the generic keep-and-retry path
+// (#1844 anti-outage). Fail SAFE toward keep-and-retry: the sentinel is
+// returned ONLY when pdRefused was positively observed.
+var errV6PDRefused = errors.New("DHCPv6 server refused the IA_PD delegation (Status NoPrefixAvail)")
+
 // runDHCPv6 runs the DHCPv6 solicit/request cycle with retries and
 // renewal. Initial acquisition is a Rapid-Solicit (or Information-Request
 // in stateless mode). At T1 the loop sends an RFC 8415 §18.2.4 RENEW to
@@ -432,6 +447,26 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 				cancelLease()
 				break renewalLoop
 			}
+			if errors.Is(rerr, errV6PDRefused) {
+				// #15224 (A39-02): the granting server explicitly refused
+				// the IA_PD delegation on RENEW and granted nothing else.
+				// Clear the delegated set NOW so DelegatedPrefixesForRA
+				// stops advertising the refused prefix, then re-acquire
+				// (which re-requests the PD via Solicit). Only PD state
+				// is cleared; a held IA_NA address is untouched (the
+				// PD-only shape that reaches here holds none, and the
+				// lease record stays until re-acquisition or expiry).
+				slog.Info("DHCPv6: server refused IA_PD delegation on renew, clearing delegated prefixes and re-acquiring",
+					"interface", ifaceName)
+				m.clearDelegatedPDs(key, committed)
+				committedPDs = nil
+				if !stateless {
+					leaseExpiryAt = deadline
+					leaseExpiryPending = true
+				}
+				cancelLease()
+				break renewalLoop
+			}
 			slog.Warn("DHCPv6: T1 renewal failed, waiting for T2",
 				"interface", ifaceName, "err", rerr)
 
@@ -543,6 +578,16 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 				// this arm only makes the reason explicit in the log.
 				slog.Info("DHCPv6: server reports NoBinding for held IA_NA on rebind, re-acquiring via Request",
 					"interface", ifaceName, "address", committed.Address)
+			}
+			if errors.Is(rerr, errV6PDRefused) {
+				// #15224 (A39-02): explicit IA_PD refusal on REBIND —
+				// clear the delegated set before the generic re-acquire
+				// below so the refused prefix stops being advertised
+				// immediately, not at its own lifetime end.
+				slog.Info("DHCPv6: server refused IA_PD delegation on rebind, clearing delegated prefixes and re-acquiring",
+					"interface", ifaceName)
+				m.clearDelegatedPDs(key, committed)
+				committedPDs = nil
 			}
 			if stateless {
 				slog.Warn("DHCPv6: T2 information-request failed, retrying options",
@@ -1175,6 +1220,17 @@ func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv
 		if st := v6IANAStatusCode(adv, expectedNA); st != nil && st.StatusCode == iana.StatusNoBinding {
 			return nil, fmt.Errorf("DHCPv6 reply on %s: %w", ifaceName, errV6NoBinding)
 		}
+	}
+
+	// #15224 (A39-02): an explicit IA_PD refusal (pdRefused) that granted
+	// nothing usable must surface as the typed refusal, not the generic
+	// transient error — otherwise a PD-only client (wantNA=false, which
+	// never reaches the pdRefused commit arm because parse fails here)
+	// keeps advertising the refused prefix until its lifetime ends. The
+	// mixed path is unaffected: a usable IA_NA address makes this guard
+	// not fire, and the pdRefused commit arm clears the PDs there.
+	if result.pdRefused && !addr.IsValid() && len(result.prefixes) == 0 {
+		return nil, fmt.Errorf("DHCPv6 reply on %s: %w", ifaceName, errV6PDRefused)
 	}
 
 	// A usable reply must yield either an IA_NA address or at least one
