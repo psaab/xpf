@@ -15,11 +15,53 @@ import (
 )
 
 // childSelector is a resolved child SA traffic-selector pair for swanctl
-// config generation.
+// config generation. ESP/DF/start/dpd/if_id are per-VPN (per-child in
+// swanctl), so they travel with the child when several VPNs share one
+// gateway connection (#15024).
 type childSelector struct {
-	Name     string
-	LocalTS  string
-	RemoteTS string
+	Name         string
+	LocalTS      string
+	RemoteTS     string
+	ESPProposals string
+	ESPLifetime  int
+	DFBit        string
+	StartAction  string // "start", "trap", or "" (responder-only)
+	DPDAction    string
+	IfID         uint32
+}
+
+// gatewayConn is one swanctl connection: the shared IKE parameters of a
+// gateway group plus every member VPN's children and PSKs (#15024).
+type gatewayConn struct {
+	name           string
+	member         string // representative (first sorted) member VPN
+	vpn            *config.IPsecVPN
+	gw             *config.IPsecGateway
+	remoteAddr     string
+	localAddr      string
+	authMethod     string
+	ikeProposals   string
+	ikeLifetime    int
+	aggressive     bool
+	dpdDelay       int
+	dpdTimeout     int
+	children       []childSelector
+	pskValues      []string
+	pskSelectorKey string
+}
+
+func gatewayKeyFor(ipsecCfg *config.IPsecConfig, name string, vpn *config.IPsecVPN, gw *config.IPsecGateway) string {
+	if gw != nil && ipsecCfg != nil {
+		if _, ok := ipsecCfg.Gateways[vpn.Gateway]; ok && vpn.Gateway != "" {
+			// A named gateway is the shared IKE endpoint. Inline endpoints
+			// (gw==nil shape) and the empty endpoint keep per-VPN conns.
+			if vpn.Gateway == name {
+				// Degenerate self-named gateway: unchanged.
+			}
+			return sanitizeSwanctlValue(vpn.Gateway)
+		}
+	}
+	return sanitizeSwanctlValue(name)
 }
 
 func (m *Manager) generateConfig(ipsecCfg *config.IPsecConfig) string {
@@ -28,15 +70,18 @@ func (m *Manager) generateConfig(ipsecCfg *config.IPsecConfig) string {
 }
 
 // renderConfig renders the swanctl snippet and returns the EXACT set of
-// swanctl connection names it actually emitted (the sanitized VPN names
-// written into the connections{} block). A VPN present in ipsecCfg.VPNs but
-// OMITTED from the render — a skip class: an unrenderable gateway reference
+// swanctl connection names it actually emitted. Since #15024 a connection
+// is per IKE gateway: VPNs sharing a named gateway render as children of
+// the gateway-named connection, so the returned set holds gateway names
+// (the sanitized VPN name only for inline/empty endpoints, where each VPN
+// keeps its own connection). A VPN present in ipsecCfg.VPNs but OMITTED
+// from the render — a skip class: an unrenderable gateway reference
 // (#2074), an unresolved ike-policy chain (#2270), an unusable IKE DH group
 // (#9919 F-161), an unsupported IKE authentication method, a malformed PSK,
 // a PSK connection with no effective secret (#14139), a responder-only PSK
 // connection whose gateway has no remote-identity or dynamic hostname (#14591),
 // a `protocol ah` proposal with no ESP render path (#4298), a section-breaking
-// VPN name (#9495), an unresolved ipsec-policy chain (#9919 F-090), an unusable
+// VPN or gateway name (#9495), an unresolved ipsec-policy chain (#9919 F-090), an unusable
 // ESP/PFS DH group (#9919 F-161), a non-empty bind-interface that resolves to
 // no XFRM if_id (#10681), an external-interface with no resolved local-address
 // (#11689), or an explicit selector set with no renderable children (#10884) —
@@ -68,23 +113,26 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 	b.WriteString("# xpf managed config - do not edit\n\n")
 
 	// skipped records VPNs whose gateway reference is not renderable
-	// (#2074) so the secrets loop below emits no orphan ike-<name> secret
-	// for a connection that was never written.
+	// (#2074) so the secrets block below emits no orphan secret for a
+	// connection that was never written.
 	skipped := make(map[string]bool)
 
-	// rendered accumulates the sanitized connection name of every VPN that
-	// survives the skip checks and is emitted into connections{}. This is
-	// the authoritative "loaded connection set" Apply diffs against
+	// rendered accumulates the sanitized connection name (gateway name for
+	// a named-gateway group, VPN name for inline/empty endpoints, #15024)
+	// of every connection emitted into connections{}. This is the
+	// authoritative "loaded connection set" Apply diffs against
 	// prevConnNames (#5494).
 	rendered := make(map[string]bool)
 
-	// decodedPSKs caches validated values for the secrets block. A malformed
-	// key skips its VPN before emitting a connection, allowing Apply to unload
-	// it and tear down any stale SA.
+	// decodedPSKs caches validated values for the secrets block, keyed by
+	// VPN name. A malformed key skips its VPN before emitting a connection.
 	decodedPSKs := make(map[string]string, len(ipsecCfg.VPNs))
 
-	// Connections
-	b.WriteString("connections {\n")
+	// groups collects surviving VPNs by connection key in sorted order.
+	groups := make(map[string]*gatewayConn)
+	var groupOrder []string
+
+	// Connections are collected first, then emitted grouped by gateway.
 	for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
 		vpn := ipsecCfg.VPNs[name]
 		// Expand once before writing the connection so an explicit selector set
@@ -190,8 +238,12 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 		// swanctl file. Commit refuses such a name (validateIPsecSectionNamesStrict);
 		// this belt covers a persisted or peer-synced one. One such name would
 		// otherwise make strongSwan discard EVERY tunnel in the file, or inject
-		// settings. SKIP it (the secrets loop honours skipped too) and keep the rest.
-		if ipsecname.SectionBreaking(sanitizeSwanctlValue(name)) {
+		// settings. SKIP it (the secrets block honours skipped too) and keep the rest.
+		// Since #15024 the connection/secret headers carry the gateway name
+		// for a named group, so that name is checked too; a solo VPN's child
+		// is named after the VPN, so its own name is checked regardless.
+		connKey := gatewayKeyFor(ipsecCfg, name, vpn, gw)
+		if ipsecname.SectionBreaking(sanitizeSwanctlValue(name)) || ipsecname.SectionBreaking(connKey) {
 			skipped[name] = true
 			slog.Warn("skipping IPsec VPN: its name would break the swanctl section it is "+
 				"written into (whitespace, a brace, '#', '=', ',', a quote, '.', '%', ':' "+
@@ -336,268 +388,172 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 			continue
 		}
 
-		// This VPN passed every skip check, so it is emitted into the
-		// loaded config. Record its sanitized connection name in the
-		// rendered set (#5494) — the same key swanctl reports in
-		// --list-sas and that promoteConnNames diffs for teardown.
-		rendered[sanitizeSwanctlValue(name)] = true
-
-		fmt.Fprintf(&b, "  %s {\n", sanitizeSwanctlValue(name))
+		// This VPN passed every skip check. Fold it into its gateway
+		// connection (#15024): the first (sorted) member supplies the
+		// shared IKE parameters; later members contribute only children
+		// and PSKs. Per-child settings ride on each childSelector.
 		dpd := deriveDPD(gw, vpn)
+		startAction := ""
+		if gw == nil || !responderOnlyGateway(gw) {
+			switch vpn.EstablishTunnels {
+			case "immediately":
+				startAction = "start"
+			case "on-traffic", "":
+				startAction = "trap"
+			}
+		}
+		ifID := xfrmiIfID(vpn.BindInterface)
+		enriched := make([]childSelector, len(children))
+		for i, c := range children {
+			c.ESPProposals = espProposals
+			c.ESPLifetime = espLifetime
+			c.DFBit = vpn.DFBit
+			c.StartAction = startAction
+			c.DPDAction = dpd.Action
+			c.IfID = ifID
+			enriched[i] = c
+		}
+		gc, exists := groups[connKey]
+		if !exists {
+			gc = &gatewayConn{
+				name: connKey, member: name, vpn: vpn, gw: gw,
+				remoteAddr: remoteAddr, localAddr: localAddr,
+				authMethod: authMethod, ikeProposals: ikeProposals,
+				ikeLifetime: ikeLifetime, aggressive: aggressive,
+				dpdDelay: dpd.Delay, dpdTimeout: dpd.Timeout,
+				pskSelectorKey: name,
+			}
+			groups[connKey] = gc
+			groupOrder = append(groupOrder, connKey)
+			rendered[connKey] = true
+		}
+		gc.children = append(gc.children, enriched...)
+		if d, ok := decodedPSKs[name]; ok {
+			seen := false
+			for _, v := range gc.pskValues {
+				if v == d {
+					seen = true
+				}
+			}
+			if !seen {
+				gc.pskValues = append(gc.pskValues, d)
+			}
+		}
+	}
+	sort.Strings(groupOrder)
 
-		// IKE version
+	b.WriteString("connections {\n")
+	for _, key := range groupOrder {
+		gc := groups[key]
+		gw := gc.gw
+		fmt.Fprintf(&b, "  %s {\n", gc.name)
 		if gw != nil && gw.Version == "v2-only" {
 			b.WriteString("    version = 2\n")
 		} else if gw != nil && gw.Version == "v1-only" {
 			b.WriteString("    version = 1\n")
 		}
-
-		if aggressive {
+		if gc.aggressive {
 			b.WriteString("    aggressive = yes\n")
 		}
-
-		// local_addrs / remote_addrs carry the endpoint address list
-		// (a real IP / dotted hostname, an IPv6 literal, a comma-
-		// separated multi-address list, or the responder-only "%any").
-		// Run them through sanitizeSwanctlValue for parity with the
-		// local_ts / remote_ts belt below and the id / PSK belts above:
-		// these are UNQUOTED list slots, so an embedded control
-		// character — a newline in particular — would otherwise inject an
-		// arbitrary `key = value` line (downgrade `version`, flip
-		// `aggressive`, add `also`/`children`) into the connection block.
-		// sanitizeSwanctlValue collapses the newline to a space, keeping
-		// the whole value on one line so a tampered address renders inert
-		// instead of live. It touches nothing in a legitimate address
-		// (letters, digits, `.`, `:`, `,`, `%` are all preserved), so a
-		// valid single/comma-list/IPv6 endpoint is byte-identical. The
-		// commit-time gate (validateIPsecEndpointsStrict) rejects such a
-		// value; this render belt is the by-construction backstop for a
-		// path that reaches render without local commit (HA peer-sync,
-		// direct IPsecConfig construction, a config persisted before the
-		// fix). Unquoted, so NO escapeSwanctlQuoted — that belt is for the
-		// quoted id / cert / secret slots only (#6469).
-		if localAddr != "" {
-			fmt.Fprintf(&b, "    local_addrs = %s\n", sanitizeSwanctlValue(localAddr))
+		// local_addrs / remote_addrs: sanitized like before (#6469) — an
+		// embedded newline must not inject a connection-level directive.
+		if gc.localAddr != "" {
+			fmt.Fprintf(&b, "    local_addrs = %s\n", sanitizeSwanctlValue(gc.localAddr))
 		}
-		if remoteAddr != "" {
-			fmt.Fprintf(&b, "    remote_addrs = %s\n", sanitizeSwanctlValue(remoteAddr))
+		if gc.remoteAddr != "" {
+			fmt.Fprintf(&b, "    remote_addrs = %s\n", sanitizeSwanctlValue(gc.remoteAddr))
 		}
-
-		// NAT traversal
 		if gw != nil {
 			switch gw.NATTraversal {
 			case "disable":
 				b.WriteString("    encap = no\n")
 			case "force":
-				// `forceencaps` is the legacy ipsec.conf/starter
-				// keyword, not a swanctl setting. `encap = yes` is
-				// the swanctl-native force mechanism on supported
-				// strongSwan releases (#10474).
 				b.WriteString("    encap = yes\n")
 			default:
-				// "enable" or empty = strongSwan default (auto-detect NAT)
 				if gw.NoNATTraversal {
 					b.WriteString("    encap = no\n")
 				}
 			}
 		}
-
-		if dpd.Delay > 0 {
-			fmt.Fprintf(&b, "    dpd_delay = %ds\n", dpd.Delay)
+		if gc.dpdDelay > 0 {
+			fmt.Fprintf(&b, "    dpd_delay = %ds\n", gc.dpdDelay)
 		}
-		if dpd.Timeout > 0 {
-			fmt.Fprintf(&b, "    dpd_timeout = %ds\n", dpd.Timeout)
+		if gc.dpdTimeout > 0 {
+			fmt.Fprintf(&b, "    dpd_timeout = %ds\n", gc.dpdTimeout)
 		}
-
-		// Local auth section
 		b.WriteString("    local {\n")
-		fmt.Fprintf(&b, "      auth = %s\n", authMethod)
+		fmt.Fprintf(&b, "      auth = %s\n", gc.authMethod)
 		if gw != nil && gw.LocalCertificate != "" {
 			fmt.Fprintf(&b, "      certs = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(gw.LocalCertificate)))
 		}
 		if gw != nil && gw.LocalIDValue != "" {
-			// Quote + escape the identity: a distinguished-name id with
-			// spaces/commas (id = CN=fw, O=acme) is mis-parsed when
-			// emitted unquoted, and swanctl accepts a quoted value for
-			// every identity type (@fqdn, IP, DN) (#2126).
 			fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(formatIdentity(gw.LocalIDType, gw.LocalIDValue))))
 		}
 		b.WriteString("    }\n")
-
-		// Remote auth section. The expected remote identity is the explicit
-		// remote-identity when set, else the `dynamic hostname` identity
-		// (#14590): a dynamic-IP peer is matched by the FQDN identity it
-		// presents, rendered fqdn-typed as @FQDN.
 		b.WriteString("    remote {\n")
-		fmt.Fprintf(&b, "      auth = %s\n", authMethod)
+		fmt.Fprintf(&b, "      auth = %s\n", gc.authMethod)
 		if gw != nil && gw.RemoteIDValue != "" {
 			fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(formatIdentity(gw.RemoteIDType, gw.RemoteIDValue))))
 		} else if gw != nil && gw.DynamicHostname != "" {
 			fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(formatIdentity("hostname", gw.DynamicHostname))))
 		}
 		b.WriteString("    }\n")
-
-		if ikeProposals != "" {
-			// Sanitize the IKE proposal list for the same reason as the
-			// child-SA esp_proposals below and the local_ts/remote_ts belt:
-			// buildIKEProposal / buildIKEProposalFromIKE append
-			// prop.EncryptionAlg / prop.AuthAlg VERBATIM on the unknown-
-			// algorithm fall-through (normalizeAuthAlg's default branch returns
-			// the collapsed token unchanged; normalizeEncAlg's generic gcm strip
-			// only removes `-cbc`/`-`), so a control character in a peer-synced
-			// or directly-constructed proposal survives into this UNQUOTED list
-			// slot and an embedded newline would inject a connection-level
-			// swanctl directive. sanitize-only, NOT escapeSwanctlQuoted (this is
-			// an unquoted list slot like local_ts/remote_ts): a proposal token is
-			// alnum / `-` / `,`, all preserved by sanitizeSwanctlValue, so a
-			// legitimate proposal or comma-list renders byte-identical (#6469).
-			fmt.Fprintf(&b, "    proposals = %s\n", sanitizeSwanctlValue(ikeProposals))
+		if gc.ikeProposals != "" {
+			fmt.Fprintf(&b, "    proposals = %s\n", sanitizeSwanctlValue(gc.ikeProposals))
 		}
-		// #9919 F-163: emit rekey_time WITHOUT rand_time. strongSwan's
-		// default rand_time (= over_time = 10% of rekey_time) jitters the
-		// rekey so co-timed tunnels (fleet boot, mass commit, HA failover)
-		// do not rekey together; emitting `rand_time = 0s` removed that
-		// jitter with no recorded rationale. Junos has no rand_time knob,
-		// so omission (strongSwan's default) is the faithful render.
-		// Keep direct or pre-fix configs bounded like compiled proposals.
-		ikeLifetime = clampIPsecLifetimeSeconds(ikeLifetime)
-		if ikeLifetime > 0 {
-			fmt.Fprintf(&b, "    rekey_time = %ds\n", ikeLifetime)
+		// #9919 F-163: rekey_time without rand_time (strongSwan default jitter).
+		if lt := clampIPsecLifetimeSeconds(gc.ikeLifetime); lt > 0 {
+			fmt.Fprintf(&b, "    rekey_time = %ds\n", lt)
 		}
-
-		// #7165: `start_action` is a CHILD setting in swanctl.conf, not a
-		// connection setting. It used to be emitted here as well as in the
-		// child below, and strongSwan rejects the connection outright:
-		//
-		//   loading connection 'vpn-a' failed: unknown option: start_action,
-		//   config discarded
-		//   loaded 0 of 1 connections, 1 failed to load
-		//
-		// "config discarded" is the whole connection, not the one line — so
-		// every VPN configured with `establish-tunnels immediately` produced a
-		// config that strongSwan refused in its entirety, and IPsec did not come
-		// up at all. The child-level emit below is the correct one and is
-		// sufficient on its own; nothing here replaces it.
-		//
-		// This survived because nothing ever LOADED the generated config: the
-		// renderer's tests assert on the emitted text, and text assertions
-		// cannot know which keys strongSwan accepts. Found by #7165 item 2,
-		// whose entire subject was the absence of that proof.
-
-		// Compute XFRM interface ID from bind-interface name
-		ifID := xfrmiIfID(vpn.BindInterface)
-
 		fmt.Fprintf(&b, "    children {\n")
-		for _, child := range children {
+		for _, child := range gc.children {
 			fmt.Fprintf(&b, "      %s {\n", sanitizeSwanctlValue(child.Name))
-			// local_ts / remote_ts carry the traffic-selector prefixes
-			// (`traffic-selector local-ip/remote-ip`, or the
-			// local-identity/remote-identity fallback). The shared shape
-			// predicate omits malformed values before they reach charon;
-			// sanitizeSwanctlValue remains the final line-injection belt.
-			// Keep it here as defense in depth for every rendered value.
 			if child.LocalTS != "" {
 				fmt.Fprintf(&b, "        local_ts = %s\n", sanitizeSwanctlValue(child.LocalTS))
 			}
 			if child.RemoteTS != "" {
 				fmt.Fprintf(&b, "        remote_ts = %s\n", sanitizeSwanctlValue(child.RemoteTS))
 			}
-			// esp_proposals sits INSIDE the children{ <child> { } } block —
-			// the same block whose local_ts/remote_ts belt above cites an
-			// injected `updown = /tmp/x.sh` executed by charon as ROOT.
-			// buildESPProposal appends prop.EncryptionAlg / prop.AuthAlg
-			// VERBATIM on the unknown-algorithm fall-through, so a control
-			// character in a peer-synced or directly-constructed ESP proposal
-			// survives; an embedded newline here injects a child-SA directive
-			// (updown → root exec, or an esp_proposals/mode/mark_* crypto
-			// rewrite) — a strictly worse vector than the endpoint one on the
-			// identical validation-bypassed threat model. sanitize-only,
-			// unquoted list slot; a legitimate proposal / comma-list renders
-			// byte-identical (#6469).
-			fmt.Fprintf(&b, "        esp_proposals = %s\n", sanitizeSwanctlValue(espProposals))
-			// swanctl's child-SA lifetime is one rekey_time for the whole
-			// comma-joined proposal list. resolveESPSettings rejects divergent
-			// lifetimes among renderable proposals before this single emission.
-			if espLifetime > 0 {
-				fmt.Fprintf(&b, "        rekey_time = %ds\n", clampIPsecLifetimeSeconds(espLifetime))
+			fmt.Fprintf(&b, "        esp_proposals = %s\n", sanitizeSwanctlValue(child.ESPProposals))
+			if child.ESPLifetime > 0 {
+				fmt.Fprintf(&b, "        rekey_time = %ds\n", clampIPsecLifetimeSeconds(child.ESPLifetime))
 			}
-			// Junos df-bit → strongSwan copy_df (outer IP-header DF handling;
-			// the DF bit lives in the outer encapsulating IP header, not ESP).
-			// strongSwan copy_df has two states: yes (default) copies the inner
-			// DF bit to the outer header; no forces the outer DF bit to 0
-			// (XFRM_STATE_NOPMTUDISC), which allows the encapsulated packet to be
-			// fragmented. There is no "force outer DF=1" — copy_df=yes is the
-			// closest DF-preserving / PMTUD-enabling behavior.
-			//   copy  → copy_df = yes   (outer DF = inner DF)
-			//   set   → copy_df = yes   (preserve DF / keep PMTUD; can't force 1)
-			//   clear → copy_df = no    (outer DF = 0, allow fragmentation)
-			// #4015: previously "set" emitted copy_df=no (which CLEARS DF) and
-			// "clear" fell through to the default copy_df=yes, i.e. set/clear were
-			// inverted — a "df-bit clear" blackholed oversized packets via PMTUD.
-			switch vpn.DFBit {
+			switch child.DFBit {
 			case "copy", "set":
 				fmt.Fprintf(&b, "        copy_df = yes\n")
 			case "clear":
 				fmt.Fprintf(&b, "        copy_df = no\n")
 			}
-			// A dynamic responder has no fixed remote endpoint; neither an
-			// explicit start nor a traffic-triggered trap may initiate.
-			// #14592: an absent establish-tunnels statement is the Junos
-			// default, on-traffic ("IKE is activated only when data traffic
-			// flows"), so "" renders the same trap as explicit on-traffic.
-			// Rendering nothing left two default-configured peers with no
-			// initiator at all: no SA, no error, green commit.
-			if gw == nil || !responderOnlyGateway(gw) {
-				switch vpn.EstablishTunnels {
-				case "immediately":
-					fmt.Fprintf(&b, "        start_action = start\n")
-				case "on-traffic", "":
-					fmt.Fprintf(&b, "        start_action = trap\n")
-				}
+			if child.StartAction != "" {
+				fmt.Fprintf(&b, "        start_action = %s\n", child.StartAction)
 			}
-			if dpd.Action != "" {
-				fmt.Fprintf(&b, "        dpd_action = %s\n", dpd.Action)
+			if child.DPDAction != "" {
+				fmt.Fprintf(&b, "        dpd_action = %s\n", child.DPDAction)
 			}
-			if ifID > 0 {
-				fmt.Fprintf(&b, "        if_id_in = %d\n", ifID)
-				fmt.Fprintf(&b, "        if_id_out = %d\n", ifID)
+			if child.IfID > 0 {
+				fmt.Fprintf(&b, "        if_id_in = %d\n", child.IfID)
+				fmt.Fprintf(&b, "        if_id_out = %d\n", child.IfID)
 			}
 			fmt.Fprintf(&b, "      }\n")
 		}
 		fmt.Fprintf(&b, "    }\n")
-
 		fmt.Fprintf(&b, "  }\n")
 	}
 	b.WriteString("}\n\n")
 
-	// Secrets — resolve PSK from IKE policy chain
+	// Secrets — one ike-<connection> block per connection (#15024), holding
+	// every member VPN's distinct PSK comma-joined (swanctl `secret` is a
+	// comma-separated list) and scoped by the representative member's peer
+	// selectors (#3952). Identical PSKs collapse to one value.
 	b.WriteString("secrets {\n")
-	for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
-		if skipped[name] {
-			// No connection was written for this VPN (#2074) — emit no
-			// orphan ike-<name> secret.
+	for _, key := range groupOrder {
+		gc := groups[key]
+		if len(gc.pskValues) == 0 {
 			continue
 		}
-		vpn := ipsecCfg.VPNs[name]
-		decoded, hasPSK := decodedPSKs[name]
-		if !hasPSK {
-			continue
-		}
-		// Resolve the remote endpoint + gateway once: they feed the id
-		// selectors below. This VPN survived every render skip check.
-		remoteAddr, _, gw, _ := resolveRemoteAddr(ipsecCfg, vpn)
-		fmt.Fprintf(&b, "  ike-%s {\n", sanitizeSwanctlValue(name))
-		// sanitizeSwanctlValue strips control chars (#1798); the
-		// quote/backslash escaper (#2126) makes a PSK containing a
-		// double-quote or backslash render as a balanced, swanctl-
-		// parseable quoted string instead of corrupting the block.
-		fmt.Fprintf(&b, "    secret = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(decoded)))
-		// Scope this PSK to its peer with id selectors (#3952). A PSK
-		// secret with NO id matches ANY peer, so with two or more PSK
-		// VPNs strongSwan can bind the wrong secret to a peer and IKE
-		// authentication fails. Each id-<n> narrows the secret to a
-		// peer whose IKE identity matches — the configured remote-id,
-		// else the remote gateway address (plus the local-id when set).
+		remoteAddr, _, gw, _ := resolveRemoteAddr(ipsecCfg, gc.vpn)
+		fmt.Fprintf(&b, "  ike-%s {\n", gc.name)
+		fmt.Fprintf(&b, "    secret = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(strings.Join(gc.pskValues, ","))))
 		for i, sel := range pskIDSelectors(remoteAddr, gw) {
 			fmt.Fprintf(&b, "    id-%d = \"%s\"\n", i+1,
 				escapeSwanctlQuoted(sanitizeSwanctlValue(sel)))
@@ -680,21 +636,52 @@ func resolveRemoteAddr(ipsecCfg *config.IPsecConfig, vpn *config.IPsecVPN) (
 	return "", localAddr, nil, false
 }
 
+// ConnectionNamesForVPN maps each VPN in ipsecCfg to the swanctl connection
+// name its surviving render contributes to (#15024): the gateway name for a
+// named-gateway group, else the VPN name. VPNs the renderer skips are absent.
+// It renders once (production fail-closed via PrepareConfig) — callers must
+// not re-derive the grouping.
+func ConnectionNamesForVPN(cfg *config.Config) map[string]string {
+	if cfg == nil {
+		return nil
+	}
+	ipsecCfg := PrepareConfig(cfg)
+	_, rendered, err := (&Manager{}).renderConfig(ipsecCfg)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]string)
+	for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
+		vpn := ipsecCfg.VPNs[name]
+		_, _, gw, ok := resolveRemoteAddr(ipsecCfg, vpn)
+		if !ok {
+			continue
+		}
+		key := gatewayKeyFor(ipsecCfg, name, vpn, gw)
+		if rendered[key] {
+			out[name] = key
+		}
+	}
+	return out
+}
+
 // RenderedVPNSet returns the VPN names that the production swanctl render
-// loads. It prepares external-interface addresses from the full config and
+// loads (#15024: keyed by VPN, not connection — grouped members all count).
+// It prepares external-interface addresses from the full config and
 // uses the production fail-closed render, so selector fences exclude VPNs
 // whose local address cannot be resolved just as strongSwan does.
 // Returns nil when config/render fails; callers must treat nil as UNKNOWN and
 // keep the current fail-closed behavior (emit for shape-valid VPNs).
 func RenderedVPNSet(cfg *config.Config) map[string]bool {
-	if cfg == nil {
+	m := ConnectionNamesForVPN(cfg)
+	if m == nil {
 		return nil
 	}
-	_, rendered, err := (&Manager{}).renderConfig(PrepareConfig(cfg))
-	if err != nil {
-		return nil
+	out := make(map[string]bool, len(m))
+	for vpn := range m {
+		out[vpn] = true
 	}
-	return rendered
+	return out
 }
 
 func sortedVPNNames(vpns map[string]*config.IPsecVPN) []string {
@@ -853,7 +840,9 @@ type ChildSelector = childSelector
 
 // EffectiveTrafficSelectors exposes the renderer's selector expansion to
 // snapshot producers so the dataplane fence cannot drift from rendered
-// bind-less selectors.
+// bind-less selectors. A VPN's selectors are grouped under its gateway
+// connection since #15024, but child names are unchanged (<vpn>-<selector>,
+// or <vpn> for a sole child), so this expansion is grouping-independent.
 func EffectiveTrafficSelectors(connName string, vpn *config.IPsecVPN) []ChildSelector {
 	return effectiveTrafficSelectors(connName, vpn)
 }
@@ -913,15 +902,23 @@ func BuildSANameIndex(ipsecCfg *config.IPsecConfig) SANameIndex {
 	if ipsecCfg == nil || len(ipsecCfg.VPNs) == 0 {
 		return nil
 	}
+	// Render the WHOLE config once (#15024): grouping is a whole-config
+	// property — a per-VPN render cannot know its connection is shared.
+	_, rendered, _ := (&Manager{}).renderConfigForConfigOnly(ipsecCfg)
 	idx := make(SANameIndex)
 	for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
 		vpn := ipsecCfg.VPNs[name]
 		one := *ipsecCfg
 		one.VPNs = map[string]*config.IPsecVPN{name: vpn}
-		if _, rendered, err := (&Manager{}).renderConfigForConfigOnly(&one); err == nil && len(rendered) == 0 {
+		if _, r, err := (&Manager{}).renderConfigForConfigOnly(&one); err == nil && len(r) == 0 {
 			continue
 		}
-		idx.add(sanitizeSwanctlValue(name), name)
+		_, _, gw, _ := resolveRemoteAddr(ipsecCfg, vpn)
+		conn := gatewayKeyFor(ipsecCfg, name, vpn, gw)
+		if len(rendered) > 0 && !rendered[conn] {
+			continue
+		}
+		idx.add(conn, name)
 		for _, child := range effectiveTrafficSelectors(name, vpn) {
 			idx.add(sanitizeSwanctlValue(child.Name), name)
 		}
