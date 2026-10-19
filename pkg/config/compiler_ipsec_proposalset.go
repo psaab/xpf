@@ -80,9 +80,12 @@ var ikeProposalSets = map[string][]ikeProposalSetSpec{
 }
 
 // espProposalSets maps a Junos IPsec proposal-set keyword to its member ESP
-// proposals. The legacy sets carry no PFS (group at policy level in Junos is
-// separate); the suiteb sets carry their Suite-B ECP group as the proposal's
-// PFS group so buildESPProposal renders the ecp<N> term.
+// proposals. Junos defines `standard` as the group-2 PFS set (g2-esp-3des /
+// g2-esp-aes128), so its members carry DH group 2 on the proposal and
+// buildESPProposal renders the -modp1024 term; without it a Junos peer's
+// PFS child rekey is refused NO_PROPOSAL_CHOSEN (#15026). `basic` and
+// `compatible` carry no PFS; the suiteb sets carry their Suite-B ECP group
+// as the proposal's PFS group so buildESPProposal renders the ecp<N> term.
 var espProposalSets = map[string][]espProposalSetSpec{
 	"basic": {
 		{"des-cbc", "hmac-sha1-96", 0},
@@ -95,8 +98,8 @@ var espProposalSets = map[string][]espProposalSetSpec{
 		{"des-cbc", "hmac-md5-96", 0},
 	},
 	"standard": {
-		{"3des-cbc", "hmac-sha1-96", 0},
-		{"aes-128-cbc", "hmac-sha1-96", 0},
+		{"3des-cbc", "hmac-sha1-96", 2},
+		{"aes-128-cbc", "hmac-sha1-96", 2},
 	},
 	"suiteb-gcm-128": {
 		{"aes-128-gcm", "", 19},
