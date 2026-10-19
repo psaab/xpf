@@ -1332,6 +1332,16 @@ now also scans the collapsed tail of a supported match leaf
 so a real bracketed list like `match application [ junos-http junos-https ]` is
 NOT over-rejected — only a known unsupported match-leaf keyword masquerading as
 an application value is. Same strict-reject / lenient-warn split as #3113.
+An operand under `*-address-excluded` is likewise dropped content (#15200):
+`source-address-excluded` / `destination-address-excluded` are boolean
+modifiers (the exclusion set is the sibling address leaf), so
+`match source-address-excluded <x>` carried `<x>` on `Keys[1:]` or as a child
+that `compilePolicy` ignored while setting the flag. The same
+`policyUnsupportedMatchLeafFindings` walk now flags every such operand
+(hierarchical, flat-set, and block spellings, zone-pair and global): strict
+rejects naming the leaf and operand, tolerant warns and poisons via
+`LenientContentDropped`. A bare modifier with no operand stays valid.
+
 
 **Unsupported security-policy `then permit` children are rejected at commit
 (#3114, interim):** Junos SRX `then permit` accepts action modifiers that turn a
