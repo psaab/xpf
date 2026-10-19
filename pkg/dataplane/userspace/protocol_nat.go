@@ -375,9 +375,9 @@ type NAT64RuleSnapshot struct {
 	// `block-size`).
 	DeterministicBlockSize uint16 `json:"deterministic_block_size,omitempty"`
 	// DeterministicBlocksPerIP is how many blocks each external pool address
-	// carries, computed against the FIXED NAT64 translated-port range
-	// (1024..65535, nat64PortLow/High) so block boundaries align with the Rust
-	// NAT64 allocator (which ignores the source pool's own port range).
+	// carries, computed against the pool's translated-port range
+	// (PortLow..PortHigh below, defaulting to 1024..65535) so block
+	// boundaries align with the Rust NAT64 allocator (#15283).
 	DeterministicBlocksPerIP uint16 `json:"deterministic_blocks_per_ip,omitempty"`
 	// DeterministicHostPrefixLen is the IPv6 subscriber-prefix length: 32 or 64.
 	// It selects the 32-bit subscriber-index word (offset 4 for /32, offset 8 for
@@ -388,6 +388,17 @@ type NAT64RuleSnapshot struct {
 	// derives the subscriber word from and reverses against. Empty => not a
 	// deterministic NAPT64 pool.
 	DeterministicHostBaseV6 string `json:"deterministic_host_base_v6,omitempty"`
+	// #15283: the referenced source pool's `port range`, carried so the Rust
+	// NAT64 allocator honours the operator's translated-port window instead
+	// of the fixed 1024..65535 default. The Go builder stamps it from
+	// config.SourceNATPoolPortRange: a pool with no explicit range defaults
+	// to 1024/65535 (byte-identical to the pre-#15283 allocator), so
+	// PortLow==0 on the wire means "no pool range supplied" and an old
+	// helper ignores these fields and keeps the fixed range — which is the
+	// defect, so the v55 protocol bump fences the pairing. The same range
+	// drives the mode-2 deterministic block math.
+	PortLow  uint16 `json:"port_low,omitempty"`
+	PortHigh uint16 `json:"port_high,omitempty"`
 	// #14962: the referenced source pool's fail-closed verdict, stamped from
 	// the same SSOT the SNAT snapshot uses
 	// (config.SourceNATPoolUnusableReason) and by the interface-SNAT overlap

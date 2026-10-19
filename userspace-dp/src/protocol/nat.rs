@@ -366,9 +366,9 @@ pub(crate) struct NAT64RuleSnapshot {
     #[serde(rename = "deterministic_block_size", default)]
     pub deterministic_block_size: u16,
     /// #4559: blocks each external pool address carries, computed by the Go
-    /// builder against the fixed NAT64 translated-port range so block boundaries
-    /// align with the allocator. Meaningful only when `deterministic_block_size
-    /// != 0`.
+    /// builder against the pool's translated-port range (port_low..port_high
+    /// below) so block boundaries align with the allocator. Meaningful only
+    /// when `deterministic_block_size != 0`.
     #[serde(rename = "deterministic_blocks_per_ip", default)]
     pub deterministic_blocks_per_ip: u16,
     /// #4559: IPv6 subscriber-prefix length (32 or 64). Selects the 32-bit
@@ -380,6 +380,16 @@ pub(crate) struct NAT64RuleSnapshot {
     /// derives the subscriber word from and reverses against.
     #[serde(rename = "deterministic_host_base_v6", default)]
     pub deterministic_host_base_v6: String,
+    /// #15283: the referenced source pool's `port range`. Zero (absent on
+    /// the wire, e.g. a rule with no usable pool) means the fixed NAT64
+    /// default 1024..=65535; a narrowed pool range is honoured by the
+    /// per-prefix PortAllocator and by the mode-2 block math. Rides the
+    /// v55 protocol bump: a v54 helper ignoring it keeps the fixed range,
+    /// which is the defect, so exact-equality versioning fences it.
+    #[serde(rename = "port_low", default)]
+    pub port_low: u16,
+    #[serde(rename = "port_high", default)]
+    pub port_high: u16,
     /// #14962: the Go-stamped fail-closed verdict for the referenced source
     /// pool (config.SourceNATPoolUnusableReason, or the interface-SNAT
     /// overlap quarantine). When true the loader installs the prefix with

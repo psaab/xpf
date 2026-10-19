@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "6c94c42c0c4da149d31ffe1395268a95fff828593be42ad2e5427a4eafd651c6"
+	snapshotShapeGolden8892 = "1da12ca3d9fae28056f48314244e876129b35355a5b9a6e4e466247adb278573"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -554,7 +554,11 @@ const (
 	// unit_scoped; the golden below moves.
 	// Version 54 (#15155) adds InterfaceAddressSnapshot.primary; the
 	// golden below moves.
-	snapshotShapeVersion8892 = 54
+	// Version 55 (#15283) adds NAT64RuleSnapshot port_low/port_high. It is
+	// a field of an EXISTING walked struct (unlike the NAT64 fields added
+	// at v51 before NAT64RuleSnapshot joined the walk), so the golden
+	// below moves.
+	snapshotShapeVersion8892 = 55
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

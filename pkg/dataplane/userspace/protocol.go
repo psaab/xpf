@@ -422,7 +422,11 @@ const (
 	// the operator's designated address on a multi-address unit. A v53
 	// helper ignores it and picks the lexicographically-first address
 	// as primary_v4/v6 — the undesignated source interface SNAT used.
-	ProtocolVersion = 54
+	// v54 -> v55 (#15283): NAT64RuleSnapshot carries port_low/port_high,
+	// the referenced source pool's `port range`. A v54 helper ignores
+	// them and keeps the fixed 1024..65535 NAT64 allocator, silently
+	// dropping the operator's translated-port window — the defect.
+	ProtocolVersion = 55
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

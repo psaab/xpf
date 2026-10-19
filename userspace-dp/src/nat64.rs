@@ -193,12 +193,32 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// #4381: NAT64 translated-port allocation range. RFC 6146 does not mandate a
-/// specific range; the ephemeral 1024..=65535 window (matching the pool-mode
-/// SNAT default) maximizes the distinct-flow capacity behind a single pool
-/// address while staying clear of the well-known ports.
+/// #4381: NAT64 DEFAULT translated-port allocation range. RFC 6146 does not
+/// mandate a specific range; the ephemeral 1024..=65535 window (matching the
+/// pool-mode SNAT default) maximizes the distinct-flow capacity behind a
+/// single pool address while staying clear of the well-known ports. A
+/// source pool referenced by a NAT64 rule-set may narrow it with its own
+/// `port range` (#15283, `NAT64RuleSnapshot.port_low/port_high`); the
+/// allocator then honours that window. The constants remain the fallback
+/// when the snapshot carries no range (port_low == 0).
 const NAT64_PORT_LOW: u16 = 1024;
 const NAT64_PORT_HIGH: u16 = 65535;
+
+/// #15283: the effective translated-port range for one NAT64 rule: the
+/// snapshot's pool `port range` when it carries a valid one, else the fixed
+/// default. A hand-crafted or peer-synced snapshot can carry a zero,
+/// reversed, or otherwise invalid pair (the Go builder never stamps one on
+/// a usable pool — it marks the pool unusable instead); falling back to the
+/// default keeps the allocator total rather than building a zero-range
+/// allocator that would refuse every flow for a reason the operator never
+/// configured.
+pub(crate) fn nat64_effective_port_range(snap: &NAT64RuleSnapshot) -> (u16, u16) {
+    if snap.port_low != 0 && snap.port_high != 0 && snap.port_low <= snap.port_high {
+        (snap.port_low, snap.port_high)
+    } else {
+        (NAT64_PORT_LOW, NAT64_PORT_HIGH)
+    }
+}
 
 fn nat64_pool_index(pool: &[Ipv4Addr]) -> Arc<FxHashMap<Ipv4Addr, usize>> {
     let mut index = FxHashMap::default();
@@ -500,9 +520,10 @@ fn parse_pool_v4(s: &str) -> Option<Ipv4Addr> {
 /// WHY NAT64 NEEDS ITS OWN. #6812 caps `PortAllocator::new` at the SNAT apply
 /// boundary, but there are exactly two production construction sites and the
 /// other one is here — gated by nothing. A NAT64 prefix costs
-/// `pool_v4.len() * (NAT64_PORT_HIGH - NAT64_PORT_LOW + 1)` = `len * 64512`
-/// occupancy bits, and unlike SNAT the port range is a FIXED CONSTANT, so every
-/// pool address costs the MAXIMUM — there is no narrow-range case to soften it.
+/// `pool_v4.len() * (effective port range)` occupancy bits; since #15283 the
+/// range is the pool's own `port range` (defaulting to the fixed
+/// 1024..=65535, i.e. `len * 64512` — the maximum), and the charge follows
+/// the honoured range via `nat64_prefix_charge_for_range`.
 /// The ~1.48 GiB scenario #6812 exists to prevent was reachable through this
 /// path with #6812 fully in place.
 ///
@@ -517,7 +538,7 @@ pub(crate) struct Nat64AggregateBudget {
     pub(crate) max_prefixes: u64,
     /// Max SUM of every prefix's pool address count.
     pub(crate) max_addresses: u64,
-    /// Max SUM of (addresses x fixed port range) = occupancy bitmap SLOTS.
+    /// Max SUM of (addresses x effective port range) = occupancy bitmap SLOTS.
     pub(crate) max_port_capacity: u64,
 }
 
@@ -570,20 +591,20 @@ impl Nat64AggregateUse {
 /// genuinely allocates the bitmap is a test that gets deleted for being slow,
 /// and a deleted guard is no guard (#6982).
 pub(crate) fn nat64_prefix_charge(pool_len: usize) -> Nat64AggregateUse {
+    nat64_prefix_charge_for_range(pool_len, NAT64_PORT_LOW, NAT64_PORT_HIGH)
+}
+
+/// #15283: the charge one prefix with the given effective port range costs.
+/// `nat64_prefix_charge` is the fixed-default-range special case.
+pub(crate) fn nat64_prefix_charge_for_range(
+    pool_len: usize,
+    port_low: u16,
+    port_high: u16,
+) -> Nat64AggregateUse {
     Nat64AggregateUse {
         prefixes: 1,
         addresses: pool_len as u64,
-        // ONE formula for "port slots this allocator materialises", shared with
-        // `PortAllocator::new`'s own capacity arithmetic — the same helper the
-        // SNAT charge uses (#6812). Open-coding `len * 64512` here would be a
-        // second copy of the allocation formula, and a charge that drifts from
-        // what is actually allocated is a budget that does not bind. Pinned by
-        // `nat64_6982_charge_uses_the_allocators_own_capacity_formula`.
-        port_capacity: crate::nat::allocator_capacity(
-            pool_len,
-            NAT64_PORT_LOW,
-            NAT64_PORT_HIGH,
-        ) as u64,
+        port_capacity: crate::nat::allocator_capacity(pool_len, port_low, port_high) as u64,
     }
 }
 
@@ -803,8 +824,9 @@ impl Nat64State {
         if let Some(prev) = previous {
             for snap in snaps {
                 if let Some((pb, pool, det)) = nat64_rule_identity(snap) {
-                    if prev.reuse_allocator(&pb, &pool, det).is_some() {
-                        used = used.saturating_with(nat64_prefix_charge(pool.len()));
+                    let (lo, hi) = nat64_effective_port_range(snap);
+                    if prev.reuse_allocator(&pb, &pool, det, (lo, hi)).is_some() {
+                        used = used.saturating_with(nat64_prefix_charge_for_range(pool.len(), lo, hi));
                     }
                 }
             }
@@ -1012,13 +1034,18 @@ impl Nat64State {
             // `reused.is_none()` arm then charges/refuses it). A geometry
             // change falls through to a fresh allocator; the #6765 reseed
             // below is skipped for deterministic prefixes (see there).
+            // #15283: reuse additionally requires the same port range.
             let new_deterministic_v6 = build_deterministic_v6(snap, pool_v4.len());
-            let reused = previous
-                .and_then(|prev| prev.reuse_allocator(&prefix_bytes, &pool_v4, new_deterministic_v6));
+            let (eff_low, eff_high) = nat64_effective_port_range(snap);
+            let reused = previous.and_then(|prev| {
+                prev.reuse_allocator(&prefix_bytes, &pool_v4, new_deterministic_v6, (eff_low, eff_high))
+            });
             let mut over_budget = false;
             if reused.is_none() {
-                match used.admitted_with(nat64_prefix_charge(pool_v4.len()), &NAT64_AGGREGATE_BUDGET)
-                {
+                match used.admitted_with(
+                    nat64_prefix_charge_for_range(pool_v4.len(), eff_low, eff_high),
+                    &NAT64_AGGREGATE_BUDGET,
+                ) {
                     Some(next) => used = next,
                     None => {
                         over_budget = true;
@@ -1046,8 +1073,7 @@ impl Nat64State {
             }
             let port_allocator = reused
                 .unwrap_or_else(|| {
-                    let fresh =
-                        PortAllocator::new(pool_v4.len(), NAT64_PORT_LOW, NAT64_PORT_HIGH);
+                    let fresh = PortAllocator::new(pool_v4.len(), eff_low, eff_high);
                     // #6765: the comment above is right that stale reservations
                     // must not be replayed against a DIFFERENT pool — the
                     // counters and the occupancy bitmap are pool-position
@@ -1215,11 +1241,19 @@ impl Nat64State {
     /// on an unchanged pool is a reuse miss and the stale BIB leases in the
     /// old allocator are abandoned with it. A no-op re-apply derives the
     /// identical params and still reuses, preserving EIM.
+    ///
+    /// #15283: the port range must ALSO match: an allocator built for a
+    /// different port window has its occupancy bitmap and block boundaries
+    /// indexed by that window, so reusing it under a changed `port range`
+    /// would mint outside the new window. A changed range falls through to
+    /// a fresh allocator, whose #6765 retained-address reseed drops
+    /// out-of-range reservations.
     fn reuse_allocator(
         &self,
         prefix_bytes: &[u8; 12],
         pool_v4: &[Ipv4Addr],
         deterministic_v6: Option<DeterministicV6>,
+        range: (u16, u16),
     ) -> Option<PortAllocator> {
         self.prefixes
             .iter()
@@ -1227,6 +1261,8 @@ impl Nat64State {
                 p.prefix_bytes == *prefix_bytes
                     && p.pool_v4.as_slice() == pool_v4
                     && p.deterministic_v6 == deterministic_v6
+                    && p.port_allocator.port_low == range.0
+                    && p.port_allocator.port_high == range.1
             })
             .map(|p| p.port_allocator.clone())
     }

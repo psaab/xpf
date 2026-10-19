@@ -160,10 +160,10 @@ type ReverseResult struct {
 	AppliedGeneration uint64
 }
 
-// nat64PortLow / nat64PortHigh mirror the FIXED NAT64 translated-port range
-// the Rust per-prefix allocator uses (userspace-dp/src/nat64.rs). Mode-2
-// block boundaries are computed against THIS range, not the pool's own
-// `port` range (which the NAT64 allocator ignores).
+// nat64PortLow / nat64PortHigh are the DEFAULT NAT64 translated-port range.
+// A NAT64-referenced pool's own `port range` narrows it (#15283): mode-2
+// block boundaries are computed against the pool's range (via
+// config.SourceNATPoolPortRange), matching the dataplane wire builder.
 const (
 	nat64PortLow  = 1024
 	nat64PortHigh = 65535
@@ -460,14 +460,19 @@ func poolParams(pool *config.NATPool, nat64Referenced bool) (detParams, *LookupE
 		return p, nil
 
 	case ModeV6:
-		// Mode 2: IPv6 subscriber (NAPT64). Fixed NAT64 port range; the
-		// subscriber count is pool-bounded (len(pool) * blocks_per_ip),
-		// matching the Rust Nat64Prefix build.
+		// Mode 2: IPv6 subscriber (NAPT64). The pool's own `port range`
+		// (#15283, default 1024-65535); the subscriber count is
+		// pool-bounded (len(pool) * blocks_per_ip), matching the Rust
+		// Nat64Prefix build.
 		if !nat64Referenced {
 			return p, lerrf(ErrCodeNotDeterministic,
 				"pool is not referenced by a NAT64 rule; translations are round-robin, not deterministic")
 		}
-		const portRange = nat64PortHigh - nat64PortLow + 1
+		portLow, portHigh, ok := poolPortRangeV4(pool)
+		if !ok {
+			return p, lerrf(ErrCodeNotDeterministic, "pool has an invalid or unset port range")
+		}
+		portRange := int(portHigh) - int(portLow) + 1
 		if det.BlockSize > portRange {
 			return p, lerrf(ErrCodeNotDeterministic, "block-size %d exceeds the NAT64 port range (%d ports)", det.BlockSize, portRange)
 		}
@@ -481,7 +486,7 @@ func poolParams(pool *config.NATPool, nat64Referenced bool) (detParams, *LookupE
 		}
 		p.mode = ModeV6
 		p.blocksPerIP = uint16(bpi)
-		p.portLow = nat64PortLow
+		p.portLow = portLow
 		copy(p.hostBaseV6[:], base16)
 		p.wordOffset = 4
 		if ones == 64 {

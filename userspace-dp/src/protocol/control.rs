@@ -268,7 +268,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // operator's designated address on a multi-address unit. A v53 helper
 // ignores it and picks the lexicographically-first address as
 // primary_v4/v6 — the undesignated source interface SNAT used.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 54;
+// v54 -> v55 (#15283): NAT64RuleSnapshot carries port_low/port_high, the
+// referenced source pool's `port range`; a v54 helper ignores them and
+// keeps the fixed 1024..65535 NAT64 allocator — the defect.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 55;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
