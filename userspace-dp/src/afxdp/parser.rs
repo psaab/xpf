@@ -48,9 +48,12 @@ const NDP_OPT_TARGET_LL: u8 = 2;
 const NDP_REQUIRED_HOP_LIMIT: u8 = 255;
 /// #9893: NA learns refused because the IPv6 chain carried a Fragment header
 /// (RFC 6980 §5 MUST-discards). Bumped only for NA-shaped frames (proto 58 +
-/// type 136 confirmed) so ordinary fragmented transit does not pollute the
-/// series — this probe runs per-packet. Exported through the coordinator
-/// status reader as `xpf_userspace_ndp_na_frag_refused_total`.
+/// type 136 confirmed — i.e. the L4 header is readable on the first-fragment
+/// path) so ordinary fragmented transit does not pollute the series — this
+/// probe runs per-packet. A non-first fragment (`NonFirstFragment`) carries
+/// no readable L4/NA type and is refused WITHOUT counting (#15242).
+/// Exported through the coordinator status reader as
+/// `xpf_userspace_ndp_na_frag_refused_total`.
 pub(crate) static NDP_NA_FRAG_REFUSED: AtomicU64 = AtomicU64::new(0);
 /// #9893: NA learns refused because the IPv6 source was not a valid on-link
 /// unicast (unspecified/loopback/multicast). Same NA-shape gating and status
@@ -274,22 +277,17 @@ pub(super) fn parse_ndp_neighbor_advert(raw_frame: &[u8]) -> Option<NdpNeighborA
     let walk = super::frame::walk_ipv6_ext_chain(l3_slice, 0);
     let (rel_l4, protocol) = match walk.outcome {
         super::frame::ExtChainOutcome::L4(offset, proto) => (offset, proto),
-        // #14116: stopped at a readable non-first Fragment header. Its
+        // #15242: stopped at a readable non-first Fragment header. Its
         // payload is not an L4 header, so this cannot be confirmed as an
-        // NA — but a chain that sighted a Fragment header is exactly the
-        // RFC 6980 fragmented-ND shape the gate below counts, and the
-        // Fragment header's Next Header naming ICMPv6 is readable without
-        // touching payload. Count the refusal once, as the gate would.
-        super::frame::ExtChainOutcome::NonFirstFragment => {
-            let names_icmpv6 = walk
-                .fragment
-                .and_then(|fragment| fragment.bytes)
-                .is_some_and(|bytes| bytes[0] == NEXT_HEADER_ICMPV6);
-            if names_icmpv6 {
-                NDP_NA_FRAG_REFUSED.fetch_add(1, Ordering::Relaxed);
-            }
-            return None;
-        }
+        // NA (no NA type byte is readable in a non-first fragment).
+        // Counting it into `NDP_NA_FRAG_REFUSED` merely because the
+        // Fragment header's Next Header names ICMPv6 (58) mis-attributes
+        // ordinary fragmented ICMPv6 transit (e.g. large ping) to the
+        // RFC 6980 NA-attack series. Refuse (learn nothing) but do NOT
+        // count — exactly like Truncated/OverLimit below. Only the
+        // first-fragment path below, where the NA shape (proto 58 +
+        // type 136) is confirmed, may bump the counter.
+        super::frame::ExtChainOutcome::NonFirstFragment => return None,
         // Truncated/OverLimit/NoNextHeader: fail closed WITHOUT counting —
         // the shape is unconfirmable as NA (accepted residual: uncounted
         // but refused, never learned).
