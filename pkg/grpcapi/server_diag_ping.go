@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sync/atomic"
 	"time"
 
 	"github.com/psaab/xpf/pkg/diagcmd"
@@ -46,6 +47,92 @@ var diagLimiter = diagcmd.DefaultLimiter
 // subprocesses. It defaults to streamDiagCmd.
 var streamDiag = streamDiagCmd
 
+// diagStreamSendTimeout bounds a SINGLE Ping/Traceroute downstream write.
+// grpc-go Send has no socket deadline, so a client that stops draining
+// (fills the 64KiB stream window and never reads) parks the scan goroutine
+// in Send; streamDiagCmd's exec timeout does not fire because that goroutine
+// is not the waiter, and the parent context stays live while the connection
+// is open — so without this bound one stuck Ping held its diagLimiter slot
+// (and child/scanner/waiter goroutines) indefinitely, and four stuck clients
+// permanently exhausted the process-wide MaxConcurrentDiagnostics budget
+// (4) shared with REST (#14980, D35-01). This mirrors the per-write bound
+// already used by MonitorInterface/MonitorPacketDrop (#9891/#7632): the
+// Send runs in a worker, the caller selects over completion, stream-context
+// cancellation, and this timeout, and on sever the limiter slot TRANSFERS
+// to the worker, which releases it when Send finally unblocks. Handler
+// return drives grpc-go WriteStatus -> finishStream -> stream-context
+// cancel -> flow-control quota release, so the worker exits promptly after
+// the handler returns rather than lingering until the client drains (see
+// the transfer note on monitorInterfaceLimiter). Per-write, not elapsed:
+// a healthy stream emitting ping lines ~1/s is untouched; only a peer that
+// has stopped draining for a full window is cut. A package var so a test
+// can compress it without a real slow reader.
+var diagStreamSendTimeout = 30 * time.Second
+
+// sendDiagFrame sends one Ping/Traceroute output line with the slow-consumer
+// bound above. It generalises sendMonitorInterfaceFrame (#9891) for the
+// diag streams: resp is sent via the supplied send closure (Ping and
+// Traceroute have distinct response types), and release is the diagLimiter
+// release for this RPC.
+//
+// Returns (err, transferred). On the fast path and on a Send error before
+// any sever, transferred is false and the CALLER still owns release (its
+// defer fires). On timeout or stream-context cancellation where Send may
+// still be parked, transferred is true: the worker owns release and the
+// caller MUST NOT release (it disarms its defer) — Limiter.release is
+// idempotent via sync.Once, but releasing here while the worker is still
+// parked would free the slot early and admit a fifth diagnostic beyond the
+// cap, recreating the #14150 premature-release hole. Timeout ownership is
+// TERMINAL (mirrors sendMonitorInterfaceFrame): once the timer wins this
+// never returns success, even if Send completed in the boundary window —
+// the worker may have taken the release via the flag, so continuing
+// without the slot would defeat the cap. In that boundary case Send is
+// done (nothing parked), so releasing here is safe (idempotent) and
+// leak-free if the worker's Load raced ahead of the Store.
+func sendDiagFrame(ctx context.Context, send func() error, release func()) (error, bool) {
+	select {
+	case <-ctx.Done():
+		return ctx.Err(), false
+	default:
+	}
+	var severed atomic.Bool
+	done := make(chan error, 1)
+	go func() {
+		err := send()
+		done <- err
+		if severed.Load() {
+			release()
+		}
+	}()
+	timer := time.NewTimer(diagStreamSendTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err, false
+	case <-ctx.Done():
+		severed.Store(true)
+		select {
+		case <-done:
+			release()
+			return ctx.Err(), false
+		default:
+			return ctx.Err(), true
+		}
+	case <-timer.C:
+		severed.Store(true)
+		select {
+		case err := <-done:
+			release()
+			if err != nil {
+				return err, true
+			}
+			return status.Error(codes.DeadlineExceeded, "diagnostic client is not reading; handler severed"), true
+		default:
+			return status.Error(codes.DeadlineExceeded, "diagnostic client is not reading; handler severed"), true
+		}
+	}
+}
+
 func (s *Server) Ping(req *pb.PingRequest, stream grpc.ServerStreamingServer[pb.PingResponse]) error {
 	if req.Target == "" {
 		return status.Error(codes.InvalidArgument, "target required")
@@ -65,12 +152,28 @@ func (s *Server) Ping(req *pb.PingRequest, stream grpc.ServerStreamingServer[pb.
 		return status.Error(codes.ResourceExhausted,
 			"diagnostic concurrency limit reached; retry shortly")
 	}
-	defer release()
+	// Release on EVERY non-transferred path via defer (success, exec
+	// error, ctx timeout/cancel). If a Send severs on the slow-consumer
+	// bound, the slot transfers to the Send worker (see sendDiagFrame)
+	// and this defer is disarmed so the slot stays held until that Send
+	// actually unblocks (#14980).
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
 
 	cmd := buildPingArgv(req, count)
 
 	return streamDiag(stream.Context(), pingExecTimeout(count), cmd, func(line string) error {
-		return stream.Send(&pb.PingResponse{Output: line})
+		err, xfer := sendDiagFrame(stream.Context(), func() error {
+			return stream.Send(&pb.PingResponse{Output: line})
+		}, release)
+		if xfer {
+			transferred = true
+		}
+		return err
 	})
 }
 
@@ -110,18 +213,30 @@ func (s *Server) Traceroute(req *pb.TracerouteRequest, stream grpc.ServerStreami
 	}
 
 	// Aggregate concurrency bound (#5057): see Ping. One shared limiter
-	// covers ping AND traceroute across gRPC and REST.
+	// covers ping AND traceroute across gRPC and REST. As in Ping, a
+	// severed Send transfers the slot to its worker (#14980).
 	release, err := diagLimiter.Acquire()
 	if err != nil {
 		return status.Error(codes.ResourceExhausted,
 			"diagnostic concurrency limit reached; retry shortly")
 	}
-	defer release()
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
 
 	cmd := buildTracerouteArgv(req)
 
 	return streamDiag(stream.Context(), diagTracerouteTimeout, cmd, func(line string) error {
-		return stream.Send(&pb.TracerouteResponse{Output: line})
+		err, xfer := sendDiagFrame(stream.Context(), func() error {
+			return stream.Send(&pb.TracerouteResponse{Output: line})
+		}, release)
+		if xfer {
+			transferred = true
+		}
+		return err
 	})
 }
 
