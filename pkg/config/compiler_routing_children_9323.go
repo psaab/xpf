@@ -161,6 +161,21 @@ func validateRoutingInstanceChildTokensAST(nodes []*Node, lenient bool) ([]strin
 				}
 				return warnings, fmt.Errorf("%s", msg)
 			}
+			// #15778: canonical Junos places instance-import/export under
+			// routing-options inside the instance, not directly under the
+			// instance. The direct-child loop above never sees that form,
+			// so it accepted inert route-leak policy that #11314 rejects
+			// in its direct spelling. Scan the instance routing-options
+			// properties (braced, flat and elided/packed alike) and apply
+			// the same strict/lenient split.
+			for _, kw := range routingInstanceNestedImportExport15778(inst) {
+				msg := routingInstanceUnknownKeywordMessage9323(instName, kw, declared)
+				if lenient {
+					warnings = append(warnings, msg)
+					continue
+				}
+				return warnings, fmt.Errorf("%s", msg)
+			}
 			properties := routingInstancePropertyNodes9323(inst)
 			for _, prop := range properties {
 				if prop == nil || len(prop.Keys) == 0 {
@@ -324,4 +339,63 @@ func routingInstanceUnknownKeywordMessage9323(instName, tok string, declared []s
 		"nowhere. There is no supported way to scope NAT or a firewall "+
 		"filter to a routing instance; configure it globally instead (#9323)",
 		instName, tok, strings.Join(declared, ", "))
+}
+
+// routingInstanceNestedImportExport15778 returns instance-import/export
+// keywords nested under the instance's routing-options, in authored
+// order and de-duplicated. It covers the braced child shape
+// (routing-options { instance-import …; }), the flat chain (same AST),
+// the elided one-liner (routing-options instance-import … as a packed
+// property node whose Keys carry the tail), and the packed-instance
+// shape ([VRF-A routing-options instance-import …]) where the whole
+// tail lives on the instance node itself. A quoted/bracketed token
+// spelling the keyword is an authored value (#9635), not a statement.
+func routingInstanceNestedImportExport15778(inst *Node) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(kw string) {
+		if (kw == "instance-import" || kw == "instance-export") && !seen[kw] {
+			seen[kw] = true
+			out = append(out, kw)
+		}
+	}
+	scanTail := func(keys []string, quoted, bracketed []bool, from int) {
+		mask := authoredValueMask9635(quoted, bracketed, len(keys))
+		for i := from; i < len(keys); i++ {
+			if mask != nil && mask[i] {
+				continue
+			}
+			add(keys[i])
+		}
+	}
+	for _, prop := range routingInstancePropertyNodes9323(inst) {
+		if prop == nil || len(prop.Keys) == 0 {
+			continue
+		}
+		if prop.Keys[0] != "routing-options" {
+			continue
+		}
+		for _, ch := range prop.Children {
+			if ch != nil && len(ch.Keys) > 0 {
+				scanTail(ch.Keys, ch.KeysQuoted, ch.KeysBracketed, 0)
+			}
+		}
+		// Elided: routing-options instance-import policy-a
+		if len(prop.Keys) > 1 {
+			scanTail(prop.Keys, prop.KeysQuoted, prop.KeysBracketed, 1)
+		}
+	}
+	// Packed-instance raw tail on the instance node itself, for direct
+	// callers with an un-normalized tree: [VRF-A routing-options
+	// instance-import policy-a].
+	if len(inst.Keys) >= 3 && inst.Keys[1] == "routing-options" {
+		mask := authoredValueMask9635(inst.KeysQuoted, inst.KeysBracketed, len(inst.Keys))
+		for i := 2; i < len(inst.Keys); i++ {
+			if mask != nil && mask[i] {
+				continue
+			}
+			add(inst.Keys[i])
+		}
+	}
+	return out
 }
