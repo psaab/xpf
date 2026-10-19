@@ -249,6 +249,19 @@ fn src_b() -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11))
 }
 
+/// #15248 (A67-01): scale a test aggregate so the per-source fair share
+/// (aggregate / 65, clamped >= 1) is exactly `share_rate`/`share_burst`.
+/// The per-zone/per-reason harness cells below exercise source-tier and
+/// small-aggregate behaviour at a burst the #9901 100-token flat slot used
+/// to provide directly; scaling the aggregate keeps those cells' source
+/// budgets identical while the zone cap grows around them.
+fn agg_for_share(share_rate: u64, share_burst: u64) -> (u64, u64) {
+    (
+        share_rate * SRC_FAIR_SHARE_DIVISOR,
+        share_burst * SRC_FAIR_SHARE_DIVISOR,
+    )
+}
+
 /// #5856 HEADLINE fail-on-revert: a TTL=1/hop-limit=1 flood that drains ZONE
 /// A's per-zone Time-Exceeded bucket must NOT prevent ZONE B from generating
 /// its Time-Exceeded reply. Before #5856 TE used a SINGLE process-global
@@ -266,21 +279,30 @@ fn time_exceeded_per_zone_flood_does_not_starve_other_zone_5856() {
     let zone_b = 9_002u16;
     let t0 = 3_100_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone_a, zone_b]);
-    // Drain zone A at a frozen instant (burst = 4).
+    // Drain zone A at a frozen instant. #15248: burst 260 => fair share
+    // exactly 4, so one source can drive the 4 the cell asserts.
     for i in 0..4 {
         assert!(
-            allow_generated_error_zoned_at(&forwarding, reason, zone_a, Some(src_a()), t0, 1000, 4),
+            allow_generated_error_zoned_at(
+                &forwarding,
+                reason,
+                zone_a,
+                Some(src_a()),
+                t0,
+                1000,
+                260
+            ),
             "zone A Time-Exceeded token {i} within burst must pass"
         );
     }
     assert!(
-        !allow_generated_error_zoned_at(&forwarding, reason, zone_a, Some(src_a()), t0, 1000, 4),
+        !allow_generated_error_zoned_at(&forwarding, reason, zone_a, Some(src_a()), t0, 1000, 260),
         "zone A Time-Exceeded bucket must be drained after its burst"
     );
     // Zone B, under no load, still generates its Time-Exceeded at the SAME
     // instant — per-zone isolation.
     assert!(
-        allow_generated_error_zoned_at(&forwarding, reason, zone_b, Some(src_b()), t0, 1000, 4),
+        allow_generated_error_zoned_at(&forwarding, reason, zone_b, Some(src_b()), t0, 1000, 260),
         "zone B must NOT be starved by zone A's Time-Exceeded flood (per-zone isolation)"
     );
 }
@@ -299,16 +321,24 @@ fn packet_too_big_per_zone_flood_does_not_starve_other_zone_5856() {
     let forwarding = forwarding_with_all_zone_buckets(&[zone_a, zone_b]);
     for i in 0..4 {
         assert!(
-            allow_generated_error_zoned_at(&forwarding, reason, zone_a, Some(src_a()), t0, 1000, 4),
+            allow_generated_error_zoned_at(
+                &forwarding,
+                reason,
+                zone_a,
+                Some(src_a()),
+                t0,
+                1000,
+                260
+            ),
             "zone A Packet-Too-Big token {i} within burst must pass"
         );
     }
     assert!(
-        !allow_generated_error_zoned_at(&forwarding, reason, zone_a, Some(src_a()), t0, 1000, 4),
+        !allow_generated_error_zoned_at(&forwarding, reason, zone_a, Some(src_a()), t0, 1000, 260),
         "zone A Packet-Too-Big bucket must be drained after its burst"
     );
     assert!(
-        allow_generated_error_zoned_at(&forwarding, reason, zone_b, Some(src_b()), t0, 1000, 4),
+        allow_generated_error_zoned_at(&forwarding, reason, zone_b, Some(src_b()), t0, 1000, 260),
         "zone B must NOT be starved by zone A's oversized-DF flood (per-zone isolation)"
     );
 }
@@ -331,8 +361,9 @@ fn generated_error_unknown_and_unzoned_share_fallback_bucket_5856() {
         // Empty map: every zone id resolves to the fallback.
         let forwarding = ForwardingState::default();
         let unknown = 55_555u16;
-        // burst = 2 on the shared fallback: an unknown-id and an unzoned (id 0)
-        // error each take one token; the third is denied.
+        // burst = 130 on the shared fallback (#15248: overflow fair share
+        // exactly 2): an unknown-id and an unzoned (id 0) error each take
+        // one token; the third is denied.
         assert!(allow_generated_error_zoned_at(
             &forwarding,
             reason,
@@ -340,7 +371,7 @@ fn generated_error_unknown_and_unzoned_share_fallback_bucket_5856() {
             None,
             t0,
             1000,
-            2
+            130
         ));
         assert!(allow_generated_error_zoned_at(
             &forwarding,
@@ -349,10 +380,10 @@ fn generated_error_unknown_and_unzoned_share_fallback_bucket_5856() {
             None,
             t0,
             1000,
-            2
+            130
         ));
         assert!(
-            !allow_generated_error_zoned_at(&forwarding, reason, unknown, None, t0, 1000, 2),
+            !allow_generated_error_zoned_at(&forwarding, reason, unknown, None, t0, 1000, 130),
             "unknown / unzoned {reason:?} errors share and are bounded by the fallback bucket"
         );
     }
@@ -512,20 +543,20 @@ fn reject_per_zone_flood_does_not_starve_other_zone_3618() {
     let zone_b = 9_002u16;
     let t0 = 3_000_000_000u64;
     let forwarding = forwarding_with_reject_zones(&[zone_a, zone_b]);
-    // Drain zone A at a frozen instant (burst = 4).
+    // Drain zone A at a frozen instant. #15248: burst 260 => fair share 4.
     for i in 0..4 {
         assert!(
-            allow_generated_reject_at(&forwarding, zone_a, Some(src_a()), t0, 1000, 4),
+            allow_generated_reject_at(&forwarding, zone_a, Some(src_a()), t0, 1000, 260),
             "zone A token {i} within burst must pass"
         );
     }
     assert!(
-        !allow_generated_reject_at(&forwarding, zone_a, Some(src_a()), t0, 1000, 4),
+        !allow_generated_reject_at(&forwarding, zone_a, Some(src_a()), t0, 1000, 260),
         "zone A bucket must be drained after its burst"
     );
     // Zone B, under no load, still generates its reject at the SAME instant.
     assert!(
-        allow_generated_reject_at(&forwarding, zone_b, Some(src_b()), t0, 1000, 4),
+        allow_generated_reject_at(&forwarding, zone_b, Some(src_b()), t0, 1000, 260),
         "zone B must NOT be starved by zone A's flood (per-zone isolation)"
     );
 }
@@ -544,14 +575,33 @@ fn reject_unknown_and_unzoned_share_fallback_bucket_3618() {
     // Empty map: every zone id resolves to the fallback.
     let forwarding = ForwardingState::default();
     let unknown = 55_555u16;
-    // burst = 2 on the shared fallback: an unknown-id reject and an
-    // unzoned (id 0) reject each take one token; the third is denied.
-    assert!(allow_generated_reject_at(&forwarding, unknown, None, t0, 1000, 2));
-    assert!(allow_generated_reject_at(&forwarding, 0, None, t0, 1000, 2));
-    assert!(
-        !allow_generated_reject_at(&forwarding, unknown, None, t0, 1000, 2),
-        "unknown / unzoned rejects share and are bounded by the fallback bucket"
-    );
+    // burst = 130 on the shared fallback (#15248: overflow fair share 2):
+    // an unknown-id reject and an unzoned (id 0) reject each take one
+    // token; the third is denied.
+    assert!(allow_generated_reject_at(
+        &forwarding,
+        unknown,
+        None,
+        t0,
+        1000,
+        130
+    ));
+    assert!(allow_generated_reject_at(
+        &forwarding,
+        0,
+        None,
+        t0,
+        1000,
+        130
+    ));
+    assert!(!allow_generated_reject_at(
+        &forwarding,
+        unknown,
+        None,
+        t0,
+        1000,
+        130
+    ),);
 }
 
 /// #3618 metric-preservation fail-on-revert: the aggregate
@@ -571,13 +621,41 @@ fn reject_aggregate_counter_sums_across_zones_3618() {
     let k1 = 3u64;
     let k2 = 5u64;
     // burst = 1 per zone: one pass, then K denies each.
-    assert!(allow_generated_reject_at(&forwarding, zone_a, Some(src_a()), t0, 1000, 1));
+    assert!(allow_generated_reject_at(
+        &forwarding,
+        zone_a,
+        Some(src_a()),
+        t0,
+        1000,
+        1
+    ));
     for _ in 0..k1 {
-        assert!(!allow_generated_reject_at(&forwarding, zone_a, Some(src_a()), t0, 1000, 1));
+        assert!(!allow_generated_reject_at(
+            &forwarding,
+            zone_a,
+            Some(src_a()),
+            t0,
+            1000,
+            1
+        ));
     }
-    assert!(allow_generated_reject_at(&forwarding, zone_b, Some(src_b()), t0, 1000, 1));
+    assert!(allow_generated_reject_at(
+        &forwarding,
+        zone_b,
+        Some(src_b()),
+        t0,
+        1000,
+        1
+    ));
     for _ in 0..k2 {
-        assert!(!allow_generated_reject_at(&forwarding, zone_b, Some(src_b()), t0, 1000, 1));
+        assert!(!allow_generated_reject_at(
+            &forwarding,
+            zone_b,
+            Some(src_b()),
+            t0,
+            1000,
+            1
+        ));
     }
     assert_eq!(
         rate_limited_count(GeneratedErrorReason::Reject),
@@ -597,8 +675,22 @@ fn reject_per_zone_isolated_from_other_reasons_3618() {
     let zone_a = 700u16;
     let forwarding = forwarding_with_reject_zones(&[zone_a]);
     // Drain zone A's Reject bucket (burst = 1).
-    assert!(allow_generated_reject_at(&forwarding, zone_a, Some(src_a()), t0, 1000, 1));
-    assert!(!allow_generated_reject_at(&forwarding, zone_a, Some(src_a()), t0, 1000, 1));
+    assert!(allow_generated_reject_at(
+        &forwarding,
+        zone_a,
+        Some(src_a()),
+        t0,
+        1000,
+        1
+    ));
+    assert!(!allow_generated_reject_at(
+        &forwarding,
+        zone_a,
+        Some(src_a()),
+        t0,
+        1000,
+        1
+    ));
     // TimeExceeded (a different reason, global bucket) is untouched.
     assert!(
         allow_generated_error_at(GeneratedErrorReason::TimeExceeded, t0, 1000, 1),
@@ -684,12 +776,12 @@ fn low_bit_neighbors_separate_under_most_seeds_9901() {
 
 /// #9901 (F-074) HEADLINE fail-on-revert: one source flooding a zone must NOT
 /// starve another source in the SAME zone. A attempts 1000 errors at a frozen
-/// instant against a zone aggregate of burst 1000: exactly its 100-token
-/// source budget passes, the other 900 are source-denied (and counted), and
-/// B — idle until now — still passes. Before F-074 the zone held a single
-/// bucket, so A's 1000 attempts drained the whole zone budget and B was
-/// denied → RED. Severing the source tier (all to the aggregate) reds this
-/// the same way.
+/// instant: exactly its per-source budget passes, the rest are source-denied
+/// (and counted), and B — idle until now — still passes. Before F-074 the zone
+/// held a single bucket, so A's attempts drained the whole zone budget and B
+/// was denied → RED. Severing the source tier (all to the aggregate) reds
+/// this the same way. #15248 (A67-01): the aggregate is scaled via
+/// `agg_for_share` so the source fair share is the historical 100 tokens.
 #[test]
 fn per_source_flood_does_not_starve_other_source_9901() {
     let _g = global_bucket_test_lock();
@@ -700,9 +792,10 @@ fn per_source_flood_does_not_starve_other_source_9901() {
     let forwarding = forwarding_with_reject_zones(&[zone]);
     let pair = distinct_slot_sources(2);
     let (a, b) = (pair[0], pair[1]);
+    let (rate, burst) = agg_for_share(1000, 100);
     let mut passed = 0u32;
     for _ in 0..1000 {
-        if allow_generated_reject_at(&forwarding, zone, Some(a), t0, 1000, 1000) {
+        if allow_generated_reject_at(&forwarding, zone, Some(a), t0, rate, burst) {
             passed += 1;
         }
     }
@@ -716,7 +809,7 @@ fn per_source_flood_does_not_starve_other_source_9901() {
         "the 900 source-denied errors must still be counted (metric unchanged)"
     );
     assert!(
-        allow_generated_reject_at(&forwarding, zone, Some(b), t0, 1000, 1000),
+        allow_generated_reject_at(&forwarding, zone, Some(b), t0, rate, burst),
         "source B must NOT be starved by source A's flood (per-source fairness)"
     );
 }
@@ -765,10 +858,11 @@ fn colliding_sources_share_one_slot_budget_9901() {
         ZoneLimiter::slot_for_test(&b),
         "test setup: the pair must collide"
     );
+    let (rate, burst) = agg_for_share(1000, 100);
     let mut passed = 0u32;
     for i in 0..200 {
         let src = if i % 2 == 0 { a } else { b };
-        if allow_generated_error_zoned_at(&forwarding, reason, zone, Some(src), t0, 1000, 1000) {
+        if allow_generated_error_zoned_at(&forwarding, reason, zone, Some(src), t0, rate, burst) {
             passed += 1;
         }
     }
@@ -793,18 +887,19 @@ fn fallback_limiter_keeps_per_source_fairness_9901() {
     let unknown = 55_555u16;
     let pair = distinct_slot_sources(2);
     let (a, b) = (pair[0], pair[1]);
+    let (rate, burst) = agg_for_share(1000, 100);
     for i in 0..100 {
         assert!(
-            allow_generated_reject_at(&forwarding, unknown, Some(a), t0, 1000, 1000),
+            allow_generated_reject_at(&forwarding, unknown, Some(a), t0, rate, burst),
             "fallback source token {i} within budget must pass"
         );
     }
     assert!(
-        !allow_generated_reject_at(&forwarding, unknown, Some(a), t0, 1000, 1000),
+        !allow_generated_reject_at(&forwarding, unknown, Some(a), t0, rate, burst),
         "source A must be source-denied past its 100-token budget"
     );
     assert!(
-        allow_generated_reject_at(&forwarding, unknown, Some(b), t0, 1000, 1000),
+        allow_generated_reject_at(&forwarding, unknown, Some(b), t0, rate, burst),
         "source B must NOT be starved by source A on the fallback limiter"
     );
 }
@@ -827,6 +922,7 @@ fn source_deny_consumes_no_aggregate_token_9901() {
         .expect("per-zone limiter");
     let pair = distinct_slot_sources(2);
     let (a, b) = (pair[0], pair[1]);
+    let (rate, burst) = agg_for_share(1000, 100);
     for _ in 0..100 {
         assert!(allow_generated_error_zoned_at(
             &forwarding,
@@ -834,8 +930,8 @@ fn source_deny_consumes_no_aggregate_token_9901() {
             zone,
             Some(a),
             t0,
-            1000,
-            1000
+            rate,
+            burst
         ));
     }
     let arrival_after_budget = limiter.aggregate_arrival_ns();
@@ -850,8 +946,8 @@ fn source_deny_consumes_no_aggregate_token_9901() {
             zone,
             Some(a),
             t0,
-            1000,
-            1000
+            rate,
+            burst
         ));
     }
     assert_eq!(
@@ -865,12 +961,278 @@ fn source_deny_consumes_no_aggregate_token_9901() {
         zone,
         Some(b),
         t0,
-        1000,
-        1000
+        rate,
+        burst
     ));
+    // #15248: the expectation derives from the scaled aggregate rate the
+    // gate was driven with, not the production constant.
+    let interval_ns = (1_000_000_000u64 + rate - 1) / rate;
     assert_eq!(
         limiter.aggregate_arrival_ns(),
-        arrival_after_budget + 1_000_000,
-        "B's admission advances the aggregate by exactly one 1000/s interval"
+        arrival_after_budget + interval_ns,
+        "B's admission advances the aggregate by exactly one interval"
+    );
+}
+
+/// #15248 (A67-01): probe the first `n` addresses of one documentation /64 —
+/// the attacker host's own prefix, one IID apart. Literals per RFC 3849.
+/// Before the fix `addr_fold` folded the full /128, so every IID got its own
+/// slot and its own 100-token budget; after the fix all of them key ONE
+/// /64 source and share that source's budget.
+fn rotation_sources_v6(n: u16) -> Vec<IpAddr> {
+    (1..=n)
+        .map(|iid| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x67, 0, 0, 0, 0, iid)))
+        .collect()
+}
+
+/// #15248 (A67-01): probe `n` DISTINCT-slot IPv4 documentation sources —
+/// genuinely distinct hosts, each entitled to its own per-source budget.
+/// Seed-adaptive via `slot_for_test`, like `distinct_slot_sources`.
+fn distinct_slot_ipv4_sources(n: usize) -> Vec<IpAddr> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for i in 0..10_000u32 {
+        let addr = IpAddr::V4(Ipv4Addr::new(
+            203,
+            0,
+            ((i / 250) % 250) as u8,
+            (i % 250 + 1) as u8,
+        ));
+        if seen.insert(ZoneLimiter::slot_for_test(&addr)) {
+            out.push(addr);
+            if out.len() == n {
+                return out;
+            }
+        }
+    }
+    panic!("could not find {n} distinct-slot IPv4 sources in 10000 probes");
+}
+
+/// #15248 (A67-01) HEADLINE fail-on-revert, IPv6 /64 cell: ONE host rotating
+/// IIDs inside its own /64 must not drain the zone aggregate and starve an
+/// unrelated victim source. The attacker cycles 16 IIDs at 10/s each over
+/// 10s (1600 attempts at the production 1000/s aggregate) while the victim
+/// asks for one reply at the end. Before the fix each IID owned a full
+/// 100/s slot, so the rotation admitted ~1008 (each IID's burst plus the
+/// aggregate's remainder) and the victim was aggregate-denied → RED. After
+/// the fix the whole /64 is ONE source at the fair share (15/s + burst
+/// 15); the GCRA admits exactly 163 over the window (15-token burst plus
+/// refill at the rounded-up 66.7ms interval) and the victim passes.
+#[test]
+fn rotating_v6_iids_in_one_64_do_not_starve_victim_15248() {
+    let _g = global_bucket_test_lock();
+    let reason = GeneratedErrorReason::TimeExceeded;
+    let zone = 15_248u16;
+    let t0 = 15_000_000_000u64;
+    let forwarding = forwarding_with_all_zone_buckets(&[zone]);
+    let attackers = rotation_sources_v6(16);
+    let victim = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x99, 0, 0, 0, 0, 1));
+    assert!(
+        attackers
+            .iter()
+            .all(|a| ZoneLimiter::slot_for_test(a) == ZoneLimiter::slot_for_test(&attackers[0])),
+        "test setup: every IID of one /64 must key the same source slot"
+    );
+    let mut admitted = 0u32;
+    // 100 steps of 100ms: one attempt per IID per step = 10/s per IID.
+    for step in 0..100u64 {
+        let now = t0 + step * 100_000_000;
+        for atk in &attackers {
+            if allow_generated_error_zoned_at(
+                &forwarding,
+                reason,
+                zone,
+                Some(*atk),
+                now,
+                DEFAULT_RATE_PER_SEC,
+                DEFAULT_BURST,
+            ) {
+                admitted += 1;
+            }
+        }
+    }
+    assert_eq!(
+        admitted, 163,
+        "one /64 source is capped at its fair share (burst 15 + 10s at 15/s \
+         GCRA = 163 admitted), not one budget per IID"
+    );
+    let t_end = t0 + 10_000_000_000;
+    assert!(
+        allow_generated_error_zoned_at(
+            &forwarding,
+            reason,
+            zone,
+            Some(victim),
+            t_end,
+            DEFAULT_RATE_PER_SEC,
+            DEFAULT_BURST
+        ),
+        "victim in another /64 must NOT be starved by one host rotating IIDs in its own /64"
+    );
+}
+
+/// #15248 (A67-01) HEADLINE fail-on-revert, IPv4 cell: 16 DISTINCT IPv4
+/// sources in the same zone must not MORE than fair-share the aggregate
+/// between them and starve a 17th victim. Each attacker drives 10/s for
+/// 10s (100 attempts — within the OLD 100-token per-source burst, so the
+/// pre-fix gate admitted all 1600 and drained the 1000-token aggregate).
+/// After the fix each source's fair share is aggregate/64 = 15/s + burst
+/// 15, so 10/s still passes in full — fairness must not clip legitimate
+/// distinct sources — and the victim still passes. The sustained-starvation
+/// half of the cell is `victim_survives_sustained_distinct_floods_15248`.
+#[test]
+fn sixteen_distinct_ipv4_sources_do_not_starve_victim_15248() {
+    let _g = global_bucket_test_lock();
+    let reason = GeneratedErrorReason::Reject;
+    let zone = 15_249u16;
+    let t0 = 16_000_000_000u64;
+    let forwarding = forwarding_with_reject_zones(&[zone]);
+    let attackers = distinct_slot_ipv4_sources(16);
+    let victim = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 77));
+    let mut admitted = 0u32;
+    for step in 0..100u64 {
+        let now = t0 + step * 100_000_000;
+        for atk in &attackers {
+            if allow_generated_reject_at(
+                &forwarding,
+                zone,
+                Some(*atk),
+                now,
+                DEFAULT_RATE_PER_SEC,
+                DEFAULT_BURST,
+            ) {
+                admitted += 1;
+            }
+        }
+    }
+    assert_eq!(
+        admitted, 1600,
+        "16 distinct sources at 10/s each stay within their fair shares"
+    );
+    assert!(
+        allow_generated_reject_at(
+            &forwarding,
+            zone,
+            Some(victim),
+            t0 + 10_000_000_000,
+            DEFAULT_RATE_PER_SEC,
+            DEFAULT_BURST
+        ),
+        "a 17th distinct source must NOT be starved by 16 distinct flooders"
+    );
+}
+
+/// #15248 (A67-01) sustained-fairness pin: 16 distinct-slot sources each
+/// hammering at 100/s for 10s offer 16,000 replies against a 1000/s zone
+/// aggregate. Even though the aggregate is the binding cap for the zone as
+/// a whole (1000 burst + 1000/s = 11,000 admissions over the window), the
+/// flooders' combined admitted count must stay within that aggregate
+/// envelope and a late victim must still be admitted: once the flooders'
+/// per-slot fair-share budgets (15/s) are spent they are source-denied
+/// WITHOUT consuming the aggregate, preserving headroom the victim can
+/// spend. Before the fix the flooders' 100/s slots admitted the full
+/// offered 16,000-attempt drain up to the aggregate cap and the victim was
+/// aggregate-denied → RED.
+#[test]
+fn victim_survives_sustained_distinct_floods_15248() {
+    let _g = global_bucket_test_lock();
+    let reason = GeneratedErrorReason::PacketTooBig;
+    let zone = 15_250u16;
+    // Far-future epoch: sibling tests share this zone's limiter only via
+    // their own fresh ForwardingState, but the FALLBACK limiters are
+    // process-global — a far-future t0 keeps this cell's injected clock
+    // ahead of any sibling's real-clock TAT so GCRA never travels
+    // backwards into a spurious deny.
+    let t0 = 17_000_000_000_000u64;
+    let forwarding = forwarding_with_all_zone_buckets(&[zone]);
+    let attackers = distinct_slot_ipv4_sources(16);
+    let victim = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 99));
+    let mut admitted = 0u32;
+    // 1000 steps of 10ms: one attempt per attacker per step = 100/s each.
+    for step in 0..1000u64 {
+        let now = t0 + step * 10_000_000;
+        for atk in &attackers {
+            if allow_generated_error_zoned_at(
+                &forwarding,
+                reason,
+                zone,
+                Some(*atk),
+                now,
+                DEFAULT_RATE_PER_SEC,
+                DEFAULT_BURST,
+            ) {
+                admitted += 1;
+            }
+        }
+    }
+    assert!(
+        admitted <= 2700,
+        "16 flooders at their 15-token burst + 15/s fair shares admit ~2624 \
+         in 10s (GCRA interval rounding), never the 11000-token aggregate \
+         envelope (got {admitted})"
+    );
+    assert!(
+        allow_generated_error_zoned_at(
+            &forwarding,
+            reason,
+            zone,
+            Some(victim),
+            t0 + 10_000_000_000,
+            DEFAULT_RATE_PER_SEC,
+            DEFAULT_BURST
+        ),
+        "victim must still pass: source-denied flooders leave aggregate headroom"
+    );
+}
+
+/// #15248 (A67-01) /128 control: ONE IPv6 source keeps exactly its old
+/// entitlement — the per-source budget (now the aggregate/64 fair share)
+/// still admits a legitimate trickle burst and refill unchanged in shape:
+/// a single source at 10/s for 10s passes in full, and two different /64s
+/// keep independent budgets (the /64 keying must not widen into a coarser
+/// aggregation that couples unrelated networks).
+#[test]
+fn single_v6_source_and_distinct_64s_unchanged_15248() {
+    let _g = global_bucket_test_lock();
+    let reason = GeneratedErrorReason::TimeExceeded;
+    let zone = 15_251u16;
+    let t0 = 18_000_000_000u64;
+    let forwarding = forwarding_with_all_zone_buckets(&[zone]);
+    let a = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0xa, 0, 0, 0, 0, 1));
+    let b = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0xb, 0, 0, 0, 0, 1));
+    // A drives 100/s for 1s (100 attempts at 10ms spacing): beyond burst 15
+    // the fair share still refills 15/s, so exactly 15 + 15 pass.
+    let mut a_passed = 0u32;
+    for step in 0..100u64 {
+        let now = t0 + step * 10_000_000;
+        if allow_generated_error_zoned_at(
+            &forwarding,
+            reason,
+            zone,
+            Some(a),
+            now,
+            DEFAULT_RATE_PER_SEC,
+            DEFAULT_BURST,
+        ) {
+            a_passed += 1;
+        }
+    }
+    assert_eq!(
+        a_passed, 29,
+        "one source is bounded to its fair share: burst 15 + 1s at 15/s GCRA"
+    );
+    // B, in a different /64 and idle until now, passes immediately: /64
+    // aggregation did not couple it to A's spend.
+    assert!(
+        allow_generated_error_zoned_at(
+            &forwarding,
+            reason,
+            zone,
+            Some(b),
+            t0 + 1_000_000_000,
+            DEFAULT_RATE_PER_SEC,
+            DEFAULT_BURST
+        ),
+        "a source in a different /64 keeps its own budget (no over-aggregation)"
     );
 }

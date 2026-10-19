@@ -27,17 +27,48 @@ addressed to the trigger's spoofable source). The limiter is modelled on Linux's
 fixed cardinality, so there is no attacker-driven map growth.
 
 The `ZoneLimiter` is a per-source-fair hierarchy (#9901 F-074): a per-source
-tier (64 fixed slots, 100/s + burst 100 each, plus a same-budget overflow
-bucket for sourceless errors) in front of the zone aggregate (1000/s + burst
-1000). Each tier is a single-atomic-word GCRA (theoretical-arrival-time);
-refill and consume commit together in one CAS so concurrent workers can never
-double-credit or over-admit (#2955). Gate order is source-FIRST then
-aggregate: a source-deny consumes NOTHING shared, so one flooder cannot starve
-another source in the same zone. Default aggregate rate/burst are compile-time
-constants `DEFAULT_RATE_PER_SEC = DEFAULT_BURST = 1000` (mirroring Linux's
-`icmp_msgs_per_sec`); a zero rate disables the limiter. Slot collisions share
-the slot's sustained rate (tag hint-only, no takeover reset); cardinality is
-config-bounded (~1.5KB per zone limiter), never attacker-growable.
+tier (64 fixed slots, each the zone aggregate's fair share — aggregate/(64+1)
+= 15/s + burst 15 at the production 1000/1000 aggregate, #15248 A67-01 — plus
+a same-share overflow bucket for sourceless errors) in front of the zone
+aggregate (1000/s + burst 1000). Each tier is a single-atomic-word GCRA
+(theoretical-arrival-time); refill and consume commit together in one CAS so
+concurrent workers can never double-credit or over-admit (#2955). Gate order
+is source-FIRST then aggregate: a source-deny consumes NOTHING shared, so one
+flooder cannot starve another source in the same zone. Default aggregate
+rate/burst are compile-time constants `DEFAULT_RATE_PER_SEC =
+DEFAULT_BURST = 1000` (mirroring Linux's `icmp_msgs_per_sec`); a zero rate
+disables the limiter. Slot collisions share the slot's sustained rate (tag
+hint-only, no takeover reset); cardinality is config-bounded (~1.5KB per zone
+limiter), never attacker-growable.
+
+## #15248 (A67-01): fair-share slots and /64 source keying
+
+The original #9901 tier gave every slot a flat 100/s + burst 100, so the 64
+slots (plus overflow) could admit up to 6500/s into a 1000/s zone aggregate.
+Ten or more distinct sources therefore drained the aggregate and starved
+PTB / Time-Exceeded / reject replies for every other source in the zone —
+and one IPv6 host rotating IIDs inside its own /64 minted a fresh slot per
+/128, needing no coalition at all. Two changes close it, both inside
+`icmp_ratelimit.rs`:
+
+- **Fair-share budgets.** Each slot and the overflow bucket now enforce
+  `aggregate / 65` (rate and burst, each clamped to at least 1), computed
+  from whatever aggregate rate/burst the gate carries. The sum of all
+  per-source entitlements can never exceed the aggregate, so a saturated
+  source tier leaves the aggregate's headroom for sources that have not
+  spent their share; the aggregate still caps the zone as a whole.
+- **IPv6 keys on the /64.** `addr_fold` drops the host bits before folding
+  (the WireGuard #14639 aggregation), so IID rotation inside one /64 is
+  ONE source with ONE budget. Distinct /64s — and every IPv4 /32 — keep
+  independent budgets.
+
+Deliberate behaviour delta: a single legitimate source's burst is now the
+fair share (15 at the production aggregate) instead of 100. A real
+traceroute/PMTUD source emits a handful of generated errors per flow, far
+below 15/s sustained, so benign behaviour is unchanged; only a source
+trying to consume more than 1/65 of a zone's generated-reply budget is
+clipped earlier than before — which is exactly the fairness the tier
+exists to provide.
 
 ## #2472 → #3618 → #5856: why every reason is per-zone
 
@@ -220,3 +251,10 @@ unchanged.)
   its source token first (conservative: the source spent budget on a reply
   the zone could not emit); the alternative (peeking the aggregate without
   consuming) would race under concurrent workers for no operator benefit.
+- #15248 (A67-01): the per-source tier can no longer out-admit the zone
+  aggregate it fronts: each slot's budget is the aggregate's fair share
+  (aggregate/65), and IPv6 sources aggregate on the /64, so neither a
+  multi-source coalition nor one host rotating IIDs can drain the
+  aggregate and starve another source's PTB / Time-Exceeded / reject
+  replies. Source-tier denial still fails closed (reply dropped, counter
+  bumped) exactly as before.
