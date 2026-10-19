@@ -218,3 +218,129 @@ func TestFilterNoProtoSinglePredicateAccepted_14445(t *testing.T) {
 		t.Fatal("explicit tcp + port + icmp-type must still be rejected (#3723)")
 	}
 }
+
+// #15258 (A89-01): `is-fragment` since #14631 matches ONLY trailing
+// fragments (offset != 0), which carry no L4 header — so it is disjoint
+// from every L4 predicate (ports/except, tcp-flags, icmp-type/code).
+// A term combining is-fragment with any of those can never match and
+// must strict-reject; is-fragment ALONE and is-fragment+protocol tcp
+// (the protocol is not an L4 predicate) must still commit.
+func TestFilterIsFragmentDisjointRejected_15258(t *testing.T) {
+	cases := []struct {
+		name string
+		cmds []string
+		want []string
+	}{
+		{
+			name: "is_fragment_dport",
+			cmds: []string{
+				"set firewall family inet filter f term t from is-fragment",
+				"set firewall family inet filter f term t from destination-port 80",
+				"set firewall family inet filter f term t then discard",
+			},
+			want: []string{"is-fragment", "port"},
+		},
+		{
+			name: "is_fragment_dport_except",
+			cmds: []string{
+				"set firewall family inet filter f term t from is-fragment",
+				"set firewall family inet filter f term t from destination-port-except 80",
+				"set firewall family inet filter f term t then discard",
+			},
+			want: []string{"is-fragment", "port"},
+		},
+		{
+			name: "is_fragment_tcpflags",
+			cmds: []string{
+				"set firewall family inet filter f term t from is-fragment",
+				"set firewall family inet filter f term t from tcp-flags syn",
+				"set firewall family inet filter f term t then discard",
+			},
+			want: []string{"is-fragment", "tcp-flags"},
+		},
+		{
+			name: "is_fragment_icmptype",
+			cmds: []string{
+				"set firewall family inet filter f term t from is-fragment",
+				"set firewall family inet filter f term t from icmp-type 8",
+				"set firewall family inet filter f term t then discard",
+			},
+			want: []string{"is-fragment", "icmp"},
+		},
+		{
+			name: "is_fragment_icmpcode_with_type",
+			cmds: []string{
+				"set firewall family inet filter f term t from is-fragment",
+				"set firewall family inet filter f term t from icmp-type 3",
+				"set firewall family inet filter f term t from icmp-code 0",
+				"set firewall family inet filter f term t then reject",
+			},
+			want: []string{"is-fragment", "icmp"},
+		},
+		{
+			name: "inet6_is_fragment_dport",
+			cmds: []string{
+				"set firewall family inet6 filter f6 term t from is-fragment",
+				"set firewall family inet6 filter f6 term t from destination-port 80",
+				"set firewall family inet6 filter f6 term t then discard",
+			},
+			want: []string{"is-fragment", "port"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := buildFilterTree(t, tc.cmds...)
+			_, err := CompileConfig(tree)
+			if err == nil {
+				t.Fatalf("is-fragment + L4 predicate term must be rejected at commit (#15258)")
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Fatalf("error %q must name %q", err, w)
+				}
+			}
+			cfg, lerr := CompileConfigLenient(tree)
+			if lerr != nil {
+				t.Fatalf("lenient path must not hard-fail: %v", lerr)
+			}
+			warned := false
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w, "cross-field") {
+					warned = true
+				}
+			}
+			if !warned {
+				t.Fatalf("expected a cross-field downgrade warning, got %v", cfg.Warnings)
+			}
+		})
+	}
+}
+
+func TestFilterIsFragmentAloneAccepted_15258(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmds []string
+	}{
+		{
+			name: "is_fragment_alone",
+			cmds: []string{
+				"set firewall family inet filter f term t from is-fragment",
+				"set firewall family inet filter f term t then discard",
+			},
+		},
+		{
+			name: "is_fragment_protocol_tcp",
+			cmds: []string{
+				"set firewall family inet filter f term t from is-fragment",
+				"set firewall family inet filter f term t from protocol tcp",
+				"set firewall family inet filter f term t then discard",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := CompileConfig(buildFilterTree(t, tc.cmds...)); err != nil {
+				t.Fatalf("is-fragment control must commit (#15258): %v", err)
+			}
+		})
+	}
+}

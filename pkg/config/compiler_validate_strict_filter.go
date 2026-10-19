@@ -852,6 +852,31 @@ func validateFilterCrossFieldStrict(cfg *Config) error {
 							family, name, term.Name, proto, family)
 					}
 				}
+				// #15258 (A89-01): `is-fragment` since #14631 matches ONLY
+				// trailing fragments (offset != 0), which carry no L4
+				// header — ports fail on `is_fragment && !l4_present`,
+				// tcp-flags/icmp require l4_present. So is-fragment is
+				// disjoint from EVERY L4 predicate, with or without a
+				// protocol: `is-fragment; destination-port 80` can never
+				// match. is-fragment ALONE and is-fragment with only a
+				// protocol (not an L4 predicate) stay legitimate.
+				if term.IsFragment && (hasPorts || len(term.TCPFlags) > 0 || len(term.ICMPTypes) > 0 || len(term.ICMPCodes) > 0) {
+					l4 := "port"
+					switch {
+					case len(term.TCPFlags) > 0 && !hasPorts:
+						l4 = "tcp-flags"
+					case (len(term.ICMPTypes) > 0 || len(term.ICMPCodes) > 0) && !hasPorts && len(term.TCPFlags) == 0:
+						l4 = "icmp-type/icmp-code"
+					}
+					return fmt.Errorf(
+						"firewall family %s filter %q term %q: an is-fragment match is "+
+							"combined with a %s match — is-fragment matches only trailing "+
+							"fragments (fragment offset != 0), which carry no L4 header, so "+
+							"no packet can satisfy both and the term would never match; a "+
+							"`then discard`/`reject` then fails OPEN. Remove the %s "+
+							"constraint or split the term",
+						family, name, term.Name, l4, l4)
+				}
 				// #14445 (DR19-H1): a NO-protocol term combining predicates
 				// from disjoint protocol families can never match: the
 				// matcher ANDs port_terms_match (requires TCP/UDP) /

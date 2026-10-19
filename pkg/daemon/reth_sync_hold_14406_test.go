@@ -104,3 +104,43 @@ func TestRethSyncHoldBootPromotion14406(t *testing.T) {
 		t.Fatalf("after ReleaseSyncHold, last rg_active write = %v/%v, want true", active, ok)
 	}
 }
+
+// #15258 (A89-02): the #14406 early return in handleClusterEvent drops
+// the queued Primary event WITHOUT recording clusterPri, but the claim
+// that "reconcile keeps desired inactive" was false: reconcileRGState
+// re-derives clusterPri from d.cluster.IsLocalPrimary (which the
+// election already set) and feeds it to s.Reconcile, bypassing the
+// suppressed event entirely. Within one reconcile tick the held RG
+// wrote rg_active=true. The fix mirrors InSyncHold into rgStateMachine
+// (the #14404 kernel-upgrade-hold pattern) so event and reconcile share
+// one predicate. Acceptance: held reconcile shows 0 writes; after
+// ReleaseSyncHold + reconcile a true write lands.
+func TestRethSyncHoldSurvivesReconcile15258(t *testing.T) {
+	d := rethHoldDaemon14406(t)
+	ha := &actuationHA{}
+	d.setDataplane(&actuationDP{ha: ha})
+	// Election has already made this node primary (the queued-event /
+	// degraded-promotion shape the backstop exists for).
+	d.cluster.SetGroupStateForTesting(1, cluster.StatePrimary)
+	d.vrrpMgr.SetSyncHold(time.Hour)
+	defer d.vrrpMgr.ReleaseSyncHold()
+
+	if timer := d.handleClusterEvent(context.Background(), cluster.ClusterEvent{
+		GroupID: 1, OldState: cluster.StateSecondary, NewState: cluster.StatePrimary,
+	}, nil); timer != nil {
+		timer.Stop()
+	}
+	d.reconcileRGState()
+	if n := ha.writeCount(); n != 0 {
+		t.Fatalf("sync-hold active: reconcile must not write rg_active, got %d writes %v (#15258)", n, ha.writes)
+	}
+	if d.getOrCreateRGState(1).IsActive() {
+		t.Fatal("sync-hold active: RG must stay inactive after reconcile (#15258)")
+	}
+
+	d.vrrpMgr.ReleaseSyncHold()
+	d.reconcileRGState()
+	if active, ok := ha.lastWrite(); !ok || !active {
+		t.Fatalf("after ReleaseSyncHold + reconcile, last rg_active write = %v/%v, want true (#15258)", active, ok)
+	}
+}

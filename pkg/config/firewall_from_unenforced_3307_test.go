@@ -89,7 +89,9 @@ func TestFilterUnenforcedFromLeafRejectedV6_3307(t *testing.T) {
 }
 
 // A term built only from ENFORCED `from` leaves must still compile cleanly — the
-// gate must not over-reject the supported match set.
+// gate must not over-reject the supported match set. (`is-fragment` is
+// exercised in its own term: combined with destination-port it is the
+// #15258 never-match and must reject.)
 func TestFilterEnforcedFromLeavesAccepted_3307(t *testing.T) {
 	tree := buildFilterTree(t,
 		"set firewall family inet filter ok term t from source-address 10.0.0.0/8",
@@ -97,8 +99,9 @@ func TestFilterEnforcedFromLeavesAccepted_3307(t *testing.T) {
 		"set firewall family inet filter ok term t from protocol tcp",
 		"set firewall family inet filter ok term t from destination-port 22",
 		"set firewall family inet filter ok term t from dscp ef",
-		"set firewall family inet filter ok term t from is-fragment",
 		"set firewall family inet filter ok term t then accept",
+		"set firewall family inet filter ok term frags from is-fragment",
+		"set firewall family inet filter ok term frags then discard",
 	)
 	if _, err := CompileConfig(tree); err != nil {
 		t.Fatalf("term using only enforced `from` leaves must compile: %v", err)
