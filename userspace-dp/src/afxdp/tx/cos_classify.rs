@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// queue and therefore use the pinned interface default queue.
 pub(in crate::afxdp) static FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub(in crate::afxdp) struct CoSTxSelection {
     pub(in crate::afxdp) queue_id: Option<u8>,
     pub(in crate::afxdp) dscp_rewrite: Option<u8>,
@@ -39,6 +39,16 @@ pub(in crate::afxdp) struct CoSTxSelection {
     // message-type is bit-identical to the old behaviour.
     pub(in crate::afxdp) reject_message: crate::filter::RejectMessage,
     pub(in crate::afxdp) filter_log: Option<crate::filter::FilterLogMatch>,
+    // #15268: deferrable side effects of the output (and ingress re-walk)
+    // walks. Empty on the metered transit walk, which charges inline;
+    // populated on the deferred generated-reply walk so the caller can
+    // replay counters + policer meter exactly once after admission.
+    pub(in crate::afxdp) filter_counters: crate::filter::CachedFilterCounters,
+    pub(in crate::afxdp) three_color_policers: crate::filter::CachedThreeColorPolicers,
+    // #15268: policer rewrite collected by the deferred walk (the policer
+    // was not metered, so its term rewrite is the provisional value; the
+    // admission replay's metered rewrite outranks it).
+    pub(in crate::afxdp) deferred_policer_dscp_rewrite: Option<u8>,
 }
 
 #[inline]
@@ -77,36 +87,97 @@ fn effective_ingress_ifindex(meta: impl Into<ForwardPacketMeta>) -> i32 {
 /// not be parsed (fail-CLOSED, §6.2). On `parse_error == true` the caller
 /// MUST attribute the drop on a dedicated parse-error counter (a parse
 /// failure of our own bytes is a logic bug, never silent).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub(in crate::afxdp) struct GeneratedReplyVerdict {
     pub(in crate::afxdp) drop: bool,
     pub(in crate::afxdp) parse_error: bool,
     pub(in crate::afxdp) cos_queue_id: Option<u8>,
     pub(in crate::afxdp) dscp_rewrite: Option<u8>,
     pub(in crate::afxdp) filter_log: Option<crate::filter::FilterLogMatch>,
+    // #15268: deferrable output-filter side effects collected by the
+    // uncounted, unmetered classification walk. Empty when the walk found
+    // no counted/policed term. The generator replays them only after the
+    // reply is admitted (zone token taken, about to enqueue).
+    pub(in crate::afxdp) filter_counters: crate::filter::CachedFilterCounters,
+    pub(in crate::afxdp) three_color_policers: crate::filter::CachedThreeColorPolicers,
+    pub(in crate::afxdp) packet_bytes: u64,
+    pub(in crate::afxdp) deferred_policer_dscp_rewrite: Option<u8>,
 }
 
-/// #2238: classify a host-generated reply frame by its OWN egress tuple.
-///
-/// Parses the BUILT reply bytes (`frame`) into the generated frame's
-/// `(SessionKey, ForwardPacketMeta)` and runs the runtime-counted output
-/// classifier ([`resolve_cos_tx_selection_at`]) on that tuple + the egress
-/// interface. This is the single contract every generator (ICMP/ICMPv6 Time
-/// Exceeded, policy-`reject` RST/ICMP-unreachable, SYN-cookie SYN-ACK/
-/// ACK-RST) routes through so output-filter counters/log/policers are
-/// charged exactly once, identically to transit, but keyed on the REPLY's
-/// real tuple rather than the trigger's.
-///
-/// Fail-CLOSED on a parse failure (#2238 §6.2): an output-filter terminal
-/// `discard`/`reject` is a security boundary, so a reply whose own bytes
-/// cannot be re-parsed is DROPPED (`drop: true, parse_error: true`) rather
-/// than leaked past the filter. The bytes are our own, so this only fires on
-/// a builder/parser logic bug — the caller's dedicated parse-error counter
-/// keeps the event attributable.
-///
-/// Cold path only — every caller is on a generator's exception arm. The
-/// added work is one L2/L3/L4 walk + one filter eval, never per transit
-/// packet.
+impl GeneratedReplyVerdict {
+    /// #15268: replay the deferred counter + policer charges for an
+    /// admitted reply. Returns `true` when the metered policer drops the
+    /// reply (red) — the caller must then suppress the enqueue it was
+    /// about to perform. On a green/yellow meter the policer's DSCP
+    /// rewrite (when it carries one) outranks the provisional rewrite.
+    pub(in crate::afxdp) fn settle_deferred_side_effects(&mut self, now_ns: u64) -> bool {
+        self.filter_counters
+            .for_each(|counter| crate::filter::record_filter_counter(counter, self.packet_bytes));
+        let action = crate::filter::apply_cached_three_color_policers(
+            &self.three_color_policers,
+            now_ns,
+            self.packet_bytes,
+        );
+        if action.drop {
+            return true;
+        }
+        if action.dscp_rewrite.is_some() {
+            self.dscp_rewrite = action.dscp_rewrite;
+        } else if self.deferred_policer_dscp_rewrite.is_some()
+            && !self.three_color_policers.is_empty()
+        {
+            self.dscp_rewrite = self.deferred_policer_dscp_rewrite;
+        }
+        false
+    }
+}
+
+/// #15268: deferred-classification entry for generated replies. Identical
+/// verdict to [`classify_generated_reply`] except the output walk neither
+/// records `then count` nor meters three-color policers; the matched
+/// handles ride on the verdict for [`GeneratedReplyVerdict::settle_deferred_side_effects`].
+pub(in crate::afxdp) fn classify_generated_reply_deferred(
+    forwarding: &ForwardingState,
+    egress_ifindex: i32,
+    frame: &[u8],
+) -> GeneratedReplyVerdict {
+    let Some((key, meta)) = generated_reply_session_key(frame) else {
+        return GeneratedReplyVerdict {
+            drop: true,
+            parse_error: true,
+            ..Default::default()
+        };
+    };
+    let packet_bytes = meta.pkt_len as u64;
+    let extra = crate::afxdp::frame::term_match_extra_from_frame(frame, meta);
+    let selection = resolve_cos_tx_selection_internal(
+        forwarding,
+        egress_ifindex,
+        meta,
+        Some(&key),
+        Some(&key),
+        extra,
+        None,
+        None,
+        None,
+        true,
+    );
+    GeneratedReplyVerdict {
+        drop: selection.drop,
+        parse_error: false,
+        cos_queue_id: selection.queue_id,
+        dscp_rewrite: selection.dscp_rewrite,
+        filter_log: selection.filter_log,
+        filter_counters: selection.filter_counters,
+        three_color_policers: selection.three_color_policers,
+        packet_bytes,
+        deferred_policer_dscp_rewrite: selection.deferred_policer_dscp_rewrite,
+    }
+}
+
+/// #2238: metered classification retained for tests that pin the inline
+/// counted/metered behaviour. Production generators use
+/// [`classify_generated_reply_deferred`] (#15268).
 pub(in crate::afxdp) fn classify_generated_reply(
     forwarding: &ForwardingState,
     egress_ifindex: i32,
@@ -114,21 +185,12 @@ pub(in crate::afxdp) fn classify_generated_reply(
     now_ns: u64,
 ) -> GeneratedReplyVerdict {
     let Some((key, meta)) = generated_reply_session_key(frame) else {
-        // §6.2: cannot classify our own generated bytes — fail CLOSED.
         return GeneratedReplyVerdict {
             drop: true,
             parse_error: true,
-            cos_queue_id: None,
-            dscp_rewrite: None,
-            filter_log: None,
+            ..Default::default()
         };
     };
-    // #2362 fold B: classify the generated reply on its OWN bytes — build the
-    // fragment-safe per-packet match inputs from the reply frame so a
-    // tcp-flags / icmp-type output-filter term matches the reply correctly.
-    // #6435: the single unified builder (the byte-identical
-    // `term_match_extra_from_frame_fwd` twin is retired; the builder now
-    // takes `impl Into<ForwardPacketMeta>`).
     let extra = crate::afxdp::frame::term_match_extra_from_frame(frame, meta);
     let selection =
         resolve_cos_tx_selection_at(forwarding, egress_ifindex, meta, Some(&key), extra, now_ns);
@@ -138,6 +200,7 @@ pub(in crate::afxdp) fn classify_generated_reply(
         cos_queue_id: selection.queue_id,
         dscp_rewrite: selection.dscp_rewrite,
         filter_log: selection.filter_log,
+        ..Default::default()
     }
 }
 
@@ -1005,6 +1068,7 @@ pub(in crate::afxdp) fn resolve_cos_tx_selection(
         None,
         None,
         None,
+        false,
     )
 }
 
@@ -1026,6 +1090,7 @@ pub(in crate::afxdp) fn resolve_cos_tx_selection_at(
         Some(now_ns),
         None,
         None,
+        false,
     )
 }
 
@@ -1062,6 +1127,7 @@ pub(in crate::afxdp) fn resolve_cos_tx_selection_at_prenat(
         Some(now_ns),
         flowless_wire,
         flowless_ingress,
+        false,
     )
 }
 
@@ -1080,6 +1146,10 @@ fn resolve_cos_tx_selection_internal(
     // post-NAT tuple, all three reads come from it.
     flowless_wire: Option<&SessionKey>,
     flowless_ingress: Option<&SessionKey>,
+    // #15268: when true, the output walk is counter-suppressed and
+    // unmetered (no `now_ns` reaches the policer); the caller replays the
+    // collected counter/policer handles after admission.
+    defer_side_effects: bool,
 ) -> CoSTxSelection {
     let meta = meta.into();
     // #3642: an interface `filter output` is applied on the EGRESS interface
@@ -1173,6 +1243,9 @@ fn resolve_cos_tx_selection_internal(
         // #6854: meaningless unless `reject`; see CoSTxSelection.reject_message.
         let mut reject_message = crate::filter::RejectMessage::ADMIN_PROHIBITED;
         let mut filter_log = None;
+        let mut filter_counters = crate::filter::CachedFilterCounters::default();
+        let mut three_color_policers = crate::filter::CachedThreeColorPolicers::default();
+        let mut deferred_policer_dscp_rewrite = None;
         // #6236 PR-2C: fold the `needs_tx_eval` precheck and the output-filter
         // fetch into ONE lookup (see the cached flowless arm above).
         let mut reject = false;
@@ -1188,7 +1261,19 @@ fn resolve_cos_tx_selection_internal(
             // l4-present=false predicates so port/flag/icmp-type terms fail
             // closed. The counted variants record `then count` exactly once
             // (this is the only output-filter walk on the flowless path).
-            let output_result = if let Some(now_ns) = now_ns {
+            let output_result = if defer_side_effects {
+                crate::filter::evaluate_filter_ref_tx_selection_uncounted(
+                    output_filter,
+                    src_ip,
+                    dst_ip,
+                    wire_protocol,
+                    0,
+                    0,
+                    meta.dscp,
+                    extra,
+                    meta.pkt_len as u64,
+                )
+            } else if let Some(now_ns) = now_ns {
                 crate::filter::evaluate_filter_ref_tx_selection_runtime_counted(
                     output_filter,
                     src_ip,
@@ -1229,6 +1314,11 @@ fn resolve_cos_tx_selection_internal(
                 crate::filter::RejectMessage::ADMIN_PROHIBITED
             };
             filter_log = output_result.log_match;
+            if defer_side_effects {
+                filter_counters = output_result.counters;
+                three_color_policers.extend(output_result.three_color_policers);
+                deferred_policer_dscp_rewrite = output_result.dscp_rewrite;
+            }
         }
         let (ingress_is_v6, ingress_input_l3) = match flowless_ingress {
             Some(key) => (
@@ -1276,7 +1366,19 @@ fn resolve_cos_tx_selection_internal(
             {
                 let mut input_extra = extra;
                 input_extra.ports_unknown = true;
-                let ingress_result = if let Some(now_ns) = now_ns {
+                let ingress_result = if defer_side_effects {
+                    crate::filter::evaluate_filter_ref_tx_selection_uncounted(
+                        ingress_filter,
+                        src_ip,
+                        dst_ip,
+                        ingress_protocol,
+                        0,
+                        0,
+                        meta.dscp,
+                        input_extra,
+                        meta.pkt_len as u64,
+                    )
+                } else if let Some(now_ns) = now_ns {
                     crate::filter::evaluate_filter_ref_tx_selection_runtime_uncounted(
                         ingress_filter,
                         src_ip,
@@ -1303,6 +1405,9 @@ fn resolve_cos_tx_selection_internal(
                     )
                 };
                 drop |= ingress_result.policer_drop;
+                if defer_side_effects {
+                    three_color_policers.extend(ingress_result.three_color_policers);
+                }
                 filter_forwarding_class = ingress_result.forwarding_class;
                 filter_dscp_rewrite = filter_dscp_rewrite.or(ingress_result.dscp_rewrite);
             }
@@ -1337,6 +1442,9 @@ fn resolve_cos_tx_selection_internal(
             reject,
             reject_message,
             filter_log,
+            filter_counters,
+            three_color_policers,
+            deferred_policer_dscp_rewrite,
         };
     };
     // `is_v6` derived above from the (post-NAT) egress key, not `meta` (#3642).
@@ -1374,6 +1482,7 @@ fn resolve_cos_tx_selection_internal(
             reject: false,
             reject_message: crate::filter::RejectMessage::ADMIN_PROHIBITED,
             filter_log: None,
+            ..Default::default()
         };
     }
     // #hb166 T-3: evaluate the INGRESS input filter for its forwarding-class /
@@ -1414,7 +1523,19 @@ fn resolve_cos_tx_selection_internal(
     // #6236 PR-2C: `output_filter` is already gated on `needs_tx_eval()` by
     // `interface_output_filter_needing_tx_eval`, so no second `.filter()`.
     let output_result = if let Some(output_filter) = output_filter {
-        if let Some(now_ns) = now_ns {
+        if defer_side_effects {
+            crate::filter::evaluate_filter_ref_tx_selection_uncounted(
+                output_filter,
+                flow_key.src_ip,
+                flow_key.dst_ip,
+                flow_key.protocol,
+                flow_key.src_port,
+                flow_key.dst_port,
+                meta.dscp,
+                extra,
+                meta.pkt_len as u64,
+            )
+        } else if let Some(now_ns) = now_ns {
             crate::filter::evaluate_filter_ref_tx_selection_runtime_counted(
                 output_filter,
                 flow_key.src_ip,
@@ -1458,6 +1579,7 @@ fn resolve_cos_tx_selection_internal(
         crate::filter::RejectMessage::ADMIN_PROHIBITED
     };
     let mut ingress_forwarding_class = None;
+    let mut ingress_policers = crate::filter::CachedThreeColorPolicers::default();
     let filter_log = output_result.log_match;
     if let Some(ingress_filter) = ingress_filter
         .filter(|filter| filter.affects_tx_selection || filter.has_three_color_policer_terms)
@@ -1473,7 +1595,19 @@ fn resolve_cos_tx_selection_internal(
         // runs via the threaded now_ns).
         // #5158: re-walk on the PRE-NAT ingress tuple, not `flow_key` (the
         // post-NAT egress wire key the output filter used above).
-        let ingress_result = if let Some(now_ns) = now_ns {
+        let ingress_result = if defer_side_effects {
+            crate::filter::evaluate_filter_ref_tx_selection_uncounted(
+                ingress_filter,
+                ingress_key.src_ip,
+                ingress_key.dst_ip,
+                ingress_key.protocol,
+                ingress_key.src_port,
+                ingress_key.dst_port,
+                meta.dscp,
+                extra,
+                meta.pkt_len as u64,
+            )
+        } else if let Some(now_ns) = now_ns {
             crate::filter::evaluate_filter_ref_tx_selection_runtime_uncounted(
                 ingress_filter,
                 ingress_key.src_ip,
@@ -1506,7 +1640,26 @@ fn resolve_cos_tx_selection_internal(
         // forwarding-class` on the output filter still wins; the ingress class
         // is only consulted when the output filter set none (or is absent).
         ingress_forwarding_class = ingress_result.forwarding_class;
+        if defer_side_effects {
+            ingress_policers = ingress_result.three_color_policers;
+        }
     }
+    let (filter_counters, three_color_policers, deferred_policer_dscp_rewrite) =
+        if defer_side_effects {
+            let mut policers = output_result.three_color_policers;
+            policers.extend(ingress_policers);
+            (
+                output_result.counters,
+                policers,
+                output_result.dscp_rewrite,
+            )
+        } else {
+            (
+                crate::filter::CachedFilterCounters::default(),
+                crate::filter::CachedThreeColorPolicers::default(),
+                None,
+            )
+        };
     let Some(iface) = iface else {
         return CoSTxSelection {
             queue_id: None,
@@ -1515,6 +1668,9 @@ fn resolve_cos_tx_selection_internal(
             reject,
             reject_message,
             filter_log,
+            filter_counters,
+            three_color_policers,
+            deferred_policer_dscp_rewrite,
         };
     };
     // Queue precedence: output-filter forwarding-class, ingress-filter
@@ -1574,6 +1730,9 @@ fn resolve_cos_tx_selection_internal(
         reject,
         reject_message,
         filter_log,
+        filter_counters,
+        three_color_policers,
+        deferred_policer_dscp_rewrite,
     }
 }
 

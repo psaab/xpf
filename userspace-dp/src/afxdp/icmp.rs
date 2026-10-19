@@ -201,6 +201,7 @@ pub(super) fn build_local_time_exceeded_request(
     ingress_ident: &BindingIdentity,
     flow: &SessionFlow,
     forwarding: &ForwardingState,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     _dynamic_neighbors: &Arc<ShardedNeighborMap>,
     _ha_state: &BTreeMap<i32, HAGroupRuntime>,
     _now_secs: u64,
@@ -320,14 +321,31 @@ pub(super) fn build_local_time_exceeded_request(
     // `target_ifindex` (physical) is still used for the XSK transmit below. For
     // a non-VLAN port the logical and physical indexes coincide, so this is a
     // no-op there.
-    let verdict =
-        classify_generated_reply(forwarding, logical_ingress, &prebuilt_frame, now_ns);
+    // #15268: deferred classification — no counter/policer charge until the
+    // zone token below admits the reply.
+    let mut verdict = crate::afxdp::tx::classify_generated_reply_deferred(
+        forwarding,
+        logical_ingress,
+        &prebuilt_frame,
+    );
     if verdict.drop {
         counters.touched = true;
         if verdict.parse_error {
             counters.generated_reply_classify_parse_errors += 1;
         } else {
             counters.time_exceeded_output_filter_drops += 1;
+            if let Some(log_match) = verdict.filter_log {
+                crate::afxdp::poll_descriptor::filter::emit_generated_reply_filter_log(
+                    forwarding,
+                    event_stream,
+                    &prebuilt_frame,
+                    meta,
+                    logical_ingress,
+                    log_match,
+                    false,
+                    now_ns,
+                );
+            }
         }
         return None;
     }
@@ -357,6 +375,37 @@ pub(super) fn build_local_time_exceeded_request(
     if !allow_generated_error_zoned(forwarding, GeneratedErrorReason::TimeExceeded, from_zone_id, Some(flow.src_ip)) {
         counters.touched = true;
         return None;
+    }
+    // #15268: token admitted — settle the deferred charges; a red meter
+    // suppresses the reply (token stays spent).
+    if verdict.settle_deferred_side_effects(now_ns) {
+        counters.touched = true;
+        counters.time_exceeded_output_filter_drops += 1;
+        if let Some(log_match) = verdict.filter_log {
+            crate::afxdp::poll_descriptor::filter::emit_generated_reply_filter_log(
+                forwarding,
+                event_stream,
+                &prebuilt_frame,
+                meta,
+                logical_ingress,
+                log_match,
+                false,
+                now_ns,
+            );
+        }
+        return None;
+    }
+    if let Some(log_match) = verdict.filter_log {
+        crate::afxdp::poll_descriptor::filter::emit_generated_reply_filter_log(
+            forwarding,
+            event_stream,
+            &prebuilt_frame,
+            meta,
+            logical_ingress,
+            log_match,
+            true,
+            now_ns,
+        );
     }
 
     Some(PendingForwardRequest {

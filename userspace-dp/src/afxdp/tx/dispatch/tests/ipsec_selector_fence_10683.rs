@@ -61,6 +61,7 @@ fn pending_live_tx_drops_bindless_selector_match_before_enqueue_10683() {
         &mut post_recycles,
         1,
         &forwarding,
+        None,
         &ingress_ident,
         unsafe { &*ingress_live },
         None,

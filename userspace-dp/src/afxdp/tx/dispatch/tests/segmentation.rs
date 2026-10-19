@@ -804,6 +804,7 @@ fn segmentation_pat_translation_survives_expected_ports_9782() {
         &mut post_recycles,
         1,
         &forwarding,
+        None,
         &ingress_ident,
         unsafe { &*ingress_live },
         None,

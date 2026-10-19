@@ -34,7 +34,8 @@ pub(in crate::afxdp) use cos_classify::{
     cos_queue_dscp_rewrite, FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL,
 };
 pub(super) use cos_classify::{
-    CoSTxSelection, GeneratedReplyVerdict, classify_generated_reply, enqueue_local_into_cos,
+    CoSTxSelection, GeneratedReplyVerdict, classify_generated_reply,
+    classify_generated_reply_deferred, enqueue_local_into_cos,
     reclassify_cached_ba_queue_and_lp_rewrite, reclassify_cached_cos_lp_rewrite,
     resolve_cached_cos_tx_queue_id,
     resolve_cached_cos_tx_selection, resolve_cached_cos_tx_selection_flowless,

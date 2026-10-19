@@ -187,6 +187,7 @@ fn syn_cookie_reply_dropped_by_egress_output_filter() {
     let sent = enqueue_syn_cookie_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -279,6 +280,7 @@ fn syn_cookie_reply_classifies_on_logical_vlan_ifindex_3035() {
     let sent = enqueue_syn_cookie_reply(
         &mut pipeline,
         &forwarding,
+        None,
         11, // physical parent bind ifindex
         &frame,
         meta,
@@ -325,6 +327,7 @@ fn syn_cookie_reply_queues_on_logical_vlan_ifindex_11786() {
     assert!(enqueue_syn_cookie_reply(
         &mut pipeline,
         &forwarding,
+        None,
         11,
         &frame,
         meta,
@@ -388,6 +391,7 @@ fn syn_cookie_reply_non_vlan_classify_unchanged_3035() {
     let sent = enqueue_syn_cookie_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5, // logical == physical for an untagged port
         &frame,
         meta,
@@ -420,6 +424,7 @@ fn syn_cookie_reply_enqueues_host_generated_frame_without_transit_policy_metadat
     assert!(enqueue_syn_cookie_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -470,6 +475,7 @@ fn stamped_fabric_syn_cookie_reply_suppresses_unreachable_syn_ack_12319() {
     let sent = enqueue_syn_cookie_reply(
         &mut pipeline,
         &forwarding,
+        None,
         21,
         &frame,
         meta,
@@ -544,6 +550,7 @@ fn stamped_fabric_syn_cookie_reply_suppresses_unreachable_ack_rst_12319() {
     let sent = enqueue_syn_cookie_reply(
         &mut pipeline,
         &forwarding,
+        None,
         21,
         &frame,
         meta,
@@ -571,6 +578,7 @@ fn stamped_fabric_syn_cookie_suppression_precedes_exhausted_budget_12319() {
     let sent = enqueue_syn_cookie_reply(
         &mut pipeline,
         &forwarding,
+        None,
         21,
         &frame,
         meta,
@@ -609,6 +617,7 @@ fn unstamped_fabric_syn_cookie_reply_still_enqueues_syn_ack_12319() {
     let sent = enqueue_syn_cookie_reply(
         &mut pipeline,
         &forwarding,
+        None,
         21,
         &frame,
         meta,
@@ -655,6 +664,7 @@ fn stamp_shaped_native_syn_cookie_reply_still_enqueues_syn_ack_12319() {
     let sent = enqueue_syn_cookie_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -706,6 +716,7 @@ fn tunnel_decap_syn_cookie_reply_suppresses_zero_mac_syn_ack_15131() {
     let sent = enqueue_syn_cookie_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -744,6 +755,7 @@ fn tunnel_decap_syn_cookie_reply_suppresses_zero_mac_ack_rst_15131() {
     let sent = enqueue_syn_cookie_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,
@@ -780,6 +792,7 @@ fn native_syn_cookie_reply_still_enqueues_syn_ack_15131() {
     let sent = enqueue_syn_cookie_reply(
         &mut pipeline,
         &forwarding,
+        None,
         5,
         &frame,
         meta,

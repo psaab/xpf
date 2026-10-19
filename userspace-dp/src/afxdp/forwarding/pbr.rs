@@ -290,6 +290,7 @@ fn ingress_route_table_override_with_mode(
             crate::afxdp::poll_descriptor::reject_reply::enqueue_filter_reject_reply(
                 sink.tx_pipeline,
                 forwarding,
+                event_stream,
                 sink.ingress_ifindex,
                 frame,
                 meta,

@@ -430,6 +430,7 @@ pub(super) fn build_live_forward_request_from_frame_with_dynamic(
             // downgrades to administratively-prohibited.
             reject_message: selection.reject_message,
             filter_log: selection.filter_log,
+            ..Default::default()
         })
         .unwrap_or_else(|| {
             resolve_cos_tx_selection_at_prenat(
@@ -615,6 +616,7 @@ pub(super) fn apply_cos_drop_side_effects(
                 crate::afxdp::poll_descriptor::reject_reply::enqueue_filter_reject_reply(
                     reply.tx_pipeline,
                     ctx.forwarding,
+                    event_stream,
                     ctx.ingress_ifindex,
                     frame,
                     ctx.meta,

@@ -1320,6 +1320,13 @@ pub(crate) struct TxSelectionFilterResult<'a> {
     pub(crate) forwarding_class: Option<&'a str>,
     pub(crate) dscp_rewrite: Option<u8>,
     pub(crate) policer_drop: bool,
+    // #15268: handles matched by this walk. `counters` is collected even on
+    // the counter-suppressed walk so a caller that defers the charge (a
+    // generated reply whose zone token is taken after classification) can
+    // replay exactly the matched set once admitted; `three_color_policers`
+    // likewise lets the deferred replay re-run the meter with `now_ns`.
+    pub(crate) counters: CachedFilterCounters,
+    pub(crate) three_color_policers: CachedThreeColorPolicers,
     pub(crate) log_match: Option<FilterLogMatch>,
 }
 
@@ -1371,6 +1378,8 @@ impl Default for TxSelectionFilterResult<'_> {
             forwarding_class: None,
             dscp_rewrite: None,
             policer_drop: false,
+            three_color_policers: CachedThreeColorPolicers::default(),
+            counters: CachedFilterCounters::default(),
             log_match: None,
         }
     }

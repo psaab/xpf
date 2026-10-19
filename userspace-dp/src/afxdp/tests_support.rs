@@ -268,6 +268,7 @@ pub(super) fn te_request_built(frame: &[u8], meta: UserspaceDpMeta) -> bool {
         &icmp_suppress_ident(),
         &flow,
         &fwd,
+        None,
         &Arc::new(ShardedNeighborMap::new()),
         &BTreeMap::new(),
         0,

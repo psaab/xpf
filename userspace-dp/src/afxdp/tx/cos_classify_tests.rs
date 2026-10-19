@@ -8734,3 +8734,121 @@ fn filter_forwarding_class_keys_egress_rewrite_over_ba_class_14636() {
         "#14636 unmaterialized filter class cache hit must rewrite by its own class"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #15268 (B13-02): the generated-reply classification must be deferrable —
+// a reply the zone limiter will discard leaves no `then count` and no
+// three-color policer charge; settlement charges exactly once.
+// ---------------------------------------------------------------------------
+
+fn output_count_term_counter(
+    forwarding: &ForwardingState,
+    ifindex: i32,
+) -> Arc<crate::filter::FilterTermCounter> {
+    forwarding
+        .filter_state
+        .iface_filter_out_v4_fast
+        .get(&ifindex)
+        .expect("output filter present")
+        .terms
+        .iter()
+        .find(|term| term.has_count)
+        .expect("output filter carries a `then count` term")
+        .counter
+        .clone()
+}
+
+#[test]
+fn generated_reply_deferred_classify_defers_count_and_policer_15268() {
+    // Output filter: fall-through `then { count; policer trickle; next term; }`
+    // then accept. The trickle policer (1 B/s, burst 1) meters any real
+    // packet RED, so a metered walk would drop + charge; the deferred walk
+    // must do neither until settlement.
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "reth0.0".into(),
+            ifindex: 202,
+            hardware_addr: "02:bf:72:00:80:08".into(),
+            filter_output_v4: "out-count-pol".into(),
+            ..Default::default()
+        }],
+        filters: vec![FirewallFilterSnapshot {
+            name: "out-count-pol".into(),
+            family: "inet".into(),
+            terms: vec![
+                FirewallTermSnapshot {
+                    name: "counted".into(),
+                    action: "".into(),
+                    protocols: vec!["icmp".into()],
+                    count: "reply-count".into(),
+                    policer: "trickle".into(),
+                    next_term: true,
+                    ..Default::default()
+                },
+                FirewallTermSnapshot {
+                    name: "accept-all".into(),
+                    action: "accept".into(),
+                    ..Default::default()
+                },
+            ],
+        }],
+        three_color_policers: vec![ThreeColorPolicerSnapshot {
+            name: "trickle".into(),
+            mode: "single-rate".into(),
+            color_blind: true,
+            committed_rate_bytes_per_sec: 1,
+            committed_burst_bytes: 1,
+            peak_or_excess_rate_bytes_per_sec: 0,
+            peak_or_excess_burst_bytes: 1,
+            then_action: "discard".into(),
+        }],
+        ..Default::default()
+    };
+    let forwarding = build_forwarding_state(&snapshot);
+    let counter = output_count_term_counter(&forwarding, 202);
+    let frame = generated_v4_frame(PROTO_ICMP, 0x00, 0, 0);
+    crate::filter::flush_recorded_filter_counters();
+    let policer_before = forwarding.filter_state.three_color_policer_statuses();
+    let green_before: u64 = policer_before.iter().map(|s| s.green_packets).sum();
+    let red_before: u64 = policer_before.iter().map(|s| s.red_packets).sum();
+
+    // Deferred classify: no count, no meter, no policer drop yet.
+    let mut verdict = classify_generated_reply_deferred(&forwarding, 202, &frame);
+    crate::filter::flush_recorded_filter_counters();
+    assert_eq!(counter.packets.load(Ordering::Relaxed), 0, "#15268: deferred classify must not record `then count`");
+    let st = forwarding.filter_state.three_color_policer_statuses();
+    assert_eq!(st.iter().map(|s| s.green_packets).sum::<u64>(), green_before, "#15268: deferred classify must not meter (green)");
+    assert_eq!(st.iter().map(|s| s.red_packets).sum::<u64>(), red_before, "#15268: deferred classify must not meter (red)");
+    assert!(!verdict.drop, "deferred walk must not fold the unmetered policer into drop");
+
+    // Settlement (admission): counts once, meters RED -> drop.
+    let red_drop = verdict.settle_deferred_side_effects(1_000_000_000);
+    crate::filter::flush_recorded_filter_counters();
+    assert!(red_drop, "#15268: settlement must surface the red policer drop");
+    assert_eq!(counter.packets.load(Ordering::Relaxed), 1, "#15268: settlement must record the count exactly once");
+    assert_eq!(counter.bytes.load(Ordering::Relaxed), verdict.packet_bytes, "#15268: settlement must charge the reply bytes");
+    let st = forwarding.filter_state.three_color_policer_statuses();
+    assert!(st.iter().map(|s| s.red_packets).sum::<u64>() > red_before, "#15268: settlement must meter the policer");
+}
+
+#[test]
+fn generated_reply_metered_classify_still_charges_inline_15268_control() {
+    // Control: the metered entry point keeps its inline behaviour, so the
+    // deferred cell above cannot pass vacuously on a broken fixture.
+    let forwarding = forwarding_with_v4_output_filter(
+        "count-icmp",
+        FirewallTermSnapshot {
+            name: "counted".into(),
+            action: "accept".into(),
+            protocols: vec!["icmp".into()],
+            count: "c1".into(),
+            ..Default::default()
+        },
+    );
+    let counter = output_count_term_counter(&forwarding, 202);
+    let frame = generated_v4_frame(PROTO_ICMP, 0x00, 0, 0);
+    let verdict = classify_generated_reply(&forwarding, 202, &frame, 0);
+    assert!(!verdict.drop);
+    crate::filter::flush_recorded_filter_counters();
+    assert_eq!(counter.packets.load(Ordering::Relaxed), 1, "control: metered classify charges inline");
+}

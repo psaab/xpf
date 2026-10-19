@@ -1005,6 +1005,7 @@ pub(super) fn retry_pending_neigh(
             super::tx::dispatch::enqueue_forwarded_ptb_reply(
                 binding,
                 forwarding,
+                event_stream,
                 &ingress_ident,
                 pkt.meta.into(),
                 ptb_bytes,

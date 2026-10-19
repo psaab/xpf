@@ -47,6 +47,7 @@ pub(super) fn syn_cookie_reply_budget_available(tx_pipeline: &WorkerTxPipeline) 
 pub(super) fn enqueue_syn_cookie_reply(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     ifindex: i32,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
@@ -122,15 +123,59 @@ pub(super) fn enqueue_syn_cookie_reply(
     let classify_ifindex =
         resolve_ingress_logical_ifindex(forwarding, ifindex, meta.ingress_vlan_id)
             .unwrap_or(ifindex);
-    let verdict = classify_generated_reply(forwarding, classify_ifindex, &bytes, now_ns);
+    // #15268: deferred classification (no zone token on this generator, so
+    // admission is the successful settle below).
+    let mut verdict =
+        crate::afxdp::tx::classify_generated_reply_deferred(forwarding, classify_ifindex, &bytes);
     if verdict.drop {
         counters.touched = true;
         if verdict.parse_error {
             counters.generated_reply_classify_parse_errors += 1;
         } else {
             counters.syn_cookie_output_filter_drops += 1;
+            if let Some(log_match) = verdict.filter_log {
+                super::filter::emit_generated_reply_filter_log(
+                    forwarding,
+                    event_stream,
+                    &bytes,
+                    meta,
+                    classify_ifindex,
+                    log_match,
+                    false,
+                    now_ns,
+                );
+            }
         }
         return false;
+    }
+    if verdict.settle_deferred_side_effects(now_ns) {
+        counters.touched = true;
+        counters.syn_cookie_output_filter_drops += 1;
+        if let Some(log_match) = verdict.filter_log {
+            super::filter::emit_generated_reply_filter_log(
+                forwarding,
+                event_stream,
+                &bytes,
+                meta,
+                classify_ifindex,
+                log_match,
+                false,
+                now_ns,
+            );
+        }
+        return false;
+    }
+    if let Some(log_match) = verdict.filter_log {
+        super::filter::emit_generated_reply_filter_log(
+            forwarding,
+            event_stream,
+            &bytes,
+            meta,
+            classify_ifindex,
+            log_match,
+            true,
+            now_ns,
+        );
     }
 
     tx_pipeline.pending_tx_local.push_back(TxRequest {

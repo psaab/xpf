@@ -470,6 +470,7 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb_with_dynamic(
 pub(in crate::afxdp) fn enqueue_forwarded_ptb_reply(
     ingress_binding: &mut BindingWorker,
     forwarding: &ForwardingState,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     ingress_ident: &BindingIdentity,
     meta: ForwardPacketMeta,
     ptb_bytes: Vec<u8>,
@@ -480,15 +481,59 @@ pub(in crate::afxdp) fn enqueue_forwarded_ptb_reply(
     let logical_ingress =
         resolve_ingress_logical_ifindex(forwarding, ingress_ident.ifindex, meta.ingress_vlan_id)
             .unwrap_or(ingress_ident.ifindex);
-    let verdict = classify_generated_reply(forwarding, logical_ingress, &ptb_bytes, now_ns);
+    // #15268: the PTB's zone token was already taken in
+    // `compute_forwarded_egress_ptb_with_dynamic`, so admission is the
+    // successful settle below.
+    let mut verdict = classify_generated_reply_deferred(forwarding, logical_ingress, &ptb_bytes);
     if verdict.drop {
         counters.touched = true;
         if verdict.parse_error {
             counters.generated_reply_classify_parse_errors += 1;
         } else {
             counters.ptb_output_filter_drops += 1;
+            if let Some(log_match) = verdict.filter_log {
+                crate::afxdp::poll_descriptor::filter::emit_generated_reply_filter_log(
+                    forwarding,
+                    event_stream,
+                    &ptb_bytes,
+                    meta.into(),
+                    logical_ingress,
+                    log_match,
+                    false,
+                    now_ns,
+                );
+            }
         }
         return;
+    }
+    if verdict.settle_deferred_side_effects(now_ns) {
+        counters.touched = true;
+        counters.ptb_output_filter_drops += 1;
+        if let Some(log_match) = verdict.filter_log {
+            crate::afxdp::poll_descriptor::filter::emit_generated_reply_filter_log(
+                forwarding,
+                event_stream,
+                &ptb_bytes,
+                meta.into(),
+                logical_ingress,
+                log_match,
+                false,
+                now_ns,
+            );
+        }
+        return;
+    }
+    if let Some(log_match) = verdict.filter_log {
+        crate::afxdp::poll_descriptor::filter::emit_generated_reply_filter_log(
+            forwarding,
+            event_stream,
+            &ptb_bytes,
+            meta.into(),
+            logical_ingress,
+            log_match,
+            true,
+            now_ns,
+        );
     }
 
     let ptb_len = ptb_bytes.len();
@@ -830,6 +875,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
     post_recycles: &mut Vec<(u32, u64)>,
     now_ns: u64,
     forwarding: &ForwardingState,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     ingress_ident: &BindingIdentity,
     ingress_live: &BindingLiveState,
     slow_path: Option<&Arc<SlowPathReinjector>>,
@@ -851,6 +897,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
         post_recycles,
         now_ns,
         forwarding,
+        event_stream,
         ingress_ident,
         ingress_live,
         slow_path,
@@ -876,6 +923,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
     post_recycles: &mut Vec<(u32, u64)>,
     now_ns: u64,
     forwarding: &ForwardingState,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     ingress_ident: &BindingIdentity,
     ingress_live: &BindingLiveState,
     slow_path: Option<&Arc<SlowPathReinjector>>,
@@ -1756,6 +1804,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
             enqueue_forwarded_ptb_reply(
                 ingress_binding,
                 forwarding,
+                event_stream,
                 ingress_ident,
                 request.meta,
                 ptb_bytes,
