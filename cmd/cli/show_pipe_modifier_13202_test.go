@@ -7,7 +7,7 @@
 //   - `show system rollback 1 bogus_compare_token` ran ShowCompare
 //     because the token merely CONTAINS "compare";
 //   - `show interfaces | compare` in config mode discarded the path and
-//     diffed the whole candidate;
+//     diffed the whole candidate (now scoped, #15272);
 //   - trailing garbage after a valid modifier (`| display set bogus`)
 //     was silently ignored on every surface.
 //
@@ -40,6 +40,7 @@ type showPipeRecorderClient struct {
 	rollbackFmt   pb.ConfigFormat
 	compareCalls  int
 	compareN      int32
+	comparePath   []string
 	configCalls   int
 	configFmt     pb.ConfigFormat
 	configTarget  pb.ConfigTarget
@@ -60,6 +61,7 @@ func (f *showPipeRecorderClient) ShowCompare(
 ) (*pb.ShowCompareResponse, error) {
 	f.compareCalls++
 	f.compareN = in.GetRollbackN()
+	f.comparePath = append([]string(nil), in.GetPath()...)
 	return &pb.ShowCompareResponse{Output: "stub"}, nil
 }
 
@@ -111,12 +113,6 @@ func TestShowPipeModifierRejectsGarbage_13202(t *testing.T) {
 		}},
 		{"op show configuration unknown pipe", func(c *ctl) error {
 			return c.handleShow([]string{"configuration", "|", "frobnicate"})
-		}},
-		{"config show path with compare", func(c *ctl) error {
-			return c.handleConfigShow([]string{"interfaces", "|", "compare"})
-		}},
-		{"config show path with compare rollback", func(c *ctl) error {
-			return c.handleConfigShow([]string{"interfaces", "|", "compare", "rollback", "1"})
 		}},
 		{"config show compare bogus", func(c *ctl) error {
 			return c.handleConfigShow([]string{"|", "compare", "bogus"})
@@ -230,6 +226,24 @@ func TestShowPipeModifierAcceptsExact_13202(t *testing.T) {
 		}
 		if fake.compareCalls != 1 || fake.compareN != 2 {
 			t.Fatalf("compare calls=%d N=%d; want 1/2", fake.compareCalls, fake.compareN)
+		}
+	})
+	t.Run("config show scoped compare", func(t *testing.T) {
+		fake := &showPipeRecorderClient{}
+		if err := configModeCtl(fake).handleConfigShow([]string{"interfaces", "|", "compare"}); err != nil {
+			t.Fatal(err)
+		}
+		if fake.compareCalls != 1 || fake.compareN != 0 || !reflect.DeepEqual(fake.comparePath, []string{"interfaces"}) {
+			t.Fatalf("compare calls=%d N=%d path=%v; want 1/0/[interfaces]", fake.compareCalls, fake.compareN, fake.comparePath)
+		}
+	})
+	t.Run("config show scoped compare rollback", func(t *testing.T) {
+		fake := &showPipeRecorderClient{}
+		if err := configModeCtl(fake).handleConfigShow([]string{"interfaces", "|", "compare", "rollback", "1"}); err != nil {
+			t.Fatal(err)
+		}
+		if fake.compareCalls != 1 || fake.compareN != 1 || !reflect.DeepEqual(fake.comparePath, []string{"interfaces"}) {
+			t.Fatalf("compare calls=%d N=%d path=%v; want 1/1/[interfaces]", fake.compareCalls, fake.compareN, fake.comparePath)
 		}
 	})
 }

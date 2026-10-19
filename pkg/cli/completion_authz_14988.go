@@ -312,7 +312,11 @@ func (c *CLI) treeConfigFor(a *completionAuthz, words []string) *config.Config {
 	if !a.operationalLiveAllowed(words) {
 		return nil
 	}
-	return c.store.ActiveConfig()
+	if !a.unrestricted {
+		return c.store.ActiveConfig()
+	}
+	cfg, _ := c.completionConfig()
+	return cfg
 }
 
 // --- shared candidate computation (TAB + `?`) --------------------------

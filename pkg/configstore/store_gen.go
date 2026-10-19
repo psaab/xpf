@@ -154,3 +154,40 @@ func (s *Store) CompileCandidateGen() (*config.Config, uint64, error) {
 	}
 	return compiled, gen, nil
 }
+
+// CandidateConfigForCompletion returns the config reference-value
+// completion should draw from in config mode (#15272 B24-04): a strict
+// candidate compile cached by candidate generation, so names created or
+// deleted in the candidate are offered/suppressed before commit. It
+// returns (nil, false) when not in config mode or the candidate does not
+// compile (fail closed: callers fall back to the active config, whose
+// names commit-time validation still backstops). The cached compile is
+// invalidated by any candidateGen bump. Compile runs under the read
+// lock, matching CompileCandidateGen.
+func (s *Store) CandidateConfigForCompletion() (*config.Config, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.candidate == nil || !s.configDir {
+		return nil, false
+	}
+	gen := s.candidateGen
+	s.completionMu.Lock()
+	if s.completionCacheGen == gen && s.completionCacheOK {
+		cached := s.completionCache
+		s.completionMu.Unlock()
+		return cached, true
+	}
+	if s.completionCacheGen == gen && !s.completionCacheOK {
+		s.completionMu.Unlock()
+		return nil, false
+	}
+	s.completionMu.Unlock()
+	compiled, err := s.compileTree(s.candidate)
+	s.completionMu.Lock()
+	s.completionCache, s.completionCacheGen, s.completionCacheOK = compiled, gen, err == nil
+	s.completionMu.Unlock()
+	if err != nil {
+		return nil, false
+	}
+	return compiled, true
+}

@@ -314,5 +314,9 @@ func (a completionAuth) treeConfig(s *Server, words []string) *config.Config {
 	if !a.operationalAllowed(words) {
 		return nil
 	}
-	return s.store.ActiveConfig()
+	if !a.unrestricted {
+		return s.store.ActiveConfig()
+	}
+	cfg, _ := s.completionConfig()
+	return cfg
 }

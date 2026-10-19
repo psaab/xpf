@@ -148,6 +148,16 @@ type Store struct {
 	// attached to a later candidate.
 	pendingRenameAncestry map[uint64][]RenameDescriptor
 
+	// completionCache* hold the last candidate compile for reference-value
+	// completion (#15272 B24-04), keyed by candidateGen. Guarded by
+	// completionMu (not s.mu): CandidateConfigForCompletion compiles under
+	// s.mu.RLock, so the cache must not need the write lock. A stale-gen
+	// entry is never served; it is overwritten on the next compile.
+	completionMu       sync.Mutex
+	completionCache    *config.Config
+	completionCacheGen uint64
+	completionCacheOK  bool
+
 	// activeGen is the writer-side counter behind the published active
 	// snapshot (#9905). Advanced on every compiled-active swap — commit,
 	// commit-confirmed, auto-rollback, peer sync, load, and boot recovery —

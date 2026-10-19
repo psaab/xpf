@@ -63,7 +63,11 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 		}
 		return config.AuthorizeConfigShowPath(cfg, class, r.GetPath(), suffix)
 	case "ShowCompare":
-		return config.AuthorizeConfigShowCompare(cfg, class)
+		r, okReq := req.(*pb.ShowCompareRequest)
+		if !okReq || r == nil {
+			return config.AuthorizeConfigShowCompare(cfg, class)
+		}
+		return config.AuthorizeConfigShowCompareAtPath(cfg, class, r.GetPath())
 	case "ShowRollback":
 		r, okReq := req.(*pb.ShowRollbackRequest)
 		if !okReq || r == nil {

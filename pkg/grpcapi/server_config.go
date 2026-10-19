@@ -453,13 +453,13 @@ func (s *Server) ShowCompare(_ context.Context, req *pb.ShowCompareRequest) (*pb
 			"invalid rollback_n %d: must be non-negative (0 = candidate vs active)", req.RollbackN)
 	}
 	if req.RollbackN > 0 {
-		diff, err := s.store.ShowCompareRollbackRedacted(int(req.RollbackN))
+		diff, err := s.store.ShowCompareRollbackRedactedAtPath(int(req.RollbackN), req.Path)
 		if err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 		}
 		return &pb.ShowCompareResponse{Output: diff}, nil
 	}
-	return &pb.ShowCompareResponse{Output: s.store.ShowCompareRedacted()}, nil
+	return &pb.ShowCompareResponse{Output: s.store.ShowCompareRedactedAtPath(req.Path)}, nil
 }
 
 func (s *Server) ShowRollback(_ context.Context, req *pb.ShowRollbackRequest) (*pb.ShowRollbackResponse, error) {

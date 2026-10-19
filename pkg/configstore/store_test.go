@@ -394,6 +394,60 @@ func TestShowCompare(t *testing.T) {
 	}
 }
 
+func TestShowCompareAtPath15272(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	s.SetFromInput("security zones security-zone oldzone")
+	s.SetFromInput("system host-name before15272")
+	if _, err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteFromInput("security zones security-zone oldzone"); err != nil {
+		t.Fatal(err)
+	}
+	s.SetFromInput("security zones security-zone newzone")
+	s.SetFromInput("system host-name after15272")
+
+	scoped := s.ShowCompareAtPath([]string{"security"})
+	if !strings.Contains(scoped, "newzone") || strings.Contains(scoped, "host-name") {
+		t.Errorf("scoped compare wrong:\n%s", scoped)
+	}
+	if got := s.ShowCompareAtPath([]string{"interfaces"}); got != "[no changes]\n" {
+		t.Errorf("unchanged scoped = %q", got)
+	}
+	global := s.ShowCompareAtPath(nil)
+	if !strings.Contains(global, "newzone") || !strings.Contains(global, "after15272") {
+		t.Errorf("global compare wrong:\n%s", global)
+	}
+	redacted := s.ShowCompareRedactedAtPath([]string{"security"})
+	if !strings.Contains(redacted, "newzone") || strings.Contains(redacted, "host-name") {
+		t.Errorf("redacted scoped wrong:\n%s", redacted)
+	}
+	rb, err := s.ShowCompareRollbackAtPath(1, []string{"security"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rb, "newzone") || strings.Contains(rb, "host-name") {
+		t.Errorf("rollback scoped wrong:\n%s", rb)
+	}
+	// Candidate compile cache: generation-keyed.
+	cfg1, ok1 := s.CandidateConfigForCompletion()
+	if !ok1 || cfg1 == nil || cfg1.Security.Zones["newzone"] == nil || cfg1.Security.Zones["oldzone"] != nil {
+		t.Fatalf("candidate completion cfg ok=%v zones=%v", ok1, cfg1)
+	}
+	cfg2, _ := s.CandidateConfigForCompletion()
+	if cfg1 != cfg2 {
+		t.Errorf("candidate compile not cached by generation")
+	}
+	s.SetFromInput("security zones security-zone thirdzone")
+	cfg3, _ := s.CandidateConfigForCompletion()
+	if cfg3 == cfg1 || cfg3.Security.Zones["thirdzone"] == nil {
+		t.Errorf("candidate compile cache not invalidated on mutation")
+	}
+}
+
 func TestRollback(t *testing.T) {
 	s := newTestStore(t)
 

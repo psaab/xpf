@@ -303,6 +303,12 @@ func (s *Store) ShowRollbackSet(n int) (string, error) {
 
 // ShowCompareRollback returns a diff between rollback slot n and the candidate.
 func (s *Store) ShowCompareRollback(n int) (string, error) {
+	return s.ShowCompareRollbackAtPath(n, nil)
+}
+
+// ShowCompareRollbackAtPath is ShowCompareRollback filtered to path
+// (#15272 B24-03); nil/empty path is the global compare.
+func (s *Store) ShowCompareRollbackAtPath(n int, path []string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -315,7 +321,7 @@ func (s *Store) ShowCompareRollback(n int) (string, error) {
 		return "", err
 	}
 
-	diff := config.FormatCompare(entry.Config, s.candidate)
+	diff := config.FormatCompareAtPath(entry.Config, s.candidate, path)
 	if diff == "" {
 		return "[no changes]\n", nil
 	}
@@ -325,6 +331,12 @@ func (s *Store) ShowCompareRollback(n int) (string, error) {
 // ShowCompare returns a hierarchical diff between the active and candidate
 // configurations in Junos [edit] context format.
 func (s *Store) ShowCompare() string {
+	return s.ShowCompareAtPath(nil)
+}
+
+// ShowCompareAtPath is ShowCompare filtered to the subtree at path
+// (#15272 B24-03); nil/empty path is the global compare.
+func (s *Store) ShowCompareAtPath(path []string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -332,12 +344,13 @@ func (s *Store) ShowCompare() string {
 		return ""
 	}
 
-	diff := config.FormatCompare(s.active, s.candidate)
+	diff := config.FormatCompareAtPath(s.active, s.candidate, path)
 	if diff == "" {
 		return "[no changes]\n"
 	}
 	return diff
 }
+
 
 // --- Redacted display renderers (#4051) ---------------------------------
 //
@@ -492,12 +505,18 @@ func (s *Store) ShowRollbackSetRedacted(n int) (string, error) {
 // Credential-bearing URLs retain RedactURL's safe context while fingerprinting
 // only the components RedactURL hides.
 func (s *Store) ShowCompareRedacted() string {
+	return s.ShowCompareRedactedAtPath(nil)
+}
+
+// ShowCompareRedactedAtPath is ShowCompareRedacted filtered to path
+// (#15272 B24-03); nil/empty path is the global compare.
+func (s *Store) ShowCompareRedactedAtPath(path []string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.candidate == nil {
 		return ""
 	}
-	diff := config.FormatCompareRedacted(s.active, s.candidate)
+	diff := config.FormatCompareRedactedAtPath(s.active, s.candidate, path)
 	if diff == "" {
 		return "[no changes]\n"
 	}
@@ -510,6 +529,12 @@ func (s *Store) ShowCompareRedacted() string {
 // arms via forDisplay collapses distinct secrets to the same placeholder, so
 // a secret-only rollback difference would render as [no changes] (#14170).
 func (s *Store) ShowCompareRollbackRedacted(n int) (string, error) {
+	return s.ShowCompareRollbackRedactedAtPath(n, nil)
+}
+
+// ShowCompareRollbackRedactedAtPath is ShowCompareRollbackRedacted filtered
+// to path (#15272 B24-03); nil/empty path is the global compare.
+func (s *Store) ShowCompareRollbackRedactedAtPath(n int, path []string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.candidate == nil {
@@ -519,7 +544,7 @@ func (s *Store) ShowCompareRollbackRedacted(n int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	diff := config.FormatCompareRedacted(entry.Config, s.candidate)
+	diff := config.FormatCompareRedactedAtPath(entry.Config, s.candidate, path)
 	if diff == "" {
 		return "[no changes]\n", nil
 	}
