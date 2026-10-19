@@ -51,6 +51,15 @@
 #                   (defaults 20000 / 500). LAN_IF: capture interface
 #                   (default eth0). cluster-env.sh supplies FW0/FW1/
 #                   CLUSTER_LAN_HOST/LAN_VIP6/IPERF_TARGET6.
+#   V6_NA_LOG_DIR   evidence directory. On a non-zero exit the raw
+#                   cap.pcap, neigh.txt (neighbor timeline) and events.txt
+#                   (when produced) are preserved under
+#                   $V6_NA_LOG_DIR/v6na-12495-<run-id>/ instead of being
+#                   deleted with the scratch dir (#15733). Defaults to a
+#                   logs/ dir beside this script (override for CI /
+#                   scratch layouts, e.g. /var/worktrees/<lab>/logs).
+#                   On a zero (PASS) exit the scratch dir is removed
+#                   as before.
 
 set -euo pipefail
 
@@ -118,7 +127,40 @@ GW_LL="$(incus exec "$CLUSTER_LAN_HOST" -- ip -6 route show default 2>/dev/null 
 [[ -n "$GW_LL" ]] || die_void "the LAN host has no IPv6 default route to watch — is v6 up on this cluster?"
 
 T="$(mktemp -d /tmp/xpf-v6na-12495.XXXXXX)"
-trap 'rm -rf "$T"' EXIT
+# #15733: the old `trap 'rm -rf "$T"' EXIT` destroyed the raw pcap and
+# neighbor timeline on exactly the failing runs they were captured for
+# (observed 2026-10-19 live FAIL: verdict printed, evidence deleted).
+# On a non-zero exit preserve whatever evidence exists under the run
+# log dir; only a PASS (rc 0) cleans the scratch dir up. Preservation
+# must never mask or change the run's own exit status, and must never
+# fail-open into deleting the only copy when the copy itself fails.
+V6_NA_LOG_DIR="${V6_NA_LOG_DIR:-${_CELL_DIR}/logs}"
+v6na_on_exit() {
+	local rc=$?
+	trap - EXIT
+	if [[ "$rc" -eq 0 ]]; then
+		rm -rf "$T"
+		exit 0
+	fi
+	local dest
+	dest="${V6_NA_LOG_DIR}/v6na-12495-$(basename "$T")"
+	local kept=0 f
+	if mkdir -p "$dest" 2>/dev/null; then
+		for f in cap.pcap neigh.txt events.txt; do
+			if [[ -e "$T/$f" ]] && cp -a "$T/$f" "$dest/$f" 2>/dev/null; then
+				kept=1
+			fi
+		done
+	fi
+	if [[ "$kept" -eq 1 ]]; then
+		echo "evidence preserved (exit $rc): raw pcap/timeline/events under $dest" >&2
+		rm -rf "$T"
+	else
+		echo "evidence preserved (exit $rc): could not copy to $dest — raw evidence left under $T" >&2
+	fi
+	exit "$rc"
+}
+trap v6na_on_exit EXIT
 
 # ── 1. Prime the discriminating entry ────────────────────────────────────
 incus exec "$CLUSTER_LAN_HOST" -- ping6 -c 1 -W 2 "$LAN_VIP6" >/dev/null 2>&1 ||
@@ -222,5 +264,9 @@ if [[ "$FAILBACK_RC" -ne 0 ]]; then
 	echo "FAILBACK: RG${V6_NA_RG} did not return to ${WANT_AFTER} within ${FAILOVER_DEADLINE}s — the shared cluster is left failed over; fix placement before any other lane runs" >&2
 	exit 3
 fi
-info "raw evidence (neigh timeline, events, pcap) is under $T and removed by the EXIT trap"
+if [[ "$RC" -eq 0 ]]; then
+	info "raw evidence (neigh timeline, events, pcap) was under $T and is removed on PASS"
+else
+	info "raw evidence (neigh timeline, events, pcap) is under $T and will be preserved under $V6_NA_LOG_DIR on exit $RC (#15733)"
+fi
 exit "$RC"

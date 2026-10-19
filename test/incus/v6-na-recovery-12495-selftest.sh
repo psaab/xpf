@@ -310,5 +310,152 @@ else
 	bad "non-Ethernet linktype rc=$rc (want 1) or silent stderr"
 fi
 
+# ── #15733: the LAB gate must preserve pcap/timeline on non-zero exit ──
+# Regression for the live 2026-10-19 run: the gate printed its FAIL
+# verdict and then `trap 'rm -rf "$T"' EXIT` deleted cap.pcap/neigh.txt,
+# destroying the only raw evidence. Exercise the gate script's actual
+# EXIT trap hermetically: stub incus/python3 on PATH, drive it to a
+# FAIL verdict (rc 1) and a PASS verdict (rc 0), and assert where the
+# evidence ends up. A run that cannot reach a live verdict (VOID)
+# preserves whatever partial timeline exists and invents nothing.
+GATE="${SCRIPT_DIR}/test-v6-na-recovery-12495.sh"
+STUB="$T/gate-stub"
+mkdir -p "$STUB/bin" "$STUB/home"
+# Synthetic pcap the stub "captures" from the LAN host: reuse the
+# byte-built capture above (GARP + override NA + RA + PARSEERRs).
+# Clean wire fixture for the gate cases — healthy attribution without
+# PARSEERR: override NA (new MAC) for the VIP, epoch-2100 timestamps so
+# they fall in the gate's [T0, window] without a fake clock.
+python3 - "$STUB/fake.pcap" "$OLD" "$NEW" "$VIP" "$GW" <<'PYEOF'
+import ipaddress, struct, sys
+path, old, new, vip, gw = sys.argv[1:6]
+vip_b = ipaddress.IPv6Address(vip).packed
+gw_b = ipaddress.IPv6Address(gw).packed
+mc = ipaddress.IPv6Address("ff02::1").packed
+mac_old = bytes(int(x, 16) for x in old.split(":"))
+mac_new = bytes(int(x, 16) for x in new.split(":"))
+def eth(payload, ethertype, src, dst):
+    return dst + src + struct.pack("!H", ethertype) + payload
+def ip6(payload, src, dst):
+    return struct.pack("!IHBB", 6 << 28, len(payload), 58, 255) + src + dst + payload
+def na(target, tlla, flags=0xA0):
+    return bytes([136, 0, 0, 0, flags, 0, 0, 0]) + target + bytes([2, 1]) + tlla + b"\x00\x00"
+def arp(sender_mac, sender_ip):
+    return struct.pack("!HHBBH", 1, 0x0800, 6, 4, 1) + sender_mac + sender_ip + b"\xff" * 6 + sender_ip
+frames = [
+    (400000, eth(arp(mac_old, bytes([10, 0, 60, 1])), 0x0806, mac_old, b"\xff" * 6)),
+    (400000, eth(ip6(na(vip_b, mac_new), gw_b, mc), 0x86DD, mac_new, b"\x33\x33\x00\x00\x00\x01")),
+    (400000, eth(ip6(na(gw_b, mac_new), gw_b, mc), 0x86DD, mac_new, b"\x33\x33\x00\x00\x00\x01")),
+]
+out = [struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)]
+for usec, frame in frames:
+    out.append(struct.pack("<IIII", 4102444800, usec, len(frame), len(frame)))
+    out.append(frame)
+open(path, "wb").write(b"".join(out))
+PYEOF
+cat >"$STUB/bin/date" <<'STUB_DATE'
+#!/usr/bin/env bash
+# Pin the gate clock at +400ms of the fixture epoch: T0 and all
+# neighbor samples read 4102444800400; wire events are stamped
+# exactly 4102444800400, so they are in [T0, T0+window] and the NA
+# is at-or-before the first flipped sample (also 4102444800400).
+if [[ "${1:-}" == "+%s%3N" ]]; then echo 4102444800400; elif [[ "${1:-}" == "+%s" ]]; then echo 4102444800; else echo 4102444800400; fi
+STUB_DATE
+chmod +x "$STUB/bin/date"
+rm -f "$STUB/fake.pcap.marker"
+cat >"$STUB/bin/incus" <<'STUB_INCUS'
+#!/usr/bin/env bash
+# Hermetic incus stub for #15733 gate-preservation cases. State (RG
+# primary) lives in $V6NA_STUB_STATE: line1 = primary before, and the
+# stub flips it on every failover request, like the real cluster.
+case "$1" in
+info) exit 0 ;;
+exec)
+	host="$2"; shift 2; [[ "${1:-}" == -- ]] && shift
+	case "$host" in
+	*host*)
+		case "$*" in
+		*"command -v tcpdump"*) echo /usr/sbin/tcpdump ;;
+		*"ip -6 route show default"*) echo "default via fe80::bf72:16:2 dev eth0 proto ra metric 100" ;;
+		"ping6 -c 1"*) echo ok ;;
+		"ping6 -c 5"*) echo "5 packets transmitted, ${V6NA_STUB_TRANSIT:-5} received, 0% packet loss" ;;
+		*"ip -6 neigh show"*)
+			if [[ "$(cat "$V6NA_STUB_STATE")" == node1 ]]; then
+				echo "2001:559:8585:ef00::1 dev eth0 lladdr 02:bf:72:16:01:00 REACHABLE"
+				echo "fe80::bf72:16:2 dev eth0 lladdr 02:bf:72:16:01:00 REACHABLE"
+			else
+				echo "2001:559:8585:ef00::1 dev eth0 lladdr 02:bf:72:16:02:00 REACHABLE"
+				echo "fe80::bf72:16:2 dev eth0 lladdr 02:bf:72:16:02:00 REACHABLE"
+			fi ;;
+		*"tcpdump: listening on"*) echo "tcpdump: listening on eth0, link-type EN10MB (Ethernet), snapshot length 262144 bytes" ;;
+		*nohup\ tcpdump*) : ;;
+		"pkill -x tcpdump") : ;;
+		"cat /tmp/v6na-12495.pcap") cat "$V6NA_STUB_PCAP" ;;
+		"rm -f /tmp/v6na-12495.pcap"*) : ;;
+		*) : ;;
+		esac ;;
+	*)
+		case "$*" in
+		*"show chassis cluster status"*)
+			prim="$(cat "$V6NA_STUB_STATE")"
+			echo "Redundancy group: 2 , Monitor fail: 0, Hold: 0"
+			if [[ "$prim" == node0 ]]; then
+				echo "node0 primary"
+			else
+				echo "node1 primary"
+			fi ;;
+		*"request chassis cluster failover"*)
+			cur="$(cat "$V6NA_STUB_STATE")"
+			if [[ "$cur" == node0 ]]; then echo node1 >"$V6NA_STUB_STATE"; else echo node0 >"$V6NA_STUB_STATE"; fi ;;
+		*) : ;;
+		esac ;;
+	esac ;;
+esac
+exit 0
+STUB_INCUS
+chmod +x "$STUB/bin/incus"
+# cluster-env.sh (sourced by the gate) would point at real instances;
+# shadow the FW*/host vars by pre-exporting them — cluster-env uses
+# ${VAR:-default}, and the stub only needs incus on PATH.
+run_gate() { # <name> <transit-recv> <want-rc>
+	local name="$1" transit="$2" want_rc="$3"
+	local g="$STUB/$name" out rc dest
+	mkdir -p "$g/logs"
+	echo node0 >"$g/state"
+	# loss-userspace-cluster.env pins LAN_VIP6=...ef00::1 unconditionally,
+	# so feed the gate a custom BPFRX_CLUSTER_ENV-free run with the self-
+	# test VIP ($VIP=...cf01::1) — write a stub env that only sets it.
+	printf 'LAN_VIP6="%s"\nLAN_HOST="cluster-userspace-host"\nINCUS_REMOTE="loss"\n' "$VIP" >"$g/cluster.env"
+	out="$(cd "$SCRIPT_DIR" && BPFRX_CLUSTER_ENV="$g/cluster.env" V6NA_DATE_COUNTER="$g/date-counter" V6NA_STUB_STATE="$g/state" V6NA_STUB_PCAP="$STUB/fake.pcap" \
+		V6NA_STUB_TRANSIT="$transit" V6_NA_LOG_DIR="$g/logs" V6_NA_WINDOW_MS=1000 V6_NA_POLL_MS=500 \
+		PATH="$STUB/bin:$PATH" bash "$GATE" 2>&1)" && rc=0 || rc=$?
+	if [[ "$rc" -ne "$want_rc" ]]; then
+		bad "gate $name: exit $rc, want $want_rc"
+		printf '%s\n' "$out" | sed 's/^/      /' >&2
+		return
+	fi
+	dest="$(find "$g/logs" -maxdepth 1 -type d -name 'v6na-12495-*' | head -1)"
+	if [[ "$want_rc" -eq 0 ]]; then
+		if [[ -z "$dest" ]]; then
+			ok "gate $name: PASS exit cleans scratch, preserves nothing"
+		else
+			bad "gate $name: PASS exit preserved evidence under $g/logs (want cleanup only)"
+		fi
+		return
+	fi
+	if [[ -n "$dest" && -s "$dest/cap.pcap" && -s "$dest/neigh.txt" && -s "$dest/events.txt" ]] &&
+		grep -q 'evidence preserved' <<<"$out"; then
+		ok "gate $name: non-zero exit $rc preserves pcap/timeline/events under log dir"
+	else
+		bad "gate $name: non-zero exit $rc did not preserve cap.pcap+neigh.txt+events.txt under $g/logs"
+		printf '%s\n' "$out" | sed 's/^/      /' >&2
+		find "$g" -type f | sed 's/^/      /' >&2
+	fi
+}
+# FAIL shape (rc 1): neighbors recover via NA but transit blackholes —
+# the exact 2026-10-19 live shape whose evidence was deleted.
+run_gate fail-transit 0 1
+# PASS shape (rc 0): transit healthy — scratch removed, nothing kept.
+run_gate pass 5 0
 echo "RESULTS: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]
