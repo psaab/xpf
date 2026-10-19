@@ -15346,3 +15346,60 @@ fn zone_to_rgs_requires_unambiguous_egress_zone_and_zoned_aliases_13181() {
         "rows without an admitted egress-zone ledger entry must not claim HA groups"
     );
 }
+
+// #15742f: the live RETH shape. The physical member row (`ge-0/0/1`,
+// zone="", egress_zone="lan" stamped by Go) shares the RETH netdev with
+// the zoned `reth1`/`reth1.0` rows (zone="lan", egress_zone="lan", RG 2).
+// The blank member row must not veto the zone's RG attribution — pre-fix
+// it zeroed the ifindex claim, `zone_to_rgs` lost lan entirely, and the
+// receiver rejected every zone-encoded fabric stamp as Invalid, so
+// split-RG transit died at the peer after a successful redirect.
+#[test]
+fn zone_to_rgs_reth_member_blank_row_does_not_veto_15742f() {
+    use crate::ZoneSnapshot;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![ZoneSnapshot {
+            name: "lan".into(),
+            id: 1,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0/0/1".into(),
+                ifindex: 50,
+                zone: String::new(),
+                egress_zone: "lan".into(),
+                redundancy_group: 2,
+                hardware_addr: "02:00:00:00:00:32".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "reth1".into(),
+                ifindex: 50,
+                zone: "lan".into(),
+                egress_zone: "lan".into(),
+                redundancy_group: 2,
+                hardware_addr: "02:00:00:00:00:32".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "reth1.0".into(),
+                ifindex: 50,
+                zone: "lan".into(),
+                egress_zone: "lan".into(),
+                redundancy_group: 2,
+                hardware_addr: "02:00:00:00:00:32".into(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    assert_eq!(
+        state.zone_to_rgs.get(&1),
+        Some(&vec![2]),
+        "RETH member blank row must not veto lan RG attribution: {:?}",
+        state.zone_to_rgs
+    );
+}
