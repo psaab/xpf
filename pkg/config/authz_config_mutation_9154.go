@@ -553,20 +553,43 @@ func ResolveTopUpPrefix15082(editPath, parts []string, quoted []bool) (target, i
 		}
 		// Non-numeric: it is the inner command's verb.
 	}
+	// Identity counting needs schema-known tokens. A cursor the
+	// schema cannot segment at all (synthetic/test cursors) falls
+	// back to token-level counting so those cursors keep their
+	// established level semantics.
+	ids := len(editIdentityStarts(editPath))
+	tokenLevel := ids == 0
+	if tokenLevel {
+		ids = len(editPath)
+	}
 	if rest >= len(parts) {
-		// Bare navigation: `up` or `up n` (count clamped to root).
-		if n > len(editPath) {
+		// Bare navigation: `up` or `up n`. Pop whole schema
+		// identities (#15237 A53-02): from `[edit security zones
+		// security-zone trust]`, one up lands at `[edit security
+		// zones]`, not at the dangling keyword `security-zone`.
+		// A count past the top clamps to the root.
+		if n >= ids {
 			return nil, nil, nil, true
 		}
 		if n == 0 {
 			return append([]string{}, editPath...), nil, nil, true
 		}
-		return append([]string{}, editPath[:len(editPath)-n]...), nil, nil, true
+		if tokenLevel {
+			return append([]string{}, editPath[:len(editPath)-n]...), nil, nil, true
+		}
+		return TruncateEditPathIdentities(editPath, ids-n), nil, nil, true
 	}
-	if n > len(editPath) {
+	// Prefixed form: the count is in LEVELS (identities), not tokens.
+	// An identity count past the cursor height cannot run — fail
+	// closed rather than silently running at the root.
+	if n > ids {
 		return nil, nil, nil, false
 	}
-	target = append([]string{}, editPath[:len(editPath)-n]...)
+	if tokenLevel {
+		target = append([]string{}, editPath[:len(editPath)-n]...)
+	} else {
+		target = TruncateEditPathIdentities(editPath, ids-n)
+	}
 	innerQuoted = nil
 	if len(quoted) == len(parts) {
 		innerQuoted = quoted[rest:]

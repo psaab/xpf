@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // ensureWritableLocked returns ErrClusterReadOnly when the store is in
@@ -403,13 +405,15 @@ func (s *Store) GetEditPath() []string {
 	return append([]string{}, s.editPath...)
 }
 
-// NavigateUp moves the edit path up one level.
+// NavigateUp moves the edit path up one SCHEMA IDENTITY (#15237
+// A53-02): from [security zones security-zone trust] it lands at
+// [security zones], popping the keyword+name pair together instead
+// of leaving the dangling keyword `security-zone` for the next
+// `set` to stage a junk zone under.
 func (s *Store) NavigateUp() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.editPath) > 0 {
-		s.editPath = s.editPath[:len(s.editPath)-1]
-	}
+	s.editPath = config.PopEditPathIdentity(s.editPath)
 }
 
 // NavigateTop resets the edit path to the root.

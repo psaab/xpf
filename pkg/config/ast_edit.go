@@ -64,6 +64,69 @@ func rekeyBracketProvenance(n *Node, changed bool) {
 // pass, so a failed copy (missing destination parent OR collision) leaves the
 // tree byte-for-byte unchanged. A missing destination parent wraps ErrPathNotFound
 // so callers can classify it with errors.Is.
+// #15237 A53-04: a bare destination (`len(dst)==nk`, e.g. the Junos
+// form `rename … policy deny-ssh to policy deny-ssh-v2` typed from
+// the zone-pair cursor, or `copy interfaces ge-0/0/0 to ge-0/0/2`)
+// names a NEW IDENTITY UNDER THE SOURCE PARENT, not a node at the
+// tree root. Previously dstParentPath was empty in that case, so the
+// clone/renamed node landed at the root as a junk top-level stanza
+// (`policy deny-ssh-v2`, `ge-0/0/2`) that commit check refused — and
+// an operator "fixing" the error by deleting the junk deleted the
+// moved policy. BareDestinationParent resolves that case; any other
+// destination keeps its explicit parent, and the existing
+// longest-match parent resolution + collision guard still apply.
+//
+// BareDestinationParent returns the destination parent path for a
+// copy/rename: dst[:len(dst)-nk], except that a bare destination
+// (empty parent) inherits the source parent path.
+func BareDestinationParent(src, dst []string, nk int) []string {
+	dstParentPath := dst[:len(dst)-nk]
+	if len(dstParentPath) != 0 || len(src) <= nk {
+		return dstParentPath
+	}
+	return append([]string(nil), src[:len(src)-nk]...)
+}
+
+// SourceIdentityLen returns the token count of the source node's
+// identity (len of its Keys) for a copy/rename source path.
+func (t *ConfigTree) SourceIdentityLen(src []string) (int, bool) {
+	srcNode, _, err := t.findNodeWithParent(src)
+	if err != nil {
+		return 0, false
+	}
+	return len(srcNode.Keys), true
+}
+
+// CopyRenameDstIdentityLen reports whether dst is a BARE destination
+// for src: len(dst) equals the source identity's token count, as
+// segmented by the schema. ok=false when src cannot be segmented.
+func CopyRenameDstIdentityLen(src, dst []string) (nk int, bare bool, ok bool) {
+	starts := editIdentityStarts(src)
+	if len(starts) == 0 {
+		return 0, false, false
+	}
+	nk = len(src) - starts[len(starts)-1]
+	if nk <= 0 {
+		return 0, false, false
+	}
+	return nk, len(dst) == nk, true
+}
+
+// PrependEditPathForCopyDst prepends the edit cursor to a copy/rename
+// destination UNLESS it is bare (#15237 A53-04): a bare destination
+// is a new identity under the SOURCE parent, so prepending the
+// cursor would misplace it; the daemon resolves it via
+// BareDestinationParent. src here is the already cursor-prefixed source.
+func PrependEditPathForCopyDst(editPath, src, dst []string) []string {
+	if _, bare, ok := CopyRenameDstIdentityLen(src, dst); ok && bare {
+		return dst
+	}
+	if len(editPath) == 0 {
+		return dst
+	}
+	return append(append([]string{}, editPath...), dst...)
+}
+
 func (t *ConfigTree) CopyPath(src, dst []string) error {
 	if len(src) == 0 || len(dst) == 0 {
 		return fmt.Errorf("empty path")
@@ -77,7 +140,7 @@ func (t *ConfigTree) CopyPath(src, dst []string) error {
 		return fmt.Errorf("destination path too short")
 	}
 	newKeys := append([]string(nil), dst[len(dst)-nk:]...)
-	dstParentPath := dst[:len(dst)-nk]
+	dstParentPath := BareDestinationParent(src, dst, nk)
 
 	// Resolve the destination parent via the longest-consumed-match navigator so a
 	// non-first same-keyword sibling parent is reached by full identity (#5822).
@@ -138,7 +201,7 @@ func (t *ConfigTree) RenamePath(src, dst []string) error {
 		return fmt.Errorf("destination path too short")
 	}
 	newKeys := append([]string(nil), dst[len(dst)-nk:]...)
-	dstParentPath := dst[:len(dst)-nk]
+	dstParentPath := BareDestinationParent(src, dst, nk)
 	dstParent, err := t.childrenAtPath(dstParentPath)
 	if err != nil {
 		return fmt.Errorf("destination parent not found: %s", strings.Join(dstParentPath, " "))

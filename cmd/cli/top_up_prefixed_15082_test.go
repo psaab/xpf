@@ -55,7 +55,9 @@ func TestRemoteTopDeleteSendsOneDelete15082(t *testing.T) {
 }
 
 func TestRemoteUpDeleteSendsOneDelete15082(t *testing.T) {
-	for _, line := range []string{"up delete allow-all", "up 1 delete allow-all"} {
+	// #15237 A53-02: up pops one IDENTITY (policy allow-all), so the
+	// relative delete names the policy under the zone pair.
+	for _, line := range []string{"up delete policy allow-all", "up 1 delete policy allow-all"} {
 		fake := &topUpRecorder15082{}
 		c := configModeCtl(fake)
 		c.editPath = []string{"security", "policies", "from-zone", "trust", "to-zone", "untrust", "policy", "allow-all"}

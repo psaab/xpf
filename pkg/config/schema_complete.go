@@ -351,3 +351,213 @@ func ResolveConsumedSetPathTokens(tokens []string) ([]string, bool) {
 
 	return resolved, true
 }
+
+// PopEditPathIdentity removes the last schema identity (one node:
+// keyword + its args, plus a compoundKey sub-token) from editPath,
+// so `up` from `[edit security zones security-zone trust]` lands at
+// `[edit security zones]` (#15237 A53-02). A flat per-token pop
+// instead left the dangling keyword `security-zone`, and the next
+// `set` staged a zone literally named after the following token.
+// A cursor whose last identity the schema cannot segment (unknown
+// trailing tokens) drops just its last token, and a wholly unknown
+// cursor also drops one token — fail-safe navigation, never a
+// panic. Returns nil at the root.
+func PopEditPathIdentity(editPath []string) []string {
+	if len(editPath) == 0 {
+		return nil
+	}
+	starts := editIdentityStarts(editPath)
+	if len(starts) == 0 {
+		if len(editPath) <= 1 {
+			return nil
+		}
+		return append([]string(nil), editPath[:len(editPath)-1]...)
+	}
+	last := starts[len(starts)-1]
+	consumed := editIdentityConsumed(editPath)
+	if consumed < len(editPath) {
+		return append([]string(nil), editPath[:len(editPath)-1]...)
+	}
+	if last <= 0 {
+		return nil
+	}
+	out := append([]string(nil), editPath[:last]...)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// TruncateEditPathIdentities keeps the first n schema identities of
+// editPath (`up n` / exit-as-up). n<=0 yields the root; an over-large
+// n or an unresolvable cursor yields the root (clamped, as Junos
+// clamps up past the top).
+func TruncateEditPathIdentities(editPath []string, n int) []string {
+	if n <= 0 || len(editPath) == 0 {
+		return nil
+	}
+	starts := editIdentityStarts(editPath)
+	if n >= len(starts) {
+		if len(starts) > 0 && n == len(starts) {
+			return append([]string(nil), editPath...)
+		}
+		return nil
+	}
+	out := append([]string(nil), editPath[:starts[n]]...)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// PopEditPathAfterTruncate truncates to keepCount identities then
+// pops one more (nil when keepCount covers the whole cursor).
+func PopEditPathAfterTruncate(editPath []string, keepCount int) []string {
+	base := TruncateEditPathIdentities(editPath, keepCount)
+	return PopEditPathIdentity(base)
+}
+
+// editIdentityConsumed returns how many leading tokens of editPath
+// the identity walk consumed (len(editPath) when fully segmented).
+func editIdentityConsumed(editPath []string) int {
+	schema := setSchema
+	i := 0
+	for i < len(editPath) {
+		if schema == nil {
+			break
+		}
+		keyword := editPath[i]
+		var child *schemaNode
+		if schema.children != nil {
+			if s, ok := schema.children[keyword]; ok {
+				child = s
+			} else {
+				var matches []string
+				for name := range schema.children {
+					if strings.HasPrefix(name, keyword) {
+						matches = append(matches, name)
+					}
+				}
+				if len(matches) == 1 {
+					child = schema.children[matches[0]]
+				}
+			}
+		}
+		if child == nil && schema.wildcard != nil {
+			child = schema.wildcard
+		}
+		if child == nil {
+			break
+		}
+		i += 1 + child.args
+		if i > len(editPath) {
+			i = len(editPath)
+		}
+		if child.compoundKey && i < len(editPath) {
+			if sub, ok := child.children[editPath[i]]; ok {
+				i++
+				child = sub
+			} else {
+				var matches []string
+				for name := range child.children {
+					if strings.HasPrefix(name, editPath[i]) {
+						matches = append(matches, name)
+					}
+				}
+				if len(matches) == 1 {
+					i++
+					child = child.children[matches[0]]
+				}
+			}
+		}
+		if child.multi && child.children == nil {
+			continue
+		}
+		schema = child
+	}
+	if i > len(editPath) {
+		return len(editPath)
+	}
+	return i
+}
+
+// editIdentityStarts returns the token index at which each schema
+// identity (node) in editPath begins, walking setSchema exactly as
+// ResolveConsumedSetPathTokens does (args + compoundKey). A truncated
+// final identity still counts (its start is recorded). An unknown
+// token stops the walk; tokens past it form no further identities.
+func editIdentityStarts(editPath []string) []int {
+	schema := setSchema
+	i := 0
+	var starts []int
+	for i < len(editPath) {
+		if schema == nil {
+			break
+		}
+		keyword := editPath[i]
+		var child *schemaNode
+		if schema.children != nil {
+			if s, ok := schema.children[keyword]; ok {
+				child = s
+			} else {
+				var matches []string
+				for name := range schema.children {
+					if strings.HasPrefix(name, keyword) {
+						matches = append(matches, name)
+					}
+				}
+				if len(matches) == 1 {
+					child = schema.children[matches[0]]
+				}
+			}
+		}
+		if child == nil && schema.wildcard != nil {
+			child = schema.wildcard
+		}
+		if child == nil {
+			break
+		}
+		starts = append(starts, i)
+		i += 1 + child.args
+		if child.compoundKey && i < len(editPath) {
+			if sub, ok := child.children[editPath[i]]; ok {
+				i++
+				child = sub
+			} else {
+				var matches []string
+				for name := range child.children {
+					if strings.HasPrefix(name, editPath[i]) {
+						matches = append(matches, name)
+					}
+				}
+				if len(matches) == 1 {
+					i++
+					child = child.children[matches[0]]
+				}
+			}
+		}
+		if child.multi && child.children == nil {
+			continue
+		}
+		schema = child
+	}
+	return starts
+}
+
+// QuoteConfigPathToken renders one resolved path token for re-joining
+// onto a wire line: a token containing whitespace (or that would not
+// re-lex as itself) is quoted so the daemon's lexer recovers it as
+// ONE token with its interior spacing intact (#15237 A53-07).
+func QuoteConfigPathToken(tok string) string {
+	return quoteKey(tok)
+}
+
+// JoinConfigPathTokens joins resolved path tokens for a wire line,
+// quoting any token that needs it (see QuoteConfigPathToken).
+func JoinConfigPathTokens(toks []string) string {
+	parts := make([]string, len(toks))
+	for i, t := range toks {
+		parts[i] = quoteKey(t)
+	}
+	return strings.Join(parts, " ")
+}

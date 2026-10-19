@@ -51,10 +51,21 @@ func (f *exitConfigureFakeClient) ExitConfigure(
 	return &pb.ExitConfigureResponse{}, nil
 }
 
+// #15237: the top-level exit warns on Dirty via GetConfigModeStatus
+// before releasing; the fake reports clean so no warning interferes.
+func (f *exitConfigureFakeClient) GetConfigModeStatus(
+	_ context.Context, _ *pb.GetConfigModeStatusRequest, _ ...grpc.CallOption,
+) (*pb.GetConfigModeStatusResponse, error) {
+	return &pb.GetConfigModeStatusResponse{InConfigMode: true}, nil
+}
+
 func newConfigModeCtl(fake pb.BpfrxServiceClient) *ctl {
 	c := &ctl{client: fake}
 	c.configMode.Store(true)
-	c.editPath = []string{"system", "login"}
+	// #15237 A53-03: exit at a non-empty edit path now acts as `up`
+	// and never reaches ExitConfigure, so the #5812 release-RPC
+	// fixture must sit at the top level to exercise the release.
+	c.editPath = nil
 	return c
 }
 
@@ -77,7 +88,7 @@ func TestConfigExitRPCErrorStaysInConfigMode_5812(t *testing.T) {
 			if !c.configMode.Load() {
 				t.Fatalf("%s: dropped out of configuration mode on RPC error (lost retry path)", verb)
 			}
-			if len(c.editPath) != 2 {
+			if len(c.editPath) != 0 {
 				t.Fatalf("%s: editPath was cleared on RPC error: %v", verb, c.editPath)
 			}
 		})

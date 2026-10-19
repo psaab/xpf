@@ -61,9 +61,12 @@ func TestTopDeleteExecutesAndRestoresCursor15082(t *testing.T) {
 }
 
 func TestUpDeleteExecutesAndRestoresCursor15082(t *testing.T) {
+	// #15237 A53-02: `up` is identity-aware — from inside
+	// `policy allow-all` one up lands at the zone pair, so the
+	// relative delete names the policy explicitly.
 	for _, line := range []string{
-		"up delete allow-all",
-		"up 1 delete allow-all",
+		"up delete policy allow-all",
+		"up 1 delete policy allow-all",
 	} {
 		store := topUpStore15082(t)
 		c := cliTopUp15082(t, store)
