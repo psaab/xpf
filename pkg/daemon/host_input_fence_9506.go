@@ -36,5 +36,7 @@ func (d *Daemon) activeHostInputFenceOverlay() *xnft.HostInputFenceOverlay {
 	}
 	copyOverlay := *o
 	copyOverlay.MasterSet = append([]string(nil), o.MasterSet...)
+	copyOverlay.SlaveSet = append([]string(nil), o.SlaveSet...)
+	copyOverlay.MasterSlavePairs = append([]xnft.HostInputFencePair(nil), o.MasterSlavePairs...)
 	return &copyOverlay
 }

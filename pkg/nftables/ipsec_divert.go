@@ -211,8 +211,12 @@ func normalizeIpsecLifelineNetdevs(names []string) []string {
 // IpsecDivertRule identifies one ownership-keyed xfrmi capture rule. The
 // caller, not this renderer, resolves the admitted SecureTunnel ownership set
 // (r6-plan §2.2); lexical st* discovery is intentionally not performed here.
+// Master is the VRF master name when Ifname is VRF-enslaved (#14974): the
+// packet then presents iifname=Master and sdifname=Ifname, so capture must
+// match that pair instead of iifname=Ifname alone (which never matches).
 type IpsecDivertRule struct {
 	Ifname string
+	Master string
 	Queue  uint16
 }
 
@@ -863,6 +867,10 @@ func emitIpsecDivertRules(p *nlPlan, rules []IpsecDivertRule) {
 	for _, rule := range rules {
 		// No bypass flag is intentional: a listener-death/missing-listener
 		// matching packet must not fall through to ACCEPT (§2.2/T12).
+		if rule.Master != "" {
+			p.rule().iifname([]string{rule.Master}).sdifname([]string{rule.Ifname}).emit(&expr.Queue{Num: rule.Queue, Total: 1})
+			continue
+		}
 		p.rule().iifname([]string{rule.Ifname}).emit(&expr.Queue{Num: rule.Queue, Total: 1})
 	}
 }

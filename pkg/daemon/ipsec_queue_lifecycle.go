@@ -30,6 +30,9 @@ type ipsecQueueKey struct {
 	Owner      string
 	STN        string
 	Ifindex    int
+	// Master is the VRF master name when STN's xfrmi is VRF-enslaved
+	// (#14974), resolved at queue-plan time; empty when unenslaved.
+	Master string
 }
 
 type ipsecQueueHandle struct {

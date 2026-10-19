@@ -303,6 +303,8 @@ func (d *Daemon) retireHostInputFenceOverlay(cfg *config.Config, expected *permi
 	}
 	empty := *old
 	empty.MasterSet = nil
+	empty.SlaveSet = nil
+	empty.MasterSlavePairs = nil
 	empty.State = "RETIRING"
 	if err := d.applyHostInboundFilterWithOverlay(cfg, &empty); err != nil {
 		d.setHostInputFenceOverlay(old)
