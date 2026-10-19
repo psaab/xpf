@@ -581,10 +581,13 @@ func TestElection_TiePriority_LowerNodeWins(t *testing.T) {
 func TestElection_BlocksPromotionWhenNotReady(t *testing.T) {
 	m := NewManager(0, 1)
 	m.takeoverHoldTime = 100 * time.Millisecond
-	m.controlInterface = "hb0" // cluster mode — enables readiness gate
 
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 200}))
+	cfg.ControlInterface = "hb0" // cluster mode — enables readiness gate
 	m.UpdateConfig(cfg)
+	// #15669: UpdateConfig now reverts takeoverHoldTime from the (zero)
+	// config value, so set the hold AFTER the apply (mirrors manager_stop_test).
+	m.takeoverHoldTime = 100 * time.Millisecond
 	drainEvents(m, 1)
 
 	// Force back to secondary for a clean test.

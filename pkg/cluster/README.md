@@ -169,9 +169,20 @@ detection MUST size from it, not from `m.hbInterval` /
   byte-identical to pre-#5081.
 
 Applying a committed timing change to the live heartbeat (rather than
-only reporting the divergence) is the remaining half and is tracked
-separately — it belongs with the control-link auth posture in the
-comms restart key.
+only reporting the divergence) is #7164's `ApplyCommittedHeartbeatTiming`,
+called from the daemon apply path.
+
+**Deleting a heartbeat/control/GARP stanza reverts it (#15669).**
+`UpdateConfig` writes the desired values from the config as authored on
+every commit: an unset `heartbeat-interval` / `heartbeat-threshold`
+reverts to `DefaultHeartbeatInterval` / `DefaultHeartbeatThreshold`, an
+unset `control-interface` clears `m.controlInterface`, and an RG that no
+longer authors a positive `gratuitous-arp-count` loses its `garpCounts`
+entry (absent = default burst). Writing only on a positive / non-empty
+value latched the last committed value forever. The reverted timing is
+picked up by the same #7164 divergence check, so a deletion restarts a
+running heartbeat onto the defaults just as a changed value does.
+
 - Group-state accessors (`UpdateConfig`, `GroupStates`,
   `DataGroupIDs`, `GroupState`, `IsLocalPrimary`, `IsPeerPrimary`,
   `PeerPrimaryRGs` (#15081: peer-primary data RGs + liveness for
