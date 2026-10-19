@@ -16,7 +16,7 @@ func TestVRRPPreemptDefault15047_FlatSetNoPreemptKeyword(t *testing.T) {
 	tree := replaySetLines(t, []string{
 		"set interfaces reth0 unit 0 family inet address 10.0.61.10/24 vrrp-group 1 virtual-address 10.0.61.1/24",
 		"set interfaces reth0 unit 0 family inet address 10.0.61.10/24 vrrp-group 1 priority 200",
-		"set interfaces reth0 unit 0 family inet address 10.0.61.10/24 vrrp-group 1 track-interface ge-0/0/1",
+		"set interfaces reth0 unit 0 family inet address 10.0.61.10/24 vrrp-group 1 track-interface reth0",
 	})
 	cfg, err := CompileConfig(tree)
 	if err != nil {

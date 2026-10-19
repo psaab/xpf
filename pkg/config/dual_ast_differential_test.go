@@ -120,7 +120,7 @@ var dualASTCases = []dualASTCase{
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address 10.0.61.3;
+                        virtual-address 10.0.61.3/24;
                         priority 200;
                         accept-data;
                         advertise-interval 1;
@@ -146,7 +146,7 @@ var dualASTCases = []dualASTCase{
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address [ 10.0.61.3 10.0.61.4 ];
+                        virtual-address [ 10.0.61.3/24 10.0.61.4/24 ];
                         priority 200;
                     }
                 }
@@ -168,8 +168,8 @@ var dualASTCases = []dualASTCase{
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
                         virtual-address {
-                            10.0.61.3;
-                            10.0.61.4;
+                            10.0.61.3/24;
+                            10.0.61.4/24;
                         }
                         priority 200;
                     }
@@ -212,7 +212,7 @@ var dualASTCases = []dualASTCase{
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address 10.0.61.3;
+                        virtual-address 10.0.61.3/24;
                         priority 200;
                         track-interface ge-0/0/1 {
                             priority-cost 20;

@@ -97,7 +97,7 @@ const trackNestedHier = `interfaces {
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address 10.0.61.3;
+                        virtual-address 10.0.61.3/24;
                         priority 200;
                         track-interface ge-0/0/1 {
                             priority-cost 20;
@@ -128,7 +128,7 @@ func TestVRRPTrackInterface_NestedHierarchical(t *testing.T) {
 
 func TestVRRPTrackInterface_NestedFlatSet(t *testing.T) {
 	tree := replaySetLines(t, []string{
-		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 virtual-address 10.0.61.3",
+		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 virtual-address 10.0.61.3/24",
 		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 priority 200",
 		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 track-interface ge-0/0/1 priority-cost 20",
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
@@ -176,7 +176,7 @@ func TestVRRPTrackInterface_LegacySiblingHierarchical(t *testing.T) {
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address 10.0.61.3;
+                        virtual-address 10.0.61.3/24;
                         priority 200;
                         track-interface ge-0/0/1;
                         track-priority-cost 30;
@@ -200,7 +200,7 @@ func TestVRRPTrackInterface_LegacySiblingHierarchical(t *testing.T) {
 
 func TestVRRPTrackInterface_LegacySiblingFlatSet(t *testing.T) {
 	tree := replaySetLines(t, []string{
-		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 virtual-address 10.0.61.3",
+		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 virtual-address 10.0.61.3/24",
 		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 track-interface ge-0/0/1",
 		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 track-priority-cost 30",
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
@@ -252,7 +252,7 @@ func TestVRRPTrackInterface_NestedWinsOverSibling_BothOrders(t *testing.T) {
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address 10.0.61.3;
+                        virtual-address 10.0.61.3/24;
                         priority 200;
                         track-interface ge-0/0/1 {
                             priority-cost 20;
@@ -291,7 +291,7 @@ func TestVRRPTrackInterface_NestedWinsOverSibling_BothOrders(t *testing.T) {
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address 10.0.61.3;
+                        virtual-address 10.0.61.3/24;
                         priority 200;
                         track-priority-cost 30;
                         track-interface ge-0/0/1 {
@@ -348,7 +348,7 @@ const trackDuplicateHier = `interfaces {
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address 10.0.61.3;
+                        virtual-address 10.0.61.3/24;
                         priority 200;
                         track-interface ge-0/0/1 {
                             priority-cost 20;
@@ -418,7 +418,7 @@ func TestVRRPTrackInterface_MissingCostWarning(t *testing.T) {
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address 10.0.61.3;
+                        virtual-address 10.0.61.3/24;
                         priority 200;
                         track-interface ge-0/0/1;
                     }
@@ -446,7 +446,7 @@ func TestVRRPTrackInterface_OrphanSiblingCostWarning(t *testing.T) {
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address 10.0.61.3;
+                        virtual-address 10.0.61.3/24;
                         priority 200;
                         track-priority-cost 30;
                     }
@@ -470,7 +470,7 @@ func TestVRRPTrackInterface_OrphanPriorityCostChildWarning(t *testing.T) {
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address 10.0.61.3;
+                        virtual-address 10.0.61.3/24;
                         priority 200;
                         priority-cost 20;
                     }
@@ -515,7 +515,7 @@ func TestVRRPTrackInterface_OwnerPriority255Warning(t *testing.T) {
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address 10.0.61.3;
+                        virtual-address 10.0.61.3/24;
                         priority 255;
                         track-interface ge-0/0/1 {
                             priority-cost 20;
@@ -593,7 +593,7 @@ func TestVRRPTrackInterface_KeysPackedDuplicateStrictReject(t *testing.T) {
         unit 0 {
             family inet {
                 address 10.0.61.1/24 {
-                    vrrp-group 1 virtual-address 10.0.61.3 track-interface ge-0/0/2 track-interface ge-0/0/3;
+                    vrrp-group 1 virtual-address 10.0.61.3/24 track-interface ge-0/0/2 track-interface ge-0/0/3;
                 }
             }
         }
@@ -648,7 +648,7 @@ func TestVRRPTrackInterface_CostRangeValidation(t *testing.T) {
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address 10.0.61.3;
+                        virtual-address 10.0.61.3/24;
                         priority 200;
                         track-interface ge-0/0/2 {
                             priority-cost ` + val + `;
@@ -708,7 +708,7 @@ func TestVRRPTrackInterface_DuplicateCostChildValidated(t *testing.T) {
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address 10.0.61.3;
+                        virtual-address 10.0.61.3/24;
                         priority 200;
                         track-interface ge-0/0/2 {
                             priority-cost 20;

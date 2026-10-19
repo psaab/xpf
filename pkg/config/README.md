@@ -991,6 +991,24 @@ or peer-synced config an older binary accepted still boots (#1960 no-brick).
 This is config-only commit-time validation — it never touches the VRRP
 runtime/state machine. Same fail-closed-on-load doctrine as #2911.
 
+**VRRP virtual-address must carry a prefix (#15050):** the structured
+`virtual-address` leaf is CIDR-gated (`ValidateIPv4CIDR`/`ValidateIPv6CIDR`),
+but the PACKED hierarchical one-liner `vrrp-group 1 virtual-address 10.0.1.100;`
+packs the value onto the instance node's Keys as an unvalidated identity token,
+so a bare Junos-style VIP passed `SchemaValidate` and strict compile verbatim.
+At runtime `pkg/vrrp` passes it to `netlink.ParseAddr`, which requires a
+prefix; the parse failure makes every promotion fail-closed (#5082) and revert
+to BACKUP — the gateway has no owner on every node carrying the config.
+`validateVRRPVIPPrefixStrict` (`compiler_validate_strict_vrrp_vipprefix.go`),
+wired beside the #8483 timers gate, hard-rejects a prefix-less VIP at
+commit/commit-check naming the interface, unit, group and VIP. The tolerant
+load/peer-sync path downgrades to a warning (`lenientVRRPVIPPrefix`, #1960
+no-brick) and `normalizeBareVRRPVIPs` rewrites the bare VIP with the enclosing
+unit address prefix (or `/32`/`/128` when no same-family prefix exists) so the
+leniently-loaded config actuates instead of reverting every promotion. Garbage
+literals that parse as neither CIDR nor IP remain the #7577 empty gate's
+concern and are not re-reported here.
+
 **VRRP virtual-address count must fit one advertisement (#6779):** RFC 5798
 §5.2.4 makes an advertisement's "Count IPvX Addr" a single byte, so one advert
 carries at most 255 addresses of a family — 254 for IPv6, where §6.1 reserves

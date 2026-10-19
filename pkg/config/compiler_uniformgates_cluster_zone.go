@@ -277,6 +277,24 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
+	// #15050 VRRP bare-virtual-address gate, beside the #8483 timers gate.
+	// Strict on commit / commit-check (hard-reject a prefix-less
+	// virtual-address — netlink.ParseAddr requires a prefix, so the VIP
+	// never actuates and #5082 fail-closed reverts every promotion,
+	// leaving the gateway ownerless). The packed hierarchical one-liner
+	// bypasses the schema's ValidateIPv4CIDR/ValidateIPv6CIDR leaf for
+	// the reason documented above. Lenient on load / peer-sync (#1960
+	// no-brick): warn here; the tail gates normalize the bare VIP to its
+	// enclosing prefix (or /32//128) so the tolerant config actuates.
+	if err := validateVRRPVIPPrefixStrict(cfg); err != nil {
+		if opts.lenientVRRPVIPPrefix {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("vrrp bare virtual-address (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #3055 reserved zone-name definition gate. Strict on commit / commit-check
 	// (hard-reject a `security zones security-zone <name>` whose name is a
 	// reserved sentinel — "junos-global" is reclassified by the userspace

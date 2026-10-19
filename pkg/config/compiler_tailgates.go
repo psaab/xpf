@@ -87,6 +87,16 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 	}
 	cfg.Warnings = append(cfg.Warnings, vaWarnings...)
 
+	// #15050: tolerant-path normalization for the bare-virtual-address
+	// gate. The uniform-gate phase already warned (lenient) or rejected
+	// (strict, so this never runs with a bare VIP left); here a leniently
+	// loaded bare VIP gains its enclosing prefix (or /32//128) so it
+	// actuates instead of reverting every promotion. Strict path: no
+	// bare VIP survives the gate, so this is a no-op there.
+	if opts.lenientVRRPVIPPrefix {
+		cfg.Warnings = append(cfg.Warnings, normalizeBareVRRPVIPs(cfg)...)
+	}
+
 	// #4114: port-scan / ip-sweep detection-window advisory. The `threshold`
 	// is a Junos MICROSECOND detection WINDOW (the detection count is a fixed
 	// constant); a value outside the Junos [1000, 1000000] us range is

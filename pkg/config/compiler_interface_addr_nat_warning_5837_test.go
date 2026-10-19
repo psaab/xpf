@@ -131,7 +131,7 @@ func TestStaticNATInterfaceAddressCollisionWarns(t *testing.T) {
 func TestDNATVRRPVIPCollisionWarns(t *testing.T) {
 	lines := []string{
 		"set interfaces reth0 unit 0 family inet address 172.16.50.2/24",
-		"set interfaces reth0 unit 0 family inet address 172.16.50.2/24 vrrp-group 1 virtual-address 172.16.50.1",
+		"set interfaces reth0 unit 0 family inet address 172.16.50.2/24 vrrp-group 1 virtual-address 172.16.50.1/24",
 		"set security zones security-zone untrust interfaces reth0.0",
 		"set security nat destination pool P1 address 10.0.30.100",
 		"set security nat destination rule-set RD from zone untrust",
