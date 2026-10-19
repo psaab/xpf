@@ -3661,6 +3661,7 @@ fn persistent_reverse_collision_keeps_both_lease_permissions_14046() {
             internal_ip: pat_flow.src_ip,
             internal_port: 40_000,
             address_only: false,
+            lease_key: Some(pat_flow.persistent_source_key(PersistentNatPermit::TargetHostPort)),
         },
         "PAT remote resolves to its internal endpoint"
     );
@@ -3670,6 +3671,7 @@ fn persistent_reverse_collision_keeps_both_lease_permissions_14046() {
             internal_ip: addr_flow.src_ip,
             internal_port: 40_000,
             address_only: true,
+            lease_key: Some(addr_flow.persistent_source_key(PersistentNatPermit::TargetHostPort)),
         },
         "address-only remote resolves to its internal endpoint"
     );
@@ -3703,6 +3705,7 @@ fn persistent_reverse_collision_keeps_both_lease_permissions_14046() {
             internal_ip: addr_flow.src_ip,
             internal_port: 40_000,
             address_only: true,
+            lease_key: Some(addr_flow.persistent_source_key(PersistentNatPermit::TargetHostPort)),
         },
         "removing PAT lease keeps the colliding address-only lease indexed"
     );
@@ -3712,6 +3715,7 @@ fn persistent_reverse_collision_keeps_both_lease_permissions_14046() {
             internal_ip: addr_flow.src_ip,
             internal_port: 40_000,
             address_only: true,
+            lease_key: Some(addr_flow.persistent_source_key(PersistentNatPermit::TargetHostPort)),
         },
         "removing the PAT owner resolves the shared permission to the remaining lease"
     );
@@ -3768,6 +3772,7 @@ fn expired_lease_recreation_drops_obsolete_remote_permissions_14113() {
             internal_ip: replacement.src_ip,
             internal_port: replacement.src_port,
             address_only: false,
+            lease_key: Some(replacement.persistent_source_key(PersistentNatPermit::TargetHostPort)),
         },
         "new lease remote grant remains admitted"
     );

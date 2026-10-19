@@ -239,7 +239,7 @@ impl PortAllocator {
         live.persistent_by_source
             .iter()
             .filter(|(_, lease)| {
-                !lease.revoked && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+                !lease.revoked && (lease.active_flows > 0 || lease.inbound_flows > 0 || lease.expires_at_ns > now_ns)
             })
             .map(|(key, lease)| {
                 let permissions = live.persistent_permissions.get(key);
@@ -486,6 +486,7 @@ impl PortAllocator {
                 expires_at_ns,
                 timeout_ns,
                 active_flows: 0,
+                inbound_flows: 0,
                 completed_flows: 0,
                 activation_saw_completion: false,
                 activation_previous_expires_at_ns: 0,

@@ -98,7 +98,7 @@ fn h1_idle(permit: PersistentNatPermit) -> (PortAllocator, Vec<Ipv4Addr>, Transl
             PersistentInbound::Permitted {
                 internal_ip,
                 internal_port: 4000,
-                address_only: true
+                address_only: true, lease_key: _
             } if internal_ip == "10.0.1.1".parse::<IpAddr>().unwrap()
         ),
         "fixture: idle H1 lease must permit inbound before H2, got {inbound:?}"

@@ -554,6 +554,41 @@ fn should_record_rx_descriptor_telemetry(is_injected: bool, was_replay: bool) ->
 }
 
 #[allow(clippy::too_many_arguments)]
+/// #15111: take the inbound persistent lease hold once the final NAT
+/// decision is known. Skipped when SNAT composed a source rewrite (that
+/// flow joins the lease via active_flows instead) or for NAT64/NPTv6.
+pub(super) fn acquire_persistent_inbound_hold(
+    forwarding: &crate::afxdp::ForwardingState,
+    hold: Option<crate::nat::PersistentSourceKey>,
+    decision_nat: crate::nat::NatDecision,
+    now_ns: u64,
+) -> bool {
+    let Some(key) = hold else { return false; };
+    if decision_nat.rewrite_src.is_some() || decision_nat.rewrite_dst.is_none() || decision_nat.nat64 || decision_nat.nptv6 {
+        return false;
+    }
+    for rule in &forwarding.source_nat_rules {
+        if rule.pool_mode && rule.pool_allocator.acquire_persistent_inbound(key, now_ns) {
+            return true;
+        }
+    }
+    false
+}
+
+/// #15111: drop an inbound hold that will not be anchored by a session.
+pub(super) fn rollback_persistent_inbound_hold(
+    forwarding: &crate::afxdp::ForwardingState,
+    hold: Option<crate::nat::PersistentSourceKey>,
+    now_ns: u64,
+) {
+    let Some(key) = hold else { return; };
+    for rule in &forwarding.source_nat_rules {
+        if rule.pool_mode {
+            rule.pool_allocator.rollback_persistent_inbound(key, now_ns);
+        }
+    }
+}
+
 pub(super) fn poll_binding_process_descriptor_with_injection(
     binding: &mut BindingWorker,
     binding_index: usize,
@@ -2067,6 +2102,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 let mut pre_routing_dnat_counter: Option<
                     std::sync::Arc<crate::nat::NatRuleCounter>,
                 > = None;
+                // #15111: persistent lease key held by an inbound session installed in this miss iteration (allocator resolved at install time).
+                let mut persistent_lease_hold_outer: Option<crate::nat::PersistentSourceKey> = None;
                 // #3918/#5147: snapshot EVERY shard's neighbor-MAC-change
                 // epoch BEFORE the neighbor MAC that backs this packet's
                 // forwarding decision is resolved. `resolve_flow_session_
@@ -3707,6 +3744,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 )
                         };
                         let mut persistent_dnat = None;
+                        let mut persistent_lease_hold: Option<crate::nat::PersistentSourceKey> = None;
                         let mut persistent_dnat_denied = false;
                         if !ndp_hop255 && static_dnat_decision.is_none() {
                             for rule in &worker_ctx.forwarding.source_nat_rules {
@@ -3772,6 +3810,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         internal_ip,
                                         internal_port,
                                         address_only,
+                                        lease_key,
                                     } => {
                                         let candidate = NatDecision {
                                             rewrite_dst: Some(internal_ip),
@@ -3784,6 +3823,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         {
                                             persistent_dnat_denied = true;
                                         } else {
+                                            if persistent_dnat.is_none() {
+                                                persistent_lease_hold = lease_key;
+                                                persistent_lease_hold_outer = lease_key;
+                                            }
                                             persistent_dnat = Some(candidate);
                                         }
                                     }
@@ -5224,6 +5267,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     worker_ctx.forwarding.has_routing_domains,
                                 )
                             {
+                                // #15111: host-local inbound session anchors the lease hold.
+                                if acquire_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold_outer, decision.nat, now_ns) { persistent_lease_hold_outer = None; }
                                 telemetry.counters.session_creates += 1;
                                 telemetry.dbg.session_create += 1;
                                 // #14120: replay state for LocalDelivery
@@ -5314,6 +5359,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             }
                             if !local_session_capacity_available {
                                 sessions.note_admission_refused();
+                                if persistent_lease_hold_outer.is_some() { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_lease_hold_outer = None; }
                             }
                         }
                         // #5690: the generic embedded-ICMP NAT reversal is
@@ -5721,6 +5767,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     }
                                     None
                                 };
+                                // #15111: final NAT is composed; take the inbound lease hold unless SNAT joined it via active_flows.
+                                let mut persistent_inbound_acquired = acquire_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold_outer, decision.nat, now_ns);
+                                if persistent_inbound_acquired { persistent_lease_hold_outer = None; }
                                 // #12904: allocation composed the final NAT
                                 // tuple (SNAT/NPTv6/NAT64 translated source),
                                 // which can match a selector pair the
@@ -5766,6 +5815,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         now_ns,
                                         worker_id,
                                     );
+                                    if persistent_inbound_acquired { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_inbound_acquired = false; }
                                     telemetry.dbg.policy_deny += 1;
                                     telemetry.counters.touched = true;
                                     binding.scratch.scratch_recycle.push(desc.addr);
@@ -5831,6 +5881,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         now_ns,
                                         worker_id,
                                     );
+                                    if persistent_inbound_acquired { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_inbound_acquired = false; }
                                     binding.scratch.scratch_forwards.push(request);
                                     // #14831: consume the descriptor, as on
                                     // session hits. The prebuilt reply owns
@@ -5856,6 +5907,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         now_ns,
                                         worker_id,
                                     );
+                                    if persistent_inbound_acquired { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_inbound_acquired = false; }
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
                                 } else {
@@ -6050,6 +6102,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     }
                                     if needed_sessions > 0 && !admission_allowed {
                                         sessions.note_admission_refused();
+                                        if persistent_inbound_acquired { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_inbound_acquired = false; }
                                         rollback_source_nat_allocation_for_worker(
                                             &worker_ctx.forwarding.iface_nat_allocators,
                                             &worker_ctx.forwarding.source_nat_rules,
@@ -6199,6 +6252,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             Ok(permits) => permits,
                                             Err(_) => {
                                                 sessions.note_admission_refused();
+                                                if persistent_inbound_acquired { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_inbound_acquired = false; }
                                                 rollback_source_nat_allocation_for_worker(
                                                     &worker_ctx.forwarding.iface_nat_allocators,
                                                     &worker_ctx.forwarding.source_nat_rules,
@@ -6388,6 +6442,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             "forward install failed after can_admit preflight"
                                         );
                                         sessions.note_install_partial();
+                                        if persistent_inbound_acquired { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_inbound_acquired = false; }
                                         rollback_source_nat_allocation_for_worker(
                                             &worker_ctx.forwarding.iface_nat_allocators,
                                             &worker_ctx.forwarding.source_nat_rules,
@@ -6662,6 +6717,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // release any allocation. No-op for the
                                         // DNS fast-path (its guard requires no
                                         // NAT).
+                                        if persistent_inbound_acquired { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_inbound_acquired = false; }
                                         rollback_source_nat_allocation_for_worker(
                                             &worker_ctx.forwarding.iface_nat_allocators,
                                             &worker_ctx.forwarding.source_nat_rules,
@@ -6944,6 +7000,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // resolved from the POST-translation dst port
                                 // (#2520/#3058) so a DNAT'd deny logs the inside
                                 // app, not UNKNOWN(pre-NAT port).
+                                if persistent_lease_hold_outer.is_some() { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_lease_hold_outer = None; }
                                 let policy_app_id = resolve_policy_deny_app_id(
                                     &worker_ctx.forwarding.app_catalog,
                                     flow,
@@ -7155,7 +7212,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta.tcp_flags,
                                             );
                                         }
-                                        install_helper_local_session_on_miss(
+                                        if install_helper_local_session_on_miss(
                                             sessions,
                                             binding.bpf_maps.session_map.handle(),
                                             worker_ctx.shared_sessions,
@@ -7170,7 +7227,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             meta.protocol,
                                             meta.tcp_flags,
                                             worker_ctx.forwarding.has_routing_domains,
-                                        );
+                                        ) {
+                                            // #15111: punt seed anchors the inbound hold.
+                                            if acquire_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold_outer, decision.nat, now_ns) { persistent_lease_hold_outer = None; }
+                                        }
                                     } else {
                                         sessions.note_admission_refused();
                                     }
@@ -10870,6 +10930,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 worker_id,
                                             );
                                         }
+                                        if persistent_lease_hold_outer.is_some() { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold_outer, now_ns); persistent_lease_hold_outer = None; }
                                         telemetry.dbg.policy_deny += 1;
                                         telemetry.counters.touched = true;
                                         break 'missing_neighbor StageOutcome::RecycleAndContinue;
@@ -11112,6 +11173,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             );
                                     // Permit held in seed_install_permit_14661
                                     // until after the shared/BPF publish below.
+                                    // #15111: committed seed anchors the inbound hold (pending_decision carries the DNAT).
+                                    if pending_installed && acquire_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold_outer, pending_decision.nat, now_ns) { persistent_lease_hold_outer = None; }
                                     let pending_install_info = pending_installed.then(|| {
                                         sessions
                                             .installed_session_info(&flow.forward_key)
@@ -11354,6 +11417,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // and drop the frame instead of
                                         // buffering it for replay.
                                         seed_install_refused = true;
+                                        if persistent_lease_hold_outer.is_some() { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold_outer, now_ns); persistent_lease_hold_outer = None; }
                                         rollback_source_nat_allocation_for_worker(
                                             &worker_ctx.forwarding.iface_nat_allocators,
                                             &worker_ctx.forwarding.source_nat_rules,

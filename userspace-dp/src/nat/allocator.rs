@@ -122,22 +122,14 @@ pub(super) fn bounded_persistent_nat_timeout_ns(timeout_ns: u64) -> u64 {
 const MAX_SOURCE_NAT_POOL_TRACKED_FLOWS: usize = 262_144;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct PersistentSourceKey {
-    pub(super) protocol: u8,
-    pub(super) src_ip: IpAddr,
-    pub(super) src_port: u16,
-    /// #10018: persistent leases are partitioned by the flow's routing
-    /// domain, just like `SourceNatFlowKey`. The allocator itself remains
-    /// shared across rules and tenants (#9389), because `(translated_ip, port)`
-    /// occupancy is a shared wire resource; only source-identity lease reuse
-    /// is scoped. A scope omitted here lets overlapping subscribers in
-    /// different VRFs share one lease and one translated tuple.
-    pub(super) routing_scope: u32,
-    /// Retained as an always-`None` compatibility field while the peer record
-    /// schema is migrated. Permit-scoped remote grants live separately in
-    /// `PortAllocatorLiveState::persistent_permissions`; they never alter the
-    /// endpoint-independent lease identity.
-    pub(super) remote: Option<(IpAddr, u16)>,
+pub(crate) struct PersistentSourceKey {
+    pub(crate) protocol: u8,
+    pub(crate) src_ip: IpAddr,
+    pub(crate) src_port: u16,
+    /// #10018: routing domain partition (see PersistentLease docs).
+    pub(crate) routing_scope: u32,
+    /// Always-None compatibility field; grants live in persistent_permissions.
+    pub(crate) remote: Option<(IpAddr, u16)>,
 }
 
 /// #14322: egress-zone scope for persistent-NAT inbound PERMISSIONS.
@@ -961,6 +953,11 @@ pub(super) struct PersistentLease {
     pub(super) expires_at_ns: u64,
     pub(super) timeout_ns: u64,
     pub(super) active_flows: u32,
+    // #15111: inbound persistent sessions holding this binding. Counted
+    // separately from active_flows (outbound/synced joins) so lease expiry,
+    // GC, clear, and lookup treat an inbound-only binding as live. Released
+    // via release_persistent_inbound when the inbound session tears down.
+    pub(super) inbound_flows: u32,
     pub(super) completed_flows: u64,
     // Rollback needs per-activation completion state, not a comparison
     // against lifetime completion counters. The latter can saturate over
@@ -1053,6 +1050,7 @@ pub(crate) struct PersistentLeaseDebugState {
     pub(crate) expires_at_ns: u64,
     pub(crate) timeout_ns: u64,
     pub(crate) active_flows: u32,
+    pub(crate) inbound_flows: u32,
     pub(crate) completed_flows: u64,
     pub(crate) activation_saw_completion: bool,
     pub(crate) activation_previous_expires_at_ns: u64,
@@ -1338,6 +1336,7 @@ impl PortAllocatorLiveState {
                 || !lease.address_only
                 || lease.revoked
                 || lease.active_flows > 0
+                || lease.inbound_flows > 0
             {
                 return false;
             }
@@ -1363,6 +1362,7 @@ impl PortAllocatorLiveState {
                             lease.address_only
                                 && !lease.revoked
                                 && lease.active_flows == 0
+                                && lease.inbound_flows == 0
                                 && lease.translated == translated
                                 && !self.persistent_permissions.contains_key(key)
                         })
@@ -2349,6 +2349,7 @@ pub(crate) enum PersistentInbound {
         internal_ip: IpAddr,
         internal_port: u16,
         address_only: bool,
+        lease_key: Option<PersistentSourceKey>,
     },
 }
 impl PortAllocator {
@@ -2491,7 +2492,11 @@ impl PortAllocator {
             let Some(lease) = live.persistent_by_source.get(key) else {
                 continue;
             };
-            if lease.revoked || (lease.active_flows == 0 && lease.expires_at_ns <= now_ns) {
+            if lease.revoked
+                || (lease.active_flows == 0
+                    && lease.inbound_flows == 0
+                    && lease.expires_at_ns <= now_ns)
+            {
                 continue;
             }
             // #15133: a lease this rule never minted on (no bucket for its
@@ -2512,6 +2517,7 @@ impl PortAllocator {
                 internal_ip: key.src_ip,
                 internal_port: key.src_port,
                 address_only: lease.address_only,
+                lease_key: Some(*key),
             };
             if matched.is_some_and(|previous| previous != candidate) {
                 return PersistentInbound::Denied;
@@ -2523,6 +2529,42 @@ impl PortAllocator {
             None if saw_lease => PersistentInbound::Denied,
             None => PersistentInbound::Miss,
         }
+    }
+    /// #15111: take an inbound reference on a persistent lease. Returns
+    /// false if the lease is gone/revoked/expired-idle. On the 0->1 inbound
+    /// edge with no outbound flows, removes the idle expiry index entry.
+    pub(crate) fn acquire_persistent_inbound(&self, key: PersistentSourceKey, now_ns: u64) -> bool {
+        let mut live = self.lock_live();
+        let Some(lease) = live.persistent_by_source.get(&key).copied() else { return false; };
+        if lease.revoked || (lease.active_flows == 0 && lease.inbound_flows == 0 && lease.expires_at_ns <= now_ns) { return false; }
+        if lease.inbound_flows == 0 && lease.active_flows == 0 {
+            Self::remove_lease_expiration_locked(&mut live, lease.addr_index, lease.expires_at_ns, key);
+        }
+        if let Some(l) = live.persistent_by_source.get_mut(&key) { l.inbound_flows = l.inbound_flows.saturating_add(1); }
+        true
+    }
+    /// #15111: release one inbound reference; on last holder re-arms expiry.
+    pub(crate) fn release_persistent_inbound(&self, key: PersistentSourceKey, now_ns: u64) {
+        let mut live = self.lock_live();
+        let mut refresh = None;
+        if let Some(lease) = live.persistent_by_source.get_mut(&key) {
+            if lease.inbound_flows == 0 { return; }
+            lease.inbound_flows = lease.inbound_flows.saturating_sub(1);
+            if lease.inbound_flows == 0 && lease.active_flows == 0 {
+                let old = lease.expires_at_ns;
+                let new = if lease.revoked { now_ns } else { now_ns.saturating_add(lease.timeout_ns) };
+                lease.expires_at_ns = new;
+                refresh = Some((lease.addr_index, old, new));
+            }
+        }
+        if let Some((addr, old, new)) = refresh {
+            Self::remove_lease_expiration_locked(&mut live, addr, old, key);
+            Self::insert_lease_expiration_locked(&mut live, addr, new, key);
+        }
+    }
+    /// #15111: rollback an inbound hold for a failed install (same as release).
+    pub(crate) fn rollback_persistent_inbound(&self, key: PersistentSourceKey, now_ns: u64) {
+        self.release_persistent_inbound(key, now_ns);
     }
 
     /// Resolve an unsolicited packet addressed to a persistent NAT tuple.
@@ -2641,13 +2683,13 @@ impl PortAllocator {
                 if newly_revoked {
                     count += 1;
                 }
-                let revoked_until_ns = if lease.active_flows == 0 {
+                let revoked_until_ns = if lease.active_flows == 0 && lease.inbound_flows == 0 {
                     replay_until_ns
                 } else {
                     ACTIVE_PERSISTENT_NAT_CLEAR_TOMBSTONE_NS
                 };
                 live.revoked_persistent.insert(key, revoked_until_ns);
-                if lease.active_flows != 0 {
+                if lease.active_flows != 0 || lease.inbound_flows != 0 {
                     if newly_revoked {
                         live.remove_persistent_address_only_owner(key, lease);
                         if let Some(stored_lease) = live.persistent_by_source.get_mut(&key) {
@@ -3074,6 +3116,7 @@ impl PortAllocator {
         };
         if !lease.imported
             || lease.active_flows != 0
+            || lease.inbound_flows != 0
             || lease.translated.ip != rec.translated_ip
             || lease.translated.port != rec.translated_port
             || lease.address_only != rec.address_only
@@ -3395,7 +3438,7 @@ impl PortAllocator {
                 .get(&key)
                 .is_some_and(|lease| {
                     !lease.revoked
-                        && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+                        && (lease.active_flows > 0 || lease.inbound_flows > 0 || lease.expires_at_ns > now_ns)
                         && live.persistent_permissions.get(&key).is_some_and(|permissions| {
                             !permissions.can_record(persistent_nat_permit, flow, egress_scope)
                         })
@@ -3505,6 +3548,7 @@ impl PortAllocator {
                             expires_at_ns,
                             timeout_ns,
                             active_flows: 1,
+                            inbound_flows: 0,
                             completed_flows: 0,
                             activation_saw_completion: false,
                             activation_previous_expires_at_ns: 0,
@@ -3588,7 +3632,7 @@ impl PortAllocator {
     ) -> LeaseReuse {
         if let Some(lease) = live.persistent_by_source.get(&key).copied() {
             if lease.revoked {
-                if lease.active_flows != 0 {
+                if lease.active_flows != 0 || lease.inbound_flows != 0 {
                     return LeaseReuse::LiveModeMismatch;
                 }
                 // A revoked active shell becomes idle before ordinary GC gets
@@ -3616,7 +3660,7 @@ impl PortAllocator {
         // timeout) and a live lease whose prior flow used another remote.
         if let Some(lease) = live.persistent_by_source.get(&key) {
             if !lease.address_only
-                && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+                && (lease.active_flows > 0 || lease.inbound_flows > 0 || lease.expires_at_ns > now_ns)
                 && live.address_only_owns_wire_identity(&flow, lease.translated)
             {
                 return LeaseReuse::WireIdentityConflict;
@@ -3647,10 +3691,10 @@ impl PortAllocator {
             // disagreeing LIVE address-only lease is left standing (#9536, the
             // arm below). Neither is silently ignored, and neither is freed by
             // the wrong path.
-            if !lease.address_only && (lease.active_flows > 0 || lease.expires_at_ns > now_ns) {
+            if !lease.address_only && (lease.active_flows > 0 || lease.inbound_flows > 0 || lease.expires_at_ns > now_ns) {
                 let translated = lease.translated;
                 let addr_index = lease.addr_index;
-                if lease.active_flows == 0 {
+                if lease.active_flows == 0 && lease.inbound_flows == 0 {
                     remove_expiry = Some((addr_index, lease.expires_at_ns));
                     lease.activation_saw_completion = false;
                     lease.activation_previous_expires_at_ns = lease.expires_at_ns;
@@ -3678,7 +3722,7 @@ impl PortAllocator {
                 let expires_at_ns = now_ns.saturating_add(local_timeout_ns);
                 lease.expires_at_ns = expires_at_ns;
                 reusable = Some((translated, addr_index));
-            } else if lease.address_only && lease.active_flows > 0 {
+            } else if lease.address_only && (lease.active_flows > 0 || lease.inbound_flows > 0) {
                 // #9536: MODE MISMATCH UNDER A LIVE ADDRESS-ONLY LEASE -- the
                 // mirror of #9158's arm in `reserve_address_only_persistent`.
                 //
@@ -3775,7 +3819,7 @@ impl PortAllocator {
         let Some(lease) = live.persistent_by_source.get(&key).copied() else {
             return false;
         };
-        if lease.active_flows != 0 || (!lease.revoked && lease.expires_at_ns > now_ns) {
+        if lease.active_flows != 0 || lease.inbound_flows != 0 || (!lease.revoked && lease.expires_at_ns > now_ns) {
             return false;
         }
         Self::remove_lease_expiration_locked(live, lease.addr_index, lease.expires_at_ns, key);
@@ -3940,7 +3984,7 @@ impl PortAllocator {
             lease.completed_flows = lease.completed_flows.saturating_add(1);
             lease.activation_saw_completion = true;
             lease.active_flows = lease.active_flows.saturating_sub(1);
-            if lease.active_flows == 0 {
+            if lease.active_flows == 0 && lease.inbound_flows == 0 {
                 let old_expires_at_ns = lease.expires_at_ns;
                 let expires_at_ns = if revoked {
                     now_ns
@@ -3981,6 +4025,7 @@ impl PortAllocator {
             expires_at_ns: lease.expires_at_ns,
             timeout_ns: lease.timeout_ns,
             active_flows: lease.active_flows,
+            inbound_flows: lease.inbound_flows,
             completed_flows: lease.completed_flows,
             activation_saw_completion: lease.activation_saw_completion,
             activation_previous_expires_at_ns: lease.activation_previous_expires_at_ns,
@@ -4180,7 +4225,7 @@ impl PortAllocator {
             let mut insert_expiry = None;
             if let Some(lease) = live.persistent_by_source.get_mut(&key) {
                 lease.active_flows = lease.active_flows.saturating_sub(1);
-                if lease.active_flows == 0 {
+                if lease.active_flows == 0 && lease.inbound_flows == 0 {
                     if revoked {
                         lease.expires_at_ns = now_ns;
                         insert_expiry = Some((lease.addr_index, now_ns));
@@ -4201,7 +4246,7 @@ impl PortAllocator {
                 && live
                     .persistent_by_source
                     .get(&key)
-                    .is_some_and(|lease| lease.active_flows == 0)
+                    .is_some_and(|lease| lease.active_flows == 0 && lease.inbound_flows == 0)
             {
                 live.revoked_persistent.insert(
                     key,
@@ -4571,7 +4616,7 @@ impl PortAllocator {
                     probe_start = Some(port_start as u16);
                     continue;
                 }
-                if let Some(expired) = live.persistent_by_source.get(&bib_key).copied().filter(|lease| lease.active_flows == 0 && lease.expires_at_ns <= now_ns) {
+                if let Some(expired) = live.persistent_by_source.get(&bib_key).copied().filter(|lease| lease.active_flows == 0 && lease.inbound_flows == 0 && lease.expires_at_ns <= now_ns) {
                     Self::remove_lease_expiration_locked(&mut live, expired.addr_index, expired.expires_at_ns, bib_key);
                     live.remove_persistent_lease(&bib_key);
                     if !expired.address_only { self.free_translated_port(expired.addr_index, expired.translated.port); }
@@ -4580,7 +4625,7 @@ impl PortAllocator {
                     continue;
                 }
                 if let Some(lease) = live.persistent_by_source.get(&bib_key).copied() {
-                    if lease.deterministic && lease.deterministic_identity == Some(super::idle_lease_sync_8121::DeterministicPortedIdentity::V6(params)) && lease.addr_index == ip_idx && lease.translated.ip == translated_ip && (port_start..=port_end).contains(&(lease.translated.port as u32)) && !lease.revoked && (lease.active_flows > 0 || lease.expires_at_ns > now_ns) {
+                    if lease.deterministic && lease.deterministic_identity == Some(super::idle_lease_sync_8121::DeterministicPortedIdentity::V6(params)) && lease.addr_index == ip_idx && lease.translated.ip == translated_ip && (port_start..=port_end).contains(&(lease.translated.port as u32)) && !lease.revoked && (lease.active_flows > 0 || lease.inbound_flows > 0 || lease.expires_at_ns > now_ns) {
                         // #14670: joining an existing BIB is a tracked flow
                         // too — the claimed-port reuse branch below already
                         // enforces this cap; the full-block branch must not
@@ -4589,7 +4634,7 @@ impl PortAllocator {
                             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
                             return Err(SourceNatFailureReason::AllocatorExhausted);
                         }
-                        let was_idle = lease.active_flows == 0;
+                        let was_idle = lease.active_flows == 0 && lease.inbound_flows == 0;
                         if was_idle { Self::remove_lease_expiration_locked(&mut live, lease.addr_index, lease.expires_at_ns, bib_key); }
                         // #14670: 0->1 re-arm activation-rollback bookkeeping
                         // (mirrors reuse_existing_lease_locked). Without it
@@ -4658,7 +4703,7 @@ impl PortAllocator {
                 self.free_translated_port(ip_idx, port);
                 return Ok(existing);
             }
-            if let Some(expired) = live.persistent_by_source.get(&bib_key).copied().filter(|lease| lease.active_flows == 0 && lease.expires_at_ns <= now_ns) {
+            if let Some(expired) = live.persistent_by_source.get(&bib_key).copied().filter(|lease| lease.active_flows == 0 && lease.inbound_flows == 0 && lease.expires_at_ns <= now_ns) {
                 Self::remove_lease_expiration_locked(&mut live, expired.addr_index, expired.expires_at_ns, bib_key);
                 live.remove_persistent_lease(&bib_key);
                 if !expired.address_only { self.free_translated_port(expired.addr_index, expired.translated.port); }
@@ -4670,14 +4715,14 @@ impl PortAllocator {
                     && lease.translated.ip == translated_ip
                     && (port_start..=port_end).contains(&(lease.translated.port as u32))
                     && !lease.revoked
-                    && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+                    && (lease.active_flows > 0 || lease.inbound_flows > 0 || lease.expires_at_ns > now_ns)
                 {
                     if live.live_by_flow.len() >= self.shared.max_tracked_flows {
                         drop(live);
                         self.free_translated_port(ip_idx, port);
                         return Err(SourceNatFailureReason::AllocatorExhausted);
                     }
-                    let was_idle = lease.active_flows == 0;
+                    let was_idle = lease.active_flows == 0 && lease.inbound_flows == 0;
                     if was_idle {
                         Self::remove_lease_expiration_locked(&mut live, lease.addr_index, lease.expires_at_ns, bib_key);
                     }
@@ -4747,6 +4792,7 @@ impl PortAllocator {
                 expires_at_ns,
                 timeout_ns: DETERMINISTIC_NAT64_BIB_TIMEOUT_NS,
                 active_flows: 1,
+                inbound_flows: 0,
                 completed_flows: 0,
                 activation_saw_completion: false,
                 activation_previous_expires_at_ns: 0,
@@ -5353,8 +5399,8 @@ impl PortAllocator {
                 // reactivated by a stale pre-clear session. The lease liveness
                 // test matches the local reuse predicate.
                 Some(lease) => {
-                    (!lease.revoked || lease.active_flows > 0)
-                        && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+                    (!lease.revoked || lease.active_flows > 0 || lease.inbound_flows > 0)
+                        && (lease.active_flows > 0 || lease.inbound_flows > 0 || lease.expires_at_ns > now_ns)
                 }
                 None => !live.persistent_nat_import_is_clear_fenced(key, now_ns),
             }
@@ -5408,7 +5454,7 @@ impl PortAllocator {
         // A synced persistent flow joins its existing source lease when present.
         if let Some((persistent_key, timeout_ns)) = persistent {
             if let Some(lease) = live.persistent_by_source.get(&persistent_key).copied() {
-                let was_idle = lease.active_flows == 0;
+                let was_idle = lease.active_flows == 0 && lease.inbound_flows == 0;
                 if let Some(lease) = live.persistent_by_source.get_mut(&persistent_key) {
                     // #8132: the 0 -> 1 edge re-arms the ACTIVATION-ROLLBACK
                     // bookkeeping, as the local reuse path does. Without it
@@ -5519,6 +5565,7 @@ impl PortAllocator {
                     expires_at_ns: now_ns.saturating_add(timeout_ns),
                     timeout_ns,
                     active_flows: 1,
+                    inbound_flows: 0,
                     completed_flows: 0,
                     activation_saw_completion: false,
                     activation_previous_expires_at_ns: 0,
@@ -5722,8 +5769,8 @@ impl PortAllocator {
                 // An expired idle replacement still awaiting GC must not be
                 // reactivated by a stale pre-clear session.
                 Some(lease) => {
-                    (!lease.revoked || lease.active_flows > 0)
-                        && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+                    (!lease.revoked || lease.active_flows > 0 || lease.inbound_flows > 0)
+                        && (lease.active_flows > 0 || lease.inbound_flows > 0 || lease.expires_at_ns > now_ns)
                 }
                 None => !live.persistent_nat_import_is_clear_fenced(key, now_ns),
             }
@@ -5753,7 +5800,7 @@ impl PortAllocator {
                 if lease.translated != translated || lease.addr_index != addr_index {
                     return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
                 }
-                if lease.active_flows == 0 {
+                if lease.active_flows == 0 && lease.inbound_flows == 0 {
                     idle_lease_to_deindex = Some((lease.addr_index, lease.expires_at_ns));
                 }
             }
@@ -5823,6 +5870,7 @@ impl PortAllocator {
                             expires_at_ns: now_ns.saturating_add(timeout_ns),
                             timeout_ns,
                             active_flows: 1,
+                            inbound_flows: 0,
                             completed_flows: 0,
                             activation_saw_completion: false,
                             activation_previous_expires_at_ns: 0,
@@ -6453,7 +6501,7 @@ impl PortAllocator {
         // falls to the expired arm, which tears down mode-correctly.
         if let Some(lease) = live.persistent_by_source.get(&key).copied() {
             if lease.revoked {
-                if lease.active_flows > 0 {
+                if lease.active_flows > 0 || lease.inbound_flows > 0 {
                     live_mode_mismatch = true;
                 } else {
                     expired = Some((
@@ -6464,10 +6512,10 @@ impl PortAllocator {
                         lease.deterministic,
                     ));
                 }
-            } else if lease.address_only && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+            } else if lease.address_only && (lease.active_flows > 0 || lease.inbound_flows > 0 || lease.expires_at_ns > now_ns)
             {
                 reuse_addr = Some((lease.translated.ip, lease.addr_index));
-            } else if !lease.address_only && lease.active_flows > 0 {
+            } else if !lease.address_only && (lease.active_flows > 0 || lease.inbound_flows > 0) {
                 // #9158: MODE MISMATCH UNDER A LIVE LEASE. An ordinary operator
                 // commit reaches here -- `allocator_key()` is built from the pool
                 // name, addresses and range and does NOT include
@@ -6661,7 +6709,7 @@ impl PortAllocator {
             // expiry out.
             let mut remove_expiry = None;
             if let Some(lease) = live.persistent_by_source.get_mut(&key) {
-                if lease.active_flows == 0 {
+                if lease.active_flows == 0 && lease.inbound_flows == 0 {
                     remove_expiry = Some((lease.addr_index, lease.expires_at_ns));
                     lease.activation_saw_completion = false;
                     lease.activation_previous_expires_at_ns = lease.expires_at_ns;
@@ -6707,6 +6755,7 @@ impl PortAllocator {
                     expires_at_ns,
                     timeout_ns,
                     active_flows: 1,
+                    inbound_flows: 0,
                     completed_flows: 0,
                     activation_saw_completion: false,
                     activation_previous_expires_at_ns: 0,
@@ -7073,7 +7122,7 @@ impl PortAllocator {
         let Some(lease) = live.persistent_by_source.get(&key).copied() else {
             return false;
         };
-        if lease.active_flows != 0 || lease.expires_at_ns != expires_at_ns {
+        if lease.active_flows != 0 || lease.inbound_flows != 0 || lease.expires_at_ns != expires_at_ns {
             return false;
         }
         // The lease still exists and is idle: its occupancy bit is still set

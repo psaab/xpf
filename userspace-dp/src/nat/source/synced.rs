@@ -193,6 +193,46 @@ pub(crate) fn reserve_synced_source_nat_allocation(
     );
 }
 
+
+/// #15111: acquire the inbound persistent hold for a synced inbound session.
+/// Mirrors `release_persistent_inbound_for_session`: the synced decision
+/// carries only `rewrite_dst`, so the outbound reserve body (gated on
+/// `rewrite_src`) never touches the lease. Per-worker fan-out and the
+/// coordinator untracked reserve each take one reference, matching the
+/// per-worker inbound release on teardown. No-op when no lease matches.
+pub(crate) fn acquire_persistent_inbound_for_synced(
+    rules: &[SourceNatRule],
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+) {
+    // A synced decision carrying a source rewrite joins its lease via
+    // `active_flows` in the reserve body; only a pure inbound (DNAT-only)
+    // decision needs the separate inbound hold. `rewrite_dst` is present on
+    // ordinary outbound synced decisions too (post-DNAT), so it must not
+    // trigger an inbound acquire on its own.
+    if is_reverse || nat.rewrite_src.is_some() {
+        return;
+    }
+    let Some(internal_ip) = nat.rewrite_dst else { return; };
+    if nat.nat64 || nat.nptv6 {
+        return;
+    }
+    let lease_key = crate::nat::PersistentSourceKey {
+        protocol: key.protocol,
+        src_ip: internal_ip,
+        src_port: nat.rewrite_dst_port.unwrap_or(key.dst_port),
+        routing_scope: key.routing_domain,
+        remote: None,
+    };
+    for rule in rules {
+        if rule.pool_mode && rule.pool_allocator.acquire_persistent_inbound(lease_key, now_ns) {
+            break;
+        }
+    }
+}
+
 /// #6211 F2: reserve a synced translation and record `worker_id` as a HOLDER.
 ///
 /// `handle_upsert_synced` runs on EVERY worker (the entry is fanned out to each
@@ -218,7 +258,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_for_worker(
     domains: SyncedSourceNatDomains<'_>,
 ) -> bool {
     let mut previous_holders = None;
-    reserve_synced_source_nat_allocation_with_holder(
+    let reserved = reserve_synced_source_nat_allocation_with_holder(
         iface_allocs,
         rules,
         key,
@@ -230,7 +270,11 @@ pub(crate) fn reserve_synced_source_nat_allocation_for_worker(
         false,
         &mut previous_holders,
         domains,
-    )
+    );
+    if reserved {
+        acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns);
+    }
+    reserved
 }
 
 /// #6600: the COORDINATOR-side reservation, taken BEFORE the shared session
@@ -254,7 +298,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked(
     domains: SyncedSourceNatDomains<'_>,
 ) -> bool {
     let mut previous_holders = None;
-    reserve_synced_source_nat_allocation_with_holder(
+    let reserved = reserve_synced_source_nat_allocation_with_holder(
         iface_allocs,
         rules,
         key,
@@ -266,7 +310,11 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked(
         false,
         &mut previous_holders,
         domains,
-    )
+    );
+    if reserved {
+        acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns);
+    }
+    reserved
 }
 /// Coordinator twin that also captures the incumbent reservation state before
 /// a same-flow translated-tuple replacement can retire it.
@@ -295,6 +343,9 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_holder_snapsho
         &mut previous_holders,
         domains,
     );
+    if reserved {
+        acquire_persistent_inbound_for_synced(rules, key, nat, is_reverse, now_ns);
+    }
     (reserved, previous_holders)
 }
 

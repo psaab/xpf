@@ -532,6 +532,7 @@ fn persistent_nat_destination(
                 internal_ip,
                 internal_port,
                 address_only,
+                lease_key: _,
             } => {
                 let candidate = NatDecision {
                     rewrite_dst: Some(internal_ip),
