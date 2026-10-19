@@ -19,13 +19,15 @@ import (
 // Fixtures use hierarchical text (NewParser) so both sides are authored
 // in BLOCK shape: destination-port { ...; }.
 
-func blockFilterTree14444(t *testing.T, groupBody, inlineBody string) *ConfigTree {
+// blockFilterTree14444Family builds the #14444 fixture under an explicit
+// firewall family spelling. blockFilterTree14444 is the inet instance.
+func blockFilterTree14444Family(t *testing.T, family, groupBody, inlineBody string) *ConfigTree {
 	t.Helper()
 	text := `
 groups {
     G {
         firewall {
-            family inet {
+            family ` + family + ` {
                 filter F {
                     term T1 {
                         from {
@@ -39,7 +41,7 @@ groups {
     }
 }
 firewall {
-    family inet {
+    family ` + family + ` {
         filter F {
             term T1 {
                 apply-groups G;
@@ -63,6 +65,40 @@ firewall {
 		t.Fatalf("ExpandGroups: %v", err)
 	}
 	return tree
+}
+
+func blockFilterTree14444(t *testing.T, groupBody, inlineBody string) *ConfigTree {
+	t.Helper()
+	return blockFilterTree14444Family(t, "inet", groupBody, inlineBody)
+}
+
+// compiledTerm14444Family returns term name from the compiled pool for
+// family: inet/implicit read FiltersInet, inet6 reads FiltersInet6, and
+// any reads FiltersInet (its IPv6 arm is checked separately where needed).
+func compiledTerm14444Family(t *testing.T, tree *ConfigTree, family, name string) *FirewallFilterTerm {
+	t.Helper()
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("CompileConfig: %v", err)
+	}
+	var filters map[string]*FirewallFilter
+	switch family {
+	case "inet6":
+		filters = cfg.Firewall.FiltersInet6
+	default:
+		filters = cfg.Firewall.FiltersInet
+	}
+	f := filters["F"]
+	if f == nil {
+		t.Fatalf("filter F not compiled for family %s", family)
+	}
+	for _, term := range f.Terms {
+		if term.Name == name {
+			return term
+		}
+	}
+	t.Fatalf("term %s not found in %v", name, f.Terms)
+	return nil
 }
 
 func compiledTerm14444(t *testing.T, tree *ConfigTree, name string) *FirewallFilterTerm {
@@ -534,4 +570,46 @@ firewall {
 	term := compiledTerm14444(t, tree, "T1")
 	// First adopted group (G1) stands as peer; G2 range must not union.
 	assertPorts14444(t, "two-group range override", term.DestinationPorts, []string{"3000-4000"})
+}
+
+// #15030 (A02-02): the #14444 pointer registry must cover `family any`.
+// The any tree is a #9017 deep copy with distinct schema pointers, so a
+// block-shaped apply-groups port member beside an inline block must union
+// range-free ([80 443] on both compiled arms) instead of taking OVERRIDE
+// and dropping the inherited port from the discard-adjacent term. These
+// cells live in this file per the #15030 fix direction; the #14966 file
+// covers the same mechanism with its own fixture.
+func TestGroupReplaceBlockAnyFamilyRangeFreeUnions15030(t *testing.T) {
+	for _, kw := range []string{"destination-port", "source-port", "destination-port-except", "source-port-except"} {
+		tree := blockFilterTree14444Family(t, "any", kw+" { 443; }", kw+" { 80; }")
+		for _, fam := range []string{"inet", "inet6"} {
+			term := compiledTerm14444Family(t, tree, fam, "T1")
+			var got []string
+			switch kw {
+			case "destination-port":
+				got = term.DestinationPorts
+			case "source-port":
+				got = term.SourcePorts
+			case "destination-port-except":
+				got = term.DestPortsExcept
+			case "source-port-except":
+				got = term.SourcePortsExcept
+			}
+			assertPorts14444(t, "family any/"+fam+" "+kw+" range-free union", got, []string{"80", "443"})
+		}
+	}
+}
+
+// Control: a range on either side under `family any` still overrides.
+func TestGroupReplaceBlockAnyFamilyRangeOverrides15030(t *testing.T) {
+	tree := blockFilterTree14444Family(t, "any",
+		"destination-port { 1000-2000; }", "destination-port { 80; }")
+	assertPorts14444(t, "family any group range override (inet arm)",
+		compiledTerm14444Family(t, tree, "inet", "T1").DestinationPorts, []string{"80"})
+	assertPorts14444(t, "family any group range override (inet6 arm)",
+		compiledTerm14444Family(t, tree, "inet6", "T1").DestinationPorts, []string{"80"})
+	tree2 := blockFilterTree14444Family(t, "any",
+		"destination-port { 443; }", "destination-port { 3000-4000; }")
+	assertPorts14444(t, "family any inline range override (inet arm)",
+		compiledTerm14444Family(t, tree2, "inet", "T1").DestinationPorts, []string{"3000-4000"})
 }
