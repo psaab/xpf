@@ -15882,8 +15882,15 @@ look silently supported:
   does not export the static route to another RIB. The route remains installed
   only in its enclosing routing table, and both strict and tolerant paths warn.
 - Per-instance `routing-options rib-groups` definitions and `generate` routes
-  are accepted but are not copied into the routing-instance forwarding
-  configuration. Both paths name the dropped scope and knob.
+  are retained in the compiled routing instance (#11782) but are not applied
+  to its forwarding configuration. Both paths name the dropped scope and knob.
+- Per-instance `routing-options` shares the global grammar by pointer for
+  every compiler-carried field (`static`, `rib`, `autonomous-system`,
+  `rib-groups`, `interface-routes`, `generate`, `forwarding-table`; #15065,
+  following #9351 for `protocols`), so the flat-set and hierarchical
+  spellings — and a `display set` restore of the latter — compile
+  identically. `router-id` stays global-only: the compiler reads it only
+  for the global block and carries no per-instance slot.
 - Per-instance `instance-import` and `instance-export` remain strict-rejected.
   Their diagnostics explain that xpf has no cross-RIB policy-leak engine; the
   global interface-routes rib-group path leaks connected prefixes only and is
