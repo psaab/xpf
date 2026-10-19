@@ -633,7 +633,7 @@ type SyslogUserConfig struct {
 	// authored first. The host sink already carried a slice
 	// (SyslogHostConfig.Facilities); this brings the user sink to the same
 	// shape. A destination with no authored pair has an empty slice and
-	// renders `*.*`, which is what an empty scalar pair rendered before.
+	// is omitted at render (#15708), not rendered as `*.*`.
 	Selectors []SyslogFacility
 }
 

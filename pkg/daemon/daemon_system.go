@@ -2201,10 +2201,10 @@ func syslogSelectorSeveritySafe(tok string) bool {
 // renders `daemon.info;auth.warning<TAB>/var/log/messages`, not two files
 // racing for the same path.
 //
-// EMPTY IS `*.*`, deliberately. Before #7187 these sinks held a scalar pair and
-// an unset one rendered `*.*` (both the empty facility and the empty severity
-// mapped to `*`). A destination authored with no selector at all keeps that
-// behaviour rather than silently disappearing.
+// EMPTY IS NOT `*.*` (#15708, superseding #7187): a destination with no
+// selector (e.g. modifier-only `file messages { archive { size 10m; } }`)
+// must not fabricate an unfiltered *.* sink logging everything. Return
+// ("", false) so the destination is omitted.
 //
 // AN UNSAFE SELECTOR IS DROPPED, NOT THE WHOLE DESTINATION — unless it was the
 // only one. The #5797 render belt skipped a destination whose single pair
@@ -2216,7 +2216,7 @@ func syslogSelectorSeveritySafe(tok string) bool {
 // that — nothing safe survived a non-empty list.
 func renderSyslogSelectorList(sels []config.SyslogFacility, kind, name string) (string, bool) {
 	if len(sels) == 0 {
-		return "*.*", true
+		return "", false
 	}
 	parts := make([]string, 0, len(sels))
 	for _, sel := range sels {

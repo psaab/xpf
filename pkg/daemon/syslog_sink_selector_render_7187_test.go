@@ -118,18 +118,13 @@ func TestAllUnsafeSelectorsSkipTheDestination7187(t *testing.T) {
 	}
 }
 
-// An empty selector list keeps rendering `*.*`. Before #7187 an unset scalar
-// pair rendered that (empty facility and empty severity both mapped to `*`), so
-// a destination authored with no selector must not silently disappear.
+// #15708 supersedes the #7187 empty-wildcard rule: an empty selector list
+// must NOT render `*.*` — a modifier-only stanza would otherwise log
+// everything. The destination is omitted.
 func TestEmptySelectorListStillRendersWildcard7187(t *testing.T) {
 	cfg := syslogCfg([]*config.SyslogFileConfig{{Name: "catchall"}}, nil)
-	body, ok := renderedFor(cfg, renderPrefix+"catchall.conf")
-	if !ok {
-		t.Fatal("a file destination with no authored selector stopped rendering; before " +
-			"#7187 it rendered `*.*`")
-	}
-	if !strings.Contains(body, "*.*") {
-		t.Errorf("empty selector list rendered %q, want the `*.*` wildcard", body)
+	if body, ok := renderedFor(cfg, renderPrefix+"catchall.conf"); ok {
+		t.Fatalf("a file destination with no authored selector rendered %q; #15708 requires omission, not *.*", body)
 	}
 }
 

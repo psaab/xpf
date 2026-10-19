@@ -405,8 +405,8 @@ bounded by this deadline.
   (`daemon.info;authorization.warning<TAB>/var/log/messages`) — rsyslog's
   selector field already expresses that OR, which is Junos' meaning for
   several statements under one stanza. Two knock-ons worth knowing:
-  an empty selector list still renders `*.*`, as an unset scalar pair
-  did; and an unsafe selector (the #5797 belt) now drops ITSELF rather
+  an empty selector list is omitted at render (#15708), not rendered
+  `*.*`; and an unsafe selector (the #5797 belt) now drops ITSELF rather
   than the whole destination, because deleting an operator's safe
   selectors because a sibling was poisoned is a worse outcome than the
   injection it defends against. For a one-selector destination that is

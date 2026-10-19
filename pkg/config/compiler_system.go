@@ -78,6 +78,17 @@ type syslogHostCoalesce9854 struct {
 	seenFac map[SyslogFacility]struct{}
 }
 
+// syslogFileCoalesce15708 / syslogUserCoalesce15708: #15708 same-name merge records.
+type syslogFileCoalesce15708 struct {
+	file *SyslogFileConfig
+	seen map[SyslogFacility]struct{}
+}
+
+type syslogUserCoalesce15708 struct {
+	user *SyslogUserConfig
+	seen map[SyslogFacility]struct{}
+}
+
 func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts) error {
 	aaaWarnings, aaaErr := systemAAAWarningsOrError10831(node, opts.lenientSystemAAA10831)
 	if aaaErr != nil {
@@ -888,42 +899,49 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 					}
 				}
 			}
+			// #15708: coalesce files by name like hostByAddr (#9854), and
+			// expand packed tails (#6684) matching host.
+			fileByName := make(map[string]*syslogFileCoalesce15708, len(sys.Syslog.Files))
+			for _, f := range sys.Syslog.Files {
+				rec := &syslogFileCoalesce15708{file: f, seen: make(map[SyslogFacility]struct{}, len(f.Selectors))}
+				for _, s := range f.Selectors {
+					rec.seen[s] = struct{}{}
+				}
+				fileByName[f.Name] = rec
+			}
 			for _, fileInst := range namedInstances(child.FindChildren("file")) {
-				file := &SyslogFileConfig{Name: fileInst.name}
+				rec := fileByName[fileInst.name]
+				if rec == nil {
+					rec = &syslogFileCoalesce15708{file: &SyslogFileConfig{Name: fileInst.name}, seen: map[SyslogFacility]struct{}{}}
+					fileByName[fileInst.name] = rec
+					sys.Syslog.Files = append(sys.Syslog.Files, rec.file)
+				}
+				file := rec.file
 				archiveKnobs := map[string]bool{}
+				for _, knob := range file.ArchiveKnobs {
+					archiveKnobs[knob] = true
+				}
 				// #9414 / #8939: read every statement of a flat-set chain.
-				for _, prop := range hoistAndSplitRun8939(fileInst.node.Children,
+				// #15708: packedBodyChildren expands compact `file f fac sev;`.
+				for _, prop := range hoistAndSplitRun8939(
+					packedBodyChildren(fileInst.node, schemaForPath("system", "syslog", "file")),
 					syslogDestinationHoistSchema9414("file")) {
 					switch prop.Name() {
 					case "archive":
-						// #7146: the whole `archive` block (files, size,
-						// start-time, transfer-interval, archive-sites,
-						// world/no-world-readable) is modeled in setSchema
-						// and implemented by NOTHING — #4303 folded it into
-						// the recognized-modifier skip list below, so every
-						// knob committed clean and vanished. Record the
-						// container's presence and its sub-statement
-						// KEYWORDS (never their values) so ValidateConfig can
-						// tell the operator their logs are not being
-						// archived. Recording is all this does; no runtime
-						// consumer reads these fields.
 						file.ArchiveConfigured = true
 						for _, knob := range syslogArchiveKnobs(prop) {
 							archiveKnobs[knob] = true
 						}
 					case "match", "match-strings", "structured-data",
 						"explicit-priority", "allow-duplicates":
-						// #4303 S-1: recognized file modifiers, not a
-						// facility/severity pair — do not append as one.
-						// #9414: recorded at the skip for the advisory.
 						skipped.note("file", prop.Name())
 					default:
 						if fac, sev, ok := syslogFacilitySeverity(prop); ok {
-							// #7187: APPEND. This assigned, so a file naming two
-							// facilities kept only the last one parsed and the
-							// earlier selectors vanished before any render.
-							file.Selectors = append(file.Selectors,
-								SyslogFacility{Facility: fac, Severity: sev})
+							pair := SyslogFacility{Facility: fac, Severity: sev}
+							if _, dup := rec.seen[pair]; !dup {
+								rec.seen[pair] = struct{}{}
+								file.Selectors = append(file.Selectors, pair)
+							}
 						}
 					}
 				}
@@ -934,30 +952,42 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 					}
 					sort.Strings(file.ArchiveKnobs)
 				}
-				sys.Syslog.Files = append(sys.Syslog.Files, file)
 			}
 			// Parse user destinations: user * { any emergency; }
+			// #15708: coalesce by user and expand packed tails.
+			userByName := make(map[string]*syslogUserCoalesce15708, len(sys.Syslog.Users))
+			for _, u := range sys.Syslog.Users {
+				rec := &syslogUserCoalesce15708{user: u, seen: make(map[SyslogFacility]struct{}, len(u.Selectors))}
+				for _, s := range u.Selectors {
+					rec.seen[s] = struct{}{}
+				}
+				userByName[u.User] = rec
+			}
 			for _, userInst := range namedInstances(child.FindChildren("user")) {
-				user := &SyslogUserConfig{User: userInst.name}
-				// #9414 / #8939: read every statement of a flat-set chain.
-				for _, prop := range hoistAndSplitRun8939(userInst.node.Children,
+				rec := userByName[userInst.name]
+				if rec == nil {
+					rec = &syslogUserCoalesce15708{user: &SyslogUserConfig{User: userInst.name}, seen: map[SyslogFacility]struct{}{}}
+					userByName[userInst.name] = rec
+					sys.Syslog.Users = append(sys.Syslog.Users, rec.user)
+				}
+				user := rec.user
+				for _, prop := range hoistAndSplitRun8939(
+					packedBodyChildren(userInst.node, schemaForPath("system", "syslog", "user")),
 					syslogDestinationHoistSchema9414("user")) {
 					switch prop.Name() {
 					case "match", "match-strings", "structured-data",
 						"explicit-priority", "allow-duplicates":
-						// #4303 S-1: recognized user modifiers, not a pair.
-						// #9414: recorded at the skip for the advisory.
 						skipped.note("user", prop.Name())
 					default:
 						if fac, sev, ok := syslogFacilitySeverity(prop); ok {
-							// #7187: APPEND, for the same reason as the file
-							// sink above.
-							user.Selectors = append(user.Selectors,
-								SyslogFacility{Facility: fac, Severity: sev})
+							pair := SyslogFacility{Facility: fac, Severity: sev}
+							if _, dup := rec.seen[pair]; !dup {
+								rec.seen[pair] = struct{}{}
+								user.Selectors = append(user.Selectors, pair)
+							}
 						}
 					}
 				}
-				sys.Syslog.Users = append(sys.Syslog.Users, user)
 			}
 			if cfg != nil {
 				cfg.Warnings = append(cfg.Warnings, skipped.warnings()...)
