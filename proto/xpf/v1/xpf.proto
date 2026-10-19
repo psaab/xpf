@@ -687,6 +687,12 @@ message NATDestInfo {
   // #14579: the #3096 non-zone from-scope of this rule's rule-set.
   string from_interface = 9;
   string from_routing_instance = 10;
+  // #15226: the COMPLETE destination-port match set (sorted, valid
+  // 1..65535 ports only), so a multi-port or port-range DNAT rule is not
+  // understated as its first port. dst_port above keeps the first port for
+  // back-compat. Additive: an older client that does not read this decodes
+  // it as empty and behaves exactly as before.
+  repeated uint32 dst_ports = 11;
 }
 
 message GetScreenRequest {}

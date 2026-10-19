@@ -776,8 +776,8 @@ func (c *CLI) showNATDestination(cfg *config.Config, args []string) error {
 				len(rule.Match.DestinationAddressNames) > 0 {
 				fmt.Printf("    Match destination-address: %s\n", match)
 			}
-			if rule.Match.DestinationPort != 0 {
-				fmt.Printf("    Match destination-port: %d\n", rule.Match.DestinationPort)
+			if ports := natshow.RuleMatchDestPortsText(rule); ports != "" {
+				fmt.Printf("    Match destination-port: %s\n", ports)
 			}
 			if rule.Then.PoolName != "" {
 				fmt.Printf("    Then pool: %s\n", rule.Then.PoolName)
@@ -1071,8 +1071,8 @@ func (c *CLI) showNATDestinationRuleSet(cfg *config.Config, rsName string) error
 			if line := natNotInstalledLine(excludedReason, false); line != "" {
 				fmt.Println("  " + line)
 			}
-			if rule.Match.DestinationPort != 0 {
-				fmt.Printf("    Match destination-port: %d\n", rule.Match.DestinationPort)
+			if ports := natshow.RuleMatchDestPortsText(rule); ports != "" {
+				fmt.Printf("    Match destination-port: %s\n", ports)
 			}
 			fmt.Printf("    Action: %s\n", natshow.DestRuleAction(rule))
 
@@ -1112,10 +1112,7 @@ func (c *CLI) showNATDestinationRuleAll(cfg *config.Config) error {
 			// #8580: the destination-NAT renderers carried the same
 			// singular-only copy the source side did, so an address-book-scoped
 			// destination rule rendered as 0.0.0.0/0 here too (#7363).
-			dstMatch := natshow.RuleMatchDestination(rule)
-			if rule.Match.DestinationPort != 0 {
-				dstMatch += fmt.Sprintf(":%d", rule.Match.DestinationPort)
-			}
+			dstMatch := natshow.RuleMatchDestinationWithPorts(rule)
 			action := natshow.DestRuleAction(rule)
 
 			fmt.Printf("Rule-set: %-20s Rule: %-12s from %s  Action: %s\n",

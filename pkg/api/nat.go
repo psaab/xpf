@@ -219,8 +219,14 @@ func (s *Server) natDestHandler(w http.ResponseWriter, _ *http.Request) {
 				FromInterface:       rs.FromInterface,
 				FromRoutingInstance: rs.FromRoutingInstance,
 			}
-			if rule.Match.DestinationPort > 0 {
-				info.DstPort = uint16(rule.Match.DestinationPort)
+			// #15226: dst_port keeps the first port for back-compat;
+			// dst_ports carries the complete set.
+			if ports := natshow.RuleMatchDestPorts(rule); len(ports) > 0 {
+				info.DstPort = uint16(ports[0])
+				info.DstPorts = make([]uint32, len(ports))
+				for i, p := range ports {
+					info.DstPorts[i] = uint32(p)
+				}
 			}
 			if pool, ok := cfg.Security.NAT.Destination.Pools[rule.Then.PoolName]; ok {
 				info.TranslateIP = pool.Address

@@ -103,10 +103,7 @@ func (c *ctl) handleShowNAT(args []string) error {
 			return fmt.Errorf("%v", err)
 		}
 		for _, r := range resp.Rules {
-			fmt.Printf("  Rule: %s  dst=%s", r.Name, r.DstAddr)
-			if r.DstPort > 0 {
-				fmt.Printf(":%d", r.DstPort)
-			}
+			fmt.Printf("  Rule: %s  dst=%s%s", r.Name, r.DstAddr, natDestPortsSuffix(r))
 			fmt.Printf(" -> %s", r.TranslateIp)
 			if r.TranslatePort > 0 {
 				fmt.Printf(":%d", r.TranslatePort)
@@ -439,10 +436,7 @@ func (c *ctl) showNATDestinationPool(poolName string) error {
 			if r.TranslatePort > 0 {
 				fmt.Printf("  Port: %d\n", r.TranslatePort)
 			}
-			fmt.Printf("  Rule: %s (dst %s", r.Name, r.DstAddr)
-			if r.DstPort > 0 {
-				fmt.Printf(":%d", r.DstPort)
-			}
+			fmt.Printf("  Rule: %s (dst %s%s", r.Name, r.DstAddr, natDestPortsSuffix(r))
 			fmt.Println(")")
 		}
 		fmt.Println()
