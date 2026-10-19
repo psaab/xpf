@@ -39,6 +39,7 @@ import (
 //	authentication-password   SNMPv3 USM auth password
 //	privacy-password          SNMPv3 USM privacy password
 //	encrypted-password        root / login crypt(3) hash
+//	plain-text-password(-value)  Junos plaintext password (rejected at strict commit, #15053; masked for tolerant trees)
 //	api-key                   REST API bearer/X-API-Key token(s)
 //	password (under api-auth | dynamic-dns | archive-sites | identity | access)
 //	                          REST basic-auth / DDNS HTTP / archival / AD-LDAP bind password
@@ -569,6 +570,7 @@ func secretIndices(fp []string) []int {
 		case "authentication-key", "additional-authentication-key",
 			"authentication-password", "privacy-password",
 			"encrypted-password", "simple-password", "api-key", "tsig-secret",
+			"plain-text-password", "plain-text-password-value",
 			"api-token", "aws-secret-key", "private-key", "preshared-key":
 			// Distinctive secret keywords: every token after the keyword is
 			// secret value (covers multi-token / bracketed list values too).

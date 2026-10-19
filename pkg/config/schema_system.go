@@ -113,15 +113,18 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 	// scope admission alone compiles the FIRST key and looks complete; only a
 	// two-key fixture shows the fold. Every child here is a modelled args:1
 	// leaf, so the tail splits cleanly.
-	"root-authentication": {desc: "Root authentication", packedStatements: true, children: map[string]*schemaNode{
+	"root-authentication": {desc: "Root authentication", packedStatements: true, closedWorld: true, children: map[string]*schemaNode{
 		// #1944 E1: share ValidateCryptHash with per-user
 		// authentication so root's identical plaintext footgun is
 		// closed (one validator, one error message).
 		"encrypted-password": {desc: "Encrypted password", args: 1, placeholder: "<crypt-hash>",
 			valueType: ValueCryptHash, validator: ValidateCryptHash, children: nil},
-		"ssh-ed25519": {desc: "SSH ED25519 public key", args: 1, multi: true, placeholder: "<key>", children: nil},
-		"ssh-rsa":     {desc: "SSH RSA public key", args: 1, multi: true, placeholder: "<key>", children: nil},
-		"ssh-dsa":     {desc: "SSH DSA public key", args: 1, multi: true, placeholder: "<key>", children: nil},
+		// #15053: modeled only so strict validation refuses it (hint to encrypted-password).
+		"plain-text-password":       plainTextPasswordLeaf15053("plain-text-password"),
+		"plain-text-password-value": plainTextPasswordLeaf15053("plain-text-password-value"),
+		"ssh-ed25519":               {desc: "SSH ED25519 public key", args: 1, multi: true, placeholder: "<key>", children: nil},
+		"ssh-rsa":                   {desc: "SSH RSA public key", args: 1, multi: true, placeholder: "<key>", children: nil},
+		"ssh-dsa":                   {desc: "SSH DSA public key", args: 1, multi: true, placeholder: "<key>", children: nil},
 	}},
 	"archival": {desc: "Configuration archival", children: map[string]*schemaNode{
 		"configuration": {desc: "Configuration archival", children: map[string]*schemaNode{
@@ -350,12 +353,14 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 				// #1944: close the schema asymmetry the compiler already
 				// half-implemented — give `authentication` a value-bearing
 				// children map (encrypted-password typed leaf + ssh-* keys).
-				"authentication": {desc: "Authentication methods", children: map[string]*schemaNode{
+				"authentication": {desc: "Authentication methods", closedWorld: true, children: map[string]*schemaNode{
 					"encrypted-password": {desc: "Encrypted password", args: 1, placeholder: "<crypt-hash>",
 						valueType: ValueCryptHash, validator: ValidateCryptHash, children: nil},
-					"ssh-ed25519": {desc: "SSH ED25519 public key", args: 1, multi: true, placeholder: "<key>", children: nil},
-					"ssh-rsa":     {desc: "SSH RSA public key", args: 1, multi: true, placeholder: "<key>", children: nil},
-					"ssh-dsa":     {desc: "SSH DSA public key", args: 1, multi: true, placeholder: "<key>", children: nil},
+					"plain-text-password":       plainTextPasswordLeaf15053("plain-text-password"),
+					"plain-text-password-value": plainTextPasswordLeaf15053("plain-text-password-value"),
+					"ssh-ed25519":               {desc: "SSH ED25519 public key", args: 1, multi: true, placeholder: "<key>", children: nil},
+					"ssh-rsa":                   {desc: "SSH RSA public key", args: 1, multi: true, placeholder: "<key>", children: nil},
+					"ssh-dsa":                   {desc: "SSH DSA public key", args: 1, multi: true, placeholder: "<key>", children: nil},
 				}},
 			}},
 	}},
