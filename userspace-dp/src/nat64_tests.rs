@@ -2506,6 +2506,70 @@ fn nat64_v4_to_v6_frag_needed_mtu_clamped_to_v6_minimum() {
 }
 
 #[test]
+fn nat64_v4_to_v6_frag_needed_zero_mtu_uses_plateau_15252() {
+    // #15252 (A78-01): a pre-RFC 1191 router sends Frag-Needed with the
+    // Next-Hop MTU field zero. RFC 7915 §4.2 then requires the greatest
+    // RFC 1191 plateau below the quoted datagram's Total Length, floored
+    // at 1280 — here the quote is a 1500-byte datagram, so 1492, not the
+    // 1280 the old `0 + 20 .max(1280)` produced.
+    let client_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let server_v6: Ipv6Addr = "64:ff9b::c000:0205".parse().unwrap();
+    let pool_v4 = Ipv4Addr::new(198, 51, 100, 1);
+    let server_v4 = Ipv4Addr::new(192, 0, 2, 5);
+
+    // Quoted original: Total Length 1500 (20-byte header + 1480 payload).
+    let embedded = build_v4_with_l4(pool_v4, server_v4, PROTO_TCP, 60, &[0u8; 1480]);
+    assert_eq!(u16::from_be_bytes([embedded[2], embedded[3]]), 1500);
+    let icmp = build_icmpv4_error(3, 4, [0, 0, 0, 0], &embedded);
+    let v4_pkt = build_v4_with_l4(server_v4, pool_v4, PROTO_ICMP_C, 64, &icmp);
+
+    let v6 = translate_v4_to_v6(&v4_pkt, server_v6, client_v6)
+        .expect("zero-MTU Frag-Needed must translate to Packet-Too-Big, not drop");
+    assert_eq!(v6[40], 2, "ICMPv6 Packet Too Big type");
+    assert_eq!(v6[41], 0, "PTB code 0");
+    let mtu = u32::from_be_bytes([v6[44], v6[45], v6[46], v6[47]]);
+    assert_eq!(
+        mtu, 1492,
+        "MTU=0 with a 1500-byte quote must yield the RFC 1191 plateau 1492"
+    );
+    let s6 = Ipv6Addr::from(<[u8; 16]>::try_from(&v6[8..24]).unwrap());
+    let d6 = Ipv6Addr::from(<[u8; 16]>::try_from(&v6[24..40]).unwrap());
+    assert_eq!(checksum16_ipv6_pseudo(s6, d6, PROTO_ICMPV6_C, &v6[40..]), 0);
+}
+
+#[test]
+fn nat64_v4_to_v6_frag_needed_zero_mtu_plateau_edges_15252() {
+    // #15252: plateau edges through the same translate path. The helper is
+    // exercised end-to-end (not unit-called) so a wiring regression that
+    // stops consulting the quote fails here too.
+    let client_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let server_v6: Ipv6Addr = "64:ff9b::c000:0205".parse().unwrap();
+    let pool_v4 = Ipv4Addr::new(198, 51, 100, 1);
+    let server_v4 = Ipv4Addr::new(192, 0, 2, 5);
+
+    let ptb_mtu = |total_len: u16| -> u32 {
+        // build_v4_with_l4 derives Total Length from the payload size.
+        let payload_len = (total_len as usize).saturating_sub(20);
+        let embedded = build_v4_with_l4(pool_v4, server_v4, PROTO_TCP, 60, &vec![0u8; payload_len]);
+        let icmp = build_icmpv4_error(3, 4, [0, 0, 0, 0], &embedded);
+        let v4_pkt = build_v4_with_l4(server_v4, pool_v4, PROTO_ICMP_C, 64, &icmp);
+        let v6 = translate_v4_to_v6(&v4_pkt, server_v6, client_v6).expect("translate");
+        u32::from_be_bytes([v6[44], v6[45], v6[46], v6[47]])
+    };
+
+    // Strictly below: Total Length exactly 1492 cannot use plateau 1492.
+    assert_eq!(ptb_mtu(1492), 1280, "length == plateau must step below it, then floor");
+    assert_eq!(ptb_mtu(1493), 1492);
+    assert_eq!(ptb_mtu(2003), 2002);
+    assert_eq!(ptb_mtu(9000), 8166);
+    // Nothing >= 1280 below the length: floor, never below the v6 minimum.
+    assert_eq!(ptb_mtu(1280), 1280);
+    assert_eq!(ptb_mtu(576), 1280);
+    // Control: a non-zero MTU is untouched by the plateau (1400 -> 1420 is
+    // asserted by nat64_v4_to_v6_frag_needed_becomes_packet_too_big_with_mtu).
+}
+
+#[test]
 fn nat64_v4_to_v6_dest_unreachable_port_maps() {
     // ICMPv4 Dest-Unreachable / Port-Unreachable (3/3) -> ICMPv6
     // Dest-Unreachable / Port-Unreachable (1/4).
