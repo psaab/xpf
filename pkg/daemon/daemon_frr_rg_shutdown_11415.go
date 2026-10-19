@@ -32,6 +32,11 @@ func newFRRHADemotionState(d *Daemon, cfg *config.Config) *frrHADemotionState {
 			state.rethInterfaces[rgID] = make(map[string]struct{})
 		}
 		addHAInterfaceName(cfg, state.rethInterfaces[rgID], name)
+		// #15060: unit refs (reth0.80) belong to the same RG as the base;
+		// otherwise they miss the set and follow RG0 instead of the owner.
+		if ifc, ok := config.LookupInterface(cfg, name); ok {
+			addHAInterfaceUnitNames(cfg, state.rethInterfaces[rgID], ifc)
+		}
 	}
 	// A global/loopback peering has no data-RETH address from which to infer a
 	// group. It follows RG0 when configured; clusters without RG0 retain the
