@@ -37,6 +37,13 @@ import (
 // present-but-0 IAADDR is positively observed (#5927).
 var errV6AddrInvalidated = errors.New("DHCPv6 reply explicitly invalidated the held IA_NA address (valid-lifetime 0)")
 
+// errV6NoBinding signals that the granting server answered a Renew/Rebind
+// with Status NoBinding for the held IA_NA (#15071, RFC 8415 §18.2.4: the
+// client MUST send a Request to re-establish the binding). It is distinct
+// from a silent IA_NA omission, which keeps the held address via
+// carry-forward until its valid expiry (#1844 anti-outage).
+var errV6NoBinding = errors.New("DHCPv6 server has no binding for the held IA_NA (Status NoBinding)")
+
 // runDHCPv6 runs the DHCPv6 solicit/request cycle with retries and
 // renewal. Initial acquisition is a Rapid-Solicit (or Information-Request
 // in stateless mode). At T1 the loop sends an RFC 8415 §18.2.4 RENEW to
@@ -409,6 +416,22 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 				cancelLease()
 				break renewalLoop
 			}
+			if errors.Is(rerr, errV6NoBinding) {
+				// #15071: the granting server has no binding for the held
+				// IA_NA (RFC 8415 §18.2.4) — send Request via a fresh
+				// Solicit/Request cycle. The held address stays installed
+				// until re-acquisition replaces it or its kernel/lease
+				// lifetime expires; do not wait for T2 against a server
+				// that has already said it holds no binding.
+				slog.Info("DHCPv6: server reports NoBinding for held IA_NA, re-acquiring via Request",
+					"interface", ifaceName, "address", committed.Address)
+				if !stateless {
+					leaseExpiryAt = deadline
+					leaseExpiryPending = true
+				}
+				cancelLease()
+				break renewalLoop
+			}
 			slog.Warn("DHCPv6: T1 renewal failed, waiting for T2",
 				"interface", ifaceName, "err", rerr)
 
@@ -513,6 +536,13 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 				leaseExpiryPending = false
 				cancelLease()
 				break renewalLoop
+			}
+			if errors.Is(rerr, errV6NoBinding) {
+				// #15071: NoBinding on REBIND — same Request re-acquisition
+				// as at T1; the generic break below already re-acquires,
+				// this arm only makes the reason explicit in the log.
+				slog.Info("DHCPv6: server reports NoBinding for held IA_NA on rebind, re-acquiring via Request",
+					"interface", ifaceName, "address", committed.Address)
 			}
 			if stateless {
 				slog.Warn("DHCPv6: T2 information-request failed, retrying options",
@@ -667,7 +697,7 @@ func (m *Manager) doDHCPv6(ctx context.Context, ifaceName string, mode dhcpExcha
 	}
 
 	wantNA := v6IANAIAID(client.InterfaceAddr())
-	result, err := m.parseV6ReplyChecked(ctx, ifaceName, adv, v6opts, &wantNA, &v6IAPDIAID)
+	result, err := m.parseV6ReplyChecked(ctx, ifaceName, adv, v6opts, &wantNA, &v6IAPDIAID, prev)
 	if err != nil {
 		return nil, err
 	}
@@ -690,6 +720,77 @@ func v6IANAIAID(hwaddr net.HardwareAddr) [4]byte {
 
 func v6StatusOK(status *dhcpv6.OptStatusCode) bool {
 	return status == nil || status.StatusCode == iana.StatusSuccess
+}
+
+// v6IANAStatusCode returns the StatusCode option inside the IA_NA
+// matching expectedIAID, or nil when there is no such IA_NA or it
+// carries no status. Used to distinguish a server NoBinding (#15071:
+// send Request) from a silent omission (#1844: keep + retry via
+// carry-forward).
+func v6IANAStatusCode(adv *dhcpv6.Message, expectedIAID *[4]byte) *dhcpv6.OptStatusCode {
+	if adv == nil {
+		return nil
+	}
+	for _, opt := range adv.Options.Options {
+		ianaOpt, ok := opt.(*dhcpv6.OptIANA)
+		if !ok {
+			continue
+		}
+		if expectedIAID != nil && ianaOpt.IaId != *expectedIAID {
+			continue
+		}
+		return ianaOpt.Options.Status()
+	}
+	return nil
+}
+
+// carryForwardV6IANA returns a lease that keeps the held IA_NA address
+// when a Renew/Rebind Reply carried no usable IA_NA (#15071). The
+// returned lease preserves prev's Address, LeaseTime and Obtained so
+// buildV6RenewMessage keeps echoing the held binding until its valid
+// expiry; the run loop then re-acquires at the absolute deadline
+// (leaseCtx) if the server never restores the IA_NA. ok=false when
+// there is no held address or it has already expired at now.
+func carryForwardV6IANA(prev *Lease, now time.Time) (carried *Lease, ok bool) {
+	if prev == nil || !prev.Address.IsValid() {
+		return nil, false
+	}
+	if exp := prev.ExpiresAt(); !exp.IsZero() && !now.Before(exp) {
+		return nil, false
+	}
+	carried = &Lease{
+		Interface:          prev.Interface,
+		Family:             prev.Family,
+		Address:            prev.Address,
+		LeaseTime:          prev.LeaseTime,
+		Obtained:           prev.Obtained,
+		leaseExpiryApplies: prev.leaseExpiryApplies,
+		v6ServerDUID:       prev.v6ServerDUID,
+	}
+	return carried, true
+}
+
+// kernelAddrLifetimes converts a lease's remaining lifetimes at now
+// into netlink ValidLft/PreferedLft seconds for AddrReplace (#15071).
+// A finite lease installs its remaining lifetime so the kernel expires
+// the address even if userspace removal is missed; the RFC 8415
+// infinite sentinel installs as 0xffffffff (forever); an expired or
+// zero-lifetime lease installs no lifetime attribute (0,0), matching
+// netlink's "only set cacheinfo when non-zero" encoding where 0/0
+// leaves the address permanent — callers must not applyAddress an
+// expired lease.
+func kernelAddrLifetimes(lease *Lease, now time.Time) (valid, pref int) {
+	if lease == nil {
+		return 0, 0
+	}
+	p, v := lease.RemainingLifetimes(now)
+	if v <= 0 {
+		return 0, 0
+	}
+	if v >= infiniteLifetime {
+		return 0xffffffff, 0xffffffff
+	}
+	return int(v / time.Second), int(p / time.Second)
 }
 
 func v6MessageStatusOK(msg *dhcpv6.Message) bool {
@@ -968,7 +1069,7 @@ func selectIANAAddress(adv *dhcpv6.Message, expectedIAID *[4]byte, protected []n
 // parseV6Reply extracts DHCPv6 options for unit callers that do not have an
 // interface IAID. Production exchanges use parseV6ReplyChecked below.
 func (m *Manager) parseV6Reply(ctx context.Context, ifaceName string, adv *dhcpv6.Message, v6opts *DHCPv6Options) (*dhcpv6Result, error) {
-	result, err := m.parseV6ReplyChecked(ctx, ifaceName, adv, v6opts, nil, nil)
+	result, err := m.parseV6ReplyChecked(ctx, ifaceName, adv, v6opts, nil, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -977,7 +1078,15 @@ func (m *Manager) parseV6Reply(ctx context.Context, ifaceName string, adv *dhcpv
 	result.lease = applyIPv6RouterAdvertisements(nil, result.lease, result.routers, time.Now())
 	return result, nil
 }
-func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv *dhcpv6.Message, v6opts *DHCPv6Options, expectedNA, expectedPD *[4]byte) (*dhcpv6Result, error) {
+
+// parseV6ReplyChecked parses a Reply. prev is the held lease on a
+// Renew/Rebind exchange (nil on acquisition): when the Reply carries no
+// usable IA_NA but the client holds an unexpired IA_NA, the held address
+// is carried forward (#15071) instead of committing an address-less lease
+// that stops echoing the binding. prev must NOT carry forward on an
+// explicit valid-lifetime-0 invalidation (#5927) or a NoBinding status
+// (RFC 8415 §18.2.4 — the caller sends Request via errV6NoBinding).
+func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv *dhcpv6.Message, v6opts *DHCPv6Options, expectedNA, expectedPD *[4]byte, prev ...*Lease) (*dhcpv6Result, error) {
 	if err := v6MessageStatusError(adv); err != nil {
 		return nil, err
 	}
@@ -1051,6 +1160,23 @@ func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv
 		return nil, fmt.Errorf("DHCPv6 reply on %s: %w", ifaceName, errV6AddrInvalidated)
 	}
 
+	// #15071: a Renew/Rebind Reply whose IA_NA carries Status NoBinding
+	// means the server has lost the binding — RFC 8415 §18.2.4 requires
+	// the client to send a Request (re-acquire). Surface it distinctly so
+	// the run loop re-acquires instead of carrying the address forward.
+	// selectIANAAddress skips a non-Success IA_NA, so addr is invalid here
+	// whenever this fires. Only when a held lease exists (renew/rebind):
+	// on acquisition prev is nil and the generic guard below applies.
+	var held *Lease
+	if len(prev) > 0 {
+		held = prev[0]
+	}
+	if wantNA && !addr.IsValid() && held != nil {
+		if st := v6IANAStatusCode(adv, expectedNA); st != nil && st.StatusCode == iana.StatusNoBinding {
+			return nil, fmt.Errorf("DHCPv6 reply on %s: %w", ifaceName, errV6NoBinding)
+		}
+	}
+
 	// A usable reply must yield either an IA_NA address or at least one
 	// LIVE delegated prefix. Count live PDs regardless of wantNA so a
 	// PD-only client (wantNA=false) whose reply carried only withdrawn
@@ -1079,6 +1205,26 @@ func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv
 		// #14598: IA_NA present — LeaseTime stays the IA_NA lifetime for
 		// T1/T2. PD expiry is tracked per-prefix (ExpiresAt, pruning,
 		// earliest-expiry recompile wake), not by shortening this lease.
+	} else if wantNA {
+		// #15071: no usable IA_NA in this Reply (absent, or only refused
+		// IAADDRs) but a live PD (or degenerate config) let us reach here.
+		// On a renew/rebind, carry the held IA_NA forward so the committed
+		// lease keeps echoing it until its valid expiry — never commit an
+		// address-less successor over an addressed lease. The carried
+		// lease preserves Address/LeaseTime/Obtained; DNS/routers/PDs from
+		// this Reply still apply via the fields set below and the caller.
+		if carried, ok := carryForwardV6IANA(held, now); ok {
+			lease.Address = carried.Address
+			lease.LeaseTime = carried.LeaseTime
+			lease.Obtained = carried.Obtained
+		} else if len(result.prefixes) > 0 {
+			lease.LeaseTime = result.prefixes[0].ValidLifetime
+			for _, dp := range result.prefixes[1:] {
+				if dp.ValidLifetime < lease.LeaseTime {
+					lease.LeaseTime = dp.ValidLifetime
+				}
+			}
+		}
 	} else if len(result.prefixes) > 0 {
 		// PD-only mode: the lease deadline must not outlive the shortest
 		// delegated prefix (#14598) — previously only prefixes[0] was used,

@@ -761,6 +761,13 @@ func (m *Manager) Close() {
 
 // applyAddress sets the DHCP-obtained address on the interface via netlink,
 // and installs a default route via the gateway if provided.
+//
+// #15071: the address is installed with the lease's remaining kernel
+// lifetimes (ValidLft/PreferedLft from kernelAddrLifetimes) so the
+// kernel expires it at the valid-lifetime boundary even if userspace
+// removal (stop / abandon / finishClient) is missed. Previously
+// AddrReplace carried no lifetimes, so a missed AddrDel left the WAN
+// address bound forever.
 func (m *Manager) applyAddress(ifaceName string, lease *Lease) error {
 	if m.nlHandle == nil {
 		return nil // test-constructed Manager without netlink
@@ -770,8 +777,11 @@ func (m *Manager) applyAddress(ifaceName string, lease *Lease) error {
 		return fmt.Errorf("link lookup %s: %w", ifaceName, err)
 	}
 
+	validLft, prefLft := kernelAddrLifetimes(lease, time.Now())
 	addr := &netlink.Addr{
-		IPNet: prefixToIPNet(lease.Address),
+		IPNet:       prefixToIPNet(lease.Address),
+		ValidLft:    validLft,
+		PreferedLft: prefLft,
 	}
 
 	if err := m.nlHandle.AddrReplace(link, addr); err != nil {
