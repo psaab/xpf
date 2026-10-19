@@ -1101,7 +1101,16 @@ func compileNAT64WithStaging(dp DataPlane, cfg *config.Config, result *CompileRe
 		if !ok {
 			pool, poolExists := cfg.Security.NAT.SourcePools[rs.SourcePool]
 			if !poolExists || pool == nil {
-				return fmt.Errorf("NAT64 rule-set %q: source pool %q not found", rs.Name, rs.SourcePool)
+				// #15000: warn-and-skip instead of erroring. The strict
+				// commit gate (validateNAT64PrefixStrict) rejects an empty
+				// or undefined source-pool; a leniently loaded / peer-synced
+				// config must not abort the whole compile (and with it
+				// every later apply) over one unresolvable rule-set.
+				// buildNAT64Snapshots emits it with an empty pool, which
+				// the Rust helper fail-closes per-packet (#2291).
+				compileWarn(dp, "NAT64 source pool not found, skipping rule-set",
+					"rule-set", rs.Name, "source-pool", rs.SourcePool)
+				continue
 			}
 			// #14679: NAT64 installs only IPv4 host addresses (Rust
 			// parse_pool_v4, all-or-nothing). Members are singular Address

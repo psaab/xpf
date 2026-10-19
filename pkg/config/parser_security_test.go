@@ -43,6 +43,11 @@ func TestNAT64(t *testing.T) {
 	}
 	hierInput := `security {
     nat {
+        source {
+            pool pool1 {
+                address 203.0.113.6/32;
+            }
+        }
         nat64 {
             rule-set wkp {
                 prefix 64:ff9b::/96;

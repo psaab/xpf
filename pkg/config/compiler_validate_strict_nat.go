@@ -2763,6 +2763,39 @@ func validateNAT64PrefixStrict(cfg *Config, lenient bool) ([]string, error) {
 	}
 
 	for _, rs := range cfg.Security.NAT.NAT64 {
+		if rs == nil {
+			continue
+		}
+		// #15000: an empty or undefined source-pool passed strict commit,
+		// then compileNAT64 errored in the #4960 pre-pass and aborted every
+		// dataplane compile. Reject at commit (lenient: warn); the dataplane
+		// now warn-skips the rule-set instead of erroring, so a leniently
+		// loaded config still applies. Checked before the prefix arm so a
+		// rule-set with both defects reports the pool first. An empty-prefix
+		// rule-set is not exempt: buildNAT64Snapshots skips it, but the
+		// typed compileNAT64 path runs regardless of prefix.
+		if rs.SourcePool == "" {
+			if err := emit(fmt.Sprintf(
+				"security nat nat64 rule-set %q source-pool is empty or omitted; "+
+					"define `security nat source pool <name> ...` and reference it with "+
+					"`security nat nat64 rule-set %s source-pool <name>` — otherwise NAT64 for this rule-set has no IPv4 source pool",
+				rs.Name, rs.Name)); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if pool, ok := cfg.Security.NAT.SourcePools[rs.SourcePool]; !ok || pool == nil {
+			if err := emit(fmt.Sprintf(
+				"security nat nat64 rule-set %q source-pool %q is not defined; "+
+					"define `security nat source pool %s ...` in the same commit — otherwise NAT64 for this rule-set has no IPv4 source pool",
+				rs.Name, rs.SourcePool, rs.SourcePool)); err != nil {
+				return nil, err
+			}
+			continue
+		}
+	}
+
+	for _, rs := range cfg.Security.NAT.NAT64 {
 		if rs == nil || rs.Prefix == "" {
 			continue
 		}
