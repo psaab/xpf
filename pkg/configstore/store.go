@@ -1221,6 +1221,7 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 			s.confirmResolvePendingPersist = true
 		}
 	} else {
+		s.reconcilePersistedUnsharedLocked() // #15142: replacement durable; reduce pending discard to bare alarm form
 		s.persistDegraded = false
 		// The synced config is durable. Drop the confirm.json this sync
 		// superseded now that the replacement is on disk.
