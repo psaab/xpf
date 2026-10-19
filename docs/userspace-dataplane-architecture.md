@@ -2080,7 +2080,13 @@ are per-node local telemetry scraped via status/Prometheus — not wire-synced �
 but the slot LAYOUT stays symmetric). If the union exceeds the 255-slot
 capacity the surplus is dropped by `ColdPathSlotMap::build` and surfaced via its
 `overflow_active` flag; exact pairs are assigned first, so they win under
-pressure.
+pressure. Since #15092 the production build path never materializes that
+union: `configured_zone_pairs_bounded(COLD_PATH_ASSIGNABLE_SLOTS)` generates
+the wildcard/global tier as sorted per-scope cross-product streams merged
+with dedup, stops at the slot budget (plus one overflow probe), and the
+build ORs the resulting `overflow` into `overflow_active` — an Any×Any
+scope at 8000 zones is 64M pairs and stalled the snapshot build, while
+the histogram can only ever assign 255 of them.
 
 **Global policy zone context (#3148, #4626 M03).** A Junos global policy may
 carry optional `match { from-zone [ <z> ... ]; to-zone [ <z> ... ]; }` to scope

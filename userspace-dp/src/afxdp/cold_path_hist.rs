@@ -87,8 +87,7 @@ const _: () = assert!(POLICY_COLD_PATH_ZONE_PAIR_SLOTS == 256);
 /// this capacity (not zone-id magnitude) is the only `overflow_active`
 /// trigger now that the slot map is keyed sparsely by the `(from, to)`
 /// pair (`ColdPathSlotMap::slot_by_pair`) rather than a 65×65 flat table.
-pub(in crate::afxdp) const COLD_PATH_ASSIGNABLE_SLOTS: usize =
-    POLICY_COLD_PATH_ZONE_PAIR_SLOTS - 1;
+pub(crate) const COLD_PATH_ASSIGNABLE_SLOTS: usize = POLICY_COLD_PATH_ZONE_PAIR_SLOTS - 1;
 const _: () = assert!(COLD_PATH_ASSIGNABLE_SLOTS == 255);
 
 // #3075: the old 65×65 flat lookup table (`COLD_PATH_ZONE_DIM` /
@@ -181,7 +180,9 @@ pub(in crate::afxdp) struct ColdPathSlotMap {
     /// `slot → Some((from, to))` for assigned slots, `None` for free.
     pub(in crate::afxdp) inverse: Vec<Option<(u16, u16)>>,
     /// True if some configured zone-pair could not be assigned a slot
-    /// because the 255-slot capacity was exhausted.
+    /// because the 255-slot capacity was exhausted. #15092: also set by
+    /// the forwarding build when `configured_zone_pairs_bounded` capped
+    /// the wildcard/global expansion before this map saw the pairs.
     pub(in crate::afxdp) overflow_active: bool,
 }
 
