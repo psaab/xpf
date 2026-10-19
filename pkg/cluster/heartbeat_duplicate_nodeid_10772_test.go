@@ -44,8 +44,9 @@ func TestRecvLoop_DuplicateNodeIDWarningDescribesIndependentPromotion_10772(t *t
 	senders := make([]*net.UDPConn, 2)
 	for i := range managers {
 		mgr := NewManager(nodeID, clusterID)
-		mgr.controlInterface = "hb0"
-		mgr.UpdateConfig(makeConfig(makeRG(0, false, map[int]int{nodeID: 200})))
+		dupCfg := makeConfig(makeRG(0, false, map[int]int{nodeID: 200}))
+		dupCfg.ControlInterface = "hb0"
+		mgr.UpdateConfig(dupCfg)
 		mgr.mu.Lock()
 		mgr.groups[0].Ready = true
 		mgr.groups[0].ReadySince = time.Now().Add(-time.Second)

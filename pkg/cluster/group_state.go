@@ -148,16 +148,25 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 	// A wrapped heartbeat interval is a 64ns ticker on the HA control channel,
 	// which is CLAUDE.md's "adding a new control socket request at >1/s will
 	// starve session installs" with the rate set to ~1.5e7/s. Out-of-range
-	// falls back to the existing default rather than clamping to the maximum.
+	// falls back to the default rather than clamping to the maximum.
+	//
+	// #15669: an unset (deleted) stanza must revert to the default / empty
+	// value, mirroring the takeoverHoldTime reset and the auth-key clearing
+	// below. Writing only on a positive / non-empty value latched the last
+	// committed value forever: deleting heartbeat-interval/threshold kept
+	// the old cadence, and deleting control-interface kept the node in
+	// cluster (readiness-gated) mode indefinitely.
 	if d := config.MillisToDuration(cfg.HeartbeatInterval, 0); d > 0 {
 		m.hbInterval = d
+	} else {
+		m.hbInterval = DefaultHeartbeatInterval
 	}
 	if cfg.HeartbeatThreshold > 0 {
 		m.hbThreshold = cfg.HeartbeatThreshold
+	} else {
+		m.hbThreshold = DefaultHeartbeatThreshold
 	}
-	if cfg.ControlInterface != "" {
-		m.controlInterface = cfg.ControlInterface
-	}
+	m.controlInterface = cfg.ControlInterface
 
 	// #4107: plumb the control-channel PSK. Reveal() reads the cleartext
 	// secret; it is stored as raw bytes and NEVER logged. Empty clears it
@@ -223,9 +232,15 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 	}
 
 	// Store GARP counts and update monitor groups.
+	// #15669: delete the entry when the RG no longer authors a positive
+	// count, mirroring the removed-RG purge (#6027). Writing only on a
+	// positive count latched the last committed burst for a group that
+	// had deleted gratuitous-arp-count; an absent entry is the default.
 	for _, rg := range cfg.RedundancyGroups {
 		if rg.GratuitousARPCount > 0 {
 			m.garpCounts[rg.ID] = rg.GratuitousARPCount
+		} else {
+			delete(m.garpCounts, rg.ID)
 		}
 	}
 	// Reconcile installed interface-monitor debt against the new desired
