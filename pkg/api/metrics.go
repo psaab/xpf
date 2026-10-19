@@ -1100,6 +1100,21 @@ type xpfCollector struct {
 	flowExportSamplingEvaluatedTotal   *prometheus.Desc
 	flowExportSamplingSelectedTotal    *prometheus.Desc
 	flowExportZoneFilteredTotal        *prometheus.Desc
+	// #15086: scrape-health counters for the label-sanitize choke point
+	// (metrics_emit_15086.go) and the lane recover (metrics_handler.go).
+	// invalidLabelValuesTotal counts label values that carried invalid
+	// UTF-8 and were folded to U+FFFD; collectorPanicsTotal counts
+	// collector passes the lane recovered. Both samples are emitted via
+	// defers at the TOP of collectContext, so they appear on every return
+	// path — and, for a recovered panic, on the NEXT scrape, since a
+	// panicking pass cannot reliably emit after the panic point. The
+	// atomic fields are the collectors' cumulative state; literal-
+	// constructed test collectors leave the Descs nil and the defers
+	// skip the emit (the counters still accumulate for assertions).
+	invalidLabelValuesTotal *prometheus.Desc
+	collectorPanicsTotal    *prometheus.Desc
+	invalidLabelValues      atomic.Uint64
+	collectorPanics         atomic.Uint64
 }
 
 func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -1148,6 +1163,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.syncookieTotal
 	ch <- c.flowCacheTotal
 	ch <- c.counterReadErrorsTotal
+	ch <- c.invalidLabelValuesTotal
+	ch <- c.collectorPanicsTotal
 	ch <- c.managementTLSCertificateInvalidTotal
 	c.describeAdmissionRefusals(ch)
 	c.describeAuthzDenials(ch)
@@ -1754,7 +1771,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// (collectSessionGauges..collectUserspaceStatus) bumps it.
 	defer c.emitCounterReadErrors(ch)
 	defer func() {
-		ch <- prometheus.MustNewConstMetric(c.managementTLSCertificateInvalidTotal,
+		c.emitConstMetric(ch, c.managementTLSCertificateInvalidTotal,
 			prometheus.CounterValue, float64(managementTLSCertificateInvalidEvents.Load()))
 	}()
 	// #8312: emitted through the SAME deferred, pre-gate route, and for the
@@ -1771,6 +1788,14 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	defer c.emitDataplaneSilentSkips(ch)
 	defer c.emitDataplaneSafety(ch)
 	defer c.emitSNMPServeBudget(ch)
+	// #15086: scrape-health samples, deferred with the other pre-gate
+	// emits so they land on every return path. A pass recovered by the
+	// lane (metrics_handler.go) unwinds through these defers while Gather
+	// may already have given up, so the panic count a bad pass bumps is
+	// certified by the NEXT scrape's sample; the atomic accumulates
+	// regardless.
+	defer c.emitInvalidLabelValues(ch)
+	defer c.emitCollectorPanics(ch)
 
 	// #1799: config-persist health is a control-plane signal — emit it
 	// BEFORE the dataplane gate below so the degraded state stays
@@ -1780,7 +1805,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		if c.srv.configPersistDegradedFn() {
 			v = 1
 		}
-		ch <- prometheus.MustNewConstMetric(c.configPersistDegraded,
+		c.emitConstMetric(ch, c.configPersistDegraded,
 			prometheus.GaugeValue, v)
 	}
 
@@ -1792,7 +1817,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		if c.srv.rollbackHistoryDegradedFn() {
 			v = 1
 		}
-		ch <- prometheus.MustNewConstMetric(c.rollbackHistoryDegraded,
+		c.emitConstMetric(ch, c.rollbackHistoryDegraded,
 			prometheus.GaugeValue, v)
 	}
 
@@ -1803,10 +1828,10 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		if c.srv.archiveDegradedFn() {
 			v = 1
 		}
-		ch <- prometheus.MustNewConstMetric(c.archiveDegraded, prometheus.GaugeValue, v)
+		c.emitConstMetric(ch, c.archiveDegraded, prometheus.GaugeValue, v)
 	}
 	if c.srv.archiveFailureCountFn != nil {
-		ch <- prometheus.MustNewConstMetric(c.archiveFailures,
+		c.emitConstMetric(ch, c.archiveFailures,
 			prometheus.CounterValue, float64(c.srv.archiveFailureCountFn()))
 	}
 
@@ -1817,7 +1842,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		if c.srv.earlyInputGuardSwapFailedFn() {
 			v = 1
 		}
-		ch <- prometheus.MustNewConstMetric(c.earlyInputGuardSwapFailed,
+		c.emitConstMetric(ch, c.earlyInputGuardSwapFailed,
 			prometheus.GaugeValue, v)
 	}
 
@@ -1829,7 +1854,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		if c.srv.journalPermsDegradedFn() {
 			v = 1
 		}
-		ch <- prometheus.MustNewConstMetric(c.journalPermsDegraded,
+		c.emitConstMetric(ch, c.journalPermsDegraded,
 			prometheus.GaugeValue, v)
 	}
 
@@ -1842,7 +1867,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		if c.srv.frrReloadDegradedFn() {
 			v = 1
 		}
-		ch <- prometheus.MustNewConstMetric(c.frrReloadDegraded,
+		c.emitConstMetric(ch, c.frrReloadDegraded,
 			prometheus.GaugeValue, v)
 	}
 
@@ -1853,7 +1878,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// when unwired: a hardcoded 0 from a process that never consulted the
 	// active config is a false all-clear.
 	if c.srv.natLenientTerminalActionRulesFn != nil {
-		ch <- prometheus.MustNewConstMetric(c.natRulesLenientTerminalAction,
+		c.emitConstMetric(ch, c.natRulesLenientTerminalAction,
 			prometheus.GaugeValue, float64(len(c.srv.natLenientTerminalActionRulesFn())))
 	}
 
@@ -1862,7 +1887,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// `> 0` can never distinguish "no quarantine" from "the exporter stopped
 	// reporting this series".
 	if c.srv.frrQuarantinedRouteMapsFn != nil {
-		ch <- prometheus.MustNewConstMetric(c.frrRouteMapsQuarantined,
+		c.emitConstMetric(ch, c.frrRouteMapsQuarantined,
 			prometheus.GaugeValue, float64(len(c.srv.frrQuarantinedRouteMapsFn())))
 	}
 	// #8363: same publish-an-explicit-0 discipline. A narrowed chain is not a
@@ -1870,17 +1895,17 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// quarantine gauge, whose documented meaning is that routes are being
 	// DENIED.
 	if c.srv.frrNarrowedPolicyChainsFn != nil {
-		ch <- prometheus.MustNewConstMetric(c.frrPolicyChainsNarrowed,
+		c.emitConstMetric(ch, c.frrPolicyChainsNarrowed,
 			prometheus.GaugeValue, float64(len(c.srv.frrNarrowedPolicyChainsFn())))
 	}
 	if c.srv.frrNarrowedPolicyChainsDenySafeFn != nil {
-		ch <- prometheus.MustNewConstMetric(c.frrPolicyChainsNarrowedDenySafe,
+		c.emitConstMetric(ch, c.frrPolicyChainsNarrowedDenySafe,
 			prometheus.GaugeValue, float64(len(c.srv.frrNarrowedPolicyChainsDenySafeFn())))
 	}
 	if c.srv.frrNarrowedPolicyChainShapesFn != nil {
 		shapes := c.srv.frrNarrowedPolicyChainShapesFn()
 		for _, shape := range []string{"empty", "fall-through", "match-all", "quarantined", "terminating-default", "unknown"} {
-			ch <- prometheus.MustNewConstMetric(c.frrPolicyChainsNarrowedShape,
+			c.emitConstMetric(ch, c.frrPolicyChainsNarrowedShape,
 				prometheus.GaugeValue, float64(shapes[shape]), shape)
 		}
 	}
@@ -1895,7 +1920,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		if c.srv.ipsecRebindPendingFn() {
 			v = 1
 		}
-		ch <- prometheus.MustNewConstMetric(c.ipsecRebindPending,
+		c.emitConstMetric(ch, c.ipsecRebindPending,
 			prometheus.GaugeValue, v)
 	}
 
@@ -1906,7 +1931,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		if c.srv.interfaceLinkSnapshotPendingFn() {
 			v = 1
 		}
-		ch <- prometheus.MustNewConstMetric(c.interfaceLinkSnapshotPending,
+		c.emitConstMetric(ch, c.interfaceLinkSnapshotPending,
 			prometheus.GaugeValue, v)
 	}
 
@@ -1920,11 +1945,11 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		if c.srv.hostInboundConntrackRevocationOwedFn() {
 			v = 1
 		}
-		ch <- prometheus.MustNewConstMetric(c.hostInboundConntrackRevocationPending,
+		c.emitConstMetric(ch, c.hostInboundConntrackRevocationPending,
 			prometheus.GaugeValue, v)
 	}
 	if c.srv.hostInboundConntrackFlushFailuresFn != nil {
-		ch <- prometheus.MustNewConstMetric(c.hostInboundConntrackRevocationFailures,
+		c.emitConstMetric(ch, c.hostInboundConntrackRevocationFailures,
 			prometheus.CounterValue,
 			float64(c.srv.hostInboundConntrackFlushFailuresFn()))
 	}
@@ -1933,19 +1958,19 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		if c.srv.hostInboundTCPlooseDisabledFn() {
 			v = 1
 		}
-		ch <- prometheus.MustNewConstMetric(c.hostInboundTCPlooseDisabled,
+		c.emitConstMetric(ch, c.hostInboundTCPlooseDisabled,
 			prometheus.GaugeValue, v)
 	}
 	if c.srv.hostInboundTCPloosePostureFailuresFn != nil {
-		ch <- prometheus.MustNewConstMetric(c.hostInboundTCPloosePostureFailures,
+		c.emitConstMetric(ch, c.hostInboundTCPloosePostureFailures,
 			prometheus.CounterValue,
 			float64(c.srv.hostInboundTCPloosePostureFailuresFn()))
 	}
 	if c.srv.snmpTrapStatsFn != nil {
 		enqueued, sent, dropped := c.srv.snmpTrapStatsFn()
-		ch <- prometheus.MustNewConstMetric(c.snmpTrapsEnqueued, prometheus.CounterValue, float64(enqueued))
-		ch <- prometheus.MustNewConstMetric(c.snmpTrapsSent, prometheus.CounterValue, float64(sent))
-		ch <- prometheus.MustNewConstMetric(c.snmpTrapsDropped, prometheus.CounterValue, float64(dropped))
+		c.emitConstMetric(ch, c.snmpTrapsEnqueued, prometheus.CounterValue, float64(enqueued))
+		c.emitConstMetric(ch, c.snmpTrapsSent, prometheus.CounterValue, float64(sent))
+		c.emitConstMetric(ch, c.snmpTrapsDropped, prometheus.CounterValue, float64(dropped))
 	}
 
 	// #6800: managed-service reload debt. Emitted BEFORE the dataplane gate for
@@ -1961,14 +1986,14 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 			if owed[svc] {
 				v = 1
 			}
-			ch <- prometheus.MustNewConstMetric(c.managedServiceReloadPending,
+			c.emitConstMetric(ch, c.managedServiceReloadPending,
 				prometheus.GaugeValue, v, svc)
 		}
 	}
 	if c.srv.managedServiceReloadFailuresFn != nil {
 		failures := c.srv.managedServiceReloadFailuresFn()
 		for _, svc := range sortedKeys6800(failures) {
-			ch <- prometheus.MustNewConstMetric(c.managedServiceReloadFailures,
+			c.emitConstMetric(ch, c.managedServiceReloadFailures,
 				prometheus.CounterValue, float64(failures[svc]), svc)
 		}
 	}
@@ -1978,9 +2003,9 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// dataplane readiness.
 	if c.srv.remoteArchiveStatusFn != nil {
 		pending, failures := c.srv.remoteArchiveStatusFn()
-		ch <- prometheus.MustNewConstMetric(c.remoteArchivePendingSites,
+		c.emitConstMetric(ch, c.remoteArchivePendingSites,
 			prometheus.GaugeValue, float64(pending))
-		ch <- prometheus.MustNewConstMetric(c.remoteArchiveFailures,
+		c.emitConstMetric(ch, c.remoteArchiveFailures,
 			prometheus.CounterValue, float64(failures))
 	}
 
@@ -2004,7 +2029,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		if s.fn() {
 			v = 1
 		}
-		ch <- prometheus.MustNewConstMetric(s.desc, prometheus.GaugeValue, v)
+		c.emitConstMetric(ch, s.desc, prometheus.GaugeValue, v)
 	}
 
 	// #8195: the per-listener state set. Emitted from the SAME
@@ -2032,7 +2057,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 				if row.L.State == st.want {
 					v = 1
 				}
-				ch <- prometheus.MustNewConstMetric(c.managementListenerState,
+				c.emitConstMetric(ch, c.managementListenerState,
 					prometheus.GaugeValue, v, row.Surface, row.L.Addr, st.name)
 			}
 		}
@@ -2055,11 +2080,11 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		if c.srv.schedulerRepublishFailedFn() {
 			v = 1
 		}
-		ch <- prometheus.MustNewConstMetric(c.schedulerRepublishFailed,
+		c.emitConstMetric(ch, c.schedulerRepublishFailed,
 			prometheus.GaugeValue, v)
 	}
 	if c.srv.schedulerRepublishStaleSecondsFn != nil {
-		ch <- prometheus.MustNewConstMetric(c.schedulerRepublishStale,
+		c.emitConstMetric(ch, c.schedulerRepublishStale,
 			prometheus.GaugeValue, c.srv.schedulerRepublishStaleSecondsFn())
 	}
 	if c.srv.schedulerRepublishFailClosedFn != nil {
@@ -2068,9 +2093,9 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 			v = 1
 		}
 		// Preserve the old series as a deprecated alias for existing alerts.
-		ch <- prometheus.MustNewConstMetric(c.schedulerRepublishFailOpenStale,
+		c.emitConstMetric(ch, c.schedulerRepublishFailOpenStale,
 			prometheus.GaugeValue, v)
-		ch <- prometheus.MustNewConstMetric(c.schedulerRepublishFailClosed,
+		c.emitConstMetric(ch, c.schedulerRepublishFailClosed,
 			prometheus.GaugeValue, v)
 	}
 
@@ -2085,27 +2110,27 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 			if !info.LastSuccess.IsZero() {
 				secs = now.Sub(info.LastSuccess).Seconds()
 			}
-			ch <- prometheus.MustNewConstMetric(c.feedSecondsSinceSuccess,
+			c.emitConstMetric(ch, c.feedSecondsSinceSuccess,
 				prometheus.GaugeValue, secs, name)
 			stale := 0.0
 			if !info.StaleSince.IsZero() {
 				stale = 1
 			}
-			ch <- prometheus.MustNewConstMetric(c.feedStale,
+			c.emitConstMetric(ch, c.feedStale,
 				prometheus.GaugeValue, stale, name)
-			ch <- prometheus.MustNewConstMetric(c.feedShrinkRefusalsTotal,
+			c.emitConstMetric(ch, c.feedShrinkRefusalsTotal,
 				prometheus.CounterValue, float64(info.ShrinkRefusalCount), name)
 			shrinkRefused := 0.0
 			if info.ShrinkRefused {
 				shrinkRefused = 1
 			}
-			ch <- prometheus.MustNewConstMetric(c.feedShrinkRefused,
+			c.emitConstMetric(ch, c.feedShrinkRefused,
 				prometheus.GaugeValue, shrinkRefused, name)
 			publicationDebt := 0.0
 			if info.PublicationDebt {
 				publicationDebt = 1
 			}
-			ch <- prometheus.MustNewConstMetric(c.feedPublicationDebt,
+			c.emitConstMetric(ch, c.feedPublicationDebt,
 				prometheus.GaugeValue, publicationDebt, name)
 		}
 	}
@@ -2323,14 +2348,16 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 func emitHistogram(ch chan<- prometheus.Metric, desc *prometheus.Desc, hist []uint64, ifindexLabel, queueLabel string) {
 	for i, count := range hist {
 		upperNs := bucketUpperBoundNs(i)
-		ch <- prometheus.MustNewConstMetric(
-			desc,
+		m, err := newConstMetric(nil, desc,
 			prometheus.CounterValue,
 			float64(count),
 			ifindexLabel,
 			queueLabel,
-			strconv.FormatUint(upperNs, 10),
-		)
+			strconv.FormatUint(upperNs, 10))
+		if err != nil {
+			continue
+		}
+		ch <- m
 	}
 }
 
@@ -2373,7 +2400,7 @@ func (c *xpfCollector) collectHelperCrashEpisodes(ch chan<- prometheus.Metric) {
 	if c.srv == nil || c.srv.helperCrashEpisodesFn == nil {
 		return
 	}
-	ch <- prometheus.MustNewConstMetric(c.helperCrashEpisodesTotal,
+	c.emitConstMetric(ch, c.helperCrashEpisodesTotal,
 		prometheus.CounterValue, float64(c.srv.helperCrashEpisodesFn()))
 }
 
@@ -2393,5 +2420,5 @@ func (c *xpfCollector) collectForwardingSupported(ch chan<- prometheus.Metric) {
 	if c.srv.forwardingSupportedFn() {
 		v = 1
 	}
-	ch <- prometheus.MustNewConstMetric(c.forwardingSupported, prometheus.GaugeValue, v)
+	c.emitConstMetric(ch, c.forwardingSupported, prometheus.GaugeValue, v)
 }

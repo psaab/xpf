@@ -46,7 +46,7 @@ func (c *xpfCollector) collectSyslogDrops(ch chan<- prometheus.Metric) {
 			{"dial", st.Dials},
 			{"cooldown", st.Cooldown},
 		} {
-			ch <- prometheus.MustNewConstMetric(c.syslogMessagesDropped,
+			c.emitConstMetric(ch, c.syslogMessagesDropped,
 				prometheus.CounterValue, float64(r.v),
 				st.RemoteAddr, st.Protocol, r.name)
 		}

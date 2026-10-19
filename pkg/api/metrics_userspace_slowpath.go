@@ -60,12 +60,10 @@ func (c *xpfCollector) emitBindingSlowPathReinjectCounters(ch chan<- prometheus.
 			{c.bindingSlowPathLocalDeliveryPackets, b.SlowPathLocalDeliveryPackets},
 			{c.bindingSlowPathMissingNeighborPackets, b.SlowPathMissingNeighborPackets},
 		} {
-			ch <- prometheus.MustNewConstMetric(
-				m.desc,
+			c.emitConstMetric(ch, m.desc,
 				prometheus.CounterValue,
 				float64(m.value),
-				slot, queueID, workerID, b.Interface,
-			)
+				slot, queueID, workerID, b.Interface)
 		}
 	}
 }

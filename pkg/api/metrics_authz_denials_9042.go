@@ -33,7 +33,7 @@ func (c *xpfCollector) emitAuthzDenials(ch chan<- prometheus.Metric) {
 	// enumeration the recording sites do rather than restating it, which is the
 	// drift #8312 called out.
 	for _, s := range denyaudit.Surfaces() {
-		ch <- prometheus.MustNewConstMetric(c.authzDenialsTotal,
+		c.emitConstMetric(ch, c.authzDenialsTotal,
 			prometheus.CounterValue, float64(denyaudit.Total(s)), string(s))
 	}
 }

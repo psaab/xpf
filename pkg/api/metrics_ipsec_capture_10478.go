@@ -27,7 +27,7 @@ func (c *xpfCollector) collectIpsecCaptureWitness(ch chan<- prometheus.Metric) {
 	if w.ActorActive {
 		active = 1
 	}
-	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureActorActive, prometheus.GaugeValue, active, labels...)
+	c.emitConstMetric(ch, c.ipsecCaptureActorActive, prometheus.GaugeValue, active, labels...)
 	state := w.PermitState
 	if state == "" {
 		state = "UNKNOWN"
@@ -37,29 +37,29 @@ func (c *xpfCollector) collectIpsecCaptureWitness(ch chan<- prometheus.Metric) {
 		if state == candidate {
 			value = 1
 		}
-		ch <- prometheus.MustNewConstMetric(c.ipsecCapturePermitState, prometheus.GaugeValue, value, runID, generation, permitEpoch, candidate)
+		c.emitConstMetric(ch, c.ipsecCapturePermitState, prometheus.GaugeValue, value, runID, generation, permitEpoch, candidate)
 	}
-	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureConsumedTotal, prometheus.CounterValue, float64(w.Consumed), labels...)
-	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureAdjudicatedTotal, prometheus.CounterValue, float64(w.Adjudicated), labels...)
-	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureReinjectedTotal, prometheus.CounterValue, float64(w.Reinjected), labels...)
-	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureWrittenTotal, prometheus.CounterValue, float64(w.Written), labels...)
-	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureUncertainTotal, prometheus.CounterValue, float64(w.Uncertain), labels...)
-	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureLateCompletionsTotal, prometheus.CounterValue, float64(w.LateCompletions), labels...)
-	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureTimeoutsTotal, prometheus.CounterValue, float64(w.Timeouts), labels...)
-	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureStaleTotal, prometheus.CounterValue, float64(w.Stale), labels...)
-	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureCancelledTotal, prometheus.CounterValue, float64(w.Cancelled), labels...)
-	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureRefusedTotal, prometheus.CounterValue, float64(w.Refused), labels...)
+	c.emitConstMetric(ch, c.ipsecCaptureConsumedTotal, prometheus.CounterValue, float64(w.Consumed), labels...)
+	c.emitConstMetric(ch, c.ipsecCaptureAdjudicatedTotal, prometheus.CounterValue, float64(w.Adjudicated), labels...)
+	c.emitConstMetric(ch, c.ipsecCaptureReinjectedTotal, prometheus.CounterValue, float64(w.Reinjected), labels...)
+	c.emitConstMetric(ch, c.ipsecCaptureWrittenTotal, prometheus.CounterValue, float64(w.Written), labels...)
+	c.emitConstMetric(ch, c.ipsecCaptureUncertainTotal, prometheus.CounterValue, float64(w.Uncertain), labels...)
+	c.emitConstMetric(ch, c.ipsecCaptureLateCompletionsTotal, prometheus.CounterValue, float64(w.LateCompletions), labels...)
+	c.emitConstMetric(ch, c.ipsecCaptureTimeoutsTotal, prometheus.CounterValue, float64(w.Timeouts), labels...)
+	c.emitConstMetric(ch, c.ipsecCaptureStaleTotal, prometheus.CounterValue, float64(w.Stale), labels...)
+	c.emitConstMetric(ch, c.ipsecCaptureCancelledTotal, prometheus.CounterValue, float64(w.Cancelled), labels...)
+	c.emitConstMetric(ch, c.ipsecCaptureRefusedTotal, prometheus.CounterValue, float64(w.Refused), labels...)
 	if w.D11Available {
 		d11Labels := []string{w.D11RunID, strconv.FormatUint(w.D11Generation, 10), strconv.FormatUint(w.D11PermitEpoch, 10)}
-		ch <- prometheus.MustNewConstMetric(c.ipsecCaptureD11SuppressedTotal, prometheus.CounterValue, float64(w.D11Suppressed), d11Labels...)
-		ch <- prometheus.MustNewConstMetric(c.ipsecCaptureD11Deny52Total, prometheus.CounterValue, float64(w.D11Deny52), w.D11RunID, strconv.FormatUint(w.D11Generation, 10), strconv.FormatUint(w.D11PermitEpoch, 10), "52")
+		c.emitConstMetric(ch, c.ipsecCaptureD11SuppressedTotal, prometheus.CounterValue, float64(w.D11Suppressed), d11Labels...)
+		c.emitConstMetric(ch, c.ipsecCaptureD11Deny52Total, prometheus.CounterValue, float64(w.D11Deny52), w.D11RunID, strconv.FormatUint(w.D11Generation, 10), strconv.FormatUint(w.D11PermitEpoch, 10), "52")
 	}
 	deliveredAvailable := 0.0
 	if w.DeliveredAvailable {
 		deliveredAvailable = 1
 	}
-	ch <- prometheus.MustNewConstMetric(c.ipsecCaptureDeliveredAvail, prometheus.GaugeValue, deliveredAvailable, labels...)
+	c.emitConstMetric(ch, c.ipsecCaptureDeliveredAvail, prometheus.GaugeValue, deliveredAvailable, labels...)
 	if w.DeliveredAvailable {
-		ch <- prometheus.MustNewConstMetric(c.ipsecCaptureDeliveredTotal, prometheus.CounterValue, float64(w.Delivered), labels...)
+		c.emitConstMetric(ch, c.ipsecCaptureDeliveredTotal, prometheus.CounterValue, float64(w.Delivered), labels...)
 	}
 }

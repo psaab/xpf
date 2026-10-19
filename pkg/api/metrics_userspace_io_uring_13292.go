@@ -13,10 +13,10 @@ func (c *xpfCollector) emitUserspaceIoUring13292(ch chan<- prometheus.Metric, st
 	if status.IOUringActive {
 		active = 1
 	}
-	ch <- prometheus.MustNewConstMetric(c.userspaceIoUringActive,
+	c.emitConstMetric(ch, c.userspaceIoUringActive,
 		prometheus.GaugeValue, active)
-	ch <- prometheus.MustNewConstMetric(c.userspaceIoUringRetainedBuffers,
+	c.emitConstMetric(ch, c.userspaceIoUringRetainedBuffers,
 		prometheus.CounterValue, float64(status.IoUringRetainedBuffersTotal))
-	ch <- prometheus.MustNewConstMetric(c.userspaceIoUringRetainedBytes,
+	c.emitConstMetric(ch, c.userspaceIoUringRetainedBytes,
 		prometheus.CounterValue, float64(status.IoUringRetainedBytesTotal))
 }

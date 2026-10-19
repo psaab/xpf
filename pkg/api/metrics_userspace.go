@@ -120,13 +120,13 @@ func (c *xpfCollector) emitDropClassCounters(ch chan<- prometheus.Metric, status
 		unknownVLAN += b.UnknownVLANDropped
 		dstMAC += b.DstMACDropped
 	}
-	ch <- prometheus.MustNewConstMetric(c.userspaceMartianDropped, prometheus.CounterValue, float64(martian))
-	ch <- prometheus.MustNewConstMetric(c.userspaceDNSIllegalReplyDropped, prometheus.CounterValue, float64(dnsIllegalReply))
-	ch <- prometheus.MustNewConstMetric(c.userspaceIPv6ExtHeaderDropped, prometheus.CounterValue, float64(ipv6ExtHeader))
-	ch <- prometheus.MustNewConstMetric(c.userspaceV4MappedIPv6Dropped, prometheus.CounterValue, float64(v4MappedIPv6))
-	ch <- prometheus.MustNewConstMetric(c.userspaceUMEMSliceDropped, prometheus.CounterValue, float64(umemSlice))
-	ch <- prometheus.MustNewConstMetric(c.userspaceUnknownVLANDropped, prometheus.CounterValue, float64(unknownVLAN))
-	ch <- prometheus.MustNewConstMetric(c.userspaceDstMACDropped, prometheus.CounterValue, float64(dstMAC))
+	c.emitConstMetric(ch, c.userspaceMartianDropped, prometheus.CounterValue, float64(martian))
+	c.emitConstMetric(ch, c.userspaceDNSIllegalReplyDropped, prometheus.CounterValue, float64(dnsIllegalReply))
+	c.emitConstMetric(ch, c.userspaceIPv6ExtHeaderDropped, prometheus.CounterValue, float64(ipv6ExtHeader))
+	c.emitConstMetric(ch, c.userspaceV4MappedIPv6Dropped, prometheus.CounterValue, float64(v4MappedIPv6))
+	c.emitConstMetric(ch, c.userspaceUMEMSliceDropped, prometheus.CounterValue, float64(umemSlice))
+	c.emitConstMetric(ch, c.userspaceUnknownVLANDropped, prometheus.CounterValue, float64(unknownVLAN))
+	c.emitConstMetric(ch, c.userspaceDstMACDropped, prometheus.CounterValue, float64(dstMAC))
 }
 
 // emitFabricSkipCounters exposes the #3773 (M13) fabric-link skip
@@ -137,16 +137,12 @@ func (c *xpfCollector) emitDropClassCounters(ch chan<- prometheus.Metric, status
 // transient). Both emitted unconditionally so a 0 is a real "no fabric
 // skipped" signal rather than an absent series.
 func (c *xpfCollector) emitFabricSkipCounters(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
-	ch <- prometheus.MustNewConstMetric(
-		c.fabricLinkSkippedMalformedTotal,
+	c.emitConstMetric(ch, c.fabricLinkSkippedMalformedTotal,
 		prometheus.CounterValue,
-		float64(status.FabricLinkSkippedMalformedTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.fabricLinkUnresolvedPeerTotal,
+		float64(status.FabricLinkSkippedMalformedTotal))
+	c.emitConstMetric(ch, c.fabricLinkUnresolvedPeerTotal,
 		prometheus.CounterValue,
-		float64(status.FabricLinkUnresolvedPeerTotal),
-	)
+		float64(status.FabricLinkUnresolvedPeerTotal))
 }
 
 // emitFabricTrustBoundaryCounters exposes packet drops attributed to the
@@ -163,26 +159,18 @@ func (c *xpfCollector) emitFabricTrustBoundaryCounters(
 		unstampedIngress += binding.UnstampedFabricIngressDrops
 		ambiguousZone += binding.AmbiguousFabricZoneDrops
 	}
-	ch <- prometheus.MustNewConstMetric(
-		c.userspaceFabricInvalidStampDrops,
+	c.emitConstMetric(ch, c.userspaceFabricInvalidStampDrops,
 		prometheus.CounterValue,
-		float64(invalidStamp),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.userspaceFabricUnstampedIngressDrops,
+		float64(invalidStamp))
+	c.emitConstMetric(ch, c.userspaceFabricUnstampedIngressDrops,
 		prometheus.CounterValue,
-		float64(unstampedIngress),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.userspaceFabricAmbiguousZoneDrops,
+		float64(unstampedIngress))
+	c.emitConstMetric(ch, c.userspaceFabricAmbiguousZoneDrops,
 		prometheus.CounterValue,
-		float64(ambiguousZone),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.userspaceFabricAmbiguousZoneCount,
+		float64(ambiguousZone))
+	c.emitConstMetric(ch, c.userspaceFabricAmbiguousZoneCount,
 		prometheus.GaugeValue,
-		float64(status.AmbiguousFabricZoneCount),
-	)
+		float64(status.AmbiguousFabricZoneCount))
 }
 
 // emitRejectObservability exposes the #3657 source-split telemetry for
@@ -210,8 +198,8 @@ func (c *xpfCollector) emitRejectObservability(ch chan<- prometheus.Metric, stat
 		filterRateLimit += b.FilterRejectRateLimitDrops
 	}
 	emit := func(desc *prometheus.Desc, policy, filter uint64) {
-		ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue, float64(policy), "policy")
-		ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue, float64(filter), "filter")
+		c.emitConstMetric(ch, desc, prometheus.CounterValue, float64(policy), "policy")
+		c.emitConstMetric(ch, desc, prometheus.CounterValue, float64(filter), "filter")
 	}
 	emit(c.userspaceRejectSent, policySent, filterSent)
 	emit(c.userspaceRejectReplyBudgetDrops, policyBudget, filterBudget)
@@ -229,7 +217,7 @@ func (c *xpfCollector) emitPolicyContentRejected(ch chan<- prometheus.Metric, st
 	if len(status.LastSnapshotRejectReasons) > 0 {
 		v = 1.0
 	}
-	ch <- prometheus.MustNewConstMetric(c.userspacePolicyContentRejected, prometheus.GaugeValue, v)
+	c.emitConstMetric(ch, c.userspacePolicyContentRejected, prometheus.GaugeValue, v)
 }
 
 // emitZoneIDCollision exposes the #3719 0/1 gauge: 1 while the last userspace
@@ -243,7 +231,7 @@ func (c *xpfCollector) emitZoneIDCollision(ch chan<- prometheus.Metric, status d
 	if len(status.ZoneIDCollisions) > 0 {
 		v = 1.0
 	}
-	ch <- prometheus.MustNewConstMetric(c.userspaceZoneIDCollision, prometheus.GaugeValue, v)
+	c.emitConstMetric(ch, c.userspaceZoneIDCollision, prometheus.GaugeValue, v)
 }
 
 // emitWireguardTelemetry exposes the #1865 per-WG-tunnel telemetry
@@ -257,8 +245,7 @@ func (c *xpfCollector) emitZoneIDCollision(ch chan<- prometheus.Metric, status d
 func (c *xpfCollector) emitWireguardTelemetry(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
 	for _, t := range status.WgTunnels {
 		counter := func(desc *prometheus.Desc, v uint64, labels ...string) {
-			ch <- prometheus.MustNewConstMetric(
-				desc, prometheus.CounterValue, float64(v), labels...)
+			c.emitConstMetric(ch, desc, prometheus.CounterValue, float64(v), labels...)
 		}
 		// Completions by role: role=responder is the helper's
 		// hs_responses_created (the single responder-completion
@@ -375,16 +362,13 @@ func (c *xpfCollector) emitWireguardTelemetry(ch chan<- prometheus.Metric, statu
 			if p.SessionConfirmed {
 				confirmed = 1.0
 			}
-			ch <- prometheus.MustNewConstMetric(
-				c.wgSessionConfirmed, prometheus.GaugeValue, confirmed, t.Tunnel, p.PeerPubkeyHex)
+			c.emitConstMetric(ch, c.wgSessionConfirmed, prometheus.GaugeValue, confirmed, t.Tunnel, p.PeerPubkeyHex)
 		}
 		if t.LastHandshakeUnixSecs > 0 {
-			ch <- prometheus.MustNewConstMetric(
-				c.wgLastHandshakeTimeSeconds,
+			c.emitConstMetric(ch, c.wgLastHandshakeTimeSeconds,
 				prometheus.GaugeValue,
 				float64(t.LastHandshakeUnixSecs),
-				t.Tunnel,
-			)
+				t.Tunnel)
 		}
 	}
 }
@@ -392,36 +376,28 @@ func (c *xpfCollector) emitWireguardTelemetry(ch chan<- prometheus.Metric, statu
 func (c *xpfCollector) emitThreeColorPolicerCounters(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
 	for _, p := range status.ThreeColorPolicerCounters {
 		emitColor := func(color string, packets, bytes uint64) {
-			ch <- prometheus.MustNewConstMetric(
-				c.threeColorPolicerPacketsTotal,
+			c.emitConstMetric(ch, c.threeColorPolicerPacketsTotal,
 				prometheus.CounterValue,
 				float64(packets),
 				p.Name,
-				color,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.threeColorPolicerBytesTotal,
+				color)
+			c.emitConstMetric(ch, c.threeColorPolicerBytesTotal,
 				prometheus.CounterValue,
 				float64(bytes),
 				p.Name,
-				color,
-			)
+				color)
 		}
 		emitColor("green", p.GreenPackets, p.GreenBytes)
 		emitColor("yellow", p.YellowPackets, p.YellowBytes)
 		emitColor("red", p.RedPackets, p.RedBytes)
-		ch <- prometheus.MustNewConstMetric(
-			c.threeColorPolicerDropsTotal,
+		c.emitConstMetric(ch, c.threeColorPolicerDropsTotal,
 			prometheus.CounterValue,
 			float64(p.DropPackets),
-			p.Name,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.threeColorPolicerDropBytes,
+			p.Name)
+		c.emitConstMetric(ch, c.threeColorPolicerDropBytes,
 			prometheus.CounterValue,
 			float64(p.DropBytes),
-			p.Name,
-		)
+			p.Name)
 	}
 }
 
@@ -441,36 +417,36 @@ func (c *xpfCollector) emitUserspaceSourceNATPoolMetrics(ch chan<- prometheus.Me
 		}
 		emitted[candidate.PoolName] = struct{}{}
 		labels := []string{pool.PoolName, pool.RuleName}
-		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolLiveFlows,
+		c.emitConstMetric(ch, c.userspaceSNATPoolLiveFlows,
 			prometheus.GaugeValue, float64(pool.LiveFlows), labels...)
-		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolMaxTrackedFlows,
+		c.emitConstMetric(ch, c.userspaceSNATPoolMaxTrackedFlows,
 			prometheus.GaugeValue, float64(pool.MaxTrackedFlows), labels...)
-		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolUsedPorts,
+		c.emitConstMetric(ch, c.userspaceSNATPoolUsedPorts,
 			prometheus.GaugeValue, float64(pool.UsedPorts), labels...)
-		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolPersistentLeases,
+		c.emitConstMetric(ch, c.userspaceSNATPoolPersistentLeases,
 			prometheus.GaugeValue, float64(pool.PersistentLeases), labels...)
-		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolAllocationsTotal,
+		c.emitConstMetric(ch, c.userspaceSNATPoolAllocationsTotal,
 			prometheus.CounterValue, float64(pool.AllocationsTotal), labels...)
-		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolReusesTotal,
+		c.emitConstMetric(ch, c.userspaceSNATPoolReusesTotal,
 			prometheus.CounterValue, float64(pool.ReusesTotal), labels...)
-		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolPersistentAdmittedTotal,
+		c.emitConstMetric(ch, c.userspaceSNATPoolPersistentAdmittedTotal,
 			prometheus.CounterValue, float64(pool.PersistentAdmittedTotal), labels...)
-		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolPersistentDeclinedTotal,
+		c.emitConstMetric(ch, c.userspaceSNATPoolPersistentDeclinedTotal,
 			prometheus.CounterValue, float64(pool.PersistentDeclinedTotal), labels...)
-		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolExhaustionsTotal,
+		c.emitConstMetric(ch, c.userspaceSNATPoolExhaustionsTotal,
 			prometheus.CounterValue, float64(pool.ExhaustionTotal), labels...)
-		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolIdleLeaseImportCapacityTotal,
+		c.emitConstMetric(ch, c.userspaceSNATPoolIdleLeaseImportCapacityTotal,
 			prometheus.CounterValue, float64(pool.IdleLeaseImportCapacityTotal), labels...)
 		// #4800: always emit the denominator and contended subset together.
-		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolLiveLockAcquisitionsTotal,
+		c.emitConstMetric(ch, c.userspaceSNATPoolLiveLockAcquisitionsTotal,
 			prometheus.CounterValue, float64(pool.LiveLockAcquisitionsTotal), labels...)
-		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolLiveLockContendedTotal,
+		c.emitConstMetric(ch, c.userspaceSNATPoolLiveLockContendedTotal,
 			prometheus.CounterValue, float64(pool.LiveLockContendedTotal), labels...)
 		// #9392: paired production measures distinguish a healthy recycled
 		// walk from the allocator cliff approaching pool exhaustion.
-		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolRecycleScanPopsTotal,
+		c.emitConstMetric(ch, c.userspaceSNATPoolRecycleScanPopsTotal,
 			prometheus.CounterValue, float64(pool.RecycleScanPopsTotal), labels...)
-		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolRecycleScanWalksTotal,
+		c.emitConstMetric(ch, c.userspaceSNATPoolRecycleScanWalksTotal,
 			prometheus.CounterValue, float64(pool.RecycleScanWalksTotal), labels...)
 	}
 }
@@ -483,26 +459,26 @@ func eventStreamBoolGauge(value bool) float64 {
 }
 
 func (c *xpfCollector) emitUserspaceEventStream(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamState,
+	c.emitConstMetric(ch, c.userspaceEventStreamState,
 		prometheus.GaugeValue, eventStreamBoolGauge(status.EventStreamConnected), "connected")
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamState,
+	c.emitConstMetric(ch, c.userspaceEventStreamState,
 		prometheus.GaugeValue, float64(status.EventStreamSeq), "sequence")
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamState,
+	c.emitConstMetric(ch, c.userspaceEventStreamState,
 		prometheus.GaugeValue, float64(status.EventStreamAcked), "acked_sequence")
 	if status.EventStream == nil {
 		return
 	}
 	es := status.EventStream
 	c.emitUserspaceEventStreamStatus(ch, *es)
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
+	c.emitConstMetric(ch, c.userspaceEventStreamProducerFramesTotal,
 		prometheus.CounterValue, float64(status.EventStreamSent), "sent")
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
+	c.emitConstMetric(ch, c.userspaceEventStreamProducerFramesTotal,
 		prometheus.CounterValue, float64(status.EventStreamDropped), "dropped")
 	// #2381: I/O cycles in which the helper hit the write-backlog cap and
 	// stopped draining the bounded channel (stalled daemon reader). Surfaced
 	// under the producer metric with a distinct "write_stalled" label so a
 	// wedged consumer is observable instead of silently OOMing the helper.
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
+	c.emitConstMetric(ch, c.userspaceEventStreamProducerFramesTotal,
 		prometheus.CounterValue, float64(status.EventStreamWriteStalls), "write_stalled")
 	// #2382: accepted RT_FLOW / dataplane-telemetry frames evicted from the
 	// helper's replay buffer when it wrapped at capacity before the daemon
@@ -510,14 +486,14 @@ func (c *xpfCollector) emitUserspaceEventStream(ch chan<- prometheus.Metric, sta
 	// permanently lost — a real telemetry-loss signal. Surfaced under the
 	// producer metric with a distinct "replay_evicted" label so the loss is
 	// observable (it is NOT ACK-trim, which is normal acknowledged removal).
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
+	c.emitConstMetric(ch, c.userspaceEventStreamProducerFramesTotal,
 		prometheus.CounterValue, float64(status.EventStreamReplayEvictions), "replay_evicted")
 	// #2959: MSG_ACK control frames rejected because the daemon ACKed a
 	// sequence outside the valid [acked_seq, next_seq] window (a backward or
 	// future ACK from a buggy/mixed-version/corrupted listener). The helper
 	// fails closed and ignores them; surfaced under the producer metric with a
 	// distinct "invalid_ack" label so an impossible-ACK peer is observable.
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
+	c.emitConstMetric(ch, c.userspaceEventStreamProducerFramesTotal,
 		prometheus.CounterValue, float64(status.EventStreamInvalidAcks), "invalid_ack")
 	// #10979: producer counters must remain distinguishable by event kind and
 	// terminal outcome; the aggregate dropped counter alone is kind-blind.
@@ -551,23 +527,23 @@ func (c *xpfCollector) emitUserspaceEventStream(ch chan<- prometheus.Metric, sta
 		{"session_create_queue_full", status.EventStreamSessionCreateQueueFull},
 		{"session_create_disconnected", status.EventStreamSessionCreateDisconnected},
 	} {
-		ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
+		c.emitConstMetric(ch, c.userspaceEventStreamProducerFramesTotal,
 			prometheus.CounterValue, float64(item.count), item.outcome)
 	}
 }
 
 func (c *xpfCollector) emitUserspaceEventStreamStatus(ch chan<- prometheus.Metric, es dpuserspace.EventStreamStatus) {
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamState,
+	c.emitConstMetric(ch, c.userspaceEventStreamState,
 		prometheus.GaugeValue, eventStreamBoolGauge(es.Paused), "paused")
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamState,
+	c.emitConstMetric(ch, c.userspaceEventStreamState,
 		prometheus.GaugeValue, float64(es.EventsSinceAck), "events_since_ack")
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamFramesTotal,
+	c.emitConstMetric(ch, c.userspaceEventStreamFramesTotal,
 		prometheus.CounterValue, float64(es.FramesRead), "read")
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamFramesTotal,
+	c.emitConstMetric(ch, c.userspaceEventStreamFramesTotal,
 		prometheus.CounterValue, float64(es.FramesWritten), "written")
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamDecodeErrorsTotal,
+	c.emitConstMetric(ch, c.userspaceEventStreamDecodeErrorsTotal,
 		prometheus.CounterValue, float64(es.DecodeErrors))
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamSequenceGapsTotal,
+	c.emitConstMetric(ch, c.userspaceEventStreamSequenceGapsTotal,
 		prometheus.CounterValue, float64(es.SeqGaps))
 	for _, item := range []struct {
 		reason string
@@ -576,14 +552,14 @@ func (c *xpfCollector) emitUserspaceEventStreamStatus(ch chan<- prometheus.Metri
 		{"session_sync_gap", es.SessionSyncResyncs},
 		{"telemetry_gap", es.TelemetryGapResyncs},
 	} {
-		ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamResyncsTotal,
+		c.emitConstMetric(ch, c.userspaceEventStreamResyncsTotal,
 			prometheus.CounterValue, float64(item.count), item.reason)
 	}
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamResyncSuppressedTotal,
+	c.emitConstMetric(ch, c.userspaceEventStreamResyncSuppressedTotal,
 		prometheus.CounterValue, float64(es.DecodeResyncSuppressed))
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamDisconnectsTotal,
+	c.emitConstMetric(ch, c.userspaceEventStreamDisconnectsTotal,
 		prometheus.CounterValue, float64(es.PendingOverflowDisconnects), "pending_callback_overflow")
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamPeerCredRejectionsTotal,
+	c.emitConstMetric(ch, c.userspaceEventStreamPeerCredRejectionsTotal,
 		prometheus.CounterValue, float64(es.PeerCredRejections))
 	for _, item := range []struct {
 		label string
@@ -596,7 +572,7 @@ func (c *xpfCollector) emitUserspaceEventStreamStatus(ch chan<- prometheus.Metri
 		{"session_close", es.SessionCloseEvents},
 		{"session_create", es.SessionCreateEvents},
 	} {
-		ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamDataplaneEventsTotal,
+		c.emitConstMetric(ch, c.userspaceEventStreamDataplaneEventsTotal,
 			prometheus.CounterValue, float64(item.count), item.label)
 	}
 	for _, item := range []struct {
@@ -609,9 +585,9 @@ func (c *xpfCollector) emitUserspaceEventStreamStatus(ch chan<- prometheus.Metri
 		{"session_close", es.SessionCloseDrops},
 		{"session_create", es.SessionCreateDrops},
 	} {
-		ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamDataplaneDropsTotal,
+		c.emitConstMetric(ch, c.userspaceEventStreamDataplaneDropsTotal,
 			prometheus.CounterValue, float64(item.count), item.label)
 	}
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamUnknownDropsTotal,
+	c.emitConstMetric(ch, c.userspaceEventStreamUnknownDropsTotal,
 		prometheus.CounterValue, float64(es.UnknownFrameDrops))
 }

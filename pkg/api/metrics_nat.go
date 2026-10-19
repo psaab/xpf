@@ -58,7 +58,7 @@ func (c *xpfCollector) collectNATPoolMetrics(ch chan<- prometheus.Metric, dp api
 		ports, unusable := config.SourceNATPoolReportablePorts(pool, name, portLow, portHigh, overBudget)
 		totalPorts := int(ports)
 		if !pool.PortNoTranslation || unusable != "" {
-			ch <- prometheus.MustNewConstMetric(c.natPoolTotalPorts, prometheus.GaugeValue,
+			c.emitConstMetric(ch, c.natPoolTotalPorts, prometheus.GaugeValue,
 				float64(totalPorts), name)
 		}
 
@@ -88,12 +88,12 @@ func (c *xpfCollector) collectNATPoolMetrics(ch chan<- prometheus.Metric, dp api
 		// used", and monitoring cannot tell the second from health.
 		if !pool.PortNoTranslation {
 			if rp, ok := poolOccupancy[name]; ok && unusable == "" {
-				ch <- prometheus.MustNewConstMetric(c.natPoolUsedPorts, prometheus.GaugeValue,
+				c.emitConstMetric(ch, c.natPoolUsedPorts, prometheus.GaugeValue,
 					float64(rp.UsedPorts), name)
 			}
 		}
 		if pool.Deterministic != nil {
-			ch <- prometheus.MustNewConstMetric(c.natPoolDeterministicInfo, prometheus.GaugeValue,
+			c.emitConstMetric(ch, c.natPoolDeterministicInfo, prometheus.GaugeValue,
 				1.0, name,
 				strconv.Itoa(pool.Deterministic.BlockSize),
 				strconv.Itoa(deterministicSubscriberCapacity(pool, name, overBudget)))
@@ -115,9 +115,9 @@ func (c *xpfCollector) collectNATPoolMetrics(ch chan<- prometheus.Metric, dp api
 				if allocated > totalBlocks {
 					allocated = totalBlocks
 				}
-				ch <- prometheus.MustNewConstMetric(c.natPoolDetBlocksTotal, prometheus.GaugeValue,
+				c.emitConstMetric(ch, c.natPoolDetBlocksTotal, prometheus.GaugeValue,
 					float64(totalBlocks), name)
-				ch <- prometheus.MustNewConstMetric(c.natPoolDetBlocksAllocated, prometheus.GaugeValue,
+				c.emitConstMetric(ch, c.natPoolDetBlocksAllocated, prometheus.GaugeValue,
 					float64(allocated), name)
 			}
 		}

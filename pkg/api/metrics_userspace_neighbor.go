@@ -25,44 +25,30 @@ const neighLatencyBucketCount = 16
 // All three are read straight off the single per-scrape ProcessStatus;
 // no extra control-socket round trip.
 func (c *xpfCollector) emitNeighborColdStartCapture(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
-	ch <- prometheus.MustNewConstMetric(
-		c.negNeighFastFailTotal,
+	c.emitConstMetric(ch, c.negNeighFastFailTotal,
 		prometheus.CounterValue,
-		float64(status.NegNeighFastFailTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.pendingNeighDuplicateDropsTotal,
+		float64(status.NegNeighFastFailTotal))
+	c.emitConstMetric(ch, c.pendingNeighDuplicateDropsTotal,
 		prometheus.CounterValue,
-		float64(status.PendingNeighDuplicateDropsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.pendingNeighDecapDropsTotal,
+		float64(status.PendingNeighDuplicateDropsTotal))
+	c.emitConstMetric(ch, c.pendingNeighDecapDropsTotal,
 		prometheus.CounterValue,
-		float64(status.PendingNeighDecapDropsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.pendingNeighCapacityDropsTotal,
+		float64(status.PendingNeighDecapDropsTotal))
+	c.emitConstMetric(ch, c.pendingNeighCapacityDropsTotal,
 		prometheus.CounterValue,
-		float64(status.PendingNeighCapacityDropsTotal),
-	)
+		float64(status.PendingNeighCapacityDropsTotal))
 	// #5673: data-path neighbor learns refused by the aggregate
 	// dynamic-neighbor map cap (spoofed-source pre-policy flood bound).
-	ch <- prometheus.MustNewConstMetric(
-		c.dynamicNeighborLearnCapDropsTotal,
+	c.emitConstMetric(ch, c.dynamicNeighborLearnCapDropsTotal,
 		prometheus.CounterValue,
-		float64(status.DynamicNeighborLearnCapDropsTotal),
-	)
+		float64(status.DynamicNeighborLearnCapDropsTotal))
 	// #10097: NDP Neighbor Advertisement learn-refusal counters.
-	ch <- prometheus.MustNewConstMetric(
-		c.ndpNaFragRefusedTotal,
+	c.emitConstMetric(ch, c.ndpNaFragRefusedTotal,
 		prometheus.CounterValue,
-		float64(status.NDPNAFragRefusedTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ndpNaBadSourceRefusedTotal,
+		float64(status.NDPNAFragRefusedTotal))
+	c.emitConstMetric(ch, c.ndpNaBadSourceRefusedTotal,
 		prometheus.CounterValue,
-		float64(status.NDPNABadSourceRefusedTotal),
-	)
+		float64(status.NDPNABadSourceRefusedTotal))
 	for _, key := range status.DynamicNeighborKeys {
 		// Each key is rendered "ifindex ip" by the helper. Split on the
 		// single space into the two gauge labels; skip a malformed entry
@@ -71,13 +57,11 @@ func (c *xpfCollector) emitNeighborColdStartCapture(ch chan<- prometheus.Metric,
 		if !ok || ifindex == "" || ip == "" {
 			continue
 		}
-		ch <- prometheus.MustNewConstMetric(
-			c.dynamicNeighborPresent,
+		c.emitConstMetric(ch, c.dynamicNeighborPresent,
 			prometheus.GaugeValue,
 			1,
 			ifindex,
-			ip,
-		)
+			ip)
 	}
 }
 
@@ -87,91 +71,59 @@ func (c *xpfCollector) emitNeighborColdStartCapture(ch chan<- prometheus.Metric,
 // debug-log feature). A non-zero `disconnected` series means the warmer
 // worker died and proactive warming is off until daemon restart.
 func (c *xpfCollector) emitNeighborWarmCounters(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborWarmDropsTotal,
+	c.emitConstMetric(ch, c.neighborWarmDropsTotal,
 		prometheus.CounterValue,
-		float64(status.NeighborWarmDropsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborWarmDisconnectedTotal,
+		float64(status.NeighborWarmDropsTotal))
+	c.emitConstMetric(ch, c.neighborWarmDisconnectedTotal,
 		prometheus.CounterValue,
-		float64(status.NeighborWarmDisconnectedTotal),
-	)
+		float64(status.NeighborWarmDisconnectedTotal))
 	// #1769: on-demand neighbor-resolver telemetry.
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborResolverQueueDepth,
+	c.emitConstMetric(ch, c.neighborResolverQueueDepth,
 		prometheus.GaugeValue,
-		float64(status.NeighborResolverQueueDepth),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborResolverEnqueueDropsTotal,
+		float64(status.NeighborResolverQueueDepth))
+	c.emitConstMetric(ch, c.neighborResolverEnqueueDropsTotal,
 		prometheus.CounterValue,
-		float64(status.NeighborResolverEnqueueDropsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborResolverDisconnectedTotal,
+		float64(status.NeighborResolverEnqueueDropsTotal))
+	c.emitConstMetric(ch, c.neighborResolverDisconnectedTotal,
 		prometheus.CounterValue,
-		float64(status.NeighborResolverDisconnectedTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborResolverGetAttemptsTotal,
+		float64(status.NeighborResolverDisconnectedTotal))
+	c.emitConstMetric(ch, c.neighborResolverGetAttemptsTotal,
 		prometheus.CounterValue,
-		float64(status.NeighborResolverGetAttemptsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborResolverGetResolvedTotal,
+		float64(status.NeighborResolverGetAttemptsTotal))
+	c.emitConstMetric(ch, c.neighborResolverGetResolvedTotal,
 		prometheus.CounterValue,
-		float64(status.NeighborResolverGetResolvedTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborResolverProbeOnStaleTotal,
+		float64(status.NeighborResolverGetResolvedTotal))
+	c.emitConstMetric(ch, c.neighborResolverProbeOnStaleTotal,
 		prometheus.CounterValue,
-		float64(status.NeighborResolverProbeOnStaleTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborResolverGetFailuresTotal,
+		float64(status.NeighborResolverProbeOnStaleTotal))
+	c.emitConstMetric(ch, c.neighborResolverGetFailuresTotal,
 		prometheus.CounterValue,
-		float64(status.NeighborResolverGetFailuresTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborResolverEpochRejectsTotal,
+		float64(status.NeighborResolverGetFailuresTotal))
+	c.emitConstMetric(ch, c.neighborResolverEpochRejectsTotal,
 		prometheus.CounterValue,
-		float64(status.NeighborResolverEpochRejectsTotal),
-	)
+		float64(status.NeighborResolverEpochRejectsTotal))
 	// #1771 §2.6: backoff-retry GETs, the §2.5 ENOBUFS/re-dump
 	// self-heal counters, and the pending/negative key gauges. All
 	// emitted unconditionally so a 0 is a real signal (no ENOBUFS, no
 	// parked packets) rather than an absent series.
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborResolverGetBackoffAttemptsTotal,
+	c.emitConstMetric(ch, c.neighborResolverGetBackoffAttemptsTotal,
 		prometheus.CounterValue,
-		float64(status.NeighborResolverGetBackoffAttemptsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborNetlinkEnobufsTotal,
+		float64(status.NeighborResolverGetBackoffAttemptsTotal))
+	c.emitConstMetric(ch, c.neighborNetlinkEnobufsTotal,
 		prometheus.CounterValue,
-		float64(status.NeighborNetlinkEnobufsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborNetlinkRedumpsTotal,
+		float64(status.NeighborNetlinkEnobufsTotal))
+	c.emitConstMetric(ch, c.neighborNetlinkRedumpsTotal,
 		prometheus.CounterValue,
-		float64(status.NeighborNetlinkRedumpsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborNetlinkRedumpUpsertsTotal,
+		float64(status.NeighborNetlinkRedumpsTotal))
+	c.emitConstMetric(ch, c.neighborNetlinkRedumpUpsertsTotal,
 		prometheus.CounterValue,
-		float64(status.NeighborNetlinkRedumpUpsertsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborPendingKeys,
+		float64(status.NeighborNetlinkRedumpUpsertsTotal))
+	c.emitConstMetric(ch, c.neighborPendingKeys,
 		prometheus.GaugeValue,
-		float64(status.NeighborPendingKeys),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.negNeighKeys,
+		float64(status.NeighborPendingKeys))
+	c.emitConstMetric(ch, c.negNeighKeys,
 		prometheus.GaugeValue,
-		float64(status.NegNeighKeys),
-	)
+		float64(status.NegNeighKeys))
 	// #1772: neighbor/ARP resolution LATENCY telemetry.
 	c.emitNeighborLatencyHistograms(ch, status)
 }
@@ -224,14 +176,10 @@ func (c *xpfCollector) emitNeighborLatencyHistograms(ch chan<- prometheus.Metric
 		float64(status.NeighborResolverGetRttSumNs)/1e9,
 		neighLatencyCumulativeBuckets(status.NeighborResolverGetRttBuckets),
 	)
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborPendingTimeoutDropsTotal,
+	c.emitConstMetric(ch, c.neighborPendingTimeoutDropsTotal,
 		prometheus.CounterValue,
-		float64(status.NeighborPendingTimeoutDropsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.neighborPendingMaxDepth,
+		float64(status.NeighborPendingTimeoutDropsTotal))
+	c.emitConstMetric(ch, c.neighborPendingMaxDepth,
 		prometheus.GaugeValue,
-		float64(status.NeighborPendingMaxDepth),
-	)
+		float64(status.NeighborPendingMaxDepth))
 }

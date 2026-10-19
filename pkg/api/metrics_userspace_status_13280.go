@@ -9,40 +9,40 @@ import (
 // ProcessStatus by Rust. Emit zeroes too: these additive counters are expected
 // to be zero on healthy nodes, and an absent series is not evidence of zero.
 func (c *xpfCollector) emitUserspaceStatus13280(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
-	ch <- prometheus.MustNewConstMetric(c.userspaceCosNoOwnerBindingDrops,
+	c.emitConstMetric(ch, c.userspaceCosNoOwnerBindingDrops,
 		prometheus.CounterValue, float64(status.CosNoOwnerBindingDropsTotal))
-	ch <- prometheus.MustNewConstMetric(c.userspaceIoUringWriteRefused,
+	c.emitConstMetric(ch, c.userspaceIoUringWriteRefused,
 		prometheus.CounterValue, float64(status.IoUringWriteRefusedTotal))
-	ch <- prometheus.MustNewConstMetric(c.userspaceIoUringWriteRefusedBytes,
+	c.emitConstMetric(ch, c.userspaceIoUringWriteRefusedBytes,
 		prometheus.CounterValue, float64(status.IoUringWriteRefusedBytesTotal))
-	ch <- prometheus.MustNewConstMetric(c.userspaceRouteChangeUnrejudgedSessions,
+	c.emitConstMetric(ch, c.userspaceRouteChangeUnrejudgedSessions,
 		prometheus.CounterValue, float64(status.RouteChangeUnrejudgedSessionsTotal))
-	ch <- prometheus.MustNewConstMetric(c.userspaceOwnerRGFilingsDeclined,
+	c.emitConstMetric(ch, c.userspaceOwnerRGFilingsDeclined,
 		prometheus.CounterValue, float64(status.OwnerRGFilingsDeclinedTotal))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionDeleteRefusedIdentity,
+	c.emitConstMetric(ch, c.userspaceSessionDeleteRefusedIdentity,
 		prometheus.CounterValue, float64(status.SessionDeleteRefusedIdentity))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionDeleteDroppedReleased,
+	c.emitConstMetric(ch, c.userspaceSessionDeleteDroppedReleased,
 		prometheus.CounterValue, float64(status.SessionDeleteDroppedReleased))
-	ch <- prometheus.MustNewConstMetric(c.userspaceTunnelPurgeReservationsReleased,
+	c.emitConstMetric(ch, c.userspaceTunnelPurgeReservationsReleased,
 		prometheus.CounterValue, float64(status.TunnelPurgeReservationsReleased))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSyncedReverseRederived,
+	c.emitConstMetric(ch, c.userspaceSyncedReverseRederived,
 		prometheus.CounterValue, float64(status.SyncedReverseRederived))
 
-	ch <- prometheus.MustNewConstMetric(c.userspacePeerDeleteRefusedLocalOwned,
+	c.emitConstMetric(ch, c.userspacePeerDeleteRefusedLocalOwned,
 		prometheus.CounterValue, float64(status.PeerDeleteRefusedLocalOwned))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionDeleteReplicaDropped,
+	c.emitConstMetric(ch, c.userspaceSessionDeleteReplicaDropped,
 		prometheus.CounterValue, float64(status.SessionDeleteReplicaDropped))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionDeleteReplicaDropRepaired,
+	c.emitConstMetric(ch, c.userspaceSessionDeleteReplicaDropRepaired,
 		prometheus.CounterValue, float64(status.SessionDeleteReplicaDropRepaired))
-	ch <- prometheus.MustNewConstMetric(c.userspaceHATransitionDropped,
+	c.emitConstMetric(ch, c.userspaceHATransitionDropped,
 		prometheus.CounterValue, float64(status.HATransitionDemoteDropped), "demote")
-	ch <- prometheus.MustNewConstMetric(c.userspaceHATransitionDropped,
+	c.emitConstMetric(ch, c.userspaceHATransitionDropped,
 		prometheus.CounterValue, float64(status.HATransitionRefreshDropped), "refresh")
-	ch <- prometheus.MustNewConstMetric(c.userspaceHATransitionDropped,
+	c.emitConstMetric(ch, c.userspaceHATransitionDropped,
 		prometheus.CounterValue, float64(status.HATransitionVacateDropped), "vacate")
-	ch <- prometheus.MustNewConstMetric(c.userspaceHATransitionStaleSkipped,
+	c.emitConstMetric(ch, c.userspaceHATransitionStaleSkipped,
 		prometheus.CounterValue, float64(status.HATransitionDemoteStaleSkipped), "demote")
-	ch <- prometheus.MustNewConstMetric(c.userspaceHATransitionStaleSkipped,
+	c.emitConstMetric(ch, c.userspaceHATransitionStaleSkipped,
 		prometheus.CounterValue, float64(status.HATransitionRefreshStaleSkipped), "refresh")
 	for _, outcome := range []struct {
 		name  string
@@ -56,13 +56,13 @@ func (c *xpfCollector) emitUserspaceStatus13280(ch chan<- prometheus.Metric, sta
 		{"queue_shed", status.WgUncoveredQueueShedTotal},
 		{"queue_orphan", status.WgUncoveredQueueOrphanTotal},
 	} {
-		ch <- prometheus.MustNewConstMetric(c.userspaceWGUncoveredPacketsTotal,
+		c.emitConstMetric(ch, c.userspaceWGUncoveredPacketsTotal,
 			prometheus.CounterValue, float64(outcome.value), outcome.name)
 	}
-	ch <- prometheus.MustNewConstMetric(c.userspaceWGUncoveredQueuePoison,
+	c.emitConstMetric(ch, c.userspaceWGUncoveredQueuePoison,
 		prometheus.CounterValue, float64(status.WgUncoveredQueuePoisonRecoveries))
 	if status.S5Reinject != nil {
-		ch <- prometheus.MustNewConstMetric(c.userspaceS5Reinject, prometheus.CounterValue,
+		c.emitConstMetric(ch, c.userspaceS5Reinject, prometheus.CounterValue,
 			float64(status.S5Reinject.Reinjected))
 		for _, outcome := range []struct {
 			name  string
@@ -73,7 +73,7 @@ func (c *xpfCollector) emitUserspaceStatus13280(ch chan<- prometheus.Metric, sta
 			{"denied", status.S5Reinject.CompletedDenied},
 			{"refused", status.S5Reinject.CompletedRefused},
 		} {
-			ch <- prometheus.MustNewConstMetric(c.userspaceS5ReinjectCompletions,
+			c.emitConstMetric(ch, c.userspaceS5ReinjectCompletions,
 				prometheus.CounterValue, float64(outcome.value), outcome.name)
 		}
 	}

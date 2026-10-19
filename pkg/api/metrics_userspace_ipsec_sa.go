@@ -9,84 +9,52 @@ import (
 // counters. Every field is emitted when a status snapshot was read, including
 // zero, so an absent series still unambiguously means no status was available.
 func (c *xpfCollector) emitIpsecSaCounters(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
-	ch <- prometheus.MustNewConstMetric(
-		c.ipsecSAMissDroppedPacketsTotal,
+	c.emitConstMetric(ch, c.ipsecSAMissDroppedPacketsTotal,
 		prometheus.CounterValue,
-		float64(status.IpsecSAMissDroppedPacketsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ipsecSAMissNoSATotal,
+		float64(status.IpsecSAMissDroppedPacketsTotal))
+	c.emitConstMetric(ch, c.ipsecSAMissNoSATotal,
 		prometheus.CounterValue,
-		float64(status.IpsecSAMissNoSATotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ipsecSAMissTruncatedTotal,
+		float64(status.IpsecSAMissNoSATotal))
+	c.emitConstMetric(ch, c.ipsecSAMissTruncatedTotal,
 		prometheus.CounterValue,
-		float64(status.IpsecSAMissTruncatedTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ipsecSAMissMalformedIKETotal,
+		float64(status.IpsecSAMissTruncatedTotal))
+	c.emitConstMetric(ch, c.ipsecSAMissMalformedIKETotal,
 		prometheus.CounterValue,
-		float64(status.IpsecSAMissMalformedIKETotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ipsecSAMissKeepaliveTotal,
+		float64(status.IpsecSAMissMalformedIKETotal))
+	c.emitConstMetric(ch, c.ipsecSAMissKeepaliveTotal,
 		prometheus.CounterValue,
-		float64(status.IpsecSAMissKeepaliveTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ipsecSASnapshotStaleDenyTotal,
+		float64(status.IpsecSAMissKeepaliveTotal))
+	c.emitConstMetric(ch, c.ipsecSASnapshotStaleDenyTotal,
 		prometheus.CounterValue,
-		float64(status.IpsecSASnapshotStaleDenyTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ipsecSAInsertsTotal,
+		float64(status.IpsecSASnapshotStaleDenyTotal))
+	c.emitConstMetric(ch, c.ipsecSAInsertsTotal,
 		prometheus.CounterValue,
-		float64(status.IpsecSAInsertsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ipsecSARemovesTotal,
+		float64(status.IpsecSAInsertsTotal))
+	c.emitConstMetric(ch, c.ipsecSARemovesTotal,
 		prometheus.CounterValue,
-		float64(status.IpsecSARemovesTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ipsecSAExpiryRemovesTotal,
+		float64(status.IpsecSARemovesTotal))
+	c.emitConstMetric(ch, c.ipsecSAExpiryRemovesTotal,
 		prometheus.CounterValue,
-		float64(status.IpsecSAExpiryRemovesTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ipsecSAEvictionsTotal,
+		float64(status.IpsecSAExpiryRemovesTotal))
+	c.emitConstMetric(ch, c.ipsecSAEvictionsTotal,
 		prometheus.CounterValue,
-		float64(status.IpsecSAEvictionsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ikeExchangeEvictionsTotal,
+		float64(status.IpsecSAEvictionsTotal))
+	c.emitConstMetric(ch, c.ikeExchangeEvictionsTotal,
 		prometheus.CounterValue,
-		float64(status.IkeExchangeEvictionsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ikeExchangeEntries,
+		float64(status.IkeExchangeEvictionsTotal))
+	c.emitConstMetric(ch, c.ikeExchangeEntries,
 		prometheus.GaugeValue,
-		float64(status.IkeExchangeEntries),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ipsecSAMultiSourceCollisionsTotal,
+		float64(status.IkeExchangeEntries))
+	c.emitConstMetric(ch, c.ipsecSAMultiSourceCollisionsTotal,
 		prometheus.CounterValue,
-		float64(status.IpsecSAMultiSourceCollisionsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ipsecSANetlinkEnobufsTotal,
+		float64(status.IpsecSAMultiSourceCollisionsTotal))
+	c.emitConstMetric(ch, c.ipsecSANetlinkEnobufsTotal,
 		prometheus.CounterValue,
-		float64(status.IpsecSANetlinkEnobufsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ipsecSANetlinkRedumpsTotal,
+		float64(status.IpsecSANetlinkEnobufsTotal))
+	c.emitConstMetric(ch, c.ipsecSANetlinkRedumpsTotal,
 		prometheus.CounterValue,
-		float64(status.IpsecSANetlinkRedumpsTotal),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		c.ipsecSANetlinkRedumpUpsertsTotal,
+		float64(status.IpsecSANetlinkRedumpsTotal))
+	c.emitConstMetric(ch, c.ipsecSANetlinkRedumpUpsertsTotal,
 		prometheus.CounterValue,
-		float64(status.IpsecSANetlinkRedumpUpsertsTotal),
-	)
+		float64(status.IpsecSANetlinkRedumpUpsertsTotal))
 }

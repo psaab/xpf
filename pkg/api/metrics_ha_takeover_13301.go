@@ -25,7 +25,7 @@ func (c *xpfCollector) emitHATakeoverReadiness13301(ch chan<- prometheus.Metric,
 	if s.Ready {
 		ready = 1
 	}
-	ch <- prometheus.MustNewConstMetric(c.userspaceHATakeoverReady, prometheus.GaugeValue, ready)
+	c.emitConstMetric(ch, c.userspaceHATakeoverReady, prometheus.GaugeValue, ready)
 	for _, blocker := range haTakeoverBlockers13301 {
 		v := 0.0
 		for _, current := range s.Blockers {
@@ -34,10 +34,10 @@ func (c *xpfCollector) emitHATakeoverReadiness13301(ch chan<- prometheus.Metric,
 				break
 			}
 		}
-		ch <- prometheus.MustNewConstMetric(c.userspaceHATakeoverBlocker, prometheus.GaugeValue, v, blocker)
+		c.emitConstMetric(ch, c.userspaceHATakeoverBlocker, prometheus.GaugeValue, v, blocker)
 	}
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionSocketRequestsTotal, prometheus.CounterValue, float64(s.SessionSocketRequests))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionSocketErrorsTotal, prometheus.CounterValue, float64(s.SessionSocketErrors))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionSocketTimeoutsTotal, prometheus.CounterValue, float64(s.SessionSocketTimeouts))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSyncedImportRefusalsTotal, prometheus.CounterValue, float64(s.SyncedImportRefusals))
+	c.emitConstMetric(ch, c.userspaceSessionSocketRequestsTotal, prometheus.CounterValue, float64(s.SessionSocketRequests))
+	c.emitConstMetric(ch, c.userspaceSessionSocketErrorsTotal, prometheus.CounterValue, float64(s.SessionSocketErrors))
+	c.emitConstMetric(ch, c.userspaceSessionSocketTimeoutsTotal, prometheus.CounterValue, float64(s.SessionSocketTimeouts))
+	c.emitConstMetric(ch, c.userspaceSyncedImportRefusalsTotal, prometheus.CounterValue, float64(s.SyncedImportRefusals))
 }

@@ -55,15 +55,15 @@ func (c *xpfCollector) collectFlowExportBuildState(ch chan<- prometheus.Metric) 
 		return
 	}
 	for _, st := range c.srv.flowExportBuildStateFn() {
-		ch <- prometheus.MustNewConstMetric(c.flowExportConfiguredGroups,
+		c.emitConstMetric(ch, c.flowExportConfiguredGroups,
 			prometheus.GaugeValue, float64(st.ConfiguredGroups), st.Family)
 		failed := 0.0
 		if st.BuildFailed {
 			failed = 1
 		}
-		ch <- prometheus.MustNewConstMetric(c.flowExportBuildFailed,
+		c.emitConstMetric(ch, c.flowExportBuildFailed,
 			prometheus.GaugeValue, failed, st.Family)
-		ch <- prometheus.MustNewConstMetric(c.flowExportExcludedFlowServers,
+		c.emitConstMetric(ch, c.flowExportExcludedFlowServers,
 			prometheus.GaugeValue, float64(st.ExcludedFlowServers), st.Family)
 	}
 }

@@ -83,11 +83,11 @@ func (c *xpfCollector) describeDataplaneSilentSkips(ch chan<- *prometheus.Desc) 
 }
 
 func (c *xpfCollector) emitDataplaneSilentSkips(ch chan<- prometheus.Metric) {
-	ch <- prometheus.MustNewConstMetric(c.napiProbeTargetSkipsTotal,
+	c.emitConstMetric(ch, c.napiProbeTargetSkipsTotal,
 		prometheus.CounterValue, float64(userspace.NAPIProbeTargetSkips()))
-	ch <- prometheus.MustNewConstMetric(c.bindingWedgeGiveupsTotal,
+	c.emitConstMetric(ch, c.bindingWedgeGiveupsTotal,
 		prometheus.CounterValue, float64(userspace.BindingWedgeGiveups()))
-	ch <- prometheus.MustNewConstMetric(c.learnedRouteCapHitsTotal,
+	c.emitConstMetric(ch, c.learnedRouteCapHitsTotal,
 		prometheus.CounterValue, float64(userspace.LearnedRouteCapHits()))
 	protocolHits := userspace.LearnedRouteCapHitsByProtocol()
 	protocols := make([]string, 0, len(protocolHits))
@@ -96,7 +96,7 @@ func (c *xpfCollector) emitDataplaneSilentSkips(ch chan<- prometheus.Metric) {
 	}
 	sort.Strings(protocols)
 	for _, protocol := range protocols {
-		ch <- prometheus.MustNewConstMetric(c.learnedRouteCapGroupShedsTotal,
+		c.emitConstMetric(ch, c.learnedRouteCapGroupShedsTotal,
 			prometheus.CounterValue, float64(protocolHits[protocol]), protocol)
 	}
 	familyHits := userspace.LearnedRouteCapHitsByFamilyProtocol()
@@ -112,7 +112,7 @@ func (c *xpfCollector) emitDataplaneSilentSkips(ch chan<- prometheus.Metric) {
 		}
 		sort.Strings(protocols)
 		for _, protocol := range protocols {
-			ch <- prometheus.MustNewConstMetric(c.learnedRouteCapGroupShedsByFamilyTotal,
+			c.emitConstMetric(ch, c.learnedRouteCapGroupShedsByFamilyTotal,
 				prometheus.CounterValue, float64(familyHits[family][protocol]), family, protocol)
 		}
 	}

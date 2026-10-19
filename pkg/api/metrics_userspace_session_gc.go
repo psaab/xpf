@@ -23,13 +23,13 @@ func (c *xpfCollector) emitSessionGCMetrics(ch chan<- prometheus.Metric, status 
 		agedOwnerRGZeroActiveNode += worker.SessionGCAgedOwnerRGZeroActiveNode
 		keptAliveByCompanion += worker.SessionGCKeptAliveByCompanion
 	}
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionGCScanned, prometheus.CounterValue, float64(scanned))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionGCDroppedGone, prometheus.CounterValue, float64(droppedGone))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionGCDroppedStale, prometheus.CounterValue, float64(droppedStale))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionGCReBucketed, prometheus.CounterValue, float64(reBucketed))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionGCHeldStandby, prometheus.CounterValue, float64(heldStandby))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionGCReapedStaleSynced, prometheus.CounterValue, float64(reapedStaleSynced))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionGCHealedOnPromote, prometheus.CounterValue, float64(healedOnPromote))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionGCAgedOwnerRGZeroActiveNode, prometheus.CounterValue, float64(agedOwnerRGZeroActiveNode))
-	ch <- prometheus.MustNewConstMetric(c.userspaceSessionGCKeptAliveByCompanion, prometheus.CounterValue, float64(keptAliveByCompanion))
+	c.emitConstMetric(ch, c.userspaceSessionGCScanned, prometheus.CounterValue, float64(scanned))
+	c.emitConstMetric(ch, c.userspaceSessionGCDroppedGone, prometheus.CounterValue, float64(droppedGone))
+	c.emitConstMetric(ch, c.userspaceSessionGCDroppedStale, prometheus.CounterValue, float64(droppedStale))
+	c.emitConstMetric(ch, c.userspaceSessionGCReBucketed, prometheus.CounterValue, float64(reBucketed))
+	c.emitConstMetric(ch, c.userspaceSessionGCHeldStandby, prometheus.CounterValue, float64(heldStandby))
+	c.emitConstMetric(ch, c.userspaceSessionGCReapedStaleSynced, prometheus.CounterValue, float64(reapedStaleSynced))
+	c.emitConstMetric(ch, c.userspaceSessionGCHealedOnPromote, prometheus.CounterValue, float64(healedOnPromote))
+	c.emitConstMetric(ch, c.userspaceSessionGCAgedOwnerRGZeroActiveNode, prometheus.CounterValue, float64(agedOwnerRGZeroActiveNode))
+	c.emitConstMetric(ch, c.userspaceSessionGCKeptAliveByCompanion, prometheus.CounterValue, float64(keptAliveByCompanion))
 }

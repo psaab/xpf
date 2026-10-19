@@ -21,7 +21,7 @@ func (c *xpfCollector) emitZoneFloodCounters(ch chan<- prometheus.Metric, status
 	if status.FloodCounterOverflowActive {
 		v = 1
 	}
-	ch <- prometheus.MustNewConstMetric(c.floodCounterOverflowActive, prometheus.GaugeValue, v)
+	c.emitConstMetric(ch, c.floodCounterOverflowActive, prometheus.GaugeValue, v)
 
 	if c.srv == nil || c.srv.dp == nil {
 		return
@@ -47,7 +47,7 @@ func (c *xpfCollector) emitZoneFloodCounters(ch chan<- prometheus.Metric, status
 			if counter.value == 0 {
 				continue
 			}
-			ch <- prometheus.MustNewConstMetric(c.zoneFloodDropsTotal, prometheus.CounterValue,
+			c.emitConstMetric(ch, c.zoneFloodDropsTotal, prometheus.CounterValue,
 				float64(counter.value), zone, counter.kind)
 		}
 	}

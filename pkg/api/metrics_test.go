@@ -1787,7 +1787,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		// #10865: GRE-decap PT/nibble mismatch refusal counter emitted
 		// unconditionally with a distinct value.
 		GreDecapPtNibbleMismatchRefusalsTotal: 10,
-		GreOuterFragDropsTotal: 14,
+		GreOuterFragDropsTotal:                14,
 		// #2472: per-reason generated-error rate-limit drop counters emitted
 		// unconditionally.
 		TimeExceededRateLimitedTotal: 11,

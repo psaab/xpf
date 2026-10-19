@@ -25,9 +25,9 @@ func (c *xpfCollector) collectDHCPMetrics(ch chan<- prometheus.Metric) {
 			inet++
 		}
 	}
-	ch <- prometheus.MustNewConstMetric(c.dhcpLeasesActive, prometheus.GaugeValue,
+	c.emitConstMetric(ch, c.dhcpLeasesActive, prometheus.GaugeValue,
 		float64(inet), "inet")
-	ch <- prometheus.MustNewConstMetric(c.dhcpLeasesActive, prometheus.GaugeValue,
+	c.emitConstMetric(ch, c.dhcpLeasesActive, prometheus.GaugeValue,
 		float64(inet6), "inet6")
 }
 
@@ -44,45 +44,45 @@ func (c *xpfCollector) collectDDNSMetrics(ch chan<- prometheus.Metric) {
 	if st == nil {
 		return
 	}
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSUpsertsTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.dhcpDDNSUpsertsTotal, prometheus.CounterValue,
 		float64(st.UpsertOK), "ok")
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSUpsertsTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.dhcpDDNSUpsertsTotal, prometheus.CounterValue,
 		float64(st.UpsertFail), "fail")
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSDeletesTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.dhcpDDNSDeletesTotal, prometheus.CounterValue,
 		float64(st.DeleteOK), "ok")
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSDeletesTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.dhcpDDNSDeletesTotal, prometheus.CounterValue,
 		float64(st.DeleteFail), "fail")
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSReconcileRunsTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.dhcpDDNSReconcileRunsTotal, prometheus.CounterValue,
 		float64(st.ReconcileOK), "ok")
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSReconcileRunsTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.dhcpDDNSReconcileRunsTotal, prometheus.CounterValue,
 		float64(st.ReconcileFail), "fail")
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSSkippedTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.dhcpDDNSSkippedTotal, prometheus.CounterValue,
 		float64(st.SkippedNoName), "no-name")
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSSkippedTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.dhcpDDNSSkippedTotal, prometheus.CounterValue,
 		float64(st.SkippedNoBackend), "no-backend")
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSSkippedTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.dhcpDDNSSkippedTotal, prometheus.CounterValue,
 		float64(st.SkippedConflict), "conflict")
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSSkippedTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.dhcpDDNSSkippedTotal, prometheus.CounterValue,
 		float64(st.SkippedPTRNotAuth), "ptr-notauth")
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSSkippedTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.dhcpDDNSSkippedTotal, prometheus.CounterValue,
 		float64(st.PTRDeferred), "ptr-deferred")
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSSkippedTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.dhcpDDNSSkippedTotal, prometheus.CounterValue,
 		float64(st.DeleteCoowned), "coowned")
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSOwnedRecords, prometheus.GaugeValue,
+	c.emitConstMetric(ch, c.dhcpDDNSOwnedRecords, prometheus.GaugeValue,
 		float64(st.OwnedRecords))
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSPTRPending, prometheus.GaugeValue,
+	c.emitConstMetric(ch, c.dhcpDDNSPTRPending, prometheus.GaugeValue,
 		float64(st.PTRPendingNow))
 	var degraded float64
 	if st.Degraded {
 		degraded = 1
 	}
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSDegraded, prometheus.GaugeValue, degraded)
+	c.emitConstMetric(ch, c.dhcpDDNSDegraded, prometheus.GaugeValue, degraded)
 	var lastTs float64
 	if !st.LastReconcile.IsZero() {
 		lastTs = float64(st.LastReconcile.Unix())
 	}
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSLastReconcileTs, prometheus.GaugeValue, lastTs)
-	ch <- prometheus.MustNewConstMetric(c.dhcpDDNSLastReconcileN, prometheus.GaugeValue,
+	c.emitConstMetric(ch, c.dhcpDDNSLastReconcileTs, prometheus.GaugeValue, lastTs)
+	c.emitConstMetric(ch, c.dhcpDDNSLastReconcileN, prometheus.GaugeValue,
 		float64(st.LastReconcileN))
 }
 
@@ -99,29 +99,29 @@ func (c *xpfCollector) collectSurfaceADDNSMetrics(ch chan<- prometheus.Metric) {
 	if st == nil {
 		return
 	}
-	ch <- prometheus.MustNewConstMetric(c.surfaceADDNSUpsertsTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.surfaceADDNSUpsertsTotal, prometheus.CounterValue,
 		float64(st.UpsertOK), "ok")
-	ch <- prometheus.MustNewConstMetric(c.surfaceADDNSUpsertsTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.surfaceADDNSUpsertsTotal, prometheus.CounterValue,
 		float64(st.UpsertFail), "fail")
-	ch <- prometheus.MustNewConstMetric(c.surfaceADDNSDeletesTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.surfaceADDNSDeletesTotal, prometheus.CounterValue,
 		float64(st.DeleteOK), "ok")
-	ch <- prometheus.MustNewConstMetric(c.surfaceADDNSDeletesTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.surfaceADDNSDeletesTotal, prometheus.CounterValue,
 		float64(st.DeleteFail), "fail")
-	ch <- prometheus.MustNewConstMetric(c.surfaceADDNSSkippedTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.surfaceADDNSSkippedTotal, prometheus.CounterValue,
 		float64(st.Skipped), "unchanged")
-	ch <- prometheus.MustNewConstMetric(c.surfaceADDNSSkippedTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.surfaceADDNSSkippedTotal, prometheus.CounterValue,
 		float64(st.BackedOff), "backoff")
-	ch <- prometheus.MustNewConstMetric(c.surfaceADDNSSkippedTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.surfaceADDNSSkippedTotal, prometheus.CounterValue,
 		float64(st.SkippedNoBackend), "no-backend")
-	ch <- prometheus.MustNewConstMetric(c.surfaceADDNSScopes, prometheus.GaugeValue,
+	c.emitConstMetric(ch, c.surfaceADDNSScopes, prometheus.GaugeValue,
 		float64(st.Scopes))
-	ch <- prometheus.MustNewConstMetric(c.surfaceADDNSOrphaned, prometheus.GaugeValue,
+	c.emitConstMetric(ch, c.surfaceADDNSOrphaned, prometheus.GaugeValue,
 		float64(st.Orphaned))
 	var degraded float64
 	if st.Degraded {
 		degraded = 1
 	}
-	ch <- prometheus.MustNewConstMetric(c.surfaceADDNSDegraded, prometheus.GaugeValue, degraded)
+	c.emitConstMetric(ch, c.surfaceADDNSDegraded, prometheus.GaugeValue, degraded)
 }
 
 // collectFlowExportMetrics emits the xpf_flow_export_collector_* family
@@ -144,29 +144,29 @@ func (c *xpfCollector) collectSurfaceADDNSMetrics(ch chan<- prometheus.Metric) {
 func (c *xpfCollector) collectFlowExportMetrics(ch chan<- prometheus.Metric) {
 	if c.srv.flowCollectorHealthFn != nil {
 		for _, h := range c.srv.flowCollectorHealthFn() {
-			ch <- prometheus.MustNewConstMetric(c.flowExportCollectorWriteAttemptsTotal,
+			c.emitConstMetric(ch, c.flowExportCollectorWriteAttemptsTotal,
 				prometheus.CounterValue, float64(h.WriteAttempts), h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
-			ch <- prometheus.MustNewConstMetric(c.flowExportCollectorWriteFailuresTotal,
+			c.emitConstMetric(ch, c.flowExportCollectorWriteFailuresTotal,
 				prometheus.CounterValue, float64(h.WriteFailures), h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
-			ch <- prometheus.MustNewConstMetric(c.flowExportCollectorWriteSkippedTotal,
+			c.emitConstMetric(ch, c.flowExportCollectorWriteSkippedTotal,
 				prometheus.CounterValue, float64(h.WriteSkipped), h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
 			healthy := 0.0
 			if h.Healthy {
 				healthy = 1
 			}
-			ch <- prometheus.MustNewConstMetric(c.flowExportCollectorHealthy,
+			c.emitConstMetric(ch, c.flowExportCollectorHealthy,
 				prometheus.GaugeValue, healthy, h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
 			var lastSuccess float64
 			if !h.LastSuccessTime.IsZero() {
 				lastSuccess = float64(h.LastSuccessTime.Unix())
 			}
-			ch <- prometheus.MustNewConstMetric(c.flowExportCollectorLastSuccessSeconds,
+			c.emitConstMetric(ch, c.flowExportCollectorLastSuccessSeconds,
 				prometheus.GaugeValue, lastSuccess, h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
 			var lastFailure float64
 			if !h.LastFailureTime.IsZero() {
 				lastFailure = float64(h.LastFailureTime.Unix())
 			}
-			ch <- prometheus.MustNewConstMetric(c.flowExportCollectorLastFailureSeconds,
+			c.emitConstMetric(ch, c.flowExportCollectorLastFailureSeconds,
 				prometheus.GaugeValue, lastFailure, h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
 		}
 	}
@@ -176,12 +176,12 @@ func (c *xpfCollector) collectFlowExportMetrics(ch chan<- prometheus.Metric) {
 
 func (c *xpfCollector) collectRouteMaskCacheMetrics(ch chan<- prometheus.Metric) {
 	s := flowexport.RouteMaskCacheStats()
-	ch <- prometheus.MustNewConstMetric(c.routeMaskCacheHits, prometheus.CounterValue, float64(s.Hits))
-	ch <- prometheus.MustNewConstMetric(c.routeMaskCacheMisses, prometheus.CounterValue, float64(s.Misses))
-	ch <- prometheus.MustNewConstMetric(c.routeMaskCacheFullClears, prometheus.CounterValue, float64(s.FullClears))
-	ch <- prometheus.MustNewConstMetric(c.routeMaskCacheInflightDrops, prometheus.CounterValue, float64(s.InflightDrops))
-	ch <- prometheus.MustNewConstMetric(c.routeMaskCacheLookupErrors, prometheus.CounterValue, float64(s.LookupErrors))
-	ch <- prometheus.MustNewConstMetric(c.routeMaskCacheEntries, prometheus.GaugeValue, float64(s.Entries))
+	c.emitConstMetric(ch, c.routeMaskCacheHits, prometheus.CounterValue, float64(s.Hits))
+	c.emitConstMetric(ch, c.routeMaskCacheMisses, prometheus.CounterValue, float64(s.Misses))
+	c.emitConstMetric(ch, c.routeMaskCacheFullClears, prometheus.CounterValue, float64(s.FullClears))
+	c.emitConstMetric(ch, c.routeMaskCacheInflightDrops, prometheus.CounterValue, float64(s.InflightDrops))
+	c.emitConstMetric(ch, c.routeMaskCacheLookupErrors, prometheus.CounterValue, float64(s.LookupErrors))
+	c.emitConstMetric(ch, c.routeMaskCacheEntries, prometheus.GaugeValue, float64(s.Entries))
 }
 
 // collectFlowExportBatchMetrics emits per-exporter batch and exported-record
@@ -196,21 +196,21 @@ func (c *xpfCollector) collectFlowExportBatchMetrics(ch chan<- prometheus.Metric
 		return
 	}
 	for _, s := range c.srv.flowExportBatchStatsFn() {
-		ch <- prometheus.MustNewConstMetric(c.flowExportBatchDepth,
+		c.emitConstMetric(ch, c.flowExportBatchDepth,
 			prometheus.GaugeValue, float64(s.Depth), s.Protocol, s.Instance, s.Template, s.Family)
-		ch <- prometheus.MustNewConstMetric(c.flowExportBatchMaxDepth,
+		c.emitConstMetric(ch, c.flowExportBatchMaxDepth,
 			prometheus.GaugeValue, float64(s.MaxDepth), s.Protocol, s.Instance, s.Template, s.Family)
-		ch <- prometheus.MustNewConstMetric(c.flowExportBatchDroppedTotal,
+		c.emitConstMetric(ch, c.flowExportBatchDroppedTotal,
 			prometheus.CounterValue, float64(s.Dropped), s.Protocol, s.Instance, s.Template, s.Family)
-		ch <- prometheus.MustNewConstMetric(c.flowExportFlowsExportedTotal,
+		c.emitConstMetric(ch, c.flowExportFlowsExportedTotal,
 			prometheus.CounterValue, float64(s.ExportedFlows), s.Protocol, s.Instance, s.Template, s.Family)
-		ch <- prometheus.MustNewConstMetric(c.flowExportPacketsExportedTotal,
+		c.emitConstMetric(ch, c.flowExportPacketsExportedTotal,
 			prometheus.CounterValue, float64(s.ExportedPackets), s.Protocol, s.Instance, s.Template, s.Family)
-		ch <- prometheus.MustNewConstMetric(c.flowExportRouteMaskUnresolvedTotal,
+		c.emitConstMetric(ch, c.flowExportRouteMaskUnresolvedTotal,
 			prometheus.CounterValue, float64(s.RouteMaskUnresolved), s.Protocol, s.Instance, s.Template, s.Family)
-		ch <- prometheus.MustNewConstMetric(c.flowExportMissingStartTimeTotal,
+		c.emitConstMetric(ch, c.flowExportMissingStartTimeTotal,
 			prometheus.CounterValue, float64(s.EstimatedDurations), s.Protocol, s.Instance, s.Template, s.Family)
-		ch <- prometheus.MustNewConstMetric(c.flowExportClockSkewClampedTotal,
+		c.emitConstMetric(ch, c.flowExportClockSkewClampedTotal,
 			prometheus.CounterValue, float64(s.ClockSkewClamped), s.Protocol, s.Instance, s.Template, s.Family)
 	}
 }
@@ -220,18 +220,18 @@ func (c *xpfCollector) collectFlowExportSamplingMetrics(ch chan<- prometheus.Met
 		return
 	}
 	for _, s := range c.srv.flowExportSamplingStatsFn() {
-		ch <- prometheus.MustNewConstMetric(c.flowExportSamplingEvaluatedTotal,
+		c.emitConstMetric(ch, c.flowExportSamplingEvaluatedTotal,
 			prometheus.CounterValue, float64(s.Evaluated), s.Protocol, s.Instance)
-		ch <- prometheus.MustNewConstMetric(c.flowExportSamplingSelectedTotal,
+		c.emitConstMetric(ch, c.flowExportSamplingSelectedTotal,
 			prometheus.CounterValue, float64(s.Selected), s.Protocol, s.Instance)
-		ch <- prometheus.MustNewConstMetric(c.flowExportZoneFilteredTotal,
+		c.emitConstMetric(ch, c.flowExportZoneFilteredTotal,
 			prometheus.CounterValue, float64(s.ZoneFiltered), s.Protocol, s.Instance)
 	}
 }
 
 func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 	// Daemon uptime
-	ch <- prometheus.MustNewConstMetric(c.daemonUptime, prometheus.GaugeValue,
+	c.emitConstMetric(ch, c.daemonUptime, prometheus.GaugeValue,
 		time.Since(c.srv.startTime).Seconds())
 
 	// #1780: per-phase age of the Go periodic neighbor-maintenance loop.
@@ -240,7 +240,7 @@ func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 	// netlink/probe syscall (the idle/overnight cold-connect hang).
 	if c.srv.neighborPhaseAgeFn != nil {
 		for phase, age := range c.srv.neighborPhaseAgeFn() {
-			ch <- prometheus.MustNewConstMetric(c.neighborPeriodicAge,
+			c.emitConstMetric(ch, c.neighborPeriodicAge,
 				prometheus.GaugeValue, age, phase)
 		}
 	}
@@ -255,9 +255,9 @@ func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 			if ps.Failed {
 				failed = 1.0
 			}
-			ch <- prometheus.MustNewConstMetric(c.ipmonPolicyFailed,
+			c.emitConstMetric(ch, c.ipmonPolicyFailed,
 				prometheus.GaugeValue, failed, ps.Name)
-			ch <- prometheus.MustNewConstMetric(c.ipmonPolicyTransitions,
+			c.emitConstMetric(ch, c.ipmonPolicyTransitions,
 				prometheus.CounterValue, float64(ps.Transitions), ps.Name)
 			// #3761 H8: routes_applied must reflect what is ACTUALLY live
 			// in the FIBs (the last converged actuation), not the desired
@@ -271,11 +271,11 @@ func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 			// without requiring an actuation.
 			unresolved += len(ps.UnresolvedRoutes)
 		}
-		ch <- prometheus.MustNewConstMetric(c.ipmonRoutesApplied,
+		c.emitConstMetric(ch, c.ipmonRoutesApplied,
 			prometheus.GaugeValue, float64(routesApplied))
-		ch <- prometheus.MustNewConstMetric(c.ipmonRoutesDesired,
+		c.emitConstMetric(ch, c.ipmonRoutesDesired,
 			prometheus.GaugeValue, float64(routesDesired))
-		ch <- prometheus.MustNewConstMetric(c.ipmonUnresolvedNextHops,
+		c.emitConstMetric(ch, c.ipmonUnresolvedNextHops,
 			prometheus.GaugeValue, float64(unresolved))
 	}
 	// #4423 L: ip-monitoring actuation-failure counter — surfaces the
@@ -286,15 +286,15 @@ func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 	// one does not suppress the other -- they are read together and a missing
 	// half is worse than an absent pair.
 	if c.srv.routeListenerMarksFn != nil {
-		ch <- prometheus.MustNewConstMetric(c.routeListenerMarks,
+		c.emitConstMetric(ch, c.routeListenerMarks,
 			prometheus.CounterValue, float64(c.srv.routeListenerMarksFn()))
 	}
 	if c.srv.routeListenerRepublishesFn != nil {
-		ch <- prometheus.MustNewConstMetric(c.routeListenerRepublishes,
+		c.emitConstMetric(ch, c.routeListenerRepublishes,
 			prometheus.CounterValue, float64(c.srv.routeListenerRepublishesFn()))
 	}
 	if c.srv.ipmonActuationFailuresFn != nil {
-		ch <- prometheus.MustNewConstMetric(c.ipmonActuationFailures,
+		c.emitConstMetric(ch, c.ipmonActuationFailures,
 			prometheus.CounterValue, float64(c.srv.ipmonActuationFailuresFn()))
 	}
 
@@ -302,37 +302,37 @@ func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 	// previously-silent loss (drop on held config lock) visible.
 	if c.srv.eventActionStatsFn != nil {
 		st := c.srv.eventActionStatsFn()
-		ch <- prometheus.MustNewConstMetric(c.eventActionsCommitted,
+		c.emitConstMetric(ch, c.eventActionsCommitted,
 			prometheus.CounterValue, float64(st.Committed))
-		ch <- prometheus.MustNewConstMetric(c.eventActionsCommittedWithDebt,
+		c.emitConstMetric(ch, c.eventActionsCommittedWithDebt,
 			prometheus.CounterValue, float64(st.CommittedWithDebt))
-		ch <- prometheus.MustNewConstMetric(c.eventActionsRejected,
+		c.emitConstMetric(ch, c.eventActionsRejected,
 			prometheus.CounterValue, float64(st.Rejected))
-		ch <- prometheus.MustNewConstMetric(c.eventActionsRetried,
+		c.emitConstMetric(ch, c.eventActionsRetried,
 			prometheus.CounterValue, float64(st.Retried))
-		ch <- prometheus.MustNewConstMetric(c.eventActionsDropped,
+		c.emitConstMetric(ch, c.eventActionsDropped,
 			prometheus.CounterValue, float64(st.DroppedLockHeld), "lock_held")
-		ch <- prometheus.MustNewConstMetric(c.eventActionsDropped,
+		c.emitConstMetric(ch, c.eventActionsDropped,
 			prometheus.CounterValue, float64(st.DroppedQueueFull), "queue_full")
-		ch <- prometheus.MustNewConstMetric(c.eventActionsDropped,
+		c.emitConstMetric(ch, c.eventActionsDropped,
 			prometheus.CounterValue, float64(st.DroppedStale), "stale")
-		ch <- prometheus.MustNewConstMetric(c.eventActionsDropped,
+		c.emitConstMetric(ch, c.eventActionsDropped,
 			prometheus.CounterValue, float64(st.DroppedGlobalBudget), "global_budget")
-		ch <- prometheus.MustNewConstMetric(c.eventActionsSuperseded,
+		c.emitConstMetric(ch, c.eventActionsSuperseded,
 			prometheus.CounterValue, float64(st.Superseded))
-		ch <- prometheus.MustNewConstMetric(c.eventActionsSkippedNoChange,
+		c.emitConstMetric(ch, c.eventActionsSkippedNoChange,
 			prometheus.CounterValue, float64(st.SkippedNoChange))
-		ch <- prometheus.MustNewConstMetric(c.eventActionsDeferred,
+		c.emitConstMetric(ch, c.eventActionsDeferred,
 			prometheus.CounterValue, float64(st.DeferredBudget))
-		ch <- prometheus.MustNewConstMetric(c.eventCooldownSuppressed,
+		c.emitConstMetric(ch, c.eventCooldownSuppressed,
 			prometheus.CounterValue, float64(st.CooldownSuppressed))
-		ch <- prometheus.MustNewConstMetric(c.eventPendingDeferred,
+		c.emitConstMetric(ch, c.eventPendingDeferred,
 			prometheus.GaugeValue, float64(st.PendingDeferred))
-		ch <- prometheus.MustNewConstMetric(c.eventAttributesInvalid,
+		c.emitConstMetric(ch, c.eventAttributesInvalid,
 			prometheus.CounterValue, float64(st.AttributesInvalid))
-		ch <- prometheus.MustNewConstMetric(c.eventPlantClassInvalid,
+		c.emitConstMetric(ch, c.eventPlantClassInvalid,
 			prometheus.CounterValue, float64(st.PlantClassInvalid))
-		ch <- prometheus.MustNewConstMetric(c.eventActionQueueDepth,
+		c.emitConstMetric(ch, c.eventActionQueueDepth,
 			prometheus.GaugeValue, float64(st.QueueDepth))
 	}
 
@@ -341,11 +341,11 @@ func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 	// this counter makes that otherwise-silent loss visible so a gapped
 	// forensic stream is not mistaken for a complete one.
 	if c.srv.eventBuf != nil {
-		ch <- prometheus.MustNewConstMetric(c.eventStreamSubscriberDropped,
+		c.emitConstMetric(ch, c.eventStreamSubscriberDropped,
 			prometheus.CounterValue, float64(c.srv.eventBuf.DroppedTotal()))
-		ch <- prometheus.MustNewConstMetric(c.eventStreamSubscriberRefusals,
+		c.emitConstMetric(ch, c.eventStreamSubscriberRefusals,
 			prometheus.CounterValue, float64(c.srv.eventBuf.SubscriberRefusals()))
-		ch <- prometheus.MustNewConstMetric(c.eventStreamRingEvicted,
+		c.emitConstMetric(ch, c.eventStreamRingEvicted,
 			prometheus.CounterValue, float64(c.srv.eventBuf.EvictedTotal()))
 	}
 
@@ -353,7 +353,7 @@ func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 	// next-hop-pinned tests are holding state (their uplinks are not
 	// being health-checked) until a pin retry succeeds.
 	if c.srv.rpmPinFailedFn != nil {
-		ch <- prometheus.MustNewConstMetric(c.rpmPinInstallFailures,
+		c.emitConstMetric(ch, c.rpmPinInstallFailures,
 			prometheus.GaugeValue, c.srv.rpmPinFailedFn())
 	}
 
@@ -362,7 +362,7 @@ func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 		fields := strings.Fields(string(data))
 		if len(fields) >= 2 {
 			if rssPages, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
-				ch <- prometheus.MustNewConstMetric(c.daemonMemRSS, prometheus.GaugeValue,
+				c.emitConstMetric(ch, c.daemonMemRSS, prometheus.GaugeValue,
 					float64(rssPages)*float64(os.Getpagesize()))
 			}
 		}
@@ -376,11 +376,11 @@ func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 			line := scanner.Text()
 			if strings.HasPrefix(line, "MemTotal:") {
 				if v := parseMemInfoKB(line); v > 0 {
-					ch <- prometheus.MustNewConstMetric(c.sysMemTotal, prometheus.GaugeValue, float64(v)*1024)
+					c.emitConstMetric(ch, c.sysMemTotal, prometheus.GaugeValue, float64(v)*1024)
 				}
 			} else if strings.HasPrefix(line, "MemAvailable:") {
 				if v := parseMemInfoKB(line); v > 0 {
-					ch <- prometheus.MustNewConstMetric(c.sysMemAvail, prometheus.GaugeValue, float64(v)*1024)
+					c.emitConstMetric(ch, c.sysMemAvail, prometheus.GaugeValue, float64(v)*1024)
 				}
 			}
 		}
@@ -399,8 +399,8 @@ func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 		if scanner.Scan() {
 			if cur, ok := parseProcStatCPU(scanner.Text()); ok {
 				if userPct, systemPct, emit := c.updateCPUUtilization(cur, float64(runtime.NumCPU())); emit {
-					ch <- prometheus.MustNewConstMetric(c.sysCPUUser, prometheus.GaugeValue, userPct)
-					ch <- prometheus.MustNewConstMetric(c.sysCPUSystem, prometheus.GaugeValue, systemPct)
+					c.emitConstMetric(ch, c.sysCPUUser, prometheus.GaugeValue, userPct)
+					c.emitConstMetric(ch, c.sysCPUSystem, prometheus.GaugeValue, systemPct)
 				}
 			}
 		}

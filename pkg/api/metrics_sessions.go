@@ -43,33 +43,33 @@ func (c *xpfCollector) collectConntrackGCMetrics(ch chan<- prometheus.Metric) {
 		return
 	}
 	stats := c.srv.gc.Stats()
-	ch <- prometheus.MustNewConstMetric(c.gcSweepDuration, prometheus.GaugeValue,
+	c.emitConstMetric(ch, c.gcSweepDuration, prometheus.GaugeValue,
 		stats.LastSweepDuration.Seconds())
 	lastSweepTimestamp := 0.0
 	if !stats.LastSweepTime.IsZero() {
 		lastSweepTimestamp = float64(stats.LastSweepTime.Unix())
 	}
-	ch <- prometheus.MustNewConstMetric(c.gcSweepTimestamp, prometheus.GaugeValue,
+	c.emitConstMetric(ch, c.gcSweepTimestamp, prometheus.GaugeValue,
 		lastSweepTimestamp)
-	ch <- prometheus.MustNewConstMetric(c.gcSweepsTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.gcSweepsTotal, prometheus.CounterValue,
 		float64(stats.SweepsTotal))
-	ch <- prometheus.MustNewConstMetric(c.gcExpiredDeletedTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.gcExpiredDeletedTotal, prometheus.CounterValue,
 		float64(stats.ExpiredDeletedTotal))
-	ch <- prometheus.MustNewConstMetric(c.gcDeadlinesSaturatedTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.gcDeadlinesSaturatedTotal, prometheus.CounterValue,
 		float64(stats.DeadlinesSaturatedTotal))
-	ch <- prometheus.MustNewConstMetric(c.gcPersistentNATExpiredTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.gcPersistentNATExpiredTotal, prometheus.CounterValue,
 		float64(stats.PersistentNATExpiredTotal))
-	ch <- prometheus.MustNewConstMetric(c.gcErrorsTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.gcErrorsTotal, prometheus.CounterValue,
 		float64(stats.SweepIterErrorsTotal), "iterate")
-	ch <- prometheus.MustNewConstMetric(c.gcErrorsTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.gcErrorsTotal, prometheus.CounterValue,
 		float64(stats.SweepDeleteErrorsTotal), "delete")
-	ch <- prometheus.MustNewConstMetric(c.gcErrorsTotal, prometheus.CounterValue,
+	c.emitConstMetric(ch, c.gcErrorsTotal, prometheus.CounterValue,
 		float64(stats.SessionCountSyncErrorsTotal), "session_count_sync")
 	active := 0.0
 	if c.srv.gc.IsAggressiveAging() {
 		active = 1
 	}
-	ch <- prometheus.MustNewConstMetric(c.gcAggressiveAging, prometheus.GaugeValue, active)
+	c.emitConstMetric(ch, c.gcAggressiveAging, prometheus.GaugeValue, active)
 }
 
 func (c *xpfCollector) collectSessionGauges(ch chan<- prometheus.Metric, dp apiRuntimeDataPlane) {
@@ -101,16 +101,16 @@ func (c *xpfCollector) collectSessionGaugesContext(ctx context.Context, ch chan<
 	// TTL unchanged), so the next scrape retries the walk.
 	snap, ok := c.sessionGaugeSnapshotCachedContext(ctx, dp)
 	if !ok {
-		ch <- prometheus.MustNewConstMetric(c.sessionScrapeOK, prometheus.GaugeValue, 0)
+		c.emitConstMetric(ch, c.sessionScrapeOK, prometheus.GaugeValue, 0)
 		return
 	}
-	ch <- prometheus.MustNewConstMetric(c.sessionScrapeOK, prometheus.GaugeValue, 1)
-	ch <- prometheus.MustNewConstMetric(c.sessionsActive, prometheus.GaugeValue, float64(snap.active))
-	ch <- prometheus.MustNewConstMetric(c.sessionsEstablished, prometheus.GaugeValue, float64(snap.established))
-	ch <- prometheus.MustNewConstMetric(c.sessionsIPv4, prometheus.GaugeValue, float64(snap.ipv4))
-	ch <- prometheus.MustNewConstMetric(c.sessionsIPv6, prometheus.GaugeValue, float64(snap.ipv6))
-	ch <- prometheus.MustNewConstMetric(c.sessionsSNAT, prometheus.GaugeValue, float64(snap.snat))
-	ch <- prometheus.MustNewConstMetric(c.sessionsDNAT, prometheus.GaugeValue, float64(snap.dnat))
+	c.emitConstMetric(ch, c.sessionScrapeOK, prometheus.GaugeValue, 1)
+	c.emitConstMetric(ch, c.sessionsActive, prometheus.GaugeValue, float64(snap.active))
+	c.emitConstMetric(ch, c.sessionsEstablished, prometheus.GaugeValue, float64(snap.established))
+	c.emitConstMetric(ch, c.sessionsIPv4, prometheus.GaugeValue, float64(snap.ipv4))
+	c.emitConstMetric(ch, c.sessionsIPv6, prometheus.GaugeValue, float64(snap.ipv6))
+	c.emitConstMetric(ch, c.sessionsSNAT, prometheus.GaugeValue, float64(snap.snat))
+	c.emitConstMetric(ch, c.sessionsDNAT, prometheus.GaugeValue, float64(snap.dnat))
 }
 
 // sessionGaugeTTLEffective returns the cache freshness window. Production uses

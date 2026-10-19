@@ -17,15 +17,13 @@ import (
 // helper's ~65ms debug-state tick (see plan §3.2-3.3).
 func (c *xpfCollector) emitBindingActiveFlowCount(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
 	for _, b := range status.Bindings {
-		ch <- prometheus.MustNewConstMetric(
-			c.bindingActiveFlowCount,
+		c.emitConstMetric(ch, c.bindingActiveFlowCount,
 			prometheus.GaugeValue,
 			float64(b.ActiveFlowCount),
 			strconv.FormatUint(uint64(b.Slot), 10),
 			strconv.FormatUint(uint64(b.QueueID), 10),
 			strconv.FormatUint(uint64(b.WorkerID), 10),
-			b.Interface,
-		)
+			b.Interface)
 	}
 }
 
@@ -39,24 +37,18 @@ func (c *xpfCollector) emitBindingTXCompletionTelemetry(ch chan<- prometheus.Met
 		slot := strconv.FormatUint(uint64(b.Slot), 10)
 		queueID := strconv.FormatUint(uint64(b.QueueID), 10)
 		workerID := strconv.FormatUint(uint64(b.WorkerID), 10)
-		ch <- prometheus.MustNewConstMetric(
-			c.bindingTXCompletions,
+		c.emitConstMetric(ch, c.bindingTXCompletions,
 			prometheus.CounterValue,
 			float64(b.TXCompletions),
-			slot, queueID, workerID, b.Interface,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.bindingTXCompletionRingAvailable,
+			slot, queueID, workerID, b.Interface)
+		c.emitConstMetric(ch, c.bindingTXCompletionRingAvailable,
 			prometheus.GaugeValue,
 			float64(b.TXCompletionRingAvailable),
-			slot, queueID, workerID, b.Interface,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.bindingTXCompletionRingAvailableMax,
+			slot, queueID, workerID, b.Interface)
+		c.emitConstMetric(ch, c.bindingTXCompletionRingAvailableMax,
 			prometheus.GaugeValue,
 			float64(b.TXCompletionRingAvailableMax),
-			slot, queueID, workerID, b.Interface,
-		)
+			slot, queueID, workerID, b.Interface)
 	}
 }
 
@@ -68,12 +60,10 @@ func (c *xpfCollector) emitBindingKernelRXRingFull(ch chan<- prometheus.Metric, 
 		slot := strconv.FormatUint(uint64(b.Slot), 10)
 		queueID := strconv.FormatUint(uint64(b.QueueID), 10)
 		workerID := strconv.FormatUint(uint64(b.WorkerID), 10)
-		ch <- prometheus.MustNewConstMetric(
-			c.bindingKernelRXRingFull,
+		c.emitConstMetric(ch, c.bindingKernelRXRingFull,
 			prometheus.CounterValue,
 			float64(b.KernelRXRingFull),
-			slot, queueID, workerID, b.Interface,
-		)
+			slot, queueID, workerID, b.Interface)
 	}
 }
 
@@ -88,18 +78,14 @@ func (c *xpfCollector) emitBindingVMinThrottleCounters(ch chan<- prometheus.Metr
 		slot := strconv.FormatUint(uint64(b.Slot), 10)
 		queueID := strconv.FormatUint(uint64(b.QueueID), 10)
 		workerID := strconv.FormatUint(uint64(b.WorkerID), 10)
-		ch <- prometheus.MustNewConstMetric(
-			c.bindingVMinThrottles,
+		c.emitConstMetric(ch, c.bindingVMinThrottles,
 			prometheus.CounterValue,
 			float64(b.VMinThrottles),
-			slot, queueID, workerID, b.Interface,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.bindingVMinThrottleHardCapOverrides,
+			slot, queueID, workerID, b.Interface)
+		c.emitConstMetric(ch, c.bindingVMinThrottleHardCapOverrides,
 			prometheus.CounterValue,
 			float64(b.VMinThrottleHardCapOverrides),
-			slot, queueID, workerID, b.Interface,
-		)
+			slot, queueID, workerID, b.Interface)
 	}
 }
 
@@ -111,36 +97,26 @@ func (c *xpfCollector) emitBindingFragmentOverlapCounters(ch chan<- prometheus.M
 		queueID := strconv.FormatUint(uint64(b.QueueID), 10)
 		workerID := strconv.FormatUint(uint64(b.WorkerID), 10)
 		labels := []string{slot, queueID, workerID, b.Interface}
-		ch <- prometheus.MustNewConstMetric(
-			c.bindingFragOverlapDropped,
+		c.emitConstMetric(ch, c.bindingFragOverlapDropped,
 			prometheus.CounterValue,
 			float64(b.FragOverlapDropped),
-			labels...,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.bindingFragOverlapOverflowDropped,
+			labels...)
+		c.emitConstMetric(ch, c.bindingFragOverlapOverflowDropped,
 			prometheus.CounterValue,
 			float64(b.FragOverlapOverflowDropped),
-			labels...,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.bindingFragOverlapShardFullDropped,
+			labels...)
+		c.emitConstMetric(ch, c.bindingFragOverlapShardFullDropped,
 			prometheus.CounterValue,
 			float64(b.FragOverlapShardFullDropped),
-			labels...,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.bindingFragOverlapPostNATDropped,
+			labels...)
+		c.emitConstMetric(ch, c.bindingFragOverlapPostNATDropped,
 			prometheus.CounterValue,
 			float64(b.FragOverlapPostNATDropped),
-			labels...,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.bindingFragOverlapMaxLifetimeEvictions,
+			labels...)
+		c.emitConstMetric(ch, c.bindingFragOverlapMaxLifetimeEvictions,
 			prometheus.CounterValue,
 			float64(b.FragOverlapMaxLifetimeEvictions),
-			labels...,
-		)
+			labels...)
 	}
 }
 
@@ -152,17 +128,17 @@ func (c *xpfCollector) emitBindingUMEMFrames(ch chan<- prometheus.Metric, status
 		queueID := strconv.FormatUint(uint64(b.QueueID), 10)
 		workerID := strconv.FormatUint(uint64(b.WorkerID), 10)
 		labels := []string{slot, queueID, workerID, b.Interface}
-		ch <- prometheus.MustNewConstMetric(c.bindingUMEMTotalFrames,
+		c.emitConstMetric(ch, c.bindingUMEMTotalFrames,
 			prometheus.GaugeValue, float64(b.UmemTotalFrames), labels...)
-		ch <- prometheus.MustNewConstMetric(c.bindingUMEMInflightFrames,
+		c.emitConstMetric(ch, c.bindingUMEMInflightFrames,
 			prometheus.GaugeValue, float64(b.UmemInflightFrames), labels...)
-		ch <- prometheus.MustNewConstMetric(c.bindingPendingFillFrames,
+		c.emitConstMetric(ch, c.bindingPendingFillFrames,
 			prometheus.GaugeValue, float64(b.DebugPendingFillFrames), labels...)
-		ch <- prometheus.MustNewConstMetric(c.bindingPendingTXPreparedFrames,
+		c.emitConstMetric(ch, c.bindingPendingTXPreparedFrames,
 			prometheus.GaugeValue, float64(b.DebugPendingTXPrepared), labels...)
-		ch <- prometheus.MustNewConstMetric(c.bindingPendingTXLocalFrames,
+		c.emitConstMetric(ch, c.bindingPendingTXLocalFrames,
 			prometheus.GaugeValue, float64(b.DebugPendingTXLocal), labels...)
-		ch <- prometheus.MustNewConstMetric(c.bindingPendingRecycleFrames,
+		c.emitConstMetric(ch, c.bindingPendingRecycleFrames,
 			prometheus.GaugeValue, float64(b.DebugInFlightRecycles), labels...)
 	}
 }
