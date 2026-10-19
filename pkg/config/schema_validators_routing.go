@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"unicode"
@@ -31,6 +32,41 @@ func ValidateBGPHoldTime(raw string, _ *Config) error {
 		return fmt.Errorf("BGP hold-time must be 0 or 3..65535 seconds (got %d); FRR rejects 1/2 and a rejected timers line fails the whole reload", v)
 	}
 	return nil
+}
+
+// ValidateBGPNeighborAddress accepts a BGP neighbor identity only if it is
+// a bare IP literal parseable by netip.ParseAddr with no zone and no
+// prefix (#15184). Values such as 10.0.0.256, 192.0.2.0/24, peer-a or a
+// hostname previously passed commit-check as a single token and rendered
+// verbatim; bgpd refuses them and frr-reload fails on every reload.
+// A scoped (zoned) address, e.g. fe80::1%ge-0-0-1, is explicitly
+// unsupported: FRR's neighbor grammar has no zone syntax here.
+func ValidateBGPNeighborAddress(raw string, _ *Config) error {
+	if raw == "" {
+		return fmt.Errorf("missing value (expected a BGP neighbor IP address, e.g. 192.0.2.1 or 2001:db8::1)")
+	}
+	if raw != strings.TrimSpace(raw) {
+		return fmt.Errorf("invalid BGP neighbor address %q (leading or trailing whitespace is not allowed; use a bare IP address)", raw)
+	}
+	addr, err := netip.ParseAddr(raw)
+	if err != nil {
+		if strings.Contains(raw, "/") {
+			return fmt.Errorf("invalid BGP neighbor address %q (prefix length not allowed; use a bare IP address)", raw)
+		}
+		if strings.Contains(raw, "%") {
+			return fmt.Errorf("invalid BGP neighbor address %q (scoped/zoned addresses are unsupported; use a bare IP address without a zone)", raw)
+		}
+		return fmt.Errorf("invalid BGP neighbor address %q (expected a bare IPv4 or IPv6 address, e.g. 192.0.2.1 or 2001:db8::1)", raw)
+	}
+	if addr.Zone() != "" {
+		return fmt.Errorf("invalid BGP neighbor address %q (scoped/zoned addresses are unsupported; use a bare IP address without a zone)", raw)
+	}
+	return nil
+}
+
+// ValidBGPNeighborAddress is the boolean twin used by the strict compiler gate.
+func ValidBGPNeighborAddress(raw string) bool {
+	return ValidateBGPNeighborAddress(raw, nil) == nil
 }
 
 // routeFilterMatchTypes are the match-type keywords accepted in the

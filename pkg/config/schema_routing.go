@@ -543,7 +543,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 				"minimum-interval": {desc: "Minimum interval (milliseconds)", args: 1, valueType: ValueInteger, placeholder: "<milliseconds>", validator: ValidateInteger(10, 60000), children: nil},
 				"multiplier":       {desc: "Multiplier", args: 1, valueType: ValueInteger, placeholder: "<multiplier>", validator: ValidateInteger(2, 255), children: nil},
 			}},
-			"neighbor": {desc: "BGP neighbor", args: 1, placeholder: "<address>", children: map[string]*schemaNode{
+			"neighbor": {desc: "BGP neighbor", args: 1, placeholder: "<address>", keyValueType: ValueIPAddress, keyValueDesc: "BGP neighbor IP address (bare IPv4/IPv6, no prefix, no zone)", keyValueExamples: []string{"192.0.2.1", "2001:db8::1"}, keyValidator: ValidateBGPNeighborAddress, children: map[string]*schemaNode{
 				"description":            {desc: "Description", args: 1, scalar: true, placeholder: "<text>", children: nil},
 				"peer-as":                {desc: "Peer AS number", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
 				"local-as":               {desc: "Local AS number for this peering", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},

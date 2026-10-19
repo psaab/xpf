@@ -94,36 +94,32 @@ func TestMultiTokenNeighborIsExcludedFromBFDToo6796(t *testing.T) {
 	}
 }
 
-// TestNeighborTokenBeltAcceptsAHostname6796 is the OVER-REJECTION control, and
-// it exists because the first version of this fix required a bare IP and was
-// caught by a pre-existing parser test peering with `peer.example.com`.
-//
-// FRR's grammar is `neighbor <A.B.C.D|X:X::X:X|WORD>`, so a hostname or peer
-// name is a legitimate single token. Rejecting it would drop a working peering
-// from frr.conf — in routing config, over-rejection is an outage, and it is the
-// direction a fail-closed belt is most likely to get wrong.
+// TestNeighborTokenBeltAcceptsAHostname6796 is now the #15184 bare-IP belt
+// test: hostnames / peer-group names are REJECTED (bgpd refuses them in
+// this rendering), bare IPs accepted, multi-token still rejected.
 func TestNeighborTokenBeltAcceptsAHostname6796(t *testing.T) {
 	for _, addr := range []string{
 		"10.0.0.2",
 		"2001:db8::2",
-		"peer.example.com",
-		"UPSTREAM-GROUP",
 	} {
 		if !validBGPNeighborAddress(addr) {
-			t.Errorf("validBGPNeighborAddress(%q) = false — this is a single "+
-				"FRR token and rejecting it drops a working peering", addr)
+			t.Errorf("validBGPNeighborAddress(%q) = false — bare IP must render", addr)
 		}
 	}
 	for _, addr := range []string{
 		"",
+		"peer.example.com",
+		"UPSTREAM-GROUP",
+		"10.0.0.256",
+		"192.0.2.0/24",
+		"fe80::1%ge-0-0-1",
 		"1.1.1.1 remote-as 65000",
 		"1.1.1.1\nneighbor 2.2.2.2",
 		"1.1.1.1\tremote-as 65000",
 		"1.1.1.1\rneighbor 2.2.2.2",
 	} {
 		if validBGPNeighborAddress(addr) {
-			t.Errorf("validBGPNeighborAddress(%q) = true — this spans more than "+
-				"one FRR token and injects a second statement", addr)
+			t.Errorf("validBGPNeighborAddress(%q) = true — must be omitted (#15184/#6796)", addr)
 		}
 	}
 }

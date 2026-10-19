@@ -176,47 +176,32 @@ func validFRRInterfaceOperand(s string) bool {
 	return true
 }
 
-// validBGPNeighborAddress reports whether a BGP neighbor identity occupies
-// exactly ONE FRR token.
+// validBGPNeighborAddress reports whether a BGP neighbor identity is a bare
+// IP address renderable as `neighbor <addr> ...`.
 //
-// Render-side fail-closed belt for #6796. `n.Address` is rendered RAW at 24
-// sites — unlike every other operand around it (update-source, description and
-// password are all sanitized) — so a value carrying whitespace SPANS MULTIPLE
-// FRR TOKENS: an identity of `1.1.1.1 remote-as 65000\n neighbor 2.2.2.2`
-// renders a valid first statement followed by an attacker-chosen second one,
-// which is arbitrary FRR configuration injected through a config value.
+// Render-side fail-closed belt for #6796 + #15184. `n.Address` is rendered RAW
+// at 24 sites, so a value carrying whitespace spans multiple FRR tokens and
+// injects configuration (#6796). Even a single token that is not an IP
+// (10.0.0.256, 192.0.2.0/24, peer-a, a hostname, fe80::1%ge-0-0-1) is
+// refused by bgpd and fails every frr-reload (#15184).
 //
-// The test is single-token-ness, deliberately NOT "is an IP". FRR's grammar is
-// `neighbor <A.B.C.D|X:X::X:X|WORD>`, and this tree already commits configs
-// whose neighbor is a hostname (a pre-existing parser test peers with
-// `peer.example.com`). Requiring an IP literal would reject configs that work
-// today — over-rejection in routing config is an outage, and the defect here is
-// about token COUNT, not address form.
-//
-// sanitizeFRRValue is deliberately not the tool, and this is the reason: it
-// maps control bytes to a SPACE, and space is exactly the separator FRR
-// tokenizes on. Replacing a newline with a space still splits the token, and a
-// plain embedded space is not a control byte at all, so it passes through
-// untouched. A sanitizer whose replacement character is the sink's delimiter
-// cannot make a value safe for that sink.
+// The predicate mirrors pkg/config ValidateBGPNeighborAddress:
+// netip.ParseAddr must succeed with no zone and no prefix. The prior
+// single-token-only test deliberately accepted hostnames; #15184 supersedes
+// that for BGP neighbors — bgpd refuses them in this rendering, so on the
+// tolerant load path they are omitted rather than breaking the reload.
+// Hostname neighbors previously committed will be omitted here (warned at
+// lenient compile) until the operator changes them to an IP.
 //
 // Commit / commit-check stay strict (validateBGPNeighborAddressStrict); this is
 // the #1960 belt for the tolerant load / peer-sync / rollback paths, which only
 // warn.
 func validBGPNeighborAddress(s string) bool {
-	if s == "" {
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		// Space, tab, CR, LF, form feed, vertical tab — every byte FRR's lexer
-		// treats as a separator — plus the remaining control bytes and DEL,
-		// which have no legitimate place in an identity and would corrupt the
-		// rendered line.
-		if s[i] <= 0x20 || s[i] == 0x7f {
-			return false
-		}
-	}
-	return true
+	return addr.Zone() == ""
 }
 
 // validBGPOrigin reports whether a route-map `then origin` value is one of the
