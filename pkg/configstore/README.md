@@ -1697,6 +1697,20 @@ it is transient (the holder commits or exits). The internal `SyncApply` /
 `PromoteRollback` convergence applies never route through the gated methods,
 so they are unaffected — same distinction as the read-only gate above.
 
+**Confirm requires a HELD lock (#14985, D36-05).** `ConfirmCommitAs` adds one
+check beyond `ensureHolderLocked`: when a commit-confirmed window is actually
+pending, a session-scoped caller must be the recorded holder
+(`effectiveHolderLocked() == sessionID`). The two bypasses above stay correct
+for candidate mutators (there is no candidate to protect once config mode is
+exited), but a pending window SURVIVES `ExitConfigure` — the owner routinely
+leaves config mode while the rollback timer runs — so the `!configDir` and
+empty-holder passes were fail-open for confirm: any well-formed REST/gRPC
+session token could cancel another operator's auto-rollback and make an
+unconfirmed config permanent. The check is gated on `confirmTimer != nil` so
+the no-pending-window error is unchanged, and the internal (`""`) caller
+keeps its bypass (in-process CLI `ConfirmCommit`, confirm-on-sync).
+RED→GREEN: `pkg/api/config_confirm_holder_14985_test.go`.
+
 ### Step-0 committed marker (#1922 Item 2)
 
 The config-DB compatibility envelope (#1917) carries a `committed=` header
