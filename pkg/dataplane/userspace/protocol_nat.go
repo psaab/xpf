@@ -328,6 +328,17 @@ type DestinationNATRuleSnapshot struct {
 	// pool-less DNAT rule — reverting to the pre-#3844 fail-open, never a
 	// crash; the commit-side compiles it identically on both binaries.
 	Off bool `json:"off,omitempty"`
+	// LenientMatchDropped carries the #14947 poison for a DNAT rule whose
+	// address-name closure is poisoned or whose referenced dynamic feed is
+	// present-but-empty (unready). The Go builder still emits the rule's
+	// entries (keyed by destination, so the Rust table can claim the flow)
+	// with this marker; the Rust DnatTable drops a flow claimed by a marked
+	// entry instead of translating it or exempting it via `off`. Without it
+	// a poisoned `off` exemption published its resolvable subset and let the
+	// rest fall through to a later translate rule, and a poisoned translate
+	// rule translated its subset. Rides the v52 protocol bump: an old helper
+	// ignoring it keeps that fail-open, which is the defect.
+	LenientMatchDropped bool `json:"lenient_match_dropped,omitempty"`
 	// CounterID is the compiler-assigned per-rule translation hit counter ID
 	// (stable key-derived hash, non-zero; 0 means "no counter"). All expanded
 	// (protocol, port) tuples of the same DNAT rule share one counter ID so

@@ -3688,24 +3688,45 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
+                        // #14947: a poisoned DNAT claim drops the packet —
+                        // it must not fall through to NPTv6/NAT64/policy as
+                        // untranslated transit.
+                        let mut dnat_poisoned = false;
                         let dnat_decision = if static_dnat_decision.is_none()
                             && persistent_dnat.is_none()
                             && !worker_ctx.forwarding.dnat_table.is_empty()
                         {
-                            worker_ctx.forwarding.dnat_table.lookup_with_counter_scoped(
-                                meta.protocol,
-                                flow.forward_key.src_ip,
-                                resolution_target,
-                                flow.forward_key.src_port,
-                                flow.forward_key.dst_port,
-                                ingress_zone_name,
-                                ingress_ifname_dnat,
-                                ingress_ri_dnat,
-                                dnat_packet_icmp,
-                            )
+                            let (lookup, counter) = worker_ctx
+                                .forwarding
+                                .dnat_table
+                                .lookup_result_with_counter_scoped(
+                                    meta.protocol,
+                                    flow.forward_key.src_ip,
+                                    resolution_target,
+                                    flow.forward_key.src_port,
+                                    flow.forward_key.dst_port,
+                                    ingress_zone_name,
+                                    ingress_ifname_dnat,
+                                    ingress_ri_dnat,
+                                    dnat_packet_icmp,
+                                );
+                            match lookup {
+                                crate::nat::DnatLookup::Matched(decision) => {
+                                    Some((decision, counter))
+                                }
+                                crate::nat::DnatLookup::Poisoned => {
+                                    dnat_poisoned = true;
+                                    None
+                                }
+                                crate::nat::DnatLookup::NoMatch => None,
+                            }
                         } else {
                             None
                         };
+                        if dnat_poisoned {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
                         // #2218: DNAT/static-DNAT now yields
                         // (NatDecision, Option<Arc<NatRuleCounter>>). Split
                         // the counter off — the decision flows unchanged into

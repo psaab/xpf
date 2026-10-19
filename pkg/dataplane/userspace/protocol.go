@@ -410,7 +410,11 @@ const (
 	// pool the control plane declared unusable (or skip the rule and route
 	// the synthetic NAT64 destination as ordinary IPv6), so exact-equality
 	// versioning fences the pairing instead of degrading silently.
-	ProtocolVersion = 51
+	// v51 -> v52 (#14947): DestinationNATRuleSnapshot.lenient_match_dropped,
+	// the fail-closed poison for a DNAT rule with a poisoned or unready
+	// address-name closure. An old helper ignores it and keeps translating
+	// the resolvable subset (or exempting via `off`), which is the defect.
+	ProtocolVersion = 52
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

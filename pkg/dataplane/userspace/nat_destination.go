@@ -173,8 +173,13 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 			// The prefixed fallback token keeps the constraint non-empty while
 			// remaining unparseable even if the set name is a CIDR (#12626).
 			// The commit-time strict gate makes the reference operator-visible.
+			// #14947: a poisoned or unready address-name closure marks the
+			// whole rule; the marker rides every emitted entry below.
+			poisonedDNAT := false
 			for _, name := range rule.Match.DestinationAddressNameList() {
-				destAddrs = appendNATDestinationAddressName(cfg, feedOverlay, destAddrs, name)
+				var p bool
+				destAddrs, p = appendNATDestinationAddressNamePoisoned(cfg, feedOverlay, destAddrs, name)
+				poisonedDNAT = poisonedDNAT || p
 			}
 			if len(destAddrs) == 0 {
 				// #9877: an exemption whose destination key was dropped is
@@ -213,7 +218,13 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 			// backstop.
 			// #3431: resolve EVERY name of a bracket list / repeated leaf.
 			for _, name := range rule.Match.SourceAddressNameList() {
-				sourceAddrs = appendNATSourceAddressName(cfg, feedOverlay, sourceAddrs, name)
+				var p bool
+				sourceAddrs, p = appendNATSourceAddressNamePoisoned(cfg, feedOverlay, sourceAddrs, name)
+				poisonedDNAT = poisonedDNAT || p
+			}
+			if poisonedDNAT {
+				slog.Warn("userspace snapshot: destination NAT rule is poisoned; shipping fail-closed (#14947)",
+					"ruleset", rs.Name, "rule", rule.Name)
 			}
 
 			// Resolve application match to protocol+ports if specified.
@@ -671,8 +682,9 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 								// no-translate and short-circuits later DNAT rules;
 								// the pool fields are unused. PoolAddress is empty
 								// for an off entry.
-								Off:       isOff,
-								CounterID: ruleCounterID,
+								Off:                 isOff,
+								LenientMatchDropped: poisonedDNAT,
+								CounterID:           ruleCounterID,
 							})
 						}
 					}

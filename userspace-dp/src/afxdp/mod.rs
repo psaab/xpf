@@ -3,8 +3,8 @@ use super::{
     InterfaceSnapshot, PacketResolution, SessionDeltaInfo, ZoneSnapshot,
 };
 use crate::nat::{
-    DnatTable, NatDecision, SourceNatFailure, SourceNatLookup, SourceNatRule, StaticNatTable,
-    parse_source_nat_rules_with_previous,
+    DnatLookup, DnatTable, NatDecision, SourceNatFailure, SourceNatLookup, SourceNatRule,
+    StaticNatTable, parse_source_nat_rules_with_previous,
     release_source_nat_allocation_for_worker, reserve_synced_source_nat_allocation_for_worker,
     rollback_source_nat_allocation_for_worker,
 };

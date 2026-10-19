@@ -3138,6 +3138,7 @@ pub(super) fn inbound_dnat_snapshot(policy: PolicyRuleSnapshot) -> ConfigSnapsho
         match_icmp_type: None,
         match_icmp_code: None,
         off: false,
+        lenient_match_dropped: false,
     }];
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "reth1.0".to_string(),

@@ -58,8 +58,13 @@ const natUnresolvedAddressNamePrefix = "unresolved-address-name:"
 // set, a dangling reference without a ready feed, an unusable static address
 // without a ready feed value, or an unready feed binding) poisons the name.
 // SNAT promotes any poisoned selector name to a whole-rule drop using its
-// existing LenientMatchDropped marker. DNAT has no corresponding poison field,
-// so it retains per-name filtering until the snapshot contract is changed.
+// existing LenientMatchDropped marker. DNAT carries the same poison on
+// DestinationNATRuleSnapshot.LenientMatchDropped (#14947): the builder still
+// emits the rule's entries (keyed by their destination) with the marker, and
+// the Rust DnatTable drops a flow claimed by a marked entry instead of
+// translating it or exempting it via `off`. Present-empty dynamic feeds
+// poison only SNAT `off` rules and DNAT rules (see nat_source.go); a
+// fail-mode-drop present-empty feed stays match-none on every path (#12965).
 // All NAT append helpers use the fixed non-address prefix for fallback tokens,
 // preventing CIDR-shaped names from becoming literal prefixes (#12626).
 //
@@ -145,14 +150,27 @@ func appendNATAddressNamesPoisoned(cfg *config.Config, feedOverlay map[string][]
 // non-address prefix keeps CIDR-shaped names from matching literal prefixes
 // (#12626). Commit validation rejects the reference on the strict path.
 func appendNATSourceAddressName(cfg *config.Config, feedOverlay map[string][]string, sourceAddrs []string, name string) []string {
+	addrs, _ := appendNATSourceAddressNamePoisoned(cfg, feedOverlay, sourceAddrs, name)
+	return addrs
+}
+
+// appendNATSourceAddressNamePoisoned is appendNATSourceAddressName but also
+// reports whether the name poisoned the DNAT rule (#14947): a poisoned
+// closure, or an empty resolution from an unready dynamic feed, poisons.
+// A fail-mode-drop present-empty feed keeps the match-none fallback token
+// without poisoning.
+func appendNATSourceAddressNamePoisoned(cfg *config.Config, feedOverlay map[string][]string, sourceAddrs []string, name string) ([]string, bool) {
 	if name == "" {
-		return sourceAddrs
+		return sourceAddrs, false
 	}
-	if values := resolveNATAddressNamePrefixes(cfg, feedOverlay, name); len(values) > 0 {
-		return append(sourceAddrs, values...)
+	values, poisoned := resolveNATAddressNamePrefixesStatus(cfg, feedOverlay, name)
+	if poisoned {
+		return append(sourceAddrs, natUnresolvedAddressNamePrefix+name), true
 	}
-	// Keep the source constraint non-empty with a prefixed, unparseable fallback.
-	return append(sourceAddrs, natUnresolvedAddressNamePrefix+name)
+	if len(values) > 0 {
+		return append(sourceAddrs, values...), false
+	}
+	return append(sourceAddrs, natUnresolvedAddressNamePrefix+name), natAddressNameEmptyPoisons(cfg, feedOverlay, name)
 }
 
 // appendNATDestinationAddressName resolves a DNAT rule's
@@ -168,14 +186,47 @@ func appendNATSourceAddressName(cfg *config.Config, feedOverlay map[string][]str
 // translation prefix (#12626). Commit validation rejects the reference on the
 // strict path.
 func appendNATDestinationAddressName(cfg *config.Config, feedOverlay map[string][]string, destAddrs []string, name string) []string {
+	addrs, _ := appendNATDestinationAddressNamePoisoned(cfg, feedOverlay, destAddrs, name)
+	return addrs
+}
+
+// appendNATDestinationAddressNamePoisoned is appendNATDestinationAddressName
+// but also reports whether the name poisoned the DNAT rule (#14947), with
+// the same poison/empty distinction as the source twin.
+func appendNATDestinationAddressNamePoisoned(cfg *config.Config, feedOverlay map[string][]string, destAddrs []string, name string) ([]string, bool) {
 	if name == "" {
-		return destAddrs
+		return destAddrs, false
 	}
-	if values := resolveNATAddressNamePrefixes(cfg, feedOverlay, name); len(values) > 0 {
-		return append(destAddrs, values...)
+	values, poisoned := resolveNATAddressNamePrefixesStatus(cfg, feedOverlay, name)
+	if poisoned {
+		return append(destAddrs, natUnresolvedAddressNamePrefix+name), true
 	}
-	// Keep the destination list non-empty with a prefixed, unparseable fallback.
-	return append(destAddrs, natUnresolvedAddressNamePrefix+name)
+	if len(values) > 0 {
+		return append(destAddrs, values...), false
+	}
+	return append(destAddrs, natUnresolvedAddressNamePrefix+name), natAddressNameEmptyPoisons(cfg, feedOverlay, name)
+}
+
+// natAddressNameEmptyPoisons reports whether an empty (non-poisoned)
+// resolution of name is an unready dynamic feed rather than intentional
+// match-none (#14947). Only a declared binding whose overlay entry is
+// present-but-empty WITHOUT fail-mode drop poisons: the feed is declared
+// and currently empty, so an `off` exemption scoped to it must not match
+// unconditionally while unready. A fail-mode-drop present-empty feed is
+// intentional match-none (#12965) and does not poison.
+func natAddressNameEmptyPoisons(cfg *config.Config, feedOverlay map[string][]string, name string) bool {
+	if cfg == nil {
+		return false
+	}
+	binding := cfg.Security.DynamicAddress.AddressBindings[dynamicAddressLookupName(name)]
+	if binding == nil || binding.FailMode == "drop" {
+		return false
+	}
+	feeds, present := feedOverlay[name]
+	if !present {
+		feeds, present = feedOverlay[dynamicAddressLookupName(name)]
+	}
+	return present && len(feeds) == 0
 }
 
 // natNeverMatchPortRange is an impossible inclusive range (Low > High): no L4
