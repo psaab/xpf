@@ -664,17 +664,25 @@ type Server struct {
 	httpsBindHosts        func() []string
 	tlsCertificateInvalid atomic.Bool
 	tlsDesired            atomic.Bool
-	tlsNow                func() time.Time
-	tlsCheckInterval      time.Duration
-	tlsMonitorOnce        sync.Once
-	tlsMonitorCancel      context.CancelFunc
-	tlsMonitorWG          sync.WaitGroup
-	tlsCertificateMu      sync.Mutex
-	lifeMu                sync.Mutex      // guards httpLegs/httpsLegs/rootCtx across reconciles
-	rootCtx               context.Context // daemon lifetime; every leg drains on its cancel
-	wg                    sync.WaitGroup  // joins EVERY serve goroutine (live + retiring legs)
-	httpLegs              []*listenerLeg  // live HTTP listener legs, one per bind address (#14583)
-	httpsLegs             []*listenerLeg  // live HTTPS listener legs, one per bind address (#14583)
+	// tlsDesiredConfigured is the operator-configured desire (Config.TLS
+	// with HTTPS addrs, or the last ReconcileHTTPS desire). tlsDesired is
+	// armed only once an HTTPS leg has actually been built (#15667): a
+	// boot whose initial cert load fails must leave tlsDesired false so
+	// daemon retry terms keyed on HTTPSServing drive ReconcileHTTPS,
+	// while the monitor (gated on tlsDesiredConfigured) still retries.
+	tlsDesiredConfigured atomic.Bool
+	httpsDesiredAddrs    []string
+	tlsNow               func() time.Time
+	tlsCheckInterval     time.Duration
+	tlsMonitorOnce       sync.Once
+	tlsMonitorCancel     context.CancelFunc
+	tlsMonitorWG         sync.WaitGroup
+	tlsCertificateMu     sync.Mutex
+	lifeMu               sync.Mutex      // guards httpLegs/httpsLegs/rootCtx across reconciles
+	rootCtx              context.Context // daemon lifetime; every leg drains on its cancel
+	wg                   sync.WaitGroup  // joins EVERY serve goroutine (live + retiring legs)
+	httpLegs             []*listenerLeg  // live HTTP listener legs, one per bind address (#14583)
+	httpsLegs            []*listenerLeg  // live HTTPS listener legs, one per bind address (#14583)
 	// httpSlots / httpsSlots are the credential slots of the legs Start launches
 	// from the construction-time servers (#5561 round 14). Every leg gets one;
 	// a live slot follows s.auth, a retired one is pinned. See authSlot.
@@ -1066,7 +1074,10 @@ func NewServer(cfg Config) *Server {
 		certificate: cfg.TLSCertificate,
 		privateKey:  cfg.TLSPrivateKey,
 	})
-	s.tlsDesired.Store(cfg.TLS && len(effectiveHTTPSAddrs(cfg)) > 0)
+	if cfg.TLS {
+		s.httpsDesiredAddrs = effectiveHTTPSAddrs(cfg)
+	}
+	s.tlsDesiredConfigured.Store(cfg.TLS && len(effectiveHTTPSAddrs(cfg)) > 0)
 	s.certGen = func(bindHosts []string) (tls.Certificate, *x509.Certificate, error) {
 		return generateSelfSignedCertAtWithStatusHosts(tlsDir, certPath, keyPath, bindHosts)
 	}
@@ -2366,9 +2377,9 @@ func generateSelfSignedCertAtWithStatusMulti(dir, certPath, keyPath string, bind
 	// Expiry/not-yet-valid is the one #1916 D6 durability exception: keeping
 	// serving it is never preferable to rotating the self-signed trust anchor.
 	if cert, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
-		cert, leaf, leafErr := managementTLSCertificateLeaf(cert)
+		cert, leaf, chain, leafErr := managementTLSCertificateChain(cert)
 		if leafErr == nil {
-			if validityErr := managementTLSCertificateValidityError(leaf, time.Now()); validityErr == nil {
+			if validityErr := managementTLSCertificatePreflightError(chain, time.Now()); validityErr == nil {
 				// SAN coverage remains diagnostic only; a rebind still does not
 				// churn a valid durable cert.
 				for _, bh := range bindHosts {
