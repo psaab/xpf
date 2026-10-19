@@ -11,14 +11,14 @@ use super::nat::{
     DestinationNATRuleSnapshot, NAT64RuleSnapshot, Nptv6RuleSnapshot, SourceNATRuleSnapshot,
     StaticNATRuleSnapshot,
 };
+pub(crate) use super::pmech::{
+    IpsecBindlessSelectorSnapshot, IpsecMainRouteNextHopSnapshot, IpsecMainRouteSnapshot,
+    IpsecPMechInventorySnapshot, IpsecPMechTunnelRowSnapshot, IpsecTrafficSelectorSnapshot,
+};
 use super::security::{
     AddressBookSnapshot, AppCatalogEntry, FirewallFilterSnapshot, FlowExportSnapshot,
     PolicerSnapshot, PolicyRenameAncestry, PolicyRuleSnapshot, PolicySessionRebind,
     ScreenMissingProfileRef, ScreenProfileSnapshot, ThreeColorPolicerSnapshot,
-};
-pub(crate) use super::pmech::{
-    IpsecBindlessSelectorSnapshot, IpsecMainRouteNextHopSnapshot, IpsecMainRouteSnapshot,
-    IpsecPMechInventorySnapshot, IpsecPMechTunnelRowSnapshot, IpsecTrafficSelectorSnapshot,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -95,6 +95,11 @@ pub(crate) struct InterfaceSnapshot {
     pub local_fabric_member: String,
     #[serde(rename = "redundancy_group", default)]
     pub redundancy_group: i32,
+    /// #15742: Go marks an RG>0 row peer-owned at snapshot build. Only
+    /// connected transit prefixes are suppressed for such a row; local
+    /// addresses and by-ifindex state are retained for local delivery.
+    #[serde(rename = "connected_rg_peer_owned", default)]
+    pub connected_rg_peer_owned: bool,
     /// #6722: the security zone this row's IFINDEX egresses into, or "" for
     /// none. Decided by the Go builder (`stampEgressZones`,
     /// `pkg/dataplane/userspace/interfaces.go`); every row sharing an ifindex
@@ -566,7 +571,6 @@ pub(crate) struct IpsecTunnelRowSnapshot {
     pub logical_ifindex: i32,
 }
 
-
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct ConfigSnapshot {
     pub version: i32,
@@ -578,7 +582,11 @@ pub(crate) struct ConfigSnapshot {
         skip_serializing_if = "crate::protocol::u64_is_zero"
     )]
     pub permit_epoch: u64,
-    #[serde(rename = "queue_epochs", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "queue_epochs",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub queue_epochs: Vec<QueueEpochSnapshot>,
     /// #10485: capture-generation authority paired with the immutable
     /// per-admitted-tunnel rows. This is intentionally distinct from the
@@ -590,7 +598,11 @@ pub(crate) struct ConfigSnapshot {
         skip_serializing_if = "crate::protocol::u64_is_zero"
     )]
     pub ipsec_tunnel_snapshot_generation: u64,
-    #[serde(rename = "ipsec_tunnel_rows", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "ipsec_tunnel_rows",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub ipsec_tunnel_rows: Vec<IpsecTunnelRowSnapshot>,
     #[serde(
         rename = "pmech_inventory",
@@ -627,8 +639,11 @@ pub(crate) struct ConfigSnapshot {
     pub zones: Vec<ZoneSnapshot>,
     /// True only when the producer supplied a populated, collision-free zone
     /// set. Removed-zone rotation is fail-closed when this marker is absent.
-    #[serde(rename = "zone_set_validated", default,
-            skip_serializing_if = "crate::protocol::bool_is_false")]
+    #[serde(
+        rename = "zone_set_validated",
+        default,
+        skip_serializing_if = "crate::protocol::bool_is_false"
+    )]
     pub zone_set_validated: bool,
     #[serde(default)]
     pub interfaces: Vec<InterfaceSnapshot>,
@@ -652,7 +667,11 @@ pub(crate) struct ConfigSnapshot {
     /// foreign-VRF interfaces remain refused. Additive and omitted when empty.
     /// Protocol v41 fences older helpers, which refuse rather than silently
     /// ignore this route authority.
-    #[serde(rename = "forwarding_tables", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "forwarding_tables",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub forwarding_tables: Vec<String>,
     #[serde(default)]
     pub flow: FlowSnapshot,
@@ -871,8 +890,11 @@ pub(crate) struct ConfigSnapshot {
     /// The Go-side CLI validates the mask is a power-of-two-minus-one
     /// and rejects `mask == 0` unless `--enable-cold-path-1-in-1-sampling`
     /// is explicitly set.
-    #[serde(rename = "cold_path_sample_mask", default,
-            skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "cold_path_sample_mask",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cold_path_sample_mask: Option<u64>,
     /// #9520: the Go control plane's content digest of this snapshot, hex
     /// SHA-256 over it with `generation`, `fib_generation`, `generated_at`,
@@ -884,7 +906,11 @@ pub(crate) struct ConfigSnapshot {
     /// does not read that field; a change that starts reading it must add it
     /// back on the Go side. Serialized only when non-empty, so the default
     /// specimen stays byte-identical (`protocol_wire_v1.json`).
-    #[serde(rename = "content_digest", default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        rename = "content_digest",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub content_digest: String,
 }
 
@@ -914,7 +940,6 @@ impl ConfigSnapshot {
             .max(SLOW_PATH_MTU_FLOOR)
     }
 }
-
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub(crate) struct MirrorConfigSnapshot {
@@ -1208,7 +1233,6 @@ pub(crate) struct UserspaceCapabilities {
     pub unsupported_reasons: Vec<String>,
 }
 
-
 #[cfg(test)]
 mod wg_snapshot_tests {
     use super::*;
@@ -1262,7 +1286,10 @@ mod wg_snapshot_tests {
             ..Default::default()
         };
         let dbg = format!("{snap:?}");
-        assert!(!dbg.contains("deadbeef"), "Debug must redact the private key: {dbg}");
+        assert!(
+            !dbg.contains("deadbeef"),
+            "Debug must redact the private key: {dbg}"
+        );
     }
 }
 
@@ -1429,14 +1456,18 @@ mod route_mtu_wire_tests {
 
     #[test]
     fn route_mtu_round_trips_and_zero_is_omitted() {
-        let route = RouteSnapshot { reject: false, mtu: 1400,
-        ..Default::default() };
+        let route = RouteSnapshot {
+            reject: false,
+            mtu: 1400,
+            ..Default::default()
+        };
         let value = serde_json::to_value(&route).expect("serialize route");
         assert_eq!(value["mtu"], 1400);
         let decoded: RouteSnapshot = serde_json::from_value(value).expect("deserialize route");
         assert_eq!(decoded.mtu, 1400);
 
-        let value = serde_json::to_value(RouteSnapshot::default()).expect("serialize default route");
+        let value =
+            serde_json::to_value(RouteSnapshot::default()).expect("serialize default route");
         assert!(
             value.get("mtu").is_none(),
             "an unknown route MTU must keep the wire field absent"

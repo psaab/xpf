@@ -777,6 +777,7 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 		(ev.OldState == cluster.StatePrimary || ev.NewState == cluster.StatePrimary)
 	if clusterOwnershipEdge && !isPrimary {
 		d.scheduleFRRHAReconcile("cluster-state")
+		d.scheduleConnectedRGRepublish("cluster-state")
 	}
 	if isPrimary {
 		// Activation: enable forwarding first.
@@ -992,6 +993,7 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 		// A promotion may need to install RETH addresses before FRR can
 		// establish its restored sessions, so reconcile after ownership work.
 		d.scheduleFRRHAReconcile("cluster-state")
+		d.scheduleConnectedRGRepublish("cluster-state")
 	}
 	return vrrpTimer
 }
@@ -1696,6 +1698,7 @@ func (d *Daemon) reconcileRGState() {
 	// the data-RG primary; the standby reverts to the config baseline.
 	if anyRGChanged {
 		d.scheduleFRRHAReconcile("rg-state-reconcile")
+		d.scheduleConnectedRGRepublish("rg-state-reconcile")
 		d.reconcileIPMonGating()
 	}
 

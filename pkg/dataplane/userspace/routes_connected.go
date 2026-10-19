@@ -7,6 +7,24 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
+// markConnectedRGPeerOwned returns a copy of interfaces with
+// ConnectedRGPeerOwned set on each peer-owned RG>0 row (#15742). Consistent
+// predicate with connectedRowPeerOwned so Go connected RouteSnapshot rows
+// and Rust connected_v4/v6 rows cannot diverge. Clustered + nil provider
+// fails closed (peer-owned). The copy prevents route-building from mutating
+// a snapshot's retained interface rows.
+func markConnectedRGPeerOwned(cfg *config.Config, interfaces []InterfaceSnapshot, provider RGPrimaryProvider) []InterfaceSnapshot {
+	if len(interfaces) == 0 {
+		return interfaces
+	}
+	marked := make([]InterfaceSnapshot, len(interfaces))
+	copy(marked, interfaces)
+	for i := range marked {
+		marked[i].ConnectedRGPeerOwned = connectedRowPeerOwned(cfg, marked[i], provider)
+	}
+	return marked
+}
+
 func connectedPrefixesForInterface(iface InterfaceSnapshot) ([]string, []string) {
 	if iface.AdminDisabled {
 		return nil, nil

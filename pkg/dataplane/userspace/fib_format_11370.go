@@ -22,6 +22,8 @@ func FormatFIBDump(generation uint32, routes []FibRouteWire) string {
 		action := ""
 		if route.Discard {
 			action = "discard"
+		} else if route.Reject {
+			action = "reject"
 		} else if route.NextTable != "" {
 			action = fmt.Sprintf("next-table %s priority %d",
 				termsafe.SanitizeForDisplay(route.NextTable), route.RulePriority)

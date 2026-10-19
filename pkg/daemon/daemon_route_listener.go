@@ -295,6 +295,53 @@ func (d *Daemon) actuateLearnedRouteRefresh(ctx context.Context) bool {
 	return true
 }
 
+// scheduleConnectedRGRepublish refreshes helper routes after an RG
+// ownership edge (#15742). A nonblocking goroutine takes applySem, then the
+// existing routes-only publisher rebuilds connected prefixes from the
+// provider's current verdict and duplicate-skips if ownership did not move
+// the effective route set. It deliberately mirrors scheduleFRRHAReconcile:
+// event handlers do not perform control-socket I/O inline.
+func (d *Daemon) scheduleConnectedRGRepublish(reason string) {
+	if d == nil || d.store == nil || d.isResetting() {
+		return
+	}
+	ctx := d.applyCancelCtx()
+	go func() {
+		if err := d.applySem.Acquire(ctx, 1); err != nil {
+			return
+		}
+		defer d.applySem.Release(1)
+		if d.isResetting() {
+			return
+		}
+		cfg := d.store.ActiveConfig()
+		if cfg == nil {
+			return
+		}
+		pub, ok := d.dataplane().(routeOverlayPublisher)
+		if !ok {
+			return
+		}
+		schedulerState, schedulerFailClosed := policySchedulerPublicationState(d.scheduler.Load(), time.Now())
+		published, err := pub.PublishRouteOverlaySnapshotWithLatch(cfg, d.ipmonActiveOverlay(), schedulerState, schedulerFailClosed)
+		if err != nil {
+			slog.Warn("HA connected-route republish failed; next ownership edge or commit retries",
+				"reason", reason, "err", err)
+			return
+		}
+		if !published && !d.pendingFIBBump {
+			return
+		}
+		if _, err := pub.BumpFIBGeneration(); err != nil {
+			d.pendingFIBBump = true
+			slog.Warn("HA connected-route FIB bump unconfirmed; route listener retry remains armed",
+				"reason", reason, "err", err)
+			return
+		}
+		d.pendingFIBBump = false
+	}()
+}
+
 // RouteListenerMarks and RouteListenerRepublishes surface the #7437 pair for
 // the xpf_route_listener_* metrics. Reported together because either alone is
 // unreadable: republishes without marks cannot distinguish "no route churn"

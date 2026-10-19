@@ -271,7 +271,9 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v54 -> v55 (#15283): NAT64RuleSnapshot carries port_low/port_high, the
 // referenced source pool's `port range`; a v54 helper ignores them and
 // keeps the fixed 1024..65535 NAT64 allocator — the defect.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 55;
+// v55 -> v56 (#15742): InterfaceSnapshot carries connected_rg_peer_owned
+// so the helper HA-filters connected transit prefixes on peer-owned RGs.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 56;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
@@ -502,6 +504,8 @@ pub(crate) struct FibRouteWire {
     pub next_hops: Vec<FibNextHopWire>,
     #[serde(default)]
     pub discard: bool,
+    #[serde(default)]
+    pub reject: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub next_table: String,
     #[serde(default)]
