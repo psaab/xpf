@@ -124,6 +124,7 @@ func raClusterStore(t *testing.T, prefix string) *configstore.Store {
 			"set chassis cluster node 0\n" +
 			"set chassis cluster redundancy-group 1 node 0 priority 200\n" +
 			"set chassis cluster redundancy-group 1 node 1 priority 100\n" +
+			"set interfaces reth0 vlan-tagging\n" +
 			"set interfaces reth0 redundant-ether-options redundancy-group 1\n" +
 			"set interfaces reth0 unit 50 vlan-id 50\n" +
 			"set interfaces ge-0/0/0 gigether-options redundant-parent reth0\n" +
@@ -524,5 +525,218 @@ func TestClusterRADemotionConfigRemovalUsesLiveSharedSource10789(t *testing.T) {
 	}
 	if len(spy.lastPrefixes()) != 0 {
 		t.Fatalf("demoted sender remains desired after config removal: %v", spy.lastPrefixes())
+	}
+}
+
+// TestClusterRAUnopenedSharedSenderSilentlyStopped14978 is the D34-01 leg (a)
+// regression. A shared-stable RETH sender that is still opening (or already
+// dead) reports an empty SrcAddr from Status, so the pre-fix check on
+// Status.SrcAddr never matched it: Apply then excluded the inactive RG from
+// the desired set and gracefully withdrew it, emitting a lifetime-0 goodbye
+// for the router identity the peer may already advertise. The fix judges the
+// sender on its CONFIGURED source.
+func TestClusterRAUnopenedSharedSenderSilentlyStopped14978(t *testing.T) {
+	store := raClusterStore(t, "2001:db8:1::/64")
+	spy := &raApplySpy{}
+	var cleared [][]string
+	d := &Daemon{
+		store:    store,
+		rgStates: make(map[int]*rgStateMachine),
+		raStatusFn: func() []ra.SenderInfo {
+			return []ra.SenderInfo{{
+				Interface: "ge-0-0-0.50",
+				SrcAddr:   "",
+				State:     "active",
+			}}
+		},
+		raApplyFn: spy.apply,
+		raClearInterfacesFn: func(names []string) error {
+			cleared = append(cleared, append([]string(nil), names...))
+			return nil
+		},
+	}
+	d.getOrCreateRGState(1).SetVRRP("reth0", false)
+	d.reconcileClusterRAServices("demoted-unopened")
+	if !reflect.DeepEqual(cleared, [][]string{{"ge-0-0-0.50"}}) {
+		t.Fatalf("unopened shared sender silently cleared = %v, want [[ge-0-0-0.50]]", cleared)
+	}
+	if got := spy.last(); len(got) != 0 {
+		t.Fatalf("demoted node desired set = %v, want empty (no graceful goodbye path)", got)
+	}
+}
+
+// TestClusterRANoLiveSharedSenderSilentlyStopped14978 covers the D34-01
+// configured-only sender: no live Status entry exists at all, yet a
+// configured shared-stable sender on an inactive RG must still be named for
+// silent stop instead of reaching Apply's graceful withdrawal.
+func TestClusterRANoLiveSharedSenderSilentlyStopped14978(t *testing.T) {
+	store := raClusterStore(t, "2001:db8:1::/64")
+	spy := &raApplySpy{}
+	var cleared [][]string
+	d := &Daemon{
+		store:      store,
+		rgStates:   make(map[int]*rgStateMachine),
+		raStatusFn: func() []ra.SenderInfo { return nil },
+		raApplyFn:  spy.apply,
+		raClearInterfacesFn: func(names []string) error {
+			cleared = append(cleared, append([]string(nil), names...))
+			return nil
+		},
+	}
+	d.getOrCreateRGState(1).SetVRRP("reth0", false)
+	d.reconcileClusterRAServices("demoted-no-live-sender")
+	if !reflect.DeepEqual(cleared, [][]string{{"ge-0-0-0.50"}}) {
+		t.Fatalf("configured-only shared sender silently cleared = %v, want [[ge-0-0-0.50]]", cleared)
+	}
+}
+
+// TestClusterRAConfiguredLinkLocalOnInactiveRGSilentlyStopped14978 covers an
+// operator-configured link-local that happens to fall inside the stable
+// pattern on an inactive RETH. It is the same shared identity and must not
+// be gracefully withdrawn; before the fix it reached Apply because demotion
+// filtering only compared the implicit stable source or live Status.
+func TestClusterRAConfiguredLinkLocalOnInactiveRGSilentlyStopped14978(t *testing.T) {
+	s := raClusterStore(t, "2001:db8:1::/64")
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadSet("set interfaces reth0 unit 50 family inet6 address fe80::bf72:1:1/64\n"); err != nil {
+		t.Fatalf("LoadSet configured LL: %v", err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("Commit configured LL: %v", err)
+	}
+	s.ExitConfigure()
+	cfg := s.ActiveConfig()
+	d0 := &Daemon{}
+	raCfgs := d0.buildRAConfigs(cfg)
+	if len(raCfgs) != 1 || raCfgs[0].SourceLinkLocal != "fe80::bf72:1:1" {
+		t.Fatalf("precondition: RA source = %+v, want fe80::bf72:1:1", raCfgs)
+	}
+	spy := &raApplySpy{}
+	var cleared [][]string
+	d := &Daemon{
+		store:      s,
+		rgStates:   make(map[int]*rgStateMachine),
+		raStatusFn: func() []ra.SenderInfo { return nil },
+		raApplyFn:  spy.apply,
+		raClearInterfacesFn: func(names []string) error {
+			cleared = append(cleared, append([]string(nil), names...))
+			return nil
+		},
+	}
+	d.getOrCreateRGState(1).SetVRRP("reth0", false)
+	d.reconcileClusterRAServices("demoted-configured-ll")
+	if !reflect.DeepEqual(cleared, [][]string{{"ge-0-0-0.50"}}) {
+		t.Fatalf("configured-LL shared sender silently cleared = %v, want [[ge-0-0-0.50]]", cleared)
+	}
+}
+
+// TestClusterRANodeLocalRAKept14978 is the D34-01 node-local leg. RA on an
+// interface with no redundancy group belongs to this node alone; cluster
+// reconciliation must keep it on every node, mirroring the #6520 DHCP rule.
+// Before the fix the desired set contained only RG-owned interfaces, so the
+// first cluster reconcile withdrew every node-local sender.
+func TestClusterRANodeLocalRAKept14978(t *testing.T) {
+	s := raClusterStore(t, "2001:db8:1::/64")
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadSet(
+		"set interfaces ge-0/0/9 unit 0 family inet6 address 2001:db8:99::1/64\n" +
+			"set protocols router-advertisement interface ge-0/0/9.0 prefix 2001:db8:99::/64\n"); err != nil {
+		t.Fatalf("LoadSet node-local RA: %v", err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("Commit node-local RA: %v", err)
+	}
+	s.ExitConfigure()
+	spy := &raApplySpy{}
+	var cleared [][]string
+	d := &Daemon{
+		store:      s,
+		rgStates:   make(map[int]*rgStateMachine),
+		raStatusFn: func() []ra.SenderInfo { return nil },
+		raClearInterfacesFn: func(names []string) error {
+			cleared = append(cleared, append([]string(nil), names...))
+			return nil
+		},
+		raApplyFn: spy.apply,
+	}
+	// Node masters nothing: the RETH RA is withdrawn, the node-local RA stays.
+	// The inactive RETH shared sender is still silently stopped; the
+	// node-local interface must never appear in a silent clear.
+	d.getOrCreateRGState(1).SetVRRP("reth0", false)
+	d.reconcileClusterRAServices("backup-node-local")
+	for _, names := range cleared {
+		if contains(names, "ge-0-0-9") {
+			t.Fatalf("node-local RA was silently cleared: %v", cleared)
+		}
+	}
+	var ifaces []string
+	for _, c := range spy.last() {
+		ifaces = append(ifaces, c.Interface)
+	}
+	if !contains(ifaces, "ge-0-0-9") {
+		t.Fatalf("node-local RA dropped from cluster desired set; desired interfaces = %v", ifaces)
+	}
+	if contains(ifaces, "ge-0-0-0.50") {
+		t.Fatalf("inactive RETH RA kept on backup node; desired interfaces = %v", ifaces)
+	}
+}
+
+// TestDemotionUnopenedSharedSenderClearedWithoutGoodbye14978 binds the VRRP
+// demotion edge itself: clearRethRASendersWithoutGoodbye must name an
+// unopened (empty SrcAddr) shared sender for silent stop.
+func TestDemotionUnopenedSharedSenderClearedWithoutGoodbye14978(t *testing.T) {
+	store := raClusterStore(t, "2001:db8:1077:9::/64")
+	cfg := store.ActiveConfig()
+	clearer := &sharedLLClearSpy10779{
+		statuses: []ra.SenderInfo{
+			{Interface: "ge-0-0-0.50", SrcAddr: "", State: "active"},
+		},
+	}
+	if err := clearRethRASendersWithoutGoodbye(clearer, cfg, 1); err != nil {
+		t.Fatalf("clear demoted RG senders: %v", err)
+	}
+	if len(clearer.calls) != 1 || !reflect.DeepEqual(clearer.calls[0], []string{"ge-0-0-0.50"}) {
+		t.Fatalf("unopened demotion clear = %v, want [[ge-0-0-0.50]]", clearer.calls)
+	}
+}
+
+// TestDemotionPerNodeSourceNotSilentlyCleared14978 is the adjacent control:
+// an explicit per-node source on the demoted RG keeps its graceful goodbye
+// and must NOT be silently cleared. The demoted interface carries a
+// configured per-node link-local, so buildRAConfigs reports that source
+// (not the implicit stable one) and the configured-source check must not
+// match it.
+func TestDemotionPerNodeSourceNotSilentlyCleared14978(t *testing.T) {
+	s := raClusterStore(t, "2001:db8:1077:9::/64")
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadSet("set interfaces reth0 unit 50 family inet6 address fe80::face/64\n"); err != nil {
+		t.Fatalf("LoadSet per-node LL: %v", err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("Commit per-node LL: %v", err)
+	}
+	s.ExitConfigure()
+	cfg := s.ActiveConfig()
+	d0 := &Daemon{}
+	raCfgs := d0.buildRAConfigs(cfg)
+	if len(raCfgs) != 1 || raCfgs[0].SourceLinkLocal != "fe80::face" {
+		t.Fatalf("precondition: RA source = %+v, want fe80::face", raCfgs)
+	}
+	clearer := &sharedLLClearSpy10779{
+		statuses: []ra.SenderInfo{
+			{Interface: "ge-0-0-0.50", SrcAddr: "fe80::face", State: "active"},
+		},
+	}
+	if err := clearRethRASendersWithoutGoodbye(clearer, cfg, 1); err != nil {
+		t.Fatalf("clear demoted RG senders: %v", err)
+	}
+	if len(clearer.calls) != 0 {
+		t.Fatalf("per-node source was silently cleared %v, want no silent clear (graceful goodbye retained)", clearer.calls)
 	}
 }

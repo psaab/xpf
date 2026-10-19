@@ -2000,6 +2000,50 @@ type raScopedClearer interface {
 	Status() []ra.SenderInfo
 }
 
+// configuredRASource returns the configured RA source for interface, or ""
+// when the interface has no configured RA or no explicit source.
+func configuredRASource(allRA []*config.RAInterfaceConfig, iface string) string {
+	for _, cfgRA := range allRA {
+		if cfgRA != nil && cfgRA.Interface == iface {
+			return cfgRA.SourceLinkLocal
+		}
+	}
+	return ""
+}
+
+// sharedStableRAInterfaces returns the subset of ifaces whose RA source is
+// the shared stable RETH identity, judged on the CONFIGURED source whenever
+// one exists. Status reports an empty SrcAddr until a sender's conn opens,
+// so a source check on Status alone misses an unopened shared-identity
+// sender and leaves Apply to withdraw the peer's router with a graceful
+// goodbye (D34-01).
+func sharedStableRAInterfaces(ifaces map[string]bool, senders []ra.SenderInfo, allRA []*config.RAInterfaceConfig) []string {
+	var names []string
+	seen := make(map[string]bool)
+	for _, sender := range senders {
+		if sender.State != "active" || !ifaces[sender.Interface] {
+			continue
+		}
+		seen[sender.Interface] = true
+		source := sender.SrcAddr
+		if cfg := configuredRASource(allRA, sender.Interface); cfg != "" {
+			source = cfg
+		}
+		if isSharedStableRASource(source) {
+			names = append(names, sender.Interface)
+		}
+	}
+	for _, cfgRA := range allRA {
+		if cfgRA == nil || !ifaces[cfgRA.Interface] || seen[cfgRA.Interface] {
+			continue
+		}
+		if isSharedStableRASource(cfgRA.SourceLinkLocal) {
+			names = append(names, cfgRA.Interface)
+		}
+	}
+	return names
+}
+
 func clearRethRASendersWithoutGoodbye(clearer raScopedClearer, cfg *config.Config, rgID int) error {
 	if clearer == nil || cfg == nil || cfg.Chassis.Cluster == nil {
 		return nil
@@ -2012,14 +2056,8 @@ func clearRethRASendersWithoutGoodbye(clearer raScopedClearer, cfg *config.Confi
 	for _, name := range rgIfaces {
 		rgIfaceSet[name] = true
 	}
-	var names []string
-	for _, sender := range clearer.Status() {
-		if sender.State == "active" &&
-			rgIfaceSet[sender.Interface] &&
-			isSharedStableRASource(sender.SrcAddr) {
-			names = append(names, sender.Interface)
-		}
-	}
+	d := &Daemon{}
+	names := sharedStableRAInterfaces(rgIfaceSet, clearer.Status(), d.buildRAConfigs(cfg))
 	if len(names) == 0 {
 		return nil
 	}

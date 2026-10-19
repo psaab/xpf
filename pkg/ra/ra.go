@@ -1422,10 +1422,23 @@ func (m *Manager) Status() []SenderInfo {
 	}
 
 	// Surface draining interfaces so a withdrawing router is not silently
-	// invisible (it is no longer "active" but not yet gone).
+	// invisible (it is no longer "active" but not yet gone). Report the
+	// sender's bound source when known, else the configured source, so an
+	// unopened shared-identity sender (conn never opened, SrcAddr empty) is
+	// still recognisable to the cluster silent-stop check (D34-01).
 	for name, e := range m.draining {
+		src := ""
+		if e.sender != nil {
+			if a := e.sender.getSrcAddr(); a.IsValid() {
+				src = a.String()
+			}
+		}
+		if src == "" && e.cfg != nil {
+			src = e.cfg.SourceLinkLocal
+		}
 		result = append(result, SenderInfo{
 			Interface:    name,
+			SrcAddr:      src,
 			State:        "draining",
 			LastRA:       "n/a",
 			JoinTimedOut: e.joinTimedOut,
