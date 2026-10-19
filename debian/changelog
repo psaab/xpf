@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Capture SIGHUP in xpfd as an explicitly ignored, logged no-op
+    instead of letting the default disposition terminate the daemon
+    with no shutdown sequence (no HA fence, no rg_active clear, no
+    RA goodbye): systemd scored a SIGHUP death as a clean exit, so
+    Restart=on-failure never revived the firewall after a stray
+    `systemctl kill -s HUP xpfd`. SIGHUP stays out of the shutdown
+    signal set (an exit-0 stop would still score clean); as defence
+    in depth the shipped unit now also declares
+    RestartForceExitStatus=SIGHUP SIGPIPE so any HUP death is
+    restarted. There is no reload-on-HUP; use commit (#15084).
   * Retain the apply-time rebuilt derived sections on partial
     userspace snapshot republishes. The scheduler, deferred-worker-arm
     and status-tick republishes wrote back only Interfaces after

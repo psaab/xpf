@@ -89,6 +89,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// `ctx` is reassigned to this signal context and carries through every later
 	// phase, the apply-cancel context, and the main wait exactly as the old
 	// PHASE 4 install did.
+	// #15084: capture SIGHUP as an ignored no-op alongside the shutdown
+	// set. Nothing else in the process notified or ignored SIGHUP, so the
+	// default action killed xpfd with no shutdown sequence and systemd
+	// scored the death clean (no Restart=on-failure revival). Installed
+	// at the same TOP-of-Run point so a HUP during startup is inert too.
+	// Stopped on every Run return via this defer; runShutdownSequence's
+	// own stop() below only releases the shutdown-signal context.
+	stopSIGHUP := ignoreSIGHUP()
+	defer stopSIGHUP()
 	ctx, stop := startupSignalContext(ctx)
 	defer stop()
 
@@ -1016,20 +1025,77 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return d.runShutdownSequence(&wg, stop, runErr)
 }
 
+// daemonSignals is the shutdown-signal set startupSignalContext captures
+// (#15084). It is a named seam so a test can pin the exact set without
+// delivering a real OS signal: daemon (non-interactive) mode captures
+// SIGTERM and SIGINT; interactive mode captures only SIGTERM so the CLI
+// keeps SIGINT for Ctrl-C command cancellation.
+func daemonSignals(interactive bool) []os.Signal {
+	if interactive {
+		return []os.Signal{syscall.SIGTERM}
+	}
+	return []os.Signal{syscall.SIGTERM, syscall.SIGINT}
+}
+
+// ignoreSIGHUP installs an explicit no-op disposition for SIGHUP (#15084).
+//
+// SIGHUP has no reload semantics in xpfd: configuration changes go
+// through commit, and there is no ExecReload on the unit. Before this
+// capture nothing notified or ignored SIGHUP, so the process took the
+// default action — immediate termination with NO runShutdownSequence
+// (no HA fence, no rg_active clear, no priority-0 advert, no RA
+// goodbye) — and systemd counted the death as a clean exit, so the
+// unit's Restart=on-failure never restarted it: a stray
+// `systemctl kill -s HUP xpfd`, a closing controlling terminal, or any
+// other HUP sender took the firewall down indefinitely.
+//
+// The disposition is a channel capture, not signal.Ignore: while the
+// returned stop func is live, each SIGHUP is logged (so an operator
+// who sent one learns it did nothing and why) and then discarded; the
+// daemon keeps forwarding. The channel is buffered so a burst cannot
+// block the runtime's signal delivery. stop() restores the default
+// disposition (signal.Stop), matching the NotifyContext stop idiom.
+//
+// This runs in BOTH modes: an interactive session whose terminal goes
+// away must not kill the daemon out from under the operator either —
+// the CLI has its own SIGINT handling for that. The capture is
+// installed at the TOP of Run, before the mutating startup phases, for
+// the same reason #5807 captures the shutdown set there.
+func ignoreSIGHUP() (stop func()) {
+	sighupCh := make(chan os.Signal, 1)
+	signal.Notify(sighupCh, syscall.SIGHUP)
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-sighupCh:
+				slog.Warn("SIGHUP received and ignored: xpfd has no reload-on-HUP; use commit to apply configuration changes (#15084)")
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() {
+		signal.Stop(sighupCh)
+		close(done)
+	}
+}
+
 // startupSignalContext returns a child of parent that is cancelled when the
 // daemon receives a shutdown signal, captured at the TOP of Run so a signal
 // during the mutating startup phases aborts startup instead of the process
 // default-terminating (#5807). The signal set is mode-dependent and matches the
 // historical late install: interactive mode catches only SIGTERM so the CLI
 // keeps SIGINT for Ctrl-C command cancellation; daemon (non-interactive) mode
-// catches SIGTERM and SIGINT. Extracted as a named seam so a test can assert the
-// returned context is a cancellable child (not context.Background, whose Done()
-// is nil) without delivering a real OS signal.
+// catches SIGTERM and SIGINT. SIGHUP is deliberately NOT in this set: it is
+// captured separately as an ignored no-op (ignoreSIGHUP, #15084) rather than
+// treated as a shutdown, because systemd counts a SIGHUP death as a clean
+// exit and Restart=on-failure would never revive the node. Extracted as a
+// named seam so a test can assert the returned context is a cancellable child
+// (not context.Background, whose Done() is nil) without delivering a real OS
+// signal.
 func startupSignalContext(parent context.Context) (context.Context, context.CancelFunc) {
-	if isInteractive() {
-		return signal.NotifyContext(parent, syscall.SIGTERM)
-	}
-	return signal.NotifyContext(parent, syscall.SIGTERM, syscall.SIGINT)
+	return signal.NotifyContext(parent, daemonSignals(isInteractive())...)
 }
 
 // startupPhase is one ordered, MUTATING startup step run under the
