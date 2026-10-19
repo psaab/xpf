@@ -330,19 +330,32 @@ func (d *Daemon) reconcileProxyARP(cfg *config.Config) {
 
 }
 
-// proxyARPResponderTargets maps kernel netdev name -> Junos interface ref for
-// every interface with proxy-ARP configured, resolved but NOT ownership
-// filtered. Nil cfg yields an empty set, which stops every responder.
-func proxyARPResponderTargets(cfg *config.Config) map[string]string {
-	want := map[string]string{}
+// proxyARPResponderTargets maps kernel netdev name -> every Junos
+// interface ref that resolves to that netdev and has proxy-ARP
+// configured, resolved but NOT ownership filtered. Nil cfg yields an
+// empty set, which stops every responder.
+//
+// #15764: several refs can alias one netdev (reth0, reth0.0 and its
+// member ge-0/0/0 -> ge-0-0-0). The old map[string]string kept one
+// arbitrary winner from Go map iteration, so the responder looked up
+// only that ref's addresses: the other aliases' IPv4 pools went
+// unanswered, and when the winner carried only IPv6 (kernel-handled
+// proxy-NDP) the len(addrs)==0 branch cancelled a responder another
+// alias needed for IPv4. Carrying every ref, sorted for a
+// deterministic identity, lets the consumer union the pools instead.
+func proxyARPResponderTargets(cfg *config.Config) map[string][]string {
+	want := map[string][]string{}
 	if cfg == nil || len(cfg.Security.NAT.ProxyARP) == 0 {
 		return want
 	}
 	byJunos, names, _ := proxyARPIfaceMap(cfg)
 	for junosRef, idx := range byJunos {
 		if n := names[idx]; n != "" {
-			want[n] = junosRef
+			want[n] = append(want[n], junosRef)
 		}
+	}
+	for n := range want {
+		sort.Strings(want[n])
 	}
 	return want
 }
