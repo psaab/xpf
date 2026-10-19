@@ -214,6 +214,7 @@ func haRoutingRequirementsForRG(cfg *config.Config, rgID int) []haRoutingRequire
 			continue
 		}
 		addHAInterfaceName(cfg, ifaces, ifc.Name)
+		addHAInterfaceUnitNames(cfg, ifaces, ifc)
 		for _, unit := range ifc.Units {
 			if unit == nil {
 				continue
@@ -348,6 +349,26 @@ func addHAInterfaceName(cfg *config.Config, names map[string]struct{}, name stri
 		if candidate != "" {
 			names[candidate] = struct{}{}
 		}
+	}
+}
+
+// addHAInterfaceUnitNames registers every authored logical-unit ref of the
+// interface (name.<unit>) in the same RG set as the base name (#15060). A
+// VLAN-tagged unit resolves to <member>.<vlan-id> (e.g. reth0.80 ->
+// ge-0-0-2.80) while addHAInterfaceName registers only the base forms, so
+// without this expansion a unit ref misses the set and follows RG0 in the
+// #11415 FRR filter / is invisible to the #11377 readiness gate. Configured
+// unit numbers in Junos are the unit's identity; the configured ref and its
+// canonical resolution both belong to the owning RG.
+func addHAInterfaceUnitNames(cfg *config.Config, names map[string]struct{}, ifc *config.InterfaceConfig) {
+	if ifc == nil {
+		return
+	}
+	for unitNum, unit := range ifc.Units {
+		if unit == nil {
+			continue
+		}
+		addHAInterfaceName(cfg, names, fmt.Sprintf("%s.%d", ifc.Name, unitNum))
 	}
 }
 
