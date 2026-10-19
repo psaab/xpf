@@ -664,6 +664,9 @@ func userspacePinnedShimMaps() []string {
 		// validated config snapshot and preflighted as PinByName maps.
 		"userspace_wg_ingress_zones",
 		"userspace_wg_zone_admission",
+		// #15789: per-zone LAND screen disposition, rebuilt from each
+		// validated config snapshot like the WG zone maps above.
+		"userspace_land_screen",
 		"userspace_sessions",
 		"userspace_trace",
 		"userspace_fallback_stats",
