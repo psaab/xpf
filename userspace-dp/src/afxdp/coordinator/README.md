@@ -286,13 +286,20 @@ Differences that matter (#1881):
   no split-brain (validation ahead of a stale forwarding table), no
   deleted-neighbor blackhole, no `ok=true` on a rejected snapshot.
   Distinct from #2484 (full-apply teardown) and #2916 (queue replan).
-- **The dead-worker sweep reclaims NAT holder bits AND the CoS V_min slot
-  (#7092 / #6979 / #9367).** `retire_worker_holders_where` walks every worker
-  its predicate selects, under a one-shot `holders_retired` CAS, and is driven
-  from the 1 Hz `refresh_status` path. It reclaims the three NAT allocator
-  families for every worker the predicate selects and — since #9367 — calls
+- **The dead-worker sweep reclaims NAT holder bits, the CoS V_min slot, AND
+  the D11 IPsec-inner worker (#7092 / #6979 / #9367 / #15149).**
+  `retire_worker_holders_where` walks every worker its predicate selects,
+  under a one-shot `holders_retired` CAS, and is driven from the 1 Hz
+  `refresh_status` path. It reclaims the three NAT allocator families for
+  every worker the predicate selects and — since #9367 — calls
   `vacate_worker_v_min_slots` for those whose `atomics.dead` is set, releasing
-  the worker's slot in every `cos.queue_vtime_floors` entry. The `dead` gate
+  the worker's slot in every `cos.queue_vtime_floors` entry. Since #15149 the
+  same dead branch also calls
+  `IpsecInnerWorkerTransport::retire_worker(id)` then
+  `join_worker_after_termination(id)` (the thread has exited) and delivers
+  the reaped requests' terminal Deny verdicts to the completion core, so the
+  router stops hashing IPsec-inner flows to the dead worker and admitted
+  requests complete as Denied instead of by ack timeout. The `dead` gate
   keeps this repair limited to panicked workers. The teardown-wide
   `retire_all_worker_holders` sweep runs after `workers.stop_and_clear` has
   joined its workers; vacating non-dead slots during teardown remains

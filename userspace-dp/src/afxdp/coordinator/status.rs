@@ -1643,6 +1643,31 @@ impl super::Coordinator {
                     );
                 }
                 let vacated = self.vacate_worker_v_min_slots(id);
+                // #15149 (B12-01): the D11 IPsec-inner transport was never
+                // enrolled in this sweep. Without retire+join here the router
+                // keeps hashing flows to the dead worker, its 128-deep queue
+                // accepts admits nothing drains, then refuses them as
+                // WORKER_QUEUE_FULL, and requests already admitted complete
+                // only by Go ack timeout. The worker has exited (the `dead`
+                // gate above), so retire + join is the same quiescence
+                // witness the full-stop path in mod.rs uses. Reaped requests
+                // carry terminal Deny verdicts; deliver them to the
+                // Go-facing completion core now (fail closed).
+                let mut ipsec_inner_reaped = 0usize;
+                if let Some(slow) = self.slow_path.as_ref() {
+                    let transport = slow.ipsec_inner_transport();
+                    if let Some(reaped) = transport.retire_worker(id) {
+                        ipsec_inner_reaped += reaped;
+                    }
+                    ipsec_inner_reaped += transport.join_worker_after_termination(id);
+                    if ipsec_inner_reaped > 0 {
+                        let mut verdicts = Vec::new();
+                        transport.take_reaped_terminal_verdicts(&mut verdicts);
+                        for verdict in verdicts {
+                            let _ = slow.complete_ipsec_inner_verdict(verdict);
+                        }
+                    }
+                }
                 if worker_freed > 0 {
                     eprintln!(
                         "xpf-dp: reclaimed {worker_freed} NAT reservation(s) stranded by dead \
@@ -1653,6 +1678,12 @@ impl super::Coordinator {
                     eprintln!(
                         "xpf-dp: vacated {vacated} cross-worker CoS V_min slot(s) stranded by \
                          dead worker {id}"
+                    );
+                }
+                if ipsec_inner_reaped > 0 {
+                    eprintln!(
+                        "xpf-dp: retired dead worker {id} from IPsec-inner routing; \
+                         {ipsec_inner_reaped} request(s) completed as Denied (#15149)"
                     );
                 }
             }
