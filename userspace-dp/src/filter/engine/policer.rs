@@ -52,7 +52,14 @@ pub(crate) fn apply_cached_three_color_policers(
     let mut action = ThreeColorPolicerAction::default();
     policers.for_each(|policer| {
         let decision = policer.meter(now_ns, packet_bytes, PacketColor::Green);
-        action.dscp_rewrite = action.dscp_rewrite.or(decision.dscp_rewrite);
+        // #15793: latest matched term wins, mirroring the fresh/inline walks
+        // (`merge_matched_tx_modifiers` / `merge_matched_modifiers` assign
+        // per matched term). The previous `.or` kept the FIRST rewrite, so
+        // cached/deferred replay emitted a different DSCP than the first
+        // packet for multi-term policer filters.
+        if decision.dscp_rewrite.is_some() {
+            action.dscp_rewrite = decision.dscp_rewrite;
+        }
         action.drop |= decision.drop;
     });
     action
