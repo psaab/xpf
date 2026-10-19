@@ -14,12 +14,12 @@ package grpcapi
 import (
 	"fmt"
 	"net"
-	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/firewallshow"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"github.com/psaab/xpf/pkg/policymatch"
 )
@@ -76,12 +76,9 @@ func (s *Server) showFirewall(cfg *config.Config, buf *strings.Builder) {
 	// filters rather than printing clean-zero / omitted hit counts.
 	var readErr error
 	printFilters := func(family string, filters map[string]*config.FirewallFilter) {
-		names := make([]string, 0, len(filters))
-		for name := range filters {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
+		// #15173: same sorted / nil-safe / suppressed-clone-hidden name
+		// set as CLI and REST (shared firewallshow.SortedFilterNames).
+		for _, name := range firewallshow.SortedFilterNames(filters) {
 			filter := filters[name]
 			fmt.Fprintf(buf, "Filter: %s (family %s)\n", name, family)
 
@@ -101,68 +98,10 @@ func (s *Server) showFirewall(cfg *config.Config, buf *strings.Builder) {
 			ruleOffset := ruleStart
 
 			for _, term := range filter.Terms {
-				fmt.Fprintf(buf, "  Term: %s\n", term.Name)
-				for _, d := range term.DSCPs {
-					fmt.Fprintf(buf, "    from dscp %s\n", d)
+				if term == nil {
+					continue
 				}
-				for _, p := range term.Protocols {
-					fmt.Fprintf(buf, "    from protocol %s\n", p)
-				}
-				for _, addr := range term.SourceAddresses {
-					fmt.Fprintf(buf, "    from source-address %s\n", addr)
-				}
-				for _, pl := range term.SourcePrefixLists {
-					if pl.Except {
-						fmt.Fprintf(buf, "    from source-prefix-list %s except\n", pl.Name)
-					} else {
-						fmt.Fprintf(buf, "    from source-prefix-list %s\n", pl.Name)
-					}
-				}
-				for _, addr := range term.DestAddresses {
-					fmt.Fprintf(buf, "    from destination-address %s\n", addr)
-				}
-				for _, pl := range term.DestPrefixLists {
-					if pl.Except {
-						fmt.Fprintf(buf, "    from destination-prefix-list %s except\n", pl.Name)
-					} else {
-						fmt.Fprintf(buf, "    from destination-prefix-list %s\n", pl.Name)
-					}
-				}
-				if len(term.SourcePorts) > 0 {
-					fmt.Fprintf(buf, "    from source-port %s\n", strings.Join(term.SourcePorts, ", "))
-				}
-				if len(term.DestinationPorts) > 0 {
-					fmt.Fprintf(buf, "    from destination-port %s\n", strings.Join(term.DestinationPorts, ", "))
-				}
-				for _, t := range term.ICMPTypes {
-					fmt.Fprintf(buf, "    from icmp-type %d\n", t)
-				}
-				for _, c := range term.ICMPCodes {
-					fmt.Fprintf(buf, "    from icmp-code %d\n", c)
-				}
-				if term.RoutingInstance != "" {
-					fmt.Fprintf(buf, "    then routing-instance %s\n", term.RoutingInstance)
-				}
-				if term.Log {
-					buf.WriteString("    then log\n")
-				}
-				if term.Count != "" {
-					fmt.Fprintf(buf, "    then count %s\n", term.Count)
-				}
-				if term.ForwardingClass != "" {
-					fmt.Fprintf(buf, "    then forwarding-class %s\n", term.ForwardingClass)
-				}
-				if term.LossPriority != "" {
-					fmt.Fprintf(buf, "    then loss-priority %s\n", term.LossPriority)
-				}
-				if term.Policer != "" {
-					fmt.Fprintf(buf, "    then policer %s\n", term.Policer)
-				}
-				action := term.Action
-				if action == "" {
-					action = "accept"
-				}
-				fmt.Fprintf(buf, "    then %s\n", action)
+				firewallshow.WriteTerm(buf, term, false)
 
 				numRules := config.FilterTermExpansionCount(term, cfg.PolicyOptions.PrefixLists)
 				var totalPkts, totalBytes uint64
@@ -601,68 +540,10 @@ func (s *Server) showFirewallFilter(req *pb.ShowTextRequest, cfg *config.Config,
 			fmt.Fprintf(buf, "Filter: %s (family %s)\n", filterName, family)
 			ruleOffset := ruleStart
 			for _, term := range filter.Terms {
-				fmt.Fprintf(buf, "\n  Term: %s\n", term.Name)
-				for _, d := range term.DSCPs {
-					fmt.Fprintf(buf, "    from dscp %s\n", d)
+				if term == nil {
+					continue
 				}
-				for _, p := range term.Protocols {
-					fmt.Fprintf(buf, "    from protocol %s\n", p)
-				}
-				for _, addr := range term.SourceAddresses {
-					fmt.Fprintf(buf, "    from source-address %s\n", addr)
-				}
-				for _, pl := range term.SourcePrefixLists {
-					if pl.Except {
-						fmt.Fprintf(buf, "    from source-prefix-list %s except\n", pl.Name)
-					} else {
-						fmt.Fprintf(buf, "    from source-prefix-list %s\n", pl.Name)
-					}
-				}
-				for _, addr := range term.DestAddresses {
-					fmt.Fprintf(buf, "    from destination-address %s\n", addr)
-				}
-				for _, pl := range term.DestPrefixLists {
-					if pl.Except {
-						fmt.Fprintf(buf, "    from destination-prefix-list %s except\n", pl.Name)
-					} else {
-						fmt.Fprintf(buf, "    from destination-prefix-list %s\n", pl.Name)
-					}
-				}
-				if len(term.SourcePorts) > 0 {
-					fmt.Fprintf(buf, "    from source-port %s\n", strings.Join(term.SourcePorts, ", "))
-				}
-				if len(term.DestinationPorts) > 0 {
-					fmt.Fprintf(buf, "    from destination-port %s\n", strings.Join(term.DestinationPorts, ", "))
-				}
-				for _, t := range term.ICMPTypes {
-					fmt.Fprintf(buf, "    from icmp-type %d\n", t)
-				}
-				for _, c := range term.ICMPCodes {
-					fmt.Fprintf(buf, "    from icmp-code %d\n", c)
-				}
-				if term.RoutingInstance != "" {
-					fmt.Fprintf(buf, "    then routing-instance %s\n", term.RoutingInstance)
-				}
-				if term.ForwardingClass != "" {
-					fmt.Fprintf(buf, "    then forwarding-class %s\n", term.ForwardingClass)
-				}
-				if term.LossPriority != "" {
-					fmt.Fprintf(buf, "    then loss-priority %s\n", term.LossPriority)
-				}
-				if term.Log {
-					buf.WriteString("    then log\n")
-				}
-				if term.Count != "" {
-					fmt.Fprintf(buf, "    then count %s\n", term.Count)
-				}
-				if term.Policer != "" {
-					fmt.Fprintf(buf, "    then policer %s\n", term.Policer)
-				}
-				action := term.Action
-				if action == "" {
-					action = "accept"
-				}
-				fmt.Fprintf(buf, "    then %s\n", action)
+				firewallshow.WriteTerm(buf, term, true)
 				numRules := config.FilterTermExpansionCount(term, cfg.PolicyOptions.PrefixLists)
 				var totalPkts, totalBytes uint64
 				if hasCounters {

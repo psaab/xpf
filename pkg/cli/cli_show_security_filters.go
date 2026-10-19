@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/firewallshow"
 )
 
 func (c *CLI) showFirewallFilters() error {
@@ -59,68 +59,9 @@ func (c *CLI) showFirewallFilters() error {
 
 			ruleOffset := ruleStart
 			for _, term := range f.Terms {
-				fmt.Printf("  Term: %s\n", term.Name)
-				for _, d := range term.DSCPs {
-					fmt.Printf("    from dscp %s\n", d)
-				}
-				for _, p := range term.Protocols {
-					fmt.Printf("    from protocol %s\n", p)
-				}
-				for _, addr := range term.SourceAddresses {
-					fmt.Printf("    from source-address %s\n", addr)
-				}
-				for _, addr := range term.DestAddresses {
-					fmt.Printf("    from destination-address %s\n", addr)
-				}
-				for _, port := range term.DestinationPorts {
-					fmt.Printf("    from destination-port %s\n", port)
-				}
-				for _, port := range term.SourcePorts {
-					fmt.Printf("    from source-port %s\n", port)
-				}
-				for _, ref := range term.SourcePrefixLists {
-					mod := ""
-					if ref.Except {
-						mod = " except"
-					}
-					fmt.Printf("    from source-prefix-list %s%s\n", ref.Name, mod)
-				}
-				for _, ref := range term.DestPrefixLists {
-					mod := ""
-					if ref.Except {
-						mod = " except"
-					}
-					fmt.Printf("    from destination-prefix-list %s%s\n", ref.Name, mod)
-				}
-				for _, t := range term.ICMPTypes {
-					fmt.Printf("    from icmp-type %d\n", t)
-				}
-				for _, c := range term.ICMPCodes {
-					fmt.Printf("    from icmp-code %d\n", c)
-				}
-				action := term.Action
-				if action == "" {
-					action = "accept"
-				}
-				if term.RoutingInstance != "" {
-					fmt.Printf("    then routing-instance %s\n", term.RoutingInstance)
-				}
-				if term.ForwardingClass != "" {
-					fmt.Printf("    then forwarding-class %s\n", term.ForwardingClass)
-				}
-				if term.LossPriority != "" {
-					fmt.Printf("    then loss-priority %s\n", term.LossPriority)
-				}
-				if term.DSCPRewrite != "" {
-					fmt.Print(filterDSCPRewriteLine(term.DSCPRewrite))
-				}
-				if term.Log {
-					fmt.Printf("    then log\n")
-				}
-				if term.Count != "" {
-					fmt.Printf("    then count %s\n", term.Count)
-				}
-				fmt.Printf("    then %s\n", action)
+				var tb strings.Builder
+				firewallshow.WriteTerm(&tb, term, false)
+				fmt.Print(tb.String())
 
 				// Sum counters across all expanded BPF rules for this term.
 				// Stride comes from the shared SSOT (#3459) so CLI, gRPC, and
@@ -251,68 +192,9 @@ func (c *CLI) showFirewallFilter(name, requestedFamily string) error {
 
 	ruleOffset := ruleStart
 	for _, term := range filter.Terms {
-		fmt.Printf("\n  Term: %s\n", term.Name)
-		for _, d := range term.DSCPs {
-			fmt.Printf("    from dscp %s\n", d)
-		}
-		for _, p := range term.Protocols {
-			fmt.Printf("    from protocol %s\n", p)
-		}
-		for _, addr := range term.SourceAddresses {
-			fmt.Printf("    from source-address %s\n", addr)
-		}
-		for _, ref := range term.SourcePrefixLists {
-			mod := ""
-			if ref.Except {
-				mod = " except"
-			}
-			fmt.Printf("    from source-prefix-list %s%s\n", ref.Name, mod)
-		}
-		for _, addr := range term.DestAddresses {
-			fmt.Printf("    from destination-address %s\n", addr)
-		}
-		for _, ref := range term.DestPrefixLists {
-			mod := ""
-			if ref.Except {
-				mod = " except"
-			}
-			fmt.Printf("    from destination-prefix-list %s%s\n", ref.Name, mod)
-		}
-		if len(term.SourcePorts) > 0 {
-			fmt.Printf("    from source-port %s\n", strings.Join(term.SourcePorts, ", "))
-		}
-		if len(term.DestinationPorts) > 0 {
-			fmt.Printf("    from destination-port %s\n", strings.Join(term.DestinationPorts, ", "))
-		}
-		for _, t := range term.ICMPTypes {
-			fmt.Printf("    from icmp-type %d\n", t)
-		}
-		for _, c := range term.ICMPCodes {
-			fmt.Printf("    from icmp-code %d\n", c)
-		}
-		if term.RoutingInstance != "" {
-			fmt.Printf("    then routing-instance %s\n", term.RoutingInstance)
-		}
-		if term.ForwardingClass != "" {
-			fmt.Printf("    then forwarding-class %s\n", term.ForwardingClass)
-		}
-		if term.LossPriority != "" {
-			fmt.Printf("    then loss-priority %s\n", term.LossPriority)
-		}
-		if term.DSCPRewrite != "" {
-			fmt.Print(filterDSCPRewriteLine(term.DSCPRewrite))
-		}
-		if term.Log {
-			fmt.Printf("    then log\n")
-		}
-		if term.Count != "" {
-			fmt.Printf("    then count %s\n", term.Count)
-		}
-		action := term.Action
-		if action == "" {
-			action = "accept"
-		}
-		fmt.Printf("    then %s\n", action)
+		var tb strings.Builder
+		firewallshow.WriteTerm(&tb, term, true)
+		fmt.Print(tb.String())
 
 		// Sum counters across all expanded BPF rules for this term
 		numRules := config.FilterTermExpansionCount(term, cfg.PolicyOptions.PrefixLists)
@@ -558,32 +440,4 @@ func (c *CLI) printFirewallEffectiveBanner() {
 		fmt.Println("  Desired: active configuration (not acknowledged).")
 		fmt.Println()
 	}
-}
-
-// filterDSCPRewriteLine renders one `then dscp` / `then traffic-class` line for
-// `show firewall`, annotating a rewrite the dataplane does NOT install.
-//
-// #6565 row 8 / #7422: the snapshot builder DROPS an unresolvable rewrite
-// (pkg/dataplane/userspace/filters.go — "CoS marking lost — the term still
-// matches and acts") while both call sites printed it unconditionally, so
-// `show firewall` reported a marking the dataplane was not applying. The
-// commit gate (config.validateFilterDSCPStrict, #3309) hard-rejects such a
-// token, but the tolerant load / cluster config-sync path (#1960 no-brick)
-// downgrades that to a warning and the config goes ACTIVE — which is the state
-// this renderer is reached in.
-//
-// Annotate rather than hide: the operator authored the line and needs to see
-// BOTH that it is configured and that it is not installed. Hiding it would
-// make `show firewall` disagree with `show configuration`.
-//
-// EXTRACTED from the two call sites so the guard has a subject: two renderers
-// of one field drift exactly the way the renderer and the builder did, and a
-// test that could only reach one of them would certify the other.
-func filterDSCPRewriteLine(rewrite string) string {
-	if _, ok := dataplane.ResolveFilterDSCP(rewrite); ok {
-		return fmt.Sprintf("    then dscp %s\n", rewrite)
-	}
-	return fmt.Sprintf("    then dscp %s  [NOT INSTALLED: unresolvable dscp/"+
-		"traffic-class value — no CoS marking is applied; the term still "+
-		"matches and acts]\n", rewrite)
 }

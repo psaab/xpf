@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/firewallshow"
 	"github.com/psaab/xpf/pkg/natshow"
 	"github.com/psaab/xpf/pkg/scheduler"
 )
@@ -173,52 +174,10 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case "firewall":
-		hasFilters := cfg != nil && (len(cfg.Firewall.FiltersInet) > 0 || len(cfg.Firewall.FiltersInet6) > 0)
-		if !hasFilters {
-			buf.WriteString("No firewall filters configured\n")
-		} else {
-			printFilters := func(family string, filters map[string]*config.FirewallFilter) {
-				for _, name := range sortedKeys(filters) {
-					filter := filters[name]
-					if filter == nil {
-						// #10439: tolerate present-but-nil slots from lenient
-						// restore/peer-sync loads.
-						continue
-					}
-					if source, _ := filter.SuppressedMemberFBF11321(); source != "" {
-						// Keep internal #11589 clones out of the authored-config view.
-						continue
-					}
-					fmt.Fprintf(&buf, "Filter: %s (family: %s)\n", name, family)
-					for _, term := range filter.Terms {
-						if term == nil {
-							// #10439: tolerate present-but-nil terms from
-							// lenient restore/peer-sync loads.
-							continue
-						}
-						fmt.Fprintf(&buf, "  Term: %s\n", term.Name)
-						if len(term.Protocols) > 0 {
-							fmt.Fprintf(&buf, "    From protocol: %s\n", strings.Join(term.Protocols, ", "))
-						}
-						if len(term.DestinationPorts) > 0 {
-							fmt.Fprintf(&buf, "    From destination-port: %s\n", strings.Join(term.DestinationPorts, ", "))
-						}
-						if len(term.SourceAddresses) > 0 {
-							fmt.Fprintf(&buf, "    From source-address: %s\n", strings.Join(term.SourceAddresses, ", "))
-						}
-						if len(term.DSCPs) > 0 {
-							fmt.Fprintf(&buf, "    From dscp: %s\n", strings.Join(term.DSCPs, ", "))
-						}
-						if term.Action != "" {
-							fmt.Fprintf(&buf, "    Then: %s\n", term.Action)
-						}
-					}
-					buf.WriteString("\n")
-				}
-			}
-			printFilters("inet", cfg.Firewall.FiltersInet)
-			printFilters("inet6", cfg.Firewall.FiltersInet6)
-		}
+		// #15173: render through the shared raw term renderer so REST is
+		// byte-equal to the gRPC `show firewall` view (same sorted names,
+		// suppressed-clone hiding, and per-field term lines).
+		firewallshow.WriteAllFilters(&buf, cfg)
 
 	case "alg":
 		if cfg == nil {
