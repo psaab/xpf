@@ -321,23 +321,27 @@ func TestEmptiedImportChainDeniesRatherThanPermits7625(t *testing.T) {
 	}
 }
 
-// THE TRAP, as a negative control. A BGP `export` list may name bare PROTOCOL
-// tokens (`static`, `direct`), which are not policy-statements and are excluded
-// from the policy chain on purpose: they render as `redistribute <proto>` on a
-// separate path. Such a list also filters to EMPTY, but it is not an emptied
-// FILTER — the operator asked to advertise those routes, not to drop
-// everything. Attaching a deny here would withdraw every route to the peer.
+// THE TRAP, as a negative control. The GLOBAL `protocols bgp export` list may
+// name bare PROTOCOL tokens (`static`, `direct`), which are not
+// policy-statements and are excluded from the policy chain on purpose: they
+// render as `redistribute <proto>` on a separate router-global path. Such a
+// list also filters to EMPTY, but it is not an emptied FILTER — the operator
+// asked to advertise those routes, not to drop everything. Attaching a deny
+// here would withdraw every route to the peer. A NEIGHBOUR's own export list
+// has no redistribute rendering, so the same token there is a ghost and DOES
+// deny (#15159, policy_chain_neighbor_protocol_token_15159_test.go).
 //
 // This cell fails if the fix keys on "the filtered chain is empty" instead of
-// "every authored member is a genuine ghost".
+// "every authored member is a genuine ghost at this scope".
 func TestEmptiedExportChainOfBareProtocolTokensGetsNoDeny7625(t *testing.T) {
 	po := policyOptions7625("REAL")
 	fc := &FullConfig{
 		PolicyOptions: po,
 		BGP: &config.BGPConfig{
 			LocalAS: 65001, RouterID: "1.1.1.1",
+			Export: []string{"static"},
 			Neighbors: []*config.BGPNeighbor{
-				{Address: "10.0.2.3", PeerAS: 65004, FamilyInet: true, Export: []string{"static"}},
+				{Address: "10.0.2.3", PeerAS: 65004, FamilyInet: true},
 			},
 		},
 	}
@@ -352,7 +356,7 @@ func TestEmptiedExportChainOfBareProtocolTokensGetsNoDeny7625(t *testing.T) {
 		t.Fatalf("fixture premise broken: the export chain did not filter to empty, got %v", kept)
 	}
 	if refs := neighborRouteMapRefs7625(section, "10.0.2.3", "out"); len(refs) != 0 {
-		t.Errorf("a bare-protocol export list must not attach a deny (it would withdraw "+
+		t.Errorf("a global bare-protocol export list must not attach a deny (it would withdraw "+
 			"every route to the peer); got %v:\n%s", refs, section)
 	}
 }

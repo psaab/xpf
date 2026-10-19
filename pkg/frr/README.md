@@ -661,12 +661,17 @@ property holds **by construction** rather than by the reference being dropped.
 The name is quarantine-counted, so it shows up in
 `xpf_frr_route_maps_quarantined` like the oversized cases.
 
-**The direction asymmetry is real.** A bare protocol token (`static`, `direct`)
-in an `export` list means `redistribute <proto>` on a separate path, so such a
-list also filters to empty — but attaching a deny there would withdraw every
-route to the peer, a worse outage than the bug. On **import** there is no
-redistribute construct, so the same token is just a name that resolves to
-nothing and must deny. The exclusion is therefore export-only.
+**The scope asymmetry is real (#15159).** A bare protocol token (`static`,
+`direct`) in the GLOBAL `protocols bgp export` list means
+`redistribute <proto>` on a separate router-global path, so such a list also
+filters to empty — but attaching a deny there would withdraw every route to
+the peer, a worse outage than the bug. At group/neighbour scope there is no
+redistribute rendering from the neighbour's own list, and on import there is
+no redistribute construct at all, so the same token is just a name that
+resolves to nothing and must deny. The exclusion is therefore
+global-export-only: a neighbour-level token previously escaped the deny,
+suppressed the global export chain, and left the peer with no outbound
+route-map at all.
 
 **Narrowed chains close their permit fall-off without deleting survivors
 (#8363/#10129/#10821).** Filtering an undefined policy member out of a BGP chain

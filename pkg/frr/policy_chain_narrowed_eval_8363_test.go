@@ -197,6 +197,7 @@ func TestNarrowedChainSitesReportsOnlyRealNarrowing8363(t *testing.T) {
 	}
 	bgp := &config.BGPConfig{
 		LocalAS: 65001, RouterID: "1.1.1.1",
+		Export: []string{"REAL", "static"},
 		Neighbors: []*config.BGPNeighbor{
 			// NARROWED — the one site that must be reported.
 			{Address: "10.0.2.1", PeerAS: 65002, FamilyInet: true, Import: []string{"REAL", "GHOST"}},
@@ -205,9 +206,11 @@ func TestNarrowedChainSitesReportsOnlyRealNarrowing8363(t *testing.T) {
 			// EMPTIED — already reported by the #7625 deny path; reporting it
 			// here too would describe one config error twice.
 			{Address: "10.0.2.3", PeerAS: 65004, FamilyInet: true, Import: []string{"GHOST"}},
-			// EXPORT with a bare protocol token — `static` is a redistribute
-			// verb, not a failed policy reference, so this chain lost nothing.
-			{Address: "10.0.2.4", PeerAS: 65005, FamilyInet: true, Export: []string{"REAL", "static"}},
+			// GLOBAL EXPORT with a bare protocol token — `static` is a
+			// redistribute verb in the global `protocols bgp export` list,
+			// not a failed policy reference, so this chain lost nothing.
+			// (A neighbour's OWN export token is a ghost instead, #15159.)
+			{Address: "10.0.2.4", PeerAS: 65005, FamilyInet: true},
 		},
 	}
 	got := narrowedWhere8363(narrowedChainSites(bgp, po))

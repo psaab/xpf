@@ -68,27 +68,42 @@ import (
 // case.
 const emptiedChainDenyName = "xpf-emptied-chain" + ReservedChainSuffix
 
+// isProtocolToken7625 reports whether n is a bare protocol token (`static`,
+// `direct`, ...) — the Junos spelling `direct` counts via its FRR
+// normalisation (#2144).
+func isProtocolToken7625(n string) bool {
+	return knownRedistProtocol(n) || knownRedistProtocol(junosProtocolToFRR7625(n))
+}
+
 // chainEmptiedByUndefinedPolicies reports whether authored is a non-empty policy
 // chain whose every member is a GENUINE GHOST — a name that resolves to nothing
 // at all.
 //
-// protocolTokensAreRedistribute selects the DIRECTION's semantics, and the
+// protocolTokensAreRedistribute selects the SCOPE's semantics, and the
 // asymmetry is real rather than defensive:
 //
-//   - EXPORT (true). A BGP `export` list may name bare protocols (`static`,
-//     `direct`). They are excluded from the policy chain on purpose because they
-//     render as `redistribute <proto>` on a separate path (#2473/#2490). Such a
-//     list also filters to empty, but it is not an emptied FILTER: the operator
-//     asked to advertise those routes. Attaching a deny there would withdraw
-//     every route to the peer — a worse outage than the bug. Keying on "the
-//     filtered chain is empty" would do exactly that.
+//   - GLOBAL EXPORT (true). The global `protocols bgp export` list may name
+//     bare protocols (`static`, `direct`). They are excluded from the policy
+//     chain on purpose because they render as `redistribute <proto>` from
+//     bgp.Export on a separate, router-global path (#2473/#2490,
+//     protocols_render.go). Such a list also filters to empty, but it is not
+//     an emptied FILTER: the operator asked to advertise those routes.
+//     Attaching a deny there would withdraw every route to the peer — a worse
+//     outage than the bug. Keying on "the filtered chain is empty" would do
+//     exactly that.
 //
-//   - IMPORT (false). Inbound has NO redistribute equivalent, so a bare protocol
-//     token is not a protocol reference at all — it renders as a route-map name
-//     and resolves to nothing. The strict commit path rejects it for exactly
-//     that reason (config.TestBGPNeighborImportProtocolTokenRejected), so it can
-//     only arrive here leniently — and when it does it is a ghost like any
-//     other, and the direction must deny rather than fall open.
+//   - NEIGHBOUR EXPORT and IMPORT (false). There is NO redistribute rendering
+//     from a neighbour's own list: a bare protocol token there renders as a
+//     route-map name and resolves to nothing (#15159). Import has no
+//     redistribute construct at all. The strict commit path rejects the token
+//     at both scopes for exactly that reason
+//     (config.TestBGPNeighborExportProtocolTokenRejected /
+//     TestBGPNeighborImportProtocolTokenRejected), so it can only arrive here
+//     leniently — and when it does it is a ghost like any other, and the
+//     direction must deny rather than fall open. Treating it as redistribute
+//     at neighbour scope also suppressed the global export chain (the own
+//     entry wins) while emitting no neighbour route-map, leaving the peer
+//     with no outbound route-map at all.
 func chainEmptiedByUndefinedPolicies(authored []string, po *config.PolicyOptionsConfig, protocolTokensAreRedistribute bool) bool {
 	sawGhost := false
 	for _, n := range authored {
@@ -99,8 +114,7 @@ func chainEmptiedByUndefinedPolicies(authored []string, po *config.PolicyOptions
 			// Not emptied — this member survives and renders normally.
 			return false
 		}
-		if protocolTokensAreRedistribute &&
-			(knownRedistProtocol(n) || knownRedistProtocol(junosProtocolToFRR7625(n))) {
+		if protocolTokensAreRedistribute && isProtocolToken7625(n) {
 			// Redistribute meaning, not a failed filter.
 			return false
 		}
@@ -160,12 +174,23 @@ func bgpNeighborAuthoredImport(n *config.BGPNeighbor, bgp *config.BGPConfig) []s
 	return bgp.Import
 }
 
+// bgpNeighborAuthoredIsGlobal reports whether the neighbour's authored chain
+// is INHERITED from the global `protocols bgp` list (the neighbour has no own
+// entry) rather than its own group/neighbour-level list. Only the inherited
+// list carries the redistribute meaning of a bare protocol token (#15159):
+// the token is rendered from bgp.Export on the router-global path, and the
+// neighbour simply shares the resulting chain.
+func bgpNeighborAuthoredIsGlobal(own []string) bool {
+	return !hasNonEmptyPolicy(own)
+}
+
 // bgpNeighborExportRef / bgpNeighborImportRef are what the four neighbor render
 // sites call: the effective route-map name for the attachment, "" for none.
 func bgpNeighborExportRef(n *config.BGPNeighbor, bgp *config.BGPConfig, globalExportChain []string, po *config.PolicyOptionsConfig) string {
 	return bgpChainRefOrEmptiedDeny(
 		bgpNeighborAuthoredExport(n, bgp),
-		bgpNeighborExportChain(n, globalExportChain, po), po, true)
+		bgpNeighborExportChain(n, globalExportChain, po), po,
+		bgpNeighborAuthoredIsGlobal(n.Export))
 }
 
 func bgpNeighborImportRef(n *config.BGPNeighbor, bgp *config.BGPConfig, globalImportChain []string, po *config.PolicyOptionsConfig) string {
