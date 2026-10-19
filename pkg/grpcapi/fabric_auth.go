@@ -52,8 +52,12 @@ import (
 //   - Local key + valid token: accept, and record that the peer holds the key.
 //   - Local key + present-but-invalid token: reject (Unauthenticated).
 //   - Local key + no token + enforcement NOT armed: accept read-only fabric
-//     RPCs only during a five-minute rollout grace starting at the config
-//     apply that first installs an accepted key; after expiry, reject them.
+//     RPCs only during a five-minute rollout grace starting at the FIRST
+//     keying of the current accepted-key set; after expiry, reject them.
+//     #15262: that first-keyed instant is persisted in node state
+//     (cluster/fabric_auth_grace.go) and restored on restart under an
+//     unchanged key set, so an xpfd restart does NOT re-open the grace;
+//     only a changed key set (a genuinely new key) re-anchors it.
 //   - Local key + no token + enforcement armed: reject — a downgrade to
 //     tokenless once both nodes are keyed is an attack.
 //

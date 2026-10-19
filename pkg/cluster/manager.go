@@ -472,7 +472,15 @@ type Manager struct {
 	controlAuthKeyAlt []byte
 	// controlAuthKeyConfiguredAt records the keyed transition time used by
 	// fabric's bounded rollout grace. Zero means no accepted key is set.
+	// #15262: it is anchored to the FIRST keying of the current accepted-key
+	// set (see controlAuthKeySetDigest / fabric_auth_grace.go) and restored
+	// from durable node state on a restart under an unchanged key, so a
+	// daemon restart does not re-open the grace.
 	controlAuthKeyConfiguredAt time.Time
+	// controlAuthKeySetDigest is the digest of the accepted-key set that
+	// controlAuthKeyConfiguredAt was anchored for (#15262). A different set
+	// (new/rotated key) re-anchors; the identical set does not.
+	controlAuthKeySetDigest string
 
 	// peerControlKeyID is the #6630 id of the accepted key that last verified
 	// a peer control frame — the running-system evidence that makes
@@ -957,9 +965,10 @@ func (m *Manager) ControlLinkAuthKey() []byte {
 	return m.controlLinkAuthKey()
 }
 
-// ControlLinkAuthKeyConfiguredAt reports the most recent transition from no
-// accepted control-link key to at least one accepted key. It is zero while
-// the accepted-key set is empty.
+// ControlLinkAuthKeyConfiguredAt reports when the current accepted
+// control-link key set was FIRST keyed (#15262: restored from durable
+// node state across restarts under an unchanged set; see
+// fabric_auth_grace.go). It is zero while the accepted-key set is empty.
 func (m *Manager) ControlLinkAuthKeyConfiguredAt() time.Time {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

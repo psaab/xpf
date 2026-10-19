@@ -70,14 +70,20 @@ Session/recon RPCs, `ClearSessions`, `MonitorInterface` and cross-node failover
 are rejected as `Unauthenticated` until a PSK is committed. Missing a key is an
 indefinite configuration state, not a rollout grace.
 
-**Keyed fabric rollout grace (#11487, #11676).** A configured key retains
+**Keyed fabric rollout grace (#11487, #11676, #15262).** A configured key retains
 tokenless access only for read-only peer RPCs during a five-minute grace
-starting at the unkeyed-to-keyed config apply while neither fabric nor
+starting at the FIRST keying of the current accepted-key set while neither fabric nor
 heartbeat auth has armed enforcement. After expiry, tokenless read-only calls
 are rejected too. `show system alarms` reports the unarmed condition as a
 warning during grace and a critical alarm after expiry. `ClearSessions` and the
 admitted `SystemAction` verbs (cross-node failover and persistent-NAT clear)
-require a valid token even before peer-auth enforcement is armed.
+require a valid token even before peer-auth enforcement is armed. #15262: the
+first-keyed instant is persisted per accepted-key-set digest in
+`/var/lib/xpf/fabric-auth-grace` (`pkg/cluster/fabric_auth_grace.go`) and
+restored across xpfd restarts, so a restart under an unchanged key no longer
+re-opens the grace; a changed key set re-anchors and gets a fresh grace. A
+missing/corrupt record or a failed persist falls back to anchoring at that
+apply (with a warning) — the residual is a wiped `/var/lib/xpf`.
 
 **Forwarded failover proxy budget (#15081).** `proxyPeerSystemAction` keeps
 the historical 5s deadline for ordinary forwarded actions, but a forwarded
