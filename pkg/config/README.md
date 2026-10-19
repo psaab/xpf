@@ -1357,6 +1357,16 @@ that `compilePolicy` ignored while setting the flag. The same
 rejects naming the leaf and operand, tolerant warns and poisons via
 `LenientContentDropped`. A bare modifier with no operand stays valid.
 
+`match application-excluded` is likewise an unsupported negation flag
+(#15662): it is registered in the policy `match` schemas (so flat-set
+`SetPath` stops `application`'s `multi: true` consumption at it and
+`SchemaValidate` recognizes it) and in `unsupportedPolicyMatchLeaves`, so
+both the standalone leaf and a token collapsed onto `application`'s tail
+are rejected under `#3113` naming `application-excluded` on strict commit
+(not misdiagnosed as an undefined application under #3144) and warned plus
+poisoned via `LenientContentDropped` on tolerant load.
+
+
 
 **Unsupported security-policy `then permit` children are rejected at commit
 (#3114, interim):** Junos SRX `then permit` accepts action modifiers that turn a

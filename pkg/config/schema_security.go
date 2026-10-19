@@ -410,6 +410,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 					"destination-address":          {desc: "Destination address", args: 1, multi: true, valueHint: ValueHintPolicyAddress, placeholder: "<address>", children: nil},
 					"source-address-excluded":      {desc: "Match all sources except source-address", children: nil},
 					"destination-address-excluded": {desc: "Match all destinations except destination-address", children: nil},
+					"application-excluded":         {desc: "Negate application match", children: nil},
 					"application":                  {desc: "Application", args: 1, multi: true, valueHint: ValueHintPolicyApp, placeholder: "<application>", children: nil},
 				}},
 				"then": {desc: "Action", children: policyThenSchemaChildren()},
@@ -441,6 +442,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 					"destination-address":          {desc: "Destination address", args: 1, multi: true, valueHint: ValueHintPolicyAddress, placeholder: "<address>", children: nil},
 					"source-address-excluded":      {desc: "Match all sources except source-address", children: nil},
 					"destination-address-excluded": {desc: "Match all destinations except destination-address", children: nil},
+					"application-excluded":         {desc: "Negate application match", children: nil},
 					"application":                  {desc: "Application", args: 1, multi: true, valueHint: ValueHintPolicyApp, placeholder: "<application>", children: nil},
 					// #3148: a Junos global policy can carry optional
 					// from-zone/to-zone match context so one global policy

@@ -675,7 +675,7 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// #12825 adds `security policy-stats system-wide` to this class after its
 	// accepted value began warning as ignored; the member registry records it.
 	// #12937 measures this population at 45.
-	gateBlindAdvisory: 49, // #15046: +2 Junos track interface priority-cost (inet/inet6), same advisory class as track-interface priority-cost. #15199: +2 for the vrrp-inet6-group alias track rows.
+	gateBlindAdvisory: 51, // #15046: +2 Junos track interface priority-cost (inet/inet6), same advisory class as track-interface priority-cost. #15199: +2 for the vrrp-inet6-group alias track rows. #15662: +2 for security policies match application-excluded (zone-pair + global); read as unsupported-leaf warning, value ignored.
 	// #7132 raised this 175 -> 176 for `system ntp server ... prefer`.
 	//
 	// Raised deliberately, and it is the one kind of raise that is not a
