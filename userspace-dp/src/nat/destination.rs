@@ -301,6 +301,16 @@ pub(crate) struct DnatTable {
     /// IP is matched by prefix containment (longest-prefix-match) within each
     /// slot vec.
     prefix_entries: FxHashMap<DnatProtoPortKey, Vec<DnatPrefixSlot>>,
+    /// #15116 (A77-01): per-destination secondary index over `entries` for
+    /// the flowless possibility probes: `(protocol, dst_port, index-within-
+    /// entries-vec)` per destination, rebuilt wholesale at the end of
+    /// `from_snapshots` (the only constructor) so it cannot drift.
+    entries_by_dst: FxHashMap<IpAddr, Vec<(u16, u16, usize)>>,
+    /// #15116: prefix slots grouped by address family for the same probes;
+    /// prefix count is operator-bounded and unrelated to host-rule count,
+    /// so scanning one family's slots no longer walks unrelated host rules.
+    /// `(key, index-within-prefix_entries-vec)` per family (false=v4).
+    prefix_slots_by_family: [Vec<(DnatProtoPortKey, usize)>; 2],
 }
 
 /// #3164: a classified DNAT destination — a host (exact-map key) or a non-host
@@ -440,7 +450,9 @@ impl DnatTable {
                 (None, _) => true,
                 (Some(want_type), Some((got_type, got_code))) => {
                     got_type == want_type
-                        && entry.match_icmp_code.is_none_or(|want_code| want_code == got_code)
+                        && entry
+                            .match_icmp_code
+                            .is_none_or(|want_code| want_code == got_code)
                 }
                 (Some(_), None) => {
                     protocol_unknown
@@ -453,22 +465,35 @@ impl DnatTable {
             icmp_possible
                 && (entry.match_dst_ports.is_empty()
                     || entry_port == 0
-                    || entry
-                        .match_dst_ports
-                        .iter()
-                        .any(|(low, high)| low <= high && *low <= entry_port && entry_port <= *high))
+                    || entry.match_dst_ports.iter().any(|(low, high)| {
+                        low <= high && *low <= entry_port && entry_port <= *high
+                    }))
         };
 
-        self.entries.iter().any(|(key, entries)| {
-            key.dst_ip == dst_ip
-                && entries
-                    .iter()
-                    .any(|entry| entry_possible(entry, key.protocol, key.dst_port))
-        }) || self.prefix_entries.iter().any(|(key, slots)| {
-            slots.iter().any(|slot| {
-                slot.contains(dst_ip) && entry_possible(&slot.entry, key.protocol, key.dst_port)
+        // #15116: probe only this destination's indexed entries and this
+        // family's prefix slots, not the whole tables.
+        self.entries_by_dst.get(&dst_ip).is_some_and(|indexed| {
+            indexed.iter().any(|(proto, port, idx)| {
+                self.entries
+                    .get(&DnatKey {
+                        protocol: *proto,
+                        dst_ip,
+                        dst_port: *port,
+                    })
+                    .and_then(|entries| entries.get(*idx))
+                    .is_some_and(|entry| entry_possible(entry, *proto, *port))
             })
-        })
+        }) || self.prefix_slots_by_family[usize::from(dst_ip.is_ipv6())]
+            .iter()
+            .any(|(key, idx)| {
+                self.prefix_entries
+                    .get(key)
+                    .and_then(|slots| slots.get(*idx))
+                    .is_some_and(|slot| {
+                        slot.contains(dst_ip)
+                            && entry_possible(&slot.entry, key.protocol, key.dst_port)
+                    })
+            })
     }
     /// #15118: could any non-`off`, non-poisoned DNAT rule translate this exact
     /// packet? This is the local-delivery claim predicate: it reuses the real
@@ -595,16 +620,29 @@ impl DnatTable {
             true
         };
 
-        self.entries.iter().any(|(key, entries)| {
-            key.dst_ip == dst_ip
-                && entries
-                    .iter()
-                    .any(|entry| entry_possible(entry, key.protocol))
-        }) || self.prefix_entries.iter().any(|(key, slots)| {
-            slots
-                .iter()
-                .any(|slot| slot.contains(dst_ip) && entry_possible(&slot.entry, key.protocol))
-        })
+        // #15116: as in flowless_l4_rule_possible — indexed exact entries
+        // plus this family's prefix slots only.
+        self.entries_by_dst.get(&dst_ip).is_some_and(|indexed| {
+            indexed.iter().any(|(proto, port, idx)| {
+                self.entries
+                    .get(&DnatKey {
+                        protocol: *proto,
+                        dst_ip,
+                        dst_port: *port,
+                    })
+                    .and_then(|entries| entries.get(*idx))
+                    .is_some_and(|entry| entry_possible(entry, *proto))
+            })
+        }) || self.prefix_slots_by_family[usize::from(dst_ip.is_ipv6())]
+            .iter()
+            .any(|(key, idx)| {
+                self.prefix_entries
+                    .get(key)
+                    .and_then(|slots| slots.get(*idx))
+                    .is_some_and(|slot| {
+                        slot.contains(dst_ip) && entry_possible(&slot.entry, key.protocol)
+                    })
+            })
     }
 
     pub(crate) fn from_snapshots(
@@ -925,6 +963,23 @@ impl DnatTable {
                         DnatPrefixSlot { v4, v6, entry },
                     );
                 }
+            }
+        }
+        // #15116: build the secondary indexes once, from the finished maps
+        // (after insert_entry/insert_prefix_slot dedup-replacement), so they
+        // cannot drift from the entries they index.
+        for (key, entries) in &table.entries {
+            let indexed: Vec<(u16, u16, usize)> = entries
+                .iter()
+                .enumerate()
+                .map(|(i, _)| (key.protocol, key.dst_port, i))
+                .collect();
+            table.entries_by_dst.insert(key.dst_ip, indexed);
+        }
+        for (key, slots) in &table.prefix_entries {
+            for (i, slot) in slots.iter().enumerate() {
+                let fam = usize::from(slot.v6.is_some());
+                table.prefix_slots_by_family[fam].push((*key, i));
             }
         }
         table
@@ -1457,8 +1512,7 @@ impl DnatTable {
         let mut best: Option<&DnatPrefixSlot> = None;
         let mut best_scope_tier = u8::MAX;
         for slot in slots {
-            if (!slot.entry.from_zone.is_empty()
-                && slot.entry.from_zone.as_ref() != ingress_zone)
+            if (!slot.entry.from_zone.is_empty() && slot.entry.from_zone.as_ref() != ingress_zone)
                 || !slot
                     .entry
                     .scope_ok(ingress_ifname, ingress_routing_instance)
