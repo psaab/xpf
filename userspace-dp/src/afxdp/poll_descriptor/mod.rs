@@ -7129,10 +7129,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     worker_ctx,
                                 );
                             }
-                        } else if decision.resolution.disposition
-                            == ForwardingDisposition::HAInactive
-                            && !fabric_link_ingress
+                        } else if matches!(
+                            decision.resolution.disposition,
+                            ForwardingDisposition::HAInactive
+                                | ForwardingDisposition::ClusterTerminalHAInactive
+                        ) && !fabric_link_ingress
                         {
+                            // #15742: capture seed eligibility BEFORE this arm
+                            // rewrites the disposition to FabricRedirect; the
+                            // seed install runs after the redirect below.
+                            let seed_pre_disposition = decision.resolution.disposition;
                             let owner_rg_id =
                                 owner_rg_for_resolution(worker_ctx.forwarding, decision.resolution);
                             if owner_rg_id > 0 {
@@ -7157,6 +7163,93 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         .egress_zone_id(decision.resolution.egress_ifindex);
                                 }
                                 decision.resolution = redirect;
+                            }
+                            // #15742: split-RG cluster-terminal flows reach
+                            // this arm (not the seed else-if below, which the
+                            // else-if chain would skip after conversion).
+                            // Install the punt seed judged on the
+                            // pre-redirect disposition.
+                            if should_seed_fabric_punt(
+                                seed_pre_disposition,
+                                packet_fabric_ingress,
+                                decision.nat,
+                            ) {
+                                let seed_owner_rg = owner_rg_for_resolution(
+                                    worker_ctx.forwarding,
+                                    decision.resolution,
+                                );
+                                if let Some(seed_metadata) = fabric_punt_seed_metadata(
+                                    worker_ctx.forwarding,
+                                    from_zone_id,
+                                    to_zone_id,
+                                    seed_owner_rg,
+                                    meta.ingress_ifindex,
+                                    meta.ingress_vlan_id,
+                                    flow.src_ip,
+                                    flow.dst_ip,
+                                    flow.forward_key.protocol,
+                                    flow.forward_key.src_port,
+                                    flow.forward_key.dst_port,
+                                    policy_packet_icmp(packet_frame, meta),
+                                    now_ns,
+                                ) && (owned_packet_frame.is_some()
+                                    || !l2_group_unicast_ip)
+                                {
+                                    let capacity = if let Some(reuse_key) =
+                                        owner_syn_reuse_key.as_ref()
+                                    {
+                                        sessions
+                                            .can_admit_after_closing_tcp_pair_for_syn(
+                                                1,
+                                                reuse_key,
+                                                meta.tcp_flags,
+                                            )
+                                    } else {
+                                        true
+                                    };
+                                    if capacity {
+                                        if owner_syn_reuse {
+                                            crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
+                                                sessions,
+                                                worker_ctx.shared_sessions,
+                                                worker_ctx.shared_nat_sessions,
+                                                worker_ctx.shared_forward_wire_sessions,
+                                                &worker_ctx.shared_owner_rg_indexes,
+                                                owner_syn_reuse_key
+                                                    .as_ref()
+                                                    .expect(
+                                                        "owner SYN reuse has a closing candidate",
+                                                    ),
+                                                meta.tcp_flags,
+                                            );
+                                        }
+                                        if install_helper_local_session_on_miss(
+                                            sessions,
+                                            binding.bpf_maps.session_map.handle(),
+                                            worker_ctx.shared_sessions,
+                                            worker_ctx.shared_nat_sessions,
+                                            worker_ctx.shared_forward_wire_sessions,
+                                            &worker_ctx.shared_owner_rg_indexes,
+                                            &flow.forward_key,
+                                            decision,
+                                            seed_metadata,
+                                            SessionOrigin::FabricPuntSeed,
+                                            now_ns,
+                                            meta.protocol,
+                                            meta.tcp_flags,
+                                            worker_ctx.forwarding.has_routing_domains,
+                                        ) && acquire_persistent_inbound_hold(
+                                            worker_ctx.forwarding,
+                                            persistent_lease_hold_outer,
+                                            decision.nat,
+                                            now_ns,
+                                        ) {
+                                            persistent_lease_hold_outer = None;
+                                        }
+                                    } else {
+                                        sessions.note_admission_refused();
+                                    }
+                                }
                             }
                         } else if should_seed_fabric_punt(
                             decision.resolution.disposition,
@@ -8655,11 +8748,25 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // Only redirect when the egress maps to a known RG.
                 // HAInactive with unknown ownership (rg=0) means unresolved
                 // — those should NOT be fabric-redirected.
-                let egress_rg = owner_rg_for_resolution(worker_ctx.forwarding, decision.resolution);
+                let egress_rg = if decision.resolution.disposition
+                    == ForwardingDisposition::ClusterTerminalHAInactive
+                {
+                    // #15742: cluster-terminal resolutions zero their egress;
+                    // the would-be egress RG lives on source_ifindex.
+                    owner_rg_for_flow(
+                        worker_ctx.forwarding,
+                        decision.resolution.source_ifindex,
+                    )
+                } else {
+                    owner_rg_for_resolution(worker_ctx.forwarding, decision.resolution)
+                };
                 // #12865: intended (pre-redirect) egress for zone counters.
                 let intended_egress_ifindex = decision.resolution.egress_ifindex;
-                if decision.resolution.disposition == ForwardingDisposition::HAInactive
-                    && egress_rg > 0
+                if matches!(
+                    decision.resolution.disposition,
+                    ForwardingDisposition::HAInactive
+                        | ForwardingDisposition::ClusterTerminalHAInactive
+                ) && egress_rg > 0
                     && !fabric_link_ingress
                 {
                     if flow_cache_owner_rg_id <= 0 {
