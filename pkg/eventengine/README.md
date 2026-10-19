@@ -518,14 +518,32 @@ Junos reading in `withinMatches` (`evaluate.go`):
   count stays at or above N. A per-`(policy, event)` latch (`policyRuntime.
   onLatched`) records that a crossing already fired; it is set in
   `evaluateEvent` only AFTER the cooldown check passes (a cooldown-suppressed
-  crossing is not consumed) and re-armed (cleared) by `withinMatches` the moment
-  the count drops back below N. Rationale: the 30 s cooldown alone only
+  crossing is not consumed) and re-armed (cleared) by `withinMatches` when
+  the count EXCLUDING the just-appended event has dropped back below N —
+  i.e. the ANDed condition was false before this event arrived (#15020).
+  Rationale: the 30 s cooldown alone only
   THROTTLES a sustained failing level — it would re-remediate an unchanged
   condition every cooldown, which is harmful for a non-idempotent then-batch and
   spams commit/rollback history. Regression-locked by
   `TestEdgeTriggerOn_*_3756`. Only a policy carrying a `trigger on` clause
   latches (`policyHasTriggerOn`); a no-within or `trigger until` policy is
   unaffected.
+- **`trigger on 1` re-arms on window decay (#15020).** The re-arm test once
+  used the in-window count INCLUDING the current event, which `evaluateEvent`
+  appends before `withinMatches` runs. For `trigger on 1` that count is
+  always >= 1, so `count < 1` never held and the latch never cleared: the
+  policy fired exactly once per daemon lifetime (the runtime is carried
+  across same-revision `Apply`, so not even a remediation's own re-apply
+  revived it). The shipped lab pair (`failover-on-probe-fail` /
+  `restore-on-probe-success` in `test/incus/xpf-test.conf`, both
+  `within 60 { trigger on 1; }`) went dead after its first outage cycle.
+  Testing the pre-event count (`count-1 < N`) re-arms N=1 exactly when no
+  prior occurrence remains inside the window, so each isolated edge fires;
+  for N>1 the observable behaviour is unchanged (a sustained burst's
+  pre-event count stays >= N until it decays, and below-threshold events
+  never fire either way). Regression-locked by
+  `TestTriggerOn1_*_15020`, including the lab-pair alternation across two
+  outages.
 - **The latch is rolled back when the action it authorized is never admitted
   (#6810).** `evaluateEvent` arms the latch under `e.mu` and returns;
   `HandleEvent` classifies and enqueues afterwards, OUTSIDE that lock. `enqueue`
@@ -589,8 +607,9 @@ Junos reading in `withinMatches` (`evaluate.go`):
   clause, so the SHORT clause that had decayed below its own threshold never
   re-armed the latch. The ANDed condition went false and true again — a real
   crossing — and the policy stayed silent until the long window decayed. The
-  latch now clears exactly when the ANDed condition is false, i.e. when ANY
-  `trigger on` clause is below its threshold, decided across all of them first.
+  latch now clears exactly when the ANDed condition was false before the
+  current event, i.e. when ANY `trigger on` clause's pre-event count is
+  below its threshold (#15020), decided across all of them first.
   Regression-locked by `TestWithinTriggerOnRearmIsIndependentOfClauseOrder`,
   which runs the same timeline against both clause orderings and requires them
   to agree. One deliberate delta: a policy carrying BOTH a structurally invalid

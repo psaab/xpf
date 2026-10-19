@@ -221,10 +221,12 @@ type policyRuntime struct {
 	lastTrigger time.Time
 	// event name -> edge latch for a `within { trigger on N }` clause
 	// (#3756 M1). Set (true) after the policy fires on a threshold CROSSING;
-	// cleared (re-armed) by withinMatches the moment the in-window count drops
-	// back below N. So a SUSTAINED above-threshold level fires the remediation
-	// ONCE per crossing instead of re-firing every cooldown (Junos `trigger on`
-	// is edge-, not level-triggered).
+	// cleared (re-armed) by withinMatches the moment the in-window count
+	// EXCLUDING the just-appended event drops back below N (#15020: for
+	// N=1 the inclusive count is always >= 1, so an inclusive test could
+	// never re-arm). So a SUSTAINED above-threshold level fires the
+	// remediation ONCE per crossing instead of re-firing every cooldown
+	// (Junos `trigger on` is edge-, not level-triggered).
 	onLatched map[string]bool
 }
 
