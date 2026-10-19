@@ -419,11 +419,11 @@ func (s *Server) bgpHandler(w http.ResponseWriter, r *http.Request) {
 			writeFRRError(w, err)
 			return
 		}
-		fmt.Fprintf(&b, "%-20s %-13s %-8s %-9s %-9s %-11s %-12s %s\n",
-			"Neighbor", "AF", "AS", "MsgRcvd", "MsgSent", "Up/Down", "State", "PfxRcd")
+		fmt.Fprintf(&b, "%-20s %-13s %-16s %-8s %-9s %-9s %-11s %-12s %s\n",
+			"Neighbor", "AF", "Instance", "AS", "MsgRcvd", "MsgSent", "Up/Down", "State", "PfxRcd")
 		for _, p := range peers {
-			fmt.Fprintf(&b, "%-20s %-13s %-8s %-9s %-9s %-11s %-12s %s\n",
-				p.Neighbor, p.AddressFamily, p.AS, p.MsgRcvd, p.MsgSent, p.UpDown, p.State, p.PfxRcd)
+			fmt.Fprintf(&b, "%-20s %-13s %-16s %-8s %-9s %-9s %-11s %-12s %s\n",
+				p.Neighbor, p.AddressFamily, p.Instance, p.AS, p.MsgRcvd, p.MsgSent, p.UpDown, p.State, p.PfxRcd)
 		}
 		writeOK(w, TextResponse{Output: b.String()})
 	}

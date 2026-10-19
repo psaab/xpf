@@ -29,6 +29,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/psaab/xpf/pkg/diagcmd"
 )
 
 // RIPRouteEntry represents a RIP route.
@@ -127,10 +129,32 @@ type ISISAdjacency struct {
 	Raw string
 }
 
+// frrVRFName maps a routing-instance name to the FRR VRF name
+// ("vrf-"+name) via the shared diagcmd helper (#15265 B08-03). The
+// argument to the Get*VRF queries is the bare Junos routing-instance
+// name (as haRoutingRequirementsForRG stores it); FRR only knows the
+// prefixed device name the daemon creates (daemon_ipmon.go:
+// "vrf-"+ri.Name). Passing the bare name asked FRR about a VRF that
+// does not exist. Already-prefixed names are not doubled.
+func frrVRFName(instance string) string {
+	return diagcmd.VRFDeviceName(instance)
+}
+
+// routingInstanceName maps an FRR VRF name back to the bare
+// routing-instance name for display: "vrf-tenant" -> "tenant",
+// "default"/"" -> "" (the global instance).
+func routingInstanceName(vrfName string) string {
+	if vrfName == "" || vrfName == "default" {
+		return ""
+	}
+	return strings.TrimPrefix(vrfName, "vrf-")
+}
+
 func vrfShowCommand(vrf, base, suffix string) (string, error) {
 	if vrf == "" {
 		return base + " " + suffix, nil
 	}
+	vrf = frrVRFName(vrf)
 	if !validFRRInterfaceOperand(vrf) {
 		return "", fmt.Errorf("invalid routing instance %q for FRR status query", vrf)
 	}
@@ -306,11 +330,17 @@ type BGPPeerSummary struct {
 	// more than one family produces one BGPPeerSummary per family, so
 	// this field disambiguates the otherwise-duplicate neighbor rows.
 	AddressFamily string
-	AS            string
-	MsgRcvd       string
-	MsgSent       string
-	UpDown        string
-	State         string
+	// Instance is the bare routing-instance name the peer belongs to
+	// ("tenant" for FRR VRF "vrf-tenant"); empty for the global/default
+	// instance. Populated from the family's vrfName (or the enclosing
+	// VRF key of `show bgp vrf all summary json`) so VRF-only peers are
+	// attributable to their instance (#15265 B08-04).
+	Instance string
+	AS       string
+	MsgRcvd  string
+	MsgSent  string
+	UpDown   string
+	State    string
 	// PfxRcd is the count of prefixes received from the peer. FRR only
 	// tracks a non-zero value once the session reaches Established.
 	PfxRcd string
@@ -351,18 +381,39 @@ type bgpPeerJSON struct {
 	PfxSnt     int64  `json:"pfxSnt"`
 }
 
-// GetBGPSummary queries FRR for the BGP peer summary via the structured
-// JSON output ("show bgp summary json") and parses it. JSON is used
-// instead of scraping the text table because the text table overloads a
-// single "State/PfxRcd" column and appends footer lines ("Total number
-// of neighbors N", blank/legend lines) that the old field-count scraper
-// misparsed as phantom peers with an empty PfxRcd. #3942.
+// GetBGPSummary queries FRR for the BGP peer summary across ALL VRFs
+// via the structured JSON output ("show bgp vrf all summary json")
+// and parses it. JSON is used instead of scraping the text table
+// because the text table overloads a single "State/PfxRcd" column
+// and appends footer lines ("Total number of neighbors N", blank/legend
+// lines) that the old field-count scraper misparsed as phantom peers
+// with an empty PfxRcd. #3942. Querying only the default VRF hid
+// every tenant peer on a VRF-only box (#15265 B08-04); each returned
+// peer carries its routing instance in BGPPeerSummary.Instance.
 func (m *Manager) GetBGPSummary(ctx context.Context) ([]BGPPeerSummary, error) {
-	return m.GetBGPSummaryVRF(ctx, "")
+	output, err := m.vtysh(ctx, "show bgp vrf all summary json")
+	if err != nil {
+		return nil, err
+	}
+	return ParseBGPSummaryAllJSON(output)
+}
+
+// ParseBGPSummaryAllJSON parses `show bgp vrf all summary json`
+// output. FRR may nest the per-VRF summaries under VRF-name keys
+// ({"vrf-tenant": {"ipv4Unicast": {...}}}) or return the flat
+// single-VRF shape; both are handled, stamping Instance from the
+// enclosing VRF key / family vrfName.
+func ParseBGPSummaryAllJSON(data string) ([]BGPPeerSummary, error) {
+	return parseBGPSummaryJSON(data)
 }
 
 // GetBGPSummaryVRF queries BGP peer state in one FRR routing instance.
+// vrf is the bare routing-instance name; it is normalized to the FRR
+// VRF name ("vrf-"+name) by vrfShowCommand (#15265 B08-03).
 func (m *Manager) GetBGPSummaryVRF(ctx context.Context, vrf string) ([]BGPPeerSummary, error) {
+	if vrf == "" {
+		return m.GetBGPSummary(ctx)
+	}
 	command, err := vrfShowCommand(vrf, "show bgp", "summary json")
 	if err != nil {
 		return nil, err
@@ -371,16 +422,33 @@ func (m *Manager) GetBGPSummaryVRF(ctx context.Context, vrf string) ([]BGPPeerSu
 	if err != nil {
 		return nil, err
 	}
-	return parseBGPSummaryJSON(output)
+	peers, err := parseBGPSummaryJSON(output)
+	if err != nil {
+		return nil, err
+	}
+	if peers == nil {
+		// `{}` / empty / non-JSON for a CONFIGURED instance means the
+		// instance does not exist in FRR (or vtysh is wedged) — a status
+		// error, not zero peers. Fail closed so HA readiness reports the
+		// real reason instead of a misleading "no adjacency" (#15265).
+		return nil, fmt.Errorf("BGP status unavailable for routing instance %q: empty or unparseable summary from %q", vrf, command)
+	}
+	for i := range peers {
+		if peers[i].Instance == "" {
+			peers[i].Instance = vrf
+		}
+	}
+	return peers, nil
 }
 
 // parseBGPSummaryJSON parses FRR's "show bgp summary json" output into
 // BGPPeerSummary entries, one per (address-family, neighbor). Output is
 // deterministic: AFI/SAFI keys and neighbor addresses are both sorted.
-// A non-JSON response (an older FRR "% BGP instance not found" banner, a
-// wedged vtysh) or an empty/peerless summary yields no peers and no
-// error — "no BGP peers" is a valid state on this observability path,
-// not a failure.
+// A nil slice (with nil error) signals "no usable summary at all"
+// (empty, `{}`, or non-JSON) so the VRF-scoped caller can fail closed
+// for a configured instance; the global show path treats it as no
+// peers. A family object with an explicitly empty peers map yields a
+// non-nil empty result (a valid peerless instance).
 func parseBGPSummaryJSON(data string) ([]BGPPeerSummary, error) {
 	data = strings.TrimSpace(data)
 	if data == "" {
@@ -392,47 +460,75 @@ func parseBGPSummaryJSON(data string) ([]BGPPeerSummary, error) {
 		// parse error on the show path.
 		return nil, nil
 	}
-
-	// Sort the AFI/SAFI keys for deterministic output.
-	afis := make([]string, 0, len(raw))
-	for k := range raw {
-		afis = append(afis, k)
+	if len(raw) == 0 {
+		return nil, nil
 	}
-	sort.Strings(afis)
-
-	var peers []BGPPeerSummary
-	for _, afi := range afis {
-		var fam bgpSummaryFamilyJSON
-		if err := json.Unmarshal(raw[afi], &fam); err != nil {
-			// A non-family sibling value (e.g. {"warning": "..."}).
-			continue
-		}
-		if len(fam.Peers) == 0 {
-			continue
-		}
-		// Sort neighbor addresses for deterministic output.
-		addrs := make([]string, 0, len(fam.Peers))
-		for a := range fam.Peers {
-			addrs = append(addrs, a)
-		}
-		sort.Strings(addrs)
-
-		af := bgpAFILabel(afi)
-		for _, addr := range addrs {
-			pj := fam.Peers[addr]
-			peers = append(peers, BGPPeerSummary{
-				Neighbor:      addr,
-				AddressFamily: af,
-				AS:            strconv.FormatInt(pj.RemoteAs, 10),
-				MsgRcvd:       strconv.FormatInt(pj.MsgRcvd, 10),
-				MsgSent:       strconv.FormatInt(pj.MsgSent, 10),
-				UpDown:        pj.PeerUptime,
-				State:         pj.State,
-				PfxRcd:        strconv.FormatInt(pj.PfxRcd, 10),
-			})
-		}
+	peers, sawFamily := parseBGPSummaryFamilies(raw, "")
+	if !sawFamily {
+		return nil, nil
+	}
+	if peers == nil {
+		peers = []BGPPeerSummary{}
 	}
 	return peers, nil
+}
+
+// parseBGPSummaryFamilies parses one level of AFI/SAFI -> family
+// objects. If a value is itself a map of AFI/SAFI objects (the
+// `vrf all` nesting, keyed by VRF name), it recurses with that key as
+// the enclosing VRF. sawFamily reports whether any family object (a
+// value carrying a "peers" map, even empty) was seen.
+func parseBGPSummaryFamilies(raw map[string]json.RawMessage, enclosingVRF string) (peers []BGPPeerSummary, sawFamily bool) {
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		var fam bgpSummaryFamilyJSON
+		if err := json.Unmarshal(raw[key], &fam); err == nil && fam.Peers != nil {
+			sawFamily = true
+			instance := routingInstanceName(fam.VRFName)
+			if instance == "" && enclosingVRF != "" {
+				instance = routingInstanceName(enclosingVRF)
+			}
+			// Sort neighbor addresses for deterministic output.
+			addrs := make([]string, 0, len(fam.Peers))
+			for a := range fam.Peers {
+				addrs = append(addrs, a)
+			}
+			sort.Strings(addrs)
+			af := bgpAFILabel(key)
+			for _, addr := range addrs {
+				pj := fam.Peers[addr]
+				peers = append(peers, BGPPeerSummary{
+					Neighbor:      addr,
+					AddressFamily: af,
+					Instance:      instance,
+					AS:            strconv.FormatInt(pj.RemoteAs, 10),
+					MsgRcvd:       strconv.FormatInt(pj.MsgRcvd, 10),
+					MsgSent:       strconv.FormatInt(pj.MsgSent, 10),
+					UpDown:        pj.PeerUptime,
+					State:         pj.State,
+					PfxRcd:        strconv.FormatInt(pj.PfxRcd, 10),
+				})
+			}
+			continue
+		}
+		// Not a family object: maybe a VRF key nesting families
+		// (`show bgp vrf all summary json`), or a non-family sibling
+		// (e.g. {"warning": "..."}) which is skipped.
+		var nested map[string]json.RawMessage
+		if err := json.Unmarshal(raw[key], &nested); err != nil || len(nested) == 0 {
+			continue
+		}
+		sub, subSaw := parseBGPSummaryFamilies(nested, key)
+		if subSaw {
+			sawFamily = true
+			peers = append(peers, sub...)
+		}
+	}
+	return peers, sawFamily
 }
 
 // bgpAFILabel maps FRR's camelCase AFI/SAFI JSON key to a readable

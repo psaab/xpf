@@ -235,12 +235,12 @@ func (s *Server) GetBGPStatus(ctx context.Context, req *pb.GetBGPStatusRequest) 
 		if err != nil {
 			return nil, frrStatusErr("", err)
 		}
-		fmt.Fprintf(&b, "%-20s %-13s %-8s %-9s %-9s %-11s %-12s %s\n",
-			"Neighbor", "AF", "AS", "MsgRcvd", "MsgSent", "Up/Down", "State", "PfxRcd")
+		fmt.Fprintf(&b, "%-20s %-13s %-16s %-8s %-9s %-9s %-11s %-12s %s\n",
+			"Neighbor", "AF", "Instance", "AS", "MsgRcvd", "MsgSent", "Up/Down", "State", "PfxRcd")
 		for _, p := range peers {
-			fmt.Fprintf(&b, "%-20s %-13s %-8s %-9s %-9s %-11s %-12s %s\n",
+			fmt.Fprintf(&b, "%-20s %-13s %-16s %-8s %-9s %-9s %-11s %-12s %s\n",
 				termsafe.SanitizeRowForDisplay(
-					p.Neighbor, p.AddressFamily, p.AS, p.MsgRcvd, p.MsgSent, p.UpDown, p.State, p.PfxRcd)...)
+					p.Neighbor, p.AddressFamily, p.Instance, p.AS, p.MsgRcvd, p.MsgSent, p.UpDown, p.State, p.PfxRcd)...)
 		}
 	}
 	return &pb.GetBGPStatusResponse{Output: termsafe.SanitizeBlockForDisplay(b.String())}, nil
