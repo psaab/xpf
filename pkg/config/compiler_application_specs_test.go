@@ -1018,6 +1018,159 @@ applications {
 		assertExpanded(t, cfg, "plain", []string{"plain-t-http"})
 	})
 }
+// #15120 (A86-01, #14340 residual): in a container-form application term,
+// header tokens packed beside the term name (`t-ssh destination-port 22 { ... }`)
+// were silently discarded by expandContainerTerm14340, which built
+// Keys ["term", sub.Keys[0]] and dropped sub.Keys[1:] before
+// applicationTermKeys/parseApplicationTerms. So
+// `term { t-ssh destination-port 22 { protocol tcp; } }` compiled as TCP
+// on any port, strict-clean, with no ApplicationMatchDrops entry.
+// Carrying sub.Keys[1:] through means the packed tokens either compile
+// (recognized leaf + value) or land in UnknownTermLeaves and are refused
+// by the #9595 strict gate with the offending token named.
+//
+// RED-on-revert: reverting expandContainerTerm14340 to ["term", sub.Keys[0]]
+// makes the packed-port case compile to TCP/any-port with a clean strict
+// compile, and the packed-garbage and packed-dangling cases compile clean
+// instead of rejecting with the token named.
+func TestApplicationContainerTermPackedHeaderTokens15120(t *testing.T) {
+	t.Run("packed destination-port beside container term name is honored", func(t *testing.T) {
+		tree := hierTree(t, `
+applications {
+    application custom-app {
+        term {
+            t-ssh destination-port 22 {
+                protocol tcp;
+            }
+        }
+    }
+}
+`)
+		cfg, err := CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("strict compile must honor packed header: %v", err)
+		}
+		app, ok := cfg.Applications.Applications["custom-app-t-ssh"]
+		if !ok {
+			t.Fatalf("application %q missing; have %v", "custom-app-t-ssh", cfg.Applications.Applications)
+		}
+		if app.Protocol != "tcp" || app.DestinationPort != "22" {
+			t.Fatalf("application %q = proto %q dst %q, want tcp/22 (packed header must not be discarded)", app.Name, app.Protocol, app.DestinationPort)
+		}
+	})
+
+	t.Run("packed destination-port beside container term name with body port stays consistent", func(t *testing.T) {
+		// Control: packed header token compiled alongside ordinary body
+		// leaves in a multi-child container; sibling unaffected.
+		tree := hierTree(t, `
+applications {
+    application multi {
+        term {
+            t-ssh destination-port 22 {
+                protocol tcp;
+            }
+            t-dns {
+                protocol udp;
+                destination-port 53;
+            }
+        }
+    }
+}
+`)
+		cfg, err := CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("strict compile: %v", err)
+		}
+		for name, want := range map[string][2]string{"multi-t-ssh": {"tcp", "22"}, "multi-t-dns": {"udp", "53"}} {
+			proto, dst := want[0], want[1]
+			app, ok := cfg.Applications.Applications[name]
+			if !ok {
+				t.Fatalf("application %q missing; have %v", name, cfg.Applications.Applications)
+			}
+			if app.Protocol != proto || app.DestinationPort != dst {
+				t.Fatalf("application %q = proto %q dst %q, want %q/%q", name, app.Protocol, app.DestinationPort, proto, dst)
+			}
+		}
+	})
+
+	t.Run("packed unknown token beside container term name rejects strict and warns lenient", func(t *testing.T) {
+		src := `
+applications {
+    application c-garbage {
+        term {
+            t-ssh destination-poort 22 {
+                protocol tcp;
+            }
+        }
+        term t-http {
+            protocol tcp;
+            destination-port 80;
+        }
+    }
+}
+`
+		if _, err := CompileConfig(hierTree(t, src)); err == nil || !strings.Contains(err.Error(), "destination-poort") {
+			t.Fatalf("strict compile must reject packed unknown token naming it, got %v", err)
+		}
+		lcfg, err := CompileConfigLenient(hierTree(t, src))
+		if err != nil {
+			t.Fatalf("lenient compile must boot (#1960): %v", err)
+		}
+		found := false
+		for _, w := range lcfg.Warnings {
+			if strings.Contains(w, "destination-poort") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("lenient compile must warn on packed unknown token, warnings=%v", lcfg.Warnings)
+		}
+	})
+
+	t.Run("packed dangling value-taking leaf beside container term name rejects strict", func(t *testing.T) {
+		src := `
+applications {
+    application c-dangle {
+        term {
+            t-ssh destination-port {
+                protocol tcp;
+            }
+        }
+    }
+}
+`
+		if _, err := CompileConfig(hierTree(t, src)); err == nil || !strings.Contains(err.Error(), "destination-port") {
+			t.Fatalf("strict compile must reject packed dangling destination-port naming it, got %v", err)
+		}
+	})
+
+	t.Run("canonical packed term without container still compiles (control)", func(t *testing.T) {
+		// Non-container control through the same parseApplicationTerms path:
+		// a flat/authored term whose keys already carry the constraint.
+		tree := hierTree(t, `
+applications {
+    application plain {
+        term t-http {
+            protocol tcp;
+            destination-port 80;
+        }
+    }
+}
+`)
+		cfg, err := CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("strict compile of canonical term must stay clean: %v", err)
+		}
+		app, ok := cfg.Applications.Applications["plain-t-http"]
+		if !ok {
+			t.Fatalf("application %q missing; have %v", "plain-t-http", cfg.Applications.Applications)
+		}
+		if app.Protocol != "tcp" || app.DestinationPort != "80" {
+			t.Fatalf("application %q = proto %q dst %q, want tcp/80", app.Name, app.Protocol, app.DestinationPort)
+		}
+	})
+}
+
 // #14341: members of an application-set placed after `description` or
 // inside a bracketed child block (`application { [ a b ]; }`) were silently
 // omitted on strict CompileConfig with zero errors or warnings, so a zone
