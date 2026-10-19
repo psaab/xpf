@@ -216,6 +216,14 @@ pub(crate) struct StaticNatTable {
     /// port-mapped rule, `None` for a whole-address rule). #3605: a `Vec`, as
     /// `dnat`.
     snat: FxHashMap<(IpAddr, Option<u16>), Vec<StaticNatEntry>>,
+    /// #15116 (A77-01): per-destination secondary index over `dnat` for the
+    /// flowless possibility probes. Without it every flowless packet linearly
+    /// scanned all `(ip, port)` keys to find the few bearing on its
+    /// destination. Values are `(port, index-within-dnat-vec)` pairs rebuilt
+    /// wholesale at the end of `from_snapshots` (the only constructor), so
+    /// the index can never drift from `dnat`. `snat` needs no index: its
+    /// only probe already keys by the packet source.
+    dnat_by_dst: FxHashMap<IpAddr, Vec<(Option<u16>, usize)>>,
     /// #3031: block-to-block (subnet) static-NAT rules. A source prefix maps
     /// 1:1 by offset to an equal-length destination prefix. These cannot be
     /// keyed by exact IP, so they are scanned linearly on the session-miss
@@ -519,6 +527,27 @@ pub(super) fn parse_nat_prefix_accepts_for_test(s: &str) -> bool {
 }
 
 impl StaticNatTable {
+    /// #15116: iterate only the port-bearing `dnat` entries for `dst_ip`
+    /// via the secondary index (see `dnat_by_dst`), applying `admit` per
+    /// entry. Replaces the pre-fix whole-map scan.
+    fn dnat_port_entries_for<'a>(
+        &'a self,
+        dst_ip: IpAddr,
+        mut admit: impl FnMut(&'a StaticNatEntry) -> bool,
+    ) -> bool {
+        let Some(indexed) = self.dnat_by_dst.get(&dst_ip) else {
+            return false;
+        };
+        indexed.iter().any(|(port, idx)| {
+            port.is_some()
+                && self
+                    .dnat
+                    .get(&(dst_ip, *port))
+                    .and_then(|entries| entries.get(*idx))
+                    .is_some_and(|entry| admit(entry))
+        })
+    }
+
     /// Whether a flowless packet could match a port-specific static-NAT
     /// translation. Protocol 255 is the non-first-fragment unknown sentinel;
     /// it is treated as possible rather than classified from packet bytes.
@@ -537,19 +566,15 @@ impl StaticNatTable {
         if protocol != u8::MAX && !crate::ip_proto::has_l4_ports(protocol) {
             return false;
         }
-        self.dnat.iter().any(|((external_ip, port), entries)| {
-            *external_ip == dst_ip
-                && port.is_some()
-                && entries.iter().any(|entry| {
-                    static_scope_ok(
-                        &entry.from_zone,
-                        &entry.from_interface,
-                        &entry.from_routing_instance,
-                        ingress_zone,
-                        ingress_ifname,
-                        ingress_routing_instance,
-                    ) && source_ok(&entry.source, Some(src_ip))
-                })
+        self.dnat_port_entries_for(dst_ip, |entry| {
+            static_scope_ok(
+                &entry.from_zone,
+                &entry.from_interface,
+                &entry.from_routing_instance,
+                ingress_zone,
+                ingress_ifname,
+                ingress_routing_instance,
+            ) && source_ok(&entry.source, Some(src_ip))
         }) || self.snat.iter().any(|((internal_ip, port), entries)| {
             *internal_ip == src_ip
                 && port.is_some()
@@ -580,19 +605,15 @@ impl StaticNatTable {
         if protocol != u8::MAX && !crate::ip_proto::has_l4_ports(protocol) {
             return false;
         }
-        self.dnat.iter().any(|((external_ip, port), entries)| {
-            *external_ip == dst_ip
-                && port.is_some()
-                && entries.iter().any(|entry| {
-                    static_scope_ok(
-                        &entry.from_zone,
-                        &entry.from_interface,
-                        &entry.from_routing_instance,
-                        ingress_zone,
-                        ingress_ifname,
-                        ingress_routing_instance,
-                    ) && source_ok(&entry.source, Some(src_ip))
-                })
+        self.dnat_port_entries_for(dst_ip, |entry| {
+            static_scope_ok(
+                &entry.from_zone,
+                &entry.from_interface,
+                &entry.from_routing_instance,
+                ingress_zone,
+                ingress_ifname,
+                ingress_routing_instance,
+            ) && source_ok(&entry.source, Some(src_ip))
         })
     }
 
@@ -612,21 +633,17 @@ impl StaticNatTable {
         if protocol.is_some_and(crate::ip_proto::has_l4_ports) {
             return false;
         }
-        self.dnat.iter().any(|((external_ip, port), entries)| {
-            *external_ip == dst_ip
-                && port.is_some()
-                && entries.iter().any(|entry| {
-                    entry.mapped_port.is_some()
-                        && static_scope_ok(
-                            &entry.from_zone,
-                            &entry.from_interface,
-                            &entry.from_routing_instance,
-                            ingress_zone,
-                            ingress_ifname,
-                            ingress_routing_instance,
-                        )
-                        && source_ok(&entry.source, Some(src_ip))
-                })
+        self.dnat_port_entries_for(dst_ip, |entry| {
+            entry.mapped_port.is_some()
+                && static_scope_ok(
+                    &entry.from_zone,
+                    &entry.from_interface,
+                    &entry.from_routing_instance,
+                    ingress_zone,
+                    ingress_ifname,
+                    ingress_routing_instance,
+                )
+                && source_ok(&entry.source, Some(src_ip))
         })
     }
     /// #15118: could a static-NAT rule translate this packet inbound? Static
@@ -851,6 +868,16 @@ impl StaticNatTable {
                 .entry((internal_ip, snat_port))
                 .or_default()
                 .push(entry);
+        }
+        // #15116: build the per-destination index once, from the finished
+        // `dnat` map, so it cannot drift from the entries it indexes.
+        for ((ip, port), entries) in &table.dnat {
+            let indexed: Vec<(Option<u16>, usize)> = entries
+                .iter()
+                .enumerate()
+                .map(|(i, _)| (*port, i))
+                .collect();
+            table.dnat_by_dst.insert(*ip, indexed);
         }
         table
     }
@@ -1215,11 +1242,7 @@ impl StaticNatTable {
         let mut out = Vec::new();
         for ((ip, _port), entries) in &self.dnat {
             for entry in entries {
-                out.push((
-                    *ip,
-                    entry.from_routing_instance.as_str(),
-                    entry.internal_ip,
-                ));
+                out.push((*ip, entry.from_routing_instance.as_str(), entry.internal_ip));
             }
         }
         for block in &self.blocks {

@@ -218,6 +218,9 @@ mod tests_empty_match_poison_9874;
 #[cfg(test)]
 #[path = "tests_reseed_persistent_siblings_15110.rs"]
 mod tests_reseed_persistent_siblings_15110;
+#[cfg(test)]
+#[path = "tests_flowless_index_15116.rs"]
+mod tests_flowless_index_15116;
 
 const NAT_SCOPE_TIER_INTERFACE: u8 = 0;
 const NAT_SCOPE_TIER_ZONE: u8 = 1;
