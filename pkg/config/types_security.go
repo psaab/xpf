@@ -1802,9 +1802,13 @@ type Application struct {
 	Protocol          string // tcp, udp, icmp, or numeric ("47")
 	DestinationPort   string // "80", "8080-8090"
 	SourcePort        string // "1024-65535" (optional)
-	InactivityTimeout int    // seconds (0 = default)
-	ALG               string // "ssh", "ftp", etc. (informational)
-	Description       string
+	InactivityTimeout int    // seconds (0 = default; see InactivityTimeoutNever)
+	// InactivityTimeoutNever is Junos inactivity-timeout never (#15207):
+	// disable the per-application idle timeout. Encoded on the userspace
+	// wire as InactivityTimeout == appTimeoutNeverWireSecs (86401).
+	InactivityTimeoutNever bool
+	ALG                    string // "ssh", "ftp", etc. (informational)
+	Description            string
 	// ICMPType / ICMPCode constrain an ICMP/ICMPv6 application to a single
 	// message type (and optionally code), e.g. junos-icmp-ping = ICMP type 8
 	// (echo-request). nil means "no constraint" — the application matches every

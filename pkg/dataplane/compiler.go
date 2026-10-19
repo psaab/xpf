@@ -1085,10 +1085,7 @@ func compileApplications(dp DataPlane, cfg *config.Config, result *CompileResult
 			result.AppNames[uint16(appID)] = appName
 		}
 
-		var appTimeout uint32
-		if app.InactivityTimeout > 0 {
-			appTimeout = uint32(app.InactivityTimeout)
-		}
+		appTimeout := config.AppTimeoutWireSecs(app)
 
 		algType := algTypeFromString(app.ALG)
 

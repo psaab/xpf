@@ -260,6 +260,26 @@ message type/code of its protocol. The echo-only application is
 aliases `junos-icmp-all` / `junos-icmp6-all` also remain unconstrained.
 Current-release vSRX readback is still outstanding.
 
+#15207 adds the typed ICMPv6 Junos defaults (`junos-icmp6-dst-unreach-*`,
+`junos-icmp6-packet-too-big` [also spelled `packet-to-big` in the issue],
+`junos-icmp6-time-exceed-*`, `junos-icmp6-param-prob-*`,
+`junos-icmp6-echo-request`/`echoreq`/`echo-reply`), simple `junos-pptp`
+(tcp/1723), `junos-sctp-any` (protocol 132), `junos-rsh` (tcp/514), and the
+multi-term sets `junos-talk`/`junos-ntalk`/`junos-stun`/`junos-mgcp` from the
+12.1X47-D25.4 `junos-defaults` capture. SCTP here is protocol-number matching
+only; SCTP multi-homing/stream tracking remains missing (see feature-gaps).
+
+`show applications [<name>]` (CLI) and the gRPC `applications` /
+`applications:<name>` topics list predefined applications and sets; a
+predefined entry shadowed by a user definition is labelled
+`(shadowed by user definition; not in effect)` (#15207 A18-01).
+
+`inactivity-timeout never` / `timeout never` (#15207 A18-03, Junos
+`(seconds | never)`) disables the per-application idle timeout: compiled as
+`InactivityTimeoutNever`, encoded on the wire as 86401, and mapped by Rust
+`app_inactivity_timeout_ns` to `u64::MAX` ns. TCP closing/RST and opening
+windows are unchanged. Numeric values keep the 0..86400 range.
+
 Junos rejects an application name such as `junos-ping` in a custom application's
 `protocol` leaf. XPF retains that syntax as a compatibility extension for
 user-defined applications and keeps it echo-constrained (type 8 / 128); this is
@@ -459,7 +479,8 @@ runtime effect is the L3/L4 catalog classification above
   A referenced set is resolved through `config.ResolveApplicationSet`
   (user-defined sets first, then the built-in `junos-defaults` bundle table
   `PredefinedApplicationSets` — junos-ms-rpc, junos-sun-rpc, junos-cifs,
-  junos-routing-inbound, junos-sip, junos-smb, and junos-h323; #4102, #5634,
+  junos-routing-inbound, junos-sip, junos-smb, junos-h323, and (#15207)
+  junos-talk, junos-ntalk, junos-stun, junos-mgcp; #4102, #5634,
   #11341).
   `CatalogNames` (AppID-disabled catalog) and BOTH NAT snapshot
   builders (`buildSourceNATAppTerms` / `buildDestinationNATSnapshots`,

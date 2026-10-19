@@ -135,7 +135,9 @@ func (c *CLI) showApplications(args []string) error {
 			if app.ICMPCode != nil {
 				fmt.Printf("%s  ICMP code: %d\n", indent, *app.ICMPCode)
 			}
-			if app.InactivityTimeout > 0 {
+			if app.InactivityTimeoutNever {
+				fmt.Printf("%s  Inactivity timeout: never\n", indent)
+			} else if app.InactivityTimeout > 0 {
 				fmt.Printf("%s  Inactivity timeout: %ds\n", indent, app.InactivityTimeout)
 			}
 			if app.ALG != "" {
@@ -234,25 +236,92 @@ func (c *CLI) showApplications(args []string) error {
 		}
 	}
 
-	// Show matching predefined application if filtering by name
+	// #15207 A18-01: predefined apps/sets, shadow-aware.
 	if filterName != "" {
-		for _, app := range config.PredefinedApplications {
-			if app.Name == filterName {
+		_, userHasApp := cfgApps(cfg)[filterName]
+		_, userHasSet := cfgSets(cfg)[filterName]
+		if app, ok := config.PredefinedApplications[filterName]; ok && app != nil {
+			if userHasApp {
+				fmt.Println("Predefined application (shadowed by user definition; not in effect):")
+			} else {
 				fmt.Println("Predefined application:")
-				printApp(app, "  ")
-				return nil
 			}
+			printApp(app, "  ")
+			return nil
+		}
+		if set, ok := config.PredefinedApplicationSets[filterName]; ok && set != nil {
+			if userHasSet {
+				fmt.Println("Predefined application set (shadowed by user definition; not in effect):")
+			} else {
+				fmt.Println("Predefined application set:")
+			}
+			fmt.Printf("  Application set: %s\n", set.Name)
+			fmt.Printf("    Members:\n")
+			for _, m := range set.Applications {
+				fmt.Printf("      %s\n", m)
+				if app, ok := config.PredefinedApplications[m]; ok && app != nil {
+					printApp(app, "        ")
+				}
+			}
+			return nil
 		}
 		return nil
 	}
-
-	// Predefined applications (only in list mode)
 	fmt.Println("Predefined applications:")
-	for _, app := range config.PredefinedApplications {
-		printApp(app, "  ")
+	names := make([]string, 0, len(config.PredefinedApplications))
+	for n := range config.PredefinedApplications {
+		names = append(names, n)
 	}
-
+	sort.Strings(names)
+	for _, n := range names {
+		app := config.PredefinedApplications[n]
+		if app == nil {
+			continue
+		}
+		printApp(app, "  ")
+		if _, shadowed := cfgApps(cfg)[n]; shadowed {
+			fmt.Println("    (shadowed by user definition; not in effect)")
+		}
+	}
+	fmt.Println()
+	fmt.Println("Predefined application sets:")
+	setNames := make([]string, 0, len(config.PredefinedApplicationSets))
+	for n := range config.PredefinedApplicationSets {
+		setNames = append(setNames, n)
+	}
+	sort.Strings(setNames)
+	for _, n := range setNames {
+		set := config.PredefinedApplicationSets[n]
+		if set == nil {
+			continue
+		}
+		if detail {
+			fmt.Printf("  Application set: %s\n", set.Name)
+			fmt.Printf("    Members:\n")
+			for _, m := range set.Applications {
+				fmt.Printf("      %s\n", m)
+			}
+		} else {
+			fmt.Printf("  %-24s members: %s\n", set.Name, strings.Join(set.Applications, ", "))
+		}
+		if _, shadowed := cfgSets(cfg)[n]; shadowed {
+			fmt.Println("    (shadowed by user definition; not in effect)")
+		}
+	}
 	return nil
+}
+
+func cfgApps(cfg *config.Config) map[string]*config.Application {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Applications.Applications
+}
+func cfgSets(cfg *config.Config) map[string]*config.ApplicationSet {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Applications.ApplicationSets
 }
 
 func (c *CLI) showDynamicAddress() error {

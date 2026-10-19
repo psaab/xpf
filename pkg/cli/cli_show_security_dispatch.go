@@ -229,15 +229,17 @@ func (c *CLI) printAppDetail(cfg *config.Config, appName string) {
 	if proto == "" {
 		proto = "0"
 	}
-	timeout := 0
-	if app.InactivityTimeout > 0 {
-		timeout = app.InactivityTimeout
+	timeoutStr := "0"
+	if app.InactivityTimeoutNever {
+		timeoutStr = "never"
+	} else if app.InactivityTimeout > 0 {
+		timeoutStr = fmt.Sprintf("%d", app.InactivityTimeout)
 	}
 	algVal := "0"
 	if app.ALG != "" {
 		algVal = app.ALG
 	}
-	fmt.Printf("    IP protocol: %s, ALG: %s, Inactivity timeout: %d\n", proto, algVal, timeout)
+	fmt.Printf("    IP protocol: %s, ALG: %s, Inactivity timeout: %s\n", proto, algVal, timeoutStr)
 	srcPort := "0-0"
 	if app.SourcePort != "" {
 		srcPort = app.SourcePort

@@ -259,6 +259,14 @@ func ValidateICMPCodeValue(raw string, _ *Config) error {
 	return fmt.Errorf("not an ICMP code: %q (expected an integer 0..255; symbolic icmp-code names are not accepted)", raw)
 }
 
+// validateAppTimeoutLeaf accepts Junos seconds in [0,86400] or `never` (#15207).
+func validateAppTimeoutLeaf(raw string, _ *Config) error {
+	if strings.EqualFold(strings.TrimSpace(raw), "never") {
+		return nil
+	}
+	return ValidateInteger(appTimeoutMin, appTimeoutMax)(raw, nil)
+}
+
 // MaxLogicalUnit is the logical `unit <n>` ceiling: Junos accepts a logical
 // unit number of 0 through 16385 and the runtime keys
 // InterfaceConfig.Units by this int (#5829).

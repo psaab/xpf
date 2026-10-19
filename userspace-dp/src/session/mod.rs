@@ -475,25 +475,14 @@ pub(crate) fn secs_to_ns_saturating(secs: u64) -> u64 {
 /// operator-facing reject, this bound is the dataplane's clamp. Keep the two
 /// values in lockstep with the Go `appTimeoutMax`.
 pub(crate) const APP_INACTIVITY_TIMEOUT_MAX_SECS: u32 = 86400;
+/// #15207: wire sentinel for Junos `inactivity-timeout never` (86401).
+pub(crate) const APP_INACTIVITY_TIMEOUT_NEVER_SECS: u32 = 86401;
+pub(crate) const APP_INACTIVITY_TIMEOUT_NEVER_NS: u64 = u64::MAX;
 
-/// #3227: convert a matched application's per-application inactivity timeout
-/// (`PolicyEvaluationResult.inactivity_timeout`, in SECONDS) to the nanosecond
-/// session override stamped on `SessionMetadata.inactivity_timeout_ns`. `None`
-/// (or 0 seconds) maps to `None` (use the global per-protocol timeout — the
-/// historical behavior); a positive value is first clamped to
-/// `APP_INACTIVITY_TIMEOUT_MAX_SECS` (#3714 — mirrors the Go 86400 s commit
-/// gate so a corrupt/mixed-version wire value can't produce a never-expiring
-/// session) and then saturates at `MAX_SESSION_TIMEOUT_NS`, so a pathological
-/// config cannot wrap into a tiny window.
-///
-/// This is the single seconds→ns conversion authority for BOTH ingress paths —
-/// the local config-snapshot policy match (`parse_applications` →
-/// `PolicyEvaluationResult`) and the HA session-sync receive
-/// (`SessionSyncRequest.inactivity_timeout`) — so clamping here bounds every
-/// value that persists on a session or rides the sync wire to a peer.
 #[inline]
 pub(crate) fn app_inactivity_timeout_ns(secs: Option<u32>) -> Option<u64> {
     match secs {
+        Some(APP_INACTIVITY_TIMEOUT_NEVER_SECS) => Some(APP_INACTIVITY_TIMEOUT_NEVER_NS),
         Some(s) if s > 0 => Some(secs_to_ns_saturating(u64::from(
             s.min(APP_INACTIVITY_TIMEOUT_MAX_SECS),
         ))),

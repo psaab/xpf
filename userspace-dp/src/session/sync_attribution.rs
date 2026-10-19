@@ -90,6 +90,9 @@ impl<'a> SessionSyncAttribution<'a> {
                 .map_or("", |counter| counter.rule_id()),
             policy_counter_idx: metadata.policy_counter_idx,
             inactivity_timeout_secs: match metadata.inactivity_timeout_ns {
+                Some(ns) if ns == super::APP_INACTIVITY_TIMEOUT_NEVER_NS => {
+                    super::APP_INACTIVITY_TIMEOUT_NEVER_SECS
+                }
                 Some(ns) => u32::try_from(ns / 1_000_000_000).unwrap_or(u32::MAX),
                 None => 0,
             },
