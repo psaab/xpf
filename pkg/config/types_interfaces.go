@@ -157,11 +157,15 @@ type InterfaceDynamicDNSConfig struct {
 
 // VRRPGroup defines a VRRP (Virtual Router Redundancy Protocol) group.
 type VRRPGroup struct {
-	ID                 int
-	VirtualAddresses   []string // virtual IP addresses
-	Priority           int      // 1-255, default 100
-	Preempt            bool     // default true (Junos/RFC 5798); cleared only by `no-preempt` (#15047)
-	PreemptHoldTime    int      // seconds a higher-priority backup waits before preempting a live lower-priority master; 0 = immediate (Junos `preempt hold-time`)
+	ID               int
+	VirtualAddresses []string // virtual IP addresses
+	Priority         int      // 1-255, default 100
+	Preempt          bool     // default true (Junos/RFC 5798); cleared only by `no-preempt` (#15047)
+	// PreemptSet records that preemption was explicitly authored
+	// (`preempt` or Junos `no-preempt`, #15046) so the emitter can
+	// round-trip `no-preempt` instead of dropping it as the default.
+	PreemptSet         bool
+	PreemptHoldTime    int // seconds a higher-priority backup waits before preempting a live lower-priority master; 0 = immediate (Junos `preempt hold-time`)
 	AcceptData         bool
 	AdvertiseInterval  int    // seconds, default 1
 	AuthType           string // "md5" or ""

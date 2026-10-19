@@ -314,6 +314,7 @@ flag (read, but value-less)	interfaces <*> unit <*> family inet address <*> vrrp
 COMPARED	interfaces <*> unit <*> family inet address <*> vrrp-group <*> preempt hold-time
 COMPARED	interfaces <*> unit <*> family inet address <*> vrrp-group <*> priority
 advisory (read, value ignored, warning says so)	interfaces <*> unit <*> family inet address <*> vrrp-group <*> track-interface <*> priority-cost
+advisory (read, value ignored, warning says so)	interfaces <*> unit <*> family inet address <*> vrrp-group <*> track interface <*> priority-cost
 COMPARED	interfaces <*> unit <*> family inet address <*> vrrp-group <*> track-priority-cost
 COMPARED	interfaces <*> unit <*> family inet address <*> vrrp-group <*> virtual-address
 flag (read, but value-less)	interfaces <*> unit <*> family inet dhcp force-discover
@@ -342,6 +343,7 @@ flag (read, but value-less)	interfaces <*> unit <*> family inet6 address <*> vrr
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> preempt hold-time
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> priority
 advisory (read, value ignored, warning says so)	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> track-interface <*> priority-cost
+advisory (read, value ignored, warning says so)	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> track interface <*> priority-cost
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> track-priority-cost
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> virtual-address
 flag (read, but value-less)	interfaces <*> unit <*> family inet6 dad-disable

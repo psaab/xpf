@@ -78,6 +78,19 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// #15046 (A05-04) unknown vrrp-group child gate. vrrp-group was
+	// open-world: the Junos `track { interface … }` container,
+	// `no-preempt`, and plain garbage (`zzbogus`) all committed clean
+	// and were silently dropped by parseVRRPGroups' switch. Runs on
+	// the same group-expanded tree, right after the #1814 gate whose
+	// track-shape checks it extends to the Junos spelling. Strict:
+	// hard-reject; lenient: warn (#1960 no-brick). NOT closedWorld on
+	// the schema node — that inherits and cannot see Keys-packed runs.
+	vrrpChildWarnings15046, err := validateVRRPGroupChildrenAST15046(tree.Children, "", opts.lenientVRRPGroupChildren15046)
+	if err != nil {
+		return nil, err
+	}
+	trackWarnings = append(trackWarnings, vrrpChildWarnings15046...)
 
 	// #4288 VRRP authentication reject. The native dataplane is RFC 5798
 	// VRRPv3, which REMOVED authentication (VRRPv2 had it; v3 does not). xpf

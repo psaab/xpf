@@ -22,6 +22,7 @@ var vrrpGroupPropertyKeywords = map[string]bool{
 	"authentication-type": true,
 	"authentication-key":  true,
 	"track-interface":     true,
+	"track":               true,
 	"track-priority-cost": true,
 }
 
@@ -1450,6 +1451,7 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 				}
 			case "preempt":
 				vg.Preempt = true
+				vg.PreemptSet = true
 				// Junos `preempt hold-time <seconds>` packs the
 				// nested leaf onto the Keys run in the flat-set
 				// shape: ... preempt hold-time 30. Consume the
@@ -1462,7 +1464,12 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 					i += 2
 				}
 			case "no-preempt":
+				// Junos explicit opt-out (#15046): Preempt stays
+				// false (last statement wins, mirroring the
+				// child-node walk) and PreemptSet records the
+				// authored statement so it round-trips.
 				vg.Preempt = false
+				vg.PreemptSet = true
 			case "accept-data":
 				vg.AcceptData = true
 			case "advertise-interval":
@@ -1494,6 +1501,24 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 					// with the child-node prune.
 					if vg.TrackInterface == "" {
 						vg.TrackInterface = keys[i]
+					}
+				}
+			case "track":
+				// Junos container packed onto the Keys run
+				// (#15046): `track interface <if> priority-cost
+				// <n>`. First-wins like track-interface above;
+				// duplicates across spellings are gated by the
+				// #1814/#15046 pre-walk.
+				if i+2 < len(keys) && keys[i+1] == "interface" {
+					if vg.TrackInterface == "" {
+						vg.TrackInterface = keys[i+2]
+					}
+					i += 2
+					if i+2 < len(keys) && keys[i+1] == "priority-cost" {
+						if n, ok := parseTrackCost(keys[i+2]); ok && vg.TrackPriorityDelta == 0 {
+							vg.TrackPriorityDelta = n
+						}
+						i += 2
 					}
 				}
 			case "track-priority-cost":
@@ -1554,6 +1579,7 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 				}
 			case "preempt":
 				vg.Preempt = true
+				vg.PreemptSet = true
 				// Junos `preempt { hold-time <seconds>; }`. The
 				// hierarchical / braced shape carries hold-time as a
 				// child node; the structured flat-set replay may pack
@@ -1573,7 +1599,11 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 					}
 				}
 			case "no-preempt":
+				// Junos explicit opt-out (#15046). Last statement
+				// wins against `preempt`, matching statement-order
+				// semantics; PreemptSet records authorship.
 				vg.Preempt = false
+				vg.PreemptSet = true
 			case "accept-data":
 				vg.AcceptData = true
 			case "advertise-interval":
@@ -1604,6 +1634,21 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 							nestedTrackCost = n
 							nestedTrackCostSet = true
 						}
+					}
+				}
+			case "track":
+				// Junos container (#15046):
+				// `track { interface <if> { priority-cost <n>; } }`,
+				// braced, or the flat-set chain
+				// `track interface <if> priority-cost <n>` packed
+				// onto Keys / nested as children. Feeds the same
+				// single-track slot as track-interface.
+				if iface, cost, ok := parseJunosTrackContainer15046(prop); ok {
+					trackIface = iface
+					trackIfaceSet = true
+					if cost > 0 {
+						nestedTrackCost = cost
+						nestedTrackCostSet = true
 					}
 				}
 			case "track-priority-cost":
@@ -2277,6 +2322,58 @@ func parseTrackCost(v string) (int, bool) {
 	return n, true
 }
 
+// parseJunosTrackContainer15046 extracts (interface, priority-cost)
+// from a Junos `track` container node (#15046) in every spelling:
+// braced `track { interface <if> { priority-cost <n>; } }`, the
+// flat-set chain packed onto Keys (`track interface <if>
+// priority-cost <n>`), and a braced container whose interface child
+// packs its cost onto its own Keys. Returns ok=false when no
+// interface statement is present.
+func parseJunosTrackContainer15046(track *Node) (string, int, bool) {
+	// Keys-packed: Keys = [track, interface, <if>, ...].
+	if len(track.Keys) >= 3 && track.Keys[1] == "interface" {
+		cost := 0
+		for i := 3; i+1 < len(track.Keys); i++ {
+			if track.Keys[i] == "priority-cost" {
+				if n, ok := parseTrackCost(track.Keys[i+1]); ok {
+					cost = n
+				}
+			}
+		}
+		return track.Keys[2], cost, true
+	}
+	for _, iface := range track.FindChildren("interface") {
+		name := ""
+		if len(iface.Keys) >= 2 {
+			name = iface.Keys[1]
+		}
+		if name == "" {
+			continue
+		}
+		cost := 0
+		if pc := iface.FindChild("priority-cost"); pc != nil {
+			if v := nodeVal(pc); v != "" {
+				if n, ok := parseTrackCost(v); ok {
+					cost = n
+				}
+			}
+		}
+		// Flat-set chain: priority-cost nested as a child chain
+		// under interface, or packed onto the interface Keys.
+		if cost == 0 {
+			for i := 2; i+1 < len(iface.Keys); i++ {
+				if iface.Keys[i] == "priority-cost" {
+					if n, ok := parseTrackCost(iface.Keys[i+1]); ok {
+						cost = n
+					}
+				}
+			}
+		}
+		return name, cost, true
+	}
+	return "", 0, false
+}
+
 // checkVRRPGroupTrackShape applies the #1814 track-interface shape
 // checks to a single vrrp-group node. See validateVRRPTrackInterfaceAST.
 func checkVRRPGroupTrackShape(vg *Node, nodePath string, lenient bool) ([]string, error) {
@@ -2292,16 +2389,35 @@ func checkVRRPGroupTrackShape(vg *Node, nodePath string, lenient bool) ([]string
 			keysPacked++
 		}
 	}
-	tracks := vg.FindChildren("track-interface")
-	if total := keysPacked + len(tracks); total > 1 {
-		if !lenient {
-			return nil, fmt.Errorf("%s: %d track-interface statements; only one tracked interface is supported per vrrp-group", nodePath, total)
+	// Junos container spellings (#15046) feed the same single-track
+	// slot: count `track` children and Keys-packed `track interface`
+	// pairs alongside track-interface.
+	junosTracks := vg.FindChildren("track")
+	for _, k := range vg.Keys {
+		if k == "track" {
+			keysPacked++
 		}
-		if keysPacked > 0 {
-			// Child-node duplicates are warned by the prune below; the
-			// Keys-packed spelling needs its own warning (the compiler
-			// keys walk is first-wins).
-			warnings = append(warnings, fmt.Sprintf("%s: %d track-interface statements; keeping the first and ignoring the rest (#1814)", nodePath, total))
+	}
+	tracks := vg.FindChildren("track-interface")
+	// Effective tracked-interface nodes for cost validation: the
+	// interface child of each Junos track container.
+	var junosIfaceNodes []*Node
+	for _, tr := range junosTracks {
+		for _, iface := range tr.FindChildren("interface") {
+			junosIfaceNodes = append(junosIfaceNodes, iface)
+		}
+		// Keys-packed `track interface <if> priority-cost <n>;`
+		if len(tr.Keys) >= 3 && tr.Keys[1] == "interface" {
+			junosIfaceNodes = append(junosIfaceNodes, tr)
+		}
+	}
+	totalTracks := keysPacked + len(tracks) + len(junosTracks)
+	if totalTracks > 1 {
+		if !lenient {
+			return nil, fmt.Errorf("%s: %d track-interface statements; only one tracked interface is supported per vrrp-group", nodePath, totalTracks)
+		}
+		if keysPacked > 0 || len(junosTracks) > 0 {
+			warnings = append(warnings, fmt.Sprintf("%s: %d track-interface statements; keeping the first and ignoring the rest (#1814)", nodePath, totalTracks))
 		}
 	}
 	if len(tracks) > 1 {
@@ -2323,6 +2439,33 @@ func checkVRRPGroupTrackShape(vg *Node, nodePath string, lenient bool) ([]string
 		vg.Children = pruned
 		warnings = append(warnings, fmt.Sprintf("%s: %d track-interface statements; keeping the first (%s) and ignoring the rest (#1814)", nodePath, len(tracks), nodeVal(tracks[0])))
 		tracks = tracks[:1]
+	}
+	// Lenient cross-spelling duplicate: prune Junos track containers
+	// when a track-interface (or an earlier track) already won, so the
+	// compiler's last-wins child walk cannot resurrect the loser.
+	if lenient && totalTracks > 1 {
+		seenTrack := len(tracks) > 0
+		pruned := vg.Children[:0]
+		changed := false
+		for _, c := range vg.Children {
+			if c.Name() == "track" {
+				if seenTrack {
+					changed = true
+					continue
+				}
+				seenTrack = true
+			}
+			if c.Name() == "track-interface" && len(tracks) == 0 && totalTracks > 1 && seenTrack {
+				// A Junos track kept above wins over a later
+				// track-interface child.
+				changed = true
+				continue
+			}
+			pruned = append(pruned, c)
+		}
+		if changed {
+			vg.Children = pruned
+		}
 	}
 	if len(tracks) == 1 && tracks[0].FindChild("priority-cost") != nil && vg.FindChild("track-priority-cost") != nil {
 		warnings = append(warnings, fmt.Sprintf("%s: both nested track-interface priority-cost and legacy track-priority-cost are configured; the nested priority-cost wins", nodePath))
@@ -2369,6 +2512,25 @@ func checkVRRPGroupTrackShape(vg *Node, nodePath string, lenient bool) ([]string
 		if (k == "track-priority-cost" || k == "priority-cost") && i+1 < len(vg.Keys) {
 			if err := costCheck(vg.Keys[i+1], k); err != nil {
 				return nil, err
+			}
+		}
+	}
+	// Junos spelling costs (#15046): validate every priority-cost
+	// under a track container's interface child, plus the Keys-packed
+	// `track interface <if> priority-cost <n>` tail.
+	for _, iface := range junosIfaceNodes {
+		for _, pc := range iface.FindChildren("priority-cost") {
+			if len(pc.Keys) > 1 {
+				if err := costCheck(pc.Keys[1], "priority-cost"); err != nil {
+					return nil, err
+				}
+			}
+		}
+		for i, k := range iface.Keys {
+			if k == "priority-cost" && i+1 < len(iface.Keys) {
+				if err := costCheck(iface.Keys[i+1], "priority-cost"); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}

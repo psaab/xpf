@@ -85,6 +85,14 @@ type compileOpts struct {
 	// tolerant load / peer-sync paths so an already-persisted or peer-synced
 	// config an older binary silently accepted still boots (#1960).
 	lenientVRRPAuthentication bool
+	// lenientVRRPGroupChildren15046 (#15046) downgrades the unknown
+	// vrrp-group child gate (validateVRRPGroupChildrenAST15046) from a
+	// hard compile error to a cfg.Warnings entry on the tolerant load /
+	// peer-sync paths, so a persisted or peer-synced config carrying an
+	// undeclared child (or the Junos spellings an older binary dropped)
+	// still boots (#1960). Commit / commit-check stay strict.
+	lenientVRRPGroupChildren15046 bool
+
 
 	// lenientRenderUnsafeInterfaceNames (#9886) turns the render-unsafe
 	// interface-name gate (validateRenderUnsafeInterfaceNamesAST) from a hard
@@ -3443,6 +3451,7 @@ func lenientCompileOpts() compileOpts {
 		lenientUnknownTopLevelStanza:           true,
 		lenientVRRPTrackDuplicates:             true,
 		lenientVRRPAuthentication:              true,
+		lenientVRRPGroupChildren15046:          true,
 		lenientRenderUnsafeInterfaceNames:      true,
 		lenientDeviceMap:                       true,
 		lenientPolicyMatchAddress:              true,

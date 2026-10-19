@@ -457,9 +457,20 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 		// priority-cost stays untyped: the #1814 AST pre-walk in the
 		// compiler already strict-rejects out-of-range costs with curated
 		// errors (validateVRRPTrackInterfaceAST / parseTrackCost,
-		// compiler_interfaces.go:791); typing it here would shadow them.
+		// compiler_interfaces.go); typing it here would shadow them.
 		"track-interface": {desc: "Interface to track", args: 1, placeholder: "<interface>", closedWorld: true, children: map[string]*schemaNode{
 			"priority-cost": {desc: "Priority cost subtracted while the tracked interface is down", args: 1, placeholder: "<1..254>", children: nil},
+		}},
+		// Junos container spelling (#15046):
+		// `track { interface <if> { priority-cost <n>; } }` — an alias
+		// of the xpf `track-interface <if> { priority-cost <n>; }`
+		// leaf. Accepted in both braced and flat-set spellings; the
+		// compiler gives it the same single-track slot as
+		// track-interface (duplicate across spellings is #1814's gate).
+		"track": {desc: "Interface tracking (Junos track container)", children: map[string]*schemaNode{
+			"interface": {desc: "Interface to track", args: 1, placeholder: "<interface>", closedWorld: true, children: map[string]*schemaNode{
+				"priority-cost": {desc: "Priority cost subtracted while the tracked interface is down", args: 1, placeholder: "<1..254>", children: nil},
+			}},
 		}},
 		"track-priority-cost": {desc: "Priority cost when tracked interface fails", args: 1, placeholder: "<cost>", children: nil},
 	}}
