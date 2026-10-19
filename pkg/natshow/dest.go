@@ -125,8 +125,8 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 			fmt.Fprintf(w, "    %s\n", natScopeLine(rs, cfg, true))
 			fmt.Fprintf(w, "    Match:\n")
 			fmt.Fprintf(w, "      Destination addresses: %s\n", dstMatch)
-			if rule.Match.DestinationPort != 0 {
-				fmt.Fprintf(w, "      Destination port:      %d\n", rule.Match.DestinationPort)
+			if ports := RuleMatchDestPortsText(rule); ports != "" {
+				fmt.Fprintf(w, "      Destination port:      %s\n", ports)
 			}
 			if protos := rule.Match.ProtocolList(); len(protos) > 0 {
 				fmt.Fprintf(w, "      IP protocol:           %s\n", strings.Join(protos, " "))

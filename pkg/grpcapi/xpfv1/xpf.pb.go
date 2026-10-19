@@ -4576,8 +4576,14 @@ type NATDestInfo struct {
 	// #14579: the #3096 non-zone from-scope of this rule's rule-set.
 	FromInterface       string `protobuf:"bytes,9,opt,name=from_interface,json=fromInterface,proto3" json:"from_interface,omitempty"`
 	FromRoutingInstance string `protobuf:"bytes,10,opt,name=from_routing_instance,json=fromRoutingInstance,proto3" json:"from_routing_instance,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// #15226: the COMPLETE destination-port match set (sorted, valid
+	// 1..65535 ports only), so a multi-port or port-range DNAT rule is not
+	// understated as its first port. dst_port above keeps the first port for
+	// back-compat. Additive: an older client that does not read this decodes
+	// it as empty and behaves exactly as before.
+	DstPorts      []uint32 `protobuf:"varint,11,rep,packed,name=dst_ports,json=dstPorts,proto3" json:"dst_ports,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NATDestInfo) Reset() {
@@ -4678,6 +4684,13 @@ func (x *NATDestInfo) GetFromRoutingInstance() string {
 		return x.FromRoutingInstance
 	}
 	return ""
+}
+
+func (x *NATDestInfo) GetDstPorts() []uint32 {
+	if x != nil {
+		return x.DstPorts
+	}
+	return nil
 }
 
 type GetScreenRequest struct {
@@ -10043,7 +10056,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\x19GetNATDestinationResponse\x12)\n" +
 	"\x05rules\x18\x01 \x03(\v2\x13.xpf.v1.NATDestInfoR\x05rules\x12:\n" +
 	"\x19total_active_translations\x18\x02 \x01(\x05R\x17totalActiveTranslations\x12F\n" +
-	"\x11rule_set_sessions\x18\x03 \x03(\v2\x1a.xpf.v1.NATRuleSetSessionsR\x0fruleSetSessions\"\xf0\x02\n" +
+	"\x11rule_set_sessions\x18\x03 \x03(\v2\x1a.xpf.v1.NATRuleSetSessionsR\x0fruleSetSessions\"\x8d\x03\n" +
 	"\vNATDestInfo\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x19\n" +
 	"\bdst_addr\x18\x02 \x01(\tR\adstAddr\x12\x19\n" +
@@ -10055,7 +10068,8 @@ const file_xpf_proto_rawDesc = "" +
 	"\tpool_name\x18\b \x01(\tR\bpoolName\x12%\n" +
 	"\x0efrom_interface\x18\t \x01(\tR\rfromInterface\x122\n" +
 	"\x15from_routing_instance\x18\n" +
-	" \x01(\tR\x13fromRoutingInstance\"\x12\n" +
+	" \x01(\tR\x13fromRoutingInstance\x12\x1b\n" +
+	"\tdst_ports\x18\v \x03(\rR\bdstPorts\"\x12\n" +
 	"\x10GetScreenRequest\"A\n" +
 	"\x11GetScreenResponse\x12,\n" +
 	"\ascreens\x18\x01 \x03(\v2\x12.xpf.v1.ScreenInfoR\ascreens\"\xe9\x01\n" +

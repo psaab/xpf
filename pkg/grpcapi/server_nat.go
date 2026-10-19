@@ -83,8 +83,15 @@ func (s *Server) GetNATDestination(ctx context.Context, _ *pb.GetNATDestinationR
 				FromInterface:       rs.FromInterface,
 				FromRoutingInstance: rs.FromRoutingInstance,
 			}
-			if rule.Match.DestinationPort > 0 {
-				info.DstPort = uint32(rule.Match.DestinationPort)
+			// #15226: dst_port keeps the first port for back-compat;
+			// dst_ports carries the complete set so a multi-port or
+			// port-range rule is not understated as its first port.
+			if ports := natshow.RuleMatchDestPorts(rule); len(ports) > 0 {
+				info.DstPort = uint32(ports[0])
+				info.DstPorts = make([]uint32, len(ports))
+				for i, p := range ports {
+					info.DstPorts[i] = uint32(p)
+				}
 			}
 			if pool, ok := cfg.Security.NAT.Destination.Pools[rule.Then.PoolName]; ok {
 				info.TranslateIp = pool.Address
@@ -457,10 +464,8 @@ func (s *Server) GetNATRuleStats(_ context.Context, req *pb.GetNATRuleStatsReque
 				for _, rule := range rs.Rules {
 					action := natshow.DestRuleAction(rule)
 					// #8580: same singular-only copy, destination side.
-					dstMatch := natshow.RuleMatchDestination(rule)
-					if rule.Match.DestinationPort != 0 {
-						dstMatch += fmt.Sprintf(":%d", rule.Match.DestinationPort)
-					}
+					// #15226: the complete port set, not ":<first port>".
+					dstMatch := natshow.RuleMatchDestinationWithPorts(rule)
 					hitPkts, hitBytes, err := readCounter(dataplane.NATCounterTypeDest, rs.Name, rule.Name)
 					if err != nil {
 						return nil, status.Errorf(codes.Internal,

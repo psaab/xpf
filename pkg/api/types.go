@@ -550,11 +550,15 @@ type NATSourceInfo struct {
 
 // NATDestInfo holds destination NAT configuration.
 type NATDestInfo struct {
-	Name          string `json:"name"`
-	DstAddr       string `json:"dst_addr"`
-	DstPort       uint16 `json:"dst_port,omitempty"`
-	TranslateIP   string `json:"translate_ip"`
-	TranslatePort uint16 `json:"translate_port,omitempty"`
+	Name    string `json:"name"`
+	DstAddr string `json:"dst_addr"`
+	DstPort uint16 `json:"dst_port,omitempty"`
+	// #15226: the COMPLETE destination-port match set (sorted, valid
+	// 1..65535 ports only). dst_port keeps the first port for back-compat;
+	// a multi-port or port-range rule must not be understated as it.
+	DstPorts      []uint32 `json:"dst_ports,omitempty"`
+	TranslateIP   string   `json:"translate_ip"`
+	TranslatePort uint16   `json:"translate_port,omitempty"`
 	// #7473: the snapshot builder's fail-closed verdict. NotInstalled true
 	// means every other field here is CONFIGURATION, not live state — a hit
 	// counter's zero then means "not armed", not "no traffic matched".
