@@ -456,7 +456,11 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 					"(#3473/#8752)")
 		}
 		for _, w := range foldWidened {
-			dupMergeWarnings = append(dupMergeWarnings, foldWidenedWarning9571(w))
+			if w.semantic {
+				dupMergeWarnings = append(dupMergeWarnings, foldSemanticWarning14968(w))
+			} else {
+				dupMergeWarnings = append(dupMergeWarnings, foldWidenedWarning9571(w))
+			}
 		}
 	}
 
@@ -854,7 +858,11 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 					"(#3473/#8752)")
 		}
 		for _, w := range foldWidened {
-			dupMergeWarnings = append(dupMergeWarnings, foldWidenedWarning9571(w))
+			if w.semantic {
+				dupMergeWarnings = append(dupMergeWarnings, foldSemanticWarning14968(w))
+			} else {
+				dupMergeWarnings = append(dupMergeWarnings, foldWidenedWarning9571(w))
+			}
 		}
 	}
 

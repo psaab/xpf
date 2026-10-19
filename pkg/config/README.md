@@ -533,6 +533,24 @@ compile entry points apply the check; actions are read by calling
 `pkg/dataplane/userspace/dup_policy_fold_widening_9571_test.go`,
 `pkg/policymatch/fold_widening_9571_test.go`.
 
+**A duplicate policy name never re-gates a surviving action either (#14968,
+D30-02):** #9571 compared actions, but the fold also overwrites *what* the
+merged action applies to. Two permit statements differing in two or more
+match dimensions fold into the dimension-wise cross product (source-union ×
+destination-union × application-union), permitting combinations no statement
+permitted; an excluded-address flag/list authored on one statement is
+OR-ed/unioned onto a surviving deny, which then matches the complement and
+no longer covers traffic its own statement denied; and a `scheduler-name`
+authored on one statement is inherited (last-wins) by a surviving
+unconditional deny, which then applies only inside that window.
+`foldChangesPolicySemantics14968` (in `dup_instance_merge_8752.go`) compiles
+every source statement and the merged policy with `compilePolicy` and marks
+such folds `LenientContentDropped` exactly like a #9571 widening, with a
+`#14968` warning. Folds whose merged semantics are the union of the
+statements — a permit pair differing in at most one dimension, identical
+excluded sets, one shared scheduler — stay unpoisoned. Coverage:
+`dup_policy_fold_crossproduct_14968_test.go`.
+
 **Security-policy `then log` requires session-init/session-close (#3060):**
 the schema accepts a bare `then log`, and `compilePolicy` compiles it to a
 non-nil `PolicyLog` with both `SessionInit` and `SessionClose` false. The
