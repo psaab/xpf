@@ -135,6 +135,9 @@ func (d *Daemon) onSessionSyncBulkAckReceived() {
 func (d *Daemon) onSessionSyncPeerDisconnected() {
 	d.configSyncMu.Lock()
 	d.syncPeerConnected.Store(false)
+	d.configSyncAppliedGen = 0
+	d.configSyncPushedDigest = ""
+	d.configSyncPushedWireGen = 0
 	d.configSyncMu.Unlock()
 	gen := d.syncPrimeRetryGen.Add(1)
 
@@ -591,7 +594,7 @@ func (d *Daemon) pushConfigToPeerWithAuthorization(
 			return nil
 		}
 	}
-	if !d.noteConfigSharedWithPeerAtEpoch(configText, epoch) {
+	if !d.noteConfigSharedWithPeerAtEpochGen(configText, epoch, reservedGen) {
 		if auth != nil {
 			d.reportPeerSnapshotConfigSyncDeferred(configText, epoch, attemptState,
 				"peer connection changed after the config write; reconciliation will retry")
@@ -830,7 +833,7 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 			return
 		}
 	}
-	if !d.noteConfigSharedWithPeerAtEpoch(configText, epoch) {
+	if !d.noteConfigSharedWithPeerAtEpochGen(configText, epoch, reservedGen) {
 		d.clearConfigSyncPushedAtEpoch(epoch, gen)
 		if auth != nil {
 			d.reportPeerSnapshotConfigSyncDeferred(configText, epoch, attemptState,

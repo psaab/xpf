@@ -106,22 +106,28 @@ func TestHealSyncThatDiscardsAPartitionCommitRaisesADivergence_9530(t *testing.T
 	}
 }
 
-// The routine RG0 failover: the old primary's commit was made with the peer
-// reachable, so the sync that follows its demotion is not a divergence.
+// #15212 supersedes the #9530 reachable exemption: a commit made with the peer
+// reachable is still unshared until a positive apply ACK. The routine-failover
+// control is now "ACKed, then demoted" (see the ACK cell below); without an
+// ACK the replacement must alarm.
 func TestCommitMadeWithThePeerReachableIsNotADivergence_9530(t *testing.T) {
 	c0 := winnerConfig9530(t)
 	reachable := true
 	node1 := nodeOne9530(t, filepath.Join(t.TempDir(), "config"), c0, &reachable)
-	commit9530(t, node1, "routine")
+	routine := commit9530(t, node1, "routine")
+	// The push carried it at gen 7 and the peer ACKed that generation.
+	node1.NoteActivePushedAtGeneration(routine, 7)
+	node1.NotePeerConfigApplyAck(7)
 	node1.SetClusterReadOnly(true)
 	sync9530(t, node1, c0)
 	if _, _, ok := node1.ConfigSyncDivergence(); ok {
-		t.Errorf("a sync after a commit made with the peer reachable was reported as a divergence; every routine RG0 failover would alarm")
+		t.Errorf("a sync after a commit the peer ACKed was reported as a divergence; every routine RG0 failover would alarm")
 	}
 }
 
-// A push of exactly the marked content, made while the peer reads secondary,
-// shares it. A push of other content does not.
+// Only a positive ACK at or beyond the carrying generation clears the mark.
+// A push alone (socket write), a push of other content, a stale ACK, and a
+// NACK-equivalent (no ACK) all keep it (#15212).
 func TestOnlyAPushOfTheMarkedContentClearsTheMark_9530(t *testing.T) {
 	c0 := winnerConfig9530(t)
 
@@ -129,22 +135,36 @@ func TestOnlyAPushOfTheMarkedContentClearsTheMark_9530(t *testing.T) {
 	shared := nodeOne9530(t, filepath.Join(t.TempDir(), "config"), c0, &reachable)
 	reachable = false
 	tightened := commit9530(t, shared, "tightened")
-	shared.NoteActiveSharedWithPeer(tightened)
+	shared.NoteActivePushedAtGeneration(tightened, 9)
+	shared.NotePeerConfigApplyAck(9)
 	shared.SetClusterReadOnly(true)
 	sync9530(t, shared, c0)
 	if _, _, ok := shared.ConfigSyncDivergence(); ok {
-		t.Errorf("the partition commit was pushed to a secondary peer, and the later sync still reported a divergence")
+		t.Errorf("the partition commit was ACKed by a secondary peer, and the later sync still reported a divergence")
+	}
+
+	// Push without ACK must NOT clear.
+	reachableP := true
+	pushedOnly := nodeOne9530(t, filepath.Join(t.TempDir(), "config"), c0, &reachableP)
+	reachableP = false
+	t2 := commit9530(t, pushedOnly, "tightened")
+	pushedOnly.NoteActivePushedAtGeneration(t2, 9)
+	pushedOnly.SetClusterReadOnly(true)
+	sync9530(t, pushedOnly, c0)
+	if _, _, ok := pushedOnly.ConfigSyncDivergence(); !ok {
+		t.Errorf("a push without an apply ACK cleared the unshared mark (#15212)")
 	}
 
 	reachable2 := true
 	other := nodeOne9530(t, filepath.Join(t.TempDir(), "config"), c0, &reachable2)
 	reachable2 = false
 	commit9530(t, other, "tightened")
-	other.NoteActiveSharedWithPeer(c0)
+	other.NoteActivePushedAtGeneration(c0, 9)
+	other.NotePeerConfigApplyAck(9)
 	other.SetClusterReadOnly(true)
 	sync9530(t, other, c0)
 	if _, _, ok := other.ConfigSyncDivergence(); !ok {
-		t.Errorf("a push of DIFFERENT content cleared the unshared mark, so the heal discarded the partition commit silently")
+		t.Errorf("an ACK for DIFFERENT content cleared the unshared mark, so the heal discarded the partition commit silently")
 	}
 }
 

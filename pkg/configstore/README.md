@@ -362,13 +362,18 @@ A node cannot recognise that from its own history alone:
 
 So the store keeps a mark (`unshared_9530.go`):
 - **Mark.** Every local promotion of the active config (commit, commit
-  confirmed, the commit-confirmed timeout revert) made while the peer is
-  unreachable (`SetPeerReachableFn`, wired by the daemon) records the new
-  active's digest in `.configdb/unshared.json`. The mark is sticky: a later local
-  commit carries it to the new active, even with the peer back.
-- **Clear.** `NoteActiveSharedWithPeer` clears it when the daemon pushed exactly
-  that content while it was RG0 primary and the peer read secondary. A sync of
-  exactly the marked content also clears it, because the peer evidently holds it.
+  confirmed, the commit-confirmed timeout revert) records the new active's
+  digest in `.configdb/unshared.json`. #9530 marked only promotions made
+  while the peer was unreachable; #15212 marks all of them, because a
+  reachable peer may still fail to apply the pushed generation. The mark is
+  sticky: a later local commit carries it to the new active, even with the
+  peer back.
+- **Clear.** The daemon stamps the carrying wire generation when it pushes
+  exactly that content (`NoteActivePushedAtGeneration`), and the mark clears
+  only on a positive config-apply ACK at or beyond that generation
+  (`NotePeerConfigApplyAck`). A queued socket write, a stale ACK, and a NACK
+  never clear it. A sync of exactly the marked content also clears it,
+  because the peer evidently holds it.
 - **Divergence.** `SyncApply` classifies under its existing mutex, before it
   replaces the active config. A sync that replaces a still-marked active records
   a `SyncDivergence` and logs it at Error. `ConfigSyncDivergence` names the
@@ -382,9 +387,6 @@ So the store keeps a mark (`unshared_9530.go`):
 The heal still adopts the winner's config. This is the issue's option (b): alarm
 loudly and name the slot, rather than refuse the sync on a node that has already
 yielded.
-
-Residual: a push counted as shared but dropped before delivery, followed by a
-demotion before the reconciler re-pushes, is a false negative.
 
 ### At-rest crypto hardening notes (#4579 A4-05/A4-06, #4705, #5231, #5638)
 

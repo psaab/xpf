@@ -688,13 +688,21 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				"applied_gen", appliedGen, "last_sent_gen", lastSent)
 			return
 		}
+		advanced := false
 		for {
 			old := s.peerAppliedConfigGen.Load()
-			if appliedGen <= old || s.peerAppliedConfigGen.CompareAndSwap(old, appliedGen) {
+			if appliedGen <= old {
+				break
+			}
+			if s.peerAppliedConfigGen.CompareAndSwap(old, appliedGen) {
+				advanced = true
 				break
 			}
 		}
 		s.mu.Unlock()
+		if advanced && s.OnPeerConfigApplyAck != nil {
+			s.OnPeerConfigApplyAck(appliedGen)
+		}
 		slog.Debug("cluster sync: peer acknowledged applied config", "gen", appliedGen)
 	case syncMsgHeartbeat:
 		if conn == nil {
