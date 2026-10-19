@@ -3896,6 +3896,22 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   `clearPeerTransferOutOverrideLocked`, keeping the override/snapshot
   pairing), before its election runs; other RGs' live transfers are
   untouched. `ResetAllFailover` inherits this via `ResetFailover`.
+- **A single-RG `ResetFailover` must NOT clear the node-global
+  kernel-upgrade hold (#15239, A56-01).** The hold is node-scoped — an
+  unverified candidate kernel stays SECONDARY on every RG until the
+  promotion marker confirms it — but `ResetFailover(rgID)` dropped it
+  inline, so `request chassis cluster failover reset redundancy-group 1`
+  (or `cluster-failover-reset:1`) on a candidate-trialling node made the
+  whole node election-eligible and let it claim primary before
+  xpf-kernel-promote verified the dataplane. `ResetFailover` now leaves
+  the hold in place (its per-RG work — manual-failover clear, transfer
+  state, weight recalc — still runs; the election stays held). The hold
+  is released only by the promotion-marker reconcile
+  (`ClearKernelUpgradeHold`), by `ResetAllFailover` (the orchestrator
+  rejoin via `xpfd upgrade kernel rejoin` / kernel self-recovery, which
+  clears it synchronously before the per-RG resets, preserving the
+  never-both-down property at the all-RG scope), or by the reboot to
+  known-good where it is never re-set.
 - **Removing an RG must stop its armed hold timer (#5245).** `SetRGReady`
   arms a per-RG `time.AfterFunc` takeover-hold timer whose closure captures
   the `*RedundancyGroupState` and re-runs election on expiry. `UpdateConfig`'s

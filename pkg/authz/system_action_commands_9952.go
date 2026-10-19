@@ -36,6 +36,10 @@ var SystemActionVerbCommand = map[string]string{
 	"power-off":          "request system power-off",
 	"zeroize":            "request system zeroize",
 	"in-service-upgrade": "request system software in-service-upgrade",
+	// #15239: sent only by `xpfd upgrade kernel rejoin` (the orchestrator
+	// node rejoin); charged as the cluster-failover request family it
+	// belongs to (no dedicated operator CLI spelling exists).
+	"cluster-rejoin": "request chassis cluster failover",
 
 	// The `clear ...` family.
 	"clear-config-lock":           "clear system config-lock",

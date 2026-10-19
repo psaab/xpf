@@ -164,10 +164,12 @@ func (d *Daemon) holdSecondaryIfKernelCandidateArmed() {
 func (d *Daemon) reconcileKernelUpgradeHold() {
 	if d.cluster == nil || !d.cluster.KernelUpgradeHeld() {
 		// The hold is gone (or never set), possibly cleared by another path
-		// (rejoin / manual reset). Drop our local fail-closed bookkeeping so a
-		// future hold starts clean. #14404: also clear the VRRP/RG mirrors —
-		// a hold cleared via ResetFailover/rejoin bypasses the release
-		// sites below, and a stale VRRP hold would block promotion forever.
+		// (ResetAllFailover rejoin / promotion reconcile). Drop our local
+		// fail-closed bookkeeping so a future hold starts clean. #14404:
+		// also clear the VRRP/RG mirrors — a hold cleared via
+		// ResetAllFailover/rejoin bypasses the release sites below, and a
+		// stale VRRP hold would block promotion forever. (A single-RG
+		// ResetFailover no longer clears the hold, #15239.)
 		d.kernelUpgradeHoldFailClosed = false
 		d.syncRGKernelUpgradeHold()
 		return

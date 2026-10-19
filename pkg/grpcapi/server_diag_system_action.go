@@ -441,6 +441,23 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 		return &pb.SystemActionResponse{Message: "D11 attestation authority armed"}, nil
 	}
 	switch req.Action {
+	case "cluster-rejoin":
+		// #15239 (A56-01): the orchestrator node rejoin. ResetAllFailover
+		// clears every RG's manual failover AND the node-global
+		// kernel-upgrade election hold, synchronously — the only reset
+		// producer allowed to release the hold. A per-RG
+		// cluster-failover-reset:<rg> must never do this (see
+		// Manager.ResetFailover).
+		if s.cluster == nil {
+			return nil, status.Error(codes.FailedPrecondition, "cluster not configured")
+		}
+		if err := s.cluster.ResetAllFailover(); err != nil {
+			return nil, status.Errorf(codes.Internal, "%v", err)
+		}
+		return &pb.SystemActionResponse{
+			Message: "Cluster rejoin: failover reset for all redundancy groups (kernel-upgrade hold cleared)",
+		}, nil
+
 	case "dynamic-address-shrink-ack":
 		return s.acknowledgeDynamicAddressShrink(ctx, req)
 

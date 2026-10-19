@@ -356,7 +356,25 @@ func (m *Manager) ForceSecondary() error {
 	return nil
 }
 
-// ResetFailover clears manual failover and resumes normal election.
+// ResetFailover clears manual failover for one redundancy group and resumes
+// normal election for that group.
+//
+// It deliberately does NOT clear the node-global kernel-upgrade election
+// hold (#15239, A56-01). The hold is node-scoped: an unverified candidate
+// kernel must stay SECONDARY on every RG until the promotion marker
+// confirms it. A single-RG operator reset (`request chassis cluster
+// failover reset redundancy-group <N>`, or the gRPC
+// cluster-failover-reset:<N> action) is a per-RG rejoin assertion, not a
+// node rejoin — clearing the hold here made the whole node
+// election-eligible and let it claim primary on every RG before
+// xpf-kernel-promote verified the dataplane. The hold is released only by
+// the promotion-marker reconcile (ClearKernelUpgradeHold), by
+// ResetAllFailover (the orchestrator rejoin via `xpfd upgrade kernel
+// rejoin` / RejoinAndConfirm and kernel self-recovery — every configured
+// RG, synchronously, preserving the never-both-down property at the
+// all-RG scope where it belongs), or by the reboot to known-good where it
+// is never re-set. While the hold is set, the recalcWeight election below
+// still runs but electRG/electSingleNode keep every RG secondary.
 func (m *Manager) ResetFailover(rgID int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -364,18 +382,8 @@ func (m *Manager) ResetFailover(rgID int) error {
 	if !ok {
 		return fmt.Errorf("redundancy group %d not found", rgID)
 	}
-	// A rejoin (manual `request ... reset`, or the kernel-roll orchestrator's
-	// `xpfd upgrade kernel rejoin`) means this node is verified and re-entering
-	// the cluster — drop the kernel-upgrade election hold too, SYNCHRONOUSLY, so
-	// the node is election-eligible the instant rejoin returns. Otherwise the
-	// hold would persist until the daemon's 5s reconcile tick, and the kernel-
-	// roll driver — which advances to drain the PEER as soon as rejoin returns —
-	// could leave BOTH nodes secondary for up to 5s (r2 Codex HIGH never-both-
-	// down). Cleared inline (we already hold m.mu); the recalcWeight election
-	// below then lets the node reclaim its role.
 	if m.kernelUpgradeHold {
-		m.kernelUpgradeHold = false
-		slog.Info("cluster: kernel-upgrade hold cleared by failover reset (rejoin)", "rg", rgID)
+		slog.Info("cluster: failover reset leaves kernel-upgrade hold in place (single-RG reset is not a node rejoin)", "rg", rgID)
 	}
 	rg.ManualFailover = false
 	rg.transferCommitRolePinned = false

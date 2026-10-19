@@ -314,9 +314,9 @@ func TestSyncParser_ScopedAndExact(t *testing.T) {
 	}
 }
 
-// TestParseRGIDs proves ResetFailover enumerates ALL configured RGs
-// (Codex: shipped configs include RG 2; ForceSecondary demotes all RGs so
-// reset must cover all of them, not a hardcoded {0,1}).
+// TestParseRGIDs proves the configured-RG enumeration covers ALL
+// configured RGs (Codex: shipped configs include RG 2; the per-RG rejoin
+// readback must cover all of them, not a hardcoded {0,1}).
 func TestParseRGIDs(t *testing.T) {
 	s := strings.Join([]string{
 		"Node name: node0",
@@ -336,18 +336,19 @@ func TestParseRGIDs(t *testing.T) {
 // TestConfiguredRGsFromStatus_FailsClosed proves the #5044 fix: RG enumeration
 // FAILS CLOSED on a transient status error or an unparseable status, instead of
 // the old {0,1,2} guess. The guess stranded RG>=3 held ForceSecondary (a
-// cluster can run >3 redundancy groups), letting ResetFailover return nil and
+// cluster can run >3 redundancy groups), letting a reset return nil and
 // the orchestrator advance to drain/recreate the peer that still owned those
 // groups — a no-primary window. RED if a fix-forward reintroduces any hardcoded
-// fallback RG set.
+// fallback RG set. (Since #15239 the enumeration feeds the per-RG rejoin
+// readback, LocalRejoinComplete; the reset itself is the single
+// cluster-rejoin action.)
 func TestConfiguredRGsFromStatus_FailsClosed(t *testing.T) {
 	// A transient `show chassis cluster status` failure must NOT resolve to a
-	// guessed set — it must return an error so ResetFailover propagates it.
+	// guessed set — it must return an error so the rejoin readback fails closed.
 	if rgs, err := configuredRGsFromStatus("", errors.New("gRPC unavailable")); err == nil {
 		t.Fatalf("transient status error: got rgs=%v err=nil, want an error "+
 			"(no {0,1,2} fallback)", rgs)
 	}
-
 	// A status that parses to no RG headers (empty/garbled render) must also
 	// fail closed rather than guess.
 	if rgs, err := configuredRGsFromStatus("Node name: node0\n(no groups)\n", nil); err == nil {
