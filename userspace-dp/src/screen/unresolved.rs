@@ -243,17 +243,25 @@ impl ScreenState {
     /// actual cause (every statement under the profile is a modifier rather
     /// than a check), and gives a different remedy.
     fn maybe_warn_inert_profile(&mut self, zone: &str, now_secs: u64) {
-        let Some(profile) = self.inert_profile_refs.get(zone).map(|r| r.profile.clone()) else {
+        if !self.inert_profile_refs.contains_key(zone) {
             return;
+        }
+        let counter = match self.inert_profile_warn_counters.get_mut(zone) {
+            Some(counter) => counter,
+            None => self
+                .inert_profile_warn_counters
+                .entry(zone.to_string())
+                .or_default(),
         };
-        let limited = self
-            .inert_profile_warn_counters
-            .entry(zone.to_string())
-            .or_default()
-            .increment(now_secs, MISSING_PROFILE_WARN_RATE_LIMIT_PER_SEC);
+        let limited = counter.increment(now_secs, MISSING_PROFILE_WARN_RATE_LIMIT_PER_SEC);
         if !limited {
             self.inert_profile_warn_count = self.inert_profile_warn_count.wrapping_add(1);
-            eprintln!("{}", inert_profile_warn_message(zone, &profile));
+            let profile = &self
+                .inert_profile_refs
+                .get(zone)
+                .expect("inert profile checked above")
+                .profile;
+            eprintln!("{}", inert_profile_warn_message(zone, profile));
         }
     }
 
@@ -264,17 +272,24 @@ impl ScreenState {
     /// than returning Pass. O(1) lookup; the WARN is bounded to one per zone
     /// per second.
     fn maybe_warn_missing_profile(&mut self, zone: &str, now_secs: u64) {
-        let Some(profile) = self.missing_profile_refs.get(zone) else {
+        if !self.missing_profile_refs.contains_key(zone) {
             // Zone has no screen configured at all — legit Pass, no signal.
             return;
+        }
+        let counter = match self.missing_profile_warn_counters.get_mut(zone) {
+            Some(counter) => counter,
+            None => self
+                .missing_profile_warn_counters
+                .entry(zone.to_string())
+                .or_default(),
         };
-        let limited = self
-            .missing_profile_warn_counters
-            .entry(zone.to_string())
-            .or_default()
-            .increment(now_secs, MISSING_PROFILE_WARN_RATE_LIMIT_PER_SEC);
+        let limited = counter.increment(now_secs, MISSING_PROFILE_WARN_RATE_LIMIT_PER_SEC);
         if !limited {
             self.missing_profile_warn_count = self.missing_profile_warn_count.wrapping_add(1);
+            let profile = self
+                .missing_profile_refs
+                .get(zone)
+                .expect("missing profile checked above");
             eprintln!("{}", missing_profile_warn_message(zone, profile));
         }
     }
