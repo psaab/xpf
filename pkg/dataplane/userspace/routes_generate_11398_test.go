@@ -53,6 +53,66 @@ func TestLearnedBlackholeDiscardBeatsDefault11398(t *testing.T) {
 	assertGeneratedLPM11398(t, routes)
 }
 
+// #15742: the split-RG shape. The config default (pref 5, via the WAN
+// gateway) stays in the snapshot on BOTH nodes — buildRouteSnapshots
+// does not HA-filter — and the cluster-mode unreachable default arrives
+// only via the kernel import (RTN_UNREACHABLE metric 20, imported at
+// the fixed preference 200). The helper FIB must carry BOTH rows for
+// the default prefix, forwarding (5) ahead of reject (200), so the
+// Rust preference tie-break forwards when the egress RG is locally
+// owned and terminates on the reject when HA enforcement demotes the
+// forwarding row. Before the fix the reject row never existed and the
+// demoted lookup had no terminal default at all.
+// FAIL-ON-REVERT: drop the Reject mapping in addLearnedRouteSnapshots
+// (or the RTN_UNREACHABLE adoption in the importer) and the reject row
+// vanishes.
+func TestLearnedClusterRejectCoexistsWithConfigDefault15742(t *testing.T) {
+	origRules := ruleListFn
+	t.Cleanup(func() { ruleListFn = origRules })
+	ruleListFn = func(int) ([]netlink.Rule, error) { return nil, nil }
+	withLearnedRoutes(t, fixedLearned(routing.LearnedRoute{
+		TableID:     254,
+		Family:      netlink.FAMILY_V4,
+		Destination: "0.0.0.0/0",
+		Protocol:    "static",
+		Reject:      true,
+	}))
+
+	cfg := &config.Config{}
+	// Preference 5 is the compiler's static default (compiler_routing.go);
+	// the raw fixture must carry it explicitly or it reads as 0 — the
+	// most-preferred value — and suppresses the imported row.
+	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{{
+		Destination: "0.0.0.0/0",
+		Preference:  5,
+		NextHops:    []config.NextHopEntry{{Address: "198.51.100.1"}},
+	}}
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRouteSnapshots: %v", err)
+	}
+	var defaults []RouteSnapshot
+	for _, r := range routes {
+		if r.Table == "inet.0" && r.Family == "inet" && r.Destination == "0.0.0.0/0" && r.NextTable == "" {
+			defaults = append(defaults, r)
+		}
+	}
+	if len(defaults) != 2 {
+		t.Fatalf("want config default + imported cluster reject, got %d defaults: %+v (all routes %+v)", len(defaults), defaults, routes)
+	}
+	// Sorted by preference: forwarding default (5) first, reject (200) last.
+	fwd, rej := defaults[0], defaults[1]
+	if fwd.Reject || fwd.Discard || len(fwd.NextHops) != 1 || fwd.NextHops[0] != "198.51.100.1" {
+		t.Fatalf("first default = %+v, want the forwarding config default", fwd)
+	}
+	if !rej.Reject || rej.Discard || len(rej.NextHops) != 0 {
+		t.Fatalf("second default = %+v, want the imported cluster reject with no next hops", rej)
+	}
+	if !(fwd.Preference < rej.Preference) {
+		t.Fatalf("preferences fwd=%d rej=%d, want forwarding strictly preferred so the reject only terminates a demoted lookup", fwd.Preference, rej.Preference)
+	}
+}
+
 func assertGeneratedLPM11398(t *testing.T, routes []RouteSnapshot) {
 	t.Helper()
 	inside := lookupIPv4Snapshot11398(t, routes, "10.9.9.9")

@@ -433,6 +433,105 @@ fn inactive_owner_rg_redirects_established_session_to_fabric() {
     );
 }
 
+/// #15742: the split-RG FIB shape. The snapshot carries BOTH defaults at
+/// the same prefix: the config default (preference 5, via the RG1-owned
+/// WAN egress) and the imported cluster-mode reject (preference 200,
+/// the RTN_UNREACHABLE kernel form of the cluster Null0 default). The
+/// preference tie-break must keep the forwarding row selected while
+/// RG1 is locally active — the reject is a terminal fallback, never a
+/// shadow of the real default — and the HA gate + fabric redirect must
+/// still fire when RG1 is peer-owned, which is the whole point of the
+/// imported row: without it the demoted node had NO default and the
+/// lookup resolved NoRoute with no fabric redirect.
+/// FAIL-ON-REVERT: sort same-prefix rows discard-first (or drop the
+/// preference tie-break) and the active cell resolves RejectRoute.
+#[test]
+fn split_rg_cluster_reject_does_not_shadow_forwarding_default_15742() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    // The fixture's defaults are preference 0; restamp them to the live
+    // shape (config 5, imported reject 200) and add the reject rows.
+    for route in &mut snapshot.routes {
+        route.preference = 5;
+    }
+    snapshot.routes.push(RouteSnapshot {
+        reject: true,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: false,
+        next_table: String::new(),
+        preference: 200,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    snapshot.routes.push(RouteSnapshot {
+        reject: true,
+        table: "inet6.0".to_string(),
+        family: "inet6".to_string(),
+        destination: "::/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: false,
+        next_table: String::new(),
+        preference: 200,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    let state = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+
+    // RG1 (WAN egress owner) locally active: the forwarding default
+    // wins for both families; the reject must not shadow it.
+    let active = Arc::new(ArcSwap::from_pointee(BTreeMap::from([(
+        1,
+        active_ha_runtime(now_secs),
+    )])));
+    for dst in [
+        IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 0x200)),
+    ] {
+        let resolved = enforce_ha_resolution(
+            &state,
+            &active,
+            lookup_forwarding_resolution(&state, dst).resolution,
+        );
+        // ForwardCandidate (neighbor resolved) or MissingNeighbor
+        // (route selected, neighbor pending — the v6 fixture carries
+        // no WAN gateway neighbor) both prove the forwarding default
+        // was selected; RejectRoute would prove the imported row
+        // shadowed it.
+        assert!(
+            matches!(
+                resolved.disposition,
+                ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+            ),
+            "active RG1 must select the config default, not the cluster reject ({dst}): got {:?}",
+            resolved.disposition
+        );
+    }
+
+    // RG1 peer-owned (the split): the same lookup is HA-demoted and
+    // fabric-redirected to the peer that owns the WAN egress.
+    let inactive = Arc::new(ArcSwap::from_pointee(BTreeMap::from([(
+        1,
+        inactive_ha_runtime(now_secs),
+    )])));
+    let blocked = enforce_ha_resolution(
+        &state,
+        &inactive,
+        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution,
+    );
+    assert_eq!(blocked.disposition, ForwardingDisposition::HAInactive);
+    let redirected = redirect_via_fabric_if_needed(&state, blocked, 24, None);
+    assert_eq!(
+        redirected.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "split-RG transit must fabric-redirect, not terminate on the imported reject"
+    );
+}
+
 #[test]
 fn inactive_owner_missing_neighbor_redirects_to_fabric() {
     let mut snapshot = nat_snapshot_with_fabric();

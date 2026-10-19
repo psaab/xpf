@@ -24,10 +24,10 @@ var ruleListFn = netlink.RuleList
 // NextHops are part of the key so distinct same-preference QNH metric-tier
 // rows survive deduplication; equal-metric members are grouped in one row.
 func routeSnapshotDedupeKey(snap RouteSnapshot) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%v|%s|%t|%d|%d|%d",
+	return fmt.Sprintf("%s|%s|%s|%s|%v|%s|%t|%t|%d|%d|%d",
 		snap.Table, snap.Family, snap.Destination,
 		strings.Join(snap.NextHops, ","), snap.NextHopWeights, snap.NextTable,
-		snap.Discard, snap.Preference, snap.RulePriority, snap.MTU)
+		snap.Discard, snap.Reject, snap.Preference, snap.RulePriority, snap.MTU)
 }
 
 // ipRuleHasUnsupportedRouteLeakSelectors reports whether the destination-only
@@ -1655,7 +1655,20 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 					learnedPreference = protocolDistance
 				}
 			}
-			if best <= comparisonPreference {
+			// #15742: a negative (discard/reject) learned row is NEVER
+			// suppressed by a same-prefix forwarding row. The two rows
+			// answer different questions: the forwarding row forwards
+			// while its egress is usable, the negative row is the
+			// kernel's terminal for the same prefix (the cluster-mode
+			// unreachable default is the load-bearing case — the config
+			// default at pref 5 must not suppress it, or a split-RG node
+			// whose egress RG is peer-owned loses its terminal route).
+			// Preference ordering (forwarding 5 < negative 200) keeps
+			// the forwarding row selected whenever it is usable; the
+			// Rust FIB's terminal-row handling (#15098) only reaches
+			// the negative row when no drivable forwarding member
+			// exists at that prefix.
+			if best <= comparisonPreference && !lr.Discard && !lr.Reject {
 				// Keep a configured route that is at least as preferred as
 				// the learned protocol route. A worse configured fallback
 				// remains beside it for the Rust FIB's preference ordering.
@@ -1665,7 +1678,7 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 				// only to the best configured candidate whose next hops match
 				// after declared config-side interfaces are resolved. Prefix
 				// matching uses the same canonical identity as suppression.
-				if lr.MTU > 0 && !lr.Discard {
+				if lr.MTU > 0 && !lr.Discard && !lr.Reject {
 					for i, snap := range existing {
 						if snap.NextTable != "" || snap.Discard ||
 							snap.Table != table || snap.Family != family ||
@@ -1690,6 +1703,7 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 			Family:         family,
 			Destination:    dest,
 			Discard:        lr.Discard,
+			Reject:         lr.Reject,
 			NextHops:       lr.NextHops,
 			NextHopWeights: nonDefaultRouteWeights(lr.NextHopWeights),
 			Preference:     learnedPreference,
