@@ -696,6 +696,14 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 		if bgp.MultipathMultipleAS {
 			b.WriteString(" bgp bestpath as-path multipath-relax\n")
 		}
+		// #15185: `bgp dampening` is an address-family command in bgpd.
+		// Rendered at router level, bgpd files it under
+		// `address-family ipv4 unicast` only, so IPv6 unicast route-flap
+		// damping was silently never enabled. Compute the line once here
+		// (defaults + the #14585 suppress<=reuse belt preserved) and emit
+		// it inside each rendered unicast AF block below — never at
+		// router level.
+		var dampeningLine string
 		if bgp.Dampening {
 			hl := bgp.DampeningHalfLife
 			if hl == 0 {
@@ -717,7 +725,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 				slog.Warn("frr: omitting bgp dampening with suppress <= reuse (#14585)",
 					"reuse", reuse, "suppress", suppress)
 			} else {
-				fmt.Fprintf(&b, " bgp dampening %d %d %d %d\n", hl, reuse, suppress, maxSup)
+				dampeningLine = fmt.Sprintf("  bgp dampening %d %d %d %d\n", hl, reuse, suppress, maxSup)
 			}
 		}
 		// validNeighbors excludes remote-as-0 neighbors (#2963/#5518). Every
@@ -1046,8 +1054,9 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 		// reaches the IGP `maximum-paths` lines (OSPF/zebra) above via
 		// ecmpMaxPaths.
 		bgpMaxPaths := bgp.Multipath
-		if len(inet4Neighbors) > 0 || len(inet4DisabledNeighbors) > 0 || bgpMaxPaths > 1 {
+		if len(inet4Neighbors) > 0 || len(inet4DisabledNeighbors) > 0 || bgpMaxPaths > 1 || dampeningLine != "" {
 			b.WriteString(" !\n address-family ipv4 unicast\n")
+			b.WriteString(dampeningLine)
 			if bgpMaxPaths > 1 {
 				fmt.Fprintf(&b, "  maximum-paths %d\n", bgpMaxPaths)
 				// FRR `maximum-paths N` enables eBGP multipath only; iBGP
@@ -1113,8 +1122,9 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 		// #9667: also opened for bare-token IPv6 redistribution alone. FRR
 		// accepts the block with no IPv6 neighbor, and a later IPv6 peer then
 		// sees the routes.
-		if len(inet6Neighbors) > 0 || bgpMaxPaths > 1 || bgpIPv6Redist.Len() > 0 {
+		if len(inet6Neighbors) > 0 || bgpMaxPaths > 1 || bgpIPv6Redist.Len() > 0 || dampeningLine != "" {
 			b.WriteString(" !\n address-family ipv6 unicast\n")
+			b.WriteString(dampeningLine)
 			if bgpMaxPaths > 1 {
 				fmt.Fprintf(&b, "  maximum-paths %d\n", bgpMaxPaths)
 				// iBGP multipath (#2978) — see the ipv4 block above.
