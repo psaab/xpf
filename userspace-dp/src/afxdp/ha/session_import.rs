@@ -1449,13 +1449,25 @@ impl crate::afxdp::ha::SessionDomain {
                     pending.len(),
                 ));
             }
+            let mut pptp_position = None;
             if let Some(call) = pptp_call {
                 // Queue after the session replica so the worker first has the
                 // discriminator-bearing session that this call resolves.
-                worker_queue::push_bounded(
+                // #15153 (B11-01): a refused association push is repair debt
+                // on the forward key, exactly like a refused UpsertSynced.
+                // The debt re-reads the shared entry at its FIFO boundary
+                // and handle_upsert_synced re-derives the association from
+                // entry.pptp_call_ids, so the worker still resolves the
+                // call's GRE instead of falling to unassociated handling.
+                if !worker_queue::push_bounded(
                     &mut pending,
                     WorkerCommand::InstallPptpAssociation(call),
-                );
+                ) {
+                    pptp_position = Some(worker_queue::session_import_repair_position(
+                        worker_id,
+                        pending.len(),
+                    ));
+                }
             }
             // #11718: publish positional repair debt before releasing `pending`;
             // otherwise repeated drains can cross the refused-import boundary
@@ -1474,6 +1486,15 @@ impl crate::afxdp::ha::SessionDomain {
             {
                 if position.is_none_or(|position| {
                     !worker_queue::record_session_import_repair(worker_id, &reverse.key, position)
+                }) {
+                    repair_overflow = true;
+                } else {
+                    repair_pending = true;
+                }
+            }
+            if let Some(position) = pptp_position {
+                if position.is_none_or(|position| {
+                    !worker_queue::record_session_import_repair(worker_id, &entry.key, position)
                 }) {
                     repair_overflow = true;
                 } else {

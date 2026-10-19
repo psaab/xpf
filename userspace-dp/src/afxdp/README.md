@@ -1538,6 +1538,18 @@ directly:
   (`2 * MAX_PENDING_WORKER_COMMANDS`) so a full queue ahead of a larger
   snapshot can obligate the whole refused tail; past that bound the #6929
   drop counter is the remaining signal.
+- A synced PPTP session's association is re-derived at install, not only
+  at import (#15153). The import fan-out queues one
+  `InstallPptpAssociation` per import on the then-live worker generation;
+  a respawned worker starts with an empty association table, and the
+  reconcile replay (bring-up, late, and the repair re-read above) queues
+  only `UpsertSynced`. So `handle_upsert_synced` re-derives the call from
+  the shared entry's `pptp_call_ids` whenever the key discriminator is
+  `Pptp(H)` and the pair decodes to that same handle, installing it via
+  `install_synced_association`. Without this the respawned worker held
+  the session but resolved the call's GRE to nothing (pre-#7699 flowless
+  handling). A refused import-time association push takes the same
+  repair debt as a refused upsert, keyed on the forward entry.
 - `drain_bounded_into` is how a worker consumes that queue (#7201).
   `apply_worker_commands` takes a **bounded prefix** of at most
   `WORKER_COMMAND_DRAIN_BUDGET` (256) commands into a worker-owned
