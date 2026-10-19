@@ -653,9 +653,10 @@ type Server struct {
 	// are exercisable without real netdevs (mirrors grpcapi).
 	ifindexByName         func(string) (int, error)
 	sharedBase            http.Handler
-	certGen               func(bindHost string) (tls.Certificate, *x509.Certificate, error)
-	tlsCertificate        atomic.Pointer[managementTLSCertificateState]
+	certGen               func(bindHosts []string) (tls.Certificate, *x509.Certificate, error)
+	tlsCertificateSlot    managementTLSCertificateSlot
 	tlsCertificateFiles   atomic.Pointer[managementTLSCertificateFiles]
+	httpsBindHosts        func() []string
 	tlsCertificateInvalid atomic.Bool
 	tlsDesired            atomic.Bool
 	tlsNow                func() time.Time
@@ -1059,7 +1060,21 @@ func NewServer(cfg Config) *Server {
 		privateKey:  cfg.TLSPrivateKey,
 	})
 	s.tlsDesired.Store(cfg.TLS && len(effectiveHTTPSAddrs(cfg)) > 0)
-	s.certGen = generateSelfSignedCertWithStatus
+	s.certGen = func(bindHosts []string) (tls.Certificate, *x509.Certificate, error) {
+		return generateSelfSignedCertAtWithStatusHosts(tlsDir, certPath, keyPath, bindHosts)
+	}
+
+	s.httpsBindHosts = func() []string {
+		var out []string
+		for _, addr := range effectiveHTTPSAddrs(cfg) {
+			host, _, err := net.SplitHostPort(addr)
+			if err != nil || host == "" {
+				continue
+			}
+			out = append(out, host)
+		}
+		return out
+	}
 
 	for _, addr := range effectiveHTTPAddrs(cfg) {
 		plan := s.planHTTPLeg(addr)
@@ -1421,13 +1436,21 @@ func (s *Server) buildHTTPServer(addr string, slot *authSlot) *http.Server {
 // the requested pair is invalid.
 func (s *Server) buildHTTPSServer(addr string, slot *authSlot) (*http.Server, error) {
 	s.tlsCertificateMu.Lock()
-	defer s.tlsCertificateMu.Unlock()
-	cert, err := s.loadManagementTLSCertificate(addr)
+	cert, err := s.loadManagementTLSCertificateLocked(addr)
 	if err != nil {
+		s.tlsCertificateMu.Unlock()
 		return nil, err
 	}
+	// #14984 D36-04: install ONLY into this leg's own slot (plus the fallback
+	// slot for selector-agnostic readers). The pre-fix code stored into ONE
+	// server-shared atomic; both dual-stack legs registered
+	// managementTLSGetCertificate on that same atomic, so the second build
+	// (IPv6 in daemon order) overwrote the IPv4 family's bind-host SANs.
+	legSlot := &managementTLSCertificateSlot{}
+	legSlot.state.Store(cert)
 	s.installManagementTLSCertificate(cert)
-	return trackHijackedConns(&http.Server{
+	s.tlsCertificateMu.Unlock()
+	srv := trackHijackedConns(&http.Server{
 		Addr:              addr,
 		Handler:           s.listenerHandler(addr, slot),
 		ReadHeaderTimeout: apiReadHeaderTimeout,
@@ -1438,10 +1461,12 @@ func (s *Server) buildHTTPSServer(addr string, slot *authSlot) (*http.Server, er
 		ConnContext: s.connContextForAuthSlot(slot),
 		// WriteTimeout intentionally unset — see the const block above.
 		TLSConfig: &tls.Config{
-			GetCertificate: s.managementTLSGetCertificate,
+			GetCertificate: s.managementTLSGetCertificateFor(legSlot),
 			MinVersion:     tls.VersionTLS12,
 		},
-	}), nil
+	})
+	RegisterHTTPServerTLSState(srv, legSlot)
+	return srv, nil
 }
 
 // Run starts the HTTP (and optionally HTTPS) server and blocks until ctx is
@@ -1634,8 +1659,45 @@ func (s *Server) HTTPSCertForTest() *tls.Certificate {
 func (s *Server) SetTLSCertDirForTest(dir string) {
 	s.tlsCertificateMu.Lock()
 	defer s.tlsCertificateMu.Unlock()
-	s.certGen = func(bindHost string) (tls.Certificate, *x509.Certificate, error) {
-		return generateSelfSignedCertAtWithStatus(dir, filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem"), bindHost)
+	s.certGen = func(bindHosts []string) (tls.Certificate, *x509.Certificate, error) {
+		return generateSelfSignedCertAtWithStatusHosts(dir, filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem"), bindHosts)
+	}
+	// Swap in the durable loader for legs built at construction against the
+	// production /etc/xpf/tls paths (which re-mint per call on an unwritable
+	// host). A reload failure keeps the previous per-leg state (fail-closed);
+	// the fallback slot's load reports its own failure. #14984: restamp each
+	// leg's OWN slot (not just the fallback), so a later refresh/test observes
+	// the durable pair per family.
+	for _, srv := range s.httpsServers {
+		state, err := s.loadManagementTLSCertificateLocked(srv.Addr)
+		if err != nil {
+			continue
+		}
+		if slot, ok := httpServerTLSState.Load(srv); ok {
+			if cs, ok2 := slot.(*managementTLSCertificateSlot); ok2 {
+				cs.state.Store(state)
+			}
+		}
+		s.installManagementTLSCertificate(state)
+	}
+	for _, leg := range s.httpsLegs {
+		if leg == nil || leg.srv == nil {
+			continue
+		}
+		if _, seen := httpServerTLSState.Load(leg.srv); seen {
+			continue
+		}
+		state, err := s.loadManagementTLSCertificateLocked(leg.srv.Addr)
+		if err != nil {
+			continue
+		}
+		legSlot := &managementTLSCertificateSlot{}
+		legSlot.state.Store(state)
+		if leg.srv.TLSConfig != nil {
+			leg.srv.TLSConfig.GetCertificate = s.managementTLSGetCertificateFor(legSlot)
+		}
+		RegisterHTTPServerTLSState(leg.srv, legSlot)
+		s.installManagementTLSCertificate(state)
 	}
 }
 
@@ -1805,6 +1867,14 @@ func generateSelfSignedCert(bindHost string) (tls.Certificate, error) {
 
 func generateSelfSignedCertWithStatus(bindHost string) (tls.Certificate, *x509.Certificate, error) {
 	return generateSelfSignedCertAtWithStatus(tlsDir, certPath, keyPath, bindHost)
+}
+
+// generateSelfSignedCertAtWithStatusHosts is generateSelfSignedCertAtWithStatus
+// for the FULL configured bind-host set (#14984 D36-04): the minted (or
+// loaded-and-diagnosed) pair is built with every host in bindHosts unioned
+// into the SANs, not just the leg whose build caller passed one host.
+func generateSelfSignedCertAtWithStatusHosts(dir, certPath, keyPath string, bindHosts []string) (tls.Certificate, *x509.Certificate, error) {
+	return generateSelfSignedCertAtWithStatusMulti(dir, certPath, keyPath, bindHosts)
 }
 
 // ipSANsContain reports whether ip is already present in sans. net.IP.Equal
@@ -2280,6 +2350,10 @@ func generateSelfSignedCertAt(dir, certPath, keyPath, bindHost string) (tls.Cert
 }
 
 func generateSelfSignedCertAtWithStatus(dir, certPath, keyPath, bindHost string) (tls.Certificate, *x509.Certificate, error) {
+	return generateSelfSignedCertAtWithStatusMulti(dir, certPath, keyPath, []string{bindHost})
+}
+
+func generateSelfSignedCertAtWithStatusMulti(dir, certPath, keyPath string, bindHosts []string) (tls.Certificate, *x509.Certificate, error) {
 	var invalidLoadedLeaf *x509.Certificate
 	// Load a usable pair as-is unless its leaf is outside its validity dates.
 	// Expiry/not-yet-valid is the one #1916 D6 durability exception: keeping
@@ -2290,7 +2364,9 @@ func generateSelfSignedCertAtWithStatus(dir, certPath, keyPath, bindHost string)
 			if validityErr := managementTLSCertificateValidityError(leaf, time.Now()); validityErr == nil {
 				// SAN coverage remains diagnostic only; a rebind still does not
 				// churn a valid durable cert.
-				warnStaleLoadedCert(cert, bindHost)
+				for _, bh := range bindHosts {
+					warnStaleLoadedCert(cert, bh)
+				}
 				return cert, nil, nil
 			}
 			invalidLoadedLeaf = leaf
@@ -2353,13 +2429,18 @@ func generateSelfSignedCertAtWithStatus(dir, certPath, keyPath, bindHost string)
 	// (#1916 D6) and deliberately NOT re-minted when the bind address later
 	// changes — auto-regenerating would churn remote clients' TOFU pins. That
 	// re-mint-on-change concern is a separate tracked #5719 C001 residual.
-	if bindHost != "" {
-		if ip := net.ParseIP(bindHost); ip != nil {
+	// #14984 D36-04: every configured dual-stack bind host is unioned into
+	// the minted SANs (a single-host spelling unions its one entry).
+	for _, bh := range bindHosts {
+		if bh == "" {
+			continue
+		}
+		if ip := net.ParseIP(bh); ip != nil {
 			if !ip.IsLoopback() && !ip.IsUnspecified() && !ipSANsContain(ipSANs, ip) {
 				ipSANs = append(ipSANs, ip)
 			}
-		} else if bindHost != "localhost" && isDNSSANSafeHostname(bindHost) && !dnsSANsContain(dnsNames, bindHost) {
-			dnsNames = append(dnsNames, bindHost)
+		} else if bh != "localhost" && isDNSSANSafeHostname(bh) && !dnsSANsContain(dnsNames, bh) {
+			dnsNames = append(dnsNames, bh)
 		}
 	}
 

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -38,6 +39,22 @@ type managementTLSCertificateState struct {
 	source      string
 	invalid     bool
 	reason      string
+}
+
+// managementTLSCertificateSlot is the fallback certificate selector for a
+// leg whose *http.Server carries no per-leg selector — hand-built test
+// fixtures and the never-completed boot path. It is the narrowed survivor
+// of the former server-shared s.tlsCertificate (#14984 D36-04): every
+// production leg carries its OWN state (see managementTLSGetCertificateFor)
+// so a dual-stack build order cannot overwrite one family's certificate
+// with the other's. The fallback survives only for legs that never went
+// through buildHTTPSServer; without it ReconcileTLSCertificate's
+// post-refresh reads, the periodic monitor's invalid badge, and the
+// managementTLSCertificateForServer fallback for GetCertificate-less
+// fixtures would have nothing to read. Production handshakes never take
+// it: buildHTTPSServer installs a per-leg closure.
+type managementTLSCertificateSlot struct {
+	state atomic.Pointer[managementTLSCertificateState]
 }
 
 var managementTLSCertificateInvalidEvents atomic.Uint64
@@ -122,7 +139,35 @@ func managementTLSBindHost(addr string) string {
 	return host
 }
 
+// bindHostsForCertGen returns the host set a cert mint/load must cover
+// (#14984 D36-04): the server's full configured HTTPS bind hosts when
+// known (dual-stack unions both families), else just bindHost.
+func bindHostsForCertGen(s *Server, bindHost string) []string {
+	if s != nil && s.httpsBindHosts != nil {
+		if hosts := s.httpsBindHosts(); len(hosts) > 0 {
+			return hosts
+		}
+	}
+	if bindHost == "" {
+		return nil
+	}
+	return []string{bindHost}
+}
+
+// loadManagementTLSCertificate locks tlsCertificateMu (buildHTTPSServer
+// calls loadManagementTLSCertificateLocked directly to also install the
+// per-leg slot atomically, #14984).
 func (s *Server) loadManagementTLSCertificate(addr string) (*managementTLSCertificateState, error) {
+	s.tlsCertificateMu.Lock()
+	defer s.tlsCertificateMu.Unlock()
+	return s.loadManagementTLSCertificateWithGen(s.certGen, addr)
+}
+
+func (s *Server) loadManagementTLSCertificateLocked(addr string) (*managementTLSCertificateState, error) {
+	return s.loadManagementTLSCertificateWithGen(s.certGen, addr)
+}
+
+func (s *Server) loadManagementTLSCertificateWithGen(gen func(bindHosts []string) (tls.Certificate, *x509.Certificate, error), addr string) (*managementTLSCertificateState, error) {
 	files := s.managementTLSFiles()
 	bindHost := managementTLSBindHost(addr)
 	now := s.managementTLSNow()
@@ -150,7 +195,11 @@ func (s *Server) loadManagementTLSCertificate(addr string) (*managementTLSCertif
 		return state, nil
 	}
 
-	cert, invalidLoadedLeaf, err := s.certGen(bindHost)
+	// #14984: mint/load with EVERY bind host this server's HTTPS legs are
+	// configured for, so the durable pair's SAN set unions both families
+	// (fall back to this addr's host when the configured set is empty).
+	genHosts := bindHostsForCertGen(s, bindHost)
+	cert, invalidLoadedLeaf, err := gen(genHosts)
 	if invalidLoadedLeaf != nil && err == nil {
 		s.reportManagementTLSCertificateRemint(invalidLoadedLeaf, bindHost, now)
 	}
@@ -171,8 +220,13 @@ func (s *Server) loadManagementTLSCertificate(addr string) (*managementTLSCertif
 	return state, nil
 }
 
+// installManagementTLSCertificate writes ONLY the fallback slot (#14984
+// D36-04: it used to also store into the shared atomic every leg's
+// handshake read, so the second-built dual-stack leg overwrote the
+// first family's bind-host SANs; the per-leg closures installed by
+// buildHTTPSServer now serve their own state held by the callers).
 func (s *Server) installManagementTLSCertificate(state *managementTLSCertificateState) {
-	s.tlsCertificate.Store(state)
+	s.tlsCertificateSlot.state.Store(state)
 	s.tlsCertificateInvalid.Store(false)
 }
 
@@ -187,7 +241,7 @@ func (s *Server) failManagementTLSCertificate(source, bindHost string, leaf *x50
 	if leaf != nil {
 		state.fingerprint = sha256.Sum256(leaf.Raw)
 	}
-	s.tlsCertificate.Store(state)
+	s.tlsCertificateSlot.state.Store(state)
 	if s.tlsCertificateInvalid.CompareAndSwap(false, true) {
 		managementTLSCertificateInvalidEvents.Add(1)
 		slog.Error("management TLS certificate is outside its validity window or unusable",
@@ -213,8 +267,24 @@ func certificateTime(leaf *x509.Certificate, notBefore bool) string {
 	return leaf.NotAfter.UTC().Format(time.RFC3339)
 }
 
+// managementTLSGetCertificate serves the FALLBACK slot (#14984 D36-04).
+// Production handshakes use managementTLSGetCertificateFor, whose state is
+// owned by the leg's own closure.
 func (s *Server) managementTLSGetCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	state := s.tlsCertificate.Load()
+	return s.managementTLSGetCertificateFromSlot(&s.tlsCertificateSlot)
+}
+
+func (s *Server) managementTLSGetCertificateFor(slot *managementTLSCertificateSlot) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	return func(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		return s.managementTLSGetCertificateFromSlot(slot)
+	}
+}
+
+func (s *Server) managementTLSGetCertificateFromSlot(slot *managementTLSCertificateSlot) (*tls.Certificate, error) {
+	if slot == nil {
+		return nil, fmt.Errorf("management TLS certificate is unavailable")
+	}
+	state := slot.state.Load()
 	if state == nil {
 		return nil, fmt.Errorf("management TLS certificate is unavailable")
 	}
@@ -223,7 +293,33 @@ func (s *Server) managementTLSGetCertificate(_ *tls.ClientHelloInfo) (*tls.Certi
 	}
 	now := s.managementTLSNow()
 	if err := managementTLSCertificateValidityError(state.leaf, now); err != nil {
-		s.failManagementTLSCertificate(state.source, state.bindHost, state.leaf, err, now)
+		// Mark THIS slot invalid: a stale leg must not poison a live
+		// sibling's state (the pre-#14984 shared-store failure). The
+		// fallback likewise records the incident so the monitor and
+		// ReconcileTLSCertificate still see an expired serving plane.
+		iv := &managementTLSCertificateState{leaf: state.leaf, bindHost: state.bindHost, source: state.source, invalid: true, reason: err.Error()}
+		if state.leaf != nil {
+			iv.fingerprint = sha256.Sum256(state.leaf.Raw)
+		}
+		slot.state.Store(iv)
+		if slot == &s.tlsCertificateSlot {
+			if s.tlsCertificateInvalid.CompareAndSwap(false, true) {
+				managementTLSCertificateInvalidEvents.Add(1)
+				slog.Error("management TLS certificate is outside its validity window or unusable",
+					"source", state.source, "bind_host", state.bindHost,
+					"not_before", certificateTime(state.leaf, true),
+					"not_after", certificateTime(state.leaf, false),
+					"now", now.UTC().Format(time.RFC3339), "err", err)
+			}
+		} else if s.tlsCertificateInvalid.CompareAndSwap(false, true) {
+			managementTLSCertificateInvalidEvents.Add(1)
+			slog.Error("management TLS certificate is outside its validity window or unusable",
+				"source", state.source, "bind_host", state.bindHost,
+				"not_before", certificateTime(state.leaf, true),
+				"not_after", certificateTime(state.leaf, false),
+				"now", now.UTC().Format(time.RFC3339), "err", err)
+			s.tlsCertificateSlot.state.Store(iv)
+		}
 		return nil, err
 	}
 	return &state.certificate, nil
@@ -232,11 +328,15 @@ func (s *Server) managementTLSGetCertificate(_ *tls.ClientHelloInfo) (*tls.Certi
 func (s *Server) refreshManagementTLSCertificate() {
 	s.tlsCertificateMu.Lock()
 	defer s.tlsCertificateMu.Unlock()
+	s.refreshManagementTLSCertificateLocked()
+}
+
+func (s *Server) refreshManagementTLSCertificateLocked() {
 	if !s.tlsDesired.Load() {
 		return
 	}
 	files := s.managementTLSFiles()
-	current := s.tlsCertificate.Load()
+	current := s.tlsCertificateSlot.state.Load()
 	now := s.managementTLSNow()
 	if files.custom() {
 		s.refreshCustomManagementTLSCertificate(files, current, now)
@@ -256,7 +356,16 @@ func (s *Server) refreshManagementTLSCertificate() {
 	if current != nil {
 		bindHost = current.bindHost
 	}
-	cert, invalidLoadedLeaf, err := s.certGen(bindHost)
+	// The fallback slot has no leg of its own (#14984 D36-04): when it has
+	// never been installed, mint against ONE dual-stack-wide state covering
+	// every configured HTTPS bind host (second-awareness: several entries
+	// must not re-collapse to the first), not one family's leftover.
+	if bindHost == "" && s.httpsBindHosts != nil {
+		if hosts := s.httpsBindHosts(); len(hosts) > 0 {
+			bindHost = hosts[0]
+		}
+	}
+	cert, invalidLoadedLeaf, err := s.certGen(bindHostsForCertGen(s, bindHost))
 	if invalidLoadedLeaf != nil && err == nil && !invalidAlreadyCounted {
 		s.reportManagementTLSCertificateRemint(invalidLoadedLeaf, bindHost, now)
 	}
@@ -274,6 +383,21 @@ func (s *Server) refreshManagementTLSCertificate() {
 		return
 	}
 	s.installManagementTLSCertificate(state)
+	s.publishManagementTLSCertificateToLiveLegs(state)
+}
+
+// publishManagementTLSCertificateToLiveLegs mirrors state into every live
+// HTTPS leg's registered slot (#14984 D36-04). The monitor-driven refresh
+// path publishes the same rotated pair to all families; per-buildFamily
+// first mints stay in the per-leg slot built by buildHTTPSServer.
+// Callers hold tlsCertificateMu.
+func (s *Server) publishManagementTLSCertificateToLiveLegs(state *managementTLSCertificateState) {
+	httpServerTLSState.Range(func(_, v any) bool {
+		if cs, ok := v.(*managementTLSCertificateSlot); ok {
+			cs.state.Store(state)
+		}
+		return true
+	})
 }
 
 // ReconcileTLSCertificate installs new operator-provided paths from a committed
@@ -288,8 +412,13 @@ func (s *Server) ReconcileTLSCertificate(certificate, privateKey string) error {
 	if !s.tlsDesired.Load() {
 		return nil
 	}
-	s.refreshManagementTLSCertificate()
-	state := s.tlsCertificate.Load()
+	// #14984: holding tlsCertificateMu makes refreshManagementTLSCertificateLocked
+	// atomic with the fallback read-back; refreshManagementTLSCertificate would
+	// self-deadlock if re-locked here.
+	s.tlsCertificateMu.Lock()
+	s.refreshManagementTLSCertificateLocked()
+	state := s.tlsCertificateSlot.state.Load()
+	s.tlsCertificateMu.Unlock()
 	if state == nil || state.invalid {
 		if state != nil {
 			return fmt.Errorf("management TLS certificate is unavailable: %s", state.reason)
@@ -309,11 +438,34 @@ func (s *Server) managementTLSCertificateForServer(srv *http.Server) *tls.Certif
 		}
 		return &srv.TLSConfig.Certificates[0]
 	}
-	state := s.tlsCertificate.Load()
+	// Per-leg selector (#14984 D36-04): the leg's own closure carries its
+	// bind-host SANs; the shared fallback slot would return whichever legs'
+	// state was written last. A hand-built srv whose closure was swapped
+	// to the plain managementTLSGetCertificate method value still resolves
+	// to the fallback slot by construction.
+	if st := managementTLSStateForServer(srv); st != nil {
+		if st.invalid {
+			return nil
+		}
+		return &st.certificate
+	}
+	state := s.tlsCertificateSlot.state.Load()
 	if state == nil || state.invalid {
 		return nil
 	}
 	return &state.certificate
+}
+
+func managementTLSStateForServer(srv *http.Server) *managementTLSCertificateState {
+	if srv == nil || srv.TLSConfig == nil || srv.TLSConfig.GetCertificate == nil {
+		return nil
+	}
+	if st, ok := httpServerTLSState.Load(srv); ok && st != nil {
+		if slot, ok2 := st.(*managementTLSCertificateSlot); ok2 {
+			return slot.state.Load()
+		}
+	}
+	return nil
 }
 
 func (s *Server) refreshCustomManagementTLSCertificate(files *managementTLSCertificateFiles, current *managementTLSCertificateState, now time.Time) {
@@ -346,6 +498,7 @@ func (s *Server) refreshCustomManagementTLSCertificate(files *managementTLSCerti
 		return
 	}
 	s.installManagementTLSCertificate(state)
+	s.publishManagementTLSCertificateToLiveLegs(state)
 	if current != nil && current.fingerprint != state.fingerprint {
 		slog.Info("custom management TLS certificate rotated", "not_after", state.leaf.NotAfter.UTC().Format(time.RFC3339))
 	}
@@ -387,4 +540,27 @@ func customTLSPathsEqual(a, b *managementTLSCertificateFiles) bool {
 		b = &managementTLSCertificateFiles{}
 	}
 	return a.certificate == b.certificate && a.privateKey == b.privateKey
+}
+
+// httpServerTLSState maps a per-leg *http.Server to its certificate slot
+// (#14984 D36-04). The registry exists because tls.Config.GetCertificate is
+// an opaque func value: the leg's closure is bound to its slot inside
+// buildHTTPSServer and this map is how managementTLSCertificateForServer
+// finds that slot for WarnStale/HTTPSCertForTest reads. It is keyed by the
+// *http.Server pointer (not Addr) so two legs that survive each other
+// never alias. Rate: bounded by the live leg set's size (one entry per
+// bound HTTPS address); entries are deleted when a leg retires so the
+// map does not grow across reconciles.
+var httpServerTLSState sync.Map // *http.Server -> *managementTLSCertificateSlot
+
+func RegisterHTTPServerTLSState(srv *http.Server, slot *managementTLSCertificateSlot) {
+	if srv != nil && slot != nil {
+		httpServerTLSState.Store(srv, slot)
+	}
+}
+
+func unregisterHTTPServerTLSState(srv *http.Server) {
+	if srv != nil {
+		httpServerTLSState.Delete(srv)
+	}
 }

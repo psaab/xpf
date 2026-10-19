@@ -377,6 +377,20 @@ func (s *Server) stopLegLocked(leg *listenerLeg) {
 	if leg == nil {
 		return
 	}
+	// #14984: once this srv is retired its TLS slot entry must not be
+	// published to by later monitor refreshes (it would otherwise keep
+	// re-storing into a dead leg) and the registry must not grow across
+	// reconciles. The serve goroutine holds the srv pointer until drain
+	// completes, but handshakes are already refusing: Shutdown closes the
+	// listener, and new connections to the retiring leg hit a closing
+	// socket. Race note: crypto/tls reads GetCertificate at handshake time
+	// under no package lock; deleting the sync.Map entry does not tear
+	// state in flight, since the captured legSlot pointer keeps its own
+	// atomic value — the entry only gated FUTURE publish/store lookups.
+	if leg.srv != nil {
+		unregisterHTTPServerTLSState(leg.srv)
+	}
+
 	leg.stopOnce.Do(func() {
 		// Pin BEFORE the wake-up so there is no interval in which the leg is
 		// retired but still following the server-wide snapshot.

@@ -1693,13 +1693,41 @@ the drop fails loudly instead of going quietly vacuous.
     - **HTTPS bind host (#5719 C001 residual, now closed):** the listener's
       bind host is threaded from the resolved `web-management https interface`
       address into cert generation (`buildHTTPSServer` → `net.SplitHostPort` →
-      `certGen(bindHost)`). A non-loopback management IP lands in the IP SANs
+      `certGen(bindHosts)`). A non-loopback management IP lands in the IP SANs
       and a DNS-safe bind hostname in the DNS SANs, so
       remote-verification-by-mgmt-IP (`https://<mgmt-ip>:8443` with strict
       verification) succeeds. A loopback / unspecified (`0.0.0.0`/`::`) /
       wildcard (`:8443` → empty) / non-encodable bind host is skipped, and a
       value already present is coalesced. Like the hostname path this only ever
       ADDS an encodable SAN, so it never aborts generation.
+    - **Dual-stack per-leg certificates (#14984 D36-04):** a dual-stack
+      `web-management https interface` binds one HTTPS leg per family
+      (#14583). Before the fix both legs were built against ONE shared
+      `s.tlsCertificate` atomic and both `TLSConfig.GetCertificate` closures
+      read it, so the second build (IPv6 in daemon order) overwrote the
+      first family's per-build state and its bind-host SAN identity. The fix
+      mints/loads with the FULL configured bind-host set
+      (`generateSelfSignedCertAtWithStatusHosts` /
+      `generateSelfSignedCertAtWithStatusMulti`): every leg's leaf unions
+      both families' non-loopback IPs (and DNS-safe names), and each leg
+      carries its OWN `managementTLSCertificateSlot` closure
+      (`managementTLSGetCertificateFor`), installed by `buildHTTPSServer`
+      and registered in `httpServerTLSState` so
+      `managementTLSCertificateForServer` / `WarnStaleMgmtCertForHostName` /
+      `HTTPSCertForTest` read the live leg's own state rather than the last
+      write. The old shared atomic survives narrowed as the fallback slot
+      `tlsCertificateSlot` for hand-built `*http.Server` fixtures and the
+      never-completed boot path; the periodic monitor and
+      `ReconcileTLSCertificate` publish rotated/refreshed state into every
+      live leg's slot (`publishManagementTLSCertificateToLiveLegs`, under
+      `tlsCertificateMu`), and a handshake-time expiry marks only ITS OWN
+      slot invalid. Retired legs are deregistered (`stopLegLocked` →
+      `unregisterHTTPServerTLSState`), so the registry is bounded by the
+      live leg set. Regression `TestDualStackPerLegTLSCert14984`
+      (`tls_cert_dualstack_14984_test.go`) invokes each built leg's actual
+      `GetCertificate` closure and asserts `VerifyHostname` for its own
+      family bind IP, plus loopback `/health` on both families and a
+      single-stack control.
     - **Re-mint STILL deferred, but no longer SILENT (#5719 C001 residual,
       #6827):** a later `set system host-name` (or a bind-address change) does
       NOT re-mint an already-persisted cert, so its DNS/IP SANs can go stale.

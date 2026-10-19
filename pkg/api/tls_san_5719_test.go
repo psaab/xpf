@@ -383,26 +383,26 @@ func TestCertCoversHostAndWarnable(t *testing.T) {
 // net.SplitHostPort, and the recorded bindHost is "" instead of "10.0.0.1".
 func TestBuildHTTPSServerThreadsBindHost(t *testing.T) {
 	s := &Server{}
-	var got string
+	var got []string
 	cert := mintCert(t, "fw", "10.0.0.1")
-	s.certGen = func(bindHost string) (tls.Certificate, *x509.Certificate, error) {
-		got = bindHost
+	s.certGen = func(bindHosts []string) (tls.Certificate, *x509.Certificate, error) {
+		got = append([]string(nil), bindHosts...)
 		return cert, nil, nil
 	}
 	if _, err := s.buildHTTPSServer("10.0.0.1:8443", s.newAuthSlot()); err != nil {
 		t.Fatalf("buildHTTPSServer: %v", err)
 	}
-	if got != "10.0.0.1" {
-		t.Fatalf("certGen bindHost = %q, want 10.0.0.1", got)
+	if len(got) != 1 || got[0] != "10.0.0.1" {
+		t.Fatalf("certGen bindHosts = %v, want [10.0.0.1]", got)
 	}
 
 	// A wildcard bind yields an empty host (no single name to certify).
-	got = "sentinel"
+	got = []string{"sentinel"}
 	if _, err := s.buildHTTPSServer(":8443", s.newAuthSlot()); err != nil {
 		t.Fatalf("buildHTTPSServer wildcard: %v", err)
 	}
-	if got != "" {
-		t.Fatalf("wildcard certGen bindHost = %q, want empty", got)
+	if len(got) != 0 {
+		t.Fatalf("wildcard certGen bindHosts = %v, want empty", got)
 	}
 }
 
