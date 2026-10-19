@@ -3,6 +3,7 @@ package daemon
 import (
 	"log/slog"
 	"net/netip"
+	"sort"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -67,6 +68,121 @@ func (s *frrHADemotionState) filterProtocols(cfg *config.Config, protocols confi
 		protocols.BGP = s.filterBGP(cfg, protocols.BGP, groups)
 	}
 	return protocols
+}
+
+// filterStaticRoutes drops (or prunes next-hops of) static routes whose
+// egress belongs to a redundancy group this node does not own (#15734).
+//
+// A static route's egress is attributed two ways, mirroring the scopes
+// the dynamic-protocol filters already use:
+//   - an explicit next-hop interface (operator-qualified, or the IPv6
+//     next-hop interface inferred from the connected prefixes) names the
+//     egress directly;
+//   - a next-hop ADDRESS inside an egress interface's connected prefix
+//     attributes the route even when no interface was named — that is
+//     how FRR itself decides the route is active (the zebra connected
+//     route must exist), so it is the same fact the FIB build consumes.
+//
+// Routes with no attributable egress (next-table leaks, discard/reject)
+// are kept: they do not depend on a RETH address this node may not hold.
+//
+// Why this exists: on a demoted node every static route used to stay in
+// the FRR managed section forever. Zebra then marked each one inactive
+// (its egress connected prefix is gone with the VIPs) and selected the
+// cluster-mode blackhole default instead — so `show ipv6 route` read as
+// a deliberate discard while the node was expected to fabric-redirect.
+// Symmetrically, when only SOME RGs move (the per-RG failover the gate
+// drives), the new owner must actually gain the WAN statics: with them
+// filtered here, promotion re-renders them and zebra activates them the
+// moment the VIPs land. Before this filter, the loss cluster's RG1/RG2
+// split left node1 owning the LAN (RG2) with every WAN v6 static
+// stranded inactive, so LAN->WAN IPv6 transit blackholed on the kernel
+// default while neighbor recovery (NA) succeeded.
+func (s *frrHADemotionState) filterStaticRoutes(cfg *config.Config, routes []*config.StaticRoute, v6NextHopInterfaces map[string]string, instanceInterfaces []string) []*config.StaticRoute {
+	if s == nil || len(routes) == 0 {
+		return routes
+	}
+	instanceGroups := s.groupsForInterfaces(cfg, instanceInterfaces)
+	filtered := make([]*config.StaticRoute, 0, len(routes))
+	for _, route := range routes {
+		if route == nil {
+			filtered = append(filtered, route)
+			continue
+		}
+		if route.Discard || route.Reject || route.NextTable != "" || len(route.NextHops) == 0 {
+			filtered = append(filtered, route)
+			continue
+		}
+		kept := make([]config.NextHopEntry, 0, len(route.NextHops))
+		for _, hop := range route.NextHops {
+			if s.staticHopActive(cfg, hop, v6NextHopInterfaces, instanceGroups) {
+				kept = append(kept, hop)
+			}
+		}
+		if len(kept) == 0 {
+			continue
+		}
+		if len(kept) == len(route.NextHops) {
+			filtered = append(filtered, route)
+			continue
+		}
+		pruned := *route
+		pruned.NextHops = kept
+		filtered = append(filtered, &pruned)
+	}
+	return filtered
+}
+
+// staticHopActive reports whether one static next-hop's egress is owned
+// by an active RG (or is not RETH-attributable at all).
+func (s *frrHADemotionState) staticHopActive(cfg *config.Config, hop config.NextHopEntry, v6NextHopInterfaces map[string]string, instanceGroups []int) bool {
+	iface := hop.Interface
+	if iface == "" && v6NextHopInterfaces != nil {
+		iface = v6NextHopInterfaces[hop.Address]
+	}
+	if iface != "" {
+		return !s.inactiveInterface(cfg, iface, instanceGroups)
+	}
+	addr, err := netip.ParseAddr(hop.Address)
+	if err != nil {
+		return true // unparseable: not attributable, keep (render validates)
+	}
+	// Attribute by connected prefix: a RETH unit whose prefix contains
+	// the next-hop owns the route's egress. Scan RG ids in order so
+	// overlapping prefixes resolve deterministically.
+	owners := cfg.RethRGOwners()
+	rgIDs := make([]int, 0, len(owners))
+	byRG := make(map[int][]string)
+	for name, rgID := range owners {
+		if _, seen := byRG[rgID]; !seen {
+			rgIDs = append(rgIDs, rgID)
+		}
+		byRG[rgID] = append(byRG[rgID], name)
+	}
+	sort.Ints(rgIDs)
+	for _, rgID := range rgIDs {
+		for _, name := range byRG[rgID] {
+			ifc := cfg.Interfaces.Interfaces[name]
+			if ifc == nil {
+				continue
+			}
+			for _, unit := range ifc.Units {
+				if unit == nil {
+					continue
+				}
+				for _, cidr := range unit.Addresses {
+					prefix, err := netip.ParsePrefix(cidr)
+					if err != nil || prefix.Addr().Is4() != addr.Is4() {
+						continue
+					}
+					if prefix.Masked().Contains(addr) {
+						return s.active[rgID]
+					}
+				}
+			}
+		}
+	}
+	return true // no RETH prefix claims it: not RG-scoped
 }
 
 func (s *frrHADemotionState) inactiveInterface(cfg *config.Config, name string, instanceGroups []int) bool {

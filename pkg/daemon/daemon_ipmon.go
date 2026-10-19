@@ -193,8 +193,8 @@ func (d *Daemon) assembleFRRConfigWithMgmtRouteInventory(
 		BGP:                     globalProtocols.BGP,
 		RIP:                     globalProtocols.RIP,
 		ISIS:                    globalProtocols.ISIS,
-		StaticRoutes:            staticRoutes,
-		Inet6StaticRoutes:       inet6StaticRoutes,
+		StaticRoutes:            haState.filterStaticRoutes(cfg, staticRoutes, ipv6NextHopInterfaces[""], nil),
+		Inet6StaticRoutes:       haState.filterStaticRoutes(cfg, inet6StaticRoutes, ipv6NextHopInterfaces[""], nil),
 		GenerateRoutes:          cfg.RoutingOptions.GenerateRoutes,
 		DHCPRoutes:              dhcpRoutes,
 		RIBRoutes:               ribRoutes,
@@ -247,16 +247,13 @@ func (d *Daemon) assembleFRRConfigWithMgmtRouteInventory(
 			BGP:               instanceProtocols.BGP,
 			RIP:               instanceProtocols.RIP,
 			ISIS:              instanceProtocols.ISIS,
-			StaticRoutes:      ri.StaticRoutes,
-			Inet6StaticRoutes: ri.Inet6StaticRoutes,
+			StaticRoutes:      haState.filterStaticRoutes(cfg, ri.StaticRoutes, ipv6NextHopInterfaces[vrfName], ri.Interfaces),
+			Inet6StaticRoutes: haState.filterStaticRoutes(cfg, ri.Inet6StaticRoutes, ipv6NextHopInterfaces[vrfName], ri.Interfaces),
 		}
 		if forwarding {
 			// #9409: DROP the protocols rather than carry them through.
 			//
 			// The `vrfName = ""` above is correct for statics and fatal for
-			// protocols: generateProtocols reads an empty VRFName as "the
-			// GLOBAL instance", so carrying them through activated an
-			// instance-scoped IGP in the global routing context and attached an
 			// instance-scoped BGP neighbor to the GLOBAL AS. Measured before
 			// this change: TWO `router ospf` blocks, neither carrying a `vrf`
 			// suffix, and the instance's `peer-as 65002` neighbor rendered under
