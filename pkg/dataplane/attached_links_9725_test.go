@@ -74,3 +74,53 @@ func TestAttachedLinksObserverIsWakeOnly9725(t *testing.T) {
 		t.Fatalf("wake callback count = %d, want one wake for attach and detach", got)
 	}
 }
+
+func TestAttachedXDPLinkCountExcludesDetachDebt15289(t *testing.T) {
+	m := New()
+	live := &countLink9725{}
+	debt := &countLink9725{}
+	m.SetLinkForTest(1, live, nil)
+	m.SetLinkForTest(2, debt, nil)
+	m.SetDetachDebtForTest(2)
+
+	oldAttached := xdpLinkAttachedFn
+	t.Cleanup(func() { xdpLinkAttachedFn = oldAttached })
+	xdpLinkAttachedFn = func(link.Link) bool { return true }
+	oldIfindex := xdpLinkIfindexFn
+	t.Cleanup(func() { xdpLinkIfindexFn = oldIfindex })
+	xdpLinkIfindexFn = func(l link.Link) (int, bool) {
+		switch l {
+		case live:
+			return 1, true
+		case debt:
+			return 2, true
+		default:
+			return 0, false
+		}
+	}
+
+	if got := m.AttachedXDPLinkCount(); got != 1 {
+		t.Fatalf("AttachedXDPLinkCount = %d, want 1 (detach-debt link excluded)", got)
+	}
+	if got := m.AttachedXDPIfindexes(); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("AttachedXDPIfindexes control = %v, want [1]", got)
+	}
+}
+
+// TestDetachDebtLinkPinKept15289 pins the deliberate scope cut: the shim pin
+// sweep keeps pins for every tracked link, including a detach-debt link. The
+// debt link is still kernel-attached (its Unpin/Close failed), so its pin is
+// the hitless-restart reference; removing it would not detach it and would
+// strand it. The fence/transit/proof exclusion is the fix, not pin removal.
+func TestDetachDebtLinkPinKept15289(t *testing.T) {
+	m := New()
+	m.SetLinkForTest(2, &countLink9725{}, nil)
+	m.SetDetachDebtForTest(2)
+	keep := make(map[int]bool)
+	for ifindex := range m.XDPLinks() {
+		keep[ifindex] = true
+	}
+	if !keep[2] {
+		t.Fatal("debt link pin must be kept while link is tracked (hitless-restart ref)")
+	}
+}

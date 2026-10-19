@@ -8,9 +8,12 @@ import (
 
 // AttachedXDPLinkCount returns the number of XDP links this Manager records
 // whose bpf_link still reports a non-zero attached-device ifindex from the
-// kernel. The link map is only the set of candidates; Info().XDP().Ifindex is
-// the authority. A failed or non-XDP read is counted as unattached so the
-// daemon's transit gate fails closed on uncertainty.
+// kernel, EXCLUDING detach-debt members (#15289). The link map is only the
+// set of candidates; Info().XDP().Ifindex is the authority. A failed or
+// non-XDP read is counted as unattached, and a link under detach debt is
+// treated as intended-detached even while the kernel still proves it
+// attached (DetachXDP's flag-clear/Unpin arms failed before Close) — so the
+// daemon's transit gate fails closed on both uncertainty and debt.
 //
 // This is deliberately a snapshot, not a writer-maintained counter. A future
 // detach path, device unregister, driver reset, process exit, or privileged
@@ -22,7 +25,7 @@ func (m *Manager) AttachedXDPLinkCount() int {
 		return 0
 	}
 	count := 0
-	for _, l := range m.XDPLinks() {
+	for _, l := range m.xdpLinksSnapshotAttached() {
 		if xdpLinkAttachedFn(l) {
 			count++
 		}
@@ -49,24 +52,12 @@ func (m *Manager) AttachedXDPIfindexes() []int {
 	if m == nil {
 		return nil
 	}
-	m.mu.Lock()
-	links := make(map[int]link.Link, len(m.xdpLinks))
-	for ifindex, l := range m.xdpLinks {
-		links[ifindex] = l
-	}
-	debt := make(map[int]struct{}, len(m.detachDebt))
-	for ifindex := range m.detachDebt {
-		debt[ifindex] = struct{}{}
-	}
-	m.mu.Unlock()
+	links := m.xdpLinksSnapshotAttached()
 	if len(links) == 0 {
 		return nil
 	}
 	out := make([]int, 0, len(links))
 	for ifindex, l := range links {
-		if _, owed := debt[ifindex]; owed {
-			continue
-		}
 		reported, ok := xdpLinkIfindexFn(l)
 		if ok && reported == ifindex && ifindex > 0 {
 			out = append(out, ifindex)
@@ -74,6 +65,22 @@ func (m *Manager) AttachedXDPIfindexes() []int {
 	}
 	sort.Ints(out)
 	return out
+}
+
+// xdpLinksSnapshotAttached returns the tracked XDP links minus detach-debt
+// members, copied under one m.mu hold so membership and debt come from the
+// same instant. Kernel Info reads then run unlocked on the copied handles.
+func (m *Manager) xdpLinksSnapshotAttached() map[int]link.Link {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	links := make(map[int]link.Link, len(m.xdpLinks))
+	for ifindex, l := range m.xdpLinks {
+		if _, owed := m.detachDebt[ifindex]; owed {
+			continue
+		}
+		links[ifindex] = l
+	}
+	return links
 }
 
 // WithAttachedXDPFence runs fn while the Manager's XDP ownership read lease is
