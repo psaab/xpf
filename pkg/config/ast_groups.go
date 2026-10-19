@@ -46,6 +46,18 @@ type groupExpandBudget struct {
 	// groupRootLoginLeaves14447 tracks root-login leaves adopted from a
 	// group during this expansion (#14447), like the default-policy set.
 	groupRootLoginLeaves14447 map[*Node]bool
+	// applyLevelByNode15033 records, per node pointer, the origin LEVEL
+	// of the apply-groups application that adopted it (#15033): the
+	// hierarchy depth (len(ancestorPath)) at which that application sits.
+	// A top-level apply therefore tags its whole adopted subtree 0 even
+	// where merge routing carries leaves deeper; an application at a
+	// nested hierarchy (e.g. under interfaces ge-0/0/0) tags its subtree
+	// with that deeper level. Group-tagged locals record/adjust this per
+	// application; recursive container merges inherit it unchanged, so
+	// a later DEEPER application may replace such a node while inline
+	// nodes (absent) never yield.
+	applyLevelByNode15033 map[*Node]int
+	applyOriginLevel15033 int
 	// adoptedRouteFilters14741 records route-filter member identities
 	// already adopted by the #14416 arm during this expansion, keyed by
 	// the destination `from` level (ancestor path + inline peer member
@@ -77,6 +89,126 @@ func (b *groupExpandBudget) charge(n int) error {
 		return fmt.Errorf("apply-groups expansion exceeds maximum work budget of %d (possible generated or pathological config)", maxGroupExpandWork)
 	}
 	return nil
+}
+
+// noteAdopted15033 records that node n was adopted into the tree by the
+// apply-groups application at hierarchy depth level (#15033).
+func (b *groupExpandBudget) noteAdopted15033(n *Node, level int) {
+	if b.applyLevelByNode15033 == nil {
+		b.applyLevelByNode15033 = make(map[*Node]int)
+	}
+	b.applyLevelByNode15033[n] = level
+}
+
+// noteAdoptedSubtree15033 tags every node in the subtree rooted at n.
+func (b *groupExpandBudget) noteAdoptedSubtree15033(n *Node, level int) {
+	b.tagNewSubtree15033(n, level)
+}
+
+// noteAdoptedDst15033 tags nodes currently in dst that this merge adopted
+// (identity diff against the pre-merge snapshot), covering every arm.
+func (b *groupExpandBudget) noteAdoptedDst15033(dst []*Node, level int, before map[*Node]bool) {
+	for _, n := range dst {
+		if !before[n] {
+			b.tagNewSubtree15033(n, level)
+		}
+	}
+}
+
+// tagNewSubtree15033 tags n and its untagged descendants at level,
+// preserving tags already set (e.g. a replacement's deeper level).
+func (b *groupExpandBudget) tagNewSubtree15033(n *Node, level int) {
+	if _, tagged := b.applyLevelByNode15033[n]; !tagged {
+		b.noteAdopted15033(n, level)
+	}
+	for _, c := range n.Children {
+		b.tagNewSubtree15033(c, level)
+	}
+}
+
+// expandLeafFamily9855 returns the single node itself; packed-peer family
+// expansion is handled by promoteLeafPeerForPackedGroup9855 at merge time.
+func expandLeafFamily9855(peer *Node) []*Node { return []*Node{peer} }
+
+// shallowerAdoptedPeer15033 reports whether dst holds a peer for s whose
+// entire subtree was adopted by an apply-groups application strictly
+// shallower than level. Inline peers are absent from the map and never
+// qualify; group-adopted containers are absent too (they merge
+// recursively and their leaves are handled one level down).
+func (b *groupExpandBudget) shallowerAdoptedPeer15033(dst []*Node, s *Node, level int) (*Node, string, bool) {
+	if len(b.applyLevelByNode15033) == 0 {
+		return nil, "", false
+	}
+	key := ""
+	if len(s.Keys) > 0 {
+		key = s.Keys[0]
+	}
+	var peer *Node
+	if groupZoneLeaf9831(nil, s) {
+		peer = zoneGroupLeafPeer9831(nil, dst, s)
+	} else if namedPeer, identity := namedLeafPeer9859(nil, dst, s); identity {
+		peer = namedPeer
+	} else {
+		peer = leafListPeer(dst, key)
+	}
+	if peer == nil || peer == s {
+		return nil, key, false
+	}
+	lvl, ok := b.applyLevelByNode15033[peer]
+	if !ok || lvl >= level {
+		return nil, key, false
+	}
+	if peer.IsLeaf {
+		family := []*Node{peer}
+		if expanded := expandLeafFamily9855(peer); len(expanded) > 0 {
+			family = expanded
+		}
+		for _, member := range family {
+			if ml, ok := b.applyLevelByNode15033[member]; !ok || ml >= level {
+				return nil, key, false
+			}
+		}
+	} else {
+		if len(peer.Keys) == 1 {
+			for _, member := range expandLeafFamily9855(peer) {
+				if member == peer {
+					continue
+				}
+				if ml, ok := b.applyLevelByNode15033[member]; !ok || ml >= level {
+					return nil, key, false
+				}
+			}
+		}
+		if len(peer.Children) > 0 {
+			return nil, key, false
+		}
+	}
+	return peer, key, true
+}
+
+// replaceAdoptedPeer15033 swaps the shallower adopted peer for s in dst
+// (nested wins) and records s at the deeper level.
+func (b *groupExpandBudget) replaceAdoptedPeer15033(dst *[]*Node, peer, s *Node, level int) {
+	for i, d := range *dst {
+		if d == peer {
+			(*dst)[i] = s
+			break
+		}
+	}
+	if b.applyLevelByNode15033 == nil {
+		b.applyLevelByNode15033 = make(map[*Node]int)
+	}
+	if peer.IsLeaf {
+		for _, member := range expandLeafFamily9855(peer) {
+			delete(b.applyLevelByNode15033, member)
+		}
+	} else {
+		delete(b.applyLevelByNode15033, peer)
+		for _, member := range expandLeafFamily9855(peer) {
+			delete(b.applyLevelByNode15033, member)
+		}
+	}
+	b.applyLevelByNode15033[s] = level
 }
 
 // countNodes is the size of a subtree forest, used to charge the budget for a
@@ -408,75 +540,91 @@ func walkGroupToContext(groupChildren []*Node, ancestorPath [][]string) []*Node 
 // vars provides ${var} replacements for group names (may be nil).
 // haveExcept gates the #9862 provenance tagging: with no `apply-groups-except`
 // in the tree, clones stay untagged and every filter below keeps all.
+type applyGroupReference15033 struct {
+	name    string
+	markers []string
+}
+
 func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath [][]string, seen map[string]bool, memo map[string][]*Node, tagInherited bool, vars map[string]string, depth int, budget *groupExpandBudget, haveExcept bool, deferWildcards bool) error {
-	// #5194 A3-b2-F1: bound the nested-group recursion depth before it can
-	// exhaust the goroutine stack on a deep acyclic chain g1->g2->...->gN.
 	if depth > maxGroupExpandDepth {
 		return fmt.Errorf("apply-groups nesting exceeds maximum depth of %d (possible generated or pathological config)", maxGroupExpandDepth)
 	}
-	// First, collect apply-groups references at this level.
-	// Support bracket-list syntax, where names are statement keys, and block
-	// leaf-list syntax, where names are child keys.
-	type applyGroupReference struct {
-		name    string
-		markers []string
-	}
-	var applyRefs []applyGroupReference
+	var applyRefs []applyGroupReference15033
 	for _, n := range *nodes {
 		if n.Name() == "apply-groups" {
 			markers := duplicateBlockMergeMarkers9023(n)
 			for _, name := range appendApplyGroupNames(nil, n, vars) {
-				applyRefs = append(applyRefs, applyGroupReference{name: name, markers: markers})
+				applyRefs = append(applyRefs, applyGroupReference15033{name: name, markers: markers})
 			}
 		}
 	}
+	// #15033: expand deeper (nested) levels first — they are more specific
+	// in Junos and must win over this level's groups. Inline children are
+	// already present; this level's groups merge afterwards and yield to
+	// both inline and deeper-adopted leaves.
+	if err := expandLevelRefs15033(nodes, groups, ancestorPath, seen, memo, tagInherited, vars, depth, budget, haveExcept, deferWildcards, applyRefs); err != nil {
+		return err
+	}
+	filtered := make([]*Node, 0, len(*nodes))
+	for _, n := range *nodes {
+		if n.Name() != "apply-groups" {
+			filtered = append(filtered, n)
+		}
+	}
+	*nodes = filtered
+	// Containers adopted by this level's merge may carry their own
+	// apply-groups (or hold nested ones from the group body); expand them.
+	for _, n := range *nodes {
+		if len(ancestorPath) == 0 && n.Name() == "groups" {
+			continue
+		}
+		if !n.IsLeaf && len(n.Children) > 0 {
+			childPath := make([][]string, len(ancestorPath)+1)
+			copy(childPath, ancestorPath)
+			childPath[len(ancestorPath)] = n.Keys
+			if err := expandGroupsRecursive(&n.Children, groups, childPath, seen, memo, tagInherited, vars, depth, budget, haveExcept, deferWildcards); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
-	// Expand each referenced group.
+// expandLevelRefs15033 expands the apply-groups references collected at
+// one hierarchy level (extracted from expandGroupsRecursive for #15033:
+// the recursion now visits children before/after this level's merge).
+// Memoization (#4474), seen cycle guard (#4474/#5194), budget (#5194) and
+// nested-group fixed-point expansion (#4474) behave exactly as before.
+func expandLevelRefs15033(nodes *[]*Node, groups map[string]*Node, ancestorPath [][]string, seen map[string]bool, memo map[string][]*Node, tagInherited bool, vars map[string]string, depth int, budget *groupExpandBudget, haveExcept bool, deferWildcards bool, applyRefs []applyGroupReference15033) error {
 	for _, ref := range applyRefs {
 		name := ref.name
 		g, ok := groups[name]
 		if !ok {
 			return fmt.Errorf("apply-groups references undefined group %q", name)
 		}
-
-		// #5194 A3-b2-F1: bound the TOTAL expansion work so a wide shallow
-		// fan-out (many groups, each referenced from many contexts) that stays
-		// under the depth cap still cannot spin unbounded on commit / HA sync.
 		budget.work++
 		if budget.work > maxGroupExpandWork {
 			return fmt.Errorf("apply-groups expansion exceeds maximum work budget of %d (possible generated or pathological config)", maxGroupExpandWork)
 		}
-
-		// Memoization (#4474 fan-out fix): the fully-expanded body of a group
-		// is a function ONLY of (group name, ancestor context) within one
-		// ExpandGroups call — walkGroupToContext AND the nested-expansion
-		// context both depend on ancestorPath, while tagInherited/vars are
-		// constant for the call. A completed memo entry is a fully-resolved,
-		// cycle-free body (a cyclic expansion errors out before it is cached),
-		// so reusing it is always correct. Without this, a converging DAG
-		// re-expands a shared group once PER PATH — delete(seen,name) runs per
-		// branch, so the `seen` cycle guard does NOT bound the fan-out — and a
-		// machine-generated deep nested-group DAG goes exponential (~2x/level).
-		// mergeNodes MUTATES its src argument, so store and hand out fresh
-		// clones and keep the cached copy pristine.
 		memoKey := name + "\x00" + ancestorPathKey(ancestorPath)
 		if cached, hit := memo[memoKey]; hit {
 			if cached != nil {
-				// #6767: a memo HIT still clones and merges the whole cached
-				// subtree, so it costs the same as a miss and must be charged.
 				if err := budget.charge(countNodes(cached)); err != nil {
 					return err
 				}
 				body := cloneNodes(cached)
 				markDefaultPolicyGroupBlocks12823(budget, ancestorPath, body)
 				appendDuplicateBlockMergeMarkersToLeaves9023(body, ref.markers)
-				if err := mergeNodes(nodes, body, ancestorPath, budget, name, vars, nil, haveExcept, deferWildcards); err != nil {
+				prevOrigin15033 := budget.applyOriginLevel15033
+				budget.applyOriginLevel15033 = len(ancestorPath)
+				err := mergeNodes(nodes, body, ancestorPath, budget, name, vars, nil, haveExcept, deferWildcards)
+				budget.applyOriginLevel15033 = prevOrigin15033
+				if err != nil {
 					return err
 				}
 			}
 			continue
 		}
-
 		if seen == nil {
 			seen = make(map[string]bool)
 		}
@@ -484,50 +632,30 @@ func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath
 			return fmt.Errorf("apply-groups circular reference: group %q", name)
 		}
 		seen[name] = true
-
-		// Walk the group tree to match the current context path.
 		var srcChildren []*Node
 		if len(ancestorPath) == 0 {
-			// Top-level: merge group's direct children.
 			srcChildren = g.Children
 		} else {
 			srcChildren = walkGroupToContext(g.Children, ancestorPath)
 		}
-
 		var expanded []*Node
 		if srcChildren != nil {
 			cloned := cloneNodes(srcChildren)
 			if tagInherited {
 				tagNodesInherited(cloned, name)
 			}
-			// #9862: leaf provenance for `apply-groups-except` through nested
-			// groups. Tags the outer group's own body BEFORE nested expansion,
-			// so nested nodes keep their own contributor names.
-			// Default-policy group/inline provenance is independent of
-			// apply-groups-except and must be set on every clone.
 			markDefaultPolicyGroupBlocks12823(budget, ancestorPath, cloned)
 			if haveExcept {
 				addNodeContrib9862(cloned, []string{name})
 			}
-			// `apply-groups G2` (a nested-group template, a standard Junos
-			// idiom). Expand the group's OWN references to a fixed point BEFORE
-			// merging its body, so G2's content is inherited rather than
-			// silently dropped when the outer strip-and-recurse removes the
-			// merged-in `apply-groups G2` node. The `seen` guard — `name` is
-			// already marked above — breaks cycles (grpA->grpB->grpA returns a
-			// circular-reference error, same as a direct self-cycle). Nodes
-			// inherited FROM the nested group are tagged with THAT group's name:
-			// tagNodesInherited above ran before this call, so it tags only the
-			// outer group's own body and does not clobber the nested tags.
+			// Nested-group template: expand the group's OWN apply-groups
+			// to a fixed point BEFORE merging, so nested content is
+			// inherited rather than dropped (#4474); seen breaks cycles.
 			if err := expandGroupsRecursive(&cloned, groups, ancestorPath, seen, memo, tagInherited, vars, depth+1, budget, haveExcept, true); err != nil {
 				return err
 			}
 			expanded = cloned
 		}
-
-		// Cache a pristine copy of the completed expansion (even an empty one,
-		// so a group with no matching context subtree is not re-walked), then
-		// merge a SEPARATE clone into the parent so the cache is never mutated.
 		memo[memoKey] = cloneNodes(expanded)
 		if expanded != nil {
 			body := expanded
@@ -536,38 +664,16 @@ func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath
 				appendDuplicateBlockMergeMarkersToLeaves9023(body, ref.markers)
 			}
 			markDefaultPolicyGroupBlocks12823(budget, ancestorPath, body)
-			if err := mergeNodes(nodes, body, ancestorPath, budget, name, vars, nil, haveExcept, deferWildcards); err != nil {
+			prevOrigin15033 := budget.applyOriginLevel15033
+			budget.applyOriginLevel15033 = len(ancestorPath)
+			err := mergeNodes(nodes, body, ancestorPath, budget, name, vars, nil, haveExcept, deferWildcards)
+			budget.applyOriginLevel15033 = prevOrigin15033
+			if err != nil {
 				return err
 			}
 		}
-
 		delete(seen, name)
 	}
-
-	// Remove apply-groups nodes.
-	filtered := make([]*Node, 0, len(*nodes))
-	for _, n := range *nodes {
-		if n.Name() != "apply-groups" {
-			filtered = append(filtered, n)
-		}
-	}
-	*nodes = filtered
-
-	// Recurse into children to handle nested apply-groups.
-	for _, n := range *nodes {
-		if !n.IsLeaf && len(n.Children) > 0 {
-			childPath := make([][]string, len(ancestorPath)+1)
-			copy(childPath, ancestorPath)
-			childPath[len(ancestorPath)] = n.Keys
-			// Descending the config TREE (not the nested-group chain), so depth
-			// is unchanged — tree depth is already bounded by the parser
-			// brace-depth cap (#4148). The shared work budget still applies.
-			if err := expandGroupsRecursive(&n.Children, groups, childPath, seen, memo, tagInherited, vars, depth, budget, haveExcept, deferWildcards); err != nil {
-				return err
-			}
-		}
-	}
-
 	return nil
 }
 
@@ -621,6 +727,39 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 	if level[group] {
 		return nil
 	}
+	// #15033: snapshot dst identities so every adopted node is tagged at
+	// this application's hierarchy level, covering all merge arms.
+	before15033 := make(map[*Node]bool, len(*dst))
+	for _, n := range *dst {
+		before15033[n] = true
+	}
+	defer budget.noteAdoptedDst15033(*dst, budget.applyOriginLevel15033, before15033)
+	// #15033: snapshot every descendant list so leaves adopted at any
+	// depth are tagged at the application level that merged them,
+	// however many container-routing hops the merge took. Tag with the
+	// merge's own len(ancestorPath): the nested application sits deeper
+	// in the tree, so its merges carry a longer ancestorPath.
+	descBefore15033 := make(map[*Node]map[*Node]bool)
+	var snap15033 func(nodes []*Node)
+	snap15033 = func(nodes []*Node) {
+		for _, n := range nodes {
+			if n == nil || n.IsLeaf {
+				continue
+			}
+			m := make(map[*Node]bool, len(n.Children))
+			for _, c := range n.Children {
+				m[c] = true
+			}
+			descBefore15033[n] = m
+			snap15033(n.Children)
+		}
+	}
+	snap15033(*dst)
+	defer func() {
+		for n, before := range descBefore15033 {
+			budget.noteAdoptedDst15033(n.Children, budget.applyOriginLevel15033, before)
+		}
+	}()
 	for _, s := range src {
 		// #6767: one unit per source node MERGED, so a deep group subtree is
 		// bounded by its own size rather than by the single reference that
@@ -932,6 +1071,16 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					// via the compiler #2641 loop when adopted/merged.
 					*dst = append(*dst, s)
 				}
+				// #15033: nested (deeper) apply-groups beats a shallower
+				// adopted peer for scalars and non-union leaves; inline
+				// and same/shallower peers keep first-wins above.
+				if rpeer, rkey, ok := budget.shallowerAdoptedPeer15033(*dst, s, budget.applyOriginLevel15033); ok &&
+					!leafListUnionEligible(ancestorPath, rkey, rpeer, s) &&
+					!groupReplacePortUnionEligible(ancestorPath, rkey, rpeer, s) {
+					budget.replaceAdoptedPeer15033(dst, rpeer, s, budget.applyOriginLevel15033)
+					markGroupDefaultPolicyStanza12923(budget, ancestorPath, s)
+					markGroupRootLoginLeaf14447(budget, ancestorPath, s)
+				}
 				continue
 			}
 			// #9855: no leaf peer, but a packed group leaf still merges into a
@@ -974,6 +1123,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			// stanza can pair with it instead of being order-suppressed.
 			markGroupDefaultPolicyStanza12923(budget, ancestorPath, s)
 			markGroupRootLoginLeaf14447(budget, ancestorPath, s)
+			budget.tagNewSubtree15033(s, budget.applyOriginLevel15033)
 			*dst = append(*dst, s)
 			continue
 		}
@@ -1061,12 +1211,15 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					mergeLeafListInto(peer, s)
 					appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{peer},
 						duplicateBlockMergeMarkers9023(s))
+				} else if rpeer, rkey, ok := budget.shallowerAdoptedPeer15033(*dst, s, budget.applyOriginLevel15033); ok &&
+					!leafListUnionEligible(ancestorPath, rkey, rpeer, s) &&
+					!groupReplacePortUnionEligible(ancestorPath, rkey, rpeer, s) {
+					// #15033 range/scalar block vs shallower leaf: nested wins.
+					budget.replaceAdoptedPeer15033(dst, rpeer, s, budget.applyOriginLevel15033)
 				}
-				// else OVERRIDE: a range-bearing inline peer wins, group
-				// block dropped (a groupReplace leaf never reaches here —
-				// its isLeafListSchema is false, so it takes the container
-				// path).
+				// else OVERRIDE: inline or same/shallower peer wins.
 			} else {
+				budget.tagNewSubtree15033(s, budget.applyOriginLevel15033)
 				*dst = append(*dst, s)
 			}
 			continue
@@ -1082,6 +1235,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				continue
 			}
 			if peer == nil {
+				budget.tagNewSubtree15033(s, budget.applyOriginLevel15033)
 				*dst = append(*dst, s)
 				continue
 			}
@@ -1263,6 +1417,31 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					!groupDefaultPolicyStanzaAdopted12923(budget, *dst)) &&
 				!packedTailLeafExempts4325(ancestorPath, *dst, s) &&
 				!isRoutingTermThenAction14425(ancestorPath, s) {
+				// #15033: a deeper group's container replaces a shallower
+				// adopted leaf peer (nested wins); inline keeps winning.
+				if rpeer, rkey, ok := budget.shallowerAdoptedPeer15033(*dst, s, budget.applyOriginLevel15033); ok &&
+					!leafListUnionEligible(ancestorPath, rkey, rpeer, s) &&
+					!groupReplacePortUnionEligible(ancestorPath, rkey, rpeer, s) {
+					hadChildren := len(s.Children) > 0
+					if !deferWildcards {
+						s.Children = pruneWildcardInstances9802(appendPath(ancestorPath, s.Keys), s.Children)
+					}
+					s.Children = pruneExcluded9862(s.Children, group, scope)
+					if !deferWildcards && (wildcardInstanceNode9802(ancestorPath, s) ||
+						(hadChildren && len(s.Children) == 0)) {
+						continue
+					}
+					if err := budget.charge(countNodes([]*Node{s}) - 1); err != nil {
+						return err
+					}
+					if isDefaultPolicyGroupBlock12823(ancestorPath, s) {
+						if budget.groupDefaultPolicyBlocks12823 == nil {
+							budget.groupDefaultPolicyBlocks12823 = make(map[*Node]bool)
+						}
+						budget.groupDefaultPolicyBlocks12823[s] = true
+					}
+					budget.replaceAdoptedPeer15033(dst, rpeer, s, budget.applyOriginLevel15033)
+				}
 				continue
 			}
 			hadChildren := len(s.Children) > 0
@@ -1305,6 +1484,13 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					budget.groupDefaultPolicyBlocks12823 = make(map[*Node]bool)
 				}
 				budget.groupDefaultPolicyBlocks12823[s] = true
+			}
+			// #15033: single-key containers adopted wholesale are terminal
+			// for later precedence (their leaves live in Children and are
+			// only reachable as this node); multi-key containers merge
+			// recursively, so their leaves are tagged one level down.
+			if len(s.Keys) == 1 {
+				budget.tagNewSubtree15033(s, budget.applyOriginLevel15033)
 			}
 			*dst = append(*dst, s)
 		}
