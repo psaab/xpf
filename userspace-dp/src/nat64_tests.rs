@@ -383,7 +383,7 @@ fn nat64_14624_duplicate_member_unique_tuples() {
     // The phase-1 reuse key must dedupe IDENTICALLY, or it would never
     // match the built pool (allocator wrongly not reused / wrongly
     // reused, and the #6982 charge would count the duplicate).
-    let (_, identity_pool) =
+    let (_, identity_pool, _) =
         nat64_rule_identity(&dup_snap).expect("a valid rule must have an identity");
     assert_eq!(
         identity_pool, state.prefixes[0].pool_v4,
@@ -9032,5 +9032,170 @@ fn nat64_pool_unusable_installs_prefix_and_drops_14962() {
         quarantined.classify_ipv6_dest(dst),
         Nat64Match::MatchUnavailable,
         "#14962: an interface-SNAT-overlap-quarantined NAT64 pool must drop, not mint the colliding tuple"
+    );
+}
+
+// ===========================================================================
+// #15178 (C06-01): NAT64 deterministic reuse + revalidation.
+//
+// Pre-fix, `reuse_allocator` keyed only on (prefix_bytes, pool_v4) and
+// `source_nat_translation_still_valid` exempted nat64 entirely. After a
+// block-size / host-base / /32<->/64 / mode edit on the same pool, the old
+// allocator (with its stale BIB lease) was reused and established sessions
+// were never revalidated, so a same-socket new-remote flow joined the stale
+// lease and was refused AllocatorExhausted instead of minting in the new
+// block, and the stateless reverse map named a different subscriber.
+// ===========================================================================
+
+fn det_nat64_snap_15178(block_size: u16, host_base: &str, prefix_len: u8) -> NAT64RuleSnapshot {
+    NAT64RuleSnapshot {
+        name: "napt64-15178".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.1".to_string()],
+        no_v6_frag_header: false,
+        deterministic_block_size: block_size,
+        deterministic_blocks_per_ip: 2016,
+        deterministic_host_prefix_len: prefix_len,
+        deterministic_host_base_v6: host_base.to_string(),
+        pool_unusable: false,
+        pool_unusable_reason: String::new(),
+    }
+}
+
+#[test]
+fn nat64_15178_block_size_change_does_not_reuse_allocator() {
+    // Old geometry: block 32. Subscriber word 5 -> block [1184,1215].
+    let old_snap = det_nat64_snap_15178(32, "2001:db8::", 32);
+    let state1 = Nat64State::from_snapshots(&[old_snap]);
+    assert!(state1.prefixes[0].deterministic_v6.is_some());
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+    let sub: Ipv6Addr = "2001:db8:0:5::".parse().unwrap();
+    let (ip1, port1) = state1
+        .allocate_source(0, PROTO_TCP, sub, dst_v4, 40001, 443, 1_000_000_000)
+        .expect("old allocation");
+    assert_eq!(ip1, Ipv4Addr::new(198, 51, 100, 1));
+    assert!((1184..=1215).contains(&port1), "old block port {port1}");
+
+    // Same prefix + pool, block-size 32 -> 1024. New block for word 5:
+    // [6144,7167]. The allocator must NOT be reused.
+    let new_snap = det_nat64_snap_15178(1024, "2001:db8::", 32);
+    let state2 = Nat64State::from_snapshots_with_previous(&[new_snap], Some(&state1), 2, 2_000_000_000);
+    assert_eq!(
+        state2.prefixes[0].port_allocator.live_flow_count(),
+        0,
+        "#15178: a block-size change must not reuse the old allocator/BIB"
+    );
+    // A same-socket new-remote flow (different dst) must mint in the NEW
+    // block instead of joining the stale lease / AllocatorExhausted.
+    let dst2 = Ipv4Addr::new(9, 9, 9, 9);
+    let (ip2, port2) = state2
+        .allocate_source(0, PROTO_TCP, sub, dst2, 40001, 443, 2_000_000_000)
+        .expect("#15178: new-remote flow must allocate in the new block");
+    assert_eq!(ip2, ip1);
+    assert!(
+        (6144..=7167).contains(&port2),
+        "#15178: new-remote port {port2} must be in the new block [6144,7167]"
+    );
+}
+
+#[test]
+fn nat64_15178_noop_reapply_reuses_allocator_and_eim() {
+    let snap = det_nat64_snap_15178(32, "2001:db8::", 32);
+    let state1 = Nat64State::from_snapshots(&[snap.clone()]);
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+    let sub: Ipv6Addr = "2001:db8:0:5::".parse().unwrap();
+    let tuple1 = state1
+        .allocate_source(0, PROTO_TCP, sub, dst_v4, 40001, 443, 1_000_000_000)
+        .expect("alloc");
+    let state2 = Nat64State::from_snapshots_with_previous(&[snap], Some(&state1), 2, 2_000_000_000);
+    assert_eq!(
+        state2.prefixes[0].port_allocator.live_flow_count(),
+        1,
+        "#15178 control: no-op re-apply must reuse the allocator"
+    );
+    // EIM: same socket to a new remote reuses the same BIB tuple.
+    let tuple2 = state2
+        .allocate_source(0, PROTO_TCP, sub, Ipv4Addr::new(9, 9, 9, 9), 40001, 443, 2_000_000_000)
+        .expect("EIM reuse");
+    assert_eq!(tuple2, tuple1, "#15178 control: no-op re-apply keeps EIM");
+}
+
+#[test]
+fn nat64_15178_mode_and_hostbase_changes_do_not_reuse() {
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+    let sub: Ipv6Addr = "2001:db8:0:5::".parse().unwrap();
+    // deterministic -> round-robin (host base cleared)
+    let det = det_nat64_snap_15178(32, "2001:db8::", 32);
+    let s1 = Nat64State::from_snapshots(&[det]);
+    let _ = s1.allocate_source(0, PROTO_TCP, sub, dst_v4, 40001, 443, 1_000_000_000).expect("alloc");
+    let mut rr = det_nat64_snap_15178(32, "2001:db8::", 32);
+    rr.deterministic_host_base_v6 = String::new();
+    rr.deterministic_block_size = 0;
+    let s2 = Nat64State::from_snapshots_with_previous(&[rr], Some(&s1), 2, 2_000_000_000);
+    assert!(s2.prefixes[0].deterministic_v6.is_none());
+    assert_eq!(s2.prefixes[0].port_allocator.live_flow_count(), 0, "#15178: det->RR must not reuse");
+    // host-base change
+    let s3 = Nat64State::from_snapshots(&[det_nat64_snap_15178(32, "2001:db8::", 32)]);
+    let _ = s3.allocate_source(0, PROTO_TCP, sub, dst_v4, 40001, 443, 1_000_000_000).expect("alloc");
+    let s4 = Nat64State::from_snapshots_with_previous(
+        &[det_nat64_snap_15178(32, "2001:db9::", 32)],
+        Some(&s3),
+        2,
+        2_000_000_000,
+    );
+    assert_eq!(s4.prefixes[0].port_allocator.live_flow_count(), 0, "#15178: host-base change must not reuse");
+}
+
+#[test]
+fn nat64_15178_tuple_matches_new_geometry_only() {
+    // Unit-level acceptance helper used by revalidation: a tuple minted
+    // under block 32 must not match block 1024 geometry for the same sub.
+    let old = det_nat64_snap_15178(32, "2001:db8::", 32);
+    let state_old = Nat64State::from_snapshots(&[old]);
+    let sub: Ipv6Addr = "2001:db8:0:5::".parse().unwrap();
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+    let (ip, port) = state_old
+        .allocate_source(0, PROTO_TCP, sub, dst_v4, 40001, 443, 1_000_000_000)
+        .expect("alloc");
+    let new_state = Nat64State::from_snapshots(&[det_nat64_snap_15178(1024, "2001:db8::", 32)]);
+    // The old port (1184..1215) is inside subscriber 0's new block, not
+    // subscriber 5's, so it must NOT validate under the new geometry.
+    // Pre-fix the nat64 exemption returned valid for every tuple.
+    let dst_v6: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    assert!(
+        !new_state.nat64_source_translation_still_valid(sub, dst_v6, ip, Some(port)),
+        "#15178: old-block tuple must not validate under new geometry"
+    );
+    // Control: the same tuple DOES validate under its own (old) geometry,
+    // and a tuple minted under the new geometry validates there.
+    assert!(
+        state_old.nat64_source_translation_still_valid(sub, dst_v6, ip, Some(port)),
+        "#15178 control: tuple must validate under its minting geometry"
+    );
+    let (ip2, port2) = new_state
+        .allocate_source(0, PROTO_TCP, sub, dst_v4, 40002, 443, 1_000_000_000)
+        .expect("new alloc");
+    assert!(
+        new_state.nat64_source_translation_still_valid(sub, dst_v6, ip2, Some(port2)),
+        "#15178 control: new-geometry tuple must validate"
+    );
+    // Fail-closed edges: missing port / unknown pool address / no prefix.
+    assert!(!new_state.nat64_source_translation_still_valid(sub, dst_v6, ip2, None));
+    assert!(
+        !new_state.nat64_source_translation_still_valid(
+            sub,
+            dst_v6,
+            Ipv4Addr::new(203, 0, 113, 99),
+            Some(port2)
+        )
+    );
+    assert!(
+        !new_state.nat64_source_translation_still_valid(
+            sub,
+            "2001:db8::1".parse().unwrap(),
+            ip2,
+            Some(port2)
+        ),
+        "#15178: a destination matching no live prefix must fail closed"
     );
 }
