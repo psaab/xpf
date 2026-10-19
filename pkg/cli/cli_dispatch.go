@@ -465,6 +465,11 @@ func (c *CLI) dispatchConfig(line string) error {
 	if err := c.checkConfigRegex(line); err != nil {
 		return err
 	}
+	// #14981: groups/apply-groups lines are judged literally above; their
+	// effective expanded paths are adjudicated here, and again at commit.
+	if err := c.checkConfigRegexGroups14981(line); err != nil {
+		return err
+	}
 	// #14707: `show` in config mode renders the candidate (whole tree or
 	// the edit-path subtree). The mutation gate declines it (not a verb
 	// it gates) and dispatchOperational's command gate never runs here,

@@ -40,6 +40,17 @@ func (s *Server) authorizeRPCConfigMutation(cfg *config.Config, class, fullMetho
 	if class == "" {
 		return nil
 	}
+	// #14981: Commit / CommitConfirmed carry no line, but they promote a
+	// candidate whose group-inherited paths were never adjudicated as
+	// literal lines. Adjudicate the expanded candidate for the committing
+	// class before the handler runs. CommitCheck only compiles and writes
+	// nothing, so it stays ungated here.
+	if _, method, okM := splitFullMethod(fullMethod); okM && (method == "Commit" || method == "CommitConfirmed") {
+		if s.store == nil {
+			return nil
+		}
+		return config.AuthorizeExpandedCandidate(cfg, class, s.store.CandidateTree(), s.store.ActiveTree())
+	}
 	line, ok := configMutationLineFor(fullMethod, req)
 	if !ok {
 		// #9633: Load and Rollback write more than one line.
@@ -48,7 +59,50 @@ func (s *Server) authorizeRPCConfigMutation(cfg *config.Config, class, fullMetho
 	if err := config.AuthorizeConfigMutation(cfg, class, nil, line); err != nil {
 		return fmt.Errorf("%w", err)
 	}
+	// #14981: a Set/Delete whose path creates or triggers groups is judged
+	// above only on its literal spelling. When the candidate already
+	// carries the complementary half (a group body awaiting an
+	// apply-groups, or an apply-groups awaiting a body), adjudicate the
+	// expanded candidate as it will stand after this mutation. Without a
+	// store (direct gate tests) there is no candidate to expand; the
+	// commit-time gate above remains the backstop.
+	if s.store != nil && config.LineTouchesGroups14981(line) {
+		if tree := candidateAfterMutation14981(s.store.CandidateTree(), line); tree != nil {
+			if err := config.AuthorizeExpandedTree(cfg, class, tree); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+// candidateAfterMutation14981 returns the candidate tree as it will stand
+// after applying line, for expanded adjudication. A line that cannot be
+// replayed (the handler will refuse it) yields nil: there is no effective
+// mutation to adjudicate beyond the literal check already done.
+func candidateAfterMutation14981(tree *config.ConfigTree, line string) *config.ConfigTree {
+	if tree == nil {
+		return nil
+	}
+	verb, path, quoted, grouped, closed, err := config.ParseSetVerbGroupedClosed(line)
+	if err != nil {
+		return nil
+	}
+	switch verb {
+	case "delete":
+		_ = tree.DeletePathGrouped(path, grouped)
+	case "deactivate":
+		_ = tree.DeactivatePathGrouped(path, grouped)
+	case "activate":
+		_ = tree.ActivatePathGrouped(path, grouped)
+	case "copy", "rename", "insert", "annotate":
+		// Two-endpoint / positional verbs are not replayed here; the
+		// commit-time expanded gate adjudicates their effective result.
+		return nil
+	default:
+		_ = tree.SetPathQuotedGrouped(path, quoted, grouped, closed)
+	}
+	return tree
 }
 
 // configMutationLineFor returns the config-mode line an RPC will apply, or

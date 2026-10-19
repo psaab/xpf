@@ -390,6 +390,15 @@ func authorizeConfigMutationDepth9939(cfg *Config, class string, editPath []stri
 	// quarantines the payload rather than executing it with root authority.
 	// The line that PLANTS it is therefore still the first adjudication point,
 	// while fire-time revalidation closes the persistence and policy-churn gap.
+	//
+	// #14981: a line that creates a group body or triggers inheritance is
+	// adjudicated above only on its literal `groups …` / `apply-groups …`
+	// spelling, which is not a path that ever takes effect. The effective
+	// paths exist only after expansion of the whole candidate, so the
+	// expanded adjudication runs where the candidate is held
+	// (AuthorizeExpandedTree at commit, the load-body expansion arm in
+	// AuthorizeConfigLoad, and the surfaces' candidate-after-mutation
+	// replay for group-touching Set lines).
 	return authorizeEmbeddedChangeConfig9939(cfg, class, editPath, parts, quoted, depth)
 }
 

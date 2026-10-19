@@ -96,6 +96,18 @@ func (s *Store) CandidateGeneration() uint64 {
 	return s.candidateGen
 }
 
+// CandidateTree returns a deep copy of the candidate tree, or nil when not
+// in configuration mode (#14981). The copy is the caller's to expand or
+// render; the live candidate is never aliased.
+func (s *Store) CandidateTree() *config.ConfigTree {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.candidate == nil {
+		return nil
+	}
+	return s.candidate.Clone()
+}
+
 // ActiveSnapshot returns the published active generation + compiled config
 // (#9905): (0, nil) on a fresh store, advanced by every compiled-active
 // swap. Lock-free (one atomic load of an immutable pair) — the warm-path

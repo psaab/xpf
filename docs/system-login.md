@@ -991,6 +991,30 @@ with each line matched in turn. The single-evaluator shape is deliberate: two
 renderings of hierarchical content as `set` lines drift, and each looks right
 on its own.
 
+#### `groups` / `apply-groups` inheritance is adjudicated expanded (#14981)
+
+`deny-configuration` (and `allow-configuration`) apply to the configuration
+that takes effect, not only to the literal line typed. A group body planted
+with `set groups G …` and pulled in with `set apply-groups G` — including a
+`<*>` wildcard group, a nested group, and `apply-groups "${node}"` — is
+adjudicated on its group-expanded paths on every surface:
+
+* **Set / Delete** (gRPC, REST, on-box CLI): when the line creates or
+  triggers a group and the candidate already carries the complementary
+  half, the candidate as it will stand after the line is expanded and
+  checked.
+* **Load** (`load merge` / `load set`): the body is parsed, its groups are
+  expanded (wildcard fan-out against the body's own containers included),
+  and every effective line is checked; an unexpandable body fails closed.
+* **Commit / CommitConfirmed**: the whole candidate is expanded and checked
+  for the committing class, because inherited paths were never written as
+  adjudicated lines — the older "already adjudicated when written"
+  justification did not cover them. `commit check` / `CommitCheck` only
+  compile and write nothing, so they are not gated this way.
+
+An unrestricted class (no `*-configuration` leaves) is never affected, and
+a group whose expanded paths are all allowed inherits exactly as before.
+
 ### Write the body as a block or as `set` — never packed on the line (#6662)
 
 Junos accepts a statement written on the instance line; xpf compiles the body

@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"strings"
+
 	"github.com/psaab/xpf/pkg/config"
 )
 
@@ -92,6 +94,93 @@ func (c *CLI) checkConfigRegex(line string) error {
 // decision stayed behind, where the other two surfaces could not call it.
 func checkConfigRegexWith(cfg *config.Config, class string, editPath []string, line string) error {
 	return config.AuthorizeConfigMutation(cfg, class, editPath, line)
+}
+
+// checkExpandedConfigRegex14981 adjudicates the candidate's group-expanded
+// paths for the session class (#14981). Used at commit and for
+// groups/apply-groups lines, whose literal spelling is never the effective
+// path. Without a store there is no candidate to expand.
+func (c *CLI) checkExpandedConfigRegex14981() error {
+	if c.store == nil || c.userClass == "" {
+		return nil
+	}
+	cfg := c.store.ActiveConfig()
+	return config.AuthorizeExpandedCandidate(cfg, c.userClass, c.store.CandidateTree(), c.store.ActiveTree())
+}
+
+// checkConfigRegexGroups14981 runs the expanded adjudication when a
+// config-mode line touches groups/apply-groups (edit-path resolved).
+func (c *CLI) checkConfigRegexGroups14981(line string) error {
+	if c.store == nil {
+		return nil
+	}
+
+	if !lineTouchesGroupsCLI14981(c, line) {
+		return nil
+	}
+	// Replay a set/delete onto a candidate copy so the complementary half
+	// already staged is expanded together with this line.
+	tree := c.store.CandidateTree()
+	if tree == nil {
+		return nil
+	}
+	full := line
+	if edit := c.store.GetEditPath(); len(edit) > 0 {
+		if fields := strings.Fields(line); len(fields) > 0 {
+			verb := fields[0]
+			if verb == "set" || verb == "delete" || verb == "deactivate" || verb == "activate" {
+				rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), verb))
+				full = verb + " " + strings.Join(append(append([]string(nil), config.NormalizeEditPathTokens(edit)...), strings.Fields(rest)...), " ")
+			}
+		}
+	}
+	if !applyLineToTree14981(tree, full) {
+		// Unreplayable verb (copy/rename/insert/annotate): the commit-time
+		// expanded gate adjudicates the staged result.
+		return nil
+	}
+	cfg := c.store.ActiveConfig()
+	return config.AuthorizeExpandedTree(cfg, c.userClass, tree)
+}
+
+func lineTouchesGroupsCLI14981(c *CLI, line string) bool {
+	var edit []string
+	if c.store != nil {
+		edit = c.store.GetEditPath()
+	}
+	// Reuse the shared predicate via a resolved line: prepend the verb-led
+	// line as-is; Authorize-side lexing resolves the cursor only inside
+	// pkg/config, so approximate by checking both raw and edit-joined forms.
+	if config.LineTouchesGroups14981(line) {
+		return true
+	}
+	if len(edit) > 0 {
+		if fields := strings.Fields(line); len(fields) > 0 {
+			joined := fields[0] + " " + strings.Join(append(append([]string(nil), edit...), fields[1:]...), " ")
+			return config.LineTouchesGroups14981(joined)
+		}
+	}
+	return false
+}
+
+func applyLineToTree14981(tree *config.ConfigTree, line string) bool {
+	verb, path, quoted, grouped, closed, err := config.ParseSetVerbGroupedClosed(line)
+	if err != nil {
+		return false
+	}
+	switch verb {
+	case "delete":
+		_ = tree.DeletePathGrouped(path, grouped)
+	case "deactivate":
+		_ = tree.DeactivatePathGrouped(path, grouped)
+	case "activate":
+		_ = tree.ActivatePathGrouped(path, grouped)
+	case "copy", "rename", "insert", "annotate":
+		return false
+	default:
+		_ = tree.SetPathQuotedGrouped(path, quoted, grouped, closed)
+	}
+	return true
 }
 
 // configRegexesFrom resolves the `*-configuration` allow/deny pair in force for

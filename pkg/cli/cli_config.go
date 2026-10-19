@@ -296,6 +296,15 @@ func (c *CLI) handleCommit(args []string) error {
 	if holder, locked := c.store.ConfigHolder(); locked && holder != "" && holder != localConfigSessionID && (c.configOwned || c.userClass != "") {
 		return fmt.Errorf("permission denied: configuration is locked by another session")
 	}
+	// #14981: commit promotes group-expanded paths never adjudicated as
+	// literal lines. `commit check` only compiles and writes nothing, so
+	// it is not gated here (mirrors the gRPC/REST CommitCheck posture).
+	isCheck := len(args) > 0 && args[0] == "check"
+	if !isCheck {
+		if err := c.checkExpandedConfigRegex14981(); err != nil {
+			return err
+		}
+	}
 	if len(args) > 0 && args[0] == "check" {
 		compiled, err := c.store.CommitCheck()
 		if err != nil {
