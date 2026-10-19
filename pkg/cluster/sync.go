@@ -240,6 +240,21 @@ const (
 	// correlated only on the requester. An old peer ignores this additive
 	// message and leaves the request fail-closed.
 	syncMsgBulkRequest = 42
+	// #15160 (B03-01): chunked DHCP lease full-sets. When a family's lease
+	// set encodes over maxSyncPayload, queueDHCPLeaseSnapshot splits it
+	// across these additive types instead of writing one over-cap frame
+	// the receiveLoop refuses connection-fatally. Each chunk payload is
+	// {generation u64, index u32, total u32, totalLeases u32} followed by a
+	// standard count-prefixed DHCP lease body for that chunk; the LAST
+	// chunk also carries the #10170 authority trailer. A pre-#15160 peer
+	// ignores the unknown types (additive, no version bump; the #14607
+	// precedent), so lease sync for over-cap sets resumes once both peers
+	// upgrade — it never tears the connection down. Small sets keep the
+	// legacy syncMsgDHCPLeaseV4/V6 single-frame shape. 44 is
+	// syncMsgAuthConfirm (pre/post-install shared space; see the NOTE
+	// above), so the chunk types take 45/46.
+	syncMsgDHCPLeaseV4Chunk = 45
+	syncMsgDHCPLeaseV6Chunk = 46
 )
 
 // syncHeader is the wire header for each sync message.
@@ -1878,6 +1893,12 @@ type SessionSync struct {
 	// on it. Taken only by the DHCP arms; the callback must not reenter DHCP
 	// receive paths (see OnDHCPLeasesReceived).
 	dhcpApplyMu sync.Mutex
+	// #15160: per-family pending chunk assemblies, guarded by dhcpApplyMu
+	// (touched only by the DHCP chunk handler's commit section and the
+	// legacy arms' supersede). A pending assembly never commits until its
+	// final chunk lands; a newer committed set discards it.
+	dhcpChunkState4 dhcpChunkState
+	dhcpChunkState6 dhcpChunkState
 	// recvEpoch fences full-set DHCP commits against receiver resets
 	// (fold-2 HIGH-2): bumped under recvSeqMu by resetRecvGen alongside
 	// the guard resets. DHCP arms capture it with the newer-check and
@@ -2906,26 +2927,76 @@ func (s *SessionSync) queueDHCPLeaseSnapshot(family int, snapshot dhcpserver.Lea
 		return
 	}
 	msgType := byte(syncMsgDHCPLeaseV4)
+	chunkMsgType := byte(syncMsgDHCPLeaseV4Chunk)
 	seqCounter := &s.dhcpV4SeqCounter
 	if family == 6 {
 		msgType = syncMsgDHCPLeaseV6
+		chunkMsgType = syncMsgDHCPLeaseV6Chunk
 		seqCounter = &s.dhcpV6SeqCounter
 	}
-	seq := seqCounter.Add(1)
 	base := encodeDHCPLeasePayload(snapshot.Leases)
-	if snapshot.Generation != 0 || len(snapshot.Scopes) > 0 {
+	hasMeta := snapshot.Generation != 0 || len(snapshot.Scopes) > 0
+	if hasMeta {
 		base = appendDHCPLeaseSnapshotMeta(base, snapshot)
 	}
-	payload := appendFullSetSeq(base, s.syncEpoch, seq)
-	s.writeMu.Lock()
-	err := writeMsg(conn, msgType, payload)
-	s.writeMu.Unlock()
-	if err != nil {
-		slog.Warn("cluster sync: DHCP lease send error", "family", family, "err", err)
-		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+	// Fast path (#15160): the whole set, metadata included, fits one frame
+	// under the receiver cap — keep the exact pre-#15160 wire shape so an
+	// old peer decodes it identically.
+	if len(base)+fullSetSeqTrailerLen <= maxSyncPayload {
+		seq := seqCounter.Add(1)
+		s.writeMu.Lock()
+		err := writeMsg(conn, msgType, appendFullSetSeq(base, s.syncEpoch, seq))
+		s.writeMu.Unlock()
+		if err != nil {
+			slog.Warn("cluster sync: DHCP lease send error", "family", family, "err", err)
+			s.stats.Errors.Add(1)
+			s.handleDisconnect(conn)
+			return
+		}
+		s.stats.DHCPLeasesSent.Add(1)
+		slog.Debug("cluster sync: DHCP lease set sent", "family", family, "count", len(snapshot.Leases))
 		return
 	}
+	// Over-cap (#15160): chunk the lease RECORDS below the frame budget.
+	// The chunk generation is this push's first full-set sequence; every
+	// chunk frame carries its own strictly increasing sequence so the
+	// receiver's per-chunk admission stays monotone even across the two
+	// fabrics, and the receiver assembles by (incarnation, generation)
+	// and commits exactly once when the last chunk lands. The authority
+	// trailer rides the last chunk only. A lease whose single record
+	// cannot fit any frame is dropped and counted — never emitted
+	// over-cap (the #14607 disposition).
+	generation := seqCounter.Add(1) // the set's identity; every chunk carries it
+	chunks, kept, dropped := encodeDHCPLeaseChunkFrames(snapshot.Leases)
+	if dropped > 0 {
+		s.stats.MalformedRecordsDropped.Add(uint64(dropped))
+	}
+	for i, chunkBody := range chunks {
+		body := encodeDHCPLeaseChunkPayload(chunkBody, generation, uint32(i), uint32(len(chunks)), uint32(kept))
+		if i == len(chunks)-1 && hasMeta {
+			body = appendDHCPLeaseSnapshotMeta(body, snapshot)
+		}
+		if len(body)+fullSetSeqTrailerLen > maxSyncPayload {
+			slog.Warn("cluster sync: refusing oversize DHCP lease chunk",
+				"family", family, "bytes", len(body)+fullSetSeqTrailerLen, "cap", maxSyncPayload)
+			s.stats.MalformedRecordsDropped.Add(1)
+			return
+		}
+		seq := generation
+		if i > 0 {
+			seq = seqCounter.Add(1)
+		}
+		s.writeMu.Lock()
+		err := writeMsg(conn, chunkMsgType, appendFullSetSeq(body, s.syncEpoch, seq))
+		s.writeMu.Unlock()
+		if err != nil {
+			slog.Warn("cluster sync: DHCP lease chunk send error", "family", family, "err", err)
+			s.stats.Errors.Add(1)
+			s.handleDisconnect(conn)
+			return
+		}
+	}
 	s.stats.DHCPLeasesSent.Add(1)
-	slog.Debug("cluster sync: DHCP lease set sent", "family", family, "count", len(snapshot.Leases))
+	slog.Debug("cluster sync: DHCP lease set sent chunked", "family", family,
+		"count", kept, "chunks", len(chunks), "dropped_oversize", dropped)
 }
