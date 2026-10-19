@@ -21,23 +21,48 @@ import (
 const (
 	appTimeoutMin = 0
 	appTimeoutMax = 86400
+	// appTimeoutNeverWireSecs encodes Junos `never` on the uint32 wire field
+	// (#15207). Distinct from 0 (use-global) and from any legal numeric value.
+	appTimeoutNeverWireSecs = appTimeoutMax + 1
 )
 
+// AppTimeoutWireSecs maps a compiled application to its wire timeout (#15207).
+func AppTimeoutWireSecs(app *Application) uint32 {
+	if app == nil {
+		return 0
+	}
+	if app.InactivityTimeoutNever {
+		return uint32(appTimeoutNeverWireSecs)
+	}
+	if app.InactivityTimeout <= 0 {
+		return 0
+	}
+	if app.InactivityTimeout > appTimeoutMax {
+		return uint32(appTimeoutMax)
+	}
+	return uint32(app.InactivityTimeout)
+}
+
 // parseAppTimeout parses an application inactivity-timeout / timeout token.
-// It returns the integer value and true when the token is a base-10 integer
-// within [appTimeoutMin, appTimeoutMax]; otherwise it returns (0, false) so the
-// caller records the raw token for a deferred strict rejection rather than
-// silently dropping it. It is the single parse authority shared by the
-// top-level and inline-term application paths and the strict commit gate.
+// Junos `never` (#15207) returns (0, true) and sets never via parseAppTimeoutFull.
 func parseAppTimeout(raw string) (int, bool) {
-	n, err := strconv.Atoi(raw)
+	n, never, ok := parseAppTimeoutFull(raw)
+	_ = never
+	return n, ok
+}
+
+func parseAppTimeoutFull(raw string) (n int, never bool, ok bool) {
+	if strings.EqualFold(strings.TrimSpace(raw), "never") {
+		return 0, true, true
+	}
+	v, err := strconv.Atoi(raw)
 	if err != nil {
-		return 0, false
+		return 0, false, false
 	}
-	if n < appTimeoutMin || n > appTimeoutMax {
-		return 0, false
+	if v < appTimeoutMin || v > appTimeoutMax {
+		return 0, false, false
 	}
-	return n, true
+	return v, false, true
 }
 
 // applicationDirectLeafKeywords is the set of statements Junos allows directly
@@ -486,21 +511,18 @@ func compileApplications(node *Node, apps *ApplicationsConfig) error {
 			case "inactivity-timeout", "timeout":
 				hasDirectBody = true
 				if v := nodeVal(prop); v != "" {
-					if n, ok := parseAppTimeout(v); ok {
-						// inactivity-timeout / timeout are ALIASES for the same
-						// field: both set to the same number is idempotent, a
-						// different number is a conflict. Record the keyword used.
-						if timeoutSet && n != timeoutVal {
+					if n, never, ok := parseAppTimeoutFull(v); ok {
+						eff := n
+						if never {
+							eff = appTimeoutNeverWireSecs
+						}
+						if timeoutSet && eff != timeoutVal {
 							dupDirectLeaves = append(dupDirectLeaves, prop.Name())
 						}
-						timeoutSet, timeoutVal = true, n
+						timeoutSet, timeoutVal = true, eff
 						app.InactivityTimeout = n
+						app.InactivityTimeoutNever = never
 					} else {
-						// #3320: a non-numeric / out-of-range / unit-suffixed
-						// value was silently dropped here (Atoi error ignored),
-						// leaving InactivityTimeout at 0 so the application fell
-						// back to the global per-protocol timeout. Record the raw
-						// token so validateApplicationSpecsStrict can reject it.
 						app.UnknownTimeouts = append(app.UnknownTimeouts, v)
 					}
 				}
@@ -776,6 +798,7 @@ func parseApplicationTerms(parentName string, keys []string) []*Application {
 	var protocols []string
 	var dstPort, srcPort, alg string
 	var timeout int
+	var timeoutNever bool
 	var badTimeouts []string
 	var icmpType, icmpCode *uint8
 	var icmpTypeRaw []string
@@ -915,16 +938,18 @@ func parseApplicationTerms(parentName string, keys []string) []*Application {
 			if i+1 < len(keys) {
 				i++
 				kw := keys[i-1]
-				if v, ok := parseAppTimeout(keys[i]); ok {
-					if timeoutSet && v != timeout {
+				if v, never, ok := parseAppTimeoutFull(keys[i]); ok {
+					eff := v
+					if never {
+						eff = appTimeoutNeverWireSecs
+					}
+					if timeoutSet && eff != timeout {
 						dupTermLeaves = append(dupTermLeaves, kw)
 					}
 					timeoutSet = true
-					timeout = v
+					timeout = eff
+					timeoutNever = never
 				} else {
-					// #3320: malformed inline-term timeout — record the raw
-					// token so the deferred strict gate rejects it instead of
-					// silently dropping it.
 					badTimeouts = append(badTimeouts, keys[i])
 				}
 			}
@@ -1021,19 +1046,20 @@ func parseApplicationTerms(parentName string, keys []string) []*Application {
 			it = echoByProto[proto]
 		}
 		result = append(result, &Application{
-			Name:                 name,
-			Protocol:             proto,
-			DestinationPort:      dstPort,
-			SourcePort:           srcPort,
-			InactivityTimeout:    timeout,
-			ALG:                  alg,
-			UnknownTimeouts:      badTimeouts,
-			ICMPType:             it,
-			ICMPCode:             icmpCode,
-			UnknownICMP:          bad,
-			UnknownTermLeaves:    badTermLeaves,
-			IncompleteTermLeaves: incompleteTermLeaves,
-			DuplicateTermLeaves:  dups,
+			Name:                   name,
+			Protocol:               proto,
+			DestinationPort:        dstPort,
+			SourcePort:             srcPort,
+			InactivityTimeout:      timeout % (appTimeoutMax + 2),
+			InactivityTimeoutNever: timeoutNever,
+			ALG:                    alg,
+			UnknownTimeouts:        badTimeouts,
+			ICMPType:               it,
+			ICMPCode:               icmpCode,
+			UnknownICMP:            bad,
+			UnknownTermLeaves:      badTermLeaves,
+			IncompleteTermLeaves:   incompleteTermLeaves,
+			DuplicateTermLeaves:    dups,
 		})
 	}
 	return result

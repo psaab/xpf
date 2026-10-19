@@ -301,7 +301,7 @@ func validateApplicationSpecsStrict(cfg *Config) error {
 		if len(app.UnknownTimeouts) > 0 {
 			return fmt.Errorf(
 				"application %q: invalid inactivity-timeout/timeout %q; must be an "+
-					"integer number of seconds in %d..%d (a non-numeric, out-of-range, "+
+					"integer number of seconds in %d..%d or never (a non-numeric, out-of-range, "+
 					"or unit-suffixed value is silently dropped and the application "+
 					"falls back to the global per-protocol timeout instead of the "+
 					"configured one)",

@@ -1737,8 +1737,8 @@ var schemaApplications = &schemaNode{desc: "Applications", children: map[string]
 		// dropped to the global timeout. The inline-term shape (`term <t> ...
 		// inactivity-timeout <n>`) is an opaque single statement to the schema
 		// walk, so it is covered by validateApplicationSpecsStrict instead.
-		"inactivity-timeout": {desc: "Inactivity timeout", args: 1, valueType: ValueInteger, valueDesc: "Timeout in seconds", valueExamples: []string{"300", "1800"}, validator: ValidateInteger(appTimeoutMin, appTimeoutMax), placeholder: "<seconds>", children: nil},
-		"timeout":            {desc: "Timeout", args: 1, valueType: ValueInteger, valueDesc: "Timeout in seconds", valueExamples: []string{"300", "1800"}, validator: ValidateInteger(appTimeoutMin, appTimeoutMax), placeholder: "<seconds>", children: nil},
+		"inactivity-timeout": {desc: "Inactivity timeout", args: 1, valueType: ValueInteger, valueDesc: "Timeout in seconds or never", valueExamples: []string{"300", "never"}, validator: validateAppTimeoutLeaf, placeholder: "<seconds|never>", children: nil},
+		"timeout":            {desc: "Timeout", args: 1, valueType: ValueInteger, valueDesc: "Timeout in seconds or never", valueExamples: []string{"300", "never"}, validator: validateAppTimeoutLeaf, placeholder: "<seconds|never>", children: nil},
 		"alg":                {desc: "Application layer gateway", args: 1, placeholder: "<alg>", children: nil},
 		"description":        {desc: "Description", args: 1, scalar: true, placeholder: "<text>", children: nil},
 		// #3348: typed ICMP/ICMPv6 type/code constraints (0..255) so an operator

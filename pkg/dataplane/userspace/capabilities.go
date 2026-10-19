@@ -520,7 +520,7 @@ func validateOneAppRef(cfg *config.Config, name string, emit func(PolicyApplicat
 				// (back-compat, byte-identical). A negative configured value is
 				// impossible (the parser stores a non-negative int), but clamp
 				// defensively so a stray value can never wrap the u32.
-				InactivityTimeout: clampNonNegU32(app.InactivityTimeout),
+				InactivityTimeout: config.AppTimeoutWireSecs(app),
 			})
 		}
 	}

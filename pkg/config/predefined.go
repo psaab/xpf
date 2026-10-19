@@ -160,6 +160,32 @@ var PredefinedApplications = map[string]*Application{
 	// --- Wildcard protocol ---
 	"junos-tcp-any": {Name: "junos-tcp-any", Protocol: "tcp"},
 	"junos-udp-any": {Name: "junos-udp-any", Protocol: "udp"},
+
+	"junos-pptp":      {Name: "junos-pptp", Protocol: "tcp", DestinationPort: "1723"},
+	"junos-sctp-any":  {Name: "junos-sctp-any", Protocol: "132"},
+	"junos-rsh":       {Name: "junos-rsh", Protocol: "tcp", DestinationPort: "514"},
+	"junos-talk-udp":  {Name: "junos-talk-udp", Protocol: "udp", DestinationPort: "517"},
+	"junos-talk-tcp":  {Name: "junos-talk-tcp", Protocol: "tcp", DestinationPort: "517"},
+	"junos-ntalk-udp": {Name: "junos-ntalk-udp", Protocol: "udp", DestinationPort: "518"},
+	"junos-ntalk-tcp": {Name: "junos-ntalk-tcp", Protocol: "tcp", DestinationPort: "518"},
+	"junos-stun-udp":  {Name: "junos-stun-udp", Protocol: "udp", DestinationPort: "3478-3479"},
+	"junos-stun-tcp":  {Name: "junos-stun-tcp", Protocol: "tcp", DestinationPort: "3478-3479"},
+	// Typed ICMPv6 (protocol 58 in Junos capture; icmpv6 here). Names keep Junos hyphenation; echoreq alias retained.
+	"junos-icmp6-dst-unreach-route":      {Name: "junos-icmp6-dst-unreach-route", Protocol: "icmpv6", ICMPType: u8p(1), ICMPCode: u8p(0)},
+	"junos-icmp6-dst-unreach-admin":      {Name: "junos-icmp6-dst-unreach-admin", Protocol: "icmpv6", ICMPType: u8p(1), ICMPCode: u8p(1)},
+	"junos-icmp6-dst-unreach-beyond":     {Name: "junos-icmp6-dst-unreach-beyond", Protocol: "icmpv6", ICMPType: u8p(1), ICMPCode: u8p(2)},
+	"junos-icmp6-dst-unreach-addr":       {Name: "junos-icmp6-dst-unreach-addr", Protocol: "icmpv6", ICMPType: u8p(1), ICMPCode: u8p(3)},
+	"junos-icmp6-dst-unreach-port":       {Name: "junos-icmp6-dst-unreach-port", Protocol: "icmpv6", ICMPType: u8p(1), ICMPCode: u8p(4)},
+	"junos-icmp6-packet-too-big":         {Name: "junos-icmp6-packet-too-big", Protocol: "icmpv6", ICMPType: u8p(2), ICMPCode: u8p(0)},
+	"junos-icmp6-packet-to-big":          {Name: "junos-icmp6-packet-to-big", Protocol: "icmpv6", ICMPType: u8p(2), ICMPCode: u8p(0)},
+	"junos-icmp6-time-exceed-transit":    {Name: "junos-icmp6-time-exceed-transit", Protocol: "icmpv6", ICMPType: u8p(3), ICMPCode: u8p(0)},
+	"junos-icmp6-time-exceed-reassembly": {Name: "junos-icmp6-time-exceed-reassembly", Protocol: "icmpv6", ICMPType: u8p(3), ICMPCode: u8p(1)},
+	"junos-icmp6-param-prob-header":      {Name: "junos-icmp6-param-prob-header", Protocol: "icmpv6", ICMPType: u8p(4), ICMPCode: u8p(0)},
+	"junos-icmp6-param-prob-nexthdr":     {Name: "junos-icmp6-param-prob-nexthdr", Protocol: "icmpv6", ICMPType: u8p(4), ICMPCode: u8p(1)},
+	"junos-icmp6-param-prob-option":      {Name: "junos-icmp6-param-prob-option", Protocol: "icmpv6", ICMPType: u8p(4), ICMPCode: u8p(2)},
+	"junos-icmp6-echo-request":           {Name: "junos-icmp6-echo-request", Protocol: "icmpv6", ICMPType: u8p(128)},
+	"junos-icmp6-echoreq":                {Name: "junos-icmp6-echoreq", Protocol: "icmpv6", ICMPType: u8p(128)},
+	"junos-icmp6-echo-reply":             {Name: "junos-icmp6-echo-reply", Protocol: "icmpv6", ICMPType: u8p(129)},
 }
 
 // PredefinedApplicationSets contains Junos application-set definitions from
@@ -226,6 +252,23 @@ var PredefinedApplicationSets = map[string]*ApplicationSet{
 			"junos-h323-q931", "junos-h323-ras", "junos-h323-tcp-1503",
 			"junos-h323-tcp-389", "junos-h323-tcp-522", "junos-h323-tcp-1731",
 		},
+	},
+	// #15207 multi-term Junos defaults as sets (app-first resolution would shadow).
+	"junos-talk": {
+		Name:         "junos-talk",
+		Applications: []string{"junos-talk-udp", "junos-talk-tcp"},
+	},
+	"junos-ntalk": {
+		Name:         "junos-ntalk",
+		Applications: []string{"junos-ntalk-udp", "junos-ntalk-tcp"},
+	},
+	"junos-stun": {
+		Name:         "junos-stun",
+		Applications: []string{"junos-stun-udp", "junos-stun-tcp"},
+	},
+	"junos-mgcp": {
+		Name:         "junos-mgcp",
+		Applications: []string{"junos-mgcp-ua", "junos-mgcp-ca"},
 	},
 }
 

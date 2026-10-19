@@ -340,7 +340,9 @@ func (s *Server) showApplications(cfg *config.Config, buf *strings.Builder) {
 			if app.ICMPCode != nil {
 				fmt.Fprintf(buf, " icmp-code=%d", *app.ICMPCode)
 			}
-			if app.InactivityTimeout > 0 {
+			if app.InactivityTimeoutNever {
+				fmt.Fprintf(buf, " timeout=never")
+			} else if app.InactivityTimeout > 0 {
 				fmt.Fprintf(buf, " timeout=%ds", app.InactivityTimeout)
 			}
 			if app.ALG != "" {
@@ -370,6 +372,103 @@ func (s *Server) showApplications(cfg *config.Config, buf *strings.Builder) {
 			}
 			fmt.Fprintf(buf, "  %-24s members: %s\n", name, strings.Join(as.Applications, ", "))
 		}
+	}
+	// #15207 A18-01: predefined apps/sets (previously absent from gRPC twin).
+	writePredefined := func(filter string) {
+		names := make([]string, 0, len(config.PredefinedApplications))
+		for n := range config.PredefinedApplications {
+			if filter == "" || n == filter {
+				names = append(names, n)
+			}
+		}
+		sort.Strings(names)
+		if len(names) > 0 {
+			buf.WriteString("Predefined applications:\n")
+			for _, n := range names {
+				app := config.PredefinedApplications[n]
+				if app == nil {
+					continue
+				}
+				fmt.Fprintf(buf, "  %-24s proto=%-6s", n, app.Protocol)
+				if app.DestinationPort != "" {
+					fmt.Fprintf(buf, " dst-port=%s", app.DestinationPort)
+				}
+				if app.ICMPType != nil {
+					fmt.Fprintf(buf, " icmp-type=%d", *app.ICMPType)
+				}
+				if app.ICMPCode != nil {
+					fmt.Fprintf(buf, " icmp-code=%d", *app.ICMPCode)
+				}
+				buf.WriteString("\n")
+				if cfg != nil {
+					if _, shadowed := cfg.Applications.Applications[n]; shadowed {
+						buf.WriteString("    (shadowed by user definition; not in effect)\n")
+					}
+				}
+			}
+		}
+		setNames := make([]string, 0, len(config.PredefinedApplicationSets))
+		for n := range config.PredefinedApplicationSets {
+			if filter == "" || n == filter {
+				setNames = append(setNames, n)
+			}
+		}
+		sort.Strings(setNames)
+		if len(setNames) > 0 {
+			buf.WriteString("Predefined application sets:\n")
+			for _, n := range setNames {
+				set := config.PredefinedApplicationSets[n]
+				if set == nil {
+					continue
+				}
+				fmt.Fprintf(buf, "  %-24s members: %s\n", n, strings.Join(set.Applications, ", "))
+				if cfg != nil {
+					if _, shadowed := cfg.Applications.ApplicationSets[n]; shadowed {
+						buf.WriteString("    (shadowed by user definition; not in effect)\n")
+					}
+				}
+			}
+		}
+	}
+	writePredefined("")
+}
+
+// showApplicationsFiltered renders one name (#15207): user first, then predefined marked shadowed if user wins.
+func (s *Server) showApplicationsFiltered(cfg *config.Config, buf *strings.Builder, filter string) {
+	if cfg == nil {
+		buf.WriteString("No active configuration\n")
+		return
+	}
+	if app, ok := cfg.Applications.Applications[filter]; ok && app != nil {
+		fmt.Fprintf(buf, "Application: %s proto=%s", app.Name, app.Protocol)
+		if app.DestinationPort != "" {
+			fmt.Fprintf(buf, " dst-port=%s", app.DestinationPort)
+		}
+		buf.WriteString("\n")
+	}
+	if set, ok := cfg.Applications.ApplicationSets[filter]; ok && set != nil {
+		fmt.Fprintf(buf, "Application set: %s members: %s\n", set.Name, strings.Join(set.Applications, ", "))
+	}
+	if app, ok := config.PredefinedApplications[filter]; ok && app != nil {
+		if _, shadowed := cfg.Applications.Applications[filter]; shadowed {
+			buf.WriteString("Predefined application (shadowed by user definition; not in effect):\n")
+		} else {
+			buf.WriteString("Predefined application:\n")
+		}
+		fmt.Fprintf(buf, "  %-24s proto=%-6s", app.Name, app.Protocol)
+		if app.DestinationPort != "" {
+			fmt.Fprintf(buf, " dst-port=%s", app.DestinationPort)
+		}
+		buf.WriteString("\n")
+		return
+	}
+	if set, ok := config.PredefinedApplicationSets[filter]; ok && set != nil {
+		if _, shadowed := cfg.Applications.ApplicationSets[filter]; shadowed {
+			buf.WriteString("Predefined application set (shadowed by user definition; not in effect):\n")
+		} else {
+			buf.WriteString("Predefined application set:\n")
+		}
+		fmt.Fprintf(buf, "  %-24s members: %s\n", set.Name, strings.Join(set.Applications, ", "))
 	}
 }
 

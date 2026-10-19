@@ -130,6 +130,10 @@ func (s *Server) showText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 	if strings.HasPrefix(req.Topic, "screen-ids-option-detail:") {
 		return s.showScreenIDSOptionDetail(req, cfg, &buf)
 	}
+	if strings.HasPrefix(req.Topic, "applications:") {
+		s.showApplicationsFiltered(cfg, &buf, strings.TrimPrefix(req.Topic, "applications:"))
+		return &pb.ShowTextResponse{Output: buf.String()}, nil
+	}
 
 	// test policy: "test-policy:from=X,to=Y,src=A,dst=B,srcport=Q,port=P,proto=TCP"
 	if strings.HasPrefix(req.Topic, "test-policy:") {

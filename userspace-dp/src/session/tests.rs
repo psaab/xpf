@@ -4872,11 +4872,16 @@ fn app_inactivity_timeout_ns_clamps_to_go_commit_bound_3714() {
         Some(max_ns),
         "u32::MAX inactivity_timeout must clamp to the 86400 s commit bound"
     );
-    // One second over the bound clamps to exactly the bound.
+    // #15207: 86401 is the documented `never` sentinel, not a corrupt value.
     assert_eq!(
-        app_inactivity_timeout_ns(Some(APP_INACTIVITY_TIMEOUT_MAX_SECS + 1)),
+        app_inactivity_timeout_ns(Some(APP_INACTIVITY_TIMEOUT_NEVER_SECS)),
+        Some(APP_INACTIVITY_TIMEOUT_NEVER_NS),
+        "86401 s is the never sentinel"
+    );
+    assert_eq!(
+        app_inactivity_timeout_ns(Some(APP_INACTIVITY_TIMEOUT_MAX_SECS + 2)),
         Some(max_ns),
-        "86401 s must clamp to the 86400 s commit bound"
+        "86402 s must clamp to the 86400 s commit bound"
     );
 
     // No regression at/under the bound: exact conversion, no clamp artifacts.
