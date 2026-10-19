@@ -3675,23 +3675,49 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 if !pool_contains_target {
                                     continue;
                                 }
-                                // #14322: the lease this rule minted is scoped
-                                // to ITS (from_zone, to_zone) pair. Pass the
-                                // packet's arrival zone with the rule's own
-                                // zones: the fold inside the lookup rebuilds
-                                // this rule's scope, so a sibling rule sharing
-                                // the pool can neither authorize nor deny on
-                                // this rule's lease (it returns Miss and the
-                                // scan continues).
-                                match rule.pool_allocator.persistent_inbound_lookup(
+                                // #14322/#15133: the lease this rule minted
+                                // is scoped to ITS normalized effective scope
+                                // (authored scope fields, empty zones replaced
+                                // by the packet's resolved zones). Keying by
+                                // the rule — never by `rule.from_zone` alone —
+                                // keeps an interface-, routing-instance- or
+                                // global-scoped sibling that shares the pool
+                                // from authorizing (or denying) inbound on
+                                // this rule's lease: the empty-zone spelling
+                                // used to collapse to UNSCOPED, where any
+                                // grant bucket admits. The packet pair is the
+                                // original flow's (internal ingress zone,
+                                // arrival zone): for a zone-authored rule the
+                                // internal side IS `rule.from_zone`; for a
+                                // non-zone rule the mint folded the packet's
+                                // resolved zones, and on this pre-routing
+                                // path the arrival fabric's resolved zone is
+                                // the only zone identity available for both
+                                // sides — the interface/RI authored fields,
+                                // not the zone pair, separate non-zone
+                                // siblings.
+                                let arrival_scope = crate::nat::NatScopeCtx {
+                                    ingress_ifname: ingress_ifname_dnat,
+                                    ingress_routing_instance: ingress_ri_dnat,
+                                    ..crate::nat::NatScopeCtx::default()
+                                };
+                                let packet_from_zone: &str = if rule.from_zone.is_empty() {
+                                    ingress_zone_name
+                                } else {
+                                    &rule.from_zone
+                                };
+                                match rule.pool_allocator.persistent_inbound_lookup_for_rule(
                                     meta.protocol,
                                     resolution_target,
                                     flow.forward_key.dst_port,
                                     flow.forward_key.src_ip,
                                     flow.forward_key.src_port,
                                     now_ns,
-                                    &rule.from_zone,
+                                    rule,
                                     ingress_zone_name,
+                                    packet_from_zone,
+                                    ingress_zone_name,
+                                    &arrival_scope,
                                 ) {
                                     PersistentInbound::Miss => {}
                                     PersistentInbound::Denied => {

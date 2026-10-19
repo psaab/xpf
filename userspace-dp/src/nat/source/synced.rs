@@ -706,7 +706,20 @@ fn reserve_synced_on_first_pool_owner<'a>(
         if !rule.pool_mode {
             continue;
         }
-        let flow_egress_scope = persistent_egress_scope(&rule.from_zone, &rule.to_zone);
+        // #15133: the standby must land its grant in the SAME bucket the
+        // active's mint used — the rule's normalized effective scope. The
+        // synced flow's own zone pair is not carried per-rule here (the
+        // candidate was already narrowed by `matches_ignoring_scope` in
+        // PASS 1, or is the PASS 2 first pool owner), so the packet pair
+        // falls back to the rule's authored zones; for a non-zone rule
+        // both sides fold empty packet zones identically, keeping mint
+        // and lookup in agreement on this node.
+        let flow_egress_scope = rule.persistent_rule_scope(
+            &rule.from_zone,
+            &rule.to_zone,
+            &rule.to_zone,
+            &NatScopeCtx::default(),
+        );
         // #5338: address-only synced decision (pool address chosen, source port
         // PRESERVED on the wire). Mint the reverse-identity occupancy token on
         // the rule whose pool owns `rewrite_src`, mirroring the active node's
