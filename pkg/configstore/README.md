@@ -1883,9 +1883,27 @@ owned by the `journal/` subpackage.
   scanner would silently discard the record it was meant to preserve.
 - **Rotation** — at append time, when the current segment reaches
   1 MiB it rotates to `.config.journal.1` (keep 2 rotated segments,
-  oldest deleted). A pre-#1896 fat journal rotates to `.1` intact on
-  the first append — old history stays readable until it ages out; no
-  migration pass, and boot never reads the journal.
+  oldest deleted). A pre-#1896 fat journal rotates to `.1` on the
+  first append; before that, first use scrubs it (below).
+- **Legacy-payload scrub (#15143)** — pre-#1896 v1 lines embed the
+  full compiled config in `before`/`after`, including the cleartext
+  REST api-auth password and API keys. The #10826 salted-hash
+  migration rewrote active/rollback/rescue/archive copies but had no
+  journal arm, so the cleartext survived at 0600 until rotation aged
+  it out. `Store.Load` invokes `journal.ScrubLegacyPayloads()`
+  alongside the other #10826 arms (first `Log`/`Tail` use runs it
+  too): every owned segment carrying `before`/`after` is rewritten
+  without those payloads, atomically (temp+rename, 0600, dir fsync),
+  preserving timestamp/action/detail/config_hash/principal so
+  `show system commit` still renders. A segment that cannot be read
+  or rewritten safely (oversized-with-payload, unparseable-with-
+  payload) is removed rather than left secret-bearing; an oversized
+  segment without a payload marker is left for the #9898 full-scan
+  refusal. Clean v2 segments are never rewritten. Failures latch
+  `LegacyScrubDegraded` (poll via `Store.JournalLegacyScrubDegraded`)
+  and retry on next use; appends/reads/Load continue while degraded.
+  An earlier revision of this section said legacy segments rotate
+  "intact … no migration pass" — that was the #15143 defect.
 - **Rotation namespace changes are synced even on append failure (#10723 F6).**
   If creation or rotation changes directory entries before a later open/write
   failure, `Log` still fsyncs the journal directory before returning. A failed

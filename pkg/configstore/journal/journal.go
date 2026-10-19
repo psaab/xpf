@@ -20,21 +20,30 @@
 // (operator-paced — the
 // commit path already pays several fsyncs for active.json and rollback
 // slot 1, see #1894). Legacy fat v1 lines decode tolerantly (unknown
-// JSON fields are ignored), and the first append after upgrade rotates
-// an over-threshold legacy file to segment .1 intact, so old history
-// stays visible until it ages out. First use — the first Log or Tail —
-// runs a one-time permission-repair pass (#5188): every OWNED segment
+// JSON fields are ignored). First use — the first Log or Tail —
+// runs a one-time permission-repair pass (#5188) and a one-time
+// legacy-payload scrub (#15143): every OWNED segment
 // (the current file plus its rotation siblings .1../.N) is lstat'd and,
 // if a pre-0600 build left it more permissive than owner-only, chmod'd
-// to 0600, and rotation re-asserts 0600 on the renamed segment. This
-// closes the residual #4579 A4-02 left: O_APPEND ignores the perm arg on
+// to 0600, and rotation re-asserts 0600 on the renamed segment. The
+// scrub rewrites any segment still carrying v1 before/after payloads
+// (the full compiled config, including cleartext REST api-auth
+// credentials that the #10826 salted-hash migration missed here)
+// without those payloads, atomically at 0600, preserving the
+// timestamp/action/detail metadata history renders; a segment that
+// cannot be rewritten safely is removed rather than left
+// secret-bearing. This closes the residual #4579 A4-02 left: O_APPEND
+// ignores the perm arg on
 // an EXISTING inode, so an upgraded 0644 current file — and any rotated
 // secret-bearing legacy .N segment — otherwise stayed world-readable
 // with no migration pass at all. The repair only ever tightens (a
 // stricter-than-0600 file is left alone), refuses to follow a symlink
-// (lstat, never chmod through it to an arbitrary target), and surfaces
-// failures as warnings rather than swallowing them. Boot never reads the
-// journal at all.
+// (lstat, never chmod/scrub through it to an arbitrary target), and surfaces
+// failures as warnings rather than swallowing them. Boot never reads
+// journal history — the only boot-time touch is Store.Load invoking
+// ScrubLegacyPayloads as the #15143 journal arm of the #10826
+// migration, so an upgraded box is scrubbed even before its first
+// history view or commit.
 package journal
 
 import (
@@ -211,6 +220,23 @@ type Journal struct {
 	// leaves it false so the next use retries, instead of sticking true
 	// after one warn and never looking again.
 	migrated bool
+	// scrubbed guards the one-time legacy-payload scrub (#15143) with
+	// the same discipline as migrated: set only when every owned
+	// segment was examined and any legacy segment was rewritten (or
+	// purged) successfully, so a failure retries on the next use
+	// instead of leaving cleartext in place after one warning.
+	scrubbed bool
+	// legacyDegraded mirrors permsDegraded for the #15143 scrub: the
+	// last scrub attempt failed and a legacy segment may still carry
+	// cleartext api-auth credentials. Guarded by j.mu; read via
+	// LegacyScrubDegraded. Cleared only by a fully-successful scrub.
+	legacyDegraded bool
+	// scrubNormalized is set by the scrub when it rewrote a segment
+	// during the current first-use pass, and consumed (cleared) by
+	// the Tail that triggered the pass so freshly-scrubbed entries
+	// keep their legacy Schema=0 identity in that view (#15143).
+	// Guarded by j.mu.
+	scrubNormalized bool
 	// permsDegraded reports that the last permission-repair attempt FAILED
 	// (or a rotation re-assert failed since) and world-readable history
 	// may still be exposed (#9898 F-113). Guarded by j.mu; read via
@@ -319,21 +345,26 @@ var (
 // with the exposure never revisited. Every retry re-warns, so a stuck
 // failure stays loud in the logs while the flag carries it for scrapers.
 func (j *Journal) migratePermsLocked() {
-	if j.migrated {
-		return
-	}
-	ok := true
-	for seg := 0; seg <= j.maxSegments; seg++ {
-		if err := chmodOwnerOnly(j.segmentPath(seg)); err != nil {
-			ok = false
+	// #15143: the legacy scrub runs even when the permission pass has
+	// already completed — migrateLegacyLocked has its own one-time
+	// guard (j.scrubbed) and retries on failure. Keying the scrub off
+	// the migrated early return would strand it after a PermRepair-
+	// only retry sequence where perms succeeded first.
+	if !j.migrated {
+		ok := true
+		for seg := 0; seg <= j.maxSegments; seg++ {
+			if err := chmodOwnerOnly(j.segmentPath(seg)); err != nil {
+				ok = false
+			}
+		}
+		if ok {
+			j.migrated = true
+			j.permsDegraded = false
+		} else {
+			j.permsDegraded = true
 		}
 	}
-	if ok {
-		j.migrated = true
-		j.permsDegraded = false
-	} else {
-		j.permsDegraded = true
-	}
+	j.migrateLegacyLocked()
 }
 
 // PermRepairDegraded reports whether journal permission repair is in a
@@ -345,6 +376,226 @@ func (j *Journal) PermRepairDegraded() bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return j.permsDegraded
+}
+
+// LegacyScrubDegraded reports whether the #15143 legacy-payload scrub
+// is in a failed state: the last scrub attempt failed and a legacy
+// segment may still carry cleartext api-auth credentials. Appends and
+// reads continue while degraded — journaling must never fail a commit
+// — and every use retries the scrub.
+func (j *Journal) LegacyScrubDegraded() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.legacyDegraded
+}
+
+// migrateLegacyLocked runs once on first use (Log or Tail), under
+// j.mu, alongside the permission repair: every owned segment that
+// still carries a legacy v1 before/after payload is rewritten once
+// without those payloads (#15143). Pre-#1896 lines embed the full
+// compiled config — including the cleartext REST api-auth password
+// and API keys — and the #10826 salted-hash migration rewrote
+// active/rollback/rescue/archive copies but had no journal arm, so
+// the cleartext survived in .config.journal[.N] at 0600 until
+// rotation aged it out. Dropping before/after preserves exactly the
+// metadata the renderers print (timestamp/action/detail, plus any
+// config_hash/principal a line carries); full trees already live in
+// the rollback slots. A segment that cannot be read or rewritten
+// safely is removed rather than left secret-bearing (its metadata
+// is lost, loudly, instead of its credentials staying on disk).
+// Failures latch legacyDegraded and retry on the next use, mirroring
+// the #9898 F-113 permission-repair discipline. Caller holds j.mu.
+// ScrubLegacyPayloads runs the #15143 scrub explicitly (first use of
+// Log/Tail also runs it via migratePermsLocked). Store.Load calls it
+// during the #10826 api-auth migration so the journal arm lands with
+// the same migration that hash-rewrites active/rollback/rescue/archive
+// copies — boot does not otherwise read the journal, so without this
+// hook a Load that migrates credentials would leave the journal copy
+// behind until the first history view or commit. Safe to call
+// concurrently; failures latch LegacyScrubDegraded and retry on the
+// next use instead of failing the caller (journaling must never fail
+// a commit or a Load).
+func (j *Journal) ScrubLegacyPayloads() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.migrateLegacyLocked()
+}
+
+func (j *Journal) migrateLegacyLocked() {
+	if j.scrubbed {
+		return
+	}
+	// Every OWNED segment (current + .1..maxSegments) plus any higher
+	// .N still on disk from a build that kept more segments: Tail only
+	// reads the owned set, but an orphaned .N with legacy payloads
+	// would otherwise stay secret-bearing forever after a
+	// maxSegments reduction.
+	maxSeg := j.maxSegments
+	for {
+		if _, err := os.Lstat(j.segmentPath(maxSeg + 1)); err != nil {
+			break
+		}
+		maxSeg++
+	}
+	ok := true
+	for seg := 0; seg <= maxSeg; seg++ {
+		if err := j.scrubSegmentLocked(j.segmentPath(seg)); err != nil {
+			slog.Warn("journal: legacy-payload scrub failed; segment may still carry cleartext credentials, will retry on next use",
+				"path", j.segmentPath(seg), "err", err, "issue", "#15143")
+			ok = false
+		}
+	}
+	if ok {
+		j.scrubbed = true
+		j.legacyDegraded = false
+	} else {
+		j.legacyDegraded = true
+	}
+}
+
+// scrubSegmentLocked rewrites one segment without legacy payloads.
+// It is a no-op (nil) for absent, symlinked, non-regular, v2-only,
+// and unparseable-without-payload segments — the read/append paths
+// already refuse symlinks and non-regular files loudly, and content
+// with no before/after keys carries no compiled-config payload to
+// drop. When any line carries a top-level before/after key the whole
+// segment is rebuilt from its parseable entries (re-marshaled as
+// compact entries, which drops before/after and any other unknown
+// field) and installed atomically at 0600 via temp+rename in the
+// same directory, followed by a directory fsync. A legacy segment
+// past the full-scan cap, unreadable, or whose rewrite would leave
+// it empty of parseable entries is removed instead: fail closed
+// against the credential, never leave it in place. Caller holds j.mu.
+func (j *Journal) scrubSegmentLocked(path string) error {
+	fi, err := journalLstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		// Present but unstat-able: cannot prove it is not a legacy
+		// secret-bearing segment. Remove it rather than retry forever
+		// over bytes we cannot inspect.
+		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+			return fmt.Errorf("stat legacy journal segment: %v; remove failed: %w", err, rmErr)
+		}
+		return nil
+	}
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+		return nil // refused loudly by the read/append paths; never follow
+	}
+	if fi.Size() > maxReadAllSegmentBytes {
+		// Oversized alone is not a legacy payload: the #9898 full-scan
+		// cap must still refuse this segment loudly on Tail(0), so an
+		// oversized v2/corrupt segment is left for that refusal. Only
+		// an oversized segment that actually carries before/after is
+		// unscrubbable-and-secret-bearing, and only that one is removed.
+		carries, cerr := segmentCarriesLegacyPayload(path)
+		if cerr != nil {
+			return cerr
+		}
+		if !carries {
+			return nil
+		}
+		slog.Warn("journal: removing oversized legacy journal segment that cannot be scrubbed safely",
+			"path", path, "size", fi.Size(), "issue", "#15143")
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove oversized legacy journal segment: %w", err)
+		}
+		return nil
+	}
+	f, err := openSegmentNoFollow(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("open journal segment for legacy scrub: %w", err)
+	}
+	data, rerr := io.ReadAll(io.LimitReader(f, maxReadAllSegmentBytes+1))
+	f.Close()
+	if rerr != nil {
+		return fmt.Errorf("read journal segment for legacy scrub: %w", rerr)
+	}
+	if len(data) > maxReadAllSegmentBytes {
+		slog.Warn("journal: removing oversized legacy journal segment that cannot be scrubbed safely",
+			"path", path, "size", len(data), "issue", "#15143")
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove oversized legacy journal segment: %w", err)
+		}
+		return nil
+	}
+	if !hasLegacyPayload(data) {
+		return nil
+	}
+	var out bytes.Buffer
+	kept := 0
+	for len(data) > 0 {
+		var line []byte
+		if i := bytes.IndexByte(data, '\n'); i >= 0 {
+			line, data = data[:i], data[i+1:]
+		} else {
+			line, data = data, nil
+		}
+		e := parseLine(line)
+		if e == nil {
+			continue
+		}
+		enc, merr := json.Marshal(e)
+		if merr != nil {
+			continue
+		}
+		out.Write(enc)
+		out.WriteByte('\n')
+		kept++
+	}
+	if kept == 0 {
+		slog.Warn("journal: removing legacy journal segment with payloads but no parseable entries",
+			"path", path, "issue", "#15143")
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove unparseable legacy journal segment: %w", err)
+		}
+		return nil
+	}
+	if err := fsatomic.WriteFileDurable(path, out.Bytes(), 0600); err != nil {
+		return fmt.Errorf("rewrite scrubbed journal segment: %w", err)
+	}
+	j.scrubNormalized = true
+	return nil
+}
+
+// hasLegacyPayload reports whether any line in data carries a
+// top-level "before" or "after" key — the v1 compiled-config payload
+// fields. The check is textual (not a per-line unmarshal) so a fat
+// legacy line is detected without materializing the config it embeds;
+// the keys appear at the start of the payload fields in every v1
+// line the old writer produced, and a false positive only costs a
+// rewrite that drops unknown fields anyway.
+func hasLegacyPayload(data []byte) bool {
+	return bytes.Contains(data, []byte(`"before":`)) ||
+		bytes.Contains(data, []byte(`"after":`)) ||
+		bytes.Contains(data, []byte(`"before" :`)) ||
+		bytes.Contains(data, []byte(`"after" :`))
+}
+
+// segmentCarriesLegacyPayload probes a segment's head for a legacy
+// payload marker without reading it whole (the caller already knows
+// it exceeds the scrub read cap). The first v1 line's before/after
+// keys sit within its first bytes; a payload buried past the window
+// in an oversized segment is the accepted residual — rotation ages
+// it out and the full-scan cap still refuses the segment loudly in
+// the meantime. Errors are returned so the scrub retries rather
+// than guessing.
+func segmentCarriesLegacyPayload(path string) (bool, error) {
+	f, err := openSegmentNoFollow(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("open oversized journal segment for legacy probe: %w", err)
+	}
+	defer f.Close()
+	head := make([]byte, 64<<10)
+	n, _ := f.ReadAt(head, 0)
+	return hasLegacyPayload(head[:n]), nil
 }
 
 // chmodOwnerOnly tightens path to 0600 when it is a regular file whose
@@ -771,9 +1022,23 @@ func (j *Journal) Tail(limit int) ([]*Entry, error) {
 	defer j.mu.Unlock()
 
 	j.migratePermsLocked()
+	// #15143: a scrubbed legacy entry re-marshals with the v2 schema
+	// marker, losing its legacy identity. On the limited tail scan,
+	// renorm entries with no schema marker back to 0 — this in-memory
+	// view now holds the scrubbed (compact) bytes, so an entry the
+	// scrub rewrote this call would otherwise read as v2. Entries the
+	// scrub already normalized on an earlier use keep v2 on disk and
+	// are indistinguishable from native v2 here.
+	scrubNormalized := j.scrubNormalized
+	j.scrubNormalized = false
 
 	if limit <= 0 {
-		return j.readAllLocked()
+		out, err := j.readAllLocked()
+		if err != nil {
+			return nil, err
+		}
+		renormScrubbedSchema(out, scrubNormalized)
+		return out, nil
 	}
 
 	// newestFirst[0] is the most recent entry.
@@ -791,7 +1056,26 @@ func (j *Journal) Tail(limit int) ([]*Entry, error) {
 	for i, e := range newestFirst {
 		out[len(out)-1-i] = e
 	}
+	renormScrubbedSchema(out, scrubNormalized)
 	return out, nil
+}
+
+// renormScrubbedSchema restores Schema=0 on entries the #15143 scrub
+// normalized during this call. A legacy line carries no schema
+// marker; the scrub re-marshals it as a compact Entry, which stamps
+// v2 and would misreport a pre-#1896 record as native v2 in this
+// first view. Native v2 lines keep their config_hash through the
+// scrub, so keying on its absence keeps them distinguishable in
+// mixed segments; legacy lines never carry one.
+func renormScrubbedSchema(entries []*Entry, scrubNormalized bool) {
+	if !scrubNormalized {
+		return
+	}
+	for _, e := range entries {
+		if e != nil && e.Schema == SchemaV2 && e.ConfigHash == "" {
+			e.Schema = 0
+		}
+	}
 }
 
 // readAllLocked is the full-scan path (limit <= 0): every segment, oldest
