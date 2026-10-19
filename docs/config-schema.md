@@ -16855,6 +16855,12 @@ MAC defaults even when the operator configured hardened algorithms.
   administrator. The cells in `pkg/daemon/ssh_faillock_11492_test.go` pin
   rendering, non-appliance apply wiring, safe appliance exclusion, and
   idempotent removal; live password-attempt verification remains a lab gate.
+  Every faillock failure is advisory (#15229): a locally tuned (modified)
+  managed block, an unreadable common-auth, or any other PAM error is
+  logged and the sshd drop-in apply proceeds, so a root-login revocation
+  is never blocked by host PAM state xpf does not own; the tuned block
+  itself is left byte-untouched. Pinned by
+  `pkg/daemon/ssh_faillock_15229_test.go`.
 
 ## Grouped system/SNMP inert knobs — accept-with-advisory (#4306 S-5)
 

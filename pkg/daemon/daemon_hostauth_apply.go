@@ -1001,13 +1001,24 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 	// pam_faillock state when their common-auth stack is the supported Debian
 	// baseline. Unknown host PAM stacks remain administrator-owned and are
 	// reported without changing them.
+	//
+	// #15229: EVERY faillock failure is advisory. The PAM state is host
+	// state the operator owns; a locally tuned (modified) managed block,
+	// an unreadable/unwritable common-auth, or any other faillock error
+	// must never hard-fail the sshd drop-in policy this apply exists to
+	// enforce — a PermitRootLogin revocation must land even when the
+	// PAM leg cannot. The failure is logged so the missing lockout (or
+	// the tuned block) stays operator-visible, faillockInstalled stays
+	// false (nothing was changed, so the #14973 rollback strip is a
+	// no-op), and the apply continues to the drop-in.
 	faillockInstalled, err := applySSHPAMFaillockChanged()
 	if err != nil {
 		if errors.Is(err, errSSHPAMFaillockUnsupported) {
 			slog.Warn("SSH cross-connection password lockout not applied; host PAM stack is not the supported Debian baseline",
 				"err", err)
 		} else {
-			return fmt.Errorf("apply SSH cross-connection password lockout: %w", err)
+			slog.Warn("SSH cross-connection password lockout not applied; continuing with sshd drop-in apply",
+				"err", err)
 		}
 	}
 	// #14973: if this apply changed common-auth (installed or upgraded the
