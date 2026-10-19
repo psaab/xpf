@@ -61,6 +61,12 @@ type LeaseDNSRecord struct {
 	// path re-derives the exact delete from the owned tuple + DHCID) and by
 	// non-self-owned backends.
 	PrevAddr netip.Addr
+	// PrevAddrs is the full candidate cleanup set for a Surface A publish
+	// recovering from an ambiguous prior publish (#15225 A40-02): the
+	// confirmed prior AND the prior desired value whose wire outcome is
+	// unknown. When set, it supersedes PrevAddr — every backend removes
+	// every candidate != Addr. Empty on ordinary publishes (PrevAddr alone).
+	PrevAddrs []netip.Addr
 	// KeepForwardDHCID, when true on a DeleteLease, tells the replace-owned
 	// RFC 2136 backend to delete the forward A/AAAA but NOT the shared RFC 4701
 	// DHCID — because ANOTHER owned record still shares this FQDN+ClientID

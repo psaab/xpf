@@ -142,6 +142,13 @@ type rfc2136Updater struct {
 	// Set at the top of UpsertLease and only consulted on the self-owned A/AAAA
 	// path; ignored by the DHCP-lease path (selfOwned=false) and by PTR adds.
 	selfOwnedPrevAddr netip.Addr
+	// selfOwnedPrevAddrs is the full ambiguous candidate set (#15225
+	// A40-02); when non-empty it supersedes selfOwnedPrevAddr.
+	selfOwnedPrevAddrs []netip.Addr
+	// zoneCache memoizes SOA-discovered zones per updater (#15225 A40-05).
+	// No lock: the manager serializes all calls on one updater (the same
+	// discipline the per-call fields above already rely on).
+	zoneCache map[string]string
 
 	// siblingFamilyOwned is retained only as the wire-side record of
 	// rec.SiblingFamilyOwned for test/debug inspection (#15072): the
@@ -287,6 +294,8 @@ func newRFC2136Updater(pol ddnsPolicy, c *config.DHCPDynamicDNSConfig, client dn
 		server:         server,
 		defaultDomain:  pol.domain,
 		conflictPolicy: pol.conflictPolicy,
+		forwardZones:   pol.forwardZones,
+		reverseZones:   pol.reverseZones,
 		timeout:        defaultDDNSTimeout,
 		client:         client,
 		onPTRNotAuth:   onPTRNotAuth,
@@ -383,6 +392,93 @@ func (u *rfc2136Updater) resolveReverseZone(ptrName string) string {
 		return z
 	}
 	return canonicalReverseZone(ptrName)
+}
+
+// discoverZone returns the UPDATE zone for name (#15225 A40-05). Explicit
+// leaves and a matching configured domain win without any query; otherwise
+// the enclosing zone is discovered by walking SOA queries toward the root
+// against the update server itself. Any failure falls back to the legacy
+// guessed zone (the caller's NOTAUTH handling then applies, unchanged).
+func (u *rfc2136Updater) discoverZone(ctx context.Context, name string, reverse bool) string {
+	guessed := u.resolveForwardZone(name)
+	if reverse {
+		guessed = u.resolveReverseZone(name)
+	}
+	// Explicit/default already authoritative-shaped: no walk needed when
+	// an explicit leaf or (forward) configured domain matched.
+	if reverse {
+		if longestZoneSuffix(name, u.reverseZones) != "" {
+			return guessed
+		}
+	} else if longestZoneSuffix(name, u.forwardZones) != "" ||
+		(u.defaultDomain != "" && longestZoneSuffix(name, []string{u.defaultDomain}) != "") {
+		return guessed
+	}
+	if u.client == nil || u.server == "" {
+		return guessed
+	}
+	key := "f:"
+	if reverse {
+		key = "r:"
+	}
+	key += dns.CanonicalName(name)
+	if z, ok := u.zoneCache[key]; ok {
+		return z
+	}
+	if z := u.soaWalk(ctx, name); z != "" {
+		if u.zoneCache == nil {
+			u.zoneCache = map[string]string{}
+		}
+		u.zoneCache[key] = z
+		return z
+	}
+	return guessed
+}
+
+// soaWalk queries SOA for name and each parent until the server answers
+// with an SOA in the answer section, returning that owner name. Bounded
+// and best-effort: any error/empty walk returns "".
+func (u *rfc2136Updater) soaWalk(ctx context.Context, name string) string {
+	cur := dns.Fqdn(name)
+	for cur != "." && cur != "" {
+		m := new(dns.Msg)
+		m.SetQuestion(cur, dns.TypeSOA)
+		m.RecursionDesired = false
+		resp, err := u.querySOA(ctx, m)
+		if err == nil && resp != nil && resp.Rcode == dns.RcodeSuccess {
+			for _, rr := range resp.Answer {
+				if _, ok := rr.(*dns.SOA); ok {
+					return dns.Fqdn(rr.Header().Name)
+				}
+			}
+		}
+		parent := parentZone(cur)
+		if parent == cur {
+			break
+		}
+		cur = parent
+	}
+	return ""
+}
+
+// querySOA sends one SOA query. dnsExchanger only carries UPDATEs, so a
+// real *dns.Client is used directly when available; a bare exchanger
+// seam (unit-test recorders without SOA support) fails the walk and the
+// caller falls back to the guessed zone.
+func (u *rfc2136Updater) querySOA(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
+	if dc, ok := u.client.(*dns.Client); ok {
+		c := *dc
+		if u.timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, u.timeout)
+			defer cancel()
+		}
+		resp, _, err := c.ExchangeContext(ctx, m, u.server)
+		return resp, err
+	}
+	// Test/recorder seams implement ExchangeContext for any message; try it.
+	resp, _, err := u.client.ExchangeContext(ctx, m, u.server)
+	return resp, err
 }
 
 // longestZoneSuffix returns the longest configured zone that is a suffix of
@@ -486,6 +582,7 @@ func (u *rfc2136Updater) siblingCandidate(rr dns.RR) bool {
 func (u *rfc2136Updater) UpsertLease(ctx context.Context, rec LeaseDNSRecord) error {
 	u.dhcidClientID = rec.ClientID
 	u.selfOwnedPrevAddr = rec.PrevAddr // #3739: value-specific self-owned replace
+	u.selfOwnedPrevAddrs = rec.PrevAddrs
 	u.siblingFamilyOwned = rec.SiblingFamilyOwned
 	u.siblingClientID = rec.SiblingClientID
 	u.pairedClientID = rec.PairedClientID
@@ -493,8 +590,9 @@ func (u *rfc2136Updater) UpsertLease(ctx context.Context, rec LeaseDNSRecord) er
 	if err != nil {
 		return err
 	}
-	// Forward zone add.
-	zone := u.resolveForwardZone(rec.FQDN)
+	// Forward zone add (#15225 A40-05: SOA-discovered zone, explicit
+	// leaves and configured domain take precedence inside the resolver).
+	zone := u.discoverZone(ctx, rec.FQDN, false)
 	if err := u.sendAdd(ctx, zone, forwardRR); err != nil {
 		// A conflict refusal (the name is owned by another party) — from
 		// replace-owned (#2648) OR skip-existing (#2660) — is propagated
@@ -509,7 +607,7 @@ func (u *rfc2136Updater) UpsertLease(ctx context.Context, rec LeaseDNSRecord) er
 	// Reverse zone PTR add — NOTAUTH/REFUSED is a counted skip, not fatal.
 	if rec.PTRName != "" {
 		ptrRR := u.ptrRR(rec)
-		rzone := u.resolveReverseZone(rec.PTRName)
+		rzone := u.discoverZone(ctx, rec.PTRName, true)
 		if err := u.sendAdd(ctx, rzone, ptrRR); err != nil {
 			if isPTRSkippable(err) {
 				if u.onPTRNotAuth != nil {
@@ -562,7 +660,7 @@ func (u *rfc2136Updater) DeleteLease(ctx context.Context, rec LeaseDNSRecord) er
 	if err != nil {
 		return err
 	}
-	zone := u.resolveForwardZone(rec.FQDN)
+	zone := u.discoverZone(ctx, rec.FQDN, false)
 	// rec.KeepForwardDHCID (#2700): another owned record still shares this
 	// FQDN+ClientID (a dual-stack client's surviving family), so delete the
 	// forward A/AAAA but keep the shared DHCID — the surviving record stays
@@ -573,7 +671,7 @@ func (u *rfc2136Updater) DeleteLease(ctx context.Context, rec LeaseDNSRecord) er
 	}
 	if rec.PTRName != "" {
 		ptrRR := u.ptrRR(rec)
-		rzone := u.resolveReverseZone(rec.PTRName)
+		rzone := u.discoverZone(ctx, rec.PTRName, true)
 		if err := u.sendRemove(ctx, rzone, ptrRR); err != nil {
 			if isPTRSkippable(err) {
 				if u.onPTRNotAuth != nil {
@@ -1107,10 +1205,16 @@ func (u *rfc2136Updater) sendAddSelfOwned(ctx context.Context, zone string, rr d
 	// Value-specific replace: remove ONLY xpf's own prior rdata (exact-RR delete)
 	// when it is known and differs from the new value. Skipped on a first publish
 	// (invalid prev) or a same-value re-publish (Insert is idempotent).
-	if prev := u.selfOwnedPrevAddr.Unmap(); prev.IsValid() {
-		if cur, ok := rrAddr(rr); !ok || cur != prev {
-			if prevRR, ok := prevSelfOwnedRR(prev, rr); ok {
-				m.Remove([]dns.RR{prevRR})
+	prevs := u.selfOwnedPrevAddrs
+	if len(prevs) == 0 && u.selfOwnedPrevAddr.IsValid() {
+		prevs = []netip.Addr{u.selfOwnedPrevAddr}
+	}
+	for _, p := range prevs {
+		if prev := p.Unmap(); prev.IsValid() {
+			if cur, ok := rrAddr(rr); !ok || cur != prev {
+				if prevRR, ok := prevSelfOwnedRR(prev, rr); ok {
+					m.Remove([]dns.RR{prevRR})
+				}
 			}
 		}
 	}

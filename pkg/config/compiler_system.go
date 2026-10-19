@@ -1204,6 +1204,8 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 var ddnsProviderStringProps = map[string]bool{
 	"backend":               true,
 	"update-server":         true,
+	"forward-zone":          true,
+	"reverse-zone":          true,
 	"tsig-key":              true,
 	"tsig-algorithm":        true,
 	"tsig-secret":           true,
@@ -1455,6 +1457,8 @@ func compileDDNSProvider(name string, nodes ...*Node) *DDNSProvider {
 		Name:                 name,
 		Backend:              props["backend"],
 		UpdateServer:         props["update-server"],
+		ForwardZone:          props["forward-zone"],
+		ReverseZone:          props["reverse-zone"],
 		TSIGKeyName:          props["tsig-key"],
 		TSIGAlgorithm:        props["tsig-algorithm"],
 		TSIGSecret:           Secret(props["tsig-secret"]),
@@ -1475,7 +1479,7 @@ func compileDDNSProvider(name string, nodes ...*Node) *DDNSProvider {
 		CheckIPURL:           props["checkip-url"],
 		CheckIPAllowlist:     props["checkip-allowlist"],
 	}
-	if p.Backend == "" && p.UpdateServer == "" && p.TSIGKeyName == "" &&
+	if p.Backend == "" && p.UpdateServer == "" && p.ForwardZone == "" && p.ReverseZone == "" && p.TSIGKeyName == "" &&
 		p.TSIGAlgorithm == "" && p.TSIGSecret == "" && p.SourceAddress == "" &&
 		p.DestinationInterface == "" && p.RoutingInstance == "" &&
 		p.Server == "" && p.Username == "" && p.Password == "" &&

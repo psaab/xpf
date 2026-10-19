@@ -195,11 +195,14 @@ func TestSurfaceADurablePendingHappyPathConfirms(t *testing.T) {
 	}
 }
 
-// TestSurfaceADurablePendingInProcessRollbackRestoresPrev proves the in-process
-// rollback path is preserved: a NON-crash wire failure (publishLocked returns an
-// error) rolls the durable row back to the confirmed prior A — never a stranded
-// pending B. The durable pending bit is the crash-safe SUPERSET, not a
-// replacement for this path.
+// TestSurfaceADurablePendingInProcessRollbackRestoresPrev — UPDATED by
+// #15225 A40-02: a bare wire failure is AMBIGUOUS (the UPDATE may have
+// been applied before the error surfaced), so it no longer rolls back to
+// the single confirmed prior. The durable row stays PENDING {B, prior A}
+// retaining both cleanup candidates; only a DEFINITIVE rejection (e.g.
+// errDDNSConflictRefused, covered in surface_a_ambiguous_15225_test.go)
+// rolls back. This preserves the #5285 invariant that matters — B is
+// never falsely CONFIRMED — while closing the A40-02 orphan.
 func TestSurfaceADurablePendingInProcessRollbackRestoresPrev(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "iface-ddns.json")
@@ -218,8 +221,9 @@ func TestSurfaceADurablePendingInProcessRollbackRestoresPrev(t *testing.T) {
 		t.Fatalf("publish A: %v", err)
 	}
 
-	// Renumber A->B but the wire add FAILS (not a crash: publishLocked returns an
-	// error and its in-process rollback restores prevOwned = the confirmed A).
+	// Renumber A->B but the wire add FAILS ambiguously: the row must stay
+	// pending with A retained, never confirmed-B and never rolled back
+	// to A-only (which would orphan a possibly-live B).
 	fu.failEvery = true
 	now = now.Add(time.Hour)
 	if err := m.Reconcile(context.Background(), []SurfaceAScope{sc}, fixedObserver(addrB), nil, nil); err == nil {
@@ -227,11 +231,8 @@ func TestSurfaceADurablePendingInProcessRollbackRestoresPrev(t *testing.T) {
 	}
 
 	rec := onlyOwned5285(t, statePath)
-	if rec.PublishPending {
-		t.Fatalf("in-process rollback must not leave a pending record, got %+v", rec)
-	}
-	if rec.AddrText != addrA {
-		t.Fatalf("in-process rollback must restore prev A, got AddrText=%q", rec.AddrText)
+	if !rec.PublishPending || rec.AddrText != addrB || rec.PriorAddrText != addrA {
+		t.Fatalf("ambiguous failure must retain pending {B, prior A}, got %+v", rec)
 	}
 	if st := m.Stats(); st.UpsertFail == 0 {
 		t.Fatalf("failed wire add must count an upsertFail, stats=%+v", st)

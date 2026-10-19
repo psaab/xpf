@@ -325,31 +325,34 @@ func (b *cloudflareBackend) UpsertLease(ctx context.Context, rec LeaseDNSRecord)
 	if err != nil {
 		return err
 	}
-	var prevContent string
+	prevSet := map[string]bool{}
 	if rec.PrevAddr.IsValid() {
-		prevContent = rec.PrevAddr.Unmap().String()
+		prevSet[rec.PrevAddr.Unmap().String()] = true
 	}
-	prevID := ""
+	for _, p := range rec.PrevAddrs {
+		if p.IsValid() {
+			prevSet[p.Unmap().String()] = true
+		}
+	}
+	var prevIDs []string
 	sameContentID := ""
 	sameContentCorrect := false
-	// #9067: a content match with the wrong TTL must be PATCHed rather than
-	// POSTed; retain a correct match as a no-op candidate, but keep scanning so
-	// a stale PrevAddr row can still be removed (#10715).
 	for _, r := range recs {
 		if r.Content == content {
 			if r.TTL == ttl {
 				sameContentCorrect = true
 				continue
 			}
-			// Content right, TTL wrong: PATCH THIS row. Falling through to the
-			// POST below would create a DUPLICATE at the same name rather than
-			// correcting the existing one.
 			sameContentID = r.ID
 			continue
 		}
-		if prevContent != "" && prevContent != content && r.Content == prevContent {
-			prevID = r.ID
+		if prevSet[r.Content] {
+			prevIDs = append(prevIDs, r.ID)
 		}
+	}
+	prevID := ""
+	if len(prevIDs) > 0 {
+		prevID = prevIDs[0]
 	}
 	payload := map[string]any{
 		"type":    rec.ForwardType,
@@ -358,20 +361,15 @@ func (b *cloudflareBackend) UpsertLease(ctx context.Context, rec LeaseDNSRecord)
 		"ttl":     ttl,
 	}
 	if sameContentCorrect {
-		// The desired record already exists. Delete xpf's stale previous value
-		// if it is still present, without writing the already-correct row.
-		if prevID == "" {
-			return nil
+		for _, id := range prevIDs {
+			if _, err = b.do(ctx, http.MethodDelete, "/zones/"+zoneID+"/dns_records/"+id, nil); err != nil {
+				return err
+			}
 		}
-		_, err = b.do(ctx, http.MethodDelete, "/zones/"+zoneID+"/dns_records/"+prevID, nil)
-		return err
+		return nil
 	}
 	targetID := prevID
 	if sameContentID != "" {
-		// Prefer the content-matching row over a prev-address row: it is the
-		// one carrying the wrong TTL, and the payload below already holds the
-		// desired content, so one PATCH converges both fields. Keep prevID
-		// separate so its stale row is deleted after a successful PATCH.
 		targetID = sameContentID
 	}
 	if targetID != "" {
@@ -379,14 +377,25 @@ func (b *cloudflareBackend) UpsertLease(ctx context.Context, rec LeaseDNSRecord)
 		if err != nil {
 			return err
 		}
-		if prevID != "" && targetID != prevID {
-			_, err = b.do(ctx, http.MethodDelete, "/zones/"+zoneID+"/dns_records/"+prevID, nil)
+		for _, id := range prevIDs {
+			if id != targetID {
+				if _, err = b.do(ctx, http.MethodDelete, "/zones/"+zoneID+"/dns_records/"+id, nil); err != nil {
+					return err
+				}
+			}
 		}
 		return err
 	}
-	// No xpf-owned row to update — create a new one alongside any foreign record.
 	_, err = b.do(ctx, http.MethodPost, "/zones/"+zoneID+"/dns_records", payload)
-	return err
+	if err != nil {
+		return err
+	}
+	for _, id := range prevIDs {
+		if _, err = b.do(ctx, http.MethodDelete, "/zones/"+zoneID+"/dns_records/"+id, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // DeleteLease removes the firewall's OWN A/AAAA from Cloudflare: resolve zone

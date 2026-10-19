@@ -725,6 +725,36 @@ ownership so the next reconcile retries every candidate (an already-deleted one 
 benign). Fail-on-revert: `surface_a_withdraw_pending_5334_test.go` (both a
 single-`AddrText` revert and a prefer-`PriorAddrText`/skip revert go RED).
 
+**Ambiguous publish keeps every candidate (#15225 A40-02).** A publish whose
+wire UPDATE was applied but whose reply was lost returns an error that is
+indistinguishable from a failure — rolling the durable row back to the single
+confirmed prior would orphan the possibly-live new value. `publishLocked`
+therefore rolls back ONLY on a definitive rejection (`isDefinitivePublishRejection`:
+conflict refusal, auth, definitive rcodes, permanent config errors); every
+other error keeps the PENDING row with every candidate retained
+(`PriorAddrText` + `AmbiguousPriorAddrText`), `LeaseDNSRecord.PrevAddrs`
+threads the full set to the backend, and the next publish removes ALL
+candidates != the new value (rfc2136 in one UPDATE, cloudflare by deleting
+every candidate row, route53 in the merge). Withdraw deletes the ambiguous
+candidate too. Fail-on-revert: `surface_a_ambiguous_15225_test.go`.
+
+**Generic http:// credential gate (#15225 A40-03).** The #14386 fixed
+credential key-name list missed `pass=`/`key=`/`api-token=`/`pwd=`/`p=`; both
+mirrored detectors (config `ddnsTemplateCarriesLiteralToken`, runtime
+`templateCarriesLiteralToken`) now treat ANY literal query value as
+credential-carrying. Credential-named path pairs remain flagged; bare path
+segments and placeholder-only/value-less templates remain unflagged; loopback
+http still works. Fail-on-revert: `ddns_plaintext_15225_test.go` (both packages).
+
+**RFC 2136 zone discovery (#15225 A40-05).** The UPDATE zone is no longer
+guessed by stripping one label: `discoverZone` honours explicit
+`forward-zone`/`reverse-zone` leaves (DHCP block + provider catalog) and a
+matching configured domain without a query, otherwise SOA-walks toward the
+root against the update server itself (cached per updater), falling back to
+the legacy guess on any failure. DHCPv6 PTRs now publish against e.g.
+`8.b.d.0.1.0.0.2.ip6.arpa` instead of NOTAUTH-skipping at the /124 guess.
+Fail-on-revert: `backend_rfc2136_zone_15225_test.go`.
+
 | backend | withdraw mechanism | per-family withdraw? |
 |---|---|---|
 | `dyndns2` | the same update GET with `offline=YES` (the de-facto dyndns2 withdraw — dyn/no-ip/dns-o-matic take the hostname offline). Body verdict parsed like an upsert; a provider failure → non-nil error → ownership kept for retry. | **No — HOST-level** (offline=YES takes down BOTH A and AAAA). |

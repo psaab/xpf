@@ -740,7 +740,7 @@ func TestSurfaceAPublishBackoffDoesNotDelayWithdraw(t *testing.T) {
 	}
 
 	// 2. A new address fails to publish → arms a PUBLISH-origin backoff. The
-	//    record rolls back to the previous address (still owned).
+	//    record stays pending with both candidates retained (#15225).
 	fu.failUpd["wan.example.net"] = true
 	obsAddr = netip.MustParseAddr("203.0.113.9")
 	now = now.Add(time.Second)
@@ -754,12 +754,14 @@ func TestSurfaceAPublishBackoffDoesNotDelayWithdraw(t *testing.T) {
 	// 3. Address is LOST while still inside the (publish-origin) backoff window.
 	//    The withdraw MUST proceed — it is a different intent than the failed
 	//    publish, and leaving the record live at a dead address is a blackhole.
+	//    #15225: the failed publish was ambiguous, so the pending row retains
+	//    BOTH candidates and the withdraw deletes both (2 deletes).
 	obsAddr = netip.Addr{} // definitive loss
 	now = now.Add(time.Second)
 	_ = m.Reconcile(context.Background(), []SurfaceAScope{sc}, observe, nil, nil)
-	if len(fu.deletes) != 1 {
+	if len(fu.deletes) != 2 {
 		t.Fatalf("a publish-origin backoff must NOT delay an address-loss withdraw (#4423 M03); "+
-			"got %d deletes, want 1", len(fu.deletes))
+			"got %d deletes, want 2 (both ambiguous candidates)", len(fu.deletes))
 	}
 }
 

@@ -60,7 +60,10 @@ type fakeDNSServer struct {
 	// zone[name] is the set of RRs currently present at that owner name; the
 	// value key is the RR's textual form for set semantics.
 	stateful bool
-	zone     map[string]map[string]dns.RR
+	// authoritativeZones, when non-empty (#15225), limits UPDATE acceptance
+	// and SOA answers to these zones; other UPDATE zones get NOTAUTH.
+	authoritativeZones map[string]bool
+	zone               map[string]map[string]dns.RR
 
 	// truncateUDP, when set, marks every UDP reply Truncated so the client
 	// retries over TCP (used to exercise the TCP-retry path).
@@ -225,6 +228,33 @@ func (s *fakeDNSServer) handle(w dns.ResponseWriter, r *dns.Msg) {
 		}
 	}
 	rec.prereqs = append(rec.prereqs, r.Answer...)
+	// #15225: SOA queries answer from authoritativeZones; UPDATEs to a
+	// non-authoritative zone answer NOTAUTH and are not applied.
+	if r.Opcode == dns.OpcodeQuery && len(r.Question) > 0 && r.Question[0].Qtype == dns.TypeSOA {
+		s.mu.Lock()
+		auth := s.authoritativeZones[dns.CanonicalName(r.Question[0].Name)]
+		s.mu.Unlock()
+		if auth {
+			m.Answer = append(m.Answer, &dns.SOA{
+				Hdr: dns.RR_Header{Name: dns.Fqdn(r.Question[0].Name), Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 300},
+				Ns:  "ns." + dns.Fqdn(r.Question[0].Name), Mbox: "hostmaster." + dns.Fqdn(r.Question[0].Name),
+				Serial: 1, Refresh: 3600, Retry: 600, Expire: 86400, Minttl: 300,
+			})
+			m.Rcode = dns.RcodeSuccess
+		} else {
+			m.Rcode = dns.RcodeNameError
+		}
+		_ = w.WriteMsg(m)
+		return
+	}
+	isUpdateNotAuth := false
+	if r.Opcode == dns.OpcodeUpdate {
+		s.mu.Lock()
+		if len(s.authoritativeZones) > 0 && !s.authoritativeZones[zone] {
+			isUpdateNotAuth = true
+		}
+		s.mu.Unlock()
+	}
 
 	overTCP := w.RemoteAddr() != nil && strings.HasPrefix(w.RemoteAddr().Network(), "tcp")
 
@@ -246,7 +276,7 @@ func (s *fakeDNSServer) handle(w dns.ResponseWriter, r *dns.Msg) {
 	// depends on this: a PTR that SERVFAILed must not silently land in the
 	// zone, or the retry's name-not-in-use prerequisite would falsely collide).
 	overrideIsError := hasOverride && override != dns.RcodeSuccess
-	if s.stateful && !overrideIsError {
+	if s.stateful && !overrideIsError && !isUpdateNotAuth {
 		statefulRcode = s.evalStatefulLocked(r)
 		statefulSet = true
 	}
@@ -268,6 +298,8 @@ func (s *fakeDNSServer) handle(w dns.ResponseWriter, r *dns.Msg) {
 	tsigBad := signed && w.TsigStatus() != nil
 	switch {
 	case tsigBad:
+		m.Rcode = dns.RcodeNotAuth
+	case isUpdateNotAuth:
 		m.Rcode = dns.RcodeNotAuth
 	case hasOverride:
 		m.Rcode = override
@@ -498,6 +530,15 @@ func (s *fakeDNSServer) setStateful(on bool) {
 	s.stateful = on
 	if on && s.zone == nil {
 		s.zone = map[string]map[string]dns.RR{}
+	}
+}
+
+func (s *fakeDNSServer) setAuthoritativeZones(zones []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.authoritativeZones = map[string]bool{}
+	for _, z := range zones {
+		s.authoritativeZones[dns.CanonicalName(z)] = true
 	}
 }
 

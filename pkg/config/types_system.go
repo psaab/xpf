@@ -388,6 +388,10 @@ type DDNSProvider struct {
 	Backend string
 	// UpdateServer is the RFC 2136 target authoritative DNS, host or host:port.
 	UpdateServer string
+	// ForwardZone / ReverseZone are explicit RFC 2136 UPDATE zones for
+	// Surface A providers (#15225 A40-05, comma/space-separated lists).
+	ForwardZone string
+	ReverseZone string
 	// TSIGKeyName / TSIGAlgorithm / TSIGSecret are the TSIG credentials for
 	// authenticated RFC 2136 updates. TSIGSecret is the sensitive HMAC key,
 	// redacted by the Secret type on every marshal and by String() below.
@@ -1767,6 +1771,12 @@ type DHCPDynamicDNSConfig struct {
 	// Domain is the default DNS suffix appended to a client name that is
 	// not already a FQDN (e.g. "corp.example.com").
 	Domain string
+	// ForwardZone / ReverseZone are explicit RFC 2136 UPDATE zones
+	// (#15225 A40-05, comma/space-separated lists). When set they take
+	// precedence over SOA discovery; empty means discover via SOA walk
+	// with the Domain/parent guess as fallback.
+	ForwardZone string
+	ReverseZone string
 	// TTLSeconds is the TTL applied to published records (default 300
 	// when zero, applied at render time, not here).
 	TTLSeconds int

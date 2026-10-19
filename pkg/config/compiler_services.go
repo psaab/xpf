@@ -643,6 +643,12 @@ func mergeDHCPDynamicDNS(dst, src *DHCPDynamicDNSConfig) *DHCPDynamicDNSConfig {
 	if dst.Domain == "" {
 		dst.Domain = src.Domain
 	}
+	if dst.ForwardZone == "" {
+		dst.ForwardZone = src.ForwardZone
+	}
+	if dst.ReverseZone == "" {
+		dst.ReverseZone = src.ReverseZone
+	}
 	if dst.HostnameSource == "" {
 		dst.HostnameSource = src.HostnameSource
 	}
@@ -686,6 +692,8 @@ func mergeDHCPDynamicDNS(dst, src *DHCPDynamicDNSConfig) *DHCPDynamicDNSConfig {
 // shape.
 var dhcpDDNSStringProps = map[string]bool{
 	"domain":          true,
+	"forward-zone":    true,
+	"reverse-zone":    true,
 	"hostname-source": true,
 	"conflict-policy": true,
 	"backend":         true,
@@ -748,6 +756,8 @@ func compileDHCPDynamicDNS(node *Node) *DHCPDynamicDNSConfig {
 
 	d.Enabled = enabled
 	d.Domain = props["domain"]
+	d.ForwardZone = props["forward-zone"]
+	d.ReverseZone = props["reverse-zone"]
 	d.HostnameSource = props["hostname-source"]
 	d.ConflictPolicy = props["conflict-policy"]
 	d.Backend = props["backend"]
