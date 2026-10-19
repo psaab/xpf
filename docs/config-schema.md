@@ -1350,6 +1350,39 @@ produces the downgrade. It also asserts on what the line **became** (its field
 count) rather than on whether an auth line was emitted at all — the malformed
 line is *present* and looks well-formed, so an existence check passes on it.
 
+### `protocols rip authentication-key` — at most 16 characters (#15013)
+
+FRR ripd's `ip rip authentication string <key>` accepts at most **16
+characters** (the same cap Junos applies to a RIP `authentication-key`).
+The leaf was untyped with no validator and no compiled length gate, so a
+17-character key committed clean, rendered verbatim, and ripd rejected
+the line on **every** `frr-reload` — a degraded retry that can never
+succeed, so every later commit reported non-convergence and RIP stayed
+down on enrolled interfaces.
+
+The fix is split, mirroring #9105/#14398/#14977:
+
+- **Commit (strict)**: the schema leaf now carries
+  `ValidateRIPAuthKeyLength` (`ValueIdentifier`, 1..16 characters), and
+  the compiled gate `validateRIPAuthKeyLengthStrict` enforces the same
+  bound on the compiled `RIPConfig` — globally and per routing instance
+  (the routing-instance schema shares the global `rip` subtree). Both
+  reject key17 and accept key16; neither error nor warning ever contains
+  the key value, only its length.
+- **Tolerant load / HA sync (#1960)**: the compiled gate downgrades to a
+  warning (`lenientRIPAuthKeyLength15013`) so a persisted config still
+  boots.
+- **Render belt**: `pkg/frr` withholds RIP enrollment entirely for an
+  over-long key (no `router rip`, no `network`, no auth lines) and warns
+  with `#15013`, exactly like the #14977 unrenderable-token arm — rather
+  than emitting a line ripd rejects forever or an unauthenticated block.
+
+The bound counts **characters (runes)**, matching the operator-visible
+length. Only the RIP key is capped: OSPF/IS-IS/BGP keys render through
+different FRR commands and are deliberately untouched. Neighbouring
+legitimate behaviour is unchanged — a 16-character key (md5 or
+simple/text), a short key, and the no-auth shape render byte-identically.
+
 ### `protocols isis interface <if> level` — the PER-INTERFACE circuit type (#8450)
 
 A different leaf and a different defect from the router-wide one below, in the

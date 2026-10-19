@@ -731,6 +731,14 @@ type compileOpts struct {
 	// fails closed for the keyless-auth RIP interfaces instead of
 	// enrolling them unauthenticated.
 	lenientRIPAuthTypeWithoutKey bool
+	// lenientRIPAuthKeyLength15013 downgrades the #15013 RIP
+	// `authentication-key` length rejection (>16 characters, which
+	// FRR ripd refuses on every frr-reload) to a warning on the
+	// tolerant paths (Store.Load, Store.SyncApply). A config an
+	// older binary accepted must still BOOT (#1960); the FRR
+	// renderer withholds RIP enrollment for the over-long key
+	// instead of emitting a line ripd rejects forever.
+	lenientRIPAuthKeyLength15013 bool
 	// lenientMultiLeafSelfRepeat downgrades the #9027 ambiguity rejection to a
 	// warning on the tolerant paths. A config an older binary accepted must
 	// still BOOT; on that path the existing readers keep their behaviour and
@@ -3453,6 +3461,7 @@ func lenientCompileOpts() compileOpts {
 		lenientAuthTypeAbsent:                  true,
 		lenientISISAuthTypeRequiresKey14399:    true,
 		lenientRIPAuthTypeWithoutKey:           true,
+		lenientRIPAuthKeyLength15013:             true,
 		lenientMultiLeafSelfRepeat:             true,
 		lenientDynamicAddressFeedRef:           true,
 		lenientDuplicateNamedBlock:             true,

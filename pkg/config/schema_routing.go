@@ -601,10 +601,12 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 		// compiler (compiler_protocols.go RIP block) reads every value via
 		// firewallMatchValues; the pre-#3904 Keys[1]-only read truncated to
 		// the first entry.
-		"neighbor":           {desc: "Neighbor", args: 1, multi: true, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: nil},
-		"passive-interface":  {desc: "Passive interface", args: 1, multi: true, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: nil},
-		"redistribute":       {desc: "Redistribute", args: 1, multi: true, placeholder: "<protocol>", children: nil},
-		"authentication-key": {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
+		"neighbor":          {desc: "Neighbor", args: 1, multi: true, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: nil},
+		"passive-interface": {desc: "Passive interface", args: 1, multi: true, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: nil},
+		"redistribute":      {desc: "Redistribute", args: 1, multi: true, placeholder: "<protocol>", children: nil},
+		"authentication-key": {desc: "Authentication key (1..16 characters)", args: 1, placeholder: "<key>",
+			valueType: ValueIdentifier, valueDesc: "RIP authentication key (1..16 characters; FRR ripd maximum)",
+			validator: ValidateRIPAuthKeyLength, children: nil},
 		"authentication-type": {desc: "Authentication type", args: 1, placeholder: "<type>",
 			valueType: ValueEnumOf, valueDesc: "authentication type",
 			valueExamples: AuthTypeSpellings(), validator: ValidateAuthType, children: nil},
