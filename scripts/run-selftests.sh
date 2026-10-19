@@ -258,8 +258,11 @@ else
 fi
 
 # ── 3. python unittest self-tests (image / deploy / scripts root) ──
+# (#15241 A58-05): scripts/*_test.py is the suffix convention one level
+# down from scripts/test_*.py; without it
+# scripts/userspace_ha_validation_matrix_test.py ran in no gate.
 hdr "python self-tests"
-for t in scripts/image/test_*.py scripts/dist/test_*.py scripts/deploy/test_*.py scripts/test_*.py; do
+for t in scripts/image/test_*.py scripts/dist/test_*.py scripts/deploy/test_*.py scripts/test_*.py scripts/*_test.py; do
 	[ -f "$t" ] || continue
 	run_py "$t"
 done
@@ -396,6 +399,19 @@ run_shell test/routing/selftest-routing-kernel_9812.sh
 # The probes pin missing-tool behavior and the -json=false argv contract.
 # Seven hermetic fixture cells: no Go build or netns.
 run_shell test/routing/selftest-routing-probes_9812.sh
+# #15241 (A58-06): the daemon real-kernel cells. The #9637 ingress,
+# #11409 unzoned-ingress, #9637 reinject-TUN, #12034 shared-VRF, #12229
+# lifeline and #12087 secure-tunnel cells are the kernel halves of their
+# fixes — all SKIP under a plain `go test` without a usable netns, and a
+# skipped cell reads identically to a passing one. This leg runs them
+# under `unshare -rn` with XPF_REQUIRE_NETNS=1, where (since A58-06) a
+# missing tool is a failure, not a skip. SKIPs without
+# go/unshare/ip/bash/nsenter/timeout/sleep/nft or where unprivileged
+# user namespaces are unavailable.
+run_shell test/daemon/selftest-daemon-kernel_15241.sh
+# The probes pin missing-tool behavior and the -json=false argv contract.
+# Eleven hermetic fixture cells: no Go build or netns.
+run_shell test/daemon/selftest-daemon-probes_15241.sh
 # #10771: prove the BPF leg's privilege contract with fake tools: without
 # passwordless sudo it SKIPs; when available, the compiled probe is invoked as
 # `sudo -n`. The fixture never creates a BPF map or uses host sudo.
@@ -659,7 +675,7 @@ fi
 #
 # The defect was not "one script was forgotten" -- it was that NOTHING NOTICED.
 # The inline block that used to live here globbed ONE location
-# (test/incus/*-selftest.sh); the extracted census covers all eight self-test
+# (test/incus/*-selftest.sh); the extracted census covers all nine self-test
 # locations plus the §4 odd-name exact set and the §3 __main__ guard, with
 # its own self-test (test/incus/selftest-census-selftest.sh) proving each
 # failure direction. `sh` is correct: the census declares #!/bin/sh and is

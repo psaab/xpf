@@ -26,6 +26,9 @@ func TestRIMemberSecureTunnelUnitBindsToVRF12087(t *testing.T) {
 	}
 	unshare, err := exec.LookPath("unshare")
 	if err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("cannot run the isolated MasterIndex cell: unshare not found (XPF_REQUIRE_NETNS is set): %v", err)
+		}
 		t.Skipf("cannot run the isolated MasterIndex cell: unshare not found: %v", err)
 	}
 	cmd := exec.Command(unshare, "-rn", os.Args[0], "-test.run", "^TestRIMemberSecureTunnelUnitBindsToVRF12087$", "-test.count=1", "-test.v")

@@ -322,8 +322,8 @@ def new_repo(d):
     return git_in(d, "rev-parse", "HEAD").stdout.strip()
 
 
-def run_ci(repo, body, base, head):
-    env = clean_env(PR_BODY=body, PR_NUMBER="7", BASE_SHA=base, HEAD_SHA=head)
+def run_ci(repo, body, base, head, title=""):
+    env = clean_env(PR_TITLE=title, PR_BODY=body, PR_NUMBER="7", BASE_SHA=base, HEAD_SHA=head)
     return subprocess.run(["bash", str(CI)], cwd=repo, env=env, capture_output=True, text=True)
 
 
@@ -351,6 +351,33 @@ class CiLegsTest(unittest.TestCase):
             self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
             self.assertIn("REFUSED commit ", res.stdout)
             self.assertIn("CLOSES #3", res.stdout)
+
+    def test_the_title_leg_refuses_a_negated_title(self):
+        # (#15241 A58-02) The title becomes the squash-landed master
+        # commit's subject; body and commits clean must not admit it.
+        with tempfile.TemporaryDirectory() as d:
+            base, head = self._repo(d, "subject\n\nCloses #1")
+            res = run_ci(d, "Closes #1", base, head,
+                         title="docs: this does not close #42 (docs only)")
+            self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+            self.assertIn("REFUSED PR 7 title:1", res.stdout)
+            self.assertIn("CLOSES #42", res.stdout)
+
+    def test_a_clean_title_passes(self):
+        with tempfile.TemporaryDirectory() as d:
+            base, head = self._repo(d, "subject\n\nCloses #1")
+            res = run_ci(d, "Closes #1", base, head,
+                         title="ci: refuse negated close keywords (#9551)")
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+    def test_the_title_is_never_shell_evaluated(self):
+        with tempfile.TemporaryDirectory() as d:
+            base, head = self._repo(d, "subject")
+            title = "$(touch pwned-t) `touch pwned-u`"
+            res = run_ci(d, "Closes #1", base, head, title=title)
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertFalse(Path(d, "pwned-t").exists())
+            self.assertFalse(Path(d, "pwned-u").exists())
 
     def test_a_clean_pull_request_passes(self):
         with tempfile.TemporaryDirectory() as d:

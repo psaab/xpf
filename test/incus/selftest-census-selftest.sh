@@ -26,14 +26,15 @@ n=0
 
 # stamp_clean <dir> — a fixture tree satisfying every census check: one file
 # per discovery glob, the positive control, one guarded file per python
-# glob, and a runner registering all of them plus exactly the 10 odd names.
+# glob (including the scripts/*_test.py suffix glob, #15241 A58-05), and a
+# runner registering all of them plus exactly the 10 odd names.
 # The eight test/incus odd names that carry a selftest arm get a real
 # arm file on disk (#14653 §2b scans for the arm, not the name), so the
 # fixture exercises the arm scan's green direction as well as its reds.
 stamp_clean() {
 	local fix="$1"
 	mkdir -p "$fix/test/incus" "$fix/test/xsk-repro" "$fix/test/routing" \
-		"$fix/test/mutation" "$fix/scripts/docs" "$fix/scripts/image" \
+		"$fix/test/mutation" "$fix/test/daemon" "$fix/scripts/docs" "$fix/scripts/image" \
 		"$fix/scripts/dist" "$fix/scripts/deploy" "$fix/test/image" \
 		"$fix/test/debian"
 	echo '#!/bin/sh' >"$fix/test/incus/a-selftest.sh"
@@ -55,10 +56,12 @@ stamp_clean() {
 		arm='--self''test)'
 		printf '#!/usr/bin/env bash\ncase "$1" in\n%s exit 0 ;;\nesac\n' "$arm" >"$fix/test/incus/$w.sh"
 	done
+	echo '#!/bin/sh' >"$fix/test/daemon/selftest-a.sh"
 	for d in image dist deploy; do
 		printf 'x = 1\nif __name__ == "__main__":\n    pass\n' >"$fix/scripts/$d/test_a.py"
 	done
 	printf 'x = 1\nif __name__ == "__main__":\n    pass\n' >"$fix/scripts/test_a.py"
+	printf 'x = 1\nif __name__ == "__main__":\n    pass\n' >"$fix/scripts/foo_test.py"
 	cat >"$fix/runner.sh" <<'RUNNER'
 # ── 4. shell self-tests ──
 run_bash test/incus/a-selftest.sh
@@ -66,6 +69,7 @@ run_bash test/incus/harness-result-selftest.sh
 run_shell test/xsk-repro/selftest-a.sh
 run_shell test/routing/selftest-a.sh
 run_shell test/mutation/selftest-a.sh
+run_shell test/daemon/selftest-a.sh
 run_bash scripts/selftest-a.sh
 run_bash scripts/docs/selftest-a.sh
 run_shell scripts/dist/selftest.sh
@@ -312,6 +316,25 @@ if out=$(run_census "$fix"); then
 	ok "census leg outside §4 is not treated as an odd name"
 else
 	bad "census leg outside §4 failed the census: $out"
+fi
+
+# ── 7b. (#15241 A58-05) a tracked python test covered by no glob fails,
+# naming it — the suffix-convention blindness one directory over. The
+# fixture is a real git repo so `git ls-files` sees the file exactly as
+# the census does on the real tree; the clean twin (cell 1) carries a
+# scripts/*_test.py file under the suffix glob and passes.
+n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix"; stamp_clean "$fix"
+mkdir -p "$fix/scripts/subdir"
+printf 'x = 1\nif __name__ == "__main__":\n    pass\n' >"$fix/scripts/subdir/test_bar.py"
+git -C "$fix" init -q
+git -C "$fix" add -A
+if out=$(run_census "$fix"); then
+	bad "uncovered tracked python tests passed the census (A58-05)"
+else
+	case "$out" in
+	*"scripts/subdir/test_bar.py"*) ok "uncovered tracked python test fails, naming the file (A58-05)" ;;
+	*) bad "uncovered-python failure did not name the file: $out" ;;
+	esac
 fi
 
 # ── 8-10. run_bash/run_shell/run_py on a missing file FAILs ──

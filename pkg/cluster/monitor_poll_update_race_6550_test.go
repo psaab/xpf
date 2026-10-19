@@ -273,6 +273,7 @@ func TestRaceGateCoversTheClusterProbes6550(t *testing.T) {
 		"TestMonitorPollDoesNotRaceUpdateGroups6550",
 		"TestMonitorPollDoesNotHoldMuAcrossManagerCallback6550",
 		"TestStartHeartbeatDoesNotRaceStopHeartbeat7257",
+		"TestStartHeartbeatSupersededByStopDoesNotPublish7257",
 	}
 
 	src, err := os.ReadFile("../../Makefile")
@@ -294,6 +295,12 @@ func TestRaceGateCoversTheClusterProbes6550(t *testing.T) {
 			break
 		}
 		if !strings.Contains(line, "./pkg/cluster/") {
+			continue
+		}
+		// The A58-04 go test -list guard lines mention the package
+		// but carry no race run; the race line is the one invoking
+		// test -race (the guard lines only name test-race-dp in prose).
+		if !strings.Contains(line, "test -race") {
 			continue
 		}
 		m := regexp.MustCompile(`-run\s+'([^']*)'`).FindStringSubmatch(line)

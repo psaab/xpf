@@ -4,10 +4,11 @@
 # WHAT IT ASSERTS
 #
 #   1. Every self-test on disk is INVOKED by scripts/run-selftests.sh, across
-#      all eight locations that carry them (not just test/incus/):
+#      all nine locations that carry them (not just test/incus/):
 #        test/incus/*-selftest.sh  test/xsk-repro/selftest*.sh
 #        test/routing/selftest*.sh test/mutation/selftest*.sh
-#        scripts/*selftest*.sh     scripts/docs/*selftest*.sh
+#        test/daemon/selftest*.sh  scripts/*selftest*.sh
+#        scripts/docs/*selftest*.sh
 #        test/image/*-test.sh      test/debian/*-test.sh
 #      Registration is a `run_bash <path>` / `run_shell <path>` call in the
 #      runner with comments stripped (a bare filename mention would be
@@ -21,7 +22,13 @@
 #      outside every glob, declared in the odd set) — the arm scan finds
 #      verdict cores that no filename glob can see.
 #   3. Every §3 python self-test (scripts/image, scripts/dist,
-#      scripts/deploy, scripts root, test_*.py) defines a `__main__` guard.
+#      scripts/deploy, scripts root, test_*.py and *_test.py) defines a
+#      `__main__` guard, and (§3b, #15241 A58-05) every tracked
+#      `*test*.py` under scripts/ is covered by the union of PY_GLOBS --
+#      the suffix-convention file
+#      scripts/userspace_ha_validation_matrix_test.py was invisible to
+#      both the runner and this census because it satisfies neither the
+#      scripts/test_*.py prefix nor any listed directory glob.
 #      Each runs via direct `python3 <file>`; without the guard a file
 #      defines its cells and exits 0 running nothing. (#9669 guards cells
 #      AFTER the guard; this guards the guard's EXISTENCE. Complement, not
@@ -87,15 +94,15 @@ FAIL=0
 note_fail() { echo "  FAIL: $*" >&2; FAIL=$((FAIL + 1)); }
 note_pass() { echo "  PASS: $*"; }
 
-SELFTEST_GLOBS="test/incus/*-selftest.sh test/xsk-repro/selftest*.sh test/routing/selftest*.sh test/mutation/selftest*.sh scripts/*selftest*.sh scripts/docs/*selftest*.sh test/image/*-test.sh test/debian/*-test.sh"
-PY_GLOBS="scripts/image/test_*.py scripts/dist/test_*.py scripts/deploy/test_*.py scripts/test_*.py"
+SELFTEST_GLOBS="test/incus/*-selftest.sh test/xsk-repro/selftest*.sh test/routing/selftest*.sh test/mutation/selftest*.sh test/daemon/selftest*.sh scripts/*selftest*.sh scripts/docs/*selftest*.sh test/image/*-test.sh test/debian/*-test.sh"
+PY_GLOBS="scripts/image/test_*.py scripts/dist/test_*.py scripts/deploy/test_*.py scripts/test_*.py scripts/*_test.py"
 ODD_SET="scripts/dist/selftest.sh scripts/image/test-grow-root.sh test/incus/wire-policy-deny.sh test/incus/wire-appmatch-twins.sh test/incus/wire-zone-matrix.sh test/incus/wire-hostinbound-deny.sh test/incus/wire-conntrack-lifecycle.sh test/incus/wire-routing-separation.sh test/incus/wire-nat-frag-needed.sh test/incus/t12-g2-9506.sh"
 POSITIVE_CONTROL="test/incus/harness-result-selftest.sh"
 
 runner_code=$(sed 's/#.*//' "$RUNNER")
 
 # ── 1. discovery: every self-test invoked ──
-echo "selftest census: discovery over 8 globs"
+echo "selftest census: discovery over 9 globs"
 discovered=""
 discovered_n=0
 set -f
@@ -227,7 +234,7 @@ else
 fi
 
 # ── 3. the __main__ guard over §3 python ──
-echo "selftest census: __main__ guard over 4 python globs"
+echo "selftest census: __main__ guard over 5 python globs"
 py_n=0
 py_missing=""
 set -f
@@ -255,6 +262,49 @@ if [ -n "$py_missing" ]; then
 	note_fail "runs via direct python3 but defines no __main__ guard (exits 0 measuring nothing):$py_missing"
 elif [ "$py_n" -gt 0 ]; then
 	note_pass "$py_n §3 python files, all guarded"
+fi
+
+# ── 3b. (#15241 A58-05) tracked python tests under scripts/ are covered ──
+# The glob list above is a convention, not a census: a new
+# scripts/foo_test.py (suffix) or scripts/subdir/test_foo.py outside the
+# listed directories satisfied no glob and ran in no gate, while this
+# census reported OK. Compare the tracked set against the union of the
+# globs actually expanded above, so adding a file in an uncovered shape
+# fails here by name until a glob (or the runner) covers it.
+echo "selftest census: tracked scripts/*test*.py covered by PY_GLOBS"
+py_covered=""
+set -f
+for g in $PY_GLOBS; do
+	set +f
+	for f in $g; do
+		[ -f "$f" ] || continue
+		py_covered="$py_covered
+$f"
+	done
+	set -f
+done
+set +f
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+	note_pass "tracked-python check skipped (fixture tree is not a git checkout)"
+else
+	py_tracked=$(git ls-files 'scripts/*test*.py' 2>/dev/null | sort)
+	if [ -z "$py_tracked" ]; then
+		note_fail "tracked python discovery is EMPTY — git ls-files found no scripts/*test*.py"
+	else
+		py_uncovered=""
+		for f in $py_tracked; do
+			case "$py_covered" in
+			*"
+$f"*) ;;
+			*) py_uncovered="$py_uncovered $f" ;;
+			esac
+		done
+		if [ -n "$py_uncovered" ]; then
+			note_fail "tracked python test(s) under scripts/ covered by no PY_GLOBS entry (invisible to run-selftests.sh §3):$py_uncovered"
+		else
+			note_pass "all tracked scripts/*test*.py covered by PY_GLOBS"
+		fi
+	fi
 fi
 
 # ── verdict ──
