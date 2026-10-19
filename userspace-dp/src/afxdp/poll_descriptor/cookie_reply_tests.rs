@@ -681,3 +681,125 @@ fn stamp_shaped_native_syn_cookie_reply_still_enqueues_syn_ack_12319() {
         crate::tcp_flags::TCP_SYN | crate::tcp_flags::TCP_ACK
     );
 }
+
+/// #15131 (A91-03, #12864/#14642 residual): a GRE/WireGuard-decapsulated
+/// inner carries a fabricated zero-MAC Ethernet header and
+/// `TUNNEL_DECAP_INGRESS_FLAG`. A syn-cookie challenge on it must NOT
+/// reflect that fake L2: pre-fix `enqueue_syn_cookie_reply` enqueues a
+/// SYN-ACK with dst/src MAC 00:00:00:00:00:00 on the physical underlay
+/// binding and counts it sent. Mirrors the #12864 reject fixture.
+/// The native control below proves the gate keys on the flag.
+#[test]
+fn tunnel_decap_syn_cookie_reply_suppresses_zero_mac_syn_ack_15131() {
+    let (mut frame, mut meta, flow) = tcp_v4_syn_frame();
+    // Synthetic decap header: both MACs zero, as GRE/WG decap fabricates.
+    frame[..12].fill(0);
+    meta.meta_flags |= crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG;
+    let forwarding = ForwardingState::default();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+        0,
+    );
+    let mut counters = BatchCounters::default();
+
+    let sent = enqueue_syn_cookie_reply(
+        &mut pipeline,
+        &forwarding,
+        5,
+        &frame,
+        meta,
+        Some(&flow),
+        SynCookieReply::SynAck(SynCookieChallenge {
+            cookie_isn: 0xaabb_ccdd,
+            peer_mss: 1460,
+        }),
+        &mut counters,
+    );
+
+    assert!(!sent, "tunnel-decapped SYN must not emit a SYN-ACK");
+    assert!(pipeline.pending_tx_local.is_empty(), "no pending TX");
+    assert_eq!(counters.syn_cookie_syn_ack_sent, 0);
+    assert_eq!(counters.syn_cookie_reply_budget_drops, 0);
+}
+
+/// #15131: the validated-cookie ACK leg (session-miss ACK -> AckRst) must
+/// honor the same tunnel-decap gate as the SYN-ACK leg.
+#[test]
+fn tunnel_decap_syn_cookie_reply_suppresses_zero_mac_ack_rst_15131() {
+    let (mut frame, mut meta, flow) = tcp_v4_syn_frame();
+    frame[..12].fill(0);
+    // Turn the fixture into an ACK (no SYN) so AckRst can build pre-fix.
+    frame[47] = crate::tcp_flags::TCP_ACK;
+    meta.tcp_flags = crate::tcp_flags::TCP_ACK;
+    meta.meta_flags |= crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG;
+    let forwarding = ForwardingState::default();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+        0,
+    );
+    let mut counters = BatchCounters::default();
+
+    let sent = enqueue_syn_cookie_reply(
+        &mut pipeline,
+        &forwarding,
+        5,
+        &frame,
+        meta,
+        Some(&flow),
+        SynCookieReply::AckRst,
+        &mut counters,
+    );
+
+    assert!(!sent, "tunnel-decapped ACK must not emit an ACK-RST");
+    assert!(pipeline.pending_tx_local.is_empty(), "no pending TX");
+    assert_eq!(counters.syn_cookie_ack_rst_sent, 0);
+    assert_eq!(counters.syn_cookie_reply_budget_drops, 0);
+}
+
+/// #15131 control: the same SYN fixture without the tunnel-decap flag is
+/// native ingress with real L2, so its cookie SYN-ACK still enqueues and
+/// counts. Kills an over-broad gate that suppresses native challenges.
+#[test]
+fn native_syn_cookie_reply_still_enqueues_syn_ack_15131() {
+    let (frame, meta, flow) = tcp_v4_syn_frame();
+    assert_eq!(
+        meta.meta_flags & crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG,
+        0,
+        "native fixture must not carry the tunnel-decap flag"
+    );
+    let forwarding = ForwardingState::default();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+        0,
+    );
+    let mut counters = BatchCounters::default();
+
+    let sent = enqueue_syn_cookie_reply(
+        &mut pipeline,
+        &forwarding,
+        5,
+        &frame,
+        meta,
+        Some(&flow),
+        SynCookieReply::SynAck(SynCookieChallenge {
+            cookie_isn: 0xaabb_ccdd,
+            peer_mss: 1460,
+        }),
+        &mut counters,
+    );
+
+    assert!(sent, "native SYN must still get its cookie SYN-ACK");
+    assert_eq!(counters.syn_cookie_syn_ack_sent, 1);
+    let reply = pipeline
+        .pending_tx_local
+        .pop_front()
+        .expect("native cookie SYN-ACK queued");
+    assert_eq!(&reply.bytes[..6], &frame[6..12]);
+    assert_eq!(
+        reply.bytes[14 + 20 + 13],
+        crate::tcp_flags::TCP_SYN | crate::tcp_flags::TCP_ACK
+    );
+}
