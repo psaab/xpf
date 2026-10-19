@@ -826,13 +826,13 @@ func validateSourceNATDeterministicStrict(cfg *Config) error {
 			return fmt.Errorf("pool %q: block-size %d exceeds port range %d", pool.Name, det.BlockSize, portRange)
 		}
 		blocksPerIP := portRange / det.BlockSize
-		var poolHosts uint64
-		if pool.Address != "" {
-			poolHosts = checkedAddU64(poolHosts, sourceNATPoolMemberHostCount(pool.Address))
-		}
-		for _, address := range pool.Addresses {
-			poolHosts = checkedAddU64(poolHosts, sourceNATPoolMemberHostCount(address))
-		}
+		// #15177: count only the addresses Rust places in the deterministic
+		// IPv4 vector. Mode 1 expands textual-v4 members (unique union);
+		// mode 2 (IPv6 subscriber / NAT64) accepts only bare//32 v4 hosts.
+		// Other-family members (including v4-mapped) must not inflate the
+		// gate — they build no deterministic block at runtime.
+		ipv6Subscriber := bits == 128
+		poolHosts := SourceNATPoolDeterministicV4AddressCount(pool, ipv6Subscriber)
 		totalBlocks := uint64(math.MaxUint64)
 		if poolHosts <= math.MaxUint64/uint64(blocksPerIP) {
 			totalBlocks = poolHosts * uint64(blocksPerIP)

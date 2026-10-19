@@ -125,20 +125,19 @@ func (c *xpfCollector) collectNATPoolMetrics(ch chan<- prometheus.Metric, dp api
 }
 
 // deterministicPoolBlockCapacity returns the total per-subscriber port-block
-// capacity of a deterministic CGNAT pool: len(addresses) * blocksPerIP, where
-// blocksPerIP = portRange / block-size. This mirrors the totalBlocks value the
-// compiler validates against the provisioned subscriber count
-// (compiler_nat.go) and the dataplane NATPoolConfig.BlocksPerIP field. Returns
-// 0 when the pool is not a valid deterministic pool (nil, non-positive block
-// size, or block size larger than the port range).
+// capacity of a deterministic CGNAT pool: deterministic-v4 addresses *
+// blocksPerIP, where blocksPerIP = portRange / block-size. This mirrors the
+// totalBlocks value the compiler validates (#15177: only the addresses Rust
+// places in the deterministic IPv4 vector count — mode 1 unique-expanded v4,
+// mode 2 bare//32 v4 hosts). Returns 0 when the pool is not a valid
+// deterministic pool (nil, non-positive block size, or block size larger
+// than the port range).
 func deterministicPoolBlockCapacity(pool *config.NATPool, poolName string, overBudget map[string]bool) int {
 	if pool == nil || pool.Deterministic == nil {
 		return 0
 	}
-	// #7000: a refused pool installs no allocator, so it has no blocks — and a
-	// prefix member expands, so the address count is not `len(pool.Addresses)`.
-	addrs, unusable := config.SourceNATPoolReportableAddresses(pool, poolName, overBudget)
-	if unusable != "" {
+	// #7000: a refused pool installs no allocator, so it has no blocks.
+	if _, unusable := config.SourceNATPoolReportableAddresses(pool, poolName, overBudget); unusable != "" {
 		return 0
 	}
 	bs := pool.Deterministic.BlockSize
@@ -157,7 +156,29 @@ func deterministicPoolBlockCapacity(pool *config.NATPool, poolName string, overB
 	if portRange <= 0 || bs > portRange {
 		return 0
 	}
-	return addrs * (portRange / bs)
+	// Mode 2 uses the fixed NAT64 port range for block math (see
+	// deterministicSubscriberCapacity / nat64.go); Rust build_deterministic_v6
+	// derives host_count from the NAT64 pool_v4 length and that range. Keep
+	// the gauge on the same range or it overstates mode-2 capacity.
+	ipv6Subscriber := false
+	if _, n, err := net.ParseCIDR(pool.Deterministic.HostAddress); err == nil {
+		_, bits := n.Mask.Size()
+		ipv6Subscriber = bits == 128
+	}
+	rangeForBlocks := portRange
+	if ipv6Subscriber {
+		rangeForBlocks = 65535 - 1024 + 1
+	}
+	addrs := config.SourceNATPoolDeterministicV4AddressCount(pool, ipv6Subscriber)
+	maxInt := uint64(^uint(0) >> 1)
+	total := addrs * uint64(rangeForBlocks/bs)
+	if addrs != 0 && total/addrs != uint64(rangeForBlocks/bs) {
+		return int(maxInt)
+	}
+	if total > maxInt {
+		return int(maxInt)
+	}
+	return int(total)
 }
 
 // deterministicSubscriberCapacity returns the value reported in the

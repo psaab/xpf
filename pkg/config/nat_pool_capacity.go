@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"net/netip"
 	"sort"
+	"strings"
 )
 
 // Reportable source-NAT pool capacity (#7000).
@@ -213,6 +214,49 @@ func sourceNATPoolUniqueAddressCount(members []string) uint64 {
 		current = next
 	}
 	return checkedAddU64(total, sourceNATPoolIntervalSize(current))
+}
+
+// sourceNATPoolUniqueAddressCountV4 returns the unique expanded cardinality
+// of only the members Rust places in pool_addresses_v4 (#15177). Family is
+// textual, matching expand_pool_address: colon-bearing members (including
+// IPv4-mapped) are v6, dotted-quad are v4. Members the interval builder
+// cannot honour contribute 0; an unhonourable member makes the whole pool
+// unusable elsewhere, so counting it as 0 keeps callers fail-closed.
+func sourceNATPoolUniqueAddressCountV4(members []string) uint64 {
+	filtered := make([]string, 0, len(members))
+	for _, m := range members {
+		if NATAddrFamily(NATCIDRIPPart(m)) == "v4" {
+			filtered = append(filtered, m)
+		}
+	}
+	return sourceNATPoolUniqueAddressCount(filtered)
+}
+
+// SourceNATPoolDeterministicV4AddressCount returns how many addresses Rust
+// places in the deterministic pool's IPv4 vector (#15177). For an IPv4
+// subscriber (mode 1, expand_pool_address) that is the textual-v4
+// unique-expanded union. For an IPv6 subscriber (mode 2, NAT64
+// parse_pool_v4) only a bare IPv4 host or explicit /32 counts, once per
+// member with no dedupe — mirroring nat64.rs.
+func SourceNATPoolDeterministicV4AddressCount(pool *NATPool, ipv6Subscriber bool) uint64 {
+	members := SourceNATPoolMembers(pool)
+	if !ipv6Subscriber {
+		return sourceNATPoolUniqueAddressCountV4(members)
+	}
+	var total uint64
+	for _, m := range members {
+		if NATAddrFamily(NATCIDRIPPart(m)) != "v4" {
+			continue
+		}
+		if strings.Contains(m, "/") {
+			parts := strings.SplitN(m, "/", 2)
+			if len(parts) != 2 || parts[1] != "32" {
+				continue
+			}
+		}
+		total++
+	}
+	return total
 }
 
 func sourceNATPoolIntervalSize(interval sourceNATPoolAddressInterval) uint64 {
