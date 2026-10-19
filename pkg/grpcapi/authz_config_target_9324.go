@@ -73,6 +73,12 @@ func configTargetReadPermission(fullMethod string, req any) (config.LoginClassPe
 		// CANDIDATE, explicitly or by proto3 default.
 		return config.PermConfig, true
 	case "ShowCompare":
+		// #15657 V45-03: an active-baseline request diffs rollback vs
+		// ACTIVE — committed state only — so it keeps the table's
+		// PermView price. Every other ShowCompare reads s.candidate.
+		if r, okReq := req.(*pb.ShowCompareRequest); okReq && r.GetActiveBaseline() {
+			return 0, false
+		}
 		// #9889: both arms render s.candidate (ShowCompareRedacted and
 		// ShowCompareRollbackRedacted), so work-in-progress is the only
 		// thing this RPC can produce. Priced, not defaulted: the request

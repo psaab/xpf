@@ -355,6 +355,9 @@ func (s *Server) configRollbackHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) configShowHandler(w http.ResponseWriter, r *http.Request) {
 	format := r.URL.Query().Get("format")
 	target := r.URL.Query().Get("target")
+	// #15657 V48-02: ?path= selects the subtree (space-separated, the
+	// gRPC ShowConfigRequest.Path twin); absent = whole tree.
+	path := strings.Fields(r.URL.Query().Get("path"))
 
 	// #9324: an ABSENT ?target renders the ACTIVE configuration.
 	//
@@ -375,29 +378,55 @@ func (s *Server) configShowHandler(w http.ResponseWriter, r *http.Request) {
 	// An UNRECOGNISED target is refused rather than silently treated as one of
 	// them: falling through on `?target=activ` is the same fail-open shape as
 	// the default this fixes.
+	//
+	// #15657 V48-02: an UNRECOGNISED format is likewise refused (400)
+	// instead of silently rendering hierarchical text; "inheritance"
+	// renders the groups-expanded form like gRPC ShowConfig.
 	var output string
 	switch target {
 	case "", "active":
 		switch format {
+		case "", "text":
+			output = s.store.ShowActiveRedacted(path)
 		case "set":
-			output = s.store.ShowActiveSetRedacted(nil)
+			output = s.store.ShowActiveSetRedacted(path)
 		case "json":
-			output = s.store.ShowActiveJSONRedacted(nil)
+			output = s.store.ShowActiveJSONRedacted(path)
 		case "xml":
-			output = s.store.ShowActiveXMLRedacted(nil)
+			output = s.store.ShowActiveXMLRedacted(path)
+		case "inheritance":
+			inh, err := s.store.ShowActiveInheritanceRedacted(path)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			output = inh
 		default:
-			output = s.store.ShowActiveRedacted(nil)
+			writeError(w, http.StatusBadRequest,
+				"unsupported format: "+format+"; use text, set, json, xml, or inheritance")
+			return
 		}
 	case "candidate":
 		switch format {
+		case "", "text":
+			output = s.store.ShowCandidateRedacted(path)
 		case "set":
-			output = s.store.ShowCandidateSetRedacted(nil)
+			output = s.store.ShowCandidateSetRedacted(path)
 		case "json":
-			output = s.store.ShowCandidateJSONRedacted(nil)
+			output = s.store.ShowCandidateJSONRedacted(path)
 		case "xml":
-			output = s.store.ShowCandidateXMLRedacted(nil)
+			output = s.store.ShowCandidateXMLRedacted(path)
+		case "inheritance":
+			inh, err := s.store.ShowCandidateInheritanceRedacted(path)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			output = inh
 		default:
-			output = s.store.ShowCandidateRedacted(nil)
+			writeError(w, http.StatusBadRequest,
+				"unsupported format: "+format+"; use text, set, json, xml, or inheritance")
+			return
 		}
 	default:
 		writeError(w, http.StatusBadRequest,
@@ -626,7 +655,7 @@ func (s *Server) configConfirmHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) configShowRollbackHandler(w http.ResponseWriter, r *http.Request) {
-	// #3443: n selects a 1-based rollback slot. Fail closed on a
+	// #3443: n selects a rollback slot. Fail closed on a
 	// malformed/negative value instead of silently defaulting to slot 1,
 	// which would show a different rollback than the operator asked for.
 	n, ok := queryIntStrict(r, "n", 1)
@@ -634,25 +663,35 @@ func (s *Server) configShowRollbackHandler(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid n parameter: must be a non-negative integer")
 		return
 	}
-	// #4556 M-01: n selects a 1-based rollback slot. 0 is a canonical
-	// non-negative uint that clears queryIntStrict but then maps to
-	// history.Get(n-1) = history.Get(-1) → the opaque store error
-	// "history position -1 out of range". Reject n<=0 up front with a
-	// clear positive-integer message (queryIntStrict already fails a
-	// negative literal, so in practice this catches n=0), mirroring the
-	// gRPC ShowRollback leg and the ShowCompare rollback_n guard.
-	if n <= 0 {
-		writeError(w, http.StatusBadRequest, "invalid n parameter: rollback index must be a positive integer")
+	// #15657 V45-03: n == 0 is the active configuration (Junos rollback
+	// 0), superseding the #4556 M-01 zero rejection on this show path;
+	// only negative values are refused. queryIntStrict already fails a
+	// negative literal, so this catches a signed value that cleared it.
+	if n < 0 {
+		writeError(w, http.StatusBadRequest, "invalid n parameter: rollback index must be non-negative (0 = active configuration)")
 		return
 	}
 	format := r.URL.Query().Get("format")
+	// #15657 V48-02: ?path= subtree selector, as on /config/show.
+	path := strings.Fields(r.URL.Query().Get("path"))
 
 	var output string
 	var err error
-	if format == "set" {
-		output, err = s.store.ShowRollbackSetRedacted(n)
-	} else {
-		output, err = s.store.ShowRollbackRedacted(n)
+	switch format {
+	case "", "text":
+		output, err = s.store.ShowRollbackRedactedPath(n, path)
+	case "set":
+		output, err = s.store.ShowRollbackSetRedactedPath(n, path)
+	case "json":
+		output, err = s.store.ShowRollbackJSONRedactedPath(n, path)
+	case "xml":
+		output, err = s.store.ShowRollbackXMLRedactedPath(n, path)
+	case "inheritance":
+		output, err = s.store.ShowRollbackInheritanceRedactedPath(n, path)
+	default:
+		writeError(w, http.StatusBadRequest,
+			"unsupported format: "+format+"; use text, set, json, xml, or inheritance")
+		return
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

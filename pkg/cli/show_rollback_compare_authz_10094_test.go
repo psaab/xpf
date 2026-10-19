@@ -9,19 +9,25 @@ import (
 	"github.com/psaab/xpf/pkg/configstore"
 )
 
-// #10094: operational `show system rollback compare N` (both spellings) diffs
-// rollback slot N against the shared CANDIDATE
-// (c.store.ShowCompareRollbackRedacted), but the console gate priced the whole
-// `show` family at PermView — so a view-only console user read another
-// session's staged, uncommitted configuration. Same disclosure #9889 closed on
-// the gRPC ShowCompare RPC (both arms), on the in-process console surface.
+// #10094 (original): operational `show system rollback compare N` (both
+// spellings) diffed rollback slot N against the shared CANDIDATE
+// (c.store.ShowCompareRollbackRedacted), but the console gate priced the
+// whole `show` family at PermView — so a view-only console user read
+// another session's staged, uncommitted configuration. Same disclosure
+// #9889 closed on the gRPC ShowCompare RPC (both arms), on the
+// in-process console surface.
 //
-// The fix prices the two compare spellings at PermConfig while the rest of
-// `show` stays PermView, mirroring the #9324/#9889 contract (reading a
-// candidate is a configure-mode activity). Secrets were already masked on this
-// path (#4099), so the disclosure is reconnaissance, not credential theft —
-// the staged secret below guards that redaction while the non-secret canary
-// carries the RED/GREEN signal.
+// The fix priced the two compare spellings at PermConfig while the rest
+// of `show` stayed PermView, mirroring the #9324/#9889 contract.
+//
+// #15657 V45-03 SUPERSEDES the baseline, not the disclosure concern:
+// operational compare now diffs against ACTIVE
+// (ShowCompareRollbackActiveRedacted) — committed state only — so a
+// view-only user is served the active-baseline diff and can NEVER see
+// the staged canary through it, at PermView. The cells below pin that:
+// compare spellings cost PermView, every class with view is served,
+// and the canary/secret never appear for anyone on this path
+// (super-user included — there is no candidate arm left to read).
 
 // compareCanary10094 is staged in the candidate and never committed. Any
 // view-only output containing it rendered another session's work-in-progress.
@@ -79,38 +85,32 @@ func newCompareStore10094(t *testing.T) *configstore.Store {
 	return store
 }
 
-// TestRequiredPermission_RollbackCompareCostsConfigure_10094 pins the gate
-// shape: both compare spellings (plus the abbreviated `system` the handler
-// resolves) cost PermConfig; every non-compare and malformed spelling stays
-// PermView. Reverting the gate makes the four configure rows go RED.
+// TestRequiredPermission_RollbackCompareCostsConfigure_10094: #15657
+// moved the operational baseline to ACTIVE, so the compare spellings
+// cost PermView like every other committed-config show. Reverting to
+// the candidate baseline without restoring the PermConfig price makes
+// the disclosure cells below go RED (canary in view-only output).
 func TestRequiredPermission_RollbackCompareCostsConfigure_10094(t *testing.T) {
 	cases := []struct {
 		name  string
 		parts []string
 		want  config.LoginClassPermission
 	}{
-		{"compare-first spelling", []string{"show", "system", "rollback", "compare", "1"}, config.PermConfig},
-		{"compare-last spelling", []string{"show", "system", "rollback", "1", "compare"}, config.PermConfig},
-		{"abbrev system compare-first", []string{"show", "syst", "rollback", "compare", "1"}, config.PermConfig},
-		{"abbrev system compare-last", []string{"show", "syst", "rollback", "1", "compare"}, config.PermConfig},
-
+		{"compare-first spelling", []string{"show", "system", "rollback", "compare", "1"}, config.PermView},
+		{"compare-last spelling", []string{"show", "system", "rollback", "1", "compare"}, config.PermView},
+		{"abbrev system compare-first", []string{"show", "syst", "rollback", "compare", "1"}, config.PermView},
+		{"abbrev system compare-last", []string{"show", "syst", "rollback", "1", "compare"}, config.PermView},
+		{"compare rollback zero", []string{"show", "system", "rollback", "compare", "0"}, config.PermView},
+		{"pipe compare", []string{"show", "system", "rollback", "1", "|", "compare"}, config.PermView},
 		{"bare rollback list", []string{"show", "system", "rollback"}, config.PermView},
 		{"rollback slot render", []string{"show", "system", "rollback", "1"}, config.PermView},
 		{"rollback slot display set", []string{"show", "system", "rollback", "1", "|", "display", "set"}, config.PermView},
-		// The handler checks `| display set` BEFORE `compare`, so this renders
-		// the committed slot (no candidate read) and must stay view-level.
 		{"display set wins over compare", []string{"show", "system", "rollback", "1", "compare", "|", "display", "set"}, config.PermView},
 		{"show version", []string{"show", "version"}, config.PermView},
 		{"commit history", []string{"show", "system", "commit", "history"}, config.PermView},
-
-		// Malformed compare errors (usage) before any store access: no
-		// candidate read, so no upgrade — the gate mirrors the handler.
 		{"bare compare", []string{"show", "system", "rollback", "compare"}, config.PermView},
-		{"compare slot zero", []string{"show", "system", "rollback", "compare", "0"}, config.PermView},
 		{"compare slot garbage", []string{"show", "system", "rollback", "compare", "foo"}, config.PermView},
 		{"garbage slot compare", []string{"show", "system", "rollback", "foo", "compare"}, config.PermView},
-		// The handler's substring match is case-sensitive; COMPARE renders
-		// the committed slot, not a diff.
 		{"uppercase compare", []string{"show", "system", "rollback", "1", "COMPARE"}, config.PermView},
 	}
 	for _, tc := range cases {
@@ -123,16 +123,15 @@ func TestRequiredPermission_RollbackCompareCostsConfigure_10094(t *testing.T) {
 	}
 }
 
-// TestCheckPermission_RollbackComparePerClass_10094 pins the per-class outcome
-// on both spellings: only a class holding configure (or everything) is
-// admitted. The `configurator` row proves the price is PermConfig rather than
-// PermAll/PermMaint; the `configureonly` row pins the replace shape (console
-// charges one bit, like REST — unlike gRPC's additive view-AND-configure).
+// TestCheckPermission_RollbackComparePerClass_10094: after #15657 the
+// price is PermView, so exactly the classes holding view (or all) are
+// admitted; configure-without-view no longer suffices.
 func TestCheckPermission_RollbackComparePerClass_10094(t *testing.T) {
 	store := newCompareStore10094(t)
 	compareCmds := [][]string{
 		{"show", "system", "rollback", "compare", "1"},
 		{"show", "system", "rollback", "1", "compare"},
+		{"show", "system", "rollback", "1", "|", "compare"},
 	}
 	cases := []struct {
 		class string
@@ -140,10 +139,10 @@ func TestCheckPermission_RollbackComparePerClass_10094(t *testing.T) {
 	}{
 		{"super-user", true},
 		{"configurator", true},
-		{"configureonly", true},
-		{"operator", false},
-		{"read-only", false},
-		{"config-viewer", false},
+		{"configureonly", false},
+		{"operator", true},
+		{"read-only", true},
+		{"config-viewer", true},
 		{"unauthorized", false},
 	}
 	for _, tc := range cases {
@@ -156,19 +155,11 @@ func TestCheckPermission_RollbackComparePerClass_10094(t *testing.T) {
 						strings.Join(cmd, " "), tc.class, err)
 				}
 				if !tc.allow && err == nil {
-					t.Errorf("%q ALLOWED for %q (want denied — renders the shared candidate)",
+					t.Errorf("%q ALLOWED for %q (want denied — no view permission)",
 						strings.Join(cmd, " "), tc.class)
 				}
 			})
 		}
-	}
-
-	// The configureonly class really is view-less: it cannot run a plain
-	// view-level show, so its compare admission above proves configure alone
-	// suffices (replace, not additive).
-	co := &CLI{store: store, userClass: "configureonly"}
-	if err := co.checkPermission([]string{"show", "version"}); err == nil {
-		t.Errorf("configureonly ALLOWED show version (want denied — the class must hold configure WITHOUT view for the replace-shape pin)")
 	}
 
 	// Unset class keeps the legacy allow-everything behavior.
@@ -181,17 +172,18 @@ func TestCheckPermission_RollbackComparePerClass_10094(t *testing.T) {
 	}
 }
 
-// TestDispatchOperational_ViewOnlyDeniedRollbackCompare_10094 is the
-// end-to-end leak cell: with another session's canary staged on the shared
-// store, a view-only console session is denied on BOTH compare spellings and
-// the canary never reaches its output. Pre-fix this goes RED (served with the
-// canary); the `run`-prefixed row pins the config-mode dispatch path, which
-// funnels through the same gate.
+// TestDispatchOperational_ViewOnlyDeniedRollbackCompare_10094 is now
+// the SERVED-WITHOUT-CANARY cell (#15657): a view-only session is
+// served the active-baseline diff on every spelling (including the
+// pipe form and the `run` path), and the staged canary/secret never
+// reach its output because there is no candidate arm anymore.
+// RED-on-revert to the candidate baseline: the canary appears.
 func TestDispatchOperational_ViewOnlyDeniedRollbackCompare_10094(t *testing.T) {
 	store := newCompareStore10094(t)
 	lines := []string{
 		"show system rollback compare 1",
 		"show system rollback 1 compare",
+		"show system rollback 1 | compare",
 	}
 	for _, class := range []string{"read-only", "operator", "config-viewer"} {
 		for _, line := range lines {
@@ -199,8 +191,11 @@ func TestDispatchOperational_ViewOnlyDeniedRollbackCompare_10094(t *testing.T) {
 				c := &CLI{store: store, userClass: class}
 				var runErr error
 				out := captureStdout(t, func() { runErr = c.dispatchOperational(line) })
-				if runErr == nil || !strings.Contains(runErr.Error(), "permission denied") {
-					t.Errorf("%q for %q: err=%v (want permission denied)", line, class, runErr)
+				if runErr != nil {
+					t.Errorf("%q for %q: err=%v (want served active-baseline diff)", line, class, runErr)
+				}
+				if strings.Contains(out, "unknown pipe") {
+					t.Errorf("%q for %q hit the unknown-pipe error (V47-02):\n%s", line, class, out)
 				}
 				if strings.Contains(out, compareCanary10094) {
 					t.Errorf("%q for %q LEAKED the staged canary:\n%s", line, class, out)
@@ -208,18 +203,22 @@ func TestDispatchOperational_ViewOnlyDeniedRollbackCompare_10094(t *testing.T) {
 				if strings.Contains(out, compareSecret10094) {
 					t.Errorf("%q for %q LEAKED the staged secret in cleartext:\n%s", line, class, out)
 				}
+				if !strings.Contains(out, "example.net") {
+					t.Errorf("%q for %q missing the committed active-baseline diff:\n%s", line, class, out)
+				}
 			})
 		}
 	}
 
-	// `run show ... compare` from config-mode dispatch reaches the same
-	// operational gate and must deny identically.
+	// `run …` from config dispatch still requires the configure verb
+	// itself for a read-only class (unchanged #10094 posture) — the
+	// compare baseline change does not widen `run`.
 	t.Run("read-only/run show system rollback compare 1", func(t *testing.T) {
 		c := &CLI{store: store, userClass: "read-only"}
 		var runErr error
 		out := captureStdout(t, func() { runErr = c.dispatchConfig("run show system rollback compare 1") })
 		if runErr == nil || !strings.Contains(runErr.Error(), "permission denied") {
-			t.Errorf("run-prefixed compare: err=%v (want permission denied)", runErr)
+			t.Errorf("run-prefixed compare: err=%v (want permission denied for the run verb)", runErr)
 		}
 		if strings.Contains(out, compareCanary10094) {
 			t.Errorf("run-prefixed compare LEAKED the staged canary:\n%s", out)
@@ -227,47 +226,34 @@ func TestDispatchOperational_ViewOnlyDeniedRollbackCompare_10094(t *testing.T) {
 	})
 }
 
-// TestDispatchOperational_PrivilegedServedRollbackCompare_10094 pins that the
-// gate is surgical: privileged sessions still get both diffs with the canary
-// in the output. super-user reads the cleartext path (the #4057 allowance);
-// the view+configure custom class reads the redacted path (canary visible,
-// secret masked).
+// TestDispatchOperational_PrivilegedServedRollbackCompare_10094 pins
+// that privileged sessions get the same active-baseline diff — and
+// that even super-user cannot pull the staged candidate through the
+// operational spelling anymore (no candidate arm exists).
 func TestDispatchOperational_PrivilegedServedRollbackCompare_10094(t *testing.T) {
 	store := newCompareStore10094(t)
 	lines := []string{
 		"show system rollback compare 1",
 		"show system rollback 1 compare",
+		"show system rollback 1 | compare",
 	}
 	for _, line := range lines {
-		t.Run("super-user/"+line, func(t *testing.T) {
-			c := &CLI{store: store, userClass: "super-user"}
-			var runErr error
-			out := captureStdout(t, func() { runErr = c.dispatchOperational(line) })
-			if runErr != nil {
-				t.Fatalf("%q for super-user: %v (want served)", line, runErr)
-			}
-			if !strings.Contains(out, compareCanary10094) {
-				t.Errorf("%q for super-user missing the canary (over-deny):\n%s", line, out)
-			}
-		})
-		t.Run("configurator/"+line, func(t *testing.T) {
-			c := &CLI{store: store, userClass: "configurator"}
-			var runErr error
-			out := captureStdout(t, func() { runErr = c.dispatchOperational(line) })
-			if runErr != nil {
-				t.Fatalf("%q for configurator: %v (want served)", line, runErr)
-			}
-			if !strings.Contains(out, compareCanary10094) {
-				t.Errorf("%q for configurator missing the canary (over-deny):\n%s", line, out)
-			}
-			if strings.Contains(out, compareSecret10094) {
-				t.Errorf("%q for configurator LEAKED the staged secret in cleartext:\n%s", line, out)
-			}
-			if !strings.Contains(out, config.SecretDataPlaceholder) {
-				t.Errorf("%q for configurator missing redaction placeholder %q:\n%s",
-					line, config.SecretDataPlaceholder, out)
-			}
-		})
+		for _, class := range []string{"super-user", "configurator"} {
+			t.Run(class+"/"+line, func(t *testing.T) {
+				c := &CLI{store: store, userClass: class}
+				var runErr error
+				out := captureStdout(t, func() { runErr = c.dispatchOperational(line) })
+				if runErr != nil {
+					t.Fatalf("%q for %s: %v (want served)", line, class, runErr)
+				}
+				if strings.Contains(out, compareCanary10094) || strings.Contains(out, compareSecret10094) {
+					t.Errorf("%q for %s leaked staged candidate content:\n%s", line, class, out)
+				}
+				if !strings.Contains(out, "example.net") {
+					t.Errorf("%q for %s missing the committed diff:\n%s", line, class, out)
+				}
+			})
+		}
 	}
 }
 

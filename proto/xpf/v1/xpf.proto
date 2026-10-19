@@ -162,12 +162,17 @@ message ShowConfigResponse { string output = 1; }
 message ShowCompareRequest {
   int32 rollback_n = 1;  // 0 = compare candidate vs active
   repeated string path = 2; // optional subtree filter (#15272)
+  // #15657 V45-03: operational baseline — diff rollback_n (0 = active)
+  // against the ACTIVE configuration instead of the candidate. Needs
+  // no candidate and is priced as a committed-config read.
+  bool active_baseline = 3;
 }
 message ShowCompareResponse { string output = 1; }
 
 message ShowRollbackRequest {
-  int32 n = 1;
+  int32 n = 1; // 0 = active configuration, 1..N = history slots (#15657)
   ConfigFormat format = 2;
+  repeated string path = 3; // optional subtree filter (#15657)
 }
 message ShowRollbackResponse { string output = 1; }
 

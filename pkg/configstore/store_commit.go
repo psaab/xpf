@@ -1475,6 +1475,25 @@ func (s *Store) RollbackAsPlantClass(sessionID, plantClass string, n int) error 
 	return nil
 }
 
+// rollbackTree resolves rollback slot n to its config tree (#15657
+// V45-03). Junos rollback 0 is the active configuration, so n == 0
+// returns s.active; n >= 1 resolves the 1-based history slot via
+// rollbackEntry (including its tombstone refusal). Callers must hold
+// s.mu (read or write). Show-path callers use this so `show ...
+// rollback 0` and `compare 0` render/diff the active config instead
+// of failing on history.Get(-1); the mutation path keeps its own
+// explicit n == 0 arm in RollbackAsPlantClass.
+func (s *Store) rollbackTree(n int) (*config.ConfigTree, error) {
+	if n == 0 {
+		return s.active, nil
+	}
+	entry, err := s.rollbackEntry(n)
+	if err != nil {
+		return nil, err
+	}
+	return entry.Config, nil
+}
+
 // rollbackEntry resolves rollback slot n (1-based) to its HistoryEntry.
 // It returns a clear error both when n is out of range and when the slot
 // was tombstoned at load time because its on-disk file could not be read

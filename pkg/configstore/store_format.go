@@ -277,28 +277,88 @@ func (s *Store) ShowActivePathInheritance(path []string) (string, error) {
 	return s.active.FormatPathInheritanceForNode(path, s.nodeID)
 }
 
-// ShowRollback returns the content of rollback slot n (1-based) as hierarchical text.
+// ShowRollback returns the content of rollback slot n as hierarchical
+// text. n is 0-based Junos-style: 0 is the active configuration,
+// 1..N are history slots (#15657 V45-03).
 func (s *Store) ShowRollback(n int) (string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	entry, err := s.rollbackEntry(n)
-	if err != nil {
-		return "", err
-	}
-	return entry.Config.Format(), nil
+	return s.ShowRollbackPath(n, nil)
 }
 
-// ShowRollbackSet returns the content of rollback slot n (1-based) as flat set commands.
-func (s *Store) ShowRollbackSet(n int) (string, error) {
+// ShowRollbackPath renders rollback slot n (0 = active) at path.
+func (s *Store) ShowRollbackPath(n int, path []string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	entry, err := s.rollbackEntry(n)
+	tree, err := s.rollbackTree(n)
 	if err != nil {
 		return "", err
 	}
-	return entry.Config.FormatSet(), nil
+	return tree.FormatPath(path), nil
+}
+
+// ShowRollbackSet returns rollback slot n (0 = active) as set commands.
+func (s *Store) ShowRollbackSet(n int) (string, error) {
+	return s.ShowRollbackSetPath(n, nil)
+}
+
+// ShowRollbackSetPath renders rollback slot n (0 = active) at path as set.
+func (s *Store) ShowRollbackSetPath(n int, path []string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tree, err := s.rollbackTree(n)
+	if err != nil {
+		return "", err
+	}
+	return tree.FormatPathSet(path), nil
+}
+
+// ShowRollbackJSON returns rollback slot n (0 = active) as JSON.
+func (s *Store) ShowRollbackJSON(n int) (string, error) {
+	return s.ShowRollbackJSONPath(n, nil)
+}
+
+// ShowRollbackJSONPath renders rollback slot n (0 = active) at path as JSON.
+func (s *Store) ShowRollbackJSONPath(n int, path []string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tree, err := s.rollbackTree(n)
+	if err != nil {
+		return "", err
+	}
+	return tree.FormatPathJSON(path), nil
+}
+
+// ShowRollbackXML returns rollback slot n (0 = active) as XML.
+func (s *Store) ShowRollbackXML(n int) (string, error) {
+	return s.ShowRollbackXMLPath(n, nil)
+}
+
+// ShowRollbackXMLPath renders rollback slot n (0 = active) at path as XML.
+func (s *Store) ShowRollbackXMLPath(n int, path []string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tree, err := s.rollbackTree(n)
+	if err != nil {
+		return "", err
+	}
+	return tree.FormatPathXML(path), nil
+}
+
+// ShowRollbackInheritance returns rollback slot n (0 = active) with
+// inheritance annotations.
+func (s *Store) ShowRollbackInheritance(n int) (string, error) {
+	return s.ShowRollbackInheritancePath(n, nil)
+}
+
+// ShowRollbackInheritancePath renders rollback slot n (0 = active) at
+// path with inheritance annotations.
+func (s *Store) ShowRollbackInheritancePath(n int, path []string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tree, err := s.rollbackTree(n)
+	if err != nil {
+		return "", err
+	}
+	return tree.FormatPathInheritanceForNode(path, s.nodeID)
 }
 
 // ShowCompareRollback returns a diff between rollback slot n and the candidate.
@@ -307,7 +367,9 @@ func (s *Store) ShowCompareRollback(n int) (string, error) {
 }
 
 // ShowCompareRollbackAtPath is ShowCompareRollback filtered to path
-// (#15272 B24-03); nil/empty path is the global compare.
+// (#15272 B24-03); nil/empty path is the global compare. n == 0 is the
+// active configuration, so compare rollback 0 is candidate-vs-active
+// and needs no history slot (still requires a candidate).
 func (s *Store) ShowCompareRollbackAtPath(n int, path []string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -316,12 +378,37 @@ func (s *Store) ShowCompareRollbackAtPath(n int, path []string) (string, error) 
 		return "", fmt.Errorf("not in configuration mode")
 	}
 
-	entry, err := s.rollbackEntry(n)
+	tree, err := s.rollbackTree(n)
 	if err != nil {
 		return "", err
 	}
 
-	diff := config.FormatCompareAtPath(entry.Config, s.candidate, path)
+	diff := config.FormatCompareAtPath(tree, s.candidate, path)
+	if diff == "" {
+		return "[no changes]\n", nil
+	}
+	return diff, nil
+}
+
+// ShowCompareRollbackActive returns a diff between rollback slot n
+// (0 = active) and the ACTIVE configuration (#15657 V45-03). This is
+// the operational-mode baseline: it never reads s.candidate and never
+// requires configuration mode, so a dirty candidate from another
+// session cannot change the answer.
+func (s *Store) ShowCompareRollbackActive(n int) (string, error) {
+	return s.ShowCompareRollbackActiveAtPath(n, nil)
+}
+
+// ShowCompareRollbackActiveAtPath is ShowCompareRollbackActive filtered
+// to path; nil/empty path is the global compare.
+func (s *Store) ShowCompareRollbackActiveAtPath(n int, path []string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tree, err := s.rollbackTree(n)
+	if err != nil {
+		return "", err
+	}
+	diff := config.FormatCompareAtPath(tree, s.active, path)
 	if diff == "" {
 		return "[no changes]\n", nil
 	}
@@ -350,7 +437,6 @@ func (s *Store) ShowCompareAtPath(path []string) string {
 	}
 	return diff
 }
-
 
 // --- Redacted display renderers (#4051) ---------------------------------
 //
@@ -475,28 +561,94 @@ func (s *Store) ShowCandidateInheritanceRedacted(path []string) (string, error) 
 	return forDisplay(s.candidate).FormatPathInheritanceForNode(path, s.nodeID)
 }
 
-// ShowRollbackRedacted renders rollback slot n (1-based) as hierarchical text
-// with secrets masked.
+// ShowRollbackRedacted renders rollback slot n (0 = active) as
+// hierarchical text with secrets masked.
 func (s *Store) ShowRollbackRedacted(n int) (string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	entry, err := s.rollbackEntry(n)
-	if err != nil {
-		return "", err
-	}
-	return forDisplay(entry.Config).Format(), nil
+	return s.ShowRollbackRedactedPath(n, nil)
 }
 
-// ShowRollbackSetRedacted renders rollback slot n (1-based) as flat set
-// commands with secrets masked.
-func (s *Store) ShowRollbackSetRedacted(n int) (string, error) {
+// ShowRollbackRedactedPath renders rollback slot n (0 = active) at path
+// with secrets masked.
+func (s *Store) ShowRollbackRedactedPath(n int, path []string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	entry, err := s.rollbackEntry(n)
+	tree, err := s.rollbackTree(n)
 	if err != nil {
 		return "", err
 	}
-	return forDisplay(entry.Config).FormatSet(), nil
+	return forDisplay(tree).FormatPath(path), nil
+}
+
+// ShowRollbackSetRedacted renders rollback slot n (0 = active) as set
+// commands with secrets masked.
+func (s *Store) ShowRollbackSetRedacted(n int) (string, error) {
+	return s.ShowRollbackSetRedactedPath(n, nil)
+}
+
+// ShowRollbackSetRedactedPath renders rollback slot n (0 = active) at
+// path as set commands with secrets masked.
+func (s *Store) ShowRollbackSetRedactedPath(n int, path []string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tree, err := s.rollbackTree(n)
+	if err != nil {
+		return "", err
+	}
+	return forDisplay(tree).FormatPathSet(path), nil
+}
+
+// ShowRollbackJSONRedacted renders rollback slot n (0 = active) as JSON
+// with secrets masked.
+func (s *Store) ShowRollbackJSONRedacted(n int) (string, error) {
+	return s.ShowRollbackJSONRedactedPath(n, nil)
+}
+
+// ShowRollbackJSONRedactedPath renders rollback slot n (0 = active) at
+// path as JSON with secrets masked.
+func (s *Store) ShowRollbackJSONRedactedPath(n int, path []string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tree, err := s.rollbackTree(n)
+	if err != nil {
+		return "", err
+	}
+	return forDisplay(tree).FormatPathJSON(path), nil
+}
+
+// ShowRollbackXMLRedacted renders rollback slot n (0 = active) as XML
+// with secrets masked.
+func (s *Store) ShowRollbackXMLRedacted(n int) (string, error) {
+	return s.ShowRollbackXMLRedactedPath(n, nil)
+}
+
+// ShowRollbackXMLRedactedPath renders rollback slot n (0 = active) at
+// path as XML with secrets masked.
+func (s *Store) ShowRollbackXMLRedactedPath(n int, path []string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tree, err := s.rollbackTree(n)
+	if err != nil {
+		return "", err
+	}
+	return forDisplay(tree).FormatPathXML(path), nil
+}
+
+// ShowRollbackInheritanceRedacted renders rollback slot n (0 = active)
+// with inheritance annotations and secrets masked.
+func (s *Store) ShowRollbackInheritanceRedacted(n int) (string, error) {
+	return s.ShowRollbackInheritanceRedactedPath(n, nil)
+}
+
+// ShowRollbackInheritanceRedactedPath renders rollback slot n
+// (0 = active) at path with inheritance annotations, secrets masked.
+func (s *Store) ShowRollbackInheritanceRedactedPath(n int, path []string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tree, err := s.rollbackTree(n)
+	if err != nil {
+		return "", err
+	}
+	return forDisplay(tree).FormatPathInheritanceForNode(path, s.nodeID)
 }
 
 // ShowCompareRedacted returns a hierarchical diff with secret values constant-
@@ -533,18 +685,43 @@ func (s *Store) ShowCompareRollbackRedacted(n int) (string, error) {
 }
 
 // ShowCompareRollbackRedactedAtPath is ShowCompareRollbackRedacted filtered
-// to path (#15272 B24-03); nil/empty path is the global compare.
+// to path (#15272 B24-03); nil/empty path is the global compare. n == 0 is
+// the active configuration (candidate-vs-active, still needs a candidate).
 func (s *Store) ShowCompareRollbackRedactedAtPath(n int, path []string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.candidate == nil {
 		return "", fmt.Errorf("not in configuration mode")
 	}
-	entry, err := s.rollbackEntry(n)
+	tree, err := s.rollbackTree(n)
 	if err != nil {
 		return "", err
 	}
-	diff := config.FormatCompareRedactedAtPath(entry.Config, s.candidate, path)
+	diff := config.FormatCompareRedactedAtPath(tree, s.candidate, path)
+	if diff == "" {
+		return "[no changes]\n", nil
+	}
+	return diff, nil
+}
+
+// ShowCompareRollbackActiveRedacted returns a diff between rollback
+// slot n (0 = active) and the ACTIVE configuration with secrets masked
+// (#15657 V45-03, #14170 fingerprint-aware). Operational baseline:
+// never reads s.candidate, never requires configuration mode.
+func (s *Store) ShowCompareRollbackActiveRedacted(n int) (string, error) {
+	return s.ShowCompareRollbackActiveRedactedAtPath(n, nil)
+}
+
+// ShowCompareRollbackActiveRedactedAtPath is
+// ShowCompareRollbackActiveRedacted filtered to path.
+func (s *Store) ShowCompareRollbackActiveRedactedAtPath(n int, path []string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tree, err := s.rollbackTree(n)
+	if err != nil {
+		return "", err
+	}
+	diff := config.FormatCompareRedactedAtPath(tree, s.active, path)
 	if diff == "" {
 		return "[no changes]\n", nil
 	}

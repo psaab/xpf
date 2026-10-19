@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
@@ -30,12 +31,15 @@ func (c *ctl) handleShowSystem(args []string) error {
 				// strconv.Atoi + int32() wrapped an out-of-range value
 				// (e.g. 4294967297 -> 1) and silently compared the wrong
 				// slot with a success exit. The shared parser rejects it.
-				n, err := parseRollbackSelector(args[2], "usage: show system rollback compare <N>", 1)
+				// #15657 V45-03: min 0 — rollback 0 is the active config,
+				// and the operational baseline is ACTIVE (ActiveBaseline).
+				n, err := parseRollbackSelector(args[2], "usage: show system rollback compare <N> (0 = active configuration)", 0)
 				if err != nil {
 					return err
 				}
 				resp, err := c.client.ShowCompare(c.ctx(), &pb.ShowCompareRequest{
-					RollbackN: n,
+					RollbackN:      n,
+					ActiveBaseline: true,
 				})
 				if err != nil {
 					return fmt.Errorf("%v", err)
@@ -48,8 +52,8 @@ func (c *ctl) handleShowSystem(args []string) error {
 				return nil
 			}
 
-			// #5052: same int32-wrap guard as the compare selector above.
-			n, err := parseRollbackSelector(args[1], "usage: show system rollback <N>", 1)
+			// #5052 int32-wrap guard; #15657: min 0 (active config).
+			n, err := parseRollbackSelector(args[1], "usage: show system rollback <N> (0 = active configuration)", 0)
 			if err != nil {
 				return err
 			}
@@ -57,14 +61,14 @@ func (c *ctl) handleShowSystem(args []string) error {
 			if err != nil {
 				return err
 			}
-			if len(path) > 0 {
-				return fmt.Errorf("usage: show system rollback <N> [| display set|xml | compare]")
-			}
 			if len(pipe) > 0 && pipe[0] == "compare" {
 				if len(pipe) != 1 {
 					return fmt.Errorf("usage: show system rollback <N> | compare")
 				}
-				resp, err := c.client.ShowCompare(c.ctx(), &pb.ShowCompareRequest{RollbackN: n})
+				if len(path) > 0 {
+					return fmt.Errorf("usage: show system rollback <N> | compare")
+				}
+				resp, err := c.client.ShowCompare(c.ctx(), &pb.ShowCompareRequest{RollbackN: n, ActiveBaseline: true})
 				if err != nil {
 					return fmt.Errorf("%v", err)
 				}
@@ -75,18 +79,26 @@ func (c *ctl) handleShowSystem(args []string) error {
 				}
 				return nil
 			}
-			format, err := parseShowDisplay(pipe, false, false, false)
+			// #15657 V48-02: pre-pipe tokens are the subtree path for
+			// display formats (previously a usage error); every
+			// display format is allowed and forwarded with the path.
+			format, err := parseShowDisplay(pipe, true, true, true)
 			if err != nil {
 				return err
 			}
 			resp, err := c.client.ShowRollback(c.ctx(), &pb.ShowRollbackRequest{
 				N:      n,
 				Format: format,
+				Path:   path,
 			})
 			if err != nil {
 				return fmt.Errorf("%v", err)
 			}
-			fmt.Print(resp.Output)
+			if len(path) > 0 && resp.Output == "" {
+				fmt.Printf("configuration path not found: %s\n", strings.Join(path, " "))
+			} else {
+				fmt.Print(resp.Output)
+			}
 			return nil
 		}
 

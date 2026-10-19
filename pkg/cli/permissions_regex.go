@@ -256,11 +256,15 @@ func splitAtPipe(words []string) (cmd, pipe []string) {
 
 // authorizablePipe reports whether the first pipe verb is one the CLI honours:
 // an output filter SplitPipe splits off, or `display`, which the show and
-// config handlers parse from the line themselves (`| display set`). Anything
-// else is refused. The gate does not know what it would do, so it cannot know
+// config handlers parse from the line themselves (`| display set`), or
+// `compare` (#15657 V47-02: `show system rollback <N> | compare` and
+// config-mode `show | compare [rollback <N>]` are handler-parsed pipes,
+// so a regex-restricted class must be able to authorize them instead of
+// failing closed before the handler runs). Anything else is refused.
+// The gate does not know what it would do, so it cannot know
 // that a deny fails to match it.
 func authorizablePipe(verb string) bool {
-	return cliterm.IsPipeFilter(verb) || verb == "display"
+	return cliterm.IsPipeFilter(verb) || verb == "display" || verb == "compare"
 }
 
 // isDisplayFormat reports whether word is a configuration display format

@@ -375,9 +375,9 @@ func (c *ctl) handleConfigShow(args []string) error {
 			// #5052: parse into the RPC's int32 via the shared selector
 			// parser. strconv.Atoi + int32() wrapped an out-of-range
 			// value (e.g. 4294967297 -> 1) and silently compared the
-			// wrong slot with a success exit.
+			// wrong slot with a success exit. #15657: min 0 (active).
 			var err error
-			n, err = parseRollbackSelector(pipe[2], "usage: show | compare rollback <N>", 1)
+			n, err = parseRollbackSelector(pipe[2], "usage: show | compare rollback <N> (0 = active configuration)", 0)
 			if err != nil {
 				return err
 			}

@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/config"
@@ -28,7 +29,12 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 	route := r.Method + " " + r.URL.Path
 	switch route {
 	case "GET /api/v1/config/show":
-		// No path selector exists on this route: whole-tree render.
+		// #15657 V48-02: ?path= selects the subtree (the gRPC
+		// ShowConfigRequest.Path twin); absent = whole-tree render.
+		if path := strings.Fields(r.URL.Query().Get("path")); len(path) > 0 {
+			return config.AuthorizeConfigShowPath(cfg, class, path,
+				config.ConfigShowDisplaySuffix(restShowFormat(format)))
+		}
 		return config.AuthorizeConfigShowWhole(cfg, class,
 			config.ConfigShowDisplaySuffix(restShowFormat(format)))
 	case "GET /api/v1/config":
@@ -56,9 +62,11 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 // display spelling. REST uses "text" for the hierarchical form; the
 // handler's own validation rejects unknown spellings, and an unknown
 // spelling here yields "" (no suffix) rather than an invented form.
+// #15657 V48-02: "inheritance" maps through so a deny-commands rule on
+// `display inheritance` fires instead of being bypassed.
 func restShowFormat(format string) string {
 	switch format {
-	case "set", "json", "xml":
+	case "set", "json", "xml", "inheritance":
 		return format
 	}
 	return ""
