@@ -46,20 +46,38 @@ pub(in crate::afxdp) use runtime_view::*;
 pub(super) type FastMap<K, V> = FxHashMap<K, V>;
 pub(super) type FastSet<T> = FxHashSet<T>;
 pub(super) type OwnerRgSessionIndex = FastMap<i32, FastSet<SessionKey>>;
+/// Per-wire-key owner multiset payload (#15106): the live forward owners
+/// claiming one shared alias key, in publish order. Inline capacity 2 so
+/// the common zero-/one-owner cases never heap-allocate a roster.
+pub(super) type WireOwnerRoster = smallvec::SmallVec<[SessionKey; 2]>;
+/// Wire/catalogue-side key -> live owner roster (#15106).
+pub(super) type WireOwnerMultiset = FastMap<SessionKey, WireOwnerRoster>;
 
 /// Bounded history of reverse aliases. Domain-neutral owners let an unstamped
 /// fabric reply reject a tuple that exists in multiple routing instances.
 /// Once the bound is reached, every such exception fails closed.
 pub(super) struct SharedNatAmbiguityIndex {
     aliases: FastMap<SessionKey, Option<SessionKey>>,
+    /// #15106: per-wire-key live-owner multiset. Its LOCK is shared with
+    /// `aliases` (the same mutex), so observe/remove and ambiguity state move
+    /// together. Soft-capped at the wire-key level: above the ingest cap the
+    /// roster saturates fail-closed via `wire_saturated`, mirroring
+    /// `saturated` for alias keys.
+    wire_owners: WireOwnerMultiset,
     saturated: bool,
+    /// #15106: set when `wire_owners` reaches its wire-key capacity. While
+    /// set, wire survivor resolution declines (fail-closed ambiguity
+    /// semantics) rather than trusting a partial roster.
+    wire_saturated: bool,
 }
 
 impl Default for SharedNatAmbiguityIndex {
     fn default() -> Self {
         Self {
             aliases: FastMap::default(),
+            wire_owners: WireOwnerMultiset::default(),
             saturated: false,
+            wire_saturated: false,
         }
     }
 }
@@ -139,7 +157,106 @@ impl SharedNatAmbiguityIndex {
 
     pub(super) fn clear(&mut self) {
         self.aliases.clear();
+        self.wire_owners.clear();
         self.saturated = false;
+        self.wire_saturated = false;
+    }
+
+    // ---- #15106: per-wire-key live-owner multiset -------------------------
+    //
+    // Roster ops run under the SAME index mutex as `aliases`, so the
+    // ambiguity record and the roster cannot drift apart at publish/remove.
+
+    /// Record `owner` as claiming `wire_key`. Idempotent per owner: a
+    /// same-session re-publish must not inflate the count. New wire keys
+    /// above the ingest cap are not recorded (fail-closed saturation),
+    /// matching the `remember` alias policy.
+    pub(super) fn observe_wire_owner(&mut self, wire_key: SessionKey, owner: SessionKey) {
+        if self.wire_saturated {
+            return;
+        }
+        if self.saturated {
+            self.wire_saturated = true;
+            return;
+        }
+        match self.wire_owners.get_mut(&wire_key) {
+            Some(roster) => {
+                if !roster.contains(&owner) {
+                    roster.push(owner);
+                }
+            }
+            None => {
+                if self.wire_owners.len() == Self::MAX_KEYS {
+                    self.wire_saturated = true;
+                } else {
+                    let mut roster = WireOwnerRoster::new();
+                    roster.push(owner);
+                    self.wire_owners.insert(wire_key, roster);
+                }
+            }
+        }
+    }
+
+    /// Remove `owner` from `wire_key`'s roster. Returns the remaining roster
+    /// count, or 0 with `still_recorded` false when nothing was recorded
+    /// (saturation or a wire key with no roster entry) so the caller keeps a
+    /// fail-closed fallback instead of trusting an empty/missing roster.
+    pub(super) fn remove_wire_owner(&mut self, wire_key: &SessionKey, owner: &SessionKey) -> u32 {
+        let Some(roster) = self.wire_owners.get_mut(wire_key) else {
+            return 0;
+        };
+        if let Some(pos) = roster.iter().position(|candidate| candidate == owner) {
+            roster.remove(pos);
+        }
+        let remaining = roster.len() as u32;
+        if roster.is_empty() {
+            self.wire_owners.remove(wire_key);
+        }
+        remaining
+    }
+
+    /// Whether a wire survivor answer from `wire_owners` can be trusted:
+    /// false once either saturation latch is set (fail-closed).
+    pub(super) fn wire_owners_trusted(&self) -> bool {
+        !self.wire_saturated && !self.saturated
+    }
+
+    /// The first (published-first) live owner recorded for `wire_key`, used
+    /// only when the caller already knows the roster holds exactly one owner.
+    pub(super) fn wire_first_owner(&self, wire_key: &SessionKey) -> Option<SessionKey> {
+        self.wire_owners
+            .get(wire_key)
+            .and_then(|roster| roster.first().cloned())
+    }
+
+    /// #15106: seed/reset `wire_key`'s roster from a survivors snapshot
+    /// (legacy reseed when the roster lacks the removed owner) and return the
+    /// remaining owner count. Mirrors the pre-#15106 scan's verdict: 0 = drop
+    /// the alias and forget, 1 = restore that sole owner, 2+ = stay ambiguous.
+    pub(super) fn reset_wire_owners(&mut self, wire_key: SessionKey, owners: &[SessionKey]) -> u32 {
+        self.wire_owners.remove(&wire_key);
+        if owners.is_empty() {
+            return 0;
+        }
+        let count = owners.len() as u32;
+        let mut roster = WireOwnerRoster::new();
+        roster.extend(owners.iter().cloned());
+        self.wire_owners.insert(wire_key, roster);
+        count
+    }
+
+    /// #15106: live owner count recorded for `wire_key` (0 when absent).
+    pub(super) fn wire_owner_count(&self, wire_key: &SessionKey) -> u32 {
+        self.wire_owners
+            .get(wire_key)
+            .map(|roster| roster.len() as u32)
+            .unwrap_or(0)
+    }
+
+    /// #15106: total live wire-owner roster entries (test/diagnostic gauge).
+    #[cfg(test)]
+    pub(super) fn wire_owner_entry_count(&self) -> usize {
+        self.wire_owners.values().map(|roster| roster.len()).sum()
     }
 }
 
