@@ -2833,6 +2833,11 @@ mod tests_shim_degraded_ndp_10863;
 #[cfg(test)]
 #[path = "tests_shim_gre_classify_10651.rs"]
 mod tests_shim_gre_classify_10651;
+// #14954: GRE-inner fragment / declared-length / LAND guards, executed —
+// same shape as above.
+#[cfg(test)]
+#[path = "tests_shim_gre_inner_14954.rs"]
+mod tests_shim_gre_inner_14954;
 // #14323: the shim's IPv4 map-key encoding, executed rather than modelled
 // — same shape as above: parse_ipv4, the GRE-inner classifier, and the WG
 // kernel path's shim_v4_key must all agree with Go's BigEndian writer.

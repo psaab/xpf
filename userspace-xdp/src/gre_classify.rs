@@ -144,3 +144,95 @@ pub fn native_gre_fragment_stays_on_helper(
         && is_fragment
         && ((protocol == 47 && wire_protocol == 47) || (protocol == 255 && wire_protocol == 47))
 }
+/// #14954: may the native-GRE inner classifier build a session key from
+/// this inner packet, or must it miss (return 0, stay in userspace)?
+///
+/// The classifier runs BEFORE the worker decapsulates: a hit can steer
+/// the OUTER frame to the kernel (`PASS_TO_KERNEL`) or to the helper
+/// (`REDIRECT`) without the inner ever being adjudicated, so every
+/// property the worker would enforce on the inner must be enforced
+/// here first. Three fail-open gaps are closed together because they
+/// share one verdict:
+///
+/// * FRAGMENTED inner — an IPv4 fragment field with MF set or a
+///   non-zero offset, or an IPv6 chain that sighted a non-atomic
+///   Fragment header (offset != 0 or M set), has no complete L4 header
+///   in this packet; ports read from it are payload bytes.
+/// * DECLARED LENGTH — the readable L4 span must lie inside the inner
+///   datagram's declared end (`total_len` for v4, `40 + payload_len`
+///   for v6, measured from the inner L3 start). Slack past it is
+///   Ethernet pad / outer trailer promoted by the outer trim, not
+///   inner bytes. A declared end past the capture (lying-long) is
+///   bounded by the capture reads themselves, exactly as the shim's
+///   outer parsers treat it.
+/// * LAND — inner src == inner dst. The healthy/degraded outer LAND
+///   drops compare the OUTER addresses; a GRE inner with equal
+///   addresses rides a `PASS_TO_KERNEL` hit to the kernel decapsulated
+///   with no screen ever seeing the inner.
+///
+/// `inner_is_fragment` is caller-computed: v4 from the fragment field,
+/// v6 from the shared walk (`fragment_seen` excludes atomic headers, so
+/// a whole datagram carrying an atomic Fragment header still classifies
+/// — the worker's `packet_trimmed_len`/`parse_inner_protocol_and_offsets`
+/// treat it the same way). `l4_span_start`/`l4_span_len` are the span
+/// the caller is about to read for the tuple (0 length = no L4 read for
+/// this protocol, so the length gate is vacuous for the span — the
+/// header itself was already read inside the declared minimums the
+/// caller checked). Address slices are the fixed 16-byte shim shape
+/// (v4 in the first 4 bytes, zero-padded), family-correct for one
+/// comparison.
+#[inline(always)]
+pub fn gre_inner_classify_allowed(
+    inner_is_fragment: bool,
+    inner_src_addr: &[u8; 16],
+    inner_dst_addr: &[u8; 16],
+    inner_l3_offset: usize,
+    declared_end: usize,
+    l4_span_start: usize,
+    l4_span_len: usize,
+) -> bool {
+    if inner_src_addr == inner_dst_addr {
+        return false;
+    }
+    !gre_inner_fragment_or_length_rejected(
+        inner_is_fragment,
+        inner_l3_offset,
+        declared_end,
+        l4_span_start,
+        l4_span_len,
+    )
+}
+
+/// #14954 scalar half of [`gre_inner_classify_allowed`]: the fragment and
+/// declared-length verdicts without the address comparison.
+///
+/// The shim's call sites judge LAND separately (a direct address
+/// comparison on the key they just built) and call this half for the
+/// fragment/length verdicts with inner-L3-relative offsets, so no
+/// packet-derived absolute offset crosses into the comparison. The
+/// combined wrapper above is exactly LAND + this half, and the host
+/// test executes both.
+#[inline(always)]
+pub fn gre_inner_fragment_or_length_rejected(
+    inner_is_fragment: bool,
+    inner_l3_offset: usize,
+    declared_end: usize,
+    l4_span_start: usize,
+    l4_span_len: usize,
+) -> bool {
+    if inner_is_fragment {
+        return true;
+    }
+    if l4_span_len == 0 {
+        return false;
+    }
+    // rejected iff the span ends past the declared end (or the declared
+    // end does not even cover the header). One subtraction chain rather
+    // than checked_add + two compares — same verdict for every input,
+    // including span overflow (start+len wraps past usize::MAX only
+    // when len > 0 and start is huge, which the wrapping form still
+    // reports as past any real declared end).
+    declared_end < inner_l3_offset
+        || l4_span_start > declared_end
+        || l4_span_len > declared_end - l4_span_start
+}
