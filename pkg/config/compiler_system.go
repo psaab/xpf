@@ -632,10 +632,28 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				sys.MasterPassword = nodeVal(prfNode)
 			}
 		case "license":
-			if auNode := child.FindChild("autoupdate"); auNode != nil {
-				if urlNode := auNode.FindChild("url"); urlNode != nil {
-					sys.LicenseAutoUpdate = nodeVal(urlNode)
+			// #15782: retain EVERY url, not just one. `url` is multi:true
+			// so flat-set repeats stay siblings; hier repeats are siblings
+			// too; a bracket list packs onto one node's Keys/children and
+			// plainListValues reads all shapes. Scalar keeps first.
+			for _, auNode := range child.FindChildren("autoupdate") {
+				for _, urlNode := range auNode.FindChildren("url") {
+					for _, u := range plainListValues(urlNode) {
+						sys.LicenseAutoUpdateURLs = append(sys.LicenseAutoUpdateURLs, u)
+					}
 				}
+				// Brace-elided `autoupdate { url a; }` packed on Keys handled
+				// by FindChildren above via expanded children; also cover
+				// `autoupdate url a` packed on the autoupdate node's Keys.
+				if len(auNode.Children) == 0 && len(auNode.Keys) >= 3 && auNode.Keys[1] == "url" {
+					sys.LicenseAutoUpdateURLs = append(sys.LicenseAutoUpdateURLs, auNode.Keys[2:]...)
+				}
+			}
+			if len(child.Children) == 0 && len(child.Keys) >= 4 && child.Keys[1] == "autoupdate" && child.Keys[2] == "url" {
+				sys.LicenseAutoUpdateURLs = append(sys.LicenseAutoUpdateURLs, child.Keys[3:]...)
+			}
+			if len(sys.LicenseAutoUpdateURLs) > 0 {
+				sys.LicenseAutoUpdate = sys.LicenseAutoUpdateURLs[0]
 			}
 		case "processes":
 			for _, proc := range child.Children {
@@ -3198,6 +3216,25 @@ func systemInertKnobWarnings(sysNode *Node, system *SystemConfig) []string {
 			if blockHas(expandRun9235(ssh, systemServicesSSHSchema13089()), "rate-limit") {
 				add("system services ssh rate-limit: accepted but NOT enforced (sshd has no per-minute connection-rate limiter)")
 			}
+		}
+	}
+	for _, lic := range sysChildren {
+		if lic.Name() != "license" {
+			continue
+		}
+		hasURL := system != nil && len(system.LicenseAutoUpdateURLs) > 0
+		if !hasURL {
+			for _, au := range lic.FindChildren("autoupdate") {
+				if au.FindChild("url") != nil || (len(au.Keys) >= 3 && au.Keys[1] == "url") {
+					hasURL = true
+				}
+			}
+			if len(lic.Children) == 0 && len(lic.Keys) >= 4 && lic.Keys[1] == "autoupdate" && lic.Keys[2] == "url" {
+				hasURL = true
+			}
+		}
+		if hasURL {
+			add("system license autoupdate url: accepted but NOT applied — xpf has no licensing runtime, so no license is fetched or updated (#15782)")
 		}
 	}
 	return warnings

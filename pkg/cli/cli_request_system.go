@@ -110,9 +110,11 @@ func (c *CLI) handleRequestSystem(args []string) error {
 	case "software":
 		return c.handleRequestSystemSoftware(args[1:])
 
+	case "license":
+		return fmt.Errorf("request system license: not implemented — xpf is open-source, requires no license, and has no licensing runtime (#15782)")
+
 	case "dynamic-dns":
 		return c.handleRequestSystemDynamicDNS(args[1:])
-
 	default:
 		return fmt.Errorf("unknown request system command: %s", args[0])
 	}

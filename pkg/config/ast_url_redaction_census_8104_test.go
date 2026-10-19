@@ -102,6 +102,9 @@ var astLeafForRedactedField = map[string]astLeafClaim{
 	"SystemConfig.LicenseAutoUpdate": {
 		set: `set system license autoupdate url "%s"`,
 	},
+	"SystemConfig.LicenseAutoUpdateURLs": {
+		set: `set system license autoupdate url "%s"`,
+	},
 	"ArchivalConfig.ArchiveSites": {
 		set: `set system archival configuration archive-sites "%s"`,
 	},

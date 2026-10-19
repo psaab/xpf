@@ -61,7 +61,8 @@ var urlBearingByContract = map[string]bool{
 	"Config.Services.RPM.Probes[k].Tests[k].Target":                     true,
 	// `system license autoupdate url` — a fetch endpoint whose value routinely
 	// carries the entitlement token. Named "LicenseAutoUpdate", not "…URL".
-	"Config.System.LicenseAutoUpdate": true,
+	"Config.System.LicenseAutoUpdate":     true,
+	"Config.System.LicenseAutoUpdateURLs": true,
 }
 
 // redactionCensus6733 records URL-shaped fields that are KNOWN to render their
