@@ -89,7 +89,25 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 		} else {
 			peerResigned := peerGroup != nil && peerGroup.Weight <= 0
 			peerTransferOut := peerGroup != nil && peerGroup.State == StateSecondaryHold
-			if !peerResigned && !peerTransferOut {
+			// #15734: the peer is PRIMARY and holds a committed transfer
+			// AWAY from us (we are the committed secondary). That is the
+			// failback-stranding shape: the gate's plain failback request
+			// demoted the peer into secondary-hold, the dual-resign guard
+			// above cleared OUR hold for ~2s, but the peer then committed
+			// itself back to primary (transferCommitRolePinned) — after
+			// which our re-armed ManualFailover could never clear again,
+			// because the peer is neither resigned nor transferred out.
+			// The hold must not outlive the peer's committed ownership:
+			// once the peer is stably primary under the commit pin, our
+			// hold is spent — clear it (after the same 2s guard) so a
+			// later targeted `... node <local>` failback, which clears
+			// the hold itself, is a decision rather than a rescue, and
+			// so plain election never sees a phantom hold. Clearing here
+			// does NOT promote us: the peer-primary arms below keep us
+			// secondary while the peer holds primary.
+			peerCommittedPrimary := peerGroup != nil && peerGroup.State == StatePrimary &&
+				rg.transferCommitRolePinned && rg.transferCommitRole == StateSecondary
+			if !peerResigned && !peerTransferOut && !peerCommittedPrimary {
 				return electNoChange, ""
 			}
 			if time.Since(rg.ManualFailoverAt) < 2*time.Second {
