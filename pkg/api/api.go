@@ -219,19 +219,59 @@ func parseRefBaseUnit(ref string) (base string, unitNum int, ok bool) {
 	return base, n, true
 }
 
-// allInterfaceNames returns a deduplicated set of interface names from
-// both the interfaces config and zone declarations.
+// canonicalInterfaceName returns the canonical row identity for a
+// config/zone interface reference (#15726). A unit-0 reference
+// ("reth0.0", "ge-0/0/0.0") denotes the same logical interface as its
+// bare base ("reth0", "ge-0/0/0"): both resolve to the same kernel
+// device via ResolveKernelIfName. Collapsing unit 0 to the base keeps
+// one row per physical interface instead of a duplicate bare + ".0"
+// pair with split zone attribution (the bare row keyed the raw zone
+// string "reth0.0" and therefore got Zone=""). Non-zero units, bare
+// names, and declared dotted interface names are returned unchanged.
+// A declared dotted name outranks the parse via SplitInterfaceUnitRef.
+func canonicalInterfaceName(cfg *config.Config, ref string) string {
+	if cfg == nil {
+		return ref
+	}
+	s := cfg.SplitInterfaceUnitRef(ref)
+	if s.HasUnit {
+		if n, _, err := config.CanonicalLogicalUnit(s.UnitTok); err == nil && n == 0 {
+			return s.Base
+		}
+	}
+	return ref
+}
+
+// interfaceZoneMap builds the interface->zone map keyed by canonical
+// name (#15726) so a zone binding written as "reth0.0" attaches to the
+// canonical "reth0" row.
+func interfaceZoneMap(cfg *config.Config) map[string]string {
+	ifZone := make(map[string]string)
+	for zoneName, zone := range cfg.Security.Zones {
+		if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
+			continue
+		}
+		for _, ifName := range zone.Interfaces {
+			ifZone[canonicalInterfaceName(cfg, ifName)] = zoneName
+		}
+	}
+	return ifZone
+}
+
+// allInterfaceNames returns a deduplicated set of canonical interface
+// names from both the interfaces config and zone declarations
+// (#15726: unit-0 refs collapse to their base).
 func allInterfaceNames(cfg *config.Config) map[string]bool {
 	names := make(map[string]bool)
 	for ifName := range cfg.Interfaces.Interfaces {
-		names[ifName] = true
+		names[canonicalInterfaceName(cfg, ifName)] = true
 	}
 	for _, zone := range cfg.Security.Zones {
 		if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
 			continue
 		}
 		for _, ifName := range zone.Interfaces {
-			names[ifName] = true
+			names[canonicalInterfaceName(cfg, ifName)] = true
 		}
 	}
 	return names

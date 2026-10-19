@@ -32,15 +32,7 @@ func (s *Server) GetInterfaces(_ context.Context, _ *pb.GetInterfacesRequest) (*
 		return &pb.GetInterfacesResponse{}, nil
 	}
 
-	ifZone := make(map[string]string)
-	for zoneName, zone := range cfg.Security.Zones {
-		if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
-			continue
-		}
-		for _, ifName := range zone.Interfaces {
-			ifZone[ifName] = zoneName
-		}
-	}
+	ifZone := interfaceZoneMap(cfg)
 
 	resp := &pb.GetInterfacesResponse{}
 	for ifName := range allInterfaceNames(cfg) {
