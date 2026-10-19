@@ -2,6 +2,11 @@ package daemon
 
 import "time"
 
+// #15264: the latch is also reconciled against kernel truth by the low-rate
+// recheck in host_kernel_truth_15264.go — an out-of-band `nft flush ruleset`
+// that removes an established table marks the state stale (LastApplyFailed)
+// instead of leaving it Current until the next apply.
+
 // HostInboundAppliedState is the operator-facing APPLIED state of the
 // host-inbound nftables surface (`inet xpf_hostinbound`), as opposed to the
 // DESIRED state every existing projection renders from config.
