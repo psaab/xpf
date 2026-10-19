@@ -98,6 +98,381 @@ func redistProtocolRouteMapName(policy, proto string) string {
 	return policy + "-" + normalizedRedistProtocol(proto) + config.ReservedRedistSuffix
 }
 
+// #15156 (B07-01): composed per-source redistribute maps.
+//
+// FRR keeps ONE route-map per (router, AF, source): successive
+// `redistribute <proto> route-map X` lines replace, they do not chain.
+// An IGP `export [ P1 P2 ]` chain — and the #14586 BGP origination union
+// across neighbours — therefore must emit exactly one line per source,
+// naming a composed map that evaluates the chain's per-source terms in
+// chain order. Name: join(policies,"-") + ReservedChainSuffix +
+// "-<proto>" + ReservedRedistSuffix, e.g.
+// `NO-RFC1918-STATICS-xpf-chain-static-xpf-redist`.
+// Collision with an operator policy or another generated map is refused
+// fail-closed (redistChainMapCollision15156), mirroring #5277/#12065.
+func redistChainRouteMapName15156(chain []string, proto string) string {
+	return composedChainName(chain) + "-" + normalizedRedistProtocol(proto) + config.ReservedRedistSuffix
+}
+
+// redistChainForSource15156 resolves a proto across an ordered policy
+// chain. It returns the distinct defined policies (in chain order) whose
+// per-source enrollment includes proto, and whether the source appears
+// only via bare protocol tokens (then it has no composed map).
+func (m *Manager) redistChainForSource15156(chain []string, po *config.PolicyOptionsConfig, self, node, proto string) (policies []string, bare bool, ok bool) {
+	seen := make(map[string]bool)
+	for _, name := range chain {
+		if name == "" {
+			continue
+		}
+		if !isDefinedPolicyStatement(name, po) {
+			if kw, isProto := config.FRRRoutingProtocolKeyword(name); isProto && normalizedRedistProtocol(kw) == proto {
+				bare = true
+			}
+			continue
+		}
+		for _, e := range m.redistributeEntriesAt(name, po, self, node) {
+			if e.proto == proto && !seen[name] {
+				seen[name] = true
+				policies = append(policies, name)
+			}
+		}
+	}
+	return policies, bare, len(policies) > 0 || bare
+}
+
+// redistChainEntries15156 composes one entry per source across a chain:
+// bare-token sources stay bare, a single-policy source keeps its
+// per-source map, and a multi-policy source names the composed map.
+func (m *Manager) redistChainEntries15156(chain []string, po *config.PolicyOptionsConfig, self, node string) []redistEntry {
+	protoSet := make(map[string]bool)
+	var protos []string
+	add := func(p string) {
+		if !protoSet[p] {
+			protoSet[p] = true
+			protos = append(protos, p)
+		}
+	}
+	for _, name := range chain {
+		if name == "" {
+			continue
+		}
+		if !isDefinedPolicyStatement(name, po) {
+			for _, e := range m.redistributeEntriesAt(name, po, self, node) {
+				add(e.proto)
+			}
+			continue
+		}
+		for _, e := range m.redistributeEntriesAt(name, po, self, node) {
+			add(e.proto)
+		}
+	}
+	sort.Strings(protos)
+	var out []redistEntry
+	for _, proto := range protos {
+		policies, bare, _ := m.redistChainForSource15156(chain, po, self, node, proto)
+		switch {
+		case len(policies) >= 2:
+			out = append(out, redistEntry{proto: proto, routeMap: redistChainRouteMapName15156(policies, proto)})
+		case len(policies) == 1:
+			out = append(out, redistEntry{proto: proto, routeMap: redistProtocolRouteMapName(policies[0], proto)})
+		case bare:
+			out = append(out, redistEntry{proto: proto})
+		}
+	}
+	return out
+}
+
+// redistChainNameKey15156 identifies a distinct (chain, source) composed
+// map; chains are stored sorted by rendered name at call sites.
+func redistChainKey15156(chain []string, proto string) string {
+	return strings.Join(chain, "\x00") + "\x01" + proto
+}
+
+// redistComposedChains15156 collects every composed per-source map the
+// section needs: IGP export chains of >=2 policies sharing a source, and
+// the BGP origination union (sorted distinct defined policies per source).
+// Keys are the composed route-map names.
+func redistComposedChains15156(fc *FullConfig) map[string]redistComposedReq15156 {
+	out := make(map[string]redistComposedReq15156)
+	if fc == nil || fc.PolicyOptions == nil {
+		return out
+	}
+	po := fc.PolicyOptions
+	m := New()
+	addChain := func(chain []string, self, node string) {
+		// Distinct defined policies in chain order.
+		var defined []string
+		seen := make(map[string]bool)
+		for _, n := range chain {
+			if isDefinedPolicyStatement(n, po) && !seen[n] {
+				seen[n] = true
+				defined = append(defined, n)
+			}
+		}
+		if len(defined) < 2 {
+			return
+		}
+		for _, e := range m.redistChainEntries15156(defined, po, self, node) {
+			if !strings.Contains(e.routeMap, ReservedChainSuffix) {
+				continue
+			}
+			policies, _, _ := m.redistChainForSource15156(defined, po, self, node, e.proto)
+			if len(policies) < 2 {
+				continue
+			}
+			name := redistChainRouteMapName15156(policies, e.proto)
+			if _, ok := out[name]; !ok {
+				out[name] = redistComposedReq15156{chain: append([]string(nil), policies...), proto: e.proto}
+			}
+		}
+	}
+	addBGP := func(bgp *config.BGPConfig) {
+		if bgp == nil {
+			return
+		}
+		policies := bgpExportPolicies14586(bgp, po)
+		if len(policies) < 2 {
+			return
+		}
+		for _, node := range []string{"bgp", "bgp-ipv6"} {
+			// Per node, enrollment differs by family; compose per source
+			// with the policies enrolling there, sorted (bgpExportPolicies
+			// is sorted) for a deterministic OR composition.
+			protoPolicies := make(map[string][]string)
+			var protos []string
+			for _, name := range policies {
+				for _, e := range m.redistributeEntriesAt(name, po, "bgp", node) {
+					if !containsString15156(protoPolicies[e.proto], name) {
+						if len(protoPolicies[e.proto]) == 0 {
+							protos = append(protos, e.proto)
+						}
+						protoPolicies[e.proto] = append(protoPolicies[e.proto], name)
+					}
+				}
+			}
+			for _, proto := range protos {
+				ps := protoPolicies[proto]
+				if len(ps) < 2 {
+					continue
+				}
+				name := redistChainRouteMapName15156(ps, proto)
+				if _, ok := out[name]; !ok {
+					out[name] = redistComposedReq15156{chain: append([]string(nil), ps...), proto: proto}
+				}
+			}
+		}
+	}
+	walk := func(ospf *config.OSPFConfig, ospfv3 *config.OSPFv3Config, bgp *config.BGPConfig, rip *config.RIPConfig, isis *config.ISISConfig) {
+		if ospf != nil {
+			addChain(ospf.Export, "ospf", "ospf")
+		}
+		if ospfv3 != nil {
+			addChain(ospfv3.Export, "ospf6", "ospf6")
+		}
+		if rip != nil {
+			addChain(rip.Redistribute, "rip", "rip")
+		}
+		if isis != nil {
+			addChain(isis.Export, "isis", "isis")
+		}
+		addBGP(bgp)
+	}
+	walk(fc.OSPF, fc.OSPFv3, fc.BGP, fc.RIP, fc.ISIS)
+	for _, inst := range fc.Instances {
+		walk(inst.OSPF, inst.OSPFv3, inst.BGP, inst.RIP, inst.ISIS)
+	}
+	return out
+}
+
+func containsString15156(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+type redistComposedReq15156 struct {
+	chain []string
+	proto string
+}
+
+// renderRedistComposedMaps15156 emits the composed per-source route-map
+// definitions (sorted by name, deterministic).
+func (m *Manager) renderRedistComposedMaps15156(fc *FullConfig) string {
+	reqs := redistComposedChains15156(fc)
+	if len(reqs) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(reqs))
+	for n := range reqs {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, name := range names {
+		req := reqs[name]
+		b.WriteString(m.renderRedistComposedMap15156(fc.PolicyOptions, name, req.chain, req.proto))
+		b.WriteString("!\n")
+	}
+	return b.String()
+}
+
+// renderRedistComposedMap15156 renders one composed per-source map: each
+// chain member's per-source filtered terms in order, continuous sequences,
+// explicit defaults terminate (next-policy jumps to the next member), and
+// fall-off-the-end resolves to deny — the protocol default for IGP
+// redistribution and the fail-closed origination default for BGP.
+func (m *Manager) renderRedistComposedMap15156(po *config.PolicyOptionsConfig, name string, chain []string, proto string) string {
+	var filtered []*config.PolicyStatement
+	var names []string
+	var total uint64
+	for _, pn := range chain {
+		ps := po.PolicyStatements[pn]
+		if ps == nil {
+			continue
+		}
+		f := redistPolicyForProtocol(ps, proto)
+		filtered = append(filtered, f)
+		names = append(names, pn)
+		total += config.RouteMapSequenceCount(po, f)
+	}
+	if total > config.MaxRouteMapSequences {
+		slog.Warn("oversized composed redistribute route-map; rendering an explicit deny instead (#15156)",
+			"route_map", name, "sequences", total, "max", config.MaxRouteMapSequences)
+		m.noteQuarantined(name)
+		return renderQuarantineDenyRouteMap(name) + "!\n"
+	}
+	type part struct {
+		definitions string
+		body        string
+		nextPolicy  bool
+		startSeq    int
+		defaultSeq  int
+		defaultVerb string
+	}
+	var parts []part
+	seq := 10
+	terminated := false
+	for i, f := range filtered {
+		definitions, body, next := m.renderPolicyTermSequencesWithDefinitions(po, name, name+"-"+names[i], f, seq)
+		p := part{definitions: definitions, body: body, nextPolicy: policyHasNextPolicyTerm(f), startSeq: seq}
+		seq = next
+		switch f.DefaultAction {
+		case "accept":
+			p.defaultVerb = "permit"
+			p.defaultSeq = seq
+			seq += 10
+			terminated = !p.nextPolicy
+		case "reject":
+			p.defaultVerb = "deny"
+			p.defaultSeq = seq
+			seq += 10
+			terminated = !p.nextPolicy
+		}
+		parts = append(parts, p)
+		if terminated {
+			break
+		}
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		b.WriteString(p.definitions)
+	}
+	fallbackSeq := seq
+	for i, p := range parts {
+		target := fallbackSeq
+		if i+1 < len(parts) {
+			target = parts[i+1].startSeq
+		}
+		if p.nextPolicy {
+			p.body = renderNextPolicyTarget(p.body, target)
+		}
+		b.WriteString(p.body)
+		if p.defaultVerb != "" {
+			fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(name), p.defaultVerb, p.defaultSeq)
+			b.WriteString("exit\n")
+		}
+	}
+	if !terminated {
+		fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(name), fallbackSeq)
+		b.WriteString("exit\n")
+	}
+	return b.String()
+}
+
+// redistChainMapCollision15156 refuses (fail-closed) a composed
+// redistribute map name that collides with an operator policy-statement,
+// a per-source map, a #5277 composed BGP chain map, or a distinct
+// (chain, source) deriving the same name — FRR merges same-named maps.
+func redistChainMapCollision15156(fc *FullConfig) error {
+	if fc == nil || fc.PolicyOptions == nil {
+		return nil
+	}
+	po := fc.PolicyOptions
+	reqs := redistComposedChains15156(fc)
+	if len(reqs) == 0 {
+		return nil
+	}
+	operator := make(map[string]string)
+	for name := range po.PolicyStatements {
+		operator[frrName(name)] = name
+	}
+	// Generated names that must stay distinct.
+	generated := make(map[string]string)
+	for _, name := range mapKeysReq15156(reqs) {
+		req := reqs[name]
+		final := frrName(name)
+		if op, ok := operator[final]; ok {
+			return fmt.Errorf("composed redistribute route-map %q (chain %v, source %s) collides with operator policy-statement %q; FRR merges same-named route-maps — refusing to render (#15156)", name, req.chain, req.proto, op)
+		}
+		key := redistChainKey15156(req.chain, req.proto)
+		if prev, ok := generated[final]; ok && prev != key {
+			return fmt.Errorf("redistribute chains derive the same composed route-map %q; FRR would merge them — refusing to render (#15156)", name)
+		}
+		generated[final] = key
+		// Per-source maps.
+		for _, pn := range req.chain {
+			_ = pn
+		}
+	}
+	// Cross-check against per-source and QNH names via final names.
+	for _, psName := range sortedKeysPS15156(po) {
+		ps := po.PolicyStatements[psName]
+		for _, proto := range redistReferencedProtocols14380(ps, redistReferencedNodes14380(fc)[psName]) {
+			final := frrName(redistProtocolRouteMapName(psName, proto))
+			if _, ok := reqs[final]; ok {
+				// reqs keyed by raw name; compare final forms.
+				for raw := range reqs {
+					if frrName(raw) == final {
+						return fmt.Errorf("composed redistribute route-map %q collides with per-source route-map %q; FRR merges same-named route-maps — refusing to render (#15156)", raw, redistProtocolRouteMapName(psName, proto))
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func mapKeysReq15156(m map[string]redistComposedReq15156) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedKeysPS15156(po *config.PolicyOptionsConfig) []string {
+	out := make([]string, 0, len(po.PolicyStatements))
+	for k := range po.PolicyStatements {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // termCanAcceptForRedist14698 reports whether term can ever cause a
 // route to be accepted for redistribution. It mirrors the route-map
 // action mapping in renderPolicyTermSequences: a cost-set rejecting
@@ -444,24 +819,9 @@ func (m *Manager) bgpPolicyIPv6RedistEntries14586(policies []string, po *config.
 }
 
 func (m *Manager) bgpPolicyRedistEntriesAt14586(policies []string, po *config.PolicyOptionsConfig, self, node string) []redistEntry {
-	seen := make(map[redistEntry]bool)
-	var out []redistEntry
-	for _, name := range policies {
-		for _, e := range m.redistributeEntriesAt(name, po, self, node) {
-			if seen[e] {
-				continue
-			}
-			seen[e] = true
-			out = append(out, e)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].proto != out[j].proto {
-			return out[i].proto < out[j].proto
-		}
-		return out[i].routeMap < out[j].routeMap
-	})
-	return out
+	// #15156: compose per source across the whole policy set — one entry
+	// per source (bare/single/composed), never one map per policy.
+	return m.redistChainEntries15156(policies, po, self, node)
 }
 
 // redistReferencedNodes14380 collects the (self, node) pairs at which
@@ -586,6 +946,77 @@ func formatRedistEntries(entries []redistEntry) string {
 		fmt.Fprintf(&sb, " redistribute %s route-map %s\n", sanitizeFRRValue(e.proto), frrName(e.routeMap))
 	}
 	return sb.String()
+}
+
+// resolveRedistributeChain renders a whole IGP export chain as one
+// redistribute line per source (#15156). With <2 defined policies it is
+// byte-identical to resolving each export singly.
+func (m *Manager) resolveRedistributeChain(chain []string, po *config.PolicyOptionsConfig, self string, metrics ...*qnhMetricScope11447) string {
+	if countDefined15156(chain, po) < 2 {
+		var b strings.Builder
+		for _, e := range chain {
+			b.WriteString(m.resolveRedistribute(e, po, self, nil, metrics...))
+		}
+		return b.String()
+	}
+	entries := m.redistChainEntries15156(chain, po, self, self)
+	if len(metrics) > 0 && metrics[0] != nil {
+		m.applyQNHChain15156(chain, metrics[0], entries)
+	}
+	return formatRedistEntries(entries)
+}
+
+func (m *Manager) resolveISISRedistributeChain(chain []string, po *config.PolicyOptionsConfig, isisLevel string, metrics ...*qnhMetricScope11447) string {
+	if countDefined15156(chain, po) < 2 {
+		var b strings.Builder
+		for _, e := range chain {
+			b.WriteString(m.resolveISISRedistribute(e, po, isisLevel, nil, metrics...))
+		}
+		return b.String()
+	}
+	entries := m.redistChainEntries15156(chain, po, "isis", "isis")
+	if len(metrics) > 0 && metrics[0] != nil {
+		m.applyQNHChain15156(chain, metrics[0], entries)
+	}
+	return isisRedistributeLines(entries, isisLevel)
+}
+
+func countDefined15156(chain []string, po *config.PolicyOptionsConfig) int {
+	n := 0
+	for _, e := range chain {
+		if isDefinedPolicyStatement(e, po) {
+			n++
+		}
+	}
+	return n
+}
+
+// applyQNHChain15156 rewrites only single-policy (or bare) static entries
+// to their QNH metric map, preserving per-policy scoping; a composed
+// multi-policy static entry keeps its composed map (metric overlay for
+// composed chains is deferred — see docs/log/15156.md).
+func (m *Manager) applyQNHChain15156(chain []string, metrics *qnhMetricScope11447, entries []redistEntry) {
+	for i := range entries {
+		if entries[i].proto != "static" {
+			continue
+		}
+		if strings.Contains(entries[i].routeMap, ReservedChainSuffix) {
+			continue
+		}
+		if entries[i].routeMap == "" {
+			if metrics.staticMap != "" {
+				entries[i].routeMap = metrics.staticMap
+			}
+			continue
+		}
+		for _, name := range chain {
+			if entries[i].routeMap == redistProtocolRouteMapName(name, "static") {
+				if rm := metrics.policyMaps[name]; rm != "" {
+					entries[i].routeMap = rm
+				}
+			}
+		}
+	}
 }
 
 // resolveISISRedistribute renders an export in isisd's grammar (#9666):

@@ -285,9 +285,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		if ecmpMaxPaths > 1 {
 			fmt.Fprintf(&b, " maximum-paths %d\n", ecmpMaxPaths)
 		}
-		for _, export := range ospf.Export {
-			b.WriteString(m.resolveRedistribute(export, policyOptions, "ospf", bgpAcceptDefault, qnhMetricScopeForDaemon11447(qnhMetrics, "ospf")))
-		}
+		b.WriteString(m.resolveRedistributeChain(ospf.Export, policyOptions, "ospf", qnhMetricScopeForDaemon11447(qnhMetrics, "ospf")))
 		b.WriteString("exit\n!\n")
 		// OSPF interface settings + per-interface area activation. The
 		// "interface <name>" block is emitted UNCONDITIONALLY for each unique
@@ -508,9 +506,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				fmt.Fprintf(&b, " area %s %s\n", area.ID, area.AreaType)
 			}
 		}
-		for _, export := range ospfv3.Export {
-			b.WriteString(m.resolveRedistribute(export, policyOptions, "ospf6", bgpAcceptDefault, qnhMetricScopeForDaemon11447(qnhMetrics, "ospf6")))
-		}
+		b.WriteString(m.resolveRedistributeChain(ospfv3.Export, policyOptions, "ospf6", qnhMetricScopeForDaemon11447(qnhMetrics, "ospf6")))
 		b.WriteString("exit\n!\n")
 		// OSPFv3 interface settings + per-interface area activation. FRR
 		// stable/10.6 moved area activation from the removed router-level
@@ -1227,9 +1223,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			for _, iface := range rip.Passive {
 				fmt.Fprintf(&b, " passive-interface %s\n", iface)
 			}
-			for _, r := range rip.Redistribute {
-				b.WriteString(m.resolveRedistribute(r, policyOptions, "rip", bgpAcceptDefault, qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
-			}
+			b.WriteString(m.resolveRedistributeChain(rip.Redistribute, policyOptions, "rip", qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
 			b.WriteString("exit\n!\n")
 			// RIP per-interface authentication
 			if rip.AuthKey != "" {
@@ -1358,10 +1352,8 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				// level-2 and every unrecognized value: the narrow default.
 				b.WriteString(" is-type level-2-only\n")
 			}
-			for _, export := range isis.Export {
-				// #9666: isisd's grammar, not the OSPF-shaped line.
-				b.WriteString(m.resolveISISRedistribute(export, policyOptions, isis.Level, bgpAcceptDefault, qnhMetricScopeForDaemon11447(qnhMetrics, "isis")))
-			}
+			// #9666: isisd's grammar, not the OSPF-shaped line. #15156: chain-composed.
+			b.WriteString(m.resolveISISRedistributeChain(isis.Export, policyOptions, isis.Level, qnhMetricScopeForDaemon11447(qnhMetrics, "isis")))
 			if isis.WideMetricsOnly {
 				b.WriteString(" metric-style wide\n")
 			}

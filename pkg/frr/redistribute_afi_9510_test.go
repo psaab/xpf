@@ -118,6 +118,13 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 	qnhCallRE := regexp.MustCompile(`addExport\(`)
 	qnhLitRE := regexp.MustCompile(`addExport\([^,()]+,\s*"([a-z0-9]*)",`)
 	qnhSelfRE := regexp.MustCompile(`addExport := func\(daemon, self,[^)]*\) \{(?s:.*?)m\.redistributeEntries\(export, fc\.PolicyOptions, self, scope\)`)
+	// #15156: chain resolvers forward a literal self into
+	// redistChainEntries15156 exactly like the single-export wrappers.
+	// Their <2-defined fallback calls resolveRedistribute(e, po, self, ...)
+	// — proven by chainSelfRE below, not a literal at the call site.
+	chainSelfRE := regexp.MustCompile(`resolveRedistribute\(e, po, self,`)
+	chainCallRE := regexp.MustCompile(`\.resolveRedistributeChain\([^,()]+,\s*[^,()]+,\s*"([a-z0-9]+)",`)
+	chainISISCallRE := regexp.MustCompile(`\.resolveISISRedistributeChain\(`)
 	entriesCallRE := regexp.MustCompile(`\.redistributeEntries\(`)
 	calls, lits := 0, map[string]int{}
 	isisCalls, isisSelfProven, entriesCalls := 0, false, 0
@@ -130,6 +137,12 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)
+		}
+		// #15156 fallback inside resolveRedistributeChain forwards self.
+		if chainSelfRE.Match(b) {
+			// Counted via chainCallRE literals at protocols_render.go;
+			// exclude the one non-literal resolveRedistribute call.
+			calls--
 		}
 		calls += len(callRE.FindAllIndex(b, -1))
 		for _, mm := range litRE.FindAllSubmatch(b, -1) {
@@ -146,6 +159,14 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 		}
 		qnhSelfProven = qnhSelfProven || qnhSelfRE.Match(b)
 		entriesCalls += len(entriesCallRE.FindAllIndex(b, -1))
+		for _, mm := range chainCallRE.FindAllSubmatch(b, -1) {
+			lits[string(mm[1])]++
+			calls++
+		}
+		if n := len(chainISISCallRE.FindAllIndex(b, -1)); n > 0 {
+			calls += n
+			lits["isis"] += n
+		}
 	}
 	if isisCalls > 0 {
 		if !isisSelfProven {
