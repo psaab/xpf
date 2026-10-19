@@ -48,6 +48,8 @@ import (
 //	private-key               WireGuard local static private key
 //	preshared-key             WireGuard per-peer PSK
 //	community (under snmp)     SNMP v1/v2c community string (the identity token)
+//	secret (under radius-server | tacplus-server | accounting)
+//	                          RADIUS/TACACS+ shared secret (#15019)
 
 // SecretDataPlaceholder is the mask emitted in place of a secret leaf value on
 // the raw-AST render/display paths. It mirrors the Junos SECRET-DATA idiom and
@@ -603,8 +605,10 @@ func secretIndices(fp []string) []int {
 				}
 			}
 		case "secret":
-			// `secret` is generic; redact it only for named API-key identities.
-			if isAPIAuthNamedKeySecretPath(fp[:i]) {
+			// `secret` is generic; redact it only for named API-key identities
+			// and the AAA server stanzas (#15019), whose shared secret is
+			// valid on the external RADIUS/TACACS+ server.
+			if isAPIAuthNamedKeySecretPath(fp[:i]) || isAAASecretPath(fp[:i]) {
 				for j := i + 1; j < len(fp); j++ {
 					out = append(out, j)
 				}

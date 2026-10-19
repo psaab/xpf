@@ -432,6 +432,18 @@ func isAPIAuthNamedKeySecretPath(path []string) bool {
 	return false
 }
 
+// isAAASecretPath qualifies the generic `secret` keyword for the AAA server
+// stanzas whose shared secret is valid on an external RADIUS/TACACS+ server
+// (#15019): `system radius-server <addr> secret`, `system tacplus-server
+// <addr> secret`, and `system accounting ... server <addr> secret`. The
+// ancestor token anywhere before the `secret` keyword is the gate, mirroring
+// the ancestry (not exact-position) doctrine of the other gated keywords, so
+// the flat-set and hierarchical spellings mask identically. `accounting`
+// alone suffices: it is only an AAA container under `system`.
+func isAAASecretPath(path []string) bool {
+	return containsAnyOf(path, "radius-server", "tacplus-server", "accounting")
+}
+
 // isSecretLeaf reports whether the leaf named by keys carries a credential,
 // given the path prefix it was found under.
 func isSecretLeaf(prefix string, keys []string) bool {
@@ -442,7 +454,7 @@ func isSecretLeaf(prefix string, keys []string) bool {
 	if secretLeafKeywords[kw] {
 		return true
 	}
-	if kw == "secret" && isAPIAuthNamedKeySecretPath(strings.Fields(prefix)) {
+	if kw == "secret" && (isAPIAuthNamedKeySecretPath(strings.Fields(prefix)) || isAAASecretPath(strings.Fields(prefix))) {
 		return true
 	}
 	roots, dualUse := secretLeafKeywordsByRoot[kw]
