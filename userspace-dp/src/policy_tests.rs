@@ -6053,6 +6053,354 @@ fn junos_host_flowless_fragment_255_wildcards_skipped_port_bearing_deny_10680() 
     }
 }
 
+// ── #14956: protocol-only DENY/REJECT vs fragment-no-L4 sentinel ─────
+//
+// A protocol-only term (no port, no ICMP constraint, e.g. `protocol udp`)
+// matches on the known protocol alone, so for a KNOWN protocol the
+// flowless path already decides it via `matches()`. For the
+// fragment-no-L4 sentinel (255) the protocol is unknown: `matches()`
+// misses (no by_protocol[255]) AND `has_l4_constrained_term` missed
+// (empty ranges are not L4-constrained), so a protocol-only DENY was
+// silently skipped and the fragment fell through to a later permit /
+// default-permit / host deliver fall-through — fail open (D24-02 leg 1).
+// RED ON REVERT: without the sentinel protocol-term arm in
+// `try_match_rule`, the native-255 cells below return Permit.
+fn frag_deny_proto_only_snapshot(action: &str) -> PolicyRuleSnapshot {
+    PolicyRuleSnapshot {
+        policy_id: 7,
+        name: "deny-udp-proto-only".to_string(),
+        from_zone: "trust".to_string(),
+        to_zone: "untrust".to_string(),
+        source_addresses: vec!["10.0.0.0/8".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["junos-udp".to_string()],
+        application_terms: vec![PolicyApplicationSnapshot {
+            name: "junos-udp".to_string(),
+            protocol: "udp".to_string(),
+            source_port: String::new(),
+            destination_port: String::new(),
+            icmp_type: None,
+            icmp_code: None,
+            inactivity_timeout: None,
+        }],
+        action: action.to_string(),
+        ..Default::default()
+    }
+}
+
+fn junos_host_frag_deny_proto_only_snapshot(action: &str) -> PolicyRuleSnapshot {
+    PolicyRuleSnapshot {
+        policy_id: 7,
+        name: "deny-udp-proto-only".to_string(),
+        from_zone: "trust".to_string(),
+        to_zone: JUNOS_HOST_ZONE_NAME.to_string(),
+        source_addresses: vec!["10.0.0.0/8".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["junos-udp".to_string()],
+        application_terms: vec![PolicyApplicationSnapshot {
+            name: "junos-udp".to_string(),
+            protocol: "udp".to_string(),
+            source_port: String::new(),
+            destination_port: String::new(),
+            icmp_type: None,
+            icmp_code: None,
+            inactivity_timeout: None,
+        }],
+        action: action.to_string(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn flowless_fragment_255_fails_closed_against_protocol_only_deny_14956() {
+    let v4 = |a, b, c, d| std::net::IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d));
+    let denied_src = v4(10, 1, 2, 3);
+    let other_src = v4(192, 168, 1, 1);
+    let dst = v4(203, 0, 113, 5);
+    let sentinel = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+
+    for action in ["deny", "reject"] {
+        let expected = if action == "deny" {
+            PolicyAction::Deny
+        } else {
+            PolicyAction::Reject
+        };
+        let state = parse_policy_state(
+            "permit",
+            &[
+                frag_deny_proto_only_snapshot(action),
+                frag_permit_any_snapshot(),
+            ],
+            &test_zone_name_to_id(),
+        );
+        // Sentinel + overlapping L3 -> fail closed, attributed to the deny.
+        let frag = evaluate_policy_result_l3_aware(
+            &state,
+            TEST_TRUST_ZONE_ID,
+            TEST_UNTRUST_ZONE_ID,
+            denied_src,
+            dst,
+            sentinel,
+            0,
+            0,
+            None,
+            64,
+            false,
+        );
+        assert_eq!(
+            (frag.action, frag.policy_id),
+            (expected, 7),
+            "#14956 transit {action}: sentinel fragment must fail closed",
+        );
+        // Sentinel + non-overlapping L3 -> permit stands (no over-drop).
+        assert_eq!(
+            evaluate_policy_result_l3_aware(
+                &state,
+                TEST_TRUST_ZONE_ID,
+                TEST_UNTRUST_ZONE_ID,
+                other_src,
+                dst,
+                sentinel,
+                0,
+                0,
+                None,
+                64,
+                false,
+            )
+            .action,
+            PolicyAction::Permit,
+            "#14956 transit {action}: non-overlapping sentinel must permit",
+        );
+        // Known UDP (recovered protocol) still matches the deny directly.
+        assert_eq!(
+            evaluate_policy_result_l3_aware(
+                &state,
+                TEST_TRUST_ZONE_ID,
+                TEST_UNTRUST_ZONE_ID,
+                denied_src,
+                dst,
+                PROTO_UDP,
+                0,
+                0,
+                None,
+                64,
+                false,
+            )
+            .action,
+            expected,
+            "#14956 transit {action}: known UDP must hit protocol-only deny",
+        );
+        // Known TCP is a different protocol -> permit (no cross-proto deny).
+        assert_eq!(
+            evaluate_policy_result_l3_aware(
+                &state,
+                TEST_TRUST_ZONE_ID,
+                TEST_UNTRUST_ZONE_ID,
+                denied_src,
+                dst,
+                PROTO_TCP,
+                0,
+                0,
+                None,
+                64,
+                false,
+            )
+            .action,
+            PolicyAction::Permit,
+            "#14956 transit {action}: known TCP must not hit UDP deny",
+        );
+    }
+}
+
+#[test]
+fn junos_host_flowless_fragment_255_fails_closed_against_protocol_only_deny_14956() {
+    let v4 = |a, b, c, d| std::net::IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d));
+    let denied_src = v4(10, 1, 2, 3);
+    let other_src = v4(192, 168, 1, 1);
+    let dst = v4(10, 0, 1, 1);
+    let sentinel = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+
+    for action in ["deny", "reject"] {
+        let expected = if action == "deny" {
+            PolicyAction::Deny
+        } else {
+            PolicyAction::Reject
+        };
+        let state = parse_policy_state(
+            "permit",
+            &[
+                junos_host_frag_deny_proto_only_snapshot(action),
+                junos_host_frag_permit_any_snapshot(),
+            ],
+            &test_zone_name_to_id(),
+        );
+        let frag = evaluate_junos_host_policy_l3_aware(
+            &state,
+            TEST_TRUST_ZONE_ID,
+            denied_src,
+            dst,
+            sentinel,
+            0,
+            0,
+            None,
+            64,
+            false,
+        )
+        .expect("#14956 host: sentinel fragment must fail closed, not deliver");
+        assert_eq!(
+            (frag.action, frag.policy_id),
+            (expected, 7),
+            "#14956 host {action}: sentinel fragment must fail closed",
+        );
+        // Non-overlapping L3 -> permit stands.
+        assert_eq!(
+            evaluate_junos_host_policy_l3_aware(
+                &state,
+                TEST_TRUST_ZONE_ID,
+                other_src,
+                dst,
+                sentinel,
+                0,
+                0,
+                None,
+                64,
+                false,
+            )
+            .map(|r| r.action),
+            Some(PolicyAction::Permit),
+            "#14956 host {action}: non-overlapping sentinel must permit",
+        );
+        // Known UDP matches directly; known TCP does not.
+        assert_eq!(
+            evaluate_junos_host_policy_l3_aware(
+                &state,
+                TEST_TRUST_ZONE_ID,
+                denied_src,
+                dst,
+                PROTO_UDP,
+                0,
+                0,
+                None,
+                64,
+                false,
+            )
+            .map(|r| (r.action, r.policy_id)),
+            Some((expected, 7)),
+            "#14956 host {action}: known UDP must hit protocol-only deny",
+        );
+        assert_eq!(
+            evaluate_junos_host_policy_l3_aware(
+                &state,
+                TEST_TRUST_ZONE_ID,
+                denied_src,
+                dst,
+                PROTO_TCP,
+                0,
+                0,
+                None,
+                64,
+                false,
+            )
+            .map(|r| r.action),
+            Some(PolicyAction::Permit),
+            "#14956 host {action}: known TCP must not hit UDP deny",
+        );
+    }
+    // Lone protocol-only host deny: sentinel must NOT take the deliver
+    // fall-through (None).
+    let state = parse_policy_state(
+        "permit",
+        &[junos_host_frag_deny_proto_only_snapshot("deny")],
+        &test_zone_name_to_id(),
+    );
+    let frag = evaluate_junos_host_policy_l3_aware(
+        &state,
+        TEST_TRUST_ZONE_ID,
+        denied_src,
+        dst,
+        sentinel,
+        0,
+        0,
+        None,
+        64,
+        false,
+    )
+    .expect("#14956 host lone deny: sentinel must fail closed, not deliver");
+    assert_eq!((frag.action, frag.policy_id), (PolicyAction::Deny, 7));
+    assert!(
+        evaluate_junos_host_policy_l3_aware(
+            &state,
+            TEST_TRUST_ZONE_ID,
+            other_src,
+            dst,
+            sentinel,
+            0,
+            0,
+            None,
+            64,
+            false,
+        )
+        .is_none(),
+        "#14956 host lone deny: non-overlapping sentinel keeps lifeline",
+    );
+}
+
+#[test]
+fn flowless_fragment_255_global_host_scope_protocol_only_deny_14956() {
+    // Leg-1 global leg: a `junos-global` rule scoped `match to-zone
+    // junos-host` carrying a protocol-only deny. The sentinel fragment
+    // must fail closed through the global tier of the host walker.
+    // (Multi-zone host scopes are leg 2, refuted/excluded — not tested.)
+    let v4 = |a, b, c, d| std::net::IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d));
+    let mut deny = global_zone_rule("g-host-udp-deny", "", JUNOS_HOST_ZONE_NAME, "deny");
+    deny.policy_id = 7;
+    deny.source_addresses = vec!["10.0.0.0/8".to_string()];
+    deny.applications = vec!["junos-udp".to_string()];
+    deny.application_terms = vec![PolicyApplicationSnapshot {
+        name: "junos-udp".to_string(),
+        protocol: "udp".to_string(),
+        source_port: String::new(),
+        destination_port: String::new(),
+        icmp_type: None,
+        icmp_code: None,
+        inactivity_timeout: None,
+    }];
+    let mut permit = global_zone_rule("g-host-permit", "", JUNOS_HOST_ZONE_NAME, "permit");
+    permit.policy_id = 8;
+    let state = parse_policy_state("permit", &[deny, permit], &test_zone_name_to_id());
+    let frag = evaluate_junos_host_policy_l3_aware(
+        &state,
+        TEST_TRUST_ZONE_ID,
+        v4(10, 1, 2, 3),
+        v4(10, 0, 1, 1),
+        crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+        0,
+        0,
+        None,
+        64,
+        false,
+    )
+    .expect("#14956 global-host: sentinel must fail closed, not deliver");
+    assert_eq!((frag.action, frag.policy_id), (PolicyAction::Deny, 7));
+    assert_eq!(
+        evaluate_junos_host_policy_l3_aware(
+            &state,
+            TEST_TRUST_ZONE_ID,
+            v4(192, 168, 1, 1),
+            v4(10, 0, 1, 1),
+            crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+            0,
+            0,
+            None,
+            64,
+            false,
+        )
+        .map(|r| r.action),
+        Some(PolicyAction::Permit),
+        "#14956 global-host: non-overlapping sentinel must permit",
+    );
+}
+
 // ── #4569: fragment-association fail-closed (transit zone policy) ─────
 //
 // A trust->untrust policy that DENIES a port-bearing app (junos-https =
