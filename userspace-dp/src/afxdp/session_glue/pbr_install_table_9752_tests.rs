@@ -2972,11 +2972,16 @@ fn colliding_ordinary_close_retires_a_keeps_b10512() {
         "a handled stale close must emit its scoped HA + RT_FLOW pair"
     );
     let expected_rev = reverse_session_key(&fx.key_a, fx.decision.nat);
+    // #15784: the stale-close producer must capture the companion
+    // incarnation BEFORE removing the reverse shared entry. This fixture
+    // publishes no shared reverse row, so the capture is 0 (uncaptured);
+    // the worker then preserves any live companion rather than treating
+    // 0 as a wildcard.
     let q = peer_queue.lock().expect("lock");
     assert!(
         q.iter().any(|c| matches!(c,
-            WorkerCommand::DeleteSyncedConditional { key, expected_id, companion, .. }
-            if key == &fx.key_a && *expected_id == fx.id_a && companion.as_ref() == Some(&expected_rev))),
+            WorkerCommand::DeleteSyncedConditional { key, expected_id, companion, companion_expected_id }
+            if key == &fx.key_a && *expected_id == fx.id_a && companion.as_ref() == Some(&expected_rev) && *companion_expected_id == 0)),
         "stale close must replicate conditionally with the derived companion, got {q:?}"
     );
     drop(q);

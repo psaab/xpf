@@ -13956,6 +13956,140 @@ fn conditional_delete_absent_companion_is_noop_14666() {
     assert_eq!(sessions.session_id_for(&companion), 0);
 }
 
+// #15784 RED: a scoped delete (expected_id != 0) carrying companion_expected_id
+// == 0 must NOT tear down a live companion — 0 is uncaptured, not a wildcard.
+// Pre-fix the consumer's `|| companion_expected_id == 0` deletes any live
+// companion after a forward match, so a replacement reverse installed during
+// queue delay dies with the stale forward.
+#[test]
+fn conditional_delete_zero_companion_id_preserves_live_companion_15784() {
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK
+    ));
+    let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+    let mut comp_meta = test_metadata();
+    comp_meta.is_reverse = true;
+    assert!(sessions.install_with_protocol_with_origin(
+        companion.clone(),
+        test_decision(),
+        comp_meta,
+        SessionOrigin::ReverseFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK
+    ));
+    let fwd_id = sessions.session_id_for(&key);
+    let live_comp_id = sessions.session_id_for(&companion);
+    assert_ne!(fwd_id, 0);
+    assert_ne!(live_comp_id, 0);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    commands
+        .lock()
+        .unwrap()
+        .push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional {
+            key: key.clone(),
+            expected_id: fwd_id,
+            companion: Some(companion.clone()),
+            companion_expected_id: 0,
+        });
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    apply_worker_commands(
+        &commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
+    assert_eq!(
+        sessions.session_id_for(&key),
+        0,
+        "matched forward must be removed"
+    );
+    assert_eq!(
+        sessions.session_id_for(&companion),
+        live_comp_id,
+        "scoped delete with uncaptured companion id must preserve a live companion"
+    );
+}
+
+// #15784: an expected_id == 0 (unscoped/legacy) conditional delete keeps the
+// legacy unconditional companion teardown — only scoped deletes lose the
+// wildcard.
+#[test]
+fn unscoped_conditional_delete_still_removes_companion_15784() {
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK
+    ));
+    let companion = crate::session::reverse_session_key(&key, NatDecision::default());
+    let mut comp_meta = test_metadata();
+    comp_meta.is_reverse = true;
+    assert!(sessions.install_with_protocol_with_origin(
+        companion.clone(),
+        test_decision(),
+        comp_meta,
+        SessionOrigin::ReverseFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK
+    ));
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    commands
+        .lock()
+        .unwrap()
+        .push_back(crate::afxdp::WorkerCommand::DeleteSyncedConditional {
+            key: key.clone(),
+            expected_id: 0,
+            companion: Some(companion.clone()),
+            companion_expected_id: 0,
+        });
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    apply_worker_commands(
+        &commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
+    assert_eq!(sessions.session_id_for(&key), 0);
+    assert_eq!(
+        sessions.session_id_for(&companion),
+        0,
+        "unscoped legacy delete must still remove its companion"
+    );
+}
+
 // #5152 FAIL-ON-REVERT: activating one redundancy group must NOT reset the
 // standby bounded-leak HOLD clock (`first_held_ns`, #2120 §6.4) of an UNRELATED
 // split-RG session this node does not own. `handle_refresh_owner_rgs` walks
@@ -18992,13 +19126,16 @@ fn scoped_worker_delete_matched_removes_both_halves_10512() {
         TCP_FLAG_ACK,
     ));
     let forward_id = sessions.session_id_for(&key);
+    // #15784: a scoped delete names its captured companion incarnation;
+    // companion_expected_id == 0 would now preserve the live companion.
+    let companion_id = sessions.session_id_for(&companion);
     let commands = Arc::new(Mutex::new(VecDeque::new()));
     commands.lock().expect("commands lock").push_back(
         crate::afxdp::WorkerCommand::DeleteSyncedConditional {
             key: key.clone(),
             expected_id: forward_id,
             companion: Some(companion.clone()),
-            companion_expected_id: 0,
+            companion_expected_id: companion_id,
         },
     );
     let forwarding = test_forwarding_state();

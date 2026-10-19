@@ -10723,6 +10723,128 @@ fn scoped_peer_delete_matched_removes_and_fans_out_conditional_10512() {
     }
 }
 
+/// #15784 RED: the coordinator fan-out must carry the companion incarnation
+/// captured BEFORE the reverse shared entry was removed
+/// (`removed_reverse_entry`), not a post-delete re-read that normally finds
+/// nothing and yields 0. Pre-fix `companion_expected_id` is 0 here despite
+/// the fixture publishing a nonzero companion id.
+#[test]
+fn scoped_peer_delete_captures_companion_id_before_reverse_removal_15784() {
+    use super::session_import::SyncedDeleteOutcome;
+    let mut fixture = fixture_10512_lease(235, 43593, 53593, 0xF15784, 0xC15784);
+    assert_ne!(fixture.reverse.session_id, 0, "fixture companion id");
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    let outcome = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session_mirror_scoped(
+            fixture.forward.key.clone(),
+            false,
+            fixture.forward.session_id,
+        );
+    assert!(
+        matches!(
+            outcome,
+            SyncedDeleteOutcome::Applied | SyncedDeleteOutcome::RefusedMirrorDelete
+        ),
+        "matched scoped delete must apply (modulo test-env mirror), got {outcome:?}"
+    );
+    let queued: Vec<WorkerCommand> = commands.lock().expect("commands").drain(..).collect();
+    assert_eq!(
+        queued.len(),
+        1,
+        "exactly the conditional fan-out, got {queued:?}"
+    );
+    match &queued[0] {
+        WorkerCommand::DeleteSyncedConditional {
+            companion_expected_id,
+            ..
+        } => {
+            assert_eq!(
+                *companion_expected_id, fixture.reverse.session_id,
+                "fan-out must carry the pre-removal companion incarnation, not 0"
+            );
+        }
+        other => panic!("expected DeleteSyncedConditional, got {other:?}"),
+    }
+}
+
+/// #15784 end-to-end (bounded queue-delay successor-reverse fixture):
+/// forward id unchanged, reverse replaced during the queue delay — the
+/// coordinator captures the ORIGINAL companion id before removing the
+/// reverse shared entry, the worker drains the queued command only after
+/// the replacement reverse is live, and the replacement survives while
+/// the matched forward is removed.
+#[test]
+fn scoped_peer_delete_replaced_companion_survives_queue_delay_15784() {
+    use super::session_import::SyncedDeleteOutcome;
+    let mut fixture = fixture_10512_lease(236, 43693, 53693, 0xF25784, 0xC25784);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    fixture.coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    let outcome = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session_mirror_scoped(
+            fixture.forward.key.clone(),
+            false,
+            fixture.forward.session_id,
+        );
+    assert!(matches!(
+        outcome,
+        SyncedDeleteOutcome::Applied | SyncedDeleteOutcome::RefusedMirrorDelete
+    ));
+    // Worker table: forward still carries the captured id; its companion
+    // was REPLACED during the queue delay (different live id).
+    let now_ns = 1_000_000_000u64;
+    let mut sessions = crate::session::SessionTable::new();
+    let key = fixture.forward.key.clone();
+    let companion = fixture.reverse.key.clone();
+    assert!(sessions.upsert_synced_with_origin(
+        fixture.forward.clone().into_session_install(now_ns),
+        false,
+    ));
+    let mut replacement = fixture.reverse.clone();
+    replacement.session_id = 0xC99999;
+    assert!(sessions.upsert_synced_with_origin(replacement.into_session_install(now_ns), false,));
+    assert_eq!(sessions.session_id_for(&key), fixture.forward.session_id);
+    assert_eq!(sessions.session_id_for(&companion), 0xC99999);
+    // Drain the queued fan-out through the real worker dispatch.
+    let forwarding = ForwardingState::default();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    crate::afxdp::session_glue::apply_worker_commands(
+        &commands,
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        0,
+        &mut VecDeque::new(),
+    );
+    assert_eq!(
+        sessions.session_id_for(&key),
+        0,
+        "matched forward must be removed"
+    );
+    assert_eq!(
+        sessions.session_id_for(&companion),
+        0xC99999,
+        "replacement companion installed during queue delay must survive"
+    );
+}
+
 /// #10512 scoped HA delete, mismatched: a live different incarnation
 /// survives (RefusedIdentity + counter), shared and worker state untouched.
 #[test]

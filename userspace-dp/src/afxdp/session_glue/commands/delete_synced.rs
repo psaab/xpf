@@ -298,10 +298,14 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
     expected_id: u64,
     // #10512 scoped companion: torn down in this same handler after the
     // forward (never a standalone command — a declined forward must leave
-    // it untouched). #14666: carries the companion incarnation captured
-    // with the forward (0 = not captured, legacy unconditional); a live
-    // companion with a different id is a replacement and is preserved,
-    // an absent companion (live id 0) is already converged.
+    // it untouched). #14666/#15784: carries the companion incarnation
+    // captured with the forward. On a scoped delete (`expected_id != 0`)
+    // a live companion goes only when its id matches the captured one;
+    // `companion_expected_id == 0` means uncaptured and preserves any
+    // live companion (bounded leak, healed by sweep/age-out) — it is
+    // never a wildcard. An absent companion (live id 0) is already
+    // converged. Only an unscoped delete (`expected_id == 0`, legacy)
+    // tears the companion down unconditionally.
     companion: Option<(SessionKey, u64)>,
 ) {
     // #10512 scoped HA delete: only the captured incarnation may go — a
@@ -458,7 +462,7 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
     if let Some((companion_key, companion_expected_id)) = companion {
         let live_companion_id = sessions.session_id_for(&companion_key);
         if live_companion_id == 0
-            || companion_expected_id == 0
+            || (expected_id == 0 && companion_expected_id == 0)
             || live_companion_id == companion_expected_id
         {
             handle_delete_synced_with_guard(
