@@ -37,6 +37,66 @@ type scopedDeleteKeyV6 struct {
 	Key    dataplane.SessionKeyV6
 }
 
+// scopedTupleIndex inverts a scoped generation map by bare tuple (#15039):
+// bareTuple -> set of scoped keys naming it. A bare close/delete names no
+// domain, so it must reach every domain's entry for its tuple (#14358);
+// without this side index that was a full-map scan per bare delete, and
+// the receiver map is pinned near its cap by tombstones, so every bare
+// delete cost O(held entries). The index holds no generations — the
+// scoped map stays authoritative — it only names which scoped keys exist
+// per tuple. Maintained on every scoped put/delete/evict/reset under the
+// same mutex as its map (genSentMu / recvGenMu); an index entry is pruned
+// as soon as its set empties, so the index never outlives the map entries
+// it names. If index and map ever disagree the map wins for ordering
+// (lookups read the map value), and an absent index set names no entries
+// to reclaim/tombstone — callers treat it exactly like a tuple with no
+// scoped entries, which is the pre-existing no-op case.
+type scopedTupleIndex[K comparable, SK comparable] struct {
+	byTuple map[K]map[SK]struct{}
+}
+
+func (ix *scopedTupleIndex[K, SK]) add(tuple K, skey SK) {
+	if ix.byTuple == nil {
+		ix.byTuple = make(map[K]map[SK]struct{})
+	}
+	set := ix.byTuple[tuple]
+	if set == nil {
+		set = make(map[SK]struct{})
+		ix.byTuple[tuple] = set
+	}
+	set[skey] = struct{}{}
+}
+
+func (ix *scopedTupleIndex[K, SK]) remove(tuple K, skey SK) {
+	set := ix.byTuple[tuple]
+	if set == nil {
+		return
+	}
+	delete(set, skey)
+	if len(set) == 0 {
+		delete(ix.byTuple, tuple)
+	}
+}
+
+// keys returns a snapshot of the scoped keys naming tuple (nil when none).
+// Callers mutate the scoped map while iterating the result, so it must be
+// a copy, not the live set.
+func (ix *scopedTupleIndex[K, SK]) keys(tuple K) []SK {
+	set := ix.byTuple[tuple]
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]SK, 0, len(set))
+	for skey := range set {
+		out = append(out, skey)
+	}
+	return out
+}
+
+func (ix *scopedTupleIndex[K, SK]) reset() {
+	ix.byTuple = nil
+}
+
 // scopedLogicalDomain normalizes a #7239 wire routing domain to the logical
 // domain the scoped generation spaces are keyed by: marker 1 (DEFAULT,
 // stated) folds to 0; all other values ride unchanged (real domains live
@@ -128,6 +188,12 @@ func (s *SessionSync) noteBulkInstallOutcomeV6(key dataplane.SessionKeyV6, retry
 // is a safety valve for keys whose delete never arrives (e.g. dropped close
 // delta).
 //
+// #15039: the four scoped maps carry a tuple side index
+// (scopedTupleIndex, one per scoped map). It holds no generations and is
+// not a twenty-fifth family: it names the same entries, adds one set
+// membership per scoped entry, and exists so a bare delete reaches its
+// tuple's scoped entries without scanning the whole scoped map.
+//
 // Heap honesty (#9915 F-044 review): the ceiling costs nothing until the table
 // genuinely fills, and per-map=wired is coverage-correct — one family can hold
 // every session (an all-v4 table fills genSentV4 alone), so each map must be
@@ -192,18 +258,22 @@ func putGenBounded[K comparable](m map[K]uint64, key K, gen uint64, maxEntries i
 	return true
 }
 
-// scopedKeysForTuple returns every scoped key in m naming the bare tuple.
-// A normal (bare) close carries no domain, so reclaiming/tombstoning it
-// must cover each domain's entry for the tuple (#14358); scanning is the
-// only domain-complete option. Caller holds the map's mutex.
-func scopedKeysForTuple[K comparable, SK comparable](m map[SK]uint64, tupleOf func(SK) K, key K) []SK {
-	var out []SK
-	for skey := range m {
-		if tupleOf(skey) == key {
-			out = append(out, skey)
-		}
+// putScopedGenBounded is putGenBounded for a scoped map plus its tuple
+// index (#15039): the index gains skey exactly when the entry is stored.
+// Caller holds the map's mutex.
+func putScopedGenBounded[K comparable, SK comparable](m map[SK]uint64, ix *scopedTupleIndex[K, SK], tuple K, skey SK, gen uint64, maxEntries int) bool {
+	stored := putGenBounded(m, skey, gen, maxEntries)
+	if stored {
+		ix.add(tuple, skey)
 	}
-	return out
+	return stored
+}
+
+// deleteScopedGen deletes skey from a scoped map and its tuple index
+// (#15039). Caller holds the map's mutex.
+func deleteScopedGen[K comparable, SK comparable](m map[SK]uint64, ix *scopedTupleIndex[K, SK], tuple K, skey SK) {
+	delete(m, skey)
+	ix.remove(tuple, skey)
 }
 
 // sentCap/recvCap return the effective sender/receiver-side guard caps. Zero
@@ -545,9 +615,9 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 	if s.genSentScopedV4 == nil {
 		s.genSentScopedV4 = make(map[scopedDeleteKeyV4]uint64)
 	}
-	storedScoped := putGenBounded(s.genSentScopedV4, skey, g, s.sentCap())
+	storedScoped := putScopedGenBounded(s.genSentScopedV4, &s.genSentScopedByTupleV4, key, skey, g, s.sentCap())
 	if !storedScoped && s.growSentCap() {
-		storedScoped = putGenBounded(s.genSentScopedV4, skey, g, s.sentCap())
+		storedScoped = putScopedGenBounded(s.genSentScopedV4, &s.genSentScopedByTupleV4, key, skey, g, s.sentCap())
 	}
 	if !storedScoped {
 		s.stats.GenMapOverflow.Add(1)
@@ -646,9 +716,9 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 	if s.genSentScopedV6 == nil {
 		s.genSentScopedV6 = make(map[scopedDeleteKeyV6]uint64)
 	}
-	storedScoped6 := putGenBounded(s.genSentScopedV6, skey6, g, s.sentCap())
+	storedScoped6 := putScopedGenBounded(s.genSentScopedV6, &s.genSentScopedByTupleV6, key, skey6, g, s.sentCap())
 	if !storedScoped6 && s.growSentCap() {
-		storedScoped6 = putGenBounded(s.genSentScopedV6, skey6, g, s.sentCap())
+		storedScoped6 = putScopedGenBounded(s.genSentScopedV6, &s.genSentScopedByTupleV6, key, skey6, g, s.sentCap())
 	}
 	if !storedScoped6 {
 		s.stats.GenMapOverflow.Add(1)
@@ -842,8 +912,9 @@ func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
 	delete(s.tcpHandshakeSentV4, key)
 	// #14358: a bare close names no domain, so reclaim every scoped stamp
 	// for this tuple; otherwise ordinary churn leaks scoped entries to cap.
-	for _, skey := range scopedKeysForTuple(s.genSentScopedV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, key) {
-		delete(s.genSentScopedV4, skey)
+	// #15039: via the tuple index, not a full-map scan.
+	for _, skey := range s.genSentScopedByTupleV4.keys(key) {
+		deleteScopedGen(s.genSentScopedV4, &s.genSentScopedByTupleV4, key, skey)
 	}
 	// #9752: same for its installing-table identity.
 	delete(s.installTableSentV4, key)
@@ -887,8 +958,8 @@ func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
 	delete(s.closeClassSentV6, key)
 	delete(s.tcpHandshakeSentV6, key)
 	// #14358: v6 twin of the scoped reclaim in takeDeleteGenV4.
-	for _, skey := range scopedKeysForTuple(s.genSentScopedV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, key) {
-		delete(s.genSentScopedV6, skey)
+	for _, skey := range s.genSentScopedByTupleV6.keys(key) {
+		deleteScopedGen(s.genSentScopedV6, &s.genSentScopedByTupleV6, key, skey)
 	}
 	// #9752: same for its installing-table identity.
 	delete(s.installTableSentV6, key)
@@ -936,7 +1007,7 @@ func (s *SessionSync) takeDeleteGenScopedV4(domain uint32, key dataplane.Session
 		}
 		return 0
 	}
-	delete(s.genSentScopedV4, skey)
+	deleteScopedGen(s.genSentScopedV4, &s.genSentScopedByTupleV4, key, skey)
 	gen := s.nextInstallGen()
 	if hook := s.testAfterDeleteGen; hook != nil {
 		hook()
@@ -960,7 +1031,7 @@ func (s *SessionSync) takeDeleteGenScopedV6(domain uint32, key dataplane.Session
 		}
 		return 0
 	}
-	delete(s.genSentScopedV6, skey)
+	deleteScopedGen(s.genSentScopedV6, &s.genSentScopedByTupleV6, key, skey)
 	gen := s.nextInstallGen()
 	if hook := s.testAfterDeleteGen; hook != nil {
 		hook()
@@ -1085,9 +1156,9 @@ func (s *SessionSync) recordInstalledGenScopedV4(domain uint32, key dataplane.Se
 	if s.recvGenScopedV4 == nil {
 		s.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
 	}
-	stored, evicted := putGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, skey, gen, s.recvCap())
+	stored, evicted := putScopedGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, &s.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, skey, gen, s.recvCap())
 	if !stored && !evicted && s.growRecvCap() {
-		stored, evicted = putGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, skey, gen, s.recvCap())
+		stored, evicted = putScopedGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, &s.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, skey, gen, s.recvCap())
 	}
 	if evicted {
 		s.stats.GenTombstonesEvicted.Add(1)
@@ -1110,9 +1181,9 @@ func (s *SessionSync) recordInstalledGenScopedV6(domain uint32, key dataplane.Se
 	if s.recvGenScopedV6 == nil {
 		s.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
 	}
-	stored, evicted := putGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, skey, gen, s.recvCap())
+	stored, evicted := putScopedGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, &s.recvGenScopedByTupleV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, skey, gen, s.recvCap())
 	if !stored && !evicted && s.growRecvCap() {
-		stored, evicted = putGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, skey, gen, s.recvCap())
+		stored, evicted = putScopedGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, &s.recvGenScopedByTupleV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, skey, gen, s.recvCap())
 	}
 	if evicted {
 		s.stats.GenTombstonesEvicted.Add(1)
@@ -1259,16 +1330,16 @@ func (s *SessionSync) tombstoneBareLockedV6(key dataplane.SessionKeyV6, gen uint
 // without a refusal check. Caller holds recvGenMu.
 func (s *SessionSync) tombstoneScopedLocked(skey scopedDeleteKeyV4, gen uint64) {
 	if gen == 0 {
-		delete(s.recvGenScopedV4, skey)
+		deleteScopedGen(s.recvGenScopedV4, &s.recvGenScopedByTupleV4, skey.Key, skey)
 		s.recvTombScopedV4.forget(skey)
 		return
 	}
 	if s.recvGenScopedV4 == nil {
 		s.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
 	}
-	stored, evicted := putGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, skey, gen, s.recvCap())
+	stored, evicted := putScopedGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, &s.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, skey, gen, s.recvCap())
 	if !stored && !evicted && s.growRecvCap() {
-		stored, evicted = putGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, skey, gen, s.recvCap())
+		stored, evicted = putScopedGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, &s.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, skey, gen, s.recvCap())
 	}
 	if evicted {
 		s.stats.GenTombstonesEvicted.Add(1)
@@ -1283,16 +1354,16 @@ func (s *SessionSync) tombstoneScopedLocked(skey scopedDeleteKeyV4, gen uint64) 
 // tombstoneScopedLockedV6 is the IPv6 twin of tombstoneScopedLocked.
 func (s *SessionSync) tombstoneScopedLockedV6(skey scopedDeleteKeyV6, gen uint64) {
 	if gen == 0 {
-		delete(s.recvGenScopedV6, skey)
+		deleteScopedGen(s.recvGenScopedV6, &s.recvGenScopedByTupleV6, skey.Key, skey)
 		s.recvTombScopedV6.forget(skey)
 		return
 	}
 	if s.recvGenScopedV6 == nil {
 		s.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
 	}
-	stored, evicted := putGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, skey, gen, s.recvCap())
+	stored, evicted := putScopedGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, &s.recvGenScopedByTupleV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, skey, gen, s.recvCap())
 	if !stored && !evicted && s.growRecvCap() {
-		stored, evicted = putGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, skey, gen, s.recvCap())
+		stored, evicted = putScopedGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, &s.recvGenScopedByTupleV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, skey, gen, s.recvCap())
 	}
 	if evicted {
 		s.stats.GenTombstonesEvicted.Add(1)
@@ -1314,7 +1385,7 @@ func (s *SessionSync) deleteGenGuardV4(key dataplane.SessionKey, deleteGen uint6
 	// #14358: a scoped tombstone for this tuple also orders bare deletes
 	// (a bare delete names no domain); live scoped entries of colliding
 	// tenants never refuse it.
-	for _, skey := range scopedKeysForTuple(s.recvGenScopedV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, key) {
+	for _, skey := range s.recvGenScopedByTupleV4.keys(key) {
 		if _, isTomb := s.recvTombScopedV4.elems[skey]; !isTomb {
 			continue
 		}
@@ -1324,7 +1395,7 @@ func (s *SessionSync) deleteGenGuardV4(key dataplane.SessionKey, deleteGen uint6
 	}
 	if deleteGen != 0 {
 		s.tombstoneBareLocked(key, deleteGen)
-		for _, skey := range scopedKeysForTuple(s.recvGenScopedV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, key) {
+		for _, skey := range s.recvGenScopedByTupleV4.keys(key) {
 			if s.recvGenScopedV4[skey] > deleteGen {
 				continue
 			}
@@ -1333,8 +1404,8 @@ func (s *SessionSync) deleteGenGuardV4(key dataplane.SessionKey, deleteGen uint6
 	} else {
 		delete(s.recvGenV4, key)
 		s.recvTombV4.forget(key)
-		for _, skey := range scopedKeysForTuple(s.recvGenScopedV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, key) {
-			delete(s.recvGenScopedV4, skey)
+		for _, skey := range s.recvGenScopedByTupleV4.keys(key) {
+			deleteScopedGen(s.recvGenScopedV4, &s.recvGenScopedByTupleV4, key, skey)
 			s.recvTombScopedV4.forget(skey)
 		}
 	}
@@ -1348,7 +1419,7 @@ func (s *SessionSync) deleteGenGuardV6(key dataplane.SessionKeyV6, deleteGen uin
 	if stored != 0 && deleteGen != 0 && deleteGen < stored {
 		return false
 	}
-	for _, skey := range scopedKeysForTuple(s.recvGenScopedV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, key) {
+	for _, skey := range s.recvGenScopedByTupleV6.keys(key) {
 		if _, isTomb := s.recvTombScopedV6.elems[skey]; !isTomb {
 			continue
 		}
@@ -1358,7 +1429,7 @@ func (s *SessionSync) deleteGenGuardV6(key dataplane.SessionKeyV6, deleteGen uin
 	}
 	if deleteGen != 0 {
 		s.tombstoneBareLockedV6(key, deleteGen)
-		for _, skey := range scopedKeysForTuple(s.recvGenScopedV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, key) {
+		for _, skey := range s.recvGenScopedByTupleV6.keys(key) {
 			if s.recvGenScopedV6[skey] > deleteGen {
 				continue
 			}
@@ -1367,8 +1438,8 @@ func (s *SessionSync) deleteGenGuardV6(key dataplane.SessionKeyV6, deleteGen uin
 	} else {
 		delete(s.recvGenV6, key)
 		s.recvTombV6.forget(key)
-		for _, skey := range scopedKeysForTuple(s.recvGenScopedV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, key) {
-			delete(s.recvGenScopedV6, skey)
+		for _, skey := range s.recvGenScopedByTupleV6.keys(key) {
+			deleteScopedGen(s.recvGenScopedV6, &s.recvGenScopedByTupleV6, key, skey)
 			s.recvTombScopedV6.forget(skey)
 		}
 	}
@@ -1406,7 +1477,7 @@ func (s *SessionSync) deleteGenGuardScopedV4(domain uint32, key dataplane.Sessio
 			s.tombstoneBareLocked(key, deleteGen)
 		}
 	} else {
-		delete(s.recvGenScopedV4, skey)
+		deleteScopedGen(s.recvGenScopedV4, &s.recvGenScopedByTupleV4, key, skey)
 		s.recvTombScopedV4.forget(skey)
 		delete(s.recvGenV4, key)
 		s.recvTombV4.forget(key)
@@ -1432,7 +1503,7 @@ func (s *SessionSync) deleteGenGuardScopedV6(domain uint32, key dataplane.Sessio
 			s.tombstoneBareLockedV6(key, deleteGen)
 		}
 	} else {
-		delete(s.recvGenScopedV6, skey)
+		deleteScopedGen(s.recvGenScopedV6, &s.recvGenScopedByTupleV6, key, skey)
 		s.recvTombScopedV6.forget(skey)
 		delete(s.recvGenV6, key)
 		s.recvTombV6.forget(key)
@@ -1482,6 +1553,16 @@ func (s *SessionSync) resetRecvSessionGen(preserve bool) {
 		s.recvGenV6 = recvGenV6
 		s.recvGenScopedV4 = recvGenScopedV4
 		s.recvGenScopedV6 = recvGenScopedV6
+		// #15039: rebuild the tuple indexes from exactly the retained
+		// tombstone entries above; live entries were dropped.
+		s.recvGenScopedByTupleV4.reset()
+		for skey := range recvGenScopedV4 {
+			s.recvGenScopedByTupleV4.add(skey.Key, skey)
+		}
+		s.recvGenScopedByTupleV6.reset()
+		for skey := range recvGenScopedV6 {
+			s.recvGenScopedByTupleV6.add(skey.Key, skey)
+		}
 		preserved := len(recvGenV4)
 		if len(recvGenV6) > preserved {
 			preserved = len(recvGenV6)
@@ -1537,6 +1618,8 @@ func (s *SessionSync) resetRecvSessionGen(preserve bool) {
 		s.recvTombV6.reset()
 		s.recvTombScopedV4.reset()
 		s.recvTombScopedV6.reset()
+		s.recvGenScopedByTupleV4.reset()
+		s.recvGenScopedByTupleV6.reset()
 		// #9915 F-044: a namespace reset starts the next epoch at the
 		// default cap and clears all session tombstones.
 		s.recvGenGuardCap = 0
