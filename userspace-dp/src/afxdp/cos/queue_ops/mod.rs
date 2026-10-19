@@ -31,7 +31,8 @@ mod drain;
 pub(in crate::afxdp) mod active_buckets;
 use accounting::{account_cos_queue_flow_dequeue, account_cos_queue_flow_enqueue};
 pub(in crate::afxdp) use drain::{
-    cos_queue_clear_orphan_snapshot_after_drop, cos_queue_drain_all, cos_queue_restore_front,
+    cos_queue_clear_orphan_snapshot_after_drop, cos_queue_drain_all,
+    cos_queue_remove_orphan_snapshot_at, cos_queue_restore_front,
 };
 
 // #1034 P3: push + pop ops split into siblings.

@@ -559,6 +559,7 @@ fn scratch() -> WorkerScratch {
         scratch_prepared_tx: Vec::new(),
         scratch_local_tx: Vec::new(),
         scratch_committed_orig_idx: Vec::new(),
+        scratch_dropped_mirror_orig_idx: Vec::new(),
         scratch_exact_prepared_tx: Vec::new(),
         scratch_exact_local_tx: Vec::new(),
         scratch_completed_offsets: Vec::new(),

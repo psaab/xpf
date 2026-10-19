@@ -107,6 +107,22 @@ pub(super) fn submit_local(
                 committed_len, packets as usize,
                 "committed identity count must equal the transmitted packet count",
             );
+            // #15172: remove mirror-drop orphan snapshots BEFORE
+            // apply_cos_send_result restores the retry tail — its
+            // LIFO push_fronts must consume survivor snapshots, not
+            // the dropped mirror's. `items` here is exactly the
+            // retry tail, so its length is the restore-entry count.
+            let (dropped, dropped_len) = dropped_mirror_positions(binding);
+            if dropped_len > 0 {
+                if let Some(queue) = binding
+                    .cos
+                    .cos_interfaces
+                    .get_mut(&root_ifindex)
+                    .and_then(|root| root.queues.get_mut(queue_idx))
+                {
+                    remove_dropped_mirror_snapshots(queue, &dropped[..dropped_len], items.len());
+                }
+            }
             items = apply_cos_send_result(
                 binding,
                 root_ifindex,
@@ -192,7 +208,18 @@ pub(super) fn submit_local(
             // #4971: expected TX backpressure — record the reason
             // lock-free instead of taking the `last_error` mutex.
             binding.live.set_tx_retry_status(reason);
-            items = restore_cos_local_items(binding, root_ifindex, queue_idx, batch_bytes, items);
+            // #15172: `items` is back to the full survivor set here
+            // (transmit_batch returned every staged entry); remove
+            // mirror-drop orphans before the LIFO restore.
+            let (dropped, dropped_len) = dropped_mirror_positions(binding);
+            items = restore_cos_local_items(
+                binding,
+                root_ifindex,
+                queue_idx,
+                batch_bytes,
+                items,
+                &dropped[..dropped_len],
+            );
             cos_batch_tx_made_progress(Err(TxError::Retry(reason)))
         }
         Err(TxError::Drop(reason)) => {
@@ -208,7 +235,18 @@ pub(super) fn submit_local(
             // #4971: exceptional drop path (rare) still renders the
             // diagnostic message via the mutex-backed set_error.
             binding.live.set_error(reason.message());
-            items = restore_cos_local_items(binding, root_ifindex, queue_idx, batch_bytes, items);
+            // #15172: same orphan removal as the Retry arm — the
+            // staged prefix is back in `items`, so remove the
+            // dropped mirror's snapshot before the LIFO restore.
+            let (dropped, dropped_len) = dropped_mirror_positions(binding);
+            items = restore_cos_local_items(
+                binding,
+                root_ifindex,
+                queue_idx,
+                batch_bytes,
+                items,
+                &dropped[..dropped_len],
+            );
             cos_batch_tx_made_progress(Err(TxError::Drop(reason)))
         }
     };
@@ -217,6 +255,62 @@ pub(super) fn submit_local(
     // allocating a fresh `VecDeque`.
     binding.cos.cos_local_batch_scratch = items;
     made_progress
+}
+
+/// #15172: copy the mirror-reserve dropped original positions out of
+/// the per-binding scratch (pop order). No allocation — fixed stack
+/// array, same shape as the committed-identity copy in the Ok arm.
+fn dropped_mirror_positions(binding: &BindingWorker) -> ([u16; TX_BATCH_SIZE], usize) {
+    let mut dropped = [0u16; TX_BATCH_SIZE];
+    let src = &binding.scratch.scratch_dropped_mirror_orig_idx;
+    let n = src.len().min(TX_BATCH_SIZE);
+    dropped[..n].copy_from_slice(&src[..n]);
+    (dropped, n)
+}
+
+/// #15172: remove the orphaned pop snapshots of mirror-reserve
+/// dropped items from `queue` (DESCENDING original position, so each
+/// positional removal only touches already-removed-above entries),
+/// The removal itself is the fix: with the orphan gone, the LIFO
+/// restore's top entries are the survivors' own snapshots, so
+/// `pop_matching_snapshot` matches each survivor's bucket (its
+/// `assert!(false)` remains the fail-closed tripwire if a future
+/// caller desyncs the stack). `retry_len` is retained for the
+/// restore-entry debug guard below.
+/// No-op when nothing was dropped — the common path adds one length
+/// check and no queue access.
+fn remove_dropped_mirror_snapshots(
+    queue: &mut crate::afxdp::types::CoSQueueRuntime,
+    dropped: &[u16],
+    retry_len: usize,
+) {
+    if dropped.is_empty() {
+        return;
+    }
+    for &pos in dropped.iter().rev() {
+        // Fail-closed: a `false` here means the stack desynced from
+        // the batch (short stack / no flow-fair state). The assert
+        // below trips on the length mismatch rather than restoring
+        // against a wrong snapshot.
+        let _ = cos_queue_remove_orphan_snapshot_at(queue, usize::from(pos));
+    }
+    // Restore-entry invariant (debug only): after orphan removal the
+    // stack must still hold AT LEAST one snapshot per restored item
+    // (the survivors' own, at the top, in batch order; any entries
+    // below them are committed-prefix snapshots a partial commit
+    // leaves resident for the next build-start clear — #3968). A
+    // short stack here means the positional removal desynced, and
+    // the LIFO restore would run off the bottom / consume a wrong
+    // entry; trip in debug instead. Bucket alignment per item is
+    // enforced by pop_matching_snapshot's assert on restore.
+    if let Some(ff) = queue.flow_fair_state.as_ref() {
+        debug_assert!(
+            ff.pop_snapshot_stack.len() >= retry_len,
+            "#15172: pop_snapshot_stack ({}) shorter than the {}              restored items at restore entry after mirror-drop              orphan removal",
+            ff.pop_snapshot_stack.len(),
+            retry_len,
+        );
+    }
 }
 
 // Moved from queue_service/mod.rs (pre-refactor L1488-L1509). Sole
@@ -234,12 +328,17 @@ fn restore_cos_local_items(
     queue_idx: usize,
     batch_bytes: u64,
     mut retry: VecDeque<TxRequest>,
+    dropped_mirror: &[u16],
 ) -> VecDeque<TxRequest> {
     {
         let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) else {
             return retry;
         };
         if let Some(queue) = root.queues.get_mut(queue_idx) {
+            // #15172: orphan removal BEFORE the LIFO restore inside
+            // restore_cos_local_items_inner (retry.len() is the
+            // restore-entry survivor count at this point).
+            remove_dropped_mirror_snapshots(queue, dropped_mirror, retry.len());
             let retry_bytes = restore_cos_local_items_inner(queue, &mut retry);
             queue.hot.queued_bytes = queue
                 .hot

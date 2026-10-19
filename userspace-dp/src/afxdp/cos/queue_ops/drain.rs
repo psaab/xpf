@@ -67,6 +67,66 @@ pub(in crate::afxdp) fn cos_queue_clear_orphan_snapshot_after_drop(queue: &mut C
         }
     }
 }
+/// #15172 — remove the pop snapshot for the dropped ORIGINAL-input
+/// position `orig_pos` in a batch whose pops pushed snapshots in
+/// original-input order (stack index == original position for a batch
+/// built by `build_cos_batch_from_queue`, which clears the stack at
+/// build start and appends one snapshot per pop in order).
+///
+/// `transmit_batch` drops a `mirror_clone` interior to a
+/// `CoSBatch::Local` batch WITHOUT returning it to `pending`, so the
+/// dropped item is neither committed nor restored; its snapshot is
+/// orphaned. Left in place, the later LIFO `push_front` restore of an
+/// earlier survivor (any `inserted == 0` / partial-insert retry, or a
+/// `Drop` settle) consumes the WRONG top snapshot: a bucket mismatch
+/// hits `assert!(false)` in `pop_matching_snapshot` (worker-thread
+/// death), and same-bucket cases silently restore the orphan's
+/// pre-pop head/tail finishes.
+///
+/// Unlike `cos_queue_clear_orphan_snapshot_after_drop` — which pops
+/// the TOP entry for a just-popped scratch-builder drop — this removes
+/// an INTERIOR entry: the dropped item may be followed by later pops
+/// whose snapshots sit above it. Removal is followed by the same
+/// clamp the orphan helper applies (remaining pre-pop vtimes raised
+/// to at least the current `queue_vtime`; same-bucket snapshots
+/// raised to at least the orphan's served finish), so the dropped
+/// item's committed vtime/frontier advance survives every later
+/// rollback restore. Callers MUST pass drops in DESCENDING
+/// `orig_pos` order (the scratch list is built in pop order, so a
+/// reverse walk) — with the stack==batch-length premise each removal
+/// then only touches already-removed-above positions.
+///
+/// Fail-closed on premise violation: a missing flow-fair state, a
+/// short stack, or an out-of-range position returns `false` with the
+/// stack untouched, and the caller asserts at restore entry so a
+/// desynchronised stack panics in the submit path (fail-closed)
+/// instead of restoring against a wrong snapshot. Returns `true`
+/// once the entry is removed.
+#[inline]
+pub(in crate::afxdp) fn cos_queue_remove_orphan_snapshot_at(
+    queue: &mut CoSQueueRuntime,
+    orig_pos: usize,
+) -> bool {
+    let Some(ff) = queue.flow_fair_state.as_mut() else {
+        return false;
+    };
+    if orig_pos >= ff.pop_snapshot_stack.len() {
+        return false;
+    }
+    let orphan = ff.pop_snapshot_stack.remove(orig_pos);
+    let z_committed_vtime = ff.queue_vtime;
+    let orphan_served_finish = orphan.pre_pop_head_finish;
+    for snap in ff.pop_snapshot_stack.iter_mut() {
+        if snap.pre_pop_queue_vtime < z_committed_vtime {
+            snap.pre_pop_queue_vtime = z_committed_vtime;
+        }
+        if snap.bucket == orphan.bucket {
+            snap.pre_pop_head_finish = snap.pre_pop_head_finish.max(orphan_served_finish);
+            snap.pre_pop_tail_finish = snap.pre_pop_tail_finish.max(orphan_served_finish);
+        }
+    }
+    true
+}
 
 pub(in crate::afxdp) fn cos_queue_drain_all(
     queue: &mut CoSQueueRuntime,

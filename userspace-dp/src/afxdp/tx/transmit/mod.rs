@@ -189,6 +189,11 @@ pub(in crate::afxdp) fn transmit_batch(
     // mirror batch below — leaves the committed set empty rather than
     // stale, and `submit_local` never charges a prior batch's flows.
     binding.scratch.scratch_committed_orig_idx.clear();
+    // #15172: same lifecycle for the mirror-reserve DROPPED set — an
+    // all-dropped / early-return batch must leave it empty, never
+    // stale, so `submit_local` cannot remove a prior batch's
+    // snapshots against a queue that never popped them.
+    binding.scratch.scratch_dropped_mirror_orig_idx.clear();
     if pending.is_empty() {
         return Ok((0, 0));
     }
@@ -225,6 +230,17 @@ pub(in crate::afxdp) fn transmit_batch(
                 .mirror_drops_tx_frame_reserve
                 .fetch_add(1, Ordering::Relaxed);
             dropped_mirror_reserve = true;
+            // #15172: report the dropped ORIGINAL position so the CoS
+            // submit path can remove this item's orphaned pop
+            // snapshot before any retry restore. The item is gone
+            // (neither staged nor returned to `pending`), so without
+            // this the queue-side snapshot stack stays one longer
+            // than the survivor set and the next LIFO `push_front`
+            // consumes the wrong top entry.
+            binding
+                .scratch
+                .scratch_dropped_mirror_orig_idx
+                .push(orig_idx);
             orig_idx = orig_idx.saturating_add(1);
             continue;
         }

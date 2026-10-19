@@ -55,6 +55,18 @@ pub(crate) struct WorkerScratch {
     /// accounting to the correct flow); other `transmit_batch` callers
     /// ignore it.
     pub(crate) scratch_committed_orig_idx: Vec<u16>,
+    /// #15172: ORIGINAL-`pending` positions `transmit_batch` DROPPED
+    /// via the mirror-reserve `continue` (interior, neither committed
+    /// nor returned to `pending`), in pop order. Filled fresh on every
+    /// `transmit_batch` call (cleared at entry, beside
+    /// `scratch_committed_orig_idx`). Only `submit_local` reads it: a
+    /// dropped item's queue-side pop snapshot is orphaned on the
+    /// queue's `pop_snapshot_stack`, and the submit path removes those
+    /// snapshots (descending) before any retry settle can `push_front`
+    /// a survivor against the wrong top entry. Other `transmit_batch`
+    /// callers (the unshaped backup drain) ignore it — their items
+    /// never came from a CoS queue pop, so no snapshot exists.
+    pub(crate) scratch_dropped_mirror_orig_idx: Vec<u16>,
     pub(crate) scratch_exact_prepared_tx: Vec<ExactPreparedScratchTxRequest>,
     pub(crate) scratch_exact_local_tx: Vec<ExactLocalScratchTxRequest>,
     pub(crate) scratch_completed_offsets: Vec<u64>,
@@ -112,6 +124,7 @@ impl WorkerScratch {
             scratch_prepared_tx: Vec::with_capacity(TX_BATCH_SIZE),
             scratch_local_tx: Vec::with_capacity(TX_BATCH_SIZE),
             scratch_committed_orig_idx: Vec::with_capacity(TX_BATCH_SIZE),
+            scratch_dropped_mirror_orig_idx: Vec::with_capacity(TX_BATCH_SIZE),
             scratch_exact_prepared_tx: Vec::with_capacity(TX_BATCH_SIZE),
             scratch_exact_local_tx: Vec::with_capacity(TX_BATCH_SIZE),
             scratch_completed_offsets: Vec::with_capacity(ring_entries as usize),
