@@ -280,7 +280,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v58 -> v59 (#15753): FlowSnapshot carries tcp_no_syn_check_in_tunnel,
 // tcp_rst_invalidate_session, tcp_no_sequence_check,
 // tcp_rst_sequence_check and tcp_maximum_window.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 59;
+// v59 -> v60 (#15678): NAT64RuleSnapshot carries from_zone /
+// from_routing_instance / source_addresses ingress scoping; a v59 helper
+// ignores them and translates for every zone/VRF/source — the defect.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 60;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

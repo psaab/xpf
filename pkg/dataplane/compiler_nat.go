@@ -1146,12 +1146,14 @@ func compileNAT64WithStaging(dp DataPlane, cfg *config.Config, result *CompileRe
 		return nil
 	}
 
+	// #15678: NO prefix-count cap. The retired-eBPF MAX_NAT64_PREFIXES=4
+	// guard broke out after four rule-sets, so a 5th+ rule-set existed in the
+	// userspace snapshot (buildNAT64Snapshots walks all) but never received a
+	// pool ID or persistent-NAT registration here — a silent desync. Every
+	// rule-set is now staged identically; the Rust loader's aggregate budget
+	// (#6982) remains the single fail-closed bound on prefix count.
 	count := uint32(0)
 	for _, rs := range ruleSets {
-		if count >= 4 { // MAX_NAT64_PREFIXES
-			compileWarn(dp, "max NAT64 prefixes exceeded, skipping", "rule-set", rs.Name)
-			break
-		}
 		// #15278 (D02-01): empty prefix skips this rule-set on BOTH passes,
 		// mirroring buildNAT64Snapshots. Before this, the real pass returned
 		// an invalid-CIDR error and aborted every apply for a strict-clean

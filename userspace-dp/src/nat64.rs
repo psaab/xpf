@@ -188,6 +188,7 @@ use crate::nat::{
     peer_owns_identity_in, release_nat64_pool_port, reserve_nat64_pool_port,
     static_owns_wire_identity,
 };
+use crate::prefix::PrefixV6;
 use crate::session::SessionDecision;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -235,6 +236,15 @@ fn nat64_pool_index(pool: &[Ipv4Addr]) -> Arc<FxHashMap<Ipv4Addr, usize>> {
 pub(crate) struct Nat64Prefix {
     /// First 96 bits of the NAT64 prefix (e.g. 64:ff9b::).
     pub(crate) prefix_bytes: [u8; 12],
+    /// #15678: optional ingress scoping. Empty = unscoped on that axis.
+    /// `source_prefixes` empty = match any IPv6 source; a rule that AUTHORED
+    /// source entries but every one failed to parse sets
+    /// `source_constrained` with an empty vec and matches NOTHING (never
+    /// silently widened to any-source).
+    pub(crate) from_zone: String,
+    pub(crate) from_routing_instance: String,
+    pub(crate) source_prefixes: Vec<PrefixV6>,
+    pub(crate) source_constrained: bool,
     /// IPv4 source pool addresses for SNAT.
     pub(crate) pool_v4: Vec<Ipv4Addr>,
     /// Live-drain allocators whose configured pool intersects this prefix's
@@ -334,6 +344,10 @@ impl Nat64Prefix {
     ) -> Self {
         Self {
             prefix_bytes,
+            from_zone: String::new(),
+            from_routing_instance: String::new(),
+            source_prefixes: Vec::new(),
+            source_constrained: false,
             pool_index_v4: nat64_pool_index(&pool_v4),
             pool_v4,
             pool_index: AtomicUsize::new(0),
@@ -354,6 +368,10 @@ impl Clone for Nat64Prefix {
     fn clone(&self) -> Self {
         Self {
             prefix_bytes: self.prefix_bytes,
+            from_zone: self.from_zone.clone(),
+            from_routing_instance: self.from_routing_instance.clone(),
+            source_prefixes: self.source_prefixes.clone(),
+            source_constrained: self.source_constrained,
             pool_v4: self.pool_v4.clone(),
             pool_index_v4: self.pool_index_v4.clone(),
             pool_index: AtomicUsize::new(self.pool_index.load(Ordering::Relaxed)),
@@ -1176,9 +1194,30 @@ impl Nat64State {
                     snap.name, snap.deterministic_host_base_v6
                 );
             }
+            // #15678: parse the authored source-address scoping. Empty list =
+            // unconstrained; a non-empty list whose entries all fail to parse
+            // stays constrained with no prefixes and matches NOTHING.
+            let source_constrained = !snap.source_addresses.is_empty();
+            let mut source_prefixes: Vec<PrefixV6> = Vec::new();
+            for a in &snap.source_addresses {
+                let parsed = if let Ok(net) = a.parse::<ipnet::Ipv6Net>() {
+                    Some(PrefixV6::from_net(net))
+                } else if let Ok(addr) = a.parse::<Ipv6Addr>() {
+                    Some(PrefixV6::from_net(ipnet::Ipv6Net::new(addr, 128).expect("host net")))
+                } else {
+                    None
+                };
+                if let Some(p) = parsed {
+                    source_prefixes.push(p);
+                }
+            }
             let pool_index_v4 = nat64_pool_index(&pool_v4);
             prefixes.push(Nat64Prefix {
                 prefix_bytes,
+                from_zone: snap.from_zone.clone(),
+                from_routing_instance: snap.from_routing_instance.clone(),
+                source_prefixes,
+                source_constrained,
                 pool_v4,
                 pool_index_v4,
                 pool_index: AtomicUsize::new(0),
@@ -1393,6 +1432,86 @@ impl Nat64State {
             }
         }
         None
+    }
+
+    /// #15678: scope test for one prefix against the packet's ingress
+    /// identity. Empty authored fields are unscoped on that axis; a scoped
+    /// field must equal the packet's resolved zone / routing-instance name
+    /// exactly (an unknown name therefore never matches). Source: an
+    /// unconstrained prefix matches any source; a constrained one matches
+    /// only a source inside one of its prefixes (an all-unparseable list
+    /// has none and matches nothing — fail-closed, never widened).
+    fn prefix_scope_matches(
+        prefix: &Nat64Prefix,
+        src: Ipv6Addr,
+        from_zone: &str,
+        routing_instance: &str,
+    ) -> bool {
+        if !prefix.from_zone.is_empty() && prefix.from_zone != from_zone {
+            return false;
+        }
+        if !prefix.from_routing_instance.is_empty()
+            && prefix.from_routing_instance != routing_instance
+        {
+            return false;
+        }
+        if !prefix.source_constrained {
+            return true;
+        }
+        prefix.source_prefixes.iter().any(|p| p.contains(src))
+    }
+
+    /// #15678: scoped destination match — the first prefix (config order)
+    /// whose /96, ingress scope, and source constraint all match.
+    pub(crate) fn match_ipv6_dest_scoped(
+        &self,
+        src: Ipv6Addr,
+        dst: Ipv6Addr,
+        from_zone: &str,
+        routing_instance: &str,
+    ) -> Option<(usize, Ipv4Addr)> {
+        let octets = dst.octets();
+        for (idx, prefix) in self.prefixes.iter().enumerate() {
+            if octets[..12] == prefix.prefix_bytes
+                && Self::prefix_scope_matches(prefix, src, from_zone, routing_instance)
+            {
+                let v4 = Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]);
+                return Some((idx, v4));
+            }
+        }
+        None
+    }
+
+    /// #15678: scoped classification — the scoped sibling of
+    /// `classify_ipv6_packet`. The Pref64 source-eligibility gate stays
+    /// destination-prefix based (any configured prefix), then the scoped
+    /// destination match decides.
+    pub(crate) fn classify_ipv6_packet_scoped(
+        &self,
+        src: Ipv6Addr,
+        dst: Ipv6Addr,
+        from_zone: &str,
+        routing_instance: &str,
+    ) -> Nat64Match {
+        if self.source_within_pref64(src) {
+            return Nat64Match::IneligibleSource;
+        }
+        match self.match_ipv6_dest_scoped(src, dst, from_zone, routing_instance) {
+            None => Nat64Match::NoPrefixMatch,
+            Some((prefix_idx, dst_v4)) => {
+                if Self::embedded_v4_is_non_global(dst_v4) {
+                    return Nat64Match::IneligibleDestination;
+                }
+                match self.prefixes.get(prefix_idx) {
+                    Some(prefix) if !prefix.pool_v4.is_empty() => Nat64Match::MatchReady {
+                        prefix_idx,
+                        dst_v4,
+                        dst_v6: dst,
+                    },
+                    _ => Nat64Match::MatchUnavailable,
+                }
+            }
+        }
     }
 
     /// #5623: RFC 6146 §3.5 source-eligibility test. A NAT64 translator MUST

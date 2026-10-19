@@ -1012,10 +1012,38 @@ type NATv6v4Config struct {
 }
 
 // NAT64RuleSet defines NAT64 translation rules.
+//
+// #15678: optional ingress scoping. FromZone / FromRoutingInstance restrict
+// the rule-set to traffic ingressing that zone / routing-instance ("" =
+// unscoped on that axis, the pre-#15678 global behaviour). SourceAddresses
+// (and, for completeness, SourceAddressNames) restrict by IPv6 source:
+// `match source-address` accepts CIDRs / bare hosts and `match
+// source-address-name` accepts address-book names resolved at snapshot
+// build. Empty = match any source. Exactly one from axis may be set
+// (zone XOR routing-instance); a mixed or repeated from clause is rejected
+// at strict commit (never OR-widened).
 type NAT64RuleSet struct {
 	Name       string
 	Prefix     string // well-known prefix, e.g. "64:ff9b::/96"
 	SourcePool string // IPv4 source pool name for translated packets
+	// FromZone scopes the rule-set to traffic ingressing this security zone.
+	// "" = unscoped. #15678.
+	FromZone string
+	// FromRoutingInstance scopes the rule-set to traffic in this routing
+	// instance / VRF. "" = the default instance / unscoped. #15678.
+	FromRoutingInstance string
+	// SourceAddresses is the full `match source-address` list (CIDRs or bare
+	// IPv6 hosts). Empty = match any source. #15678.
+	SourceAddresses []string
+	// SourceAddressNames is the full `match source-address-name` list
+	// (address-book names resolved at snapshot build). #15678.
+	SourceAddressNames []string
+	// SourceAddress is the first configured `match source-address` value,
+	// retained for back-compat; prefer SourceAddresses.
+	SourceAddress string
+	// SourceAddressName is the first configured `match source-address-name`
+	// value, retained for back-compat.
+	SourceAddressName string
 }
 
 // StaticNATRuleSet is a set of static 1:1 NAT rules bound to a from scope.

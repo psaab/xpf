@@ -340,6 +340,16 @@ pub(crate) struct NAT64RuleSnapshot {
     pub name: String,
     #[serde(default)]
     pub prefix: String,
+    /// #15678: optional ingress scoping. Empty = unscoped on that axis;
+    /// `source_addresses` empty = match any IPv6 source. An old control
+    /// plane omits them and the rule stays global (pre-#15678 behaviour);
+    /// the v60 protocol bump fences a new control plane from an old helper.
+    #[serde(rename = "from_zone", default)]
+    pub from_zone: String,
+    #[serde(rename = "from_routing_instance", default)]
+    pub from_routing_instance: String,
+    #[serde(rename = "source_addresses", default)]
+    pub source_addresses: Vec<String>,
     // #2214: null-tolerant. A NAT64 rule with no resolvable source pool
     // makes the Go builder emit `pool_addresses:null` (nil slice, no
     // `,omitempty`); plain `default` would only cover an ABSENT key, so an

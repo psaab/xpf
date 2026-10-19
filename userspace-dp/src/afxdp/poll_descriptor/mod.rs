@@ -4003,10 +4003,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // unreachable for a real packet and degrades to the
                                 // dest-only classify rather than asserting.
                                 let nat64_result = match flow.forward_key.src_ip {
+                                    // #15678: enforce the rule-set's ingress
+                                    // scope (from-zone / routing-instance /
+                                    // source-address) using the pre-routing
+                                    // scope identity resolved above.
                                     IpAddr::V6(src_v6) => worker_ctx
                                         .forwarding
                                         .nat64
-                                        .classify_ipv6_packet(src_v6, dst_v6),
+                                        .classify_ipv6_packet_scoped(
+                                            src_v6,
+                                            dst_v6,
+                                            ingress_zone_name,
+                                            ingress_ri_dnat,
+                                        ),
                                     IpAddr::V4(_) => {
                                         worker_ctx.forwarding.nat64.classify_ipv6_dest(dst_v6)
                                     }

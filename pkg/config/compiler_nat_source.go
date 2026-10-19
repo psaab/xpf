@@ -417,6 +417,23 @@ func compileNAT64(node *Node, sec *SecurityConfig) error {
 	for _, inst := range namedInstances(node.FindChildren("rule-set")) {
 		rs := &NAT64RuleSet{Name: inst.name}
 
+		// #15678: from-scope (zone | routing-instance). Reuse the shared
+		// NAT scope reader so the packed-header shape (`rule-set rs from
+		// zone trust { ... }`) and bracket lists behave exactly as the
+		// source/destination/static rule-sets. The gate
+		// (validateNAT64ScopeStrict) rejects a mixed/repeated from clause;
+		// here every scope is stamped verbatim (last value wins per axis is
+		// never widened silently because strict rejects >1 total).
+		fromScopes, _ := collectNATScopes(inst.node, false, "nat64")
+		for _, s := range fromScopes {
+			switch s.kind {
+			case "routing-instance":
+				rs.FromRoutingInstance = s.value
+			default: // "zone"
+				rs.FromZone = s.value
+			}
+		}
+
 		// #9792: a packed one-line run reaches this reader on the lenient path
 		// (Store.Load / Store.SyncApply); expand it as #9235 does. Lenient path only.
 		for _, child := range expandResolvingRuns9792(inst.node.Children, nat64RuleSetSchema9792()) {
@@ -425,6 +442,32 @@ func compileNAT64(node *Node, sec *SecurityConfig) error {
 				rs.Prefix = nodeVal(child)
 			case "source-pool":
 				rs.SourcePool = nodeVal(child)
+			case "match":
+				for _, m := range child.Children {
+					switch m.Name() {
+					case "source-address":
+						rs.SourceAddresses = append(rs.SourceAddresses, natMatchAddressValues(m)...)
+						if len(rs.SourceAddresses) > 0 {
+							rs.SourceAddress = rs.SourceAddresses[0]
+						}
+					case "source-address-name":
+						rs.SourceAddressNames = append(rs.SourceAddressNames, firewallMatchValues(m)...)
+						if len(rs.SourceAddressNames) > 0 {
+							rs.SourceAddressName = rs.SourceAddressNames[0]
+						}
+					}
+				}
+				// Flat-set / packed match leaves ride on Keys.
+				for i := 0; i+1 < len(child.Keys); i++ {
+					switch child.Keys[i] {
+					case "source-address":
+						rs.SourceAddresses = append(rs.SourceAddresses, child.Keys[i+1])
+						rs.SourceAddress = rs.SourceAddresses[0]
+					case "source-address-name":
+						rs.SourceAddressNames = append(rs.SourceAddressNames, child.Keys[i+1])
+						rs.SourceAddressName = rs.SourceAddressNames[0]
+					}
+				}
 			}
 		}
 

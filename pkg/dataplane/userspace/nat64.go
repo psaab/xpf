@@ -80,6 +80,13 @@ func deterministicNAT64V6Fields(pool *config.NATPool) (blockSize, blocksPerIP ui
 }
 
 func buildNAT64Snapshots(cfg *config.Config) []NAT64RuleSnapshot {
+	return buildNAT64SnapshotsWithFeeds(cfg, nil)
+}
+
+// buildNAT64SnapshotsWithFeeds is buildNAT64Snapshots with the dynamic-address
+// feed overlay threaded in (#15678), so a `match source-address-name`
+// reference backed by a live feed resolves exactly as the SNAT builder does.
+func buildNAT64SnapshotsWithFeeds(cfg *config.Config, feedOverlay map[string][]string) []NAT64RuleSnapshot {
 	if cfg == nil || len(cfg.Security.NAT.NAT64) == 0 {
 		return nil
 	}
@@ -144,10 +151,22 @@ func buildNAT64Snapshots(cfg *config.Config) []NAT64RuleSnapshot {
 				}
 			}
 		}
+		// #15678: resolve `match source-address-name` into prefixes (feed-aware,
+		// like SNAT). A poisoned closure clears the side; the raw authored
+		// entries stay non-empty, so the Rust matcher fails closed.
+		sourceAddrs := append([]string(nil), rs.SourceAddresses...)
+		if resolved, poisoned := appendNATAddressNamesPoisoned(cfg, feedOverlay, sourceAddrs, rs.SourceAddressNames); poisoned != "" {
+			sourceAddrs = sourceAddrs[:0]
+		} else {
+			sourceAddrs = resolved
+		}
 		out = append(out, NAT64RuleSnapshot{
 			Name:                       rs.Name,
 			Prefix:                     config.NormaliseNAT64PrefixForSnapshot(rs.Prefix),
 			PoolAddresses:              poolAddresses,
+			FromZone:                   rs.FromZone,
+			FromRoutingInstance:        rs.FromRoutingInstance,
+			SourceAddresses:            sourceAddrs,
 			NoV6FragHeader:             noV6FragHeader,
 			DeterministicBlockSize:     detBlockSize,
 			DeterministicBlocksPerIP:   detBlocksPerIP,

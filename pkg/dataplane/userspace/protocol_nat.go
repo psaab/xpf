@@ -353,6 +353,16 @@ type NAT64RuleSnapshot struct {
 	Name          string   `json:"name"`
 	Prefix        string   `json:"prefix"`         // e.g. "64:ff9b::/96"
 	PoolAddresses []string `json:"pool_addresses"` // resolved IPv4 pool addresses
+	// #15678: optional ingress scoping. FromZone / FromRoutingInstance
+	// restrict the rule to traffic ingressing that zone / routing-instance
+	// ("" = unscoped). SourceAddresses restricts by IPv6 source (CIDRs /
+	// bare hosts, address-book names pre-resolved by the builder); empty =
+	// match any source. An old helper ignoring these fields would match
+	// every scope/source — the defect — so the v60 protocol bump fences
+	// the pairing instead of degrading silently.
+	FromZone            string   `json:"from_zone,omitempty"`
+	FromRoutingInstance string   `json:"from_routing_instance,omitempty"`
+	SourceAddresses     []string `json:"source_addresses,omitempty"`
 	// NoV6FragHeader mirrors the global `security nat natv6v4
 	// no-v6-frag-header` knob. When set, it is an explicit local override that
 	// keeps header-less IPv6->IPv4 outputs fragmentable (DF=0) regardless of

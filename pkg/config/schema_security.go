@@ -949,6 +949,17 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 		// downgrades to a warning (#1960).
 		"nat64": {desc: "NAT64 (IPv6-to-IPv4) translation", closedWorld: true, children: map[string]*schemaNode{
 			"rule-set": {desc: "NAT64 rule-set name", args: 1, placeholder: "<rule-set-name>", children: map[string]*schemaNode{
+				// #15678: optional ingress scoping, mirroring the other NAT
+				// rule-sets. Exactly one of zone / routing-instance may be set
+				// (validated at strict commit); source scoping lives under match.
+				"from": {desc: "Source of traffic to match", children: map[string]*schemaNode{
+					"zone":             {desc: "Source zone name", args: 1, multi: true, valueHint: ValueHintZoneName, placeholder: "<zone-name>", children: nil},
+					"routing-instance": {desc: "Ingress routing instance name", args: 1, multi: true, placeholder: "<routing-instance>", children: nil},
+				}},
+				"match": {desc: "Match criteria", closedWorld: true, children: map[string]*schemaNode{
+					"source-address":      {desc: "Source address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil},
+					"source-address-name": {desc: "Source address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil},
+				}},
 				"prefix":      {desc: "NAT64 IPv6 prefix (must be /96)", args: 1, placeholder: "<ipv6-prefix>", children: nil},
 				"source-pool": {desc: "Source NAT pool for the translated IPv4 source", args: 1, placeholder: "<pool-name>", children: nil},
 			}},
