@@ -136,7 +136,11 @@ var (
 
 	// ifTable column OIDs: 1.3.6.1.2.1.2.2.1.<col>.<ifIndex>
 	// Columns: 1=ifIndex, 2=ifDescr, 3=ifType, 4=ifMtu, 5=ifSpeed,
-	//          7=ifAdminStatus, 8=ifOperStatus, 10=ifInOctets, 16=ifOutOctets
+	//          7=ifAdminStatus, 8=ifOperStatus, 9=ifLastChange,
+	//          10=ifInOctets, 11=ifInUcastPkts, 12=ifInNUcastPkts,
+	//          13=ifInErrors, 14=ifInDiscards, 15=ifInUnknownProtos,
+	//          16=ifOutOctets, 17=ifOutUcastPkts, 18=ifOutNUcastPkts,
+	//          19=ifOutErrors, 20=ifOutDiscards (#15232 A48-02)
 	oidIfTablePrefix = []int{1, 3, 6, 1, 2, 1, 2, 2, 1}
 
 	// ifXTable column OIDs: 1.3.6.1.2.1.31.1.1.1.<col>.<ifIndex>
@@ -154,7 +158,7 @@ var (
 	}
 
 	// ifTable columns we serve (sorted for GETNEXT).
-	ifTableColumns = []int{1, 2, 3, 4, 5, 7, 8, 10, 16}
+	ifTableColumns = []int{1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
 
 	// ifXTable columns we serve (sorted for GETNEXT).
 	// 1=ifName, 2=ifInMulticastPkts, 3=ifInBroadcastPkts, 4=ifOutMulticastPkts,
@@ -174,6 +178,18 @@ type IfData struct {
 	OperStatus  int    // 1=up, 2=down
 	InOctets    uint32 // Counter32 (wraps at 2^32)
 	OutOctets   uint32 // Counter32 (wraps at 2^32)
+
+	// ifTable Counter32 / TimeTicks columns (#15232 A48-02).
+	LastChange      uint32 // TimeTicks hundredths since agent start of last oper change; 0 = never changed
+	InUcastPkts     uint32 // Counter32 (ifTable.11)
+	InNonUcastPkts  uint32 // Counter32 (ifTable.12)
+	InErrors        uint32 // Counter32 (ifTable.13)
+	InDiscards      uint32 // Counter32 (ifTable.14)
+	InUnknownProtos uint32 // Counter32 (ifTable.15)
+	OutUcastPkts    uint32 // Counter32 (ifTable.17)
+	OutNonUcastPkts uint32 // Counter32 (ifTable.18)
+	OutErrors       uint32 // Counter32 (ifTable.19)
+	OutDiscards     uint32 // Counter32 (ifTable.20)
 
 	// ifXTable fields (64-bit high-capacity counters).
 	IfName           string // interface name (ifXTable.1)
@@ -1879,10 +1895,30 @@ func getIfTableValue(col, ifIdx int, ifaces []IfData) ([]byte, byte) {
 		return berEncodeIntegerValue(iface.AdminStatus), tagInteger
 	case 8: // ifOperStatus
 		return berEncodeIntegerValue(iface.OperStatus), tagInteger
+	case 9: // ifLastChange
+		return berEncodeTimeTicks(int(iface.LastChange)), tagTimeTicks
 	case 10: // ifInOctets
 		return berEncodeCounter32(iface.InOctets), tagCounter32
+	case 11: // ifInUcastPkts
+		return berEncodeCounter32(iface.InUcastPkts), tagCounter32
+	case 12: // ifInNUcastPkts
+		return berEncodeCounter32(iface.InNonUcastPkts), tagCounter32
+	case 13: // ifInErrors
+		return berEncodeCounter32(iface.InErrors), tagCounter32
+	case 14: // ifInDiscards
+		return berEncodeCounter32(iface.InDiscards), tagCounter32
+	case 15: // ifInUnknownProtos
+		return berEncodeCounter32(iface.InUnknownProtos), tagCounter32
 	case 16: // ifOutOctets
 		return berEncodeCounter32(iface.OutOctets), tagCounter32
+	case 17: // ifOutUcastPkts
+		return berEncodeCounter32(iface.OutUcastPkts), tagCounter32
+	case 18: // ifOutNUcastPkts
+		return berEncodeCounter32(iface.OutNonUcastPkts), tagCounter32
+	case 19: // ifOutErrors
+		return berEncodeCounter32(iface.OutErrors), tagCounter32
+	case 20: // ifOutDiscards
+		return berEncodeCounter32(iface.OutDiscards), tagCounter32
 	}
 	return nil, 0
 }

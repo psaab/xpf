@@ -389,8 +389,8 @@ func TestIfXTableWalk(t *testing.T) {
 	})
 
 	// Walking from last ifTable entry should reach ifXTable
-	// Last ifTable OID: 1.3.6.1.2.1.2.2.1.16.2
-	lastIfTable := append(append([]int{}, oidIfTablePrefix...), 16, 2)
+	// Last ifTable OID: 1.3.6.1.2.1.2.2.1.20.2 (#15232)
+	lastIfTable := append(append([]int{}, oidIfTablePrefix...), 20, 2)
 	next := a.findNextOID(lastIfTable)
 	// Should be ifXTable.1.2 (ifName.2)
 	wantFirst := append(append([]int{}, oidIfXTablePrefix...), 1, 2)
@@ -864,8 +864,8 @@ func TestIfXTable_GETNEXTWalk(t *testing.T) {
 	a.SetIfDataFn(testIfXData)
 
 	// GETNEXT from last ifTable entry should reach ifXTable
-	// Last ifTable entry is ifOutOctets (col 16) for ifIndex 3
-	lastIfTable := append(append([]int{}, oidIfTablePrefix...), 16, 3)
+	// Last ifTable entry is ifOutDiscards (col 20) for ifIndex 3 (#15232)
+	lastIfTable := append(append([]int{}, oidIfTablePrefix...), 20, 3)
 	next := a.findNextOID(lastIfTable)
 	if next == nil {
 		t.Fatal("expected ifXTable entry after last ifTable, got nil")

@@ -588,6 +588,25 @@ broadcast count and no TX multicast/broadcast breakdown. The daemon's
 Before #5050 the unicast counters were `RxPackets` / `TxPackets` verbatim,
 which folded multicast/broadcast into unicast and made a manager
 double-count when summing the class columns.
+
+### ifTable error/discard/unicast columns, ifLastChange, trap-only enable, reth rows (#15232)
+
+- ifTable now also serves cols 9 (`ifLastChange`, TimeTicks), 11/12
+  (`ifInUcastPkts`/`ifInNUcastPkts`), 13/14/15 (`ifInErrors`/
+  `ifInDiscards`/`ifInUnknownProtos`), 17/18 (`ifOutUcastPkts`/
+  `ifOutNUcastPkts`) and 19/20 (`ifOutErrors`/`ifOutDiscards`) as
+  Counter32. `deriveIfCounters` maps them from `rtnl_link_stats`
+  (`RxErrors/RxDropped/TxErrors/TxDropped`); IN non-unicast is the RX
+  `Multicast` sub-count, OUT non-unicast and `ifInUnknownProtos` are
+  honest zeros (no kernel counter). `ifLastChange` is tracked per
+  ifIndex in the daemon (hundredths since daemon start, 0 until the
+  first observed oper change).
+- A trap-group-only SNMP stanza (no community/v3 user) now enables
+  the agent (`snmpEnabled` counts `TrapGroups`), so the link monitor
+  starts and linkUp/linkDown traps are actually sent.
+- Bondless reths (no kernel device) get a synthesized ifTable/ifXTable
+  row: stable synthetic ifIndex `1<<24 + rethN`, owning local member's
+  counters, oper = RG-primary && member-up (standalone = primary).
 - `NotifyLinkUp` / `NotifyLinkDown` — `traps.go`.
 
 ## Callers
