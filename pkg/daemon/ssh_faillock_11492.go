@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,9 +18,17 @@ const (
 	pamFaillockPostBegin = "# BEGIN xpf SSH faillock result (#11492)"
 	pamFaillockPostEnd   = "# END xpf SSH faillock result (#11492)"
 
-	pamFaillockPreauth  = "auth requisite pam_faillock.so preauth silent deny=5 fail_interval=600 unlock_time=300"
-	pamFaillockAuthfail = "auth [default=die] pam_faillock.so authfail deny=5 fail_interval=600 unlock_time=300"
-	pamFaillockAuthsucc = "auth [success=1 default=ignore] pam_faillock.so authsucc deny=5 fail_interval=600 unlock_time=300"
+	pamFaillockPreauth  = "auth requisite pam_faillock.so preauth silent deny=5 fail_interval=600 unlock_time=300 even_deny_root"
+	pamFaillockAuthfail = "auth [default=die] pam_faillock.so authfail deny=5 fail_interval=600 unlock_time=300 even_deny_root"
+	pamFaillockAuthsucc = "auth [success=1 default=ignore] pam_faillock.so authsucc deny=5 fail_interval=600 unlock_time=300 even_deny_root"
+
+	// Pre-#14973 managed bodies, without even_deny_root. Recognised in
+	// stripPAMFaillockBlock so hosts already carrying the old rules can be
+	// upgraded (enable=true strips then re-adds the current body) and rolled
+	// back (enable=false strips) instead of erroring "modified".
+	pamFaillockPreauthLegacy  = "auth requisite pam_faillock.so preauth silent deny=5 fail_interval=600 unlock_time=300"
+	pamFaillockAuthfailLegacy = "auth [default=die] pam_faillock.so authfail deny=5 fail_interval=600 unlock_time=300"
+	pamFaillockAuthsuccLegacy = "auth [success=1 default=ignore] pam_faillock.so authsucc deny=5 fail_interval=600 unlock_time=300"
 
 	pamUnixAuthLine   = "auth [success=1 default=ignore] pam_unix.so nullok"
 	pamDenyAuthLine   = "auth requisite pam_deny.so"
@@ -54,39 +63,15 @@ var (
 // host-PAM integration is limited to non-appliance installs. A custom PAM
 // stack is left untouched for its administrator to configure explicitly.
 func applySSHPAMFaillock() error {
-	if _, err := os.Stat(applianceMarkerFile); err == nil {
-		return nil
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("check appliance marker before PAM update: %w", err)
-	}
-	if !sshdPAMModuleAvailable() {
-		return fmt.Errorf("%w: pam_faillock.so is not installed", errSSHPAMFaillockUnsupported)
-	}
-	current, err := sshdPAMReadFile(sshdPAMCommonAuthPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("%w: %s is absent", errSSHPAMFaillockUnsupported, sshdPAMCommonAuthPath)
-		}
-		return fmt.Errorf("read PAM common-auth stack: %w", err)
-	}
-	updated, changed, err := renderSSHPAMFaillock(current, true)
-	if err != nil {
-		return err
-	}
-	if !changed {
-		return nil
-	}
-	info, err := os.Lstat(sshdPAMCommonAuthPath)
-	if err != nil {
-		return fmt.Errorf("stat PAM common-auth stack: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%w: %s is not a regular file", errSSHPAMFaillockUnsupported, sshdPAMCommonAuthPath)
-	}
-	if err := sshdPAMWriteFile(sshdPAMCommonAuthPath, updated, info.Mode().Perm()); err != nil {
-		return fmt.Errorf("write PAM common-auth stack: %w", err)
-	}
-	return nil
+	_, err := applySSHPAMFaillockChanged()
+	return err
+}
+
+// applySSHPAMFaillockChanged is applySSHPAMFaillock reporting whether it
+// changed common-auth, so applySSHConfig can strip exactly the rules this
+// apply installed when a later step rolls back (#14973).
+func applySSHPAMFaillockChanged() (bool, error) {
+	return setSSHPAMFaillock(true)
 }
 
 // renderSSHPAMFaillock inserts faillock controls only into the stock Debian
@@ -101,12 +86,14 @@ func renderSSHPAMFaillock(current []byte, enable bool) ([]byte, bool, error) {
 	}
 	text := strings.ReplaceAll(original, "\r\n", "\n")
 	lines := strings.Split(text, "\n")
-	lines, removedPre, err := stripPAMFaillockBlock(lines, pamFaillockPreBegin, pamFaillockPreEnd, []string{pamFaillockPreauth})
+	lines, removedPre, err := stripPAMFaillockBlock(lines, pamFaillockPreBegin, pamFaillockPreEnd,
+		[]string{pamFaillockPreauth}, []string{pamFaillockPreauthLegacy})
 	if err != nil {
 		return nil, false, err
 	}
 	lines, removedPost, err := stripPAMFaillockBlock(lines, pamFaillockPostBegin, pamFaillockPostEnd,
-		[]string{pamFaillockAuthfail, pamFaillockAuthsucc})
+		[]string{pamFaillockAuthfail, pamFaillockAuthsucc},
+		[]string{pamFaillockAuthfailLegacy, pamFaillockAuthsuccLegacy})
 	if err != nil {
 		return nil, false, err
 	}
@@ -118,7 +105,7 @@ func renderSSHPAMFaillock(current []byte, enable bool) ([]byte, bool, error) {
 		}
 		return []byte(strings.ReplaceAll(clean, "\n", newline)), true, nil
 	}
-	if strings.Contains(clean, "pam_faillock.so") {
+	if hasActivePAMFaillock(lines) {
 		if removed {
 			return []byte(strings.ReplaceAll(clean, "\n", newline)), true, nil
 		}
@@ -156,7 +143,10 @@ func renderSSHPAMFaillock(current []byte, enable bool) ([]byte, bool, error) {
 	return updated, true, nil
 }
 
-func stripPAMFaillockBlock(lines []string, begin, end string, body []string) ([]string, bool, error) {
+// stripPAMFaillockBlock removes one managed block. bodies lists every
+// known-good variant of the block body (current + pre-#14973 legacy);
+// any other body is refused as modified, preserving the tamper check.
+func stripPAMFaillockBlock(lines []string, begin, end string, bodies ...[]string) ([]string, bool, error) {
 	start, finish, starts, ends := -1, -1, 0, 0
 	for i, line := range lines {
 		switch line {
@@ -174,22 +164,122 @@ func stripPAMFaillockBlock(lines []string, begin, end string, body []string) ([]
 	if starts != 1 || ends != 1 || finish <= start {
 		return nil, false, fmt.Errorf("malformed managed PAM faillock block %q", begin)
 	}
-	want := make([]string, 0, len(body)+2)
-	want = append(want, begin)
-	want = append(want, body...)
-	want = append(want, end)
-	if finish-start+1 != len(want) {
-		return nil, false, fmt.Errorf("managed PAM faillock block %q was modified", begin)
-	}
-	for i, line := range want {
-		if lines[start+i] != line {
-			return nil, false, fmt.Errorf("managed PAM faillock block %q was modified", begin)
+	matched := false
+	for _, body := range bodies {
+		want := make([]string, 0, len(body)+2)
+		want = append(want, begin)
+		want = append(want, body...)
+		want = append(want, end)
+		if finish-start+1 != len(want) {
+			continue
 		}
+		ok := true
+		for i, line := range want {
+			if lines[start+i] != line {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return nil, false, fmt.Errorf("managed PAM faillock block %q was modified", begin)
 	}
 	out := make([]string, 0, len(lines)-(finish-start+1))
 	out = append(out, lines[:start]...)
 	out = append(out, lines[finish+1:]...)
 	return out, true, nil
+}
+
+// hasActivePAMFaillock reports whether any non-comment PAM line invokes
+// pam_faillock.so. Comment lines (first non-blank byte '#') and blank lines
+// are ignored: a comment merely mentioning the module (#14973) must not be
+// mistaken for an administrator-installed faillock policy.
+func hasActivePAMFaillock(lines []string) bool {
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		for _, f := range fields[1:] {
+			if f == "pam_faillock.so" || strings.HasSuffix(f, "/pam_faillock.so") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// setSSHPAMFaillock installs (enable=true) or removes (enable=false) the
+// managed faillock rules, mirroring applySSHPAMFaillock's guards. It reports
+// whether common-auth was changed so a rollback knows the strip took effect.
+// Appliance hosts and unsupported stacks report (false, nil) on removal —
+// nothing xpf-managed can be present there — and removal still runs for a
+// render error's managed blocks via the enable=false render path below.
+func setSSHPAMFaillock(enable bool) (bool, error) {
+	if _, err := os.Stat(applianceMarkerFile); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("check appliance marker before PAM update: %w", err)
+	}
+	if enable && !sshdPAMModuleAvailable() {
+		return false, fmt.Errorf("%w: pam_faillock.so is not installed", errSSHPAMFaillockUnsupported)
+	}
+	current, err := sshdPAMReadFile(sshdPAMCommonAuthPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if !enable {
+				return false, nil
+			}
+			return false, fmt.Errorf("%w: %s is absent", errSSHPAMFaillockUnsupported, sshdPAMCommonAuthPath)
+		}
+		return false, fmt.Errorf("read PAM common-auth stack: %w", err)
+	}
+	if !enable && !strings.Contains(string(current), pamFaillockPreBegin) && !strings.Contains(string(current), pamFaillockPostBegin) {
+		return false, nil
+	}
+	updated, changed, err := renderSSHPAMFaillock(current, enable)
+	if err != nil {
+		return false, err
+	}
+	if !changed {
+		return false, nil
+	}
+	info, err := os.Lstat(sshdPAMCommonAuthPath)
+	if err != nil {
+		return false, fmt.Errorf("stat PAM common-auth stack: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("%w: %s is not a regular file", errSSHPAMFaillockUnsupported, sshdPAMCommonAuthPath)
+	}
+	if err := sshdPAMWriteFile(sshdPAMCommonAuthPath, updated, info.Mode().Perm()); err != nil {
+		return false, fmt.Errorf("write PAM common-auth stack: %w", err)
+	}
+	return true, nil
+}
+
+// stripSSHPAMFaillockOnRollback removes the managed faillock rules a failed
+// applySSHConfig installed (#14973). It is best-effort: failures are logged
+// and joined into the apply error by the caller, never masking the original
+// failure. It only strips when this apply actually changed common-auth, so a
+// pre-existing admin faillock is never removed by an unrelated rollback.
+func stripSSHPAMFaillockOnRollback(installed bool) error {
+	if !installed {
+		return nil
+	}
+	changed, err := setSSHPAMFaillock(false)
+	if err != nil {
+		slog.Warn("failed to strip managed PAM faillock rules on SSH apply rollback", "err", err)
+		return fmt.Errorf("strip managed PAM faillock on rollback: %w", err)
+	}
+	if changed {
+		slog.Info("stripped managed PAM faillock rules on SSH apply rollback")
+	}
+	return nil
 }
 
 func insertPAMLines(lines []string, at int, insert []string) []string {
