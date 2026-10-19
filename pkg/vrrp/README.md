@@ -1402,3 +1402,23 @@ dataplane reuses this Go walker, and do NOT try to consolidate them.
   wired in `NewManager` (`addrsFn` defaults to nil → live
   `iface.Addrs()`); do not change a seam's production default without
   updating the matching test fakes.
+
+## Diagnostics and resign visibility (#15213)
+
+- **Hold-refusal logging (A25-03)** — a #14404-held RETH candidate
+  retries `becomeMaster` on every master-down horizon. The refusal
+  logs INFO **once per hold episode** (`kernelHoldRefusalLogged`,
+  cleared when the hold clears); repeats within the episode are Debug.
+- **Effective priority on operator surfaces (A25-04)** — `Status()`
+  prints the EFFECTIVE (track-demoted) priority from
+  `prioritySnapshot()` and appends `, track down` while tracking is
+  demoting; `VRRPEvent`/`InstanceStates()`/`emitEvent` carry
+  `EffectivePriority` and `TrackDown` so structured consumers stop
+  repeating the configured-value lie.
+- **Pending resign (A25-06)** — `ResignRG` records a pending
+  resignation (`beginResign`: priority 0 stashed in `resignPriority`)
+  instead of overwriting `cfg.Priority`. Routine MASTER adverts keep
+  the pre-resign priority until `becomeBackup` applies the stash after
+  the VIP removal; only the explicit priority-0 burst after
+  `becomeBackup` signals takeover. `masterDownInterval` also uses the
+  stashed 0 while pending so the resigned instance cannot re-elect.

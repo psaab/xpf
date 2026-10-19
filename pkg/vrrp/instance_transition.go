@@ -99,8 +99,17 @@ func (vi *vrrpInstance) becomeMaster() bool {
 	// timer (rearmForRetry), so promotion retries on the next horizon once
 	// the hold clears.
 	if vi.kernelUpgradeHeld() {
-		slog.Info("vrrp: refusing MASTER while kernel-upgrade hold is armed (#14404)",
-			"key", vi.key())
+		// #15213 A25-03: this refusal repeats on every master-down
+		// horizon (~8/s) for the whole hold episode. Log INFO once per
+		// episode (cleared when the hold clears); repeats are Debug so
+		// the journal is not flooded and real diagnostics stay visible.
+		if vi.kernelHoldRefusalLogged.CompareAndSwap(false, true) {
+			slog.Info("vrrp: refusing MASTER while kernel-upgrade hold is armed (#14404)",
+				"key", vi.key())
+		} else {
+			slog.Debug("vrrp: refusing MASTER while kernel-upgrade hold is armed (#14404)",
+				"key", vi.key())
+		}
 		return false
 	}
 	// #6779: refuse ownership we cannot advertise — #5082's "do not claim what
@@ -197,6 +206,10 @@ func (vi *vrrpInstance) becomeBackup(masterDownTimer, advertTimer *time.Timer) e
 	removeErr := vi.removeVIPsLocked(nil)
 	vi.setState(StateBackup)
 	vi.vipMu.Unlock()
+	// #15213 A25-06: the VIPs are now off the wire, so the stashed
+	// resigning priority may take effect. Until this point cfg.Priority
+	// kept the pre-resign value and routine adverts never carried 0.
+	vi.applyPendingResign()
 	vi.surfaceStaleVIP(removeErr, "becomeBackup")
 	advertTimer.Stop()
 	masterDownTimer.Reset(vi.masterDownInterval())

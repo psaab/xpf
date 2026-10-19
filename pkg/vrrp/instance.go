@@ -59,11 +59,20 @@ func (s VRRPState) String() string {
 
 // VRRPEvent is emitted when a VRRP instance changes state.
 type VRRPEvent struct {
-	Interface         string
-	Family            string
-	GroupID           int
-	State             VRRPState
-	VIPs              []string
+	Interface string
+	Family    string
+	GroupID   int
+	State     VRRPState
+	VIPs      []string
+	// EffectivePriority is the priority this instance would advertise
+	// now — the configured priority after interface-tracking demotion
+	// (#15213 A25-04). The configured value alone is a diagnostic lie
+	// while the tracked interface is down (a MASTER displaying 100
+	// while advertising 50), so structured consumers carry both.
+	EffectivePriority int
+	// TrackDown reports that interface tracking is currently demoting
+	// this instance (#15213 A25-04).
+	TrackDown         bool
 	VIPDiverged       bool
 	VIPUpdateFailures uint64
 }
@@ -102,6 +111,24 @@ type vrrpInstance struct {
 	// for RETH instances; becomeMaster refuses while set. Atomic so the
 	// run-loop reads it without vi.mu (becomeMaster already takes vipMu).
 	kernelUpgradeHold atomic.Bool
+	// kernelHoldRefusalLogged (#15213 A25-03): the current kernel-upgrade
+	// hold episode has already emitted its one INFO refusal from
+	// becomeMaster. Set on the first refusal, cleared when the hold is
+	// cleared (setKernelUpgradeHold(false)), so a re-armed hold logs
+	// INFO once again. Atomic like kernelUpgradeHold.
+	kernelHoldRefusalLogged atomic.Bool
+	// resignMu guards the pending forced-resignation state (#15213
+	// A25-06). ResignRG stashes priority 0 in resignPriority and sets
+	// resignPending instead of overwriting cfg.Priority, so the routine
+	// MASTER advert path (getPriority, driven by advertTimer) keeps
+	// advertising the pre-resign priority until becomeBackup completes.
+	// becomeBackup applies the stashed 0 under this lock. A dedicated
+	// mutex (not vi.mu/cfg) because the run loop's advert path reads it
+	// without wanting cfg, and ResignRG/becomeBackup must apply the
+	// transition atomically with respect to that reader.
+	resignMu       sync.Mutex
+	resignPending  bool
+	resignPriority int
 	// skipNextPreemptHold makes the next masterDownTimer expiry promote
 	// immediately, bypassing the preempt hold-time (#2850). Set when the
 	// master resigns (priority-0) so a graceful, planned failover is never
@@ -465,6 +492,9 @@ func (vi *vrrpInstance) updateConfigHeld(cfg Instance, heldRETH bool) {
 // this instance (atomic; read by becomeMaster without vi.mu).
 func (vi *vrrpInstance) setKernelUpgradeHold(held bool) {
 	vi.kernelUpgradeHold.Store(held)
+	if !held {
+		vi.kernelHoldRefusalLogged.Store(false)
+	}
 }
 
 // kernelUpgradeHeld reports the #14404 hold for this instance. Only RETH

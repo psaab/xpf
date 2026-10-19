@@ -934,16 +934,26 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 
 // ResignRG forces all VRRP instances for the given redundancy group
 // to resign by sending priority-0 adverts and transitioning to BACKUP.
-// Also immediately sets the instance priority to 0 to prevent
-// re-election before the debounced priority update fires.
+// It records a PENDING resignation (priority 0 stashed on the
+// instance) rather than overwriting the configured priority
+// synchronously: until the run loop consumes the resign and
+// becomeBackup has removed the VIPs, routine MASTER adverts keep
+// carrying the pre-resign priority (#15213 A25-06). Writing 0 here —
+// before the run-loop select — let an advertTimer win race a
+// priority-0 routine advert out while this node still held its VIPs,
+// triggering the peer's 1ms priority-0 takeover into a two-owner
+// window. becomeBackup applies the stashed 0 once the VIPs are off
+// the wire; the explicit priority-0 burst after it remains the
+// takeover signal, and masterDownInterval at the stashed 0 keeps the
+// resigned instance from winning a re-election.
 // Used when cluster state transitions from Primary to Secondary
 // (manual failover, weight drop, etc.) in non-preempt mode.
 //
 // The returned ResignBarrier completes when every targeted instance has
-// physically released its virtual addresses (#6177 item 1). The priority-0
-// write is synchronous, but triggerResign is not: the advert burst and the
+// physically released its virtual addresses (#6177 item 1). The resign
+// signal is synchronous, but triggerResign is not: the advert burst and the
 // becomeBackup VIP removal run on each instance's own goroutine, so ResignRG
-// returning means "resignation signalled and priority driven to 0", NOT "the
+// returning means "resignation signalled", NOT "the
 // VIPs are off the wire". A caller fencing a remote failover against a
 // two-owner window must wait on the barrier; a caller that only needs the
 // election result (the reconcile safety net) may ignore it. Never nil: an RG
@@ -968,13 +978,14 @@ func (m *Manager) ResignRG(rgID int) *ResignBarrier {
 		// Arm the barrier BEFORE the trigger so the run loop cannot complete
 		// the release in the gap and leave this registration unreported.
 		vi.armResignAck(barrier)
-		// Set priority to 0 BEFORE triggering resign. Without this,
-		// the masterDown timer (~97ms) can fire before the debounced
-		// priority update (500ms), causing the instance to re-elect
-		// at the old high priority and knock the peer back to BACKUP.
-		vi.mu.Lock()
-		vi.cfg.Priority = 0
-		vi.mu.Unlock()
+		// Record the pending resignation (priority 0 stashed) BEFORE
+		// triggering resign. Without the pending marker, the masterDown
+		// timer (~97ms) can fire before the debounced priority update
+		// (500ms), causing the instance to re-elect at the old high
+		// priority and knock the peer back to BACKUP; with it,
+		// getPriority still advertises the pre-resign value on routine
+		// adverts while masterDownInterval uses the stashed 0.
+		vi.beginResign()
 		vi.triggerResign()
 	}
 	return barrier
@@ -1201,12 +1212,15 @@ func (m *Manager) InstanceStates() []VRRPEvent {
 
 	out := make([]VRRPEvent, 0, len(m.instances))
 	for _, vi := range m.instances {
+		_, effective, trackDown := vi.prioritySnapshot()
 		out = append(out, VRRPEvent{
 			Interface:         vi.cfg.Interface,
 			Family:            vi.cfg.Family,
 			GroupID:           vi.cfg.GroupID,
 			State:             vi.getState(),
 			VIPs:              vi.vipsSnapshot(),
+			EffectivePriority: effective,
+			TrackDown:         trackDown,
 			VIPDiverged:       vi.vipDiverged.Load() || vi.vipUpdateDiverged.Load(),
 			VIPUpdateFailures: vi.vipUpdateFailures.Load(),
 		})
@@ -1273,13 +1287,19 @@ func (m *Manager) Status() string {
 		// getState() already RLocks internally, so it stays outside this block;
 		// vi.key() reads only immutable identity fields.
 		vi.mu.RLock()
-		priority := vi.cfg.Priority
 		preempt := vi.cfg.Preempt
 		interval := vi.cfg.AdvertiseInterval
 		vips := append([]string(nil), vi.cfg.VirtualAddresses...)
 		vi.mu.RUnlock()
-		sb.WriteString(fmt.Sprintf("  %s: state=%s, priority=%d, preempt=%t, interval=%dms\n",
-			vi.key(), state, priority, preempt, interval))
+		// #15213 A25-04: display the EFFECTIVE priority (after track
+		// demotion) and name the track state, not the configured value.
+		_, effective, trackDown := vi.prioritySnapshot()
+		track := ""
+		if trackDown {
+			track = ", track down"
+		}
+		sb.WriteString(fmt.Sprintf("  %s: state=%s, priority=%d, preempt=%t, interval=%dms%s\n",
+			vi.key(), state, effective, preempt, interval, track))
 		for _, vip := range vips {
 			sb.WriteString(fmt.Sprintf("    VIP: %s\n", vip))
 		}
