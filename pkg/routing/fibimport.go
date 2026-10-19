@@ -146,6 +146,17 @@ type LearnedRoute struct {
 	// Discard is true for an imported RTN_BLACKHOLE route. It carries no
 	// next-hops; the helper must drop traffic matching this prefix.
 	Discard bool
+	// Reject is true for an imported RTN_UNREACHABLE route (FRR `reject`).
+	// It carries no next-hops; the helper must drop traffic matching this
+	// prefix and return an ICMP unreachable, exactly like a config `reject`
+	// static. Before #15742 only RTN_BLACKHOLE was adopted, so the
+	// cluster-mode Null0 defaults — which FRR installs in the kernel as
+	// RTN_UNREACHABLE at metric 20 (`unreachable (blackhole)` in zebra,
+	// `blackhole default proto static metric 20` in `ip route`) — never
+	// reached the helper FIB at all: a split-RG node whose real default
+	// was HA-filtered away had NO default in the helper and resolved
+	// NoRoute instead of the intended terminal route.
+	Reject bool
 	// NextHops holds every gateway leg of a unicast route, in kernel order.
 	// A discard route has no next-hops.
 	NextHops []string
@@ -242,10 +253,20 @@ func ImportLearnedRoutes(tableIDs []int) ([]LearnedRoute, error) {
 // Every rejection below is a deliberate safety property, not a
 // simplification:
 //
-//   - Only RTN_UNICAST and RTN_BLACKHOLE are adopted. A blackhole is an
-//     explicit negative route needed to preserve kernel longest-prefix
-//     discard behavior, but the HA inactive-RG blackhole uses a 4242 priority
-//     sentinel and remains the helper's own HAInactive responsibility.
+//   - Only RTN_UNICAST, RTN_BLACKHOLE and RTN_UNREACHABLE are adopted.
+//     A blackhole/unreachable is an explicit negative route needed to
+//     preserve kernel longest-prefix discard/reject behavior, but the HA
+//     inactive-RG blackhole uses a 4242 priority sentinel and remains the
+//     helper's own HAInactive responsibility. RTN_UNREACHABLE is FRR's
+//     `reject` form — and, load-bearing for #15742, the kernel form of the
+//     cluster-mode Null0 defaults (zebra renders them `unreachable
+//     (blackhole)`, `ip route` shows `blackhole default proto static
+//     metric 20`): before #15742 they were excluded by the
+//     "only discard" rule in TestImportRejectsUnsupportedNegativeRoutes,
+//     so a split-RG node's helper FIB had no default at all once the
+//     real default was HA-filtered away. RTN_PROHIBIT stays excluded: it
+//     is a policy-refusal (ICMP administratively-prohibited), not a
+//     routing decision FRR or the operator's statics produce here.
 //   - A UNICAST ROUTE NEEDS A GATEWAY. Gateway-less unicast routes are directly
 //     connected and already reach the FIB from the interface snapshot.
 //     Requiring a gateway keeps the importer clear of the Rust side's
@@ -272,10 +293,11 @@ func importableRoute(r netlink.Route, family, tableID int) (LearnedRoute, bool) 
 // so a table of routes sharing a handful of links costs a handful of lookups.
 func importableRouteScoped(r netlink.Route, family, tableID int, linkName func(int) (string, bool)) (LearnedRoute, bool) {
 	blackhole := r.Type == unix.RTN_BLACKHOLE
-	if r.Type != unix.RTN_UNICAST && !blackhole {
+	reject := r.Type == unix.RTN_UNREACHABLE
+	if r.Type != unix.RTN_UNICAST && !blackhole && !reject {
 		return LearnedRoute{}, false
 	}
-	if blackhole && r.Priority == haInactiveBlackholePriority {
+	if (blackhole || reject) && r.Priority == haInactiveBlackholePriority {
 		return LearnedRoute{}, false
 	}
 	if !learnedRouteProtocols[int(r.Protocol)] {
@@ -291,13 +313,14 @@ func importableRouteScoped(r netlink.Route, family, tableID int, linkName func(i
 			"table", tableID, "destination", dst, "mtu", mtu)
 		mtu = 0
 	}
-	if blackhole {
+	if blackhole || reject {
 		return LearnedRoute{
 			TableID:     tableID,
 			Family:      family,
 			Metric:      r.Priority,
 			Destination: dst,
-			Discard:     true,
+			Discard:     blackhole,
+			Reject:      reject,
 			Protocol:    rtProtoName(r.Protocol),
 			MTU:         mtu,
 		}, true

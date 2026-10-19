@@ -205,10 +205,14 @@ func TestImportAdoptsFRRStaticdDHCPRoutes(t *testing.T) {
 	}
 }
 
-// SAFETY PROPERTY: only the discard route type is the non-forwarding
-// exception to learned unicast import. Unreachable and prohibit routes stay
-// out of the helper FIB; HA's inactive-RG blackholes are excluded by their
-// priority sentinel in a separate cell below.
+// SAFETY PROPERTY: prohibit is the only non-forwarding exception that
+// stays OUT of the learned import. RTN_UNREACHABLE is FRR's `reject`
+// form and — load-bearing for #15742 — the kernel form of the
+// cluster-mode Null0 defaults, so it is ADOPTED as Reject (next test);
+// RTN_PROHIBIT is an administratively-prohibited policy refusal, not a
+// routing decision, and must never reach the helper FIB. HA's
+// inactive-RG blackholes are excluded by their priority sentinel in a
+// separate cell below.
 // ONE VARIABLE. Each tested route is byte-identical to the BGP route that
 // TestImportAdoptsBGPLearnedRoute proves IS imported — same gateway, same
 // protocol, same prefix shape — and differs ONLY in Type.
@@ -217,7 +221,6 @@ func TestImportRejectsUnsupportedNegativeRoutesEvenWhenOtherwiseImportable11398(
 		name     string
 		routeTyp int
 	}{
-		{"unreachable", unix.RTN_UNREACHABLE},
 		{"prohibit", unix.RTN_PROHIBIT},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -233,6 +236,68 @@ func TestImportRejectsUnsupportedNegativeRoutesEvenWhenOtherwiseImportable11398(
 				t.Fatalf("a %s route must never be imported, got %+v", tc.name, got)
 			}
 		})
+	}
+}
+
+// #15742: the cluster-mode Null0 default reaches the kernel as
+// RTN_UNREACHABLE proto static metric 20 (`blackhole default proto
+// static metric 20` / zebra `S>* ::/0 [250/0] unreachable (blackhole)`).
+// Before this fix the importer dropped it, so a split-RG node's helper
+// FIB — whose config default (pref 5) is HA-filtered to the peer — had
+// NO default at all and resolved NoRoute instead of the terminal
+// reject. The unreachable must be adopted as Reject with no next-hops,
+// for both families, and must NOT be confused with Discard.
+func TestImportAdoptsClusterUnreachableAsReject15742(t *testing.T) {
+	withRouteLister(t, staticLister(map[[2]int][]netlink.Route{
+		{netlink.FAMILY_V4, mainTableID}: {{
+			Dst: nil, Type: unix.RTN_UNREACHABLE, Priority: 20,
+			Protocol: netlink.RouteProtocol(unix.RTPROT_STATIC),
+		}},
+		{netlink.FAMILY_V6, mainTableID}: {{
+			Dst: nil, Type: unix.RTN_UNREACHABLE, Priority: 20,
+			Protocol: netlink.RouteProtocol(unix.RTPROT_STATIC),
+		}},
+	}))
+
+	got, err := ImportLearnedRoutes([]int{mainTableID})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want both cluster unreachable defaults imported, got %d: %+v", len(got), got)
+	}
+	byFamily := map[int]LearnedRoute{}
+	for _, lr := range got {
+		byFamily[lr.Family] = lr
+	}
+	for family, wantDst := range map[int]string{netlink.FAMILY_V4: "0.0.0.0/0", netlink.FAMILY_V6: "::/0"} {
+		lr, ok := byFamily[family]
+		if !ok {
+			t.Fatalf("family %d missing from import: %+v", family, got)
+		}
+		if lr.Destination != wantDst || !lr.Reject || lr.Discard || len(lr.NextHops) != 0 {
+			t.Errorf("family %d imported route = %+v, want reject %s with no next hops", family, lr, wantDst)
+		}
+	}
+}
+
+// #15742 control: an RTN_UNREACHABLE at the HA sentinel priority 4242
+// must stay excluded exactly like its RTN_BLACKHOLE twin — the helper
+// owns that decision via HAInactive, and importing it would double it.
+func TestImportRejectsHAUnreachableSentinel15742(t *testing.T) {
+	withRouteLister(t, staticLister(v4Main(netlink.Route{
+		Dst:      mustCIDR(t, "10.0.61.0/24"),
+		Type:     unix.RTN_UNREACHABLE,
+		Priority: 4242,
+		Protocol: netlink.RouteProtocol(unix.RTPROT_BOOT),
+	})))
+
+	got, err := ImportLearnedRoutes([]int{mainTableID})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("the HA unreachable sentinel must never be imported, got %+v", got)
 	}
 }
 
