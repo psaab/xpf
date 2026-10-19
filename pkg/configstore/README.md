@@ -1980,18 +1980,27 @@ owned by the `journal/` subpackage.
   When `active.json` is absent, surviving rollback slots remain available for
   the fail-closed recovery path (#10297). Generationless legacy metadata keeps
   its prior interpretation.
-- **Active rewrites without a history shift rebind the sidecar (#14578).**
+- **Active rewrites without a history shift rebind the sidecar (#14578, #15023).**
   `PromoteRollback` (commit-confirmed timeout), expired-window boot recovery
   (`recoverPendingConfirmLocked`), and the degraded persist-retry heal
   (`retryActiveConfigPersistLocked`) rewrite `active.json` (new inode) without
   pushing/shifting rollback history. Each now calls
   `rebindRollbackMetadataLocked` after its successful active write: it bumps
-  the sidecar generation and re-binds the existing slot bytes/identities to
-  the new active hash/inode, without rewriting slot contents. Without it the
-  next restart saw a generation mismatch and tombstoned the whole ladder.
-  Rebind failure is degrade-not-fail (`RollbackHistoryDegraded` + journal),
-  never blocking the rollback itself. Guarded by
-  `rollback_rebind_14578_test.go` (runtime, boot, and retry paths).
+  the sidecar generation and re-binds the slot set to the new active
+  hash/inode. Slot identity is derived from the IN-MEMORY history, never
+  from whatever bytes happen to be on disk (#15023): a live slot is hashed
+  from `entry.Config.Format()` and rewritten durably whenever its on-disk
+  bytes diverge; a tombstone always records (and restores) the tombstone
+  marker. A slot that cannot be made to match is recorded with an invalid
+  (zero) identity so the next load tombstones it, and the rebind stays
+  degraded. Without the #14578 rebind the next restart saw a generation
+  mismatch and tombstoned the whole ladder; without the #15023 correction
+  the rebind blessed a stale/tombstoned slot left by a prior slot-write
+  failure and cleared the degraded flag. Rebind failure is degrade-not-fail
+  (`RollbackHistoryDegraded` + journal), never blocking the rollback itself.
+  Guarded by `rollback_rebind_14578_test.go` (runtime, boot, and retry paths)
+  and `rollback_rebind_15023_test.go` (stale live slot, failed rewrite,
+  tombstone, healthy-ladder control).
 - Rollback-history degradation (#3441 L1): a rollback-slot write or the
   trailing dir-sync failing no longer just logs a warning. The commit
   still succeeds (the canonical active config already persisted via the
