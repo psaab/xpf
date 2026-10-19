@@ -40,8 +40,88 @@ type NatIndexBucket = SmallVec<[u32; 2]>;
 type SeededReverseIndex = HashMap<SessionKey, NatIndexBucket, HotPathSeededState>;
 type SeededForwardWireIndex = HashMap<SessionKey, NatIndexBucket, HotPathSeededState>;
 type SeededReverseTranslatedIndex = HashMap<SessionKey, NatIndexBucket, HotPathSeededState>;
-/// #10130/#10674: address-only index key for session-gated reply fragments.
-type SeededL3ReverseIndex = HashMap<L3ReverseKey, NatIndexBucket, HotPathSeededState>;
+/// #15087 (A62-01): the L3 reverse index maps one (family, src, dst) identity
+/// to MANY forward sessions — interface/pool SNAT collapses every session to
+/// one destination onto the same reversed (server, SNAT address) pair, and
+/// ports/protocol are erased by construction (a non-first fragment has no
+/// L4 header to key on). A linear `SmallVec` bucket therefore made insert
+/// (`contains`), removal (`retain`), and every live fragment probe O(bucket)
+/// — O(N) per op in the live same-destination session count. This aggregate
+/// keeps the same outer key but stores hashed membership plus per-protocol
+/// live-candidate counts, so insert/remove are O(1) amortized and a probe
+/// decides from counts alone (see `reverse_nat_fragment_requires_translation`).
+type SeededL3ReverseIndex = HashMap<L3ReverseKey, L3ReverseBucket, HotPathSeededState>;
+
+/// #15087: one L3 address identity's forward-session membership.
+///
+/// `handles` is the hashed membership set (seeded with the same keyed
+/// hasher as the outer index: handles are internal slab slots, but the SET
+/// SIZE is attacker-influenced via session count, so placement stays keyed).
+/// `protocol_counts[p]` counts members whose REAL reverse protocol is `p`
+/// (0..=255; 255 is a real IANA-reserved value here, never a stored session
+/// protocol — sessions carry real protocols only, and the shim's 255 probe
+/// sentinel is matched by summing the counts, never by storing 255).
+///
+/// INVARIANT: `protocol_counts` is exactly the multiset of
+/// `l3_reverse_key_for_forward(member).protocol` over `handles`, maintained
+/// at the same insert/remove sites that mutate `handles`. Counts are only
+/// as trustworthy as the slab record's CURRENT nat decision; the probe
+/// re-derives each member's decision and cross-checks (see lookup.rs), so
+/// a stale count can at worst cost a bounded scan, never a wrong verdict.
+struct L3ReverseBucket {
+    handles: std::collections::HashSet<u32, HotPathSeededState>,
+    protocol_counts: [u32; 256],
+}
+
+impl L3ReverseBucket {
+    fn new(hasher: HotPathSeededState) -> Self {
+        Self {
+            handles: std::collections::HashSet::with_hasher(hasher),
+            protocol_counts: [0; 256],
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.handles.is_empty()
+    }
+
+    #[cfg(debug_assertions)]
+    fn contains(&self, handle: u32) -> bool {
+        self.handles.contains(&handle)
+    }
+
+    /// Insert `handle` under its real reverse `protocol`. Returns true when
+    /// the handle was newly added (false = idempotent re-assert, #1753).
+    fn insert(&mut self, handle: u32, protocol: u8) -> bool {
+        if !self.handles.insert(handle) {
+            return false;
+        }
+        self.protocol_counts[protocol as usize] =
+            self.protocol_counts[protocol as usize].saturating_add(1);
+        true
+    }
+
+    /// Remove `handle` previously inserted under `protocol`. Returns true
+    /// when the handle was present.
+    fn remove(&mut self, handle: u32, protocol: u8) -> bool {
+        if !self.handles.remove(&handle) {
+            return false;
+        }
+        self.protocol_counts[protocol as usize] =
+            self.protocol_counts[protocol as usize].saturating_sub(1);
+        true
+    }
+
+    /// Members carrying real protocol `protocol` (exact probes).
+    fn count_for(&self, protocol: u8) -> u32 {
+        self.protocol_counts[protocol as usize]
+    }
+
+    /// All members, any real protocol (255-sentinel probes).
+    fn total(&self) -> u32 {
+        self.handles.len() as u32
+    }
+}
 /// S9.4 bounds the combined native/IPsec reply-alias population per tuple.
 pub(crate) const IPSEC_INNER_ALIAS_BUCKET_BOUND: usize = 8;
 /// The alias index stores only tunnel-scoped forward candidates. Native
@@ -1552,8 +1632,12 @@ pub(crate) struct SessionTable {
     /// family and addresses before reverse NAT. Ports are absent because a
     /// non-first fragment has no L4 header; its protocol is validated per
     /// candidate, or treated as unknown when metadata carries the shim's 255
-    /// sentinel.
+    /// sentinel. #15087: each bucket is a hashed set plus per-protocol counts.
     l3_reverse_index: SeededL3ReverseIndex,
+    /// #15087: hasher state for new `L3ReverseBucket` handle sets — the same
+    /// per-process keyed seed the outer L3 map uses, retained because
+    /// `HashMap::entry` cannot lend its own hasher to a new bucket.
+    l3_bucket_hasher: HotPathSeededState,
     /// #964 Step 1: owner-RG sets keyed by handle (was Key).
     owner_rg_sessions: FxHashMap<i32, FxHashSet<u32>>,
     /// RGs demoted during the current ownership epoch. The owner-RG index is
@@ -1887,6 +1971,7 @@ impl SessionTable {
             reverse_translated_index: HashMap::with_hasher(state.clone()),
             reply_alias_index: HashMap::with_hasher(state.clone()),
             l3_reverse_index: HashMap::with_hasher(state.clone()),
+            l3_bucket_hasher: state.clone(),
             leak_incarnations: HashMap::with_hasher(state.clone()),
             // owner_rg_sessions is keyed by i32 RG/ifindex (not an
             // attacker-chosen 5-tuple) with inner sets of internally
@@ -5169,13 +5254,15 @@ impl SessionTable {
         if !is_reverse && let Some(l3_key) = l3_reverse_key_for_forward(key, nat) {
             // #10130/#10674: the index buckets by family and reverse addresses;
             // its real protocol is validated at lookup, with 255 acting as the
-            // native-fragment wildcard. The bucket stays indexed by hash rather
-            // than requiring a scan across every session for sentinel probes.
+            // native-fragment wildcard. #15087: membership is hashed and the
+            // real protocol is counted at insert, so re-asserts and removals
+            // stay O(1) however many sessions share this address identity.
             let index_key = l3_reverse_fragment_index_key(l3_key);
-            let bucket = self.l3_reverse_index.entry(index_key).or_default();
-            if !bucket.contains(&handle) {
-                bucket.push(handle);
-            }
+            let bucket = self
+                .l3_reverse_index
+                .entry(index_key)
+                .or_insert_with(|| L3ReverseBucket::new(self.l3_bucket_hasher));
+            bucket.insert(handle, l3_key.protocol);
         }
         if owner_rg_id > 0 {
             self.owner_rg_sessions
@@ -5252,7 +5339,12 @@ impl SessionTable {
         );
         if let Some(l3_key) = l3_reverse_key_for_forward(key, nat) {
             let index_key = l3_reverse_fragment_index_key(l3_key);
-            l3_reverse_bucket_remove(&mut self.l3_reverse_index, &index_key, handle);
+            l3_reverse_bucket_remove(
+                &mut self.l3_reverse_index,
+                &index_key,
+                handle,
+                l3_key.protocol,
+            );
         }
     }
 
@@ -5286,7 +5378,7 @@ impl SessionTable {
             && !self
                 .l3_reverse_index
                 .values()
-                .any(|bucket| bucket.contains(&handle))
+                .any(|bucket| bucket.contains(handle))
             && !self
                 .bare_tuple_index
                 .values()
@@ -5396,9 +5488,20 @@ fn nat_index_bucket_remove(
     }
 }
 
-fn l3_reverse_bucket_remove(map: &mut SeededL3ReverseIndex, key: &L3ReverseKey, handle: u32) {
+/// #15087: O(1) per-handle removal from the hashed L3 bucket; the outer key
+/// drops only once its last member leaves. `protocol` must be the same real
+/// reverse protocol the handle was inserted under (the caller re-derives it
+/// from the same forward key + nat decision), or the per-protocol counts
+/// drift — the probe cross-checks counts against live records, so drift
+/// degrades to a bounded scan, never a wrong verdict.
+fn l3_reverse_bucket_remove(
+    map: &mut SeededL3ReverseIndex,
+    key: &L3ReverseKey,
+    handle: u32,
+    protocol: u8,
+) {
     if let Some(bucket) = map.get_mut(key) {
-        bucket.retain(|h| *h != handle);
+        bucket.remove(handle, protocol);
         if bucket.is_empty() {
             map.remove(key);
         }
@@ -5599,3 +5702,9 @@ mod handshake_cache_hit_14939_tests;
 #[cfg(test)]
 #[path = "probe_hit_14945_tests.rs"]
 mod probe_hit_14945_tests;
+
+// #15087 (A62-01): L3 reverse bucket must stay O(1) under same-destination
+// SNAT fan-in (hashed membership + per-protocol counts, bounded probe).
+#[cfg(test)]
+#[path = "l3_reverse_bucket_15087_tests.rs"]
+mod l3_reverse_bucket_15087_tests;

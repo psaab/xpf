@@ -1264,6 +1264,27 @@ impl SessionTable {
     /// records and expiry. A live tuple candidate remains fail-closed even when
     /// its egress domain differs, because a missing fragment association cannot
     /// safely carry out the required translation.
+    ///
+    /// #15087 (A62-01): the verdict needs only PRESENCE of one live,
+    /// protocol-matching member, so it is decided from the bucket's
+    /// per-protocol counts plus a bounded verification walk — never a scan
+    /// whose length grows with the same-destination session count. The
+    /// walk re-derives at most `L3_PROBE_SCAN_BUDGET` members from their
+    /// live slab records (same-domain returns TRUE at once, a live
+    /// cross-domain member sets the fail-closed flag, expired/reverse/
+    /// wrong-protocol members are skipped — exactly the pre-#15087 scan's
+    /// per-member rules). If the walk visits every member, its verdict is
+    /// exact. If members remain unvisited and the counts claim matching
+    /// members among them, the answer is TRUE: every live-matching outcome
+    /// (same-domain, cross-domain fail-closed, quarantined) is TRUE, so
+    /// presence alone decides and no domain probing is needed. If the
+    /// counts say no matching member exists, the answer is FALSE without
+    /// walking. Expired members still occupy the bucket until GC removes
+    /// them; a bucket whose members are ALL expired is visited in full
+    /// when it fits the budget (exact FALSE), and a larger all-expired
+    /// bucket returns the fail-closed TRUE until GC drains it — bounded
+    /// over-drop of fragment tails for already-dead sessions, never a
+    /// fail-open. See `probe_l3_reverse_bucket`.
     pub fn reverse_nat_fragment_requires_translation<F>(
         &self,
         reply_key: &L3ReverseKey,
@@ -1278,43 +1299,15 @@ impl SessionTable {
         let Some(bucket) = self.l3_reverse_index.get(&index_key) else {
             return false;
         };
-        let mut live_candidate = false;
-        for &handle in bucket {
-            let Some(record) = self.entries.get(handle as usize) else {
-                continue;
-            };
-            let entry = &record.entry;
-            let Some(forward_reply_key) =
-                l3_reverse_key_for_forward(&record.key, entry.decision.nat)
-            else {
-                continue;
-            };
-            if entry.metadata.is_reverse
-                || l3_reverse_fragment_index_key(forward_reply_key) != index_key
-                || (reply_key.protocol != SHIM_PROTO_FRAGMENT_NO_L4
-                    && forward_reply_key.protocol != reply_key.protocol)
-                || now_ns.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns
-            {
-                continue;
-            }
-            live_candidate = true;
-            let forward_domain =
-                egress_routing_domain(entry.decision.resolution.egress_ifindex);
-            if forward_domain == reply_routing_domain {
-                return true;
-            }
-            // NOTE (#11061 R3): no quarantine skip here on purpose. A
-            // quarantined-domain tail takes the same live-candidate path as
-            // any other domain (TRUE below): the caller drops on TRUE, so
-            // quarantined tails are dropped without borrowing a tenant
-            // candidate. An earlier revision fenced quarantined domains with
-            // `continue`, but that was unobservable (the live flag already
-            // yields TRUE) — the session/tests.rs AMBIGUOUS|2 pin below
-            // asserts this outcome, not a fence mechanism.
-        }
-        // A live candidate whose egress domain differs from the reply is still
-        // deliberately fail-closed: do not let the ambiguous tail bypass NAT.
-        live_candidate
+        probe_l3_reverse_bucket(
+            bucket,
+            &index_key,
+            reply_key,
+            reply_routing_domain,
+            now_ns,
+            |handle| self.entries.get(handle as usize),
+            egress_routing_domain,
+        )
     }
 
     pub fn find_forward_wire_match(&self, wire_key: &SessionKey) -> Option<ForwardSessionMatch> {
@@ -1911,6 +1904,110 @@ impl SessionTable {
         }
         if end >= cap { Complete } else { ResumeAt(end) }
     }
+}
+
+/// #15087: upper bound on slab records one fragment probe re-derives before
+/// deferring to the bucket's per-protocol counts. Any constant works for
+/// correctness (the counts decide); 8 keeps the common live-member case to
+/// a handful of slab reads while making the worst case independent of the
+/// same-destination session count.
+const L3_PROBE_SCAN_BUDGET: usize = 8;
+
+/// #15087: O(1) fragment-gate probe over one L3 bucket. See
+/// `reverse_nat_fragment_requires_translation` for the contract. Split out
+/// as a free function over a record-accessor closure so the count/drift
+/// logic is unit-testable without a full `SessionTable`.
+///
+/// `get_record(handle)` must return the CURRENT slab record for `handle`
+/// (or `None` for a stale handle). The probe never trusts a stored bucket
+/// identity: every visited member's reverse key is re-derived from its
+/// live record, exactly as the pre-#15087 full scan did.
+fn probe_l3_reverse_bucket<'a, G, F>(
+    bucket: &L3ReverseBucket,
+    index_key: &L3ReverseKey,
+    reply_key: &L3ReverseKey,
+    reply_routing_domain: u32,
+    now_ns: u64,
+    mut get_record: G,
+    egress_routing_domain: F,
+) -> bool
+where
+    G: FnMut(u32) -> Option<&'a SessionRecord>,
+    F: Fn(i32) -> u32,
+{
+    let exact = reply_key.protocol != SHIM_PROTO_FRAGMENT_NO_L4;
+    let counted = if exact {
+        bucket.count_for(reply_key.protocol)
+    } else {
+        bucket.total()
+    };
+    if counted == 0 {
+        return false;
+    }
+    let mut live_candidate = false;
+    let mut visited: u32 = 0;
+    let mut counted_visited: u32 = 0;
+    for &handle in bucket.handles.iter().take(L3_PROBE_SCAN_BUDGET) {
+        visited += 1;
+        let Some(record) = get_record(handle) else {
+            continue;
+        };
+        let entry = &record.entry;
+        let Some(forward_reply_key) =
+            l3_reverse_key_for_forward(&record.key, entry.decision.nat)
+        else {
+            continue;
+        };
+        if l3_reverse_fragment_index_key(forward_reply_key) == *index_key {
+            counted_visited += 1;
+        }
+        if entry.metadata.is_reverse
+            || l3_reverse_fragment_index_key(forward_reply_key) != *index_key
+            || (exact && forward_reply_key.protocol != reply_key.protocol)
+            || now_ns.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns
+        {
+            continue;
+        }
+        live_candidate = true;
+        if egress_routing_domain(entry.decision.resolution.egress_ifindex)
+            == reply_routing_domain
+        {
+            return true;
+        }
+        // NOTE (#11061 R3): no quarantine skip here on purpose, exactly as
+        // the pre-#15087 scan: a quarantined-domain tail takes the same
+        // live-candidate path (TRUE via `live_candidate` below).
+    }
+    if live_candidate {
+        return true;
+    }
+    // Presence fallback: counts claim matching members the bounded walk did
+    // not prove live. Answer TRUE (fail closed) ONLY when the walk is
+    // consistent with counts — every visited member re-derived into this
+    // bucket, so `counted_visited <= counted` must hold with equality iff
+    // the walk visited every counted member. If the walk visited ALL
+    // members (`visited == bucket size`) and found none live, counts are
+    // proven complete and the answer is exactly FALSE. If unvisited
+    // members remain, at least one counted member is unexamined; it may
+    // be live (sessions only leave the bucket via GC-timed removal, and
+    // expiry is a per-record deadline the counts cannot see), so the
+    // fail-closed answer is TRUE. Count DRIFT (visited members re-deriving
+    // OUTSIDE this bucket, i.e. `counted_visited` under-counting visited
+    // members that no longer belong here) means the counts describe a
+    // stale membership; unvisited members are then just as suspect, and
+    // TRUE remains the fail-closed answer.
+    let visited_all = visited as usize >= bucket.handles.len();
+    if visited_all && counted_visited >= counted {
+        // Walk examined every member the counts can describe and found
+        // none live-matching: exact FALSE.
+        return false;
+    }
+    if counted > counted_visited {
+        // Unvisited counted members remain (or counts drifted upward):
+        // presence of a possibly-live matching member -> fail closed.
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]
