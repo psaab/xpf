@@ -176,21 +176,21 @@ var zeroizeFullWipe = grpcapi.PerformZeroizeWipeUngated
 var zeroizeFullWipePending = grpcapi.PerformZeroizeWipePending
 
 // cliZeroizeArchiveDir returns the archive directory the CONSOLE zeroize path
-// erases (#7173).
-//
-// The console path is a recovery surface: it runs when the daemon may be down
-// and the committed config may be unreadable, so it cannot ask the store what
-// `system archival archive-dir` was set to. It therefore erases the xpf-owned
-// DEFAULT, which is provably safe, and a custom archive dir is left for the
-// operator — the same disposition FactoryResetArchiveDir would reach anyway,
-// since it refuses to erase a directory whose ownership it cannot prove.
-//
-// The difference from the gRPC path is honest and worth stating: there, the
-// configured directory is known and a skip is reported as an incomplete reset.
-// Here it is not known, so a custom archive is not merely skipped but never
-// seen. An operator who zeroizes from the console with a custom archive-dir
-// must erase it by hand.
-func cliZeroizeArchiveDir() string {
+// erases (#15729). Like the gRPC path (#7173), it hands the wipe the store's
+// CONFIGURED archive dir when one is set, so FactoryResetArchiveDir's
+// ownership guard can fire and surface an *ArchiveDirSkippedError for a
+// custom dir (which performConsoleZeroize propagates fail-closed instead of
+// stopping the daemon on a clean-looking reset). Only when archival is
+// unset/disabled does it fall back to the xpf-owned default, whose
+// snapshots survive archival disable. A nil store likewise falls back to
+// the default; performConsoleZeroize has already failed closed on a
+// missing config root before this is consulted.
+func (c *CLI) cliZeroizeArchiveDir() string {
+	if c != nil && c.store != nil {
+		if configured := c.store.ArchiveDir(); configured != "" {
+			return configured
+		}
+	}
 	return configstore.DefaultArchiveDir
 }
 
@@ -246,9 +246,9 @@ func (c *CLI) performConsoleZeroize() error {
 		logInventory := grpcapi.ZeroizeLogInventoryFromConfig(c.store.ActiveConfig())
 		helperPath := dpuserspace.StateFilePathForConfig(c.store.ActiveConfig())
 		if c.factoryResetFn != nil {
-			return zeroizeFullWipePending(configDir, configBase, cliZeroizeArchiveDir(), logInventory, helperPath)
+			return zeroizeFullWipePending(configDir, configBase, c.cliZeroizeArchiveDir(), logInventory, helperPath)
 		}
-		return zeroizeFullWipe(configDir, configBase, cliZeroizeArchiveDir(), logInventory, helperPath)
+		return zeroizeFullWipe(configDir, configBase, c.cliZeroizeArchiveDir(), logInventory, helperPath)
 	}
 
 	// Route through the daemon's coordinated transaction when wired. When it is

@@ -415,21 +415,25 @@ func FactoryResetArchiveDir(archiveDir string) error {
 			"compliance archive destination is the operator's to erase, not "+
 			"the factory reset's",
 			"dir", archiveDir, "default", DefaultArchiveDir)
-		// #7173: the skip is a FIRST-CLASS RESULT, not a log line. This
-		// function's own contract two paragraphs above says a merely
-		// non-durable erasure "must not be reported as a clean zeroize"; a
-		// skipped one did not happen AT ALL, which is strictly worse, and it
-		// returned nil. An operator who ran zeroize on a box with a custom
-		// archive-dir was told the reset completed while every archived config
-		// snapshot — carrying cleartext IKE PSKs, WireGuard keys and SNMP
-		// communities — was still on disk.
-		//
-		// The skip itself stays: erasing a directory whose ownership cannot be
-		// proven could destroy compliance records that are not xpf's to delete.
-		// What changes is that the caller can no longer mistake it for success.
-		return &ArchiveDirSkippedError{Dir: archiveDir}
+		// #7173: the skip is a FIRST-CLASS RESULT, not a log line.
+		skipErr := &ArchiveDirSkippedError{Dir: archiveDir}
+		// #15729: a custom archive-dir does not prove the xpf-owned DEFAULT
+		// is empty — snapshots written before the operator switched (or
+		// while archival was briefly defaulted) still hold cleartext
+		// config text there. Erase the default we provably own even
+		// though the configured custom dir is skipped, and join any
+		// default-erase failure with the skip so neither is lost.
+		if err := eraseArchiveDir(DefaultArchiveDir); err != nil {
+			return errors.Join(skipErr, err)
+		}
+		return skipErr
 	}
+	return eraseArchiveDir(archiveDir)
+}
 
+// eraseArchiveDir erases one archive directory already proven to be the
+// xpf-owned default (see FactoryResetArchiveDir's ownership guard).
+func eraseArchiveDir(archiveDir string) error {
 	var firstErr error
 	fail := func(err error) {
 		if err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
@@ -480,11 +484,10 @@ func FactoryResetArchiveDir(archiveDir string) error {
 	// Erase the whole archive tree — every config-<ts>.<seq>.conf snapshot of
 	// the prior tenant's config text. RemoveAll is nil on an absent dir.
 	fail(os.RemoveAll(archiveDir))
-
 	// fsync the PARENT so the unlink of the archive directory entry itself is
 	// durable before the reboot that completes the factory reset. A sync
 	// failure is propagated — a silently non-durable erasure must never be
-	// reported as a clean zeroize. ErrNotExist (parent absent → nothing was
+	// reported as a clean zeroize. ErrNotExist (parent absent — nothing was
 	// removed) is excluded by fail().
 	fail(rbSyncDir(filepath.Dir(archiveDir)))
 	var result []error
@@ -889,7 +892,7 @@ func FactoryResetConfigDirWithSync(configDir, configBase string, syncDir func(st
 			strings.HasPrefix(name, "dhcpv6-duid-") ||
 			isTextRollbackSlot(name, configBase) ||
 			isOwnedFactoryResetBackup(name, configBase) ||
-			isFsatomicTemp(name) {
+			isFsatomicTemp(name) || isDay0StagedTemp(name) {
 			found, herr := CollectHardlinkedFiles(full, "")
 			hardlinks = append(hardlinks, found...)
 			fail(herr)
@@ -1086,4 +1089,37 @@ func isTextRollbackSlot(name, configBase string) bool {
 func isFsatomicTemp(name string) bool {
 	ok, _ := filepath.Match(".*.tmp-*", name)
 	return ok
+}
+
+// isDay0StagedTemp reports whether name is a crash-leaked xpf-day0-config
+// staging file — the ".<base>.XXXXXX" shape scripts/image/xpf-day0-config
+// creates with mktemp (".xpf.conf.XXXXXX" for the durable install, and
+// ".$base.XXXXXX" generally via write_line_durable) before its durable
+// rename. mktemp replaces the six X's with a random [A-Za-z0-9_] suffix,
+// so a loader killed between mktemp and the rename leaves one behind
+// holding the FULL cleartext config it was installing — the #15729
+// sibling of the fsatomic temp shape above. It is intentionally narrow:
+// the name must start with ".", contain a second "." before the suffix,
+// and carry exactly six alnum/underscore characters after the final dot,
+// so ".day0-config-applied", ".config.journal" and fsatomic
+// ".<base>.tmp-<rand>" names never match (fsatomic suffixes follow "-",
+// not ".").
+func isDay0StagedTemp(name string) bool {
+	if !strings.HasPrefix(name, ".") {
+		return false
+	}
+	idx := strings.LastIndex(name, ".")
+	if idx <= 0 {
+		return false
+	}
+	suffix := name[idx+1:]
+	if len(suffix) != 6 {
+		return false
+	}
+	for _, r := range suffix {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' {
+			return false
+		}
+	}
+	return true
 }
