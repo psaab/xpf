@@ -10,6 +10,15 @@ xpf (0.0.0) unstable; urgency=medium
     and the stored content hash no longer described the retained
     snapshot. All three paths now retain exactly the prepared snapshot
     the helper accepted (#15043).
+  * Reject a firewall-filter term that pairs an icmp-type/icmp-code match
+    with the sibling family's ICMP protocol (next-header/protocol icmp/1
+    under family inet6, or icmpv6/58 under family inet) at strict commit,
+    warn on tolerant load, and fail such snapshots closed in the
+    userspace dataplane. The term could never match (the icmp-type name
+    resolves with the filter family's table while the protocol number is
+    the other family's), so a discard/reject term silently fell through
+    to the implicit accept. Family-correct icmp/icmpv6 terms are
+    unchanged (#15045).
   * Warn at commit when an IKE gateway sets an explicit DPD
     `dead-peer-detection threshold` and can negotiate IKEv2 (no
     `version` pin or `v2-only`): strongSwan honours the rendered
