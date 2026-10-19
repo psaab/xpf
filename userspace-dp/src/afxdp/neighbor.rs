@@ -91,6 +91,63 @@ pub(super) fn report_na_unsolicited_override_refusal(
     }
 }
 
+/// #15097: rate limit for re-asserting the dataplane's held MAC into the
+/// kernel after a refused `NUD_PROBE`. Per key, at most one re-assert per
+/// second — the kernel's own retransmit tail re-notifies within that
+/// window, and the dataplane entry does not change between refusals, so
+/// re-programming more often buys nothing and would let a spoofed-ARP
+/// flood drive unbounded netlink work on the monitor thread. The state
+/// is a process-global sharded map (the monitor is a single thread, but
+/// `parse_neighbor_msg` is also driven from tests); bounded by pruning
+/// entries older than the interval on each insertion past the cap.
+pub(super) const REFUSED_PROBE_REASSERT_INTERVAL_NS: u64 = 1_000_000_000;
+const REFUSED_PROBE_REASSERT_MAX_KEYS: usize = 4096;
+
+static REFUSED_PROBE_REASSERTED_AT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(i32, std::net::IpAddr), u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// #15097: decide (and record) whether a refused-probe re-assert for
+/// `key` may fire at `now_ns`. Pure decision + bookkeeping, split from
+/// the netlink syscall so the rate limit is unit-testable without a
+/// privileged socket (mirrors the #4475 builder split).
+pub(super) fn should_reassert_refused_probe(key: (i32, IpAddr), now_ns: u64) -> bool {
+    let mut map = REFUSED_PROBE_REASSERTED_AT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(&last) = map.get(&key) {
+        if now_ns.saturating_sub(last) < REFUSED_PROBE_REASSERT_INTERVAL_NS {
+            return false;
+        }
+    } else if map.len() >= REFUSED_PROBE_REASSERT_MAX_KEYS {
+        map.retain(|_, last| now_ns.saturating_sub(*last) < REFUSED_PROBE_REASSERT_INTERVAL_NS);
+        if map.len() >= REFUSED_PROBE_REASSERT_MAX_KEYS {
+            return false;
+        }
+    }
+    map.insert(key, now_ns);
+    true
+}
+
+/// #15097: on a refused kernel `NUD_PROBE` (the kernel is probing a MAC
+/// the dataplane refused and does not hold), re-assert the dataplane's
+/// held MAC `held_mac` into the kernel with REPLACE semantics so the
+/// kernel's unicast re-probe validates `held_mac` — not the refused MAC.
+/// If the held host genuinely moved, its new MAC never answers a probe
+/// of the old one, the entry fails to `NUD_FAILED`, and fresh resolution
+/// converges; if the refused MAC was a spoof, the genuine host answers
+/// and the kernel entry stays at the held MAC. Rate-limited per key via
+/// [`should_reassert_refused_probe`]; the syscall reuses the #4475
+/// `NUD_STALE` encoding (`add_kernel_neighbor`).
+pub(super) fn reassert_held_neighbor_after_refused_probe(
+    key: (i32, IpAddr),
+    held_mac: [u8; 6],
+    now_ns: u64,
+) {
+    if should_reassert_refused_probe(key, now_ns) {
+        add_kernel_neighbor(key.0, key.1, held_mac);
+    }
+}
 
 pub(super) fn monotonic_timestamp_to_datetime(
     last_nanos: u64,
@@ -730,6 +787,13 @@ pub(super) enum NeighborMsgEffect {
     Removed,
 }
 
+/// #15097: seam for the refused-probe kernel re-assert. Production wires
+/// this to `reassert_held_neighbor_after_refused_probe` (a rate-limited
+/// `add_kernel_neighbor` REPLACE of the held MAC); tests substitute a
+/// recorder so the re-assert decision is observable without a privileged
+/// netlink socket.
+pub(super) type RefusedProbeReassert<'a> = dyn Fn((i32, IpAddr), [u8; 6], u64) + Sync + 'a;
+
 /// Parse one kernel RTM_{NEW,DEL}NEIGH message for the configured interface
 /// keyspace. IPv4 upserts are the production ARP learn path because the XDP
 /// shim passes ARP to the kernel; differing MACs therefore use the same
@@ -739,6 +803,22 @@ pub(super) fn parse_neighbor_msg(
     body: &[u8],
     monitored_ifindexes: &FastSet<i32>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
+) -> NeighborMsgEffect {
+    parse_neighbor_msg_with_reassert(
+        nlmsg_type,
+        body,
+        monitored_ifindexes,
+        dynamic_neighbors,
+        &reassert_held_neighbor_after_refused_probe,
+    )
+}
+
+pub(super) fn parse_neighbor_msg_with_reassert(
+    nlmsg_type: u16,
+    body: &[u8],
+    monitored_ifindexes: &FastSet<i32>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    reassert: &RefusedProbeReassert<'_>,
 ) -> NeighborMsgEffect {
     fn removal(removed: bool) -> NeighborMsgEffect {
         if removed {
@@ -826,8 +906,11 @@ pub(super) fn parse_neighbor_msg(
                 // refreshes and first learns. Peek before the insert, then
                 // consume only when this update actually replaces a different
                 // existing MAC.
-                let solicited = dynamic_neighbors.peek_arp_reply_solicited(&key, now_ns)
-                    || (state & NUD_PERMANENT) != 0;
+                // #15097: the peek is MAC-aware — a token bound to MAC `G`
+                // does not authorize a differing update to `A != G`.
+                let solicited =
+                    dynamic_neighbors.peek_arp_reply_solicited_for_mac(&key, Some(mac), now_ns)
+                        || (state & NUD_PERMANENT) != 0;
                 let result = dynamic_neighbors.insert_arp_reply_if_solicited_allows(
                     key,
                     NeighborEntry { mac },
@@ -836,11 +919,31 @@ pub(super) fn parse_neighbor_msg(
                 if matches!(result, Some(true)) {
                     dynamic_neighbors.take_arp_reply_solicited(&key, now_ns);
                 }
-                // The kernel's own NUD_PROBE notification is evidence of an
-                // actual probe for the next matching ARP update. Do not let
-                // this notification itself authorize a MAC change.
+                // #15097: a kernel NUD_PROBE notification is evidence of
+                // a probe ONLY for the MAC it carries, and only when that
+                // MAC is the one the dataplane holds. If the kernel is
+                // probing a MAC the dataplane refused (kernel entry at
+                // attacker MAC `A`, dataplane at genuine `G`), mint NO
+                // token, clear any stale token for the key, and
+                // re-assert `G` into the kernel (rate-limited) so the
+                // kernel re-probes `G` rather than `A`. Previously this
+                // arm recorded a key-only token whatever the lladdr, so
+                // the attacker's subsequent REACHABLE `A` update was
+                // authorized by the kernel's own re-probe of `A`.
                 if (state & NUD_PROBE) != 0 {
-                    dynamic_neighbors.record_neighbor_probe(key, now_ns);
+                    let held = dynamic_neighbors.get(&key).map(|e| e.mac);
+                    match held {
+                        Some(held_mac) if held_mac == mac => {
+                            dynamic_neighbors.record_neighbor_probe_for_mac(key, Some(mac), now_ns);
+                        }
+                        Some(held_mac) => {
+                            dynamic_neighbors.clear_neighbor_probe(&key);
+                            reassert(key, held_mac, now_ns);
+                        }
+                        None => {
+                            dynamic_neighbors.record_neighbor_probe_for_mac(key, Some(mac), now_ns);
+                        }
+                    }
                 }
                 match result {
                     Some(changed) => {
@@ -872,8 +975,13 @@ pub(super) fn parse_neighbor_msg(
                 // update, exactly as on the v4 arm; refusals are counted via
                 // the NA report (single counting point, mirroring #11069).
                 let now_ns = monotonic_nanos();
-                let solicited = dynamic_neighbors.peek_arp_reply_solicited(&key, now_ns)
-                    || (state & NUD_PERMANENT) != 0;
+                // #15097: MAC-aware peek + MAC-bound NUD_PROBE token, as
+                // on the v4 arm — a kernel probe of a refused NA's MAC
+                // mints no authorization for that MAC and re-asserts the
+                // held MAC into the kernel instead.
+                let solicited =
+                    dynamic_neighbors.peek_arp_reply_solicited_for_mac(&key, Some(mac), now_ns)
+                        || (state & NUD_PERMANENT) != 0;
                 let result = dynamic_neighbors.insert_arp_reply_if_solicited_allows(
                     key,
                     NeighborEntry { mac },
@@ -883,7 +991,19 @@ pub(super) fn parse_neighbor_msg(
                     dynamic_neighbors.take_arp_reply_solicited(&key, now_ns);
                 }
                 if (state & NUD_PROBE) != 0 {
-                    dynamic_neighbors.record_neighbor_probe(key, now_ns);
+                    let held = dynamic_neighbors.get(&key).map(|e| e.mac);
+                    match held {
+                        Some(held_mac) if held_mac == mac => {
+                            dynamic_neighbors.record_neighbor_probe_for_mac(key, Some(mac), now_ns);
+                        }
+                        Some(held_mac) => {
+                            dynamic_neighbors.clear_neighbor_probe(&key);
+                            reassert(key, held_mac, now_ns);
+                        }
+                        None => {
+                            dynamic_neighbors.record_neighbor_probe_for_mac(key, Some(mac), now_ns);
+                        }
+                    }
                 }
                 match result {
                     Some(changed) => {
@@ -2705,8 +2825,11 @@ mod noarp_listener_10690_tests {
         assert_eq!(neighbors.arp_overwrite_refusals(), refusals + 1);
 
         // NUD_PROBE is the kernel's explicit request to revalidate this
-        // neighbor. The probe notification itself cannot replace the MAC;
-        // its subsequent reply can.
+        // neighbor. The probe notification itself cannot replace the MAC.
+        // #15097: the token it mints is bound to the probed MAC (the held
+        // `live_mac`), so it authorizes only a same-MAC confirmation —
+        // a differing failover MAC needs a fresh locally-issued probe or
+        // the FAILED/fresh-resolution cycle (pinned in the #15097 cells).
         assert_eq!(
             parse_neighbor_msg(
                 28,
@@ -2724,12 +2847,25 @@ mod noarp_listener_10690_tests {
                 &monitored,
                 &neighbors,
             ),
+            NeighborMsgEffect::None,
+            "a MAC-bound probe token for the held MAC must not authorize \
+             a differing MAC (#15097)"
+        );
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(live_mac));
+        neighbors.record_neighbor_probe(key, monotonic_nanos());
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_body(7, ip, failover_mac, NUD_REACHABLE),
+                &monitored,
+                &neighbors,
+            ),
             NeighborMsgEffect::Upserted,
-            "a differing MAC confirmed after a kernel probe must converge"
+            "a differing MAC confirmed after a local probe must converge"
         );
         assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(failover_mac));
         assert_eq!(neighbors.mac_change_epoch_for(&key), epoch + 1);
-        assert_eq!(neighbors.arp_overwrite_refusals(), refusals + 1);
+        assert_eq!(neighbors.arp_overwrite_refusals(), refusals + 2);
     }
     /// #13661 fail-on-revert: a same-MAC NUD state refresh inside the
     /// solicitation window must NOT consume the one-shot probe token.
@@ -2788,6 +2924,237 @@ mod noarp_listener_10690_tests {
         );
     }
 
+    /// #15097 (A66-05) fail-on-revert — v4 cell. One spoofed ARP reply
+    /// the kernel accepted installs attacker MAC `A` in the KERNEL table
+    /// while the dataplane refuses it and holds genuine `G`. The kernel
+    /// then unicast re-probes `A` and notifies `NUD_PROBE(A)`. Pre-fix,
+    /// that notification minted a key-only token, so the attacker's
+    /// answering `REACHABLE(A)` update replaced `G` in the dataplane —
+    /// the refused hijack became authorized, while the refusal counter
+    /// still reported a refusal. Post-fix: `NUD_PROBE(A)` mints nothing,
+    /// clears any stale token, and re-asserts `G` into the kernel; the
+    /// `REACHABLE(A)` follow-up is refused and `G` survives. The issue's
+    /// `PROBE G then REACHABLE G2` positive control is preserved in
+    /// substance — a probe solicits the genuine host's answer — but with
+    /// the token MAC-bound it converges through the same paths production
+    /// uses for a genuine move (local probe, or `NUD_FAILED` removal +
+    /// fresh first-learn), both pinned in the companion cell below; the
+    /// old direct kernel-probe-to-differing-MAC leg was the vulnerability
+    /// itself and is now refused (pinned in the updated #10704/#13660
+    /// cells).
+    #[test]
+    fn refused_kernel_probe_mints_no_token_and_reasserts_held_mac_15097() {
+        const NUD_REACHABLE: u16 = 0x02;
+        const NUD_PROBE: u16 = 0x10;
+        const NUD_FAILED: u16 = 0x20;
+        let ip = Ipv4Addr::new(10, 0, 61, 50);
+        let monitored = FastSet::from_iter([7]);
+        let key = (7, IpAddr::V4(ip));
+        let genuine_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01];
+        let attack_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee];
+        let failover_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02];
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        assert!(neighbors.insert_if_changed(key, NeighborEntry { mac: genuine_mac }));
+        let epoch = neighbors.mac_change_epoch_for(&key);
+
+        let reasserts: std::sync::Mutex<Vec<((i32, IpAddr), [u8; 6])>> =
+            std::sync::Mutex::new(Vec::new());
+        let reassert = |k: (i32, IpAddr), m: [u8; 6], _now: u64| {
+            reasserts.lock().unwrap().push((k, m));
+        };
+
+        // Step 1: spoofed reply reaches the kernel; the monitor refuses
+        // it in the dataplane (counters report the refusal).
+        assert_eq!(
+            parse_neighbor_msg_with_reassert(
+                28,
+                &newneigh_body(7, ip, attack_mac, NUD_REACHABLE),
+                &monitored,
+                &neighbors,
+                &reassert,
+            ),
+            NeighborMsgEffect::None,
+            "step 1: unsolicited attacker MAC must be refused"
+        );
+        assert_eq!(neighbors.get(&key).map(|e| e.mac), Some(genuine_mac));
+        assert_eq!(neighbors.arp_overwrite_refusals(), 1);
+        assert!(reasserts.lock().unwrap().is_empty());
+
+        // Step 2: the kernel unicast re-probes the MAC in ITS table
+        // (`A`) and notifies NUD_PROBE(A).
+        assert_eq!(
+            parse_neighbor_msg_with_reassert(
+                28,
+                &newneigh_body(7, ip, attack_mac, NUD_PROBE),
+                &monitored,
+                &neighbors,
+                &reassert,
+            ),
+            NeighborMsgEffect::None,
+            "step 2: the refused-MAC probe notification itself changes nothing"
+        );
+        assert_eq!(neighbors.get(&key).map(|e| e.mac), Some(genuine_mac));
+        assert_eq!(
+            *reasserts.lock().unwrap(),
+            vec![(key, genuine_mac)],
+            "step 2: the held MAC G must be re-asserted into the kernel \
+             so its re-probe validates G, not A"
+        );
+        assert!(
+            !neighbors.peek_arp_reply_solicited_for_mac(&key, Some(attack_mac), monotonic_nanos()),
+            "step 2: no token may authorize the refused MAC"
+        );
+
+        // Step 3: the attacker answers its own probe; the kernel reports
+        // REACHABLE(A). Pre-fix this replaced G; it must now be refused.
+        assert_eq!(
+            parse_neighbor_msg_with_reassert(
+                28,
+                &newneigh_body(7, ip, attack_mac, NUD_REACHABLE),
+                &monitored,
+                &neighbors,
+                &reassert,
+            ),
+            NeighborMsgEffect::None,
+            "step 3: the probe-of-refused-MAC answer must not authorize A"
+        );
+        assert_eq!(
+            neighbors.get(&key).map(|e| e.mac),
+            Some(genuine_mac),
+            "step 3: the dataplane must keep G"
+        );
+        assert_eq!(neighbors.mac_change_epoch_for(&key), epoch);
+        assert_eq!(neighbors.arp_overwrite_refusals(), 3);
+
+        // Rate-limit control: a second refused NUD_PROBE(A) inside the
+        // interval re-asserts nothing new (production limiter), and G
+        // still survives. Exercised via the seam's production closure
+        // shape: the recorder above is unthrottled, so assert the
+        // limiter decision directly in the dedicated limiter cell
+        // below; here only the token invariant is re-checked.
+        assert!(
+            !neighbors.peek_arp_reply_solicited_for_mac(&key, Some(attack_mac), monotonic_nanos()),
+            "the refused MAC must stay unauthorized"
+        );
+    }
+
+    /// #15097 positive controls: the #10704 convergence (probe of the
+    /// held MAC, then a differing REACHABLE) and the genuinely-moved
+    /// host recovery (FAILED removal, then fresh resolution) keep
+    /// working after the token is MAC-bound.
+    #[test]
+    fn held_mac_probe_still_converges_and_failed_recovers_15097() {
+        const NUD_REACHABLE: u16 = 0x02;
+        const NUD_PROBE: u16 = 0x10;
+        const NUD_FAILED: u16 = 0x20;
+        let ip = Ipv4Addr::new(10, 0, 61, 50);
+        let monitored = FastSet::from_iter([7]);
+        let key = (7, IpAddr::V4(ip));
+        let genuine_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01];
+        let failover_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02];
+        let noop_reassert = |_: (i32, IpAddr), _: [u8; 6], _: u64| {};
+
+        // Positive control: kernel probes the MAC the dataplane holds,
+        // then the host answers from its new MAC — must converge.
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        assert!(neighbors.insert_if_changed(key, NeighborEntry { mac: genuine_mac }));
+        assert_eq!(
+            parse_neighbor_msg_with_reassert(
+                28,
+                &newneigh_body(7, ip, genuine_mac, NUD_PROBE),
+                &monitored,
+                &neighbors,
+                &noop_reassert,
+            ),
+            NeighborMsgEffect::None,
+        );
+        // The MAC-bound token for G does not itself authorize G2; the
+        // kernel's post-probe REACHABLE(G) refresh is a same-MAC no-op,
+        // and the genuine move arrives via a fresh local probe / kernel
+        // FAILED cycle. Pin the token binding explicitly:
+        assert!(neighbors.peek_arp_reply_solicited_for_mac(
+            &key,
+            Some(genuine_mac),
+            monotonic_nanos()
+        ));
+        assert!(!neighbors.peek_arp_reply_solicited_for_mac(
+            &key,
+            Some(failover_mac),
+            monotonic_nanos()
+        ));
+        // A fresh locally-issued (key-only) probe still authorizes the
+        // genuine move, exactly as pre-#15097.
+        neighbors.record_neighbor_probe(key, monotonic_nanos());
+        assert_eq!(
+            parse_neighbor_msg_with_reassert(
+                28,
+                &newneigh_body(7, ip, failover_mac, NUD_REACHABLE),
+                &monitored,
+                &neighbors,
+                &noop_reassert,
+            ),
+            NeighborMsgEffect::Upserted,
+            "a locally-probed genuine MAC move must still converge"
+        );
+        assert_eq!(neighbors.get(&key).map(|e| e.mac), Some(failover_mac));
+
+        // Genuinely-moved recovery: held MAC fails its re-probe, the
+        // kernel reports FAILED (entry removed), fresh resolution
+        // first-learns the new MAC.
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        assert!(neighbors.insert_if_changed(key, NeighborEntry { mac: genuine_mac }));
+        assert_eq!(
+            parse_neighbor_msg_with_reassert(
+                28,
+                &newneigh_body(7, ip, genuine_mac, NUD_FAILED),
+                &monitored,
+                &neighbors,
+                &noop_reassert,
+            ),
+            NeighborMsgEffect::Removed,
+            "NUD_FAILED must still remove the held binding"
+        );
+        assert!(neighbors.get(&key).is_none());
+        assert_eq!(
+            parse_neighbor_msg_with_reassert(
+                28,
+                &newneigh_body(7, ip, failover_mac, NUD_REACHABLE),
+                &monitored,
+                &neighbors,
+                &noop_reassert,
+            ),
+            NeighborMsgEffect::Upserted,
+            "fresh resolution after FAILED must first-learn the new MAC"
+        );
+        assert_eq!(neighbors.get(&key).map(|e| e.mac), Some(failover_mac));
+    }
+
+    /// #15097: the refused-probe re-assert is rate-limited per key.
+    #[test]
+    fn refused_probe_reassert_is_rate_limited_15097() {
+        // Unique ifindex+IP so the process-global limiter state cannot
+        // collide with other tests running in parallel.
+        let key = (15097, IpAddr::V4(Ipv4Addr::new(10, 150, 97, 1)));
+        let other = (15097, IpAddr::V4(Ipv4Addr::new(10, 150, 97, 2)));
+        let t0 = 1_000_000_000_000u64;
+        assert!(should_reassert_refused_probe(key, t0));
+        assert!(
+            !should_reassert_refused_probe(key, t0 + 1),
+            "a second re-assert inside the interval must be suppressed"
+        );
+        assert!(
+            !should_reassert_refused_probe(key, t0 + REFUSED_PROBE_REASSERT_INTERVAL_NS - 1),
+            "still inside the interval"
+        );
+        assert!(
+            should_reassert_refused_probe(key, t0 + REFUSED_PROBE_REASSERT_INTERVAL_NS),
+            "the next interval must allow a fresh re-assert"
+        );
+        assert!(
+            should_reassert_refused_probe(other, t0 + 1),
+            "the limit is per key, not global"
+        );
+    }
 }
 #[cfg(test)]
 mod monitored_neighbor_import_tests_11457 {
@@ -3035,8 +3402,10 @@ mod kernel_neighbor_v6_unsolicited_13660_tests {
             assert_eq!(neighbors.na_unsolicited_override_refusals(), 0);
         }
 
-        // Kernel NUD_PROBE authorizes the following update (the v4
-        // arm's production failover convergence).
+        // #15097: a kernel NUD_PROBE of the held MAC mints a token bound
+        // to that MAC only — it no longer authorizes a differing MAC.
+        // Genuine convergence runs through a local probe (next block) or
+        // FAILED + fresh resolution.
         let (neighbors, key, ip6) = seeded();
         assert_eq!(
             parse_neighbor_msg(
@@ -3055,8 +3424,21 @@ mod kernel_neighbor_v6_unsolicited_13660_tests {
                 &monitored,
                 &neighbors,
             ),
+            NeighborMsgEffect::None,
+            "a MAC-bound probe token for the held MAC must not authorize \
+             a differing MAC (#15097)"
+        );
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(LIVE_MAC));
+        neighbors.record_neighbor_probe(key, monotonic_nanos());
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_v6_body(IFINDEX, ip6, Some(FAILOVER_MAC), NUD_REACHABLE, 0),
+                &monitored,
+                &neighbors,
+            ),
             NeighborMsgEffect::Upserted,
-            "a differing MAC confirmed after a kernel probe must converge"
+            "a differing MAC confirmed after a local probe must converge"
         );
         assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(FAILOVER_MAC));
 
@@ -3224,5 +3606,80 @@ mod kernel_neighbor_v6_unsolicited_13660_tests {
             refusals,
             "a solicited failover must not count as an unsolicited refusal"
         );
+    }
+
+    /// #15097 (A66-05) fail-on-revert — v6 cell, twin of the v4 cell in
+    /// `noarp_listener_10690_tests`. One spoofed NA the kernel accepted
+    /// installs attacker MAC `A` in the KERNEL table while the dataplane
+    /// refuses it and holds genuine `G`; the kernel's unicast NUD probe
+    /// of `A` must mint no token for `A`, must re-assert `G`, and the
+    /// attacker's answering `REACHABLE(A)` must be refused.
+    #[test]
+    fn refused_kernel_probe_mints_no_token_and_reasserts_held_mac_v6_15097() {
+        const NUD_REACHABLE: u16 = 0x02;
+        const NUD_PROBE: u16 = 0x10;
+        let monitored = monitored_ifindexes();
+        let (neighbors, key, ip6) = seeded();
+        let epoch = neighbors.mac_change_epoch_for(&key);
+        let reasserts: std::sync::Mutex<Vec<((i32, IpAddr), [u8; 6])>> =
+            std::sync::Mutex::new(Vec::new());
+        let reassert = |k: (i32, IpAddr), m: [u8; 6], _now: u64| {
+            reasserts.lock().unwrap().push((k, m));
+        };
+
+        assert_eq!(
+            parse_neighbor_msg_with_reassert(
+                28,
+                &newneigh_v6_body(IFINDEX, ip6, Some(ATTACK_MAC), NUD_REACHABLE, 0),
+                &monitored,
+                &neighbors,
+                &reassert,
+            ),
+            NeighborMsgEffect::None,
+            "step 1: unsolicited attacker NA must be refused"
+        );
+        assert_eq!(neighbors.get(&key).map(|e| e.mac), Some(LIVE_MAC));
+        assert_eq!(neighbors.na_unsolicited_override_refusals(), 1);
+
+        assert_eq!(
+            parse_neighbor_msg_with_reassert(
+                28,
+                &newneigh_v6_body(IFINDEX, ip6, Some(ATTACK_MAC), NUD_PROBE, 0),
+                &monitored,
+                &neighbors,
+                &reassert,
+            ),
+            NeighborMsgEffect::None,
+            "step 2: the refused-MAC probe notification itself changes nothing"
+        );
+        assert_eq!(
+            *reasserts.lock().unwrap(),
+            vec![(key, LIVE_MAC)],
+            "step 2: the held MAC G must be re-asserted into the kernel"
+        );
+        assert!(!neighbors.peek_arp_reply_solicited_for_mac(
+            &key,
+            Some(ATTACK_MAC),
+            monotonic_nanos()
+        ));
+
+        assert_eq!(
+            parse_neighbor_msg_with_reassert(
+                28,
+                &newneigh_v6_body(IFINDEX, ip6, Some(ATTACK_MAC), NUD_REACHABLE, 0),
+                &monitored,
+                &neighbors,
+                &reassert,
+            ),
+            NeighborMsgEffect::None,
+            "step 3: the probe-of-refused-MAC answer must not authorize A"
+        );
+        assert_eq!(
+            neighbors.get(&key).map(|e| e.mac),
+            Some(LIVE_MAC),
+            "step 3: the dataplane must keep G"
+        );
+        assert_eq!(neighbors.mac_change_epoch_for(&key), epoch);
+        assert_eq!(neighbors.na_unsolicited_override_refusals(), 3);
     }
 }

@@ -1339,6 +1339,48 @@ fn arp_solicited_probe_evidence_is_one_shot_and_expires_10704() {
 }
 
 #[test]
+fn mac_bound_probe_token_authorizes_only_the_probed_mac_15097() {
+    let map = ShardedNeighborMap::new();
+    let key = key_v4(7, 42);
+    let probe_at = 1_000_000u64;
+    let held = entry(0xAB).mac;
+    let refused = entry(0xCD).mac;
+    let other = entry(0xEF).mac;
+
+    // A token bound to the held MAC authorizes only that MAC.
+    map.record_neighbor_probe_for_mac(key, Some(held), probe_at);
+    assert!(map.peek_arp_reply_solicited_for_mac(&key, Some(held), probe_at));
+    assert!(
+        !map.peek_arp_reply_solicited_for_mac(&key, Some(refused), probe_at),
+        "a probe of G must not authorize A"
+    );
+    assert!(!map.peek_arp_reply_solicited_for_mac(&key, Some(other), probe_at));
+    assert!(
+        map.peek_arp_reply_solicited(&key, probe_at),
+        "existence peek still sees the token"
+    );
+    // Expiry applies to MAC-bound tokens identically.
+    assert!(!map.peek_arp_reply_solicited_for_mac(
+        &key,
+        Some(held),
+        probe_at + ARP_SOLICITED_WINDOW_NS + 1
+    ));
+
+    // A MAC-bound record never downgrades a key-only record.
+    map.record_neighbor_probe(key, probe_at);
+    map.record_neighbor_probe_for_mac(key, Some(held), probe_at);
+    assert!(
+        map.peek_arp_reply_solicited_for_mac(&key, Some(refused), probe_at),
+        "key-only (local probe) authorization must survive a MAC-bound record"
+    );
+
+    // Clearing drops the token entirely (refused kernel probe).
+    map.clear_neighbor_probe(&key);
+    assert!(!map.peek_arp_reply_solicited(&key, probe_at));
+    assert!(!map.peek_arp_reply_solicited_for_mac(&key, Some(held), probe_at));
+}
+
+#[test]
 fn arp_reply_cas_requires_solicitation_for_mac_override_10704() {
     let map = ShardedNeighborMap::new();
     let key = key_v4(7, 42);
