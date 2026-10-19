@@ -562,40 +562,19 @@ fn match_source_nat_result_for_tuple_inner(
                     }
                 };
             }
-            // #14367 Check B: pre-check preserved port; if peer owns it, mint a
-            // dummy own record so allocate PATs, then drop dummy after PAT mint.
+            // #14367 Check B / #15109: pre-check preserved port; if a peer
+            // owns it, force PAT via the must-PAT allocator variant and
+            // exclude every peer-owned PAT candidate, rather than minting
+            // a synthetic dummy flow (whose rollback could unlink a real
+            // host aliasing the fabricated key).
             let owners_combined = rule.iface_overlap_owners.clone().or_else(|| rules.iter().find_map(|r| r.overlap_owners.clone()));
             let peer_owns = |port: u16| {
                 let cand = TranslatedTuple { ip: rewrite_src, port };
                 super::nat64_ports::peer_owns_for_interface(owners_combined.as_deref(), &alloc, flow, cand)
                     || rules.iter().any(|r| super::nat64_ports::peer_owns_for_interface(r.overlap_owners.as_deref(), &alloc, flow, cand))
             };
-            if peer_owns(flow.src_port) {
-                // Reserve preserved identity for a dummy flow so PAT is forced.
-                let dummy2 = SourceNatFlowKey { src_ip: IpAddr::V4(std::net::Ipv4Addr::new(10, 255, 255, 253)), src_port: flow.src_port, ..flow };
-                let dummy_minted = alloc.allocate_interface_identity(dummy2, rewrite_src, holder);
-                let result = alloc.allocate_interface_identity(flow, rewrite_src, holder);
-                if let Ok(d) = dummy_minted {
-                    alloc.rollback_flow(dummy2, TranslatedTuple { ip: rewrite_src, port: d.port }, now_ns, holder);
-                }
-                return match result {
-                    Ok(identity) => {
-                        let cand = TranslatedTuple { ip: rewrite_src, port: identity.port };
-                        if peer_owns(identity.port) {
-                            alloc.rollback_flow(flow, cand, now_ns, holder);
-                            crate::nat::INTERFACE_SNAT_IDENTITY_EXHAUSTION.fetch_add(1, Ordering::Relaxed);
-                            SourceNatLookup::Unavailable(SourceNatFailure::for_rule(rule, SourceNatFailureReason::InterfaceIdentityExhausted))
-                        } else {
-                            SourceNatLookup::Matched(NatDecision { rewrite_src: Some(rewrite_src), rewrite_dst: None, rewrite_src_port: identity.patted.then_some(identity.port), ..NatDecision::default() })
-                        }
-                    }
-                    Err(reason) => {
-                        match reason { SourceNatFailureReason::InterfaceRegistryCap => { crate::nat::INTERFACE_SNAT_REGISTRY_CAP_EXHAUSTION.fetch_add(1, Ordering::Relaxed); } _ => { crate::nat::INTERFACE_SNAT_IDENTITY_EXHAUSTION.fetch_add(1, Ordering::Relaxed); } }
-                        SourceNatLookup::Unavailable(SourceNatFailure::for_rule(rule, reason))
-                    }
-                };
-            }
-            return match alloc.allocate_interface_identity(flow, rewrite_src, holder) {
+            let must_pat = peer_owns(flow.src_port);
+            return match alloc.allocate_interface_identity_excluding(flow, rewrite_src, holder, must_pat, &peer_owns) {
                 Ok(identity) => {
                     let cand = TranslatedTuple { ip: rewrite_src, port: identity.port };
                     if peer_owns(identity.port) {
