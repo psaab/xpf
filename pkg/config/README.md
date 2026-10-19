@@ -15,6 +15,15 @@ nothing internal.
   self-recursion — see the recursion-bound note below.
 - `Parser` — `parser.go`. **Hierarchical** input. Block nesting is capped at
   `maxParseDepth` (256) — see the recursion-bound note below.
+- Junos `$9$` secrets — `junos9_15051.go` (`DecodeJunos9Secret`, moved
+  from pkg/ipsec in #15051). `decodeJunos9AtCompile` runs FIRST in
+  `runUniformGatesLogFeedRouting` and decodes every routing
+  authentication leaf (BGP/OSPF/IS-IS/RIP, global + routing-instance)
+  in place on the compiled Config before any gate or renderer reads
+  it; a malformed `$9$` is a strict commit error, a warning (blob
+  kept) on the tolerant paths (#1960). VRRP auth is refused/dropped
+  earlier by #4288/#5834 and LDP has no auth leaf, so neither is a
+  decode site.
 
 **Recursion and size bounds are load-bearing security guards (H-2).** The
 lexer and recursive-descent parser are reachable, unauthenticated, from the

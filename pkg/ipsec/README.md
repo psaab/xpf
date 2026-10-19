@@ -155,11 +155,10 @@ all files stay in `package ipsec`, so the public API is unchanged.
   `parseIKEHeader`/`parseChildHeader`/`parseEndpointHost`/`parseTrafficLine`,
   `TerminateAllSAs`/`InitiateConnection`/`ActiveConnectionNames`). The parser
   is pinned to captured golden fixtures in `testdata/swanctl_list_sas_*.txt`.
-- `crypto.go` — **isolated** Junos `$9$` pre-shared-key decryption
-  (`normalizePSK`/`decodeJunosSecret`/`junosGap`/`junosGapDecode` and the
-  `$9$` alphabet tables). Kept in its own file so the decryption surface
-  is auditable and unit-testable without pulling in the swanctl/XFRM
-  machinery.
+- `crypto.go` — Junos `$9$` pre-shared-key decryption entry point
+  (`normalizePSK`, delegating to `config.DecodeJunos9Secret`). The
+  decoder itself lives in pkg/config (#15051) so the same decoding
+  applies at compile to routing authentication keys.
 - `policy.go` — swanctl config generation (`renderConfig`/`generateConfig`,
   traffic-selector resolution, value sanitizers, identity formatting,
   `authMethodToSwan`, `xfrmiIfID`) plus XFRM bind-interface preparation
