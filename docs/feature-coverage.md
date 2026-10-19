@@ -282,6 +282,13 @@ the userspace dataplane admission boundary is in
   cleanup relies on the reconcile, not transition edges; the reconcile fires
   `SetMonitorWeight` only when the installed value actually changes, so steady
   state is churn-free (#5271).
+  A target may carry `interface <unit>` and `secondary-ip-address <addr>`
+  (#15038): the primary probes from the unit's RETH VIP, the secondary
+  from the secondary address it actually holds. A probe that cannot be
+  sent from this node's source (bind or send failure on a non-primary) is
+  not a measurement — it installs no debt and leaves dampening untouched,
+  so the survivor stays promotable instead of being pinned at weight 0
+  with the RG ownerless after a primary loss.
   When `global-threshold` is unset (0),
   the historical **independent per-target** behavior is preserved exactly: each
   unreachable target subtracts its own `weight` (or `global-weight` when the
