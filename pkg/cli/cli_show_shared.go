@@ -8,7 +8,13 @@ import (
 )
 
 func (c *CLI) showOperationalHelp() {
-	cmdtree.WriteHelp(os.Stdout, cmdtree.HelpCandidates(operationalTree))
+	// #14988: help lists only commands the class may run.
+	cands := c.filteredOperationalHelp()
+	pairs := make([]cmdtree.Candidate, len(cands))
+	for i, cand := range cands {
+		pairs[i] = cmdtree.Candidate{Name: cand.name, Desc: cand.desc}
+	}
+	cmdtree.WriteHelp(os.Stdout, pairs)
 	fmt.Println()
 	fmt.Println("  <command> | match/grep <pattern>    Filter output by pattern")
 	fmt.Println("  <command> | except <pattern>        Exclude lines matching pattern")
@@ -20,7 +26,12 @@ func (c *CLI) showOperationalHelp() {
 }
 
 func (c *CLI) showConfigHelp() {
-	cmdtree.WriteHelp(os.Stdout, cmdtree.HelpCandidates(configTopLevel))
+	cands := c.filteredConfigHelp()
+	pairs := make([]cmdtree.Candidate, len(cands))
+	for i, cand := range cands {
+		pairs[i] = cmdtree.Candidate{Name: cand.name, Desc: cand.desc}
+	}
+	cmdtree.WriteHelp(os.Stdout, pairs)
 	fmt.Println()
 	fmt.Println("  Use <TAB> for command completion, ? for context help")
 }
