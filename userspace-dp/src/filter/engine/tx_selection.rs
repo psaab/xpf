@@ -171,6 +171,7 @@ fn evaluate_filter_ref_tx_selection_runtime<'a>(
         packet_bytes,
         now_ns,
         count_terms,
+        0,
     )
 }
 
@@ -188,15 +189,40 @@ fn evaluate_filter_ref_tx_selection_runtime_inner<'a>(
     packet_bytes: u64,
     now_ns: Option<u64>,
     count_terms: bool,
+    // #15189: first term index to walk; 0 for every full walk. The inline
+    // routing-bearing remainder passes its defer index so already-metered
+    // terms are not charged again.
+    from_term: usize,
 ) -> TxSelectionFilterResult<'a> {
+    debug_assert!(from_term <= filter.terms.len());
     match (src_ip, dst_ip) {
         (IpAddr::V4(src), IpAddr::V4(dst)) => evaluate_filter_ref_tx_selection_counted_v4(
-            filter, src, dst, protocol, src_port, dst_port, dscp, extra, packet_bytes, now_ns,
+            filter,
+            src,
+            dst,
+            protocol,
+            src_port,
+            dst_port,
+            dscp,
+            extra,
+            packet_bytes,
+            now_ns,
             count_terms,
+            from_term,
         ),
         (IpAddr::V6(src), IpAddr::V6(dst)) => evaluate_filter_ref_tx_selection_counted_v6(
-            filter, src, dst, protocol, src_port, dst_port, dscp, extra, packet_bytes, now_ns,
+            filter,
+            src,
+            dst,
+            protocol,
+            src_port,
+            dst_port,
+            dscp,
+            extra,
+            packet_bytes,
+            now_ns,
             count_terms,
+            from_term,
         ),
         _ => TxSelectionFilterResult::default(),
     }
@@ -216,14 +242,16 @@ fn evaluate_filter_ref_tx_selection_counted_v4<'a>(
     packet_bytes: u64,
     now_ns: Option<u64>,
     count_terms: bool,
+    from_term: usize,
 ) -> TxSelectionFilterResult<'a> {
     // #2544: accumulate modifiers across fall-through terms (forwarding-class,
     // dscp-rewrite, policer metering + drop, log). A matched fall-through term
     // applies its modifiers and continues; a matched terminating term applies
     // its action+modifiers and returns. The policer meter is a side effect that
     // must run for a fall-through term too, so it is invoked on every match.
+    // #15189: the term slice starts at `from_term` (0 on full walks).
     let mut acc = TxSelectionFilterResult::default();
-    for term in &filter.terms {
+    for term in &filter.terms[from_term.min(filter.terms.len())..] {
         if !term_matches_v4(
             term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
         ) {
@@ -292,10 +320,11 @@ fn evaluate_filter_ref_tx_selection_counted_v6<'a>(
     packet_bytes: u64,
     now_ns: Option<u64>,
     count_terms: bool,
+    from_term: usize,
 ) -> TxSelectionFilterResult<'a> {
     // #2544: see evaluate_filter_ref_tx_selection_counted_v4.
     let mut acc = TxSelectionFilterResult::default();
-    for term in &filter.terms {
+    for term in &filter.terms[from_term.min(filter.terms.len())..] {
         if !term_matches_v6(
             term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
         ) {
@@ -346,7 +375,48 @@ pub(crate) fn evaluate_filter_ref_tx_selection_runtime_routing_bearing<'a>(
         packet_bytes,
         Some(now_ns),
         false,
+        0,
     )
+}
+
+/// #15189: the routing-bearing remainder, restricted to terms at or after
+/// `from_term`. The inline-metered input-filter caller
+/// (`evaluate_non_pbr_input_filter`) passes the index its non-routing walk
+/// deferred at: terms before it were already metered by that walk, and the
+/// pre-#15189 full re-walk charged them a second time whenever the filter
+/// carried ANY routing-instance term — matching or not. Returns an owned
+/// drop flag (not a borrowing result): the caller consumes only
+/// `policer_drop`, so no sliced `Filter` view is materialized.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn routing_bearing_remainder_policer_drop_from(
+    filter: &Filter,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    extra: TermMatchExtra<'_>,
+    packet_bytes: u64,
+    now_ns: u64,
+    from_term: usize,
+) -> bool {
+    evaluate_filter_ref_tx_selection_runtime_inner(
+        filter,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        dscp,
+        extra,
+        packet_bytes,
+        Some(now_ns),
+        false,
+        from_term,
+    )
+    .policer_drop
 }
 
 pub(crate) fn evaluate_interface_filter_tx_selection_counted<'a>(

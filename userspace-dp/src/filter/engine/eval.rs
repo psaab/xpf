@@ -469,7 +469,7 @@ fn evaluate_filter_ref_non_routing_counted_v4(
     // exactly once and never drop to zero.
     let (always_count, replay_on_terminal_deny) = count_policy.counting();
     let mut acc = FilterResult::default();
-    for term in &filter.terms {
+    for (term_idx, term) in filter.terms.iter().enumerate() {
         if !term_matches_v4(
             term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
         ) {
@@ -479,6 +479,11 @@ fn evaluate_filter_ref_non_routing_counted_v4(
             // #14659: preserve fall-through modifiers (policer drop, log,
             // FC/DSCP) accumulated from `next term` terms; the routing
             // evaluator owns only the PBR steering verdict.
+            // #15189: record WHERE the walk deferred. The inline-metered
+            // caller runs its routing-bearing remainder only from this
+            // term onward; before this the remainder re-walked from term 0
+            // and charged every already-metered term a second time.
+            acc.deferred_at_routing_term = Some(term_idx);
             normalize_log_match_action(&mut acc);
             return acc;
         }
@@ -570,7 +575,7 @@ fn evaluate_filter_ref_non_routing_counted_v6(
     // #2544/#2620: see evaluate_filter_ref_non_routing_counted_v4.
     let (always_count, replay_on_terminal_deny) = count_policy.counting();
     let mut acc = FilterResult::default();
-    for term in &filter.terms {
+    for (term_idx, term) in filter.terms.iter().enumerate() {
         if !term_matches_v6(
             term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
         ) {
@@ -578,6 +583,8 @@ fn evaluate_filter_ref_non_routing_counted_v6(
         }
         if !term.routing_instance.is_empty() {
             // #14659: see v4 — preserve accumulated fall-through modifiers.
+            // #15189: see v4 — record the defer index for the remainder.
+            acc.deferred_at_routing_term = Some(term_idx);
             normalize_log_match_action(&mut acc);
             return acc;
         }
