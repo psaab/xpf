@@ -981,8 +981,15 @@ func (er *EventReader) logEvent(data []byte) {
 				if localBinMsg == nil {
 					localBinMsg = formatBinaryRecord(&evt, &rec, severity, closeReasonCode)
 				}
-				if err := lw.SendBinary(localBinMsg); err != nil {
-					slog.Debug("local log binary write failed", "err", err)
+				// #14999 (D40-05): do NOT call synchronous SendBinary here.
+				// This is the EventStream reader goroutine (HA session sync,
+				// ISSU drain, full-resync); SendBinary's file.Write plus
+				// inline rotate() parks all of them under disk distress —
+				// the stall #9025 removed for the text branch below but
+				// left on this binary branch. Hand off; a refusal means
+				// the record was dropped and counted (#3478).
+				if !lw.SendBinaryFromEventReader(localBinMsg) {
+					slog.Debug("local log binary write dropped (queue full or writer retired)")
 				}
 				continue
 			}

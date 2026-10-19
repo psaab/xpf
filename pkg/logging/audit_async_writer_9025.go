@@ -59,7 +59,11 @@ type auditItem struct {
 	// finished string. TraceWriter formats before enqueueing and ignores it.
 	severity int
 	line     string
-	ack      chan struct{} // non-nil: a barrier, nothing to write
+	// binary, when non-nil, is a self-framing binary record for
+	// LocalLogWriter.SendBinary (#14999). It is an immutable copy owned by
+	// the queue; text items leave it nil.
+	binary []byte
+	ack    chan struct{} // non-nil: a barrier, nothing to write
 }
 
 // asyncAuditWriter is the shared queue+goroutine for the two audit-log writers.
