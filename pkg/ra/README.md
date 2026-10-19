@@ -145,6 +145,20 @@ after HA failover. To make that **structural**, not flag-defended:
   the semaphore: a commit that landed while the tick queued may already have
   rebuilt the sender, and re-applying then would be a gratuitous RA restart.
 
+  Two residual shapes #6793's probe could not see are covered by #15214.
+  A `startLocked` failure BEFORE a sender is inserted — the netdev is absent
+  at Apply (re-created outside a commit, or not yet created) — records the
+  interface in `Manager.wantedNotStarted`, so `HasDeadSenders()` is true and
+  the same retry owners re-drive Apply until the netdev exists. The record
+  is pruned when the interface leaves the desired set and cleared on a
+  successful start or any withdraw/clear, so it never drives the loop for a
+  removed config. And a sender whose conn opened but whose RA writes then
+  fail repeatedly with ENODEV/ENXIO (netdev deleted outside a commit) marks
+  itself `sendDead` after three consecutive such failures (any success
+  resets the count), which `dead()` also reports. Both shapes surface in
+  `Status()` with `State: "failed"` instead of `"active"` (or invisibility),
+  so a silent LAN is operator-visible.
+
 - **A failed FINAL goodbye is returned AND retained (#6777).** The graceful
   withdrawal path gets exactly two chances to put a lifetime-0 RA on the wire:
   the owner's own emit in `finishShutdown`, and — if that failed, leaving
