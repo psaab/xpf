@@ -6,13 +6,20 @@ import (
 )
 
 // #14594: daemon DHCP lease addresses are foreign to systemd-networkd
-// (pkg/dhcp applyAddress uses AddrReplace with no lifetimes and no
-// Address= in the generated .network). Before the fix, a DHCP row carried
-// no keep directive, so an ordinary `networkctl reconfigure` of every
-// managed interface stripped the lease until at least T1.
+// (pkg/dhcp applyAddress uses AddrReplace with the lease's kernel
+// lifetimes and no Address= in the generated .network). Before the
+// first fix a DHCP row carried no keep directive, so an ordinary
+// `networkctl reconfigure` of every managed interface stripped the
+// lease until at least T1. The first fix emitted KeepConfiguration=dhcp,
+// but live systemd 262 netns probes (docs/log/14594.md) proved the
+// dhcp class preserves only finite-lifetime foreign addresses and
+// strips a forever-lifetime one (infinite / zero-lifetime leases
+// install as forever), while static does the mirror image. Only
+// `yes` preserves the lease in both shapes, so every daemon-DHCP row
+// must emit KeepConfiguration=yes.
 //
-// FAIL-ON-REVERT: revert generateNetwork to emit KeepConfiguration only
-// for KeepAddresses (RETH/VRRP) and these cells go RED for DHCPv4,
+// FAIL-ON-REVERT: emit `dhcp` (or only the KeepAddresses static keep)
+// for DHCP rows and these cells go RED for DHCPv4,
 // stateful/address-bearing DHCPv6, and mixed DHCP+static rows. The
 // stateless / PD-only / static-only controls must stay without a keep
 // directive: they own no address on this interface, so widening keep to
@@ -27,29 +34,29 @@ func TestGenerateNetwork_DHCPLeaseKeepConfiguration14594(t *testing.T) {
 		{
 			name: "DHCPv4 only",
 			ifc:  InterfaceConfig{Name: "wan0", DHCPv4: true},
-			want: "KeepConfiguration=dhcp\n",
+			want: "KeepConfiguration=yes\n",
 		},
 		{
 			name: "DHCPv6 stateful default",
 			ifc:  InterfaceConfig{Name: "wan0", DHCPv6: true},
-			want: "KeepConfiguration=dhcp\n",
+			want: "KeepConfiguration=yes\n",
 		},
 		{
 			name: "DHCPv6 with IA-NA",
 			ifc: InterfaceConfig{Name: "wan0", DHCPv6: true,
 				DHCPv6IATypes: []string{"ia-na"}},
-			want: "KeepConfiguration=dhcp\n",
+			want: "KeepConfiguration=yes\n",
 		},
 		{
 			name: "DHCPv6 with IA-NA and IA-PD",
 			ifc: InterfaceConfig{Name: "wan0", DHCPv6: true,
 				DHCPv6IATypes: []string{"ia-na", "ia-pd"}},
-			want: "KeepConfiguration=dhcp\n",
+			want: "KeepConfiguration=yes\n",
 		},
 		{
 			name: "dual DHCP",
 			ifc:  InterfaceConfig{Name: "wan0", DHCPv4: true, DHCPv6: true},
-			want: "KeepConfiguration=dhcp\n",
+			want: "KeepConfiguration=yes\n",
 		},
 		{
 			name: "DHCPv4 plus static IPv6",
@@ -57,13 +64,13 @@ func TestGenerateNetwork_DHCPLeaseKeepConfiguration14594(t *testing.T) {
 			// configures it, so only the dynamic class is foreign.
 			ifc: InterfaceConfig{Name: "wan0", DHCPv4: true,
 				Addresses: []string{"2001:db8:2::10/64"}},
-			want: "KeepConfiguration=dhcp\n",
+			want: "KeepConfiguration=yes\n",
 		},
 		{
 			name: "DHCPv6 plus static IPv4",
 			ifc: InterfaceConfig{Name: "wan0", DHCPv6: true,
 				Addresses: []string{"192.0.2.10/24"}},
-			want: "KeepConfiguration=dhcp\n",
+			want: "KeepConfiguration=yes\n",
 		},
 		{
 			name: "DHCPv6 stateless owns no address",
@@ -136,7 +143,7 @@ func TestGenerateNetwork_KeepAddressesWithDHCP14594(t *testing.T) {
 			// KeepAddresses without any surviving static Address= owns
 			// no static address (the RETH link-local is DHCP-
 			// suppressed); only the dynamic class needs keeping.
-			want: "KeepConfiguration=dhcp\n",
+			want: "KeepConfiguration=yes\n",
 		},
 	}
 	for _, tc := range cases {
