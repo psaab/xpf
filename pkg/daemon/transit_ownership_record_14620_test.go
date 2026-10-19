@@ -18,8 +18,13 @@ func withTransitOwnershipRecord14620(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "transit-gate-owned")
 	old := transitOwnershipRecordFile
+	oldProbe := configstore.TransitOwnershipRecordPath
 	transitOwnershipRecordFile = path
-	t.Cleanup(func() { transitOwnershipRecordFile = old })
+	configstore.TransitOwnershipRecordPath = path
+	t.Cleanup(func() {
+		transitOwnershipRecordFile = old
+		configstore.TransitOwnershipRecordPath = oldProbe
+	})
 	return path
 }
 

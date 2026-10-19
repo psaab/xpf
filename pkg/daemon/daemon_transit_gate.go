@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/cluster"
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/fsatomic"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/vishvananda/netlink"
@@ -275,6 +276,38 @@ func (d *Daemon) shouldManageTransitGate() bool {
 		return true
 	}
 	return false
+}
+
+// removeUnownedBootTransitBarrier15147 releases a boot-installed transit
+// barrier on a host xpf does not own (#15147). The pre-networkd unit
+// installs the forward DROP unconditionally, but on a foreign,
+// never-committed host that barrier would otherwise drop all routed and
+// bridged forwarding for the whole uptime: the daemon's #10733 gate never
+// actuates there, so nothing ever removes it. Called once during bring-up,
+// before the transit policy is applied; it acts only when the daemon does
+// not manage the gate AND the read-only on-disk probe confirms no durable
+// ownership either. Any installer failure is logged, never fatal: the
+// daemon brings up management regardless (#1960 no-brick).
+func (d *Daemon) removeUnownedBootTransitBarrier15147() {
+	if d == nil || d.shouldManageTransitGate() {
+		return
+	}
+	configFile := ""
+	if d.store != nil {
+		configFile = d.store.ConfigPath()
+	}
+	if configstore.TransitGateOwnedOnDisk(configFile) {
+		return
+	}
+	if nftInstaller == nil {
+		return
+	}
+	if err := nftInstaller.RemoveTransitBarrier(); err != nil {
+		slog.Warn("failed to remove unowned boot transit barrier; foreign-host forwarding stays fenced until the barrier is removed",
+			"err", err)
+		return
+	}
+	slog.Info("removed boot transit barrier on unowned host; existing kernel forwarding posture preserved")
 }
 
 // writeTransitForwardSysctls drives both transit knobs to on/off.

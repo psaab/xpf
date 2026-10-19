@@ -2365,6 +2365,18 @@ never lock an operator out of a remote box it manages.
     periodic kernel-truth tick is gated by the same predicate. Once ownership
     is established it stays latched through a first-commit rollback, so the
     rollback closes forwarding before detaching the dataplane.
+  - **Boot-barrier release on unowned hosts (#15147).** The pre-networkd
+    unit `xpf-transit-closed.service` installs the same barrier
+    unconditionally before xpfd starts. On a foreign, never-committed
+    host the gate above never actuates, so during bring-up
+    `removeUnownedBootTransitBarrier15147` releases a boot-installed
+    barrier — only when `shouldManageTransitGate()` is false AND the
+    read-only probe `configstore.TransitGateOwnedOnDisk` (appliance
+    marker, committed/history-bearing `.configdb`, FIRST-rollback
+    teardown debt, or the #14620 record) also reads unowned. The probe
+    never creates or chmods `.configdb` (unlike `New`/`NewDB`). If xpfd
+    never starts, the barrier stays: fail-closed on an owned box, and
+    the stated residual on a foreign host with the daemon disabled.
   - **Removal-time restore (#14620).** When ownership first latches, the
     daemon durably records it (with the host's pre-xpf sysctl values) in
     `/var/lib/xpf/transit-gate-owned` (`recordTransitGateOwnership`).

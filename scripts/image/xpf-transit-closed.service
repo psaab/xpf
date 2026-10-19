@@ -13,9 +13,15 @@
 # unaffected on the normal success path because the barrier has only a forward
 # hook; INPUT/OUTPUT are never touched.
 #
-# The unit deliberately owns NO forwarding sysctl. Those knobs belong to the
-# #9725 daemon gate; this unit is scoped to the bridged-transit nftables leg.
 # The xpfd subcommand reads no config and takes no daemon lock.
+#
+# #15147 ownership: on a foreign, never-committed host this barrier is
+# released by xpfd at bring-up (removeUnownedBootTransitBarrier15147) once
+# the daemon's read-only probe confirms xpf owns nothing there; on an
+# appliance-marked, committed, or #14620-recorded host the daemon owns the
+# fence and keeps/reinstalls it. If xpfd never starts, the barrier stays —
+# fail-closed on an owned box, and the documented residual on a foreign
+# host whose daemon is disabled (remove the package to release it).
 [Unit]
 Description=xpf early bridge-transit barrier (fail-closed before networkd)
 DefaultDependencies=no

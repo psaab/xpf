@@ -728,6 +728,93 @@ func (s *Store) absentActiveHasRecoveryMarkers() bool {
 	return false
 }
 
+// TransitOwnershipRecordPath is the #14620 durable ownership record the
+// daemon writes when the transit gate first latches. A package var so tests
+// repoint the read-only probe; production keeps the /var/lib/xpf default.
+var TransitOwnershipRecordPath = "/var/lib/xpf/transit-gate-owned"
+
+// TransitGateOwnedOnDisk reports, READ-ONLY, whether durable on-disk state
+// proves xpf owns this host's transit forwarding posture (#15147): the
+// #14620 ownership record, a committed (or history-bearing) config DB, or
+// FIRST-rollback teardown debt. It never creates, chmods, or sweeps the
+// .configdb directory (unlike New/NewDB), so the pre-networkd boot barrier
+// can consult it on a foreign, never-committed host without mutating host
+// state. Absent state reads unowned; a present-but-unreadable marker or an
+// unreadable committed bit reads owned (fail-closed), mirroring Load's
+// absent-with-history handling. configFile is the daemon's -config path
+// (/etc/xpf/xpf.conf in production); its directory holds .configdb. An
+// empty path reads unowned.
+func TransitGateOwnedOnDisk(configFile string) bool {
+	if configFile == "" {
+		return false
+	}
+	dir := filepath.Dir(configFile)
+	if ownedOnDisk(TransitOwnershipRecordPath) {
+		return true
+	}
+	dbDir := filepath.Join(dir, ".configdb")
+	if ownedOnDisk(filepath.Join(dbDir, firstCommitTeardownMarkerBase)) {
+		return true
+	}
+	if entries, err := os.ReadDir(dbDir); err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if (strings.HasPrefix(name, "rollback.") && strings.HasSuffix(name, ".json")) ||
+				name == "confirm.json" || name == apiAuthMigrationStagingFilename {
+				return true
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return true
+	}
+	for i := 1; i <= 50; i++ {
+		slot := filepath.Join(dir, fmt.Sprintf("%s.%d", filepath.Base(configFile), i))
+		if _, err := os.Lstat(slot); err == nil {
+			return true
+		} else if !os.IsNotExist(err) {
+			return true
+		}
+	}
+	present, committed, err := readActiveCommittedMarker(dbDir)
+	if err != nil {
+		return true
+	}
+	return present && committed
+}
+
+// ownedOnDisk reports whether path exists; a stat error other than
+// not-exist also reads owned so an unobservable marker fails closed.
+func ownedOnDisk(path string) bool {
+	if _, err := os.Stat(path); err == nil {
+		return true
+	} else if !os.IsNotExist(err) {
+		return true
+	}
+	return false
+}
+
+// readActiveCommittedMarker inspects .configdb/active.json's envelope
+// committed bit WITHOUT decrypting or parsing the config body, creating
+// directories, or touching the key. Absent reads (false, false, nil); a
+// present non-enveloped (legacy) DB reads committed per migration rule C3.
+func readActiveCommittedMarker(dbDir string) (present, committed bool, err error) {
+	data, err := ReadBoundedFile(filepath.Join(dbDir, "active.json"), MaxConfigSize)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	if !hasEnvelope(data) {
+		return true, true, nil
+	}
+	_, hdr, err := stripEnvelope(data)
+	if err != nil {
+		return false, false, err
+	}
+	return true, hdr.Committed, nil
+}
+
 // SetConfirmRecoveryClockSkewCheck installs the daemon's pre-recovery clock
 // alarm check. Set it before Load. The callback runs under the Store lock with
 // the just-loaded compiled config, and must not call back into Store.
