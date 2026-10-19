@@ -3299,6 +3299,7 @@ fn purge_fence_decline_preserves_nat_and_bpf_state_13670() {
         None,
         NOW_NS,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     assert_eq!(
         crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules)[0].used_ports,

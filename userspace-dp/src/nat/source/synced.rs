@@ -103,6 +103,66 @@ pub(crate) type SyncedNatZones<'a> = Option<(&'a str, &'a str)>;
 /// BUILD FAILURE in the non-test profile rather than a silent single-holder
 /// release of a reservation every worker holds. Production uses the
 /// `_for_worker` twin.
+/// #15191: the non-pool translation domains a synced `rewrite_src` can
+/// belong to, resolved by the caller from the SAME forwarding generation
+/// the rules came from. A static-NAT external or an NPTv6 external owns
+/// no allocator on either node — the translation is a 1:1 / prefix
+/// rewrite — so booking it into the interface registry fabricated one
+/// retained allocator per distinct address and, past the 256 cap,
+/// refused further imports and local interface admissions.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SyncedSourceNatDomains<'a> {
+    /// The synced entry's `source_nat_static` provenance (#12187):
+    /// `Some(true)` static, `Some(false)` dynamic, `None` unknown.
+    pub source_nat_static: Option<bool>,
+    /// The local static table's external identities, when the caller
+    /// could resolve them. Consulted only for unknown provenance.
+    pub static_externals: Option<&'a crate::nat::StaticExternalIdentities>,
+    /// The local NPTv6 external prefixes `(addr, len)`. A translated
+    /// source inside one is an NPTv6 rewrite, never interface SNAT.
+    pub nptv6_external_prefixes: &'a [(std::net::Ipv6Addr, u8)],
+}
+
+impl SyncedSourceNatDomains<'_> {
+    /// True when `rewrite_src` needs no source-NAT reservation at all:
+    /// an NPTv6 rewrite (the `nptv6` bit, or an address inside a local
+    /// NPTv6 external prefix when the bit was not carried), or a
+    /// static-NAT external (static provenance, or — for an unknown
+    /// provenance peer — an address the local static table owns).
+    fn owns_no_reservation(&self, nat: NatDecision, rewrite_src: std::net::IpAddr) -> bool {
+        if nat.nptv6 {
+            return true;
+        }
+        if let std::net::IpAddr::V6(v6) = rewrite_src
+            && self
+                .nptv6_external_prefixes
+                .iter()
+                .any(|(base, len)| ipv6_prefix_contains(*base, *len, v6))
+        {
+            return true;
+        }
+        if self.source_nat_static == Some(true) {
+            return true;
+        }
+        self.source_nat_static.is_none()
+            && self
+                .static_externals
+                .is_some_and(|s| s.covers_address(rewrite_src))
+    }
+}
+
+/// True when `addr` falls inside the IPv6 prefix `base/len`.
+fn ipv6_prefix_contains(base: std::net::Ipv6Addr, len: u8, addr: std::net::Ipv6Addr) -> bool {
+    if len == 0 {
+        return true;
+    }
+    if len >= 128 {
+        return base == addr;
+    }
+    let host = u128::MAX >> len;
+    (u128::from(addr) & !host) == (u128::from(base) & !host)
+}
+
 #[cfg(test)]
 pub(crate) fn reserve_synced_source_nat_allocation(
     // #6751: see `reserve_synced_source_nat_allocation_with_holder`.
@@ -114,6 +174,8 @@ pub(crate) fn reserve_synced_source_nat_allocation(
     // #6211: see `SyncedNatZones`.
     synced_zones: SyncedNatZones<'_>,
     now_ns: u64,
+    // #15191: see `SyncedSourceNatDomains`.
+    domains: SyncedSourceNatDomains<'_>,
 ) {
     let mut previous_holders = None;
     reserve_synced_source_nat_allocation_with_holder(
@@ -127,6 +189,7 @@ pub(crate) fn reserve_synced_source_nat_allocation(
         NatHolder::Untracked,
         false,
         &mut previous_holders,
+        domains,
     );
 }
 
@@ -151,6 +214,8 @@ pub(crate) fn reserve_synced_source_nat_allocation_for_worker(
     // expiry off a real clock.
     now_ns: u64,
     worker_id: u32,
+    // #15191: see `SyncedSourceNatDomains`.
+    domains: SyncedSourceNatDomains<'_>,
 ) -> bool {
     let mut previous_holders = None;
     reserve_synced_source_nat_allocation_with_holder(
@@ -164,6 +229,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_for_worker(
         NatHolder::Worker(worker_id),
         false,
         &mut previous_holders,
+        domains,
     )
 }
 
@@ -184,6 +250,8 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked(
     is_reverse: bool,
     synced_zones: SyncedNatZones<'_>,
     now_ns: u64,
+    // #15191: see `SyncedSourceNatDomains`.
+    domains: SyncedSourceNatDomains<'_>,
 ) -> bool {
     let mut previous_holders = None;
     reserve_synced_source_nat_allocation_with_holder(
@@ -197,6 +265,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked(
         NatHolder::Untracked,
         false,
         &mut previous_holders,
+        domains,
     )
 }
 /// Coordinator twin that also captures the incumbent reservation state before
@@ -209,6 +278,8 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_holder_snapsho
     is_reverse: bool,
     synced_zones: SyncedNatZones<'_>,
     now_ns: u64,
+    // #15191: see `SyncedSourceNatDomains`.
+    domains: SyncedSourceNatDomains<'_>,
 ) -> (bool, Option<SourceNatReservationSnapshot>) {
     let mut previous_holders = None;
     let reserved = reserve_synced_source_nat_allocation_with_holder(
@@ -222,6 +293,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_holder_snapsho
         NatHolder::Untracked,
         true,
         &mut previous_holders,
+        domains,
     );
     (reserved, previous_holders)
 }
@@ -260,6 +332,8 @@ fn reserve_synced_source_nat_allocation_with_holder(
     holder: NatHolder,
     capture_previous_holders: bool,
     previous_holders: &mut Option<SourceNatReservationSnapshot>,
+    // #15191: see `SyncedSourceNatDomains`.
+    domains: SyncedSourceNatDomains<'_>,
 ) -> bool {
     // NAT64's translated source belongs exclusively to its NAT64 allocator.
     // Reserving it in a peer source-NAT pool first makes the NAT64 leg's
@@ -270,6 +344,14 @@ fn reserve_synced_source_nat_allocation_with_holder(
     let Some(rewrite_src) = nat.rewrite_src else {
         return true;
     };
+    // #15191: a static-NAT external or an NPTv6 external owns no
+    // allocator on either node, so there is nothing to reserve and
+    // nothing to refuse. Booking it into the interface registry (the
+    // pre-fix fall-through) retained one allocator per distinct
+    // address and refused imports past the 256 cap.
+    if domains.owns_no_reservation(nat, rewrite_src) {
+        return true;
+    }
     let flow = SourceNatFlowKey {
         protocol: key.protocol,
         src_ip: key.src_ip,

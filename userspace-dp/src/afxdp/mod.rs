@@ -743,6 +743,9 @@ mod tests_iface_nat64_14367;
 #[path = "tests_synced_iface_15146.rs"]
 mod tests_synced_iface_15146;
 #[cfg(test)]
+#[path = "tests_synced_static_nptv6_15191.rs"]
+mod tests_synced_static_nptv6_15191;
+#[cfg(test)]
 #[path = "tests_static_pool_overlap_14368.rs"]
 mod tests_static_pool_overlap_14368;
 #[cfg(test)]

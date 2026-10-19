@@ -2944,6 +2944,7 @@ fn upsert_synced_session_refuses_import_whose_nat_port_is_locally_owned_6600() {
             false,
             None,
             1_000,
+        crate::nat::SyncedSourceNatDomains::default(),
         ),
         "setup: the local flow must end up holding the exact port the import names, \
          or the case below is not exercising the collision at all"
@@ -3028,6 +3029,7 @@ fn upsert_synced_session_skips_pre_publish_reserve_with_no_workers_6600() {
             false,
             None,
             1_000,
+        crate::nat::SyncedSourceNatDomains::default(),
         ),
         "the zero-worker path must take NO reservation — the port it would have \
          held has no worker to release it"
@@ -3140,6 +3142,7 @@ fn upsert_synced_session_rolls_back_source_nat_when_nat64_refuses_6600() {
             false,
             None,
             1_000,
+        crate::nat::SyncedSourceNatDomains::default(),
         ),
         "the source-NAT reservation taken before the NAT64 refusal was NOT rolled \
          back — it holds a pool port no worker will ever release, because no \
@@ -3172,6 +3175,7 @@ fn coordinator_pre_publish_reserve_is_absorbed_by_worker_reserve_6600() {
             entry.metadata.is_reverse,
             None,
             now_ns,
+        crate::nat::SyncedSourceNatDomains::default(),
         ),
         "the coordinator's reservation must succeed on a free port"
     );
@@ -3189,7 +3193,8 @@ fn coordinator_pre_publish_reserve_is_absorbed_by_worker_reserve_6600() {
                 None,
                 now_ns,
                 worker_id,
-            ),
+        crate::nat::SyncedSourceNatDomains::default(),
+        ),
             "worker {worker_id}'s reservation must be ABSORBED by the coordinator's, \
              not refused — a refusal records no holder bit and the port leaks"
         );
@@ -3221,6 +3226,7 @@ fn coordinator_pre_publish_reserve_is_absorbed_by_worker_reserve_6600() {
             false,
             None,
             now_ns,
+        crate::nat::SyncedSourceNatDomains::default(),
         ),
         "after the LAST worker released, the port must be reservable again by an \
          unrelated flow — an un-absorbed coordinator reservation would hold it forever"
@@ -3334,6 +3340,7 @@ fn coordinator_pre_publish_reserve_uses_the_workers_zone_pair_6600() {
             false,
             None,
             1_000,
+        crate::nat::SyncedSourceNatDomains::default(),
         ),
         "the coordinator did not reserve in the ZONE-MATCHED rule's allocator — it \
          resolved a different zone pair than the worker will, so the port the \
@@ -3350,6 +3357,7 @@ fn coordinator_pre_publish_reserve_uses_the_workers_zone_pair_6600() {
             false,
             None,
             1_000,
+        crate::nat::SyncedSourceNatDomains::default(),
         ),
         "the coordinator reserved in the DECOY rule's allocator (the PASS 2 \
          fall-through), which no worker will ever release"
@@ -5493,6 +5501,7 @@ fn purge8138_port_held(
         probe.metadata.is_reverse,
         None,
         now_ns,
+        crate::nat::SyncedSourceNatDomains::default(),
     )
 }
 
@@ -6646,6 +6655,7 @@ fn port_is_free_9678(coordinator: &Coordinator, probe_src_port: u16, pool_port: 
         false,
         None,
         2_000,
+        crate::nat::SyncedSourceNatDomains::default(),
     )
 }
 
@@ -6694,7 +6704,8 @@ fn coordinator_9678(
                 false,
                 None,
                 1_000,
-            ),
+        crate::nat::SyncedSourceNatDomains::default(),
+        ),
             "setup: the local flow must hold LOCAL_PORT_9678"
         );
         crate::afxdp::shared_ops::publish_shared_session(
@@ -6769,7 +6780,8 @@ fn peer_upsert_naming_an_occupied_port_keeps_the_local_allocation_9678() {
         false,
         None,
         1_500,
-    ));
+        crate::nat::SyncedSourceNatDomains::default(),
+        ));
     coordinator.upsert_synced_session(peer_entry_9678());
     assert!(
         !port_is_free_9678(&coordinator, 40202, LOCAL_PORT_9678),

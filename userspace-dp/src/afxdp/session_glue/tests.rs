@@ -12354,7 +12354,8 @@ fn delete_terminal_filtered_session_releases_companion_and_allocator_5622() {
             false,
             None,
             0,
-        );
+        crate::nat::SyncedSourceNatDomains::default(),
+    );
         assert_eq!(
             crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules)[0].used_ports,
             1,
@@ -12530,6 +12531,7 @@ fn purge_translated_synced_hit_releases_source_nat_reservation_5295() {
         false,
         None,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     assert_eq!(
         crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules)[0].used_ports,
@@ -12735,6 +12737,7 @@ fn purge_translated_synced_hit_reverse_entry_releases_nothing_5295() {
         false,
         None,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     assert_eq!(
         crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules)[0].used_ports,

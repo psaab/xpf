@@ -510,6 +510,7 @@ fn interface_snat_synced_import_reserves_the_identity_6751() {
             false,
             None,
             1_000,
+        crate::nat::SyncedSourceNatDomains::default(),
         ),
         "an interface-mode import must be publishable"
     );
@@ -548,6 +549,7 @@ fn interface_snat_synced_import_conflict_is_refused_6751() {
             false,
             None,
             1_000,
+        crate::nat::SyncedSourceNatDomains::default(),
         ),
         "an import colliding with a live local identity must be refused"
     );
@@ -562,7 +564,8 @@ fn interface_snat_synced_import_conflict_is_refused_6751() {
         false,
         None,
         1_000,
-    ));
+        crate::nat::SyncedSourceNatDomains::default(),
+        ));
 }
 
 /// An import conflict is an HA-FIDELITY loss, not a data-path drop, so it must
@@ -593,7 +596,8 @@ fn interface_snat_sync_conflict_uses_its_own_counter_6751() {
         false,
         None,
         1_000,
-    ));
+        crate::nat::SyncedSourceNatDomains::default(),
+        ));
 
     assert_eq!(
         INTERFACE_SNAT_SYNC_IDENTITY_CONFLICT_DROPS.load(Ordering::Relaxed),
