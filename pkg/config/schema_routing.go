@@ -432,6 +432,16 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 			}},
 			"virtual-link": {desc: "Virtual link", args: 1, placeholder: "<router-id>", keyValidator: ValidateOSPFVirtualLinkNeighbor, children: map[string]*schemaNode{
 				"transit-area": {desc: "Transit area", args: 1, valueType: ValueIPAddress, placeholder: "<area-id>", validator: ValidateOSPFArea, children: nil},
+				// #15136: modeled ONLY so they are REFUSED — see
+				// schema_ospf_authentication_8443.go. The compiler reads
+				// only transit-area and OSPFVirtualLink carries no auth,
+				// so every Junos virtual-link auth spelling committed
+				// clean and rendered an unauthenticated virtual link.
+				"authentication":      unmodeledOSPFAuthenticationContainer(),
+				"authentication-key":  unmodeledVLAuthKeyLeaf(),
+				"authentication-type": unmodeledVLAuthTypeLeaf(),
+				"ipsec-sa":            unmodeledOSPFIPsecSALeaf(),
+				"keychain":            unmodeledOSPFKeychainLeaf(),
 			}},
 		}},
 	}},
@@ -446,6 +456,16 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 				"dead-interval":       {desc: "Dead interval (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateInteger(1, 65535), children: nil},
 				"retransmit-interval": {desc: "Retransmit interval (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateInteger(1, 65535), children: nil},
 				"priority":            {desc: "Router priority for DR election", args: 1, valueType: ValueInteger, placeholder: "<priority>", validator: ValidateInteger(0, 255), children: nil},
+				// #15136: modeled ONLY so they are REFUSED — see
+				// schema_ospf_authentication_8443.go. OSPFv3 auth is
+				// IPsec-only in Junos and xpf renders none of it, so
+				// every spelling below committed clean and left the
+				// OSPFv3 adjacency unauthenticated.
+				"ipsec-sa":            unmodeledOSPFIPsecSALeaf(),
+				"authentication":      unmodeledOSPFAuthenticationContainer(),
+				"authentication-key":  unmodeledOSPFv3AuthKeyLeaf(),
+				"authentication-type": unmodeledOSPFv3AuthTypeLeaf(),
+				"keychain":            unmodeledOSPFKeychainLeaf(),
 				"bfd-liveness-detection": {desc: "BFD liveness detection", children: map[string]*schemaNode{
 					"minimum-interval": {desc: "Minimum interval (milliseconds)", args: 1, valueType: ValueInteger, placeholder: "<milliseconds>", validator: ValidateInteger(10, 60000), children: nil},
 					"multiplier":       {desc: "Multiplier", args: 1, valueType: ValueInteger, placeholder: "<multiplier>", validator: ValidateInteger(2, 255), children: nil},

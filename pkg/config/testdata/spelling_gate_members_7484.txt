@@ -313,8 +313,8 @@ COMPARED	interfaces <*> unit <*> family inet address <*> vrrp-group <*> authenti
 flag (read, but value-less)	interfaces <*> unit <*> family inet address <*> vrrp-group <*> no-preempt
 COMPARED	interfaces <*> unit <*> family inet address <*> vrrp-group <*> preempt hold-time
 COMPARED	interfaces <*> unit <*> family inet address <*> vrrp-group <*> priority
-advisory (read, value ignored, warning says so)	interfaces <*> unit <*> family inet address <*> vrrp-group <*> track-interface <*> priority-cost
 advisory (read, value ignored, warning says so)	interfaces <*> unit <*> family inet address <*> vrrp-group <*> track interface <*> priority-cost
+advisory (read, value ignored, warning says so)	interfaces <*> unit <*> family inet address <*> vrrp-group <*> track-interface <*> priority-cost
 COMPARED	interfaces <*> unit <*> family inet address <*> vrrp-group <*> track-priority-cost
 COMPARED	interfaces <*> unit <*> family inet address <*> vrrp-group <*> virtual-address
 flag (read, but value-less)	interfaces <*> unit <*> family inet dhcp force-discover
@@ -342,8 +342,8 @@ COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> authent
 flag (read, but value-less)	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> no-preempt
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> preempt hold-time
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> priority
-advisory (read, value ignored, warning says so)	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> track-interface <*> priority-cost
 advisory (read, value ignored, warning says so)	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> track interface <*> priority-cost
+advisory (read, value ignored, warning says so)	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> track-interface <*> priority-cost
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> track-priority-cost
 COMPARED	interfaces <*> unit <*> family inet6 address <*> vrrp-group <*> virtual-address
 flag (read, but value-less)	interfaces <*> unit <*> family inet6 dad-disable
@@ -483,6 +483,13 @@ flag (read, but value-less)	protocols ospf area <*> interface <*> no-passive
 flag (read, but value-less)	protocols ospf area <*> interface <*> passive
 COMPARED	protocols ospf area <*> interface <*> priority
 COMPARED	protocols ospf area <*> interface <*> retransmit-interval
+unreachable (leaf changed nothing)	protocols ospf area <*> virtual-link <*> authentication keychain
+unreachable (leaf changed nothing)	protocols ospf area <*> virtual-link <*> authentication md5 <*> key
+unreachable (leaf changed nothing)	protocols ospf area <*> virtual-link <*> authentication simple-password <*> key
+unreachable (leaf changed nothing)	protocols ospf area <*> virtual-link <*> authentication-key
+unreachable (leaf changed nothing)	protocols ospf area <*> virtual-link <*> authentication-type
+unreachable (leaf changed nothing)	protocols ospf area <*> virtual-link <*> ipsec-sa
+unreachable (leaf changed nothing)	protocols ospf area <*> virtual-link <*> keychain
 COMPARED	protocols ospf area <*> virtual-link <*> transit-area
 COMPARED	protocols ospf export
 flag (read, but value-less)	protocols ospf passive
@@ -490,11 +497,18 @@ COMPARED	protocols ospf reference-bandwidth
 COMPARED	protocols ospf router-id
 flag (read, but value-less)	protocols ospf3 area <*> area-type nssa no-summaries
 flag (read, but value-less)	protocols ospf3 area <*> area-type stub no-summaries
+unreachable (leaf changed nothing)	protocols ospf3 area <*> interface <*> authentication keychain
+unreachable (leaf changed nothing)	protocols ospf3 area <*> interface <*> authentication md5 <*> key
+unreachable (leaf changed nothing)	protocols ospf3 area <*> interface <*> authentication simple-password <*> key
+unreachable (leaf changed nothing)	protocols ospf3 area <*> interface <*> authentication-key
+unreachable (leaf changed nothing)	protocols ospf3 area <*> interface <*> authentication-type
 COMPARED	protocols ospf3 area <*> interface <*> bfd-liveness-detection minimum-interval
 COMPARED	protocols ospf3 area <*> interface <*> bfd-liveness-detection multiplier
 COMPARED	protocols ospf3 area <*> interface <*> cost
 COMPARED	protocols ospf3 area <*> interface <*> dead-interval
 COMPARED	protocols ospf3 area <*> interface <*> hello-interval
+unreachable (leaf changed nothing)	protocols ospf3 area <*> interface <*> ipsec-sa
+unreachable (leaf changed nothing)	protocols ospf3 area <*> interface <*> keychain
 flag (read, but value-less)	protocols ospf3 area <*> interface <*> passive
 COMPARED	protocols ospf3 area <*> interface <*> priority
 COMPARED	protocols ospf3 area <*> interface <*> retransmit-interval
@@ -607,6 +621,13 @@ flag (read, but value-less)	routing-instances <*> protocols ospf area <*> interf
 flag (read, but value-less)	routing-instances <*> protocols ospf area <*> interface <*> passive
 COMPARED	routing-instances <*> protocols ospf area <*> interface <*> priority
 COMPARED	routing-instances <*> protocols ospf area <*> interface <*> retransmit-interval
+unreachable (leaf changed nothing)	routing-instances <*> protocols ospf area <*> virtual-link <*> authentication keychain
+unreachable (leaf changed nothing)	routing-instances <*> protocols ospf area <*> virtual-link <*> authentication md5 <*> key
+unreachable (leaf changed nothing)	routing-instances <*> protocols ospf area <*> virtual-link <*> authentication simple-password <*> key
+unreachable (leaf changed nothing)	routing-instances <*> protocols ospf area <*> virtual-link <*> authentication-key
+unreachable (leaf changed nothing)	routing-instances <*> protocols ospf area <*> virtual-link <*> authentication-type
+unreachable (leaf changed nothing)	routing-instances <*> protocols ospf area <*> virtual-link <*> ipsec-sa
+unreachable (leaf changed nothing)	routing-instances <*> protocols ospf area <*> virtual-link <*> keychain
 COMPARED	routing-instances <*> protocols ospf area <*> virtual-link <*> transit-area
 COMPARED	routing-instances <*> protocols ospf export
 flag (read, but value-less)	routing-instances <*> protocols ospf passive
@@ -614,11 +635,18 @@ COMPARED	routing-instances <*> protocols ospf reference-bandwidth
 COMPARED	routing-instances <*> protocols ospf router-id
 flag (read, but value-less)	routing-instances <*> protocols ospf3 area <*> area-type nssa no-summaries
 flag (read, but value-less)	routing-instances <*> protocols ospf3 area <*> area-type stub no-summaries
+unreachable (leaf changed nothing)	routing-instances <*> protocols ospf3 area <*> interface <*> authentication keychain
+unreachable (leaf changed nothing)	routing-instances <*> protocols ospf3 area <*> interface <*> authentication md5 <*> key
+unreachable (leaf changed nothing)	routing-instances <*> protocols ospf3 area <*> interface <*> authentication simple-password <*> key
+unreachable (leaf changed nothing)	routing-instances <*> protocols ospf3 area <*> interface <*> authentication-key
+unreachable (leaf changed nothing)	routing-instances <*> protocols ospf3 area <*> interface <*> authentication-type
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> bfd-liveness-detection minimum-interval
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> bfd-liveness-detection multiplier
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> cost
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> dead-interval
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> hello-interval
+unreachable (leaf changed nothing)	routing-instances <*> protocols ospf3 area <*> interface <*> ipsec-sa
+unreachable (leaf changed nothing)	routing-instances <*> protocols ospf3 area <*> interface <*> keychain
 flag (read, but value-less)	routing-instances <*> protocols ospf3 area <*> interface <*> passive
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> priority
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> retransmit-interval
