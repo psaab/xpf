@@ -221,6 +221,8 @@ mod tests_reseed_persistent_siblings_15110;
 #[cfg(test)]
 #[path = "tests_flowless_index_15116.rs"]
 mod tests_flowless_index_15116;
+#[path = "tests_synced_det_v4_15267.rs"]
+mod tests_synced_det_v4_15267;
 
 const NAT_SCOPE_TIER_INTERFACE: u8 = 0;
 const NAT_SCOPE_TIER_ZONE: u8 = 1;

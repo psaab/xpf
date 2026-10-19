@@ -876,6 +876,35 @@ fn reserve_synced_on_first_pool_owner<'a>(
                     rule.persistent_nat_timeout_ns,
                 )
             });
+            // #15267 (B10-03): a deterministic (mode 1) rule also owes the
+            // ADDRESS half of the deterministic domain check here. The wire
+            // carries no translated port on this arm (it is preserved), so
+            // only the pool address can be checked: it must be the address
+            // `deterministic_indices_v4` assigns this subscriber. A peer
+            // whose deterministic map disagrees (config-sync window, or a
+            // peer bug) otherwise books a token here for a tuple this node
+            // would never mint; the port-bearing arm below checks the full
+            // tuple via `deterministic_v4_tuple_matches`. A non-V4 source
+            // cannot satisfy a V4 deterministic map, so it refuses too.
+            if let Some(det) = rule.deterministic_v4 {
+                let in_domain = match (flow.src_ip, rewrite_src) {
+                    (IpAddr::V4(src_v4), IpAddr::V4(translated_v4)) => {
+                        deterministic_indices_v4(&det, src_v4).is_some_and(
+                            |(ip_idx, _)| {
+                                rule.pool_addresses_v4.get(ip_idx)
+                                    == Some(&translated_v4)
+                            },
+                        )
+                    }
+                    _ => false,
+                };
+                if !in_domain {
+                    if stop_at_first_owner {
+                        return SyncedReserveOutcome::Refused;
+                    }
+                    continue;
+                }
+            }
             #[cfg(test)]
             crate::nat::gap_barrier_11478::fire_at_capture_gap(capture_previous_holders);
             let mut incumbent_snapshot = None;
@@ -986,6 +1015,40 @@ fn reserve_synced_on_first_pool_owner<'a>(
                 return SyncedReserveOutcome::Refused;
             }
             continue;
+        }
+        // #15267 (B10-03): a deterministic (mode 1) rule owes the full
+        // deterministic domain check the v6 twin already applies in
+        // `reserve_synced_nat64_port_unless_peer_owns`: the translated
+        // `(pool address, port)` must be the tuple
+        // `deterministic_v4_tuple_matches` assigns this subscriber. Pre-fix
+        // this arm passed only `deterministic_v4.is_some()` as a tag, so a
+        // synced import naming an out-of-block port — or the right port on
+        // the wrong pool address — was booked while the nodes disagreed on
+        // the deterministic map (config-sync window, or a peer bug). Once
+        // configs converge the active's port is in-block under the shared
+        // map, so legitimate imports are unaffected. `saw_candidate` is
+        // already set above, so PASS 2 degrades to the same `Refused` the
+        // pool-failure arm yields, never to the interface domain.
+        if let Some(det) = rule.deterministic_v4 {
+            let in_domain = match (flow.src_ip, rewrite_src) {
+                (IpAddr::V4(src_v4), IpAddr::V4(translated_v4)) => rule
+                    .pool_allocator
+                    .deterministic_v4_tuple_matches(
+                        det,
+                        src_v4,
+                        &rule.pool_addresses_v4,
+                        addr_index,
+                        translated_v4,
+                        rewrite_src_port,
+                    ),
+                _ => false,
+            };
+            if !in_domain {
+                if stop_at_first_owner {
+                    return SyncedReserveOutcome::Refused;
+                }
+                continue;
+            }
         }
         // #5178: tag the reservation deterministic iff this rule runs a
         // deterministic CGNAT (mode 1) pool (mode identity for BIB/lease

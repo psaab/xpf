@@ -1504,8 +1504,13 @@ const LEASE_CREATION_SITES_8121: &[(&str, &str)] = &[
     // REBUILT ON THE STANDBY from a synced SESSION — the population with live
     // flows. Two arms because the port-bearing and address-only reserves are
     // different functions, which is why they needed separate fixes.
+    // #15267: the lease insert now sits in
+    // `reserve_flow_maybe_persistent_inner` (the shared body behind
+    // `reserve_flow_maybe_persistent` and its `_with_identity` twin).
+    // Same standby route (#7360, rebuilt from a synced session); only
+    // the enclosing-function name changed.
     (
-        "reserve_flow_maybe_persistent",
+        "reserve_flow_maybe_persistent_inner",
         "#7360, from synced sessions",
     ),
     (
