@@ -883,6 +883,16 @@ var errRedactedURLIngest = errors.New(
 // NOT rejected — RedactedClone never masks it, so ingesting it is harmless and
 // rejecting it would be an over-reach. The returned error names the offending
 // config path for the operator.
+//
+// #15209 (A20-03): the scope includes credentials embedded in an
+// `event-options … then change-configuration commands` payload. #14413 taught
+// RedactedClone to mask those (via lexConfigMutationLine9938 +
+// secretIndices/urlLeafIndices on the inner command), so a redacted export
+// carries the placeholder / a "<redacted>" URL inside the quoted command
+// string — invisible to the direct leaf checks below, which only see the
+// whole command as one token. findRedactionPlaceholder/findRedactedURL
+// therefore also lex each embedded command (see
+// embeddedRedactionHit15209) and judge its inner tokens with the same sets.
 func checkRedactionPlaceholder(t *ConfigTree) error {
 	if t == nil {
 		return nil
@@ -913,6 +923,9 @@ func findRedactedURL(nodes []*Node, base []string) string {
 				return strings.Join(full[:idx+1], " ")
 			}
 		}
+		if hit, _ := embeddedRedactionHit15209(n, full, base); hit != "" {
+			return hit
+		}
 		if !n.IsLeaf {
 			if hit := findRedactedURL(n.Children, full); hit != "" {
 				return hit
@@ -929,6 +942,9 @@ func findRedactedURL(nodes []*Node, base []string) string {
 // in whichever node's own Keys slice owns it (idx >= len(base)) — matching how
 // redactNodes masks the token — so the detection is exactly symmetric with the
 // masking regardless of the dual (hierarchical vs flat-set) AST shape.
+//
+// #15209: embedded `change-configuration commands` payloads are inspected via
+// embeddedRedactionHit15209, mirroring redactEmbeddedCommands14413.
 func findRedactionPlaceholder(nodes []*Node, base []string) string {
 	for _, n := range nodes {
 		full := append(append([]string(nil), base...), n.Keys...)
@@ -937,10 +953,158 @@ func findRedactionPlaceholder(nodes []*Node, base []string) string {
 				return strings.Join(full[:idx+1], " ")
 			}
 		}
+		if _, hit := embeddedRedactionHit15209(n, full, base); hit != "" {
+			return hit
+		}
 		if !n.IsLeaf {
 			if hit := findRedactionPlaceholder(n.Children, full); hit != "" {
 				return hit
 			}
+		}
+	}
+	return ""
+}
+
+// embeddedRedactionHit15209 is the ingest-guard mirror of
+// redactEmbeddedCommands14413 (#15209). It locates the
+// `change-configuration commands` payload carried by node n (full = base +
+// n.Keys), extracts every embedded command with the SAME shapes the display
+// redactor handles (quoted tokens, unquoted joined tail, `commands { … }`
+// block/bracket children), lexes each with lexConfigMutationLine9938, and
+// judges the inner tokens with the SAME secretIndices/urlLeafIndices sets.
+// It returns (urlHit, secretHit): urlHit is the flattened outer path when an
+// inner URL token contains SecretRedacted, secretHit when an inner secret
+// token equals SecretDataPlaceholder. Only a `set` command can mint a
+// credential, mirroring redactEmbeddedTokens. A non-secret inner leaf
+// carrying the placeholder, or the placeholder glued inside a larger token,
+// is NOT a hit — RedactedClone replaces whole tokens, so neither spelling
+// is one it produces. The reported path is the outer flattened path up to
+// and including the payload token (quoted command) or the whole node
+// (unquoted joined tail / block child), naming the offending config path.
+func embeddedRedactionHit15209(n *Node, full, base []string) (string, string) {
+	ci := -1
+	for i := 0; i+1 < len(full); i++ {
+		if full[i] == "change-configuration" && full[i+1] == "commands" {
+			ci = i
+			break
+		}
+	}
+	if ci < 0 {
+		return "", ""
+	}
+	// The `commands` keyword must belong to THIS node, not an ancestor: an
+	// ancestor-owned payload is judged when that ancestor is visited.
+	if ci+1 < len(base) {
+		return "", ""
+	}
+	local := ci + 1 - len(base) // index of "commands" within n.Keys
+	if local < 0 || local >= len(n.Keys) {
+		return "", ""
+	}
+	tailStart := local + 1
+	if len(n.Children) > 0 {
+		for _, child := range n.Children {
+			if urlHit, secretHit := embeddedChildRedactionHit15209(child, full); urlHit != "" || secretHit != "" {
+				return urlHit, secretHit
+			}
+		}
+		return "", ""
+	}
+	if tailStart >= len(n.Keys) {
+		return "", ""
+	}
+	tail := n.Keys[tailStart:]
+	hasProv := n.KeysHaveQuoteProvenance()
+	quoted := func(j int) bool {
+		if hasProv {
+			return n.KeyQuoted(tailStart + j)
+		}
+		return tail[j] == "" || strings.Contains(tail[j], " ")
+	}
+	if quoted(0) {
+		for j := range tail {
+			cmdPath := strings.Join(full[:len(base)+tailStart+j+1], " ")
+			if hit := embeddedCommandURLHit15209(tail[j], cmdPath); hit != "" {
+				return hit, ""
+			}
+			if hit := embeddedCommandSecretHit15209(tail[j], cmdPath); hit != "" {
+				return "", hit
+			}
+		}
+		return "", ""
+	}
+	joined := strings.Join(tail, " ")
+	nodePath := strings.Join(full, " ")
+	if hit := embeddedCommandURLHit15209(joined, nodePath); hit != "" {
+		return hit, ""
+	}
+	if hit := embeddedCommandSecretHit15209(joined, nodePath); hit != "" {
+		return "", hit
+	}
+	return "", ""
+}
+
+// embeddedChildRedactionHit15209 handles one child of a `commands { … }`
+// block (or a flat-set bracket child), mirroring redactEmbeddedChild14413:
+// quoted first token means each Keys token is a separate command; otherwise
+// the Keys join into one command. parentFull is the flattened path of the
+// owning `commands` node, used to name the offending path.
+func embeddedChildRedactionHit15209(child *Node, parentFull []string) (string, string) {
+	if len(child.Keys) == 0 {
+		return "", ""
+	}
+	childFull := append(append([]string(nil), parentFull...), child.Keys...)
+	hasProv := child.KeysHaveQuoteProvenance()
+	quotedFirst := (hasProv && child.KeyQuoted(0)) || (!hasProv &&
+		(child.Keys[0] == "" || strings.Contains(child.Keys[0], " ")))
+	if quotedFirst {
+		for j := range child.Keys {
+			cmdPath := strings.Join(childFull[:len(parentFull)+j+1], " ")
+			if hit := embeddedCommandURLHit15209(child.Keys[j], cmdPath); hit != "" {
+				return hit, ""
+			}
+			if hit := embeddedCommandSecretHit15209(child.Keys[j], cmdPath); hit != "" {
+				return "", hit
+			}
+		}
+		return "", ""
+	}
+	joined := strings.Join(child.Keys, " ")
+	nodePath := strings.Join(childFull, " ")
+	if hit := embeddedCommandURLHit15209(joined, nodePath); hit != "" {
+		return hit, ""
+	}
+	if hit := embeddedCommandSecretHit15209(joined, nodePath); hit != "" {
+		return "", hit
+	}
+	return "", ""
+}
+
+// embeddedCommandSecretHit15209 lexes one embedded command and reports
+// path when a secretIndices token equals SecretDataPlaceholder.
+func embeddedCommandSecretHit15209(cmd, path string) string {
+	tokens, _ := lexConfigMutationLine9938(cmd)
+	if len(tokens) < 2 || tokens[0] != "set" {
+		return ""
+	}
+	for _, idx := range secretIndices(tokens) {
+		if idx >= 0 && idx < len(tokens) && tokens[idx] == SecretDataPlaceholder {
+			return path
+		}
+	}
+	return ""
+}
+
+// embeddedCommandURLHit15209 lexes one embedded command and reports path
+// when a urlLeafIndices token contains SecretRedacted.
+func embeddedCommandURLHit15209(cmd, path string) string {
+	tokens, _ := lexConfigMutationLine9938(cmd)
+	if len(tokens) < 2 || tokens[0] != "set" {
+		return ""
+	}
+	for _, idx := range urlLeafIndices(tokens) {
+		if idx >= 0 && idx < len(tokens) && strings.Contains(tokens[idx], SecretRedacted) {
+			return path
 		}
 	}
 	return ""
