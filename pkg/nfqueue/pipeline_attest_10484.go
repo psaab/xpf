@@ -1167,6 +1167,10 @@ func (p *CapturePipeline) applyAdmission(item *pendingReinject, admission Reinje
 	early := item.earlyCompletion
 	item.earlyCompletion = nil
 	p.mu.Unlock()
+	// #14948: when duplicateEarly was observed, resolveCompletion treats
+	// the replayed early completion as ambiguous/uncertain rather than a
+	// clean Written/Reinjected outcome (duplicate delivery casts doubt on
+	// which terminal result the reinjection owner actually committed).
 	if early != nil {
 		p.resolveCompletion(*early)
 	}

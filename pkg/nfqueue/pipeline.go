@@ -1240,11 +1240,18 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 		return true
 	}
 	delete(p.pending, completion.RequestID)
+	// #14948: origin validation is unconditional. The origin wire triple
+	// (family/hook/ifindex) is part of the pending lease identity for every
+	// submitter, not only D11-attested frames; a ledger==nil (ordinary
+	// FORWARD) completion that lies about origin must be treated as an
+	// identity mismatch (uncertain/drop), never as clean Written. The
+	// existing TestD11CompletionOriginMismatchIsUncertainWhileV1Accepts10484
+	// second leg encodes the old fail-open exception and is updated to the
+	// new contract.
 	family, hook := d11OriginWire(pending.frame.origin)
-	originMismatch := pending.ledger != nil &&
-		(completion.Family != family ||
-			completion.Hook != hook ||
-			completion.OwnedIfindex != pending.frame.origin.OwnedIfindex)
+	originMismatch := completion.Family != family ||
+		completion.Hook != hook ||
+		completion.OwnedIfindex != pending.frame.origin.OwnedIfindex
 	identityMismatch := completion.PermitEpoch != pending.lease.PermitEpoch ||
 		completion.QueueNumber != pending.lease.QueueNumber ||
 		completion.QueueEpoch != pending.lease.QueueEpoch ||
@@ -1252,11 +1259,17 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 	bytesMismatch := completion.Outcome == CompletionWritten &&
 		completion.BytesWritten != uint32(len(pending.frame.Packet.Payload()))
 	wouldPermit := completion.Outcome == CompletionWouldPermit &&
-		!identityMismatch && !bytesMismatch
+		!identityMismatch && !bytesMismatch && !pending.duplicateEarly
 	outcomeUncertain := completion.Outcome == CompletionUncertain ||
 		completion.Outcome == CompletionAccepted ||
 		completion.Outcome == CompletionWouldReinject
-	ambiguous := identityMismatch || bytesMismatch || outcomeUncertain
+	// A duplicate early completion means the reinjection owner delivered
+	// the same request's terminal result twice before admission resolved.
+	// RecordCompletion preserves FAIL terminal state for duplicates, but
+	// the pipeline must not count a clean Written/Reinjected outcome from
+	// such ambiguous evidence; force the uncertain/drop terminal path
+	// (same fail-closed direction as identity/bytes mismatch).
+	ambiguous := pending.duplicateEarly || identityMismatch || bytesMismatch || outcomeUncertain
 	if !ambiguous {
 		if flow := p.flows[pending.frame.FlowKey]; flow != nil && flow.pending == pending {
 			flow.pending = nil

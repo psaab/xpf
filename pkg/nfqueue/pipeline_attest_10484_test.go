@@ -397,7 +397,7 @@ func TestD11WouldPermitRecordsFailTerminalAndReason52Counters10484(t *testing.T)
 	}
 }
 
-func TestD11CompletionOriginMismatchIsUncertainWhileV1Accepts10484(t *testing.T) {
+func TestD11CompletionOriginMismatchIsUncertain10484(t *testing.T) {
 	frame := CaptureFrame{
 		Packet:  pipelineTestPacket(77, 2, 2, 7, 11),
 		FlowKey: "d11-origin-mismatch",
@@ -408,66 +408,119 @@ func TestD11CompletionOriginMismatchIsUncertainWhileV1Accepts10484(t *testing.T)
 		originSet: true,
 	}
 	lease := ReinjectLease{RequestID: 1, PermitEpoch: 9, QueueEpoch: 4, QueueNumber: 77}
-	ledger := NewD11AttestationLedger()
-	ledger.Begin("node-a", "attest-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", lease.PermitEpoch)
-	key, err := ledger.Reserve(frame, lease)
-	if err != nil {
-		t.Fatalf("Reserve: %v", err)
+	origins := []struct {
+		name         string
+		family, hook uint8
+		ownedIfindex uint32
+	}{
+		{"family", 2, 1, 7},
+		{"hook", 1, 2, 7},
+		{"ifindex", 1, 1, 99},
 	}
-	if !ledger.UpdateAdmission(key, "ADMIT_OK", false) {
-		t.Fatal("UpdateAdmission failed")
+	// #14948: origin validation must be unconditional — both the
+	// D11-attested leg (ledger != nil) and the ordinary FORWARD leg
+	// (ledger == nil) treat a mismatched family/hook/ifindex as an
+	// identity mismatch (uncertain/drop), never as clean Written.
+	for _, origin := range origins {
+		t.Run("ledger/"+origin.name, func(t *testing.T) {
+			ledger := NewD11AttestationLedger()
+			ledger.Begin("node-a", "attest-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", lease.PermitEpoch)
+			key, err := ledger.Reserve(frame, lease)
+			if err != nil {
+				t.Fatalf("Reserve: %v", err)
+			}
+			if !ledger.UpdateAdmission(key, "ADMIT_OK", false) {
+				t.Fatal("UpdateAdmission failed")
+			}
+			p, err := NewCapturePipeline(CapturePipelineConfig{
+				Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing,
+				Sink: new(pipelineTestSink),
+			})
+			if err != nil {
+				t.Fatalf("NewCapturePipeline: %v", err)
+			}
+			pending := &pendingReinject{frame: frame, lease: lease, ledger: ledger, ledgerKey: key}
+			p.mu.Lock()
+			p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: pending}
+			p.pending[lease.RequestID] = pending
+			p.mu.Unlock()
+			if !p.resolveCompletion(ReinjectCompletion{
+				RequestID: lease.RequestID, PermitEpoch: lease.PermitEpoch,
+				QueueEpoch: lease.QueueEpoch, QueueNumber: lease.QueueNumber,
+				Family: origin.family, Hook: origin.hook, OwnedIfindex: origin.ownedIfindex, Outcome: CompletionWritten,
+				BytesWritten: uint32(len(frame.Packet.Payload())),
+			}) {
+				t.Fatal("D11 mismatched completion was not resolved")
+			}
+			record := ledger.Snapshot().Records[0]
+			if record.TerminalState != "Uncertain" || record.Completion != CompletionWritten {
+				t.Fatalf("D11 mismatch record = %+v, want Uncertain/Written", record)
+			}
+			if got := p.Stats(); got.Uncertain != 1 || got.Written != 0 || got.Reinjected != 0 {
+				t.Fatalf("D11 mismatch stats = %+v, want uncertain only", got)
+			}
+		})
+		t.Run("ordinary/"+origin.name, func(t *testing.T) {
+			sink := new(pipelineTestSink)
+			uncertainCalls := 0
+			p, err := NewCapturePipeline(CapturePipelineConfig{
+				Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing,
+				Sink: sink, OnUncertain: func(string) { uncertainCalls++ },
+			})
+			if err != nil {
+				t.Fatalf("NewCapturePipeline: %v", err)
+			}
+			pending := &pendingReinject{frame: frame, lease: lease}
+			p.mu.Lock()
+			p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: pending}
+			p.pending[lease.RequestID] = pending
+			p.mu.Unlock()
+			if !p.resolveCompletion(ReinjectCompletion{
+				RequestID: lease.RequestID, PermitEpoch: lease.PermitEpoch,
+				QueueEpoch: lease.QueueEpoch, QueueNumber: lease.QueueNumber,
+				Family: origin.family, Hook: origin.hook, OwnedIfindex: origin.ownedIfindex, Outcome: CompletionWritten,
+				BytesWritten: uint32(len(frame.Packet.Payload())),
+			}) {
+				t.Fatal("ordinary mismatched completion was not resolved")
+			}
+			if got := p.Stats(); got.Uncertain != 1 || got.Written != 0 || got.Reinjected != 0 {
+				t.Fatalf("ordinary mismatch stats = %+v, want uncertain only (origin validation unconditional)", got)
+			}
+			if uncertainCalls != 1 {
+				t.Fatalf("uncertain callback = %d, want 1 on origin mismatch", uncertainCalls)
+			}
+			if len(sink.verdicts) != 1 || sink.verdicts[0].v != VerdictDrop {
+				t.Fatalf("verdicts = %+v, want one DROP", sink.verdicts)
+			}
+		})
 	}
-	p, err := NewCapturePipeline(CapturePipelineConfig{
-		Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing,
-		Sink: new(pipelineTestSink),
+	// Positive control: matching origin on the ordinary leg still counts
+	// as clean Written/Reinjected.
+	t.Run("ordinary/matching-origin-control", func(t *testing.T) {
+		sink := new(pipelineTestSink)
+		p, err := NewCapturePipeline(CapturePipelineConfig{
+			Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing, Sink: sink,
+		})
+		if err != nil {
+			t.Fatalf("NewCapturePipeline: %v", err)
+		}
+		pending := &pendingReinject{frame: frame, lease: lease}
+		p.mu.Lock()
+		p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: pending}
+		p.pending[lease.RequestID] = pending
+		p.mu.Unlock()
+		if !p.resolveCompletion(ReinjectCompletion{
+			RequestID: lease.RequestID, PermitEpoch: lease.PermitEpoch,
+			QueueEpoch: lease.QueueEpoch, QueueNumber: lease.QueueNumber,
+			Family: 1, Hook: 1, OwnedIfindex: 7, Outcome: CompletionWritten,
+			BytesWritten: uint32(len(frame.Packet.Payload())),
+		}) {
+			t.Fatal("ordinary matching completion was not resolved")
+		}
+		if got := p.Stats(); got.Written != 1 || got.Reinjected != 1 || got.Uncertain != 0 {
+			t.Fatalf("ordinary matching stats = %+v, want written/reinjected only", got)
+		}
 	})
-	if err != nil {
-		t.Fatalf("NewCapturePipeline: %v", err)
-	}
-	pending := &pendingReinject{frame: frame, lease: lease, ledger: ledger, ledgerKey: key}
-	p.mu.Lock()
-	p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: pending}
-	p.pending[lease.RequestID] = pending
-	p.mu.Unlock()
-	if !p.resolveCompletion(ReinjectCompletion{
-		RequestID: lease.RequestID, PermitEpoch: lease.PermitEpoch,
-		QueueEpoch: lease.QueueEpoch, QueueNumber: lease.QueueNumber,
-		Family: 2, Hook: 1, OwnedIfindex: 7, Outcome: CompletionWritten,
-		BytesWritten: uint32(len(frame.Packet.Payload())),
-	}) {
-		t.Fatal("D11 mismatched completion was not resolved")
-	}
-	record := ledger.Snapshot().Records[0]
-	if record.TerminalState != "Uncertain" || record.Completion != CompletionWritten {
-		t.Fatalf("D11 mismatch record = %+v, want Uncertain/Written", record)
-	}
-	if got := p.Stats(); got.Uncertain != 1 || got.Written != 0 || got.Reinjected != 0 {
-		t.Fatalf("D11 mismatch stats = %+v, want uncertain only", got)
-	}
-
-	v1, err := NewCapturePipeline(CapturePipelineConfig{
-		Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing,
-		Sink: new(pipelineTestSink),
-	})
-	if err != nil {
-		t.Fatalf("NewCapturePipeline V1: %v", err)
-	}
-	v1Pending := &pendingReinject{frame: frame, lease: lease}
-	v1.mu.Lock()
-	v1.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: v1Pending}
-	v1.pending[lease.RequestID] = v1Pending
-	v1.mu.Unlock()
-	if !v1.resolveCompletion(ReinjectCompletion{
-		RequestID: lease.RequestID, PermitEpoch: lease.PermitEpoch,
-		QueueEpoch: lease.QueueEpoch, QueueNumber: lease.QueueNumber,
-		Family: 2, Hook: 1, OwnedIfindex: 7, Outcome: CompletionWritten,
-		BytesWritten: uint32(len(frame.Packet.Payload())),
-	}) {
-		t.Fatal("V1 mismatched completion was not resolved")
-	}
-	if got := v1.Stats(); got.Written != 1 || got.Reinjected != 1 || got.Uncertain != 0 {
-		t.Fatalf("V1 mismatch stats = %+v, want written/reinjected only", got)
-	}
 }
 
 func TestD11AdmissionContractFailureUnwindsPending10484(t *testing.T) {
@@ -1060,4 +1113,176 @@ func boolInt11017(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+// TestDuplicateEarlyCompletionDoesNotCountAsWritten14948: two early
+// completions for an admission-pending request mark the pending row
+// duplicate; when admission then succeeds and the retained early
+// completion is replayed through resolveCompletion, duplicate evidence
+// must be treated as ambiguous/uncertain — never as clean
+// Written/Reinjected — and the D11 ledger row must stay non-finalizable
+// (Duplicate + FAIL).
+func TestDuplicateEarlyCompletionDoesNotCountAsWritten14948(t *testing.T) {
+	ledger := NewD11AttestationLedger()
+	ledger.Begin("node-a", "attest-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 9)
+	frame := CaptureFrame{
+		Packet:  pipelineTestPacket(77, 2, 2, 7, 11),
+		FlowKey: "duplicate-early",
+		origin: CaptureOrigin{
+			Family: CaptureFamilyInet, Hook: CaptureHookForward,
+			Owner: "owner-a", STN: "st0", OwnedIfindex: 7,
+		},
+		originSet: true,
+	}
+	follower := CaptureFrame{
+		Packet: pipelineTestPacket(77, 2, 2, 7, 12), FlowKey: "duplicate-early",
+		origin: frame.origin, originSet: true,
+	}
+	lease := ReinjectLease{RequestID: 7, PermitEpoch: 9, QueueEpoch: 4, QueueNumber: 77}
+	key, err := ledger.Reserve(frame, lease)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	sink := new(pipelineTestSink)
+	uncertainCalls := 0
+	p, err := NewCapturePipeline(CapturePipelineConfig{
+		Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing,
+		Sink: sink, OnUncertain: func(string) { uncertainCalls++ },
+	})
+	if err != nil {
+		t.Fatalf("NewCapturePipeline: %v", err)
+	}
+	item := &pendingReinject{frame: frame, lease: lease, admissionPending: true, ledger: ledger, ledgerKey: key}
+	p.mu.Lock()
+	p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame, follower}, pending: item}
+	p.pending[lease.RequestID] = item
+	p.mu.Unlock()
+	completion := ReinjectCompletion{
+		RequestID: lease.RequestID, PermitEpoch: lease.PermitEpoch,
+		QueueNumber: lease.QueueNumber, QueueEpoch: lease.QueueEpoch,
+		Family: 1, Hook: 1, OwnedIfindex: 7, Outcome: CompletionWritten,
+		BytesWritten: uint32(len(frame.Packet.Payload())),
+	}
+	// Two early completions arrive while admission is still pending.
+	if !p.resolveCompletion(completion) || !p.resolveCompletion(completion) {
+		t.Fatal("early completions were not consumed")
+	}
+	p.mu.Lock()
+	duplicateMarked := item.duplicateEarly
+	p.mu.Unlock()
+	if !duplicateMarked {
+		t.Fatal("duplicateEarly was not latched after second early completion")
+	}
+	// Admission then succeeds; the retained early completion is replayed.
+	family, hook := d11OriginWire(frame.origin)
+	if got := p.applyAdmission(item, ReinjectAdmission{
+		RequestID: lease.RequestID, PermitEpoch: lease.PermitEpoch,
+		QueueNumber: lease.QueueNumber, QueueEpoch: lease.QueueEpoch,
+		Family: family, Hook: hook, OwnedIfindex: 7, Admitted: true,
+	}); got != nil {
+		t.Fatalf("applyAdmission returned %+v, want nil", got)
+	}
+	if got := p.Stats(); got.Uncertain != 1 || got.Written != 0 || got.Reinjected != 0 {
+		t.Fatalf("duplicate-early stats = %+v, want uncertain only (no clean Written)", got)
+	}
+	if uncertainCalls != 1 {
+		t.Fatalf("uncertain callback = %d, want 1", uncertainCalls)
+	}
+	record := ledger.Snapshot().Records[0]
+	if !record.Duplicate || record.TerminalState != "FAIL" {
+		t.Fatalf("duplicate ledger record = %+v, want Duplicate with FAIL terminal state", record)
+	}
+	if ledger.FinalizeIfTerminal() {
+		t.Fatal("duplicate row finalized as clean attestation evidence")
+	}
+	// Head (ambiguous resolve) + retired follower both terminal DROP.
+	if len(sink.verdicts) != 2 {
+		t.Fatalf("sink verdicts = %+v, want head + follower DROP", sink.verdicts)
+	}
+	for _, v := range sink.verdicts {
+		if v.v != VerdictDrop {
+			t.Fatalf("verdict = %v, want DROP", v.v)
+		}
+	}
+	// Positive control: a single (non-duplicate) early completion with
+	// matching origin still resolves to clean Written after admitted
+	// replay — duplicate enforcement must not poison the normal path.
+	t.Run("single early completion control", func(t *testing.T) {
+		ledger := NewD11AttestationLedger()
+		ledger.Begin("node-a", "attest-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 9)
+		key, err := ledger.Reserve(frame, lease)
+		if err != nil {
+			t.Fatalf("Reserve: %v", err)
+		}
+		p2, err := NewCapturePipeline(CapturePipelineConfig{
+			Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing, Sink: new(pipelineTestSink),
+		})
+		if err != nil {
+			t.Fatalf("NewCapturePipeline: %v", err)
+		}
+		item := &pendingReinject{frame: frame, lease: lease, admissionPending: true, ledger: ledger, ledgerKey: key}
+		p2.mu.Lock()
+		p2.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: item}
+		p2.pending[lease.RequestID] = item
+		p2.mu.Unlock()
+		if !p2.resolveCompletion(completion) {
+			t.Fatal("single early completion was not consumed")
+		}
+		if got := p2.applyAdmission(item, ReinjectAdmission{
+			RequestID: lease.RequestID, PermitEpoch: lease.PermitEpoch,
+			QueueNumber: lease.QueueNumber, QueueEpoch: lease.QueueEpoch,
+			Family: family, Hook: hook, OwnedIfindex: 7, Admitted: true,
+		}); got != nil {
+			t.Fatalf("applyAdmission returned %+v, want nil", got)
+		}
+		if got := p2.Stats(); got.Written != 1 || got.Reinjected != 1 || got.Uncertain != 0 {
+			t.Fatalf("single-early control stats = %+v, want written/reinjected only", got)
+		}
+		if !ledger.FinalizeIfTerminal() {
+			t.Fatal("single-early control row did not finalize")
+		}
+	})
+}
+
+// TestDuplicateEarlyOrdinaryCompletionDoesNotCountAsWritten14948: a
+// pending row with duplicateEarly latched and no ledger (ordinary
+// FORWARD arm) whose terminal completion arrives after admission must
+// also be uncertain — the duplicate-early contract is not D11-only.
+func TestDuplicateEarlyOrdinaryCompletionDoesNotCountAsWritten14948(t *testing.T) {
+	frame := CaptureFrame{
+		Packet:  pipelineTestPacket(77, 2, 2, 7, 11),
+		FlowKey: "duplicate-early-ordinary",
+		origin: CaptureOrigin{
+			Family: CaptureFamilyInet, Hook: CaptureHookForward,
+			Owner: "owner-a", STN: "st0", OwnedIfindex: 7,
+		},
+		originSet: true,
+	}
+	lease := ReinjectLease{RequestID: 7, PermitEpoch: 9, QueueEpoch: 4, QueueNumber: 77}
+	sink := new(pipelineTestSink)
+	p, err := NewCapturePipeline(CapturePipelineConfig{
+		Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing, Sink: sink,
+	})
+	if err != nil {
+		t.Fatalf("NewCapturePipeline: %v", err)
+	}
+	item := &pendingReinject{frame: frame, lease: lease, duplicateEarly: true}
+	p.mu.Lock()
+	p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: item}
+	p.pending[lease.RequestID] = item
+	p.mu.Unlock()
+	if !p.resolveCompletion(ReinjectCompletion{
+		RequestID: lease.RequestID, PermitEpoch: lease.PermitEpoch,
+		QueueNumber: lease.QueueNumber, QueueEpoch: lease.QueueEpoch,
+		Family: 1, Hook: 1, OwnedIfindex: 7, Outcome: CompletionWritten,
+		BytesWritten: uint32(len(frame.Packet.Payload())),
+	}) {
+		t.Fatal("completion was not resolved")
+	}
+	if got := p.Stats(); got.Uncertain != 1 || got.Written != 0 || got.Reinjected != 0 {
+		t.Fatalf("ordinary duplicate-early stats = %+v, want uncertain only", got)
+	}
+	if len(sink.verdicts) != 1 || sink.verdicts[0].v != VerdictDrop {
+		t.Fatalf("verdicts = %+v, want one DROP", sink.verdicts)
+	}
 }
