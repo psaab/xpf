@@ -158,6 +158,10 @@ func readBootstrapLifelineSnapshot(path string) ([]byte, error) {
 type bootstrapLifelineSnapshotRecord struct {
 	Generation string `json:"generation"`
 	Network    []byte `json:"network"`
+	// Present distinguishes a captured pre-takeover file from a captured
+	// absence (#14993). Absent in old records decodes false, which the
+	// restore gate rejects without authentic provenance.
+	Present bool `json:"present"`
 }
 
 // applianceMarkerFile marks a host that was PROVISIONED FROM THE XPF APPLIANCE
@@ -675,17 +679,22 @@ func (d *Daemon) captureBootstrapLifelineNetwork() {
 	d.bootstrapLifelineMu.Lock()
 	defer d.bootstrapLifelineMu.Unlock()
 	if d.bootstrapLifelineCaptured {
-		// P1: two FIRST windows in one process. Window 1 rolled back live
-		// (memory snapshot kept, durable record bound to window 1). If a
-		// second bootstrap exit runs under a NEW generation with the same
-		// marked bytes still present, re-persist under the new generation —
-		// otherwise a window-2 expiry-across-restart gates authentic bytes
+		// P1: two FIRST windows in one process. Window 1 rolled back (memory
+		// snapshot kept, durable record bound to window 1). If a second
+		// bootstrap exit runs under a NEW generation, re-persist the same
+		// captured state — present bytes or absence (#14993) — under the new
+		// generation, otherwise a window-2 expiry-across-restart gates it
 		// against the wrong generation and sticks the box DEGRADED.
-		if generation != "" && generation != d.bootstrapLifelineGeneration &&
-			d.bootstrapLifelinePresent && isBootstrapLifelineNetwork(d.bootstrapLifelineNetwork) {
-			d.persistBootstrapLifelineSnapshotLocked(d.bootstrapLifelineNetwork, generation)
-			slog.Debug("bootstrap exit: re-persisted pre-takeover lifeline under a new generation",
-				"generation", generation, "issue", "#12155")
+		if generation != "" && generation != d.bootstrapLifelineGeneration {
+			if !d.bootstrapLifelinePresent {
+				d.persistAbsentBootstrapLifelineSnapshotLocked(generation)
+			} else if isBootstrapLifelineNetwork(d.bootstrapLifelineNetwork) {
+				d.persistBootstrapLifelineSnapshotLocked(d.bootstrapLifelineNetwork, generation)
+			}
+			if d.bootstrapLifelineGeneration == generation {
+				slog.Debug("bootstrap exit: re-persisted pre-takeover lifeline under a new generation",
+					"generation", generation, "issue", "#14993")
+			}
 		}
 		return
 	}
@@ -694,6 +703,12 @@ func (d *Daemon) captureBootstrapLifelineNetwork() {
 	if errors.Is(err, os.ErrNotExist) {
 		d.bootstrapLifelineCaptured = true
 		d.bootstrapLifelinePresent = false
+		// #14993: persist the captured ABSENCE generation-bound, so a
+		// first-commit expiry across a daemon restart can prove the
+		// post-takeover file is xpfd's own and remove it. Without this
+		// the restart consumer has no provenance and fails closed with
+		// the management network stranded.
+		d.persistAbsentBootstrapLifelineSnapshotLocked(generation)
 		slog.Debug("bootstrap exit: no pre-takeover management network file existed",
 			"path", path)
 		return
@@ -731,6 +746,7 @@ func (d *Daemon) persistBootstrapLifelineSnapshotLocked(content []byte, generati
 	record, err := json.Marshal(bootstrapLifelineSnapshotRecord{
 		Generation: d.bootstrapLifelineGeneration,
 		Network:    content,
+		Present:    true,
 	})
 	if err == nil {
 		record = append(record, '\n')
@@ -741,6 +757,33 @@ func (d *Daemon) persistBootstrapLifelineSnapshotLocked(content []byte, generati
 			"first-commit rollback may be degraded", "path",
 			filepath.Join(linkDir, bootstrapLifelineSnapshotBase), "err", err, "issue", "#12155")
 		return
+	}
+}
+
+// persistAbsentBootstrapLifelineSnapshotLocked writes the generation-bound
+// durable record for a captured pre-takeover ABSENCE (#14993). Caller holds
+// bootstrapLifelineMu and passes the generation read BEFORE taking it.
+// Best-effort like the present-bytes variant: a persist failure degrades
+// to memory-only (the live rollback still works) and is warned.
+func (d *Daemon) persistAbsentBootstrapLifelineSnapshotLocked(generation string) {
+	if generation == "" {
+		slog.Warn("bootstrap exit: active config generation unavailable; absent lifeline provenance is memory-only",
+			"issue", "#14993")
+		return
+	}
+	d.bootstrapLifelineGeneration = generation
+	record, err := json.Marshal(bootstrapLifelineSnapshotRecord{
+		Generation: generation,
+		Present:    false,
+	})
+	if err == nil {
+		record = append(record, '\n')
+		err = fsatomic.WriteFileDurable(filepath.Join(linkDir, bootstrapLifelineSnapshotBase), record, 0o600)
+	}
+	if err != nil {
+		slog.Warn("bootstrap exit: could not persist absent management lifeline snapshot; "+
+			"first-commit rollback across restart may be degraded", "path",
+			filepath.Join(linkDir, bootstrapLifelineSnapshotBase), "err", err, "issue", "#14993")
 	}
 }
 func (d *Daemon) clearBootstrapLifelineNetwork() {
@@ -754,32 +797,34 @@ func (d *Daemon) clearBootstrapLifelineNetwork() {
 	d.bootstrapLifelineMu.Unlock()
 }
 
-// loadBootstrapLifelineSnapshot reads the durable pre-takeover record (#12155).
-// Tri-state (N2): absent (ok=false, unreadable=false) vs present-but-bad
-// (ok=false, unreadable=true: oversized, FIFO/symlink, corrupt JSON) vs
-// decoded (ok=true). The caller must treat present-but-bad as DEGRADED
-// with debt retained — never as the absent-absent no-op. The abandoned-
-// generation binding is checked by the caller against
-// FirstCommitTeardownGeneration. No mutex: callers hold it or are
-// single-threaded boot; never call into the Store here (NEW-MAJOR-A).
-func (d *Daemon) loadBootstrapLifelineSnapshot() (snapshot []byte, generation string, ok, unreadable bool) {
+// loadBootstrapLifelineSnapshot reads the durable pre-takeover record
+// (#12155). Tri-state (N2): absent (ok=false, unreadable=false) vs
+// present-but-bad (ok=false, unreadable=true: oversized, FIFO/symlink,
+// corrupt JSON) vs decoded (ok=true, with present reporting whether a
+// pre-takeover file existed — #14993). The caller must treat
+// present-but-bad as DEGRADED with debt retained — never as the
+// absent-absent no-op. The abandoned-generation binding is checked by
+// the caller against FirstCommitTeardownGeneration. No mutex: callers
+// hold it or are single-threaded boot; never call into the Store here
+// (NEW-MAJOR-A).
+func (d *Daemon) loadBootstrapLifelineSnapshot() (snapshot []byte, generation string, present, ok, unreadable bool) {
 	// Bounded read (#8597 census): a FIFO here must not hang boot nor a
 	// runaway file exhaust memory.
 	data, err := readBootstrapLifelineSnapshot(filepath.Join(linkDir, bootstrapLifelineSnapshotBase))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, "", false, false
+			return nil, "", false, false, false
 		}
-		return nil, "", false, true
+		return nil, "", false, false, true
 	}
 	if len(data) > maxBootstrapLifelineSnapshotSize {
-		return nil, "", false, true
+		return nil, "", false, false, true
 	}
 	var record bootstrapLifelineSnapshotRecord
 	if err := json.Unmarshal(data, &record); err != nil {
-		return nil, "", false, true
+		return nil, "", false, false, true
 	}
-	return append([]byte(nil), record.Network...), record.Generation, true, false
+	return append([]byte(nil), record.Network...), record.Generation, record.Present, true, false
 }
 
 // restoreBootstrapLifelineNetwork restores exact pre-takeover bytes: from the
@@ -806,8 +851,8 @@ func (d *Daemon) restoreBootstrapLifelineNetwork() (bool, error) {
 	// never the absent-absent no-op.
 	unreadableRecord := false
 	if !captured && d.store != nil && d.store.FirstCommitTeardownOwed() {
-		if loaded, loadedGen, ok, bad := d.loadBootstrapLifelineSnapshot(); ok {
-			snapshot, generation, captured, present = loaded, loadedGen, true, true
+		if loaded, loadedGen, loadedPresent, ok, bad := d.loadBootstrapLifelineSnapshot(); ok {
+			snapshot, generation, captured, present = loaded, loadedGen, true, loadedPresent
 		} else if bad {
 			unreadableRecord = true
 		}
@@ -819,9 +864,13 @@ func (d *Daemon) restoreBootstrapLifelineNetwork() (bool, error) {
 			name)
 	}
 	if captured && d.store != nil && d.store.FirstCommitTeardownOwed() {
-		if len(snapshot) == 0 || generation == "" ||
-			generation != d.store.FirstCommitTeardownGeneration() ||
-			!isBootstrapLifelineNetwork(snapshot) {
+		// #14993: a captured ABSENCE is authentic provenance too — it
+		// carries no bytes and no marker, only the generation binding.
+		// Old-format records (no Present field) with empty Network fail
+		// this gate exactly as before.
+		if generation == "" || generation != d.store.FirstCommitTeardownGeneration() ||
+			(present && (len(snapshot) == 0 || !isBootstrapLifelineNetwork(snapshot))) ||
+			(!present && len(snapshot) != 0) {
 			return false, fmt.Errorf("%s has no authentic pre-takeover snapshot for the abandoned generation",
 				name)
 		}

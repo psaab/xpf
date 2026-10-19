@@ -278,6 +278,15 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 		resolutionDrained = s.clearConfirmResolutionPendingLocked()
 	}
 
+	// #14993: this commit's config is now the active generation (durable,
+	// or visible post-rename) and supersedes any FIRST-rollback teardown
+	// debt a recovered window left behind. Discard it in-process — the
+	// Load-time discard alone never runs again in this process, so the
+	// daemon teardown gate would keep authorizing teardown against the
+	// replacement. Runs after writeActive so everCommitted reflects the
+	// new commit; a no-op when no debt is owed.
+	s.discardSupersededFirstCommitTeardownLocked(guardedConfigHash(committedTree))
+
 	// Push current active to history with description
 	s.history.Push(&HistoryEntry{
 		Config:    s.active.Clone(),
@@ -688,6 +697,11 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 		s.everCommitted = true
 		s.persistMarkerCommitted = true
 	}
+	// #14993: the candidate is now the active generation and supersedes
+	// any FIRST-rollback teardown debt (see commitWithDescriptionLocked).
+	// If this window itself later expires as a FIRST rollback, recovery
+	// re-arms fresh debt bound to this generation.
+	s.discardSupersededFirstCommitTeardownLocked(guardedConfigHash(committedTree))
 	runCommitConfirmedCrashHook(commitConfirmedStageActive)
 	// The candidate is active; its provisional record still preserves the old
 	// disk generation as an alias until finalization. This supersedes a deferred

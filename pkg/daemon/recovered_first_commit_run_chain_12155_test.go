@@ -92,6 +92,7 @@ func TestRecoveredFirstCommitBootCleanupRunsThroughDaemonRun12155(t *testing.T) 
 	snapshot, err := json.Marshal(bootstrapLifelineSnapshotRecord{
 		Generation: generation,
 		Network:    lifeline,
+		Present:    true,
 	})
 	if err != nil {
 		t.Fatal(err)
