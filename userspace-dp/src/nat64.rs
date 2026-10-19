@@ -260,6 +260,15 @@ pub(crate) struct Nat64Prefix {
     /// Asserted at the CONSUMPTION boundary by
     /// `nat64_6982_over_budget_is_distinguishable_from_empty_pool`.
     pub(crate) over_budget: bool,
+    /// #14962: the Go-stamped pool-unusable reason when the prefix was
+    /// installed with an empty pool because its source pool failed the
+    /// definition verdict (SourceNATPoolUnusableReason) or the
+    /// interface-SNAT overlap quarantine. Empty when the pool is usable
+    /// (including the legitimate no-source-pool empty state and the
+    /// #6982 over-budget refusal, whose reason is the budget itself and
+    /// which is counted separately). Distinguishes the three empty-pool
+    /// states at consumption, like `over_budget` does for its own.
+    pub(crate) pool_unusable_reason: String,
     /// #8115 R3: which OTHER allocators cover this prefix's `pool_v4`
     /// addresses.
     ///
@@ -310,6 +319,7 @@ impl Nat64Prefix {
             port_allocator,
             deterministic_v6: None,
             over_budget: false,
+            pool_unusable_reason: String::new(),
             overlap_owners: None,
             iface_allocs: None,
             iface_overlap_owners: None,
@@ -330,6 +340,7 @@ impl Clone for Nat64Prefix {
             port_allocator: self.port_allocator.clone(),
             deterministic_v6: self.deterministic_v6,
             over_budget: self.over_budget,
+            pool_unusable_reason: self.pool_unusable_reason.clone(),
             overlap_owners: self.overlap_owners.clone(),
             iface_allocs: self.iface_allocs.clone(),
             iface_overlap_owners: self.iface_overlap_owners.clone(),
@@ -586,6 +597,13 @@ pub(crate) fn nat64_prefix_charge(pool_len: usize) -> Nat64AggregateUse {
 /// parse — `nat64_6982_identity_parser_matches_the_build_loop` binds that, so
 /// a rule the loop accepts can never be invisible to the budget.
 fn nat64_rule_identity(snap: &NAT64RuleSnapshot) -> Option<([u8; 12], Vec<Ipv4Addr>)> {
+    // #14962: an unusable pool installs with an empty pool (see the build
+    // loop), so it has no reusable allocator identity and no #6982 charge.
+    // Returning None here keeps phase 1 from reserving/charging a pool the
+    // loop will clear before any allocator is built.
+    if snap.pool_unusable {
+        return None;
+    }
     if snap.prefix.is_empty() {
         return None;
     }
@@ -907,19 +925,39 @@ impl Nat64State {
             // all see the same deduped pool this loop builds.
             let mut seen_pool = FxHashSet::default();
             let mut pool_v4 = Vec::with_capacity(snap.pool_addresses.len());
-            for s in &snap.pool_addresses {
-                match parse_pool_v4(s) {
-                    Some(addr) => {
-                        if seen_pool.insert(addr) {
-                            pool_v4.push(addr);
+            // #14962: a Go-stamped unusable pool installs EMPTY — the same
+            // posture as the #6982 budget refusal below. Clearing here,
+            // BEFORE the parse loop, means an unparseable member no longer
+            // SKIPs the whole rule ('rules continue): the prefix still
+            // installs, so prefix traffic classifies MatchUnavailable
+            // (drop) instead of falling through to NoPrefixMatch and being
+            // ROUTED as ordinary IPv6. It also means no allocator bitmap
+            // is materialised for a pool that must never mint, and the
+            // deterministic branch below sees an empty pool. Logged once:
+            // the reason is the operator's remedy.
+            if snap.pool_unusable {
+                eprintln!(
+                    "xpf nat64: rule {:?} source pool is UNUSABLE ({}); installing it with an \
+                     EMPTY pool so its traffic drops fail-closed rather than minting from the \
+                     pool or routing untranslated (#14962)",
+                    snap.name, snap.pool_unusable_reason
+                );
+            }
+            if !snap.pool_unusable {
+                for s in &snap.pool_addresses {
+                    match parse_pool_v4(s) {
+                        Some(addr) => {
+                            if seen_pool.insert(addr) {
+                                pool_v4.push(addr);
+                            }
                         }
-                    }
-                    None => {
-                        eprintln!(
-                            "xpf nat64: skipping malformed rule {:?}: unparseable source-pool address {:?}",
-                            snap.name, s
-                        );
-                        continue 'rules;
+                        None => {
+                            eprintln!(
+                                "xpf nat64: skipping malformed rule {:?}: unparseable source-pool address {:?}",
+                                snap.name, s
+                            );
+                            continue 'rules;
+                        }
                     }
                 }
             }
@@ -1053,12 +1091,12 @@ impl Nat64State {
             // #6982: a refused prefix has no pool, so it has no deterministic
             // mapping either — and it must NOT emit the downgrade warning below,
             // which would attribute a budget refusal to bad deterministic config.
-            let deterministic_v6 = if over_budget {
+            let deterministic_v6 = if over_budget || snap.pool_unusable {
                 None
             } else {
                 build_deterministic_v6(snap, pool_v4.len())
             };
-            if !over_budget && deterministic_v6.is_none() && !snap.deterministic_host_base_v6.is_empty() {
+            if !over_budget && !snap.pool_unusable && deterministic_v6.is_none() && !snap.deterministic_host_base_v6.is_empty() {
                 DETERMINISTIC_V6_DOWNGRADE_COUNT.fetch_add(1, Ordering::Relaxed);
                 eprintln!(
                     "xpf nat64: rule {:?} requested deterministic NAPT64 mapping (host-base {:?}) but failed to build (bad base / unsupported prefix-len / degenerate block math / pool-size overflow) — falling back to round-robin PAT; subscriber mappings are no longer deterministic",
@@ -1074,6 +1112,11 @@ impl Nat64State {
                 port_allocator,
                 deterministic_v6,
                 over_budget,
+                pool_unusable_reason: if snap.pool_unusable {
+                    snap.pool_unusable_reason.clone()
+                } else {
+                    String::new()
+                },
                 // Filled in by `wire_nat64_overlap_peers` once source-NAT rules
                 // and NAT64 prefixes both exist (#8115 R3).
                 overlap_owners: None,

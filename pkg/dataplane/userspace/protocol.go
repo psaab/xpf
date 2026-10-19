@@ -405,7 +405,12 @@ const (
 	// The manager gates both lease-control verbs on an observed v50 helper;
 	// without that gate an old helper would ignore the field and merge two
 	// egress zones' permissions into one lease.
-	ProtocolVersion = 50
+	// v50 -> v51 (#14962): NAT64RuleSnapshot gained pool_unusable /
+	// pool_unusable_reason. A v50 helper ignores them and would mint from a
+	// pool the control plane declared unusable (or skip the rule and route
+	// the synthetic NAT64 destination as ordinary IPv6), so exact-equality
+	// versioning fences the pairing instead of degrading silently.
+	ProtocolVersion = 51
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

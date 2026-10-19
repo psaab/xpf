@@ -352,6 +352,26 @@ func reportInterfaceSNATPoolOverlaps(snap *ConfigSnapshot) {
 			snap.SourceNAT[i].PoolUnusableReason = poolUnusableReasonIfaceOverlap
 		}
 	}
+	// #14962: the detector has iterated snap.NAT64 since #14367, but this
+	// quarantine only stamped snap.SourceNAT — a NAT64 finding was logged
+	// and then translated anyway, so the NAT64 allocator could still mint
+	// the colliding (address, port). NAT64 snapshots now carry the same
+	// PoolUnusable transport; Rust installs such a prefix with an empty
+	// pool (MatchUnavailable/drop), never minting and never falling
+	// through to NoPrefixMatch routing. Same preserve-existing-reason
+	// rule as the SNAT arm above. Rule names share one namespace in the
+	// `quarantined` set (detector keys findings by rule name across both
+	// slices); a name collision between a SNAT and a NAT64 rule therefore
+	// quarantines both — fail-closed in the safe direction.
+	for i := range snap.NAT64 {
+		if _, hit := quarantined[snap.NAT64[i].Name]; !hit {
+			continue
+		}
+		snap.NAT64[i].PoolUnusable = true
+		if snap.NAT64[i].PoolUnusableReason == "" {
+			snap.NAT64[i].PoolUnusableReason = poolUnusableReasonIfaceOverlap
+		}
+	}
 
 	for _, o := range overlaps {
 		slog.Warn("source-NAT pool overlaps an interface-SNAT egress address and has been "+

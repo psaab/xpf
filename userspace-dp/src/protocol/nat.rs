@@ -373,6 +373,22 @@ pub(crate) struct NAT64RuleSnapshot {
     /// derives the subscriber word from and reverses against.
     #[serde(rename = "deterministic_host_base_v6", default)]
     pub deterministic_host_base_v6: String,
+    /// #14962: the Go-stamped fail-closed verdict for the referenced source
+    /// pool (config.SourceNATPoolUnusableReason, or the interface-SNAT
+    /// overlap quarantine). When true the loader installs the prefix with
+    /// an EMPTY pool — prefix traffic classifies MatchUnavailable (drop) —
+    /// instead of minting from the unusable pool or skipping the rule
+    /// (which would route the synthetic destination as ordinary IPv6).
+    /// Rides the v51 protocol bump: an old helper ignoring it would mint
+    /// from an unusable pool, so exact-equality versioning fences it.
+    #[serde(rename = "pool_unusable", default)]
+    pub pool_unusable: bool,
+    /// #14962: companion reason string (same vocabulary as the SNAT wire:
+    /// missing_pool / empty_pool / invalid_pool / invalid_port_range /
+    /// iface_snat_egress_overlap / ...). Carried onto Nat64Prefix for
+    /// operator diagnosis; empty when the pool is usable.
+    #[serde(rename = "pool_unusable_reason", default)]
+    pub pool_unusable_reason: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

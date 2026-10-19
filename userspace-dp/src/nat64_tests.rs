@@ -128,6 +128,8 @@ fn napt64_deterministic_v6_routes_through_block_allocator() {
         deterministic_blocks_per_ip: 126,
         deterministic_host_prefix_len: 32,
         deterministic_host_base_v6: "2001:db8::".to_string(),
+        pool_unusable: false,
+        pool_unusable_reason: String::new(),
     };
     let state = Nat64State::from_snapshots(&[det_snap]);
     assert!(
@@ -232,6 +234,8 @@ fn napt64_deterministic_v6_unsupported_prefix_len_falls_back() {
         deterministic_blocks_per_ip: 126,
         deterministic_host_prefix_len: 48, // unsupported
         deterministic_host_base_v6: "2001:db8::".to_string(),
+        pool_unusable: false,
+        pool_unusable_reason: String::new(),
     }]);
     assert!(
         state.prefixes[0].deterministic_v6.is_none(),
@@ -278,6 +282,8 @@ fn napt64_deterministic_v6_host_count_overflow_warns_operator() {
         deterministic_blocks_per_ip: u16::MAX,
         deterministic_host_prefix_len: 32,
         deterministic_host_base_v6: "2001:db8::".to_string(),
+        pool_unusable: false,
+        pool_unusable_reason: String::new(),
     }]);
     assert!(
         state.prefixes[0].deterministic_v6.is_none(),
@@ -441,6 +447,8 @@ fn nat64_14624_deterministic_duplicate_pool_matches_single() {
         deterministic_blocks_per_ip: 126,
         deterministic_host_prefix_len: 32,
         deterministic_host_base_v6: "2001:db8::".to_string(),
+        pool_unusable: false,
+        pool_unusable_reason: String::new(),
     };
     let dup = Nat64State::from_snapshots(&[mk(vec![
         "198.51.100.1".to_string(),
@@ -8953,3 +8961,76 @@ fn embedded_v4_to_v6_pmtud_preserves_original_len_10432() {
     assert_eq!(&emb[40..48], &quote[20..28], "embedded L4 stays the quoted bytes");
 }
 
+
+// #14962 (D27-01): a NAT64 snapshot whose source pool is unusable
+// (PoolUnusable, stamped Go-side from SourceNATPoolUnusableReason or by the
+// interface-SNAT overlap quarantine) must still INSTALL its prefix — so a
+// destination inside the prefix classifies MatchUnavailable (drop) — and
+// must never mint. Installing-with-empty-pool is the #6982 over-budget
+// posture; SKIPPING the rule instead would leave no prefix to match, so the
+// synthetic destination falls through to NoPrefixMatch and is ROUTED as
+// ordinary IPv6 (the fail-open this issue names).
+#[test]
+fn nat64_pool_unusable_installs_prefix_and_drops_14962() {
+    let unusable = NAT64RuleSnapshot {
+        name: "n64-bad-pool".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.1".to_string()],
+        pool_unusable: true,
+        pool_unusable_reason: "invalid_pool".to_string(),
+        ..Default::default()
+    };
+    let state = Nat64State::from_snapshots(&[unusable]);
+    assert_eq!(
+        state.prefixes.len(),
+        1,
+        "#14962: an unusable-pool NAT64 rule must INSTALL (empty pool), not be skipped"
+    );
+    assert!(
+        state.prefixes[0].pool_v4.is_empty(),
+        "#14962: an unusable pool must install with NO mintable addresses"
+    );
+    assert_eq!(
+        state.prefixes[0].pool_unusable_reason,
+        "invalid_pool",
+        "#14962: the Go-stamped reason must survive onto the prefix for operator diagnosis"
+    );
+    // 64:ff9b::198.51.100.50 — inside the prefix, global embedded v4.
+    let dst: Ipv6Addr = "64:ff9b::c633:6432".parse().unwrap();
+    assert_eq!(
+        state.classify_ipv6_dest(dst),
+        Nat64Match::MatchUnavailable,
+        "#14962: prefix-matched traffic on an unusable pool must drop fail-closed, \
+         never NoPrefixMatch (which routes the synthetic destination as IPv6)"
+    );
+    // Control: the same rule with a usable pool classifies MatchReady.
+    let healthy = NAT64RuleSnapshot {
+        name: "n64-good-pool".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.1".to_string()],
+        ..Default::default()
+    };
+    let ok = Nat64State::from_snapshots(&[healthy]);
+    assert!(
+        matches!(
+            ok.classify_ipv6_dest(dst),
+            Nat64Match::MatchReady { .. }
+        ),
+        "#14962 control: a usable NAT64 pool must still translate"
+    );
+    // Control: the interface-overlap quarantine reason installs the same way.
+    let overlap = NAT64RuleSnapshot {
+        name: "n64-overlap".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.1".to_string()],
+        pool_unusable: true,
+        pool_unusable_reason: "iface_snat_egress_overlap".to_string(),
+        ..Default::default()
+    };
+    let quarantined = Nat64State::from_snapshots(&[overlap]);
+    assert_eq!(
+        quarantined.classify_ipv6_dest(dst),
+        Nat64Match::MatchUnavailable,
+        "#14962: an interface-SNAT-overlap-quarantined NAT64 pool must drop, not mint the colliding tuple"
+    );
+}

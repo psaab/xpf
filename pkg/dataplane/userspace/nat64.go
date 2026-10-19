@@ -92,13 +92,31 @@ func buildNAT64Snapshots(cfg *config.Config) []NAT64RuleSnapshot {
 		var detBlockSize, detBlocksPerIP uint16
 		var detHostPrefixLen uint8
 		var detHostBaseV6 string
+		// #14962: propagate the pool's definition verdict. The SNAT builder
+		// has stamped PoolUnusable from config.SourceNATPoolUnusableReason
+		// since #6812; this builder never consulted it, so an unusable pool
+		// shipped its raw members unmarked. Rust then either skipped the
+		// whole rule on an unparseable member ('rules continue) — prefix
+		// traffic fell through to NoPrefixMatch and was ROUTED as ordinary
+		// IPv6 — or minted from a pool already declared unusable. A rule
+		// with NO source-pool configured (SourcePool=="") is the legitimate
+		// empty-pool state and stays unmarked, exactly as before.
+		var poolUnusable bool
+		var poolUnusableReason string
 		if rs.SourcePool != "" {
-			if pool, ok := cfg.Security.NAT.SourcePools[rs.SourcePool]; ok && pool != nil {
-				if pool.Address != "" {
-					poolAddresses = append(poolAddresses, pool.Address)
+			pool, ok := cfg.Security.NAT.SourcePools[rs.SourcePool]
+			if !ok || pool == nil {
+				poolUnusable = true
+				poolUnusableReason = "missing_pool"
+			} else {
+				poolAddresses = config.SourceNATPoolMembers(pool)
+				if poolAddresses == nil {
+					poolAddresses = []string{}
 				}
-				poolAddresses = append(poolAddresses, pool.Addresses...)
-				if bs, bpi, pl, base, okDet := deterministicNAT64V6Fields(pool); okDet {
+				if reason := config.SourceNATPoolUnusableReason(pool); reason != "" {
+					poolUnusable = true
+					poolUnusableReason = reason
+				} else if bs, bpi, pl, base, okDet := deterministicNAT64V6Fields(pool); okDet {
 					detBlockSize, detBlocksPerIP, detHostPrefixLen, detHostBaseV6 = bs, bpi, pl, base
 				}
 			}
@@ -112,6 +130,8 @@ func buildNAT64Snapshots(cfg *config.Config) []NAT64RuleSnapshot {
 			DeterministicBlocksPerIP:   detBlocksPerIP,
 			DeterministicHostPrefixLen: detHostPrefixLen,
 			DeterministicHostBaseV6:    detHostBaseV6,
+			PoolUnusable:               poolUnusable,
+			PoolUnusableReason:         poolUnusableReason,
 		})
 	}
 	return out
