@@ -4219,3 +4219,310 @@ fn no_local_entry_local_delivery_meters_input_policer_inline_14317() {
     assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
     assert!(hit.eval.policer_drop);
 }
+
+/// #15794: a NoLocalEntry LocalDelivery hit with `then count` + policer must
+/// charge its term counter once per packet. Pre-fix the conforming arm
+/// returned `(None, true)` — conflating policer metering with term counting —
+/// and the red-policed arm returned `(Some, true)`, so the caller in
+/// poll_descriptor/mod.rs skipped `evaluate_non_pbr_input_filter_counters_cached`
+/// for both and `then count` never incremented.
+///
+/// Fixture: one term carries BOTH `count` and `policer` (host-pol, burst
+/// 1000): packet 1 (900B) conforms/green, packet 2 (900B) is red/dropped.
+/// Both must increment the term counter exactly once, and report
+/// `already_counted == false` so the caller charges it (the helper itself
+/// does not run the counted walk on these arms).
+#[test]
+fn no_local_entry_local_delivery_count_increments_with_policer_15794() {
+    use std::sync::atomic::Ordering;
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "police-count".into(),
+            protocols: vec!["tcp".into()],
+            destination_ports: vec!["22".into()],
+            policer: "host-pol".into(),
+            count: "policed-hits".into(),
+            action: "accept".into(),
+            ..Default::default()
+        }],
+    }];
+    snapshot.three_color_policers = vec![crate::ThreeColorPolicerSnapshot {
+        name: "host-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 1_000,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let flow = v4_flow(22);
+    let filter =
+        crate::filter::interface_input_filter(&forwarding.filter_state, LAN_IFINDEX, false)
+            .expect("the filter is attached");
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    let mut m = meta(LAN_IFINDEX as u32, 0, false);
+    m.pkt_len = 900;
+    // Packet 1: conforming (green) — passes, policer meters, but term
+    // counter was NOT charged by this helper, so counted must be false
+    // and the caller-side cached-counter walk must charge it once.
+    let (hit, counted) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        m,
+        Some(TEST_LAN_ZONE_ID),
+        ForwardingDisposition::LocalDelivery,
+        1_000,
+    );
+    assert!(hit.is_none(), "conforming packet must pass: {hit:?}");
+    assert!(
+        !counted,
+        "conforming NoLocalEntry policer arm must report counted=false \
+         so the caller charges then count (#15794)"
+    );
+    assert_eq!(
+        forwarding.filter_state.three_color_policer_statuses()[0].green_packets,
+        1,
+        "policer still meters the conforming packet"
+    );
+    // Simulate the caller (mod.rs): charge cached counters iff !counted.
+    if !counted {
+        evaluate_non_pbr_input_filter_counters_cached(&forwarding, Some(&flow), m)
+            .for_each(|c| crate::filter::record_filter_counter(c, m.pkt_len as u64));
+    }
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(
+        filter.terms[0].counter.packets.load(Ordering::Relaxed),
+        1,
+        "then count must increment once for the conforming packet (#15794)"
+    );
+    // Packet 2: red / policer drop.
+    let (hit, counted) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        m,
+        Some(TEST_LAN_ZONE_ID),
+        ForwardingDisposition::LocalDelivery,
+        1_000,
+    );
+    let hit = hit.expect("over-rate packet must drop on policer");
+    assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
+    assert!(hit.eval.policer_drop);
+    assert!(
+        !counted,
+        "red-policed NoLocalEntry arm must report counted=false so the \
+         caller charges then count (#15794)"
+    );
+    if !counted {
+        evaluate_non_pbr_input_filter_counters_cached(&forwarding, Some(&flow), m)
+            .for_each(|c| crate::filter::record_filter_counter(c, m.pkt_len as u64));
+    }
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(
+        filter.terms[0].counter.packets.load(Ordering::Relaxed),
+        2,
+        "then count must increment once for the red-policed packet (#15794)"
+    );
+}
+
+/// #15794 Fresh-arm twin: a Fresh LocalDelivery hit whose stored policer
+/// goes red must also report counted=false (pre-fix it returned true, so
+/// the caller skipped the term counter for the dropped packet).
+#[test]
+fn fresh_local_delivery_red_policer_reports_uncounted_15794() {
+    use std::sync::atomic::Ordering;
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "police-count".into(),
+            protocols: vec!["tcp".into()],
+            destination_ports: vec!["5201".into()],
+            policer: "host-pol".into(),
+            count: "policed-hits".into(),
+            action: "accept".into(),
+            ..Default::default()
+        }],
+    }];
+    snapshot.three_color_policers = vec![crate::ThreeColorPolicerSnapshot {
+        name: "host-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 1_000,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let flow = v4_flow(5201);
+    let filter =
+        crate::filter::interface_input_filter(&forwarding.filter_state, LAN_IFINDEX, false)
+            .expect("the filter is attached");
+    let local_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::LocalDelivery,
+            ..decision().resolution
+        },
+        ..decision()
+    };
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    assert!(sessions.install_with_protocol_with_origin(
+        flow.forward_key.clone(),
+        local_decision,
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+        PROTO_TCP,
+        0,
+    ));
+    let mut m = meta(LAN_IFINDEX as u32, 0, false);
+    m.pkt_len = 900;
+    // Hit 1 (Stale): captures + meters conforming packet, stamps Fresh.
+    let (hit, _) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        m,
+        Some(TEST_LAN_ZONE_ID),
+        ForwardingDisposition::LocalDelivery,
+        1_000,
+    );
+    assert!(hit.is_none(), "conforming stale hit must pass: {hit:?}");
+    // Hit 2 (Fresh): stored policer now red -> drop, counted must be false.
+    let (hit, counted) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        m,
+        Some(TEST_LAN_ZONE_ID),
+        ForwardingDisposition::LocalDelivery,
+        1_000,
+    );
+    let hit = hit.expect("over-rate fresh hit must drop via stored policer");
+    assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
+    assert!(hit.eval.policer_drop);
+    assert!(
+        !counted,
+        "red-policed Fresh arm must report counted=false so the caller \
+         charges then count (#15794)"
+    );
+    if !counted {
+        evaluate_non_pbr_input_filter_counters_cached(&forwarding, Some(&flow), m)
+            .for_each(|c| crate::filter::record_filter_counter(c, m.pkt_len as u64));
+    }
+    crate::filter::flush_recorded_filter_counters();
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(
+        filter.terms[0].counter.packets.load(Ordering::Relaxed),
+        1,
+        "then count must increment for the red-policed Fresh packet (#15794)"
+    );
+}
+
+/// #15794 Stale-arm twin: a Stale LocalDelivery hit that captures its
+/// policer and goes red on that first metered packet must also report
+/// counted=false.
+#[test]
+fn stale_local_delivery_red_policer_reports_uncounted_15794() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "police-count".into(),
+            protocols: vec!["tcp".into()],
+            destination_ports: vec!["5201".into()],
+            policer: "host-pol".into(),
+            count: "policed-hits".into(),
+            action: "accept".into(),
+            ..Default::default()
+        }],
+    }];
+    // Burst 100 < 900-byte packet: first metered packet is already red.
+    snapshot.three_color_policers = vec![crate::ThreeColorPolicerSnapshot {
+        name: "host-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 100,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let flow = v4_flow(5201);
+    let local_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::LocalDelivery,
+            ..decision().resolution
+        },
+        ..decision()
+    };
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    assert!(sessions.install_with_protocol_with_origin(
+        flow.forward_key.clone(),
+        local_decision,
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+        PROTO_TCP,
+        0,
+    ));
+    let mut m = meta(LAN_IFINDEX as u32, 0, false);
+    m.pkt_len = 900;
+    let (hit, counted) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        m,
+        Some(TEST_LAN_ZONE_ID),
+        ForwardingDisposition::LocalDelivery,
+        1_000,
+    );
+    let hit = hit.expect("over-burst stale hit must drop via captured policer");
+    assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
+    assert!(hit.eval.policer_drop);
+    assert!(
+        !counted,
+        "red-policed Stale arm must report counted=false so the caller \
+         charges then count (#15794)"
+    );
+}

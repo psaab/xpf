@@ -1282,6 +1282,11 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
 /// `Fresh`, `Stale`-ACCEPT, `NoLocalEntry`-ACCEPT). Named explicitly — never
 /// derived as `hit.is_some()` — so a future counted-`None` arm cannot silently
 /// double-charge at the seed.
+///
+/// #15794: the meter-only LocalDelivery policer replays (Fresh red, Stale
+/// red, NoLocalEntry red/conforming) return `false`: `apply_cached_three_color_policers`
+/// meters token buckets only and never charges a `FilterTermCounter`, so the
+/// caller must still charge `then count` via its cached-counter walk.
 #[inline]
 pub(super) fn evaluate_input_filter_on_session_hit(
     forwarding: &ForwardingState,
@@ -1498,7 +1503,8 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                             revoked_key: None,
                             log_source: FilterLogSource::Input,
                         }),
-                        true,
+                        // #15794: meter-only replay charged no term counter.
+                        false,
                     );
                 }
             }
@@ -1566,7 +1572,8 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                                 revoked_key: None,
                                 log_source: FilterLogSource::Input,
                             }),
-                            true,
+                            // #15794: meter-only replay charged no term counter.
+                            false,
                         );
                     }
                 }
@@ -1633,13 +1640,14 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                                 revoked_key: None,
                                 log_source: FilterLogSource::Input,
                             }),
-                            true,
+                            // #15794: meter-only replay charged no term counter.
+                            false,
                         );
                     }
-                    // Metered and conforming: report counted so the caller
-                    // does not also charge the static counters for a packet
-                    // whose policer walk already paid (mirrors Fresh/Stale).
-                    return (None, true);
+                    // #15794: metered and conforming, but the cached policer
+                    // replay charges no `FilterTermCounter` — report uncounted
+                    // so the caller charges `then count` exactly once.
+                    return (None, false);
                 }
             }
             (verdict, counted)
