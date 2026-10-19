@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/feeds"
 	"github.com/psaab/xpf/pkg/firewallshow"
 	"github.com/psaab/xpf/pkg/natshow"
 	"github.com/psaab/xpf/pkg/scheduler"
@@ -23,6 +24,25 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// dynamicAddressRuntimeName15725 returns the first runtime-feed name for a
+// feed-server, mirroring pkg/grpcapi dynamicAddressRuntimeNames: the first
+// FeedEntries entry, else FeedName, else the server name. Only the first name
+// carries the effective shrink-guard thresholds (#15725).
+func dynamicAddressRuntimeName15725(server string, feed *config.FeedServer) string {
+	if feed == nil {
+		return server
+	}
+	for _, entry := range feed.FeedEntries {
+		if entry.Name != "" {
+			return entry.Name
+		}
+	}
+	if feed.FeedName != "" {
+		return feed.FeedName
+	}
+	return server
 }
 
 func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
@@ -98,6 +118,29 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 						continue
 					}
 					fmt.Fprintf(&buf, "  %s: %s\n", name, strings.Join(tg.Targets, ", "))
+				}
+			}
+			// #15725: SNMPv3 USM users, matching the gRPC showSNMP renderer
+			// (pkg/grpcapi/server_show_dhcp_lldp_snmp.go) and the local CLI:
+			// protocols only — AuthPassword/PrivPassword are config.Secret
+			// and must never render here.
+			if len(snmpCfg.V3Users) > 0 {
+				buf.WriteString("SNMPv3 USM users:\n")
+				for _, name := range sortedKeys(snmpCfg.V3Users) {
+					u := snmpCfg.V3Users[name]
+					if u == nil {
+						// #10439: tolerate present-but-nil slots.
+						continue
+					}
+					auth := u.AuthProtocol
+					if auth == "" {
+						auth = "none"
+					}
+					priv := u.PrivProtocol
+					if priv == "" {
+						priv = "none"
+					}
+					fmt.Fprintf(&buf, "  %s: auth=%s priv=%s\n", name, auth, priv)
 				}
 			}
 		}
@@ -197,6 +240,16 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case "dynamic-address":
+		// #15725: mirror the gRPC showDynamicAddress renderer
+		// (pkg/grpcapi/server_show_security_text.go): hold-interval default
+		// wording, shrink/content-churn guard lines, and the Dynamic
+		// Address Bindings section with feeds.BindingEnforcement verdicts.
+		// The REST-only compact "Feed runtime status" summary is retained
+		// after the config sections.
+		var runtimeFeeds map[string]feeds.FeedInfo
+		if s.feedsFn != nil {
+			runtimeFeeds = s.feedsFn()
+		}
 		if cfg == nil || len(cfg.Security.DynamicAddress.FeedServers) == 0 {
 			buf.WriteString("No dynamic address feeds configured\n")
 		} else {
@@ -219,29 +272,66 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 				}
 				if feed.HoldInterval > 0 {
 					fmt.Fprintf(&buf, "  Hold interval: %ds\n", feed.HoldInterval)
+				} else {
+					fmt.Fprintf(&buf, "  Hold interval: none (last-good set retained indefinitely)\n")
 				}
+				minOld, minRetain, minDrop := feed.ShrinkGuardMinOldCount, feed.ShrinkGuardMinRetainPercent, feed.ShrinkGuardMinDrop
+				if fi, ok := runtimeFeeds[dynamicAddressRuntimeName15725(name, feed)]; ok {
+					if fi.ShrinkGuardMinOldCount > 0 {
+						minOld = fi.ShrinkGuardMinOldCount
+					}
+					if fi.ShrinkGuardMinRetainPercent > 0 {
+						minRetain = fi.ShrinkGuardMinRetainPercent
+					}
+					if fi.ShrinkGuardMinDrop > 0 {
+						minDrop = fi.ShrinkGuardMinDrop
+					}
+				}
+				if minOld < 1 || minOld > config.MaxDynamicAddressFeedPrefixes {
+					minOld = config.DefaultDynamicAddressShrinkGuardMinOldCount
+				}
+				if minRetain < 1 || minRetain > 100 {
+					minRetain = config.DefaultDynamicAddressShrinkGuardRetainPct
+				}
+				if minDrop < 1 || minDrop >= config.MaxDynamicAddressFeedPrefixes {
+					minDrop = config.DefaultDynamicAddressShrinkGuardMinDrop
+				}
+				fmt.Fprintf(&buf, "  Shrink guard: high-water >= %d prefixes; refuse candidates below %d%% of baseline with a drop of at least %d\n", minOld, minRetain, minDrop)
+				fmt.Fprintf(&buf, "  Content churn guard: installed >= %d prefixes; refuse below %d%% exact-prefix overlap\n", minOld, minRetain)
 				buf.WriteString("\n")
 			}
 		}
-		if s.feedsFn != nil {
-			infos := s.feedsFn()
-			if len(infos) > 0 {
-				buf.WriteString("Feed runtime status:\n")
-				for _, feedName := range sortedKeys(infos) {
-					info := infos[feedName]
-					fmt.Fprintf(&buf, "  %s: installed prefixes=%d", feedName, info.Prefixes)
-					if info.PublicationDebt {
-						published := info.PublishedHash
-						if !info.HasPublished {
-							published = "none"
-						}
-						fmt.Fprintf(&buf, "; PUBLICATION-DEBT installed sha256=%s, last published sha256=%s (dataplane may still enforce previous-good snapshot)",
-							info.Hash, published)
-					} else if info.HasPublished {
-						fmt.Fprintf(&buf, "; published sha256=%s", info.PublishedHash)
-					}
-					buf.WriteString("\n")
+		if cfg != nil && len(cfg.Security.DynamicAddress.AddressBindings) > 0 {
+			buf.WriteString("Dynamic Address Bindings:\n")
+			for _, name := range sortedKeys(cfg.Security.DynamicAddress.AddressBindings) {
+				b := cfg.Security.DynamicAddress.AddressBindings[name]
+				if b == nil {
+					// #10439: tolerate present-but-nil slots.
+					continue
 				}
+				mode := b.FailMode
+				if mode == "" {
+					mode = "retain"
+				}
+				fmt.Fprintf(&buf, "  %s: feeds %s, fail-mode %s\n", name, strings.Join(b.FeedNames, ", "), mode)
+				fmt.Fprintf(&buf, "    Enforced: %s\n", feeds.BindingEnforcement(b, runtimeFeeds))
+			}
+		}
+		if len(runtimeFeeds) > 0 {
+			buf.WriteString("Feed runtime status:\n")
+			for _, feedName := range sortedKeys(runtimeFeeds) {
+				info := runtimeFeeds[feedName]
+				fmt.Fprintf(&buf, "  %s: installed prefixes=%d", feedName, info.Prefixes)
+				if info.PublicationDebt {
+					published := info.PublishedHash
+					if !info.HasPublished {
+						published = "none"
+					}
+					fmt.Fprintf(&buf, "; PUBLICATION-DEBT installed sha256=%s, last published sha256=%s (dataplane may still enforce previous-good snapshot)", info.Hash, published)
+				} else if info.HasPublished {
+					fmt.Fprintf(&buf, "; published sha256=%s", info.PublishedHash)
+				}
+				buf.WriteString("\n")
 			}
 		}
 
@@ -271,7 +361,16 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 						// restore/peer-sync loads.
 						continue
 					}
-					fmt.Fprintf(&buf, "  %-20s members: %s\n", name, strings.Join(as.Addresses, ", "))
+					// #15725: nested address-set members, rendered with the
+					// `set:` prefix the gRPC showAddressBook and local CLI
+					// use, so a set grouping other sets no longer reads as
+					// empty.
+					parts := make([]string, 0, len(as.Addresses)+len(as.AddressSets))
+					parts = append(parts, as.Addresses...)
+					for _, nested := range as.AddressSets {
+						parts = append(parts, "set:"+nested)
+					}
+					fmt.Fprintf(&buf, "  %-20s members: %s\n", name, strings.Join(parts, ", "))
 				}
 			}
 		}
