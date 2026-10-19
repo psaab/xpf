@@ -32,6 +32,16 @@
 # existing per-statement commit/delete pattern; cleanup deletes only owned
 # leaves, and an authenticated FAIL survives a failed restore.
 #
+# The GRE member lives in its OWN test-owned zone (wire-vrf), never in the
+# existing `wan` zone: `wan` also carries the MAIN-context reth0.50/.80, so
+# adding an RI member there makes the zone span two routing contexts and the
+# #11061 strict validator (validateFabricZoneRoutingInstanceAmbiguityStrict)
+# rejects the commit — the exact failure the 2026-10-16 live attempt hit.
+# The dedicated zone carries its own lan->wire-vrf permit and lan->wire-vrf
+# interface-SNAT rule-set, mirroring the existing lan->sfmix pair for the
+# product GRE fixture, so policy/NAT selection for the new egress is
+# explicit instead of borrowed from a zone the packet does not egress into.
+#
 # Successful sender sendto calls are the offered-frame count. Sender and
 # capture mirror wire-conntrack-lifecycle: LAN host offers, target captures on
 # eth0. The target is the managed peer, not the host-side fence.
@@ -177,6 +187,33 @@ if [[ "$MODE" == selftest ]]; then
     fi
     rm -f "$set_a" "$set_b" "$set_c" "$set_d"
 
+    # #11416 fixture-shape guards (source-text, no cluster): the populated
+    # GRE member must land in the dedicated wire-vrf zone with its own
+    # lan->wire-vrf permit + SNAT, never in the cross-context wan zone.
+    # Reverting the zone to wan (or dropping the policy/NAT pair) makes the
+    # populated commit collide with the #11061 validator again — these
+    # cells are the unit-level proof that cannot happen by construction.
+    script_text="$(cat "$0")"
+    wan_zone_lines="$(grep 'security-zone wan interfaces' "$0" | grep -vc 'wan_zone_lines' || true)"
+    if [[ "$script_text" == *'set security zones security-zone %s interfaces %s'* &&
+        "$script_text" == *'from-zone lan to-zone %s policy wire-vrf-allow'* &&
+        "$script_text" == *'rule-set lan-to-wire-vrf to zone %s'* &&
+        "$wan_zone_lines" == 0 ]]; then
+        echo "  PASS  populated GRE member uses dedicated wire-vrf zone, not wan"
+        pass=$((pass + 1))
+    else
+        echo "  FAIL  populated GRE member uses dedicated wire-vrf zone, not wan"
+        fail=$((fail + 1))
+    fi
+    if [[ "$script_text" == *'delete security policies from-zone lan to-zone %s'* &&
+        "$script_text" == *'delete security nat source rule-set lan-to-wire-vrf'* &&
+        "$script_text" == *'delete security zones security-zone %s'* ]]; then
+        echo "  PASS  populated cleanup deletes owned zone policy and SNAT"
+        pass=$((pass + 1))
+    else
+        echo "  FAIL  populated cleanup deletes owned zone policy and SNAT"
+        fail=$((fail + 1))
+    fi
     marker_cell "summary commit marker" 0 $'configuration check succeeds\ncommit complete: 1 statement(s) changed (1 added, 0 removed)'
     marker_cell "embedded commit marker rejected" 1 $'configuration check succeeds\nerror: commit failed before commit complete'
 
@@ -480,25 +517,31 @@ cli_commit_probe_allow() {
 }
 # #11416: the populated-RI fixture. One transaction owns the GRE member —
 # device-level tunnel source/destination plus a unit-0 address, the same
-# statement shape as the fixture's own gr-0/0/0 — its RI list membership, and
-# its zone placement (the existing wan zone already carries the lan->wan
-# permit policy and interface SNAT rule-set the forwarded tuple needs); a
-# second owns only the exact /32 static route, so the route-removed
-# discrimination phase deletes exactly that leaf.
+# statement shape as the fixture's own gr-0/0/0 — its RI list membership,
+# and its placement in the test-owned wire-vrf zone together with that
+# zone's lan->wire-vrf permit and interface-SNAT rule-set (mirroring the
+# existing lan->sfmix pair); a second owns only the exact /32 static
+# route, so the route-removed discrimination phase deletes exactly that
+# leaf. The member must NOT join the existing wan zone: wan also carries
+# MAIN-context reth0.50/.80, so the #11061 fabric-zone validator rejects a
+# zone spanning MAIN and the RI (the 2026-10-16 live VOID).
+POPULATED_ZONE="${POPULATED_ZONE:-wire-vrf}"
 cli_commit_populated() {
     local action="$1" out
     if [[ "$action" == add ]]; then
-        out="$(printf 'configure\nrollback 0\nset interfaces %s tunnel source %s\nset interfaces %s tunnel destination %s\nset interfaces %s unit 0 family inet address %s/32\nset routing-instances %s interface %s\nset security zones security-zone wan interfaces %s\ncommit check\ncommit\nexit\nquit\n' \
+        out="$(printf 'configure\nrollback 0\nset interfaces %s tunnel source %s\nset interfaces %s tunnel destination %s\nset interfaces %s unit 0 family inet address %s/32\nset routing-instances %s interface %s\nset security zones security-zone %s interfaces %s\nset security policies from-zone lan to-zone %s policy wire-vrf-allow match source-address any\nset security policies from-zone lan to-zone %s policy wire-vrf-allow match destination-address any\nset security policies from-zone lan to-zone %s policy wire-vrf-allow match application any\nset security policies from-zone lan to-zone %s policy wire-vrf-allow then permit\nset security nat source rule-set lan-to-wire-vrf from zone lan\nset security nat source rule-set lan-to-wire-vrf to zone %s\nset security nat source rule-set lan-to-wire-vrf rule snat match source-address 0.0.0.0/0\nset security nat source rule-set lan-to-wire-vrf rule snat then source-nat interface\ncommit check\ncommit\nexit\nquit\n' \
             "$POPULATED_GRE_DEV" "$WAN_SRC" "$POPULATED_GRE_DEV" "$DEST_IP" \
             "$POPULATED_GRE_DEV" "$POPULATED_GRE_ADDR" "$RI_NAME" "$POPULATED_GRE_UNIT" \
-            "$POPULATED_GRE_UNIT" |
+            "$POPULATED_ZONE" "$POPULATED_GRE_UNIT" \
+            "$POPULATED_ZONE" "$POPULATED_ZONE" "$POPULATED_ZONE" "$POPULATED_ZONE" \
+            "$POPULATED_ZONE" |
             $SG "incus exec ${NODE} -- cli" 2>&1)" || {
             printf '%s\n' "$out" >&2
             return 1
         }
     else
-        out="$(printf 'configure\nrollback 0\ndelete security zones security-zone wan interfaces %s\ndelete routing-instances %s interface %s\ndelete interfaces %s\ncommit check\ncommit\nexit\nquit\n' \
-            "$POPULATED_GRE_UNIT" "$RI_NAME" "$POPULATED_GRE_UNIT" "$POPULATED_GRE_DEV" |
+        out="$(printf 'configure\nrollback 0\ndelete security nat source rule-set lan-to-wire-vrf\ndelete security policies from-zone lan to-zone %s\ndelete security zones security-zone %s\ndelete routing-instances %s interface %s\ndelete interfaces %s\ncommit check\ncommit\nexit\nquit\n' \
+            "$POPULATED_ZONE" "$POPULATED_ZONE" "$RI_NAME" "$POPULATED_GRE_UNIT" "$POPULATED_GRE_DEV" |
             $SG "incus exec ${NODE} -- cli" 2>&1)" || {
             printf '%s\n' "$out" >&2
             return 1
@@ -697,12 +740,15 @@ if grep -qE "^set routing-instances ${RI_NAME}[[:space:]]" "$BASE0_NORM" ||
     grep -qE "^set routing-instances ${RI_NAME}[[:space:]]" "$BASE1_NORM"; then
     void_now env-void
 fi
-# #11416: the populated-RI fixture's GRE member, unit address, and zone
-# placement must be absent on both nodes before anything is written.
-if grep -qE "${POPULATED_GRE_DEV}|${POPULATED_GRE_ADDR%.*}" "$BASE0_NORM" ||
-    grep -qE "${POPULATED_GRE_DEV}|${POPULATED_GRE_ADDR%.*}" "$BASE1_NORM"; then
+# #11416: the populated-RI fixture's GRE member, unit address, dedicated
+# zone, policy pair, and SNAT rule-set must be absent on both nodes before
+# anything is written.
+if grep -qE "${POPULATED_GRE_DEV}|${POPULATED_GRE_ADDR%.*}|security-zone ${POPULATED_ZONE}[[:space:]]|to-zone ${POPULATED_ZONE}[[:space:]]|rule-set lan-to-wire-vrf[[:space:]]" "$BASE0_NORM" ||
+    grep -qE "${POPULATED_GRE_DEV}|${POPULATED_GRE_ADDR%.*}|security-zone ${POPULATED_ZONE}[[:space:]]|to-zone ${POPULATED_ZONE}[[:space:]]|rule-set lan-to-wire-vrf[[:space:]]" "$BASE1_NORM"; then
     void_now env-void
 fi
+[[ "$POPULATED_ZONE" =~ ^[A-Za-z][A-Za-z0-9_-]{0,31}$ && "$POPULATED_ZONE" != wan && "$POPULATED_ZONE" != lan ]] ||
+    void_now harness-void
 # The ingress filter must already be attached to the product-owned LAN unit.
 # This is the ownership proof that replaces the old temporary unowned veth.
 grep -q 'set interfaces reth1 unit 0 family inet filter input sfmix-pbr' "$BASE0_NORM" ||
