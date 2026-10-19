@@ -5689,6 +5689,29 @@ impl PortAllocator {
         translated_ip: IpAddr,
         holder: NatHolder,
     ) -> Result<InterfaceIdentity, super::source::SourceNatFailureReason> {
+        self.allocate_interface_identity_excluding(flow, translated_ip, holder, false, &|_| false)
+    }
+
+    /// #15109: must-PAT variant of [`Self::allocate_interface_identity`].
+    ///
+    /// When a peer pool/NAT64 allocator already owns the preserved port,
+    /// the caller must not preserve it, and the PAT walk must not select
+    /// any other peer-owned candidate either. `must_pat` skips the
+    /// preserve-first arm; `excluded` is consulted for every PAT
+    /// candidate so a peer-owned candidate is skipped rather than
+    /// minted and rolled back.
+    ///
+    /// No synthetic flow key is fabricated: the real `flow` is the only
+    /// record minted, so no rollback can unlink a real host's record
+    /// that happens to alias a made-up key.
+    pub(super) fn allocate_interface_identity_excluding(
+        &self,
+        flow: SourceNatFlowKey,
+        translated_ip: IpAddr,
+        holder: NatHolder,
+        must_pat: bool,
+        excluded: &dyn Fn(u16) -> bool,
+    ) -> Result<InterfaceIdentity, super::source::SourceNatFailureReason> {
         let rkey_for = |port: u16| AddressOnlyReverseKey::for_flow(&flow, translated_ip, port);
         let preserved = flow.src_port;
         // #13944: the reverse NAT key for UDP H:source -> P:destination
@@ -5716,7 +5739,9 @@ impl PortAllocator {
             }
             // PRESERVE-FIRST. Identity check and insert happen under ONE
             // acquisition, so two workers cannot both observe the port free.
-            if !reserved_local_tuple
+            if !must_pat
+                && !reserved_local_tuple
+                && !excluded(preserved)
                 && !live.address_only_owners.contains_key(&rkey_for(preserved))
             {
                 self.insert_interface_record_locked(
@@ -5768,11 +5793,13 @@ impl PortAllocator {
                 let offset = (start + probed) % span;
                 let candidate = self.port_low.saturating_add(offset as u16);
                 probed += 1;
-                if crate::nat::iface_registry::conflicts_with_local_control_tuple(
-                    flow.protocol,
-                    candidate,
-                    flow.dst_port,
-                ) || live.address_only_owners.contains_key(&rkey_for(candidate))
+                if excluded(candidate)
+                    || crate::nat::iface_registry::conflicts_with_local_control_tuple(
+                        flow.protocol,
+                        candidate,
+                        flow.dst_port,
+                    )
+                    || live.address_only_owners.contains_key(&rkey_for(candidate))
                 {
                     continue;
                 }

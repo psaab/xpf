@@ -248,3 +248,87 @@ fn interface_different_remote_translates_14367() {
     assert!(matches!(l, SourceNatLookup::Matched(_)), "different remote must translate (PAT ok), got {l:?}");
     let _ = InterfaceNatAllocators::default();
 }
+
+// #15109 — the #14367 forced-PAT arm fabricated
+// `SourceNatFlowKey{src_ip:10.255.255.253, src_port:flow.src_port, ..flow}`,
+// minted it, minted the real flow, then rolled the dummy back. If a real
+// internal host at 10.255.255.253 already held that exact interface
+// identity, the dummy mint re-entered the victim's live record (same key
+// + same translated tuple) and the dummy rollback unlinked it. A victim
+// PAT rollback must never delete the aliased host's record.
+#[test]
+fn victim_at_synthetic_address_survives_peer_owned_preserved_pat_15109() {
+    let state = build_forwarding_state(&snap_iface_nat64(E));
+    let (ip, pt) = nat64_mint(&state, 40000).expect("NAT64 mint");
+    assert_eq!(ip.to_string(), E);
+    // The victim is the host the old dummy key aliased.
+    match iface_admit(&state, "10.255.255.253", pt, SRV) {
+        SourceNatLookup::Matched(d) => {
+            assert_ne!(d.rewrite_src_port.unwrap_or(pt), pt, "victim must PAT off peer-owned port")
+        }
+        SourceNatLookup::Unavailable(f) => {
+            assert_eq!(f.reason, SourceNatFailureReason::InterfaceIdentityExhausted)
+        }
+        other => panic!("victim admit {other:?}"),
+    }
+    let alloc = state
+        .iface_nat_allocators
+        .allocator_if_present(E.parse::<IpAddr>().unwrap())
+        .expect("interface allocator");
+    assert_eq!(alloc.live_flow_count(), 1, "victim record must survive its own PAT mint (no dummy rollback may unlink it)");
+    // The victim still owns its identity: a re-admit is idempotent, not a
+    // fresh mint that could preserve the peer-owned port.
+    match iface_admit(&state, "10.255.255.253", pt, SRV) {
+        SourceNatLookup::Matched(d) => {
+            assert_ne!(d.rewrite_src_port.unwrap_or(pt), pt, "victim re-admit must keep its PAT port")
+        }
+        other => panic!("victim re-admit {other:?}"),
+    }
+    assert_eq!(alloc.live_flow_count(), 1, "victim re-admit must be idempotent");
+}
+
+#[test]
+fn real_host_survives_forced_pat_of_colliding_flow_15109() {
+    let state = build_forwarding_state(&snap_iface_nat64(E));
+    let (ip, pt) = nat64_mint(&state, 40000).expect("NAT64 mint");
+    assert_eq!(ip.to_string(), E);
+    // Real host at the formerly-fabricated address owns (E,pt) toward SRV.
+    let victim = match iface_admit(&state, "10.255.255.253", pt, SRV) {
+        SourceNatLookup::Matched(d) => d,
+        SourceNatLookup::Unavailable(f) => {
+            assert_eq!(f.reason, SourceNatFailureReason::InterfaceIdentityExhausted);
+            return;
+        }
+        other => panic!("victim admit {other:?}"),
+    };
+    let victim_port = victim.rewrite_src_port.unwrap_or(pt);
+    // A different host with the same source port takes the forced-PAT arm.
+    match iface_admit(&state, "10.0.0.2", pt, SRV) {
+        SourceNatLookup::Matched(d) => {
+            assert_ne!(d.rewrite_src_port.unwrap_or(pt), pt, "collider must PAT off peer-owned port");
+            assert_ne!(d.rewrite_src_port.unwrap_or(pt), victim_port, "collider must not take the victim's PAT port");
+        }
+        SourceNatLookup::Unavailable(f) => {
+            assert_eq!(f.reason, SourceNatFailureReason::InterfaceIdentityExhausted)
+        }
+        other => panic!("collider admit {other:?}"),
+    }
+    let alloc = state
+        .iface_nat_allocators
+        .allocator_if_present(E.parse::<IpAddr>().unwrap())
+        .expect("interface allocator");
+    assert_eq!(alloc.live_flow_count(), 2, "victim and collider records must both survive (dummy rollback deleted the victim pre-fix)");
+}
+
+#[test]
+fn synthetic_address_without_peer_collision_preserves_15109() {
+    // Control: with no peer owning the port, the host at the formerly
+    // fabricated address preserves like any other host.
+    let state = build_forwarding_state(&snap_iface_nat64(E));
+    match iface_admit(&state, "10.255.255.253", 40000, SRV) {
+        SourceNatLookup::Matched(d) => {
+            assert_eq!(d.rewrite_src_port, None, "control: no peer collision must preserve")
+        }
+        other => panic!("control admit {other:?}"),
+    }
+}
