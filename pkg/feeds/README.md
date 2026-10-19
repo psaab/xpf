@@ -37,9 +37,20 @@ the set: the rotation that drops epoch retention below the floor is
 refused and names epoch content overlap. The same exact-candidate
 acknowledgement workflow applies to either refusal; acknowledging an
 epoch-churn candidate installs it and rebases the epoch (and the count
-high-water) to the acknowledged set. Bootstrap remains installable; after a
-same-manager remove/re-add, a bootstrap with fewer prefixes or changed
-same-sized content installs with a warning that records both hashes and counts.
+high-water) to the acknowledged set. A true bootstrap (no remembered
+baseline) remains installable. A feed with no live snapshot but a remembered
+baseline — cold restart, same-manager remove/re-add, or post-hold-drop
+(#14994, D39-01) — is not a true bootstrap: its first candidate is compared
+with the remembered high-water count/hash and, when restored, the remembered
+epoch content set, and a candidate that trips those guards is refused
+awaiting the exact acknowledgement (nothing installs, nothing publishes; the
+binding stays omitted so referencing policy fails closed). Only a candidate
+at or above those floors installs on that path, with a warning that records
+both hashes and counts when it differs from the remembered high-water.
+Comparing a growing candidate against the remembered epoch does not rebase
+it: the epoch and high-water hash stay anchored to the acknowledged epoch
+until an acknowledged install rebases them (#14395 non-rebase on growth,
+preserved).
 
 Refusal does not replace the installed set, stamp success, or publish to the
 dataplane. `LastError`, `StaleSince`, `show security dynamic-address`, and the
@@ -48,10 +59,13 @@ truncation, and whole-address-space guards remain independent and unchanged.
 High-water history survives same-name reconfiguration and removal/recreation,
 and the daemon durably stores each feed's count, hash, and epoch prefix set in
 `/var/lib/xpf/feed-shrink-history.json`. A cold boot restores that epoch before
-starting producers, so its first successful bootstrap is audited against it,
-and the restored epoch set anchors subsequent content-churn refusals. Records
+starting producers, so its first fetch is guarded against it (above), and the
+restored epoch set anchors subsequent content-churn refusals. The restored
+epoch set carries its own digest: it need not equal the count high-water hash,
+which a later ordinary rotation may have advanced past the epoch set. Records
 written before the epoch set was persisted restore the count epoch only; the
-content epoch then re-bootstraps on the first install.
+content epoch then re-bootstraps on the first install, still guarded by the
+restored count high-water.
 Factory reset erases this file and any crash-leaked `.<base>.tmp-*` snapshots
 after fencing and draining the daemon's in-flight persistence callback, so a
 re-tenanted device does not inherit a prior tenant's same-named feed baseline.
@@ -112,10 +126,11 @@ the drop, so the exact refused candidate re-served afterwards is refused
 again (previous-good enforcement persists through the omitted-binding
 preflight) until its exact acknowledgement lands; the acknowledgement is
 accepted without a live installed baseline to compare against, and the
-acknowledged candidate installs and rebases the epoch. A DIFFERENT successful
-fetch after the drop follows the bootstrap rule: if it is below the
-remembered epoch high-water threshold it installs with the same audit
-warning, clearing the refusal.
+acknowledged candidate installs and rebases the epoch. A DIFFERENT fetch
+after the drop follows the #14994 remembered-baseline rule: if it trips the
+remembered shrink/churn guards it is refused as a fresh candidate; only a
+candidate at or above those floors installs with the audit warning,
+clearing the refusal.
 
 The guard logs an initial Warn and re-Warns at most hourly for a persistent
 refusal. Prometheus exposes an active gauge and a per-feed counter for refused
@@ -149,10 +164,14 @@ compared with the epoch high-water baseline, and low-overlap content changes
 are refused. The #14395 multi-step rotation bypass is guarded the same way:
 content overlap is compared with the epoch content set, not the immediate
 predecessor, so three successive 51%-retained rotations cannot fully replace
-a feed with zero refusals. A same-manager delete/re-add retains the high-water count and
-warns on a smaller or changed same-sized bootstrap candidate. The daemon also
-persists that per-feed count, hash, and epoch set across process restarts. Keep the source
-feed's own integrity/monitoring controls in place.
+a feed with zero refusals. The #14994 (D39-01) no-snapshot bypass is guarded
+the same way: cold-restart, recreated, and post-hold-drop candidates are
+compared with the remembered baseline and refused when they trip it, instead
+of installing with only an audit warning; the restored epoch set is accepted
+with its own digest even when a later rotation advanced the count high-water
+hash past it. The daemon persists that per-feed count, hash, and epoch set
+across process restarts. Keep the source feed's own integrity/monitoring
+controls in place.
 
 ## Day-2 reconcile (#5036)
 

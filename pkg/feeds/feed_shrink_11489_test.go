@@ -110,6 +110,11 @@ func TestEqualCountDisjointSwapIsRefused11489(t *testing.T) {
 	}
 }
 
+// Superseded by #14994 (D39-01): a recreated bootstrap that trips the
+// remembered shrink/churn guards is refused awaiting ack, not installed
+// with only an audit warning. The remembered-high-water restore is
+// unchanged; the audit-warning expectation now applies only to candidates
+// at/above the floors (covered in feed_shrink_14994_test.go controls).
 func TestRecreatedFeedAuditsSmallBootstrapAgainstRememberedHighWater11489(t *testing.T) {
 	logs := captureShrinkLogs11059(t)
 	m := New(nil)
@@ -154,31 +159,32 @@ func TestRecreatedFeedAuditsSmallBootstrapAgainstRememberedHighWater11489(t *tes
 	}
 	m.installSnapshot(recreated, candidate)
 
-	if got := len(m.GetPrefixes("recreated-feed")); got != 5 {
-		t.Fatalf("bootstrap install changed behavior: got %d prefixes, want 5", got)
+	if got := len(m.GetPrefixes("recreated-feed")); got != 0 {
+		t.Fatalf("recreated drastic shrink installed as bootstrap (#14994): got %d prefixes, want 0 (refused)", got)
 	}
 	info := m.AllFeeds()["recreated-feed"]
+	if !info.ShrinkRefused || info.ShrinkCandidateOldCount != 100 || info.ShrinkCandidateNewCount != 5 {
+		t.Fatalf("recreated refusal did not bind remembered high-water tuple: %+v", info)
+	}
 	if info.ShrinkGuardHighWaterCount != 100 || info.ShrinkGuardHighWaterHash == "" {
 		t.Fatalf("recreated feed lost remembered high-water state: %+v", info)
 	}
-	if !strings.Contains(logs.String(), "bootstrap below or changed from remembered high-water") {
-		t.Fatalf("small same-name recreate bootstrap had no audit warning:\n%s", logs.String())
+	if !strings.Contains(logs.String(), "drastic shrink REFUSED") {
+		t.Fatalf("small same-name recreate shrink had no refusal audit:\n%s", logs.String())
+	}
+	if err := m.AcknowledgeFeedShrink("recreated-feed", info.ShrinkRefusalID,
+		info.ShrinkCandidateHash, info.ShrinkBaselineHash,
+		info.ShrinkCandidateOldCount, info.ShrinkCandidateNewCount,
+		"operator=alice", "provider confirmed recreated reduction"); err != nil {
+		t.Fatalf("acknowledging recreated shrink: %v", err)
+	}
+	m.installSnapshot(recreated, candidate)
+	if got := len(m.GetPrefixes("recreated-feed")); got != 5 {
+		t.Fatalf("acknowledged recreated shrink did not install: got %d prefixes, want 5", got)
 	}
 
-	// A count-preserving swap is also visible when re-add makes it a bootstrap,
-	// even though there is no live snapshot to run the overlap refusal against.
-	m.Apply(ctx, &config.DynamicAddressConfig{})
-	m.Apply(ctx, cfg())
-	recreated = getState()
-	swapped, err := parseFeed(strings.NewReader(strings.ReplaceAll(shrinkBody11059(100), "198.18.", "198.19.")))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.installSnapshot(recreated, swapped)
-	if got := len(m.GetPrefixes("recreated-feed")); got != 100 || m.AllFeeds()["recreated-feed"].ShrinkRefused {
-		t.Fatalf("recreated equal-count feed did not install cleanly with audit: prefixes=%d info=%+v", got, m.AllFeeds()["recreated-feed"])
-	}
-	if got := strings.Count(logs.String(), "bootstrap below or changed from remembered high-water"); got != 2 {
-		t.Fatalf("small and equal-count recreate bootstraps produced %d audit warnings, want 2:\n%s", got, logs.String())
-	}
+	// The equal-count disjoint-swap recreate case is covered against a
+	// fresh 100-epoch by TestRecreatedFeedBootstrapChurnRefused14994
+	// (#14994): ack-rebasing to 5 above moved this feed's epoch, so a swap
+	// here would compare against 5, not the remembered 100.
 }
