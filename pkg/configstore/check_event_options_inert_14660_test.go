@@ -65,6 +65,58 @@ func TestCheckTextEventOptionsInert14660(t *testing.T) {
 	}
 }
 
+// TestCheckTextEventOptionsInert15134 covers #15134 (A91-02) on the
+// operator surface: unknown change-configuration children (above all
+// the verify-only `commit-options { check; }`) must fail CheckText
+// naming the token, while plain `commands` still passes.
+func TestCheckTextEventOptionsInert15134(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "commit-options check hier",
+			text: "event-options {\n policy p {\n  events ping_test_failed;\n  then { change-configuration { commit-options { check; } commands \"set system host-name x\"; } }\n }\n}\n",
+			want: "commit-options",
+		},
+		{
+			name: "user-name hier",
+			text: "event-options {\n policy p {\n  events ping_test_failed;\n  then { change-configuration { user-name bob; commands \"set system host-name x\"; } }\n }\n}\n",
+			want: "user-name",
+		},
+		{
+			name: "retry hier",
+			text: "event-options {\n policy p {\n  events ping_test_failed;\n  then { change-configuration { retry 3; commands \"set system host-name x\"; } }\n }\n}\n",
+			want: "retry",
+		},
+		{
+			name: "junk hier",
+			text: "event-options {\n policy p {\n  events ping_test_failed;\n  then { change-configuration { junk-thing foo; commands \"set system host-name x\"; } }\n }\n}\n",
+			want: "junk-thing",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := CheckText(tc.text, -1)
+			if err == nil {
+				t.Fatalf("CheckText accepted inert change-configuration child (cfg=%+v); want reject naming %q", cfg, tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CheckText error %q does not name %q", err.Error(), tc.want)
+			}
+			if !strings.Contains(err.Error(), "#15134") {
+				t.Fatalf("CheckText error %q does not cite #15134", err.Error())
+			}
+		})
+	}
+	// Flat-set rows return an error through the same strict pipeline.
+	flat := "set event-options policy p events ping_test_failed\nset event-options policy p then change-configuration commit-options check\nset event-options policy p then change-configuration commands \"set system host-name x\"\n"
+	if _, err := CheckText(flat, -1); err == nil || !strings.Contains(err.Error(), "commit-options") {
+		t.Fatalf("CheckText flat commit-options = %v, want reject naming commit-options", err)
+	}
+}
+
 // TestCheckTextEventOptionsValid14660 is the positive control: the one
 // fully working shape stays accepted with no #14660 warning.
 func TestCheckTextEventOptionsValid14660(t *testing.T) {

@@ -167,6 +167,164 @@ func TestEventOptionsInert14660StrictRejects(t *testing.T) {
 	}
 }
 
+// TestEventOptionsInert15134ChangeConfigChildren is the #15134 decisive
+// check (residual of #14660, claim A91-02): the #14660 gate stopped at
+// the `then` keyword, so unknown `change-configuration` children
+// committed clean and were dropped by compileEventOptions (which reads
+// only FindChildren("commands")). An authored
+// `commit-options { check; }` (verify, do not activate) therefore
+// performed a LIVE commit when the policy fired. Strict must reject
+// naming policy + token; plain `commands` in every spelling stays the
+// control (TestEventOptionsInert14660ValidControls).
+func TestEventOptionsInert15134ChangeConfigChildren(t *testing.T) {
+	cases := []struct {
+		name string
+		tree *ConfigTree
+		want []string
+	}{
+		{
+			name: "commit-options check block hier",
+			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration { commit-options { check; } commands "set system host-name x"; } } } }`),
+			want: []string{"p", "commit-options", "commands"},
+		},
+		{
+			name: "commit-options flat",
+			tree: setTree6659(t,
+				`set event-options policy p events ping_test_failed`,
+				`set event-options policy p then change-configuration commit-options check`,
+				`set event-options policy p then change-configuration commands "set system host-name x"`),
+			want: []string{"p", "commit-options"},
+		},
+		{
+			name: "user-name hier",
+			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration { user-name bob; commands "set system host-name x"; } } } }`),
+			want: []string{"p", "user-name"},
+		},
+		{
+			name: "user-name flat",
+			tree: setTree6659(t,
+				`set event-options policy p events ping_test_failed`,
+				`set event-options policy p then change-configuration user-name bob`,
+				`set event-options policy p then change-configuration commands "set system host-name x"`),
+			want: []string{"p", "user-name"},
+		},
+		{
+			name: "retry hier",
+			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration { retry 3; commands "set system host-name x"; } } } }`),
+			want: []string{"p", "retry"},
+		},
+		{
+			name: "junk child hier",
+			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration { junk-thing foo; commands "set system host-name x"; } } } }`),
+			want: []string{"p", "junk-thing"},
+		},
+		{
+			name: "commit-options packed then block hier",
+			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then change-configuration { commit-options { check; } commands "set system host-name x"; } } }`),
+			want: []string{"p", "commit-options"},
+		},
+		{
+			name: "commit-options packed cc hier",
+			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration commit-options { check; } } } }`),
+			want: []string{"p", "commit-options"},
+		},
+		{
+			name: "user-name packed cc hier",
+			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration user-name bob; } } }`),
+			want: []string{"p", "user-name"},
+		},
+		{
+			name: "junk packed then-cc hier",
+			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then change-configuration junk-thing foo; } }`),
+			want: []string{"p", "junk-thing"},
+		},
+		{
+			name: "second change-configuration block junk hier",
+			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration { commands "set system host-name a"; } change-configuration { retry 3; } } } }`),
+			want: []string{"p", "retry"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(tc.tree)
+			if err == nil {
+				t.Fatalf("CompileConfig accepted inert change-configuration child; want reject containing %v", tc.want)
+			}
+			for _, sub := range tc.want {
+				if !strings.Contains(err.Error(), sub) {
+					t.Errorf("error %q missing %q", err.Error(), sub)
+				}
+			}
+			if !strings.Contains(err.Error(), "#15134") {
+				t.Errorf("error %q does not cite #15134", err.Error())
+			}
+		})
+	}
+	// Lenient: the same shapes warn (named) and still compile (#1960).
+	for _, tc := range cases {
+		t.Run(tc.name+"/lenient", func(t *testing.T) {
+			cfg, err := CompileConfigLenient(tc.tree)
+			if err != nil {
+				t.Fatalf("CompileConfigLenient rejected inert change-configuration child: %v", err)
+			}
+			if cfg == nil {
+				t.Fatal("lenient compile returned nil config")
+			}
+			if !hasWarningContaining14660(cfg, append(append([]string{}, tc.want...), "#15134")...) {
+				t.Fatalf("lenient warnings %v contain no warning with %v + #15134", cfg.Warnings, tc.want)
+			}
+		})
+	}
+}
+
+// TestEventOptionsInert15134ChangeConfigControls proves plain `commands`
+// under change-configuration stays clean in every spelling — including
+// the packed `then change-configuration commands "..."` tail, whose
+// Keys[2] is `commands`, not an unknown child.
+func TestEventOptionsInert15134ChangeConfigControls(t *testing.T) {
+	// ThenCommands preservation is asserted only where compileEventOptions
+	// reads it today (bare-then and flat spellings). The packed-then
+	// spellings compile zero commands on master too (FindChildren finds
+	// no change-configuration child under a packed then) — a pre-existing
+	// gap outside #15134; here they are gate-only controls: no rejection,
+	// no warning.
+	trees := map[string]struct {
+		tree         *ConfigTree
+		wantCommands bool
+	}{
+		"hier block commands":         {hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration { commands "set system host-name x"; } } } }`), true},
+		"hier packed then cc block":   {hierTree14660(t, `event-options { policy p { events ping_test_failed; then change-configuration { commands "set system host-name x"; } } }`), false},
+		"hier packed then packed cmd": {hierTree14660(t, `event-options { policy p { events ping_test_failed; then change-configuration commands "set system host-name x"; } }`), false},
+		"hier cc block-list commands": {hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration { commands { "set system host-name a"; "set system host-name b"; } } } } }`), true},
+		"flat commands": {setTree6659(t,
+			`set event-options policy p events ping_test_failed`,
+			`set event-options policy p then change-configuration commands "set system host-name x"`), true},
+	}
+	for name, tc := range trees {
+		t.Run(name+"/strict", func(t *testing.T) {
+			cfg, err := CompileConfig(tc.tree)
+			if err != nil {
+				t.Fatalf("CompileConfig rejected plain commands control: %v", err)
+			}
+			if hasWarningContaining14660(cfg, "#14660") || hasWarningContaining14660(cfg, "#15134") {
+				t.Fatalf("strict commands control carried inert warning: %v", cfg.Warnings)
+			}
+			if tc.wantCommands && (len(cfg.EventOptions) != 1 || len(cfg.EventOptions[0].ThenCommands) == 0) {
+				t.Fatalf("compiled EventOptions = %+v, want commands preserved", cfg.EventOptions)
+			}
+		})
+		t.Run(name+"/lenient", func(t *testing.T) {
+			cfg, err := CompileConfigLenient(tc.tree)
+			if err != nil {
+				t.Fatalf("CompileConfigLenient rejected plain commands control: %v", err)
+			}
+			if hasWarningContaining14660(cfg, "#14660") || hasWarningContaining14660(cfg, "#15134") {
+				t.Fatalf("lenient commands control carried inert warning: %v", cfg.Warnings)
+			}
+		})
+	}
+}
+
 // TestEventOptionsInert14660ValidControls proves the gate does not
 // over-reject: the three RPM names with change-configuration (plus
 // within / attributes-match / plant-class) stay clean on BOTH paths
