@@ -16,6 +16,7 @@ var vrrpGroupPropertyKeywords = map[string]bool{
 	"virtual-address":     true,
 	"priority":            true,
 	"preempt":             true,
+	"no-preempt":          true,
 	"accept-data":         true,
 	"advertise-interval":  true,
 	"authentication-type": true,
@@ -1413,6 +1414,9 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 			vg = &VRRPGroup{
 				ID:       groupID,
 				Priority: 100, // default
+				// Junos and RFC 5798 default Preempt_Mode to TRUE
+				// (#15047): only an explicit `no-preempt` clears it.
+				Preempt: true,
 			}
 			unit.VRRPGroups[key] = vg
 		}
@@ -1457,6 +1461,8 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 					}
 					i += 2
 				}
+			case "no-preempt":
+				vg.Preempt = false
 			case "accept-data":
 				vg.AcceptData = true
 			case "advertise-interval":
@@ -1566,6 +1572,8 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 						vg.PreemptHoldTime = n
 					}
 				}
+			case "no-preempt":
+				vg.Preempt = false
 			case "accept-data":
 				vg.AcceptData = true
 			case "advertise-interval":
