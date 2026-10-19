@@ -1506,6 +1506,8 @@ pub(super) fn txn_run_descriptor_with_injected(
     super::poll_descriptor::poll_binding_process_descriptor_with_injection(
         binding,
         0,
+        &mut [],
+        &mut [],
         area_ptr,
         0,
         Some(injected),

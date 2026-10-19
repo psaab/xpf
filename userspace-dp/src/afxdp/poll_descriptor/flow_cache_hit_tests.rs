@@ -511,6 +511,15 @@ fn nat_translated_entry() -> FlowCacheEntry {
     entry
 }
 
+/// #14945 (3): `cached_entry` retargeted at binding 1 (LAN->WAN transit):
+/// the cached descriptor AND decision name the distinct egress, so the
+/// stage resolves `target_bi = 1` instead of the hairpin binding 0.
+fn transit_entry() -> FlowCacheEntry {
+    let mut entry = cached_entry();
+    entry.descriptor.target_binding_index = Some(1);
+    entry
+}
+
 fn tx_pipeline() -> WorkerTxPipeline {
     WorkerTxPipeline {
         free_tx_frames: (0..8u64).collect(),
@@ -870,6 +879,10 @@ struct StageRun {
     flow_cache_tallies: (u64, u64, u64),
     tx_pipeline: WorkerTxPipeline,
     tx_counters: WorkerTxCounters,
+    /// #14945 (3): the TARGET binding's pipeline/counters on a
+    /// cross-binding transit run; empty/default on hairpin runs.
+    target_tx_pipeline: WorkerTxPipeline,
+    target_tx_counters: WorkerTxCounters,
     scratch: WorkerScratch,
     mirror_sample_counter: u64,
     /// `telemetry.dbg` after the call. `run_stage` used to build this and drop
@@ -1034,6 +1047,9 @@ struct StageSeed {
     /// Physical parent-or-overlay arrival identity for the anti-loop cache
     /// guard. Defaults false for ordinary non-fabric cache fixtures.
     fabric_link_ingress: bool,
+    /// #14945 (3): run the stage with a cross-binding target
+    /// (`target_bi = 1`), optionally sharing the ingress UMEM.
+    cross_umem_shared: Option<bool>,
     /// The `now_ns` handed to `stage_flow_cache_hit`. Separate from
     /// `install_ns` so a cell can choose whether the session is STALE at call
     /// time, which is the only axis `touch_if_stale` branches on.
@@ -1051,6 +1067,7 @@ impl Default for StageSeed {
             tx_headroom: None,
             install_key: None,
             fabric_link_ingress: false,
+            cross_umem_shared: None,
             now_ns: 1_000_000,
         }
     }
@@ -1101,12 +1118,28 @@ fn run_stage_seeded(
     };
     flow_state.flow_cache.insert(entry);
 
+    // #14945 (3): the ingress UMEM identity the inline gate compares
+    // against; a bare mmap area suffices for the hairpin arm, while a
+    // cross-binding run clones this handle into the target binding.
+    let ingress_umem =
+        WorkerUmem::new_for_test(256).expect("ingress test umem");
     let mut tx_pipeline_state = tx_pipeline();
     if let Some((free_frames, max_pending)) = seed.tx_headroom {
         tx_pipeline_state.free_tx_frames = (0..free_frames as u64).collect();
         tx_pipeline_state.max_pending_tx = max_pending;
     }
     let mut tx_counters_state = tx_counters();
+    let mut target_binding = BindingWorker::new_for_mirror_test(
+        1,
+        0,
+        EGRESS_IFINDEX,
+        0,
+    );
+    if seed.cross_umem_shared == Some(true) {
+        target_binding.umem = ingress_umem.clone();
+    }
+    // The target binding keeps its own (fresh) pipeline/counters, so the
+    // stage's cross-binding arm writes to the queues asserted on below.
     let mut scratch_state = scratch();
     let mut sessions = SessionTable::new();
     if let Some((install_ns, protocol, tcp_flags)) = seed.session {
@@ -1150,15 +1183,29 @@ fn run_stage_seeded(
     // admission primitive, so the reset has to sit immediately before the call
     // and the read immediately after it.
     crate::afxdp::binding_state::pending_tx_admission_attempts_reset();
+    let mut inline_tx = InlineTxBindings {
+        ingress: InlineTxTarget {
+            tx_pipeline: &mut tx_pipeline_state,
+            tx_counters: &mut tx_counters_state,
+        },
+        // Cross-binding runs hand the stage the target as `right[0]`
+        // (binding_index 0 -> target_bi 1); hairpin runs keep it out.
+        left: &mut [],
+        right: if seed.cross_umem_shared.is_some() {
+            std::slice::from_mut(&mut target_binding)
+        } else {
+            &mut []
+        },
+    };
     let outcome = stage_flow_cache_hit(
         &mut flow_state,
-        &mut tx_pipeline_state,
-        &mut tx_counters_state,
+        &mut inline_tx,
         &mut scratch_state,
         &mut mirror_sample_counter,
         &fixture.ingress_live,
         0,
         BINDING_INDEX,
+        &ingress_umem,
         desc,
         &area as *const MmapArea,
         raw_frame,
@@ -1187,11 +1234,21 @@ fn run_stage_seeded(
     );
     // #6304: lift the staged TX bytes out of the UMEM before the mapping dies
     // with this function's frame.
-    let tx_frame = tx_pipeline_state
+    let target_tx_frame = target_binding
+        .tx_pipeline
         .pending_tx_prepared
         .front()
         .and_then(|prepared| area.slice(prepared.offset as usize, prepared.len as usize))
         .map(<[u8]>::to_vec);
+    let tx_frame = if seed.cross_umem_shared.is_some() {
+        target_tx_frame
+    } else {
+        tx_pipeline_state
+            .pending_tx_prepared
+            .front()
+            .and_then(|prepared| area.slice(prepared.offset as usize, prepared.len as usize))
+            .map(<[u8]>::to_vec)
+    };
     // #6304: read the hit entry's accumulated byte count back out. The
     // `#[cfg(test)]` `lookup` is the ZERO-adding variant of the same
     // `lookup_with_observed_bytes` body, so this read cannot itself move the
@@ -1212,6 +1269,8 @@ fn run_stage_seeded(
         flow_cache_tallies,
         tx_pipeline: tx_pipeline_state,
         tx_counters: tx_counters_state,
+        target_tx_pipeline: target_binding.tx_pipeline,
+        target_tx_counters: target_binding.tx_counters,
         scratch: scratch_state,
         mirror_sample_counter,
         dbg_forward: dbg.forward,
@@ -5088,4 +5147,110 @@ fn policy_deny_cache_hit_falls_through_for_live_reverse_nat_alias_13635() {
     assert_eq!(run.counters.policy_denied_packets, 0);
     assert!(run.tx_pipeline.pending_tx_local.is_empty());
     assert!(run.cached_observed_bytes.is_none());
+}
+
+/// #14945 (3): LAN->WAN transit on the same worker — the egress binding
+/// differs from the ingress binding but shares its UMEM allocation, so
+/// the cache hit takes the INLINE in-place path and hands the prepared
+/// request to the TARGET binding, byte-identical to the hairpin arm.
+///
+/// Fail-on-revert: restoring the `is_self_target` gate makes this run
+/// detour through `PendingForwardRequest` (`scratch_forwards` non-empty,
+/// target queue empty).
+#[test]
+fn transit_cross_binding_shared_umem_takes_inline_path_14945() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    // Hairpin control on the same frame: the byte-identical reference.
+    let hairpin = run_stage(&fixture, &frame, 1);
+    let hairpin_bytes = hairpin
+        .tx_frame
+        .clone()
+        .expect("control: hairpin stages the rewritten frame");
+
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        test_meta(&frame),
+        transit_entry(),
+        1,
+        StageSeed {
+            cross_umem_shared: Some(true),
+            ..StageSeed::default()
+        },
+    );
+
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "the transit cache hit must be consumed"
+    );
+    assert_eq!(
+        run.target_tx_pipeline.pending_tx_prepared.len(),
+        1,
+        "#14945: the prepared request must land on the TARGET binding's queue"
+    );
+    assert!(
+        run.tx_pipeline.pending_tx_prepared.is_empty(),
+        "#14945: nothing may be queued on the ingress binding for a transit hit"
+    );
+    assert!(
+        run.scratch.scratch_forwards.is_empty(),
+        "#14945: a shared-UMEM transit hit must NOT detour through \
+         PendingForwardRequest/enqueue_pending_forwards"
+    );
+    assert_eq!(
+        run.target_tx_counters.pending_in_place_tx_packets, 1,
+        "#14945: the target binding is charged for the in-place TX"
+    );
+    assert_eq!(run.tx_counters.pending_in_place_tx_packets, 0);
+    let transit_bytes = run
+        .tx_frame
+        .as_ref()
+        .expect("the target's staged frame must be readable from the shared UMEM");
+    assert_eq!(
+        transit_bytes, &hairpin_bytes,
+        "#14945: transit inline forwarding must be byte-identical to the hairpin arm"
+    );
+    // The prepared request still recycles to the INGRESS fill slot.
+    let prepared = run
+        .target_tx_pipeline
+        .pending_tx_prepared
+        .front()
+        .expect("target prepared request");
+    assert_eq!(prepared.recycle.fill_slot(), Some(0));
+    assert_eq!(prepared.egress_ifindex, EGRESS_IFINDEX);
+}
+
+/// #14945 (3) guard: a cross-binding target on a FOREIGN UMEM must not
+/// receive a prepared offset into the ingress allocation — it keeps
+/// the existing `PendingForwardRequest` detour (which rewrites in
+/// place after resolving the shared allocation, or copies).
+#[test]
+fn transit_cross_binding_foreign_umem_keeps_pending_forward_14945() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        test_meta(&frame),
+        transit_entry(),
+        1,
+        StageSeed {
+            cross_umem_shared: Some(false),
+            ..StageSeed::default()
+        },
+    );
+
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
+    assert!(
+        run.target_tx_pipeline.pending_tx_prepared.is_empty(),
+        "#14945/#8916: a foreign-UMEM target must never receive a prepared \
+         offset into the ingress UMEM"
+    );
+    assert_eq!(
+        run.scratch.scratch_forwards.len(),
+        1,
+        "#14945: a foreign-UMEM transit hit keeps the PendingForwardRequest path"
+    );
+    assert_eq!(run.target_tx_counters.pending_in_place_tx_packets, 0);
 }

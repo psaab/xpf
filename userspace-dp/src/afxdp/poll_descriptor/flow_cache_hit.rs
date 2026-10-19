@@ -66,17 +66,79 @@ pub(super) enum FlowCacheOutcome {
     FallThrough,
 }
 
+/// #14945 (3): one binding the inline cache-hit TX may hand a prepared
+/// request to. On the cross-binding arm these are the TARGET's fields,
+/// so its counters and queue bound are charged, not the ingress's.
+pub(super) struct InlineTxTarget<'a> {
+    pub(super) tx_pipeline: &'a mut WorkerTxPipeline,
+    pub(super) tx_counters: &'a mut WorkerTxCounters,
+}
+
+/// #14945 (3): the split bindings of this worker, handed to
+/// `stage_flow_cache_hit` so a cache hit whose egress binding differs
+/// from the ingress binding can still take the inline in-place rewrite
+/// when both bindings share one UMEM allocation.
+///
+/// `ingress` is the binding currently being polled; `left`/`right` are
+/// its siblings in the worker's slice (the `poll_binding` split). Only
+/// `WorkerUmem::allocation_ptr` equality admits the cross-binding arm:
+/// the prepared request carries an offset into the INGRESS UMEM, so it
+/// is meaningful on the target only when that is the same allocation
+/// (cf. `can_rewrite_in_place` in tx/dispatch/mod.rs, #8916).
+pub(super) struct InlineTxBindings<'a> {
+    pub(super) ingress: InlineTxTarget<'a>,
+    pub(super) left: &'a mut [BindingWorker],
+    pub(super) right: &'a mut [BindingWorker],
+}
+
+impl InlineTxBindings<'_> {
+    fn get_mut(&mut self, target_bi: usize, binding_index: usize) -> Option<InlineTxTarget<'_>> {
+        if target_bi == binding_index {
+            return Some(InlineTxTarget {
+                tx_pipeline: &mut *self.ingress.tx_pipeline,
+                tx_counters: &mut *self.ingress.tx_counters,
+            });
+        }
+        let target = if target_bi < binding_index {
+            self.left.get_mut(target_bi)?
+        } else {
+            self.right.get_mut(target_bi - binding_index - 1)?
+        };
+        Some(InlineTxTarget {
+            tx_pipeline: &mut target.tx_pipeline,
+            tx_counters: &mut target.tx_counters,
+        })
+    }
+
+    /// Bound the TARGET binding's prepared queue after a cross-binding
+    /// push, exactly as the dispatcher does (`bound_pending_tx_prepared`
+    /// needs the whole binding for overflow recycling/telemetry).
+    fn bound_target(&mut self, target_bi: usize, binding_index: usize) {
+        if target_bi == binding_index {
+            return;
+        }
+        let target = if target_bi < binding_index {
+            self.left.get_mut(target_bi)
+        } else {
+            self.right.get_mut(target_bi - binding_index - 1)
+        };
+        if let Some(target) = target {
+            bound_pending_tx_prepared(target, None);
+        }
+    }
+}
+
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn stage_flow_cache_hit(
     flow_state: &mut WorkerFlowCacheState,
-    tx_pipeline: &mut WorkerTxPipeline,
-    tx_counters: &mut WorkerTxCounters,
+    tx: &mut InlineTxBindings<'_>,
     scratch: &mut WorkerScratch,
     mirror_sample_counter: &mut u64,
     live: &Arc<BindingLiveState>,
     binding_slot: u32,
     binding_index: usize,
+    ingress_umem: &WorkerUmem,
     desc: XdpDesc,
     area: *const MmapArea,
     raw_frame: &[u8],
@@ -246,7 +308,7 @@ pub(super) fn stage_flow_cache_hit(
             if let Some(deny) = cached.policy_deny {
                 if deny.reply_allowed {
                     super::reject_reply::deny_reply_and_emit(
-                        tx_pipeline,
+                        tx.ingress.tx_pipeline,
                         worker_ctx.forwarding,
                         worker_ctx.event_stream,
                         worker_ctx.ident.ifindex,
@@ -520,7 +582,7 @@ pub(super) fn stage_flow_cache_hit(
         // — a reject whose reply fail-closes logs DENY, not REJECT.
         let output_reject_reply_enqueued = if cached_descriptor.tx_selection.reject {
             super::reject_reply::enqueue_filter_reject_reply(
-                tx_pipeline,
+                tx.ingress.tx_pipeline,
                 worker_ctx.forwarding,
                 worker_ctx.ident.ifindex,
                 packet_frame,
@@ -695,11 +757,36 @@ pub(super) fn stage_flow_cache_hit(
                 }
             });
             let is_self_target = target_bi == Some(binding_index);
+            // #14945 (3): the inline path is gated on the target sharing
+            // THIS worker's UMEM allocation (`allocation_ptr` equality, as
+            // tx/dispatch/mod.rs tests for `can_rewrite_in_place`), not on
+            // binding identity. A LAN->WAN transit hit whose egress binding
+            // lives on the same worker and shares the allocation now takes
+            // the in-place rewrite and hands the prepared request to the
+            // TARGET binding; only a foreign-allocation (or unresolved)
+            // target detours through `PendingForwardRequest`.
+            let inline_target = target_bi.and_then(|target_bi| {
+                if target_bi == binding_index {
+                    return Some(target_bi);
+                }
+                let target_umem = if target_bi < binding_index {
+                    tx.left.get(target_bi).map(|binding| &binding.umem)
+                } else {
+                    tx.right
+                        .get(target_bi - binding_index - 1)
+                        .map(|binding| &binding.umem)
+                };
+                target_umem
+                    .filter(|target_umem| {
+                        target_umem.allocation_ptr() == ingress_umem.allocation_ptr()
+                    })
+                    .map(|_| target_bi)
+            });
             // A direct cache-hit TX bypasses `enqueue_pending_forwards`,
             // where PMTUD and TCP segmentation are admitted. Keep oversized
             // packets on that path; it also derives the correct inner MTU and
             // encapsulates native-tunnel forwards.
-            if is_self_target
+            if inline_target.is_some()
                 && owned_packet_frame.is_none()
                 && !flow_cache_hit_requires_pending_forward(
                     packet_frame,
@@ -821,33 +908,60 @@ pub(super) fn stage_flow_cache_hit(
                         };
                         record_mirror_clone_result(live, result, mirror_frame_len);
                     }
-                    tx_pipeline.pending_tx_prepared.push_back(PreparedTxRequest {
-                        offset: rewrite_result.offset,
-                        len: rewrite_result.len,
-                        recycle: PreparedTxRecycle::fill_on_slot(
-                            ingress_slot,
-                            rewrite_result.offset,
-                            desc.addr,
-                        ),
-                        expected_ports,
-                        expected_addr_family: meta.addr_family,
-                        expected_protocol: meta.protocol,
-                        flow_key: Some(flow_key),
-                        egress_ifindex: cached_decision.resolution.egress_ifindex,
-                        cos_queue_id: cached_queue_id,
-                        dscp_rewrite: cached_dscp_rewrite,
-                        mirror_clone: false,
-                        overlap_admissions: None,
-                        enqueue_ns: 0,
-                    });
-                    tx_counters.pending_in_place_tx_packets += 1;
-                    tx_counters.record_in_place_l2_rewrite(rewrite_result.l2_rewrite);
+                    // #14945 (3): hand the prepared request to the TARGET
+                    // binding (the ingress binding itself on the hairpin
+                    // arm). The rewrite ran in the shared UMEM, so the
+                    // offset addresses the same frame on the target; its
+                    // completion recycles to the ingress slot via the
+                    // shared-recycle path. Bound the target queue exactly
+                    // as the dispatcher does.
+                    let Some(mut target_tx) =
+                        inline_target.and_then(|target_bi| tx.get_mut(target_bi, binding_index))
+                    else {
+                        unreachable!("inline_target resolved above");
+                    };
+                    target_tx
+                        .tx_pipeline
+                        .pending_tx_prepared
+                        .push_back(PreparedTxRequest {
+                            offset: rewrite_result.offset,
+                            len: rewrite_result.len,
+                            recycle: PreparedTxRecycle::fill_on_slot(
+                                ingress_slot,
+                                rewrite_result.offset,
+                                desc.addr,
+                            ),
+                            expected_ports,
+                            expected_addr_family: meta.addr_family,
+                            expected_protocol: meta.protocol,
+                            flow_key: Some(flow_key),
+                            egress_ifindex: cached_decision.resolution.egress_ifindex,
+                            cos_queue_id: cached_queue_id,
+                            dscp_rewrite: cached_dscp_rewrite,
+                            mirror_clone: false,
+                            overlap_admissions: None,
+                            enqueue_ns: 0,
+                        });
+                    target_tx.tx_counters.pending_in_place_tx_packets += 1;
+                    target_tx
+                        .tx_counters
+                        .record_in_place_l2_rewrite(rewrite_result.l2_rewrite);
+                    drop(target_tx);
+                    // Cross-binding only: bound the target queue exactly
+                    // as the dispatcher does. The hairpin arm keeps the
+                    // historic push onto the ingress queue.
+                    if !is_self_target {
+                        if let Some(target_bi) = inline_target {
+                            tx.bound_target(target_bi, binding_index);
+                        }
+                    }
                     telemetry.dbg.forward += 1;
                     telemetry.dbg.tx += 1;
                     recycle_now = false;
                 }
             }
-            // Fallback: use PendingForwardRequest path for cross-binding or failure.
+            // Fallback: PendingForwardRequest path for a foreign-UMEM
+            // target, an unresolved target, or a failed inline rewrite.
             if recycle_now {
                 let cached_precomputed_tx_selection = CachedTxSelectionDescriptor {
                     queue_id: cached_queue_id,
