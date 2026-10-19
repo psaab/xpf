@@ -243,19 +243,27 @@ func (d *Daemon) applyBootstrapHostAuthorizationCloseout(cfg *config.Config) err
 // closeoutHostAuthOnPostPromotionError wraps a post-promotion apply error so
 // the bounded, non-cancellable host-authorization closeout still runs before
 // the error propagates (#5643 / M35, extended by #14356 to non-cancellation
-// aborts). Store.Commit promotes the config UPSTREAM of applyConfigLocked, so
-// EVERY early-return inside applyConfigLocked after the pre-networkd fence —
-// C1 (in applyVRFReconcile, before the netlink phase), C2 (before the
-// dataplane apply), C3 (before the FRR reload), the compile-abort and
-// ancestry-refusal returns inside applyDataplaneAndHACore, and the
-// bootstrap-exit / config-arrival naming refusals — is post-promotion and
-// leaves the durable config advanced while the nft/login/root-auth
-// host-authorization tail has not run. Running the closeout enforces the
-// committed tightening (lo0 / host-inbound filters + OS credentials) even
-// when the dataplane or takeover step cannot proceed; the healthy
-// (successful) path never calls this, so a normal commit's tail is
-// unaffected and never double-runs. Centralizing here keeps every
-// post-promotion boundary wired to the same closeout.
+// aborts, including the reopened earliest returns). Store.Commit promotes
+// the config UPSTREAM of applyConfigLocked, so EVERY error return inside
+// applyConfigLocked — the pre-handoff guard
+// (requireEarlyInputProtectionPreApply), the pre-networkd fence install
+// (applyHostInboundPreNetworkdAddressFence), C1 (in applyVRFReconcile,
+// before the netlink phase), C2 (before the dataplane apply), C3 (before
+// the FRR reload), the compile-abort and ancestry-refusal returns inside
+// applyDataplaneAndHACore, and the bootstrap-exit / config-arrival naming
+// refusals — is post-promotion and leaves the durable config advanced
+// while the nft/login/root-auth host-authorization tail has not run.
+// Running the closeout enforces the committed tightening (lo0 /
+// host-inbound filters + OS credentials) even when the dataplane or
+// takeover step cannot proceed; the healthy (successful) path never calls
+// this, so a normal commit's tail is unaffected and never double-runs.
+// Centralizing here keeps every post-promotion boundary wired to the same
+// closeout. The host-inbound owner re-invokes the pre-handoff guard at
+// its own top, so on the earliest guard-refusal path that owner fails
+// visibly in the joined error while the lo0 and credential owners still
+// run; the fence-install path's helper has already recorded staleness,
+// and this wrapper records it again if a fence spec is still retained
+// after the closeout.
 //
 // Fail-closed rendering: the closeout renders applyHostInboundFilter from
 // the INCOMING config WITHOUT any ApplyConfig of that config having

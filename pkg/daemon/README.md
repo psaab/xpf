@@ -2652,7 +2652,14 @@ never lock an operator out of a remote box it manages.
     because `store.Commit` has already promoted the config on those paths
     too — otherwise the committed tightening stays unenforced until a later
     successful apply, and a preactivation fence installed earlier in the
-    apply strands with no real table behind it. The closeout renders
+    apply strands with no real table behind it. The reopened #14356 funnels
+    the two earliest returns through it as well —
+    `requireEarlyInputProtectionPreApply` and the
+    `applyHostInboundPreNetworkdAddressFence` install failure — so literally
+    every error return in `applyConfigLocked` is post-promotion-closeout
+    (on the guard-refusal path the host-inbound owner re-invokes the guard
+    and fails visibly in the joined error while the other owners still run).
+    The closeout renders
     host-inbound without the reinject accept (fail-closed) and records
     staleness when a preactivation fence is still standing afterwards. The closeout runs the security-critical
     owners in tail order (step 9.5–13): the two nft loads, then
