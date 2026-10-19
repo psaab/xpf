@@ -130,12 +130,41 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 	// reduced snapshot (survivor policies/zones stay reduced), so applying
 	// it here mirrors the full build. Carry the diagnostic forward and
 	// recompute ZoneSetValidated and the summary counts exactly as builder.go.
+	// #14964: preserve both full-build quarantines on this snapshot rebuild.
+	// The alias must be detached before mutating NAT quarantine, because a
+	// no-hash refresh must not alter the retained snapshot.
+	next.SourceNAT = append([]SourceNATRuleSnapshot(nil), next.SourceNAT...)
+	// Deriving validated state from locally recorded collisions alone is
+	// wrong when next copies an already-reduced snapshot but the current
+	// config's runtime quarantine cannot reproduce the prior record: the
+	// re-run returns no collisions and would flip ZoneSetValidated to true.
+	// When the rebuilt zone set is exactly the prior published set, keep the
+	// prior quarantine record and validated state. A changed zone set is
+	// evaluated by quarantine itself and then recomputed normally.
+	publishedZonesBefore := append([]ZoneSnapshot(nil), current.Zones...)
 	next.zoneIDCollisions = quarantineCollidingZones(&next)
-	next.ZoneSetValidated = len(next.Zones) > 0 && len(next.zoneIDCollisions) == 0
+	sameZones := len(next.Zones) == len(publishedZonesBefore)
+	if sameZones {
+		for i := range next.Zones {
+			if next.Zones[i].Name != publishedZonesBefore[i].Name || next.Zones[i].ID != publishedZonesBefore[i].ID {
+				sameZones = false
+				break
+			}
+		}
+	}
+	if sameZones {
+		next.ZoneSetValidated = current.ZoneSetValidated && len(next.Zones) > 0
+		if len(current.zoneIDCollisions) > 0 {
+			next.zoneIDCollisions = current.zoneIDCollisions
+		}
+	} else {
+		next.ZoneSetValidated = len(next.Zones) > 0 && len(next.zoneIDCollisions) == 0
+	}
 	if len(next.zoneIDCollisions) > 0 {
 		next.Summary.ZoneCount = len(next.Zones)
 		next.Summary.PolicyCount = len(next.Policies)
 	}
+	reportInterfaceSNATPoolOverlaps(&next)
 	// Policy refusal reasons must name the exact post-quarantine policy/zone
 	// sets this refresh publishes (builder.go recomputes them the same way);
 	// otherwise a refresh that newly quarantines a zone keeps stale reasons

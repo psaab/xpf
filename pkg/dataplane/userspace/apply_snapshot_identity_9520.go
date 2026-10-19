@@ -166,13 +166,36 @@ func (m *Manager) rebuildDerivedSectionsAfterRevalidate(snap *ConfigSnapshot) {
 	snap.Fabrics = buildFabricSnapshotsFrom(cfg, liveXfrm)
 	snap.TunnelEndpoints = buildTunnelEndpointSnapshots(cfg, snap.Interfaces)
 	snap.MirrorConfigs, snap.MirrorExclusions = buildMirrorConfigSnapshots(cfg, snap.Interfaces)
+	// #14964: preserve both full-build quarantines on this snapshot rebuild.
+	// Detach NAT rows before the reporter mutates only this publish copy.
+	snap.SourceNAT = append([]SourceNATRuleSnapshot(nil), snap.SourceNAT...)
+	publishedZonesBefore := append([]ZoneSnapshot(nil), snap.Zones...)
+	priorCollisions := snap.zoneIDCollisions
+	priorValidated := snap.ZoneSetValidated
 	collisions := quarantineCollidingZones(snap)
 	if len(collisions) > 0 {
 		snap.zoneIDCollisions = collisions
 		snap.Summary.ZoneCount = len(snap.Zones)
 		snap.Summary.PolicyCount = len(snap.Policies)
 	}
-	snap.ZoneSetValidated = len(snap.Zones) > 0 && len(snap.zoneIDCollisions) == 0
+	sameZones := len(snap.Zones) == len(publishedZonesBefore)
+	if sameZones {
+		for i := range snap.Zones {
+			if snap.Zones[i].Name != publishedZonesBefore[i].Name || snap.Zones[i].ID != publishedZonesBefore[i].ID {
+				sameZones = false
+				break
+			}
+		}
+	}
+	if sameZones && len(priorCollisions) > 0 {
+		snap.zoneIDCollisions = priorCollisions
+	}
+	if sameZones {
+		snap.ZoneSetValidated = priorValidated && len(snap.Zones) > 0
+	} else {
+		snap.ZoneSetValidated = len(snap.Zones) > 0 && len(snap.zoneIDCollisions) == 0
+	}
+	reportInterfaceSNATPoolOverlaps(snap)
 }
 
 // requestApplySnapshotLocked prepares interface rows before sending the snapshot.
