@@ -267,12 +267,13 @@ func TestRibGroupRulesApply_Fake(t *testing.T) {
 	// that peer's table; its own prefix and unrelated destinations do not
 	// receive a return rule. The peer gets the reciprocal dmz-vr prefix.
 	peerReturn, ok := ops.findDstRule(unix.AF_INET, 102, "10.0.40.0/24")
-	if !ok || peerReturn.Priority != RibGroupReturnRulePriority ||
+	if !ok || !IsRibGroupReturnRulePriority(peerReturn.Priority) ||
+		peerReturn.Priority != ribGroupReturnRulePriorityFor(peerReturn.Dst) ||
 		(peerReturn.IifName != "vrf-dmz-vr" && peerReturn.OifName != "vrf-dmz-vr") {
 		t.Errorf("missing dmz-vr return rule to peer table 102 scoped to 10.0.40.0/24: %+v", peerReturn)
 	}
 	for _, rule := range ops.rules[unix.AF_INET] {
-		if rule.Priority == RibGroupReturnRulePriority &&
+		if IsRibGroupReturnRulePriority(rule.Priority) &&
 			(rule.IifName == "vrf-dmz-vr" || rule.OifName == "vrf-dmz-vr") &&
 			(rule.Dst == nil || rule.Dst.String() != "10.0.40.0/24") {
 			t.Errorf("dmz-vr return rule is not scoped to the other leaked prefix: %+v", rule)

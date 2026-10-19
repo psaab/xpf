@@ -244,11 +244,11 @@ func TestVRFReconcileMissTerminatorFailureSurfaces9819(t *testing.T) {
 func returnRules9819(ops *fakeRuleOps, family int) []string {
 	var out []string
 	for _, r := range ops.rules[family] {
-		if r.Priority != RibGroupReturnRulePriority {
+		if !IsRibGroupReturnRulePriority(r.Priority) {
 			continue
 		}
-		out = append(out, fmt.Sprintf("iif=%s oif=%s table=%d dst=%v src=%v",
-			r.IifName, r.OifName, r.Table, r.Dst, r.Src))
+		out = append(out, fmt.Sprintf("iif=%s oif=%s table=%d dst=%v src=%v pref=%d",
+			r.IifName, r.OifName, r.Table, r.Dst, r.Src, r.Priority))
 	}
 	sort.Strings(out)
 	return out
@@ -284,15 +284,16 @@ func TestRibGroupReturnRules9819(t *testing.T) {
 		"n":     {"10.70.0.0/24"},
 		"plain": {"10.80.0.0/24"},
 	}
+	// All peer prefixes here are /24: 1001+(32-24)*28 = 1225.
 	wantV4 := []string{
-		"iif= oif=vrf-b table=200 dst=10.30.0.0/24 src=<nil>",
-		"iif= oif=vrf-b table=500 dst=10.60.0.0/24 src=<nil>",
-		"iif= oif=vrf-src table=300 dst=10.40.0.0/24 src=<nil>",
-		"iif= oif=vrf-src table=500 dst=10.60.0.0/24 src=<nil>",
-		"iif=vrf-b oif= table=200 dst=10.30.0.0/24 src=<nil>",
-		"iif=vrf-b oif= table=500 dst=10.60.0.0/24 src=<nil>",
-		"iif=vrf-src oif= table=300 dst=10.40.0.0/24 src=<nil>",
-		"iif=vrf-src oif= table=500 dst=10.60.0.0/24 src=<nil>",
+		"iif= oif=vrf-b table=200 dst=10.30.0.0/24 src=<nil> pref=1225",
+		"iif= oif=vrf-b table=500 dst=10.60.0.0/24 src=<nil> pref=1225",
+		"iif= oif=vrf-src table=300 dst=10.40.0.0/24 src=<nil> pref=1225",
+		"iif= oif=vrf-src table=500 dst=10.60.0.0/24 src=<nil> pref=1225",
+		"iif=vrf-b oif= table=200 dst=10.30.0.0/24 src=<nil> pref=1225",
+		"iif=vrf-b oif= table=500 dst=10.60.0.0/24 src=<nil> pref=1225",
+		"iif=vrf-src oif= table=300 dst=10.40.0.0/24 src=<nil> pref=1225",
+		"iif=vrf-src oif= table=500 dst=10.60.0.0/24 src=<nil> pref=1225",
 	}
 	wantV6 := []string{}
 
@@ -586,7 +587,9 @@ func vrfMissTerminatorNetnsChild9819(t *testing.T) {
 	if err := m.ApplyPBRRules(nil); err != nil {
 		t.Fatalf("clear PBR rules: %v", err)
 	}
-	if r := rules("-4"); strings.Contains(r, "1500:") {
+	// Return rules now sit at LPM-derived priorities in (1000,2000)
+	// (1225 for the /24s here), not flat 1500; none may survive.
+	if r := rules("-4"); strings.Contains(r, "1225:") || strings.Contains(r, "1500:") {
 		t.Errorf("return rules must go with the last rib-group:\n%s", r)
 	}
 	if err := m.ReconcileVRFs(nil); err != nil {
@@ -616,17 +619,17 @@ func rulesInWindow9819(ops *fakeRuleOps, family, lo, hi int) int {
 // assertRibGroupRulesInClearedWindows9819 is the #1706 "nothing leaks across
 // applies" invariant for the rib-group manager. Each rule must sit at a
 // priority ribGroupManager.clear() removes: the leak window, or the #9819
-// return priority.
+// return band (1000,2000) including legacy 1500.
 func assertRibGroupRulesInClearedWindows9819(t *testing.T, ops *fakeRuleOps) {
 	t.Helper()
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
 		for _, r := range ops.rules[family] {
 			inLeak := r.Priority >= ribGroupLeakRulePriority &&
 				r.Priority < ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow
-			if !inLeak && r.Priority != RibGroupReturnRulePriority {
-				t.Errorf("rule priority %d is in no window clear() scans ([%d,%d) or %d) — would leak",
+			if !inLeak && !IsRibGroupReturnRulePriority(r.Priority) {
+				t.Errorf("rule priority %d is in no window clear() scans ([%d,%d) or (1000,2000)) — would leak",
 					r.Priority, ribGroupLeakRulePriority,
-					ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow, RibGroupReturnRulePriority)
+					ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow)
 			}
 		}
 	}

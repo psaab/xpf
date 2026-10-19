@@ -817,7 +817,7 @@ func (rg *ribGroupManager) clear() error {
 				isNonReservedRuleTable(r.Table) && hasNoAdditionalRuleSelectors(r)
 			inOldBlanket := r.Priority >= ribGroupRulePriority &&
 				r.Priority < ribGroupRulePriority+100 && legacyBlanketShape
-			inReturn := r.Priority == RibGroupReturnRulePriority &&
+			inReturn := IsRibGroupReturnRulePriority(r.Priority) &&
 				r.Dst != nil && r.Src == nil && isNonReservedRuleTable(r.Table) &&
 				hasExactlyOneVRFRuleInterface(r) && hasNoAdditionalRuleSelectors(r)
 			if inCurrent || inOldBlanket || inReturn {

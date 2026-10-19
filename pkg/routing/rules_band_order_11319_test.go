@@ -122,8 +122,15 @@ func TestKernelBandOrderAppliesInBothFamilies11319(t *testing.T) {
 		}
 		for _, rule := range rgOps.rules[family] {
 			switch {
-			case rule.Priority == RibGroupReturnRulePriority:
+			case IsRibGroupReturnRulePriority(rule.Priority):
 				returnPrios = append(returnPrios, rule.Priority)
+				if rule.Dst != nil {
+					pl, bits := rule.Dst.Mask.Size()
+					if want := config.RibGroupReturnRulePriority(pl, bits); rule.Priority != want {
+						t.Errorf("family %d: return %s priority = %d, want LPM-derived %d",
+							family, rule.Dst, rule.Priority, want)
+					}
+				}
 			case inWindow(rule.Priority):
 				rgPrios = append(rgPrios, rule.Priority)
 				if rule.Dst == nil {
@@ -137,7 +144,7 @@ func TestKernelBandOrderAppliesInBothFamilies11319(t *testing.T) {
 						family, rule.Dst, rule.Priority, want)
 				}
 			default:
-				t.Errorf("family %d: rib-group installed priority %d outside the shared leak range and return priority",
+				t.Errorf("family %d: rib-group installed priority %d outside the shared leak range and return band",
 					family, rule.Priority)
 			}
 		}
