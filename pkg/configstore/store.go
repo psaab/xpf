@@ -523,6 +523,18 @@ type Store struct {
 	// keeps serving rescue saves normally.
 	rescueFenced atomic.Bool
 
+	// journalFenced is set true by QuiesceJournal at the start of a factory
+	// reset (#15281 D08-03). Once set, journalLog is a no-op instead of
+	// recreating the .config.journal the zeroize erased (or is erasing)
+	// with the prior tenant's principal. Unlike the rescue fence — whose
+	// fenced path REJECTS an explicit operator command — journaling is
+	// a best-effort side-effect of an already-decided action, so silencing
+	// it is the honest behaviour (mirrors the archive fence). It is a
+	// one-way latch for the terminal reset path; ResumeJournal clears it
+	// only on the fail-closed recoverable-wipe path so a daemon that stays
+	// up keeps journaling normally.
+	journalFenced atomic.Bool
+
 	// rescueMu serializes the off-lock rescue.conf filesystem mutations
 	// among SaveRescueConfig writers themselves (#14722 D18-05). It is
 	// acquired AFTER rescueWriteBarrier, so a test holding a writer at

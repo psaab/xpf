@@ -582,6 +582,14 @@ contract.
   take precedence. The human-readable message is unchanged; only the code
   distinguishes "retry" from "fix your config". Unclassifiable errors fail
   safe to `InvalidArgument`.
+- **REST twin (#15281 D08-02).** `pkg/api` `writeCommitError` applies the
+  same structural classification to `POST /config/commit` and
+  `/config/commit-confirmed`: context errors → 503 `commit busy: ...`;
+  `compiled != nil` (committed, persisted, live; non-fatal tail/peer-push
+  error) → 503 with `success:false` and `data.committed:true` /
+  `data.status:"committed_with_error"` plus the preserved error text —
+  distinguishable from a reject without reading as a clean success;
+  `compiled == nil` → 400 (unchanged fail-safe).
 - **Zeroize goes through the apply gate AND stops xpfd (#5281).** The
   `SystemAction{zeroize}` handler does NOT call `performZeroizeWipe`
   directly. It routes through `ZeroizeFn` (wired by the daemon to
