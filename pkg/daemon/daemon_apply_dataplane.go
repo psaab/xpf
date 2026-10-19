@@ -844,12 +844,11 @@ func (d *Daemon) abandonLinkCycleLease() {
 // the channel that fails the commit.
 func (d *Daemon) finishRethMemberLinkTail(linuxName string, mac net.HardwareAddr, rethCfg *config.InterfaceConfig) error {
 	clearDadFailed(linuxName)
-	removeAutoLinkLocal(linuxName)
-	// Re-add link-local if this parent interface has IPv6 on unit 0.
-	// NDP Neighbor Solicitation requires a link-local source address.
-	if rethUnitHasIPv6(rethCfg, 0) {
-		ensureRethLinkLocal(linuxName)
-	}
+	// Strip stale auto link-locals, preserving any configured unit-0
+	// link-local, and re-add an EUI-64 only if unit 0 has IPv6 and no
+	// configured link-local replaces it (#15148). NDP Neighbor
+	// Solicitation requires a link-local source address.
+	rethParentLinkLocalRepair(linuxName, rethCfg)
 
 	// Re-disable the RX tag-strip offloads after MAC programming. The iavf
 	// VF driver resets ethtool features during the link down/up cycle:

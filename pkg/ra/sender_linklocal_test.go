@@ -14,7 +14,7 @@ import (
 
 // TestEUI64LinkLocal verifies the EUI-64 fe80::/64 derivation matches the
 // canonical pattern (mac[0]^0x02, mac[1], mac[2], 0xff, 0xfe, mac[3..5]) and is
-// byte-identical to the daemon's ensureRethLinkLocal computation
+// byte-identical to the daemon's ensureRethLinkLocalExcluding computation
 // (pkg/daemon/daemon_reth.go). The expected vectors are copied here on purpose:
 // pkg/ra must not import pkg/daemon, so the test pins the shared byte pattern
 // rather than reaching across the package boundary.
