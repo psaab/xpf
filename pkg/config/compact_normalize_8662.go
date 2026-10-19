@@ -83,6 +83,22 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 		if schema == schemaRoutingInstances && child == schema.wildcard {
 			n += normalizeElidedRoutingInstance9620(node, child)
 		}
+		// #15062 (A01-01): a top-level brace-elided interface packs the
+		// interface NAME onto the `interfaces` node's own Keys, which no
+		// (container, head) scope pair can name either (#8879). Fold it
+		// into the braced shape before dispatch/compiler ever see it;
+		// otherwise compileInterfaces turns the body's first child
+		// (`unit`, ...) into a phantom interface and loses the named one.
+		// The node may sit at the root (schema == setSchema) or inside a
+		// groups body, where the walk carries the groups-wildcard schema
+		// whose children mirror setSchema (schema.go init). Requiring an
+		// `interfaces` child that is schemaInterfaces covers both without
+		// matching an unrelated `interfaces` container deeper in the tree
+		// (e.g. class-of-service, whose interfaces child is a different
+		// schema node).
+		if kw == "interfaces" && child == schemaInterfaces {
+			n += normalizeElidedInterface15062(node)
+		}
 		// The node's own identity is its keyword plus its declared args.
 		identity := 1 + child.args
 		// #8763: a compoundKey container carries its second key as an
