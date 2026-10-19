@@ -1229,6 +1229,11 @@ type Daemon struct {
 	hostInboundLastApplyFailed     atomic.Bool
 	hostInboundLastFailureUnixNano atomic.Int64
 	hostInboundGapFenceActive      atomic.Bool
+	// hostDriftNoticed15264 de-dupes the #15264 kernel-drift Warn to one
+	// line per episode (mirrors mgmtReassertNoticed #6803): set when the
+	// low-rate kernel-truth recheck first finds an established table
+	// missing, cleared when a later pass observes no drift.
+	hostDriftNoticed15264 atomic.Bool
 
 	// hostInboundConntrackDebt is the #6802 retry debt: a conntrack revocation
 	// that FAILED, so stale kernel entries for now-denied host services may
