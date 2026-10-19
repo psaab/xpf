@@ -726,6 +726,14 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
+	// #15257: same packed-header fan-out on the RA caller of
+	// bracketedGroupInstances8794. Strict refuses; lenient warns.
+	raPackedHeaderWarnings, err := validateRAInterfacePackedHeaders15257(
+		tree.Children, opts.lenientRAInterfacePackedHeader15257)
+	if err != nil {
+		return nil, err
+	}
+
 	// #3444: reject a `security nat destination rule-set <name> to ...`
 	// scope. A Junos destination-NAT rule-set has only a `from` clause —
 	// DNAT translates the destination on inbound, so there is no egress
@@ -936,6 +944,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, firewallFusedThenWarnings...)
 	warnings = append(warnings, emptyIdentityWarnings...)
 	warnings = append(warnings, zoneGroupWarnings...)
+	warnings = append(warnings, raPackedHeaderWarnings...)
 	warnings = append(warnings, dnatToScopeWarnings...)
 	warnings = append(warnings, natEmptyScopeWarnings...)
 	warnings = append(warnings, natMixedScopeWarnings...)

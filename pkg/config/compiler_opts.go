@@ -2879,6 +2879,10 @@ type compileOpts struct {
 	// of a security-zone statement with no braced body whose keys after the zone
 	// name would be dropped, on the tolerant load and peer-sync paths (#1960).
 	lenientZoneStatementTail9656 bool
+	// lenientRAInterfacePackedHeader15257 (#15257) downgrades to a warning
+	// the refusal of a braced RA `interface` header whose unbracketed tail
+	// is an RA child keyword (phantom fan-out), on tolerant paths (#1960).
+	lenientRAInterfacePackedHeader15257 bool
 	// lenientPolicyCommunityRef (#2881) downgrades the policy community
 	// cross-reference gate (validatePolicyCommunityReferencesStrict) from a
 	// hard compile error to a cfg.Warnings entry. A policy term's
@@ -3746,6 +3750,7 @@ func lenientCompileOpts() compileOpts {
 		lenientFirewallFusedThen12528:          true,
 		lenientEmptySecurityIdentity:           true,
 		lenientZoneStatementTail9656:           true,
+		lenientRAInterfacePackedHeader15257: true,
 		lenientPolicyCommunityRef:              true,
 		lenientSNMPv3KeyMaterial:               true,
 		lenientSNMPv3SecurityKeyword:           true,
