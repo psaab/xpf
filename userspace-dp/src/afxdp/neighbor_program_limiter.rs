@@ -54,17 +54,33 @@
 //!   key A therefore cannot keep victim B out — B lands in a different way and
 //!   programs. Up to `WAYS - 1` distinct foreign keys may be simultaneously hot
 //!   in a bucket before a genuine victim change can be delayed. When every
-//!   way IS hot (#15247), the refused binding is recorded in the single
-//!   `owed` slot: the next same-binding advert retries it even though the
-//!   userspace map already absorbed it (`map_changed == false`), so it is
-//!   delayed by at most one interval plus one advert, not lost.
+//!   way IS hot (#15247), the refused binding is recorded as owed (below).
 //!
-//! The claim step still honors the rate cap on the way it evicts (a way within
-//! its interval is NOT evicted), so the aggregate netlink rate stays bounded to
-//! `≤ SLOTS / MIN_INTERVAL` — the #5288 property is preserved: an adversarial
-//! flood of repeated/colliding adverts with no genuine change still programs
-//! O(1), and a distinct-genuine-change flood is still capped by the fixed way
-//! count, not O(adverts).
+//! ## Owed bindings are per-bucket, not a single slot (#15770)
+//! #15247 recorded a refused binding in ONE table-wide `owed` slot
+//! (newest-wins): a second hot-bucket refusal overwrote the first victim,
+//! whose later `map_changed == false` advert then looked proven-present and
+//! was skipped forever. An in-owned-way rate-limited MAC change likewise
+//! recorded nothing, so evicting that way dropped the new MAC. #15770 moves
+//! the owed state onto the bucket's ways: each way carries one
+//! `(desired_key, desired_mac)` pair — the latest binding this bucket owes
+//! the kernel — so a bucket retains up to `WAYS` distinct owed bindings.
+//! * A hot-bucket refusal records into its own bucket (updating that key's
+//!   existing owed entry, else a free owed way, else the oldest owed entry).
+//! * An in-owned-way rate-limited change records owed the same way; the way
+//!   keeps the OLD programmed mac until the retry programs.
+//! * Programming a way does NOT clear another key's owed entry stored on
+//!   it, so an owed binding survives eviction of its owner's way and is
+//!   retried by the victim's next advert (changed or not).
+//! * A newer advert for the same key supersedes its owed entry; programming
+//!   the exact owed binding discharges it.
+//! Bound: more than `WAYS` simultaneously-owed distinct keys in ONE bucket
+//! evict the oldest owed entry — that key's kernel entry then lags until
+//! its next *changed* advert. The userspace neighbor map (transit
+//! forwarding) is unaffected. The claim step still honors the rate cap on
+//! the way it evicts (a way within its interval is NOT evicted), so the
+//! aggregate netlink rate stays bounded to `≤ SLOTS / MIN_INTERVAL` — the
+//! #5288 property is preserved.
 //!
 //! ## Placement
 //! Per-worker, owned by [`super::worker::BindingWorker`] and touched ONLY by the
@@ -109,8 +125,9 @@ pub(in crate::afxdp) const KERNEL_NEIGH_LIMITER_SLOTS: usize =
 /// interval even in the (flood-only) rate-limited-then-retried case.
 pub(in crate::afxdp) const KERNEL_NEIGH_MIN_INTERVAL_NS: u64 = 50_000_000; // 50 ms
 
-/// One direct-mapped slot: the last binding this worker programmed for the
-/// key that currently owns the slot, and when.
+/// One way of a set-associative bucket: the last binding this worker
+/// programmed for the key that currently owns the way, when, and one
+/// owed binding this bucket still has to program (#15770).
 #[derive(Clone, Copy)]
 struct Slot {
     /// `None` only for a never-fired slot (fresh worker). Once a slot programs
@@ -120,6 +137,16 @@ struct Slot {
     mac: [u8; 6],
     /// Monotonic-nanos timestamp of the last ACTUAL program driven by this slot.
     last_program_ns: u64,
+    /// #15770: a binding this bucket owes the kernel — refused under a hot
+    /// bucket or rate-limited on its owning way — with the MAC still to
+    /// program. Stored per way (not per owner) so it survives eviction of
+    /// the owner's way. `None` when this way carries no owed binding.
+    desired_key: Option<(i32, IpAddr)>,
+    /// MAC owed for `desired_key`. Meaningless when `desired_key` is `None`.
+    desired_mac: [u8; 6],
+    /// When the owed binding was (last) recorded; oldest is evicted first
+    /// when every way of the bucket already carries an owed binding.
+    desired_ns: u64,
 }
 
 impl Default for Slot {
@@ -128,6 +155,9 @@ impl Default for Slot {
             key: None,
             mac: [0u8; 6],
             last_program_ns: 0,
+            desired_key: None,
+            desired_mac: [0u8; 6],
+            desired_ns: 0,
         }
     }
 }
@@ -156,6 +186,46 @@ fn choose_victim_way(bucket: &Bucket) -> usize {
     }
     victim
 }
+
+/// #15770: does any way of `bucket` owe exactly `(key, mac)`?
+fn bucket_owes(bucket: &Bucket, key: (i32, IpAddr), mac: [u8; 6]) -> bool {
+    bucket
+        .iter()
+        .any(|s| s.desired_key == Some(key) && s.desired_mac == mac)
+}
+
+/// Drop every owed entry for `key` in `bucket` (discharged by programming
+/// the binding, or superseded by a newer advert for the same key).
+fn clear_owed(bucket: &mut Bucket, key: (i32, IpAddr)) {
+    for slot in bucket.iter_mut() {
+        if slot.desired_key == Some(key) {
+            slot.desired_key = None;
+        }
+    }
+}
+
+/// Record `(key, mac)` as owed by `bucket` (#15770): update the key's
+/// existing owed entry, else take a way carrying no owed binding, else
+/// evict the oldest owed entry. Never touches a way's programmed binding
+/// or timestamp, so the rate cap is unaffected.
+fn record_owed(bucket: &mut Bucket, key: (i32, IpAddr), mac: [u8; 6], now_ns: u64) {
+    if bucket_owes(bucket, key, mac) {
+        return;
+    }
+    if let Some(slot) = bucket.iter_mut().find(|s| s.desired_key.is_none()) {
+        slot.desired_key = Some(key);
+        slot.desired_mac = mac;
+        slot.desired_ns = now_ns;
+        return;
+    }
+    let oldest = (0..KERNEL_NEIGH_LIMITER_WAYS)
+        .min_by_key(|&i| bucket[i].desired_ns)
+        .unwrap_or(0);
+    bucket[oldest].desired_key = Some(key);
+    bucket[oldest].desired_mac = mac;
+
+    bucket[oldest].desired_ns = now_ns;
+}
 /// Per-worker gate for `add_kernel_neighbor`. See the module docs.
 pub(in crate::afxdp) struct KernelNeighborProgramLimiter {
     /// Boxed so the table lives on the heap (allocated once at worker
@@ -164,12 +234,6 @@ pub(in crate::afxdp) struct KernelNeighborProgramLimiter {
     buckets: Box<[Bucket; KERNEL_NEIGH_LIMITER_BUCKETS]>,
     min_interval_ns: u64,
     hash_state: HotPathSeededState,
-    /// #15247 (A66-04): newest binding refused because every way of its
-    /// bucket was hot. Recording it (without updating any way's program
-    /// timestamp) makes the next same-binding advert — which reports
-    /// `map_changed == false` — retry instead of being mistaken for a
-    /// proven-present repeat. One slot: newest-wins.
-    owed: Option<((i32, IpAddr), [u8; 6])>,
 }
 
 impl KernelNeighborProgramLimiter {
@@ -188,7 +252,6 @@ impl KernelNeighborProgramLimiter {
             ),
             min_interval_ns,
             hash_state: HotPathSeededState::new(seed),
-            owed: None,
         }
     }
 
@@ -212,69 +275,40 @@ impl KernelNeighborProgramLimiter {
         now_ns: u64,
     ) -> bool {
         let min_interval_ns = self.min_interval_ns;
-        // #15247 (A66-04): a binding refused under a hot bucket is owed,
-        // not proven-present. Only the exact owed binding retries with
-        // `map_changed == false`; a different binding for the same key
-        // supersedes (clears) it.
-        let owed_map_changed = if self.owed == Some((key, mac)) {
-            true
-        } else {
-            if matches!(self.owed, Some((owed_key, _)) if owed_key == key) {
-                self.owed = None;
-            }
-            map_changed
-        };
-        let bucket = &mut self.buckets[bucket_index_with(&key, self.hash_state)];
-        // Fast path: a way in this bucket already OWNS this key.
+        let bucket_idx = bucket_index_with(&key, self.hash_state);
+        let bucket = &mut self.buckets[bucket_idx];
+        let owed_map_changed = bucket_owes(bucket, key, mac) || map_changed;
         if let Some(pos) = bucket.iter().position(|s| s.key == Some(key)) {
-            let slot = &mut bucket[pos];
-            // `owes_other`: owning the key with a DIFFERENT, stale mac we
-            // have not yet pushed. A change we owe must never be skipped.
-            let owes_other = slot.mac != mac;
-            // Skip when the kernel already holds this exact binding and
-            // we owe nothing newer (`!owed_map_changed` is the other proof).
-            if !owes_other && (slot.mac == mac || !owed_map_changed) {
-                if self.owed == Some((key, mac)) {
-                    self.owed = None;
+            let owes_other = bucket[pos].mac != mac;
+            if !owes_other && (bucket[pos].mac == mac || !owed_map_changed) {
+                if bucket[pos].mac != mac {
+                    clear_owed(bucket, key);
                 }
                 return false;
             }
-            // Rate cap: at most one program per interval per way. A
-            // rate-limited change leaves the OLD mac, so it stays owed.
-            if now_ns.saturating_sub(slot.last_program_ns) < min_interval_ns {
+            if now_ns.saturating_sub(bucket[pos].last_program_ns) < min_interval_ns {
+                record_owed(bucket, key, mac, now_ns);
                 return false;
             }
-            slot.mac = mac;
-            slot.last_program_ns = now_ns;
-            if self.owed == Some((key, mac)) {
-                self.owed = None;
-            }
+            bucket[pos].mac = mac;
+            bucket[pos].last_program_ns = now_ns;
+            clear_owed(bucket, key);
             return true;
         }
-        // No way owns this key. If the userspace map was UNCHANGED by this
-        // advert (and it is not the owed binding), the kernel already
-        // holds the binding. Skip; no netlink needed.
         if !owed_map_changed {
             return false;
         }
-        // A GENUINE change whose key owns no way: CLAIM a way (free way
-        // preferred, else LRU) but honor the rate cap on that way, so a
-        // way still inside its interval is NOT evicted (#5288 invariant).
-        let victim = choose_victim_way(bucket);
-        let slot = &mut bucket[victim];
-        if slot.key.is_some() && now_ns.saturating_sub(slot.last_program_ns) < min_interval_ns {
-            // Every way was hot: record the owed binding instead of
-            // dropping it; the next same-binding advert retries it even
-            // though the userspace map already absorbed it (#15247).
-            self.owed = Some((key, mac));
+        let victim_way = choose_victim_way(bucket);
+        if bucket[victim_way].key.is_some()
+            && now_ns.saturating_sub(bucket[victim_way].last_program_ns) < min_interval_ns
+        {
+            record_owed(bucket, key, mac, now_ns);
             return false;
         }
-        slot.key = Some(key);
-        slot.mac = mac;
-        slot.last_program_ns = now_ns;
-        if self.owed == Some((key, mac)) {
-            self.owed = None;
-        }
+        bucket[victim_way].key = Some(key);
+        bucket[victim_way].mac = mac;
+        bucket[victim_way].last_program_ns = now_ns;
+        clear_owed(bucket, key);
         true
     }
 }
@@ -463,7 +497,10 @@ mod tests {
     #[test]
     fn ipv6_repeat_flood_programs_once() {
         let mut lim = KernelNeighborProgramLimiter::new();
-        let key = (24, IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x42)));
+        let key = (
+            24,
+            IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x42)),
+        );
         let m = mac(0x42);
         assert!(lim.should_program(key, m, true, T0));
         for i in 1..64u64 {
@@ -651,6 +688,25 @@ mod tests {
         assert_eq!(placed, KERNEL_NEIGH_LIMITER_WAYS);
     }
 
+    fn colliding_keys(seed_key: (i32, IpAddr), n: usize) -> Vec<(i32, IpAddr)> {
+        let state = HotPathSeededState::new(crate::hot_hash_seed::hot_path_hash_seed());
+        let bucket = bucket_index_with(&seed_key, state);
+        let mut out = Vec::new();
+        'scan: for c in 0..=255u8 {
+            for last in 0..=255u8 {
+                let cand = (11, IpAddr::V4(Ipv4Addr::new(172, 16, c, last)));
+                if cand != seed_key && bucket_index_with(&cand, state) == bucket {
+                    out.push(cand);
+                    if out.len() == n {
+                        break 'scan;
+                    }
+                }
+            }
+        }
+        assert_eq!(out.len(), n, "test setup: need {n} colliding keys");
+        out
+    }
+
     /// #15247 (A66-04) FAIL-ON-REVERT: a genuine change refused while
     /// every way is hot must program on a later same-binding advert
     /// (`map_changed == false`) once a way ages out.
@@ -681,5 +737,84 @@ mod tests {
         assert!(!lim.should_program(victim, new_mac, true, T0 + 2));
         assert!(lim.should_program(victim, new_mac, false, T0 + MIN + 2));
         assert!(!lim.should_program(victim, old_mac, false, T0 + MIN + 3));
+    }
+
+    /// #15770 FAIL-ON-REVERT: with every way hot (an 8-key same-bucket
+    /// collision sequence: 4 fillers + 4 victims), each distinct owed
+    /// victim must survive; the pre-fix single table-wide `owed` slot
+    /// kept only the newest, so all but the last victim's unchanged
+    /// re-advert was skipped forever.
+    #[test]
+    fn hot_bucket_multi_victim_owed_not_overwritten_15770() {
+        let base = v4(210);
+        let mut lim = KernelNeighborProgramLimiter::new();
+        fill_bucket_hot(&mut lim, base, T0);
+        // Fillers occupy the first WAYS colliding keys; victims are the
+        // next WAYS keys, disjoint from the fillers.
+        let victims = colliding_keys(base, KERNEL_NEIGH_LIMITER_WAYS + 4)
+            [KERNEL_NEIGH_LIMITER_WAYS..]
+            .to_vec();
+        for (i, &v) in victims.iter().enumerate() {
+            assert!(
+                !lim.should_program(v, mac(0x50 + i as u8), true, T0 + 1 + i as u64),
+                "test setup: victim {i} must be refused while every way is hot"
+            );
+        }
+        for (i, &v) in victims.iter().enumerate() {
+            assert!(
+                !lim.should_program(v, mac(0x50 + i as u8), false, T0 + MIN - 1),
+                "test setup: victim {i} must stay rate-capped inside the interval"
+            );
+        }
+        // Each retry consumes one way, so victims beyond the way count
+        // retry one interval later (the rate bound); all must program.
+        for (i, &v) in victims.iter().enumerate() {
+            let retry_at = T0
+                + (1 + i as u64 / KERNEL_NEIGH_LIMITER_WAYS as u64) * MIN
+                + (i as u64 % KERNEL_NEIGH_LIMITER_WAYS as u64);
+            assert!(
+                lim.should_program(v, mac(0x50 + i as u8), false, retry_at),
+                "victim {i}'s owed binding must program on its unchanged \
+                 re-advert after the interval (#15770); the pre-fix single \
+                 owed slot overwrote all but the newest victim"
+            );
+        }
+    }
+
+    /// #15770 FAIL-ON-REVERT (second limb): a MAC change rate-limited on
+    /// its owning way must survive that way being evicted by foreign
+    /// claims. Pre-fix nothing was recorded, so after eviction the
+    /// victim's unchanged re-advert was skipped (`!owed` early return).
+    #[test]
+    fn owned_way_rate_limited_mac_change_survives_eviction_15770() {
+        let mut lim = KernelNeighborProgramLimiter::new();
+        let victim = v4(220);
+        let old_mac = mac(0xAA);
+        let new_mac = mac(0xBB);
+        assert!(lim.should_program(victim, old_mac, true, T0));
+        assert!(!lim.should_program(victim, new_mac, true, T0 + 1));
+        // Foreign colliding keys claim the remaining ways, then evict
+        let foreigners = colliding_keys(victim, KERNEL_NEIGH_LIMITER_WAYS - 1);
+        for (i, &f) in foreigners.iter().enumerate() {
+            // Stagger one interval apart so each claim finds an aged way.
+            assert!(lim.should_program(
+                f,
+                mac(0x60 + i as u8),
+                true,
+                T0 + MIN + (i as u64 + 1) * (MIN / 2)
+            ));
+        }
+        // The last foreigner evicts the victim's way (LRU, aged exactly
+        // one interval). The victim's owed retry then needs one aged way.
+        let evict_at = T0 + MIN + (KERNEL_NEIGH_LIMITER_WAYS as u64) * (MIN / 2);
+        let last_f =
+            colliding_keys(victim, KERNEL_NEIGH_LIMITER_WAYS)[KERNEL_NEIGH_LIMITER_WAYS - 1];
+        assert!(lim.should_program(last_f, mac(0x6F), true, evict_at));
+        let retry_at = evict_at + MIN;
+        assert!(
+            lim.should_program(victim, new_mac, false, retry_at),
+            "an in-owned-way rate-limited MAC change must survive way \
+             eviction and program on the victim's next advert (#15770)"
+        );
     }
 }

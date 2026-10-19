@@ -371,11 +371,17 @@ sync.
     free, else the LRU way, still honoring the rate cap (a way inside its
     interval is never evicted), so a single colliding key can no longer
     starve a victim (#6129): with 4 ways per bucket the victim lands in a
-    different way. Residual (bounded, self-healing): up to WAYS (4)
-    *churning* colliding keys mapping to one bucket can delay a 5th key's
-    kernel program until a way frees; the AF_XDP fast path and userspace
-    neighbor map stay correct throughout, and host-path reachability
-    self-heals under normal traffic via `NUD_STALE` + on-demand kernel ARP.
+    different way. Owed bindings are per-bucket since #15770: each way
+    carries one `(desired_key, desired_mac)` owed pair, so a bucket
+    retains up to 4 distinct owed bindings — a hot-bucket refusal or an
+    in-owned-way rate-limited MAC change is recorded on its bucket and
+    retried by the victim's next advert even after its way is evicted.
+    Residual (bounded, self-healing): more than 4 simultaneously-owed
+    distinct keys in one bucket evict the oldest owed entry, and that
+    key's kernel program then waits for its next *changed* advert; the
+    AF_XDP fast path and userspace neighbor map stay correct throughout,
+    and host-path reachability self-heals under normal traffic via
+    `NUD_STALE` + on-demand kernel ARP.
     The gate decision (`should_program`) is a pure,
     allocation-free, syscall-free function pinned by fail-on-revert tests.
     Neighbor programming is a LOCAL kernel-table op, NOT HA/session-sync
