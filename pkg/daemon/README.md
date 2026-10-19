@@ -1617,6 +1617,18 @@ safe. Guards: `rg_apply_invalidate_race_6799_test.go`, whose wiring cell lands
 the fence *inside* the in-flight `SetRGActive` (the #6530 test fences between
 passes, which is sequential and cannot reach this window).
 
+**Legacy RG0 has no VRRP gate (#15165).** Under `no-private-rg-election`
+the VRRP-path setter requires `AllVRRPMaster`, which is false with zero
+instances, and RG0 never gets a RETH VRRP instance (`rethVRID` rejects
+`rgID <= 0`). `legacyNoRethVRRPCommitReady` therefore treats an RG with
+zero known AND zero config-expected RETH VRRP instances as ready once it
+is cluster primary and `!NeedsApply()`. It is consulted at the cluster
+promotion arm, inside the accepted reconcile record, and by
+`waitLocalFailoverCommitReady` itself (the probe's legacy arm, which
+covers a dropped promotion event). A data RG that expects an instance
+but has none known yet stays gated on `AllVRRPMaster`. Guards:
+`failover_commit_ready_15165_test.go`.
+
 **Where the wiring lives (#6428).** `startClusterComms` was a 602-line
 constructor; the sub-constructions were extracted verbatim into thirteen focused
 builders in **`daemon_ha_comms_wiring.go`** (VRF-device resolution, HA watchdog

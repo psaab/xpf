@@ -186,6 +186,18 @@ func (s *rgStateMachine) AllVRRPMaster() bool {
 	return s.allMasterLocked()
 }
 
+// VRRPInstanceCount returns how many VRRP instances are currently known
+// for this RG (#15165). Zero is ambiguous on its own: it means either no
+// instance is expected (RG0 in legacy mode, which never gets one) or an
+// expected instance has not instantiated yet. Callers must combine it
+// with the config-derived expected count before treating zero as
+// "no VRRP gate applies".
+func (s *rgStateMachine) VRRPInstanceCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.vrrpInstances)
+}
+
 // Reconcile overwrites the internal state with the authoritative cluster
 // and VRRP state, then recomputes rg_active. Called by the periodic
 // reconciliation loop to correct any drift from dropped events.

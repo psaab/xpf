@@ -121,6 +121,50 @@ func (d *Daemon) localFailoverCommitIsReady(rgID int) bool {
 	return d.localFailoverCommitReady[rgID]
 }
 
+// legacyNoRethVRRPCommitReady reports whether an RG that has no RETH VRRP
+// instance BY CONSTRUCTION may raise local failover commit readiness on
+// cluster primary + converged rg_active alone (#15165, B22-03).
+//
+// Under no-private-rg-election (legacy VRRP-backed mode) the only
+// commit-ready setter on the VRRP path requires AllVRRPMaster, and
+// AllVRRPMaster is false when the RG has zero instances. RG0 never gets
+// a RETH VRRP instance (rethVRID rejects rgID <= 0 and CollectRethInstances
+// skips rgID <= 0), so `request chassis cluster failover redundancy-group 0
+// node <local>` always timed out at waitLocalFailoverCommitReady and then
+// aborted — even though this node had become RG0 primary and converged.
+//
+// The predicate is deliberately narrow so it cannot fail open for a data
+// RG whose VRRP instance merely has not instantiated yet:
+//   - affirmatively legacy mode: a committed cluster config exists with
+//     neither NoRethVRRP nor PrivateRGElection. (A bare !isNoRethVRRP()
+//     is NOT enough: with no store it is also false, which would treat
+//     every unconverged-mode RG0 as legacy-ready.)
+//   - this node is cluster primary for the RG;
+//   - rg_active has converged (!NeedsApply — the same convergence term the
+//     direct-mode setters use);
+//   - the RG has zero known VRRP instances AND zero config-expected RETH
+//     VRRP instances. An RG that expects an instance but has none known
+//     yet stays gated on AllVRRPMaster, exactly as before.
+func (d *Daemon) legacyNoRethVRRPCommitReady(rgID int, s *rgStateMachine, noRethVRRP bool) bool {
+	if noRethVRRP || s == nil {
+		return false
+	}
+	cc := d.clusterConfig()
+	if cc == nil || cc.NoRethVRRP || cc.PrivateRGElection {
+		return false
+	}
+	if d.cluster == nil || !d.cluster.IsLocalPrimary(rgID) {
+		return false
+	}
+	if s.NeedsApply() {
+		return false
+	}
+	if s.VRRPInstanceCount() != 0 {
+		return false
+	}
+	return d.expectedRethVRRPCounts()[rgID] == 0
+}
+
 // recordRGActiveAppliedIfCurrentOrStable records a completed rg_active write
 // against the transition that produced it. #6799: it is now a thin wrapper over
 // rgStateMachine.RecordApplied so EVERY apply path — the four cluster/VRRP event
@@ -180,8 +224,22 @@ func (d *Daemon) waitLocalFailoverCommitReady(rgIDs []int) error {
 				return fmt.Errorf("local redundancy group %d lost primary before peer demotion commit", rgID)
 			}
 			if !d.localFailoverCommitIsReady(rgID) {
-				ready = false
-				break
+				// #15165: legacy-mode RG with no RETH VRRP instance by
+				// construction (RG0) has no VRRP MASTER event to raise
+				// the flag. Treat cluster primary + converged
+				// rg_active as ready here as well, so a promotion
+				// whose cluster event was dropped (or whose flag the
+				// event/reconcile arms have not raised yet) still
+				// completes instead of timing out. The predicate
+				// re-checks expected instances, so a data RG awaiting
+				// its VRRP instance stays gated.
+				s := d.getOrCreateRGState(rgID)
+				if d.legacyNoRethVRRPCommitReady(rgID, s, d.isNoRethVRRP()) {
+					d.setLocalFailoverCommitReady(rgID, true)
+				} else {
+					ready = false
+					break
+				}
 			}
 		}
 		if ready {
@@ -740,6 +798,13 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 			go d.RefreshFabricFwd()
 		}
 		if noRethVRRP && d.cluster != nil && d.cluster.IsLocalPrimary(ev.GroupID) && (d.dataplane() == nil || !s.NeedsApply()) {
+			d.setLocalFailoverCommitReady(ev.GroupID, true)
+		}
+		// #15165: legacy mode, RG with no RETH VRRP instance by
+		// construction (RG0): cluster primary + converged rg_active is
+		// the complete readiness signal — no VRRP MASTER event will
+		// ever arrive for it.
+		if d.legacyNoRethVRRPCommitReady(ev.GroupID, s, noRethVRRP) {
 			d.setLocalFailoverCommitReady(ev.GroupID, true)
 		}
 	} else {
@@ -1429,6 +1494,13 @@ func (d *Daemon) reconcileRGState() {
 					// FAILOVER COMMIT (waitLocalFailoverCommitReady), so it must
 					// never be raised off a convergence the machine refused.
 					if noRethVRRP && clusterPri && !s.NeedsApply() {
+						d.setLocalFailoverCommitReady(rgID, true)
+					}
+					// #15165: legacy-mode RG with no RETH VRRP instance
+					// by construction (RG0) — the accepted record IS
+					// the convergence, so raise readiness here too;
+					// no VRRP MASTER event will ever do it.
+					if d.legacyNoRethVRRPCommitReady(rgID, s, noRethVRRP) {
 						d.setLocalFailoverCommitReady(rgID, true)
 					}
 				} else {
