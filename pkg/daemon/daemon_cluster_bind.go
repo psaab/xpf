@@ -4,6 +4,7 @@ package daemon
 import (
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 
@@ -176,14 +177,22 @@ func clampBindsToLoopback(multi []string, single string, hasAuth bool, kind stri
 		addrs = []string{single}
 	}
 	out := make([]string, 0, len(addrs))
+	seen := make(map[string]struct{}, len(addrs))
 	for _, a := range addrs {
+		effective := a
 		if clamped, ok := clampBindToLoopback(a, hasAuth); ok {
 			slog.Warn(kind+" API bind is non-loopback without api-auth; clamping to loopback (add `set system services web-management api-auth` to bind off-loopback) — #4047/#5127",
 				"requested", a, "clamped", clamped)
-			out = append(out, clamped)
+			effective = clamped
+		}
+		// #15228 A44-03: de-duplicate the clamped set (e.g. two v6
+		// spellings both clamping to [::1]:port must not install a
+		// duplicate leg that can never bind).
+		if _, dup := seen[effective]; dup {
 			continue
 		}
-		out = append(out, a)
+		seen[effective] = struct{}{}
+		out = append(out, effective)
 	}
 	return out
 }
@@ -213,10 +222,14 @@ func hostIsLoopback(host string) bool {
 		// Not a parseable IP, but a legitimate loopback bind spelling.
 		return true
 	}
+	// #15228 A44-03: netip.ParseAddr is zone-aware; net.ParseIP returns
+	// nil for "fe80::1%zone", mis-classifying a zoned link-local.
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return addr.IsLoopback()
+	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		// Unparseable and not "localhost": fail safe, treat as non-loopback so
-		// a no-auth bind gets clamped rather than left exposed.
+		// Unparseable and not "localhost": fail safe, treat as non-loopback.
 		return false
 	}
 	return ip.IsLoopback()
@@ -245,9 +258,14 @@ func clampBindToLoopback(addr string, hasAuth bool) (string, bool) {
 		return addr, false
 	}
 	loopback := "127.0.0.1"
-	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
-		// An IPv6 (non-v4-mapped) address clamps to the IPv6 loopback so the
-		// bind stays same-family (a v6 daemon is reachable on ::1, not 127.0.0.1).
+	// #15228 A44-03: zone-aware family classification. net.ParseIP
+	// returns nil for "fe80::1%zone", so a zoned link-local fell through
+	// to the IPv4 loopback and duplicated the v4 leg.
+	if a, err := netip.ParseAddr(host); err == nil {
+		if a.Is6() {
+			loopback = "::1"
+		}
+	} else if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
 		loopback = "::1"
 	}
 	return net.JoinHostPort(loopback, port), true

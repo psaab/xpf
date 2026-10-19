@@ -140,18 +140,51 @@ func managementTLSBindHost(addr string) string {
 }
 
 // bindHostsForCertGen returns the host set a cert mint/load must cover
-// (#14984 D36-04): the server's full configured HTTPS bind hosts when
-// known (dual-stack unions both families), else just bindHost.
+// (#14984 D36-04, #15228 A44-04): the union of the server's configured
+// HTTPS bind hosts AND the live/requested legs' hosts, so a reconcile
+// that grows the set (single-stack construction -> dual-stack reconcile)
+// mints a fresh cert covering every leg, not only the construction set.
+// Ordering is deterministic: configured hosts first, then bindHost,
+// then any serving/requested leg hosts not already present.
 func bindHostsForCertGen(s *Server, bindHost string) []string {
+	var out []string
+	seen := make(map[string]struct{})
+	add := func(h string) {
+		if h == "" {
+			return
+		}
+		if _, dup := seen[h]; dup {
+			return
+		}
+		seen[h] = struct{}{}
+		out = append(out, h)
+	}
 	if s != nil && s.httpsBindHosts != nil {
-		if hosts := s.httpsBindHosts(); len(hosts) > 0 {
-			return hosts
+		for _, h := range s.httpsBindHosts() {
+			add(h)
 		}
 	}
-	if bindHost == "" {
-		return nil
+	add(bindHost)
+	if s != nil {
+		// Live legs (requested srv.Addr) — covers reconciles that have
+		// already installed/queued a leg for a new host before its cert
+		// is (re)built, and SetTLSCertDirForTest reloads.
+		for _, leg := range s.httpsLegs {
+			if leg != nil && leg.srv != nil {
+				if h, _, err := net.SplitHostPort(leg.srv.Addr); err == nil {
+					add(h)
+				}
+			}
+		}
+		for _, srv := range s.httpsServers {
+			if srv != nil {
+				if h, _, err := net.SplitHostPort(srv.Addr); err == nil {
+					add(h)
+				}
+			}
+		}
 	}
-	return []string{bindHost}
+	return out
 }
 
 // loadManagementTLSCertificate locks tlsCertificateMu (buildHTTPSServer
