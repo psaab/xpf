@@ -10,7 +10,7 @@ import (
 // DrainAndConfirm: happy path — pre-checks pass, ForceSecondary, then the strong
 // drain predicate holds -> nil.
 func TestDrainAndConfirmHappy(t *testing.T) {
-	f := &fakeCluster{peerAlive: true, compatible: true, peerReady: true, drainAfter: 1}
+	f := &fakeCluster{peerAlive: true, synced: true, compatible: true, peerReady: true, drainAfter: 1}
 	if err := DrainAndConfirm(f, 5*time.Second, false); err != nil {
 		t.Fatalf("DrainAndConfirm: %v", err)
 	}
@@ -32,7 +32,7 @@ func TestDrainAndConfirmRefusesDeadPeer(t *testing.T) {
 
 // Refuse to drain when the peer is not takeover-ready (would strand VIPs).
 func TestDrainAndConfirmRefusesPeerNotReady(t *testing.T) {
-	f := &fakeCluster{peerAlive: true, compatible: true, peerReady: false, drainAfter: 1}
+	f := &fakeCluster{peerAlive: true, synced: true, compatible: true, peerReady: false, drainAfter: 1}
 	if err := DrainAndConfirm(f, time.Second, false); err == nil {
 		t.Fatal("expected refusal when peer not takeover-ready")
 	}
@@ -43,7 +43,7 @@ func TestDrainAndConfirmRefusesPeerNotReady(t *testing.T) {
 
 // Refuse to drain on incompatible HA protocol (mixed-protocol split risk).
 func TestDrainAndConfirmRefusesIncompatibleProtocol(t *testing.T) {
-	f := &fakeCluster{peerAlive: true, compatible: false, peerReady: true, drainAfter: 1}
+	f := &fakeCluster{peerAlive: true, synced: true, compatible: false, peerReady: true, drainAfter: 1}
 	if err := DrainAndConfirm(f, time.Second, false); err == nil {
 		t.Fatal("expected refusal on incompatible HA protocol")
 	}
@@ -53,7 +53,7 @@ func TestDrainAndConfirmRefusesIncompatibleProtocol(t *testing.T) {
 // mixed-base gate has already validated window-compat, so a drain against an
 // in-window-but-not-equal peer must proceed (r3 Codex HIGH).
 func TestDrainAndConfirmAllowMixedHA(t *testing.T) {
-	f := &fakeCluster{peerAlive: true, compatible: false, peerReady: true, drainAfter: 1}
+	f := &fakeCluster{peerAlive: true, synced: true, compatible: false, peerReady: true, drainAfter: 1}
 	if err := DrainAndConfirm(f, 5*time.Second, true); err != nil {
 		t.Fatalf("allowMixedHA must skip the HA-compat precheck: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestDrainAndConfirmAllowMixedHA(t *testing.T) {
 // Drain that never completes within the deadline -> error AND failback (r2
 // Codex: must not leave the node force-demoted with VIPs stranded).
 func TestDrainAndConfirmTimesOutAndFailsBack(t *testing.T) {
-	f := &fakeCluster{peerAlive: true, compatible: true, peerReady: true, drainAfter: 1000}
+	f := &fakeCluster{peerAlive: true, synced: true, compatible: true, peerReady: true, drainAfter: 1000}
 	if err := DrainAndConfirm(f, 50*time.Millisecond, false); err == nil {
 		t.Fatal("expected timeout when drain never completes")
 	}
