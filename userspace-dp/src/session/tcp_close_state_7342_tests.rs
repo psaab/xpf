@@ -312,7 +312,7 @@ fn a_session_installed_by_a_fin_is_closing_not_time_wait_7342() {
 ///
 /// The old incarnation closes, a bare SYN reuses the tuple immediately, and
 /// the new pair completes a real three-way handshake. The new pair must start
-/// on OPENING (20 s), promote to ESTABLISHED (300 s), survive an opening-window
+/// on OPENING (20 s), promote to ESTABLISHED (1800 s, #15127), survive an opening-window
 /// idle gap, and accept a server-first packet after that gap.
 fn reused_tuple_completes_handshake_after_close(close_flags: u8) {
     let mut table = SessionTable::new();
@@ -361,7 +361,7 @@ fn reused_tuple_completes_handshake_after_close(close_flags: u8) {
         .lookup(&forward, reuse + 2_000_000, TCP_ACK)
         .is_some());
     // Refresh the responder half once after handshake completion so BOTH
-    // halves visibly carry the 300 s established window before the idle-gap
+    // halves visibly carry the 1800 s established window (#15127) before the idle-gap
     // / server-first assertion.
     assert!(table
         .lookup(&reverse, reuse + 3_000_000, TCP_ACK)
@@ -375,7 +375,7 @@ fn reused_tuple_completes_handshake_after_close(close_flags: u8) {
         assert_eq!(
             entry.expires_after_ns,
             DEFAULT_TCP_SESSION_TIMEOUT_NS,
-            "{label}: the new incarnation must use the full 300 s idle window"
+            "{label}: the new incarnation must use the full 1800 s idle window (#15127)"
         );
     }
 

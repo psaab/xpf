@@ -1187,8 +1187,8 @@ fn the_mirror_gate_holds_for_a_real_sibling_replica_7919() {
 //     closing-timeout UNSET (30 s window):  Timeout: 1800s   session alive at +8s
 //     closing-timeout 3     (3 s window):   Timeout: 1800s   session GONE  at +8s
 //
-// and 1800 for ESTABLISHED sessions too, whose window is 300 s
-// (DEFAULT_TCP_SESSION_TIMEOUT_NS) unless configured. A wrong number is
+// and 1800 for ESTABLISHED sessions too, whose window is 1800 s
+// (DEFAULT_TCP_SESSION_TIMEOUT_NS, #15127) unless configured. A wrong number is
 // indistinguishable from a right one at the point of reading, which is what
 // makes this worse than an unimplemented column.
 //
@@ -1210,9 +1210,9 @@ fn conntrack_timeout_column_reports_the_session_window_8125() {
     let metadata = synced_forward_metadata();
 
     // The two windows an operator actually sees on one box at one time: an
-    // ESTABLISHED session on its 300 s default and a half-closed one on the
+    // ESTABLISHED session on its 1800 s default (#15127) and a half-closed one on the
     // 30 s closing window.
-    const ESTABLISHED_SECS: u32 = 300;
+    const ESTABLISHED_SECS: u32 = 1800;
     const CLOSING_SECS: u32 = 30;
 
     let established = publish_conntrack::build_conntrack_value_v4(

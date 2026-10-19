@@ -38,18 +38,21 @@ const (
 	TCPSessionTimeWaitTimeoutLeaf    = "time-wait-timeout"
 )
 
-// Fixed session windows the three unenforced leaves would have controlled.
-// These MIRROR userspace-dp/src/session/mod.rs, which is the source of truth:
+// Fixed session windows mirrored from userspace-dp/src/session/mod.rs,
+// which is the source of truth:
 //
-//	DEFAULT_TCP_OPENING_TIMEOUT_NS = 20_000_000_000  // half-open / OPENING
-//	TCP_CLOSING_TIMEOUT_NS         = 30_000_000_000  // graceful FIN close
-//	TCP_RST_TIMEOUT_NS             =  2_000_000_000  // RST abort
+//	DEFAULT_TCP_SESSION_TIMEOUT_NS = 1_800_000_000_000  // established (#15127)
+//	DEFAULT_TCP_OPENING_TIMEOUT_NS =    20_000_000_000  // half-open / OPENING
+//	TCP_CLOSING_TIMEOUT_NS         =    30_000_000_000  // graceful FIN close
+//	TCP_RST_TIMEOUT_NS             =     2_000_000_000  // RST abort
 //
 // They are quoted in operator-facing text, so flow_tcp_timeouts_6539_test.go
 // re-reads the Rust constants and fails if either side drifts — otherwise the
 // annotation added here to stop one false claim would quietly become another.
 const (
-	DataplaneTCPEstablishedWindowSecs = 300
+	// #15127 (A93-02): 1800 is both the Junos established-timeout default
+	// and the dataplane fallback — DEFAULT_TCP_SESSION_TIMEOUT_NS in Rust.
+	DataplaneTCPEstablishedWindowSecs = 1800
 	DataplaneTCPOpeningWindowSecs     = 20
 	DataplaneTCPClosingWindowSecs     = 30
 	DataplaneTCPRSTWindowSecs         = 2
@@ -61,10 +64,11 @@ const (
 //
 // It exists because "default" on a `show` surface is itself an enforcement
 // claim, and the CLI's were wrong in the same way the missing annotation was:
-// it printed established-timeout's Junos default of 1800s, but nothing in the
-// Go path ever fills that in — an unset leaf lowers as 0 and the helper falls
-// back to its own constant, so the session actually idles out at 300s. Report
-// the DATAPLANE's fallback here, never the Junos book value.
+// it once printed established-timeout's Junos default of 1800s while the
+// dataplane actually idled out at 300s. #15127 raised the dataplane
+// fallback to 1800s, so the Junos book value and the dataplane fallback
+// now agree — but this function must still report the DATAPLANE's
+// fallback (mirrored from the Rust constant), never an assumed book value.
 //
 // The second return distinguishes "this leaf has no window to report" from a
 // zero-valued one. Which leaves those are is the switch below; it is not

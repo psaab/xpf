@@ -554,7 +554,7 @@ mod tcp_syn_check_tests {
         let expired = tcp_key(40300);
         let now = 1_000_000_000u64;
         // Seed an established tuple directly (the equivalent of a confirmed
-        // existing session), then advance beyond the default 300 s idle window.
+        // existing session), then advance beyond the default 1800 s idle window (#15127).
         assert!(table.install_with_protocol_with_origin(
             expired.clone(),
             fwd_decision(),
@@ -564,9 +564,9 @@ mod tcp_syn_check_tests {
             PROTO_TCP,
             TCP_ACK,
         ));
-        let _ = table.expire_stale_entries(now + 301_000_000_000);
+        let _ = table.expire_stale_entries(now + 1_801_000_000_000);
         assert!(
-            table.probe_with_origin_at(&expired, now + 301_000_000_000).is_none(),
+            table.probe_with_origin_at(&expired, now + 1_801_000_000_000).is_none(),
             "expired tuple must be a session miss before the ACK/PSH burst"
         );
         let fresh = tcp_key(40301);
@@ -590,9 +590,9 @@ mod tcp_syn_check_tests {
         assert_eq!(expired_transit, 0, "expired ACK/PSH burst must not transit");
         assert_eq!(fresh_transit, 0, "fresh ACK/PSH burst must not transit");
         assert!(
-            table.probe_with_origin_at(&expired, now + 301_000_000_000).is_none()
+            table.probe_with_origin_at(&expired, now + 1_801_000_000_000).is_none()
         );
-        assert!(table.probe_with_origin_at(&fresh, now + 301_000_000_000).is_none());
+        assert!(table.probe_with_origin_at(&fresh, now + 1_801_000_000_000).is_none());
     }
 
     #[test]

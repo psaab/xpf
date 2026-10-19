@@ -80,15 +80,15 @@ fn flow_cache_completing_ack_promotes_pending_pair_14939() {
         );
         assert_eq!(
             entry.expires_after_ns, table.timeouts.tcp_established_ns,
-            "#14939: {label} must move to the established window (Timeout:300)"
+            "#14939: {label} must move to the established window (Timeout:1800, #15127)"
         );
         assert_eq!(
             entry.last_seen_ns, ack_ns,
             "#14939: {label} re-stamped by the completing ACK"
         );
     }
-    assert_eq!(table.timeout_secs_for(&forward), 300);
-    assert_eq!(table.timeout_secs_for(&reverse), 300);
+    assert_eq!(table.timeout_secs_for(&forward), 1800); // #15127
+    assert_eq!(table.timeout_secs_for(&reverse), 1800); // #15127
 }
 
 /// Bare completing ACK (no payload) through the same keepalive: also
@@ -267,5 +267,5 @@ fn completed_pair_survives_past_opening_window_under_cache_hits_14939() {
             step * 5
         );
     }
-    assert_eq!(table.timeout_secs_for(&forward), 300);
+    assert_eq!(table.timeout_secs_for(&forward), 1800); // #15127
 }

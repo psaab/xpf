@@ -210,10 +210,12 @@ func TestTCPSessionTimeoutDataplaneDefault_7342(t *testing.T) {
 				tc.leaf, got, ok, tc.wantSecs, tc.wantOK)
 		}
 	}
-	// The established default must NOT be the Junos 1800 the CLI used to
-	// print: nothing in the Go path fills that in, so the helper's own
-	// fallback is what an unset leaf actually gets.
-	if DataplaneTCPEstablishedWindowSecs == 1800 {
-		t.Fatal("established default is 1800 — that is the Junos default, not this dataplane's fallback")
+	// #15127 (A93-02): the established default IS the Junos 1800 s — the
+	// dataplane fallback was raised from 300 s to 1800 s so an unset leaf
+	// no longer idles out at 300 s. The constant, the Rust constant and
+	// this pin must move together (TestTCPSessionTimeoutWindowsMatchRust).
+	if DataplaneTCPEstablishedWindowSecs != 1800 {
+		t.Fatalf("established default is %d, want 1800 — the Junos default the dataplane now applies (#15127)",
+			DataplaneTCPEstablishedWindowSecs)
 	}
 }

@@ -185,14 +185,14 @@ fn probe_hit_refuses_absent_and_expired_like_unfused_14945() {
         &missing,
     );
 
-    // Idle-crossed: install + 400 s with no traffic crosses the 300 s
+    // Idle-crossed: install + 1900 s with no traffic crosses the 1800 s (#15127)
     // established window.
     assert_equivalent(
         "expired",
         &mut fused,
         &mut oracle,
         &[&forward, &reverse],
-        now + 400 * SEC,
+        now + 1900 * SEC,
         100,
         TCP_ACK,
         0,

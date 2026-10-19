@@ -251,7 +251,7 @@ pub(super) fn build_conntrack_value_v4(
         // 1800 for every session — the Junos `established-timeout` default —
         // whatever window was actually in force, so a half-closed session on a
         // 30 s (or configured 3 s) closing window and an ESTABLISHED session on
-        // its 300 s default both reported the same number. The reap behaviour
+        // its 1800 s default (#15127) both reported the same number. The reap behaviour
         // proved they differed by an order of magnitude; the column did not.
         //
         // 1800 remains the fallback for a publish with NO live table entry

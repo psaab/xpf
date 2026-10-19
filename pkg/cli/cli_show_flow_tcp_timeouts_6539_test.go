@@ -135,9 +135,12 @@ func TestShowFlowTimeoutsUnsetDefaultsAreTheDataplanes_6539(t *testing.T) {
 	if est == "" {
 		t.Fatalf("no TCP established row rendered for an absent tcp-session stanza.\n%s", out)
 	}
-	if strings.Contains(est, "1800s") {
-		t.Errorf("unset established-timeout still renders the Junos 1800s default, which this "+
-			"dataplane does not use: %q", est)
+	// #15127: the dataplane fallback is now the Junos 1800 s itself, so the
+	// rendered default must be exactly "1800s (default)" — sourced from the
+	// config constant, never a divergent literal.
+	wantEstCheck := strconv.Itoa(config.DataplaneTCPEstablishedWindowSecs) + "s (default)"
+	if wantEstCheck != "1800s (default)" {
+		t.Fatalf("dataplane established fallback is %q, want 1800s (default) (#15127)", wantEstCheck)
 	}
 	wantEst := strconv.Itoa(config.DataplaneTCPEstablishedWindowSecs) + "s (default)"
 	if !strings.Contains(est, wantEst) {
