@@ -395,6 +395,18 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   operator prefix with no `preferred-lifetime` leaf keeps the 7-day
   default. Pinned by `pkg/daemon/ra_pd_preferred_zero_14606_test.go` and
   `pkg/ra/sender_preferred_zero_14606_test.go`.
+- **Decaying PD lifetimes do not churn the RA desired set** (#15057):
+  `DelegatedPrefixesForRA` returns the GRANTED lifetimes with the
+  original `Obtained` (it only prunes/skips expired entries);
+  `buildRAConfigs` carries the absolute expiry
+  (`RAPrefix.ValidExpiresAt`/`PreferredExpiresAt` = Obtained+granted)
+  and `pkg/ra` `buildRA` computes the remaining lifetime at send time.
+  The cluster `raDesiredHash` and `configEqual` therefore compare
+  expiries, not a per-second decayed value, so the 2s reconcile applies
+  once instead of hard-restarting the sender every pass. A renewal moves
+  the expiry and does restart. Pinned by
+  `pkg/daemon/ra_pd_expiry_15057_test.go` and
+  `pkg/ra/sender_expiry_15057_test.go`.
 - **DHCPv6 IA_PD prefix-length is validated at the DECODER** (#6531). The
   wire prefix-length is a single byte, and insomniacslk/dhcp decodes it
   as `net.CIDRMask(int(length), 128)` — which returns a **nil** mask for

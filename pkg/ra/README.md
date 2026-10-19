@@ -554,6 +554,14 @@ never retried and the stale IPv6 default-router identity lingered on hosts
     on the PD path, so it is compared in `configEqual` alongside
     `PreferredLife` — omitting it would keep a stale fully-preferred
     advertisement after a delegation is deprecated.
+  - **`RAPrefix.ValidExpiresAt`/`PreferredExpiresAt` (#15057).** A
+    delegated prefix carries the absolute expiry (Obtained+granted);
+    `buildRA` computes the remaining PIO lifetimes at send time (whole
+    seconds, never more than remains, PIO omitted past valid expiry).
+    The expiries — not a decayed remaining value — are compared in
+    `configEqual`, so the sender is NOT restarted as time advances, but
+    IS restarted when a renewal moves the expiry. Prefixes without an
+    expiry keep the granted/default path verbatim.
   - **The converse also holds: CIDR fields compare by parsed value, not raw
     text (#4590 A5-03).** `buildRA` re-parses `NAT64Prefix` and each advertised
     `Prefixes[i].Prefix` via `netip.ParsePrefix`, so two strings that parse to

@@ -4010,7 +4010,9 @@
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
-                "Delegated": false
+                "Delegated": false,
+                "ValidExpiresAt": 0,
+                "PreferredExpiresAt": 0
               }
             ],
             "DNSServers": [
@@ -5468,7 +5470,9 @@
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
-                "Delegated": false
+                "Delegated": false,
+                "ValidExpiresAt": 0,
+                "PreferredExpiresAt": 0
               }
             ],
             "DNSServers": [
@@ -6925,7 +6929,9 @@
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
-                "Delegated": false
+                "Delegated": false,
+                "ValidExpiresAt": 0,
+                "PreferredExpiresAt": 0
               }
             ],
             "DNSServers": [
@@ -8382,7 +8388,9 @@
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
-                "Delegated": false
+                "Delegated": false,
+                "ValidExpiresAt": 0,
+                "PreferredExpiresAt": 0
               }
             ],
             "DNSServers": [
@@ -9843,7 +9851,9 @@
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
-                "Delegated": false
+                "Delegated": false,
+                "ValidExpiresAt": 0,
+                "PreferredExpiresAt": 0
               }
             ],
             "DNSServers": [
@@ -11303,7 +11313,9 @@
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
-                "Delegated": false
+                "Delegated": false,
+                "ValidExpiresAt": 0,
+                "PreferredExpiresAt": 0
               }
             ],
             "DNSServers": [
@@ -12507,7 +12519,9 @@
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
-                "Delegated": false
+                "Delegated": false,
+                "ValidExpiresAt": 0,
+                "PreferredExpiresAt": 0
               }
             ],
             "DNSServers": [
@@ -13592,7 +13606,9 @@
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
-                "Delegated": false
+                "Delegated": false,
+                "ValidExpiresAt": 0,
+                "PreferredExpiresAt": 0
               }
             ],
             "DNSServers": [
@@ -14676,7 +14692,9 @@
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
-                "Delegated": false
+                "Delegated": false,
+                "ValidExpiresAt": 0,
+                "PreferredExpiresAt": 0
               }
             ],
             "DNSServers": [
@@ -15760,7 +15778,9 @@
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
-                "Delegated": false
+                "Delegated": false,
+                "ValidExpiresAt": 0,
+                "PreferredExpiresAt": 0
               }
             ],
             "DNSServers": [
@@ -16848,7 +16868,9 @@
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
-                "Delegated": false
+                "Delegated": false,
+                "ValidExpiresAt": 0,
+                "PreferredExpiresAt": 0
               }
             ],
             "DNSServers": [
@@ -17935,7 +17957,9 @@
                 "ValidLifetime": 0,
                 "PreferredLife": 0,
                 "PreferredLifeSet": false,
-                "Delegated": false
+                "Delegated": false,
+                "ValidExpiresAt": 0,
+                "PreferredExpiresAt": 0
               }
             ],
             "DNSServers": [

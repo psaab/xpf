@@ -684,6 +684,23 @@ type RAPrefix struct {
 	// Set ONLY by buildRAConfigs (pkg/daemon) on the PD path; the compiler
 	// leaves it false for operator-authored prefixes by construction.
 	Delegated bool
+	// ValidExpiresAt is the absolute wall-clock expiry of the valid
+	// lifetime for a delegated prefix (#15057): Obtained+granted-valid.
+	// Carrying the expiry rather than a decayed remaining value keeps the
+	// desired set stable as wall time advances — buildRA computes the
+	// remaining lifetime at send time, so the 2s cluster reconcile does
+	// not see the desired set change every second and restart the sender.
+	// Zero means no expiry (infinite, zero-obtained, or unset/operator
+	// prefix). Unix-nano int64 is the on-wire/config JSON shape, so the
+	// golden fixtures marshal it as a plain number.
+	ValidExpiresAt int64
+	// PreferredExpiresAt is the absolute wall-clock expiry of the
+	// preferred lifetime for a delegated prefix (#15057), mirroring
+	// ValidExpiresAt. Zero means no preferred expiry (infinite, zero
+	// preferred, zero-obtained, or unset/operator prefix). Whether a zero
+	// value means deprecated-0 is decided by PreferredLifeSet, not by
+	// this field.
+	PreferredExpiresAt int64
 }
 
 // OSPFConfig holds OSPF routing configuration.

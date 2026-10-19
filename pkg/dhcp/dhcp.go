@@ -110,6 +110,15 @@ func (dp DelegatedPrefix) ExpiresAt() time.Time {
 	return dp.Obtained.Add(dp.ValidLifetime)
 }
 
+// PreferredExpiresAt returns Obtained+PreferredLifetime, or zero if the
+// preferred lifetime is infinite, zero (deprecated), or unknown.
+func (dp DelegatedPrefix) PreferredExpiresAt() time.Time {
+	if dp.Obtained.IsZero() || dp.PreferredLifetime <= 0 || dp.PreferredLifetime >= infiniteLifetime {
+		return time.Time{}
+	}
+	return dp.Obtained.Add(dp.PreferredLifetime)
+}
+
 // Expired reports whether the valid lifetime has elapsed at now.
 // Prefixes with zero Obtained (test-seeded, no clock) never expire here.
 func (dp DelegatedPrefix) Expired(now time.Time) bool {
@@ -415,8 +424,11 @@ type PDRAMapping struct {
 }
 
 // DelegatedPrefixesForRA returns live delegated prefixes that have an RA
-// target, with lifetimes decayed to their remaining values at now
-// (#14598). Expired prefixes are pruned and never returned.
+// target, with the GRANTED lifetimes and original Obtained preserved
+// (#15057). The consumer (buildRAConfigs) derives the absolute expiry
+// from Obtained+granted and computes the remaining lifetime at send
+// time, so this snapshot is stable across calls as wall time advances.
+// Expired prefixes are pruned and never returned.
 func (m *Manager) DelegatedPrefixesForRA() []PDRAMapping {
 	now := time.Now()
 	m.mu.Lock()
@@ -428,16 +440,12 @@ func (m *Manager) DelegatedPrefixesForRA() []PDRAMapping {
 			continue
 		}
 		for _, dp := range pds {
-			pref, valid := dp.RemainingLifetimes(now)
+			_, valid := dp.RemainingLifetimes(now)
 			if valid == 0 && !dp.Obtained.IsZero() && dp.ValidLifetime > 0 {
 				continue
 			}
-			decayed := dp
-			decayed.PreferredLifetime = pref
-			decayed.ValidLifetime = valid
-			decayed.Obtained = now
 			result = append(result, PDRAMapping{
-				DelegatedPrefix: decayed,
+				DelegatedPrefix: dp,
 				RAIface:         opts.RAIface,
 				SubPrefLen:      opts.PDSubLen,
 			})

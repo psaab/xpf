@@ -83,28 +83,37 @@ func TestBuildRAConfigs_14606_DeprecatedPDKeepsPreferredZero(t *testing.T) {
 	}
 }
 
-// #14606 x #14598: a prefix granted preferred 3600 / valid 7200 whose
-// preferred lifetime has fully decayed (elapsed 4000s) while valid
-// remains must advertise as deprecated: PreferredLife 0 WITH the
-// explicit-set flag, valid decayed to 3200 — not the 7-day default.
+// #14606 x #14598 x #15057: a prefix granted preferred 3600 / valid 7200
+// whose preferred lifetime has fully decayed (elapsed 4000s) while valid
+// remains must advertise as deprecated. Since #15057 the decay happens in
+// pkg/ra buildRA at send time, so the daemon half carries the granted
+// lifetimes with PreferredLifeSet and the absolute expiries; buildRA then
+// emits preferred 0 / valid 3200 (pinned in pkg/ra sender_expiry tests).
 func TestBuildRAConfigs_14606_DecayedToZeroPreferred(t *testing.T) {
+	obtained := time.Now().Add(-4000 * time.Second)
 	pfxs := raPrefixesFor14606(t, []dhcp.DelegatedPrefix{
 		{
 			Interface:         "ge-0/0/3",
 			Prefix:            netip.MustParsePrefix("2606:4700:900d::/64"),
 			PreferredLifetime: 3600 * time.Second,
 			ValidLifetime:     7200 * time.Second,
-			Obtained:          time.Now().Add(-4000 * time.Second),
+			Obtained:          obtained,
 		},
 	})
 	if len(pfxs) != 1 {
 		t.Fatalf("got %d prefixes, want 1", len(pfxs))
 	}
 	p := pfxs[0]
-	if !p.PreferredLifeSet || p.PreferredLife != 0 {
-		t.Errorf("decayed-to-zero = set=%v pref=%d, want true/0 (deprecated)", p.PreferredLifeSet, p.PreferredLife)
+	if !p.PreferredLifeSet {
+		t.Errorf("decayed-to-zero PreferredLifeSet=false, want true (deprecated signal must survive, #14606)")
 	}
-	if p.ValidLifetime != 3200 {
-		t.Errorf("ValidLifetime=%d, want 3200 (7200 decayed by 4000)", p.ValidLifetime)
+	if p.PreferredLife != 3600 || p.ValidLifetime != 7200 {
+		t.Errorf("carried lifetimes = pref %d / valid %d, want granted 3600/7200 (decay at send time, #15057)", p.PreferredLife, p.ValidLifetime)
+	}
+	if want := obtained.Add(3600 * time.Second).UnixNano(); p.PreferredExpiresAt != want {
+		t.Errorf("PreferredExpiresAt=%d, want %d (Obtained+3600s)", p.PreferredExpiresAt, want)
+	}
+	if want := obtained.Add(7200 * time.Second).UnixNano(); p.ValidExpiresAt != want {
+		t.Errorf("ValidExpiresAt=%d, want %d (Obtained+7200s)", p.ValidExpiresAt, want)
 	}
 }
