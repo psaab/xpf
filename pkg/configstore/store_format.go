@@ -115,6 +115,22 @@ func (s *Store) ActiveConfigGeneration() string {
 	return guardedConfigHash(s.active)
 }
 
+// CandidateEqualsActive reports whether the candidate tree is identical to
+// the active tree under the canonical (post-persist-round-trip) hash. It is
+// the no-change gate the event engine consults before committing a
+// remediation batch (#15022): a batch that restores values already active
+// produces a candidate equal to active, and committing it would push an
+// identical rollback-history entry and run a full apply for nothing.
+// Returns false when there is no candidate (not in configuration mode).
+func (s *Store) CandidateEqualsActive() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.candidate == nil || s.active == nil {
+		return false
+	}
+	return guardedConfigHash(s.candidate) == guardedConfigHash(s.active)
+}
+
 // ActiveTree returns a deep copy of the active configuration tree.
 func (s *Store) ActiveTree() *config.ConfigTree {
 	s.mu.RLock()

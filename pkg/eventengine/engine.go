@@ -124,6 +124,7 @@ type Stats struct {
 	DroppedLockHeld     uint64 // actions dropped after the lock-retry deadline elapsed
 	DroppedStale        uint64 // actions dropped at commit: policy removed/redefined or cooldown active (#3750)
 	DroppedGlobalBudget uint64 // actions refused by the cross-policy rolling action budget (#10871)
+	SkippedNoChange     uint64 // actions whose post-batch candidate equalled active: commit skipped, no history/budget spent, cooldown still armed (#15022)
 	// DroppedShutdown counts queued or in-flight-retry actions abandoned by Close
 	// (#9916 F-131). Deliberately NOT surfaced to Prometheus: it increments at
 	// process exit and would never be scraped. Explicit accounting (test-observable
@@ -144,6 +145,7 @@ type engineCounters struct {
 	superseded          atomic.Uint64
 	droppedLockHeld     atomic.Uint64
 	droppedStale        atomic.Uint64
+	skippedNoChange     atomic.Uint64
 	droppedGlobalBudget atomic.Uint64
 	droppedShutdown     atomic.Uint64
 	attributesInvalid   atomic.Uint64
@@ -822,6 +824,7 @@ func (e *Engine) Stats() Stats {
 		DroppedLockHeld:     e.counters.droppedLockHeld.Load(),
 		DroppedStale:        e.counters.droppedStale.Load(),
 		DroppedGlobalBudget: e.counters.droppedGlobalBudget.Load(),
+		SkippedNoChange:     e.counters.skippedNoChange.Load(),
 		DroppedShutdown:     e.counters.droppedShutdown.Load(),
 		AttributesInvalid:   e.counters.attributesInvalid.Load(),
 		PlantClassInvalid:   e.counters.plantClassInvalid.Load(),
@@ -1112,6 +1115,25 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 		e.store.ExitConfigure()
 		return errBatch("commit-check: %w", err)
 	}
+
+	// #15022 (A14-03): a batch that restores values already active (the
+	// ordinary restore-on-success shape — a no-within policy on
+	// ping_test_completed re-setting what the active config already carries)
+	// leaves the candidate identical to active. Committing it would push an
+	// identical rollback-history entry, spend the cross-policy budget, and
+	// run a full commit+apply on every probe cycle — throttled only by the
+	// 30s cooldown, evicting the bounded rollback ladder in ~24 minutes.
+	// Skip the commit entirely: no history, no budget, no commitFn. Return
+	// nil so runAction counts the action committed and arms the cooldown
+	// exactly as for a real commit, throttling the repeat.
+	if e.store.CandidateEqualsActive() {
+		e.store.ExitConfigure()
+		e.counters.skippedNoChange.Add(1)
+		slog.Info("event-options: remediation skipped (candidate unchanged)",
+			"policy", a.policyName)
+		return nil
+	}
+
 	// Reserve the cross-policy budget only when this action is ready to commit.
 	// Queue-time admission would let a held worker accumulate expired budget
 	// timestamps and then release an unbounded commit burst. #14724: a commit

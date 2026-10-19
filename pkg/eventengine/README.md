@@ -133,7 +133,16 @@ all-or-nothing transaction:
    (`ExitConfigure`) and rejects the batch. **No partial apply ever commits.**
 3. **Validate the whole candidate** with `CommitCheck()` before committing; a
    failure discards cleanly.
-4. **Commit** through the daemon's atomic commit+apply (`CommitFn`, #846) so it
+4. **No-change skip** (#15022): if the post-batch candidate is identical to
+   the active config (`Store.CandidateEqualsActive`, canonical-hash equality),
+   the commit is skipped — no rollback-history entry, no global-budget spend,
+   no `CommitFn` invocation. This stops a no-`within` restore-on-success
+   policy on `ping_test_completed` from re-committing an unchanged config on
+   every probe cycle (throttled only by the 30 s cooldown, an identical
+   history entry per commit would evict the 50-entry rollback ladder in
+   ~24 minutes). The action still counts as committed and arms the cooldown,
+   and bumps `xpf_event_actions_skipped_no_change_total`.
+5. **Commit** through the daemon's atomic commit+apply (`CommitFn`, #846) so it
    serializes with operator commits.
 
 A `delete` of a missing path is a **tolerated exception** (logged at Debug):
@@ -457,6 +466,8 @@ blocks a `commitFn` on `ctx.Done()` and asserts `Close()` aborts it with
   (`stale` = revalidate-before-commit dropped a removed/redefined-policy or
   within-cooldown action, #3750; `global_budget` = the shared #10871 rolling
   commit-attempt budget was exhausted)
+- `xpf_event_actions_skipped_no_change_total` (#15022 — post-batch candidate
+  identical to active; commit skipped, cooldown still armed)
 - `xpf_event_attributes_match_invalid_total`
 - `xpf_event_action_queue_depth` (gauge)
 

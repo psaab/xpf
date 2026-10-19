@@ -320,6 +320,8 @@ func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue, float64(st.DroppedGlobalBudget), "global_budget")
 		ch <- prometheus.MustNewConstMetric(c.eventActionsSuperseded,
 			prometheus.CounterValue, float64(st.Superseded))
+		ch <- prometheus.MustNewConstMetric(c.eventActionsSkippedNoChange,
+			prometheus.CounterValue, float64(st.SkippedNoChange))
 		ch <- prometheus.MustNewConstMetric(c.eventAttributesInvalid,
 			prometheus.CounterValue, float64(st.AttributesInvalid))
 		ch <- prometheus.MustNewConstMetric(c.eventPlantClassInvalid,
