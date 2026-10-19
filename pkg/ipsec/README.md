@@ -74,8 +74,11 @@ the apply path pays no fsync (the file is regenerated on every apply).
   forgot VPNs the rollback left running in charon, so their SAs were
   never terminated; and a failed terminate is carried as debt and
   returned (#6542).
-- `SAStatus`, `TerminateAllSAs`, `InitiateConnection`, `GetSAStatus`,
-  `ActiveConnectionNames` — `ike.go`.
+- `SAStatus`, `TerminateAllSAs`, `InitiateConnection`, `TerminateConnection`,
+  `GetSAStatus`, `ActiveConnectionNames` — `ike.go`. `TerminateConnection`
+  (#15194) resolves the IKE connection owning a named SA from the live list
+  and issues `swanctl --terminate --ike <conn> --force`; no matching live SA
+  is a no-op and a failed list is returned rather than guessed.
 - `PrepareConfig(cfg *config.Config) *config.IPsecConfig` — `policy.go`.
 - `ApplyWithHooks(ipsecCfg, hooks ApplyHooks) error`, `ApplyHooks{Written, Loaded}` and
   `ApplyNotifyLoaded(ipsecCfg, loaded func()) error` — `manager.go`. `Apply` with callbacks

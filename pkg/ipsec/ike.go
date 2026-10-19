@@ -957,6 +957,66 @@ func (m *Manager) InitiateConnection(name string) error {
 	return nil
 }
 
+// TerminateConnection terminates the live IKE SA that owns the named SA
+// (#15194). name is an SA name as published by ActiveConnectionNames: a
+// CHILD name, or the IKE name for a childless SA. The IKE connection to
+// terminate is resolved from the live SA list (the SA's ConnectionName,
+// falling back to its own name), because since #15024 the connection is
+// gateway-named while the child carries the VPN/selector name.
+//
+// --force: terminate without waiting for the peer's delete acknowledgement.
+// On an RG demotion the local VIP is already gone, so a graceful delete can
+// stall or never be acked (MOBIKE defers; a non-MOBIKE peer sends nothing);
+// waiting would leave the stale SA in charon to collide with the returning
+// owner's initiate ("existing duplicate").
+//
+// No live SA matching name (including a name that resolves to a connection
+// whose SA is already down) is a clean no-op. A failed --list-sas is
+// returned: the caller must not guess at a connection name, because
+// terminating the wrong IKE SA tears down a tunnel another RG still owns.
+func (m *Manager) TerminateConnection(name string) error {
+	if name == "" {
+		return nil
+	}
+	sas, err := m.listSAsForTerminate()
+	if err != nil {
+		return fmt.Errorf("swanctl --list-sas before terminate %s: %w", name, err)
+	}
+	ikeName := ""
+	for _, sa := range sas {
+		if sa.Name != name && sa.ConnectionName != name {
+			continue
+		}
+		ikeName = sa.ConnectionName
+		if ikeName == "" {
+			ikeName = sa.Name
+		}
+		break
+	}
+	if ikeName == "" {
+		return nil
+	}
+	if out, err := m.sc("--terminate", "--ike", ikeName, "--force"); err != nil {
+		return fmt.Errorf("swanctl --terminate --ike %s --force: %w: %s", ikeName, err, termsafe.SanitizeForDisplay(string(out)))
+	}
+	return nil
+}
+
+// listSAsForTerminate lists live SAs through the manager's exec seams
+// (unlike GetSAStatus, which uses the package-level split exec), so test
+// doubles that inject `swanctl` observe the read.
+func (m *Manager) listSAsForTerminate() ([]SAStatus, error) {
+	out, errOut, err := m.scSplit("--list-sas")
+	if err != nil {
+		return nil, fmt.Errorf("swanctl --list-sas: %w: %s", err, termsafe.SanitizeForDisplay(string(errOut)))
+	}
+	sas := parseSAOutput(string(out))
+	for i := range sas {
+		sanitizeSAStatus(&sas[i])
+	}
+	return sas, nil
+}
+
 // GetSAStatus queries strongSwan for active SAs.
 func (m *Manager) GetSAStatus() ([]SAStatus, error) {
 	// #9068: the shared stdout-only exec, not a second inline copy of it.
