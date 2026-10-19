@@ -606,9 +606,30 @@ func HostInboundFirstApplyMarked() bool {
 
 // clearHostInboundFirstApplyMarker removes a stale first-apply marker.
 // Best-effort and silent: absence only makes `ensure` install fail-closed.
+// It refuses to remove a LIVE owner's marker (#15085): Run calls it only
+// after taking the singleton lock, so a live marker here can only belong
+// to this process's own earlier note in the same lifetime (test seams
+// included) — never to a second daemon that slipped past the lock.
 func clearHostInboundFirstApplyMarker() {
+	if markerHeldByOtherSlot(&hostInboundFirstApplyLockFile) {
+		slog.Warn("refusing to clear a live first-apply marker held by another process; singleton lock should have refused this start")
+		return
+	}
 	releaseMarkerLock(&hostInboundFirstApplyLockFile)
 	_ = os.Remove(HostInboundFirstApplyMarkerPath)
+}
+
+// markerHeldByOtherSlot reports whether path's marker is exclusively held
+// by a process other than the one that owns slot in this process. When
+// this process already holds the slot, its own hold is not "another".
+func markerHeldByOtherSlot(slot **os.File) bool {
+	markerLockMu.Lock()
+	held := *slot != nil
+	markerLockMu.Unlock()
+	if held {
+		return false
+	}
+	return HostInboundFirstApplyLive()
 }
 
 // noteHostInboundInstalled records a successful host-inbound enforcement

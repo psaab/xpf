@@ -428,7 +428,7 @@ func main() {
 
 	case cmdUnknown:
 		fmt.Fprintf(os.Stderr, "xpfd: unknown command %q\n", os.Args[1])
-		fmt.Fprintf(os.Stderr, "  use the 'cli' binary for remote commands, or run xpfd on a TTY\n")
+		fmt.Fprintf(os.Stderr, "  use the 'cli' binary for remote commands; a daemon is started only by the xpfd service (systemctl restart xpfd), never by running xpfd directly\n")
 		os.Exit(1)
 	}
 
