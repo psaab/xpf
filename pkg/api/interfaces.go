@@ -19,16 +19,8 @@ func (s *Server) interfacesHandler(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	// Build interface->zone map
-	ifZone := make(map[string]string)
-	for zoneName, zone := range cfg.Security.Zones {
-		if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
-			continue
-		}
-		for _, ifName := range zone.Interfaces {
-			ifZone[ifName] = zoneName
-		}
-	}
+	// Build interface->zone map (canonical keys, #15726).
+	ifZone := interfaceZoneMap(cfg)
 
 	var result []InterfaceStats
 	for ifName := range allInterfaceNames(cfg) {
@@ -84,15 +76,6 @@ func (s *Server) interfacesDetailHandler(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) writeInterfacesTerse(w http.ResponseWriter, cfg *config.Config, filterName string) {
-	ifaceZoneName := make(map[string]string)
-	for name, zone := range cfg.Security.Zones {
-		if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
-			continue
-		}
-		for _, ifName := range zone.Interfaces {
-			ifaceZoneName[ifName] = name
-		}
-	}
 
 	// Build RETH mappings
 	physToReth := make(map[string]string) // physical member → reth parent
@@ -213,15 +196,7 @@ func (s *Server) writeInterfacesTerse(w http.ResponseWriter, cfg *config.Config,
 }
 
 func (s *Server) writeInterfacesDetail(w http.ResponseWriter, cfg *config.Config, filterName string) {
-	ifaceZoneName := make(map[string]string)
-	for name, zone := range cfg.Security.Zones {
-		if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
-			continue
-		}
-		for _, ifName := range zone.Interfaces {
-			ifaceZoneName[ifName] = name
-		}
-	}
+	ifaceZoneName := interfaceZoneMap(cfg)
 
 	var b strings.Builder
 	var ifNames []string
