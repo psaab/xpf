@@ -1040,6 +1040,39 @@ short frame is read as epoch 0 and accepted only when no bulk is in progress —
 state in which any epoch is accepted, since the guard requires `bulkInProgress`.
 A malformed short frame grants nothing a well-formed one does not.
 
+### The abandoned-accept twin: disconnect closes the window (#15254, A82-03)
+
+#9177 covered the **refused** start. The **accepted** start has the same
+symptom through the opposite edge: the telemetry stores (correctly) open the
+window on accept, every fabric then drops before the `BulkEnd`, and
+`handleDisconnect`'s full-disconnect block cleared `bulkInProgress` but not
+the pair. Status reported an in-progress bulk for the whole peer outage, and
+early incremental records on reconnect satisfied the session handlers'
+telemetry-pair test and were counted as bulk traffic.
+
+Two halves, matching the two readers:
+
+- **Status reads the pair**, so the disconnect stamps the end:
+  `handleDisconnect`, gated on `hadBulkInProgress`, stores
+  `BulkSyncEndTime = now` when it clears a live receive window. The stamp is
+  NOT a completion — `BulkSyncs`, `bulkEverCompleted` and
+  `OnBulkSyncReceived` belong to `BulkEnd` alone (#5272), and an abandoned
+  bulk must never release the failover hold. The gate matters: an ungated
+  stamp would rewrite a genuinely completed bulk's end (and duration) on
+  every later idle disconnect. A later accepted `BulkStart` re-opens the
+  window exactly as before.
+- **Counting reads the window**, so the session handlers key on
+  `bulkInProgress` (`bulkReceiveProgress`), not the pair. The counted set is
+  then exactly the set the install arm accumulates into
+  `bulkRecvV4`/`bulkRecvV6` under the same flag, including records that
+  arrive between the accepted start and its telemetry stores.
+
+A **partial** disconnect abandons nothing: the same peer process is still
+streaming on the surviving fabric, so the window and its telemetry stay open.
+Cells: `pkg/cluster/sync_bulk_abandoned_15254_test.go` (abandoned cell,
+miscount cell, running-bulk / completed-bulk / partial-disconnect /
+reconnect controls); the #9177 cells stay green as the refused-start twin.
+
 ### `BulkAck` epoch comparison is `!=`, not `<` (#9177 V053)
 
 The authority for `pendingBulkAckEpoch` is **local**: our own send path sets it
