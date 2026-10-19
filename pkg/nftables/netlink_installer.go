@@ -203,7 +203,7 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 	if !found {
 		return fmt.Errorf("host overlay marker %q absent", marker)
 	}
-	if len(overlay.MasterSet) == 0 {
+	if len(overlay.MasterSet) == 0 && len(overlay.MasterSlavePairs) == 0 {
 		return nil
 	}
 	sets, err := c.GetSets(tbl)
@@ -230,44 +230,90 @@ func (in *netlinkInstaller) VerifyHostInboundOverlay(overlay HostInputFenceOverl
 	if len(rules) == 0 {
 		return fmt.Errorf("host overlay leading rule absent")
 	}
-	names, markerSeen, dropSeen := decodeHostOverlayRule(rules[0], setNames, marker)
-	sort.Strings(names)
-	want := overlay.MasterSet
-	sort.Strings(want)
-	if strings.Join(names, "\x00") != strings.Join(want, "\x00") || !markerSeen || !dropSeen {
-		return fmt.Errorf("host overlay readback mismatch: got masters=%v marker=%v drop=%v want=%v", names, markerSeen, dropSeen, want)
+	// Collect every leading overlay drop: paired slave-scoped rules first,
+	// then the bare-master rule. All must carry the marker + DROP, the union
+	// of iifname scopes must equal MasterSet plus pair masters, and the union
+	// of sdifname scopes must equal the paired slaves (#14974).
+	wantMasters := append([]string(nil), overlay.MasterSet...)
+	var wantSlaves []string
+	for _, pair := range overlay.MasterSlavePairs {
+		wantMasters = append(wantMasters, pair.Master)
+		wantSlaves = append(wantSlaves, pair.Slave)
+	}
+	var gotMasters, gotSlaves []string
+	overlayRules := 0
+	for _, rule := range rules {
+		masters, slaves, markerSeen, dropSeen := decodeHostOverlayRule(rule, setNames, marker)
+		if !markerSeen {
+			break
+		}
+		if !dropSeen {
+			return fmt.Errorf("host overlay rule lacks DROP verdict")
+		}
+		overlayRules++
+		gotMasters = append(gotMasters, masters...)
+		gotSlaves = append(gotSlaves, slaves...)
+	}
+	if overlayRules == 0 {
+		return fmt.Errorf("host overlay leading rule absent")
+	}
+	sort.Strings(gotMasters)
+	sort.Strings(gotSlaves)
+	sort.Strings(wantMasters)
+	sort.Strings(wantSlaves)
+	wantMasters = canonicalIfNames(wantMasters)
+	wantSlaves = canonicalIfNames(wantSlaves)
+	gotMasters = canonicalIfNames(gotMasters)
+	gotSlaves = canonicalIfNames(gotSlaves)
+	if strings.Join(gotMasters, "\x00") != strings.Join(wantMasters, "\x00") ||
+		strings.Join(gotSlaves, "\x00") != strings.Join(wantSlaves, "\x00") {
+		return fmt.Errorf("host overlay readback mismatch: got masters=%v slaves=%v want masters=%v slaves=%v", gotMasters, gotSlaves, wantMasters, wantSlaves)
 	}
 	return nil
 }
 
-func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, marker string) (names []string, markerSeen, dropSeen bool) {
-	pendingMeta := false
+func decodeHostOverlayRule(rule *nftables.Rule, setNames map[string][]string, marker string) (masters, slaves []string, markerSeen, dropSeen bool) {
+	pending := 0 // 1=iifname, 2=sdifname
 	var reg uint32
 	for _, anyExpr := range rule.Exprs {
 		switch x := anyExpr.(type) {
 		case *expr.Meta:
-			pendingMeta = x.Key == expr.MetaKeyIIFNAME
+			pending = 0
+			if x.Key == expr.MetaKeyIIFNAME {
+				pending = 1
+			} else if x.Key == expr.MetaKey(metaKeySDIFNAME) {
+				pending = 2
+			}
 			reg = x.Register
 		case *expr.Cmp:
-			if pendingMeta && x.Register == reg {
-				names = append(names, string(bytes.TrimRight(x.Data, "\x00")))
+			if pending != 0 && x.Register == reg {
+				name := string(bytes.TrimRight(x.Data, "\x00"))
+				if pending == 1 {
+					masters = append(masters, name)
+				} else {
+					slaves = append(slaves, name)
+				}
 			}
-			pendingMeta = false
+			pending = 0
 		case *expr.Lookup:
-			if pendingMeta && x.SourceRegister == reg {
-				names = append(names, setNames[x.SetName]...)
+			if pending != 0 && x.SourceRegister == reg {
+				if pending == 1 {
+					masters = append(masters, setNames[x.SetName]...)
+				} else {
+					slaves = append(slaves, setNames[x.SetName]...)
+				}
 			}
-			pendingMeta = false
+			pending = 0
 		case *expr.Objref:
 			markerSeen = markerSeen || x.Name == marker
 		case *expr.Verdict:
 			dropSeen = dropSeen || x.Kind == expr.VerdictDrop
-			pendingMeta = false
+			pending = 0
 		default:
-			pendingMeta = false
+			pending = 0
 		}
 	}
-	return names, markerSeen, dropSeen
+	return masters, slaves, markerSeen, dropSeen
 }
 
 func (in *netlinkInstaller) InstallColdBootFence(spec FenceSpec) error {

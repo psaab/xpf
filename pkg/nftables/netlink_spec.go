@@ -229,35 +229,64 @@ type Lo0FilterSpec struct {
 	V6Terms []Lo0FilterTerm
 }
 
+// HostInputFencePair binds one VRF master to one enslaved tunnel slave.
+// A paired master must only fence traffic whose sdifname is the paired
+// slave; dropping the bare master would fence every co-member (#14974).
+type HostInputFencePair struct {
+	Master string
+	Slave  string
+}
+
 // HostInputFenceOverlay is the generation-tagged master-interface revocation
 // overlay. It is merged at the very head of the ordinary host-input chain so
 // established/related accepts cannot bypass a revoked master. The marker fields
 // are encoded into the named counter and are checked by readback before the
 // daemon publishes the generation.
 type HostInputFenceOverlay struct {
-	MasterSet       []string
-	Generation      uint64
-	PermitEpoch     uint64
-	CloseRequestSeq uint64
-	CloseRequestKey string
-	WatchGeneration uint64
-	State           string
+	MasterSet        []string
+	SlaveSet         []string
+	MasterSlavePairs []HostInputFencePair
+	Generation       uint64
+	PermitEpoch      uint64
+	CloseRequestSeq  uint64
+	CloseRequestKey  string
+	WatchGeneration  uint64
+	State            string
 }
 
-// CanonicalHostInputFenceOverlay returns an immutable-value copy with the
-// master-interface set sorted and deduplicated. Every renderer and readback
-// path uses this form so duplicate logical members cannot diverge from the
-// content marker.
-func CanonicalHostInputFenceOverlay(o HostInputFenceOverlay) HostInputFenceOverlay {
-	o.MasterSet = append([]string(nil), o.MasterSet...)
-	sort.Strings(o.MasterSet)
-	uniq := o.MasterSet[:0]
-	for _, name := range o.MasterSet {
+func canonicalIfNames(names []string) []string {
+	out := append([]string(nil), names...)
+	sort.Strings(out)
+	uniq := out[:0]
+	for _, name := range out {
 		if len(uniq) == 0 || uniq[len(uniq)-1] != name {
 			uniq = append(uniq, name)
 		}
 	}
-	o.MasterSet = uniq
+	return uniq
+}
+
+// CanonicalHostInputFenceOverlay returns an immutable-value copy with the
+// master/slave sets and pairs sorted and deduplicated. Every renderer and
+// readback path uses this form so duplicate logical members cannot diverge
+// from the content marker.
+func CanonicalHostInputFenceOverlay(o HostInputFenceOverlay) HostInputFenceOverlay {
+	o.MasterSet = canonicalIfNames(o.MasterSet)
+	o.SlaveSet = canonicalIfNames(o.SlaveSet)
+	pairs := append([]HostInputFencePair(nil), o.MasterSlavePairs...)
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].Master != pairs[j].Master {
+			return pairs[i].Master < pairs[j].Master
+		}
+		return pairs[i].Slave < pairs[j].Slave
+	})
+	uniq := pairs[:0]
+	for _, p := range pairs {
+		if len(uniq) == 0 || uniq[len(uniq)-1] != p {
+			uniq = append(uniq, p)
+		}
+	}
+	o.MasterSlavePairs = uniq
 	return o
 }
 
@@ -286,6 +315,13 @@ func HostInputFenceOverlayCounterName(o HostInputFenceOverlay) string {
 	writeString(o.State)
 	for _, name := range o.MasterSet {
 		writeString(name)
+	}
+	for _, name := range o.SlaveSet {
+		writeString(name)
+	}
+	for _, pair := range o.MasterSlavePairs {
+		writeString(pair.Master)
+		writeString(pair.Slave)
 	}
 	sum := sha256.Sum256(payload.Bytes())
 	return "xpf_hif_" + hex.EncodeToString(sum[:12])

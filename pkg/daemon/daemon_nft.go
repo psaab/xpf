@@ -873,7 +873,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			}
 			overlayConntrackChanged = true
 		}
-		if len(overlay.MasterSet) > 0 && overlayConntrackChanged {
+		if (len(overlay.MasterSet) > 0 || len(overlay.SlaveSet) > 0 || len(overlay.MasterSlavePairs) > 0) && overlayConntrackChanged {
 			overlayConntrackReq = &req
 		}
 	}
@@ -2262,6 +2262,9 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 	rules = append(rules, fmt.Sprintf("    type filter hook input priority %d; policy accept;", nftHostInboundPriority))
 	if overlay != nil {
 		canonical := xnft.CanonicalHostInputFenceOverlay(*overlay)
+		for _, pair := range canonical.MasterSlavePairs {
+			rules = append(rules, "    iifname "+strconv.Quote(pair.Master)+" meta sdifname "+strconv.Quote(pair.Slave)+" counter name \""+xnft.HostInputFenceOverlayCounterName(canonical)+"\" drop")
+		}
 		if len(canonical.MasterSet) > 0 {
 			quoted := make([]string, 0, len(canonical.MasterSet))
 			for _, master := range canonical.MasterSet {

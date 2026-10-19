@@ -55,7 +55,7 @@ func ipsecCaptureDivertSpec(handles []ipsecQueueHandle) (xnft.IpsecDivertSpec, e
 				QuarantinePrimaryReason: xnft.IpsecQuarantineReasonIFIDUnderivable,
 			}, nil
 		}
-		rule := xnft.IpsecDivertRule{Ifname: ifname, Queue: handle.Number}
+		rule := xnft.IpsecDivertRule{Ifname: ifname, Master: handle.Key.Master, Queue: handle.Number}
 		switch handle.Key.Family {
 		case ipsecFamilyInet:
 			switch handle.Key.Hook {
@@ -1071,6 +1071,7 @@ func buildIpsecCaptureQueuePlan(cfg *config.Config, generation uint64) (ipsecCap
 	type validTunnel struct {
 		name, bind    string
 		ifID, ifindex uint32
+		master        string
 	}
 	valid := make([]validTunnel, 0, len(names))
 	for _, name := range names {
@@ -1090,7 +1091,19 @@ func buildIpsecCaptureQueuePlan(cfg *config.Config, generation uint64) (ipsecCap
 			continue
 		}
 		ifindex := uint32(link.Attrs().Index)
-		valid = append(valid, validTunnel{name: name, bind: vpn.BindInterface, ifID: ifID, ifindex: ifindex})
+		// #14974: a VRF-enslaved xfrmi presents its master as iifname; resolve
+		// it now (fail closed to quarantine when unresolvable) so the divert
+		// rule can match iifname=master + sdifname=tunnel.
+		master := ""
+		if link.Attrs().MasterIndex > 0 {
+			masterLink, merr := ipsecFenceLinkByIndex(link.Attrs().MasterIndex)
+			if merr != nil || masterLink == nil || masterLink.Attrs() == nil || masterLink.Attrs().Name == "" {
+				plan.addQuarantine(xnft.IpsecQuarantineReasonLinkLookup)
+				continue
+			}
+			master = masterLink.Attrs().Name
+		}
+		valid = append(valid, validTunnel{name: name, bind: vpn.BindInterface, ifID: ifID, ifindex: ifindex, master: master})
 		plan.Quarantine.CandidateIfindices = append(plan.Quarantine.CandidateIfindices, ifindex)
 	}
 	// Every distinct VPN claimant sharing one if_id is contested, including
@@ -1124,6 +1137,7 @@ func buildIpsecCaptureQueuePlan(cfg *config.Config, generation uint64) (ipsecCap
 				Owner:      tunnel.name,
 				STN:        tunnel.bind,
 				Ifindex:    int(tunnel.ifindex),
+				Master:     tunnel.master,
 			})
 		}
 	}

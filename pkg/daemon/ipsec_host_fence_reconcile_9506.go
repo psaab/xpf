@@ -27,6 +27,8 @@ func (d *Daemon) ipsecHostInputFenceOverlayForPermit(permit *permitRecord) (*xnf
 		return nil, nil
 	}
 	masters := make([]string, 0, len(permit.closeRequestKey.Tuples))
+	var slaves []string
+	var pairs []xnft.HostInputFencePair
 	seenIndex := map[int]string{}
 	for _, tuple := range permit.closeRequestKey.Tuples {
 		if tuple.Kind != "xfrmi" {
@@ -41,11 +43,19 @@ func (d *Daemon) ipsecHostInputFenceOverlayForPermit(permit *permitRecord) (*xnf
 				}
 				return nil, fmt.Errorf("resolve xfrmi master index %d: %w", tuple.MasterIndex, err)
 			}
-			name = link.Attrs().Name
-			if prior, ok := seenIndex[tuple.MasterIndex]; ok && prior != name {
-				return nil, fmt.Errorf("master index %d resolved ambiguously as %q and %q", tuple.MasterIndex, prior, name)
+			masterName := link.Attrs().Name
+			if prior, ok := seenIndex[tuple.MasterIndex]; ok && prior != masterName {
+				return nil, fmt.Errorf("master index %d resolved ambiguously as %q and %q", tuple.MasterIndex, prior, masterName)
 			}
-			seenIndex[tuple.MasterIndex] = name
+			seenIndex[tuple.MasterIndex] = masterName
+			if tuple.Name == "" {
+				return nil, fmt.Errorf("xfrmi tuple has no interface name")
+			}
+			// #14974: enslaved tunnel is fenced by (master, slave) pair, not
+			// by the bare VRF master (which would drop every co-member).
+			pairs = append(pairs, xnft.HostInputFencePair{Master: masterName, Slave: tuple.Name})
+			slaves = append(slaves, tuple.Name)
+			continue
 		}
 		if name == "" {
 			return nil, fmt.Errorf("xfrmi tuple has no interface name")
@@ -60,13 +70,15 @@ func (d *Daemon) ipsecHostInputFenceOverlayForPermit(permit *permitRecord) (*xnf
 		}
 	}
 	return &xnft.HostInputFenceOverlay{
-		MasterSet:       uniq,
-		Generation:      permit.watchGeneration,
-		PermitEpoch:     permit.permitEpoch,
-		CloseRequestSeq: permit.closeRequestSeq,
-		CloseRequestKey: fmt.Sprintf("%d/%d/%v", permit.closeRequestKey.Ready, permit.closeRequestKey.WatchGeneration, permit.closeRequestKey.Tuples),
-		WatchGeneration: permit.watchGeneration,
-		State:           permit.state.String(),
+		MasterSet:        uniq,
+		SlaveSet:         slaves,
+		MasterSlavePairs: pairs,
+		Generation:       permit.watchGeneration,
+		PermitEpoch:      permit.permitEpoch,
+		CloseRequestSeq:  permit.closeRequestSeq,
+		CloseRequestKey:  fmt.Sprintf("%d/%d/%v", permit.closeRequestKey.Ready, permit.closeRequestKey.WatchGeneration, permit.closeRequestKey.Tuples),
+		WatchGeneration:  permit.watchGeneration,
+		State:            permit.state.String(),
 	}, nil
 }
 
@@ -85,11 +97,22 @@ func sameHostInputFenceOverlay(a, b *xnft.HostInputFenceOverlay) bool {
 	if a.Generation != b.Generation || a.PermitEpoch != b.PermitEpoch ||
 		a.CloseRequestSeq != b.CloseRequestSeq || a.CloseRequestKey != b.CloseRequestKey ||
 		a.WatchGeneration != b.WatchGeneration || a.State != b.State ||
-		len(a.MasterSet) != len(b.MasterSet) {
+		len(a.MasterSet) != len(b.MasterSet) || len(a.SlaveSet) != len(b.SlaveSet) ||
+		len(a.MasterSlavePairs) != len(b.MasterSlavePairs) {
 		return false
 	}
 	for i := range a.MasterSet {
 		if a.MasterSet[i] != b.MasterSet[i] {
+			return false
+		}
+	}
+	for i := range a.SlaveSet {
+		if a.SlaveSet[i] != b.SlaveSet[i] {
+			return false
+		}
+	}
+	for i := range a.MasterSlavePairs {
+		if a.MasterSlavePairs[i] != b.MasterSlavePairs[i] {
 			return false
 		}
 	}
@@ -124,9 +147,11 @@ func (d *Daemon) tryOpenIpsecPermitAfterFenceAck(permit *permitRecord) {
 	_ = d.ipsecS4.tryOpenPermit(permit, permit.closeRequestKey, permit.watchGeneration)
 }
 
-// ipsecDivertSpecMasters9506 collects the xfrmi ifnames from a divert spec's
-// four hook classes. The fence hold unions these with the live census so a
-// census lag cannot leave a configured tunnel unfenced across a transition.
+// ipsecDivertSpecMasters9506 collects the tunnel slave ifnames from a divert
+// spec's four hook classes (#14974: the slave name, not the VRF master, so a
+// divert-transition hold fences only the tunnel). The fence hold unions
+// these with the live census so a census lag cannot leave a configured
+// tunnel unfenced across a transition.
 func ipsecDivertSpecMasters9506(spec xnft.IpsecDivertSpec) []string {
 	var out []string
 	for _, rules := range [][]xnft.IpsecDivertRule{spec.InetForward, spec.InetInput, spec.BridgeForward, spec.BridgeInput} {
@@ -200,7 +225,7 @@ func (d *Daemon) holdIpsecHostInputFenceForDivertTransition(extraMasters []strin
 		canon := xnft.CanonicalHostInputFenceOverlay(*desired)
 		desired = &canon
 	}
-	if len(desired.MasterSet) == 0 {
+	if len(desired.MasterSet) == 0 && len(desired.MasterSlavePairs) == 0 {
 		return nil
 	}
 	if sameHostInputFenceOverlay(d.activeHostInputFenceOverlay(), desired) &&
@@ -325,7 +350,7 @@ func (d *Daemon) reconcileIpsecHostInputFence(ctx context.Context) {
 	if desired == nil {
 		return
 	}
-	if len(desired.MasterSet) == 0 {
+	if len(desired.MasterSet) == 0 && len(desired.MasterSlavePairs) == 0 {
 		// No xfrmi master is resolvable in this authority record. Retain any
 		// previously installed fence (overfence) and ACK only the empty
 		// authority; the OPEN retire path is the sole detach owner.

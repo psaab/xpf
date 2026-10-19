@@ -44,6 +44,11 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 	}
 	if spec.Overlay != nil {
 		overlay := CanonicalHostInputFenceOverlay(*spec.Overlay)
+		for _, pair := range overlay.MasterSlavePairs {
+			p.rule().iifname([]string{pair.Master}).sdifname([]string{pair.Slave}).
+				counterRef(HostInputFenceOverlayCounterName(overlay)).
+				emit(verdictDrop()...)
+		}
 		if len(overlay.MasterSet) > 0 {
 			p.rule().iifname(overlay.MasterSet).
 				counterRef(HostInputFenceOverlayCounterName(overlay)).
