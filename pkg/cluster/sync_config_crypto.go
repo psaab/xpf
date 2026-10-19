@@ -45,6 +45,17 @@ package cluster
 // providing a confidential channel; it removes the passive-capture class from
 // one message type.
 //
+// #15041 (A24-03): on an AUTHENTICATED connection the ephemeral exchange
+// above is no longer the key source at all. That exchange is an ordinary
+// droppable frame, and verifyFrame admits sequence gaps, so an active
+// relay could suppress both ConfigKeyExchange frames and let the 2s
+// await lapse into cleartext on a keyed same-version link. Authenticated
+// connections now derive the config key from the Noise handshake secret
+// (configKeyFromHandshake) with no wire exchange to suppress; the
+// ephemeral path remains only for unauthenticated (legacy/unkeyed)
+// connections, where the cleartext fallback is the pinned #6629
+// mixed-version behaviour.
+//
 // It is deliberately NOT a change to the frame seal. `sealFrame`
 // (sync_auth.go) still provides the HMAC and anti-replay for authenticated
 // connections, unchanged. This adds confidentiality to ONE message type; it
@@ -125,6 +136,12 @@ var syncConfigKeyWait = 2 * time.Second
 // purpose. Changing it changes the key, so a peer on a different string
 // produces a decrypt failure rather than a silently mismatched key.
 const syncConfigKeyInfo = "xpf cluster config-sync payload v1"
+
+// syncConfigHandshakeKeyInfo binds the #15041 handshake-derived config key
+// to this purpose. It is distinct from syncConfigKeyInfo so a key derived
+// from the ephemeral exchange can never collide with one derived from the
+// authenticated handshake secret.
+const syncConfigHandshakeKeyInfo = "xpf cluster config-sync payload handshake v1 (#15041)"
 
 // errConfigDecrypt is returned when a sealed config payload cannot be opened.
 var errConfigDecrypt = errors.New("cluster sync: config payload decrypt failed")
@@ -363,6 +380,35 @@ func (s *SessionSync) handleConfigKeyExchange(conn net.Conn, payload []byte) {
 		"remote", connRemoteAddrString(conn))
 }
 
+// configKeyFromHandshake derives the config-payload AEAD key from this
+// connection's authenticated handshake secret (#15041). Both ends hold the
+// same unordered pair {local writeKey, local readKey} = {Noise i2r, r2i}
+// keys, so HKDF over their canonical (sorted) concatenation yields the
+// same key on both sides with no wire exchange at all — there is no
+// droppable frame for an on-path relay to suppress. Returns nil when the
+// connection is not authenticated in both directions (the only case where
+// no handshake secret exists). The frame keys themselves are never used
+// directly as an AEAD key; HKDF with a purpose-bound info string keeps
+// the config key cryptographically separate from the frame MAC keys.
+func configKeyFromHandshake(conn net.Conn) []byte {
+	ac, ok := conn.(*authConn)
+	if !ok || !ac.authed() {
+		return nil
+	}
+	lo, hi := ac.writeKey, ac.readKey
+	if string(lo) > string(hi) {
+		lo, hi = hi, lo
+	}
+	ikm := make([]byte, 0, len(lo)+len(hi))
+	ikm = append(ikm, lo...)
+	ikm = append(ikm, hi...)
+	key, err := hkdf.Key(sha256.New, ikm, nil, syncConfigHandshakeKeyInfo, syncConfigKeyLen)
+	if err != nil {
+		return nil
+	}
+	return key
+}
+
 // awaitConfigKey returns the AEAD key for conn's connection, waiting up to
 // syncConfigKeyWait for the peer's key exchange to land.
 //
@@ -371,7 +417,17 @@ func (s *SessionSync) handleConfigKeyExchange(conn net.Conn, payload []byte) {
 // is not decoration. An operator running a mixed-version pair while first
 // keying the cluster is standing in precisely the exposed window, and the
 // first push on that connection is the moment the information is actionable.
+//
+// #15041: on an AUTHENTICATED connection the key is derived from the
+// handshake secret instead (configKeyFromHandshake) and the droppable
+// ephemeral exchange is never consulted: a relay that suppresses every
+// ConfigKeyExchange frame can no longer force the cleartext fallback on a
+// keyed same-version link. Only unauthenticated (legacy/unkeyed)
+// connections take the exchange-plus-timeout path below.
 func (s *SessionSync) awaitConfigKey(conn net.Conn) []byte {
+	if key := configKeyFromHandshake(conn); key != nil {
+		return key
+	}
 	c := s.configCryptoForConn(conn)
 	if c == nil {
 		return nil
