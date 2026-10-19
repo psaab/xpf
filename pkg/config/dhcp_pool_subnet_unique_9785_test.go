@@ -22,11 +22,16 @@ func dupSubnetTree9785(t *testing.T, lines ...string) *ConfigTree {
 	return tree
 }
 
-// dhcpPool9785 returns the set lines declaring one pool of one group.
+// dhcpPool9785 returns the set lines declaring one pool of one group on
+// ge-0-0-1; dhcpPoolOnIface9785 names the interface explicitly.
 func dhcpPool9785(server, group, pool, subnet, low, high string) []string {
+	return dhcpPoolOnIface9785(server, group, pool, subnet, low, high, "ge-0-0-1")
+}
+
+func dhcpPoolOnIface9785(server, group, pool, subnet, low, high, iface string) []string {
 	p := "set system services " + server + " group " + group
 	return []string{
-		p + " interface ge-0-0-1",
+		p + " interface " + iface,
 		p + " pool " + pool + " subnet " + subnet,
 		p + " pool " + pool + " address-range low " + low + " high " + high,
 	}
@@ -54,7 +59,7 @@ func TestDuplicateDHCPPoolSubnetIsRefusedAtCommit9785(t *testing.T) {
 	}{
 		{
 			name:  "the #9785 shape: a second group for the same v4 subnet",
-			lines: joinLines9785(lan, dhcpPool9785(v4, "g9729", "p9729", "10.0.61.0/24", "10.0.61.150", "10.0.61.199")),
+			lines: joinLines9785(lan, dhcpPoolOnIface9785(v4, "g9729", "p9729", "10.0.61.0/24", "10.0.61.150", "10.0.61.199", "ge-0-0-2")),
 			want:  []string{v4, `group "lan-pool" pool "lan-range"`, `group "g9729" pool "p9729"`, "10.0.61.0/24", "duplicates"},
 		},
 		{
@@ -64,23 +69,23 @@ func TestDuplicateDHCPPoolSubnetIsRefusedAtCommit9785(t *testing.T) {
 		},
 		{
 			name:  "a host-bit spelling of the same v4 network",
-			lines: joinLines9785(lan, dhcpPool9785(v4, "other", "o", "10.0.61.1/24", "10.0.61.150", "10.0.61.199")),
+			lines: joinLines9785(lan, dhcpPoolOnIface9785(v4, "other", "o", "10.0.61.1/24", "10.0.61.150", "10.0.61.199", "ge-0-0-2")),
 			want:  []string{"subnet 10.0.61.1/24", "prefix 10.0.61.0/24", "duplicates"},
 		},
 		{
 			name: "two v6 groups with one subnet",
 			lines: joinLines9785(
 				dhcpPool9785(v6, "a6", "p", "2001:db8:61::/64", "2001:db8:61::10", "2001:db8:61::20"),
-				dhcpPool9785(v6, "b6", "p", "2001:db8:61::/64", "2001:db8:61::30", "2001:db8:61::40")),
+				dhcpPoolOnIface9785(v6, "b6", "p", "2001:db8:61::/64", "2001:db8:61::30", "2001:db8:61::40", "ge-0-0-2")),
 			want: []string{v6, `group "a6"`, `group "b6"`, "2001:db8:61::/64", "duplicates"},
 		},
 		{
 			name:  "control: distinct v4 subnets commit",
-			lines: joinLines9785(lan, dhcpPool9785(v4, "other", "o", "10.0.62.0/24", "10.0.62.100", "10.0.62.199")),
+			lines: joinLines9785(lan, dhcpPoolOnIface9785(v4, "other", "o", "10.0.62.0/24", "10.0.62.100", "10.0.62.199", "ge-0-0-2")),
 		},
 		{
 			name:  "control: nested v4 prefixes are left to the ambiguity warning",
-			lines: joinLines9785(lan, dhcpPool9785(v4, "other", "o", "10.0.61.0/25", "10.0.61.10", "10.0.61.20")),
+			lines: joinLines9785(lan, dhcpPoolOnIface9785(v4, "other", "o", "10.0.61.0/25", "10.0.61.10", "10.0.61.20", "ge-0-0-2")),
 		},
 		{
 			name: "control: v4 and v6 servers are separate scopes",
@@ -116,7 +121,7 @@ func TestDuplicateDHCPPoolSubnetIsRefusedAtCommit9785(t *testing.T) {
 func TestDuplicateDHCPPoolSubnetLenientGate9785(t *testing.T) {
 	lines := joinLines9785(
 		dhcpPool9785("dhcp-local-server", "lan-pool", "lan-range", "10.0.61.0/24", "10.0.61.100", "10.0.61.199"),
-		dhcpPool9785("dhcp-local-server", "g9729", "p9729", "10.0.61.0/24", "10.0.61.150", "10.0.61.199"))
+		dhcpPoolOnIface9785("dhcp-local-server", "g9729", "p9729", "10.0.61.0/24", "10.0.61.150", "10.0.61.199", "ge-0-0-2"))
 	if _, err := CompileConfig(dupSubnetTree9785(t, lines...)); err == nil || !strings.Contains(err.Error(), "duplicates") {
 		t.Fatalf("CompileConfig: want the duplicate refused, got %v", err)
 	}
