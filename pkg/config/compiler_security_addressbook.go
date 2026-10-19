@@ -31,6 +31,19 @@ func setAddressPrefix14967(addr *Address, prefix string) {
 	if addr == nil || prefix == "" {
 		return
 	}
+	// #15673: a prefix authored alongside a modelled form (dns/range/
+	// wildcard) is a second value form — record the modelled form as
+	// unimplemented-in-combination so the mixed entry fails closed.
+	if len(addr.ExpandedPrefixes) > 0 || addr.DNSName != "" || addr.OversizedRange != "" {
+		form := "dns-name"
+		if len(addr.ExpandedPrefixes) > 0 {
+			form = "range-address"
+		}
+		if addr.OversizedRange != "" {
+			form = "range-address"
+		}
+		addr.UnimplementedForms = appendUniqueForm9524(addr.UnimplementedForms, form)
+	}
 	if addr.Value == "" {
 		if len(addr.DuplicatePrefixes) == 0 {
 			addr.Value = prefix
@@ -408,7 +421,12 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 			gb.Addresses[q] = &Address{Name: q, Value: addr.Value, Description: addr.Description,
 				TrailingTokens:     append([]string(nil), addr.TrailingTokens...),
 				DuplicatePrefixes:  append([]string(nil), addr.DuplicatePrefixes...),
-				UnimplementedForms: append([]string(nil), addr.UnimplementedForms...)}
+				UnimplementedForms: append([]string(nil), addr.UnimplementedForms...),
+				DNSName:            addr.DNSName,
+				DNSFamily:          addr.DNSFamily,
+				DNSAddresses:       append([]string(nil), addr.DNSAddresses...),
+				ExpandedPrefixes:   append([]string(nil), addr.ExpandedPrefixes...),
+				OversizedRange:     addr.OversizedRange}
 		}
 		for name, set := range z.AddressBook.AddressSets {
 			q := zoneLocalQualify(zoneName, name)
@@ -857,9 +875,12 @@ func parseAddressBookEntries(node *Node, ab *AddressBook) {
 			// capture each immediate block name so zone-local references to
 			// the dropped entry cannot fall back to a global twin.
 			for _, nested := range child.Children {
-				if !nested.IsLeaf {
-					entry.Names = append(entry.Names, nested.Keys...)
-				}
+				// #15673: hierarchical LEAF entries (`address leafname
+				// 10.9.9.9/32;` inside an unknown stanza) carry the name at
+				// Keys[0] even though IsLeaf is true; the old !IsLeaf guard
+				// dropped them, so a zone-local reference could fall back to
+				// a broader global twin.
+				entry.Names = append(entry.Names, nested.Keys...)
 			}
 			ab.UnknownBookEntries = append(ab.UnknownBookEntries, entry)
 			if len(entry.Names) > 0 {
@@ -935,76 +956,64 @@ func bracketMask12831(node *Node, start int) []bool {
 // (hierarchical block prefix) is the other prefix source. Description is
 // routed to its own field so it can never clobber Value.
 func mergeAddressNode(addr *Address, node *Node) {
-	// Sub-stanza keyword form: Keys[2] is a known attribute keyword
-	// (currently only "description"), so it is NOT the prefix.
+	// #15673: a `description` Keys[2] is NOT an early return; children are
+	// always inspected below so a form/prefix sub-stanza on a described
+	// node is classified instead of dropped.
 	if len(node.Keys) >= 3 && node.Keys[2] == "description" {
 		if d := descriptionText(node); d != "" {
 			addr.Description = d
 		}
-		// In a packed description leaf, the address value can follow the
-		// description value: `address a1 description "d" 10.0.0.1/32`.
 		if len(node.Keys) > 4 {
-			if looksLikeIPOrCIDR(node.Keys[4]) {
-				setAddressPrefix14967(addr, node.Keys[4])
-				// #14967: tokens after a packed prefix are trailing even
-				// when a duplicate prefix superseded the value slot.
-				if len(node.Keys) > 5 {
-					recordAddressTrailing14967(addr, node.Keys[5:]...)
+			rest := node.Keys[4:]
+			if looksLikeIPOrCIDR(rest[0]) {
+				setAddressPrefix14967(addr, rest[0])
+				if len(rest) > 1 {
+					recordAddressTrailing14967(addr, rest[1:]...)
 				}
-			} else {
-				addr.TrailingTokens = append(addr.TrailingTokens, node.Keys[4:]...)
+			} else if !applyAddressFormTokens(addr, rest) {
+				addr.TrailingTokens = append(addr.TrailingTokens, rest...)
 			}
 		}
-		return
-	}
-
-	// An address value form is usable only when its token parses as a prefix.
-	// Known Junos forms such as dns-name / wildcard-address / range-address
-	// are unsupported, and future keywords must be tainted by default rather
-	// than letting another occurrence's prefix resolve this entry.
-	valueToken := ""
-	if len(node.Keys) >= 3 {
-		valueToken = node.Keys[2]
-	}
-	valueIsPrefix := valueToken != "" && looksLikeIPOrCIDR(valueToken)
-	if valueToken != "" && !valueIsPrefix {
-		addr.UnimplementedForms = appendUniqueForm9524(addr.UnimplementedForms, valueToken)
-	}
-
-	// Prefix-bearing leaf: Keys[2] is the prefix iff it parses as an IP/CIDR.
-	if valueIsPrefix {
-		setAddressPrefix14967(addr, valueToken)
-		// #3332: a named address takes exactly one prefix; anything after it
-		// (Keys[3:]) is operator garbage the compiler silently dropped.
-		if len(node.Keys) > 3 {
-			recordAddressTrailing14967(addr, node.Keys[3:]...)
+	} else {
+		valueToken := ""
+		if len(node.Keys) >= 3 {
+			valueToken = node.Keys[2]
+		}
+		valueIsPrefix := valueToken != "" && looksLikeIPOrCIDR(valueToken)
+		if valueToken != "" && !valueIsPrefix {
+			if !applyAddressFormTokens(addr, node.Keys[2:]) {
+				addr.UnimplementedForms = appendUniqueForm9524(addr.UnimplementedForms, valueToken)
+			}
+		}
+		if valueIsPrefix {
+			setAddressPrefix14967(addr, valueToken)
+			if len(node.Keys) > 3 {
+				recordAddressTrailing14967(addr, node.Keys[3:]...)
+			}
 		}
 	}
-
-	// Hierarchical-block children: bare-leaf prefix and/or `description`.
 	for _, sub := range node.Children {
 		switch sub.Name() {
 		case "description":
 			if d := nodeVal(sub); d != "" {
 				addr.Description = d
 			}
-			// A braced body may contain the packed equivalent of the
-			// description leaf, with the prefix after its text.
 			if len(sub.Keys) > 2 {
 				if looksLikeIPOrCIDR(sub.Keys[2]) {
 					setAddressPrefix14967(addr, sub.Keys[2])
 					if len(sub.Keys) > 3 {
 						recordAddressTrailing14967(addr, sub.Keys[3:]...)
 					}
-				} else {
+				} else if !applyAddressFormTokens(addr, sub.Keys[2:]) {
 					addr.TrailingTokens = append(addr.TrailingTokens, sub.Keys[2:]...)
 				}
 			}
+			for _, nested := range sub.Children {
+				classifyAddressChild(addr, nested)
+			}
+		case "dns-name", "range-address", "wildcard-address":
+			classifyAddressChild(addr, sub)
 		default:
-			// #14967: the apply-groups duplicate marker carries the losing
-			// prefix (and one trailing exemplar) for an entry whose inline
-			// and group definitions conflict. Route it into the same
-			// taints instead of the unknown-form default-deny below.
 			if sub.Name() == "__xpf_duplicate_address_14967__" {
 				for _, k := range sub.Keys[1:] {
 					if looksLikeIPOrCIDR(k) {
@@ -1015,23 +1024,91 @@ func mergeAddressNode(addr *Address, node *Node) {
 				}
 				continue
 			}
-			// A bare value leaf (the hierarchical block prefix) is usable only
-			// when it parses as an IP/CIDR. Every other sub-stanza is a known
-			// unsupported or future value form, so record it for default-deny
-			// resolution instead of silently ignoring it.
 			if len(sub.Keys) >= 1 && looksLikeIPOrCIDR(sub.Keys[0]) {
 				setAddressPrefix14967(addr, sub.Keys[0])
-				// #14967: extra keys on a bare prefix child (the #14424
-				// group-leaf fold packs trailing tokens there) are trailing
-				// tokens, not a second prefix.
 				if len(sub.Keys) > 1 {
 					recordAddressTrailing14967(addr, sub.Keys[1:]...)
 				}
+				for _, nested := range sub.Children {
+					classifyAddressChild(addr, nested)
+				}
 				continue
 			}
-			addr.UnimplementedForms = appendUniqueForm9524(addr.UnimplementedForms, sub.Name())
+			classifyAddressChild(addr, sub)
 		}
 	}
+}
+
+// classifyAddressChild classifies one hierarchical child of an `address`
+// node: a modelled form populates its field; anything else is recorded as
+// an unimplemented form so the entry fails closed (#9524/#15673). Nested
+// children beyond the consumed form body are classified, not dropped.
+func classifyAddressChild(addr *Address, sub *Node) {
+	switch sub.Name() {
+	case "dns-name":
+		fqdn, family := dnsKeys(sub.Keys[1:], sub.Children)
+		applyDNSName(addr, fqdn, family)
+	case "range-address":
+		low, high := rangeKeys(sub)
+		applyRangeAddress(addr, low, high)
+	case "wildcard-address":
+		spec := ""
+		if len(sub.Keys) >= 2 {
+			spec = sub.Keys[1]
+		}
+		applyWildcardAddress(addr, spec)
+	case "description":
+		if d := nodeVal(sub); d != "" {
+			addr.Description = d
+		}
+		return
+	default:
+		if len(sub.Keys) >= 1 && looksLikeIPOrCIDR(sub.Keys[0]) {
+			setAddressPrefix14967(addr, sub.Keys[0])
+			return
+		}
+		addr.UnimplementedForms = appendUniqueForm9524(addr.UnimplementedForms, sub.Name())
+		return
+	}
+	for _, nested := range sub.Children {
+		if nested.Name() == "to" || nested.Name() == "ipv4-only" || nested.Name() == "ipv6-only" {
+			continue
+		}
+		if nested.Name() != "" {
+			addr.UnimplementedForms = appendUniqueForm9524(addr.UnimplementedForms, nested.Name())
+		}
+	}
+}
+
+// applyAddressFormTokens handles a flat-set value-form token run starting
+// with the form keyword. Returns false if not a modelled form.
+func applyAddressFormTokens(addr *Address, tokens []string) bool {
+	if len(tokens) == 0 {
+		return false
+	}
+	switch tokens[0] {
+	case "dns-name":
+		fqdn, family := dnsKeys(tokens[1:], nil)
+		applyDNSName(addr, fqdn, family)
+		return true
+	case "range-address":
+		if len(tokens) >= 4 && tokens[2] == "to" {
+			applyRangeAddress(addr, tokens[1], tokens[3])
+		} else if len(tokens) >= 2 {
+			applyRangeAddress(addr, tokens[1], "")
+		} else {
+			applyRangeAddress(addr, "", "")
+		}
+		return true
+	case "wildcard-address":
+		spec := ""
+		if len(tokens) >= 2 {
+			spec = tokens[1]
+		}
+		applyWildcardAddress(addr, spec)
+		return true
+	}
+	return false
 }
 
 // descriptionText extracts the description string from a flat-set

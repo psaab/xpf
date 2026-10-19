@@ -5655,13 +5655,13 @@ func TestAddressBookEmptyValueWarns(t *testing.T) {
 			wantValue: "",
 		},
 		{
-			name: "flat-set uncompiled sub-stanza (dns-name) warns",
+			name: "flat-set dns-name is modelled (#15673, no empty-prefix warning)",
 			tree: func(t *testing.T) *ConfigTree {
 				return flatSet(t, []string{
 					"set security address-book global address h2 dns-name example.com",
 				})
 			},
-			wantWarn:  true,
+			wantWarn:  false,
 			wantValue: "",
 		},
 		{

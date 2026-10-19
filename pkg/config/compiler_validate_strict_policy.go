@@ -337,14 +337,16 @@ func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
 			// #14967: UsableValue (not raw Value) so a duplicate-prefix or
 			// trailing-token tainted entry fails closed here exactly as the
 			// runtime resolver (resolveUserspaceAddressBookEntry) refuses it.
-			if addr.UsableValue() == "" {
+			// #15673: count every usable prefix (range/wildcard/DNS entries
+			// expand to many); an empty expansion still fails closed.
+			if len(addr.UsableValues()) == 0 {
 				if firstErr == nil {
 					firstErr = fmt.Errorf("address %q has no configured prefix "+
 						"(it resolves to no usable address)", show(ref))
 				}
 				return false
 			}
-			count++
+			count += len(addr.UsableValues())
 			return true
 		}
 		set := ab.AddressSets[ref]

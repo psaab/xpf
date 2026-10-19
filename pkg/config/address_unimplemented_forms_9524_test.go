@@ -126,7 +126,7 @@ func TestMixedAddressValueFormControls9524(t *testing.T) {
 		wantUsable string
 	}{
 		{"sole prefix", []string{"set security address-book global address mixed 10.10.0.0/24"}, "10.10.0.0/24"},
-		{"sole dns-name, unreferenced", []string{"set security address-book global address mixed dns-name evil.example"}, ""},
+		{"sole future form, unreferenced", []string{"set security address-book global address mixed future-address-form value"}, ""},
 		{"prefix with description", []string{
 			"set security address-book global address mixed 10.10.0.0/24",
 			`set security address-book global address mixed description "web tier"`,
@@ -136,6 +136,21 @@ func TestMixedAddressValueFormControls9524(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			lines := append([]string{"set security zones security-zone trust"}, tc.lines...)
 			cfg, err := CompileConfig(buildTree(t, lines))
+			if tc.name == "sole future form, unreferenced" {
+				// #15673: a sole unsupported form now rejects at strict commit
+				// (previously warn-only via the a.Value=="" bypass).
+				if err == nil {
+					t.Fatalf("#15673: sole unsupported form must reject at commit")
+				}
+				cfgL, lerr := CompileConfigLenient(buildTree(t, lines))
+				if lerr != nil {
+					t.Fatalf("lenient must boot: %v", lerr)
+				}
+				if got := cfgL.Security.AddressBook.Addresses["mixed"].UsableValue(); got != "" {
+					t.Fatalf("lenient sole form usable = %q, want empty", got)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("#9524 OVER-REJECTION: a legitimate entry did not commit: %v", err)
 			}

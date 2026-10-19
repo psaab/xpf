@@ -21,15 +21,18 @@ func appendUniqueForm9524(forms []string, form string) []string {
 }
 
 // validateAddressUnimplementedFormsStrict rejects an address-book entry that
-// configures a prefix AND an unsupported or unknown value form.
-//
-// Before #9524 such an entry compiled to the prefix alone on all config
-// channels with no warning, so a `deny` naming the object silently under-covered
-// it by exactly the form the compiler dropped. The strict gate rejects this
-// mixed shape, while the tolerant path warns and Address.UsableValue returns
-// empty so both policy and NAT resolvers treat the entry as unresolvable.
-// A sole unsupported form remains unusable and is rejected when referenced,
-// preserving its existing behavior (#2229/#3149/#3261).
+// configures an unsupported or unknown value form — with OR without a prefix
+// (#15673 removes the former `a.Value == ""` bypass that let a sole
+// dns-name/range-address/wildcard-address or future form commit silently).
+// Native forms (range-address, wildcard-address, dns-name) are modelled at
+// compile time and never land in UnimplementedForms, so this gate only fires
+// for genuinely unimplemented forms. Before #9524 a mixed entry compiled to
+// the prefix alone with no warning, so a `deny` naming the object silently
+// under-covered it by exactly the form the compiler dropped. The strict gate
+// rejects both mixed and sole unsupported forms; the tolerant path warns and
+// Address.UsableValue/UsableValues return empty so policy and NAT resolvers
+// treat the entry as unresolvable. An oversized range-address is likewise
+// rejected here (recorded in Address.OversizedRange).
 //
 // It walks the global book and every zone-local book, and skips the synthetic
 // zone-local/ names the fold injects into the global book, so an error names
@@ -52,10 +55,25 @@ func validateAddressUnimplementedFormsStrict(cfg *Config) error {
 		sort.Strings(names)
 		for _, name := range names {
 			a := book.Addresses[name]
-			if a == nil || a.Value == "" || len(a.UnimplementedForms) == 0 {
+			if a == nil {
+				continue
+			}
+			if a.OversizedRange != "" {
+				return fmt.Errorf(
+					"security %saddress-book address %q configures range-address %s (#15673)",
+					scope, name, a.OversizedRange)
+			}
+			if len(a.UnimplementedForms) == 0 {
 				continue
 			}
 			form := a.UnimplementedForms[0]
+			if a.Value == "" && len(a.ExpandedPrefixes) == 0 && a.DNSName == "" {
+				return fmt.Errorf(
+					"security %saddress-book address %q configures %s, which is not implemented: "+
+						"a Junos address takes exactly one value form, and this entry has no usable prefix, "+
+						"so it would silently match nothing; configure a prefix or a modelled form (dns-name, range-address, wildcard-address) (#15673)",
+					scope, name, strings.Join(a.UnimplementedForms, ", "))
+			}
 			return fmt.Errorf(
 				"security %saddress-book address %q configures the prefix %q and also %s: a Junos address "+
 					"takes exactly one value form, and %s is not implemented, so the prefix would be "+

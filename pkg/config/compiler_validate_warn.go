@@ -376,27 +376,37 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 			if entry == nil { // #3494: tolerant/HA-sync path may carry a nil address
 				continue
 			}
-			if entry.Value != "" && len(entry.UnimplementedForms) > 0 {
-				// #9524/#11508: a prefix PLUS a known unsupported or unknown
-				// future value form. The prefix used to be enforced alone with
-				// no warning on any channel; the entry now resolves to no usable
-				// address (UsableValue).
+			if len(entry.UnimplementedForms) > 0 {
+				// #9524/#11508/#15673: an unsupported/unknown value form,
+				// with OR without a prefix. Name the form on both sole and
+				// mixed entries so the tolerant path never reduces to the
+				// generic "no usable prefix" warning.
 				warnings = append(warnings, fmt.Sprintf(
 					"address-book %q: %s is not implemented, so this entry resolves to no usable address (its prefix %q alone would under-cover what it names)",
 					name, strings.Join(entry.UnimplementedForms, ", "), entry.Value))
 				continue
 			}
-			if entry.Value == "" {
-				// An `address <name>` entry with no compiled prefix —
-				// either no prefix at all, or only an unsupported/unrecognized
-				// value-form stanza (dns-name/range-address/wildcard-address or
-				// a future keyword) — resolves to nothing, so every policy
-				// referencing it denies (fail-closed, #2229). That is safe but
-				// silent, so surface the operator authoring error at commit. This
-				// is a WARNING, never a hard reject: an empty-prefix address
-				// never forwarded and rejecting it would brick existing configs.
+			if entry.OversizedRange != "" {
+				warnings = append(warnings, fmt.Sprintf(
+					"address-book %q: range-address %s, so this entry resolves to no usable address", name, entry.OversizedRange))
+				continue
+			}
+			if entry.DNSName != "" && len(entry.UsableValues()) == 0 {
+				warnings = append(warnings, fmt.Sprintf(
+					"address-book %q: dns-name %q currently resolves to no addresses; it will match nothing until DNS resolves", name, entry.DNSName))
+				continue
+			}
+			if entry.Value == "" && len(entry.ExpandedPrefixes) == 0 && entry.DNSName == "" {
 				warnings = append(warnings, fmt.Sprintf(
 					"address-book %q: no usable prefix configured; it will match nothing", name))
+				continue
+			}
+			if len(entry.UsableValues()) == 0 {
+				warnings = append(warnings, fmt.Sprintf(
+					"address-book %q: no usable prefix configured; it will match nothing", name))
+				continue
+			}
+			if entry.DNSName != "" || len(entry.ExpandedPrefixes) > 0 {
 				continue
 			}
 			if _, _, err := net.ParseCIDR(entry.Value); err != nil {

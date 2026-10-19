@@ -1837,6 +1837,21 @@ type Address struct {
 	// at commit; UsableValue keeps every tainted entry unresolvable on tolerant
 	// load / peer-sync.
 	UnimplementedForms []string
+	// DNSName is the modelled `dns-name <fqdn>` value (#15673); empty for
+	// prefix/range/wildcard entries. DNSFamily is "", "ipv4-only", or
+	// "ipv6-only". DNSAddresses is the last resolver snapshot for the name
+	// (CIDR strings); it is runtime state, never persisted, and is refreshed
+	// by the daemon's periodic resolver. Resolvers read UsableValues.
+	DNSName      string   `json:"-"`
+	DNSFamily    string   `json:"-"`
+	DNSAddresses []string `json:"-"`
+	// ExpandedPrefixes holds the native expansion of `range-address` /
+	// `wildcard-address` (#15673): bounded /32 (range, expandAddressRange cap)
+	// or the single wildcard-derived CIDR. OversizedRange records an
+	// oversized range-address so strict commit rejects and tolerant load
+	// keeps the entry unusable without failing to boot.
+	ExpandedPrefixes []string `json:"-"`
+	OversizedRange   string   `json:"-"`
 }
 
 // UsableValue returns the prefix a policy or NAT resolver may enforce:
@@ -1848,10 +1863,39 @@ type Address struct {
 // address" signal (#2229, #3149, #3261). Value itself remains available to
 // show surfaces so they can render what the operator configured.
 func (a *Address) UsableValue() string {
-	if a == nil || len(a.UnimplementedForms) > 0 || len(a.DuplicatePrefixes) > 0 || len(a.TrailingTokens) > 0 {
+	if a == nil || len(a.UnimplementedForms) > 0 || len(a.DuplicatePrefixes) > 0 || len(a.TrailingTokens) > 0 || a.OversizedRange != "" {
+		return ""
+	}
+	if len(a.ExpandedPrefixes) > 0 {
+		return a.ExpandedPrefixes[0]
+	}
+	if a.DNSName != "" {
+		if len(a.DNSAddresses) > 0 {
+			return a.DNSAddresses[0]
+		}
 		return ""
 	}
 	return a.Value
+}
+
+// UsableValues returns every prefix a resolver may enforce: the single
+// prefix, the native range/wildcard expansion, or the current DNS snapshot.
+// Tainted entries (unsupported/unknown form, duplicate prefix, trailing
+// tokens, oversized range) return nil (#9524/#14967/#15673).
+func (a *Address) UsableValues() []string {
+	if a == nil || len(a.UnimplementedForms) > 0 || len(a.DuplicatePrefixes) > 0 || len(a.TrailingTokens) > 0 || a.OversizedRange != "" {
+		return nil
+	}
+	if len(a.ExpandedPrefixes) > 0 {
+		return append([]string(nil), a.ExpandedPrefixes...)
+	}
+	if a.DNSName != "" {
+		return append([]string(nil), a.DNSAddresses...)
+	}
+	if a.Value != "" {
+		return []string{a.Value}
+	}
+	return nil
 }
 
 // AddressSet is a named group of addresses and/or nested address-sets.

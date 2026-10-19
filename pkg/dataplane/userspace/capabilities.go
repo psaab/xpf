@@ -340,11 +340,11 @@ func resolveUserspaceAddressBookEntry(cfg *config.Config, name string) ([]string
 			return false
 		}
 		if addr := addressBook.Addresses[ref]; addr != nil {
-			value := addr.UsableValue()
-			if value == "" {
+			values := addr.UsableValues()
+			if len(values) == 0 {
 				return false
 			}
-			expanded = append(expanded, value)
+			expanded = append(expanded, values...)
 			return true
 		}
 		set := addressBook.AddressSets[ref]

@@ -207,11 +207,12 @@ func nameRepresentability(ab *config.AddressBook, feedOverlay map[string][]strin
 		return false, false
 	}
 	if addr, ok := ab.Addresses[name]; ok {
-		// #9524: UsableValue is "" for an entry that also carries an
-		// unimplemented value form, so a mixed entry is unrepresentable like the
-		// sole-value case rather than representable by its prefix alone.
-		if addressValueRepresentable(addr.UsableValue()) {
-			return true, true
+		// #9524/#15673: an entry is representable iff it has at least one
+		// usable prefix (prefix, range/wildcard expansion, or DNS snapshot).
+		for _, v := range addr.UsableValues() {
+			if addressValueRepresentable(v) {
+				return true, true
+			}
 		}
 		return false, false
 	}
