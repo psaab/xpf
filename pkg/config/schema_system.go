@@ -262,12 +262,12 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		// A keyValidator (typed KEY slot) rejects a path separator / whitespace /
 		// control-char value at commit; the daemon's applySyslogFiles applies the
 		// same check defensively.
-		"user": {desc: "Syslog user destination", args: 1, placeholder: "<user>",
+		"user": {desc: "Syslog user destination", args: 1, placeholder: "<user>", packedTail: true,
 			keyValueType: ValueIdentifier, keyValueDesc: "Login user name, or '*' for all logged-in users",
 			keyValidator: ValidateSyslogUser,
 			wildcard:     syslogFacilitySeverityLeaf(),
 			children:     syslogDestinationModifiers(nil)},
-		"host": {desc: "Syslog host destination", args: 1, placeholder: "<host>",
+		"host": {desc: "Syslog host destination", args: 1, placeholder: "<host>", packedTail: true,
 			wildcard: syslogFacilitySeverityLeaf(),
 			// #4303 S-1: host-only modifiers wired into the runtime syslog
 			// client (source-address, port). log-prefix / facility-override /
@@ -292,7 +292,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		// filename 10-xpf-<name>.conf. A keyValidator rejects a path separator /
 		// `..` / whitespace / control-char value at commit; applySyslogFiles
 		// applies the same check defensively.
-		"file": {desc: "Syslog file destination", args: 1, placeholder: "<filename>",
+		"file": {desc: "Syslog file destination", args: 1, placeholder: "<filename>", packedTail: true,
 			keyValueType: ValueIdentifier, keyValueDesc: "Log file base name (written to /var/log/<name>)",
 			keyValidator: ValidateSyslogFileName,
 			wildcard:     syslogFacilitySeverityLeaf(),
