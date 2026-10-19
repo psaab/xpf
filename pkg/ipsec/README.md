@@ -327,6 +327,18 @@ all files stay in `package ipsec`, so the public API is unchanged.
   (1..3600 seconds and 1..100 probes) before calculating `dpd_timeout`;
   `deriveDPD` also caps values from direct/pre-fix configs.
 
+  `threshold` is IKEv1-only in effect (#15025): strongSwan honours
+  `dpd_timeout` for IKEv1 only (its own swanctl.conf documents it so),
+  while on IKEv2 a dead peer is declared only after charon's global
+  retransmission budget (retransmit_timeout/base/tries) is exhausted,
+  regardless of interval × threshold. The renderer still emits
+  `dpd_timeout` (IKEv1 peers use it), and `pkg/config`
+  (`appendDPDThresholdIKEv2AdvisoryLocked`) warns at commit when a
+  gateway with an explicit `threshold` can negotiate IKEv2 (no
+  `version` pin — the dual default initiates IKEv2 — or `v2-only`).
+  A `v1-only` gateway and a gateway with no explicit `threshold` stay
+  silent; the advisory is suppressed on tolerant load / peer-sync.
+
   `DPDEnable` is the single source of truth for "is DPD on"; the mode
   string only carries the explicit keyword. Before #3994 the enable check
   was `DeadPeerDetect != ""`, so a bare statement was read as DISABLED and

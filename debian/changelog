@@ -1,5 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Warn at commit when an IKE gateway sets an explicit DPD
+    `dead-peer-detection threshold` and can negotiate IKEv2 (no
+    `version` pin or `v2-only`): strongSwan honours the rendered
+    `dpd_timeout` (interval x threshold) for IKEv1 only, while IKEv2
+    dead-peer detection waits for charon's global retransmission
+    budget, so the threshold was silently inert on the default
+    negotiated version. A `v1-only` gateway is unaffected and stays
+    silent; the advisory is suppressed on tolerant load / peer-sync
+    (#15025).
   * Emit the bare `ip ospf bfd` / `isis bfd` enable line immediately
     before the `... bfd profile <name>` binding on OSPFv2 and IS-IS
     interfaces configured with bfd-liveness-detection
