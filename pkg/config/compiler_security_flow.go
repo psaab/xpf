@@ -403,11 +403,15 @@ var tcpMSSKinds = []string{"ipsec-vpn", "gre-in", "gre-out", "all-tcp"}
 // here instead.
 //
 // It range-checks the COMPILER-SELECTED token (selectMSSToken, shared with
-// parseMSSValue) against [0, 65535] — the same Layer-A bound (coerceWireU16
-// out-of-range -> 0). Validating only the selected value means a mixed shape
-// like `gre-in 70000 { mss 1360; }` PASSES (the compiler selects the child
-// 1360; the flat 70000 is discarded), exactly matching what compileFlow
-// reads.
+// parseMSSValue) against [64, 65535] — the Junos range (#15171 B19-01), not
+// just the Layer-A wire bound [0, 65535] (coerceWireU16 out-of-range -> 0).
+// mss 0 previously committed clean as unset (compileFlow's `v > 0` guard
+// stored nothing, so the clamp the operator configured silently did not
+// happen) and 1..63 were written into SYN MSS options (userspace
+// clamp_tcp_mss has no floor), collapsing throughput. Validating only the
+// selected value means a mixed shape like `gre-in 70000 { mss 1360; }`
+// PASSES (the compiler selects the child 1360; the flat 70000 is
+// discarded), exactly matching what compileFlow reads.
 //
 // Strict path (commit / commit-check, lenient=false): an out-of-range or
 // non-integer selected value is a hard compile error. Lenient path (load /
@@ -556,21 +560,26 @@ func checkTCPMSSKind(node *Node, nodePath string, lenient bool) ([]string, error
 	} else if len(w) > 0 {
 		return w, nil
 	}
-	if err := ValidateInteger(0, maxWireU16)(tok, nil); err != nil {
+	if err := ValidateInteger(MinTCPMSS, maxWireU16)(tok, nil); err != nil {
 		msg := fmt.Sprintf("%s: invalid tcp-mss value: %v", nodePath, err)
 		if !lenient {
 			return nil, fmt.Errorf("%s", msg)
 		}
 		// Tailor the lenient suffix to the failure kind (Codex/Copilot
-		// review). Only a parseable POSITIVE-but-too-large integer reaches
+		// review). Only a parseable integer above the wire ceiling reaches
 		// Layer A to be clamped (flow.go coerceWireU16) — compileFlow only
-		// assigns the MSS when v > 0. A non-integer token OR a negative
-		// value yields no MSS: the compiler reads 0 (unset), nothing
-		// reaches the dataplane, so "the dataplane coerces it" would
-		// mislead. Branch on the parsed value, not just parseability.
+		// assigns the MSS when v > 0. A non-integer token, a negative value,
+		// or 0 (#15171: 0 is now below the Junos floor, not a valid clamp)
+		// yields no MSS: the compiler reads 0 (unset), nothing reaches the
+		// dataplane, so "the dataplane coerces it" would mislead. A parseable
+		// 1..63 value (#15171) DOES reach the dataplane and is written into
+		// SYN MSS options unchanged by Layer A, so warn that it stays in
+		// effect. Branch on the parsed value, not just parseability.
 		suffix := " (kept; the dataplane coerces it — a strict commit would reject this)"
-		if v, perr := strconv.Atoi(tok); perr != nil || v < 0 {
+		if v, perr := strconv.Atoi(tok); perr != nil || v <= 0 {
 			suffix = " (treated as unset/0 by the compiler — a strict commit would reject this)"
+		} else if int64(v) < MinTCPMSS {
+			suffix = " (kept; values below 64 collapse throughput — a strict commit would reject this)"
 		}
 		return []string{msg + suffix}, nil
 	}
