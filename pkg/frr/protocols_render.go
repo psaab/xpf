@@ -1074,7 +1074,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				// references the composed route-map that preserves the ordered
 				// Junos policy chain (#5277) instead of dropping all but the
 				// last.
-				rm := bgpNeighborExportRef(n, bgp, globalExportChain, policyOptions)
+				rm := bgpNeighborExportRef15157(n, bgp, globalExportChain, policyOptions)
 				if alias := m.narrowedAliasRef10129(n, bgp, globalExportChain, policyOptions, true); alias != "" {
 					rm = alias
 				}
@@ -1090,7 +1090,6 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				// neighbor's routes (#5115). The route-map lowering still
 				// overrides iBGP / route-reflector-reflected next-hops (the
 				// #2977 fix), now scoped to the term. See the `term.NextHop ==
-				// "self"` branch in the route-map renderer.
 				//
 				// Inbound filter (#2490/#5277). Same chain composition as the
 				rm = bgpNeighborImportRef(n, bgp, globalImportChain, policyOptions)
@@ -1125,7 +1124,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 					fmt.Fprintf(&b, "  neighbor %s default-originate\n", n.Address)
 				}
 				writeBGPMaximumPrefix15010(&b, n.Address, "inet6", bgpPrefixLimitInet6_15010(n))
-				rm := bgpNeighborExportRef(n, bgp, globalExportChain, policyOptions)
+				rm := bgpNeighborExportRef15157(n, bgp, globalExportChain, policyOptions)
 				if alias := m.narrowedAliasRef10129(n, bgp, globalExportChain, policyOptions, true); alias != "" {
 					rm = alias
 				}

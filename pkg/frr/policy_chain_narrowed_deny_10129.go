@@ -205,9 +205,9 @@ func (m *Manager) renderNarrowedChainAlias10129(po *config.PolicyOptionsConfig, 
 		// Standalone aliases use the fail-closed non-BGP default for a
 		// no-default policy while preserving explicit accept/reject.
 		return name, m.renderRouteMapForPolicyWithFallback(
-			po, name, ps, policyTrailingAction(kept[0], ps, nil), "deny")
+			po, name, ps, policyTrailingAction(kept[0], ps, nil), "deny", false)
 	}
-	return name, m.renderComposedRouteMapWithDefault(po, name, kept, "deny")
+	return name, m.renderComposedRouteMapWithDefault(po, name, kept, "deny", false)
 }
 
 // narrowedAliasCollision10129 is the render-side collision belt for the

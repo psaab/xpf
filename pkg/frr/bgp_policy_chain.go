@@ -204,6 +204,26 @@ func collectBGPRouteMapPolicies(bgp *config.BGPConfig, po *config.PolicyOptionsC
 	}
 }
 
+// collectBGPExportCarved15157 records, into dst, every DEFINED
+// policy-statement name rendered as a single-policy BGP `route-map out`
+// in an instance that has #14586 origination (#15157). These are the
+// standalone export maps whose no-explicit-default #2998 permit tail
+// must carve to permit-BGP-only. Import attachments never record, and
+// neither do exports in instances without origination. Composed chains
+// are carved at their own render site (renderComposedBGPChainsForSection)
+// because a composed name is not a policy-statement name.
+func collectBGPExportCarved15157(bgp *config.BGPConfig, po *config.PolicyOptionsConfig, dst map[string]bool) {
+	if bgp == nil || po == nil || !bgpExportBGPOnlyDefault15157(bgp, po) {
+		return
+	}
+	globalExportChain := bgpGlobalExportChain(bgp, po)
+	for _, n := range bgp.Neighbors {
+		if chain := bgpNeighborExportChain(n, globalExportChain, po); len(chain) == 1 {
+			dst[chain[0]] = true
+		}
+	}
+}
+
 // bgpEffectiveChains yields every neighbor's effective export and import chain
 // for bgp (each already Junos most-specific-resolved and defined-filtered). The
 // visit callback receives each chain; callers filter by length. Shared by the
@@ -312,6 +332,33 @@ func bgpComposedChainCollision(fc *FullConfig) error {
 	return firstErr
 }
 
+// bgpEffectiveChainsFor instance-scoped composed collection (#15157):
+// renderComposedBGPChains must know, per composed name, whether it is
+// referenced as an EXPORT in an originating instance (carve its tail)
+// or only as an import / in a non-originating instance (plain tail).
+// collectBGPComposedChains loses direction and instance, so the
+// section renderer walks instances itself via the helpers below.
+
+// collectBGPComposedExportChains15157 records composed chains that are
+// referenced as an EXPORT chain (length >= 2) in bgp.
+func collectBGPComposedExportChains15157(bgp *config.BGPConfig, po *config.PolicyOptionsConfig, dst map[string][]string) {
+	if bgp == nil || po == nil {
+		return
+	}
+	globalExportChain := bgpGlobalExportChain(bgp, po)
+	for _, n := range bgp.Neighbors {
+		chain := bgpNeighborExportChain(n, globalExportChain, po)
+		if len(chain) < 2 {
+			continue
+		}
+		name := composedChainName(chain)
+		if _, ok := dst[name]; ok {
+			continue
+		}
+		dst[name] = append([]string(nil), chain...)
+	}
+}
+
 // renderComposedBGPChains emits the DEFINITIONS of every composed BGP
 // policy-chain route-map referenced anywhere in fc (default instance + every
 // VRF), deduplicated and sorted by name for deterministic output. It is emitted
@@ -321,6 +368,15 @@ func bgpComposedChainCollision(fc *FullConfig) error {
 // length >= 2 is referenced (byte-identical to the pre-#5277 render). Any
 // distinct-chain name conflict is already rejected by bgpComposedChainCollision
 // in ApplyFull; here a residual conflict keeps the first chain deterministically.
+//
+// #15157: a composed chain referenced as an EXPORT in an instance with
+// #14586 origination renders with the carved BGP-only tail; the same
+// composed name referenced only as an import (or only in
+// non-originating instances) keeps the plain #2998 permit tail. One
+// FRR object carries one tail, so an export reference in any
+// originating instance carves the shared definition — fail-closed for
+// the import direction too in that (rare, shared-name) case, never
+// fail-open for export.
 func (m *Manager) renderComposedBGPChains(fc *FullConfig) string {
 	if fc == nil || fc.PolicyOptions == nil {
 		return ""
@@ -333,6 +389,21 @@ func (m *Manager) renderComposedBGPChains(fc *FullConfig) string {
 	if len(chains) == 0 {
 		return ""
 	}
+	carved := map[string]bool{}
+	markCarved := func(bgp *config.BGPConfig) {
+		if !bgpExportBGPOnlyDefault15157(bgp, fc.PolicyOptions) {
+			return
+		}
+		exportChains := map[string][]string{}
+		collectBGPComposedExportChains15157(bgp, fc.PolicyOptions, exportChains)
+		for name := range exportChains {
+			carved[name] = true
+		}
+	}
+	markCarved(fc.BGP)
+	for _, inst := range fc.Instances {
+		markCarved(inst.BGP)
+	}
 	names := make([]string, 0, len(chains))
 	for name := range chains {
 		names = append(names, name)
@@ -340,7 +411,11 @@ func (m *Manager) renderComposedBGPChains(fc *FullConfig) string {
 	sort.Strings(names)
 	var b strings.Builder
 	for _, name := range names {
-		b.WriteString(m.renderComposedRouteMap(fc.PolicyOptions, name, chains[name]))
+		if carved[name] {
+			b.WriteString(m.renderComposedRouteMapExport15157(fc.PolicyOptions, name, chains[name], true))
+		} else {
+			b.WriteString(m.renderComposedRouteMap(fc.PolicyOptions, name, chains[name]))
+		}
 		b.WriteString("!\n")
 	}
 	return b.String()

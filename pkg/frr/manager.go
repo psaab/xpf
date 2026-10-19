@@ -660,6 +660,12 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		if err := emptiedChainDenyCollision(fc); err != nil {
 			return err
 		}
+		// #15157 render-side belt, same posture: the generated Junos
+		// default-export map must not fuse with an operator policy of
+		// that exact name.
+		if err := bgpDefaultExportCollision15157(fc); err != nil {
+			return err
+		}
 		// #15008 render-side belt, same posture: community-lists share
 		// FRR's flat namespace, so two operator names normalizing to one
 		// FRR name — or an operator name forging a generated delete
@@ -688,7 +694,21 @@ func collectAllBGPAcceptDefault(fc *FullConfig) map[string]bool {
 	return bgpAcceptDefault
 }
 
-// buildManagedSection renders the full xpf-managed frr.conf section for fc
+// collectAllBGPExportCarved15157 builds the GLOBAL union (default
+// instance + every VRF) of single-policy BGP export names whose tail
+// must carve under #15157. Only originating instances contribute.
+func collectAllBGPExportCarved15157(fc *FullConfig) map[string]bool {
+	carved := make(map[string]bool)
+	if fc == nil || fc.PolicyOptions == nil {
+		return carved
+	}
+	collectBGPExportCarved15157(fc.BGP, fc.PolicyOptions, carved)
+	for _, inst := range fc.Instances {
+		collectBGPExportCarved15157(inst.BGP, fc.PolicyOptions, carved)
+	}
+	return carved
+}
+
 // WITHOUT writing or reloading. It is the pure assembly half of ApplyFull,
 // split out so the consolidated single-`bfd`-block invariant (#2550) and
 // other whole-section properties can be asserted in unit tests via the
@@ -757,6 +777,9 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 	// terminating `permit` (Junos BGP default-accept) rather than FRR's
 	// implicit deny — preventing a non-matching-route blackhole (#2998).
 	bgpAcceptDefault := collectAllBGPAcceptDefault(fc)
+	// #15157: single-policy export maps in originating instances carve
+	// their no-default tail to permit-BGP-only.
+	bgpCarvedExport15157 := collectAllBGPExportCarved15157(fc)
 	qnhMetrics := buildQNHMetricSet11447(fc, fc.PolicyOptions)
 	policyOptions := fc.PolicyOptions
 	if policyOptions == nil && qnhMetrics != nil {
@@ -765,7 +788,7 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 	if policyOptions != nil {
 		// #14380: referenced no-from policies get their expanded
 		// per-source maps defined at exactly the referencing nodes.
-		b.WriteString(m.generatePolicyOptionsForSection(policyOptions, bgpAcceptDefault, qnhMetrics, redistReferencedNodes14380(fc)))
+		b.WriteString(m.generatePolicyOptionsForSection15157(policyOptions, bgpAcceptDefault, qnhMetrics, redistReferencedNodes14380(fc), bgpCarvedExport15157))
 		if fc.PolicyOptions != nil {
 			// Composed BGP policy-chain route-maps: an ordered `import`/`export
 			// [ A B C ]` list of >= 2 defined policy-statements is composed into a
@@ -781,6 +804,10 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 			b.WriteString(m.renderNarrowedAliases10129(fc))
 		}
 	}
+	// #15157: the generated Junos default-export map for neighbours with
+	// an empty effective export in an originating instance. Emitted
+	// alongside the emptied-chain deny; "" when unreferenced.
+	b.WriteString(m.renderBGPDefaultExport15157(fc))
 	// #7625: the bounded deny an EMPTIED policy chain attaches. Emitted OUTSIDE
 	// the PolicyOptions guard above — a nil PolicyOptions makes every authored
 	// policy name a ghost, which is exactly when the deny is referenced and when
