@@ -507,7 +507,11 @@ hard-rejects at commit via `validateRoutingTermTerminalConflictStrict`;
 `PolicyTerm.TerminalActions` retains every authored terminal so the
 loser is visible. Tolerant loads warn and force the term to `reject`.
 Repeating the same action and non-terminal modifiers (`local-preference`,
-`next-hop`, ...) remain valid.
+`next-hop`, ...) remain valid. A group-supplied `then next policy`
+beside an inline terminal (or vice versa) likewise materializes so the
+`#11780` gate rejects the conflict in both directions (#15259); a
+group `next policy` beside a modifier-only or identical `next policy`
+term remains valid.
 
 Distinct conflicting terminal actions on a lenient load retain the compiler's
 last-wins action only as an internal parse result; `LenientContentDropped`
