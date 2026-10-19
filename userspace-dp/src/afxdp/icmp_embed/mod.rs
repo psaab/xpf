@@ -928,3 +928,397 @@ mod pptp_embedded_9298 {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// #15771: the companion-absent fallback of `embedded_icmp_return_resolution` /
+// `embedded_icmp_quoted_reply_resolution` must resolve in the flow's own
+// routing domain / installing table, never the default `inet.0`/`inet6.0`.
+//
+// Fixture shape (report §G36-03): the target prefix exists in BOTH the tenant
+// table (egress 11) and the default table (egress 99), with distinct neighbors
+// so a cross-table leak is observable as egress/neighbor, not just disposition.
+// No companion session is installed, so the probe misses and the fresh
+// fallback runs. Pre-fix both helpers called the table-free lookup and
+// returned egress 99 (RED); post-fix they return egress 11.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod return_resolution_15771 {
+    use super::return_resolution::{
+        embedded_icmp_quoted_reply_resolution, embedded_icmp_return_resolution,
+    };
+    use super::*;
+    use crate::prefix::{PrefixV4, PrefixV6};
+
+    const TENANT_EGRESS: i32 = 11;
+    const DEFAULT_EGRESS: i32 = 99;
+    const TENANT_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 11];
+    const DEFAULT_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 99];
+    const TENANT_SRC_MAC: [u8; 6] = [0x02, 0xaa, 0, 0, 0, 11];
+    const DEFAULT_SRC_MAC: [u8; 6] = [0x02, 0xaa, 0, 0, 0, 99];
+
+    fn tenant_identity() -> (u32, u32) {
+        crate::session::install_table_identity("tenant-a")
+    }
+
+    fn v4_target() -> Ipv4Addr {
+        Ipv4Addr::new(10, 99, 1, 50)
+    }
+
+    fn v6_target() -> Ipv6Addr {
+        "2001:db8:99::50".parse().expect("v6 target")
+    }
+
+    fn egress_row(ifindex: i32, src_mac: [u8; 6]) -> EgressInterface {
+        EgressInterface {
+            bind_ifindex: 0,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac,
+            zone_id: 0,
+            redundancy_group: 0,
+            primary_v4: None,
+            primary_v6: None,
+        }
+    }
+
+    /// Tenant table + conflicting default table, both families, plus the
+    /// tenant install-table registry row. Egress rows give each route its
+    /// source MAC so `populate_egress_resolution` completes the resolution.
+    fn vrf_forwarding() -> ForwardingState {
+        let (domain, check) = tenant_identity();
+        let mut state = ForwardingState::default();
+        state.has_routing_domains = true;
+        state.install_tables.insert(
+            domain,
+            InstallTables {
+                v4: Some("tenant-a.inet.0".to_string()),
+                v6: Some("tenant-a.inet6.0".to_string()),
+                h2: check,
+            },
+        );
+        state
+            .egress
+            .insert(TENANT_EGRESS, egress_row(TENANT_EGRESS, TENANT_SRC_MAC));
+        state
+            .egress
+            .insert(DEFAULT_EGRESS, egress_row(DEFAULT_EGRESS, DEFAULT_SRC_MAC));
+        state.routes_v4.insert(
+            "tenant-a.inet.0".to_string(),
+            vec![RouteEntryV4::single(
+                PrefixV4::from_net("10.99.1.0/24".parse().expect("tenant v4 prefix")),
+                TENANT_EGRESS,
+                0,
+                Some(v4_target()),
+                false,
+                String::new(),
+                0,
+            )],
+        );
+        state.routes_v4.insert(
+            "inet.0".to_string(),
+            vec![RouteEntryV4::single(
+                PrefixV4::from_net("10.99.1.0/24".parse().expect("default v4 prefix")),
+                DEFAULT_EGRESS,
+                0,
+                Some(v4_target()),
+                false,
+                String::new(),
+                0,
+            )],
+        );
+        state.routes_v6.insert(
+            "tenant-a.inet6.0".to_string(),
+            vec![RouteEntryV6::single(
+                PrefixV6::from_net("2001:db8:99::/64".parse().expect("tenant v6 prefix")),
+                TENANT_EGRESS,
+                0,
+                Some(v6_target()),
+                false,
+                String::new(),
+                0,
+            )],
+        );
+        state.routes_v6.insert(
+            "inet6.0".to_string(),
+            vec![RouteEntryV6::single(
+                PrefixV6::from_net("2001:db8:99::/64".parse().expect("default v6 prefix")),
+                DEFAULT_EGRESS,
+                0,
+                Some(v6_target()),
+                false,
+                String::new(),
+                0,
+            )],
+        );
+        state
+    }
+
+    fn neighbors() -> Arc<ShardedNeighborMap> {
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        neighbors.insert(
+            (TENANT_EGRESS, IpAddr::V4(v4_target())),
+            crate::afxdp::types::NeighborEntry { mac: TENANT_MAC },
+        );
+        neighbors.insert(
+            (DEFAULT_EGRESS, IpAddr::V4(v4_target())),
+            crate::afxdp::types::NeighborEntry { mac: DEFAULT_MAC },
+        );
+        neighbors.insert(
+            (TENANT_EGRESS, IpAddr::V6(v6_target())),
+            crate::afxdp::types::NeighborEntry { mac: TENANT_MAC },
+        );
+        neighbors.insert(
+            (DEFAULT_EGRESS, IpAddr::V6(v6_target())),
+            crate::afxdp::types::NeighborEntry { mac: DEFAULT_MAC },
+        );
+        neighbors
+    }
+
+    struct Harness {
+        sessions: SessionTable,
+        forwarding: ForwardingState,
+        dynamic_neighbors: Arc<ShardedNeighborMap>,
+        shared_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        shared_nat_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        shared_forward_wire_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        owner_indexes: crate::afxdp::types::SharedSessionOwnerRgIndexes,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            Self {
+                sessions: SessionTable::new(),
+                forwarding: vrf_forwarding(),
+                dynamic_neighbors: neighbors(),
+                shared_sessions: Arc::new(Mutex::new(FastMap::default())),
+                shared_nat_sessions: Arc::new(Mutex::new(FastMap::default())),
+                shared_forward_wire_sessions: Arc::new(Mutex::new(FastMap::default())),
+                owner_indexes: crate::afxdp::types::SharedSessionOwnerRgIndexes::default(),
+            }
+        }
+
+        fn ctx(&mut self) -> NatMatchCtx<'_> {
+            NatMatchCtx {
+                sessions: &mut self.sessions,
+                forwarding: &self.forwarding,
+                dynamic_neighbors: &self.dynamic_neighbors,
+                shared_sessions: &self.shared_sessions,
+                shared_nat_sessions: &self.shared_nat_sessions,
+                shared_owner_rg_indexes: Some(&self.owner_indexes),
+                shared_forward_wire_sessions: &self.shared_forward_wire_sessions,
+                ingress_zone_override: None,
+            }
+        }
+    }
+
+    fn forward_key_v4(domain: u32) -> SessionKey {
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: 6,
+            src_ip: IpAddr::V4(v4_target()),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)),
+            src_port: 40_000,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: domain,
+        }
+    }
+
+    fn forward_key_v6(domain: u32) -> SessionKey {
+        SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: 6,
+            src_ip: IpAddr::V6(v6_target()),
+            dst_ip: IpAddr::V6("2001:db8:ffff::7".parse().expect("v6 dst")),
+            src_port: 40_000,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: domain,
+        }
+    }
+
+    fn plain_decision() -> SessionDecision {
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::NoRoute,
+                local_ifindex: 0,
+                egress_ifindex: 0,
+                tx_ifindex: 0,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+                source_ifindex: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        }
+    }
+
+    fn assert_tenant(resolution: &ForwardingResolution, what: &str) {
+        assert_eq!(
+            resolution.disposition,
+            ForwardingDisposition::ForwardCandidate,
+            "{what}: tenant route must forward, got {resolution:?}"
+        );
+        assert_eq!(
+            resolution.egress_ifindex, TENANT_EGRESS,
+            "{what}: must egress via tenant ifindex {TENANT_EGRESS}, not default {DEFAULT_EGRESS}"
+        );
+        assert_eq!(
+            resolution.neighbor_mac,
+            Some(TENANT_MAC),
+            "{what}: tenant neighbor"
+        );
+    }
+
+    #[test]
+    fn return_resolution_no_companion_uses_tenant_table_v4_15771() {
+        let (domain, _) = tenant_identity();
+        let mut h = Harness::new();
+        let key = forward_key_v4(domain);
+        let resolution = embedded_icmp_return_resolution(
+            &mut h.ctx(),
+            &key,
+            plain_decision(),
+            IpAddr::V4(v4_target()),
+            1_000,
+        );
+        assert_tenant(&resolution, "return v4");
+    }
+
+    #[test]
+    fn return_resolution_no_companion_uses_tenant_table_v6_15771() {
+        let (domain, _) = tenant_identity();
+        let mut h = Harness::new();
+        let key = forward_key_v6(domain);
+        let resolution = embedded_icmp_return_resolution(
+            &mut h.ctx(),
+            &key,
+            plain_decision(),
+            IpAddr::V6(v6_target()),
+            1_000,
+        );
+        assert_tenant(&resolution, "return v6");
+    }
+
+    #[test]
+    fn quoted_reply_resolution_no_companion_uses_tenant_table_v4_15771() {
+        let (domain, _) = tenant_identity();
+        let mut h = Harness::new();
+        let key = forward_key_v4(domain);
+        let resolution = embedded_icmp_quoted_reply_resolution(
+            &mut h.ctx(),
+            &key,
+            IpAddr::V4(v4_target()),
+            1_000,
+        );
+        assert_tenant(&resolution, "quoted-reply v4");
+    }
+
+    #[test]
+    fn quoted_reply_resolution_no_companion_uses_tenant_table_v6_15771() {
+        let (domain, _) = tenant_identity();
+        let mut h = Harness::new();
+        let key = forward_key_v6(domain);
+        let resolution = embedded_icmp_quoted_reply_resolution(
+            &mut h.ctx(),
+            &key,
+            IpAddr::V6(v6_target()),
+            1_000,
+        );
+        assert_tenant(&resolution, "quoted-reply v6");
+    }
+
+    /// A stamped installing table (PBR or native install stamp) scopes the
+    /// return fallback even when the key itself carries domain 0.
+    #[test]
+    fn return_resolution_stamped_install_table_scopes_fallback_15771() {
+        let (domain, check) = tenant_identity();
+        let mut h = Harness::new();
+        let key = forward_key_v4(0);
+        let mut decision = plain_decision();
+        decision.install_table_domain = domain;
+        decision.install_table_check = check;
+        let resolution = embedded_icmp_return_resolution(
+            &mut h.ctx(),
+            &key,
+            decision,
+            IpAddr::V4(v4_target()),
+            1_000,
+        );
+        assert_tenant(&resolution, "stamped return v4");
+    }
+
+    /// An unresolvable stamp must fail closed, never probe the default table.
+    #[test]
+    fn return_resolution_unresolvable_stamp_fails_closed_15771() {
+        let (domain, check) = tenant_identity();
+        let mut h = Harness::new();
+        h.forwarding.install_tables.remove(&domain);
+        let key = forward_key_v4(domain);
+        let mut decision = plain_decision();
+        decision.install_table_domain = domain;
+        decision.install_table_check = check;
+        let resolution = embedded_icmp_return_resolution(
+            &mut h.ctx(),
+            &key,
+            decision,
+            IpAddr::V4(v4_target()),
+            1_000,
+        );
+        assert_eq!(
+            resolution.disposition,
+            ForwardingDisposition::TableUnavailable,
+            "unresolvable installing table must fail closed, got {resolution:?}"
+        );
+        assert_eq!(resolution.egress_ifindex, 0);
+    }
+
+    /// A nonzero routing domain with no registry row must fail closed.
+    #[test]
+    fn quoted_reply_unknown_domain_fails_closed_15771() {
+        let (domain, _) = tenant_identity();
+        let mut h = Harness::new();
+        h.forwarding.install_tables.remove(&domain);
+        let key = forward_key_v4(domain);
+        let resolution = embedded_icmp_quoted_reply_resolution(
+            &mut h.ctx(),
+            &key,
+            IpAddr::V4(v4_target()),
+            1_000,
+        );
+        assert_eq!(
+            resolution.disposition,
+            ForwardingDisposition::TableUnavailable,
+            "unknown routing domain must fail closed, got {resolution:?}"
+        );
+    }
+
+    /// Control: domain 0 / unstamped keeps the historical default-table path.
+    #[test]
+    fn return_resolution_default_domain_still_uses_default_table_15771() {
+        let mut h = Harness::new();
+        let key = forward_key_v4(0);
+        let resolution = embedded_icmp_return_resolution(
+            &mut h.ctx(),
+            &key,
+            plain_decision(),
+            IpAddr::V4(v4_target()),
+            1_000,
+        );
+        assert_eq!(
+            resolution.disposition,
+            ForwardingDisposition::ForwardCandidate
+        );
+        assert_eq!(
+            resolution.egress_ifindex, DEFAULT_EGRESS,
+            "control: default-domain flow must keep resolving in inet.0"
+        );
+        assert_eq!(resolution.neighbor_mac, Some(DEFAULT_MAC));
+    }
+}
