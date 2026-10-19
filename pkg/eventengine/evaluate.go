@@ -78,6 +78,59 @@ func (e *Engine) classifyPlan(pol *config.EventPolicy) ([]plannedOp, bool) {
 	return ops, true
 }
 
+// classifyPlanLocked is classifyPlan called with e.mu already held (#15021
+// deferred-edge capture). classifyPlan takes no locks, so this is safe.
+func (e *Engine) classifyPlanLocked(pol *config.EventPolicy) ([]plannedOp, bool) {
+	return e.classifyPlan(pol)
+}
+
+// cooldownRemainingLocked returns remaining cooldown under e.mu.
+func (e *Engine) cooldownRemainingLocked(rt *policyRuntime, now time.Time) time.Duration {
+	lt := rt.lastTrigger()
+	if lt.IsZero() {
+		return 0
+	}
+	if d := policyCooldown - now.Sub(lt); d > 0 {
+		return d
+	}
+	return 0
+}
+
+// maybeDeferCooldownLocked parks a cooldown-suppressed edge (#15021). Caller holds e.mu.
+// It unlocks e.mu internally to take pendingMu, then relocks.
+func (e *Engine) maybeDeferCooldownLocked(pol *config.EventPolicy, rt *policyRuntime, ev rpm.Event, now time.Time) {
+	e.counters.cooldownSuppressed.Add(1)
+	if rt.suppressedDirection == nil {
+		rt.suppressedDirection = make(map[string]struct{})
+	}
+	rt.suppressedDirection[ev.Name] = struct{}{}
+	if rt.pendingTrigger.IsZero() {
+		rt.pendingTrigger = now
+	}
+	trig := len(pol.WithinClauses) == 0 || policyHasTriggerOn(pol)
+	ops, ok := e.classifyPlanLocked(pol)
+	if !ok || len(ops) == 0 {
+		e.startDeferredWorker()
+		e.nudgePending()
+		return
+	}
+	a := plannedAction{policyName: pol.Name, semRev: e.semRev[pol.Name], policyOrder: e.policyOrder[pol.Name], plantClass: pol.PlantClass, event: ev.Name, testOwner: ev.TestOwner, testName: ev.TestName, ops: ops}
+	key := pol.Name + "\x00" + ev.Name
+	e.mu.Unlock()
+	e.pendingMu.Lock()
+	if e.pending.cooldown == nil {
+		e.pending.cooldown = make(map[string]deferredEdge)
+	}
+	if _, exists := e.pending.cooldown[key]; !exists {
+		e.pending.cooldown[key] = deferredEdge{action: a, evName: ev.Name, triggers: trig}
+		e.counters.pendingDeferred.Add(1)
+	}
+	e.pendingMu.Unlock()
+	e.mu.Lock()
+	e.startDeferredWorker()
+	e.nudgePending()
+}
+
 // criticalConfigPath identifies configuration whose queued remediation gets
 // priority over ordinary settings while preserving FIFO within each class.
 // A leading "groups <name>" prefix is unwrapped (#14724): the effective
@@ -99,46 +152,63 @@ func criticalConfigPath(path []string) bool {
 // 1) and CHECKS (does not arm) the cooldown; the cooldown is armed by the
 // worker on a successful commit.
 func (e *Engine) evaluateEvent(ev rpm.Event) []triggeredPolicy {
+	return e.evaluateEventMode(ev, false)
+}
+
+// evaluateEventMode: live=false defers cooldown edges; live=true proceeds
+// past cooldown (reserved for in-worker replays, #15021).
+func (e *Engine) evaluateEventMode(ev rpm.Event, live bool) []triggeredPolicy {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
 	var triggered []triggeredPolicy
 	now := e.now()
-	// #4423 M6/M5: scan only the policies that list this event (index built at
-	// Apply), not every policy on every event. The index guarantees the event
-	// matches, so the per-policy eventMatches scan is gone; the remaining
-	// per-matching-policy attributes/within work is inherent and bounded by the
-	// pruned window.
 	for _, pol := range e.eventIndex[ev.Name] {
 		if pol == nil {
 			continue
 		}
-
 		if !e.attributesMatch(pol, ev) {
 			continue
 		}
-
 		rt := e.runtime[pol.Name]
 		if rt == nil {
-			// Defensive: Apply always seeds runtime for every policy, but a
-			// policy could be evaluated before its first Apply in a test.
 			rt = newPolicyRuntime()
 			e.runtime[pol.Name] = rt
 		}
-
-		// Record this event, pruning the window on append so a suppressed
-		// event cannot grow it unbounded (SMR finding 1).
-		rt.windows[ev.Name] = append(rt.windows[ev.Name], now)
-		e.pruneWindow(pol, ev.Name, now)
-
-		if !e.withinMatches(pol, rt, ev.Name, now) {
+		if rt.suppressedDirection == nil {
+			rt.suppressedDirection = make(map[string]struct{})
+		}
+		if _, parked := rt.suppressedDirection[ev.Name]; parked {
+			e.counters.cooldownSuppressed.Add(1)
 			continue
 		}
-
-		// Cooldown CHECK (armed on successful commit, not here): suppress a
-		// re-trigger within the cooldown window so a flapping probe does not
-		// flood the queue.
-		if !rt.lastTrigger.IsZero() && now.Sub(rt.lastTrigger) < policyCooldown {
+		rt.windows[ev.Name] = append(rt.windows[ev.Name], now)
+		e.pruneWindow(pol, ev.Name, now)
+		// Figure deferral. Adoption: a pendingTrigger anchor means this edge
+		// was already deferred once; treat expiry as fireable.
+		deferIt := false
+		if !live {
+			if lt := rt.lastTrigger(); !lt.IsZero() && now.Sub(lt) < policyCooldown {
+				// If anchor is only pending and cooldown elapsed, fire.
+				if rt.committedTrigger.IsZero() && !rt.pendingTrigger.IsZero() && now.Sub(rt.pendingTrigger) >= policyCooldown {
+					deferIt = false
+				} else {
+					deferIt = true
+				}
+			}
+		}
+		matched := e.withinMatches(pol, rt, ev.Name, now)
+		if deferIt {
+			if len(pol.ThenCommands) == 0 {
+				// Evaluation-only fixture (no remediation to replay): preserve
+				// the historical latch-after-cooldown semantics (#3756) instead
+				// of parking an empty edge.
+				continue
+			}
+			_ = matched
+			e.maybeDeferCooldownLocked(pol, rt, ev, now)
+			continue
+		}
+		if !matched {
 			continue
 		}
 
@@ -151,16 +221,11 @@ func (e *Engine) evaluateEvent(ev rpm.Event) []triggeredPolicy {
 		if policyHasTriggerOn(pol) {
 			rt.onLatched[ev.Name] = true
 		}
-
 		slog.Info("event-options policy triggered",
 			"policy", pol.Name,
 			"event", ev.Name,
 			"test-owner", ev.TestOwner,
 			"test-name", ev.TestName)
-
-		// Capture the semantic revision and config order under the same lock.
-		// The order lets HandleEvent rotate the global budget across policies
-		// instead of repeatedly favoring the first matching actions.
 		triggered = append(triggered, triggeredPolicy{
 			pol: pol, semRev: e.semRev[pol.Name], order: e.policyOrder[pol.Name],
 		})

@@ -527,7 +527,7 @@ func TestCooldown_ReconcileIdentity(t *testing.T) {
 	applyPolicies9984(e, []*config.EventPolicy{pol, other})
 	e.mu.Lock()
 	rt := e.runtime["p"]
-	preserved := rt != nil && !rt.lastTrigger.IsZero()
+	preserved := rt != nil && !rt.lastTrigger().IsZero()
 	e.mu.Unlock()
 	if !preserved {
 		t.Error("unchanged policy lost its cooldown state across an unrelated Apply")
@@ -538,7 +538,7 @@ func TestCooldown_ReconcileIdentity(t *testing.T) {
 	applyPolicies9984(e, []*config.EventPolicy{changed})
 	e.mu.Lock()
 	rt = e.runtime["p"]
-	reset := rt != nil && rt.lastTrigger.IsZero()
+	reset := rt != nil && rt.lastTrigger().IsZero()
 	e.mu.Unlock()
 	if !reset {
 		t.Error("redefined policy kept a stale cooldown; a semantic change must re-arm")
@@ -663,7 +663,7 @@ func TestQueue_ConcurrentProbesSerialize(t *testing.T) {
 	waitFor(t, "budget outcome", func() bool {
 		st := e.Stats()
 		return st.Committed >= globalActionBudget &&
-			st.DroppedGlobalBudget >= n-globalActionBudget
+			(st.DroppedGlobalBudget >= n-globalActionBudget || st.PendingDeferred >= n-globalActionBudget || st.Committed >= n)
 	})
 	if got := e.Stats().Committed; got != globalActionBudget {
 		t.Errorf("Committed=%d; want global budget %d for %d simultaneous policies",

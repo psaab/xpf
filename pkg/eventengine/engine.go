@@ -92,8 +92,10 @@ import (
 type CommitFn func(ctx context.Context, comment string) (*config.Config, error)
 
 // Maximum event-options commit attempts in a rolling window, shared across all
-// policies. This caps the commit rate at four per minute while preserving a
-// four-action burst for simultaneous legitimate failures.
+// policies. This caps the committed/remediation-attempt rate at four per
+// minute while preserving a four-action burst for simultaneous legitimate
+// failures. A budget-denied action is deferred until the oldest slot expires
+// instead of being dropped (#15021).
 const (
 	globalActionBudget       = 4
 	globalActionBudgetWindow = time.Minute
@@ -123,16 +125,19 @@ type Stats struct {
 	Superseded          uint64 // same-policy queued actions REPLACED by a newer trigger (benign dedup; nothing lost — the newer equivalent action runs) (#5853)
 	DroppedLockHeld     uint64 // actions dropped after the lock-retry deadline elapsed
 	DroppedStale        uint64 // actions dropped at commit: policy removed/redefined or cooldown active (#3750)
-	DroppedGlobalBudget uint64 // actions refused by the cross-policy rolling action budget (#10871)
+	DroppedGlobalBudget uint64 // actions still dropped at commit-time budget reservation after deferral/revalidation (residual; pre-commit denials defer, #15021)
 	SkippedNoChange     uint64 // actions whose post-batch candidate equalled active: commit skipped, no history/budget spent, cooldown still armed (#15022)
 	// DroppedShutdown counts queued or in-flight-retry actions abandoned by Close
 	// (#9916 F-131). Deliberately NOT surfaced to Prometheus: it increments at
 	// process exit and would never be scraped. Explicit accounting (test-observable
 	// via Stats) plus the shutdown INFO log are the operator signal.
-	DroppedShutdown   uint64 // actions abandoned on shutdown (queued at Close + in-flight retries)
-	AttributesInvalid uint64 // runtime fail-closed: malformed/unknown attributes-match line
-	PlantClassInvalid uint64 // payloads refused for missing/denied planting class (#9984)
-	QueueDepth        int64  // currently queued actions
+	DroppedShutdown    uint64 // actions abandoned on shutdown (queued at Close + in-flight retries)
+	DeferredBudget     uint64 // pre-commit budget denials deferred for replay after the oldest slot expires (#15021)
+	CooldownSuppressed uint64 // evaluate-time cooldown suppressions, incl. deferred-edge replays (#15021)
+	PendingDeferred    int64  // currently deferred (budget/cooldown) actions awaiting replay
+	AttributesInvalid  uint64 // runtime fail-closed: malformed/unknown attributes-match line
+	PlantClassInvalid  uint64 // payloads refused for missing/denied planting class (#9984)
+	QueueDepth         int64  // currently queued actions
 }
 
 // engineCounters holds the atomic counters behind Stats.
@@ -148,6 +153,9 @@ type engineCounters struct {
 	skippedNoChange     atomic.Uint64
 	droppedGlobalBudget atomic.Uint64
 	droppedShutdown     atomic.Uint64
+	deferredBudget      atomic.Uint64
+	cooldownSuppressed  atomic.Uint64
+	pendingDeferred     atomic.Int64
 	attributesInvalid   atomic.Uint64
 	plantClassInvalid   atomic.Uint64
 	queueDepth          atomic.Int64
@@ -199,6 +207,17 @@ type plannedAction struct {
 	testOwner string
 	testName  string
 	ops       []plannedOp
+	// deferredBudgetUsed marks a replay that already consumed its one
+	// budget-deferral (#15021); a second pre-commit denial (e.g. an older slot
+	// pruned between wait-computation and pre-check) drops as global_budget
+	// instead of looping forever.
+	deferredBudgetUsed bool
+	// deferredBudgetDelay is the timer duration to wait for this budget replay
+	// (0 means compute from the oldest budget slot). Tests shorten it.
+	deferredBudgetDelay time.Duration
+	// deferredDelay, when >0, shortens the effective deferral wake for this
+	// action's replay (test seam for evaluateEvent cooldown parking).
+	deferredDelay time.Duration
 }
 
 // triggeredPolicy pairs a policy that should fire with the semantic revision its
@@ -214,13 +233,34 @@ type triggeredPolicy struct {
 // policyRuntime is the per-policy temporal/cooldown state. It is split from the
 // immutable EventPolicy config so it can be carried forward across an Apply
 // (reconcile-not-recreate, #2140) keyed by (name, semantic revision).
+// deferredEdge is the preserved original event for a cooldown-suppressed edge
+// (#15021). Direction is the event name itself: a failed edge never suppresses
+// a completed edge and vice versa. triggers is the latch captured BEFORE the
+// deferred cooldown commit armed it.
+type deferredEdge struct {
+	action   plannedAction
+	evName   string
+	triggers bool
+}
+
+// pendingDeferred bundles the deferred sets under one lock (#15021).
+// Invariants: at most one budget hold per policy; at most one cooldown hold
+// per (policy,eventName); a cooldown hold never has slotReserved=true;
+// pendingDeferred gauge == len(budget)+len(cooldown).
+type pendingDeferred struct {
+	budget   map[string]plannedAction
+	cooldown map[string]deferredEdge
+	wakeAt   time.Time
+}
+
 type policyRuntime struct {
 	// event name -> sliding window of trigger timestamps.
 	windows map[string][]time.Time
-	// last successful-commit time for this policy (cooldown anchor). Zero
-	// means "never triggered". Armed by the worker after a successful commit,
-	// not at evaluate time (#2157 SMR finding 3).
-	lastTrigger time.Time
+	// committedTrigger is the cooldown anchor (#2157): zero = never triggered,
+	// armed by the worker after a successful commit. pendingTrigger is the
+	// optimistic stamp from a deferred edge, adopted on committed replay.
+	committedTrigger time.Time
+	pendingTrigger   time.Time
 	// event name -> edge latch for a `within { trigger on N }` clause
 	// (#3756 M1). Set (true) after the policy fires on a threshold CROSSING;
 	// cleared (re-armed) by withinMatches the moment the in-window count
@@ -230,12 +270,22 @@ type policyRuntime struct {
 	// remediation ONCE per crossing instead of re-firing every cooldown
 	// (Junos `trigger on` is edge-, not level-triggered).
 	onLatched map[string]bool
+	// suppressedDirection is the parked deferred-edge set under e.mu (#15021).
+	suppressedDirection map[string]struct{}
 }
 
+// lastTrigger returns the effective cooldown anchor (committed wins).
+func (rt *policyRuntime) lastTrigger() time.Time {
+	if !rt.committedTrigger.IsZero() {
+		return rt.committedTrigger
+	}
+	return rt.pendingTrigger
+}
 func newPolicyRuntime() *policyRuntime {
 	return &policyRuntime{
-		windows:   make(map[string][]time.Time),
-		onLatched: make(map[string]bool),
+		windows:             make(map[string][]time.Time),
+		onLatched:           make(map[string]bool),
+		suppressedDirection: make(map[string]struct{}),
 	}
 }
 
@@ -367,6 +417,18 @@ type Engine struct {
 	// remediations pending until RG0 promotion opens the gate.
 	publishEnabled atomic.Bool
 	publishWake    chan struct{}
+	// Deferred action parking (#15021). pendingMu guards pending; pendingWake
+	// is buffered(1) and nudged edge-triggered on every mutation. Hold order:
+	// enqueueMu -> pendingMu -> {e.mu,budgetMu}; never pendingMu -> enqueueMu.
+	pendingMu        sync.Mutex
+	pending          pendingDeferred
+	pendingWake      chan struct{}
+	deferredWorkerWG sync.WaitGroup
+	deferredOnce     sync.Once
+	// budgetWakeAtFn overrides the deferred budget wake delay (tests).
+	budgetWakeAtFn func(time.Time) time.Time
+	// budgetSlotAvailableFn overrides the pre-commit budget gate (tests).
+	budgetSlotAvailableFn func() bool
 }
 
 func (e *Engine) lockRetryInitial() time.Duration {
@@ -412,6 +474,8 @@ func New(store *configstore.Store, commitFn CommitFn) *Engine {
 		actions:       make(chan plannedAction, actionQueueDepth),
 		stopCh:        make(chan struct{}),
 		publishWake:   make(chan struct{}, 1),
+		pendingWake:   make(chan struct{}, 1),
+		pending:       pendingDeferred{budget: make(map[string]plannedAction), cooldown: make(map[string]deferredEdge)},
 		lifeCtx:       ctx,
 		lifeCancel:    cancel,
 	}
@@ -441,10 +505,28 @@ func (e *Engine) pruneGlobalBudgetLocked(now time.Time) {
 }
 
 func (e *Engine) globalBudgetAvailable() bool {
+	if e.budgetSlotAvailableFn != nil {
+		return e.budgetSlotAvailableFn()
+	}
+	return e.globalBudgetAvailableReal()
+}
+
+func (e *Engine) globalBudgetAvailableReal() bool {
 	e.budgetMu.Lock()
 	defer e.budgetMu.Unlock()
 	e.pruneGlobalBudgetLocked(e.now())
 	return e.budgetCount < globalActionBudget
+}
+
+// oldestBudgetExpiry returns when the oldest budget slot expires.
+func (e *Engine) oldestBudgetExpiry() (time.Time, bool) {
+	e.budgetMu.Lock()
+	defer e.budgetMu.Unlock()
+	e.pruneGlobalBudgetLocked(e.now())
+	if e.budgetCount == 0 {
+		return time.Time{}, false
+	}
+	return e.budgetTimes[e.budgetStart].Add(globalActionBudgetWindow), true
 }
 
 // reserveGlobalCommit accounts one commit attempt. The worker is serialized,
@@ -692,6 +774,7 @@ func policySemanticRevision(pol *config.EventPolicy) string {
 // permanently favoring the same policies in a sustained cross-policy flap.
 func (e *Engine) HandleEvent(ev rpm.Event) {
 	e.startOnce.Do(e.startWorker)
+	e.startDeferredWorker()
 	triggered := e.evaluateEvent(ev)
 	if len(triggered) == 0 {
 		return
@@ -774,6 +857,16 @@ func (e *Engine) Close() {
 		}
 	})
 	e.workerWG.Wait()
+	e.deferredWorkerWG.Wait()
+	// Count parked deferred actions as shutdown-abandoned (#15021).
+	e.pendingMu.Lock()
+	if n := len(e.pending.budget) + len(e.pending.cooldown); n > 0 {
+		e.counters.droppedShutdown.Add(uint64(n))
+		e.counters.pendingDeferred.Store(0)
+		e.pending.budget = make(map[string]plannedAction)
+		e.pending.cooldown = make(map[string]deferredEdge)
+	}
+	e.pendingMu.Unlock()
 	// Single drainer: the worker already exited (it returns on stopCh without
 	// draining), so Close owns the remaining buffered actions. Held under
 	// enqueueMu so no placer can land post-drain: any enqueue that passed the
@@ -826,15 +919,16 @@ func (e *Engine) Stats() Stats {
 		DroppedGlobalBudget: e.counters.droppedGlobalBudget.Load(),
 		SkippedNoChange:     e.counters.skippedNoChange.Load(),
 		DroppedShutdown:     e.counters.droppedShutdown.Load(),
+		DeferredBudget:      e.counters.deferredBudget.Load(),
+		CooldownSuppressed:  e.counters.cooldownSuppressed.Load(),
+		PendingDeferred:     e.counters.pendingDeferred.Load(),
 		AttributesInvalid:   e.counters.attributesInvalid.Load(),
 		PlantClassInvalid:   e.counters.plantClassInvalid.Load(),
 		QueueDepth:          e.counters.queueDepth.Load(),
 	}
 }
 
-// actionWorker is the single goroutine that applies remediation actions. It
-// serializes all configure/commit on behalf of the engine (removing the
-// cross-probe race) and retries a held config lock with bounded backoff.
+// actionWorker is the single goroutine that applies remediation actions.
 func (e *Engine) actionWorker() {
 	defer e.workerWG.Done()
 	for {
@@ -844,6 +938,180 @@ func (e *Engine) actionWorker() {
 		case a := <-e.actions:
 			e.counters.queueDepth.Add(-1)
 			e.runAction(a)
+		}
+	}
+}
+
+func (e *Engine) startDeferredWorker() {
+	e.deferredOnce.Do(func() {
+		e.deferredWorkerWG.Add(1)
+		go e.deferredWorker()
+	})
+}
+
+// deferredWorker replays parked budget/cooldown actions (#15021).
+func (e *Engine) deferredWorker() {
+	defer e.deferredWorkerWG.Done()
+	for {
+		e.pendingMu.Lock()
+		now := e.now()
+		var wake time.Time
+		if !e.pending.wakeAt.IsZero() {
+			wake = e.pending.wakeAt
+		}
+		for _, de := range e.pending.cooldown {
+			e.mu.Lock()
+			rt := e.runtime[de.action.policyName]
+			var anchor time.Time
+			if rt != nil {
+				anchor = rt.lastTrigger()
+			}
+			e.mu.Unlock()
+			if !anchor.IsZero() {
+				cand := anchor.Add(policyCooldown)
+				if wake.IsZero() || cand.Before(wake) {
+					wake = cand
+				}
+			}
+		}
+		for range e.pending.budget {
+			if exp, ok := e.oldestBudgetExpiryLocked(now); ok {
+				if wake.IsZero() || exp.Before(wake) {
+					wake = exp
+				}
+			}
+			break
+		}
+		e.pending.wakeAt = wake
+		e.pendingMu.Unlock()
+		var timerC <-chan time.Time
+		var stopTimer func() bool
+		if !wake.IsZero() {
+			// Real-time timer: with an injected fake clock, still wake
+			// periodically (bounded) so tests advancing the fake clock see
+			// the replay; production clocks coincide.
+			d := wake.Sub(now)
+			if d < 0 {
+				d = 0
+			}
+			if e.nowFn != nil {
+				if d > 20*time.Millisecond {
+					d = 20 * time.Millisecond
+				}
+			} else if d > globalActionBudgetWindow {
+				d = globalActionBudgetWindow
+			}
+			timerC, stopTimer = e.newRetryTimer(d)
+		}
+		select {
+		case <-e.stopCh:
+			if stopTimer != nil {
+				stopTimer()
+			}
+			return
+		case <-e.pendingWake:
+			if stopTimer != nil {
+				stopTimer()
+			}
+			e.drainDeferred()
+		case <-timerC:
+			e.drainDeferred()
+		}
+		if stopTimer != nil {
+			stopTimer()
+		}
+	}
+}
+
+func (e *Engine) oldestBudgetExpiryLocked(now time.Time) (time.Time, bool) {
+	e.budgetMu.Lock()
+	defer e.budgetMu.Unlock()
+	e.pruneGlobalBudgetLocked(now)
+	if e.budgetCount == 0 {
+		return time.Time{}, false
+	}
+	return e.budgetTimes[e.budgetStart].Add(globalActionBudgetWindow), true
+}
+
+func (e *Engine) wakeAtLocked() time.Time {
+	e.pendingMu.Lock()
+	defer e.pendingMu.Unlock()
+	return e.pending.wakeAt
+}
+
+func (e *Engine) nudgePending() {
+	select {
+	case e.pendingWake <- struct{}{}:
+	default:
+	}
+}
+
+func (e *Engine) drainDeferred() {
+	for {
+		drained := false
+		e.pendingMu.Lock()
+		e.mu.Lock()
+		now := e.now()
+		// Cooldown first.
+		for key, de := range e.pending.cooldown {
+			rt := e.runtime[de.action.policyName]
+			var anchor time.Time
+			if rt != nil {
+				anchor = rt.lastTrigger()
+			}
+			if anchor.IsZero() || now.Sub(anchor) >= policyCooldown {
+				delete(e.pending.cooldown, key)
+				if rt != nil {
+					delete(rt.suppressedDirection, de.evName)
+				}
+				e.counters.pendingDeferred.Add(-1)
+				e.mu.Unlock()
+				drained = true
+				if !e.enqueue(de.action) {
+					e.releaseEdgeLatch(de.action.policyName, de.action.event, de.action.semRev)
+				} else if de.triggers {
+					e.mu.Lock()
+					if rt2 := e.runtime[de.action.policyName]; rt2 != nil {
+						rt2.onLatched[de.evName] = true
+					}
+					e.mu.Unlock()
+				}
+				e.mu.Lock()
+			}
+		}
+		e.mu.Unlock()
+		// Budget replay with pre-check.
+		type cand struct {
+			key string
+			a   plannedAction
+		}
+		var cands []cand
+		for key, a := range e.pending.budget {
+			cands = append(cands, cand{key, a})
+		}
+		sort.Slice(cands, func(i, j int) bool { return cands[i].a.policyOrder < cands[j].a.policyOrder })
+		e.pendingMu.Unlock()
+		for _, c := range cands {
+			if !e.globalBudgetAvailable() {
+				break
+			}
+			e.pendingMu.Lock()
+			cur, ok := e.pending.budget[c.key]
+			if !ok {
+				e.pendingMu.Unlock()
+				continue
+			}
+			delete(e.pending.budget, c.key)
+			e.counters.pendingDeferred.Add(-1)
+			e.pendingMu.Unlock()
+			drained = true
+			cur.deferredBudgetUsed = true
+			if !e.enqueue(cur) {
+				e.releaseEdgeLatch(cur.policyName, cur.event, cur.semRev)
+			}
+		}
+		if !drained {
+			break
 		}
 	}
 }
@@ -866,7 +1134,11 @@ func (e *Engine) runAction(a plannedAction) {
 		}
 		if !budgetChecked {
 			if !e.globalBudgetAvailable() {
-				e.dropGlobalBudget(a)
+				if a.deferredBudgetUsed {
+					e.dropGlobalBudget(a)
+				} else if !e.deferBudget(a) {
+					e.dropGlobalBudget(a)
+				}
 				return
 			}
 			budgetChecked = true
@@ -1233,6 +1505,29 @@ func (e *Engine) dropGlobalBudget(a plannedAction) {
 	e.releaseEdgeLatch(a.policyName, a.event, a.semRev)
 }
 
+// deferBudget parks a pre-commit budget-denied action until the oldest slot
+// expires (#15021). Returns false if already parked for this policy.
+func (e *Engine) deferBudget(a plannedAction) bool {
+	e.pendingMu.Lock()
+	if _, ok := e.pending.budget[a.policyName]; ok {
+		e.pendingMu.Unlock()
+		return false
+	}
+	if e.budgetWakeAtFn != nil {
+		e.pending.wakeAt = e.budgetWakeAtFn(e.now())
+	} else if exp, ok := e.oldestBudgetExpiryLocked(e.now()); ok {
+		e.pending.wakeAt = exp
+	}
+	e.pending.budget[a.policyName] = a
+	e.counters.pendingDeferred.Add(1)
+	e.counters.deferredBudget.Add(1)
+	e.pendingMu.Unlock()
+	e.startDeferredWorker()
+	e.nudgePending()
+	slog.Info("event-options: remediation deferred (global budget)", "policy", a.policyName)
+	return true
+}
+
 // staleErr wraps errStaleAction with a human-readable reason for logging.
 func staleErr(reason string) error {
 	return fmt.Errorf("%w: %s", errStaleAction, reason)
@@ -1266,8 +1561,8 @@ func (e *Engine) staleReason(a plannedAction) string {
 	if rev != a.semRev {
 		return "policy redefined"
 	}
-	if rt := e.runtime[a.policyName]; rt != nil && !rt.lastTrigger.IsZero() &&
-		e.now().Sub(rt.lastTrigger) < policyCooldown {
+	if rt := e.runtime[a.policyName]; rt != nil && !rt.lastTrigger().IsZero() &&
+		e.now().Sub(rt.lastTrigger()) < policyCooldown {
 		return "cooldown active"
 	}
 	return ""
@@ -1300,6 +1595,9 @@ func (e *Engine) armCooldown(name, authRev string) {
 		return
 	}
 	if rt := e.runtime[name]; rt != nil {
-		rt.lastTrigger = e.now()
+		rt.committedTrigger = e.now()
+		if !rt.pendingTrigger.IsZero() && rt.pendingTrigger.Before(rt.committedTrigger) {
+			rt.pendingTrigger = time.Time{}
+		}
 	}
 }

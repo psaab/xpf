@@ -446,6 +446,9 @@ type xpfCollector struct {
 	eventActionsDropped           *prometheus.Desc
 	eventActionsSuperseded        *prometheus.Desc
 	eventActionsSkippedNoChange   *prometheus.Desc
+	eventActionsDeferred          *prometheus.Desc
+	eventCooldownSuppressed       *prometheus.Desc
+	eventPendingDeferred          *prometheus.Desc
 	eventAttributesInvalid        *prometheus.Desc
 	eventPlantClassInvalid        *prometheus.Desc
 	eventActionQueueDepth         *prometheus.Desc
@@ -772,7 +775,7 @@ type xpfCollector struct {
 	// #10865: GRE endpoint refusals for a Protocol Type / inner IP version
 	// nibble mismatch. A refusal, not a drop; transit GRE is not counted.
 	userspaceGreDecapPtNibbleMismatchRefusals *prometheus.Desc
-	userspaceGreOuterFragDrops *prometheus.Desc
+	userspaceGreOuterFragDrops                *prometheus.Desc
 	// #2472: locally-generated ICMP/RST error replies dropped by the
 	// per-reason token-bucket rate limiter (Time Exceeded / PTB / reject).
 	userspaceTimeExceededRateLimited *prometheus.Desc
@@ -793,10 +796,10 @@ type xpfCollector struct {
 	userspaceRejectOutputFilterDrops   *prometheus.Desc
 	userspaceRejectRateLimitedBySource *prometheus.Desc
 	// #4768: per-binding drop-class counters (#4743) summed across bindings.
-	userspaceMartianDropped       *prometheus.Desc
+	userspaceMartianDropped *prometheus.Desc
 	// #14668: Junos-default illegal DNS-reply drops, summed across bindings.
 	userspaceDNSIllegalReplyDropped *prometheus.Desc
-	userspaceIPv6ExtHeaderDropped *prometheus.Desc
+	userspaceIPv6ExtHeaderDropped   *prometheus.Desc
 	// #10686: RFC 4291 / RFC 4038 embedded-v4 IPv6 ingress drops.
 	userspaceV4MappedIPv6Dropped *prometheus.Desc
 	// #11061: per-binding fabric trust-boundary drops, summed across bindings.
@@ -1295,6 +1298,10 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.eventActionsDropped
 	ch <- c.eventActionsSuperseded
 	ch <- c.eventActionsSkippedNoChange
+	ch <- c.eventActionsDeferred
+	ch <- c.eventCooldownSuppressed
+	ch <- c.eventPendingDeferred
+	ch <- c.eventActionQueueDepth
 	ch <- c.eventPlantClassInvalid
 	ch <- c.eventAttributesInvalid
 	ch <- c.eventActionQueueDepth

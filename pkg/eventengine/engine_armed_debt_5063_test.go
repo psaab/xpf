@@ -36,7 +36,7 @@ func armWaitForCooldown(t *testing.T, e *Engine, policy string) {
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		rt := e.runtime[policy]
-		return rt != nil && !rt.lastTrigger.IsZero()
+		return rt != nil && !rt.lastTrigger().IsZero()
 	})
 }
 
@@ -119,7 +119,7 @@ func TestCommitDebt_GenuineRejection_CountsRejected_5063(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	e.mu.Lock()
 	rt := e.runtime["p"]
-	armed := rt != nil && !rt.lastTrigger.IsZero()
+	armed := rt != nil && !rt.lastTrigger().IsZero()
 	e.mu.Unlock()
 	if armed {
 		t.Error("cooldown armed on a genuine rejection; only a committed generation arms the cooldown")
