@@ -51,19 +51,22 @@ func syslogZoneNameMap(cfg *config.Config) map[uint16]string {
 	return znMap
 }
 
-// reloadSyslog rebuilds the syslog client set and zone-name mapping from
-// the supplied config. Safe to call with a nil event reader.
+// reloadSyslog refreshes syslog state after a local commit/rollback.
+// #15231 A47-05: when the daemon apply callbacks are wired, the daemon's
+// applySyslogConfig already ran in-process for this commit (commitFn /
+// applyConfigFn) and installed a deferred client set the daemon latch owns.
+// Rebuilding here with the dialing constructor paid a dial per stream, tore
+// down healthy connections, and installed a set the latch does not own — so
+// on that path only the zone map is refreshed and the client set is left
+// untouched. In standalone mode (no daemon callback) there is no other
+// owner, so the CLI still builds the set itself via buildSyslogClients.
+// Safe to call with a nil event reader.
 func (c *CLI) reloadSyslog(cfg *config.Config) {
 	if c.eventReader == nil {
 		return
 	}
 	c.eventReader.SetZoneNames(syslogZoneNameMap(cfg))
 
-	// #5738 gap 2: honor event mode exactly like the daemon's applySyslogConfig.
-	// In event mode the daemon CLEARS remote clients and installs a LOCAL writer;
-	// the previous CLI reload unconditionally rebuilt remote clients from Streams,
-	// so a config with BOTH event-mode AND remote streams re-installed the remote
-	// clients the daemon had cleared (the CLI reload runs LAST on a local commit).
 	if cfg.Security.Log.Mode == "event" {
 		c.eventReader.ReplaceSyslogClients(nil) // close + clear any remote clients
 		lw, err := logging.NewLocalLogWriter(logging.LocalLogConfig{})
@@ -78,8 +81,12 @@ func (c *CLI) reloadSyslog(cfg *config.Config) {
 		return
 	}
 
-	// Stream mode (default): clear local writers, install remote clients.
+	// Stream mode: clear local writers (daemon parity).
 	c.eventReader.ReplaceLocalWriters(nil)
+	if c.commitFn != nil || c.applyConfigFn != nil {
+		// Daemon-owned: preserve the deferred set installed by applySyslogConfig.
+		return
+	}
 	c.eventReader.ReplaceSyslogClients(buildSyslogClients(cfg))
 }
 

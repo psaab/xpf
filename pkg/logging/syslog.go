@@ -148,6 +148,10 @@ type SyslogClient struct {
 	// Seams for deterministic testing. nil → real implementations.
 	nowFn  func() time.Time         // clock source (default time.Now)
 	dialFn func() (net.Conn, error) // dial override (default s.dial)
+	// hostnameFn15231 overrides the OS hostname source for a single client
+	// in tests that need a stable name without racing a rename; nil reads
+	// the live kernel name through syslogHostnameFn on every Send (#15231).
+	hostnameFn15231 func() (string, error)
 
 	// eventWriter is created lazily only for EventReader fanout. Direct Send
 	// callers keep their synchronous contract.
@@ -159,6 +163,27 @@ type SyslogClient struct {
 	// operation that can race Close. The separate connMu lets Close detach and
 	// close a socket without waiting for s.mu, which an in-flight Write holds.
 	closed atomic.Bool
+}
+
+// syslogHostnameFn resolves the current device hostname. It is a seam so
+// #15231 tests can simulate a rename without changing the host; production
+// is os.Hostname. Send reads through it on every record (when no per-client
+// override is set), so a rename is reflected without rebuilding clients.
+var syslogHostnameFn = os.Hostname
+
+func currentSyslogHostname(fallback string, override func() (string, error)) string {
+	fn := override
+	if fn == nil {
+		fn = syslogHostnameFn
+	}
+	h, _ := fn()
+	if h == "" {
+		if fallback != "" {
+			return fallback
+		}
+		return "xpf"
+	}
+	return h
 }
 
 type syslogEventWrite struct {
@@ -456,10 +481,7 @@ func NewSyslogClientTransport(host string, port int, sourceAddr, protocol string
 		return nil, fmt.Errorf("%w %q", ErrUnsupportedTransport, protocol)
 	}
 	remoteAddr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	hostname, _ := os.Hostname()
-	if hostname == "" {
-		hostname = "xpf"
-	}
+	hostname := currentSyslogHostname("", nil)
 
 	c := &SyslogClient{
 		hostname:          hostname,
@@ -521,10 +543,7 @@ func NewSyslogClientDeferred(host string, port int, sourceAddr, protocol string,
 		return nil, fmt.Errorf("%w: udp cannot be deferred — it never reconnects lazily",
 			ErrUnsupportedTransport)
 	}
-	hostname, _ := os.Hostname()
-	if hostname == "" {
-		hostname = "xpf"
-	}
+	hostname := currentSyslogHostname("", nil)
 	return &SyslogClient{
 		hostname:          hostname,
 		remoteAddr:        net.JoinHostPort(host, fmt.Sprintf("%d", port)),
@@ -606,10 +625,7 @@ func NewSyslogClientWithConn(conn net.Conn, protocol string) *SyslogClient {
 	if protocol == "" {
 		protocol = "udp"
 	}
-	hostname, _ := os.Hostname()
-	if hostname == "" {
-		hostname = "xpf"
-	}
+	hostname := currentSyslogHostname("", nil)
 	return &SyslogClient{
 		hostname:          hostname,
 		protocol:          protocol,
@@ -1015,7 +1031,7 @@ func (s *SyslogClient) Send(severity int, msg string) error {
 	msg = termsafe.SanitizeForDisplay(msg)
 
 	priority := s.Facility*8 + severity
-	hostname := sanitizeSyslogHostname(s.hostname)
+	hostname := sanitizeSyslogHostname(currentSyslogHostname(s.hostname, s.hostnameFn15231))
 	var line string
 	if s.Format == "sd-syslog" {
 		// RFC 5424: <PRI>VERSION TIMESTAMP HOSTNAME APP-NAME PROCID MSGID SD MSG

@@ -21,6 +21,7 @@ func sendSyslogAndReadFrame10726(t *testing.T, format string) string {
 	client := NewSyslogClientWithConn(clientConn, "tcp")
 	client.Format = format
 	client.hostname = hostileHostname10726
+	client.hostnameFn15231 = func() (string, error) { return hostileHostname10726, nil }
 	t.Cleanup(func() {
 		_ = client.Close()
 		_ = serverConn.Close()

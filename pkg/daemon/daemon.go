@@ -1889,6 +1889,20 @@ type Daemon struct {
 	// writes happen under applySem (apply / retry tick).
 	syslogRetryDebt atomic.Bool
 
+	// systemSyslogRetryDebt records that the last applySystemSyslog skipped
+	// at least one system syslog host (#15231 A47-04). Re-driven by the same
+	// 30s retry loop as stream debt.
+	systemSyslogRetryDebt atomic.Bool
+
+	// syslogBuiltByName15231 caches successfully built security-log stream
+	// clients by stream name so a partial-build retry can preserve healthy
+	// clients instead of replacing the whole set (#15231 A47-06). Guarded
+	// by syslogBuiltMu; entries are removed when a stream disappears or its
+	// per-stream fingerprint changes.
+	syslogBuiltMu          sync.Mutex
+	syslogBuiltByName15231 map[string]*logging.SyslogClient
+	syslogBuiltFP15231     map[string]string
+
 	// archiveTransfer performs one upload from a serialized active-config file.
 	// The commit, periodic-timer, and retained-debt paths share this transport;
 	// nil selects the default scpArchiveTransfer implementation. Overridable

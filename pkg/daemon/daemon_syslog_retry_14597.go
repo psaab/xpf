@@ -51,11 +51,17 @@ func (d *Daemon) syslogStreamRetryLoop(ctx context.Context) {
 // and re-checks the debt inside, because the commit this tick queued
 // behind may already have rebuilt the stream set in full.
 func (d *Daemon) reassertSyslogOnce(ctx context.Context) {
-	if !d.syslogRetryOwed() {
+	if !d.syslogRetryOwed() && !d.systemSyslogRetryOwed() {
 		return
 	}
-	if d.applySem == nil || d.eventReader == nil || d.store == nil {
+	if d.applySem == nil || d.store == nil {
 		return
+	}
+	if d.syslogRetryOwed() && d.eventReader == nil {
+		// Stream debt needs the reader; system debt alone does not.
+		if !d.systemSyslogRetryOwed() {
+			return
+		}
 	}
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		return
@@ -67,7 +73,7 @@ func (d *Daemon) reassertSyslogOnce(ctx context.Context) {
 // reassertSyslogLocked is the inside-the-semaphore half of the retry
 // tick: re-check the debt, then rebuild from the active config.
 func (d *Daemon) reassertSyslogLocked() {
-	if !d.syslogRetryOwed() {
+	if !d.syslogRetryOwed() && !d.systemSyslogRetryOwed() {
 		return
 	}
 	cfg := d.store.ActiveConfig()
@@ -79,10 +85,21 @@ func (d *Daemon) reassertSyslogLocked() {
 
 // rebuildSyslog runs one apply against the daemon's live event reader.
 func (d *Daemon) rebuildSyslog(cfg *config.Config) {
-	slog.Debug("syslog stream build incomplete; retrying (#14597)")
-	d.applySyslogConfig(d.eventReader, cfg)
-	if !d.syslogRetryOwed() {
-		slog.Info("syslog streams recovered; all configured streams now built (#14597)")
+	if d.syslogRetryOwed() {
+		slog.Debug("syslog stream build incomplete; retrying (#14597)")
+		if d.eventReader != nil {
+			d.applySyslogConfig(d.eventReader, cfg)
+		}
+		if !d.syslogRetryOwed() {
+			slog.Info("syslog streams recovered; all configured streams now built (#14597)")
+		}
+	}
+	if d.systemSyslogRetryOwed() {
+		slog.Debug("system syslog build incomplete; retrying (#15231)")
+		d.applySystemSyslog(cfg)
+		if !d.systemSyslogRetryOwed() {
+			slog.Info("system syslog hosts recovered (#15231)")
+		}
 	}
 }
 
@@ -90,8 +107,10 @@ func (d *Daemon) rebuildSyslog(cfg *config.Config) {
 // and reader without needing a store or semaphore, so unit cells can
 // exercise the owed → rebuild → discharged contract directly.
 func (d *Daemon) reassertSyslogOnceForTest(cfg *config.Config) {
-	if !d.syslogRetryOwed() || d.eventReader == nil || cfg == nil {
-		return
+	if d.syslogRetryOwed() && d.eventReader != nil && cfg != nil {
+		d.applySyslogConfig(d.eventReader, cfg)
 	}
-	d.applySyslogConfig(d.eventReader, cfg)
+	if d.systemSyslogRetryOwed() && cfg != nil {
+		d.applySystemSyslog(cfg)
+	}
 }

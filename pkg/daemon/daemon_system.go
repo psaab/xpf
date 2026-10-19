@@ -55,10 +55,11 @@ func syslogClientFingerprint(cfg *config.Config) (string, bool) {
 	// #15078: the global source-interface has no single collector, so its
 	// fingerprint term keeps the family-blind resolution; per-stream terms
 	// below resolve against each stream's own collector family.
-	fmt.Fprintf(h, "mode=%s\nformat=%s\nsrcif=%s\nsrcaddr=%s\n",
+	fmt.Fprintf(h, "mode=%s\nformat=%s\nsrcif=%s\nsrcaddr=%s\nhostname=%s\n",
 		cfg.Security.Log.Mode, cfg.Security.Log.Format,
 		cfg.Security.Log.SourceInterface,
-		config.ResolveSyslogSourceAddr(cfg, cfg.Security.Log.SourceInterface))
+		config.ResolveSyslogSourceAddr(cfg, cfg.Security.Log.SourceInterface),
+		currentHostnameForFingerprint15231())
 	for _, name := range names {
 		st := cfg.Security.Log.Streams[name]
 		if st == nil {
@@ -71,6 +72,104 @@ func syslogClientFingerprint(cfg *config.Config) (string, bool) {
 			config.ResolveSyslogSourceAddrForCollector(cfg, st.SourceInterface, st.Host))
 	}
 	return hex.EncodeToString(h.Sum(nil)), true
+}
+
+// syslogStreamFingerprint15231 hashes one stream's resolved build inputs
+// (#15231 A47-06). It mirrors the per-stream term of syslogClientFingerprint
+// plus the effective source/format the builder derives, so a cached client
+// is reused only when everything that would change its construction is
+// unchanged.
+func syslogStreamFingerprint15231(cfg *config.Config, name string, stream *config.SyslogStream, srcAddr, protocol, format string) string {
+	if stream == nil {
+		return name + "\x00NIL"
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "name=%s\nhost=%s\nport=%d\nproto=%s\nsev=%s\nfac=%s\ncat=%s\nfmt=%s\ngfmt=%s\nsa=%s\nsi=%s\nsrc=%s\nrsi=%s\ngsi=%s\ngsrc=%s\n",
+		name, stream.Host, stream.Port, protocol, stream.Severity, stream.Facility,
+		stream.Category, format, cfg.Security.Log.Format, stream.SourceAddress, stream.SourceInterface, srcAddr,
+		config.ResolveSyslogSourceAddrForCollector(cfg, stream.SourceInterface, stream.Host),
+		cfg.Security.Log.SourceInterface,
+		config.ResolveSyslogSourceAddrForCollector(cfg, cfg.Security.Log.SourceInterface, stream.Host))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (d *Daemon) syslogCachedClient15231(name, fp string) *logging.SyslogClient {
+	d.syslogBuiltMu.Lock()
+	defer d.syslogBuiltMu.Unlock()
+	if d.syslogBuiltByName15231 == nil {
+		return nil
+	}
+	if d.syslogBuiltFP15231[name] != fp {
+		return nil
+	}
+	return d.syslogBuiltByName15231[name]
+}
+
+func (d *Daemon) syslogCacheClient15231(name, fp string, c *logging.SyslogClient) {
+	d.syslogBuiltMu.Lock()
+	defer d.syslogBuiltMu.Unlock()
+	if d.syslogBuiltByName15231 == nil {
+		d.syslogBuiltByName15231 = map[string]*logging.SyslogClient{}
+		d.syslogBuiltFP15231 = map[string]string{}
+	}
+	d.syslogBuiltByName15231[name] = c
+	d.syslogBuiltFP15231[name] = fp
+}
+
+func (d *Daemon) syslogForgetCached15231(keep map[string]bool) []*logging.SyslogClient {
+	d.syslogBuiltMu.Lock()
+	defer d.syslogBuiltMu.Unlock()
+	var stale []*logging.SyslogClient
+	for name, c := range d.syslogBuiltByName15231 {
+		if keep == nil || !keep[name] {
+			stale = append(stale, c)
+			delete(d.syslogBuiltByName15231, name)
+			delete(d.syslogBuiltFP15231, name)
+		}
+	}
+	return stale
+}
+
+func (d *Daemon) syslogClearCache15231() {
+	for _, c := range d.syslogForgetCached15231(nil) {
+		_ = c
+	}
+}
+
+// installSyslogClientsPreserving15231 installs next while preserving any
+// client object that appears in both sets (ReplaceSyslogClients would
+// close it). Preserved clients are neither closed nor re-warmed by caller.
+func installSyslogClientsPreserving15231(er *logging.EventReader, next []*logging.SyslogClient) (preserved map[*logging.SyslogClient]bool) {
+	preserved = map[*logging.SyslogClient]bool{}
+	old := er.SyslogClients()
+	oldSet := map[*logging.SyslogClient]bool{}
+	for _, c := range old {
+		oldSet[c] = true
+	}
+	for _, c := range next {
+		if oldSet[c] {
+			preserved[c] = true
+		}
+	}
+	if len(preserved) == 0 {
+		er.ReplaceSyslogClients(next)
+		return preserved
+	}
+	er.SetSyslogClients(next)
+	for _, c := range old {
+		if !preserved[c] {
+			c.Close()
+		}
+	}
+	return preserved
+}
+
+func currentHostnameForFingerprint15231() string {
+	h, _ := osHostname()
+	if h == "" {
+		return "xpf"
+	}
+	return h
 }
 
 // buildIfNames builds the EventReader's kernel-ifindex -> operator-facing
@@ -228,9 +327,7 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 	// Event mode: write to local file instead of remote syslog
 	if cfg.Security.Log.Mode == "event" {
 		er.ReplaceSyslogClients(nil) // close + clear any remote clients (#3579)
-		// #9326: same reason as the no-streams teardown below — forget the
-		// fingerprint, or switching back to stream mode with an unchanged
-		// stanza would hash-match a client set that has been closed.
+		d.syslogClearCache15231()
 		d.syslogHashSet = false
 		d.setSyslogRetryOwed(false)
 		lw, err := logging.NewLocalLogWriter(logging.LocalLogConfig{})
@@ -263,9 +360,7 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		// Closes the superseded clients' connections so a CONNECTED stream's
 		// fd is not leaked when all streams are removed (#3579).
 		er.ReplaceSyslogClients(nil)
-		// #9326: forget the fingerprint on teardown, or re-adding the SAME
-		// stanza later would hash-match the set that was just closed and
-		// install nothing.
+		d.syslogClearCache15231()
 		d.syslogHashSet = false
 		d.setSyslogRetryOwed(false)
 		d.applyAggregator(er, cfg)
@@ -317,7 +412,12 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 	}
 
 	var clients []*logging.SyslogClient
+	var freshClients15231 []*logging.SyslogClient
 	skipped := 0
+	keepNames15231 := make(map[string]bool, len(cfg.Security.Log.Streams))
+	for name := range cfg.Security.Log.Streams {
+		keepNames15231[name] = true
+	}
 	for name, stream := range cfg.Security.Log.Streams {
 		// #6875 precedence: an explicitly configured address beats one derived
 		// from an interface, and both beat the global fallback.
@@ -434,6 +534,18 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		//
 		// The #3351 operator signal is preserved, not dropped: the reachability
 		// probe moves to warmSyslogClients below, off the commit path.
+		// #15231 A47-06: reuse a cached client for this stream when its
+		// per-stream fingerprint is unchanged, so a retry owed only by a
+		// sibling does not tear down healthy connections.
+		effectiveFormat15231 := stream.Format
+		if effectiveFormat15231 == "" {
+			effectiveFormat15231 = cfg.Security.Log.Format
+		}
+		streamFP15231 := syslogStreamFingerprint15231(cfg, name, stream, srcAddr, protocol, effectiveFormat15231)
+		if cached := d.syslogCachedClient15231(name, streamFP15231); cached != nil {
+			clients = append(clients, cached)
+			continue
+		}
 		var client *logging.SyslogClient
 		var err error
 		if protocol == "udp" {
@@ -484,31 +596,18 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 			"protocol", protocol, "severity", stream.Severity,
 			"facility", stream.Facility, "format", format,
 			"category", stream.Category)
+		d.syslogCacheClient15231(name, streamFP15231, client)
+		freshClients15231 = append(freshClients15231, client)
 		clients = append(clients, client)
 	}
-	// #3579: install the freshly-built client set AND close the superseded
-	// set in one atomic swap. applySyslogConfig rebuilds every SyslogClient
-	// from config on each apply (the loop above always constructs new
-	// objects via NewSyslogClientTransport), so the prior set is ALWAYS fully
-	// superseded by-object and every old client's connection must be closed —
-	// otherwise a re-apply that changed or dropped a CONNECTED TCP/TLS stream
-	// would leak the old socket (fd). ReplaceSyslogClients (the closing
-	// variant the CLI apply path already uses, pkg/cli/apply.go) closes the
-	// old set AFTER releasing syslogMu, and SyslogClient.Close only takes the
-	// client's own mutex (no slog under it), so the close cannot re-enter the
-	// slog->syslog handler path under a held lock (#2285). The prior
-	// len(clients) > 0 guard is intentionally gone: when streams are
-	// configured but none could be built (all UDP construction failures), the
-	// old clients must still be torn down rather than left forwarding to a
-	// stale destination.
-	er.ReplaceSyslogClients(clients)
-	// #14597: latch ONLY on a complete build. A TCP/TLS client returned
-	// alongside an error is installed (reconnecting, #3351) and counts
-	// as built — only a nil-client skip leaves the set incomplete.
-	// On an incomplete build the fingerprint stays unset so the next
-	// apply retries, and the retry debt arms the always-on owner that
-	// recovers the stream with no commit at all (e.g. the source
-	// address appears when a RETH VIP arrives after the boot apply).
+	// Drop cache entries for streams no longer configured; install below
+	// closes their installed clients via the preserving install.
+	_ = d.syslogForgetCached15231(keepNames15231)
+	// #3579 + #15231 A47-06: install the new set, closing superseded clients
+	// that are not preserved. Cached healthy clients reused above appear in
+	// both sets and are neither closed nor re-warmed.
+	preserved15231 := installSyslogClientsPreserving15231(er, clients)
+	_ = preserved15231
 	if skipped == 0 {
 		if pendingHashOK {
 			d.syslogHash, d.syslogHashSet = pendingHash, true
@@ -518,7 +617,7 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		d.syslogHashSet = false
 		d.setSyslogRetryOwed(true)
 	}
-	d.warmSyslogClients(clients)
+	d.warmSyslogClients(freshClients15231)
 	d.applyAggregator(er, cfg)
 }
 
@@ -1576,10 +1675,12 @@ func (d *Daemon) applySystemSyslog(cfg *config.Config) {
 
 	if cfg.System.Syslog == nil || len(cfg.System.Syslog.Hosts) == 0 {
 		d.slogHandler.SetClients(nil)
+		d.setSystemSyslogRetryOwed(false)
 		return
 	}
 
 	var clients []*logging.SyslogClient
+	skippedSystem15231 := 0
 	for _, host := range cfg.System.Syslog.Hosts {
 		// #4303 S-1: honor `host <h> port <n>` and `source-address <ip>`.
 		// Both were previously misparsed into bogus facility entries and
@@ -1688,6 +1789,7 @@ func (d *Daemon) applySystemSyslog(cfg *config.Config) {
 
 		c, err := logging.NewSyslogClientWithSource(host.Address, port, host.SourceAddress)
 		if err != nil {
+			skippedSystem15231++
 			slog.Warn("failed to create system syslog client",
 				"host", host.Address, "err", err)
 			continue
@@ -1706,7 +1808,19 @@ func (d *Daemon) applySystemSyslog(cfg *config.Config) {
 			"host", host.Address, "facility", c.Facility)
 	}
 
+	d.setSystemSyslogRetryOwed(skippedSystem15231 > 0)
 	d.slogHandler.SetClients(clients)
+}
+
+func (d *Daemon) systemSyslogRetryOwed() bool { return d.systemSyslogRetryDebt.Load() }
+
+func (d *Daemon) setSystemSyslogRetryOwed(owed bool) { d.systemSyslogRetryDebt.Store(owed) }
+
+func (d *Daemon) reassertSystemSyslogOnceForTest(cfg *config.Config) {
+	if !d.systemSyslogRetryOwed() || cfg == nil {
+		return
+	}
+	d.applySystemSyslog(cfg)
 }
 
 // rsyslogConfDir is the directory holding the xpf-managed rsyslog drop-ins. A

@@ -792,6 +792,22 @@ retries) and arms `syslogRetryDebt`; the always-on `syslogStreamRetryLoop`
 every stream builds, so recovery needs no commit and no restart. A fully
 built identical config still performs zero rebuilds.
 
+**Syslog client lifecycle cohort (#15231).** (A47-02) `Send` resolves the
+hostname per record through `syslogHostnameFn` (production `os.Hostname`),
+falling back to the construction-time name only if the live read is empty,
+so a rename is reflected without rebuilding clients; the whole-set
+fingerprint also carries the hostname. (A47-03) `slogLevelToSyslog` maps
+levels below Info to `SyslogDebug` (7), so an `any info` host no longer
+receives debug records labelled Info and a debug host sees severity 7.
+(A47-04) `applySystemSyslog` arms `systemSyslogRetryDebt` on a skipped
+host and the 30 s retry loop re-drives it until the host builds, with no
+commit needed. (A47-05) on the daemon-wired path `pkg/cli` `reloadSyslog`
+only refreshes the zone map and preserves the daemon-installed deferred
+client set; standalone CLI still builds via `buildSyslogClients`.
+(A47-06) `applySyslogConfig` caches built clients per stream (per-stream
+fingerprint) and preserves healthy clients across a partial-build retry,
+warming only freshly built clients.
+
 `security log stream <s> host` is also a typed leaf now (`ValidateSyslogHost`:
 an IP address or a DNS name, the `ValidateNTPServer` shape). It was `args: 1`
 with no valueType and no validator, so any string reached the dialer's resolver.
