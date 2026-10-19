@@ -107,31 +107,52 @@ func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig, instanceName st
 	// inet.0 / inet6.0; an instance block owns only <instance>.inet.0 /
 	// <instance>.inet6.0. A qualified rib from another scope must not be
 	// silently filed into the current instance's route list.
+	// Collect every `static` block under this rib. The flat spelling
+	// `rib inet.0 { static { ... } }` carries the block as a direct child
+	// of the named rib node. The hierarchical spelling
+	// `rib { inet.0 { static { ... } } }` instead nests the table name as
+	// an unnamed child (`rib` with one child `inet.0` ...), so a direct
+	// FindChild("static") misses it and every route is silently dropped
+	// (#15777). Unwrap that one extra level, and honour every `rib` /
+	// `static` sibling rather than only the first.
+	var ribBlocks []struct {
+		name   string
+		static []*Node
+	}
 	for _, ribNode := range node.FindChildren("rib") {
-		ribName := nodeVal(ribNode)
-		ribStatic := ribNode.FindChild("static")
+		if len(ribNode.Keys) >= 2 {
+			ribBlocks = append(ribBlocks, struct {
+				name   string
+				static []*Node
+			}{nodeVal(ribNode), ribNode.FindChildren("static")})
+			continue
+		}
+		for _, tableNode := range ribNode.Children {
+			ribBlocks = append(ribBlocks, struct {
+				name   string
+				static []*Node
+			}{tableNode.Name(), tableNode.FindChildren("static")})
+		}
+	}
+	for _, ribBlock := range ribBlocks {
+		ribName := ribBlock.name
 		if ribMatchesRoutingOptionsScope(ribName, instanceName) {
-			if ribStatic != nil {
+			for _, ribStatic := range ribBlock.static {
 				if ribName == "inet6.0" || strings.HasSuffix(ribName, ".inet6.0") {
 					ro.Inet6StaticRoutes = compileStaticRoutes(ribStatic, ro.Inet6StaticRoutes)
 				} else {
-					// The IPv4 unicast table is the SAME destination as a bare
-					// `routing-options static` block, so routes reached either way
-					// land in one list and append rather than replace.
 					ro.StaticRoutes = compileStaticRoutes(ribStatic, ro.StaticRoutes)
 				}
 			}
 			continue
 		}
-		// Not implemented in this scope (either an unsupported table or a table
-		// owned by another scope). Record it ONLY when routes were actually lost;
-		// an empty `rib foo { }` discards nothing, and warning there would be noise.
-		if ribStatic == nil {
-			continue
-		}
-		compiledRoutes := compileStaticRoutes(ribStatic, nil)
-		if n := len(foldDistinctStaticRouteAliases(compiledRoutes)); n > 0 {
-			ro.UnhandledRibs = append(ro.UnhandledRibs, UnhandledRib{Name: ribName, Routes: n})
+		// Not implemented in this scope. Record it ONLY when routes were
+		// actually lost; an empty rib discards nothing.
+		for _, ribStatic := range ribBlock.static {
+			compiledRoutes := compileStaticRoutes(ribStatic, nil)
+			if n := len(foldDistinctStaticRouteAliases(compiledRoutes)); n > 0 {
+				ro.UnhandledRibs = append(ro.UnhandledRibs, UnhandledRib{Name: ribName, Routes: n})
+			}
 		}
 	}
 
@@ -1087,13 +1108,17 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 						route.NoInstall = true
 						continue
 					}
-					// `interface <if>` is a modifier even without an address:
-					// that is the interface-only next-hop form. Preserve a
-					// bare `interface` as a gateway value.
 					if prop.Keys[j] == "interface" && j+1 < len(prop.Keys) {
 						iface = prop.Keys[j+1]
 						j++
 						continue
+					}
+					// #15777: fused route-level clauses (`preference`,
+					// `next-table`, `discard`, ...) packed onto this leaf
+					// are not gateways. Apply them to the route instead.
+					if isFusedRouteTailKeyword15777(prop.Keys[j]) {
+						applyFusedRouteTail15777(route, prop.Keys[j:])
+						break
 					}
 					addrs = append(addrs, prop.Keys[j])
 				}
@@ -1214,6 +1239,48 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 		}
 	}
 	return existing
+}
+
+// isFusedRouteTailKeyword15777 reports whether tok begins a route-level
+// clause fused onto a preceding next-hop leaf (#15777). `qualified-next-hop`
+// is absent: that tail is split by the packed-QNH normalizer, and a residual
+// fused QNH is rejected by validateStaticRouteQNHTails12813.
+func isFusedRouteTailKeyword15777(tok string) bool {
+	switch tok {
+	case "preference", "metric", "next-table", "discard", "reject":
+		return true
+	}
+	return false
+}
+
+// applyFusedRouteTail15777 applies route-level clauses fused onto a
+// next-hop leaf (`next-hop <gw> preference <n> discard ...`) to route.
+func applyFusedRouteTail15777(route *StaticRoute, keys []string) {
+	for j := 0; j < len(keys); j++ {
+		switch keys[j] {
+		case "preference":
+			if j+1 < len(keys) {
+				if n, err := strconv.Atoi(keys[j+1]); err == nil {
+					route.Preference = n
+					route.HasPreference = true
+				}
+				j++
+			}
+		case "next-table":
+			if j+1 < len(keys) {
+				setStaticRouteNextTable(route, keys[j+1])
+				j++
+			}
+		case "discard":
+			route.Discard = true
+		case "reject":
+			route.Reject = true
+		case "no-install":
+			route.NoInstall = true
+		default:
+			return
+		}
+	}
 }
 
 // parseNextTableSuffix splits a Junos next-table value into its routing
