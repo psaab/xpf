@@ -731,12 +731,32 @@ func diffNodes(b *strings.Builder, oldNodes, newNodes []*Node, editPath []string
 		}
 	}
 
-	// Print [edit <path>] header — this is the level where leaf changes exist.
-	if len(editPath) > 0 {
-		fmt.Fprintf(b, "[edit %s]\n", strings.Join(editPath, " "))
+	// Collect this level's sections before writing anything: removals
+	// first (old order, #15168), then the new-order list of additions,
+	// moves-in, modified and unchanged siblings. Own lines render into
+	// buffers; modified block pairs become recursion arms. The [edit]
+	// header attribution depends on the interleaving: a recursed child
+	// prints its own deeper header, so any of this level's own lines
+	// that follow it must be preceded by this level's header again
+	// (#15169). Rendering own lines lazily also keeps a header with no
+	// lines under it from ever being printed.
+	type section struct {
+		own       string // rendered own lines; empty for a recursion
+		oldNode   *Node  // recursion arm, set when own is empty
+		newNode   *Node
+		childPath []string
 	}
-
+	var sections []section
+	hasOwn := false
 	indent := "    "
+	addOwn := func(render func(*strings.Builder)) {
+		var sb strings.Builder
+		render(&sb)
+		if sb.Len() > 0 {
+			hasOwn = true
+			sections = append(sections, section{own: sb.String()})
+		}
+	}
 	// Removals (deleted and moved-out) render in old order first, then the
 	// new-order list renders additions, moves-in, modified and unchanged
 	// siblings. A move therefore appears as - <node> ... + <node> within
@@ -751,7 +771,7 @@ func diffNodes(b *strings.Builder, oldNodes, newNodes []*Node, editPath []string
 	// Old-order removals (moved-out and deleted) first.
 	for oi, o := range oldNodes {
 		if removedSet[oi] {
-			formatPrefixed(b, "-", indent, o)
+			addOwn(func(sb *strings.Builder) { formatPrefixed(sb, "-", indent, o) })
 		}
 	}
 	// New-order list: additions, moves-in, modified and unchanged siblings.
@@ -759,25 +779,55 @@ func diffNodes(b *strings.Builder, oldNodes, newNodes []*Node, editPath []string
 		oi, paired := oldIdxOfNew[ni]
 		switch {
 		case !paired:
-			formatPrefixed(b, "+", indent, n)
+			addOwn(func(sb *strings.Builder) { formatPrefixed(sb, "+", indent, n) })
 		case al.movedNew[ni]:
-			formatPrefixed(b, "+", indent, n)
+			addOwn(func(sb *strings.Builder) { formatPrefixed(sb, "+", indent, n) })
 		default:
 			o := oldNodes[oi]
 			switch {
 			case nodesEqual(o, n):
-				if o.IsLeaf {
-					fmt.Fprintf(b, " %s%s%s;\n", indent, inactivePrefix(o), o.QuotedKeyPath())
-				} else {
-					fmt.Fprintf(b, " %s%s%s { ... }\n", indent, inactivePrefix(o), o.QuotedKeyPath())
-				}
+				addOwn(func(sb *strings.Builder) {
+					if o.IsLeaf {
+						fmt.Fprintf(sb, " %s%s%s;\n", indent, inactivePrefix(o), o.QuotedKeyPath())
+					} else {
+						fmt.Fprintf(sb, " %s%s%s { ... }\n", indent, inactivePrefix(o), o.QuotedKeyPath())
+					}
+				})
 			case !o.IsLeaf && !n.IsLeaf && o.Inactive == n.Inactive:
 				childPath := append(append([]string{}, editPath...), strings.Fields(o.KeyPath())...)
-				diffNodes(b, o.Children, n.Children, childPath)
+				sections = append(sections, section{oldNode: o, newNode: n, childPath: childPath})
 			default:
-				formatPrefixed(b, "-", indent, o)
-				formatPrefixed(b, "+", indent, n)
+				addOwn(func(sb *strings.Builder) {
+					formatPrefixed(sb, "-", indent, o)
+					formatPrefixed(sb, "+", indent, n)
+				})
 			}
+		}
+	}
+
+	// This level's [edit <path>] header — at the root (empty editPath)
+	// it is a bare [edit]. Printed lazily, immediately before each run
+	// of this level's own lines (#15169).
+	header := "[edit]\n"
+	if len(editPath) > 0 {
+		header = fmt.Sprintf("[edit %s]\n", strings.Join(editPath, " "))
+	}
+	headerPending := hasOwn
+	for _, s := range sections {
+		if s.own != "" {
+			if headerPending {
+				b.WriteString(header)
+				headerPending = false
+			}
+			b.WriteString(s.own)
+			continue
+		}
+		before := b.Len()
+		diffNodes(b, s.oldNode.Children, s.newNode.Children, s.childPath)
+		if b.Len() > before {
+			// The child printed its own header(s); this level's header
+			// must be re-emitted before any following own lines.
+			headerPending = hasOwn
 		}
 	}
 }
