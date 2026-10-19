@@ -2162,6 +2162,7 @@ type compileOpts struct {
 	// cfg.LenientNATUndefinedZoneRuleSets so dataplane compileNAT skips
 	// them instead of aborting every apply.
 	lenientNATUndefinedZone bool
+	lenientNATUndefinedScope bool // #15278 tolerant downgrade
 	// lenientNATMatchAddressLiterals (#7145) downgrades the NAT match-address
 	// literal gate (validateNATMatchAddressLiteralsStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check path
@@ -3705,6 +3706,7 @@ func lenientCompileOpts() compileOpts {
 		lenientClusterAuthKey:                  true,
 		lenientDestNATAddresses:                true,
 		lenientNATUndefinedZone:                true,
+		lenientNATUndefinedScope:               true,
 		lenientNATMatchAddressLiterals:         true,
 		lenientRPMSourceAddress:                true,
 		lenientRPMLinkLocalZone:                true,

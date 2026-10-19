@@ -19,6 +19,16 @@ import (
 
 func buildNATScopeTree(t *testing.T, cmds ...string) *ConfigTree {
 	t.Helper()
+	// #15278: scoped fixtures must define the interfaces/RIs they reference
+	// (undefined scopes now strict-reject). Prepend definitions; duplicate
+	// definitions in a fixture are harmless set-path overwrites.
+	pre := []string{
+		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24",
+		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
+		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances red instance-type virtual-router",
+	}
+	cmds = append(pre, cmds...)
 	cmds = prependNATZoneDefs15001(cmds)
 	tree := &ConfigTree{}
 	for _, cmd := range cmds {

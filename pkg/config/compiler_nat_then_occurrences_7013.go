@@ -206,6 +206,23 @@ func (a *natThenAuthored) scanRun(keys []string, from int) {
 			a.Pools = append(a.Pools, keys[i+1])
 			a.Modes = append(a.Modes, "pool")
 			i++
+			// #15278 (D02-04): a bare non-keyword token right after a consumed
+			// pool value is a further authored pool (`pool A B`, `pool [ A B ]`
+			// — brackets are stripped before this scan). Without this, scanRun
+			// stopped at B and the gate saw one pool, silently resolving to A
+			// even when B was undefined. Keywords (pool/off/interface/
+			// persistent-nat) are NOT bare values: they keep their existing
+			// handling on the next iteration, so `pool off` (one pool named
+			// off), `pool P off`, and `pool P persistent-nat ...` are unchanged.
+			if i+1 < len(keys) {
+				switch keys[i+1] {
+				case "pool", "off", "interface", "persistent-nat":
+				default:
+					a.Pools = append(a.Pools, keys[i+1])
+					a.Modes = append(a.Modes, "pool")
+					i++
+				}
+			}
 		case "off", "interface":
 			a.Modes = append(a.Modes, keys[i])
 		default:
@@ -266,6 +283,43 @@ func (a *natThenAuthored) addPoolNode(c *Node) {
 	} else if name := nodeVal(c); name != "" {
 		a.Pools = append(a.Pools, name)
 		a.Modes = append(a.Modes, "pool")
+		// #15278 (D02-04): `pool { A; B; }` — a further leaf child with no
+		// children is a further authored pool. Children with children
+		// (persistent-nat { ... }) stay single-pool.
+		for idx, ch := range c.Children {
+			if ch == nil || idx == 0 {
+				continue
+			}
+			if len(ch.Children) == 0 {
+				if v := nodeVal(ch); v != "" {
+					a.Pools = append(a.Pools, v)
+					a.Modes = append(a.Modes, "pool")
+				} else if v := ch.Name(); v != "" {
+					a.Pools = append(a.Pools, v)
+					a.Modes = append(a.Modes, "pool")
+				}
+			}
+		}
+	}
+	// #15278 (D02-04): flat-set `pool PD PD2` builds `pool PD` with a bare
+	// `PD2` child (Keys=["PD2"], no children, Name() not a recognised
+	// action). walkActionChain would drop it; record it here when this pool
+	// node already consumed a Keys value and a child is a bare leaf.
+	if len(c.Keys) > 1 {
+		for _, ch := range c.Children {
+			if ch == nil || len(ch.Children) != 0 {
+				continue
+			}
+			switch ch.Name() {
+			case "pool", "off", "interface", "persistent-nat":
+				// Recognised actions are handled by walkActionChain below.
+			default:
+				if v := ch.Name(); v != "" {
+					a.Pools = append(a.Pools, v)
+					a.Modes = append(a.Modes, "pool")
+				}
+			}
+		}
 	}
 	// The chain continues below a pool node in the flat-set spelling
 	// (`pool P` carrying `off` as its child). The name node itself — `pool { P; }`

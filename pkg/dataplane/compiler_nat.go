@@ -1152,6 +1152,14 @@ func compileNAT64WithStaging(dp DataPlane, cfg *config.Config, result *CompileRe
 			compileWarn(dp, "max NAT64 prefixes exceeded, skipping", "rule-set", rs.Name)
 			break
 		}
+		// #15278 (D02-01): empty prefix skips this rule-set on BOTH passes,
+		// mirroring buildNAT64Snapshots. Before this, the real pass returned
+		// an invalid-CIDR error and aborted every apply for a strict-clean
+		// (pre-fix) or leniently-loaded config with no prefix.
+		if rs.Prefix == "" {
+			compileWarn(dp, "NAT64 rule-set has no prefix, skipping rule-set", "rule-set", rs.Name)
+			continue
+		}
 
 		// #15002 (A08-03): on the validation pass, every fault below that
 		// the tolerant config path downgrades to a warning (the NAT64

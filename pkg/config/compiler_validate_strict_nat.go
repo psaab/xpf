@@ -113,6 +113,164 @@ func NATUndefinedZoneRuleSetNames(cfg *Config) map[string]bool {
 	return out
 }
 
+// #15278 (D02-02): NAT rule-set from/to interface and routing-instance
+// scopes naming an undefined logical unit or routing-instance. Unlike the
+// zone axis (#15001), the dataplane does not abort — it silently never
+// matches — so strict rejects and tolerant warns + records for any future
+// skip. Interface check mirrors validateZoneInterfaceDefinedStrict's
+// generosity: configured unit, lo0.0, materialized st0, implicit tunnel 0.
+func natInterfaceDefined15278(cfg *Config, ref string) bool {
+	if cfg == nil || ref == "" {
+		return true
+	}
+	split := cfg.SplitInterfaceUnitRef(ref)
+	base := split.Base
+	if base == "" {
+		base = ref
+	}
+	if !split.HasUnit {
+		if _, ok := cfg.Interfaces.Interfaces[base]; ok && cfg.Interfaces.Interfaces[base] != nil {
+			return true
+		}
+		if base == "lo0" {
+			return true
+		}
+		if _, bound := cfg.SecureTunnelNetdevForRef(ref); bound {
+			return true
+		}
+		if _, bound := cfg.SecureTunnelNetdevForRef(ref + ".0"); bound {
+			return true
+		}
+		return false
+	}
+	unitNum, _, err := CanonicalLogicalUnit(split.UnitTok)
+	if err != nil {
+		return false
+	}
+	if base == "lo0" && unitNum == 0 {
+		return true
+	}
+	if _, bound := cfg.SecureTunnelNetdevForRef(ref); bound {
+		return true
+	}
+	ifc := cfg.Interfaces.Interfaces[base]
+	if ifc == nil {
+		return false
+	}
+	if u := ifc.Units[unitNum]; u != nil {
+		return true
+	}
+	if unitNum == 0 && ifc.Tunnel != nil && !ifc.AuthoredUnits {
+		return true
+	}
+	return false
+}
+
+func natRoutingInstanceDefined15278(cfg *Config, name string) bool {
+	if name == "" || name == "default" {
+		return true
+	}
+	if cfg == nil {
+		return true
+	}
+	for _, ri := range cfg.RoutingInstances {
+		if ri != nil && ri.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func natUndefinedScopeOffenders(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	var out []string
+	checkRIface := func(kind, rsName, axis, iface string) {
+		if iface != "" && !natInterfaceDefined15278(cfg, iface) {
+			out = append(out, fmt.Sprintf("%s rule-set %q: %s interface %q not defined", kind, rsName, axis, iface))
+		}
+	}
+	checkRI := func(kind, rsName, axis, ri string) {
+		if ri != "" && !natRoutingInstanceDefined15278(cfg, ri) {
+			out = append(out, fmt.Sprintf("%s rule-set %q: %s routing-instance %q not defined", kind, rsName, axis, ri))
+		}
+	}
+	for _, rs := range cfg.Security.NAT.Source {
+		if rs == nil {
+			continue
+		}
+		checkRIface("source-nat", rs.Name, "from", rs.FromInterface)
+		checkRIface("source-nat", rs.Name, "to", rs.ToInterface)
+		checkRI("source-nat", rs.Name, "from", rs.FromRoutingInstance)
+		checkRI("source-nat", rs.Name, "to", rs.ToRoutingInstance)
+	}
+	if dnat := cfg.Security.NAT.Destination; dnat != nil {
+		for _, rs := range dnat.RuleSets {
+			if rs == nil {
+				continue
+			}
+			checkRIface("destination-nat", rs.Name, "from", rs.FromInterface)
+			checkRI("destination-nat", rs.Name, "from", rs.FromRoutingInstance)
+		}
+	}
+	for _, rs := range cfg.Security.NAT.Static {
+		if rs == nil {
+			continue
+		}
+		checkRIface("static-nat", rs.Name, "from", rs.FromInterface)
+		checkRI("static-nat", rs.Name, "from", rs.FromRoutingInstance)
+	}
+	return out
+}
+
+func validateNATUndefinedScopeStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	for _, o := range natUndefinedScopeOffenders(cfg) {
+		return fmt.Errorf("%s", o)
+	}
+	return nil
+}
+
+// NATUndefinedScopeRuleSetNames returns "kind\x00name" keys for tolerant record.
+func NATUndefinedScopeRuleSetNames(cfg *Config) map[string]bool {
+	out := make(map[string]bool)
+	if cfg == nil {
+		return out
+	}
+	add := func(kind, name string, bad bool) {
+		if bad {
+			out[kind+"\x00"+name] = true
+		}
+	}
+	for _, rs := range cfg.Security.NAT.Source {
+		if rs == nil {
+			continue
+		}
+		bad := (rs.FromInterface != "" && !natInterfaceDefined15278(cfg, rs.FromInterface)) || (rs.ToInterface != "" && !natInterfaceDefined15278(cfg, rs.ToInterface)) || (rs.FromRoutingInstance != "" && !natRoutingInstanceDefined15278(cfg, rs.FromRoutingInstance)) || (rs.ToRoutingInstance != "" && !natRoutingInstanceDefined15278(cfg, rs.ToRoutingInstance))
+		add("source", rs.Name, bad)
+	}
+	if dnat := cfg.Security.NAT.Destination; dnat != nil {
+		for _, rs := range dnat.RuleSets {
+			if rs == nil {
+				continue
+			}
+			bad := (rs.FromInterface != "" && !natInterfaceDefined15278(cfg, rs.FromInterface)) || (rs.FromRoutingInstance != "" && !natRoutingInstanceDefined15278(cfg, rs.FromRoutingInstance))
+			add("destination", rs.Name, bad)
+		}
+	}
+	for _, rs := range cfg.Security.NAT.Static {
+		if rs == nil {
+			continue
+		}
+		bad := (rs.FromInterface != "" && !natInterfaceDefined15278(cfg, rs.FromInterface)) || (rs.FromRoutingInstance != "" && !natRoutingInstanceDefined15278(cfg, rs.FromRoutingInstance))
+		add("static", rs.Name, bad)
+	}
+	return out
+}
+
 // validateNATMatchApplicationsStrict hard-rejects a source- or
 // destination-NAT rule's `match application <name>` token that resolves to
 // NONE of: a predefined junos-* application, a user-defined `applications
@@ -2855,9 +3013,12 @@ func NormaliseNAT64PrefixForSnapshot(prefix string) string {
 // go looking for a wedged pipeline and may roll back good config, when the
 // truth is one missing NAT64 rule.
 //
-// An empty/absent prefix is deliberately OUT OF SCOPE: the Go builder
-// (buildNAT64Snapshots) skips an empty-prefix rule, so it is never emitted on
-// the wire and never reaches the Rust check.
+// #15278 (D02-01): an empty/absent prefix is NOT out of scope. The snapshot
+// builder (buildNAT64Snapshots) skips an empty-prefix rule, but the typed
+// dataplane compileNAT64 path runs regardless and previously returned an
+// invalid-CIDR error from the #4960 pre-pass/real pass, aborting every
+// apply. Strict now rejects a missing prefix; lenient warns; the dataplane
+// warn-skips the rule-set (mirroring buildNAT64Snapshots).
 //
 // Strict (commit / commit-check): hard-reject anything that is not the
 // canonical `<ipv6-address>/96`.
@@ -2920,7 +3081,16 @@ func validateNAT64PrefixStrict(cfg *Config, lenient bool) ([]string, error) {
 	}
 
 	for _, rs := range cfg.Security.NAT.NAT64 {
-		if rs == nil || rs.Prefix == "" {
+		if rs == nil {
+			continue
+		}
+		if rs.Prefix == "" {
+			if err := emit(fmt.Sprintf(
+				"security nat nat64 rule-set %q has no prefix; "+
+					"define `security nat nat64 rule-set %s prefix <ipv6-prefix>/96` — otherwise NAT64 for this rule-set has no translation prefix",
+				rs.Name, rs.Name)); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		// Mirror the Rust loader Nat64State::from_snapshots
