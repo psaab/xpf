@@ -774,6 +774,11 @@ fn ipsec_inner_descriptor(
         } else if let Some((offset, protocol)) =
             crate::afxdp::packet_rel_l4_offset_and_protocol_for_ipsec(bytes, inner_family)
         {
+            // #15787: the fragment-no-L4 sentinel (255) falls to the
+            // catch-all arm: payload offset == L4 offset (the first
+            // payload byte), no L4 header is read. Non-first inner
+            // fragments are admitted to the deny-only adjudicator
+            // instead of being stamped (0,0,0) and dropped.
             let payload = match protocol {
                 6 => offset
                     .checked_add(12)

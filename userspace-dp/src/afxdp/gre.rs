@@ -1231,6 +1231,18 @@ pub(in crate::afxdp) fn parse_inner_protocol_and_offsets(
             if ihl < 20 || packet.len() < ihl {
                 return None;
             }
+            // #15787: a non-first fragment's bytes at `ihl` are payload,
+            // not an L4 header. Admit it as fragment-no-L4 (the XDP
+            // shim's `PROTO_FRAGMENT_NO_L4` substitution, ported via
+            // `packet_rel_l4_offset_and_protocol`) instead of parsing
+            // the payload as a TCP/UDP/ICMP header.
+            if crate::afxdp::frame::ipv4_is_non_first_fragment(packet) {
+                return Some((
+                    crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+                    ihl as u16,
+                    ihl as u16,
+                ));
+            }
             let protocol = packet[9];
             let l4_offset = ihl as u16;
             let payload_offset = match protocol {
@@ -1286,6 +1298,14 @@ pub(in crate::afxdp) fn parse_inner_protocol_and_offsets(
             // resolve.
             let (l4_off, protocol) = packet_rel_l4_offset_and_protocol(packet, addr_family)?;
             let rel_l4 = l4_off as u16;
+            // #15787: an inner IPv6 non-first fragment resolves to the
+            // fragment-no-L4 sentinel at the payload offset (first byte
+            // past the Fragment header). Admit it flowless — payload
+            // offset == L4 offset, no L4 header is read — instead of
+            // dropping 100% of such decapsulated fragments.
+            if protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4 {
+                return Some((protocol, rel_l4, rel_l4));
+            }
             let payload_offset = match protocol {
                 PROTO_TCP => {
                     let l4 = rel_l4 as usize;

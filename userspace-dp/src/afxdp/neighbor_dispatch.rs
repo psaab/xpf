@@ -570,8 +570,17 @@ pub(super) fn retry_pending_neigh(
             if let Some(l3) = source_frame.get(l3_start..)
                 && crate::afxdp::frame::is_non_first_fragment(l3, pkt.meta.addr_family)
             {
-                let Some((_, protocol)) = crate::afxdp::frame::packet_rel_l4_offset_and_protocol(
-                    l3,
+                // #15787: `packet_rel_l4_offset_and_protocol` now
+                // reports the fragment-no-L4 sentinel (255) for a
+                // non-first fragment, not the wire protocol this retry
+                // needs to decide ESP/AH passthrough vs NAT. Recover
+                // the real protocol from the declared header (IPv4
+                // Protocol byte / IPv6 Fragment Next Header), exactly
+                // as `flowless_effective_protocol` does for sentinel
+                // meta. An unreadable header fails closed as before.
+                let Some(protocol) = crate::afxdp::frame::fragment_protocol_from_frame(
+                    source_frame,
+                    pkt.meta.l3_offset,
                     pkt.meta.addr_family,
                 ) else {
                     counters.record_nat_frag_untranslated_dropped();

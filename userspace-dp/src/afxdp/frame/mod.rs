@@ -2790,6 +2790,9 @@ mod tests_fragment_term_extra;
 #[path = "tests_ipv6_ext_walk.rs"]
 mod tests_ipv6_ext_walk;
 #[cfg(test)]
+#[path = "tests_inner_frag_15787.rs"]
+mod tests_inner_frag_15787;
+#[cfg(test)]
 #[path = "tests_mss_inject_inspect.rs"]
 mod tests_mss_inject_inspect;
 #[cfg(test)]
