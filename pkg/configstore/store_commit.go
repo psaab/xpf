@@ -1336,6 +1336,15 @@ func (s *Store) PromoteRollback(gen uint64) (prevCfg *config.Config, ok bool) {
 	// never-committed without a restart.
 	var perr error
 	if firstCommitRollback {
+		// #15055 (A32-02): the candidate was just reset to the empty
+		// rollback tree above. Advance the holder epoch so a commit
+		// authority minted for the pre-rollback holder (AuthorizeCommit
+		// before the timeout fired, e.g. while its daemon commit waited
+		// on applySem) fails verification at promotion instead of
+		// promoting the reset candidate under the old holder's authority.
+		// Scoped to the first-commit branch: an ordinary rollback restores
+		// a real prior config and must not invalidate the holder.
+		s.holderEpoch++
 		// Record the never-committed marker for BOTH the immediate write
 		// and the degraded-retry loop, so a failed-then-healed write still
 		// persists committed=0 (Codex r1 release-blocker).

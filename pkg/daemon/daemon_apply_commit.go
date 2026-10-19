@@ -224,6 +224,23 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 	}
 	defer d.applySem.Release(1)
 
+	// #15055 (A32-02): re-test the bootstrap gate under applySem. The
+	// pre-Acquire check above is a TOCTOU: a commit that passed it while a
+	// first commit-confirmed rollback was mid-flight parks here, and the
+	// rollback executor (holding applySem across PromoteRollback +
+	// enterBootstrapMode) resets the candidate to the empty rollback tree,
+	// clears everCommitted, and enters bootstrap before this commit
+	// acquires. Without the recheck the commit binds the RESET generation
+	// in commitWithGenBinding and promotes the empty candidate, reporting
+	// success and persisting committed=1-empty — the state #1922 Item 1b /
+	// #7291 exist to prevent. beginBackgroundApply (#9884) already
+	// re-tests inBootstrap after Acquire for the same reason.
+	if d.inBootstrap() {
+		return nil, fmt.Errorf("system is in bootstrap mode: commit the takeover config with " +
+			"'commit confirmed <minutes>' (the interface takeover can cut off management, so the " +
+			"system rolls back automatically unless you confirm it from a still-reachable session)")
+	}
+
 	// #5281: reject the commit if a factory reset is in progress. Checked under
 	// applySem and BEFORE store.Commit persists the candidate — a commit that
 	// promoted after the zeroize wipe would re-create the just-erased .configdb
