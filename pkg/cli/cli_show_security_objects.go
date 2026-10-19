@@ -216,14 +216,20 @@ func (c *CLI) showApplications(args []string) error {
 			if detail || filterName != "" {
 				fmt.Printf("  Application set: %s\n", as.Name)
 				fmt.Printf("    Members:\n")
-				for _, member := range as.Applications {
+				// #15652: expand via canonical resolver so nested sets,
+				// predefined members and term-generated members render
+				// protocol/port/ALG instead of raw names only.
+				members := as.Applications
+				if cfg != nil {
+					if expanded, err := config.ExpandApplicationSet(as.Name, &cfg.Applications); err == nil && len(expanded) > 0 {
+						members = expanded
+					}
+				}
+				for _, member := range members {
 					fmt.Printf("      %s\n", member)
-					// Show member details if filtering by set name
-					if filterName != "" {
-						if cfg != nil {
-							if app, ok := cfg.Applications.Applications[member]; ok && app != nil {
-								printApp(app, "        ")
-							}
+					if filterName != "" && cfg != nil {
+						if app, ok := config.ResolveApplication(member, cfg.Applications.Applications); ok && app != nil {
+							printApp(app, "        ")
 						}
 					}
 				}
@@ -259,7 +265,7 @@ func (c *CLI) showApplications(args []string) error {
 			fmt.Printf("    Members:\n")
 			for _, m := range set.Applications {
 				fmt.Printf("      %s\n", m)
-				if app, ok := config.PredefinedApplications[m]; ok && app != nil {
+				if app, ok := config.ResolveApplication(m, cfgApps(cfg)); ok && app != nil {
 					printApp(app, "        ")
 				}
 			}

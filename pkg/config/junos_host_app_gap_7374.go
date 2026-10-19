@@ -48,13 +48,63 @@ import (
 // ok=false when it cannot be reduced (unknown name, unparseable port, an
 // application-set, or a protocol this comparison does not model).
 func appL4Matches(cfg *Config, name string) (out []L4Match, ok bool) {
-	app := PredefinedApplications[name]
-	if app == nil && cfg != nil && cfg.Applications.Applications != nil {
-		app = cfg.Applications.Applications[name]
+	var apps *ApplicationsConfig
+	var userApps map[string]*Application
+	if cfg != nil {
+		apps = &cfg.Applications
+		userApps = cfg.Applications.Applications
 	}
-	if app == nil {
+	// #15652 V5-03: canonical resolver — user definitions first (honouring
+	// shadowed junos-*), then predefined; application-sets and multi-term
+	// (implicit-set) applications expand via ExpandApplicationSet instead
+	// of aborting. Any unresolvable leaf makes the whole name unresolvable
+	// (fail-quiet, #7374).
+	if app, found := ResolveApplication(name, userApps); found {
+		if app == nil {
+			return nil, false
+		}
+		return appToL4(app)
+	}
+	if apps != nil {
+		if _, isSet := ResolveApplicationSet(name, apps.ApplicationSets); isSet {
+			return expandSetL4(cfg, name)
+		}
+	} else if _, isSet := ResolveApplicationSet(name, nil); isSet {
+		return expandSetL4(cfg, name)
+	}
+	return nil, false
+}
+
+func expandSetL4(cfg *Config, name string) ([]L4Match, bool) {
+	var apps *ApplicationsConfig
+	if cfg != nil {
+		apps = &cfg.Applications
+	} else {
+		apps = &ApplicationsConfig{}
+	}
+	members, err := ExpandApplicationSet(name, apps)
+	if err != nil || len(members) == 0 {
 		return nil, false
 	}
+	var out []L4Match
+	for _, m := range members {
+		app, found := ResolveApplication(m, apps.Applications)
+		if !found || app == nil {
+			return nil, false
+		}
+		ms, ok := appToL4(app)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, ms...)
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+func appToL4(app *Application) ([]L4Match, bool) {
 	proto, ok := appProtoNumber(app.Protocol)
 	if !ok {
 		return nil, false
@@ -67,8 +117,6 @@ func appL4Matches(cfg *Config, name string) (out []L4Match, ok bool) {
 		}
 		return []L4Match{{Proto: proto, Ports: ports}}, true
 	case HostInboundProtoICMP, HostInboundProtoICMPv6:
-		// A nil ICMPType means "every type of its protocol" (#3020), which
-		// covers any admitted ICMP tuple of that protocol.
 		return []L4Match{{Proto: proto, ICMPType: app.ICMPType}}, true
 	default:
 		return []L4Match{{Proto: proto}}, true
