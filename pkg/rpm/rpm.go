@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -1210,6 +1211,7 @@ func probeMeasurementIdentity(test *config.RPMTest, rethMap map[string]string) s
 	return strings.Join([]string{
 		test.EffectiveProbeType(),
 		test.Target,
+		strconv.Itoa(test.EffectiveDestinationPort()),
 		test.SourceAddress,
 		test.RoutingInstance,
 		test.NextHop,

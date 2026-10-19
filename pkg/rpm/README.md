@@ -85,7 +85,9 @@ out-of-range value to a warning.
   covers `cfg.RethToPhysical()`, so any RETH-member change reopened the
   gate. `Apply` now snapshots the prior results first and carries a
   test's runtime state forward when `probeMeasurementIdentity` — probe
-  type, target, source, routing-instance, next-hop, and the destination
+  type, target, destination port (`EffectiveDestinationPort()`, so an
+  implicit default and an explicit `80` are the same measurement),
+  source, routing-instance, next-hop, and the destination
   interface AFTER RETH translation — is unchanged. A new test, a
   retargeted one, or one whose path moved correctly starts as `"unknown"`;
   a key the config dropped stays ABSENT, which ip-monitoring needs to
