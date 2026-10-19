@@ -951,20 +951,36 @@ func compileDynamicAddress(node *Node, sec *SecurityConfig) error {
 				}
 			case "feed-name":
 				appendFeedEntry := func(entry FeedEntry) {
-					if fs.FeedName != "" {
+					// #15682: upsert by feed name within this server. A
+					// bare `feed-name <feed>` (held in fs.FeedName or as a
+					// path-less entry) later refined with `path <path>`,
+					// and a path re-stated across merged blocks, are the
+					// SAME feed: update its path, never append a duplicate
+					// FeedEntry that the strict uniqueness gate would
+					// self-reject and the lenient feeds.Manager path would
+					// resolve to the path-less first entry.
+					if fs.FeedName == entry.Name {
+						fs.FeedName = ""
+						if entry.Path == "" {
+							if len(fs.FeedEntries) == 0 {
+								// Still a single bare feed: keep the
+								// single-feed FeedName representation.
+								fs.FeedName = entry.Name
+							}
+							return
+						}
+						// fall through: promote the bare feed to an entry
+					} else if fs.FeedName != "" {
 						fs.FeedEntries = append(fs.FeedEntries, FeedEntry{Name: fs.FeedName})
 						fs.FeedName = ""
 					}
-					// Identical re-statements are idempotent (Junos set
-					// semantics): do not accumulate duplicates that the
-					// strict uniqueness gate would then reject.
-					for _, existing := range fs.FeedEntries {
-						if existing == entry {
+					for i := range fs.FeedEntries {
+						if fs.FeedEntries[i].Name == entry.Name {
+							if entry.Path != "" {
+								fs.FeedEntries[i].Path = entry.Path
+							}
 							return
 						}
-					}
-					if fs.FeedName == entry.Name && entry.Path == "" {
-						return
 					}
 					fs.FeedEntries = append(fs.FeedEntries, entry)
 				}
@@ -1030,7 +1046,19 @@ func compileDynamicAddress(node *Node, sec *SecurityConfig) error {
 				switch c.Name() {
 				case "feed-name":
 					if fn := nodeVal(c); fn != "" {
-						ab.FeedNames = append(ab.FeedNames, fn)
+						// #15682: dedup before appending; repeated
+						// profile blocks / re-statements name the same
+						// feed once.
+						found := false
+						for _, existing := range ab.FeedNames {
+							if existing == fn {
+								found = true
+								break
+							}
+						}
+						if !found {
+							ab.FeedNames = append(ab.FeedNames, fn)
+						}
 					}
 				case "fail-mode":
 					// #9689: retain (default) or drop.
