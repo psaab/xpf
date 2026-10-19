@@ -586,6 +586,65 @@ func managedAuthorizedKeysPath(name string) string {
 	return filepath.Join(homeBaseDir, filepath.Base(filepath.Clean(name)), ".ssh", "authorized_keys")
 }
 
+// checkSSHPathNotSymlink refuses a symlinked path component in the
+// user-writable .ssh tree (#14970, D31-02). /home/<user>/.ssh is writable by
+// the (possibly unprivileged, possibly compromised) login user, while the
+// daemon acts on it as root: os.Chown follows a planted .ssh symlink and
+// re-owns the TARGET directory, fsatomic.WriteFileDurable creates its temp
+// file inside the target and renames over the target's authorized_keys, and
+// os.Remove on a path whose intermediate component is a link unlinks the
+// RESOLVED file. Lstat does not follow the final component, so a planted
+// link is seen and refused before any of those operations. An absent path
+// is not a refusal (creation/removal proceeds to its normal NotExist
+// handling); any other Lstat error fails closed.
+func checkSSHPathNotSymlink(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("lstat %s: %w", path, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		target, _ := os.Readlink(path)
+		return fmt.Errorf("%s is a symlink to %s; refusing to operate on a login user's .ssh path through a symlink (#14970)", path, target)
+	}
+	return nil
+}
+
+// ensureSSHDirSafeForWrite gates the authorized_keys WRITE path: neither the
+// .ssh directory nor an existing authorized_keys inside it may be a symlink.
+// Checked before MkdirAll/Chown/WriteFile and again immediately before the
+// durable write, so a pre-planted link is never chowned or written through.
+// A link swapped in between the final check and the write remains a TOCTOU
+// residual, the same accepted class as the repo's other Lstat-then-act
+// guards; closing it fully would require openat2/O_NOFOLLOW directory
+// plumbing through fsatomic.
+func ensureSSHDirSafeForWrite(sshDir string) error {
+	if err := checkSSHPathNotSymlink(sshDir); err != nil {
+		return err
+	}
+	return checkSSHPathNotSymlink(filepath.Join(sshDir, "authorized_keys"))
+}
+
+// removeManagedAuthorizedKeys removes the xpf-managed authorized_keys for
+// name WITHOUT following a planted symlink (#14970): if .ssh or the key file
+// itself is a symlink, the removal is refused (an error, so callers keep
+// their provenance markers and retry/report) rather than unlinking the
+// resolved victim file outside the user's .ssh tree. The returned error is
+// the raw os.Remove error otherwise, so existing os.IsNotExist handling at
+// the call sites is unchanged.
+func removeManagedAuthorizedKeys(name string) error {
+	keysFile := managedAuthorizedKeysPath(name)
+	if err := checkSSHPathNotSymlink(filepath.Dir(keysFile)); err != nil {
+		return err
+	}
+	if err := checkSSHPathNotSymlink(keysFile); err != nil {
+		return err
+	}
+	return os.Remove(keysFile)
+}
+
 // reconcileAbsentLoginUsers revokes the host credentials of every
 // xpf-provisioned login account that is NO LONGER present in
 // cfg.System.Login.Users (#5128). Declarative removal of a `system login user`
@@ -880,6 +939,9 @@ func (d *Daemon) deprovisionLoginUser(name string) (retErr error) {
 	// commit may have re-presented the user and its keys while this owner was
 	// blocked in chpasswd; skip those keys, or restore them before completion
 	// if the promotion raced the unlink.
+	// #14970: the removal goes through removeManagedAuthorizedKeys, which
+	// refuses a symlinked .ssh/authorized_keys instead of deleting the
+	// resolved victim file (markers kept, retry next apply).
 	if ownsKey {
 		keysFile := managedAuthorizedKeysPath(name)
 		// Refresh immediately before unlinking; a password operation above
@@ -887,7 +949,7 @@ func (d *Daemon) deprovisionLoginUser(name string) (retErr error) {
 		liveUser, liveDesired = d.liveDesiredLoginUser12169(name)
 		if liveDesired && len(liveUser.SSHKeys) > 0 {
 			staleRevocationSuperseded12169("remove-user-keys", name)
-		} else if err := os.Remove(keysFile); err != nil && !os.IsNotExist(err) {
+		} else if err := removeManagedAuthorizedKeys(name); err != nil && !os.IsNotExist(err) {
 			slog.Warn("failed to remove authorized_keys for removed login user",
 				"user", name, "file", keysFile, "err", err)
 			fail(fmt.Errorf("remove authorized_keys for removed user %s: %w", name, err))
