@@ -148,6 +148,27 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	// #15685 — reject a `security dynamic-address address-name <name>` that
+	// shares its name with a static `address`/`address-set` (global or
+	// zone-local). Userspace lowering checks a declared binding BEFORE the
+	// static book, so while the feed is unready (or the binding has no
+	// profile feed-name at all) the name lowers to __unsupported_address__
+	// and rejects the whole snapshot instead of enforcing the static entry;
+	// once ready it enforces the union — never the single meaning either
+	// stanza declares. MUST run here, on the PRISTINE books BEFORE the
+	// zone-local fold, because bindings are keyed by authored name and the
+	// userspace lookup unqualifies zone-local tokens back to that name.
+	// Strict on commit / commit-check; tolerant load / peer-sync downgrades
+	// to a warning (lenientDynamicAddressFeedRef, #1960 no-brick) — the
+	// runtime stays fail-closed for the name while its feed is unready.
+	if err := validateDynamicAddressStaticCollisionStrict(cfg); err != nil {
+		if opts.lenientDynamicAddressFeedRef {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("dynamic-address/static address-book collision (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	// #10688 — an IPv4-mapped IPv6 address-book prefix is currently folded into
 	// prefixes_v4 by Go, but parsed as IPv6 by the helper. Reject it before the
 	// zone-local fold so the error names the authored entry; tolerant loads keep
