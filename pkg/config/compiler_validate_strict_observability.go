@@ -485,7 +485,8 @@ func validateDynamicAddressFeedNameUniquenessStrict(cfg *Config) error {
 
 // validateDynamicAddressFeedReferencesStrict hard-rejects a
 // `security dynamic-address address-name <addr> profile feed-name <feed>`
-// binding whose `<feed>` resolves to no declared feed (#3300). The
+// binding whose `<feed>` resolves to no declared feed (#3300), and — since
+// #15685 — a binding with NO `profile feed-name` at all. The
 // address-name→feed binding is recorded verbatim into
 // AddressBinding.FeedNames with no cross-reference against the configured
 // feed-servers (compileDynamicAddress in compiler_services.go), and at
@@ -495,13 +496,16 @@ func validateDynamicAddressFeedNameUniquenessStrict(cfg *Config) error {
 // prefix set (#5645), so the binding name stays UNRESOLVED and the policy
 // lowering compiles it to __unsupported_address__ → whole-snapshot preflight
 // reject → fail-closed (previous-good retained, or fresh-boot default-deny).
+// A binding with zero FeedNames is unresolvable by construction — no fetch
+// can ever populate it — yet before #15685 it committed clean because this
+// gate only iterated present FeedNames, and it shadowed any same-named
+// static address-book entry at lowering (the declared-binding guard runs
+// before the static-book lookup). Junos requires `profile feed-name` at
+// commit check; this gate restores that behavior for both shapes.
 // The runtime fail-closed posture is correct for "feed declared but not yet
 // fetched", but a TYPO in the feed-name is indistinguishable from that at
 // runtime — it too fails closed (the referencing deny is enforced via
-// default-deny, not silently ignored), with no commit error. Junos rejects
-// an address-name whose profile
-// feed-name does not resolve to a declared feed at commit; this gate
-// restores that behavior.
+// default-deny, not silently ignored), with no commit error.
 //
 // The valid feed-name set mirrors the keys feeds.Manager registers (feeds.go
 // Start): a feed-server with per-feed entries contributes each FeedEntry.Name;
@@ -566,6 +570,17 @@ func validateDynamicAddressFeedReferencesStrict(cfg *Config) error {
 		ab := da.AddressBindings[name]
 		if ab == nil {
 			continue
+		}
+		if len(ab.FeedNames) == 0 {
+			return fmt.Errorf("security dynamic-address address-name %q "+
+				"has no profile feed-name configured (declare "+
+				"`profile feed-name <feed>` naming a feed under a "+
+				"dynamic-address feed-server; a binding with no feed can "+
+				"never resolve, so at runtime it is OMITTED and lowers to "+
+				"the __unsupported_address__ sentinel, the userspace "+
+				"snapshot preflight REJECTS the whole publication, and "+
+				"any same-named static address-book entry is shadowed — "+
+				"#15685)", name)
 		}
 		for _, fn := range ab.FeedNames {
 			if fn == "" || declared[fn] {
