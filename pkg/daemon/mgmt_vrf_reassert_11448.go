@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/routing"
 )
 
 var mgmtVRFReassertInterval = 30 * time.Second
@@ -36,11 +37,12 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 		return
 	}
 	bindingChanged := d.activeTransport().BindingChanged
+	missing := d.routing != nil && d.mgmtVRFMissing()
 	var drifted []string
-	if d.routing != nil {
+	if d.routing != nil && !missing {
 		drifted = d.mgmtVRFInterfacesOutsideVRF()
 	}
-	if len(drifted) == 0 && !bindingChanged {
+	if !missing && len(drifted) == 0 && !bindingChanged {
 		return
 	}
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
@@ -48,6 +50,15 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 	}
 	defer d.applySem.Release(1)
 
+	// #15223: re-create a deleted vrf-mgmt before deriving drift, so the
+	// bind pass below runs against the new device index in the same tick.
+	if d.routing != nil && d.mgmtVRFMissing() {
+		if !d.ensureVRFDeviceForReassert(routing.VRFSpec{
+			Name: config.ManagementVRFInstanceName, TableID: config.ManagementVRFTableID,
+		}) {
+			return
+		}
+	}
 	bindingChanged = d.activeTransport().BindingChanged
 	drifted = nil
 	if d.routing != nil {
@@ -83,9 +94,22 @@ func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 	}
 }
 
+// mgmtVRFMissing reports whether the last apply managed vrf-mgmt (the
+// published set is non-empty) but its device is now absent — deleted out
+// of band (#15223). With no published set the device is not desired and
+// must never be created here.
+func (d *Daemon) mgmtVRFMissing() bool {
+	if len(d.mgmtVRFIfaceSet()) == 0 {
+		return false
+	}
+	return d.vrfDeviceMissing(config.ManagementVRFDeviceName)
+}
+
 // mgmtVRFInterfacesOutsideVRF reports published management interfaces whose
-// kernel master differs from vrf-mgmt. Missing links and a missing VRF device
-// are left to the normal apply/reconcile owners; healthy links cause no writes.
+// kernel master differs from vrf-mgmt. Missing member links are left to
+// their normal owners; healthy links cause no writes. A missing VRF device
+// yields no drift here — reassertMgmtVRFOnce handles it via mgmtVRFMissing
+// and re-derives drift after re-creating the device (#15223).
 func (d *Daemon) mgmtVRFInterfacesOutsideVRF() []string {
 	mgmtSet := d.mgmtVRFIfaceSet()
 	if len(mgmtSet) == 0 {

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/routing"
+	"github.com/vishvananda/netlink"
 )
 
 // #9813, tenant half. A routing-instance `interface` list member is bound to
@@ -86,7 +88,10 @@ func (d *Daemon) reassertRIMemberVRFOnce(ctx context.Context) {
 // rebindRIMembersOutsideTheirVRF restores desired list members, detaches
 // quarantined conflicts, and identity-gated-detaches unclaimed slaves from
 // surviving routing-instance VRFs. Unrelated masters are never detached.
+// A desired VRF device deleted out of band is re-created first (#15223),
+// once per instance, so its members bind in the same tick.
 func (d *Daemon) rebindRIMembersOutsideTheirVRF(cfg *config.Config) {
+	ensured := make(map[string]bool)
 	for _, m := range d.riMembersOutsideTheirVRF(cfg) {
 		if m.conflict != nil {
 			d.detachRIMemberDeviceConflict(*m.conflict)
@@ -95,6 +100,22 @@ func (d *Daemon) rebindRIMembersOutsideTheirVRF(cfg *config.Config) {
 		if m.unbind {
 			d.detachRemovedRIMemberFromVRF(m)
 			continue
+		}
+		if m.needsDevice {
+			if !ensured[m.instance] {
+				ensured[m.instance] = true
+				if !d.ensureVRFDeviceForReassert(routing.VRFSpec{Name: m.instance, TableID: m.tableID}) {
+					continue
+				}
+			}
+			// Re-derive this member's drift against the re-created device:
+			// skip only if it is already enslaved to it.
+			if vrf, err := d.fabricLinkByName("vrf-" + m.instance); err == nil && vrf != nil && vrf.Attrs() != nil {
+				if link, err := d.fabricLinkByName(m.linuxName); err == nil && link != nil && link.Attrs() != nil &&
+					link.Attrs().MasterIndex == vrf.Attrs().Index && vrf.Attrs().Index != 0 {
+					continue
+				}
+			}
 		}
 		slog.Warn("routing-instance member outside its VRF — re-binding",
 			"interface", m.linuxName, "instance", m.instance)
@@ -120,12 +141,16 @@ func (d *Daemon) detachRemovedRIMemberFromVRF(member riMember) {
 
 // riMember names one routing-instance list member that needs reconciliation.
 // A non-nil conflict requests a safe detach; unbind marks a kernel VRF slave
-// that no current routing-instance member or tunnel claim wants.
+// that no current routing-instance member or tunnel claim wants. needsDevice
+// marks a member whose desired VRF device is absent (#15223): the rebind
+// pass re-creates it (with tableID) before binding.
 type riMember struct {
-	linuxName string
-	instance  string
-	conflict  *config.RoutingInstanceMemberDeviceConflict
-	unbind    bool
+	linuxName   string
+	instance    string
+	conflict    *config.RoutingInstanceMemberDeviceConflict
+	unbind      bool
+	needsDevice bool
+	tableID     int
 }
 
 // riMemberDeviceConflicts combines freshly derived ambiguity with evidence
@@ -224,8 +249,11 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 			desiredDevices[key.LinuxName] = struct{}{}
 		}
 		vrf, err := d.fabricLinkByName("vrf-" + ri.Name)
-		if err != nil || vrf == nil || vrf.Attrs() == nil {
-			continue // no VRF device on the box: ReconcileVRFs owns creating it
+		deviceMissing := err != nil || vrf == nil || vrf.Attrs() == nil
+		if !deviceMissing {
+			if _, ok := vrf.(*netlink.Vrf); !ok {
+				continue // foreign occupant: never bind into a non-VRF (#12062)
+			}
 		}
 		for _, key := range keys {
 			linuxName := key.LinuxName
@@ -241,6 +269,15 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 			link, err := d.fabricLinkByName(linuxName)
 			if err != nil || link == nil || link.Attrs() == nil {
 				continue // absent on this chassis
+			}
+			if deviceMissing {
+				// #15223: desired device deleted out of band. Emit the
+				// member so the rebind pass re-creates the device and
+				// binds it in the same tick, instead of skipping until
+				// the next apply. No stale-slave enumeration runs below
+				// for this instance without its device.
+				out = append(out, riMember{linuxName: linuxName, instance: ri.Name, needsDevice: true, tableID: ri.TableID})
+				continue
 			}
 			if link.Attrs().MasterIndex == vrf.Attrs().Index {
 				continue // already a member
