@@ -671,6 +671,22 @@ func (s *Server) ReconcileHTTPSAddrs(useTLS bool, addrs []string) error {
 	if !useTLS {
 		addrs = nil
 	}
+	// #15228 A44-04: keep the cert host set in step with the DESIRED
+	// HTTPS set, not only the construction-time Config. Without this a
+	// single-stack-constructed server reconciled to dual-stack minted
+	// (on a fresh durable dir) a cert covering only the first host.
+	if useTLS && len(addrs) > 0 {
+		hosts := make([]string, 0, len(addrs))
+		for _, a := range addrs {
+			if h, _, err := net.SplitHostPort(a); err == nil && h != "" {
+				hosts = append(hosts, h)
+			}
+		}
+		if len(hosts) > 0 {
+			captured := hosts
+			s.httpsBindHosts = func() []string { return captured }
+		}
+	}
 	return s.reconcileLegsLocked(addrs, true)
 }
 

@@ -521,7 +521,18 @@ func (c *xpfCollector) collectInterfaceCounters(ch chan<- prometheus.Metric, dp 
 		return
 	}
 
+	// #15228 A44-05: de-duplicate by resolved ifindex. allInterfaceNames
+	// unions config base names (ge-0/0/0) with zone unit names
+	// (ge-0/0/0.0); both resolve to the same kernel ifindex, so emitting
+	// per name double-counts unit-0 interfaces. First name (sorted for
+	// determinism) wins as the label.
+	names := make([]string, 0, len(allInterfaceNames(cfg)))
 	for ifName := range allInterfaceNames(cfg) {
+		names = append(names, ifName)
+	}
+	sort.Strings(names)
+	seenIfindex := make(map[int]string)
+	for _, ifName := range names {
 		// Translate Junos config name to Linux kernel ifname (#1565).
 		iface, err := net.InterfaceByName(cfg.ResolveKernelIfName(ifName))
 		if err != nil {
@@ -529,15 +540,15 @@ func (c *xpfCollector) collectInterfaceCounters(ch chan<- prometheus.Metric, dp 
 			c.interfaceCounterReadErrors.Add(1)
 			continue
 		}
+		if _, dup := seenIfindex[iface.Index]; dup {
+			continue
+		}
+		seenIfindex[iface.Index] = ifName
 		ctrs, err := dp.ReadInterfaceCounters(iface.Index)
 		if err != nil {
 			// #3464: a per-interface counter-read failure SKIPS this
 			// interface's samples (no misleading 0) and bumps
-			// xpf_interface_counter_read_errors_total — the interface-counter
-			// analogue of the #3345/#3408 security-counter contract (skip, do
-			// not emit a 0). The interface error metric is intentionally
-			// SEPARATE from xpf_counter_read_errors_total (interface counters
-			// are out of the security-counter contract; #3464).
+			// xpf_interface_counter_read_errors_total.
 			c.interfaceCounterReadErrors.Add(1)
 			continue
 		}

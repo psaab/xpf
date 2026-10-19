@@ -8,6 +8,12 @@ xpf (0.0.0) unstable; urgency=medium
     symlink is left untouched, and seed-runtime skips sbin entries
     that are not its own staged/current links, so package removal
     can no longer delete an operator's original file (#15240).
+  * Clamp a zoned link-local web-management bind (fe80::...%iface)
+    without api-auth to the IPv6 loopback [::1] instead of duplicating
+    the IPv4 loopback leg, mint a fresh dual-stack HTTPS certificate
+    covering every reconciled bind host (not only the construction
+    set), and emit each kernel interface's Prometheus counters once
+    when both the base and unit-0 spellings are configured (#15228).
 
   * Reject a single-rate firewall policer missing either
     if-exceeding bandwidth-limit or burst-size-limit at strict
