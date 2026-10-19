@@ -7654,6 +7654,74 @@ fn the_two_warn_texts_are_distinguishable_7888() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// #15245 (A64-01) — the pre-session screen stage must not allocate per packet
+// for a zone whose screen profile is inert or missing. The WARN rate-counter
+// lookup used `entry(zone.to_string())` (an owned key on every packet) and,
+// for inert zones, cloned the profile name before knowing whether the WARN
+// was rate-limited. Steady state (counter already inserted, WARN suppressed)
+// must read 0 allocations through the real `check_packet` path.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unresolved_warn_steady_state_is_allocation_free_15245() {
+    let src = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1));
+    let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2));
+    let pkt = tcp_pkt(src, dst, 5000, 80, TCP_SYN);
+
+    // Inert: warm the counter (first packet emits the WARN and inserts the
+    // key), then a rate-limited packet in the same second must not allocate.
+    let mut inert = inert_ref_state("trust", "p");
+    assert_eq!(inert.check_packet("trust", &pkt, 1), ScreenVerdict::Pass);
+    assert_eq!(inert.inert_profile_warn_count(), 1);
+    let (verdict, allocs) =
+        crate::test_alloc::count_allocs(|| inert.check_packet("trust", &pkt, 1));
+    assert_eq!(verdict, ScreenVerdict::Pass);
+    assert_eq!(
+        allocs, 0,
+        "#15245: a rate-limited packet to an inert-profile zone must not allocate \
+         (reverting to `r.profile.clone()` + `entry(zone.to_string())` makes this 2)"
+    );
+    assert_eq!(
+        inert.inert_profile_warn_count(),
+        1,
+        "still rate-limited"
+    );
+
+    // Missing/undefined: same steady-state probe through the missing map.
+    let mut missing = missing_ref_state("trust", "ghost");
+    assert_eq!(missing.check_packet("trust", &pkt, 1), ScreenVerdict::Pass);
+    assert_eq!(missing.missing_profile_warn_count(), 1);
+    let (verdict, allocs) =
+        crate::test_alloc::count_allocs(|| missing.check_packet("trust", &pkt, 1));
+    assert_eq!(verdict, ScreenVerdict::Pass);
+    assert_eq!(
+        allocs, 0,
+        "#15245: a rate-limited packet to a missing-profile zone must not allocate \
+         (reverting to `entry(zone.to_string())` makes this 1)"
+    );
+    assert_eq!(
+        missing.missing_profile_warn_count(),
+        1,
+        "still rate-limited"
+    );
+
+    // Control: after a quiet gap both zones re-WARN exactly once (the
+    // `!limited` branch still borrows the profile name correctly).
+    assert_eq!(inert.check_packet("trust", &pkt, 10), ScreenVerdict::Pass);
+    assert_eq!(
+        inert.inert_profile_warn_count(),
+        2,
+        "inert re-WARN after gap"
+    );
+    assert_eq!(missing.check_packet("trust", &pkt, 10), ScreenVerdict::Pass);
+    assert_eq!(
+        missing.missing_profile_warn_count(),
+        2,
+        "missing re-WARN after gap"
+    );
+}
+
 // #6860 closed an all-or-nothing hole: with NO resolved profiles the screen
 // stage was skipped entirely, so the missing-profile WARN never fired. An
 // inert-only config has the same shape — no `zones` entry and no missing ref —
