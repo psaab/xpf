@@ -73,12 +73,14 @@ func (s *frrHADemotionState) filterProtocols(cfg *config.Config, protocols confi
 // filterStaticRoutes drops (or prunes next-hops of) static routes whose
 // egress belongs to a redundancy group this node does not own (#15734).
 //
-// A static route's egress is attributed two ways, mirroring the scopes
-// the dynamic-protocol filters already use:
+// A static route's egress is attributed two ways:
 //   - an explicit next-hop interface (operator-qualified, or the IPv6
 //     next-hop interface inferred from the connected prefixes) names the
-//     egress directly;
+//     egress directly — but ONLY a RETH-attributed interface is RG-scoped
+//     (#15783); a node-local interface exists on both nodes regardless of
+//     RG0, so it never demotes a static hop;
 //   - a next-hop ADDRESS inside an egress interface's connected prefix
+//     (configured Addresses or vrrp-group VirtualAddresses, #15783)
 //     attributes the route even when no interface was named — that is
 //     how FRR itself decides the route is active (the zebra connected
 //     route must exist), so it is the same fact the FIB build consumes.
@@ -134,22 +136,48 @@ func (s *frrHADemotionState) filterStaticRoutes(cfg *config.Config, routes []*co
 }
 
 // staticHopActive reports whether one static next-hop's egress is owned
-// by an active RG (or is not RETH-attributable at all).
+// by an active RG (or is not RETH-attributable at all, #15783).
+//
+// The 'not RETH-attributable → active' contract binds THIS function;
+// the shared inactiveInterface helper cannot express it for statics: its
+// !matched fallthrough follows instance groups and then RG0 (globalActive),
+// which is correct for dynamic PROTOCOL peerings/IGPs (a non-RETH peering
+// has no data-RETH address and must follow cluster control ownership) but
+// wrong for a static route whose egress is a node-local connected
+// interface — those interfaces exist on BOTH nodes regardless of RG0.
+// So statics resolve interface attribution STRICTLY: only an interface
+// matched to a configured RETH RG (base/unit refs, canonicalised) is
+// RG-scoped; anything else (plain ge/xe/lo, undeclared) stays active.
+// instanceGroups/RG0 never demote a static hop.
+//
+// Address attribution mirrors that split: the RETH walk enumerates each
+// unit's configured Addresses AND its vrrp-group VirtualAddresses'
+// prefixes (#15783 — a next-hop inside a VIP subnet egresses via the RETH
+// even when no configured host address covers it). The fallback scan then
+// attributes a hop contained in a NON-RETH connected prefix to that
+// node-local interface (active), so a RETH prefix lying outside this
+// node's reachable ordering cannot swallow a plain-interface hop whose
+// zebra connected route exists here.
 func (s *frrHADemotionState) staticHopActive(cfg *config.Config, hop config.NextHopEntry, v6NextHopInterfaces map[string]string, instanceGroups []int) bool {
 	iface := hop.Interface
 	if iface == "" && v6NextHopInterfaces != nil {
 		iface = v6NextHopInterfaces[hop.Address]
 	}
 	if iface != "" {
-		return !s.inactiveInterface(cfg, iface, instanceGroups)
+		return !s.staticInactiveInterface(cfg, iface)
 	}
 	addr, err := netip.ParseAddr(hop.Address)
 	if err != nil {
 		return true // unparseable: not attributable, keep (render validates)
 	}
-	// Attribute by connected prefix: a RETH unit whose prefix contains
-	// the next-hop owns the route's egress. Scan RG ids in order so
-	// overlapping prefixes resolve deterministically.
+	rethAttribution := ""
+	localAttribution := false
+	if cfg == nil {
+		return true
+	}
+	// Scan RETH-owned interfaces first (deterministic RG order so
+	// overlapping prefixes resolve stably), then require that no
+	// node-local (non-RETH) connected prefix claims the hop instead.
 	owners := cfg.RethRGOwners()
 	rgIDs := make([]int, 0, len(owners))
 	byRG := make(map[int][]string)
@@ -167,22 +195,108 @@ func (s *frrHADemotionState) staticHopActive(cfg *config.Config, hop config.Next
 				continue
 			}
 			for _, unit := range ifc.Units {
-				if unit == nil {
-					continue
-				}
-				for _, cidr := range unit.Addresses {
-					prefix, err := netip.ParsePrefix(cidr)
-					if err != nil || prefix.Addr().Is4() != addr.Is4() {
-						continue
+				if unitAddressOrVRRPContains(unit, addr) {
+					rethAttribution = name
+					if s.active[rgID] {
+						return true
 					}
-					if prefix.Masked().Contains(addr) {
-						return s.active[rgID]
-					}
+					// Inactive owner found; a later RETH owner could
+					// still be active under an overlap, so keep scanning
+					// RETH owners before consulting node-local prefixes.
+					break
 				}
 			}
 		}
 	}
-	return true // no RETH prefix claims it: not RG-scoped
+	// A hop in any non-RETH connected prefix (configured address or
+	// vrrp-group virtual address of a plain interface) is node-local.
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		if _, isRETH := owners[name]; isRETH {
+			continue
+		}
+		for _, unit := range ifc.Units {
+			if unitAddressOrVRRPContains(unit, addr) {
+				localAttribution = true
+				break
+			}
+		}
+		if localAttribution {
+			break
+		}
+	}
+	if localAttribution {
+		// #15783 node-local override: a hop also covered by a non-RETH
+		// connected prefix resolves via that node-local connected route
+		// on this node even when an inactive RG's RETH prefix covers it
+		// too, so zebra can resolve it here; keep it.
+		return true
+	}
+	if rethAttribution != "" {
+		return false // claimed only by RETH owner(s), none active (active returned above)
+	}
+	return true // no prefix claims it: not RG-scoped
+}
+
+// unitAddressOrVRRPContains reports whether addr lies in any configured
+// address prefix or vrrp-group virtual-address prefix of unit (#15783).
+// Virtual addresses may be bare host literals (tolerant load before
+// normalization); those contribute their host prefix. Prefix length is
+// NOT inherited from a sibling unit address — that would invent a
+// subnet the operator never configured.
+func unitAddressOrVRRPContains(unit *config.InterfaceUnit, addr netip.Addr) bool {
+	if unit == nil {
+		return false
+	}
+	for _, cidr := range unit.Addresses {
+		if prefixContainsAddr(cidr, addr) {
+			return true
+		}
+	}
+	for _, group := range unit.VRRPGroups {
+		if group == nil {
+			continue
+		}
+		for _, vip := range group.VirtualAddresses {
+			if prefixContainsAddr(vip, addr) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// prefixContainsAddr parses value as a prefix (bare literals become host
+// prefixes) and reports family-matching containment.
+func prefixContainsAddr(value string, addr netip.Addr) bool {
+	if prefix, err := netip.ParsePrefix(value); err == nil {
+		return prefix.Addr().Is4() == addr.Is4() && prefix.Masked().Contains(addr)
+	}
+	if host, err := netip.ParseAddr(value); err == nil {
+		return host.Is4() == addr.Is4() && host == addr
+	}
+	return false
+}
+
+// staticInactiveInterface is the static-route-only interface test: true
+// iff name is attributable to a configured RETH RG that is not locally
+// active. Unmatched interfaces are node-local and never inactive here,
+// REGARDLESS of RG0/globalActive or the route's routing-instance groups
+// — the #15783 contract. (Dynamic protocols keep inactiveInterface.)
+func (s *frrHADemotionState) staticInactiveInterface(cfg *config.Config, name string) bool {
+	matched := false
+	for rgID, interfaces := range s.rethInterfaces {
+		if !haInterfaceRefsMatch(cfg, interfaces, []string{name}) {
+			continue
+		}
+		matched = true
+		if s.active[rgID] {
+			return false
+		}
+	}
+	return matched
 }
 
 func (s *frrHADemotionState) inactiveInterface(cfg *config.Config, name string, instanceGroups []int) bool {
