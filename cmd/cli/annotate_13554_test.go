@@ -101,12 +101,16 @@ func TestDispatchConfigAnnotateVerbatimComment13554(t *testing.T) {
 
 // #13628: embedded quotes in the comment survive dispatch and are escaped on
 // the wire so Server.Set and the authorization lexer see one comment token.
+// #15760: under the canonical lexer split the comment must be authored as
+// ONE quoted token, so the escaped spelling (`"say \"hi\" team"`)
+// round-trips to the same escaped wire form; see the parity note below
+// for the unescaped spelling.
 func TestDispatchConfigAnnotateEmbeddedQuote13628(t *testing.T) {
 	fake := &annotateRecorder13554{}
 	c := configModeCtl(fake)
 	var dispatchErr error
 	captureStdout(t, func() {
-		dispatchErr = c.dispatchConfig(`annotate system host-name "say "hi" team"`)
+		dispatchErr = c.dispatchConfig(`annotate system host-name "say \"hi\" team"`)
 	})
 	if dispatchErr != nil {
 		t.Fatalf("dispatchConfig = %v", dispatchErr)
@@ -114,5 +118,28 @@ func TestDispatchConfigAnnotateEmbeddedQuote13628(t *testing.T) {
 	want := `annotate system host-name "say \"hi\" team"`
 	if len(fake.setInputs) != 1 || fake.setInputs[0] != want {
 		t.Fatalf("Set inputs = %v, want [%q]", fake.setInputs, want)
+	}
+
+	// #15760 parity note: dispatchConfig tokenizes with
+	// strings.Fields before this arm runs, so the unescaped
+	// `"say "hi" team"` spelling reaches the arm already split and
+	// the canonical parse of the remainder cannot recover the
+	// original quoting — the wire carries those tokens with the
+	// trailing token as the comment, as it did pre-#15760. The
+	// defect fixed here is the quoted-token corpus (the escaped
+	// wire form above and quoted path elements), where the old
+	// first-quote split truncated the path at the first '"'.
+	// Operators needing embedded quotes author the escaped form.
+	fake2 := &annotateRecorder13554{}
+	c2 := configModeCtl(fake2)
+	captureStdout(t, func() {
+		dispatchErr = c2.dispatchConfig(`annotate system host-name "say "hi" team"`)
+	})
+	if dispatchErr != nil {
+		t.Fatalf("dispatchConfig(unescaped) = %v", dispatchErr)
+	}
+	want2 := `annotate system host-name "say " hi " team"`
+	if len(fake2.setInputs) != 1 || fake2.setInputs[0] != want2 {
+		t.Fatalf("unescaped Set inputs = %v, want [%q]", fake2.setInputs, want2)
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/psaab/xpf/pkg/cliterm"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
@@ -149,14 +148,18 @@ func (s *Server) Set(ctx context.Context, req *pb.SetRequest) (*pb.SetResponse, 
 		return nil, status.Errorf(codes.PermissionDenied, "%v", err)
 	}
 	input := req.Input
-	fields := strings.Fields(input)
-	if len(fields) > 0 && fields[0] == "annotate" {
-		line := strings.TrimSpace(strings.TrimPrefix(input, fields[0]))
-		pathText, comment, ok := cliterm.AnnotateCommentFromLine(line)
-		if !ok || len(strings.Fields(pathText)) == 0 {
+	// #15760: route annotate on the lexed verb and split it with the
+	// canonical #14717 parser (ParseAnnotateCommand): the comment is
+	// the LAST token and only when authored quoted, so a quoted path
+	// element stays in the path. The previous first-quote split
+	// (cliterm.AnnotateCommentFromLine + strings.Fields) annotated a
+	// shorter path than the authorization gate adjudicated, with the
+	// rest of the line mangled into the comment.
+	if verb, isMutation := config.ConfigMutationVerb(input); isMutation && verb == "annotate" {
+		path, comment, ok := config.ParseAnnotateCommand(input)
+		if !ok || len(path) == 0 {
 			return nil, status.Error(codes.InvalidArgument, `usage: annotate <path> "comment"`)
 		}
-		path := strings.Fields(pathText)
 		if err := s.store.AnnotateAsPlantClass(sessionID, plantClass, path, comment); err != nil {
 			return nil, configMutationStatus(err)
 		}

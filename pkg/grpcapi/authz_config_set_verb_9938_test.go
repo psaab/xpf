@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
@@ -103,7 +104,19 @@ func TestEveryResolvedConfigLineIsVerbLed9938(t *testing.T) {
 func TestSetAnnotateRemainsVerbLedForConfigurationGate13554(t *testing.T) {
 	input := `annotate system host-name "edge fw"`
 	got := setLine9938(t, input)
-	if got != input {
-		t.Fatalf("Set annotate resolved to %q, want unchanged verb-led line %q", got, input)
+	// #15760: the pre-normalizer rebuilds the gate line from the
+	// canonical ParseAnnotateCommand split, quoting every path
+	// element (previously it rebuilt from the first-quote split,
+	// which produced the same shape for this bare-path input). The
+	// contract this cell pins is unchanged: the resolved line stays
+	// verb-led with the same lexed path and comment, so the gate
+	// adjudicates exactly what the handler acts on.
+	want := `annotate "system" "host-name" "edge fw"`
+	if got != want {
+		t.Fatalf("Set annotate resolved to %q, want verb-led canonical line %q (input %q)", got, want, input)
+	}
+	path, comment, ok := config.ParseAnnotateCommand(got)
+	if !ok || comment != "edge fw" || len(path) != 2 || path[0] != "system" || path[1] != "host-name" {
+		t.Fatalf("resolved line %q re-parses to path=%v comment=%q ok=%v, want [system host-name] / edge fw", got, path, comment, ok)
 	}
 }

@@ -200,21 +200,54 @@ func TestAnnotateAdmissionMatchesHandlerWhitespace13628(t *testing.T) {
 	}
 	for _, sep := range []string{" ", "\t"} {
 		t.Run(map[string]string{" ": "space", "\t": "tab"}[sep]+" embedded quotes", func(t *testing.T) {
-			req := &pb.SetRequest{
-				Input: "annotate" + sep + `system host-name "say "hi" team"`,
-			}
-			called := false
-			_, err := s.principalUnaryInterceptor(
-				ctxWithPeerUID(authzUIDOperator), req,
-				&grpc.UnaryServerInfo{FullMethod: pb.BpfrxService_Set_FullMethodName},
-				func(ctx context.Context, request any) (any, error) {
-					called = true
-					return s.Set(ctx, request.(*pb.SetRequest))
-				},
-			)
-			if status.Code(err) != codes.PermissionDenied || called {
-				t.Fatalf("embedded-quote annotate err=%v handlerCalled=%v, want PermissionDenied and no handler",
-					err, called)
+			// #15760: unescaped embedded quotes no longer form one
+			// lexer comment token. The canonical split takes the
+			// LAST quoted token as the comment, so this spelling
+			// lexes as path [system host-name say hi] + comment
+			// `team` — the denied `system host-name` node is not
+			// the adjudicated path, so the gate admits it and the
+			// handler fails on the nonexistent lexed path, exactly
+			// as the local CLI behaves. The #13628 wire form
+			// escapes the embedded quotes (`"say \"hi\" team"`,
+			// produced by cliterm.EscapeAnnotateComment on the
+			// remote CLI), which gate and handler both lex as the
+			// denied path with that one comment token. Assert
+			// both halves: the escaped wire form is denied at the
+			// gate, and the unescaped spelling never annotates
+			// the denied node (pre-#15760 it was denied only
+			// because the first-quote split coincidentally
+			// recovered `system host-name`).
+			for _, input := range []string{
+				"annotate" + sep + `system host-name "say "hi" team"`,
+				"annotate" + sep + `system host-name "say \"hi\" team"`,
+			} {
+				req := &pb.SetRequest{Input: input}
+				called := false
+				_, err := s.principalUnaryInterceptor(
+					ctxWithPeerUID(authzUIDOperator), req,
+					&grpc.UnaryServerInfo{FullMethod: pb.BpfrxService_Set_FullMethodName},
+					func(ctx context.Context, request any) (any, error) {
+						called = true
+						return s.Set(ctx, request.(*pb.SetRequest))
+					},
+				)
+				if strings.Contains(input, `\"`) {
+					if status.Code(err) != codes.PermissionDenied || called {
+						t.Fatalf("escaped embedded-quote annotate %q err=%v handlerCalled=%v, want PermissionDenied and no handler",
+							input, err, called)
+					}
+					continue
+				}
+				// Unescaped spelling: gate adjudicates the lexed
+				// path [system host-name say hi] (not denied), the
+				// handler acts on that same path and fails to find
+				// it — the denied node must not gain an annotation.
+				// (The seeded candidate already carries a `/* note */`
+				// from the earlier allowed subtest, so assert on this
+				// spelling's comment text, not on any annotation.)
+				if out := store.ShowCandidate(); strings.Contains(out, "/* team */") || strings.Contains(out, `say "hi"`) {
+					t.Fatalf("unescaped embedded-quote annotate %q mutated the candidate: err=%v\n%s", input, err, out)
+				}
 			}
 		})
 	}
