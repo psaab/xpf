@@ -78,6 +78,57 @@ func validateFirewallPolicerReferencesStrict(cfg *Config) error {
 	return check("inet6", cfg.Firewall.FiltersInet6)
 }
 
+// validateFirewallPolicerNameCollisionStrict hard-rejects a name defined
+// as BOTH `firewall policer <name>` and
+// `firewall three-color-policer <name>` (#15005, A09-01).
+//
+// The two definitions live in separate maps
+// (FirewallConfig.Policers / FirewallConfig.ThreeColorPolicers) but share
+// one operator-visible namespace: a filter term's `then policer <name>`
+// (and the userspace wire collections built from both maps) carries only
+// the bare name. The userspace filter compiler loads three-color
+// templates first and skips a single-rate policer whose name already
+// exists, so the collision silently enforces the three-color meter
+// instead of the single-rate rate limit the operator authored — the
+// configured limit is replaced with no diagnostic. There is no
+// `then three-color-policer` spelling that could disambiguate the
+// reference, so Junos-parity and fail-closed admission both require
+// rejecting the second namespace's reuse of the name at commit.
+//
+// Names are visited in sorted order so the first-reported error is
+// deterministic across runs (Go map order is randomized).
+//
+// On the tolerant load / peer-sync paths the call site downgrades this
+// to a warning (opts.lenientPolicerNameCollision) so an
+// already-persisted or peer-synced config carrying the collision still
+// BOOTS (#1960 no-brick); on that boot both definitions survive and the
+// dataplane keeps its pre-gate three-color precedence, now visible
+// instead of silent. Commit / commit-check stay strict.
+func validateFirewallPolicerNameCollisionStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Firewall.Policers))
+	for name := range cfg.Firewall.Policers {
+		if _, ok := cfg.Firewall.ThreeColorPolicers[name]; ok {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	name := names[0]
+	return fmt.Errorf(
+		"firewall policer %q is defined as both `firewall policer %s` and "+
+			"`firewall three-color-policer %s`; the two share one policer "+
+			"namespace, so `then policer %s` would silently enforce the "+
+			"three-color meter instead of the single-rate policer — rename "+
+			"one of the two definitions so every policer reference is "+
+			"unambiguous",
+		name, name, name, name)
+}
+
 // validateFirewallTCPFlagsStrict hard-rejects a firewall-filter term whose
 // `from tcp-flags <expr>` the conjunctive dataplane matcher cannot enforce —
 // a disjunction (`ack | rst`), a negated parenthesized group (a disjunction by
