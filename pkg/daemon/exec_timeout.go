@@ -34,6 +34,14 @@ var runCommandTimeout = func(name string, args ...string) ([]byte, error) {
 // runCommandStdinTimeout is runCommandTimeout with an optional stdin
 // (used by `chpasswd -e`, which reads the user:hash pair from stdin).
 func runCommandStdinTimeout(stdin io.Reader, name string, args ...string) ([]byte, error) {
+	// #14969: a superseded closeout owner must not spawn a credential
+	// mutation (chpasswd/useradd/usermod/id/chown/visudo/systemctl)
+	// after a newer host-auth authority has begun. Callers on goroutines
+	// with no captured generation (the normal tail, every non-host-auth
+	// exec user) are never refused.
+	if err := checkHostAuthSeam14969(); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), externalCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)

@@ -128,6 +128,11 @@ const (
 // host-inbound table — is not per-address scoped and still governs every local
 // address (the deliberate divergence from the #5789 gap fence).
 func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
+	// #14969: a superseded abandoned closeout owner abstains before
+	// rendering/installing stale lo0 state over a newer authority.
+	if seamErr := checkHostAuthSeam14969(); seamErr != nil {
+		return seamErr
+	}
 	// #10751/B1: publish this apply's lo0 outcome for the host-inbound
 	// handoff gate. The tail runs lo0 before host-inbound, so by the time
 	// the host-inbound branches decide on barrier removal this flag is fresh.
@@ -649,6 +654,11 @@ func mergeHostInboundAddressLists(first, second []string) []string {
 }
 
 func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *xnft.HostInputFenceOverlay) error {
+	// #14969: a superseded abandoned closeout owner abstains before
+	// rendering/installing stale host-inbound state (see applyLo0Filter).
+	if seamErr := checkHostAuthSeam14969(); seamErr != nil {
+		return seamErr
+	}
 	// #10751: converge the pre-handoff lifeline guard before doing anything
 	// else. Replaces any unit-installed global form (or heals a flush) so
 	// every later retention in this process admits recovery; fails the
