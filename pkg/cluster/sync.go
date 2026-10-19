@@ -833,8 +833,10 @@ type SessionSync struct {
 	// made and cannot express the predicate.
 	peerBootIncarnation bootIncarnation
 	// peerIdentity is the process identity of the peer incarnation that is
-	// currently authoritative. It is set by an accepted BulkStart and is
-	// deliberately distinct from peerBootIncarnation: the latter is a legacy
+	// currently authoritative. It is set by an accepted BulkStart (#15274:
+	// on every accepted prime whose connection carries a proven identity,
+	// not only the first incarnated prime) and cleared on full disconnect,
+	// and is deliberately distinct from peerBootIncarnation: the latter is a legacy
 	// boot-id fence, while this also carries the ordered daemon boot epoch
 	// (#9818). Guarded by mu.
 	peerIdentity peerProcessIdentity

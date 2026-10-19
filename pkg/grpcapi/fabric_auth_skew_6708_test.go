@@ -225,19 +225,21 @@ func TestSkewScanIsThrottled6708(t *testing.T) {
 		t.Fatalf("clause = %q, want it to name the clock", first)
 	}
 
-	// Past the interval it scans again. A token that is NOT skew-explained must
-	// now CLEAR the state rather than leaving a stale number asserted.
+	// Past the interval it scans again. #15274 C03-03: a token that is NOT
+	// skew-explained must NOT clear the measurement — it is unverifiable,
+	// not evidence the clocks agree — but its own rejection still carries
+	// no skew clause. Only noteFabricAuthOK clears (recovery cell below).
 	if got := scan(now.Add(fabricAuthSkewScanInterval + time.Second)); got != "" {
 		_ = got
 	}
 	s.fabricSkew.lastScanNanos.Store(0)
 	if got := s.noteFabricAuthSkew(countingKeys, strings.Repeat("cd", 32), now.Add(time.Minute)); got != "" {
-		t.Fatalf("an unexplained token still reported a skew (%q); the status "+
-			"surface would keep asserting a clock fault that no longer explains "+
-			"anything", got)
+		t.Fatalf("an unexplained token reported a skew clause (%q); an unverifiable "+
+			"token must not be labelled a clock problem", got)
 	}
-	if _, have := s.FabricPeerClockSkew(); have {
-		t.Fatal("a scan that explained nothing left the previous measurement latched")
+	if _, have := s.FabricPeerClockSkew(); !have {
+		t.Fatal("a scan that explained nothing erased the previous measurement; " +
+			"only a normally-verifying token (noteFabricAuthOK) may clear it (#15274)")
 	}
 	if scans == 0 {
 		t.Fatal("no scan ran at all; this cell asserts nothing")
