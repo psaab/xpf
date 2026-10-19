@@ -3,8 +3,83 @@ package upgrade
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"time"
 )
+
+// targetWireVerdict judges a TARGET binary's protocol constants (from its
+// `protocol-versions` probe) against the still-running peer (#14991). HA is
+// a window check (peer in [target floor, target HA]) and the session-sync
+// wire is exact-match — the same rules GateMixedBaseSwap applies to an
+// image, because after the cut it is the target, not the running daemon,
+// that must decode the peer's frames. An UNKNOWN peer wire (0, pre-#7990)
+// permits, mirroring cluster.SessionSyncWireCompatible; an unknown peer HA
+// (0/absent) refuses. A target that cannot prove its own constants is an
+// ERROR (the check cannot run), never a refusal about the peer.
+func targetWireVerdict(target *ImageVersions, peerWire uint16, peerHA uint16) (bool, string, error) {
+	if target == nil {
+		return false, "", fmt.Errorf("target binary protocol versions unavailable — the staged-target compatibility check cannot run")
+	}
+	for _, k := range requiredKeys {
+		if !target.has(k) {
+			return false, "", fmt.Errorf("target binary protocol versions missing %q — the staged-target compatibility check cannot run", k)
+		}
+	}
+	if peerHA == 0 {
+		return false, "peer HA protocol unknown (peer not advertising) — fail closed", nil
+	}
+	if peerHA < target.HAProtocolMinCompat || peerHA > target.HAProtocol {
+		return false, fmt.Sprintf("peer HA protocol %d outside target window [%d,%d] — the target binary cannot interoperate with the peer; use image-replace",
+			peerHA, target.HAProtocolMinCompat, target.HAProtocol), nil
+	}
+	if peerWire == 0 {
+		return true, "peer advertises no session-sync wire version (predates #7990) — permitted against the target binary", nil
+	}
+	if int(peerWire) != target.SessionSyncProtocol {
+		return false, fmt.Sprintf("target session-sync wire version %d differs from peer %d — after the cut the target could not decode the peer's synced sessions; use image-replace",
+			target.SessionSyncProtocol, peerWire), nil
+	}
+	return true, "target binary is protocol-compatible with the peer", nil
+}
+
+// checkTargetCompatible probes targetBin and refuses (pre-demotion) when
+// it cannot interoperate with the peer. op prefixes the operator message
+// ("rolling" / "rolling rollback").
+func checkTargetCompatible(r *Runner, cl RollingCluster, targetBin string, op string) error {
+	target, err := r.cfg.Sys.ProtocolVersions(targetBin)
+	if err != nil {
+		return fmt.Errorf("%s: probe staged target binary: %w", op, err)
+	}
+	_, peerHA, peerWire, peerPresent, err := cl.PeerProtocolVersions()
+	if err != nil {
+		return fmt.Errorf("%s: read peer protocol versions for staged target check: %w", op, err)
+	}
+	if !peerPresent {
+		return fmt.Errorf("%s: peer protocol versions not present in cluster status — the staged target check cannot run, and an unreadable instrument is not evidence of compatibility", op)
+	}
+	ok, reason, err := targetWireVerdict(target, peerWire, peerHA)
+	if err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	if !ok {
+		return fmt.Errorf("%s: staged target is NOT protocol-compatible with the peer (%s); use image-replace", op, reason)
+	}
+	return nil
+}
+
+// checkStagedTargetCompatible resolves the pinned staged generation the
+// forward cut will copy from and judges its xpfd against the peer.
+func checkStagedTargetCompatible(r *Runner, cl RollingCluster) error {
+	j, err := r.loadJournal()
+	if err != nil {
+		return fmt.Errorf("rolling: load journal for staged target check: %w", err)
+	}
+	_, srcDir, err := r.resolveSource(j)
+	if err != nil {
+		return fmt.Errorf("rolling: resolve staged target for compatibility check: %w", err)
+	}
+	return checkTargetCompatible(r, cl, filepath.Join(srcDir, "xpfd"), "rolling")
+}
 
 // RollingCluster is the cluster-control surface the rolling driver needs.
 // It is satisfied by a CLI/gRPC-backed implementation in production
@@ -30,6 +105,13 @@ type RollingCluster interface {
 	// are separate counters, so the claim was not merely loose but wrong. The
 	// session-sync half is SessionSyncWireCompatible below.
 	HAProtocolCompatible() (bool, error)
+	// PeerProtocolVersions reports the LOCAL and PEER HA protocol versions
+	// and the PEER session-sync wire version exactly as rendered in the
+	// status topic (#14991), so the rolling drivers can judge the TARGET
+	// binary against the peer that will still be running after the cut.
+	// peerHA/peerWire are 0 with present=false when the peer line is absent;
+	// a present-but-malformed value is an ERROR (fail closed), never 0.
+	PeerProtocolVersions() (localHA uint16, peerHA uint16, peerWire uint16, peerPresent bool, err error)
 	// SessionSyncWireCompatible reports whether the peer's session-sync WIRE
 	// version is known to be compatible with this node's, plus a reason for
 	// the log (#7990). An UNKNOWN peer version permits — see
@@ -179,12 +261,20 @@ func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, targ
 	if !synced {
 		return fmt.Errorf("rolling rollback: session sync not established — draining now would drop connections; aborting")
 	}
+	// #14991: the rollback TARGET binary (versions/<to>/xpfd) is the build
+	// that must interoperate with the still-running peer after the cut —
+	// not the currently running local daemon the legacy checks below
+	// describe. Refuse before demotion when the target cannot prove
+	// compatibility, or when the peer's versions cannot be read cleanly.
+	if err := checkTargetCompatible(r, cl, filepath.Join(r.versionDir(plan.toVersion), "xpfd"), "rolling rollback"); err != nil {
+		return err
+	}
 	compat, err := cl.HAProtocolCompatible()
 	if err != nil {
 		return fmt.Errorf("rolling rollback: check HA protocol compatibility: %w", err)
 	}
 	if !compat {
-		return fmt.Errorf("rolling rollback: HA/session-sync protocol is NOT compatible across the target; use image-replace")
+		return fmt.Errorf("rolling rollback: HA protocol is NOT compatible across the running pair; use image-replace")
 	}
 	syncOK, syncWhy, err := cl.SessionSyncWireCompatible()
 	if err != nil {
@@ -316,13 +406,20 @@ func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) 
 		return fmt.Errorf("rolling: session sync not established — draining now would " +
 			"drop connections; aborting (resolve sync or use image-replace)")
 	}
+	// #14991: judge the STAGED target binary against the still-running
+	// peer, not the running local daemon/CLI pair. Resolve the same pinned
+	// staged generation Runner.Run will copy from; an unresolvable source
+	// or an unprovable target fails closed before any demotion.
+	if err := checkStagedTargetCompatible(r, cl); err != nil {
+		return err
+	}
 	compat, err := cl.HAProtocolCompatible()
 	if err != nil {
 		return fmt.Errorf("rolling: check HA protocol compatibility: %w", err)
 	}
 	if !compat {
-		return fmt.Errorf("rolling: HA/session-sync protocol is NOT compatible across " +
-			"the staged version — this release is not rolling-upgradable; use " +
+		return fmt.Errorf("rolling: HA protocol is NOT compatible across " +
+			"the running pair — this release is not rolling-upgradable; use " +
 			"image-replace (Path C) with documented connection loss")
 	}
 

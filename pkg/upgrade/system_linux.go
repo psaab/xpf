@@ -201,6 +201,33 @@ func (s *realSystem) EnvelopeReaderVersion(bin string) (int, error) {
 		"in output %q", bin, strings.TrimSpace(out.String()))
 }
 
+// ProtocolVersions invokes the target binary's side-effect-free
+// `protocol-versions` probe (#14991) and parses the result with the same
+// fail-closed parser the image gate uses. A non-zero exit, unparseable
+// output, or a missing required protocol field is an error: the caller
+// must not gate a drain on a partial reading of the target binary.
+func (s *realSystem) ProtocolVersions(bin string) (*ImageVersions, error) {
+	cmd := exec.Command(bin, "protocol-versions")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%s protocol-versions: %w (output: %s)",
+			bin, err, strings.TrimSpace(out.String()))
+	}
+	iv, err := parseImageVersions(out.String())
+	if err != nil {
+		return nil, fmt.Errorf("%s protocol-versions: %w", bin, err)
+	}
+	for _, k := range requiredKeys {
+		if !iv.has(k) {
+			return nil, fmt.Errorf("%s protocol-versions: missing %q in output %q",
+				bin, k, strings.TrimSpace(out.String()))
+		}
+	}
+	return iv, nil
+}
+
 // unitActiveProbeCtx reports whether <unit>.service is active per `systemctl
 // is-active`, BOUNDED by ctx (#5808): a wedged systemctl / hung DBus is KILLED
 // when ctx is canceled (exec.CommandContext) instead of blocking the caller past

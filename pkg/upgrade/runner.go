@@ -111,6 +111,11 @@ type System interface {
 	// `--capability-check` probe and returns the envelope format major it can
 	// read. It MUST NOT start a daemon or mutate runtime state.
 	EnvelopeReaderVersion(bin string) (int, error)
+	// ProtocolVersions runs the target binary's pure `protocol-versions`
+	// probe (#14991) and parses its HA / session-sync protocol constants.
+	// It MUST NOT start a daemon or mutate runtime state. A malformed or
+	// incomplete probe fails closed (error), never a partial verdict.
+	ProtocolVersions(bin string) (*ImageVersions, error)
 	// HelperHealthy reports whether the running daemon's helper is healthy
 	// and reports the expected version within the deadline.
 	HelperHealthy(expectVersion string, deadline time.Duration) error
