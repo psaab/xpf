@@ -184,6 +184,13 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				}
 				passiveAreaByInterface[iface.Name] = firstArea
 			}
+		}
+		// Collect valid virtual links for a trailing stanza (#15016).
+		var virtualLinks15016 []struct {
+			area *config.OSPFArea
+			vl   *config.OSPFVirtualLink
+		}
+		for _, area := range ospf.Areas {
 			if area.AreaType != "" {
 				if !validFRROSPFArea(area.ID) {
 					slog.Warn("frr: omitting an OSPF area stanza with an invalid area id (#9820)",
@@ -206,7 +213,16 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 						"neighbor", sanitizeFRRValue(vl.NeighborID), "transit_area", sanitizeFRRValue(vl.TransitArea))
 					continue
 				}
-				fmt.Fprintf(&b, " area %s virtual-link %s\n", vl.TransitArea, vl.NeighborID)
+				// #15016: omit a VL whose transit is backbone/stub/NSSA.
+				if reason := config.VirtualLinkTransitInvalid15016(ospf, vl); reason != "" {
+					slog.Warn("frr: omitting an OSPF virtual-link with an invalid transit area (#15016)",
+						"neighbor", sanitizeFRRValue(vl.NeighborID), "transit_area", sanitizeFRRValue(vl.TransitArea), "reason", reason)
+					continue
+				}
+				virtualLinks15016 = append(virtualLinks15016, struct {
+					area *config.OSPFArea
+					vl   *config.OSPFVirtualLink
+				}{area, vl})
 			}
 		}
 		if ecmpMaxPaths > 1 {
@@ -382,6 +398,18 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			} else {
 				slog.Warn("frr: omitting an OSPF interface area activation with an invalid area id (#9820)",
 					"area", sanitizeFRRValue(state.area.id), "interface", sanitizeFRRValue(iface.Name))
+			}
+			b.WriteString("exit\n!\n")
+		}
+		// #15016: emit virtual links in a second router ospf stanza after
+		// interface activation, so FRR has the transit area on first load.
+		if len(virtualLinks15016) > 0 {
+			fmt.Fprintf(&b, "router ospf%s\n", vrfSuffix)
+			if validRouterID(ospf.RouterID) {
+				fmt.Fprintf(&b, " ospf router-id %s\n", ospf.RouterID)
+			}
+			for _, e := range virtualLinks15016 {
+				fmt.Fprintf(&b, " area %s virtual-link %s\n", e.vl.TransitArea, e.vl.NeighborID)
 			}
 			b.WriteString("exit\n!\n")
 		}

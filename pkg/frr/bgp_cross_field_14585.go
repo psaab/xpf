@@ -13,6 +13,10 @@ import (
 // leniently-loaded or peer-synced config (#1960) can still carry them. Omit
 // each line FRR would refuse — with a warning — rather than failing the
 // whole frr-reload.
+//
+// #15016 extends the same belt to OSPF virtual links: a VL whose effective
+// transit is the backbone or a stub/NSSA area is omitted, and valid VLs
+// render in a trailing `router ospf` stanza after interface activation.
 
 func bgpNeighborIBGP14585(routerAS uint32, n *config.BGPNeighbor) bool {
 	return config.BGPNeighborIsIBGP14585(routerAS, n)

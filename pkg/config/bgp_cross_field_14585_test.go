@@ -121,6 +121,125 @@ func TestBGPCrossField14585StrictRejects(t *testing.T) {
 	}
 }
 
+// #15016 (A12-04): a virtual link's effective transit area must relate to
+// the backbone and to the transit area's type. FRR refuses a VL whose
+// transit is the backbone itself or a stub/NSSA area, failing every
+// frr-reload; the default transit (the enclosing area) covers the
+// `area 0 { virtual-link … }` spelling with no explicit transit-area.
+func TestVirtualLinkTransitStrictRejects15016(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sets []string
+		want []string
+	}{
+		{
+			name: "default transit is backbone when VL written under area 0",
+			sets: []string{
+				"set protocols ospf area 0.0.0.0 interface ge-0/0/0.0",
+				"set protocols ospf area 0.0.0.0 virtual-link 10.0.0.2",
+			},
+			want: []string{"virtual-link", "10.0.0.2", "backbone"},
+		},
+		{
+			name: "explicit transit-area is backbone integer spelling",
+			sets: []string{
+				"set protocols ospf area 0.0.0.1 interface ge-0/0/0.0",
+				"set protocols ospf area 0.0.0.1 virtual-link 10.0.0.2 transit-area 0",
+			},
+			want: []string{"virtual-link", "10.0.0.2", "backbone"},
+		},
+		{
+			name: "transit area is stub",
+			sets: []string{
+				"set protocols ospf area 0.0.0.1 area-type stub",
+				"set protocols ospf area 0.0.0.1 interface ge-0/0/0.0",
+				"set protocols ospf area 0.0.0.1 virtual-link 10.0.0.2",
+			},
+			want: []string{"virtual-link", "stub"},
+		},
+		{
+			name: "transit area is nssa via explicit transit-area",
+			sets: []string{
+				"set protocols ospf area 0.0.0.1 interface ge-0/0/0.0",
+				"set protocols ospf area 0.0.0.2 area-type nssa",
+				"set protocols ospf area 0.0.0.2 interface ge-0/0/1.0",
+				"set protocols ospf area 0.0.0.1 virtual-link 10.0.0.2 transit-area 0.0.0.2",
+			},
+			want: []string{"virtual-link", "nssa"},
+		},
+		{
+			name: "routing-instance transit is backbone",
+			sets: []string{
+				"set routing-instances VRF-A instance-type virtual-router",
+				"set routing-instances VRF-A protocols ospf area 0.0.0.0 interface ge-0/0/0.0",
+				"set routing-instances VRF-A protocols ospf area 0.0.0.0 virtual-link 10.0.0.2",
+			},
+			want: []string{"VRF-A", "virtual-link", "backbone"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(buildTree(t, tc.sets))
+			if err == nil {
+				t.Fatalf("strict compilation accepted %s; want rejection (#15016)", tc.name)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Fatalf("diagnostic %q does not name %q", err.Error(), w)
+				}
+			}
+		})
+	}
+}
+
+func TestVirtualLinkTransitControlsPass15016(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sets []string
+	}{
+		{
+			name: "normal transit area default",
+			sets: []string{
+				"set protocols ospf area 0.0.0.1 interface ge-0/0/0.0",
+				"set protocols ospf area 0.0.0.1 virtual-link 10.0.0.2",
+			},
+		},
+		{
+			name: "normal transit area explicit different area",
+			sets: []string{
+				"set protocols ospf area 0.0.0.1 interface ge-0/0/0.0",
+				"set protocols ospf area 0.0.0.2 interface ge-0/0/1.0",
+				"set protocols ospf area 0.0.0.1 virtual-link 10.0.0.2 transit-area 0.0.0.2",
+			},
+		},
+		{
+			name: "stub area without virtual link",
+			sets: []string{
+				"set protocols ospf area 0.0.0.1 area-type stub",
+				"set protocols ospf area 0.0.0.1 interface ge-0/0/0.0",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := CompileConfig(buildTree(t, tc.sets)); err != nil {
+				t.Fatalf("control %q rejected: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestVirtualLinkTransitLenientWarns15016(t *testing.T) {
+	cfg, err := CompileConfigLenient(buildTree(t, []string{
+		"set protocols ospf area 0.0.0.0 interface ge-0/0/0.0",
+		"set protocols ospf area 0.0.0.0 virtual-link 10.0.0.2",
+	}))
+	if err != nil {
+		t.Fatalf("lenient compilation must boot (#1960): %v", err)
+	}
+	if joined := strings.Join(cfg.Warnings, "\n"); !strings.Contains(joined, "virtual-link") {
+		t.Fatalf("lenient warnings missing virtual-link: %v", cfg.Warnings)
+	}
+}
+
 func TestBGPCrossField14585ControlsPass(t *testing.T) {
 	for _, tc := range []struct {
 		name string

@@ -49,6 +49,32 @@ func BGPNeighborIsIBGP14585(routerAS uint32, n *BGPNeighbor) bool {
 // commit-check-clean config was not FRR-loadable. Strict on commit /
 // commit-check; lenient on load / peer-sync (opts.lenientBGPCrossField14585,
 // #1960) where the render path omits each refused line.
+// VirtualLinkTransitInvalid15016 reports why a virtual link's effective
+// transit area is FRR-refused (#15016 A12-04), or "" if it is valid.
+// The backbone itself cannot be a transit area, and a stub/NSSA area
+// cannot carry a virtual link. Area identity is spelling-normalized so
+// "0", "0.0.0.0" etc. compare equal. An unknown transit area (no area
+// stanza) has no known type and is not refused here — only backbone
+// identity, which needs no lookup, is refused in that case.
+func VirtualLinkTransitInvalid15016(ospf *OSPFConfig, vl *OSPFVirtualLink) string {
+	if ospf == nil || vl == nil {
+		return ""
+	}
+	if ospfAreaIdentity11400(vl.TransitArea) == "0" {
+		return "backbone"
+	}
+	for _, a := range ospf.Areas {
+		if a == nil {
+			continue
+		}
+		if ospfAreaIdentity11400(a.ID) == ospfAreaIdentity11400(vl.TransitArea) &&
+			(a.AreaType == "stub" || a.AreaType == "nssa") {
+			return a.AreaType
+		}
+	}
+	return ""
+}
+
 func validateBGPCrossFieldStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -129,6 +155,18 @@ func validateBGPCrossFieldStrict(cfg *Config) error {
 				}
 				if err := checkBackbone(scope, "ospf", area.ID, area.AreaType); err != nil {
 					return err
+				}
+				for _, vl := range area.VirtualLinks {
+					if vl == nil {
+						continue
+					}
+					switch reason := VirtualLinkTransitInvalid15016(ospf, vl); reason {
+					case "":
+					case "backbone":
+						return fmt.Errorf("%sprotocols ospf area %s virtual-link %s: transit area %s is the backbone — a virtual link must transit a non-backbone normal area to reach the backbone and FRR refuses a backbone transit area, failing the frr-reload; move the virtual-link under a normal transit area or set transit-area to one", scope, area.ID, vl.NeighborID, vl.TransitArea)
+					default:
+						return fmt.Errorf("%sprotocols ospf area %s virtual-link %s: transit area %s is a %s area — a virtual link cannot transit a stub or NSSA area and FRR refuses it, failing the frr-reload; use a normal transit area", scope, area.ID, vl.NeighborID, vl.TransitArea, reason)
+					}
 				}
 			}
 		}
