@@ -31,7 +31,13 @@ the apply path pays no fsync (the file is regenerated on every apply).
   loaded: a candidate subset is re-filed as exactly that subset (refused
   VPNs and their secrets dropped) and re-loaded for verification; any
   other case falls back to a true rollback (prior file restored **and
-  re-loaded**). Either way the recovered set is promoted (departed SAs
+  re-loaded**). A full NAME-set match is not proof the candidate loaded
+  (#15141): a changed existing connection charon refuses stays loaded
+  under its old content, so the verification reload's before/after
+  loaded-content fingerprints (`LoadedConn.Content`) are compared and a
+  content change diverts to the same true rollback, keeping the prior
+  hash so a later loadable generation tears the stale SA down. Either
+  way the recovered set is promoted (departed SAs
   torn down, `Loaded` not fired) and the partial error is still returned,
   so disk, `swanctl --list-conns`, and `prevConnNames` name the same set
   when Apply returns. A changed survivor of the partial load is
