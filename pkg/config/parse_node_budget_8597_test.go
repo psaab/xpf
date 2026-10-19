@@ -56,9 +56,13 @@ func TestParseHeapDoesNotScalePastTheBudget_8597(t *testing.T) {
 	atCap, nodesAt, errsAt := parseHeap(t, maxParseNodes+50_000)
 	wayPast, nodesPast, errsPast := parseHeap(t, 4*maxParseNodes)
 
-	if nodesAt != maxParseNodes || nodesPast != maxParseNodes {
-		t.Fatalf("node counts %d and %d; both must stop at the %d budget",
-			nodesAt, nodesPast, maxParseNodes)
+	// #15195: the budget now charges 1+len(Keys) per statement, so the
+	// minimal `a;` statement costs 2 units and the tree stops at
+	// maxParseNodes/2 nodes. The invariant is that BOTH sizes stop at the
+	// SAME bounded count, not the pre-#15195 exact node count.
+	if nodesAt != maxParseNodes/2 || nodesPast != maxParseNodes/2 {
+		t.Fatalf("node counts %d and %d; both must stop at the %d budget "+
+			"(%d single-key statements)", nodesAt, nodesPast, maxParseNodes, maxParseNodes/2)
 	}
 	if len(errsAt) == 0 || len(errsPast) == 0 {
 		t.Fatal("a truncated parse MUST report an error: a truncated tree with no " +
@@ -79,9 +83,11 @@ func TestParseHeapDoesNotScalePastTheBudget_8597(t *testing.T) {
 // returns. This measures the same two sizes BELOW the cap, where growth is
 // still linear and must be visible.
 func TestParseHeapProbeCanSeeUnboundedGrowth_8597(t *testing.T) {
-	small, nSmall, _ := parseHeap(t, 20_000)
-	large, nLarge, _ := parseHeap(t, 160_000)
-	if nSmall != 20_000 || nLarge != 160_000 {
+	// #15195: each `a;` costs 2 budget units (node + its one key), so the
+	// below-budget sizes are halved to stay under maxParseNodes units.
+	small, nSmall, _ := parseHeap(t, 10_000)
+	large, nLarge, _ := parseHeap(t, 80_000)
+	if nSmall != 10_000 || nLarge != 80_000 {
 		t.Fatalf("both fixtures must be BELOW the %d budget so growth is unbounded "+
 			"here; got %d and %d nodes", maxParseNodes, nSmall, nLarge)
 	}
