@@ -51,6 +51,7 @@ fn wg_tunnel_decision(logical_ifindex: i32, tunnel_endpoint_id: u16) -> SessionD
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -1515,7 +1516,7 @@ fn wg_encap_frame_sources_outer_from_physical_wan_primary_v6() {
     snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:559:8585:80::8/64".to_string(), scope: 0, ..Default::default() });
     snap.interfaces[1].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "fd00:dead::1/64".to_string(), scope: 0, ..Default::default() });
     // v6 route to the peer endpoint prefix, egressing reth0.80.
-    snap.routes.push(crate::RouteSnapshot { reject: false, table: "inet6.0".to_string(),
+    snap.routes.push(crate::RouteSnapshot { reject: false, cluster_terminal: false, table: "inet6.0".to_string(),
     family: "inet6".to_string(),
     destination: "2001:db8:113::/48".to_string(),
     next_hop_weights: vec![],

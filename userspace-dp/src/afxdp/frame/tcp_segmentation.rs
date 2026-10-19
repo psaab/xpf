@@ -933,6 +933,7 @@ mod mode_aware_segmentation_tests {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         }
@@ -1318,6 +1319,7 @@ mod mode_aware_segmentation_tests {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         }
@@ -1876,6 +1878,7 @@ mod mode_aware_segmentation_tests {
         snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:559:8585:80::8/64".to_string(), scope: 0, ..Default::default() });
         snap.routes.push(crate::RouteSnapshot {
             reject: false,
+            cluster_terminal: false,
             table: "inet6.0".to_string(),
             family: "inet6".to_string(),
             destination: "2001:db8:c0::/48".to_string(),
@@ -1910,6 +1913,7 @@ mod mode_aware_segmentation_tests {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
                 tx_vlan_id: 0,
+                source_ifindex: 0,
                 route_mtu: 0,
                 transport_route_mtu: 0,
             },
@@ -1960,6 +1964,7 @@ mod mode_aware_segmentation_tests {
         snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:559:8585:80::8/64".to_string(), scope: 0, ..Default::default() });
         snap.routes.push(crate::RouteSnapshot {
             reject: false,
+            cluster_terminal: false,
             table: "inet6.0".to_string(),
             family: "inet6".to_string(),
             destination: "2001:db8:c0::/48".to_string(),
@@ -1995,6 +2000,7 @@ mod mode_aware_segmentation_tests {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
                 tx_vlan_id: 0,
+                source_ifindex: 0,
                 route_mtu: 0,
                 transport_route_mtu: 0,
             },

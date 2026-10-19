@@ -231,6 +231,7 @@ pub(in crate::afxdp) fn interface_nat_local_resolution(
                     neighbor_mac: None,
                     src_mac: None,
                     tx_vlan_id: 0,
+                    source_ifindex: 0,
                     route_mtu: 0,
                     transport_route_mtu: 0,
                 })
@@ -258,6 +259,7 @@ pub(in crate::afxdp) fn interface_nat_local_resolution(
                     neighbor_mac: None,
                     src_mac: None,
                     tx_vlan_id: 0,
+                    source_ifindex: 0,
                     route_mtu: 0,
                     transport_route_mtu: 0,
                 })

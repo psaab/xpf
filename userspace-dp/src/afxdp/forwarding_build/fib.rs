@@ -713,6 +713,7 @@ pub(super) fn populate_routes(
                         next_hops,
                         discard: route.discard,
                         reject: route.reject,
+                        cluster_terminal: route.cluster_terminal,
                         next_table: String::new(),
                         preference: route.preference,
                         mtu: route.mtu as u32,
@@ -780,6 +781,7 @@ pub(super) fn populate_routes(
                         next_hops,
                         discard: route.discard,
                         reject: route.reject,
+                        cluster_terminal: route.cluster_terminal,
                         next_table: String::new(),
                         preference: route.preference,
                         mtu: route.mtu as u32,
@@ -1423,7 +1425,7 @@ mod recursive_prefix_index_12617_tests {
 
     fn snapshot_v4(count: usize) -> ConfigSnapshot {
         let routes = (0..count)
-            .map(|n| RouteSnapshot { reject: false, table: "inet.0".into(),
+            .map(|n| RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".into(),
             family: "inet".into(),
             destination: format!("10.{}.{}.{} /32", (n >> 16) & 255, (n >> 8) & 255, n & 255)
                 .replace(" ", ""),

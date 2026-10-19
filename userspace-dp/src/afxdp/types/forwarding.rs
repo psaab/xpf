@@ -1365,6 +1365,8 @@ pub(in crate::afxdp) struct RouteEntryV4 {
     pub(in crate::afxdp) next_hops: Vec<RouteNextHopV4>,
     pub(in crate::afxdp) discard: bool,
     pub(in crate::afxdp) reject: bool,
+    /// #15742: cluster Null0 default provenance (see RouteSnapshot).
+    pub(in crate::afxdp) cluster_terminal: bool,
     pub(in crate::afxdp) next_table: String,
     /// #2390: Junos route preference (admin distance; lower = preferred).
     pub(in crate::afxdp) preference: i32,
@@ -1382,6 +1384,8 @@ pub(in crate::afxdp) struct RouteEntryV6 {
     pub(in crate::afxdp) next_hops: Vec<RouteNextHopV6>,
     pub(in crate::afxdp) discard: bool,
     pub(in crate::afxdp) reject: bool,
+    /// #15742: cluster Null0 default provenance (see RouteSnapshot).
+    pub(in crate::afxdp) cluster_terminal: bool,
     pub(in crate::afxdp) next_table: String,
     /// #2390: Junos route preference (admin distance; lower = preferred).
     pub(in crate::afxdp) preference: i32,
@@ -1450,6 +1454,7 @@ impl RouteEntryV4 {
             }],
             discard,
             reject: false,
+            cluster_terminal: false,
             next_table,
             preference,
             mtu: 0,
@@ -1480,6 +1485,7 @@ impl RouteEntryV6 {
             }],
             discard,
             reject: false,
+            cluster_terminal: false,
             next_table,
             preference,
             mtu: 0,
@@ -1736,6 +1742,12 @@ pub(crate) enum ForwardingDisposition {
     ForwardCandidate,
     FabricRedirect,
     HAInactive,
+    /// #15742: cluster Null0 terminal whose would-be egress RG is
+    /// peer-owned. Demoted in HA enforcement (not at lookup, which
+    /// has no HA map); fabric helpers convert it exactly like
+    /// HAInactive. Distinct so operator discard/reject stays a drop
+    /// and HAInactive-specific handling is untouched.
+    ClusterTerminalHAInactive,
     PolicyDenied,
     NoRoute,
     MissingNeighbor,
@@ -1876,6 +1888,12 @@ pub(crate) struct ForwardingResolution {
     pub(crate) neighbor_mac: Option<[u8; 6]>,
     pub(crate) src_mac: Option<[u8; 6]>,
     pub(crate) tx_vlan_id: u16,
+    /// #15742: for a ClusterTerminalHAInactive resolution, the gateway
+    /// ifindex of the forwarding row that WOULD have carried this
+    /// destination (selected at lookup before the terminal zeroed the
+    /// egress). HA enforcement attributes its RG to decide demotion.
+    /// Zero on every other resolution.
+    pub(crate) source_ifindex: i32,
     /// Selected route's L3 MTU. Zero means no route-specific constraint.
     pub(crate) route_mtu: u32,
     /// Outer transport route's MTU for native tunnel resolutions. Kept
@@ -1894,7 +1912,7 @@ impl ForwardingResolution {
                 ForwardingDisposition::LocalDelivery => "local_delivery",
                 ForwardingDisposition::ForwardCandidate => "forward_candidate",
                 ForwardingDisposition::FabricRedirect => "fabric_redirect",
-                ForwardingDisposition::HAInactive => "ha_inactive",
+                ForwardingDisposition::HAInactive | ForwardingDisposition::ClusterTerminalHAInactive => "ha_inactive",
                 ForwardingDisposition::PolicyDenied => "policy_denied",
                 ForwardingDisposition::NoRoute => "no_route",
                 ForwardingDisposition::MissingNeighbor => "missing_neighbor",

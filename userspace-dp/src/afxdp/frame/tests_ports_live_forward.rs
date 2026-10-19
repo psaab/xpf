@@ -145,6 +145,7 @@ fn rewrite_forwarded_frame_in_place_keeps_ipv6_tcp_ports_after_vlan_snat() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision {
@@ -232,6 +233,7 @@ fn build_forwarded_frame_into_keeps_ipv6_tcp_ports_after_vlan_snat() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision {
@@ -320,6 +322,7 @@ fn build_forwarded_frame_into_ignores_ipv6_tcp_metadata_port_mismatch() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision {
@@ -415,6 +418,7 @@ fn build_live_forward_request_prefers_session_flow_ports_over_frame() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision {
@@ -518,6 +522,7 @@ fn build_live_forward_request_uses_live_frame_ports_when_no_session_flow() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision {
@@ -664,6 +669,7 @@ fn build_live_forward_request_meters_non_l4_metadata_flow() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
@@ -776,6 +782,7 @@ fn build_live_forward_request_marks_empty_cos_selection_resolved() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
@@ -901,6 +908,7 @@ fn build_live_forward_request_emits_output_filter_log_event() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
@@ -1054,6 +1062,7 @@ fn live_forward_filter_log_zones_6722(egress_ifindex: i32) -> (ForwardingState, 
             neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -1239,6 +1248,7 @@ fn build_live_forward_request_uses_flow_or_metadata_ports_when_frame_ports_unava
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision {
@@ -1383,6 +1393,7 @@ fn build_live_forward_request_caches_target_binding_index() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
@@ -1543,6 +1554,7 @@ fn build_forwarded_frame_into_keeps_ipv6_ports_when_frame_and_metadata_disagree(
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision {
@@ -1621,6 +1633,7 @@ fn build_forwarded_frame_into_prefers_expected_ipv6_ports_over_wrong_live_ports(
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision {
@@ -1702,6 +1715,7 @@ fn build_forwarded_frame_into_repairs_wrong_ipv6_frame_ports_from_expected_tuple
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision {
@@ -1785,6 +1799,7 @@ fn build_forwarded_frame_into_ignores_wrong_ipv4_offsets() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision {

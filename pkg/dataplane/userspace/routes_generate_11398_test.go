@@ -113,6 +113,49 @@ func TestLearnedClusterRejectCoexistsWithConfigDefault15742(t *testing.T) {
 	}
 }
 
+// #15742 round-4: the LIVE cluster row is a Discard (RTN_BLACKHOLE
+// Null0), not a Reject. It must coexist with the pref-5 config default
+// and carry ClusterTerminal so the Rust demotion gate can fabric-
+// redirect it on the split node; an unmarked learned discard at the
+// same prefix (operator-equivalent) must not carry the flag.
+func TestLearnedClusterDiscardCoexistsWithConfigDefault15742(t *testing.T) {
+	origRules := ruleListFn
+	t.Cleanup(func() { ruleListFn = origRules })
+	ruleListFn = func(int) ([]netlink.Rule, error) { return nil, nil }
+	withLearnedRoutes(t, fixedLearned(
+		routing.LearnedRoute{
+			TableID: 254, Family: netlink.FAMILY_V4, Destination: "0.0.0.0/0",
+			Protocol: "static", Discard: true, ClusterTerminal: true,
+		},
+		routing.LearnedRoute{
+			TableID: 254, Family: netlink.FAMILY_V4, Destination: "10.0.0.0/8",
+			Protocol: "static", Discard: true,
+		},
+	))
+	cfg := &config.Config{}
+	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{{
+		Destination: "0.0.0.0/0", Preference: 5,
+		NextHops: []config.NextHopEntry{{Address: "198.51.100.1"}},
+	}}
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRouteSnapshots: %v", err)
+	}
+	var cluster *RouteSnapshot
+	for i := range routes {
+		r := &routes[i]
+		if r.Destination == "0.0.0.0/0" && r.Discard {
+			cluster = r
+		}
+		if r.Destination == "10.0.0.0/8" && r.ClusterTerminal {
+			t.Fatalf("unmarked learned discard gained ClusterTerminal: %+v", r)
+		}
+	}
+	if cluster == nil || !cluster.ClusterTerminal || cluster.Preference != 200 {
+		t.Fatalf("cluster discard default = %+v, want Discard+ClusterTerminal at pref 200", cluster)
+	}
+}
+
 func assertGeneratedLPM11398(t *testing.T, routes []RouteSnapshot) {
 	t.Helper()
 	inside := lookupIPv4Snapshot11398(t, routes, "10.9.9.9")

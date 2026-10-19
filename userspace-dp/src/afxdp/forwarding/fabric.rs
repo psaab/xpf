@@ -596,6 +596,7 @@ pub(in crate::afxdp) fn resolve_fabric_redirect_from_list(
         neighbor_mac: Some(fabric.peer_mac),
         src_mac: Some(fabric.local_mac),
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     })
@@ -755,7 +756,10 @@ pub(in crate::afxdp) fn redirect_via_fabric_if_needed(
     ingress_ifindex: i32,
     ingress_zone_id: Option<u16>,
 ) -> ForwardingResolution {
-    if resolution.disposition != ForwardingDisposition::HAInactive {
+    if !matches!(
+        resolution.disposition,
+        ForwardingDisposition::HAInactive | ForwardingDisposition::ClusterTerminalHAInactive
+    ) {
         return resolution;
     }
     if ingress_is_fabric(forwarding, ingress_ifindex) {

@@ -278,6 +278,56 @@ func TestImportAdoptsClusterUnreachableAsReject15742(t *testing.T) {
 		if lr.Destination != wantDst || !lr.Reject || lr.Discard || len(lr.NextHops) != 0 {
 			t.Errorf("family %d imported route = %+v, want reject %s with no next hops", family, lr, wantDst)
 		}
+		// Round-4: the live Null0 lands as RTN_BLACKHOLE, so the reject
+		// arm above does not fire live; the cluster provenance triple is
+		// (default, proto static, metric 20). This fixture IS the
+		// unreachable form of that shape, so it must be marked.
+		if !lr.ClusterTerminal {
+			t.Errorf("family %d cluster unreachable default not marked ClusterTerminal: %+v", family, lr)
+		}
+	}
+}
+
+// #15742 round-4: ClusterTerminal provenance is the exact
+// (default, RTPROT_STATIC, kernel priority 20) triple. The live shape
+// is RTN_BLACKHOLE (round-4 FIB dump: "route discard pref 200"), so a
+// blackhole default with that triple is marked; every near-miss
+// (non-default prefix, wrong protocol, wrong metric) stays unmarked
+// and therefore remains an ordinary terminal drop in the helper.
+func TestImportMarksOnlyClusterNull0Shape15742(t *testing.T) {
+	mk := func(dst string, typ int, proto int, prio int) netlink.Route {
+		r := netlink.Route{Type: typ, Priority: prio, Protocol: netlink.RouteProtocol(proto)}
+		if dst != "" {
+			r.Dst = mustCIDR(t, dst)
+		}
+		return r
+	}
+	withRouteLister(t, staticLister(map[[2]int][]netlink.Route{
+		{netlink.FAMILY_V4, mainTableID}: {
+			mk("", unix.RTN_BLACKHOLE, unix.RTPROT_STATIC, 20),          // live shape: marked
+			mk("10.0.0.0/8", unix.RTN_BLACKHOLE, unix.RTPROT_STATIC, 20), // non-default: unmarked
+			mk("", unix.RTN_BLACKHOLE, unix.RTPROT_STATIC, 99),           // wrong metric: unmarked
+			mk("", unix.RTN_BLACKHOLE, unix.RTPROT_BGP, 20),              // wrong proto: unmarked
+		},
+		{netlink.FAMILY_V6, mainTableID}: {
+			mk("", unix.RTN_BLACKHOLE, unix.RTPROT_STATIC, 20), // live v6 shape: marked
+		},
+	}))
+	got, err := ImportLearnedRoutes([]int{mainTableID})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	marked := 0
+	for _, lr := range got {
+		if lr.ClusterTerminal {
+			marked++
+			if lr.Destination != "0.0.0.0/0" && lr.Destination != "::/0" {
+				t.Errorf("marked non-default row: %+v", lr)
+			}
+		}
+	}
+	if marked != 2 {
+		t.Fatalf("want exactly the v4+v6 cluster Null0 defaults marked, got %d of %+v", marked, got)
 	}
 }
 

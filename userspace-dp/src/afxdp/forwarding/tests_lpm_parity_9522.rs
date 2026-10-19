@@ -76,7 +76,7 @@ fn base_snapshot() -> crate::ConfigSnapshot {
 }
 
 fn v4_route(destination: &str, next_hops: Vec<&str>, preference: i32) -> crate::RouteSnapshot {
-    crate::RouteSnapshot { reject: false, table: "inet.0".into(),
+    crate::RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".into(),
     family: "inet".into(),
     destination: destination.into(),
     next_hops: next_hops.into_iter().map(str::to_string).collect(),
@@ -85,7 +85,7 @@ fn v4_route(destination: &str, next_hops: Vec<&str>, preference: i32) -> crate::
 }
 
 fn v6_route(destination: &str, next_hops: Vec<&str>, preference: i32) -> crate::RouteSnapshot {
-    crate::RouteSnapshot { reject: false, table: "inet6.0".into(),
+    crate::RouteSnapshot { reject: false, cluster_terminal: false, table: "inet6.0".into(),
     family: "inet6".into(),
     destination: destination.into(),
     next_hops: next_hops.into_iter().map(str::to_string).collect(),

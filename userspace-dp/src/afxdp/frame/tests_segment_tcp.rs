@@ -81,6 +81,7 @@ fn segment_forwarded_tcp_frames_splits_ipv6_snat_payload_by_mtu() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision {
@@ -199,6 +200,7 @@ fn segment_forwarded_tcp_frames_repairs_ipv6_tcp_ports_when_metadata_disagrees()
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision {
@@ -303,6 +305,7 @@ fn segment_forwarded_tcp_frames_prefers_expected_ipv6_ports_over_wrong_live_port
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision {
@@ -410,6 +413,7 @@ fn segment_forwarded_tcp_frames_repairs_wrong_ipv6_frame_ports_from_expected_tup
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision {
@@ -791,6 +795,7 @@ fn segment_forwarded_tcp_frames_keeps_ipv4_tcp_ports_after_vlan_snat() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x00]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision {
@@ -927,6 +932,7 @@ fn segment_forwarded_tcp_frames_honors_sub_1280_ipv4_egress_mtu_5159() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x00]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
@@ -1179,6 +1185,7 @@ fn segment_forwarded_tcp_frames_refuses_first_ipv4_fragment() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x00]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
@@ -1295,6 +1302,7 @@ fn segment_forwarded_tcp_frames_refuses_ipv6_fragment_header() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
@@ -1444,6 +1452,7 @@ fn seg5191_segments(frame: &[u8]) -> Vec<Vec<u8>> {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x00]),
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
@@ -1668,6 +1677,7 @@ fn segment_forwarded_tcp_frames_refuses_cross_frame_span_9900() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },

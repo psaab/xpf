@@ -508,7 +508,7 @@ fn directed_broadcast_source_martian_is_routing_domain_scoped_11074() {
             ..Default::default()
         },
     ]);
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "blue.inet.0".to_string(),
+    snapshot.routes.push(crate::RouteSnapshot { reject: false, cluster_terminal: false, table: "blue.inet.0".to_string(),
     family: "inet".to_string(),
     destination: "0.0.0.0/0".to_string(),
     next_hops: vec!["172.16.81.1@blue-out".to_string()],

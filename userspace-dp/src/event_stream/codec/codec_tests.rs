@@ -61,6 +61,7 @@ fn test_decision() -> SessionDecision {
             neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
             src_mac: Some([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]),
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },

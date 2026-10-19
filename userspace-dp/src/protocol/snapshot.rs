@@ -309,6 +309,12 @@ pub(crate) struct RouteSnapshot {
     pub discard: bool,
     #[serde(default)]
     pub reject: bool,
+    /// #15742: cluster Null0 default provenance. Only terminal rows
+    /// carrying it may be demoted to fabric redirect when the
+    /// would-be egress RG is peer-owned; operator discard/reject
+    /// rows never carry it.
+    #[serde(rename = "cluster_terminal", default)]
+    pub cluster_terminal: bool,
     #[serde(rename = "next_table", default)]
     pub next_table: String,
     /// #9955: kernel ip-rule priority for a synthetic next-table leak.

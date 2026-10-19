@@ -245,7 +245,7 @@ pub(super) fn encode_disposition(d: ForwardingDisposition) -> u8 {
         ForwardingDisposition::PolicyDenied => DISP_POLICY_DENIED,
         ForwardingDisposition::NoRoute => DISP_NO_ROUTE,
         ForwardingDisposition::MissingNeighbor => DISP_MISSING_NEIGHBOR,
-        ForwardingDisposition::HAInactive => DISP_HA_INACTIVE,
+        ForwardingDisposition::HAInactive | ForwardingDisposition::ClusterTerminalHAInactive => DISP_HA_INACTIVE,
         ForwardingDisposition::DiscardRoute => DISP_DISCARD_ROUTE,
         ForwardingDisposition::RejectRoute => DISP_DISCARD_ROUTE,
         ForwardingDisposition::NextTableUnsupported => DISP_NEXT_TABLE_UNSUPPORTED,

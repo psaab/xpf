@@ -25,7 +25,7 @@ fn iface_11650(
 }
 
 fn route_v6_11650(table: &str, destination: &str, next_hops: &[&str]) -> RouteSnapshot {
-    RouteSnapshot { reject: false, table: table.into(),
+    RouteSnapshot { reject: false, cluster_terminal: false, table: table.into(),
     family: "inet6".into(),
     destination: destination.into(),
     next_hops: next_hops.iter().map(|next_hop| (*next_hop).into()).collect(),

@@ -430,7 +430,10 @@ const (
 	// ConnectedRGPeerOwned so the helper HA-filters connected transit
 	// prefixes on peer-owned RGs; a v55 helper keeps the peer-owned
 	// connected prefix and it shadows the default into a blackhole.
-	ProtocolVersion = 56
+	// v56 -> v57 (#15742): RouteSnapshot carries ClusterTerminal so the
+	// helper demotes only the cluster Null0 default to fabric redirect;
+	// a v56 helper drops it terminally on the split node (the defect).
+	ProtocolVersion = 57
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

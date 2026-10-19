@@ -268,6 +268,7 @@ fn wireguard_peer_outer_egress_rg_is_gated_13980() {
         neighbor_mac: Some([0, 0, 0, 0, 0, 1]),
         src_mac: None,
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     };
@@ -455,6 +456,7 @@ fn split_rg_cluster_reject_does_not_shadow_forwarding_default_15742() {
     }
     snapshot.routes.push(RouteSnapshot {
         reject: true,
+            cluster_terminal: false,
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "0.0.0.0/0".to_string(),
@@ -468,6 +470,7 @@ fn split_rg_cluster_reject_does_not_shadow_forwarding_default_15742() {
     });
     snapshot.routes.push(RouteSnapshot {
         reject: true,
+            cluster_terminal: false,
         table: "inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "::/0".to_string(),
@@ -532,6 +535,156 @@ fn split_rg_cluster_reject_does_not_shadow_forwarding_default_15742() {
     );
 }
 
+/// #15742 round-4 LIVE shape: the cluster Null0 default reaches the
+/// helper as DISCARD (RTN_BLACKHOLE), pref 200, marked
+/// cluster_terminal -- not reject. The destinations are off-link, so
+/// LPM reaches the default; gateway neighbors are removed so the
+/// pref-5 forwarding row has no live member and the terminal row is
+/// selected (the #15098 rule). The demotion must come from the
+/// terminal path itself: lookup surfaces the cluster terminal, HA
+/// enforcement keeps the demotion because the forwarding sibling's
+/// egress RG1 is peer-owned, and the fabric helper converts it.
+/// Controls: (a) same rows with cluster_terminal cleared
+/// (operator-equivalent discard) stay DiscardRoute and never
+/// redirect; (b) RG1 locally owned keeps the plain terminal drop.
+/// FAIL-ON-REVERT: drop the cluster_terminal demotion in
+/// enforce_ha_resolution_snapshot and the split cell resolves
+/// DiscardRoute instead of FabricRedirect.
+#[test]
+fn split_rg_cluster_discard_demotes_to_fabric_redirect_15742() {
+    let build = |cluster: bool| {
+        let mut snapshot = nat_snapshot_with_fabric();
+        for route in &mut snapshot.routes {
+            route.preference = 5;
+        }
+        // Point the pref-5 forwarding rows at TEST-NET gateways with
+        // no neighbor entry. Native liveness (build-time gateway
+        // resolution against connected prefixes) and lookup liveness
+        // then both treat the member as undrivable, so the #15098
+        // terminal-row rule selects the pref-200 discard -- exactly
+        // the split-node state where the WAN gateway neighbor is not
+        // usable locally. Repointing (vs deleting neighbors) is
+        // needed because deleting empties next_hops when the neighbor
+        // is the gateway's only resolution path.
+        for route in &mut snapshot.routes {
+            for nh in &mut route.next_hops {
+                if nh.starts_with("172.16.80.1") {
+                    *nh = "172.16.80.1".to_string();
+                } else if nh.starts_with("2001:559:8585:80::1") {
+                    *nh = "2001:559:8585:80::1".to_string();
+                }
+            }
+        }
+        // Live post-#15745 shape: the WAN unit's connected transit
+        // prefixes are suppressed on the split node, so the bare
+        // gateway cannot resolve an ifindex at FIB build (NH ifindex
+        // 0, terminal selected); connected_by_ifindex still records
+        // the prefix for source attribution.
+        for iface in &mut snapshot.interfaces {
+            if iface.name == "reth0.80" {
+                iface.connected_rg_peer_owned = true;
+            }
+        }
+        snapshot.routes.push(RouteSnapshot {
+            reject: false,
+            cluster_terminal: cluster,
+            table: "inet.0".to_string(),
+            family: "inet".to_string(),
+            destination: "0.0.0.0/0".to_string(),
+            next_hop_weights: vec![],
+            next_hops: vec![],
+            discard: true,
+            next_table: String::new(),
+            preference: 200,
+            rule_priority: 0,
+            mtu: 0,
+        });
+        snapshot.routes.push(RouteSnapshot {
+            reject: false,
+            cluster_terminal: cluster,
+            table: "inet6.0".to_string(),
+            family: "inet6".to_string(),
+            destination: "::/0".to_string(),
+            next_hop_weights: vec![],
+            next_hops: vec![],
+            discard: true,
+            next_table: String::new(),
+            preference: 200,
+            rule_priority: 0,
+            mtu: 0,
+        });
+        build_forwarding_state(&snapshot)
+    };
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let inactive = Arc::new(ArcSwap::from_pointee(BTreeMap::from([(
+        1,
+        inactive_ha_runtime(now_secs),
+    )])));
+    let active = Arc::new(ArcSwap::from_pointee(BTreeMap::from([(
+        1,
+        active_ha_runtime(now_secs),
+    )])));
+    let dsts = [
+        IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888)),
+    ];
+
+    // Split: cluster discard demotes and fabric-redirects, both families.
+    let state = build(true);
+    for dst in dsts {
+        let raw = lookup_forwarding_resolution(&state, dst).resolution;
+        assert_eq!(
+            raw.disposition,
+            ForwardingDisposition::ClusterTerminalHAInactive,
+            "lookup must surface the cluster terminal for {dst}, got {:?}",
+            raw.disposition
+        );
+        let blocked = enforce_ha_resolution(&state, &inactive, raw);
+        assert_eq!(
+            blocked.disposition,
+            ForwardingDisposition::ClusterTerminalHAInactive,
+            "peer-owned sibling must keep the demotion for {dst}"
+        );
+        let redirected = redirect_via_fabric_if_needed(&state, blocked, 24, None);
+        assert_eq!(
+            redirected.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "split cluster discard must fabric-redirect for {dst}, got {:?}",
+            redirected.disposition
+        );
+    }
+
+    // Control (a): unmarked discard (operator semantics) stays a drop.
+    let op_state = build(false);
+    for dst in dsts {
+        let raw = lookup_forwarding_resolution(&op_state, dst).resolution;
+        assert_eq!(raw.disposition, ForwardingDisposition::DiscardRoute);
+        let blocked = enforce_ha_resolution(&op_state, &inactive, raw);
+        assert_eq!(
+            blocked.disposition,
+            ForwardingDisposition::DiscardRoute,
+            "operator discard must stay a drop for {dst}"
+        );
+        let redirected = redirect_via_fabric_if_needed(&op_state, blocked, 24, None);
+        assert_eq!(redirected.disposition, ForwardingDisposition::DiscardRoute);
+    }
+
+    // Control (b): locally-owned RG1 -- the cluster terminal is not
+    // demoted; it resolves back to the plain terminal drop (the
+    // forwarding row has no live member in this fixture, so the
+    // terminal is the selected row and must drop, not redirect).
+    for dst in dsts {
+        let raw = lookup_forwarding_resolution(&state, dst).resolution;
+        let resolved = enforce_ha_resolution(&state, &active, raw);
+        assert_eq!(
+            resolved.disposition,
+            ForwardingDisposition::DiscardRoute,
+            "locally-owned cluster terminal must drop, not redirect, for {dst}: got {:?}",
+            resolved.disposition
+        );
+    }
+}
+
 /// #15742 live shape: the WAN interface itself carries the connected
 /// 172.16.80.0/24 and 2001:559:8585:80::/64 prefixes, and the probe targets
 /// (172.16.80.200, 2001:559:8585:80::200) are inside them. Go marks the
@@ -546,6 +699,7 @@ fn split_rg_connected_wan_prefix_does_not_shadow_default_15742() {
     }
     snapshot.routes.push(RouteSnapshot {
         reject: true,
+            cluster_terminal: false,
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "0.0.0.0/0".to_string(),
@@ -559,6 +713,7 @@ fn split_rg_connected_wan_prefix_does_not_shadow_default_15742() {
     });
     snapshot.routes.push(RouteSnapshot {
         reject: true,
+            cluster_terminal: false,
         table: "inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "::/0".to_string(),
@@ -1194,6 +1349,7 @@ fn gate_fabric_zone_override_on_owner_rg_6458() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     };
@@ -2194,6 +2350,7 @@ fn missing_neighbor_session_metadata_preserves_fabric_ingress() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -2427,6 +2584,7 @@ fn embedded_icmp_to_inactive_owner_rg_uses_zone_encoded_fabric_redirect() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]),
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -2495,6 +2653,7 @@ fn embedded_icmp_no_route_uses_zone_encoded_fabric_redirect() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -2563,6 +2722,7 @@ fn embedded_icmp_discard_route_uses_zone_encoded_fabric_redirect() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -2627,6 +2787,7 @@ fn embedded_icmp_from_fabric_does_not_redirect_back_to_fabric() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]),
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -2678,6 +2839,7 @@ fn fabric_ingress_does_not_redirect_back_to_fabric() {
         neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
         src_mac: None,
         tx_vlan_id: 80,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     };
@@ -4764,6 +4926,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
         routes: vec![
             crate::RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "0.0.0.0/0".to_string(),
@@ -4777,6 +4940,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
             },
             crate::RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "red.inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "0.0.0.0/0".to_string(),
@@ -6048,6 +6212,7 @@ fn ecmp_static_route_retains_all_next_hops_and_skips_dead() {
         ],
         routes: vec![crate::RouteSnapshot {
             reject: false,
+            cluster_terminal: false,
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "203.0.113.0/24".to_string(),
@@ -6180,6 +6345,7 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
         ],
         routes: vec![crate::RouteSnapshot {
             reject: false,
+            cluster_terminal: false,
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "203.0.113.0/24".to_string(),
@@ -6338,6 +6504,7 @@ fn ecmp_down_interface_only_member_does_not_share_gateway_hashes_11404() {
         routes: vec![
             crate::RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
@@ -6351,6 +6518,7 @@ fn ecmp_down_interface_only_member_does_not_share_gateway_hashes_11404() {
             },
             crate::RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet6.0".to_string(),
                 family: "inet6".to_string(),
                 destination: "2001:db8:3::/64".to_string(),
@@ -6487,6 +6655,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
     // One sfmix.inet.0 ECMP prefix with a mixed direct + tunnel next-hop set.
     snapshot.routes.push(crate::RouteSnapshot {
         reject: false,
+            cluster_terminal: false,
         table: "sfmix.inet.0".to_string(),
         family: "inet".to_string(),
         destination: "203.0.113.0/24".to_string(),
@@ -6705,6 +6874,7 @@ fn ecmp_mixed_with_noroute_underlay_tunnel_uses_only_live_direct_hop() {
     });
     snapshot.routes.push(crate::RouteSnapshot {
         reject: false,
+            cluster_terminal: false,
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "203.0.113.0/24".to_string(),
@@ -6799,6 +6969,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
     // (Disjoint from the GRE outer prefix 2602:ffd3:0:2::/64.)
     snapshot.routes.push(crate::RouteSnapshot {
         reject: false,
+            cluster_terminal: false,
         table: "sfmix.inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "2001:db8:dead::/48".to_string(),
@@ -6975,6 +7146,7 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
         ],
         routes: vec![crate::RouteSnapshot {
             reject: false,
+            cluster_terminal: false,
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "203.0.113.0/24".to_string(),
@@ -7289,6 +7461,7 @@ fn ecmp_dual_enumeration_snapshot_11686(
         routes: vec![
             crate::RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
@@ -7305,6 +7478,7 @@ fn ecmp_dual_enumeration_snapshot_11686(
             },
             crate::RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "198.51.100.0/24".to_string(),
@@ -7318,6 +7492,7 @@ fn ecmp_dual_enumeration_snapshot_11686(
             },
             crate::RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet6.0".to_string(),
                 family: "inet6".to_string(),
                 destination: "2001:db8:dead::/48".to_string(),
@@ -7616,6 +7791,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
             // WORSE route first (higher preference = less preferred).
             crate::RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
@@ -7630,6 +7806,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
             // BETTER route second (lower preference).
             crate::RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
@@ -8203,6 +8380,7 @@ fn secure_tunnel_snapshot_6713(policy: TunnelPolicy6713) -> ConfigSnapshot {
         ],
         routes: vec![RouteSnapshot {
             reject: false,
+            cluster_terminal: false,
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "192.168.99.0/24".to_string(),

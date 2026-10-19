@@ -476,7 +476,7 @@ fn local_origin_tunnel_ipv6_nonfirst_fragment_transmits_without_session_14119() 
     let mut snapshot = native_gre_snapshot(true);
     let gre = snapshot.interfaces.iter_mut().find(|iface| iface.name == "gr-0/0/0.0").expect("GRE interface");
     gre.addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:db8:255:192::42/64".to_string(), scope: 0, ..Default::default() });
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "sfmix.inet6.0".to_string(), family: "inet6".to_string(), destination: "::/0".to_string(), next_hop_weights: vec![], next_hops: vec!["2001:db8:255:192::41".to_string()], discard: false, next_table: String::new(), preference: 0, rule_priority: 0, mtu: 0 });
+    snapshot.routes.push(crate::RouteSnapshot { reject: false, cluster_terminal: false, table: "sfmix.inet6.0".to_string(), family: "inet6".to_string(), destination: "::/0".to_string(), next_hop_weights: vec![], next_hops: vec!["2001:db8:255:192::41".to_string()], discard: false, next_table: String::new(), preference: 0, rule_priority: 0, mtu: 0 });
     let state = build_forwarding_state(&snapshot);
     let src: Ipv6Addr = "2001:db8:255:192::42".parse().unwrap();
     let dst: Ipv6Addr = "2001:db8:255:192::41".parse().unwrap();
@@ -538,7 +538,7 @@ fn ipv6_tunnel_state_14655() -> (ForwardingState, Ipv6Addr, Ipv6Addr) {
     let mut snapshot = native_gre_snapshot(true);
     let gre = snapshot.interfaces.iter_mut().find(|iface| iface.name == "gr-0/0/0.0").expect("GRE interface");
     gre.addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:db8:255:192::42/64".to_string(), scope: 0, ..Default::default() });
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "sfmix.inet6.0".to_string(), family: "inet6".to_string(), destination: "::/0".to_string(), next_hop_weights: vec![], next_hops: vec!["2001:db8:255:192::41".to_string()], discard: false, next_table: String::new(), preference: 0, rule_priority: 0, mtu: 0 });
+    snapshot.routes.push(crate::RouteSnapshot { reject: false, cluster_terminal: false, table: "sfmix.inet6.0".to_string(), family: "inet6".to_string(), destination: "::/0".to_string(), next_hop_weights: vec![], next_hops: vec!["2001:db8:255:192::41".to_string()], discard: false, next_table: String::new(), preference: 0, rule_priority: 0, mtu: 0 });
     let src: Ipv6Addr = "2001:db8:255:192::42".parse().unwrap();
     let dst: Ipv6Addr = "2001:db8:255:192::41".parse().unwrap();
     (build_forwarding_state(&snapshot), src, dst)
@@ -661,7 +661,7 @@ fn local_origin_tunnel_tx_request_accepts_owned_ipv6_in_tunnel_instance() {
         .find(|iface| iface.name == "gr-0/0/0.0")
         .expect("GRE interface");
     gre.addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:db8:255:192::42/64".to_string(), scope: 0, ..Default::default() });
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "sfmix.inet6.0".to_string(),
+    snapshot.routes.push(crate::RouteSnapshot { reject: false, cluster_terminal: false, table: "sfmix.inet6.0".to_string(),
     family: "inet6".to_string(),
     destination: "::/0".to_string(),
     next_hop_weights: vec![],

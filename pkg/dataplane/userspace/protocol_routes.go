@@ -9,7 +9,13 @@ type RouteSnapshot struct {
 	NextHopWeights []uint32 `json:"next_hop_weights,omitempty"`
 	Discard        bool     `json:"discard"`
 	Reject         bool     `json:"reject,omitempty"`
-	NextTable      string   `json:"next_table,omitempty"`
+	// ClusterTerminal marks a learned cluster-mode Null0 default
+	// (#15742). Only the Rust demotion gate reads it: a terminal row
+	// carrying it may fabric-redirect when the would-be egress RG is
+	// peer-owned. Operator discard/reject rows never carry it and stay
+	// local drops. Fenced by the v57 bump.
+	ClusterTerminal bool   `json:"cluster_terminal,omitempty"`
+	NextTable       string `json:"next_table,omitempty"`
 	// RulePriority is the kernel ip-rule priority of a NextTable leak (#9955).
 	// The kernel resolves inter-VRF leaks in TWO stages: priority-ordered
 	// rules with fall-through on a target-table miss, then per-table

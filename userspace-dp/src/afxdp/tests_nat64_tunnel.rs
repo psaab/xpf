@@ -796,7 +796,7 @@ fn txn_tunnel_marked_missing_neighbor_not_buffered() {
         ttl: 64,
         ..Default::default()
     }];
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
+    snapshot.routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
     family: "inet".to_string(),
     destination: "8.8.8.8/32".to_string(),
     next_hop_weights: vec![],

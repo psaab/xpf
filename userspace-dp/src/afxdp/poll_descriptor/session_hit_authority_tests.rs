@@ -532,6 +532,7 @@ fn forward_decision() -> SessionDecision {
             neighbor_mac: Some([0; 6]),
             src_mac: Some([0; 6]),
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },

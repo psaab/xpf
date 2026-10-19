@@ -2052,6 +2052,7 @@ mod export_unresolved_sessions_10790_tests {
                     .then_some([0, 1, 2, 3, 4, 5]),
                 src_mac: None,
                 tx_vlan_id: 0,
+                source_ifindex: 0,
                 route_mtu: 0,
                 transport_route_mtu: 0,
             },
