@@ -930,6 +930,19 @@ impl WorkerCommandQueues {
         }
     }
 
+    /// #15105: resolve a queue in this generation to its worker id, by Arc
+    /// identity (the same discipline as `shed_if_dead`'s pointer projection).
+    /// `None` for a queue outside this generation's map.
+    pub(in crate::afxdp) fn worker_id_for_queue(
+        &self,
+        commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+    ) -> Option<u32> {
+        self.commands_by_id
+            .iter()
+            .find(|(_, candidate)| Arc::ptr_eq(candidate, commands))
+            .map(|(id, _)| *id)
+    }
+
     pub(in crate::afxdp) fn runtime_atomics_for_queue(
         &self,
         commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,

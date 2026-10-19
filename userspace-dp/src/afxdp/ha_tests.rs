@@ -3891,7 +3891,10 @@ fn full_worker_repair_latch_reports_overflow_instead_of_applied_11360() {
         }
     }
     let pending = crate::afxdp::worker_queue::lock_recover(&commands);
-    for offset in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+    // Fill the repair latch to ITS bound (#15105: twice the queue cap, so a
+    // full queue ahead of a larger replay snapshot can obligate its whole
+    // refused tail), not merely to the queue cap.
+    for offset in 0..2 * crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
         let key = synced_entry_port(20_000 + offset as u16, 0).key;
         assert!(
             crate::afxdp::worker_queue::record_session_import_repair(

@@ -1523,6 +1523,21 @@ directly:
   and do not classify the committed import as a rollback-triggering refusal.
   The queue-drop counter above remains the operator-visible push count for
   both outcomes.
+- A refused REPLAY `UpsertSynced` takes the same repair obligation (#15105).
+  The reconcile bring-up replay (`replay_preserved_sessions` →
+  `Coordinator::replay_synced_sessions` → `replicate_session_upsert`) and the
+  post-registration `replay_late_synced_sessions` both push through
+  `push_bounded` into queues that can already be at the cap — the bring-up
+  queues are empty but the replay set itself can exceed 4096 rows, and the
+  late replay retains a non-upsert prefix. Before #15105 both discarded the
+  refusal, so every worker silently received only the first 4096 rows of any
+  larger shared table. Now each refused row is recorded as session-import
+  repair debt (above) for that worker, positioned after the queue prefix at
+  refusal; the worker re-reads the row from shared authority at that FIFO
+  boundary. The per-worker repair bound is twice the queue cap
+  (`2 * MAX_PENDING_WORKER_COMMANDS`) so a full queue ahead of a larger
+  snapshot can obligate the whole refused tail; past that bound the #6929
+  drop counter is the remaining signal.
 - `drain_bounded_into` is how a worker consumes that queue (#7201).
   `apply_worker_commands` takes a **bounded prefix** of at most
   `WORKER_COMMAND_DRAIN_BUDGET` (256) commands into a worker-owned

@@ -713,8 +713,14 @@ pub(in crate::afxdp) fn replay_preserved_sessions(
 /// a raw shared origin such as `SharedPromote` is NOT peer-synced, so a worker
 /// adopting it would skip its translated-port reservation. Mapping it before
 /// queueing preserves the worker-owned reservation on adoption.
+///
+/// #15105: a snapshot row refused at the queue cap is recorded as #11360
+/// import repair debt for `worker_id` instead of being silently dropped, so
+/// the worker re-reads it from shared authority once the retained prefix
+/// ahead of it has drained.
 pub(in crate::afxdp) fn replay_late_synced_sessions(
     coord: &Coordinator,
+    worker_id: u32,
     commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
     tunnel_purge_ids: &[u16],
 ) {
@@ -736,10 +742,28 @@ pub(in crate::afxdp) fn replay_late_synced_sessions(
     pending.retain(|command| !matches!(command, WorkerCommand::UpsertSynced(_)));
     for entry in entries {
         let replica = crate::afxdp::shared_ops::synced_replica_entry(&entry);
-        crate::afxdp::worker_queue::push_bounded(
+        // #15105: a snapshot row refused at the queue cap must not vanish.
+        // Record it as #11360 import repair debt for this worker, positioned
+        // after the retained queue prefix, while still holding the queue
+        // lock; the worker re-reads the key from shared authority at that
+        // FIFO boundary. `worker_id` is the registration this queue belongs
+        // to (the spawn loop's current worker), so the debt lands in the
+        // slot that worker drains.
+        if !crate::afxdp::worker_queue::push_bounded(
             &mut pending,
             WorkerCommand::UpsertSynced(replica),
-        );
+        ) {
+            if let Some(position) = crate::afxdp::worker_queue::session_import_repair_position(
+                worker_id,
+                pending.len(),
+            ) {
+                let _ = crate::afxdp::worker_queue::record_session_import_repair(
+                    worker_id,
+                    &entry.key,
+                    position,
+                );
+            }
+        }
     }
 }
 
@@ -1265,7 +1289,7 @@ busy — forced private bind failure (test seam #6245)"
                     },
                     Some(join),
                 );
-                replay_late_synced_sessions(coord, &commands, tunnel_purge_ids);
+                replay_late_synced_sessions(coord, worker_id, &commands, tunnel_purge_ids);
                 startup_gate.wait();
             }
             Err(err) => {
