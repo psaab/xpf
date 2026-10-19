@@ -221,11 +221,24 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 				// zone statement-tail / unknown-child gates then reject or
 				// warn instead of publishing an empty zone. Container and
 				// wildcard heads keep the existing attachment.
+				//
+				// #15139: decline only when the packed statement already
+				// consumed its own value. A value leaf authored as the bare
+				// keyword (`system-services { ping; }`,
+				// `loss-priority { high; }`) carries no value token yet:
+				// the braced body IS its value in the braced spelling, and
+				// leaf readers (nodeVal, host-inbound value children) read
+				// it from Children. Declining those rejected the #8850
+				// partially-elided host-inbound spelling at strict commit
+				// and silently dropped it on tolerant load. A flag leaf
+				// (args == 0, e.g. `discard { ... }`) is already complete
+				// as the bare keyword, so its body still declines.
 				declineLeafBody14343 := false
 				if len(body) > 0 && len(stmts) == 1 {
 					if cs := resolveSchemaChild(childSub, stmts[0][0]); cs != nil {
 						_, refined := consumeNodeKeys(stmts[0], cs)
-						if refined != nil && refined.children == nil && refined.wildcard == nil {
+						if refined != nil && refined.children == nil && refined.wildcard == nil &&
+							len(stmts[0]) >= 1+refined.args {
 							declineLeafBody14343 = true
 						}
 					}
