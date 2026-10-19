@@ -719,6 +719,13 @@ pub(crate) fn worker_loop(
                 let Some(transport) = ipsec_inner_transport.as_ref() else {
                     return;
                 };
+                // #15151 (B12-03): skip the whole D11 block on an idle
+                // iteration — atomic pending counters only, zero shared
+                // locks (the drains also gate internally, this avoids
+                // even their call/branch cost and documents the gate).
+                if !transport.has_pending_work(worker_id) {
+                    return;
+                }
                 let taken = transport.drain_worker(worker_id, &mut ipsec_inner_batch);
                 if taken != 0 {
                     for descriptor in ipsec_inner_batch.current().iter().take(taken) {
