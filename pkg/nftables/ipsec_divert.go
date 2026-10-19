@@ -139,9 +139,15 @@ func normalizeIpsecQuarantineSpec(spec IpsecDivertSpec) IpsecDivertSpec {
 		spec.QuarantinePrimaryReason > IpsecQuarantineReasonDomainOverlap {
 		rawReason = spec.QuarantinePrimaryReason
 	}
+	// #15066: CandidateIfindices alone is not a quarantine request. A valid
+	// tunnel stages its ifindex as a candidate so an explicit quarantine
+	// reason can deny it; only QuarantineAll or a reason (mask, primary, or
+	// raw) may close admission. Candidates without a reason are cleared
+	// below so a valid divert generation cannot become a box-wide DROP.
 	requested := spec.QuarantineAll || rawMask != 0 || rawReason != IpsecQuarantineReasonUnknown ||
-		spec.QuarantinePrimaryReason != IpsecQuarantineReasonUnknown || len(spec.CandidateIfindices) != 0
+		spec.QuarantinePrimaryReason != IpsecQuarantineReasonUnknown
 	if !requested {
+		spec.CandidateIfindices = nil
 		spec.LifelineNetdevs = nil
 		return spec
 	}
