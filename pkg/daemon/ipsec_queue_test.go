@@ -257,16 +257,16 @@ func TestIpsecQueueRetireBound9506(t *testing.T) {
 		t.Fatal("allocator tick exceeded bounded maintenance budget")
 	}
 }
-func TestIpsecQueueAllocatorRefusesBeyond128Handles9506(t *testing.T) {
+func TestIpsecQueueAllocatorRefusesBeyondTwoGenerationHandles9506(t *testing.T) {
 	a := newIpsecQueueAllocator()
-	for i := 0; i < 128; i++ {
+	for i := range ipsecQueueAllocatorCapacity {
 		key := ipsecQueueKey{Generation: uint64(i + 1), Family: ipsecFamilyInet, Hook: ipsecHookForward, Owner: "owner-a", STN: "st0", Ifindex: i + 1}
 		if _, err := a.allocate(key); err != nil {
 			t.Fatalf("allocate %d: %v", i, err)
 		}
 	}
-	if _, err := a.allocate(ipsecQueueKey{Generation: 129, Family: ipsecFamilyInet, Hook: ipsecHookForward, Owner: "owner-a", STN: "st0", Ifindex: 999}); err == nil {
-		t.Fatal("allocator admitted 129th active/quarantined handle; cap is 128")
+	if _, err := a.allocate(ipsecQueueKey{Generation: uint64(ipsecQueueAllocatorCapacity + 1), Family: ipsecFamilyInet, Hook: ipsecHookForward, Owner: "owner-a", STN: "st0", Ifindex: 9999}); err == nil {
+		t.Fatal("allocator admitted a handle beyond the two-generation cap")
 	}
 }
 func TestIpsecQueueRetireImmediatelyInvalidatesDescriptor9506(t *testing.T) {

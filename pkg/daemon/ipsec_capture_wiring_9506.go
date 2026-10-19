@@ -1275,7 +1275,19 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 		plan.finalize(generation)
 		return stagedIpsecQuarantineRuntime(d, generation, plan.Quarantine), nil
 	}
+	// A single generation is bounded to the supported tunnel count. The
+	// allocator holds two generations (old + staged), so without this
+	// bound one oversized stage could consume both generations' capacity
+	// and a later legitimate stage would quarantine (#15068).
+	stagedGenerationHandles := d.ipsecS4.generationQueueHandleCount(generation)
 	for _, key := range keys {
+		if stagedGenerationHandles >= ipsecCaptureMaxGenerationHandles {
+			cleanupHandles()
+			staged, _ = quarantineWith(xnft.IpsecQuarantineReasonQueueOpen, errIpsecQueueExhausted)
+			d.ipsecCaptureStaged = staged
+			d.ipsecCaptureStagePending = true
+			return old, staged, nil
+		}
 		handle, allocErr := d.ipsecS4.allocateQueue(key)
 		if allocErr != nil {
 			cleanupHandles()
@@ -1285,6 +1297,7 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 			return old, staged, nil
 		}
 		handles = append(handles, handle)
+		stagedGenerationHandles++
 	}
 	registry := new(nfqueue.OriginRegistry)
 	if registerErr := ipsecCaptureRegisterOrigins(registry, handles); registerErr != nil {
