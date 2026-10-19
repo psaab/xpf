@@ -78,7 +78,7 @@ func TestRethMemberMACFoldsAbortIntoCommitError_5103(t *testing.T) {
 			withRethOps(t, newRecordingRethOps(t, &events, curMAC5103, true /* force the cycle */))
 			d, lc := newAbortRecoveryDaemon(errors.New("stop_workers: helper did not respond"))
 
-			got, needRecovery, _ := d.programRethMemberMAC(
+			got, needRecovery, _, _ := d.programRethMemberMAC(
 				"ge-0-0-1", virtMAC5103, tc.prior, false /* no earlier member cycled */, false)
 
 			if lc.prepareCalls != 1 {
@@ -122,7 +122,7 @@ func TestRethMemberMACLeavesPriorErrorAloneOnSuccess_5103(t *testing.T) {
 	withRethOps(t, newRecordingRethOps(t, &events, curMAC5103, true /* force the cycle */))
 	d, lc := newAbortRecoveryDaemon(nil /* the join SUCCEEDS, so the cycle completes */)
 
-	got, needRecovery, _ := d.programRethMemberMAC(
+	got, needRecovery, _, _ := d.programRethMemberMAC(
 		"ge-0-0-1", virtMAC5103, errPriorCommit5103, false, false)
 
 	if lc.prepareCalls != 1 {
@@ -152,7 +152,7 @@ func TestRethMemberMACKeepsOrdinaryFailureWarnOnly_5103(t *testing.T) {
 	withRethOps(t, ordinaryFailureRethOps())
 	d, lc := newAbortRecoveryDaemon(errors.New("stop_workers: helper did not respond"))
 
-	got, needRecovery, _ := d.programRethMemberMAC(
+	got, needRecovery, _, _ := d.programRethMemberMAC(
 		"ge-0-0-1", virtMAC5103, errPriorCommit5103, false, false)
 
 	if lc.prepareCalls != 0 {
@@ -189,7 +189,7 @@ func TestRethMemberMACRecoveryGateAbsorbsAcrossMembers_5103(t *testing.T) {
 	// Member 1: a driver with no IFF_LIVE_ADDR_CHANGE — the cycle runs.
 	var ev1 []string
 	withRethOps(t, newRecordingRethOps(t, &ev1, curMAC5103, true /* force the cycle */))
-	commitErr, needRecovery, _ = d.programRethMemberMAC("ge-0-0-1", virtMAC5103, commitErr, needRecovery, false)
+	commitErr, needRecovery, _, _ = d.programRethMemberMAC("ge-0-0-1", virtMAC5103, commitErr, needRecovery, false)
 	if !needRecovery {
 		t.Fatalf("member 1 cycled its link (events %v) but did not arm the gate", ev1)
 	}
@@ -197,13 +197,13 @@ func TestRethMemberMACRecoveryGateAbsorbsAcrossMembers_5103(t *testing.T) {
 	// Members 2 and 3: the live set works, so neither cycles.
 	var ev2 []string
 	withRethOps(t, newRecordingRethOps(t, &ev2, curMAC5103, false /* live set works */))
-	commitErr, needRecovery, _ = d.programRethMemberMAC("ge-0-0-2", virtMAC5103, commitErr, needRecovery, false)
+	commitErr, needRecovery, _, _ = d.programRethMemberMAC("ge-0-0-2", virtMAC5103, commitErr, needRecovery, false)
 	if !needRecovery {
 		t.Fatalf("member 2 needed no link cycle and CLEARED the gate member 1 armed: step "+
 			"2.6b2 will skip the rebind, so member 1's AF_XDP sockets stay unbound after its "+
 			"link cycle destroyed them (events %v)", ev2)
 	}
-	commitErr, needRecovery, _ = d.programRethMemberMAC("ge-0-0-3", virtMAC5103, commitErr, needRecovery, false)
+	commitErr, needRecovery, _, _ = d.programRethMemberMAC("ge-0-0-3", virtMAC5103, commitErr, needRecovery, false)
 	if !needRecovery {
 		t.Fatal("member 3 needed no link cycle and CLEARED the gate: the accumulator must " +
 			"absorb, not track the last member")
