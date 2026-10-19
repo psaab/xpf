@@ -76,6 +76,12 @@ const maxParseErrors = 64
 // the measured 185 B/node, and sits in the same order as the existing
 // 100,000-unit group-expansion budget. Deriving it from MaxConfigSize would
 // defeat the purpose: 16 MiB of minimal statements IS 5.6M nodes.
+//
+// #15195 A01-05: the budget charges KEYS as well as nodes (parseKeys stops
+// appending at the budget; parseStatements adds len(Keys) per node). A single
+// statement previously counted as 1 node no matter how many keys it carried,
+// and each key pins three parallel slots (Keys + quoted/bracketed provenance),
+// so a key-dense statement reached ~4x this bound at the input cap.
 const maxParseNodes = 200_000
 
 // Parser implements a recursive descent parser for Junos configuration syntax.
@@ -356,13 +362,21 @@ func (p *Parser) parseStatements() []*Node {
 			p.lexer.Next() // consume error token
 			continue
 		}
-		if p.nodes >= maxParseNodes {
+		if p.nodes+1 >= maxParseNodes {
 			p.noteNodeBudget(tok.Line, tok.Column)
 			break
 		}
+		before := p.nodes
 		node := p.parseStatement()
 		if node != nil {
-			p.nodes++
+			// #15195 A01-05: parseKeys charged this statement's keys against
+			// the budget as it built them (stopping at the budget), and this
+			// node itself is one more unit. The total charge for a statement
+			// is therefore 1+len(Keys) — previously a statement counted as 1
+			// no matter how many keys it carried, and each key pins three
+			// parallel slots (Keys + quoted/bracketed provenance), so a
+			// key-dense statement reached ~4x the documented bound.
+			p.nodes = before + 1 + len(node.Keys)
 			nodes = append(nodes, node)
 		}
 	}
@@ -631,6 +645,18 @@ func (p *Parser) parseKeys() ([]string, []TokenType, []bool, bool) {
 			sawClose = true
 		}
 		if tok.Type == TokenIdentifier || tok.Type == TokenString {
+			// #15195 A01-05: charge each key against the same budget BEFORE
+			// appending it. Without this, parseKeys built unbounded
+			// Keys/kinds/bracketed slices for one statement (counted as a
+			// single node by parseStatements) — the live-AST bound was
+			// ~4x the documented ~37 MB at the input cap. On exhaustion,
+			// latch the budget error at this token and stop consuming keys;
+			// parseStatement still terminates the (truncated) statement and
+			// parseStatements unwinds on the latch without building more.
+			if p.nodes+len(keys) >= maxParseNodes {
+				p.noteNodeBudget(tok.Line, tok.Column)
+				break
+			}
 			p.lexer.Next()
 			if p.lexer.LastGapClosed() {
 				sawClose = true

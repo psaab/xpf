@@ -897,6 +897,47 @@ func matchNodeKeys(n *Node, path []string, pos int) int {
 	return nk
 }
 
+// matchNodeKeysFull is matchNodeKeys for MUTATING resolution (#15195 A01-06):
+// it returns the number of path elements consumed only on a FULL-identity
+// match, and 0 otherwise. Two shapes are full identity:
+//   - the node's ENTIRE key list equals the path segment at pos (consume
+//     len(n.Keys)); or
+//   - the remaining path is a PREFIX of the node's keys (consume the
+//     remaining length): the path names a wider node by a leading portion
+//     of its key list — e.g. the flat-set as-path leaf [as-path AP1 0-9 +]
+//     addressed as `as-path AP1` on the way to a destination parent, or a
+//     bracketed-group container addressed by its leading keys. Whether a
+//     terminal prefix match may terminate the walk is the CALLER's call:
+//     findNodeWithParent rejects it as a rename/copy SOURCE (the path must
+//     spell the node's full identity to mutate it), while descent to a
+//     destination parent legitimately passes through it.
+//
+// What it must NEVER do is what lenient matchNodeKeys does: return 1 on a
+// first-key-only hit where a LATER key differs (`[filter F1]` for segment
+// `filter term ...`). That descended into a different object and mutated it.
+// The display walkers keep the lenient match; mutating callers use this.
+func matchNodeKeysFull(n *Node, path []string, pos int) int {
+	nk := len(n.Keys)
+	if nk == 0 || pos >= len(path) {
+		return 0
+	}
+	if pos+nk <= len(path) {
+		for j := range nk {
+			if n.Keys[j] != path[pos+j] {
+				return 0
+			}
+		}
+		return nk
+	}
+	rem := len(path) - pos
+	for j := range rem {
+		if n.Keys[j] != path[pos+j] {
+			return 0
+		}
+	}
+	return rem
+}
+
 // navigateToNode walks the tree following path, returning the target node.
 // Multi-key nodes consume multiple path elements at once.
 func navigateToNode(children []*Node, path []string) (*Node, error) {
@@ -933,22 +974,38 @@ func (t *ConfigTree) findNodeWithParent(path []string) (*Node, *[]*Node, error) 
 	parentChildren := &t.Children
 	pos := 0
 	for pos < len(path) {
-		// Try all children; prefer full-key matches over partial ones.
-		// This handles siblings like [policy first], [policy second], [policy third]
-		// where the first key "policy" matches all but we need the full key match.
+		// Full-identity match only (#15195 A01-06). Among siblings prefer an
+		// EXACT whole-key-list match; a prefix match (remaining path is a
+		// leading portion of a wider node's keys) is accepted only for
+		// DESCENT, never as the terminal node: a rename/copy source must
+		// spell the node's full identity, so a truncated path
+		// (`... ge-0/0/0 unit` for [unit 0]) is "not found", not the node.
+		// The lenient matchNodeKeys returns 1 for a first-key-only hit
+		// where a later key differs, which descended into the wrong
+		// sibling and mutated it — that shape matches nothing here.
 		var bestChild *Node
 		bestConsumed := 0
+		bestExact := false
 		for _, child := range *parentChildren {
-			consumed := matchNodeKeys(child, path, pos)
-			if consumed > bestConsumed {
-				bestChild = child
-				bestConsumed = consumed
+			consumed := matchNodeKeysFull(child, path, pos)
+			if consumed == 0 {
+				continue
+			}
+			exact := consumed == len(child.Keys)
+			if bestChild == nil || (exact && !bestExact) || (exact == bestExact && consumed > bestConsumed) {
+				bestChild, bestConsumed, bestExact = child, consumed, exact
 			}
 		}
 		if bestChild == nil {
 			return nil, nil, fmt.Errorf("path element %q not found", path[pos])
 		}
 		if pos+bestConsumed >= len(path) {
+			if !bestExact {
+				// Terminal prefix match: the path is a truncated spelling
+				// of a wider node. That node IS an ancestor of the spelled
+				// path, not the target — refuse rather than mutate it.
+				return nil, nil, fmt.Errorf("path element %q not found", path[pos])
+			}
 			return bestChild, parentChildren, nil
 		}
 		parentChildren = &bestChild.Children

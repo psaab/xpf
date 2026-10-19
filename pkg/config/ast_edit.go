@@ -179,19 +179,24 @@ func (t *ConfigTree) RenamePath(src, dst []string) error {
 
 // childrenAtPath navigates to the node identified by path and returns a pointer
 // to its children slice. An empty path returns the tree root's children. Like
-// findNodeWithParent it prefers the longest key match at each level so a
-// same-keyword sibling in the path is resolved by full identity.
+// findNodeWithParent it resolves each level by FULL identity
+// (matchNodeKeysFull, #15195 A01-06) so a destination parent in a rename/copy
+// is never reached by descending through a first-key partial match.
 func (t *ConfigTree) childrenAtPath(path []string) (*[]*Node, error) {
 	children := &t.Children
 	pos := 0
 	for pos < len(path) {
 		var bestChild *Node
 		bestConsumed := 0
+		bestExact := false
 		for _, child := range *children {
-			consumed := matchNodeKeys(child, path, pos)
-			if consumed > bestConsumed {
-				bestChild = child
-				bestConsumed = consumed
+			consumed := matchNodeKeysFull(child, path, pos)
+			if consumed == 0 {
+				continue
+			}
+			exact := consumed == len(child.Keys)
+			if bestChild == nil || (exact && !bestExact) || (exact == bestExact && consumed > bestConsumed) {
+				bestChild, bestConsumed, bestExact = child, consumed, exact
 			}
 		}
 		if bestChild == nil {
