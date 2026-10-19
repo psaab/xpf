@@ -127,7 +127,10 @@ func (s *Server) showFirewall(cfg *config.Config, buf *strings.Builder) {
 					fmt.Fprintf(buf, "    Hit count: %d packets, %d bytes\n", totalPkts, totalBytes)
 				}
 				if term.Policer != "" {
-					if ps, ok := policerStatuses[term.Policer]; ok {
+					key := dpuserspace.ThreeColorPolicerStatusKey{
+						Family: family, FilterName: name, TermName: term.Name, Policer: term.Policer,
+					}
+					if ps, ok := policerStatuses[key]; ok {
 						writeThreeColorPolicerStatus(buf, ps)
 					}
 				}
@@ -568,7 +571,10 @@ func (s *Server) showFirewallFilter(req *pb.ShowTextRequest, cfg *config.Config,
 					fmt.Fprintf(buf, "    Hit count: %d packets, %d bytes\n", totalPkts, totalBytes)
 				}
 				if term.Policer != "" {
-					if ps, ok := policerStatuses[term.Policer]; ok {
+					key := dpuserspace.ThreeColorPolicerStatusKey{
+						Family: family, FilterName: filterName, TermName: term.Name, Policer: term.Policer,
+					}
+					if ps, ok := policerStatuses[key]; ok {
 						writeThreeColorPolicerStatus(buf, ps)
 					}
 				}

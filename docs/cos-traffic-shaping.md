@@ -1493,11 +1493,13 @@ Currently implemented:
   and the per-color green (conform) / yellow (exceed) / red (violate) plus
   treatment-drop packet/byte counters the userspace dataplane publishes over
   its `three_color_policer_counters` status. Each distinct `(family, filter,
-  term)` reference gets an independent default runtime; these status counters
-  aggregate all such instances by configured name. Legacy single-rate `firewall
-  policer` definitions are lowered into the same three-color runtime family
-  (#4514), so both policer namespaces render. The same aggregate counters are
-  also printed as a "Three-color policers:" table in the dataplane status summary.
+  term)` reference gets an independent default runtime, and since #15680 the
+  helper publishes one scoped status row per such instance (with `family`,
+  `filter_name`, and `term_name`) so each term renders only its own counters.
+  Legacy single-rate `firewall policer` definitions are lowered into the same
+  three-color runtime family (#4514), so both policer namespaces render. The
+  name-aggregated counters are also printed as a "Three-color policers:" table
+  in the dataplane status summary.
 
 Still planned:
 

@@ -672,12 +672,14 @@ func writeTXCoSSummarySection(b *strings.Builder, status userspace.ProcessStatus
 }
 
 // writeThreeColorPolicersSection renders the three-color policer table, sorted
-// by ID then name, when any policers are present.
+// by ID then name, when any policers are present. #15680: the helper
+// publishes one row per (family, filter, term) instance; this name-scoped
+// summary folds them back to one row per configured policer name.
 func writeThreeColorPolicersSection(b *strings.Builder, status userspace.ProcessStatus) {
 	if len(status.ThreeColorPolicerCounters) == 0 {
 		return
 	}
-	rows := append([]userspace.ThreeColorPolicerStatus(nil), status.ThreeColorPolicerCounters...)
+	rows := userspace.AggregateThreeColorPolicerCountersByName(&status)
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].ID != rows[j].ID {
 			return rows[i].ID < rows[j].ID

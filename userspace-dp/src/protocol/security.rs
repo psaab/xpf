@@ -732,6 +732,12 @@ pub(crate) struct ThreeColorPolicerStatus {
     pub id: u32,
     #[serde(default)]
     pub name: String,
+    #[serde(rename = "family", default, skip_serializing_if = "String::is_empty")]
+    pub family: String,
+    #[serde(rename = "filter_name", default, skip_serializing_if = "String::is_empty")]
+    pub filter_name: String,
+    #[serde(rename = "term_name", default, skip_serializing_if = "String::is_empty")]
+    pub term_name: String,
     #[serde(default)]
     pub mode: String,
     #[serde(rename = "color_blind", default)]

@@ -210,9 +210,9 @@ fn build_term_scoped_policer_runtimes(
             .filter(|runtime| runtime.reusable_for(id, &template.state))
             .cloned();
         let runtime = reused.unwrap_or_else(|| {
-            Arc::new(ThreeColorPolicerRuntime::new(
+            Arc::new(ThreeColorPolicerRuntime::new_scoped(
                 id,
-                scope.policer_name().to_string(),
+                scope.clone(),
                 template.state.fresh_instance(),
             ))
         });
@@ -235,9 +235,9 @@ fn build_term_scoped_policer_runtimes(
             .filter(|runtime| runtime.reusable_for(id, &template.state))
             .cloned();
         let runtime = reused.unwrap_or_else(|| {
-            Arc::new(ThreeColorPolicerRuntime::new(
+            Arc::new(ThreeColorPolicerRuntime::new_scoped(
                 id,
-                name.clone(),
+                scope.clone(),
                 template.state.fresh_instance(),
             ))
         });

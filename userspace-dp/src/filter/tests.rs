@@ -1812,13 +1812,21 @@ fn single_rate_policer_instances_are_term_scoped_11333() {
     );
     assert!(!result.policer_drop, "each term starts with its own bucket");
     assert_eq!(result.action, FilterAction::Accept);
+    // #15680: statuses are per-term rows carrying their scope, not a
+    // name-keyed aggregate. Each term metered one conforming packet.
     let status = state.three_color_policer_statuses();
-    assert_eq!(status.len(), 1);
-    assert_eq!(status[0].name, "shared-legacy");
-    assert_eq!(status[0].green_packets, 2);
-    assert_eq!(status[0].green_bytes, 2_000);
-    assert_eq!(status[0].red_packets, 0);
-    assert_eq!(status[0].drop_packets, 0);
+    assert_eq!(status.len(), 2);
+    for row in &status {
+        assert_eq!(row.name, "shared-legacy");
+        assert_eq!(row.green_packets, 1);
+        assert_eq!(row.green_bytes, 1_000);
+        assert_eq!(row.red_packets, 0);
+        assert_eq!(row.drop_packets, 0);
+    }
+    let terms: Vec<&str> = status.iter().map(|row| row.term_name.as_str()).collect();
+    assert!(terms.contains(&"meter-first"), "status rows: {status:?}");
+    assert!(terms.contains(&"meter-second"), "status rows: {status:?}");
+    assert!(status.iter().all(|row| row.family == "inet" && row.filter_name == "legacy-rl"));
 }
 
 #[test]
@@ -2986,13 +2994,20 @@ fn cached_three_color_policer_instances_are_term_scoped_11333() {
         !apply_cached_three_color_policers(&combined, 2_000_000_000, 1_000).drop,
         "cached replay meters each distinct term once, despite repeated references"
     );
+    // #15680: one scoped row per (family, filter, term) instance. The
+    // charges split across the two fall-through input terms and the
+    // output term; only the 9-packet total is order-independent, so
+    // assert the term set and the sum rather than a split.
     let status = state.three_color_policer_statuses();
-    assert_eq!(status.len(), 1, "status remains grouped by configured name");
-    assert_eq!(status[0].name, "same-pol");
-    assert_eq!(status[0].green_packets, 9);
-    assert_eq!(status[0].green_bytes, 9_000);
-    assert_eq!(status[0].red_packets, 0);
-    assert_eq!(status[0].drop_packets, 0);
+    assert_eq!(status.len(), 3, "status is per-term, not grouped by name");
+    assert!(status.iter().all(|row| row.name == "same-pol"));
+    let terms: Vec<&str> = status.iter().map(|row| row.term_name.as_str()).collect();
+    for term in ["meter-in-a", "meter-in-b", "meter-out"] {
+        assert!(terms.contains(&term), "status rows: {status:?}");
+    }
+    assert_eq!(status.iter().map(|row| row.green_packets).sum::<u64>(), 9);
+    assert_eq!(status.iter().map(|row| row.green_bytes).sum::<u64>(), 9_000);
+    assert!(status.iter().all(|row| row.red_packets == 0 && row.drop_packets == 0));
 }
 
 #[test]
