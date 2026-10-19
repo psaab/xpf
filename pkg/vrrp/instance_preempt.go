@@ -159,6 +159,29 @@ func (vi *vrrpInstance) preemptHoldDuration() time.Duration {
 	return config.SecondsToDuration(vi.cfg.PreemptHoldTime, 0)
 }
 
+// backupConfigUpdateNeedsMasterDownReset reports whether a BACKUP
+// configUpdatedCh consumption with NO armed hold must re-arm
+// masterDownTimer (#15689). Two cases:
+//
+//   - No learned master interval (hasLearned false) and the recorded
+//     change shrank the local AdvertiseInterval: masterDownInterval()
+//     falls back to the local interval, so the timer armed at
+//     3× the old interval is stale by up to ~12 minutes (Scenario B).
+//     With a learned interval the master's cadence owns the horizon
+//     and handleBackupRx resets per advert — leave the timer alone.
+//   - Preemption newly warranted (shouldPreemptObservedMaster now
+//     true — preempt toggled on, or priority raised above the live
+//     master): re-arming evaluates the takeover on the fresh horizon
+//     instead of the timer armed under the old posture. A dead master
+//     also reads warranted here; re-arming to masterDownInterval() is
+//     the same horizon a fresh BACKUP would use, so no regression.
+func (vi *vrrpInstance) backupConfigUpdateNeedsMasterDownReset(change configChange15689, hasLearned bool) bool {
+	if !hasLearned && change.valid && change.newAdvertiseMS < change.oldAdvertiseMS {
+		return true
+	}
+	return vi.shouldPreemptObservedMaster()
+}
+
 // preemptingLiveLowerMaster reports whether the masterDownTimer expiry that is
 // firing right now represents PREEMPTION of a still-live lower-priority master
 // (as opposed to takeover of a dead/silent master). It returns true iff a
@@ -283,6 +306,7 @@ func (vi *vrrpInstance) armPreemptHold(masterDownTimer, preemptHoldTimer *time.T
 	masterDownTimer.Reset(vi.masterDownInterval())
 	vi.mu.Lock()
 	vi.preemptHoldArmed = true
+	vi.preemptHoldArmedAt = time.Now()
 	vi.mu.Unlock()
 }
 
@@ -293,5 +317,6 @@ func (vi *vrrpInstance) disarmPreemptHold(preemptHoldTimer *time.Timer) {
 	stopAndDrainTimer(preemptHoldTimer)
 	vi.mu.Lock()
 	vi.preemptHoldArmed = false
+	vi.preemptHoldArmedAt = time.Time{}
 	vi.mu.Unlock()
 }

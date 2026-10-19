@@ -147,6 +147,26 @@ type vrrpInstance struct {
 	// mu so a future cross-goroutine reader stays race-clean. Guarded by mu.
 	preemptHoldArmed bool
 
+	// preemptHoldArmedAt is when the current hold was armed (run-loop
+	// goroutine, under mu alongside preemptHoldArmed). #15689: a config
+	// update that does not invalidate the hold must preserve the elapsed
+	// countdown rather than restart it; the expiry re-validation at
+	// preemptHoldTimer.C remains the safety net.
+	preemptHoldArmedAt time.Time
+
+	// pendingConfigChange is the before/after snapshot of the most recent
+	// updateConfigHeld that signalled configUpdatedCh and has not yet been
+	// consumed by the run loop (#15689). Set under mu by updateConfigHeld
+	// BEFORE the channel send, consumed (taken) under mu by the run loop's
+	// configUpdatedCh handlers. It lets StateMaster decide whether an
+	// immediate advert is warranted (AdvertiseInterval or effective
+	// priority changed) and lets stepBackup distinguish an invalidating
+	// hold edit (PreemptHoldTime changed / premise lost) from an
+	// unrelated edit that must preserve the armed countdown. A coalesced
+	// second update overwrites it — the handlers re-read current cfg for
+	// the interval/priority decisions, exactly as the channel coalesces.
+	pendingConfigChange configChange15689
+
 	trackDown bool // tracked interface (cfg.TrackInterface) is down (#1814); guarded by mu
 
 	// Last-seen accepted master advertisement (#2082). Recorded by
@@ -433,6 +453,52 @@ func (vi *vrrpInstance) key() string {
 	return StateKey(vi.cfg.Interface, vi.cfg.GroupID, vi.cfg.Family)
 }
 
+// configChange15689 is the before/after snapshot updateConfigHeld records
+// for the run loop's configUpdatedCh handlers (#15689). Effective
+// priorities are computed under the same lock that mutates cfg so the
+// MASTER handler can tell "interval or priority changed — advertise now"
+// from an unrelated edit, and stepBackup can tell "hold-time changed"
+// from an unrelated edit that must preserve an armed countdown.
+type configChange15689 struct {
+	valid            bool
+	oldAdvertiseMS   int
+	newAdvertiseMS   int
+	oldEffectivePrio int
+	newEffectivePrio int
+	oldHoldSec       int
+	newHoldSec       int
+}
+
+// effectivePriorityLocked computes the track-adjusted advertised priority
+// from cfg/trackDown. Caller MUST hold vi.mu (read or write); it never
+// takes the lock itself (mirrors advertIntervalLocked, #6230). Priority
+// 0/255 pass through; otherwise TrackPriorityCost is subtracted while the
+// tracked link is down, clamped to [1,254] — same math as prioritySnapshot.
+func (vi *vrrpInstance) effectivePriorityLocked() int {
+	p := vi.cfg.Priority
+	if p == 0 || p == addressOwnerPriority {
+		return p
+	}
+	if vi.trackDown && vi.cfg.TrackInterface != "" {
+		p -= vi.cfg.TrackPriorityCost
+		if p < 1 {
+			p = 1
+		} else if p > 254 {
+			p = 254
+		}
+	}
+	return p
+}
+
+// takePendingConfigChange consumes the pending #15689 snapshot.
+func (vi *vrrpInstance) takePendingConfigChange() configChange15689 {
+	vi.mu.Lock()
+	defer vi.mu.Unlock()
+	c := vi.pendingConfigChange
+	vi.pendingConfigChange = configChange15689{}
+	return c
+}
+
 // updateConfig updates priority, preempt, interface-tracking,
 // advertise-interval, and gratuitous-ARP-count config in-place without
 // restarting.
@@ -445,14 +511,14 @@ func (vi *vrrpInstance) key() string {
 // keeps all preemptHoldTimer Stop/Reset calls on the single run-loop goroutine.
 //
 // AdvertiseInterval and GARPCount are copied so a day-2 change reaches the
-// running instance (#5087). Both are re-read from cfg by the run loop and the
-// failover path, so no explicit timer poke is needed: the MASTER advert timer
-// re-arms via advertTimer.Reset(vi.advertInterval()) on its next fire, the
-// BACKUP master-down horizon re-reads cfg.AdvertiseInterval via
-// masterDownInterval(), and the next failover's sendGARP re-reads
-// cfg.GARPCount. Before this copy a commit changing only
-// reth-advertise-interval or gratuitous-arp-count left the running instance at
-// its stale value until an unrelated restart.
+// running instance (#5087, #15689). The run loop consumes configUpdatedCh
+// in BOTH states: StateMaster immediately advertises and re-arms
+// advertTimer when the interval or effective priority changed (a shrink
+// left on the old arm starves BACKUP peers into a dual-MASTER window),
+// and StateBackup re-arms masterDownTimer / re-validates an armed
+// preempt hold against the recorded change. Before #15689 StateMaster
+// never drained the channel, so the token leaked into a later BACKUP
+// tenure and the advert timer kept its stale arm until its next fire.
 func (vi *vrrpInstance) updateConfig(cfg Instance) {
 	vi.updateConfigHeld(cfg, false)
 }
@@ -465,6 +531,9 @@ func (vi *vrrpInstance) updateConfig(cfg Instance) {
 // a live peer while held.
 func (vi *vrrpInstance) updateConfigHeld(cfg Instance, heldRETH bool) {
 	vi.mu.Lock()
+	oldAdvertiseMS := vi.cfg.AdvertiseInterval
+	oldHoldSec := vi.cfg.PreemptHoldTime
+	oldEffective := vi.effectivePriorityLocked()
 	if heldRETH && cfg.Priority == 0 {
 		vi.cfg.Priority = 0
 	} else {
@@ -477,11 +546,28 @@ func (vi *vrrpInstance) updateConfigHeld(cfg Instance, heldRETH bool) {
 	vi.cfg.TrackInterface = cfg.TrackInterface
 	vi.cfg.TrackPriorityCost = cfg.TrackPriorityCost
 	vi.desiredPreempt = cfg.Preempt
+	// Record the change BEFORE signalling (#15689): the run loop takes
+	// this snapshot when it consumes configUpdatedCh to decide whether
+	// to advertise/re-arm (MASTER) or disarm vs preserve an armed hold
+	// (BACKUP). Effective priority is computed after the mutation so a
+	// track-cost change is reflected in newEffectivePrio.
+	vi.pendingConfigChange = configChange15689{
+		valid:            true,
+		oldAdvertiseMS:   oldAdvertiseMS,
+		newAdvertiseMS:   vi.cfg.AdvertiseInterval,
+		oldEffectivePrio: oldEffective,
+		newEffectivePrio: vi.effectivePriorityLocked(),
+		oldHoldSec:       oldHoldSec,
+		newHoldSec:       vi.cfg.PreemptHoldTime,
+	}
 	vi.mu.Unlock()
 
-	// Wake the BACKUP select so an armed preempt hold-time can be re-validated
-	// against the new config. Non-blocking: a coalesced pending signal is fine
-	// (the handler re-reads the current cfg, not a per-update delta).
+	// Wake the run-loop select (MASTER and BACKUP both consume
+	// configUpdatedCh since #15689) so timers and an armed preempt hold
+	// can be re-validated against the new config. Non-blocking: a
+	// coalesced pending signal is fine (the pending snapshot above is
+	// overwritten with the latest change and interval/priority decisions
+	// re-read current cfg).
 	select {
 	case vi.configUpdatedCh <- struct{}{}:
 	default:
@@ -595,6 +681,7 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 		// armed; clear the flag before deciding (#2900).
 		vi.mu.Lock()
 		vi.preemptHoldArmed = false
+		vi.preemptHoldArmedAt = time.Time{}
 		vi.mu.Unlock()
 		// RE-VALIDATE before taking over (#2900). A >= -priority master
 		// returning during the hold would have re-armed masterDownTimer and
@@ -644,23 +731,41 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 		// and this is not a two-owner-safe resignation.
 		vi.notifyResigned(vi.staleVIPResignErr())
 	case <-vi.configUpdatedCh:
-		// A config update landed (updateConfig) while this BACKUP select was
-		// running (#2900). If a preempt hold-time is armed, the new config may
-		// have invalidated its premise — preempt disabled, priority demoted so
-		// we no longer outrank the live master, or a changed hold-time. The
-		// simplest correct response is to tear the in-flight hold down and
-		// re-arm masterDownTimer: the next expiry re-evaluates against the
-		// fresh config (preemptingLiveLowerMaster + the current hold-time) and
-		// either re-arms the hold with the NEW duration, takes over, or stays
-		// BACKUP. This never silently keeps a stale duration or a stale
-		// preempt decision.
+		// A config update landed (updateConfig) while this BACKUP select
+		// was running (#2900, #15689). Consume the recorded change:
+		//
+		//   - Hold armed: tear it down ONLY when the change invalidates
+		//     its premise — hold-time changed, or preemption is no
+		//     longer warranted (shouldPreemptObservedMaster false:
+		//     preempt disabled / demoted below the live master). An
+		//     unrelated edit (GARPCount, priority raised further) must
+		//     preserve the elapsed countdown; destroying it restarted
+		//     the full hold on every day-2 edit (#15689). The hold-expiry
+		//     re-validation (#2900) still guards the preserved countdown.
+		//   - Hold not armed: re-arm masterDownTimer when the local
+		//     fallback horizon shrank (no learned master interval — a
+		//     cold-start BACKUP otherwise stays stuck at 3× the old
+		//     interval, #15689 Scenario B) or when preemption newly
+		//     became warranted against a live lower master. With a
+		//     learned master interval the peer's cadence owns the timer
+		//     (handleBackupRx resets it per advert), so leave it alone.
+		change := vi.takePendingConfigChange()
 		vi.mu.RLock()
 		armed := vi.preemptHoldArmed
+		hasLearned := vi.masterAdverInterval > 0
 		vi.mu.RUnlock()
 		if armed {
-			slog.Info("vrrp: config update during preempt hold — re-validating",
-				"key", vi.key())
-			vi.disarmPreemptHold(preemptHoldTimer)
+			holdChanged := change.valid && change.oldHoldSec != change.newHoldSec
+			if holdChanged || !vi.shouldPreemptObservedMaster() {
+				slog.Info("vrrp: config update during preempt hold — re-validating",
+					"key", vi.key())
+				vi.disarmPreemptHold(preemptHoldTimer)
+				stopAndDrainTimer(masterDownTimer)
+				masterDownTimer.Reset(vi.masterDownInterval())
+			}
+			// else: premise intact and hold-time unchanged — preserve
+			// the running countdown untouched (#15689).
+		} else if vi.backupConfigUpdateNeedsMasterDownReset(change, hasLearned) {
 			stopAndDrainTimer(masterDownTimer)
 			masterDownTimer.Reset(vi.masterDownInterval())
 		}
@@ -804,37 +909,65 @@ func (vi *vrrpInstance) run() {
 			}
 
 		case StateMaster:
-			select {
-			case <-vi.stopCh:
-				vi.resignForShutdown()
+			if vi.stepMaster(masterDownTimer, advertTimer) {
 				return
-			case pkt := <-vi.rxCh:
-				vi.handleMasterRx(pkt, masterDownTimer, advertTimer)
-			case <-advertTimer.C:
-				vi.sendAdvert(vi.getPriority())
-				advertTimer.Reset(vi.advertInterval())
-			case <-vi.resignCh:
-				// Forced resignation removes and publishes BACKUP before telling
-				// the peer to take over. A failed removal is surfaced by
-				// becomeBackup and deliberately does not send priority zero.
-				slog.Info("vrrp: forced resignation", "key", vi.key())
-				if err := vi.becomeBackup(masterDownTimer, advertTimer); err == nil {
-					for range 3 {
-						vi.sendAdvert(0)
-					}
-				}
-				// Use an extended safety-net timer instead of stopping entirely.
-				// With short RETH intervals (30ms), the normal masterDown timer
-				// at priority 0 is only ~120ms, which can re-elect us before the
-				// peer starts advertising.
-				safetyTimeout := 3 * vi.masterDownInterval()
-				if safetyTimeout < 500*time.Millisecond {
-					safetyTimeout = 500 * time.Millisecond
-				}
-				masterDownTimer.Reset(safetyTimeout)
 			}
 		}
 	}
+}
+
+// stepMaster runs one iteration of the StateMaster select. It mirrors
+// stepBackup: called by the run loop AND directly by unit tests (run()
+// spawns receiver goroutines unsuitable for test instances). Returns
+// true when the instance has been told to stop (shutdown resignation
+// already performed — the caller must return without further action).
+func (vi *vrrpInstance) stepMaster(masterDownTimer, advertTimer *time.Timer) (stop bool) {
+	select {
+	case <-vi.stopCh:
+		vi.resignForShutdown()
+		return true
+	case pkt := <-vi.rxCh:
+		vi.handleMasterRx(pkt, masterDownTimer, advertTimer)
+	case <-advertTimer.C:
+		vi.sendAdvert(vi.getPriority())
+		advertTimer.Reset(vi.advertInterval())
+	case <-vi.configUpdatedCh:
+		// Day-2 in-place update while MASTER (#15689). Consuming the
+		// token here is what stops it leaking into a future BACKUP
+		// tenure. When the advertise interval or the effective
+		// priority changed, peers must learn it NOW: send an advert
+		// carrying the new MaxAdverInt/priority and re-arm advertTimer
+		// at the new interval. Left on the old arm, a shrink (e.g.
+		// 60s -> 1s) starves BACKUP peers past their master-down
+		// horizon and creates a dual-MASTER window. Unrelated edits
+		// (GARPCount/track) leave the running advert timer untouched.
+		change := vi.takePendingConfigChange()
+		if !change.valid || change.oldAdvertiseMS != change.newAdvertiseMS || change.oldEffectivePrio != change.newEffectivePrio {
+			vi.sendAdvert(vi.getPriority())
+			stopAndDrainTimer(advertTimer)
+			advertTimer.Reset(vi.advertInterval())
+		}
+	case <-vi.resignCh:
+		// Forced resignation removes and publishes BACKUP before telling
+		// the peer to take over. A failed removal is surfaced by
+		// becomeBackup and deliberately does not send priority zero.
+		slog.Info("vrrp: forced resignation", "key", vi.key())
+		if err := vi.becomeBackup(masterDownTimer, advertTimer); err == nil {
+			for range 3 {
+				vi.sendAdvert(0)
+			}
+		}
+		// Use an extended safety-net timer instead of stopping entirely.
+		// With short RETH intervals (30ms), the normal masterDown timer
+		// at priority 0 is only ~120ms, which can re-elect us before the
+		// peer starts advertising.
+		safetyTimeout := 3 * vi.masterDownInterval()
+		if safetyTimeout < 500*time.Millisecond {
+			safetyTimeout = 500 * time.Millisecond
+		}
+		masterDownTimer.Reset(safetyTimeout)
+	}
+	return false
 }
 
 // resignForShutdown makes the final VIP removal before publishing BACKUP or
