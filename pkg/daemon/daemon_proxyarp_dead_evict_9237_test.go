@@ -62,7 +62,7 @@ func TestDeadResponderIsEvictedAndRestarted9237(t *testing.T) {
 	close(dead.done)
 	d.arpResponders.running["ge-0-0-2.80"] = dead
 
-	d.syncProxyARPResponders(cfg, map[string]string{"ge-0-0-2.80": "ge-0/0/2.80"})
+	d.syncProxyARPResponders(cfg, map[string][]string{"ge-0-0-2.80": {"ge-0/0/2.80"}})
 
 	cur, ok := d.arpResponders.running["ge-0-0-2.80"]
 	if !ok {
@@ -96,7 +96,7 @@ func TestLiveResponderIsNotEvicted9237(t *testing.T) {
 	}
 	d.arpResponders.running["ge-0-0-2.80"] = live
 
-	d.syncProxyARPResponders(proxyARPCfg9237(t), map[string]string{"ge-0-0-2.80": "ge-0/0/2.80"})
+	d.syncProxyARPResponders(proxyARPCfg9237(t), map[string][]string{"ge-0-0-2.80": {"ge-0/0/2.80"}})
 
 	if cur := d.arpResponders.running["ge-0-0-2.80"]; cur != live {
 		t.Error("#9237: a LIVE responder was replaced. Restarting a healthy responder drops " +
@@ -129,7 +129,7 @@ func TestNoCorpseSurvivesASweep9237(t *testing.T) {
 		d.arpResponders.running[name] = r
 	}
 	// Only the first is still wanted; the second must be stopped, not restarted.
-	d.syncProxyARPResponders(proxyARPCfg9237(t), map[string]string{"ge-0-0-2.80": "ge-0/0/2.80"})
+	d.syncProxyARPResponders(proxyARPCfg9237(t), map[string][]string{"ge-0-0-2.80": {"ge-0/0/2.80"}})
 
 	for name, r := range d.arpResponders.running {
 		select {

@@ -111,7 +111,14 @@ func (r *proxyARPResponder) snapshot(target string) (proxied bool, junosRef stri
 }
 
 // proxyARPPoolAddressesByInterface derives, from config alone, the IPv4
-// proxy-ARP addresses per Junos interface ref.
+// proxy-ARP addresses per kernel netdev name.
+//
+// Keyed by the resolved LINUX name (cfg.ResolveKernelIfName), not the
+// authored Junos ref: several refs can alias one netdev (reth0, reth0.0
+// and its member ge-0/0/0 all resolve to ge-0-0-0), and the responder
+// owns one socket per netdev. Keying by ref stranded every alias but
+// one behind the single-ref collapse in proxyARPResponderTargets
+// (#15764); keying by netdev unions their address sets instead.
 //
 // IPv4 only, and deliberately: IPv6 proxy NDP has no equivalent defect —
 // `ndisc_recv_ns` gates on forwarding + proxy_ndp + a bare `pneigh_lookup` with
@@ -125,6 +132,7 @@ func proxyARPPoolAddressesByInterface(cfg *config.Config) map[string]map[string]
 	}
 	out := map[string]map[string]struct{}{}
 	for _, entry := range cfg.Security.NAT.ProxyARP {
+		linuxName := cfg.ResolveKernelIfName(entry.Interface)
 		for _, cidr := range entry.Addresses {
 			ip, _, err := net.ParseCIDR(cidr)
 			if err != nil {
@@ -136,10 +144,10 @@ func proxyARPPoolAddressesByInterface(cfg *config.Config) map[string]map[string]
 			if v4 == nil {
 				continue // see the IPv6 note above
 			}
-			set, ok := out[entry.Interface]
+			set, ok := out[linuxName]
 			if !ok {
 				set = map[string]struct{}{}
-				out[entry.Interface] = set
+				out[linuxName] = set
 			}
 			set[v4.String()] = struct{}{}
 		}
@@ -265,12 +273,22 @@ func respondToARPFrame(fd, ifIndex int, ifName string, r *proxyARPResponder, pol
 // syncProxyARPResponders starts, updates and stops per-interface responders to
 // match the reconcile's view.
 //
-// want maps kernel netdev name -> Junos interface ref, and is exactly the set
-// reconcileProxyARP just installed entries for. Interfaces that dropped out get
-// their responder stopped: leaving one running would answer for an address this
-// node no longer proxies, which is the same class of error as the #4001 stale
-// re-install the reassert loop was fixed for.
-func (d *Daemon) syncProxyARPResponders(cfg *config.Config, want map[string]string) {
+// want maps kernel netdev name -> Junos interface refs naming that netdev,
+// and is exactly the set reconcileProxyARP just installed entries for.
+// Interfaces that dropped out get their responder stopped: leaving one
+// running would answer for an address this node no longer proxies, which is
+// the same class of error as the #4001 stale re-install the reassert loop
+// was fixed for.
+//
+// #15764: want carries EVERY ref aliasing the netdev, not one arbitrary
+// winner. The address set is the union of all of them (byIface is keyed
+// by netdev and already unioned), and the responder identity is the
+// lexicographically smallest ref — deterministic across reconciles, so a
+// reassert never churns the snapshot between aliases. The redundancy
+// group is still resolved from that one ref: aliases of one netdev sit
+// on the same base/parent, so they agree on the group, and the per-request
+// policy re-reads ownership live.
+func (d *Daemon) syncProxyARPResponders(cfg *config.Config, want map[string][]string) {
 	if d.arpResponders == nil {
 		return
 	}
@@ -347,8 +365,14 @@ func (d *Daemon) syncProxyARPResponders(cfg *config.Config, want map[string]stri
 		}
 	}
 
-	for name, junosRef := range want {
-		addrs := byIface[junosRef]
+	for name, refs := range want {
+		if len(refs) == 0 {
+			continue
+		}
+		// proxyARPResponderTargets sorts refs, so refs[0] is the stable
+		// identity; byIface is keyed by netdev and holds the union.
+		junosRef := refs[0]
+		addrs := byIface[name]
 		rgID := proxyARPRedundancyGroupFor(cfg, junosRef)
 		if len(addrs) == 0 {
 			// Configured on this interface but with no IPv4 address to answer

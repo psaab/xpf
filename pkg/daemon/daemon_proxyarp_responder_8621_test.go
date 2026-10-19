@@ -22,13 +22,26 @@ import (
 // do anything.
 
 func proxyARPCfg(iface string, addrs ...string) *config.Config {
-	return &config.Config{
+	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			NAT: config.NATConfig{
 				ProxyARP: []*config.ProxyARPEntry{{Interface: iface, Addresses: addrs}},
 			},
 		},
 	}
+	// #15764: the pool collector keys by ResolveKernelIfName, and
+	// reth0.80 only resolves to ge-0-0-2 when the member mapping exists.
+	if iface == "reth0.80" {
+		cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+			"reth0":    {Name: "reth0"},
+			"ge-0/0/2": {Name: "ge-0/0/2", RedundantParent: "reth0"},
+		}
+		// Unit 80 must exist so reth0.80 resolves to ge-0-0-2.80 via its
+		// unit number (no VLAN tag in these fixtures).
+		cfg.Interfaces.Interfaces["reth0"].Units = map[int]*config.InterfaceUnit{80: {Number: 80}}
+		cfg.Interfaces.Interfaces["ge-0/0/2"].Units = map[int]*config.InterfaceUnit{80: {Number: 80}}
+	}
+	return cfg
 }
 
 // v4 addresses are collected; v6 ones are deliberately NOT, because the kernel
@@ -43,7 +56,7 @@ func TestOnlyIPv4PoolAddressesAreClaimed8621(t *testing.T) {
 		"not-an-address",
 	)
 	got := proxyARPPoolAddressesByInterface(cfg)
-	set := got["reth0.80"]
+	set := got["ge-0-0-2.80"]
 	if _, ok := set["172.16.80.7"]; !ok {
 		t.Fatalf("the v4 pool address was not claimed; got %v. Every other assertion "+
 			"in this cell is satisfied by a collector that returns nothing", set)
@@ -280,18 +293,22 @@ func TestResponderReconcileRefreshesVirtualMAC_10316(t *testing.T) {
 	t.Cleanup(func() { proxyARPInterfaceByName = originalLookup })
 
 	d := &Daemon{arpResponders: newProxyARPResponders()}
+	_, cancel10316 := context.WithCancel(context.Background())
+	t.Cleanup(cancel10316)
 	r := &proxyARPResponder{
+		cancel:   cancel10316,
+		done:     make(chan struct{}),
 		junosRef: "reth0.80",
 		addrs:    map[string]struct{}{"172.16.80.7": {}},
 		mac:      mac1,
 		macSet:   true,
 	}
-	d.arpResponders.running["ge-0-0-2"] = r
+	d.arpResponders.running["ge-0-0-2.80"] = r
 	cfg := proxyARPCfg("reth0.80", "172.16.80.7/32")
 
 	// Reconcile is the live-set notification path: no responder restart and
 	// no socket reopen occurs here.
-	d.syncProxyARPResponders(cfg, map[string]string{"ge-0-0-2": "reth0.80"})
+	d.syncProxyARPResponders(cfg, map[string][]string{"ge-0-0-2.80": {"reth0.80"}})
 	if got := r.currentMAC(); got.String() != mac2.String() {
 		t.Fatalf("reconcile left responder MAC at %s, want live MAC %s", got, mac2)
 	}
@@ -331,18 +348,22 @@ func TestResponderReconcileAndRepliesAreRaceFree_10316(t *testing.T) {
 	t.Cleanup(func() { proxyARPInterfaceByName = originalLookup })
 
 	d := &Daemon{arpResponders: newProxyARPResponders()}
+	_, cancelRace := context.WithCancel(context.Background())
+	t.Cleanup(cancelRace)
 	r := &proxyARPResponder{
+		cancel:   cancelRace,
+		done:     make(chan struct{}),
 		junosRef: "reth0.80",
 		rgID:     2,
 		addrs:    map[string]struct{}{"172.16.80.7": {}},
 		mac:      net.HardwareAddr{0x02, 0xbf, 0x72, 0x16, 0x01, 0x00},
 		macSet:   true,
 	}
-	d.arpResponders.running["ge-0-0-2"] = r
+	d.arpResponders.running["ge-0-0-2.80"] = r
 	cfg := proxyARPCfg("reth0.80", "172.16.80.7/32")
-	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
-		"reth0": {Name: "reth0", RedundancyGroup: 2},
-	}
+	// Keep the member mapping proxyARPCfg installed (the pool key is now
+	// the resolved netdev) and add the redundancy group on top.
+	cfg.Interfaces.Interfaces["reth0"].RedundancyGroup = 2
 	policy := d.answerPolicyFor(r)
 	frame := arpRequestFrame(
 		net.HardwareAddr{0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4},
@@ -353,7 +374,7 @@ func TestResponderReconcileAndRepliesAreRaceFree_10316(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 1000; i++ {
-			d.syncProxyARPResponders(cfg, map[string]string{"ge-0-0-2": "reth0.80"})
+			d.syncProxyARPResponders(cfg, map[string][]string{"ge-0-0-2.80": {"reth0.80"}})
 		}
 	}()
 	go func() {
