@@ -74,13 +74,52 @@ impl XskSocketRole {
     fn create_mode(self) -> xsk_ffi::XskCreateMode {
         match self {
             Self::Private => xsk_ffi::XskCreateMode::PrivateUmem,
-            Self::SharedOwner | Self::SharedSecondary => xsk_ffi::XskCreateMode::SharedUmem,
+            // #15088 (A61-02): the owner gets its own mode so libxdp is
+            // handed NULL fill/comp and substitutes the UMEM's
+            // fill_save/comp_save (see xsk_ffi::create_xsk_binding_shared_owner).
+            Self::SharedOwner => xsk_ffi::XskCreateMode::SharedOwnerUmem,
+            Self::SharedSecondary => xsk_ffi::XskCreateMode::SharedUmem,
         }
     }
 
     fn requires_zerocopy(self) -> bool {
         !matches!(self, Self::Private)
     }
+}
+
+/// #15088 (A61-02): whether a failed socket create may be retried in place
+/// on the SAME UMEM (the 20 x 250 ms EBUSY loop in `try_open_bind`).
+///
+/// Never for the shared owner. In the pre-fix tree the owner was created
+/// like a secondary, with fresh per-socket fill/comp structs; libxdp
+/// 1.6.3 memcpy'd the UMEM's `fill_save`/`comp_save` into them and, on
+/// any post-ctx failure (bind `-EBUSY` from the kernel's deferred XSK
+/// pool release — the documented reason this retry exists), computed
+/// `unmap = (fill_save != fill) == true` and munmapped the UMEM's only
+/// FILL/COMP mapping. The retry then re-copied the now-dangling
+/// `fill_save` pointers and reported a bound zero-copy socket whose fill
+/// ring writes landed in unmapped/aliased memory and never fed the
+/// kernel. Even with the owner now created via NULL fill/comp (so a
+/// single failed attempt no longer unmaps), an in-place retry still
+/// re-enters create on a UMEM whose post-failure state this tree cannot
+/// prove from its linked libxdp: the same reasoning that already forbids
+/// an in-bind retry after an identity-mismatch delete (see
+/// `try_open_bind`). A failed owner create therefore fails the group
+/// bind closed; recovery is the outer reconcile loop, which rebuilds the
+/// `WorkerUmem` wholesale (`create_shared_binding_group` constructs a
+/// fresh `WorkerUmemPool` per attempt) and then falls back to private
+/// UMEMs (`fallback_shared_group_to_private`).
+///
+/// Private and shared-secondary creates keep the retry: a private socket
+/// is the UMEM's only socket and borrows its rings (libxdp's non-shared
+/// path never unmaps them on failure), and a secondary's `xsk_put_ctx`
+/// unmap only releases that secondary's own per-socket mapping copy —
+/// the owner's live mapping, referenced by the owner's context, is not
+/// the secondary's to unmap (the secondary ctx is a distinct queue ctx;
+/// `xsk_socket__delete` of the owner is what unmaps the UMEM rings, once
+/// refcount reaches zero).
+pub(super) fn ebusy_retry_allowed(role: XskSocketRole) -> bool {
+    !matches!(role, XskSocketRole::SharedOwner)
 }
 
 /// Total UMEM frames per binding: reserved TX + 2×ring_entries for RX fill.
@@ -161,9 +200,12 @@ pub(super) fn preferred_bind_strategy(binding: &BindingStatus) -> AfXdpBindStrat
 /// The returned XSK handles must be stored/dropped before `worker_umem`, so
 /// `xsk_socket__delete` runs while the UMEM state is still live and before
 /// `xsk_umem__delete`. Private UMEM sockets borrow `worker_umem`'s
-/// fill/completion ring structs directly. Shared UMEM sockets own
-/// socket-local fill/completion rings but still depend on the live shared UMEM
-/// pointer passed through `worker_umem`.
+/// fill/completion ring structs directly. Shared-secondary sockets own
+/// socket-local fill/completion rings but still depend on the live shared
+/// UMEM pointer passed through `worker_umem`. The shared owner (#15088)
+/// also borrows the UMEM's ring structs — they are libxdp's
+/// `fill_save`/`comp_save` — so it carries the private case's drop-order
+/// requirement: socket first, UMEM last.
 pub(super) unsafe fn open_binding_worker_rings(
     worker_umem: &mut WorkerUmem,
     info: &IfInfo,
@@ -619,6 +661,16 @@ fn try_open_bind(
                     bind_flags,
                 )
             },
+            // #15088 (A61-02): the owner borrows the UMEM's rings, so it
+            // needs the same &mut Umem access as the private create.
+            xsk_ffi::XskCreateMode::SharedOwnerUmem => unsafe {
+                xsk_ffi::create_xsk_binding_shared_owner(
+                    worker_umem.umem_mut(),
+                    info,
+                    ring_entries,
+                    bind_flags,
+                )
+            },
         };
         match create_result {
             Ok((user, rx, tx, mut device)) => {
@@ -689,7 +741,14 @@ fn try_open_bind(
             }
             Err(err) => {
                 let msg = err.to_string();
-                if attempt + 1 < BIND_RETRY_ATTEMPTS && msg.contains("Device or resource busy") {
+                // #15088 (A61-02): the shared owner never retries on the
+                // same UMEM — see ebusy_retry_allowed. Its failure fails
+                // the group bind closed and the reconcile loop rebuilds
+                // the WorkerUmem before any re-attempt.
+                if ebusy_retry_allowed(socket_role)
+                    && attempt + 1 < BIND_RETRY_ATTEMPTS
+                    && msg.contains("Device or resource busy")
+                {
                     thread::sleep(BIND_RETRY_DELAY);
                     continue;
                 }
@@ -1236,6 +1295,59 @@ mod bind_mismatch_teardown_9904_tests {
                 && msg.contains("11")
                 && msg.contains("12"),
             "mismatch teardown must fail closed with planned-vs-observed, got: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bind_owner_retry_15088_tests {
+    use super::*;
+
+    // #15088 (A61-02): a failed shared-owner create must NEVER be retried
+    // on the same UMEM. Pre-fix, SharedOwner mapped to SharedUmem and the
+    // EBUSY loop re-created it up to 20 times; the first failure had
+    // already made libxdp munmap the UMEM's only FILL/COMP mapping, so
+    // the retried "OK" socket primed an unmapped fill ring. The retry
+    // decision is pinned here; the in-place loop's use of it is pinned by
+    // tests/shared_owner_ebusy_retry_15088.rs. Controls: private and
+    // shared-secondary creates keep the EBUSY retry (their failure paths
+    // do not unmap a mapping another socket's liveness depends on).
+    #[test]
+    fn shared_owner_ebusy_is_never_retried_on_same_umem_15088() {
+        assert!(
+            !ebusy_retry_allowed(XskSocketRole::SharedOwner),
+            "#15088: shared-owner EBUSY must fail the group bind closed, \
+             not retry on the same UMEM"
+        );
+        assert!(
+            ebusy_retry_allowed(XskSocketRole::Private),
+            "private create must keep the EBUSY retry"
+        );
+        assert!(
+            ebusy_retry_allowed(XskSocketRole::SharedSecondary),
+            "shared-secondary create must keep the EBUSY retry"
+        );
+    }
+
+    // #15088 (A61-02): the owner must reach libxdp through the NULL
+    // fill/comp owner create, not the per-socket shared create. Pre-fix
+    // both shared roles shared XskCreateMode::SharedUmem.
+    #[test]
+    fn shared_owner_uses_owner_create_mode_15088() {
+        assert_eq!(
+            XskSocketRole::SharedOwner.create_mode(),
+            xsk_ffi::XskCreateMode::SharedOwnerUmem,
+            "#15088: owner must use the NULL fill/comp owner create"
+        );
+        assert_eq!(
+            XskSocketRole::SharedSecondary.create_mode(),
+            xsk_ffi::XskCreateMode::SharedUmem,
+            "secondary must keep the per-socket shared create"
+        );
+        assert_eq!(
+            XskSocketRole::Private.create_mode(),
+            xsk_ffi::XskCreateMode::PrivateUmem,
+            "private must keep the private create"
         );
     }
 }

@@ -140,6 +140,10 @@ static __typeof__(xsk_socket__create) *bridge_socket_create = xsk_socket__create
 static __typeof__(xsk_socket__create_shared) *bridge_socket_create_shared =
     xsk_socket__create_shared;
 static __u32 bridge_captured_libxdp_flags;
+/* #15088: 1 when the last captured shared create received NULL fill/comp
+ * (the owner contract), 0 when it received ring structs, -1 before any
+ * shared capture. Reset by bridge_xsk_capture_socket_create_for_test. */
+static int bridge_captured_shared_fill_is_null = -1;
 
 /* Each capture records config->libxdp_flags and returns -EINVAL. It reads no
  * other argument and creates no socket, so a test may pass null pointers. */
@@ -168,14 +172,16 @@ static int bridge_capture_socket_create_shared(
     const struct xsk_socket_config *config)
 {
     bridge_captured_libxdp_flags = config->libxdp_flags;
+    bridge_captured_shared_fill_is_null = (fill == NULL && comp == NULL) ? 1 : 0;
     return -EINVAL;
 }
 
 /* #9726: test-only. A non-zero enable routes both create functions to the
- * captures; 0 restores libxdp's functions. Either resets the captured flags to 0. */
+ * captures; 0 restores libxdp's functions. Either resets the captured state. */
 void bridge_xsk_capture_socket_create_for_test(int enable)
 {
     bridge_captured_libxdp_flags = 0;
+    bridge_captured_shared_fill_is_null = -1;
     bridge_socket_create = enable ? bridge_capture_socket_create : xsk_socket__create;
     bridge_socket_create_shared =
         enable ? bridge_capture_socket_create_shared : xsk_socket__create_shared;
@@ -185,6 +191,13 @@ void bridge_xsk_capture_socket_create_for_test(int enable)
 __u32 bridge_xsk_captured_libxdp_flags(void)
 {
     return bridge_captured_libxdp_flags;
+}
+
+/* #15088: test-only. 1 when the last captured shared create received NULL
+ * fill/comp, 0 when it received ring structs, -1 before any shared capture. */
+int bridge_xsk_captured_shared_fill_is_null(void)
+{
+    return bridge_captured_shared_fill_is_null;
 }
 
 int bridge_xsk_socket_create_private(
@@ -229,6 +242,37 @@ int bridge_xsk_socket_create_shared(
     bridge_fill_socket_config(&cfg, rx_size, tx_size, bind_flags);
     return bridge_socket_create_shared(xsk_out, ifname, queue_id, umem,
                                        rx, tx, fill, comp, &cfg);
+}
+
+/*
+ * #15088 (A61-02): shared-UMEM OWNER create. Passing NULL fill/comp makes
+ * libxdp 1.6.3 substitute the UMEM's own fill_save/comp_save structs
+ * (xsk_socket__create_opts: "if (!fill && !comp) { fill = fill_save; }").
+ * That identity is load-bearing on the error path: when bind() fails
+ * (e.g. -EBUSY from the kernel's deferred XSK pool release), libxdp
+ * computes unmap = (fill_save != fill) == false and xsk_put_ctx skips the
+ * munmap, so the UMEM's only FILL/COMP mapping survives. The per-socket
+ * variant above hands libxdp fresh structs; libxdp memcpy's fill_save
+ * into them, sees fill_save != fill, and munmaps the UMEM mapping on any
+ * post-ctx failure — after which a retried create re-copies the dangling
+ * pointers and the "bound" socket primes an unmapped fill ring.
+ */
+int bridge_xsk_socket_create_shared_owner(
+    struct xsk_socket **xsk_out,
+    const char *ifname,
+    __u32 queue_id,
+    struct xsk_umem *umem,
+    struct xsk_ring_cons *rx,
+    struct xsk_ring_prod *tx,
+    __u32 rx_size,
+    __u32 tx_size,
+    __u16 bind_flags)
+{
+    struct xsk_socket_config cfg;
+
+    bridge_fill_socket_config(&cfg, rx_size, tx_size, bind_flags);
+    return bridge_socket_create_shared(xsk_out, ifname, queue_id, umem,
+                                       rx, tx, NULL, NULL, &cfg);
 }
 
 void bridge_xsk_socket_delete(struct xsk_socket *xsk)
