@@ -47,7 +47,20 @@ const (
 	authorityUnset commitAuthorityKind = iota
 	// authorityInternal is a system/daemon committer that legitimately carries
 	// no config-lock session (HA sync, event engine, in-process CLI, tests).
+	// It carries no mint-time lock state and is accepted unconditionally —
+	// see #15208 for why only directly-constructed authorities are this
+	// kind.
 	authorityInternal
+	// authorityInternalEpochBound is an internal authority MINTED by the
+	// store (AuthorizeCommitAs with sessionID == "") while nobody held
+	// the config lock (#15208, A19-02). It stays internal — IsInternal,
+	// SessionID and the journal principal behave exactly as
+	// authorityInternal — but it is bound to the holder epoch observed at
+	// mint time: any later lock acquisition (or release) means the
+	// candidate at promotion belongs to a holder the mint never saw, and
+	// promoting it would apply that holder's work under the minting
+	// caller's journal principal.
+	authorityInternalEpochBound
 	// authorityHolder is a transport session that passed the holder gate, bound
 	// to the holder identity AND the epoch observed at that moment.
 	authorityHolder
@@ -104,8 +117,12 @@ func InternalCommitterAs(principal string) CommitAuthority {
 }
 
 // IsInternal reports whether a is the system/daemon authority. Exported for the
-// daemon's logging and for tests asserting which authority a path used.
-func (a CommitAuthority) IsInternal() bool { return a.kind == authorityInternal }
+// daemon's logging and for tests asserting which authority a path used. An
+// epoch-bound internal authority (#15208) is still internal: it carries no
+// config-lock session and journals under its minting principal.
+func (a CommitAuthority) IsInternal() bool {
+	return a.kind == authorityInternal || a.kind == authorityInternalEpochBound
+}
 
 // SessionID returns the config session this authority is bound to, or "" for an
 // internal or unset authority.
@@ -127,6 +144,20 @@ func (a CommitAuthority) JournalPrincipal() string {
 func (s *Store) verifyCommitAuthorityLocked(a CommitAuthority) error {
 	switch a.kind {
 	case authorityInternal:
+		return nil
+	case authorityInternalEpochBound:
+		// #15208 (A19-02): this authority was minted while nobody held
+		// the lock, so it authorized "whatever candidate exists, owned
+		// by nobody". A lock turnover since then — above all a holder
+		// ACQUIRING the lock and staging work — means the candidate now
+		// belongs to someone the mint never authorized. Refuse with
+		// the turnover sentinel (never a generation conflict, or the
+		// daemon's retry would automate the substitution). No turnover
+		// means the same unheld state the mint observed: proceed.
+		if s.holderEpoch != a.epoch {
+			return fmt.Errorf("%w (internal authority minted unheld at holder epoch %d; now %q at epoch %d)",
+				ErrConfigHolderTurnover, a.epoch, s.effectiveHolderLocked(), s.holderEpoch)
+		}
 		return nil
 	case authorityHolder:
 		holder := s.effectiveHolderLocked()
@@ -171,6 +202,19 @@ func (s *Store) AuthorizeCommit(sessionID string) (CommitAuthority, error) {
 // and receives a holder-bound (epoch-bound) authority, otherwise it is
 // refused with ErrConfigLockedByOther. ensureHolderLocked already refuses
 // reclaimed holders on an unowned lock, so that refusal is preserved here.
+//
+// #15208 (A19-02): the sessionID == "" mint reached while the lock is
+// UNHELD (!configDir, or an unowned internal candidate) is bound to the
+// holder epoch observed here. Such a mint authorized a candidate owned
+// by nobody; if a holder acquires the lock before promotion, the
+// candidate belongs to that holder and this authority must not promote
+// it — verifyCommitAuthorityLocked refuses with
+// ErrConfigHolderTurnover. A mint reached while a lock IS held (only
+// reachable via an unowned internal candidate being edited under the
+// #5059 pass, where the internal caller deliberately promotes the
+// shared candidate) stays unconditional authorityInternal, as do the
+// directly-constructed InternalCommitter()/InternalCommitterAs
+// authorities, which carry no mint-time lock state.
 func (s *Store) AuthorizeCommitAs(sessionID, principal string) (CommitAuthority, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -178,6 +222,13 @@ func (s *Store) AuthorizeCommitAs(sessionID, principal string) (CommitAuthority,
 		return CommitAuthority{}, err
 	}
 	if sessionID == "" {
+		if !s.configDir || s.effectiveHolderLocked() == "" {
+			return CommitAuthority{
+				kind:             authorityInternalEpochBound,
+				journalPrincipal: principal,
+				epoch:            s.holderEpoch,
+			}, nil
+		}
 		return InternalCommitterAs(principal), nil
 	}
 	if !s.configDir || s.effectiveHolderLocked() != sessionID {

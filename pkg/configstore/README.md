@@ -725,6 +725,22 @@ they may not commit it — committing it requires the internal caller or taking 
 `reclaimedHolders`, like the idle-lease reclaim, so an operator force-clear does not leave the
 evicted session able to ride the empty-holder pass back into the next internal candidate.
 
+An internal authority minted by the store while nobody holds the lock is
+epoch-bound (#15208, A19-02). `AuthorizeCommitAs("")` reached with
+`!configDir` or an unowned candidate returns
+`authorityInternalEpochBound`: still internal (no session, journals under
+the minting principal), but bound to the mint-time `holderEpoch`. If a
+holder acquires the lock before promotion — the apply-semaphore wait is
+exactly where that happens — `verifyCommitAuthorityLocked` refuses with
+`ErrConfigHolderTurnover`, because the candidate now belongs to a holder
+the mint never saw and promoting it would apply that holder's partial
+work under the minting caller's name. With no intervening turnover the
+promotion proceeds as before. Directly constructed
+`InternalCommitter()`/`InternalCommitterAs` authorities (HA sync, event
+engine, bootstrap, in-process shell) carry no mint-time lock state and
+stay unconditional, as does a store mint reached while a lock is held
+against an unowned candidate.
+
 Generation binding does not close it, and the retry loop makes it worse. A
 turnover that completes *before* the daemon's `CompileCandidateGen` — i.e. while
 the commit waits on the apply semaphore, which is where a busy daemon actually
