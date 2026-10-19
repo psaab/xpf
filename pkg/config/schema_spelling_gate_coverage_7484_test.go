@@ -416,7 +416,7 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // table export`/`generate route policy`/`rib-groups import-rib` compare; the
 // `generate route discard` flag and `rib-groups import-policy` advisory/blind
 // rows are recorded in testdata/spelling_gate_members_7484.txt).
-const gateCoverageFloor = 801 // #15199: +9 compared leaves from the vrrp-inet6-group alias and virtual-inet6-address
+const gateCoverageFloor = 803 // #15659: +2 compared leaves from the direct per-instance interface-routes rib-group fix (was 801 #15199)
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent
@@ -643,7 +643,7 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// origin/master run of this same cell: master already exceeds the
 	// old ceilings by +8/+14/+10 from unrelated drift; only the +28
 	// delta here is this change's.)
-	gateBlindUnreachable: 164,
+	gateBlindUnreachable: 162, // #15659: -2, the direct RI interface-routes rib-group leaves now compare (was 164)
 	// #8830: read, value deliberately ignored, advisory says so. Measured at
 	// this head: vrrp-group track-interface priority-cost (inet and inet6),
 	// security log stream transport tls-profile, system dataplane

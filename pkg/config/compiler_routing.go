@@ -202,35 +202,58 @@ func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig, instanceName st
 		}
 	}
 
-	// Parse global interface-routes { rib-group { inet X; inet6 Y; } }
+	// Parse interface-routes { rib-group { inet X; inet6 Y; } }
+	compileInterfaceRoutesRibGroup(node, ro)
+
+	return nil
+}
+
+// compileInterfaceRoutesRibGroup reads `interface-routes { rib-group ... }`
+// from node (a routing-options node) into ro. Only non-empty values
+// overwrite, so layering a direct RI selector and a nested routing-options
+// selector does not erase one family with the other's empty slot (#15659).
+func compileInterfaceRoutesRibGroup(node *Node, ro *RoutingOptionsConfig) {
 	if irNode := node.FindChild("interface-routes"); irNode != nil {
-		if rgNode := irNode.FindChild("rib-group"); rgNode != nil {
-			// #8939: split a packed run. `rib-group inet RG inet6 RG` is ONE
-			// command and SetPath nests the second family onto the first
-			// rather than making them siblings, so this loop saw `inet` and
-			// dropped the v6 rib-group with it — a leak the operator asked
-			// for that silently does not happen for one family.
-			for _, rgChild := range expandFlatRun(rgNode.Children, interfaceRoutesRibGroupSchema8939()) {
-				switch rgChild.Name() {
-				case "inet":
-					ro.InterfaceRoutesRibGroup = nodeVal(rgChild)
-				case "inet6":
-					ro.InterfaceRoutesRibGroupV6 = nodeVal(rgChild)
+		compileInterfaceRoutesRibGroupFromNode(irNode, ro)
+	}
+}
+
+// compileInterfaceRoutesRibGroupFromNode reads the rib-group selectors from
+// an `interface-routes` node itself (the direct per-instance placement,
+// #15659). Only non-empty values overwrite.
+func compileInterfaceRoutesRibGroupFromNode(irNode *Node, ro *RoutingOptionsConfig) {
+	if rgNode := irNode.FindChild("rib-group"); rgNode != nil {
+		// #8939: split a packed run. `rib-group inet RG inet6 RG` is ONE
+		// command and SetPath nests the second family onto the first
+		// rather than making them siblings, so this loop saw `inet` and
+		// dropped the v6 rib-group with it — a leak the operator asked
+		// for that silently does not happen for one family.
+		for _, rgChild := range expandFlatRun(rgNode.Children, interfaceRoutesRibGroupSchema8939()) {
+			switch rgChild.Name() {
+			case "inet":
+				if v := nodeVal(rgChild); v != "" {
+					ro.InterfaceRoutesRibGroup = v
+				}
+			case "inet6":
+				if v := nodeVal(rgChild); v != "" {
+					ro.InterfaceRoutesRibGroupV6 = v
 				}
 			}
-			// Also handle inline: "rib-group inet NAME" or "rib-group inet6 NAME"
-			for i := 1; i < len(rgNode.Keys)-1; i++ {
-				switch rgNode.Keys[i] {
-				case "inet":
-					ro.InterfaceRoutesRibGroup = rgNode.Keys[i+1]
-				case "inet6":
-					ro.InterfaceRoutesRibGroupV6 = rgNode.Keys[i+1]
+		}
+		// Also handle inline: "rib-group inet NAME" or "rib-group inet6 NAME"
+		for i := 1; i < len(rgNode.Keys)-1; i++ {
+			switch rgNode.Keys[i] {
+			case "inet":
+				if v := rgNode.Keys[i+1]; v != "" {
+					ro.InterfaceRoutesRibGroup = v
+				}
+			case "inet6":
+				if v := rgNode.Keys[i+1]; v != "" {
+					ro.InterfaceRoutesRibGroupV6 = v
 				}
 			}
 		}
 	}
-
-	return nil
 }
 
 // ribMatchesRoutingOptionsScope reports whether ribName selects the main
@@ -1324,8 +1347,26 @@ func compileRoutingInstances(node *Node, cfg *Config, opts compileOpts) error {
 				ri.RibGroups = ro.RibGroups
 				ri.ForwardingTableExport = ro.ForwardingTableExport
 				ri.ForwardingTableExports = ro.ForwardingTableExports
-				ri.InterfaceRoutesRibGroup = ro.InterfaceRoutesRibGroup
-				ri.InterfaceRoutesRibGroupV6 = ro.InterfaceRoutesRibGroupV6
+				if ro.InterfaceRoutesRibGroup != "" {
+					ri.InterfaceRoutesRibGroup = ro.InterfaceRoutesRibGroup
+				}
+				if ro.InterfaceRoutesRibGroupV6 != "" {
+					ri.InterfaceRoutesRibGroupV6 = ro.InterfaceRoutesRibGroupV6
+				}
+			case "interface-routes":
+				// #15659: Junos-canonical direct placement under the instance.
+				// The schema and #9323 gate admit it, but previously no case
+				// read it, so the selector silently vanished. Reuse the same
+				// helper as routing-options; non-empty-only writes keep a
+				// direct selector from being erased by an empty nested slot
+				// (and vice versa) regardless of stanza order.
+				var direct RoutingOptionsConfig
+				direct.InterfaceRoutesRibGroup = ri.InterfaceRoutesRibGroup
+				direct.InterfaceRoutesRibGroupV6 = ri.InterfaceRoutesRibGroupV6
+				// prop is the interface-routes node itself.
+				compileInterfaceRoutesRibGroupFromNode(prop, &direct)
+				ri.InterfaceRoutesRibGroup = direct.InterfaceRoutesRibGroup
+				ri.InterfaceRoutesRibGroupV6 = direct.InterfaceRoutesRibGroupV6
 			case "protocols":
 				var proto ProtocolsConfig
 				if err := compileProtocols(prop, &proto, opts, &cfg.Warnings); err != nil {
