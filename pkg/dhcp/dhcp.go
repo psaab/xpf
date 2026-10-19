@@ -249,10 +249,13 @@ type Manager struct {
 	// one that started before the latch. Add(1) happens under mu in
 	// scheduleRecompile (so it cannot race the latch), Done in the timer func.
 	// RenewalBindingStats counters count replies that pass transaction/client
-	// identity checks but fail the server-identity check (granting-server
-	// mismatch in RENEWING/RENEW, or a missing server identity in any mode).
+	// identity checks but fail a later acceptance gate: the server-identity
+	// check (granting-server mismatch in RENEWING/RENEW, or a missing
+	// server identity in any mode), and — v6 only — the #14997 REBIND
+	// content gate (a destructive Reply from a non-granting server).
 	renewV4ServerIdentityRejects atomic.Uint64
 	renewV6ServerIdentityRejects atomic.Uint64
+	renewV6TeardownRejects       atomic.Uint64
 	recompileWG                  sync.WaitGroup
 	stateDir                     string
 	// protectedPDOverlaps is the configured-prefix set an IA_PD delegation
@@ -296,19 +299,23 @@ type Manager struct {
 
 // RenewalBindingStats reports renewal replies that were ignored because
 // their server identity was missing or, in RENEWING/RENEW, did not match
-// the committed lease binding. REBINDING replies from any server are
-// accepted (#14600) and do not increment these counters.
+// the committed lease binding, plus DHCPv6 REBIND Replies rejected
+// because a non-granting server sent lease/delegation teardown content
+// (#14997). REBINDING replies from any server that merely extend the
+// binding are accepted (#14600) and do not increment these counters.
 type RenewalBindingStats struct {
 	DHCPv4ServerIdentityRejects uint64
 	DHCPv6ServerIdentityRejects uint64
+	DHCPv6TeardownRejects       uint64
 }
 
-// RenewalBindingStats returns a snapshot of the server-identity rejection
+// RenewalBindingStats returns a snapshot of the renewal-rejection
 // counters.
 func (m *Manager) RenewalBindingStats() RenewalBindingStats {
 	return RenewalBindingStats{
 		DHCPv4ServerIdentityRejects: m.renewV4ServerIdentityRejects.Load(),
 		DHCPv6ServerIdentityRejects: m.renewV6ServerIdentityRejects.Load(),
+		DHCPv6TeardownRejects:       m.renewV6TeardownRejects.Load(),
 	}
 }
 

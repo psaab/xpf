@@ -61,9 +61,21 @@ func v4RenewMatcher(m *Manager, req *dhcpv4.DHCPv4, prev *Lease, rebind bool) nc
 // queue by transaction ID; the explicit transaction/client checks keep the
 // acceptance predicate testable. During RENEW the Reply must identify the
 // granting server DUID; during REBIND any server may answer (RFC 8415
-// §18.2.5), so only a present server DUID is required and parseV6Reply
-// stores it as the new binding. A non-nil manager records server-identity
-// rejections.
+// §18.2.5), so a present server DUID suffices for an extending Reply and
+// parseV6Reply stores it as the new binding.
+//
+// #14997 (D40-03): a non-granting REBIND responder may extend the held
+// bindings but must not tear them down. Before this gate, any host that
+// learned the transaction ID and client DUID could answer the multicast
+// REBIND with an IA_PD NoPrefixAvail status, valid-lifetime-0 IA_NA /
+// IA_PD options, or a non-Success status and clear the WAN lease and
+// every delegated prefix in one packet (the run-loop pdRefused clear,
+// the errV6AddrInvalidated deconfigure, and the per-prefix withdrawal
+// reconcile). RFC 8415 §18.2.5 lets any server answer a Rebind, but only
+// about bindings it actually has (§18.2.10/§21: a Reply from a different
+// server must not replace the binding mid-renewal); teardown content is
+// therefore accepted only from the granting server. A non-nil manager
+// records server-identity and teardown rejections.
 func v6RenewMatcher(m *Manager, req *dhcpv6.Message, prev *Lease, rebind bool) nclient6.Matcher {
 	var expectedServer dhcpv6.DUID
 	if prev != nil {
@@ -88,8 +100,64 @@ func v6RenewMatcher(m *Manager, req *dhcpv6.Message, prev *Lease, rebind bool) n
 			}
 			return false
 		}
+		if rebind && !sameDUID(serverID, expectedServer) && v6ReplyTearsDownHeldBinding(req, resp) {
+			if m != nil {
+				m.renewV6TeardownRejects.Add(1)
+			}
+			return false
+		}
 		return true
 	}
+}
+
+// v6ReplyTearsDownHeldBinding reports whether a Reply carries any
+// content the renew/rebind path turns into lease or delegation
+// teardown: a non-Success status at message or requested-IA level, an
+// IAADDR for a requested IA_NA with valid-lifetime 0 (the held address
+// when it is the only address, RFC 8415 §18.2.10.1), or an IAPREFIX for
+// a requested IA_PD with valid-lifetime 0 (§12.1 withdrawal). Pure
+// extensions — every requested IA successful and every carried binding
+// element live — report false, so the #14600 failover partner path is
+// unaffected. Status/IAID discipline mirrors v6ReplyMatches and the
+// parse layer (#10858): only IAs the request actually asked for count.
+func v6ReplyTearsDownHeldBinding(req, resp *dhcpv6.Message) bool {
+	if req == nil || resp == nil {
+		return false
+	}
+	if !v6MessageStatusOK(resp) {
+		return true
+	}
+	for _, want := range req.Options.IANA() {
+		for _, got := range resp.Options.IANA() {
+			if got.IaId != want.IaId {
+				continue
+			}
+			if !v6StatusOK(got.Options.Status()) {
+				return true
+			}
+			for _, addr := range got.Options.Addresses() {
+				if addr != nil && addr.ValidLifetime == 0 {
+					return true
+				}
+			}
+		}
+	}
+	for _, want := range req.Options.IAPD() {
+		for _, got := range resp.Options.IAPD() {
+			if got.IaId != want.IaId {
+				continue
+			}
+			if !v6StatusOK(got.Options.Status()) {
+				return true
+			}
+			for _, prefix := range got.Options.Prefixes() {
+				if prefix != nil && prefix.ValidLifetime == 0 {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // This file holds the RFC-correct renewal path (#2994). Before #2994 the

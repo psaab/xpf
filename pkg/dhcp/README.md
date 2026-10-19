@@ -188,8 +188,23 @@ the debounced `onAddressChange` callback when content changed.
   rewriting or revoking the lease. In REBINDING/REBIND any server may
   answer (RFC 2131 §4.3.2, RFC 8415 §18.2.5): the transaction/client
   checks and a present valid server identity are still required, and the
-  answering server's identifier/DUID from the accepted reply is stored
-  as the new granting binding for the next RENEW.
+  answering server's identifier/DUID from an accepted extending reply is
+  stored as the new granting binding for the next RENEW.
+- **REBIND teardown content stays bound to the granting server (#14997)**:
+  the DHCPv6 REBIND any-server arm accepts only extensions from a
+  non-granting server. A Reply carrying teardown content — a non-Success
+  status at message or requested-IA level, an IAADDR with
+  valid-lifetime 0, or an IAPREFIX with valid-lifetime 0 — is rejected
+  unless it comes from the granting server: RFC 8415 §18.2.5 lets any
+  server answer a Rebind, but only about bindings it actually has, and
+  §18.2.10/§21 forbid a different server's Reply from replacing the
+  binding mid-renewal. Before this gate one spoofed REBIND Reply (the
+  transaction ID and client DUID are learnable on-link) could clear the
+  WAN lease and every IA_PD delegation via the pdRefused clear, the
+  valid-lifetime-0 deconfigure, or the per-prefix withdrawal reconcile.
+  DHCPv4 needs no twin: a partner NAK revoking the lease in REBINDING
+  is the #14600-documented RFC 2131 §4.3.2 behaviour, and v4 has no
+  delegated-prefix set to tear down.
 - **NAK immediately revokes the lease (#9944, #3956, #14600)**: a NAK
   accepted under the rules above is an explicit lease revocation — from
   the granting server in RENEWING/RENEW, or from any server in
@@ -203,7 +218,9 @@ the debounced `onAddressChange` callback when content changed.
 - `Manager.RenewalBindingStats()` exposes per-family counters for replies
   ignored after transaction/client validation because their server identity
   was missing or, in RENEWING/RENEW, did not match the committed granting
-  lease. Accepted REBINDING/REBIND replies from a new server do not count.
+  lease, plus DHCPv6 REBIND Replies rejected for non-granting teardown
+  content (#14997). Accepted REBINDING/REBIND replies from a new server
+  that merely extend the binding do not count.
 - **Address moves are re-acquisition-equivalent**: if a renewal returns
   a different address, the old one is removed and the new one applied
   via the same netlink mechanisms the fresh-acquisition path uses.
