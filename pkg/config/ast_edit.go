@@ -112,6 +112,55 @@ func CopyRenameDstIdentityLen(src, dst []string) (nk int, bare bool, ok bool) {
 	return nk, len(dst) == nk, true
 }
 
+// ResolveBareCopyRenameDestination returns the full destination path a
+// copy/rename will act on (#15757): a bare destination (identity-only,
+// e.g. `user root` for source `system login user operator`) is resolved
+// under the SOURCE parent via BareDestinationParent — exactly as
+// CopyPath/RenamePath place it — while any non-bare destination is
+// returned unchanged. src must already be fully resolved (edit cursor
+// applied). When the source cannot be schema-segmented the destination
+// is returned unchanged: the executor then fails on its own arity /
+// lookup checks, and callers that adjudicate must not invent a parent.
+func ResolveBareCopyRenameDestination(src, dst []string) []string {
+	nk, bare, ok := CopyRenameDstIdentityLen(src, dst)
+	if !ok || !bare {
+		return dst
+	}
+	parent := BareDestinationParent(src, dst, nk)
+	if len(parent) == 0 {
+		return dst
+	}
+	out := make([]string, 0, len(parent)+len(dst))
+	out = append(out, parent...)
+	out = append(out, dst...)
+	return out
+}
+
+// ResolvedRenameDestination is ResolveBareCopyRenameDestination
+// segmenting the source against the candidate tree's actual node
+// identity, for callers that hold the tree (#15757 lineage): the
+// schema walk can mis-segment a source the tree resolves differently,
+// so the tree's Keys length wins when the source node exists. Falls
+// back to the schema-only resolution when the source is absent (the
+// rename itself will then fail and record no lineage).
+func (t *ConfigTree) ResolvedRenameDestination(src, dst []string) []string {
+	if t == nil {
+		return ResolveBareCopyRenameDestination(src, dst)
+	}
+	nk, found := t.SourceIdentityLen(src)
+	if !found || nk <= 0 || len(dst) != nk {
+		return ResolveBareCopyRenameDestination(src, dst)
+	}
+	parent := BareDestinationParent(src, dst, nk)
+	if len(parent) == 0 {
+		return dst
+	}
+	out := make([]string, 0, len(parent)+len(dst))
+	out = append(out, parent...)
+	out = append(out, dst...)
+	return out
+}
+
 // PrependEditPathForCopyDst prepends the edit cursor to a copy/rename
 // destination UNLESS it is bare (#15237 A53-04): a bare destination
 // is a new identity under the SOURCE parent, so prepending the
