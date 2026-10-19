@@ -50,7 +50,7 @@ func acquisitionDUID(t *testing.T, m *Manager, ifc net.Interface) []byte {
 func renewalDUID(t *testing.T, m *Manager, ifc net.Interface) []byte {
 	t.Helper()
 	renewMods := m.buildDHCPv6RenewModifiers(ifc.Name, nil)
-	msg, err := buildV6RenewMessage(ifc.HardwareAddr, nil, nil, false, renewMods)
+	msg, err := buildV6RenewMessage(ifc.HardwareAddr, nil, nil, false, renewMods, nil, nil)
 	if err != nil {
 		t.Fatalf("build RENEW: %v", err)
 	}

@@ -224,6 +224,23 @@ the debounced `onAddressChange` callback when content changed.
   DHCPv4 needs no twin: a partner NAK revoking the lease in REBINDING
   is the #14600-documented RFC 2131 §4.3.2 behaviour, and v4 has no
   delegated-prefix set to tear down.
+- **Missing IA_PD is re-requested on RENEW/REBIND (#15069, A39-01)**: when
+  `ia-pd` is configured but no delegation is currently held — the initial
+  acquisition answered `NoPrefixAvail`, a renewal refused or withdrew it,
+  or the #14598 per-prefix expiry pruned it — the RENEW/REBIND still
+  carries an empty IA_PD (IAID `{0,0,0,1}`) with the acquisition
+  prefix-length hint, so the server can grant a prefix on that cycle.
+  Before this, the renew builder only echoed held PDs, so an IA_NA-only
+  RENEW renewed the address forever and the missing delegation (and the
+  LAN RA prefix/SLAAC it feeds) stayed absent until the IA_NA itself
+  expired or an operator ran `request dhcp renew`. The matcher now also
+  accepts that Reply: the requested empty IA_PD makes
+  `v6HasSuccessfulRequestedIA` recognise a grant (and
+  `v6ReplyTearsDownHeldBinding` treats a renewed `NoPrefixAvail` as
+  teardown content, still bound to the granting server on REBIND per
+  #14997). Committing needs no run-loop change — the existing
+  reconcile/commit arms store a live prefix carried by a RENEW/REBIND
+  reply as soon as it arrives.
 - **NAK immediately revokes the lease (#9944, #3956, #14600)**: a NAK
   accepted under the rules above is an explicit lease revocation — from
   the granting server in RENEWING/RENEW, or from any server in

@@ -282,7 +282,17 @@ func v4RenewDest(prev *Lease, rebind bool) *net.UDPAddr {
 // acquisition path: IA_NA uses the last 4 bytes of the MAC (as
 // dhcpv6.NewSolicit does) and IA_PD uses {0,0,0,1} (as
 // buildDHCPv6Modifiers does), so the server matches the existing binding.
-func buildV6RenewMessage(hwaddr net.HardwareAddr, prev *Lease, prevPDs []DelegatedPrefix, rebind bool, mods []dhcpv6.Modifier) (*dhcpv6.Message, error) {
+//
+// #15069 (A39-01): when ia-pd is configured (iaTypes contains "ia-pd")
+// but no delegation is currently held — the initial acquisition
+// answered NoPrefixAvail, a renewal refused/withdrew it, or the
+// #14598 per-prefix expiry pruned it — the RENEW/REBIND must still
+// carry an empty IA_PD (with the acquisition hint from pdHint when
+// non-nil) so the server can grant a prefix on this cycle. Without
+// it, an IA_NA-only RENEW renews the address forever and the missing
+// delegation is never re-requested until the IA_NA itself expires
+// or an operator runs request dhcp renew.
+func buildV6RenewMessage(hwaddr net.HardwareAddr, prev *Lease, prevPDs []DelegatedPrefix, rebind bool, mods []dhcpv6.Modifier, iaTypes []string, pdHint *dhcpv6.OptIAPrefix) (*dhcpv6.Message, error) {
 	msg, err := dhcpv6.NewMessage()
 	if err != nil {
 		return nil, err
@@ -317,7 +327,9 @@ func buildV6RenewMessage(hwaddr net.HardwareAddr, prev *Lease, prevPDs []Delegat
 		dhcpv6.WithIAID(iaid)(msg)
 	}
 
-	// Echo the held delegated prefixes (IA_PD).
+	// Echo the held delegated prefixes (IA_PD), or, when none are
+	// held but ia-pd is configured, re-request the delegation with an
+	// empty IA_PD carrying the acquisition hint (#15069).
 	if len(prevPDs) > 0 {
 		prefixes := make([]*dhcpv6.OptIAPrefix, 0, len(prevPDs))
 		for _, pd := range prevPDs {
@@ -331,7 +343,26 @@ func buildV6RenewMessage(hwaddr net.HardwareAddr, prev *Lease, prevPDs []Delegat
 			})
 		}
 		dhcpv6.WithIAPD([4]byte{0, 0, 0, 1}, prefixes...)(msg)
+	} else if v6WantsPD(iaTypes) {
+		if pdHint != nil {
+			dhcpv6.WithIAPD([4]byte{0, 0, 0, 1}, pdHint)(msg)
+		} else {
+			dhcpv6.WithIAPD([4]byte{0, 0, 0, 1})(msg)
+		}
 	}
 
 	return msg, nil
+}
+
+// v6WantsPD reports whether the configured IA types include ia-pd
+// (the same membership parse parseV6ReplyChecked applies), so the
+// renew builder re-requests a missing delegation only when one was
+// configured (#15069).
+func v6WantsPD(iaTypes []string) bool {
+	for _, t := range iaTypes {
+		if t == "ia-pd" {
+			return true
+		}
+	}
+	return false
 }
