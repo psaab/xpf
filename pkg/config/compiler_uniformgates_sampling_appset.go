@@ -97,6 +97,22 @@ func runUniformGatesSamplingAppSet(tree *ConfigTree, cfg *Config, opts compileOp
 		}
 	}
 
+	// #15651: port-mirroring aliased-ingress gate. compilePortMirroring's
+	// inline dedup keys on LinuxIfName before interface stanzas exist, so
+	// spellings that alias only through ResolveKernelIfName (bare vs
+	// unit-0, RETH vs member, VLAN unit) passed as distinct sources. This
+	// post-section gate normalizes through the compiled interfaces;
+	// strict rejects, tolerant warns (#1960) and the snapshot builder
+	// scope-drops the duplicate at runtime.
+	if err := validatePortMirroringIngressAliasStrict(cfg); err != nil {
+		if opts.lenientPortMirroringIngressAlias15651 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("port-mirroring ingress alias (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #2217 Finding B: application-set member cross-reference. An
 	// `applications application-set <set>` member referencing neither a defined
 	// application (user / junos-* predefined) nor a defined nested

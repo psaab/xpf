@@ -2325,6 +2325,37 @@ func parseRingParams(output string) (maxTX, curTX int) {
 	return
 }
 
+// mirrorKernelName resolves a port-mirroring interface reference to the
+// kernel device name (#15651). A plain LinuxIfName only slash-translates,
+// so a Junos unit ref (`ge-0/0/0.0`) names no device, a VLAN unit names
+// the parent instead of its `<parent>.<vid>` child, and a RETH ref names
+// the logical interface instead of its member. resolveInterfaceRef
+// supplies the physical base; a tagged unit's child is that base plus the
+// VLAN id, mirroring how the zone/filter phases name the same device.
+// ResolveKernelIfName covers the spellings resolveInterfaceRef declines
+// (per-unit tunnels, secure tunnels, IRB).
+func mirrorKernelName(cfg *config.Config, ref string) string {
+	physName, _, _, vlanID := resolveInterfaceRef(ref, cfg)
+	if vlanID > 0 {
+		return fmt.Sprintf("%s.%d", physName, vlanID)
+	}
+	if resolved := cfg.ResolveKernelIfName(ref); resolved != "" {
+		// Prefer the config resolver when it names a dotted unit/tunnel
+		// device the bare physName cannot express (e.g. a per-unit tunnel
+		// `gr-0-0-0u1` or a VLAN child spelled by unit number).
+		if resolved != physName && physName != "" && strings.HasPrefix(resolved, physName+".") {
+			return resolved
+		}
+		if physName == "" {
+			return resolved
+		}
+	}
+	if physName != "" {
+		return physName
+	}
+	return cfg.ResolveKernelIfName(ref)
+}
+
 // compilePortMirroring populates the mirror_config BPF map from
 // forwarding-options { port-mirroring { instance ... } }.
 func compilePortMirroring(dp DataPlane, cfg *config.Config, result *CompileResult) error {
@@ -2341,7 +2372,7 @@ func compilePortMirroring(dp DataPlane, cfg *config.Config, result *CompileResul
 			continue
 		}
 
-		outIface, err := result.cachedInterfaceByName(config.LinuxIfName(inst.Output))
+		outIface, err := result.cachedInterfaceByName(mirrorKernelName(cfg, inst.Output))
 		if err != nil {
 			slog.Warn("port-mirroring output interface not found",
 				"name", name, "interface", inst.Output, "err", err)
@@ -2351,7 +2382,7 @@ func compilePortMirroring(dp DataPlane, cfg *config.Config, result *CompileResul
 		rate := uint32(inst.InputRate)
 
 		for _, inputIface := range inst.Input {
-			inIface, err := result.cachedInterfaceByName(config.LinuxIfName(inputIface))
+			inIface, err := result.cachedInterfaceByName(mirrorKernelName(cfg, inputIface))
 			if err != nil {
 				slog.Warn("port-mirroring input interface not found",
 					"name", name, "interface", inputIface, "err", err)
