@@ -790,8 +790,46 @@ func peerSessionsTotal(resp *pb.GetSessionsResponse) int32 {
 	return int32(len(resp.GetSessions()))
 }
 
+// buildPeerSummaryRequest translates the local session filter into the
+// peer summary request (#15236 A52-04), mirroring buildPeerShowRequest so the
+// peer counts only filter-matching sessions.
+func buildPeerSummaryRequest(f sessionFilter) *pb.GetSessionSummaryRequest {
+	req := &pb.GetSessionSummaryRequest{}
+	if f.zoneID != 0 {
+		req.Zone = uint32(f.zoneID)
+	}
+	if f.hasProto {
+		req.Protocol = strings.ToUpper(protoNameFromNum(f.proto))
+	}
+	if f.srcNet != nil {
+		req.SourcePrefix = f.srcNet.String()
+	}
+	if f.dstNet != nil {
+		req.DestinationPrefix = f.dstNet.String()
+	}
+	if f.srcPort != 0 {
+		req.SourcePort = uint32(f.srcPort)
+	}
+	if f.dstPort != 0 {
+		req.DestinationPort = uint32(f.dstPort)
+	}
+	if f.natOnly {
+		req.NatOnly = true
+	}
+	if f.appName != "" {
+		req.Application = f.appName
+	}
+	if f.iface != "" {
+		req.InterfaceFilter = f.iface
+	}
+	if f.snatPool != "" {
+		req.SourceNatPool = f.snatPool
+	}
+	return req
+}
+
 // fetchPeerSessionSummary dials the cluster peer's gRPC and returns its session summary.
-func (c *CLI) fetchPeerSessionSummary() (*pb.GetSessionSummaryResponse, error) {
+func (c *CLI) fetchPeerSessionSummary(f sessionFilter) (*pb.GetSessionSummaryResponse, error) {
 	conn := c.dialPeer()
 	if conn == nil {
 		return nil, fmt.Errorf("cluster peer not reachable")
@@ -801,7 +839,7 @@ func (c *CLI) fetchPeerSessionSummary() (*pb.GetSessionSummaryResponse, error) {
 	client := pb.NewBpfrxServiceClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	resp, err := client.GetSessionSummary(ctx, &pb.GetSessionSummaryRequest{})
+	resp, err := client.GetSessionSummary(ctx, buildPeerSummaryRequest(f))
 	if err != nil {
 		slog.Warn("failed to fetch peer session summary", "err", err)
 		return nil, fmt.Errorf("fetch peer session summary: %w", err)

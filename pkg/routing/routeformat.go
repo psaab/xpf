@@ -279,6 +279,31 @@ func formatTableJunos(buf *strings.Builder, tableName string, entries []RouteEnt
 	}
 }
 
+// NormalizeRouteProtocol maps an operator `show route protocol <p>` token to
+// the internal protocol name rtProtoName emits, or "" for an unknown token
+// (#15236 A52-02). The completion offers Junos/display spellings (direct,
+// local, kernel, Access-internal) that never equal the internal names
+// (connected, dhcp, ...), so the filter must translate before comparing and
+// reject unknown protocols instead of printing a false "(no routes)".
+func NormalizeRouteProtocol(token string) string {
+	switch strings.ToLower(strings.TrimSpace(token)) {
+	case "connected", "direct", "local", "kernel":
+		return "connected"
+	case "dhcp", "access-internal", "access_internal", "access internal":
+		return "dhcp"
+	case "static", "bgp", "ospf", "isis", "is-is", "rip", "redirect":
+		return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(token)), "is-is", "isis")
+	default:
+		return ""
+	}
+}
+
+// RouteProtocolMatches reports whether an entry's internal protocol name
+// matches an already-normalized operator protocol.
+func RouteProtocolMatches(entryProtocol, normalized string) bool {
+	return normalized != "" && strings.EqualFold(entryProtocol, normalized)
+}
+
 // junosProtoName maps protocol names to Junos-style names.
 func junosProtoName(proto string) string {
 	switch proto {

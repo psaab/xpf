@@ -248,16 +248,6 @@ func (c *CLI) showFlowSession(args []string) error {
 		fmt.Println("--------------------------------------------------------------------------")
 	}
 
-	// Determine HA state string for session display.
-	haState := ""
-	if clusterMode {
-		if c.cluster.IsLocalPrimary(0) {
-			haState = "Active"
-		} else {
-			haState = "Backup"
-		}
-	}
-
 	// Summary counters for protocol/zone/NAT breakdown
 	var byProto map[uint8]int
 	var byZonePair map[string]int
@@ -292,6 +282,22 @@ func (c *CLI) showFlowSession(args []string) error {
 	// map and one rule; where the rule cannot defend a name, the column falls
 	// back to the zone rather than picking a member arbitrarily.
 	f.populateIfaceMaps(c)
+
+	// #15236 (A52-03): HA state is per-session, derived from the owning
+	// data RG of the session's interfaces/zones — not RG0. Unresolvable
+	// ownership renders "unknown" instead of an inverted Active/Backup.
+	sessionHAState := func(ingressIface, egressIface string, inZoneID, outZoneID uint16) string {
+		if !clusterMode {
+			return ""
+		}
+		cfg := f.cfg
+		if cfg == nil && c.store != nil {
+			cfg = c.store.ActiveConfig()
+		}
+		return config.SessionHAState(cfg, ingressIface, egressIface, inZoneID, outZoneID, zoneNames, func(rg int) (bool, bool) {
+			return c.cluster.LocalGroupPrimary(rg)
+		})
+	}
 
 	sessionEgressIf := func(fibIfindex uint32, fibVlanID uint16, zoneID uint16, zoneName string) string {
 		if ifName := f.egressIfaceDisplay(fibIfindex, fibVlanID, zoneID); ifName != "" {
@@ -388,6 +394,7 @@ func (c *CLI) showFlowSession(args []string) error {
 		if polName == "" {
 			polName = fmt.Sprintf("%d", val.PolicyID)
 		}
+		haState := sessionHAState(sessionIngressIf(val.IngressIfindex, val.IngressVlanID, val.IngressZone, inZone), sessionEgressIf(val.FibIfindex, val.FibVlanID, val.EgressZone, outZone), val.IngressZone, val.EgressZone)
 		if haState != "" {
 			fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Session State: Unknown (validity not tracked)\n",
 				sid, polName, val.PolicyID, haState, val.Timeout)
@@ -517,6 +524,7 @@ func (c *CLI) showFlowSession(args []string) error {
 		if polName == "" {
 			polName = fmt.Sprintf("%d", val.PolicyID)
 		}
+		haState := sessionHAState(sessionIngressIf(val.IngressIfindex, val.IngressVlanID, val.IngressZone, inZone), sessionEgressIf(val.FibIfindex, val.FibVlanID, val.EgressZone, outZone), val.IngressZone, val.EgressZone)
 		if haState != "" {
 			fmt.Printf("Session ID: %d, Policy name: %s/%d, HA State: %s, Timeout: %d, Session State: Unknown (validity not tracked)\n",
 				sid, polName, val.PolicyID, haState, val.Timeout)
@@ -598,7 +606,7 @@ func (c *CLI) showFlowSession(args []string) error {
 	var peerSummary *pb.GetSessionSummaryResponse
 	var peerSummaryErr error
 	if f.summary && clusterMode {
-		peerSummary, peerSummaryErr = c.fetchPeerSessionSummary()
+		peerSummary, peerSummaryErr = c.fetchPeerSessionSummary(f)
 	}
 
 	if f.summary {
@@ -1014,6 +1022,21 @@ func (c *CLI) showFlowTimeouts() error {
 	return nil
 }
 
+// cliSessionCount reads table occupancy via the unwrapped backend,
+// mirroring backendSessionCount, so a test double whose embedded manager
+// is nil yields (0,0) rather than a promoted-method panic.
+func cliSessionCount(dp cliRuntime) (v4, v6 int) {
+	if dp == nil {
+		return 0, 0
+	}
+	defer func() {
+		if recover() != nil {
+			v4, v6 = 0, 0
+		}
+	}()
+	return dp.SessionCount()
+}
+
 // showFlowStatistics displays flow statistics from BPF global counters.
 
 func (c *CLI) showFlowStatistics() error {
@@ -1053,8 +1076,14 @@ func (c *CLI) showFlowStatistics() error {
 	cacheFlush := readCounter(dataplane.GlobalCtrFlowCacheFlush)
 	cacheInval := readCounter(dataplane.GlobalCtrFlowCacheInvalidate)
 
+	// #15236 (A52-05): "Current sessions" is table occupancy from
+	// SessionCount(), not create-minus-expire of locally created sessions
+	// (wrong after failover/clear for peer-synced sessions). The counter
+	// delta is kept under its honest local-forwarding label.
+	v4Cur, v6Cur := cliSessionCount(c.dp)
 	fmt.Println("Flow statistics:")
-	fmt.Printf("  %-30s %d\n", "Current sessions:", dataplane.CurrentSessions(sessNew, sessClosed))
+	fmt.Printf("  %-30s %d\n", "Current sessions:", v4Cur+v6Cur)
+	fmt.Printf("  %-30s %d\n", "Local forwarding sessions (created-closed):", dataplane.CurrentSessions(sessNew, sessClosed))
 	fmt.Printf("  %-30s %d\n", "Sessions created:", sessNew)
 	fmt.Printf("  %-30s %d\n", "Sessions closed:", sessClosed)
 	fmt.Println()

@@ -1014,7 +1014,14 @@ func (c *CLI) handleMonitorSecurityPacketDrop(args []string) error {
 				return nil
 			}
 			i++
-			protocol = args[i]
+			// #15236 (A52-07): reuse the #13553 normalization so numeric
+			// ("6") and named forms match the record's rendered protocol.
+			canonical, ok := normalizeMonitorProtocol(args[i])
+			if !ok {
+				fmt.Printf("error: invalid protocol: %s\n", args[i])
+				return nil
+			}
+			protocol = canonical
 		case "from-zone":
 			if i+1 >= len(args) {
 				fmt.Println("error: from-zone requires a value")
@@ -1107,13 +1114,15 @@ func (c *CLI) handleMonitorSecurityPacketDrop(args []string) error {
 			if dstPort != 0 && extractPort(rec.DstAddr) != dstPort {
 				continue
 			}
-			if protocol != "" && !strings.EqualFold(rec.Protocol, protocol) {
+			if protocol != "" && !(&monitorFlowFilter{Protocol: protocol}).matches(&rec) {
 				continue
 			}
 			if fromZone != "" && rec.InZoneName != fromZone {
 				continue
 			}
-			if iface != "" && rec.IngressIface != iface {
+			// #15236 (A52-07): Junos interface spellings (ge-0/0/0) must
+			// match the record's Linux name (ge-0-0-0).
+			if iface != "" && !monitorIfaceNamesMatch(iface, rec.IngressIface) {
 				continue
 			}
 

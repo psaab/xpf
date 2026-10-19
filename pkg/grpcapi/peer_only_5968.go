@@ -178,7 +178,7 @@ func (s *Server) PeerSessionSummary(ctx context.Context) (*pb.GetSessionSummaryR
 	defer release()
 
 	resp := &pb.GetSessionSummaryResponse{}
-	peerResp, perr := s.proxyPeerSessionSummary(ctx)
+	peerResp, perr := s.proxyPeerSessionSummary(ctx, &pb.GetSessionSummaryRequest{})
 	s.attachPeerSessionSummary(resp, peerResp, perr)
 	return resp, nil
 }

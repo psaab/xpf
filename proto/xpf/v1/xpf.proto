@@ -590,6 +590,20 @@ message SessionEntry {
 
 message GetSessionSummaryRequest {
   bool include_peer = 1;
+  // #15236 (A52-04): optional session filters. When any is set, the summary
+  // counts only filter-matching forward sessions, so a filtered cluster
+  // summary does not print the peer's whole-table count under the filtered
+  // local labels. Empty/zero means unfiltered (backwards compatible).
+  uint32 zone = 2;
+  string protocol = 3;
+  string source_prefix = 4;
+  string destination_prefix = 5;
+  uint32 source_port = 6;
+  uint32 destination_port = 7;
+  bool nat_only = 8;
+  string application = 9;
+  string interface_filter = 10;
+  string source_nat_pool = 11;
 }
 message GetSessionSummaryResponse {
   int32 total_entries = 1;

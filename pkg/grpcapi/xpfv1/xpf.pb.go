@@ -4043,10 +4043,24 @@ func (x *SessionEntry) GetHaActive() bool {
 }
 
 type GetSessionSummaryRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	IncludePeer   bool                   `protobuf:"varint,1,opt,name=include_peer,json=includePeer,proto3" json:"include_peer,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	IncludePeer bool                   `protobuf:"varint,1,opt,name=include_peer,json=includePeer,proto3" json:"include_peer,omitempty"`
+	// #15236 (A52-04): optional session filters. When any is set, the summary
+	// counts only filter-matching forward sessions, so a filtered cluster
+	// summary does not print the peer's whole-table count under the filtered
+	// local labels. Empty/zero means unfiltered (backwards compatible).
+	Zone              uint32 `protobuf:"varint,2,opt,name=zone,proto3" json:"zone,omitempty"`
+	Protocol          string `protobuf:"bytes,3,opt,name=protocol,proto3" json:"protocol,omitempty"`
+	SourcePrefix      string `protobuf:"bytes,4,opt,name=source_prefix,json=sourcePrefix,proto3" json:"source_prefix,omitempty"`
+	DestinationPrefix string `protobuf:"bytes,5,opt,name=destination_prefix,json=destinationPrefix,proto3" json:"destination_prefix,omitempty"`
+	SourcePort        uint32 `protobuf:"varint,6,opt,name=source_port,json=sourcePort,proto3" json:"source_port,omitempty"`
+	DestinationPort   uint32 `protobuf:"varint,7,opt,name=destination_port,json=destinationPort,proto3" json:"destination_port,omitempty"`
+	NatOnly           bool   `protobuf:"varint,8,opt,name=nat_only,json=natOnly,proto3" json:"nat_only,omitempty"`
+	Application       string `protobuf:"bytes,9,opt,name=application,proto3" json:"application,omitempty"`
+	InterfaceFilter   string `protobuf:"bytes,10,opt,name=interface_filter,json=interfaceFilter,proto3" json:"interface_filter,omitempty"`
+	SourceNatPool     string `protobuf:"bytes,11,opt,name=source_nat_pool,json=sourceNatPool,proto3" json:"source_nat_pool,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *GetSessionSummaryRequest) Reset() {
@@ -4084,6 +4098,76 @@ func (x *GetSessionSummaryRequest) GetIncludePeer() bool {
 		return x.IncludePeer
 	}
 	return false
+}
+
+func (x *GetSessionSummaryRequest) GetZone() uint32 {
+	if x != nil {
+		return x.Zone
+	}
+	return 0
+}
+
+func (x *GetSessionSummaryRequest) GetProtocol() string {
+	if x != nil {
+		return x.Protocol
+	}
+	return ""
+}
+
+func (x *GetSessionSummaryRequest) GetSourcePrefix() string {
+	if x != nil {
+		return x.SourcePrefix
+	}
+	return ""
+}
+
+func (x *GetSessionSummaryRequest) GetDestinationPrefix() string {
+	if x != nil {
+		return x.DestinationPrefix
+	}
+	return ""
+}
+
+func (x *GetSessionSummaryRequest) GetSourcePort() uint32 {
+	if x != nil {
+		return x.SourcePort
+	}
+	return 0
+}
+
+func (x *GetSessionSummaryRequest) GetDestinationPort() uint32 {
+	if x != nil {
+		return x.DestinationPort
+	}
+	return 0
+}
+
+func (x *GetSessionSummaryRequest) GetNatOnly() bool {
+	if x != nil {
+		return x.NatOnly
+	}
+	return false
+}
+
+func (x *GetSessionSummaryRequest) GetApplication() string {
+	if x != nil {
+		return x.Application
+	}
+	return ""
+}
+
+func (x *GetSessionSummaryRequest) GetInterfaceFilter() string {
+	if x != nil {
+		return x.InterfaceFilter
+	}
+	return ""
+}
+
+func (x *GetSessionSummaryRequest) GetSourceNatPool() string {
+	if x != nil {
+		return x.SourceNatPool
+	}
+	return ""
 }
 
 type GetSessionSummaryResponse struct {
@@ -10017,9 +10101,21 @@ const file_xpf_proto_rawDesc = "" +
 	"natDstAddr\x12 \n" +
 	"\fnat_dst_port\x18\x1c \x01(\rR\n" +
 	"natDstPort\x12\x1b\n" +
-	"\tha_active\x18\x1d \x01(\bR\bhaActive\"=\n" +
+	"\tha_active\x18\x1d \x01(\bR\bhaActive\"\x9d\x03\n" +
 	"\x18GetSessionSummaryRequest\x12!\n" +
-	"\finclude_peer\x18\x01 \x01(\bR\vincludePeer\"\xe5\x03\n" +
+	"\finclude_peer\x18\x01 \x01(\bR\vincludePeer\x12\x12\n" +
+	"\x04zone\x18\x02 \x01(\rR\x04zone\x12\x1a\n" +
+	"\bprotocol\x18\x03 \x01(\tR\bprotocol\x12#\n" +
+	"\rsource_prefix\x18\x04 \x01(\tR\fsourcePrefix\x12-\n" +
+	"\x12destination_prefix\x18\x05 \x01(\tR\x11destinationPrefix\x12\x1f\n" +
+	"\vsource_port\x18\x06 \x01(\rR\n" +
+	"sourcePort\x12)\n" +
+	"\x10destination_port\x18\a \x01(\rR\x0fdestinationPort\x12\x19\n" +
+	"\bnat_only\x18\b \x01(\bR\anatOnly\x12 \n" +
+	"\vapplication\x18\t \x01(\tR\vapplication\x12)\n" +
+	"\x10interface_filter\x18\n" +
+	" \x01(\tR\x0finterfaceFilter\x12&\n" +
+	"\x0fsource_nat_pool\x18\v \x01(\tR\rsourceNatPool\"\xe5\x03\n" +
 	"\x19GetSessionSummaryResponse\x12#\n" +
 	"\rtotal_entries\x18\x01 \x01(\x05R\ftotalEntries\x12!\n" +
 	"\fforward_only\x18\x02 \x01(\x05R\vforwardOnly\x12 \n" +
