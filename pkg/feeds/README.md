@@ -57,15 +57,22 @@ dataplane. `LastError`, `StaleSince`, `show security dynamic-address`, and the
 per-feed refusal metrics identify the held candidate. The zero-prefix,
 truncation, and whole-address-space guards remain independent and unchanged.
 High-water history survives same-name reconfiguration and removal/recreation,
-and the daemon durably stores each feed's count, hash, and epoch prefix set in
+and the daemon durably stores each feed's count, hash, epoch prefix set, and
+the epoch set's own digest (`epoch_hash`, #15075) in
 `/var/lib/xpf/feed-shrink-history.json`. A cold boot restores that epoch before
 starting producers, so its first fetch is guarded against it (above), and the
-restored epoch set anchors subsequent content-churn refusals. The restored
-epoch set carries its own digest: it need not equal the count high-water hash,
-which a later ordinary rotation may have advanced past the epoch set. Records
-written before the epoch set was persisted restore the count epoch only; the
-content epoch then re-bootstraps on the first install, still guarded by the
-restored count high-water.
+restored epoch set anchors subsequent content-churn refusals. On restore the
+epoch set is validated against its persisted `epoch_hash`, never against the
+count high-water hash: an ordinary non-rebasing rotation advances the
+high-water hash past the epoch set, so keying the epoch restore on the
+high-water hash dropped every such epoch across the restart and left churn
+unanchored (the first post-restart fetch then rebased it unchecked). A set
+whose digest matches neither its `epoch_hash` nor (for records written before
+`epoch_hash` existed, where epoch == high-water) the count hash is dropped
+fail-closed; the count epoch still restores. Records written before the epoch
+set was persisted restore the count epoch only; the content epoch then
+re-bootstraps on the first install, still guarded by the restored count
+high-water.
 Factory reset erases this file and any crash-leaked `.<base>.tmp-*` snapshots
 after fencing and draining the daemon's in-flight persistence callback, so a
 re-tenanted device does not inherit a prior tenant's same-named feed baseline.
@@ -169,9 +176,14 @@ the same way: cold-restart, recreated, and post-hold-drop candidates are
 compared with the remembered baseline and refused when they trip it, instead
 of installing with only an audit warning; the restored epoch set is accepted
 with its own digest even when a later rotation advanced the count high-water
-hash past it. The daemon persists that per-feed count, hash, and epoch set
-across process restarts. Keep the source feed's own integrity/monitoring
-controls in place.
+hash past it. The #15075 (A50-01) persistence key is guarded the same way: the
+epoch set's digest is persisted separately as `epoch_hash` and the restore
+validates the set against it, so a restart after an ordinary non-rebasing
+install keeps the full epoch (a restart bootstrapping a disjoint set against
+the restored epoch is refused pending the exact-candidate acknowledgement,
+never rebased unchecked). The daemon persists that per-feed count, hash,
+epoch set, and epoch hash across process restarts. Keep the source feed's own
+integrity/monitoring controls in place.
 
 ## Day-2 reconcile (#5036)
 
