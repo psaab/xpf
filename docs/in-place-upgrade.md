@@ -2180,12 +2180,16 @@ use:
   started; delete it and a correct recreate is left inert and never rejoined).
   Because `die()` is a `SystemExit`, `kernel-roll`'s `finally` still runs
   after a fence-abort — and its own best-effort restore-forwarding rejoin
-  IS a pair mutation. So the fence records the loss (a `lost_lease` flag,
-  set on a confirmed loss OR an unconfirmable-after-retries lease — the same
-  fail-closed stance) and the `finally` SKIPS that rejoin whenever the flag
-  is set: an orchestrator that lost its lease must not un-drain a pair a
-  successor now owns. A clean abort where the lease is still confidently
-  held leaves the flag clear and the restore rejoin runs as before.
+  IS a pair mutation. So the fence splits its verdicts (#14992): a
+  CONFIRMED loss sets `lost_lease` and the `finally` SKIPS that rejoin (an
+  orchestrator that lost its lease must not un-drain a pair a successor
+  now owns), while an UNCONFIRMABLE-after-retries lease (a transient peer
+  SSH/transport error — no successor ever proved) sets only
+  `unconfirmable`: the fence still refuses the forward mutation
+  fail-closed, but the restore rejoin still runs, because suppressing it
+  too stranded the drained node. A clean abort where the lease is still
+  confidently held leaves both flags clear and the restore rejoin runs as
+  before.
 
 Because renewal keeps the TTL a rolling window that never elapses while the
 driver is live, the `--lease-ttl` FLOOR was NOT raised: a short TTL is now
@@ -2206,12 +2210,31 @@ real reboot: an un-ok read is retried, not misread as a completed revert.
 Before this, ANY empty `uname -r` set `rebooted=True`, so one status blip made
 a still-drained-and-running node (e.g. an `arm` that failed its UEFI/NVRAM
 preflight WITHOUT rebooting) look like a finished revert; the `finally` then
-skipped its rejoin and left the node DRAINED + ForceSecondary with both leases
-released — a silent loss of redundancy. Rejoin is now decided from the
-confirmed drain state: a drained node that never affirmatively rebooted is
-rejoined — UNLESS the roll aborted because we lost the lease (see the Fence
-`lost_lease` note above), in which case the pair belongs to a successor and
-the finally must NOT un-drain it.
+skipped its rejoin and left the node DRAINED + ForceSecondary — a silent loss
+of redundancy. Rejoin is now decided from the confirmed drain state: a drained
+node that never affirmatively rebooted is rejoined — UNLESS the roll aborted
+because we PROVED we lost the lease (see the Fence `lost_lease` note above),
+in which case the pair belongs to a successor and the finally must NOT
+un-drain it. An unconfirmable fence is not a proven loss and does not
+suppress the rejoin (#14992).
+
+**Lease disposition on an incomplete drained roll (#14992 D38-04).**
+`kernel-roll`'s `finally` used to delete BOTH leases unconditionally. That
+permanently disabled the Go self-recovery below: `KernelSelfRecovery.Tick`
+acts ONLY on an EXPIRED lease naming the node, and a deleted lease reads
+`leaseNone` — a permanent no-op — so a drained node whose restore rejoin
+could not land (or was suppressed) had no automatic recovery at all. The
+finally now PRESERVES both leases whenever the roll drained the node and
+did not complete (mirroring `image-roll`'s never-both-down stance): a clean
+success, a pre-drain abort, and a drained-but-rebooted roll (drain gone via
+reboot) still release. A preserved lease is holder-guarded and expires on
+its TTL — it blocks a second orchestrator only until expiry, after which
+self-recovery (this node's expired-lease fingerprint) or a successor's
+expired-lease reclaim can act. Covered by
+`scripts/deploy/test_xpf_deploy_lease_renew_fence.py`
+(`KernelRollTransientFenceLossTests`: RED on master — the finally skipped
+the rejoin and deleted both leases; the proven-loss control keeps the
+#5816 no-rejoin behaviour).
 
 If `rejoin` cannot confirm within its deadline, `RejoinAndConfirm`
 (`pkg/upgrade/kernel_drain.go`) now surfaces the last non-nil
