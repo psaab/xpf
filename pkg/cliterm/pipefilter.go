@@ -45,12 +45,27 @@ import (
 // operator ran, and that disagreement IS the bypass. Two copies can drift; one
 // cannot.
 //
-// The split is on the LAST " | " so a filter argument may itself contain a
-// pipe (`| match "a | b"`), and an unrecognized filter word returns the ORIGINAL
-// line untouched rather than a truncated command — the fail-safe direction for
-// a caller that is about to authorize what it gets back.
+// The split is on the LAST unquoted " | ", so a QUOTED filter argument may
+// itself contain a pipe (`| match "a | b"` -> arg `a | b`), and an
+// unrecognized filter word returns the ORIGINAL line untouched rather than a
+// truncated command — the fail-safe direction for a caller that is about to
+// authorize what it gets back. An unquoted argument pipe
+// (`| match a | b`) still resolves the trailing token as the filter word and
+// declines whole, exactly as before (#15722).
+//
+// Quotes (#15722): a pipeArg entirely wrapped in matching single or double
+// quotes has the quotes stripped (`| match "Physical interface"` filters on
+// `Physical interface`, not `"Physical interface"`). The delimiter scan
+// tracks quote state (both quote kinds, backslash-escaped quote/backslash
+// inside double quotes) so a " | " inside a quoted region is data, never a
+// delimiter — including a quoted region in the command part. An unterminated
+// quote leaves the rest of the line unquoted-as-typed: a trailing
+// `| match "a | b` is treated as an unquoted filter whose arg keeps its
+// leading quote, while an unterminated quote before the only pipe hides
+// that pipe, so the line declines whole. Quotes that do not wrap the whole
+// argument (internal, mismatched, trailing-text) are data and stay.
 func SplitPipe(line string) (cmd, pipeType, pipeArg string, ok bool) {
-	idx := strings.LastIndex(line, " | ")
+	idx := lastUnquotedPipeSep(line)
 	if idx < 0 {
 		return line, "", "", false
 	}
@@ -59,12 +74,101 @@ func SplitPipe(line string) (cmd, pipeType, pipeArg string, ok bool) {
 	parts := strings.SplitN(pipe, " ", 2)
 	pipeType = parts[0]
 	if len(parts) > 1 {
-		pipeArg = parts[1]
+		pipeArg = stripPipeArgQuotes(parts[1])
 	}
 	if IsPipeFilter(pipeType) {
 		return cmd, pipeType, pipeArg, true
 	}
 	return line, "", "", false
+}
+
+// lastUnquotedPipeSep returns the index of the last " | " occurring outside
+// any quoted region, or -1. Quote state is tracked in one forward scan:
+// inside double quotes a backslash escapes the next byte (so `\"` does not
+// close, and `\\` consumes both backslashes so the quote after them closes);
+// inside single quotes a backslash is literal (POSIX shell rule). An
+// unterminated quote swallows the rest of the line, so no later " | " is a
+// delimiter.
+func lastUnquotedPipeSep(line string) int {
+	last := -1
+	var quote byte // 0 when outside quotes, else '"' or '\''
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if quote != 0 {
+			if quote == '"' && c == '\\' {
+				i++ // escaped byte cannot close the quote
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'':
+			quote = c
+		case '|':
+			if i > 0 && i+1 < len(line) && line[i-1] == ' ' && line[i+1] == ' ' {
+				last = i - 1
+			}
+		}
+	}
+	return last
+}
+
+// stripPipeArgQuotes removes one pair of matching surrounding quotes from a
+// pipe argument. Inside double quotes, `\"` and `\\` are unescaped (the same
+// spellings the config lexer honours); other backslash sequences stay as
+// typed, so a pattern like `"a\nb"` keeps its backslash for FilterStream.
+// Inside single quotes nothing is unescaped. Anything that is not a whole
+// argument wrapped in one matching pair — unquoted, internal, mismatched, or
+// followed by more text — is returned unchanged.
+func stripPipeArgQuotes(arg string) string {
+	if len(arg) < 2 {
+		return arg
+	}
+	q := arg[0]
+	if q != '"' && q != '\'' {
+		return arg
+	}
+	// Find the closing quote: it must be the final byte. In double quotes a
+	// backslash-escaped byte cannot close.
+	for i := 1; i < len(arg); i++ {
+		if q == '"' && arg[i] == '\\' {
+			i++
+			continue
+		}
+		if arg[i] == q {
+			if i != len(arg)-1 {
+				return arg // closing quote is not at the end: quotes are data
+			}
+			inner := arg[1:i]
+			if q == '\'' {
+				return inner
+			}
+			return unescapeDoubleQuotedPipeArg(inner)
+		}
+	}
+	return arg // unterminated: keep as typed
+}
+
+// unescapeDoubleQuotedPipeArg resolves \" and \\ inside a double-quoted pipe
+// argument, leaving every other backslash sequence untouched.
+func unescapeDoubleQuotedPipeArg(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) && (s[i+1] == '"' || s[i+1] == '\\') {
+			b.WriteByte(s[i+1])
+			i++
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // IsPipeFilter reports whether verb is an output filter SplitPipe splits off.

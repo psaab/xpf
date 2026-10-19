@@ -2946,6 +2946,18 @@ Filters output to lines matching the pattern (case-sensitive grep):
 0.0.0.0/0          *[Static/5] 4w4d 05:42:26
 ```
 
+The pattern may be quoted to include spaces or a pipe (`#15722`): surrounding
+single or double quotes are stripped before matching, and a quoted `" | "` is
+part of the pattern, not a filter separator:
+
+```
+> show interfaces | match "Physical interface"
+> show log | match "a | b"
+```
+
+The same quoting applies to `| except` and `| find` below, on both the local
+and remote CLI (one shared splitter, `cliterm.SplitPipe`).
+
 ### `| except <pattern>`
 
 Filters out lines matching the pattern (inverse grep):
