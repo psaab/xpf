@@ -102,6 +102,9 @@ func (b *managerBridge12175) SyncEstablished() (bool, error) {
 }
 func (b *managerBridge12175) SessionSyncBulkPrimed() (bool, error) { return b.synced, nil }
 func (b *managerBridge12175) HAProtocolCompatible() (bool, error)  { return true, nil }
+func (b *managerBridge12175) PeerProtocolVersions() (uint16, uint16, uint16, bool, error) {
+	return 1, 1, 2, true, nil
+}
 func (b *managerBridge12175) SessionSyncWireCompatible() (bool, string, error) {
 	return true, "test pair wire-compatible", nil
 }

@@ -193,6 +193,35 @@ func TestEnvelopeReaderVersion_RefusesMalformedProbe(t *testing.T) {
 	}
 }
 
+func TestProtocolVersionsProbe14991(t *testing.T) {
+	s := &realSystem{systemdUnitDir: t.TempDir(), unit: "xpfd"}
+	bin := filepath.Join(t.TempDir(), "xpfd-proto")
+	writeFakeVersionBin(t, bin, "ha-protocol-version=3\nha-protocol-min-compat=1\nsession-sync-protocol-version=2\n", 0)
+	iv, err := s.ProtocolVersions(bin)
+	if err != nil {
+		t.Fatalf("ProtocolVersions: %v", err)
+	}
+	if iv.HAProtocol != 3 || iv.HAProtocolMinCompat != 1 || iv.SessionSyncProtocol != 2 {
+		t.Fatalf("ProtocolVersions = %+v, want HA 3 floor 1 sync 2", iv)
+	}
+	for _, tc := range []struct {
+		name, out string
+		code      int
+	}{
+		{"missing sync", "ha-protocol-version=3\nha-protocol-min-compat=1\n", 0},
+		{"garbage sync", "ha-protocol-version=3\nha-protocol-min-compat=1\nsession-sync-protocol-version=banana\n", 0},
+		{"exec failure", "boom\n", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := filepath.Join(t.TempDir(), "xpfd-proto")
+			writeFakeVersionBin(t, b, tc.out, tc.code)
+			if _, err := s.ProtocolVersions(b); err == nil {
+				t.Fatal("ProtocolVersions succeeded on a malformed probe; want fail-closed error")
+			}
+		})
+	}
+}
+
 func TestUnitExecStartReadsLoadedSystemdProperty(t *testing.T) {
 	dir := t.TempDir()
 	out := "{ path=/var/lib/xpf/versions/2.0.0/xpfd ; argv[]=/var/lib/xpf/versions/2.0.0/xpfd ; ignore_errors=no }\n"

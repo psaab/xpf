@@ -51,8 +51,13 @@ type fakeSystem struct {
 	// parent-directory basename (staged generation or installed version tag).
 	readerVersionsByDir map[string]int
 	readerErr           error
-	// healthErr is returned by HelperHealthy (nil = healthy).
-	healthErr error
+	// protocolVersionsByDir optionally overrides the #14991 target probe by
+	// the binary's parent-directory kind: "staged" for a staged-gen xpfd,
+	// otherwise the version-dir basename (rollback target). Nil entries
+	// model a probe error for that target.
+	protocolVersionsByDir map[string]*ImageVersions
+	protocolVersionsErr   error
+	healthErr             error
 	// healthFailVersions: versions for which health fails (overrides
 	// healthErr when matched).
 	healthFailVersions map[string]bool
@@ -198,6 +203,38 @@ func (f *fakeSystem) EnvelopeReaderVersion(bin string) (int, error) {
 		return 0, f.readerErr
 	}
 	return f.readerVersion, nil
+}
+func (f *fakeSystem) ProtocolVersions(bin string) (*ImageVersions, error) {
+	if f.protocolVersionsErr != nil {
+		return nil, f.protocolVersionsErr
+	}
+	if f.protocolVersionsByDir != nil {
+		dir := filepath.Base(filepath.Dir(bin))
+		key := dir
+		if _, isVersion := f.protocolVersionsByDir[dir]; !isVersion {
+			if _, ok := f.protocolVersionsByDir["staged"]; ok {
+				key = "staged"
+			}
+		}
+		if iv, ok := f.protocolVersionsByDir[key]; ok {
+			if iv == nil {
+				return nil, fmt.Errorf("synthetic protocol-versions failure for %s", bin)
+			}
+			return iv, nil
+		}
+	}
+	// Default: a target speaking the running build's constants (compatible
+	// with a current peer), so pre-#14991 tests keep their meaning.
+	return &ImageVersions{
+		HAProtocol:          1,
+		HAProtocolMinCompat: 1,
+		SessionSyncProtocol: 2,
+		present: map[string]bool{
+			"ha-protocol-version":           true,
+			"ha-protocol-min-compat":        true,
+			"session-sync-protocol-version": true,
+		},
+	}, nil
 }
 func (f *fakeSystem) HelperHealthy(ver string, deadline time.Duration) error {
 	f.log("health:" + ver)

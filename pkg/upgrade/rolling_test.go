@@ -54,6 +54,14 @@ type fakeCluster struct {
 	syncWireIncompat bool
 	syncWireErr      error
 	syncWireChecks   int
+	// #14991 seams: the peer/local protocol versions PeerProtocolVersions
+	// reports. Zero-value defaults model a current peer (HA 1, wire 2,
+	// present) so pre-#14991 tests keep passing.
+	peerWire        uint16
+	peerWirePresent bool
+	peerHA          uint16
+	localHA         uint16
+	peerProtoErr    error
 }
 
 func (f *fakeCluster) PeerAlive() (bool, error) { return f.peerAlive, f.peerAliveErr }
@@ -72,6 +80,16 @@ func (f *fakeCluster) SyncEstablished() (bool, error) {
 	return f.synced, nil
 }
 func (f *fakeCluster) HAProtocolCompatible() (bool, error) { return f.compatible, nil }
+func (f *fakeCluster) PeerProtocolVersions() (uint16, uint16, uint16, bool, error) {
+	if f.peerProtoErr != nil {
+		return 0, 0, 0, false, f.peerProtoErr
+	}
+	if f.localHA == 0 && f.peerHA == 0 && f.peerWire == 0 && !f.peerWirePresent {
+		// Unset seam: model the current healthy pair.
+		return 1, 1, 2, true, nil
+	}
+	return f.localHA, f.peerHA, f.peerWire, f.peerWirePresent, nil
+}
 
 func (f *fakeCluster) SessionSyncBulkPrimed() (bool, error) {
 	if f.bulkPrimedSet {

@@ -196,7 +196,102 @@ func (g *grpcCluster) HAProtocolCompatible() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return parseHAProtocolCompatible(s), nil
+	compat, _, _ := haProtocolVerdictFromStatus(s)
+	return compat, nil
+}
+
+// PeerProtocolVersions returns the local/peer HA versions and the peer
+// session-sync wire version from ONE status fetch (#14991). A present but
+// malformed peer value is an error so callers fail closed; an absent peer
+// line is reported via peerPresent=false (the caller decides — the
+// rolling target gate refuses, mirroring the absent-wire-line rule).
+func (g *grpcCluster) PeerProtocolVersions() (uint16, uint16, uint16, bool, error) {
+	s, err := g.statusText()
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	return peerProtocolVersionsFromStatus(s)
+}
+
+// haProtocolVerdictFromStatus is the decision half of HAProtocolCompatible:
+// compatible iff both HA lines parse and are equal. Malformed or absent
+// lines fail closed (compatible=false) with the parsed values for logging.
+func haProtocolVerdictFromStatus(status string) (bool, uint16, uint16) {
+	local, peer, ok := parseHAProtocolVersions(status)
+	if !ok {
+		return false, 0, 0
+	}
+	return local == peer, uint16(local), uint16(peer)
+}
+
+// peerProtocolVersionsFromStatus parses one status render for the target
+// gate. Malformed present values are errors (#14991: never collapse them
+// to 0/permit); absent peer lines yield peerPresent=false.
+func peerProtocolVersionsFromStatus(status string) (uint16, uint16, uint16, bool, error) {
+	local, peer, ok := parseHAProtocolVersions(status)
+	if !ok {
+		// Distinguish "peer line absent" (peerPresent=false, no error) from
+		// "present but malformed / local unreadable" (error): the former is
+		// for the caller to refuse as an unreadable instrument; the latter
+		// is a garbled instrument and must not be read as version 0.
+		if _, peerPresent := parsePeerHAProtocol(status); !peerPresent {
+			if _, localPresent := parseLocalHAProtocol(status); localPresent {
+				return 0, 0, 0, false, nil
+			}
+		}
+		return 0, 0, 0, false, fmt.Errorf("HA protocol versions not parseable in `show chassis cluster status` — the compatibility check cannot run")
+	}
+	wire, wirePresent, wireErr := parsePeerSessionSyncWireStrict(status)
+	if wireErr != nil {
+		return 0, 0, 0, false, wireErr
+	}
+	if !wirePresent {
+		return uint16(local), uint16(peer), 0, false, nil
+	}
+	return uint16(local), uint16(peer), wire, true, nil
+}
+
+// parseLocalHAProtocol / parsePeerHAProtocol report presence of each HA
+// line (value only when strictly valid).
+func parseLocalHAProtocol(s string) (int, bool) {
+	for _, line := range strings.Split(s, "\n") {
+		l := strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(l), "ha protocol version:") {
+			n, ok := strictVersionValue(l[len("ha protocol version:"):])
+			return n, ok
+		}
+	}
+	return 0, false
+}
+
+func parsePeerHAProtocol(s string) (int, bool) {
+	for _, line := range strings.Split(s, "\n") {
+		l := strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(l), "peer ha protocol version:") {
+			n, ok := strictVersionValue(l[len("peer ha protocol version:"):])
+			return n, ok
+		}
+	}
+	return 0, false
+}
+
+// strictVersionValue parses a rendered version token: digits only, in
+// uint16 range. Anything else is not a version.
+func strictVersionValue(raw string) (int, bool) {
+	tok := strings.TrimSpace(raw)
+	if tok == "" {
+		return 0, false
+	}
+	for _, r := range tok {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.Atoi(tok)
+	if err != nil || n > 65535 {
+		return 0, false
+	}
+	return n, true
 }
 
 // SessionSyncWireCompatible reads the peer's advertised session-sync wire
@@ -223,7 +318,14 @@ func (g *grpcCluster) SessionSyncWireCompatible() (bool, string, error) {
 // left the whole suite green. The collapse lives HERE, between the parser and
 // the verdict, so this is the layer a test has to reach.
 func sessionSyncWireVerdictFromStatus(status string) (bool, string, error) {
-	peer, present := parsePeerSessionSyncWire(status)
+	peer, present, err := parsePeerSessionSyncWireStrict(status)
+	if err != nil {
+		// #14991: a PRESENT but malformed wire value used to collapse to
+		// (0, present) and PERMIT via the unknown-peer path. A garbled
+		// instrument is not a pre-#7990 peer; fail closed as an error so
+		// the message says the check could not run.
+		return false, "", err
+	}
 	if !present {
 		// The line is ABSENT, which is a statement about the INSTRUMENT, not
 		// about the peer — and collapsing it into "peer advertises nothing"
@@ -248,6 +350,30 @@ func sessionSyncWireVerdictFromStatus(status string) (bool, string, error) {
 	}
 	okv, reason := cluster.SessionSyncWireCompatible(peer)
 	return okv, reason, nil
+}
+
+// parsePeerSessionSyncWireStrict is parsePeerSessionSyncWire with the
+// malformed-present case surfaced as an error (#14991) instead of
+// (0, present). "unknown" remains (0, present, nil): a peer that
+// advertises nothing predates #7990 and permits deliberately.
+func parsePeerSessionSyncWireStrict(s string) (uint16, bool, error) {
+	const prefix = "peer session-sync wire version:"
+	for _, line := range strings.Split(s, "\n") {
+		l := strings.TrimSpace(line)
+		if !strings.HasPrefix(strings.ToLower(l), prefix) {
+			continue
+		}
+		val := strings.TrimSpace(l[len(prefix):])
+		if strings.EqualFold(val, "unknown") {
+			return 0, true, nil
+		}
+		n, ok := strictVersionValue(val)
+		if !ok {
+			return 0, true, fmt.Errorf("peer session-sync wire version %q in `show chassis cluster status` is malformed — the compatibility check cannot run, and a garbled instrument is not evidence of compatibility", val)
+		}
+		return uint16(n), true, nil
+	}
+	return 0, false, nil
 }
 
 // statusText fetches the rendered `show chassis cluster status` text.
@@ -387,6 +513,12 @@ func parseSessionSyncBulkPrimed(s string) bool {
 // future caller that must not may need to tell them apart, and a parser that
 // erases the distinction cannot be asked later.
 func parsePeerSessionSyncWire(s string) (uint16, bool) {
+	// Kept for the #7990 parser table: a malformed present value still
+	// reports (0, true) HERE so the parser's present/absent distinction is
+	// pinned; the VERDICT layer (sessionSyncWireVerdictFromStatus, via
+	// parsePeerSessionSyncWireStrict) refuses it — #14991 moved the
+	// fail-closed decision there so no caller can permit on garbage by
+	// routing through this lenient form.
 	const prefix = "peer session-sync wire version:"
 	for _, line := range strings.Split(s, "\n") {
 		l := strings.TrimSpace(line)
@@ -397,61 +529,30 @@ func parsePeerSessionSyncWire(s string) (uint16, bool) {
 		if strings.EqualFold(val, "unknown") {
 			return 0, true
 		}
-		n, err := strconv.Atoi(val)
-		if err != nil || n < 0 || n > 65535 {
-			// A line we cannot parse is not a version. Report it as PRESENT
-			// but 0 so the caller's permit-on-unknown path takes it, rather
-			// than reporting absent and inviting a different branch.
-			return 0, true
+		if n, ok := strictVersionValue(val); ok {
+			return uint16(n), true
 		}
-		return uint16(n), true
+		return 0, true
 	}
 	return 0, false
 }
 
-func parseHAProtocolCompatible(s string) bool {
-	var local, peer int
-	haveLocal, havePeer := false, false
-	for _, line := range strings.Split(s, "\n") {
-		l := strings.TrimSpace(line)
-		ll := strings.ToLower(l)
-		if strings.HasPrefix(ll, "peer ha protocol version:") {
-			if n, ok := trailingInt(l); ok {
-				peer, havePeer = n, true
-			}
-			continue
-		}
-		if strings.HasPrefix(ll, "ha protocol version:") {
-			if n, ok := trailingInt(l); ok {
-				local, haveLocal = n, true
-			}
-		}
+// parseHAProtocolVersions extracts both HA lines strictly: any present
+// line whose value is not a clean uint16, or either line absent, yields
+// ok=false (#14991 — previously trailingInt silently skipped a malformed
+// line and the caller read the pair as merely "missing").
+func parseHAProtocolVersions(s string) (local, peer int, ok bool) {
+	local, lok := parseLocalHAProtocol(s)
+	peer, pok := parsePeerHAProtocol(s)
+	if !lok || !pok {
+		return 0, 0, false
 	}
-	if !haveLocal || !havePeer {
-		return false
-	}
-	return local == peer
+	return local, peer, true
 }
 
-// trailingInt extracts the integer after the final ':' or space in a
-// "key: N" line.
-func trailingInt(line string) (int, bool) {
-	idx := strings.LastIndex(line, ":")
-	if idx < 0 || idx+1 >= len(line) {
-		return 0, false
-	}
-	tok := strings.TrimSpace(line[idx+1:])
-	n := 0
-	if tok == "" {
-		return 0, false
-	}
-	for _, r := range tok {
-		if r < '0' || r > '9' {
-			return 0, false
-		}
-		n = n*10 + int(r-'0')
-	}
-	return n, true
+func parseHAProtocolCompatible(s string) bool {
+	compat, _, _ := haProtocolVerdictFromStatus(s)
+	return compat
 }
 
 func parsePeerTakeoverReady(s string) bool {
