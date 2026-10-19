@@ -90,7 +90,7 @@ func ApplicationMatchDrops(app *Application) []string {
 	}
 	for _, tok := range app.UnknownICMP {
 		out = append(out, fmt.Sprintf(
-			"icmp-type/icmp-code %q is not an integer in 0..255 and was dropped, leaving the term unconstrained", tok))
+			"icmp-type/icmp-code %q did not resolve (icmp-type: integer 0..255 or a Junos name for the protocol; icmp-code: integer 0..255) and was dropped, leaving the term unconstrained", tok))
 	}
 	if proto != "" && (app.ICMPType != nil || app.ICMPCode != nil) && !protocolIsICMPFamily(proto) {
 		out = append(out, fmt.Sprintf(

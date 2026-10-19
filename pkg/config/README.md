@@ -2029,6 +2029,19 @@ all-ICMP, so `unconstrainedICMP[proto]` suppresses echo narrowing; malformed
 inline `icmp-type`/`icmp-code` is recorded on `Application.UnknownICMP` for the
 same strict-reject / lenient-warn gate.
 
+Since #15198, application `icmp-type` also accepts a Junos symbolic name
+(`echo-request`, `neighbor-solicit`, ...), resolved by the application's
+protocol through the shared firewall-filter tables (`icmpTypeNames` /
+`icmp6TypeNames` in `filter_match_resolve.go`): `echo-request` is 8 on
+`icmp`/`1` and 128 on `icmpv6`/`58`, including per-protocol resolution in a
+multi-protocol inline term and when the `icmp-type` leaf precedes `protocol`.
+A symbolic cell compiles to the same `ICMPType` as the numeric one, and a
+duplicate restated in the other spelling is idempotent. `icmp-code` stays
+numeric-only (Junos application `icmp-code` is numeric 0..255; symbolic codes
+fail closed on both the application and filter paths). Unknown or
+wrong-family names are recorded on `UnknownICMP` and rejected at strict
+commit, exactly like a malformed numeric value.
+
 **Application is EITHER direct OR term-based, never both; conflicting duplicate
 term leaves rejected (#3366):** a custom `applications application <name>` may
 define EITHER a direct match body (`protocol` / `destination-port` /

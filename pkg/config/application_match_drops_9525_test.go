@@ -60,7 +60,7 @@ func TestApplicationReferenceMatchDropsNamesEachMember9525(t *testing.T) {
 		{"source-port on gre", `application a { protocol gre; source-port 80; }`,
 			`source-port "80" on protocol "gre", which presents no source port`},
 		{"icmp-type 999 direct", `application a { protocol icmp; icmp-type 999; }`,
-			`icmp-type/icmp-code "999" is not an integer in 0..255`},
+			`icmp-type/icmp-code "999" did not resolve`},
 		{"icmp-type 999 in a term", `application a { term t1 { protocol icmp; icmp-type 999; } }`,
 			`application "a-t1": icmp-type/icmp-code "999"`},
 		{"icmp-code 999 in a term", `application a { term t1 { protocol icmp; icmp-type 8; icmp-code 999; } }`,
