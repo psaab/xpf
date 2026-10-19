@@ -264,14 +264,25 @@ func twoLeaves8436(c *schemaNode) (leafA, valA, leafB, valB string, ok bool) {
 type dupCensusResult8436 struct {
 	checked   int
 	divergent []string
-	verdict   map[string]string // siteKey -> "SILENT" | "rejected-at-commit"
-	skipped   map[string]int
-	// skippedSites is every site the census could not CHECK, by key. Pinned
-	// (dupConservationSkipped8436) for the same reason the non-conserving list
-	// is: a skip is not a pass. `services rpm probe xpfname test` sat in a skip
-	// COUNT for seven batches while silently losing configuration — a number
-	// cannot be read as a defect, and a named set can.
+	// verdict: siteKey -> "SILENT" | "rejected-at-commit" |
+	// "UNPROBED (invalid fixture)" (#15255 D07-02). The third value is
+	// not a disposition: it says the synthesized single-block fixture
+	// does not strict-compile on its own, so a strict error on the
+	// duplicate spelling carries no information about duplication.
+	verdict map[string]string
+	skipped map[string]int
+	// skippedSites is every site the census could not CHECK, by key.
+	// Pinned (dupConservationSkipped8436) for the same reason the
+	// non-conserving list is: a skip is not a pass. `services rpm
+	// probe xpfname test` sat in a skip COUNT for seven batches while
+	// silently losing configuration — a number cannot be read as a
+	// defect, and a named set can.
 	skippedSites []string
+	// unprobedSites is every divergent site scored UNPROBED, by key.
+	// Named in the census log beside the SILENT count for the same
+	// reason skippedSites is pinned: an unnamed bucket is where a
+	// silent site hides.
+	unprobedSites []string
 }
 
 func runDupConservationCensus8436(t *testing.T) dupCensusResult8436 {
@@ -307,6 +318,36 @@ func runDupConservationCensus8436(t *testing.T) dupCensusResult8436 {
 			stmtA = strings.ReplaceAll(stmtA, "node xpfinner", "node 0")
 			stmtB = strings.ReplaceAll(stmtB, "node xpfinner", "node 0")
 		}
+		// #15255 (D07-02): placeholder repairs. The synthesizer's
+		// generic values are invalid as a SINGLE block at these sites,
+		// so the old verdict ("any strict error on the duplicate =
+		// rejected-at-commit") measured the fixture, not duplication.
+		switch siteKey {
+		case "firewall family any filter xpfname term",
+			"firewall family inet filter xpfname term",
+			"firewall family inet6 filter xpfname term",
+			"firewall filter xpfname term":
+			// bit-length takes 1-32, not an identifier.
+			stmtA = strings.Replace(stmtA, "bit-length xpfaaa", "bit-length 16", 1)
+		case "system services dhcpv6-local-server group",
+			"system services dhcpv6-local-server group xpfname pool xpfname static-binding":
+			// fixed-address under dhcpv6 must be an IPv6 address.
+			stmtA = strings.Replace(stmtA, "fixed-address 10.0.1.50", "fixed-address 2001:db8::50", 1)
+			stmtB = strings.Replace(stmtB, "fixed-address 10.0.1.50", "fixed-address 2001:db8::50", 1)
+		case "security nat nat64 rule-set":
+			// prefix takes a NAT64 prefix, not a bare integer.
+			stmtA = strings.Replace(stmtA, "prefix 1;", "prefix 64:ff9b::/96;", 1)
+		case "security ike proposal":
+			// sha-256 is a supported IKE integrity algorithm.
+			stmtA = strings.Replace(stmtA, "authentication-algorithm xpfaaa;", "authentication-algorithm sha-256;", 1)
+		case "security flow traceoptions packet-filter":
+			// destination-prefix is a CIDR, not an identifier.
+			stmtA = strings.Replace(stmtA, "destination-prefix xpfaaa;", "destination-prefix 192.0.2.0/24;", 1)
+		case "security ipsec vpn xpfname traffic-selector":
+			// Traffic selectors are CIDRs, not identifiers.
+			stmtA = strings.Replace(stmtA, "local-ip xpfaaa;", "local-ip 10.0.0.0/24;", 1)
+			stmtB = strings.Replace(stmtB, "remote-ip xpfaaa;", "remote-ip 10.1.0.0/24;", 1)
+		}
 		ctx := contextFor(s.container)
 		dup := nest(s.container, ctx+
 			named+" { "+stmtA+" } "+
@@ -330,14 +371,35 @@ func runDupConservationCensus8436(t *testing.T) dupCensusResult8436 {
 		res.checked++
 		if !cfgEqual(cd, cm) {
 			// Does STRICT commit already refuse the duplicate? That is
-			// conservation by refusal (namedDupRules or a bespoke gate) and it
-			// is a different disposition from a silent loss. The census
-			// compiles LENIENTLY above so it can see the reduction either way;
-			// this second compile is what tells the two apart, and it is the
-			// column that decides which sites are candidates for the next fix.
+			// conservation by refusal (namedDupRules or a bespoke gate)
+			// and it is a different disposition from a silent loss. The
+			// census compiles LENIENTLY above so it can see the reduction
+			// either way; this second compile is what tells the two
+			// apart, and it is the column that decides which sites are
+			// candidates for the next fix.
+			//
+			// #15255 (D07-02): the old predicate scored
+			// "rejected-at-commit" whenever strict CompileConfig errored
+			// for ANY reason. For 10 of the 14 divergent sites the
+			// synthesized fixture is invalid even as a single
+			// non-duplicated block, so that verdict carried no
+			// information about duplication — and for the four filter
+			// `term` rows it hid the then-silent D07-01 site behind
+			// the "SILENT: 0" summary. The sound predicate:
+			//   1. the merged single-block twin must strict-compile
+			//      cleanly (otherwise the fixture itself is invalid:
+			//      UNPROBED, named, not a disposition);
+			//   2. the strict error on the duplicate must come from a
+			//      duplicate-detection gate, identified by asking the
+			//      gates themselves (isDupGateError15255), not by
+			//      matching error prose.
 			verdict := "SILENT"
-			if tree, perrs := NewParser(dup).Parse(); len(perrs) == 0 {
-				if _, err := CompileConfig(tree); err != nil {
+			mergedText := nest(s.container, ctx+named+" { "+stmtA+" "+stmtB+" }")
+			if _, err := strictCompileErr15255(mergedText); err != nil {
+				verdict = "UNPROBED (invalid fixture)"
+				res.unprobedSites = append(res.unprobedSites, siteKey)
+			} else if tree, perrs := NewParser(dup).Parse(); len(perrs) == 0 {
+				if _, err := CompileConfig(tree); err != nil && isDupGateError15255(tree) {
 					verdict = "rejected-at-commit"
 				}
 			}
@@ -367,13 +429,24 @@ func TestDuplicateBlockConservationCensus8436(t *testing.T) {
 		t.Logf("  SKIPPED — %-52s %d", k, res.skipped[k])
 	}
 	silent := 0
+	unprobed := 0
 	for _, d := range res.divergent {
-		if res.verdict[d] == "SILENT" {
+		switch res.verdict[d] {
+		case "SILENT":
 			silent++
+		case "UNPROBED (invalid fixture)":
+			unprobed++
 		}
-		t.Logf("    NOT CONSERVED [%-18s] %s", res.verdict[d], d)
+		t.Logf("    NOT CONSERVED [%-24s] %s", res.verdict[d], d)
 	}
 	t.Logf("  of those, SILENT (no commit gate at all):    %d", silent)
+	// #15255 (D07-02): UNPROBED sites are named, never folded into
+	// either disposition count. A reader who sees only "SILENT: 0"
+	// cannot tell a refused site from an unmeasured one.
+	for _, d := range res.unprobedSites {
+		t.Logf("    UNPROBED (invalid fixture):              %s", d)
+	}
+	t.Logf("  of those, UNPROBED (invalid fixture):        %d", unprobed)
 	// Issue 9024: print the DENOMINATOR beside the verdict. "SILENT: 0" over a
 	// population of 9 reads identically to "SILENT: 0" over a population of
 	// 139, and the difference is the whole finding.
@@ -469,5 +542,123 @@ func TestDuplicateBlockConservationIsPinned8436(t *testing.T) {
 		t.Errorf("container %q is no longer skipped but is still listed in "+
 			"dupConservationSkipped8436 — delete the line; a stale skip entry claims the "+
 			"census cannot see a site it now checks (#8436)", k)
+	}
+}
+
+// strictCompileErr15255 strict-compiles text, returning the error
+// (nil on success). Used by the D07-02 verdict predicate and its
+// acceptance test.
+func strictCompileErr15255(text string) (bool, error) {
+	tree, perrs := NewParser(text).Parse()
+	if len(perrs) > 0 {
+		return false, perrs[0]
+	}
+	if tree == nil {
+		return false, nil
+	}
+	_, err := CompileConfig(tree)
+	return true, err
+}
+
+// isDupGateError15255 reports whether any duplicate-detection gate
+// fires on tree: the named/deep block gate in BOTH modes, the
+// expanded-names and NAT rule/rule-set gates via their lenient
+// warnings, the bespoke application-definition gate, or the
+// #15192 firewall-filter term gate. Asking the gates — rather than
+// matching CompileConfig's first-error prose — is what keeps the
+// census verdict sound when gates are added, removed, or reworded:
+// removing the ike-proposal row from namedDupRules flips that site
+// to SILENT here because no gate fires, whatever the remaining
+// validators happen to say about the fixture.
+func isDupGateError15255(tree *ConfigTree) bool {
+	if tree == nil {
+		return false
+	}
+	if _, err := validateDuplicateNamedBlockAST(tree, false); err != nil {
+		return true
+	}
+	if warnings, _ := validateDuplicateNamedBlockAST(tree, true); len(warnings) > 0 {
+		return true
+	}
+	if warnings, _ := validateDuplicateNamesExpandedAST(tree, true, nil); len(warnings) > 0 {
+		return true
+	}
+	if warnings, _ := validateDuplicateNATRuleNamesAST(tree, true); len(warnings) > 0 {
+		return true
+	}
+	if warnings, _ := validateDuplicateNATRuleSetNamesAST(tree, true); len(warnings) > 0 {
+		return true
+	}
+	if _, _, err := validateApplicationNameCollisionsAST(tree.Children, false); err != nil {
+		return true
+	}
+	if warnings, _, _ := validateApplicationNameCollisionsAST(tree.Children, true); len(warnings) > 0 {
+		return true
+	}
+	// #15192's term gate has no standalone validator; it surfaces as
+	// a CompileConfig error naming the duplicate term and as a
+	// lenient warning carrying the same phrase.
+	if cfg, err := CompileConfigLenient(tree); err == nil && cfg != nil {
+		for _, w := range cfg.Warnings {
+			if strings.Contains(w, "has duplicate term") {
+				return true
+			}
+		}
+	}
+	if _, err := CompileConfig(tree); err != nil &&
+		strings.Contains(err.Error(), "has duplicate term") {
+		return true
+	}
+	return false
+}
+
+// TestDupVerdictRequiresDuplicateGate15255 is the #15255 (D07-02)
+// acceptance cell for the census verdict predicate. The pre-fix
+// predicate scored "rejected-at-commit" on ANY strict error; the
+// four firewall-filter term rows proved the failure — their fixture
+// was invalid as a single block (bit-length xpfaaa), yet they were
+// recorded as refused, hiding the then-silent duplicate-term site.
+func TestDupVerdictRequiresDuplicateGate15255(t *testing.T) {
+	res := runDupConservationCensus8436(t)
+
+	// The four filter-term rows: with the placeholder repaired the
+	// merged twin strict-compiles, and the #15192 duplicate-term gate
+	// (D07-01's fix, already on master) refuses the duplicate — so
+	// they score rejected-at-commit for a DUPLICATION reason. Delete
+	// that gate and they flip to SILENT; restore the invalid
+	// placeholder and they flip to UNPROBED. Either flip is visible
+	// here, which is the property the old predicate lacked.
+	for _, site := range []string{
+		"firewall family any filter xpfname term",
+		"firewall family inet filter xpfname term",
+		"firewall family inet6 filter xpfname term",
+		"firewall filter xpfname term",
+	} {
+		if got := res.verdict[site]; got != "rejected-at-commit" {
+			t.Errorf("site %q verdict = %q, want rejected-at-commit (the #15192 "+
+				"duplicate-term gate fires and the merged twin compiles); the "+
+				"pre-#15255 predicate scored this row refused on an unrelated "+
+				"fixture error", site, got)
+		}
+	}
+
+	// Every rejected-at-commit verdict must be backed by a gate: a
+	// strict error whose text does not come from duplicate detection
+	// is not conservation by refusal.
+	if got := res.verdict["security ike proposal"]; got != "rejected-at-commit" {
+		t.Errorf("ike proposal verdict = %q, want rejected-at-commit via namedDupRules; "+
+			"a mutation removing that row must flip this site to SILENT", got)
+	}
+	// Named UNPROBED sites: fixtures invalid even as a single block
+	// must not masquerade as refused (or as silent).
+	if len(res.unprobedSites) == 0 {
+		t.Errorf("no UNPROBED (invalid fixture) sites recorded — the census is "+
+			"folding invalid fixtures into a disposition again; unprobed=%v verdicts=%v",
+			res.unprobedSites, res.verdict)
+	}
+	for _, site := range res.unprobedSites {
+		if res.verdict[site] != "UNPROBED (invalid fixture)" {
+			t.Errorf("unprobed site %q carries verdict %q", site, res.verdict[site])
+		}
 	}
 }

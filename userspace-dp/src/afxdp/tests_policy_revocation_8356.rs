@@ -2420,6 +2420,7 @@ fn the_poll_paths_forward_install_releases_a_seeded_predecessors_unnamed_rows_95
     );
 }
 
+#[test]
 fn the_poll_paths_reverse_install_releases_a_predecessors_rows_9560() {
     use crate::afxdp::bpf_map::{
         RECORDER_ONLY_MAP_FD, SteeringHolder, SteeringMapRef, SteeringRowOwners,

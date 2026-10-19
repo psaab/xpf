@@ -354,7 +354,7 @@ test-go: test-race-dp
 	# Any future package whose tests read the tree outside the compiled
 	# sources (git grep, git ls-files, subprocess census) MUST be added
 	# to this leg, not given a cached-only gate.
-	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/
+	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/
 
 # #2114 scoped race gate: the dataplane-cell publication races
 # (bootstrap-exit clear vs sampler/watcher/confirm-timer readers) and the
