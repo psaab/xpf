@@ -61,6 +61,12 @@ Standard library only.
   when both classes are present (systemd accepts one value). DHCPv6
   counts as dynamic only when it is stateful and requests IA_NA;
   stateless and PD-only clients own no address on the interface.
+  Standalone `vrrp-group` VIPs (#15061) are the other static class:
+  pkg/vrrp installs them on MASTER but no `Address=` line renders
+  them, so `pkg/dataplane` sets `KeepForeignStatic` (with
+  `KeepAddresses`) on any row whose units carry a group with a
+  virtual address — non-VLAN, VLAN sub-interface, or VLAN parent for
+  an untagged unit — and `keepConfigurationValue` treats it as static.
 
 ## Gotchas
 

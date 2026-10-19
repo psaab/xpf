@@ -89,6 +89,15 @@ type InterfaceConfig struct {
 	// VRRP advert source of a VRRP-backed RETH whose untagged unit binds its
 	// instance to the parent device (#9721).
 	VLANParentAddresses []string
+
+	// KeepForeignStatic is true when an externally-owned static address
+	// lives on this device but is NOT rendered as an Address= line by
+	// this file — a standalone vrrp-group VIP that pkg/vrrp installs on
+	// MASTER (#15061). KeepAddresses alone cannot express it: the static
+	// class also requires a rendered Address= (hasRenderedStaticAddress),
+	// which a foreign VIP never has. keepConfigurationValue treats this
+	// as the static class so the VIP survives networkctl reconfigure.
+	KeepForeignStatic bool
 }
 
 // Manager handles systemd-networkd .link and .network file generation.
@@ -1724,7 +1733,7 @@ func (m *Manager) generateNetwork(ifc InterfaceConfig) string {
 // IATypes = daemon default, which requests IA_NA). Stateless and
 // PD-only DHCPv6 own no address here and must not widen the keep.
 func keepConfigurationValue(ifc InterfaceConfig) string {
-	static := ifc.KeepAddresses && hasRenderedStaticAddress(ifc)
+	static := (ifc.KeepAddresses && hasRenderedStaticAddress(ifc)) || ifc.KeepForeignStatic
 	dynamic := ifc.DHCPv4 || dhcpv6OwnsAddress(ifc)
 	switch {
 	case static && dynamic:
