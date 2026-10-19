@@ -918,6 +918,20 @@ impl super::Coordinator {
         crate::afxdp::gre_reassembly::GRE_OUTER_FRAG_DROPS.load(Ordering::Relaxed)
     }
 
+    /// #15095: complete outer-fragmented GRE datagrams that reassembled
+    /// but whose decap then refused (the reassembled outer tuple matched
+    /// the decap index at buffer time but key / transport-domain / egress
+    /// / host-inbound checks failed at decap, or the inner was malformed).
+    /// The fragments were consumed by the pool, so this is a drop, not a
+    /// refusal-with-fallthrough. Transit fragments never enter the pool
+    /// (#15095 endpoint gate) and are not counted here. Surfaced as
+    /// `xpf_userspace_gre_reassembled_decap_refusals_total`.
+    pub fn gre_reassembled_decap_refusals_total(&self) -> u64 {
+        self.forwarding
+            .gre_decap_counters
+            .reassembled_decap_refusals()
+    }
+
     /// #2472: locally-generated ICMP/ICMPv6 Time Exceeded replies dropped
     /// because the per-reason token bucket was empty. The TTL/hop-limit error
     /// generator is rate-limited (global-per-reason, Linux `icmp_msgs_per_sec`

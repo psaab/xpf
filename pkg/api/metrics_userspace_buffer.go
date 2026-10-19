@@ -438,6 +438,14 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		prometheus.CounterValue,
 		float64(status.GreOuterFragDropsTotal))
 
+	// #15095: reassembled-but-decap-refused GRE datagrams. Emitted
+	// unconditionally so 0 means no completed reassembly was refused.
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceGreReassembledDecapRefusals,
+		prometheus.CounterValue,
+		float64(status.GreReassembledDecapRefusalsTotal),
+	)
+
 	// #2472: locally-generated error-reply per-reason token-bucket drops.
 	// Emitted unconditionally so a 0 is a real "no generated errors
 	// rate-limited" signal rather than an absent series. Nonzero flags an

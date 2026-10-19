@@ -930,6 +930,16 @@ pub(crate) struct ProcessStatus {
     /// reassembly pool. Additive / defaulted for backward compatibility.
     #[serde(rename = "gre_outer_frag_drops_total", default)]
     pub gre_outer_frag_drops_total: u64,
+    /// #15095: complete outer-fragmented GRE datagrams that reassembled
+    /// but whose decap then refused (index hit at buffer time, then key /
+    /// transport-domain / egress / host-inbound mismatch or a malformed
+    /// inner). The fragments were consumed by the pool, so this is a
+    /// counted drop. Transit fragments never enter the pool and are not
+    /// counted. Surfaced as
+    /// `xpf_userspace_gre_reassembled_decap_refusals_total`. Additive /
+    /// defaulted for backward compatibility.
+    #[serde(rename = "gre_reassembled_decap_refusals_total", default)]
+    pub gre_reassembled_decap_refusals_total: u64,
     /// #2472: locally-generated ICMP Time Exceeded / PTB / `reject` replies
     /// dropped because the per-reason token bucket was empty. Each reason has
     /// an independent global-per-reason bucket (Linux `icmp_msgs_per_sec`

@@ -387,9 +387,17 @@ pub(super) fn stage_native_gre_decap(
     // #14645: an outer-fragmented native-GRE datagram must be reassembled
     // before decap. Heads keep protocol GRE; tails carry the 255 sentinel
     // with GRE recoverable from the frame, so gate on the frame, not meta.
+    // #15095: buffer ONLY when the outer tuple names a configured native-GRE
+    // endpoint. A transit GRE/PPTP datagram fragmented upstream is not ours
+    // to reassemble: buffering it consumed every fragment and, on completion,
+    // decap missed and the stage returned Buffered with no counter — the
+    // datagram was never forwarded and no operator surface showed the loss.
+    // Returning NotGre here lets transit fragments take the ordinary
+    // flowless / fragment-association path like any other proto-47 transit.
     if crate::afxdp::gre_reassembly::frame_is_fragment(raw_frame, meta)
         && crate::afxdp::frame::flowless_effective_protocol(raw_frame, meta)
             == crate::ip_proto::PROTO_GRE
+        && crate::afxdp::gre::outer_frame_targets_gre_endpoint(raw_frame, meta, forwarding)
     {
         return match reassembler.offer(raw_frame, meta, now_ns) {
             Some((frame, rmeta)) => {
@@ -406,7 +414,18 @@ pub(super) fn stage_native_gre_decap(
                 }
                 match pkt {
                     Some(p) => GreDecapStage::Decapped(p.meta, p.frame),
-                    None => GreDecapStage::Buffered,
+                    None => {
+                        // #15095: the datagram reassembled and its fragments
+                        // were consumed by the pool, but decap refused it
+                        // (key / transport-domain / egress / host-inbound
+                        // mismatch, or a malformed inner). It cannot fall
+                        // through — there is no fragment left to forward —
+                        // so count the refusal before recycling.
+                        forwarding
+                            .gre_decap_counters
+                            .note_reassembled_decap_refusal();
+                        GreDecapStage::Buffered
+                    }
                 }
             }
             None => GreDecapStage::Buffered,
