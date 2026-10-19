@@ -370,7 +370,13 @@ methods.** `methodCanonicalCommand` keys on the short method name;
 request's topic and verb. `GetSystemInfo` is also request-decoded for
 deny-command attribution: `systemInfoCanonicalCommand` maps its bounded type
 selector to a fixed canonical command. Its coarse permission remains
-`PermView`. The ShowText topic map's data moved to
+`PermView`. Since #15076 `GetBGPStatus` (`bgpStatusCanonicalCommand`) and
+`GetNATRuleStats` (`natRuleStatsCanonicalCommand`) are request-decoded the
+same way: BGP charges `show protocols bgp summary|routes|neighbor…` by
+`type`, NAT charges `show security nat source|destination rule` by
+`nat_type`, and an unknown selector (including BGP `groups`, which has no
+cmdtree command) resolves to no command and denies for a restricted class.
+The ShowText topic map's data moved to
 `pkg/cmdtree/showtext_topic.go` in #8058 and this package holds a view onto it —
 the remote CLI reads the same table to decide what topic to send, so the two
 surfaces cannot disagree about a topic's command. Add or rename a ShowText topic

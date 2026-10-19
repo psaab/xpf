@@ -35,9 +35,10 @@ package grpcapi
 // `ShowText`'s topics and `SystemAction`'s verbs are priced from the decoded
 // request rather than the method name (see `methodPermission`), so they get
 // their own tables in `authz_command_table_topics.go` (cut 5a-2).
-// `GetSystemInfo` is also request-decoded for deny-command attribution: its type
-// selects a fixed server-side command in `rpcCanonicalCommand`. These mappings
-// are inert until 5b wires them into `authorizeRPC`.
+// `GetSystemInfo`, `GetBGPStatus` and `GetNATRuleStats` are also
+// request-decoded for deny-command attribution: their selectors select a
+// fixed server-side command in `rpcCanonicalCommand` (#15076). These
+// mappings are inert until 5b wires them into `authorizeRPC`.
 
 // methodCanonicalCommand maps a short gRPC method name to the canonical
 // operational command it performs, for fine-grained deny-commands matching.
@@ -51,8 +52,9 @@ package grpcapi
 //     deny-COMMANDS would apply the wrong leaf's regex.
 //   - REQUEST-DECODED methods (ShowText, SystemAction). One method serves many
 //     commands, so a single string would be a lie. They get per-topic and
-//     per-verb tables in 5a-2. GetSystemInfo has its own type-to-command mapping
-//     in rpcCanonicalCommand because all variants retain the same view permission.
+//     per-verb tables in 5a-2. GetSystemInfo, GetBGPStatus and
+//     GetNATRuleStats have their own selector-to-command mappings in
+//     rpcCanonicalCommand because all variants retain the same view permission.
 var methodCanonicalCommand = map[string]string{
 	// Operational reads.
 	"GetStatus":                "show version",
@@ -71,10 +73,8 @@ var methodCanonicalCommand = map[string]string{
 	"GetDHCPLeases":            "show dhcp leases",
 	"GetDHCPClientIdentifiers": "show dhcp client-identifier",
 	"GetRoutes":                "show route",
-	"GetBGPStatus":             "show bgp summary",
 	"GetIPsecSA":               "show security ipsec security-associations",
 	"GetNATPoolStats":          "show security nat source pool",
-	"GetNATRuleStats":          "show security nat source rule",
 	"GetNATDeterministic":      "show security nat source deterministic-nat",
 	"MatchPolicies":            "show security match-policies",
 	"GetConfigModeStatus":      "show version",
@@ -141,6 +141,8 @@ var methodsWithoutCanonicalCommand = map[string]string{
 	"GetVRRPStatus":           "no `show vrrp` node exists in the operational tree",
 	"ShowText":                "priced from the decoded request; the topic selects the command (showTextTopicCommand)",
 	"GetSystemInfo":           "command selected by request type via systemInfoCanonicalCommand in rpcCanonicalCommand",
+	"GetBGPStatus":            "command selected by request type via bgpStatusCanonicalCommand in rpcCanonicalCommand (#15076)",
+	"GetNATRuleStats":         "command selected by request nat_type via natRuleStatsCanonicalCommand in rpcCanonicalCommand (#15076)",
 	"SystemAction":            "priced from the decoded request; the verb selects the command (systemActionVerbCommand)",
 	"GetD11AttestationLedger": "privileged bounded D11 evidence has no operator command; handler requires local root or configured super-user",
 }

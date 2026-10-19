@@ -103,7 +103,12 @@ class with operational regexes, except `/health`, `/metrics`, and the
 config-mode family (`restNoCommandExempt14146`, governed by the
 `*-configuration` pair); `GET /api/v1/system/info` is request-decoded by its
 `type` (`show system uptime` / `show system memory`, as gRPC charges
-`GetSystemInfo`).
+`GetSystemInfo`). Since #15076 `GET /api/v1/routing/bgp` is request-decoded
+by `?type=` (`show protocols bgp summary` / `show protocols bgp routes`,
+unknown types deny) and `GET /api/v1/security/nat/rules` by `?type=` /
+`?nat_type=` (`show security nat source rule` / `show security nat
+destination rule`, unknown selectors deny), matching the gRPC charges for
+`GetBGPStatus` / `GetNATRuleStats`.
 
 - `GET /metrics` — Prometheus exposition.
   - Current-config remote archive debt is exposed as

@@ -325,6 +325,10 @@ const systemActionMethodName = "SystemAction"
 
 const getSystemInfoMethodName = "GetSystemInfo"
 
+const getBGPStatusMethodName = "GetBGPStatus"
+
+const getNATRuleStatsMethodName = "GetNATRuleStats"
+
 // ShowText is the SECOND multiplexed method on this service, and the first
 // revision of this file got it wrong: it was priced flat at PermView with the
 // comment "every topic is a `show ...`". That is false. Three topics are
