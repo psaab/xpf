@@ -227,11 +227,22 @@ func classifyIpsecTopologyLinks(links []netlink.Link, ready ipsecReadyResult) ([
 			continue
 		}
 		switch master.Type() {
-		case "bridge", "vrf":
+		case "vrf":
+			// #15067 (A35-02): a VRF-enslaved xfrmi is a supported
+			// topology. The divert matches it by iifname=master +
+			// sdifname=tunnel and the host-input fence drops only
+			// that (master, slave) pair (#14974), so co-members such
+			// as ge-0-0-3 keep their host-inbound path. Marking it
+			// UNSAFE kept the permit from ever OPENing, and the
+			// fence (retired only on the OPEN path) then dropped
+			// tunnel-arriving host traffic forever. Leave ready
+			// unchanged (SAFE when subscribed).
+		case "bridge":
 			ready = ipsecReadyUnsafe
 		default:
-			// A supported xfrmi is masterless. Any other resolved master is
-			// an unsupported route domain and must not reach OPEN.
+			// A supported xfrmi is masterless or VRF-enslaved. Any
+			// other resolved master is an unsupported route domain
+			// and must not reach OPEN.
 			ready = ipsecReadyUnsafe
 		}
 	}

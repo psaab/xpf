@@ -185,7 +185,7 @@ func TestIpsecTopologyTransitionBlocksSafeReopen9506(t *testing.T) {
 		t.Fatal("safe reopen succeeded before post-event census")
 	}
 }
-func TestIpsecTopologyCensusRejectsVRFMaster9506(t *testing.T) {
+func TestIpsecTopologyCensusVRFMasterSafe9506(t *testing.T) {
 	oldList, oldByIndex := ipsecTopologyLinkList, ipsecFenceLinkByIndex
 	t.Cleanup(func() {
 		ipsecTopologyLinkList, ipsecFenceLinkByIndex = oldList, oldByIndex
@@ -207,8 +207,8 @@ func TestIpsecTopologyCensusRejectsVRFMaster9506(t *testing.T) {
 	d.ipsecTopologySubscribed.Store(true)
 	d.pollIpsecTopology()
 	snapshot := s.watch.Load()
-	if snapshot == nil || snapshot.Ready != ipsecReadyUnsafe {
-		t.Fatalf("census ready = %v, want UNSAFE for VRF-master xfrmi", snapshotReady(snapshot))
+	if snapshot == nil || snapshot.Ready != ipsecReadySafe {
+		t.Fatalf("census ready = %v, want SAFE for VRF-master xfrmi (#15067: supported, fence-scoped topology)", snapshotReady(snapshot))
 	}
 	var gotXfrmi *ipsecTopologyTuple
 	for i := range snapshot.Tuples {
