@@ -12,6 +12,7 @@ import (
 // generateProtocols returns only a string, so the belt is slog.Warn — the
 // compile gate is the enforcement; these tests pin that keyed rendering is
 // unchanged and type-only rendering emits no password lines.
+// #14977: the renderer now also omits the stanza entirely (fail closed).
 
 func TestISISKeyedRenderUnchanged14399(t *testing.T) {
 	m := New()
@@ -50,7 +51,11 @@ func TestISISTypeWithoutKeyRendersNoPassword14399(t *testing.T) {
 			t.Errorf("type-without-key rendered %q (must be password-free; enforcement is the #14399 compile gate):\n%s", bad, got)
 		}
 	}
-	if !strings.Contains(got, "router isis xpf\n") {
-		t.Errorf("IS-IS stanza missing:\n%s", got)
+	// #14977 supersedes the stanza-present half of this contract: a
+	// type-without-key config now fails closed — the whole IS-IS
+	// stanza is omitted rather than activated unauthenticated. The
+	// #14399 compile gate remains the strict-path enforcement.
+	if strings.Contains(got, "router isis xpf\n") {
+		t.Errorf("type-without-key still emitted the IS-IS stanza (unauthenticated activation):\n%s", got)
 	}
 }
