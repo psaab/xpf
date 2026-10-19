@@ -449,6 +449,16 @@ func (d *Daemon) enterBootstrapMode() error {
 func (d *Daemon) enterBootstrapModeWithLifeline(restoreLifeline bool) error {
 	d.bootstrapMode.Store(true)
 
+	// #15054: discharge any config-apply debt. A failed auto-rollback or
+	// boot apply may have latched it before this rollback to the safe state;
+	// the teardown below deliberately does NOT apply the active (possibly
+	// #9615-refused) target, so leaving the debt owed would let the #9811
+	// retry owner re-apply it in bootstrap mode and take over with no
+	// commit. The retry is also gated on inBootstrap, but the debt itself
+	// must not survive: convergence from here is owned by the authorized
+	// commit/sync/rollback that exits bootstrap and applies in full.
+	d.dischargeConfigApplyDebt()
+
 	// #2114: stop and DISCARD the NAT pool-alarm monitor. It may have been
 	// started on a prior successful bootstrap-exit arm; rolling back to
 	// bootstrap means a later corrected commit can re-enter
