@@ -1156,6 +1156,17 @@ func ribInstanceFromName(ribName string) (string, bool) {
 // so a "Comcst.inet.0" typo is quoted verbatim rather than as the stripped
 // "Comcst".
 //
+// #15201 (A10-03): the suffix itself is also validated. parseNextTableInstance
+// discarded ".inet[6].N" entirely, so `blue.inet6.0` on an IPv4 route,
+// `blue.inet.2` (Junos inet.2 is the RPF table), and an IPv6 route to
+// `blue.inet.0` all committed and leaked into blue's unicast table. The
+// gate now requires a suffixed target to be exactly the unicast suffix of
+// the route destination's family (".inet.0" / ".inet6.0" via FRRAddrFamily;
+// a v6 destination under bare `static` stays in the inet list, so the list
+// is not a family tag). A bare instance name (no
+// ".inet" suffix) carries no family/index claim and is left to the
+// definedness check, preserving the historically accepted shorthand.
+//
 // The GLOBAL inet.0 + inet6.0 static routes are validated for target
 // DEFINEDNESS — those are exactly the routes daemon_apply feeds to
 // ApplyNextTableRules (daemon_apply.go). A next-table authored UNDER a
@@ -1198,12 +1209,42 @@ func validateNextTableTargetReferencesStrict(cfg *Config) error {
 			if sr == nil || sr.NextTable == "" {
 				continue
 			}
-			if definedInstance[sr.NextTable] {
-				continue
-			}
 			raw := sr.NextTableRaw
 			if raw == "" {
 				raw = sr.NextTable
+			}
+			// #15201 (A10-03): the raw token's ".inet[6].N" suffix was
+			// discarded by parseNextTableInstance, so a wrong-family or
+			// nonzero-index target committed and leaked into the named
+			// instance's unicast table. Validate it against the route
+			// destination's family (FRRAddrFamily, the #9820 predicate —
+			// a v6 destination under bare `static` legitimately stays in
+			// the inet list, so the list is not a family tag) and require
+			// index 0. A bare instance name carries no suffix claim and
+			// stays accepted (internal consumers construct it). An
+			// unparseable destination is left to the other gates.
+			if fam := FRRAddrFamily(sr.Destination); fam != "" {
+				if _, suffix, hasSuffix := parseNextTableSuffix(raw); hasSuffix {
+					want := ".inet.0"
+					familyName := "IPv4 (inet.0)"
+					if fam == "v6" {
+						want = ".inet6.0"
+						familyName = "IPv6 (inet6.0)"
+					}
+					if suffix != want {
+						return fmt.Errorf(
+							"routing-options static route %q next-table %q has an "+
+								"invalid table suffix %q: a %s route must use "+
+								"next-table <instance>%s (only the unicast table "+
+								"index 0 of the matching family is a forwarding "+
+								"target); the suffix is otherwise discarded and "+
+								"the route leaks into instance %q's unicast table",
+							sr.Destination, raw, suffix, familyName, want, sr.NextTable)
+					}
+				}
+			}
+			if definedInstance[sr.NextTable] {
+				continue
 			}
 			return fmt.Errorf(
 				"routing-options static route %q next-table %q references an "+

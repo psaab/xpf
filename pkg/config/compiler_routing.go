@@ -1071,22 +1071,29 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 	return existing
 }
 
+// parseNextTableSuffix splits a Junos next-table value into its routing
+// instance name and its trailing ".inet[6].N" table suffix. The separator
+// is the LAST ".inet" occurrence (#5632: a dotted instance name such as
+// "a.inet.b" contains ".inet" itself; its table is "a.inet.b.inet.0").
+// A value with no ".inet" at all is a bare instance name (hasSuffix=false)
+// — accepted historically and constructed directly by internal consumers,
+// so it carries no family/index claim to validate. Any other return has
+// the raw suffix preserved verbatim so callers can distinguish the valid
+// unicast suffixes (".inet.0" / ".inet6.0") from a wrong family, a nonzero
+// index (e.g. Junos inet.2, the RPF table), or malformed trailing garbage
+// that must not be silently discarded (#15201).
+func parseNextTableSuffix(table string) (instance, suffix string, hasSuffix bool) {
+	if idx := strings.LastIndex(table, ".inet"); idx > 0 {
+		return table[:idx], table[idx:], true
+	}
+	return table, "", false
+}
+
 // parseNextTableInstance extracts the routing instance name from a Junos
 // next-table value like "Comcast-GigabitPro.inet.0" → "Comcast-GigabitPro".
 func parseNextTableInstance(table string) string {
-	// Strip the trailing .inet.N / .inet6.N table suffix to get the routing
-	// instance name. A next-table target is always "<instance>.<family>.<index>",
-	// so the family+index separator is the LAST ".inet" occurrence, not the
-	// first. strings.Index truncated a routing-instance NAME that itself
-	// contained ".inet" (an accepted dotted instance, e.g. "a.inet.b" whose
-	// table is "a.inet.b.inet.0") at the embedded ".inet", corrupting the
-	// emitted next-table identity to "a" and misrouting the leak (#5632). Anchor
-	// on the trailing suffix with LastIndex; for a single-".inet" table the two
-	// are identical, so ordinary names are unaffected.
-	if idx := strings.LastIndex(table, ".inet"); idx > 0 {
-		return table[:idx]
-	}
-	return table
+	instance, _, _ := parseNextTableSuffix(table)
+	return instance
 }
 
 func compileRoutingInstances(node *Node, cfg *Config, opts compileOpts) error {
