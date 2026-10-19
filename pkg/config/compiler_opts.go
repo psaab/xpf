@@ -1743,6 +1743,12 @@ type compileOpts struct {
 	// omitting policy-bearing aggregates. The tolerant load / peer-sync path
 	// preserves already-persisted configuration while warning (#1960).
 	lenientGenerateRoutePolicy bool
+	// lenientGenerateRoutePrefix (#15658) downgrades a malformed or
+	// helper-refused generate-route prefix from a strict compile error
+	// to cfg.Warnings entries. The route is NOT excluded on the tolerant
+	// path: a published malformed prefix fails the helper snapshot closed
+	// (RouteDestinationUnparseable), fail-closed for a blackhole.
+	lenientGenerateRoutePrefix bool
 	// lenientDHCPStaticBindings (#2243 review) downgrades the DHCP-server
 	// static (fixed/reserved) host-binding gate (validateDHCPStaticBindingsStrict)
 	// from a hard compile error to a cfg.Warnings entry. The strict commit /
@@ -3670,6 +3676,7 @@ func lenientCompileOpts() compileOpts {
 		lenientStaticNextHopFamily:             true,
 		lenientStaticRouteCIDRMaskSpelling:     true,
 		lenientGenerateRoutePolicy:             true,
+		lenientGenerateRoutePrefix:             true,
 		lenientDHCPStaticBindings:              true,
 		lenientDHCPPoolSubnets:                 true,
 		lenientDHCPPoolValues:                   true,

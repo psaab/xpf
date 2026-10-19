@@ -152,8 +152,16 @@ func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig, instanceName st
 		}
 	}
 
-	// Parse generate routes (aggregate routes)
-	if genNode := node.FindChild("generate"); genNode != nil {
+	// Parse generate routes (aggregate routes). #15658: fold every
+	// `generate` container (a repeated container is already merged by the
+	// #12120 duplicate-block fold, but multiple routing-options roots and
+	// flat-set siblings still arrive here) and merge same-masked-prefix
+	// definitions deterministically — first spelling wins for Prefix,
+	// Discard latches, first non-empty Policy wins — so FRR and userspace
+	// consume one route per prefix instead of divergent duplicates. The
+	// #8939 packed-run control in routing_packed_runs_8939_test.go pins
+	// that `discard` + `policy P` on one prefix land on ONE route.
+	for _, genNode := range node.FindChildren("generate") {
 		for _, routeNode := range genNode.FindChildren("route") {
 			prefix := nodeVal(routeNode)
 			if prefix == "" {
@@ -190,7 +198,7 @@ func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig, instanceName st
 					}
 				}
 			}
-			ro.GenerateRoutes = append(ro.GenerateRoutes, gr)
+			ro.GenerateRoutes = mergeGenerateRoute(ro.GenerateRoutes, gr)
 		}
 	}
 
@@ -744,6 +752,7 @@ func canonicalizeStaticRoutesAcrossTables(cfg *Config) {
 		)
 	canonicalizeStaticRouteDestinationMasks(
 		cfg.RoutingOptions.StaticRoutes, cfg.RoutingOptions.Inet6StaticRoutes)
+	canonicalizeGenerateRoutesAcrossScopes(cfg)
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil {
 			continue
@@ -806,6 +815,119 @@ func canonicalizeStaticRouteDestinationMask(route *StaticRoute) {
 	route.destinationAliases = nil
 	for _, spelling := range spellings {
 		appendStaticRouteDestinationAlias(route, spelling)
+	}
+}
+
+// --- generate routes (#15658) -------------------------------------------
+
+// mergeGenerateRoute folds gr into routes by masked prefix (the same
+// staticRouteMergeKey identity static routes use, so host-bit and
+// helper-supported padded-mask spellings of one prefix are one route).
+// First spelling wins for Prefix, Discard latches, first non-empty
+// Policy wins (a later differing policy is dropped deterministically;
+// strict commit rejects any surviving policy via #11456, so the choice
+// never changes what installs). Malformed prefixes get no key and stay
+// appended verbatim for the strict gates to name.
+func mergeGenerateRoute(routes []*GenerateRoute, gr *GenerateRoute) []*GenerateRoute {
+	if gr == nil {
+		return routes
+	}
+	key := staticRouteMergeKey(gr.Prefix)
+	if strings.HasPrefix(key, "v4\x00") || strings.HasPrefix(key, "v6\x00") {
+		for _, existing := range routes {
+			if existing == nil || staticRouteMergeKey(existing.Prefix) != key {
+				continue
+			}
+			appendGenerateRoutePrefixAlias(existing, gr.Prefix)
+			for _, alias := range gr.prefixAliases {
+				appendGenerateRoutePrefixAlias(existing, alias)
+			}
+			existing.Discard = existing.Discard || gr.Discard
+			if existing.Policy == "" {
+				existing.Policy = gr.Policy
+			}
+			return routes
+		}
+	}
+	return append(routes, gr)
+}
+
+func appendGenerateRoutePrefixAlias(route *GenerateRoute, prefix string) {
+	if route == nil || prefix == "" || prefix == route.Prefix {
+		return
+	}
+	for _, alias := range route.prefixAliases {
+		if alias == prefix {
+			return
+		}
+	}
+	route.prefixAliases = append(route.prefixAliases, prefix)
+}
+
+// canonicalizeGenerateRoutes folds same-prefix generate routes that
+// arrived in separate compileRoutingOptions invocations (multiple
+// routing-options roots, per-instance scopes) and writes each surviving
+// prefix in the helper-supported canonical mask spelling, mirroring
+// canonicalizeStaticRouteDestinationMasks (#12507 doctrine): a "/08"
+// generate route otherwise reaches the userspace FIB but not FRR's
+// netip belt. Helper-refused padding ("/008") is kept verbatim — strict
+// commit rejects it (generateRouteHelperRefusedMaskSpellings) and a
+// tolerant load publishes it so the helper fails the snapshot closed —
+// unless a folded alias the helper parses can take its place.
+func canonicalizeGenerateRoutes(routes []*GenerateRoute) []*GenerateRoute {
+	if routes == nil {
+		return nil
+	}
+	folded := make([]*GenerateRoute, 0, len(routes))
+	for _, gr := range routes {
+		folded = mergeGenerateRoute(folded, gr)
+	}
+	for _, gr := range folded {
+		canonicalizeGenerateRoutePrefix(gr)
+	}
+	return folded
+}
+
+func canonicalizeGenerateRoutePrefix(route *GenerateRoute) {
+	if route == nil {
+		return
+	}
+	authored := route.Prefix
+	prefix := authored
+	if CIDRMaskHelperRefusesPadding(prefix) {
+		for _, alias := range route.prefixAliases {
+			if !CIDRMaskHelperRefusesPadding(alias) {
+				prefix = alias
+				break
+			}
+		}
+	}
+	prefix = normalizeHelperSupportedCIDRMaskPadding(prefix)
+	if prefix == authored {
+		return
+	}
+	spellings := append([]string{authored}, route.prefixAliases...)
+	route.Prefix = prefix
+	route.prefixAliases = nil
+	for _, spelling := range spellings {
+		appendGenerateRoutePrefixAlias(route, spelling)
+	}
+}
+
+// canonicalizeGenerateRoutesAcrossScopes applies canonicalizeGenerateRoutes
+// to the global list and every routing instance. Called from
+// canonicalizeStaticRoutesAcrossTables, after every routing-options root
+// has compiled.
+func canonicalizeGenerateRoutesAcrossScopes(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.RoutingOptions.GenerateRoutes = canonicalizeGenerateRoutes(cfg.RoutingOptions.GenerateRoutes)
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil {
+			continue
+		}
+		ri.GenerateRoutes = canonicalizeGenerateRoutes(ri.GenerateRoutes)
 	}
 }
 

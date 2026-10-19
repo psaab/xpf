@@ -43,7 +43,7 @@ func TestRoutingInstanceRoutingOptionsCarryAllCompiledFields11782(t *testing.T) 
 			ri := cfg.RoutingInstances[0]
 			if len(ri.GenerateRoutes) != 1 || ri.GenerateRoutes[0] == nil {
 				t.Errorf("per-instance GenerateRoutes = %+v, want one generated route", ri.GenerateRoutes)
-			} else if got := *ri.GenerateRoutes[0]; got != (GenerateRoute{Prefix: "198.51.100.0/24", Discard: true}) {
+			} else if got := *ri.GenerateRoutes[0]; !reflect.DeepEqual(got, GenerateRoute{Prefix: "198.51.100.0/24", Discard: true}) {
 				t.Errorf("per-instance generate route = %+v, want prefix and discard preserved", got)
 			}
 			if got, want := ri.RibGroups["leak"], (&RibGroup{Name: "leak", ImportRibs: []string{"inet.0"}}); !reflect.DeepEqual(got, want) {

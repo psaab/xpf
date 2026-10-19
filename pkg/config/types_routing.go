@@ -326,6 +326,10 @@ type GenerateRoute struct {
 	Prefix  string // route prefix (e.g. "192.168.0.0/16")
 	Policy  string // contributing route policy (optional; #11456: unevaluable — a policy-bearing aggregate is not installed anywhere)
 	Discard bool   // discard traffic to this route (blackhole)
+	// prefixAliases retains every authored spelling folded into Prefix by
+	// the same-prefix merge (#15658), for helper-refused mask diagnostics.
+	// Compiler-only, like StaticRoute.destinationAliases.
+	prefixAliases []string `json:"-"`
 }
 
 // RibGroup defines a RIB group for route sharing between routing instances.

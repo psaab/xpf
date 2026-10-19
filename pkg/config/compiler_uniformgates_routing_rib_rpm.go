@@ -178,6 +178,35 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
+	// #15658: generate-route prefixes get the same treatment as static
+	// destinations. A malformed prefix (ValidateRouteDestination, also the
+	// schema keyValidator) or a helper-refused padded mask otherwise splits
+	// FRR (omits the blackhole) from userspace (helper refuses the whole
+	// snapshot). Strict rejects the first offender; tolerant warns per
+	// offender and keeps the route so the helper still fails closed.
+	if problems := generateRouteInvalidPrefixes(cfg); len(problems) > 0 {
+		if !opts.lenientGenerateRoutePrefix {
+			return fmt.Errorf("%s", problems[0])
+		}
+		for _, problem := range problems {
+			cfg.Warnings = append(cfg.Warnings,
+				"generate-route prefix (downgraded to warning on tolerant path; "+
+					"a published route that keeps it makes the userspace helper refuse the "+
+					"whole snapshot): "+problem)
+		}
+	}
+	if spellings := generateRouteHelperRefusedMaskSpellings(cfg); len(spellings) > 0 {
+		if !opts.lenientGenerateRoutePrefix {
+			return fmt.Errorf("%s", spellings[0])
+		}
+		for _, spelling := range spellings {
+			cfg.Warnings = append(cfg.Warnings,
+				"generate-route CIDR mask spelling (downgraded to warning on tolerant path; "+
+					"a published route that keeps it makes the userspace helper refuse the "+
+					"whole snapshot): "+spelling)
+		}
+	}
+
 	if err := validatePolicyNextPolicyActions11780(cfg); err != nil {
 		if opts.lenientPolicyNextAction11780 {
 			failClosedMalformedNextPolicyActions11780(cfg)
