@@ -267,6 +267,13 @@ type compileOpts struct {
 	// committed, so firing on every boot and peer sync trains the operator to
 	// skip it.
 	suppressContestedTrunkZoneAdvisory bool
+	// suppressDPDThresholdIKEv2Advisory (#15025) suppresses the commit-time
+	// advisory that a DPD threshold is IKEv1-only (dpd_timeout is not
+	// honoured on IKEv2). Set on the TOLERANT paths (Store.Load,
+	// Store.SyncApply) for the same reason as its sibling above: the
+	// condition is a property of a config already committed, so firing on
+	// every boot and peer sync trains the operator to skip it.
+	suppressDPDThresholdIKEv2Advisory bool
 	// suppressFabricStampAdvisory (#10105) suppresses the commit-time private
 	// L2 advisory on tolerant load / peer-sync paths. The warning is a
 	// deployment constraint, not a hard error: software cannot inspect the
@@ -3391,6 +3398,7 @@ func lenientCompileOpts() compileOpts {
 		suppressClusterNTPAdvisory:             true,
 		suppressContestedTrunkZoneAdvisory:     true,
 		suppressFabricStampAdvisory:            true,
+		suppressDPDThresholdIKEv2Advisory:      true,
 		lenientIPsecPolicyProposalRef:          true,
 		lenientPolicySchedulerRef:              true,
 		lenientSchedulerMapRef:                 true,
