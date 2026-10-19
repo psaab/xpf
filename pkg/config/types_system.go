@@ -530,6 +530,15 @@ type SSHServiceConfig struct {
 	// advisory (no `Protocol` line is emitted — the directive is gone from
 	// modern sshd).
 	ProtocolVersion string
+	// #15282 (V31-S1, residual of #4305): Junos boolean leaves that forbid
+	// password-based SSH authentication. Both were previously unmodeled, so
+	// they committed clean and did nothing — on a non-appliance (.deb) host
+	// the host sshd default then applied. NoPasswordAuthentication renders
+	// PasswordAuthentication no; NoPasswords additionally renders
+	// KbdInteractiveAuthentication no (keyboard-interactive is the other
+	// password-carrying method, and on Debian it rides PAM).
+	NoPasswordAuthentication bool
+	NoPasswords              bool
 }
 
 // WebManagementConfig holds web management settings.

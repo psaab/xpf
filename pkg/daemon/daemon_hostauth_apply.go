@@ -1392,6 +1392,18 @@ func buildSSHDConfigErr(ssh *config.SSHServiceConfig) (string, error) {
 	if ssh.ClientAliveCountMaxSet {
 		lines = append(lines, fmt.Sprintf("ClientAliveCountMax %d", ssh.ClientAliveCountMax))
 	}
+	// #15282 (V31-S1, residual of #4305): the Junos password-forbidding
+	// leaves. NoPasswordAuthentication forbids the password method only;
+	// NoPasswords is the broader leaf and also forbids keyboard-interactive
+	// (which carries passwords through PAM on Debian). Either renders
+	// PasswordAuthentication no exactly once. Absent leaves render nothing:
+	// existing stanzas keep host/factory posture.
+	if ssh.NoPasswordAuthentication || ssh.NoPasswords {
+		lines = append(lines, "PasswordAuthentication no")
+	}
+	if ssh.NoPasswords {
+		lines = append(lines, "KbdInteractiveAuthentication no")
+	}
 	if len(lines) == 0 {
 		return "", nil
 	}
