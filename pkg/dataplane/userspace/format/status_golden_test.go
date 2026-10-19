@@ -112,7 +112,7 @@ func goldenStatusSummaryFixture() userspace.ProcessStatus {
 				TXSharedRecycleUnknownSlotDrops: 1, TXCompletions: 65,
 				MirroredPackets: 4, MirroredBytes: 512, MirrorDropsNoFrame: 1, MirrorDropsTXFrameReserve: 1,
 				MirrorDropsNoBinding: 1, MirrorDropsQueueFull: 2, MirrorDropsQueueFullSameWorker: 1, MirrorDropsQueueFullCrossWorker: 1,
-				KernelRXDropped: 9, KernelRXInvalidDescs: 1,
+				KernelRXDropped: 9, KernelRXInvalidDescs: 1, KernelRXRingFull: 7,
 				DirectTXPackets: 40, CopyTXPackets: 20, InPlaceTXPackets: 10,
 				InPlaceVLANPushDescPackets: 5, InPlaceVLANPopDescPackets: 6, InPlaceVLANPushNoHeadroomPackets: 1, InPlaceL2MemmoveFallbackPackets: 2,
 				DirectTXNoFrameFallbackPackets: 3, DirectTXBuildFallbackPackets: 2, DirectTXDisallowedFallbackPackets: 1,

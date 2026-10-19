@@ -228,6 +228,7 @@ fn copy_live_snapshot(binding: &mut BindingStatus, snap: BindingLiveSnapshot) {
     binding.fabric_redirect_unsendable_drops = snap.fabric_redirect_unsendable_drops;
     binding.kernel_rx_dropped = snap.kernel_rx_dropped;
     binding.kernel_rx_invalid_descs = snap.kernel_rx_invalid_descs;
+    binding.kernel_rx_ring_full = snap.kernel_rx_ring_full;
     binding.tx_packets = snap.tx_packets;
     binding.tx_bytes = snap.tx_bytes;
     binding.tx_completions = snap.tx_completions;
@@ -487,6 +488,7 @@ fn zero_unbound_slot(binding: &mut BindingStatus) {
     binding.fabric_redirect_unsendable_drops = 0;
     binding.kernel_rx_dropped = 0;
     binding.kernel_rx_invalid_descs = 0;
+    binding.kernel_rx_ring_full = 0;
     binding.tx_packets = 0;
     binding.tx_bytes = 0;
     binding.tx_completions = 0;

@@ -877,6 +877,10 @@ pub(crate) struct BindingStatus {
     pub kernel_rx_dropped: u64,
     #[serde(rename = "kernel_rx_invalid_descs", default)]
     pub kernel_rx_invalid_descs: u64,
+    /// #15285: kernel XDP `rx_ring_full` per binding/queue. Wire-additive
+    /// (serde default; Go side omitempty).
+    #[serde(rename = "kernel_rx_ring_full", default)]
+    pub kernel_rx_ring_full: u64,
     #[serde(rename = "tx_packets", default)]
     pub tx_packets: u64,
     #[serde(rename = "tx_bytes", default)]

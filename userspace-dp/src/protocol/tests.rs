@@ -3146,6 +3146,28 @@ fn binding_status_fabric_redirect_unsendable_drops_wire_key_1946() {
     assert_eq!(legacy.fabric_redirect_unsendable_drops, 0);
 }
 
+// #15285: kernel rx_ring_full wire key.
+#[test]
+fn binding_status_kernel_rx_ring_full_wire_key_15285() {
+    let status = BindingStatus {
+        kernel_rx_ring_full: 109,
+        ..Default::default()
+    };
+    let value: serde_json::Value = serde_json::to_value(&status).expect("serialize BindingStatus");
+    assert_eq!(value["kernel_rx_ring_full"], 109u64);
+    let decoded: BindingStatus = serde_json::from_value(value).expect("deserialize BindingStatus");
+    assert_eq!(decoded.kernel_rx_ring_full, 109);
+    let mut legacy_value =
+        serde_json::to_value(BindingStatus::default()).expect("serialize default BindingStatus");
+    legacy_value
+        .as_object_mut()
+        .expect("object")
+        .remove("kernel_rx_ring_full");
+    let legacy: BindingStatus =
+        serde_json::from_value(legacy_value).expect("deserialize legacy BindingStatus");
+    assert_eq!(legacy.kernel_rx_ring_full, 0);
+}
+
 #[test]
 fn process_status_event_stream_fields_wire_keys_1642() {
     let status = ProcessStatus {

@@ -139,6 +139,7 @@ type statusSummaryAggregates struct {
 
 	kernelRXDropped                   uint64
 	kernelRXInvalidDescs              uint64
+	kernelRXRingFull                  uint64
 	directTXPackets                   uint64
 	copyTXPackets                     uint64
 	inPlaceTXPackets                  uint64
@@ -303,6 +304,7 @@ func aggregateStatusSummary(status userspace.ProcessStatus) statusSummaryAggrega
 		agg.mirrorDropsQueueFullCrossWorker += binding.MirrorDropsQueueFullCrossWorker
 		agg.kernelRXDropped += binding.KernelRXDropped
 		agg.kernelRXInvalidDescs += binding.KernelRXInvalidDescs
+		agg.kernelRXRingFull += binding.KernelRXRingFull
 		agg.directTXPackets += binding.DirectTXPackets
 		agg.copyTXPackets += binding.CopyTXPackets
 		agg.inPlaceTXPackets += binding.InPlaceTXPackets
@@ -714,6 +716,7 @@ func writeTXPathCountersSection(b *strings.Builder, agg statusSummaryAggregates)
 	fmt.Fprintf(b, "  Mirror drops:              no-frame=%d tx-frame-reserve=%d no-binding=%d queue-full=%d same-worker=%d cross-worker=%d\n", agg.mirrorDropsNoFrame, agg.mirrorDropsTXFrameReserve, agg.mirrorDropsNoBinding, agg.mirrorDropsQueueFull, agg.mirrorDropsQueueFullSameWorker, agg.mirrorDropsQueueFullCrossWorker)
 	fmt.Fprintf(b, "  Kernel RX dropped:         %d\n", agg.kernelRXDropped)
 	fmt.Fprintf(b, "  Kernel RX invalid descs:   %d\n", agg.kernelRXInvalidDescs)
+	fmt.Fprintf(b, "  Kernel RX ring full:       %d\n", agg.kernelRXRingFull)
 	fmt.Fprintf(b, "  Direct TX packets:         %d\n", agg.directTXPackets)
 	fmt.Fprintf(b, "  Copy-path TX packets:      %d\n", agg.copyTXPackets)
 	fmt.Fprintf(b, "  In-place TX packets:       %d\n", agg.inPlaceTXPackets)

@@ -1,11 +1,11 @@
 // #9168 — the kernel RX counters must have a PRODUCER, not just a consumer.
+// #15285 — `rx_ring_full` joins them: it must not be discarded by the publisher.
 //
 // `kernel_rx_dropped` and `kernel_rx_invalid_descs` were plumbed end to end
 // (atomic -> snapshot -> wire -> Go decode -> `Kernel RX dropped:` in
 // `pkg/monitoriface/monitor.go`) and never written. The worker sampled
 // `statistics_v2()` once per second per binding and stored one of its six
 // counters. `show` / `monitor` therefore reported a permanent hard 0.
-//
 // A CONSUMER TEST CANNOT SEE THIS. The pre-existing #802 cell
 // (`ring_pressure_counters_round_trip_through_snapshot`) stores a value into
 // the atomic itself and asserts the snapshot carries it — it is green whether
@@ -137,6 +137,12 @@ fn publish_kernel_xdp_statistics_writes_every_plumbed_atom_9168() {
         "the kernel's invalid-descriptor count must reach its own atom (#9168)",
     );
     assert_eq!(
+        snap.kernel_rx_ring_full, 109,
+        "the kernel's RX ring-full count must reach its own atom per binding/queue; \
+         discarding it made 'Kernel RX dropped: 0' unable to establish zero \
+         ring-full loss (#15285)",
+    );
+    assert_eq!(
         snap.rx_fill_ring_empty_descs, 113,
         "#802's counter must keep working through the shared publisher",
     );
@@ -147,6 +153,7 @@ fn publish_kernel_xdp_statistics_writes_every_plumbed_atom_9168() {
     live.publish_kernel_xdp_statistics(XdpStatisticsV2 {
         rx_dropped: 200,
         rx_invalid_descs: 201,
+        rx_ring_full: 203,
         rx_fill_ring_empty_descs: 202,
         ..XdpStatisticsV2::default()
     });
@@ -155,9 +162,10 @@ fn publish_kernel_xdp_statistics_writes_every_plumbed_atom_9168() {
         (
             snap.kernel_rx_dropped,
             snap.kernel_rx_invalid_descs,
+            snap.kernel_rx_ring_full,
             snap.rx_fill_ring_empty_descs
         ),
-        (200, 201, 202),
+        (200, 201, 203, 202),
         "kernel statistics are ABSOLUTE — publish must store(), not fetch_add()",
     );
 }

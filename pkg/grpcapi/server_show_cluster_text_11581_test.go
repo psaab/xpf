@@ -140,7 +140,7 @@ func processStatus11581() dpuserspace.ProcessStatus {
 				SessionHits: 50, SessionMisses: 12, SessionCreates: 8, SessionExpires: 4,
 				SessionDeltaPending: 0, SessionDeltaGenerated: 6, SessionDeltaDrained: 5,
 				PolicyDeniedPackets: 7, NeighborMissPackets: 1,
-				KernelRXDropped: 9, DirectTXNoFrameFallbackPackets: 3,
+				KernelRXDropped: 9, KernelRXRingFull: 5, DirectTXNoFrameFallbackPackets: 3,
 				DebugPendingTXLocal: 14, DebugOutstandingTX: 15,
 				DebugPendingFillFrames: 10, DebugSpareFillFrames: 11, DebugFreeTXFrames: 12,
 				DebugPendingTXPrepared: 13, DebugInFlightRecycles: 16,

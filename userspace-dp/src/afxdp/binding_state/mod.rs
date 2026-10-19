@@ -510,6 +510,9 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(in crate::afxdp) table_unavailable_drops: AtomicU64,
     pub(super) kernel_rx_dropped: AtomicU64,
     pub(super) kernel_rx_invalid_descs: AtomicU64,
+    /// #15285: kernel XDP `rx_ring_full` — RX ring-full drops, distinct
+    /// from `rx_dropped`. Absolute per socket; published via `store()`.
+    pub(super) kernel_rx_ring_full: AtomicU64,
     pub(super) tx_packets: AtomicU64,
     pub(super) tx_bytes: AtomicU64,
     pub(super) tx_completions: AtomicU64,
@@ -1045,9 +1048,11 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // syn-cookie active-budget counter (+40 bytes).
 // #14668 adds one unconditional u64 DNS illegal-reply drop counter before
 // both sentinels; offsets advance by 8 bytes, size unchanged.
+// #15285 adds one unconditional u64 kernel_rx_ring_full counter before both
+// sentinels; offsets advance by 8 bytes, size unchanged.
 const _: [(); 2624] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2480] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2609] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2488] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2617] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1183,6 +1188,7 @@ impl BindingLiveState {
             table_unavailable_drops: AtomicU64::new(0),
             kernel_rx_dropped: AtomicU64::new(0),
             kernel_rx_invalid_descs: AtomicU64::new(0),
+            kernel_rx_ring_full: AtomicU64::new(0),
             tx_packets: AtomicU64::new(0),
             tx_bytes: AtomicU64::new(0),
             tx_completions: AtomicU64::new(0),

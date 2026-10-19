@@ -2952,6 +2952,43 @@ func TestEmitBindingFragmentOverlapCounters_LabelsAndValues(t *testing.T) {
 	assertCounterClose(t, got, c.bindingFragOverlapMaxLifetimeEvictions, zeroLabels, 0)
 }
 
+// #15285: per-binding kernel RX ring-full counter — labels, CounterValue
+// type (via assertCounterClose), and unconditional zero emission.
+func TestEmitBindingKernelRXRingFull_LabelsAndValues(t *testing.T) {
+	bindingLabels := []string{"binding_slot", "queue_id", "worker_id", "iface"}
+	c := &xpfCollector{
+		bindingKernelRXRingFull: prometheus.NewDesc(
+			"xpf_userspace_binding_kernel_rx_ring_full_total", "test desc", bindingLabels, nil,
+		),
+	}
+	status := dpuserspace.ProcessStatus{
+		Bindings: []dpuserspace.BindingStatus{
+			{Slot: 2, QueueID: 5, WorkerID: 7, Interface: "ge-0-0-1", KernelRXRingFull: 109},
+			{Slot: 3, QueueID: 0, WorkerID: 1, Interface: "ge-0-0-2"},
+		},
+	}
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.emitBindingKernelRXRingFull(ch, status)
+		close(ch)
+	}()
+	var got []prometheus.Metric
+	for m := range ch {
+		got = append(got, m)
+	}
+	if len(got) != 2 {
+		t.Fatalf("emitBindingKernelRXRingFull: want 2 metrics (2 bindings x 1 counter), got %d", len(got))
+	}
+	labels := map[string]string{
+		"binding_slot": "2", "queue_id": "5", "worker_id": "7", "iface": "ge-0-0-1",
+	}
+	assertCounterClose(t, got, c.bindingKernelRXRingFull, labels, 109)
+	zeroLabels := map[string]string{
+		"binding_slot": "3", "queue_id": "0", "worker_id": "1", "iface": "ge-0-0-2",
+	}
+	assertCounterClose(t, got, c.bindingKernelRXRingFull, zeroLabels, 0)
+}
+
 func TestEmitCoSActiveFlowCount_LabelsAndValue(t *testing.T) {
 	c := &xpfCollector{
 		cosActiveFlowCount: prometheus.NewDesc(

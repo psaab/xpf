@@ -231,6 +231,7 @@ impl BindingLiveState {
                 .load(Ordering::Relaxed),
             kernel_rx_dropped: self.kernel_rx_dropped.load(Ordering::Relaxed),
             kernel_rx_invalid_descs: self.kernel_rx_invalid_descs.load(Ordering::Relaxed),
+            kernel_rx_ring_full: self.kernel_rx_ring_full.load(Ordering::Relaxed),
             tx_packets: self.tx_packets.load(Ordering::Relaxed),
             tx_bytes: self.tx_bytes.load(Ordering::Relaxed),
             tx_completions: self.tx_completions.load(Ordering::Relaxed),

@@ -18,6 +18,14 @@
 // `XdpStatisticsV2` makes forgetting one a COMPILE ERROR — a field added to
 // the kernel-statistics struct cannot reach the wire unwritten, because it
 // cannot reach this function unnamed.
+//
+// #15285: `rx_ring_full` joins the plumbed set. The kernel distinguishes it
+// from `rx_dropped` (if_xdp.h), but the publisher discarded it, so
+// "Kernel RX dropped: 0" could not establish zero ring-full loss — the
+// suspected silent micro-drop point for -P12 retransmit bursts. It is now
+// carried per binding/queue as `kernel_rx_ring_full` through snapshot, wire,
+// Go decode, status/monitor, and the
+// `xpf_userspace_binding_kernel_rx_ring_full_total` counter metric.
 
 use super::BindingLiveState;
 use crate::xsk_ffi::XdpStatisticsV2;
@@ -35,10 +43,11 @@ impl BindingLiveState {
     /// PLUMBED, in the order the kernel struct declares them:
     ///   - `rx_dropped`               -> `kernel_rx_dropped`
     ///   - `rx_invalid_descs`         -> `kernel_rx_invalid_descs`
+    ///   - `rx_ring_full`             -> `kernel_rx_ring_full` (#15285)
     ///   - `rx_fill_ring_empty_descs` -> `rx_fill_ring_empty_descs`
     ///
     /// NOT PLUMBED, deliberately, and named here so the omission is a decision
-    /// rather than an oversight — `tx_invalid_descs`, `rx_ring_full` and
+    /// rather than an oversight — `tx_invalid_descs` and
     /// `tx_ring_empty_descs` have no `BindingLiveState` atomic, no snapshot
     /// field, no wire field and no reader anywhere in the tree. Adding them is
     /// a WIRE change (new `BindingLiveSnapshot` fields crossing the Go/Rust
@@ -59,13 +68,15 @@ impl BindingLiveState {
             rx_dropped,
             rx_invalid_descs,
             tx_invalid_descs: _,
-            rx_ring_full: _,
+            rx_ring_full,
             rx_fill_ring_empty_descs,
             tx_ring_empty_descs: _,
         } = stats;
         self.kernel_rx_dropped.store(rx_dropped, Ordering::Relaxed);
         self.kernel_rx_invalid_descs
             .store(rx_invalid_descs, Ordering::Relaxed);
+        self.kernel_rx_ring_full
+            .store(rx_ring_full, Ordering::Relaxed);
         self.rx_fill_ring_empty_descs
             .store(rx_fill_ring_empty_descs, Ordering::Relaxed);
     }
@@ -78,8 +89,8 @@ impl BindingLiveState {
 /// This is the machine-readable half of the doc comment above, and it exists
 /// so the omission is CHECKED rather than described: the #9168 guard asserts
 /// that the set of `_`-bound names in the destructure is exactly this list, so
-/// silently dropping a fourth field reds a cell instead of reading as a
+/// silently dropping a third field reds a cell instead of reading as a
 /// decision somebody made.
 #[cfg(test)]
-pub(in crate::afxdp) const UNPLUMBED_KERNEL_STAT_FIELDS: [&str; 3] =
-    ["tx_invalid_descs", "rx_ring_full", "tx_ring_empty_descs"];
+pub(in crate::afxdp) const UNPLUMBED_KERNEL_STAT_FIELDS: [&str; 2] =
+    ["tx_invalid_descs", "tx_ring_empty_descs"];
