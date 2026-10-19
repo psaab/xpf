@@ -65,6 +65,33 @@ fn flowless_counters_round_trip_batch_to_status_to_reset_9956() {
     );
 }
 
+#[test]
+fn kernel_rx_ring_full_round_trip_to_status_15285() {
+    let live = crate::afxdp::binding_state::BindingLiveState::new();
+    live.publish_kernel_xdp_statistics(crate::xsk_ffi::XdpStatisticsV2 {
+        rx_ring_full: 109,
+        ..Default::default()
+    });
+    let snap = live.snapshot();
+    assert_eq!(
+        snap.kernel_rx_ring_full, 109,
+        "snapshot must carry kernel rx_ring_full live -> snapshot (#15285)"
+    );
+    let mut status = crate::protocol::BindingStatus::default();
+    copy_live_snapshot(&mut status, snap);
+    assert_eq!(
+        status.kernel_rx_ring_full, 109,
+        "copy must carry kernel rx_ring_full snapshot -> status (#15285)"
+    );
+    let wire = serde_json::to_value(&status).expect("serialize BindingStatus");
+    assert_eq!(wire["kernel_rx_ring_full"], 109);
+    zero_unbound_slot(&mut status);
+    assert_eq!(
+        status.kernel_rx_ring_full, 0,
+        "unbound slot must not retain a prior binding's ring-full count (#15285)"
+    );
+}
+
 
 #[test]
 fn fabric_trust_boundary_counters_round_trip_to_status_11061() {

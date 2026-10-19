@@ -117,6 +117,7 @@ Three-color policers:
   Mirror drops:              no-frame=1 tx-frame-reserve=1 no-binding=1 queue-full=2 same-worker=1 cross-worker=1
   Kernel RX dropped:         9
   Kernel RX invalid descs:   1
+  Kernel RX ring full:       7
   Direct TX packets:         40
   Copy-path TX packets:      20
   In-place TX packets:       10

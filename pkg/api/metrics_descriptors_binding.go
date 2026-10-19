@@ -62,6 +62,14 @@ func (c *xpfCollector) initBindingDescriptors() {
 		"Maximum sampled AF_XDP TX completion-ring descriptors available in the last debug window (#1241).",
 		[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
 	)
+	// #15285: kernel XDP rx_ring_full per binding/queue — RX ring-full
+	// drops distinct from rx_dropped. Emitted unconditionally so 0 means
+	// no ring-full loss, not an absent series.
+	c.bindingKernelRXRingFull = prometheus.NewDesc(
+		"xpf_userspace_binding_kernel_rx_ring_full_total",
+		"Cumulative kernel AF_XDP rx_ring_full drops for this binding's socket: packets dropped because the RX ring was full, distinct from rx_dropped (#15285).",
+		[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
+	)
 	// #1831 (follow-up to #1766): per-binding V_min fairness-throttle
 	// counters (#941 work item D / #943), already carried in
 	// BindingStatus on the wire but previously unexported.

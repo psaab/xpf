@@ -95,6 +95,7 @@ pub(super) fn reset_binding_counters(bindings: &mut [BindingStatus]) {
         binding.fabric_redirect_unsendable_drops = 0;
         binding.kernel_rx_dropped = 0;
         binding.kernel_rx_invalid_descs = 0;
+        binding.kernel_rx_ring_full = 0;
         binding.last_error.clear();
         binding.ready = false;
     }

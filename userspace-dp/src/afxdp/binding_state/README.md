@@ -46,6 +46,10 @@ orderings and `#[inline]` attributes moved byte-identical, and the
   counter it deliberately does not carry must be listed in
   `UNPLUMBED_KERNEL_STAT_FIELDS`. Kernel counters are ABSOLUTE per
   socket, so they are published with `store()`, never `fetch_add()`.
+  #15285 carries `rx_ring_full` as `kernel_rx_ring_full` per binding/queue
+  through snapshot, wire, Go status/monitor, and the
+  `xpf_userspace_binding_kernel_rx_ring_full_total` metric; the remaining
+  unplumbed fields are `tx_invalid_descs` and `tx_ring_empty_descs`.
 - **Redirect inbox admission is linearizable via
   `pending_tx_admitted`, not `pending_tx.len()`** — the atomic
   acquire/release pair brackets the MPSC push, and the

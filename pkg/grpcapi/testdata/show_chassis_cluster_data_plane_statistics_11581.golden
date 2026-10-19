@@ -100,6 +100,7 @@ Userspace dataplane helper:
   Mirror drops:              no-frame=0 tx-frame-reserve=0 no-binding=0 queue-full=0 same-worker=0 cross-worker=0
   Kernel RX dropped:         9
   Kernel RX invalid descs:   0
+  Kernel RX ring full:       5
   Direct TX packets:         7300
   Copy-path TX packets:      165
   In-place TX packets:       55

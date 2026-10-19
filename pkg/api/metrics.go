@@ -887,6 +887,8 @@ type xpfCollector struct {
 	bindingTXCompletions                *prometheus.Desc
 	bindingTXCompletionRingAvailable    *prometheus.Desc
 	bindingTXCompletionRingAvailableMax *prometheus.Desc
+	// #15285: per-binding kernel XDP rx_ring_full counter.
+	bindingKernelRXRingFull *prometheus.Desc
 	// #1831 (follow-up to #1766): per-binding V_min fairness-throttle
 	// counters (#941 work item D / #943). Already on the wire in
 	// BindingStatus; these export them to Prometheus. v_min_throttles
@@ -1575,6 +1577,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.bindingTXCompletions
 	ch <- c.bindingTXCompletionRingAvailable
 	ch <- c.bindingTXCompletionRingAvailableMax
+	ch <- c.bindingKernelRXRingFull
 	ch <- c.bindingVMinThrottles
 	ch <- c.bindingVMinThrottleHardCapOverrides
 	ch <- c.bindingFragOverlapDropped

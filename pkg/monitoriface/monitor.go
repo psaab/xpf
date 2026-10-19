@@ -222,6 +222,7 @@ type UserspaceSnapshot struct {
 	TxCompletions                     uint64
 	KernelRXDropped                   uint64
 	KernelRXInvalidDescs              uint64
+	KernelRXRingFull                  uint64
 	DebugPendingFillFrames            uint64
 	DebugSpareFillFrames              uint64
 	DebugFreeTXFrames                 uint64
@@ -649,6 +650,7 @@ func AggregateUserspaceSnapshot(kernelName string, status dpuserspace.ProcessSta
 		snap.TxCompletions += binding.TXCompletions
 		snap.KernelRXDropped += binding.KernelRXDropped
 		snap.KernelRXInvalidDescs += binding.KernelRXInvalidDescs
+		snap.KernelRXRingFull += binding.KernelRXRingFull
 		snap.DebugPendingFillFrames += uint64(binding.DebugPendingFillFrames)
 		snap.DebugSpareFillFrames += uint64(binding.DebugSpareFillFrames)
 		snap.DebugFreeTXFrames += uint64(binding.DebugFreeTXFrames)
@@ -888,30 +890,30 @@ func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string
 	fmt.Fprintf(w, "\n")
 	if snap.Userspace != nil {
 		var (
-			usRxBps, usTxBps, usRxPps, usTxPps                                           uint64
-			usRxBytesDelta, usTxBytesDelta, usRxPktsDelta, usTxPktsDelta                 uint64
-			usDirectDelta, usCopyDelta, usInPlaceDelta                                   uint64
-			usDirectNoFrameDelta, usDirectBuildDelta, usDirectDisallowedDelta            uint64
-			usTxCompletionsDelta, usKernelRXDroppedDelta, usKernelRXInvalidDelta         uint64
-			usPendingFillDelta, usSpareFillDelta, usFreeTXDelta                          uint64
-			usPendingPreparedDelta, usPendingLocalDelta                                  uint64
-			usOutstandingTXDelta, usInFlightRecycleDelta                                 uint64
-			usSessionMissDelta, usNeighborMissDelta, usRouteMissDelta                    uint64
-			usPolicyDeniedDelta, usExceptionDelta, usSlowPathDelta                       uint64
-			usSlowPathLocalDelta, usSlowPathMissingNeighborDelta                         uint64
-			usSlowPathNoRouteDelta, usSlowPathNextTableDelta, usSlowPathBuildDelta       uint64
-			usRxBytesReset, usTxBytesReset, usRxPktsReset, usTxPktsReset                 bool
-			usDirectReset, usCopyReset, usInPlaceReset                                   bool
-			usDirectNoFrameReset, usDirectBuildReset, usDirectDisallowedReset            bool
-			usTxCompletionsReset, usKernelRXDroppedReset, usKernelRXInvalidReset         bool
-			usPendingFillReset, usSpareFillReset, usFreeTXReset                          bool
-			usPendingPreparedReset, usPendingLocalReset                                  bool
-			usOutstandingTXReset, usInFlightRecycleReset                                 bool
-			usSessionMissReset, usNeighborMissReset, usRouteMissReset                    bool
-			usPolicyDeniedReset, usExceptionReset, usSlowPathReset                       bool
-			usSlowPathLocalReset, usSlowPathMissingNeighborReset                         bool
-			usSlowPathNoRouteReset, usSlowPathNextTableReset, usSlowPathBuildReset       bool
-			usRxBytesRateReset, usTxBytesRateReset, usRxPktsRateReset, usTxPktsRateReset bool
+			usRxBps, usTxBps, usRxPps, usTxPps                                                            uint64
+			usRxBytesDelta, usTxBytesDelta, usRxPktsDelta, usTxPktsDelta                                  uint64
+			usDirectDelta, usCopyDelta, usInPlaceDelta                                                    uint64
+			usDirectNoFrameDelta, usDirectBuildDelta, usDirectDisallowedDelta                             uint64
+			usTxCompletionsDelta, usKernelRXDroppedDelta, usKernelRXInvalidDelta, usKernelRXRingFullDelta uint64
+			usPendingFillDelta, usSpareFillDelta, usFreeTXDelta                                           uint64
+			usPendingPreparedDelta, usPendingLocalDelta                                                   uint64
+			usOutstandingTXDelta, usInFlightRecycleDelta                                                  uint64
+			usSessionMissDelta, usNeighborMissDelta, usRouteMissDelta                                     uint64
+			usPolicyDeniedDelta, usExceptionDelta, usSlowPathDelta                                        uint64
+			usSlowPathLocalDelta, usSlowPathMissingNeighborDelta                                          uint64
+			usSlowPathNoRouteDelta, usSlowPathNextTableDelta, usSlowPathBuildDelta                        uint64
+			usRxBytesReset, usTxBytesReset, usRxPktsReset, usTxPktsReset                                  bool
+			usDirectReset, usCopyReset, usInPlaceReset                                                    bool
+			usDirectNoFrameReset, usDirectBuildReset, usDirectDisallowedReset                             bool
+			usTxCompletionsReset, usKernelRXDroppedReset, usKernelRXInvalidReset, usKernelRXRingFullReset bool
+			usPendingFillReset, usSpareFillReset, usFreeTXReset                                           bool
+			usPendingPreparedReset, usPendingLocalReset                                                   bool
+			usOutstandingTXReset, usInFlightRecycleReset                                                  bool
+			usSessionMissReset, usNeighborMissReset, usRouteMissReset                                     bool
+			usPolicyDeniedReset, usExceptionReset, usSlowPathReset                                        bool
+			usSlowPathLocalReset, usSlowPathMissingNeighborReset                                          bool
+			usSlowPathNoRouteReset, usSlowPathNextTableReset, usSlowPathBuildReset                        bool
+			usRxBytesRateReset, usTxBytesRateReset, usRxPktsRateReset, usTxPktsRateReset                  bool
 		)
 		if prev != nil && prev.Userspace != nil {
 			dt := snap.Timestamp.Sub(prev.Timestamp).Seconds()
@@ -950,6 +952,7 @@ func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string
 			usTxCompletionsDelta, usTxCompletionsReset = deltaU64Rebase(snap.Userspace.TxCompletions, &baseline.Userspace.TxCompletions)
 			usKernelRXDroppedDelta, usKernelRXDroppedReset = deltaU64Rebase(snap.Userspace.KernelRXDropped, &baseline.Userspace.KernelRXDropped)
 			usKernelRXInvalidDelta, usKernelRXInvalidReset = deltaU64Rebase(snap.Userspace.KernelRXInvalidDescs, &baseline.Userspace.KernelRXInvalidDescs)
+			usKernelRXRingFullDelta, usKernelRXRingFullReset = deltaU64Rebase(snap.Userspace.KernelRXRingFull, &baseline.Userspace.KernelRXRingFull)
 			usPendingFillDelta, usPendingFillReset = deltaU64Rebase(snap.Userspace.DebugPendingFillFrames, &baseline.Userspace.DebugPendingFillFrames)
 			usSpareFillDelta, usSpareFillReset = deltaU64Rebase(snap.Userspace.DebugSpareFillFrames, &baseline.Userspace.DebugSpareFillFrames)
 			usFreeTXDelta, usFreeTXReset = deltaU64Rebase(snap.Userspace.DebugFreeTXFrames, &baseline.Userspace.DebugFreeTXFrames)
@@ -992,6 +995,7 @@ func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string
 		writeDeltaLine(w, "  TX completions:       %20d          [", snap.Userspace.TxCompletions, usTxCompletionsDelta, usTxCompletionsReset)
 		writeDeltaLine(w, "  Kernel RX dropped:    %20d          [", snap.Userspace.KernelRXDropped, usKernelRXDroppedDelta, usKernelRXDroppedReset)
 		writeDeltaLine(w, "  Kernel RX invalid:    %20d          [", snap.Userspace.KernelRXInvalidDescs, usKernelRXInvalidDelta, usKernelRXInvalidReset)
+		writeDeltaLine(w, "  Kernel RX ring full:  %20d          [", snap.Userspace.KernelRXRingFull, usKernelRXRingFullDelta, usKernelRXRingFullReset)
 		writeDeltaLine(w, "  Direct TX no-frame:   %20d          [", snap.Userspace.DirectTXNoFrameFallbackPackets, usDirectNoFrameDelta, usDirectNoFrameReset)
 		writeDeltaLine(w, "  Direct TX build-none: %20d          [", snap.Userspace.DirectTXBuildFallbackPackets, usDirectBuildDelta, usDirectBuildReset)
 		writeDeltaLine(w, "  Direct TX disallowed: %20d          [", snap.Userspace.DirectTXDisallowedFallbackPackets, usDirectDisallowedDelta, usDirectDisallowedReset)

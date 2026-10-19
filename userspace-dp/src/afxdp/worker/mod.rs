@@ -1651,6 +1651,8 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) table_unavailable_drops: u64,
     pub(crate) kernel_rx_dropped: u64,
     pub(crate) kernel_rx_invalid_descs: u64,
+    /// #15285: kernel XDP `rx_ring_full` per binding/queue.
+    pub(crate) kernel_rx_ring_full: u64,
     pub(crate) tx_packets: u64,
     pub(crate) tx_bytes: u64,
     pub(crate) tx_completions: u64,

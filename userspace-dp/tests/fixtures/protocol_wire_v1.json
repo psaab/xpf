@@ -114,6 +114,7 @@
     "ipv6_ext_header_dropped": 0,
     "kernel_rx_dropped": 0,
     "kernel_rx_invalid_descs": 0,
+    "kernel_rx_ring_full": 0,
     "last_error": "",
     "local_delivery_packets": 0,
     "martian_dropped": 0,

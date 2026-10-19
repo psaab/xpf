@@ -389,6 +389,9 @@ type BindingStatus struct {
 	FabricRedirectUnsendableDrops   uint64 `json:"fabric_redirect_unsendable_drops,omitempty"`
 	KernelRXDropped                 uint64 `json:"kernel_rx_dropped,omitempty"`
 	KernelRXInvalidDescs            uint64 `json:"kernel_rx_invalid_descs,omitempty"`
+	// KernelRXRingFull is the kernel XDP rx_ring_full counter (#15285),
+	// distinct from KernelRXDropped. Wire-additive: older helpers omit it.
+	KernelRXRingFull                uint64 `json:"kernel_rx_ring_full,omitempty"`
 	TXPackets                       uint64 `json:"tx_packets,omitempty"`
 	TXBytes                         uint64 `json:"tx_bytes,omitempty"`
 	TXErrors                        uint64 `json:"tx_errors,omitempty"`

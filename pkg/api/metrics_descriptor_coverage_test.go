@@ -714,6 +714,8 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		// #1831: per-binding V_min fairness-throttle counters (#941/#943)
 		"xpf_userspace_binding_v_min_throttles_total",
 		"xpf_userspace_binding_v_min_throttle_hard_cap_overrides_total",
+		// #15285: per-binding kernel RX ring-full counter.
+		"xpf_userspace_binding_kernel_rx_ring_full_total",
 		// #10131: per-binding fragment-overlap attribution counters.
 		"xpf_userspace_binding_frag_overlap_drops_total",
 		"xpf_userspace_binding_frag_overlap_overflow_drops_total",
