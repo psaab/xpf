@@ -370,7 +370,7 @@ func renderRedistributePolicyMap(m *Manager, po *config.PolicyOptionsConfig, pol
 		return renderQuarantineDenyRouteMap(routeMap) + "!\n"
 	}
 	body := m.renderRouteMapForPolicyWithFallback(
-		po, routeMap, filtered, policyTrailingAction(policy, filtered, nil), "deny")
+		po, routeMap, filtered, policyTrailingAction(policy, filtered, nil), "deny", false)
 	return body + "!\n"
 }
 

@@ -351,6 +351,16 @@ func renderQuarantineDenyRouteMap(name string) string {
 //   - no policy default elsewhere (redistribute / forwarding-table export /
 //     standalone) → deny (fail-closed, matches the OSPF/redistribute Junos
 //     default and FRR's implicit deny)
+//
+// #15157: the plain `permit` tail above is the Junos *import* default
+// and the *explicit-policy* export default, but NOT the Junos
+// *no-policy* export default — the latter permits only routes whose
+// source is BGP itself. When any #14586 origination exists in an
+// instance, the no-default export tails (single and composed, in
+// bgpExportBGPOnlyDefault15157) become a carved pair — permit with
+// `match source-protocol bgp`, then deny — so a redistributed
+// connected/static/... route that no export term selected cannot
+// ride the tail out. Import maps and explicit defaults are untouched.
 func policyTrailingAction(name string, ps *config.PolicyStatement, bgpAcceptDefault map[string]bool) string {
 	switch {
 	case ps.DefaultAction == "accept":
@@ -380,11 +390,11 @@ func (m *Manager) generatePolicyOptions(po *config.PolicyOptionsConfig, bgpAccep
 	if len(bgpAccept) > 0 {
 		bgpAcceptDefault = bgpAccept[0]
 	}
-	return m.generatePolicyOptionsWithRefNodes14380(po, bgpAcceptDefault, nil, nil)
+	return m.generatePolicyOptionsWithRefNodes14380(po, bgpAcceptDefault, nil, nil, nil)
 }
 
 func (m *Manager) generatePolicyOptionsWithQNH11447(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447) string {
-	return m.generatePolicyOptionsWithRefNodes14380(po, bgpAcceptDefault, qnhMetrics, nil)
+	return m.generatePolicyOptionsWithRefNodes14380(po, bgpAcceptDefault, qnhMetrics, nil, nil)
 }
 
 // generatePolicyOptionsForSection is generatePolicyOptions for the
@@ -394,10 +404,18 @@ func (m *Manager) generatePolicyOptionsWithQNH11447(po *config.PolicyOptionsConf
 // its expanded per-source maps defined. Direct callers use
 // generatePolicyOptions and keep the explicit-only set.
 func (m *Manager) generatePolicyOptionsForSection(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string) string {
-	return m.generatePolicyOptionsWithRefNodes14380(po, bgpAcceptDefault, qnhMetrics, referencedNodes)
+	return m.generatePolicyOptionsForSection15157(po, bgpAcceptDefault, qnhMetrics, referencedNodes, nil)
 }
 
-func (m *Manager) generatePolicyOptionsWithRefNodes14380(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string) string {
+// generatePolicyOptionsForSection15157 additionally carries the
+// #15157 carved-export set: policy names whose standalone map is a
+// single-policy BGP export in an originating instance and whose
+// no-default tail must carve to permit-BGP-only.
+func (m *Manager) generatePolicyOptionsForSection15157(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string, carvedExport map[string]bool) string {
+	return m.generatePolicyOptionsWithRefNodes14380(po, bgpAcceptDefault, qnhMetrics, referencedNodes, carvedExport)
+}
+
+func (m *Manager) generatePolicyOptionsWithRefNodes14380(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string, carvedExport map[string]bool) string {
 	var b strings.Builder
 	b.WriteString(qnhMetrics.renderPrefixLists())
 
@@ -576,8 +594,13 @@ func (m *Manager) generatePolicyOptionsWithRefNodes14380(po *config.PolicyOption
 			if bgpAcceptDefault[name] {
 				fallbackAction = "permit"
 			}
-			b.WriteString(m.renderRouteMapForPolicyWithFallback(
-				po, name, ps, policyTrailingAction(name, ps, bgpAcceptDefault), fallbackAction))
+			if carvedExport[name] {
+				b.WriteString(m.renderRouteMapForPolicyExport15157(
+					po, name, ps, policyTrailingAction(name, ps, bgpAcceptDefault), true))
+			} else {
+				b.WriteString(m.renderRouteMapForPolicyWithFallback(
+					po, name, ps, policyTrailingAction(name, ps, bgpAcceptDefault), fallbackAction, false))
+			}
 		}
 		b.WriteString("!\n")
 		// #14380: referencedNodes expands a referenced no-from policy
@@ -1574,10 +1597,19 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 // without leaking its permit default across FRR's name-keyed route-map object
 // (#4481 / #2998 / #2607 / #2642).
 func (m *Manager) renderRouteMapForPolicy(po *config.PolicyOptionsConfig, emitName string, ps *config.PolicyStatement, trailingAction string) string {
-	return m.renderRouteMapForPolicyWithFallback(po, emitName, ps, trailingAction, trailingAction)
+	return m.renderRouteMapForPolicyWithFallback(po, emitName, ps, trailingAction, trailingAction, false)
 }
 
-func (m *Manager) renderRouteMapForPolicyWithFallback(po *config.PolicyOptionsConfig, emitName string, ps *config.PolicyStatement, trailingAction, fallbackAction string) string {
+// renderRouteMapForPolicyExport15157 renders a single-policy BGP export
+// map: when carved is true and the policy has NO explicit default, the
+// #2998 plain permit tail becomes the #15157 carved pair (permit
+// `match source-protocol bgp`, then deny). Explicit defaults keep the
+// plain tail. Callers pass carved only for export-direction maps.
+func (m *Manager) renderRouteMapForPolicyExport15157(po *config.PolicyOptionsConfig, emitName string, ps *config.PolicyStatement, trailingAction string, carved bool) string {
+	return m.renderRouteMapForPolicyWithFallback(po, emitName, ps, trailingAction, trailingAction, carved)
+}
+
+func (m *Manager) renderRouteMapForPolicyWithFallback(po *config.PolicyOptionsConfig, emitName string, ps *config.PolicyStatement, trailingAction, fallbackAction string, carvedBGPOnly bool) string {
 	body, seq := m.renderPolicyTermSequences(po, emitName, emitName, ps, 10)
 	hasNextPolicy := policyHasNextPolicyTerm(ps)
 	if hasNextPolicy {
@@ -1596,6 +1628,27 @@ func (m *Manager) renderRouteMapForPolicyWithFallback(po *config.PolicyOptionsCo
 	// under a per-use-site alias with a different trailing default, never
 	// mutating FRR's name-keyed shared route-map object (#4481). See
 	// policyTrailingAction for the case matrix.
+	//
+	// #15157 carved tail: a no-explicit-default export map whose plain
+	// tail would be the BGP-accept permit instead permits only
+	// BGP-sourced routes (Junos default export: active BGP routes
+	// only) and denies the rest, so a #14586-redistributed route no
+	// export term selected cannot ride the tail out. The next-policy
+	// escape target (plain fallbackAction) moves past both carved
+	// sequences to seq+20; with an explicit default the carved branch
+	// never fires and the layout is byte-identical to before.
+	if carvedBGPOnly && ps.DefaultAction == "" && trailingAction == "permit" {
+		fmt.Fprintf(&b, "route-map %s permit %d\n", frrName(emitName), seq)
+		b.WriteString(" match source-protocol bgp\n")
+		b.WriteString("exit\n")
+		fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(emitName), seq+10)
+		b.WriteString("exit\n")
+		if hasNextPolicy {
+			fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(emitName), fallbackAction, seq+20)
+			b.WriteString("exit\n")
+		}
+		return b.String()
+	}
 	fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(emitName), trailingAction, seq)
 	b.WriteString("exit\n")
 	if hasNextPolicy && (ps.DefaultAction == "accept" || ps.DefaultAction == "reject") {
@@ -1632,7 +1685,15 @@ func (m *Manager) renderRouteMapForPolicyWithFallback(po *config.PolicyOptionsCo
 // aliases call renderComposedRouteMapWithDefault with a fail-closed fallback
 // instead, without changing this existing shared-map behavior.
 func (m *Manager) renderComposedRouteMap(po *config.PolicyOptionsConfig, composedName string, chain []string) string {
-	return m.renderComposedRouteMapWithDefault(po, composedName, chain, "permit")
+	return m.renderComposedRouteMapWithDefault(po, composedName, chain, "permit", false)
+}
+
+// renderComposedRouteMapExport15157 renders a composed EXPORT chain:
+// when carved is true the fall-off tail becomes the #15157 carved pair
+// (permit `match source-protocol bgp`, then deny) instead of the plain
+// #2998 permit. carved must be false for import chains.
+func (m *Manager) renderComposedRouteMapExport15157(po *config.PolicyOptionsConfig, composedName string, chain []string, carved bool) string {
+	return m.renderComposedRouteMapWithDefault(po, composedName, chain, "permit", carved)
 }
 
 // renderComposedRouteMapWithDefault is the common chain renderer. The
@@ -1640,8 +1701,11 @@ func (m *Manager) renderComposedRouteMap(po *config.PolicyOptionsConfig, compose
 // by `next policy` in the last reachable member. Explicit policy defaults
 // terminate ordinary fall-through but can be skipped by a `next policy` term.
 // Production narrowed aliases pass "deny" here without mutating the shared
-// composed map or changing ordinary BGP chains.
-func (m *Manager) renderComposedRouteMapWithDefault(po *config.PolicyOptionsConfig, composedName string, chain []string, fallbackAction string) string {
+// composed map or changing ordinary BGP chains. carvedBGPOnly (#15157)
+// only ever applies when fallbackAction == "permit": the fall-off tail
+// AND the `next policy` escape of the last reachable member both land on
+// the carved pair, so neither path can leak a non-BGP route.
+func (m *Manager) renderComposedRouteMapWithDefault(po *config.PolicyOptionsConfig, composedName string, chain []string, fallbackAction string, carvedBGPOnly bool) string {
 	// #5732 render-side belt: this composed route-map numbers its members'
 	// sequences with ONE running counter, so a chain whose members each pass the
 	// per-policy #5701 bound can still SUM past the FRR ceiling and emit a
@@ -1712,6 +1776,7 @@ func (m *Manager) renderComposedRouteMapWithDefault(po *config.PolicyOptionsConf
 	}
 
 	fallbackSeq := seq
+	carved := carvedBGPOnly && fallbackAction == "permit" && !terminated
 	for i, part := range parts {
 		target := fallbackSeq
 		if i+1 < len(parts) {
@@ -1731,8 +1796,21 @@ func (m *Manager) renderComposedRouteMapWithDefault(po *config.PolicyOptionsConf
 		// default-ACCEPT (#2998). A narrowed alias passes "deny" here so
 		// the dropped authored members cannot silently widen that attached
 		// map; explicit member defaults remain authoritative.
-		fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(composedName), fallbackAction, fallbackSeq)
-		b.WriteString("exit\n")
+		//
+		// #15157 carved tail (export only, carvedBGPOnly): permit only
+		// BGP-sourced routes, deny the rest — the Junos default export.
+		// The `next policy` escape of the last member targets fallbackSeq
+		// too, so both fall-off paths land on the carved permit first.
+		if carved {
+			fmt.Fprintf(&b, "route-map %s permit %d\n", frrName(composedName), fallbackSeq)
+			b.WriteString(" match source-protocol bgp\n")
+			b.WriteString("exit\n")
+			fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(composedName), fallbackSeq+10)
+			b.WriteString("exit\n")
+		} else {
+			fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(composedName), fallbackAction, fallbackSeq)
+			b.WriteString("exit\n")
+		}
 	}
 	return b.String()
 }
