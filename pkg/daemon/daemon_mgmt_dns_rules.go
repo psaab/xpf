@@ -17,18 +17,74 @@ import (
 const (
 	// Management DNS steering runs after the VRF-miss terminator: a lookup
 	// bound to a tenant VRF must fail in that VRF instead of falling through
-	// to the management table. Keep its miss shadow adjacent to the lookup so
+	// to the management table. Keep each miss shadow adjacent to its lookup so
 	// a missing table-999 route cannot fall through to main's WAN default.
-	mgmtDNSRulePriority       = 2500
-	mgmtDNSRuleShadowPriority = mgmtDNSRulePriority + 1
+	// Only DNS traffic is steered (#14971): each protocol gets its own
+	// lookup/shadow pair scoped by FRA_IP_PROTO + destination port 53, so
+	// non-DNS host traffic to a nameserver's IP (SSH, NTP, monitoring, ...)
+	// keeps its main-table route instead of being hijacked into table 999 or
+	// blackholed by the shadow. Legacy unscoped pairs (UDP/TCP priorities
+	// 2500/2501) are reconciled away as invalid (#14971 migration).
+	mgmtDNSUDPRulePriority    = 2500
+	mgmtDNSUDPShadowPriority  = mgmtDNSUDPRulePriority + 1
+	mgmtDNSTCPRulePriority    = 2502
+	mgmtDNSTCPShadowPriority  = mgmtDNSTCPRulePriority + 1
+	mgmtDNSRulePriority       = mgmtDNSUDPRulePriority
+	mgmtDNSRuleShadowPriority = mgmtDNSUDPShadowPriority
 	mgmtDNSRuleInterface      = "lo"
 	mgmtDNSRuleLookupTable    = config.ManagementVRFTableID
+	mgmtDNSPort               = 53
 )
 
 const (
-	_ = uint(mgmtDNSRulePriority - 2001) // after VRF miss terminator at 2000
-	_ = uint(config.PBRRulePriorityBase - mgmtDNSRuleShadowPriority - 1)
+	_ = uint(mgmtDNSUDPRulePriority - 2001) // after VRF miss terminator at 2000
+	_ = uint(config.PBRRulePriorityBase - mgmtDNSTCPShadowPriority - 1)
 )
+
+// mgmtDNSProtocols are the DNS transports, in priority order. A kernel ip
+// rule carries exactly one FRA_IP_PROTO value, so DNS-over-UDP and
+// DNS-over-TCP each need their own lookup/shadow pair (#14971).
+var mgmtDNSProtocols = []struct {
+	proto          int
+	lookupPriority int
+	shadowPriority int
+}{
+	{proto: unix.IPPROTO_UDP, lookupPriority: mgmtDNSUDPRulePriority, shadowPriority: mgmtDNSUDPShadowPriority},
+	{proto: unix.IPPROTO_TCP, lookupPriority: mgmtDNSTCPRulePriority, shadowPriority: mgmtDNSTCPShadowPriority},
+}
+
+type mgmtDNSRuleProto struct {
+	proto          int
+	lookupPriority int
+	shadowPriority int
+}
+
+func mgmtDNSProtoForPriority(priority int) (mgmtDNSRuleProto, bool) {
+	for _, p := range mgmtDNSProtocols {
+		if priority == p.lookupPriority || priority == p.shadowPriority {
+			return mgmtDNSRuleProto(p), true
+		}
+	}
+	return mgmtDNSRuleProto{}, false
+}
+
+func mgmtDNSIsLookupPriority(priority int) bool {
+	for _, p := range mgmtDNSProtocols {
+		if priority == p.lookupPriority {
+			return true
+		}
+	}
+	return false
+}
+
+func mgmtDNSIsShadowPriority(priority int) bool {
+	for _, p := range mgmtDNSProtocols {
+		if priority == p.shadowPriority {
+			return true
+		}
+	}
+	return false
+}
 
 type mgmtDNSRuleOps interface {
 	RuleAdd(*netlink.Rule) error
@@ -147,11 +203,15 @@ func decodeMgmtDNSRuleMessages(family int, msgs [][]byte) ([]netlink.Rule, error
 				}
 				rule.Goto = int(value)
 			case nl.FRA_IP_PROTO:
-				value, err := mgmtDNSRuleUint32(attr.Value, "IP protocol")
-				if err != nil {
-					return nil, err
+				// Kernel emits FRA_IP_PROTO as u8 (1 byte); the previous
+				// u32 decode only ever saw our synthetic 4-byte fixtures.
+				// Accept 1..4 bytes, fail closed on empty/oversize (#14971).
+				if len(attr.Value) < 1 || len(attr.Value) > 4 {
+					return nil, fmt.Errorf("invalid policy-rule IP protocol attribute length %d in family %d", len(attr.Value), family)
 				}
-				rule.IPProto = int(value)
+				var protoBuf [4]byte
+				copy(protoBuf[:], attr.Value)
+				rule.IPProto = int(nl.NativeEndian().Uint32(protoBuf[:]))
 			case nl.FRA_DPORT_RANGE:
 				if len(attr.Value) < 4 {
 					return nil, fmt.Errorf("short policy-rule destination-port range in family %d", family)
@@ -207,6 +267,7 @@ func mgmtDNSRuleIfName(value []byte) string {
 type mgmtDNSRuleKey struct {
 	family int
 	dst    string
+	proto  int
 }
 
 type mgmtDNSRulePair struct {
@@ -216,10 +277,12 @@ type mgmtDNSRulePair struct {
 }
 
 // mgmtDNSRulePairs builds host-only lookup/terminal pairs for nameservers on
-// management-VRF DHCP leases. Locally generated default-context traffic has
-// iif=lo; the exact destination keeps this away from unrelated host traffic.
-// Tenant-VRF local traffic reaches the existing l3mdev miss terminator at
-// priority 2000 before these rules can match.
+// management-VRF DHCP leases, one pair per DNS transport (UDP, TCP).
+// Locally generated default-context traffic has iif=lo; the rules are
+// additionally scoped by protocol and destination port 53 (#14971) so only
+// DNS traffic is steered — non-DNS host traffic to the same IP keeps its
+// main-table route. Tenant-VRF local traffic reaches the existing l3mdev
+// miss terminator at priority 2000 before these rules can match.
 func mgmtDNSRulePairs(leases []*dhcp.Lease, mgmtSet map[string]bool) []mgmtDNSRulePair {
 	seen := make(map[mgmtDNSRuleKey]struct{})
 	pairs := make([]mgmtDNSRulePair, 0)
@@ -236,36 +299,43 @@ func mgmtDNSRulePairs(leases []*dhcp.Lease, mgmtSet map[string]bool) []mgmtDNSRu
 				family, bits = unix.AF_INET, 32
 			}
 			prefix := netip.PrefixFrom(ip, bits)
-			key := mgmtDNSRuleKey{family: family, dst: prefix.String()}
-			if _, duplicate := seen[key]; duplicate {
-				continue
-			}
-			seen[key] = struct{}{}
-
 			_, dst, err := net.ParseCIDR(prefix.String())
 			if err != nil {
 				continue // PrefixFrom above produces a canonical, valid CIDR.
 			}
-			lookup := netlink.NewRule()
-			lookup.Family = family
-			lookup.Priority = mgmtDNSRulePriority
-			lookup.Table = mgmtDNSRuleLookupTable
-			lookup.Type = unix.RTN_UNICAST
-			lookup.IifName = mgmtDNSRuleInterface
-			lookup.Dst = dst
+			for _, mp := range mgmtDNSProtocols {
+				key := mgmtDNSRuleKey{family: family, dst: prefix.String(), proto: mp.proto}
+				if _, duplicate := seen[key]; duplicate {
+					continue
+				}
+				seen[key] = struct{}{}
+				lookup := netlink.NewRule()
+				lookup.Family = family
+				lookup.Priority = mp.lookupPriority
+				lookup.Table = mgmtDNSRuleLookupTable
+				lookup.Type = unix.RTN_UNICAST
+				lookup.IifName = mgmtDNSRuleInterface
+				lookup.Dst = dst
+				lookup.IPProto = mp.proto
+				lookup.Dport = netlink.NewRulePortRange(mgmtDNSPort, mgmtDNSPort)
 
-			shadow := *lookup
-			shadow.Priority = mgmtDNSRuleShadowPriority
-			shadow.Table = unix.RT_TABLE_UNSPEC
-			shadow.Type = nl.FR_ACT_UNREACHABLE
-			pairs = append(pairs, mgmtDNSRulePair{key: key, lookup: *lookup, shadow: shadow})
+				shadow := *lookup
+				shadow.Dport = netlink.NewRulePortRange(mgmtDNSPort, mgmtDNSPort)
+				shadow.Priority = mp.shadowPriority
+				shadow.Table = unix.RT_TABLE_UNSPEC
+				shadow.Type = nl.FR_ACT_UNREACHABLE
+				pairs = append(pairs, mgmtDNSRulePair{key: key, lookup: *lookup, shadow: shadow})
+			}
 		}
 	}
 	sort.Slice(pairs, func(i, j int) bool {
 		if pairs[i].key.family != pairs[j].key.family {
 			return pairs[i].key.family < pairs[j].key.family
 		}
-		return pairs[i].key.dst < pairs[j].key.dst
+		if pairs[i].key.dst != pairs[j].key.dst {
+			return pairs[i].key.dst < pairs[j].key.dst
+		}
+		return pairs[i].key.proto < pairs[j].key.proto
 	})
 	return pairs
 }
@@ -319,8 +389,10 @@ func reconcileMgmtDNSRules(ops mgmtDNSRuleOps, leases []*dhcp.Lease, mgmtSet map
 		failedShadow := make(map[mgmtDNSRuleKey]bool)
 		blocked := make(map[mgmtDNSRuleKey]bool)
 		// Reserved-priority rules with the right host selector but the wrong
-		// action/table can preempt the intended pair. Remove them exactly before
-		// installing anything; if removal fails, suppress resolver publication.
+		// action/table/proto/port can preempt the intended pair. Remove them
+		// exactly before installing anything; if removal fails, suppress
+		// resolver publication for every protocol of that destination. A
+		// legacy unscoped invalid (proto 0) blocks both protocols (#14971).
 		for _, key := range sortedMgmtDNSRuleKeys(invalids) {
 			for _, rule := range invalids[key] {
 				if err := deleteExactMgmtDNSRule(ops, rule); err != nil {
@@ -331,9 +403,14 @@ func reconcileMgmtDNSRules(ops mgmtDNSRuleOps, leases []*dhcp.Lease, mgmtSet map
 		}
 		for key := range blocked {
 			failedShadow[key] = true
-			for _, lookup := range lookups[key] {
-				if err := deleteMgmtDNSRule(ops, lookup, mgmtDNSRuleLookupTable); err != nil {
-					errs = append(errs, fmt.Errorf("remove management DNS lookup behind invalid rule to %s: %w", key.dst, err))
+			for _, mp := range mgmtDNSProtocols {
+				protoKey := mgmtDNSRuleKey{family: key.family, dst: key.dst, proto: mp.proto}
+				failedShadow[protoKey] = true
+				blocked[protoKey] = true
+				for _, lookup := range lookups[protoKey] {
+					if err := deleteMgmtDNSRule(ops, lookup, mgmtDNSRuleLookupTable); err != nil {
+						errs = append(errs, fmt.Errorf("remove management DNS lookup behind invalid rule to %s: %w", key.dst, err))
+					}
 				}
 			}
 		}
@@ -389,9 +466,10 @@ func reconcileMgmtDNSRules(ops mgmtDNSRuleOps, leases []*dhcp.Lease, mgmtSet map
 	return errors.Join(errs...)
 }
 
-// mgmtDNSRuleReadiness returns only nameservers whose lease-scoped lookup and
-// unreachable shadow are both installed. The resolver merge uses this as a
-// fail-closed publication gate if either netlink rule could not be reconciled.
+// mgmtDNSRuleReadiness returns only nameservers whose UDP and TCP
+// lookup/unreachable-shadow pairs are all installed exactly once (#14971).
+// The resolver merge uses this as a fail-closed publication gate if any
+// netlink rule could not be reconciled or a legacy/wrong-proto rule remains.
 func mgmtDNSRuleReadiness(ops mgmtDNSRuleOps) (map[string]bool, error) {
 	lookups := make(map[mgmtDNSRuleKey]int)
 	shadows := make(map[mgmtDNSRuleKey]int)
@@ -415,17 +493,38 @@ func mgmtDNSRuleReadiness(ops mgmtDNSRuleOps) (map[string]bool, error) {
 				shadows[key]++
 			case "invalid":
 				invalids[key] = true
+				// A legacy/wrong-proto invalid carries proto 0; poison every
+				// protocol key for the same destination.
+				for _, mp := range mgmtDNSProtocols {
+					invalids[mgmtDNSRuleKey{family: key.family, dst: key.dst, proto: mp.proto}] = true
+				}
 			}
 		}
 	}
+	type dstID struct {
+		family int
+		dst    string
+	}
+	candidates := make(map[dstID]bool)
+	for key := range lookups {
+		candidates[dstID{family: key.family, dst: key.dst}] = true
+	}
 	ready := make(map[string]bool)
-	for key, count := range lookups {
-		if count != 1 || shadows[key] != 1 || invalids[key] {
+	for id := range candidates {
+		okAll := true
+		for _, mp := range mgmtDNSProtocols {
+			key := mgmtDNSRuleKey{family: id.family, dst: id.dst, proto: mp.proto}
+			if lookups[key] != 1 || shadows[key] != 1 || invalids[key] {
+				okAll = false
+				break
+			}
+		}
+		if !okAll {
 			continue
 		}
-		prefix, err := netip.ParsePrefix(key.dst)
+		prefix, err := netip.ParsePrefix(id.dst)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("parse installed management DNS rule destination %q: %w", key.dst, err))
+			errs = append(errs, fmt.Errorf("parse installed management DNS rule destination %q: %w", id.dst, err))
 			continue
 		}
 		ready[prefix.Addr().String()] = true
@@ -453,29 +552,43 @@ func managedMgmtDNSRule(rule netlink.Rule) (mgmtDNSRuleKey, string, bool) {
 	default:
 		return mgmtDNSRuleKey{}, "", false
 	}
-	key := mgmtDNSRuleKey{family: rule.Family, dst: rule.Dst.String()}
-	switch rule.Priority {
-	case mgmtDNSRulePriority:
-		if rule.Table == mgmtDNSRuleLookupTable && rule.Type == unix.RTN_UNICAST {
-			return key, "lookup", true
+	if mgmtDNSIsLookupPriority(rule.Priority) || mgmtDNSIsShadowPriority(rule.Priority) {
+		expected, known := mgmtDNSProtoForPriority(rule.Priority)
+		if !known || rule.IPProto != expected.proto || !mgmtDNSDportIsDNS(rule) {
+			// Legacy pre-#14971 unscoped rule (no proto/port) or a
+			// wrong-proto/port rule at a reserved priority: invalid, so
+			// reconcile removes it exactly and blocks resolver publication.
+			// Key stays proto-less; readiness invalidates via priority.
+			return mgmtDNSRuleKey{family: rule.Family, dst: rule.Dst.String()}, "invalid", true
 		}
-		return key, "invalid", true
-	case mgmtDNSRuleShadowPriority:
+		key := mgmtDNSRuleKey{family: rule.Family, dst: rule.Dst.String(), proto: rule.IPProto}
+		if mgmtDNSIsLookupPriority(rule.Priority) {
+			if rule.Table == mgmtDNSRuleLookupTable && rule.Type == unix.RTN_UNICAST {
+				return key, "lookup", true
+			}
+			return key, "invalid", true
+		}
 		if rule.Table == unix.RT_TABLE_UNSPEC && rule.Type == nl.FR_ACT_UNREACHABLE {
 			return key, "shadow", true
 		}
 		return key, "invalid", true
-	default:
-		return mgmtDNSRuleKey{}, "", false
 	}
+	return mgmtDNSRuleKey{}, "", false
 }
 
+func mgmtDNSDportIsDNS(rule netlink.Rule) bool {
+	return rule.Dport != nil && rule.Dport.Start == mgmtDNSPort && rule.Dport.End == mgmtDNSPort
+}
+
+// mgmtDNSRuleSelectorsExact reports whether every selector other than the
+// #14971 protocol/destination-port pair (validated by the caller against the
+// priority's protocol) is at its unset default, so a rule carrying any extra
+// selector (source, mark, sport, uid, ...) is not mistaken for ours.
 func mgmtDNSRuleSelectorsExact(rule netlink.Rule) bool {
 	return !rule.Invert && rule.Src == nil && rule.Mark == 0 && rule.Mask == nil &&
 		rule.Tos == 0 && rule.TunID == 0 && rule.Goto == -1 && rule.Flow == -1 &&
 		rule.OifName == "" && rule.SuppressIfgroup == -1 && rule.SuppressPrefixlen == -1 &&
-		rule.Dport == nil && rule.Sport == nil && rule.IPProto == 0 &&
-		rule.UIDRange == nil && rule.Protocol == 0
+		rule.Sport == nil && rule.UIDRange == nil && rule.Protocol == 0
 }
 
 func sortedMgmtDNSRuleKeys(rules map[mgmtDNSRuleKey][]netlink.Rule) []mgmtDNSRuleKey {
@@ -487,7 +600,10 @@ func sortedMgmtDNSRuleKeys(rules map[mgmtDNSRuleKey][]netlink.Rule) []mgmtDNSRul
 		if keys[i].family != keys[j].family {
 			return keys[i].family < keys[j].family
 		}
-		return keys[i].dst < keys[j].dst
+		if keys[i].dst != keys[j].dst {
+			return keys[i].dst < keys[j].dst
+		}
+		return keys[i].proto < keys[j].proto
 	})
 	return keys
 }

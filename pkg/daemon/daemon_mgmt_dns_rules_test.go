@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"maps"
@@ -62,8 +63,12 @@ func mgmtDNSRuleTestKey(rule netlink.Rule) string {
 	if rule.Dst != nil {
 		dst = rule.Dst.String()
 	}
-	return fmt.Sprintf("%d/%d/%d/%d/%s/%s", rule.Family, rule.Priority,
-		rule.Table, rule.Type, rule.IifName, dst)
+	dport := 0
+	if rule.Dport != nil {
+		dport = int(rule.Dport.Start)
+	}
+	return fmt.Sprintf("%d/%d/%d/%d/%s/%s/%d/%d", rule.Family, rule.Priority,
+		rule.Table, rule.Type, rule.IifName, dst, rule.IPProto, dport)
 }
 
 func TestMgmtDNSRulesAreLeaseScopedAndDeduplicated11385(t *testing.T) {
@@ -85,15 +90,19 @@ func TestMgmtDNSRulesAreLeaseScopedAndDeduplicated11385(t *testing.T) {
 	if err := reconcileMgmtDNSRules(ops, leases, map[string]bool{"fxp0": true, "fxp1": true}); err != nil {
 		t.Fatalf("reconcile management DNS rules: %v", err)
 	}
-	if len(ops.rules) != 4 {
-		t.Fatalf("installed %d rules, want one lookup/shadow pair for each of the two management nameservers: %+v",
+	if len(ops.rules) != 8 {
+		t.Fatalf("installed %d rules, want UDP+TCP lookup/shadow pairs for each of the two management nameservers: %+v",
 			len(ops.rules), ops.rules)
 	}
 	want := map[string]bool{
-		"2/2500/999/1/lo/192.0.2.53/32":     true,
-		"2/2501/0/7/lo/192.0.2.53/32":       true,
-		"10/2500/999/1/lo/2001:db8::53/128": true,
-		"10/2501/0/7/lo/2001:db8::53/128":   true,
+		"2/2500/999/1/lo/192.0.2.53/32/17/53":     true,
+		"2/2501/0/7/lo/192.0.2.53/32/17/53":       true,
+		"2/2502/999/1/lo/192.0.2.53/32/6/53":      true,
+		"2/2503/0/7/lo/192.0.2.53/32/6/53":        true,
+		"10/2500/999/1/lo/2001:db8::53/128/17/53": true,
+		"10/2501/0/7/lo/2001:db8::53/128/17/53":   true,
+		"10/2502/999/1/lo/2001:db8::53/128/6/53":  true,
+		"10/2503/0/7/lo/2001:db8::53/128/6/53":    true,
 	}
 	got := make(map[string]bool, len(ops.rules))
 	for _, rule := range ops.rules {
@@ -212,6 +221,11 @@ func TestMgmtDNSRuleDumpDecodesActionAndExtendedTable11385(t *testing.T) {
 		if table > 255 {
 			raw = append(raw, nl.NewRtAttr(unix.RTA_TABLE, nl.Uint32Attr(uint32(table))).Serialize()...)
 		}
+		raw = append(raw, nl.NewRtAttr(nl.FRA_IP_PROTO, nl.Uint32Attr(uint32(unix.IPPROTO_UDP))).Serialize()...)
+		var portBuf [4]byte
+		binary.NativeEndian.PutUint16(portBuf[0:2], 53)
+		binary.NativeEndian.PutUint16(portBuf[2:4], 53)
+		raw = append(raw, nl.NewRtAttr(nl.FRA_DPORT_RANGE, portBuf[:]).Serialize()...)
 		return raw
 	}
 	rules, err := decodeMgmtDNSRuleMessages(unix.AF_INET, [][]byte{
@@ -290,8 +304,8 @@ func TestMgmtDNSRulesFollowLeaseRenewalAndWithdrawal11385(t *testing.T) {
 	if err := reconcileMgmtDNSRules(ops, []*dhcp.Lease{second}, mgmt); err != nil {
 		t.Fatalf("renew lease with changed nameserver: %v", err)
 	}
-	if got := len(ops.rules); got != 3 {
-		t.Fatalf("after renewal have %d rules, want second nameserver pair plus untouched foreign rule: %+v", got, ops.rules)
+	if got := len(ops.rules); got != 5 {
+		t.Fatalf("after renewal have %d rules, want second nameserver UDP+TCP pairs plus untouched foreign rule: %+v", got, ops.rules)
 	}
 	for _, rule := range ops.rules {
 		if rule.Table == mgmtVRFTableID && rule.Dst != nil && rule.Dst.String() == "192.0.2.53/32" {
@@ -309,6 +323,101 @@ func TestMgmtDNSRulesFollowLeaseRenewalAndWithdrawal11385(t *testing.T) {
 	}
 	if len(ops.rules) != 1 || ops.rules[0].Table != 300 {
 		t.Fatalf("after final withdrawal rules = %+v, want only unrelated rule", ops.rules)
+	}
+}
+
+// TestMgmtDNSRulesScopedToDNSOnly14971 is the #14971 (D31-03) regression:
+// every installed rule must carry IPProto in {UDP,TCP} and Dport 53-53, a
+// legacy unscoped pair must be migrated away, readiness must require all
+// four rules, and a non-DNS packet to the nameserver must not be steered.
+func TestMgmtDNSRulesScopedToDNSOnly14971(t *testing.T) {
+	server := netip.MustParseAddr("192.0.2.53")
+	lease := &dhcp.Lease{Interface: "fxp0", Family: dhcp.AFInet, DNS: []netip.Addr{server}}
+	mgmt := map[string]bool{"fxp0": true}
+
+	// Fresh install: exactly UDP+TCP lookup/shadow, all scoped.
+	ops := &fakeMgmtDNSRuleOps{}
+	if err := reconcileMgmtDNSRules(ops, []*dhcp.Lease{lease}, mgmt); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(ops.rules) != 4 {
+		t.Fatalf("installed %d rules, want 4 scoped rules: %+v", len(ops.rules), ops.rules)
+	}
+	for _, rule := range ops.rules {
+		if rule.IPProto != unix.IPPROTO_UDP && rule.IPProto != unix.IPPROTO_TCP {
+			t.Fatalf("rule not protocol-scoped (proto=%d): %+v", rule.IPProto, rule)
+		}
+		if rule.Dport == nil || rule.Dport.Start != 53 || rule.Dport.End != 53 {
+			t.Fatalf("rule not port-scoped to DNS 53: %+v", rule)
+		}
+		if rule.Sport != nil {
+			t.Fatalf("rule must not constrain source port: %+v", rule)
+		}
+	}
+	ready, err := mgmtDNSRuleReadiness(ops)
+	if err != nil || !ready[server.String()] {
+		t.Fatalf("ready=%v err=%v, want nameserver ready with all four rules", ready, err)
+	}
+
+	// Legacy migration: seed pre-#14971 unscoped pair at 2500/2501, reconcile
+	// must delete them and install scoped pairs; readiness holds after.
+	legacyLookup := netlink.NewRule()
+	legacyLookup.Family, legacyLookup.Priority, legacyLookup.Table = unix.AF_INET, mgmtDNSUDPRulePriority, mgmtDNSRuleLookupTable
+	legacyLookup.Type, legacyLookup.IifName = unix.RTN_UNICAST, mgmtDNSRuleInterface
+	_, legacyDst, _ := net.ParseCIDR("192.0.2.53/32")
+	legacyLookup.Dst = legacyDst
+	legacyShadow := *legacyLookup
+	legacyShadow.Priority, legacyShadow.Table, legacyShadow.Type = mgmtDNSUDPShadowPriority, unix.RT_TABLE_UNSPEC, nl.FR_ACT_UNREACHABLE
+	legacyOps := &fakeMgmtDNSRuleOps{rules: []netlink.Rule{*legacyLookup, legacyShadow}}
+	if ready, _ := mgmtDNSRuleReadiness(legacyOps); ready[server.String()] {
+		t.Fatal("legacy unscoped pair must not make nameserver ready")
+	}
+	if err := reconcileMgmtDNSRules(legacyOps, []*dhcp.Lease{lease}, mgmt); err != nil {
+		t.Fatalf("migrate legacy rules: %v", err)
+	}
+	for _, rule := range legacyOps.rules {
+		if rule.IPProto == 0 || rule.Dport == nil {
+			t.Fatalf("legacy unscoped rule survived migration: %+v", rule)
+		}
+	}
+	if len(legacyOps.rules) != 4 {
+		t.Fatalf("after migration %d rules, want 4 scoped: %+v", len(legacyOps.rules), legacyOps.rules)
+	}
+	if ready, _ := mgmtDNSRuleReadiness(legacyOps); !ready[server.String()] {
+		t.Fatalf("nameserver not ready after migration: %+v", legacyOps.rules)
+	}
+
+	// Partial pair (one transport only) must not be ready. Pairs are sorted
+	// by proto (TCP=6 before UDP=17), so find the UDP pair explicitly.
+	pairs := mgmtDNSRulePairs([]*dhcp.Lease{lease}, mgmt)
+	if len(pairs) != 2 {
+		t.Fatalf("pairs=%d want 2 (UDP+TCP)", len(pairs))
+	}
+	var udpPair mgmtDNSRulePair
+	foundUDP := false
+	for _, p := range pairs {
+		if p.key.proto == unix.IPPROTO_UDP {
+			udpPair, foundUDP = p, true
+		}
+	}
+	if !foundUDP {
+		t.Fatal("no UDP pair built")
+	}
+	partial := &fakeMgmtDNSRuleOps{rules: []netlink.Rule{udpPair.lookup, udpPair.shadow}}
+	if ready, _ := mgmtDNSRuleReadiness(partial); ready[server.String()] {
+		t.Fatal("UDP-only pair must not make nameserver ready (TCP DNS would fall through)")
+	}
+	// Wrong-proto rule (TCP proto at UDP priority) must be classified invalid.
+	bad := udpPair.lookup
+	bad.IPProto = unix.IPPROTO_TCP
+	if _, kind, ok := managedMgmtDNSRule(bad); !ok || kind != "invalid" {
+		t.Fatalf("wrong-proto rule kind=%q ok=%v want invalid", kind, ok)
+	}
+	// Non-DNS dport at UDP priority must be invalid.
+	badPort := udpPair.lookup
+	badPort.Dport = netlink.NewRulePortRange(443, 443)
+	if _, kind, ok := managedMgmtDNSRule(badPort); !ok || kind != "invalid" {
+		t.Fatalf("wrong-port rule kind=%q ok=%v want invalid", kind, ok)
 	}
 }
 
@@ -365,12 +474,32 @@ func TestMgmtDNSRulesSteerOnlyDefaultContextHostLookups11385(t *testing.T) {
 	if err := reconcileMgmtDNSRules(netlinkMgmtDNSRuleOps{}, []*dhcp.Lease{lease}, map[string]bool{"fxp0": true}); err != nil {
 		t.Fatalf("install live management DNS rules: %v", err)
 	}
+	// #14971: installed live rules must be DNS-scoped (proto + dport 53).
+	liveRules, err := netlinkMgmtDNSRuleOps{}.RuleList(unix.AF_INET)
+	if err != nil {
+		t.Fatalf("list live rules: %v", err)
+	}
+	scoped := 0
+	for _, rule := range liveRules {
+		if _, kind, ok := managedMgmtDNSRule(rule); ok && (kind == "lookup" || kind == "shadow") {
+			scoped++
+			if (rule.IPProto != unix.IPPROTO_UDP && rule.IPProto != unix.IPPROTO_TCP) || rule.Dport == nil || rule.Dport.Start != 53 || rule.Dport.End != 53 {
+				t.Fatalf("live rule not DNS-scoped: %+v", rule)
+			}
+		}
+	}
+	if scoped != 4 {
+		t.Fatalf("live scoped rules=%d want 4 (UDP+TCP pairs)", scoped)
+	}
+	// Plain RouteGet carries no L4 selector, so pre-#14971 it matched the
+	// unscoped lookup; post-fix it must stay on the main WAN route — that is
+	// the non-DNS control (any non-DNS traffic to the nameserver).
 	routed, err := netlink.RouteGet(server)
 	if err != nil || len(routed) == 0 {
-		t.Fatalf("management DNS route lookup: routes=%v err=%v", routed, err)
+		t.Fatalf("non-DNS route lookup: routes=%v err=%v", routed, err)
 	}
-	if routed[0].LinkIndex != fxp.Attrs().Index || routed[0].Table != mgmtVRFTableID {
-		t.Fatalf("host DNS lookup route = %+v, want fxp0 via table %d (not the main WAN default)", routed[0], mgmtVRFTableID)
+	if routed[0].LinkIndex != wan.Attrs().Index {
+		t.Fatalf("non-DNS host traffic was steered into mgmt VRF: %+v, want WAN link %d", routed[0], wan.Attrs().Index)
 	}
 	if tenant, tenantErr := netlink.RouteGetWithOptions(server, &netlink.RouteGetOptions{VrfName: "vrf-tenant"}); tenantErr == nil {
 		t.Fatalf("VRF-bound local lookup was redirected through management DNS rules: %+v", tenant)
@@ -382,9 +511,11 @@ func TestMgmtDNSRulesSteerOnlyDefaultContextHostLookups11385(t *testing.T) {
 	if err := netlink.LinkSetDown(fxp); err != nil {
 		t.Fatalf("withdraw management connected route: %v", err)
 	}
+	// Non-DNS traffic must still reach main/WAN even when mgmt link is down
+	// (pre-fix the unscoped shadow blackholed it).
 	miss, missErr := netlink.RouteGet(server)
-	if missErr == nil && len(miss) > 0 && miss[0].LinkIndex == wan.Attrs().Index {
-		t.Fatalf("table-999 miss escaped to the main WAN default despite its unreachable shadow: %+v", miss[0])
+	if missErr != nil || len(miss) == 0 || miss[0].LinkIndex != wan.Attrs().Index {
+		t.Fatalf("non-DNS traffic blackholed by DNS shadow: routes=%v err=%v", miss, missErr)
 	}
 	if err := netlink.LinkSetUp(fxp); err != nil {
 		t.Fatalf("restore management interface: %v", err)
