@@ -1858,3 +1858,16 @@ form from the same resolved sources (`redistributeEntries`) the other routers us
   allows 0. `renderBGPAllowASIn` therefore emits nothing for `loops 1`
   and `allowas-in N-1` for N>=2 (`loops 10` -> `allowas-in 9`); copying
   N verbatim accepted one extra local-AS occurrence per peer.
+- **Junos `remove-private` renders as FRR `remove-private-AS all`
+  (#15202).** Junos strips the private-AS run at the head
+  (most-recently-prepended end) of the advertised AS path even when a
+  public AS follows it; the bare FRR `remove-private-AS` strips only
+  an all-private path, so a mixed private-then-public path leaked the
+  private ASNs upstream (and upstreams filtering private ASNs dropped
+  the route). Residual differences, not expressible in FRR's CLI:
+  FRR `all` also strips a private run that is not at the head of the
+  path, while Junos stops at the first non-private (or peer) AS; and
+  Junos withholds stripping when the path contains the eBGP peer's
+  own AS. `TestRenderBGPRemovePrivateAll15202` pins both address
+  families, the iBGP omission belt, the non-flag control, and the
+  local `vtysh -C` grammar acceptance of the `all` spelling.

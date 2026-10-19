@@ -34,6 +34,15 @@ func renderBGPRouteReflectorClient14585(b *strings.Builder, routerAS uint32, n *
 	fmt.Fprintf(b, "  neighbor %s route-reflector-client\n", n.Address)
 }
 
+// #15202: Junos `remove-private` strips the private-AS run at the head
+// (most-recently-prepended end) of the advertised AS path even when a
+// public AS follows it. The bare FRR `remove-private-AS` strips only an
+// all-private path, leaking the private ASNs of a mixed
+// private-then-public path upstream; `remove-private-AS all` is the
+// Junos-equivalent spelling. Residual difference: FRR `all` also
+// strips a private run that is not at the head of the path, and Junos
+// withholds stripping when the path contains the eBGP peer's own AS —
+// neither is expressible in FRR's CLI.
 func renderBGPRemovePrivate14585(b *strings.Builder, routerAS uint32, n *config.BGPNeighbor) {
 	if !n.RemovePrivateAS {
 		return
@@ -43,7 +52,7 @@ func renderBGPRemovePrivate14585(b *strings.Builder, routerAS uint32, n *config.
 			"neighbor", sanitizeFRRValue(n.Address), "peer_as", n.PeerAS, "router_as", routerAS)
 		return
 	}
-	fmt.Fprintf(b, "  neighbor %s remove-private-AS\n", n.Address)
+	fmt.Fprintf(b, "  neighbor %s remove-private-AS all\n", n.Address)
 }
 
 // isBackboneArea14585 reports whether id spells area 0 in any form

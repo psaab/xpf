@@ -3391,8 +3391,8 @@ func TestGenerateProtocols_BGPRemovePrivateAS(t *testing.T) {
 		},
 	}
 	got := m.generateProtocols(nil, nil, bgp, nil, nil, "", 1, nil, nil)
-	if !strings.Contains(got, "neighbor 10.0.0.2 remove-private-AS\n") {
-		t.Errorf("missing remove-private-AS in:\n%s", got)
+	if !strings.Contains(got, "neighbor 10.0.0.2 remove-private-AS all\n") {
+		t.Errorf("missing remove-private-AS all in:\n%s", got)
 	}
 }
 

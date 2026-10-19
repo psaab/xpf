@@ -38,7 +38,7 @@ func TestRenderCrossField14585OmitsRefusedLines(t *testing.T) {
 	for _, good := range []string{
 		"neighbor 192.0.2.4 route-reflector-client",
 		"neighbor 192.0.2.5 local-as 65009",
-		"neighbor 192.0.2.5 remove-private-AS",
+		"neighbor 192.0.2.5 remove-private-AS all",
 	} {
 		if !strings.Contains(got, good) {
 			t.Errorf("renderer dropped valid %q:\n%s", good, got)
