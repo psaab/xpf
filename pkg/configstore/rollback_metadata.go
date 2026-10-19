@@ -1,6 +1,7 @@
 package configstore
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // rollbackMetadataFile stores the non-config attributes of the canonical text
@@ -63,6 +66,21 @@ func (s *Store) rollbackMetadataPath() string {
 func rollbackSlotHash(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// rollbackSlotBytesParseAsConfig reports whether slot bytes would be
+// admitted by loadRollbackHistory as a live config (non-empty, not the
+// tombstone marker, parses to a non-empty tree). Used by the #15023
+// rebind to decide whether a tombstone's on-disk bytes are a resurrectable
+// prior generation (must be replaced by the marker) or already refuse at
+// load (identity can be kept as-is).
+func rollbackSlotBytesParseAsConfig(data []byte) bool {
+	if len(bytes.TrimSpace(data)) == 0 ||
+		bytes.HasPrefix(data, []byte(rollbackTombstoneMarkerPrefix)) {
+		return false
+	}
+	tree, errs := config.NewParser(string(data)).Parse()
+	return len(errs) == 0 && tree != nil && len(tree.Children) > 0
 }
 
 type rollbackSlotIdentity struct {
@@ -118,8 +136,17 @@ func (s *Store) writeRollbackMetadataGeneration(generation uint64, entries []rol
 // successful active write; otherwise the stale active hash/inode makes the
 // next loadRollbackHistory tombstone every slot (#10723 generation check).
 // The generation is bumped so the rebound sidecar is a new generation, not a
-// mutation of the old one. Slot files are NOT rewritten — their bytes and
-// identities are re-read from disk, so per-slot metadata stays exact.
+// mutation of the old one.
+//
+// Slot identity is derived from the IN-MEMORY history, never from whatever
+// bytes happen to be on disk (#15023): for a live entry the expected bytes
+// are entry.Config.Format(); the slot file is rewritten durably whenever
+// its on-disk bytes diverge (including an oversized/unreadable read), and
+// only the identity captured after that write is recorded. For a tombstone
+// the marker is always (re)written so stale pre-tombstone bytes cannot be
+// blessed. A slot that cannot be made to match its in-memory entry is
+// recorded with an invalid (zero) identity so the next load tombstones it,
+// and the rebind stays degraded instead of clearing the flag.
 // Best-effort degrade-not-fail like saveRollbackFiles: a failure sets
 // rollbackPersistDegraded and journals, never fails the promotion.
 // Caller must hold s.mu (write lock) and have just durably written active.
@@ -141,37 +168,64 @@ func (s *Store) rebindRollbackMetadataLocked() {
 		var identity rollbackSlotIdentity
 		var identityOK bool
 		if entry.Config == nil {
+			// #15023: always record the marker for a tombstone — never
+			// hash whatever bytes are on disk, which would bless a
+			// stale slot whose marker write previously failed. If the
+			// file still parses as a real config (a prior generation's
+			// bytes, e.g. tombstoned at load by the #10723 generation
+			// check), restore the marker durably so it cannot be
+			// resurrected after restart (#7176). Bytes that already
+			// refuse at load (marker, empty, parse error) keep their
+			// identity: the slot tombstones either way, and rewriting
+			// them would regress the #14578 boot-recovery ladder,
+			// whose trailing slots are exactly such tombstones while
+			// sibling slots still hold live configs.
 			data = []byte(rollbackTombstoneMarker)
-			// Slot file on disk should already hold the marker; read its
-			// identity if present, else leave identity zero (slot stays
-			// tombstoned on next load via marker bytes).
-			if b, err := ReadBoundedFile(path, MaxConfigSize); err == nil {
-				data = b
-			}
-			identity, identityOK = rollbackSlotIdentityForPath(path)
-		} else {
-			data = []byte(entry.Config.Format())
-			identity, identityOK = rollbackSlotIdentityForPath(path)
-			if !identityOK {
-				// Slot file missing (e.g. history loaded before any
-				// saveRollbackFiles in this process, or slot file removed).
-				// Rewrite it durably so the rebound metadata points at real bytes.
+			b, rerr := ReadBoundedFile(path, MaxConfigSize)
+			switch {
+			case rerr == nil && bytes.Equal(b, data):
+				identity, identityOK = rollbackSlotIdentityForPath(path)
+			case rerr == nil && rollbackSlotBytesParseAsConfig(b):
 				if werr := rbWriteFileDurable(path, data, 0600); werr != nil {
-					slog.Warn("failed to rewrite rollback file during rebind", "path", path, "err", werr, "issue", "#14578")
+					slog.Warn("failed to rewrite rollback tombstone during rebind", "path", path, "err", werr, "issue", "#15023")
 					degraded = true
 				} else {
 					identity, identityOK = rollbackSlotIdentityForPath(path)
 				}
-			} else {
-				// Verify on-disk bytes match in-memory entry; if a prior
-				// legitimate slot rewrite diverged, trust disk bytes for hash.
-				if b, err := ReadBoundedFile(path, MaxConfigSize); err == nil {
-					data = b
+			default:
+				identity, identityOK = rollbackSlotIdentityForPath(path)
+			}
+		} else {
+			// #15023: hash the in-memory Format(), not disk bytes. A prior
+			// slot-write failure (ENOSPC/EIO) or a crash during a
+			// commit-confirmed slot shift can leave a different
+			// generation's bytes at this index; trusting them would
+			// bless the stale generation and clear the degraded flag.
+			data = []byte(entry.Config.Format())
+			if b, err := ReadBoundedFile(path, MaxConfigSize); err == nil && bytes.Equal(b, data) {
+				identity, identityOK = rollbackSlotIdentityForPath(path)
+			}
+			if !identityOK {
+				// Slot missing, diverged, unreadable, or oversized:
+				// rewrite it durably so the rebound metadata points at
+				// the in-memory entry's real bytes.
+				if werr := rbWriteFileDurable(path, data, 0600); werr != nil {
+					slog.Warn("failed to rewrite rollback file during rebind", "path", path, "err", werr, "issue", "#15023")
+					degraded = true
+					if isPostRenameDurabilityFailure(werr) {
+						identity, identityOK = rollbackSlotIdentityForPath(path)
+					}
+				} else {
+					identity, identityOK = rollbackSlotIdentityForPath(path)
 				}
 			}
 		}
 		if !identityOK {
+			// Record an invalid identity so the next load tombstones
+			// this slot instead of admitting bytes the rebind could
+			// not verify (#15023 fail-closed).
 			degraded = true
+			identity = rollbackSlotIdentity{}
 		}
 		metadata[i] = rollbackSlotMetadataEntry{
 			Hash:       rollbackSlotHash(data),
@@ -197,8 +251,11 @@ func (s *Store) rebindRollbackMetadataLocked() {
 	if degraded {
 		s.rollbackPersistDegraded = true
 	} else {
-		// A successful rebind means the sidecar now matches disk exactly,
-		// mirroring saveRollbackFiles' unconditional clear on success.
+		// A successful rebind means every slot was verified against (or
+		// rewritten to) its in-memory entry and the sidecar now matches
+		// disk exactly, mirroring saveRollbackFiles' unconditional clear
+		// on success (#15023: a merely re-hashed stale slot no longer
+		// counts as success).
 		s.rollbackPersistDegraded = false
 	}
 }
