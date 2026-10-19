@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1027,32 +1028,120 @@ func validateRibGroupImportRibReferencesStrict(cfg *Config) error {
 	return nil
 }
 
-// validateRibGroupImportPolicyStrict rejects a global RIB-group import-policy
-// that the route-leak applier cannot evaluate. Ignoring the filter would leak
-// routes more broadly than the authored policy permits.
+// ribGroupImportPolicySchema15661 returns the schema of one rib-group
+// instance (`routing-options rib-groups <name>`), shared by pointer with
+// the per-instance grammar (#15065), for expanding packed bodies.
+func ribGroupImportPolicySchema15661() *schemaNode {
+	rg := resolveSchemaChild(schemaRoutingOptions, "rib-groups")
+	if rg == nil {
+		return nil
+	}
+	if rg.wildcard != nil {
+		return rg.wildcard
+	}
+	return rg
+}
+
+// ribGroupHasImportPolicy15661 reports whether one compiled-form rib-group
+// instance carries `import-policy`, in every AST shape the compiler
+// accepts: a child statement (`leak { import-policy P; }`), a value tail
+// packed onto the instance keys (`leak import-policy P`), and a packed
+// flat run expanded under the rib-group schema (`leak` whose children pack
+// `import-rib inet.0 import-policy P` onto one node's keys, which the
+// pre-existing undefined-import-rib reference gate also rejects — both
+// diagnostics name the same defect, and this gate keeps the targeted
+// import-policy message when it runs first on a shape the reference gate
+// does not see).
+func ribGroupHasImportPolicy15661(inst struct {
+	name string
+	node *Node
+}, schema *schemaNode) bool {
+	if inst.node == nil {
+		return false
+	}
+	if tail := instanceValueTail(inst.node, inst.name); slices.Contains(tail, "import-policy") {
+		return true
+	}
+	for _, child := range expandFlatRun(inst.node.Children, schema) {
+		if child != nil && child.Name() == "import-policy" {
+			return true
+		}
+	}
+	// Packed flat run the schema expansion above does not split because the
+	// first leaf (`import-rib`) carries the run as its child: its value
+	// node's keys pack `import-policy` after the rib names.
+	for _, child := range inst.node.Children {
+		if child == nil {
+			continue
+		}
+		for _, sub := range child.Children {
+			if sub != nil && slices.Contains(sub.Keys, "import-policy") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// validateRibGroupImportPolicyStrict rejects a RIB-group import-policy
+// that the route-leak applier cannot evaluate, wherever it is defined:
+// under the global `routing-options`, or under a routing instance's
+// `routing-options` (`routing-instances <name> routing-options
+// rib-groups ...`). Ignoring the filter would leak routes more broadly
+// than the authored policy permits. Per-instance definitions are retained
+// in the compiled instance (#11782) and named by later route-sharing
+// consumers exactly like global ones, so the gate walks both roots
+// through namedInstances — the same dual-shape reader compileRoutingOptions
+// uses — rather than only the raw children of a global `rib-groups`
+// container, which missed the named-instance spelling
+// (`rib-groups leak { ... }`, no braces around the container) and every
+// per-instance definition (#15661).
 func validateRibGroupImportPolicyStrict(tree *ConfigTree) error {
 	if tree == nil {
 		return nil
 	}
-	for _, routingOptions := range tree.Children {
-		if routingOptions == nil || routingOptions.Name() != "routing-options" {
+	schema := ribGroupImportPolicySchema15661()
+	// checkRoutingOptions scans every `routing-options` node in scope.
+	checkRoutingOptions := func(scope string, ros []*Node) error {
+		for _, ro := range ros {
+			if ro == nil {
+				continue
+			}
+			for _, rgNode := range ro.FindChildren("rib-groups") {
+				for _, inst := range namedInstances([]*Node{rgNode}) {
+					if inst.name == "" || !ribGroupHasImportPolicy15661(inst, schema) {
+						continue
+					}
+					return fmt.Errorf(
+						"%srib-groups %q import-policy is not implemented: "+
+							"xpf cannot apply this filter to imported routes, so the route leak "+
+							"would include routes the policy excludes",
+						scope, inst.name)
+				}
+			}
+		}
+		return nil
+	}
+	for _, top := range tree.Children {
+		if top == nil {
 			continue
 		}
-		for _, ribGroups := range routingOptions.FindChildren("rib-groups") {
-			for _, group := range ribGroups.Children {
-				if group == nil || len(group.Keys) == 0 {
-					continue
+		switch top.Name() {
+		case "routing-options":
+			if err := checkRoutingOptions("routing-options ", []*Node{top}); err != nil {
+				return err
+			}
+		case "routing-instances":
+			// Dual shape: flat-set nests instance nodes as children of the
+			// `routing-instances` root keyed by name; hierarchical nests
+			// them the same way. namedInstances over the root itself
+			// resolves both.
+			for _, inst := range namedInstances([]*Node{top}) {
+				if err := checkRoutingOptions(
+					fmt.Sprintf("routing-instances %q routing-options ", inst.name),
+					inst.node.FindChildren("routing-options")); err != nil {
+					return err
 				}
-				importPolicy := group.FindChild("import-policy") != nil ||
-					(len(group.Keys) >= 3 && group.Keys[1] == "import-policy")
-				if !importPolicy {
-					continue
-				}
-				return fmt.Errorf(
-					"routing-options rib-groups %q import-policy is not implemented: "+
-						"xpf cannot apply this filter to imported routes, so the route leak "+
-						"would include routes the policy excludes",
-					group.Keys[0])
 			}
 		}
 	}
