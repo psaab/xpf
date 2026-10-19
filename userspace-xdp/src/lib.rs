@@ -973,6 +973,18 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
             }
             _ => {
                 // Session miss — run full checks for new connections.
+                // #15117: on-link NDP (133-137, hop 255) to a NAT external
+                // belongs to the kernel proxy-NDP, not the worker's
+                // destination translation.
+                if parsed.protocol == PROTO_ICMPV6
+                    && degraded_ndp::is_nat_external_ndp_control(
+                        parsed.icmp_type,
+                        parsed.hop_limit,
+                        is_interface_nat_destination(&parsed, ingress_domain),
+                    )
+                {
+                    return Ok(cpumap_or_pass(ctrl));
+                }
                 if is_icmp_to_interface_nat_local(&parsed, ingress_domain) {
                     record_trace(
                         ctrl.flags,
@@ -1902,6 +1914,8 @@ struct ParsedPacket {
     flow_src_port: u16,
     flow_dst_port: u16,
     dscp: u8,
+    // #15117: IPv6 hop limit (0 for IPv4); gates the NAT-external NDP arm.
+    hop_limit: u8,
     src_addr: [u8; 16],
     dst_v4: u32,
     dst_addr: [u8; 16],
@@ -2081,6 +2095,7 @@ fn parse_ipv4(
         flow_src_port,
         flow_dst_port,
         dscp: tos >> 2,
+        hop_limit: 0,
         src_addr,
         dst_v4: ipv4_map_key([dst_bytes[0], dst_bytes[1], dst_bytes[2], dst_bytes[3]]),
         dst_addr,
@@ -2199,6 +2214,7 @@ fn parse_ipv6(
         flow_src_port,
         flow_dst_port,
         dscp,
+        hop_limit: ip6[7],
         src_addr,
         dst_v4: 0,
         dst_addr,

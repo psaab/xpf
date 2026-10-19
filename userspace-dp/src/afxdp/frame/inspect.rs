@@ -101,6 +101,35 @@ pub(crate) enum ExtChainOutcome {
     OverLimit,
 }
 
+/// #15117: true for an on-link Neighbor Discovery message: ICMPv6 type
+/// 133-137 with IPv6 hop limit 255. Read from the frame bytes (verified
+/// L3, shared ext-chain walk) so session-miss and flowless callers agree.
+/// A non-first fragment, truncated chain, or hop != 255 fails closed
+/// (false — the packet keeps its ordinary translation/policy path).
+#[inline]
+pub(in crate::afxdp) fn is_ndp_hop255_frame(frame: &[u8], meta: UserspaceDpMeta) -> bool {
+    if meta.addr_family != libc::AF_INET6 as u8 || meta.protocol != crate::ip_proto::PROTO_ICMPV6 {
+        return false;
+    }
+    let l3 = verified_l3_or_stamp(frame, meta.l3_offset, meta.addr_family);
+    let Some(packet) = frame.get(l3..) else {
+        return false;
+    };
+    if packet.get(7) != Some(&255) {
+        return false;
+    }
+    match walk_ipv6_ext_chain(frame, l3).outcome {
+        ExtChainOutcome::L4(l4_off, protocol) => {
+            protocol == crate::ip_proto::PROTO_ICMPV6
+                && frame
+                    .get(l4_off)
+                    .copied()
+                    .is_some_and(|t| (133..=137).contains(&t))
+        }
+        _ => false,
+    }
+}
+
 /// The FIRST Fragment (44) header a walked chain declared, recorded by
 /// [`walk_ipv6_ext_chain`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

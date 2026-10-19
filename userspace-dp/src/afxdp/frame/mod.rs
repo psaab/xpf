@@ -101,6 +101,7 @@ pub(in crate::afxdp) use inspect::{
     ipv4_is_any_fragment, ipv4_is_non_first_fragment, is_term_fragment,
     ipv6_addr_is_v4_mapped_or_compat, ipv6_ext_chain_over_limit,
     ipv6_frame_has_v4_mapped_or_compat, ipv6_is_any_fragment, ipv6_is_non_first_fragment,
+    is_ndp_hop255_frame,
     ipv6_is_nonatomically_fragmented, is_any_fragment, is_non_first_fragment,
     l2_dst_is_group_or_broadcast, l3_enforcement_flow_from_frame, l3_enforcement_flow_from_meta,
     l3_session_flow_from_meta, meta_icmp_identifier_bearing, meta_l4_ports_in_declared_end,
