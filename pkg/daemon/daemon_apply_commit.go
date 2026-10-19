@@ -1040,13 +1040,25 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	_ = d.applySem.Acquire(context.Background(), 1)
 	defer d.applySem.Release(1)
 
+	// #15054/#6788: a shutdown-fenced daemon must not run this transaction's
+	// unconditional apply. This callback previously acquired applySem with
+	// context.Background() and applied with context.Background() below,
+	// escaping the fence entirely — an uncancellable full apply into a
+	// half-torn-down daemon that shutdown had to join. The store has not
+	// been promoted yet at this point, so refusing leaves no divergence;
+	// the next boot re-derives the confirm window and re-applies in full.
+	if d.applyFencedForBackground() {
+		slog.Info("shutdown: refusing commit-confirmed rollback apply; the daemon is stopping",
+			"issue", "#15054")
+		return
+	}
+
 	// #5281: a confirm-timeout rollback that fires after a factory reset wipe
 	// would PromoteRollback (re-persisting the SSOT) and re-apply the rolled-back
 	// config, re-rendering secrets. Skip it — the daemon is being wiped/stopped.
 	if d.isResetting() {
 		return
 	}
-
 	// Pre-rollback active config (the abandoned unconfirmed config, C2) for the
 	// #4234 deletion-clear: a rollback that removes a policy the abandoned commit
 	// added must drop that policy's sessions, same as any commit.
@@ -1197,7 +1209,12 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// The rollback re-apply is driven with a non-cancellable context (#2926):
 	// the store has already been promoted to the rollback target, so the
 	// dataplane MUST be brought into agreement unconditionally — aborting here
-	// would re-open the split-brain this transaction exists to close.
+	// would re-open the split-brain this transaction exists to close. #15054
+	// fences this path BEFORE promotion (see the applyFenced check at entry),
+	// so a shutdown that has already fenced never reaches here; a fence that
+	// lands after promotion is joined by the shutdown drain like any other
+	// in-flight unconditional apply, and the #9811 debt owner (now gated by
+	// beginBackgroundApply + applyCancelCtx) owns any retry.
 	// #6948: arm the commit-time session-invalidation plan BEFORE the apply.
 	// Only this caller holds the pre-commit active config — the store promoted
 	// the new one upstream — and the invalidation's candidate set has to be READ

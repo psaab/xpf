@@ -531,6 +531,22 @@ startup-phase and shutdown ordering is untouched:
   authorized exits (commit, sync, rollback) bypass the helper and are
   unaffected.
 
+  **Retry-owner gate (#15054).** The #9811 `configApplyReassertLoop` is a
+  background applier too and passes the same helper
+  (`beginBackgroundApply(ctx, "configApplyReassert")`): before #15054 it
+  acquired `applySem` itself and called
+  `applyConfigLocked(context.Background(), cfg)`, so a debt latched before
+  a rollback to bootstrap was retried into a full takeover — including the
+  #9615 refused target `enterBootstrapMode` had deliberately not applied —
+  and a post-fence retry ran an uncancellable apply shutdown had to join.
+  It now refuses in bootstrap/after the fence (debt left owed for the
+  authorized/boot apply) and drives its apply with `applyCancelCtx()`.
+  `enterBootstrapMode` also discharges any owed debt on entry: the safe
+  state deliberately does not apply the refused target, and convergence is
+  owned by the authorized commit/sync/rollback that exits bootstrap.
+  `executeConfirmedRollback` checks the fence before promoting, so a
+  shutdown-fenced daemon never starts its unconditional apply.
+
   The DHCP quiesce is separate and **both are required**. `dhcp.Manager.Quiesce`
   stops the 2s lease-change debounce timer and latches so a lease event racing
   shutdown re-arms nothing; it is emphatically NOT `StopAll`, because cancelling

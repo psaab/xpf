@@ -46,12 +46,18 @@ var configApplyReassertInterval = 30 * time.Second
 // configApplyReassertFn is the retry owner's operation, overridable in tests.
 // Without a seam the retry could only be observed by breaking a real dataplane
 // publish, and the cell this issue asks for injects the failure.
+//
+// #15054: the apply is driven with applyCancelCtx() (the daemon-stop
+// context), not context.Background(). A retry that starts before the #6788
+// fence but runs across it must abort at the next #2926 boundary instead of
+// completing an uncancellable full apply shutdown has to join; the next boot
+// re-applies the active config in full, so the debt simply remains owed.
 var configApplyReassertFn = func(d *Daemon) error {
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
 		return nil
 	}
-	return d.applyConfigLocked(context.Background(), cfg)
+	return d.applyConfigLocked(d.applyCancelCtx(), cfg)
 }
 
 // configApplyDebt records that the ACTIVE configuration is not the one the
@@ -65,6 +71,24 @@ type configApplyDebt struct {
 	// count with owed set means it is not running.
 	failures uint64
 	lastErr  string
+}
+
+// dischargeConfigApplyDebt clears any owed config-apply debt without an
+// apply. Used on entry to the bootstrap safe state (#15054): the teardown
+// has deliberately NOT applied the active/refused target, so a debt latched
+// by the failed apply that preceded the rollback must not survive to be
+// retried into a takeover. Convergence from bootstrap is owned by the
+// authorized commit/sync/rollback that exits it, which applies in full.
+func (d *Daemon) dischargeConfigApplyDebt() {
+	d.configDebt.mu.Lock()
+	defer d.configDebt.mu.Unlock()
+	if d.configDebt.owed {
+		slog.Info("config apply debt discharged on entry to bootstrap mode; "+
+			"convergence is owned by the authorized recovery commit",
+			"issue", "#15054")
+	}
+	d.configDebt.owed = false
+	d.configDebt.lastErr = ""
 }
 
 // noteConfigApplyResult latches the debt when err is non-nil and discharges it
@@ -130,16 +154,29 @@ func (d *Daemon) configApplyReassertLoop(ctx context.Context) {
 // what the store reports" — and is what discharges the debt after an unrelated
 // successful commit, which would otherwise leave a permanent false degraded.
 //
-// It takes applySem BEFORE reading the config, for the reason #4001 gave the
-// proxy-ARP loop: a read outside the semaphore could capture a pre-commit
-// snapshot. The owed check is repeated inside, because a commit that lands in
-// between applies the same config and discharges the debt itself.
+// #15054: this is a BACKGROUND applier and must pass the same gate as every
+// other one. It previously acquired applySem itself and called
+// applyConfigLocked(context.Background(), cfg) directly, bypassing
+// beginBackgroundApply entirely: in bootstrap mode it reached
+// maybeExitBootstrapOnFirstConfig and took over interfaces/dataplane with no
+// commit — including the #9615 refused target enterBootstrapMode had
+// deliberately not applied — and after the #6788 shutdown fence it ran an
+// uncancellable full apply shutdown had to join. Routing through
+// beginBackgroundApply(ctx, ...) refuses both (applies=0, debt left owed for
+// a later authorized/boot apply) and owns applySem, so the config is re-read
+// under the semaphore for the reason #4001 gave the proxy-ARP loop: a read
+// outside it could capture a pre-commit snapshot. The owed check is repeated
+// inside, because a commit that lands in between applies the same config and
+// discharges the debt itself. The apply itself runs under applyCancelCtx()
+// (see configApplyReassertFn), so a daemon stop aborts it at the next #2926
+// boundary; a cancelled acquire or apply leaves the debt owed, never
+// discharged without an apply.
 func (d *Daemon) reassertConfigApplyOnce(ctx context.Context) {
 	if d.store == nil || !d.configApplyOwed() {
 		return
 	}
-	if err := d.applySem.Acquire(ctx, 1); err != nil {
-		return // ctx cancelled (daemon shutdown)
+	if !d.beginBackgroundApply(ctx, "configApplyReassert") {
+		return
 	}
 	defer d.applySem.Release(1)
 	if !d.configApplyOwed() {
@@ -148,8 +185,9 @@ func (d *Daemon) reassertConfigApplyOnce(ctx context.Context) {
 	appliedDigest := d.store.ActiveDigest()
 	err := configApplyReassertFn(d)
 	d.noteConfigApplyResult(err)
-	// reassertConfigApplyOnce owns applySem, so this captured digest names the
-	// active config the retry applied and cannot drift to a concurrent promotion.
+	// reassertConfigApplyOnce owns applySem (via beginBackgroundApply), so
+	// this captured digest names the active config the retry applied and
+	// cannot drift to a concurrent promotion.
 	if err == nil && d.policyInvalidationDebt == nil {
 		d.store.MarkAppliedDigest(appliedDigest)
 	}
