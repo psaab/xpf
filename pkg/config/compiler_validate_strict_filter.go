@@ -1465,6 +1465,19 @@ func classifyFilterAddrFamily(a string) (isV6 bool, ok bool) {
 	return false, false
 }
 
+// FilterAddressRepresentable reports whether a firewall-filter address token
+// is representable by the userspace matcher — the exported form of
+// classifyFilterAddrFamily for the snapshot builder (pkg/dataplane/userspace),
+// which must decide representability for prefix-list ENTRIES as well as
+// literals. The strict gate (#7273) and the builder share this one classifier
+// so "rejected at strict commit" and "marked unrepresentable on the tolerant
+// path" can never drift apart. Empty / "any" placeholders are handled by
+// callers (they are no-constraint, not malformed).
+func FilterAddressRepresentable(a string) bool {
+	_, ok := classifyFilterAddrFamily(a)
+	return ok
+}
+
 // validateFilterFromMatchStrict hard-rejects any firewall-filter term whose
 // `from` block carries a match leaf the dataplane does NOT enforce — #3307.
 //
