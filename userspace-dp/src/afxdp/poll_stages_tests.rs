@@ -2112,6 +2112,39 @@ fn ndp_na_unsolicited_override1_refused_and_counted_once_11069() {
     assert_eq!(neighbors.na_unsolicited_override_refusals(), 1);
 }
 
+/// #15247 (A66-03) FAIL-ON-REVERT: off-link ARP senders / NA targets are
+/// not learned; on-link and link-local controls still learn, and the
+/// XSK-learned entries age out without kernel backing.
+#[test]
+fn off_link_arp_na_not_learned_and_xsk_learn_ages_15247() {
+    let forwarding = build_forwarding_state(&super::super::test_fixtures::nat_snapshot());
+    with_neighbor_learn_ctx(&forwarding, |ctx, neighbors| {
+        let meta = link_layer_meta(24, 0);
+        let mac = [0x02, 0x00, 0x00, 0x00, 0x15, 0x47];
+        let off_ip = Ipv4Addr::new(10, 0, 99, 50);
+        assert!(matches!(classify(&arp_reply_frame(off_ip, mac), meta, ctx), StageOutcome::RecycleAndContinue));
+        assert!(neighbors.get(&(24, IpAddr::V4(off_ip))).is_none(), "off-link ARP sender must not be learned (#15247)");
+        let on_ip = Ipv4Addr::new(10, 0, 61, 50);
+        assert!(matches!(classify(&arp_reply_frame(on_ip, mac), meta, ctx), StageOutcome::RecycleAndContinue));
+        assert_eq!(neighbors.get(&(24, IpAddr::V4(on_ip))).map(|e| e.mac), Some(mac));
+        let (off_frame, off_target, _) = ndp_na_frame_with_target([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x99]);
+        assert!(matches!(classify(&off_frame, meta, ctx), StageOutcome::Continue(())));
+        assert!(neighbors.get(&(24, off_target)).is_none(), "off-link NA target must not be learned (#15247)");
+        let (on_frame, on_target, on_mac) = ndp_na_frame_with_target([0x20, 0x01, 0x05, 0x59, 0x85, 0x85, 0xef, 0x00, 0, 0, 0, 0, 0, 0, 0, 0x42]);
+        assert!(matches!(classify(&on_frame, meta, ctx), StageOutcome::Continue(())));
+        assert_eq!(neighbors.get(&(24, on_target)).map(|e| e.mac), Some(on_mac));
+        let (ll_frame, ll_target, ll_mac) = ndp_na_frame();
+        assert!(matches!(classify(&ll_frame, meta, ctx), StageOutcome::Continue(())));
+        assert_eq!(neighbors.get(&(24, ll_target)).map(|e| e.mac), Some(ll_mac));
+        let removed = neighbors.age_rx_learned_neighbors(
+            TEST_NOW_NS + super::sharded_neighbor::RX_LEARNED_NEIGHBOR_MAX_AGE_NS + super::sharded_neighbor::RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS,
+            super::sharded_neighbor::RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
+            &Default::default(),
+        );
+        assert_eq!(removed, 3, "XSK ARP/NA learns must age out without kernel backing (#15247)");
+    });
+}
+
 /// #4475 companion: the Override honor must NOT break legitimate
 /// resolution. An Override=0 NA for an ABSENT neighbor (no cached
 /// entry) still creates it — the anti-hijack skip only fires when a
