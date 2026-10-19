@@ -23,7 +23,9 @@ import (
 )
 
 // getOrCreateRGState returns the rgStateMachine for the given RG, creating
-// one if it doesn't exist yet.
+// one if it doesn't exist yet. A newly created state is seeded with the
+// current sync-hold (#15258) so a late-created RG cannot activate before
+// its first reconcile pass mirrors the hold.
 func (d *Daemon) getOrCreateRGState(rgID int) *rgStateMachine {
 	d.rgStatesMu.RLock()
 	s, ok := d.rgStates[rgID]
@@ -45,6 +47,9 @@ func (d *Daemon) getOrCreateRGState(rgID int) *rgStateMachine {
 		d.rgStates = make(map[int]*rgStateMachine)
 	}
 	s = newRGStateMachine()
+	if d.vrrpMgr != nil && d.vrrpMgr.InSyncHold() {
+		s.SetSyncHold(true)
+	}
 	d.rgStates[rgID] = s
 	return s
 }
@@ -56,6 +61,31 @@ func (d *Daemon) getOrCreateRGState(rgID int) *rgStateMachine {
 // reconcileRGState pass (so a hold armed after an RG state was created
 // still lands, and a cleared hold restores desired from retained inputs).
 // Nil-safe for minimal daemon constructions.
+// syncRGSyncHold mirrors vrrp.Manager.InSyncHold onto every
+// rgStateMachine (#15258, A89-02), the #14404 syncRGKernelUpgradeHold
+// pattern applied to the #14406 sync-hold. Without it the
+// handleClusterEvent backstop lasted at most one reconcile tick:
+// reconcileRGState re-derives clusterPri from cluster.IsLocalPrimary
+// and fed it straight to Reconcile, writing rg_active=true while
+// still held. Mirroring here — called at the top of every
+// reconcileRGState pass and whenever a state is created — makes the
+// event path and the reconcile path share one predicate. In no-RETH
+// modes no VRRP sync-hold is armed (that path has its own
+// armNoRethSyncHold readiness term), so InSyncHold is false and this
+// is a no-op there. Nil-safe for minimal daemon constructions.
+func (d *Daemon) syncRGSyncHold() {
+	held := d.vrrpMgr != nil && d.vrrpMgr.InSyncHold()
+	d.rgStatesMu.RLock()
+	states := make([]*rgStateMachine, 0, len(d.rgStates))
+	for _, s := range d.rgStates {
+		states = append(states, s)
+	}
+	d.rgStatesMu.RUnlock()
+	for _, s := range states {
+		s.SetSyncHold(held)
+	}
+}
+
 func (d *Daemon) syncRGKernelUpgradeHold() {
 	held := d.cluster != nil && d.cluster.KernelUpgradeHeld()
 	if d.vrrpMgr != nil {
@@ -694,6 +724,11 @@ func (d *Daemon) watchClusterEvents(ctx context.Context) {
 // cluster event channel (cluster.Manager only exposes a receive-only Events()).
 func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent, vrrpTimer *time.Timer) *time.Timer {
 	noRethVRRP := d.isNoRethVRRP()
+	// #15258: refresh the sync-hold mirror before any state-machine
+	// input — a state created while held carries syncHold=true, and
+	// without this refresh a post-release event would stay suppressed
+	// until the next reconcile tick.
+	d.syncRGSyncHold()
 
 	// Dual-active winner reaffirm: no state change but send
 	// GARPs to refresh upstream ARP/NDP caches after split-brain.
@@ -724,9 +759,12 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 	// event while held; this guard is the backstop for an event already
 	// queued (or a degraded/peer-yielded promotion) when the hold is
 	// observed here. Returning early leaves the RG secondary/inactive:
-	// clusterPri is not recorded, so reconcile keeps desired inactive
-	// and re-derives promotion after ReleaseSyncHold. Demotions are
-	// never gated — resigning during hold is always safe.
+	// clusterPri is not recorded on this state, and the #15258 sync-hold
+	// mirrored into rgStateMachine (syncRGSyncHold, refreshed at the top
+	// of every reconcileRGState pass) keeps desired inactive until
+	// ReleaseSyncHold, after which reconcile re-derives promotion from
+	// cluster state. Demotions are never gated — resigning during hold
+	// is always safe.
 	if isPrimary && !noRethVRRP && d.vrrpMgr != nil && d.vrrpMgr.InSyncHold() {
 		slog.Info("cluster: sync-hold active, suppressing RG promotion until bulk sync",
 			"rg", ev.GroupID)
@@ -1359,6 +1397,10 @@ func (d *Daemon) reconcileRGState() {
 	// or instance re-drive in this pass — a held RG must stay inactive and
 	// its instances must carry priority 0 / refuse MASTER this pass.
 	d.syncRGKernelUpgradeHold()
+	// #15258 (A89-02): mirror the VRRP sync-hold the same way, so this
+	// pass cannot re-activate an RG whose Primary event the #14406
+	// backstop suppressed — previously this lasted at most one tick.
+	d.syncRGSyncHold()
 
 	// #6889: re-derive the config read-only gate from RG0's authoritative
 	// state. Placed FIRST so no later early return in this function can skip

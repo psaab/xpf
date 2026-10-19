@@ -399,3 +399,47 @@ func TestStaticOffInterfaceEgressIsNotReported_6751(t *testing.T) {
 		t.Fatalf("a whole-address static on a NON-interface address was rejected: %v", err)
 	}
 }
+
+// #15258 (A89-05): the verdict for a port-mapped static on an
+// interface-SNAT egress address must not depend on whether an unrelated
+// source pool exists. natPoolOverlapOwners early-returned nil when
+// len(pools)==0, so the interface-egress owners (and therefore the
+// #14368 static pairing, which includes port-mapped statics against
+// minting allocators) vanished on pool-less configs: the same config
+// was accepted without pools and rejected once any pool was added.
+// The contract: interface-egress owners are built regardless of pools,
+// so both shapes give the SAME verdict. Whole-address statics are
+// already rejected in both shapes by the #6751 §5.7 gate; the
+// port-mapped shape must now agree too (interface SNAT can mint the
+// mapped external port, #14368).
+func staticIfaceCfg15258(withPool bool, matchPort, mappedPort int) *Config {
+	cfg := staticIfaceCfg("172.16.50.5/32", matchPort, mappedPort)
+	if !withPool {
+		cfg.Security.NAT.SourcePools = nil
+		// Drop the pool-mode rule-set too: no source pool exists at all.
+		cfg.Security.NAT.Source = cfg.Security.NAT.Source[:1]
+	}
+	return cfg
+}
+
+func TestPortMappedStaticOnIfaceEgressSameVerdictWithAndWithoutPool_15258(t *testing.T) {
+	for _, withPool := range []bool{false, true} {
+		cfg := staticIfaceCfg15258(withPool, 8080, 80)
+		if _, err := validateStaticNATPoolOverlapStrict(cfg, false); err == nil {
+			t.Fatalf("withPool=%v: port-mapped static on interface egress must reject via #14368 pairing (#15258)", withPool)
+		} else if !strings.Contains(err.Error(), "#14368") {
+			t.Fatalf("withPool=%v: error must cite #14368, got: %v", withPool, err)
+		}
+		if _, err := validateStaticNATPoolOverlapStrict(cfg, true); err != nil {
+			t.Fatalf("withPool=%v: lenient must warn not reject (#1960): %v", withPool, err)
+		}
+	}
+	// Whole-address control: already consistent (rejected in both
+	// shapes by #6751); must stay rejected, not become pool-dependent.
+	for _, withPool := range []bool{false, true} {
+		cfg := staticIfaceCfg15258(withPool, 0, 0)
+		if _, err := validateNATPoolExternalTupleOverlapStrict(cfg, false); err == nil {
+			t.Fatalf("withPool=%v: whole-address static on interface egress must stay rejected (#6751)", withPool)
+		}
+	}
+}

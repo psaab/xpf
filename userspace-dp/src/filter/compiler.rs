@@ -1128,6 +1128,21 @@ fn check_cross_field_satisfiability(
     let tcp_flags_present =
         snap.tcp_flags.is_some_and(|m| m != 0) || snap.tcp_flags_forbidden.is_some_and(|m| m != 0);
     let icmp_present = !snap.icmp_types.is_empty() || !snap.icmp_codes.is_empty();
+    // #15258 (A89-01): `is_fragment` since #14631 matches only trailing
+    // fragments (offset != 0), which carry no L4 header — ports fail on
+    // `is_fragment && !l4_present` and tcp-flags/icmp require
+    // `l4_present`. So is-fragment + any L4 predicate is a never-match
+    // with or without a protocol. is-fragment alone, or with only a
+    // protocol, stays legitimate.
+    if snap.is_fragment && (ports_present || tcp_flags_present || icmp_present) {
+        return Err(SnapshotIntegrityError::UnsatisfiableFilterCrossField {
+            family: filter_family.to_string(),
+            filter: filter_name.to_string(),
+            term: snap.name.clone(),
+            predicate: "is-fragment+l4",
+            protocol: protocols.first().copied().unwrap_or(0),
+        });
+    }
     // #14445 (DR19-H1): a no-protocol term combining disjoint families is a
     // never-match. `protocol: 0` is a sentinel only (not a real protocol);
     // no field is widened because predicate names the combined shape.

@@ -58,6 +58,17 @@ type rgStateMachine struct {
 	// on an unverified candidate kernel.
 	kernelUpgradeHold bool
 
+	// syncHold (#15258, A89-02): while set, desired is forced false
+	// regardless of clusterPri / VRRP MASTER. The daemon mirrors
+	// vrrp.Manager.InSyncHold onto every rgStateMachine
+	// (syncRGSyncHold) so the reconcile path shares the ONE predicate
+	// the #14406 handleClusterEvent backstop checks directly. Without
+	// this term that backstop lasted at most one reconcile tick:
+	// reconcileRGState re-derives clusterPri from
+	// cluster.IsLocalPrimary (already set by the election) and fed it
+	// to Reconcile, writing rg_active=true while still held.
+	syncHold bool
+
 	// Strict VIP ownership (#104): when enabled, rg_active is derived
 	// solely from VRRP master state, NOT clusterPri || anyVrrpMaster.
 	// This prevents the brief dual-active window during failover.
@@ -404,11 +415,31 @@ func (s *rgStateMachine) KernelUpgradeHeld() bool {
 	return s.kernelUpgradeHold
 }
 
+// SetSyncHold mirrors the VRRP sync-hold onto this RG (#15258).
+// While held, reconcileLocked forces desired=false; clearing
+// re-derives desired from the retained cluster/VRRP inputs so a
+// promotion suppressed while held activates on clear without needing
+// a new event (ReleaseSyncHold's triggerPreemptNow plus the next
+// reconcile pass re-drive it).
+func (s *rgStateMachine) SetSyncHold(held bool) rgTransition {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.syncHold = held
+	return s.reconcileLocked()
+}
+
+// SyncHeld reports the #15258 sync-hold mirrored on this RG.
+func (s *rgStateMachine) SyncHeld() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.syncHold
+}
+
 func (s *rgStateMachine) reconcileLocked() rgTransition {
 	s.epoch++
 	var desired bool
-	if s.kernelUpgradeHold {
-		desired = false // #14404: hold is authority until the marker clears it
+	if s.kernelUpgradeHold || s.syncHold {
+		desired = false // holds are authority until they clear
 	} else if s.strictVIPOwnership {
 		desired = s.allMasterLocked() // VRRP-only: ALL instances must be MASTER (#132)
 	} else {
@@ -512,7 +543,7 @@ func (s *rgStateMachine) CheckVRRPPosture(now time.Time, expectedInstances int) 
 	// config and the instance re-promotes: MASTER-flapping, not held-down.
 	// The VRRP hold gate (becomeMaster refusal) keeps it BACKUP; posture
 	// stays silent until the hold clears.
-	if s.kernelUpgradeHold {
+	if s.kernelUpgradeHold || s.syncHold {
 		s.vrrpMismatchSince = time.Time{}
 		return vrrpPostureOK
 	}

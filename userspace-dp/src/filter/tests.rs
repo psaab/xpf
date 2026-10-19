@@ -8111,6 +8111,71 @@ fn filter_disjoint_noproto_14445_single_and_joint_tcp_compile() {
         .expect("port+tcp-flags with no protocol compiles");
 }
 
+// =====================================================================
+// #15258 (A89-01): `is-fragment` (trailing fragments only since #14631)
+// is disjoint from every L4 predicate — a trailing fragment has no L4
+// header, so ports/except, tcp-flags and icmp-type/code can never be
+// satisfied on the same packet. The backstop must reject the combined
+// shape with predicate "is-fragment+l4"; is-fragment alone and
+// is-fragment+protocol tcp must still compile.
+// =====================================================================
+
+fn crossfield_filter_fragment(
+    family: &str,
+    protocols: Vec<String>,
+    dst_ports: Vec<String>,
+    tcp_flags: Option<u8>,
+    icmp_types: Vec<u8>,
+) -> Result<FilterState, SnapshotIntegrityError> {
+    parse_filter_state(
+        &[FirewallFilterSnapshot {
+            name: "f".into(),
+            family: family.into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "x".into(),
+                protocols,
+                destination_ports: dst_ports,
+                tcp_flags,
+                icmp_types,
+                is_fragment: true,
+                action: "discard".into(),
+                ..Default::default()
+            }],
+        }],
+        &[],
+        &[],
+        "",
+        "",
+    )
+}
+
+#[test]
+fn filter_is_fragment_l4_15258_rejected() {
+    for (family, ports, flags, types) in [
+        ("inet", vec!["80".to_string()], None, vec![]),
+        ("inet", vec![], Some(0x02), vec![]),
+        ("inet", vec![], None, vec![8u8]),
+        ("inet6", vec!["80".to_string()], None, vec![]),
+    ] {
+        let err = crossfield_filter_fragment(family, vec![], ports, flags, types)
+            .expect_err("is-fragment + L4 predicate must fail the build closed (#15258)");
+        match err {
+            SnapshotIntegrityError::UnsatisfiableFilterCrossField { predicate, .. } => {
+                assert_eq!(predicate, "is-fragment+l4");
+            }
+            other => panic!("expected UnsatisfiableFilterCrossField, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn filter_is_fragment_alone_15258_compiles() {
+    crossfield_filter_fragment("inet", vec![], vec![], None, vec![])
+        .expect("is-fragment alone compiles");
+    crossfield_filter_fragment("inet", vec!["tcp".into()], vec![], None, vec![])
+        .expect("is-fragment + protocol tcp compiles");
+}
+
 #[test]
 fn filter_crossfield_3723_never_match_fails_open_at_runtime() {
     // L06 runtime guard: FABRICATE the never-match term the backstop normally

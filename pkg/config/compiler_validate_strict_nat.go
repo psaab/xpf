@@ -4799,10 +4799,15 @@ func natPoolOverlapOwners(cfg *Config) []natAllocOwner {
 	if cfg == nil {
 		return nil
 	}
+	// #15258 (A89-05): interface-egress owners must be built regardless
+	// of whether any source pool exists. The pool-less early return made
+	// the #14368 static pairing (which includes port-mapped statics
+	// against interface SNAT, a minting allocator) vanish, so the same
+	// port-mapped static on an interface egress was accepted without
+	// pools and rejected once any unrelated pool was added. Only the
+	// pool-backed owner enumeration below is pool-gated; the
+	// interface-egress append at the end is not.
 	pools := cfg.Security.NAT.SourcePools
-	if len(pools) == 0 {
-		return nil
-	}
 	var owners []natAllocOwner
 	srcRuleSets := append([]*NATRuleSet(nil), cfg.Security.NAT.Source...)
 	sort.SliceStable(srcRuleSets, func(i, j int) bool {
