@@ -79,3 +79,31 @@ func TestWellFormedPrefixListStillCommits7273(t *testing.T) {
 		t.Fatalf("a well-formed referenced prefix-list was rejected: %v", err)
 	}
 }
+
+// Lenient twin (#1960): the tolerant / peer-sync path must downgrade the
+// same malformed entry to a warning and still boot — the fail-closed wire
+// marker is asserted on the snapshot side
+// (TestFilterSnapshotMalformedReferencedPrefix7273). FAIL-ON-REVERT:
+// return the error unconditionally in the lenient branch and this goes
+// RED (lenient compile bricks).
+func TestPrefixListMalformedEntryLenientWarns7273(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set policy-options prefix-list pl1 10.0.0.0/8",
+		"set policy-options prefix-list pl1 10.0.0.0/33",
+		"set firewall family inet filter f1 term t1 from source-prefix-list pl1",
+		"set firewall family inet filter f1 term t1 then discard",
+	})
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile must remain bootable on a malformed referenced entry: %v", err)
+	}
+	if !strings.Contains(strings.Join(cfg.Warnings, "\n"), "10.0.0.0/33") {
+		t.Fatalf("lenient compile must warn naming the malformed entry, got %v", cfg.Warnings)
+	}
+	// The literal record channel stays empty for prefix-list provenance —
+	// the snapshot marker is derived from the referenced list itself.
+	term := cfg.Firewall.FiltersInet["f1"].Terms[0]
+	if len(term.UnknownAddresses) != 0 {
+		t.Fatalf("prefix-list malformed entry must not be recorded as a literal, got %v", term.UnknownAddresses)
+	}
+}
