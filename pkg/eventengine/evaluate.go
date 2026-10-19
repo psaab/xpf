@@ -146,8 +146,8 @@ func (e *Engine) evaluateEvent(ev rpm.Event) []triggeredPolicy {
 		// above-threshold level does not re-fire every cooldown. Set only
 		// AFTER the cooldown check passed — a cooldown-suppressed crossing is
 		// NOT treated as already-fired, so the next event past the cooldown
-		// still fires. Cleared by withinMatches when the count drops back
-		// below the trigger-on threshold (re-arm).
+		// still fires. Cleared by withinMatches when the pre-event count
+		// drops back below the trigger-on threshold (re-arm, #15020).
 		if policyHasTriggerOn(pol) {
 			rt.onLatched[ev.Name] = true
 		}
@@ -304,7 +304,6 @@ func policyHasTriggerOn(pol *config.EventPolicy) bool {
 // OR-of-conditions must be written as separate policies. This AND semantics is
 // the documented contract (pkg/eventengine/README.md) and is covered by
 // TestWithinMultipleClausesAreANDed.
-//
 // The body is three passes over the clause list rather than one fused loop, so
 // no verdict depends on the order the operator wrote the clauses in — see the
 // #7223 note on pass 2. One deliberate ordering delta survives: a policy that
@@ -313,7 +312,8 @@ func policyHasTriggerOn(pol *config.EventPolicy) bool {
 // fused loop did if the below-threshold clause came first. Such a policy fails
 // closed on every event for as long as the invalid clause exists, so the
 // latch's value is unobservable until the config is corrected — after which the
-// next below-threshold event re-arms it through the normal path.
+// next event whose pre-event count is below threshold re-arms it through the
+// normal path (#15020: the re-arm test excludes the just-appended event).
 func (e *Engine) withinMatches(pol *config.EventPolicy, rt *policyRuntime, eventName string, now time.Time) bool {
 	if len(pol.WithinClauses) == 0 {
 		return true // no temporal filter
@@ -375,6 +375,27 @@ func (e *Engine) withinMatches(pol *config.EventPolicy, rt *policyRuntime, event
 	// cooldown), which is harmful for a non-idempotent then-batch and spams
 	// commit/rollback history.
 	//
+	// The re-arm test uses the count EXCLUDING the current event
+	// (counts[i]-1): evaluateEvent appended the current event to the window
+	// before this call, so counts[i] includes it. The latch re-arms exactly
+	// when the ANDed condition was false BEFORE this event arrived — some
+	// trigger-on clause's prior in-window count had dropped below its
+	// threshold — which is precisely a fresh crossing.
+	//
+	// #15020: with the inclusive count the re-arm was unreachable for
+	// `trigger on 1`: counts[i] >= 1 holds for every event by construction,
+	// so `counts[i] < 1` never held and the latch, once armed, never
+	// cleared — the policy fired once per daemon lifetime. Excluding the
+	// current event, N=1 re-arms when no prior occurrence is still inside
+	// the window (window decay), so each isolated edge fires. For N>1 the
+	// observable behaviour is unchanged: between events the in-window count
+	// never grows, so while a burst stays at/above N every subsequent event
+	// still sees a pre-event count >= N and stays latched (sustained-level
+	// suppression), and once the burst decays below N the policy is silent
+	// until the next crossing either way — the pre-event test merely clears
+	// the latch on the crossing event itself instead of on a preceding
+	// below-threshold event.
+	//
 	// #7223: the re-arm and the latch check are two separate passes
 	// over the clause list, and that separation IS the fix. The single fused
 	// loop this replaces returned false from inside the walk, so with more
@@ -397,14 +418,27 @@ func (e *Engine) withinMatches(pol *config.EventPolicy, rt *policyRuntime, event
 			continue
 		}
 		hasTriggerOn = true
-		if counts[i] < wc.TriggerOn {
+		if counts[i]-1 < wc.TriggerOn {
 			belowTriggerOn = true
 		}
 	}
 	if belowTriggerOn {
-		// Dropped below the threshold: re-arm so the next crossing fires again.
+		// The ANDed condition was false before this event: re-arm so this
+		// crossing can fire. When the AND is still unsatisfied (some clause
+		// at/below threshold including this event) PASS 3 / the count gate
+		// below still suppresses the fire; clearing here only permits a
+		// later crossing.
 		rt.onLatched[eventName] = false
-		return false
+	}
+	// A trigger-on clause that has not yet reached its threshold (including
+	// the current event) cannot fire — for every event, not only latched
+	// ones. This is the count gate the pre-#15020 code reached via the
+	// re-arm return; stating it separately keeps the re-arm (a latch
+	// mutation) distinct from the firing decision.
+	for i, wc := range pol.WithinClauses {
+		if wc.TriggerOn > 0 && counts[i] < wc.TriggerOn {
+			return false
+		}
 	}
 	if hasTriggerOn && rt.onLatched[eventName] {
 		// Level still at/above N on every clause and this crossing already
