@@ -78,7 +78,7 @@ func TestArmCooldown_SkipsSuccessorGeneration_5311(t *testing.T) {
 		t.Fatal("Apply carried the runtime forward instead of installing a fresh " +
 			"successor; the ABA setup is invalid")
 	}
-	if !r2rt.lastTrigger.IsZero() {
+	if !r2rt.lastTrigger().IsZero() {
 		t.Fatal("the freshly reconciled successor runtime is not zero-armed; the " +
 			"ABA setup is invalid")
 	}
@@ -88,7 +88,7 @@ func TestArmCooldown_SkipsSuccessorGeneration_5311(t *testing.T) {
 	e.armCooldown("p", authRev)
 
 	e.mu.Lock()
-	lt := e.runtime["p"].lastTrigger
+	lt := e.runtime["p"].lastTrigger()
 	e.mu.Unlock()
 	if !lt.IsZero() {
 		t.Fatalf("successor R2 lastTrigger=%v; the revision-blind arm stamped the "+
@@ -117,7 +117,7 @@ func TestArmCooldown_StampsSameGeneration_5311(t *testing.T) {
 	e.armCooldown("p", rev)
 
 	e.mu.Lock()
-	lt := e.runtime["p"].lastTrigger
+	lt := e.runtime["p"].lastTrigger()
 	e.mu.Unlock()
 	if lt.IsZero() {
 		t.Fatal("same-generation armCooldown did not stamp lastTrigger; the #5311 " +
@@ -211,7 +211,7 @@ func TestCooldown_NormalPolicyRapidRefireSuppressed_5311(t *testing.T) {
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		rt := e.runtime["p"]
-		return rt != nil && !rt.lastTrigger.IsZero()
+		return rt != nil && !rt.lastTrigger().IsZero()
 	})
 
 	// A rapid re-fire within the cooldown must be suppressed (never re-committed).

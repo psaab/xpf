@@ -107,7 +107,7 @@ func TestEdgeTriggerOn_CooldownDoesNotConsumeCrossing_3756(t *testing.T) {
 	// Pre-arm the cooldown anchor to base (as if a commit had just occurred),
 	// so the crossing at tick 1 lands inside the 30s cooldown and is suppressed.
 	e.mu.Lock()
-	e.runtime["on2-cooldown"].lastTrigger = base
+	e.runtime["on2-cooldown"].committedTrigger = base
 	e.mu.Unlock()
 
 	triggered := 0

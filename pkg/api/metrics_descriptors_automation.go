@@ -81,6 +81,21 @@ func (c *xpfCollector) initAutomationDescriptors() {
 			"values that are already active.",
 		nil, nil,
 	)
+	c.eventActionsDeferred = prometheus.NewDesc(
+		"xpf_event_actions_deferred_total",
+		"Total event-options actions deferred on global-budget exhaustion for replay after the oldest slot expires (#15021).",
+		nil, nil,
+	)
+	c.eventCooldownSuppressed = prometheus.NewDesc(
+		"xpf_event_cooldown_suppressed_total",
+		"Total event-options edges suppressed by the per-policy cooldown, including deferred replays (#15021).",
+		nil, nil,
+	)
+	c.eventPendingDeferred = prometheus.NewDesc(
+		"xpf_event_pending_deferred",
+		"Current event-options actions parked awaiting budget/cooldown replay (#15021).",
+		nil, nil,
+	)
 	c.eventAttributesInvalid = prometheus.NewDesc(
 		"xpf_event_attributes_match_invalid_total",
 		"Total times a malformed or unknown-field attributes-match line "+

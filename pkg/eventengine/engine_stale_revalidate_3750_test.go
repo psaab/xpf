@@ -245,7 +245,7 @@ func TestStale_PostCooldownRefire_3750(t *testing.T) {
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		rt := e.runtime["p"]
-		return rt != nil && !rt.lastTrigger.IsZero()
+		return rt != nil && !rt.lastTrigger().IsZero()
 	})
 
 	// A re-fire WITHIN the cooldown is suppressed at evaluate (never queued).

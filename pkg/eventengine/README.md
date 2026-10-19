@@ -84,16 +84,22 @@ cycle would otherwise fire into a nil callback and be lost (#3755); registering
 first closes the gap, and `pkg/rpm` additionally buffers-and-replays any event
 fired before a callback exists as a belt against a future reorder.
 
-## Cross-policy global action budget (#10871, refund #14724)
+## Cross-policy global action budget (#10871, refund #14724, deferral #15021)
 
 Per-policy cooldowns do not constrain a storm across many distinct policies.
 The worker therefore admits at most **four promoted commits in any rolling
 60-second window**, shared by every event-options policy. Four simultaneous
-actions can still run as a burst; once exhausted, queued actions are dropped
-before taking the config lock and counted by
+actions can still run as a burst; once exhausted, a pre-commit budget denial
+**defers** the action until the oldest slot expires (bounded, revalidated at
+commit) instead of dropping it (#15021) — RPM emits `ping_test_failed` only
+on a status change, so dropping would permanently discard the only edge.
+Only a commit-time reservation denial after that deferral still counts
 `xpf_event_actions_dropped_total{reason="global_budget"}`. A denied `trigger on`
 edge has its latch released, so a later edge can retry after budget capacity
-returns.
+returns. Cooldown-suppressed edges are likewise parked per (policy,event)
+direction, counted by `xpf_event_cooldown_suppressed_total`, and replayed
+after the 30 s cooldown; a different-direction edge is never suppressed by
+the parked one.
 
 The slot is reserved only when the action is ready to commit, and a commit
 that never promotes — a transient `commitFn` returning `(nil, err)`, a
@@ -464,10 +470,13 @@ blocks a `commitFn` on `ctx.Done()` and asserts `Close()` aborts it with
 - `xpf_event_actions_retried_total`
 - `xpf_event_actions_dropped_total{reason="lock_held"|"queue_full"|"stale"|"global_budget"}`
   (`stale` = revalidate-before-commit dropped a removed/redefined-policy or
-  within-cooldown action, #3750; `global_budget` = the shared #10871 rolling
-  commit-attempt budget was exhausted)
+  within-cooldown action, #3750; `global_budget` = residual commit-time
+  reservation denial after #15021 deferral)
 - `xpf_event_actions_skipped_no_change_total` (#15022 — post-batch candidate
   identical to active; commit skipped, cooldown still armed)
+- `xpf_event_actions_deferred_total` (#15021 budget deferrals)
+- `xpf_event_cooldown_suppressed_total` (#15021 cooldown suppressions)
+- `xpf_event_pending_deferred` (gauge, #15021 parked actions)
 - `xpf_event_attributes_match_invalid_total`
 - `xpf_event_action_queue_depth` (gauge)
 
