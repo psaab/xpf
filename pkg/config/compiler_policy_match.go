@@ -171,6 +171,9 @@ type policyMatchLeafFinding struct {
 	swallowed bool
 	leaf      string
 	tok       string
+	// operand15200 is the dropped operand carried by a boolean
+	// `*-address-excluded` leaf (#15200); non-empty only for that finding.
+	operand15200 string
 }
 
 // policyUnsupportedMatchLeafFindings returns every unsupported / swallowed
@@ -198,6 +201,17 @@ func policyUnsupportedMatchLeafFindings(polNode *Node, isGlobal bool) []policyMa
 			continue
 		}
 		if supportedPolicyMatchLeaves[leaf] {
+			// #15200: `*-address-excluded` are boolean modifiers with no
+			// operand; compilePolicy sets the flag off the leaf name alone
+			// and ignores Keys[1:]/children, so any operand is silently
+			// dropped. Flag it so strict rejects, tolerant warns, and
+			// compilePolicy poisons via LenientContentDropped.
+			if leaf == "source-address-excluded" || leaf == "destination-address-excluded" {
+				for _, op := range firewallMatchValues(m) {
+					out = append(out, policyMatchLeafFinding{leaf: leaf, operand15200: op})
+				}
+				continue
+			}
 			// #3142: a multi:true match leaf (application/source-address/
 			// destination-address) absorbs trailing non-sibling tokens onto its
 			// own node (Keys[1:] + child sub-nodes — the #2419 collapse). An
@@ -274,6 +288,20 @@ func validatePolicyMatchLeavesStrict(nodes []*Node, lenient bool) ([]string, err
 
 	checkPolicy := func(scope, policyName string, polNode *Node, isGlobal bool) error {
 		for _, f := range policyUnsupportedMatchLeafFindings(polNode, isGlobal) {
+			if f.operand15200 != "" {
+				if err := report(fmt.Sprintf(
+					"security policies %s policy %q match %q carries operand %q "+
+						"that is silently dropped (source-address-excluded and "+
+						"destination-address-excluded are boolean modifiers with "+
+						"no operand; the exclusion set is the sibling "+
+						"source-address/destination-address leaf) — remove the "+
+						"operand %q from %q (#15200)",
+					scope, policyName, f.leaf, f.operand15200, f.operand15200, f.leaf,
+				)); err != nil {
+					return err
+				}
+				continue
+			}
 			if f.swallowed {
 				if err := emitSwallowed(scope, policyName, f.leaf, f.tok); err != nil {
 					return err
