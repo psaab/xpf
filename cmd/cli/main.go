@@ -541,7 +541,7 @@ func (c *ctl) handlePing(args []string) error {
 		Target: parsed.Target, Count: int32(parsed.Count), Source: parsed.Source,
 		Size: int32(parsed.Size), RoutingInstance: parsed.RoutingInstance,
 	}
-	ctx, cancel := context.WithTimeout(c.ctx(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(c.ctx(), diagcmd.PingClientTimeout(parsed.Count))
 	defer cancel()
 	stream, err := c.client.Ping(ctx, req)
 	if err != nil {

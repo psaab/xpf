@@ -10,6 +10,83 @@ import (
 	"time"
 )
 
+// cpuSample is one parsed aggregate "cpu " line from /proc/stat.
+// Fields are jiffies in kernel order; guest/guestNice are already
+// included in user/nice by the kernel and are not double-counted.
+type cpuSample struct {
+	user, nice, system, idle, iowait, irq, softirq, steal float64
+}
+
+func (s cpuSample) total() float64 {
+	return s.user + s.nice + s.system + s.idle + s.iowait + s.irq + s.softirq + s.steal
+}
+func (s cpuSample) busy() float64 { return s.user + s.nice }
+func (s cpuSample) sys() float64  { return s.system + s.irq + s.softirq }
+
+// parseCPUSample parses the aggregate cpu line; extra fields beyond
+// steal are ignored, missing trailing fields stay zero.
+func parseCPUSample(data []byte) (cpuSample, bool) {
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "cpu ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			return cpuSample{}, false
+		}
+		vals := make([]float64, 8)
+		for i := 0; i < 8 && 1+i < len(fields); i++ {
+			v, err := strconv.ParseFloat(fields[1+i], 64)
+			if err != nil {
+				return cpuSample{}, false
+			}
+			vals[i] = v
+		}
+		return cpuSample{user: vals[0], nice: vals[1], system: vals[2], idle: vals[3], iowait: vals[4], irq: vals[5], softirq: vals[6], steal: vals[7]}, true
+	}
+	return cpuSample{}, false
+}
+
+// cpuPercents renders interval percentages from two samples. All
+// fields are in the denominator; iowait/steal count toward neither
+// bucket but dilute both, matching top's interval view.
+func cpuPercents(a, b cpuSample) (userPct, sysPct, idlePct float64) {
+	dt := b.total() - a.total()
+	if dt <= 0 {
+		return 0, 0, 0
+	}
+	return (b.busy() - a.busy()) / dt * 100, (b.sys() - a.sys()) / dt * 100, (b.idle - a.idle) / dt * 100
+}
+
+var (
+	readProcStat = func() ([]byte, error) { return os.ReadFile("/proc/stat") }
+	cpuSleep     = func(d time.Duration) { time.Sleep(d) }
+)
+
+// cpuInterval is the sampling interval for the CPU delta.
+const cpuInterval = 500 * time.Millisecond
+
+func sampleCPUInterval() (userPct, sysPct, idlePct float64) {
+	first, err := readProcStat()
+	if err != nil {
+		return 0, 0, 0
+	}
+	a, ok := parseCPUSample(first)
+	if !ok {
+		return 0, 0, 0
+	}
+	cpuSleep(cpuInterval)
+	second, err := readProcStat()
+	if err != nil {
+		return 0, 0, 0
+	}
+	b, ok := parseCPUSample(second)
+	if !ok {
+		return 0, 0, 0
+	}
+	return cpuPercents(a, b)
+}
+
 // WriteProcessesSummary writes the Junos-style process summary shared by the
 // embedded and remote CLIs. psOutput is captured by each caller's bounded
 // process-execution path.
@@ -71,34 +148,7 @@ func WriteProcessesSummary(w io.Writer, psOutput []byte) {
 		memUsed = memTotal - memAvailable
 	}
 
-	var userPct, sysPct, idlePct float64
-	if data, err := os.ReadFile("/proc/stat"); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			if !strings.HasPrefix(line, "cpu ") {
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) >= 5 {
-				user, _ := strconv.ParseFloat(fields[1], 64)
-				nice, _ := strconv.ParseFloat(fields[2], 64)
-				system, _ := strconv.ParseFloat(fields[3], 64)
-				idle, _ := strconv.ParseFloat(fields[4], 64)
-				total := user + nice + system + idle
-				if len(fields) >= 8 {
-					iowait, _ := strconv.ParseFloat(fields[5], 64)
-					irq, _ := strconv.ParseFloat(fields[6], 64)
-					softirq, _ := strconv.ParseFloat(fields[7], 64)
-					total += iowait + irq + softirq
-				}
-				if total > 0 {
-					userPct = (user + nice) / total * 100
-					sysPct = system / total * 100
-					idlePct = idle / total * 100
-				}
-			}
-			break
-		}
-	}
+	userPct, sysPct, idlePct := sampleCPUInterval()
 
 	var running, sleeping, stopped, zombie int
 	if entries, err := os.ReadDir("/proc"); err == nil {
