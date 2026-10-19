@@ -200,6 +200,16 @@ func validateSNMPv3Node14767(v3 *Node) error {
 			if err := checkSNMPv3UserKeywords9155(user); err != nil {
 				return err
 			}
+			// #15706: two-level `user { <name> { ... } }` — the instances
+			// are the user's children; check each as a user body.
+			if len(user.Keys) < 2 {
+				for _, inst := range user.Children {
+					synth := &Node{Keys: append([]string{"user", inst.Name()}, inst.Keys[1:]...), Children: inst.Children}
+					if err := checkSNMPv3UserKeywords9155(synth); err != nil {
+						return err
+					}
+				}
+			}
 		}
 		// A fully packed tail can synthesise the user itself
 		// (`v3 usm local-engine user u1 ...`): packedBodyChildren
@@ -307,7 +317,24 @@ func checkSNMPv3BracedKeywords14411(n *Node, userBody *Node) error {
 
 // chain holds the statement heads from the enclosing user node down to n
 // (nil outside a user, or when n IS the user).
+func isTwoLevelUserContainer15706(n *Node) bool {
+	return n != nil && n.Name() == "user" && len(n.Keys) < 2
+}
+
 func checkSNMPv3BracedKeywordsDepth14411(n *Node, userBody *Node, chain []string) error {
+	// #15706: children of a two-level `user { <name> { ... } }` container
+	// (outside any user) are instances, not statements: each starts a
+	// user body. Intercept before the generic misplaced check, which
+	// would reject their protocol children as outside any user.
+	if (userBody == nil || userBody == n) && isTwoLevelUserContainer15706(n) {
+		for _, inst := range n.Children {
+			synth := &Node{Keys: append([]string{"user", inst.Name()}, inst.Keys[1:]...), Children: inst.Children}
+			if err := checkSNMPv3BracedKeywords14411(synth, synth); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	for _, child := range n.Children {
 		var childChain []string
 		if userBody != nil {
@@ -397,6 +424,17 @@ func snmpv3KeywordKind14411(tok string) string {
 // would otherwise compile to nothing). The R02 hoisted chain is the sole
 // tolerated nesting (see checkSNMPv3BracedKeywordsDepth14411).
 func checkSNMPv3UserKeywords9155(user *Node) error {
+	// #15706: a nameless `user { <name> { ... } }` container is not itself
+	// a user; validate each instance and return.
+	if isTwoLevelUserContainer15706(user) {
+		for _, inst := range user.Children {
+			synth := &Node{Keys: append([]string{"user", inst.Name()}, inst.Keys[1:]...), Children: inst.Children}
+			if err := checkSNMPv3UserKeywords9155(synth); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	name := "<unnamed>"
 	if len(user.Keys) > 1 {
 		// Elided user node: the name is the token after `user`, not Keys[1].
