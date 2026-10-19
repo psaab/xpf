@@ -298,7 +298,18 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 				}},
 				"dynamic-dns": interfaceDynamicDNSSchema(),
 				"dhcpv6-client": {desc: "DHCPv6 client", children: map[string]*schemaNode{
-					"client-type":    {desc: "Client type", args: 1, placeholder: "<type>", children: nil},
+					// #15693 (V37-03): typed closed sets. Pre-fix these were
+					// untyped args:1 leaves, so `client-type bogus` committed
+					// (daemon treats !=stateless as stateful), `client-type
+					// autoconfig` (a real Junos type) silently also meant
+					// stateful, and `duid-type vendor`/`duid-en` silently fell
+					// back to duid-ll in normalizeDUIDType. autoconfig is in
+					// the client-type set because Junos accepts it and the
+					// #12714 editor test already drives it; the runtime
+					// treats it as stateful (only "stateless" selects the
+					// Information-Request path), which is now an explicit,
+					// validated choice instead of an accident of any typo.
+					"client-type":    {desc: "Client type", args: 1, placeholder: "<type>", valueType: ValueEnumOf, valueDesc: "DHCPv6 client type (stateful | stateless | autoconfig)", valueExamples: []string{"stateful", "stateless", "autoconfig"}, validator: ValidateEnum([]string{"stateful", "stateless", "autoconfig"}), children: nil},
 					"client-ia-type": {desc: "Client IA type", args: 1, multi: true, placeholder: "<type>", children: nil},
 					"prefix-delegating": {desc: "Prefix delegation", children: map[string]*schemaNode{
 						// #6587: both leaves were untyped `<length>` placeholders
@@ -340,9 +351,9 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 						},
 					}},
 					"client-identifier": {desc: "Client identifier", children: map[string]*schemaNode{
-						"duid-type": {desc: "DUID type", args: 1, placeholder: "<type>", children: nil},
+						"duid-type": {desc: "DUID type", args: 1, placeholder: "<type>", valueType: ValueEnumOf, valueDesc: "DUID type (duid-ll | duid-llt)", valueExamples: []string{"duid-ll", "duid-llt"}, validator: ValidateEnum([]string{"duid-ll", "duid-llt"}), children: nil},
 					}},
-					"req-option": {desc: "Request option", args: 1, placeholder: "<option>", children: nil},
+					"req-option": {desc: "Request option", args: 1, multi: true, placeholder: "<option>", valueType: ValueEnumOf, valueDesc: "DHCPv6 option to request (dns-server | domain-name)", valueExamples: []string{"dns-server", "domain-name"}, validator: ValidateEnum([]string{"dns-server", "domain-name"}), children: nil},
 					"update-router-advertisement": {desc: "Update router advertisement", children: map[string]*schemaNode{
 						"interface": {desc: "Interface", args: 1, placeholder: "<interface>", children: nil},
 					}},

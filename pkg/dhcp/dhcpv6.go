@@ -694,6 +694,7 @@ func (m *Manager) doDHCPv6(ctx context.Context, ifaceName string, mode dhcpExcha
 				}
 			}
 		}
+		lease.DomainSearch = domainSearchFromOptions(resp.Options)
 
 		routers := m.observedRouterAdvertisements(ctx, ifaceName)
 		return &dhcpv6Result{lease: lease, routers: routers, raSampled: true}, nil
@@ -1314,12 +1315,24 @@ func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv
 			}
 		}
 	}
+	// Extract Domain Search List (Option 24, RFC 3646) — requested via
+	// `req-option domain-name` but never parsed before #15693.
+	lease.DomainSearch = domainSearchFromOptions(adv.Options)
 
 	// Router Advertisements are sampled by the exchange wrapper and applied
 	// with the prior lease there so silence can retain a live gateway.
 
 	result.lease = lease
 	return result, nil
+}
+
+// domainSearchFromOptions returns the Domain Search List (Option 24)
+// carried by a DHCPv6 Reply, or nil when the option is absent (#15693).
+func domainSearchFromOptions(opts dhcpv6.MessageOptions) []string {
+	if dsl := opts.DomainSearchList(); dsl != nil && len(dsl.Labels) > 0 {
+		return append([]string(nil), dsl.Labels...)
+	}
+	return nil
 }
 
 // buildDHCPv6RenewModifiers constructs the modifiers for a RENEW/REBIND

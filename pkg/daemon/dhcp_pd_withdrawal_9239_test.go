@@ -107,7 +107,7 @@ func TestPDWithdrawalDrivesTheRealCallback9239(t *testing.T) {
 	// PD signal the classifier takes the cheap management-only path -- the arm
 	// that never applies RA. That is what makes the withdrawal invisible.
 	if _, err := s.LoadSet("set interfaces fxp0 unit 0 family inet dhcp\n" +
-		"set interfaces fxp0 unit 0 family inet6 dhcpv6-client client-type statefull\n"); err != nil {
+		"set interfaces fxp0 unit 0 family inet6 dhcpv6-client client-type stateful\n"); err != nil {
 		t.Fatalf("LoadSet: %v", err)
 	}
 	if _, err := s.Commit(); err != nil {

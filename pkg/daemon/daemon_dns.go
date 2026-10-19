@@ -154,8 +154,8 @@ func validLeaseDNSServer(ip netip.Addr) bool {
 // retained too — matching the address it is still bound to (a firewall
 // must not blackhole its own management resolver mid-renewal). DNS only
 // truly clears when no held lease and no static name-server remain.
-// domain-name / domain-search come from
-// static config only (DHCP domain options are not consumed here).
+// domain-name comes from static config only; domain-search merges static
+// `system domain-search` with DHCPv6 Option 24 retained on leases (#15693).
 func mergeDNSInput(cfg *config.Config, leases []*dhcp.Lease) system.ResolvedDropinInput {
 	return mergeDNSInputWithMgmtDNSRules(cfg, leases, nil, nil)
 }
@@ -270,6 +270,31 @@ func mergeDNSInputWithMgmtDNSRulesRefused(cfg *config.Config, leases []*dhcp.Lea
 			} else {
 				slog.Warn("skipping invalid domain-search entry", "domain", d)
 			}
+		}
+	}
+	// #15693: DHCPv6 Domain Search List (Option 24, requested via
+	// `req-option domain-name` and now retained on the lease) joins the
+	// resolver search list after static domain-search. Same #4902 render
+	// belt: the values arrive from an untrusted upstream server, so each
+	// is re-validated as a DNS name and de-duplicated before rendering.
+	seenSearch := make(map[string]struct{}, len(in.DomainSearch))
+	for _, d := range in.DomainSearch {
+		seenSearch[d] = struct{}{}
+	}
+	for _, l := range sorted {
+		if ri := leaseInstance[l.Interface]; ri != "" {
+			continue
+		}
+		for _, d := range l.DomainSearch {
+			if config.ValidateDNSDomain(d, nil) != nil {
+				slog.Warn("skipping invalid DHCP domain-search entry", "interface", l.Interface, "domain", d)
+				continue
+			}
+			if _, dup := seenSearch[d]; dup {
+				continue
+			}
+			seenSearch[d] = struct{}{}
+			in.DomainSearch = append(in.DomainSearch, d)
 		}
 	}
 	return in
