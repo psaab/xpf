@@ -97,11 +97,16 @@ func TestResignRGBarrierNotCompleteUntilVIPRemoved_6177(t *testing.T) {
 	if len(vi.resignCh) != 1 {
 		t.Fatalf("resignCh depth = %d, want 1 — ResignRG did not signal the instance", len(vi.resignCh))
 	}
-	vi.mu.RLock()
-	pri := vi.cfg.Priority
-	vi.mu.RUnlock()
-	if pri != 0 {
-		t.Fatalf("priority = %d, want 0 — ResignRG must still drive priority to 0 synchronously", pri)
+	// #15213 A25-06 supersedes the synchronous-write half of this
+	// control: ResignRG now records a PENDING resignation (priority 0
+	// stashed) instead of overwriting cfg.Priority, so routine adverts
+	// keep the pre-resign priority until becomeBackup. The pending
+	// marker — not cfg.Priority — is the synchronous side effect.
+	if !vi.resignIsPending() {
+		t.Fatal("ResignRG did not record a pending resignation synchronously")
+	}
+	if got := vi.getPriority(); got != 200 {
+		t.Fatalf("routine priority after ResignRG = %d, want 200 (pre-resign, #15213 A25-06)", got)
 	}
 
 	// THE residual: at this instant the VIP delete has not been issued.

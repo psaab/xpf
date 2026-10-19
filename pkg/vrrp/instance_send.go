@@ -11,12 +11,15 @@ import (
 
 // emitEvent sends a state change event to the manager's event channel.
 func (vi *vrrpInstance) emitEvent() {
+	_, effective, trackDown := vi.prioritySnapshot()
 	evt := VRRPEvent{
 		Interface:         vi.cfg.Interface,
 		Family:            vi.cfg.Family,
 		GroupID:           vi.cfg.GroupID,
 		State:             vi.getState(),
 		VIPs:              vi.vipsSnapshot(),
+		EffectivePriority: effective,
+		TrackDown:         trackDown,
 		VIPDiverged:       vi.vipDiverged.Load() || vi.vipUpdateDiverged.Load(),
 		VIPUpdateFailures: vi.vipUpdateFailures.Load(),
 	}

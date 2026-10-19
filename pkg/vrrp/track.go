@@ -30,21 +30,62 @@ import (
 // The no-track path returns cfg.Priority unchanged. Called from the
 // advert path and masterDownInterval computation — keep it lock-cheap.
 func (vi *vrrpInstance) getPriority() int {
-	vi.mu.RLock()
-	defer vi.mu.RUnlock()
-	p := vi.cfg.Priority
-	if p == 0 || p == 255 {
+	// A pending forced resignation (#15213 A25-06) must not leak
+	// priority 0 into the routine MASTER advert path: ResignRG stashes
+	// 0 in resignPriority while cfg.Priority still carries the
+	// pre-resign value, and the run loop's advertTimer arm sends
+	// getPriority(). Until becomeBackup consumes the resignation, a
+	// routine advert therefore still carries the pre-resign priority;
+	// only the explicit post-becomeBackup burst sends 0.
+	vi.resignMu.Lock()
+	pending := vi.resignPending
+	vi.resignMu.Unlock()
+	if pending {
+		vi.mu.RLock()
+		p := vi.cfg.Priority
+		trackDown := vi.trackDown && vi.cfg.TrackInterface != ""
+		cost := vi.cfg.TrackPriorityCost
+		vi.mu.RUnlock()
+		if p == 0 || p == addressOwnerPriority {
+			return p
+		}
+		if trackDown {
+			p -= cost
+			if p < 1 {
+				p = 1
+			} else if p > 254 {
+				p = 254
+			}
+		}
 		return p
 	}
-	if vi.trackDown && vi.cfg.TrackInterface != "" {
-		p -= vi.cfg.TrackPriorityCost
-		if p < 1 {
-			p = 1
-		} else if p > 254 {
-			p = 254
-		}
+	_, effective, _ := vi.prioritySnapshot()
+	return effective
+}
+
+// prioritySnapshot returns the configured priority, the effective
+// (track-demoted) priority getPriority would advertise, and whether
+// tracking is currently demoting this instance. getPriority delegates
+// here so status surfaces and the advert path can never disagree
+// about the tracked value (#15213 A25-04).
+func (vi *vrrpInstance) prioritySnapshot() (configured, effective int, trackDown bool) {
+	vi.mu.RLock()
+	defer vi.mu.RUnlock()
+	configured = vi.cfg.Priority
+	effective = configured
+	if effective == 0 || effective == addressOwnerPriority {
+		return configured, effective, false
 	}
-	return p
+	if vi.trackDown && vi.cfg.TrackInterface != "" {
+		effective -= vi.cfg.TrackPriorityCost
+		if effective < 1 {
+			effective = 1
+		} else if effective > 254 {
+			effective = 254
+		}
+		return configured, effective, true
+	}
+	return configured, effective, false
 }
 
 // setTrackDown records the tracked interface's link state. Logs only on
