@@ -154,11 +154,47 @@ func TestRendersAsOnePatternPassesGlobsByDesign_10089(t *testing.T) {
 	}
 }
 
-// TestSafeInterfaceNameRefusesWhitespaceAndControls is the RENDER contract,
-// exhaustive over the byte range: any ASCII whitespace or any C0/DEL byte
+// TestIsNegatedMatchPatternOnlyLeadingBang_15079 pins the systemd grammar
+// fact: only a LEADING '!' inverts the [Match] list. A '!' anywhere else is
+// an ordinary character in the glob, and "!!x" is still one inverted test
+// (the parser collapses the run — see #14701).
+func TestIsNegatedMatchPatternOnlyLeadingBang_15079(t *testing.T) {
+	for _, name := range []string{"!eth0", "!!eth0", "!x", "!"} {
+		if !IsNegatedMatchPattern(name) {
+			t.Errorf("IsNegatedMatchPattern(%q) = false, want true (leading '!' inverts the list)", name)
+		}
+	}
+	for _, name := range []string{"eth0", "eth0!", "e!th0", "", "ge-0-0-0"} {
+		if IsNegatedMatchPattern(name) {
+			t.Errorf("IsNegatedMatchPattern(%q) = true, want false (only a leading '!' inverts)", name)
+		}
+	}
+}
+
+// TestRendersAsOnePatternPassesNegationByDesign_15079 pins the intentional
+// scope boundary, mirroring the glob boundary in
+// TestRendersAsOnePatternPassesGlobsByDesign_10089: "!eth0" IS exactly one
+// match-list slot, so the slot-count and render predicates answer their own
+// questions truthfully by passing it. Render-side negation refusal is the
+// separate #15079 belt (IsNegatedMatchPattern) at the call sites.
+func TestRendersAsOnePatternPassesNegationByDesign_15079(t *testing.T) {
+	for _, name := range []string{"!eth0", "!!eth0"} {
+		if !RendersAsOnePattern(name) {
+			t.Errorf("RendersAsOnePattern(%q) = false, want true (negation is one slot — see #15079)", name)
+		}
+		if !SafeInterfaceName(name) {
+			t.Errorf("SafeInterfaceName(%q) = false, want true (negation refusal is the #15079 belt, not this predicate)", name)
+		}
+	}
+}
+
+// TestSafeInterfaceNameRefusesWhitespaceAndControls is the RENDER contract
+// for embedded bytes ("a<BYTE>z"): any ASCII whitespace or any C0/DEL byte
 // refuses, everything else passes (including the unicode spaces NBSP/NEL,
 // which the kernel allows and systemd treats atomically, and glob
 // metacharacters, whose render refusal is #10089's, not this predicate's).
+// A leading '!' is a positional hazard, pinned passing-by-design above;
+// its render refusal is the #15079 belt, not this predicate.
 func TestSafeInterfaceNameRefusesWhitespaceAndControls(t *testing.T) {
 	for b := range 0x100 {
 		in := "a" + string(rune(b)) + "z"

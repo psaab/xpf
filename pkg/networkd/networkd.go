@@ -408,8 +408,9 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 		// whitespace-separated match list. First hazard wins, so a row is
 		// refused at most once. An empty OriginalName is unset, not a name,
 		// and skips the check. Glob metacharacters in either match-list value
-		// are checked separately below for #10089; the [Link] Name= target is
-		// literal, non-match syntax.
+		// are checked separately below for #10089; a leading '!' — systemd's
+		// list-inversion prefix — is checked for #15079; the [Link] Name=
+		// target is literal, non-match syntax.
 		//
 		// Accepted exotic: a kernel device hand-named with control bytes
 		// (legal to dev_valid_name, never minted by udev/systemd) arrives as
@@ -424,12 +425,20 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing interface name %q: glob metacharacter %q in [Match] Name= would be interpreted as a shell-style glob and claim every matching interface (#10089)", ifc.Name, glob))
 			continue
 		}
+		if rendersafe.IsNegatedMatchPattern(ifc.Name) {
+			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing interface name %q: a leading '!' in [Match] Name= inverts the match list, so the unit would claim every interface except the named one (#15079)", ifc.Name))
+			continue
+		}
 		if ifc.OriginalName != "" && !rendersafe.SafeInterfaceName(ifc.OriginalName) {
 			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing OriginalName %q for interface %q: it must be exactly one [Match] OriginalName= pattern and may not contain control bytes or end in a backslash (systemd line continuation) (#9886/#10718)", ifc.OriginalName, ifc.Name))
 			continue
 		}
 		if glob := rendersafe.FirstGlobMetacharacter(ifc.OriginalName); ifc.OriginalName != "" && glob != "" {
 			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing OriginalName %q for interface %q: glob metacharacter %q in [Match] OriginalName= would be interpreted as a shell-style glob and claim every matching interface (#10089)", ifc.OriginalName, ifc.Name, glob))
+			continue
+		}
+		if rendersafe.IsNegatedMatchPattern(ifc.OriginalName) {
+			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing OriginalName %q for interface %q: a leading '!' in [Match] OriginalName= inverts the match list, so the unit would claim every interface except the named one (#15079)", ifc.OriginalName, ifc.Name))
 			continue
 		}
 		// #10718: every other string sink must remain one systemd token without

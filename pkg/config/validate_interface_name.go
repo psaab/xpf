@@ -98,6 +98,19 @@ func ValidateInterfaceName(raw string, _ *Config) error {
 				"one name would leave every interface in the batch unconfigured while the "+
 				"apply reported success. '-' is allowed everywhere else in the name", raw)
 	}
+	// systemd's list-inversion prefix has the same shape of hazard (#15079):
+	// a leading '!' in the rendered [Match] Name= value inverts the whole
+	// match list, so the unit claims every interface EXCEPT the named one.
+	// '!' is not in the allowlist below, so without this branch it would
+	// fall through to the generic invalid-character message, which would
+	// not tell the operator the name would have claimed other devices.
+	if strings.HasPrefix(raw, "!") {
+		return fmt.Errorf(
+			"interface name %q begins with '!'; the name is rendered into "+
+				"the generated .network file's [Match] Name=, where systemd reads a "+
+				"leading '!' as inverting the match list — the name would match, and "+
+				"claim, every interface except the named one (#15079)", raw)
+	}
 	for i := 0; i < len(raw); i++ {
 		c := raw[i]
 		if interfaceNameAllowed(c) {
