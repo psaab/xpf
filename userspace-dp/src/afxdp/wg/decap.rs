@@ -347,6 +347,57 @@ pub(in crate::afxdp) fn is_wg_underlay_frame(
         && forwarding.owns_configured_ip(dst_ip)
 }
 
+/// #15102: is this frame a fragment (head or tail) of a WireGuard outer
+/// datagram to a configured listener? Heads are admitted by the ordinary
+/// listener/zone/ownership gates on their UDP header. Tails carry no UDP
+/// header, so they are admitted only when the reassembler already holds
+/// the head for the same outer identity — `has_head_for` is that check,
+/// supplied by the caller that owns the pool. A tail with no buffered
+/// head is not ours to buffer: it follows the ordinary path (and, in the
+/// shim's disposition, the kernel), exactly as a stray tail does today.
+pub(in crate::afxdp) fn is_wg_fragment_candidate(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    forwarding: &ForwardingState,
+    has_head_for_tail: bool,
+) -> bool {
+    if !forwarding.has_wg_tunnels {
+        return false;
+    }
+    if crate::afxdp::gre_reassembly::frame_is_first_fragment(frame, meta) {
+        // Head: full listener admission on its UDP header.
+        if meta.protocol != crate::ip_proto::PROTO_UDP {
+            return false;
+        }
+        let Some(end) = outer_datagram_end(frame, meta) else {
+            return false;
+        };
+        let l4 = meta.l4_offset as usize;
+        let Some(udp) = l4.checked_add(8).and_then(|e| frame.get(l4..e)) else {
+            return false;
+        };
+        if udp.len() < 8 || l4 + 8 > end {
+            return false;
+        }
+        let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+        let Some(dst_ip) = outer_destination_ip(frame, meta) else {
+            return false;
+        };
+        let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
+        let Some((endpoint, _)) =
+            wg_endpoint_for_listen_port(forwarding, dst_port, dst_ip, ingress_ifindex)
+        else {
+            return false;
+        };
+        wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip)
+            && forwarding.owns_configured_ip(dst_ip)
+    } else {
+        has_head_for_tail
+            && crate::afxdp::gre_reassembly::fragment_upper_protocol(frame, meta)
+                == Some(crate::ip_proto::PROTO_UDP)
+    }
+}
+
 /// Decapsulate an inbound WireGuard transport-data record, or `None`.
 ///
 /// `None` means "not ours, or not decryptable" and the caller leaves the packet

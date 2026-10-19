@@ -144,6 +144,34 @@ pub fn native_gre_fragment_stays_on_helper(
         && is_fragment
         && ((protocol == 47 && wire_protocol == 47) || (protocol == 255 && wire_protocol == 47))
 }
+
+/// #15102: must a WireGuard outer fragment be kept on the userspace (XSK)
+/// path instead of a kernel pass? `protocol`/`wire_protocol` are the parsed
+/// and pre-substitution protocols; `is_fragment` separates a fragmented
+/// datagram from a whole one. A first fragment keeps UDP (and, when it is a
+/// transport-data record to a steered listener, `wg_worker_claim` already
+/// claims it); this predicate's load-bearing row is the TAIL: protocol 255
+/// with wire protocol UDP. The tail carries no port and no record type, so
+/// the shim cannot prove it is WG — it keeps EVERY UDP tail on the helper,
+/// where the worker buffers it only if the head was already admitted to a
+/// configured listener (see `is_wg_fragment_candidate`); every other UDP
+/// tail is then adjudicated as an ordinary fragment by downstream stages,
+/// never kernel-passed merely for being a tail. `wg_rx_armed` is the
+/// `USERSPACE_CTRL_FLAG_WG_RX` state: with no WG tunnel configured there
+/// is no listener to reassemble for and tails keep today's disposition.
+/// Host-executed by the userspace-dp test.
+#[inline(always)]
+pub fn wg_fragment_stays_on_helper(
+    protocol: u8,
+    wire_protocol: u8,
+    is_fragment: bool,
+    wg_rx_armed: bool,
+) -> bool {
+    wg_rx_armed
+        && is_fragment
+        && ((protocol == 17 && wire_protocol == 17) || (protocol == 255 && wire_protocol == 17))
+}
+
 /// #14954: may the native-GRE inner classifier build a session key from
 /// this inner packet, or must it miss (return 0, stay in userspace)?
 ///

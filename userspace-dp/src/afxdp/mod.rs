@@ -784,6 +784,9 @@ mod tests_gre_outer_unverified_14652;
 #[path = "tests_gre_transit_frag_15095.rs"]
 mod tests_gre_transit_frag_15095;
 #[cfg(test)]
+#[path = "tests_wg_outer_frag_15102.rs"]
+mod tests_wg_outer_frag_15102;
+#[cfg(test)]
 #[path = "tests_decap_dnat_table.rs"]
 mod tests_decap_dnat_table;
 #[cfg(test)]
