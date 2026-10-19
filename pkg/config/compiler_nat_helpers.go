@@ -1,11 +1,10 @@
 package config
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"math/big"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 )
@@ -341,20 +340,17 @@ func appendPoolAddresses(pool *NATPool, tokens []string) error {
 			expanded, err := expandAddressRange(tok, tokens[i+2])
 			switch {
 			case errors.Is(err, errNATAddressRangeTooLarge):
-				// #8814: RECORD rather than fail. A hard error here reaches the
-				// LENIENT path too -- appendPoolAddresses is called from the
-				// security compiler chain, which carries no compileOpts -- so a
-				// persisted config with an oversized range could not boot,
-				// defeating what CompileConfigLenient exists for. The pool loads
-				// WITHOUT the oversized range and
-				// validateNATPoolAddressRangeStrict hard-rejects it at commit.
-				// Same shape as PortRangeInvalidSpec on this struct.
+				// #8814: RECORD rather than fail (see OversizedAddressRanges).
 				pool.OversizedAddressRanges = append(pool.OversizedAddressRanges,
 					fmt.Sprintf("%s to %s: %v", tok, tokens[i+2], err))
 			case err != nil:
-				// Malformed input (not a /32, not IPv4, low > high) still fails
-				// on both paths: there is no safe interpretation to fall back to.
-				return fmt.Errorf("pool %q address range: %w", pool.Name, err)
+				// #15674: RECORD rather than fail. A hard error here also
+				// reaches the LENIENT path (no compileOpts in this chain),
+				// so a persisted malformed/reversed/non-host-mask range
+				// bricked boot. Record it; strict rejects, lenient warns,
+				// and the pool loads without that range.
+				pool.InvalidAddressRanges = append(pool.InvalidAddressRanges,
+					fmt.Sprintf("%s to %s: %v", tok, tokens[i+2], err))
 			default:
 				pool.Addresses = append(pool.Addresses, expanded...)
 			}
@@ -367,108 +363,94 @@ func appendPoolAddresses(pool *NATPool, tokens []string) error {
 	return nil
 }
 
-// errNATAddressRangeTooLarge marks the ONE expandAddressRange failure that is a
-// SIZE limit rather than a malformed input (#8814).
-//
-// The distinction is what lets the caller record an oversized range and keep
-// going on the tolerant load / peer-sync path while a malformed one still fails
-// there. Malformed input has no safe interpretation; an oversized range has one
-// -- omit it -- and CompileConfigLenient exists precisely so an already-persisted
-// config boots through.
-//
-// THE CAP ITSELF STAYS HERE, and that is deliberate rather than a half-measure.
-// #8814 proposed moving it out of the compiler entirely, into a strict
-// validator. Measured, the widest legal spelling is
-// `address 0.0.0.0/32 to 255.255.255.255/32` -> 4294967296 IPs, so an expansion
-// with no bound would try to allocate 4.29 BILLION strings on the LENIENT path,
-// which is the boot path. That trades a load failure for an OOM, which is worse.
-// So the bound stays and only the ERROR becomes a recordable fact.
+// errNATAddressRangeTooLarge marks the expandAddressRange failure that is a
+// SIZE limit rather than a malformed input (#8814). The cap stays here: the
+// widest spelling would otherwise allocate billions of strings on the
+// lenient boot path. Only the ERROR became a recordable fact.
 var errNATAddressRangeTooLarge = errors.New("address range too large")
 
-// expandAddressRange expands "low/mask to high/mask" into individual IP strings.
-// IPv4 endpoints must be /32, IPv6 endpoints /128 (bare endpoints default to
-// the host mask). Both endpoints must share a family. Max 256 IPs; a larger
-// range returns errNATAddressRangeTooLarge (see above).
+// parseRangeEndpoint parses one range endpoint: a bare IP or a host prefix
+// (/32 for IPv4, /128 for IPv6). Any other explicit prefix length is
+// rejected (#15674): previously net.ParseCIDR discarded the mask and the
+// endpoint was silently rewritten to a /32 host. IPv6 support itself
+// landed via #15677 on master; this keeps the host-mask validation.
+func parseRangeEndpoint(s string) (netip.Addr, error) {
+	if strings.Contains(s, "/") {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return netip.Addr{}, fmt.Errorf("invalid address %q: %w", s, err)
+		}
+		addr := p.Addr()
+		want := 128
+		if addr.Is4() {
+			want = 32
+		}
+		if p.Bits() != want {
+			return netip.Addr{}, fmt.Errorf(
+				"address %q has non-host prefix length /%d; range endpoints must be bare IPs or /%d",
+				s, p.Bits(), want)
+		}
+		return addr, nil
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("invalid address %q: %w", s, err)
+	}
+	return addr, nil
+}
+
+// expandAddressRange expands "low to high" into individual host strings
+// (/32 for IPv4, /128 for IPv6). Endpoints must be bare IPs or host
+// prefixes of the same family. Max 256 IPs; a larger range returns
+// errNATAddressRangeTooLarge.
 func expandAddressRange(low, high string) ([]string, error) {
-	lowFam := natAddrFamily(natCIDRIPPart(low))
-	highFam := natAddrFamily(natCIDRIPPart(high))
-	if lowFam != "" && highFam != "" && lowFam != highFam {
-		return nil, fmt.Errorf("address range endpoints must share an address family: %q (%s) to %q (%s)", low, lowFam, high, highFam)
-	}
-	isV6 := lowFam == "v6" || highFam == "v6" || strings.Contains(low, ":") || strings.Contains(high, ":")
-	hostMask := "/32"
-	if isV6 {
-		hostMask = "/128"
-	}
-	lowCIDR := low
-	if !strings.Contains(lowCIDR, "/") {
-		lowCIDR += hostMask
-	}
-	highCIDR := high
-	if !strings.Contains(highCIDR, "/") {
-		highCIDR += hostMask
-	}
-	lowIP, _, err := net.ParseCIDR(lowCIDR)
+	lowAddr, err := parseRangeEndpoint(low)
 	if err != nil {
-		return nil, fmt.Errorf("invalid low address %q: %w", low, err)
+		return nil, err
 	}
-	highIP, _, err := net.ParseCIDR(highCIDR)
+	highAddr, err := parseRangeEndpoint(high)
 	if err != nil {
-		return nil, fmt.Errorf("invalid high address %q: %w", high, err)
+		return nil, err
 	}
-	if isV6 {
-		if lowIP.To4() != nil && !strings.Contains(low, ":") || highIP.To4() != nil && !strings.Contains(high, ":") {
-			return nil, fmt.Errorf("address range endpoints must share an address family: %q to %q", low, high)
-		}
-		low16 := lowIP.To16()
-		high16 := highIP.To16()
-		if low16 == nil || high16 == nil {
-			return nil, fmt.Errorf("invalid IPv6 address in range %q to %q", low, high)
-		}
-		lowN := new(big.Int).SetBytes(low16)
-		highN := new(big.Int).SetBytes(high16)
-		if lowN.Cmp(highN) > 0 {
-			return nil, fmt.Errorf("low address %s > high address %s", low, high)
-		}
-		count := new(big.Int).Sub(highN, lowN)
-		count.Add(count, big.NewInt(1))
-		if count.Cmp(big.NewInt(256)) > 0 {
-			return nil, fmt.Errorf("%w: %s IPs (max 256)", errNATAddressRangeTooLarge, count.String())
-		}
-		n := int(count.Int64())
-		result := make([]string, 0, n)
-		cur := new(big.Int).Set(lowN)
-		one := big.NewInt(1)
-		for range n {
-			b := cur.Bytes()
-			ipBytes := make([]byte, 16)
-			copy(ipBytes[16-len(b):], b)
-			result = append(result, net.IP(ipBytes).String()+"/128")
-			cur.Add(cur, one)
-		}
-		return result, nil
+	if lowAddr.Is4() != highAddr.Is4() {
+		return nil, fmt.Errorf("address range endpoints %q and %q are different address families", low, high)
 	}
-	lowIP4 := lowIP.To4()
-	highIP4 := highIP.To4()
-	if lowIP4 == nil || highIP4 == nil {
-		return nil, fmt.Errorf("address range only supports IPv4")
-	}
-	lowN := binary.BigEndian.Uint32(lowIP4)
-	highN := binary.BigEndian.Uint32(highIP4)
-	if lowN > highN {
+	if highAddr.Compare(lowAddr) < 0 {
 		return nil, fmt.Errorf("low address %s > high address %s", low, high)
 	}
-	// #5194: inclusive count in uint64 (uint32 +1 wraps full-domain to 0).
-	count := uint64(highN) - uint64(lowN) + 1
-	if count > 256 {
-		return nil, fmt.Errorf("%w: %d IPs (max 256)", errNATAddressRangeTooLarge, count)
+	// Count: IPv4 via uint32 subtraction in uint64 (#5194 wrap guard);
+	// IPv6 via successive Next() steps bounded by the cap (no 128-bit
+	// subtraction). The exact count is reported for IPv4 so the recorded
+	// oversized spec carries the size (#8814 test contract).
+	var count uint64
+	if lowAddr.Is4() {
+		l4, h4 := lowAddr.As4(), highAddr.As4()
+		lo := uint64(l4[0])<<24 | uint64(l4[1])<<16 | uint64(l4[2])<<8 | uint64(l4[3])
+		hi := uint64(h4[0])<<24 | uint64(h4[1])<<16 | uint64(h4[2])<<8 | uint64(h4[3])
+		count = hi - lo + 1
+		if count > 256 {
+			return nil, fmt.Errorf("%w: %d IPs (max 256)", errNATAddressRangeTooLarge, count)
+		}
+	} else {
+		count = 1
+		for cur := lowAddr; cur != highAddr; {
+			cur = cur.Next()
+			count++
+			if count > 256 {
+				return nil, fmt.Errorf("%w: more than 256 IPs (max 256)", errNATAddressRangeTooLarge)
+			}
+		}
 	}
-	var result []string
-	buf := make(net.IP, 4)
-	// count is bounded by 256 here, so the uint32 loop bound cannot wrap.
-	for i := uint32(0); i < uint32(count); i++ {
-		binary.BigEndian.PutUint32(buf, lowN+i)
-		result = append(result, buf.String()+"/32")
+	suffix := "/128"
+	if lowAddr.Is4() {
+		suffix = "/32"
+	}
+	result := make([]string, 0, count)
+	for cur := lowAddr; ; cur = cur.Next() {
+		result = append(result, cur.String()+suffix)
+		if cur == highAddr {
+			break
+		}
 	}
 	return result, nil
 }
