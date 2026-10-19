@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -1547,35 +1546,51 @@ func (s *Store) CommitDiffSummary() string {
 
 	activeLines := splitLines(active.FormatSet())
 	candidateLines := splitLines(candidate.FormatSet())
-	sort.Strings(activeLines)
-	sort.Strings(candidateLines)
 
-	var added, removed int
-	for i, j := 0, 0; i < len(activeLines) || j < len(candidateLines); {
-		switch {
-		case i == len(activeLines):
-			added += len(candidateLines) - j
-			j = len(candidateLines)
-		case j == len(candidateLines):
-			removed += len(activeLines) - i
-			i = len(activeLines)
-		case activeLines[i] < candidateLines[j]:
-			removed++
-			i++
-		case candidateLines[j] < activeLines[i]:
-			added++
-			j++
-		default:
-			i++
-			j++
-		}
-	}
+	// Order-aware sequence diff (#15168, B24-01): the previous code sorted
+	// both line lists, so a pure reorder of first-match policies counted as
+	// zero changes. Compute an LCS over the ordered lines; lines off the LCS
+	// are removed (old side) or added (new side). A moved line therefore
+	// counts as one removal plus one addition, duplicate lines are handled
+	// positionally, and identical order yields zero.
+	added, removed := sequenceLineDiffCounts(activeLines, candidateLines)
 
 	total := added + removed
 	if total == 0 {
 		return ""
 	}
 	return fmt.Sprintf("%d statement(s) changed (%d added, %d removed)", total, added, removed)
+}
+
+// sequenceLineDiffCounts returns (added, removed) between two ordered line
+// lists via an LCS alignment (#15168). Lines on the LCS are unchanged;
+// every other old line is a removal and every other new line is an addition,
+// so a moved line counts once on each side and duplicates align positionally.
+func sequenceLineDiffCounts(oldLines, newLines []string) (added, removed int) {
+	lo, ln := len(oldLines), len(newLines)
+	if lo == 0 {
+		return ln, 0
+	}
+	if ln == 0 {
+		return 0, lo
+	}
+	dp := make([][]int, lo+1)
+	for i := range dp {
+		dp[i] = make([]int, ln+1)
+	}
+	for i := lo - 1; i >= 0; i-- {
+		for j := ln - 1; j >= 0; j-- {
+			if oldLines[i] == newLines[j] {
+				dp[i][j] = dp[i+1][j+1] + 1
+			} else if dp[i+1][j] >= dp[i][j+1] {
+				dp[i][j] = dp[i+1][j]
+			} else {
+				dp[i][j] = dp[i][j+1]
+			}
+		}
+	}
+	lcs := dp[0][0]
+	return ln - lcs, lo - lcs
 }
 
 // rollbackPath returns the file path for rollback slot n (1-based).
