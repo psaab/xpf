@@ -73,6 +73,104 @@ func syslogClientFingerprint(cfg *config.Config) (string, bool) {
 	return hex.EncodeToString(h.Sum(nil)), true
 }
 
+// buildIfNames builds the EventReader's kernel-ifindex -> operator-facing
+// interface-name map (#15094). For each configured interface it resolves
+// the authored (Junos) name through cfg.ResolveKernelIfName — which maps
+// "ge-0/0/1" to kernel "ge-0-0-1", a unit ref to its VLAN/tunnel device,
+// and rethN[.unit] onto the local physical member's device — looks that
+// kernel device up, and stores the AUTHORED name under its ifindex. The
+// pre-fix code looked the authored name up directly, so every interface
+// whose authored spelling differs from its kernel spelling (all
+// slash-spelled interfaces, all RETHs) was silently skipped.
+//
+// Per-unit entries are included: a VLAN unit's device ("ge-0-0-1.50") is
+// a distinct ifindex from its parent's, and an event stamped with the
+// child ifindex (kernel XDP path) must render "ge-0/0/1.50", not "".
+// Unit 0 of an untagged interface resolves to the parent device and
+// renders as the bare authored name (first-wins, see below).
+//
+// Iteration is sorted and first-wins so a shared ifindex is named
+// deterministically: a parent is visited before its units (its bare
+// name claims the parent device before unit 0 collapses onto it), and
+// "reth0" sorts after its member "ge-0/0/2" only by name order — the
+// RETH's claim on the member device is what an operator wants rendered
+// for traffic on the redundant interface, so RETH interfaces are
+// visited FIRST, before physical members. Within one interface the
+// parent entry precedes its units.
+func buildIfNames(cfg *config.Config) map[uint32]string {
+	ifNames := make(map[uint32]string)
+	if cfg == nil {
+		return ifNames
+	}
+	put := func(kernelName, display string) {
+		if kernelName == "" || display == "" {
+			return
+		}
+		link, err := netlink.LinkByName(kernelName)
+		if err != nil || link == nil {
+			return
+		}
+		idx := uint32(link.Attrs().Index)
+		if idx == 0 {
+			return
+		}
+		if _, exists := ifNames[idx]; !exists {
+			ifNames[idx] = display
+		}
+	}
+	// RETH interfaces first (see doc comment), then the rest; each group
+	// in sorted name order. RangeInterfaces skips present-but-nil slots.
+	var rethNames, otherNames []string
+	config.RangeInterfaces(cfg, func(name string, _ *config.InterfaceConfig) {
+		if strings.HasPrefix(name, "reth") {
+			rethNames = append(rethNames, name)
+		} else {
+			otherNames = append(otherNames, name)
+		}
+	})
+	sort.Strings(rethNames)
+	sort.Strings(otherNames)
+	for _, names := range [][]string{rethNames, otherNames} {
+		for _, name := range names {
+			ifc, ok := config.LookupInterface(cfg, name)
+			if !ok {
+				continue
+			}
+			display := name
+			if ifc.Name != "" {
+				display = ifc.Name
+			}
+			put(cfg.ResolveKernelIfName(name), display)
+			// Units in numeric order; unit 0 normally collapses onto
+			// the parent device (already claimed, first-wins) while a
+			// VLAN/tunnel unit claims its own child device.
+			unitNums := make([]int, 0, len(ifc.Units))
+			config.RangeUnits(ifc, func(num int, _ *config.InterfaceUnit) {
+				unitNums = append(unitNums, num)
+			})
+			sort.Ints(unitNums)
+			for _, num := range unitNums {
+				ref := fmt.Sprintf("%s.%d", name, num)
+				unitDisplay := ref
+				if ifc.Name != "" {
+					unitDisplay = fmt.Sprintf("%s.%d", ifc.Name, num)
+				}
+				if num == 0 {
+					// Unit 0 renders as the bare interface name when
+					// it collapses onto the parent device; the
+					// first-wins parent entry already covers that.
+					// A unit 0 on its OWN device (VLAN 0 tunnel /
+					// xfrm) still claims it under the bare name.
+					put(cfg.ResolveKernelIfName(ref), display)
+					continue
+				}
+				put(cfg.ResolveKernelIfName(ref), unitDisplay)
+			}
+		}
+	}
+	return ifNames
+}
+
 func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) {
 	if er == nil {
 		return
@@ -108,18 +206,24 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 	// wired" and would restore the pre-#6859 fan-out.
 	er.SetFilterTermSyslog(dpuserspace.FilterTermSyslogMap(cfg))
 
-	// Wire interface names (ifindex -> name) from config
-	ifNames := make(map[uint32]string)
-	for name, iface := range cfg.Interfaces.Interfaces {
-		ifName := name
-		if iface != nil && iface.Name != "" {
-			ifName = iface.Name
-		}
-		if link, err := netlink.LinkByName(ifName); err == nil {
-			ifNames[uint32(link.Attrs().Index)] = ifName
-		}
-	}
-	er.SetIfNames(ifNames)
+	// Wire interface names (ifindex -> operator-facing name) from config.
+	// #15094: resolve through cfg.ResolveKernelIfName for the kernel
+	// lookup — the authored name (e.g. "ge-0/0/1") is not a kernel
+	// device ("ge-0-0-1"), so LinkByName on the authored spelling
+	// silently skipped every Junos-spelled interface and RT_FLOW /
+	// show security log lost packet-incoming-interface. Store the
+	// AUTHORED (operator-facing) name as the value. Include per-unit
+	// entries (a VLAN unit's kernel device, e.g. "ge-0-0-1.50" or the
+	// RETH member's "ge-0-0-2.50", is a distinct ifindex from the
+	// parent's) rendered as "<iface>.<unit>", and RETH interfaces
+	// (ResolveKernelIfName maps rethN[.unit] onto the local physical
+	// member's device, so the member-device ifindex renders under
+	// the reth name). Sorted iteration keeps first-wins collision
+	// handling deterministic: the parent entry is written before its
+	// unit-0 collapse onto the same device, and a RETH entry before
+	// its member's own entry, so the operator-facing logical name
+	// wins over a member/physical spelling for a shared ifindex.
+	er.SetIfNames(buildIfNames(cfg))
 
 	// Event mode: write to local file instead of remote syslog
 	if cfg.Security.Log.Mode == "event" {
