@@ -657,6 +657,13 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		if err := emptiedChainDenyCollision(fc); err != nil {
 			return err
 		}
+		// #15008 render-side belt, same posture: community-lists share
+		// FRR's flat namespace, so two operator names normalizing to one
+		// FRR name — or an operator name forging a generated delete
+		// backing — would fuse lists and silently alter a policy.
+		if err := communityListCollision(fc.PolicyOptions); err != nil {
+			return err
+		}
 	}
 
 	section, overlays := m.buildManagedSectionWithQNH11447(fc)
