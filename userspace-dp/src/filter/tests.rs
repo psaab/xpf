@@ -2014,6 +2014,132 @@ fn flow_cache_hit_runs_both_fall_through_policers() {
     }
 }
 
+// #15793: cached/deferred three-color policer replay must apply DSCP
+// rewrites with the same precedence as the fresh/inline walk — the LATEST
+// matched term's policer rewrite wins. The cached replay folded with
+// `.or` (first-wins), so two fall-through policer terms carrying distinct
+// DSCP rewrites emitted the first term's mark on cached packets while the
+// inline walk (per-term assignment in merge_matched_tx_modifiers /
+// merge_matched_modifiers) emitted the second term's. Because production
+// snapshot policers carry no DSCP treatments, the runtimes are built
+// directly so each term's policer has a deterministic rewrite.
+#[test]
+fn cached_three_color_replay_latest_policer_dscp_wins_15793() {
+    use std::sync::Arc as StdArc;
+    let rt = |id: u32, name: &str, dscp: u8| {
+        let treatments = ThreeColorTreatments {
+            green: ColorTreatment::rewrite(dscp),
+            yellow: ColorTreatment::rewrite(dscp),
+            red: ColorTreatment::rewrite(dscp),
+        };
+        let state =
+            ThreeColorPolicerState::sr_tcm_with_treatments(1, 10_000, 5_000, true, treatments)
+                .expect("valid srTCM");
+        StdArc::new(ThreeColorPolicerRuntime::new(id, name.into(), state))
+    };
+    let first_pol = rt(90_001, "first-pol".into(), 10);
+    let second_pol = rt(90_002, "second-pol".into(), 46);
+    let make_term =
+        |id: u32, name: &str, pol: &StdArc<ThreeColorPolicerRuntime>, cont: bool| FilterTerm {
+            id,
+            name: name.into(),
+            source_v4: Vec::new(),
+            source_v6: Vec::new(),
+            dest_v4: Vec::new(),
+            dest_v6: Vec::new(),
+            source_addr_constrained: false,
+            dest_addr_constrained: false,
+            source_except: false,
+            dest_except: false,
+            protocol_bitmap: [0; 4],
+            protocol_match_enabled: false,
+            source_ports: PortMatcher::Any,
+            dest_ports: PortMatcher::Any,
+            source_port_constrained: false,
+            dest_port_constrained: false,
+            source_port_except: false,
+            dest_port_except: false,
+            dscp_bitmap: 0,
+            dscp_match_enabled: false,
+            tcp_flags_mask: None,
+            tcp_flags_forbidden: None,
+            is_fragment: false,
+            icmp_type_bitmap: [0; 4],
+            icmp_type_match_enabled: false,
+            icmp_code_bitmap: [0; 4],
+            icmp_code_match_enabled: false,
+            flex_enabled: false,
+            flex_offset: 0,
+            flex_length: 0,
+            flex_value: 0,
+            flex_mask: 0,
+            flex_match_start: FlexMatchStart::Layer3,
+            action: FilterAction::Accept,
+            continue_term: cont,
+            count: String::new(),
+            has_count: false,
+            log: false,
+            policer_name: StdArc::from(""),
+            three_color_policer: Some(StdArc::clone(pol)),
+            routing_instance: StdArc::from(""),
+            forwarding_class: StdArc::from(""),
+            dscp_rewrite: None,
+            counter: StdArc::new(FilterTermCounter::default()),
+        };
+    let filter = Filter {
+        id: 1,
+        name: "policed".into(),
+        family: "inet".into(),
+        terms: vec![
+            make_term(1, "t-first", &first_pol, true),
+            make_term(2, "t-second", &second_pol, false),
+        ],
+        affects_tx_selection: true,
+        affects_route_lookup: false,
+        has_counter_terms: false,
+        has_log_terms: false,
+        has_terminal_action_terms: true,
+        has_dscp_match_terms: false,
+        has_per_packet_l4_match_terms: false,
+        has_three_color_policer_terms: true,
+    };
+    // Fresh/inline walk: latest matched term wins.
+    let fresh = evaluate_filter_ref_tx_selection_runtime_counted(
+        &filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        TermMatchExtra::default(),
+        100,
+        0,
+    );
+    assert_eq!(
+        fresh.dscp_rewrite,
+        Some(46),
+        "fresh walk: latest matched term's policer rewrite wins (#15793)"
+    );
+    // Cached capture + replay must agree with the fresh walk.
+    let cached = evaluate_filter_ref_tx_selection_cached(
+        &filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+    );
+    assert_eq!(cached.three_color_policers.len(), 2);
+    let replayed = apply_cached_three_color_policers(&cached.three_color_policers, 0, 100);
+    assert_eq!(
+        replayed.dscp_rewrite, fresh.dscp_rewrite,
+        "cached replay DSCP must equal fresh walk DSCP (#15793)"
+    );
+    assert_eq!(replayed.dscp_rewrite, Some(46));
+}
+
 #[test]
 fn equivalent_snapshot_refresh_preserves_three_color_state_and_counters() {
     let filters = [FirewallFilterSnapshot {
