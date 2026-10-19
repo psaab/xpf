@@ -699,6 +699,7 @@ pub(crate) struct ThreeColorPolicerCounters {
 pub(crate) struct ThreeColorPolicerRuntime {
     pub(crate) id: u32,
     pub(crate) name: Arc<str>,
+    pub(crate) scope: PolicerRuntimeScope,
     // #5390: NO `Mutex`. The token-bucket state meters lock-free through CAS
     // over its own atomics (`filter/policer.rs`), so the RSS-spread flow
     // aggregate no longer serializes on a per-packet futex. Removing the lock
@@ -848,9 +849,19 @@ impl CachedFilterCounters {
 
 impl ThreeColorPolicerRuntime {
     pub(crate) fn new(id: u32, name: String, state: ThreeColorPolicerState) -> Self {
+        Self::new_scoped(id, PolicerRuntimeScope::unreferenced(&name), state)
+    }
+
+    pub(crate) fn new_scoped(
+        id: u32,
+        scope: PolicerRuntimeScope,
+        state: ThreeColorPolicerState,
+    ) -> Self {
+        let name = scope.policer_name().to_string();
         Self {
             id,
             name: Arc::<str>::from(name),
+            scope,
             state,
             counters: ThreeColorPolicerCounters::default(),
         }
@@ -901,9 +912,23 @@ impl ThreeColorPolicerRuntime {
         // Relaxed atomics as before.
         let mode = self.state.mode_name().to_string();
         let color_blind = self.state.color_blind();
+        let (family, filter_name, term_name) = match &self.scope {
+            PolicerRuntimeScope::Term {
+                family,
+                filter,
+                term,
+                ..
+            } => (family.clone(), filter.clone(), term.clone()),
+            PolicerRuntimeScope::Unreferenced { .. } => {
+                (String::new(), String::new(), String::new())
+            }
+        };
         crate::protocol::ThreeColorPolicerStatus {
             id: self.id,
             name: self.name.to_string(),
+            family,
+            filter_name,
+            term_name,
             mode,
             color_blind,
             green_packets: self.counters.green.packets.load(Ordering::Relaxed),
@@ -1198,31 +1223,17 @@ impl FilterState {
     pub(crate) fn three_color_policer_statuses(
         &self,
     ) -> Vec<crate::protocol::ThreeColorPolicerStatus> {
-        let mut indices = rustc_hash::FxHashMap::<String, usize>::default();
-        let mut statuses: Vec<crate::protocol::ThreeColorPolicerStatus> =
-            Vec::with_capacity(self.three_color_policers.len());
-        for policer in &self.three_color_policers {
-            let status = policer.status();
-            if let Some(&index) = indices.get(status.name.as_str()) {
-                let aggregate = &mut statuses[index];
-                aggregate.id = aggregate.id.min(status.id);
-                aggregate.green_packets =
-                    aggregate.green_packets.saturating_add(status.green_packets);
-                aggregate.green_bytes = aggregate.green_bytes.saturating_add(status.green_bytes);
-                aggregate.yellow_packets =
-                    aggregate.yellow_packets.saturating_add(status.yellow_packets);
-                aggregate.yellow_bytes =
-                    aggregate.yellow_bytes.saturating_add(status.yellow_bytes);
-                aggregate.red_packets = aggregate.red_packets.saturating_add(status.red_packets);
-                aggregate.red_bytes = aggregate.red_bytes.saturating_add(status.red_bytes);
-                aggregate.drop_packets =
-                    aggregate.drop_packets.saturating_add(status.drop_packets);
-                aggregate.drop_bytes = aggregate.drop_bytes.saturating_add(status.drop_bytes);
-            } else {
-                indices.insert(status.name.clone(), statuses.len());
-                statuses.push(status);
-            }
-        }
+        // #15680: publish one row per term-scoped runtime. The pre-fix
+        // aggregation by configured name collapsed distinct
+        // (family, filter, term) buckets into a single row, so
+        // `show firewall` re-rendered the aggregate under every term
+        // referencing that policer. Unreferenced definitions keep their
+        // single name-scoped row (empty scope fields).
+        let mut statuses: Vec<crate::protocol::ThreeColorPolicerStatus> = self
+            .three_color_policers
+            .iter()
+            .map(|policer| policer.status())
+            .collect();
         statuses.sort_by_key(|status| status.id);
         statuses
     }

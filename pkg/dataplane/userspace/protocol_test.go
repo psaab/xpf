@@ -495,6 +495,9 @@ func TestProcessStatusThreeColorPolicerCountersRoundTrip(t *testing.T) {
 			{
 				ID:            1,
 				Name:          "wan-egress",
+				Family:        "inet",
+				FilterName:    "edge",
+				TermName:      "policed",
 				Mode:          "single-rate",
 				ColorBlind:    true,
 				GreenPackets:  10,

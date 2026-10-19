@@ -12,6 +12,13 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
+// policerScope identifies one term-scoped BPF policer instance (#15680).
+// The zero term/filter/family fields denote the single name-scoped slot
+// retained for a definition no term references.
+type policerScope struct {
+	family, filter, term, policer string
+}
+
 // compileFirewallFilters compiles firewall filter config into BPF maps.
 // It creates filter_rules, filter_configs, iface_filter_map, and policer_configs entries.
 func compileFirewallFilters(dp DataPlane, cfg *config.Config, result *CompileResult) error {
@@ -35,55 +42,39 @@ func compileFirewallFilters(dp DataPlane, cfg *config.Config, result *CompileRes
 		}
 	}
 
-	// Compile policer definitions (sorted for deterministic IDs, 1-based)
-	policerIDs := make(map[string]uint32) // policer name -> ID (1-based)
-	if len(cfg.Firewall.Policers) > 0 {
+	// #15680: allocate one BPF policer slot per (family, filter, term,
+	// policer) instance, matching the userspace term-scoped runtimes and
+	// Junos term-specific default. The pre-fix code allocated one slot per
+	// definition name, so two terms referencing the same policer shared a
+	// single token bucket in the retired-eBPF compiler. An authored
+	// `filter-specific` sharing request has no config representation, so
+	// the per-term default always applies here. Unreferenced definitions
+	// retain one name-scoped slot so their config is still programmed.
+	type policerDefinition struct {
+		cfg PolicerConfig
+	}
+	definitions := make(map[string]policerDefinition)
+	{
 		polNames := make([]string, 0, len(cfg.Firewall.Policers))
 		for name := range cfg.Firewall.Policers {
 			polNames = append(polNames, name)
 		}
 		sort.Strings(polNames)
-		for i, name := range polNames {
-			polID := uint32(i + 1) // 1-based (0 = no policer)
-			if polID >= MaxPolicers {
-				slog.Warn("policer limit reached", "policer", name)
-				break
-			}
+		for _, name := range polNames {
 			pol := cfg.Firewall.Policers[name]
-			bpfCfg := PolicerConfig{
-				RateBytesSec: pol.BandwidthLimit,
-				BurstBytes:   pol.BurstSizeLimit,
+			definitions[name] = policerDefinition{
+				cfg: PolicerConfig{
+					RateBytesSec: pol.BandwidthLimit,
+					BurstBytes:   pol.BurstSizeLimit,
+				},
 			}
-			if err := dp.SetPolicerConfig(polID, bpfCfg); err != nil {
-				return fmt.Errorf("set policer config %s: %w", name, err)
-			}
-			policerIDs[name] = polID
-			slog.Info("compiled policer",
-				// #8429: BandwidthLimit is BYTES/sec, so the old "rate_bps"
-				// key named this value wrongly by a factor of 8. This leg's
-				// ENFORCEMENT is correct (RateBytesSec above is byte-named);
-				// only the log label was lying, and it lied in the same
-				// direction as the userspace defect — an operator reading it to
-				// check a policer saw a rate 8x too low.
-				"name", name, "rate_bytes_sec", pol.BandwidthLimit,
-				"burst", pol.BurstSizeLimit, "id", polID)
 		}
-	}
-
-	// Compile three-color policer definitions (continue IDs after single-rate)
-	if len(cfg.Firewall.ThreeColorPolicers) > 0 {
-		nextPolID := uint32(len(policerIDs) + 1) // continue after single-rate IDs
 		tcpNames := make([]string, 0, len(cfg.Firewall.ThreeColorPolicers))
 		for name := range cfg.Firewall.ThreeColorPolicers {
 			tcpNames = append(tcpNames, name)
 		}
 		sort.Strings(tcpNames)
 		for _, name := range tcpNames {
-			polID := nextPolID
-			if polID >= MaxPolicers {
-				slog.Warn("three-color policer limit reached", "policer", name)
-				break
-			}
 			tcp := cfg.Firewall.ThreeColorPolicers[name]
 			bpfCfg := PolicerConfig{
 				RateBytesSec: tcp.CIR,
@@ -96,16 +87,99 @@ func compileFirewallFilters(dp DataPlane, cfg *config.Config, result *CompileRes
 			} else {
 				bpfCfg.ColorMode = PolicerModeSR3C
 			}
-			if err := dp.SetPolicerConfig(polID, bpfCfg); err != nil {
-				return fmt.Errorf("set three-color policer %s: %w", name, err)
-			}
-			policerIDs[name] = polID
-			slog.Info("compiled three-color policer",
-				"name", name, "mode", bpfCfg.ColorMode,
-				"cir", tcp.CIR, "cbs", tcp.CBS,
-				"pir", tcp.PIR, "pbs", tcp.PBS, "id", polID)
-			nextPolID++
+			// Three-color takes precedence on a name collision, matching
+			// the userspace template lowering (#15005).
+			definitions[name] = policerDefinition{cfg: bpfCfg}
 		}
+	}
+	// Collect every referenced (family, filter, term, policer) scope in
+	// deterministic order, plus one scope per unreferenced definition.
+	var scopes []policerScope
+	referenced := make(map[string]bool)
+	collectScopes := func(family string, filters map[string]*config.FirewallFilter) {
+		names := make([]string, 0, len(filters))
+		for name := range filters {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			filter := filters[name]
+			if filter == nil {
+				continue
+			}
+			for _, term := range filter.Terms {
+				if term == nil || term.Policer == "" {
+					continue
+				}
+				if _, ok := definitions[term.Policer]; !ok {
+					continue
+				}
+				referenced[term.Policer] = true
+				scopes = append(scopes, policerScope{family, name, term.Name, term.Policer})
+			}
+		}
+	}
+	collectScopes("inet", cfg.Firewall.FiltersInet)
+	collectScopes("inet6", cfg.Firewall.FiltersInet6)
+	{
+		names := make([]string, 0, len(definitions))
+		for name := range definitions {
+			if !referenced[name] {
+				names = append(names, name)
+			}
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			scopes = append(scopes, policerScope{policer: name})
+		}
+	}
+	sort.Slice(scopes, func(i, j int) bool {
+		a, b := scopes[i], scopes[j]
+		if a.family != b.family {
+			return a.family < b.family
+		}
+		if a.filter != b.filter {
+			return a.filter < b.filter
+		}
+		if a.term != b.term {
+			return a.term < b.term
+		}
+		return a.policer < b.policer
+	})
+	// Dedup identical scopes (defensive: duplicate term names).
+	{
+		seen := make(map[policerScope]bool)
+		deduped := scopes[:0]
+		for _, scope := range scopes {
+			if seen[scope] {
+				continue
+			}
+			seen[scope] = true
+			deduped = append(deduped, scope)
+		}
+		scopes = deduped
+	}
+	policerIDs := make(map[policerScope]uint32)
+	nextPolID := uint32(1)
+	for _, scope := range scopes {
+		def := definitions[scope.policer]
+		polID := nextPolID
+		if polID >= MaxPolicers {
+			slog.Warn("policer limit reached", "policer", scope.policer,
+				"family", scope.family, "filter", scope.filter, "term", scope.term)
+			break
+		}
+		if err := dp.SetPolicerConfig(polID, def.cfg); err != nil {
+			return fmt.Errorf("set policer config %s: %w", scope.policer, err)
+		}
+		policerIDs[scope] = polID
+		// #8429: BandwidthLimit/CIR are BYTES/sec; the log key is byte-named.
+		slog.Info("compiled policer",
+			"name", scope.policer, "family", scope.family,
+			"filter", scope.filter, "term", scope.term,
+			"rate_bytes_sec", def.cfg.RateBytesSec,
+			"burst", def.cfg.BurstBytes, "id", polID)
+		nextPolID++
 	}
 
 	filterID := uint32(0)
@@ -128,7 +202,7 @@ func compileFirewallFilters(dp DataPlane, cfg *config.Config, result *CompileRes
 		startIdx := ruleIdx
 		var allRules []FilterRule
 		for _, term := range filter.Terms {
-			rules := expandFilterTerm(term, AFInet, riTableIDs, cfg.PolicyOptions.PrefixLists, policerIDs)
+			rules := expandFilterTerm(term, AFInet, riTableIDs, cfg.PolicyOptions.PrefixLists, scopedPolicerID(policerIDs, "inet", name, term))
 			for _, rule := range rules {
 				if ruleIdx >= MaxFilterRules {
 					slog.Warn("filter rule limit reached", "filter", name, "term", term.Name)
@@ -178,7 +252,7 @@ func compileFirewallFilters(dp DataPlane, cfg *config.Config, result *CompileRes
 		startIdx := ruleIdx
 		var allRules []FilterRule
 		for _, term := range filter.Terms {
-			rules := expandFilterTerm(term, AFInet6, riTableIDs, cfg.PolicyOptions.PrefixLists, policerIDs)
+			rules := expandFilterTerm(term, AFInet6, riTableIDs, cfg.PolicyOptions.PrefixLists, scopedPolicerID(policerIDs, "inet6", name, term))
 			for _, rule := range rules {
 				if ruleIdx >= MaxFilterRules {
 					slog.Warn("filter rule limit reached", "filter", name, "term", term.Name)
@@ -442,6 +516,21 @@ func validateFilterProtocols(cfg *config.Config) error {
 		return err
 	}
 	return check("inet6", cfg.Firewall.FiltersInet6)
+}
+
+// scopedPolicerID resolves the BPF policer slot allocated for one
+// (family, filter, term, policer) instance (#15680). It returns nil when
+// the term has no policer or its slot was not allocated (unknown policer
+// or the MaxPolicers cap), so expandFilterTerm leaves PolicerID 0.
+func scopedPolicerID(policerIDs map[policerScope]uint32, family, filter string, term *config.FirewallFilterTerm) map[string]uint32 {
+	if term == nil || term.Policer == "" {
+		return nil
+	}
+	id, ok := policerIDs[policerScope{family: family, filter: filter, term: term.Name, policer: term.Policer}]
+	if !ok {
+		return nil
+	}
+	return map[string]uint32{term.Policer: id}
 }
 
 // expandFilterTerm expands a single filter term into one or more BPF filter rules.

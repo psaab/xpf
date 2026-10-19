@@ -376,7 +376,11 @@ func (c *xpfCollector) emitWireguardTelemetry(ch chan<- prometheus.Metric, statu
 }
 
 func (c *xpfCollector) emitThreeColorPolicerCounters(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
-	for _, p := range status.ThreeColorPolicerCounters {
+	// #15680: the helper now publishes one row per (family, filter, term)
+	// instance; Prometheus series are keyed by policer name only, so fold
+	// the scoped rows back to name totals instead of emitting duplicate
+	// series with the same label set.
+	for _, p := range dpuserspace.AggregateThreeColorPolicerCountersByName(&status) {
 		emitColor := func(color string, packets, bytes uint64) {
 			c.emitConstMetric(ch, c.threeColorPolicerPacketsTotal,
 				prometheus.CounterValue,

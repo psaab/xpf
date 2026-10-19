@@ -139,6 +139,9 @@ func TestShowFirewallSurfacesThreeColorPolicerStatus(t *testing.T) {
 					{
 						ID:            3,
 						Name:          "tcp-limit",
+						Family:        "inet",
+						FilterName:    "rate-in",
+						TermName:      "policed",
 						Mode:          "single-rate",
 						ColorBlind:    true,
 						GreenPackets:  100,
@@ -214,6 +217,62 @@ func TestShowFirewallOmitsPolicerBlockWithoutThreeColorPolicer(t *testing.T) {
 	out := buf.String()
 	if strings.Contains(out, "Policer ") {
 		t.Fatalf("show firewall rendered a policer block for a filter with no policer:\n%s", out)
+	}
+}
+
+// #15680: two terms referencing the same policer must render only their
+// own scoped counters. Pre-fix the index was keyed by policer name alone,
+// so each term rendered the (aggregated) counters of every term.
+func TestShowFirewallRendersPerTermPolicerCounters15680(t *testing.T) {
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure() error = %v", err)
+	}
+	for _, cmd := range []string{
+		"firewall three-color-policer shared single-rate color-blind",
+		"firewall three-color-policer shared single-rate committed-information-rate 1m",
+		"firewall three-color-policer shared single-rate committed-burst-size 15k",
+		"firewall three-color-policer shared single-rate excess-burst-size 30k",
+		"firewall family inet filter edge term first then policer shared",
+		"firewall family inet filter edge term first then accept",
+		"firewall family inet filter edge term second then policer shared",
+		"firewall family inet filter edge term second then accept",
+	} {
+		if err := store.SetFromInput(cmd); err != nil {
+			t.Fatalf("SetFromInput(%q) error = %v", cmd, err)
+		}
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	s := &Server{
+		store: store,
+		dp: &firewallFilterShowUserspaceDP{
+			Manager: dataplane.New(),
+			status: dpuserspace.ProcessStatus{
+				ThreeColorPolicerCounters: []dpuserspace.ThreeColorPolicerStatus{
+					{ID: 5, Name: "shared", Family: "inet", FilterName: "edge", TermName: "first", Mode: "single-rate", ColorBlind: true, GreenPackets: 10, GreenBytes: 1000},
+					{ID: 6, Name: "shared", Family: "inet", FilterName: "edge", TermName: "second", Mode: "single-rate", ColorBlind: true, GreenPackets: 2, GreenBytes: 200, RedPackets: 1, RedBytes: 100, DropPackets: 1, DropBytes: 100},
+				},
+			},
+		},
+	}
+	var buf strings.Builder
+	s.showFirewall(store.ActiveConfig(), &buf)
+	out := buf.String()
+	if strings.Count(out, "Policer shared") != 2 {
+		t.Fatalf("want one policer block per term, got:\n%s", out)
+	}
+	if !strings.Contains(out, "green (conform):  10 packets, 1000 bytes") {
+		t.Fatalf("first term's own counters missing:\n%s", out)
+	}
+	if !strings.Contains(out, "green (conform):  2 packets, 200 bytes") {
+		t.Fatalf("second term's own counters missing:\n%s", out)
+	}
+	// The pre-fix name-keyed rendering would show the same numbers under
+	// both terms; guard against either count appearing twice.
+	if strings.Count(out, "10 packets, 1000 bytes") != 1 || strings.Count(out, "2 packets, 200 bytes") != 1 {
+		t.Fatalf("per-term counters bled across terms:\n%s", out)
 	}
 }
 

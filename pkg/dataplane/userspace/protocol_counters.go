@@ -101,6 +101,9 @@ type CoSInterfaceStatus struct {
 type ThreeColorPolicerStatus struct {
 	ID            uint32 `json:"id,omitempty"`
 	Name          string `json:"name,omitempty"`
+	Family        string `json:"family,omitempty"`
+	FilterName    string `json:"filter_name,omitempty"`
+	TermName      string `json:"term_name,omitempty"`
 	Mode          string `json:"mode,omitempty"`
 	ColorBlind    bool   `json:"color_blind,omitempty"`
 	GreenPackets  uint64 `json:"green_packets,omitempty"`
