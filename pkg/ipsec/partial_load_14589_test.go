@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #14589: swanctl --load-all is not a transaction. A partial load
@@ -265,6 +267,149 @@ func TestPartialClearRestoresPriorFile14589(t *testing.T) {
 	}
 	if !sameSet14589(m.prevConnNames, map[string]bool{"a": true, "b": true}) {
 		t.Fatalf("prev=%v want prior {a,b}", m.prevConnNames)
+	}
+}
+
+// #15128 (A90-01): the commit path reaches clearConfig via
+// ApplyGeneration (empty config), not Clear(). On a partial clear where
+// charon still holds a prior connection, clearConfig rolls charon back
+// to the prior set {a,b} and returns pae{names:{a,b}, clear:true}.
+// Clear() promotes pae.names; ApplyGeneration used to discard them and
+// promote the empty set, so prev forgot VPNs charon still runs — their
+// SAs were never terminated and the persisted record said none.
+// Setup mirrors TestPartialClearRestoresPriorFile14589; the leg
+// exercised here is ApplyGeneration with an empty config.
+func TestA90PartialClearViaApplyEmpty(t *testing.T) {
+	m := NewWithConfigDir(t.TempDir())
+	ch := &partialCharon14589{loaded: map[string]bool{}}
+	ch.loadedFromDisk = func() map[string]bool {
+		data, err := os.ReadFile(m.configPath)
+		if err != nil {
+			return map[string]bool{}
+		}
+		return connNamesInFile14589(t, string(data))
+	}
+	m.swanctl = ch.run
+	if err := m.Apply(vpnCfg("a", "b")); err != nil {
+		t.Fatalf("gen1: %v", err)
+	}
+	ch.loaded = map[string]bool{"a": true, "b": true}
+	prior, _ := os.ReadFile(m.configPath)
+	// Partial clear via the commit path: empty config -> clearConfig
+	// removes the file; charon unloads b but a remains (partial), the
+	// rollback reload then restores the prior set {a,b} in charon.
+	m.swanctl = func(args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "--load-all" {
+			if _, err := os.Stat(m.configPath); os.IsNotExist(err) {
+				ch.loaded = map[string]bool{"a": true}
+				return []byte("loaded 1 of 2 connections, 1 failed to load, 1 unloaded\n"), errors.New("exit status 22")
+			}
+			ch.loaded = map[string]bool{"a": true, "b": true}
+			return nil, nil
+		}
+		return ch.run(args...)
+	}
+	err := m.ApplyGeneration(&config.IPsecConfig{VPNs: map[string]*config.IPsecVPN{}}, UnknownGeneration, ApplyHooks{})
+	if err == nil {
+		t.Fatal("partial clear via ApplyGeneration must error")
+	}
+	got, rerr := os.ReadFile(m.configPath)
+	if rerr != nil {
+		t.Fatalf("prior file must be restored after partial clear: %v", rerr)
+	}
+	if string(got) != string(prior) {
+		t.Fatalf("disk must equal prior file after partial clear rollback")
+	}
+	// Charon still runs {a,b} after the rollback; prev must agree, not
+	// the empty set the buggy promotion installed.
+	if !sameSet14589(m.prevConnNames, map[string]bool{"a": true, "b": true}) {
+		t.Fatalf("prev=%v want prior {a,b} (charon rolled back to it)", m.prevConnNames)
+	}
+	loaded, lerr := m.ListLoadedConns()
+	if lerr != nil {
+		t.Fatalf("ListLoadedConns: %v", lerr)
+	}
+	loadedSet := map[string]bool{}
+	for n := range loaded {
+		loadedSet[n] = true
+	}
+	if !sameSet14589(m.prevConnNames, loadedSet) {
+		t.Fatalf("prevConnNames %v != charon loaded %v", m.prevConnNames, loadedSet)
+	}
+}
+
+// Follow-up leg: after the partial clear above, a later successful
+// commit deleting every VPN must terminate the SAs charon still runs.
+// With the buggy empty promotion prev forgot {a,b}, so this apply saw
+// no removals and terminated nothing. The fake charon reports live SAs
+// for a and b; the successful clear must issue --terminate for both.
+func TestA90FollowUpAfterApplyEmpty(t *testing.T) {
+	m := NewWithConfigDir(t.TempDir())
+	ch := &partialCharon14589{loaded: map[string]bool{}}
+	ch.loadedFromDisk = func() map[string]bool {
+		data, err := os.ReadFile(m.configPath)
+		if err != nil {
+			return map[string]bool{}
+		}
+		return connNamesInFile14589(t, string(data))
+	}
+	m.swanctl = ch.run
+	if err := m.Apply(vpnCfg("a", "b")); err != nil {
+		t.Fatalf("gen1: %v", err)
+	}
+	ch.loaded = map[string]bool{"a": true, "b": true}
+	phase := "partial"
+	var terminated []string
+	m.swanctl = func(args ...string) ([]byte, error) {
+		if len(args) > 0 {
+			switch args[0] {
+			case "--load-all":
+				if phase == "partial" {
+					if _, err := os.Stat(m.configPath); os.IsNotExist(err) {
+						ch.loaded = map[string]bool{"a": true}
+						return []byte("loaded 1 of 2 connections, 1 failed to load, 1 unloaded\n"), errors.New("exit status 22")
+					}
+					ch.loaded = map[string]bool{"a": true, "b": true}
+					return nil, nil
+				}
+				// Successful clear: file is gone, charon unloads all.
+				ch.loaded = map[string]bool{}
+				return nil, nil
+			case "--list-sas":
+				if phase == "followup" {
+					return []byte(liveSA("a", "b")), nil
+				}
+				return nil, nil
+			case "--terminate":
+				// --terminate --ike <name>
+				if len(args) >= 3 {
+					terminated = append(terminated, args[2])
+				}
+				return nil, nil
+			}
+		}
+		return ch.run(args...)
+	}
+	empty := &config.IPsecConfig{VPNs: map[string]*config.IPsecVPN{}}
+	if err := m.ApplyGeneration(empty, UnknownGeneration, ApplyHooks{}); err == nil {
+		t.Fatal("partial clear via ApplyGeneration must error")
+	}
+	if !sameSet14589(m.prevConnNames, map[string]bool{"a": true, "b": true}) {
+		t.Fatalf("after partial clear prev=%v want {a,b}", m.prevConnNames)
+	}
+	phase = "followup"
+	if err := m.ApplyGeneration(empty, UnknownGeneration, ApplyHooks{}); err != nil {
+		t.Fatalf("follow-up successful clear: %v", err)
+	}
+	got := map[string]bool{}
+	for _, n := range terminated {
+		got[n] = true
+	}
+	if !got["a"] || !got["b"] || len(got) != 2 {
+		t.Fatalf("follow-up clear must terminate live SAs for a and b, terminated=%v", terminated)
+	}
+	if len(m.prevConnNames) != 0 {
+		t.Fatalf("prev=%v want empty after successful clear", m.prevConnNames)
 	}
 }
 
