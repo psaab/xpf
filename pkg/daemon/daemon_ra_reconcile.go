@@ -212,54 +212,97 @@ func (d *Daemon) reassertDeadRASendersOnce(ctx context.Context) {
 	}
 }
 
-// desiredClusterRA returns the union of buildRAConfigs entries whose interface
-// belongs to an RG this node is currently the active owner for. The union is
-// sorted by interface name so the digest is stable across map-iteration order
-// (snapshotRethMasterState and rethInterfacesForRG both iterate maps). Callers
-// must hold raReconcileMu.
+// desiredClusterRA returns the desired cluster RA set: buildRAConfigs entries
+// on RGs this node currently owns, plus node-local interfaces with no
+// redundancy group (kept on every node, #6520's rule applied to RA). The set
+// is sorted by interface name so the digest is stable across map-iteration
+// order (snapshotRethMasterState and rethInterfacesForRG both iterate maps).
+// Callers must hold raReconcileMu.
 func (d *Daemon) desiredClusterRA(cfg *config.Config) []*config.RAInterfaceConfig {
 	desired, _ := d.clusterRAConfigSets(cfg)
 	return desired
 }
 
 // clusterRAConfigSets derives the active desired set and the inactive shared-
-// identity interfaces that must be stopped silently. A stable RETH link-local is
-// the cluster's router identity, not a node's: sending a demotion goodbye would
-// also withdraw the peer's live default route. If both nodes are BACKUP, the
-// stale route may persist until Router Lifetime expiry; a later MASTER's RA
-// refresh repairs it.
+// identity interfaces that must be stopped silently. A stable RETH link-local
+// is the cluster's router identity, not a node's: sending a demotion goodbye
+// would also withdraw the peer's live default route. If both nodes are BACKUP,
+// the stale route may persist until Router Lifetime expiry; a later MASTER's
+// RA refresh repairs it. The shared-identity check runs on the CONFIGURED
+// source of every active sender (Status reports an empty source until the
+// conn opens), and on configured senders with no live sender at all, so an
+// unopened shared-identity sender cannot fall through to Apply's graceful
+// goodbye (D34-01).
 func (d *Daemon) clusterRAConfigSets(cfg *config.Config) ([]*config.RAInterfaceConfig, []string) {
 	masters := d.snapshotRethMasterState()
 	ownedIfaces := make(map[string]bool)
 	inactiveIfaces := make(map[string]bool)
+	rgScopedIfaces := make(map[string]bool)
 	for _, name := range rethInterfacesMatchingRG(cfg, func(rgID int) bool { return masters[rgID] }) {
 		ownedIfaces[name] = true
 	}
 	for _, name := range rethInterfacesMatchingRG(cfg, func(rgID int) bool { return !masters[rgID] }) {
 		inactiveIfaces[name] = true
 	}
-	if len(ownedIfaces) == 0 && len(inactiveIfaces) == 0 {
-		return nil, nil
+	for _, name := range rethInterfacesMatchingRG(cfg, func(int) bool { return true }) {
+		rgScopedIfaces[name] = true
+	}
+
+	// Node-local RA interfaces (no redundancy group) are kept on every node,
+	// mirroring the #6520 DHCP rule: mastership says which node answers for a
+	// REDUNDANT interface; it says nothing about an interface with no redundant
+	// peer. Shared-stable RETH senders on inactive RGs are silently stopped
+	// below. Sender-state checks use the configured source on every active
+	// sender, because Status reports an empty source until its conn opens and
+	// would otherwise miss an unopened shared-identity sender and let Apply
+	// withdraw the peer's router with a goodbye.
+	allRA := d.buildRAConfigs(cfg)
+	byIface := make(map[string]*config.RAInterfaceConfig, len(allRA))
+	for _, cfgRA := range allRA {
+		if cfgRA != nil {
+			byIface[cfgRA.Interface] = cfgRA
+		}
 	}
 
 	var desired []*config.RAInterfaceConfig
-	for _, cfgRA := range d.buildRAConfigs(cfg) {
-		if ownedIfaces[cfgRA.Interface] {
+	for _, cfgRA := range allRA {
+		if cfgRA == nil {
+			continue
+		}
+		if ownedIfaces[cfgRA.Interface] || !rgScopedIfaces[cfgRA.Interface] {
 			desired = append(desired, cfgRA)
 		}
 	}
 
-	// Use the live sender source rather than current RA config: a config
-	// removal racing demotion leaves the old sender active until this reconcile
-	// applies. This also keeps periodic safety reconciles on the same silent-stop
-	// path as the VRRP demotion edge.
 	var silentStop []string
+	statusSeen := make(map[string]bool)
 	for _, sender := range d.raSenderStatuses() {
-		if sender.State == "active" &&
-			inactiveIfaces[sender.Interface] &&
-			!ownedIfaces[sender.Interface] &&
-			isSharedStableRASource(sender.SrcAddr) {
+		if sender.State != "active" ||
+			!inactiveIfaces[sender.Interface] ||
+			ownedIfaces[sender.Interface] {
+			continue
+		}
+		statusSeen[sender.Interface] = true
+		source := sender.SrcAddr
+		if cfgRA := byIface[sender.Interface]; cfgRA != nil && cfgRA.SourceLinkLocal != "" {
+			source = cfgRA.SourceLinkLocal
+		}
+		if isSharedStableRASource(source) {
 			silentStop = append(silentStop, sender.Interface)
+		}
+	}
+	// A configured shared-stable sender with no live Status entry (conn not
+	// yet opened, or already removed from the sender map) must not reach
+	// Apply's graceful-withdraw path, which would emit a goodbye for an
+	// identity the peer may already advertise.
+	for _, cfgRA := range allRA {
+		if cfgRA == nil || statusSeen[cfgRA.Interface] {
+			continue
+		}
+		if inactiveIfaces[cfgRA.Interface] &&
+			!ownedIfaces[cfgRA.Interface] &&
+			isSharedStableRASource(cfgRA.SourceLinkLocal) {
+			silentStop = append(silentStop, cfgRA.Interface)
 		}
 	}
 	sort.Slice(desired, func(i, j int) bool {

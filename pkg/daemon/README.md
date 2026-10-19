@@ -1644,12 +1644,15 @@ observation seam in `pkg/cluster`.
 
 ### Per-RG Router-Advertisement reconcile (#5861)
 
-In cluster mode RA senders run ONLY on the RG that is the current active
-owner: the desired RA set is the union of `buildRAConfigs` filtered to the
-RGs this node is MASTER for. Every RA-affecting cluster event —
-a day-2 config commit, a VRRP MASTER/BACKUP transition, and a periodic
-dropped-event safety pass (`reconcileRGState`) — funnels through the single
-authoritative applier `reconcileClusterRAServices` (`daemon_ra_reconcile.go`).
+In cluster mode RG-scoped RA senders run ONLY on the RG that is the current
+active owner: the desired RA set is the union of `buildRAConfigs` filtered to
+the RGs this node is MASTER for, plus every node-local RA interface (an
+interface in no redundancy group belongs to this node alone and is kept on
+every node — the #6520 rule applied to RA, #14978). Every RA-affecting
+cluster event — a day-2 config commit, a VRRP MASTER/BACKUP transition, and
+a periodic dropped-event safety pass (`reconcileRGState`) — funnels through
+the single authoritative applier `reconcileClusterRAServices`
+(`daemon_ra_reconcile.go`).
 
 Before #5861 the cluster commit path SKIPPED `ra.Apply` (RA was managed
 only by ownership events) and `reconcileRGState` re-applied RA only on an
@@ -1661,20 +1664,25 @@ active owner whenever the effective desired set changes even when ownership
 is stable, and `ra.Apply` diffs safely (no RA gap for unchanged senders).
 
 **Owner gating + demotion-race guard.** The desired set is built from
-`snapshotRethMasterState()` — an RG's interfaces are included ONLY while
-this node is its active owner. The ownership snapshot and the `ra.Apply`
-run under `raReconcileMu`, and the VRRP demote path updates rg-state
-(`SetVRRP`/`Reconcile`) BEFORE it drives the RA reconcile. So a config apply
-that races a demotion either snapshots the RG as already-inactive (its
-senders are silently stopped when they use the shared router identity, or
-never armed) or snapshots it active — in which case the node genuinely was
-the owner at apply time and the demote's own reconcile pass, serialized behind
-this one on `raReconcileMu`, stops the shared identity silently immediately
-after. Unique-source senders still emit a goodbye on removal. Stable RETH
-link-local addresses are cluster-wide router identities: a lifetime-zero RA
-would also withdraw the active peer's route. If both nodes are BACKUP, a stale
-host route may remain until Router Lifetime expiry; a later MASTER's RA refresh
-repairs it.
+`snapshotRethMasterState()` — an RG-scoped interface is included ONLY while
+this node is its active owner; node-local interfaces are always included.
+The ownership snapshot and the `ra.Apply` run under `raReconcileMu`, and the
+VRRP demote path updates rg-state (`SetVRRP`/`Reconcile`) BEFORE it drives
+the RA reconcile. So a config apply that races a demotion either snapshots
+the RG as already-inactive (its senders are silently stopped when they use
+the shared router identity, or never armed) or snapshots it active — in
+which case the node genuinely was the owner at apply time and the demote's
+own reconcile pass, serialized behind this one on `raReconcileMu`, stops the
+shared identity silently immediately after. Unique-source senders still emit
+a goodbye on removal. Stable RETH link-local addresses are cluster-wide
+router identities: a lifetime-zero RA would also withdraw the active peer's
+route. The shared-identity check runs on the CONFIGURED source of every
+sender (including configured senders with no live sender yet), because
+`Status` reports an empty source until a sender's conn opens — checking the
+live source alone would let an unopened shared-identity sender fall through
+to `Apply`'s graceful goodbye (#14978). If both nodes are BACKUP, a stale
+host route may remain until Router Lifetime expiry; a later MASTER's RA
+refresh repairs it.
 
 **Idempotence.** A stable digest of the desired set (`lastRAReconcileHash`,
 updated only on a successful apply) gates the actual `ra.Apply`, so the
