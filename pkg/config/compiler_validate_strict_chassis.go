@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // MaxHeartbeatRedundancyGroups is the largest number of chassis-cluster
@@ -164,6 +165,147 @@ func ClampInterfaceMonitorWeight(w int) (int, bool) {
 	default:
 		return w, false
 	}
+}
+
+// interfaceMonitorNameAttributable reports whether an interface-monitor
+// name (#15037) denotes a PHYSICAL interface this config attributes on
+// ANY node view: physical-shaped (an FPC slot parses, #8829 slash or
+// dash spelling; not dotted, not a RETH) AND declared somewhere the
+// shared cluster config can see it — an `interfaces` stanza inside
+// groups node0/node1/nodeN, at top level, or in any group, or a fabric
+// member-interfaces entry (a bare physical NIC may exist only as a
+// fabric member, #8444).
+//
+// The stanza scan walks the SOURCE TREE's `interfaces` subtrees rather
+// than cfg.Interfaces of one node view: one shared cluster config
+// monitors BOTH nodes' members (ge-0/0/2 + ge-7/0/2), each declared only
+// in its own node's group, so a single-view existence check would
+// reject every shipped cluster config on both nodes (the #4191
+// over-rejection class; the peer pipeline compiles each view
+// separately, so the union must come from the tree). A stanza NAME is
+// attributed; the stanza's own validity is other gates' concern.
+//
+// Three deliberate exclusions — a name no node could ever poll:
+//
+//   - a RETH name, even when an `interfaces rethN` stanza exists: the
+//     RETH is bondless, no netdev carries the name, and naming it
+//     instead of its members is exactly the both-nodes-down error.
+//   - a name carrying no FPC slot (fab0, lo0, st0, a dotted unit).
+//   - a physical-shaped name declared NOWHERE while the config declares
+//     at least one other physical interface: ge-0/0/99 beside declared
+//     ge-* members is the typo class. When NOTHING physical is declared
+//     anywhere (the stanza-less splitter/packing fixtures), the name
+//     stays attributable: a monitor on a not-yet-stanza'd slot is
+//     counted down at runtime, the #5080 fail-closed direction, and
+//     those fixtures compile no stanza at all.
+func interfaceMonitorNameAttributable(cfg *Config, name string) bool {
+	if cfg == nil || name == "" || strings.Contains(name, ".") {
+		return false
+	}
+	if _, isReth := RethIndex(name); isReth {
+		return false
+	}
+	if InterfaceSlot(name) < 0 {
+		// Keyword-shaped names (a statement keyword in the one free-form
+		// identifier slot — the #6665/#6672 reservation) are exempt: the
+		// splitter tests pin their compilation with no interface stanza
+		// at all, and this gate must not re-litigate that reservation.
+		// Any other slot-less name (reth-adjacent spellings, fab0, lo0,
+		// typos like nosuch0) is refused.
+		return isClusterKeywordName(name)
+	}
+	declared := cfg.PhysicalInterfaces
+	if len(declared) == 0 {
+		return true
+	}
+	return declared[LinuxIfName(name)]
+}
+
+// physicalInterfacesInTree returns the set of physical interface names
+// (Linux spelling) attributed anywhere in the PRE-expansion tree: top
+// level AND every `groups` block. The peer node's members are declared
+// only in its own group and ExpandGroups removes the groups stanza, so
+// this must run before expansion (the stamp site in compileExpanded
+// does). A stanza NAME is attributed; the stanza's own validity is
+// other gates' concern. A nil tree yields the empty set, which the
+// caller treats as "nothing declared anywhere".
+func physicalInterfacesInTree(tree *ConfigTree) map[string]bool {
+	out := make(map[string]bool)
+	if tree == nil {
+		return out
+	}
+	// PRE-expansion presence union ONLY (top level + every `groups`
+	// block). Do NOT expand here: expansion is destructive to the tree
+	// it runs on, and a ${node}-applied group lands the SAME stanza
+	// names this raw walk already sees inside the groups blocks, so the
+	// expansion views add nothing but risk.
+	collectPhysicalInterfaces(tree.Children, out)
+	return out
+}
+
+// collectPhysicalInterfaces adds every physical name under nodes to out:
+// every direct child NAME of every `interfaces` node that parses to an
+// FPC slot, and every `member-interfaces` entry under fabric-options.
+// The stanza name is the child's Keys[0] in every spelling (block,
+// flat-set child, packed one-liner carrying its body behind the name —
+// compileInterfaces reads child.Name() the same way); joining the Keys
+// would fuse the name with its body tokens.
+func collectPhysicalInterfaces(nodes []*Node, out map[string]bool) {
+	var walk func(ns []*Node, depth int)
+	walk = func(ns []*Node, depth int) {
+		for _, n := range ns {
+			if n == nil {
+				continue
+			}
+			// A declaration lives at depth 0 (top level) or depth 1
+			// (inside a `groups <name>` block — group children splice
+			// in at the top level when applied). Anything deeper that
+			// spells "interfaces" (class-of-service interfaces <if>)
+			// is a REFERENCE, not a declaration, and must not mint
+			// attribution.
+			if depth <= 1 {
+				switch n.Name() {
+				case "interfaces":
+					for _, child := range n.Children {
+						if child == nil {
+							continue
+						}
+						if cname := child.Name(); InterfaceSlot(cname) >= 0 {
+							out[LinuxIfName(cname)] = true
+						}
+					}
+				case "member-interfaces":
+					for _, k := range n.Keys[1:] {
+						if k != "" && InterfaceSlot(k) >= 0 {
+							out[LinuxIfName(k)] = true
+						}
+					}
+					for _, child := range n.Children {
+						if child == nil {
+							continue
+						}
+						if cname := child.Name(); cname != "" && InterfaceSlot(cname) >= 0 {
+							out[LinuxIfName(cname)] = true
+						}
+					}
+				}
+			}
+			walk(n.Children, depth+1)
+		}
+	}
+	walk(nodes, 0)
+}
+
+// isClusterKeywordName reports whether name is a chassis-cluster /
+// redundancy-group statement keyword — the keyword-shaped interface
+// names the packed-statement splitter reserves a value slot for
+// (#6665/#6672).
+func isClusterKeywordName(name string) bool {
+	if _, ok := redundancyGroupStatements[name]; ok {
+		return true
+	}
+	_, ok := clusterStatements[name]
+	return ok
 }
 
 // validateChassisClusterStrict hard-rejects, at commit / commit-check, a
@@ -347,6 +489,32 @@ func validateChassisClusterStrict(cfg *Config) error {
 		for _, im := range rg.InterfaceMonitors {
 			if im == nil { // tolerant/HA-sync path may carry a nil entry (#3494).
 				continue
+			}
+			// #15037 (A15-03): the monitor NAME was never validated at all.
+			// pollInterfaceMonitors (pkg/cluster/monitor.go) resolves it with
+			// LinuxIfName + LinkByName and skips ONLY a name whose FPC slot
+			// belongs to the peer; every other miss counts DOWN. A RETH name
+			// (reth0 — InterfaceSlot -1, and bondless: no netdev ever carries
+			// it) or a name defined nowhere therefore counts down on BOTH
+			// nodes, both group weights hit 0, and election's weight<=0 ->
+			// secondary leaves the group owned by NEITHER node. Strict-reject
+			// (tolerant-warn via the lenientChassisRG downgrade at the call
+			// site, #1960) any monitor that does not name a physical
+			// interface attributable from this config: an `interfaces`
+			// stanza, or a fabric member-interfaces entry (a bare physical
+			// NIC may exist only as a fabric member — the #8444 finding, so
+			// existence alone is not the predicate). A RETH is never
+			// attributable: monitoring reth0 when its members are meant is
+			// the operator error this catches; monitor the members instead.
+			if !interfaceMonitorNameAttributable(cfg, im.Interface) {
+				return fmt.Errorf("chassis cluster: redundancy-group %d interface-monitor %s "+
+					"does not name a physical interface defined under `interfaces` "+
+					"(nor a fabric member-interfaces entry) — a redundant-ethernet "+
+					"(reth) name or an undefined name has no netdev on either node, "+
+					"so the monitor counts it down on both nodes, both redundancy-group "+
+					"weights reach 0, and neither node owns the group — monitor the "+
+					"physical member interfaces (e.g. ge-0/0/0, ge-7/0/0) instead",
+					rg.ID, im.Interface)
 			}
 			if im.Weight < MinInterfaceMonitorWeight || im.Weight > MaxInterfaceMonitorWeight {
 				return fmt.Errorf("chassis cluster: redundancy-group %d interface-monitor %s "+

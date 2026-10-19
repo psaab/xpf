@@ -1149,6 +1149,15 @@ func diffConfigSections(hier, flat *Config) string {
 	var b strings.Builder
 	for i := 0; i < ct.NumField(); i++ {
 		name := ct.Field(i).Name
+		// PhysicalInterfaces (#15037) is compile-time gate metadata
+		// derived from the PRE-expansion tree shape, not compiled
+		// config: the hierarchical spelling declares interfaces in an
+		// `interfaces {}` stanza while the flat-set spelling authors
+		// them as `set interfaces ...` paths, and the two trees do not
+		// attribute identically. It carries no forwarding behaviour.
+		if name == "PhysicalInterfaces" {
+			continue
+		}
 		hf := hv.Field(i).Interface()
 		ff := fv.Field(i).Interface()
 		if !reflect.DeepEqual(hf, ff) {

@@ -10382,6 +10382,19 @@ reserved for whole-dataplane selection where a rewrite shim
   `node 0 priority <v>;` bypasses the gate (identity-token rule) even
   though `compileChassis` reads its inline tokens — pinned by
   `TestSchemaValidate_ChassisCluster_PackedOneLinerBypassesGate`.
+  **#15037 (A15-03)** gates the monitor NAME at the same layer: the name
+  must denote a physical interface attributable from the config — an
+  `interfaces` stanza, or a `fabric-options member-interfaces` entry (a
+  bare physical NIC may exist only as a fabric member, #8444), in either
+  the Junos slash or the Linux dash spelling (#8829). A RETH name
+  (`reth0`), a logical name (`fab0`, `lo0`, `st0`), a dotted unit, or a
+  name defined nowhere is strict-rejected at commit (warn on the tolerant
+  path): the cluster monitor polls a kernel netdev by that name and
+  counts every non-peer miss DOWN, so a RETH/undefined name is down on
+  BOTH nodes, both redundancy-group weights reach 0, and neither node
+  owns the group. Monitor the physical members instead. Pinned by
+  `compiler_validate_strict_chassis_ifmon_name_15037_test.go`, including
+  the shipped HA configs for both node personalities.
   **#5695 (codex-182 M16)** completes the `gratuitous-arp-count`
   "sanity-cap-belongs-in-the-runtime" note above: the runtime now clamps
   the effective GARP/NA burst to `config.GratuitousARPBurstClamp` (32, 2×
