@@ -189,6 +189,11 @@ var chownSSHDir = func(dir string, uid, gid int) error { return os.Chown(dir, ui
 // safe outcome, not an incomplete reconcile.
 
 func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
+	// #14969: a superseded abandoned closeout owner abstains before its
+	// first host mutation (the seams fence later mutations individually).
+	if seamErr := checkHostAuthSeam14969(); seamErr != nil {
+		return seamErr
+	}
 	fail := func(e error) { err = errors.Join(err, e) }
 	var releaseApply func()
 	defer func() {
@@ -605,6 +610,10 @@ func defaultValidateSudoersFile(path string) error {
 // independent of applySystemLogin's early return, so the "all users
 // removed" case still revokes stale grants.
 func (d *Daemon) reconcileSudoers(cfg *config.Config) (err error) {
+	// #14969: superseded abandoned owner abstains (see applySystemLogin).
+	if seamErr := checkHostAuthSeam14969(); seamErr != nil {
+		return seamErr
+	}
 	fail := func(e error) { err = errors.Join(err, e) }
 	var releaseApply func()
 	defer func() {
@@ -952,6 +961,10 @@ var (
 // or the restore write itself fails) so a bad config never persists to break
 // the next sshd restart.
 func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
+	// #14969: superseded abandoned owner abstains (see applySystemLogin).
+	if seamErr := checkHostAuthSeam14969(); seamErr != nil {
+		return seamErr
+	}
 	fail := func(e error) { retErr = errors.Join(retErr, e) }
 	var ssh *config.SSHServiceConfig
 	if cfg.System.Services != nil {
@@ -1364,6 +1377,10 @@ func buildSSHDConfigErr(ssh *config.SSHServiceConfig) (string, error) {
 // stanza still absent re-locks nothing (the shadow field is already "!") and
 // removes nothing (the key file is already gone).
 func (d *Daemon) applyRootAuth(cfg *config.Config) (retErr error) {
+	// #14969: superseded abandoned owner abstains (see applySystemLogin).
+	if seamErr := checkHostAuthSeam14969(); seamErr != nil {
+		return seamErr
+	}
 	var releaseApply func()
 	defer func() {
 		if releaseApply != nil {

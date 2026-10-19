@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -86,7 +87,58 @@ func (d *Daemon) hostAuthCloseoutOwners() []hostAuthOwner {
 // taking down the remaining owners and the process — the opposite of the M35
 // fail-VISIBLE, one-owner-at-a-time discipline. The recover keeps the batch and
 // the process alive and surfaces the panicking owner as a named failure.
+// hostAuthGeneration14969 is the monotonic host-auth authority token
+// (#14969). Every closeout invocation and every normal apply tail
+// advances it at entry (beginHostAuthAuthority14969). An owner launched
+// by the closeout runner captures the current value and runs under it
+// via runWithHostAuthGeneration14969 (hostauth_fence_14969.go), which
+// publishes the captured generation for the calling goroutine; every
+// host-mutation seam re-checks it and refuses once a newer authority
+// has advanced the token. The zero generation (no runner capture —
+// direct reconciler calls, the normal tail) is never stale, preserving
+// stand-alone behavior exactly.
+var hostAuthGeneration14969 atomic.Uint64
+
+// beginHostAuthAuthority14969 advances the host-auth generation. Called
+// at every host-auth authority entry: each closeout invocation and each
+// normal apply tail's host-auth section.
+func beginHostAuthAuthority14969() uint64 {
+	return hostAuthGeneration14969.Add(1)
+}
+
+// runHostAuthCloseoutOwners runs each owner in order under a shared wall-clock
+// budget and returns a per-owner outcome. Owners run SEQUENTIALLY (the M35
+// order is load-bearing) but each in its own goroutine so a wedged owner can be
+// bounded by the budget instead of hanging the daemon-stop path. It preserves
+// the non-cancellable INTENT — the budget does NOT abort on the first owner
+// ERROR (a failed owner is recorded and the next still runs: collect-all-then-
+// report). It only stops launching owners once the TOTAL budget is exhausted;
+// the remaining owners are then recorded timed-out (never silently skipped).
+//
+// When an owner outruns the budget its goroutine is abandoned (at most one at a
+// time — no further owner is launched concurrently). #12169 fences the
+// credential revocations such an owner can still perform (live-config
+// re-reads + applySem settlement). #14969 fences the remainder — the two nft
+// owners and every unfenced owner phase — with the generation token: each
+// owner is wrapped so its host-mutation seams (nft Install/Delete, the
+// credential exec seam, the sshd drop-in write/remove seams) re-check the
+// generation it was launched under; once a newer host-auth authority has
+// begun (a later closeout or a normal apply tail) the stale owner's next
+// seam refuses and it abstains instead of overwriting the newer commit.
+// A stale seam that passed before the newer authority began is ordered
+// before it and is overwritten by the newer authority's own seam. The
+// fence never blocks a later commit (the #12169 contract).
+//
+// Each owner's goroutine carries a defer/recover (#6184): a panic in one owner's
+// reconcile is recovered, logged with the owner id, and converted into that
+// owner's fail-visible reconcile error (routed through `done`, so the select
+// records it as o.err exactly like a returned error). Without the recover an
+// owner panic would unwind the goroutine and crash the whole daemon-stop path,
+// taking down the remaining owners and the process — the opposite of the M35
+// fail-VISIBLE, one-owner-at-a-time discipline. The recover keeps the batch and
+// the process alive and surfaces the panicking owner as a named failure.
 func runHostAuthCloseoutOwners(cfg *config.Config, budget time.Duration, owners []hostAuthOwner) []hostAuthOwnerOutcome {
+	gen := beginHostAuthAuthority14969()
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
@@ -112,7 +164,7 @@ func runHostAuthCloseoutOwners(cfg *config.Config, budget time.Duration, owners 
 					done <- fmt.Errorf("host-auth closeout owner %q panicked: %v", name, r)
 				}
 			}()
-			done <- fn(cfg)
+			done <- runWithHostAuthGeneration14969(gen, func() error { return fn(cfg) })
 		}(o.name, o.fn)
 		select {
 		case err := <-done:

@@ -2589,6 +2589,22 @@ never lock an operator out of a remote box it manages.
       intentionally discarded (`_ =`) — next-boot convergence still covers a
       transient failure there; only the daemon-stop cancel, where next-boot
       convergence does not happen, collects and fails on them.
+    - **Abandoned closeout owners are generation-fenced (#14969).**
+      Since #14356 the closeout also runs on LIVE post-promotion aborts, so a
+      budget-expired owner keeps running with its captured (stale) config
+      after `applySem` is released. #12169 fences its credential
+      *revocations*, but the two nft loads and the unfenced owner phases
+      could still overwrite a later commit. The closeout runner now runs
+      each owner under its launch generation (`hostAuthGeneration14969`,
+      advanced by every closeout and every normal apply tail); the
+      host-mutation seams — the `runCommand*` exec seam and the seven
+      owner entries — refuse a superseded owner before it mutates, so it
+      abstains instead of installing stale state. The fence is checked at
+      the syscall boundary and never gates a later commit (which must
+      return while an old revocation is blocked, per #12169): a stale
+      seam that passed before the newer authority began is ordered
+      before it and overwritten by it. Pinned by
+      `hostauth_fence_14969_test.go`.
     - **Unreadable ownership inventories now reach this closeout (#6798).**
       The reconcilers above could only report failures they could SEE, and an
       ownership read that failed was invisible to them: `hasProvenanceMarker`

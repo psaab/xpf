@@ -135,6 +135,11 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, networkdErr, applyErr, 
 	d.applyHostname(cfg)
 	d.applyTimezone(cfg)
 	d.applyKernelTuning(cfg)
+	// #14969: this tail is a new host-auth authority — advancing the
+	// generation here is what supersedes any abandoned closeout owner
+	// from an earlier abort, so its next seam check abstains instead of
+	// overwriting this apply's host-auth state.
+	beginHostAuthAuthority14969()
 	// #3392: the lo0 input filter is host-protection control-plane enforcement,
 	// so an apply/teardown failure must fail the commit closed rather than be
 	// swallowed at WARN — the same fail-open #3333 fixed for host-inbound. The
