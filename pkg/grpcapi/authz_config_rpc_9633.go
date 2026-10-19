@@ -32,6 +32,14 @@ import (
 // configModeMethods9633 are the RPCs governed by the configuration regexes and
 // not by the operational ones. It is a subset of methodsWithoutCanonicalCommand;
 // TestConfigModeMethodsAreDeliberatelyUnmapped9633 binds the two.
+//
+// #14952 exception: Complete stays in this set (its config-mode arm is
+// governed by *-configuration for live values, #14144), but it is no
+// longer exempt from the operational gate — authorizeRPCCommand routes
+// it to authorizeCompleteRPCCommand, which adjudicates the typed line
+// under *-commands, and methodPermission prices its ConfigMode arm at
+// PermConfig. The set membership here now only records that Complete
+// has no canonical command in methodCanonicalCommand.
 var configModeMethods9633 = map[string]bool{
 	"EnterConfigure":  true,
 	"ExitConfigure":   true,

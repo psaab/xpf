@@ -160,11 +160,18 @@ var methodPermissions = map[string]config.LoginClassPermission{
 	"ClearCounters":             config.PermClear,
 	"ClearDHCPClientIdentifier": config.PermClear,
 
-	// --- Tab completion. Completion answers "what could I type here", which is
-	// a read of the command tree and (for config-mode value slots) of config
-	// the same class may already `show`. View-tier, so a read-only operator
-	// keeps a usable CLI; the `unauthorized` class, which holds nothing, loses
-	// it along with everything else.
+	// --- Tab completion. Operational completion answers "what could I type
+	// here" from the command tree, which is a view-tier read, so a read-only
+	// operator keeps a usable CLI; the `unauthorized` class, which holds
+	// nothing, loses it along with everything else.
+	//
+	// #14952: that price is only the FLOOR. A ConfigMode=true request
+	// completes configuration-mode lines (`set security …`) from the active
+	// configuration, which is a configure-mode activity: methodPermission
+	// charges PermConfig for that arm (mirroring how #9324 charges the
+	// candidate arm of a PermView-priced RPC), so a view-only principal
+	// denied `show configuration` cannot enumerate the configuration by
+	// flipping the mode bit. Operational completion stays PermView.
 	"Complete": config.PermView,
 
 	// --- The multiplexed system-action verb. The entry here is the FLOOR for a
@@ -263,15 +270,21 @@ func systemActionPermission(action string) config.LoginClassPermission {
 	return config.PermMaint
 }
 
+// completeMethodName is the second request-priced method (after
+// SystemAction): its ConfigMode bit selects the tier.
+const completeMethodName = "Complete"
+
 // methodPermission returns the permission a full gRPC method requires, and
 // whether the method was found in the table at all.
 //
-// req is the DECODED request for a unary call and nil for a stream. It is read
-// for exactly one method: SystemAction, whose verb selects the tier. A
-// SystemAction whose request is missing or of an unexpected type falls back to
-// the methodPermissions entry (PermMaint, the destructive floor) — the same
-// answer pkg/api's body-agnostic gate gives, reached only when the verb cannot
-// be seen.
+// req is the DECODED request for a unary call and nil for a stream. It is
+// read for the request-priced methods: SystemAction, whose verb selects
+// the tier, ShowText, whose topic selects it, and Complete (#14952),
+// whose ConfigMode bit selects it. A request-priced method whose request
+// is missing or of an unexpected type falls back to the methodPermissions
+// entry — for Complete that is the PermView floor, reached only when the
+// mode bit cannot be seen (a stream or an unreadable decode); a decoded
+// ConfigMode=true request is charged PermConfig.
 func methodPermission(fullMethod string, req any) (config.LoginClassPermission, bool) {
 	service, method, ok := splitFullMethod(fullMethod)
 	if !ok || service != serviceName {
@@ -291,6 +304,15 @@ func methodPermission(fullMethod string, req any) (config.LoginClassPermission, 
 			// An unknown topic reports mapped=false so the interceptor logs
 			// the miss, exactly as an unknown METHOD does.
 			return showTextTopicPermission(st.GetTopic())
+		}
+	case completeMethodName:
+		// #14952: config-mode completion enumerates the configuration the
+		// caller could `set`; operational completion only walks the public
+		// command tree. Charge the configure tier for the former so the
+		// mode bit cannot be flipped by a view-only principal to buy the
+		// config-mode read at the view price.
+		if cr, isComplete := req.(*pb.CompleteRequest); isComplete && cr != nil && cr.GetConfigMode() {
+			return config.PermConfig, true
 		}
 	}
 	return perm, true
