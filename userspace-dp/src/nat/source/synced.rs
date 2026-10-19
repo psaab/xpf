@@ -513,6 +513,10 @@ fn reserve_synced_source_nat_allocation_with_holder(
             // the first pool-owning candidate rather than searching for one
             // that accepts.
             true,
+            // #15676: the active's resolved zone pair, so the persistent
+            // grant lands in the same bucket the active's mint used. See
+            // `reserve_synced_on_first_pool_owner`.
+            Some((from_zone, to_zone)),
             flow,
             rewrite_src,
             nat.rewrite_src_port,
@@ -596,6 +600,12 @@ fn reserve_synced_source_nat_allocation_with_holder(
         // claim was unbound until then, and mutating it to `true` escaped the
         // entire suite (5125 collected, zero red).
         false,
+        // #15676: PASS 2 is reached with `synced_zones == None` (old peer /
+        // drift) or after PASS 1 found no confirmed owner. When the pair IS
+        // known it still names the active's resolved zones, so the grant
+        // bucket must prefer it over the candidate rule's authored zones;
+        // `None` keeps the pre-#15676 authored-zone fallback byte-identical.
+        synced_zones,
         flow,
         rewrite_src,
         nat.rewrite_src_port,
@@ -820,6 +830,10 @@ fn reserve_synced_on_first_pool_owner<'a>(
     all_rules: &[SourceNatRule],
     rules: impl Iterator<Item = &'a SourceNatRule>,
     stop_at_first_owner: bool,
+    // #15676: the flow's RESOLVED zone pair from the session-sync wire
+    // (`SyncedNatZones`), when the standby could resolve it. `None` keeps
+    // the pre-#15676 authored-zone fallback.
+    synced_zones: SyncedNatZones<'_>,
     flow: SourceNatFlowKey,
     rewrite_src: IpAddr,
     rewrite_src_port: Option<u16>,
@@ -839,18 +853,31 @@ fn reserve_synced_on_first_pool_owner<'a>(
         if !rule.pool_mode {
             continue;
         }
-        // #15133: the standby must land its grant in the SAME bucket the
-        // active's mint used — the rule's normalized effective scope. The
-        // synced flow's own zone pair is not carried per-rule here (the
-        // candidate was already narrowed by `matches_ignoring_scope` in
-        // PASS 1, or is the PASS 2 first pool owner), so the packet pair
-        // falls back to the rule's authored zones; for a non-zone rule
-        // both sides fold empty packet zones identically, keeping mint
-        // and lookup in agreement on this node.
+        // #15133/#15676: the standby must land its grant in the SAME bucket
+        // the active's mint used — the rule's normalized effective scope.
+        // The active (`match_rules.rs`) folds the PACKET's resolved zone
+        // pair; `persistent_rule_scope` replaces empty authored zones with
+        // that packet pair. The pre-#15676 standby passed the rule's OWN
+        // authored zones as the packet pair, so for a non-zone-scoped
+        // rule-set (empty `from_zone`/`to_zone`, e.g. `to interface …`)
+        // it folded ("","") while the active folded the resolved
+        // ("trust","wan") — a different grant bucket, so the promoted
+        // node's inbound lookup (keyed by the admitting rule with the
+        // real packet pair) missed the standby's grant and denied
+        // post-failover inbound. Prefer the synced resolved pair when
+        // known; fall back to the authored pair only when it is not
+        // (old peer / drift, PASS 2), which keeps that fallback
+        // byte-identical to before. Empty components in a resolved pair
+        // cannot occur (`synced_source_nat_zone_pair` requires both
+        // non-empty), but guard anyway so an empty never widens.
+        let (eff_from_zone, eff_to_zone) = match synced_zones {
+            Some((fz, tz)) if !fz.is_empty() && !tz.is_empty() => (fz, tz),
+            _ => (rule.from_zone.as_str(), rule.to_zone.as_str()),
+        };
         let flow_egress_scope = rule.persistent_rule_scope(
-            &rule.from_zone,
-            &rule.to_zone,
-            &rule.to_zone,
+            eff_from_zone,
+            eff_to_zone,
+            eff_to_zone,
             &NatScopeCtx::default(),
         );
         // #5338: address-only synced decision (pool address chosen, source port
