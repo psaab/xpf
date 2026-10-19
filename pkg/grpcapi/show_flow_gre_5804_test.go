@@ -30,7 +30,7 @@ func TestShowFlowGREAccelerationIsQualified_5804(t *testing.T) {
 
 	line := ""
 	for _, l := range strings.Split(got, "\n") {
-		if strings.Contains(l, "GRE acceleration") {
+		if strings.Contains(l, "gre-performance-acceleration") {
 			line = l
 			break
 		}
@@ -38,20 +38,22 @@ func TestShowFlowGREAccelerationIsQualified_5804(t *testing.T) {
 	if line == "" {
 		t.Fatalf("no GRE acceleration line rendered at all; the operator surface vanished.\n%s", got)
 	}
-	if !strings.Contains(line, "accepted-only") {
-		t.Errorf("GRE acceleration is rendered without the accepted-only qualifier, so it reads "+
-			"as a feature in force: %q", line)
+	// #15649/#7188: stale #5804 "remain 5-tuple keyed" wording replaced by
+	// the shared SSOT line (partial; discriminator-keyed locally, not HA).
+	if strings.Contains(line, "#5804") || strings.Contains(line, "remain 5-tuple") || strings.Contains(line, "accepted-only") {
+		t.Errorf("stale #5804 GRE wording: %q", line)
 	}
-	if !strings.Contains(line, "5-tuple") {
-		t.Errorf("the line does not say what actually happens (sessions stay 5-tuple keyed), so "+
-			"an operator cannot tell why it matters: %q", line)
+	if !strings.Contains(line, "#7188") || !strings.Contains(line, "RFC 2890") {
+		t.Errorf("GRE line does not carry #7188 partial wording: %q", line)
+	}
+	if strings.TrimSpace(line) == "gre-performance-acceleration: enabled" {
+		t.Errorf("bare enabled: %q", line)
 	}
 
-	// Negative control: an unset knob renders no line, so the qualifier cannot
-	// be satisfied by printing it unconditionally.
+	// Negative control: an unset knob renders no line.
 	var off strings.Builder
 	(&Server{}).showFlowTimeouts(&config.Config{}, &off)
-	if strings.Contains(off.String(), "GRE acceleration") {
-		t.Errorf("a config that never sets the knob must render no GRE acceleration line:\n%s", off.String())
+	if strings.Contains(off.String(), "gre-performance-acceleration") {
+		t.Errorf("a config that never sets the knob must render no GRE line:\n%s", off.String())
 	}
 }

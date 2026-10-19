@@ -459,6 +459,31 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 	// the numeric policy ID) back to the detail row. RuntimePolicyIDs is the same
 	// SSOT the local CLI detail + REST/gRPC structured inventory key off.
 	runtimeIDs := dpuserspace.RuntimePolicyIDs(cfg)
+	var readErr error
+	// #15649 V2-02: shared Session-statistics/count rendering.
+	policyStats := func(w *strings.Builder, countIndent, statsIndent string, pol *config.Policy, quarantined bool, ruleID uint32) {
+		var read func(uint32) (config.PolicyCounter, error)
+		if readPolicy != nil {
+			read = func(id uint32) (config.PolicyCounter, error) {
+				cv, err := readPolicy(id)
+				if err != nil {
+					if errors.Is(err, dpuserspace.ErrPolicyCounterUnpublished) {
+						return config.PolicyCounter{}, config.ErrPolicyCounterUnpublished
+					}
+					return config.PolicyCounter{}, err
+				}
+				return config.PolicyCounter{Packets: cv.Packets, Bytes: cv.Bytes}, nil
+			}
+		}
+		disabled, rerr := config.PolicyDetailStats(w, countIndent, statsIndent, pol, quarantined, statsEnabled, read, ruleID)
+		if disabled {
+			statsDisabledDetail++
+		}
+		if rerr != nil && readErr == nil {
+			readErr = rerr
+		}
+	}
+
 	// #3667 (H01, correctness): shared source/destination address renderer.
 	// When the match sense is inverted (source-address-excluded /
 	// destination-address-excluded) the header is annotated "(except)" so the
@@ -480,9 +505,7 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 			fmt.Fprintf(buf, "        %s%s\n", config.DisplayAddressName(addr), resolved)
 		}
 	}
-	// #3408: surface a per-policy counter read failure as a warning AFTER all
-	// reads rather than silently omitting the session-statistics block.
-	var readErr error
+	// #3408: readErr declared above policyStats; warning emitted after reads.
 	passes := 1
 	if filterFrom != "" || filterTo != "" {
 		passes = 3
@@ -548,33 +571,7 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 				if modes := pol.Log.SessionLogModes(); len(modes) > 0 {
 					fmt.Fprintf(buf, "      Session log: %s\n", strings.Join(modes, ", "))
 				}
-				if pol.Count {
-					fmt.Fprintf(buf, "      count\n")
-				}
-				if ruleQuarantined {
-					fmt.Fprintf(buf, "    Session statistics: %s\n", config.ZoneQuarantineLiveCountersUnavailable)
-				} else if (statsEnabled || pol.Count) && readPolicy != nil {
-					counters, err := readPolicy(ruleID)
-					switch {
-					case err == nil:
-						fmt.Fprintf(buf, "    Session statistics:\n")
-						fmt.Fprintf(buf, "      %d packets, %d bytes\n", counters.Packets, counters.Bytes)
-					case errors.Is(err, dpuserspace.ErrPolicyCounterUnpublished):
-						// #7016: say so explicitly. Omitting the block silently is
-						// indistinguishable from `policy-stats` being off.
-						fmt.Fprintf(buf, "    Session statistics: not available "+
-							"(not yet published by the dataplane)\n")
-					default:
-						if readErr == nil {
-							readErr = err
-						}
-					}
-				} else if !statsEnabled && !pol.Count {
-					// #8177: counted, not printed per-rule. A per-rule line would
-					// repeat one system-wide fact on every policy; one trailing
-					// note states it once and names how many rows it covers.
-					statsDisabledDetail++
-				}
+				policyStats(buf, "      ", "    ", pol, ruleQuarantined, ruleID)
 			}
 			fmt.Fprintln(buf)
 		}
@@ -651,33 +648,7 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 			if modes := pol.Log.SessionLogModes(); len(modes) > 0 {
 				fmt.Fprintf(buf, "      Session log: %s\n", strings.Join(modes, ", "))
 			}
-			if pol.Count {
-				fmt.Fprintf(buf, "      count\n")
-			}
-			if ruleQuarantined {
-				fmt.Fprintf(buf, "    Session statistics: %s\n", config.ZoneQuarantineLiveCountersUnavailable)
-			} else if (statsEnabled || pol.Count) && readPolicy != nil {
-				counters, err := readPolicy(ruleID)
-				switch {
-				case err == nil:
-					fmt.Fprintf(buf, "    Session statistics:\n")
-					fmt.Fprintf(buf, "      %d packets, %d bytes\n", counters.Packets, counters.Bytes)
-				case errors.Is(err, dpuserspace.ErrPolicyCounterUnpublished):
-					// #7016: say so explicitly. Omitting the block silently is
-					// indistinguishable from `policy-stats` being off.
-					fmt.Fprintf(buf, "    Session statistics: not available "+
-						"(not yet published by the dataplane)\n")
-				default:
-					if readErr == nil {
-						readErr = err
-					}
-				}
-			} else if !statsEnabled && !pol.Count {
-				// #8177: counted, not printed per-rule. A per-rule line would
-				// repeat one system-wide fact on every policy; one trailing
-				// note states it once and names how many rows it covers.
-				statsDisabledDetail++
-			}
+			policyStats(buf, "      ", "    ", pol, ruleQuarantined, ruleID)
 		}
 		fmt.Fprintln(buf)
 	}

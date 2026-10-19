@@ -916,109 +916,9 @@ func (c *CLI) showFlowTimeouts() error {
 		fmt.Println("no active configuration")
 		return nil
 	}
-
-	flow := &cfg.Security.Flow
-
-	fmt.Println("Flow session timeouts:")
-
-	// TCP (#6539). Two claims on each of these rows are enforcement claims and
-	// both used to be wrong:
-	//
-	//  1. Only established-timeout has a dataplane wire carrier. The other
-	//     three are committed and stored but never leave the control plane, so
-	//     they carry config.AnnotateTCPSessionTimeout's annotation — the same
-	//     string the REST and gRPC surfaces and the commit advisory use.
-	//  2. The "(default)" values were the Junos defaults (1800/30/30/120), not
-	//     the windows this dataplane applies. Nothing in the Go path fills a
-	//     default in, so an unset leaf reaches the helper as 0 and it falls
-	//     back to its own constant. config.TCPSessionTimeoutDataplaneDefault is
-	//     the authority for what those constants are; time-wait reports none,
-	//     because the dataplane has no TIME_WAIT state to give a window to.
-	printTimeout := func(name, leaf string, val int) {
-		var cell string
-		switch def, ok := config.TCPSessionTimeoutDataplaneDefault(leaf); {
-		case val > 0:
-			cell = fmt.Sprintf("%ds", val)
-		case ok:
-			cell = fmt.Sprintf("%ds (default)", def)
-		default:
-			cell = "not set"
-		}
-		fmt.Printf("  %-30s %s\n", name+":", config.AnnotateTCPSessionTimeout(leaf, cell))
-	}
-	tcp := flow.TCPSession
-	if tcp == nil {
-		// No tcp-session stanza: every leaf is unset, which is exactly the
-		// val<=0 case above. Render through the same helper rather than
-		// duplicating four literal lines that can drift out of agreement with
-		// it (they had).
-		tcp = &config.TCPSessionConfig{}
-	}
-	printTimeout("TCP established timeout", config.TCPSessionEstablishedTimeoutLeaf, tcp.EstablishedTimeout)
-	printTimeout("TCP initial timeout", config.TCPSessionInitialTimeoutLeaf, tcp.InitialTimeout)
-	printTimeout("TCP closing timeout", config.TCPSessionClosingTimeoutLeaf, tcp.ClosingTimeout)
-	printTimeout("TCP time-wait timeout", config.TCPSessionTimeWaitTimeoutLeaf, tcp.TimeWaitTimeout)
-
-	// UDP
-	if flow.UDPSessionTimeout > 0 {
-		fmt.Printf("  %-30s %ds\n", "UDP session timeout:", flow.UDPSessionTimeout)
-	} else {
-		fmt.Println("  UDP session timeout:           60s (default)")
-	}
-
-	// ICMP
-	if flow.ICMPSessionTimeout > 0 {
-		fmt.Printf("  %-30s %ds\n", "ICMP session timeout:", flow.ICMPSessionTimeout)
-	} else {
-		fmt.Println("  ICMP session timeout:          30s (default)")
-	}
-
-	// TCP MSS clamping
-	if flow.TCPMSSAllTCP > 0 || flow.TCPMSSIPsecVPN > 0 || flow.TCPMSSGreIn > 0 || flow.TCPMSSGreOut > 0 {
-		fmt.Println()
-		fmt.Println("TCP MSS clamping:")
-		if flow.TCPMSSAllTCP > 0 {
-			fmt.Printf("  %-30s %d\n", "All TCP MSS:", flow.TCPMSSAllTCP)
-		}
-		if flow.TCPMSSIPsecVPN > 0 {
-			fmt.Printf("  %-30s %d\n", "IPsec VPN MSS (not enforced):", flow.TCPMSSIPsecVPN)
-		}
-		if flow.TCPMSSGreIn > 0 {
-			fmt.Printf("  %-30s %d\n", "GRE ingress MSS:", flow.TCPMSSGreIn)
-		}
-		if flow.TCPMSSGreOut > 0 {
-			fmt.Printf("  %-30s %d\n", "GRE egress MSS:", flow.TCPMSSGreOut)
-		}
-	}
-
-	// Flow options
-	if flow.AllowDNSReply || flow.AllowEmbeddedICMP || flow.GREPerformanceAcceleration || flow.PowerModeDisable {
-		fmt.Println()
-		fmt.Println("Flow options:")
-		if flow.AllowDNSReply {
-			fmt.Println("  allow-dns-reply:               enabled")
-		}
-		if flow.AllowEmbeddedICMP {
-			fmt.Println("  allow-embedded-icmp:           enabled")
-		}
-		if flow.GREPerformanceAcceleration {
-			// #7188 cut 1: still do NOT render a plain "enabled", but the
-			// reason changed. This used to say GRE sessions "remain 5-tuple
-			// keyed", which stopped being true when transit GRE started
-			// resolving a discriminator-keyed flow. It is now partially in
-			// force: keyed locally, NOT keyed across HA sync, because
-			// build_synced_session_key zeroes the discriminator on a
-			// peer-synced key. An operator who reads "enabled" here and plans
-			// per-tunnel separation through a failover gets aliasing on the
-			// standby. Keep this in lockstep with the commit-time advisory in
-			// validateSecurityFlowAcceptedOnly.
-			fmt.Println("  gre-performance-acceleration:  configured (partial; transit GRE keyed on the RFC 2890 discriminator locally, NOT across HA sync — per-tunnel identity does not survive failover — #7188)")
-		}
-		if flow.PowerModeDisable {
-			fmt.Println("  power-mode-disable:            yes")
-		}
-	}
-
+	// #15649 V11-04: single shared renderer (config.RenderFlowTimeouts) so
+	// CLI/gRPC/REST cannot diverge on ICMP 60s, unset defaults, or GRE text.
+	config.RenderFlowTimeouts(os.Stdout, cfg)
 	return nil
 }
 
@@ -1190,71 +1090,21 @@ func (c *CLI) showFlowMonitoring() error {
 		fmt.Println("No active configuration")
 		return nil
 	}
-
-	hasConfig := false
-
-	if cfg.Services.FlowMonitoring != nil && cfg.Services.FlowMonitoring.Version9 != nil {
-		v9 := cfg.Services.FlowMonitoring.Version9
-		if len(v9.Templates) > 0 {
-			hasConfig = true
-			fmt.Println("Flow Monitoring Version 9 Templates:")
-			for _, name := range sortedInstanceNames(v9.Templates) {
-				tmpl := v9.Templates[name]
-				activeTimeout := tmpl.FlowActiveTimeout
-				if activeTimeout == 0 {
-					activeTimeout = 60
-				}
-				inactiveTimeout := tmpl.FlowInactiveTimeout
-				if inactiveTimeout == 0 {
-					inactiveTimeout = 15
-				}
-				refreshRate := tmpl.TemplateRefreshRate
-				if refreshRate == 0 {
-					refreshRate = 60
-				}
-				fmt.Printf("  Template: %s\n", name)
-				fmt.Printf("    Flow active timeout:   %d seconds\n", activeTimeout)
-				fmt.Printf("    Flow inactive timeout: %d seconds\n", inactiveTimeout)
-				fmt.Printf("    Template refresh rate: %d seconds\n", refreshRate)
-				if len(tmpl.ExportExtensions) > 0 {
-					fmt.Printf("    Export extensions:     %s\n", strings.Join(tmpl.ExportExtensions, ", "))
-				}
-			}
-			fmt.Println()
-		}
+	// #15649 V17-04: shared SSOT for templates/IPFIX/bindings; CLI keeps its
+	// richer sampling-instance section below.
+	config.RenderFlowMonitoring(os.Stdout, cfg, flowServerNotInstalledSuffix)
+	if cfg.ForwardingOptions.Sampling != nil {
+		// sampling detail appended below by legacy block (hasConfig shim)
+		_ = cfg
 	}
+	return c.showFlowMonitoringSampling(cfg)
+}
 
-	if cfg.Services.FlowMonitoring != nil && cfg.Services.FlowMonitoring.VersionIPFIX != nil {
-		ipfix := cfg.Services.FlowMonitoring.VersionIPFIX
-		if len(ipfix.Templates) > 0 {
-			hasConfig = true
-			fmt.Println("Flow Monitoring IPFIX Templates:")
-			for _, name := range sortedInstanceNames(ipfix.Templates) {
-				tmpl := ipfix.Templates[name]
-				activeTimeout := tmpl.FlowActiveTimeout
-				if activeTimeout == 0 {
-					activeTimeout = 60
-				}
-				inactiveTimeout := tmpl.FlowInactiveTimeout
-				if inactiveTimeout == 0 {
-					inactiveTimeout = 15
-				}
-				refreshRate := tmpl.TemplateRefreshRate
-				if refreshRate == 0 {
-					refreshRate = 60
-				}
-				fmt.Printf("  Template: %s\n", name)
-				fmt.Printf("    Flow active timeout:   %d seconds\n", activeTimeout)
-				fmt.Printf("    Flow inactive timeout: %d seconds\n", inactiveTimeout)
-				fmt.Printf("    Template refresh rate: %d seconds\n", refreshRate)
-				if len(tmpl.ExportExtensions) > 0 {
-					fmt.Printf("    Export extensions:     %s\n", strings.Join(tmpl.ExportExtensions, ", "))
-				}
-			}
-			fmt.Println()
-		}
+func (c *CLI) showFlowMonitoringSampling(cfg *config.Config) error {
+	hasConfig := config.HasFlowMonitoring(cfg)
+	if cfg.ForwardingOptions.Sampling != nil && len(cfg.ForwardingOptions.Sampling.Instances) > 0 {
+		hasConfig = true
 	}
-
 	if cfg.ForwardingOptions.Sampling != nil {
 		for _, name := range sortedInstanceNames(cfg.ForwardingOptions.Sampling.Instances) {
 			inst := cfg.ForwardingOptions.Sampling.Instances[name]
@@ -1309,7 +1159,9 @@ func (c *CLI) showFlowMonitoring() error {
 	}
 
 	if !hasConfig {
-		fmt.Println("No flow monitoring configured")
+		// RenderFlowMonitoring already printed "No flow monitoring
+		// configured" when nothing exists; only sampling could add more.
+		_ = hasConfig
 	}
 
 	return nil

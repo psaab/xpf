@@ -234,7 +234,7 @@ func (c *CLI) showApplications(args []string) error {
 					}
 				}
 			} else {
-				fmt.Printf("  %-24s members: %s\n", as.Name, strings.Join(as.Applications, ", "))
+				fmt.Printf("  %-24s members: %s\n", as.Name, config.ApplicationSetExpandedMembers(cfg, as))
 			}
 		}
 		if filterName == "" {
@@ -262,7 +262,8 @@ func (c *CLI) showApplications(args []string) error {
 				fmt.Println("Predefined application set:")
 			}
 			fmt.Printf("  Application set: %s\n", set.Name)
-			fmt.Printf("    Members:\n")
+			fmt.Printf("    Members: %s\n", config.ApplicationSetExpandedMembers(cfg, set))
+			fmt.Printf("    Configured members:\n")
 			for _, m := range set.Applications {
 				fmt.Printf("      %s\n", m)
 				if app, ok := config.ResolveApplication(m, cfgApps(cfg)); ok && app != nil {

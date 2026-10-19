@@ -44,9 +44,9 @@ func TestShowFlowTCPTimeoutsAnnotateUnenforced_6539(t *testing.T) {
 		leaf  string
 		value string
 	}{
-		{"TCP initial", config.TCPSessionInitialTimeoutLeaf, "45s"},
-		{"TCP closing", config.TCPSessionClosingTimeoutLeaf, "15s"},
-		{"TCP time-wait", config.TCPSessionTimeWaitTimeoutLeaf, "90s"},
+		{"TCP initial timeout", config.TCPSessionInitialTimeoutLeaf, "45s"},
+		{"TCP closing timeout", config.TCPSessionClosingTimeoutLeaf, "15s"},
+		{"TCP time-wait timeout", config.TCPSessionTimeWaitTimeoutLeaf, "90s"},
 	} {
 		line := lineWith(tc.label + ":")
 		if line == "" {
@@ -78,7 +78,7 @@ func TestShowFlowTCPTimeoutsAnnotateUnenforced_6539(t *testing.T) {
 	// established-timeout IS carried to the dataplane and must stay
 	// unannotated — otherwise the annotation is decoration applied to every
 	// row and tells an operator nothing about which knob works.
-	est := lineWith("TCP established:")
+	est := lineWith("TCP established timeout:")
 	if est == "" {
 		t.Fatalf("no TCP established row rendered.\n%s", got)
 	}
