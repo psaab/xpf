@@ -97,7 +97,7 @@ func TestShowRouteTerseRendersPartialAndWarns(t *testing.T) {
 	s := serverWithPartialRouting()
 	var buf strings.Builder
 
-	if err := s.showRouteTerse(&buf); err != nil {
+	if err := s.showRouteTerse(nil, &buf); err != nil {
 		t.Fatalf("showRouteTerse must not bail on a per-family failure; got err %v", err)
 	}
 	out := buf.String()

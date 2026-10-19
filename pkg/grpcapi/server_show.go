@@ -79,7 +79,7 @@ func (s *Server) showText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 	}
 
 	if strings.HasPrefix(req.Topic, "route-protocol:") {
-		return s.showRouteProtocol(req, &buf)
+		return s.showRouteProtocol(req, cfg, &buf)
 	}
 
 	if strings.HasPrefix(req.Topic, "route-prefix:") {
@@ -388,7 +388,7 @@ func (s *Server) showText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 
 	case "route-terse":
 		// #1043 Phase 9: case body extracted to server_show_routes_text.go
-		if err := s.showRouteTerse(&buf); err != nil {
+		if err := s.showRouteTerse(cfg, &buf); err != nil {
 			return nil, err
 		}
 

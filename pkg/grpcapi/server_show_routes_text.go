@@ -22,6 +22,8 @@ import (
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"github.com/psaab/xpf/pkg/routing"
 	"github.com/psaab/xpf/pkg/termsafe"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func (s *Server) showRouteFIB(buf *strings.Builder) error {
@@ -83,17 +85,22 @@ func (s *Server) showRouteSummary(cfg *config.Config, buf *strings.Builder) erro
 	return nil
 }
 
-// showRouteTerse renders the terse main-table route listing.
-func (s *Server) showRouteTerse(buf *strings.Builder) error {
+// showRouteTerse renders the terse route listing across all tables
+// (main + routing instances), matching the local CLI (#15774).
+func (s *Server) showRouteTerse(cfg *config.Config, buf *strings.Builder) error {
 	if s.routing == nil {
 		fmt.Fprintln(buf, "Routing manager not available")
 		return nil
 	}
-	entries, err := s.routing.GetRoutes()
+	var instances []*config.RoutingInstanceConfig
+	if cfg != nil {
+		instances = cfg.RoutingInstances
+	}
+	allTables, err := s.routing.GetAllTableRoutes(instances)
 	if err != nil {
 		fmt.Fprintf(buf, "warning: partial route display (some address families unavailable): %v\n", err)
 	}
-	buf.WriteString(routing.FormatRouteTerse(entries))
+	buf.WriteString(routing.FormatRouteEntriesTerse(allTables))
 	return nil
 }
 
@@ -139,28 +146,31 @@ func (s *Server) showRouteTable(req *pb.ShowTextRequest, cfg *config.Config, buf
 	return &pb.ShowTextResponse{Output: buf.String()}, nil
 }
 
-func (s *Server) showRouteProtocol(req *pb.ShowTextRequest, buf *strings.Builder) (*pb.ShowTextResponse, error) {
-	proto := strings.ToLower(strings.TrimPrefix(req.Topic, "route-protocol:"))
+func (s *Server) showRouteProtocol(req *pb.ShowTextRequest, cfg *config.Config, buf *strings.Builder) (*pb.ShowTextResponse, error) {
+	proto := strings.TrimSpace(strings.TrimPrefix(req.Topic, "route-protocol:"))
 	if s.routing == nil {
 		buf.WriteString("Routing manager not available\n")
-	} else {
-		entries, err := s.routing.GetRoutes()
-		if err != nil {
-			fmt.Fprintf(buf, "warning: partial route display (some address families unavailable): %v\n", err)
-		}
-		fmt.Fprintf(buf, "Routes matching protocol: %s\n", proto)
-		fmt.Fprintf(buf, "  %-24s %-20s %-14s %-12s %s\n", "Destination", "Next-hop", "Interface", "Proto", "Pref")
-		count := 0
-		for _, e := range entries {
-			if strings.ToLower(e.Protocol) == proto {
-				fmt.Fprintf(buf, "  %-24s %-20s %-14s %-12s %d\n",
-					e.Destination, e.NextHop, e.Interface, e.Protocol, e.Preference)
-				count++
-			}
-		}
-		if count == 0 {
-			buf.WriteString("  (no routes)\n")
-		}
+		return &pb.ShowTextResponse{Output: buf.String()}, nil
+	}
+	// #15774: same #15236 normalization + all-tables scan as the local CLI.
+	normalized := routing.NormalizeRouteProtocol(proto)
+	if normalized == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "unknown route protocol %q", proto)
+	}
+	var instances []*config.RoutingInstanceConfig
+	if cfg != nil {
+		instances = cfg.RoutingInstances
+	}
+	allTables, err := s.routing.GetAllTableRoutes(instances)
+	if err != nil {
+		fmt.Fprintf(buf, "warning: partial route display (some address families unavailable): %v\n", err)
+	}
+	fmt.Fprintf(buf, "Routes matching protocol: %s\n", strings.ToLower(proto))
+	fmt.Fprintf(buf, "  %-24s %-20s %-14s %-12s %s\n", "Destination", "Next-hop", "Interface", "Proto", "Pref")
+	matched := routing.FilterRouteEntriesByProtocol(routing.FlattenTableRoutes(allTables), normalized)
+	buf.WriteString(routing.FormatRouteEntryRows(matched))
+	if len(matched) == 0 {
+		buf.WriteString("  (no routes)\n")
 	}
 	return &pb.ShowTextResponse{Output: buf.String()}, nil
 }
@@ -616,11 +626,11 @@ func (s *Server) showRouteInstance(filter string, cfg *config.Config, buf *strin
 		buf.WriteString("No active configuration\n")
 		return
 	}
-	var tableID int
 	found := false
+	var instances []*config.RoutingInstanceConfig
+	instances = cfg.RoutingInstances
 	for _, ri := range cfg.RoutingInstances {
 		if ri.Name == instanceName {
-			tableID = ri.TableID
 			found = true
 			break
 		}
@@ -629,23 +639,23 @@ func (s *Server) showRouteInstance(filter string, cfg *config.Config, buf *strin
 		fmt.Fprintf(buf, "Routing instance %q not found\n", instanceName)
 		return
 	}
-	if s.routing != nil {
-		entries, err := s.routing.GetRoutesForTable(tableID)
-		if err != nil {
-			// Non-fatal: render whatever family was read and surface the
-			// per-family failure rather than dropping the table (#5125).
-			fmt.Fprintf(buf, "warning: partial route display for instance %s (some address families unavailable): %v\n", instanceName, err)
-		}
-		fmt.Fprintf(buf, "Routing table for instance %s (table %d):\n", instanceName, tableID)
-		fmt.Fprintf(buf, "  %-24s %-20s %-14s %-12s %s\n",
-			"Destination", "Next-hop", "Interface", "Proto", "Pref")
-		for _, e := range entries {
-			fmt.Fprintf(buf, "  %-24s %-20s %-14s %-12s %d\n",
-				e.Destination, e.NextHop, e.Interface, e.Protocol, e.Preference)
-		}
-	} else {
+	if s.routing == nil {
 		buf.WriteString("Routing manager not available\n")
+		return
 	}
+	// #15774: configured table ID when present, else VRF-device lookup.
+	entries, err := s.routing.GetInstanceRoutes(instanceName, instances)
+	if err != nil {
+		if len(entries) == 0 {
+			fmt.Fprintf(buf, "Routing instance %q not found: %v\n", instanceName, err)
+			return
+		}
+		fmt.Fprintf(buf, "warning: partial route display for instance %s (some address families unavailable): %v\n", instanceName, err)
+	}
+	fmt.Fprintf(buf, "Routing table for instance %s:\n", instanceName)
+	fmt.Fprintf(buf, "  %-24s %-20s %-14s %-12s %s\n",
+		"Destination", "Next-hop", "Interface", "Proto", "Pref")
+	buf.WriteString(routing.FormatRouteEntryRows(entries))
 }
 
 func (s *Server) showRouteMap(ctx context.Context, cfg *config.Config, buf *strings.Builder) error {

@@ -118,11 +118,18 @@ func (c *CLI) showRouteTerse() error {
 		fmt.Println("Routing manager not available")
 		return nil
 	}
-	entries, err := c.routing.GetRoutes()
+	var instances []*config.RoutingInstanceConfig
+	if c.store != nil {
+		if cfg := c.store.ActiveConfig(); cfg != nil {
+			instances = cfg.RoutingInstances
+		}
+	}
+	// #15774: all tables, not main only — mirrors the gRPC twin.
+	allTables, err := c.routing.GetAllTableRoutes(instances)
 	if err != nil {
 		fmt.Printf("warning: partial route display (some address families unavailable): %v\n", err)
 	}
-	fmt.Print(routing.FormatRouteTerse(entries))
+	fmt.Print(routing.FormatRouteEntriesTerse(allTables))
 	return nil
 }
 
@@ -138,11 +145,9 @@ func (c *CLI) showRoutesForInstance(instanceName string) error {
 		return nil
 	}
 
-	var tableID int
 	found := false
 	for _, ri := range cfg.RoutingInstances {
 		if ri.Name == instanceName {
-			tableID = ri.TableID
 			found = true
 			break
 		}
@@ -151,18 +156,19 @@ func (c *CLI) showRoutesForInstance(instanceName string) error {
 		return fmt.Errorf("routing instance %q not found", instanceName)
 	}
 
-	entries, err := c.routing.GetRoutesForTable(tableID)
+	// #15774: configured table ID when present, else VRF-device lookup.
+	entries, err := c.routing.GetInstanceRoutes(instanceName, cfg.RoutingInstances)
 	if err != nil {
+		if len(entries) == 0 {
+			return fmt.Errorf("routing instance %q not found: %w", instanceName, err)
+		}
 		fmt.Printf("warning: partial route display for instance %s (some address families unavailable): %v\n", instanceName, err)
 	}
 
-	fmt.Printf("Routing table for instance %s (table %d):\n", instanceName, tableID)
+	fmt.Printf("Routing table for instance %s:\n", instanceName)
 	fmt.Printf("  %-24s %-20s %-14s %-12s %s\n",
 		"Destination", "Next-hop", "Interface", "Proto", "Pref")
-	for _, e := range entries {
-		fmt.Printf("  %-24s %-20s %-14s %-12s %d\n",
-			e.Destination, e.NextHop, e.Interface, e.Protocol, e.Preference)
-	}
+	fmt.Print(routing.FormatRouteEntryRows(entries))
 	return nil
 }
 
@@ -218,17 +224,9 @@ func (c *CLI) showRoutesForProtocol(proto string) error {
 	fmt.Printf("Routes matching protocol: %s\n", strings.ToLower(proto))
 	fmt.Printf("  %-24s %-20s %-14s %-12s %s\n",
 		"Destination", "Next-hop", "Interface", "Proto", "Pref")
-	count := 0
-	for _, table := range allTables {
-		for _, e := range table.Entries {
-			if routing.RouteProtocolMatches(e.Protocol, normalized) {
-				fmt.Printf("  %-24s %-20s %-14s %-12s %d\n",
-					e.Destination, e.NextHop, e.Interface, e.Protocol, e.Preference)
-				count++
-			}
-		}
-	}
-	if count == 0 {
+	matched := routing.FilterRouteEntriesByProtocol(routing.FlattenTableRoutes(allTables), normalized)
+	fmt.Print(routing.FormatRouteEntryRows(matched))
+	if len(matched) == 0 {
 		fmt.Printf("  (no routes)\n")
 	}
 	return nil
