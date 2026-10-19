@@ -142,15 +142,17 @@ func configMutationLineFor(fullMethod string, req any) (string, bool) {
 			// Server.Set routes these inputs by their leading verb instead of
 			// sending them through SetFromInput. Keep the exact handler-routed
 			// line so the configuration gate adjudicates the real path(s):
-			if fields := strings.Fields(input); len(fields) > 0 && fields[0] == "annotate" {
-				// The handler passes this input through AnnotateCommentFromLine,
-				// then uses strings.Fields(pathText) and the decoded comment. Rebuild
-				// the gate line from those same values so quotes inside a comment
-				// cannot become extra path tokens in the authorization lexer.
-				line := strings.TrimSpace(strings.TrimPrefix(input, fields[0]))
-				pathText, comment, ok := cliterm.AnnotateCommentFromLine(line)
-				if ok {
-					path := strings.Fields(pathText)
+			if verb, isMutation := config.ConfigMutationVerb(input); isMutation && verb == "annotate" {
+				// #15760: split with the canonical #14717 parser the
+				// handler now also uses (ParseAnnotateCommand): the
+				// comment is the LAST token and only when authored
+				// quoted, so a quoted path element stays in the path.
+				// Rebuild the gate line from those lexed values —
+				// every path element quoted, comment escaped — so
+				// quotes inside the comment cannot become extra path
+				// tokens in the authorization lexer, and the path
+				// adjudicated is the path acted on.
+				if path, comment, ok := config.ParseAnnotateCommand(input); ok {
 					quotedPath := make([]string, len(path))
 					for i, token := range path {
 						quotedPath[i] = `"` + cliterm.EscapeAnnotateComment(token) + `"`

@@ -363,10 +363,17 @@ func (c *ctl) dispatchConfig(line string) error {
 	case "annotate":
 		// #13554: annotate rides Set like the other config mutations routed
 		// through Server.Set, with the verb retained for authorization.
-		remainder := strings.TrimSpace(strings.TrimPrefix(line, parts[0]))
-		pathText, comment, ok := cliterm.AnnotateCommentFromLine(remainder)
-		annotPath, annotOK := config.ParseConfigPath(pathText)
-		if !ok || !annotOK || len(annotPath) == 0 {
+		// #15760: split with the canonical #14717 parser
+		// (ParseAnnotateRemainder): the comment is the LAST token and
+		// only when authored quoted, so a quoted path element stays in
+		// the path. The previous first-quote split
+		// (cliterm.AnnotateCommentFromLine) truncated the path at the
+		// first '"' and mangled the remainder into the comment, so the
+		// wire path was shorter than the one the server gate
+		// adjudicates. JoinConfigPathTokens re-quotes any token that
+		// needs it, so the wire line re-lexes to the same path.
+		annotPath, comment, ok := config.ParseAnnotateRemainder(strings.TrimSpace(strings.TrimPrefix(line, parts[0])))
+		if !ok || len(annotPath) == 0 {
 			fmt.Println("usage: annotate <path> \"comment\"")
 			return nil
 		}
