@@ -497,10 +497,10 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 			// Junos "all facilities" spelling on the system-syslog
 			// host/file/user surface, whose facility key is an OPEN-ENDED
 			// schema wildcard — and this is not that surface. A security
-			// stream's facility is ValidateEnum(syslogFacilities), which lists
-			// auth/change-log/daemon/kern/local0-7/syslog/user and does NOT
-			// include `any`; the stream carries a numeric facility, so there is
-			// no wildcard for `any` to mean here.
+			// stream's facility is ValidateEnum(syslogFacilities) (#15703: the
+			// BSD names plus the documented Junos names ParseFacilityChecked
+			// maps) and does NOT include `any`; the stream carries a numeric
+			// facility, so there is no wildcard for `any` to mean here.
 			//
 			// Suppressing on it therefore silenced the diagnostic on exactly
 			// the population it was built for: `any` cannot arrive by strict

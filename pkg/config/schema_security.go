@@ -40,8 +40,9 @@ const (
 //     error/warning/info list that rejected critical/notice/debug/
 //     emergency/alert/any/none — every one of which the runtime honors
 //     (commit-rejects-valid, codex-179 C179-046).
-//   - syslogFacilities: pkg/logging ParseFacility (recognized names; every
-//     other name silently remaps to local0).
+//   - syslogFacilities: pkg/logging ParseFacilityChecked (#6830) — the
+//     BSD names plus the documented Junos names in junosRemoteFacility;
+//     every other name silently remaps to local0.
 //   - syslogCategories: pkg/logging ParseCategory (all/session/policy/screen/
 //     firewall; every other name => 0 = no filter = send ALL).
 var (
@@ -52,10 +53,12 @@ var (
 	// domain the runtime applies (C179-046). Do NOT re-list the tokens here.
 	syslogSeverities = junosSyslogSeverities
 	syslogFacilities = []string{
-		"auth", "change-log", "daemon", "kern",
+		"auth", "authorization", "change-log", "conflict-log",
+		"daemon", "dfc", "firewall", "ftp",
+		"interactive-commands", "kern", "kernel",
 		"local0", "local1", "local2", "local3",
 		"local4", "local5", "local6", "local7",
-		"syslog", "user",
+		"pfe", "syslog", "user",
 	}
 	syslogCategories = []string{"all", "firewall", "policy", "screen", "session"}
 )

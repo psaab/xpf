@@ -175,9 +175,10 @@ func TestBuildSyslogClientsWarnsOnUnmappedFacility_6829(t *testing.T) {
 	// host/file/user surface, whose facility key is an open-ended schema wildcard
 	// and where `host <ip> any <sev>` really is the canonical Junos form. A
 	// security stream is a different surface: its facility is
-	// ValidateEnum(syslogFacilities) — auth/change-log/daemon/kern/local0-7/
-	// syslog/user — with no `any`, and the stream carries a NUMERIC facility, so
-	// there is no wildcard for `any` to denote.
+	// ValidateEnum(syslogFacilities) (#15703: the BSD names plus the
+	// documented Junos names ParseFacilityChecked maps) — with no `any`, and
+	// the stream carries a NUMERIC facility, so there is no wildcard for
+	// `any` to denote.
 	//
 	// Because the enum forbids it, `any` cannot arrive by strict commit at all;
 	// it arrives only through the tolerant paths (configstore.Store downgrades
