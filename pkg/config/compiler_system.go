@@ -4144,6 +4144,25 @@ func compileRGInterfaceMonitors(rg *RedundancyGroup, child *Node) {
 	// on the statement's OWN Keys and has no children at all, and a
 	// bracketed `[ ge-0/0/0 ge-0/0/1 ]` collapses N monitors onto
 	// one node's Keys in EVERY spelling.
+	//
+	// #15036: entries fold BY INTERFACE, last-wins. A re-weighted
+	// monitor (`... ge-0/0/1 weight 100;` then `... ge-0/0/1 weight
+	// 255;`, in any spelling) used to append a SECOND monitor, and
+	// the two runtime consumers disagreed about which was live:
+	// pollInterfaceMonitors applied the FIRST entry's weight on the
+	// shared dampening key while reconcileMonitorDebtsLocked's
+	// desired map took the LAST, so the group stayed primary behind
+	// a dead link until an unrelated commit flipped the weight.
+	// One compiled monitor per interface makes both read one weight.
+	// The strict commit path rejects the duplicate outright
+	// (validateChassisClusterStrict); this fold is what the tolerant
+	// load / peer-sync path keeps (#1960 no-brick).
+	seen := make(map[string]int, len(rg.InterfaceMonitors))
+	for i, m := range rg.InterfaceMonitors {
+		if m != nil {
+			seen[m.Interface] = i
+		}
+	}
 	for _, ifChild := range monitorEntryNodes(child, 1) {
 		im := &InterfaceMonitor{
 			Interface: ifChild.Name(),
@@ -4160,6 +4179,11 @@ func compileRGInterfaceMonitors(rg *RedundancyGroup, child *Node) {
 				im.Weight = n
 			}
 		}
+		if idx, dup := seen[im.Interface]; dup {
+			rg.InterfaceMonitors[idx] = im
+			continue
+		}
+		seen[im.Interface] = len(rg.InterfaceMonitors)
 		rg.InterfaceMonitors = append(rg.InterfaceMonitors, im)
 	}
 }

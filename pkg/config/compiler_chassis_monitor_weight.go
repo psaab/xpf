@@ -118,8 +118,26 @@ func validateMonitorWeightTokensAST(nodes []*Node, lenient bool) ([]string, erro
 
 	// checkEntries validates every entry of one monitor statement. what names
 	// the statement for the operator (e.g. `interface-monitor`).
-	checkEntries := func(rgName, what string, entries []*Node) error {
+	//
+	// #15036: entries are ALSO checked for a duplicate interface. A
+	// re-weighted monitor authored twice compiles (via the
+	// compileRGInterfaceMonitors fold) to one entry, so the compiled
+	// struct cannot show the duplicate — only this AST walk sees both
+	// statements. Strict: reject; lenient: warn, and the fold keeps the
+	// last weight so both runtime consumers read one weight.
+	checkEntries := func(rgName, what string, entries []*Node, seen map[string]bool) error {
 		for _, entry := range entries {
+			name := entry.Name()
+			if seen[name] {
+				if err := emit("chassis cluster redundancy-group %s %s %s: "+
+					"duplicate interface-monitor %s — specify the monitor exactly once with its "+
+					"final weight; a second entry is not a re-weight, and the runtime would "+
+					"apply the two entries in different orders",
+					rgName, what, name, name); err != nil {
+					return err
+				}
+			}
+			seen[name] = true
 			if err := checkTokens(
 				fmt.Sprintf("redundancy-group %s %s %s", rgName, what, entry.Name()),
 				monitorWeightKeyword,
@@ -157,11 +175,16 @@ func validateMonitorWeightTokensAST(nodes []*Node, lenient bool) ([]string, erro
 	walkErr := forEachChild(nodes, "chassis", func(chassis *Node) error {
 		return forEachChild(chassis.Children, "cluster", func(cluster *Node) error {
 			for _, rgInst := range namedInstances(cluster.FindChildren("redundancy-group")) {
+				// #15036: duplicate detection is per redundancy-group and
+				// spans every statement in its (possibly multi-block,
+				// #6543-folded) body, so both maps live outside the child loop.
+				seenIfMon := make(map[string]bool)
+				seenIP := make(map[string]bool)
 				for _, child := range redundancyGroupBody(rgInst.node) {
 					switch child.Name() {
 					case "interface-monitor":
 						if err := checkEntries(rgInst.name, "interface-monitor",
-							monitorEntryNodes(child, 1)); err != nil {
+							monitorEntryNodes(child, 1), seenIfMon); err != nil {
 							return err
 						}
 					case "ip-monitoring":
@@ -182,7 +205,7 @@ func validateMonitorWeightTokensAST(nodes []*Node, lenient bool) ([]string, erro
 								continue
 							}
 							if err := checkEntries(rgInst.name, "ip-monitoring family inet",
-								monitorEntryNodes(inetNode, inetSkip)); err != nil {
+								monitorEntryNodes(inetNode, inetSkip), seenIP); err != nil {
 								return err
 							}
 						}

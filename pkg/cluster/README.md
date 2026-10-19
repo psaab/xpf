@@ -3628,6 +3628,19 @@ removed/changed persisted and stranded a healthy node secondary forever.
 (it runs under the manager lock already held by `UpdateConfig`); the
 manager-side clear happens directly in `reconcileMonitorDebtsLocked`.
 
+**One weight per monitored interface (#15036).** A redundancy group must
+never carry two compiled monitors for the same interface. Before the fix a
+re-weighted `interface-monitor ge-0/0/1` (weight 100, then weight 255)
+compiled to two entries, and the consumers disagreed: `pollInterfaceMonitors`
+shares one dampening key per (rg,iface) and applied the FIRST entry's weight
+on the down-transition, while `reconcileMonitorDebtsLocked`'s desired map
+took the LAST — so the group stayed primary behind a dead link at weight 155
+until an unrelated commit flipped it to 0. `compileRGInterfaceMonitors` now
+folds by interface last-wins, the strict commit path rejects the duplicate
+(`validateChassisClusterStrict`), and the tolerant path keeps the folded
+single monitor with a warning, so poll and reconcile read one weight before
+and after any re-commit.
+
 **Monitor map locking and the `m.mu -> mon.mu` order (#6550).** The poll
 goroutine and `UpdateGroups` share four maps — `ifaceState`, `ipState`,
 `ipDebts`, `ipThresholdState`. `UpdateGroups` deletes from all four under
