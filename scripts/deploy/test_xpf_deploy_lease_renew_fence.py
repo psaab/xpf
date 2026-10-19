@@ -39,11 +39,11 @@ RED-on-revert (proven by hand, see the docstrings on the end-to-end tests):
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import types
 import unittest
 from pathlib import Path
 from unittest import mock
-
 _SPEC = importlib.util.spec_from_file_location(
     "xpf_deploy", Path(__file__).with_name("xpf-deploy.py"))
 xpf_deploy = importlib.util.module_from_spec(_SPEC)
@@ -530,6 +530,181 @@ class ImageRollFenceAbortTests(unittest.TestCase):
         self.assertEqual(recreate_calls, [],
                          "a lost-lease driver recreated the node (split-brain)")
         self.assertNotIn("fw0", exec_fake.rejoined)
+
+
+
+# ── #14992 D38-04: transient fence loss must not strand a drained node ─────
+# The fence reports "unreachable" (never "lost") for a transport failure, but
+# the pre-fix kernel-roll collapsed that into lost_lease: the finally both
+# SKIPPED the restore rejoin AND unconditionally deleted both leases. The
+# drained node then read leaseNone in Go KernelSelfRecovery.Tick — a
+# permanent no-op — so nothing could ever rejoin it. The backends below model
+# the lease as real state so the assertions measure preservation, not mocks
+# of the code under test.
+class _LeaseTrackingKernelBackend:
+    """Kernel-roll backend with an explicit per-node lease present/absent set.
+
+    Acquire seeds the lease, a holder-guarded clear (`rm -f`) removes it, and
+    a renew answers RENEWED/LOST/unreachable per `renew_verdicts` (a callable
+    node -> verdict, default RENEWED). `clears` records every clear attempt so
+    a test can prove the finally did (or did not) delete the leases."""
+
+    def __init__(self, renew_verdicts=None):
+        self.verbs = []            # (node, verb) for drain/arm/rejoin
+        self.clears = []           # node names a holder-guarded clear ran on
+        self.lease_present = set()
+        self.renew_verdicts = renew_verdicts or (lambda node: "RENEWED")
+
+    def __call__(self, runner, backend, node, argv):
+        if argv[:2] == ["sh", "-c"]:
+            s = argv[-1]
+            if "RENEWED" in s:                  # renew/fence tick
+                return R(0, self.renew_verdicts(node) + "\n", "", True)
+            if "rm -f" in s:                    # holder-guarded clear
+                self.clears.append(node)
+                self.lease_present.discard(node)
+                return R(0, "", "", True)
+            self.lease_present.add(node)        # acquire
+            return R(0, "ACQUIRED\n", "", True)
+        if argv[:3] == ["xpfd", "upgrade", "kernel"]:
+            verb = argv[3]
+            if verb == "status":
+                return R(0, f"promoted={KNOWN_GOOD} armed=none\n", "", True)
+            self.verbs.append((node, verb))
+            return R(0, "", "", True)
+        if argv[:1] == ["cat"] and "boot_id" in argv[-1]:
+            return R(0, "BOOT\n", "", True)
+        if argv == ["uname", "-r"]:
+            return R(0, KNOWN_GOOD + "\n", "", True)
+        return R(0, "", "", True)
+
+
+def _sequence_verdicts(verdicts):
+    """Renew verdicts consumed in call order (fw0 then fw1 per fence)."""
+    it = itertools.chain(verdicts, itertools.repeat(verdicts[-1]))
+    return lambda node: next(it)
+
+class KernelRollTransientFenceLossTests(unittest.TestCase):
+    def test_unconfirmable_peer_fence_rejoins_and_preserves_leases(self):
+        """D38-04 exact mechanism: drain fw0, then the pre-ARM fence cannot
+        confirm the PEER lease (transient SSH error -> transport failure,
+        never a proven LOST). The fence still aborts fail-closed, but the
+        finally MUST rejoin the drained fw0 and MUST NOT delete either lease
+        (preserved to expire -> KernelSelfRecovery leaseExpiredOurs).
+
+        RED on current master: `lost_lease` is set on the unconfirmable
+        branch, the finally skips the rejoin, and 7b deletes both leases —
+        verbs == [('fw0','drain')] and lease_present == set()."""
+        # Pre-drain fence: fw0, fw1 RENEWED. Pre-arm fence: fw0 RENEWED,
+        # fw1 transport failure on all 3 fence retries.
+        verdicts = _sequence_verdicts(
+            ["RENEWED", "RENEWED", "RENEWED", "UNREACHABLE",
+             "UNREACHABLE", "UNREACHABLE"])
+        fake = _LeaseTrackingKernelBackend(renew_verdicts=verdicts)
+        # Transport failure: _renew_lease maps un-ok to "unreachable"; model
+        # that by returning a not-ok result for UNREACHABLE ticks instead.
+        orig = fake.__call__
+
+        def call(runner, backend, node, argv):
+            if argv[:2] == ["sh", "-c"] and "RENEWED" in argv[-1]:
+                v = verdicts(node)
+                if v == "UNREACHABLE":
+                    return R(1, "", "ssh: connect failed", False)
+                return R(0, v + "\n", "", True)
+            return orig(runner, backend, node, argv)
+
+        with mock.patch.object(xpf_deploy, "_node_exec_result", call), \
+                mock.patch("time.sleep", return_value=None):
+            with self.assertRaises(SystemExit) as cm:
+                xpf_deploy.cmd_kernel_roll(_kernel_args())
+        self.assertIn("could NOT confirm", str(cm.exception))
+        self.assertIn("arm+reboot fw0", str(cm.exception))
+        # Drain ran, arm did NOT (fence stayed fail-closed), restore rejoin DID.
+        self.assertEqual(fake.verbs, [("fw0", "drain"), ("fw0", "rejoin")],
+                         "transient fence loss stranded the drained node: "
+                         "the finally skipped its restore rejoin (#14992)")
+        # Leases preserved on BOTH nodes (left to expire for self-recovery).
+        self.assertEqual(fake.clears, [],
+                         "transient fence loss deleted the kernel-roll "
+                         "leases, disabling KernelSelfRecovery (#14992)")
+        self.assertEqual(fake.lease_present, {"fw0", "fw1"})
+
+    def test_proven_loss_still_suppresses_rejoin_but_preserves_leases(self):
+        """Adjacent control: a PROVEN loss (LOST) after the drain keeps the
+        #5816 behaviour — no finally rejoin (a successor owns the pair) —
+        but the leases are still preserved: the drained lease is already
+        the successor's (holder-guarded clear would be a no-op) and deleting
+        the peer lease would destroy the successor's reservation."""
+        fake = _LeaseTrackingKernelBackend(
+            renew_verdicts=_sequence_verdicts(
+                ["RENEWED", "RENEWED", "LOST"]))
+        with mock.patch.object(xpf_deploy, "_node_exec_result", fake), \
+                mock.patch("time.sleep", return_value=None):
+            with self.assertRaises(SystemExit) as cm:
+                xpf_deploy.cmd_kernel_roll(_kernel_args())
+        self.assertIn("LOST", str(cm.exception))
+        self.assertEqual(fake.verbs, [("fw0", "drain")],
+                         "a proven-loss driver un-drained the pair (#5816)")
+        self.assertEqual(fake.clears, [],
+                         "an incomplete drained roll must preserve leases")
+        self.assertEqual(fake.lease_present, {"fw0", "fw1"})
+
+    def test_arm_failure_abort_rejoins_and_preserves_leases(self):
+        """Adjacent control: an arm that fails pre-reboot (lease still owned,
+        node never rebooted, status armed=none) still gets the finally
+        restore rejoin, and — being drained+incomplete — now preserves the
+        leases instead of deleting them (#14992). The rejoin is the primary
+        recovery; the preserved lease is the backstop if it cannot land."""
+        fake = _LeaseTrackingKernelBackend()
+        with mock.patch.object(xpf_deploy, "_node_exec_result", fake), \
+                mock.patch("time.sleep", return_value=None):
+            with self.assertRaises(SystemExit):
+                xpf_deploy.cmd_kernel_roll(_kernel_args())
+        self.assertIn(("fw0", "drain"), fake.verbs)
+        self.assertIn(("fw0", "rejoin"), fake.verbs)
+        self.assertEqual(fake.clears, [])
+        self.assertEqual(fake.lease_present, {"fw0", "fw1"})
+
+
+class FenceUnreachableCallbackTests(unittest.TestCase):
+    """`_fence_before_mutate` splits CONFIRMED loss from UNCONFIRMABLE."""
+
+    def _fence(self, verdicts, **kwargs):
+        runner = xpf_deploy.Runner(False)
+        with mock.patch.object(
+                xpf_deploy, "_renew_lease",
+                side_effect=lambda r, b, n, nid, h, t: verdicts[n]), \
+                mock.patch("time.sleep", return_value=None):
+            xpf_deploy._fence_before_mutate(
+                runner, "ssh", [("fw0", 0), ("fw1", 0)], HOLDER, 1800,
+                "drain fw0", **kwargs)
+
+    def test_unreachable_invokes_on_unreachable_not_on_lost(self):
+        lost, unreachable = [], []
+        with self.assertRaises(SystemExit):
+            self._fence({"fw0": "unreachable", "fw1": "owned"},
+                        on_lost=lambda: lost.append(1),
+                        on_unreachable=lambda: unreachable.append(1))
+        self.assertEqual(lost, [])
+        self.assertEqual(unreachable, [1])
+
+    def test_lost_invokes_on_lost_not_on_unreachable(self):
+        lost, unreachable = [], []
+        with self.assertRaises(SystemExit):
+            self._fence({"fw0": "lost", "fw1": "owned"},
+                        on_lost=lambda: lost.append(1),
+                        on_unreachable=lambda: unreachable.append(1))
+        self.assertEqual(lost, [1])
+        self.assertEqual(unreachable, [])
+
+    def test_legacy_on_lost_only_still_fires_on_unreachable(self):
+        # Callers that pass only on_lost (e.g. image-roll's default None and
+        # any out-of-tree caller) keep the old both-outcomes behaviour.
+        lost = []
+        with self.assertRaises(SystemExit):
+            self._fence({"fw0": "unreachable", "fw1": "owned"},
+                        on_lost=lambda: lost.append(1))
+        self.assertEqual(lost, [1])
 
 
 if __name__ == "__main__":
