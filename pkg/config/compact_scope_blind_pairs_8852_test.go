@@ -145,6 +145,7 @@ var knownBlindScopePairs8852 = map[string]string{
 	"nat nat64":       "plain-container",
 	"nat natv6v4":     "plain-container",
 	"nat proxy-arp":   "plain-container",
+	"nat proxy-ndp":   "plain-container",
 	"nat static":      "plain-container",
 	// #8929, a DEPTH-2 pair; shape derived by the sentinel method.
 	"nat source": "plain-container",

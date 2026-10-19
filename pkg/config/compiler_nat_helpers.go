@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"strconv"
 	"strings"
@@ -385,16 +386,27 @@ func appendPoolAddresses(pool *NATPool, tokens []string) error {
 var errNATAddressRangeTooLarge = errors.New("address range too large")
 
 // expandAddressRange expands "low/mask to high/mask" into individual IP strings.
-// Both low and high must be /32 CIDRs. Max 256 IPs; a larger range returns
-// errNATAddressRangeTooLarge (see above) rather than an anonymous error.
+// IPv4 endpoints must be /32, IPv6 endpoints /128 (bare endpoints default to
+// the host mask). Both endpoints must share a family. Max 256 IPs; a larger
+// range returns errNATAddressRangeTooLarge (see above).
 func expandAddressRange(low, high string) ([]string, error) {
+	lowFam := natAddrFamily(natCIDRIPPart(low))
+	highFam := natAddrFamily(natCIDRIPPart(high))
+	if lowFam != "" && highFam != "" && lowFam != highFam {
+		return nil, fmt.Errorf("address range endpoints must share an address family: %q (%s) to %q (%s)", low, lowFam, high, highFam)
+	}
+	isV6 := lowFam == "v6" || highFam == "v6" || strings.Contains(low, ":") || strings.Contains(high, ":")
+	hostMask := "/32"
+	if isV6 {
+		hostMask = "/128"
+	}
 	lowCIDR := low
 	if !strings.Contains(lowCIDR, "/") {
-		lowCIDR += "/32"
+		lowCIDR += hostMask
 	}
 	highCIDR := high
 	if !strings.Contains(highCIDR, "/") {
-		highCIDR += "/32"
+		highCIDR += hostMask
 	}
 	lowIP, _, err := net.ParseCIDR(lowCIDR)
 	if err != nil {
@@ -404,21 +416,49 @@ func expandAddressRange(low, high string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid high address %q: %w", high, err)
 	}
-	lowIP = lowIP.To4()
-	highIP = highIP.To4()
-	if lowIP == nil || highIP == nil {
+	if isV6 {
+		if lowIP.To4() != nil && !strings.Contains(low, ":") || highIP.To4() != nil && !strings.Contains(high, ":") {
+			return nil, fmt.Errorf("address range endpoints must share an address family: %q to %q", low, high)
+		}
+		low16 := lowIP.To16()
+		high16 := highIP.To16()
+		if low16 == nil || high16 == nil {
+			return nil, fmt.Errorf("invalid IPv6 address in range %q to %q", low, high)
+		}
+		lowN := new(big.Int).SetBytes(low16)
+		highN := new(big.Int).SetBytes(high16)
+		if lowN.Cmp(highN) > 0 {
+			return nil, fmt.Errorf("low address %s > high address %s", low, high)
+		}
+		count := new(big.Int).Sub(highN, lowN)
+		count.Add(count, big.NewInt(1))
+		if count.Cmp(big.NewInt(256)) > 0 {
+			return nil, fmt.Errorf("%w: %s IPs (max 256)", errNATAddressRangeTooLarge, count.String())
+		}
+		n := int(count.Int64())
+		result := make([]string, 0, n)
+		cur := new(big.Int).Set(lowN)
+		one := big.NewInt(1)
+		for range n {
+			b := cur.Bytes()
+			ipBytes := make([]byte, 16)
+			copy(ipBytes[16-len(b):], b)
+			result = append(result, net.IP(ipBytes).String()+"/128")
+			cur.Add(cur, one)
+		}
+		return result, nil
+	}
+	lowIP4 := lowIP.To4()
+	highIP4 := highIP.To4()
+	if lowIP4 == nil || highIP4 == nil {
 		return nil, fmt.Errorf("address range only supports IPv4")
 	}
-	lowN := binary.BigEndian.Uint32(lowIP)
-	highN := binary.BigEndian.Uint32(highIP)
+	lowN := binary.BigEndian.Uint32(lowIP4)
+	highN := binary.BigEndian.Uint32(highIP4)
 	if lowN > highN {
 		return nil, fmt.Errorf("low address %s > high address %s", low, high)
 	}
-	// #5194 A3-b2-F9: compute the inclusive count in uint64. In uint32 the
-	// full-domain range 0.0.0.0-255.255.255.255 has highN-lowN == 0xFFFFFFFF and
-	// +1 WRAPS to 0, so the `> 256` guard passed, the generation loop ran zero
-	// times, and the oversized range committed as an EMPTY pool with nil error
-	// instead of the promised size error.
+	// #5194: inclusive count in uint64 (uint32 +1 wraps full-domain to 0).
 	count := uint64(highN) - uint64(lowN) + 1
 	if count > 256 {
 		return nil, fmt.Errorf("%w: %d IPs (max 256)", errNATAddressRangeTooLarge, count)

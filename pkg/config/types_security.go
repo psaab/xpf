@@ -553,6 +553,20 @@ type ZoneConfig struct {
 	ResolvedInterfaceOverrides map[string]*HostInboundTraffic
 	ResolvedInterfaceDeclared  map[string]bool
 	TCPRst                     bool // send TCP RST for non-SYN TCP transit session misses
+	// #15670 (V3-02): standard Junos security-zone children. Parsed onto
+	// the zone so they no longer trip the closed-world strict reject or
+	// the #11575 DroppedEnforcementChild whole-zone quarantine. None has
+	// a dataplane runtime today; ValidateConfig emits an accepted-only
+	// advisory naming each configured knob (white-list included — it is
+	// enforcement-bearing screen-bypass state, so silence would claim a
+	// bypass that never happens; see validateZoneChildren15670).
+	ApplicationTracking        bool                        // `application-tracking` (AppTrack telemetry)
+	SourceIdentityLog          bool                        // `source-identity-log` (user/group in session log)
+	EnableReverseReroute       bool                        // `enable-reverse-reroute`
+	UnidirectionalRefresh      bool                        // `unidirectional-session-refreshing`
+	AdvancePBRProfile          string                      // `advance-policy-based-routing-profile <name>`
+	AdvancedConnectionTracking *AdvancedConnectionTracking // `advanced-connection-tracking { ... }`
+	WhiteList                  []string                    // `white-list <screen white-list name> ...` (screen-bypass allowlist refs)
 	// AddressBook is the zone-local address book (#3061). A policy whose
 	// from-zone (source-address) or to-zone (destination-address) is this
 	// zone resolves a name against this book FIRST, then falls back to the
@@ -560,6 +574,17 @@ type ZoneConfig struct {
 	// zone-qualified internal names by resolveZoneLocalAddressBooks during
 	// compile, so the dataplane resolution path stays global-only.
 	AddressBook *AddressBook
+}
+
+// AdvancedConnectionTracking is the zone-level
+// `advanced-connection-tracking { mode ...; timeout ...;
+// track-all-policies-to-this-zone; }` stanza (#15670). Mode is one of
+// allow-any-host / allow-target-host / allow-target-host-port; Timeout
+// is seconds (0 = unset). Accepted-only: xpf has no ACT table runtime.
+type AdvancedConnectionTracking struct {
+	Mode             string
+	Timeout          int
+	TrackAllPolicies bool
 }
 
 // HostInboundTraffic defines what services are permitted to the firewall itself.

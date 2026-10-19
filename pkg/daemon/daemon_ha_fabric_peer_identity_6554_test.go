@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sync/semaphore"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -66,6 +69,20 @@ func (h *fabricProgramRecorder) programmedPeerMACs() []string {
 			continue
 		}
 		out = append(out, net.HardwareAddr(w.PeerMAC[:]).String())
+	}
+	return out
+}
+
+// programmedIDs returns the FabricIDs of every NON-ZERO fabric write, in order.
+func (h *fabricProgramRecorder) programmedIDs() []dataplane.FabricID {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []dataplane.FabricID
+	for i, w := range h.writes {
+		if w.Ifindex == 0 {
+			continue
+		}
+		out = append(out, h.ids[i])
 	}
 	return out
 }
@@ -542,5 +559,207 @@ func TestSelectFabricPeerLinkLocalMAC(t *testing.T) {
 				t.Fatal("success carried no link-local address for logging")
 			}
 		})
+	}
+}
+
+// #15683 — fab1 must get the same physical-parent ARP/NDP and IPv6 link-local
+// fallbacks as fab0, and reconcileRGState must treat fab1-populated as
+// fabric-ready.
+
+// fab1PeerTestDaemon wires a Daemon whose secondary fabric parent resolves to
+// a synthetic link. The fab1 overlay's own neighbour table is deliberately
+// EMPTY, so resolution must fall through to the parent fallbacks under test.
+// parentNeighs maps (ifindex, family) -> neighbours; unlisted keys miss.
+func fab1PeerTestDaemon(t *testing.T, parentNeighs map[[2]int][]netlink.Neigh) (*Daemon, *fabricProgramRecorder) {
+	t.Helper()
+	const (
+		parentIdx  = 21
+		overlayIdx = 22
+	)
+	parent := &testLink{attrs: netlink.LinkAttrs{
+		Name:         "ge-0-0-1",
+		Index:        parentIdx,
+		OperState:    netlink.OperUp,
+		TxQLen:       10000,
+		HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
+	}}
+	overlay := &testLink{attrs: netlink.LinkAttrs{
+		Name:         "fab1",
+		Index:        overlayIdx,
+		ParentIndex:  parentIdx,
+		OperState:    netlink.OperUp,
+		TxQLen:       10000,
+		HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
+	}}
+	rec := &fabricProgramRecorder{}
+	d := &Daemon{
+		linkByNameFn: mockLinkByName(map[string]*testLink{
+			"ge-0-0-1": parent,
+			"fab1":     overlay,
+		}),
+		neighListFn: func(ifindex, family int) ([]netlink.Neigh, error) {
+			if got, ok := parentNeighs[[2]int{ifindex, family}]; ok {
+				return got, nil
+			}
+			return nil, nil
+		},
+	}
+	d.setDataplane(&fabricProgramDP{ha: rec})
+	return d, rec
+}
+
+// TestRefreshFabricFwd1ParentARPAndLinkLocalFallback is the #15683 regression
+// gate. The fab1 overlay table is empty; (a) an address-matched neighbour on
+// the physical parent and (b) a sole fe80::/10 neighbour on the parent must
+// each populate fab1. Pre-fix refreshFabricFwd1 had neither fallback leg and
+// returned false in both cases.
+func TestRefreshFabricFwd1ParentARPAndLinkLocalFallback(t *testing.T) {
+	const parentIdx = 21
+	peerIP := net.ParseIP("10.99.14.2")
+
+	t.Run("parent ARP address-matched", func(t *testing.T) {
+		d, rec := fab1PeerTestDaemon(t, map[[2]int][]netlink.Neigh{
+			{parentIdx, netlink.FAMILY_V4}: {
+				fabPeerNeigh(t, peerIP.String(), fabPeerTestPeerMAC),
+			},
+		})
+		if !d.refreshFabricFwd1(context.Background(), "ge-0-0-1", "fab1", peerIP, false) {
+			t.Fatal("refreshFabricFwd1 returned false; expected parent ARP fallback to resolve the peer (#15683)")
+		}
+		if !d.fabricEntryPopulated(1) {
+			t.Fatal("fabric1Populated not set after parent ARP fallback resolution")
+		}
+		if d.fabric1Populated != true {
+			t.Fatal("d.fabric1Populated = false, want true")
+		}
+		ids := rec.programmedIDs()
+		if len(ids) != 1 || ids[0] != dataplane.FabricID(1) {
+			t.Fatalf("programmed FabricIDs = %v, want exactly [%v]", ids, dataplane.FabricID(1))
+		}
+		if got := rec.programmedPeerMACs(); len(got) != 1 || got[0] != fabPeerTestPeerMAC {
+			t.Fatalf("programmed peer MACs = %v, want exactly [%s]", got, fabPeerTestPeerMAC)
+		}
+		if hint := d.fabricPeerMACHint(1); hint == nil || hint.String() != fabPeerTestPeerMAC {
+			t.Fatalf("parent ARP hit must record slot-1 identity, hint = %v", hint)
+		}
+	})
+
+	t.Run("parent IPv6 link-local sole peer", func(t *testing.T) {
+		d, rec := fab1PeerTestDaemon(t, map[[2]int][]netlink.Neigh{
+			{parentIdx, netlink.FAMILY_V6}: {
+				fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
+			},
+		})
+		if !d.refreshFabricFwd1(context.Background(), "ge-0-0-1", "fab1", peerIP, false) {
+			t.Fatal("refreshFabricFwd1 returned false; expected parent IPv6 link-local fallback to resolve the sole peer (#15683)")
+		}
+		if !d.fabricEntryPopulated(1) {
+			t.Fatal("fabric1Populated not set after link-local fallback resolution")
+		}
+		ids := rec.programmedIDs()
+		if len(ids) != 1 || ids[0] != dataplane.FabricID(1) {
+			t.Fatalf("programmed FabricIDs = %v, want exactly [%v]", ids, dataplane.FabricID(1))
+		}
+		if got := rec.programmedPeerMACs(); len(got) != 1 || got[0] != fabPeerTestPeerMAC {
+			t.Fatalf("programmed peer MACs = %v, want exactly [%s]", got, fabPeerTestPeerMAC)
+		}
+		// Link-local fallback must not promote itself into identity (#6554).
+		if hint := d.fabricPeerMACHint(1); hint != nil {
+			t.Fatalf("link-local fallback promoted its own result to slot-1 identity (%v)", hint)
+		}
+	})
+
+	t.Run("parent IPv6 ambiguous segment refused", func(t *testing.T) {
+		d, rec := fab1PeerTestDaemon(t, map[[2]int][]netlink.Neigh{
+			{parentIdx, netlink.FAMILY_V6}: {
+				fabPeerNeigh(t, "fe80::dec0", fabPeerTestDecoyMAC),
+				fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
+			},
+		})
+		if d.refreshFabricFwd1(context.Background(), "ge-0-0-1", "fab1", peerIP, false) {
+			t.Fatal("refreshFabricFwd1 reported success on an ambiguous segment; expected fail-closed refusal (#6554/#15683)")
+		}
+		if got := rec.programmedPeerMACs(); len(got) != 0 {
+			t.Fatalf("a peer MAC was programmed from an unidentifiable segment: %v", got)
+		}
+		if d.fabricEntryPopulated(1) {
+			t.Fatal("fabric1Populated latched on a refused resolution")
+		}
+	})
+}
+
+// TestReconcileRGStateFabricReadyWithFab1Only verifies that when fab0 is
+// unpopulated but fab1 is populated and the peer is alive, reconcileRGState
+// passes fabricReady=true to takeoverReadinessForRG (#15683). Without this,
+// fab0-down/fab1-up blocks takeover even though fab1 could forward.
+// fab1ReadyDaemon builds the noReth fixture with applySem installed: the
+// reconcile pass schedules a connected-RG republish goroutine that acquires
+// it, and the bare fixture's nil semaphore panics in that goroutine.
+func fab1ReadyDaemon(t *testing.T) *Daemon {
+	t.Helper()
+	d := noRethHoldDaemon(t)
+	d.applySem = semaphore.NewWeighted(1)
+	return d
+}
+
+func TestReconcileRGStateFabricReadyWithFab1Only(t *testing.T) {
+	d := fab1ReadyDaemon(t)
+
+	// Peer alive via the real heartbeat admission path.
+	d.cluster.HandlePeerHeartbeatForTesting(&cluster.HeartbeatPacket{
+		NodeID:    1,
+		ClusterID: 1,
+		Groups: []cluster.HeartbeatGroup{{
+			GroupID:  0,
+			Priority: 100,
+			Weight:   100,
+			State:    uint8(cluster.StatePrimary),
+		}},
+	})
+	if !d.cluster.PeerAlive() {
+		t.Fatal("precondition: PeerAlive must be true for the fabric gate to be evaluated")
+	}
+
+	// fab1 only.
+	d.fabricMu.Lock()
+	d.fabricPopulated = false
+	d.fabric1Populated = true
+	d.fabricMu.Unlock()
+
+	ready, reasons := rgReadiness(t, d)
+	if !ready {
+		t.Fatalf("RG must be takeover-ready with fab1-only populated: ready=false reasons=%v (#15683)", reasons)
+	}
+	for _, r := range reasons {
+		if strings.Contains(r, "fabric forwarding path not ready") {
+			t.Fatalf("fabric reason present despite fab1 populated: %v", reasons)
+		}
+	}
+
+	// Control: neither fabric populated must stay not-ready, proving the
+	// gate above was live and not vacuous.
+	d.fabricMu.Lock()
+	d.fabric1Populated = false
+	d.fabricMu.Unlock()
+	ready, reasons = rgReadiness(t, d)
+	if ready {
+		t.Fatal("control: RG must be not-ready when neither fabric is populated")
+	}
+	found := false
+	for _, r := range reasons {
+		if strings.Contains(r, "fabric forwarding path not ready") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("control: expected fabric-not-ready reason, got %v", reasons)
+	}
+
+	// fab0-only also stays ready (no regression for single-fabric).
+	d.fabricMu.Lock()
+	d.fabricPopulated = true
+	d.fabricMu.Unlock()
+	if ready, reasons := rgReadiness(t, d); !ready {
+		t.Fatalf("fab0-only must remain takeover-ready: %v", reasons)
 	}
 }

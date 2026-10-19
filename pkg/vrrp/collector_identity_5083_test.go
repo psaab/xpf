@@ -336,7 +336,7 @@ func TestVRRPGroupFamily_ConfigAddressIsAuthoritative(t *testing.T) {
 	}
 }
 
-func TestManagerUpdateInstances_RejectsDuplicateIdentityTransactionally(t *testing.T) {
+func TestManagerUpdateInstances_SkipsDuplicateIdentityKeepingExisting(t *testing.T) {
 	m := NewManager()
 	key := instanceKey{iface: "ge-0-0-0", groupID: 5, family: "inet"}
 	sentinel := newInstance(Instance{
@@ -349,27 +349,28 @@ func TestManagerUpdateInstances_RejectsDuplicateIdentityTransactionally(t *testi
 		{Interface: "ge-0-0-0", Family: "inet", GroupID: 5, VirtualAddresses: []string{"10.0.0.1/24"}},
 		{Interface: "ge-0-0-0", Family: "inet", GroupID: 5, VirtualAddresses: []string{"10.0.0.2/24"}},
 	})
-	if err == nil {
-		t.Fatal("duplicate runtime identity must be rejected, got nil")
-	}
-	if got := err.Error(); got != `duplicate VRRP instance identity interface="ge-0-0-0" VRID=5 family="inet"; refusing non-deterministic last-wins reconciliation` {
-		t.Fatalf("unexpected deterministic error: %q", got)
+	if err != nil {
+		t.Fatalf("duplicate runtime identity must be skipped, not abort the batch: %v", err)
 	}
 
 	m.mu.RLock()
 	got, ok := m.instances[key]
 	n := len(m.instances)
 	_, publishedDesired := m.desiredIfaces["ge-0-0-0"]
+	_, unbuilt := m.unbuiltDesired[key]
 	m.mu.RUnlock()
 	if !ok || got != sentinel || n != 1 {
-		t.Fatalf("rejected reconcile mutated live set: present=%v same=%v len=%d", ok, got == sentinel, n)
+		t.Fatalf("skipped duplicate mutated live set: present=%v same=%v len=%d", ok, got == sentinel, n)
 	}
-	if publishedDesired {
-		t.Fatal("rejected reconcile published a partial desired interface set")
+	if !publishedDesired {
+		t.Fatal("accepted first claimant must publish its desired interface")
+	}
+	if !unbuilt {
+		t.Fatal("rejected duplicate key must be recorded unbuilt")
 	}
 }
 
-func TestManagerUpdateInstances_RejectsRethGenericWireOverlapInEitherOrder(t *testing.T) {
+func TestManagerUpdateInstances_SkipsRethGenericWireOverlapInEitherOrder(t *testing.T) {
 	generic := &Instance{
 		Interface: "ge-0-0-0", Family: "inet", GroupID: 101,
 		VirtualAddresses: []string{"10.0.0.1/24"},
@@ -378,18 +379,18 @@ func TestManagerUpdateInstances_RejectsRethGenericWireOverlapInEitherOrder(t *te
 		Interface: "ge-0-0-0", GroupID: 101,
 		VirtualAddresses: []string{"10.0.0.254/24", "2001:db8::1/64"},
 	}
-	want := `overlapping VRRP election domains interface="ge-0-0-0" VRID=101 families="","inet"; empty-family RETH overlaps both wire families`
 	for _, desired := range [][]*Instance{{generic, reth}, {reth, generic}} {
-		m := NewManager()
-		err := m.UpdateInstances(desired)
-		if err == nil {
-			t.Fatal("RETH/generic wire-domain overlap must be rejected, got nil")
+		m := vrrpFamilyManager()
+		if err := m.UpdateInstances(desired); err != nil {
+			t.Fatalf("RETH/generic overlap must be skipped, not abort the batch: %v", err)
 		}
-		if got := err.Error(); got != want {
-			t.Fatalf("order-dependent overlap error: got %q, want %q", got, want)
-		}
-		if len(m.instances) != 0 || len(m.desiredIfaces) != 0 {
-			t.Fatalf("overlap rejection mutated manager: instances=%d desired=%v", len(m.instances), m.desiredIfaces)
+		m.mu.RLock()
+		n := len(m.instances)
+		unbuiltN := len(m.unbuiltDesired)
+		m.mu.RUnlock()
+		stopManagerForTest(m)
+		if n != 1 || unbuiltN != 1 {
+			t.Fatalf("overlap must seat exactly one instance and record one refusal: instances=%d unbuilt=%d", n, unbuiltN)
 		}
 	}
 }

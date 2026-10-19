@@ -1,6 +1,9 @@
 package config
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 const nestedHostInboundChildMarker13106 = "nested-host-inbound-child:"
 
@@ -824,6 +827,61 @@ func compileZoneBody15668(instNode *Node, instName string, schema *schemaNode, s
 			} else {
 				zone.Description = nodeVal(prop)
 			}
+		case "application-tracking", "source-identity-log", "enable-reverse-reroute", "unidirectional-session-refreshing":
+			// #15670: presence flags. A malformed shape (operand/body)
+			// is not interpreted as "enable" — poison like tcp-rst.
+			if len(prop.Keys) > 1 || len(prop.Children) > 0 {
+				recordUnknownSecurityZoneChild11575(zone, prop.Keys)
+			} else {
+				switch prop.Name() {
+				case "application-tracking":
+					zone.ApplicationTracking = true
+				case "source-identity-log":
+					zone.SourceIdentityLog = true
+				case "enable-reverse-reroute":
+					zone.EnableReverseReroute = true
+				case "unidirectional-session-refreshing":
+					zone.UnidirectionalRefresh = true
+				}
+			}
+		case "advance-policy-based-routing-profile":
+			if len(prop.Keys) != 2 || len(prop.Children) > 0 {
+				recordUnknownSecurityZoneChild11575(zone, prop.Keys)
+			} else {
+				zone.AdvancePBRProfile = nodeVal(prop)
+			}
+		case "advanced-connection-tracking":
+			if act, ok := parseAdvancedConnectionTracking15670(prop); ok {
+				zone.AdvancedConnectionTracking = act
+			} else {
+				recordUnknownSecurityZoneChild11575(zone, prop.Keys)
+			}
+		case "white-list":
+			// Junos: `white-list [ name ... ]` — screen-bypass allowlist
+			// refs. Empty (no name) is malformed and poisons.
+			names := prop.Keys[1:]
+			bad := len(names) == 0 || len(prop.Children) > 0
+			for _, n := range names {
+				if n == "" {
+					bad = true
+				}
+			}
+			if bad {
+				recordUnknownSecurityZoneChild11575(zone, prop.Keys)
+			} else {
+				for _, n := range names {
+					found := false
+					for _, existing := range zone.WhiteList {
+						if existing == n {
+							found = true
+							break
+						}
+					}
+					if !found {
+						zone.WhiteList = append(zone.WhiteList, n)
+					}
+				}
+			}
 		case "address-book":
 			// #3061: zone-local address book. Same entry grammar as the
 			// global book; resolved into the global book under
@@ -849,6 +907,56 @@ func compileZoneBody15668(instNode *Node, instName string, schema *schemaNode, s
 			recordUnknownSecurityZoneChild11575(zone, prop.Keys)
 		}
 	}
+}
+
+// parseAdvancedConnectionTracking15670 parses the zone-level
+// `advanced-connection-tracking { mode ...; timeout ...;
+// track-all-policies-to-this-zone; }` body (#15670). Any unknown child,
+// malformed leaf, bad mode, or non-integer timeout returns ok=false so
+// the caller poisons the zone (strict rejects via the unknown-child
+// gate; tolerant quarantines) instead of silently dropping content.
+func parseAdvancedConnectionTracking15670(prop *Node) (*AdvancedConnectionTracking, bool) {
+	act := &AdvancedConnectionTracking{}
+	if len(prop.Keys) > 1 {
+		return nil, false
+	}
+	for _, child := range prop.Children {
+		switch child.Name() {
+		case "mode":
+			if len(child.Keys) != 2 || len(child.Children) > 0 {
+				return nil, false
+			}
+			mode := child.Keys[1]
+			valid := false
+			for _, m := range advancedConnectionTrackingModes15670 {
+				if mode == m {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				return nil, false
+			}
+			act.Mode = mode
+		case "timeout":
+			if len(child.Keys) != 2 || len(child.Children) > 0 {
+				return nil, false
+			}
+			n, err := strconv.Atoi(child.Keys[1])
+			if err != nil || n < 0 {
+				return nil, false
+			}
+			act.Timeout = n
+		case "track-all-policies-to-this-zone":
+			if len(child.Keys) > 1 || len(child.Children) > 0 {
+				return nil, false
+			}
+			act.TrackAllPolicies = true
+		default:
+			return nil, false
+		}
+	}
+	return act, true
 }
 
 // zoneInterfaceMembers flattens every interface name a `security-zone`

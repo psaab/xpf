@@ -16,9 +16,9 @@ import (
 // non-nil, failing the assertion; the fix stops and nils it.
 func TestStop_CancelsArmedHoldTimer(t *testing.T) {
 	m := NewManager(0, 1)
-	m.controlInterface = "hb0" // cluster mode
 
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
+	cfg.ControlInterface = "hb0" // cluster mode
 	m.UpdateConfig(cfg)
 	// Set AFTER UpdateConfig — UpdateConfig resets takeoverHoldTime from the
 	// (zero) config value. An hour ensures the timer never fires in-test.
@@ -59,9 +59,9 @@ func TestStop_CancelsArmedHoldTimer(t *testing.T) {
 // ever produced, and the wait times out cleanly.
 func TestStop_SuppressesHoldTimerElection(t *testing.T) {
 	m := NewManager(0, 1)
-	m.controlInterface = "hb0" // cluster mode — enables the readiness gate
 
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 200})) // higher priority than peer
+	cfg.ControlInterface = "hb0"                            // cluster mode — enables the readiness gate
 	m.UpdateConfig(cfg)
 	m.takeoverHoldTime = 40 * time.Millisecond // AFTER UpdateConfig (see above)
 
@@ -119,11 +119,15 @@ func TestStop_SuppressesHoldTimerElection(t *testing.T) {
 // during normal operation.
 func TestHoldTimer_StillPromotesWhenRunning(t *testing.T) {
 	m := NewManager(0, 1)
-	m.controlInterface = "hb0"
 	defer m.Stop() // clean up any live timer
 
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 200}))
+	cfg.ControlInterface = "hb0"
 	m.UpdateConfig(cfg)
+	// #15669: authoring ControlInterface now also arms the dataplane
+	// monitor debt on the new RG; clear it as election_test.go:471 does
+	// so weight does not block the promotion this cell exists to observe.
+	m.SetMonitorWeight(0, DataplaneArmMonitorIface, false, DataplaneArmMonitorCost)
 	m.takeoverHoldTime = 40 * time.Millisecond // AFTER UpdateConfig (see above)
 
 	m.handlePeerHeartbeat(&HeartbeatPacket{

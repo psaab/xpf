@@ -115,6 +115,110 @@ func validateAddressBookNameCollisionStrict(cfg *Config) error {
 	}
 	return nil
 }
+
+// validateDynamicAddressStaticCollisionStrict (#15685) hard-rejects a
+// `security dynamic-address address-name <name>` binding that shares its name
+// with a static `address` or `address-set` — in the global book or in ANY
+// zone-local book.
+//
+// Dynamic bindings and static entries share one operator-visible namespace
+// at policy/NAT resolution, but userspace lowering does NOT treat them as
+// one definition: a DECLARED binding absent from the live feed overlay is
+// unrepresentable (the declared-binding guard in policies_lower.go runs
+// BEFORE the static-book lookup), so while the feed is unready the name
+// lowers to __unsupported_address__ and the whole snapshot publication is
+// rejected — the static entry the operator can see in the book never
+// enforces. Once the feed IS ready the same name enforces the UNION of the
+// feed prefixes and the static entry. Neither behaviour is the single
+// meaning either stanza declares on its own, and for a binding with no
+// `profile feed-name` at all (rejected by
+// validateDynamicAddressFeedReferencesStrict) the union is unreachable, so
+// the static entry is shadowed permanently. Junos forbids the ambiguity at
+// commit; rename one side so every policy reference has exactly one meaning.
+//
+// MUST run on the PRISTINE books — BEFORE resolveZoneLocalAddressBooks folds
+// zone-local entries into the global book under synthetic
+// zone-local/<zone>/<name> names — for the same reason as the #5676 gate
+// above: dynamic bindings are keyed by their authored global name, and the
+// userspace lookup unqualifies a zone-local token back to that authored name
+// (dynamicAddressLookupName), so a zone-local `address blocked` really does
+// collide with `address-name blocked` even though the post-fold global keys
+// differ. The caller (runEarlyStrictAndFolds) enforces that ordering.
+//
+// Strict on commit / commit-check hard-rejects; the tolerant load / peer-sync
+// path (opts.lenientDynamicAddressFeedRef, #1960 no-brick) downgrades to a
+// warning so an already-persisted colliding config still boots — the runtime
+// stays fail-closed for the colliding name while its feed is unready.
+func validateDynamicAddressStaticCollisionStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	bindings := cfg.Security.DynamicAddress.AddressBindings
+	if len(bindings) == 0 {
+		return nil
+	}
+	// Bindings is a map (unordered); sort keys so the first-error
+	// commit-check message is deterministic across runs.
+	names := make([]string, 0, len(bindings))
+	for name := range bindings {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	kindIn := func(ab *AddressBook, name string) string {
+		if ab == nil {
+			return ""
+		}
+		if _, ok := ab.Addresses[name]; ok {
+			return "address"
+		}
+		if _, ok := ab.AddressSets[name]; ok {
+			return "address-set"
+		}
+		return ""
+	}
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for z := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, z)
+	}
+	sort.Strings(zoneNames)
+	for _, name := range names {
+		if kind := kindIn(cfg.Security.AddressBook, name); kind != "" {
+			return fmt.Errorf(
+				"security dynamic-address address-name %q collides with "+
+					"security address-book global %s %q: the dynamic binding "+
+					"and the static entry share one policy namespace, but the "+
+					"binding is checked first at lowering — while its feed is "+
+					"unready (or has no profile feed-name, #15685) the name "+
+					"lowers to __unsupported_address__ and rejects the whole "+
+					"userspace snapshot instead of enforcing the static "+
+					"entry, and once ready it enforces the union of both; "+
+					"rename the address-name or the static entry so the "+
+					"name has one meaning",
+				name, kind, name)
+		}
+		for _, z := range zoneNames {
+			zone := cfg.Security.Zones[z]
+			if zone == nil {
+				continue
+			}
+			if kind := kindIn(zone.AddressBook, name); kind != "" {
+				return fmt.Errorf(
+					"security dynamic-address address-name %q collides with "+
+						"security zone %q address-book %s %q: the dynamic binding "+
+						"and the static entry share one policy namespace, but the "+
+						"binding is checked first at lowering — while its feed is "+
+						"unready (or has no profile feed-name, #15685) the name "+
+						"lowers to __unsupported_address__ and rejects the whole "+
+						"userspace snapshot instead of enforcing the static "+
+						"entry, and once ready it enforces the union of both; "+
+						"rename the address-name or the static entry so the "+
+						"name has one meaning",
+					name, z, kind, name)
+			}
+		}
+	}
+	return nil
+}
 func recordAddressBookNameCollisions(cfg *Config) {
 	if cfg == nil {
 		return

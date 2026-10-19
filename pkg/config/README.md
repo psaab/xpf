@@ -715,6 +715,29 @@ tolerant load / peer-sync path keeps the persisted entry but warns; the shared
 publish diagnostic and policy simulator do not silently treat the snapshot as
 healthy.
 
+**A dynamic-address binding needs a feed, and must not shadow a static entry
+(#15685):** `security dynamic-address address-name <name>` with no
+`profile feed-name` compiled into a binding with zero `FeedNames`; the
+#3300 cross-reference gate only iterated present feed names, so it committed
+clean, yet no fetch could ever populate it. At userspace lowering a declared
+binding absent from the feed overlay is unrepresentable, so a referencing
+policy lowered to `__unsupported_address__` and aborted the whole snapshot
+publication — and the same guard runs before the static-book lookup, so the
+orphan also shadowed any same-named static `address`/`address-set`.
+`validateDynamicAddressFeedReferencesStrict` now rejects a binding with
+`len(FeedNames) == 0` at commit (naming the binding and the missing
+`profile feed-name`), and `validateDynamicAddressStaticCollisionStrict`
+(run in `runEarlyStrictAndFolds` on the pristine books, before the
+zone-local fold) rejects ANY binding — feed-backed or not — whose name
+collides with a static `address` or `address-set` in the global or any
+zone-local book: while the feed is unready the name fails closed instead of
+enforcing the static entry, and once ready it enforces the union, so the
+name never has the single meaning either stanza declares. Both gates
+downgrade to warnings on the tolerant load / peer-sync path
+(`lenientDynamicAddressFeedRef`, #1960 no-brick); the runtime stays
+fail-closed for such names. Regression coverage:
+`dynamic_address_no_profile_15685_test.go`.
+
 **Warn pass must agree with strict on the valid address-reference forms
 (#3958):** the non-fatal `ValidateConfig` warn pass
 (`compiler_validate_warn.go`) emits a `policy … source/destination-address …
@@ -1092,6 +1115,21 @@ synthesis is active. The tolerant path downgrades to a warning
 (`lenientVRRPVIPCrossGroup`, #1960 no-brick); `pkg/vrrp` `UpdateInstances`
 refuses the second claimant, so a leniently-loaded duplicate seats only one
 election.
+
+**VRRP instance identities must be unique (#15688):** `CollectInstances`
+keys each explicit group by its parent address, so the same VRID under two
+addresses of one unit+family (or under units resolving to one kernel device)
+emits two instances with one manager identity `(kernelIf, VRID, family)`;
+an explicit group whose VRID equals a RETH-derived `100+RG` VRID on the same
+kernel device overlaps the RETH empty-family election domain.
+`validateVRRPInstanceIdentityStrict`
+(`compiler_validate_strict_vrrp_identity.go`) walks the exact keys both
+collectors produce (family from the group key's parent address, RETH via
+`RethRGOwners`/`rethKernelIface`, synthesis-off modes skipped) and rejects
+either collision at commit. Dual-stack (same VRID, distinct families) and
+distinct kernel devices stay legal. The tolerant path downgrades to a warning
+(`lenientVRRPInstanceIdentity`, #1960 no-brick); `UpdateInstances` skips only
+the offending duplicate/overlap instead of aborting the whole node batch.
 
 **No-match default-policy is fail-closed (#3065):** the sibling of #3043
 for the implicit fallback. When a flow matches NO zone-pair, global, or
