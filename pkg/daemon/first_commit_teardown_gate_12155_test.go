@@ -34,7 +34,7 @@ func TestFirstCommitTeardownMismatchedGenerationStaysDegraded12155(t *testing.T)
 		t.Fatal(err)
 	}
 	stale := []byte(bootstrapLifelineNetworkMarker + " (static snapshot)\n[Match]\nName=fxp0\n\n[Network]\nAddress=203.0.113.7/24\n")
-	data, _ := json.Marshal(bootstrapLifelineSnapshotRecord{Generation: "stale-generation-from-an-earlier-window", Network: stale})
+	data, _ := json.Marshal(bootstrapLifelineSnapshotRecord{Generation: "stale-generation-from-an-earlier-window", Network: stale, Present: true})
 	if err := os.WriteFile(filepath.Join(dir, bootstrapLifelineSnapshotBase), append(data, '\n'), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestFirstCommitTeardownUnreadableRecordStaysDegraded12155(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "valid-matched-generation":
-				data, _ := json.Marshal(bootstrapLifelineSnapshotRecord{Generation: store.FirstCommitTeardownGeneration(), Network: pmLifeline12155})
+				data, _ := json.Marshal(bootstrapLifelineSnapshotRecord{Generation: store.FirstCommitTeardownGeneration(), Network: pmLifeline12155, Present: true})
 				if err := os.WriteFile(rec, append(data, '\n'), 0o600); err != nil {
 					t.Fatal(err)
 				}

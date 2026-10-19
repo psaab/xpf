@@ -268,6 +268,7 @@ func TestFirstCommitLifelineSnapshotRestoresMissingNetworkFile12155(t *testing.T
 	snapshot, err := json.Marshal(bootstrapLifelineSnapshotRecord{
 		Generation: store.FirstCommitTeardownGeneration(),
 		Network:    original,
+		Present:    true,
 	})
 	if err != nil {
 		t.Fatal(err)
