@@ -55,6 +55,7 @@ type fakeKernelSystem struct {
 	promotionMarker string
 	lastRoll        KernelRollOutcome
 	lastRollWrites  int
+	clearRollLease  int
 	lastRollErr     error
 	calls           []string
 	now             time.Time
@@ -190,7 +191,7 @@ func (f *fakeKernelSystem) WritePromotionMarker(u string) error {
 }
 func (f *fakeKernelSystem) ReadPromotionMarker() (string, error) { return f.promotionMarker, nil }
 func (f *fakeKernelSystem) ClearPromotionMarker() error          { f.promotionMarker = ""; return nil }
-func (f *fakeKernelSystem) ClearRollLease() error                { return nil }
+func (f *fakeKernelSystem) ClearRollLease() error                { f.clearRollLease++; return nil }
 
 // #6495 durable last-roll record. lastRollWrites counts writes so a test can
 // assert the record is written EXACTLY once per completed roll — a second

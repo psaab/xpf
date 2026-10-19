@@ -12,13 +12,23 @@ import (
 type fakeSRCluster struct {
 	drained    bool
 	drainedErr error
+	drainedAt  time.Time
 	peerOK     bool
 	peerErr    error
 	resets     int
 	resetErr   error
 }
 
-func (f *fakeSRCluster) LocalDrained() (bool, error)       { return f.drained, f.drainedErr }
+func (f *fakeSRCluster) LocalDrained() (bool, error) { return f.drained, f.drainedErr }
+func (f *fakeSRCluster) LocalDrainedSince() (time.Time, error) {
+	if !f.drained {
+		return time.Time{}, nil
+	}
+	if f.drainedAt.IsZero() {
+		return time.Unix(1_600_000_000, 0), nil
+	}
+	return f.drainedAt, nil
+}
 func (f *fakeSRCluster) PeerHealthyPrimary() (bool, error) { return f.peerOK, f.peerErr }
 func (f *fakeSRCluster) ResetFailover() error              { f.resets++; return f.resetErr }
 

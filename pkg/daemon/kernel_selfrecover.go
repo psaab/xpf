@@ -14,7 +14,10 @@ import (
 // #1930 INC-2 kernel-channel bounded local self-recovery.
 type kernelSRCluster struct{ m *cluster.Manager }
 
-func (a kernelSRCluster) LocalDrained() (bool, error)       { return a.m.LocalDrained(), nil }
+func (a kernelSRCluster) LocalDrained() (bool, error) { return a.m.LocalDrained(), nil }
+func (a kernelSRCluster) LocalDrainedSince() (time.Time, error) {
+	return a.m.LocalDrainedSince(), nil
+}
 func (a kernelSRCluster) PeerHealthyPrimary() (bool, error) { return a.m.PeerHealthyPrimary(), nil }
 func (a kernelSRCluster) ResetFailover() error              { return a.m.ResetAllFailover() }
 
