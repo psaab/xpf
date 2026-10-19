@@ -106,32 +106,24 @@ func (c *CLI) reloadSyslog(cfg *config.Config) {
 // failure, or an unsupported/typo'd transport rejected fail-closed by #5581)
 // skips the stream.
 func buildSyslogClients(cfg *config.Config) []*logging.SyslogClient {
-	// #5738 gap 1: resolve the global `security log source-interface` to an IP,
-	// used as the source binding for any stream that lacks a per-stream
-	// source-address. applySyslogConfig computes and applies this same fallback,
-	// so the previous CLI path (which passed stream.SourceAddress unconditionally)
-	// bound a kernel-chosen source on an in-process commit while the daemon bound
-	// the interface address — a divergence that persists because the CLI reload
-	// writes LAST on a local commit. Mirror the daemon exactly.
-	var globalSourceAddr string
-	if cfg.Security.Log.SourceInterface != "" {
-		globalSourceAddr = config.ResolveSyslogSourceAddr(cfg, cfg.Security.Log.SourceInterface)
-	}
 	var clients []*logging.SyslogClient
 	for name, stream := range cfg.Security.Log.Streams {
-		// #6875: MIRROR of daemon.applySyslogConfig. #5738 exists because these
-		// two paths must bind the same source — an in-process CLI commit and a
-		// daemon reconcile that disagree is the defect that issue closed — so
-		// the per-stream source-interface arm belongs at both sites or neither.
+		// #6875 + #15078: MIRROR of daemon.applySyslogConfig. #5738 exists
+		// because these two paths must bind the same source — an in-process
+		// CLI commit and a daemon reconcile that disagree is the defect that
+		// issue closed — so the per-stream source-interface arm belongs at
+		// both sites or neither, and both interface arms resolve against
+		// THIS stream's collector family (ResolveSyslogSourceAddrForCollector)
+		// with no family-blind fallback after them.
 		// TestSyslogSourcePrecedenceMatchesDaemon_6875 pins the agreement.
 		//
 		//	source-address  >  source-interface  >  global source-interface
 		srcAddr := stream.SourceAddress
 		if srcAddr == "" && stream.SourceInterface != "" {
-			srcAddr = config.ResolveSyslogSourceAddr(cfg, stream.SourceInterface)
+			srcAddr = config.ResolveSyslogSourceAddrForCollector(cfg, stream.SourceInterface, stream.Host)
 		}
-		if srcAddr == "" {
-			srcAddr = globalSourceAddr
+		if srcAddr == "" && cfg.Security.Log.SourceInterface != "" {
+			srcAddr = config.ResolveSyslogSourceAddrForCollector(cfg, cfg.Security.Log.SourceInterface, stream.Host)
 		}
 		protocol := stream.Transport.Protocol
 		if protocol == "" {

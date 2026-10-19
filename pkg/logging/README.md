@@ -796,6 +796,20 @@ built identical config still performs zero rebuilds.
 an IP address or a DNS name, the `ValidateNTPServer` shape). It was `args: 1`
 with no valueType and no validator, so any string reached the dialer's resolver.
 
+- **Source resolution is collector-family aware (#15078).**
+  `ResolveSyslogSourceAddrForCollector` (pkg/config) takes the stream's
+  collector `host`: an IP-literal collector only matches source addresses
+  of its own family (family primary/preferred first, then the first
+  configured address of the family, then the first kernel address of the
+  family — `source-interface lo` to an IPv6 collector binds `::1`). The
+  family-blind resolver returned the inet `primary` or the first IPv4
+  kernel address, so a dual-stack source-interface stream to an IPv6
+  collector failed to dial for the life of the config. No address of the
+  family leaves the bind unbound with a WARN rather than pinning a
+  wrong-family source; a hostname collector carries no family and keeps
+  the legacy resolution. Both apply paths (daemon `applySyslogConfig`,
+  CLI `buildSyslogClients`) and the rebuild fingerprint resolve this way.
+
 ## Gotchas
 
 - The binary RT_FLOW format used by Junos session logging is custom; it
