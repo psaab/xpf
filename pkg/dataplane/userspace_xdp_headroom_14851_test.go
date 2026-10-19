@@ -100,8 +100,17 @@ func TestShimHeadroomOutlinesStayOutlined14851(t *testing.T) {
 		"live_userspace_session_action",
 		// #15645: the packed trace callee. It carries the whole trace
 		// value construction + map insert; if it re-inlines into the
-		// twelve call sites the object returns to the 1M reject.
+		// trace call sites the object returns to the 1M reject.
 		"record_trace_packed",
+		// #15854: the three outlines that restored PASS headroom
+		// (815623 processed insns, 18.44%) after the #15843 LAND gate
+		// pushed the object to 963340 / guest-kernel reject. The
+		// merged readiness trace is what makes binding_ready_slot
+		// pay; re-inlining any of these re-spends the per-calling-
+		// state walk (docs/log/15854.md).
+		"land_gate",
+		"wg_zone_admits_packet",
+		"binding_ready_slot",
 	} {
 		want := "#[inline(never)]\nfn " + fn + "("
 		if !strings.Contains(src, want) {
