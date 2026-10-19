@@ -995,14 +995,17 @@ regressed.
   A cross-family publish earns a guard downgrade ONLY by proving the
   sibling's exact DHCID on the wire: the manager threads the sibling's
   identity (`SiblingClientID` from the durable store, narrowed to same
-  scope-modulo-family + same endpoint; `PairedClientID` for a same-device
+  scope-modulo-family + same endpoint + same-device client identity
+  via `sameDeviceClient` — #15072 binds the candidate to the client,
+  so an unrelated-DUID/client-id row at the name yields no candidate
+  and no `SiblingFamilyOwned` stamp; `PairedClientID` for a same-device
   sibling desired this same pass) and the backend sends a
   prerequisite-only `Used(sibling-DHCID)` probe (`proveSiblingDHCID`)
   before any per-type add. The pre-#14995 store scan matched on
   FQDN+family ONLY, so any unauthenticated client that merely REQUESTED
   the victim's hostname from the other family hijacked the name and
-  poisoned its DHCID prerequisites — the store is now a candidate
-  source, never the proof. On teardown each family's delete replays its
+  poisoned its DHCID prerequisites — the store is now a client-bound
+  candidate source, never the proof. On teardown each family's delete replays its
   own publishing identity against the shared device DHCID;
   `dhcidSharedWithOther`/`KeepForwardDHCID` keep it while a same-device
   sibling survives and the last family's delete removes it (no orphan).

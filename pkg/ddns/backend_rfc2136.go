@@ -143,12 +143,12 @@ type rfc2136Updater struct {
 	// path; ignored by the DHCP-lease path (selfOwned=false) and by PTR adds.
 	selfOwnedPrevAddr netip.Addr
 
-	// siblingFamilyOwned mirrors rec.SiblingFamilyOwned for the FORWARD add
-	// in flight (#14604): the manager already owns a record at this forward
-	// name under the opposite address family, so the name is xpf-owned, not
-	// foreign. Set at the top of UpsertLease and consulted only by the
-	// skip-existing/strict-fail forward add; reset on every call so a stale
-	// flag never leaks into a PTR or same-family guard.
+	// siblingFamilyOwned is retained only as the wire-side record of
+	// rec.SiblingFamilyOwned for test/debug inspection (#15072): the
+	// RFC 2136 add paths deliberately NEVER consult it — authorization
+	// is the wire DHCID proof via siblingClientID/pairedClientID
+	// (siblingDHCIDRR + proveSiblingDHCID), so a stamped flag alone
+	// cannot downgrade any guard.
 	siblingFamilyOwned bool
 
 	// siblingClientID is the client identity of the manager-owned

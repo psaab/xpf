@@ -1098,7 +1098,8 @@ func (m *Manager) dhcidSharedWithOther(owned ownedRecord) bool {
 // recording phantom ownership whose later release aimed the DHCID
 // prerequisite at the victim's name.
 //
-// The sibling proof is therefore re-anchored:
+// The sibling proof is therefore re-anchored (#15072, residual of
+// #14995/A40-01):
 //   - same scope (every ScopeKey axis except Family) and same backend
 //     endpoint (BackendFingerprint): a record published to a
 //     different RG/interface/provider/server is not this name's
@@ -1106,9 +1107,13 @@ func (m *Manager) dhcidSharedWithOther(owned ownedRecord) bool {
 //   - same-device client identity (pairedIdentityKey / sameDeviceClient):
 //     the RFC 4701 client-identity pairing (a DUID, or a MAC that is
 //     also the v4 client-id/hwaddr). Name+family alone NEVER proves
-//     a sibling.
+//     a sibling. An unrelated-DUID (or unrelated v4 client-id/hwaddr)
+//     row at the same name yields NO candidate at all, so
+//     upsertLocked stamps neither SiblingFamilyOwned nor
+//     SiblingClientID for it and every name-level / DHCID guard
+//     stays in force under all three conflict policies.
 //
-// A non-nil return is NOT by itself wire authorization: the caller
+// Client identity alone is still NOT wire authorization: the caller
 // threads the sibling's ClientID to the backend, which must still
 // prove the sibling's DHCID exists on the wire before downgrading
 // any guard (sendAddOwned sibling branch / skip-existing downgrade).
@@ -1129,11 +1134,15 @@ func (m *Manager) crossTypeSiblingOwned(owned ownedRecord) *ownedRecord {
 		if r.BackendFingerprint != owned.BackendFingerprint {
 			continue
 		}
-		// No identity-equality filter here (#14995): pairing is a
-		// backend wire question (the sibling DHCID proof), and a
-		// foreign row at this scope+endpoint simply fails that
-		// proof. Filtering by identity in the store would hide the
-		// candidate the backend must refuse on the wire.
+		// #15072: bind the candidate to the client. A foreign row
+		// (different device) at this scope+endpoint is not a
+		// sibling candidate — returning it would stamp
+		// SiblingFamilyOwned for a claimant that can never prove
+		// the wire DHCID, and any consumer that trusted the flag
+		// alone would reopen the A40-01 downgrade.
+		if !sameDeviceClient(owned.ClientID, r.ClientID) {
+			continue
+		}
 		rc := r
 		return &rc
 	}
