@@ -39,6 +39,20 @@ import (
 type unsharedRecord struct {
 	Digest string    `json:"digest"`
 	At     time.Time `json:"at"`
+	// Discarded, when present, is a peer sync divergence (#15142): the
+	// unshared local commit DiscardedDigest was replaced by
+	// AdoptedDigest at At. The record itself persists until the
+	// replacement is durable (see reconcilePersistedUnsharedLocked);
+	// Discarded records the alarm durably before writeActive runs.
+	Discarded *discardedRecord `json:"discarded,omitempty"`
+}
+
+// discardedRecord is the durable form of SyncDivergence (#15142).
+type discardedRecord struct {
+	DiscardedDigest string    `json:"discarded_digest"`
+	DiscardedAt     time.Time `json:"discarded_at"`
+	AdoptedDigest   string    `json:"adopted_digest"`
+	At              time.Time `json:"at"`
 }
 
 // SyncDivergence describes a peer config sync that replaced an active config
@@ -90,6 +104,9 @@ func (db *DB) ReadUnshared() (*unsharedRecord, error) {
 	if rec.Digest == "" {
 		return nil, errors.New("unshared-commit mark has no digest")
 	}
+	if rec.Discarded != nil && rec.Discarded.DiscardedDigest == "" {
+		return nil, errors.New("discarded record has no discarded digest")
+	}
 	return &rec, nil
 }
 
@@ -127,7 +144,12 @@ func (s *Store) SetPeerReachableFn(fn func() bool) {
 // Callers hold s.mu.
 func (s *Store) noteLocalActivePromotionLocked() {
 	// The active config changed after a divergence alarm, so the alarm no longer
-	// describes what this node runs.
+	// describes what this node runs. Clear any persisted discarded record
+	// with it (#15142); the sticky re-mark below then names the new active
+	// if it is itself unshared.
+	if s.unshared != nil && s.unshared.Discarded != nil {
+		s.setUnsharedLocked(nil)
+	}
 	s.divergence = nil
 	if s.peerReachableFn == nil {
 		return
@@ -145,6 +167,12 @@ func (s *Store) setUnsharedLocked(rec *unsharedRecord) {
 	if s.db == nil {
 		return
 	}
+	if rec == nil {
+		if err := s.db.DeleteUnshared(); err != nil {
+			slog.Warn("configstore: could not remove the unshared-commit mark", "err", err, "issue", "#15142")
+		}
+		return
+	}
 	if err := s.db.WriteUnshared(rec); err != nil {
 		slog.Warn("configstore: could not persist the unshared-commit mark; it holds for this process only",
 			"err", err, "issue", "#9530")
@@ -152,16 +180,19 @@ func (s *Store) setUnsharedLocked(rec *unsharedRecord) {
 }
 
 func (s *Store) clearUnsharedLocked() {
+	// #15142: a pending-discard record is reduced to its bare discarded
+	// form, never deleted: the divergence alarm must survive until the
+	// replacement is durable and beyond. Its bare form (Digest ==
+	// AdoptedDigest) can no longer classify as a divergence.
+	if s.unsharedPendingDiscard() {
+		d := s.unshared.Discarded
+		s.setUnsharedLocked(&unsharedRecord{Digest: d.AdoptedDigest, At: d.At, Discarded: d})
+		return
+	}
 	if s.unshared == nil {
 		return
 	}
-	s.unshared = nil
-	if s.db == nil {
-		return
-	}
-	if err := s.db.DeleteUnshared(); err != nil {
-		slog.Warn("configstore: could not remove the unshared-commit mark", "err", err, "issue", "#9530")
-	}
+	s.setUnsharedLocked(nil)
 }
 
 // NoteActiveSharedWithPeer records that pushedText reached a peer able to apply
@@ -184,6 +215,12 @@ func (s *Store) classifySyncLocked(incoming *config.ConfigTree) *SyncDivergence 
 	}
 	in := activeTreeDigest(incoming)
 	switch {
+	case s.unshared.Discarded != nil && s.unshared.Digest == s.unshared.Discarded.AdoptedDigest:
+		// Bare discarded form (#15142): the marked commit was already
+		// discarded and its replacement is durable. No sync can discard
+		// it again; recordSyncDivergenceLocked(nil) clears the alarm
+		// when a different config arrives.
+		return nil
 	case in == s.unshared.Digest:
 		// The peer holds exactly the marked content, so it was shared after all.
 		s.clearUnsharedLocked()
@@ -207,18 +244,65 @@ func (s *Store) classifySyncLocked(incoming *config.ConfigTree) *SyncDivergence 
 func (s *Store) recordSyncDivergenceLocked(d *SyncDivergence) {
 	if d == nil {
 		// A different config arriving after an alarm means the operator acted on
-		// the winner; the same config re-pushed keeps the alarm.
+		// the winner; the same config re-pushed keeps the alarm. A pending
+		// discard is not cleared here: its replacement is not yet durable.
+		if s.unsharedPendingDiscard() {
+			return
+		}
 		if s.divergence != nil && s.divergence.AdoptedDigest != activeTreeDigest(s.active) {
+			s.setUnsharedLocked(nil)
 			s.divergence = nil
 		}
 		return
 	}
-	s.clearUnsharedLocked()
+	// #15142: persist the discarded state BEFORE SyncApply writes the
+	// replacement active config, and keep the on-disk record (now carrying
+	// Discarded) until that replacement is durable. Only the in-memory
+	// unshared mark is consumed here; clearUnsharedLocked would durably
+	// delete the record before writeActive, recreating #9530 silently on
+	// a restart after a failed or interrupted heal.
+	s.setUnsharedLocked(&unsharedRecord{
+		Digest: s.unshared.Digest, At: s.unshared.At,
+		Discarded: &discardedRecord{
+			DiscardedDigest: d.DiscardedDigest, DiscardedAt: d.DiscardedAt,
+			AdoptedDigest: d.AdoptedDigest, At: d.At,
+		},
+	})
 	s.divergence = d
 	slog.Error("configstore: a peer config sync replaced a local commit the peer never held; "+
 		"the discarded config is rollback 1",
 		"discarded_digest", d.DiscardedDigest, "committed_at", d.DiscardedAt,
 		"adopted_digest", d.AdoptedDigest, "issue", "#9530")
+}
+
+// unsharedPendingDiscard reports whether an in-memory record still waits
+// for its replacement config to become durable (#15142): it carries a
+// Discarded whose adopted config is not yet the record's own Digest.
+// The bare form (Digest == Discarded.AdoptedDigest) is the durable
+// alarm left after the replacement landed. Callers hold s.mu.
+func (s *Store) unsharedPendingDiscard() bool {
+	return s.unshared != nil && s.unshared.Discarded != nil &&
+		s.unshared.Digest != s.unshared.Discarded.AdoptedDigest
+}
+
+// reconcilePersistedUnsharedLocked runs after a durable write of the
+// current active config (SyncApply success or the persist-retry heal).
+// A pending-discard record whose AdoptedDigest matches the now-durable
+// active is reduced to a bare discarded record (Digest=AdoptedDigest,
+// which can never re-classify as a divergence); any other record is
+// left untouched. Callers hold s.mu.
+func (s *Store) reconcilePersistedUnsharedLocked() {
+	if !s.unsharedPendingDiscard() {
+		return
+	}
+	discarded := s.unshared.Discarded
+	if discarded.AdoptedDigest != activeTreeDigest(s.active) {
+		return
+	}
+	s.setUnsharedLocked(&unsharedRecord{
+		Digest: discarded.AdoptedDigest, At: discarded.At,
+		Discarded: discarded,
+	})
 }
 
 // ConfigSyncDivergence reports the last divergence a peer sync caused (#9530),
@@ -267,4 +351,21 @@ func (s *Store) loadUnsharedMarkLocked() {
 		return
 	}
 	s.unshared = rec
+	if rec != nil && rec.Discarded != nil {
+		d := rec.Discarded
+		s.divergence = &SyncDivergence{
+			DiscardedDigest: d.DiscardedDigest, DiscardedAt: d.DiscardedAt,
+			AdoptedDigest: d.AdoptedDigest, At: d.At,
+		}
+		// If the persisted active already IS the adopted config, the
+		// replacement reached disk before the crash: reduce the record
+		// to its durable alarm form so it cannot re-classify. Otherwise
+		// the replacement never landed; keep Digest so the re-sync (or
+		// the retry heal through reconcile) re-raises / completes it.
+		if activeTreeDigest(s.active) == d.AdoptedDigest && rec.Digest != d.AdoptedDigest {
+			s.setUnsharedLocked(&unsharedRecord{
+				Digest: d.AdoptedDigest, At: d.At, Discarded: d,
+			})
+		}
+	}
 }

@@ -1593,6 +1593,7 @@ func (s *Store) retryActiveConfigPersistLocked(backoff time.Duration) {
 		// other path persistMarkerCommitted is true, so this matches the
 		// pre-#1922 committed=1 write exactly.
 		if err := s.writeActiveMarker(s.active, s.persistMarkerCommitted); err == nil {
+			s.reconcilePersistedUnsharedLocked() // #15142: replacement now durable
 			s.persistDegraded = false
 			// #14578: the retry just created a new active.json inode. If the
 			// original writer was a commit/sync, its saveRollbackFiles already
