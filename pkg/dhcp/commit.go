@@ -105,6 +105,17 @@ func remainingTimer(deadline, now time.Time) time.Duration {
 // lease.
 const reacquireBackstop = 10 * time.Second
 
+// terminalRetryBackoff paces self-recovery after a terminal initial-
+// acquisition exit that previously killed the client until an unrelated
+// config apply (#15070): DHCPv6 exhausting its 30s link-local wait, and
+// DHCPv4 exhausting retransmission-attempt. The run loops wait this long
+// (ctx-bound, via the after seam) and re-enter INIT instead of returning,
+// so a firewall that boots faster than its ONT/modem — or a WAN server
+// that is briefly unreachable — recovers on its own. Like
+// reacquireBackstop it is a pacing bound against a tight retry loop,
+// not a renewal timer.
+const terminalRetryBackoff = 30 * time.Second
+
 // leaseContentChanged reports whether two leases differ in any field a
 // downstream consumer reads or that controls the renewal binding (address,
 // gateway, DNS, classless static routes, and server identity). Obtained and

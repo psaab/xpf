@@ -109,12 +109,43 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 			}
 			attempt++
 			if maxAttempts > 0 && attempt >= maxAttempts {
-				slog.Warn("DHCPv4: max retransmission attempts reached",
-					"interface", ifaceName, "attempts", attempt)
+				// #15070: exhausting retransmission-attempt previously
+				// returned and killed the client until an unrelated
+				// config apply. The attempt budget still bounds one
+				// INIT cycle's DISCOVER burst, but the client now
+				// paces a long ctx-bound backoff and re-enters INIT
+				// (attempt/backoff reset) instead of dying. The wait
+				// stays bounded by the held lease's expiry when one is
+				// pending, mirroring the ordinary retry wait below.
+				slog.Warn("DHCPv4: max retransmission attempts reached, backing off before re-entering INIT",
+					"interface", ifaceName, "attempts", attempt, "backoff", terminalRetryBackoff)
+				select {
+				case <-m.after(terminalRetryBackoff):
+				case <-ctx.Done():
+					if cancelAcquire != nil {
+						cancelAcquire()
+					}
+					return
+				case <-expiryDone:
+					if ctx.Err() != nil {
+						if cancelAcquire != nil {
+							cancelAcquire()
+						}
+						return
+					}
+					m.abandonLeaseAfterExpiry(key, committed)
+					committed = nil
+					leaseExpiryPending = false
+					if cancelAcquire != nil {
+						cancelAcquire()
+					}
+				}
 				if cancelAcquire != nil {
 					cancelAcquire()
 				}
-				return
+				attempt = 0
+				backoff = baseBackoff
+				continue
 			}
 			slog.Warn("DHCPv4: discovery failed, retrying",
 				"interface", ifaceName, "err", err, "backoff", backoff,

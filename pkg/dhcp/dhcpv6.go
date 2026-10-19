@@ -58,11 +58,29 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 
 	stateless := v6opts != nil && v6opts.Stateless
 
-	// Wait for link-local address
-	if err := m.waitLinkLocal(ctx, ifaceName, 30*time.Second); err != nil {
-		slog.Warn("DHCPv6: no link-local address, aborting",
-			"interface", ifaceName, "err", err)
-		return
+	// Wait for link-local address. #15070: a terminal 30s timeout here
+	// previously returned and killed the client until an unrelated
+	// config apply — a firewall booting faster than its ONT/modem lost
+	// DHCPv6 (WAN address + delegated prefix) indefinitely. Instead,
+	// pace a ctx-bound backoff and re-wait: the wait itself re-polls
+	// every 500ms, so as soon as the link-local appears the next wait
+	// succeeds and Solicit proceeds. Cancellation (Reconcile removal /
+	// Renew / StopAll) still terminates promptly.
+	for {
+		err := m.waitLinkLocal(ctx, ifaceName, 30*time.Second)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		slog.Warn("DHCPv6: no link-local address, retrying",
+			"interface", ifaceName, "err", err, "backoff", terminalRetryBackoff)
+		select {
+		case <-m.after(terminalRetryBackoff):
+		case <-ctx.Done():
+			return
+		}
 	}
 
 	// committed / committedPDs track the lease and delegated prefixes
