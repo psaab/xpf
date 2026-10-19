@@ -142,6 +142,11 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// onUpdate re-applies, exactly as at boot).
 	d.reconcileFeeds(cfg)
 
+	// #15673: re-resolve dns-name address-book entries so the snapshot build
+	// below enforces the current DNS answer. The periodic goroutine in
+	// daemon_dnsaddr.go republishes on change between applies.
+	config.RefreshDNSAddressBooks(cfg)
+
 	// 1.96. Refresh the dataplane's dynamic-address feed overlay from the
 	// feed manager BEFORE the full snapshot build (#2049). The feed manager
 	// fetches threat-feed/allowlist prefixes and its onUpdate callback

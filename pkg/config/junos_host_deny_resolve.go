@@ -116,7 +116,9 @@ func junosHostResolveAddrSet(cfg *Config, tokens []string, feedBound map[string]
 		}
 		if ab != nil {
 			if a, found := ab.Addresses[tok]; found {
-				addCIDR(a.UsableValue())
+				for _, v := range a.UsableValues() {
+					addCIDR(v)
+				}
 				continue
 			}
 			if _, found := ab.AddressSets[tok]; found {
@@ -127,7 +129,9 @@ func junosHostResolveAddrSet(cfg *Config, tokens []string, feedBound map[string]
 				}
 				for _, n := range names {
 					if a, f := ab.Addresses[n]; f {
-						addCIDR(a.UsableValue())
+						for _, v := range a.UsableValues() {
+							addCIDR(v)
+						}
 					} else {
 						ok = false
 					}
@@ -161,6 +165,11 @@ func junosHostAddrScoped(tokens []string) bool {
 func junosHostNameUnrepresentable(ab *AddressBook, feedBound map[string]bool, name string, visited map[string]bool) bool {
 	if ab != nil {
 		if _, collision := ab.CollidingNames[name]; collision {
+			return true
+		}
+		// #15673: an address with no usable prefixes (tainted mixed form,
+		// unresolvable dns-name, oversized range) cannot be projected.
+		if a, ok := ab.Addresses[name]; ok && a != nil && len(a.UsableValues()) == 0 {
 			return true
 		}
 	}

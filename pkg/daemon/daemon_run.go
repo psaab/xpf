@@ -513,6 +513,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.ensureFeedManager()
 		d.reconcileFeeds(cfg)
 	}
+	d.startDNSAddressRefresher()
 
 	// RPM probes are started by the hash-gated reconcileRPM step inside
 	// the startup applyConfig above (#1827); this safety net covers the

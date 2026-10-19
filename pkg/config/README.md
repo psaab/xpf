@@ -813,29 +813,29 @@ program, correctly spelled denies included, behind only the #4168 advisory.
 name lookup), `junosHostAddrScoped` and the #4146 warning's
 `junosHostPolicySourceScoped` now read the SSOT.
 
-**An address takes one value form; a mixed entry is rejected (#9524/#11508):**
-the compiler enforces only parsed IP/CIDR prefixes; a Junos `dns-name` /
-`wildcard-address` / `range-address` or any unrecognized future value keyword
-cannot be enforced as a prefix. Before #9524 an entry carrying a prefix AND a
-known unsupported form compiled to the prefix alone on all four config channels
-with no warning, so a `deny` naming the object silently under-covered it
-(measured: a host named by the object's `range-address` fell through the deny
-to a `permit-all` default). `mergeAddressNode` records known unsupported forms
-and default-denies every non-prefix, non-description value token into
-`Address.UnimplementedForms`, in both parser shapes; the zone-local fold carries
-the taint.
-`validateAddressUnimplementedFormsStrict` rejects a mixed prefix/form entry at
-commit, naming the prefix and dropped form; tolerant load / peer-sync warns
-(`lenientAddressUnimplementedForms`). `Address.UsableValue()` returns `""` for
-every tainted entry, so unknown future forms cannot let NAT use a prefix policy
-rejected as unresolvable. The policy resolvers (`nameRepresentability` and the
-junos-host deny projection) produce the existing `__unsupported_address__`
-sentinel on tolerant load (#2229/#3261); static-NAT `prefix-name` resolution
-also treats the entry as unresolvable. A sole unsupported form remains
-unresolvable and is rejected only when referenced (#3149). `Value` stays
-available to show surfaces. Regression coverage:
-`address_unimplemented_forms_9524_test.go` covers mixed known forms and the
-unknown-form default-deny path.
+**Address value forms (#9524/#11508/#15673):** a Junos address takes exactly
+one value form. `range-address <low> to <high>` expands natively at compile
+time via `expandAddressRange` (256-address cap; oversized ranges are recorded
+in `Address.OversizedRange`, rejected at strict commit, unusable on tolerant
+load), `wildcard-address <ip>/<wildcard-mask>` expands to the single
+wildcard-derived CIDR (non-contiguous masks have no CIDR equivalent and stay
+unimplemented), and `dns-name <fqdn> [ipv4-only|ipv6-only]` is modelled in
+`Address.DNSName`/`DNSFamily` with the current resolution in
+`Address.DNSAddresses` — refreshed at apply time and periodically by the
+daemon (`RefreshDNSAddressBooks`); an unresolvable name matches nothing
+(fail-closed). These expansions live in `Address.ExpandedPrefixes` /
+`DNSAddresses` and are returned by `Address.UsableValues()`, which every
+resolver (policy, NAT, junos-host, userspace book table) now consumes so a
+multi-prefix entry publishes all of its prefixes. Any other form keyword —
+and any entry mixing a prefix with another form — is recorded in
+`Address.UnimplementedForms` by `mergeAddressNode` in both parser shapes
+(including sub-stanzas under a `description` node and leaf entries inside
+unknown book stanzas, #15673); `validateAddressUnimplementedFormsStrict`
+rejects such entries at commit whether or not they carry a prefix (the
+pre-#15673 `a.Value == ""` sole-form bypass is removed), tolerant load /
+peer-sync warns naming the form, and `UsableValue()`/`UsableValues()` return
+empty so no resolver enforces a subset. Regression coverage:
+`address_forms_15673_test.go`, `address_unimplemented_forms_9524_test.go`.
 
 **An address takes exactly one prefix; duplicates are explicit (#14967):**
 a Junos address names a single prefix, so two distinct prefixes for one
