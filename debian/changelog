@@ -19,6 +19,13 @@ xpf (0.0.0) unstable; urgency=medium
     negotiated version. A `v1-only` gateway is unaffected and stays
     silent; the advisory is suppressed on tolerant load / peer-sync
     (#15025).
+  * Reject at commit a non-zero interface unit with no VLAN tag on a
+    parent without vlan-tagging: its addresses previously landed on the
+    untagged parent while its zone and input filter bound to a
+    `parent.<unit>` device nothing creates, so the filter was never
+    installed and the subnet was attributed to unit 0's zone. Tunnel,
+    loopback, secure-tunnel and irb units are exempt; tolerant load
+    warns instead of bricking (#15034).
   * Emit the bare `ip ospf bfd` / `isis bfd` enable line immediately
     before the `... bfd profile <name>` binding on OSPFv2 and IS-IS
     interfaces configured with bfd-liveness-detection
