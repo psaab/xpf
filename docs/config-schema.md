@@ -14879,9 +14879,11 @@ the value sits in a single typed slot:
   `compileExpanded` next to the VRRP pre-walk) range-checks the
   COMPILER-SELECTED token via `selectMSSToken` (shared with `parseMSSValue` so
   it can never diverge: `mss` child first, flat fallback) against
-  `[0, 65535]`. A mixed shape `gre-in 70000 { mss 1360; }` therefore PASSES
-  (the compiler selects the child 1360 and discards the flat 70000).
-
+  `[64, 65535]` — the Junos range (`MinTCPMSS`, #15171 B19-01; originally
+  the wire bound `[0, 65535]` under #1979, which let `mss 0` commit clean
+  as unset and 1..63 reach SYN MSS options). A mixed shape
+  `gre-in 70000 { mss 1360; }` therefore PASSES (the compiler selects the
+  child 1360 and discards the flat 70000).
 **Strict vs lenient (boot/HA safety):** Tiers 1+2 get the strict/lenient split
 for free (a typed-leaf `SchemaValidate` violation hard-rejects on the strict
 commit path and downgrades to a warning on `Store.Load` / `Store.SyncApply`,

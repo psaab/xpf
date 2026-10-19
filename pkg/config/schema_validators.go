@@ -519,6 +519,14 @@ const (
 	maxWireI32 = int64(math.MaxInt32)
 )
 
+// MinTCPMSS is the Junos floor for `security flow tcp-mss` values (#15171
+// B19-01): Junos accepts 64..65535. Below 64 the clamp is either silently
+// absent (0 compiles as unset via parseMSSValue's `v > 0` guard) or a
+// box-wide throughput collapse (1..63 written into SYN MSS options,
+// userspace-dp clamp_tcp_mss has no floor). validateTCPMSSRanges enforces
+// this on the strict commit path and warns on lenient load.
+const MinTCPMSS = int64(64)
+
 // maxLoginUsernameLen caps a `system login user <name>` identity token. The
 // classic Linux useradd/UT_NAMESIZE practical limit is 32; keeping the cap
 // there also bounds the derived /etc/sudoers.d/xpf-<name> filename and the

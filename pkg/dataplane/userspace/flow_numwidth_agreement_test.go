@@ -49,9 +49,24 @@ func intValidator(min, max int64) func(int64) error {
 func numwidthFields() []layerBField {
 	return []layerBField{
 		{
+			// #15171: Layer B is now stricter than the wire bound — it
+			// rejects 0..63 (Junos floor 64) that Layer A leaves unchanged.
+			// Those values are Layer-A-safe (0=unset, 1..63 written as-is)
+			// but operator-invalid, so they are a documented exception to
+			// invariant #2 below, modelled here by coercing them to the
+			// -2 sentinel (not Layer-A-unchanged) exactly like the
+			// collector-port field. Layer A itself is unchanged.
 			name:     "tcp_mss_u16",
-			validate: intValidator(0, math.MaxUint16),
-			coerce:   func(v int) int { return coerceWireU16("t", v) },
+			validate: intValidator(config.MinTCPMSS, math.MaxUint16),
+			coerce: func(v int) int {
+				if v >= int(config.MinTCPMSS) && v <= math.MaxUint16 {
+					return v
+				}
+				if v > math.MaxUint16 || v < 0 {
+					return coerceWireU16("t", v)
+				}
+				return -2
+			},
 		},
 		{
 			name:     "active_inactive_timeout_u32",
