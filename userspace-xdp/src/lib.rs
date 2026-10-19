@@ -2180,22 +2180,17 @@ fn should_fallback_early(pkt: &ParsedPacket, ingress_domain: u32) -> bool {
     // ahead of this function; they are classified here like any other
     // protocol and reach the kernel only through the destination-qualified
     // local-destination / interface-NAT arms of the session-miss path.
-    // #10640/#13983: the verdict lives in `early_filter` (host-executed by
-    // the userspace-dp regression test). IPv4 link-local and non-owned IPv6
-    // link-local fall through: scope alone is not exact destination ownership.
-    // Exact-local IPv6 link-local destinations pass early only after the
-    // ownership lookup; other local delivery remains in the session-miss path.
+    // #10640/#13983/#14955: the verdict lives in `early_filter`
+    // (host-executed by the userspace-dp regression test). IPv4 link-local
+    // and every IPv6 link-local unicast — exact-local included — fall
+    // through: an early pass would pre-empt USERSPACE_SESSIONS, the
+    // WireGuard worker claim, and native-GRE inner classification. The
+    // session-miss path still delivers exact-local destinations to the
+    // kernel and the WG steer above still runs first; only the pre-session
+    // shortcut is gone.
     match pkt.addr_family {
         AF_INET => early_filter::ipv4_early_pass_to_kernel(pkt.dst_v4),
-        AF_INET6 => {
-            let destination_is_local_link_local =
-                early_filter::is_ipv6_link_local(pkt.dst_addr)
-                    && is_local_destination(pkt, ingress_domain);
-            early_filter::ipv6_early_pass_to_kernel(
-                pkt.dst_addr,
-                destination_is_local_link_local,
-            )
-        }
+        AF_INET6 => early_filter::ipv6_early_pass_to_kernel(pkt.dst_addr, false),
         _ => true,
     }
 }
