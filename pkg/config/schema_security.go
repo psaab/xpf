@@ -290,13 +290,32 @@ func validateZoneTCPRstNode13119(node *Node, _ *schemaNode) error {
 	return nil
 }
 
+// #15670: the Junos zone mode domain for advanced-connection-tracking.
+var advancedConnectionTrackingModes15670 = []string{"allow-any-host", "allow-target-host", "allow-target-host-port"}
+
+// validateZoneFlagNode15670 is the presence-flag validator shared by the
+// #15670 zone flags (and ACT's track-all leaf): no operand, no body.
+func validateZoneFlagNode15670(node *Node, _ *schemaNode) error {
+	if node == nil {
+		return nil
+	}
+	if len(node.Keys) > 1 || len(node.Children) > 0 {
+		return fmt.Errorf("%s is a presence-only flag and accepts no trailing tokens or body", node.Name())
+	}
+	return nil
+}
+
 var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: true, children: map[string]*schemaNode{
 	// #9878: closed-world arm. Leaf-completeness audit (the schema.go
 	// contract: only flip a LEAF-COMPLETE subtree). zones children =
 	// {security-zone, functional-zone}: the zone compiler
 	// (compiler_security_zones.go) reads description, interfaces (dynamic
-	// names via wildcard), tcp-rst, screen, host-inbound-traffic, and the
-	// zone-local address-book for security-zone — each modeled below;
+	// names via wildcard), tcp-rst, screen, host-inbound-traffic, the
+	// #15670 standard children (application-tracking, source-identity-log,
+	// enable-reverse-reroute, unidirectional-session-refreshing,
+	// advance-policy-based-routing-profile, advanced-connection-tracking,
+	// white-list), and the zone-local address-book for security-zone —
+	// each modeled below;
 	// host-inbound service tokens ride as leaf VALUES validated by
 	// validateHostInboundTokensStrict, not as keywords, so no service name
 	// can false-reject. Unknown direct zone children remain strict rejects;
@@ -351,7 +370,21 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 					"host-inbound-traffic": {desc: "Per-interface host inbound traffic", children: hostInboundSchemaChildren()},
 				},
 			}},
-			"tcp-rst":              {desc: "Send TCP RST for non-SYN TCP transit session misses", nodeValidator: validateZoneTCPRstNode13119, children: nil},
+			"tcp-rst": {desc: "Send TCP RST for non-SYN TCP transit session misses", nodeValidator: validateZoneTCPRstNode13119, children: nil},
+			// #15670 (V3-02): standard Junos security-zone children.
+			// Presence flags share the tcp-rst validator (no operand/body);
+			// malformed shapes poison the zone in compileZoneBody15668.
+			"application-tracking":                 {desc: "Enable Application tracking support for this zone", nodeValidator: validateZoneFlagNode15670, children: nil},
+			"source-identity-log":                  {desc: "Show user and group info in session log for this zone", nodeValidator: validateZoneFlagNode15670, children: nil},
+			"enable-reverse-reroute":               {desc: "Enable reverse route lookup when there is change in ingress interface", nodeValidator: validateZoneFlagNode15670, children: nil},
+			"unidirectional-session-refreshing":    {desc: "Enable unidirectional session refreshing on this zone", nodeValidator: validateZoneFlagNode15670, children: nil},
+			"advance-policy-based-routing-profile": {desc: "Enable Advance Policy Based Routing on this zone", args: 1, scalar: true, placeholder: "<profile-name>", children: nil},
+			"advanced-connection-tracking": {desc: "Advanced connection tracking for this zone", children: map[string]*schemaNode{
+				"mode":                            {desc: "Connection tracking mode", args: 1, scalar: true, placeholder: "<mode>", valueType: ValueEnumOf, valueDesc: "connection tracking mode", valueExamples: advancedConnectionTrackingModes15670, validator: ValidateEnum(advancedConnectionTrackingModes15670), children: nil},
+				"timeout":                         {desc: "Timeout in seconds for advanced-connection-tracking table", args: 1, scalar: true, placeholder: "<seconds>", valueType: ValueInteger, valueDesc: "timeout in seconds", valueExamples: []string{"60", "300"}, validator: ValidateInteger(0, 86400), children: nil},
+				"track-all-policies-to-this-zone": {desc: "Mandate all policies to this zone to do connection track lookup", nodeValidator: validateZoneFlagNode15670, children: nil},
+			}},
+			"white-list":           {desc: "Allowlist for all IP screen options in this zone", args: 1, multi: true, scalar: true, placeholder: "<white-list-name>", children: nil},
 			"screen":               {desc: "Screen profile name", args: 1, scalar: true, placeholder: "<screen-name>", children: nil},
 			"host-inbound-traffic": {desc: "Host inbound traffic", children: hostInboundSchemaChildren()},
 			// #3061: zone-local address book. Same entry grammar as the
