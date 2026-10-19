@@ -346,6 +346,12 @@ type ownedRecord struct {
 	// key). Released (set "") by the confirm-save once the wire add succeeds. Omitted
 	// from the JSON when empty.
 	PriorAddrText string `json:"prior_addr_text,omitempty"`
+	// AmbiguousPriorAddrText retains the prior DESIRED value whose wire
+	// outcome is unknown after an ambiguous publish error (#15225 A40-02):
+	// the publish may have been applied despite the error, so this value
+	// stays a cleanup candidate alongside PriorAddrText until a later
+	// publish removes every candidate != the new value. Omitted when empty.
+	AmbiguousPriorAddrText string `json:"ambiguous_prior_addr_text,omitempty"`
 	// Scope is the ScopeKey this record belongs to (#2691 P1b, plan §5.4). It
 	// is the per-family / per-interface / per-RG / per-routing-instance scope
 	// the record was published under, so two scopes for the same name+address

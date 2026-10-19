@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/miekg/dns"
+
 	"github.com/psaab/xpf/pkg/config"
 )
 
@@ -709,6 +711,8 @@ func newSurfaceARFC2136(p *config.DDNSProvider, _ string, resolveIf ...func(stri
 	}
 	c := &config.DHCPDynamicDNSConfig{
 		UpdateServer:         p.UpdateServer,
+		ForwardZone:          p.ForwardZone,
+		ReverseZone:          p.ReverseZone,
 		TSIGKeyName:          p.TSIGKeyName,
 		TSIGAlgorithm:        p.TSIGAlgorithm,
 		TSIGSecret:           p.TSIGSecret,
@@ -716,6 +720,8 @@ func newSurfaceARFC2136(p *config.DDNSProvider, _ string, resolveIf ...func(stri
 		DestinationInterface: p.DestinationInterface,
 		RoutingInstance:      p.RoutingInstance,
 	}
+	pol.forwardZones = splitZoneList(p.ForwardZone)
+	pol.reverseZones = splitZoneList(p.ReverseZone)
 	u, err := newRFC2136Updater(pol, c, nil, nil, nil, resolveIf...)
 	if err != nil {
 		return nil, err
@@ -1291,6 +1297,40 @@ var errSurfaceANoBackend = errors.New("ddns surface-a: no live backend for provi
 // backoff); the next reconcile converges whatever the current desired state is.
 var errSurfaceAPublishRaced = errors.New("ddns surface-a: publish raced a concurrent ownership change")
 
+// isDefinitivePublishRejection reports whether a publish error proves
+// nothing was applied at the provider (#15225 A40-02): a conflict refusal,
+// a definitive auth/not-implemented refusal, errGenericDeleteUnsupported-
+// class permanent errors, or an HTTP 4xx other than 408/429. Every other
+// error (timeout, lost reply, 5xx, 408/429, EOF) is ambiguous — the UPDATE
+// may already be live — and must keep every candidate as a cleanup key.
+func isDefinitivePublishRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errDDNSConflictRefused) || errors.Is(err, errHTTPAuth) ||
+		errors.Is(err, errGenericDeleteUnsupported) {
+		return true
+	}
+	var re *rcodeErr
+	if errors.As(err, &re) {
+		switch re.rcode {
+		case dns.RcodeNotAuth, dns.RcodeRefused, dns.RcodeNotImplemented, dns.RcodeFormatError:
+			return true
+		}
+		return false
+	}
+	for _, marker := range []string{"unexpected status 4", "must be an https", "refusing to transmit", "malformed rendered", "invalid conflict-policy", "unsupported TSIG"} {
+		if strings.Contains(err.Error(), marker) {
+			// "unexpected status 408/429" are retryable, not definitive.
+			if strings.Contains(err.Error(), "unexpected status 408") || strings.Contains(err.Error(), "unexpected status 429") {
+				return false
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // publishLocked publishes the scope's record through the resolved Backend and
 // records ownership write-ahead (the same durability discipline as the lease
 // path, #2662). The ownership key fixes Address="" so a scope owns exactly one
@@ -1346,16 +1386,29 @@ func (m *SurfaceAManager) publishLocked(ctx context.Context, sc SurfaceAScope, a
 	key := sc.effectiveKey()
 	prevOwned, hadPrev := m.state.get(key, surfaceAIdentity, "")
 	prevAddr := ""
+	var prevCandidates []string
 	if hadPrev {
 		if prevOwned.PublishPending {
-			// The current durable row is a not-yet-confirmed PENDING write-ahead
-			// (#5285): a prior crash struck between the write-ahead state.save and
-			// the wire add, so its AddrText holds the DESIRED value that never
-			// reached the wire. The value actually LIVE at the provider is the
-			// retained CONFIRMED prior (PriorAddrText). Thread the prior so the
-			// self-owned in-place replace targets xpf's real live value and cleans
-			// the stale record — never the phantom desired value AddrText carries.
+			// #15225 A40-02: a pending row is ambiguous about which value
+			// is live — the confirmed prior AND the prior desired (whose
+			// wire add may have landed before a crash/lost reply) are both
+			// cleanup candidates. Keep every candidate; the backend removes
+			// all candidates != the new value.
 			prevAddr = prevOwned.PriorAddrText
+			addCand := func(s string) {
+				if s == "" {
+					return
+				}
+				for _, c := range prevCandidates {
+					if c == s {
+						return
+					}
+				}
+				prevCandidates = append(prevCandidates, s)
+			}
+			addCand(prevOwned.PriorAddrText)
+			addCand(prevOwned.AddrText)
+			addCand(prevOwned.AmbiguousPriorAddrText)
 		} else {
 			// The previously-published rdata lives in AddrText for a Surface A
 			// record (Address is the "" scope key, #2691 P2). Reading Address here
@@ -1367,6 +1420,9 @@ func (m *SurfaceAManager) publishLocked(ctx context.Context, sc SurfaceAScope, a
 			if prevAddr == "" {
 				prevAddr = prevOwned.Address
 			}
+			if prevAddr != "" {
+				prevCandidates = []string{prevAddr}
+			}
 		}
 	}
 
@@ -1375,9 +1431,17 @@ func (m *SurfaceAManager) publishLocked(ctx context.Context, sc SurfaceAScope, a
 	// xpf's own prior value, never a co-resident FOREIGN record at a shared
 	// name. On a first publish (or a lost prior value) PrevAddr stays invalid and
 	// the backend does an additive insert/create instead of clobbering the name.
+	// #15225: PrevAddrs carries the full ambiguous candidate set when >1.
 	if prevAddr != "" {
 		if pa, perr := netip.ParseAddr(prevAddr); perr == nil {
 			rec.PrevAddr = pa.Unmap()
+		}
+	}
+	if len(prevCandidates) > 1 {
+		for _, cs := range prevCandidates {
+			if pa, perr := netip.ParseAddr(cs); perr == nil {
+				rec.PrevAddrs = append(rec.PrevAddrs, pa.Unmap())
+			}
 		}
 	}
 
@@ -1449,22 +1513,33 @@ func (m *SurfaceAManager) publishLocked(ctx context.Context, sc SurfaceAScope, a
 	cur, stillOwned := m.state.get(key, surfaceAIdentity, "")
 	stale := !stillOwned || cur.AddrText != ow.AddrText
 	if wireErr != nil {
-		// Hard add failure: the record is NOT live with the new rdata. Restore
-		// the previous durable ownership (the old address is still live) so we
-		// do not claim an address we failed to publish. A conflict refusal
-		// (name owned by another party) also lands here — Surface A does not
-		// adopt a third party's name.
-		//
-		// Racing-op guard (#2778): only roll back if OUR write-ahead is still the
-		// live entry. If a concurrent op already changed the owned record while we
-		// were unlocked, rolling back to prevOwned would clobber the newer truth —
-		// leave it alone and let the next reconcile converge.
+		// #15225 A40-02: only a DEFINITIVE rejection (conflict refusal, or
+		// definitive auth/not-implemented/validation) proves nothing was
+		// applied, so only those roll back to the single confirmed prior.
+		// Every other error is AMBIGUOUS — the UPDATE may have been applied
+		// before the reply was lost — so the pending row is KEPT with the
+		// prior desired retained as an extra cleanup candidate; the next
+		// publish removes every candidate != the new value.
+		// Racing-op guard (#2778): only touch state if OUR write-ahead is
+		// still the live entry.
 		if !stale {
-			if hadPrev {
-				m.state.put(prevOwned)
-			} else {
-				m.state.delete(key, surfaceAIdentity, "")
+			if isDefinitivePublishRejection(wireErr) {
+				if hadPrev {
+					m.state.put(prevOwned)
+				} else {
+					m.state.delete(key, surfaceAIdentity, "")
+				}
+			} else if hadPrev && prevOwned.PublishPending {
+				// Already pending: preserve chained candidates.
+				keep := ow
+				keep.AmbiguousPriorAddrText = prevOwned.AddrText
+				if keep.AmbiguousPriorAddrText == ow.AddrText {
+					keep.AmbiguousPriorAddrText = prevOwned.AmbiguousPriorAddrText
+				}
+				m.state.put(keep)
 			}
+			// Fresh ambiguous failure: ow already IS the pending row
+			// {desired, prior=confirmed}; leaving it is the fix.
 			_ = m.state.save()
 		}
 		m.upsertFail++
@@ -1513,6 +1588,7 @@ func (m *SurfaceAManager) publishLocked(ctx context.Context, sc SurfaceAScope, a
 	confirmed := ow
 	confirmed.PublishPending = false
 	confirmed.PriorAddrText = ""
+	confirmed.AmbiguousPriorAddrText = ""
 	m.state.put(confirmed)
 	if err := m.state.save(); err != nil {
 		slog.Warn("ddns surface-a: cannot persist confirmed ownership after publish (record still owned via pending write-ahead)",
@@ -1730,8 +1806,13 @@ func (m *SurfaceAManager) withdrawOwnedLocked(ctx context.Context, owned ownedRe
 // collapses to one delete). Caller holds m.mu.
 func (m *SurfaceAManager) withdrawTargets(owned ownedRecord) []netip.Addr {
 	texts := []string{owned.AddrText}
-	if owned.PublishPending && owned.PriorAddrText != "" {
-		texts = append(texts, owned.PriorAddrText)
+	if owned.PublishPending {
+		if owned.PriorAddrText != "" {
+			texts = append(texts, owned.PriorAddrText)
+		}
+		if owned.AmbiguousPriorAddrText != "" {
+			texts = append(texts, owned.AmbiguousPriorAddrText)
+		}
 	}
 	out := make([]netip.Addr, 0, len(texts))
 	seen := make(map[netip.Addr]struct{}, len(texts))

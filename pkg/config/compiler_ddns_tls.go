@@ -36,13 +36,17 @@ func ddnsBackendCarriesCredentials(p *DDNSProvider) bool {
 }
 
 // ddnsTemplateCarriesLiteralToken reports whether a generic url-template
-// carries a credential as a literal credential-named key=value pair in its
-// query or path (#14386/#14439): e.g. "?token=SECRET" or "/update/token=SECRET".
-// The template is otherwise opaque, so the detector keys on credential-NAMED
-// pairs only, never on bare values. A value counts as literal only when it is
-// non-empty and contains no '%' (excludes %u/%p/%h/%i specifiers) and no "{{"
-// (excludes placeholders). Bare path segments ("/update/SECRET") are
-// intentionally not flagged — see ddnsBackendCarriesCredentials.
+// carries ANY literal query value (#15225 A40-03, widening
+// #14386/#14439): a fixed credential key-name list misses pass=, key=,
+// api-token=, pwd=, p= and every provider-specific spelling, and any
+// literal query value on an http:// template is operator-supplied data
+// sent in cleartext — the safe rule is that a literal query value counts
+// as credential-carrying. A value counts as literal only when it is
+// non-empty and contains no '%' (excludes %u/%p/%h/%i specifiers) and no
+// "{{" (excludes placeholders). Bare path segments ("/update/SECRET")
+// are intentionally not flagged, while credential-NAMED path pairs
+// ("/update/token=SECRET", #14439) still are — see
+// ddnsBackendCarriesCredentials and the pinned controls.
 func ddnsTemplateCarriesLiteralToken(tmpl string) bool {
 	tmpl = strings.TrimSpace(tmpl)
 	if i := strings.Index(tmpl, "#"); i >= 0 {
@@ -82,7 +86,7 @@ func ddnsTemplateCarriesLiteralToken(tmpl string) bool {
 		}
 	}
 	for _, pair := range strings.Split(query, "&") {
-		if i := strings.Index(pair, "="); i > 0 && isCredKey(pair[:i]) && isLiteral(pair[i+1:]) {
+		if i := strings.Index(pair, "="); i > 0 && isLiteral(pair[i+1:]) {
 			return true
 		}
 	}

@@ -974,6 +974,18 @@ func dhcpDynamicDNSSchema() *schemaNode {
 			placeholder: "<host[:port]>",
 			children:    nil,
 		},
+		"forward-zone": {
+			desc:        "Explicit forward UPDATE zone(s), comma/space-separated (#15225)",
+			args:        1,
+			placeholder: "<zone>",
+			children:    nil,
+		},
+		"reverse-zone": {
+			desc:        "Explicit reverse UPDATE zone(s), comma/space-separated (#15225)",
+			args:        1,
+			placeholder: "<zone>",
+			children:    nil,
+		},
 		"tsig-key": {
 			desc:        "TSIG key name for authenticated updates",
 			args:        1,
@@ -1042,6 +1054,8 @@ func ddnsServicesSchema() *schemaNode {
 				children:      nil,
 			},
 			"update-server":         {desc: "Authoritative DNS target for RFC 2136 updates (host[:port])", args: 1, placeholder: "<host[:port]>", children: nil},
+			"forward-zone":          {desc: "Explicit forward UPDATE zone(s), comma/space-separated (#15225)", args: 1, placeholder: "<zone>", children: nil},
+			"reverse-zone":          {desc: "Explicit reverse UPDATE zone(s), comma/space-separated (#15225)", args: 1, placeholder: "<zone>", children: nil},
 			"tsig-key":              {desc: "TSIG key name for authenticated updates", args: 1, placeholder: "<key-name>", children: nil},
 			"tsig-algorithm":        {desc: "TSIG algorithm (e.g. hmac-sha256)", args: 1, placeholder: "<algorithm>", children: nil},
 			"tsig-secret":           {desc: "TSIG shared secret (sensitive; redacted in show output)", args: 1, placeholder: "<secret>", children: nil},

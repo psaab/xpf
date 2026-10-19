@@ -73,7 +73,8 @@ func templateAuthorityUserinfo(s string) bool {
 }
 
 // templateCarriesLiteralToken mirrors config.ddnsTemplateCarriesLiteralToken:
-// a credential-named key=literal pair in the query or path.
+// ANY literal query value (#15225 A40-03), or a credential-named key=literal
+// pair in the path (#14439).
 func templateCarriesLiteralToken(tmpl string) bool {
 	tmpl = strings.TrimSpace(tmpl)
 	if i := strings.Index(tmpl, "#"); i >= 0 {
@@ -113,7 +114,7 @@ func templateCarriesLiteralToken(tmpl string) bool {
 		}
 	}
 	for _, pair := range strings.Split(query, "&") {
-		if i := strings.Index(pair, "="); i > 0 && isCredKey(pair[:i]) && isLiteral(pair[i+1:]) {
+		if i := strings.Index(pair, "="); i > 0 && isLiteral(pair[i+1:]) {
 			return true
 		}
 	}

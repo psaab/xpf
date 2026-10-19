@@ -139,6 +139,8 @@ type ddnsPolicy struct {
 	hostnameSource string
 	conflictPolicy string
 	backend        string
+	forwardZones   []string
+	reverseZones   []string
 	// authority is the credential-free fingerprint of this policy's DNS
 	// endpoint (#6755), comparable with a Surface A record's stored
 	// BackendFingerprint. Computed once here because ddnsPolicy is the resolved
@@ -206,6 +208,8 @@ func policyFromConfig(c *config.DHCPDynamicDNSConfig) ddnsPolicy {
 		hostnameSource: c.HostnameSource,
 		conflictPolicy: c.ConflictPolicy,
 		backend:        c.Backend,
+		forwardZones:   splitZoneList(c.ForwardZone),
+		reverseZones:   splitZoneList(c.ReverseZone),
 		authority:      leaseAuthorityFingerprint(c),
 	}
 	if p.ttl <= 0 {
@@ -218,6 +222,14 @@ func policyFromConfig(c *config.DHCPDynamicDNSConfig) ddnsPolicy {
 		p.conflictPolicy = "replace-owned"
 	}
 	return p
+}
+
+// splitZoneList parses a comma/space-separated zone list (#15225).
+func splitZoneList(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' })
 }
 
 // validConflictPolicy reports whether p is one of the three conflict

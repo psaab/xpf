@@ -390,6 +390,32 @@ func mergeUpsertValues(current []string, prevVal, newVal string) []string {
 	return out
 }
 
+// mergeUpsertValuesMulti is mergeUpsertValues for the ambiguous candidate
+// set (#15225 A40-02): drop every candidate prior, keep foreign members.
+func mergeUpsertValuesMulti(current []string, prevVals map[string]bool, newVal string) []string {
+	out := make([]string, 0, len(current)+1)
+	seen := map[string]struct{}{}
+	add := func(v string) {
+		if v == "" {
+			return
+		}
+		k := canonicalRRValueKey9147(v)
+		if _, ok := seen[k]; ok {
+			return
+		}
+		seen[k] = struct{}{}
+		out = append(out, v)
+	}
+	for _, v := range current {
+		if prevVals[canonicalRRValueKey9147(v)] {
+			continue
+		}
+		add(v)
+	}
+	add(newVal)
+	return out
+}
+
 // removeValue returns current without the owned value (all occurrences), and
 // reports whether anything was removed.
 func removeValue(current []string, owned string) (out []string, removed bool) {
@@ -455,11 +481,16 @@ func (b *route53Backend) UpsertLease(ctx context.Context, rec LeaseDNSRecord) er
 	if err != nil {
 		return err
 	}
-	var prevVal string
+	prevVals := map[string]bool{}
 	if rec.PrevAddr.IsValid() {
-		prevVal = rec.PrevAddr.Unmap().String()
+		prevVals[rec.PrevAddr.Unmap().String()] = true
 	}
-	desired := mergeUpsertValues(live.values, prevVal, newVal)
+	for _, p := range rec.PrevAddrs {
+		if p.IsValid() {
+			prevVals[p.Unmap().String()] = true
+		}
+	}
+	desired := mergeUpsertValuesMulti(live.values, prevVals, newVal)
 	ttl := rec.TTL
 	if ttl <= 0 {
 		ttl = defaultDDNSTTL
