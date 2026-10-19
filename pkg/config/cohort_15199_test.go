@@ -82,13 +82,17 @@ func TestRethUndefinedRG15199(t *testing.T) {
 }
 
 // A05-06: unknown interface keywords warn on both paths, known stay silent.
+// #15654 supersedes the family-bridge row: ethernet-switching/bridge
+// families with L2 content now fail closed instead of warn-only.
+// (Bare `family bridge` with no content stays warn-only: #15654
+// scopes its gate to authored L2/filter/policer content.)
 func TestInterfacesOpenWorldWarn15199(t *testing.T) {
 	cases := []struct {
 		name, want string
 		lines      []string
 	}{
 		{"ether-options", "ether-options", []string{"set interfaces ge-0/0/1 ether-options 802.3ad ae0", "set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24"}},
-		{"family bridge", "bridge", []string{"set interfaces ge-0/0/1 unit 0 family bridge"}},
+		{"family unknown-af", "unknown-af-15199", []string{"set interfaces ge-0/0/1 unit 0 family unknown-af-15199"}},
 		{"arbitrary", "zzbogus", []string{"set interfaces ge-0/0/1 unit 0 zzbogus 1"}},
 		{"filtr typo", "filtr", []string{"set interfaces ge-0/0/1 unit 0 family inet filtr input f1", "set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24"}},
 	}
