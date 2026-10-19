@@ -54,6 +54,14 @@ func vrrpGroupVIPSetLines(n int, isIPv6 bool) []string {
 	}
 	lines := make([]string, 0, n)
 	for _, vip := range vips {
+		// #15050: author the VIPs as CIDRs (the enclosing prefix) — a bare
+		// literal is now hard-rejected at strict commit for the unrelated
+		// missing-prefix reason, which would mask the count gate here.
+		if isIPv6 {
+			vip += "/64"
+		} else {
+			vip += "/16"
+		}
 		lines = append(lines, base+"vrrp-group 1 virtual-address "+vip)
 	}
 	return lines

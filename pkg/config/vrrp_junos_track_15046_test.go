@@ -31,7 +31,7 @@ const junosTrackHier15046 = `interfaces {
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address 10.0.61.3;
+                        virtual-address 10.0.61.3/24;
                         priority 200;
                         track {
                             interface ge-0/0/1 {
@@ -52,7 +52,7 @@ func vrrpGroupText15046(body string) string {
             family inet {
                 address 10.0.61.1/24 {
                     vrrp-group 1 {
-                        virtual-address 10.0.61.3;
+                        virtual-address 10.0.61.3/24;
                         priority 200;
 ` + body + `
                     }
@@ -76,7 +76,7 @@ func TestVRRPJunosTrackHier15046(t *testing.T) {
 
 func TestVRRPJunosTrackFlatSet15046(t *testing.T) {
 	tree := replaySetLines(t, []string{
-		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 virtual-address 10.0.61.3",
+		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 virtual-address 10.0.61.3/24",
 		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 priority 200",
 		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 track interface reth1 priority-cost 150",
 	})
@@ -151,7 +151,7 @@ func TestVRRPNoPreempt15046(t *testing.T) {
 	})
 	t.Run("flat-set", func(t *testing.T) {
 		tree := replaySetLines(t, []string{
-			"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 virtual-address 10.0.61.3",
+			"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 virtual-address 10.0.61.3/24",
 			"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 no-preempt",
 		})
 		cfg, err := CompileConfig(tree)
@@ -202,7 +202,7 @@ func TestVRRPUnknownChild15046(t *testing.T) {
 	cells := map[string]string{
 		"braced":      vrrpGroupText15046(`                        zzbogus 1;`),
 		"track-inner": vrrpGroupText15046("                        track {\n                            zzbogus ge-0/0/1;\n                        }"),
-		"keys-packed": `interfaces { reth1 { unit 0 { family inet { address 10.0.61.1/24 { vrrp-group 1 virtual-address 10.0.61.3 zzbogus 1; } } } } }`,
+		"keys-packed": `interfaces { reth1 { unit 0 { family inet { address 10.0.61.1/24 { vrrp-group 1 virtual-address 10.0.61.3/24 zzbogus 1; } } } } }`,
 	}
 	for name, text := range cells {
 		t.Run(name, func(t *testing.T) {
@@ -224,7 +224,7 @@ func TestVRRPUnknownChild15046(t *testing.T) {
 	}
 	t.Run("flat-set", func(t *testing.T) {
 		tree := replaySetLines(t, []string{
-			"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 virtual-address 10.0.61.3",
+			"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 virtual-address 10.0.61.3/24",
 			"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 zzbogus 1",
 		})
 		if _, err := CompileConfig(tree); err == nil {
@@ -314,11 +314,11 @@ func TestVRRPKnownChildrenControl15046(t *testing.T) {
 // SchemaValidate (the configstore strict commit gate's first half)
 // must accept the new declared spellings.
 func TestVRRPJunosSpellingsSchemaValidate15046(t *testing.T) {
-	// Use CIDR VIPs here: SchemaValidate enforces the xpf CIDR
-	// contract on virtual-address (the compile-only cells above use
-	// the bare form the compiler tolerates).
-	junosCIDR := strings.Replace(junosTrackHier15046, "virtual-address 10.0.61.3;", "virtual-address 10.0.61.3/24;", 1)
-	noPreemptCIDR := strings.Replace(vrrpGroupText15046(`                        no-preempt;`), "virtual-address 10.0.61.3;", "virtual-address 10.0.61.3/24;", 1)
+	// VIPs are authored as CIDRs: SchemaValidate enforces the xpf CIDR
+	// contract on virtual-address, and #15050 hard-rejects the bare form
+	// at strict compile.
+	junosCIDR := junosTrackHier15046
+	noPreemptCIDR := vrrpGroupText15046(`                        no-preempt;`)
 	for name, text := range map[string]string{
 		"junos-track": junosCIDR,
 		"no-preempt":  noPreemptCIDR,

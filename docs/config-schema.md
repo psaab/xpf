@@ -10442,7 +10442,7 @@ reserved for whole-dataplane selection where a rewrite shim
 
   | leaf | schema bound | packed spelling bypasses `SchemaValidate` | compiled-`*Config` backstop before #8483 |
   |---|---|---|---|
-  | `virtual-address` | `ValueCIDR` | yes | yes — the VIP is separately re-parsed at compile |
+  | `virtual-address` | `ValueCIDR` | yes | yes — re-parsed at compile; since #15050 the compiled gate also rejects a prefix-less literal (below) |
   | `priority` | 1..255 | yes | yes — `validateVRRPGroupPriorityStrict` (#5184) |
   | `advertise-interval` | 1..40 | yes | **no** |
   | `preempt hold-time` | 1..3600 | yes | **no** |
@@ -10489,6 +10489,21 @@ reserved for whole-dataplane selection where a rewrite shim
   hierarchical for that reason and whose accept-side controls (in-range
   packed, the inclusive 40 boundary, and a group with NO timers set) are
   what distinguish a working gate from one that rejects everything.
+  **#15050 — the same bypass on the `virtual-address` VALUE.** The census
+  row above recorded a compiled backstop for `virtual-address` because the
+  VIP is re-parsed at compile, but that re-parse tolerated a bare literal:
+  a packed `vrrp-group 1 virtual-address 10.0.1.100;` passed
+  `SchemaValidate` and strict compile, then `netlink.ParseAddr` rejected
+  it at runtime and the #5082 fail-closed promotion path reverted every
+  promotion to BACKUP — the gateway had no owner on every node carrying
+  the config. `validateVRRPVIPPrefixStrict`
+  (`compiler_validate_strict_vrrp_vipprefix.go`), wired beside the #8483
+  timers gate, hard-rejects a prefix-less VIP at commit / commit-check.
+  The tolerant load / peer-sync path warns and normalizes the bare VIP to
+  its enclosing unit prefix (or `/32`/`/128`) so the config boots AND
+  actuates. Pinned by
+  `compiler_validate_strict_vrrp_vipprefix_15050_test.go` (hierarchical
+  fixture, CIDR controls unchanged).
   **#4826 — reth-derived VRID range gate:** #4573 only bounded the
   *explicit* `vrrp-group <id>` slot; a RETH interface's VRRP GroupID is
   separately synthesized as `100 + redundancy-group-id`

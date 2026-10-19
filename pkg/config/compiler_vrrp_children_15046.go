@@ -145,6 +145,16 @@ func checkVRRPGroupChildren15046(vg *Node, idPath string, permitted map[string]b
 		// Skip this property's value span.
 		if child := vrrpGroupSchemaNode(false).children[tok]; child != nil {
 			i += child.args
+			// A multi-value leaf (`virtual-address`, args=1, multi)
+			// packs a whole bracketed list into the run: skip every
+			// bracketed value token so the second address is not
+			// misread as a group-level property (#15050). Mirror
+			// parseVRRPGroups, which consumes the same run.
+			if child.multi {
+				for i+1 < len(keys) && vg.KeyBracketed(i+1) {
+					i++
+				}
+			}
 			// Container properties pack a nested keyword run
 			// (e.g. `preempt hold-time 30`, `track interface
 			// ge-0/0/1 priority-cost 150`): consume declared

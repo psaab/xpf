@@ -21,7 +21,7 @@ import (
 func trackRefCfg15048(t *testing.T, track string) *ConfigTree {
 	t.Helper()
 	return buildTree(t, []string{
-		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24 vrrp-group 1 virtual-address 10.0.0.3",
+		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24 vrrp-group 1 virtual-address 10.0.0.3/24",
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24 vrrp-group 1 priority 200",
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24 vrrp-group 1 track-interface " + track + " priority-cost 20",
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",

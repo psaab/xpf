@@ -164,7 +164,7 @@ func TestEmptyVRRPVirtualAddressFailsCommitButNotLenientLoad7577(t *testing.T) {
 func TestVRRPGroupWithVirtualAddressCommitsCleanly7577(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.9.0.1/16 vrrp-group 1 priority 150",
-		"set interfaces ge-0/0/0 unit 0 family inet address 10.9.0.1/16 vrrp-group 1 virtual-address 10.9.0.100",
+		"set interfaces ge-0/0/0 unit 0 family inet address 10.9.0.1/16 vrrp-group 1 virtual-address 10.9.0.100/16",
 	})
 	cfg, err := CompileConfig(tree)
 	if err != nil {

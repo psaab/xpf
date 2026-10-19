@@ -3054,6 +3054,23 @@ type compileOpts struct {
 	// peer-synced config still boots (#1960 no-brick).
 	lenientVRRPTrackRef bool
 
+	// lenientVRRPVIPPrefix (#15050) downgrades the VRRP bare-virtual-address
+	// gate (validateVRRPVIPPrefixStrict) from a hard compile error to a
+	// cfg.Warnings entry AND normalizes the bare VIP in the tail gates
+	// (normalizeBareVRRPVIPs). A prefix-less `virtual-address 10.0.1.100`
+	// carried by the packed hierarchical one-liner passes SchemaValidate
+	// (the value rides the instance node's Keys as an unvalidated identity
+	// token) and strict compile, then netlink.ParseAddr rejects it at
+	// runtime so #5082 fail-closed reverts every promotion — the gateway
+	// has no owner on every node carrying the config. The strict commit /
+	// commit-check path hard-rejects naming the VIP; the tolerant load /
+	// peer-sync paths warn and rewrite the bare VIP with its enclosing
+	// unit prefix (or /32//128) so an already-persisted or peer-synced
+	// config still boots AND actuates (#1960 no-brick). Same doctrine as
+	// lenientVRRPVIPEmpty, plus normalization: merely warning would boot a
+	// group that reverts every promotion forever.
+	lenientVRRPVIPPrefix bool
+
 	// lenientDNATToScope (#3444) downgrades the destination-NAT rule-set
 	// `to` scope reject (validateDNATRuleSetToScopeAST) from a hard compile
 	// error to a cfg.Warnings entry. Junos destination NAT rule-sets have
@@ -3722,6 +3739,7 @@ func lenientCompileOpts() compileOpts {
 		lenientVRRPVIPEmpty:                    true,
 		lenientVRRPVIPCrossGroup:               true,
 		lenientVRRPTrackRef:                    true,
+		lenientVRRPVIPPrefix:                   true,
 		lenientDNATToScope:                     true,
 		lenientNATMixedScope:                   true,
 		lenientNATEmptyScope:                   true,
