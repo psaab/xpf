@@ -283,6 +283,13 @@ type Daemon struct {
 	// cold-start bulk is an authoritative, broader recovery window that also
 	// reconciles stale receiver entries, rather than the same paced export.
 	userspaceFullResyncOwedWhileDown atomic.Bool
+	// #15217: fallback drains whose helper response carried deltas together
+	// with a status-apply error. The deltas are consumed by the helper and
+	// queued before the error propagates, so the count is an observability
+	// signal for the status divergence, not a loss count. Surfaced via
+	// UserspaceDeltaDrainStatusErrorCount.
+	userspaceDeltaDrainStatusErrors atomic.Uint64
+	userspaceDeltaDrainStatusWarn   userspaceWarnThrottle
 
 	networkd *networkd.Manager
 	routing  *routing.Manager

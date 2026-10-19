@@ -396,6 +396,21 @@ func userspaceSessionEventName(eventType uint8) string {
 // userspaceDeltaPeerDownDropped counter keeps advancing at delta rate.
 const userspaceDeltaPeerDownWarnInterval = time.Minute
 
+// userspaceDeltaDrainStatusWarnInterval bounds the #15217 status-apply
+// drain warning: the fallback loop drains at 100ms while the stream is
+// down, so an undampened warning would flood the log while the counter
+// keeps advancing.
+const userspaceDeltaDrainStatusWarnInterval = time.Minute
+
+// UserspaceDeltaDrainStatusErrorCount is the #15217 observable: how many
+// fallback drain responses carried deltas together with a helper
+// status-apply error. The deltas were queued before the error propagated,
+// so a non-zero count signals status divergence to investigate, not lost
+// session deltas.
+func (d *Daemon) UserspaceDeltaDrainStatusErrorCount() uint64 {
+	return d.userspaceDeltaDrainStatusErrors.Load()
+}
+
 // UserspaceDeltaPeerDownDroppedCount is the #9631 observable: how many
 // session-delta opens/updates were dropped while the HA sync peer was down.
 // Non-zero means outage opens were shed instead of being ACK-withheld and
@@ -1086,6 +1101,25 @@ func (d *Daemon) drainUserspaceSessionDeltasWithConfigLocked(
 	for batch := 0; batch < maxBatches; batch++ {
 		deltas, status, err := drainer.DrainSessionDeltas(256)
 		if err != nil {
+			// #15217: a drain response can carry deltas together with an error:
+			// Manager.DrainSessionDeltas already popped the batch from the helper
+			// when applyHelperStatusLocked fails after the response arrived
+			// (manager_status.go). Returning before queueing discards a batch that
+			// will never be replayed incrementally — opens are recoverable via
+			// LossResync, closes stay stale until peer GC. Record the status
+			// fingerprint, queue what arrived, count/log the status error, and
+			// only then propagate it. An empty batch keeps the bare error return.
+			if len(deltas) == 0 {
+				return total, err
+			}
+			d.recordUserspaceDeltaSchema(status.SessionDeltaSchemaFingerprint)
+			total += d.queueUserspaceSessionDeltasLocked(zoneIDs, deltas)
+			errTotal := d.userspaceDeltaDrainStatusErrors.Add(1)
+			if emit, suppressed := d.userspaceDeltaDrainStatusWarn.shouldLog(time.Now(), userspaceDeltaDrainStatusWarnInterval); emit {
+				slog.Warn("userspace: session-delta drain queued deltas despite helper status-apply error",
+					"err", err, "deltas_in_batch", len(deltas), "queued_total", total,
+					"error_total", errTotal, "suppressed_since_last", suppressed)
+			}
 			return total, err
 		}
 		// #7194: the drain already carries the helper's ProcessStatus; record
