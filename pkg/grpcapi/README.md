@@ -978,6 +978,14 @@ contract.
   `DeadlineExceeded` and the slot transfers to the Send worker, which
   releases it when `Send` unblocks on the handler-return stream cancel —
   the same transfer discipline as `sendMonitorInterfaceFrame` (#9891).
+  `streamDiagCmd`'s own wait is likewise bounded (#15080): `c.Wait()`
+  runs in a worker selected against `waitDone`/`scanDone`/`ctx.Done()`,
+  because Wait joins the exec copy goroutine that stays blocked in
+  `pw.Write` while the scanner is parked in `sendFn`. On cancellation
+  it closes both pipe ends, joins only Wait under
+  `requestExecWaitDelay`, and abandons a ctx-parked scanner to the
+  caller's Send bound before returning the ctx error, so the wait
+  cannot re-wedge the handler (and its slot) behind a parked scanner.
 
   **That aggregate cap now covers the READ-ONLY diagnostic forks too
   (#6552), and the default is bounded.** Ping/Traceroute were the only
