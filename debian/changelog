@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Stream `show security flow session brief` rows as they are walked
+    instead of buffering the whole table in a tabwriter until flush, so
+    a full session table no longer heap-buffers every row before the
+    first byte reaches the terminal (#14989).
   * Refuse a loopback management server that merely shares the
     caller's own non-root uid in the CLI/upgrade dial verification:
     only uid 0 (what xpfd runs as) is trusted on loopback, so a

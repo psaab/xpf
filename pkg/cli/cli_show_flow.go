@@ -7,7 +7,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/psaab/xpf/pkg/appid"
 	"github.com/psaab/xpf/pkg/config"
@@ -51,22 +50,36 @@ func newSessionBriefRow(id uint64, srcAddr string, srcPort uint16, dstAddr strin
 	}
 }
 
-func newSessionBriefWriter(w io.Writer) *tabwriter.Writer {
-	return tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+// sessionBriefWriter streams fixed-width brief rows straight to the
+// underlying writer. #14989 (D37-04): the previous text/tabwriter buffered
+// the ENTIRE table until Flush, so `show security flow session brief` over
+// a full session table heap-buffered every row before any byte reached the
+// terminal/pager. A fixed layout (mirroring cmd/cli and showTopTalkers)
+// needs no whole-table pass: header and each row are emitted as printed.
+// Column widths match cmd/cli printSessionEntries; longer values overflow
+// their field without truncation (Go %-Ns semantics), preserving the
+// long-value guarantee TestSessionBriefWriterPreservesLongValues pins.
+type sessionBriefWriter struct{ w io.Writer }
+
+func newSessionBriefWriter(w io.Writer) *sessionBriefWriter {
+	return &sessionBriefWriter{w: w}
 }
 
-func flushSessionBriefWriter(w *tabwriter.Writer) {
-	if w != nil {
-		_ = w.Flush()
-	}
+func (s *sessionBriefWriter) Write(p []byte) (int, error) { return s.w.Write(p) }
+
+// flushSessionBriefWriter is a no-op for the streaming writer (kept so call
+// sites retain an explicit end-of-table point); rows are already emitted.
+func flushSessionBriefWriter(w *sessionBriefWriter) {
+	_ = w
 }
 
 func printSessionBriefHeader(w io.Writer) {
-	fmt.Fprintln(w, "ID\tSource\tDestination\tProto\tZone\tNAT\tState\tAge\tPkts(f/r)")
+	fmt.Fprintf(w, "%-5s %-22s %-22s %-5s %-20s %-3s %-5s %5s %s\n",
+		"ID", "Source", "Destination", "Proto", "Zone", "NAT", "State", "Age", "Pkts(f/r)")
 }
 
 func printSessionBriefRow(w io.Writer, row sessionBriefRow) {
-	fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d/%d\n",
+	fmt.Fprintf(w, "%-5d %-22s %-22s %-5s %-20s %-3s %-5s %5d %d/%d\n",
 		row.ID,
 		row.Source,
 		row.Destination,
@@ -254,7 +267,7 @@ func (c *CLI) showFlowSession(args []string) error {
 		byZonePair = make(map[string]int)
 	}
 
-	var briefWriter *tabwriter.Writer
+	var briefWriter *sessionBriefWriter
 	if f.brief {
 		briefWriter = newSessionBriefWriter(os.Stdout)
 		printSessionBriefHeader(briefWriter)
