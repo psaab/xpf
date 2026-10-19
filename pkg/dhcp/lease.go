@@ -48,6 +48,43 @@ type Lease struct {
 	v6ServerDUID dhcpv6.DUID
 }
 
+// RemainingLifetimes returns the lease's remaining preferred/valid
+// lifetimes at now, decayed at whole-second granularity like
+// DelegatedPrefix.RemainingLifetimes. LeaseTime is the IA_NA/ACK valid
+// lifetime; the preferred lifetime is not carried separately, so both
+// report the same remaining valid lifetime (#15071). Infinite leases
+// report infiniteLifetime; expired leases report 0.
+func (l *Lease) RemainingLifetimes(now time.Time) (pref, valid time.Duration) {
+	if l == nil || l.LeaseTime <= 0 {
+		return 0, 0
+	}
+	valid = l.LeaseTime
+	if valid >= infiniteLifetime {
+		return infiniteLifetime, infiniteLifetime
+	}
+	if l.Obtained.IsZero() {
+		return valid, valid
+	}
+	elapsed := now.Sub(l.Obtained)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	elapsed = elapsed / time.Second * time.Second
+	valid -= elapsed
+	if valid < 0 {
+		valid = 0
+	}
+	return valid, valid
+}
+
+// ExpiresAt returns Obtained+LeaseTime, or zero if infinite/unknown.
+func (l *Lease) ExpiresAt() time.Time {
+	if l == nil || l.Obtained.IsZero() || l.LeaseTime <= 0 || l.LeaseTime >= infiniteLifetime {
+		return time.Time{}
+	}
+	return l.Obtained.Add(l.LeaseTime)
+}
+
 // sameDUID compares DHCPv6 DUID values without relying on interface
 // comparability: DUID implementations contain byte slices.
 func sameDUID(a, b dhcpv6.DUID) bool {

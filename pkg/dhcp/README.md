@@ -155,6 +155,19 @@ the debounced `onAddressChange` callback when content changed.
   prefix expiry that interrupts the T1 or T2 wait resumes with the
   remaining time (`remainingTimer`) instead of restarting the full tier
   wait; past-expiry safety remains bounded by the lease deadline.
+- **Address-less Renew/Rebind with live PD (#15071)**: when a Renew/Rebind
+  Reply carries a live IA_PD but no usable IA_NA (IA_NA absent, or only
+  refused IAADDRs), `parseV6ReplyChecked` carries the held IA_NA forward
+  (`carryForwardV6IANA`: Address/LeaseTime/Obtained preserved) instead of
+  committing an address-less lease that would stop echoing the binding,
+  hide the address from `show dhcp`, and orphan it on stop. An IA_NA
+  Status **NoBinding** instead returns `errV6NoBinding` (RFC 8415
+  §18.2.4: send Request) and the run loop re-acquires without waiting
+  for T2. Explicit valid-lifetime-0 still fires `errV6AddrInvalidated`.
+  `applyAddress` installs the lease's remaining kernel lifetimes
+  (`kernelAddrLifetimes` → `ValidLft`/`PreferedLft`, infinite →
+  `0xffffffff`) so the kernel expires the address even if userspace
+  removal is missed.
 - **DHCPv6 default-router discovery (#10763, #11425)**: because DHCPv6
   carries no default-router option and managed interfaces disable kernel RA
   acceptance, the client sends Router Solicitations and reads answering RAs
