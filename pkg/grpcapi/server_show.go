@@ -473,8 +473,10 @@ func (s *Server) showText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 		s.showChassisClusterIPMonitoringStatus(&buf)
 
 	case "chassis-cluster-fabric-statistics":
-		// #1043 Phase 11: case body extracted to server_show_cluster_text.go
 		s.showChassisClusterFabricStatistics(&buf)
+
+	case "chassis-cluster-fence-status":
+		s.showChassisClusterFenceStatus(&buf)
 
 	case "chassis-environment":
 		// #1043 Phase 7: case body extracted to server_show_system.go

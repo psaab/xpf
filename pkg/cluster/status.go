@@ -581,43 +581,7 @@ func (m *Manager) FormatInformation() string {
 	// conditional style of the sections around it.
 	b.WriteString(m.formatStartupSyncHold())
 
-	fenceAction, fenceEvents := m.FenceStatus()
-	if fenceAction != "" || len(fenceEvents) > 0 {
-		fmt.Fprintln(&b, "Peer fencing:")
-		action := fenceAction
-		if action == "" {
-			// History outlives the config: a fence fired, then the operator
-			// removed `peer-fencing`. Report the CURRENT action, not the one
-			// the events were recorded under.
-			action = "disabled"
-		}
-		fmt.Fprintf(&b, "  Action: %s\n", action)
-		// #7147: under the acknowledged policy the counters are the only place
-		// the guarantee's actual delivery rate is visible. An operator who
-		// selected `disable-rg-confirmed` gets a fail-open takeover whenever
-		// the ack does not arrive, and without this line a cluster that failed
-		// open on EVERY takeover renders identically to one that was confirmed
-		// every time — the "Attempts:" history would have to be read line by
-		// line to tell them apart. Shown whenever the policy is armed or any
-		// ack traffic has ever happened, so a disarmed-but-used history keeps
-		// its numbers.
-		if syncStats != nil && (fenceAction == PeerFencingDisableRGConfirmed ||
-			syncStats.FenceAcksSent > 0 || syncStats.FenceAcksReceived > 0 ||
-			syncStats.FenceAcksTimedOut > 0) {
-			fmt.Fprintf(&b, "  Confirmations: received %d, timed out %d, sent to peer %d\n",
-				syncStats.FenceAcksReceived, syncStats.FenceAcksTimedOut, syncStats.FenceAcksSent)
-		}
-		if len(fenceEvents) == 0 {
-			fmt.Fprintln(&b, "  Attempts: none")
-		} else {
-			fmt.Fprintln(&b, "  Attempts:")
-			for _, ev := range fenceEvents {
-				fmt.Fprintf(&b, "    %s  %s\n",
-					ev.Time.Format("Jan 02 15:04:05"), ev.Message)
-			}
-		}
-		fmt.Fprintln(&b)
-	}
+	b.WriteString(formatPeerFencing(m, syncStats, false))
 
 	// Interface monitoring events.
 	monEvents := m.history.Events(EventMonitor)
@@ -786,6 +750,51 @@ func (m *Manager) FormatInformation() string {
 	}
 
 	return b.String()
+}
+
+// formatPeerFencing renders the peer-fencing block. When always is false
+// (the FormatInformation path) it stays silent when fencing was never
+// configured and never fired; FormatFenceStatus sets always so the
+// dedicated `show chassis cluster fence-status` view always renders
+// (action `disabled`, `Attempts: none` when unconfigured) (#15775).
+func formatPeerFencing(m *Manager, syncStats *SyncStatsSnapshot, always bool) string {
+	var b strings.Builder
+	fenceAction, fenceEvents := m.FenceStatus()
+	if !always && fenceAction == "" && len(fenceEvents) == 0 {
+		return ""
+	}
+	fmt.Fprintln(&b, "Peer fencing:")
+	action := fenceAction
+	if action == "" {
+		action = "disabled"
+	}
+	fmt.Fprintf(&b, "  Action: %s\n", action)
+	if syncStats != nil && (fenceAction == PeerFencingDisableRGConfirmed ||
+		syncStats.FenceAcksSent > 0 || syncStats.FenceAcksReceived > 0 ||
+		syncStats.FenceAcksTimedOut > 0) {
+		fmt.Fprintf(&b, "  Confirmations: received %d, timed out %d, sent to peer %d\n",
+			syncStats.FenceAcksReceived, syncStats.FenceAcksTimedOut, syncStats.FenceAcksSent)
+	}
+	if len(fenceEvents) == 0 {
+		fmt.Fprintln(&b, "  Attempts: none")
+	} else {
+		fmt.Fprintln(&b, "  Attempts:")
+		for _, ev := range fenceEvents {
+			fmt.Fprintf(&b, "    %s  %s\n",
+				ev.Time.Format("Jan 02 15:04:05"), ev.Message)
+		}
+	}
+	fmt.Fprintln(&b)
+	return b.String()
+}
+
+// FormatFenceStatus renders the dedicated peer-fencing view for
+// `show chassis cluster fence-status` (#15775): configured action
+// (`disabled` when the `peer-fencing` leaf is absent) plus every
+// EventFence attempt and its result. Distinct from FormatInformation,
+// it always renders so the advertised command has a real handler.
+func (m *Manager) FormatFenceStatus() string {
+	return formatPeerFencing(m, m.GetSyncStats(), true)
 }
 
 // FormatStatistics returns cluster statistics matching vSRX output.

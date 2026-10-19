@@ -138,7 +138,7 @@ var showTextAuditTopics = []string{
 	"chassis", "chassis-cluster", "chassis-cluster-control-plane-statistics",
 	"chassis-cluster-data-plane-fairness", "chassis-cluster-data-plane-flows",
 	"chassis-cluster-data-plane-interfaces", "chassis-cluster-data-plane-statistics",
-	"chassis-cluster-fabric-statistics", "chassis-cluster-information",
+	"chassis-cluster-fabric-statistics", "chassis-cluster-fence-status", "chassis-cluster-information",
 	"chassis-cluster-interfaces", "chassis-cluster-ip-monitoring-status",
 	"chassis-cluster-statistics", "chassis-cluster-status", "chassis-device-map",
 	"chassis-device-map-candidates", "chassis-environment", "chassis-forwarding",
