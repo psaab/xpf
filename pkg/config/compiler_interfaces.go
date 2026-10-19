@@ -1502,6 +1502,15 @@ func parseMSSValue(node *Node) int {
 	return 0
 }
 
+// isVRRPGroupNodeName reports whether name is a VRRP group node: the
+// xpf spelling `vrrp-group` or the Junos IPv6 alias `vrrp-inet6-group`
+// (#15199). Every AST gate that walks group nodes must use this — keying
+// on `vrrp-group` alone lets the inet6 spelling bypass the gate while
+// parseVRRPGroups still compiles the group (#15762).
+func isVRRPGroupNodeName(name string) bool {
+	return name == "vrrp-group" || name == "vrrp-inet6-group"
+}
+
 // parseVRRPGroups parses every `vrrp-group <id> { ... }` block under a
 // family inet/inet6 address into unit.VRRPGroups. Shared by both family
 // arms (#2384): the inet6 path carries IPv6 VIPs, and the native VRRP
@@ -1822,7 +1831,7 @@ func validateVRRPTrackInterfaceAST(nodes []*Node, prefix string, lenient bool) (
 	var warnings []string
 	for _, n := range nodes {
 		nodePath := joinNodePath(prefix, n.Keys)
-		if n.Name() == "vrrp-group" {
+		if isVRRPGroupNodeName(n.Name()) {
 			// SECURITY (#5195, codex-177 A3-b2-F10): build the diagnostic path
 			// from the group IDENTITY ONLY (`vrrp-group <id>`), never n.Keys — in
 			// the Keys-packed spelling (`vrrp-group 1 authentication-key <secret>
@@ -1902,7 +1911,7 @@ func validateVRRPAuthenticationAST(nodes []*Node, prefix string, lenient bool) (
 		pruned := false
 		kept := make([]*Node, 0, len(n.Children))
 		for _, c := range n.Children {
-			if c.Name() == "vrrp-group" {
+			if isVRRPGroupNodeName(c.Name()) {
 				if leaf := vrrpAuthLeafRecursive(c); leaf != "" {
 					// SECURITY: build the message path from the group IDENTITY
 					// ONLY (`vrrp-group <id>`), never c.Keys — in the Keys-packed
@@ -2069,7 +2078,7 @@ func vrrpDirectAuthLeaf(n *Node) string {
 // collectVRRPGroups returns every vrrp-group node in n's subtree.
 func collectVRRPGroups(n *Node) []*Node {
 	var out []*Node
-	if n.Name() == "vrrp-group" {
+	if isVRRPGroupNodeName(n.Name()) {
 		out = append(out, n)
 	}
 	for _, c := range n.Children {
@@ -2083,7 +2092,7 @@ func collectVRRPGroups(n *Node) []*Node {
 // least one vrrp-group (#14403 cells H1-a..H1-d: address / family / unit /
 // interface ancestors). Returns ("", nil) otherwise.
 func vrrpMisplacedAuth(n *Node) (string, []*Node) {
-	if n.Name() == "vrrp-group" {
+	if isVRRPGroupNodeName(n.Name()) {
 		return "", nil
 	}
 	leaf := vrrpDirectAuthLeaf(n)
