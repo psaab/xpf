@@ -578,6 +578,14 @@ func (c *CLI) showVRRP() error {
 	}
 
 	instances := vrrp.CollectInstances(cfg)
+	// #15690: on a chassis cluster the VIPs live on RETH instances; the gRPC
+	// GetVRRPStatus and REST /vrrp handlers append them, so the local CLI
+	// must too or it prints "No VRRP groups configured" on exactly the
+	// deployments that have VRRP. CollectRethInstances returns nil for a
+	// non-clustered config and for no-reth-vrrp / private-RG election.
+	if c.cluster != nil {
+		instances = append(instances, vrrp.CollectRethInstances(cfg, c.cluster.LocalPriorities())...)
+	}
 	if len(instances) == 0 {
 		fmt.Println("No VRRP groups configured")
 		return nil

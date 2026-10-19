@@ -262,6 +262,9 @@ func (c *CLI) handleShow(args []string) error {
 	case "security":
 		return c.handleShowSecurity(args[1:])
 
+	case "vrrp":
+		return c.showVRRP()
+
 	case "services":
 		return c.handleShowServices(args[1:])
 

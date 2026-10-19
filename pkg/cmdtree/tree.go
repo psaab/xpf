@@ -323,6 +323,7 @@ var OperationalTree = map[string]*Node{
 		"exclusive": {Desc: "Enter exclusive configuration mode"},
 	}},
 	"show": {Desc: "Show system information", Children: map[string]*Node{
+		"vrrp": {Desc: "Show VRRP high availability status"},
 		"chassis": {Desc: "Show chassis information", Children: map[string]*Node{
 			"cluster": {Desc: "Show cluster/HA status", Children: map[string]*Node{
 				"status":      {Desc: "Show cluster node status"},

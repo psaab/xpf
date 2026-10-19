@@ -184,6 +184,9 @@ func (c *ctl) handleShow(args []string) error {
 		}
 		return c.showRoutes()
 
+	case "vrrp":
+		return c.showVRRP()
+
 	case "security":
 		return c.handleShowSecurity(args[1:])
 
