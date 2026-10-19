@@ -66,7 +66,8 @@ func TestGenerateProtocols_BGPNeighborAttributesAreAddressFamilyScoped11460(t *t
 			afBlock := got[familyStart : familyStart+familyEnd]
 			want := []string{
 				"  neighbor " + tc.neighbor.Address + " route-reflector-client\n",
-				"  neighbor " + tc.neighbor.Address + " allowas-in 2\n",
+				// #15009: loops 2 -> allowas-in 1 (Junos allows N-1 occurrences).
+				"  neighbor " + tc.neighbor.Address + " allowas-in 1\n",
 			}
 			for _, line := range want {
 				if !strings.Contains(afBlock, line) {
