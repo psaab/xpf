@@ -876,21 +876,30 @@ type SAStatus struct {
 	Rekey string
 }
 
-// TerminateAllSAs terminates all active IKE SAs via swanctl.
+// TerminateAllSAs terminates all active IKE SAs via swanctl. It attempts
+// every live IKE SA and returns how many terminates succeeded. A failed
+// terminate is not swallowed (#15279, D04-03): the returned error is a
+// joined error naming each connection whose terminate failed (with its
+// sanitized swanctl output), so the CLI and the gRPC ipsec-sa-clear
+// action report a partial failure instead of success while an SA the
+// operator meant to kill keeps forwarding. A failed --list-sas is
+// returned as (0, err) before anything is attempted.
 func (m *Manager) TerminateAllSAs() (int, error) {
-	sas, err := m.GetSAStatus()
+	sas, err := m.listSAsForTerminate()
 	if err != nil {
 		return 0, err
 	}
 	count := 0
+	var errs []error
 	for _, ikeName := range terminateIKENames(sas) {
-		if out, err := runSwanctl("--terminate", "--ike", ikeName); err != nil {
+		if out, err := m.sc("--terminate", "--ike", ikeName); err != nil {
 			slog.Warn("swanctl terminate failed", "ike", ikeName, "err", err, "output", string(out))
+			errs = append(errs, fmt.Errorf("swanctl --terminate --ike %s: %w: %s", ikeName, err, termsafe.SanitizeForDisplay(string(out))))
 		} else {
 			count++
 		}
 	}
-	return count, nil
+	return count, errors.Join(errs...)
 }
 
 // terminateIKENames is TerminateAllSAs' selection, split from the swanctl exec so the names it
