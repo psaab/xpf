@@ -425,6 +425,7 @@ pub(super) fn build_local_time_exceeded_request(
             neighbor_mac: None,
             src_mac: Some(egress.src_mac),
             tx_vlan_id: forwarding.egress_tx_vlan_id(logical_ingress),
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 },

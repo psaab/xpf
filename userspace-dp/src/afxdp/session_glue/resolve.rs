@@ -763,7 +763,10 @@ pub(in crate::afxdp) fn redirect_session_via_fabric_if_needed(forwarding: &Forwa
 resolution: ForwardingResolution,
 fabric_ingress: bool,
 ingress_zone: u16,) -> ForwardingResolution {
-    if resolution.disposition != ForwardingDisposition::HAInactive {
+    if !matches!(
+        resolution.disposition,
+        ForwardingDisposition::HAInactive | ForwardingDisposition::ClusterTerminalHAInactive
+    ) {
         return resolution;
     }
     if fabric_ingress {

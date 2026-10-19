@@ -89,6 +89,15 @@ const LearnedRouteImportPreference = 200
 // remain owned by the helper's HA disposition, not be imported a second time.
 const haInactiveBlackholePriority = 4242
 
+// clusterNull0KernelPriority is the kernel RTA_PRIORITY of the
+// cluster-mode Null0 defaults (#15742). renderClusterModeDefaults
+// renders them at FRR admin distance 250 with tag 2500; FRR installs
+// them proto static at kernel metric 20. The tag does not survive
+// into the kernel route, so (default prefix, proto static, this
+// priority) is the import-time provenance discriminator for the
+// designed split-node terminal.
+const clusterNull0KernelPriority = 20
+
 // mgmtVRFTableID is the kernel routing table backing the management VRF
 // (config.ManagementVRFTableID, #9622), named here to hard-exclude the table
 // from the import.
@@ -157,6 +166,17 @@ type LearnedRoute struct {
 	// was HA-filtered away had NO default in the helper and resolved
 	// NoRoute instead of the intended terminal route.
 	Reject bool
+	// ClusterTerminal is true only for the cluster-mode Null0 defaults
+	// (#15742 round-4): a negative learned row whose (destination,
+	// protocol, kernel metric) exactly matches the shape
+	// renderClusterModeDefaults installs -- a default prefix, proto
+	// static, kernel priority 20 (FRR AD 250). The kernel route no
+	// longer carries the FRR tag 2500, so this triple is the only
+	// provenance discriminator available at import. It marks the row
+	// as the designed split-node terminal (fabric-redirect when the
+	// would-be egress RG is peer-owned) rather than an operator
+	// discard/reject, whose semantics must stay a local drop.
+	ClusterTerminal bool
 	// NextHops holds every gateway leg of a unicast route, in kernel order.
 	// A discard route has no next-hops.
 	NextHops []string
@@ -321,8 +341,11 @@ func importableRouteScoped(r netlink.Route, family, tableID int, linkName func(i
 			Destination: dst,
 			Discard:     blackhole,
 			Reject:      reject,
-			Protocol:    rtProtoName(r.Protocol),
-			MTU:         mtu,
+			ClusterTerminal: (dst == "0.0.0.0/0" || dst == "::/0") &&
+				r.Protocol == netlink.RouteProtocol(unix.RTPROT_STATIC) &&
+				r.Priority == clusterNull0KernelPriority,
+			Protocol: rtProtoName(r.Protocol),
+			MTU:      mtu,
 		}, true
 	}
 	nextHops, nextHopWeights, ok, unscoped := learnedRouteNextHops(r, linkName)

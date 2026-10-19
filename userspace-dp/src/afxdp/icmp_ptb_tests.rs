@@ -1154,6 +1154,7 @@ fn tunnel_resolution() -> ForwardingResolution {
         neighbor_mac: Some([0x02, 0x00, 0x00, 0x00, 0x00, 0x09]),
         src_mac: Some(EGRESS_SRC_MAC),
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }
@@ -1180,6 +1181,7 @@ fn nat64_decision(nat64: bool) -> SessionDecision {
             neighbor_mac: Some([0x02, 0x00, 0x00, 0x00, 0x00, 0x09]),
             src_mac: Some(EGRESS_SRC_MAC),
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -1639,6 +1641,7 @@ fn wg_logical_tunnel_decision(logical_ifindex: i32, tunnel_endpoint_id: u16) -> 
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -1741,6 +1744,7 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v6() {
         .push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:559:8585:80::8/64".to_string(), scope: 0, ..Default::default() });
     snap.routes = vec![crate::RouteSnapshot {
         reject: false,
+            cluster_terminal: false,
         table: "inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "2001:db8:c0::/64".to_string(),
@@ -1866,7 +1870,7 @@ fn wg_two_peer_asymmetric_snapshot() -> crate::ConfigSnapshot {
         ..Default::default()
     });
     // Route to peer B's endpoint egresses reth0.50.
-    snap.routes.push(crate::RouteSnapshot { reject: false, table: "inet.0".to_string(),
+    snap.routes.push(crate::RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
     family: "inet".to_string(),
     destination: "198.51.100.0/24".to_string(),
     next_hop_weights: vec![],
@@ -2019,6 +2023,7 @@ fn post_transform_wg_inner_mtu_charges_selected_peer_family_14118() {
     snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:559:8585:80::8/64".to_string(), scope: 0, ..Default::default() });
     snap.routes = vec![crate::RouteSnapshot {
         reject: false,
+            cluster_terminal: false,
         table: "inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "2001:db8:c0::/64".to_string(),

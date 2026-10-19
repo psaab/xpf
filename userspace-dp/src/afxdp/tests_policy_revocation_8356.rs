@@ -112,6 +112,7 @@ fn snapshot_with_lan_rule(lan_action: Option<&str>) -> crate::ConfigSnapshot {
     });
     snapshot.routes.push(RouteSnapshot {
         reject: false,
+            cluster_terminal: false,
         table: "inet.0".into(),
         family: "inet".into(),
         destination: "198.51.100.0/24".into(),
@@ -250,6 +251,7 @@ fn decision(egress_ifindex: i32) -> SessionDecision {
             neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
             tx_vlan_id: 80,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -2606,6 +2608,7 @@ fn descriptor_path_stale_dnat_hit_restamps_conntrack_app_id_12191() {
             neighbor_mac: Some([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01]),
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -6532,6 +6535,7 @@ fn forwarding_with_fabric_dmz_10507() -> ForwardingState {
     });
     snapshot.routes.push(RouteSnapshot {
         reject: false,
+            cluster_terminal: false,
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "203.0.113.0/24".to_string(),
@@ -6669,6 +6673,7 @@ fn syncimport_wan_decision_10507() -> SessionDecision {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
             tx_vlan_id: 80,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -6701,6 +6706,7 @@ fn live_dmz_decision_10507() -> SessionDecision {
             neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0x05]),
             src_mac: Some(REVOCATION_DMZ_MAC),
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -6984,6 +6990,7 @@ fn forwarding_with_fabric_dmz_armed_10507() -> ForwardingState {
     });
     snapshot.routes.push(RouteSnapshot {
         reject: false,
+            cluster_terminal: false,
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "203.0.113.0/24".to_string(),
@@ -7187,6 +7194,7 @@ fn reverse_first_resolves_forward_live_and_revokes_pair_10507() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -7323,6 +7331,7 @@ fn reverse_icmp_recorded_forward_pair_fails_closed_10507() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -7790,6 +7799,7 @@ fn reverse_unresolvable_forward_fails_closed_10507() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -8792,6 +8802,7 @@ fn reverse_syncimport_redirect_retained_without_stamp_10507() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -8913,6 +8924,7 @@ fn noegress_forward_decision_10507() -> SessionDecision {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -9976,6 +9988,7 @@ fn add_fib_move_route_12074(
 ) {
     snapshot.routes.push(RouteSnapshot {
         reject: false,
+            cluster_terminal: false,
         table: "inet.0".into(),
         family: "inet".into(),
         destination: format!("{destination}/32"),
@@ -10690,6 +10703,7 @@ fn fib_only_reply_nonforwarding_route_12074(
     if discard {
         moved.routes.push(RouteSnapshot {
             reject: false,
+            cluster_terminal: false,
             table: "inet.0".into(),
             family: "inet".into(),
             destination: format!("{FIB_MOVE_DST_12074}/32"),
@@ -11086,6 +11100,7 @@ fn no_local_entry_current_route_12074(
             });
             current.routes.push(RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet.0".into(),
                 family: "inet".into(),
                 destination: format!("{FIB_MOVE_DST_12074}/32"),

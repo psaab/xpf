@@ -254,6 +254,7 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
             neighbor_mac: outer.neighbor_mac,
             src_mac: outer.src_mac,
             tx_vlan_id: outer.tx_vlan_id,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -775,6 +776,7 @@ mod tests {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         };

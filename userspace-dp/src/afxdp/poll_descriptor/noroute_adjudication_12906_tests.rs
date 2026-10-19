@@ -94,6 +94,7 @@ fn no_route_retaining_wan_egress() -> ForwardingResolution {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }
@@ -779,7 +780,7 @@ fn noroute_descriptor_uses_effective_protocol_for_ah_deny_13769() {
     snapshot.policies = ah_deny_snapshot_13645().policies;
     snapshot.policies[0].from_zone = "any".to_string();
     snapshot.policies[0].to_zone = "any".to_string();
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "sfmix.inet6.0".to_string(),
+    snapshot.routes.push(crate::RouteSnapshot { reject: false, cluster_terminal: false, table: "sfmix.inet6.0".to_string(),
     family: "inet6".to_string(),
     destination: "::/0".to_string(),
     next_hop_weights: vec![],

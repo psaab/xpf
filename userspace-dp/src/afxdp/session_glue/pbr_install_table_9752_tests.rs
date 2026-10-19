@@ -226,6 +226,7 @@ fn unusable_resolution() -> ForwardingResolution {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }
@@ -908,6 +909,7 @@ fn validation_judges_installing_table_candidate() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     };
@@ -1036,6 +1038,7 @@ fn install_table_precedence_pins() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     };
@@ -1404,6 +1407,7 @@ fn tunnel_resolution_bypasses_install_table() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     };

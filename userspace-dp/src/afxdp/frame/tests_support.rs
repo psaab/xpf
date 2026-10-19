@@ -524,6 +524,7 @@ pub(super) fn l2_rewrite_test_decision(vlan_id: u16) -> SessionDecision {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: vlan_id,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
@@ -609,6 +610,7 @@ pub(super) fn icmp_test_decision(nat: NatDecision) -> SessionDecision {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat, install_table_domain: 0, install_table_check: 0 }
@@ -791,6 +793,7 @@ pub(super) fn build_oversized_tcp_frame_for_ttl_gate(
             neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x00]),
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -1041,6 +1044,7 @@ pub(super) fn plain_forward_decision_v4(dst: Ipv4Addr) -> SessionDecision {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }

@@ -58,6 +58,7 @@ fn maybe_reinject_slow_path_ignores_forward_candidate_disposition() {
         neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
         src_mac: Some([6, 7, 8, 9, 10, 11]),
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
@@ -152,7 +153,7 @@ fn maybe_reinject_slow_path_drops_ineligible_dispositions() {
             protocol: PROTO_ICMP,
             ..UserspaceDpMeta::default()
         };
-        let decision = SessionDecision { resolution: ForwardingResolution { disposition,
+        let decision = SessionDecision { resolution: ForwardingResolution { source_ifindex: 0, disposition,
         local_ifindex: 0,
         egress_ifindex: 6,
         tx_ifindex: 6,
@@ -231,6 +232,7 @@ fn maybe_reinject_slow_path_records_extract_failure_for_invalid_desc() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
@@ -295,6 +297,7 @@ fn maybe_reinject_slow_path_from_frame_records_unavailable() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
@@ -386,7 +389,7 @@ fn route_identity_is_dropped_before_any_slow_path_outlet_11326() {
             ..UserspaceDpMeta::default()
         };
         let decision = SessionDecision {
-            resolution: ForwardingResolution { disposition,
+            resolution: ForwardingResolution { source_ifindex: 0, disposition,
             local_ifindex: 0,
             egress_ifindex: 12,
             tx_ifindex: 12,
@@ -471,6 +474,7 @@ fn handle_forward_build_failure_records_build_and_slow_path_failures() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
@@ -549,6 +553,7 @@ fn stamped_route_identity_build_failure_does_not_reinject_11326() {
             neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
             src_mac: Some([6, 7, 8, 9, 10, 11]),
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -626,6 +631,7 @@ fn handle_forward_build_failure_without_fallback_only_records_build_failure() {
         neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
         src_mac: Some([6, 7, 8, 9, 10, 11]),
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
@@ -700,6 +706,7 @@ fn handle_forward_build_failure_drops_fabric_redirect_fail_closed() {
         neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
         src_mac: Some([6, 7, 8, 9, 10, 11]),
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
@@ -786,6 +793,7 @@ fn handle_forward_build_failure_still_reinjects_forward_candidate() {
         neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
         src_mac: Some([6, 7, 8, 9, 10, 11]),
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
@@ -886,6 +894,7 @@ fn disposition_counters_hot_accumulates_in_batch_not_live() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -952,6 +961,7 @@ fn disposition_counters_cold_writes_live_immediately() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -1324,7 +1334,7 @@ fn next_table_unsupported_is_dropped_and_counted_permit_no_route_still_delegates
         // egress_ifindex 0 mirrors what the FIB actually builds for both of
         // these dispositions (there is no egress interface), so the harness
         // is not quietly kinder to them than production is.
-        let decision = SessionDecision { resolution: ForwardingResolution { disposition,
+        let decision = SessionDecision { resolution: ForwardingResolution { source_ifindex: 0, disposition,
         local_ifindex: 0,
         egress_ifindex: 0,
         tx_ifindex: 0,
@@ -1695,6 +1705,7 @@ fn reinject_primitive_routes_each_path_to_its_outlet_9637() {
                 neighbor_mac: None,
                 src_mac: None,
                 tx_vlan_id: 0,
+                source_ifindex: 0,
                 route_mtu: 0,
                 transport_route_mtu: 0,
             },

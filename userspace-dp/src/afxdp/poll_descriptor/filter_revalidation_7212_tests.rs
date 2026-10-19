@@ -303,6 +303,7 @@ fn decision() -> SessionDecision {
             neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },
@@ -2258,6 +2259,7 @@ fn push_gre_underlay_10630(snapshot: &mut crate::protocol::snapshot::ConfigSnaps
         });
     snapshot.routes.push(crate::RouteSnapshot {
         reject: false,
+            cluster_terminal: false,
         table: "inet.0".into(),
         family: "inet".into(),
         destination: "203.0.113.0/24".into(),
@@ -2345,6 +2347,7 @@ fn forwarding_with_blue_pbr_tunnel_10630() -> ForwardingState {
     push_gre_underlay_10630(&mut snapshot);
     snapshot.routes.push(crate::RouteSnapshot {
         reject: false,
+            cluster_terminal: false,
         table: "blue.inet.0".into(),
         family: "inet".into(),
         destination: "172.16.80.0/24".into(),
@@ -2392,6 +2395,7 @@ fn forwarding_with_green_pbr_native_10630() -> ForwardingState {
     });
     snapshot.routes.push(crate::RouteSnapshot {
         reject: false,
+            cluster_terminal: false,
         table: "green.inet.0".into(),
         family: "inet".into(),
         destination: "172.16.80.0/24".into(),
@@ -2450,6 +2454,7 @@ fn forwarding_with_green_pbr_tunnel_10630() -> ForwardingState {
     push_second_gre_10630(&mut snapshot);
     snapshot.routes.push(crate::RouteSnapshot {
         reject: false,
+            cluster_terminal: false,
         table: "green.inet.0".into(),
         family: "inet".into(),
         destination: "172.16.80.0/24".into(),
@@ -2854,6 +2859,7 @@ fn tunneled_hit_stays_pinned_truth_table_10630() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     };

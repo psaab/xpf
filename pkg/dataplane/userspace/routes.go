@@ -24,10 +24,10 @@ var ruleListFn = netlink.RuleList
 // NextHops are part of the key so distinct same-preference QNH metric-tier
 // rows survive deduplication; equal-metric members are grouped in one row.
 func routeSnapshotDedupeKey(snap RouteSnapshot) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%v|%s|%t|%t|%d|%d|%d",
+	return fmt.Sprintf("%s|%s|%s|%s|%v|%s|%t|%t|%t|%d|%d|%d",
 		snap.Table, snap.Family, snap.Destination,
 		strings.Join(snap.NextHops, ","), snap.NextHopWeights, snap.NextTable,
-		snap.Discard, snap.Reject, snap.Preference, snap.RulePriority, snap.MTU)
+		snap.Discard, snap.Reject, snap.ClusterTerminal, snap.Preference, snap.RulePriority, snap.MTU)
 }
 
 // ipRuleHasUnsupportedRouteLeakSelectors reports whether the destination-only
@@ -1727,15 +1727,16 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 			}
 		}
 		addSnapshot(RouteSnapshot{
-			Table:          table,
-			Family:         family,
-			Destination:    dest,
-			Discard:        lr.Discard,
-			Reject:         lr.Reject,
-			NextHops:       lr.NextHops,
-			NextHopWeights: nonDefaultRouteWeights(lr.NextHopWeights),
-			Preference:     learnedPreference,
-			MTU:            lr.MTU,
+			Table:           table,
+			Family:          family,
+			Destination:     dest,
+			Discard:         lr.Discard,
+			Reject:          lr.Reject,
+			ClusterTerminal: lr.ClusterTerminal,
+			NextHops:        lr.NextHops,
+			NextHopWeights:  nonDefaultRouteWeights(lr.NextHopWeights),
+			Preference:      learnedPreference,
+			MTU:             lr.MTU,
 		})
 	}
 	return capped, suppressedMTUs, nil

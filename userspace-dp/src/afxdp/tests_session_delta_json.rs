@@ -46,6 +46,7 @@ fn delta_with_session_id(session_id: u64) -> SessionDelta {
                 neighbor_mac: None,
                 src_mac: None,
                 tx_vlan_id: 0,
+                source_ifindex: 0,
                 route_mtu: 0,
                 transport_route_mtu: 0,
             },

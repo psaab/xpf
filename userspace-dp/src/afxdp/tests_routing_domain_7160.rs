@@ -64,6 +64,7 @@ fn decision_snatting_to(snat: Ipv4Addr, install_table_domain: u32) -> SessionDec
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
             tx_vlan_id: 80,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },

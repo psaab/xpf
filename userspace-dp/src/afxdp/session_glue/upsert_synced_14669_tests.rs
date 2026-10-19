@@ -174,6 +174,7 @@ fn peer_resolution() -> ForwardingResolution {
         neighbor_mac: Some([0xaa; 6]),
         src_mac: Some([0xbb; 6]),
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }
@@ -280,6 +281,7 @@ fn upsert_synced_stale_standby_stamp_does_not_clobber_active_local_14669() {
                 neighbor_mac: Some([0, 0, 0, 0, 0, 2]),
                 src_mac: Some([0x02, 0, 0, 0, 0, 13]),
                 tx_vlan_id: 0,
+                source_ifindex: 0,
                 route_mtu: 0,
                 transport_route_mtu: 0,
             },

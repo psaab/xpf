@@ -159,6 +159,7 @@ pub(super) fn forwarding_snapshot(include_neighbor: bool) -> ConfigSnapshot {
         routes: vec![
             RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "0.0.0.0/0".to_string(),
@@ -171,6 +172,7 @@ pub(super) fn forwarding_snapshot(include_neighbor: bool) -> ConfigSnapshot {
             },
             RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet6.0".to_string(),
                 family: "inet6".to_string(),
                 destination: "::/0".to_string(),
@@ -300,6 +302,7 @@ pub(super) fn native_gre_snapshot(include_neighbor: bool) -> ConfigSnapshot {
         routes: vec![
             RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet6.0".to_string(),
                 family: "inet6".to_string(),
                 destination: "2602:ffd3:0:2::/64".to_string(),
@@ -312,6 +315,7 @@ pub(super) fn native_gre_snapshot(include_neighbor: bool) -> ConfigSnapshot {
             },
             RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "sfmix.inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "0.0.0.0/0".to_string(),
@@ -440,6 +444,7 @@ pub(super) fn wg_outer_mtu_snapshot() -> ConfigSnapshot {
         }],
         routes: vec![RouteSnapshot {
             reject: false,
+            cluster_terminal: false,
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             // The OUTER peer endpoint (203.0.113.7) routes out reth0.80 via
@@ -489,7 +494,7 @@ pub(super) fn wg_two_peer_dnat_snapshot() -> ConfigSnapshot {
     });
     // Route peer B's outer endpoint (198.51.100.7) out reth0.50 via the
     // connected next-hop 172.16.50.1 (mirroring the base peer-A route).
-    snap.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
+    snap.routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
     family: "inet".to_string(),
     destination: "198.51.100.0/24".to_string(),
     next_hop_weights: vec![],
@@ -639,6 +644,7 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
         routes: vec![
             RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "8.8.8.0/24".to_string(),
@@ -651,6 +657,7 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
             },
             RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "blue.inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "8.8.8.0/24".to_string(),
@@ -663,6 +670,7 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
             },
             RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet6.0".to_string(),
                 family: "inet6".to_string(),
                 destination: "2606:4700:4700::/48".to_string(),
@@ -675,6 +683,7 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
             },
             RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "blue.inet6.0".to_string(),
                 family: "inet6".to_string(),
                 destination: "2606:4700:4700::/48".to_string(),
@@ -722,6 +731,7 @@ pub(super) fn forwarding_snapshot_with_next_table_loop() -> ConfigSnapshot {
     v5(ConfigSnapshot {
         routes: vec![RouteSnapshot {
             reject: false,
+            cluster_terminal: false,
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "0.0.0.0/0".to_string(),
@@ -815,6 +825,7 @@ pub(super) fn nat_snapshot() -> ConfigSnapshot {
         routes: vec![
             RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "0.0.0.0/0".to_string(),
@@ -827,6 +838,7 @@ pub(super) fn nat_snapshot() -> ConfigSnapshot {
             },
             RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "inet6.0".to_string(),
                 family: "inet6".to_string(),
                 destination: "::/0".to_string(),
@@ -1253,6 +1265,7 @@ pub(super) fn static_nat_snapshot() -> ConfigSnapshot {
         ],
         routes: vec![RouteSnapshot {
             reject: false,
+            cluster_terminal: false,
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "0.0.0.0/0".to_string(),
@@ -1455,7 +1468,7 @@ fn tunnel_routes_6722() -> Vec<RouteSnapshot> {
     ["192.168.99.0/24", "192.168.98.0/24", "192.168.97.0/24"]
         .iter()
         .zip(["10.5.5.2", "10.6.6.2", "10.7.7.2"])
-        .map(|(dst, nh)| RouteSnapshot { reject: false, table: "inet.0".to_string(),
+        .map(|(dst, nh)| RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: (*dst).to_string(),
         next_hop_weights: vec![],

@@ -141,7 +141,7 @@ mod tests {
     }
 
     fn blue_route() -> crate::RouteSnapshot {
-        crate::RouteSnapshot { reject: false, table: "blue.inet.0".into(),
+        crate::RouteSnapshot { reject: false, cluster_terminal: false, table: "blue.inet.0".into(),
         family: "inet".into(),
         destination: "10.0.0.0/8".into(),
         next_hops: vec!["172.16.50.254".into()],

@@ -4225,7 +4225,7 @@ fn flowless_dnat_snapshot(policy_destination: &str) -> ConfigSnapshot {
             && !(route.family == "inet6" && route.destination == "::/0")
     });
     snapshot.routes.extend([
-        RouteSnapshot { reject: false, table: "inet.0".to_string(),
+        RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "172.16.80.100/32".to_string(),
         next_hop_weights: vec![],
@@ -4235,7 +4235,7 @@ fn flowless_dnat_snapshot(policy_destination: &str) -> ConfigSnapshot {
         preference: 0,
         rule_priority: 0,
         mtu: 0, },
-        RouteSnapshot { reject: false, table: "inet6.0".to_string(),
+        RouteSnapshot { reject: false, cluster_terminal: false, table: "inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "fd00:100::/48".to_string(),
         next_hop_weights: vec![],
@@ -5579,7 +5579,7 @@ fn route_overlay_fib_bump_reseeds_packet_egress_11599() {
         link_local: false,
         ..Default::default()
     });
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
+    snapshot.routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
     family: "inet".to_string(),
     destination: "9.9.9.9/32".to_string(),
     next_hop_weights: vec![],

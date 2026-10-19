@@ -891,7 +891,7 @@ pub(super) fn record_forwarding_disposition(
                 );
             }
         }
-        ForwardingDisposition::HAInactive => {
+        ForwardingDisposition::HAInactive | ForwardingDisposition::ClusterTerminalHAInactive => {
             update_last_resolution(last_resolution, resolution, debug, forwarding);
             counters.bump_exception();
             record_exception(
@@ -1090,6 +1090,7 @@ impl ResolutionEvent {
                 neighbor_mac: None,
                 src_mac: None,
                 tx_vlan_id: 0,
+                source_ifindex: 0,
                 route_mtu: 0,
                 transport_route_mtu: 0,
             },

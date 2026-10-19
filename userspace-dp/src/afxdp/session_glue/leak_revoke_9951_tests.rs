@@ -1069,6 +1069,7 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
         routes: vec![
             RouteSnapshot {
                 reject: false,
+            cluster_terminal: false,
                 table: "blue.inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "8.8.8.0/24".to_string(),
@@ -1083,6 +1084,7 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
             RouteSnapshot {
                 table: "red.inet.0".to_string(),
                 reject: false,
+            cluster_terminal: false,
                 family: "inet".to_string(),
                 destination: "8.8.8.0/24".to_string(),
                 next_hop_weights: vec![],
@@ -1097,6 +1099,7 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 reject: false,
+            cluster_terminal: false,
                 destination: "9.9.9.0/24".to_string(),
                 next_hop_weights: vec![],
                 next_hops: vec![],
@@ -1111,6 +1114,7 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                 family: "inet".to_string(),
                 destination: "9.9.9.0/24".to_string(),
                 reject: false,
+            cluster_terminal: false,
                 next_hop_weights: vec![],
                 next_hops: vec!["172.16.50.1@ge-0/0/0.51".to_string()],
                 discard: false,

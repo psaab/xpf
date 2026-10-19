@@ -85,6 +85,7 @@ fn revocation_decision(snat_port: Option<u16>) -> SessionDecision {
             neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
             tx_vlan_id: 80,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         },

@@ -422,6 +422,7 @@ pub(crate) fn build_synced_session_entry(
                 neighbor_mac,
                 src_mac,
                 tx_vlan_id: req.tx_vlan_id,
+                source_ifindex: 0,
                 route_mtu: 0,
                 transport_route_mtu: 0,
             },

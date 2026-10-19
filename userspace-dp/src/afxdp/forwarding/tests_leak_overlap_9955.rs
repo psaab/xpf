@@ -82,7 +82,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
     let mut routes = Vec::new();
     for leak in leaks {
         // The leak itself, in the main table.
-        routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
+        routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: prefix_containing_probe(leak.prefix_len),
         next_hop_weights: vec![],
@@ -94,7 +94,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
         mtu: 0, });
         // A route in the target table so the recursion resolves to something
         // distinguishable.
-        routes.push(RouteSnapshot { reject: false, table: format!("{}.inet.0", leak.target),
+        routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: format!("{}.inet.0", leak.target),
         family: "inet".to_string(),
         destination: "10.0.0.0/8".to_string(),
         next_hop_weights: vec![],
@@ -279,7 +279,7 @@ fn leak_versus_ordinary_route_in_the_same_table_9955() {
     let mut snapshot = snapshot_for(&[leak]);
     // An ordinary, more-specific route in the SAME table as the leak, out a
     // third interface so the winner is unambiguous.
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
+    snapshot.routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
     family: "inet".to_string(),
     destination: "10.1.2.0/24".to_string(),
     next_hop_weights: vec![],
@@ -354,7 +354,7 @@ fn a_leak_into_a_table_that_misses_falls_through_9955() {
     // Remove the target table's route so the leak lands on an EMPTY table.
     snapshot.routes.retain(|r| r.table != "red.inet.0");
     // Main can route it perfectly well, via a BROADER prefix.
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
+    snapshot.routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
     family: "inet".to_string(),
     destination: "10.0.0.0/8".to_string(),
     next_hop_weights: vec![],

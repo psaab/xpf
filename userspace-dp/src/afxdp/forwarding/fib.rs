@@ -203,6 +203,7 @@ pub(in crate::afxdp) fn resolve_forwarding(
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         });
@@ -684,6 +685,7 @@ fn local_delivery_resolution_v4(
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     })
@@ -745,6 +747,7 @@ fn local_delivery_resolution_v6(
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     })
@@ -780,6 +783,7 @@ fn lookup_forwarding_resolution_v4_inner(
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         });
@@ -856,6 +860,7 @@ fn lookup_forwarding_resolution_v4_inner(
                 neighbor_mac: neighbor.map(|entry| entry.mac),
                 src_mac: None,
                 tx_vlan_id: 0,
+                source_ifindex: 0,
                 route_mtu: 0,
                 transport_route_mtu: 0,
             };
@@ -864,27 +869,34 @@ fn lookup_forwarding_resolution_v4_inner(
         }
         Some(ResolvedRouteV4::Static { route, selected }) => {
             if route.discard || route.reject {
-                return selected_route_lookup_result(
-                    state,
-                    table,
-                    ForwardingResolution {
-                        disposition: if route.reject {
-                            ForwardingDisposition::RejectRoute
-                        } else {
-                            ForwardingDisposition::DiscardRoute
-                        },
-                        local_ifindex: 0,
-                        egress_ifindex: 0,
-                        tx_ifindex: 0,
-                        tunnel_endpoint_id: 0,
-                        next_hop: None,
-                        neighbor_mac: None,
-                        src_mac: None,
-                        tx_vlan_id: 0,
-                        route_mtu: 0,
-                        transport_route_mtu: 0,
+                let mut resolution = ForwardingResolution {
+                    disposition: if route.cluster_terminal {
+                        ForwardingDisposition::ClusterTerminalHAInactive
+                    } else if route.reject {
+                        ForwardingDisposition::RejectRoute
+                    } else {
+                        ForwardingDisposition::DiscardRoute
                     },
-                );
+                    local_ifindex: 0,
+                    egress_ifindex: 0,
+                    tx_ifindex: 0,
+                    tunnel_endpoint_id: 0,
+                    next_hop: None,
+                    neighbor_mac: None,
+                    src_mac: None,
+                    tx_vlan_id: 0,
+                    source_ifindex: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                };
+                if route.cluster_terminal {
+                    // #15742: stamp the selected forwarding default's
+                    // gateway ifindex before the terminal zeroes the
+                    // egress, so HA enforcement can attribute the
+                    // would-be egress RG for this destination
+                    resolution.source_ifindex = select_source_ifindex_v4(state, ip, table);
+                }
+                return selected_route_lookup_result(state, table, resolution);
             }
             // `select_v4_route` has already selected a member within the
             // preferred live tier, or the preferred drivable member if every
@@ -928,6 +940,7 @@ fn lookup_forwarding_resolution_v4_inner(
                 neighbor_mac: neighbor.map(|entry| entry.mac),
                 src_mac: None,
                 tx_vlan_id: 0,
+                source_ifindex: 0,
                 route_mtu: route.mtu,
                 transport_route_mtu: 0,
             };
@@ -1020,6 +1033,7 @@ fn lookup_forwarding_resolution_v6_inner(
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            source_ifindex: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
         });
@@ -1090,6 +1104,7 @@ fn lookup_forwarding_resolution_v6_inner(
                 neighbor_mac: neighbor.map(|entry| entry.mac),
                 src_mac: None,
                 tx_vlan_id: 0,
+                source_ifindex: 0,
                 route_mtu: 0,
                 transport_route_mtu: 0,
             };
@@ -1098,27 +1113,31 @@ fn lookup_forwarding_resolution_v6_inner(
         }
         Some(ResolvedRouteV6::Static { route, selected }) => {
             if route.discard || route.reject {
-                return selected_route_lookup_result(
-                    state,
-                    table,
-                    ForwardingResolution {
-                        disposition: if route.reject {
-                            ForwardingDisposition::RejectRoute
-                        } else {
-                            ForwardingDisposition::DiscardRoute
-                        },
-                        local_ifindex: 0,
-                        egress_ifindex: 0,
-                        tx_ifindex: 0,
-                        tunnel_endpoint_id: 0,
-                        next_hop: None,
-                        neighbor_mac: None,
-                        src_mac: None,
-                        tx_vlan_id: 0,
-                        route_mtu: 0,
-                        transport_route_mtu: 0,
+                let mut resolution = ForwardingResolution {
+                    disposition: if route.cluster_terminal {
+                        ForwardingDisposition::ClusterTerminalHAInactive
+                    } else if route.reject {
+                        ForwardingDisposition::RejectRoute
+                    } else {
+                        ForwardingDisposition::DiscardRoute
                     },
-                );
+                    local_ifindex: 0,
+                    egress_ifindex: 0,
+                    tx_ifindex: 0,
+                    tunnel_endpoint_id: 0,
+                    next_hop: None,
+                    neighbor_mac: None,
+                    src_mac: None,
+                    tx_vlan_id: 0,
+                    source_ifindex: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                };
+                if route.cluster_terminal {
+                    // #15742: see the v4 twin.
+                    resolution.source_ifindex = select_source_ifindex_v6(state, ip, table);
+                }
+                return selected_route_lookup_result(state, table, resolution);
             }
             // See the v4 twin: preserve the preferred tier's cold-path
             // fallback only when no same-prefix tier has a live member.
@@ -1161,6 +1180,7 @@ fn lookup_forwarding_resolution_v6_inner(
                 neighbor_mac: neighbor.map(|entry| entry.mac),
                 src_mac: None,
                 tx_vlan_id: 0,
+                source_ifindex: 0,
                 route_mtu: route.mtu,
                 transport_route_mtu: 0,
             };
@@ -1182,6 +1202,7 @@ pub(in crate::afxdp) fn no_route_resolution(next_hop: Option<IpAddr>) -> Forward
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }
@@ -1223,6 +1244,7 @@ pub(in crate::afxdp) fn table_unavailable_resolution() -> ForwardingResolution {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        source_ifindex: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
     }
@@ -1248,6 +1270,141 @@ enum ResolvedRouteV6<'a> {
         route: &'a RouteEntryV6,
         selected: Option<&'a RouteNextHopV6>,
     },
+}
+
+/// #15742: the gateway ifindex of the route that WOULD carry `ip`
+/// absent any terminal row: the same live-tier selection
+/// `select_v4_route` performs on non-terminal rows (first row with a
+/// live member, else the preferred row's drivable member, else the
+/// connected prefix at least as specific). Used to stamp a
+/// cluster-terminal resolution's would-be egress before the terminal
+/// zeroes it, so HA enforcement can attribute the destination's
+/// would-be RG. Returns 0 when no forwarding row or connected prefix
+/// matches.
+fn select_source_ifindex_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> i32 {
+    let connected = state
+        .connected_v4
+        .iter()
+        .find(|entry| entry.table == table && entry.prefix.contains(ip));
+    if let Some(routes) = state.routes_v4.get(table) {
+        let mut iter = routes.iter().filter(|r| {
+            r.next_table.is_empty() && !r.discard && !r.reject && r.prefix.contains(ip)
+        });
+        if let Some(first) = iter.next() {
+            if let Some(conn) = connected {
+                if conn.prefix.prefix_len() >= first.prefix.prefix_len() {
+                    return conn.ifindex;
+                }
+            }
+            // Same live-tier rule as select_v4_route: first row with a
+            // live member wins; otherwise remember the preferred row's
+            // drivable member.
+            let mut fallback_ifindex = 0;
+            for route in std::iter::once(first).chain(iter) {
+                let hash = ecmp_hash_v4(ip);
+                match select_route_next_hop_with_status(
+                    &route.next_hops,
+                    hash,
+                    ecmp_candidate_id_v4,
+                    |nh| nh.weight,
+                    |nh| {
+                        nh.ifindex > 0
+                            && state.egress.contains_key(&nh.ifindex)
+                            && !state.egress_link_down.contains(&nh.ifindex)
+                    },
+                    |nh| nh.ifindex > 0,
+                ) {
+                    Some((nh, true)) => return nh.ifindex,
+                    Some((nh, false)) if fallback_ifindex == 0 => fallback_ifindex = nh.ifindex,
+                    _ => {}
+                }
+            }
+            if fallback_ifindex > 0 {
+                return fallback_ifindex;
+            }
+            if let Some(conn) = connected {
+                return conn.ifindex;
+            }
+        }
+    }
+    if let Some(routes) = state.routes_v4.get(table) {
+        for route in routes.iter().filter(|r| {
+            r.next_table.is_empty() && !r.discard && !r.reject && r.prefix.contains(ip)
+        }) {
+            for nh in &route.next_hops {
+                if let Some(gw) = nh.next_hop {
+                    for (ifindex, prefixes) in &state.connected_v4_by_ifindex {
+                        if prefixes.iter().any(|prefix| prefix.contains(gw)) {
+                            return *ifindex;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    connected.map(|conn| conn.ifindex).unwrap_or(0)
+}
+
+/// #15742: v6 twin of `select_source_ifindex_v4`.
+fn select_source_ifindex_v6(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> i32 {
+    let connected = state
+        .connected_v6
+        .iter()
+        .find(|entry| entry.table == table && entry.prefix.contains(ip));
+    if let Some(routes) = state.routes_v6.get(table) {
+        let mut iter = routes.iter().filter(|r| {
+            r.next_table.is_empty() && !r.discard && !r.reject && r.prefix.contains(ip)
+        });
+        if let Some(first) = iter.next() {
+            if let Some(conn) = connected {
+                if conn.prefix.prefix_len() >= first.prefix.prefix_len() {
+                    return conn.ifindex;
+                }
+            }
+            let mut fallback_ifindex = 0;
+            for route in std::iter::once(first).chain(iter) {
+                let hash = ecmp_hash_v6(ip);
+                match select_route_next_hop_with_status(
+                    &route.next_hops,
+                    hash,
+                    ecmp_candidate_id_v6,
+                    |nh| nh.weight,
+                    |nh| {
+                        nh.ifindex > 0
+                            && state.egress.contains_key(&nh.ifindex)
+                            && !state.egress_link_down.contains(&nh.ifindex)
+                    },
+                    |nh| nh.ifindex > 0,
+                ) {
+                    Some((nh, true)) => return nh.ifindex,
+                    Some((nh, false)) if fallback_ifindex == 0 => fallback_ifindex = nh.ifindex,
+                    _ => {}
+                }
+            }
+            if fallback_ifindex > 0 {
+                return fallback_ifindex;
+            }
+            if let Some(conn) = connected {
+                return conn.ifindex;
+            }
+        }
+    }
+    if let Some(routes) = state.routes_v6.get(table) {
+        for route in routes.iter().filter(|r| {
+            r.next_table.is_empty() && !r.discard && !r.reject && r.prefix.contains(ip)
+        }) {
+            for nh in &route.next_hops {
+                if let Some(gw) = nh.next_hop {
+                    for (ifindex, prefixes) in &state.connected_v6_by_ifindex {
+                        if prefixes.iter().any(|prefix| prefix.contains(gw)) {
+                            return *ifindex;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    connected.map(|conn| conn.ifindex).unwrap_or(0)
 }
 
 /// Choose the most-specific route, then the first live preference/metric row.

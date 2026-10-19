@@ -40,6 +40,27 @@ pub(in crate::afxdp) fn owner_rg_for_resolution(
     owner_rg_for_flow(forwarding, resolution.egress_ifindex)
 }
 
+/// #15742: would-be egress RG peer-owned test for a cluster-terminal
+/// resolution. The lookup stamps the selected forwarding row's
+/// gateway ifindex (select_source_ifindex_*) before zeroing the
+/// egress; if that egress's RG is >0 and not forwarding-active
+/// (peer-owned or unknown on a clustered node, mirroring the
+/// ForwardCandidate gate), the terminal demotes to fabric redirect.
+/// This is destination-dependent: the selected row is ECMP/LPM
+/// aware, unlike a static scan of the table's default rows.
+pub(in crate::afxdp) fn cluster_terminal_peer_owned_egress_rg(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    resolution: &ForwardingResolution,
+) -> bool {
+    if resolution.source_ifindex <= 0 {
+        return false;
+    }
+    let rg = owner_rg_for_flow(forwarding, resolution.source_ifindex);
+    rg > 0 && ha_state.get(&rg).is_none_or(|g| !g.is_forwarding_active(now_secs))
+}
+
 pub(in crate::afxdp) fn enforce_ha_resolution(
     forwarding: &ForwardingState,
     ha_state: &Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
@@ -69,6 +90,27 @@ pub(in crate::afxdp) fn enforce_ha_resolution_snapshot(
     now_secs: u64,
     resolution: ForwardingResolution,
 ) -> ForwardingResolution {
+    // #15742: a cluster-terminal resolution carries no egress (the FIB
+    // zeroed it), so the ordinary owner attribution below cannot run.
+    // Demote it only when the same table holds a forwarding sibling at
+    // the terminal's prefix whose egress RG is peer-owned; otherwise
+    // (locally-owned, standalone, or no sibling) it stays the terminal
+    // drop the lookup selected. Operator discard/reject rows never
+    // reach here: only cluster_terminal rows produce this disposition.
+    if resolution.disposition == ForwardingDisposition::ClusterTerminalHAInactive {
+        if ha_state.is_empty() {
+            return resolution;
+        }
+        return match cluster_terminal_peer_owned_egress_rg(forwarding, ha_state, now_secs, &resolution) {
+            true => resolution,
+            false => ForwardingResolution {
+                disposition: ForwardingDisposition::DiscardRoute,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+                ..resolution
+            },
+        };
+    }
     if !matches!(
         resolution.disposition,
         ForwardingDisposition::ForwardCandidate

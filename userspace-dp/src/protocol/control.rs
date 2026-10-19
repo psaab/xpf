@@ -273,7 +273,9 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // keeps the fixed 1024..65535 NAT64 allocator — the defect.
 // v55 -> v56 (#15742): InterfaceSnapshot carries connected_rg_peer_owned
 // so the helper HA-filters connected transit prefixes on peer-owned RGs.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 56;
+// v56 -> v57 (#15742): RouteSnapshot carries cluster_terminal so the
+// helper demotes only the cluster Null0 default to fabric redirect.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 57;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
