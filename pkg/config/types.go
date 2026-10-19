@@ -610,6 +610,15 @@ type Config struct {
 	// count, an annotation and the warning can never disagree about which rules
 	// are affected.
 	LenientNATTerminalActionRules []LenientNATTerminalActionRule
+	// LenientNATUndefinedZoneRuleSets records every source/destination NAT
+	// rule-set the TOLERANT path admitted despite an undefined from/to zone
+	// (#15001). Populated only on that path (strict returns the error), as
+	// "kind\x00name" keys. pkg/dataplane compileNAT skips exactly these
+	// rule-sets so a leniently-loaded typo does not abort every apply,
+	// while a config that never went through tolerant compile (hand-built
+	// or JSON-round-tripped, losing the record) still fails closed there.
+	// Compile-time only; never serialized.
+	LenientNATUndefinedZoneRuleSets map[string]bool `json:"-"`
 }
 
 // LenientNATTerminalActionRule identifies one NAT rule admitted by the tolerant

@@ -32,6 +32,7 @@ import (
 // compileHier parses hierarchical Junos text and strict-compiles it.
 func compileHier5628(t *testing.T, cfgText string) (*Config, error) {
 	t.Helper()
+	cfgText = injectHierNATZones15001(cfgText)
 	p := NewParser(cfgText)
 	tree, perrs := p.Parse()
 	if len(perrs) > 0 {

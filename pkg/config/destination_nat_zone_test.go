@@ -5,11 +5,27 @@ import (
 	"testing"
 )
 
-// TestDestinationNATFromZoneUndefinedWarns12245 proves a typo'd DNAT from-zone
-// gets the same warning as source and static NAT instead of producing a
-// never-matching rule without an operator diagnostic.
+func natZoneTreeDirect12245(t *testing.T, cmds ...string) *ConfigTree {
+	t.Helper()
+	tree := &ConfigTree{}
+	for _, cmd := range cmds {
+		path, err := ParseSetCommand(cmd)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", cmd, err)
+		}
+	}
+	return tree
+}
+
+// #12245 originally: typo'd DNAT from-zone warns like source/static.
+// #15001 supersedes the source/destination half: strict commit now
+// rejects naming rule-set and zone; static NAT remains warn-only.
+// The tolerant path warning is pinned in nat_undefined_zone_15001_test.go.
 func TestDestinationNATFromZoneUndefinedWarns12245(t *testing.T) {
-	cfg, err := CompileConfig(buildNATScopeTree(t,
+	tree := natZoneTreeDirect12245(t,
 		"set security zones security-zone trust",
 		"set security nat source rule-set snat-typo from zone untrsut",
 		"set security nat static rule-set static-typo from zone untrsut",
@@ -19,33 +35,35 @@ func TestDestinationNATFromZoneUndefinedWarns12245(t *testing.T) {
 		"set security nat destination rule-set dnat-typo from zone untrsut",
 		"set security nat destination rule-set dnat-typo rule R1 match destination-address 198.51.100.5/32",
 		"set security nat destination rule-set dnat-typo rule R1 then destination-nat pool P1",
+	)
+	if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "snat-typo") {
+		t.Fatalf("strict compile = %v, want undefined-zone reject naming snat-typo (#15001)", err)
+	}
+	// Static-only config still compiles strict and warns via ValidateConfig.
+	cfg, err := CompileConfig(natZoneTreeDirect12245(t,
+		"set security zones security-zone trust",
+		"set security nat static rule-set static-typo from zone untrsut",
+		"set security nat static rule-set static-typo rule R1 match destination-address 203.0.113.5/32",
+		"set security nat static rule-set static-typo rule R1 then static-nat prefix 10.0.0.5/32",
 	))
 	if err != nil {
-		t.Fatalf("strict compile should accept the configuration with advisory, got: %v", err)
+		t.Fatalf("static-only strict compile: %v", err)
 	}
-
-	warnings := ValidateConfig(cfg)
-	for _, want := range []string{
-		`source-nat ruleset "snat-typo": from-zone "untrsut" not defined`,
-		`static-nat ruleset "static-typo": from-zone "untrsut" not defined`,
-		`destination-nat ruleset "dnat-typo": from-zone "untrsut" not defined`,
-	} {
-		found := false
-		for _, warning := range warnings {
-			if warning == want {
-				found = true
-				break
-			}
+	want := `static-nat ruleset "static-typo": from-zone "untrsut" not defined`
+	found := false
+	for _, warning := range ValidateConfig(cfg) {
+		if warning == want {
+			found = true
 		}
-		if !found {
-			t.Errorf("missing zone warning %q; warnings=%v", want, warnings)
-		}
+	}
+	if !found {
+		t.Errorf("missing static zone warning %q; warnings=%v", want, ValidateConfig(cfg))
 	}
 }
 
 // A defined DNAT from-zone is a positive control: it must stay warning-free.
 func TestDestinationNATFromZoneDefinedNoWarn12245(t *testing.T) {
-	cfg, err := CompileConfig(buildNATScopeTree(t,
+	cfg, err := CompileConfig(natZoneTreeDirect12245(t,
 		"set security zones security-zone untrust",
 		"set security nat destination pool P1 address 10.0.30.100",
 		"set security nat destination rule-set dnat-valid from zone untrust",
@@ -97,7 +115,7 @@ func TestDestinationNATNonZoneFromScopesNoWarn12245(t *testing.T) {
 				"set security nat destination rule-set "+ruleSet+" rule R1 match destination-address 198.51.100.5/32",
 				"set security nat destination rule-set "+ruleSet+" rule R1 then destination-nat pool P1",
 			)
-			cfg, err := CompileConfig(buildNATScopeTree(t, cmds...))
+			cfg, err := CompileConfig(natZoneTreeDirect12245(t, cmds...))
 			if err != nil {
 				t.Fatalf("CompileConfig rejected %s DNAT: %v", tc.name, err)
 			}

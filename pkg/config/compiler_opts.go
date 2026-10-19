@@ -2060,6 +2060,14 @@ type compileOpts struct {
 	// leniently-loaded bad config is inert. Same doctrine as
 	// lenientPolicyZoneRefs / lenientNATHostMask.
 	lenientDestNATAddresses bool
+	// lenientNATUndefinedZone (#15001) downgrades the NAT undefined-zone
+	// gate (validateNATUndefinedZoneStrict) to a warning on tolerant load /
+	// peer-sync (#1960 no-brick). Strict commit rejects a source-NAT
+	// from/to zone or destination-NAT from zone naming no configured zone;
+	// tolerant loads warn and record the rule-sets in
+	// cfg.LenientNATUndefinedZoneRuleSets so dataplane compileNAT skips
+	// them instead of aborting every apply.
+	lenientNATUndefinedZone bool
 	// lenientNATMatchAddressLiterals (#7145) downgrades the NAT match-address
 	// literal gate (validateNATMatchAddressLiteralsStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check path
@@ -3538,6 +3546,7 @@ func lenientCompileOpts() compileOpts {
 		lenientDuplicateHostLocalAddress:       true,
 		lenientClusterAuthKey:                  true,
 		lenientDestNATAddresses:                true,
+		lenientNATUndefinedZone:                true,
 		lenientNATMatchAddressLiterals:         true,
 		lenientRPMSourceAddress:                true,
 		lenientRPMLinkLocalZone:                true,

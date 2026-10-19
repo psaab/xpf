@@ -113,6 +113,10 @@ func TestSourceNATPoolAddressBracketMixedRange_4521(t *testing.T) {
 func TestSourceNATPoolAddressHierarchicalBlock_4521(t *testing.T) {
 	const cfgText = `
 security {
+    zones {
+        security-zone trust;
+        security-zone untrust;
+    }
     nat {
         source {
             pool p1 {

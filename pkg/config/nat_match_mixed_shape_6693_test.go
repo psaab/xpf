@@ -81,7 +81,8 @@ func natRuleBody6693(natType, leaf, matchBody string) string {
 		sibling = " destination-address 198.51.100.1/32;"
 	}
 	return fmt.Sprintf(`
-security {%s
+security {
+    zones { security-zone trust; security-zone untrust; }%s
     nat {
         %s {
             rule-set rs1 {

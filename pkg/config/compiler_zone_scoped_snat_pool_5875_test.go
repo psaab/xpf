@@ -34,6 +34,7 @@ func snat5875Tree(t *testing.T, poolCmds ...string) *ConfigTree {
 	t.Helper()
 	tree := &ConfigTree{}
 	cmds := append([]string{}, poolCmds...)
+	cmds = append([]string{"set security zones security-zone trust", "set security zones security-zone untrust"}, cmds...)
 	cmds = append(cmds,
 		"set security nat source rule-set RS from zone trust",
 		"set security nat source rule-set RS to zone untrust",
