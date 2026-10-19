@@ -10818,7 +10818,7 @@ fn import_between_replay_and_registration_delivers_late_upsert_9718() {
     coordinator
         .workers
         .register(0, WorkerRuntimeRecord::for_test(handle), None);
-    super::reconcile::bringup::replay_late_synced_sessions(&coordinator, &commands, &[]);
+    super::reconcile::bringup::replay_late_synced_sessions(&coordinator, 0, &commands, &[]);
     {
         let pending = crate::afxdp::worker_queue::lock_recover(&commands);
         assert!(
@@ -10855,6 +10855,210 @@ fn import_between_replay_and_registration_delivers_late_upsert_9718() {
             .debug_is_port_occupied(0, 20000),
         "draining the late worker's UpsertSynced did not hold its translated port"
     );
+}
+
+/// #15105 (A71-02): the reconcile replay must not silently truncate each
+/// new worker's synced-session replay at the 4,096-command queue cap.
+///
+/// Both replay sites routed through `push_bounded` and discarded its
+/// refusal: `Coordinator::replay_synced_sessions` via
+/// `replicate_session_upsert` (the bring-up replay over brand-new empty
+/// queues) and `replay_late_synced_sessions` (the post-registration
+/// full-snapshot requeue). With more than
+/// `MAX_PENDING_WORKER_COMMANDS` rows in shared authority, every worker
+/// received only the first 4,096 and the rest were absent with no repair
+/// obligation — the #6929 residual at the replay call sites (#11360
+/// delivered the obligation for the import path only).
+///
+/// The fix records every refused replayed row as #11360 session-import
+/// repair debt, positioned after the queue prefix present at refusal, so
+/// the worker re-reads the row from shared authority at that FIFO
+/// boundary. These cells drive the real replay helpers with
+/// cap + 1000 shared rows and assert the refused tail is recoverable.
+/// Pre-fix they fail on the debt assertion: no debt exists, so the tail
+/// rows have no path to the worker at all.
+#[test]
+fn bringup_replay_over_cap_records_import_repair_debt_15105() {
+    use std::collections::BTreeMap;
+
+    // In-range worker id (< MAX_NAT_HOLDER_WORKERS): the repair-debt
+    // slots are indexed by it, as they are for every production worker.
+    const WORKER_ID: u32 = 0;
+    const REPLAY_ROWS: usize =
+        crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS + 1000;
+    crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+
+    let mut coordinator = Coordinator::new();
+    // Distinct keys (vary src_port) and distinct translated ports so the
+    // allocator census below can count holder reservations per row.
+    for i in 0..REPLAY_ROWS {
+        let mut key = f4_key();
+        key.src_port = 4000 + (i as u16);
+        f4_seed_shared_only(
+            &coordinator,
+            &key,
+            crate::nat::TranslatedTuple {
+                ip: "203.0.113.1".parse().unwrap(),
+                port: 20000 + (i as u16),
+            },
+        );
+    }
+    assert_eq!(
+        coordinator.snapshot_shared_session_entries().len(),
+        REPLAY_ROWS,
+        "fixture: shared authority must hold cap+1000 rows"
+    );
+
+    let workers: BTreeMap<u32, Vec<crate::afxdp::BindingPlan>> =
+        BTreeMap::from([(WORKER_ID, Vec::new())]);
+    let queues = super::reconcile::bringup::replay_preserved_sessions(
+        &mut coordinator,
+        &workers,
+        &[],
+        crate::afxdp::bpf_map::SteeringMap {
+            fd: -1,
+            owners: &Default::default(),
+            holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+        },
+    );
+
+    let commands = queues.get(&WORKER_ID).expect("one worker queue");
+    {
+        let pending = crate::afxdp::worker_queue::lock_recover(commands);
+        assert_eq!(
+            pending.len(),
+            crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS,
+            "the bring-up queue must stop at the #6929 cap; the fix must not \
+             unbound the queue, it must obligate the refused tail"
+        );
+    }
+    assert!(
+        crate::afxdp::worker_queue::has_session_import_repair_debt(WORKER_ID),
+        "#15105: bring-up replay rows refused at the 4096 cap recorded no \
+         repair debt — the tail of the replay is silently truncated"
+    );
+
+    // The debt must name the refused tail, not some bounded subset of it.
+    // Drain the queue prefix (advancing the repair boundary exactly as
+    // `apply_worker_commands` does), then collect every due repair.
+    {
+        let mut pending = crate::afxdp::worker_queue::lock_recover(commands);
+        let drained = pending.len();
+        pending.clear();
+        crate::afxdp::worker_queue::note_worker_commands_drained(WORKER_ID, drained);
+    }
+    let mut repaired_keys = std::collections::HashSet::new();
+    loop {
+        let (ready, ready_remains, _) =
+            crate::afxdp::worker_queue::take_ready_session_import_repairs(
+                WORKER_ID,
+                crate::afxdp::worker_queue::SESSION_IMPORT_REPAIR_DRAIN_BUDGET,
+            );
+        if ready.is_empty() {
+            assert!(!ready_remains, "repairs remain but none are due");
+            break;
+        }
+        for repair in &ready {
+            repaired_keys.insert(repair.key.clone());
+            crate::afxdp::worker_queue::complete_session_import_repair(WORKER_ID, repair);
+        }
+    }
+    assert_eq!(
+        repaired_keys.len(),
+        REPLAY_ROWS - crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS,
+        "#15105: repair debt must cover exactly the refused replay tail"
+    );
+    crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+}
+
+/// #15105 (A71-02), late leg: `replay_late_synced_sessions` retains
+/// non-upsert commands, then appends a fresh full snapshot through the
+/// same bounded push. When the retained prefix plus the snapshot exceeds
+/// the cap, the snapshot tail was dropped with no obligation. The fix
+/// records the refused snapshot rows as import repair debt for that
+/// worker, positioned after the retained prefix.
+#[test]
+fn late_replay_over_cap_records_import_repair_debt_15105() {
+    // In-range worker id (see the bring-up cell above).
+    const WORKER_ID: u32 = 0;
+    const REPLAY_ROWS: usize =
+        crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS + 1000;
+    crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+
+    let mut coordinator = Coordinator::new();
+    for i in 0..REPLAY_ROWS {
+        let mut key = f4_key();
+        key.src_port = 4000 + (i as u16);
+        f4_seed_shared_only(
+            &coordinator,
+            &key,
+            crate::nat::TranslatedTuple {
+                ip: "203.0.113.1".parse().unwrap(),
+                port: 20000 + (i as u16),
+            },
+        );
+    }
+
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    // Retain one non-upsert command, as a live late worker's queue would
+    // hold; the snapshot tail refusal must be positioned after it.
+    {
+        let mut pending = crate::afxdp::worker_queue::lock_recover(&commands);
+        assert!(crate::afxdp::worker_queue::push_bounded(
+            &mut pending,
+            crate::afxdp::WorkerCommand::DeleteSynced(f4_key()),
+        ));
+    }
+    super::reconcile::bringup::replay_late_synced_sessions(&coordinator, 0, &commands, &[]);
+
+    {
+        let pending = crate::afxdp::worker_queue::lock_recover(&commands);
+        assert_eq!(
+            pending.len(),
+            crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS,
+            "the late replay queue must stop at the #6929 cap"
+        );
+        assert!(
+            matches!(pending.front(), Some(crate::afxdp::WorkerCommand::DeleteSynced(_))),
+            "the retained non-upsert prefix must survive the late replay"
+        );
+    }
+    assert!(
+        crate::afxdp::worker_queue::has_session_import_repair_debt(WORKER_ID),
+        "#15105: late-replay snapshot rows refused at the 4096 cap recorded \
+         no repair debt — the snapshot tail is silently truncated"
+    );
+
+    {
+        let mut pending = crate::afxdp::worker_queue::lock_recover(&commands);
+        let drained = pending.len();
+        pending.clear();
+        crate::afxdp::worker_queue::note_worker_commands_drained(WORKER_ID, drained);
+    }
+    let mut repaired = 0usize;
+    loop {
+        let (ready, ready_remains, _) =
+            crate::afxdp::worker_queue::take_ready_session_import_repairs(
+                WORKER_ID,
+                crate::afxdp::worker_queue::SESSION_IMPORT_REPAIR_DRAIN_BUDGET,
+            );
+        if ready.is_empty() {
+            assert!(!ready_remains, "repairs remain but none are due");
+            break;
+        }
+        repaired += ready.len();
+        for repair in &ready {
+            crate::afxdp::worker_queue::complete_session_import_repair(WORKER_ID, repair);
+        }
+    }
+    // One queue slot is the retained DeleteSynced, so the snapshot tail
+    // refused is REPLAY_ROWS - (cap - 1).
+    assert_eq!(
+        repaired,
+        REPLAY_ROWS + 1 - crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS,
+        "#15105: late-replay repair debt must cover exactly the refused tail"
+    );
+    crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
 }
 
 /// #9718: a shared row promoted by local traffic must be mapped to a
@@ -10945,7 +11149,7 @@ fn late_reconciler_maps_shared_promote_for_worker_reserve_9718() {
     coordinator
         .workers
         .register(0, WorkerRuntimeRecord::for_test(handle), None);
-    super::reconcile::bringup::replay_late_synced_sessions(&coordinator, &commands, &[]);
+    super::reconcile::bringup::replay_late_synced_sessions(&coordinator, 0, &commands, &[]);
 
     {
         let pending = crate::afxdp::worker_queue::lock_recover(&commands);
@@ -11041,7 +11245,7 @@ fn pre_replay_import_still_replays_9718() {
     coordinator
         .workers
         .register(0, WorkerRuntimeRecord::for_test(handle), None);
-    super::reconcile::bringup::replay_late_synced_sessions(&coordinator, &commands, &[]);
+    super::reconcile::bringup::replay_late_synced_sessions(&coordinator, 0, &commands, &[]);
     let pending = crate::afxdp::worker_queue::lock_recover(&commands);
     assert!(
         pending.iter().any(|cmd| matches!(

@@ -496,12 +496,17 @@ pub(in crate::afxdp) fn clear_transition_debt(worker_id: u32) {
 }
 
 /// #11360: one latest-intent repair slot per refused imported-session key.
+/// #15105 extends the same obligation to the reconcile replay paths.
 ///
 /// Refused upserts are positioned after the queue prefix that preceded them.
 /// The worker re-reads each key from shared authority at that boundary, so a
-/// delayed repair cannot resurrect an older import. The map is deduplicated and
-/// capped per worker; overflow is returned to the importer as a distinct loud
-/// outcome rather than silently losing the repair obligation.
+/// delayed repair cannot resurrect an older import. The map is deduplicated
+/// and capped per worker; overflow is returned to the importer as a distinct
+/// loud outcome rather than silently losing the repair obligation. The cap is
+/// twice the queue cap: a full queue (4096) ahead of a larger snapshot can
+/// refuse the whole snapshot into debt, and the #15105 bring-up/late replay
+/// can refuse a replay set that itself exceeds one queue cap — 8192 bounds
+/// 4096 queue-ahead plus 4096 snapshot-ahead refusals per worker.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct SessionImportRepairDebt {
     entries: FastMap<SessionKey, (u64, u64)>,
@@ -666,7 +671,7 @@ pub(in crate::afxdp) struct SessionImportRepair {
     token: u64,
 }
 
-const MAX_PENDING_SESSION_IMPORT_REPAIRS: usize = MAX_PENDING_WORKER_COMMANDS;
+const MAX_PENDING_SESSION_IMPORT_REPAIRS: usize = 2 * MAX_PENDING_WORKER_COMMANDS;
 pub(in crate::afxdp) const SESSION_IMPORT_REPAIR_DRAIN_BUDGET: usize = 256;
 
 /// Session-import repair lock order: when both locks are required, acquire

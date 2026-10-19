@@ -969,7 +969,32 @@ entry: &SyncedSessionEntry,) {
         // #4800: ...and count the acquisitions that had to block.
         let mut pending =
             worker_queue::lock_recover_counting(commands, &SESSION_REPLICATION_LOCK_CONTENDED);
-        worker_queue::push_bounded(&mut pending, WorkerCommand::UpsertSynced(replica.clone()));
+        // #15105: a refused replica must not vanish silently. This covers
+        // the reconcile bring-up replay (which fans a full shared snapshot
+        // into brand-new queues through this helper) as well as steady-state
+        // sibling replication: record the row as #11360 import repair debt,
+        // positioned after the queue prefix present at refusal, while still
+        // holding the queue lock. The worker re-reads the key from shared
+        // authority at that FIFO boundary. Debt recording can itself fail
+        // only past the (doubled) repair bound or for an out-of-generation
+        // queue; the #6929 drop counter already bumped by `push_bounded`
+        // keeps that residual operator-visible.
+        if !worker_queue::push_bounded(
+            &mut pending,
+            WorkerCommand::UpsertSynced(replica.clone()),
+        ) {
+            if let Some(worker_id) = worker_command_queues.worker_id_for_queue(commands) {
+                if let Some(position) =
+                    worker_queue::session_import_repair_position(worker_id, pending.len())
+                {
+                    let _ = worker_queue::record_session_import_repair(
+                        worker_id,
+                        &entry.key,
+                        position,
+                    );
+                }
+            }
+        }
         deepest = deepest.max(pending.len() as u64);
     }
     if deepest != 0 {
