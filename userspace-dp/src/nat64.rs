@@ -2198,6 +2198,25 @@ const IPV6_MIN_MTU: u32 = 1280;
 /// the smaller translated datagram.
 const NAT64_HEADER_DELTA: u32 = 20;
 
+/// RFC 1191 Table 7-1 plateaus (lowest MTU of each group), descending.
+/// Used only when a pre-RFC 1191 router reports Next-Hop MTU 0 in a
+/// Fragmentation-Needed message: RFC 7915 §4.2 requires the greatest
+/// plateau below the quoted datagram's Total Length (floored at 1280).
+const RFC1191_PLATEAUS: [u32; 11] = [
+    65535, 32000, 17914, 8166, 4352, 2002, 1492, 1006, 508, 296, 68,
+];
+
+/// Greatest RFC 1191 plateau strictly below `quoted_total_len`, floored
+/// at the IPv6 minimum MTU (1280). Values at or below 1280 therefore all
+/// yield 1280; a length with no plateau >= 1280 below it also yields 1280.
+fn rfc1191_plateau_mtu(quoted_total_len: u32) -> u32 {
+    RFC1191_PLATEAUS
+        .iter()
+        .copied()
+        .find(|&p| p < quoted_total_len && p >= IPV6_MIN_MTU)
+        .unwrap_or(IPV6_MIN_MTU)
+}
+
 use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP};
 use std::sync::atomic::AtomicU32;
 
@@ -3659,10 +3678,27 @@ fn translate_icmpv4_message_to_icmpv6(
             // 16 bits (bytes 6-7) of the ICMPv4 rest-of-header (RFC 1191); the
             // ICMPv6 PTB carries the MTU as a full 32-bit word (bytes 4-7).
             let v4_mtu = u16::from_be_bytes([src[6], src[7]]) as u32;
+            // RFC 7915 §4.2: a zero Next-Hop MTU means the v4 router predates
+            // RFC 1191 and reports no MTU. Recover a likely path MTU from the
+            // quoted datagram's Total Length via the RFC 1191 plateau table
+            // (greatest plateau below that length, floored at 1280) instead of
+            // pinning every such client to 1280. The quoted header is src[8..];
+            // a truncated or malformed quote has no usable Total Length and
+            // keeps the 1280 floor rather than dropping the error. Non-zero
+            // MTUs keep the plain +20 translation below.
             // The translated v6 datagram is 20 bytes larger than the v4 one, so
             // the v6 path MTU is 20 bytes larger; clamp to the v6 minimum link
             // MTU (1280) so a v6 client is never told to go below it.
-            let v6_mtu = v4_mtu.saturating_add(NAT64_HEADER_DELTA).max(IPV6_MIN_MTU);
+            let v6_mtu = if v4_mtu == 0 {
+                let quoted_total_len = src
+                    .get(8..)
+                    .filter(|q| q.len() >= 20 && (q[0] >> 4) == 4)
+                    .map(|q| u16::from_be_bytes([q[2], q[3]]) as u32)
+                    .unwrap_or(0);
+                rfc1191_plateau_mtu(quoted_total_len)
+            } else {
+                v4_mtu.saturating_add(NAT64_HEADER_DELTA).max(IPV6_MIN_MTU)
+            };
             write_icmpv6_error_with_embedded(
                 dst,
                 src,
