@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"golang.org/x/sync/semaphore"
 )
@@ -27,6 +28,113 @@ func (d *policySnapshotRecoveryDP12072) ListSessionsByPolicy(
 	req dpuserspace.SessionPolicyListRequest,
 ) (dpuserspace.ControlResponse, error) {
 	return d.manager.ListSessionsByPolicy(req)
+}
+
+type policyIncompleteRealDP15162 struct {
+	*policySnapshotRecoveryDP12072
+	deleteCalls [][]dpuserspace.SessionPolicyMatch
+}
+
+func (d *policyIncompleteRealDP15162) DeletePolicySessions(
+	matches []dpuserspace.SessionPolicyMatch,
+) (dpuserspace.PolicyDeleteResult, error) {
+	d.deleteCalls = append(d.deleteCalls, append([]dpuserspace.SessionPolicyMatch(nil), matches...))
+	return dpuserspace.PolicyDeleteResult{Applied: len(matches)}, nil
+}
+
+// #15162: the daemon's commit-time capture over the REAL Manager must
+// revoke the rows of a terminal incomplete READ (complete=false) instead
+// of discarding them when ListSessionsByPolicy hard-errors.
+func TestDaemonCaptureIncompleteReadDeletesPartial15162(t *testing.T) {
+	dir, err := os.MkdirTemp("", "x15162")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "control.sock")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	oldCfg := twoPolicyConfig([]string{"p-first", "tmp", "web"}, nil)
+	newCfg := twoPolicyConfig([]string{"p-first", "web"}, nil)
+	tmpID := dpuserspace.PolicyIDsByStableKey(oldCfg)["trust->untrust/tmp"]
+	if tmpID == 0 {
+		t.Fatal("precondition: tmp policy id must be non-zero")
+	}
+	mk := func(port uint16, id uint64) dpuserspace.SessionPolicyMatch {
+		return dpuserspace.SessionPolicyMatch{
+			AddrFamily: 4, PolicyID: tmpID, ExpectedRTFlowSessionID: id,
+			Tuple: dpuserspace.SessionPolicyTuple{
+				AddrFamily: 4, Protocol: 6, SrcIP: "10.0.0.1", DstIP: "10.0.0.2",
+				SrcPort: port, DstPort: 80,
+			},
+		}
+	}
+	want := []dpuserspace.SessionPolicyMatch{mk(40001, 0xA1), mk(40002, 0xB1), mk(40003, 0xC1)}
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				var req dpuserspace.ControlRequest
+				if json.NewDecoder(conn).Decode(&req) != nil {
+					return
+				}
+				resp := dpuserspace.ControlResponse{OK: true, SessionPolicyComplete: true}
+				if req.SessionPolicyList != nil {
+					resp = dpuserspace.ControlResponse{
+						OK: true, SessionPolicyComplete: false,
+						SessionPolicyMatches:         want,
+						SessionPolicyPerWorkerErrors: []string{"worker-1:dead"},
+					}
+				}
+				_ = json.NewEncoder(conn).Encode(resp)
+			}()
+		}
+	}()
+
+	fixture := dpuserspace.NewPolicySnapshotRecoveryFixtureForTest(oldCfg, newCfg, socket)
+	base := &policySnapshotRecoveryDP12072{
+		policyInvalTestDP: &policyInvalTestDP{appliedConfig: oldCfg},
+		manager:           fixture.ManagerForTest(),
+	}
+	dp := &policyIncompleteRealDP15162{policySnapshotRecoveryDP12072: base}
+	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+	d.setDataplane(dp)
+	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	defer d.applySem.Release(1)
+	d.armPolicyInvalidationPlan(oldCfg, newCfg)
+	d.capturePolicyInvalidationLocked(newCfg)
+	capture := d.policyInvalidationCapture
+	if capture == nil {
+		t.Fatal("capture missing")
+	}
+	if capture.readErr == nil {
+		t.Fatal("incomplete READ must surface readErr")
+	}
+	if len(capture.deleted.policy) != 3 {
+		t.Fatalf("captured %d policy matches, want 3 (partial beats zero)", len(capture.deleted.policy))
+	}
+	if err := d.deleteInvalidatedSessions(capture.deleted, dataplane.DeleteReasonPolicyDeleted, "deleted"); err != nil {
+		t.Fatalf("delete captured partial: %v", err)
+	}
+	if len(dp.deleteCalls) != 1 || len(dp.deleteCalls[0]) != 3 {
+		t.Fatalf("DeletePolicySessions calls = %v, want one call with 3 matches", dp.deleteCalls)
+	}
+	for i, m := range dp.deleteCalls[0] {
+		if m.ExpectedRTFlowSessionID != want[i].ExpectedRTFlowSessionID {
+			t.Fatalf("deleted match %d id = %x, want %x", i, m.ExpectedRTFlowSessionID, want[i].ExpectedRTFlowSessionID)
+		}
+	}
 }
 
 func TestDeferredLostACKNeighborInterleavingFourCells12072(t *testing.T) {
