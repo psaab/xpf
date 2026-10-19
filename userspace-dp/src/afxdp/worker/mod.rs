@@ -180,12 +180,20 @@ pub(crate) struct BindingWorker {
     /// admitted packet. Admission keeps the OLDEST packet for a key (it
     /// drives the probe/dwell clock) and drops+recycles duplicates, so a
     /// SYN flood to one dead host pins ≤1 UMEM frame for that host instead
-    /// of up to `MAX_PENDING_NEIGH`. The cap now bounds distinct unresolved
-    /// next-hops per worker (not total packets). Same key shape as
+    /// of the whole pool. The cap (`pending_neigh_cap`, #15096) bounds
+    /// distinct unresolved next-hops per worker (not total packets). Same
     /// `neg_neigh_cache` / `resolver_enqueue_throttle`. Worker-owned, no
     /// cross-core sync; lazy allocation.
     pub(crate) pending_neigh:
         super::types::FastMap<(i32, std::net::IpAddr), PendingNeighPacket>,
+    /// #15096: this binding's effective pending-neighbor cap —
+    /// `pending_neigh_cap_for_rx_fill(rx_fill_frames)` computed once at
+    /// bind time from the binding's own RX fill pool (total frames minus
+    /// reserved TX), so a park can pin at most one quarter of the fill
+    /// pool. Test constructors derive it the same way from their
+    /// synthetic pools. The global `MAX_PENDING_NEIGH` remains the
+    /// ceiling for large rings.
+    pub(crate) pending_neigh_cap: usize,
     /// #7156: deadline-ordered arming for `pending_neigh`. The map above stays
     /// authoritative for packet state; this only decides WHEN each key is next
     /// looked at, so a sweep with nothing due costs one heap peek instead of a
@@ -595,12 +603,19 @@ impl BindingWorker {
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
             gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
             // GEMINI-NEXT.md Section 3 cold start: lazy allocation. The
-            // 4096-cap is enforced at admission (poll_descriptor.rs check
-            // against MAX_PENDING_NEIGH), so pre-allocating that capacity
-            // up front would burn ~576 KB per binding at startup even when
-            // idle. Start at 0 capacity and let VecDeque grow on push as
-            // packets actually queue up.
+            // per-binding cap (#15096) is enforced at admission
+            // (poll_descriptor.rs check against `pending_neigh_cap`), so
+            // pre-allocating that capacity up front would burn memory per
+            // binding even when idle. Start at 0 capacity and let the map
+            // grow as packets actually queue up.
             pending_neigh: super::types::FastMap::default(),
+            // #15096: cap the park at one quarter of THIS binding's RX
+            // fill pool (total frames minus the reserved-TX carve-out,
+            // via the same helper the bind arithmetic uses), so a
+            // distinct-hop sweep cannot drain the fill ring.
+            pending_neigh_cap: super::pending_neigh_cap_for_rx_fill(
+                super::rx_fill_frames_for_driver(driver_name.as_deref(), ring_entries),
+            ),
             pending_neigh_schedule: Default::default(),
             last_neigh_generation: (0, 0),
             pending_neigh_scan: Vec::new(),
@@ -748,6 +763,9 @@ impl BindingWorker {
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
             gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
             pending_neigh: super::types::FastMap::default(),
+            // #15096: test pools model all frames as fill (no reserved
+            // TX carve-out), so the cap derives from the whole pool.
+            pending_neigh_cap: super::pending_neigh_cap_for_rx_fill(total_frames),
             pending_neigh_schedule: Default::default(),
             last_neigh_generation: (0, 0),
             pending_neigh_scan: Vec::new(),
@@ -871,6 +889,7 @@ impl BindingWorker {
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
             gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
             pending_neigh: super::types::FastMap::default(),
+            pending_neigh_cap: super::pending_neigh_cap_for_rx_fill(total_frames),
             pending_neigh_schedule: Default::default(),
             last_neigh_generation: (0, 0),
             pending_neigh_scan: Vec::new(),

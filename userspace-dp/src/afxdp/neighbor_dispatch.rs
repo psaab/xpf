@@ -81,21 +81,30 @@ pub(super) enum PendingNeighAdmission {
     /// (keep-OLDEST; the buffered representative is never replaced, so
     /// each unresolved hop pins at most one UMEM frame).
     DuplicateDrop,
-    /// New key but the map is at `MAX_PENDING_NEIGH` distinct hops →
-    /// capacity drop (counted SEPARATELY in `pending_neigh_capacity_drops`
-    /// per the #2375 split; the duplicate counter must not conflate this
-    /// case).
+    /// New key but the map is at the BINDING's effective cap (#15096:
+    /// `pending_neigh_cap_for_rx_fill` — at most one quarter of the
+    /// binding's RX fill pool, never more than `MAX_PENDING_NEIGH`)
+    /// distinct hops → capacity drop (counted SEPARATELY in
+    /// `pending_neigh_capacity_drops` per the #2375 split; the duplicate
+    /// counter must not conflate this case).
     CapacityDrop,
 }
 
 /// Pure admission decision over the two map facts the caller reads
-/// (`contains_key`, `len`). `#[inline]` — compiles to the identical
-/// branch pair the inline code had.
+/// (`contains_key`, `len`) and the binding's effective cap
+/// `cap = min(MAX_PENDING_NEIGH, rx_fill_frames / 4)` — computed once
+/// at bind time by `BindingWorker` (#15096), so the hot path stays one
+/// comparison. `#[inline]` — compiles to the identical branch pair the
+/// inline code had.
 #[inline]
-pub(super) fn pending_neigh_admission(already_pending: bool, len: usize) -> PendingNeighAdmission {
+pub(super) fn pending_neigh_admission(
+    already_pending: bool,
+    len: usize,
+    cap: usize,
+) -> PendingNeighAdmission {
     if already_pending {
         PendingNeighAdmission::DuplicateDrop
-    } else if len < MAX_PENDING_NEIGH {
+    } else if len < cap {
         PendingNeighAdmission::Buffer
     } else {
         PendingNeighAdmission::CapacityDrop
@@ -112,7 +121,8 @@ pub(super) fn pending_neigh_admission(already_pending: bool, len: usize) -> Pend
 ///   - `DuplicateDrop` (`pending_neigh_duplicate_drops`) — the key was
 ///     already pending: normal cold-start sibling coalescing.
 ///   - `CapacityDrop` (`pending_neigh_capacity_drops`) — a NEW distinct
-///     hop refused because the map is at `MAX_PENDING_NEIGH`:
+///     hop refused because the map is at the binding's effective cap
+///     (#15096: `min(MAX_PENDING_NEIGH, rx_fill_frames / 4)`):
 ///     distinct-hop neighbor exhaustion (the scan/upstream-outage
 ///     failure mode).
 #[inline]
@@ -1781,7 +1791,10 @@ mod learn_precheck_tests {
 #[cfg(test)]
 mod pending_admission_tests {
     use super::{PendingNeighAdmission, pending_neigh_admission};
-    use crate::afxdp::MAX_PENDING_NEIGH;
+    use crate::afxdp::{
+        MAX_PENDING_NEIGH, binding_frame_count_for_driver, pending_neigh_cap_for_rx_fill,
+        reserved_tx_frames_for_driver, rx_fill_frames_for_driver,
+    };
 
     /// Invariant N1's buffering half (#1771 §2.4): exactly one buffered
     /// packet per `(egress_ifindex, next_hop)` — the first packet
@@ -1790,22 +1803,22 @@ mod pending_admission_tests {
     #[test]
     fn first_packet_buffers_siblings_duplicate_drop() {
         assert_eq!(
-            pending_neigh_admission(false, 0),
+            pending_neigh_admission(false, 0, MAX_PENDING_NEIGH),
             PendingNeighAdmission::Buffer
         );
         assert_eq!(
-            pending_neigh_admission(true, 1),
+            pending_neigh_admission(true, 1, MAX_PENDING_NEIGH),
             PendingNeighAdmission::DuplicateDrop
         );
         // Duplicate wins even with plenty of room…
         assert_eq!(
-            pending_neigh_admission(true, 10),
+            pending_neigh_admission(true, 10, MAX_PENDING_NEIGH),
             PendingNeighAdmission::DuplicateDrop
         );
         // …and even at the cap (the duplicate counter must not be
         // conflated with the capacity case — #1782 split).
         assert_eq!(
-            pending_neigh_admission(true, MAX_PENDING_NEIGH),
+            pending_neigh_admission(true, MAX_PENDING_NEIGH, MAX_PENDING_NEIGH),
             PendingNeighAdmission::DuplicateDrop
         );
     }
@@ -1815,12 +1828,112 @@ mod pending_admission_tests {
     #[test]
     fn new_key_capacity_boundary() {
         assert_eq!(
-            pending_neigh_admission(false, MAX_PENDING_NEIGH - 1),
+            pending_neigh_admission(false, MAX_PENDING_NEIGH - 1, MAX_PENDING_NEIGH),
             PendingNeighAdmission::Buffer
         );
         assert_eq!(
-            pending_neigh_admission(false, MAX_PENDING_NEIGH),
+            pending_neigh_admission(false, MAX_PENDING_NEIGH, MAX_PENDING_NEIGH),
             PendingNeighAdmission::CapacityDrop
+        );
+    }
+
+    /// #15096 acceptance cell: a binding built for ring=1024 parks at
+    /// most one quarter of its RX fill pool. Pre-fix the admission
+    /// helper took no cap and compared `len < MAX_PENDING_NEIGH`
+    /// (4096), so a 4096-deep distinct-hop sweep parked twice the
+    /// whole 2048-frame fill pool (fill = 2*ring on every driver).
+    /// This cell drives the
+    /// same `pending_neigh_admission` the poll loop calls, with the
+    /// cap derived from the same bind arithmetic
+    /// (`binding_frame_count_for_driver` / `rx_fill_frames_for_driver`)
+    /// the worker constructor uses — so it fails on revert of either
+    /// the derivation or the admission threading.
+    #[test]
+    fn ring_1024_binding_parks_at_most_quarter_of_fill_pool_15096() {
+        for driver in [None, Some("virtio_net"), Some("mlx5_core")] {
+            let ring = 1024u32;
+            let total = binding_frame_count_for_driver(driver, ring);
+            let reserved = reserved_tx_frames_for_driver(driver, ring);
+            let rx_fill = rx_fill_frames_for_driver(driver, ring);
+            assert_eq!(rx_fill, total - reserved, "fill derivation for {driver:?}");
+            let cap = pending_neigh_cap_for_rx_fill(rx_fill);
+            assert_eq!(cap, (rx_fill / 4).max(1) as usize, "cap for {driver:?}");
+            assert!(
+                cap < MAX_PENDING_NEIGH,
+                "ring=1024 cap must bind below the global ceiling for {driver:?}"
+            );
+            assert!(
+                cap <= rx_fill as usize / 4,
+                "parked <= rx_frames/4 for {driver:?}"
+            );
+            // Exactly `cap` distinct hops buffer; the next new hop is a
+            // capacity drop, and a duplicate is never a capacity drop.
+            assert_eq!(
+                pending_neigh_admission(false, cap - 1, cap),
+                PendingNeighAdmission::Buffer,
+                "last slot below the derived cap buffers for {driver:?}",
+            );
+            assert_eq!(
+                pending_neigh_admission(false, cap, cap),
+                PendingNeighAdmission::CapacityDrop,
+                "new hop at the derived cap is refused for {driver:?}",
+            );
+            assert_eq!(
+                pending_neigh_admission(true, cap, cap),
+                PendingNeighAdmission::DuplicateDrop,
+                "duplicate at the derived cap stays a duplicate for {driver:?}",
+            );
+        }
+        // Large rings keep the historical ceiling: the per-binding cap
+        // never exceeds MAX_PENDING_NEIGH.
+        assert_eq!(pending_neigh_cap_for_rx_fill(1_000_000), MAX_PENDING_NEIGH);
+        // Degenerate pools still admit one representative rather than
+        // wedging admission at zero.
+        assert_eq!(pending_neigh_cap_for_rx_fill(0), 1);
+        assert_eq!(pending_neigh_cap_for_rx_fill(3), 1);
+    }
+
+    /// #15096 binding-level cell: a real `BindingWorker` built the way
+    /// the mirror fixture builds one (its synthetic 256-frame pool
+    /// models all frames as fill) parks at most `rx_frames / 4`
+    /// distinct hops through the production admission helper, and the
+    /// refusal past the cap is a capacity drop counted on the binding's
+    /// own live state. Pre-fix `BindingWorker` had no per-binding cap
+    /// at all, so this cell fails to compile on the base — the RED
+    /// evidence is the two-arg helper cell above
+    /// (`ring_1024_...`), whose pre-fix form admits
+    /// `len < MAX_PENDING_NEIGH` regardless of the fill pool.
+    #[test]
+    fn binding_worker_parks_at_most_quarter_of_its_pool_15096() {
+        use super::record_pending_neigh_admission_drop;
+        use crate::afxdp::worker::BindingWorker;
+        use std::sync::atomic::Ordering;
+
+        let binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+        // new_for_mirror_test: ring=128, total_frames=256, all fill.
+        let rx_frames = 256usize;
+        assert_eq!(binding.pending_neigh_cap, rx_frames / 4);
+        assert_eq!(
+            pending_neigh_admission(false, binding.pending_neigh_cap, binding.pending_neigh_cap),
+            PendingNeighAdmission::CapacityDrop,
+        );
+        record_pending_neigh_admission_drop(
+            &binding.live,
+            pending_neigh_admission(false, binding.pending_neigh_cap, binding.pending_neigh_cap),
+        );
+        assert_eq!(
+            binding
+                .live
+                .pending_neigh_capacity_drops
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            binding
+                .live
+                .pending_neigh_duplicate_drops
+                .load(Ordering::Relaxed),
+            0
         );
     }
 
