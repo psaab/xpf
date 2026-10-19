@@ -1645,12 +1645,18 @@ func (m *Manager) generateNetwork(ifc InterfaceConfig) string {
 	// Preserve externally-added addresses across networkctl reload /
 	// reconfigure. Two owners add addresses networkd does not know about:
 	// VRRP VIPs / the RETH link-local base (KeepAddresses, static class)
-	// and the daemon DHCP client's lease (dynamic class, #14594). The
-	// daemon lease is written only by pkg/dhcp applyAddress (AddrReplace,
-	// no lifetimes), so without a keep directive an ordinary reconfigure
-	// of every managed interface strips it until at least T1.
-	// KeepConfiguration accepts one value, so the classes compose:
-	// static-only -> static, dynamic-only -> dhcp, both -> yes.
+	// and the daemon DHCP client's lease (#14594). The daemon lease is
+	// written only by pkg/dhcp applyAddress (AddrReplace with the
+	// lease's kernel lifetimes, #15071), so without a keep directive an
+	// ordinary reconfigure of every managed interface strips it until
+	// at least T1.
+	// KeepConfiguration accepts one value. A DHCP row must emit `yes`,
+	// NOT `dhcp`: live systemd 262 netns probes (docs/log/14594.md)
+	// show the `dhcp` class preserves only finite-lifetime foreign
+	// addresses and strips a forever-lifetime one (an infinite lease
+	// installs as forever, and a zero/expired lifetime installs with
+	// no cacheinfo = permanent), while `static` does the mirror image.
+	// Only `yes` (static+dynamic) preserves the lease in both shapes.
 	if keep := keepConfigurationValue(ifc); keep != "" {
 		fmt.Fprintf(&b, "KeepConfiguration=%s\n", keep)
 	}
@@ -1729,28 +1735,33 @@ func (m *Manager) generateNetwork(ifc InterfaceConfig) string {
 //
 // Static class: KeepAddresses (VRRP VIPs, the RETH link-local base, a
 // VLAN parent's advert source) plus any Address= line this file itself
-// renders — a foreign address can only be the static class when the
-// interface actually carries one. Rendering is per-family DHCP-gated
-// (#2986), so the surviving set is recomputed exactly as generateNetwork
-// renders it; a DHCP-suppressed address does not count.
+// renders. Rendering is per-family DHCP-gated (#2986), so the
+// surviving set is recomputed exactly as generateNetwork renders it; a
+// DHCP-suppressed address does not count.
 //
-// Dynamic class: a daemon DHCP lease on THIS interface — DHCPv4 always,
-// DHCPv6 only when the client is stateful and requests IA_NA (nil
-// IATypes = daemon default, which requests IA_NA). Stateless and
+// Daemon-DHCP class: a lease address on THIS interface — DHCPv4
+// always, DHCPv6 only when the client is stateful and requests IA_NA
+// (nil IATypes = daemon default, which requests IA_NA). Stateless and
 // PD-only DHCPv6 own no address here and must not widen the keep.
+//
+// Any row owning a daemon lease emits `yes`, even with no static
+// class: the lease's kernel shape is lifetime-dependent (finite
+// remaining lifetime, or forever for an infinite/zero lifetime), and
+// neither `dhcp` nor `static` alone preserves both shapes across
+// `networkctl reconfigure` (executed on systemd 262, see
+// docs/log/14594.md). `yes` is the only value that covers both, and
+// it also covers any static class present, so the classes compose to
+// the same value.
 func keepConfigurationValue(ifc InterfaceConfig) string {
-	static := (ifc.KeepAddresses && hasRenderedStaticAddress(ifc)) || ifc.KeepForeignStatic
 	dynamic := ifc.DHCPv4 || dhcpv6OwnsAddress(ifc)
-	switch {
-	case static && dynamic:
+	if dynamic {
 		return "yes"
-	case static:
-		return "static"
-	case dynamic:
-		return "dhcp"
-	default:
-		return ""
 	}
+	static := (ifc.KeepAddresses && hasRenderedStaticAddress(ifc)) || ifc.KeepForeignStatic
+	if static {
+		return "static"
+	}
+	return ""
 }
 
 // hasRenderedStaticAddress reports whether generateNetwork renders at

@@ -56,9 +56,13 @@ Standard library only.
   that still use `MACAddress=`.
 - `KeepConfiguration=static` on RETH interfaces preserves VRRP VIPs
   across `networkctl reload`. DHCP rows preserve the daemon's lease
-  address the same way (#14594): `keepConfigurationValue` emits `dhcp`
-  for a dynamic-only row, `static` for a static-only row, and `yes`
-  when both classes are present (systemd accepts one value). DHCPv6
+  address the same way (#14594): `keepConfigurationValue` emits `yes`
+  for any row owning a daemon lease and `static` for a static-only
+  row (systemd accepts one value). `yes` is required, not `dhcp`:
+  live systemd 262 netns probes showed the `dhcp` class preserves
+  only finite-lifetime foreign addresses and strips a
+  forever-lifetime one (infinite/zero-lifetime leases install as
+  forever), while `static` does the mirror image. DHCPv6
   counts as dynamic only when it is stateful and requests IA_NA;
   stateless and PD-only clients own no address on the interface.
   Standalone `vrrp-group` VIPs (#15061) are the other static class:
