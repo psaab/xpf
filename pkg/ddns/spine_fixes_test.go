@@ -38,8 +38,8 @@ import (
 // family publishes its OWN DHCID, and the manager store is the
 // cross-family ownership proof.
 func dualStackLease() (v4, v6 []Lease) {
-	v4 = []Lease{{Family: 4, Address: "10.0.1.5", Identity: "cid:01:02:03", SubnetID: "1", HostName: "laptop"}}
-	v6 = []Lease{{Family: 6, Address: "2001:db8::5", Identity: "duid:00:01:00:01:22:33:44:55:66:77/16777216", SubnetID: "1", HostName: "laptop"}}
+	v4 = []Lease{{Family: 4, Address: "10.0.1.5", Identity: "cid:01000000000001", SubnetID: "1", HostName: "laptop"}}
+	v6 = []Lease{{Family: 6, Address: "2001:db8::5", Identity: "duid:00:03:00:01:00:00:00:00:00:01/16777216", SubnetID: "1", HostName: "laptop"}}
 	return v4, v6
 }
 
@@ -79,42 +79,40 @@ func TestPartialDualStackTeardownKeepsSharedDHCID(t *testing.T) {
 	// replace-owned with a DHCID; reuse the same cfg for both.
 	cfg.DynamicDNSv6 = cfg.DynamicDNS
 
-	const v4Identity = "cid:01:02:03"
-	const v6Identity = "duid:00:01:00:01:22:33:44:55:66:77/16777216"
+	const v4Identity = "cid:01000000000001"
+	const v6Identity = "duid:00:03:00:01:00:00:00:00:00:01/16777216"
 	const fqdn = "laptop.example.com"
 	v4, v6 := dualStackLease()
 
-	// Cycle 1: both families active → A, AAAA, and BOTH per-family
-	// DHCIDs published.
+	// Cycle 1: both families active → A, AAAA, and the ONE shared
+	// device DHCID published (#14995: same device => one DHCID RR;
+	// dhcidForName(v4) and dhcidForName(v6) coincide).
 	src.v4, src.v6 = v4, v6
 	if err := m.Reconcile(context.Background(), cfg); err != nil {
 		t.Fatalf("publish reconcile: %v", err)
 	}
 	dhcid4 := dhcidForName(t, v4Identity, fqdn)
 	dhcid6 := dhcidForName(t, v6Identity, fqdn)
-	if !srv.zoneHas(dhcid4) {
-		t.Fatal("setup: v4 DHCID was not published")
+	if dhcid4.Digest != dhcid6.Digest {
+		t.Fatal("#14995: same-device families must write ONE identical device DHCID RR")
 	}
-	if !srv.zoneHas(dhcid6) {
-		t.Fatal("setup: v6 DHCID was not published")
+	if !srv.zoneHas(dhcid4) {
+		t.Fatal("setup: shared device DHCID was not published")
 	}
 	if m.Stats().OwnedRecords != 2 {
 		t.Fatalf("want 2 owned records (A+AAAA), got %d", m.Stats().OwnedRecords)
 	}
 
-	// Cycle 2: v4 lease released, v6 still active. The A and the v4
-	// DHCID are withdrawn but the v6 DHCID MUST survive (the AAAA
-	// still needs it for its own delete prerequisite).
+	// Cycle 2: v4 lease released, v6 still active. The A is withdrawn
+	// but the shared DHCID MUST survive (the AAAA still needs it for
+	// its own delete prerequisite).
 	src.v4 = nil
 	if err := m.Reconcile(context.Background(), cfg); err != nil {
 		t.Fatalf("partial-teardown reconcile: %v", err)
 	}
 	if !srv.zoneHas(dhcid6) {
-		t.Fatal("#2700/#14602 regression: v6 DHCID was deleted on partial dual-stack " +
+		t.Fatal("#2700/#14995 regression: shared DHCID was deleted on partial dual-stack " +
 			"teardown — the surviving AAAA is now unprotected and will leak")
-	}
-	if srv.zoneHas(dhcid4) {
-		t.Fatal("v4 DHCID orphaned after the v4 family released")
 	}
 	// The A must be gone; the AAAA must remain.
 	if hasA := zoneHasType(srv, dns.Fqdn(fqdn), dns.TypeA); hasA {

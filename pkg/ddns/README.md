@@ -979,30 +979,38 @@ regressed.
   transient/auth/throttle failures (`SignatureDoesNotMatch`, 5xx, 429, a
   non-"not found" `InvalidChangeBatch`) STILL return non-nil so the engine
   keeps retrying — only the already-gone case is swallowed.
-- **Per-family DHCID + manager-owned sibling publish (#2700/#14602)** — the
-  RFC 4701 DHCID digest folds in `client-identity || FQDN` only (NOT the
-  address). Production identities are family-shaped (`identity4` yields
-  `cid:`/`mac:`, `identity6` yields `duid:<duid>/<iaid>`), so a dual-stack
-  client's two families digest to DIFFERENT DHCIDs — there is no single
-  shared DHCID across families in production (the identical-identity
-  fixture the #2700 wording described cannot be produced by `identity6`).
-  Each family publishes its OWN DHCID. The second family's publish
-  cannot satisfy Attempt B (DHCID-matches-ours) against the sibling's
-  DHCID, so `sendAddOwned` takes a sibling branch when the manager
-  threads `SiblingFamilyOwned` (from `crossTypeSiblingOwned`, its store
-  scan — the store, not the wire digest, is the cross-family ownership
-  proof): it adds the forward RR + its own DHCID under a per-type
-  `RRsetNotUsed` prerequisite, leaving the sibling untouched. On
-  teardown each family's delete replays its own publishing identity,
-  so it removes only its own A/AAAA + its own DHCID; the surviving
-  family's DHCID stays on the wire (its delete prerequisite still
-  holds) and the last family's delete leaves no orphan. The
-  identical-identity case (same ClientID both families) still shares
-  one DHCID and `dhcidSharedWithOther`/`KeepForwardDHCID` still keep
-  it across a partial teardown. A foreign client at the same name is
-  still refused: no sibling in the store leaves every name-level /
-  DHCID guard unchanged, and a same-type foreign RRset fails the
-  sibling branch's own `RRsetNotUsed`.
+- **Device DHCID + wire-proven sibling publish (#2700/#14602/#14995)** — the
+  RFC 4701 DHCID digest folds in `device-identity || FQDN` (NOT the raw
+  family-shaped string, NOT the address). `dhcidDigestClientID` canonicalizes
+  a pairable identity to its device key (`dev:mac:<MAC>` for a MAC-based
+  DUID / v4 hwaddr / Ethernet client-id; `dev:cid:<id>` / `dev:duid:<DUID>`
+  otherwise), so one device carries ONE DHCID RR across its A and AAAA —
+  never two DHCID RRs at one name (RFC 4701 §3.5). An unpairable identity
+  digests verbatim and can only ever match itself. **Pre-#14995 residual:**
+  records published before the device canonicalization carry the legacy
+  per-identity digest; their guarded delete's `Used` prerequisite computes
+  the device digest, so a legacy record's delete is a counted skip (ownership
+  still dropped — no wire leak beyond the stale RR the operator can remove;
+  a same-device re-publish converges the name onto the device DHCID).
+  A cross-family publish earns a guard downgrade ONLY by proving the
+  sibling's exact DHCID on the wire: the manager threads the sibling's
+  identity (`SiblingClientID` from the durable store, narrowed to same
+  scope-modulo-family + same endpoint; `PairedClientID` for a same-device
+  sibling desired this same pass) and the backend sends a
+  prerequisite-only `Used(sibling-DHCID)` probe (`proveSiblingDHCID`)
+  before any per-type add. The pre-#14995 store scan matched on
+  FQDN+family ONLY, so any unauthenticated client that merely REQUESTED
+  the victim's hostname from the other family hijacked the name and
+  poisoned its DHCID prerequisites — the store is now a candidate
+  source, never the proof. On teardown each family's delete replays its
+  own publishing identity against the shared device DHCID;
+  `dhcidSharedWithOther`/`KeepForwardDHCID` keep it while a same-device
+  sibling survives and the last family's delete removes it (no orphan).
+  A foreign client at the same name is refused: it pairs with nothing,
+  proves nothing, and every name-level / DHCID guard stays in force.
+  Under skip-existing/strict-fail (which write no DHCID on the normal
+  path) a successful same-device first-family add publishes the device
+  marker once per updater so the sibling's proof has a wire target.
 - **Unloadable ownership state fails CLOSED (#2650)** — a corrupt, unknown-
   future-version, or unreadable state file is NOT silently reset to an empty
   store. `loadDDNSState` returns the empty store plus a CLASSIFIED error

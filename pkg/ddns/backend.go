@@ -40,6 +40,15 @@ type LeaseDNSRecord struct {
 	// pre-existing third-party RR). NOT part of the published forward/reverse
 	// RR set; carried alongside it only to derive the ownership marker.
 	ClientID string
+	// PairedClientID is the client identity of the OPPOSITE family's
+	// lease for the same device + FQDN in this reconcile pass, paired
+	// by sameDeviceClient at desired-set build time (#14995). The
+	// backend digests it (device-canonicalized) into the sibling
+	// DHCID the cross-family add must prove on the wire. Empty when
+	// no same-device sibling is desired this pass. Distinct from
+	// SiblingClientID (the durable store sibling): PairedClientID
+	// covers the FIRST pass, before any store row exists.
+	PairedClientID string
 	// PrevAddr is the PREVIOUS published rdata for a SELF-OWNED Surface A
 	// record (#3739), threaded from publishLocked (seeded across a restart from
 	// the durable store's AddrText). It lets a self-owned backend do a
@@ -97,6 +106,16 @@ type LeaseDNSRecord struct {
 	// Set by Manager.upsertLocked from its ownership scan — deliberately
 	// NOT set anywhere on a DeleteLease-construction path for this meaning.
 	SiblingFamilyOwned bool
+	// SiblingClientID is the client identity of the manager-owned
+	// opposite-family sibling record, threaded on UpsertLease only
+	// (#14995). The RFC 2136 backend digests it into the sibling's
+	// DHCID and requires that exact DHCID on the wire (RFC 2136
+	// §2.4.2 value-dependent prerequisite) before it downgrades any
+	// guard for a cross-family publish — so the store flag alone
+	// never authorizes the claim, and a stale write-ahead intent
+	// whose wire add never landed cannot hijack the name. Empty
+	// means no proven sibling: every guard stays name-level.
+	SiblingClientID string
 }
 
 // DNSUpdater is the pluggable DNS-update backend (plan §4.4). The
