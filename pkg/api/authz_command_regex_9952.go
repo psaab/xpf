@@ -75,8 +75,9 @@ import (
 var restRouteCommand = map[string]string{
 	// Read endpoints. Where a gRPC method serves the same data, the command is
 	// the SAME STRING it charges, so the two surfaces cannot diverge on what an
-	// operator's regex means.
-	"GET /api/v1/status":                               "show version",
+	// operator's regex means. (GET /api/v1/status and
+	// GET /api/v1/config/status are session plumbing probes with no command
+	// charge — see restRoutesNoCommand, #15077.)
 	"GET /api/v1/statistics/global":                    "show security flow statistics",
 	"GET /api/v1/security/zones":                       "show security zones",
 	"GET /api/v1/security/policies":                    "show security policies",
@@ -103,13 +104,8 @@ var restRouteCommand = map[string]string{
 	"GET /api/v1/config/export":                        "show configuration",
 	"GET /api/v1/config/search":                        "show configuration",
 	"GET /api/v1/config/history":                       "show system commit history",
-	// gRPC charges GetConfigModeStatus "show version" (authz_command_table.go).
-	// Matched deliberately rather than "improved" here: if that is the wrong
-	// command it is wrong IDENTICALLY on both surfaces, which is discoverable;
-	// a better answer on one surface only is a divergence nobody sees.
-	"GET /api/v1/config/status": "show version",
-	"GET /api/v1/events/stream": "show log",
-	"GET /api/v1/logs/stream":   "show log",
+	"GET /api/v1/events/stream":                        "show log",
+	"GET /api/v1/logs/stream":                          "show log",
 
 	// Clear and diagnostic endpoints — the class the issue's own matrix names.
 	"POST /api/v1/security/sessions/clear": "clear security flow session",
@@ -133,6 +129,18 @@ var restRoutesNoCommand = map[string]string{
 	"GET /health":  "unauthenticated liveness probe; authMiddleware exempts it unconditionally, so there is no principal to charge",
 	"GET /metrics": "Prometheus exposition, not an operational command; gated by the #4162 metrics auth rule",
 
+	// SESSION PLUMBING, NOT COMMANDS (#15077). The REST twins of the
+	// gRPC plumbing probes: daemon liveness/cluster facts and
+	// config-mode/dirty facts. Neither renders the `show version`
+	// banner; `show version` itself is served by GET /api/v1/show-text
+	// with topic=version and stays charged there. Charging the probes
+	// to `show version` made a version deny (or an allowlist) refuse
+	// the liveness facts every other admitted operation depends on.
+	// They are exempt from the operational regex gate and governed by
+	// the coarse permission authorization alone, exactly as the gRPC
+	// probes are — see restNoCommandExempt14146.
+	"GET /api/v1/status":        "session plumbing probe (daemon liveness/cluster facts); not an operator command — coarse permission only (#15077)",
+	"GET /api/v1/config/status": "session plumbing probe (config-mode/dirty facts); not an operator command — coarse permission only (#15077)",
 	// CONFIG-MODE routes are governed by `deny-configuration` /
 	// `allow-configuration`, not by `deny-commands` — exactly as the on-box CLI's
 	// dispatchConfig applies only checkConfigRegex, and as #9633 established for
@@ -179,13 +187,17 @@ var restRoutesNoCommand = map[string]string{
 // that still return nil for a class with operational regexes. Every member is
 // exempt because a DIFFERENT authorization decision governs it, never because
 // it is a read: /health and /metrics never carry a login-class principal on
-// this path (health is unauthenticated, metrics has its own #4162 rule), and
-// the config-mode routes are governed by the *-configuration pair (#9633).
+// this path (health is unauthenticated, metrics has its own #4162 rule), the
+// config-mode routes are governed by the *-configuration pair (#9633), and
+// the two status probes are session plumbing governed by the coarse
+// permission authorization alone (#15077).
 // TestNoCommandExemptSetIsExactlyTheOtherFamily14146 pins this set so a future
 // route cannot be exempted by adding it to restRoutesNoCommand alone.
 var restNoCommandExempt14146 = map[string]bool{
 	"GET /health":                          true,
 	"GET /metrics":                         true,
+	"GET /api/v1/status":                   true,
+	"GET /api/v1/config/status":            true,
 	"POST /api/v1/config/set":              true,
 	"POST /api/v1/config/delete":           true,
 	"POST /api/v1/config/deactivate":       true,

@@ -85,13 +85,12 @@ func runGuardedReadMethod14712(t *testing.T, s *Server, method, url string) *htt
 // 403 (fail-closed !mapped), and after the fix HEAD follows the GET
 // verdict including deny cases.
 func TestHeadFollowsGetCommandVerdict14712(t *testing.T) {
-	// allow-commands "^show ": /api/v1/status charges "show version"
-	// (allowed) and /api/v1/security/sessions charges
-	// "show security flow session" (also a show — see the deny cells
-	// below for the refusal direction on this same config shape).
+	// allow-commands "^show version$": /api/v1/show-text?topic=version
+	// charges "show version" (allowed); /api/v1/status is a plumbing
+	// probe (#15077) admitted by its coarse price on every spelling.
 	allowCfg := cfg14146(t, "", "^show version$")
 	s := &Server{}
-	for _, path := range []string{"/api/v1/status"} {
+	for _, path := range []string{"/api/v1/status", "/api/v1/show-text?topic=version"} {
 		getErr := s.authorizeRESTCommand(httptest.NewRequest(http.MethodGet, path, nil), allowCfg, principalLimited14712())
 		headErr := s.authorizeRESTCommand(httptest.NewRequest(http.MethodHead, path, nil), allowCfg, principalLimited14712())
 		if getErr != nil {
@@ -104,12 +103,11 @@ func TestHeadFollowsGetCommandVerdict14712(t *testing.T) {
 		}
 	}
 
-	// DENY direction on the same mechanism: a class that denies the
-	// route's command must be refused on HEAD exactly as on GET. This
-	// proves the fix evaluates the regex against the resolved command
-	// rather than merely allowing HEAD.
+	// DENY direction: a class that denies the command must be refused
+	// identically on HEAD and GET ("show version" via topic=version).
+	// /api/v1/status is plumbing (#15077) and matches neither side's deny.
 	denyCfg := cfg14146(t, "^show version$", "")
-	for _, path := range []string{"/api/v1/status"} {
+	for _, path := range []string{"/api/v1/show-text?topic=version"} {
 		getErr := s.authorizeRESTCommand(httptest.NewRequest(http.MethodGet, path, nil), denyCfg, principalLimited14712())
 		headErr := s.authorizeRESTCommand(httptest.NewRequest(http.MethodHead, path, nil), denyCfg, principalLimited14712())
 		if getErr == nil {
@@ -121,6 +119,14 @@ func TestHeadFollowsGetCommandVerdict14712(t *testing.T) {
 				"refused — HEAD bypassed the command regex (#14712)", path)
 		} else if !strings.Contains(headErr.Error(), `denies "show version"`) {
 			t.Errorf("HEAD %s refusal does not charge \"show version\": %v", path, headErr)
+		}
+	}
+	for _, path := range []string{"/api/v1/status", "/api/v1/config/status"} {
+		if err := s.authorizeRESTCommand(httptest.NewRequest(http.MethodGet, path, nil), denyCfg, principalLimited14712()); err != nil {
+			t.Errorf("GET %s is session plumbing and must stay admitted under a show-version deny (#15077): %v", path, err)
+		}
+		if err := s.authorizeRESTCommand(httptest.NewRequest(http.MethodHead, path, nil), denyCfg, principalLimited14712()); err != nil {
+			t.Errorf("HEAD %s is session plumbing and must stay admitted under a show-version deny (#15077): %v", path, err)
 		}
 	}
 }

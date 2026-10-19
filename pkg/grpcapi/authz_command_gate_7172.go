@@ -115,6 +115,14 @@ func (s *Server) authorizeRPCCommand(cfg *config.Config, class, fullMethod strin
 	if isCompleteMethod(fullMethod) {
 		return authorizeCompleteRPCCommand(class, rules, req)
 	}
+	// #15077: session-plumbing probes are exempt from the operational
+	// regex gate; the coarse PermView check in authorizeRPCContext
+	// already ran. Charging them to `show version` locked every member
+	// of a version-denying (or allowlist) class out of the cli, whose
+	// startup probe runs before any command is dispatched.
+	if isSessionPlumbingMethod(fullMethod) {
+		return nil
+	}
 
 	// #9633: config-mode RPCs are governed by the `*-configuration` regexes
 	// (authorizeRPCConfigMutation), exactly as the on-box CLI's dispatchConfig
@@ -138,6 +146,32 @@ func isCompleteMethod(fullMethod string) bool {
 	service, method, ok := splitFullMethod(fullMethod)
 	return ok && service == serviceName && method == completeMethodName
 }
+
+// isSessionPlumbingMethod reports whether fullMethod is one of the two
+// session-plumbing probes (#15077): GetStatus (the cli's pre-dispatch
+// reachability probe, also the prompt's cluster-facts refresh) and
+// GetConfigModeStatus (the per-prompt config-mode/dirty poll). They
+// return liveness facts, not command output, so there is no operational
+// command to price; authorizeRPCCommand exempts them from the regex
+// gate and the coarse PermView price governs them.
+func isSessionPlumbingMethod(fullMethod string) bool {
+	service, method, ok := splitFullMethod(fullMethod)
+	if !ok || service != serviceName {
+		return false
+	}
+	switch method {
+	case statusMethodName, configModeStatusMethodName:
+		return true
+	}
+	return false
+}
+
+// Named so the plumbing set has one spelling, mirroring
+// completeMethodName / showTextMethodName.
+const (
+	statusMethodName           = "GetStatus"
+	configModeStatusMethodName = "GetConfigModeStatus"
+)
 
 // authorizeCompleteRPCCommand applies the class's operational
 // allow/deny-commands rules to a Complete request (#14952).

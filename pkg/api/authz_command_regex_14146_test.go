@@ -127,7 +127,7 @@ func TestRestrictedClassControls14146(t *testing.T) {
 		}
 	}
 	if err := call9952(t, allowCfg, "limited", "GET", "/api/v1/status", ""); err != nil {
-		t.Fatalf("GET /api/v1/status (show version) refused under its own allow: %v", err)
+		t.Fatalf("GET /api/v1/status is session plumbing (#15077) and must stay admitted under any allow-list: %v", err)
 	}
 	// Superuser exemption is unchanged.
 	denyAllCfg := cfg14146(t, ".*", "")
@@ -140,7 +140,8 @@ func TestRestrictedClassControls14146(t *testing.T) {
 
 // TestNoCommandExemptSetIsExactlyTheOtherFamily14146 guards the exemption
 // mechanism itself: the only declared routes a restricted class may still
-// reach are /health, /metrics, and the config-mode family. A future route
+// reach are /health, /metrics, the two session-plumbing status probes
+// (#15077), and the config-mode family. A future route
 // added to restRoutesNoCommand without being added here denies — and this
 // test fails if the exempt set drifts from that reviewed set in either
 // direction (a stale exemption for a removed route, or a new exemption
@@ -148,6 +149,7 @@ func TestRestrictedClassControls14146(t *testing.T) {
 func TestNoCommandExemptSetIsExactlyTheOtherFamily14146(t *testing.T) {
 	want := map[string]bool{
 		"GET /health": true, "GET /metrics": true,
+		"GET /api/v1/status": true, "GET /api/v1/config/status": true,
 		"POST /api/v1/config/set": true, "POST /api/v1/config/delete": true,
 		"POST /api/v1/config/deactivate": true, "POST /api/v1/config/activate": true,
 		"POST /api/v1/config/annotate": true, "POST /api/v1/config/load": true,
@@ -169,10 +171,9 @@ func TestNoCommandExemptSetIsExactlyTheOtherFamily14146(t *testing.T) {
 	}
 	for route := range restNoCommandExempt14146 {
 		if !want[route] {
-			t.Errorf("route %q is exempt for a restricted class but is not /health, /metrics, or config-mode; a read route must fail closed, not be exempted (#14146)", route)
+			t.Errorf("route %q is exempt for a restricted class but is not /health, /metrics, a status probe, or config-mode; a read route must fail closed, not be exempted (#14146/#15077)", route)
 		}
 	}
-	// Every non-exempt, non-request-decoded declared route is one of the six.
 	for route := range restRoutesNoCommand {
 		if restNoCommandExempt14146[route] || isRequestDecodedRoute9952(route) {
 			continue

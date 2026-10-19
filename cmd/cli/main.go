@@ -27,7 +27,9 @@ import (
 	"github.com/psaab/xpf/pkg/osident"
 	"github.com/psaab/xpf/pkg/policymatch"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -181,6 +183,15 @@ func main() {
 	resp, err := client.GetStatus(ctx, &pb.GetStatusRequest{})
 	cancel()
 	if err != nil {
+		// #15077: a PermissionDenied from the startup probe is an
+		// authorization verdict, not a reachability failure — the
+		// daemon IS reachable and refused the probe. Report it as
+		// such; "cannot reach xpfd" blames the network and sends the
+		// operator debugging a healthy daemon.
+		if status.Code(err) == codes.PermissionDenied {
+			fmt.Fprintf(os.Stderr, "cli: access denied by xpfd at %s: %v\n", *addr, err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "cli: cannot reach xpfd at %s: %v\n", *addr, err)
 		os.Exit(1)
 	}
