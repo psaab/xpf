@@ -6788,7 +6788,7 @@ A BGP `group`'s `neighbor` children and its group-level default attributes are
 **semantically-unordered** Junos siblings. A neighbor inherits every group-level
 default it does not override: `peer-as`, `local-as`, `local-address`,
 `hold-time`, `passive`, `description`, `multihop`, `export`, `import`,
-`family` (inet/inet6 + per-family `prefix-limit maximum`), `authentication-key`,
+`family` (inet/inet6 + per-family `prefix-limit` — see below), `authentication-key`,
 `bfd-liveness-detection` (interval/multiplier), `default-originate`, `loops`
 (allow-as-in), and `remove-private`.
 
@@ -16823,3 +16823,43 @@ Repeated `security pre-id-default-policy` blocks merge their session-init and
 session-close logging bits across all security roots instead of replacing the
 earlier block. A block without logging modes does not clear a mode already
 configured elsewhere.
+
+### BGP prefix-limit: log-only default, teardown opt-in (#15010)
+
+Junos `family <inet|inet6> unicast prefix-limit` (group or neighbor scope):
+
+```
+prefix-limit {
+    maximum <1..4294967295>;
+    teardown [<1..100>] [idle-timeout (forever | <1..2400 minutes>)];
+}
+```
+
+`maximum` alone is **log-only** in Junos: exceeding it logs, the session
+stays Established. Only with `teardown` is the session dropped on
+overflow; `teardown <pct>` additionally logs at that percentage of the
+maximum, and `idle-timeout` keeps the torn-down session down for that
+many minutes (`forever` = until `clear bgp neighbor`).
+
+xpf models `maximum` + `teardown` (typed on `BGPNeighbor` as
+`PrefixLimit*` / `PrefixLimitTeardown*` / `PrefixLimitTeardownPct*` /
+`PrefixLimitIdleTimeout*` / `PrefixLimitIdleForever*`, per family) and
+renders FRR 10.6 `neighbor <peer> maximum-prefix` as:
+
+| Junos form | FRR render |
+|---|---|
+| `maximum N` (no teardown) | `maximum-prefix N warning-only` |
+| `teardown` / `teardown <pct>` | `maximum-prefix N [<pct>]` |
+| `teardown [<pct>] idle-timeout M` | `maximum-prefix N [<pct>] restart M` |
+| `teardown [<pct>] idle-timeout forever` | `maximum-prefix N [<pct>]` |
+
+Documented FRR gaps: (1) Junos re-establishes a torn-down session "in a
+short time" when no idle-timeout is given, but FRR `restart` is in whole
+minutes (1..65535) with no sub-minute form, so bare `teardown` maps to
+FRR's no-restart shape — the session stays down until
+`clear bgp neighbor`, exactly like `forever`. Operators who need timed
+re-establishment must author `idle-timeout <minutes>`. (2) `drop-excess`
+and `hide-excess` have no FRR equivalent (bgpd either warns or CEASEs;
+it cannot drop/hide only the excess) and are **rejected** at commit
+rather than silently ignored — use an import policy / prefix-list to
+drop excess prefixes instead.

@@ -18,8 +18,8 @@ func TestGenerateProtocolsBGPMaximumPrefixBounds11793(t *testing.T) {
 		{Address: "2001:db8::1", PeerAS: 65003, FamilyInet6: true, PrefixLimitInet6: int(^uint32(0)) + 1},
 	}}
 	got := New().generateProtocols(nil, nil, bgp, nil, nil, "", 1, nil, nil)
-	if !strings.Contains(got, "neighbor 192.0.2.1 maximum-prefix 4294967295\n") {
-		t.Fatalf("legal uint32 maximum was not rendered verbatim:\n%s", got)
+	if !strings.Contains(got, "neighbor 192.0.2.1 maximum-prefix 4294967295 warning-only\n") {
+		t.Fatalf("legal uint32 maximum was not rendered verbatim (log-only default, #15010):\n%s", got)
 	}
 	if strings.Contains(got, "neighbor 192.0.2.2 maximum-prefix") ||
 		strings.Contains(got, "neighbor 2001:db8::1 maximum-prefix") ||

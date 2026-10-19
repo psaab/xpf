@@ -789,6 +789,18 @@ type BGPNeighbor struct {
 	RemovePrivateAS      bool     // strip private AS numbers from updates
 	PrefixLimitInet      int      // max IPv4 prefixes (1..4294967295; 0 = unlimited only when unset)
 	PrefixLimitInet6     int      // max IPv6 prefixes (1..4294967295; 0 = unlimited only when unset)
+	// #15010: Junos prefix-limit teardown model. Without teardown the
+	// limit is log-only (FRR warning-only). With teardown the session is
+	// dropped on overflow; IdleTimeout minutes (0 = immediate re-establish
+	// unless IdleForever) maps to FRR restart, Forever to no restart.
+	PrefixLimitTeardownInet     bool // inet: teardown session on overflow
+	PrefixLimitTeardownPctInet  int  // inet: warning threshold % (1..100; 0 = none)
+	PrefixLimitIdleTimeoutInet  int  // inet: idle-timeout minutes (1..2400; 0 = none/forever per flag)
+	PrefixLimitIdleForeverInet  bool // inet: idle-timeout forever (manual clear only)
+	PrefixLimitTeardownInet6    bool
+	PrefixLimitTeardownPctInet6 int
+	PrefixLimitIdleTimeoutInet6 int
+	PrefixLimitIdleForeverInet6 bool
 }
 
 // TunnelConfig defines a GRE, IPIP, or other tunnel interface.

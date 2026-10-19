@@ -504,6 +504,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			var groupFamilyInetUnsupportedSAFI, groupFamilyInet6UnsupportedSAFI bool
 			var groupSAFIWarningRecords []bgpSAFIWarning11815
 			var groupPrefixLimitInet, groupPrefixLimitInet6 int
+			var groupPrefixLimitTDInet, groupPrefixLimitTDInet6 bgpPrefixLimitTeardown15010
 			var groupAuthKey string
 			var groupBFD bool
 			var groupBFDInterval int
@@ -548,14 +549,14 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 					familyInet = familyInet || unicast
 					groupFamilyInetUnsupportedSAFI = groupFamilyInetUnsupportedSAFI || unsupported
 					if unicast {
-						return applyPrefixLimit11793(familyNode, &groupPrefixLimitInet, true, scope, opts, warnings)
+						return applyPrefixLimitFull15010(familyNode, bgpPrefixLimitTarget15010{maximum: &groupPrefixLimitInet, teardown: &groupPrefixLimitTDInet.teardown, pct: &groupPrefixLimitTDInet.pct, idle: &groupPrefixLimitTDInet.idle, forever: &groupPrefixLimitTDInet.forever}, true, scope, opts, warnings)
 					}
 					return nil
 				}
 				familyInet6 = familyInet6 || unicast
 				groupFamilyInet6UnsupportedSAFI = groupFamilyInet6UnsupportedSAFI || unsupported
 				if unicast {
-					return applyPrefixLimit11793(familyNode, &groupPrefixLimitInet6, true, scope, opts, warnings)
+					return applyPrefixLimitFull15010(familyNode, bgpPrefixLimitTarget15010{maximum: &groupPrefixLimitInet6, teardown: &groupPrefixLimitTDInet6.teardown, pct: &groupPrefixLimitTDInet6.pct, idle: &groupPrefixLimitTDInet6.idle, forever: &groupPrefixLimitTDInet6.forever}, true, scope, opts, warnings)
 				}
 				return nil
 			}
@@ -727,28 +728,30 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 							neighbor := findBGPNeighbor9192(proto.BGP.Neighbors, groupInst.name, nAddr)
 							if neighbor == nil {
 								neighbor = &BGPNeighbor{
-									Address:          nAddr,
-									PeerAS:           peerAS,
-									LocalAS:          groupLocalAS,
-									LocalAddress:     groupLocalAddress,
-									HoldTime:         groupHoldTime,
-									Passive:          groupPassive,
-									Description:      groupDesc,
-									MultihopTTL:      groupMultihop,
-									Export:           groupExport,
-									Import:           groupImport,
-									FamilyInet:       inheritInet,
-									FamilyInet6:      inheritInet6,
-									GroupName:        groupInst.name,
-									AuthPassword:     Secret(groupAuthKey),
-									BFD:              groupBFD,
-									BFDInterval:      groupBFDInterval,
-									BFDMultiplier:    groupBFDMultiplier,
-									DefaultOriginate: groupDefaultOriginate,
-									AllowASIn:        groupAllowASIn,
-									RemovePrivateAS:  groupRemovePrivateAS,
-									PrefixLimitInet:  groupPrefixLimitInet,
-									PrefixLimitInet6: groupPrefixLimitInet6,
+									Address:                 nAddr,
+									PeerAS:                  peerAS,
+									LocalAS:                 groupLocalAS,
+									LocalAddress:            groupLocalAddress,
+									HoldTime:                groupHoldTime,
+									Passive:                 groupPassive,
+									Description:             groupDesc,
+									MultihopTTL:             groupMultihop,
+									Export:                  groupExport,
+									Import:                  groupImport,
+									FamilyInet:              inheritInet,
+									FamilyInet6:             inheritInet6,
+									GroupName:               groupInst.name,
+									AuthPassword:            Secret(groupAuthKey),
+									BFD:                     groupBFD,
+									BFDInterval:             groupBFDInterval,
+									BFDMultiplier:           groupBFDMultiplier,
+									DefaultOriginate:        groupDefaultOriginate,
+									AllowASIn:               groupAllowASIn,
+									RemovePrivateAS:         groupRemovePrivateAS,
+									PrefixLimitInet:         groupPrefixLimitInet,
+									PrefixLimitInet6:        groupPrefixLimitInet6,
+									PrefixLimitTeardownInet: groupPrefixLimitTDInet.teardown, PrefixLimitTeardownPctInet: groupPrefixLimitTDInet.pct, PrefixLimitIdleTimeoutInet: groupPrefixLimitTDInet.idle, PrefixLimitIdleForeverInet: groupPrefixLimitTDInet.forever,
+									PrefixLimitTeardownInet6: groupPrefixLimitTDInet6.teardown, PrefixLimitTeardownPctInet6: groupPrefixLimitTDInet6.pct, PrefixLimitIdleTimeoutInet6: groupPrefixLimitTDInet6.idle, PrefixLimitIdleForeverInet6: groupPrefixLimitTDInet6.forever,
 								}
 								neighbor.UnsupportedInetSAFI = groupFamilyInetUnsupportedSAFI
 								neighbor.UnsupportedInet6SAFI = groupFamilyInet6UnsupportedSAFI

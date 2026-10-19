@@ -43,16 +43,73 @@ func bgpNeighborBFDMultihop14587(n *config.BGPNeighbor, routerAS uint32) bool {
 	return n.MultihopTTL > 0 // ebgp-multihop
 }
 
-func writeBGPMaximumPrefix11793(b *strings.Builder, address, family string, limit int) {
-	if limit <= 0 {
+// bgpPrefixLimitRender15010 carries the full Junos prefix-limit model
+// (#15010) into the FRR renderer.
+type bgpPrefixLimitRender15010 struct {
+	limit    int
+	teardown bool
+	pct      int
+	idle     int
+	forever  bool
+}
+
+func bgpPrefixLimitInet15010(n *config.BGPNeighbor) bgpPrefixLimitRender15010 {
+	return bgpPrefixLimitRender15010{limit: n.PrefixLimitInet, teardown: n.PrefixLimitTeardownInet, pct: n.PrefixLimitTeardownPctInet, idle: n.PrefixLimitIdleTimeoutInet, forever: n.PrefixLimitIdleForeverInet}
+}
+
+func bgpPrefixLimitInet6_15010(n *config.BGPNeighbor) bgpPrefixLimitRender15010 {
+	return bgpPrefixLimitRender15010{limit: n.PrefixLimitInet6, teardown: n.PrefixLimitTeardownInet6, pct: n.PrefixLimitTeardownPctInet6, idle: n.PrefixLimitIdleTimeoutInet6, forever: n.PrefixLimitIdleForeverInet6}
+}
+
+// writeBGPMaximumPrefix15010 renders Junos prefix-limit semantics in FRR
+// 10.6 grammar (neighbour maximum-prefix in bgp_vty.c):
+//   - no teardown (Junos default): `maximum-prefix N warning-only`
+//     (log-only; bgpd returns without CEASE in warning mode)
+//   - teardown, no idle-timeout: `maximum-prefix N [pct]` (CEASE, no
+//     pmax_restart timer; peer stays suppressed until `clear bgp
+//     neighbor` — Junos re-establishes "in a short time", but FRR has
+//     no sub-minute restart value, so this maps to manual-clear; see
+//     docs/log/15010.md)
+//   - teardown + idle-timeout minutes: `... [pct] restart M`
+//   - teardown + idle-timeout forever: `maximum-prefix N [pct]` (same
+//     FRR shape as no-idle; both are no-restart/manual-clear in FRR)
+//
+// Out-of-range typed operands from tolerant construction are clamped
+// by omission of that operand (warn), never passed verbatim to vtysh:
+// a rejected line fails the whole managed-section reload.
+func writeBGPMaximumPrefix15010(b *strings.Builder, address, family string, p bgpPrefixLimitRender15010) {
+	if p.limit <= 0 {
 		return
 	}
-	if uint64(limit) > uint64(^uint32(0)) {
+	if uint64(p.limit) > uint64(^uint32(0)) {
 		slog.Warn("frr: omitting invalid BGP maximum-prefix value (#11793)",
-			"neighbor", sanitizeFRRValue(address), "family", family, "maximum", limit)
+			"neighbor", sanitizeFRRValue(address), "family", family, "maximum", p.limit)
 		return
 	}
-	fmt.Fprintf(b, "  neighbor %s maximum-prefix %d\n", address, limit)
+	if !p.teardown {
+		fmt.Fprintf(b, "  neighbor %s maximum-prefix %d warning-only\n", address, p.limit)
+		return
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "  neighbor %s maximum-prefix %d", address, p.limit)
+	if p.pct != 0 {
+		if p.pct < 1 || p.pct > 100 {
+			slog.Warn("frr: omitting out-of-range BGP maximum-prefix threshold (#15010)",
+				"neighbor", sanitizeFRRValue(address), "family", family, "threshold", p.pct)
+		} else {
+			fmt.Fprintf(&sb, " %d", p.pct)
+		}
+	}
+	if !p.forever && p.idle != 0 {
+		if p.idle < 1 || p.idle > 65535 {
+			slog.Warn("frr: omitting out-of-range BGP maximum-prefix restart (#15010)",
+				"neighbor", sanitizeFRRValue(address), "family", family, "restart", p.idle)
+		} else {
+			fmt.Fprintf(&sb, " restart %d", p.idle)
+		}
+	}
+	sb.WriteString("\n")
+	b.WriteString(sb.String())
 }
 
 // ospfAreaIdentity11400 compares FRR's two valid spellings of a 32-bit area
@@ -1009,7 +1066,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				if n.DefaultOriginate {
 					fmt.Fprintf(&b, "  neighbor %s default-originate\n", n.Address)
 				}
-				writeBGPMaximumPrefix11793(&b, n.Address, "inet", n.PrefixLimitInet)
+				writeBGPMaximumPrefix15010(&b, n.Address, "inet", bgpPrefixLimitInet15010(n))
 				// Outbound filter. The effective export CHAIN (neighbor's own
 				// list, else the global default) is pre-filtered to DEFINED
 				// policy-statements (filterDefinedPolicies), so bare/undefined
@@ -1071,7 +1128,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				if n.DefaultOriginate {
 					fmt.Fprintf(&b, "  neighbor %s default-originate\n", n.Address)
 				}
-				writeBGPMaximumPrefix11793(&b, n.Address, "inet6", n.PrefixLimitInet6)
+				writeBGPMaximumPrefix15010(&b, n.Address, "inet6", bgpPrefixLimitInet6_15010(n))
 				rm := bgpNeighborExportRef(n, bgp, globalExportChain, policyOptions)
 				if alias := m.narrowedAliasRef10129(n, bgp, globalExportChain, policyOptions, true); alias != "" {
 					rm = alias
