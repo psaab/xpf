@@ -291,18 +291,42 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox_for_worker(
                     seg.dst,
                     peer_call_id,
                 );
-                if let Err(e) = sessions.pptp_mut().install(call, control, seg.captured_ns) {
-                    debug_log!("PPTP association refused on the local worker: {:?}", e);
-                    continue;
+                let local_install = sessions.pptp_mut().install(call, control, seg.captured_ns);
+                let local_install_failed = local_install.is_err();
+                if let Err(e) = &local_install {
+                    debug_log!(
+                        "PPTP association refused on the local worker; \
+                         broadcasting and recording retry: {:?}",
+                        e
+                    );
                 }
-                let (accepted, unsent) =
+                let (accepted, mut unsent) =
                     broadcast_pptp_install(peer_worker_commands, call, control, seg.captured_ns);
-                if accepted == peer_worker_commands.len() {
+                if local_install_failed {
+                    if let Some(queue) = self_worker_commands {
+                        let self_queue_id = Arc::as_ptr(queue) as usize;
+                        if !unsent.contains(&self_queue_id) {
+                            unsent.push(self_queue_id);
+                        }
+                    } else {
+                        // No self queue identity to retry against (test-only
+                        // drain without a self queue): record a sentinel that
+                        // no real queue matches so the retry is retained but
+                        // never misdelivered; production always passes Some.
+                        // Use usize::MAX which cannot be an Arc pointer.
+                        if !unsent.contains(&usize::MAX) {
+                            unsent.push(usize::MAX);
+                        }
+                    }
+                }
+                if !local_install_failed && accepted == peer_worker_commands.len() {
                     inbox.complete_call_install_broadcast(call, control, seg.captured_ns);
                 } else {
                     inbox.record_call_install(call, control, seg.captured_ns, unsent);
                 }
-                learned += 1;
+                if !local_install_failed {
+                    learned += 1;
+                }
             }
             crate::session::pptp_control::ControlParse::CallDisconnect { call_id } => {
                 let disconnect = crate::session::pptp::PptpCallDisconnect {

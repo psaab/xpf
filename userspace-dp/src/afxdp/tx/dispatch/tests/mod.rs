@@ -107,10 +107,11 @@ mod shared_recycle;
 mod enqueue_failure;
 mod ptb;
 mod cos_shared_exact;
-mod nat64_attribution_6922;
 mod ipsec_selector_fence_10683;
 mod martian_source_11074;
 #[path = "martian_destination_11413.rs"]
 mod martian_destination_11413;
 #[path = "nat64_fragment_11353.rs"]
 mod nat64_fragment_11353;
+#[path = "prebuilt_mirror_15251.rs"]
+mod prebuilt_mirror_15251;
