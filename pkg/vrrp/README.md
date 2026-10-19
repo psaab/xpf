@@ -654,14 +654,14 @@ silently dropped:
   instance through the manager's build-before-teardown proof. In particular,
   an IPv6 socket failure is no longer warning-only: the manager cannot publish
   a nominally running `inet6` instance that is unable to advertise.
-- **Collisions fail closed** — collection order is deterministic, and
-  `UpdateInstances` rejects duplicate `{kernel interface, VRID, family}`
-  identities before changing the live set or publishing desired interfaces.
-  It also rejects an empty-family RETH instance sharing interface+VRID with a
-  generic family: the RETH state machine consumes both wire families and would
-  overlap either generic election despite having a different map key.
-  The apply tail propagates that rejection as a commit error rather than
-  accepting whichever map entry happened to win iteration order.
+- **Collisions fail closed per instance (#15688)** — collection order is
+  deterministic, and `UpdateInstances` refuses only the second claimant of a
+  duplicate `{kernel interface, VRID, family}` identity or an overlapping
+  empty-family RETH election domain, recording it in `unbuiltDesired` while
+  the rest of the desired set reconciles. The strict config gate
+  (`validateVRRPInstanceIdentityStrict`) rejects such configs at commit; a
+  leniently-loaded collision therefore darkens only the colliding election
+  instead of aborting the whole node batch.
 - **RETH is different** — `CollectRethInstances` deliberately leaves `Family`
   empty and puts a sub-interface's mixed v4+v6 VIPs on **one** instance (see the
   #4376 tie-break above), so RETH keys stay byte-identical to before. The

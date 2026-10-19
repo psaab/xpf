@@ -3091,6 +3091,18 @@ type compileOpts struct {
 	// the second claimant, so a leniently-loaded duplicate is bounded to
 	// one seated election rather than two masters for one VIP.
 	lenientVRRPVIPCrossGroup bool
+	// lenientVRRPInstanceIdentity (#15688) downgrades the VRRP instance
+	// identity gate (validateVRRPInstanceIdentityStrict) from a hard compile
+	// error to a cfg.Warnings entry. A duplicate (kernelInterface, VRID,
+	// family) group or an explicit group colliding with a RETH-derived
+	// 100+RG VRID on the same kernel device made UpdateInstances return a
+	// whole-batch error, aborting every VRRP instance on the node. The
+	// strict commit / commit-check path hard-rejects; the tolerant load /
+	// peer-sync paths warn so an already-persisted or peer-synced config
+	// still boots (#1960 no-brick). UpdateInstances now skips only the
+	// offending duplicate/overlap, so a leniently-loaded collision is
+	// bounded to the colliding election rather than the whole node.
+	lenientVRRPInstanceIdentity bool
 	// lenientVRRPTrackRef (#15048) downgrades the track-interface
 	// declared-reference gate (validateVRRPTrackInterfaceRefStrict) from a
 	// hard compile error to a cfg.Warnings entry. A track-interface naming
@@ -3803,6 +3815,7 @@ func lenientCompileOpts() compileOpts {
 		lenientVRRPVIPCount:                    true,
 		lenientVRRPVIPEmpty:                    true,
 		lenientVRRPVIPCrossGroup:               true,
+		lenientVRRPInstanceIdentity:            true,
 		lenientVRRPTrackRef:                    true,
 		lenientVRRPVIPPrefix:                   true,
 		lenientDNATToScope:                     true,

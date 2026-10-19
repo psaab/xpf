@@ -615,10 +615,13 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 			}
 		}
 		if _, exists := desiredMap[key]; exists {
-			return fmt.Errorf(
-				"duplicate VRRP instance identity interface=%q VRID=%d family=%q; refusing non-deterministic last-wins reconciliation",
-				inst.Interface, inst.GroupID, inst.Family,
-			)
+			rejectedDesired[key] = fmt.Sprintf(
+				"duplicate VRRP instance identity interface=%q VRID=%d family=%q; refusing second instance",
+				inst.Interface, inst.GroupID, inst.Family)
+			slog.Warn("vrrp: refusing duplicate instance identity, keeping first claimant",
+				"interface", inst.Interface, "group_id", inst.GroupID,
+				"family", inst.Family)
+			continue
 		}
 		wireKey := electionKey{iface: inst.Interface, groupID: inst.GroupID}
 		domains := domainsByElection[wireKey]
@@ -631,10 +634,13 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 			if second < first {
 				first, second = second, first
 			}
-			return fmt.Errorf(
-				"overlapping VRRP election domains interface=%q VRID=%d families=%q,%q; empty-family RETH overlaps both wire families",
-				inst.Interface, inst.GroupID, first, second,
-			)
+			rejectedDesired[key] = fmt.Sprintf(
+				"overlapping VRRP election domains interface=%q VRID=%d families=%q,%q; empty-family RETH overlaps both wire families; refusing overlapping instance",
+				inst.Interface, inst.GroupID, first, second)
+			slog.Warn("vrrp: refusing overlapping election domain, keeping first claimant",
+				"interface", inst.Interface, "group_id", inst.GroupID,
+				"family", inst.Family, "conflict_family", conflict)
+			continue
 		}
 		domains.add(inst.Family)
 		desiredMap[key] = inst
@@ -643,10 +649,10 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 			needsLinkWatcher = true
 		}
 	}
-	// Start watchers only after the entire desired set passes validation. A
-	// duplicate/malformed identity returns transactionally without publishing
-	// a partial desired-name set or starting background work for a rejected
-	// reconcile.
+	// Start watchers only after the desired set is classified. A
+	// duplicate/overlapping identity is skipped above (recorded in
+	// rejectedDesired) without publishing a partial desired-name set or
+	// starting background work for the rejected instance.
 	if needsLinkWatcher {
 		// Lazily start the singleton link watcher once any instance tracks an
 		// interface (#1814). Idempotent under m.mu.

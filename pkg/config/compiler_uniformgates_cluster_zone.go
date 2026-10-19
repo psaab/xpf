@@ -263,6 +263,24 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
+	// #15688 VRRP instance-identity gate. Strict on commit / commit-check
+	// (hard-reject a duplicate (kernelInterface, VRID, family) identity —
+	// the same VRID under two addresses of one unit+family, or units that
+	// resolve to one kernel device — or an explicit group whose VRID equals
+	// a RETH-derived 100+RG VRID on the same kernel device, overlapping the
+	// RETH empty-family election domain). UpdateInstances previously
+	// returned a whole-batch error for either shape, aborting every
+	// instance on the node. Lenient on load / peer-sync (#1960 no-brick);
+	// UpdateInstances now skips only the offending duplicate/overlap.
+	if err := validateVRRPInstanceIdentityStrict(cfg); err != nil {
+		if opts.lenientVRRPInstanceIdentity {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("vrrp instance identity (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #15048 track-interface declared-reference gate. Strict on commit /
 	// commit-check (hard-reject a track-interface naming no configured
 	// interface or unit — it resolves to no netdev, so the group is held
