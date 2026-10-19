@@ -1916,17 +1916,46 @@ pub(super) fn populate_egress(
 /// #6458/#13181: build `state.zone_to_rgs` from admitted interface rows,
 /// not ingress `ifindex_to_zone_id`, which also contains inherited parent
 /// aliases. Shared-ifindex logical units each contribute their own RG.
+///
+/// #15742f: a blank NON-UNIT row must not veto by itself — the physical
+/// member row (`ge-0/0/1`, zone="", is_unit=false) sharing a RETH's
+/// netdev is legitimately unzoned (the Go zone map fans a bare RETH
+/// reference DOWN to its unit, never UP to the member), yet
+/// `reth1`/`reth1.0` carry the zone on the same ifindex. Treating the
+/// blank as a conflicting claim zeroed every RETH zone's RG
+/// attribution live, so `zone_encoded_fabric_stamp_valid` rejected
+/// every fabric punt as Invalid and split-RG transit blackholed at
+/// receiver. The veto therefore applies only to a blank row that
+/// aliases a unit on the same ifindex (its name is that unit's base,
+/// e.g. `st0` beside `st0.0` — the #13181 unzoned-alias shape), while
+/// the RETH member (no unit bears its name) does not vote.
+/// claim, and the second pass's `ifindex_unambiguous_zone_id` gate
+/// (built from the Go-stamped `egress_zone`, which the member row
+/// shares) remains the authority.
 pub(super) fn populate_zone_to_rgs(snapshot: &ConfigSnapshot, state: &mut ForwardingState) {
     let mut row_zone_by_ifindex = BTreeMap::<i32, Option<u16>>::new();
     for iface in &snapshot.interfaces {
         if iface.ifindex <= 0 {
             continue;
         }
-        // A blank or unresolved row is still part of the shared ifindex's
-        // ownership claim; it must prevent a zoned sibling from lending it
-        // HA ownership.
+        // #15742f: blank rows veto only when they alias a zoned unit on
+        // this ifindex (name is that unit's base, e.g. `st0` beside
+        // `st0.0`); a blank physical member (`ge-0/0/1` beside
+        // `reth1.0`) does not vote. A resolved zone claims directly.
         let zone_id = if iface.zone.is_empty() {
-            None
+            let aliases_unit = snapshot.interfaces.iter().any(|unit| {
+                unit.ifindex == iface.ifindex
+                    && is_logical_unit_row(&unit.name, unit.is_unit)
+                    && unit
+                        .name
+                        .strip_prefix(iface.name.as_str())
+                        .is_some_and(|rest| rest.starts_with('.'))
+            });
+            if aliases_unit {
+                None
+            } else {
+                continue;
+            }
         } else {
             state
                 .zone_name_to_id
