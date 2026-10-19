@@ -286,7 +286,7 @@ pub(crate) use source::{
     sync_interface_overlap_peers, wire_nat64_overlap_peers, wire_static_overlap_peers, PersistentNatPermit,
     SourceNatFailure, SourceNatFailureReason, SourceNatFlowKey, SourceNatLookup, SourceNatRule,
     flowless_source_nat_rule_possible,
-    SyncedNatZones, allocate_nat64_pool_port, allocate_nat64_pool_port_deterministic_v6,
+    SyncedNatZones, SyncedSourceNatDomains, allocate_nat64_pool_port, allocate_nat64_pool_port_deterministic_v6,
     match_source_nat_result_for_tuple, match_source_nat_result_for_tuple_with_icmp,
     parse_source_nat_rules,
     parse_source_nat_rules_with_previous, release_nat64_pool_port,

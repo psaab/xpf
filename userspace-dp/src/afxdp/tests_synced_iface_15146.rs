@@ -213,6 +213,7 @@ fn import_synced_snat(
         false,
         Some(("lan", "wan")),
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     )
 }
 

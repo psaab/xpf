@@ -180,8 +180,12 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
     let previous_reservation = sessions.entry_with_origin(&key);
     // #9412: the Copy fields read after the install, captured before
     // `into_session_install` consumes the entry. It carries the peer's stable
-    let (entry_origin, entry_decision, leak_incarnation) =
-        (entry.origin, entry.decision, entry.leak_incarnation);
+    let (entry_origin, entry_decision, leak_incarnation, entry_source_nat_static) = (
+        entry.origin,
+        entry.decision,
+        entry.leak_incarnation,
+        entry.source_nat_static,
+    );
     let pptp_call_ids = entry.pptp_call_ids;
     let leak_key = entry.key.clone();
     if sessions.upsert_synced_with_origin(entry.into_session_install(now_ns), allow_replace_local) {
@@ -243,6 +247,14 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         // the active path). The reservation is freed by the standard teardown
         // (`release_source_nat_allocation`) on reap or delete-sync.
         if entry_origin.is_peer_synced() && !metadata.is_reverse {
+            // #15191: the non-pool domains, from this same generation.
+            let synced_static_externals = forwarding.static_nat.external_identities();
+            let synced_nptv6_prefixes = forwarding.nptv6.external_prefixes();
+            let synced_domains = crate::nat::SyncedSourceNatDomains {
+                source_nat_static: entry_source_nat_static,
+                static_externals: Some(&synced_static_externals),
+                nptv6_external_prefixes: &synced_nptv6_prefixes,
+            };
             reserve_synced_source_nat_allocation_for_worker(
                 &forwarding.iface_nat_allocators,
                 &forwarding.source_nat_rules,
@@ -264,6 +276,7 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
                 // allocator; without the holder bit the first worker to reap or
                 // delete-sync frees a port the others still forward through.
                 worker_id,
+                synced_domains,
             );
             // #4512: same treatment for NAT64. The translated `(pool v4, port)`
             // rides the synced `NatDecision` (`rewrite_src_port`), but the

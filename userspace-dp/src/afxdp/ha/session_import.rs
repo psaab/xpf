@@ -399,6 +399,14 @@ impl crate::afxdp::ha::SessionDomain {
         // the pairing defect #6592 closed, reintroduced at a different layer.
         let view = self.runtime_view();
         let forwarding = view.forwarding();
+        // #15191: the non-pool domains, from this same generation.
+        let static_externals = forwarding.static_nat.external_identities();
+        let nptv6_prefixes = forwarding.nptv6.external_prefixes();
+        let domains = crate::nat::SyncedSourceNatDomains {
+            source_nat_static: entry.source_nat_static,
+            static_externals: Some(&static_externals),
+            nptv6_external_prefixes: &nptv6_prefixes,
+        };
 
         let zones =
             crate::afxdp::session_glue::synced_source_nat_zone_pair(forwarding, &entry.metadata);
@@ -433,6 +441,7 @@ impl crate::afxdp::ha::SessionDomain {
                 entry.metadata.is_reverse,
                 zones,
                 now_ns,
+                domains,
             )
         } else {
             (
@@ -444,6 +453,7 @@ impl crate::afxdp::ha::SessionDomain {
                     entry.metadata.is_reverse,
                     zones,
                     now_ns,
+                    domains,
                 ),
                 None,
             )
@@ -540,6 +550,14 @@ impl crate::afxdp::ha::SessionDomain {
                 forwarding,
                 &previous.metadata,
             );
+            // #15191: the non-pool domains, from this same generation.
+            let prev_static_externals = forwarding.static_nat.external_identities();
+            let prev_nptv6_prefixes = forwarding.nptv6.external_prefixes();
+            let prev_domains = crate::nat::SyncedSourceNatDomains {
+                source_nat_static: previous.source_nat_static,
+                static_externals: Some(&prev_static_externals),
+                nptv6_external_prefixes: &prev_nptv6_prefixes,
+            };
             let mut snat_restored = crate::nat::reserve_synced_source_nat_allocation_untracked(
                 &forwarding.iface_nat_allocators,
                 &forwarding.source_nat_rules,
@@ -548,6 +566,7 @@ impl crate::afxdp::ha::SessionDomain {
                 false,
                 zones,
                 now_ns,
+                prev_domains,
             );
             if snat_restored {
                 if let Some(snapshot) = holder_snapshot.source_nat.as_ref() {
@@ -563,6 +582,7 @@ impl crate::afxdp::ha::SessionDomain {
                                 zones,
                                 now_ns,
                                 worker_id,
+                                prev_domains,
                             )
                         {
                             snat_restored = false;
@@ -2732,7 +2752,8 @@ mod rejected_mirror_reservation_10790_tests {
             entry.metadata.is_reverse,
             None,
             1_000,
-        ));
+        crate::nat::SyncedSourceNatDomains::default(),
+    ));
         assert!(crate::nat64::reserve_synced_nat64_allocation(
             &coordinator.forwarding.nat64,
             &entry.key,
@@ -3013,7 +3034,8 @@ mod rejected_mirror_reservation_10790_tests {
                 None,
                 1_000,
                 worker_id,
-            ));
+        crate::nat::SyncedSourceNatDomains::default(),
+    ));
         }
         assert!(source_allocator.debug_is_port_occupied(0, 51_010));
         publish_seeded_shared_entry(&coordinator, &previous);
@@ -3791,7 +3813,8 @@ mod rejected_mirror_reservation_10790_tests {
                 None,
                 1_000,
                 worker_id,
-            ));
+        crate::nat::SyncedSourceNatDomains::default(),
+    ));
         }
         publish_seeded_shared_entry(&coordinator, &previous);
         let current = synced_entry(key, current_nat, 6, 5_021);
@@ -3905,7 +3928,8 @@ mod rejected_mirror_reservation_10790_tests {
                 None,
                 1_000,
                 worker_id,
-            ));
+        crate::nat::SyncedSourceNatDomains::default(),
+    ));
         }
         publish_seeded_shared_entry(&coordinator, &previous);
         let current = synced_entry(key, current_nat, 6, 5_041);
@@ -3921,7 +3945,8 @@ mod rejected_mirror_reservation_10790_tests {
                     None,
                     2_000,
                     2,
-                ));
+        crate::nat::SyncedSourceNatDomains::default(),
+    ));
             }),
             SyncedImportOutcome::RejectedMirrorPublish
         );

@@ -481,6 +481,7 @@ fn a_synced_nat64_import_books_only_the_nat64_allocator_under_dual_reference_107
         false,
         Some(("lan", "wan")),
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     let nat64_ok = crate::nat64::reserve_synced_nat64_allocation(&state.nat64, &key, decision, false, 0);
     assert!(

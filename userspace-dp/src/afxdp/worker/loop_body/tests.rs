@@ -1121,7 +1121,8 @@ mod gc_reap_source_nat_release_tests_6901 {
             false,
             None,
             0,
-        );
+        crate::nat::SyncedSourceNatDomains::default(),
+    );
         assert_eq!(
             used(&forwarding, "pool-a"),
             1,
@@ -1169,7 +1170,8 @@ mod gc_reap_source_nat_release_tests_6901 {
                 false,
                 None,
                 0,
-            );
+        crate::nat::SyncedSourceNatDomains::default(),
+    );
         }
         assert_eq!(
             (used(&forwarding, "pool-a"), used(&forwarding, "pool-b")),

@@ -451,6 +451,7 @@ fn import(rules: &[SourceNatRule], key: &crate::session::SessionKey, port: Optio
         false,
         Some(("lan", "wan")),
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     )
 }
 

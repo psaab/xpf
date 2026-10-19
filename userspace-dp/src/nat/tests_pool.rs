@@ -4515,6 +4515,7 @@ fn synced_session_reserves_nat_pool_port_4388() {
         false,
         None,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     // The reservation is visible as an occupied translated tuple.
@@ -4650,6 +4651,7 @@ fn synced_deterministic_reservation_recycled_5178_14625() {
         false,
         None,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     assert!(
         det_rules[0].pool_allocator.debug_is_port_occupied(0, 3584),
@@ -4711,6 +4713,7 @@ fn synced_deterministic_reservation_recycled_5178_14625() {
         false,
         None,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     release_source_nat_allocation(
         &InterfaceNatAllocators::default(),
@@ -4762,6 +4765,7 @@ fn synced_session_without_nat_reserves_nothing_4388() {
         false,
         None,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert_eq!(
@@ -4803,6 +4807,7 @@ fn synced_session_foreign_pool_addr_skips_reserve_4388() {
         false,
         None,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert_eq!(
@@ -4845,6 +4850,7 @@ fn synced_reverse_entry_reserves_nothing_4388() {
         true,
         None,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert_eq!(
@@ -4893,6 +4899,7 @@ fn synced_address_only_session_reserves_reverse_identity_token_5338() {
         false,
         None,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     // THE FAIL-ON-REVERT ASSERTION (mint): the standby minted the reverse-
@@ -5051,6 +5058,7 @@ fn synced_reservation_follows_active_zone_match_6211() {
         false,
         Some(("lan", "wan")),
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert!(
@@ -5161,6 +5169,7 @@ fn synced_address_only_token_follows_active_zone_match_6211() {
         false,
         Some(("lan", "wan")),
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert_eq!(
@@ -5214,6 +5223,7 @@ fn synced_reservation_double_upsert_across_zone_outcomes_frees_both_6211() {
         false,
         Some(("lan", "wan")),
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     // Upsert #2 (same live session re-synced) AFTER a zone delete/renumber, so
     // the pair no longer resolves -> pass 2 -> the `dmz->wan` rule.
@@ -5225,6 +5235,7 @@ fn synced_reservation_double_upsert_across_zone_outcomes_frees_both_6211() {
         false,
         None,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert!(
@@ -5282,6 +5293,7 @@ fn synced_release_sweep_does_not_free_an_unrelated_flow_6211() {
         false,
         Some(("lan", "wan")),
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     reserve_synced_source_nat_allocation(
         &InterfaceNatAllocators::default(),
@@ -5291,6 +5303,7 @@ fn synced_release_sweep_does_not_free_an_unrelated_flow_6211() {
         false,
         None,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     assert!(rules[1].pool_allocator.debug_is_port_occupied(0, 20000));
     assert!(rules[0].pool_allocator.debug_is_port_occupied(0, 20050));
@@ -5343,6 +5356,7 @@ fn synced_reservation_without_zone_pair_falls_back_to_first_pool_match_6211() {
         false,
         None,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert!(
@@ -5379,6 +5393,7 @@ fn synced_reservation_unmatched_zone_pair_still_reserves_6211() {
         false,
         Some(("mgmt", "wan")),
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert!(
@@ -5421,7 +5436,8 @@ fn synced_reservation_single_rule_is_zone_pair_invariant_6211() {
             false,
             zones,
             0,
-        );
+        crate::nat::SyncedSourceNatDomains::default(),
+    );
         assert!(
             rules[0].pool_allocator.debug_is_port_occupied(0, 10000),
             "single-rule reservation must be identical for zones = {zones:?}"
@@ -5482,7 +5498,8 @@ fn synced_reservation_non_overlapping_pools_is_zone_pair_invariant_6211() {
             false,
             zones,
             0,
-        );
+        crate::nat::SyncedSourceNatDomains::default(),
+    );
         assert!(
             rules[1].pool_allocator.debug_is_port_occupied(0, 20000),
             "the only pool owning 203.0.113.20 must hold it for zones = {zones:?}"
@@ -5554,6 +5571,7 @@ fn synced_reservation_ignores_unconfirmable_interface_scope_6211() {
         false,
         Some(("lan", "wan")),
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert!(
@@ -5622,6 +5640,7 @@ fn synced_reservation_narrows_on_l4_match_6211() {
         false,
         Some(("lan", "wan")),
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert!(
@@ -5729,6 +5748,7 @@ fn synced_reservation_narrows_on_icmp_application_type_11064() {
         false,
         Some(("lan", "wan")),
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     assert!(
         standby_rules[1]
@@ -5839,6 +5859,7 @@ fn synced_reservation_narrows_on_post_dnat_destination_6211() {
         false,
         Some(("lan", "wan")),
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert!(
@@ -7389,6 +7410,7 @@ fn synced_reservation_survives_first_worker_retire_6211_f2() {
         None,
         0,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     reserve_synced_source_nat_allocation_for_worker(
         &InterfaceNatAllocators::default(),
@@ -7399,6 +7421,7 @@ fn synced_reservation_survives_first_worker_retire_6211_f2() {
         None,
         0,
         1,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     assert!(
         rules[0].pool_allocator.debug_is_port_occupied(0, 10000),
@@ -7447,6 +7470,7 @@ fn synced_reservation_frees_on_last_worker_retire_6211_f2() {
         None,
         0,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     reserve_synced_source_nat_allocation_for_worker(
         &InterfaceNatAllocators::default(),
@@ -7457,6 +7481,7 @@ fn synced_reservation_frees_on_last_worker_retire_6211_f2() {
         None,
         0,
         1,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     release_source_nat_allocation_for_worker(
@@ -7512,7 +7537,8 @@ fn retire_worker_frees_only_when_it_was_the_last_holder_7092() {
             None,
             0,
             worker,
-        );
+        crate::nat::SyncedSourceNatDomains::default(),
+    );
     }
     assert!(
         rules[0].pool_allocator.debug_is_port_occupied(0, 10000),
@@ -7611,6 +7637,7 @@ fn retire_worker_is_idempotent_and_ignores_out_of_range_ids_7092() {
         None,
         0,
         3,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     assert!(rules[0].pool_allocator.debug_is_port_occupied(0, 10000), "fixture");
 
@@ -7673,7 +7700,8 @@ fn synced_reservation_refresh_by_one_worker_does_not_accumulate_holders_6211_f2(
             None,
             0,
             3,
-        );
+        crate::nat::SyncedSourceNatDomains::default(),
+    );
     }
     assert!(
         rules[0].pool_allocator.debug_is_port_occupied(0, 10000),
@@ -7737,6 +7765,7 @@ fn synced_address_only_token_survives_first_worker_retire_6211_f2() {
         None,
         0,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     reserve_synced_source_nat_allocation_for_worker(
         &InterfaceNatAllocators::default(),
@@ -7747,6 +7776,7 @@ fn synced_address_only_token_survives_first_worker_retire_6211_f2() {
         None,
         0,
         1,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     assert_eq!(
         rules[0].pool_allocator.debug_address_only_owners().len(),
@@ -7939,7 +7969,8 @@ fn local_allocation_survives_sibling_replica_reaps_6522() {
             None,
             1_000,
             sibling,
-        );
+        crate::nat::SyncedSourceNatDomains::default(),
+    );
     }
 
     // Every replica ages out with nothing refreshing it and reaps.
@@ -7986,7 +8017,8 @@ fn local_allocation_frees_when_the_owning_worker_reaps_6522() {
             None,
             1_000,
             sibling,
-        );
+        crate::nat::SyncedSourceNatDomains::default(),
+    );
         release_source_nat_allocation_for_worker(
             &InterfaceNatAllocators::default(),
             &rules,
@@ -8093,7 +8125,8 @@ fn local_address_only_token_survives_sibling_replica_reaps_6522() {
             None,
             1_000,
             sibling,
-        );
+        crate::nat::SyncedSourceNatDomains::default(),
+    );
     }
     for sibling in 1..6u32 {
         release_source_nat_allocation_for_worker(
@@ -8277,6 +8310,7 @@ fn synced_eviction_of_address_only_keeps_unrelated_pat_port_6528() {
         None,
         NS_PER_SEC,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert!(
@@ -8326,6 +8360,7 @@ fn synced_eviction_of_address_only_clears_its_token_6528() {
         None,
         NS_PER_SEC,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert_eq!(
@@ -8372,6 +8407,7 @@ fn synced_refusal_preserves_the_persistent_lease_refcount_13691() {
         None,
         now,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     let live = rules[0].pool_allocator.debug_live();
@@ -8423,6 +8459,7 @@ fn synced_eviction_keeps_a_persistent_pat_lease_port_6528() {
         None,
         NS_PER_SEC,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert!(
@@ -8459,6 +8496,7 @@ fn synced_eviction_still_frees_a_plain_pat_port_6528() {
         None,
         NS_PER_SEC,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert!(
@@ -8701,6 +8739,7 @@ fn synced_reserve_distinguishes_no_pool_from_a_refusal_7581() {
             false,
             Some(("lan", "wan")),
             0,
+        crate::nat::SyncedSourceNatDomains::default(),
         ),
         "an interface-mode synced import has NOTHING to reserve — no rule's \
          pool owns the egress address — and must not be read as a collision. \
@@ -8760,6 +8799,7 @@ fn synced_reserve_distinguishes_no_pool_from_a_refusal_7581() {
             false,
             Some(("lan", "wan")),
             0,
+        crate::nat::SyncedSourceNatDomains::default(),
         ),
         "a pool-owning candidate that DECLINES is a genuine collision and must \
          still refuse the import — the standby would otherwise advertise a \
@@ -8825,6 +8865,7 @@ fn synced_may_publish(rules: &[SourceNatRule], rewrite_src_port: Option<u16>) ->
         false,
         Some(("lan", "wan")),
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     )
 }
 
@@ -9301,6 +9342,7 @@ fn f1_import(rules: &[SourceNatRule]) -> bool {
         false,
         Some(("lan", "wan")),
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     )
 }
 
@@ -9487,6 +9529,7 @@ fn pass2_still_falls_through_a_refusing_owner_6979_f1() {
         false,
         None,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     assert!(
@@ -9551,6 +9594,7 @@ fn import_synced_7360(
         false,
         None,
         now_ns,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 }
 
@@ -9943,6 +9987,7 @@ fn import_synced_address_only_8132(
         false,
         None,
         now_ns,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 }
 
@@ -11449,6 +11494,7 @@ fn synced_address_only_reservation_evicts_a_disagreeing_incumbent_8597_k63() {
         None,
         NS_PER_SEC,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     let owners = rules[0].pool_allocator.debug_address_only_owners();
@@ -11501,6 +11547,7 @@ fn synced_address_only_reservation_keeps_an_agreeing_incumbent_8597_k63() {
         None,
         NS_PER_SEC,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     let after = rules[0].pool_allocator.debug_address_only_owners();
@@ -12398,6 +12445,7 @@ fn snat_9388_reserve_and_release_agree_on_post_dnat_port() {
         false,
         Some(("lan", "wan")),
         1_000,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
     assert!(
         rules[0].pool_allocator.debug_is_port_occupied(0, 20000),
@@ -13740,6 +13788,7 @@ fn allocator_id_preserved_by_ha_import_9902() {
         false,
         None,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     );
 
     let after = source_nat_pool_statuses(&rules);
@@ -13826,6 +13875,7 @@ fn import_iface_14674(
         false,
         zones,
         0,
+        crate::nat::SyncedSourceNatDomains::default(),
     )
 }
 
