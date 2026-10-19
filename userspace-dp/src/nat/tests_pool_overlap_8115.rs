@@ -646,3 +646,88 @@ fn a_synced_deterministic_import_is_refused_and_leaves_no_reservation_8115() {
          free — the import was never published, so no teardown names it"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #15145 — a refused synced RE-decision must not evict the flow's incumbent.
+//
+// #13691 ordered refusals INSIDE the allocator. The caller-side peer/static
+// refusal in `reserve_synced_on_first_pool_owner` ran AFTER the reserve: the
+// reserve evicted the same flow's incumbent (different tuple), installed the
+// replacement, and only then did rollback remove the replacement — leaving
+// the still-live flow with no reservation at all. The fix asks ownership
+// before reserving and restores the incumbent if the post-reserve recheck
+// fires anyway.
+//
+// RED on master: the import below is refused (correct) but the incumbent
+// reservation in pool `b` is gone — `debug_is_port_occupied` for the
+// incumbent port and the live record both vanish.
+#[test]
+fn a_refused_synced_redecision_keeps_the_incumbent_reservation_15145() {
+    let rules = parse_source_nat_rules(&[
+        pat_rule_two_ports("r1", "a", "10.0.0.0/24"),
+        pat_rule_two_ports("r2", "b", "10.1.0.0/24"),
+    ]);
+    // The importing flow's incumbent in ITS OWN pool `b`: tuple 20001.
+    let key = synced_key("10.1.0.7", 40000, REMOTE);
+    assert!(
+        import(&rules, &key, Some(20001)),
+        "fixture: the incumbent import must reserve 203.0.113.1:20001 in pool b"
+    );
+    assert!(
+        rules[1].pool_allocator.debug_is_port_occupied(0, 20001),
+        "fixture: pool b must hold the incumbent port"
+    );
+    // A LOCAL flow takes 203.0.113.1:20000 in peer pool `a`.
+    let local = mint_to(&rules, "10.0.0.7", 1111, REMOTE);
+    assert_eq!(
+        identity(&local),
+        Some((shared_ip(), Some(20000))),
+        "fixture: the local flow must own the identity the re-decision will claim"
+    );
+    // The peer re-decides the SAME flow onto 20000 — peer `a` owns it.
+    assert!(
+        !import(&rules, &key, Some(20000)),
+        "the re-decision must still be REFUSED: peer pool a owns 203.0.113.1:20000"
+    );
+    assert!(
+        rules[1].pool_allocator.debug_is_port_occupied(0, 20001),
+        "#15145: the refused re-decision must leave the incumbent reservation \
+         (203.0.113.1:20001 in pool b) intact — on master the reserve evicted \
+         it before the peer refusal rolled the replacement back"
+    );
+    assert!(
+        !rules[1].pool_allocator.debug_is_port_occupied(0, 20000),
+        "the refused replacement must not linger in pool b either"
+    );
+    assert_eq!(
+        rules[1].pool_allocator.live_flow_count(),
+        1,
+        "exactly the incumbent record survives in pool b"
+    );
+}
+
+/// #15145 CONTROL: an admissible synced re-decision still replaces the
+/// incumbent — the pre-check must not freeze the first decision forever.
+#[test]
+fn an_admissible_synced_redecision_still_replaces_the_incumbent_15145() {
+    let rules = parse_source_nat_rules(&[
+        pat_rule_two_ports("r1", "a", "10.0.0.0/24"),
+        pat_rule_two_ports("r2", "b", "10.1.0.0/24"),
+    ]);
+    let key = synced_key("10.1.0.7", 40000, REMOTE);
+    assert!(import(&rules, &key, Some(20001)), "fixture: incumbent import");
+    // Nobody owns 20000 anywhere: the re-decision is admissible.
+    assert!(
+        import(&rules, &key, Some(20000)),
+        "an unowned re-decision must still be reserved (#15145 control)"
+    );
+    assert!(
+        !rules[1].pool_allocator.debug_is_port_occupied(0, 20001),
+        "the replaced incumbent port is freed"
+    );
+    assert!(
+        rules[1].pool_allocator.debug_is_port_occupied(0, 20000),
+        "the replacement port is held"
+    );
+    assert_eq!(rules[1].pool_allocator.live_flow_count(), 1);
+}

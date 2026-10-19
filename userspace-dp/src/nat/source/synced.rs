@@ -918,7 +918,7 @@ fn reserve_synced_on_first_pool_owner<'a>(
                 capture_previous_holders,
                 &mut incumbent_snapshot,
             ) {
-                *previous_holders = incumbent_snapshot;
+                *previous_holders = incumbent_snapshot.clone();
                 // #8115 R2: the identity the ACTIVE node chose may be one a
                 // LOCAL flow already owns in a PEER pool. `reserve_address_only`
                 // checks only THIS allocator's `address_only_owners`, so the
@@ -961,6 +961,25 @@ fn reserve_synced_on_first_pool_owner<'a>(
                 // #14368: a static external covering the imported tuple
                 // publishes it unconditionally; refuse on PASS 1 alongside
                 // the peer-pool check (same gate, same reason it is gated).
+                // #15145: ask peer/static/interface ownership BEFORE the
+                // reserve completes the refusal path — reserving first evicts
+                // this flow's incumbent, and the post-reserve rollback below
+                // removes only the replacement. The tuple is the wire's
+                // preserved identity: (rewrite_src, flow.src_port).
+                {
+                    let pre = TranslatedTuple { ip: rewrite_src, port: flow.src_port };
+                    if stop_at_first_owner
+                        && (peer_owns_wire_identity(rule, flow, pre)
+                            || super::nat64_ports::iface_owns_for_pool(iface_allocs, flow, pre)
+                            || static_owns_wire_identity(
+                                rule.static_externals.as_deref(),
+                                pre.ip,
+                                pre.port,
+                            ))
+                    {
+                        return SyncedReserveOutcome::Refused;
+                    }
+                }
                 if stop_at_first_owner
                     && (peer_owns_wire_identity(rule, flow, translated)
                         || super::nat64_ports::iface_owns_for_pool(iface_allocs, flow, translated)
@@ -970,8 +989,12 @@ fn reserve_synced_on_first_pool_owner<'a>(
                             translated.port,
                         ))
                 {
+                    let snapshot = incumbent_snapshot.clone();
                     rule.pool_allocator
                         .rollback_flow(flow, translated, now_ns, holder);
+                    if let Some(snapshot) = snapshot.as_ref() {
+                        let _ = snapshot.restore_displaced(translated, now_ns);
+                    }
                     return SyncedReserveOutcome::Refused;
                 }
                 if rule.persistent_nat {
@@ -1085,6 +1108,20 @@ fn reserve_synced_on_first_pool_owner<'a>(
         #[cfg(test)]
         crate::nat::gap_barrier_11478::fire_at_capture_gap(capture_previous_holders);
         let mut incumbent_snapshot = None;
+        // #15145: ask peer/static/interface ownership BEFORE reserving, so a
+        // refusal never evicts this flow's incumbent. The post-reserve
+        // recheck below stays for races.
+        if stop_at_first_owner
+            && (peer_owns_wire_identity(rule, flow, translated)
+                || super::nat64_ports::iface_owns_for_pool(iface_allocs, flow, translated)
+                || static_owns_wire_identity(
+                    rule.static_externals.as_deref(),
+                    translated.ip,
+                    translated.port,
+                ))
+        {
+            return SyncedReserveOutcome::Refused;
+        }
         if rule.pool_allocator.reserve_flow_maybe_persistent(
             flow,
             translated,
@@ -1096,11 +1133,10 @@ fn reserve_synced_on_first_pool_owner<'a>(
             capture_previous_holders,
             &mut incumbent_snapshot,
         ) {
-            *previous_holders = incumbent_snapshot;
-            // #8115 R2: see the address-only arm above. `reserve_flow` checks
-            // and sets only THIS allocator's bitmap, so an imported flow
-            // narrowed to pool B succeeds while a LOCAL flow already owns the
-            // same tuple in pool A.
+            *previous_holders = incumbent_snapshot.clone();
+            // #15145: ownership was already asked before the reserve (see
+            // below); this post-reserve recheck stays for races, and on
+            // refusal the incumbent the reserve displaced is restored.
             if stop_at_first_owner
                 && (peer_owns_wire_identity(rule, flow, translated)
                     || super::nat64_ports::iface_owns_for_pool(iface_allocs, flow, translated)
@@ -1110,8 +1146,12 @@ fn reserve_synced_on_first_pool_owner<'a>(
                         translated.port,
                     ))
             {
+                let snapshot = incumbent_snapshot.clone();
                 rule.pool_allocator
                     .rollback_flow(flow, translated, now_ns, holder);
+                if let Some(snapshot) = snapshot.as_ref() {
+                    let _ = snapshot.restore_displaced(translated, now_ns);
+                }
                 return SyncedReserveOutcome::Refused;
             }
             if rule.persistent_nat {

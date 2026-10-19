@@ -1522,6 +1522,13 @@ const LEASE_CREATION_SITES_8121: &[(&str, &str)] = &[
     // batch share one insertion implementation (#13693).
     ("import_idle_lease_inner", "#8121, from the idle-lease sync"),
     ("allocate_deterministic_v6_at", "#14091 deterministic NAT64 BIB mint; idle route is #8121 via coordinator nat64 export"),
+    // #15145: NOT a creation site in the census sense — `restore_displaced`
+    // re-inserts the EXACT lease record `capture_and_replace` snapshotted
+    // before the same flow's synced re-decision displaced it, on the same
+    // node, after a caller-side refusal. It mints nothing new and carries
+    // no lease across nodes: the standby route that brought the lease here
+    // is whichever of #7360/#8132/#8121 installed it originally.
+    ("restore_displaced", "#15145, same-node incumbent restore (no new lease, no cross-node route)"),
 ];
 
 /// The census. Reds when a lease is created somewhere the three-route argument
@@ -1603,7 +1610,7 @@ fn every_persistent_lease_creation_site_has_a_sync_route_8121() {
 fn the_lease_census_actually_finds_its_population_8121() {
     assert_eq!(
         LEASE_CREATION_SITES_8121.len(),
-        6,
+        7,
         "the expected-site list is empty or has been trimmed to nothing, which \
          would make the census compare empty to empty"
     );
