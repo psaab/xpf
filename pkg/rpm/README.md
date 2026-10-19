@@ -35,6 +35,9 @@ out-of-range value to a warning.
   selected probes establish their first pass/fail verdict from back-to-back
   initial test cycles, while every other probe keeps ordinary cadence.
 - `Results()` — `rpm.go`.
+- `ResultsVersioned()` — `rpm.go`. Snapshot plus the current
+  `transitionGeneration` under the same lock (#15233 A49-03), so
+  ip-monitoring can fence a snapshot taken before a FAIL transition.
 - `SetEventCallback(fn)` — `rpm.go`. Registers the event-options callback.
   Events emitted BEFORE a callback is registered (a first probe cycle that ran
   before wiring) are buffered and REPLAYED to `fn` on registration, in FIFO

@@ -105,10 +105,11 @@ type PolicyStatus struct {
 	Name   string
 	Probe  string
 	Failed bool
-	// Known is true once at least one RPM result for the policy's probe
-	// has been observed (#3761 H7). While false the policy's health is
-	// UNKNOWN — status/metrics must NOT report it as PASS, because "no
-	// probe has run" is not "the uplink is healthy".
+	// Known is true once at least one pass/fail RPM verdict for the
+	// policy's probe has been observed (#3761 H7, #15233 A49-01: an
+	// "unknown" seed row is not a verdict). While false the policy's
+	// health is UNKNOWN — status/metrics must NOT report it as PASS,
+	// because "no probe has run" is not "the uplink is healthy".
 	Known             bool
 	Since             time.Time // last state-change time (zero = never evaluated)
 	FailingTests      []string
@@ -160,7 +161,8 @@ type policyState struct {
 type Engine struct {
 	mu                       sync.Mutex
 	policies                 map[string]*policyState
-	failedTests              map[string]map[string]bool // probe → test → failed
+	failedTests              map[string]map[string]bool // probe → test → failed (verdict-known tests only, #15233)
+	knownTests               map[string]map[string]bool // probe → test → has pass/fail verdict (#15233)
 	lastTransitionGeneration uint64                     // latest ordered RPM snapshot accepted
 
 	// publishEnabled implements HA primary-only overlay publication
@@ -257,6 +259,7 @@ func New(actuate func(ctx context.Context) bool) *Engine {
 	e := &Engine{
 		policies:       make(map[string]*policyState),
 		failedTests:    make(map[string]map[string]bool),
+		knownTests:     make(map[string]map[string]bool),
 		publishEnabled: true,
 		actuate:        actuate,
 		now:            time.Now,
@@ -446,7 +449,23 @@ func (e *Engine) Stop() {
 // unavailable and preserves the current test state; a non-nil empty snapshot
 // is authoritative and clears it.
 // Called under the daemon apply path on config change.
+// Unversioned (generation 0): always seeds — legacy/test callers.
 func (e *Engine) Apply(cfg *config.IPMonitoringConfig, results []*rpm.ProbeResult) {
+	e.apply(cfg, results, 0)
+}
+
+// ApplyVersioned is Apply with the RPM transition generation that was
+// current when the snapshot was taken under the RPM lock (#15233 A49-03).
+// A snapshot older than the newest transition the engine has accepted
+// must not overwrite that transition's verdict: its rows still say
+// pass/unknown for a test that has since FAILED. The policy set is still
+// installed; only the stale seed is skipped (as if results were nil).
+// Generation 0 means unspecified and always seeds.
+func (e *Engine) ApplyVersioned(cfg *config.IPMonitoringConfig, results []*rpm.ProbeResult, generation uint64) {
+	e.apply(cfg, results, generation)
+}
+
+func (e *Engine) apply(cfg *config.IPMonitoringConfig, results []*rpm.ProbeResult, generation uint64) {
 	e.mu.Lock()
 	// Codex PR #1843 MED: actuate only when the overlay-relevant
 	// state actually changed. Compare the effective overlay before
@@ -500,6 +519,13 @@ func (e *Engine) Apply(cfg *config.IPMonitoringConfig, results []*rpm.ProbeResul
 		}
 	}
 	e.policies = next
+	if generation != 0 && generation < e.lastTransitionGeneration {
+		// #15233 A49-03: stale snapshot — install policies but do not
+		// let its rows overwrite a newer transition verdict.
+		results = nil
+	} else if generation > e.lastTransitionGeneration {
+		e.lastTransitionGeneration = generation
+	}
 	e.seedResultsLocked(results)
 	changed := e.evaluateLocked(e.now())
 	if !changed && !slices.Equal(overlayBefore, e.activeOverlayLocked()) {
@@ -537,7 +563,15 @@ func (e *Engine) HandleTransition(t rpm.Transition) {
 	if e.failedTests[t.ProbeName] == nil {
 		e.failedTests[t.ProbeName] = make(map[string]bool)
 	}
-	e.failedTests[t.ProbeName][t.TestName] = t.Status == "fail"
+	if e.knownTests[t.ProbeName] == nil {
+		e.knownTests[t.ProbeName] = make(map[string]bool)
+	}
+	// Only a genuine pass/fail verdict makes a test known (#15233);
+	// any other status string leaves it unknown.
+	if t.Status == "fail" || t.Status == "pass" {
+		e.knownTests[t.ProbeName][t.TestName] = true
+		e.failedTests[t.ProbeName][t.TestName] = t.Status == "fail"
+	}
 	changed := e.evaluateLocked(e.now())
 	if changed && t.TakeoverBurst && t.Status == "fail" {
 		e.loop.MarkImmediately()
@@ -762,7 +796,7 @@ func (e *Engine) Status() []PolicyStatus {
 	out := make([]PolicyStatus, 0, len(names))
 	for _, name := range names {
 		st := e.policies[name]
-		_, known := e.failedTests[st.cfg.MatchRPMProbe]
+		known := len(e.knownTests[st.cfg.MatchRPMProbe]) > 0
 		ps := PolicyStatus{
 			Name:              name,
 			Probe:             st.cfg.MatchRPMProbe,
@@ -816,21 +850,33 @@ func (e *Engine) ActuationFailures() uint64 {
 // seedResultsLocked rebuilds per-test fail state from an authoritative results
 // snapshot. Nil means no snapshot is available, so preserve the last known
 // state; a non-nil empty snapshot is authoritative and clears all known state.
+// Only pass/fail rows make a test known (#15233 A49-01): rpm seeds every
+// test LastStatus "unknown" before any verdict, and an unknown row must
+// neither mark the policy Known (it would render PASS) nor be recorded
+// in failedTests (evaluateLocked only reads the failed flag, but keeping
+// unknown rows out keeps failedTests == verdict-known failed/pass state).
 func (e *Engine) seedResultsLocked(results []*rpm.ProbeResult) {
 	if results == nil {
 		return
 	}
 	fresh := make(map[string]map[string]bool)
+	known := make(map[string]map[string]bool)
 	for _, r := range results {
 		if r == nil {
 			continue
 		}
+		if r.LastStatus != "pass" && r.LastStatus != "fail" {
+			continue
+		}
 		if fresh[r.ProbeName] == nil {
 			fresh[r.ProbeName] = make(map[string]bool)
+			known[r.ProbeName] = make(map[string]bool)
 		}
 		fresh[r.ProbeName][r.TestName] = r.LastStatus == "fail"
+		known[r.ProbeName][r.TestName] = true
 	}
 	e.failedTests = fresh
+	e.knownTests = known
 }
 
 // evaluateLocked runs the FAIL/recover state machine at time now.
