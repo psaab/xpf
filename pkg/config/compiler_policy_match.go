@@ -120,6 +120,7 @@ var unsupportedPolicyMatchLeaves = map[string]bool{
 	"source-identity":           true,
 	"dynamic-application-group": true, // #11078: Junos sibling of dynamic-application
 	"source-end-user-profile":   true, // #11078: Junos sibling of source-identity
+	"application-excluded":      true, // #15662: Junos negation flag; xpf does not enforce application exclusion
 }
 
 // swallowedStructuralMatchTokens are structural policy `match` keywords that

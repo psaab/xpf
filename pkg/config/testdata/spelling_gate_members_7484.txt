@@ -959,6 +959,7 @@ unreachable (leaf changed nothing)	security policies default-policy
 unreachable (leaf changed nothing)	security policies default-policy-log
 COMPARED	security policies from-zone <*> <*> <*> policy <*> description
 COMPARED	security policies from-zone <*> <*> <*> policy <*> match application
+advisory (read, value ignored, warning says so)	security policies from-zone <*> <*> <*> policy <*> match application-excluded
 COMPARED	security policies from-zone <*> <*> <*> policy <*> match destination-address
 flag (read, but value-less)	security policies from-zone <*> <*> <*> policy <*> match destination-address-excluded
 COMPARED	security policies from-zone <*> <*> <*> policy <*> match source-address
@@ -972,6 +973,7 @@ flag (read, but value-less)	security policies from-zone <*> <*> <*> policy <*> t
 flag (read, but value-less)	security policies from-zone <*> <*> <*> policy <*> then reject
 COMPARED	security policies global policy <*> description
 COMPARED	security policies global policy <*> match application
+advisory (read, value ignored, warning says so)	security policies global policy <*> match application-excluded
 COMPARED	security policies global policy <*> match destination-address
 flag (read, but value-less)	security policies global policy <*> match destination-address-excluded
 COMPARED	security policies global policy <*> match from-zone
