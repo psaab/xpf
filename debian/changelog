@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Retain the apply-time rebuilt derived sections on partial
+    userspace snapshot republishes. The scheduler, deferred-worker-arm
+    and status-tick republishes wrote back only Interfaces after
+    prepareSnapshotForApply had rebuilt routes, fabrics, tunnel
+    endpoints and mirror rows against the revalidated interface rows
+    (#14209), so later republishes re-shipped mirror/tunnel/route rows
+    bound to a vanished or reused ifindex until the next full compile,
+    and the stored content hash no longer described the retained
+    snapshot. All three paths now retain exactly the prepared snapshot
+    the helper accepted (#15043).
   * Warn at commit when an IKE gateway sets an explicit DPD
     `dead-peer-detection threshold` and can negotiate IKEv2 (no
     `version` pin or `v2-only`): strongSwan honours the rendered
