@@ -369,11 +369,34 @@ pub(super) fn stage_flow_cache_hit(
             telemetry.counters.touched = true;
             return FlowCacheOutcome::Consumed;
         }
-        // #9991/#10670: a cached descriptor requires a live backing session.
-        // The stamped-fabric preflight above checked liveness and zone together;
-        // other arrivals check the idle deadline here before TTL, filters,
-        // policers, logs, and accounting.
-        if !fabric_session_live && !sessions.session_is_live_at(&flow.forward_key, now_ns) {
+        // #9991/#10670/#14945: a cached descriptor requires a live backing
+        // session. The stamped-fabric preflight above checked liveness and
+        // zone together; the fused probe below re-checks the idle deadline
+        // under its single borrow (a live entry at the same `now_ns`
+        // cannot fail it) while performing the throttled keepalive
+        // (#14939 handshake completion, #14935/#10885 closing gates) and
+        // the packet accounting. The TTL check stays between the probe
+        // and the filter/policer/log replay, so a TTL-expired packet is
+        // still never refreshed, completed, or charged — a would-expire
+        // packet takes the liveness-only probe instead, matching the slow
+        // path, which also drops before accounting.
+        let ttl_would_expire = matches!(
+            cached_decision.resolution.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
+        ) && matches!(packet_ttl_would_expire(packet_frame, meta), Some(true));
+        let session_live = if ttl_would_expire {
+            fabric_session_live || sessions.session_is_live_at(&flow.forward_key, now_ns)
+        } else {
+            sessions.probe_hit(
+                &flow.forward_key,
+                now_ns,
+                meta.pkt_len as u64,
+                meta.tcp_flags,
+                super::tcp_payload_len(packet_frame, meta),
+                meta.dscp,
+            )
+        };
+        if !session_live {
             flow_state
                 .flow_cache
                 .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
@@ -398,11 +421,7 @@ pub(super) fn stage_flow_cache_hit(
         // touch_if_stale): an expired packet is never egressed, so it must not
         // charge session byte/packet counters or refresh the idle timer —
         // matching the slow path, which also drops before accounting.
-        if matches!(
-            cached_decision.resolution.disposition,
-            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
-        ) && matches!(packet_ttl_would_expire(packet_frame, meta), Some(true))
-        {
+        if ttl_would_expire {
             // #5140: the TTL/hop-limit test + the embedded original in the
             // generated Time Exceeded read the INNER packet via `packet_frame`
             // (decapped frame post native-GRE, else `raw_frame`); `meta.l3_offset`
@@ -432,24 +451,8 @@ pub(super) fn stage_flow_cache_hit(
             scratch.scratch_recycle.push(desc.addr);
             return FlowCacheOutcome::Consumed;
         }
-        // #9991: the cache hit must still be backed by a non-expired session.
-        // `touch_if_stale` returns false for an absent or idle-crossed entry;
-        // reclassify that candidate and fall through before replaying any
-        // filter, log, policer, or packet-accounting side effects. The TTL
-        // check above is intentionally first so a TTL-expired packet does not
-        // refresh a session before its generated error/drop decision.
-        if !sessions.touch_if_stale_with_payload(
-            &flow.forward_key,
-            now_ns,
-            meta.tcp_flags,
-            super::tcp_payload_len(packet_frame, meta),
-        ) {
-            flow_state
-                .flow_cache
-                .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
-            flow_state.flow_cache.reclassify_hit_as_miss();
-            return FlowCacheOutcome::FallThrough;
-        }
+        // (The fused `probe_hit` above already performed the #9991
+        // keepalive + accounting for this hit.)
         if cached_descriptor
             .tx_selection
             .filter_forwarding_class_fallback_pinned
@@ -621,22 +624,12 @@ pub(super) fn stage_flow_cache_hit(
                 (*entry_ptr).descriptor.last_queue_id = cached_queue_id;
             }
         }
-        // #2501: account this forwarded packet against the session. The packet
-        // is keyed by its OWN tuple (`flow.forward_key`); `account_packet`
-        // derives the direction from the resolved entry and folds both
-        // directions onto the canonical forward entry. HOT PATH: one
-        // `key_to_handle` probe (warm — `touch_if_stale` just probed the same
-        // key) + a `saturating_add`. Allocation-free, no atomic (worker-owned
-        // table).
-        // #2749: also observe the packet's TCP control bits + DSCP so the
-        // SESSION_CLOSE RT_FLOW frame carries real NetFlow/IPFIX
-        // class-of-service / TCP-flags values.
-        sessions.account_packet(
-            &flow.forward_key,
-            meta.pkt_len as u64,
-            meta.tcp_flags,
-            meta.dscp,
-        );
+        // #2501/#2749/#14945: this forwarded packet was already accounted
+        // against the session by the fused `probe_hit` above (keyed by its
+        // OWN tuple `flow.forward_key`, direction derived from the resolved
+        // entry, both directions folded onto the canonical forward entry,
+        // TCP control bits + DSCP observed for the SESSION_CLOSE RT_FLOW
+        // frame). No second session probe runs here.
         let mut recycle_now = true;
         if matches!(
             cached_decision.resolution.disposition,
