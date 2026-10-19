@@ -143,7 +143,14 @@ and pin.
 - Apt `Release`/`InRelease` carries `Valid-Until` (default 1 year,
   `XPF_APT_VALID_DAYS`). A SHORT window with manual/air-gap signing would
   expire the repo between releases — keep it long for a manual cadence, or run
-  an automated re-sign job.
+  an automated re-sign job. At publish time `publish.py gate_apt` also refuses
+  EVERY suite in the tree (target and non-target, flat and reprepro) whose
+  signed `Valid-Until` has passed or falls within the freshness margin
+  (default 7 days; override with `XPF_APT_FRESHNESS_MARGIN_SECONDS`, a
+  non-negative integer number of seconds, `0` disables only the margin and
+  never the expired check) — an expired suite would otherwise be published
+  and then refused by every apt client (#15277). Rebuild/re-sign the stale
+  suite before publishing; do not publish around it.
 - Images: `latest.json` (signed) names the current version per channel, and
   `xpf-deploy.py fetch` **consumes** it: with no `--version` it fetches
   `<channel>/latest.json`, minisign-verifies it against any configured image
