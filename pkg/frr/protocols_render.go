@@ -372,6 +372,14 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				if iface.BFDInterval > 0 || iface.BFDMultiplier > 0 {
 					profile := bfdProfileName(iface.BFDInterval, iface.BFDMultiplier)
 					bfd.addProfile(profile, bfdProfile{iface.BFDInterval, iface.BFDMultiplier})
+					// #15015: `ip ospf bfd profile` alone does NOT
+					// enable BFD in FRR 10.6 — ospfd's profile DEFUN
+					// refuses ("ip ospf bfd has not been set") unless
+					// bfd_config already exists, and
+					// ospf_bfd_write_config prints ` ip ospf bfd`
+					// before the profile line. Emit the bare enable
+					// first or no BFD session ever runs.
+					b.WriteString(" ip ospf bfd\n")
 					fmt.Fprintf(&b, " ip ospf bfd profile %s\n", profile)
 				} else {
 					b.WriteString(" ip ospf bfd\n")
@@ -1389,6 +1397,14 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 					if iface.BFDInterval > 0 || iface.BFDMultiplier > 0 {
 						profile := bfdProfileName(iface.BFDInterval, iface.BFDMultiplier)
 						bfd.addProfile(profile, bfdProfile{iface.BFDInterval, iface.BFDMultiplier})
+						// #15015: `isis bfd profile` alone does NOT
+						// enable BFD in FRR 10.6 — it only sets the
+						// bfd-monitoring/profile leaf; the enabled leaf
+						// is set solely by `isis bfd`, and adjacency
+						// setup skips circuits with enabled=false.
+						// Emit the bare enable first (mirrors
+						// cli_show_ip_isis_bfd_monitoring's order).
+						b.WriteString(" isis bfd\n")
 						fmt.Fprintf(&b, " isis bfd profile %s\n", profile)
 					} else {
 						b.WriteString(" isis bfd\n")

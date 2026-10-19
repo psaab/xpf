@@ -1573,6 +1573,25 @@ step. Both are required — neither sees the other's case:
   block's `exit\n!\n`, mirroring the OSPFv3 ordering. Emitting them after
   `exit` lands them in global config scope, which vtysh rejects and (one bad
   line) fails the whole managed-section reload (#1880/#2223).
+- **A BFD profile binding needs its bare enable line first (#15015).**
+  In FRR 10.6, ` ip ospf bfd profile <name>` alone does not enable BFD:
+  ospfd's profile DEFUN refuses ("ip ospf bfd has not been set") unless
+  ` ip ospf bfd` already created the interface bfd_config, and
+  `ospf_bfd_write_config` prints the bare line before the profile line.
+  Likewise ` isis bfd profile <name>` only sets the
+  bfd-monitoring/profile leaf; the enabled leaf comes solely from
+  ` isis bfd`, and adjacency setup skips circuits with enabled=false
+  (`cli_show_ip_isis_bfd_monitoring` prints ` isis bfd` first). The
+  OSPFv2 and IS-IS interface loops therefore emit the bare enable line
+  immediately before the profile line whenever
+  `bfd-liveness-detection minimum-interval`/`multiplier` selects a
+  profile; without it the commit/reload reported success while no BFD
+  session ever ran. OSPFv3 (`ipv6 ospf6 bfd [profile ...]` is a single
+  self-enabling command) and BGP (`neighbor X bfd profile` is documented
+  as "Same as neighbor X bfd") are unaffected.
+  `TestBFDProfileEnableLines15015` pins both ordered pairs, the
+  inside-the-interface-block placement (#2942), and the bare/no-BFD
+  controls.
 - **Community-lists: `standard` vs `expanded` is per-DEFINITION (#2643).**
   An FRR `standard` community-list accepts ONLY literal community values
   (`ASN:VALUE`, or a well-known name such as `no-export` /
