@@ -16,11 +16,14 @@ import (
 const sharedUMEMPhase0ArtifactMaxBytes = 16 << 20
 
 // These exact Junos AAA leaves have no runtime consumer. Refuse them narrowly
-// while keeping the surrounding open-world system tree unchanged.
+// while keeping the surrounding open-world system tree unchanged. `accounting`
+// joined the set in #15019: it committed strictly with no warning while its
+// `secret` leaves rendered in cleartext on redacted show surfaces.
 var unimplementedSystemAAALeaves10831 = map[string]struct{}{
 	"radius-server":        {},
 	"tacplus-server":       {},
 	"authentication-order": {},
+	"accounting":           {},
 }
 
 func systemAAARefusal10831(leaf string) string {
@@ -32,6 +35,18 @@ func systemAAARefusal10831(leaf string) string {
 func systemAAAWarningsOrError10831(systemNode *Node, lenient bool) ([]string, error) {
 	if systemNode == nil {
 		return nil, nil
+	}
+	// A `system` statement packed onto the system node's own Keys
+	// (`system accounting order radius;`, the #2419 brace-elided shape) has
+	// no child node for the walk below to see, so judge Keys[1] directly.
+	if len(systemNode.Keys) >= 2 {
+		if _, unsupported := unimplementedSystemAAALeaves10831[systemNode.Keys[1]]; unsupported {
+			message := systemAAARefusal10831(systemNode.Keys[1])
+			if !lenient {
+				return nil, fmt.Errorf("%s", message)
+			}
+			return []string{message + " (strict commit would reject this)"}, nil
+		}
 	}
 	var warnings []string
 	for _, child := range systemNode.Children {
