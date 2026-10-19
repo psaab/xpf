@@ -23,6 +23,13 @@ import (
 //   - compileEventOptions likewise drops every policy child other than
 //     events / within / attributes-match / plant-class / then, and every
 //     event-options child other than `policy`.
+//   - #15134: compileEventOptions reads only `commands` under
+//     `change-configuration` (FindChildren("commands")); every other
+//     child there (commit-options, user-name, retry, ...) is dropped.
+//     The verify-only spelling is the dangerous one: an authored
+//     `change-configuration { commit-options { check; } commands "..."; }`
+//     intends "verify, do not activate", commits clean, and then
+//     performs a LIVE commit when the policy fires.
 //
 // Before this gate all of the following committed with warnings=[] on
 // both the strict (CheckText / CompileConfig) and flat-set paths, so
@@ -82,6 +89,14 @@ var knownEventPolicyChildrenFallback = []string{
 // knownEventThenChildren are the `then` children the engine executes.
 var knownEventThenChildrenFallback = []string{"change-configuration"}
 
+// knownEventChangeConfigChildren are the `change-configuration` children
+// the engine executes (#15134). compileEventOptions reads ONLY `commands`
+// under change-configuration; any other Junos child (commit-options,
+// user-name, retry, ...) is dropped, so an authored
+// `commit-options { check; }` (verify, do not activate) performs a LIVE
+// commit when the policy fires.
+var knownEventChangeConfigChildrenFallback = []string{"commands"}
+
 func eventPolicyChildTokens14660() []string {
 	pol := schemaEventOptions.children["policy"]
 	if pol == nil || len(pol.children) == 0 {
@@ -112,6 +127,31 @@ func eventThenChildTokens14660() []string {
 	return out
 }
 
+// eventChangeConfigChildTokens14660 reads the permitted
+// `change-configuration` children from the schema (#9017 rule), so a
+// child declared under change-configuration later is permitted
+// automatically; falls back to `commands` only if the schema lookup fails.
+func eventChangeConfigChildTokens14660() []string {
+	pol := schemaEventOptions.children["policy"]
+	if pol == nil {
+		return append([]string(nil), knownEventChangeConfigChildrenFallback...)
+	}
+	thenNode := pol.children["then"]
+	if thenNode == nil {
+		return append([]string(nil), knownEventChangeConfigChildrenFallback...)
+	}
+	ccNode := thenNode.children["change-configuration"]
+	if ccNode == nil || len(ccNode.children) == 0 {
+		return append([]string(nil), knownEventChangeConfigChildrenFallback...)
+	}
+	out := make([]string, 0, len(ccNode.children))
+	for k := range ccNode.children {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func eventOptionsChildTokens14660() []string {
 	if len(schemaEventOptions.children) == 0 {
 		return []string{"policy"}
@@ -131,6 +171,7 @@ func eventOptionsChildTokens14660() []string {
 //   - a policy child compileEventOptions does not consume
 //   - an `events` value outside KnownEventNames (exact, case-sensitive)
 //   - a `then` child other than `change-configuration`
+//   - a `change-configuration` child other than `commands` (#15134)
 //
 // It is an AST pre-walk (not a typed-*Config gate) because unknown
 // children are gone by the time compileEventOptions has run — there is
@@ -143,7 +184,8 @@ func validateEventOptionsInertAST(nodes []*Node, lenient bool) ([]string, error)
 	policyChildren := eventPolicyChildTokens14660()
 	thenChildren := eventThenChildTokens14660()
 	topChildren := eventOptionsChildTokens14660()
-	if len(policyChildren) == 0 || len(thenChildren) == 0 || len(topChildren) == 0 {
+	changeConfigChildren := eventChangeConfigChildTokens14660()
+	if len(policyChildren) == 0 || len(thenChildren) == 0 || len(topChildren) == 0 || len(changeConfigChildren) == 0 {
 		return nil, nil
 	}
 	permittedPolicy := make(map[string]bool, len(policyChildren))
@@ -157,6 +199,10 @@ func validateEventOptionsInertAST(nodes []*Node, lenient bool) ([]string, error)
 	permittedTop := make(map[string]bool, len(topChildren))
 	for _, k := range topChildren {
 		permittedTop[k] = true
+	}
+	permittedChangeConfig := make(map[string]bool, len(changeConfigChildren))
+	for _, k := range changeConfigChildren {
+		permittedChangeConfig[k] = true
 	}
 	knownEvents := strings.Join(KnownEventNamesSorted(), ", ")
 
@@ -206,7 +252,7 @@ func validateEventOptionsInertAST(nodes []*Node, lenient bool) ([]string, error)
 			}
 		}
 		for _, pInst := range namedInstances(eo.FindChildren("policy")) {
-			if err := validateEventPolicyInert14660(pInst.name, pInst.node, permittedPolicy, permittedThen, knownEvents, emit); err != nil {
+			if err := validateEventPolicyInert14660(pInst.name, pInst.node, permittedPolicy, permittedThen, permittedChangeConfig, knownEvents, emit); err != nil {
 				return err
 			}
 		}
@@ -218,7 +264,7 @@ func validateEventOptionsInertAST(nodes []*Node, lenient bool) ([]string, error)
 	return warnings, nil
 }
 
-func validateEventPolicyInert14660(policy string, node *Node, permittedPolicy, permittedThen map[string]bool, knownEvents string, emit func(string, ...any) error) error {
+func validateEventPolicyInert14660(policy string, node *Node, permittedPolicy, permittedThen, permittedChangeConfig map[string]bool, knownEvents string, emit func(string, ...any) error) error {
 	if node == nil {
 		return nil
 	}
@@ -264,11 +310,90 @@ func validateEventPolicyInert14660(policy string, node *Node, permittedPolicy, p
 						policy, sub, strings.Join(eventThenChildTokens14660(), ", ")); err != nil {
 						return err
 					}
+					continue
+				}
+				if sub != "change-configuration" {
+					continue
+				}
+				// #15134: descend one more level. compileEventOptions
+				// reads only `commands` under change-configuration; any
+				// other child is dropped. The verify-only spelling is
+				// the dangerous one (see header).
+				for _, ccTok := range changeConfigChildTokens14660(child) {
+					if ccTok == "" || routingInstanceApplyMetaKeyword9323(ccTok) {
+						continue
+					}
+					if !permittedChangeConfig[ccTok] {
+						if err := emit("event-options policy %q then change-configuration: %q is not a "+
+							"change-configuration statement xpf implements (known: %s) — it compiles to "+
+							"NOTHING: the policy may trigger and execute its commands as a LIVE commit, "+
+							"ignoring the authored %q (#14660, #15134)",
+							policy, ccTok, strings.Join(eventChangeConfigChildTokens14660(), ", "), ccTok); err != nil {
+							return err
+						}
+					}
 				}
 			}
 		}
 	}
 	return nil
+}
+
+// changeConfigChildTokens14660 returns the statement keywords one
+// `change-configuration` node under this `then` carries, across both AST
+// shapes (#15134). Mirrors thenChildTokens14660 one level down — a packed
+// keyword wins and its Children are that keyword's BODY, not siblings:
+//
+//   - Bare `then` (Keys=[then]): the cc node is a CHILD. Braced
+//     (`change-configuration { commit-options { check; } commands ...; }`)
+//     -> Keys=[change-configuration], Children are the cc children.
+//     Packed (`change-configuration user-name bob;` or
+//     `change-configuration commit-options { check; }`)
+//     -> Keys=[change-configuration <child> ...], Children (if any) are
+//     the packed child's body — only Keys[1] is the child keyword.
+//   - Packed `then` (Keys=[then change-configuration ...]): the cc body
+//     lives on the then node. Braced (`then change-configuration {
+//     commit-options ...; }`) -> Keys[2] absent, Children are the cc
+//     children. Packed (`then change-configuration commands "...";` --
+//     permitted; `then change-configuration junk-thing foo;` -- rejected)
+//     -> Keys[2] is the child keyword; Children, if any, are its body.
+//
+// Only the child KEYWORD is returned; its value (e.g. `check` under
+// commit-options) is never read, matching how compileEventOptions would
+// have dropped the whole child.
+func changeConfigChildTokens14660(thenNode *Node) []string {
+	if thenNode == nil {
+		return nil
+	}
+	if len(thenNode.Keys) >= 2 {
+		// Packed then: change-configuration body lives on this node.
+		if len(thenNode.Keys) >= 3 {
+			return []string{thenNode.Keys[2]}
+		}
+		out := make([]string, 0, len(thenNode.Children))
+		for _, ch := range thenNode.Children {
+			if ch != nil && ch.Name() != "" {
+				out = append(out, ch.Name())
+			}
+		}
+		return out
+	}
+	var out []string
+	for _, cc := range thenNode.FindChildren("change-configuration") {
+		if cc == nil {
+			continue
+		}
+		if len(cc.Keys) >= 2 {
+			out = append(out, cc.Keys[1])
+			continue
+		}
+		for _, ch := range cc.Children {
+			if ch != nil && ch.Name() != "" {
+				out = append(out, ch.Name())
+			}
+		}
+	}
+	return out
 }
 
 // thenChildTokens14660 returns the statement keywords one `then` node

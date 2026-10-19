@@ -4,22 +4,26 @@ Event-driven automation engine implementing Junos-style `event-options`
 policies. Matches RPM probe events against policy clauses (with optional
 temporal `within` windows) and triggers commit-and-apply actions.
 
-## Closed-world commit gate (#14660)
+## Closed-world commit gate (#14660, #15134)
 
 The only producer wired to `HandleEvent` is `pkg/rpm` (`fireEvent` in
 `pkg/daemon/daemon_apply_tail.go`), which fires exactly
 `ping_probe_failed`, `ping_test_failed`, and `ping_test_completed`
 (`config.KnownEventNames`, kept in sync by
 `TestKnownEventNamesMatchesRPMProducers14660`), and the engine executes
-only `then change-configuration`. `config.validateEventOptionsInertAST`
+only `then change-configuration` `commands`. `config.validateEventOptionsInertAST`
 (pre-walk, permitted sets read from `schemaEventOptions`) therefore
 hard-rejects at commit / commit-check: any other event name (matching
 is exact and case-sensitive, so `PING_TEST_FAILED` never fires), any
 other `then` action (`execute-commands`, `raise-trap`, `event-script`,
-`ignore`, `generate-event`, ...), and any undeclared `event-options` or
-policy child. On the tolerant load / peer-sync paths the same gate
-downgrades to a `cfg.Warnings` entry so a persisted config still boots
-(#1960); the inert policy then simply never fires, now surfaced.
+`ignore`, `generate-event`, ...), any undeclared `event-options` or
+policy child, and (#15134) any `change-configuration` child other than
+`commands` — including `commit-options { check; }` (verify-only in
+Junos), `user-name`, and `retry`, which `compileEventOptions` would
+otherwise drop before performing a live commit. On the tolerant load /
+peer-sync paths the same gate downgrades to a `cfg.Warnings` entry so
+a persisted config still boots (#1960); the inert policy then simply
+never fires, now surfaced.
 
 ## Entry points
 
