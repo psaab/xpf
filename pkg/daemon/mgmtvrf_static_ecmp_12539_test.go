@@ -15,12 +15,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// FAIL-ON-REVERT (#12539): the kernel accepts a top-level RTA_FLOW on a
+// FAIL-ON-REVERT (#12539, #14972): the kernel accepts a top-level RTA_FLOW on a
 // multipath route only when it equals the first leg's per-nexthop RTA_FLOW,
 // and vishvananda/netlink cannot emit a per-leg RTA_FLOW, so a realm-stamped
-// ECMP mgmt static fails with EINVAL. An ECMP route therefore carries no realm
-// and is owned through config.ManagementVRFMultipathStaticProtocol, while a
-// single-path route keeps RTPROT_STATIC plus the realm.
+// ECMP mgmt static fails with EINVAL. Every mgmt static is therefore owned
+// through config.ManagementVRFMultipathStaticProtocol; a single-path route
+// additionally carries the realm (which IPv6 never stores, #14972).
 func TestMgmtStaticRoutesDesiredECMPOwnershipMarker12539(t *testing.T) {
 	store := testStoreWithSetConfig(t, []string{
 		"set interfaces fxp0 unit 0 family inet address 192.0.2.2/24",
@@ -73,9 +73,9 @@ func TestMgmtStaticRoutesDesiredECMPOwnershipMarker12539(t *testing.T) {
 	if len(single.MultiPath) != 0 {
 		t.Fatalf("single-path route unexpectedly multipath: %+v", single.MultiPath)
 	}
-	if single.Protocol != unix.RTPROT_STATIC || single.Realm != mgmtStaticRouteRealm {
+	if single.Protocol != config.ManagementVRFMultipathStaticProtocol || single.Realm != mgmtStaticRouteRealm {
 		t.Fatalf("single-path route protocol/realm = %d/%#x, want %d/%#x",
-			single.Protocol, single.Realm, unix.RTPROT_STATIC, mgmtStaticRouteRealm)
+			single.Protocol, single.Realm, config.ManagementVRFMultipathStaticProtocol, mgmtStaticRouteRealm)
 	}
 	if single.Gw == nil || !single.Gw.Equal(net.ParseIP("192.0.2.1")) || single.LinkIndex != 7 {
 		t.Fatalf("single-path route = gw %v ifindex %d, want .1/7", single.Gw, single.LinkIndex)

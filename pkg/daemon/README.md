@@ -3218,13 +3218,16 @@ never lock an operator out of a remote box it manages.
   errors, while this owner retries the idempotent reconciles. Configured
   management-scoped statics and the system backup-router are installed in
   table 999 by `applyMgmtVRFStaticRoutesTo`, independently of FRR and DHCP:
-  single-path routes as `RTPROT_STATIC` carrying the xpf realm, ECMP routes as
-  `config.ManagementVRFMultipathStaticProtocol` (0x58) because a library-built
-  multipath route cannot carry the realm (#12539). Only routes with one of
-  those markers are reaped, so operator `RTPROT_STATIC` routes in table 999 are
-  never claimed; a replace that overwrites a route's (destination, priority)
-  slot never issues a delete for the overwritten copy, because the kernel
-  would match that delete against the replacement. Those routes are excluded
+  every management static (single-path and ECMP) and the backup-router as
+  `config.ManagementVRFMultipathStaticProtocol` (0x58), with single-path
+  routes additionally carrying the xpf realm — the protocol survives the
+  kernel round-trip in both families, while IPv6 stores no `RTA_FLOW`, so
+  the realm alone never marked an IPv6 single-path route (#12539, #14972).
+  Only routes with one of those markers are reaped, so operator
+  `RTPROT_STATIC` routes in table 999 are never claimed; a replace that
+  overwrites a route's (destination, priority) slot never issues a delete
+  for the overwritten copy, because the kernel would match that delete
+  against the replacement. Those routes are excluded
   from FRR's default-table statics; implicit gateways are matched against live
   table-999 connected routes as well as configured prefixes, covering
   DHCP-only management addresses. The backup-router's gateway resolves to its

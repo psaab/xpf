@@ -402,9 +402,11 @@ func mgmtClasslessPrefixSafetyFailure(prefix netip.Prefix) string {
 // resolve through fxp*/fab*/em* interfaces, and the system backup-router, are
 // installed directly via netlink.
 // This is a full reconcile, not an append-only apply (#5108). Configured
-// management statics and backup-router routes use RTPROT_STATIC with the xpf
-// realm when single-path and config.ManagementVRFMultipathStaticProtocol when
-// multipath (#12539); DHCP-learned routes use RTPROT_DHCP so each owner can
+// management statics and backup-router routes carry
+// config.ManagementVRFMultipathStaticProtocol (0x58) as their ownership
+// protocol in both families, plus the xpf realm when single-path (#12539,
+// #14972: IPv6 stores no RTA_FLOW, so the realm alone never marked an IPv6
+// single-path route); DHCP-learned routes use RTPROT_DHCP so each owner can
 // reconcile without deleting the other.
 // Each apply first reconciles configured management statics, then
 // RouteReplaces each desired lease route (idempotent add-or-update) and, on

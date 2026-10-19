@@ -17,17 +17,26 @@ import (
 // route`, both RTPROT_STATIC), so the reconcile claims and reaps only routes
 // that carry an xpf ownership marker (mgmtStaticRouteOwned):
 //
-//   - A single-path route is RTPROT_STATIC with this realm in RTA_FLOW.
-//   - A multipath (ECMP) route is config.ManagementVRFMultipathStaticProtocol
-//     with no realm. The kernel accepts a top-level RTA_FLOW on a multipath
-//     route only when it equals the first leg's per-nexthop RTA_FLOW ("Nexthop
-//     class id does not match RTA_FLOW"), and vishvananda/netlink can neither
-//     emit nor parse a per-leg RTA_FLOW. A realm-stamped ECMP route therefore
-//     fails with EINVAL, and a realm-0 one would be indistinguishable from an
-//     operator route (#12539).
-//
-// IPv6 routes do not store RTA_FLOW, so an IPv6 single-path route reads back
-// unmarked and is never reaped; the protocol marker survives in both families.
+//   - Every xpf management static carries
+//     config.ManagementVRFMultipathStaticProtocol (0x58) as its rtm_protocol.
+//     It lives in the fixed rtmsg header and survives the kernel round-trip
+//     in both families, and it scopes the kernel's own delete match, so a
+//     stale xpf delete returns ESRCH against an operator RTPROT_STATIC route
+//     at the same slot.
+//   - A single-path route additionally carries this realm in RTA_FLOW. IPv6
+//     routes do not store RTA_FLOW, so the realm alone never marked an IPv6
+//     route; before #14972 single-path routes were stamped only
+//     RTPROT_STATIC+realm and IPv6 ones read back unmarked and were never
+//     reaped. The protocol marker above is therefore the primary marker, and
+//     the realm remains so IPv4 routes installed by earlier builds are still
+//     recognized.
+//   - A multipath (ECMP) route carries no realm. The kernel accepts a
+//     top-level RTA_FLOW on a multipath route only when it equals the first
+//     leg's per-nexthop RTA_FLOW ("Nexthop class id does not match
+//     RTA_FLOW"), and vishvananda/netlink can neither emit nor parse a
+//     per-leg RTA_FLOW. A realm-stamped ECMP route therefore fails with
+//     EINVAL, and a realm-0 RTPROT_STATIC one would be indistinguishable
+//     from an operator route (#12539).
 const mgmtStaticRouteRealm = 0x585046 // "XPF"
 
 type mgmtStaticRouteTarget struct {
@@ -274,17 +283,18 @@ func mgmtStaticRoutesDesired(
 					Dst:      dst,
 					Table:    mgmtVRFTableID,
 					Type:     unix.RTN_UNICAST,
-					Protocol: unix.RTPROT_STATIC,
+					Protocol: config.ManagementVRFMultipathStaticProtocol,
 					Priority: priority,
 				}
-				// Ownership marker per path shape; see mgmtStaticRouteRealm
-				// for why a multipath route cannot carry the realm (#12539).
+				// Ownership markers; see mgmtStaticRouteRealm. The protocol
+				// marks every shape in both families; a single-path route
+				// additionally carries the realm, which a multipath route
+				// cannot (#12539, #14972).
 				if len(hops) == 1 {
 					route.Realm = mgmtStaticRouteRealm
 					route.LinkIndex = hops[0].LinkIndex
 					route.Gw = hops[0].Gw
 				} else {
-					route.Protocol = config.ManagementVRFMultipathStaticProtocol
 					route.MultiPath = hops
 				}
 				mgmtAddStaticRoute(desired, route, family)
@@ -487,7 +497,7 @@ func mgmtBackupRouterRoute(nextHop, destination string) (netlink.Route, int, boo
 		Gw:       gateway,
 		Table:    mgmtVRFTableID,
 		Type:     unix.RTN_UNICAST,
-		Protocol: unix.RTPROT_STATIC,
+		Protocol: config.ManagementVRFMultipathStaticProtocol,
 		Realm:    mgmtStaticRouteRealm,
 		Priority: 250,
 	}, family, true
@@ -582,7 +592,10 @@ func mgmtAddStaticRoute(routes map[string]mgmtStaticRouteTarget, route netlink.R
 }
 
 // mgmtStaticRouteOwned reports whether a table-999 route carries one of the
-// xpf ownership markers described at mgmtStaticRouteRealm.
+// xpf ownership markers described at mgmtStaticRouteRealm: the protocol
+// marker on any route, or the realm on a legacy RTPROT_STATIC route. An
+// operator RTPROT_STATIC route without the realm is never owned, in either
+// family (#14972).
 func mgmtStaticRouteOwned(route netlink.Route) bool {
 	switch route.Protocol {
 	case config.ManagementVRFMultipathStaticProtocol:

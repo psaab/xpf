@@ -4275,9 +4275,10 @@ func findNamedNode(nodes []*Node, name string) *Node {
 // whose EXPLICIT `destination` is malformed or of a different address
 // family than the next-hop.
 //
-// Runtime: pkg/daemon reconciles the backup-router through netlink as an
-// RTPROT_STATIC route in management table 999 with metric 250. An empty
-// destination defaults to the next-hop family (v6 → ::/0, v4 → 0.0.0.0/0).
+// Runtime: pkg/daemon reconciles the backup-router through netlink as a
+// config.ManagementVRFMultipathStaticProtocol route in management table 999
+// with metric 250 (#14972). An empty destination defaults to the next-hop
+// family (v6 → ::/0, v4 → 0.0.0.0/0).
 // The route must be excluded when either operand is malformed or their
 // families disagree so an unusable fallback is never acknowledged.
 //

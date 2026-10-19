@@ -234,3 +234,26 @@ func TestBackupRouterLeavesNonManagementLinkOnKernel12583(t *testing.T) {
 	e.apply(d, mgmtSet, gateway, backupApply12583{step: "apply 3 (fxp0 connected)", replaced: 1, link: "fxp0"})
 	e.apply(d, mgmtSet, gateway, backupApply12583{step: "apply 4", link: "fxp0"})
 }
+
+// #14972: removing the backup-router from the config reaps its kernel route
+// in both families. The IPv6 leg is the regression cell: the kernel stored
+// no RTA_FLOW for it, so before the protocol marker it read back unowned and
+// survived every reconcile.
+func TestBackupRouterRemovedOnKernel14972(t *testing.T) {
+	for _, gateway := range []string{"192.0.2.1", "2001:db8:10::1"} {
+		e := newBackupKernelEnv12583(t)
+		e.link("fxp0", true)
+		e.addr("fxp0", "192.0.2.2/24", true)
+		e.addr("fxp0", "2001:db8:10::2/64", true)
+		d := &Daemon{store: testStoreWithSetConfig(t, []string{
+			"set interfaces fxp0 unit 0 family inet address 192.0.2.2/24",
+			"set interfaces fxp0 unit 0 family inet6 address 2001:db8:10::2/64",
+			"set system backup-router " + gateway,
+		})}
+		mgmtSet := map[string]bool{"fxp0": true}
+		e.apply(d, mgmtSet, gateway, backupApply12583{step: gateway + " install", replaced: 1, link: "fxp0"})
+		d.store = testStoreWithSetConfig(t, []string{})
+		e.apply(d, mgmtSet, gateway, backupApply12583{step: gateway + " removed", deleted: 1, link: ""})
+		e.apply(d, mgmtSet, gateway, backupApply12583{step: gateway + " removed steady-state", link: ""})
+	}
+}

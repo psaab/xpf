@@ -190,8 +190,8 @@ non-trivial code. This page is the quick-reference gotcha list.
   routes fail closed while DHCP defaults keep their independent contract;
   `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1` is the explicit escape hatch.
   The management VRF treats only table-999 `RTPROT_STATIC` routes, plus the
-  ECMP management statics xpf stamps with protocol 0x58
-  (`config.ManagementVRFMultipathStaticProtocol`, #12539), as operator
+  management statics xpf stamps with protocol 0x58
+  (`config.ManagementVRFMultipathStaticProtocol`, #12539, #14972), as operator
   authority; xpf-owned `RTPROT_DHCP` and ordinary connected/kernel routes are
   not operator authority. BGP/OSPF/IS-IS/RIP routes in table 999 suppress
   classless prefixes they contain, except a dynamic `/0`, which does not
