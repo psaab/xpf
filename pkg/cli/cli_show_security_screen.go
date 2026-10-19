@@ -65,6 +65,9 @@ func (c *CLI) showScreen() error {
 			continue
 		}
 		fmt.Printf("Screen profile: %s\n", name)
+		if line := dpuserspace.ScreenAlarmModeLine(profile); line != "" {
+			fmt.Printf("  %s\n", line)
+		}
 
 		// #3327: drive the enabled-check inventory from the cross-package SSOT
 		// (config.ScreenEnabledCheckList -> config.ScreenChecks /
@@ -142,24 +145,27 @@ func (c *CLI) showScreenIdsOption(name string) error {
 	}
 
 	fmt.Printf("Screen object status:\n\n")
+	if line := dpuserspace.ScreenAlarmModeLine(profile); line != "" {
+		fmt.Printf("  %s\n\n", line)
+	}
 	fmt.Printf("  %-45s %s\n", "Name", "Value")
 	if profile.TCP.Land {
-		fmt.Printf("  %-45s %s\n", "TCP land attack", "enabled")
+		fmt.Printf("  %-45s %s\n", "TCP land attack", dpuserspace.ScreenCheckValue(profile))
 	}
 	if profile.TCP.SynFin {
-		fmt.Printf("  %-45s %s\n", "TCP SYN+FIN", "enabled")
+		fmt.Printf("  %-45s %s\n", "TCP SYN+FIN", dpuserspace.ScreenCheckValue(profile))
 	}
 	if profile.TCP.NoFlag {
-		fmt.Printf("  %-45s %s\n", "TCP no-flag", "enabled")
+		fmt.Printf("  %-45s %s\n", "TCP no-flag", dpuserspace.ScreenCheckValue(profile))
 	}
 	if profile.TCP.FinNoAck {
-		fmt.Printf("  %-45s %s\n", "TCP FIN-no-ACK", "enabled")
+		fmt.Printf("  %-45s %s\n", "TCP FIN-no-ACK", dpuserspace.ScreenCheckValue(profile))
 	}
 	if profile.TCP.WinNuke {
-		fmt.Printf("  %-45s %s\n", "TCP WinNuke", "enabled")
+		fmt.Printf("  %-45s %s\n", "TCP WinNuke", dpuserspace.ScreenCheckValue(profile))
 	}
 	if profile.TCP.SynFrag {
-		fmt.Printf("  %-45s %s\n", "TCP SYN fragment", "enabled")
+		fmt.Printf("  %-45s %s\n", "TCP SYN fragment", dpuserspace.ScreenCheckValue(profile))
 	}
 	if profile.TCP.SynFlood != nil {
 		fmt.Printf("  %-45s %d\n", "TCP SYN flood attack threshold", profile.TCP.SynFlood.AttackThreshold)
@@ -174,16 +180,16 @@ func (c *CLI) showScreenIdsOption(name string) error {
 		}
 	}
 	if profile.ICMP.PingDeath {
-		fmt.Printf("  %-45s %s\n", "ICMP ping of death", "enabled")
+		fmt.Printf("  %-45s %s\n", "ICMP ping of death", dpuserspace.ScreenCheckValue(profile))
 	}
 	if profile.ICMP.FloodThreshold > 0 {
 		fmt.Printf("  %-45s %d\n", "ICMP flood threshold", profile.ICMP.FloodThreshold)
 	}
 	if profile.IP.SourceRouteOption {
-		fmt.Printf("  %-45s %s\n", "IP source route option", "enabled")
+		fmt.Printf("  %-45s %s\n", "IP source route option", dpuserspace.ScreenCheckValue(profile))
 	}
 	if profile.IP.TearDrop {
-		fmt.Printf("  %-45s %s\n", "IP teardrop (tear-drop)", "enabled")
+		fmt.Printf("  %-45s %s\n", "IP teardrop (tear-drop)", dpuserspace.ScreenCheckValue(profile))
 	}
 	if profile.UDP.FloodThreshold > 0 {
 		fmt.Printf("  %-45s %d\n", "UDP flood threshold", profile.UDP.FloodThreshold)
@@ -195,7 +201,7 @@ func (c *CLI) showScreenIdsOption(name string) error {
 	// canonical config.ScreenCheck* name) so no screen-inventory renderer
 	// drifts from the config.ScreenChecks SSOT. Mirrors gRPC showScreenIDSOption.
 	if profile.ICMP.Fragment {
-		fmt.Printf("  %-45s %s\n", "ICMP fragment (icmp-fragment)", "enabled")
+		fmt.Printf("  %-45s %s\n", "ICMP fragment (icmp-fragment)", dpuserspace.ScreenCheckValue(profile))
 	}
 	if profile.TCP.PortScanThreshold > 0 {
 		fmt.Printf("  %-45s %d us\n", "TCP port scan window (port-scan)", profile.TCP.PortScanThreshold)
@@ -246,24 +252,35 @@ func (c *CLI) showScreenIdsOptionDetail(name string) error {
 	}
 
 	fmt.Printf("Screen object status (detail):\n\n")
+	if line := dpuserspace.ScreenAlarmModeLine(profile); line != "" {
+		fmt.Printf("  %s\n\n", line)
+	}
 	fmt.Printf("  %-45s %-12s %s\n", "Name", "Value", "Default")
+	// #15175: a boolean check that is on under alarm-without-drop alarms
+	// without dropping, so its Value is alarm-only, not enabled.
+	valueStr := func(v bool) string {
+		if !v {
+			return "disabled"
+		}
+		return dpuserspace.ScreenCheckValue(profile)
+	}
 
 	// TCP checks
 	fmt.Printf("  %-45s %-12s %s\n", "TCP land attack",
-		enabledStr(profile.TCP.Land), "disabled")
+		valueStr(profile.TCP.Land), "disabled")
 	fmt.Printf("  %-45s %-12s %s\n", "TCP SYN+FIN",
-		enabledStr(profile.TCP.SynFin), "disabled")
+		valueStr(profile.TCP.SynFin), "disabled")
 	fmt.Printf("  %-45s %-12s %s\n", "TCP no-flag",
-		enabledStr(profile.TCP.NoFlag), "disabled")
+		valueStr(profile.TCP.NoFlag), "disabled")
 	fmt.Printf("  %-45s %-12s %s\n", "TCP FIN-no-ACK",
-		enabledStr(profile.TCP.FinNoAck), "disabled")
+		valueStr(profile.TCP.FinNoAck), "disabled")
 	fmt.Printf("  %-45s %-12s %s\n", "TCP WinNuke",
-		enabledStr(profile.TCP.WinNuke), "disabled")
+		valueStr(profile.TCP.WinNuke), "disabled")
 	fmt.Printf("  %-45s %-12s %s\n", "TCP SYN fragment",
-		enabledStr(profile.TCP.SynFrag), "disabled")
+		valueStr(profile.TCP.SynFrag), "disabled")
 
 	if profile.TCP.SynFlood != nil {
-		fmt.Printf("  %-45s %-12s %s\n", "TCP SYN flood protection", "enabled", "disabled")
+		fmt.Printf("  %-45s %-12s %s\n", "TCP SYN flood protection", valueStr(profile.TCP.SynFlood != nil), "disabled")
 		fmt.Printf("  %-45s %-12d %s\n", "  Attack threshold",
 			profile.TCP.SynFlood.AttackThreshold, "200")
 		if profile.TCP.SynFlood.AlarmThreshold > 0 {
@@ -296,7 +313,7 @@ func (c *CLI) showScreenIdsOptionDetail(name string) error {
 
 	// ICMP checks
 	fmt.Printf("  %-45s %-12s %s\n", "ICMP ping of death",
-		enabledStr(profile.ICMP.PingDeath), "disabled")
+		valueStr(profile.ICMP.PingDeath), "disabled")
 	if profile.ICMP.FloodThreshold > 0 {
 		fmt.Printf("  %-45s %-12d %s\n", "ICMP flood threshold",
 			profile.ICMP.FloodThreshold, "1000")
@@ -306,9 +323,9 @@ func (c *CLI) showScreenIdsOptionDetail(name string) error {
 
 	// IP checks
 	fmt.Printf("  %-45s %-12s %s\n", "IP source route option",
-		enabledStr(profile.IP.SourceRouteOption), "disabled")
+		valueStr(profile.IP.SourceRouteOption), "disabled")
 	fmt.Printf("  %-45s %-12s %s\n", "IP teardrop",
-		enabledStr(profile.IP.TearDrop), "disabled")
+		valueStr(profile.IP.TearDrop), "disabled")
 
 	// UDP checks
 	if profile.UDP.FloodThreshold > 0 {
@@ -325,7 +342,7 @@ func (c *CLI) showScreenIdsOptionDetail(name string) error {
 	// ip-sweep, the source/destination session limits) so it can no longer
 	// drift from the enforced set. Mirrors gRPC showScreenIDSOptionDetail.
 	fmt.Printf("  %-45s %-12s %s\n", "ICMP fragment (icmp-fragment)",
-		enabledStr(profile.ICMP.Fragment), "disabled")
+		valueStr(profile.ICMP.Fragment), "disabled")
 	if profile.TCP.PortScanThreshold > 0 {
 		fmt.Printf("  %-45s %-12s %s\n", "TCP port scan window (port-scan)", fmt.Sprintf("%d us", profile.TCP.PortScanThreshold), "disabled")
 	} else {

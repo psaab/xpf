@@ -665,6 +665,10 @@ type ScreenInfo struct {
 	// consumer can distinguish a default threshold from an intentionally tight
 	// or accidentally clamped one (#3327). Omitted when no threshold is set.
 	Thresholds map[string]int `json:"thresholds,omitempty"`
+	// AlarmWithoutDrop is the profile-wide `alarm-without-drop` audit
+	// mode (#15175): when true every check alarms/logs but drops nothing.
+	// Omitted when false (the drop-enforcing default).
+	AlarmWithoutDrop bool `json:"alarm_without_drop,omitempty"`
 }
 
 // TextResponse wraps text output from commands.

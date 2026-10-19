@@ -478,24 +478,27 @@ func (s *Server) showScreenIDSOption(req *pb.ShowTextRequest, cfg *config.Config
 			fmt.Fprintf(buf, "Screen profile '%s' not found\n", profileName)
 		} else {
 			fmt.Fprintf(buf, "Screen object status:\n\n")
+			if line := dpuserspace.ScreenAlarmModeLine(profile); line != "" {
+				fmt.Fprintf(buf, "  %s\n\n", line)
+			}
 			fmt.Fprintf(buf, "  Name                                        Value\n")
 			if profile.TCP.Land {
-				fmt.Fprintf(buf, "  TCP land attack                             enabled\n")
+				fmt.Fprintf(buf, "  TCP land attack                             %s\n", dpuserspace.ScreenCheckValue(profile))
 			}
 			if profile.TCP.SynFin {
-				fmt.Fprintf(buf, "  TCP SYN+FIN                                 enabled\n")
+				fmt.Fprintf(buf, "  TCP SYN+FIN                                 %s\n", dpuserspace.ScreenCheckValue(profile))
 			}
 			if profile.TCP.NoFlag {
-				fmt.Fprintf(buf, "  TCP no-flag                                 enabled\n")
+				fmt.Fprintf(buf, "  TCP no-flag                                 %s\n", dpuserspace.ScreenCheckValue(profile))
 			}
 			if profile.TCP.FinNoAck {
-				fmt.Fprintf(buf, "  TCP FIN-no-ACK                              enabled\n")
+				fmt.Fprintf(buf, "  TCP FIN-no-ACK                              %s\n", dpuserspace.ScreenCheckValue(profile))
 			}
 			if profile.TCP.WinNuke {
-				fmt.Fprintf(buf, "  TCP WinNuke                                 enabled\n")
+				fmt.Fprintf(buf, "  TCP WinNuke                                 %s\n", dpuserspace.ScreenCheckValue(profile))
 			}
 			if profile.TCP.SynFrag {
-				fmt.Fprintf(buf, "  TCP SYN fragment                            enabled\n")
+				fmt.Fprintf(buf, "  TCP SYN fragment                            %s\n", dpuserspace.ScreenCheckValue(profile))
 			}
 			if profile.TCP.SynFlood != nil {
 				fmt.Fprintf(buf, "  TCP SYN flood attack threshold              %d\n",
@@ -514,17 +517,17 @@ func (s *Server) showScreenIDSOption(req *pb.ShowTextRequest, cfg *config.Config
 				}
 			}
 			if profile.ICMP.PingDeath {
-				fmt.Fprintf(buf, "  ICMP ping of death                          enabled\n")
+				fmt.Fprintf(buf, "  ICMP ping of death                          %s\n", dpuserspace.ScreenCheckValue(profile))
 			}
 			if profile.ICMP.FloodThreshold > 0 {
 				fmt.Fprintf(buf, "  ICMP flood threshold                        %d\n",
 					profile.ICMP.FloodThreshold)
 			}
 			if profile.IP.SourceRouteOption {
-				fmt.Fprintf(buf, "  IP source route option                      enabled\n")
+				fmt.Fprintf(buf, "  IP source route option                      %s\n", dpuserspace.ScreenCheckValue(profile))
 			}
 			if profile.IP.TearDrop {
-				fmt.Fprintf(buf, "  IP teardrop (tear-drop)                     enabled\n")
+				fmt.Fprintf(buf, "  IP teardrop (tear-drop)                     %s\n", dpuserspace.ScreenCheckValue(profile))
 			}
 			if profile.UDP.FloodThreshold > 0 {
 				fmt.Fprintf(buf, "  UDP flood threshold                         %d\n",
@@ -538,7 +541,7 @@ func (s *Server) showScreenIDSOption(req *pb.ShowTextRequest, cfg *config.Config
 			// config.ScreenChecks SSOT. The trailing token matches the
 			// canonical config.ScreenCheck* name.
 			if profile.ICMP.Fragment {
-				fmt.Fprintf(buf, "  ICMP fragment (icmp-fragment)               enabled\n")
+				fmt.Fprintf(buf, "  ICMP fragment (icmp-fragment)               %s\n", dpuserspace.ScreenCheckValue(profile))
 			}
 			if profile.TCP.PortScanThreshold > 0 {
 				fmt.Fprintf(buf, "  TCP port scan window (port-scan)            %d us\n",
@@ -738,12 +741,16 @@ func (s *Server) showScreenIDSOptionDetail(req *pb.ShowTextRequest, cfg *config.
 			fmt.Fprintf(buf, "Screen profile '%s' not found\n", profileName)
 		} else {
 			fmt.Fprintf(buf, "Screen object status (detail):\n\n")
+			if line := dpuserspace.ScreenAlarmModeLine(profile); line != "" {
+				fmt.Fprintf(buf, "  %s\n\n", line)
+			}
 			fmt.Fprintf(buf, "  %-45s %-12s %s\n", "Name", "Value", "Default")
+			// #15175: on under alarm-without-drop means alarm-only.
 			enabledS := func(v bool) string {
-				if v {
-					return "enabled"
+				if !v {
+					return "disabled"
 				}
-				return "disabled"
+				return dpuserspace.ScreenCheckValue(profile)
 			}
 			fmt.Fprintf(buf, "  %-45s %-12s %s\n", "TCP land attack", enabledS(profile.TCP.Land), "disabled")
 			fmt.Fprintf(buf, "  %-45s %-12s %s\n", "TCP SYN+FIN", enabledS(profile.TCP.SynFin), "disabled")
@@ -752,7 +759,7 @@ func (s *Server) showScreenIDSOptionDetail(req *pb.ShowTextRequest, cfg *config.
 			fmt.Fprintf(buf, "  %-45s %-12s %s\n", "TCP WinNuke", enabledS(profile.TCP.WinNuke), "disabled")
 			fmt.Fprintf(buf, "  %-45s %-12s %s\n", "TCP SYN fragment", enabledS(profile.TCP.SynFrag), "disabled")
 			if profile.TCP.SynFlood != nil {
-				fmt.Fprintf(buf, "  %-45s %-12s %s\n", "TCP SYN flood protection", "enabled", "disabled")
+				fmt.Fprintf(buf, "  %-45s %-12s %s\n", "TCP SYN flood protection", enabledS(true), "disabled")
 				fmt.Fprintf(buf, "  %-45s %-12d %s\n", "  Attack threshold", profile.TCP.SynFlood.AttackThreshold, "200")
 				if profile.TCP.SynFlood.AlarmThreshold > 0 {
 					fmt.Fprintf(buf, "  %-45s %-12d %s\n", "  Alarm threshold", profile.TCP.SynFlood.AlarmThreshold, "512")
@@ -906,6 +913,9 @@ func (s *Server) showScreen(cfg *config.Config, buf *strings.Builder) {
 				continue
 			}
 			fmt.Fprintf(buf, "Screen profile: %s\n", name)
+			if line := dpuserspace.ScreenAlarmModeLine(profile); line != "" {
+				fmt.Fprintf(buf, "  %s\n", line)
+			}
 			// #3327: drive the enabled-check inventory from the shared SSOT
 			// (config.ScreenChecks / config.ScreenThresholds via
 			// screenEnabledCheckList) instead of a hand-built presence list

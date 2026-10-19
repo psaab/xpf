@@ -702,6 +702,10 @@ message ScreenInfo {
   // consumer can distinguish a default threshold from an intentionally tight or
   // accidentally clamped one (#3327).
   map<string, int64> thresholds = 3;
+  // alarm_without_drop is the profile-wide Junos `alarm-without-drop`
+  // audit mode (#15175): when true every check alarms/logs but drops
+  // nothing. Additive: absent/false is the drop-enforcing default.
+  bool alarm_without_drop = 4;
 }
 
 message GetEventsRequest {
