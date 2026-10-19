@@ -1,18 +1,18 @@
 {
   "schema_version": 2,
-  "verified_at": "2026-10-19T21:00:46.104981296Z",
-  "object_sha256": "aeb2a37c904547338e7a56bcc2b53f62b0f9ffdeb4d7d7e51460d0a0c6cf33ce",
-  "build_digest": "639874b30df8e3a33b6181c803106933e2fed4701fadcb50556e26c42ef209dc",
-  "verdict": "OVERRIDDEN",
-  "override_consumed": true,
-  "reason": "measured headroom 3.67% is below the 15.0% floor; installed with XPF_SHIM_ALLOW_LOW_HEADROOM=1",
+  "verified_at": "2026-10-19T22:35:46.751970992Z",
+  "object_sha256": "bf8a47e7a9b757c9b85dfa9ddfdf8423903c3c4e9da57d61f7b0442040870d6b",
+  "build_digest": "53a18e49b97f81a911c2efc6c4c4797344a842efe862e80f96505c7cfcd421d0",
+  "verdict": "PASS",
+  "override_consumed": false,
+  "reason": "measured headroom 18.44% meets the 15.0% floor",
   "stats": {
     "measured": true,
-    "processed_insns": 963340,
+    "processed_insns": 815623,
     "insn_limit": 1000000,
-    "headroom_pct": 3.666,
+    "headroom_pct": 18.4377,
     "floor_pct": 15,
-    "slack_to_floor_insns": -113340
+    "slack_to_floor_insns": 34377
   },
   "provenance": {
     "toolchain": "nightly-2026-05-23",

@@ -3881,7 +3881,18 @@ fn shim_index_path_has_one_construction_and_one_lookup() {
     // declaration and the trace-key mix — which is exactly the price of the
     // alias shadow above. Found while checking what the residual actually was;
     // it is cheaper to pin than to document.
-    const TRACE_CALL_SITES: usize = 12;
+    // #15854: 12 -> 9, deliberately. The four binding/heartbeat
+    // readiness failures (binding missing / not ready, heartbeat
+    // missing / stale) now share ONE trace call whose stage, reason
+    // and slot are selected from the outlined readiness code — the
+    // four separate calls were the shim's largest remaining
+    // verifier-state multiplier (keeping them measured 953428
+    // processed insns against 815623 merged; see docs/log/15854.md).
+    // Every failure still records its own stage/reason and the same
+    // slot value (u32::MAX when no binding resolved), so the
+    // telemetry property above is preserved; what changed is only
+    // that the call is written once.
+    const TRACE_CALL_SITES: usize = 9;
     #[rustfmt::skip]
     const TRACE_SIGNATURE: &[&str] = &[
         "fn", "record_trace", "(",
@@ -4109,7 +4120,16 @@ fn shim_index_path_has_one_construction_and_one_lookup() {
         // index path, and the callee's locals are trace_* so the
         // single-`let` bound above is unmoved. This row tracks code,
         // not wording, so the delta is stated here rather than hidden.
-        ("lib.rs",               38,              3,               20),
+        // #15854: 38 -> 41 / 3 -> 5, deliberately. Binding+heartbeat
+        // readiness moved into the outlined `binding_ready_slot`
+        // subprogram (verifier headroom; docs/log/15854.md): its
+        // parameter, its retained pinned lookup statement and the
+        // one call site write both coordinates, and the four failure
+        // traces merged into one call — net +3 interface / +2 queue
+        // mentions, all on the binding index path itself, none a
+        // rebinding (both single-`let` bounds above are unmoved and
+        // the queue still travels as the RawRxQueue wrapper).
+        ("lib.rs",               41,              5,               20),
     ];
 
     // ---- …and `ctx` may not be rebound AT ALL. ---------------------------
@@ -4265,7 +4285,11 @@ fn shim_index_path_has_one_construction_and_one_lookup() {
     // buys on its own is an impl, not a defect — reducing the coordinate still
     // needs a shadow, and the per-file coordinate tally below is what bounds
     // those.
-    const RAW_TYPE_MENTIONS: usize = 8;
+    // #15854: 8 -> 9, deliberately: `binding_ready_slot`'s
+    // parameter names the wrapper type once more, so the queue
+    // coordinate reaches the outlined readiness subprogram AS the
+    // wrapper (no unpack, no second construction).
+    const RAW_TYPE_MENTIONS: usize = 9;
     let raw_type = seq(&["RawRxQueue"]);
     assert_eq!(
         raw_type.len(),

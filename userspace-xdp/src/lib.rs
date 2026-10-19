@@ -742,16 +742,15 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // tagged-only VID-0 drop so that shape keeps its own counter, and
     // after the #8279 authority gate so a non-adjudicated ifindex still
     // takes cpumap_or_pass untouched.
-    if is_land(&parsed.src_addr, &parsed.dst_addr) {
-        match land_disposition_for_packet(&parsed, ingress_ifindex) {
-            LandDisposition::Pass => {}
-            LandDisposition::Drop => {
-                return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
-            }
-            LandDisposition::AlarmPass => {
-                incr_fallback_stat(USERSPACE_FALLBACK_REASON_LAND_ALARM);
-            }
-        }
+    // #15854: the whole LAND gate (address compare, zone resolution,
+    // both map reads, disposition, counters) is one outlined
+    // subprogram call — see `land_gate` below. As two inline matches
+    // over `land_disposition_for_packet` (here + ctrl-disabled) LLVM
+    // duplicated the WG-key construction and both map walks under
+    // every calling state; the tracked object fell to 3.67% headroom
+    // (963340 processed insns) and rejects on the guest kernel.
+    if land_gate(&parsed, ingress_ifindex) {
+        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
     }
     let native_gre =
         parsed.protocol == PROTO_GRE && (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0;
@@ -796,90 +795,62 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         0,
         &parsed,
     );
-    let binding =
-        binding_slot(ingress_ifindex, rx_queue).and_then(|idx| USERSPACE_BINDINGS.get(idx));
-    let binding = match binding {
-        Some(b) if b.flags != 0 => b,
-        _ => {
-            record_trace(
-                ctrl.flags,
-                ingress_ifindex,
-                rx_queue_index,
-                selected_queue,
-                u32::MAX,
+    // #15854: binding + heartbeat readiness is one outlined
+    // subprogram (`binding_ready_slot` below): it resolves the slot,
+    // checks the READY flag, reads the heartbeat and applies the
+    // timeout, returning the slot packed with a failure code. The
+    // four failure arms that used to sit inline here each carried a
+    // trace call plus a degraded-local check, and the verifier
+    // re-walked the packed trace callee under every one of those
+    // calling states (keeping the four traces separate measured
+    // 953428 processed insns; this merged form measures ~816k — see
+    // docs/log/15854.md). The merged arm below preserves each
+    // failure's stage, reason and trace slot exactly (u32::MAX for a
+    // missing binding, the resolved slot otherwise) and the same
+    // degraded-local pass/drop decision; only the trace call is
+    // shared. The #5173 call-site count moves 12 -> 9 with it.
+    let ready = binding_ready_slot(ingress_ifindex, rx_queue, ctrl.heartbeat_timeout_ms);
+    let ready_code = (ready >> 32) as u32;
+    let ready_slot = ready as u32;
+    if ready_code != 0 {
+        let (stage, reason, trace_slot) = match ready_code {
+            2 => (
+                USERSPACE_TRACE_STAGE_BINDING_NOT_READY,
+                USERSPACE_FALLBACK_REASON_BINDING_NOT_READY,
+                ready_slot,
+            ),
+            3 => (
+                USERSPACE_TRACE_STAGE_HEARTBEAT_MISSING,
+                USERSPACE_FALLBACK_REASON_HEARTBEAT_MISSING,
+                ready_slot,
+            ),
+            4 => (
+                USERSPACE_TRACE_STAGE_HEARTBEAT_STALE,
+                USERSPACE_FALLBACK_REASON_HEARTBEAT_STALE,
+                ready_slot,
+            ),
+            _ => (
                 USERSPACE_TRACE_STAGE_BINDING_MISSING,
                 USERSPACE_FALLBACK_REASON_BINDING_MISSING,
-                &parsed,
-            );
-            if is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain) {
-                return pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_BINDING_MISSING);
-            }
-            return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_BINDING_MISSING);
-        }
-    };
-    if (binding.flags & USERSPACE_BINDING_READY) == 0 {
+                u32::MAX,
+            ),
+        };
         record_trace(
             ctrl.flags,
             ingress_ifindex,
             rx_queue_index,
             selected_queue,
-            binding.slot,
-            USERSPACE_TRACE_STAGE_BINDING_NOT_READY,
-            USERSPACE_FALLBACK_REASON_BINDING_NOT_READY,
+            trace_slot,
+            stage,
+            reason,
             &parsed,
         );
         if is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain) {
-            return pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_BINDING_NOT_READY);
+            return pass_local_control(ctrl, reason);
         }
-        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_BINDING_NOT_READY);
+        return drop_degraded_transit(ctrl, reason);
     }
-    let last_heartbeat = USERSPACE_HEARTBEAT.get(binding.slot);
-    let Some(last_heartbeat) = last_heartbeat else {
-        record_trace(
-            ctrl.flags,
-            ingress_ifindex,
-            rx_queue_index,
-            selected_queue,
-            binding.slot,
-            USERSPACE_TRACE_STAGE_HEARTBEAT_MISSING,
-            USERSPACE_FALLBACK_REASON_HEARTBEAT_MISSING,
-            &parsed,
-        );
-        if is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain) {
-            return pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_HEARTBEAT_MISSING);
-        }
-        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_HEARTBEAT_MISSING);
-    };
-    let timeout_ms = if ctrl.heartbeat_timeout_ms == 0 {
-        USERSPACE_DEFAULT_HEARTBEAT_TIMEOUT_MS
-    } else {
-        ctrl.heartbeat_timeout_ms
-    };
-    let timeout_ns = (timeout_ms as u64) * 1_000_000;
-    let now_ns = unsafe { bpf_ktime_get_ns() };
-    // #1864: spelled as a guarded wrapping_sub, not saturating_sub. The
-    // rustc/LLVM nightlies after 2026-05-23 lower saturating_sub into a
-    // materialized-boolean re-branch that defeats BPF verifier state
-    // pruning (the rebuilt object blew the 1M processed-insn cap and
-    // took both cluster dataplanes down). Semantics are identical: the
-    // short-circuit `<` clause handles the underflow case, and on the
-    // evaluated path now_ns >= *last_heartbeat makes wrapping_sub exact.
-    if now_ns < *last_heartbeat || now_ns.wrapping_sub(*last_heartbeat) > timeout_ns {
-        record_trace(
-            ctrl.flags,
-            ingress_ifindex,
-            rx_queue_index,
-            selected_queue,
-            binding.slot,
-            USERSPACE_TRACE_STAGE_HEARTBEAT_STALE,
-            USERSPACE_FALLBACK_REASON_HEARTBEAT_STALE,
-            &parsed,
-        );
-        if is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain) {
-            return pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_HEARTBEAT_STALE);
-        }
-        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_HEARTBEAT_STALE);
-    }
+    let binding_slot_ready = ready_slot;
 
     // #15645: `packet_len` (the guarded `data_end - data` below) is
     // computed at its single use at the meta store, not bound here. As
@@ -939,7 +910,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
             ingress_ifindex,
             rx_queue_index,
             selected_queue,
-            binding.slot,
+            binding_slot_ready,
             USERSPACE_TRACE_STAGE_EARLY_FILTER,
             USERSPACE_FALLBACK_REASON_EARLY_FILTER,
             &parsed,
@@ -983,7 +954,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                     ingress_ifindex,
                     rx_queue_index,
                     selected_queue,
-                    binding.slot,
+                    binding_slot_ready,
                     USERSPACE_TRACE_STAGE_LOCAL_DESTINATION,
                     0,
                     &parsed,
@@ -1011,7 +982,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                         ingress_ifindex,
                         rx_queue_index,
                         selected_queue,
-                        binding.slot,
+                        binding_slot_ready,
                         USERSPACE_TRACE_STAGE_INTERFACE_NAT_LOCAL,
                         0,
                         &parsed,
@@ -1051,7 +1022,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                         ingress_ifindex,
                         rx_queue_index,
                         selected_queue,
-                        binding.slot,
+                        binding_slot_ready,
                         USERSPACE_TRACE_STAGE_LOCAL_DESTINATION,
                         0,
                         &parsed,
@@ -1099,7 +1070,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 ingress_ifindex,
                 rx_queue_index,
                 selected_queue,
-                binding.slot,
+                binding_slot_ready,
                 USERSPACE_TRACE_STAGE_LOCAL_DESTINATION,
                 0,
                 &parsed,
@@ -1199,12 +1170,12 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         ingress_ifindex,
         rx_queue_index,
         selected_queue,
-        binding.slot,
+        binding_slot_ready,
         USERSPACE_TRACE_STAGE_REDIRECT,
         0,
         &parsed,
     );
-    match USERSPACE_XSK_MAP.redirect(binding.slot, 0) {
+    match USERSPACE_XSK_MAP.redirect(binding_slot_ready, 0) {
         Ok(action) => Ok(action),
         Err(_) => {
             record_trace(
@@ -1212,7 +1183,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 ingress_ifindex,
                 rx_queue_index,
                 selected_queue,
-                binding.slot,
+                binding_slot_ready,
                 USERSPACE_TRACE_STAGE_REDIRECT_ERR,
                 USERSPACE_FALLBACK_REASON_REDIRECT_ERR,
                 &parsed,
@@ -1587,6 +1558,52 @@ fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize
     0
 }
 
+// #15854: binding + heartbeat readiness as one outlined subprogram.
+// Returns the resolved slot in the low half with a zero failure
+// code in the high half when the binding is ready; otherwise the
+// high half carries the failure code (1 missing / flags-zero, 2 not
+// READY, 3 heartbeat missing, 4 heartbeat stale) and the low half
+// the slot when one was resolved (0 when none was). The caller
+// maps the code back to the exact trace stage/reason/slot and the
+// degraded-local decision the four inline arms used to make, so
+// behaviour is unchanged; the verifier walks the binding map,
+// heartbeat map and timeout arithmetic once instead of under four
+// inline calling states. The timeout compare keeps the #1864
+// guarded wrapping_sub spelling (never saturating_sub).
+#[inline(never)]
+fn binding_ready_slot(
+    ingress_ifindex: u32,
+    rx_queue: RawRxQueue,
+    heartbeat_timeout_ms: u32,
+) -> u64 {
+    let binding =
+        binding_slot(ingress_ifindex, rx_queue).and_then(|idx| USERSPACE_BINDINGS.get(idx));
+    let Some(b) = binding else {
+        return 1u64 << 32;
+    };
+    if b.flags == 0 {
+        return 1u64 << 32;
+    }
+    let slot = b.slot;
+    if (b.flags & USERSPACE_BINDING_READY) == 0 {
+        return ((2u64) << 32) | (slot as u64);
+    }
+    let Some(last_heartbeat) = USERSPACE_HEARTBEAT.get(slot) else {
+        return ((3u64) << 32) | (slot as u64);
+    };
+    let timeout_ms = if heartbeat_timeout_ms == 0 {
+        USERSPACE_DEFAULT_HEARTBEAT_TIMEOUT_MS
+    } else {
+        heartbeat_timeout_ms
+    };
+    let timeout_ns = (timeout_ms as u64) * 1_000_000;
+    let now_ns = unsafe { bpf_ktime_get_ns() };
+    if now_ns < *last_heartbeat || now_ns.wrapping_sub(*last_heartbeat) > timeout_ns {
+        return ((4u64) << 32) | (slot as u64);
+    }
+    slot as u64
+}
+
 fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Result<u32, i64> {
     // #13632: disabled control must not parse or pass any frame from an
     // interface the shim does not adjudicate. Raw-L3 source octets can look
@@ -1632,20 +1649,13 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
     if is_tagged_only_vid0_firewall_owned_destination(ingress_iface_flags, &parsed, ingress_domain) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP);
     }
-    // #13953/#15789: the ctrl-disabled local/control pass is terminal like
-    // every healthy kernel-pass arm, so the same profile-gated LAND
-    // disposition applies: DROP drops, ALARM counts and falls through to
-    // the local/control decision below, absent fails closed to DROP.
-    if is_land(&parsed.src_addr, &parsed.dst_addr) {
-        match land_disposition_for_packet(&parsed, ingress_ifindex) {
-            LandDisposition::Pass => {}
-            LandDisposition::Drop => {
-                return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
-            }
-            LandDisposition::AlarmPass => {
-                incr_fallback_stat(USERSPACE_FALLBACK_REASON_LAND_ALARM);
-            }
-        }
+    // #13953/#15789/#15854: the ctrl-disabled local/control pass is
+    // terminal like every healthy kernel-pass arm, so the same
+    // outlined profile-gated LAND gate applies (see `land_gate`):
+    // DROP drops, ALARM counts and falls through to the local/control
+    // decision below, absent fails closed to DROP.
+    if land_gate(&parsed, ingress_ifindex) {
+        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
     }
     let local_or_control = is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain);
     match degraded_ctrl_disabled::ctrl_disabled_action(ingress_iface_flags, false, local_or_control)
@@ -2345,14 +2355,30 @@ fn should_fallback_early(pkt: &ParsedPacket, ingress_domain: u32) -> bool {
     }
 }
 
-// #15789: resolve the ingress zone's published LAND disposition for this
-// packet. Reuses the WG ingress-zone resolver's (ifindex, wire VLAN) key
-// so the zone identity is the same StableZoneID the Go sync publishes.
-// A resolved zone reads its land_screen byte (absent = PASS, the Go sync
-// publishes explicit PASS rows for screened zones with LAND disabled);
-// an unresolved zone fails closed to Drop regardless of any byte.
+// #15789/#15854: the whole LAND gate as one outlined subprogram,
+// returning true iff the caller must drop with LAND_DROP. Reuses the
+// WG ingress-zone resolver's (ifindex, wire VLAN) key so the zone
+// identity is the same StableZoneID the Go sync publishes. A
+// resolved zone reads its land_screen byte (absent = PASS, the Go
+// sync publishes explicit PASS rows for screened zones with LAND
+// disabled); an unresolved zone fails closed to Drop regardless of
+// any byte. ALARM counts LAND_ALARM here and returns false so the
+// caller's normal kernel-pass arms proceed.
+//
+// #15854: this replaces the two inline `is_land` + match blocks
+// (healthy + ctrl-disabled) over a separate outlined resolver. The
+// inline matches duplicated the key construction and both map walks
+// under every calling state — the #15843 regression that took the
+// tracked object from 920733 to 963340 processed insns (3.67%
+// headroom) and over the guest kernel's 1M cap. One outlined call
+// per path is the record_trace_packed (#15645) shape: the verifier
+// walks the gate once. Do not re-inline without re-measuring
+// through cmd/shimverify.
 #[inline(never)]
-fn land_disposition_for_packet(pkt: &ParsedPacket, ingress_ifindex: u32) -> LandDisposition {
+fn land_gate(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
+    if !is_land(&pkt.src_addr, &pkt.dst_addr) {
+        return false;
+    }
     let ingress_key = UserspaceWgIngressZoneKey {
         ifindex: ingress_ifindex,
         vlan_id: if pkt.vlan_present {
@@ -2366,14 +2392,28 @@ fn land_disposition_for_packet(pkt: &ParsedPacket, ingress_ifindex: u32) -> Land
         .copied()
         .unwrap_or(0);
     if zone_id == 0 {
-        return land_disposition(false, 0);
+        return land_disposition(false, 0) == LandDisposition::Drop;
     }
     let screen_byte = (unsafe { USERSPACE_LAND_SCREEN.get(&zone_id) })
         .copied()
         .unwrap_or(0);
-    land_disposition(true, screen_byte)
+    match land_disposition(true, screen_byte) {
+        LandDisposition::Pass => false,
+        LandDisposition::Drop => true,
+        LandDisposition::AlarmPass => {
+            incr_fallback_stat(USERSPACE_FALLBACK_REASON_LAND_ALARM);
+            false
+        }
+    }
 }
 
+// #15854: outlined like the other map-touching helpers (#14851
+// shape): this resolver's WG-key construction and two map reads
+// were inlined at both call sites (WG steer + worker claim) and
+// re-walked under every calling state. One subprogram walk instead;
+// measured with the LAND/binding outlines in docs/log/15854.md.
+// Do not re-inline without re-measuring through cmd/shimverify.
+#[inline(never)]
 fn wg_zone_admits_packet(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
     if pkt.protocol != PROTO_UDP || pkt.flow_dst_port == 0 {
         return false;
