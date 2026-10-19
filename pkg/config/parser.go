@@ -507,20 +507,28 @@ func (p *Parser) parseStatement() *Node {
 	// strictly inline (index > 0) and leaves an identity key intact.
 	// Only a bare identifier `inactive:` counts; quoted `"inactive:"` values
 	// are preserved (#4348).
+	// #15713: when keys follow the marker and a block follows them
+	// (`parent inactive: sub-block { ... }`, i < len(keys)-1 before `{`),
+	// the marker governs only that sub-block — Junos-equivalent to
+	// `parent { inactive: sub-block { ... } }`. The governed keys are
+	// preserved as an inactive inner node under the active outer node
+	// instead of being truncated while Inactive is hoisted onto the parent.
+	var governedSubKeys []string
+	var governedSubKinds []TokenType
+	var governedSubBracketed []bool
+	governedBlock := false
 	for i, k := range keys {
 		if i > 0 && kinds[i] == TokenIdentifier && k == inactiveMarker {
+			if p.lexer.Peek().Type == TokenLBrace && i < len(keys)-1 {
+				governedSubKeys = append([]string(nil), keys[i+1:]...)
+				governedSubKinds = append([]TokenType(nil), kinds[i+1:]...)
+				governedSubBracketed = append([]bool(nil), bracketed[i+1:]...)
+				governedBlock = true
+			}
 			keys = keys[:i]
-			// Truncate the kinds in lockstep. The leading-marker branch above
-			// already re-slices both; this one dropped only the keys, which
-			// left kinds LONGER than keys for every statement carrying an
-			// inline marker — invisible while kinds was consulted by index
-			// against keys, but a length mismatch the moment anything derives
-			// a per-key slice from it (#6673 quote provenance).
 			kinds = kinds[:i]
 			bracketed = bracketed[:i]
-			// A marker before a block deactivates that block. For leaves the
-			// inline marker still only removes its governed sub-statement.
-			if p.lexer.Peek().Type == TokenLBrace {
+			if !governedBlock && p.lexer.Peek().Type == TokenLBrace {
 				inactive = true
 			}
 			break
@@ -562,6 +570,40 @@ func (p *Parser) parseStatement() *Node {
 			p.lexer.Next() // consume }
 		} else {
 			p.addErrorf(closeTok.Line, closeTok.Column, "expected '}', got %s", closeTok)
+		}
+		if governedBlock {
+			subQuoted := make([]bool, len(governedSubKeys))
+			for i := range governedSubKeys {
+				if i < len(governedSubKinds) {
+					subQuoted[i] = governedSubKinds[i] == TokenString
+				}
+			}
+			subBrackets := make([]bool, len(governedSubKeys))
+			for i := range governedSubKeys {
+				if i < len(governedSubBracketed) {
+					subBrackets[i] = governedSubBracketed[i]
+				}
+			}
+			inner := &Node{
+				Keys:     governedSubKeys,
+				Children: children,
+				Inactive: true,
+				Line:     line,
+				Column:   col,
+			}
+			inner.setKeysQuoted(subQuoted)
+			inner.setKeysBracketed(subBrackets)
+			outer := &Node{
+				Keys:            keys,
+				Children:        []*Node{inner},
+				Inactive:        inactive,
+				BracketedClosed: bracketedClosed,
+				Line:            line,
+				Column:          col,
+			}
+			outer.setKeysQuoted(quoted)
+			outer.setKeysBracketed(brackets)
+			return outer
 		}
 		n := &Node{
 			Keys:            keys,
