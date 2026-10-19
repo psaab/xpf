@@ -574,17 +574,26 @@ type Config struct {
 	// declares never quarantines a live zone. It is compile-time metadata only
 	// and is never sent over the dataplane wire.
 	ZoneQuarantineNames []string `json:"-"`
-	Firewall            FirewallConfig
-	ClassOfService      *ClassOfServiceConfig
-	Services            ServicesConfig
-	ForwardingOptions   ForwardingOptionsConfig
-	System              SystemConfig
-	PolicyOptions       PolicyOptionsConfig
-	Schedulers          map[string]*SchedulerConfig
-	Chassis             ChassisConfig
-	EventOptions        []*EventPolicy
-	BridgeDomains       []*BridgeDomainConfig
-	Warnings            []string // non-fatal validation warnings
+	// PhysicalInterfaces is the set of physical interface names (Linux
+	// spelling) declared anywhere in the candidate tree BEFORE group
+	// expansion — top level, every `groups` block, fabric members —
+	// computed once per compile (#15037). The interface-monitor name
+	// gate scans it: a shared cluster config declares each node's
+	// members only in that node's group, so no single expanded view
+	// names them all, and ExpandGroups removes the groups stanza the
+	// peer's declarations live in. Compile-time only; never marshalled.
+	PhysicalInterfaces map[string]bool `json:"-"`
+	Firewall           FirewallConfig
+	ClassOfService     *ClassOfServiceConfig
+	Services           ServicesConfig
+	ForwardingOptions  ForwardingOptionsConfig
+	System             SystemConfig
+	PolicyOptions      PolicyOptionsConfig
+	Schedulers         map[string]*SchedulerConfig
+	Chassis            ChassisConfig
+	EventOptions       []*EventPolicy
+	BridgeDomains      []*BridgeDomainConfig
+	Warnings           []string // non-fatal validation warnings
 
 	// LenientNATTerminalActionRules records every NAT rule the TOLERANT path
 	// admitted despite validateNATTerminalActionCardinalityStrict rejecting it

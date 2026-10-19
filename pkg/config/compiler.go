@@ -392,6 +392,10 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	// never aliases the caller's tree, so the caller retains groups/apply-groups
 	// nodes for `show configuration` and ExpandGroups below mutates only our copy.
 	tree = tree.cloneForExpansion()
+	// #15037: capture the any-node physical-interface set NOW, before
+	// ExpandGroups below removes the groups stanza the peer node's
+	// interface declarations live in.
+	opts.physicalInterfaces = physicalInterfacesInTree(tree)
 	if _, err := HashAPIAuthSecrets(tree); err != nil {
 		return nil, err
 	}
@@ -787,6 +791,10 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	// returns a fresh, freely-mutable pruned tree in a single deep copy (never
 	// aliases the caller's tree) so ExpandGroupsWithVars below mutates only our copy.
 	tree = tree.cloneForExpansion()
+	// #15037: capture the any-node physical-interface set NOW, before
+	// ExpandGroupsWithVars below removes the groups stanza the peer
+	// node's interface declarations live in.
+	opts.physicalInterfaces = physicalInterfacesInTree(tree)
 	if _, err := HashAPIAuthSecrets(tree); err != nil {
 		return nil, err
 	}
@@ -1126,6 +1134,9 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// #15037: the any-node physical-interface set arrives via opts (the
+	// wrappers computed it pre-expansion; this tree is already expanded)
+	// and is stamped onto cfg below for the interface-monitor name gate.
 
 	cfg := &Config{
 		Security: SecurityConfig{
@@ -1163,6 +1174,7 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	if applicationNameCollisions != nil {
 		cfg.Applications.CollidingNames = applicationNameCollisions
 	}
+	cfg.PhysicalInterfaces = opts.physicalInterfaces
 	cfg.Warnings = append(cfg.Warnings, preWalkWarnings...)
 	// #13095: stamp the pre-expansion three-view runtime zone-name union
 	// (#10248, validateZoneIDCollisionAST via opts) BEFORE any gate reads the

@@ -3482,6 +3482,16 @@ type compileOpts struct {
 	// and ZoneQuarantineNamesForConfig falls back to cfg's own zone keys,
 	// which is the pre-#13095 behavior.
 	zoneQuarantineNames []string
+	// physicalInterfaces (#15037) carries the pre-expansion physical
+	// interface-name set (top level + every groups block + fabric
+	// members) so compileExpanded can stamp it onto cfg for the
+	// interface-monitor name gate. Both compile wrappers compute it
+	// right after cloneForExpansion, BEFORE ExpandGroups removes the
+	// groups stanza the peer node's declarations live in; a direct
+	// compileExpanded caller that leaves it nil stamps the empty set
+	// and the gate treats every physical-shaped monitor name as
+	// attributable (nothing declared anywhere).
+	physicalInterfaces map[string]bool
 	// lenientAPIAuthDuplicateScalar (#14448) downgrades the api-auth
 	// duplicate class/expires gate (validateAPIAuthDuplicateScalarAST)
 	// from a hard error to a warning on the tolerant load / peer-sync
