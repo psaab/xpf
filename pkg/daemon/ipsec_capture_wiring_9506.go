@@ -86,13 +86,19 @@ func ipsecCaptureDivertSpec(handles []ipsecQueueHandle) (xnft.IpsecDivertSpec, e
 }
 
 func ipsecCaptureDivertSpecWithQuarantine(handles []ipsecQueueHandle, quarantine xnft.IpsecDivertSpec) (xnft.IpsecDivertSpec, error) {
+	// #15066: CandidateIfindices alone is not a quarantine request. A valid
+	// tunnel stages its ifindex as a candidate so a later quarantine reason
+	// can deny it; only an explicit reason (QuarantineAll, a reason mask, or
+	// a primary/raw reason) may close admission. finalize clears candidates
+	// when no reason exists, and this predicate must agree.
 	if quarantine.QuarantineAll || quarantine.QuarantineReasonMask != 0 ||
 		quarantine.QuarantinePrimaryReason != xnft.IpsecQuarantineReasonUnknown ||
 		quarantine.QuarantineRawReason != xnft.IpsecQuarantineReasonUnknown ||
-		quarantine.QuarantineRawMask != 0 || len(quarantine.CandidateIfindices) != 0 {
+		quarantine.QuarantineRawMask != 0 {
 		quarantine.QuarantineAll = true
 		return quarantine, nil
 	}
+	quarantine.CandidateIfindices = nil
 	return ipsecCaptureDivertSpec(handles)
 }
 
@@ -1023,6 +1029,12 @@ func (p *ipsecCaptureQueuePlan) finalize(generation uint64) {
 	}
 	if !p.Quarantine.QuarantineAll {
 		p.Quarantine.LifelineNetdevs = nil
+		// #15066: candidates collected from valid tunnels are deny-list
+		// bookkeeping for a quarantine that a later reason may request.
+		// With no quarantine reason they must not survive finalize, or
+		// downstream predicates would read them as a quarantine request
+		// and stage a box-wide DROP guard for a valid VPN.
+		p.Quarantine.CandidateIfindices = nil
 		return
 	}
 	mask := p.Quarantine.QuarantineReasonMask
