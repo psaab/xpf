@@ -75,6 +75,9 @@ func (c *ctl) handleRequest(args []string) error {
 
 	switch args[1] {
 	case "reboot", "halt", "power-off":
+		if len(args) > 2 {
+			return fmt.Errorf("request system %s does not accept arguments (%q)", args[1], strings.Join(args[2:], " "))
+		}
 		ok, err := c.confirmYes(fmt.Sprintf(
 			"%s the system? [yes,no] (no) ", strings.Title(args[1])))
 		if err != nil {
@@ -93,6 +96,9 @@ func (c *ctl) handleRequest(args []string) error {
 		fmt.Println(resp.Message)
 		return nil
 	case "zeroize":
+		if len(args) > 2 {
+			return fmt.Errorf("request system zeroize does not accept arguments (%q)", strings.Join(args[2:], " "))
+		}
 		fmt.Println("WARNING: This will erase all configuration and return to factory defaults.")
 		ok, err := c.confirmYes("Zeroize the system? [yes,no] (no) ")
 		if err != nil {
@@ -114,6 +120,9 @@ func (c *ctl) handleRequest(args []string) error {
 		if len(args) < 3 || args[2] != "in-service-upgrade" {
 			printRemoteTreeHelp("request system software:", "request", "system", "software")
 			return nil
+		}
+		if len(args) > 3 {
+			return fmt.Errorf("request system software in-service-upgrade does not accept arguments (%q)", strings.Join(args[3:], " "))
 		}
 		fmt.Println("WARNING: This will force this node to secondary for all redundancy groups.")
 		ok, err := c.confirmYes("Proceed with in-service upgrade? [yes,no] (no) ")
@@ -153,6 +162,9 @@ func (c *ctl) handleRequest(args []string) error {
 		default:
 			printRemoteTreeHelp("request system dynamic-dns:", "request", "system", "dynamic-dns")
 			return nil
+		}
+		if len(args) > 3 {
+			return fmt.Errorf("request system dynamic-dns %s does not accept arguments (%q)", args[2], strings.Join(args[3:], " "))
 		}
 		resp, err := c.client.SystemAction(c.ctx(), &pb.SystemActionRequest{
 			Action: action,
