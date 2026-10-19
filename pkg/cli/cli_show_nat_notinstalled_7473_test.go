@@ -88,7 +88,7 @@ func TestNATSummaryRenderersAnnotateNotInstalled7473(t *testing.T) {
 		call     func(c *CLI, cfg *config.Config) error
 	}{
 		{"showNATSourceRuleAll", disarmedSourceCfg(), armedSourceCfg(),
-			func(c *CLI, cfg *config.Config) error { return c.showNATSourceRuleAll(cfg) }},
+			func(c *CLI, cfg *config.Config) error { return c.showNATSourceRuleAll(cfg, "") }},
 		{"showNATSourceRuleSet", disarmedSourceCfg(), armedSourceCfg(),
 			func(c *CLI, cfg *config.Config) error { return c.showNATSourceRuleSet(cfg, "rs1") }},
 		{"showNATSourceSummary", disarmedSourceCfg(), armedSourceCfg(),
@@ -98,7 +98,7 @@ func TestNATSummaryRenderersAnnotateNotInstalled7473(t *testing.T) {
 		{"showNATDestinationPool", disarmedDestCfg(), armedDestCfg(),
 			func(c *CLI, cfg *config.Config) error { return c.showNATDestinationPool(cfg, "") }},
 		{"showNATDestinationRuleAll", disarmedDestCfg(), armedDestCfg(),
-			func(c *CLI, cfg *config.Config) error { return c.showNATDestinationRuleAll(cfg) }},
+			func(c *CLI, cfg *config.Config) error { return c.showNATDestinationRuleAll(cfg, "") }},
 		{"showNATDestinationRuleSet", disarmedDestCfg(), armedDestCfg(),
 			func(c *CLI, cfg *config.Config) error { return c.showNATDestinationRuleSet(cfg, "drs1") }},
 		{"showNATDestinationSummary", disarmedDestCfg(), armedDestCfg(),

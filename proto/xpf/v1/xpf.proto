@@ -680,6 +680,16 @@ message GetNATDestinationResponse {
   repeated NATDestInfo rules = 1;
   int32 total_active_translations = 2;
   repeated NATRuleSetSessions rule_set_sessions = 3;
+  // #15773: EVERY configured destination pool, including pools no rule
+  // references. `rules` alone cannot name an unreferenced pool, so a
+  // consumer deriving pools from rules hid them. Additive: older clients
+  // decode this as empty and behave exactly as before.
+  repeated NATDestPoolInfo pools = 4;
+}
+message NATDestPoolInfo {
+  string name = 1;
+  string address = 2;
+  uint32 port = 3;
 }
 message NATDestInfo {
   string name = 1;
@@ -1297,6 +1307,10 @@ message HostInboundAdmission {
 message GetNATRuleStatsRequest {
   string rule_set = 1;  // rule-set name (empty = all)
   string nat_type = 2;  // "source", "destination", or "" (source only for backward compat)
+  // #15773: single-rule name filter (empty = all rules). Additive: older
+  // servers ignore it; the remote CLI also filters client-side and fails
+  // on an unmatched name, so the selector is never silently dropped.
+  string rule = 3;
 }
 message GetNATRuleStatsResponse {
   repeated NATRuleStats rules = 1;
@@ -1330,6 +1344,10 @@ message NATRuleStats {
   string to_interface = 13;
   string from_routing_instance = 14;
   string to_routing_instance = 15;
+  // #15773: source rules only — the referenced pool preserves the source
+  // port (`port no-translation`), so no port-utilization reading applies.
+  // Additive: older clients decode it as false.
+  bool port_no_translation = 16;
 }
 
 // --- Deterministic source-NAT (CGNAT / NAPT64) mapping lookup ---

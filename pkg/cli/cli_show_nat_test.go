@@ -58,7 +58,7 @@ func TestShowNATSourceRuleAllReadsApplyResultOnce(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() {
-		if err := c.showNATSourceRuleAll(cfg); err != nil {
+		if err := c.showNATSourceRuleAll(cfg, ""); err != nil {
 			t.Fatalf("showNATSourceRuleAll() error = %v", err)
 		}
 	})
@@ -83,7 +83,7 @@ func TestNATRuleCounterReadsRequireInstalledRule11743(t *testing.T) {
 			return c.showNATSourceRuleSet(cfg, "rs1")
 		}},
 		{"source rule all", true, func(c *CLI, cfg *config.Config) error {
-			return c.showNATSourceRuleAll(cfg)
+			return c.showNATSourceRuleAll(cfg, "")
 		}},
 		{"destination", false, func(c *CLI, cfg *config.Config) error {
 			return c.showNATDestination(cfg, nil)
@@ -95,7 +95,7 @@ func TestNATRuleCounterReadsRequireInstalledRule11743(t *testing.T) {
 			return c.showNATDestinationRuleSet(cfg, "drs1")
 		}},
 		{"destination rule all", false, func(c *CLI, cfg *config.Config) error {
-			return c.showNATDestinationRuleAll(cfg)
+			return c.showNATDestinationRuleAll(cfg, "")
 		}},
 		{"destination summary", false, func(c *CLI, cfg *config.Config) error {
 			return c.showNATDestinationSummary(cfg)

@@ -214,6 +214,45 @@ type Candidate struct {
 // daemon's own validators and route builder already tolerate. cmdtree is the
 // completion SSOT for the local CLI, remote CLI, and gRPC, so a read-only
 // completion request must never panic on that shape (#4866).
+// sourceNATRuleNames / destNATRuleNames return configured rule names for
+// the `show security nat {source,destination} rule <name>` completer
+// (#15773), nil-skipping tolerant-load shapes (#4866).
+func sourceNATRuleNames(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	var names []string
+	for _, rs := range cfg.Security.NAT.Source {
+		if rs == nil {
+			continue
+		}
+		for _, rule := range rs.Rules {
+			if rule != nil {
+				names = append(names, rule.Name)
+			}
+		}
+	}
+	return names
+}
+
+func destNATRuleNames(cfg *config.Config) []string {
+	if cfg == nil || cfg.Security.NAT.Destination == nil {
+		return nil
+	}
+	var names []string
+	for _, rs := range cfg.Security.NAT.Destination.RuleSets {
+		if rs == nil {
+			continue
+		}
+		for _, rule := range rs.Rules {
+			if rule != nil {
+				names = append(names, rule.Name)
+			}
+		}
+	}
+	return names
+}
+
 // sourceNATPoolNames returns the configured source-NAT pool names for
 // completion (session pool filter, deterministic-NAT lookup pool filter).
 func sourceNATPoolNames(cfg *config.Config) []string {
@@ -634,8 +673,14 @@ var OperationalTree = map[string]*Node{
 					}},
 					"rule": {Desc: "Show source NAT rules", Children: map[string]*Node{
 						"detail": {Desc: "Show detailed source NAT rules"},
-					}},
-					// #9064: takes a rule-set NAME.
+						"all":    {Desc: "Show all source NAT rules"},
+						// #15773: named-rule selector, modelled as a
+						// dynamic value on the `rule` node itself (the
+						// `show security zones` precedent). A childless
+						// <placeholder> sibling would instead make the
+						// argument-free `... rule` command incomplete
+						// under Canonicalize (#14687).
+					}, DynamicFn: sourceNATRuleNames},
 					"rule-set": {Desc: "Show source NAT rule sets", ValueType: ValueIdentifier, ValueDesc: "Rule-set name"},
 					"deterministic-nat": {Desc: "Resolve deterministic CGNAT/NAPT64 mappings (applied generation)", Children: map[string]*Node{
 						"internal-host": {Desc: "Forward: map an internal subscriber to its translated IP + port block", Children: map[string]*Node{
@@ -659,8 +704,8 @@ var OperationalTree = map[string]*Node{
 					"pool":    {Desc: "Show destination NAT pools"},
 					"rule": {Desc: "Show destination NAT rules", Children: map[string]*Node{
 						"detail": {Desc: "Show detailed destination NAT rules"},
-					}},
-					// #9064: takes a rule-set NAME.
+						"all":    {Desc: "Show all destination NAT rules"},
+					}, DynamicFn: destNATRuleNames},
 					"rule-set": {Desc: "Show destination NAT rule sets", ValueType: ValueIdentifier, ValueDesc: "Rule-set name"},
 				}},
 				"static": {Desc: "Show static NAT", Children: map[string]*Node{

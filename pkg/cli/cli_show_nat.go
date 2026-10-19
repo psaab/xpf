@@ -77,10 +77,20 @@ func (c *CLI) showNATSource(cfg *config.Config, args []string) error {
 			}
 			return c.showNATSourcePool(cfg, poolName)
 		case "rule":
-			if len(args) > 1 && args[1] == "detail" {
+			// #15773: `rule <name>` filters to the named rule; `detail`
+			// keeps its existing meaning, bare `rule`/`rule all` list all.
+			// An unmatched name fails loudly — silently printing every
+			// rule was the defect.
+			switch {
+			case len(args) == 1, len(args) == 2 && args[1] == "all":
+				return c.showNATSourceRuleAll(cfg, "")
+			case len(args) == 2 && args[1] == "detail":
 				return c.showNATSourceRuleDetail(cfg)
+			case len(args) == 2:
+				return c.showNATSourceRuleAll(cfg, args[1])
+			default:
+				return fmt.Errorf("usage: show security nat source rule [<name>|all|detail]")
 			}
-			return c.showNATSourceRuleAll(cfg)
 		case "rule-set":
 			if len(args) == 2 {
 				return c.showNATSourceRuleSet(cfg, args[1])
@@ -650,10 +660,14 @@ func (c *CLI) showNATSourceRuleSet(cfg *config.Config, rsName string) error {
 	return nil
 }
 
-// showNATSourceRuleAll displays all source NAT rules across all rule-sets with hit counters.
-
-func (c *CLI) showNATSourceRuleAll(cfg *config.Config) error {
+// showNATSourceRuleAll displays source NAT rules across all rule-sets with
+// hit counters. ruleName "" (bare `rule` / `rule all`) lists every rule;
+// a named rule filters to it and an unmatched name is an error (#15773).
+func (c *CLI) showNATSourceRuleAll(cfg *config.Config, ruleName string) error {
 	if cfg == nil || len(cfg.Security.NAT.Source) == 0 {
+		if ruleName != "" {
+			return fmt.Errorf("source NAT rule %q not found", ruleName)
+		}
 		fmt.Println("No source NAT rules configured")
 		return nil
 	}
@@ -662,6 +676,9 @@ func (c *CLI) showNATSourceRuleAll(cfg *config.Config) error {
 	totalRules := 0
 	for _, rs := range cfg.Security.NAT.Source {
 		for _, rule := range rs.Rules {
+			if ruleName != "" && rule.Name != ruleName {
+				continue
+			}
 			totalRules++
 			// #8580: one shared computation for every surface — see
 			// natshow.SourceRuleAction. This copy defaulted to "interface",
@@ -681,6 +698,12 @@ func (c *CLI) showNATSourceRuleAll(cfg *config.Config) error {
 			if line := natNotInstalledLine(excludedReason, true); line != "" {
 				fmt.Println(line)
 			}
+			// #15773: a `port no-translation` pool preserves the source
+			// port; say so beside the rule rather than leaving the state
+			// to pool views only.
+			if pool, ok := cfg.Security.NAT.SourcePools[rule.Then.PoolName]; ok && pool != nil && pool.PortNoTranslation && excludedReason == "" {
+				fmt.Println("  Port translation: no-translation (source port preserved)")
+			}
 
 			if c.dp != nil && cr != nil && excludedReason == "" {
 				ruleKey := dataplane.NATCounterKey(dataplane.NATCounterTypeSource, rs.Name, rule.Name)
@@ -693,6 +716,9 @@ func (c *CLI) showNATSourceRuleAll(cfg *config.Config) error {
 				}
 			}
 		}
+	}
+	if ruleName != "" && totalRules == 0 {
+		return fmt.Errorf("source NAT rule %q not found", ruleName)
 	}
 	fmt.Printf("\nTotal source NAT rules: %d\n", totalRules)
 	return nil
@@ -727,10 +753,16 @@ func (c *CLI) showNATDestination(cfg *config.Config, args []string) error {
 			}
 			return c.showNATDestinationPool(cfg, poolName)
 		case "rule":
-			if len(args) > 1 && args[1] == "detail" {
+			switch {
+			case len(args) == 1, len(args) == 2 && args[1] == "all":
+				return c.showNATDestinationRuleAll(cfg, "")
+			case len(args) == 2 && args[1] == "detail":
 				return c.showNATDestinationRuleDetail(cfg)
+			case len(args) == 2:
+				return c.showNATDestinationRuleAll(cfg, args[1])
+			default:
+				return fmt.Errorf("usage: show security nat destination rule [<name>|all|detail]")
 			}
-			return c.showNATDestinationRuleAll(cfg)
 		case "rule-set":
 			if len(args) == 2 {
 				return c.showNATDestinationRuleSet(cfg, args[1])
@@ -1098,11 +1130,14 @@ func (c *CLI) showNATDestinationRuleSet(cfg *config.Config, rsName string) error
 	return nil
 }
 
-// showNATDestinationRuleAll displays all destination NAT rules with hit counters.
-
-func (c *CLI) showNATDestinationRuleAll(cfg *config.Config) error {
+// showNATDestinationRuleAll displays destination NAT rules with hit
+// counters; ruleName filtering mirrors showNATSourceRuleAll (#15773).
+func (c *CLI) showNATDestinationRuleAll(cfg *config.Config, ruleName string) error {
 	dnat := cfg.Security.NAT.Destination
 	if dnat == nil || len(dnat.RuleSets) == 0 {
+		if ruleName != "" {
+			return fmt.Errorf("destination NAT rule %q not found", ruleName)
+		}
 		fmt.Println("No destination NAT rules configured")
 		return nil
 	}
@@ -1111,6 +1146,9 @@ func (c *CLI) showNATDestinationRuleAll(cfg *config.Config) error {
 	totalRules := 0
 	for _, rs := range dnat.RuleSets {
 		for _, rule := range rs.Rules {
+			if ruleName != "" && rule.Name != ruleName {
+				continue
+			}
 			totalRules++
 			// #8580: the destination-NAT renderers carried the same
 			// singular-only copy the source side did, so an address-book-scoped
@@ -1139,6 +1177,9 @@ func (c *CLI) showNATDestinationRuleAll(cfg *config.Config) error {
 				}
 			}
 		}
+	}
+	if ruleName != "" && totalRules == 0 {
+		return fmt.Errorf("destination NAT rule %q not found", ruleName)
 	}
 	fmt.Printf("\nTotal destination NAT rules: %d\n", totalRules)
 	return nil

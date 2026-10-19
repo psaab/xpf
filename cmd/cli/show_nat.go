@@ -46,16 +46,27 @@ func (c *ctl) handleShowNAT(args []string) error {
 			return c.showCommand("show security nat source persistent-nat-table")
 		}
 		if len(args) >= 3 && args[1] == "rule" && args[2] == "detail" {
+			if len(args) > 3 {
+				return fmt.Errorf("usage: show security nat source rule [<name>|all|detail]")
+			}
 			return c.showCommand("show security nat source rule detail")
 		}
 		if len(args) >= 2 && args[1] == "rule" {
-			return c.showNATRuleStats("")
+			// #15773: `rule <name>` filters; bare/`all` list every rule.
+			switch {
+			case len(args) == 2, len(args) == 3 && args[2] == "all":
+				return c.showNATRuleStats("", "")
+			case len(args) == 3:
+				return c.showNATRuleStats("", args[2])
+			default:
+				return fmt.Errorf("usage: show security nat source rule [<name>|all|detail]")
+			}
 		}
 		if len(args) >= 3 && args[1] == "rule-set" {
-			return c.showNATRuleStats(args[2])
+			return c.showNATRuleStats(args[2], "")
 		}
 		if len(args) >= 2 && args[1] == "rule-set" {
-			return c.showNATRuleStats("")
+			return c.showNATRuleStats("", "")
 		}
 		if len(args) >= 2 && args[1] == "deterministic-nat" {
 			return c.showNATDeterministic(args[2:])
@@ -70,6 +81,9 @@ func (c *ctl) handleShowNAT(args []string) error {
 				fmt.Printf(" (pool: %s)", r.Pool)
 			}
 			fmt.Println()
+			if line := remoteNATNotInstalledLine(r.NotInstalled, r.NotInstalledReason); line != "" {
+				fmt.Println(line)
+			}
 		}
 		return nil
 	case "destination":
@@ -87,16 +101,26 @@ func (c *ctl) handleShowNAT(args []string) error {
 			return c.showNATDestinationPool(poolName)
 		}
 		if len(args) >= 3 && args[1] == "rule" && args[2] == "detail" {
+			if len(args) > 3 {
+				return fmt.Errorf("usage: show security nat destination rule [<name>|all|detail]")
+			}
 			return c.showCommand("show security nat destination rule detail")
 		}
 		if len(args) >= 2 && args[1] == "rule" {
-			return c.showNATDNATRuleStats("")
+			switch {
+			case len(args) == 2, len(args) == 3 && args[2] == "all":
+				return c.showNATDNATRuleStats("", "")
+			case len(args) == 3:
+				return c.showNATDNATRuleStats("", args[2])
+			default:
+				return fmt.Errorf("usage: show security nat destination rule [<name>|all|detail]")
+			}
 		}
 		if len(args) >= 3 && args[1] == "rule-set" {
-			return c.showNATDNATRuleStats(args[2])
+			return c.showNATDNATRuleStats(args[2], "")
 		}
 		if len(args) >= 2 && args[1] == "rule-set" {
-			return c.showNATDNATRuleStats("")
+			return c.showNATDNATRuleStats("", "")
 		}
 		resp, err := c.client.GetNATDestination(c.ctx(), &pb.GetNATDestinationRequest{})
 		if err != nil {
@@ -114,6 +138,9 @@ func (c *ctl) handleShowNAT(args []string) error {
 				fmt.Printf(":%d", r.TranslatePort)
 			}
 			fmt.Println()
+			if line := remoteNATNotInstalledLine(r.NotInstalled, r.NotInstalledReason); line != "" {
+				fmt.Println(line)
+			}
 		}
 		return nil
 	case "nat64":
@@ -245,6 +272,9 @@ func (c *ctl) showNATSourceSummary() error {
 		}
 		fmt.Printf("%-20s %-20s %-8s %-8d %-12s %-12s\n",
 			p.Name, p.Address, ports, p.UsedPorts, avail, util)
+		if line := remoteNATNotInstalledLine(p.NotInstalled, p.NotInstalledReason); line != "" {
+			fmt.Println(line)
+		}
 	}
 	if len(resp.RuleSetSessions) > 0 {
 		fmt.Println()
@@ -289,6 +319,9 @@ func (c *ctl) showNATPoolStats(name string) error {
 		} else {
 			fmt.Printf("  Active sessions: %d\n", p.UsedPorts)
 		}
+		if line := remoteNATNotInstalledLine(p.NotInstalled, p.NotInstalledReason); line != "" {
+			fmt.Println("  " + line)
+		}
 		fmt.Println()
 	}
 	if name != "" && !matched {
@@ -297,14 +330,47 @@ func (c *ctl) showNATPoolStats(name string) error {
 	return nil
 }
 
-func (c *ctl) showNATRuleStats(ruleSet string) error {
+// remoteNATNotInstalledLine renders the #7473 verdict carried on the wire
+// (#15773: the remote rule renderers previously dropped it).
+func remoteNATNotInstalledLine(notInstalled bool, reason string) string {
+	if !notInstalled {
+		return ""
+	}
+	if reason != "" {
+		return "  NOT INSTALLED — " + reason
+	}
+	return "  NOT INSTALLED"
+}
+
+// filterNATRuleStats applies the `rule <name>` selector client-side as
+// well as on the wire, so an older daemon that ignores the field cannot
+// silently widen the answer back to every rule (#15773).
+func filterNATRuleStats(rules []*pb.NATRuleStats, rule string) []*pb.NATRuleStats {
+	if rule == "" {
+		return rules
+	}
+	out := rules[:0:0]
+	for _, r := range rules {
+		if r != nil && r.RuleName == rule {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func (c *ctl) showNATRuleStats(ruleSet, rule string) error {
 	resp, err := c.client.GetNATRuleStats(c.ctx(), &pb.GetNATRuleStatsRequest{
 		RuleSet: ruleSet,
+		Rule:    rule,
 	})
 	if err != nil {
 		return fmt.Errorf("%v", err)
 	}
+	resp.Rules = filterNATRuleStats(resp.Rules, rule)
 	if len(resp.Rules) == 0 {
+		if rule != "" {
+			return fmt.Errorf("source NAT rule %q not found", rule)
+		}
 		if ruleSet != "" {
 			fmt.Printf("Rule-set %q not found\n", ruleSet)
 		} else {
@@ -326,6 +392,12 @@ func (c *ctl) showNATRuleStats(ruleSet string) error {
 		fmt.Printf("  Rule: %s\n", r.RuleName)
 		fmt.Printf("    Match: source %s destination %s\n", r.SourceMatch, r.DestinationMatch)
 		fmt.Printf("    Action: %s\n", r.Action)
+		if line := remoteNATNotInstalledLine(r.NotInstalled, r.NotInstalledReason); line != "" {
+			fmt.Println("  " + line)
+		}
+		if r.PortNoTranslation {
+			fmt.Println("    Port translation: no-translation (source port preserved)")
+		}
 		fmt.Printf("    Translation hits: %d packets  %d bytes\n", r.HitPackets, r.HitBytes)
 	}
 	fmt.Println()
@@ -337,7 +409,7 @@ func (c *ctl) showNATDestinationSummary() error {
 	if err != nil {
 		return fmt.Errorf("%v", err)
 	}
-	if len(resp.Rules) == 0 {
+	if len(resp.Rules) == 0 && len(resp.Pools) == 0 {
 		fmt.Println("No destination NAT pools configured")
 		return nil
 	}
@@ -347,6 +419,13 @@ func (c *ctl) showNATDestinationSummary() error {
 		port uint32
 	}
 	pools := make(map[string]poolInfo)
+	// #15773: seed from the daemon's full pool list first so a pool no
+	// rule references is not hidden; rule rows (older daemons) fill gaps.
+	for _, p := range resp.Pools {
+		if p != nil && p.Name != "" {
+			pools[p.Name] = poolInfo{addr: p.Address, port: p.Port}
+		}
+	}
 	for _, r := range resp.Rules {
 		name := r.PoolName
 		if name == "" {
@@ -391,6 +470,12 @@ func (c *ctl) showNATDestinationSummary() error {
 			portStr = fmt.Sprintf("%d", p.port)
 		}
 		fmt.Printf("%-20s %-20s %-8s %-12d\n", name, p.addr, portStr, poolHits["pool "+name])
+		// #15773: a pool every referencing rule was refused for is not
+		// merely quiet. resp.Pools carries no verdict, so derive it from
+		// the rule rows: all referencing rules NotInstalled.
+		if reason := remoteDestPoolNotInstalled(resp.Rules, name); reason != "" {
+			fmt.Println("  NOT INSTALLED — " + reason)
+		}
 	}
 	if len(resp.RuleSetSessions) > 0 {
 		fmt.Println()
@@ -408,6 +493,14 @@ func (c *ctl) showNATDestinationPool(poolName string) error {
 	if err != nil {
 		return fmt.Errorf("%v", err)
 	}
+	// #15773: index EVERY configured pool (resp.Pools), not only pools a
+	// rule references; an unreferenced pool renders with no Rule lines.
+	poolAddr := make(map[string]*pb.NATDestPoolInfo)
+	for _, p := range resp.Pools {
+		if p != nil && p.Name != "" {
+			poolAddr[p.Name] = p
+		}
+	}
 	poolRules := make(map[string][]*pb.NATDestInfo)
 	for _, r := range resp.Rules {
 		name := r.PoolName
@@ -417,47 +510,95 @@ func (c *ctl) showNATDestinationPool(poolName string) error {
 		if name == "" {
 			continue // `destination-nat off` rules do not reference pools.
 		}
-		if poolName != "" && poolName != "all" && name != poolName {
-			continue
+		if _, ok := poolAddr[name]; !ok {
+			poolAddr[name] = &pb.NATDestPoolInfo{Name: name, Address: r.TranslateIp, Port: r.TranslatePort}
 		}
 		poolRules[name] = append(poolRules[name], r)
 	}
-	if len(poolRules) == 0 {
+	names := make([]string, 0, len(poolAddr))
+	for name := range poolAddr {
+		if poolName != "" && poolName != "all" && name != poolName {
+			continue
+		}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
 		if poolName != "" && poolName != "all" {
 			return fmt.Errorf("destination NAT pool %q not found", poolName)
 		}
 		fmt.Println("No destination NAT pools configured")
 		return nil
 	}
-	names := make([]string, 0, len(poolRules))
-	for name := range poolRules {
-		names = append(names, name)
-	}
 	slices.Sort(names)
 	for _, name := range names {
 		fmt.Printf("Pool name: %s\n", name)
-		for _, r := range poolRules[name] {
+		p := poolAddr[name]
+		rules := poolRules[name]
+		if len(rules) == 0 {
+			// Unreferenced pool: address/port come from the pool list.
+			fmt.Printf("  Address: %s\n", p.Address)
+			if p.Port > 0 {
+				fmt.Printf("  Port: %d\n", p.Port)
+			}
+		}
+		for _, r := range rules {
 			fmt.Printf("  Address: %s\n", r.TranslateIp)
 			if r.TranslatePort > 0 {
 				fmt.Printf("  Port: %d\n", r.TranslatePort)
 			}
 			fmt.Printf("  Rule: %s (dst %s%s", r.Name, r.DstAddr, natDestPortsSuffix(r))
 			fmt.Println(")")
+			if line := remoteNATNotInstalledLine(r.NotInstalled, r.NotInstalledReason); line != "" {
+				fmt.Println("  " + line)
+			}
 		}
 		fmt.Println()
 	}
 	return nil
 }
 
-func (c *ctl) showNATDNATRuleStats(ruleSet string) error {
+// remoteDestPoolNotInstalled returns a reason when every rule referencing
+// poolName is NotInstalled, mirroring the local CLI's derived pool verdict.
+func remoteDestPoolNotInstalled(rules []*pb.NATDestInfo, poolName string) string {
+	referencing, excluded := 0, 0
+	reason := ""
+	for _, r := range rules {
+		if r == nil {
+			continue
+		}
+		name := r.PoolName
+		if name == "" {
+			name = r.TranslateIp
+		}
+		if name != poolName {
+			continue
+		}
+		referencing++
+		if r.NotInstalled {
+			excluded++
+			reason = r.NotInstalledReason
+		}
+	}
+	if referencing > 0 && referencing == excluded {
+		return reason
+	}
+	return ""
+}
+
+func (c *ctl) showNATDNATRuleStats(ruleSet, rule string) error {
 	resp, err := c.client.GetNATRuleStats(c.ctx(), &pb.GetNATRuleStatsRequest{
 		RuleSet: ruleSet,
+		Rule:    rule,
 		NatType: "destination",
 	})
 	if err != nil {
 		return fmt.Errorf("%v", err)
 	}
+	resp.Rules = filterNATRuleStats(resp.Rules, rule)
 	if len(resp.Rules) == 0 {
+		if rule != "" {
+			return fmt.Errorf("destination NAT rule %q not found", rule)
+		}
 		if ruleSet != "" {
 			fmt.Printf("Rule-set %q not found\n", ruleSet)
 		} else {
@@ -478,7 +619,13 @@ func (c *ctl) showNATDNATRuleStats(ruleSet string) error {
 		}
 		fmt.Printf("  Rule: %s\n", r.RuleName)
 		fmt.Printf("    Match destination: %s\n", r.DestinationMatch)
+		if r.SourceMatch != "" {
+			fmt.Printf("    Match source: %s\n", r.SourceMatch)
+		}
 		fmt.Printf("    Action: %s\n", r.Action)
+		if line := remoteNATNotInstalledLine(r.NotInstalled, r.NotInstalledReason); line != "" {
+			fmt.Println("  " + line)
+		}
 		fmt.Printf("    Translation hits: %d packets  %d bytes\n", r.HitPackets, r.HitBytes)
 	}
 	fmt.Println()

@@ -92,7 +92,7 @@ func TestD13246NATShowEvilTwins(t *testing.T) {
 		run  func() error
 	}{
 		{"rule-set", func() error { return (&CLI{}).showNATDestinationRuleSet(cfg, "drs") }},
-		{"rule-all", func() error { return (&CLI{}).showNATDestinationRuleAll(cfg) }},
+		{"rule-all", func() error { return (&CLI{}).showNATDestinationRuleAll(cfg, "") }},
 	} {
 		out = captureStdout(t, func() {
 			if err := view.run(); err != nil {

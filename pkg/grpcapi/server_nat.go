@@ -74,6 +74,20 @@ func (s *Server) GetNATDestination(ctx context.Context, _ *pb.GetNATDestinationR
 	}
 
 	resp := &pb.GetNATDestinationResponse{}
+	// #15773: every configured pool, referenced or not — `rules` cannot
+	// name an unreferenced pool, and consumers deriving pools from rules
+	// hid them.
+	for _, name := range sortedMapKeys(cfg.Security.NAT.Destination.Pools) {
+		pool := cfg.Security.NAT.Destination.Pools[name]
+		info := &pb.NATDestPoolInfo{Name: name}
+		if pool != nil {
+			info.Address = pool.Address
+			if pool.Port > 0 {
+				info.Port = uint32(pool.Port)
+			}
+		}
+		resp.Pools = append(resp.Pools, info)
+	}
 	for _, rs := range cfg.Security.NAT.Destination.RuleSets {
 		for _, rule := range rs.Rules {
 			info := &pb.NATDestInfo{
@@ -415,6 +429,9 @@ func (s *Server) GetNATRuleStats(_ context.Context, req *pb.GetNATRuleStatsReque
 				continue
 			}
 			for _, rule := range rs.Rules {
+				if req.Rule != "" && rule.Name != req.Rule {
+					continue
+				}
 				// #8580: one shared computation for every surface — see
 				// natshow.SourceRuleAction. This copy carried the same two
 				// defects the REST one did: `then source-nat off` reported as
@@ -446,6 +463,10 @@ func (s *Server) GetNATRuleStats(_ context.Context, req *pb.GetNATRuleStatsReque
 					HitPackets:          hitPkts,
 					HitBytes:            hitBytes,
 				}
+				// #15773: `port no-translation` state of the referenced pool.
+				if pool, ok := cfg.Security.NAT.SourcePools[rule.Then.PoolName]; ok && pool != nil && pool.PortNoTranslation {
+					srcInfo.PortNoTranslation = true
+				}
 				if reason := config.SourceNATRuleNotInstalledReason(cfg, rule); reason != "" {
 					srcInfo.NotInstalled = true
 					srcInfo.NotInstalledReason = config.SourceNATDisarmReasonText(reason)
@@ -463,6 +484,9 @@ func (s *Server) GetNATRuleStats(_ context.Context, req *pb.GetNATRuleStatsReque
 					continue
 				}
 				for _, rule := range rs.Rules {
+					if req.Rule != "" && rule.Name != req.Rule {
+						continue
+					}
 					action := natshow.DestRuleAction(rule)
 					// #8580: same singular-only copy, destination side.
 					// #15226: the complete port set, not ":<first port>".
