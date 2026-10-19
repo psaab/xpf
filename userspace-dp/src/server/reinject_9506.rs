@@ -371,26 +371,46 @@ pub(crate) fn spawn_reinject_socket_servers(
     let submit_thread = thread::Builder::new()
         .name("xpf-reinject-submit".to_string())
         .spawn(move || {
+            let mut backoff = super::lifecycle::AcceptBackoff::new();
             while submit_running.load(Ordering::Acquire) {
-                match submit_listener.accept() {
-                    Ok((stream, _)) => {
+                let decision = super::lifecycle::accept_step(
+                    submit_listener.accept(),
+                    Duration::from_millis(1),
+                    "reinject submit socket",
+                    &mut backoff,
+                    Instant::now(),
+                    true,
+                );
+                if let Some(line) = decision.log {
+                    eprintln!("xpf-userspace-dp: {line}");
+                }
+                match decision.step {
+                    super::lifecycle::AcceptStep::Serve((stream, _)) => {
                         if let Err(err) =
                             super::lifecycle::reject_unprivileged_peer("reinject submit", &stream)
                         {
                             eprintln!("xpf-userspace-dp: {err}");
                             continue;
                         }
-                        serve_submit_conn_with_running(
-                            stream,
-                            &submit_core,
-                            &submit_target,
-                            &submit_running,
-                        );
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            serve_submit_conn_with_running(
+                                stream,
+                                &submit_core,
+                                &submit_target,
+                                &submit_running,
+                            );
+                        }))
+                        .unwrap_or_else(|_| {
+                            eprintln!(
+                                "xpf-userspace-dp: reinject submit connection panicked; connection dropped, accept loop continues (#15112)"
+                            );
+                        });
                     }
-                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(1));
+                    super::lifecycle::AcceptStep::Sleep(delay) => thread::sleep(delay),
+                    super::lifecycle::AcceptStep::Fail(msg) => {
+                        eprintln!("xpf-userspace-dp: {msg}");
+                        thread::sleep(super::lifecycle::AcceptBackoff::MAX);
                     }
-                    Err(_) => break,
                 }
             }
         })
@@ -401,9 +421,21 @@ pub(crate) fn spawn_reinject_socket_servers(
     let complete_thread = thread::Builder::new()
         .name("xpf-reinject-complete".to_string())
         .spawn(move || {
+            let mut backoff = super::lifecycle::AcceptBackoff::new();
             while complete_running.load(Ordering::Acquire) {
-                match complete_listener.accept() {
-                    Ok((stream, _)) => {
+                let decision = super::lifecycle::accept_step(
+                    complete_listener.accept(),
+                    Duration::from_millis(1),
+                    "reinject complete socket",
+                    &mut backoff,
+                    Instant::now(),
+                    true,
+                );
+                if let Some(line) = decision.log {
+                    eprintln!("xpf-userspace-dp: {line}");
+                }
+                match decision.step {
+                    super::lifecycle::AcceptStep::Serve((stream, _)) => {
                         if let Err(err) =
                             super::lifecycle::reject_unprivileged_peer("reinject complete", &stream)
                         {
@@ -415,12 +447,20 @@ pub(crate) fn spawn_reinject_socket_servers(
                         let target = target.clone();
                         // One completion client is expected (Go pipeline). Serve
                         // it inline so drain order remains globally serialized.
-                        serve_complete_conn_with_target(stream, &core, Some(&target), &run);
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            serve_complete_conn_with_target(stream, &core, Some(&target), &run);
+                        }))
+                        .unwrap_or_else(|_| {
+                            eprintln!(
+                                "xpf-userspace-dp: reinject complete connection panicked; connection dropped, accept loop continues (#15112)"
+                            );
+                        });
                     }
-                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(1));
+                    super::lifecycle::AcceptStep::Sleep(delay) => thread::sleep(delay),
+                    super::lifecycle::AcceptStep::Fail(msg) => {
+                        eprintln!("xpf-userspace-dp: {msg}");
+                        thread::sleep(super::lifecycle::AcceptBackoff::MAX);
                     }
-                    Err(_) => break,
                 }
             }
         })

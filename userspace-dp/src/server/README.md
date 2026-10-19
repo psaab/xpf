@@ -802,10 +802,14 @@ queues. See PR #1243's kill record for why i40e doesn't reshape.
 
 ## Gotchas
 
-- **An accept error does not crash-loop the helper (#9172, V031).** Both accept
-  loops in `lifecycle.rs` (the control socket on the main thread, the session
-  socket on its own thread) decide through `accept_step`, which also returns the
-  journal line to write, so log volume is tested rather than assumed.
+- **An accept error does not crash-loop the helper (#9172, V031; #15112).** All
+  four accept loops decide through `accept_step`, which also returns the
+  journal line to write, so log volume is tested rather than assumed: the
+  control and session loops in `lifecycle.rs`, and the #9506 reinject
+  submit/complete loops in `reinject_9506.rs` (#15112 — these two used to
+  `break` on any non-`WouldBlock` error, dropping the listener permanently
+  on an idle EMFILE; each accepted connection there is also served under
+  `catch_unwind` so a handler panic drops one connection, not the loop).
   - `WouldBlock` keeps each loop's poll interval.
   - EMFILE / ENFILE / ENOBUFS / ENOMEM -- what the accept path returns under
     descriptor or memory pressure -- are RETRIED on both loops: 50 ms doubling to
@@ -821,10 +825,12 @@ queues. See PR #1243's kill record for why i40e doesn't reshape.
     control socket; how to recover that is #9651.
   - Any other error: the CONTROL loop returns `Err`, which `main` turns into
     `exit(1)` for the supervisor -- its behaviour before this change. The SESSION
-    loop retries it the same way and says once that it is not exiting: errno does
-    not say where an error came from (an LSM hook runs before `unix_accept` and
-    its errno is propagated unchanged), the thread has no path to end the
-    process, and exiting would take forwarding down with the HA session socket.
+    loop and both REINJECT loops retry it the same way and say once that they
+    are not exiting: errno does not say where an error came from (an LSM hook
+    runs before `unix_accept` and its errno is propagated unchanged), the
+    threads have no path to end the process, and exiting a reinject loop would
+    silently black-hole every IPsec FORWARD flow on the #9506 re-entry behind
+    a healthy control socket, with nothing triggering a restart.
 
   Before this, the control loop exited on every non-`WouldBlock` error, so fd
   pressure became a supervisor crash-loop with no forwarding for up to 60 s per
