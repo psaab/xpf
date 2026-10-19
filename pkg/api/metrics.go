@@ -1304,6 +1304,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.eventActionQueueDepth
 	ch <- c.eventPlantClassInvalid
 	ch <- c.eventAttributesInvalid
+	ch <- c.eventActionQueueDepth
 	ch <- c.eventStreamSubscriberDropped
 	ch <- c.eventStreamSubscriberRefusals
 	ch <- c.eventStreamRingEvicted
