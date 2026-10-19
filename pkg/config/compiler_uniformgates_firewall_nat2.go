@@ -27,6 +27,27 @@ func runUniformGatesFirewallNAT2(tree *ConfigTree, cfg *Config, opts compileOpts
 		}
 	}
 
+	// #15005 (A09-01): a name defined as BOTH `firewall policer <name>`
+	// and `firewall three-color-policer <name>` compiled cleanly; both
+	// definitions ship under the bare name and the userspace filter
+	// compiler's three-color-first loading silently enforces the
+	// three-color meter for `then policer <name>` instead of the
+	// single-rate policer. Strict on commit / commit-check (hard reject
+	// naming both definitions); lenient on load / peer-sync (warn so an
+	// already-persisted or peer-synced config still boots — #1960; both
+	// definitions survive and the pre-gate three-color precedence is
+	// retained, now visible). Runs right after the reference gate above
+	// on the fully-compiled *Config so both policer maps
+	// are populated regardless of authoring order.
+	if err := validateFirewallPolicerNameCollisionStrict(cfg); err != nil {
+		if opts.lenientPolicerNameCollision {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("firewall policer name collision (downgraded to warning on tolerant path; the three-color-policer definition takes precedence in the dataplane): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #3076 / #4953: firewall-filter `from tcp-flags` enforceability gate.
 	// An expression the conjunctive dataplane matcher cannot represent
 	// (disjunction, negated group, unknown flag, dangling negation, or a

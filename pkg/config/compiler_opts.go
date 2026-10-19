@@ -1269,6 +1269,19 @@ type compileOpts struct {
 	// as it did before the gate, so a leniently-loaded config is no worse
 	// off. Same doctrine as lenientFilterActions (#2399).
 	lenientPolicerUnknownActions bool
+	// lenientPolicerNameCollision (#15005) downgrades the policer /
+	// three-color-policer same-name collision gate
+	// (validateFirewallPolicerNameCollisionStrict) from a hard compile
+	// error to a cfg.Warnings entry. The strict commit / commit-check
+	// path hard-rejects a name defined in both namespaces, because the
+	// userspace filter compiler loads three-color templates first and
+	// silently enforces that meter for `then policer <name>` instead of
+	// the single-rate policer. The tolerant load / peer-sync paths warn
+	// so an already-persisted or peer-synced config still BOOTS (#1960
+	// no-brick); both definitions survive and the dataplane keeps its
+	// pre-gate three-color precedence, now visible instead of silent.
+	// Same doctrine as lenientPolicerThenConflict.
+	lenientPolicerNameCollision bool
 	// lenientFilterDSCP (#3309) downgrades the firewall-filter DSCP /
 	// traffic-class range gate (validateFilterDSCPStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check path
@@ -3476,6 +3489,7 @@ func lenientCompileOpts() compileOpts {
 		lenientFilterTerminalConflict:          true,
 		lenientPolicerThenConflict:             true,
 		lenientPolicerUnknownActions:           true,
+		lenientPolicerNameCollision:           true,
 		lenientFilterDSCP:                      true,
 		lenientNPTv6:                           true,
 		lenientVRFOverlapPBR:                   true,
