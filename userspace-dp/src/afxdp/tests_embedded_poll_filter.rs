@@ -10590,6 +10590,31 @@ fn poll_descriptor_untranslated_v4_error_admission_impl(
     outer_error_type: u8,
     same_zone_arrival: bool,
 ) {
+    // #15255 (A84-03): the knob value is a PARAMETER, not a hard-coded
+    // `false` inside. The pre-#15255 body forced the knob off for every
+    // caller, so the #13935 "knob-off control" was byte-identical to
+    // the #10286 cell and no v4 run exercised the knob ON at all.
+    poll_descriptor_untranslated_v4_error_admission_knob_impl(
+        install_session,
+        cross_zone_arrival,
+        unknown_zone_arrival,
+        reverse_half,
+        outer_error_type,
+        same_zone_arrival,
+        false,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn poll_descriptor_untranslated_v4_error_admission_knob_impl(
+    install_session: bool,
+    cross_zone_arrival: bool,
+    unknown_zone_arrival: bool,
+    reverse_half: bool,
+    outer_error_type: u8,
+    same_zone_arrival: bool,
+    allow_embedded_icmp: bool,
+) {
     let router_ip = if same_zone_arrival {
         Ipv4Addr::new(10, 0, 61, 1)
     } else {
@@ -10630,9 +10655,12 @@ fn poll_descriptor_untranslated_v4_error_admission_impl(
     }
 
     let mut snapshot = nat_snapshot();
-    // #13935: same-family errors do not use this option; verify unmatched
-    // quotes still face normal zone policy when the option is disabled.
-    snapshot.flow.allow_embedded_icmp = false;
+    // #13935/#15255: same-family errors do not consult this option (no
+    // production code reads ForwardingState::allow_embedded_icmp);
+    // verify unmatched quotes still face normal zone policy at BOTH
+    // knob values, so a reintroduction of knob-dependent v4 admission
+    // reds the knob-ON cell.
+    snapshot.flow.allow_embedded_icmp = allow_embedded_icmp;
     // Default-deny arrival-to-egress: no WAN->LAN or LAN->LAN permit. The
     // fixture's LAN->WAN allow-all stays (the forward session's own permit).
     let mut forwarding = build_forwarding_state(&snapshot);
@@ -11035,7 +11063,21 @@ fn poll_descriptor_unsolicited_icmp_still_denied_10286() {
 /// optional knob disabled.
 #[test]
 fn poll_descriptor_unsolicited_icmp_still_denied_with_knob_off_13935() {
-    poll_descriptor_untranslated_v4_error_admission_impl(false, false, false, false, 3, false);
+    poll_descriptor_untranslated_v4_error_admission_knob_impl(
+        false, false, false, false, 3, false, false,
+    );
+}
+
+/// #15255 (A84-03): the knob-ON twin the #13935 commit removed. No
+/// production code reads `allow_embedded_icmp`, so denial must be
+/// IDENTICAL with the knob on: if v4 admission ever consults the knob
+/// again, this cell queues a RELATED forward for an unsolicited error
+/// and reds, where the byte-identical pre-#15255 control could not.
+#[test]
+fn poll_descriptor_unsolicited_icmp_still_denied_with_knob_on_15255() {
+    poll_descriptor_untranslated_v4_error_admission_knob_impl(
+        false, false, false, false, 3, false, true,
+    );
 }
 /// #10671 fail-on-revert: a live un-NAT'd session must not authorize an
 /// error whose actual arrival zone differs from the session's expected zone.

@@ -53,6 +53,14 @@ var dupConservationInventory8436 = []string{
 	// services dhcp-local-server group`. The remaining rows are
 	// `rejected-at-commit` — conservation BY REFUSAL, a different and
 	// acceptable disposition that the census reports separately.
+	// #15255 (D07-02): these four rows ARE refused at strict commit —
+	// by the bespoke #15192 duplicate-term gate (D07-01), not by any
+	// generic duplicate rule. At the report base the census scored
+	// them "rejected-at-commit" on an unrelated fixture error
+	// (bit-length xpfaaa is invalid as a single block), which hid the
+	// then-silent term site behind "SILENT: 0". The verdict now
+	// requires the merged twin to strict-compile AND a duplicate gate
+	// to fire; see TestDupVerdictRequiresDuplicateGate15255.
 	"firewall family any filter xpfname term",
 	"firewall family inet filter xpfname term",
 	"firewall family inet6 filter xpfname term",
@@ -61,6 +69,12 @@ var dupConservationInventory8436 = []string{
 	"firewall filter xpfname term",
 	"security screen ids-option",
 	"system services dhcpv6-local-server group",
+	// #15255: genuinely SILENT (no dup gate fires, merged twin compiles).
+	// Recorded as divergent, NOT as refused — the pre-#15255 census
+	// scored this row rejected-at-commit because strict compile errored
+	// on unrelated grounds at other sites. A fix for this site itself
+	// is D07-01-class runtime work, out of scope here.
+	"protocols ospf area xpfname virtual-link",
 	// ---- SILENT: no commit gate at all. ----
 	//
 	// EMPTY — and this time the sentence is load-bearing rather than an
@@ -217,7 +231,15 @@ var dupConservationSkipped8436 = []string{
 	"protocols lldp interface",
 	"protocols ospf3 area",
 	"protocols ospf area xpfname interface xpfname authentication md5",
-	"protocols ospf area xpfname virtual-link",
+	// #15255: the four authentication/virtual-link descendants below
+	// (plus their ospf3 siblings) synthesize no valid fixture even on
+	// latest master — recorded as unprobed-by-name at the report base
+	// too. The parent virtual-link site IS now checked (see the
+	// divergent list) and is SILENT there.
+	"protocols ospf area xpfname virtual-link xpfname authentication md5",
+	"protocols ospf area xpfname virtual-link xpfname authentication simple-password",
+	"protocols ospf3 area xpfname interface xpfname authentication md5",
+	"protocols ospf3 area xpfname interface xpfname authentication simple-password",
 	"protocols router-advertisement interface xpfname nat64prefix",
 	"protocols router-advertisement interface xpfname nat-prefix",
 	"routing-options generate route",
