@@ -847,15 +847,17 @@ packet handlers, and MIB view that call into them.
   delivery was synchronous and inline, so an unreachable trap target (or a
   hung DNS lookup for an FQDN target) blocked link-state processing for up
   to the 2s dial timeout × target count.
-- **The v2c trap community is selected deterministically (#2989).**
-  `selectTrapCommunity` picks the lexicographically-first configured
-  community (falling back to `public` when none is configured). The old
-  code ranged the `Communities` map and broke on the first entry, which —
-  because Go map iteration is randomized — picked a different community per
-  run when more than one was configured, so a collector accepting only one
-  community saw flaky traps and a less-privileged community could leak
-  through the wrong credential boundary. Trap groups are likewise iterated
-  in sorted order so dispatch and log output are reproducible.
+- **The v1/v2c trap community is the trap-group name (#15052, #2989).**
+  `trapCommunityForGroup` returns the trap-group's own name — in Junos
+  `snmp trap-group <name>` sends with community `<name>` — falling back
+  to `public` only for a hand-built unnamed group. Before #15052 every
+  group sent the alphabetically-first configured QUERY community
+  (`selectTrapCommunity`, the #2989 deterministic pick), disclosing that
+  query credential — possibly a read-write one — in cleartext to every
+  trap target (#15052 A20-04). The #2989 determinism property is
+  preserved trivially: the group name does not depend on Go map
+  iteration. Trap groups are likewise iterated in sorted order so
+  dispatch and log output are reproducible.
 - **Trap-group `version` selects the emitted PDU shape (#3948).** Each trap
   group carries a `version` (`v1` | `v2` | `all`, schema enum in
   `pkg/config/schema_system.go`) compiled onto `config.SNMPTrapGroup.Version`.
