@@ -970,6 +970,49 @@ func validateSamplingInputRateStrict(cfg *Config) error {
 	return nil
 }
 
+// validatePortMirroringIngressAliasStrict (#15651) is the post-section half
+// of the port-mirroring duplicate-ingress gate. compilePortMirroring dedups
+// on LinuxIfName while the interface stanzas are not yet compiled, so two
+// spellings that only alias through the CONFIG — a bare `ge-0/0/0` and its
+// unit-0 `ge-0/0/0.0`, a RETH ref and its member, a VLAN unit and its kernel
+// child — compiled as distinct sources in different instances and then
+// collided on one ifindex in the snapshot builders. Normalizing every input
+// through ResolveKernelIfName (interfaces are compiled by this phase) makes
+// the commit gate see the same identity the dataplane keys on. Bare-vs-unit0
+// is rejected here even though the userspace builder's scoped key can tell
+// the rows apart: the legacy eBPF compiler keys mirror_config by bare
+// ifindex, so on that plane the second SetMirrorConfig silently overwrites
+// the first — one output per ingress ifindex is the table contract (#3972).
+func validatePortMirroringIngressAliasStrict(cfg *Config) error {
+	if cfg == nil || cfg.ForwardingOptions.PortMirroring == nil {
+		return nil
+	}
+	insts := cfg.ForwardingOptions.PortMirroring.Instances
+	names := make([]string, 0, len(insts))
+	for name := range insts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	owner := make(map[string]string)
+	for _, name := range names {
+		inst := insts[name]
+		if inst == nil {
+			continue
+		}
+		for _, input := range inst.Input {
+			key := cfg.ResolveKernelIfName(input)
+			if prev, dup := owner[key]; dup {
+				if prev == name {
+					return fmt.Errorf("port-mirroring instance %q: duplicate ingress interface %q", name, input)
+				}
+				return fmt.Errorf("port-mirroring: ingress interface %q is mirrored by both instance %q and %q (one output per ingress interface)", input, prev, name)
+			}
+			owner[key] = name
+		}
+	}
+	return nil
+}
+
 // validateSamplingSourceAddressesStrict rejects source-address values that
 // cannot be bound by the flow exporter (#11445). Sampling source addresses
 // belong to an explicit inet/inet6 family, and a literal collector address

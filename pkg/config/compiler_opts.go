@@ -1476,6 +1476,12 @@ type compileOpts struct {
 	// loaded negative rate runs safely as sample-all. Same doctrine as
 	// lenientSamplingInstanceConflicts.
 	lenientSamplingInputRate bool
+	// lenientPortMirroringIngressAlias15651 (#15651) downgrades the
+	// post-section port-mirroring aliased-ingress gate
+	// (validatePortMirroringIngressAliasStrict) to a cfg.Warnings entry on
+	// tolerant load / peer-sync (#1960); the userspace builder's scoped
+	// duplicate check still scope-drops the second claimant at runtime.
+	lenientPortMirroringIngressAlias15651 bool
 	// lenientSamplingSourceAddress (#11445) downgrades invalid sampling flow
 	// export source-address literals or family mismatches to warnings during
 	// tolerant load / peer-sync. Strict commit rejects them because the
@@ -3645,6 +3651,7 @@ func lenientCompileOpts() compileOpts {
 		lenientFlowServerTemplateRef:           true,
 		lenientSamplingInstanceConflicts:       true,
 		lenientSamplingInputRate:               true,
+		lenientPortMirroringIngressAlias15651:  true,
 		lenientSamplingSourceAddress:           true,
 		lenientFlowExportSeconds:               true,
 		lenientApplicationSetMembers:           true,

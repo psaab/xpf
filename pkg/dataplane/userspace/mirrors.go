@@ -74,6 +74,19 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 			if iface.LinuxName != "" {
 				ifindexByName[iface.LinuxName] = iface.Ifindex
 				scopeByName[iface.LinuxName] = mirrorIngressScope{vlanID: iface.VLANID, unitScoped: iface.IsUnit}
+				// #15651: a unit row's LinuxName is the kernel device
+				// (unit 0 collapses onto the parent; a VLAN unit is
+				// `<parent>.<vid>`), so neither Name nor LinuxName ever
+				// equals the Linux unit spelling an operator can write
+				// (`ge-0-0-0.0`). Index that spelling too, derived from
+				// the row's configured name, so it resolves with the
+				// row's own scope instead of disappearing.
+				if iface.IsUnit {
+					if linuxUnit := config.LinuxIfName(iface.Name); linuxUnit != iface.Name && linuxUnit != iface.LinuxName {
+						ifindexByName[linuxUnit] = iface.Ifindex
+						scopeByName[linuxUnit] = mirrorIngressScope{vlanID: iface.VLANID, unitScoped: iface.IsUnit}
+					}
+				}
 			}
 		}
 	}
@@ -123,6 +136,12 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 			outputIfindex = ifindexByName[config.LinuxIfName(inst.Output)]
 		}
 		if outputIfindex <= 0 {
+			// #15651: Junos/VLAN/RETH/tunnel spellings (`ge-0/0/0.0`,
+			// `ge-0/0/3.1` on a VLAN unit, `reth0.0`) only reduce to the
+			// kernel device through the config resolver.
+			outputIfindex = ifindexByName[cfg.ResolveKernelIfName(inst.Output)]
+		}
+		if outputIfindex <= 0 {
 			slog.Warn("port-mirroring output interface not found",
 				"name", name, "interface", inst.Output)
 			excluded = append(excluded, MirrorExclusion{
@@ -138,6 +157,14 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 			if ingressIfindex <= 0 {
 				ingressIfindex = ifindexByName[config.LinuxIfName(input)]
 				scope, scopeOK = scopeByName[config.LinuxIfName(input)]
+			}
+			if ingressIfindex <= 0 {
+				// #15651: see the output arm above — resolve through
+				// the config so unit/RETH/VLAN/tunnel spellings reach
+				// the row (and its scope) the raw LinuxIfName missed.
+				resolved := cfg.ResolveKernelIfName(input)
+				ingressIfindex = ifindexByName[resolved]
+				scope, scopeOK = scopeByName[resolved]
 			}
 			if ingressIfindex <= 0 {
 				slog.Warn("port-mirroring input interface not found",
