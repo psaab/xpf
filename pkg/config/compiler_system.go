@@ -534,7 +534,17 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				sys.PersistGroupsInheritance = true
 			}
 		case "root-authentication":
-			sys.RootAuthentication = &RootAuthConfig{}
+			// #15018: allocate ONCE. A repeated block — or a second
+			// `system` root, which re-enters compileSystem — must
+			// accumulate into the same stanza (the #6957 `login` shape):
+			// keys append below, and the password is replaced only when
+			// the later block actually authors one. Reallocating reset
+			// the stanza, so applyRootAuth then revoked the earlier
+			// block's keys and could lock an xpf-provisioned root
+			// password after a successful commit.
+			if sys.RootAuthentication == nil {
+				sys.RootAuthentication = &RootAuthConfig{}
+			}
 			for _, prop := range child.Children {
 				switch prop.Name() {
 				case "encrypted-password":
@@ -547,9 +557,14 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				}
 			}
 		case "archival":
-			sys.Archival = &ArchivalConfig{
-				ArchiveDir:  "/var/lib/xpf/archive",
-				MaxArchives: 10,
+			// #15018: allocate ONCE, defaults only on first allocation;
+			// sites append below and scalars apply only when authored,
+			// so a repeated block cannot erase an earlier block's sites.
+			if sys.Archival == nil {
+				sys.Archival = &ArchivalConfig{
+					ArchiveDir:  "/var/lib/xpf/archive",
+					MaxArchives: 10,
+				}
 			}
 			if cfgNode := child.FindChild("configuration"); cfgNode != nil {
 				// #8939: split a packed run. `archival configuration
@@ -629,7 +644,11 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				}
 			}
 		case "internet-options":
-			sys.InternetOptions = &InternetOptionsConfig{}
+			// #15018: allocate ONCE; the flag below is only ever set,
+			// never cleared, so a repeated empty block must not reset it.
+			if sys.InternetOptions == nil {
+				sys.InternetOptions = &InternetOptionsConfig{}
+			}
 			if child.FindChild("no-ipv6-reject-zero-hop-limit") != nil {
 				sys.InternetOptions.NoIPv6RejectZeroHopLimit = true
 			}
@@ -1038,7 +1057,13 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			if sys.Services == nil {
 				sys.Services = &SystemServicesConfig{}
 			}
-			sys.Services.WebManagement = &WebManagementConfig{}
+			// #15018 census: allocate ONCE. A second `system` root
+			// re-enters here and must merge (flags set, scalars
+			// overwritten when authored), not reset the first root's
+			// web-management stanza.
+			if sys.Services.WebManagement == nil {
+				sys.Services.WebManagement = &WebManagementConfig{}
+			}
 			if httpNode := wmNode.FindChild("http"); httpNode != nil {
 				sys.Services.WebManagement.HTTP = true
 				if ifNode := httpNode.FindChild("interface"); ifNode != nil {
