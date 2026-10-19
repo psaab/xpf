@@ -465,17 +465,23 @@ packets only (#14949):
 ```
 table inet xpf_dp_rst {
   chain output {
-    type filter hook output priority 0; policy accept;
-    ip saddr <snat_v4_addr> ct state & (invalid|established|related|new|untracked) == 0 tcp flags & rst == rst counter drop
-    ip6 saddr <snat_v6_addr> ct state & (invalid|established|related|new|untracked) == 0 tcp flags & rst == rst counter drop
+    type filter hook output priority raw; policy accept;
+    ip saddr <snat_v4_addr> ct state invalid tcp flags & rst == rst counter drop
+    ip6 saddr <snat_v6_addr> ct state invalid tcp flags & rst == rst counter drop
   }
 }
 ```
 
-The `ct state == 0` scope is load-bearing: the spurious RSTs are for
-userspace-owned flows the kernel never tracked, while legitimate RSTs
-from the same addresses (`reject with tcp reset`, local socket RSTs)
-are conntrack-tracked and must survive.
+The `ct state invalid` scope at raw priority is load-bearing (#15727):
+the spurious RSTs are for userspace-owned flows the kernel never
+tracked, while legitimate RSTs from the same addresses (`reject with
+tcp reset`, local socket RSTs) are conntrack-tracked and must survive.
+The earlier `ct state & 0x4f == 0` at filter priority could never
+match: `nft_ct` never writes state 0 (it writes INVALID, UNTRACKED, or
+a tracked bit), and by filter priority the OUTPUT conntrack hook
+(−200) has already attached a NEW entry to the locally generated RST.
+At raw priority (−300) the RST is still entry-less and reports
+INVALID, which is the only conntrack-less signature at OUTPUT.
 
 The rules are:
 - Auto-installed when forwarding state is rebuilt from the config snapshot.

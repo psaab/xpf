@@ -25,8 +25,9 @@ type rstSuppressionPlan struct {
 }
 
 // InstallRSTSuppression creates nftables rules to DROP outgoing TCP RSTs
-// from interface-NAT (SNAT) addresses, but ONLY for packets with no
-// conntrack entry (ct state 0 -- see rstDropExprs, #14949). These
+// from interface-NAT (SNAT) addresses, but ONLY for packets the kernel
+// reports as ct state invalid at OUTPUT -- its no-conntrack-entry
+// signature (see rstDropExprs, #14949 as corrected by #15727). These
 // addresses are owned by the userspace dataplane; the kernel has no
 // sockets for them and should never emit RSTs for the flows the
 // dataplane owns. Conntrack-tracked RSTs from the same addresses --
@@ -111,13 +112,26 @@ func queueRSTSuppression(c *nftables.Conn, plan rstSuppressionPlan) bool {
 		Family: nftables.TableFamilyINet,
 		Name:   rstTableName,
 	})
-
+	// Priority raw (-300) is load-bearing (#15727): the output
+	// conntrack hook runs at -200 and attaches an entry (ctinfo NEW)
+	// to the kernel's locally generated RST before a filter-priority
+	// (0) chain sees it, so at filter priority the packet reads
+	// `new`, never `invalid`, and no INVALID predicate can match it.
+	// Verified live: the same rule counts the RST at priority raw and
+	// counts nothing at priority filter. At raw the RST still carries
+	// no entry, so nft_ct reports INVALID -- the signature rstDropExprs
+	// matches. Legitimate tracked RSTs keep their tracked bit at raw
+	// too: a local socket's RST carries its socket conntrack entry
+	// (attached before OUTPUT), and a reject-synthesized RST is
+	// emitted from the ingress hook itself, never reaches OUTPUT as
+	// a fresh socket-less packet, and in any case is not emitted
+	// from an interface-NAT source address owned by the dataplane.
 	chain := c.AddChain(&nftables.Chain{
 		Name:     "output",
 		Table:    table,
 		Type:     nftables.ChainTypeFilter,
 		Hooknum:  nftables.ChainHookOutput,
-		Priority: nftables.ChainPriorityFilter,
+		Priority: nftables.ChainPriorityRaw,
 		Policy:   ptrPolicy(nftables.ChainPolicyAccept),
 	})
 
@@ -130,7 +144,7 @@ func queueRSTSuppression(c *nftables.Conn, plan rstSuppressionPlan) bool {
 	return true
 }
 
-// addRSTDropRule adds: meta nfproto <family> ip/ip6 saddr <addr> ct state & (invalid|established|related|new|untracked) == 0 tcp flags & rst != 0 counter drop
+// addRSTDropRule adds: meta nfproto <family> ip/ip6 saddr <addr> ct state invalid tcp flags & rst != 0 counter drop
 func addRSTDropRule(c *nftables.Conn, table *nftables.Table, chain *nftables.Chain, addr netip.Addr) {
 	c.AddRule(&nftables.Rule{
 		Table: table,
@@ -196,32 +210,54 @@ func rstDropExprs(addr netip.Addr) []expr.Any {
 			Register: 1,
 			Data:     addrBytes,
 		},
-		// ct state & (invalid|established|related|new|untracked) == 0 --
-		// no conntrack entry (#14949). The spurious RSTs this table
-		// exists to suppress (#450) belong to userspace-owned flows the
-		// kernel never tracked, so they arrive conntrack-less. Every
-		// legitimate RST from these addresses is tracked: an nft
-		// reject-with-tcp-reset (policy reject / ident-reset) creates
-		// a conntrack entry for the rejected connection before its
+		// ct state invalid -- no conntrack entry at OUTPUT (#14949
+		// scoping, corrected by #15727). Linux nft_ct_get_eval
+		// (net/netfilter/nft_ct.c, NFT_CT_STATE) never writes 0: it
+		// writes NF_CT_STATE_BIT(ctinfo) for a tracked packet,
+		// NF_CT_STATE_UNTRACKED_BIT (0x40) when ctinfo is
+		// IP_CT_UNTRACKED, and NF_CT_STATE_INVALID_BIT (0x01)
+		// otherwise. The pre-#15727 predicate `state & 0x4f == 0`
+		// was therefore unsatisfiable and the rule never fired.
+		//
+		// INVALID is the only conntrack-less signature a locally
+		// generated RST presents at OUTPUT: tcp_v4_send_reset emits
+		// it via a fresh control socket with no nfct attached (any
+		// ingress-created entry is detached by nf_reset_ct), and
+		// the OUTPUT conntrack hook creates no entry for it -- with
+		// nf_conntrack_tcp_loose=0 tcp_new rejects a non-SYN, and a
+		// lone RST in TCP_CONNTRACK_NONE maps to TCP_CONNTRACK_MAX
+		// so the hook drops the entry and reports invalid. Every
+		// legitimate RST from these addresses carries a confirmed
+		// entry and reports its tracked ctinfo bit instead: an nft
+		// reject-with-tcp-reset creates the entry before its
 		// synthesized RST traverses OUTPUT, and a local socket RST
-		// belongs to a tracked connection. Matching only ct state 0
+		// belongs to a tracked connection. Matching INVALID alone
 		// therefore drops the spurious RSTs and lets both legitimate
-		// classes through. The mask covers every known state bit so
-		// any tracked packet, whatever its single state, is excluded.
+		// classes through.
+		//
+		// UNTRACKED is deliberately not matched: it requires a
+		// NOTRACK decision (ingress raw table) that the kernel's own
+		// locally generated RST never carries, so it cannot occur on
+		// this path. Widening to it would drop a class with no
+		// evidence it occurs here.
+		//
+		// Residual: with the host default tcp_loose=1 a bare
+		// non-RST segment may be picked up mid-stream on ingress;
+		// it still cannot attach to the locally generated RST
+		// (nf_reset_ct detaches it; a lone RST creates none), so
+		// the INVALID signature holds. Recorded in docs/log/15727.md.
 		&expr.Ct{Register: 1, Key: expr.CtKeySTATE},
 		&expr.Bitwise{
 			SourceRegister: 1,
 			DestRegister:   1,
 			Len:            4,
-			Mask: binaryutil.NativeEndian.PutUint32(expr.CtStateBitINVALID |
-				expr.CtStateBitESTABLISHED | expr.CtStateBitRELATED |
-				expr.CtStateBitNEW | expr.CtStateBitUNTRACKED),
-			Xor: binaryutil.NativeEndian.PutUint32(0),
+			Mask:           binaryutil.NativeEndian.PutUint32(expr.CtStateBitINVALID),
+			Xor:            binaryutil.NativeEndian.PutUint32(0),
 		},
 		&expr.Cmp{
 			Op:       expr.CmpOpEq,
 			Register: 1,
-			Data:     []byte{0, 0, 0, 0},
+			Data:     binaryutil.NativeEndian.PutUint32(expr.CtStateBitINVALID),
 		},
 		// meta l4proto tcp
 		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
