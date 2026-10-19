@@ -68,14 +68,25 @@ func validateNATPoolAddressRangeStrict(cfg *Config) error {
 		sort.Strings(names)
 		for _, name := range names {
 			pool := pools[name]
-			if pool == nil || len(pool.OversizedAddressRanges) == 0 {
+			if pool == nil {
 				continue
 			}
-			return fmt.Errorf(
-				"security nat %s pool %q address range %s; a pool address range expands to one "+
-					"address per IP and is capped at 256 — narrow the range, or list the "+
-					"addresses individually",
-				kind, name, pool.OversizedAddressRanges[0])
+			if len(pool.OversizedAddressRanges) > 0 {
+				return fmt.Errorf(
+					"security nat %s pool %q address range %s; a pool address range expands to one "+
+						"address per IP and is capped at 256 — narrow the range, or list the "+
+						"addresses individually",
+					kind, name, pool.OversizedAddressRanges[0])
+			}
+			// #15674: invalid range (non-host mask, malformed, mixed
+			// family, reversed) recorded by the compiler.
+			if len(pool.InvalidAddressRanges) > 0 {
+				return fmt.Errorf(
+					"security nat %s pool %q address range %s; range endpoints must be "+
+						"bare IPs or host prefixes (/32 for IPv4, /128 for IPv6) of the "+
+						"same family with low <= high",
+					kind, name, pool.InvalidAddressRanges[0])
+			}
 		}
 		return nil
 	}

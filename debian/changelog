@@ -9,6 +9,12 @@ xpf (0.0.0) unstable; urgency=medium
     fail closed (#15672).
 
 
+  * Fix NAT `address <low> to <high>` ranges: non-host endpoint masks
+    (e.g. /24) are no longer silently rewritten to /32, valid IPv6
+    ranges (bare or /128) now expand to /128 members, and malformed,
+    mixed-family, or reversed ranges are recorded so strict commits
+    reject them while tolerant loads warn instead of bricking
+    (#15674).
   * Close the `vrrp-inet6-group` validator bypass: the Junos IPv6 alias
     now goes through the VRRP authentication reject/drop, misplaced-auth
     collector, and single-track-interface gates exactly like

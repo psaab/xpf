@@ -3602,6 +3602,16 @@ func validateProxyARPAddressesStrict(cfg *Config) error {
 					"firewall answers no ARP/ND for it (#8814)",
 				entry.Interface, spec, proxyARPMaxExpandedHosts)
 		}
+		// #15674: invalid range (non-host mask, malformed, mixed family,
+		// reversed) recorded by the compiler; nothing installed for it.
+		for _, spec := range entry.InvalidRangeSpecs {
+			return fmt.Errorf(
+				"security nat proxy-arp interface %q address range %s; range endpoints "+
+					"must be bare IPs or host prefixes (/32 for IPv4, /128 for IPv6) of "+
+					"the same family with low <= high. Nothing is installed for an "+
+					"invalid range, so the firewall answers no ARP/ND for it (#15674)",
+				entry.Interface, spec)
+		}
 		for _, spec := range entry.MalformedRangeSpecs {
 			return fmt.Errorf(
 				"security nat proxy-arp interface %q address %q is not a valid "+
@@ -4316,6 +4326,11 @@ func SourceNATPoolUnusableReason(pool *NATPool) string {
 			break
 		}
 	}
+	// #15674: a pool whose only authored range was invalid (recorded,
+	// not expanded) has no members and already reports empty_pool above;
+	// a pool mixing a valid member with an invalid range keeps the valid
+	// member (strict gate rejects the config; lenient keeps working
+	// addresses). No extra wire reason is introduced.
 	if _, _, ok := SourceNATPoolPortRange(pool); !ok {
 		reason = "invalid_port_range"
 	}

@@ -132,13 +132,13 @@ func compileProxyARPStanza(node *Node, sec *SecurityConfig, stanza string) error
 					expanded, err := expandAddressRange(prop.Keys[1], prop.Keys[3])
 					switch {
 					case errors.Is(err, errNATAddressRangeTooLarge):
-						// #8814: record, do not fail. This chain carries no
-						// compileOpts, so a hard error here reaches the LENIENT
-						// path and a persisted config cannot boot.
 						entry.OversizedRangeSpecs = append(entry.OversizedRangeSpecs,
 							fmt.Sprintf("%s to %s: %v", prop.Keys[1], prop.Keys[3], err))
 					case err != nil:
-						return fmt.Errorf("%s interface %s: %w", stanza, inst.name, err)
+						// #15674: record, do not fail — same lenient-brick
+						// reasoning as the oversized case.
+						entry.InvalidRangeSpecs = append(entry.InvalidRangeSpecs,
+							fmt.Sprintf("%s to %s: %v", prop.Keys[1], prop.Keys[3], err))
 					default:
 						entry.Addresses = append(entry.Addresses, expanded...)
 					}
@@ -157,7 +157,8 @@ func compileProxyARPStanza(node *Node, sec *SecurityConfig, stanza string) error
 							entry.OversizedRangeSpecs = append(entry.OversizedRangeSpecs,
 								fmt.Sprintf("%s to %s: %v", low, high, err))
 						case err != nil:
-							return fmt.Errorf("%s interface %s: %w", stanza, inst.name, err)
+							entry.InvalidRangeSpecs = append(entry.InvalidRangeSpecs,
+								fmt.Sprintf("%s to %s: %v", low, high, err))
 						default:
 							entry.Addresses = append(entry.Addresses, expanded...)
 						}

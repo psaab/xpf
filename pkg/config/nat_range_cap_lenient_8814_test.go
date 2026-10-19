@@ -123,28 +123,39 @@ func TestOversizedProxyARPRangeLoadsLenientlyAndRejectsStrictly8814(t *testing.T
 	}
 }
 
-// A SIZE limit is now recorded and survivable; MALFORMED input must still be
-// fatal on BOTH paths. The sentinel exists to separate them, and a sentinel that
-// swallowed real parse errors would turn this fix into a silent-acceptance bug —
-// the class the whole NAT gate family exists to prevent.
+// #15674 supersedes the #8814 malformed-is-fatal rule for RANGE errors:
+// every expandAddressRange failure (malformed, non-host mask, mixed
+// family, reversed) is now recorded, so lenient loads and strict rejects.
+// IPv6 ranges are now valid (see nat_address_range_15674_test.go).
 func TestMalformedRangesStillFailOnBothPaths8814(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
 		{"low > high", "address 10.0.0.9/32 to 10.0.0.1/32;"},
 		{"not an IP", "address notanip to 10.0.0.1/32;"},
-		{"IPv6 endpoints (unsupported for ranges)", "address 2001:db8::1/128 to 2001:db8::9/128;"},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			_, lerr, serr := compileBoth8814(t, natPoolText8814(tc.body))
-			if lerr == nil {
-				t.Error("CompileConfigLenient ACCEPTED a malformed range. Malformed input has no safe " +
-					"interpretation to fall back to, so it must fail on the tolerant path too — only " +
-					"the SIZE limit is recordable (#8814)")
+			cfg, lerr, serr := compileBoth8814(t, natPoolText8814(tc.body))
+			if lerr != nil {
+				t.Fatalf("CompileConfigLenient failed (#15674): %v", lerr)
+			}
+			if cfg == nil || cfg.Security.NAT.SourcePools["p1"] == nil {
+				t.Fatal("pool absent on lenient path")
+			}
+			if got := len(cfg.Security.NAT.SourcePools["p1"].InvalidAddressRanges); got != 1 {
+				t.Errorf("InvalidAddressRanges = %d, want 1", got)
 			}
 			if serr == nil {
 				t.Error("strict CompileConfig accepted a malformed range")
 			}
 		})
+	}
+	// IPv6 ranges are valid since #15674.
+	cfg, lerr, serr := compileBoth8814(t, natPoolText8814("address 2001:db8::1/128 to 2001:db8::9/128;"))
+	if lerr != nil || serr != nil {
+		t.Fatalf("IPv6 range must compile on both paths: lenient=%v strict=%v", lerr, serr)
+	}
+	if got := len(cfg.Security.NAT.SourcePools["p1"].Addresses); got != 9 {
+		t.Errorf("IPv6 range expanded to %d, want 9", got)
 	}
 }
 

@@ -1023,6 +1023,12 @@ type ProxyARPEntry struct {
 	// installed for the statement -- fail closed, no ARP/ND answered for
 	// addresses the compiler could not enumerate.
 	OversizedRangeSpecs []string `json:"-"`
+	// InvalidRangeSpecs records `address <low> to <high>` statements
+	// expandAddressRange rejected for a reason other than size (#15674):
+	// a non-host prefix length, a malformed endpoint, a family mismatch,
+	// or a reversed range. Strict rejects; lenient warns and installs
+	// nothing for the statement.
+	InvalidRangeSpecs []string `json:"-"`
 
 	MalformedRangeSpecs []string `json:"-"`
 }
@@ -1365,6 +1371,15 @@ type NATPool struct {
 	// would otherwise leak into configstore.ExportJSON's dump of the compiled
 	// *config.Config. Mirrors PortRaw and ProxyARPEntry.MalformedRangeSpecs.
 	OversizedAddressRanges []string `json:"-"`
+	// InvalidAddressRanges records `address <low> to <high>` ranges
+	// expandAddressRange rejected for a reason other than size (#15674):
+	// a non-host prefix length (e.g. /24 on a range endpoint), a malformed
+	// endpoint, a mixed-family pair, or a reversed range. The compiler
+	// records rather than fails so CompileConfigLenient loads the pool
+	// without that range; validateNATPoolAddressRangeStrict rejects at
+	// commit and SourceNATPoolUnusableReason poisons a pool consisting
+	// solely of such ranges. `json:"-"`: compile-time diagnostic only.
+	InvalidAddressRanges []string `json:"-"`
 
 	PortRaw  string `json:"-"`
 	PortLow  int    // source pool port range low (default 1024)
