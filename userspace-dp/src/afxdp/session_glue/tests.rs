@@ -3016,6 +3016,173 @@ fn shared_forward_wire_republish_same_session_stays_unique_14383() {
     );
 }
 
+// #15106 (A71-03): `remove_shared_session_if` must resolve NAT'd forward-wire
+// survivors from the per-wire-key owner multiset in O(1), not by scanning the
+// whole shared session map under its mutex (the #11299 shape reintroduced by
+// #14383). The timing/ratio assertion lives in the release-only probe below;
+// this cell pins the mechanism (index-driven survivor restore, ambiguity
+// verdicts, roster bookkeeping) at any table size.
+#[test]
+fn remove_shared_session_if_resolves_wire_survivor_from_owner_index_15106() {
+    let backend = Ipv4Addr::new(10, 0, 61, 200);
+    let f1 = wire_ambiguity_entry(Ipv4Addr::new(172, 16, 80, 91), backend);
+    let f2 = wire_ambiguity_entry(Ipv4Addr::new(172, 16, 80, 92), backend);
+    let wire_key = forward_wire_key(&f1.key, f1.decision.nat);
+    assert_eq!(wire_key, forward_wire_key(&f2.key, f2.decision.nat));
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+
+    // Unrelated NAT'd population sharing one wire key: pre-fix, every removal
+    // below scanned all of these rows under the shared lock.
+    const UNRELATED: u32 = 2_000;
+    for index in 0..UNRELATED {
+        let mut key = test_key();
+        key.src_ip = IpAddr::V4(Ipv4Addr::from(0x0a10_0000_u32 + index));
+        key.src_port = (index % 60_000) as u16;
+        let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))),
+            rewrite_src_port: Some(50_000),
+            ..NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 };
+        let entry = SyncedSessionEntry {
+            key,
+            decision,
+            metadata: test_metadata(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            pptp_call_ids: 0,
+            source_nat_static: None,
+        };
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &entry,
+        );
+    }
+
+    // The colliding pair under test, published through the real path so the
+    // owner multiset records both.
+    publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &f1);
+    publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &f2);
+    assert!(
+        lookup_shared_forward_wire_match(&shared_forward_wire_sessions, &shared_owner_rg_indexes, &wire_key).is_none(),
+        "two-owner wire key must fail closed before removal"
+    );
+
+    // Conditional removal of the displacing owner (the exact
+    // remove_shared_session_if path): the survivor must resolve again
+    // without scanning the unrelated population.
+    let outcome = remove_shared_session_if(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &f2.key,
+        |_| true,
+    );
+    assert!(matches!(outcome, SharedRemoval::Removed(_)), "removal must be accepted");
+    assert_eq!(
+        lookup_shared_forward_wire_match(&shared_forward_wire_sessions, &shared_owner_rg_indexes, &wire_key).map(|e| e.key),
+        Some(f1.key.clone()),
+        "sole survivor F1 must resolve after F2 removal"
+    );
+
+    // Roster bookkeeping: F1 remains the one live owner of the wire key.
+    {
+        let idx = lock_shared_recover(&shared_owner_rg_indexes.wire_ambiguities);
+        assert_eq!(idx.wire_owner_count(&wire_key), 1, "one live wire owner must remain");
+        assert!(idx.is_unique_for(&wire_key, &f1.key), "survivor must be the unique wire owner");
+    }
+
+    // Three-owner leg: add a third collider, remove down to two (stays
+    // ambiguous), then to one (resolves).
+    let f3 = wire_ambiguity_entry(Ipv4Addr::new(172, 16, 80, 93), backend);
+    publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &f2);
+    publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &f3);
+    remove_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &f3.key);
+    assert!(
+        lookup_shared_forward_wire_match(&shared_forward_wire_sessions, &shared_owner_rg_indexes, &wire_key).is_none(),
+        "two remaining owners must stay ambiguous"
+    );
+    remove_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &f2.key);
+    assert_eq!(
+        lookup_shared_forward_wire_match(&shared_forward_wire_sessions, &shared_owner_rg_indexes, &wire_key).map(|e| e.key),
+        Some(f1.key.clone()),
+        "after draining to one owner, F1 resolves"
+    );
+
+    // Last owner removal drops the alias and the record.
+    remove_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &f1.key);
+    assert!(lookup_shared_forward_wire_match(&shared_forward_wire_sessions, &shared_owner_rg_indexes, &wire_key).is_none());
+    {
+        let idx = lock_shared_recover(&shared_owner_rg_indexes.wire_ambiguities);
+        assert_eq!(idx.wire_owner_count(&wire_key), 0, "wire roster must be empty after last removal");
+    }
+}
+
+/// #15106 measurement probe: NAT'd forward-removal cost must not grow with
+/// the shared table. Release-only (mirrors the #11299 churn probe shape):
+/// medians over repeats at 1k vs 100k rows, ratio bound 2x. The legacy scan
+/// makes the 100k median scale ~linearly; the owner multiset keeps it flat.
+/// Run with:
+/// `cargo test --release remove_shared_session_if_nat_removal_cost_15106 -- --ignored --nocapture`
+#[cfg(not(debug_assertions))]
+#[test]
+#[ignore = "MEASUREMENT: manual NAT-removal scaling probe (#15106)"]
+fn remove_shared_session_if_nat_removal_cost_15106() {
+    use std::time::Instant;
+    fn median_close_ns(rows: u32) -> u128 {
+        let backend = Ipv4Addr::new(10, 0, 61, 200);
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        for index in 0..rows {
+            let mut key = test_key();
+            key.src_ip = IpAddr::V4(Ipv4Addr::from(0x0a20_0000_u32 + index));
+            key.src_port = (index % 60_000) as u16;
+            let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))),
+                rewrite_src_port: Some(50_000),
+                ..NatDecision::default()
+            }, install_table_domain: 0, install_table_check: 0 };
+            publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &SyncedSessionEntry {
+                key, decision, metadata: test_metadata(), leak_incarnation: 0,
+                origin: SessionOrigin::SyncImport, protocol: PROTO_TCP, tcp_flags: 0,
+                generation: 0, session_id: 0, tcp_close_class: 0, tcp_handshake_state: 0,
+                pptp_call_ids: 0, source_nat_static: None,
+            });
+        }
+        let mut samples: Vec<u128> = Vec::new();
+        for round in 0..16u32 {
+            let vip = Ipv4Addr::new(172, 16, 80, 100 + round as u8);
+            let victim = wire_ambiguity_entry(vip, backend);
+            publish_shared_session(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &victim);
+            let start = Instant::now();
+            let outcome = remove_shared_session_if(&shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &victim.key, |_| true);
+            samples.push(start.elapsed().as_nanos());
+            assert!(matches!(outcome, SharedRemoval::Removed(_)));
+        }
+        samples.sort_unstable();
+        samples[samples.len() / 2]
+    }
+    let small = median_close_ns(1_000);
+    let large = median_close_ns(100_000);
+    eprintln!("15106 NAT-removal median: 1k={small}ns 100k={large}ns ratio={:.2}", large as f64 / small.max(1) as f64);
+    assert!(large <= small.saturating_mul(2), "NAT'd removal cost grew with table size: 1k={small}ns 100k={large}ns (bound: 100k <= 2x 1k)");
+}
+
 #[test]
 fn publish_and_remove_shared_session_tracks_canonical_reverse_alias() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));

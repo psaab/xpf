@@ -792,6 +792,10 @@ pub(in crate::afxdp) fn publish_shared_session(
             let mut wire_ambiguities =
                 lock_wire_ambiguities_for_publish(shared_owner_rg_indexes);
             wire_ambiguities.observe(wire_key.clone(), entry.key.clone());
+            // #15106: record the live owner in the per-wire-key multiset so a
+            // later removal resolves survivors in O(1) instead of scanning
+            // `shared_sessions`.
+            wire_ambiguities.observe_wire_owner(wire_key.clone(), entry.key.clone());
             let mut sessions = lock_shared_publish(shared_forward_wire_sessions);
             let displaced = sessions.insert(wire_key.clone(), entry.clone());
             let wire_displaced = displaced
@@ -1037,8 +1041,7 @@ pub(in crate::afxdp) fn remove_shared_session_if(
                 let wire_key = forward_wire_key(&entry.key, entry.decision.nat);
                 if wire_key != entry.key {
                     // #14383: after this removal, re-resolve the wire key
-                    // against the survivors still live in `shared_sessions`
-                    // (held by this call). The wire map holds one entry per
+                    // against the survivors. The wire map holds one entry per
                     // key, so an ambiguous key may currently name the removed
                     // entry, the survivor, or nothing (the survivor was
                     // displaced at publish). Exactly one survivor: restore
@@ -1046,34 +1049,110 @@ pub(in crate::afxdp) fn remove_shared_session_if(
                     // shared wire lookup resolves again. No survivor: drop
                     // the alias and the record. Two or more survivors: the
                     // key stays ambiguous and unresolvable.
-                    let mut survivors = sessions
-                        .values()
-                        .filter(|candidate| {
-                            !candidate.metadata.is_reverse
-                                && candidate.key != entry.key
-                                && forward_wire_key(&candidate.key, candidate.decision.nat)
-                                    == wire_key
-                        })
-                        .take(2);
-                    let survivor = survivors.next().cloned();
-                    let still_ambiguous = survivors.next().is_some();
+                    //
+                    // #15106 (A71-03): the #14383 code re-resolved survivors
+                    // by scanning every row of `shared_sessions` while holding
+                    // its mutex — the #11299 shape, O(table) per NAT'd removal.
+                    // The per-wire-key owner multiset maintained in
+                    // `publish_shared_session` now answers in O(1). The roster
+                    // is only trusted when it actually recorded the removed
+                    // owner and the index is not saturated; the legacy scan
+                    // below stays as a fail-closed-compatible fallback for
+                    // unrecorded/saturated state (e.g. a session seeded by a
+                    // bare map insert), reseeding the roster from its result.
                     let mut forward_wire_sessions =
                         lock_shared_recover(shared_forward_wire_sessions);
                     let mut wire_ambiguities =
                         lock_shared_recover(&shared_owner_rg_indexes.wire_ambiguities);
-                    match survivor {
-                        Some(survivor) if !still_ambiguous => {
-                            let previous_owner_rg = forward_wire_sessions
-                                .insert(wire_key.clone(), survivor.clone())
-                                .map(|existing| existing.metadata.owner_rg_id);
-                            update_owner_rg_index(
-                                &shared_owner_rg_indexes.forward_wire_sessions,
-                                &wire_key,
-                                previous_owner_rg,
-                                survivor.metadata.owner_rg_id,
-                            );
-                            wire_ambiguities
-                                .reset_to_owner(wire_key.clone(), survivor.key.clone());
+                    let roster_before = wire_ambiguities.wire_owner_count(&wire_key);
+                    let remaining =
+                        wire_ambiguities.remove_wire_owner(&wire_key, &entry.key);
+                    let roster_trusted = wire_ambiguities.wire_owners_trusted()
+                        && roster_before > 0
+                        && remaining == roster_before - 1;
+                    // Verdict: 0 = drop alias + forget, 1 = restore the sole
+                    // survivor, 2+ = stay ambiguous (existing semantics).
+                    let (survivor_key, survivor_count) = if roster_trusted {
+                        let first = if remaining == 1 {
+                            wire_ambiguities.wire_first_owner(&wire_key)
+                        } else {
+                            None
+                        };
+                        (first, remaining)
+                    } else {
+                        // Legacy fallback: scan at most 2 survivors (same
+                        // filter/take as pre-#15106), then reseed the roster
+                        // so later removals take the O(1) path.
+                        let mut survivors = sessions
+                            .values()
+                            .filter(|candidate| {
+                                !candidate.metadata.is_reverse
+                                    && candidate.key != entry.key
+                                    && forward_wire_key(&candidate.key, candidate.decision.nat)
+                                        == wire_key
+                            })
+                            .take(2);
+                        let survivor = survivors.next().cloned();
+                        let still_ambiguous = survivors.next().is_some();
+                        let count = match (&survivor, still_ambiguous) {
+                            (Some(_), true) => 2,
+                            (Some(_), false) => 1,
+                            (None, _) => 0,
+                        };
+                        // Reseed only when the scan could name every survivor
+                        // (count < 2); an ambiguous pair leaves the roster as
+                        // found so the next removal rescans rather than
+                        // trusting a partial roster.
+                        if count < 2 {
+                            let owners: Vec<SessionKey> = match &survivor {
+                                Some(s) => vec![s.key.clone()],
+                                None => Vec::new(),
+                            };
+                            wire_ambiguities.reset_wire_owners(wire_key.clone(), &owners);
+                        }
+                        (survivor.map(|s| s.key), count)
+                    };
+                    let still_ambiguous = survivor_count >= 2;
+                    match survivor_key {
+                        Some(survivor_key) if !still_ambiguous => {
+                            // Fetch the full surviving entry by key from
+                            // `shared_sessions` (still held) instead of
+                            // scanning its values.
+                            match sessions.get(&survivor_key).cloned() {
+                                Some(survivor) => {
+                                    let previous_owner_rg = forward_wire_sessions
+                                        .insert(wire_key.clone(), survivor.clone())
+                                        .map(|existing| existing.metadata.owner_rg_id);
+                                    update_owner_rg_index(
+                                        &shared_owner_rg_indexes.forward_wire_sessions,
+                                        &wire_key,
+                                        previous_owner_rg,
+                                        survivor.metadata.owner_rg_id,
+                                    );
+                                    wire_ambiguities.reset_to_owner(
+                                        wire_key.clone(),
+                                        survivor.key.clone(),
+                                    );
+                                }
+                                None => {
+                                    // Roster named an owner no longer in
+                                    // `shared_sessions`: fail closed — drop
+                                    // only the removed entry's own alias and
+                                    // forget the wire record (#9679).
+                                    if let Some(removed) = remove_shared_alias_owned_by(
+                                        &mut forward_wire_sessions,
+                                        &wire_key,
+                                        &entry.key,
+                                    ) {
+                                        remove_owner_rg_index_entry(
+                                            &shared_owner_rg_indexes.forward_wire_sessions,
+                                            removed.metadata.owner_rg_id,
+                                            &wire_key,
+                                        );
+                                    }
+                                    wire_ambiguities.forget(&wire_key);
+                                }
+                            }
                         }
                         _ => {
                             // No survivor, or still ambiguous: only the
