@@ -663,6 +663,9 @@ func (c *CLI) handleShowSecurity(args []string) error {
 						if len(pol.Log.SessionLogModes()) > 0 {
 							actionStr += ", log"
 						}
+						if pol.Count {
+							actionStr += ", count"
+						}
 						fmt.Printf("    Action: %s\n", actionStr)
 					}
 				}
@@ -724,6 +727,9 @@ func (c *CLI) handleShowSecurity(args []string) error {
 				// #12901: same empty-log gate as the zone-pair branch above.
 				if len(pol.Log.SessionLogModes()) > 0 {
 					actionStr += ", log"
+				}
+				if pol.Count {
+					actionStr += ", count"
 				}
 				fmt.Printf("    Action: %s\n", actionStr)
 			}
@@ -803,7 +809,13 @@ func (c *CLI) handleShowScreen(args []string) error {
 			return fmt.Errorf("usage: show security screen ids-option <name> [detail]")
 		}
 		if len(args) >= 3 && args[2] == "detail" {
+			if len(args) > 3 {
+				return fmt.Errorf("unexpected argument %q after `show security screen ids-option %s detail`", args[3], args[1])
+			}
 			return c.showScreenIdsOptionDetail(args[1])
+		}
+		if len(args) > 2 {
+			return fmt.Errorf("unexpected argument %q after `show security screen ids-option %s` (expected [detail])", args[2], args[1])
 		}
 		return c.showScreenIdsOption(args[1])
 	case "statistics":
@@ -811,10 +823,19 @@ func (c *CLI) handleShowScreen(args []string) error {
 			if len(args) < 3 {
 				return fmt.Errorf("usage: show security screen statistics zone <zone>")
 			}
+			if len(args) > 3 {
+				return fmt.Errorf("unexpected argument %q after `show security screen statistics zone %s`", args[3], args[2])
+			}
 			return c.showScreenStatistics(args[2])
+		}
+		if len(args) > 1 {
+			return fmt.Errorf("unexpected argument %q after `show security screen statistics` (expected [zone <zone>])", args[1])
 		}
 		return c.showScreenStatisticsAll()
 	default:
-		return c.showScreen()
+		// #15649 V10-04: unknown screen args must error, not silently fall
+		// back to the all-profiles listing (which widened the view and hid
+		// typos).
+		return fmt.Errorf("unknown show security screen target: %s (expected ids-option|statistics)", args[0])
 	}
 }

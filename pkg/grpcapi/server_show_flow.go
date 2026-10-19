@@ -23,27 +23,10 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// showFlowMonitoring renders NetFlow v9 template configuration.
+// showFlowMonitoring renders NetFlow v9 + IPFIX templates via the shared
+// SSOT (#15649 V17-04): an IPFIX-only config must not read as unconfigured.
 func (s *Server) showFlowMonitoring(cfg *config.Config, buf *strings.Builder) {
-	if cfg == nil || cfg.Services.FlowMonitoring == nil || cfg.Services.FlowMonitoring.Version9 == nil {
-		buf.WriteString("No flow monitoring configured\n")
-		return
-	}
-	v9 := cfg.Services.FlowMonitoring.Version9
-	buf.WriteString("Flow monitoring (NetFlow v9):\n")
-	for _, name := range sortedMapKeys(v9.Templates) {
-		tmpl := v9.Templates[name]
-		fmt.Fprintf(buf, "  Template: %s\n", name)
-		if tmpl.FlowActiveTimeout > 0 {
-			fmt.Fprintf(buf, "    Active timeout: %ds\n", tmpl.FlowActiveTimeout)
-		}
-		if tmpl.FlowInactiveTimeout > 0 {
-			fmt.Fprintf(buf, "    Inactive timeout: %ds\n", tmpl.FlowInactiveTimeout)
-		}
-		if tmpl.TemplateRefreshRate > 0 {
-			fmt.Fprintf(buf, "    Template refresh: %ds\n", tmpl.TemplateRefreshRate)
-		}
-	}
+	config.RenderFlowMonitoring(buf, cfg, flowServerNotInstalledSuffix)
 }
 
 // showFlowMonitoringStatistics renders per-collector NetFlow v9 / IPFIX
@@ -98,62 +81,13 @@ func (s *Server) showFlowMonitoringStatistics(buf *strings.Builder) {
 	}
 }
 
-// showFlowTimeouts renders TCP/UDP/ICMP session timeouts and assorted
-// flow toggles (allow-dns-reply, embedded ICMP, GRE acceleration,
-// power mode).
+// showFlowTimeouts renders via the shared SSOT (#15649 V11-04).
 func (s *Server) showFlowTimeouts(cfg *config.Config, buf *strings.Builder) {
 	if cfg == nil {
 		buf.WriteString("No active configuration\n")
 		return
 	}
-	flow := cfg.Security.Flow
-	buf.WriteString("Flow session timeouts:\n")
-	if flow.TCPSession != nil {
-		// #6539: only established-timeout has a dataplane wire carrier. The
-		// other three are committed and stored but never leave the control
-		// plane, so they are annotated rather than printed in the same shape
-		// as the enforced one. config.AnnotateTCPSessionTimeout is the single
-		// authority shared with the REST/CLI surfaces and the commit advisory.
-		tcpRow := func(label, leaf string, secs int) {
-			fmt.Fprintf(buf, "  %-21s %s\n", label+":",
-				config.AnnotateTCPSessionTimeout(leaf, fmt.Sprintf("%ds", secs)))
-		}
-		tcpRow("TCP established", config.TCPSessionEstablishedTimeoutLeaf, flow.TCPSession.EstablishedTimeout)
-		tcpRow("TCP initial", config.TCPSessionInitialTimeoutLeaf, flow.TCPSession.InitialTimeout)
-		tcpRow("TCP closing", config.TCPSessionClosingTimeoutLeaf, flow.TCPSession.ClosingTimeout)
-		tcpRow("TCP time-wait", config.TCPSessionTimeWaitTimeoutLeaf, flow.TCPSession.TimeWaitTimeout)
-	}
-	fmt.Fprintf(buf, "  UDP session:          %ds\n", flow.UDPSessionTimeout)
-	fmt.Fprintf(buf, "  ICMP session:         %ds\n", flow.ICMPSessionTimeout)
-	if flow.TCPMSSAllTCP > 0 {
-		fmt.Fprintf(buf, "  TCP MSS (all-tcp):    %d\n", flow.TCPMSSAllTCP)
-	}
-	if flow.TCPMSSIPsecVPN > 0 {
-		// #2486: ipsec-vpn is rejected at commit; a value can only appear
-		// from a leniently-loaded legacy config and is NOT enforced.
-		fmt.Fprintf(buf, "  TCP MSS (IPsec VPN):  %d (not enforced)\n", flow.TCPMSSIPsecVPN)
-	}
-	if flow.TCPMSSGreIn > 0 {
-		fmt.Fprintf(buf, "  TCP MSS (GRE in):     %d\n", flow.TCPMSSGreIn)
-	}
-	if flow.TCPMSSGreOut > 0 {
-		fmt.Fprintf(buf, "  TCP MSS (GRE out):    %d\n", flow.TCPMSSGreOut)
-	}
-	if flow.AllowDNSReply {
-		buf.WriteString("  Allow DNS reply:      enabled\n")
-	}
-	if flow.AllowEmbeddedICMP {
-		buf.WriteString("  Allow embedded ICMP:  enabled\n")
-	}
-	if flow.GREPerformanceAcceleration {
-		// #5804: accepted-only. Same wording contract as the local CLI
-		// (pkg/cli/cli_show_flow.go) — a remote operator must not read a
-		// stronger claim than an on-box one.
-		buf.WriteString("  GRE acceleration:     configured (accepted-only; GRE sessions remain 5-tuple keyed — #5804)\n")
-	}
-	if flow.PowerModeDisable {
-		buf.WriteString("  Power mode:           disabled\n")
-	}
+	config.RenderFlowTimeouts(buf, cfg)
 }
 
 // showFlowStatistics renders global flow counters (sessions, packets,

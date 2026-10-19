@@ -41,6 +41,7 @@ const (
 	ScreenCheckIPSweep                 = "ip-sweep"
 	ScreenCheckLimitSessionSource      = "limit-session-source"
 	ScreenCheckLimitSessionDestination = "limit-session-destination"
+	ScreenCheckAlarmWithoutDrop        = "alarm-without-drop"
 )
 
 // Threshold keys that do not map onto a single presence check name. The
@@ -117,6 +118,14 @@ func ScreenChecks(p *ScreenProfile) []string {
 	}
 	if p.LimitSession.DestinationIPBased > 0 {
 		checks = append(checks, ScreenCheckLimitSessionDestination)
+	}
+	// #15649 V10-04: alarm-without-drop is a profile-wide modifier, not a
+	// check, but the structured inventory must expose it or an audit-only
+	// profile is indistinguishable from a drop-enforcing one. It sorts
+	// last so existing check order is unchanged for drop profiles (which
+	// never emit it).
+	if p.AlarmWithoutDrop {
+		checks = append(checks, ScreenCheckAlarmWithoutDrop)
 	}
 	return checks
 }

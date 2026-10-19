@@ -353,7 +353,7 @@ func (s *Server) showApplications(cfg *config.Config, buf *strings.Builder) {
 				// as.Applications and panicking the display handler.
 				continue
 			}
-			fmt.Fprintf(buf, "  %-24s members: %s\n", name, strings.Join(as.Applications, ", "))
+			fmt.Fprintf(buf, "  %-24s members: %s\n", name, config.ApplicationSetExpandedMembers(cfg, as))
 		}
 	}
 	// #15207 A18-01: predefined apps/sets (previously absent from gRPC twin).
@@ -404,7 +404,7 @@ func (s *Server) showApplications(cfg *config.Config, buf *strings.Builder) {
 				if set == nil {
 					continue
 				}
-				fmt.Fprintf(buf, "  %-24s members: %s\n", n, strings.Join(set.Applications, ", "))
+				fmt.Fprintf(buf, "  %-24s members: %s\n", n, config.ApplicationSetExpandedMembers(cfg, set))
 				if cfg != nil {
 					if _, shadowed := cfg.Applications.ApplicationSets[n]; shadowed {
 						buf.WriteString("    (shadowed by user definition; not in effect)\n")

@@ -310,80 +310,23 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 						// the REST handler.
 						continue
 					}
-					fmt.Fprintf(&buf, "  %-20s members: %s\n", name, strings.Join(as.Applications, ", "))
+					fmt.Fprintf(&buf, "  %-20s members: %s\n", name, config.ApplicationSetExpandedMembers(cfg, as))
 				}
 			}
 		}
 
 	case "flow-monitoring":
-		if cfg == nil || cfg.Services.FlowMonitoring == nil || cfg.Services.FlowMonitoring.Version9 == nil {
-			buf.WriteString("No flow monitoring configured\n")
-		} else {
-			v9 := cfg.Services.FlowMonitoring.Version9
-			buf.WriteString("Flow monitoring (NetFlow v9):\n")
-			for _, name := range sortedKeys(v9.Templates) {
-				tmpl := v9.Templates[name]
-				if tmpl == nil {
-					// #10439: tolerate present-but-nil slots from lenient
-					// restore/peer-sync loads.
-					continue
-				}
-				fmt.Fprintf(&buf, "  Template: %s\n", name)
-				if tmpl.FlowActiveTimeout > 0 {
-					fmt.Fprintf(&buf, "    Active timeout: %ds\n", tmpl.FlowActiveTimeout)
-				}
-				if tmpl.FlowInactiveTimeout > 0 {
-					fmt.Fprintf(&buf, "    Inactive timeout: %ds\n", tmpl.FlowInactiveTimeout)
-				}
-				if tmpl.TemplateRefreshRate > 0 {
-					fmt.Fprintf(&buf, "    Template refresh: %ds\n", tmpl.TemplateRefreshRate)
-				}
+		// #15649 V17-04: shared SSOT so IPFIX-only configs render on REST too.
+		config.RenderFlowMonitoring(&buf, cfg, func(fs *config.FlowServer) string {
+			if r := config.FlowServerExcludedReason(fs); r != "" {
+				return "  [NOT INSTALLED: " + r + "]"
 			}
-		}
+			return ""
+		})
 
 	case "flow-timeouts":
-		if cfg == nil {
-			buf.WriteString("No active configuration\n")
-		} else {
-			flow := cfg.Security.Flow
-			buf.WriteString("Flow session timeouts:\n")
-			if flow.TCPSession != nil {
-				// #6539: only established-timeout has a dataplane wire
-				// carrier; the other three never leave the control plane and
-				// must not be printed in the same shape as the enforced one.
-				// The annotation comes from config.AnnotateTCPSessionTimeout,
-				// shared with the CLI/gRPC surfaces and the commit advisory.
-				tcpRow := func(label, leaf string, secs int) {
-					fmt.Fprintf(&buf, "  %-21s %s\n", label+":",
-						config.AnnotateTCPSessionTimeout(leaf, fmt.Sprintf("%ds", secs)))
-				}
-				tcpRow("TCP established", config.TCPSessionEstablishedTimeoutLeaf, flow.TCPSession.EstablishedTimeout)
-				tcpRow("TCP initial", config.TCPSessionInitialTimeoutLeaf, flow.TCPSession.InitialTimeout)
-				tcpRow("TCP closing", config.TCPSessionClosingTimeoutLeaf, flow.TCPSession.ClosingTimeout)
-				tcpRow("TCP time-wait", config.TCPSessionTimeWaitTimeoutLeaf, flow.TCPSession.TimeWaitTimeout)
-			}
-			fmt.Fprintf(&buf, "  UDP session:          %ds\n", flow.UDPSessionTimeout)
-			fmt.Fprintf(&buf, "  ICMP session:         %ds\n", flow.ICMPSessionTimeout)
-			if flow.TCPMSSAllTCP > 0 {
-				fmt.Fprintf(&buf, "  TCP MSS (all-tcp):    %d\n", flow.TCPMSSAllTCP)
-			}
-			if flow.TCPMSSIPsecVPN > 0 {
-				// #2486: ipsec-vpn rejected at commit; not enforced.
-				fmt.Fprintf(&buf, "  TCP MSS (IPsec VPN):  %d (not enforced)\n", flow.TCPMSSIPsecVPN)
-			}
-			if flow.TCPMSSGreIn > 0 {
-				fmt.Fprintf(&buf, "  TCP MSS (GRE in):     %d\n", flow.TCPMSSGreIn)
-			}
-			if flow.TCPMSSGreOut > 0 {
-				fmt.Fprintf(&buf, "  TCP MSS (GRE out):    %d\n", flow.TCPMSSGreOut)
-			}
-			if flow.AllowDNSReply {
-				buf.WriteString("  Allow DNS reply:      enabled\n")
-			}
-			if flow.AllowEmbeddedICMP {
-				buf.WriteString("  Allow embedded ICMP:  enabled\n")
-			}
-		}
+		// #15649 V11-04: shared SSOT (ICMP 60s default, no bare 0s, #7188 GRE).
+		config.RenderFlowTimeouts(&buf, cfg)
 
 	// #6565: BOTH NAT views delegate to the SHARED pkg/natshow renderers, the
 	// same ones the CLI (cli_show_nat.go) and gRPC (server_show_nat.go) call.

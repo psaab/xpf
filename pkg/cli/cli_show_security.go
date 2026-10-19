@@ -352,6 +352,39 @@ func printPolicyMatchAddresses(cfg *config.Config, pol *config.Policy) {
 	printAddrs("Destination addresses", pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded)
 }
 
+// cliPolicyStats renders then-count + Session statistics via the shared
+// SSOT (#15649 V2-02), translating dataplane counter errors.
+func (c *CLI) cliPolicyStats(countIndent, statsIndent string, cfg *config.Config, pol *config.Policy, quarantined bool, ruleID uint32, statsDisabled *int, readErr *error) {
+	statsEnabled := cfg != nil && cfg.Security.PolicyStatsEnabled
+	var read func(uint32) (config.PolicyCounter, error)
+	if c.dp != nil && c.dp.IsLoaded() {
+		rp := dpuserspace.NewPolicyCounterReader(c.dp, cfg, c.dp.ReadPolicyCounters)
+		if rp != nil {
+			read = func(id uint32) (config.PolicyCounter, error) {
+				cv, err := rp(id)
+				if err != nil {
+					if errors.Is(err, dpuserspace.ErrPolicyCounterUnpublished) {
+						return config.PolicyCounter{}, config.ErrPolicyCounterUnpublished
+					}
+					return config.PolicyCounter{}, err
+				}
+				return config.PolicyCounter{Packets: cv.Packets, Bytes: cv.Bytes}, nil
+			}
+		}
+	}
+	disabled, rerr := config.PolicyDetailStats(stdoutWriter{}, countIndent, statsIndent, pol, quarantined, statsEnabled, read, ruleID)
+	if disabled && statsDisabled != nil {
+		*statsDisabled++
+	}
+	if rerr != nil && readErr != nil && *readErr == nil {
+		*readErr = rerr
+	}
+}
+
+type stdoutWriter struct{}
+
+func (stdoutWriter) Write(p []byte) (int, error) { return fmt.Print(string(p)) }
+
 func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) error {
 	schedActive, haveSched := c.policySchedulerActiveState()
 	quarantinedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
@@ -440,8 +473,12 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 				if modes := pol.Log.SessionLogModes(); len(modes) > 0 {
 					fmt.Printf("  Session log: %s\n", strings.Join(modes, ", "))
 				}
-				if ruleQuarantined {
-					fmt.Printf("  Session statistics: %s\n", config.ZoneQuarantineLiveCountersUnavailable)
+				{
+					var sd int
+					var rerr error
+					c.cliPolicyStats("  ", "  ", cfg, pol, ruleQuarantined, policySetID*dataplane.MaxRulesPerPolicy+uint32(i), &sd, &rerr)
+					_ = sd
+					_ = rerr
 				}
 				seqNum++
 			}
@@ -507,8 +544,12 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 			if modes := pol.Log.SessionLogModes(); len(modes) > 0 {
 				fmt.Printf("  Session log: %s\n", strings.Join(modes, ", "))
 			}
-			if ruleQuarantined {
-				fmt.Printf("  Session statistics: %s\n", config.ZoneQuarantineLiveCountersUnavailable)
+			{
+				var sd int
+				var rerr error
+				c.cliPolicyStats("  ", "  ", cfg, pol, ruleQuarantined, policySetID*dataplane.MaxRulesPerPolicy+uint32(i), &sd, &rerr)
+				_ = sd
+				_ = rerr
 			}
 			seqNum++
 
