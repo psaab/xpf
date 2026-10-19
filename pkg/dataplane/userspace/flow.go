@@ -120,7 +120,8 @@ func buildFlowSnapshot(cfg *config.Config) FlowSnapshot {
 // algDisableFlags packs the `security alg <proto> disable` knobs into the
 // bitfield the userspace dataplane consumes (#2008 H3/H4). The bit layout
 // MUST match pkg/dataplane/compiler.go's legacy flow_config_map encoding and
-// the Rust ALG_DISABLE_* constants: DNS=0x01, FTP=0x02, SIP=0x04, TFTP=0x08.
+// the Rust ALG_DISABLE_* constants: DNS=0x01, FTP=0x02, SIP=0x04, TFTP=0x08,
+// PPTP=0x10 (#15655).
 func algDisableFlags(alg *config.ALGConfig) uint8 {
 	if alg == nil {
 		return 0
@@ -137,6 +138,9 @@ func algDisableFlags(alg *config.ALGConfig) uint8 {
 	}
 	if alg.TFTPDisable {
 		flags |= 0x08
+	}
+	if alg.PPTPDisable {
+		flags |= 0x10
 	}
 	return flags
 }

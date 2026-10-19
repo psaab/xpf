@@ -12,12 +12,18 @@ import "strings"
 // shared, so a change to what an ALG actually does is one edit rather than
 // three that can drift apart.
 //
-// Why none of them says "enabled": nothing in the userspace dataplane performs
-// data-channel pinholing or payload doctoring. The ALG bits reach exactly one
-// consumer, alg_type_for_session, which stamps a tag on the conntrack row for
-// `show security flow session`. A non-disabled ALG is session-tagged, not
-// enforcing anything, and "enabled" invites an operator to leave a pinhole
-// unconfigured in the belief that the firewall is tracking the control channel.
+// Why none of them says "enabled": for DNS/FTP/SIP nothing in the userspace
+// dataplane performs data-channel pinholing or payload doctoring. Those bits
+// reach exactly one consumer, alg_type_for_session, which stamps a tag on
+// the conntrack row for `show security flow session`. A non-disabled
+// DNS/FTP/SIP ALG is session-tagged, not enforcing anything, and "enabled"
+// invites an operator to leave a pinhole unconfigured in the belief that
+// the firewall is tracking the control channel.
+//
+// PPTP (#15655 V12-01) is different: the Rust dataplane DOES implement the
+// RFC 2637 ALG — TCP/1723 control learning and GRE v1 Call-ID data
+// association — so a non-disabled PPTP renders as control-inspected, and
+// `pptp disable` (bit 0x10) turns that learning/association off.
 //
 // TFTP is weaker still and is worded differently on purpose: it has no
 // alg_type at all, and its wire bit is #[allow(dead_code)] in the Rust helper,
@@ -28,11 +34,15 @@ const (
 	ALGProtoFTP  = "ftp"
 	ALGProtoSIP  = "sip"
 	ALGProtoTFTP = "tftp"
+	ALGProtoPPTP = "pptp"
 
 	ALGStatusDisabled       = "disabled"
 	ALGStatusSessionTagged  = "session-tagged (no data-channel pinholing)"
 	ALGStatusRecordedOnly   = "configured (not enforced)"
 	ALGStatusNotImplemented = "configured (not implemented)"
+	// ALGStatusPPTPActive describes the live PPTP ALG: control-channel
+	// inspection and GRE Call-ID association are performed.
+	ALGStatusPPTPActive = "control-inspected (GRE Call-ID association)"
 )
 
 // ALGModeledProtos returns the ALGs `security alg` actually models, in the
@@ -41,7 +51,7 @@ const (
 // they previously rendered the same four in three different orders, and the
 // CLI additionally rendered twelve that do not exist at all.
 func ALGModeledProtos() []string {
-	return []string{ALGProtoDNS, ALGProtoFTP, ALGProtoSIP, ALGProtoTFTP}
+	return []string{ALGProtoDNS, ALGProtoFTP, ALGProtoSIP, ALGProtoTFTP, ALGProtoPPTP}
 }
 
 // ALGDisplayName is the operator-facing spelling of a proto name.
@@ -55,6 +65,9 @@ func ALGStatusText(proto string, disabled bool) string {
 	}
 	if proto == ALGProtoTFTP {
 		return ALGStatusRecordedOnly
+	}
+	if proto == ALGProtoPPTP {
+		return ALGStatusPPTPActive
 	}
 	return ALGStatusSessionTagged
 }
@@ -77,6 +90,8 @@ func (a *ALGConfig) ALGDisabled(proto string) bool {
 		return a.SIPDisable
 	case ALGProtoTFTP:
 		return a.TFTPDisable
+	case ALGProtoPPTP:
+		return a.PPTPDisable
 	}
 	return false
 }

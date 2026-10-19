@@ -542,6 +542,8 @@ type Exporter struct {
 	recSizeV4       int
 	recSizeV6       int
 	templateFlowSet []byte
+	// #15655: active/inactive timeout tracker (nil = close-only export).
+	tracker *FlowTracker
 
 	mu    sync.Mutex
 	seq   uint32
@@ -600,6 +602,7 @@ func NewExporter(cfg *ExportConfig) (*Exporter, error) {
 		fieldsV4:     buildTemplateFieldsV4(cfg.V9TemplateOpts),
 		fieldsV6:     buildTemplateFieldsV6(cfg.V9TemplateOpts),
 		MaskResolver: NewRouteMaskResolver(0),
+		tracker:      NewFlowTracker(cfg.FlowActiveTimeout, cfg.FlowInactiveTimeout),
 	}
 	e.recSizeV4 = recordSize(e.fieldsV4)
 	e.recSizeV6 = recordSize(e.fieldsV6)
@@ -635,6 +638,9 @@ func (e *Exporter) Run(ctx context.Context) {
 		case <-templateTicker.C:
 			e.sendTemplates()
 		case <-batchTicker.C:
+			// #15655: emit interim/final records for flows that hit the
+			// active/inactive timeouts since the last tick.
+			e.CollectDueExports(time.Now())
 			e.flushBatches()
 		}
 	}

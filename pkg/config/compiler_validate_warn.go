@@ -1048,7 +1048,7 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 			}
 		}
 		warnings = append(warnings, fmt.Sprintf(
-			"security alg %s accepted but inert — the userspace dataplane implements ALG control only for dns/ftp/sip/tftp, so this stanza has no effect (#4232)",
+			"security alg %s accepted but inert — the userspace dataplane implements ALG control only for dns/ftp/sip/tftp/pptp, so this stanza has no effect (#4232)",
 			strings.Join(uniq, ", ")))
 	}
 

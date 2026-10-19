@@ -59,6 +59,7 @@ func TestBuildFlowSnapshotPacksALGDisableFlags(t *testing.T) {
 		{"ftp", func(a *config.ALGConfig) { a.FTPDisable = true }, 0x02},
 		{"sip", func(a *config.ALGConfig) { a.SIPDisable = true }, 0x04},
 		{"tftp", func(a *config.ALGConfig) { a.TFTPDisable = true }, 0x08},
+		{"pptp", func(a *config.ALGConfig) { a.PPTPDisable = true }, 0x10},
 		{"dns+ftp", func(a *config.ALGConfig) {
 			a.DNSDisable = true
 			a.FTPDisable = true
@@ -68,7 +69,8 @@ func TestBuildFlowSnapshotPacksALGDisableFlags(t *testing.T) {
 			a.FTPDisable = true
 			a.SIPDisable = true
 			a.TFTPDisable = true
-		}, 0x0f},
+			a.PPTPDisable = true
+		}, 0x1f},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

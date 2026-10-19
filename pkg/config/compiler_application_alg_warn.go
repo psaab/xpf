@@ -46,6 +46,8 @@ func applicationALGTupleTaggable(app *Application) bool {
 		servicePort = 53
 	case strings.EqualFold(alg, "sip"):
 		servicePort = 5060
+	case strings.EqualFold(alg, "pptp"):
+		servicePort = 1723
 	default:
 		// TFTP has no userspace conntrack tag; unsupported names are handled
 		// by the existing accepted-with-advisory path.
@@ -66,6 +68,10 @@ func applicationALGTupleTaggable(app *Application) bool {
 			}
 		case strings.EqualFold(alg, "sip"):
 			if n != 6 && n != 17 {
+				return false
+			}
+		case strings.EqualFold(alg, "pptp"):
+			if n != 6 {
 				return false
 			}
 		}

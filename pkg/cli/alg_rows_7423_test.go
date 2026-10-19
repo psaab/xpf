@@ -18,8 +18,10 @@ func renderALG7423(t *testing.T, alg *config.ALGConfig) string {
 // ghostALGs7423 are the ALG names the pre-#7423 CLI printed as hard-coded
 // literals. Eight of them claimed "Enabled". None has any config leaf, any
 // compiler path, or any dataplane consumer anywhere in this product.
+// PPTP left this list in #15655: it now has a real config leaf, compiler
+// path, and Rust ALG consumer, so it renders as a modeled row.
 var ghostALGs7423 = []string{
-	"H323", "MGCP", "MSRPC", "PPTP", "RTSP", "SCCP", "SUNRPC", "TALK",
+	"H323", "MGCP", "MSRPC", "RTSP", "SCCP", "SUNRPC", "TALK",
 	"REAL", "RSH", "SQL", "TRACEROUTE",
 }
 
@@ -31,7 +33,7 @@ func TestShowALGDoesNotFabricateRows_7423(t *testing.T) {
 				"exist in this product:\n%s", ghost, out)
 		}
 	}
-	for _, real := range []string{"DNS", "FTP", "SIP", "TFTP"} {
+	for _, real := range []string{"DNS", "FTP", "SIP", "TFTP", "PPTP"} {
 		if !strings.Contains(out, real) {
 			t.Errorf("show security alg is missing the real ALG %q:\n%s", real, out)
 		}

@@ -578,9 +578,14 @@ func secretIndices(fp []string) []int {
 			"authentication-password", "privacy-password",
 			"encrypted-password", "simple-password", "api-key", "tsig-secret",
 			"plain-text-password", "plain-text-password-value",
-			"api-token", "aws-secret-key", "private-key", "preshared-key":
+			"api-token", "aws-secret-key", "private-key", "preshared-key",
+			"client-secret", "shared-secret", "radius-shared-secret":
 			// Distinctive secret keywords: every token after the keyword is
 			// secret value (covers multi-token / bracketed list values too).
+			// client-secret/shared-secret are the JIMS (Juniper Identity
+			// Management Service) credentials under user-identification
+			// (#15655 V15-04); they are credential-shaped names with no
+			// non-secret Junos use.
 			for j := i + 1; j < len(fp); j++ {
 				out = append(out, j)
 			}

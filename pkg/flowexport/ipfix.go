@@ -747,7 +747,8 @@ type IPFIXExporter struct {
 	// the template set and every data record agree on whether flowDirection
 	// (IE 61) is present (#3270).
 	includeDir bool
-
+	// #15655: active/inactive timeout tracker (nil = close-only export).
+	tracker *FlowTracker
 	// #3748: sampler Options Template (Set ID 3) + Options Data Record (Set ID
 	// 258) advertising the group's 1-in-N sampling rate. Precomputed at
 	// construction (rate is fixed per group) and re-sent on the template-refresh
@@ -800,6 +801,7 @@ func NewIPFIXExporter(cfg *ExportConfig) (*IPFIXExporter, error) {
 		includeDir:   cfg.IncludeFlowDir,
 		templateSet:  encodeIPFIXTemplateSetDir(cfg.IncludeFlowDir),
 		MaskResolver: NewRouteMaskResolver(0),
+		tracker:      NewFlowTracker(cfg.FlowActiveTimeout, cfg.FlowInactiveTimeout),
 	}
 
 	// #3748: advertise the 1-in-N sampling rate via an Options Template +
@@ -840,6 +842,7 @@ func (e *IPFIXExporter) Run(ctx context.Context) {
 		case <-templateTicker.C:
 			e.sendTemplates()
 		case <-batchTicker.C:
+			e.CollectDueExports(time.Now())
 			e.flushBatches()
 		}
 	}

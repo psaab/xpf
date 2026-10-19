@@ -1383,6 +1383,7 @@ var supportedApplicationALGs = map[string]bool{
 	"ftp":  true,
 	"sip":  true,
 	"tftp": true,
+	"pptp": true,
 }
 
 // validApplicationALG reports whether name is a supported per-application ALG.

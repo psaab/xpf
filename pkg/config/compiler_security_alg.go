@@ -19,7 +19,7 @@ func validateALGPackedTokens(node *Node, _ *schemaNode) error {
 		tokens = tokens[1:]
 	}
 	switch proto {
-	case "dns", "ftp", "sip", "tftp":
+	case "dns", "ftp", "sip", "tftp", "pptp":
 		for _, token := range tokens {
 			if token != "disable" {
 				return fmt.Errorf("unknown configuration keyword %q under ALG %q (valid: disable)", token, proto)
@@ -61,6 +61,7 @@ func compileALG(node *Node, sec *SecurityConfig) error {
 	sec.ALG.FTPDisable = sec.ALG.FTPDisable || algDisabled(node, "ftp")
 	sec.ALG.SIPDisable = sec.ALG.SIPDisable || algDisabled(node, "sip")
 	sec.ALG.TFTPDisable = sec.ALG.TFTPDisable || algDisabled(node, "tftp")
+	sec.ALG.PPTPDisable = sec.ALG.PPTPDisable || algDisabled(node, "pptp")
 	// #4232 (fable-167 P-4a): record any `security alg <proto>` whose proto is
 	// not one of the four the dataplane wires. The whole stanza (bare `disable`
 	// or a richer child like `h323 gatekeeper ...`) was previously dropped
@@ -105,6 +106,8 @@ func compileALG(node *Node, sec *SecurityConfig) error {
 			sec.ALG.SIPDisable = sec.ALG.SIPDisable || algPackedDisable(tail, node.Children)
 		case "tftp":
 			sec.ALG.TFTPDisable = sec.ALG.TFTPDisable || algPackedDisable(tail, node.Children)
+		case "pptp":
+			sec.ALG.PPTPDisable = sec.ALG.PPTPDisable || algPackedDisable(tail, node.Children)
 		default:
 			sec.ALG.UnsupportedProtos = append(sec.ALG.UnsupportedProtos, proto)
 		}
@@ -115,7 +118,7 @@ func compileALG(node *Node, sec *SecurityConfig) error {
 	}
 	for _, child := range node.Children {
 		switch child.Name() {
-		case "dns", "ftp", "sip", "tftp":
+		case "dns", "ftp", "sip", "tftp", "pptp":
 			// wired above
 		default:
 			sec.ALG.UnsupportedProtos = append(sec.ALG.UnsupportedProtos, child.Name())

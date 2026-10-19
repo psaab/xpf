@@ -1850,6 +1850,9 @@ func compileFlowConfig(dp DataPlane, cfg *config.Config, result *CompileResult) 
 	if alg.TFTPDisable {
 		fc.ALGFlags |= 0x08
 	}
+	if alg.PPTPDisable {
+		fc.ALGFlags |= 0x10
+	}
 
 	// #2078: the `security flow tcp-session` presence flags (no-syn-check /
 	// rst-invalidate-session / no-syn-check-in-tunnel) used to be packed into

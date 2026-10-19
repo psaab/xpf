@@ -32,6 +32,7 @@ func compileSections(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	for _, node := range tree.Children {
 		switch node.Name() {
 		case "security":
+			cfg.Warnings = append(cfg.Warnings, userIdentificationWarnings("security", node)...)
 			if err := compileSecurity(node, &cfg.Security); err != nil {
 				return fmt.Errorf("security: %w", err)
 			}
