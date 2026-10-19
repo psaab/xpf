@@ -146,22 +146,42 @@ fn build_logical_ingress_packet_with_ethernet(
             ..UserspaceDpMeta::default()
         },
     );
+    // #15772: stamp the L3 addresses from the inner header independently
+    // of whether a ported SessionFlow could be parsed. Flowless inner
+    // traffic (ESP/OSPF and other non-TCP/UDP/ICMP-query protocols,
+    // non-first fragments, ICMP errors) makes parse_session_flow_from_frame
+    // return None by design; coupling the addresses to that success left
+    // them 0.0.0.0/::, so downstream flowless enforcement built a
+    // synthetic 0.0.0.0/:: flow and mis-adjudicated the packet. This
+    // matches the XDP shim, which always fills the addresses from the L3
+    // header even for fragments. The source/destination parsers use the
+    // verified L3 offset and fail closed (None) on a truncated header,
+    // in which case the addresses stay zeroed — there is no L3 header to
+    // trust. Ports remain flow-gated: a flowless packet has no ports.
+    let stamp_meta = UserspaceDpMeta {
+        addr_family: params.inner_family,
+        protocol: params.protocol,
+        l3_offset: l3_offset as u16,
+        ..UserspaceDpMeta::default()
+    };
     let mut flow_src_addr = [0u8; 16];
     let mut flow_dst_addr = [0u8; 16];
-    let (src_port, dst_port) = flow
-        .as_ref()
-        .map(|flow| (flow.forward_key.src_port, flow.forward_key.dst_port))
-        .unwrap_or_default();
-    if let Some(flow) = flow.as_ref() {
-        match flow.src_ip {
+    if let Some(src_ip) = parse_packet_source_from_frame(&packet, stamp_meta) {
+        match src_ip {
             IpAddr::V4(ip) => flow_src_addr[..4].copy_from_slice(&ip.octets()),
             IpAddr::V6(ip) => flow_src_addr.copy_from_slice(&ip.octets()),
         }
-        match flow.dst_ip {
+    }
+    if let Some(dst_ip) = parse_packet_destination_from_frame(&packet, stamp_meta) {
+        match dst_ip {
             IpAddr::V4(ip) => flow_dst_addr[..4].copy_from_slice(&ip.octets()),
             IpAddr::V6(ip) => flow_dst_addr.copy_from_slice(&ip.octets()),
         }
     }
+    let (src_port, dst_port) = flow
+        .as_ref()
+        .map(|flow| (flow.forward_key.src_port, flow.forward_key.dst_port))
+        .unwrap_or_default();
 
     // Derive the ingress zone from the tunnel's LOGICAL ifindex, never the
     // underlay's (#7167 invariant 2).
@@ -335,5 +355,179 @@ mod pkt_len_invariant_8581_tests {
             assert_eq!(meta.payload_offset, 40);
             assert_eq!(meta.pkt_len as usize, inner_len);
         }
+    }
+}
+
+#[cfg(test)]
+mod flowless_addr_15772_tests {
+    use super::*;
+    use crate::afxdp::types::ForwardingState;
+    use std::sync::atomic::AtomicU64;
+
+    static ECN_DROPS: AtomicU64 = AtomicU64::new(0);
+
+    fn params<'a>(
+        inner: &'a [u8],
+        inner_family: u8,
+        inner_eth_proto: u16,
+        protocol: u8,
+        rel_l4_offset: u16,
+        payload_offset: u16,
+    ) -> LogicalIngressParams<'a> {
+        LogicalIngressParams {
+            inner_packet: inner,
+            inner_family,
+            inner_eth_proto,
+            protocol,
+            rel_l4_offset,
+            payload_offset,
+            logical_ifindex: 42,
+            outer_ecn: None,
+            ecn_illegal_drops: &ECN_DROPS,
+            meta_flags: 0,
+            rx_queue_index: 0,
+            config_generation: 1,
+            fib_generation: 1,
+        }
+    }
+
+    fn inner_v4_proto(total: usize, protocol: u8, src: [u8; 4], dst: [u8; 4]) -> Vec<u8> {
+        let mut p = vec![0u8; total];
+        p[0] = 0x45;
+        p[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+        p[8] = 64;
+        p[9] = protocol;
+        p[12..16].copy_from_slice(&src);
+        p[16..20].copy_from_slice(&dst);
+        p
+    }
+
+    fn inner_v6_proto(total: usize, protocol: u8, src: [u8; 16], dst: [u8; 16]) -> Vec<u8> {
+        let mut p = vec![0u8; total];
+        p[0] = 0x60;
+        let payload_len = total.saturating_sub(40) as u16;
+        p[4..6].copy_from_slice(&payload_len.to_be_bytes());
+        p[6] = protocol;
+        p[7] = 64;
+        p[8..24].copy_from_slice(&src);
+        p[24..40].copy_from_slice(&dst);
+        p
+    }
+
+    fn v4_addr_bytes(addr: [u8; 4]) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[..4].copy_from_slice(&addr);
+        out
+    }
+
+    #[test]
+    fn flowless_v4_esp_and_ospf_stamp_l3_addrs_15772() {
+        let fw = ForwardingState::default();
+        for protocol in [50u8, 89] {
+            let inner = inner_v4_proto(28, protocol, [192, 0, 2, 10], [198, 51, 100, 20]);
+            let (_frame, meta) = build_logical_ingress_ethernet_packet(
+                &fw,
+                &params(&inner, libc::AF_INET as u8, 0x0800, protocol, 20, 28),
+            )
+            .expect("flowless inner packet must build");
+            assert_eq!(
+                meta.flow_src_addr,
+                v4_addr_bytes([192, 0, 2, 10]),
+                "#15772: flowless proto {protocol} meta src must be the inner L3 src, not 0.0.0.0",
+            );
+            assert_eq!(
+                meta.flow_dst_addr,
+                v4_addr_bytes([198, 51, 100, 20]),
+                "#15772: flowless proto {protocol} meta dst must be the inner L3 dst, not 0.0.0.0",
+            );
+            assert_eq!(meta.flow_src_port, 0);
+            assert_eq!(meta.flow_dst_port, 0);
+            let flow = crate::afxdp::frame::l3_enforcement_flow_from_meta(meta)
+                .expect("#15772: enforcement flow must be built from real inner addrs");
+            assert_eq!(flow.src_ip, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
+            assert_eq!(flow.dst_ip, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)));
+        }
+    }
+
+    #[test]
+    fn flowless_v4_non_first_fragment_and_icmp_error_stamp_l3_addrs_15772() {
+        let fw = ForwardingState::default();
+        let mut frag = inner_v4_proto(28, 6, [10, 10, 0, 1], [10, 20, 0, 2]);
+        frag[6..8].copy_from_slice(&1u16.to_be_bytes());
+        let (_f, meta) = build_logical_ingress_ethernet_packet(
+            &fw,
+            &params(&frag, libc::AF_INET as u8, 0x0800, 6, 20, 28),
+        )
+        .expect("non-first fragment must build");
+        assert_eq!(meta.flow_src_addr, v4_addr_bytes([10, 10, 0, 1]));
+        assert_eq!(meta.flow_dst_addr, v4_addr_bytes([10, 20, 0, 2]));
+        let flow = crate::afxdp::frame::l3_enforcement_flow_from_meta(meta)
+            .expect("#15772: fragment enforcement flow must use real inner addrs");
+        assert_eq!(flow.src_ip, IpAddr::V4(Ipv4Addr::new(10, 10, 0, 1)));
+        assert_eq!(flow.dst_ip, IpAddr::V4(Ipv4Addr::new(10, 20, 0, 2)));
+
+        let mut icmp_err = inner_v4_proto(28, 1, [203, 0, 113, 5], [192, 0, 2, 99]);
+        icmp_err[20] = 3;
+        icmp_err[21] = 1;
+        let (_f, meta) = build_logical_ingress_ethernet_packet(
+            &fw,
+            &params(&icmp_err, libc::AF_INET as u8, 0x0800, 1, 20, 28),
+        )
+        .expect("ICMP error must build");
+        assert_eq!(meta.flow_src_addr, v4_addr_bytes([203, 0, 113, 5]));
+        assert_eq!(meta.flow_dst_addr, v4_addr_bytes([192, 0, 2, 99]));
+        let flow = crate::afxdp::frame::l3_enforcement_flow_from_meta(meta)
+            .expect("#15772: ICMP-error enforcement flow must use real inner addrs");
+        assert_eq!(flow.src_ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)));
+        assert_eq!(flow.dst_ip, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)));
+    }
+
+    #[test]
+    fn flowless_v6_esp_stamps_l3_addrs_15772() {
+        let fw = ForwardingState::default();
+        let src: [u8; 16] = "2001:db8:1::10".parse::<Ipv6Addr>().unwrap().octets();
+        let dst: [u8; 16] = "2001:db8:2::20".parse::<Ipv6Addr>().unwrap().octets();
+        let inner = inner_v6_proto(48, 50, src, dst);
+        let (_frame, meta) = build_logical_ingress_ethernet_packet(
+            &fw,
+            &params(&inner, libc::AF_INET6 as u8, 0x86dd, 50, 40, 48),
+        )
+        .expect("flowless v6 ESP inner must build");
+        assert_eq!(meta.flow_src_addr, src, "#15772: v6 flowless src must not be ::");
+        assert_eq!(meta.flow_dst_addr, dst, "#15772: v6 flowless dst must not be ::");
+        let flow = crate::afxdp::frame::l3_enforcement_flow_from_meta(meta)
+            .expect("#15772: v6 enforcement flow must use real inner addrs");
+        assert_eq!(flow.src_ip, IpAddr::V6(Ipv6Addr::from(src)));
+        assert_eq!(flow.dst_ip, IpAddr::V6(Ipv6Addr::from(dst)));
+    }
+
+    #[test]
+    fn flowless_bare_l3_stamps_l3_addrs_15772() {
+        let fw = ForwardingState::default();
+        let inner = inner_v4_proto(28, 50, [172, 16, 0, 10], [172, 16, 0, 20]);
+        let (_packet, meta) = build_logical_ingress_packet(
+            &fw,
+            &params(&inner, libc::AF_INET as u8, 0x0800, 50, 20, 28),
+        )
+        .expect("bare-L3 flowless inner must build");
+        assert_eq!(meta.flow_src_addr, v4_addr_bytes([172, 16, 0, 10]));
+        assert_eq!(meta.flow_dst_addr, v4_addr_bytes([172, 16, 0, 20]));
+    }
+
+    #[test]
+    fn ported_tcp_inner_stamping_not_regressed_15772() {
+        let fw = ForwardingState::default();
+        let mut inner = inner_v4_proto(40, 6, [10, 0, 0, 1], [10, 0, 0, 2]);
+        inner[20..22].copy_from_slice(&12345u16.to_be_bytes());
+        inner[22..24].copy_from_slice(&443u16.to_be_bytes());
+        let (_frame, meta) = build_logical_ingress_ethernet_packet(
+            &fw,
+            &params(&inner, libc::AF_INET as u8, 0x0800, 6, 20, 40),
+        )
+        .expect("TCP inner must build");
+        assert_eq!(meta.flow_src_addr, v4_addr_bytes([10, 0, 0, 1]));
+        assert_eq!(meta.flow_dst_addr, v4_addr_bytes([10, 0, 0, 2]));
+        assert_eq!(meta.flow_src_port, 12345);
+        assert_eq!(meta.flow_dst_port, 443);
     }
 }
