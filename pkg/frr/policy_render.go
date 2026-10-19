@@ -418,12 +418,19 @@ func (m *Manager) generatePolicyOptionsWithRefNodes14380(po *config.PolicyOption
 			// routing-only list reaches here unchecked on every path
 			// (strict compile accepts it). Skip the entry (match-nothing,
 			// fail-closed) rather than poison the reload; the seq slot
-			// stays a gap, which is FRR-legal (#2103 precedent). Same
-			// net.ParseCIDR predicate as the route-filter belt, so the two
-			// cannot drift.
-			if _, _, err := net.ParseCIDR(prefix); err != nil {
+			// stays a gap, which is FRR-legal (#2103 precedent).
+			//
+			// #15012: the predicate is config.NormalizePrefixListEntry,
+			// shared with the inline-ACL belt and
+			// prefixListRefMissingAtRender so the three cannot drift. It
+			// also accepts a bare host (no "/len"), which is commit-valid
+			// Junos for a host route — the #7273 firewall classifier
+			// already accepts it as /32 or /128 — and renders it with the
+			// host mask instead of omitting it as "malformed".
+			normalized, ok := config.NormalizePrefixListEntry(prefix)
+			if !ok {
 				slog.Warn("frr: omitting malformed prefix-list entry",
-					"list", name, "prefix", prefix, "reason", err)
+					"list", name, "prefix", prefix)
 				continue
 			}
 			// #4482: sanitize the prefix so an embedded newline from a
@@ -433,11 +440,13 @@ func (m *Manager) generatePolicyOptionsWithRefNodes14380(po *config.PolicyOption
 			// prefix-list slots and the route-map `set` clauses below, which
 			// still rendered with a bare %s — a residual bypass on the tolerant
 			// load path (the strict #1798 commit control-char gate rejects it,
-			// but the peer-sync / rollback path only warns, #1960).
-			if strings.Contains(prefix, ":") {
-				fmt.Fprintf(&b, "ipv6 prefix-list %s seq %d permit %s\n", frrName(name), (i+1)*5, sanitizeFRRValue(prefix))
+			// but the peer-sync / rollback path only warns, #1960). The
+			// normalised value is netip-canonical (no control chars can
+			// survive parsing), so sanitize is a no-op belt here.
+			if strings.Contains(normalized, ":") {
+				fmt.Fprintf(&b, "ipv6 prefix-list %s seq %d permit %s\n", frrName(name), (i+1)*5, sanitizeFRRValue(normalized))
 			} else {
-				fmt.Fprintf(&b, "ip prefix-list %s seq %d permit %s\n", frrName(name), (i+1)*5, sanitizeFRRValue(prefix))
+				fmt.Fprintf(&b, "ip prefix-list %s seq %d permit %s\n", frrName(name), (i+1)*5, sanitizeFRRValue(normalized))
 			}
 		}
 	}
@@ -658,12 +667,14 @@ func communityDeleteTarget(po *config.PolicyOptionsConfig, name string) string {
 // prefixListRefMissingAtRender reports whether one per-family
 // `match ip|ipv6 address prefix-list <name>` ref would dangle: the list is
 // undefined, or the prefix-list loop omits every entry of that family
-// (malformed entries fail net.ParseCIDR, #10823). The predicate is per-family
+// (malformed entries fail the shared normaliser, #10823). The predicate is per-family
 // because a mixed list renders its families as independent FRR prefix-lists:
 // an all-malformed v6 half leaves the v6 ref dangling even when the v4 half
 // renders. Keeping this predicate in step with the emission loop (same
-// net.ParseCIDR test, same `:` family split) ensures every ref reported
+// config.NormalizePrefixListEntry test, same `:` family split) ensures every ref reported
 // missing has no rendered entry, and every rendered ref has at least one.
+// #15012: a bare host entry normalises to /32 or /128, so an all-bare list
+// renders and is NOT missing.
 func prefixListRefMissingAtRender(po *config.PolicyOptionsConfig, name, matchKW string) bool {
 	pl := po.PrefixLists[name]
 	if pl == nil {
@@ -674,7 +685,7 @@ func prefixListRefMissingAtRender(po *config.PolicyOptionsConfig, name, matchKW 
 		if strings.Contains(prefix, ":") != wantV6 {
 			continue
 		}
-		if _, _, err := net.ParseCIDR(prefix); err == nil {
+		if _, ok := config.NormalizePrefixListEntry(prefix); ok {
 			return false
 		}
 	}
