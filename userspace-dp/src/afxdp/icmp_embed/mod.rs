@@ -78,8 +78,12 @@ pub(super) struct EmbeddedIcmpMatch {
     /// `SessionTable::refund_icmp_error_not_delivered` on every post-match
     /// non-delivery terminal (TTL-expire, CoS drop, policy-refuse after
     /// `Queued`) so refused errors cannot starve permitted ones.
-    /// `NotHandled` (unbuildable frame) keeps the charge: the error falls
-    /// through to flowless enforcement, which may still deliver it.
+    /// `NotHandled` after a same-family BUILDER decline also refunds
+    /// (#15152, the #14123 NAT64 precedent): the build failure is a
+    /// non-delivery of a CHARGED match even though the descriptor then
+    /// falls through to flowless enforcement, which re-adjudicates the
+    /// original error without consuming this token again. `NotHandled`
+    /// from `NoMatch` never charged, so there is nothing to refund there.
     pub(super) budget_key: SessionKey,
     /// #10671: the normalized arrival zone expected for the quoted packet's
     /// direction. A forward quote expects the session's egress zone; a reply
