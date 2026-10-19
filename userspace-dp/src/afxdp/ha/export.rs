@@ -332,6 +332,7 @@ impl crate::afxdp::Coordinator {
                 // documented unknown/alloc-fallback sentinel.
                 session_id: entry.session_id,
                 bulk_resync: false,
+                is_admission: false,
                 tcp_close_class: entry.tcp_close_class,
                 tcp_handshake_state: entry.tcp_handshake_state,
                 pptp_call_ids: entry.pptp_call_ids,

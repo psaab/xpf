@@ -784,6 +784,20 @@ pub(crate) struct SessionDelta {
     /// caller is the worker loop's chunked export), and a new call site cannot
     /// get it wrong because it does not choose.
     pub(crate) bulk_resync: bool,
+    /// #15126: this Open is a FRESH LOCAL ADMISSION (the install Open at
+    /// `install.rs`), not a re-announcement of an already-created session.
+    /// Only an admission may emit the RT_FLOW SESSION_CREATE frame
+    /// (#2508): a LossResync owner-RG re-export (`open_export_delta`,
+    /// `bulk_resync: true`) and a peer-synced -> local promote
+    /// (`update_session`) re-announce a session that was already created
+    /// and logged, so they carry `false` and the flush suppresses the
+    /// duplicate CREATE while still delivering the HA sync frame.
+    ///
+    /// Carried on the DELTA like `bulk_resync`, for the same reason: the
+    /// producer decides, and no drain call site can get it wrong because
+    /// none chooses. Exactly one producer sets it (`true`): the install
+    /// Open in `install_with_protocol_with_origin_and_source_nat`.
+    pub(crate) is_admission: bool,
     /// #9412: the session's TCP close class at delta production.
     /// `0` means no class is carried; otherwise the value is
     /// `TcpCloseClass::to_wire`.

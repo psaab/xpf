@@ -3890,6 +3890,7 @@ impl SessionTable {
             observed_tcp_flags: forward.observed_tcp_flags,
             session_id: forward.session_id,
             bulk_resync: false,
+            is_admission: false,
             tcp_close_class: forward.tcp_close_class_wire(),
             purge_retirement: false,
             tcp_handshake_state: forward.tcp_handshake_state_wire(forward_key.protocol),
@@ -4413,6 +4414,7 @@ impl SessionTable {
                 observed_tcp_flags,
                 session_id,
                 bulk_resync: false,
+                is_admission: false,
                 pptp_call_ids,
                 source_nat_static,
             });

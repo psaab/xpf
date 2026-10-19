@@ -514,6 +514,7 @@ pub(in crate::afxdp) fn export_close_direct(
         observed_tcp_flags: 0,
         session_id: tombstone.session_id,
         bulk_resync: true,
+        is_admission: false,
         tcp_close_class: tombstone.close_class,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
@@ -1053,7 +1054,16 @@ pub(super) fn flush_session_deltas(
                 // admitting policy requested session-init logging. The
                 // SESSION_CLOSE syslog record is gated on the Go side (via the
                 // frame's gate byte) because flowexport still needs every close.
-                if delta.kind == SessionDeltaKind::Open && delta.metadata.log_session_init {
+                // #15126: only a fresh admission may emit CREATE. A
+                // LossResync re-export (bulk_resync) or a peer->local
+                // promote re-announces a session already created and
+                // logged; emitting again duplicates the audit record on
+                // every failover/failback. The HA sync frame above still
+                // fires for those legs — only the CREATE is suppressed.
+                if delta.kind == SessionDeltaKind::Open
+                    && delta.is_admission
+                    && delta.metadata.log_session_init
+                {
                     // #2615: resolve the AppID for the new 5-tuple with the SAME
                     // app_catalog the forwarding hot path runs (mirroring the #2520
                     // close-side fix), so the SESSION_CREATE RT_FLOW record carries

@@ -769,6 +769,8 @@ impl SessionTable {
                 // SESSION_CLOSE will.
                 session_id,
                 bulk_resync: false,
+                // #15126: the sole fresh-admission Open; may emit CREATE.
+                is_admission: true,
                 // #9412: a session installed BY a closing packet is already closing.
                 tcp_close_class: if matches!(protocol, PROTO_TCP) && is_closing(tcp_flags) {
                     TcpCloseClass::from_packet(tcp_flags).to_wire()
@@ -1197,6 +1199,8 @@ impl SessionTable {
             // caller is a `#[cfg(test)]` fixture. A drop of one of these
             // must not arm the loss-of-sync latch that TRIGGERS that export.
             bulk_resync: true,
+            // #15126: a re-export re-announces an already-created session.
+            is_admission: false,
             source_nat_static,
         })
     }
@@ -1295,6 +1299,7 @@ impl SessionTable {
                 snapshot.session_id
             },
             bulk_resync: false,
+            is_admission: false,
             tcp_close_class: snapshot.tcp_close_class,
             tcp_handshake_state: snapshot.tcp_handshake_state,
             pptp_call_ids,
@@ -1338,6 +1343,7 @@ impl SessionTable {
             observed_tcp_flags: removed.observed_tcp_flags,
             session_id: removed.session_id,
             bulk_resync: false,
+            is_admission: false,
             tcp_close_class: reason,
             tcp_handshake_state: 0,
             pptp_call_ids: self.pptp_call_ids_wire_for(key),
