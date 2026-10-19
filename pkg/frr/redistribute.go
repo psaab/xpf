@@ -85,9 +85,16 @@ func knownRedistProtocol(name string) bool {
 // redistEntry is one source a `redistribute` export resolves to under an
 // enclosing router: the FRR source protocol, and the route-map to attach
 // ("" for a bare protocol token).
+//
+// #15158: clusterMode records that the enclosing section renders the
+// tagged cluster Null0 defaults. A bare static entry (routeMap == "")
+// would redistribute them unfiltered, so format paths rewrite it to
+// clusterNull0DenyRouteMap15158; filtered entries already name a generated
+// map that carries the tag deny itself. Non-static entries ignore it.
 type redistEntry struct {
-	proto    string
-	routeMap string
+	proto       string
+	routeMap    string
+	clusterMode bool
 }
 
 func normalizedRedistProtocol(proto string) string {
@@ -313,7 +320,7 @@ func (m *Manager) renderRedistComposedMaps15156(fc *FullConfig) string {
 	var b strings.Builder
 	for _, name := range names {
 		req := reqs[name]
-		b.WriteString(m.renderRedistComposedMap15156(fc.PolicyOptions, name, req.chain, req.proto))
+		b.WriteString(m.renderRedistComposedMapCluster15158(fc.PolicyOptions, name, req.chain, req.proto, fc != nil && fc.ClusterMode))
 		b.WriteString("!\n")
 	}
 	return b.String()
@@ -325,6 +332,13 @@ func (m *Manager) renderRedistComposedMaps15156(fc *FullConfig) string {
 // fall-off-the-end resolves to deny — the protocol default for IGP
 // redistribution and the fail-closed origination default for BGP.
 func (m *Manager) renderRedistComposedMap15156(po *config.PolicyOptionsConfig, name string, chain []string, proto string) string {
+	return m.renderRedistComposedMapCluster15158(po, name, chain, proto, false)
+}
+
+// renderRedistComposedMapCluster15158 is renderRedistComposedMap15156
+// with the #15158 cluster guard: in cluster mode a composed static map
+// leads with the tag deny at sequence 5, below the parts starting at 10.
+func (m *Manager) renderRedistComposedMapCluster15158(po *config.PolicyOptionsConfig, name string, chain []string, proto string, clusterMode bool) string {
 	var filtered []*config.PolicyStatement
 	var names []string
 	var total uint64
@@ -379,6 +393,9 @@ func (m *Manager) renderRedistComposedMap15156(po *config.PolicyOptionsConfig, n
 	var b strings.Builder
 	for _, p := range parts {
 		b.WriteString(p.definitions)
+	}
+	if clusterMode && proto == "static" {
+		b.WriteString(clusterTagDeny15158(name))
 	}
 	fallbackSeq := seq
 	for i, p := range parts {
@@ -736,6 +753,17 @@ func redistProtocolMapCollisionFiltered(po *config.PolicyOptionsConfig, protocol
 }
 
 func renderRedistributePolicyMap(m *Manager, po *config.PolicyOptionsConfig, policy string, ps *config.PolicyStatement, proto string) string {
+	return renderRedistributePolicyMapCluster15158(m, po, policy, ps, proto, false)
+}
+
+// renderRedistributePolicyMapCluster15158 is renderRedistributePolicyMap
+// with the #15158 cluster guard: when the section renders the tagged
+// cluster Null0 defaults and this map can carry statics, it leads with
+// the tag deny at sequence 5 (below every term sequence, which start at
+// 10), so the internal defaults are denied before any permit while
+// untagged operator statics fall through to the policy unchanged. The
+// oversized-map quarantine already denies everything, tagged or not.
+func renderRedistributePolicyMapCluster15158(m *Manager, po *config.PolicyOptionsConfig, policy string, ps *config.PolicyStatement, proto string, clusterMode bool) string {
 	routeMap := redistProtocolRouteMapName(policy, proto)
 	filtered := redistPolicyForProtocol(ps, proto)
 	if n := config.RouteMapSequenceCount(po, filtered); n > config.MaxRouteMapSequences {
@@ -746,6 +774,9 @@ func renderRedistributePolicyMap(m *Manager, po *config.PolicyOptionsConfig, pol
 	}
 	body := m.renderRouteMapForPolicyWithFallback(
 		po, routeMap, filtered, policyTrailingAction(policy, filtered, nil), "deny", false)
+	if clusterMode && proto == "static" {
+		body = clusterTagDeny15158(routeMap) + body
+	}
 	return body + "!\n"
 }
 
@@ -755,7 +786,19 @@ func renderRedistributePolicyMap(m *Manager, po *config.PolicyOptionsConfig, pol
 // The optional qualified-next-hop metric scope is passed by IGP call sites
 // only; BGP MED is distinct and must not consume the IGP export cost.
 func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsConfig, self string, _ map[string]bool, metrics ...*qnhMetricScope11447) string {
-	return formatRedistEntries(m.redistributeEntries(export, po, self, metrics...))
+	return m.resolveRedistributeCluster15158(export, po, self, nil, false, metrics...)
+}
+
+// resolveRedistributeCluster15158 is resolveRedistribute with the #15158
+// cluster flag threaded onto every entry, so formatRedistEntries rewrites
+// a bare static entry to the deny-tag guard map. Non-cluster rendering is
+// byte-identical to resolveRedistribute.
+func (m *Manager) resolveRedistributeCluster15158(export string, po *config.PolicyOptionsConfig, self string, _ map[string]bool, clusterMode bool, metrics ...*qnhMetricScope11447) string {
+	entries := m.redistributeEntries(export, po, self, metrics...)
+	for i := range entries {
+		entries[i].clusterMode = clusterMode
+	}
+	return formatRedistEntries(entries)
 }
 
 // bgpExportPolicies14586 returns the sorted, de-duplicated set of DEFINED
@@ -809,13 +852,34 @@ func bgpExportPolicies14586(bgp *config.BGPConfig, po *config.PolicyOptionsConfi
 // no-`from protocol` term expands over the whole node-fitting domain
 // (#14380 semantics). The IPv6 sibling is bgpPolicyIPv6RedistEntries14586.
 func (m *Manager) bgpPolicyRedistEntries14586(policies []string, po *config.PolicyOptionsConfig) []redistEntry {
-	return m.bgpPolicyRedistEntriesAt14586(policies, po, "bgp", "bgp")
+	return m.bgpPolicyRedistEntriesCluster15158(policies, po, false)
+}
+
+// bgpPolicyRedistEntriesCluster15158 is bgpPolicyRedistEntries14586 with
+// the #15158 cluster flag threaded onto every entry.
+func (m *Manager) bgpPolicyRedistEntriesCluster15158(policies []string, po *config.PolicyOptionsConfig, clusterMode bool) []redistEntry {
+	entries := m.bgpPolicyRedistEntriesAt14586(policies, po, "bgp", "bgp")
+	for i := range entries {
+		entries[i].clusterMode = clusterMode
+	}
+	return entries
 }
 
 // bgpPolicyIPv6RedistEntries14586 is bgpPolicyRedistEntries14586 at the
 // `address-family ipv6 unicast` node ("bgp-ipv6" grammar).
 func (m *Manager) bgpPolicyIPv6RedistEntries14586(policies []string, po *config.PolicyOptionsConfig) []redistEntry {
-	return m.bgpPolicyRedistEntriesAt14586(policies, po, "bgp", "bgp-ipv6")
+	return m.bgpPolicyIPv6RedistEntriesCluster15158(policies, po, false)
+}
+
+// bgpPolicyIPv6RedistEntriesCluster15158 is
+// bgpPolicyIPv6RedistEntries14586 with the #15158 cluster flag threaded
+// onto every entry.
+func (m *Manager) bgpPolicyIPv6RedistEntriesCluster15158(policies []string, po *config.PolicyOptionsConfig, clusterMode bool) []redistEntry {
+	entries := m.bgpPolicyRedistEntriesAt14586(policies, po, "bgp", "bgp-ipv6")
+	for i := range entries {
+		entries[i].clusterMode = clusterMode
+	}
+	return entries
 }
 
 func (m *Manager) bgpPolicyRedistEntriesAt14586(policies []string, po *config.PolicyOptionsConfig, self, node string) []redistEntry {
@@ -936,14 +1000,29 @@ func applyQNHMetricRouteMap11447(export string, metrics *qnhMetricScope11447, en
 	}
 }
 
+// guardedStaticRouteMap15158 returns the route-map a static entry must
+// attach so the tagged cluster defaults are denied: the entry's own
+// filtered map when it has one (that map carries the tag deny in cluster
+// mode), else the generated deny-tag guard map.
+func guardedStaticRouteMap15158(e redistEntry) string {
+	if e.routeMap != "" {
+		return e.routeMap
+	}
+	return clusterNull0DenyRouteMap15158
+}
+
 func formatRedistEntries(entries []redistEntry) string {
 	var sb strings.Builder
 	for _, e := range entries {
-		if e.routeMap == "" {
+		routeMap := e.routeMap
+		if e.clusterMode && e.proto == "static" {
+			routeMap = guardedStaticRouteMap15158(e)
+		}
+		if routeMap == "" {
 			fmt.Fprintf(&sb, " redistribute %s\n", sanitizeFRRValue(e.proto))
 			continue
 		}
-		fmt.Fprintf(&sb, " redistribute %s route-map %s\n", sanitizeFRRValue(e.proto), frrName(e.routeMap))
+		fmt.Fprintf(&sb, " redistribute %s route-map %s\n", sanitizeFRRValue(e.proto), frrName(routeMap))
 	}
 	return sb.String()
 }
@@ -952,10 +1031,18 @@ func formatRedistEntries(entries []redistEntry) string {
 // redistribute line per source (#15156). With <2 defined policies it is
 // byte-identical to resolving each export singly.
 func (m *Manager) resolveRedistributeChain(chain []string, po *config.PolicyOptionsConfig, self string, metrics ...*qnhMetricScope11447) string {
+	return m.resolveRedistributeChainCluster15158(chain, po, self, false, metrics...)
+}
+
+// resolveRedistributeChainCluster15158 is resolveRedistributeChain with
+// the #15158 cluster flag threaded onto every entry, including the
+// composed multi-policy entries (#15156) whose maps are guarded in
+// renderRedistComposedMap15156.
+func (m *Manager) resolveRedistributeChainCluster15158(chain []string, po *config.PolicyOptionsConfig, self string, clusterMode bool, metrics ...*qnhMetricScope11447) string {
 	if countDefined15156(chain, po) < 2 {
 		var b strings.Builder
 		for _, e := range chain {
-			b.WriteString(m.resolveRedistribute(e, po, self, nil, metrics...))
+			b.WriteString(m.resolveRedistributeCluster15158(e, po, self, nil, clusterMode, metrics...))
 		}
 		return b.String()
 	}
@@ -963,20 +1050,33 @@ func (m *Manager) resolveRedistributeChain(chain []string, po *config.PolicyOpti
 	if len(metrics) > 0 && metrics[0] != nil {
 		m.applyQNHChain15156(chain, metrics[0], entries)
 	}
+	for i := range entries {
+		entries[i].clusterMode = clusterMode
+	}
 	return formatRedistEntries(entries)
 }
 
 func (m *Manager) resolveISISRedistributeChain(chain []string, po *config.PolicyOptionsConfig, isisLevel string, metrics ...*qnhMetricScope11447) string {
+	return m.resolveISISRedistributeChainCluster15158(chain, po, isisLevel, false, metrics...)
+}
+
+// resolveISISRedistributeChainCluster15158 is
+// resolveISISRedistributeChain with the #15158 cluster flag threaded
+// onto every entry.
+func (m *Manager) resolveISISRedistributeChainCluster15158(chain []string, po *config.PolicyOptionsConfig, isisLevel string, clusterMode bool, metrics ...*qnhMetricScope11447) string {
 	if countDefined15156(chain, po) < 2 {
 		var b strings.Builder
 		for _, e := range chain {
-			b.WriteString(m.resolveISISRedistribute(e, po, isisLevel, nil, metrics...))
+			b.WriteString(m.resolveISISRedistributeCluster15158(e, po, isisLevel, nil, clusterMode, metrics...))
 		}
 		return b.String()
 	}
 	entries := m.redistChainEntries15156(chain, po, "isis", "isis")
 	if len(metrics) > 0 && metrics[0] != nil {
 		m.applyQNHChain15156(chain, metrics[0], entries)
+	}
+	for i := range entries {
+		entries[i].clusterMode = clusterMode
 	}
 	return isisRedistributeLines(entries, isisLevel)
 }
@@ -1038,7 +1138,17 @@ func (m *Manager) applyQNHChain15156(chain []string, metrics *qnhMetricScope1144
 // level, since a router in both levels redistributes into both and each FRR
 // line names one; everything else -> the narrow level-2 default.
 func (m *Manager) resolveISISRedistribute(export string, po *config.PolicyOptionsConfig, isisLevel string, _ map[string]bool, metrics ...*qnhMetricScope11447) string {
-	return isisRedistributeLines(m.redistributeEntries(export, po, "isis", metrics...), isisLevel)
+	return m.resolveISISRedistributeCluster15158(export, po, isisLevel, nil, false, metrics...)
+}
+
+// resolveISISRedistributeCluster15158 is resolveISISRedistribute with the
+// #15158 cluster flag threaded onto every entry.
+func (m *Manager) resolveISISRedistributeCluster15158(export string, po *config.PolicyOptionsConfig, isisLevel string, _ map[string]bool, clusterMode bool, metrics ...*qnhMetricScope11447) string {
+	entries := m.redistributeEntries(export, po, "isis", metrics...)
+	for i := range entries {
+		entries[i].clusterMode = clusterMode
+	}
+	return isisRedistributeLines(entries, isisLevel)
 }
 
 func isisRedistributeLines(entries []redistEntry, isisLevel string) string {
@@ -1069,10 +1179,14 @@ func isisRedistributeLines(entries []redistEntry, isisLevel string) string {
 				continue
 			}
 			for _, lv := range levels {
-				if e.routeMap == "" {
+				routeMap := e.routeMap
+				if e.clusterMode && e.proto == "static" {
+					routeMap = guardedStaticRouteMap15158(e)
+				}
+				if routeMap == "" {
 					fmt.Fprintf(&sb, " redistribute %s %s %s\n", fam.name, sanitizeFRRValue(e.proto), lv)
 				} else {
-					fmt.Fprintf(&sb, " redistribute %s %s %s route-map %s\n", fam.name, sanitizeFRRValue(e.proto), lv, frrName(e.routeMap))
+					fmt.Fprintf(&sb, " redistribute %s %s %s route-map %s\n", fam.name, sanitizeFRRValue(e.proto), lv, frrName(routeMap))
 				}
 			}
 		}
@@ -1094,7 +1208,16 @@ func (m *Manager) redistributeEntries(export string, po *config.PolicyOptionsCon
 // grammar installed in that address family ("bgp-ipv6"), and indents the lines
 // one level deeper to sit inside the block.
 func (m *Manager) resolveBGPIPv6Redistribute(export string, po *config.PolicyOptionsConfig, _ map[string]bool) string {
+	return m.resolveBGPIPv6RedistributeCluster15158(export, po, nil, false)
+}
+
+// resolveBGPIPv6RedistributeCluster15158 is resolveBGPIPv6Redistribute
+// with the #15158 cluster flag threaded onto every entry.
+func (m *Manager) resolveBGPIPv6RedistributeCluster15158(export string, po *config.PolicyOptionsConfig, _ map[string]bool, clusterMode bool) string {
 	entries := m.redistributeEntriesAt(export, po, "bgp", "bgp-ipv6")
+	for i := range entries {
+		entries[i].clusterMode = clusterMode
+	}
 	return indentFRRLines(formatRedistEntries(entries), " ")
 }
 

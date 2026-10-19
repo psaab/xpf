@@ -383,6 +383,14 @@ func qualifiedNextHopMetricCollision11447(po *config.PolicyOptionsConfig, set *q
 	return nil
 }
 func (m *Manager) renderQNHMetricPolicyMap11447(po *config.PolicyOptionsConfig, routeMap string, ps *config.PolicyStatement, scope *qnhMetricScope11447) string {
+	return m.renderQNHMetricPolicyMapCluster15158(po, routeMap, ps, scope, false)
+}
+
+// renderQNHMetricPolicyMapCluster15158 is renderQNHMetricPolicyMap11447
+// with the #15158 cluster guard: in cluster mode the map (which attaches
+// only to `redistribute static`) leads with the tag deny at sequence 5,
+// below the metric rules that start at 10.
+func (m *Manager) renderQNHMetricPolicyMapCluster15158(po *config.PolicyOptionsConfig, routeMap string, ps *config.PolicyStatement, scope *qnhMetricScope11447, clusterMode bool) string {
 	policy := redistPolicyForProtocol(ps, "static")
 	if uint64(len(scope.routes))+config.RouteMapSequenceCount(po, policy) > config.MaxRouteMapSequences {
 		slog.Warn("frr: qualified-next-hop metric and policy route-map exceed FRR sequence limit; rendering a deny map",
@@ -402,6 +410,9 @@ func (m *Manager) renderQNHMetricPolicyMap11447(po *config.PolicyOptionsConfig, 
 	}
 	var b strings.Builder
 	b.WriteString(definitions)
+	if clusterMode {
+		b.WriteString(clusterTagDeny15158(routeMap))
+	}
 	b.WriteString(rules)
 	b.WriteString(body)
 	trailingAction := "deny"
@@ -802,6 +813,15 @@ func qnhMetricSequencesWithSetMetricFromManagedConfig11447(text string) qnhMetri
 }
 
 func (m *Manager) generateQNHMetricStaticMaps11447(set *qnhMetricSet11447) string {
+	return m.generateQNHMetricStaticMapsCluster15158(set, false)
+}
+
+// generateQNHMetricStaticMapsCluster15158 is
+// generateQNHMetricStaticMaps11447 with the #15158 cluster guard: in
+// cluster mode each static map leads with the tag deny at sequence 5,
+// below the metric rules that start at 10. The oversized-map quarantine
+// already denies everything, tagged or not.
+func (m *Manager) generateQNHMetricStaticMapsCluster15158(set *qnhMetricSet11447, clusterMode bool) string {
 	if set == nil {
 		return ""
 	}
@@ -812,6 +832,9 @@ func (m *Manager) generateQNHMetricStaticMaps11447(set *qnhMetricSet11447) strin
 			b.WriteString(renderQuarantineDenyRouteMap(scope.staticMap))
 			b.WriteString("!\n")
 			continue
+		}
+		if clusterMode {
+			b.WriteString(clusterTagDeny15158(scope.staticMap))
 		}
 		rules, next := renderQNHMetricTerms11447(scope, scope.staticMap, 10)
 		b.WriteString(rules)

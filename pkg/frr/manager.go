@@ -623,7 +623,19 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		if err := redistProtocolMapCollision(fc.PolicyOptions); err != nil {
 			return err
 		}
-		// #14380: a referenced no-from policy also generates the
+		// #15158: the cluster bare-redistribute guard map shares FRR's
+		// flat route-map namespace; an operator policy-statement with
+		// that exact name would fuse with it on a tolerant load.
+		if fc.ClusterMode {
+			if _, ok := fc.PolicyOptions.PolicyStatements[clusterNull0DenyRouteMap15158]; ok {
+				return fmt.Errorf("policy-statement %q collides with the generated cluster Null0 guard route-map; FRR merges same-named route-maps — refusing to render", clusterNull0DenyRouteMap15158)
+			}
+			for name := range fc.PolicyOptions.PolicyStatements {
+				if frrName(name) == clusterNull0DenyRouteMap15158 && name != clusterNull0DenyRouteMap15158 {
+					return fmt.Errorf("policy-statement %q renders as %q, colliding with the generated cluster Null0 guard route-map; FRR merges same-named route-maps — refusing to render", name, clusterNull0DenyRouteMap15158)
+				}
+			}
+		}
 		// expanded node-fitting set; guard those names too.
 		for _, nodes := range redistReferencedNodes14380(fc) {
 			for _, nd := range nodes {
@@ -788,7 +800,15 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 	if policyOptions != nil {
 		// #14380: referenced no-from policies get their expanded
 		// per-source maps defined at exactly the referencing nodes.
-		b.WriteString(m.generatePolicyOptionsForSection15157(policyOptions, bgpAcceptDefault, qnhMetrics, redistReferencedNodes14380(fc), bgpCarvedExport15157))
+		// #15158: in cluster mode those maps (and the QNH metric maps)
+		// lead with the cluster tag deny, and the bare-redistribute
+		// guard map is defined.
+		if fc.ClusterMode {
+			b.WriteString(m.generatePolicyOptionsForSectionCluster15158(policyOptions, bgpAcceptDefault, qnhMetrics, redistReferencedNodes14380(fc), bgpCarvedExport15157))
+			b.WriteString(renderClusterNull0DenyRouteMap15158(fc))
+		} else {
+			b.WriteString(m.generatePolicyOptionsForSection15157(policyOptions, bgpAcceptDefault, qnhMetrics, redistReferencedNodes14380(fc), bgpCarvedExport15157))
+		}
 		if fc.PolicyOptions != nil {
 			// Composed BGP policy-chain route-maps: an ordered `import`/`export
 			// [ A B C ]` list of >= 2 defined policy-statements is composed into a
@@ -803,6 +823,11 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 			// Non-suffix sites are refused by the collision belt (#14700).
 			b.WriteString(m.renderNarrowedAliases10129(fc))
 		}
+	} else if fc.ClusterMode {
+		// #15158: the bare-redistribute guard map must be defined even
+		// with no policy-options at all — a bare `redistribute static`
+		// under RIP/OSPF/IS-IS/BGP references it in cluster mode.
+		b.WriteString(renderClusterNull0DenyRouteMap15158(fc))
 	}
 	// #15157: the generated Junos default-export map for neighbours with
 	// an empty effective export in an originating instance. Emitted
@@ -868,7 +893,7 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 		globalMetrics = qnhMetrics.global
 	}
 	if fc.OSPF != nil || fc.OSPFv3 != nil || fc.BGP != nil || fc.RIP != nil || fc.ISIS != nil {
-		b.WriteString(m.generateProtocolsWithQNH11447(rOSPF, rOSPFv3, fc.BGP, rRIP, rISIS, "", ecmpMaxPaths, policyOptions, bgpAcceptDefault, globalMetrics, bfdSec))
+		b.WriteString(m.generateProtocolsCluster15158(rOSPF, rOSPFv3, fc.BGP, rRIP, rISIS, "", ecmpMaxPaths, policyOptions, bgpAcceptDefault, globalMetrics, fc.ClusterMode, bfdSec))
 	}
 
 	// 11. Per-VRF dynamic protocols
@@ -878,13 +903,13 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 			if qnhMetrics != nil && i < len(qnhMetrics.instances) {
 				instanceMetrics = qnhMetrics.instances[i]
 			}
-			b.WriteString(m.generateProtocolsWithQNH11447(
+			b.WriteString(m.generateProtocolsCluster15158(
 				resolveOSPFIfNames(resolveIfName, inst.OSPF),
 				resolveOSPFv3IfNames(resolveIfName, inst.OSPFv3),
 				inst.BGP,
 				resolveRIPIfNames(resolveIfName, inst.RIP),
 				resolveISISIfNames(resolveIfName, inst.ISIS),
-				inst.VRFName, ecmpMaxPaths, policyOptions, bgpAcceptDefault, instanceMetrics, bfdSec))
+				inst.VRFName, ecmpMaxPaths, policyOptions, bgpAcceptDefault, instanceMetrics, fc.ClusterMode, bfdSec))
 		}
 	}
 
