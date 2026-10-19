@@ -26,6 +26,13 @@ xpf (0.0.0) unstable; urgency=medium
     installed and the subnet was attributed to unit 0's zone. Tunnel,
     loopback, secure-tunnel and irb units are exempt; tolerant load
     warns instead of bricking (#15034).
+  * Render an IKE/IPsec `pre-shared-key hexadecimal <hex>` as the raw
+    bytes it denotes (`secret = 0x<hex>` in the swanctl config)
+    instead of committing the hex digits as an ASCII secret that
+    could never match a hex-keyed peer, reject an unknown
+    pre-shared-key qualifier or malformed hex at commit (warning on
+    tolerant load), and carry the block-spelling hexadecimal key
+    that was previously dropped entirely (#15027).
   * Emit the bare `ip ospf bfd` / `isis bfd` enable line immediately
     before the `... bfd profile <name>` binding on OSPFv2 and IS-IS
     interfaces configured with bfd-liveness-detection

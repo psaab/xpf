@@ -331,5 +331,21 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 		}
 	}
 
+	// #15027 (A16-04): a pre-shared-key with an unknown qualifier or a
+	// malformed hexadecimal value was previously accepted with the
+	// value treated as an ASCII secret (hex digits rendered quoted, so
+	// the tunnel could never authenticate against a hex-keyed peer).
+	// Strict on commit / commit-check; lenient on load / peer-sync
+	// (warn, and the pkg/ipsec render belt skips a hex-flagged VPN
+	// whose value is not valid hex so the other tunnels keep loading).
+	if err := validateIPsecPSKQualifierStrict(cfg); err != nil {
+		if opts.lenientIPsecPSKQualifier {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec pre-shared-key qualifier (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	return nil
 }

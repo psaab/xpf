@@ -698,6 +698,14 @@ type compileOpts struct {
 	// without an identity its secret can be scoped to.
 	lenientIPsecResponderIdentity bool
 
+	// lenientIPsecPSKQualifier (#15027) downgrades the bad-PSK-qualifier
+	// reject (validateIPsecPSKQualifierStrict) to a warning on the
+	// tolerant load / peer-sync paths, so a persisted or synced config
+	// still boots. The pkg/ipsec render belt skips a hex-flagged VPN
+	// whose value is not valid hex, so no warned config renders hex
+	// digits as an ASCII secret.
+	lenientIPsecPSKQualifier bool
+
 	// lenientLogProfileStreamRef (#2008 H7) downgrades the
 	// `security log profile <name> stream-name <stream>` cross-reference
 	// from a hard error to a warning on the tolerant load / peer-sync
@@ -3478,6 +3486,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecSectionName:                true,
 		lenientIPsecPSKPresence:                true,
 		lenientIPsecResponderIdentity:          true,
+		lenientIPsecPSKQualifier:               true,
 		lenientLogProfileStreamRef:             true,
 		lenientAuthTypeAbsent:                  true,
 		lenientISISAuthTypeRequiresKey14399:    true,

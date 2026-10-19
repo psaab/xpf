@@ -69,6 +69,27 @@ func normalizePSK(secret string) (string, error) {
 	return secret, nil
 }
 
+// validHexPSKRender reports whether s can render as a swanctl hex
+// secret (`secret = 0x<s>`) (#15027): non-empty, even length, hex
+// digits only. It mirrors pkg/config's compile-time check so a
+// directly constructed or peer-synced config that bypassed the
+// strict commit gate is still fenced at render. encoding/hex is
+// already imported by policy.go's package; this file stays free of
+// rendering helpers beyond the PSK predicates per its header — the
+// check is a PSK-validity predicate, not a rendering helper.
+func validHexPSKRender(s string) bool {
+	if s == "" || len(s)%2 != 0 {
+		return false
+	}
+	for i := range s {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
 func decodeJunosSecret(secret string) (string, error) {
 	if !strings.HasPrefix(secret, junosSecretMagic) {
 		return "", errInvalidJunosSecret

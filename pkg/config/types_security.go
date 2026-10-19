@@ -2055,6 +2055,21 @@ type IKEPolicy struct {
 	// establish. Rendered comma-joined into the swanctl `proposals =` line.
 	Proposals []string
 	PSK       Secret // pre-shared key; redacted on JSON/YAML marshal (#2053)
+	// PSKHex (#15027, A16-04) records that PSK was authored as
+	// `pre-shared-key hexadecimal <hex>`: PSK holds the hex digits and
+	// the swanctl renderer must emit them as raw bytes (`secret =
+	// 0x<hex>`), not as an ASCII string. False for `ascii-text` (and
+	// for the legacy unqualified VPN-level form), preserving today's
+	// quoted-ASCII render.
+	PSKHex bool
+	// PSKQualifierInvalidSpec (#15027) records the RAW qualifier token
+	// when a `pre-shared-key` leaf carried anything other than
+	// `ascii-text` / `hexadecimal` (or a hexadecimal value that is not
+	// even-length hex), so validateIPsecPSKQualifierStrict can reject
+	// it at strict commit and warn on the tolerant path. Mirrors the
+	// DHGroupInvalidSpec pattern (#9919). Not serialised: it is a
+	// diagnostic about the input text, not configuration state.
+	PSKQualifierInvalidSpec string `json:"-"`
 }
 
 // IPsecProposal defines Phase 2 (ESP) encryption and authentication parameters.
@@ -2160,17 +2175,23 @@ type IPsecTrafficSelector struct {
 
 // IPsecVPN defines an IPsec VPN tunnel.
 type IPsecVPN struct {
-	Name             string
-	Gateway          string // gateway reference
-	IPsecPolicy      string // IPsec policy reference
-	LocalID          string // local traffic selector (CIDR)
-	RemoteID         string // remote traffic selector (CIDR)
-	PSK              Secret // pre-shared key (legacy, prefer IKE policy); redacted on marshal (#2053)
-	LocalAddr        string // local address
-	BindInterface    string // tunnel interface (e.g. "st0.0") — creates xfrmi with if_id
-	DFBit            string // "copy", "set", "clear"
-	EstablishTunnels string // "immediately", "on-traffic", "responder-only"; "" = Junos default on-traffic (#14592)
-	TrafficSelectors map[string]*IPsecTrafficSelector
+	Name        string
+	Gateway     string // gateway reference
+	IPsecPolicy string // IPsec policy reference
+	LocalID     string // local traffic selector (CIDR)
+	RemoteID    string // remote traffic selector (CIDR)
+	PSK         Secret // pre-shared key (legacy, prefer IKE policy); redacted on marshal (#2053)
+	// PSKHex / PSKQualifierInvalidSpec (#15027): mirror of the IKEPolicy
+	// fields — a VPN-level `pre-shared-key hexadecimal <hex>` renders
+	// as `secret = 0x<hex>`; an unknown qualifier or malformed hex is
+	// recorded for validateIPsecPSKQualifierStrict.
+	PSKHex                  bool
+	PSKQualifierInvalidSpec string `json:"-"`
+	LocalAddr               string // local address
+	BindInterface           string // tunnel interface (e.g. "st0.0") — creates xfrmi with if_id
+	DFBit                   string // "copy", "set", "clear"
+	EstablishTunnels        string // "immediately", "on-traffic", "responder-only"; "" = Junos default on-traffic (#14592)
+	TrafficSelectors        map[string]*IPsecTrafficSelector
 	// Manual records a `manual { ... }` manual-key SA block (#4300, V-4).
 	// xpf does not support manual-key SAs; the block used to be silently
 	// dropped, leaving a dead tunnel that committed OK. It is now captured
