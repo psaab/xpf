@@ -197,10 +197,12 @@ func (d *Daemon) applyServicesReconcile(cfg *config.Config) (error, error) {
 //
 // Return contract (#9947 F-007, fail-closed): nil on a full-diff
 // convergence; non-nil otherwise. A HARD reload failure means neither
-// the primary nor additive load completed successfully. QNH cleanup and
-// replay are deferred until a config load succeeds, so prior QNH metrics
-// are not stripped before such a failure; FRR loads remain nontransactional
-// and may have accepted earlier commands before rejecting a later one.
+// the primary nor additive load completed successfully. No QNH
+// pre-clear runs before such a load, but frr-reload.py deletes the
+// memory-only QNH metric overlay before it fails, so the manager
+// reconciles (restores) the overlay on the failure return too
+// (#15183); FRR loads remain nontransactional and may have accepted
+// earlier commands before rejecting a later one.
 // Any degraded reload (additive vtysh -f applied desired lines but deferred
 // stale-config removal) also returns an error, so the commit cannot report
 // unqualified success for a removal that did not happen.
