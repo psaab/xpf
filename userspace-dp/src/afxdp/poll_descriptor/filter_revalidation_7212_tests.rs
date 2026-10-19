@@ -287,6 +287,7 @@ fn metadata() -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -366,7 +367,8 @@ fn frame() -> Vec<u8> {
 /// rather than merely drop the packet.
 #[test]
 fn static_discard_revokes_a_stale_stamped_session_7212() {
-    let forwarding = forwarding_with_input_filter(LAN_IFINDEX, false, vec![deny_term("no-5201", "5201")]);
+    let forwarding =
+        forwarding_with_input_filter(LAN_IFINDEX, false, vec![deny_term("no-5201", "5201")]);
     let flow = v4_flow(5201);
     let mut sessions = table_with_session(&flow, 7, None);
 
@@ -476,7 +478,8 @@ fn a_still_permitted_session_keeps_its_snat_translation_7212() {
 /// "re-derive on every packet", and only a fresh-stamp row can show that.
 #[test]
 fn a_fresh_stamp_skips_the_revalidation_entirely_7212() {
-    let forwarding = forwarding_with_input_filter(LAN_IFINDEX, false, vec![deny_term("no-5201", "5201")]);
+    let forwarding =
+        forwarding_with_input_filter(LAN_IFINDEX, false, vec![deny_term("no-5201", "5201")]);
     let flow = v4_flow(5201);
     let mut sessions = table_with_session(&flow, 7, Some(LAN_IFINDEX));
 
@@ -1979,7 +1982,10 @@ fn a_fresh_per_packet_pbr_nat_alias_hit_steers_reverse_without_revoking_11324() 
         .expect("the reverse companion remains installed");
     assert_eq!(updated.decision.resolution, route.resolution);
     assert_eq!(
-        (updated.decision.install_table_domain, updated.decision.install_table_check),
+        (
+            updated.decision.install_table_domain,
+            updated.decision.install_table_check
+        ),
         crate::session::install_table_identity("blue")
     );
     assert!(
@@ -2178,7 +2184,6 @@ fn a_cross_domain_reverse_hit_keeps_the_forward_stamped_native_identity_11324() 
     );
 }
 
-
 /// A `then { routing-instance blue; reject; }` term is the other half of #4392's
 /// DROP set, and `enqueue_filter_reject_reply` keys on `FilterAction::Reject`,
 /// so a fix that collapsed both onto `Discard` would silently stop sending the
@@ -2251,15 +2256,19 @@ fn push_gre_underlay_10630(snapshot: &mut crate::protocol::snapshot::ConfigSnaps
             ttl: 64,
             ..Default::default()
         });
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "inet.0".into(),
-    family: "inet".into(),
-    destination: "203.0.113.0/24".into(),
-    next_hop_weights: vec![],
-    next_hops: vec!["172.16.80.1@reth0.80".into()],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0, mtu: 0, });
+    snapshot.routes.push(crate::RouteSnapshot {
+        reject: false,
+        table: "inet.0".into(),
+        family: "inet".into(),
+        destination: "203.0.113.0/24".into(),
+        next_hop_weights: vec![],
+        next_hops: vec!["172.16.80.1@reth0.80".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     snapshot.neighbors.push(crate::NeighborSnapshot {
         interface: "ge-0-0-0.80".into(),
         ifindex: 12,
@@ -2334,15 +2343,19 @@ fn forwarding_with_blue_pbr_tunnel_10630() -> ForwardingState {
         ..Default::default()
     });
     push_gre_underlay_10630(&mut snapshot);
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "blue.inet.0".into(),
-    family: "inet".into(),
-    destination: "172.16.80.0/24".into(),
-    next_hop_weights: vec![],
-    next_hops: vec!["@gr-0/0/0.0".into()],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0, mtu: 0, });
+    snapshot.routes.push(crate::RouteSnapshot {
+        reject: false,
+        table: "blue.inet.0".into(),
+        family: "inet".into(),
+        destination: "172.16.80.0/24".into(),
+        next_hop_weights: vec![],
+        next_hops: vec!["@gr-0/0/0.0".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     for iface in snapshot.interfaces.iter_mut() {
         if iface.ifindex == LAN_IFINDEX {
             iface.filter_input_v4 = "edge-in".into();
@@ -2377,15 +2390,19 @@ fn forwarding_with_green_pbr_native_10630() -> ForwardingState {
         }],
         ..Default::default()
     });
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "green.inet.0".into(),
-    family: "inet".into(),
-    destination: "172.16.80.0/24".into(),
-    next_hop_weights: vec![],
-    next_hops: vec!["172.16.80.1@reth0.80".into()],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0, mtu: 0, });
+    snapshot.routes.push(crate::RouteSnapshot {
+        reject: false,
+        table: "green.inet.0".into(),
+        family: "inet".into(),
+        destination: "172.16.80.0/24".into(),
+        next_hop_weights: vec![],
+        next_hops: vec!["172.16.80.1@reth0.80".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     snapshot.neighbors.push(crate::NeighborSnapshot {
         interface: "ge-0-0-0.80".into(),
         ifindex: 12,
@@ -2431,15 +2448,19 @@ fn forwarding_with_green_pbr_tunnel_10630() -> ForwardingState {
     });
     push_gre_underlay_10630(&mut snapshot);
     push_second_gre_10630(&mut snapshot);
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "green.inet.0".into(),
-    family: "inet".into(),
-    destination: "172.16.80.0/24".into(),
-    next_hop_weights: vec![],
-    next_hops: vec!["@gr-0/0/0.1".into()],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0, mtu: 0, });
+    snapshot.routes.push(crate::RouteSnapshot {
+        reject: false,
+        table: "green.inet.0".into(),
+        family: "inet".into(),
+        destination: "172.16.80.0/24".into(),
+        next_hop_weights: vec![],
+        next_hops: vec!["@gr-0/0/0.1".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     for iface in snapshot.interfaces.iter_mut() {
         if iface.ifindex == LAN_IFINDEX {
             iface.filter_input_v4 = "edge-in".into();
@@ -3134,9 +3155,23 @@ fn forwarding_with_ri_local_12056(
             addresses: vec![InterfaceAddressSnapshot {
                 family: family.into(),
                 address: if v6 {
-                    format!("2001:db8:{}::1/64", if routing_instance == "blue" { "250" } else { "251" })
+                    format!(
+                        "2001:db8:{}::1/64",
+                        if routing_instance == "blue" {
+                            "250"
+                        } else {
+                            "251"
+                        }
+                    )
                 } else {
-                    format!("10.{}.0.1/24", if routing_instance == "blue" { "250" } else { "251" })
+                    format!(
+                        "10.{}.0.1/24",
+                        if routing_instance == "blue" {
+                            "250"
+                        } else {
+                            "251"
+                        }
+                    )
                 },
                 ..Default::default()
             }],
@@ -3263,11 +3298,13 @@ fn unchanged_ri_local_miss_arms_keep_sessions_for_v4_v6_tcp_udp_12056() {
                 .unwrap_or_else(|| {
                     panic!("selected local miss arm must match: v6={v6}, proto={proto}, interface_nat={interface_nat}")
                 });
-                assert_eq!(local.disposition, crate::afxdp::ForwardingDisposition::LocalDelivery);
+                assert_eq!(
+                    local.disposition,
+                    crate::afxdp::ForwardingDisposition::LocalDelivery
+                );
                 let native_identity = crate::session::install_table_identity("blue");
-                let pbr_install_table =
-                    miss_install_table_12056(&forwarding, &flow, v6)
-                        .expect("native RI miss must select its route table");
+                let pbr_install_table = miss_install_table_12056(&forwarding, &flow, v6)
+                    .expect("native RI miss must select its route table");
                 assert_eq!(pbr_install_table, native_identity);
                 let stamp = crate::afxdp::forwarding::install_table_stamp_for_miss(
                     Some(pbr_install_table),
@@ -3337,9 +3374,8 @@ fn static_pbr_local_session_tracks_retarget_and_address_removal_12056() {
                 .unwrap_or_else(|| {
                     panic!("local miss arm must match: v6={v6}, proto={proto}, interface_nat={interface_nat}")
                 });
-                let pbr_install_table =
-                    miss_install_table_12056(&forwarding, &flow, v6)
-                        .expect("static PBR miss must select its route table");
+                let pbr_install_table = miss_install_table_12056(&forwarding, &flow, v6)
+                    .expect("static PBR miss must select its route table");
                 assert_eq!(pbr_install_table, blue_identity);
                 let stamp = crate::afxdp::forwarding::install_table_stamp_for_miss(
                     Some(pbr_install_table),
@@ -3600,9 +3636,8 @@ fn removing_static_pbr_revalidates_local_session_under_native_ri_12056() {
     )
     .expect("WAN SNAT destination must use the interface-NAT local arm");
     assert_eq!(local.local_ifindex, 12);
-    let pbr_install_table =
-        miss_install_table_12056(&forwarding, &flow, false)
-            .expect("matching green PBR term must select its table");
+    let pbr_install_table = miss_install_table_12056(&forwarding, &flow, false)
+        .expect("matching green PBR term must select its table");
     assert_eq!(
         pbr_install_table,
         crate::session::install_table_identity("green")
@@ -3629,7 +3664,10 @@ fn removing_static_pbr_revalidates_local_session_under_native_ri_12056() {
     let native = forwarding_with_ri_local_12056(false, true, None, "green", true);
     let native_identity =
         miss_install_table_12056(&native, &flow, false).expect("native RI must select blue");
-    assert_eq!(native_identity, crate::session::install_table_identity("blue"));
+    assert_eq!(
+        native_identity,
+        crate::session::install_table_identity("blue")
+    );
     let route = revalidate_static_pbr_route_on_session_hit(
         &native,
         &std::sync::Arc::new(ShardedNeighborMap::new()),
@@ -3648,7 +3686,10 @@ fn removing_static_pbr_revalidates_local_session_under_native_ri_12056() {
         (route.install_table_domain, route.install_table_check),
         crate::session::install_table_identity("blue")
     );
-    assert_eq!(route.resolution.disposition, crate::afxdp::ForwardingDisposition::NoRoute);
+    assert_eq!(
+        route.resolution.disposition,
+        crate::afxdp::ForwardingDisposition::NoRoute
+    );
 }
 
 /// #12056: a firewall-local address on a DIFFERENT interface is reached
@@ -3669,13 +3710,13 @@ fn unchanged_non_ingress_fib_local_session_is_not_revoked_12056() {
     flow.forward_key.dst_ip = flow.dst_ip;
     flow.forward_key.routing_domain = 0;
     let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
-    let resolution =
-        crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
-            &forwarding,
-            &neighbors,
-            flow.dst_ip,
-            None,
-        ).resolution;
+    let resolution = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+        &forwarding,
+        &neighbors,
+        flow.dst_ip,
+        None,
+    )
+    .resolution;
     assert_eq!(
         resolution.disposition,
         crate::afxdp::ForwardingDisposition::LocalDelivery,

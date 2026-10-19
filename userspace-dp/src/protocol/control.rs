@@ -1208,6 +1208,13 @@ pub(crate) struct SessionSyncRequest {
     pub fabric_ingress: bool,
     #[serde(rename = "is_reverse", default)]
     pub is_reverse: bool,
+    /// #15176: this node's resolved logical NAT-scope ifindex for the
+    /// imported session (Go resolves the cluster-stable fold to a local
+    /// logical unit before building this request). 0 = no scope recorded
+    /// (legacy peer / unfoldable / fabric): revalidation declines to
+    /// revoke on scope grounds. Additive, rolling-upgrade safe.
+    #[serde(rename = "nat_scope_ifindex", default)]
+    pub nat_scope_ifindex: i32,
     /// #2785: the admitting policy's per-policy `then log` selection,
     /// carried so a session synced to this node logs the same RT_FLOW
     /// SESSION_CREATE/CLOSE records after failover. `serde(default)` =>

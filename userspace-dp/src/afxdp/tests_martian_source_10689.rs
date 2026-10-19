@@ -300,6 +300,7 @@ fn transit_martian_source_gate_drops_preexisting_session_hit_10689() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         SessionOrigin::ForwardFlow,
         122_000_000_000,

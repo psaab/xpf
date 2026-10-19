@@ -50,6 +50,7 @@ fn session_entry() -> SyncedSessionEntry {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,

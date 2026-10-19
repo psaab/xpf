@@ -11,8 +11,8 @@
 // would let the two files disagree about what a forward/reverse pair looks
 // like, and the whole subject of that file is how the two halves interact.
 
-use crate::test_zone_ids::*;
 use super::*;
+use crate::test_zone_ids::*;
 // #2005 split: the timer-wheel constants used by the GC tests below were
 // previously reachable via `super::*` through mod.rs's explicit
 // `use wheel::{...}` re-export. mod.rs no longer imports them directly
@@ -33,8 +33,8 @@ pub(in crate::session) fn key_v4() -> SessionKey {
         dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
         src_port: 12345,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -46,8 +46,8 @@ fn key_v6() -> SessionKey {
         dst_ip: IpAddr::V6("2606:4700:4700::1111".parse::<Ipv6Addr>().expect("v6 dst")),
         src_port: 5555,
         dst_port: 53,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -95,6 +95,7 @@ pub(in crate::session) fn metadata() -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -102,14 +103,7 @@ pub(in crate::session) fn metadata() -> SessionMetadata {
 fn expiry_probe_classifies_live_idle_crossed_and_absent_13078() {
     let mut table = SessionTable::new();
     let key = key_v4();
-    assert!(table.install_with_protocol(
-        key.clone(),
-        decision(),
-        metadata(),
-        10,
-        PROTO_TCP,
-        0,
-    ));
+    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), 10, PROTO_TCP, 0,));
 
     assert!(matches!(
         table.probe_with_origin_expiry(&key, 10),
@@ -263,14 +257,7 @@ fn open_delta_keeps_policy_generation_paired_with_admission_id_11698() {
     let mut md = metadata();
     md.policy_id = 77;
     md.log_session_init = true;
-    assert!(table.install_with_protocol(
-        key_v4(),
-        decision(),
-        md,
-        1_000,
-        PROTO_TCP,
-        TCP_SYN,
-    ));
+    assert!(table.install_with_protocol(key_v4(), decision(), md, 1_000, PROTO_TCP, TCP_SYN,));
 
     // A queued Open must keep the generation under which its frozen numeric
     // policy ID was captured, even if the worker observes a newer generation
@@ -379,8 +366,8 @@ pub(in crate::session) fn tcp_key_v6() -> SessionKey {
         dst_ip: IpAddr::V6("2606:4700:4700::1111".parse::<Ipv6Addr>().expect("v6 dst")),
         src_port: 51000,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -437,14 +424,7 @@ fn session_lookup_hits_after_install() {
     let mut table = SessionTable::new();
     let key = key_v4();
     let now = 1_000_000_000u64;
-    assert!(table.install_with_protocol(
-        key.clone(),
-        decision(),
-        metadata(),
-        now,
-        PROTO_TCP,
-        0x10
-    ));
+    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_TCP, 0x10));
     let hit = table.lookup(&key, now + 1_000_000, 0x10);
     assert_eq!(
         hit,
@@ -452,7 +432,7 @@ fn session_lookup_hits_after_install() {
             decision: decision(),
             metadata: metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
-                aux: SessionLookupAux {
+            aux: SessionLookupAux {
                 session_id: 1,
                 ..SessionLookupAux::default()
             },
@@ -523,12 +503,17 @@ fn missing_neighbor_and_fabric_punt_seed_delta_origins_13974() {
     ));
     let deltas = table.drain_deltas(8);
     assert_eq!(
-        deltas.iter().filter(|d| d.origin == SessionOrigin::MissingNeighborSeed).count(),
+        deltas
+            .iter()
+            .filter(|d| d.origin == SessionOrigin::MissingNeighborSeed)
+            .count(),
         1,
         "missing-neighbor seeds emit one local telemetry Open (#13974); fabric-punt seeds stay silent"
     );
     assert!(
-        deltas.iter().all(|d| d.origin != SessionOrigin::FabricPuntSeed),
+        deltas
+            .iter()
+            .all(|d| d.origin != SessionOrigin::FabricPuntSeed),
         "fabric-punt seeds must not enter the delta stream"
     );
 }
@@ -566,14 +551,7 @@ fn session_expire_removes_stale_entries() {
     let mut table = SessionTable::new();
     let key = key_v6();
     let then = 1_000_000_000u64;
-    assert!(table.install_with_protocol(
-        key.clone(),
-        decision(),
-        metadata(),
-        then,
-        PROTO_UDP,
-        0
-    ));
+    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), then, PROTO_UDP, 0));
     let _ = table.drain_deltas(8);
     table.last_gc_ns = then + 118_000_000_000;
     let expired = table.expire_stale(then + 120_000_000_000);
@@ -603,8 +581,16 @@ fn session_id_is_stable_across_open_and_close() {
     assert!(table.install_with_protocol(b.clone(), decision(), metadata(), t0, PROTO_UDP, 0));
     let opens = table.drain_deltas(8);
     assert_eq!(opens.len(), 2);
-    let a_open_id = opens.iter().find(|d| d.key == a).expect("a open").session_id;
-    let b_open_id = opens.iter().find(|d| d.key == b).expect("b open").session_id;
+    let a_open_id = opens
+        .iter()
+        .find(|d| d.key == a)
+        .expect("a open")
+        .session_id;
+    let b_open_id = opens
+        .iter()
+        .find(|d| d.key == b)
+        .expect("b open")
+        .session_id;
     assert_ne!(a_open_id, 0, "a real session id must never be 0");
     assert_ne!(b_open_id, 0, "a real session id must never be 0");
     assert_ne!(
@@ -887,8 +873,14 @@ fn synced_import_adopts_peer_session_id_5212() {
         false,
     ));
     let local_id = table.session_id_for(&key2);
-    assert_ne!(local_id, 0, "a zero wire id must fall back to a fresh non-zero local id");
-    assert_ne!(local_id, peer_id, "the fallback must be a fresh LOCAL id, not the peer's");
+    assert_ne!(
+        local_id, 0,
+        "a zero wire id must fall back to a fresh non-zero local id"
+    );
+    assert_ne!(
+        local_id, peer_id,
+        "the fallback must be a fresh LOCAL id, not the peer's"
+    );
     assert_eq!(
         local_id >> 48,
         2,
@@ -995,7 +987,10 @@ fn symmetric_flow_unaffected_by_companion_retention() {
     let now = then + 1_810_000_000_000;
     table.last_gc_ns = now - 2_000_000_000;
     let expired = table.expire_stale_entries(now);
-    assert!(expired.is_empty(), "an actively-forwarding flow must not reap");
+    assert!(
+        expired.is_empty(),
+        "an actively-forwarding flow must not reap"
+    );
     assert_eq!(table.len(), 2, "both halves survive a symmetric flow");
     assert_eq!(
         table.last_pop_stats().kept_alive_by_companion,
@@ -1114,6 +1109,7 @@ fn metadata_with_app_timeout(ns: u64) -> SessionMetadata {
         inactivity_timeout_ns: Some(ns),
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
         ..metadata()
     }
 }
@@ -1129,7 +1125,10 @@ fn session_timeout_ns_honors_app_override() {
 
     // ESTABLISHED TCP (ACK, not closing): override wins; None -> global.
     // #3527: the opening override (6th arg) never touches the established branch.
-    assert_eq!(session_timeout_ns(PROTO_TCP, 0x10, true, &to, Some(app), None), app);
+    assert_eq!(
+        session_timeout_ns(PROTO_TCP, 0x10, true, &to, Some(app), None),
+        app
+    );
     assert_eq!(
         session_timeout_ns(PROTO_TCP, 0x10, true, &to, None, None),
         DEFAULT_TCP_SESSION_TIMEOUT_NS
@@ -1137,7 +1136,14 @@ fn session_timeout_ns_honors_app_override() {
     // #3152: OPENING TCP (handshake incomplete): the short opening window,
     // regardless of any per-app override (which is the established idle value).
     assert_eq!(
-        session_timeout_ns(PROTO_TCP, crate::tcp_flags::TCP_SYN, false, &to, Some(app), None),
+        session_timeout_ns(
+            PROTO_TCP,
+            crate::tcp_flags::TCP_SYN,
+            false,
+            &to,
+            Some(app),
+            None
+        ),
         DEFAULT_TCP_OPENING_TIMEOUT_NS
     );
     assert_eq!(
@@ -1189,7 +1195,14 @@ fn session_timeout_ns_honors_app_override() {
         "promoted other-protocol flow must use the per-app override"
     );
     assert_eq!(
-        session_timeout_ns(crate::ip_proto::PROTO_GRE, 0, true, &to, Some(other_app), None),
+        session_timeout_ns(
+            crate::ip_proto::PROTO_GRE,
+            0,
+            true,
+            &to,
+            Some(other_app),
+            None
+        ),
         other_app
     );
     // Closing/RST TCP: the override never extends the short reap window
@@ -1216,7 +1229,14 @@ fn session_timeout_ns_honors_opening_override() {
 
     // OPENING TCP (bare SYN): the per-zone override replaces the 20 s default.
     assert_eq!(
-        session_timeout_ns(PROTO_TCP, crate::tcp_flags::TCP_SYN, false, &to, None, Some(zone_opening)),
+        session_timeout_ns(
+            PROTO_TCP,
+            crate::tcp_flags::TCP_SYN,
+            false,
+            &to,
+            None,
+            Some(zone_opening)
+        ),
         zone_opening,
         "an OPENING half-open session must reap on the per-zone syn-flood timeout"
     );
@@ -1331,8 +1351,8 @@ fn make_v4_key(src_octet: u8, port: u16) -> SessionKey {
         dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
         src_port: port,
         dst_port: 53,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -1589,14 +1609,7 @@ fn wheel_sustained_overload_drains_all_buckets() {
     // same install_ns so they share an expiration tick.
     for i in 0..N {
         let k = make_v4_key((i % 250) as u8, 1024 + (i / 250) as u16);
-        assert!(table.install_with_protocol(
-            k,
-            decision(),
-            metadata(),
-            install_ns,
-            PROTO_UDP,
-            0
-        ));
+        assert!(table.install_with_protocol(k, decision(), metadata(), install_ns, PROTO_UDP, 0));
     }
     let advance = install_ns + 65 * WHEEL_TICK_NS;
     table.last_gc_ns = advance - SESSION_GC_INTERVAL_NS;
@@ -1625,8 +1638,8 @@ fn wheel_alias_lookup_refreshes_canonical_key() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 255, 192, 42)),
         src_port: 5201,
         dst_port: 42424,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let alias_key = SessionKey {
         addr_family: 2,
@@ -1635,15 +1648,20 @@ fn wheel_alias_lookup_refreshes_canonical_key() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
         src_port: 5201,
         dst_port: 42424,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let mut reverse_metadata = metadata();
     reverse_metadata.is_reverse = true;
-    let nat = SessionDecision { resolution: resolution(), nat: NatDecision {
-        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let nat = SessionDecision {
+        resolution: resolution(),
+        nat: NatDecision {
+            rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let install_ns = 1_000_000_000u64;
     assert!(table.install_with_protocol(
         canonical_key.clone(),
@@ -1935,14 +1953,9 @@ fn take_synced_local_only_removes_helper_local_sessions() {
     assert_eq!(removed.metadata, local_metadata);
     assert!(table.lookup(&key, now + 1_000_000, 0x10).is_none());
 
-    assert!(table.install_with_protocol(
-        key.clone(),
-        decision(),
-        metadata(),
-        now,
-        PROTO_TCP,
-        0x10,
-    ));
+    assert!(
+        table.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_TCP, 0x10,)
+    );
     assert!(table.take_synced_local(&key).is_none());
     assert!(table.lookup(&key, now + 1_000_000, 0x10).is_some());
 }
@@ -1952,14 +1965,7 @@ fn tcp_fin_keeps_session_until_closing_timeout() {
     let mut table = SessionTable::new();
     let key = key_v4();
     let now = 1_000_000_000u64;
-    assert!(table.install_with_protocol(
-        key.clone(),
-        decision(),
-        metadata(),
-        now,
-        PROTO_TCP,
-        0x10
-    ));
+    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_TCP, 0x10));
     let _ = table.drain_deltas(8);
     let hit = table.lookup(&key, now + 1_000_000, TCP_FIN);
     assert_eq!(
@@ -1968,7 +1974,7 @@ fn tcp_fin_keeps_session_until_closing_timeout() {
             decision: decision(),
             metadata: metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
-                aux: SessionLookupAux {
+            aux: SessionLookupAux {
                 session_id: 1,
                 ..SessionLookupAux::default()
             },
@@ -1978,7 +1984,10 @@ fn tcp_fin_keeps_session_until_closing_timeout() {
     // the peer's copy reaps on the same window.
     let closing = table.drain_deltas(8);
     assert_eq!(
-        closing.iter().map(|d| (d.kind, d.tcp_close_class)).collect::<Vec<_>>(),
+        closing
+            .iter()
+            .map(|d| (d.kind, d.tcp_close_class))
+            .collect::<Vec<_>>(),
         vec![(SessionDeltaKind::Update, 1)]
     );
     assert!(table.lookup(&key, now + 2_000_000, 0x10).is_some());
@@ -2013,14 +2022,7 @@ fn tcp_rst_uses_short_timeout_not_fin_timeout() {
     // --- RST path: short timeout ---
     let mut table = SessionTable::new();
     let key = key_v4();
-    assert!(table.install_with_protocol(
-        key.clone(),
-        decision(),
-        metadata(),
-        now,
-        PROTO_TCP,
-        0x10
-    ));
+    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_TCP, 0x10));
     let _ = table.drain_deltas(8);
     assert!(table.lookup(&key, now + 1_000_000, TCP_RST).is_some());
     let rst_entry = table.entry_by_key(&key).expect("rst entry");
@@ -2046,7 +2048,10 @@ fn tcp_rst_uses_short_timeout_not_fin_timeout() {
     assert!(table2.lookup(&key2, now + 1_000_000, TCP_FIN).is_some());
     let fin_entry = table2.entry_by_key(&key2).expect("fin entry");
     assert!(fin_entry.closing, "FIN must mark the session closing");
-    assert!(!fin_entry.reset, "FIN-only close must NOT set the reset flag");
+    assert!(
+        !fin_entry.reset,
+        "FIN-only close must NOT set the reset flag"
+    );
     assert_eq!(
         fin_entry.expires_after_ns, TCP_CLOSING_TIMEOUT_NS,
         "FIN-only close must keep the 30s graceful close timeout"
@@ -2078,7 +2083,9 @@ fn tcp_rst_uses_short_timeout_not_fin_timeout() {
         tcp_flags: TCP_FIN,
     };
     assert!(table.update_session(fin_req, false));
-    let after_update = table.entry_by_key(&key).expect("entry after update_session");
+    let after_update = table
+        .entry_by_key(&key)
+        .expect("entry after update_session");
     assert!(
         after_update.reset,
         "reset must stay sticky across an update_session refresh"
@@ -2135,7 +2142,10 @@ fn closing_flag_is_sticky_across_nonclosing_update() {
     assert!(table.update_session(fin_req, false));
     let after_fin = table.entry_by_key(&key).expect("entry after FIN");
     assert!(after_fin.closing, "FIN must mark the session closing");
-    assert!(!after_fin.reset, "FIN-only close must not set the reset flag");
+    assert!(
+        !after_fin.reset,
+        "FIN-only close must not set the reset flag"
+    );
     assert_eq!(
         after_fin.expires_after_ns, TCP_CLOSING_TIMEOUT_NS,
         "a FIN'd session must use the 30s close window"
@@ -2279,8 +2289,14 @@ fn update_session_mirrors_handshake_transitions_13678() {
         false
     ));
     let after_ack = table.entry_by_key(&key).expect("entry after ACK");
-    assert!(!after_ack.handshake_pending, "#13678: completing ACK must clear pending");
-    assert!(!after_ack.syn_ack_first, "#13678: completing ACK must clear syn_ack_first");
+    assert!(
+        !after_ack.handshake_pending,
+        "#13678: completing ACK must clear pending"
+    );
+    assert!(
+        !after_ack.syn_ack_first,
+        "#13678: completing ACK must clear syn_ack_first"
+    );
     assert!(!table.pressure_shed_openings.contains_key(&key));
     assert_eq!(
         after_ack.expires_after_ns, table.timeouts.tcp_established_ns,
@@ -2326,8 +2342,14 @@ fn promote_synced_clears_syn_ack_first_pending_13678() {
         tcp_flags: TCP_ACK,
     }));
     let after = table.entry_by_key(&key).expect("entry after promote");
-    assert!(!after.handshake_pending, "#13678: promote must clear pending on completion");
-    assert!(!after.syn_ack_first, "#13678: promote must clear syn_ack_first on completion");
+    assert!(
+        !after.handshake_pending,
+        "#13678: promote must clear pending on completion"
+    );
+    assert!(
+        !after.syn_ack_first,
+        "#13678: promote must clear syn_ack_first on completion"
+    );
     assert_eq!(table.handshake_state_wire_for(&key), 4);
     assert_eq!(
         after.expires_after_ns, table.timeouts.tcp_established_ns,
@@ -2342,8 +2364,7 @@ fn reverse_ack_completion_removes_pressure_shed_entry_13678() {
     let now = 1_000_000_000u64;
     let mut table = SessionTable::new();
     let forward = key_v4();
-    let reverse =
-        install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN | TCP_ACK);
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN | TCP_ACK);
     assert!(table.pressure_shed_openings.contains_key(&forward));
 
     let mut reverse_meta = metadata();
@@ -2420,7 +2441,12 @@ fn update_session_reverse_synack_does_not_repend_established_13677() {
         PROTO_TCP,
         TCP_ACK,
     ));
-    assert!(table.entry_by_key(&key).expect("established entry").established);
+    assert!(
+        table
+            .entry_by_key(&key)
+            .expect("established entry")
+            .established
+    );
 
     let mut reverse_meta = metadata();
     reverse_meta.is_reverse = true;
@@ -2485,10 +2511,13 @@ fn update_session_completion_requires_valid_ack_13676() {
                 protocol: PROTO_TCP,
                 tcp_flags: bad_flags,
             },
-            false
+            false,
         );
         assert!(
-            table.entry_by_key(&key).expect("pending session").handshake_pending,
+            table
+                .entry_by_key(&key)
+                .expect("pending session")
+                .handshake_pending,
             "#13676: {name} ({bad_flags:#x}) completed the normal handshake"
         );
     }
@@ -2523,7 +2552,6 @@ fn update_session_completion_requires_valid_ack_13676() {
         assert!(!entry.established && entry.handshake_pending && entry.syn_ack_first);
     }
 }
-
 
 /// #3152 FAIL-ON-REVERT: a TCP session created by a bare SYN (SYN set, ACK
 /// clear) must start in the OPENING (half-open) state and take the short
@@ -2574,8 +2602,18 @@ fn tcp_handshake_promotes_opening_to_established() {
     // 1) Opening SYN installs BOTH the forward entry and its reverse companion;
     //    a bare SYN starts both OPENING.
     let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
-    assert!(!table.entry_by_key(&forward).expect("opening fwd").established);
-    assert!(!table.entry_by_key(&reverse).expect("opening rev").established);
+    assert!(
+        !table
+            .entry_by_key(&forward)
+            .expect("opening fwd")
+            .established
+    );
+    assert!(
+        !table
+            .entry_by_key(&reverse)
+            .expect("opening rev")
+            .established
+    );
     // 2) Reverse SYN-ACK (server's handshake response, carries ACK on the
     //    reverse half). It promotes the reverse companion AND, via #4109
     //    companion propagation, the forward entry.
@@ -2646,12 +2684,7 @@ fn forward_ack_without_reverse_synack_stays_opening(forward: SessionKey) {
         "a half-open session pinged by a client-only ACK stays on the short opening window"
     );
     // The reverse companion, never having seen a reply, is likewise OPENING.
-    assert!(
-        !table
-            .entry_by_key(&reverse)
-            .expect("rev entry")
-            .established
-    );
+    assert!(!table.entry_by_key(&reverse).expect("rev entry").established);
     // Reap proof: past the 20s opening window both halves reap — neither pinned
     // the 300s established window.
     let advance = now + 25 * WHEEL_TICK_NS;
@@ -2783,7 +2816,10 @@ fn unidirectional_fin_reaps_both_companions(forward: SessionKey) {
     // A FIN arrives on the FORWARD direction only.
     assert!(table.lookup(&forward, now + 1_000_000, TCP_FIN).is_some());
     let fwd = table.entry_by_key(&forward).expect("fwd after fin");
-    assert!(fwd.closing && !fwd.reset, "matched half is FIN-closing, not reset");
+    assert!(
+        fwd.closing && !fwd.reset,
+        "matched half is FIN-closing, not reset"
+    );
     assert_eq!(fwd.expires_after_ns, TCP_CLOSING_TIMEOUT_NS);
     // The reverse companion inherits the FIN close window (#4109 F17).
     let rev = table.entry_by_key(&reverse).expect("rev after fin");
@@ -2828,7 +2864,12 @@ fn established_flow_forward_ack_unaffected() {
     let now = 1_000_000_000u64;
     // First packet carries ACK (mid-stream pickup) → ESTABLISHED at install.
     let _reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_ACK);
-    assert!(table.entry_by_key(&forward).expect("established").established);
+    assert!(
+        table
+            .entry_by_key(&forward)
+            .expect("established")
+            .established
+    );
     // A later forward data-ACK keeps it established on the 300s window.
     assert!(table.lookup(&forward, now + 1_000_000, TCP_ACK).is_some());
     let entry = table.entry_by_key(&forward).expect("still established");
@@ -2904,6 +2945,7 @@ fn metadata_with_zone(zone: u16) -> SessionMetadata {
         ingress_vlan_id: 0,
         forward_ingress_vlan_id: None,
         ingress_zone: zone,
+        nat_scope_ifindex: None,
         ..metadata()
     }
 }
@@ -2973,7 +3015,10 @@ fn per_zone_syn_flood_timeout_reaps_half_open_on_override() {
         TCP_SYN,
     ));
     assert_eq!(
-        table2.entry_by_key(&key2).expect("opening").expires_after_ns,
+        table2
+            .entry_by_key(&key2)
+            .expect("opening")
+            .expires_after_ns,
         DEFAULT_TCP_OPENING_TIMEOUT_NS,
         "an unscreened zone keeps the global opening window"
     );
@@ -3010,7 +3055,10 @@ fn per_zone_syn_flood_timeout_applies_on_opening_refresh() {
     // SYN retransmit (still OPENING, no ACK) — the refresh re-stamps the window.
     assert!(table.lookup(&key, now + 1_000_000, TCP_SYN).is_some());
     let entry = table.entry_by_key(&key).expect("still opening");
-    assert!(!entry.established, "a SYN retransmit keeps the session OPENING");
+    assert!(
+        !entry.established,
+        "a SYN retransmit keeps the session OPENING"
+    );
     assert_eq!(
         entry.expires_after_ns, override_ns,
         "an OPENING refresh must re-stamp the per-zone override, not the global default"
@@ -3097,7 +3145,7 @@ fn synced_sessions_do_not_emit_deltas() {
             decision: decision(),
             metadata: synced_meta,
             forwarding_generation: ForwardingGenerationStamp::default(),
-                aux: SessionLookupAux {
+            aux: SessionLookupAux {
                 session_id: 1,
                 ..SessionLookupAux::default()
             },
@@ -3144,7 +3192,6 @@ fn upsert_synced_does_not_clobber_live_local_session() {
         .expect("live session");
     assert_eq!(hit.metadata, live);
     assert_eq!(hit.decision, decision());
-
 }
 
 #[test]
@@ -3210,7 +3257,7 @@ fn promote_synced_forward_session_emits_open_delta() {
             decision: decision(),
             metadata: promoted.clone(),
             forwarding_generation: ForwardingGenerationStamp::default(),
-                aux: SessionLookupAux {
+            aux: SessionLookupAux {
                 session_id: 1,
                 ..SessionLookupAux::default()
             },
@@ -3257,7 +3304,7 @@ fn promote_synced_reverse_session_stays_quiet() {
             decision: decision(),
             metadata: promoted,
             forwarding_generation: ForwardingGenerationStamp::default(),
-                aux: SessionLookupAux {
+            aux: SessionLookupAux {
                 session_id: 1,
                 ..SessionLookupAux::default()
             },
@@ -3480,12 +3527,7 @@ fn demote_then_refresh_preserves_replica_origin_10366() {
     ));
 
     assert_eq!(table.demote_owner_rg(1), vec![key.clone()]);
-    assert!(table.refresh_for_ha_transition(
-        &key,
-        decision(),
-        meta,
-        now + 1_000_000,
-    ));
+    assert!(table.refresh_for_ha_transition(&key, decision(), meta, now + 1_000_000,));
     let (_, _, origin) = table
         .entry_with_origin(&key)
         .expect("demoted replica survives refresh");
@@ -3507,14 +3549,7 @@ fn demoted_live_local_rows_kept_10366() {
     let key = key_v4();
     let mut meta = metadata();
     meta.owner_rg_id = 1;
-    assert!(table.install_with_protocol(
-        key.clone(),
-        decision(),
-        meta,
-        now,
-        PROTO_TCP,
-        0x10,
-    ));
+    assert!(table.install_with_protocol(key.clone(), decision(), meta, now, PROTO_TCP, 0x10,));
     assert_eq!(table.demote_owner_rg(1), vec![key.clone()]);
     let (_, _, origin) = table
         .entry_with_origin(&key)
@@ -3638,12 +3673,7 @@ fn demote_reactivate_transient_seeds_stay_local_10402() {
 
     table.activate_owner_rgs(&[1]);
     assert!(
-        table.refresh_for_ha_transition(
-            &seed_key,
-            decision(),
-            seed_metadata,
-            now + 1_000_000,
-        ),
+        table.refresh_for_ha_transition(&seed_key, decision(), seed_metadata, now + 1_000_000,),
         "HA transition refresh must refresh the held seed"
     );
     assert!(
@@ -3734,8 +3764,8 @@ fn reply_match_finds_tcp_snat_reverse_tuple() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 42424,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let reply = SessionKey {
         addr_family: 2,
@@ -3744,8 +3774,8 @@ fn reply_match_finds_tcp_snat_reverse_tuple() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
         src_port: 5201,
         dst_port: 42424,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     assert!(reply_matches_forward_session(
         &forward,
@@ -3767,8 +3797,8 @@ fn reply_match_finds_icmp_snat_reverse_tuple() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 0x1234,
         dst_port: 0,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let reply = SessionKey {
         addr_family: 2,
@@ -3777,8 +3807,8 @@ fn reply_match_finds_icmp_snat_reverse_tuple() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
         src_port: 0x1234,
         dst_port: 0,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     assert!(reply_matches_forward_session(
         &forward,
@@ -3801,8 +3831,8 @@ fn find_forward_nat_match_uses_reverse_index() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 42424,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let reply = SessionKey {
         addr_family: 2,
@@ -3811,8 +3841,8 @@ fn find_forward_nat_match_uses_reverse_index() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
         src_port: 5201,
         dst_port: 42424,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let nat = NatDecision {
         rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
@@ -3841,7 +3871,11 @@ fn find_forward_nat_match_uses_reverse_index() {
     assert_eq!(hit.decision.nat, nat);
 
     table.delete(&hit.key);
-    assert!(table.find_forward_nat_match(&reply, |_| reply.routing_domain).is_none());
+    assert!(
+        table
+            .find_forward_nat_match(&reply, |_| reply.routing_domain)
+            .is_none()
+    );
 }
 
 #[test]
@@ -3885,7 +3919,9 @@ fn find_forward_nat_match_does_not_borrow_main_for_quarantined_domain_11061() {
         TCP_ACK,
     ));
     assert!(
-        table.find_forward_nat_match(&reply, |_| reply.routing_domain).is_some(),
+        table
+            .find_forward_nat_match(&reply, |_| reply.routing_domain)
+            .is_some(),
         "the domain-0 control reply must still match its MAIN session"
     );
     let quarantined_reply = SessionKey {
@@ -3893,7 +3929,9 @@ fn find_forward_nat_match_does_not_borrow_main_for_quarantined_domain_11061() {
         ..reply
     };
     assert!(
-        table.find_forward_nat_match(&quarantined_reply, |_| quarantined_reply.routing_domain).is_none(),
+        table
+            .find_forward_nat_match(&quarantined_reply, |_| quarantined_reply.routing_domain)
+            .is_none(),
         "a stamped ambiguous-zone reply must not borrow a domain-0 NAT session"
     );
 }
@@ -4012,8 +4050,8 @@ fn find_forward_nat_match_uses_canonical_reverse_index() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 42424,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let canonical_reply = SessionKey {
         addr_family: 2,
@@ -4022,8 +4060,8 @@ fn find_forward_nat_match_uses_canonical_reverse_index() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
         src_port: 5201,
         dst_port: 42424,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let nat = NatDecision {
         rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
@@ -4051,7 +4089,11 @@ fn find_forward_nat_match_uses_canonical_reverse_index() {
     assert_eq!(hit.decision.nat, nat);
 
     table.delete(&hit.key);
-    assert!(table.find_forward_nat_match(&canonical_reply, |_| canonical_reply.routing_domain).is_none());
+    assert!(
+        table
+            .find_forward_nat_match(&canonical_reply, |_| canonical_reply.routing_domain)
+            .is_none()
+    );
 }
 
 #[test]
@@ -4063,8 +4105,8 @@ fn reverse_canonical_key_keeps_icmp_identifier_position() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 255, 192, 41)),
         src_port: 0x1234,
         dst_port: 0,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let reply = reverse_canonical_key(&forward, NatDecision::default());
     assert_eq!(reply.src_ip, IpAddr::V4(Ipv4Addr::new(10, 255, 192, 41)));
@@ -4083,8 +4125,8 @@ fn find_forward_nat_match_uses_canonical_reverse_index_for_icmp() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 255, 192, 41)),
         src_port: 0x1234,
         dst_port: 0,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let canonical_reply = SessionKey {
         addr_family: 2,
@@ -4093,8 +4135,8 @@ fn find_forward_nat_match_uses_canonical_reverse_index_for_icmp() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
         src_port: 0x1234,
         dst_port: 0,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let nat = NatDecision {
         rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 192, 42))),
@@ -4122,7 +4164,11 @@ fn find_forward_nat_match_uses_canonical_reverse_index_for_icmp() {
     assert_eq!(hit.decision.nat, nat);
 
     table.delete(&hit.key);
-    assert!(table.find_forward_nat_match(&canonical_reply, |_| canonical_reply.routing_domain).is_none());
+    assert!(
+        table
+            .find_forward_nat_match(&canonical_reply, |_| canonical_reply.routing_domain)
+            .is_none()
+    );
 }
 
 #[test]
@@ -4135,8 +4181,8 @@ fn find_forward_wire_match_uses_translated_forward_index() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 42528,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let translated = SessionKey {
         addr_family: 2,
@@ -4145,8 +4191,8 @@ fn find_forward_wire_match_uses_translated_forward_index() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 42528,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let nat = NatDecision {
         rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
@@ -4188,8 +4234,8 @@ fn lookup_uses_translated_reverse_alias() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 255, 192, 42)),
         src_port: 5201,
         dst_port: 42424,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let reverse_canonical = SessionKey {
         addr_family: 2,
@@ -4198,15 +4244,20 @@ fn lookup_uses_translated_reverse_alias() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
         src_port: 5201,
         dst_port: 42424,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let mut reverse_metadata = metadata();
     reverse_metadata.is_reverse = true;
-    let reverse_decision = SessionDecision { resolution: resolution(), nat: NatDecision {
-        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let reverse_decision = SessionDecision {
+        resolution: resolution(),
+        nat: NatDecision {
+            rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     assert!(table.install_with_protocol(
         reverse_wire.clone(),
         reverse_decision,
@@ -4286,7 +4337,12 @@ fn fib_route_and_policy_invalidation_resolve_reverse_translated_alias_12074() {
     current_route.tx_ifindex = 26;
     assert!(table.revalidate_forwarding_resolution(&reverse_alias, current_route, None));
     assert_eq!(
-        table.entry_with_origin(&reverse_wire).unwrap().0.resolution.egress_ifindex,
+        table
+            .entry_with_origin(&reverse_wire)
+            .unwrap()
+            .0
+            .resolution
+            .egress_ifindex,
         26,
         "a route refresh through a query alias must update the canonical row",
     );
@@ -4315,7 +4371,12 @@ fn reroute_rebinds_forward_egress_and_reverse_ingress_14318() {
     assert_eq!(rev.egress_zone, TEST_LAN_ZONE_ID);
     assert_eq!(fwd.ingress_zone, TEST_LAN_ZONE_ID);
     assert_eq!(
-        table.entry_with_origin(&forward).unwrap().0.resolution.egress_ifindex,
+        table
+            .entry_with_origin(&forward)
+            .unwrap()
+            .0
+            .resolution
+            .egress_ifindex,
         26
     );
 }
@@ -4329,11 +4390,17 @@ fn reroute_none_zone_preserves_recorded_zones_14318() {
     let mut new_res = decision().resolution;
     new_res.egress_ifindex = 26;
     table.set_forwarding_revalidation_gen(7, 10);
-    assert!(table.revalidate_forwarding_resolution_with_egress_zone(
-        &forward, new_res, None, None,
-    ));
-    assert_eq!(table.entry_with_origin(&forward).unwrap().1.egress_zone, TEST_WAN_ZONE_ID);
-    assert_eq!(table.entry_with_origin(&reverse).unwrap().1.ingress_zone, TEST_WAN_ZONE_ID);
+    assert!(
+        table.revalidate_forwarding_resolution_with_egress_zone(&forward, new_res, None, None,)
+    );
+    assert_eq!(
+        table.entry_with_origin(&forward).unwrap().1.egress_zone,
+        TEST_WAN_ZONE_ID
+    );
+    assert_eq!(
+        table.entry_with_origin(&reverse).unwrap().1.ingress_zone,
+        TEST_WAN_ZONE_ID
+    );
 }
 
 #[test]
@@ -4351,8 +4418,14 @@ fn reroute_via_reverse_hit_rebinds_pair_14318() {
         None,
         Some(TEST_DMZ_ZONE_ID),
     ));
-    assert_eq!(table.entry_with_origin(&forward).unwrap().1.egress_zone, TEST_DMZ_ZONE_ID);
-    assert_eq!(table.entry_with_origin(&reverse).unwrap().1.ingress_zone, TEST_DMZ_ZONE_ID);
+    assert_eq!(
+        table.entry_with_origin(&forward).unwrap().1.egress_zone,
+        TEST_DMZ_ZONE_ID
+    );
+    assert_eq!(
+        table.entry_with_origin(&reverse).unwrap().1.ingress_zone,
+        TEST_DMZ_ZONE_ID
+    );
 }
 
 #[test]
@@ -4365,8 +4438,8 @@ fn dnat_port_in_reverse_wire_key() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
         src_port: 54321,
         dst_port: 80,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let nat = NatDecision {
         rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
@@ -4381,8 +4454,8 @@ fn dnat_port_in_reverse_wire_key() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
         src_port: 8080,
         dst_port: 54321,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     assert!(reply_matches_forward_session(
         &forward,
@@ -4402,10 +4475,18 @@ fn dnat_plus_snat_ports_in_reverse_key() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
         src_port: 54321,
         dst_port: 80,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
-    let nat = NatDecision { rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))), rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))), rewrite_src_port: None, rewrite_dst_port: Some(8080), source_nat_icmp: None, nat64: false, nptv6: false };
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
+        rewrite_src_port: None,
+        rewrite_dst_port: Some(8080),
+        source_nat_icmp: None,
+        nat64: false,
+        nptv6: false,
+    };
     // Reply: internal:8080 -> egress:54321
     let expected_reply = SessionKey {
         addr_family: 2,
@@ -4414,8 +4495,8 @@ fn dnat_plus_snat_ports_in_reverse_key() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         src_port: 8080,
         dst_port: 54321,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     assert!(reply_matches_forward_session(
         &forward,
@@ -4434,8 +4515,8 @@ fn icmp_port_handling_unchanged_with_dnat_ports() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
         src_port: 0x1234,
         dst_port: 0,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let nat = NatDecision {
         rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
@@ -4450,8 +4531,8 @@ fn icmp_port_handling_unchanged_with_dnat_ports() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         src_port: 0x1234,
         dst_port: 0,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     assert!(reply_matches_forward_session(
         &forward,
@@ -4485,8 +4566,8 @@ fn icmp_query_id_translation_demuxes_reverse_wire_key() {
         dst_ip: target,
         src_port: query_id,
         dst_port: 0,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     // Distinct translated ids allocated by pool SNAT for the two hosts.
     let mk_nat = |translated_id: u16| NatDecision {
@@ -4525,8 +4606,8 @@ fn icmp_query_id_translation_demuxes_reverse_wire_key() {
         dst_ip: pool,
         src_port: 40001,
         dst_port: 0,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     assert!(reply_matches_forward_session(&fwd_a, nat_a, &reply_a));
     assert!(!reply_matches_forward_session(&fwd_b, nat_b, &reply_a));
@@ -4574,8 +4655,8 @@ fn icmp_query_id_zero_translation_demuxes_reverse_wire_key() {
         dst_ip: target,
         src_port: query_id,
         dst_port: 0,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let mk_nat = |translated_id: u16| NatDecision {
         rewrite_src: Some(pool),
@@ -4607,8 +4688,8 @@ fn icmp_query_id_zero_translation_demuxes_reverse_wire_key() {
         dst_ip: pool,
         src_port: 40001,
         dst_port: 0,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     assert!(reply_matches_forward_session(&fwd_a, nat_a, &reply_a));
     assert!(!reply_matches_forward_session(&fwd_b, nat_b, &reply_a));
@@ -4632,8 +4713,8 @@ fn find_forward_nat_match_with_dnat_port_rewrite() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
         src_port: 54321,
         dst_port: 80,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     // Reply from internal:8080 -> client:54321
     let reply = SessionKey {
@@ -4643,8 +4724,8 @@ fn find_forward_nat_match_with_dnat_port_rewrite() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
         src_port: 8080,
         dst_port: 54321,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let nat = NatDecision {
         rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
@@ -4673,7 +4754,11 @@ fn find_forward_nat_match_with_dnat_port_rewrite() {
     assert_eq!(hit.decision.nat, nat);
 
     table.delete(&hit.key);
-    assert!(table.find_forward_nat_match(&reply, |_| reply.routing_domain).is_none());
+    assert!(
+        table
+            .find_forward_nat_match(&reply, |_| reply.routing_domain)
+            .is_none()
+    );
 }
 
 #[test]
@@ -4682,14 +4767,9 @@ fn configurable_tcp_timeout_changes_session_expiry() {
     table.set_timeouts(SessionTimeouts::from_seconds(60, 0, 0));
     let key = key_v4();
     let now = 1_000_000_000u64;
-    assert!(table.install_with_protocol(
-        key.clone(),
-        decision(),
-        metadata(),
-        now,
-        PROTO_TCP,
-        0x10,
-    ));
+    assert!(
+        table.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_TCP, 0x10,)
+    );
     // Session should expire after 60s (configured), not 300s (default)
     table.last_gc_ns = now + 59_000_000_000;
     let expired = table.expire_stale(now + 59_000_000_000 + SESSION_GC_INTERVAL_NS);
@@ -4706,14 +4786,7 @@ fn configurable_udp_timeout_changes_session_expiry() {
     table.set_timeouts(SessionTimeouts::from_seconds(0, 120, 0));
     let key = key_v6();
     let now = 1_000_000_000u64;
-    assert!(table.install_with_protocol(
-        key.clone(),
-        decision(),
-        metadata(),
-        now,
-        PROTO_UDP,
-        0,
-    ));
+    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_UDP, 0,));
     // Should not expire at 60s (the old default)
     table.last_gc_ns = now + 61_000_000_000;
     let expired = table.expire_stale(now + 61_000_000_000 + SESSION_GC_INTERVAL_NS);
@@ -4976,7 +5049,10 @@ fn iter_with_idle_budgeted_bounds_and_resumes_full_coverage() {
     let mut table = SessionTable::new();
     const N: usize = 25;
     const BUDGET: usize = 8;
-    assert!(N > BUDGET, "test only meaningful when the table exceeds one slice");
+    assert!(
+        N > BUDGET,
+        "test only meaningful when the table exceeds one slice"
+    );
 
     let install_time = 1_000_000_000u64;
     let mut installed = std::collections::HashSet::new();
@@ -5001,12 +5077,13 @@ fn iter_with_idle_budgeted_bounds_and_resumes_full_coverage() {
     // Bounded loop guards against a non-advancing cursor hanging the test.
     for _ in 0..1024 {
         let mut this_slice = 0usize;
-        let next = table.iter_with_idle_budgeted(cursor, BUDGET, now, |k, _d, meta, _idle, _c, _exp| {
-            this_slice += 1;
-            if !meta.is_reverse {
-                seen.insert(k.clone());
-            }
-        });
+        let next =
+            table.iter_with_idle_budgeted(cursor, BUDGET, now, |k, _d, meta, _idle, _c, _exp| {
+                this_slice += 1;
+                if !meta.is_reverse {
+                    seen.insert(k.clone());
+                }
+            });
         // (1) Hard per-slice bound — THE fail-on-revert assertion. An unbounded
         // single pass processes all N (> BUDGET) entries in one call.
         assert!(
@@ -5218,8 +5295,12 @@ fn refresh_local_skips_peer_synced_entries() {
         0x10,
     ));
     let new_decision = SessionDecision {
-        resolution: ForwardingResolution { egress_ifindex: 99,
-        route_mtu: 0, transport_route_mtu: 0, ..decision().resolution },
+        resolution: ForwardingResolution {
+            egress_ifindex: 99,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+            ..decision().resolution
+        },
         ..decision()
     };
     // refresh_local should return false for peer-synced sessions
@@ -5245,8 +5326,12 @@ fn refresh_for_ha_activation_updates_peer_synced_entries() {
         0x10,
     ));
     let new_decision = SessionDecision {
-        resolution: ForwardingResolution { egress_ifindex: 99,
-        route_mtu: 0, transport_route_mtu: 0, ..decision().resolution },
+        resolution: ForwardingResolution {
+            egress_ifindex: 99,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+            ..decision().resolution
+        },
         ..decision()
     };
     // refresh_for_ha_activation should succeed even for peer-synced sessions
@@ -5329,25 +5414,24 @@ fn reference_update_session(
         && (!entry.established || entry.handshake_pending);
     let handshake_completed = !entry.closing
         && if entry.syn_ack_first {
-        matches!(protocol, PROTO_TCP)
-            && entry.handshake_pending
-            && metadata.is_reverse
-            && has_ack(tcp_flags)
-            && !has_syn(tcp_flags)
-            && !is_closing(tcp_flags)
-    } else {
-        matches!(protocol, PROTO_TCP)
-            && entry.handshake_pending
-            && !metadata.is_reverse
-            && has_ack(tcp_flags)
-            && !has_syn(tcp_flags)
-            && !is_closing(tcp_flags)
-    };
-    entry.established |=
-        reverse_syn_ack
-            || (!matches!(protocol, PROTO_TCP)
+            matches!(protocol, PROTO_TCP)
+                && entry.handshake_pending
                 && metadata.is_reverse
-                && metadata.inactivity_timeout_ns.is_some());
+                && has_ack(tcp_flags)
+                && !has_syn(tcp_flags)
+                && !is_closing(tcp_flags)
+        } else {
+            matches!(protocol, PROTO_TCP)
+                && entry.handshake_pending
+                && !metadata.is_reverse
+                && has_ack(tcp_flags)
+                && !has_syn(tcp_flags)
+                && !is_closing(tcp_flags)
+        };
+    entry.established |= reverse_syn_ack
+        || (!matches!(protocol, PROTO_TCP)
+            && metadata.is_reverse
+            && metadata.inactivity_timeout_ns.is_some());
     if reverse_syn_ack && !entry.syn_ack_first {
         entry.handshake_pending = true;
     }
@@ -5381,25 +5465,29 @@ fn reference_update_session(
         // #9412: production's promote stamps the entry's close class; mirror it.
         let tcp_close_class = table.close_class_wire_for(key);
         let tcp_handshake_state = table.handshake_state_wire_for(key);
-        table.push_delta(SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Open,
-        key: key.clone(),
-        decision,
-        metadata,
-        policy_generation: 0,
-        origin,
-        fabric_redirect_sync: false,
-        created_ns,
-        last_seen_ns: now_ns,
-        counters: SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id: 0,
-        bulk_resync: false,
-        is_admission: false,
-        tcp_close_class,
-        tcp_handshake_state,
-        pptp_call_ids: 0,
-        purge_retirement: false, source_nat_static: None });
+        table.push_delta(SessionDelta {
+            provenance: crate::session::ExportProvenance::Incremental,
+            kind: SessionDeltaKind::Open,
+            key: key.clone(),
+            decision,
+            metadata,
+            policy_generation: 0,
+            origin,
+            fabric_redirect_sync: false,
+            created_ns,
+            last_seen_ns: now_ns,
+            counters: SessionCounters::default(),
+            observed_tos: 0,
+            observed_tcp_flags: 0,
+            session_id: 0,
+            bulk_resync: false,
+            is_admission: false,
+            tcp_close_class,
+            tcp_handshake_state,
+            pptp_call_ids: 0,
+            purge_retirement: false,
+            source_nat_static: None,
+        });
     }
     true
 }
@@ -5443,12 +5531,19 @@ fn assert_tables_equiv(
 ) {
     assert_eq!(inplace.len(), reference.len(), "len mismatch");
     for k in keys {
-        assert!(entries_equiv(inplace, reference, k), "entry mismatch for {k:?}");
+        assert!(
+            entries_equiv(inplace, reference, k),
+            "entry mismatch for {k:?}"
+        );
     }
     for pk in probe_keys {
         assert_eq!(
-            inplace.find_forward_nat_match(pk, |_| pk.routing_domain).map(|m| m.key),
-            reference.find_forward_nat_match(pk, |_| pk.routing_domain).map(|m| m.key),
+            inplace
+                .find_forward_nat_match(pk, |_| pk.routing_domain)
+                .map(|m| m.key),
+            reference
+                .find_forward_nat_match(pk, |_| pk.routing_domain)
+                .map(|m| m.key),
             "find_forward_nat_match diverged for {pk:?}"
         );
         assert_eq!(
@@ -5481,11 +5576,16 @@ fn assert_tables_equiv(
 }
 
 fn nat_rewrite() -> SessionDecision {
-    SessionDecision { resolution: resolution(), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
-        rewrite_src_port: Some(40001),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
+            rewrite_src_port: Some(40001),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 /// Build two identical tables with `key` installed at the given origin.
@@ -5515,7 +5615,13 @@ fn two_tables_with(
 #[test]
 fn inplace_local_refresh_matches_reference() {
     let key = key_v4();
-    let (mut ip, mut rf) = two_tables_with(&key, decision(), metadata(), SessionOrigin::ForwardFlow, 1_000);
+    let (mut ip, mut rf) = two_tables_with(
+        &key,
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+    );
     let req = |now| SessionUpdate {
         key: &key,
         decision: decision(),
@@ -5533,7 +5639,13 @@ fn inplace_local_refresh_matches_reference() {
 #[test]
 fn inplace_peer_to_local_promote_matches_reference() {
     let key = key_v4();
-    let (mut ip, mut rf) = two_tables_with(&key, decision(), metadata(), SessionOrigin::SyncImport, 1_000);
+    let (mut ip, mut rf) = two_tables_with(
+        &key,
+        decision(),
+        metadata(),
+        SessionOrigin::SyncImport,
+        1_000,
+    );
     let req = SessionUpdate {
         key: &key,
         decision: decision(),
@@ -5553,7 +5665,13 @@ fn inplace_peer_to_local_promote_matches_reference() {
 #[test]
 fn inplace_peer_to_peer_reject_matches_reference() {
     let key = key_v4();
-    let (mut ip, mut rf) = two_tables_with(&key, decision(), metadata(), SessionOrigin::SyncImport, 1_000);
+    let (mut ip, mut rf) = two_tables_with(
+        &key,
+        decision(),
+        metadata(),
+        SessionOrigin::SyncImport,
+        1_000,
+    );
     let req = SessionUpdate {
         key: &key,
         decision: decision(),
@@ -5571,7 +5689,13 @@ fn inplace_peer_to_peer_reject_matches_reference() {
 #[test]
 fn inplace_local_from_peer_reject_matches_reference() {
     let key = key_v4();
-    let (mut ip, mut rf) = two_tables_with(&key, decision(), metadata(), SessionOrigin::ForwardFlow, 1_000);
+    let (mut ip, mut rf) = two_tables_with(
+        &key,
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+    );
     let req = SessionUpdate {
         key: &key,
         decision: decision(),
@@ -5589,7 +5713,13 @@ fn inplace_local_from_peer_reject_matches_reference() {
 #[test]
 fn inplace_ha_activation_matches_reference() {
     let key = key_v4();
-    let (mut ip, mut rf) = two_tables_with(&key, decision(), metadata(), SessionOrigin::SyncImport, 1_000);
+    let (mut ip, mut rf) = two_tables_with(
+        &key,
+        decision(),
+        metadata(),
+        SessionOrigin::SyncImport,
+        1_000,
+    );
     // ha_activation=true always applies regardless of origin.
     let req = SessionUpdate {
         key: &key,
@@ -5609,7 +5739,13 @@ fn inplace_ha_activation_matches_reference() {
 fn inplace_nat_reindex_matches_reference() {
     let key = key_v4();
     // baseline: default nat. refresh: nat rewrite -> reverse index keys change.
-    let (mut ip, mut rf) = two_tables_with(&key, decision(), metadata(), SessionOrigin::ForwardFlow, 1_000);
+    let (mut ip, mut rf) = two_tables_with(
+        &key,
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+    );
     let probe_old = reverse_wire_key(&key, NatDecision::default());
     let probe_new = reverse_wire_key(&key, nat_rewrite().nat);
     let req = SessionUpdate {
@@ -5623,7 +5759,13 @@ fn inplace_nat_reindex_matches_reference() {
     };
     assert!(ip.update_session(req.clone(), false));
     assert!(reference_update_session(&mut rf, req, false));
-    assert_tables_equiv(&mut ip, &mut rf, &[key.clone()], &[probe_old, probe_new], &[1, 2]);
+    assert_tables_equiv(
+        &mut ip,
+        &mut rf,
+        &[key.clone()],
+        &[probe_old, probe_new],
+        &[1, 2],
+    );
 }
 
 #[test]
@@ -5658,8 +5800,13 @@ fn inplace_reject_reasserts_displaced_collision_like_reference() {
     // remove+restore; in-place re-asserts via index_forward_nat_key_parts. Both
     // must re-win the slot identically.
     let key = key_v4();
-    let (mut ip, mut rf) =
-        two_tables_with(&key, decision(), metadata(), SessionOrigin::ForwardFlow, 1_000);
+    let (mut ip, mut rf) = two_tables_with(
+        &key,
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+    );
     let collide = reverse_wire_key(&key, NatDecision::default());
     for t in [&mut ip, &mut rf] {
         // #4399: overwrite the bucket with a bogus handle -> the real
@@ -5687,8 +5834,13 @@ fn inplace_reject_reasserts_displaced_collision_like_reference() {
 #[test]
 fn inplace_accept_reasserts_displaced_collision_like_reference() {
     let key = key_v4();
-    let (mut ip, mut rf) =
-        two_tables_with(&key, decision(), metadata(), SessionOrigin::ForwardFlow, 1_000);
+    let (mut ip, mut rf) = two_tables_with(
+        &key,
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+    );
     let collide = reverse_wire_key(&key, NatDecision::default());
     for t in [&mut ip, &mut rf] {
         // #4399: overwrite the bucket with a bogus handle -> displaced slot.
@@ -5732,10 +5884,22 @@ fn rig_stale_handle_table() -> (SessionTable, SessionKey, SessionKey) {
     let other = key_v6();
     let mut t = SessionTable::new();
     assert!(t.install_with_protocol_with_origin(
-        key.clone(), decision(), metadata(), SessionOrigin::ForwardFlow, 1_000, key.protocol, 0,
+        key.clone(),
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+        key.protocol,
+        0,
     ));
     assert!(t.install_with_protocol_with_origin(
-        other.clone(), decision(), metadata(), SessionOrigin::ForwardFlow, 1_000, other.protocol, 0,
+        other.clone(),
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+        other.protocol,
+        0,
     ));
     let other_handle = *t.key_to_handle.get(&other).expect("other handle");
     t.key_to_handle.insert(key.clone(), other_handle);
@@ -5796,7 +5960,9 @@ fn inplace_randomized_sequence_matches_reference() {
     // Deterministic LCG (Math.random is unavailable in this env; fixed seed).
     let mut state: u64 = 0x9E3779B97F4A7C15;
     let mut next = || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (state >> 33) as u32
     };
     let keys = [key_v4(), key_v6()];
@@ -5806,14 +5972,28 @@ fn inplace_randomized_sequence_matches_reference() {
     for t in [&mut ip, &mut rf] {
         for k in &keys {
             assert!(t.install_with_protocol_with_origin(
-                k.clone(), decision(), metadata(), SessionOrigin::ForwardFlow, 1_000, k.protocol, 0,
+                k.clone(),
+                decision(),
+                metadata(),
+                SessionOrigin::ForwardFlow,
+                1_000,
+                k.protocol,
+                0,
             ));
         }
     }
     for step in 0..400u64 {
         let k = &keys[(next() % 2) as usize];
-        let origin = if next() % 3 == 0 { SessionOrigin::SyncImport } else { SessionOrigin::ForwardFlow };
-        let dec = if next() % 4 == 0 { nat_rewrite() } else { decision() };
+        let origin = if next() % 3 == 0 {
+            SessionOrigin::SyncImport
+        } else {
+            SessionOrigin::ForwardFlow
+        };
+        let dec = if next() % 4 == 0 {
+            nat_rewrite()
+        } else {
+            decision()
+        };
         let mut md = metadata();
         md.owner_rg_id = (next() % 3) as i32; // 0,1,2
         md.is_reverse = next() % 5 == 0;
@@ -5888,12 +6068,19 @@ fn inplace_ha_transition_matches_reference() {
         m
     };
     for (dec, md) in [(decision(), metadata()), (nat_rewrite(), reindex_md)] {
-        let (mut ip, mut rf) =
-            two_tables_with(&key, decision(), metadata(), SessionOrigin::SyncImport, 1_000);
+        let (mut ip, mut rf) = two_tables_with(
+            &key,
+            decision(),
+            metadata(),
+            SessionOrigin::SyncImport,
+            1_000,
+        );
         let probe_old = reverse_wire_key(&key, NatDecision::default());
         let probe_new = reverse_wire_key(&key, dec.nat);
         assert!(ip.refresh_for_ha_transition(&key, dec, md.clone(), 2_000));
-        assert!(reference_refresh_for_ha_transition(&mut rf, &key, dec, md, 2_000));
+        assert!(reference_refresh_for_ha_transition(
+            &mut rf, &key, dec, md, 2_000
+        ));
         assert_tables_equiv(
             &mut ip,
             &mut rf,
@@ -5965,8 +6152,13 @@ fn inplace_fin_rst_closing_matches_reference() {
     // path writes them identically to the reference for both flags.
     let key = key_v4();
     for flags in [TCP_FIN, TCP_RST, TCP_FIN | TCP_RST] {
-        let (mut ip, mut rf) =
-            two_tables_with(&key, decision(), metadata(), SessionOrigin::ForwardFlow, 1_000);
+        let (mut ip, mut rf) = two_tables_with(
+            &key,
+            decision(),
+            metadata(),
+            SessionOrigin::ForwardFlow,
+            1_000,
+        );
         let req = SessionUpdate {
             key: &key,
             decision: decision(),
@@ -6000,10 +6192,15 @@ fn inplace_fin_rst_closing_matches_reference() {
 /// leave the source port untranslated (rewrite_src_port = None). This is
 /// the default SNAT mode and the #1758 reachable collision vector.
 fn iface_snat_decision(egress: Ipv4Addr) -> SessionDecision {
-    SessionDecision { resolution: resolution(), nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(egress)),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(egress)),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 #[test]
@@ -6185,7 +6382,9 @@ fn nat_reverse_1n_collision_preserves_displaced_return_path() {
     // multimap returns the first-installed S1 deterministically instead of
     // "whatever was written last".
     assert_eq!(
-        table.find_forward_nat_match(&reply, |_| reply.routing_domain).map(|m| m.key),
+        table
+            .find_forward_nat_match(&reply, |_| reply.routing_domain)
+            .map(|m| m.key),
         Some(s1.clone()),
         "reply on K resolves to the first-installed forward session",
     );
@@ -6201,7 +6400,9 @@ fn nat_reverse_1n_collision_preserves_displaced_return_path() {
         "delete removes only S2's handle; S1's entry remains in the bucket",
     );
     assert_eq!(
-        table.find_forward_nat_match(&reply, |_| reply.routing_domain).map(|m| m.key),
+        table
+            .find_forward_nat_match(&reply, |_| reply.routing_domain)
+            .map(|m| m.key),
         Some(s1.clone()),
         "surviving S1 must still resolve after the colliding S2 closes \
          (single-value map returned None here)",
@@ -6245,7 +6446,9 @@ fn nat_reverse_1n_delete_removes_specific_handle_not_the_key() {
     table.delete(&s1);
     assert_eq!(small_bucket_len(&table, &reply), 1);
     assert_eq!(
-        table.find_forward_nat_match(&reply, |_| reply.routing_domain).map(|m| m.key),
+        table
+            .find_forward_nat_match(&reply, |_| reply.routing_domain)
+            .map(|m| m.key),
         Some(s2.clone()),
         "surviving S2 resolves after the first-installed S1 closes",
     );
@@ -6274,7 +6477,9 @@ fn nat_reverse_1n_pool_snat_fast_path_stays_single_value() {
     );
     assert_eq!(table.nat_reverse_key_collisions(), 0, "no collision on PAT");
     assert_eq!(
-        table.find_forward_nat_match(&reply, |_| reply.routing_domain).map(|m| m.key),
+        table
+            .find_forward_nat_match(&reply, |_| reply.routing_domain)
+            .map(|m| m.key),
         Some(s1.clone()),
         "the pool-mode reply resolves through the single-value fast path",
     );
@@ -6561,10 +6766,15 @@ fn forward_wire_dnat_shared_backend_ambiguous_fails_closed_14382() {
 /// destination to a shared backend and a reverse metadata carrying the given
 /// `zone` (used only to distinguish which reverse session resolved).
 fn shared_backend_reverse(backend: IpAddr, zone: u16) -> (SessionDecision, SessionMetadata) {
-    let decision = SessionDecision { resolution: resolution(), nat: NatDecision {
-        rewrite_dst: Some(backend),
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: resolution(),
+        nat: NatDecision {
+            rewrite_dst: Some(backend),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let mut md = metadata();
     md.is_reverse = true;
     md.ingress_zone = zone;
@@ -6593,8 +6803,8 @@ fn reverse_translated_1n_collision_preserves_displaced_alias() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
         src_port: 40001,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let mut r2 = r1.clone();
     r2.dst_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2));
@@ -6672,8 +6882,8 @@ fn reverse_translated_1n_delete_removes_specific_handle_not_the_key() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
         src_port: 50002,
         dst_port: 8443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let mut r2 = r1.clone();
     r2.dst_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2));
@@ -6757,7 +6967,11 @@ fn can_admit_boundary_matches_install_cap() {
         PROTO_TCP,
         0x02,
     ));
-    assert_eq!(table.create_drops(), 1, "at-cap install must count a create drop");
+    assert_eq!(
+        table.create_drops(),
+        1,
+        "at-cap install must count a create drop"
+    );
     // can_admit(0) is the tracking-not-required case — always true.
     assert!(table.can_admit(0));
 }
@@ -6796,11 +7010,7 @@ fn pressure_sheds_half_open_pair_before_admitting_new_syn() {
     let pending_reverse = install_forward_reverse_pair(&mut table, &pending, now, TCP_SYN);
     assert!(
         table
-            .lookup(
-                &pending_reverse,
-                now + 1_000_000,
-                TCP_SYN | TCP_ACK,
-            )
+            .lookup(&pending_reverse, now + 1_000_000, TCP_SYN | TCP_ACK,)
             .is_some()
     );
     assert!(
@@ -6830,8 +7040,15 @@ fn pressure_sheds_half_open_pair_before_admitting_new_syn() {
 
     let (non_syn_admitted, non_syn_shed) = table.can_admit_new_syn(2, PROTO_TCP, TCP_ACK);
     assert!(!non_syn_admitted, "a non-initial SYN retains the hard cap");
-    assert!(non_syn_shed.is_empty(), "a non-initial SYN cannot shed sessions");
-    assert_eq!(table.len(), 9, "non-SYN admission must not mutate the table");
+    assert!(
+        non_syn_shed.is_empty(),
+        "a non-initial SYN cannot shed sessions"
+    );
+    assert_eq!(
+        table.len(),
+        9,
+        "non-SYN admission must not mutate the table"
+    );
     assert_eq!(table.pressure_shed_openings.len(), 2);
 
     let (syn_admitted, shed_sessions) = table.can_admit_new_syn(2, PROTO_TCP, TCP_SYN);
@@ -6875,7 +7092,11 @@ fn pressure_sheds_half_open_pair_before_admitting_new_syn() {
         .into_iter()
         .filter(|delta| delta.kind == SessionDeltaKind::Close)
         .collect();
-    assert_eq!(closes.len(), 1, "the shed forward session must sync its close");
+    assert_eq!(
+        closes.len(),
+        1,
+        "the shed forward session must sync its close"
+    );
     assert!(
         closes[0].key == opening || closes[0].key == pending,
         "the close delta must name the selected half-open victim"
@@ -6909,11 +7130,7 @@ fn pressure_shed_index_tracks_handshake_completion() {
         table.pressure_shed_openings.contains_key(&forward),
         "a SYN-ACK without the final ACK remains pressure-sheddable"
     );
-    assert!(
-        table
-            .lookup(&forward, now + 2_000_000, TCP_ACK)
-            .is_some()
-    );
+    assert!(table.lookup(&forward, now + 2_000_000, TCP_ACK).is_some());
     assert!(
         !table.pressure_shed_openings.contains_key(&forward),
         "completed handshakes must leave the pressure-shed index"
@@ -6930,14 +7147,9 @@ fn can_admit_is_conservative_for_replacements() {
     table.set_max_sessions_for_test(1);
     let now = 1_000_000_000u64;
     let key = key_with_port(20_000);
-    assert!(table.install_with_protocol(
-        key.clone(),
-        decision(),
-        metadata(),
-        now,
-        PROTO_TCP,
-        0x02,
-    ));
+    assert!(
+        table.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_TCP, 0x02,)
+    );
     assert!(!table.can_admit(1));
     assert!(
         !table.install_with_protocol(key, decision(), metadata(), now, PROTO_TCP, 0x02),
@@ -7100,7 +7312,10 @@ fn expire_holds_peer_synced_when_rg_inactive() {
     table.last_gc_ns = then + 301_000_000_000;
     // This node forwards NOTHING (pure standby). RG1 inactive.
     let expired = run_expire_ha(&mut table, past_tcp_timeout(then), &[], &|_| 0);
-    assert!(expired.is_empty(), "standby must NOT expire synced RG1 session");
+    assert!(
+        expired.is_empty(),
+        "standby must NOT expire synced RG1 session"
+    );
     assert!(
         table.entry_by_key(&key).is_some(),
         "held session must remain installed for HA retention",
@@ -7179,7 +7394,12 @@ fn expire_holds_all_peer_synced_origins() {
             "origin {:?} must be held on a non-forwarding node",
             origin
         );
-        assert_eq!(table.last_pop_stats().held_standby, 1, "origin {:?}", origin);
+        assert_eq!(
+            table.last_pop_stats().held_standby,
+            1,
+            "origin {:?}",
+            origin
+        );
     }
 }
 
@@ -7209,7 +7429,10 @@ fn expire_holds_peer_synced_owner_rg_zero_whole_node_standby() {
     install_synced_tcp(&mut table, &key, 0, then);
     table.last_gc_ns = then + 301_000_000_000;
     let expired = run_expire_ha(&mut table, past_tcp_timeout(then), &[], &|_| 0);
-    assert!(expired.is_empty(), "owner_rg_id==0 whole-node standby must hold");
+    assert!(
+        expired.is_empty(),
+        "owner_rg_id==0 whole-node standby must hold"
+    );
     assert_eq!(table.last_pop_stats().held_standby, 1);
 }
 
@@ -7384,7 +7607,10 @@ fn expire_owner_rg_zero_survives_promotion() {
     table.last_gc_ns = t1;
     let t2 = t1 + 2_000_000_000;
     let expired = run_expire_ha(&mut table, t2, &[1], &|_| 1);
-    assert!(expired.is_empty(), "node-level self-heal must keep it alive");
+    assert!(
+        expired.is_empty(),
+        "node-level self-heal must keep it alive"
+    );
     assert_eq!(table.last_pop_stats().healed_on_promote, 1);
 }
 
@@ -7475,11 +7701,22 @@ fn expire_reaps_held_at_abs_cap_for_long_timeout() {
     // artifact; the load-bearing assertions are "not reaped" + "still
     // present". first_held_ns is armed on the first observation so the cap
     // measures from there, not from the stale install-time last_seen.
-    assert!(table.last_pop_stats().held_standby >= 1, "held at least once");
-    assert_eq!(table.last_pop_stats().reaped_stale_synced, 0, "not yet reaped");
+    assert!(
+        table.last_pop_stats().held_standby >= 1,
+        "held at least once"
+    );
+    assert_eq!(
+        table.last_pop_stats().reaped_stale_synced,
+        0,
+        "not yet reaped"
+    );
     // NOTE: presence via `table.len()`, NOT `lookup()` -- lookup refreshes
     // last_seen_ns (it is the packet path) and would defeat the timeout.
-    assert_eq!(table.len(), 1, "long-timeout synced session retained on the standby");
+    assert_eq!(
+        table.len(),
+        1,
+        "long-timeout synced session retained on the standby"
+    );
     // ABS cap is 7 days from first_held_ns (t1). After > 7 days it is
     // reaped (the relative ceiling would be 90 days).
     table.last_gc_ns = t1;
@@ -7537,7 +7774,10 @@ fn expire_flapping_rg_still_reaps() {
     // t_anchor, but the entry survived via self-heals. A HOLD pass (RG
     // inactive) reaps it: held_ns from first_held_ns (t_anchor) >>
     // ceiling, despite the self-heal re-stamps to last_seen.
-    assert!(t - t_anchor > 900_000_000_000, "past ceiling after self-heals");
+    assert!(
+        t - t_anchor > 900_000_000_000,
+        "past ceiling after self-heals"
+    );
     table.last_gc_ns = t;
     let t_final = t + 302_000_000_000;
     let expired = run_expire_ha(&mut table, t_final, &[], &|_| 0);
@@ -7670,7 +7910,11 @@ fn promotion_refresh_with_nonzero_epoch_ages_after_one_selfheal() {
     table.last_gc_ns = t2;
     let t3 = t2 + 302_000_000_000;
     let expired = run_expire_ha(&mut table, t3, &[1], &|_| 5);
-    assert_eq!(expired.len(), 1, "ages on the next pass -- no perpetual re-stamp");
+    assert_eq!(
+        expired.len(),
+        1,
+        "ages on the next pass -- no perpetual re-stamp"
+    );
 }
 
 // ===================================================================
@@ -7691,8 +7935,8 @@ fn limit_key(src_octet: u8, dst_octet: u8, src_port: u16) -> SessionKey {
         dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, dst_octet)),
         src_port,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -7795,12 +8039,7 @@ fn session_limit_count_moves_with_ingress_zone_updates_10985() {
 
     let mut trust_metadata = metadata();
     trust_metadata.ingress_zone = TEST_TRUST_ZONE_ID;
-    assert!(table.refresh_for_ha_transition(
-        &key,
-        decision(),
-        trust_metadata,
-        now + 2_000_000,
-    ));
+    assert!(table.refresh_for_ha_transition(&key, decision(), trust_metadata, now + 2_000_000,));
     assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 1);
     assert_eq!(table.session_limit_src_count(TEST_DMZ_ZONE_ID, src), 0);
     table.delete(&key);
@@ -7871,8 +8110,7 @@ fn local_delivery_single_entry_rebinds_policy_without_reverse_12858() {
     let mut table = SessionTable::new();
     let key = limit_key(12, 12, 40_128);
     let mut local_decision = decision();
-    local_decision.resolution.disposition =
-        crate::afxdp::ForwardingDisposition::LocalDelivery;
+    local_decision.resolution.disposition = crate::afxdp::ForwardingDisposition::LocalDelivery;
     let mut local_metadata = metadata();
     local_metadata.egress_zone = TEST_LAN_ZONE_ID;
     assert!(table.install_with_protocol_with_origin(
@@ -8087,7 +8325,6 @@ fn rebind_policy_pair_restamps_zone_vintage_checks_14320() {
         zone_identity_check("wan")
     );
 }
-
 
 /// §5.2 established-flow regression (the r2 BLOCKER): the per-packet
 /// session HIT path (`lookup` / `touch`) must NOT change the per-IP
@@ -8720,7 +8957,12 @@ fn session_limit_counts_match_live_counted_entries_invariant() {
     }));
     // refresh that preserves origin/direction (must not change counts).
     let refresh_target = counted_keys[2].clone();
-    assert!(table.refresh_for_ha_transition(&refresh_target, decision(), metadata(), now + 2_000_000));
+    assert!(table.refresh_for_ha_transition(
+        &refresh_target,
+        decision(),
+        metadata(),
+        now + 2_000_000
+    ));
 
     let check_invariant = |table: &SessionTable, label: &str| {
         let mut src_live: std::collections::HashMap<(u16, IpAddr), u32> =
@@ -8812,7 +9054,11 @@ fn session_limit_clear_on_disable() {
     table.set_session_limit_active(false);
     assert_eq!(table.session_limit_src_map_len(), 1);
     assert_eq!(table.session_limit_src_count(TEST_LAN_ZONE_ID, src), 3);
-    assert_eq!(table.session_limit_dst_map_len(), 0, "dst map must clear on disable");
+    assert_eq!(
+        table.session_limit_dst_map_len(),
+        0,
+        "dst map must clear on disable"
+    );
 
     // Re-enable back-counts only the optional destination map.
     table.set_session_limit_active(true);
@@ -8969,9 +9215,7 @@ fn session_limit_destination_backcount_on_enable_covers_preexisting_sessions() {
     // number of live counted entries for that IP — never below it.
     let mut live_src = 0u32;
     table.iter_with_origin(|k, _d, md, origin| {
-        if k.src_ip == src
-            && !md.is_reverse
-            && super::install::session_limit_origin_counted(origin)
+        if k.src_ip == src && !md.is_reverse && super::install::session_limit_origin_counted(origin)
         {
             live_src += 1;
         }
@@ -9264,25 +9508,29 @@ fn touch_if_stale_survives_skew_that_starves_global_modulo() {
 /// Build a synthetic Open delta from the shared test fixtures. Used only to
 /// drive `push_delta` to the ring limit without installing real sessions.
 fn open_delta(key: SessionKey) -> SessionDelta {
-    SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Open,
-    key,
-    decision: decision(),
-    metadata: metadata(),
-    policy_generation: 0,
-    origin: SessionOrigin::ForwardFlow,
-    fabric_redirect_sync: false,
-    created_ns: 0,
-    last_seen_ns: 0,
-    counters: SessionCounters::default(),
-    observed_tos: 0,
-    observed_tcp_flags: 0,
-    session_id: 0,
-    bulk_resync: false,
-    is_admission: false,
-    tcp_close_class: 0,
-    tcp_handshake_state: 0,
-    pptp_call_ids: 0,
-    purge_retirement: false, source_nat_static: None }
+    SessionDelta {
+        provenance: crate::session::ExportProvenance::Incremental,
+        kind: SessionDeltaKind::Open,
+        key,
+        decision: decision(),
+        metadata: metadata(),
+        policy_generation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: 0,
+        bulk_resync: false,
+        is_admission: false,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        purge_retirement: false,
+        source_nat_static: None,
+    }
 }
 
 /// (a) Overflowing the ring sets the loss latch and counts the drop.
@@ -9443,7 +9691,10 @@ fn loss_resync_re_exports_owned_forward_sessions() {
 fn resync_ships_complete_snapshot_above_ring_cap_without_relatching() {
     const RESYNC_EXPORT_CHUNK: usize = 2048; // mirror the worker loop
     let n: usize = MAX_SESSION_DELTAS + 1000; // 5096 > 4096 cap
-    assert!(n > MAX_SESSION_DELTAS, "must exceed the ring to exercise the hole");
+    assert!(
+        n > MAX_SESSION_DELTAS,
+        "must exceed the ring to exercise the hole"
+    );
 
     let mut table = SessionTable::new();
     let now = 1_000_000_000u64;
@@ -9462,7 +9713,10 @@ fn resync_ships_complete_snapshot_above_ring_cap_without_relatching() {
         keys.push(key);
     }
     // The installs themselves overflowed the ring (n > cap) and latched loss.
-    assert!(table.delta_drops() > 0, "installing > cap deltas overflows the ring");
+    assert!(
+        table.delta_drops() > 0,
+        "installing > cap deltas overflows the ring"
+    );
     let drops_after_install = table.delta_drops();
 
     // === one chunked drain-as-you-export resync cycle (mirrors loop_body) ===
@@ -9489,7 +9743,10 @@ fn resync_ships_complete_snapshot_above_ring_cap_without_relatching() {
     // (c) convergence: a second resync cycle ships the same complete snapshot
     // and still drops nothing — delta_drops does not climb cycle over cycle.
     let exported2 = run_chunked_resync(&mut table, RESYNC_EXPORT_CHUNK);
-    assert_eq!(exported2, n, "second cycle still ships the complete snapshot");
+    assert_eq!(
+        exported2, n,
+        "second cycle still ships the complete snapshot"
+    );
     assert_eq!(
         table.delta_drops(),
         drops_after_install,
@@ -9511,7 +9768,8 @@ fn run_chunked_resync(table: &mut SessionTable, chunk: usize) -> usize {
     while !table.drain_deltas(256).is_empty() {}
 
     let owner_rgs = table.all_owner_rg_ids();
-    let candidates = crate::afxdp::forward_export_candidates_for_owner_rgs(table, &owner_rgs, u64::MAX);
+    let candidates =
+        crate::afxdp::forward_export_candidates_for_owner_rgs(table, &owner_rgs, u64::MAX);
     let mut exported = 0usize;
     for c in candidates.chunks(chunk) {
         for (key, decision, metadata, origin) in c.iter().cloned() {
@@ -9522,7 +9780,10 @@ fn run_chunked_resync(table: &mut SessionTable, chunk: usize) -> usize {
             if d.is_empty() {
                 break;
             }
-            exported += d.iter().filter(|x| x.kind == SessionDeltaKind::Open).count();
+            exported += d
+                .iter()
+                .filter(|x| x.kind == SessionDeltaKind::Open)
+                .count();
         }
     }
     exported
@@ -9595,6 +9856,7 @@ fn metadata_reverse() -> SessionMetadata {
         ingress_vlan_id: 0,
         forward_ingress_vlan_id: None,
         is_reverse: true,
+        nat_scope_ifindex: None,
         ..metadata()
     }
 }
@@ -9653,7 +9915,10 @@ fn account_packet_reverse_folds_onto_forward_entry() {
     // FAIL-ON-REVERT: drop the reverse→forward fold and rev_* stays 0 on the
     // forward entry (the reverse volume would be lost by the forward-only
     // conntrack mirror).
-    assert_eq!(c.rev_packets, 2, "two reverse packets folded onto fwd entry");
+    assert_eq!(
+        c.rev_packets, 2,
+        "two reverse packets folded onto fwd entry"
+    );
     assert_eq!(c.rev_bytes, 100);
 }
 
@@ -9714,8 +9979,8 @@ fn account_packet_reverse_folds_onto_forward_translated_icmp() {
             dst_ip: target,
             src_port: orig_id,
             dst_port: 0,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         };
         let fwd_nat = NatDecision {
             rewrite_src: Some(pool),
@@ -9772,7 +10037,14 @@ fn close_delta_carries_harvested_counters() {
     let mut table = SessionTable::new();
     let then = 1_000_000_000u64;
     let key = key_v4();
-    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), then, PROTO_TCP, 0x10));
+    assert!(table.install_with_protocol(
+        key.clone(),
+        decision(),
+        metadata(),
+        then,
+        PROTO_TCP,
+        0x10
+    ));
     // Drain the Open delta so the next drain only sees the Close.
     let _ = table.drain_deltas(8);
 
@@ -9808,7 +10080,14 @@ fn close_delta_carries_observed_tos_and_tcp_flags() {
     let fwd = key_v4();
     let rev = reverse_session_key(&fwd, NatDecision::default());
     // Install seeds the cumulative flags with the trigger packet's SYN (0x02).
-    assert!(table.install_with_protocol(fwd.clone(), decision(), metadata(), then, PROTO_TCP, 0x02));
+    assert!(table.install_with_protocol(
+        fwd.clone(),
+        decision(),
+        metadata(),
+        then,
+        PROTO_TCP,
+        0x02
+    ));
     assert!(table.install_with_protocol(
         rev.clone(),
         decision(),
@@ -9987,7 +10266,10 @@ fn same_source_pat_collision_is_not_attributed_6751() {
     let a = key_v4();
     let mut b = key_v4();
     b.src_port = 6000;
-    assert_eq!(a.src_ip, b.src_ip, "fixture: both sessions are the SAME host");
+    assert_eq!(
+        a.src_ip, b.src_ip,
+        "fixture: both sessions are the SAME host"
+    );
 
     assert!(table.install_with_protocol(a, pat, metadata(), now, PROTO_TCP, 0x10));
     assert!(table.install_with_protocol(
@@ -10054,16 +10336,14 @@ fn synack_without_final_ack_stays_on_the_opening_window_6752() {
          WHEN a flow counts as established, only which idle window it ages on",
     );
     assert_eq!(
-        rev.expires_after_ns,
-        table.timeouts.tcp_opening_ns,
+        rev.expires_after_ns, table.timeouts.tcp_opening_ns,
         "the reverse half jumped to the ESTABLISHED idle window on the SYN-ACK, \
          so a handshake the client never completes is held for the full \
          established timeout instead of reaping at the opening window (#6752)",
     );
     let fwd = table.entry_by_key(&forward).expect("fwd after synack");
     assert_eq!(
-        fwd.expires_after_ns,
-        table.timeouts.tcp_opening_ns,
+        fwd.expires_after_ns, table.timeouts.tcp_opening_ns,
         "the forward half must also still be on the opening window",
     );
 
@@ -10234,8 +10514,7 @@ fn completed_handshake_still_gets_the_established_window_6752() {
     let fwd = table.entry_by_key(&forward).expect("fwd after final ack");
     assert!(fwd.established);
     assert_eq!(
-        fwd.expires_after_ns,
-        table.timeouts.tcp_established_ns,
+        fwd.expires_after_ns, table.timeouts.tcp_established_ns,
         "a COMPLETED handshake must get the established idle window — without \
          this the #6752 fix would reap every legitimate idle TCP session at the \
          20s opening window",
@@ -10292,15 +10571,16 @@ fn reverse_synack_after_established_does_not_repend_13677() {
             .is_some()
     );
     for key in [&forward, &reverse] {
-        let entry = table.entry_by_key(key).expect("established half after SYN-ACK");
+        let entry = table
+            .entry_by_key(key)
+            .expect("established half after SYN-ACK");
         assert!(entry.established);
         assert!(
             !entry.handshake_pending,
             "#13677: reverse SYN-ACK on an established flow re-pended a half"
         );
         assert_eq!(
-            entry.expires_after_ns,
-            table.timeouts.tcp_established_ns,
+            entry.expires_after_ns, table.timeouts.tcp_established_ns,
             "#13677: established flow must keep the established idle window"
         );
     }
@@ -10382,14 +10662,7 @@ fn tcp_syn_open_delta_carries_opening_state_10888() {
     let mut table = SessionTable::new();
     let key = key_v4();
     let now = 1_000_000_000u64;
-    assert!(table.install_with_protocol(
-        key,
-        decision(),
-        metadata(),
-        now,
-        PROTO_TCP,
-        TCP_SYN,
-    ));
+    assert!(table.install_with_protocol(key, decision(), metadata(), now, PROTO_TCP, TCP_SYN,));
     let opens = table.drain_deltas(8);
     assert_eq!(opens.len(), 1);
     assert_eq!(opens[0].kind, SessionDeltaKind::Open);
@@ -10890,7 +11163,11 @@ fn quote_match_same_domain_dnat_shared_backend_twins_are_ambiguous_14375() {
     quote.routing_domain = DOMAIN;
     assert_eq!(
         super::key::reverse_wire_key(&forward2, nat),
-        { let mut q = quote.clone(); q.routing_domain = 0; q },
+        {
+            let mut q = quote.clone();
+            q.routing_domain = 0;
+            q
+        },
         "fixture premise: both twins share one post-NAT reverse tuple"
     );
     assert!(
@@ -10943,7 +11220,6 @@ fn quote_match_cross_domain_twins_still_ambiguous_14375() {
         "cross-domain twins must remain Ambiguous"
     );
 }
-
 
 /// `reverse_match_key` is the ONE name for the domain-agnostic convention, so
 /// the index side and the probe side cannot drift. It must be identity on a
@@ -11165,19 +11441,35 @@ fn session_decision_typed_snat_layout_11064() {
 fn install_epoch_survives_update_session_9856() {
     let mut table = SessionTable::new();
     let key = key_v4();
-    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), 1_000, PROTO_TCP, TCP_SYN | TCP_ACK));
+    assert!(table.install_with_protocol(
+        key.clone(),
+        decision(),
+        metadata(),
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK
+    ));
     let before = table.entry_by_key(&key).expect("installed").install_epoch;
-    assert!(table.update_session(SessionUpdate {
-        key: &key,
-        decision: decision(),
-        metadata: metadata(),
-        origin: SessionOrigin::ForwardFlow,
-        now_ns: 2_000,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-    }, false));
-    let after = table.entry_by_key(&key).expect("still installed").install_epoch;
-    assert_eq!(before, after, "#9856 RED: update_session re-stamped install_epoch {before}->{after}; a refreshed pre-kick session would be excluded from its own export");
+    assert!(table.update_session(
+        SessionUpdate {
+            key: &key,
+            decision: decision(),
+            metadata: metadata(),
+            origin: SessionOrigin::ForwardFlow,
+            now_ns: 2_000,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+        },
+        false
+    ));
+    let after = table
+        .entry_by_key(&key)
+        .expect("still installed")
+        .install_epoch;
+    assert_eq!(
+        before, after,
+        "#9856 RED: update_session re-stamped install_epoch {before}->{after}; a refreshed pre-kick session would be excluded from its own export"
+    );
 }
 
 /// #9856 STEP-0 (M1): same write-once contract for `refresh_for_ha_transition`.
@@ -11186,11 +11478,24 @@ fn install_epoch_survives_update_session_9856() {
 fn install_epoch_survives_refresh_for_ha_transition_9856() {
     let mut table = SessionTable::new();
     let key = key_v4();
-    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), 1_000, PROTO_TCP, TCP_SYN | TCP_ACK));
+    assert!(table.install_with_protocol(
+        key.clone(),
+        decision(),
+        metadata(),
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK
+    ));
     let before = table.entry_by_key(&key).expect("installed").install_epoch;
     assert!(table.refresh_for_ha_transition(&key, decision(), metadata(), 2_000));
-    let after = table.entry_by_key(&key).expect("still installed").install_epoch;
-    assert_eq!(before, after, "#9856 RED: refresh_for_ha_transition re-stamped install_epoch {before}->{after}");
+    let after = table
+        .entry_by_key(&key)
+        .expect("still installed")
+        .install_epoch;
+    assert_eq!(
+        before, after,
+        "#9856 RED: refresh_for_ha_transition re-stamped install_epoch {before}->{after}"
+    );
 }
 
 /// #9856 STEP-0 (M1+M2): the export contract "every session that existed at the
@@ -11201,19 +11506,35 @@ fn install_epoch_survives_refresh_for_ha_transition_9856() {
 fn refreshed_pre_kick_session_satisfies_kick_epoch_9856() {
     let mut table = SessionTable::new();
     let key = key_v4();
-    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), 1_000, PROTO_TCP, TCP_SYN | TCP_ACK));
+    assert!(table.install_with_protocol(
+        key.clone(),
+        decision(),
+        metadata(),
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK
+    ));
     let kick_epoch = table.entry_by_key(&key).expect("installed").install_epoch;
-    assert!(table.update_session(SessionUpdate {
-        key: &key,
-        decision: decision(),
-        metadata: metadata(),
-        origin: SessionOrigin::ForwardFlow,
-        now_ns: 2_000,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-    }, false));
-    let after = table.entry_by_key(&key).expect("still installed").install_epoch;
-    assert!(after <= kick_epoch, "#9856 RED: refresh moved epoch {kick_epoch}->{after} past the kick; the session would be excluded from its own export");
+    assert!(table.update_session(
+        SessionUpdate {
+            key: &key,
+            decision: decision(),
+            metadata: metadata(),
+            origin: SessionOrigin::ForwardFlow,
+            now_ns: 2_000,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+        },
+        false
+    ));
+    let after = table
+        .entry_by_key(&key)
+        .expect("still installed")
+        .install_epoch;
+    assert!(
+        after <= kick_epoch,
+        "#9856 RED: refresh moved epoch {kick_epoch}->{after} past the kick; the session would be excluded from its own export"
+    );
 }
 
 /// #9856 STEP-0 (M2): the export has no kick-epoch predicate — a session
@@ -11224,16 +11545,43 @@ fn refreshed_pre_kick_session_satisfies_kick_epoch_9856() {
 fn forward_export_candidates_lack_kick_epoch_predicate_9856() {
     let mut table = SessionTable::new();
     let key_a = key_v4();
-    assert!(table.install_with_protocol(key_a.clone(), decision(), metadata(), 1_000, PROTO_TCP, TCP_SYN | TCP_ACK));
-    let kick_epoch = table.entry_by_key(&key_a).expect("a installed").install_epoch;
+    assert!(table.install_with_protocol(
+        key_a.clone(),
+        decision(),
+        metadata(),
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK
+    ));
+    let kick_epoch = table
+        .entry_by_key(&key_a)
+        .expect("a installed")
+        .install_epoch;
     let mut key_b = key_v4();
     key_b.src_port = 54321;
-    assert!(table.install_with_protocol(key_b.clone(), decision(), metadata(), 2_000, PROTO_TCP, TCP_SYN | TCP_ACK));
-    assert!(table.entry_by_key(&key_b).expect("b installed").install_epoch > kick_epoch, "fixture: post-kick install must carry a higher epoch");
+    assert!(table.install_with_protocol(
+        key_b.clone(),
+        decision(),
+        metadata(),
+        2_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK
+    ));
+    assert!(
+        table
+            .entry_by_key(&key_b)
+            .expect("b installed")
+            .install_epoch
+            > kick_epoch,
+        "fixture: post-kick install must carry a higher epoch"
+    );
     let got = crate::afxdp::forward_export_candidates_for_owner_rgs(&table, &[1], kick_epoch);
     let keys: Vec<_> = got.iter().map(|(k, _, _, _)| k.clone()).collect();
     assert!(keys.contains(&key_a), "pre-kick session must be exported");
-    assert!(!keys.contains(&key_b), "#9856 RED: post-kick install exported without an epoch predicate (kick={kick_epoch})");
+    assert!(
+        !keys.contains(&key_b),
+        "#9856 RED: post-kick install exported without an epoch predicate (kick={kick_epoch})"
+    );
 }
 
 /// #9856 STEP-0 (M2): a key reused by a NEW incarnation after the kick must be
@@ -11244,15 +11592,35 @@ fn forward_export_candidates_lack_kick_epoch_predicate_9856() {
 fn forward_export_candidates_lack_reuse_predicate_9856() {
     let mut table = SessionTable::new();
     let key = key_v4();
-    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), 1_000, PROTO_TCP, TCP_SYN | TCP_ACK));
+    assert!(table.install_with_protocol(
+        key.clone(),
+        decision(),
+        metadata(),
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK
+    ));
     let kick_epoch = table.entry_by_key(&key).expect("A installed").install_epoch;
     table.delete(&key);
-    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), 2_000, PROTO_TCP, TCP_SYN | TCP_ACK));
+    assert!(table.install_with_protocol(
+        key.clone(),
+        decision(),
+        metadata(),
+        2_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK
+    ));
     let new_epoch = table.entry_by_key(&key).expect("B installed").install_epoch;
-    assert!(new_epoch > kick_epoch, "fixture: reinstall is a new incarnation with a higher epoch");
+    assert!(
+        new_epoch > kick_epoch,
+        "fixture: reinstall is a new incarnation with a higher epoch"
+    );
     let got = crate::afxdp::forward_export_candidates_for_owner_rgs(&table, &[1], kick_epoch);
     let keys: Vec<_> = got.iter().map(|(k, _, _, _)| k.clone()).collect();
-    assert!(!keys.contains(&key), "#9856 RED: reused key's NEW incarnation (epoch {new_epoch} > kick {kick_epoch}) exported for a kick that predates it");
+    assert!(
+        !keys.contains(&key),
+        "#9856 RED: reused key's NEW incarnation (epoch {new_epoch} > kick {kick_epoch}) exported for a kick that predates it"
+    );
 }
 
 /// #9856: #2442 loss-resync and #2653 command-export deltas carry distinct
@@ -11288,8 +11656,7 @@ fn bulk_export_deltas_carry_provenance_9856() {
     let d = table.drain_deltas(8);
     assert_eq!(d.len(), 2, "fixture: two bulk-export deltas emitted");
     assert_ne!(
-        d[0].provenance,
-        d[1].provenance,
+        d[0].provenance, d[1].provenance,
         "#9856: loss-resync and command-export deltas must remain distinguishable",
     );
 }
@@ -11312,11 +11679,24 @@ fn helper_advertises_export_paging_v2_9856() {
 fn install_epoch_survives_refresh_for_ha_activation_9856() {
     let mut table = SessionTable::new();
     let key = key_v4();
-    assert!(table.install_with_protocol(key.clone(), decision(), metadata(), 1_000, PROTO_TCP, TCP_SYN | TCP_ACK));
+    assert!(table.install_with_protocol(
+        key.clone(),
+        decision(),
+        metadata(),
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK
+    ));
     let before = table.entry_by_key(&key).expect("installed").install_epoch;
     assert!(table.refresh_for_ha_activation(&key, decision(), metadata(), 2_000, 0));
-    let after = table.entry_by_key(&key).expect("still installed").install_epoch;
-    assert_eq!(before, after, "#9856 RED: refresh_for_ha_activation re-stamped install_epoch {before}->{after}");
+    let after = table
+        .entry_by_key(&key)
+        .expect("still installed")
+        .install_epoch;
+    assert_eq!(
+        before, after,
+        "#9856 RED: refresh_for_ha_activation re-stamped install_epoch {before}->{after}"
+    );
 }
 /// #9856: idle terminal removals must not accumulate until an unrelated
 /// export. A fresh kick discards pre-kick tombstones, while a removal after
@@ -11334,7 +11714,11 @@ fn idle_terminal_removals_are_discarded_without_export_9856() {
         TCP_SYN | TCP_ACK,
     ));
     table.delete(&stale_key);
-    assert_eq!(table.tombstone_log.len(), 1, "terminal removal is harvested");
+    assert_eq!(
+        table.tombstone_log.len(),
+        1,
+        "terminal removal is harvested"
+    );
     table.discard_tombstones_for_export();
     assert!(
         table.tombstone_log.is_empty(),
@@ -11354,10 +11738,12 @@ fn idle_terminal_removals_are_discarded_without_export_9856() {
     let kick_epoch = table.current_epoch();
     table.delete(&active_key);
     let mut harvested = Vec::new();
-    assert!(table.take_tombstones_for_export(kick_epoch, &[1], |tombstone| {
-        harvested.push(tombstone.key.clone());
-        true
-    }));
+    assert!(
+        table.take_tombstones_for_export(kick_epoch, &[1], |tombstone| {
+            harvested.push(tombstone.key.clone());
+            true
+        })
+    );
     assert_eq!(
         harvested,
         vec![active_key],
@@ -11390,7 +11776,10 @@ fn tombstone_harvest_cap_transfers_drop_to_export_9856() {
         "terminal-removal harvest must stay bounded at its cap"
     );
     let drops = table.take_tombstone_drops_for_export();
-    assert_eq!(drops, 1, "the first terminal removal past the cap must be counted");
+    assert_eq!(
+        drops, 1,
+        "the first terminal removal past the cap must be counted"
+    );
     assert_eq!(
         crate::afxdp::transfer_tombstone_drops_for_export_test(drops),
         1,
@@ -11423,14 +11812,7 @@ fn tombstone_harvest_cap_transfers_drop_to_export_9856() {
 fn install_forward_udp_burst_10309(table: &mut SessionTable, n: usize, install_ns: u64) {
     for i in 0..n {
         let k = make_v4_key((i % 250) as u8, 1024 + (i / 250) as u16);
-        assert!(table.install_with_protocol(
-            k,
-            decision(),
-            metadata(),
-            install_ns,
-            PROTO_UDP,
-            0
-        ));
+        assert!(table.install_with_protocol(k, decision(), metadata(), install_ns, PROTO_UDP, 0));
         if i % 1024 == 1023 {
             let _ = table.drain_deltas(MAX_SESSION_DELTAS);
         }
@@ -11450,7 +11832,11 @@ fn expiry_over_capacity_tick_loses_no_close_10309() {
     let drops_before = table.delta_drops();
 
     let expired = table.expire_stale_entries(install_ns + 65 * WHEEL_TICK_NS);
-    assert_eq!(expired.len(), N, "all-in-one-call expiry must reap every due session");
+    assert_eq!(
+        expired.len(),
+        N,
+        "all-in-one-call expiry must reap every due session"
+    );
     assert_eq!(table.len(), 0, "reaped sessions must leave the table");
     assert_eq!(
         table.delta_drops(),
@@ -11492,14 +11878,7 @@ fn expiry_over_capacity_tick_with_full_ring_loses_no_close_10309() {
     // No draining: install-time Opens fill the ring, so the tick starts full.
     for i in 0..N {
         let k = make_v4_key((i % 250) as u8, 1024 + (i / 250) as u16);
-        assert!(table.install_with_protocol(
-            k,
-            decision(),
-            metadata(),
-            install_ns,
-            PROTO_UDP,
-            0
-        ));
+        assert!(table.install_with_protocol(k, decision(), metadata(), install_ns, PROTO_UDP, 0));
     }
     // Install-time Open drops are out of scope (Opens are resync-recoverable);
     // clear the latch and baseline the counter so the tick is measured alone.
@@ -11507,7 +11886,11 @@ fn expiry_over_capacity_tick_with_full_ring_loses_no_close_10309() {
     let drops_before = table.delta_drops();
 
     let expired = table.expire_stale_entries(install_ns + 65 * WHEEL_TICK_NS);
-    assert_eq!(expired.len(), N, "all-in-one-call expiry must reap every due session");
+    assert_eq!(
+        expired.len(),
+        N,
+        "all-in-one-call expiry must reap every due session"
+    );
     assert_eq!(table.len(), 0, "reaped sessions must leave the table");
     assert_eq!(
         table.delta_drops(),
@@ -11675,8 +12058,14 @@ fn bulk_export_includes_held_imported_promoted_and_fabric_ingress_10317() {
         "#10317 RED: split-RG fabric-ingress ForwardFlow omitted from authoritative bulk"
     );
     assert!(!keys.contains(&key_tun), "TUN-origin must stay node-local");
-    assert!(!keys.contains(&key_seed), "transient seeds must stay unexported");
-    assert!(!keys.contains(&key_rev), "reverse entries must stay out of the forward bulk");
+    assert!(
+        !keys.contains(&key_seed),
+        "transient seeds must stay unexported"
+    );
+    assert!(
+        !keys.contains(&key_rev),
+        "reverse entries must stay out of the forward bulk"
+    );
     assert!(
         !keys.contains(&key_replica),
         "worker-local replicas must not duplicate the authoritative export"
@@ -11895,7 +12284,6 @@ fn ipsec_reply_alias_rejects_nonzero_domain_native_collision_9506() {
     ));
 }
 
-
 #[test]
 fn ipsec_reply_alias_admits_only_the_matching_routing_domain_9506() {
     let mut table = SessionTable::new();
@@ -12017,14 +12405,9 @@ fn reverse_translated_alias_flow_cache_probes_resolve_13640() {
         table.lookup(&alias, now, 0).is_none(),
         "fixture: alias must miss before install"
     );
-    assert!(table.install_with_protocol(
-        reverse_key.clone(),
-        rev_dec,
-        rev_meta,
-        now,
-        PROTO_UDP,
-        0,
-    ));
+    assert!(
+        table.install_with_protocol(reverse_key.clone(), rev_dec, rev_meta, now, PROTO_UDP, 0,)
+    );
     assert_eq!(
         table.revalidation_canonical_key(&alias),
         Some(reverse_key.clone()),
@@ -12038,8 +12421,14 @@ fn reverse_translated_alias_flow_cache_probes_resolve_13640() {
         table.session_is_live_at(&alias, now + 1),
         "alias must be live for flow-cache hit path (#13640)"
     );
-    assert_eq!(table.live_ingress_zone_matches_at(&alias, now + 1, 77), Some(true));
-    assert_eq!(table.live_ingress_zone_matches_at(&alias, now + 1, 78), Some(false));
+    assert_eq!(
+        table.live_ingress_zone_matches_at(&alias, now + 1, 77),
+        Some(true)
+    );
+    assert_eq!(
+        table.live_ingress_zone_matches_at(&alias, now + 1, 78),
+        Some(false)
+    );
     assert!(
         table.touch_if_stale(&alias, now + 1),
         "alias touch_if_stale must find the reverse entry (#13640)"

@@ -577,6 +577,7 @@ pub(crate) fn build_synced_session_entry(
                     crate::policy::PolicyRuleCounter::with_rule_id(&req.policy_rule_id),
                 ))
             },
+            nat_scope_ifindex: (req.nat_scope_ifindex > 0).then_some(req.nat_scope_ifindex),
         },
         leak_incarnation: 0,
         origin: crate::session::SessionOrigin::SyncImport,

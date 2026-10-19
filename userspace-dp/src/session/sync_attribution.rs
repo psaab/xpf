@@ -72,6 +72,8 @@ pub(crate) struct SessionSyncAttribution<'a> {
     /// The active ICMP query identity for source-NAT rule reconstruction.
     /// `Some` only when an ICMP packet installed a source-NAT translation.
     pub(crate) source_nat_icmp: Option<(u8, u8)>,
+    /// #15176: validated NAT-scope logical ingress ifindex (0 = none).
+    pub(crate) nat_scope_ifindex: i32,
 }
 
 impl<'a> SessionSyncAttribution<'a> {
@@ -102,6 +104,7 @@ impl<'a> SessionSyncAttribution<'a> {
                 _ => None,
             },
             source_nat_icmp: decision.nat.source_nat_icmp,
+            nat_scope_ifindex: metadata.nat_scope_ifindex.unwrap_or(0),
         }
     }
 }

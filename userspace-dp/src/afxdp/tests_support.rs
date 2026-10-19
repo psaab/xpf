@@ -32,7 +32,12 @@ pub(super) const TEST_VLAN70_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x00, 0x70, 0x07]
 pub(super) const TEST_RETH1_PARENT_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x01, 0x00, 0x00];
 pub(super) const TEST_RETH1_SECOND_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x01, 0x00, 0x02];
 
-pub(super) fn build_icmp_echo_frame_v4(src: Ipv4Addr, dst: Ipv4Addr, ttl: u8, dst_mac: [u8; 6]) -> Vec<u8> {
+pub(super) fn build_icmp_echo_frame_v4(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    ttl: u8,
+    dst_mac: [u8; 6],
+) -> Vec<u8> {
     let mut frame = Vec::new();
     write_eth_header(
         &mut frame,
@@ -55,7 +60,12 @@ pub(super) fn build_icmp_echo_frame_v4(src: Ipv4Addr, dst: Ipv4Addr, ttl: u8, ds
     frame
 }
 
-pub(super) fn build_icmp_echo_frame_v6(src: Ipv6Addr, dst: Ipv6Addr, hop_limit: u8, dst_mac: [u8; 6]) -> Vec<u8> {
+pub(super) fn build_icmp_echo_frame_v6(
+    src: Ipv6Addr,
+    dst: Ipv6Addr,
+    hop_limit: u8,
+    dst_mac: [u8; 6],
+) -> Vec<u8> {
     let mut frame = Vec::new();
     write_eth_header(
         &mut frame,
@@ -73,7 +83,6 @@ pub(super) fn build_icmp_echo_frame_v6(src: Ipv6Addr, dst: Ipv6Addr, hop_limit: 
     frame[icmp_start + 2..icmp_start + 4].copy_from_slice(&icmp_csum.to_be_bytes());
     frame
 }
-
 
 /// Build a `ForwardingState.filter_state` with a single egress (output) v4
 /// firewall filter on ifindex 5 carrying one term (#2238 test helper).
@@ -96,7 +105,8 @@ pub(super) fn build_output_filter_state(
         }],
         "",
         "",
-    ).expect("filter state compiles")
+    )
+    .expect("filter state compiles")
 }
 
 /// Install a minimal shaped CoS interface for generated-reply queue tests.
@@ -134,7 +144,6 @@ pub(super) fn test_reply_cos_interface(default_queue: u8) -> CoSInterfaceConfig 
     }
 }
 
-
 /// Shared egress fixture for the suppression tests: ifindex 5 with a
 /// primary v4 and v6 so the emission cases can actually build a reply.
 pub(super) fn icmp_suppress_forwarding() -> ForwardingState {
@@ -155,7 +164,6 @@ pub(super) fn icmp_suppress_forwarding() -> ForwardingState {
     forwarding
 }
 
-
 pub(super) fn ttl_meta_v4() -> UserspaceDpMeta {
     UserspaceDpMeta {
         l3_offset: 14,
@@ -167,7 +175,6 @@ pub(super) fn ttl_meta_v4() -> UserspaceDpMeta {
     }
 }
 
-
 pub(super) fn icmp_suppress_ident() -> BindingIdentity {
     BindingIdentity {
         slot: 0,
@@ -177,7 +184,6 @@ pub(super) fn icmp_suppress_ident() -> BindingIdentity {
         ifindex: 5,
     }
 }
-
 
 pub(super) fn icmp_suppress_flow_v4(src: Ipv4Addr, dst: Ipv4Addr) -> SessionFlow {
     SessionFlow {
@@ -190,12 +196,11 @@ pub(super) fn icmp_suppress_flow_v4(src: Ipv4Addr, dst: Ipv4Addr) -> SessionFlow
             dst_ip: IpAddr::V4(dst),
             src_port: 0xc000,
             dst_port: 53,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     }
 }
-
 
 /// Drive `build_local_time_exceeded_request` end-to-end and return
 /// whether it produced a request. Used by the suppression tests so each
@@ -207,12 +212,16 @@ pub(super) fn te_request_built(frame: &[u8], meta: UserspaceDpMeta) -> bool {
     let (src, dst) = match meta.addr_family as i32 {
         libc::AF_INET6 => (
             IpAddr::V6(Ipv6Addr::from(
-                <[u8; 16]>::try_from(&frame[meta.l3_offset as usize + 8..meta.l3_offset as usize + 24])
-                    .unwrap(),
+                <[u8; 16]>::try_from(
+                    &frame[meta.l3_offset as usize + 8..meta.l3_offset as usize + 24],
+                )
+                .unwrap(),
             )),
             IpAddr::V6(Ipv6Addr::from(
-                <[u8; 16]>::try_from(&frame[meta.l3_offset as usize + 24..meta.l3_offset as usize + 40])
-                    .unwrap(),
+                <[u8; 16]>::try_from(
+                    &frame[meta.l3_offset as usize + 24..meta.l3_offset as usize + 40],
+                )
+                .unwrap(),
             )),
         ),
         _ => {
@@ -243,8 +252,8 @@ pub(super) fn te_request_built(frame: &[u8], meta: UserspaceDpMeta) -> bool {
             dst_ip: dst,
             src_port: 0xc000,
             dst_port: 53,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let desc = XdpDesc {
@@ -266,7 +275,6 @@ pub(super) fn te_request_built(frame: &[u8], meta: UserspaceDpMeta) -> bool {
     )
     .is_some()
 }
-
 
 /// Build an IPv4 UDP frame with a configurable TTL and dst MAC so the
 /// suppression tests can drive the multicast/broadcast-L2 case.
@@ -292,8 +300,10 @@ pub(super) fn build_udp_frame_v4_full(
     frame
 }
 
-
-pub(super) fn reject_egress_forwarding(v4: Option<Ipv4Addr>, v6: Option<Ipv6Addr>) -> ForwardingState {
+pub(super) fn reject_egress_forwarding(
+    v4: Option<Ipv4Addr>,
+    v6: Option<Ipv6Addr>,
+) -> ForwardingState {
     let mut forwarding = ForwardingState::default();
     forwarding.egress.insert(
         5,
@@ -311,7 +321,6 @@ pub(super) fn reject_egress_forwarding(v4: Option<Ipv4Addr>, v6: Option<Ipv6Addr
     forwarding
 }
 
-
 /// Build an IPv4 UDP frame: [Eth][IP src=client dst=server proto=UDP][UDP].
 pub(super) fn build_udp_frame_v4(src: Ipv4Addr, dst: Ipv4Addr) -> Vec<u8> {
     let mut frame = Vec::new();
@@ -328,7 +337,6 @@ pub(super) fn build_udp_frame_v4(src: Ipv4Addr, dst: Ipv4Addr) -> Vec<u8> {
     frame.extend_from_slice(&[0xc0, 0x00, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00]); // UDP hdr
     frame
 }
-
 
 pub(super) fn build_icmp_te_frame_v4(
     router_ip: Ipv4Addr,
@@ -365,7 +373,7 @@ pub(super) fn build_icmp_te_frame_v4_with_mac(
     // Ethernet header
     write_eth_header(
         &mut frame,
-        dst_mac, // dst MAC
+        dst_mac,                              // dst MAC
         [0x00, 0x25, 0x90, 0x12, 0x34, 0x56], // src MAC
         0,
         0x0800,
@@ -453,7 +461,6 @@ pub(super) fn build_icmp_te_frame_v4_with_mac(
     frame
 }
 
-
 /// Shared meta for the IPv4 embedded-ICMP builder tests.
 pub(super) fn icmp_err_meta_v4() -> UserspaceDpMeta {
     UserspaceDpMeta {
@@ -467,7 +474,6 @@ pub(super) fn icmp_err_meta_v4() -> UserspaceDpMeta {
         ..UserspaceDpMeta::default()
     }
 }
-
 
 /// Resolution + metadata block shared by the v4 #3112 fixtures.
 pub(super) fn icmp_err_resolution_v4(next_hop: Ipv4Addr) -> ForwardingResolution {
@@ -485,7 +491,6 @@ pub(super) fn icmp_err_resolution_v4(next_hop: Ipv4Addr) -> ForwardingResolution
         transport_route_mtu: 0,
     }
 }
-
 
 pub(super) fn icmp_err_metadata() -> SessionMetadata {
     SessionMetadata {
@@ -506,9 +511,9 @@ pub(super) fn icmp_err_metadata() -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
-
 
 pub(super) fn build_icmpv6_te_frame(
     router_ip: Ipv6Addr,
@@ -591,7 +596,6 @@ pub(super) fn build_icmpv6_te_frame_with_mac(
     frame.extend_from_slice(&icmp6);
     frame
 }
-
 
 /// Flexible ICMPv6 Time Exceeded fixture for the #1838 §5.7 builder
 /// tests: optional outer hop-by-hop ext header (8 bytes between the
@@ -676,7 +680,6 @@ pub(super) fn build_icmpv6_te_frame_ext(
     frame
 }
 
-
 pub(super) fn icmpv6_te_match_fixture(
     snat_ip: Ipv6Addr,
     client_ip: Ipv6Addr,
@@ -725,6 +728,7 @@ pub(super) fn icmpv6_te_match_fixture(
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         related_expected_zone: 0,
         outbound_snat: false,
@@ -745,7 +749,6 @@ pub(super) fn icmp_budget_test_key() -> crate::session::SessionKey {
     }
 }
 
-
 pub(super) fn icmpv6_te_meta(l4_offset: u16) -> UserspaceDpMeta {
     UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -758,7 +761,6 @@ pub(super) fn icmpv6_te_meta(l4_offset: u16) -> UserspaceDpMeta {
         ..UserspaceDpMeta::default()
     }
 }
-
 
 /// Rewrite the outer ICMPv4 type byte (frame[l4_offset]) to `new_type`
 /// and recompute the outer ICMP checksum, leaving the 8-byte ICMP header
@@ -799,7 +801,6 @@ pub(super) fn build_policy_deny_tcp_syn_frame(dst_mac: [u8; 6]) -> Vec<u8> {
     frame
 }
 
-
 pub(super) fn set_ipv4_dst(frame: &mut [u8], dst: Ipv4Addr) {
     frame[24] = 0;
     frame[25] = 0;
@@ -808,7 +809,6 @@ pub(super) fn set_ipv4_dst(frame: &mut [u8], dst: Ipv4Addr) {
     frame[24] = (ip_sum >> 8) as u8;
     frame[25] = ip_sum as u8;
 }
-
 
 /// #2617 harness: drive a single LAN→WAN TCP-SYN session-miss packet through
 /// `poll_binding_process_descriptor` with an interface input filter whose term
@@ -852,8 +852,9 @@ pub(super) fn run_input_filter_accept_log_poll(
         state: "reachable".to_string(),
         router: false,
         link_local: false,
-    
-    ..Default::default()}];
+
+        ..Default::default()
+    }];
     snapshot.routes = vec![RouteSnapshot {
         reject: false,
         table: "inet.0".to_string(),
@@ -864,7 +865,8 @@ pub(super) fn run_input_filter_accept_log_poll(
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0, mtu: 0,
+        rule_priority: 0,
+        mtu: 0,
     }];
     snapshot.filters = vec![FirewallFilterSnapshot {
         name: "log-input".to_string(),
@@ -949,7 +951,8 @@ pub(super) fn run_input_filter_accept_log_poll(
             session_close_burst: 0,
         },
     );
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -1013,7 +1016,6 @@ pub(super) fn run_input_filter_accept_log_poll(
     (event_handle, event_rx)
 }
 
-
 /// Assert the common shape of the emitted accepted input-filter `then log`
 /// RT_FLOW event (shared by the install-success and install-refused #2617
 /// tests).
@@ -1039,15 +1041,11 @@ pub(super) fn assert_input_filter_accept_log_event(
     assert_eq!(event_handle.dataplane_event_stats().filter_log.sent, 1);
 }
 
-
 // #4743: a NoRoute drop whose destination is a martian address bumps BOTH
 // route_miss_packets AND the martian_dropped sub-breakout. RED-on-revert:
 // removing the `counters.bump_martian()` call in the NoRoute arm makes this fail
 // (martian_dropped stays 0). A non-martian NoRoute leaves martian_dropped 0.
-pub(super) fn record_noroute_with_dst(
-    counters: &mut BatchCounters,
-    dst: std::net::IpAddr,
-) {
+pub(super) fn record_noroute_with_dst(counters: &mut BatchCounters, dst: std::net::IpAddr) {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let binding = BindingIdentity {
         slot: 1,
@@ -1091,7 +1089,6 @@ pub(super) fn record_noroute_with_dst(
     );
 }
 
-
 pub(super) fn txn_ha_state() -> BTreeMap<i32, HAGroupRuntime> {
     let mut ha = BTreeMap::new();
     for rg in [1, 2] {
@@ -1106,7 +1103,6 @@ pub(super) fn txn_ha_state() -> BTreeMap<i32, HAGroupRuntime> {
     }
     ha
 }
-
 
 pub(super) fn build_txn_tcp_syn_frame_v4(
     src: Ipv4Addr,
@@ -1141,7 +1137,6 @@ pub(super) fn build_txn_tcp_syn_frame_v4(
     frame
 }
 
-
 pub(super) fn txn_meta_v4(ingress_ifindex: u32, tcp_flags: u8, pkt_len: u16) -> UserspaceDpMeta {
     UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -1160,7 +1155,6 @@ pub(super) fn txn_meta_v4(ingress_ifindex: u32, tcp_flags: u8, pkt_len: u16) -> 
         ..UserspaceDpMeta::default()
     }
 }
-
 
 /// Push one frame through `poll_binding_process_descriptor` against the
 /// given table/forwarding state. Owns the per-call shared-map and
@@ -1248,7 +1242,6 @@ fn assert_packet_validated_10646(batch: &BatchCounters) {
     );
 }
 
-
 /// `txn_run_descriptor` with a CALLER-PROVIDED `dynamic_neighbors` map, so a
 /// test can seed the shard MAC-change epochs BEFORE the poll takes its
 /// pre-resolve snapshot (`snapshot_shard_epochs`). Used by the #6075 poll
@@ -1311,7 +1304,8 @@ pub(super) fn txn_run_descriptor_with_neighbors(
     let peer_worker_commands = Vec::new();
     let dnat_fds = DnatTableFds::default();
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -1370,7 +1364,6 @@ pub(super) fn txn_run_descriptor_with_neighbors(
     (batch, dbg)
 }
 
-
 /// `txn_run_descriptor` with a caller-provided `local_tunnel_deliveries`
 /// map, so the GRE local-origin INBOUND delivery pins (#1885) can
 /// observe exactly the bytes that would be written to the gr- TUN.
@@ -1421,7 +1414,6 @@ pub(super) fn txn_run_descriptor_with_shared_sessions(
         None,
     )
 }
-
 
 /// #10597 driver: run one control-thread WG plaintext record end-to-end
 /// through `poll_binding_process_descriptor_with_injection` with a
@@ -1586,7 +1578,12 @@ pub(super) fn txn_run_descriptor_capturing_shared(
         &shared_sessions,
         None,
     );
-    let published = shared_sessions.lock().expect("shared sessions").values().cloned().collect();
+    let published = shared_sessions
+        .lock()
+        .expect("shared sessions")
+        .values()
+        .cloned()
+        .collect();
     (batch, dbg, published)
 }
 
@@ -2095,7 +2092,8 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
     let peer_worker_commands = Vec::new();
     let dnat_fds = DnatTableFds::default();
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -2150,7 +2148,6 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
     assert_descriptor_arrived_10646(&batch, &dbg);
     (batch, dbg)
 }
-
 
 /// `txn_run_descriptor` with an event stream wired so a cold-path emit (deny /
 /// filter-log / host-inbound deny) can be observed on the returned receiver.
@@ -2218,7 +2215,8 @@ pub(super) fn txn_run_descriptor_capturing_events(
             session_close_burst: 0,
         },
     );
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -2277,11 +2275,9 @@ pub(super) fn txn_run_descriptor_capturing_events(
     (batch, dbg, event_handle, event_rx)
 }
 
-
 pub(super) fn txn_flow_cache_entries(binding: &BindingWorker) -> usize {
     binding.flow.flow_cache.entries.iter().flatten().count()
 }
-
 
 pub(super) fn build_txn_tcp_syn_frame_v6(
     src: Ipv6Addr,
@@ -2333,7 +2329,6 @@ pub(super) fn build_txn_tcp_frame_v6(
     frame
 }
 
-
 pub(super) fn tunnel_gate_test_fixture() -> (
     BindingIdentity,
     BindingLiveState,
@@ -2341,7 +2336,12 @@ pub(super) fn tunnel_gate_test_fixture() -> (
     UserspaceDpMeta,
     Vec<u8>,
 ) {
-    let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(1, 1, 1, 1),
+        64,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let binding = BindingIdentity {
         slot: 7,
         queue_id: 0,
@@ -2364,19 +2364,26 @@ pub(super) fn tunnel_gate_test_fixture() -> (
     (binding, live, recent_exceptions, meta, frame)
 }
 
-
 pub(super) fn tunnel_marked_decision(disposition: ForwardingDisposition) -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution { disposition,
-    local_ifindex: 0,
-    egress_ifindex: 6,
-    tx_ifindex: 0,
-    tunnel_endpoint_id: 824,
-    next_hop: None,
-    neighbor_mac: None,
-    src_mac: None,
-    tx_vlan_id: 0, route_mtu: 0, transport_route_mtu: 0 }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition,
+            local_ifindex: 0,
+            egress_ifindex: 6,
+            tx_ifindex: 0,
+            tunnel_endpoint_id: 824,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
-
 
 /// #1885 fixture: WAN underlay (reth0.80, VLAN 80) + a gre endpoint
 /// whose local outer address is 172.16.80.8 and whose gr- interface
@@ -2445,7 +2452,6 @@ pub(super) fn gre_to_self_native_untagged_snapshot() -> ConfigSnapshot {
     snapshot
 }
 
-
 /// Inner ICMP echo request 10.255.0.2 -> 10.255.0.1 (the gr-local
 /// inner address): 20-byte IPv4 header + 8-byte ICMP + 8 payload.
 pub(super) fn build_gre_inner_icmp_packet_v4() -> Vec<u8> {
@@ -2465,7 +2471,6 @@ pub(super) fn build_gre_inner_icmp_packet_v4() -> Vec<u8> {
     packet.extend_from_slice(&icmp);
     packet
 }
-
 
 /// GRE-to-self OUTER frame: peer 203.0.113.9 -> local 172.16.80.8,
 /// proto 47, flagless GRE (proto 0x0800) wrapping `inner`. `vlan_id`
@@ -2495,7 +2500,6 @@ pub(super) fn build_gre_to_self_outer_frame_v4(vlan_id: u16, inner: &[u8]) -> Ve
     frame
 }
 
-
 /// Shim-contract meta for the GRE OUTER frame (`parse_l2` in
 /// userspace-xdp is VLAN-aware: tagged L3 at 18, untagged at 14).
 pub(super) fn gre_to_self_outer_meta(vlan_id: u16, frame_len: usize) -> UserspaceDpMeta {
@@ -2518,7 +2522,6 @@ pub(super) fn gre_to_self_outer_meta(vlan_id: u16, frame_len: usize) -> Userspac
         ..UserspaceDpMeta::default()
     }
 }
-
 
 /// #1885 driver: run one GRE-to-self outer frame end-to-end through
 /// `poll_binding_process_descriptor` with a registered gr- delivery
@@ -2578,7 +2581,6 @@ pub(super) fn assert_gre_to_self_delivers_inner_exactly_once(vlan_id: u16) {
     );
 }
 
-
 /// #3019: gre_to_self_snapshot (default-permit, lan ingress, 10.255.0.1 local)
 /// optionally extended with a `from-zone lan to-zone junos-host` policy.
 pub(super) fn junos_host_local_delivery_snapshot(action: Option<&str>) -> ConfigSnapshot {
@@ -2598,7 +2600,6 @@ pub(super) fn junos_host_local_delivery_snapshot(action: Option<&str>) -> Config
     }
     snapshot
 }
-
 
 /// #3019: gre_to_self_snapshot extended with a `from-zone lan to-zone
 /// junos-host then permit` policy carrying an explicit `then log` selection and
@@ -2647,7 +2648,6 @@ pub(super) fn junos_host_local_delivery_permit_snapshot_with_timeout(
     });
     snapshot
 }
-
 
 /// #3706 helper: run the session-MISS LocalDelivery descriptor for a host-bound
 /// TCP/179 SYN under `snapshot` and return the metadata of the single installed
@@ -2711,7 +2711,6 @@ pub(super) fn run_junos_host_permit_local_delivery(
     });
     seen.expect("a host-local session must be installed for a permitted flow")
 }
-
 
 /// #2782: GRE-to-self OUTER frame whose GRE header carries the optional
 /// fields selected by `flags` (any of `GRE_FLAG_CHECKSUM` / `GRE_FLAG_KEY`
@@ -2791,7 +2790,6 @@ pub(super) fn build_gre_checksum_present_outer_frame_v4(
     frame
 }
 
-
 /// Build a flagless-GRE OUTER frame (peer 203.0.113.9 -> local
 /// 172.16.80.8, the `gre_to_self_snapshot` tunnel tuple) carrying an
 /// arbitrary `inner` packet under the GRE inner proto `gre_inner_proto`
@@ -2800,7 +2798,10 @@ pub(super) fn build_gre_checksum_present_outer_frame_v4(
 /// still produces a well-formed OUTER — the truncation is purely in the
 /// inner, which is what the #2376 guard inspects. Untagged underlay
 /// (L3 at 14).
-pub(super) fn build_gre_to_self_outer_frame_with_inner(gre_inner_proto: u16, inner: &[u8]) -> Vec<u8> {
+pub(super) fn build_gre_to_self_outer_frame_with_inner(
+    gre_inner_proto: u16,
+    inner: &[u8],
+) -> Vec<u8> {
     let mut frame = Vec::new();
     write_eth_header(
         &mut frame,
@@ -2825,7 +2826,6 @@ pub(super) fn build_gre_to_self_outer_frame_with_inner(gre_inner_proto: u16, inn
     frame.extend_from_slice(inner);
     frame
 }
-
 
 /// IPv4 inner with `protocol` and `total_len` set to `ihl + l4_bytes`
 /// (ihl = 20). `l4_bytes` is how many bytes of L4 follow the IP header in
@@ -2864,7 +2864,6 @@ pub(super) fn build_gre_inner_v4(protocol: u8, l4_bytes: usize) -> Vec<u8> {
     packet
 }
 
-
 /// IPv6 inner with the given next-header `protocol`, `payload_len`
 /// L4 bytes after the 40-byte fixed header. Physical buffer padded to the
 /// declared length so the truncation is in the IP-declared length, not
@@ -2875,16 +2874,11 @@ pub(super) fn build_gre_inner_v6(protocol: u8, payload_len: usize) -> Vec<u8> {
     packet.push(protocol);
     packet.push(64); // hop limit
     // src 2001:db8::2, dst 2001:db8::1
-    packet.extend_from_slice(&[
-        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
-    ]);
-    packet.extend_from_slice(&[
-        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-    ]);
+    packet.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+    packet.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
     packet.extend(std::iter::repeat(0u8).take(payload_len));
     packet
 }
-
 
 /// #1902 fixture: inner TCP SYN L3 packet (no Ethernet header — it is
 /// the flagless-GRE proto-0x0800 payload) 10.255.0.2 -> `dst`. With
@@ -2909,7 +2903,6 @@ pub(super) fn build_gre_inner_tcp_syn_packet_v4(dst: Ipv4Addr) -> Vec<u8> {
     packet.extend_from_slice(&[0x50, TCP_FLAG_SYN, 0xfa, 0xf0, 0x00, 0x00, 0x00, 0x00]);
     packet
 }
-
 
 /// #1902/#11326 regression driver: one GRE-to-self outer frame whose inner
 /// packet selects MissingNeighbor, driven through `poll_binding_process_descriptor`.
@@ -2952,7 +2945,9 @@ pub(super) fn assert_decapped_missing_neighbor_never_buffered_or_retried(vlan_id
         meta.ingress_vlan_id,
         &frame,
     ));
-    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(
+        1500,
+    ));
 
     let (_batch, dbg) = txn_run_descriptor_with_reinjector(
         &mut bindings[0],
@@ -2985,7 +2980,10 @@ pub(super) fn assert_decapped_missing_neighbor_never_buffered_or_retried(vlan_id
         bindings[0].scratch.scratch_recycle.contains(&128),
         "the refused frame must be recycled now, not pinned in pending_neigh"
     );
-    assert_eq!(bindings[0].live.slow_path_packets.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        bindings[0].live.slow_path_packets.load(Ordering::Relaxed),
+        0
+    );
     assert_eq!(bindings[0].live.slow_path_drops.load(Ordering::Relaxed), 1);
     assert!(
         reinjector.test_enqueued_delegated().is_empty(),
@@ -3046,7 +3044,6 @@ pub(super) fn assert_decapped_missing_neighbor_never_buffered_or_retried(vlan_id
     }
 }
 
-
 pub(super) fn dnat_snat_decision() -> NatDecision {
     NatDecision {
         rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
@@ -3054,7 +3051,6 @@ pub(super) fn dnat_snat_decision() -> NatDecision {
         ..NatDecision::default()
     }
 }
-
 
 pub(super) fn dnat_v4_key() -> SessionKey {
     SessionKey {
@@ -3064,11 +3060,10 @@ pub(super) fn dnat_v4_key() -> SessionKey {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 12345,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
-
 
 pub(super) fn dnat_v6_key() -> SessionKey {
     SessionKey {
@@ -3078,20 +3073,20 @@ pub(super) fn dnat_v6_key() -> SessionKey {
         dst_ip: IpAddr::V6("2606:4700:4700::1111".parse::<Ipv6Addr>().unwrap()),
         src_port: 12345,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
-
 pub(super) fn dnat_snat_decision_v6() -> NatDecision {
     NatDecision {
-        rewrite_src: Some(IpAddr::V6("2001:559:8585:80::8".parse::<Ipv6Addr>().unwrap())),
+        rewrite_src: Some(IpAddr::V6(
+            "2001:559:8585:80::8".parse::<Ipv6Addr>().unwrap(),
+        )),
         rewrite_src_port: Some(54321),
         ..NatDecision::default()
     }
 }
-
 
 /// v6 ingress meta for the txn harness (TCP, ingress on `ifindex`).
 pub(super) fn txn_meta_v6(ingress_ifindex: u32, frame_len: usize) -> UserspaceDpMeta {
@@ -3112,7 +3107,6 @@ pub(super) fn txn_meta_v6(ingress_ifindex: u32, frame_len: usize) -> UserspaceDp
         ..UserspaceDpMeta::default()
     }
 }
-
 
 /// Build a wan->lan inbound DNAT snapshot: public VIP 172.16.80.8:443 is
 /// port-DNAT'd to the internal LAN host 10.0.61.102:8443. The internal
@@ -3150,15 +3144,15 @@ pub(super) fn inbound_dnat_snapshot(policy: PolicyRuleSnapshot) -> ConfigSnapsho
         state: "reachable".to_string(),
         router: false,
         link_local: false,
-    
-    ..Default::default()});
+
+        ..Default::default()
+    });
     // Replace the default lan->wan permit with the caller's wan->lan rule
     // so the only policy that can match the inbound flow is the one under
     // test (default-policy stays deny).
     snapshot.policies = vec![policy];
     snapshot
 }
-
 
 pub(super) fn wan_to_lan_permit(dst: &str, name: &str) -> PolicyRuleSnapshot {
     PolicyRuleSnapshot {
@@ -3173,7 +3167,6 @@ pub(super) fn wan_to_lan_permit(dst: &str, name: &str) -> PolicyRuleSnapshot {
         ..Default::default()
     }
 }
-
 
 /// Build a wan-ingress inbound NPTv6 snapshot. The external prefix
 /// 2602:fd41:70::/48 is translated to the internal prefix
@@ -3190,16 +3183,19 @@ pub(super) fn inbound_nptv6_snapshot(policy: PolicyRuleSnapshot) -> ConfigSnapsh
     }];
     // Route the internal /48 toward the LAN host (reth1.0) so the
     // translated destination resolves on the inside.
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet6.0".to_string(),
-    family: "inet6".to_string(),
-    destination: "fd35:1940:27::/48".to_string(),
-    next_hops: vec!["fd35:1940:27:100::102@reth1.0".to_string()],
-    next_hop_weights: vec![],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0,
-    mtu: 0, });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        table: "inet6.0".to_string(),
+        family: "inet6".to_string(),
+        destination: "fd35:1940:27::/48".to_string(),
+        next_hops: vec!["fd35:1940:27:100::102@reth1.0".to_string()],
+        next_hop_weights: vec![],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "reth1.0".to_string(),
         ifindex: 24,
@@ -3209,12 +3205,12 @@ pub(super) fn inbound_nptv6_snapshot(policy: PolicyRuleSnapshot) -> ConfigSnapsh
         state: "reachable".to_string(),
         router: false,
         link_local: false,
-    
-    ..Default::default()});
+
+        ..Default::default()
+    });
     snapshot.policies = vec![policy];
     snapshot
 }
-
 
 /// Build a NAT64 snapshot: the synthetic IPv6 destination 64:ff9b::808:808
 /// extracts the IPv4 server 8.8.8.8 (routed out wan via the default route).
@@ -3227,12 +3223,11 @@ pub(super) fn nat64_snapshot(policy: PolicyRuleSnapshot) -> ConfigSnapshot {
         prefix: "64:ff9b::/96".to_string(),
         pool_addresses: vec!["172.16.80.50".to_string()],
         no_v6_frag_header: false,
-            ..Default::default()
+        ..Default::default()
     }];
     snapshot.policies = vec![policy];
     snapshot
 }
-
 
 pub(super) fn lan_to_wan_permit(dst: &str, name: &str) -> PolicyRuleSnapshot {
     PolicyRuleSnapshot {
@@ -3248,13 +3243,11 @@ pub(super) fn lan_to_wan_permit(dst: &str, name: &str) -> PolicyRuleSnapshot {
     }
 }
 
-
 /// Drop a neighbor entry (by IP) from a snapshot so its next hop stays
 /// unresolved → MissingNeighbor.
 pub(super) fn drop_neighbor(snapshot: &mut ConfigSnapshot, ip: &str) {
     snapshot.neighbors.retain(|n| n.ip != ip);
 }
-
 
 /// Ethernet (14B) + IPv4 header with the given `frag_off` (raw flags+offset
 /// field) + `payload`. A non-first fragment carries payload where an L4
@@ -3283,7 +3276,6 @@ pub(super) fn eth_ipv4_frag_frame(frag_off: u16, payload: &[u8], dst_mac: [u8; 6
     f
 }
 
-
 /// The egress output-filter that DISCARDs TCP traffic to dst port 443.
 /// Re-used from `build_live_forward_request_from_frame_drops_logged_output_filter_discard`.
 pub(super) fn wan_drop_443_forwarding() -> ForwardingState {
@@ -3311,7 +3303,6 @@ pub(super) fn wan_drop_443_forwarding() -> ForwardingState {
     })
 }
 
-
 pub(super) fn frag_test_ingress_ident() -> BindingIdentity {
     BindingIdentity {
         slot: 7,
@@ -3322,23 +3313,26 @@ pub(super) fn frag_test_ingress_ident() -> BindingIdentity {
     }
 }
 
-
 pub(super) fn frag_test_decision() -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 11,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
-        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-        tx_vlan_id: 80,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
-
 
 /// Meta describing a flowless TCP packet whose stamped flow_* fields claim
 /// dst port 443 (what the shim would write from the bytes at the post-IP
@@ -3363,7 +3357,6 @@ pub(super) fn frag_test_meta(l3_offset: u16) -> UserspaceDpMeta {
     }
 }
 
-
 /// Full (non-fragment) IPv4 ICMP frame: eth(14) + IPv4(20, proto=ICMP) + an
 /// 8-byte ICMP header of the given type. `total_len` covers the ICMP header so
 /// the type byte and the [l4+4..l4+6] word both lie inside the declared
@@ -3386,7 +3379,6 @@ pub(super) fn eth_ipv4_icmp_frame(icmp_type: u8) -> Vec<u8> {
     f.extend_from_slice(&icmp);
     f
 }
-
 
 /// Meta for a non-first IPv4 TCP fragment ingressing on `reth1.0` (lan,
 /// ifindex 24) toward 172.16.80.200 (wan). `flow_*_addr` carry the L3 identity
@@ -3413,7 +3405,6 @@ pub(super) fn frag_v4_transit_meta() -> UserspaceDpMeta {
     }
 }
 
-
 /// A reachable wan neighbor for 172.16.80.200 so the fragment resolves
 /// ForwardCandidate (not MissingNeighbor) and reaches the transit gate.
 pub(super) fn frag_transit_wan_neighbor() -> NeighborSnapshot {
@@ -3426,16 +3417,15 @@ pub(super) fn frag_transit_wan_neighbor() -> NeighborSnapshot {
         state: "reachable".to_string(),
         router: false,
         link_local: false,
-    
-    ..Default::default()}
-}
 
+        ..Default::default()
+    }
+}
 
 /// A non-first IPv4 fragment frame (offset != 0 => flowless per #2344).
 pub(super) fn frag_v4_transit_frame(dst_mac: [u8; 6]) -> Vec<u8> {
     eth_ipv4_frag_frame(0x0001, &[0x82, 0x35, 0x01, 0xbb, 0, 0, 0, 0], dst_mac)
 }
-
 
 /// Build N attacker-constructible flowless v4 metas differing only in the
 /// (src_port, dst_port) pair — the input the fabric hash mixes when there
@@ -3452,7 +3442,6 @@ pub(super) fn fabric_adversarial_metas(n: u16) -> Vec<(UserspaceDpMeta, (u16, u1
         })
         .collect()
 }
-
 
 /// Ethernet (14B) + IPv6 header + fragment header (44) + `payload`. A
 /// non-first fragment has fragment-offset bits set.
@@ -3482,7 +3471,6 @@ pub(super) fn eth_ipv6_frag_frame(frag_off: u16, payload: &[u8]) -> Vec<u8> {
     f.extend_from_slice(payload);
     f
 }
-
 
 // ── #7541: IPv6-OUTER GRE fixtures ──────────────────────────────────────────
 //
@@ -3626,7 +3614,6 @@ pub(super) fn gre_to_self_outer_meta_v6(vlan_id: u16, frame_len: usize) -> Users
     }
 }
 
-
 /// #9298: an ICMPv4 Time Exceeded quoting a PPTP (RFC 2637 enhanced GRE,
 /// VERSION 1) data packet.
 ///
@@ -3696,7 +3683,6 @@ pub(super) fn build_icmp_te_frame_v4_pptp(
     frame.extend_from_slice(&icmp);
     frame
 }
-
 
 /// #9298: the IPv6 counterpart of [`build_icmp_te_frame_v4_pptp`].
 ///
@@ -3777,6 +3763,14 @@ mod antivacuity_10646_tests {
         );
         let mut meta = txn_meta_v4(24, crate::tcp_flags::TCP_SYN, frame.len() as u16);
         meta.magic = 0;
-        let _ = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+        let _ = txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+            true,
+        );
     }
 }

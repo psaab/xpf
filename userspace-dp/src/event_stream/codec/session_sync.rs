@@ -128,7 +128,6 @@ impl EventFrame {
         )
     }
 
-
     #[allow(clippy::too_many_arguments)]
     fn encode_session_record(
         msg_type: u8,
@@ -161,9 +160,10 @@ impl EventFrame {
             nat64,
             nat64_snat_v4,
             source_nat_icmp,
+            nat_scope_ifindex,
         } = SessionSyncAttribution::from_session(decision, metadata);
-        let (source_nat_icmp_valid, source_nat_icmp_type, source_nat_icmp_code) =
-            source_nat_icmp.map_or((0, 0, 0), |(icmp_type, icmp_code)| {
+        let (source_nat_icmp_valid, source_nat_icmp_type, source_nat_icmp_code) = source_nat_icmp
+            .map_or((0, 0, 0), |(icmp_type, icmp_code)| {
                 (1, icmp_type, icmp_code)
             });
 
@@ -421,7 +421,7 @@ impl EventFrame {
         // then panicked past the 512-byte frame when the 8-byte pair was
         // written. Reserving all 10 tail bytes makes the fallback correct:
         // either the full trailer fits and is written, or rule_id_len is 0.
-        const RULE_ID_TRAILER_BYTES: usize = 1 + 1 + 8;
+        const RULE_ID_TRAILER_BYTES: usize = 1 + 1 + 8 + 4;
         let rule_id_len = if rule_id.len() <= u16::MAX as usize
             && pos + 2 + rule_id.len() + RULE_ID_TRAILER_BYTES <= buf.len()
         {
@@ -447,6 +447,10 @@ impl EventFrame {
         // Zero means absent, preserving fail-closed behavior on old producers.
         buf[pos..pos + 8].copy_from_slice(&pptp_call_ids.to_le_bytes());
         pos += 8;
+        // #15176: trailing NAT-scope ifindex (i32 LE), length-gated after
+        // the PPTP pair. 0 = no scope recorded; old Go decoders length-skip.
+        buf[pos..pos + 4].copy_from_slice(&nat_scope_ifindex.to_le_bytes());
+        pos += 4;
 
         // Write header
         let payload_len = (pos - FRAME_HEADER_SIZE) as u32;

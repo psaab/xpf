@@ -3127,6 +3127,7 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         SessionOrigin::ForwardFlow,
         122_000_000_000,

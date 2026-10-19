@@ -110,11 +110,7 @@ fn fnv1a64(name: &str) -> u64 {
 /// on, falling back to the #10612 stateless arms.
 pub(crate) fn zone_identity_check(name: &str) -> u32 {
     let check = (fnv1a64(name) >> 32) as u32;
-    if check == 0 {
-        1
-    } else {
-        check
-    }
+    if check == 0 { 1 } else { check }
 }
 
 /// #10620: the vintage stamp for one zone-id leg at install time: the
@@ -279,6 +275,16 @@ pub(crate) struct SessionMetadata {
     pub(crate) ingress_vlan_id: u16,
     /// Forward packet's ingress VLAN retained on a synthesized reverse row.
     pub(crate) forward_ingress_vlan_id: Option<u16>,
+    /// #15176: the validated NAT-scope logical ingress ifindex at admission
+    /// (the V2 fabric scope identity, or the locally resolved logical unit),
+    /// recorded so session-hit NAT revalidation rebuilds the SAME
+    /// interface/routing-instance scope admission used instead of an empty
+    /// one. `None` = no scope recorded (legacy peer, V1/unstamped fabric,
+    /// identity-less import): revalidation declines to revoke on scope
+    /// grounds rather than evaluate an empty scope. Excluded from
+    /// `PartialEq` (derived enforcement state, #10620 pattern) and from the
+    /// per-packet clone cost concern — it is `Copy`.
+    pub(crate) nat_scope_ifindex: Option<i32>,
     pub(crate) owner_rg_id: i32,
     pub(crate) fabric_ingress: bool,
     pub(crate) is_reverse: bool,
@@ -439,6 +445,7 @@ impl SessionMetadata {
             ingress_ifindex: self.ingress_ifindex,
             ingress_vlan_id: self.ingress_vlan_id,
             forward_ingress_vlan_id: self.forward_ingress_vlan_id,
+            nat_scope_ifindex: self.nat_scope_ifindex,
             owner_rg_id: self.owner_rg_id,
             fabric_ingress: self.fabric_ingress,
             is_reverse: self.is_reverse,
@@ -703,7 +710,6 @@ pub(crate) fn source_nat_static_from_provenance(value: u8) -> Option<bool> {
         _ => None,
     }
 }
-
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionDelta {

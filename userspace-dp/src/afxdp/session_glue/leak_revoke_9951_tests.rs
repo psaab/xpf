@@ -82,6 +82,7 @@ fn leak_metadata() -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -131,7 +132,7 @@ fn reverse_worker_entry_fixture(
         &BTreeMap::new(),
         neighbors,
         ForwardSessionMatch {
-                    aux: SessionLookupAux::default(),
+            aux: SessionLookupAux::default(),
             key: forward_key,
             decision: noroute_decision(),
             metadata: leak_metadata(),
@@ -204,27 +205,29 @@ fn resolve_cached_hit(
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
-    let resolved = resolve_flow_session_decision(sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    forwarding,
-    &BTreeMap::new(),
-    neighbors,
-    flow,
-    2_000_000,
-    1,
-    PROTO_TCP,
-    0x10,
-    12,
-    0,
-    false,
-    0,
-    0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        forwarding,
+        &BTreeMap::new(),
+        neighbors,
+        flow,
+        2_000_000,
+        1,
+        PROTO_TCP,
+        0x10,
+        12,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("9951 cached session hit");
     resolved.decision.resolution
 }
@@ -242,7 +245,8 @@ fn leak_removed_mid_session_reresolves_and_denies_9951() {
 
     // Miss-time resolution rides the leak into blue.
     let miss =
-        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision()).resolution;
+        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision())
+            .resolution;
     assert_eq!(
         miss.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -316,7 +320,8 @@ fn next_hop_change_in_target_table_still_pins_9951() {
     let mut sessions = SessionTable::new();
 
     let miss =
-        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision()).resolution;
+        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision())
+            .resolution;
     assert_eq!(
         miss.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -373,25 +378,34 @@ fn next_hop_change_in_target_table_still_pins_9951() {
 fn unrelated_leak_removal_leaves_session_pinned_9951() {
     let mut snapshot = leak_snapshot();
     // A second, unrelated leak + its target route.
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "9.9.9.0/24".to_string(),
-    next_hops: vec![],
-    next_table: "blue.inet.0".to_string(),
-    rule_priority: 150,
-    mtu: 0, ..Default::default() });
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "blue.inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "9.9.9.0/24".to_string(),
-    next_hops: vec!["172.16.50.1@ge-0/0/0.50".to_string()],
-    mtu: 0, ..Default::default() });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "9.9.9.0/24".to_string(),
+        next_hops: vec![],
+        next_table: "blue.inet.0".to_string(),
+        rule_priority: 150,
+        mtu: 0,
+        ..Default::default()
+    });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        table: "blue.inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "9.9.9.0/24".to_string(),
+        next_hops: vec!["172.16.50.1@ge-0/0/0.50".to_string()],
+        mtu: 0,
+        ..Default::default()
+    });
     let with_both = build_forwarding_state(&snapshot);
     let neighbors = Arc::new(ShardedNeighborMap::new());
     let flow = leak_flow();
     let mut sessions = SessionTable::new();
 
     let miss =
-        lookup_forwarding_resolution_for_session(&with_both, &neighbors, &flow, noroute_decision()).resolution;
+        lookup_forwarding_resolution_for_session(&with_both, &neighbors, &flow, noroute_decision())
+            .resolution;
     assert_eq!(
         miss.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -448,7 +462,8 @@ fn promoted_shared_hit_rechecks_removed_leak_9951() {
     let neighbors = Arc::new(ShardedNeighborMap::new());
     let flow = leak_flow();
     let miss =
-        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision()).resolution;
+        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision())
+            .resolution;
     assert_eq!(miss.disposition, ForwardingDisposition::ForwardCandidate);
     let decision = SessionDecision {
         resolution: miss,
@@ -511,27 +526,29 @@ fn promoted_shared_hit_rechecks_removed_leak_9951() {
     let mut removed = snapshot;
     removed.routes.remove(0);
     let without_leak = rebuild_with_previous(&removed, &with_leak);
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &without_leak,
-    &BTreeMap::new(),
-    &neighbors,
-    &flow,
-    2_000_000,
-    1,
-    PROTO_TCP,
-    0x10,
-    12,
-    0,
-    false,
-    0,
-    0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &without_leak,
+        &BTreeMap::new(),
+        &neighbors,
+        &flow,
+        2_000_000,
+        1,
+        PROTO_TCP,
+        0x10,
+        12,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("rematerialized shared hit");
     assert_eq!(
         resolved.decision.resolution.disposition,
@@ -548,7 +565,8 @@ fn removed_and_readded_leak_does_not_resurrect_old_session_9951() {
     let flow = leak_flow();
     let mut sessions = SessionTable::new();
     let miss =
-        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision()).resolution;
+        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision())
+            .resolution;
     assert_eq!(miss.disposition, ForwardingDisposition::ForwardCandidate);
     let decision = SessionDecision {
         resolution: miss,
@@ -563,7 +581,8 @@ fn removed_and_readded_leak_does_not_resurrect_old_session_9951() {
     let without_leak = rebuild_with_previous(&removed, &with_leak);
     let readded = rebuild_with_previous(&leak_snapshot(), &without_leak);
     let fresh =
-        lookup_forwarding_resolution_for_session(&readded, &neighbors, &flow, noroute_decision()).resolution;
+        lookup_forwarding_resolution_for_session(&readded, &neighbors, &flow, noroute_decision())
+            .resolution;
     assert_eq!(
         fresh.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -585,7 +604,8 @@ fn peer_shared_materialize_promote_rechecks_removed_leak_9951() {
     let neighbors = Arc::new(ShardedNeighborMap::new());
     let flow = leak_flow();
     let miss =
-        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision()).resolution;
+        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision())
+            .resolution;
     assert_eq!(miss.disposition, ForwardingDisposition::ForwardCandidate);
     let decision = SessionDecision {
         resolution: miss,
@@ -625,27 +645,29 @@ fn peer_shared_materialize_promote_rechecks_removed_leak_9951() {
     );
 
     let mut sessions = SessionTable::new();
-    let first = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &with_leak,
-    &BTreeMap::new(),
-    &neighbors,
-    &flow,
-    2_000_000,
-    1,
-    PROTO_TCP,
-    0x10,
-    12,
-    0,
-    false,
-    0,
-    0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let first = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &with_leak,
+        &BTreeMap::new(),
+        &neighbors,
+        &flow,
+        2_000_000,
+        1,
+        PROTO_TCP,
+        0x10,
+        12,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("peer shared materialization");
     assert_eq!(
         first.decision.resolution.disposition,
@@ -668,27 +690,29 @@ fn peer_shared_materialize_promote_rechecks_removed_leak_9951() {
     let mut removed = original;
     removed.routes.remove(0);
     let without_leak = rebuild_with_previous(&removed, &with_leak);
-    let second = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &without_leak,
-    &BTreeMap::new(),
-    &neighbors,
-    &flow,
-    3_000_000,
-    1,
-    PROTO_TCP,
-    0x10,
-    12,
-    0,
-    false,
-    0,
-    0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let second = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &without_leak,
+        &BTreeMap::new(),
+        &neighbors,
+        &flow,
+        3_000_000,
+        1,
+        PROTO_TCP,
+        0x10,
+        12,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("peer shared rematerialization");
     assert_eq!(
         second.decision.resolution.disposition,
@@ -704,7 +728,8 @@ fn demoted_shared_leak_rematerialization_rechecks_removed_leak_9951() {
     let neighbors = Arc::new(ShardedNeighborMap::new());
     let flow = leak_flow();
     let miss =
-        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision()).resolution;
+        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision())
+            .resolution;
     assert_eq!(miss.disposition, ForwardingDisposition::ForwardCandidate);
     let decision = SessionDecision {
         resolution: miss,
@@ -766,27 +791,29 @@ fn demoted_shared_leak_rematerialization_rechecks_removed_leak_9951() {
     let without_leak = rebuild_with_previous(&removed, &with_leak);
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     let mut sessions = SessionTable::new();
-    let first = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &without_leak,
-    &BTreeMap::new(),
-    &neighbors,
-    &flow,
-    2_000_000,
-    1,
-    PROTO_TCP,
-    0x10,
-    12,
-    0,
-    false,
-    0,
-    0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let first = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &without_leak,
+        &BTreeMap::new(),
+        &neighbors,
+        &flow,
+        2_000_000,
+        1,
+        PROTO_TCP,
+        0x10,
+        12,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("demoted shared materialization");
     assert_eq!(
         first.decision.resolution.disposition,
@@ -798,27 +825,29 @@ fn demoted_shared_leak_rematerialization_rechecks_removed_leak_9951() {
     );
 
     sessions.delete(&flow.forward_key);
-    let second = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &without_leak,
-    &BTreeMap::new(),
-    &neighbors,
-    &flow,
-    3_000_000,
-    1,
-    PROTO_TCP,
-    0x10,
-    12,
-    0,
-    false,
-    0,
-    0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let second = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &without_leak,
+        &BTreeMap::new(),
+        &neighbors,
+        &flow,
+        3_000_000,
+        1,
+        PROTO_TCP,
+        0x10,
+        12,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("demoted shared rematerialization");
     assert_eq!(
         second.decision.resolution.disposition,
@@ -836,7 +865,7 @@ fn reverse_synthesis_stamps_and_revokes_leak_riding_session_9951() {
     forward_key.src_ip = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
     forward_key.dst_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
     let forward_match = ForwardSessionMatch {
-                    aux: SessionLookupAux::default(),
+        aux: SessionLookupAux::default(),
         key: forward_key.clone(),
         decision: noroute_decision(),
         metadata: leak_metadata(),
@@ -1048,7 +1077,8 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                 discard: false,
                 next_table: "red.inet.0".to_string(),
                 preference: 0,
-                rule_priority: 0, mtu: 0,
+                rule_priority: 0,
+                mtu: 0,
             },
             RouteSnapshot {
                 table: "red.inet.0".to_string(),
@@ -1060,7 +1090,8 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
-                rule_priority: 0, mtu: 0,
+                rule_priority: 0,
+                mtu: 0,
             },
             RouteSnapshot {
                 table: "inet.0".to_string(),
@@ -1072,7 +1103,8 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                 discard: false,
                 next_table: "red.inet.0".to_string(),
                 preference: 0,
-                rule_priority: 0, mtu: 0,
+                rule_priority: 0,
+                mtu: 0,
             },
             RouteSnapshot {
                 table: "red.inet.0".to_string(),
@@ -1084,7 +1116,8 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
-                rule_priority: 0, mtu: 0,
+                rule_priority: 0,
+                mtu: 0,
             },
         ],
         neighbors: vec![NeighborSnapshot {
@@ -1111,7 +1144,7 @@ fn ri_forward_match() -> (ForwardSessionMatch, SessionKey) {
     forward_key.dst_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
     forward_key.routing_domain = domain;
     let forward_match = ForwardSessionMatch {
-                    aux: SessionLookupAux::default(),
+        aux: SessionLookupAux::default(),
         key: forward_key.clone(),
         decision: noroute_decision(),
         metadata: leak_metadata(),
@@ -1419,27 +1452,29 @@ fn shared_materialize_recomputes_ri_reverse_leak_stamp_10312() {
     );
 
     let mut sessions = SessionTable::new();
-    let first = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &with_leak,
-    &BTreeMap::new(),
-    &neighbors,
-    &reverse_flow,
-    2_000_000,
-    1,
-    PROTO_TCP,
-    0x10,
-    12,
-    0,
-    false,
-    0,
-    0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let first = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &with_leak,
+        &BTreeMap::new(),
+        &neighbors,
+        &reverse_flow,
+        2_000_000,
+        1,
+        PROTO_TCP,
+        0x10,
+        12,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("peer shared materialization");
     assert_eq!(
         first.decision.resolution.disposition,
@@ -1457,27 +1492,29 @@ fn shared_materialize_recomputes_ri_reverse_leak_stamp_10312() {
     let mut removed = original;
     removed.routes.remove(0);
     let without_leak = rebuild_with_previous(&removed, &with_leak);
-    let second = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared_sessions,
-    &shared_nat_sessions,
-    &shared_forward_wire_sessions,
-    &shared_owner_rg_indexes,
-    &peer_worker_commands,
-    &without_leak,
-    &BTreeMap::new(),
-    &neighbors,
-    &reverse_flow,
-    3_000_000,
-    1,
-    PROTO_TCP,
-    0x10,
-    12,
-    0,
-    false,
-    0,
-    0,
-        crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let second = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &without_leak,
+        &BTreeMap::new(),
+        &neighbors,
+        &reverse_flow,
+        3_000_000,
+        1,
+        PROTO_TCP,
+        0x10,
+        12,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("peer shared rematerialization");
     assert_eq!(
         second.decision.resolution.disposition,

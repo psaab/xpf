@@ -19,9 +19,9 @@
 // See #1356.
 
 use super::{
-    BpfSessionKeyV4, BpfSessionKeyV6, BpfSessionValueV4, BpfSessionValueV6,
-    ConntrackPublishResult, SESS_STATE_ESTABLISHED, SessionDecision, SessionKey,
-    SessionMetadata, bpf_session_key_v4, bpf_session_key_v6, reverse_session_key,
+    BpfSessionKeyV4, BpfSessionKeyV6, BpfSessionValueV4, BpfSessionValueV6, ConntrackPublishResult,
+    SESS_STATE_ESTABLISHED, SessionDecision, SessionKey, SessionMetadata, bpf_session_key_v4,
+    bpf_session_key_v6, reverse_session_key,
 };
 use crate::ip_proto::{PROTO_TCP, PROTO_UDP};
 use core::ffi::{c_int, c_void};
@@ -117,7 +117,13 @@ pub(super) fn publish_v4_session(
     // #8125: see build_conntrack_value_v4.
     timeout_secs: u32,
 ) -> ConntrackPublishResult {
-    let bpf_key = bpf_session_key_v4(src.octets(), dst.octets(), key.src_port, key.dst_port, key.protocol);
+    let bpf_key = bpf_session_key_v4(
+        src.octets(),
+        dst.octets(),
+        key.src_port,
+        key.dst_port,
+        key.protocol,
+    );
 
     // A cross-family reverse key means the session cannot be mirrored to the v4
     // conntrack map — skip the write entirely (pre-#5213 behaviour).
@@ -219,7 +225,13 @@ pub(super) fn build_conntrack_value_v4(
                 IpAddr::V4(d) => d,
                 _ => return None,
             };
-            bpf_session_key_v4(rsrc.octets(), rdst.octets(), rev.src_port, rev.dst_port, rev.protocol)
+            bpf_session_key_v4(
+                rsrc.octets(),
+                rdst.octets(),
+                rev.src_port,
+                rev.dst_port,
+                rev.protocol,
+            )
         }
         _ => return None,
     };
@@ -462,7 +474,13 @@ pub(super) fn build_conntrack_value_v6(
                 IpAddr::V6(d) => d,
                 _ => return None,
             };
-            bpf_session_key_v6(rsrc.octets(), rdst.octets(), rev.src_port, rev.dst_port, rev.protocol)
+            bpf_session_key_v6(
+                rsrc.octets(),
+                rdst.octets(),
+                rev.src_port,
+                rev.dst_port,
+                rev.protocol,
+            )
         }
         _ => return None,
     };
@@ -556,8 +574,14 @@ mod alg_type_tests {
 
     #[test]
     fn sip_session_tagged_when_alg_enabled() {
-        assert_eq!(alg_type_for_session(PROTO_UDP, 5060, 5060, false, 0), ALG_TYPE_SIP);
-        assert_eq!(alg_type_for_session(PROTO_TCP, 40000, 5060, false, 0), ALG_TYPE_SIP);
+        assert_eq!(
+            alg_type_for_session(PROTO_UDP, 5060, 5060, false, 0),
+            ALG_TYPE_SIP
+        );
+        assert_eq!(
+            alg_type_for_session(PROTO_TCP, 40000, 5060, false, 0),
+            ALG_TYPE_SIP
+        );
     }
 
     #[test]
@@ -772,7 +796,9 @@ mod publish_chokepoint_6923_tests {
             .find("pub(super) fn publish_v6_session(")
             .expect("#6923: publish_v6_session is gone — fix this bind, do not delete it");
         let body = &code[start..];
-        let end = body.find("\n}").expect("#6923: could not bound publish_v6_session");
+        let end = body
+            .find("\n}")
+            .expect("#6923: could not bound publish_v6_session");
         let body = &body[..end];
 
         let guard_at = body.find("v6_session_key_is_publishable").expect(
@@ -824,11 +850,13 @@ mod publish_chokepoint_6923_tests {
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
-        let start = code
-            .find("fn v6_session_key_is_publishable(")
-            .expect("#6923: the predicate is gone — this bind has rotted, fix it, do not delete it");
+        let start = code.find("fn v6_session_key_is_publishable(").expect(
+            "#6923: the predicate is gone — this bind has rotted, fix it, do not delete it",
+        );
         let body = &code[start..];
-        let end = body.find("\n}").expect("#6923: could not bound the predicate");
+        let end = body
+            .find("\n}")
+            .expect("#6923: could not bound the predicate");
         let body = &body[..end];
         assert!(
             body.contains("ipv6_ext_header_is_traversable"),
@@ -861,27 +889,32 @@ mod routing_domain_row_9546_tests {
     use crate::ip_proto::PROTO_TCP;
     use crate::nat::NatDecision;
     use crate::session::{
-        routing_domain_from_wire, routing_domain_to_wire, SessionDecision, SessionKey,
-        SessionMetadata, WireRoutingDomain, ROUTING_DOMAIN_WIRE_ABSENT,
+        ROUTING_DOMAIN_WIRE_ABSENT, SessionDecision, SessionKey, SessionMetadata,
+        WireRoutingDomain, routing_domain_from_wire, routing_domain_to_wire,
     };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     const TENANT: u32 = 100_007;
 
     fn decision() -> SessionDecision {
-        SessionDecision { resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 0,
-            tx_ifindex: 0,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-            route_mtu: 0,
-            transport_route_mtu: 0,
-        }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 0,
+                tx_ifindex: 0,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        }
     }
 
     fn metadata(is_reverse: bool) -> SessionMetadata {
@@ -903,6 +936,7 @@ mod routing_domain_row_9546_tests {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         }
     }
 
@@ -953,7 +987,10 @@ mod routing_domain_row_9546_tests {
             got, ROUTING_DOMAIN_WIRE_ABSENT,
             "a default-instance forward row must not read as 'not stated'"
         );
-        assert!(matches!(routing_domain_from_wire(got), WireRoutingDomain::Present(0)));
+        assert!(matches!(
+            routing_domain_from_wire(got),
+            WireRoutingDomain::Present(0)
+        ));
     }
 
     /// LOAD-BEARING CONTROL, both directions. A reverse row's key is the
@@ -969,14 +1006,27 @@ mod routing_domain_row_9546_tests {
                 got, ROUTING_DOMAIN_WIRE_ABSENT,
                 "a reverse row (key domain {key_domain}) must state absence, got {got}"
             );
-            assert!(matches!(routing_domain_from_wire(got), WireRoutingDomain::Absent));
+            assert!(matches!(
+                routing_domain_from_wire(got),
+                WireRoutingDomain::Absent
+            ));
         }
     }
 
     #[test]
     fn built_v4_forward_row_carries_the_domain_9546() {
         let row = build_conntrack_value_v4(
-            &key_v4(TENANT), decision(), &metadata(false), 0, 1, 2, 0, 0, 0, 0, 0,
+            &key_v4(TENANT),
+            decision(),
+            &metadata(false),
+            0,
+            1,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
         )
         .expect("a same-family v4 key must build a row");
         assert_eq!(
@@ -990,7 +1040,17 @@ mod routing_domain_row_9546_tests {
     #[test]
     fn built_v6_forward_row_carries_the_domain_9546() {
         let row = build_conntrack_value_v6(
-            &key_v6(TENANT), decision(), &metadata(false), 0, 1, 2, 0, 0, 0, 0, 0,
+            &key_v6(TENANT),
+            decision(),
+            &metadata(false),
+            0,
+            1,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
         )
         .expect("a same-family v6 key must build a row");
         assert_eq!(
@@ -1004,7 +1064,17 @@ mod routing_domain_row_9546_tests {
     #[test]
     fn built_reverse_row_states_absence_9546() {
         let row = build_conntrack_value_v4(
-            &key_v4(0), decision(), &metadata(true), 0, 1, 2, 0, 0, 0, 0, 0,
+            &key_v4(0),
+            decision(),
+            &metadata(true),
+            0,
+            1,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
         )
         .expect("a same-family v4 key must build a row");
         assert_eq!(row.routing_domain, ROUTING_DOMAIN_WIRE_ABSENT);

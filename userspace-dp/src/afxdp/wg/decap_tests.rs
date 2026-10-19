@@ -2357,25 +2357,24 @@ fn run_tun_origin_case_10038(permit_forward: bool) {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let mk_meta = |is_reverse: bool| SessionMetadata {
-        ingress_zone: TEST_SFMIX_ZONE_ID,
-        egress_zone: TEST_SFMIX_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 1,
-        fabric_ingress: false,
-        is_reverse,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-    };
+    let mk_meta = |is_reverse: bool| SessionMetadata { ingress_zone: TEST_SFMIX_ZONE_ID,
+    egress_zone: TEST_SFMIX_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: 0,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 1,
+    fabric_ingress: false,
+    is_reverse,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: 0,
+    policy_counter: None,
+    nat_scope_ifindex: None };
     let install_pair = |sessions: &mut SessionTable| {
         assert!(
             sessions.install_with_protocol_with_origin(
@@ -2681,25 +2680,24 @@ fn install_solicited_pair_10038(
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let mk_meta = |is_reverse: bool, ingress: u32, policy_idx: u32| SessionMetadata {
-        ingress_zone: TEST_SFMIX_ZONE_ID,
-        egress_zone: TEST_SFMIX_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: ingress,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: 1,
-        fabric_ingress: false,
-        is_reverse,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: policy_idx,
-        policy_counter: None,
-    };
+    let mk_meta = |is_reverse: bool, ingress: u32, policy_idx: u32| SessionMetadata { ingress_zone: TEST_SFMIX_ZONE_ID,
+    egress_zone: TEST_SFMIX_ZONE_ID,
+    ingress_zone_check: 0,
+    egress_zone_check: 0,
+    ingress_ifindex: ingress,
+    ingress_vlan_id: 0,
+    forward_ingress_vlan_id: None,
+    owner_rg_id: 1,
+    fabric_ingress: false,
+    is_reverse,
+    nat64_reverse: None,
+    log_session_init: false,
+    log_session_close: false,
+    policy_id: 0,
+    inactivity_timeout_ns: None,
+    policy_counter_idx: policy_idx,
+    policy_counter: None,
+    nat_scope_ifindex: None };
     if install_forward {
         assert!(
             sessions.install_with_protocol_with_origin(
@@ -3005,6 +3003,7 @@ fn wg_host_bound_forward_still_faces_host_inbound_10038() {
                 inactivity_timeout_ns: None,
                 policy_counter_idx: 1,
                 policy_counter: None,
+            nat_scope_ifindex: None,
             },
             SessionOrigin::ForwardFlow,
             122_000_000_000,
@@ -3843,8 +3842,18 @@ fn wg_tun_origin_domain_vrf_hit_delivers_10038() {
     assert_eq!(rev_key.routing_domain, 7, "the pair must live in domain 7");
     assert_eq!(
         (
-            entries.reverse.as_ref().expect("reverse").decision.install_table_domain,
-            entries.reverse.as_ref().expect("reverse").decision.install_table_check,
+            entries
+                .reverse
+                .as_ref()
+                .expect("reverse")
+                .decision
+                .install_table_domain,
+            entries
+                .reverse
+                .as_ref()
+                .expect("reverse")
+                .decision
+                .install_table_check,
         ),
         crate::session::install_table_identity("cust"),
         "the shared VRF reverse must retain its validated table identity for stale re-resolve"
@@ -3933,28 +3942,61 @@ fn worker_decap_input_filter_denied_data_has_no_state_effect_13663() {
     let engine = std::sync::Arc::clone(&forwarding.wg_engines[&id]);
     let inner = inner_v4([10, 123, 0, 5], [10, 0, 61, 102]);
     let mut wire = vec![0u8; 2048];
-    let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
+    let enc = init
+        .try_encap(&resp_pub, &inner, &mut wire)
+        .expect("initiator encap");
     let frame = outer_frame_from(&wire[..enc.len], WG_PORT, ROAMED_OUTER, ROAMED_SPORT);
     let meta = outer_meta(frame.len());
     let scratch = WgWorkerScratch::new(4096);
     let mut rejected = false;
-    assert!(super::decap::try_wg_decap_from_frame_with_input_filter(
-        &frame, meta, &forwarding, &scratch, &mut |_, _| false, &mut rejected,
-    )
-    .is_none());
-    assert!(rejected, "#13663: denied outer must set input_filter_rejected");
-    assert_eq!(engine.counters().decap_packets.load(Ordering::Relaxed), 0, "#13663: denied outer must not decap");
-    assert_eq!(decap_outcomes_observed(&engine), 0, "#13663: denied outer must not touch replay/counters");
-    assert_eq!(engine.take_worker_observed_endpoint(&init_pub), None, "#13663: denied outer must not roam the endpoint");
+    assert!(
+        super::decap::try_wg_decap_from_frame_with_input_filter(
+            &frame,
+            meta,
+            &forwarding,
+            &scratch,
+            &mut |_, _| false,
+            &mut rejected,
+        )
+        .is_none()
+    );
+    assert!(
+        rejected,
+        "#13663: denied outer must set input_filter_rejected"
+    );
+    assert_eq!(
+        engine.counters().decap_packets.load(Ordering::Relaxed),
+        0,
+        "#13663: denied outer must not decap"
+    );
+    assert_eq!(
+        decap_outcomes_observed(&engine),
+        0,
+        "#13663: denied outer must not touch replay/counters"
+    );
+    assert_eq!(
+        engine.take_worker_observed_endpoint(&init_pub),
+        None,
+        "#13663: denied outer must not roam the endpoint"
+    );
     // Replay untouched: the same record decaps under an allowing filter.
     let mut rejected2 = false;
     let decapped = super::decap::try_wg_decap_from_frame_with_input_filter(
-        &frame, meta, &forwarding, &scratch, &mut |_, _| true, &mut rejected2,
+        &frame,
+        meta,
+        &forwarding,
+        &scratch,
+        &mut |_, _| true,
+        &mut rejected2,
     )
     .expect("#13663: denied attempt must leave replay unconsumed");
     assert!(!rejected2);
     assert_eq!(&decapped.frame[14..], &inner[..]);
-    assert_eq!(engine.take_worker_observed_endpoint(&init_pub), Some(std::net::SocketAddr::from((ROAMED_OUTER, ROAMED_SPORT))), "#13663: allowed outer still roams");
+    assert_eq!(
+        engine.take_worker_observed_endpoint(&init_pub),
+        Some(std::net::SocketAddr::from((ROAMED_OUTER, ROAMED_SPORT))),
+        "#13663: allowed outer still roams"
+    );
 }
 
 #[test]
@@ -3966,31 +4008,71 @@ fn worker_decap_input_filter_denied_keepalive_and_malformed_do_not_roam_13663() 
     let scratch = WgWorkerScratch::new(4096);
     // Keepalive leg.
     let mut wire = vec![0u8; 2048];
-    let enc = init.create_keepalive(&resp_pub, &mut wire).expect("initiator keepalive");
+    let enc = init
+        .create_keepalive(&resp_pub, &mut wire)
+        .expect("initiator keepalive");
     let frame = outer_frame_from(&wire[..enc.len], WG_PORT, ROAMED_OUTER, ROAMED_SPORT);
     let mut rejected = false;
-    assert!(super::decap::try_wg_decap_from_frame_with_input_filter(
-        &frame, outer_meta(frame.len()), &forwarding, &scratch, &mut |_, _| false, &mut rejected,
-    )
-    .is_none());
-    assert!(rejected, "#13663: denied keepalive must set input_filter_rejected");
-    assert_eq!(engine.counters().decap_keepalives.load(Ordering::Relaxed), 0, "#13663: denied keepalive must not reach decap");
-    assert_eq!(engine.take_worker_observed_endpoint(&init_pub), None, "#13663: denied keepalive must not roam");
+    assert!(
+        super::decap::try_wg_decap_from_frame_with_input_filter(
+            &frame,
+            outer_meta(frame.len()),
+            &forwarding,
+            &scratch,
+            &mut |_, _| false,
+            &mut rejected,
+        )
+        .is_none()
+    );
+    assert!(
+        rejected,
+        "#13663: denied keepalive must set input_filter_rejected"
+    );
+    assert_eq!(
+        engine.counters().decap_keepalives.load(Ordering::Relaxed),
+        0,
+        "#13663: denied keepalive must not reach decap"
+    );
+    assert_eq!(
+        engine.take_worker_observed_endpoint(&init_pub),
+        None,
+        "#13663: denied keepalive must not roam"
+    );
     // Malformed-inner leg (fresh engines so counters/endpoints are independent).
     let (init2, resp2, init2_pub, resp2_pub) = established_pair(allowed.clone(), allowed);
     let (forwarding2, id2) = forwarding_with_engine(resp2);
     let engine2 = std::sync::Arc::clone(&forwarding2.wg_engines[&id2]);
     let mut wire2 = vec![0u8; 2048];
-    let enc2 = init2.try_encap(&resp2_pub, &[0xffu8; 32], &mut wire2).expect("initiator encap");
+    let enc2 = init2
+        .try_encap(&resp2_pub, &[0xffu8; 32], &mut wire2)
+        .expect("initiator encap");
     let frame2 = outer_frame_from(&wire2[..enc2.len], WG_PORT, ROAMED_OUTER, ROAMED_SPORT);
     let mut rejected2 = false;
-    assert!(super::decap::try_wg_decap_from_frame_with_input_filter(
-        &frame2, outer_meta(frame2.len()), &forwarding2, &scratch, &mut |_, _| false, &mut rejected2,
-    )
-    .is_none());
-    assert!(rejected2, "#13663: denied malformed-inner must set input_filter_rejected");
-    assert_eq!(decap_outcomes_observed(&engine2), 0, "#13663: denied malformed-inner must not reach decap");
-    assert_eq!(engine2.take_worker_observed_endpoint(&init2_pub), None, "#13663: denied malformed-inner must not roam");
+    assert!(
+        super::decap::try_wg_decap_from_frame_with_input_filter(
+            &frame2,
+            outer_meta(frame2.len()),
+            &forwarding2,
+            &scratch,
+            &mut |_, _| false,
+            &mut rejected2,
+        )
+        .is_none()
+    );
+    assert!(
+        rejected2,
+        "#13663: denied malformed-inner must set input_filter_rejected"
+    );
+    assert_eq!(
+        decap_outcomes_observed(&engine2),
+        0,
+        "#13663: denied malformed-inner must not reach decap"
+    );
+    assert_eq!(
+        engine2.take_worker_observed_endpoint(&init2_pub),
+        None,
+        "#13663: denied malformed-inner must not roam"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -4041,7 +4123,9 @@ fn cross_family_mapped_v6_wg_decap_rejected_14957() {
     // Preconditions: v4 listener owned in WAN, mapped v6 form owned in LAN,
     // native v6 WAN address also present (control leg below).
     assert_eq!(
-        forwarding.wg_local_address_zone_v4.get(&std::net::Ipv4Addr::new(172, 16, 80, 8)),
+        forwarding
+            .wg_local_address_zone_v4
+            .get(&std::net::Ipv4Addr::new(172, 16, 80, 8)),
         Some(&crate::test_zone_ids::TEST_WAN_ZONE_ID),
         "fixture: v4 listener owner is WAN"
     );
@@ -4054,7 +4138,9 @@ fn cross_family_mapped_v6_wg_decap_rejected_14957() {
     assert!(forwarding.owns_configured_ip(std::net::IpAddr::V6(mapped)));
     let inner = inner_v4([10, 123, 0, 5], [10, 0, 61, 102]);
     let mut wire = vec![0u8; 2048];
-    let enc = init.try_encap(&rpub, &inner, &mut wire).expect("initiator encap");
+    let enc = init
+        .try_encap(&rpub, &inner, &mut wire)
+        .expect("initiator encap");
     let scratch = WgWorkerScratch::new(4096);
     let peer_v6: std::net::Ipv6Addr = "::ffff:203.0.113.7".parse().unwrap();
 
@@ -4079,10 +4165,15 @@ fn cross_family_mapped_v6_wg_decap_rejected_14957() {
         "#14957: mapped-v6 listener tuple in a foreign zone must not be claimed"
     );
     assert!(
-        super::decap::try_wg_decap_from_frame(&frame_lan, meta_lan, &forwarding, &scratch).is_none(),
+        super::decap::try_wg_decap_from_frame(&frame_lan, meta_lan, &forwarding, &scratch)
+            .is_none(),
         "#14957: cross-family record arriving in LAN must not decap via the WAN v4 listener"
     );
-    assert_eq!(decap_outcomes_observed(&engine), before, "#14957: rejection must precede AEAD");
+    assert_eq!(
+        decap_outcomes_observed(&engine),
+        before,
+        "#14957: rejection must precede AEAD"
+    );
     assert_eq!(
         engine.take_worker_observed_endpoint(&init_pub),
         None,
@@ -4099,10 +4190,15 @@ fn cross_family_mapped_v6_wg_decap_rejected_14957() {
         "#14957: mapped-v6 wire destination must never be WG underlay for a v4-bound listener"
     );
     assert!(
-        super::decap::try_wg_decap_from_frame(&frame_wan, meta_wan, &forwarding, &scratch).is_none(),
+        super::decap::try_wg_decap_from_frame(&frame_wan, meta_wan, &forwarding, &scratch)
+            .is_none(),
         "#14957: mapped-v6 wire record must not decap via the v4 listener even in the mapped dst zone"
     );
-    assert_eq!(decap_outcomes_observed(&engine), before, "#14957: WAN mapped rejection must precede AEAD");
+    assert_eq!(
+        decap_outcomes_observed(&engine),
+        before,
+        "#14957: WAN mapped rejection must precede AEAD"
+    );
     assert_eq!(engine.take_worker_observed_endpoint(&init_pub), None);
 
     // (c) Control: the SAME authenticated record on its native v4 wire form
@@ -4138,7 +4234,9 @@ fn cross_family_v6_listener_mapped_dst_rejected_v4_control_14957() {
     forwarding.wg_engines.insert(id, std::sync::Arc::new(resp));
     let inner = inner_v4([10, 123, 0, 5], [203, 0, 113, 50]);
     let mut wire = vec![0u8; 2048];
-    let enc = init.try_encap(&rpub, &inner, &mut wire).expect("initiator encap");
+    let enc = init
+        .try_encap(&rpub, &inner, &mut wire)
+        .expect("initiator encap");
     let scratch = WgWorkerScratch::new(4096);
     // Mapped destination naming the v4 listener address space must not claim
     // the v6 listener.
@@ -4146,7 +4244,8 @@ fn cross_family_v6_listener_mapped_dst_rejected_v4_control_14957() {
     let frame_mapped = outer_frame_v6(&wire[..enc.len], WG_PORT, peer_v6, mapped);
     let meta_mapped = outer_meta_v6(frame_mapped.len());
     assert!(
-        super::decap::try_wg_decap_from_frame(&frame_mapped, meta_mapped, &forwarding, &scratch).is_none(),
+        super::decap::try_wg_decap_from_frame(&frame_mapped, meta_mapped, &forwarding, &scratch)
+            .is_none(),
         "#14957: mapped-v6 wire record must not decap via any listener"
     );
     // Control: native v6 destination in-zone decaps.
@@ -4200,7 +4299,11 @@ fn cross_family_native_v6_binds_wildcard_not_specific_v4_14957() {
     forwarding.wg_engines.insert(1, std::sync::Arc::new(resp1));
     forwarding.wg_engines.insert(2, std::sync::Arc::new(resp2));
     assert_eq!(
-        forwarding.tunnel_endpoints.get(&2).expect("wildcard ep").source,
+        forwarding
+            .tunnel_endpoints
+            .get(&2)
+            .expect("wildcard ep")
+            .source,
         std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
         "fixture: empty source parses to the unspecified wildcard"
     );
@@ -4209,7 +4312,9 @@ fn cross_family_native_v6_binds_wildcard_not_specific_v4_14957() {
     let scratch = WgWorkerScratch::new(4096);
     let inner = inner_v4([10, 123, 0, 5], [10, 0, 61, 102]);
     let mut wire2 = vec![0u8; 2048];
-    let enc2 = init2.try_encap(&rpub2, &inner, &mut wire2).expect("encap wildcard peer");
+    let enc2 = init2
+        .try_encap(&rpub2, &inner, &mut wire2)
+        .expect("encap wildcard peer");
     let frame_wild = outer_frame_v6(&wire2[..enc2.len], WG_PORT, peer_v6, local_v6);
     let decapped = super::decap::try_wg_decap_from_frame(
         &frame_wild,

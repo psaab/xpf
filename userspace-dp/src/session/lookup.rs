@@ -174,10 +174,7 @@ impl SessionTable {
     /// installed entry that the old lookup saw before deciding whether to
     /// refuse a peer delete. It still performs the same stale-index and alias
     /// validation, and cannot mutate the table by construction.
-    pub fn probe_with_origin(
-        &self,
-        key: &SessionKey,
-    ) -> Option<(SessionLookup, SessionOrigin)> {
+    pub fn probe_with_origin(&self, key: &SessionKey) -> Option<(SessionLookup, SessionOrigin)> {
         let record = self.probe_record_with_origin(key)?;
         Some((
             SessionLookup {
@@ -899,8 +896,7 @@ impl SessionTable {
         if !matches!(reply_key.discriminator, TunnelDiscriminator::None) {
             return IpsecReplyAliasLookup::NativeMiss;
         }
-        let pmech_probe =
-            PMechSessionDirectory::global().probe_packet_key(reply_key);
+        let pmech_probe = PMechSessionDirectory::global().probe_packet_key(reply_key);
         if !pmech_probe.is_fallthrough() {
             return IpsecReplyAliasLookup::PMechBlocked(pmech_probe);
         }
@@ -1121,7 +1117,7 @@ impl SessionTable {
                 decision: record.entry.decision,
                 metadata: record.entry.metadata.clone(),
                 forwarding_generation: record.entry.forwarding_generation,
-            aux: SessionLookupAux::default(),
+                aux: SessionLookupAux::default(),
             })
         } else {
             ForwardNatQuoteLookup::NoMatch
@@ -1519,10 +1515,7 @@ impl SessionTable {
     /// different facts, and the diagnostic that reads this exists precisely to
     /// tell them apart — `None` means the second, `Some((zeroed, _))` the first.
     /// Returning bare counters would collapse them into one zero.
-    pub fn counters_with_replica_flag(
-        &self,
-        key: &SessionKey,
-    ) -> Option<(SessionCounters, bool)> {
+    pub fn counters_with_replica_flag(&self, key: &SessionKey) -> Option<(SessionCounters, bool)> {
         self.entry_by_key(key)
             .map(|entry| (entry.counters, entry.origin.is_peer_synced()))
     }
@@ -1532,8 +1525,13 @@ impl SessionTable {
     /// pre-decision probes and packet lookups must leave untouched.
     #[cfg(test)]
     pub(crate) fn lifetime_state_for(&self, key: &SessionKey) -> Option<(u64, bool, u64)> {
-        self.entry_by_key(key)
-            .map(|entry| (entry.last_seen_ns, entry.handshake_pending, entry.expires_after_ns))
+        self.entry_by_key(key).map(|entry| {
+            (
+                entry.last_seen_ns,
+                entry.handshake_pending,
+                entry.expires_after_ns,
+            )
+        })
     }
 
     /// #5152: test-only read of an entry's `first_held_ns` — the standby
@@ -1586,12 +1584,13 @@ impl SessionTable {
         {
             return None;
         }
-        self.remove_entry(key, RemovalKind::Transfer).map(|entry| SessionLookup {
-            decision: entry.decision,
-            metadata: entry.metadata,
-            forwarding_generation: entry.forwarding_generation,
+        self.remove_entry(key, RemovalKind::Transfer)
+            .map(|entry| SessionLookup {
+                decision: entry.decision,
+                metadata: entry.metadata,
+                forwarding_generation: entry.forwarding_generation,
                 aux: SessionLookupAux::default(),
-        })
+            })
     }
 
     pub fn iter_with_origin(
@@ -1619,14 +1618,7 @@ impl SessionTable {
     /// primary-key index.
     pub fn iter_with_identity(
         &self,
-        mut f: impl FnMut(
-            &SessionKey,
-            SessionDecision,
-            &SessionMetadata,
-            SessionOrigin,
-            u64,
-            u64,
-        ),
+        mut f: impl FnMut(&SessionKey, SessionDecision, &SessionMetadata, SessionOrigin, u64, u64),
     ) {
         for (key, handle) in &self.key_to_handle {
             if let Some(record) = self.entries.get(*handle as usize) {
@@ -1653,11 +1645,7 @@ impl SessionTable {
     ) -> Option<(SessionKey, SessionMetadata, u64)> {
         let companion_key = reverse_session_key(key, nat);
         let record = self.entry_by_key(&companion_key)?;
-        Some((
-            companion_key,
-            record.metadata.clone(),
-            record.session_id,
-        ))
+        Some((companion_key, record.metadata.clone(), record.session_id))
     }
 
     /// Iterate over ALL session entries in one pass with idle time (in
@@ -1678,7 +1666,13 @@ impl SessionTable {
             if let Some(record) = self.entries.get(*handle as usize) {
                 let entry = &record.entry;
                 let idle_ns = now_ns.saturating_sub(entry.last_seen_ns);
-                f(key, entry.decision, &entry.metadata, idle_ns, entry.counters);
+                f(
+                    key,
+                    entry.decision,
+                    &entry.metadata,
+                    idle_ns,
+                    entry.counters,
+                );
             }
         }
     }
@@ -1721,7 +1715,7 @@ impl SessionTable {
     /// `f` is invoked only for occupied slots (at most `budget` times). No
     /// allocation, no atomics — a bounded index walk plus one `saturating_sub`
     /// per occupied slot.
-     /// `iter_with_origin`, BUDGETED and RESUMABLE — the same cursor/budget
+    /// `iter_with_origin`, BUDGETED and RESUMABLE — the same cursor/budget
     /// contract as [`Self::iter_with_idle_budgeted`], for the same reason
     /// (#9327).
     ///
@@ -1770,14 +1764,10 @@ impl SessionTable {
                 f(&record.key, record.entry.origin);
             }
         }
-        if end >= cap {
-            0
-        } else {
-            end
-        }
+        if end >= cap { 0 } else { end }
     }
 
-   pub fn iter_with_idle_budgeted(
+    pub fn iter_with_idle_budgeted(
         &self,
         cursor: usize,
         budget: usize,
@@ -1953,8 +1943,7 @@ where
             continue;
         };
         let entry = &record.entry;
-        let Some(forward_reply_key) =
-            l3_reverse_key_for_forward(&record.key, entry.decision.nat)
+        let Some(forward_reply_key) = l3_reverse_key_for_forward(&record.key, entry.decision.nat)
         else {
             continue;
         };
@@ -1969,9 +1958,7 @@ where
             continue;
         }
         live_candidate = true;
-        if egress_routing_domain(entry.decision.resolution.egress_ifindex)
-            == reply_routing_domain
-        {
+        if egress_routing_domain(entry.decision.resolution.egress_ifindex) == reply_routing_domain {
             return true;
         }
         // NOTE (#11061 R3): no quarantine skip here on purpose, exactly as
@@ -2047,6 +2034,7 @@ mod export_unresolved_sessions_10790_tests {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         }
     }
 
@@ -2148,7 +2136,11 @@ mod export_unresolved_sessions_10790_tests {
             ForwardingDisposition::MissingNeighbor,
         ] {
             let mut sessions = SessionTable::new();
-            let egress = if disposition == ForwardingDisposition::NoRoute { 0 } else { 12 };
+            let egress = if disposition == ForwardingDisposition::NoRoute {
+                0
+            } else {
+                12
+            };
             let key = key(42001);
             assert!(sessions.install_with_protocol_with_origin(
                 key.clone(),
@@ -2162,13 +2154,15 @@ mod export_unresolved_sessions_10790_tests {
             let kick_epoch = sessions.current_epoch();
             sessions.delete(&key);
             let mut harvested = Vec::new();
-            assert!(sessions.take_tombstones_for_export(kick_epoch, &[1], |tombstone| {
-                harvested.push((
-                    tombstone.key.clone(),
-                    tombstone.decision.resolution.disposition,
-                ));
-                true
-            }));
+            assert!(
+                sessions.take_tombstones_for_export(kick_epoch, &[1], |tombstone| {
+                    harvested.push((
+                        tombstone.key.clone(),
+                        tombstone.decision.resolution.disposition,
+                    ));
+                    true
+                })
+            );
             assert_eq!(
                 harvested,
                 vec![(key, disposition)],
@@ -2176,10 +2170,12 @@ mod export_unresolved_sessions_10790_tests {
             );
             // Drain-once: a second take must see nothing (no double-close).
             let mut again = Vec::new();
-            assert!(sessions.take_tombstones_for_export(kick_epoch, &[1], |tombstone| {
-                again.push(tombstone.key.clone());
-                true
-            }));
+            assert!(
+                sessions.take_tombstones_for_export(kick_epoch, &[1], |tombstone| {
+                    again.push(tombstone.key.clone());
+                    true
+                })
+            );
             assert!(again.is_empty(), "tombstone must drain exactly once");
         }
     }
@@ -2200,10 +2196,15 @@ mod export_unresolved_sessions_10790_tests {
         let kick_epoch = sessions.current_epoch();
         sessions.delete(&key);
         let mut harvested = Vec::new();
-        assert!(sessions.take_tombstones_for_export(kick_epoch, &[1], |tombstone| {
-            harvested.push(tombstone.key.clone());
-            true
-        }));
-        assert!(harvested.is_empty(), "PolicyDenied is not export-visible and must not tombstone");
+        assert!(
+            sessions.take_tombstones_for_export(kick_epoch, &[1], |tombstone| {
+                harvested.push(tombstone.key.clone());
+                true
+            })
+        );
+        assert!(
+            harvested.is_empty(),
+            "PolicyDenied is not export-visible and must not tombstone"
+        );
     }
 }

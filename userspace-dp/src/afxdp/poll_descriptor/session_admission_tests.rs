@@ -28,8 +28,8 @@ mod new_flow_session_limit_tests {
             dst_ip: dst,
             src_port,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }
     }
 
@@ -52,23 +52,29 @@ mod new_flow_session_limit_tests {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         }
     }
 
     fn decision() -> crate::session::SessionDecision {
-        crate::session::SessionDecision { resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-            src_mac: None,
-            tx_vlan_id: 0,
-            route_mtu: 0,
-            transport_route_mtu: 0,
-        }, nat: crate::nat::NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+        crate::session::SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: None,
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: crate::nat::NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        }
     }
 
     /// Install `n` distinct counted forward flows (distinct src ports) for
@@ -193,26 +199,12 @@ mod new_flow_session_limit_tests {
         install_n(&mut table, TEST_DMZ_ZONE_ID, attacker, dst, 50000, 1);
         assert_eq!(table.session_limit_src_count(TEST_DMZ_ZONE_ID, attacker), 1);
         assert_eq!(
-            new_flow_session_limit_drop(
-                &fw,
-                &table,
-                "other-zone",
-                TEST_DMZ_ZONE_ID,
-                attacker,
-                dst
-            ),
+            new_flow_session_limit_drop(&fw, &table, "other-zone", TEST_DMZ_ZONE_ID, attacker, dst),
             None,
             "the default source quota is independently enforced per ingress zone"
         );
         assert_eq!(
-            new_flow_session_limit_drop(
-                &fw,
-                &table,
-                "unconfigured",
-                TEST_LAN_ZONE_ID,
-                other,
-                dst
-            ),
+            new_flow_session_limit_drop(&fw, &table, "unconfigured", TEST_LAN_ZONE_ID, other, dst),
             None,
             "one source reaching its quota must not block another source"
         );
@@ -359,8 +351,8 @@ mod tcp_syn_check_tests {
             dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)),
             src_port,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }
     }
 
@@ -383,23 +375,29 @@ mod tcp_syn_check_tests {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         }
     }
 
     fn fwd_decision() -> SessionDecision {
-        SessionDecision { resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-            src_mac: None,
-            tx_vlan_id: 0,
-            route_mtu: 0,
-            transport_route_mtu: 0,
-        }, nat: crate::nat::NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: None,
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: crate::nat::NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        }
     }
 
     /// Model the transit session-MISS guard and install path with the default
@@ -451,7 +449,9 @@ mod tcp_syn_check_tests {
         // carry a closing flag; a SYN|ACK without FIN/RST supports asymmetric
         // routing, but closing SYNs must never seed an immediately-closing
         // session.
-        assert!(!strict_syn_check_drops_new_flow(PROTO_TCP, TCP_SYN, false, false));
+        assert!(!strict_syn_check_drops_new_flow(
+            PROTO_TCP, TCP_SYN, false, false
+        ));
         assert!(!strict_syn_check_drops_new_flow(
             PROTO_TCP,
             TCP_SYN | TCP_ACK,
@@ -491,7 +491,9 @@ mod tcp_syn_check_tests {
             (40404, TCP_RST | TCP_ACK),
             (40405, TCP_FIN | TCP_ACK),
         ] {
-            assert!(strict_syn_check_drops_new_flow(PROTO_TCP, flags, true, false));
+            assert!(strict_syn_check_drops_new_flow(
+                PROTO_TCP, flags, true, false
+            ));
             assert!(
                 !install_on_miss_with_checks(&mut table, tcp_key(port), flags, true, false),
                 "no-syn-check must not install closing flags 0x{flags:02x}"
@@ -518,8 +520,16 @@ mod tcp_syn_check_tests {
         // closing session; with it, nothing is installed.
         assert!(!install_on_miss(&mut table, tcp_key(40000), TCP_RST));
         assert!(!install_on_miss(&mut table, tcp_key(40001), TCP_FIN));
-        assert!(!install_on_miss(&mut table, tcp_key(40002), TCP_FIN | TCP_ACK));
-        assert!(!install_on_miss(&mut table, tcp_key(40003), TCP_RST | TCP_ACK));
+        assert!(!install_on_miss(
+            &mut table,
+            tcp_key(40002),
+            TCP_FIN | TCP_ACK
+        ));
+        assert!(!install_on_miss(
+            &mut table,
+            tcp_key(40003),
+            TCP_RST | TCP_ACK
+        ));
         assert_eq!(
             table.len(),
             0,
@@ -533,7 +543,11 @@ mod tcp_syn_check_tests {
         // unaffected, while closing SYN first packets cannot seed state.
         let syn = tcp_key(40100);
         assert!(install_on_miss(&mut table, syn.clone(), TCP_SYN));
-        assert!(table.lookup(&syn, 1_001_000_000, TCP_SYN | TCP_ACK).is_some());
+        assert!(
+            table
+                .lookup(&syn, 1_001_000_000, TCP_SYN | TCP_ACK)
+                .is_some()
+        );
         for (port, flags) in [
             (40101, TCP_SYN | TCP_FIN),
             (40102, TCP_SYN | TCP_RST),
@@ -666,9 +680,7 @@ mod tcp_syn_check_tests {
     #[test]
     fn ah_protocol_never_drops_at_syn_gate_10729() {
         for flags in [TCP_SYN, TCP_ACK, TCP_ACK | TCP_PSH, TCP_FIN, 0] {
-            for (no_syn, strict) in
-                [(false, false), (true, false), (false, true), (true, true)]
-            {
+            for (no_syn, strict) in [(false, false), (true, false), (false, true), (true, true)] {
                 assert!(
                     !strict_syn_check_drops_new_flow(
                         crate::ip_proto::PROTO_AH,

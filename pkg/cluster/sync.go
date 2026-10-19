@@ -2330,6 +2330,18 @@ func (s *SessionSync) stampEgressIfaceFold(ifindex uint32, vlan uint16) uint32 {
 	return s.stampIngressIfaceFold(ifindex, vlan)
 }
 
+// stampNatScopeFold fills the #15176 wire field: the cluster-stable fold
+// of the session's validated NAT-scope logical ingress ifindex, carried
+// on the helper delta as NatScopeIfindex (0 = none recorded). The same
+// direction-agnostic resolver folds it; the peer resolves it back to its
+// own logical unit for session-hit NAT revalidation.
+func (s *SessionSync) stampNatScopeFold(ifindex int32) uint32 {
+	if ifindex <= 0 {
+		return 0
+	}
+	return s.stampIngressIfaceFold(uint32(ifindex), 0)
+}
+
 // SetRuntime wires the backend-neutral runtime used by SessionSync.
 //
 // Passing nil clears both runtime domains, matching the existing nil-

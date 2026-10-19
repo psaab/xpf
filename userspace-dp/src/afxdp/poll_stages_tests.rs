@@ -17,11 +17,7 @@ const TCP_FLAG_ACK: u8 = 0x10;
 /// netlink `add_kernel_neighbor` syscall, so a fresh limiter per call is
 /// correct here. The limiter's own repeat/flood gating is pinned directly in
 /// `neighbor_program_limiter::tests`.
-fn classify(
-    frame: &[u8],
-    meta: UserspaceDpMeta,
-    ctx: &WorkerContext,
-) -> StageOutcome<()> {
+fn classify(frame: &[u8], meta: UserspaceDpMeta, ctx: &WorkerContext) -> StageOutcome<()> {
     let mut neigh_limiter = KernelNeighborProgramLimiter::new();
     stage_link_layer_classify(frame, meta, TEST_NOW_NS, &mut neigh_limiter, ctx)
 }
@@ -288,7 +284,8 @@ fn session_miss_ack_stage_invokes_syn_cookie_runtime_validation() {
             session_close_burst: 0,
         },
     );
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -339,18 +336,13 @@ fn session_miss_ack_stage_invokes_syn_cookie_runtime_validation() {
         screen.check_packet_with_zone_id("lan", TEST_LAN_ZONE_ID, &syn_info, TEST_NOW_SECS),
         ScreenVerdict::Pass
     );
-    let _challenge = match screen.check_packet_with_zone_id(
-        "lan",
-        TEST_LAN_ZONE_ID,
-        &syn_info,
-        TEST_NOW_SECS,
-    ) {
-        ScreenVerdict::SynCookieChallenge(challenge) => challenge,
-        other => panic!("expected SYN-cookie challenge, got {other:?}"),
-    };
+    let _challenge =
+        match screen.check_packet_with_zone_id("lan", TEST_LAN_ZONE_ID, &syn_info, TEST_NOW_SECS) {
+            ScreenVerdict::SynCookieChallenge(challenge) => challenge,
+            other => panic!("expected SYN-cookie challenge, got {other:?}"),
+        };
 
-    let invalid_ack_frame =
-        tcp_v4_frame(client, server, 49152, 443, TCP_FLAG_ACK, 2, 0xdead_beef);
+    let invalid_ack_frame = tcp_v4_frame(client, server, 49152, 443, TCP_FLAG_ACK, 2, 0xdead_beef);
     let invalid_ack_meta = tcp_v4_meta(&invalid_ack_frame, TCP_FLAG_ACK);
     let invalid_ack_flow = parse_session_flow_from_bytes(&invalid_ack_frame, invalid_ack_meta)
         .expect("session flow from invalid ACK");
@@ -393,15 +385,11 @@ fn session_miss_ack_stage_invokes_syn_cookie_runtime_validation() {
     assert_eq!(screen_event.screen_id, 1 << 14);
     assert_eq!(event_handle.dataplane_event_stats().screen_drop.sent, 1);
 
-    let challenge = match screen.check_packet_with_zone_id(
-        "lan",
-        TEST_LAN_ZONE_ID,
-        &syn_info,
-        TEST_NOW_SECS,
-    ) {
-        ScreenVerdict::SynCookieChallenge(challenge) => challenge,
-        other => panic!("invalid ACK must not install SYN-cookie bypass, got {other:?}"),
-    };
+    let challenge =
+        match screen.check_packet_with_zone_id("lan", TEST_LAN_ZONE_ID, &syn_info, TEST_NOW_SECS) {
+            ScreenVerdict::SynCookieChallenge(challenge) => challenge,
+            other => panic!("invalid ACK must not install SYN-cookie bypass, got {other:?}"),
+        };
 
     let ack_frame = tcp_v4_frame(
         client,
@@ -554,7 +542,8 @@ fn unresolved_screen_profile_zone_continues_to_policy_5806() {
             session_close_burst: 0,
         },
     );
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -690,7 +679,10 @@ fn unresolved_screen_profile_zone_continues_to_policy_5806() {
          must still be false when there is nothing to enforce and nothing to report"
     );
     let (continued_empty, warns_empty) = run(&mut empty);
-    assert!(continued_empty, "an empty screen state must continue to policy");
+    assert!(
+        continued_empty,
+        "an empty screen state must continue to policy"
+    );
     assert_eq!(
         warns_empty, 0,
         "an empty screen state has no unresolved reference, so there is nothing \
@@ -1112,7 +1104,8 @@ fn priority_tagged_vlan0_screen_stage_parses_l3_at_offset_18() {
             session_close_burst: 0,
         },
     );
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -1188,8 +1181,8 @@ fn priority_tagged_vlan0_screen_stage_parses_l3_at_offset_18() {
     let mut cookie_screen = syn_cookie_screen();
     let syn_frame = tcp_v4_syn_frame_with_l2(Vlan::PriorityTagged, 5);
     let syn_meta = tcp_v4_syn_meta_with_l2(&syn_frame, Vlan::PriorityTagged);
-    let syn_flow = parse_session_flow_from_bytes(&syn_frame, syn_meta)
-        .expect("session flow from tagged SYN");
+    let syn_flow =
+        parse_session_flow_from_bytes(&syn_frame, syn_meta).expect("session flow from tagged SYN");
     let syn_info = extract_screen_info(
         &syn_frame,
         syn_meta.addr_family,
@@ -1206,12 +1199,7 @@ fn priority_tagged_vlan0_screen_stage_parses_l3_at_offset_18() {
     // First SYN passes; second crosses the flood threshold and
     // mints the cookie challenge (mirrors the SYN-cookie test).
     assert_eq!(
-        cookie_screen.check_packet_with_zone_id(
-            "lan",
-            TEST_LAN_ZONE_ID,
-            &syn_info,
-            TEST_NOW_SECS
-        ),
+        cookie_screen.check_packet_with_zone_id("lan", TEST_LAN_ZONE_ID, &syn_info, TEST_NOW_SECS),
         ScreenVerdict::Pass
     );
     let challenge = match cookie_screen.check_packet_with_zone_id(
@@ -1244,8 +1232,8 @@ fn priority_tagged_vlan0_screen_stage_parses_l3_at_offset_18() {
         tcp_flags: TCP_FLAG_ACK,
         ..ack_meta
     };
-    let ack_flow = parse_session_flow_from_bytes(&ack_frame, ack_meta)
-        .expect("session flow from tagged ACK");
+    let ack_flow =
+        parse_session_flow_from_bytes(&ack_frame, ack_meta).expect("session flow from tagged ACK");
     let mut counters = BatchCounters::default();
     assert!(
         matches!(
@@ -1304,8 +1292,7 @@ fn neighbor_learn_ctx(
     let binding_lookup = Box::leak(Box::new(WorkerBindingLookup::default()));
     let mirror_targets = Box::leak(Box::new(MirrorTargetMap::default()));
     let ha_state = Box::leak(Box::new(BTreeMap::new()));
-    let dynamic_neighbors_ref =
-        Box::leak(Box::new(dynamic_neighbors.clone())) as &'static Arc<_>;
+    let dynamic_neighbors_ref = Box::leak(Box::new(dynamic_neighbors.clone())) as &'static Arc<_>;
     let shared_sessions = Box::leak(Box::new(Arc::new(Mutex::new(FastMap::default()))));
     let shared_nat_sessions = Box::leak(Box::new(Arc::new(Mutex::new(FastMap::default()))));
     let shared_forward_wire_sessions =
@@ -1619,10 +1606,8 @@ fn arp_two_vlans_same_ip_distinct_logical_keys_2370() {
     let mac_v50 = [0x02, 0x00, 0x00, 0x00, 0x00, 0x50];
 
     // Same physical port (11), same neighbor IP, different VLANs.
-    let _ =
-        classify(&arp_reply_frame(ip, mac_v80), link_layer_meta(11, 80), ctx);
-    let _ =
-        classify(&arp_reply_frame(ip, mac_v50), link_layer_meta(11, 50), ctx);
+    let _ = classify(&arp_reply_frame(ip, mac_v80), link_layer_meta(11, 80), ctx);
+    let _ = classify(&arp_reply_frame(ip, mac_v50), link_layer_meta(11, 50), ctx);
 
     assert_eq!(
         neighbors.get(&(12, IpAddr::V4(ip))).map(|e| e.mac),
@@ -1695,7 +1680,11 @@ fn outlined_arp_ndp_handlers_still_learn_and_program_6261() {
     // handler must learn AND the stage must still recycle the ARP frame.
     let arp_ip = Ipv4Addr::new(172, 16, 80, 61);
     let arp_mac = [0x02, 0x00, 0x00, 0x00, 0x62, 0x61];
-    let arp_outcome = classify(&arp_reply_frame(arp_ip, arp_mac), link_layer_meta(11, 80), ctx);
+    let arp_outcome = classify(
+        &arp_reply_frame(arp_ip, arp_mac),
+        link_layer_meta(11, 80),
+        ctx,
+    );
     assert!(
         matches!(arp_outcome, StageOutcome::RecycleAndContinue),
         "ARP frames must still recycle after outlining (#6261)"
@@ -1813,9 +1802,7 @@ fn ndp_na_frame_with_target_and_mac(
     let packet_end = l3_start + 40 + payload_len as usize;
     // Shared stamper (single source of truth, also used by the #2368
     // parser tests) — the strict NA parser requires a valid checksum.
-    super::super::test_fixtures::stamp_icmpv6_checksum(
-        &mut f, l3_start, l4_start, packet_end,
-    );
+    super::super::test_fixtures::stamp_icmpv6_checksum(&mut f, l3_start, l4_start, packet_end);
     (f, IpAddr::V6(Ipv6Addr::from(target_bytes)), target_mac)
 }
 
@@ -1842,8 +1829,7 @@ fn arp_invalid_sender_ip_not_learned_2790() {
     // 1) Valid unicast on-subnet sender — MUST be learned.
     let good_ip = Ipv4Addr::new(10, 0, 61, 50);
     let good_mac = [0xde, 0xad, 0xbe, 0xef, 0x00, 0x18];
-    let outcome =
-        classify(&arp_reply_frame(good_ip, good_mac), meta, ctx);
+    let outcome = classify(&arp_reply_frame(good_ip, good_mac), meta, ctx);
     assert!(matches!(outcome, StageOutcome::RecycleAndContinue));
     assert_eq!(
         neighbors.get(&(24, IpAddr::V4(good_ip))).map(|e| e.mac),
@@ -1854,14 +1840,13 @@ fn arp_invalid_sender_ip_not_learned_2790() {
 
     // 2) Illegitimate senders — each recycled but NEVER cached.
     for bad_ip in [
-        Ipv4Addr::new(0, 0, 0, 0),             // unspecified
-        Ipv4Addr::new(255, 255, 255, 255),     // limited broadcast
-        Ipv4Addr::new(224, 0, 0, 1),           // multicast
-        Ipv4Addr::new(127, 0, 0, 1),           // loopback
+        Ipv4Addr::new(0, 0, 0, 0),         // unspecified
+        Ipv4Addr::new(255, 255, 255, 255), // limited broadcast
+        Ipv4Addr::new(224, 0, 0, 1),       // multicast
+        Ipv4Addr::new(127, 0, 0, 1),       // loopback
     ] {
         let bad_mac = [0x02, 0x00, 0x00, 0x00, 0xba, 0xad];
-        let outcome =
-            classify(&arp_reply_frame(bad_ip, bad_mac), meta, ctx);
+        let outcome = classify(&arp_reply_frame(bad_ip, bad_mac), meta, ctx);
         // ARP is always recycled (it never transits the firewall).
         assert!(
             matches!(outcome, StageOutcome::RecycleAndContinue),
@@ -1881,14 +1866,18 @@ fn arp_invalid_sender_ip_not_learned_2790() {
 #[test]
 fn neighbor_ip_is_learnable_rejects_non_unicast_2790() {
     // Learnable unicast.
-    assert!(neighbor_ip_is_learnable(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 50))));
+    assert!(neighbor_ip_is_learnable(IpAddr::V4(Ipv4Addr::new(
+        10, 0, 61, 50
+    ))));
     assert!(neighbor_ip_is_learnable(IpAddr::V6(Ipv6Addr::from([
         0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0xab, 0xcd, 0xef, 0x01, 0x00, 0x00, 0x00, 0x42,
     ]))));
     // Rejected IPv4 classes.
     assert!(!neighbor_ip_is_learnable(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
     assert!(!neighbor_ip_is_learnable(IpAddr::V4(Ipv4Addr::BROADCAST)));
-    assert!(!neighbor_ip_is_learnable(IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1))));
+    assert!(!neighbor_ip_is_learnable(IpAddr::V4(Ipv4Addr::new(
+        224, 0, 0, 1
+    ))));
     assert!(!neighbor_ip_is_learnable(IpAddr::V4(Ipv4Addr::LOCALHOST)));
     // Rejected IPv6 classes (no broadcast in v6).
     assert!(!neighbor_ip_is_learnable(IpAddr::V6(Ipv6Addr::UNSPECIFIED)));
@@ -1930,8 +1919,7 @@ fn arp_own_ip_reply_not_learned_2851() {
 
     // 1) Spoofed reply claiming the router's OWN IP — must NOT learn.
     let attacker_mac = [0x02, 0x00, 0x00, 0x00, 0xba, 0xad];
-    let outcome =
-        classify(&arp_reply_frame(own_ip, attacker_mac), meta, ctx);
+    let outcome = classify(&arp_reply_frame(own_ip, attacker_mac), meta, ctx);
     assert!(
         matches!(outcome, StageOutcome::RecycleAndContinue),
         "an ARP reply (even an own-IP one) is still recycled"
@@ -2199,8 +2187,7 @@ fn arp_nat_excluded_wan_ip_not_learned_3182() {
 
     // 1) Spoofed reply claiming the router's OWN WAN IP — must NOT learn.
     let attacker_mac = [0x02, 0x00, 0x00, 0x00, 0xba, 0xad];
-    let outcome =
-        classify(&arp_reply_frame(wan_ip, attacker_mac), meta, ctx);
+    let outcome = classify(&arp_reply_frame(wan_ip, attacker_mac), meta, ctx);
     assert!(matches!(outcome, StageOutcome::RecycleAndContinue));
     assert!(
         neighbors.get(&(12, IpAddr::V4(wan_ip))).is_none(),
@@ -2359,11 +2346,11 @@ fn rx_learn_non_unicast_src_ip_rejected_4889() {
     //   loopback (127/8, ::1), multicast (224/4, ff00::/8),
     //   limited broadcast (255.255.255.255), unspecified (0.0.0.0, ::).
     let spoofed: [IpAddr; 6] = [
-        IpAddr::V4(Ipv4Addr::LOCALHOST),          // 127.0.0.1
-        IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)),  // multicast
-        IpAddr::V4(Ipv4Addr::BROADCAST),          // 255.255.255.255
-        IpAddr::V4(Ipv4Addr::UNSPECIFIED),        // 0.0.0.0
-        IpAddr::V6(Ipv6Addr::LOCALHOST),          // ::1
+        IpAddr::V4(Ipv4Addr::LOCALHOST),                        // 127.0.0.1
+        IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)),                // multicast
+        IpAddr::V4(Ipv4Addr::BROADCAST),                        // 255.255.255.255
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),                      // 0.0.0.0
+        IpAddr::V6(Ipv6Addr::LOCALHOST),                        // ::1
         IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1)), // ff02::1
     ];
 
@@ -2463,9 +2450,8 @@ fn pre_cache_learn_skips_sharded_map_inside_dedup_interval_14945() {
         neighbors.remove(&(12, src_ip));
         neighbors.remove(&(11, src_ip));
         let repeat_ns = t0 + super::sharded_neighbor::RX_LEARNED_NEIGHBOR_REFRESH_INTERVAL_NS / 2;
-        let flow = stage_parse_flow_and_learn(
-            &area, desc, &frame, meta, true, repeat_ns, &mut dedup, ctx,
-        );
+        let flow =
+            stage_parse_flow_and_learn(&area, desc, &frame, meta, true, repeat_ns, &mut dedup, ctx);
         assert!(flow.is_some());
         assert!(
             neighbors.get(&(12, src_ip)).is_none() && neighbors.get(&(11, src_ip)).is_none(),
@@ -2652,7 +2638,8 @@ fn screen_zone_lookup_uses_logical_ingress_ifindex_3022() {
             session_close_burst: 0,
         },
     );
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -2686,8 +2673,8 @@ fn screen_zone_lookup_uses_logical_ingress_ifindex_3022() {
     let mut meta = tcp_v4_syn_meta_with_l2(&frame, Vlan::None);
     meta.ingress_ifindex = 11; // physical parent
     meta.ingress_vlan_id = 50; // -> logical 13 (zone lan)
-    let flow = parse_session_flow_from_bytes(&frame, meta)
-        .expect("session flow from source-route SYN");
+    let flow =
+        parse_session_flow_from_bytes(&frame, meta).expect("session flow from source-route SYN");
 
     let mut screen = source_route_screen();
     let mut counters = BatchCounters::default();
@@ -2852,7 +2839,11 @@ fn run_stage_screen_capture(
     frame: &[u8],
     meta: UserspaceDpMeta,
     flow: Option<&SessionFlow>,
-) -> (bool, u64, Vec<crate::event_stream::codec::DataplaneEventPayload>) {
+) -> (
+    bool,
+    u64,
+    Vec<crate::event_stream::codec::DataplaneEventPayload>,
+) {
     let forwarding = build_forwarding_state(&super::super::test_fixtures::nat_snapshot());
     run_stage_screen_capture_in(&forwarding, screen, frame, meta, flow)
 }
@@ -2872,7 +2863,11 @@ fn run_stage_screen_capture_in(
     frame: &[u8],
     meta: UserspaceDpMeta,
     flow: Option<&SessionFlow>,
-) -> (bool, u64, Vec<crate::event_stream::codec::DataplaneEventPayload>) {
+) -> (
+    bool,
+    u64,
+    Vec<crate::event_stream::codec::DataplaneEventPayload>,
+) {
     let ident = BindingIdentity {
         slot: 0,
         queue_id: 0,
@@ -2904,7 +2899,8 @@ fn run_stage_screen_capture_in(
             session_close_burst: 0,
         },
     );
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -3388,7 +3384,10 @@ fn alarm_without_drop_flood_tallies_zone_alarms_not_drops_7086() {
         "control: both suppressible drops are attributed to the ingress zone"
     );
     assert!(
-        drop_fwd.flood_counter_store.alarm_zones_for_test().is_empty(),
+        drop_fwd
+            .flood_counter_store
+            .alarm_zones_for_test()
+            .is_empty(),
         "control: a DROPPING zone raises no alarms, so the alarm triple must \
          stay empty — the two arms are separate tallies, not one renamed"
     );
@@ -3550,8 +3549,8 @@ fn ipsec_flow_to(family: i32, protocol: u8, dst_port: u16, dst_ip: IpAddr) -> Se
             dst_ip,
             src_port: 40000,
             dst_port,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     }
 }
@@ -3612,7 +3611,8 @@ fn stage_ipsec_passthrough_exempts_all_classes_3616() {
             session_close_burst: 0,
         },
     );
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -3673,8 +3673,17 @@ fn stage_ipsec_passthrough_exempts_all_classes_3616() {
         let mut meta = tcp_v4_meta(&frame, TCP_FLAG_ACK);
         meta.addr_family = family as u8;
         meta.protocol = protocol;
-        let outcome =
-            stage_ipsec_passthrough_check(Some(&flow), &frame, meta, None, None, &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS);
+        let outcome = stage_ipsec_passthrough_check(
+            Some(&flow),
+            &frame,
+            meta,
+            None,
+            None,
+            &live,
+            &worker_ctx,
+            TEST_NOW_NS,
+            TEST_NOW_SECS,
+        );
         assert!(
             matches!(outcome, IpsecPassthroughOutcome::Passthrough),
             "Stage 11 must exempt raw IPsec (family {family}, proto {protocol}, \
@@ -3698,7 +3707,8 @@ fn stage_ipsec_passthrough_exempts_all_classes_3616() {
                 None,
                 &live,
                 &worker_ctx,
-                TEST_NOW_NS, TEST_NOW_SECS,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::NotClaimed
         ),
@@ -3709,7 +3719,17 @@ fn stage_ipsec_passthrough_exempts_all_classes_3616() {
     let meta = tcp_v4_meta(&frame, TCP_FLAG_ACK);
     assert!(
         matches!(
-            stage_ipsec_passthrough_check(None, &frame, meta, None, None, &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS),
+            stage_ipsec_passthrough_check(
+                None,
+                &frame,
+                meta,
+                None,
+                None,
+                &live,
+                &worker_ctx,
+                TEST_NOW_NS,
+                TEST_NOW_SECS
+            ),
             IpsecPassthroughOutcome::NotClaimed
         ),
         "a flowless packet is not claimed by Stage 11"
@@ -3906,7 +3926,8 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
             session_close_burst: 0,
         },
     );
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -3944,7 +3965,8 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
         None,
         &live,
         &worker_ctx,
-        TEST_NOW_NS, TEST_NOW_SECS,
+        TEST_NOW_NS,
+        TEST_NOW_SECS,
     );
     assert!(
         matches!(
@@ -3971,7 +3993,8 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
                 None,
                 &live,
                 &worker_ctx,
-                TEST_NOW_NS, TEST_NOW_SECS,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Passthrough
         ),
@@ -4007,7 +4030,8 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
                 None,
                 &live,
                 &worker_ctx,
-                TEST_NOW_NS, TEST_NOW_SECS,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Denied { .. }
         ),
@@ -4029,7 +4053,8 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
                 None,
                 &live,
                 &worker_ctx,
-                TEST_NOW_NS, TEST_NOW_SECS,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Passthrough
         ),
@@ -4050,7 +4075,8 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
                 None,
                 &live,
                 &worker_ctx,
-                TEST_NOW_NS, TEST_NOW_SECS,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Passthrough
         ),
@@ -4071,7 +4097,8 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
                 None,
                 &live,
                 &worker_ctx,
-                TEST_NOW_NS, TEST_NOW_SECS,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Passthrough
         ),
@@ -4138,7 +4165,8 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
             session_close_burst: 0,
         },
     );
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -4182,7 +4210,8 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 None,
                 &live,
                 &worker_ctx,
-                TEST_NOW_NS, TEST_NOW_SECS,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Denied { .. }
         ),
@@ -4202,7 +4231,8 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 None,
                 &live,
                 &worker_ctx,
-                TEST_NOW_NS, TEST_NOW_SECS,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Denied { .. }
         ),
@@ -4223,7 +4253,8 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 None,
                 &live,
                 &worker_ctx,
-                TEST_NOW_NS, TEST_NOW_SECS,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Passthrough
         ),
@@ -4257,7 +4288,8 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 None,
                 &live,
                 &worker_ctx,
-                TEST_NOW_NS, TEST_NOW_SECS,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Passthrough
         ),
@@ -4277,7 +4309,8 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 None,
                 &live,
                 &worker_ctx,
-                TEST_NOW_NS, TEST_NOW_SECS,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Denied { .. }
         ),
@@ -4299,7 +4332,8 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 None,
                 &live,
                 &worker_ctx,
-                TEST_NOW_NS, TEST_NOW_SECS,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Denied { .. }
         ),
@@ -4320,7 +4354,8 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 None,
                 &live,
                 &worker_ctx,
-                TEST_NOW_NS, TEST_NOW_SECS,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Passthrough
         ),
@@ -4371,9 +4406,15 @@ fn stage_ipsec_established_seed_does_not_cross_zone_or_vrf_14124() {
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
-        DataplaneEventRateLimitConfig { events_per_second: 0, burst: 0, session_close_events_per_second: 0, session_close_burst: 0 },
+        DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
+        },
     );
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -4416,8 +4457,15 @@ fn stage_ipsec_established_seed_does_not_cross_zone_or_vrf_14124() {
     assert!(
         matches!(
             stage_ipsec_passthrough_check(
-                Some(&flow), &est, ike_v4_meta(&est, PERMIT_IF), None, None,
-                &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS,
+                Some(&flow),
+                &est,
+                ike_v4_meta(&est, PERMIT_IF),
+                None,
+                None,
+                &live,
+                &worker_ctx,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Passthrough
         ),
@@ -4427,8 +4475,15 @@ fn stage_ipsec_established_seed_does_not_cross_zone_or_vrf_14124() {
     assert!(
         matches!(
             stage_ipsec_passthrough_check(
-                Some(&flow), &est, ike_v4_meta(&est, DENY_IF), None, None,
-                &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS,
+                Some(&flow),
+                &est,
+                ike_v4_meta(&est, DENY_IF),
+                None,
+                None,
+                &live,
+                &worker_ctx,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
             ),
             IpsecPassthroughOutcome::Denied { .. }
         ),
@@ -4453,8 +4508,7 @@ fn stage_ipsec_established_seed_does_not_cross_zone_or_vrf_14124() {
     }
     let vrf_forwarding = build_forwarding_state(&vrf_snapshot);
     let mut vrf_flow = ipsec_flow(libc::AF_INET, PROTO_UDP, 500);
-    vrf_flow.forward_key.routing_domain =
-        crate::session::install_table_identity("tenant-a").0;
+    vrf_flow.forward_key.routing_domain = crate::session::install_table_identity("tenant-a").0;
     assert!(
         matches!(
             run_stage11_on_ifindex(
@@ -4581,7 +4635,10 @@ fn stage_ipsec_claim_follows_effective_table_14314() {
         // its own address (pre-#14314 behaviour preserved).
         let flow = ipsec_flow_to(libc::AF_INET, PROTO_ESP, 0, inet_dst);
         assert!(
-            matches!(run(&flow, esp_meta(INET_IF), None), IpsecPassthroughOutcome::Passthrough),
+            matches!(
+                run(&flow, esp_meta(INET_IF), None),
+                IpsecPassthroughOutcome::Passthrough
+            ),
             "control: inet.0 ingress must claim the inet.0-owned dst (#14314)"
         );
 
@@ -4609,7 +4666,10 @@ fn stage_ipsec_claim_follows_effective_table_14314() {
         let mut domain_flow = ipsec_flow_to(libc::AF_INET, PROTO_ESP, 0, blue_dst);
         domain_flow.forward_key.routing_domain = blue_domain;
         assert!(
-            matches!(run(&domain_flow, esp_meta(INET_IF), None), IpsecPassthroughOutcome::Passthrough),
+            matches!(
+                run(&domain_flow, esp_meta(INET_IF), None),
+                IpsecPassthroughOutcome::Passthrough
+            ),
             "a vrf_blue-stamped flow must claim its VRF-owned dst (#14314)"
         );
         let mut domain_inet_flow = ipsec_flow_to(libc::AF_INET, PROTO_ESP, 0, inet_dst);
@@ -4627,11 +4687,17 @@ fn stage_ipsec_claim_follows_effective_table_14314() {
         let mut fabric_meta = esp_meta(INET_IF);
         fabric_meta.fabric_ingress_ifindex = BLUE_IF as u32;
         assert!(
-            matches!(run(&blue_flow, fabric_meta, None), IpsecPassthroughOutcome::Passthrough),
+            matches!(
+                run(&blue_flow, fabric_meta, None),
+                IpsecPassthroughOutcome::Passthrough
+            ),
             "a validated fabric scope in vrf_blue must claim its dst (#14314)"
         );
         assert!(
-            matches!(run(&flow, fabric_meta, None), IpsecPassthroughOutcome::NotClaimed),
+            matches!(
+                run(&flow, fabric_meta, None),
+                IpsecPassthroughOutcome::NotClaimed
+            ),
             "a validated fabric scope in vrf_blue must not claim an inet.0 dst (#14314)"
         );
 
@@ -4639,9 +4705,15 @@ fn stage_ipsec_claim_follows_effective_table_14314() {
         // falls back to inet.0.
         let mut orphan_flow = ipsec_flow_to(libc::AF_INET, PROTO_ESP, 0, inet_dst);
         orphan_flow.forward_key.routing_domain = 99;
-        assert!(!forwarding.install_tables.contains_key(&99), "FIXTURE: domain 99 unresolvable");
         assert!(
-            matches!(run(&orphan_flow, esp_meta(INET_IF), None), IpsecPassthroughOutcome::NotClaimed),
+            !forwarding.install_tables.contains_key(&99),
+            "FIXTURE: domain 99 unresolvable"
+        );
+        assert!(
+            matches!(
+                run(&orphan_flow, esp_meta(INET_IF), None),
+                IpsecPassthroughOutcome::NotClaimed
+            ),
             "an unresolvable routing domain must fail closed (#14314)"
         );
     });
@@ -4704,7 +4776,8 @@ fn run_stage11_on_ifindex(
             session_close_burst: 0,
         },
     );
-    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let __pptp_control_7699 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
         pptp_control: &__pptp_control_7699,
         ident: &ident,
@@ -4730,7 +4803,17 @@ fn run_stage11_on_ifindex(
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
-    stage_ipsec_passthrough_check(Some(flow), frame, meta, None, None, &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS)
+    stage_ipsec_passthrough_check(
+        Some(flow),
+        frame,
+        meta,
+        None,
+        None,
+        &live,
+        &worker_ctx,
+        TEST_NOW_NS,
+        TEST_NOW_SECS,
+    )
 }
 
 /// #5620 RED-on-revert: Stage 11 must NOT claim the kernel-XFRM passthrough
@@ -4768,7 +4851,13 @@ fn stage_ipsec_passthrough_rejects_remote_transit_dst_5620() {
     // (family, proto, dst_port, remote_dst, label)
     let cases: [(i32, u8, u16, IpAddr, &str); 5] = [
         (libc::AF_INET, PROTO_UDP, 500, remote_v4, "IKE UDP/500 v4"),
-        (libc::AF_INET, PROTO_UDP, 4500, remote_v4, "NAT-T UDP/4500 v4"),
+        (
+            libc::AF_INET,
+            PROTO_UDP,
+            4500,
+            remote_v4,
+            "NAT-T UDP/4500 v4",
+        ),
         (libc::AF_INET, PROTO_AH, 0, remote_v4, "AH proto 51 v4"),
         (libc::AF_INET, PROTO_ESP, 0, remote_v4, "ESP proto 50 v4"),
         (libc::AF_INET6, PROTO_ESP, 0, remote_v6, "ESP proto 50 v6"),
@@ -4857,9 +4946,7 @@ fn stage_ipsec_passthrough_claims_local_and_nat_to_self_dst_5620() {
         forwarding.owns_ipsec_local_destination(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 12))),
         "static NAT to a firewall interface remains local to XFRM"
     );
-    assert!(
-        !forwarding.owns_ipsec_local_destination(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 200)))
-    );
+    assert!(!forwarding.owns_ipsec_local_destination(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 200))));
 
     let frame = tcp_v4_frame(
         Ipv4Addr::new(192, 0, 2, 10),
@@ -4995,13 +5082,7 @@ fn stage_ipsec_passthrough_does_not_claim_transit_dnat_ike_11439() {
         500,
         IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)),
     );
-    let outcome = run_stage11_on_ifindex(
-        &forwarding,
-        &flow,
-        &frame,
-        ike_v4_meta(&frame, 25),
-        25,
-    );
+    let outcome = run_stage11_on_ifindex(&forwarding, &flow, &frame, ike_v4_meta(&frame, 25), 25);
     assert!(
         matches!(outcome, IpsecPassthroughOutcome::NotClaimed),
         "transit DNAT IKE must continue through normal NAT/forwarding and \
@@ -5034,26 +5115,14 @@ fn stage_ipsec_passthrough_dnat_to_self_ike_keeps_host_inbound_gate_11439() {
     );
     assert!(
         matches!(
-            run_stage11_on_ifindex(
-                &forwarding,
-                &flow,
-                &frame,
-                ike_v4_meta(&frame, 25),
-                25,
-            ),
+            run_stage11_on_ifindex(&forwarding, &flow, &frame, ike_v4_meta(&frame, 25), 25,),
             IpsecPassthroughOutcome::Passthrough
         ),
         "DNAT-to-self IKE on a zone permitting ike remains local"
     );
     assert!(
         matches!(
-            run_stage11_on_ifindex(
-                &forwarding,
-                &flow,
-                &frame,
-                ike_v4_meta(&frame, 24),
-                24,
-            ),
+            run_stage11_on_ifindex(&forwarding, &flow, &frame, ike_v4_meta(&frame, 24), 24,),
             IpsecPassthroughOutcome::Denied { .. }
         ),
         "DNAT-to-self IKE on a zone omitting ike remains denied by host-inbound"
@@ -5167,8 +5236,8 @@ fn flowless_legitimate_ihl5_fragment_is_not_dropped_8298() {
 mod pptp_dispatch_join_tests_7699 {
     use super::*;
     use crate::session::pptp_control::{
-        fixtures_7699::outgoing_call_reply, PptpControlInbox, CONTROL_DRAIN_INTERVAL_NS,
-        PENDING_CONTROL_CAPACITY, PPTP_CONTROL_PORT,
+        CONTROL_DRAIN_INTERVAL_NS, PENDING_CONTROL_CAPACITY, PPTP_CONTROL_PORT, PptpControlInbox,
+        fixtures_7699::outgoing_call_reply,
     };
 
     const PAC: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 7);
@@ -5198,8 +5267,7 @@ mod pptp_dispatch_join_tests_7699 {
         frame[24..26].copy_from_slice(&[0, 0]);
         let ip_csum = checksum16(&frame[14..34]);
         frame[24..26].copy_from_slice(&ip_csum.to_be_bytes());
-        recompute_l4_checksum_ipv4(&mut frame[14..], 20, PROTO_TCP, false)
-            .expect("tcp checksum");
+        recompute_l4_checksum_ipv4(&mut frame[14..], 20, PROTO_TCP, false).expect("tcp checksum");
         frame
     }
 
@@ -5349,12 +5417,8 @@ mod pptp_dispatch_join_tests_7699 {
 
         let mut sessions = crate::session::SessionTable::new();
         let queues = peer_queues(2);
-        let learned = crate::afxdp::worker_queue::drain_pptp_control_inbox(
-            inbox,
-            &mut sessions,
-            &queues,
-            T0,
-        );
+        let learned =
+            crate::afxdp::worker_queue::drain_pptp_control_inbox(inbox, &mut sessions, &queues, T0);
         assert_eq!(learned, 1, "the drain did not learn the association");
 
         // Both directions resolve to ONE handle: a packet TO the PAC carries
@@ -5407,12 +5471,7 @@ mod pptp_dispatch_join_tests_7699 {
         let mut sessions = crate::session::SessionTable::new();
         let queues = peer_queues(2);
         assert_eq!(
-            crate::afxdp::worker_queue::drain_pptp_control_inbox(
-                inbox,
-                &mut sessions,
-                &queues,
-                T0,
-            ),
+            crate::afxdp::worker_queue::drain_pptp_control_inbox(inbox, &mut sessions, &queues, T0,),
             0
         );
         assert_eq!(sessions.pptp().resolve(IpAddr::V4(PAC), PAC_CALL_ID), None);
@@ -5439,13 +5498,8 @@ mod pptp_dispatch_join_tests_7699 {
         meta.flow_src_addr[..4].copy_from_slice(&PNS.octets());
         meta.flow_dst_addr[..4].copy_from_slice(&PAC.octets());
         assert!(
-            crate::afxdp::gre_discriminator::pptp_data_session_flow(
-                &gre,
-                meta,
-                &mut sessions,
-                T0,
-            )
-            .is_none(),
+            crate::afxdp::gre_discriminator::pptp_data_session_flow(&gre, meta, &mut sessions, T0,)
+                .is_none(),
             "GRE must remain unassociated after the denied control segment"
         );
     }
@@ -5470,12 +5524,7 @@ mod pptp_dispatch_join_tests_7699 {
 
         run_stage(ctx, &call_reply_frame());
         assert_eq!(
-            crate::afxdp::worker_queue::drain_pptp_control_inbox(
-                inbox,
-                &mut sessions,
-                &queues,
-                T0
-            ),
+            crate::afxdp::worker_queue::drain_pptp_control_inbox(inbox, &mut sessions, &queues, T0),
             1,
             "the first drain must learn"
         );
@@ -5575,12 +5624,7 @@ mod pptp_dispatch_join_tests_7699 {
         let mut sessions = crate::session::SessionTable::new();
         let queues = peer_queues(1);
         assert_eq!(
-            crate::afxdp::worker_queue::drain_pptp_control_inbox(
-                inbox,
-                &mut sessions,
-                &queues,
-                T0
-            ),
+            crate::afxdp::worker_queue::drain_pptp_control_inbox(inbox, &mut sessions, &queues, T0),
             0,
             "a failed call must not become an association"
         );
@@ -5655,12 +5699,7 @@ mod pptp_dispatch_join_tests_7699 {
         let mut sessions = crate::session::SessionTable::new();
         let queues = peer_queues(1);
         assert_eq!(
-            crate::afxdp::worker_queue::drain_pptp_control_inbox(
-                inbox,
-                &mut sessions,
-                &queues,
-                T0,
-            ),
+            crate::afxdp::worker_queue::drain_pptp_control_inbox(inbox, &mut sessions, &queues, T0,),
             0,
             "bytes beyond the IPv4 datagram completed an Outgoing-Call-Reply"
         );
@@ -5690,8 +5729,7 @@ mod pptp_dispatch_join_tests_7699 {
         );
         let captured_payload_len = 16;
         let declared_ipv6_payload_len = 20 + captured_payload_len;
-        frame[18..20]
-            .copy_from_slice(&(declared_ipv6_payload_len as u16).to_be_bytes());
+        frame[18..20].copy_from_slice(&(declared_ipv6_payload_len as u16).to_be_bytes());
         let declared_end = 14 + 40 + declared_ipv6_payload_len;
         crate::afxdp::frame::recompute_l4_checksum_ipv6(
             &mut frame[14..declared_end],
@@ -5715,12 +5753,7 @@ mod pptp_dispatch_join_tests_7699 {
         let mut sessions = crate::session::SessionTable::new();
         let queues = peer_queues(1);
         assert_eq!(
-            crate::afxdp::worker_queue::drain_pptp_control_inbox(
-                inbox,
-                &mut sessions,
-                &queues,
-                T0,
-            ),
+            crate::afxdp::worker_queue::drain_pptp_control_inbox(inbox, &mut sessions, &queues, T0,),
             0,
             "bytes beyond IPv6 payload_len completed an Outgoing-Call-Reply"
         );
@@ -5837,7 +5870,10 @@ fn neighbor_mac_is_learnable_rejects_group_and_zero_9115() {
         neighbor_mac_is_learnable([0x02, 0x01, 0x01, 0x01, 0x01, 0x01]),
         "unicast with odd bytes after the first octet is still unicast"
     );
-    assert!(neighbor_mac_is_learnable([0x02, 0, 0, 0, 0, 1]), "ordinary unicast");
+    assert!(
+        neighbor_mac_is_learnable([0x02, 0, 0, 0, 0, 1]),
+        "ordinary unicast"
+    );
 }
 
 /// #9115: the NDP-NA learn arm must refuse a group / all-zero target
@@ -5904,7 +5940,6 @@ fn ndp_na_learn_still_accepts_unicast_mac_9115() {
          MAC's group/zero shape, not on NAs as such"
     );
 }
-
 
 /// #9425 member 1, END TO END through the real verdict consumer.
 ///

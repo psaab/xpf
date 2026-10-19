@@ -635,6 +635,7 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 		val.IngressIfindex = uint32(delta.IngressIfindex)
 	}
 	val.IngressVlanID = delta.IngressVLANID
+	val.NatScopeIfindex = delta.NatScopeIfindex
 	if delta.TunnelEndpointID != 0 {
 		val.LogFlags |= dataplane.LogFlagUserspaceTunnelEndpoint
 		val.FibGen = delta.TunnelEndpointID
@@ -794,6 +795,7 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 		val.IngressIfindex = uint32(delta.IngressIfindex)
 	}
 	val.IngressVlanID = delta.IngressVLANID
+	val.NatScopeIfindex = delta.NatScopeIfindex
 	if delta.TunnelEndpointID != 0 {
 		val.LogFlags |= dataplane.LogFlagUserspaceTunnelEndpoint
 		val.FibGen = delta.TunnelEndpointID

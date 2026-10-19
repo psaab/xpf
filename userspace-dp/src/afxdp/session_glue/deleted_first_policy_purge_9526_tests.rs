@@ -10,8 +10,8 @@
 // `worker_loop` rotation, in worker/loop_body/first_policy_purge_rotation_9526_tests.rs.
 use super::*;
 use crate::policy::{
-    parse_policy_state_with_counters, PolicyCounterStore, PolicyRuleCounter, PolicyState,
-    DEFAULT_POLICY_COUNTER_IDX, DEFAULT_POLICY_SENTINEL_ID,
+    DEFAULT_POLICY_COUNTER_IDX, DEFAULT_POLICY_SENTINEL_ID, PolicyCounterStore, PolicyRuleCounter,
+    PolicyState, parse_policy_state_with_counters,
 };
 use rustc_hash::FxHashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -64,19 +64,24 @@ fn key(src_port: u16) -> SessionKey {
 }
 
 fn decision() -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 12,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-        src_mac: Some([6, 7, 8, 9, 10, 11]),
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: Some([6, 7, 8, 9, 10, 11]),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 fn metadata(
@@ -102,6 +107,7 @@ fn metadata(
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: counter,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -198,7 +204,10 @@ fn deleted_first_policy_rule_id_fires_on_delete_and_rename_only_9526() {
         "reordered: the first policy still exists"
     );
     assert_eq!(
-        deleted_first_policy_rule_id(&policy(&[rule("a", 0), rule("b", 0)]), &policy(&[rule("b", 0)])),
+        deleted_first_policy_rule_id(
+            &policy(&[rule("a", 0), rule("b", 0)]),
+            &policy(&[rule("b", 0)])
+        ),
         None,
         "an all-zero old snapshot names no first policy"
     );
@@ -215,8 +224,14 @@ fn purge_removes_both_halves_of_the_deleted_first_policys_sessions_only_9526() {
         Some("lan->wan/p-first"),
         "fixture: counter idx 1 is the first rule's handle"
     );
-    assert_eq!(web_counter.as_ref().map(|c| c.rule_id()), Some("lan->wan/p-web"));
-    assert!(default_counter.is_some(), "fixture: the default-policy handle exists");
+    assert_eq!(
+        web_counter.as_ref().map(|c| c.rule_id()),
+        Some("lan->wan/p-web")
+    );
+    assert!(
+        default_counter.is_some(),
+        "fixture: the default-policy handle exists"
+    );
 
     let mut sessions = SessionTable::new();
     let first_fwd = key(40001);
@@ -228,13 +243,21 @@ fn purge_removes_both_halves_of_the_deleted_first_policys_sessions_only_9526() {
     let unbound_fwd = key(40003);
     let unbound_rev = install_pair(&mut sessions, &unbound_fwd, 0, None);
     let default_fwd = key(40004);
-    let default_rev =
-        install_pair(&mut sessions, &default_fwd, DEFAULT_POLICY_SENTINEL_ID, default_counter);
+    let default_rev = install_pair(
+        &mut sessions,
+        &default_fwd,
+        DEFAULT_POLICY_SENTINEL_ID,
+        default_counter,
+    );
     let _ = sessions.drain_deltas(64);
 
     let new = policy(&[rule("p-web", 0)]);
     let rule_id = deleted_first_policy_rule_id(&old, &new).expect("the first policy was deleted");
-    assert_eq!(purge(&mut sessions, &rule_id), 1, "exactly the first policy's one forward session");
+    assert_eq!(
+        purge(&mut sessions, &rule_id),
+        1,
+        "exactly the first policy's one forward session"
+    );
 
     assert!(
         sessions.entry_with_origin(&first_fwd).is_none(),
@@ -252,10 +275,17 @@ fn purge_removes_both_halves_of_the_deleted_first_policys_sessions_only_9526() {
         ("default policy, forward", &default_fwd),
         ("default policy, reverse", &default_rev),
     ] {
-        assert!(sessions.entry_with_origin(k).is_some(), "{what} session was purged");
+        assert!(
+            sessions.entry_with_origin(k).is_some(),
+            "{what} session was purged"
+        );
     }
     let deltas = sessions.drain_deltas(64);
-    assert_eq!(deltas.len(), 1, "one close delta; the reverse half's is suppressed");
+    assert_eq!(
+        deltas.len(),
+        1,
+        "one close delta; the reverse half's is suppressed"
+    );
     assert_eq!(deltas[0].kind, SessionDeltaKind::Close);
     assert_eq!(deltas[0].key, first_fwd);
 }

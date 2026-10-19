@@ -72,8 +72,16 @@ fn pmech_inventory_for(
 fn scheduled_reintroduction_through_refresh_is_not_expired_15093() {
     use crate::protocol::snapshot::ZoneSnapshot;
     let zone_snaps = vec![
-        ZoneSnapshot { name: "lan".into(), id: 100, ..Default::default() },
-        ZoneSnapshot { name: "wan".into(), id: 200, ..Default::default() },
+        ZoneSnapshot {
+            name: "lan".into(),
+            id: 100,
+            ..Default::default()
+        },
+        ZoneSnapshot {
+            name: "wan".into(),
+            id: 200,
+            ..Default::default()
+        },
     ];
     let scheduled_rule = |name: &str| crate::PolicyRuleSnapshot {
         name: name.into(),
@@ -102,20 +110,28 @@ fn scheduled_reintroduction_through_refresh_is_not_expired_15093() {
     let stale = crate::afxdp::monotonic_nanos()
         .saturating_sub(crate::policy::SCHEDULER_HEARTBEAT_LEASE_NS + 60_000_000_000);
     assert!(coord.scheduler_lease.apply(1, stale));
-    assert!(coord.forwarding.policy.scheduler_rules_expired_at(crate::afxdp::monotonic_nanos()));
+    assert!(
+        coord
+            .forwarding
+            .policy
+            .scheduler_rules_expired_at(crate::afxdp::monotonic_nanos())
+    );
 
     // Era 2: no scheduled rules.
     coord
-        .refresh_runtime_snapshot_disarmed(&snap(2, vec![crate::PolicyRuleSnapshot {
-            name: "plain".into(),
-            from_zone: "lan".into(),
-            to_zone: "wan".into(),
-            source_addresses: vec!["any".into()],
-            destination_addresses: vec!["any".into()],
-            applications: vec!["any".into()],
-            action: "permit".into(),
-            ..Default::default()
-        }]))
+        .refresh_runtime_snapshot_disarmed(&snap(
+            2,
+            vec![crate::PolicyRuleSnapshot {
+                name: "plain".into(),
+                from_zone: "lan".into(),
+                to_zone: "wan".into(),
+                source_addresses: vec!["any".into()],
+                destination_addresses: vec!["any".into()],
+                applications: vec!["any".into()],
+                action: "permit".into(),
+                ..Default::default()
+            }],
+        ))
         .expect("era2 refresh");
 
     // Era 3: scheduled rules return; no heartbeat has been sent since.
@@ -151,8 +167,12 @@ fn install_main_route_table_authority(forwarding: &mut crate::afxdp::types::Forw
         domain: 0,
         table: 254,
     };
-    forwarding.route_table_identities.insert("inet.0".into(), identity);
-    forwarding.route_table_identities.insert("inet6.0".into(), identity);
+    forwarding
+        .route_table_identities
+        .insert("inet.0".into(), identity);
+    forwarding
+        .route_table_identities
+        .insert("inet6.0".into(), identity);
     forwarding.route_table_identity_map_complete = true;
     forwarding
         .routes_v4
@@ -162,7 +182,9 @@ fn install_main_route_table_authority(forwarding: &mut crate::afxdp::types::Forw
             20,
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 2)),
         ),
-        crate::afxdp::types::NeighborEntry { mac: [2, 0, 0, 0, 0, 20] },
+        crate::afxdp::types::NeighborEntry {
+            mac: [2, 0, 0, 0, 0, 20],
+        },
     );
 }
 
@@ -318,8 +340,7 @@ impl Coordinator {
                     .filter(|command| {
                         matches!(
                             command,
-                            WorkerCommand::DeleteSynced(_)
-                                | WorkerCommand::DeleteLocalControl(_)
+                            WorkerCommand::DeleteSynced(_) | WorkerCommand::DeleteLocalControl(_)
                         )
                     })
                     .count()
@@ -365,9 +386,7 @@ impl Coordinator {
             HAGroupRuntime {
                 active: true,
                 watchdog_timestamp: now_secs.saturating_sub(11),
-                lease: crate::afxdp::HAForwardingLease::ActiveUntil(
-                    now_secs.saturating_sub(1),
-                ),
+                lease: crate::afxdp::HAForwardingLease::ActiveUntil(now_secs.saturating_sub(1)),
             },
         )])));
     }
@@ -431,7 +450,7 @@ use crate::{
 
 #[test]
 fn snapshot_published_tunnel_rows_join_d11_10485() {
-    use crate::afxdp::ipsec_inner::{adjudicate_ipsec_inner, IpsecInnerInput};
+    use crate::afxdp::ipsec_inner::{IpsecInnerInput, adjudicate_ipsec_inner};
     use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
 
     let mut coordinator = Coordinator::new();
@@ -542,7 +561,11 @@ fn snapshot_stop_inner_clears_published_tunnel_rows_10485() {
     coordinator.set_ipsec_tunnel_rows_from_snapshot(&snapshot);
     coordinator.publish_runtime_view();
     assert_eq!(
-        coordinator.ha.runtime.load_full().ipsec_snapshot_generation(),
+        coordinator
+            .ha
+            .runtime
+            .load_full()
+            .ipsec_snapshot_generation(),
         42
     );
 
@@ -609,7 +632,7 @@ fn snapshot_published_duplicate_if_id_rows_deny_claimants_10485() {
 
 #[test]
 fn snapshot_published_rows_deny_stale_advisory_generation_10485() {
-    use crate::afxdp::ipsec_inner::{adjudicate_ipsec_inner, IpsecInnerDecision, IpsecInnerInput};
+    use crate::afxdp::ipsec_inner::{IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner};
     use crate::afxdp::ipsec_inner_queue::reason;
     use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
 
@@ -799,9 +822,7 @@ fn snapshot_empty_rows_withdraw_published_generation_deny_through_load_10540() {
 /// ambiguity set itself is also caught by the `*_10485` `exact()` cell.)
 #[test]
 fn snapshot_duplicate_if_id_claimants_deny_through_adjudication_10540() {
-    use crate::afxdp::ipsec_inner::{
-        IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner,
-    };
+    use crate::afxdp::ipsec_inner::{IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner};
     use crate::afxdp::ipsec_inner_queue::reason;
     use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
 
@@ -1273,8 +1294,7 @@ fn stamp_injected_packet_tuple_builds_ipv4_icmp_flow_key() {
         ..Default::default()
     };
     let owned = forwarding_owning(&[IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))]);
-    let tuple =
-        inject::validate_injected_packet_tuple(&req, dst, &owned).expect("validate tuple");
+    let tuple = inject::validate_injected_packet_tuple(&req, dst, &owned).expect("validate tuple");
 
     inject::stamp_injected_packet_tuple(&mut meta, 98, tuple, 0).expect("stamp tuple");
 
@@ -1524,13 +1544,12 @@ fn validate_injected_packet_tuple_rejects_legacy_wire_request() {
         ..Default::default()
     };
 
-    let err =
-        inject::validate_injected_packet_tuple(
-            &req,
-            IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-            &forwarding_owning(&[IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))]),
-        )
-            .expect_err("legacy request must fail closed");
+    let err = inject::validate_injected_packet_tuple(
+        &req,
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        &forwarding_owning(&[IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))]),
+    )
+    .expect_err("legacy request must fail closed");
     assert!(err.contains("tuple metadata version"), "{err}");
 }
 
@@ -1547,13 +1566,12 @@ fn validate_injected_packet_tuple_rejects_protocol_mismatch() {
         ..Default::default()
     };
 
-    let err =
-        inject::validate_injected_packet_tuple(
-            &req,
-            IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-            &forwarding_owning(&[IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))]),
-        )
-            .expect_err("non-ICMP tuple must fail closed");
+    let err = inject::validate_injected_packet_tuple(
+        &req,
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        &forwarding_owning(&[IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))]),
+    )
+    .expect_err("non-ICMP tuple must fail closed");
     assert!(err.contains("supports only protocol"), "{err}");
 }
 
@@ -1625,7 +1643,7 @@ fn build_cos_owner_worker_by_queue_prefers_lowest_worker_with_tx_binding() {
                 surplus_weight: 1,
                 buffer_bytes: 64 * 1024,
                 dscp_rewrite: None,
-            codel_target_ns: 0,
+                codel_target_ns: 0,
             }],
             oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
             oversubscription_guarantee_fraction: 0.0,
@@ -1689,7 +1707,7 @@ fn build_cos_owner_worker_by_queue_spreads_queues_across_eligible_workers() {
                     surplus_weight: 1,
                     buffer_bytes: 64 * 1024,
                     dscp_rewrite: None,
-                codel_target_ns: 0,
+                    codel_target_ns: 0,
                 },
                 CoSQueueConfig {
                     queue_id: 1,
@@ -1704,7 +1722,7 @@ fn build_cos_owner_worker_by_queue_spreads_queues_across_eligible_workers() {
                     surplus_weight: 1,
                     buffer_bytes: 64 * 1024,
                     dscp_rewrite: None,
-                codel_target_ns: 0,
+                    codel_target_ns: 0,
                 },
                 CoSQueueConfig {
                     queue_id: 2,
@@ -1719,7 +1737,7 @@ fn build_cos_owner_worker_by_queue_spreads_queues_across_eligible_workers() {
                     surplus_weight: 1,
                     buffer_bytes: 64 * 1024,
                     dscp_rewrite: None,
-                codel_target_ns: 0,
+                    codel_target_ns: 0,
                 },
             ],
             oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
@@ -1786,7 +1804,7 @@ fn build_cos_owner_worker_by_queue_prefers_ready_workers_when_available() {
                     surplus_weight: 1,
                     buffer_bytes: 64 * 1024,
                     dscp_rewrite: None,
-                codel_target_ns: 0,
+                    codel_target_ns: 0,
                 },
                 CoSQueueConfig {
                     queue_id: 4,
@@ -1801,7 +1819,7 @@ fn build_cos_owner_worker_by_queue_prefers_ready_workers_when_available() {
                     surplus_weight: 1,
                     buffer_bytes: 64 * 1024,
                     dscp_rewrite: None,
-                codel_target_ns: 0,
+                    codel_target_ns: 0,
                 },
             ],
             oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
@@ -1866,7 +1884,7 @@ fn build_cos_owner_worker_by_queue_falls_back_when_no_ready_workers_exist() {
                 surplus_weight: 1,
                 buffer_bytes: 64 * 1024,
                 dscp_rewrite: None,
-            codel_target_ns: 0,
+                codel_target_ns: 0,
             }],
             oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
             oversubscription_guarantee_fraction: 0.0,
@@ -1998,7 +2016,9 @@ fn refresh_runtime_snapshot_rebuilds_cos_owner_worker_map_from_identities() {
         inet_precedence_classifiers: vec![],
     });
 
-    coordinator.refresh_runtime_snapshot(&snapshot).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&snapshot)
+        .expect("refresh_runtime_snapshot must succeed");
 
     assert_eq!(
         coordinator.cos_owner_worker_by_queue.get(&(80, 0)),
@@ -2239,7 +2259,8 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
         "the published view must carry this refresh's generation",
     );
     assert_eq!(
-        intended.validation(), published.validation(),
+        intended.validation(),
+        published.validation(),
         "the published validation must be the one the choke point intended \
          (#6592 coherent publish)",
     );
@@ -2261,12 +2282,14 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
     // Not vacuous: the fixture really did rotate the generation, so the
     // published value could have differed from the pre-refresh default.
     assert_ne!(
-        published.validation(), before,
+        published.validation(),
+        before,
         "the fixture must actually rotate the generation, or the asserts above \
          are vacuous",
     );
     assert_eq!(
-        previous_view.validation(), before,
+        previous_view.validation(),
+        before,
         "the retained previous view is the pre-refresh one",
     );
 }
@@ -2314,11 +2337,13 @@ fn bump_fib_generation_publishes_new_stamps_without_rotating_forwarding() {
 
     // The stamps advanced and are worker-visible...
     assert_eq!(
-        after.validation().fib_generation, 10,
+        after.validation().fib_generation,
+        10,
         "the bump must be published to workers"
     );
     assert_eq!(
-        after.validation().config_generation, 4,
+        after.validation().config_generation,
+        4,
         "a FIB bump must not disturb the config generation"
     );
     // ...paired with the SAME forwarding allocation, so the worker's #1188
@@ -2377,7 +2402,7 @@ fn build_shared_cos_root_leases_uses_active_workers_per_interface() {
                     surplus_weight: 1,
                     buffer_bytes: 128 * 1024,
                     dscp_rewrite: None,
-                codel_target_ns: 0,
+                    codel_target_ns: 0,
                 },
                 CoSQueueConfig {
                     queue_id: 1,
@@ -2392,7 +2417,7 @@ fn build_shared_cos_root_leases_uses_active_workers_per_interface() {
                     surplus_weight: 1,
                     buffer_bytes: 128 * 1024,
                     dscp_rewrite: None,
-                codel_target_ns: 0,
+                    codel_target_ns: 0,
                 },
             ],
             oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
@@ -2469,7 +2494,7 @@ fn build_shared_cos_root_leases_reuses_existing_matching_lease_arc() {
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,
-            codel_target_ns: 0,
+                codel_target_ns: 0,
             }],
             oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
             oversubscription_guarantee_fraction: 0.0,
@@ -2521,7 +2546,7 @@ fn build_shared_cos_queue_leases_reuses_existing_matching_lease_arc() {
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,
-            codel_target_ns: 0,
+                codel_target_ns: 0,
             }],
             oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
             oversubscription_guarantee_fraction: 0.0,
@@ -2579,7 +2604,7 @@ fn build_shared_cos_queue_leases_rebuilds_when_equal_flow_mode_toggles() {
                 surplus_weight: 1,
                 buffer_bytes: 128 * 1024,
                 dscp_rewrite: None,
-            codel_target_ns: 0,
+                codel_target_ns: 0,
             }],
             oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
             oversubscription_guarantee_fraction: 0.0,
@@ -2787,11 +2812,25 @@ fn build_shared_cos_queue_leases_sizes_for_sparse_high_worker_id() {
 
     let burst_bytes = (128 * 1024u64).max(64 * 1500);
     assert!(
-        lease.matches_config_v8(50_000_000, burst_bytes, 2, 40, V8RateMode::CstructDefault, EqualFlowTargetPolicy::Slowest),
+        lease.matches_config_v8(
+            50_000_000,
+            burst_bytes,
+            2,
+            40,
+            V8RateMode::CstructDefault,
+            EqualFlowTargetPolicy::Slowest
+        ),
         "lease must be sized for max_worker_id 40 (41 per-worker slots)"
     );
     assert!(
-        !lease.matches_config_v8(50_000_000, burst_bytes, 2, 1, V8RateMode::CstructDefault, EqualFlowTargetPolicy::Slowest),
+        !lease.matches_config_v8(
+            50_000_000,
+            burst_bytes,
+            2,
+            1,
+            V8RateMode::CstructDefault,
+            EqualFlowTargetPolicy::Slowest
+        ),
         "a 41-slot lease must not match a 2-slot topology"
     );
 
@@ -2888,7 +2927,7 @@ fn refresh_cos_owner_worker_map_from_binding_statuses_keeps_shared_arcs_when_unc
                     surplus_weight: 1,
                     buffer_bytes: 128 * 1024,
                     dscp_rewrite: None,
-                codel_target_ns: 0,
+                    codel_target_ns: 0,
                 },
                 CoSQueueConfig {
                     queue_id: 1,
@@ -2903,7 +2942,7 @@ fn refresh_cos_owner_worker_map_from_binding_statuses_keeps_shared_arcs_when_unc
                     surplus_weight: 1,
                     buffer_bytes: 128 * 1024,
                     dscp_rewrite: None,
-                codel_target_ns: 0,
+                    codel_target_ns: 0,
                 },
             ],
             oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
@@ -3676,13 +3715,16 @@ fn warm_test_coordinator(rg_id: i32) -> (Coordinator, Receiver<WarmItem>) {
     coord.neighbors.warm_queue = Some(tx);
 
     let now_secs = monotonic_nanos() / 1_000_000_000;
-    coord
-        .ha
-        .rg_runtime
-        .store(Arc::new(BTreeMap::from([(rg_id, warm_active_ha_runtime(now_secs))])));
+    coord.ha.rg_runtime.store(Arc::new(BTreeMap::from([(
+        rg_id,
+        warm_active_ha_runtime(now_secs),
+    )])));
 
     let egress_ifindex = 80i32;
-    coord.forwarding.ifindex_to_name.insert(egress_ifindex, "ge-0-0-2".to_string());
+    coord
+        .forwarding
+        .ifindex_to_name
+        .insert(egress_ifindex, "ge-0-0-2".to_string());
     coord.forwarding.egress.insert(
         egress_ifindex,
         EgressInterface {
@@ -3715,7 +3757,9 @@ fn warm_test_coordinator(rg_id: i32) -> (Coordinator, Receiver<WarmItem>) {
 fn queue_warm_pass_fires_for_unresolved_next_hop() {
     let (coord, rx) = warm_test_coordinator(0);
     coord.queue_warm_pass(false);
-    let item = rx.try_recv().expect("one warm item for the unresolved next-hop");
+    let item = rx
+        .try_recv()
+        .expect("one warm item for the unresolved next-hop");
     assert_eq!(item.ifindex, 80);
     assert_eq!(item.hop, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1)));
     assert_eq!(item.iface_name, "ge-0-0-2");
@@ -3732,7 +3776,10 @@ fn queue_warm_pass_skips_already_resolved_next_hop() {
         NeighborEntry { mac: [0xaa; 6] },
     );
     coord.queue_warm_pass(false);
-    assert!(rx.try_recv().is_err(), "resolved next-hop must not be warmed");
+    assert!(
+        rx.try_recv().is_err(),
+        "resolved next-hop must not be warmed"
+    );
 }
 
 #[test]
@@ -3775,7 +3822,10 @@ fn queue_warm_pass_skips_invalid_addresses() {
     coord.forwarding.routes_v4.get_mut("inet.0").unwrap()[0].next_hops[0].next_hop =
         Some(Ipv4Addr::new(224, 0, 0, 1));
     coord.queue_warm_pass(false);
-    assert!(rx.try_recv().is_err(), "multicast next-hop must be filtered");
+    assert!(
+        rx.try_recv().is_err(),
+        "multicast next-hop must be filtered"
+    );
 }
 
 #[test]
@@ -3796,7 +3846,10 @@ fn queue_warm_pass_dedups_within_one_call() {
     );
     coord.queue_warm_pass(false);
     assert!(rx.try_recv().is_ok(), "first item expected");
-    assert!(rx.try_recv().is_err(), "duplicate (ifindex, hop) must coalesce");
+    assert!(
+        rx.try_recv().is_err(),
+        "duplicate (ifindex, hop) must coalesce"
+    );
 }
 
 #[test]
@@ -3812,7 +3865,10 @@ fn queue_warm_pass_respects_snapshot_rate_limit() {
     );
     // Forced sweep (RG-promote path) bypasses the snapshot rate-limit.
     coord.queue_warm_pass(true);
-    assert!(rx.try_recv().is_ok(), "forced sweep must bypass snapshot rate-limit");
+    assert!(
+        rx.try_recv().is_ok(),
+        "forced sweep must bypass snapshot rate-limit"
+    );
 }
 
 #[test]
@@ -3821,7 +3877,10 @@ fn queue_warm_pass_warms_fabric_peer_over_parent_ifindex() {
     // Drop the route so only the fabric is a candidate.
     coord.forwarding.routes_v4.clear();
     let parent = 80i32;
-    coord.forwarding.ifindex_to_name.insert(parent, "ge-0-0-0".to_string());
+    coord
+        .forwarding
+        .ifindex_to_name
+        .insert(parent, "ge-0-0-0".to_string());
     coord.forwarding.fabrics.push(FabricLink {
         parent_ifindex: parent,
         overlay_ifindex: 90,
@@ -3832,7 +3891,10 @@ fn queue_warm_pass_warms_fabric_peer_over_parent_ifindex() {
     });
     coord.queue_warm_pass(false);
     let item = rx.try_recv().expect("fabric peer warm item");
-    assert_eq!(item.ifindex, parent, "fabric warms over parent_ifindex (AGY r7 #3)");
+    assert_eq!(
+        item.ifindex, parent,
+        "fabric warms over parent_ifindex (AGY r7 #3)"
+    );
     assert_eq!(item.hop, IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2)));
 }
 
@@ -3864,7 +3926,11 @@ fn refresh_fabric_links_replacement_peer_invalidates_stale_old_5686() {
     // 1. Install P_old (resolved) under parent X → it is the redirect target.
     coord.refresh_fabric_links(&[fabric_snap_5686(parent, "10.99.0.2", "02:00:00:00:00:02")]);
     let res = resolve_fabric_redirect(&coord.forwarding).expect("P_old redirect after install");
-    assert_eq!(res.next_hop, Some(p_old), "P_old is the redirect target after install");
+    assert_eq!(
+        res.next_hop,
+        Some(p_old),
+        "P_old is the redirect target after install"
+    );
     assert_eq!(res.egress_ifindex, parent);
 
     // 2. Replace with P_new under the SAME parent while P_new is UNRESOLVED
@@ -3887,7 +3953,11 @@ fn refresh_fabric_links_replacement_peer_invalidates_stale_old_5686() {
     // 3. Once P_new RESOLVES → redirect returns P_new.
     coord.refresh_fabric_links(&[fabric_snap_5686(parent, "10.99.0.9", "02:00:00:00:00:09")]);
     let res = resolve_fabric_redirect(&coord.forwarding).expect("P_new redirect after resolve");
-    assert_eq!(res.next_hop, Some(p_new), "resolved replacement P_new is the redirect target");
+    assert_eq!(
+        res.next_hop,
+        Some(p_new),
+        "resolved replacement P_new is the redirect target"
+    );
     assert_eq!(res.egress_ifindex, parent);
 }
 
@@ -3912,8 +3982,17 @@ fn refresh_fabric_links_replacement_leaves_other_parent_untouched_5686() {
         fabric_snap_5686(x, "10.99.0.9", ""),
         fabric_snap_5686(y, "10.99.1.2", ""),
     ]);
-    let parents: Vec<i32> = coord.forwarding.fabrics.iter().map(|f| f.parent_ifindex).collect();
-    assert_eq!(parents, vec![y], "only Y survives; the superseded X link is dropped");
+    let parents: Vec<i32> = coord
+        .forwarding
+        .fabrics
+        .iter()
+        .map(|f| f.parent_ifindex)
+        .collect();
+    assert_eq!(
+        parents,
+        vec![y],
+        "only Y survives; the superseded X link is dropped"
+    );
     let res = resolve_fabric_redirect(&coord.forwarding).expect("Y still redirects");
     assert_eq!(
         res.next_hop,
@@ -3963,10 +4042,10 @@ fn queue_warm_pass_noop_without_worker_queue() {
     // No warm_queue installed (worker not yet spawned) → no panic, no-op.
     let mut coord = Coordinator::new();
     let now_secs = monotonic_nanos() / 1_000_000_000;
-    coord
-        .ha
-        .rg_runtime
-        .store(Arc::new(BTreeMap::from([(0i32, warm_active_ha_runtime(now_secs))])));
+    coord.ha.rg_runtime.store(Arc::new(BTreeMap::from([(
+        0i32,
+        warm_active_ha_runtime(now_secs),
+    )])));
     coord.forwarding.routes_v4.insert(
         "inet.0".to_string(),
         vec![RouteEntryV4::single(
@@ -3989,7 +4068,10 @@ fn on_rg_promote_active_clears_rate_limit_and_forces_warm() {
     // would normally suppress it.
     {
         let mut probed = coord.neighbors.last_probed_at.lock().unwrap();
-        probed.insert((80, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))), monotonic_nanos());
+        probed.insert(
+            (80, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+            monotonic_nanos(),
+        );
     }
     // First non-forced sweep enqueues (queue_warm_pass does not consult
     // last_probed_at — that is the worker's job — so the item IS sent).
@@ -4002,7 +4084,10 @@ fn on_rg_promote_active_clears_rate_limit_and_forces_warm() {
         coord.neighbors.last_probed_at.lock().unwrap().is_empty(),
         "RG-promote must clear the per-key rate-limit map",
     );
-    assert!(rx.try_recv().is_ok(), "forced warm pass on RG-promote must enqueue");
+    assert!(
+        rx.try_recv().is_ok(),
+        "forced warm pass on RG-promote must enqueue"
+    );
 }
 
 // #1628: waterfill counter cross-worker aggregation.
@@ -4052,7 +4137,11 @@ fn aggregate_cos_waterfill_epochs_sum_and_min_over_active_workers() {
         aggregate_cos_statuses_across_workers(&[worker_healthy, worker_frozen], &owner_by_queue);
     assert_eq!(aggregated.len(), 1);
     let iface = &aggregated[0];
-    assert_eq!(iface.waterfill_epochs, 1000 + 3, "epochs SUM across workers");
+    assert_eq!(
+        iface.waterfill_epochs,
+        1000 + 3,
+        "epochs SUM across workers"
+    );
     assert_eq!(
         iface.waterfill_phase1_budget_breaks,
         4 + 900,
@@ -4258,12 +4347,9 @@ fn aggregate_cos_statuses_max_merges_sojourn_across_worker_snapshots() {
 // the suite on the same host (a mutation matrix runs two) cannot collide.
 // ---------------------------------------------------------------------
 
-const WG1866_PRIVKEY_A: &str =
-    "a01010101010101010101010101010101010101010101010101010101010101a";
-const WG1866_PRIVKEY_B: &str =
-    "c03030303030303030303030303030303030303030303030303030303030303c";
-const WG1866_PUBKEY: &str =
-    "b02020202020202020202020202020202020202020202020202020202020202b";
+const WG1866_PRIVKEY_A: &str = "a01010101010101010101010101010101010101010101010101010101010101a";
+const WG1866_PRIVKEY_B: &str = "c03030303030303030303030303030303030303030303030303030303030303c";
+const WG1866_PUBKEY: &str = "b02020202020202020202020202020202020202020202020202020202020202b";
 
 fn wg1866_snapshot(id: u16, ifindex: i32, name: &str, port: u16, privkey: &str) -> ConfigSnapshot {
     ConfigSnapshot {
@@ -4320,12 +4406,22 @@ fn wg1866_wait_tombstone(coordinator: &mut Coordinator, id: u16, timeout_ms: u64
 fn wg1866_removal_refresh_prunes_thread_and_releases_port() {
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
-    coordinator.refresh_runtime_snapshot(&wg1866_snapshot(1, 4242, "wgt1866a", port, WG1866_PRIVKEY_A)).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&wg1866_snapshot(
+            1,
+            4242,
+            "wgt1866a",
+            port,
+            WG1866_PRIVKEY_A,
+        ))
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(
         coordinator.wg_control_threads.contains_key(&1),
         "WG control entry created on snapshot with WG endpoint"
     );
-    coordinator.refresh_runtime_snapshot(&ConfigSnapshot::default()).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&ConfigSnapshot::default())
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(
         coordinator.wg_control_threads.is_empty(),
         "removal refresh must prune the entry (stop+join)"
@@ -4349,7 +4445,9 @@ fn wg1866_eaddrinuse_tombstone_backoff_and_retry() {
     // for BOTH of bind_wg_socket's attempts (v6 preferred, v4 fallback).
     let (blocker, blocker_v4, port) = crate::test_ports::hold_ephemeral_udp_port();
     let snap = wg1866_snapshot(1, 4242, "wgt1866b", port, WG1866_PRIVKEY_A);
-    coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(
         coordinator.wg_control_threads.contains_key(&1),
         "spawn attempt recorded even though bind will fail"
@@ -4398,11 +4496,17 @@ fn wg1866_remove_then_readd_same_identity_respawns() {
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
     let snap = wg1866_snapshot(1, 4242, "wgt1866c", port, WG1866_PRIVKEY_A);
-    coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(coordinator.wg_control_threads.contains_key(&1));
-    coordinator.refresh_runtime_snapshot(&ConfigSnapshot::default()).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&ConfigSnapshot::default())
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(coordinator.wg_control_threads.is_empty());
-    coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator
         .wg_control_threads
         .get(&1)
@@ -4418,10 +4522,15 @@ fn wg1866_sweep_cannot_spawn_after_stop() {
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
     let snap = wg1866_snapshot(1, 4242, "wgt1866d", port, WG1866_PRIVKEY_A);
-    coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(coordinator.wg_control_threads.contains_key(&1));
     coordinator.stop();
-    assert!(coordinator.wg_control_threads.is_empty(), "stop clears entries");
+    assert!(
+        coordinator.wg_control_threads.is_empty(),
+        "stop clears entries"
+    );
     for _ in 0..3 {
         coordinator.reconcile_wg_control_liveness(Some(&snap));
     }
@@ -4439,7 +4548,9 @@ fn wg1866_defer_prune_releases_port_and_sweep_does_not_resurrect() {
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
     let snap = wg1866_snapshot(1, 4242, "wgt1866e", port, WG1866_PRIVKEY_A);
-    coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(coordinator.wg_control_threads.contains_key(&1));
     // Defer-branch apply removed the endpoint: narrow prune only.
     let removed = ConfigSnapshot::default();
@@ -4453,7 +4564,11 @@ fn wg1866_defer_prune_releases_port_and_sweep_does_not_resurrect() {
         "defer prune must NOT touch the (intentionally stale) forwarding state"
     );
     let bind = std::net::UdpSocket::bind(("0.0.0.0", port));
-    assert!(bind.is_ok(), "port released by the defer prune: {:?}", bind.err());
+    assert!(
+        bind.is_ok(),
+        "port released by the defer prune: {:?}",
+        bind.err()
+    );
     // F7 regression: repeated sweeps against the STORED (endpoint-free)
     // snapshot must not resurrect the thread from stale forwarding.
     for _ in 0..3 {
@@ -4480,8 +4595,13 @@ fn wg1866_sweep_suppresses_stale_identity_respawn_under_defer() {
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
     let snap_a = wg1866_snapshot(1, 4242, "wgt1866f", port, WG1866_PRIVKEY_A);
-    coordinator.refresh_runtime_snapshot(&snap_a).expect("refresh_runtime_snapshot must succeed");
-    assert!(wg1866_wait_tombstone(&mut coordinator, 1, 2_000), "open_tun failure tombstones");
+    coordinator
+        .refresh_runtime_snapshot(&snap_a)
+        .expect("refresh_runtime_snapshot must succeed");
+    assert!(
+        wg1866_wait_tombstone(&mut coordinator, 1, 2_000),
+        "open_tun failure tombstones"
+    );
     // Defer window: stored snapshot re-keys id 1 to identity B while
     // forwarding still holds identity A. Force past the backoff.
     let snap_b = wg1866_snapshot(1, 4242, "wgt1866f", port, WG1866_PRIVKEY_B);
@@ -4491,16 +4611,27 @@ fn wg1866_sweep_suppresses_stale_identity_respawn_under_defer() {
         .expect("tombstone")
         .last_spawn_attempt_ns = 0;
     coordinator.reconcile_wg_control_liveness(Some(&snap_b));
-    let entry = coordinator.wg_control_threads.get(&1).expect("tombstone kept");
+    let entry = coordinator
+        .wg_control_threads
+        .get(&1)
+        .expect("tombstone kept");
     assert!(
         entry.handle.is_none(),
         "sweep must not respawn identity A when the stored snapshot says identity B"
     );
     // The coherent apply with B then restarts cleanly (engine changed
     // => stale prune => fresh spawn).
-    coordinator.refresh_runtime_snapshot(&snap_b).expect("refresh_runtime_snapshot must succeed");
-    let entry = coordinator.wg_control_threads.get(&1).expect("entry after B apply");
-    assert!(entry.handle.is_some(), "identity B spawns at the coherent apply");
+    coordinator
+        .refresh_runtime_snapshot(&snap_b)
+        .expect("refresh_runtime_snapshot must succeed");
+    let entry = coordinator
+        .wg_control_threads
+        .get(&1)
+        .expect("entry after B apply");
+    assert!(
+        entry.handle.is_some(),
+        "identity B spawns at the coherent apply"
+    );
 }
 
 /// Plan §9 test 6d — Codex r4 regression: same id, same crypto
@@ -4518,8 +4649,13 @@ fn wg1866_sweep_suppresses_stale_attachment_respawn_under_defer() {
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
     let snap_a = wg1866_snapshot(1, 4242, "wgt1866g", port, WG1866_PRIVKEY_A);
-    coordinator.refresh_runtime_snapshot(&snap_a).expect("refresh_runtime_snapshot must succeed");
-    assert!(wg1866_wait_tombstone(&mut coordinator, 1, 2_000), "open_tun failure tombstones");
+    coordinator
+        .refresh_runtime_snapshot(&snap_a)
+        .expect("refresh_runtime_snapshot must succeed");
+    assert!(
+        wg1866_wait_tombstone(&mut coordinator, 1, 2_000),
+        "open_tun failure tombstones"
+    );
     // Stored snapshot renames the interface (same id + identity).
     let snap_renamed = wg1866_snapshot(1, 4243, "wgt1866h", port, WG1866_PRIVKEY_A);
     coordinator
@@ -4528,7 +4664,10 @@ fn wg1866_sweep_suppresses_stale_attachment_respawn_under_defer() {
         .expect("tombstone")
         .last_spawn_attempt_ns = 0;
     coordinator.reconcile_wg_control_liveness(Some(&snap_renamed));
-    let entry = coordinator.wg_control_threads.get(&1).expect("tombstone kept");
+    let entry = coordinator
+        .wg_control_threads
+        .get(&1)
+        .expect("tombstone kept");
     assert!(
         entry.handle.is_none(),
         "sweep must not respawn the old TUN attachment when the stored snapshot renamed it"
@@ -4543,13 +4682,32 @@ fn wg1866_sweep_suppresses_stale_attachment_respawn_under_defer() {
 fn wg1866_apply_time_rename_restarts_thread_on_new_attachment() {
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
-    coordinator.refresh_runtime_snapshot(&wg1866_snapshot(1, 4242, "wgt1866i", port, WG1866_PRIVKEY_A)).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&wg1866_snapshot(
+            1,
+            4242,
+            "wgt1866i",
+            port,
+            WG1866_PRIVKEY_A,
+        ))
+        .expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
     assert_eq!(entry.spawned_tunnel_name, "wgt1866i");
     // Rename (same id, same identity): engine Arc is REUSED, but the
     // attachment-aware stale prune must restart the thread.
-    coordinator.refresh_runtime_snapshot(&wg1866_snapshot(1, 4243, "wgt1866j", port, WG1866_PRIVKEY_A)).expect("refresh_runtime_snapshot must succeed");
-    let entry = coordinator.wg_control_threads.get(&1).expect("entry after rename");
+    coordinator
+        .refresh_runtime_snapshot(&wg1866_snapshot(
+            1,
+            4243,
+            "wgt1866j",
+            port,
+            WG1866_PRIVKEY_A,
+        ))
+        .expect("refresh_runtime_snapshot must succeed");
+    let entry = coordinator
+        .wg_control_threads
+        .get(&1)
+        .expect("entry after rename");
     assert_eq!(
         entry.spawned_tunnel_name, "wgt1866j",
         "rename must stop the old thread and spawn against the new TUN"
@@ -4576,7 +4734,9 @@ fn wg1866_sweep_respawns_with_empty_linux_name_rows() {
     let mut snap = wg1866_snapshot(1, 4244, "wgt1866k", port, WG1866_PRIVKEY_A);
     snap.interfaces[0].linux_name = String::new();
     snap.tunnel_endpoints[0].linux_name = String::new();
-    coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(
         wg1866_wait_tombstone(&mut coordinator, 1, 2_000),
         "open_tun failure tombstones"
@@ -4682,7 +4842,9 @@ fn wg2921_outer_mtu_change_restarts_control_thread() {
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
     // First apply: peer reachable via ge2921wan @ MTU 1400.
-    coordinator.refresh_runtime_snapshot(&wg2921_snapshot(1, 4242, "wgt2921a", port, 1400)).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&wg2921_snapshot(1, 4242, "wgt2921a", port, 1400))
+        .expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
     assert_eq!(
         entry.spawned_outer_mtu, 1400,
@@ -4702,8 +4864,13 @@ fn wg2921_outer_mtu_change_restarts_control_thread() {
     // Second apply: SAME WG identity (port/privkey/peer), underlay MTU
     // dropped to 1280. The engine Arc is reused (wg_identity_unchanged),
     // so only the #2921 outer-MTU prune can restart the thread.
-    coordinator.refresh_runtime_snapshot(&wg2921_snapshot(1, 4242, "wgt2921a", port, 1280)).expect("refresh_runtime_snapshot must succeed");
-    let entry = coordinator.wg_control_threads.get(&1).expect("entry after MTU change");
+    coordinator
+        .refresh_runtime_snapshot(&wg2921_snapshot(1, 4242, "wgt2921a", port, 1280))
+        .expect("refresh_runtime_snapshot must succeed");
+    let entry = coordinator
+        .wg_control_threads
+        .get(&1)
+        .expect("entry after MTU change");
     assert_eq!(
         entry.engine_ptr, engine_ptr_before,
         "engine Arc must be REUSED (identity unchanged) — exercising the same-engine path"
@@ -4725,9 +4892,14 @@ fn wg2921_outer_mtu_change_restarts_control_thread() {
 fn wg2921_unchanged_outer_mtu_keeps_control_thread() {
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
-    coordinator.refresh_runtime_snapshot(&wg2921_snapshot(1, 4242, "wgt2921b", port, 1400)).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&wg2921_snapshot(1, 4242, "wgt2921b", port, 1400))
+        .expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
-    assert_eq!(entry.spawned_outer_mtu, 1400, "resolved underlay MTU captured");
+    assert_eq!(
+        entry.spawned_outer_mtu, 1400,
+        "resolved underlay MTU captured"
+    );
     let engine_ptr_before = entry.engine_ptr;
     // Recent attempt stamp: suppresses any tombstone self-respawn so the
     // assertion isolates the prune decision.
@@ -4739,8 +4911,13 @@ fn wg2921_unchanged_outer_mtu_keeps_control_thread() {
         .last_spawn_attempt_ns = t0;
 
     // Identical underlay MTU — resolve_wg_outer_mtu is unchanged.
-    coordinator.refresh_runtime_snapshot(&wg2921_snapshot(1, 4242, "wgt2921b", port, 1400)).expect("refresh_runtime_snapshot must succeed");
-    let entry = coordinator.wg_control_threads.get(&1).expect("entry after no-op refresh");
+    coordinator
+        .refresh_runtime_snapshot(&wg2921_snapshot(1, 4242, "wgt2921b", port, 1400))
+        .expect("refresh_runtime_snapshot must succeed");
+    let entry = coordinator
+        .wg_control_threads
+        .get(&1)
+        .expect("entry after no-op refresh");
     assert_eq!(
         entry.engine_ptr, engine_ptr_before,
         "engine Arc reused on the unchanged refresh"
@@ -5239,9 +5416,11 @@ fn gre1881_coordinator_with_worker() -> Coordinator {
     let mut coordinator = Coordinator::new();
     // #6242: register the whole runtime record (handle + empty observability
     // slots) as one op.
-    coordinator
-        .workers
-        .register(0, WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle()), None);
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle()),
+        None,
+    );
     coordinator
 }
 
@@ -5267,7 +5446,9 @@ fn gre1881_wait_tombstone(coordinator: &mut Coordinator, id: u16, timeout_ms: u6
 #[test]
 fn gre1881_refresh_creates_entry_and_publishes_delivery() {
     let mut coordinator = gre1881_coordinator_with_worker();
-    coordinator.refresh_runtime_snapshot(&gre1881_snapshot(1, 36281, "gre1881a", "198.51.100.7")).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&gre1881_snapshot(1, 36281, "gre1881a", "198.51.100.7"))
+        .expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator
         .tunnel_sources
         .get(&1)
@@ -5289,9 +5470,13 @@ fn gre1881_refresh_creates_entry_and_publishes_delivery() {
 #[test]
 fn gre1881_removal_refresh_prunes_entry_and_unpublishes() {
     let mut coordinator = gre1881_coordinator_with_worker();
-    coordinator.refresh_runtime_snapshot(&gre1881_snapshot(1, 36282, "gre1881b", "198.51.100.7")).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&gre1881_snapshot(1, 36282, "gre1881b", "198.51.100.7"))
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(coordinator.tunnel_sources.contains_key(&1));
-    coordinator.refresh_runtime_snapshot(&ConfigSnapshot::default()).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&ConfigSnapshot::default())
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(
         coordinator.tunnel_sources.is_empty(),
         "removed endpoint prunes the entry"
@@ -5307,7 +5492,9 @@ fn gre1881_removal_refresh_prunes_entry_and_unpublishes() {
 #[test]
 fn gre1881_no_workers_spawn_gate() {
     let mut coordinator = Coordinator::new();
-    coordinator.refresh_runtime_snapshot(&gre1881_snapshot(1, 36283, "gre1881c", "198.51.100.7")).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&gre1881_snapshot(1, 36283, "gre1881c", "198.51.100.7"))
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(
         coordinator.tunnel_sources.is_empty(),
         "no spawn without live worker handles (frozen empty captures)"
@@ -5322,13 +5509,17 @@ fn gre1881_no_workers_spawn_gate() {
 #[test]
 fn gre1881_destination_edit_preserves_entry_without_respawn() {
     let mut coordinator = gre1881_coordinator_with_worker();
-    coordinator.refresh_runtime_snapshot(&gre1881_snapshot(1, 36284, "gre1881d", "198.51.100.7")).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&gre1881_snapshot(1, 36284, "gre1881d", "198.51.100.7"))
+        .expect("refresh_runtime_snapshot must succeed");
     let stamp = coordinator
         .tunnel_sources
         .get(&1)
         .expect("entry")
         .last_spawn_attempt_ns;
-    coordinator.refresh_runtime_snapshot(&gre1881_snapshot(1, 36284, "gre1881d", "203.0.113.9")).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&gre1881_snapshot(1, 36284, "gre1881d", "203.0.113.9"))
+        .expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator
         .tunnel_sources
         .get(&1)
@@ -5344,18 +5535,25 @@ fn gre1881_destination_edit_preserves_entry_without_respawn() {
 #[test]
 fn gre1881_attachment_change_restarts_thread() {
     let mut coordinator = gre1881_coordinator_with_worker();
-    coordinator.refresh_runtime_snapshot(&gre1881_snapshot(1, 36285, "gre1881e", "198.51.100.7")).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&gre1881_snapshot(1, 36285, "gre1881e", "198.51.100.7"))
+        .expect("refresh_runtime_snapshot must succeed");
     let stamp = coordinator
         .tunnel_sources
         .get(&1)
         .expect("entry")
         .last_spawn_attempt_ns;
-    coordinator.refresh_runtime_snapshot(&gre1881_snapshot(1, 36286, "gre1881e", "198.51.100.7")).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&gre1881_snapshot(1, 36286, "gre1881e", "198.51.100.7"))
+        .expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator
         .tunnel_sources
         .get(&1)
         .expect("reattached endpoint respawned");
-    assert_eq!(entry.spawned_ifindex, 36286, "entry re-spawned on the new ifindex");
+    assert_eq!(
+        entry.spawned_ifindex, 36286,
+        "entry re-spawned on the new ifindex"
+    );
     assert!(
         entry.last_spawn_attempt_ns > stamp,
         "attachment change respawns (fresh attempt stamp)"
@@ -5498,9 +5696,13 @@ fn gre1881_mode_flip_to_wireguard_prunes_gre_entry() {
 fn gre1881_disarmed_refresh_stops_threads() {
     let mut coordinator = gre1881_coordinator_with_worker();
     let snap = gre1881_snapshot(1, 36288, "gre1881g", "198.51.100.7");
-    coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(coordinator.tunnel_sources.contains_key(&1));
-    coordinator.refresh_runtime_snapshot_disarmed(&snap).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot_disarmed(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(
         coordinator.tunnel_sources.is_empty(),
         "disarmed refresh must not hold TUN reader fds"
@@ -5515,7 +5717,9 @@ fn gre1881_disarmed_refresh_stops_threads() {
 fn gre1881_defer_prune_removes_only_stale_entries() {
     let mut coordinator = gre1881_coordinator_with_worker();
     let snap = gre1881_snapshot(1, 36289, "gre1881h", "198.51.100.7");
-    coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(coordinator.tunnel_sources.contains_key(&1));
     // Same snapshot: nothing pruned.
     coordinator.prune_local_tunnel_sources_for_snapshot(&snap);
@@ -5532,7 +5736,9 @@ fn gre1881_defer_prune_removes_only_stale_entries() {
     assert!(coordinator.local_tunnel_deliveries.load().is_empty());
 
     // Re-arm an entry and verify full removal still prunes.
-    coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(coordinator.tunnel_sources.contains_key(&1));
     coordinator.prune_local_tunnel_sources_for_snapshot(&ConfigSnapshot::default());
     assert!(coordinator.tunnel_sources.is_empty());
@@ -5555,7 +5761,9 @@ fn gre1881_exit_tombstones_sweep_unpublishes_and_respawn_is_coherence_gated() {
 
     let mut coordinator = gre1881_coordinator_with_worker();
     let snap = gre1881_snapshot(1, 36290, "gre1881i", "198.51.100.7");
-    coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(
         gre1881_wait_tombstone(&mut coordinator, 1, 2_000),
         "open_tun failure tombstones the entry"
@@ -5602,7 +5810,9 @@ fn gre1881_exit_tombstones_sweep_unpublishes_and_respawn_is_coherence_gated() {
 fn gre1881_stop_inner_clears_and_sweep_creates_nothing() {
     let mut coordinator = gre1881_coordinator_with_worker();
     let snap = gre1881_snapshot(1, 36291, "gre1881j", "198.51.100.7");
-    coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
     assert!(coordinator.tunnel_sources.contains_key(&1));
     coordinator.stop_inner(false);
     assert!(coordinator.tunnel_sources.is_empty(), "stop clears entries");
@@ -5965,7 +6175,9 @@ fn reconcile_post_teardown_worker_spawn_failure_fails_closed_4952() {
     assert!(
         matches!(
             result,
-            Err(ReconcileError::WorkerSpawn(ReconcileStage::SpawnWorkerFailed { .. }))
+            Err(ReconcileError::WorkerSpawn(
+                ReconcileStage::SpawnWorkerFailed { .. }
+            ))
         ),
         "a post-teardown worker-spawn failure must surface as \
          Err(WorkerSpawn(SpawnWorkerFailed)), got {result:?}"
@@ -6155,7 +6367,9 @@ fn reconcile_partial_spawn_failure_stops_launched_workers_14130() {
     assert!(
         matches!(
             result,
-            Err(ReconcileError::WorkerSpawn(ReconcileStage::SpawnWorkerFailed { worker_id: 2, .. }))
+            Err(ReconcileError::WorkerSpawn(
+                ReconcileStage::SpawnWorkerFailed { worker_id: 2, .. }
+            ))
         ),
         "a partial-success spawn failure must surface as \
          Err(WorkerSpawn(SpawnWorkerFailed{{worker_id:2}})), got {result:?}"
@@ -6473,10 +6687,7 @@ fn bind_failure_cause_survives_the_failclosed_teardown_8558() {
     let failed = &bindings[0];
     assert_eq!(failed.slot, 1, "fixture drift: worker 0 owns slot 1");
     assert!(
-        failed
-            .last_error
-            .to_lowercase()
-            .contains("resource busy"),
+        failed.last_error.to_lowercase().contains("resource busy"),
         "the reconcile that stopped every worker must still publish WHY slot {} \
          could not bind — this is the exact substring \
          hasBusyBindingsWedgeLocked's busyErr term matches, and master left it \
@@ -6682,7 +6893,11 @@ fn stop_inner_drops_worker_record_owners_exactly_once_6242() {
     coordinator.workers.register(0, rec, None);
 
     // Two owners each: the registered record + our external clone.
-    assert_eq!(Arc::strong_count(&panic), 2, "record + external clone own the panic slot");
+    assert_eq!(
+        Arc::strong_count(&panic),
+        2,
+        "record + external clone own the panic slot"
+    );
     assert_eq!(Arc::strong_count(&exception_ring), 2);
     assert_eq!(Arc::strong_count(&last_resolution), 2);
 
@@ -6738,7 +6953,9 @@ fn ipsec_sa_not_ready_unwinds_plan_and_same_plan_retries_14130() {
     assert!(coordinator.workers.records().is_empty());
     assert!(coordinator.workers.identities.is_empty());
     assert!(
-        bindings.iter().all(|binding| !binding.bound && !binding.ready),
+        bindings
+            .iter()
+            .all(|binding| !binding.bound && !binding.ready),
         "no slot may report bound/ready after the SA gate failure"
     );
 
@@ -6746,7 +6963,10 @@ fn ipsec_sa_not_ready_unwinds_plan_and_same_plan_retries_14130() {
     coordinator.force_ipsec_sa_not_ready = false;
     coordinator.force_ipsec_sa_ready = true;
     let second = coordinator.reconcile(Some(&snap), &mut bindings, 64);
-    assert!(second.is_ok(), "identical-plan retry must succeed, got {second:?}");
+    assert!(
+        second.is_ok(),
+        "identical-plan retry must succeed, got {second:?}"
+    );
     assert_eq!(coordinator.workers.records().len(), 3);
     assert_eq!(coordinator.live_count(), 3);
     assert!(bindings.iter().all(|binding| binding.bound));
@@ -6775,7 +6995,10 @@ fn spawn_failure_same_plan_retry_recovers_14130() {
     assert!(coordinator.workers.records().is_empty());
 
     let second = coordinator.reconcile(Some(&snap), &mut bindings, 64);
-    assert!(second.is_ok(), "identical-plan retry must succeed, got {second:?}");
+    assert!(
+        second.is_ok(),
+        "identical-plan retry must succeed, got {second:?}"
+    );
     assert_eq!(coordinator.workers.records().len(), 3);
     assert_eq!(coordinator.live_count(), 3);
     assert!(bindings.iter().all(|binding| binding.bound));
@@ -6803,7 +7026,10 @@ fn bind_incomplete_same_plan_retry_recovers_14130() {
     assert!(!coordinator.last_bind_failures.is_empty());
 
     let second = coordinator.reconcile(Some(&snap), &mut bindings, 64);
-    assert!(second.is_ok(), "identical-plan retry must succeed, got {second:?}");
+    assert!(
+        second.is_ok(),
+        "identical-plan retry must succeed, got {second:?}"
+    );
     assert_eq!(coordinator.workers.records().len(), 3);
     assert!(bindings.iter().all(|binding| binding.bound));
     assert!(coordinator.last_bind_failures.is_empty());
@@ -6996,7 +7222,9 @@ fn validate_snapshot_buildable_matches_reconcile_5171() {
     assert!(
         matches!(
             &recon,
-            Err(ReconcileError::MapSetup(ReconcileStage::MissingPin(MandatoryPin::Session)))
+            Err(ReconcileError::MapSetup(ReconcileStage::MissingPin(
+                MandatoryPin::Session
+            )))
         ),
         "reconcile must reject the missing-session-pin snapshot at missing_session_pin, got {recon:?}"
     );
@@ -7008,7 +7236,9 @@ fn validate_snapshot_buildable_matches_reconcile_5171() {
     assert!(
         matches!(
             &validated,
-            Err(ReconcileError::MapSetup(ReconcileStage::MissingPin(MandatoryPin::Session)))
+            Err(ReconcileError::MapSetup(ReconcileStage::MissingPin(
+                MandatoryPin::Session
+            )))
         ),
         "validate_snapshot_buildable must reject the same snapshot with the same MapSetup stage, got {validated:?}"
     );
@@ -7082,7 +7312,7 @@ fn validate_snapshot_buildable_matches_reconcile_5171() {
 #[test]
 fn validate_snapshot_buildable_does_not_prune_live_zone_counters_5171() {
     use crate::afxdp::zone_counters::{
-        flush_recorded_zone_counters, record_zone_traffic, ZoneCounterSlotMap,
+        ZoneCounterSlotMap, flush_recorded_zone_counters, record_zone_traffic,
     };
     const ZONE_A: u16 = 100;
     const ZONE_B: u16 = 200;
@@ -7181,13 +7411,15 @@ fn zone_counter_live_coordinator(coord: &mut Coordinator) {
     use crate::afxdp::zone_counters::{flush_recorded_zone_counters, record_zone_traffic};
     let mut baseline = mandatory_ok_snapshot(5);
     baseline.zones = zone_counter_zones(&[100, 200]);
-    coord.set_forwarding_for_test(crate::afxdp::forwarding_build::build_forwarding_state_with_policy_counters_and_previous(
+    coord.set_forwarding_for_test(
+        crate::afxdp::forwarding_build::build_forwarding_state_with_policy_counters_and_previous(
             &baseline,
             &coord.policy_counters,
             &coord.nat_counters,
             None,
         )
-        .expect("the baseline zone snapshot must build"));
+        .expect("the baseline zone snapshot must build"),
+    );
     record_zone_traffic(&coord.forwarding.zone_counter_slot_map, 100, 200, 64);
     record_zone_traffic(&coord.forwarding.zone_counter_slot_map, 200, 100, 64);
     flush_recorded_zone_counters(
@@ -7343,7 +7575,11 @@ fn rule_counter_live_coordinator(coord: &mut Coordinator) {
 
     for want in [RULE_COUNTER_LIVE_POLICY_ID, RULE_COUNTER_DOOMED_POLICY_ID] {
         assert!(
-            coord.policy_counters.tracked_rule_ids().iter().any(|id| id == want),
+            coord
+                .policy_counters
+                .tracked_rule_ids()
+                .iter()
+                .any(|id| id == want),
             "fixture: policy id {want} must be seeded, or every assertion below is \
              vacuous. Got {:?}",
             coord.policy_counters.tracked_rule_ids()
@@ -7665,8 +7901,8 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
     // calls it, so reverting this accessor to its old inline
     // "configured-only" body left them all green. This test binds the wiring.
     use crate::afxdp::zone_counters::{
-        flush_recorded_zone_counters, record_zone_traffic, ZoneCounterSlotMap,
-        ZONE_COUNTER_ASSIGNABLE_SLOTS,
+        ZONE_COUNTER_ASSIGNABLE_SLOTS, ZoneCounterSlotMap, flush_recorded_zone_counters,
+        record_zone_traffic,
     };
     const Z: u16 = 50675; // config::StableZoneID("trust")
 
@@ -7677,7 +7913,10 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
     record_zone_traffic(&map1, Z, 0, 1500);
     flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &map1);
     coord.forwarding.zone_counter_slot_map = std::sync::Arc::new(map1);
-    coord.forwarding.zone_id_to_name.insert(Z, "trust".to_string());
+    coord
+        .forwarding
+        .zone_id_to_name
+        .insert(Z, "trust".to_string());
 
     let published = coord.zone_traffic_counters();
     assert!(
@@ -7781,8 +8020,8 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
     // the Rust one was not. Mirrors
     // `zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843` above.
     use crate::afxdp::flood_counters::{
-        flush_recorded_flood_counters, record_zone_flood_drop, FloodCounterSlotMap,
-        FLOOD_COUNTER_ASSIGNABLE_SLOTS,
+        FLOOD_COUNTER_ASSIGNABLE_SLOTS, FloodCounterSlotMap, flush_recorded_flood_counters,
+        record_zone_flood_drop,
     };
     const Z: u16 = 50675; // config::StableZoneID("trust")
 
@@ -7793,7 +8032,10 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
     record_zone_flood_drop(&map1, Z, "syn-flood");
     flush_recorded_flood_counters(&coord.forwarding.flood_counter_store, &map1);
     coord.forwarding.flood_counter_slot_map = std::sync::Arc::new(map1);
-    coord.forwarding.zone_id_to_name.insert(Z, "trust".to_string());
+    coord
+        .forwarding
+        .zone_id_to_name
+        .insert(Z, "trust".to_string());
 
     let published = coord.zone_flood_counters();
     assert!(
@@ -8225,9 +8467,7 @@ fn reconcile_present_conntrack_pin_open_failure_keeps_prior_generation() {
         "the published validation must still hold the prior generation"
     );
     assert!(
-        bindings[0]
-            .last_error
-            .starts_with("open conntrack_v4 map:"),
+        bindings[0].last_error.starts_with("open conntrack_v4 map:"),
         "expected per-binding last_error for the conntrack_v4 open failure, got {:?}",
         bindings[0].last_error
     );
@@ -8286,10 +8526,7 @@ fn reconcile_present_dnat_pin_open_failure_keeps_prior_generation() {
         coordinator.validation.config_generation, 40,
         "config_generation must NOT advance on a present-but-unopenable dnat map"
     );
-    assert_eq!(
-        coordinator.published_validation().config_generation,
-        40
-    );
+    assert_eq!(coordinator.published_validation().config_generation, 40);
     assert!(
         bindings[0].last_error.starts_with("open dnat_table map:"),
         "expected per-binding last_error for the dnat_table open failure, got {:?}",
@@ -8333,10 +8570,7 @@ fn reconcile_empty_optional_pins_advance_published_generation() {
         coordinator.validation.config_generation, 51,
         "empty optional pins must NOT gate the reconcile (anti-over-gate)"
     );
-    assert_eq!(
-        coordinator.published_validation().config_generation,
-        51
-    );
+    assert_eq!(coordinator.published_validation().config_generation, 51);
 }
 
 /// Positive control: PRESENT optional pins that OPEN OK must reconcile
@@ -8372,10 +8606,7 @@ fn reconcile_present_optional_pins_open_ok_advance_generation() {
         coordinator.validation.config_generation, 61,
         "present + openable optional maps must reconcile normally"
     );
-    assert_eq!(
-        coordinator.published_validation().config_generation,
-        61
-    );
+    assert_eq!(coordinator.published_validation().config_generation, 61);
 }
 
 // ---------------------------------------------------------------------------
@@ -8516,7 +8747,12 @@ fn reconcile_all_seven_pin_faults_lock_stage_and_binding_strings_6243() {
     let mut p = all_map_pins_ok_6243();
     p.heartbeat = format!("{TEST_MAP_PIN_FAIL}heartbeat");
     let (stage, be) = drive_map_pin_reconcile_6243(p);
-    assert_open_parity(&stage, &be, "open_heartbeat_map_failed:", "open heartbeat map: ");
+    assert_open_parity(
+        &stage,
+        &be,
+        "open_heartbeat_map_failed:",
+        "open heartbeat map: ",
+    );
 
     // Mandatory session.
     let mut p = all_map_pins_ok_6243();
@@ -8528,7 +8764,12 @@ fn reconcile_all_seven_pin_faults_lock_stage_and_binding_strings_6243() {
     let mut p = all_map_pins_ok_6243();
     p.sessions = format!("{TEST_MAP_PIN_FAIL}sessions");
     let (stage, be) = drive_map_pin_reconcile_6243(p);
-    assert_open_parity(&stage, &be, "open_session_map_failed:", "open session map: ");
+    assert_open_parity(
+        &stage,
+        &be,
+        "open_session_map_failed:",
+        "open session map: ",
+    );
 
     // Optional pins: PRESENT-but-unopenable is fatal (#2444). There is no
     // "missing" variant — an empty optional pin is silent absence. The stage
@@ -8808,8 +9049,14 @@ fn both_paths_open_full_seven_pin_bundle_before_ok_6243() {
         let deferred = deferred_map_pin_stage_6243(faulted);
         match &activated {
             ReconcileStage::OpenMapFailed { map, err } => {
-                assert_eq!(*map, token, "activated must fault the {token} optional open");
-                assert!(!err.is_empty(), "activated {token} fault must carry a nonempty err");
+                assert_eq!(
+                    *map, token,
+                    "activated must fault the {token} optional open"
+                );
+                assert!(
+                    !err.is_empty(),
+                    "activated {token} fault must carry a nonempty err"
+                );
             }
             other => panic!("expected OpenMapFailed({token}) from activated, got {other:?}"),
         }
@@ -8974,10 +9221,7 @@ fn refresh_runtime_snapshot_build_failure_is_atomic_noop_3766() {
         .refresh_runtime_snapshot(&good_snapshot(11))
         .expect("valid snapshot must still apply after a rejected one");
     assert_eq!(coordinator.validation.config_generation, 11);
-    assert_eq!(
-        coordinator.published_validation().config_generation,
-        11
-    );
+    assert_eq!(coordinator.published_validation().config_generation, 11);
 }
 
 /// #5190 (A1-b8-F6) fail-on-revert + structural CENSUS: every field
@@ -9044,8 +9288,8 @@ fn zero_unbound_slot_clears_every_copied_field_5190() {
         "armed",
     ];
 
-    let default_json = serde_json::to_value(BindingStatus::default())
-        .expect("BindingStatus must serialize");
+    let default_json =
+        serde_json::to_value(BindingStatus::default()).expect("BindingStatus must serialize");
     let mut poisoned_json = default_json.clone();
     poison(&mut poisoned_json);
     let poisoned: BindingStatus =
@@ -9599,9 +9843,11 @@ fn no_snapshot_reconcile_leaves_no_reader_for_the_empty_table_6873() {
     let mut coordinator = Coordinator::new();
 
     // A LIVE worker record: the reader that must not survive.
-    coordinator
-        .workers
-        .register(0, WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle()), None);
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle()),
+        None,
+    );
 
     // A POPULATED host-inbound table: the state that must be emptied. Both
     // halves matter — with an empty table the "it was emptied" assertion is
@@ -9934,7 +10180,10 @@ fn stop_inner_retires_holders_for_all_allocator_families_7092() {
         .expect("iface allocator");
     assert!(iface_alloc.reserve_flow(
         flow(6001),
-        TranslatedTuple { ip: egress, port: 40001 },
+        TranslatedTuple {
+            ip: egress,
+            port: 40001
+        },
         0,
         false,
         1_000,
@@ -9949,7 +10198,10 @@ fn stop_inner_retires_holders_for_all_allocator_families_7092() {
     let pool_addr = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5));
     assert!(pool_alloc.reserve_flow(
         flow(6002),
-        TranslatedTuple { ip: pool_addr, port: 40002 },
+        TranslatedTuple {
+            ip: pool_addr,
+            port: 40002
+        },
         0,
         false,
         1_000,
@@ -9962,7 +10214,10 @@ fn stop_inner_retires_holders_for_all_allocator_families_7092() {
     let nat64_addr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 77));
     assert!(nat64_alloc.reserve_flow(
         flow(6003),
-        TranslatedTuple { ip: nat64_addr, port: 40003 },
+        TranslatedTuple {
+            ip: nat64_addr,
+            port: 40003
+        },
         0,
         false,
         1_000,
@@ -9980,9 +10235,15 @@ fn stop_inner_retires_holders_for_all_allocator_families_7092() {
 
     // Preconditions: without these the assertions after teardown could pass
     // against reservations that were never taken.
-    assert!(iface_alloc.debug_is_port_occupied(0, 40001), "iface fixture");
+    assert!(
+        iface_alloc.debug_is_port_occupied(0, 40001),
+        "iface fixture"
+    );
     assert!(pool_alloc.debug_is_port_occupied(0, 40002), "pool fixture");
-    assert!(nat64_alloc.debug_is_port_occupied(0, 40003), "nat64 fixture");
+    assert!(
+        nat64_alloc.debug_is_port_occupied(0, 40003),
+        "nat64 fixture"
+    );
 
     coordinator.stop_inner(false);
 
@@ -10056,7 +10317,10 @@ mod routing_domain_7160 {
     fn an_unnamed_peer_ingress_is_unknown_not_the_default_domain() {
         let c = coordinator_with_domains();
         for (ifindex, why) in [
-            (0i32, "the sender had no cluster-stable ingress name to fold"),
+            (
+                0i32,
+                "the sender had no cluster-stable ingress name to fold",
+            ),
             (-1, "a negative ifindex is not an interface"),
         ] {
             assert_eq!(
@@ -10205,7 +10469,14 @@ fn f4_seed(coordinator: &mut Coordinator, worker_id: u32) -> crate::nat::Transla
     };
     let alloc = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
     assert!(
-        alloc.reserve_flow(flow, translated, 0, false, 1_000, NatHolder::Worker(worker_id)),
+        alloc.reserve_flow(
+            flow,
+            translated,
+            0,
+            false,
+            1_000,
+            NatHolder::Worker(worker_id)
+        ),
         "fixture must take the reservation, or every assertion below is vacuous"
     );
     assert!(
@@ -10230,23 +10501,28 @@ fn f4_seed_shared_only(
     // fix applied.
     let entry = crate::afxdp::worker::SyncedSessionEntry {
         key: key.clone(),
-        decision: crate::afxdp::SessionDecision { resolution: crate::afxdp::ForwardingResolution {
-            disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-            route_mtu: 0,
-            transport_route_mtu: 0,
-        }, nat: crate::nat::NatDecision {
-            rewrite_src: Some(translated.ip),
-            rewrite_src_port: Some(translated.port),
-            ..crate::nat::NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
+        decision: crate::afxdp::SessionDecision {
+            resolution: crate::afxdp::ForwardingResolution {
+                disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: crate::nat::NatDecision {
+                rewrite_src: Some(translated.ip),
+                rewrite_src_port: Some(translated.port),
+                ..crate::nat::NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         metadata: crate::session::SessionMetadata {
             ingress_zone: 1,
             egress_zone: 2,
@@ -10265,6 +10541,7 @@ fn f4_seed_shared_only(
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         leak_incarnation: 0,
         origin: crate::afxdp::SessionOrigin::SyncImport,
@@ -10484,6 +10761,7 @@ fn nat64_14961_seed(coordinator: &mut Coordinator, worker_id: u32, port: u16) {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         leak_incarnation: 0,
         origin: crate::afxdp::SessionOrigin::SyncImport,
@@ -10545,20 +10823,26 @@ fn a_dropped_deletesynced_releases_the_workers_nat64_reservation_14961() {
     let alloc = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
     let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
     assert_eq!(
-        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        alloc
+            .debug_persistent_lease_for_flow(&flow, permit)
+            .map(|l| l.active_flows),
         Some(1),
         "fixture precondition: one active NAT64 flow reference before the delete"
     );
 
     let drops_before = WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed);
-    coordinator.session_domain.delete_synced_session(key.clone(), false);
+    coordinator
+        .session_domain
+        .delete_synced_session(key.clone(), false);
     assert!(
         WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed) > drops_before,
         "fixture: the DeleteSynced must actually have been DROPPED — if the queue \
          accepted it, this cell is testing the ordinary path and proves nothing"
     );
     assert_eq!(
-        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        alloc
+            .debug_persistent_lease_for_flow(&flow, permit)
+            .map(|l| l.active_flows),
         Some(0),
         "#14961: the dropped DeleteSynced stranded the NAT64 reservation — the \
          coordinator's on-behalf repair released only the source-NAT leg, so \
@@ -10606,14 +10890,22 @@ fn a_dropped_deletesynced_preserves_a_second_workers_nat64_hold_14961() {
     let alloc = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
     let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
     assert_eq!(
-        alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+        alloc
+            .debug_persistent_lease_for_flow(&flow, permit)
+            .map(|l| l.active_flows),
         Some(1),
         "fixture: both workers share ONE BIB active reference (transport-keyed)"
     );
     let mask_before = alloc.holder_mask_for_flow(&flow);
-    assert_eq!(mask_before, Some(0b11000), "fixture: workers 3 and 4 both hold");
+    assert_eq!(
+        mask_before,
+        Some(0b11000),
+        "fixture: workers 3 and 4 both hold"
+    );
 
-    coordinator.session_domain.delete_synced_session(key.clone(), false);
+    coordinator
+        .session_domain
+        .delete_synced_session(key.clone(), false);
 
     assert_eq!(
         alloc.holder_mask_for_flow(&flow),
@@ -10635,7 +10927,9 @@ fn a_queued_deletesynced_leaves_the_nat64_release_to_the_worker_14961() {
     let mut coordinator = Coordinator::new();
     nat64_14961_seed(&mut coordinator, 3, 51002);
     // Queue NOT filled: the push succeeds.
-    coordinator.session_domain.delete_synced_session(nat64_14961_key(), false);
+    coordinator
+        .session_domain
+        .delete_synced_session(nat64_14961_key(), false);
     let alloc = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
     assert!(
         alloc.debug_is_port_occupied(0, 51002),
@@ -10649,8 +10943,6 @@ fn a_queued_deletesynced_leaves_the_nat64_release_to_the_worker_14961() {
         "nothing was dropped, so the repair counter must stay at zero"
     );
 }
-
-
 
 /// #8157: the bringup replay derives its set from the LIVE shared synced map,
 /// and applies the tunnel-remap filter THERE.
@@ -10812,6 +11104,7 @@ fn import_entry_9718(
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         leak_incarnation: 0,
         origin: crate::afxdp::SessionOrigin::SyncImport,
@@ -10959,8 +11252,7 @@ fn bringup_replay_over_cap_records_import_repair_debt_15105() {
     // In-range worker id (< MAX_NAT_HOLDER_WORKERS): the repair-debt
     // slots are indexed by it, as they are for every production worker.
     const WORKER_ID: u32 = 0;
-    const REPLAY_ROWS: usize =
-        crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS + 1000;
+    const REPLAY_ROWS: usize = crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS + 1000;
     crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
 
     let mut coordinator = Coordinator::new();
@@ -11056,8 +11348,7 @@ fn bringup_replay_over_cap_records_import_repair_debt_15105() {
 fn late_replay_over_cap_records_import_repair_debt_15105() {
     // In-range worker id (see the bring-up cell above).
     const WORKER_ID: u32 = 0;
-    const REPLAY_ROWS: usize =
-        crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS + 1000;
+    const REPLAY_ROWS: usize = crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS + 1000;
     crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
 
     let mut coordinator = Coordinator::new();
@@ -11094,7 +11385,10 @@ fn late_replay_over_cap_records_import_repair_debt_15105() {
             "the late replay queue must stop at the #6929 cap"
         );
         assert!(
-            matches!(pending.front(), Some(crate::afxdp::WorkerCommand::DeleteSynced(_))),
+            matches!(
+                pending.front(),
+                Some(crate::afxdp::WorkerCommand::DeleteSynced(_))
+            ),
             "the retained non-upsert prefix must survive the late replay"
         );
     }
@@ -11184,8 +11478,7 @@ fn late_reconciler_maps_shared_promote_for_worker_reserve_9718() {
         forward_wire_sessions: &coordinator.sessions.forward_wire,
         owner_rg_indexes: &coordinator.sessions.owner_rg_indexes,
     };
-    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<crate::afxdp::WorkerCommand>>>> =
-        Vec::new();
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<crate::afxdp::WorkerCommand>>>> = Vec::new();
     let promoted_metadata = crate::afxdp::session_glue::maybe_promote_synced_session(
         &mut local_sessions,
         SteeringMap::unshared_for_test(-1),
@@ -11206,10 +11499,11 @@ fn late_reconciler_maps_shared_promote_for_worker_reserve_9718() {
         promoted_metadata, imported.metadata,
         "the real promote must retain the imported metadata"
     );
-    let promoted_entry = crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
-        .get(&key)
-        .cloned()
-        .expect("the real promote must publish the shared row");
+    let promoted_entry =
+        crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
+            .get(&key)
+            .cloned()
+            .expect("the real promote must publish the shared row");
     assert_eq!(
         promoted_entry.origin,
         crate::afxdp::SessionOrigin::SharedPromote
@@ -11231,9 +11525,7 @@ fn late_reconciler_maps_shared_promote_for_worker_reserve_9718() {
         let queued = pending
             .iter()
             .find_map(|command| match command {
-                crate::afxdp::WorkerCommand::UpsertSynced(entry) if entry.key == key => {
-                    Some(entry)
-                }
+                crate::afxdp::WorkerCommand::UpsertSynced(entry) if entry.key == key => Some(entry),
                 _ => None,
             })
             .expect("late reconciler must queue the promoted shared row");
@@ -11482,12 +11774,7 @@ fn a_non_exact_high_rate_queue_gets_no_vtime_floor_8428() {
     // THE DIVERGENCE: same rate, not exact.
     let mut non_exact = exact_queue_forwarding_fixture();
     {
-        let q = &mut non_exact
-            .cos
-            .interfaces
-            .get_mut(&80)
-            .expect("iface")
-            .queues[0];
+        let q = &mut non_exact.cos.interfaces.get_mut(&80).expect("iface").queues[0];
         q.transmit_rate_bytes = high_rate;
         q.exact = false;
     }
@@ -11538,10 +11825,7 @@ fn a_non_exact_high_rate_queue_gets_no_vtime_floor_8428() {
 /// what `build_shared_cos_queue_vtime_floors_reusing_existing` produces.
 fn v_min_floor_map_9367(
     num_workers: usize,
-) -> std::collections::BTreeMap<
-    (i32, u8),
-    Arc<SharedCoSQueueVtimeFloor>,
-> {
+) -> std::collections::BTreeMap<(i32, u8), Arc<SharedCoSQueueVtimeFloor>> {
     let mut map = std::collections::BTreeMap::new();
     map.insert(
         (7, 3u8),
@@ -11672,9 +11956,11 @@ fn refresh_status_vacates_a_dead_workers_v_min_slot_9367() {
     let dead_rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
     let dead_atomics = dead_rec.handle.runtime_atomics.clone();
     coordinator.workers.register(2, dead_rec, None);
-    coordinator
-        .workers
-        .register(3, WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle()), None);
+    coordinator.workers.register(
+        3,
+        WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle()),
+        None,
+    );
     // An EXACT queue at or above COS_SHARED_EXACT_MIN_RATE_BYTES is the only
     // shape the V_min-floor allocator admits (#8428 pins that containment), and
     // six slots so worker id 2 is indexable and the reuse filter has a stable
@@ -11855,9 +12141,9 @@ fn retire_all_worker_holders_does_not_vacate_a_live_workers_v_min_slot_9367() {
          this cell constrains the V_min vacate only",
     );
     assert_eq!(
-        coordinator.steering_owners.owner_count(
-            &crate::afxdp::bpf_map::session_map_row(&steering_key),
-        ),
+        coordinator
+            .steering_owners
+            .owner_count(&crate::afxdp::bpf_map::session_map_row(&steering_key),),
         1,
         "teardown holder sweep must not delete rows for a normally stopped worker",
     );
@@ -11922,11 +12208,7 @@ fn stop_inner_joins_workers_before_retiring_holders_13669() {
             )
             .expect("late steering claim");
     });
-    coordinator.workers.register(
-        7,
-        rec,
-        Some(join),
-    );
+    coordinator.workers.register(7, rec, Some(join));
 
     coordinator.stop_inner(false);
 
@@ -11939,14 +12221,13 @@ fn stop_inner_joins_workers_before_retiring_holders_13669() {
         "late NAT reservation must be reclaimed by stop_inner (#13669)"
     );
     assert_eq!(
-        coordinator.steering_owners.owner_count(
-            &crate::afxdp::bpf_map::session_map_row(&f4_key()),
-        ),
+        coordinator
+            .steering_owners
+            .owner_count(&crate::afxdp::bpf_map::session_map_row(&f4_key()),),
         0,
         "late steering claim must be reclaimed by stop_inner (#13669)"
     );
 }
-
 
 // ---------------------------------------------------------------------
 // #9521: the steered-port decision made at spawn reaches the thread.
@@ -12009,7 +12290,10 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
     let (peer_priv, peer_pub) = crate::afxdp::wg::tests::keypair();
     let peer_hex: String = peer_pub.iter().map(|b| format!("{b:02x}")).collect();
     // #9549: listen ports come from test_ports; the test only needs two distinct ports.
-    let (steered_port, unsteered_port) = (crate::test_ports::reserve_ephemeral_udp_port(), crate::test_ports::reserve_ephemeral_udp_port());
+    let (steered_port, unsteered_port) = (
+        crate::test_ports::reserve_ephemeral_udp_port(),
+        crate::test_ports::reserve_ephemeral_udp_port(),
+    );
     let snap = wg9521_snapshot(
         ["wgt9521s", "wgt9521u"],
         [4531, 4532],
@@ -12024,11 +12308,19 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
     coordinator
         .refresh_runtime_snapshot(&snap)
         .expect("refresh_runtime_snapshot must succeed");
-    assert_eq!(wg9521_decision(&coordinator, 1), Some(WgKernelTransport::Deliver));
-    assert_eq!(wg9521_decision(&coordinator, 2), Some(WgKernelTransport::DropUnsteered));
+    assert_eq!(
+        wg9521_decision(&coordinator, 1),
+        Some(WgKernelTransport::Deliver)
+    );
+    assert_eq!(
+        wg9521_decision(&coordinator, 2),
+        Some(WgKernelTransport::DropUnsteered)
+    );
 
-    let allowed: Vec<ipnet::IpNet> =
-        vec!["10.95.21.0/24".parse().unwrap(), "fd95:21::/64".parse().unwrap()];
+    let allowed: Vec<ipnet::IpNet> = vec![
+        "10.95.21.0/24".parse().unwrap(),
+        "fd95:21::/64".parse().unwrap(),
+    ];
     for (id, port, tun, steered) in [
         (1u16, steered_port, &steered_tun, true),
         (2u16, unsteered_port, &unsteered_tun, false),
@@ -12048,7 +12340,11 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
         let resp_pub = engine.local_public_key();
         for outer_v6 in [false, true] {
             let family = if outer_v6 { "IPv6" } else { "IPv4" };
-            let inner = if outer_v6 { inner_v6_9521() } else { inner_v4_9521() };
+            let inner = if outer_v6 {
+                inner_v6_9521()
+            } else {
+                inner_v4_9521()
+            };
             // Settle and drain, so a datagram from the previous family cannot be
             // read as this family's outcome.
             thread::sleep(Duration::from_millis(200));
@@ -12069,14 +12365,16 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
             .parse()
             .unwrap();
             let sender =
-                std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" }).unwrap();
+                std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" })
+                    .unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) =
-                (None, false, false);
+            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) = (None, false, false);
             // Resend until the thread (which binds asynchronously) accounts for one.
             while std::time::Instant::now() < deadline {
                 let mut wire = vec![0u8; 2048];
-                let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
+                let enc = init
+                    .try_encap(&resp_pub, &inner, &mut wire)
+                    .expect("initiator encap");
                 let _ = sender.send_to(&wire[..enc.len], dst);
                 thread::sleep(Duration::from_millis(40));
                 if let Some(bytes) = tun_standin_recv_9521(tun) {
@@ -12113,12 +12411,18 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
                     "{family}: the steered endpoint never counted its degraded-transit drop"
                 );
                 assert_eq!(
-                    engine.counters().rx_degraded_transit_drops.load(Ordering::Relaxed),
+                    engine
+                        .counters()
+                        .rx_degraded_transit_drops
+                        .load(Ordering::Relaxed),
                     degraded_before + 1,
                     "{family}: the steered endpoint counted an unexpected number of degraded drops"
                 );
                 assert_eq!(
-                    engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed),
+                    engine
+                        .counters()
+                        .rx_unsteered_transport_drops
+                        .load(Ordering::Relaxed),
                     unsteered_before,
                     "{family}: the steered endpoint counted an unsteered drop"
                 );
@@ -12129,12 +12433,18 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
                      either the record never arrived or the thread spawned with the wrong decision"
                 );
                 assert_eq!(
-                    engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed),
+                    engine
+                        .counters()
+                        .rx_unsteered_transport_drops
+                        .load(Ordering::Relaxed),
                     unsteered_before + 1,
                     "{family}: the unsteered endpoint counted an unexpected number of drops"
                 );
                 assert_eq!(
-                    engine.counters().rx_degraded_transit_drops.load(Ordering::Relaxed),
+                    engine
+                        .counters()
+                        .rx_degraded_transit_drops
+                        .load(Ordering::Relaxed),
                     degraded_before,
                     "{family}: the unsteered endpoint counted a degraded-transit drop"
                 );
@@ -12214,7 +12524,10 @@ fn wg_both_steered_endpoints_deliver_end_to_end_9587() {
 
     let (peer_priv, peer_pub) = crate::afxdp::wg::tests::keypair();
     let peer_hex: String = peer_pub.iter().map(|b| format!("{b:02x}")).collect();
-    let (port_a, port_b) = (crate::test_ports::reserve_ephemeral_udp_port(), crate::test_ports::reserve_ephemeral_udp_port());
+    let (port_a, port_b) = (
+        crate::test_ports::reserve_ephemeral_udp_port(),
+        crate::test_ports::reserve_ephemeral_udp_port(),
+    );
     let mut snap = wg9521_snapshot(
         ["wgt9587a", "wgt9587b"],
         [4551, 4552],
@@ -12230,11 +12543,19 @@ fn wg_both_steered_endpoints_deliver_end_to_end_9587() {
     coordinator
         .refresh_runtime_snapshot(&snap)
         .expect("refresh_runtime_snapshot must succeed");
-    assert_eq!(wg9521_decision(&coordinator, 1), Some(WgKernelTransport::Deliver));
-    assert_eq!(wg9521_decision(&coordinator, 2), Some(WgKernelTransport::Deliver));
+    assert_eq!(
+        wg9521_decision(&coordinator, 1),
+        Some(WgKernelTransport::Deliver)
+    );
+    assert_eq!(
+        wg9521_decision(&coordinator, 2),
+        Some(WgKernelTransport::Deliver)
+    );
 
-    let allowed: Vec<ipnet::IpNet> =
-        vec!["10.95.21.0/24".parse().unwrap(), "fd95:21::/64".parse().unwrap()];
+    let allowed: Vec<ipnet::IpNet> = vec![
+        "10.95.21.0/24".parse().unwrap(),
+        "fd95:21::/64".parse().unwrap(),
+    ];
     for (id, port, tun) in [(1u16, port_a, &tun_a), (2u16, port_b, &tun_b)] {
         let engine = coordinator
             .forwarding
@@ -12251,7 +12572,11 @@ fn wg_both_steered_endpoints_deliver_end_to_end_9587() {
         let resp_pub = engine.local_public_key();
         for outer_v6 in [false, true] {
             let family = if outer_v6 { "IPv6" } else { "IPv4" };
-            let inner = if outer_v6 { inner_v6_9521() } else { inner_v4_9521() };
+            let inner = if outer_v6 {
+                inner_v6_9521()
+            } else {
+                inner_v4_9521()
+            };
             thread::sleep(Duration::from_millis(200));
             while tun_standin_recv_9521(tun).is_some() {}
             let unsteered_before = engine
@@ -12270,13 +12595,15 @@ fn wg_both_steered_endpoints_deliver_end_to_end_9587() {
             .parse()
             .unwrap();
             let sender =
-                std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" }).unwrap();
+                std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" })
+                    .unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) =
-                (None, false, false);
+            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) = (None, false, false);
             while std::time::Instant::now() < deadline {
                 let mut wire = vec![0u8; 2048];
-                let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
+                let enc = init
+                    .try_encap(&resp_pub, &inner, &mut wire)
+                    .expect("initiator encap");
                 let _ = sender.send_to(&wire[..enc.len], dst);
                 thread::sleep(Duration::from_millis(40));
                 if let Some(bytes) = tun_standin_recv_9521(tun) {
@@ -12312,12 +12639,18 @@ fn wg_both_steered_endpoints_deliver_end_to_end_9587() {
                 "{family}: endpoint {id}'s spawned thread never counted degraded transit"
             );
             assert_eq!(
-                engine.counters().rx_degraded_transit_drops.load(Ordering::Relaxed),
+                engine
+                    .counters()
+                    .rx_degraded_transit_drops
+                    .load(Ordering::Relaxed),
                 degraded_before + 1,
                 "{family}: endpoint {id} counted an unexpected number of degraded drops"
             );
             assert_eq!(
-                engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed),
+                engine
+                    .counters()
+                    .rx_unsteered_transport_drops
+                    .load(Ordering::Relaxed),
                 unsteered_before,
                 "{family}: endpoint {id} counted an unsteered drop while steered"
             );
@@ -12357,7 +12690,10 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
 
     let (peer_priv, peer_pub) = crate::afxdp::wg::tests::keypair();
     let peer_hex: String = peer_pub.iter().map(|b| format!("{b:02x}")).collect();
-    let (port_a, port_b) = (crate::test_ports::reserve_ephemeral_udp_port(), crate::test_ports::reserve_ephemeral_udp_port());
+    let (port_a, port_b) = (
+        crate::test_ports::reserve_ephemeral_udp_port(),
+        crate::test_ports::reserve_ephemeral_udp_port(),
+    );
     let mut snap = wg9521_snapshot(
         ["wgt9587c", "wgt9587d"],
         [4553, 4554],
@@ -12373,11 +12709,19 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
     coordinator
         .refresh_runtime_snapshot(&snap)
         .expect("refresh_runtime_snapshot must succeed");
-    assert_eq!(wg9521_decision(&coordinator, 1), Some(WgKernelTransport::Deliver));
-    assert_eq!(wg9521_decision(&coordinator, 2), Some(WgKernelTransport::DropUnsteered));
+    assert_eq!(
+        wg9521_decision(&coordinator, 1),
+        Some(WgKernelTransport::Deliver)
+    );
+    assert_eq!(
+        wg9521_decision(&coordinator, 2),
+        Some(WgKernelTransport::DropUnsteered)
+    );
 
-    let allowed: Vec<ipnet::IpNet> =
-        vec!["10.95.21.0/24".parse().unwrap(), "fd95:21::/64".parse().unwrap()];
+    let allowed: Vec<ipnet::IpNet> = vec![
+        "10.95.21.0/24".parse().unwrap(),
+        "fd95:21::/64".parse().unwrap(),
+    ];
     // Positive control: the steered endpoint has Deliver disposition, but its
     // transit records are degraded/uncovered and never reach the TUN.
     {
@@ -12414,13 +12758,15 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
             .parse()
             .unwrap();
             let sender =
-                std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" }).unwrap();
+                std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" })
+                    .unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) =
-                (None, false, false);
+            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) = (None, false, false);
             while std::time::Instant::now() < deadline {
                 let mut wire = vec![0u8; 2048];
-                let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
+                let enc = init
+                    .try_encap(&resp_pub, &inner, &mut wire)
+                    .expect("initiator encap");
                 let _ = sender.send_to(&wire[..enc.len], dst);
                 thread::sleep(Duration::from_millis(40));
                 if let Some(bytes) = tun_standin_recv_9521(&tun_a) {
@@ -12456,12 +12802,18 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
                 "{family}: steered endpoint 1 never counted degraded transit"
             );
             assert_eq!(
-                engine.counters().rx_degraded_transit_drops.load(Ordering::Relaxed),
+                engine
+                    .counters()
+                    .rx_degraded_transit_drops
+                    .load(Ordering::Relaxed),
                 degraded_before + 1,
                 "{family}: steered endpoint 1 counted an unexpected number of degraded drops"
             );
             assert_eq!(
-                engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed),
+                engine
+                    .counters()
+                    .rx_unsteered_transport_drops
+                    .load(Ordering::Relaxed),
                 unsteered_before,
                 "{family}: steered endpoint 1 counted an unsteered drop"
             );
@@ -12502,13 +12854,15 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
             .parse()
             .unwrap();
             let sender =
-                std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" }).unwrap();
+                std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" })
+                    .unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) =
-                (None, false, false);
+            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) = (None, false, false);
             while std::time::Instant::now() < deadline {
                 let mut wire = vec![0u8; 2048];
-                let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
+                let enc = init
+                    .try_encap(&resp_pub, &inner, &mut wire)
+                    .expect("initiator encap");
                 let _ = sender.send_to(&wire[..enc.len], dst);
                 thread::sleep(Duration::from_millis(40));
                 if let Some(bytes) = tun_standin_recv_9521(&tun_b) {
@@ -12539,12 +12893,18 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
                 "{family}: unsteered endpoint 2 never counted the drop"
             );
             assert_eq!(
-                engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed),
+                engine
+                    .counters()
+                    .rx_unsteered_transport_drops
+                    .load(Ordering::Relaxed),
                 unsteered_before + 1,
                 "{family}: unsteered endpoint 2 counted an unexpected number of drops"
             );
             assert_eq!(
-                engine.counters().rx_degraded_transit_drops.load(Ordering::Relaxed),
+                engine
+                    .counters()
+                    .rx_degraded_transit_drops
+                    .load(Ordering::Relaxed),
                 degraded_before,
                 "{family}: unsteered endpoint 2 counted a degraded-transit drop"
             );
@@ -12594,21 +12954,40 @@ fn wg_resteering_restarts_control_threads_with_the_new_decision_9521() {
     let (_, peer_pub) = crate::afxdp::wg::tests::keypair();
     let peer_hex: String = peer_pub.iter().map(|b| format!("{b:02x}")).collect();
     // #9549: listen ports come from test_ports; the test only needs two distinct ports.
-    let (names, ifindexes, ports) = (["wgt9521r1", "wgt9521r2"], [4541, 4542], [crate::test_ports::reserve_ephemeral_udp_port(), crate::test_ports::reserve_ephemeral_udp_port()]);
+    let (names, ifindexes, ports) = (
+        ["wgt9521r1", "wgt9521r2"],
+        [4541, 4542],
+        [
+            crate::test_ports::reserve_ephemeral_udp_port(),
+            crate::test_ports::reserve_ephemeral_udp_port(),
+        ],
+    );
 
     let mut coordinator = Coordinator::new();
     coordinator
-        .refresh_runtime_snapshot(&wg9521_snapshot(names, ifindexes, ports, ports[0], &peer_hex))
+        .refresh_runtime_snapshot(&wg9521_snapshot(
+            names, ifindexes, ports, ports[0], &peer_hex,
+        ))
         .expect("first refresh");
     assert_eq!(wg9521_decision(&coordinator, 1), Some(Deliver));
     assert_eq!(wg9521_decision(&coordinator, 2), Some(DropUnsteered));
-    let engine_before = coordinator.forwarding.wg_engines.get(&1).map(|e| Arc::as_ptr(e) as usize);
+    let engine_before = coordinator
+        .forwarding
+        .wg_engines
+        .get(&1)
+        .map(|e| Arc::as_ptr(e) as usize);
 
     coordinator
-        .refresh_runtime_snapshot(&wg9521_snapshot(names, ifindexes, ports, ports[1], &peer_hex))
+        .refresh_runtime_snapshot(&wg9521_snapshot(
+            names, ifindexes, ports, ports[1], &peer_hex,
+        ))
         .expect("second refresh");
     assert_eq!(
-        coordinator.forwarding.wg_engines.get(&1).map(|e| Arc::as_ptr(e) as usize),
+        coordinator
+            .forwarding
+            .wg_engines
+            .get(&1)
+            .map(|e| Arc::as_ptr(e) as usize),
         engine_before,
         "fixture premise: the engine must be REUSED, or engine_changed restarts the thread \
          and this cell cannot see the kernel_transport_changed arm"
@@ -12674,7 +13053,9 @@ fn wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594() {
     let inner = inner_v4_9521();
     let inner_dst = inner_destination(&inner).expect("parseable inner");
     let set_maps = |local: bool| {
-        let mut seam = TEST_SHIM_MAPS_9594.lock().unwrap_or_else(|e| e.into_inner());
+        let mut seam = TEST_SHIM_MAPS_9594
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         seam.retain(|(name, _)| name != "wgt9594s");
         let mut maps = TestShimMaps9594::default();
         maps.ingress.insert(lo);
@@ -12690,10 +13071,15 @@ fn wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594() {
     coordinator
         .refresh_runtime_snapshot(&snap)
         .expect("refresh_runtime_snapshot must succeed");
-    assert_eq!(wg9521_decision(&coordinator, 1), Some(WgKernelTransport::Deliver));
+    assert_eq!(
+        wg9521_decision(&coordinator, 1),
+        Some(WgKernelTransport::Deliver)
+    );
 
-    let allowed: Vec<ipnet::IpNet> =
-        vec!["10.95.21.0/24".parse().unwrap(), "fd95:21::/64".parse().unwrap()];
+    let allowed: Vec<ipnet::IpNet> = vec![
+        "10.95.21.0/24".parse().unwrap(),
+        "fd95:21::/64".parse().unwrap(),
+    ];
     let engine = coordinator
         .forwarding
         .wg_engines
@@ -12708,18 +13094,27 @@ fn wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594() {
     let send_until = |want_delivery: bool| -> (Option<Vec<u8>>, bool) {
         thread::sleep(Duration::from_millis(200));
         while tun_standin_recv_9521(&tun).is_some() {}
-        let before = engine.counters().rx_degraded_transit_drops.load(Ordering::Relaxed);
+        let before = engine
+            .counters()
+            .rx_degraded_transit_drops
+            .load(Ordering::Relaxed);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
             let mut wire = vec![0u8; 2048];
-            let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
+            let enc = init
+                .try_encap(&resp_pub, &inner, &mut wire)
+                .expect("initiator encap");
             let _ = sender.send_to(&wire[..enc.len], dst);
             thread::sleep(Duration::from_millis(40));
             if let Some(bytes) = tun_standin_recv_9521(&tun) {
                 return (Some(bytes), false);
             }
             if !want_delivery
-                && engine.counters().rx_degraded_transit_drops.load(Ordering::Relaxed) > before
+                && engine
+                    .counters()
+                    .rx_degraded_transit_drops
+                    .load(Ordering::Relaxed)
+                    > before
             {
                 thread::sleep(Duration::from_millis(100));
                 return (tun_standin_recv_9521(&tun), true);
@@ -12746,9 +13141,8 @@ fn wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594() {
     // stand-in queue and prove the spawned thread's local record lands on it
     // — through the real spawn path, production view, and real encap — with
     // no legacy direct-TUN bypass write.
-    let queue = std::sync::Arc::new(
-        crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue::new(),
-    );
+    let queue =
+        std::sync::Arc::new(crate::afxdp::wg_uncovered_forward::WgUncoveredIngressQueue::new());
     coordinator.wg_uncovered_queues.store(std::sync::Arc::new(
         [(0u32, queue.clone())].into_iter().collect(),
     ));
@@ -12759,7 +13153,9 @@ fn wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594() {
     let mut queued = Vec::new();
     while std::time::Instant::now() < deadline && queued.is_empty() {
         let mut wire = vec![0u8; 2048];
-        let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
+        let enc = init
+            .try_encap(&resp_pub, &inner, &mut wire)
+            .expect("initiator encap");
         let _ = sender.send_to(&wire[..enc.len], dst);
         thread::sleep(Duration::from_millis(40));
         queue.drain_into(&mut queued, 64);
@@ -12828,14 +13224,24 @@ fn shim_maps_view_places_configured_uncovered_ingress_9594() {
         "setup: ifindex 4551 must be a configured interface in the runtime forwarding state"
     );
     {
-        let mut seam = TEST_SHIM_MAPS_9594.lock().unwrap_or_else(|e| e.into_inner());
+        let mut seam = TEST_SHIM_MAPS_9594
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         seam.retain(|(name, _)| name != "wgt9594-view");
         let mut maps = TestShimMaps9594::default();
         maps.ingress.insert(4552);
         seam.push(("wgt9594-view".to_string(), maps));
     }
-    let view = ShimMapsKernelPathView::new("wgt9594-view".to_string(), 4551, coordinator.ha.runtime_reader());
-    assert_eq!(view.ingress(Some(4552)), WgKernelPathIngress::Covered, "in the shim's ingress set");
+    let view = ShimMapsKernelPathView::new(
+        "wgt9594-view".to_string(),
+        4551,
+        coordinator.ha.runtime_reader(),
+    );
+    assert_eq!(
+        view.ingress(Some(4552)),
+        WgKernelPathIngress::Covered,
+        "in the shim's ingress set"
+    );
     assert_eq!(
         view.ingress(Some(4551)),
         WgKernelPathIngress::Uncovered,
@@ -12848,7 +13254,11 @@ fn shim_maps_view_places_configured_uncovered_ingress_9594() {
         WgKernelPathIngress::Unknown,
         "an ifindex neither adjudicated nor configured cannot be placed"
     );
-    assert_eq!(view.ingress(None), WgKernelPathIngress::Unknown, "no pktinfo cmsg");
+    assert_eq!(
+        view.ingress(None),
+        WgKernelPathIngress::Unknown,
+        "no pktinfo cmsg"
+    );
     TEST_SHIM_MAPS_9594
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -12966,7 +13376,12 @@ fn counter_query_concurrent_replies_keep_snapshots_separate_13711() {
             })
             .collect();
         assert_eq!(queries.len(), 2);
-        (queries[0].0, queries[0].1.clone(), queries[1].0, queries[1].1.clone())
+        (
+            queries[0].0,
+            queries[0].1.clone(),
+            queries[1].0,
+            queries[1].1.clone(),
+        )
     };
 
     // Hold A's reply slot while its waiter starts, then publish B before
@@ -13114,7 +13529,10 @@ fn session_delete_fan_out_sheds_dead_workers_9900() {
 /// different-tuple row must survive.
 #[test]
 fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
-    fn gre_key(discriminator: crate::session::TunnelDiscriminator, dst_port: u16) -> crate::session::SessionKey {
+    fn gre_key(
+        discriminator: crate::session::TunnelDiscriminator,
+        dst_port: u16,
+    ) -> crate::session::SessionKey {
         crate::session::SessionKey {
             addr_family: libc::AF_INET as u8,
             protocol: crate::ip_proto::PROTO_GRE,
@@ -13126,10 +13544,7 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
             routing_domain: 0,
         }
     }
-    fn seed(
-        coordinator: &Coordinator,
-        key: &crate::session::SessionKey,
-    ) {
+    fn seed(coordinator: &Coordinator, key: &crate::session::SessionKey) {
         let entry = crate::afxdp::worker::SyncedSessionEntry {
             key: key.clone(),
             decision: crate::afxdp::SessionDecision {
@@ -13168,6 +13583,7 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
                 inactivity_timeout_ns: None,
                 policy_counter_idx: 0,
                 policy_counter: None,
+                nat_scope_ifindex: None,
             },
             leak_incarnation: 0,
             origin: crate::afxdp::SessionOrigin::SyncImport,
@@ -13191,7 +13607,9 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
         seed(&coordinator, key);
     }
     assert!(
-        coordinator.session_domain().synced_tunnel_variant_contains(&target),
+        coordinator
+            .session_domain()
+            .synced_tunnel_variant_contains(&target),
         "fixture: the target tuple must be present before the delete"
     );
     coordinator
@@ -13269,6 +13687,7 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         },
         leak_incarnation: 0,
         origin: crate::afxdp::SessionOrigin::SyncImport,
@@ -13283,20 +13702,25 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
     };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
         .insert(target.clone(), entry);
-    let outcome = coordinator
-        .session_domain()
-        .delete_synced_tunnel_variants(target.clone(), false, false, true);
+    let outcome = coordinator.session_domain().delete_synced_tunnel_variants(
+        target.clone(),
+        false,
+        false,
+        true,
+    );
     assert_eq!(
         outcome,
         SyncedDeleteOutcome::RefusedMirrorDelete,
         "strict variant purge must not discard the mirror outcome"
     );
-    let lenient = coordinator
-        .session_domain()
-        .delete_synced_tunnel_variants(target.clone(), false, false, false);
+    let lenient = coordinator.session_domain().delete_synced_tunnel_variants(
+        target.clone(),
+        false,
+        false,
+        false,
+    );
     assert_eq!(lenient, SyncedDeleteOutcome::Applied);
 }
-
 
 /// #15153 (B11-01): after a full reconcile / worker respawn, synced PPTP GRE
 /// sessions are replayed (UpsertSynced) but the PPTP call association that
@@ -13479,7 +13903,11 @@ fn v42_b11_01_refused_pptp_push_records_repair_debt_15153() {
     let commands = Arc::new(Mutex::new(VecDeque::new()));
     coordinator.workers.register(
         WORKER_ID,
-        WorkerRuntimeRecord::for_test({ let mut h = gre1881_fake_worker_handle(); h.commands = commands.clone(); h }),
+        WorkerRuntimeRecord::for_test({
+            let mut h = gre1881_fake_worker_handle();
+            h.commands = commands.clone();
+            h
+        }),
         None,
     );
     // Fill the queue so all three pushes (forward, reverse, PPTP) refuse.

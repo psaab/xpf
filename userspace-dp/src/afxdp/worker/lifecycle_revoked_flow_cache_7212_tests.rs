@@ -57,23 +57,29 @@ fn metadata() -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
 fn decision() -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 12,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
-        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-        src_mac: Some([6, 7, 8, 9, 10, 11]),
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: Some([6, 7, 8, 9, 10, 11]),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 fn seed(binding: &mut BindingWorker, key: &SessionKey) {
@@ -131,7 +137,11 @@ fn seed_with_logical_ingress(
     });
 }
 
-fn hits(binding: &mut BindingWorker, key: &SessionKey, epochs: &[AtomicU32; MAX_RG_EPOCHS]) -> bool {
+fn hits(
+    binding: &mut BindingWorker,
+    key: &SessionKey,
+    epochs: &[AtomicU32; MAX_RG_EPOCHS],
+) -> bool {
     let ingress_ifindex = binding.ifindex;
     hits_on_logical_ingress(binding, key, epochs, ingress_ifindex)
 }
@@ -158,7 +168,6 @@ fn hits_on_logical_ingress(
         )
         .is_some()
 }
-
 
 /// A tunnel-decapsulated RST still carries the tunnel logical ifindex in its
 /// packet metadata, while the RST teardown invalidates by the physical binding
@@ -251,7 +260,12 @@ fn revocation_eviction_leaves_other_flows_cached_7212() {
     seed(&mut b, &bystander);
 
     let mut keys = vec![revoked.clone()];
-    invalidate_flow_cache_slots_for_revoked_sessions(&mut [], &mut a, std::slice::from_mut(&mut b), &mut keys);
+    invalidate_flow_cache_slots_for_revoked_sessions(
+        &mut [],
+        &mut a,
+        std::slice::from_mut(&mut b),
+        &mut keys,
+    );
 
     assert!(!hits(&mut a, &revoked, &epochs));
     assert!(

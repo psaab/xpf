@@ -14,16 +14,14 @@
 //! the 8.8.8.8/32 host route), which lets the validation cells distinguish "no
 //! X-table candidate" from "no candidate at all".
 
+use super::super::types::{RuntimeView, RuntimeViewChannel, RuntimeViewReader, ValidationState};
 use super::*;
-use crate::afxdp::worker_queue::{
-    MAX_PENDING_WORKER_COMMANDS, WORKER_COMMAND_QUEUE_DROPS,
-};
+use crate::afxdp::worker_queue::{MAX_PENDING_WORKER_COMMANDS, WORKER_COMMAND_QUEUE_DROPS};
 use crate::session::{ForwardingGenerationStamp, install_table_identity};
 use crate::{
     ConfigSnapshot, InterfaceAddressSnapshot, InterfaceSnapshot, NeighborSnapshot, RouteSnapshot,
     ZoneSnapshot,
 };
-use super::super::types::{RuntimeView, RuntimeViewChannel, RuntimeViewReader, ValidationState};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::Ordering;
@@ -161,7 +159,8 @@ fn publish_pbr_view(
     generation: u64,
     forwarding: Arc<ForwardingState>,
 ) {
-    channel.publish(Arc::new(RuntimeView::new( // runtime-view-canary: test-local
+    channel.publish(Arc::new(RuntimeView::new(
+        // runtime-view-canary: test-local
         ValidationState {
             snapshot_installed: true,
             config_generation: generation,
@@ -212,6 +211,7 @@ fn pbr_metadata() -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -307,27 +307,29 @@ fn synced_hit_reresolves_in_installing_table_keeps_stamp() {
     ));
     let shared = shared_maps();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared.sessions,
-    &shared.nat_sessions,
-    &shared.forward_wire_sessions,
-    &shared.owner_rg_indexes,
-    &shared.peer_worker_commands,
-    &forwarding,
-    &active_ha(),
-    &dynamic_neighbors,
-    &pbr_flow(),
-    NOW_NS,
-    NOW_SECS,
-    PROTO_TCP,
-    0x18,
-    LAN_IFINDEX,
-    0,
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &shared.peer_worker_commands,
+        &forwarding,
+        &active_ha(),
+        &dynamic_neighbors,
+        &pbr_flow(),
+        NOW_NS,
+        NOW_SECS,
+        PROTO_TCP,
+        0x18,
+        LAN_IFINDEX,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("synced session must hit");
     assert_eq!(
         resolved.decision.resolution.disposition,
@@ -356,27 +358,29 @@ fn unstamped_hit_resolves_in_default_table() {
     ));
     let shared = shared_maps();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared.sessions,
-    &shared.nat_sessions,
-    &shared.forward_wire_sessions,
-    &shared.owner_rg_indexes,
-    &shared.peer_worker_commands,
-    &forwarding,
-    &active_ha(),
-    &dynamic_neighbors,
-    &pbr_flow(),
-    NOW_NS,
-    NOW_SECS,
-    PROTO_TCP,
-    0x18,
-    LAN_IFINDEX,
-    0,
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &shared.peer_worker_commands,
+        &forwarding,
+        &active_ha(),
+        &dynamic_neighbors,
+        &pbr_flow(),
+        NOW_NS,
+        NOW_SECS,
+        PROTO_TCP,
+        0x18,
+        LAN_IFINDEX,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("synced session must hit");
     assert_eq!(
         resolved.decision.resolution.disposition,
@@ -410,16 +414,28 @@ fn synced_import_reresolves_in_installing_table() {
         env!("CARGO_MANIFEST_DIR"),
         "/../pkg/dataplane/userspace/testdata/synced_request_9752.json"
     );
-    let req_json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(path).expect("read the shared request golden"))
-            .expect("request golden parses");
+    let req_json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(path).expect("read the shared request golden"),
+    )
+    .expect("request golden parses");
     // Pin the chain's load-bearing content at this hop.
-    assert_eq!(req_json.get("operation").and_then(|v| v.as_str()), Some("upsert"));
-    assert_eq!(req_json.get("src_ip").and_then(|v| v.as_str()), Some("10.0.61.102"));
-    assert_eq!(req_json.get("dst_ip").and_then(|v| v.as_str()), Some("8.8.8.8"));
+    assert_eq!(
+        req_json.get("operation").and_then(|v| v.as_str()),
+        Some("upsert")
+    );
+    assert_eq!(
+        req_json.get("src_ip").and_then(|v| v.as_str()),
+        Some("10.0.61.102")
+    );
+    assert_eq!(
+        req_json.get("dst_ip").and_then(|v| v.as_str()),
+        Some("8.8.8.8")
+    );
     let (want_domain, want_check) = blue_stamp();
     assert_eq!(
-        req_json.get("install_table_domain").and_then(|v| v.as_u64()),
+        req_json
+            .get("install_table_domain")
+            .and_then(|v| v.as_u64()),
         Some(want_domain as u64)
     );
     assert_eq!(
@@ -436,8 +452,7 @@ fn synced_import_reresolves_in_installing_table() {
         Some(77),
         "the request golden must carry the incarnation id"
     );
-    let req: SessionSyncRequest =
-        serde_json::from_value(req_json.clone()).expect("request parses");
+    let req: SessionSyncRequest = serde_json::from_value(req_json.clone()).expect("request parses");
     let zones = FxHashMap::from_iter([
         ("lan".to_string(), crate::test_zone_ids::TEST_LAN_ZONE_ID),
         ("wan".to_string(), crate::test_zone_ids::TEST_WAN_ZONE_ID),
@@ -574,11 +589,8 @@ fn missing_neighbor_seed_install_and_reseed_stay_in_table() {
     .resolution;
     assert_eq!(miss.disposition, ForwardingDisposition::MissingNeighbor);
     // Real stamp fn: a neighbor-miss resolved in X still stamps X.
-    let (domain, check) = super::super::forwarding::install_table_stamp_for_miss(
-        Some(blue_stamp()),
-        true,
-        miss,
-    );
+    let (domain, check) =
+        super::super::forwarding::install_table_stamp_for_miss(Some(blue_stamp()), true, miss);
     assert_eq!((domain, check), blue_stamp());
     let mut sessions = SessionTable::new();
     let key = pbr_key();
@@ -598,37 +610,36 @@ fn missing_neighbor_seed_install_and_reseed_stay_in_table() {
     ));
     // Reseed trigger: the gateway neighbor is learned dynamically.
     dynamic_neighbors.insert(
-        (
-            BLUE_IFINDEX,
-            IpAddr::V4(Ipv4Addr::new(172, 16, 50, 254)),
-        ),
+        (BLUE_IFINDEX, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 254))),
         NeighborEntry {
             mac: [0, 0xaa, 0xbb, 0xcc, 0xdd, 0x01],
         },
     );
     // Real hit path over the seed.
     let shared = shared_maps();
-    let resolved = resolve_flow_session_decision(&mut sessions,
-    SteeringMap::unshared_for_test(-1),
-    &shared.sessions,
-    &shared.nat_sessions,
-    &shared.forward_wire_sessions,
-    &shared.owner_rg_indexes,
-    &shared.peer_worker_commands,
-    &forwarding,
-    &active_ha(),
-    &dynamic_neighbors,
-    &pbr_flow(),
-    NOW_NS,
-    NOW_SECS,
-    PROTO_TCP,
-    0x18,
-    LAN_IFINDEX,
-    0,
-    false,
-    0,
-    0,
-    crate::afxdp::session_glue::SessionHitVerdict::Owner)
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &shared.peer_worker_commands,
+        &forwarding,
+        &active_ha(),
+        &dynamic_neighbors,
+        &pbr_flow(),
+        NOW_NS,
+        NOW_SECS,
+        PROTO_TCP,
+        0x18,
+        LAN_IFINDEX,
+        0,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
     .expect("seeded session must hit");
     assert_eq!(
         resolved.decision.resolution.disposition,
@@ -668,7 +679,7 @@ fn install_table_name_resolver_exposes_stamped_table() {
 fn reverse_session_resolves_unstamped_in_default() {
     let forwarding = pbr_state();
     let forward = ForwardSessionMatch {
-                    aux: SessionLookupAux::default(),
+        aux: SessionLookupAux::default(),
         key: pbr_key(),
         decision: stamped_decision(unusable_resolution()),
         metadata: pbr_metadata(),
@@ -797,8 +808,7 @@ fn demote_preserves_installing_table() {
 fn unresolvable_stamp_serves_terminal_not_default() {
     let forwarding = pbr_state();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    let before =
-        super::super::forwarding::LOCAL_DELIVERY_IFINDEX0.load(Ordering::Relaxed);
+    let before = super::super::forwarding::LOCAL_DELIVERY_IFINDEX0.load(Ordering::Relaxed);
     // Unknown domain (no such table): terminal.
     let unknown = SessionDecision {
         resolution: unusable_resolution(),
@@ -1086,7 +1096,10 @@ fn refused_replication_counts_drop_keeps_valid_entry() {
     {
         let mut queue = recipient.lock().expect("recipient lock");
         for _ in 0..MAX_PENDING_WORKER_COMMANDS {
-            assert!(push_bounded(&mut queue, WorkerCommand::DeleteSynced(key.clone())));
+            assert!(push_bounded(
+                &mut queue,
+                WorkerCommand::DeleteSynced(key.clone())
+            ));
         }
     }
     let drops_before = WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed);
@@ -1156,14 +1169,15 @@ fn pbr_key_for(src_port: u16, dst: Ipv4Addr) -> SessionKey {
 #[test]
 fn ecmp_spread_preserved_within_installing_table() {
     let mut snapshot = pbr_snapshot();
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "blue.inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "9.9.9.9/32".to_string(),
-    next_hops: vec![
-        "172.16.50.253".to_string(),
-        "172.16.50.254".to_string(),
-    ],
-    mtu: 0, ..Default::default() });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        table: "blue.inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "9.9.9.9/32".to_string(),
+        next_hops: vec!["172.16.50.253".to_string(), "172.16.50.254".to_string()],
+        mtu: 0,
+        ..Default::default()
+    });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "ge-0-0-2".to_string(),
         ifindex: BLUE_IFINDEX,
@@ -1173,8 +1187,7 @@ fn ecmp_spread_preserved_within_installing_table() {
         state: "reachable".to_string(),
         ..Default::default()
     });
-    let forwarding =
-        super::super::forwarding_build::build_forwarding_state(&snapshot);
+    let forwarding = super::super::forwarding_build::build_forwarding_state(&snapshot);
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let dst = Ipv4Addr::new(9, 9, 9, 9);
     let mut next_hops = std::collections::BTreeSet::new();
@@ -1244,7 +1257,8 @@ fn nat64_reresolve_uses_post_nat_family_table() {
         install_table_check: check,
     };
     let resolved =
-        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, decision).resolution;
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, decision)
+            .resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -1262,8 +1276,7 @@ fn unresolvable_stamp_serves_any_table_local() {
     forwarding.local_v4.insert(target);
     forwarding.local_nat_any_table_v4.insert(target);
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    let before =
-        super::super::forwarding::LOCAL_DELIVERY_IFINDEX0.load(Ordering::Relaxed);
+    let before = super::super::forwarding::LOCAL_DELIVERY_IFINDEX0.load(Ordering::Relaxed);
     let unknown = SessionDecision {
         resolution: unusable_resolution(),
         nat: NatDecision::default(),
@@ -1316,7 +1329,10 @@ fn unresolvable_stamp_does_not_serve_interface_nat_local_12086() {
         unknown,
     )
     .resolution;
-    assert_eq!(resolved.disposition, ForwardingDisposition::TableUnavailable);
+    assert_eq!(
+        resolved.disposition,
+        ForwardingDisposition::TableUnavailable
+    );
 }
 
 /// #12086 R1-F3: a session carrying the `blue` installing-table stamp must
@@ -1487,9 +1503,11 @@ fn purge_rearm_mid_walk_does_not_starve_beyond_budget() {
     assert_eq!(purged_total, total);
     assert_eq!(evicted.len(), total);
     for i in 0..total {
-        assert!(sessions
-            .entry_with_origin(&pbr_key_for(30000 + i as u16, dst))
-            .is_none());
+        assert!(
+            sessions
+                .entry_with_origin(&pbr_key_for(30000 + i as u16, dst))
+                .is_none()
+        );
     }
 }
 
@@ -1604,8 +1622,7 @@ fn purge_table_readd_skips_all_through_flush() {
     // Latest re-adds blue while the step still scans the rotated view.
     publish_pbr_view(&channel, 8, forwarding.clone());
     let rotated = rotated_blue_gone_state();
-    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> = Arc::new(Mutex::new(VecDeque::new()));
     let peer_cmds = vec![peer_queue.clone()];
     let mut purge = super::install_table_purge::InstallTablePurge::default();
     purge.arm(8);
@@ -1682,8 +1699,7 @@ fn purge_fence_decline_emits_no_close_through_flush() {
     );
     let rotated = Arc::new(rotated_blue_gone_state());
     publish_pbr_view(&channel, 8, rotated.clone());
-    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> = Arc::new(Mutex::new(VecDeque::new()));
     let peer_cmds = vec![peer_queue.clone()];
     let mut purge = super::install_table_purge::InstallTablePurge::default();
     purge.arm(8);
@@ -1777,12 +1793,15 @@ fn purge_rejected_companion_survives_close_flush() {
         &shared.nat_sessions,
         &shared.forward_wire_sessions,
         &shared.owner_rg_indexes,
-        &synced_entry_for(&rk, unstamped_decision(unusable_resolution()), pbr_metadata()),
+        &synced_entry_for(
+            &rk,
+            unstamped_decision(unusable_resolution()),
+            pbr_metadata(),
+        ),
     );
     let rotated = Arc::new(rotated_blue_gone_state());
     publish_pbr_view(&channel, 8, rotated.clone());
-    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> = Arc::new(Mutex::new(VecDeque::new()));
     let peer_cmds = vec![peer_queue.clone()];
     // Clear install-time deltas (F2's Open) so the ring holds exactly what
     // the walk emits.
@@ -1902,8 +1921,7 @@ fn purge_close_after_table_readd_preserves_new_authority_through_flush() {
     publish(&shared);
     let rotated = Arc::new(rotated_blue_gone_state());
     publish_pbr_view(&channel, 8, rotated.clone());
-    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> = Arc::new(Mutex::new(VecDeque::new()));
     let peer_cmds = vec![peer_queue.clone()];
     let mut purge = super::install_table_purge::InstallTablePurge::default();
     purge.arm(8);
@@ -1974,10 +1992,8 @@ fn purge_close_after_table_readd_preserves_new_authority_through_flush() {
     );
     let q = peer_queue.lock().expect("lock");
     assert!(
-        q.iter().all(|c| matches!(
-            c,
-            WorkerCommand::DeleteSyncedIfTableUnknown { .. }
-        )),
+        q.iter()
+            .all(|c| matches!(c, WorkerCommand::DeleteSyncedIfTableUnknown { .. })),
         "drain must add no ordinary replicate for a stale purge close, got {q:?}"
     );
 }
@@ -1992,10 +2008,18 @@ fn purge_close_after_table_readd_preserves_new_authority_through_flush() {
 fn reimport_zero_stamp_preserves_same_incarnation() {
     let mut sessions = SessionTable::new();
     let key = pbr_key();
-    let mut first = synced_entry_for(&key, stamped_decision(unusable_resolution()), pbr_metadata());
+    let mut first = synced_entry_for(
+        &key,
+        stamped_decision(unusable_resolution()),
+        pbr_metadata(),
+    );
     first.session_id = 77;
     assert!(sessions.upsert_synced_with_origin(first.into_session_install(NOW_NS), true));
-    let mut resend = synced_entry_for(&key, unstamped_decision(unusable_resolution()), pbr_metadata());
+    let mut resend = synced_entry_for(
+        &key,
+        unstamped_decision(unusable_resolution()),
+        pbr_metadata(),
+    );
     resend.session_id = 77;
     assert!(sessions.upsert_synced_with_origin(resend.into_session_install(NOW_NS), true));
     let (decision, _, _) = sessions.entry_with_origin(&key).expect("entry must exist");
@@ -2009,10 +2033,18 @@ fn reimport_zero_stamp_preserves_same_incarnation() {
 fn reimport_zero_stamp_new_incarnation_applies() {
     let mut sessions = SessionTable::new();
     let key = pbr_key();
-    let mut first = synced_entry_for(&key, stamped_decision(unusable_resolution()), pbr_metadata());
+    let mut first = synced_entry_for(
+        &key,
+        stamped_decision(unusable_resolution()),
+        pbr_metadata(),
+    );
     first.session_id = 77;
     assert!(sessions.upsert_synced_with_origin(first.into_session_install(NOW_NS), true));
-    let mut resend = synced_entry_for(&key, unstamped_decision(unusable_resolution()), pbr_metadata());
+    let mut resend = synced_entry_for(
+        &key,
+        unstamped_decision(unusable_resolution()),
+        pbr_metadata(),
+    );
     resend.session_id = 78;
     assert!(sessions.upsert_synced_with_origin(resend.into_session_install(NOW_NS), true));
     let (decision, _, _) = sessions.entry_with_origin(&key).expect("entry must exist");
@@ -2025,10 +2057,18 @@ fn reimport_zero_stamp_new_incarnation_applies() {
 fn reimport_stamped_overwrites() {
     let mut sessions = SessionTable::new();
     let key = pbr_key();
-    let mut first = synced_entry_for(&key, unstamped_decision(unusable_resolution()), pbr_metadata());
+    let mut first = synced_entry_for(
+        &key,
+        unstamped_decision(unusable_resolution()),
+        pbr_metadata(),
+    );
     first.session_id = 77;
     assert!(sessions.upsert_synced_with_origin(first.into_session_install(NOW_NS), true));
-    let mut resend = synced_entry_for(&key, stamped_decision(unusable_resolution()), pbr_metadata());
+    let mut resend = synced_entry_for(
+        &key,
+        stamped_decision(unusable_resolution()),
+        pbr_metadata(),
+    );
     resend.session_id = 77;
     assert!(sessions.upsert_synced_with_origin(resend.into_session_install(NOW_NS), true));
     let (decision, _, _) = sessions.entry_with_origin(&key).expect("entry must exist");
@@ -2079,8 +2119,7 @@ fn purge_close_after_reinstall_without_readd_drops_through_flush() {
     publish(&shared);
     let rotated = Arc::new(rotated_blue_gone_state());
     publish_pbr_view(&channel, 8, rotated.clone());
-    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> = Arc::new(Mutex::new(VecDeque::new()));
     let peer_cmds = vec![peer_queue.clone()];
     let mut purge = super::install_table_purge::InstallTablePurge::default();
     purge.arm(8);
@@ -2188,8 +2227,7 @@ fn purge_close_reinstall_scoped_survivor_skips_flush_10512() {
     );
     let rotated = Arc::new(rotated_blue_gone_state());
     publish_pbr_view(&channel, 8, rotated.clone());
-    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> = Arc::new(Mutex::new(VecDeque::new()));
     let peer_cmds = vec![peer_queue.clone()];
     let mut purge = super::install_table_purge::InstallTablePurge::default();
     purge.arm(8);
@@ -2399,8 +2437,7 @@ fn purge_close_without_reinstall_flushes_through_flush() {
     );
     let rotated = Arc::new(rotated_blue_gone_state());
     publish_pbr_view(&channel, 8, rotated.clone());
-    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> = Arc::new(Mutex::new(VecDeque::new()));
     let peer_cmds = vec![peer_queue.clone()];
     let mut purge = super::install_table_purge::InstallTablePurge::default();
     purge.arm(8);
@@ -2461,25 +2498,29 @@ fn purge_close_without_reinstall_flushes_through_flush() {
     );
 }
 fn cancel_keys_test_delta(purge_retirement: bool) -> SessionDelta {
-    SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
-    key: pbr_key(),
-    decision: stamped_decision(unusable_resolution()),
-    metadata: pbr_metadata(),
-    policy_generation: 0,
-    origin: SessionOrigin::ForwardFlow,
-    fabric_redirect_sync: false,
-    created_ns: 0,
-    last_seen_ns: 0,
-    counters: crate::session::SessionCounters::default(),
-    observed_tos: 0,
-    observed_tcp_flags: 0,
-    session_id: 0,
-    bulk_resync: false,
-    is_admission: false,
-    tcp_close_class: 0,
-    tcp_handshake_state: 0,
-    pptp_call_ids: 0,
-    purge_retirement, source_nat_static: None }
+    SessionDelta {
+        provenance: crate::session::ExportProvenance::Incremental,
+        kind: SessionDeltaKind::Close,
+        key: pbr_key(),
+        decision: stamped_decision(unusable_resolution()),
+        metadata: pbr_metadata(),
+        policy_generation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: 0,
+        bulk_resync: false,
+        is_admission: false,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        purge_retirement,
+        source_nat_static: None,
+    }
 }
 
 /// Round 3 item 3, flow-cancel gating: cancelled flows are DROPPED, so the
@@ -2506,7 +2547,8 @@ fn purge_close_cancel_keys_matrix() {
         .expect("an ordinary close cancels");
     assert_eq!(ordinary.0, pbr_key());
     assert_ne!(
-        ordinary.1, pbr_key(),
+        ordinary.1,
+        pbr_key(),
         "an ordinary close derives the reverse companion"
     );
     // Non-close deltas never cancel.
@@ -2514,7 +2556,6 @@ fn purge_close_cancel_keys_matrix() {
     open.kind = SessionDeltaKind::Open;
     assert_eq!(purge_close_cancel_keys(&open, false), None);
 }
-
 
 /// Round 3 item 3, table leg alone: blue comes back but nothing reinstalls.
 /// The predicate fails under current truth, so the drain drops the close
@@ -2550,8 +2591,7 @@ fn purge_close_after_readd_without_reinstall_drops_through_flush() {
     );
     let rotated = Arc::new(rotated_blue_gone_state());
     publish_pbr_view(&channel, 8, rotated.clone());
-    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> = Arc::new(Mutex::new(VecDeque::new()));
     let peer_cmds = vec![peer_queue.clone()];
     let mut purge = super::install_table_purge::InstallTablePurge::default();
     purge.arm(8);
@@ -2670,8 +2710,7 @@ fn ordinary_close_bypasses_the_stale_check_through_flush() {
         },
     );
     let handle = Some(handle);
-    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> = Arc::new(Mutex::new(VecDeque::new()));
     flush_deltas_for_test(
         &deltas,
         &shared,
@@ -2691,7 +2730,8 @@ fn ordinary_close_bypasses_the_stale_check_through_flush() {
     );
     let q = peer_queue.lock().expect("lock");
     assert!(
-        q.iter().any(|c| matches!(c, WorkerCommand::DeleteSynced(k) if k == &key)),
+        q.iter()
+            .any(|c| matches!(c, WorkerCommand::DeleteSynced(k) if k == &key)),
         "an ordinary close must replicate the forward delete, got {q:?}"
     );
 }
@@ -2726,8 +2766,7 @@ fn reverse_import_normalizes_stamp_to_default() {
         "install_table_domain": domain,
         "install_table_check": check,
     });
-    let req: SessionSyncRequest =
-        serde_json::from_value(req_json).expect("request parses");
+    let req: SessionSyncRequest = serde_json::from_value(req_json).expect("request parses");
     let zones = FxHashMap::from_iter([
         ("lan".to_string(), crate::test_zone_ids::TEST_LAN_ZONE_ID),
         ("wan".to_string(), crate::test_zone_ids::TEST_WAN_ZONE_ID),
@@ -2747,10 +2786,18 @@ fn reverse_import_normalizes_stamp_to_default() {
 fn reimport_zero_stamp_omitted_id_preserves() {
     let mut sessions = SessionTable::new();
     let key = pbr_key();
-    let mut first = synced_entry_for(&key, stamped_decision(unusable_resolution()), pbr_metadata());
+    let mut first = synced_entry_for(
+        &key,
+        stamped_decision(unusable_resolution()),
+        pbr_metadata(),
+    );
     first.session_id = 77;
     assert!(sessions.upsert_synced_with_origin(first.into_session_install(NOW_NS), true));
-    let mut resend = synced_entry_for(&key, unstamped_decision(unusable_resolution()), pbr_metadata());
+    let mut resend = synced_entry_for(
+        &key,
+        unstamped_decision(unusable_resolution()),
+        pbr_metadata(),
+    );
     resend.session_id = 0;
     assert!(sessions.upsert_synced_with_origin(resend.into_session_install(NOW_NS), true));
     let (decision, _, _) = sessions.entry_with_origin(&key).expect("entry must exist");
@@ -2881,9 +2928,11 @@ fn colliding_ordinary_close_retires_a_keeps_b10512() {
     );
     let deltas = fx.sessions.drain_deltas(64);
     assert_eq!(deltas.len(), 1);
-    assert_eq!(deltas[0].session_id, fx.id_a, "explicit close must carry the captured id");
-    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    assert_eq!(
+        deltas[0].session_id, fx.id_a,
+        "explicit close must carry the captured id"
+    );
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> = Arc::new(Mutex::new(VecDeque::new()));
     flush_deltas_for_test(
         &deltas,
         &fx.shared,
@@ -2894,11 +2943,19 @@ fn colliding_ordinary_close_retires_a_keeps_b10512() {
         Some(&mut fx.sessions),
     );
     assert!(
-        !fx.shared.sessions.lock().expect("lock").contains_key(&fx.key_a),
+        !fx.shared
+            .sessions
+            .lock()
+            .expect("lock")
+            .contains_key(&fx.key_a),
         "stale ordinary close must retire shared-A"
     );
     assert!(
-        fx.shared.sessions.lock().expect("lock").contains_key(&fx.key_b),
+        fx.shared
+            .sessions
+            .lock()
+            .expect("lock")
+            .contains_key(&fx.key_b),
         "shared-B must survive A's close"
     );
     assert_ne!(
@@ -2946,7 +3003,11 @@ fn colliding_ordinary_close_retires_a_keeps_b10512() {
         Some(&mut fx.sessions),
     );
     assert!(
-        !fx.shared.sessions.lock().expect("lock").contains_key(&fx.key_b),
+        !fx.shared
+            .sessions
+            .lock()
+            .expect("lock")
+            .contains_key(&fx.key_b),
         "B's later close must flush normally (no M1 poison)"
     );
     assert!(
@@ -2971,8 +3032,7 @@ fn colliding_ordinary_close_without_identity_drops10512() {
         0,
     );
     let deltas = fx.sessions.drain_deltas(64);
-    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> = Arc::new(Mutex::new(VecDeque::new()));
     flush_deltas_for_test(
         &deltas,
         &fx.shared,
@@ -2983,7 +3043,11 @@ fn colliding_ordinary_close_without_identity_drops10512() {
         Some(&mut fx.sessions),
     );
     assert!(
-        fx.shared.sessions.lock().expect("lock").contains_key(&fx.key_a),
+        fx.shared
+            .sessions
+            .lock()
+            .expect("lock")
+            .contains_key(&fx.key_a),
         "identity-less stale close must not retire unverifiable rows"
     );
     assert!(
@@ -3003,8 +3067,8 @@ fn colliding_ordinary_close_without_identity_drops10512() {
 #[test]
 #[ignore = "MEASUREMENT: manual loaded shared-session churn (#11299)"]
 fn close_check_and_publish_churn_11299() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -3090,12 +3154,14 @@ fn close_check_and_publish_churn_11299() {
         let mut overlapping_close_checks = 0usize;
         while close_remaining.load(Ordering::Acquire) > 0 {
             let overlapping_before = close_mutations.load(Ordering::Acquire) > 0;
-            assert!(!super::super::session_delta::close_delta_is_stale_incarnation(
-                &close_delta_for_worker,
-                Some(&local_sessions),
-                &close_shared.sessions,
-                &close_shared.owner_rg_indexes,
-            ));
+            assert!(
+                !super::super::session_delta::close_delta_is_stale_incarnation(
+                    &close_delta_for_worker,
+                    Some(&local_sessions),
+                    &close_shared.sessions,
+                    &close_shared.owner_rg_indexes,
+                )
+            );
             let overlapping_after = close_mutations.load(Ordering::Acquire) > 0;
             close_checks += 1;
             if overlapping_before || overlapping_after {
@@ -3117,8 +3183,8 @@ fn close_check_and_publish_churn_11299() {
             publish_gate.wait();
             let mut latencies = Vec::with_capacity(PUBLISHES_PER_WORKER);
             for sequence in 0..PUBLISHES_PER_WORKER {
-                let identity = 0x0b00_0000_u32
-                    + (worker_id * PUBLISHES_PER_WORKER + sequence) as u32;
+                let identity =
+                    0x0b00_0000_u32 + (worker_id * PUBLISHES_PER_WORKER + sequence) as u32;
                 let mut key = pbr_key();
                 key.src_ip = IpAddr::V4(Ipv4Addr::from(identity));
                 key.src_port = identity as u16;
@@ -3162,7 +3228,10 @@ fn close_check_and_publish_churn_11299() {
     let elapsed = started.elapsed();
     assert_eq!(publish_latencies.len(), PUBLISHERS * PUBLISHES_PER_WORKER);
     assert!(close_checks > 0, "close checker did not run");
-    assert!(overlapping_close_checks > 0, "close checks did not overlap publishing");
+    assert!(
+        overlapping_close_checks > 0,
+        "close checks did not overlap publishing"
+    );
     publish_latencies.sort_unstable();
     let p99 = publish_latencies[publish_latencies.len() * 99 / 100];
     let max = *publish_latencies.last().expect("publish samples exist");
@@ -3281,17 +3350,18 @@ fn purge_fence_decline_preserves_nat_and_bpf_state_13670() {
     let mut decision = stamped_decision(unusable_resolution());
     decision.nat = nat;
     let mut forwarding = (*forwarding).clone();
-    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
-        name: "pool-snat".to_string(),
-        from_zone: "lan".to_string(),
-        to_zone: "wan".to_string(),
-        source_addresses: vec!["0.0.0.0/0".to_string()],
-        pool_name: "p".to_string(),
-        pool_addresses: vec!["203.0.113.1/32".to_string()],
-        port_low: 1024,
-        port_high: 65535,
-        ..crate::SourceNATRuleSnapshot::default()
-    }]);
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+            name: "pool-snat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            pool_name: "p".to_string(),
+            pool_addresses: vec!["203.0.113.1/32".to_string()],
+            port_low: 1024,
+            port_high: 65535,
+            ..crate::SourceNATRuleSnapshot::default()
+        }]);
     crate::nat::reserve_synced_source_nat_allocation_for_worker(
         &forwarding.iface_nat_allocators,
         &forwarding.source_nat_rules,
@@ -3334,21 +3404,21 @@ fn purge_fence_decline_preserves_nat_and_bpf_state_13670() {
     publish_pbr_view(&channel, 8, rotated.clone());
     let forwarding = Arc::new(forwarding);
     assert!(super::install_table_purge::install_table_purge_predicate(
-        &rotated,
-        &key,
-        &decision,
+        &rotated, &key, &decision,
     ));
     assert!(super::install_table_purge::install_table_purge_predicate(
         reader.load().forwarding(),
         &key,
         &decision,
     ));
-    let session_map =
-        SteeringMap::unshared_for_test(crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD);
+    let session_map = SteeringMap::unshared_for_test(crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD);
     crate::afxdp::bpf_map::publish_live_session_entry(session_map, &key, nat, false)
         .expect("seed live steering rows");
     let seeded_writes = crate::afxdp::bpf_map::session_map_writes();
-    assert!(!seeded_writes.is_empty(), "precondition: steering rows were seeded");
+    assert!(
+        !seeded_writes.is_empty(),
+        "precondition: steering rows were seeded"
+    );
     let seeded_row_count = seeded_writes.len();
     let mut purge = super::install_table_purge::InstallTablePurge::default();
     purge.arm(8);

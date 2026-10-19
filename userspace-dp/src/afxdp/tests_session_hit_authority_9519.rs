@@ -767,6 +767,7 @@ fn established_icmp_hit(
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     };
     let mut sessions = SessionTable::new();
     if let Some((config_generation, fib_generation)) = forwarding_generation {

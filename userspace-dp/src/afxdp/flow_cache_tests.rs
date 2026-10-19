@@ -19,8 +19,8 @@ fn make_key() -> crate::session::SessionKey {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 50, 200)),
         src_port: 45678,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -51,15 +51,19 @@ fn make_descriptor() -> RewriteDescriptor {
 }
 
 fn make_resolution(disposition: ForwardingDisposition) -> ForwardingResolution {
-    ForwardingResolution { disposition,
-    local_ifindex: 0,
-    egress_ifindex: 6,
-    tx_ifindex: 6,
-    tunnel_endpoint_id: 0,
-    next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-    neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
-    src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
-    tx_vlan_id: 0, route_mtu: 0, transport_route_mtu: 0 }
+    ForwardingResolution {
+        disposition,
+        local_ifindex: 0,
+        egress_ifindex: 6,
+        tx_ifindex: 6,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+        neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
+        tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    }
 }
 
 fn make_decision(disposition: ForwardingDisposition) -> SessionDecision {
@@ -90,6 +94,7 @@ fn make_metadata(owner_rg_id: i32) -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -583,9 +588,11 @@ fn hit_past_insert_lease_with_fresh_runtime_lease_stays_cached_14943() {
     );
     assert_eq!(cache.evictions, 0);
     // Still cached well past the insert freeze.
-    assert!(cache
-        .lookup_with_ha_state(&key, lookup, 150, &rg_epochs, &ha)
-        .is_some());
+    assert!(
+        cache
+            .lookup_with_ha_state(&key, lookup, 150, &rg_epochs, &ha)
+            .is_some()
+    );
     assert_eq!(cache.evictions, 0);
 }
 
@@ -703,10 +710,7 @@ fn policy_denied_and_discard_route_are_cacheable_drops() {
         ..meta_tcp
     };
     assert!(
-        !FlowCacheEntry::should_cache(
-            syn,
-            make_decision(ForwardingDisposition::PolicyDenied)
-        ),
+        !FlowCacheEntry::should_cache(syn, make_decision(ForwardingDisposition::PolicyDenied)),
         "TCP SYN denies stay on the slow path so control packets cannot skip session state"
     );
 }
@@ -779,8 +783,7 @@ fn policy_deny_cache_expires_and_generation_fences_verdict() {
 #[test]
 fn from_deny_decision_retains_policy_replay_and_expiry_state() {
     let rg_epochs = default_rg_epochs();
-    let (flow, meta, validation, mut decision, forwarding, ha_state) =
-        make_v4_round_trip_inputs();
+    let (flow, meta, validation, mut decision, forwarding, ha_state) = make_v4_round_trip_inputs();
     decision.resolution.disposition = ForwardingDisposition::PolicyDenied;
     let policy_counter = std::sync::Arc::new(crate::policy::PolicyRuleCounter::default());
     let input_filter_log = Some(CachedInputFilterLog {
@@ -821,7 +824,10 @@ fn from_deny_decision_retains_policy_replay_and_expiry_state() {
         entry.decision.resolution.disposition,
         ForwardingDisposition::PolicyDenied
     );
-    assert_eq!(entry.policy_deny.unwrap().action, crate::policy::PolicyAction::Reject);
+    assert_eq!(
+        entry.policy_deny.unwrap().action,
+        crate::policy::PolicyAction::Reject
+    );
     assert_eq!(entry.metadata.policy_id, 9);
     assert_eq!(entry.metadata.ingress_zone, TEST_TRUST_ZONE_ID);
     assert_eq!(entry.metadata.egress_zone, TEST_UNTRUST_ZONE_ID);
@@ -925,27 +931,32 @@ fn from_forward_decision_round_trip() {
         config_generation: 10,
         fib_generation: 3,
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 6,
-        tx_ifindex: 6,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
-        neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
-        tx_vlan_id: 50,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 8))),
-        rewrite_dst: None,
-        rewrite_src_port: Some(1024),
-        rewrite_dst_port: None,
-        source_nat_icmp: None,
-        nat64: false,
-        nptv6: false,
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 6,
+            tx_ifindex: 6,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
+            neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
+            tx_vlan_id: 50,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 8))),
+            rewrite_dst: None,
+            rewrite_src_port: Some(1024),
+            rewrite_dst_port: None,
+            source_nat_icmp: None,
+            nat64: false,
+            nptv6: false,
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let ingress_zone = Some(3);
 
     // ForwardingState needs egress entry so owner_rg_for_resolution can
@@ -1092,27 +1103,32 @@ fn make_v4_round_trip_inputs() -> (
         config_generation: 10,
         fib_generation: 3,
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 6,
-        tx_ifindex: 6,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
-        neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
-        tx_vlan_id: 50,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 8))),
-        rewrite_dst: None,
-        rewrite_src_port: Some(1024),
-        rewrite_dst_port: None,
-        source_nat_icmp: None,
-        nat64: false,
-        nptv6: false,
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 6,
+            tx_ifindex: 6,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
+            neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
+            tx_vlan_id: 50,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 8))),
+            rewrite_dst: None,
+            rewrite_src_port: Some(1024),
+            rewrite_dst_port: None,
+            source_nat_icmp: None,
+            nat64: false,
+            nptv6: false,
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let mut forwarding = ForwardingState::default();
     forwarding.egress.insert(
         6,
@@ -1166,7 +1182,8 @@ fn from_forward_decision_skips_cache_for_dscp_matched_output_filter() {
         }],
         "",
         "",
-    ).expect("filter state compiles");
+    )
+    .expect("filter state compiles");
 
     let entry = FlowCacheEntry::from_forward_decision(
         &flow,
@@ -1221,7 +1238,8 @@ fn from_forward_decision_skips_cache_for_dscp_matched_input_filter() {
         }],
         "",
         "",
-    ).expect("filter state compiles");
+    )
+    .expect("filter state compiles");
 
     let entry = FlowCacheEntry::from_forward_decision(
         &flow,
@@ -1276,7 +1294,8 @@ fn from_forward_decision_skips_cache_for_per_packet_l4_input_filter() {
         }],
         "",
         "",
-    ).expect("filter state compiles");
+    )
+    .expect("filter state compiles");
 
     let entry = FlowCacheEntry::from_forward_decision(
         &flow,
@@ -1327,7 +1346,8 @@ fn from_forward_decision_skips_cache_for_per_packet_l4_output_filter() {
         }],
         "",
         "",
-    ).expect("filter state compiles");
+    )
+    .expect("filter state compiles");
 
     let entry = FlowCacheEntry::from_forward_decision(
         &flow,
@@ -1423,7 +1443,8 @@ fn dscp_input_gate_blocks_flow_cache_insertion_via_runbook_pattern() {
         }],
         "",
         "",
-    ).expect("filter state compiles");
+    )
+    .expect("filter state compiles");
 
     // Step 4: drive FlowCacheEntry::from_forward_decision and
     // confirm the gate at flow_cache.rs:297-309 declined
@@ -1488,7 +1509,8 @@ fn dscp_output_gate_blocks_flow_cache_insertion_via_runbook_pattern() {
         }],
         "",
         "",
-    ).expect("filter state compiles");
+    )
+    .expect("filter state compiles");
 
     // Step 4: same gate, different lookup —
     // interface_output_filter_has_dscp_match consults
@@ -1541,8 +1563,8 @@ fn make_v6_round_trip_inputs() -> (
         dst_port: 443,
         protocol: PROTO_TCP,
         addr_family: libc::AF_INET6 as u8,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let flow = SessionFlow {
         src_ip,
@@ -1563,27 +1585,32 @@ fn make_v6_round_trip_inputs() -> (
         config_generation: 10,
         fib_generation: 3,
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 6,
-        tx_ifindex: 6,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))),
-        neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
-        tx_vlan_id: 50,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision {
-        rewrite_src: None,
-        rewrite_dst: None,
-        rewrite_src_port: None,
-        rewrite_dst_port: None,
-        source_nat_icmp: None,
-        nat64: false,
-        nptv6: false,
-    }, install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 6,
+            tx_ifindex: 6,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))),
+            neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
+            tx_vlan_id: 50,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision {
+            rewrite_src: None,
+            rewrite_dst: None,
+            rewrite_src_port: None,
+            rewrite_dst_port: None,
+            source_nat_icmp: None,
+            nat64: false,
+            nptv6: false,
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let mut forwarding = ForwardingState::default();
     forwarding.egress.insert(
         6,
@@ -1891,19 +1918,24 @@ fn fabric_redirect_cache_entry_uses_flow_owner_rg_for_epoch_invalidation() {
         config_generation: 1,
         fib_generation: 1,
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::FabricRedirect,
-        local_ifindex: 0,
-        egress_ifindex: 21,
-        tx_ifindex: 21,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
-        neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
-        src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::FabricRedirect,
+            local_ifindex: 0,
+            egress_ifindex: 21,
+            tx_ifindex: 21,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
+            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+            src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let mut forwarding = ForwardingState::default();
     forwarding.fabrics.push(FabricLink {
         parent_ifindex: 21,
@@ -1978,8 +2010,8 @@ fn key_in_set(target_set: usize, salt: u16) -> crate::session::SessionKey {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 50, 200)),
             src_port: port,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         };
         if FlowCache::set_index(&key, 7) == target_set {
             return key;
@@ -2444,7 +2476,11 @@ fn active_flow_debug_entries_count_cos_queues_without_row_limit_loss() {
 
 // #13077 test helper: stamp the served queue exactly as the hit path does —
 // through the mutable entry borrow the lookup hands out.
-fn stamp_served_queue(cache: &mut FlowCache, key: &crate::session::SessionKey, queue_id: Option<u8>) {
+fn stamp_served_queue(
+    cache: &mut FlowCache,
+    key: &crate::session::SessionKey,
+    queue_id: Option<u8>,
+) {
     let set = FlowCache::set_index(key, 7);
     let base = set * FLOW_CACHE_WAYS;
     for way in 0..FLOW_CACHE_WAYS {
@@ -2551,9 +2587,15 @@ fn active_flow_debug_entries_seed_stamp_and_queueless_entries() {
     assert_eq!(cos_counts.len(), 1);
     assert_eq!(cos_counts[0].queue_id, 2, "insert seeded the seed queue");
     assert_eq!(cos_counts[0].active_flow_count, 1);
-    let seeded = rows.iter().find(|row| row.session_key.src_port == 45678).unwrap();
+    let seeded = rows
+        .iter()
+        .find(|row| row.session_key.src_port == 45678)
+        .unwrap();
     assert_eq!(seeded.cos_queue_id, Some(2));
-    let unattributed = rows.iter().find(|row| row.session_key.src_port == 45679).unwrap();
+    let unattributed = rows
+        .iter()
+        .find(|row| row.session_key.src_port == 45679)
+        .unwrap();
     assert_eq!(unattributed.cos_queue_id, None);
 }
 
@@ -3010,126 +3052,126 @@ fn flow_cache_not_populated_by_control_segment_via_insertion_site() {
 
 // ---- #2364: seeded flow-cache set index ------------------------------
 
-    /// Build N distinct v4 5-tuples differing only in src_port. These are
-    /// trivially attacker-constructible (one source, one ephemeral range).
-    fn adversarial_keys(n: u16) -> Vec<crate::session::SessionKey> {
-        (0..n)
-            .map(|i| crate::session::SessionKey {
-                addr_family: libc::AF_INET as u8,
-                protocol: PROTO_TCP,
-                src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)),
-                dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-                src_port: 40000u16.wrapping_add(i),
-                dst_port: 443,
-                            discriminator: Default::default(),
-                            routing_domain: 0,
-            })
-            .collect()
-    }
+/// Build N distinct v4 5-tuples differing only in src_port. These are
+/// trivially attacker-constructible (one source, one ephemeral range).
+fn adversarial_keys(n: u16) -> Vec<crate::session::SessionKey> {
+    (0..n)
+        .map(|i| crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            src_port: 40000u16.wrapping_add(i),
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        })
+        .collect()
+}
 
-    /// Set distribution = the multiset of set indices for a key list under
-    /// a given seed. Equal vectors ⇒ identical mapping.
-    fn set_distribution(seed: u64, keys: &[crate::session::SessionKey]) -> Vec<usize> {
-        keys.iter()
-            .map(|k| FlowCache::set_index_seeded(seed, k, 7))
-            .collect()
-    }
+/// Set distribution = the multiset of set indices for a key list under
+/// a given seed. Equal vectors ⇒ identical mapping.
+fn set_distribution(seed: u64, keys: &[crate::session::SessionKey]) -> Vec<usize> {
+    keys.iter()
+        .map(|k| FlowCache::set_index_seeded(seed, k, 7))
+        .collect()
+}
 
-    #[test]
-    fn set_index_is_stable_within_one_seed() {
-        // Cache-consistency invariant: a given flow must map to the SAME
-        // set every time within one process, or lookup/insert disagree
-        // and the cache silently misses. Repeat many times under a fixed
-        // seed and demand byte-identical results.
-        let keys = adversarial_keys(64);
-        let seed = 0x0123_4567_89AB_CDEF;
-        let first = set_distribution(seed, &keys);
-        for _ in 0..256 {
-            assert_eq!(
-                first,
-                set_distribution(seed, &keys),
-                "set_index must be stable for a fixed seed (cache consistency)"
-            );
+#[test]
+fn set_index_is_stable_within_one_seed() {
+    // Cache-consistency invariant: a given flow must map to the SAME
+    // set every time within one process, or lookup/insert disagree
+    // and the cache silently misses. Repeat many times under a fixed
+    // seed and demand byte-identical results.
+    let keys = adversarial_keys(64);
+    let seed = 0x0123_4567_89AB_CDEF;
+    let first = set_distribution(seed, &keys);
+    for _ in 0..256 {
+        assert_eq!(
+            first,
+            set_distribution(seed, &keys),
+            "set_index must be stable for a fixed seed (cache consistency)"
+        );
+    }
+}
+
+#[test]
+fn set_index_distribution_depends_on_seed() {
+    // Hardening invariant: the set mapping is NOT an externally
+    // probeable pure function of the 5-tuple. Two different process
+    // seeds must produce a DIFFERENT set distribution for the SAME
+    // attacker key set — so an offline attacker cannot precompute a
+    // colliding key set. (With the unseeded `FxHasher::default()` the
+    // distribution is seed-independent and this assertion fails —
+    // fail-on-revert.)
+    let keys = adversarial_keys(128);
+    let ref_seed = 0xA5A5_0000_C3C3_FFFFu64;
+    let reference = set_distribution(ref_seed, &keys);
+
+    // Scan seeds for a divergence. Under a uniform hash the chance
+    // that an entire 128-element distribution matches the reference by
+    // accident is ~ (1/1024)^? — vanishingly small per seed; one
+    // differing seed is essentially guaranteed immediately. Bound the
+    // loop so a TRULY seed-independent hash (the reverted state) makes
+    // this test FAIL rather than hang.
+    let mut diverged = false;
+    for seed in 1u64..4096u64 {
+        if seed == ref_seed {
+            continue;
+        }
+        if set_distribution(seed, &keys) != reference {
+            diverged = true;
+            break;
         }
     }
-
-    #[test]
-    fn set_index_distribution_depends_on_seed() {
-        // Hardening invariant: the set mapping is NOT an externally
-        // probeable pure function of the 5-tuple. Two different process
-        // seeds must produce a DIFFERENT set distribution for the SAME
-        // attacker key set — so an offline attacker cannot precompute a
-        // colliding key set. (With the unseeded `FxHasher::default()` the
-        // distribution is seed-independent and this assertion fails —
-        // fail-on-revert.)
-        let keys = adversarial_keys(128);
-        let ref_seed = 0xA5A5_0000_C3C3_FFFFu64;
-        let reference = set_distribution(ref_seed, &keys);
-
-        // Scan seeds for a divergence. Under a uniform hash the chance
-        // that an entire 128-element distribution matches the reference by
-        // accident is ~ (1/1024)^? — vanishingly small per seed; one
-        // differing seed is essentially guaranteed immediately. Bound the
-        // loop so a TRULY seed-independent hash (the reverted state) makes
-        // this test FAIL rather than hang.
-        let mut diverged = false;
-        for seed in 1u64..4096u64 {
-            if seed == ref_seed {
-                continue;
-            }
-            if set_distribution(seed, &keys) != reference {
-                diverged = true;
-                break;
-            }
-        }
-        assert!(
-            diverged,
-            "flow-cache set distribution did not change across {} seeds — \
+    assert!(
+        diverged,
+        "flow-cache set distribution did not change across {} seeds — \
              set_index is seed-independent (unseeded FxHash regression, #2364)",
-            4095
-        );
-    }
+        4095
+    );
+}
 
-    #[test]
-    fn set_index_seed_reshuffles_collision_set() {
-        // Concrete attack framing: take the keys that all land in ONE set
-        // under seed A, then show that under seed B they no longer all
-        // share a set. Proves the per-boot reseed defeats a precomputed
-        // single-set flood. Use a large enough key pool that some set is
-        // guaranteed to hold >=2 keys (4096 keys into 1024 sets ⇒ mean 4
-        // per set, max well above 2 under any reasonable hash).
-        let keys = adversarial_keys(4096);
-        let seed_a = 0xDEAD_BEEF_CAFE_BABEu64;
-        // Find the most-populated set under seed A.
-        let mut counts: std::collections::BTreeMap<usize, Vec<crate::session::SessionKey>> =
-            std::collections::BTreeMap::new();
-        for k in &keys {
-            counts
-                .entry(FlowCache::set_index_seeded(seed_a, k, 7))
-                .or_default()
-                .push(k.clone());
-        }
-        let (_, hot_set_keys) = counts
-            .into_iter()
-            .max_by_key(|(_, v)| v.len())
-            .expect("at least one set");
-        assert!(
-            hot_set_keys.len() >= 2,
-            "test precondition: need >=2 keys colliding in one set under seed A"
-        );
-        // Under a different seed, those same keys must NOT all collide in
-        // a single set (otherwise the reseed bought nothing).
-        let seed_b = seed_a ^ 0xFFFF_FFFF_FFFF_FFFF;
-        let distinct_under_b: std::collections::BTreeSet<usize> = hot_set_keys
-            .iter()
-            .map(|k| FlowCache::set_index_seeded(seed_b, k, 7))
-            .collect();
-        assert!(
-            distinct_under_b.len() > 1,
-            "keys colliding in one set under seed A still all collide under seed B — \
-             reseed did not break the precomputed flood (#2364)"
-        );
+#[test]
+fn set_index_seed_reshuffles_collision_set() {
+    // Concrete attack framing: take the keys that all land in ONE set
+    // under seed A, then show that under seed B they no longer all
+    // share a set. Proves the per-boot reseed defeats a precomputed
+    // single-set flood. Use a large enough key pool that some set is
+    // guaranteed to hold >=2 keys (4096 keys into 1024 sets ⇒ mean 4
+    // per set, max well above 2 under any reasonable hash).
+    let keys = adversarial_keys(4096);
+    let seed_a = 0xDEAD_BEEF_CAFE_BABEu64;
+    // Find the most-populated set under seed A.
+    let mut counts: std::collections::BTreeMap<usize, Vec<crate::session::SessionKey>> =
+        std::collections::BTreeMap::new();
+    for k in &keys {
+        counts
+            .entry(FlowCache::set_index_seeded(seed_a, k, 7))
+            .or_default()
+            .push(k.clone());
     }
+    let (_, hot_set_keys) = counts
+        .into_iter()
+        .max_by_key(|(_, v)| v.len())
+        .expect("at least one set");
+    assert!(
+        hot_set_keys.len() >= 2,
+        "test precondition: need >=2 keys colliding in one set under seed A"
+    );
+    // Under a different seed, those same keys must NOT all collide in
+    // a single set (otherwise the reseed bought nothing).
+    let seed_b = seed_a ^ 0xFFFF_FFFF_FFFF_FFFF;
+    let distinct_under_b: std::collections::BTreeSet<usize> = hot_set_keys
+        .iter()
+        .map(|k| FlowCache::set_index_seeded(seed_b, k, 7))
+        .collect();
+    assert!(
+        distinct_under_b.len() > 1,
+        "keys colliding in one set under seed A still all collide under seed B — \
+             reseed did not break the precomputed flood (#2364)"
+    );
+}
 
 // ---- #12603: v6 s3-clique must not be an all-seed single-set clique ------
 
@@ -3142,12 +3184,8 @@ fn v6_s3_clique(n: u16) -> Vec<crate::session::SessionKey> {
         .map(|i| crate::session::SessionKey {
             addr_family: libc::AF_INET6 as u8,
             protocol: PROTO_TCP,
-            src_ip: IpAddr::V6(Ipv6Addr::new(
-                0x2001, 0x0db8, 0, i, 0, 0, 0, 1,
-            )),
-            dst_ip: IpAddr::V6(Ipv6Addr::new(
-                0x2001, 0x0db8, 0, 2, 0, 0, 0, 2,
-            )),
+            src_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, i, 0, 0, 0, 1)),
+            dst_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 2, 0, 0, 0, 2)),
             src_port: 40000,
             dst_port: 443,
             discriminator: Default::default(),
@@ -3199,7 +3237,12 @@ fn cached_descriptor_evicted_only_on_neighbor_mac_change() {
     let neighbors = ShardedNeighborMap::new();
     let nh = (6i32, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1)));
     // Resolve the gateway with its initial MAC (first insert — no bump).
-    neighbors.insert_if_changed(nh, NeighborEntry { mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01] });
+    neighbors.insert_if_changed(
+        nh,
+        NeighborEntry {
+            mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
+        },
+    );
 
     // Build a cached forwarding descriptor and stamp it against the flow's
     // OWN next-hop shard exactly as poll_descriptor / from_forward_decision
@@ -3216,7 +3259,12 @@ fn cached_descriptor_evicted_only_on_neighbor_mac_change() {
     entry.neighbor_mac_epoch = neighbors.mac_change_epoch_for(&nh);
 
     // Steady state: a same-MAC ARP/NDP refresh must NOT evict the entry.
-    neighbors.insert_if_changed(nh, NeighborEntry { mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01] });
+    neighbors.insert_if_changed(
+        nh,
+        NeighborEntry {
+            mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
+        },
+    );
     assert!(
         !entry.neighbor_mac_epoch_stale(&neighbors),
         "same-MAC refresh must not evict the cached descriptor (#3048)"
@@ -3225,7 +3273,12 @@ fn cached_descriptor_evicted_only_on_neighbor_mac_change() {
     // Gateway VRRP failover: the flow's OWN neighbor MAC changes. The cached
     // dst_mac is now stale and the entry MUST be evicted so the next packet
     // re-resolves the current MAC (#3048 preserved under the #5147 scheme).
-    neighbors.insert_if_changed(nh, NeighborEntry { mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99] });
+    neighbors.insert_if_changed(
+        nh,
+        NeighborEntry {
+            mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
+        },
+    );
     assert!(
         entry.neighbor_mac_epoch_stale(&neighbors),
         "a MAC change to the flow's own neighbor must evict its stale dst_mac (#3048)"
@@ -3264,8 +3317,18 @@ fn unrelated_neighbor_mac_change_does_not_evict_cached_flow() {
         }
         (a, b.expect("distinct-shard neighbor B exists"))
     };
-    neighbors.insert_if_changed(na, NeighborEntry { mac: [0xaa, 0, 0, 0, 0, 0x01] });
-    neighbors.insert_if_changed(nb, NeighborEntry { mac: [0xbb, 0, 0, 0, 0, 0x02] });
+    neighbors.insert_if_changed(
+        na,
+        NeighborEntry {
+            mac: [0xaa, 0, 0, 0, 0, 0x01],
+        },
+    );
+    neighbors.insert_if_changed(
+        nb,
+        NeighborEntry {
+            mac: [0xbb, 0, 0, 0, 0, 0x02],
+        },
+    );
 
     let stamp = FlowCacheStamp {
         config_generation: 5,
@@ -3283,7 +3346,12 @@ fn unrelated_neighbor_mac_change_does_not_evict_cached_flow() {
     f_b.neighbor_mac_epoch = neighbors.mac_change_epoch_for(&nb);
 
     // Neighbor A's MAC flaps (an on-link sender alternating one IP's MAC).
-    neighbors.insert_if_changed(na, NeighborEntry { mac: [0xaa, 0, 0, 0, 0, 0x99] });
+    neighbors.insert_if_changed(
+        na,
+        NeighborEntry {
+            mac: [0xaa, 0, 0, 0, 0, 0x99],
+        },
+    );
 
     // F_a (uses A) is invalidated → re-resolves.
     assert!(
@@ -3332,7 +3400,12 @@ fn flow_cache_stamps_pre_resolve_epoch_survives_interleaved_gateway_failover() {
     // shard.
     let nh = (6i32, IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)));
     // Gateway resolved with its pre-failover MAC (first insert — no bump).
-    neighbors.insert_if_changed(nh, NeighborEntry { mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01] });
+    neighbors.insert_if_changed(
+        nh,
+        NeighborEntry {
+            mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
+        },
+    );
 
     // poll_descriptor snapshots EVERY shard's epoch BEFORE resolving the
     // neighbor MAC (the resolved shard is not yet known).
@@ -3342,7 +3415,12 @@ fn flow_cache_stamps_pre_resolve_epoch_survives_interleaved_gateway_failover() {
     // A kernel ARP/NDP update REPLACES the gateway MAC AFTER the resolve read
     // the old MAC but BEFORE the flow-cache entry is stamped. This advances the
     // neighbor's shard epoch past the pre-resolve snapshot.
-    neighbors.insert_if_changed(nh, NeighborEntry { mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99] });
+    neighbors.insert_if_changed(
+        nh,
+        NeighborEntry {
+            mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
+        },
+    );
     assert_ne!(
         pre_resolve_snapshot.epoch_for(&nh),
         neighbors.mac_change_epoch_for(&nh),
@@ -3425,7 +3503,12 @@ fn flow_cache_normal_resolve_caches_and_serves_neighbor_mac() {
     // Match the round-trip decision's resolved next-hop (egress_ifindex=6,
     // next_hop=10.0.1.1) so the stamped shard matches the mutated neighbor.
     let nh = (6i32, IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)));
-    neighbors.insert_if_changed(nh, NeighborEntry { mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01] });
+    neighbors.insert_if_changed(
+        nh,
+        NeighborEntry {
+            mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
+        },
+    );
 
     // Snapshot pre-resolve; NO failover interleaves.
     let pre_resolve_snapshot = neighbors.snapshot_shard_epochs();
@@ -3452,7 +3535,12 @@ fn flow_cache_normal_resolve_caches_and_serves_neighbor_mac() {
 
     // A same-MAC refresh does not advance the shard epoch, so the entry stays
     // fresh.
-    neighbors.insert_if_changed(nh, NeighborEntry { mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01] });
+    neighbors.insert_if_changed(
+        nh,
+        NeighborEntry {
+            mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
+        },
+    );
     assert!(
         !entry.neighbor_mac_epoch_stale(&neighbors),
         "a normal resolve with no interleaved MAC change must serve the cached \
@@ -3493,10 +3581,9 @@ fn tunnel_flow_cache_keys_mac_change_shard_on_outer_neighbor_not_logical_ifindex
     // GRE state: tunnel endpoint 1 -> logical ifindex 362 (gr-0-0-0), outer
     // transport egress ifindex 12 (reth0.80 VLAN subif). See
     // forwarding/tests.rs resolve_tunnel_outer_returns_outer_l3_egress.
-    let forwarding =
-        crate::afxdp::forwarding_build::build_forwarding_state(
-            &crate::afxdp::test_fixtures::native_gre_snapshot(true),
-        );
+    let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+        &crate::afxdp::test_fixtures::native_gre_snapshot(true),
+    );
 
     // A cacheable v4 forward decision, retargeted as a TUNNEL egress: keep its
     // resolved next-hop + neighbor_mac + ForwardCandidate disposition, but mark
@@ -3572,11 +3659,15 @@ fn tunnel_flow_cache_keys_mac_change_shard_on_outer_neighbor_not_logical_ifindex
     // neighbor's shard (the gateway VRRP-failover event).
     neighbors.insert_if_changed(
         (outer_if, nh),
-        NeighborEntry { mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01] },
+        NeighborEntry {
+            mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
+        },
     );
     neighbors.insert_if_changed(
         (outer_if, nh),
-        NeighborEntry { mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99] },
+        NeighborEntry {
+            mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x99],
+        },
     );
     assert!(
         entry.neighbor_mac_epoch_stale(&neighbors),
@@ -3608,8 +3699,8 @@ fn expired_scheduler_lease_evicts_scheduled_deny_cache_entries() {
         &zones,
     );
     assert!(policy.scheduler_lease.apply(1, 100));
-    let scheduler_expired = policy
-        .scheduler_rules_expired_at(100 + crate::policy::SCHEDULER_HEARTBEAT_LEASE_NS + 1);
+    let scheduler_expired =
+        policy.scheduler_rules_expired_at(100 + crate::policy::SCHEDULER_HEARTBEAT_LEASE_NS + 1);
     assert!(scheduler_expired);
 
     let rg_epochs = default_rg_epochs();
@@ -3775,7 +3866,14 @@ fn scheduler_lease_recovery_evicts_fail_closed_unscheduled_deny() {
     assert!(
         cache
             .lookup_counted_with_scheduler_expiry(
-                &deny_key, lookup, 0, &rg_epochs, 64, &policy, true, &std::collections::BTreeMap::new()
+                &deny_key,
+                lookup,
+                0,
+                &rg_epochs,
+                64,
+                &policy,
+                true,
+                &std::collections::BTreeMap::new()
             )
             .is_none()
     );
@@ -3784,7 +3882,14 @@ fn scheduler_lease_recovery_evicts_fail_closed_unscheduled_deny() {
     assert!(
         cache
             .lookup_counted_with_scheduler_expiry(
-                &deny_key, lookup, 0, &rg_epochs, 64, &policy, true, &std::collections::BTreeMap::new()
+                &deny_key,
+                lookup,
+                0,
+                &rg_epochs,
+                64,
+                &policy,
+                true,
+                &std::collections::BTreeMap::new()
             )
             .is_some(),
         "the fail-closed deny must hit while the lease is expired"
@@ -3812,7 +3917,14 @@ fn scheduler_lease_recovery_evicts_fail_closed_unscheduled_deny() {
     assert!(
         cache
             .lookup_counted_with_scheduler_expiry(
-                &deny_key, lookup, 0, &rg_epochs, 64, &policy, false, &std::collections::BTreeMap::new()
+                &deny_key,
+                lookup,
+                0,
+                &rg_epochs,
+                64,
+                &policy,
+                false,
+                &std::collections::BTreeMap::new()
             )
             .is_none(),
         "lease recovery must evict the fail-closed deny so the recovered scheduled permit can win (#13639)"

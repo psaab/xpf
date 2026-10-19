@@ -225,7 +225,6 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
         tcp_flags,
     )
 }
-
 /// Evaluate the session-hit verdict before applying any deferred synced
 /// materialization, purge, or promotion. Foreign and unresolved packets leave
 /// the decision, metadata, shared maps, and local session state untouched.

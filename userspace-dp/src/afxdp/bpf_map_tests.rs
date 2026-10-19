@@ -65,6 +65,7 @@ fn synced_forward_metadata() -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -229,33 +230,109 @@ fn tunnel_discriminators_demote_kernel_local_to_redirect_9517() {
 fn fragment_sentinel_never_publishes_a_steering_row_14648() {
     for family in [libc::AF_INET, libc::AF_INET6] {
         let (src_ip, dst_ip) = if family == libc::AF_INET {
-            (IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)), IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)))
+            (
+                IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+                IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
+            )
         } else {
-            (IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x66)), IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x01)))
+            (
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x66)),
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x01)),
+            )
         };
-        let key = SessionKey { addr_family: family as u8, protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4, src_ip, dst_ip, src_port: 0, dst_port: 0, discriminator: crate::session::TunnelDiscriminator::None, routing_domain: 0 };
-        assert!(!uses_kernel_local_session_map_entry(&key, local_delivery_decision(0), &synced_forward_metadata(), SessionOrigin::SyncImport, false), "#14648: proto-255 LocalDelivery must never select PASS_TO_KERNEL (family {family})");
+        let key = SessionKey {
+            addr_family: family as u8,
+            protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+            src_ip,
+            dst_ip,
+            src_port: 0,
+            dst_port: 0,
+            discriminator: crate::session::TunnelDiscriminator::None,
+            routing_domain: 0,
+        };
+        assert!(
+            !uses_kernel_local_session_map_entry(
+                &key,
+                local_delivery_decision(0),
+                &synced_forward_metadata(),
+                SessionOrigin::SyncImport,
+                false
+            ),
+            "#14648: proto-255 LocalDelivery must never select PASS_TO_KERNEL (family {family})"
+        );
         clear_session_map_writes();
-        publish_session_map_entry_for_session_with_conntrack(SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD), &key, local_delivery_decision(0), &synced_forward_metadata(), SessionOrigin::SyncImport, false, None).expect("refused steering publish must not error");
+        publish_session_map_entry_for_session_with_conntrack(
+            SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+            &key,
+            local_delivery_decision(0),
+            &synced_forward_metadata(),
+            SessionOrigin::SyncImport,
+            false,
+            None,
+        )
+        .expect("refused steering publish must not error");
         let writes = session_map_writes();
-        assert!(writes.is_empty(), "#14648: a proto-255 key publishes nothing (family {family}), got {writes:?}");
+        assert!(
+            writes.is_empty(),
+            "#14648: a proto-255 key publishes nothing (family {family}), got {writes:?}"
+        );
     }
     clear_session_map_writes();
-    publish_session_map_entry_for_session_with_conntrack(SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD), &plain_key(), local_delivery_decision(0), &synced_forward_metadata(), SessionOrigin::SyncImport, false, None).expect("control publish");
+    publish_session_map_entry_for_session_with_conntrack(
+        SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+        &plain_key(),
+        local_delivery_decision(0),
+        &synced_forward_metadata(),
+        SessionOrigin::SyncImport,
+        false,
+        None,
+    )
+    .expect("control publish");
     let writes = session_map_writes();
-    assert_eq!(writes.iter().filter(|w| w.value == Some(USERSPACE_SESSION_ACTION_PASS_TO_KERNEL)).count(), 1, "#14648 control: TCP LocalDelivery must still publish PASS_TO_KERNEL, got {writes:?}");
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|w| w.value == Some(USERSPACE_SESSION_ACTION_PASS_TO_KERNEL))
+            .count(),
+        1,
+        "#14648 control: TCP LocalDelivery must still publish PASS_TO_KERNEL, got {writes:?}"
+    );
 }
 
 /// #14648: the live REDIRECT publish path is gated too.
 #[test]
 fn fragment_sentinel_never_publishes_a_live_row_14648() {
-    let key = SessionKey { protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4, src_port: 0, dst_port: 0, ..plain_key() };
+    let key = SessionKey {
+        protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+        src_port: 0,
+        dst_port: 0,
+        ..plain_key()
+    };
     clear_session_map_writes();
-    publish_live_session_entry(SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD), &key, NatDecision::default(), false).expect("refused live publish must not error");
-    assert!(session_map_writes().is_empty(), "#14648: live publish of a proto-255 key must write nothing, got {:?}", session_map_writes());
+    publish_live_session_entry(
+        SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+        &key,
+        NatDecision::default(),
+        false,
+    )
+    .expect("refused live publish must not error");
+    assert!(
+        session_map_writes().is_empty(),
+        "#14648: live publish of a proto-255 key must write nothing, got {:?}",
+        session_map_writes()
+    );
     clear_session_map_writes();
-    publish_live_session_entry(SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD), &plain_key(), NatDecision::default(), false).expect("control live publish");
-    assert!(!session_map_writes().is_empty(), "#14648 control: TCP live publish must still write rows");
+    publish_live_session_entry(
+        SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+        &plain_key(),
+        NatDecision::default(),
+        false,
+    )
+    .expect("control live publish");
+    assert!(
+        !session_map_writes().is_empty(),
+        "#14648 control: TCP live publish must still write rows"
+    );
 }
 
 #[test]
@@ -532,6 +609,7 @@ fn session_map_redirect_keys_for_forward_session_include_nat_aliases() {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     };
 
     let keys = session_map_redirect_keys_for_session(
@@ -801,6 +879,7 @@ fn refresh_bpf_conntrack_last_seen_is_budgeted_across_slices() {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            nat_scope_ifindex: None,
         };
         assert!(table.install_with_protocol(key, decision, metadata, install_time, 6, 0x10));
     }
@@ -1378,6 +1457,7 @@ fn a_refresh_slice_reports_the_largest_session_volume_it_walked_7919() {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     };
     let busy = mk_key(40001);
     let quiet = mk_key(40002);
@@ -1757,8 +1837,17 @@ fn conntrack_rmw_app_id_declines_under_gate_lease_13668() {
     let metadata = synced_forward_metadata();
     assert_eq!(
         crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
-            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, decision, &metadata,
-            &FastMap::default(), 0, 11, 42, 60, SessionOrigin::ForwardFlow,
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
+            &key,
+            decision,
+            &metadata,
+            &FastMap::default(),
+            0,
+            11,
+            42,
+            60,
+            SessionOrigin::ForwardFlow,
         ),
         crate::afxdp::bpf_map::ConntrackPublishResult::Written
     );
@@ -1766,9 +1855,13 @@ fn conntrack_rmw_app_id_declines_under_gate_lease_13668() {
     let _lease = crate::afxdp::bpf_map::global_tuple_gate()
         .acquire_lease([key.clone()])
         .expect("test lease");
-    let ok = restamp_bpf_conntrack_app_id(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, 999);
+    let ok =
+        restamp_bpf_conntrack_app_id(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, 999);
     assert!(!ok, "#13668: RMW must decline while tuple is gate-leased");
-    assert_eq!(crate::afxdp::bpf_map::conntrack_app_id_restamp_writes_for_test(), 0);
+    assert_eq!(
+        crate::afxdp::bpf_map::conntrack_app_id_restamp_writes_for_test(),
+        0
+    );
     let after = crate::afxdp::bpf_map::conntrack_row_for_test(&key).expect("row survives");
     assert_eq!(after.app_id, before.app_id);
 }
@@ -1782,16 +1875,29 @@ fn conntrack_rmw_app_id_declines_under_clear_fence_13668() {
     let metadata = synced_forward_metadata();
     assert_eq!(
         crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
-            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, decision, &metadata,
-            &FastMap::default(), 0, 11, 42, 60, SessionOrigin::ForwardFlow,
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
+            &key,
+            decision,
+            &metadata,
+            &FastMap::default(),
+            0,
+            11,
+            42,
+            60,
+            SessionOrigin::ForwardFlow,
         ),
         crate::afxdp::bpf_map::ConntrackPublishResult::Written
     );
     let gate = crate::afxdp::bpf_map::global_tuple_gate();
     let _fence = gate.begin_clear().expect("clear fence");
-    let ok = restamp_bpf_conntrack_app_id(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, 999);
+    let ok =
+        restamp_bpf_conntrack_app_id(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, 999);
     assert!(!ok, "#13668: RMW must decline during clear fence");
-    assert_eq!(crate::afxdp::bpf_map::conntrack_app_id_restamp_writes_for_test(), 0);
+    assert_eq!(
+        crate::afxdp::bpf_map::conntrack_app_id_restamp_writes_for_test(),
+        0
+    );
 }
 
 #[test]
@@ -1799,10 +1905,35 @@ fn conntrack_rmw_policy_declines_under_gate_lease_13668() {
     let _g = crate::afxdp::bpf_map::take_conntrack_publish_guard();
     crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
     let key = plain_key();
-    assert_eq!(crate::afxdp::bpf_map::publish_bpf_conntrack_entry(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, local_delivery_decision(0), &synced_forward_metadata(), &FastMap::default(), 0, 11, 42, 60, SessionOrigin::ForwardFlow), crate::afxdp::bpf_map::ConntrackPublishResult::Written);
-    let _lease = crate::afxdp::bpf_map::global_tuple_gate().acquire_lease([key.clone()]).expect("lease");
+    assert_eq!(
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
+            &key,
+            local_delivery_decision(0),
+            &synced_forward_metadata(),
+            &FastMap::default(),
+            0,
+            11,
+            42,
+            60,
+            SessionOrigin::ForwardFlow
+        ),
+        crate::afxdp::bpf_map::ConntrackPublishResult::Written
+    );
+    let _lease = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([key.clone()])
+        .expect("lease");
     // Policy restamp has no test-fd model; gated decline returns false before any map access.
-    assert!(!restamp_bpf_conntrack_policy(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, &synced_forward_metadata()), "#13668 policy RMW must decline under lease");
+    assert!(
+        !restamp_bpf_conntrack_policy(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
+            &key,
+            &synced_forward_metadata()
+        ),
+        "#13668 policy RMW must decline under lease"
+    );
 }
 
 #[test]
@@ -1810,11 +1941,41 @@ fn conntrack_rmw_origin_declines_under_gate_lease_13668() {
     let _g = crate::afxdp::bpf_map::take_conntrack_publish_guard();
     crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
     let key = plain_key();
-    assert_eq!(crate::afxdp::bpf_map::publish_bpf_conntrack_entry(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, local_delivery_decision(0), &synced_forward_metadata(), &FastMap::default(), 0, 11, 42, 60, SessionOrigin::ForwardFlow), crate::afxdp::bpf_map::ConntrackPublishResult::Written);
-    let before = crate::afxdp::bpf_map::conntrack_row_for_test(&key).unwrap().cluster_synced;
-    let _lease = crate::afxdp::bpf_map::global_tuple_gate().acquire_lease([key.clone()]).expect("lease");
-    crate::afxdp::bpf_map::update_session_cluster_synced_origin(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, !before);
-    assert_eq!(crate::afxdp::bpf_map::conntrack_row_for_test(&key).unwrap().cluster_synced, before, "#13668 origin RMW must decline under lease");
+    assert_eq!(
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
+            &key,
+            local_delivery_decision(0),
+            &synced_forward_metadata(),
+            &FastMap::default(),
+            0,
+            11,
+            42,
+            60,
+            SessionOrigin::ForwardFlow
+        ),
+        crate::afxdp::bpf_map::ConntrackPublishResult::Written
+    );
+    let before = crate::afxdp::bpf_map::conntrack_row_for_test(&key)
+        .unwrap()
+        .cluster_synced;
+    let _lease = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([key.clone()])
+        .expect("lease");
+    crate::afxdp::bpf_map::update_session_cluster_synced_origin(
+        crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+        -1,
+        &key,
+        !before,
+    );
+    assert_eq!(
+        crate::afxdp::bpf_map::conntrack_row_for_test(&key)
+            .unwrap()
+            .cluster_synced,
+        before,
+        "#13668 origin RMW must decline under lease"
+    );
 }
 
 #[test]
@@ -1823,13 +1984,66 @@ fn conntrack_rmw_refresh_declines_under_gate_lease_13668() {
     let _g = crate::afxdp::bpf_map::take_conntrack_publish_guard();
     crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
     let key = plain_key();
-    assert_eq!(crate::afxdp::bpf_map::publish_bpf_conntrack_entry(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, local_delivery_decision(0), &synced_forward_metadata(), &FastMap::default(), 0, 11, 42, 60, SessionOrigin::ForwardFlow), crate::afxdp::bpf_map::ConntrackPublishResult::Written);
+    assert_eq!(
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
+            &key,
+            local_delivery_decision(0),
+            &synced_forward_metadata(),
+            &FastMap::default(),
+            0,
+            11,
+            42,
+            60,
+            SessionOrigin::ForwardFlow
+        ),
+        crate::afxdp::bpf_map::ConntrackPublishResult::Written
+    );
     let mut table = SessionTable::new();
-    assert!(table.install_with_protocol(key.clone(), local_delivery_decision(0), synced_forward_metadata(), 1_000_000_000, 6, 0x10));
+    assert!(table.install_with_protocol(
+        key.clone(),
+        local_delivery_decision(0),
+        synced_forward_metadata(),
+        1_000_000_000,
+        6,
+        0x10
+    ));
     let policy = crate::policy::PolicyState::default();
-    let _lease = crate::afxdp::bpf_map::global_tuple_gate().acquire_lease([key.clone()]).expect("lease");
-    let _ = refresh_bpf_conntrack_last_seen(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &table, &policy, 2_000_000_000, 0, 4096);
-    { assert_eq!(crate::afxdp::bpf_map::conntrack_refresh_writes_for_test(), 0, "#13668 refresh RMW must decline under lease"); drop(_lease); let _ = refresh_bpf_conntrack_last_seen(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &table, &policy, 2_000_000_000, 0, 4096); assert_eq!(crate::afxdp::bpf_map::conntrack_refresh_writes_for_test(), 1, "#13668 unleased refresh must write"); };
+    let _lease = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([key.clone()])
+        .expect("lease");
+    let _ = refresh_bpf_conntrack_last_seen(
+        crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+        -1,
+        &table,
+        &policy,
+        2_000_000_000,
+        0,
+        4096,
+    );
+    {
+        assert_eq!(
+            crate::afxdp::bpf_map::conntrack_refresh_writes_for_test(),
+            0,
+            "#13668 refresh RMW must decline under lease"
+        );
+        drop(_lease);
+        let _ = refresh_bpf_conntrack_last_seen(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
+            &table,
+            &policy,
+            2_000_000_000,
+            0,
+            4096,
+        );
+        assert_eq!(
+            crate::afxdp::bpf_map::conntrack_refresh_writes_for_test(),
+            1,
+            "#13668 unleased refresh must write"
+        );
+    };
 }
 
 #[test]
@@ -1837,7 +2051,32 @@ fn conntrack_rmw_app_id_succeeds_without_lease_13668() {
     let _g = crate::afxdp::bpf_map::take_conntrack_publish_guard();
     crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
     let key = plain_key();
-    assert_eq!(crate::afxdp::bpf_map::publish_bpf_conntrack_entry(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, local_delivery_decision(0), &synced_forward_metadata(), &FastMap::default(), 0, 11, 42, 60, SessionOrigin::ForwardFlow), crate::afxdp::bpf_map::ConntrackPublishResult::Written);
-    assert!(restamp_bpf_conntrack_app_id(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, 999));
-    assert_eq!(crate::afxdp::bpf_map::conntrack_row_for_test(&key).unwrap().app_id, 999);
+    assert_eq!(
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
+            &key,
+            local_delivery_decision(0),
+            &synced_forward_metadata(),
+            &FastMap::default(),
+            0,
+            11,
+            42,
+            60,
+            SessionOrigin::ForwardFlow
+        ),
+        crate::afxdp::bpf_map::ConntrackPublishResult::Written
+    );
+    assert!(restamp_bpf_conntrack_app_id(
+        crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+        -1,
+        &key,
+        999
+    ));
+    assert_eq!(
+        crate::afxdp::bpf_map::conntrack_row_for_test(&key)
+            .unwrap()
+            .app_id,
+        999
+    );
 }

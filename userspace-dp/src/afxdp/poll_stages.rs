@@ -29,7 +29,6 @@
 use super::*;
 use crate::screen::{SynCookieAckVerdict, SynCookieChallenge};
 
-
 /// Generic outcome for a per-packet stage. The `RecycleAndContinue`
 /// arm signals that the caller should push `desc.addr` to
 /// `binding.scratch.scratch_recycle` and `continue` the while-let.
@@ -320,12 +319,15 @@ fn outline_ndp_na_learn_and_program(
         // unsolicited Override=1 (#11069, counted + alarmed). `Some(changed)`
         // feeds the #5288 limiter exactly as the old `insert_if_changed`
         // bool did.
-        let Some(changed) = worker_ctx.dynamic_neighbors.insert_ndp_na_if_override_allows(
-            (ifindex, na.target_ip),
-            NeighborEntry { mac },
-            na.override_flag,
-            na.solicited,
-        ) else {
+        let Some(changed) = worker_ctx
+            .dynamic_neighbors
+            .insert_ndp_na_if_override_allows(
+                (ifindex, na.target_ip),
+                NeighborEntry { mac },
+                na.override_flag,
+                na.solicited,
+            )
+        else {
             if na.override_flag && !na.solicited {
                 super::neighbor::report_na_unsolicited_override_refusal(
                     worker_ctx.dynamic_neighbors,
@@ -773,9 +775,7 @@ pub(super) fn stage_classify_fabric_ingress(
     );
     let (ingress_zone_override, ingress_nat_scope_ifindex) = match stamp {
         ZoneEncodedFabricStamp::Valid(zone) => (Some(zone), None),
-        ZoneEncodedFabricStamp::ValidScoped { zone_id, ifindex } => {
-            (Some(zone_id), Some(ifindex))
-        }
+        ZoneEncodedFabricStamp::ValidScoped { zone_id, ifindex } => (Some(zone_id), Some(ifindex)),
         ZoneEncodedFabricStamp::Absent | ZoneEncodedFabricStamp::Invalid => (None, None),
     };
     meta.fabric_ingress_ifindex = ingress_nat_scope_ifindex.unwrap_or_default() as u32;
@@ -1426,19 +1426,24 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss(
 /// `local_ifindex` here, which would divert the reinject into the GRE
 /// channel.
 fn ipsec_passthrough_decision() -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::LocalDelivery,
-        local_ifindex: 0,
-        egress_ifindex: 0,
-        tx_ifindex: 0,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::LocalDelivery,
+            local_ifindex: 0,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 /// #4323: the outcome of Stage 11 (IPsec passthrough) for the poll loop.
@@ -1721,9 +1726,14 @@ pub(super) fn stage_ipsec_passthrough_check(
     ) {
         // #4323 Option B: gate a NEW inbound IKE initiation on host-inbound.
         crate::afxdp::forwarding::IpsecAdmissionClass::NewInboundIke => {
-            if let Some(from_zone_id) =
-                ike_host_inbound_deny_zone(flow, meta, dst_port, ingress_zone_override, now_secs, worker_ctx)
-            {
+            if let Some(from_zone_id) = ike_host_inbound_deny_zone(
+                flow,
+                meta,
+                dst_port,
+                ingress_zone_override,
+                now_secs,
+                worker_ctx,
+            ) {
                 return IpsecPassthroughOutcome::Denied { from_zone_id };
             }
         }

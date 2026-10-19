@@ -53,19 +53,32 @@ fn session_key(routing_domain: u32) -> SessionKey {
 
 fn decision_snatting_to(snat: Ipv4Addr, install_table_domain: u32) -> SessionDecision {
     let install_table_check = if install_table_domain == 0 { 0 } else { 1 };
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 12,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
-        neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-        tx_vlan_id: 80,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision { rewrite_src: Some(IpAddr::V4(snat)), rewrite_dst: None, rewrite_src_port: Some(40000), rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false }, install_table_domain, install_table_check }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(snat)),
+            rewrite_dst: None,
+            rewrite_src_port: Some(40000),
+            rewrite_dst_port: None,
+            source_nat_icmp: None,
+            nat64: false,
+            nptv6: false,
+        },
+        install_table_domain,
+        install_table_check,
+    }
 }
 
 fn forward_metadata() -> SessionMetadata {
@@ -87,6 +100,7 @@ fn forward_metadata() -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        nat_scope_ifindex: None,
     }
 }
 
@@ -139,7 +153,14 @@ fn drive_lan_segment(
     // An established segment (ACK, no SYN): on a session MISS the #4400/#4539
     // guard declines to seed a session for a non-SYN first packet, so "which
     // session was found" is the only thing that can produce a forward here.
-    let frame = build_txn_tcp_syn_frame_v4(CLIENT, SERVER, CLIENT_PORT, SERVER_PORT, 0x10, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_txn_tcp_syn_frame_v4(
+        CLIENT,
+        SERVER,
+        CLIENT_PORT,
+        SERVER_PORT,
+        0x10,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let meta = txn_meta_v4(24, 0x10, frame.len() as u16);
     let _ = txn_run_descriptor_checked(
         &mut binding,

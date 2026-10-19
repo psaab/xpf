@@ -44,7 +44,6 @@ type pendingCallbackFrame struct {
 	// IN ORDER (#6558). See markDroppedFrameApplied for why a refused frame
 	// has to enter the queue at all.
 	dropped bool
-
 }
 
 // EventStream manages the daemon-side event socket for receiving session events
@@ -1886,6 +1885,11 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 					// fields; older peers omit it.
 					if off+8 <= len(payload) {
 						d.PptpCallIDs = binary.LittleEndian.Uint64(payload[off : off+8])
+						off += 8
+						// #15176: trailing NAT-scope ifindex (i32 LE).
+						if off+4 <= len(payload) {
+							d.NatScopeIfindex = int32(binary.LittleEndian.Uint32(payload[off : off+4]))
+						}
 					}
 				}
 			}

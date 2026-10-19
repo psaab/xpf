@@ -831,9 +831,7 @@ pub(super) fn retry_pending_neigh(
             cos_extra,
             now_ns,
             flowless_wire_flow.as_ref().map(|f| &f.forward_key),
-            flowless_ingress_flow
-                .as_ref()
-                .map(|flow| &flow.forward_key),
+            flowless_ingress_flow.as_ref().map(|flow| &flow.forward_key),
         );
         if cos.drop {
             // #7176 (C179-001): apply the SAME reject-reply / filter-log side
@@ -1626,8 +1624,12 @@ pub(super) fn build_missing_neighbor_session_metadata(
         inactivity_timeout_ns: crate::session::app_inactivity_timeout_ns(inactivity_timeout),
         policy_counter_idx: policy_result.map_or(0, |r| r.policy_counter_idx),
         policy_counter: policy_result.and_then(|r| {
-            forwarding.policy.hit_counter_by_idx(r.policy_counter_idx).cloned()
+            forwarding
+                .policy
+                .hit_counter_by_idx(r.policy_counter_idx)
+                .cloned()
         }),
+        nat_scope_ifindex: None,
     }
 }
 

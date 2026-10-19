@@ -117,8 +117,10 @@ type SessionSyncRequest struct {
 	// Additive and omitempty, like the zone-id mirrors above: an older helper
 	// decodes them via serde(default) to 0 and keeps the pre-#7095 behaviour of
 	// recording no ingress identity.
-	IngressIfindex   int    `json:"ingress_ifindex,omitempty"`
-	IngressVLANID    uint16 `json:"ingress_vlan_id,omitempty"`
+	IngressIfindex int    `json:"ingress_ifindex,omitempty"`
+	IngressVLANID  uint16 `json:"ingress_vlan_id,omitempty"`
+	// #15176: node-local logical NAT-scope ingress ifindex (0 = none).
+	NatScopeIfindex  int32  `json:"nat_scope_ifindex,omitempty"`
 	OwnerRGID        int    `json:"owner_rg_id,omitempty"`
 	EgressIfindex    int    `json:"egress_ifindex,omitempty"`
 	TXIfindex        int    `json:"tx_ifindex,omitempty"`
@@ -335,10 +337,12 @@ type SessionDeltaInfo struct {
 	// event-stream payload (bytes [21],[22] u8 → u16 here for symmetry
 	// with SessionSyncRequest). The HA delta path prefers these IDs;
 	// the legacy strings stay populated when JSON callers fill them.
-	IngressZoneID    uint16 `json:"ingress_zone_id,omitempty"`
-	EgressZoneID     uint16 `json:"egress_zone_id,omitempty"`
-	IngressIfindex   int    `json:"ingress_ifindex,omitempty"`
-	IngressVLANID    uint16 `json:"ingress_vlan_id,omitempty"`
+	IngressZoneID  uint16 `json:"ingress_zone_id,omitempty"`
+	EgressZoneID   uint16 `json:"egress_zone_id,omitempty"`
+	IngressIfindex int    `json:"ingress_ifindex,omitempty"`
+	IngressVLANID  uint16 `json:"ingress_vlan_id,omitempty"`
+	// #15176: node-local logical NAT-scope ingress ifindex (0 = none).
+	NatScopeIfindex  int32  `json:"nat_scope_ifindex,omitempty"`
 	OwnerRGID        int    `json:"owner_rg_id,omitempty"`
 	Disposition      string `json:"disposition,omitempty"`
 	Origin           string `json:"origin,omitempty"`
