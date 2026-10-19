@@ -100,6 +100,7 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 	prevFIB := m.lastSnapshot.FIBGeneration
 	prevSnapGen := m.lastSnapshot.Generation
 	prevAlloc := m.generation
+	prevPublished := m.publishedSnapshot
 	prevPermitEpoch := m.lastSnapshot.PermitEpoch
 	prevQueueEpochs := append([]QueueEpochSnapshot(nil), m.lastSnapshot.QueueEpochs...)
 	prevTunnelSnapshotGeneration := m.lastSnapshot.IpsecTunnelSnapshotGeneration
@@ -108,6 +109,30 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 	m.lastSnapshot.FIBGeneration = newGen
 	m.incGenerationSaturatingLocked()
 	m.lastSnapshot.Generation = m.generation
+	// #15216 (A29-03): a route-only bump advances lastSnapshot.Generation
+	// without an apply_snapshot. If publishedSnapshot equalled the
+	// pre-bump generation, the helper was enforcing exactly this
+	// snapshot, and the confirmed bump below keeps enforcing the same
+	// retained content at the new generation (last_snapshot_generation
+	// is untouched by a FIB bump; the bump only moves the FIB view).
+	// Advance publishedSnapshot with the snapshot here — mirroring
+	// advanceGenerationAfterPartialUpdateLocked's #6986 guard, which
+	// samples the same pre-bump equality — so the #7468 retain
+	// predicate (publishedSnapshot == lastSnapshot.Generation) still
+	// recognises the retained plan after a bump. Without this, a
+	// same-plan commit refused in-band inside the bump-to-next-tick
+	// window took the ctrl-disable path instead of the retain. When
+	// publishedSnapshot was behind (a deferred publish is outstanding),
+	// or an earlier outcome is unknown, leave it alone: the tick gate
+	// must still see unpublished work, and unknown helper content must
+	// not be marked settled. The refusal restore below reverts this
+	// together with the other speculative fields, and the hash dedup
+	// cannot suppress the tick either way: the hash ignores Generation
+	// and the tick's publish gate is the generation inequality.
+	if prevPublished == prevSnapGen && !m.applySnapshotOutcomeUnknown &&
+		m.partialOutcomeUnknown == 0 {
+		m.publishedSnapshot = m.generation
+	}
 	stampCaptureAuthorityWithRoutesNoFallback(m.lastSnapshot, m.captureEpochProvider, prefetch)
 
 	// #1197 v4 (Codex code-review v3 #1): refresh the monitored
@@ -191,6 +216,7 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 			m.lastSnapshot.FIBGeneration = prevFIB
 			m.lastSnapshot.Generation = prevSnapGen
 			m.generation = prevAlloc
+			m.publishedSnapshot = prevPublished
 			m.lastSnapshot.PermitEpoch = prevPermitEpoch
 			m.lastSnapshot.QueueEpochs = prevQueueEpochs
 			m.lastSnapshot.IpsecTunnelSnapshotGeneration = prevTunnelSnapshotGeneration
