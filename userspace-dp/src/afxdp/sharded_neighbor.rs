@@ -105,6 +105,15 @@ const _: () = assert!(
 /// race a solicited reply it observes us request (inherent to any
 /// solicited-preference scheme, NDP included) — the gate removes the
 /// fire-and-forget unsolicited overwrite, not the race.
+///
+/// #15097: the token is now bound to the MAC being probed
+/// (`ProbedNeighbor`). A token recorded for MAC `G` authorizes only a
+/// differing-MAC update to `G`'s successor when the caller recorded the
+/// token for that successor, or a same-MAC refresh of `G`. A kernel
+/// `NUD_PROBE` notification whose lladdr differs from the dataplane's
+/// current entry records NO token — the kernel is probing a MAC the
+/// dataplane refused, so its re-probe must not mint authorization for
+/// the refused MAC.
 pub(super) const ARP_SOLICITED_WINDOW_NS: u64 = 5_000_000_000;
 
 /// Configured idle lease age for an RX source-learned entry that is not
@@ -126,9 +135,25 @@ pub(crate) const RX_LEARNED_NEIGHBOR_SWEEP_INTERVAL_NS: u64 = 5_000_000_000;
 /// distinct unreachable IPv4 next hops are probed over a long-lived process.
 pub(super) const MAX_SOLICITED_KEYS_PER_SHARD: usize = 1024;
 
+/// #15097: one probe token, bound to the MAC the probe was for.
+///
+/// `mac == None` is a legacy key-only probe: a locally-issued resolution
+/// probe (warmer / resolver / pending retry / poll-descriptor probe) where
+/// the caller does not yet know the answer MAC — any differing-MAC reply
+/// inside the window is solicited (the pre-#15097 semantics, preserved for
+/// genuine convergence). `mac == Some(m)` is a MAC-bound probe: only an
+/// update to `m` is solicited. The kernel-monitor `NUD_PROBE` arm
+/// records `Some(current_dataplane_mac)` when the probed lladdr agrees
+/// with the dataplane, and records nothing when it disagrees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProbedNeighbor {
+    pub(crate) mac: Option<[u8; 6]>,
+    pub(crate) probed_at_ns: u64,
+}
+
 /// One mutex-guarded shard of ARP solicitation evidence.
 #[repr(align(64))]
-struct SolicitedShard(Mutex<FastMap<(i32, IpAddr), u64>>);
+struct SolicitedShard(Mutex<FastMap<(i32, IpAddr), ProbedNeighbor>>);
 
 impl SolicitedShard {
     fn new() -> Self {
@@ -310,7 +335,28 @@ impl ShardedNeighborMap {
 
     /// #10704: record a successfully-issued neighbor-resolution probe so an
     /// ARP reply can be distinguished from a fire-and-forget advert.
+    ///
+    /// Key-only form: the caller issued a resolution probe and does not
+    /// yet know the answer MAC, so any differing-MAC reply inside the
+    /// window is solicited (pre-#15097 semantics).
     pub(crate) fn record_neighbor_probe(&self, key: (i32, IpAddr), now_ns: u64) {
+        self.record_neighbor_probe_for_mac(key, None, now_ns);
+    }
+
+    /// #15097: record a probe bound to `probed_mac`.
+    ///
+    /// `Some(m)` means the probe was for MAC `m` specifically — only an
+    /// update to `m` is solicited by this token. `None` is the key-only
+    /// form above. A MAC-bound record never downgrades an existing
+    /// key-only record for the same key (a local probe already in flight
+    /// must not lose its broader authorization), and a key-only record
+    /// upgrades/replaces a MAC-bound one.
+    pub(crate) fn record_neighbor_probe_for_mac(
+        &self,
+        key: (i32, IpAddr),
+        probed_mac: Option<[u8; 6]>,
+        now_ns: u64,
+    ) {
         // Family-agnostic: IPv4 ARP (#10704) and IPv6 kernel-neighbor
         // solicitation (#13660) share this one-shot evidence store.
         let idx = shard_idx(&key);
@@ -318,15 +364,41 @@ impl ShardedNeighborMap {
             .0
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if !shard.contains_key(&key) && shard.len() >= MAX_SOLICITED_KEYS_PER_SHARD {
-            shard.retain(|_, probed_at| {
-                now_ns.saturating_sub(*probed_at) <= ARP_SOLICITED_WINDOW_NS
+        if let Some(existing) = shard.get(&key) {
+            // Never downgrade key-only (None) to MAC-bound.
+            if existing.mac.is_none() && probed_mac.is_some() {
+                return;
+            }
+        } else if shard.len() >= MAX_SOLICITED_KEYS_PER_SHARD {
+            shard.retain(|_, probed| {
+                now_ns.saturating_sub(probed.probed_at_ns) <= ARP_SOLICITED_WINDOW_NS
             });
             if shard.len() >= MAX_SOLICITED_KEYS_PER_SHARD {
                 return;
             }
         }
-        shard.insert(key, now_ns);
+        shard.insert(
+            key,
+            ProbedNeighbor {
+                mac: probed_mac,
+                probed_at_ns: now_ns,
+            },
+        );
+    }
+
+    /// #15097: drop any probe token for `key`. Used when a kernel
+    /// `NUD_PROBE` notification carries a lladdr the dataplane does not
+    /// hold: the kernel is probing a refused MAC, so no token minted
+    /// earlier for that key may authorize the refused MAC's later reply.
+    /// (A locally-issued key-only probe recorded after this call is
+    /// unaffected — it is a fresh, dataplane-initiated probe.)
+    pub(crate) fn clear_neighbor_probe(&self, key: &(i32, IpAddr)) {
+        let idx = shard_idx(key);
+        let mut shard = self.arp_solicited_at[idx]
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        shard.remove(key);
     }
 
     /// #13661: peek at recent-probe evidence WITHOUT consuming it.
@@ -335,14 +407,39 @@ impl ShardedNeighborMap {
     /// so burning the token there makes a genuine MAC move milliseconds later
     /// look unsolicited. Callers peek before insertion and consume the token
     /// only when the insert changed the map.
+    ///
+    /// Key-only peek: true when any unexpired token exists for `key`.
+    /// Preserved for callers that only need existence (e.g. the resolver's
+    /// confirmed-insert gate, where the candidate MAC is the kernel's own
+    /// GETNEIGH answer).
     pub(crate) fn peek_arp_reply_solicited(&self, key: &(i32, IpAddr), now_ns: u64) -> bool {
+        self.peek_arp_reply_solicited_for_mac(key, None, now_ns)
+    }
+
+    /// #15097: MAC-aware peek. `candidate == Some(m)` asks whether a
+    /// differing-MAC update to `m` is solicited: true iff an unexpired
+    /// token exists and is either key-only (`mac == None`) or bound to
+    /// exactly `m`. `candidate == None` is the key-only existence peek.
+    pub(crate) fn peek_arp_reply_solicited_for_mac(
+        &self,
+        key: &(i32, IpAddr),
+        candidate: Option<[u8; 6]>,
+        now_ns: u64,
+    ) -> bool {
         let idx = shard_idx(key);
         let shard = self.arp_solicited_at[idx]
             .0
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         match shard.get(key) {
-            Some(probed_at) => now_ns.saturating_sub(*probed_at) <= ARP_SOLICITED_WINDOW_NS,
+            Some(probed) => {
+                now_ns.saturating_sub(probed.probed_at_ns) <= ARP_SOLICITED_WINDOW_NS
+                    && match (probed.mac, candidate) {
+                        (None, _) => true,
+                        (Some(bound), Some(cand)) => bound == cand,
+                        (Some(_), None) => true,
+                    }
+            }
             None => false,
         }
     }
@@ -355,7 +452,9 @@ impl ShardedNeighborMap {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         match shard.remove(key) {
-            Some(probed_at) => now_ns.saturating_sub(probed_at) <= ARP_SOLICITED_WINDOW_NS,
+            Some(probed) => {
+                now_ns.saturating_sub(probed.probed_at_ns) <= ARP_SOLICITED_WINDOW_NS
+            }
             None => false,
         }
     }

@@ -212,9 +212,11 @@ fn outline_arp_reply_learn_and_program(
         )
         .unwrap_or(meta.ingress_ifindex as i32);
         let key = (ifindex, arp.sender_ip);
+        // #15097: MAC-aware peek — a token bound to the held MAC does
+        // not authorize a differing reply from the refused MAC.
         let solicited = worker_ctx
             .dynamic_neighbors
-            .peek_arp_reply_solicited(&key, now_ns);
+            .peek_arp_reply_solicited_for_mac(&key, Some(arp.sender_mac), now_ns);
         let Some(changed) = worker_ctx
             .dynamic_neighbors
             .insert_arp_reply_if_solicited_allows(
