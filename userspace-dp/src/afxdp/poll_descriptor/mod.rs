@@ -4143,6 +4143,32 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 )
                             {
                                 (local, false)
+                            } else if pre_routing_dnat.is_none()
+                                && nptv6_inbound.is_none()
+                                && nat64_match.is_none()
+                            {
+                                // #15118: no DNAT/static/NPTv6/NAT64 rule
+                                // translated this packet. If its wire
+                                // destination is a NAT-registered address, it
+                                // is local only for a flow a rule could match
+                                // (or a to-self target); otherwise suppress
+                                // the NAT local shortcut and follow the FIB.
+                                (
+                                    enforce_ha_resolution_snapshot(
+                                        worker_ctx.forwarding,
+                                        worker_ctx.ha_state,
+                                        now_secs,
+                                        lookup_forwarding_resolution_for_nat_flow(
+                                            worker_ctx.forwarding,
+                                            Some(worker_ctx.dynamic_neighbors),
+                                            &flow,
+                                            ingress_zone_name,
+                                            ingress_ifname_dnat,
+                                            ingress_ri_dnat,
+                                        ),
+                                    ),
+                                    false,
+                                )
                             } else {
                                 (
                                     enforce_ha_resolution_snapshot(

@@ -272,6 +272,148 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_with_dynamic_for_flow_in_ta
     )
 }
 
+/// #15118: decide whether `dst` is firewall-local *for this packet*.
+///
+/// `local_v*` mixes two sets: configured interface addresses (local for every
+/// packet in their table) and NAT externals registered for proxy-ARP/ND and
+/// ownership. A NAT external is local only when a translate rule could match
+/// this packet's protocol, ports, source and ingress scope, or when every
+/// translation targets a configured interface address (DNAT/static-to-self:
+/// the translated packet is host-bound). Otherwise the address is a routed
+/// host's address that merely shares an IP with a scoped NAT rule, and the
+/// caller must fall through to the FIB instead of LocalDelivering it.
+/// `icmp` carries the packet's ICMP type/code when known.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn nat_destination_claims_local(
+    state: &ForwardingState,
+    dst: IpAddr,
+    protocol: u8,
+    src_ip: IpAddr,
+    src_port: u16,
+    dst_port: u16,
+    ingress_zone: &str,
+    ingress_ifname: &str,
+    ingress_routing_instance: &str,
+    icmp: Option<(u8, u8)>,
+) -> bool {
+    // A to-self translation is host-bound only for flows its rule matches:
+    // DNAT 203.0.113.53 tcp/443 -> 10.0.61.1 does not make tcp/22 to the VIP
+    // host-bound. The match check below is therefore not bypassed; to-self
+    // only matters through the ordinary FIB on the translated target, which
+    // the poll path resolves separately. Kept as a named binding so the
+    // registration metadata stays visible at this decision point.
+    let _to_self_registered = match dst {
+        IpAddr::V4(v4) => state.local_nat_to_self_v4.contains_key(&v4),
+        IpAddr::V6(v6) => state.local_nat_to_self_v6.contains_key(&v6),
+    };
+    state.dnat_table.nat_local_match_possible(
+        protocol,
+        src_ip,
+        dst,
+        src_port,
+        dst_port,
+        ingress_zone,
+        ingress_ifname,
+        ingress_routing_instance,
+        icmp,
+    ) || state.static_nat.nat_local_match_possible(
+        protocol,
+        src_ip,
+        dst,
+        dst_port,
+        ingress_zone,
+        ingress_ifname,
+        ingress_routing_instance,
+    )
+}
+
+/// #15118: scoped sibling of [`lookup_forwarding_resolution_with_dynamic_for_flow`]
+/// for a packet whose destination was *not* translated. When the destination
+/// is a NAT-registered address that no rule claims for this flow, the plain
+/// FIB result is returned with the NAT local shortcut suppressed; every other
+/// destination takes the ordinary lookup unchanged. Callers that already
+/// translated the packet resolve the translated target and never reach this
+/// helper with the wire destination.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn lookup_forwarding_resolution_for_nat_flow(
+    state: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+    flow: &SessionFlow,
+    ingress_zone: &str,
+    ingress_ifname: &str,
+    ingress_routing_instance: &str,
+) -> ForwardingResolution {
+    let dst = flow.dst_ip;
+    let is_nat_local = match dst {
+        IpAddr::V4(v4) => state.local_nat_to_self_v4.contains_key(&v4),
+        IpAddr::V6(v6) => state.local_nat_to_self_v6.contains_key(&v6),
+    };
+    if is_nat_local
+        && !nat_destination_claims_local(
+            state,
+            dst,
+            flow.forward_key.protocol,
+            flow.src_ip,
+            flow.forward_key.src_port,
+            flow.forward_key.dst_port,
+            ingress_zone,
+            ingress_ifname,
+            ingress_routing_instance,
+            None,
+        )
+    {
+        return lookup_forwarding_resolution_without_nat_local(
+            state,
+            dynamic_neighbors,
+            dst,
+            None,
+        )
+        .resolution;
+    }
+    match dynamic_neighbors {
+        Some(neighbors) => {
+            lookup_forwarding_resolution_with_dynamic_for_flow(state, neighbors, dst, &flow.forward_key)
+                .resolution
+        }
+        None => lookup_forwarding_resolution(state, dst).resolution,
+    }
+}
+
+/// #15118: FIB lookup with the NAT-external local shortcut suppressed for
+/// `dst`. Interface addresses remain local; only the late NAT registration in
+/// `local_nat_to_self_*` is bypassed. Implemented by cloning the (small)
+/// local sets without the NAT entries — this is the cold session-miss path
+/// for an unclaimed NAT address, never the per-packet fast path.
+pub(in crate::afxdp) fn lookup_forwarding_resolution_without_nat_local(
+    state: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+    dst: IpAddr,
+    table: Option<&str>,
+) -> ForwardingLookupResult {
+    let mut scoped = state.clone();
+    match dst {
+        IpAddr::V4(v4) => {
+            if scoped.local_nat_to_self_v4.contains_key(&v4)
+                && !scoped.configured_iface_v4.contains(&v4)
+            {
+                scoped.local_v4.remove(&v4);
+                scoped.local_nat_any_table_v4.remove(&v4);
+                scoped.local_tables_v4.remove(&v4);
+            }
+        }
+        IpAddr::V6(v6) => {
+            if scoped.local_nat_to_self_v6.contains_key(&v6)
+                && !scoped.configured_iface_v6.contains(&v6)
+            {
+                scoped.local_v6.remove(&v6);
+                scoped.local_nat_any_table_v6.remove(&v6);
+                scoped.local_tables_v6.remove(&v6);
+            }
+        }
+    }
+    lookup_forwarding_resolution_inner(&scoped, dynamic_neighbors, dst, table)
+}
+
 /// #9951: identify the exact inter-VRF leak selected by the immutable FIB
 /// walk. This deliberately does not re-run neighbor/ECMP/HA resolution:
 /// those mutable inputs can change between the session lookup and provenance

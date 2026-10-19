@@ -470,6 +470,90 @@ impl DnatTable {
             })
         })
     }
+    /// #15118: could any non-`off`, non-poisoned DNAT rule translate this exact
+    /// packet? This is the local-delivery claim predicate: it reuses the real
+    /// match tiers (exact, wildcard-port, protocol-any, prefix LPM) with the
+    /// packet's zone/interface/routing-instance, source and L4 constraints, so
+    /// a rule scoped to another zone, source, protocol or port does not claim
+    /// the address. An `off` exemption or poisoned claim never claims local
+    /// delivery (poisoned packets are dropped by the NAT stage itself).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn nat_local_match_possible(
+        &self,
+        protocol: u8,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        src_port: u16,
+        dst_port: u16,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+        packet_icmp: Option<(u8, u8)>,
+    ) -> bool {
+        let protocol_u16 = u16::from(protocol);
+        let outcome = self
+            .match_entries(
+                self.entries.get(&DnatKey {
+                    protocol: protocol_u16,
+                    dst_ip,
+                    dst_port,
+                }),
+                src_ip,
+                src_port,
+                dst_port,
+                ingress_zone,
+                ingress_ifname,
+                ingress_routing_instance,
+                packet_icmp,
+            )
+            .or_else(|| {
+                self.match_entries(
+                    self.entries.get(&DnatKey {
+                        protocol: protocol_u16,
+                        dst_ip,
+                        dst_port: 0,
+                    }),
+                    src_ip,
+                    src_port,
+                    dst_port,
+                    ingress_zone,
+                    ingress_ifname,
+                    ingress_routing_instance,
+                    packet_icmp,
+                )
+            })
+            .or_else(|| {
+                self.match_entries(
+                    self.entries.get(&DnatKey {
+                        protocol: PROTO_ANY,
+                        dst_ip,
+                        dst_port: 0,
+                    }),
+                    src_ip,
+                    src_port,
+                    dst_port,
+                    ingress_zone,
+                    ingress_ifname,
+                    ingress_routing_instance,
+                    packet_icmp,
+                )
+            })
+            .or_else(|| {
+                self.match_prefix_lpm(
+                    protocol_u16,
+                    src_ip,
+                    dst_ip,
+                    src_port,
+                    dst_port,
+                    ingress_zone,
+                    ingress_ifname,
+                    ingress_routing_instance,
+                    packet_icmp,
+                )
+            });
+        matches!(outcome, Some(DnatOutcome::Translate(..)))
+    }
+
     /// Whether a non-TCP/UDP DNAT candidate would rewrite a destination port
     /// that the flowless address-only path cannot honor. `None` means the wire
     /// protocol was not recoverable, so all protocol tiers remain possible.

@@ -144,6 +144,19 @@ Route metadata crosses the Go→Rust snapshot boundary as `RouteSnapshot`
     match, so its LocalDelivery carries ifindex 0 — now reached ONLY when
     the table genuinely owns the address, and counted by the
     `LOCAL_DELIVERY_IFINDEX0` diagnostic atomic.
+  - **NAT-external local delivery is also rule-scoped (#15118).** Table
+    ownership alone does not make a NAT/DNAT external host-bound: the
+    session-miss path resolves an *untranslated* packet through
+    `lookup_forwarding_resolution_for_nat_flow`, which claims the address
+    only when a DNAT/static rule could match the packet's protocol, ports,
+    source and ingress zone/interface/routing-instance (`nat_local_match_possible`
+    reuses the real match tiers). Otherwise the NAT registration is suppressed
+    for that lookup (`lookup_forwarding_resolution_without_nat_local`) and the
+    packet follows the FIB — so a `udp/53`-only DNS redirect no longer
+    LocalDelivers `tcp/443`/ICMP to the same address. Registration in
+    `local_v*` is unchanged (proxy-ARP/ND and ownership consumers keep the
+    full set); translated packets resolve their translated target as before,
+    and DNAT-to-self still delivers via the interface-local translated address.
   - **Interface-NAT ownership is table-scoped (#12086).** Interface
     addresses excluded from local delivery by interface-SNAT enter
     `interface_nat_v[46]` and `interface_nat_tables_v[46]`, keyed by
