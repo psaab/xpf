@@ -861,10 +861,13 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_HEARTBEAT_STALE);
     }
 
-    // #1864: explicit compare instead of saturating_sub (same verifier
-    // state-pruning hazard as the heartbeat check above; identical
-    // result for all inputs).
-    let packet_len = if data_end > data { data_end - data } else { 0 };
+    // #15645: `packet_len` (the guarded `data_end - data` below) is
+    // computed at its single use at the meta store, not bound here. As
+    // an early binding it stayed live across the whole session/WG/GRE
+    // dispatch and widened every verifier state on that span; the same
+    // guarded difference at the store costs one subtraction, on the
+    // redirect path only. The #1864 compare-not-saturating_sub shape
+    // is preserved at that site.
     // #304: ESP and non-native GRE used to be diverted to the kernel here
     // on a PROTOCOL-ONLY test with no destination predicate, so TRANSIT
     // ESP and transit non-native GRE — addressed to a host beyond this
@@ -1171,7 +1174,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // otherwise overwrite it.
     unsafe {
         core::ptr::addr_of_mut!((*meta_ptr).pkt_len)
-            .write(packet_len.min(u16::MAX as usize) as u16);
+            .write((if data_end > data { data_end - data } else { 0 }).min(u16::MAX as usize) as u16);
     }
 
     record_trace(
@@ -1817,6 +1820,26 @@ fn incr_fallback_stat(reason: u32) {
     }
 }
 
+// #15645: the trace recorder is outlined behind a 5-argument packed
+// callee. It was the shim's largest single verifier-cost contributor
+// as measured on this host's pinned build (stubbing it: 1,000,001
+// REJECT -> 632,625 processed insns): with eight parameters it could
+// not be a BPF subprogram at all (BPF-to-BPF calls take at most five
+// arguments), so LLVM inlined it at all twelve call sites and the
+// verifier re-walked its value construction, key mix and map insert
+// under every calling state. The wrapper below keeps the pinned
+// call-site shape (the #5173 trace-argument prefix and signature in
+// userspace-dp's parity test name THIS function) and packs the six
+// scalar coordinates into three u64s — pairs of u32s, so unpacking is
+// shifts, never a reduction of either coordinate (#5173: the
+// interface coordinate travels whole in the high half, and the
+// callee's locals are named trace_* so this adds no second binding
+// of the pinned name). `selected_queue` always equals
+// `rx_queue_index` today (see the single binding in try_xdp_userspace)
+// but is packed separately so the recorded value stays the caller's
+// selected queue, not a re-derivation. Do not re-inline the packed
+// callee without re-measuring through cmd/shimverify.
+#[inline(always)]
 fn record_trace(
     ctrl_flags: u32,
     ingress_ifindex: u32,
@@ -1827,6 +1850,29 @@ fn record_trace(
     reason: u32,
     parsed: &ParsedPacket,
 ) {
+    record_trace_packed(
+        ctrl_flags,
+        ((ingress_ifindex as u64) << 32) | (rx_queue_index as u64),
+        ((selected_queue as u64) << 32) | (slot as u64),
+        ((stage as u64) << 32) | (reason as u64),
+        parsed,
+    );
+}
+
+#[inline(never)]
+fn record_trace_packed(
+    ctrl_flags: u32,
+    ifindex_rx: u64,
+    selected_slot: u64,
+    stage_reason: u64,
+    parsed: &ParsedPacket,
+) {
+    let trace_ifindex = (ifindex_rx >> 32) as u32;
+    let trace_rx_queue = ifindex_rx as u32;
+    let trace_selected_queue = (selected_slot >> 32) as u32;
+    let trace_slot = selected_slot as u32;
+    let trace_stage = (stage_reason >> 32) as u32;
+    let trace_reason = stage_reason as u32;
     // #4113 (F7): gate the BPF map insert on the TRACE flag UNCONDITIONALLY.
     // The previous `forced` bypass ran a per-packet bpf_ktime_get_ns + avalanche
     // key compute + bpf_map_update_elem (per-bucket lock) for the EARLY_FILTER /
@@ -1845,12 +1891,12 @@ fn record_trace(
     }
     let value = UserspaceTraceValue {
         seq: unsafe { bpf_ktime_get_ns() },
-        stage,
-        reason,
-        ingress_ifindex,
-        rx_queue_index,
-        selected_queue,
-        slot,
+        stage: trace_stage,
+        reason: trace_reason,
+        ingress_ifindex: trace_ifindex,
+        rx_queue_index: trace_rx_queue,
+        selected_queue: trace_selected_queue,
+        slot: trace_slot,
         vlan_id: parsed.vlan_id,
         addr_family: parsed.addr_family,
         protocol: parsed.protocol,
@@ -1863,7 +1909,7 @@ fn record_trace(
     // Keep the key in u32 for the BPF map, but avoid overlapping the two port
     // fields directly. Mix each component into a separate avalanche step so
     // distinct (src_port, dst_port) pairs do not alias trivially.
-    let trace_key = ingress_ifindex.wrapping_mul(0x9e37_79b1).rotate_left(5)
+    let trace_key = trace_ifindex.wrapping_mul(0x9e37_79b1).rotate_left(5)
         ^ ((((parsed.protocol as u32) << 16) | (parsed.flow_src_port as u32))
             .wrapping_mul(0x85eb_ca6b))
         ^ ((parsed.flow_dst_port as u32).wrapping_mul(0xc2b2_ae35));

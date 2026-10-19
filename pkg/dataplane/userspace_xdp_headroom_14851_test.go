@@ -27,6 +27,19 @@ import (
 // lower headroom, an unmeasured install) fails here and forces a
 // fresh deliberate decision. Remove this exception when the shim
 // next clears the 15% floor.
+//
+// #15645 SUPERSEDES the recorded count: the tracked 873042 object
+// verifier-REJECTED on guest kernel 7.0.0 (processed 1000001 insns)
+// and a fresh pinned build on this host rejected identically, so the
+// shim's trace recorder was outlined behind a packed 5-argument
+// subprogram (see the #15645 note in lib.rs). The regenerated object
+// LOADS on this host at 920733 processed insns (7.93% headroom) and
+// is installed OVERRIDDEN under the same exception shape: exactly
+// this measured count, nothing else. 7.93% is worse than the #14954
+// figure it replaces — the honest trade is recorded in
+// docs/log/15645.md: a loadable object below the floor over an
+// unloadable one above it. The exception must not silently widen
+// further; any other count forces a fresh deliberate decision.
 func TestShimGateVerdictIsMeasuredPass14851(t *testing.T) {
 	raw, err := os.ReadFile("userspace_xdp_gate_verdict.json")
 	if err != nil {
@@ -52,17 +65,17 @@ func TestShimGateVerdictIsMeasuredPass14851(t *testing.T) {
 	if !v.Stats.Measured {
 		t.Fatalf("#14851/#14954: shipped verdict is unmeasured; an unmeasured install is never acceptable")
 	}
-	// #14954 exception: exactly the measured OVERRIDDEN state recorded
-	// for this issue. PASS at/above the floor also satisfies the gate
-	// (the exception is a floor, not a ceiling on headroom).
+	// #14954/#15645 exception: exactly the measured OVERRIDDEN state
+	// recorded for #15645. PASS at/above the floor also satisfies the
+	// gate (the exception is a floor, not a ceiling on headroom).
 	if v.Verdict == "PASS" && !v.OverrideConsumed && v.Stats.HeadroomPct >= v.Stats.FloorPct {
 		return
 	}
 	if v.Verdict != "OVERRIDDEN" || !v.OverrideConsumed {
-		t.Fatalf("#14851/#14954: shipped gate verdict is %q (override_consumed=%v); want measured PASS or the recorded #14954 OVERRIDDEN exception", v.Verdict, v.OverrideConsumed)
+		t.Fatalf("#14851/#15645: shipped gate verdict is %q (override_consumed=%v); want measured PASS or the recorded #15645 OVERRIDDEN exception", v.Verdict, v.OverrideConsumed)
 	}
-	if v.Stats.ProcessedInsns != 873042 {
-		t.Fatalf("#14954: OVERRIDDEN object measures %d processed insns; the recorded exception is exactly 873042 (12.70%%). A different count is a new object and needs a fresh deliberate decision", v.Stats.ProcessedInsns)
+	if v.Stats.ProcessedInsns != 920733 {
+		t.Fatalf("#15645: OVERRIDDEN object measures %d processed insns; the recorded exception is exactly 920733 (7.93%%). A different count is a new object and needs a fresh deliberate decision", v.Stats.ProcessedInsns)
 	}
 }
 
@@ -85,10 +98,14 @@ func TestShimHeadroomOutlinesStayOutlined14851(t *testing.T) {
 		"try_xdp_userspace",
 		"is_interface_nat_destination",
 		"live_userspace_session_action",
+		// #15645: the packed trace callee. It carries the whole trace
+		// value construction + map insert; if it re-inlines into the
+		// twelve call sites the object returns to the 1M reject.
+		"record_trace_packed",
 	} {
 		want := "#[inline(never)]\nfn " + fn + "("
 		if !strings.Contains(src, want) {
-			t.Errorf("#14851: %s lost its #[inline(never)] outline; re-inlining it re-spends verifier states at every call site (see the #14851 note in lib.rs)", fn)
+			t.Errorf("#14851/#15645: %s lost its #[inline(never)] outline; re-inlining it re-spends verifier states at every call site (see the #14851/#15645 notes in lib.rs)", fn)
 		}
 	}
 }
