@@ -658,9 +658,16 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 				for _, n := range *current {
 					if n.IsLeaf && len(n.Keys) > 0 && n.Keys[0] == nodeKeys[0] {
 						if !replaced {
+							// #15083: carry the first replaced node's
+							// Inactive/Annotation — building a fresh node
+							// dropped both, so re-setting (even to the
+							// same value) silently re-activated the leaf
+							// and lost its comment at the next commit.
 							repl := &Node{
-								Keys:   append([]string(nil), nodeKeys...),
-								IsLeaf: true,
+								Keys:       append([]string(nil), nodeKeys...),
+								IsLeaf:     true,
+								Inactive:   n.Inactive,
+								Annotation: n.Annotation,
 							}
 							repl.setKeysQuoted(quotedRange(keyStart, i))
 							repl.setKeysBracketed(groupedRange(keyStart, i), closed...)
