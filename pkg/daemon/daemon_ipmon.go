@@ -546,13 +546,15 @@ func (d *Daemon) reconcileIPMon(cfg *config.Config) {
 	if d.ipmon == nil || cfg == nil {
 		return
 	}
-	// RPM.Results returns a non-nil authoritative snapshot, even when empty.
+	// RPM.ResultsVersioned returns a non-nil authoritative snapshot, even
+	// when empty, together with its transition generation (#15233 A49-03).
 	// Keep nil reserved for an unavailable manager so Apply preserves state.
 	var results []*rpm.ProbeResult
+	var generation uint64
 	if d.rpm != nil {
-		results = d.rpm.Results()
+		results, generation = d.rpm.ResultsVersioned()
 	}
-	d.ipmon.Apply(cfg.Services.IPMonitoring, results)
+	d.ipmon.ApplyVersioned(cfg.Services.IPMonitoring, results, generation)
 }
 
 // ipmonPublishAllowed implements §4.4 primary-only overlay

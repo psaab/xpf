@@ -209,10 +209,20 @@ routing-instance, tracked unit, metric, and reason — shown by
 `Status`/`FormatStatus`/metrics distinguish converged truth from intent:
 
 - **UNKNOWN vs PASS (H7).** `PolicyStatus.Known` is false until the
-  policy's probe has produced at least one result. `FormatStatus`
-  renders `Status: UNKNOWN` in that window — never `PASS`. An operator
-  reading `PASS` would assume failover protection is active when no
-  probe has run.
+  policy's probe has produced at least one pass/fail verdict.
+  `FormatStatus` renders `Status: UNKNOWN` in that window — never
+  `PASS`. An operator reading `PASS` would assume failover protection
+  is active when no probe has run. (#15233 A49-01: rpm seeds every test
+  `LastStatus: "unknown"` before any verdict; `seedResultsLocked` now
+  records only pass/fail rows in `knownTests`/`failedTests`, so an
+  unknown-only snapshot no longer marks the policy Known.)
+- **Stale snapshot fence (A49-03, #15233).** `reconcileIPMon` takes
+  `rpm.ResultsVersioned()` — snapshot + transition generation under the
+  rpm lock — and calls `ApplyVersioned`. A snapshot older than
+  `lastTransitionGeneration` still installs the policy set but does not
+  seed: its pass/unknown rows must not overwrite a FAIL transition that
+  landed after the snapshot was taken. Unversioned `Apply` (generation
+  0) always seeds, preserving legacy/test callers.
 - **Applied vs desired (H8).** `PolicyStatus.Routes` is the DESIRED
   winner-resolved overlay (what the engine wants injected).
   `PolicyStatus.AppliedRoutes` is the subset of the last CONVERGED
@@ -260,6 +270,11 @@ FRR DHCP default route; see the RFC 2131 coupling rule in
   full authoritative snapshot, including a non-nil empty slice that clears
   known test state. A nil slice means no snapshot is available and preserves
   the last known state; it must not be used to represent authoritative-empty.
+  Only pass/fail rows count as known verdicts (#15233).
+- `ApplyVersioned(cfg, results, generation)` — `Apply` plus the RPM
+  transition generation the snapshot was taken at; a stale generation
+  installs policies without seeding (#15233 A49-03). The daemon's
+  `reconcileIPMon` uses this with `rpm.ResultsVersioned()`.
 - `HandleTransition(rpm.Transition)` — the sensor input (wired to
   `rpm.Manager.SetTransitionCallback`). RPM supplies an authoritative,
   non-nil results snapshot; the transition itself is still applied if a

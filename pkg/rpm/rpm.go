@@ -552,6 +552,17 @@ func (m *Manager) Results() []*ProbeResult {
 	return m.resultsLocked()
 }
 
+// ResultsVersioned returns the snapshot together with the transition
+// generation current under the same lock (#15233 A49-03). A consumer
+// (ip-monitoring ApplyVersioned) can then refuse a snapshot older than
+// a transition it has already accepted, instead of letting the stale
+// rows overwrite that transition's verdict.
+func (m *Manager) ResultsVersioned() ([]*ProbeResult, uint64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.resultsLocked(), m.transitionGeneration
+}
+
 // resultsLocked returns a sorted deep-enough snapshot. The caller must hold
 // m.mu (for reading or writing).
 func (m *Manager) resultsLocked() []*ProbeResult {
