@@ -14,6 +14,16 @@ errgroup. A typed daemon result keeps help, flag syntax, positional remainder,
 semantic, construction, and runtime failures distinct so `main` owns each
 diagnostic and exit status exactly once.
 
+Daemon construction is singleton-gated (#15085): `daemon.New` takes a
+non-blocking exclusive flock on `/run/xpf/xpfd.lock` (the owner's pid is
+recorded in the file) before the config store is created, and the daemon
+holds it until `Run` returns. A second `xpfd` — bare, flagged, or under a
+different `-config` — exits non-zero with `xpfd already running (pid N)`
+before any marker, netlink, bpffs, or sysctl write; use the `cli` binary
+for remote commands, or `systemctl restart xpfd` to restart the service
+daemon. One-shot subcommands (`version`, `check-config`, barriers, …)
+never take this lock.
+
 `main()` first routes on `classifyCommand(os.Args)` — the pure,
 side-effect-free SSOT for the top-level subcommand decision (which
 subcommand runs for a given argv; `cmdDaemon` is the fall-through that passes

@@ -112,9 +112,10 @@ func TestRecoveredFirstCommitBootCleanupRunsThroughDaemonRun12155(t *testing.T) 
 	confPath, sentinel := seededFRRConf(t)
 	recorder := &frr.RecordingExecutor{}
 	d := &Daemon{
-		applySem: semaphore.NewWeighted(1),
-		store:    freshStore,
-		frr:      frr.NewForTest(confPath, recorder),
+		daemonLockLease: mustTestDaemonLockLease15085(t),
+		applySem:        semaphore.NewWeighted(1),
+		store:           freshStore,
+		frr:             frr.NewForTest(confPath, recorder),
 		opts: Options{
 			ConfigFile:  storePath,
 			NoDataplane: true,

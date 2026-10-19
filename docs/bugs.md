@@ -81,6 +81,12 @@
 - **Fix:** Add positional argument guard in `cmd/xpfd/main.go` — reject any non-flag first argument that isn't `version` or `cleanup`. Users should use `cli` binary or run `xpfd` interactively on a TTY
 - **Key insight:** ALWAYS use `cli` binary for remote show commands, NEVER `xpfd show ...` via non-interactive execution
 
+### Bare xpfd boots a second daemon before the port check (#15085 A54-02)
+- **Symptom:** A bare `xpfd` or `xpfd -flag...` (which the old unknown-command error text recommended trying) starts a second full daemon on a live firewall. Long before the #8233 management-port refusal fires, the duplicate clears the first-apply marker, closes the transit gate, re-runs compile, and re-attaches XDP, disturbing the live daemon's ownership proof and dataplane.
+- **Root cause:** `classifyCommand` routes empty argv / leading `-flag` to `cmdDaemon`. `daemon.New` created the config store and `Daemon.Run` unconditionally cleared the host-inbound first-apply marker with no host-wide singleton, pidfile, or flock, so phases 1-4 mutated host state before the gRPC/management port bind could refuse the duplicate.
+- **Fix:** `daemon.New` takes a non-blocking exclusive flock on `/run/xpf/xpfd.lock` (0600, pid recorded under the lock, never unlinked) before the config store is constructed, and holds it for the daemon's lifetime; a second process exits non-zero with `xpfd already running (pid N); use the 'cli' binary … or 'systemctl restart xpfd' …`. `Daemon.Run` additionally refuses any daemon that holds no lease, before the marker clear, and `clearHostInboundFirstApplyMarker` refuses to delete a marker live-held by another process. The unknown-command text no longer suggests running `xpfd` directly. systemd restart works unchanged: the predecessor's exit closes its fd (bounded by `TimeoutStopSec`), so the successor acquires immediately after.
+- **Key insight:** Port-bind collisions are a LATE duplicate detector, after the mutations that matter. Process singletons must be taken before the first host write, and the marker clear must respect live ownership (`HostInboundFirstApplyLive`) even if a future caller reaches it without the lock.
+
 ### Fabric interface txqueuelen drops under bidirectional active/active load
 - **Symptom:** `bpf_redirect_map` drops exceeded 1.7% under bidirectional active/active load at ~10 Gbps on virtio-net fabric interface
 - **Root cause:** virtio-net fabric interface has max 256-entry TX ring. Default `txqueuelen=1000` insufficient for burst traffic during failover

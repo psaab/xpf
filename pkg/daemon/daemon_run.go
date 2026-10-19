@@ -62,7 +62,20 @@ func buildRuntimeDataPlane(dpType string) (dataplane.RuntimeDataPlane, error) {
 }
 
 // Run starts the daemon and blocks until shutdown.
+//
+// The singleton lease acquired by New is the process's first gate: a
+// Daemon without it (a struct-literal construction) is refused before
+// ANY startup mutation — in particular before the first-apply marker
+// clear below, which would otherwise delete a LIVE owner's marker
+// (#15085 A54-02). A New-constructed Daemon always carries the lease;
+// New itself fails closed when another xpfd already holds it.
 func (d *Daemon) Run(ctx context.Context) error {
+	if d.daemonLockLease == nil {
+		return fmt.Errorf("%w; use the 'cli' binary for remote commands, or 'systemctl restart xpfd' to restart the daemon (no singleton lock held)", ErrDaemonAlreadyRunning)
+	}
+	lease := d.daemonLockLease
+	d.daemonLockLease = nil
+	defer lease.release()
 	// d.daemonCtx is the RAW parent (production: context.Background) for the
 	// long-lived background goroutines and the dataplane/cluster runtimes. The
 	// shutdown sequence tears those down EXPLICITLY and needs them LIVE during

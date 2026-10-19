@@ -40,6 +40,10 @@ func init() {
 	if dir, err := os.MkdirTemp("", "xpf-handoff-test-"); err == nil {
 		EarlyInputHandoffMarkerPath = filepath.Join(dir, "early-input-handoff.done")
 		HostInboundFirstApplyMarkerPath = filepath.Join(dir, "host-inbound-applied.done")
+		// #15085: daemon.New takes the singleton lock; keep it in the
+		// same temp root so daemon tests never touch /run/xpf or refuse
+		// against a developer's live daemon.
+		DaemonLockPath = filepath.Join(dir, "xpfd.lock")
 	}
 }
 

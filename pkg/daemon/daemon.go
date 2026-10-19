@@ -1951,6 +1951,11 @@ type Daemon struct {
 	// ⇒ the real netlink subscription (defaultFabricLinkSubscribe). Overridable
 	// so tests can drive the resilient resubscribe loop with an injected close.
 	fabricLinkSubscribe func(ch chan<- netlink.LinkUpdate, done <-chan struct{}) error
+	// daemonLockLease holds the host-wide singleton flock for the lifetime
+	// of Run (#15085). Set only by New; a Daemon constructed as a struct
+	// literal in tests owns no lease, and Run refuses it before any startup
+	// mutation. Nil after Run releases it on return.
+	daemonLockLease *daemonLockLease
 	// fabricNeighSubscribe starts the netlink neighbor-update subscription for
 	// the fabric-state monitor. Same close/leak contract as fabricLinkSubscribe.
 	// nil ⇒ netlink.NeighSubscribe (defaultFabricNeighSubscribe) (#4031).
@@ -2066,8 +2071,22 @@ func New(opts Options) (*Daemon, error) {
 		opts.ConfigFile = defaultConfigFile
 	}
 
+	// #15085 A54-02: take the host-wide singleton BEFORE the config store
+	// can create or migrate anything under the config root. A second full
+	// daemon (a bare `xpfd`, exactly what the old cmdUnknown text used to
+	// suggest) is refused here, before Run can clear the live owner's
+	// first-apply marker, close its transit gate, or re-attach XDP.
+	// systemd restarts overlap only across the old process's exit, which
+	// closes this fd (TimeoutStopSec bounds that wait), so a legitimate
+	// restart acquires as soon as the predecessor is actually gone.
+	lease, err := acquireDaemonLock()
+	if err != nil {
+		return nil, err
+	}
+
 	store, err := configstore.New(opts.ConfigFile)
 	if err != nil {
+		lease.release()
 		return nil, fmt.Errorf("config store: %w", err)
 	}
 
@@ -2111,6 +2130,7 @@ func New(opts Options) (*Daemon, error) {
 	}
 
 	d := &Daemon{
+		daemonLockLease:            lease,
 		opts:                       opts,
 		startTime:                  time.Now(),
 		store:                      store,
