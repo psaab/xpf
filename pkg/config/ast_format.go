@@ -561,31 +561,53 @@ func FormatCompare(oldTree, newTree *ConfigTree) string {
 }
 
 // FormatCompareAtPath is FormatCompare filtered to the subtree at path
-// (#15272 B24-03). Both trees are navigated to path; a side missing the
-// path contributes no children, so an added/deleted subtree renders as
-// +/- under its [edit <path>] header. A path present on neither side
-// yields "". An empty path is the global compare.
+// (#15272 B24-03, #15758). Both trees are navigated to path; a side
+// missing the path contributes no matches, so an added/deleted subtree
+// renders as +/- under its parent [edit] header. A path present on
+// neither side yields "". An empty path is the global compare.
+//
+// #15758: the matched nodes THEMSELVES are diffed (oldMatches vs
+// newMatches) at the parent prefix — the same navigatePathWidth
+// contract FormatPathSet / FormatPathJSON use — not just their
+// children. Unwrapping children discarded everything that lives on
+// the matched node itself: a leaf match was skipped outright, a
+// container's own Inactive flag never reached the diff, and an empty
+// container produced an empty child list indistinguishable from a
+// missing path, so all three rendered "[no changes]". Diffing the
+// node slice also keeps bare-keyword multi-matches (every sibling
+// sharing the terminal keyword) as separate nodes for diffNodes'
+// occurrence-aware pairing instead of flattening their children into
+// one shared list where duplicate KeyPaths could pair across
+// siblings.
 func FormatCompareAtPath(oldTree, newTree *ConfigTree, path []string) string {
 	if len(path) == 0 {
 		return FormatCompare(oldTree, newTree)
 	}
-	var oldChildren, newChildren []*Node
+	var oldMatches []*Node
+	oldWidth := 0
 	if oldTree != nil {
-		for _, m := range navigatePath(oldTree.Children, path) {
-			if m != nil && !m.IsLeaf {
-				oldChildren = append(oldChildren, m.Children...)
-			}
-		}
+		oldMatches, oldWidth = navigatePathWidth(oldTree.Children, path)
 	}
+	var newMatches []*Node
+	newWidth := 0
 	if newTree != nil {
-		for _, m := range navigatePath(newTree.Children, path) {
-			if m != nil && !m.IsLeaf {
-				newChildren = append(newChildren, m.Children...)
-			}
-		}
+		newMatches, newWidth = navigatePathWidth(newTree.Children, path)
 	}
+	if len(oldMatches) == 0 && len(newMatches) == 0 {
+		return ""
+	}
+	// The parent prefix comes from the TRUE consumed width (see
+	// FormatPathSet). When exactly one side matches, its width is the
+	// only one available; when both match, navigatePathWidth consumes
+	// the same tokens for the same path, so either side's width gives
+	// the same prefix.
+	width := oldWidth
+	if len(oldMatches) == 0 {
+		width = newWidth
+	}
+	parentPrefix := append([]string(nil), path[:len(path)-width]...)
 	var b strings.Builder
-	diffNodes(&b, oldChildren, newChildren, append([]string(nil), path...))
+	diffNodes(&b, oldMatches, newMatches, parentPrefix)
 	return b.String()
 }
 
