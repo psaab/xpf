@@ -119,11 +119,10 @@ func resolveSyslogSource(cfg *Config, srcIface, family string) string {
 
 // syslogUnitSourceAddr picks the source address for one interface unit.
 // With a family (#15078) it honours that family's primary, then preferred,
-// then the first configured address of the family — PrimaryAddress /
-// PreferredAddress are single slots that inet fills first at compile time,
-// so for an IPv6 collector they usually hold an IPv4 address and must be
-// skipped when their family does not match. Without a family it is the
-// legacy rule: PrimaryAddress only.
+// then the first configured address of the family. Per-family primaries
+// (#15653) are consulted first; the legacy single slots are still checked
+// (family-filtered) for hand-built and pre-#15653 fixtures. Without a
+// family it is the legacy rule: PrimaryAddress only.
 func syslogUnitSourceAddr(unit *InterfaceUnit, family string) string {
 	parse := func(cidr string) (net.IP, string) {
 		if cidr == "" {
@@ -141,7 +140,11 @@ func syslogUnitSourceAddr(unit *InterfaceUnit, family string) string {
 		}
 		return ""
 	}
-	for _, cand := range []string{unit.PrimaryAddress, unit.PreferredAddress} {
+	ipv6 := family == "ipv6"
+	for _, cand := range []string{
+		unit.PrimaryAddressForFamily(ipv6), unit.PreferredAddressForFamily(ipv6),
+		unit.PrimaryAddress, unit.PreferredAddress,
+	} {
 		if ip, s := parse(cand); s != "" && syslogIPMatchesFamily(ip, family) {
 			return s
 		}

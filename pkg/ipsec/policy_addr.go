@@ -351,8 +351,11 @@ func selectUnitAddress(unit *config.InterfaceUnit, family int) string {
 		return ""
 	}
 
-	candidates := make([]string, 0, 2+len(unit.Addresses))
-	candidates = append(candidates, unit.PrimaryAddress, unit.PreferredAddress)
+	candidates := make([]string, 0, 4+len(unit.Addresses))
+	// #15653: per-family primaries first so the family's designated
+	// address wins even when selectFamilyAddress is family-blind (-1).
+	candidates = append(candidates, unit.PrimaryAddressForFamily(false), unit.PrimaryAddressForFamily(true),
+		unit.PreferredAddressForFamily(false), unit.PreferredAddressForFamily(true))
 	candidates = append(candidates, unit.Addresses...)
 	groupIDs := make([]string, 0, len(unit.VRRPGroups))
 	for id := range unit.VRRPGroups {

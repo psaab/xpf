@@ -56,6 +56,11 @@ type physDesired struct {
 	// VRRP, or the IPVLAN overlay, and a union that included them would let
 	// this path fight the real owner.
 	skipAddrs bool
+	// primaryV4 / primaryV6 are the per-family primaries of the units on
+	// this netdev (#15653). The live-netlink reconcile orders them first
+	// and promotes a secondary desired primary via delete+re-add.
+	primaryV4 string
+	primaryV6 string
 }
 
 // unitHasDHCPv6 reports either representation of a DHCPv6-managed unit.
@@ -275,6 +280,12 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 				}
 				seenAddr[physName][a] = true
 				pd.addrs = append(pd.addrs, a)
+			}
+			if pd.primaryV4 == "" {
+				pd.primaryV4 = unit.PrimaryAddressForFamily(false)
+			}
+			if pd.primaryV6 == "" {
+				pd.primaryV6 = unit.PrimaryAddressForFamily(true)
 			}
 			if unit.MTU > 0 && !mtuOwned[physName] {
 				// Unit overrides interface level; lowest unit number wins
