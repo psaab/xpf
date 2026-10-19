@@ -144,7 +144,8 @@ func nat64CfgWithPrefix8667(prefix string) *Config {
 	return &Config{
 		Security: SecurityConfig{
 			NAT: NATConfig{
-				NAT64: []*NAT64RuleSet{{Name: "rs1", Prefix: prefix}},
+				SourcePools: map[string]*NATPool{"p64": {Name: "p64", Addresses: []string{"100.64.0.7/32"}}},
+				NAT64:       []*NAT64RuleSet{{Name: "rs1", Prefix: prefix, SourcePool: "p64"}},
 			},
 		},
 	}

@@ -12,6 +12,13 @@ xpf (0.0.0) unstable; urgency=medium
     instead of buffering the whole table in a tabwriter until flush, so
     a full session table no longer heap-buffers every row before the
     first byte reaches the terminal (#14989).
+  * Reject a NAT64 rule-set whose source-pool is empty/omitted or names
+    an undefined source pool at strict commit (naming the rule-set and
+    pool), warn on tolerant load, and warn-skip the rule-set in the
+    dataplane compile instead of aborting every apply. Previously such
+    a rule-set committed cleanly, then failed the validate-before-mutate
+    pre-pass and blocked all later commits from reaching the dataplane
+    (#15000).
   * Refuse a loopback management server that merely shares the
     caller's own non-root uid in the CLI/upgrade dial verification:
     only uid 0 (what xpfd runs as) is trusted on loopback, so a

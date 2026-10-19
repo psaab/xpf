@@ -26,10 +26,14 @@ import (
 // All tests use the production ParseSetCommand + SetPath path (buildTree),
 // never NewParser (the flat-set gotcha in CLAUDE.md).
 
-// nat64Set builds a minimal NAT64 rule-set with the given prefix.
+// nat64Set builds a minimal NAT64 rule-set with the given prefix and a
+// defined source pool (#15000: an omitted pool is now strict-rejected, so
+// prefix fixtures must carry a valid pool to reach the prefix gate).
 func nat64Set(prefix string) []string {
 	return []string{
+		"set security nat source pool p64 address 100.64.0.7/32",
 		"set security nat nat64 rule-set rs1 prefix " + prefix,
+		"set security nat nat64 rule-set rs1 source-pool p64",
 	}
 }
 
