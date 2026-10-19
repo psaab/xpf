@@ -79,6 +79,8 @@ use selectors::{
     select_cos_surplus_batch_filtered, select_exact_cos_guarantee_queue_with_lease_telemetry,
     select_nonexact_cos_guarantee_batch_into,
 };
+#[cfg(test)]
+pub(in crate::afxdp) use settle::estimate_cos_queue_wakeup_tick as estimate_cos_queue_wakeup_tick_for_test;
 use settle::{
     assign_local_dscp_rewrite, assign_prepared_dscp_rewrite, build_cos_batch_from_queue,
     cos_batch_tx_made_progress, cos_guarantee_quantum_bytes, cos_guarantee_visit_cap_bytes,

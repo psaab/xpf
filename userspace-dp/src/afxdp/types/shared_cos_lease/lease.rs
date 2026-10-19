@@ -448,6 +448,32 @@ impl SharedCoSQueueLease {
             v8: Some(V8State {
                 epoch: SharedCoSEpochState::new(),
                 rate_mode,
+                lag_window_ns: lag_window_ns_for_rate(rate_bytes),
+                carry_max_bytes: {
+                    let lag_ns = lag_window_ns_for_rate(rate_bytes);
+                    let cap = ((rate_bytes as u128 * lag_ns as u128) / 1_000_000_000u128) as u64;
+                    cap.max(CARRY_FRAME_BYTES)
+                },
+                carry_drain_max_bytes: {
+                    let lag_ns = lag_window_ns_for_rate(rate_bytes);
+                    let reservoir = (((rate_bytes as u128 * lag_ns as u128) / 1_000_000_000u128)
+                        as u64)
+                        .max(CARRY_FRAME_BYTES);
+                    let proportional = ((reservoir as u128 * CARRY_DRAIN_MAX_EPOCHS as u128
+                        / CARRY_MAX_EPOCHS as u128) as u64);
+                    let epoch_cap = ((rate_bytes as u128
+                        * CARRY_MAX_EPOCHS as u128
+                        * EPOCH_DURATION_NS as u128)
+                        / 1_000_000_000u128) as u64;
+                    if epoch_cap >= CARRY_FRAME_BYTES {
+                        ((rate_bytes as u128
+                            * CARRY_DRAIN_MAX_EPOCHS as u128
+                            * EPOCH_DURATION_NS as u128)
+                            / 1_000_000_000u128) as u64
+                    } else {
+                        proportional.max(CARRY_FRAME_BYTES)
+                    }
+                },
                 equal_flow_target_policy,
                 worker_grants,
                 worker_active_flow_buckets,
@@ -1045,10 +1071,13 @@ impl SharedCoSQueueLease {
     pub(in crate::afxdp) fn v8_newly_active_excluded_count(&self) -> u64 {
         self.v8
             .as_ref()
-            .map(|v| v.equal_flow.newly_active_excluded_count.load(Ordering::Relaxed))
+            .map(|v| {
+                v.equal_flow
+                    .newly_active_excluded_count
+                    .load(Ordering::Relaxed)
+            })
             .unwrap_or(0)
     }
-
 
     pub(in crate::afxdp) fn consume(&self, bytes: u64) {
         shared_cos_lease_consume(&self.state, bytes);

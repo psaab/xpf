@@ -191,33 +191,48 @@ impl SharedCoSQueueLease {
         //                         prevents carry leaking across an HA
         //                         demote→promote gap on a reused lease.
         //
+        // #15100 (A70-02): STALL here is the rate-relative window from
+        // `stall_window_ns_for_rate` (fixed 51.2 ms floor OR one full
+        // frame's refill at this rate), NOT the bare fixed epoch count:
+        // a self-parked low-rate class's revisit lag IS its frame
+        // refill time and must land in regime 2 (bank + drain), never
+        // regime 3. The reservoir/drain caps are byte-sized at lease
+        // creation for the same reason (see `epoch.rs`).
+        //
         // `epoch_carry_bytes` is rotation-private (single-writer, inside
         // the seqlock ODD section); the Acquire/Release on it are redundant
         // with the surrounding CAS fence but self-documenting. See the
         // struct doc-comment for the enforced reader-private invariant.
         let rate_bytes = self.config.rate_bytes as u128;
-        let carry_max = ((rate_bytes
-            * CARRY_MAX_EPOCHS as u128
-            * EPOCH_DURATION_NS as u128)
-            / 1_000_000_000u128) as u64;
-        let carry_drain_max = ((rate_bytes
-            * CARRY_DRAIN_MAX_EPOCHS as u128
-            * EPOCH_DURATION_NS as u128)
-            / 1_000_000_000u128) as u64;
+        // #15100 (A70-02): byte-sized reservoir computed at lease
+        // creation (floored at one frame for low rates); equals the
+        // epoch-sized caps whenever those exceed a frame.
+        let carry_max = v8.carry_max_bytes;
+        let carry_drain_max = v8.carry_drain_max_bytes;
 
         // Regime boundaries are compared on EXACT wall-clock nanoseconds,
         // NOT a floored epoch count: a floored `lag = raw / EPOCH` would
         // admit a regime-1 lag of up to `(K+1)×EPOCH − 1ns` (floors to K),
         // so the regime-1 base grant could reach almost `(K+1)×rate×EPOCH`
         // and, with a full carry drain, breach the `(2K−1)×rate×EPOCH`
-        // per-rotation bound by one epoch; and a raw lag of
-        // `STALL×EPOCH + 1ns` (floors to STALL) would skip the regime-3
-        // cold-resume and bank instead of dropping stale carry across an
-        // HA gap. Comparing raw nanoseconds against the exact `K×EPOCH`
-        // and `STALL×EPOCH` thresholds closes both boundary holes.
+        // per-rotation bound by one epoch; and a raw lag just over the
+        // stall window would skip the regime-3 cold-resume and bank
+        // instead of dropping stale carry across an HA gap. Comparing raw
+        // nanoseconds against the exact `K×EPOCH` and stall-window
+        // thresholds closes both boundary holes.
         let raw_elapsed_ns = now_ns.saturating_sub(start);
-        let k_window_ns = EPOCH_DURATION_NS * MAX_ROTATION_LAG_EPOCHS;
-        let stall_window_ns = EPOCH_DURATION_NS * STALL_THRESHOLD_EPOCHS;
+        // #15100 (A70-02): rate-relative lag window stored at lease
+        // creation (fixed K×EPOCH OR one full frame's refill at this
+        // rate). A self-parked low-rate class revisits after
+        // `frame / rate`, which the fixed window alone credited only
+        // 1.6 ms of, banking the rest past a stall cutoff that then
+        // dropped it.
+        let k_window_ns = v8.lag_window_ns;
+        // #15100 (A70-02): rate-relative stall window — the fixed
+        // 51.2 ms floor OR twice the lag window, whichever is longer.
+        // Must sit above the lag window or a self-parked class whose
+        // lag lands between them cold-resumes and drops its carry.
+        let stall_window_ns = stall_window_ns_for_rate(self.config.rate_bytes);
 
         // #1863 Path A-ii: the just-ended epoch's UNCLAIMED class budget.
         // Workers claim their flow-proportional share only at drain-visit

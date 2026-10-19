@@ -62,6 +62,59 @@ fn shared_cos_queue_lease_bounds_total_outstanding_credit() {
 }
 
 #[test]
+fn estimate_wakeup_low_rate_park_scales_with_rate_15100() {
+    use crate::afxdp::cos::queue_service::estimate_cos_queue_wakeup_tick_for_test as estimate_cos_queue_wakeup_tick;
+    use crate::afxdp::cos::tx_completion::{COS_TIMER_WHEEL_TICK_NS, cos_tick_for_ns};
+    // #15100 (A70-02): the self-park interval scales with the queue's
+    // own rate. At 8000 B/s a 1500 B frame parks ~187.5 ms; at
+    // 125000 B/s (1 Mbps) it parks ~12 ms. The estimator must return
+    // those rate-relative waits (not a fixed epoch/K window), because
+    // that park is what the lease rotation sees as its visit lag.
+    let now = 1_000_000_000u64;
+    let low = estimate_cos_queue_wakeup_tick(1500, 0, 0, 8_000, 1500, now, true)
+        .expect("low-rate wake tick");
+    let low_wait_ns = (low - cos_tick_for_ns(now)) * COS_TIMER_WHEEL_TICK_NS;
+    assert!(
+        (180_000_000..=195_000_000).contains(&low_wait_ns),
+        "8000 B/s frame park must be ~187.5 ms, got {low_wait_ns} ns"
+    );
+    let mid = estimate_cos_queue_wakeup_tick(1500, 0, 0, 125_000, 1500, now, true)
+        .expect("1 Mbps wake tick");
+    let mid_wait_ns = (mid - cos_tick_for_ns(now)) * COS_TIMER_WHEEL_TICK_NS;
+    assert!(
+        (11_000_000..=13_000_000).contains(&mid_wait_ns),
+        "125000 B/s frame park must be ~12 ms, got {mid_wait_ns} ns"
+    );
+}
+
+#[test]
+fn estimate_wakeup_sufficient_tokens_not_parked_15100() {
+    use crate::afxdp::cos::queue_service::estimate_cos_queue_wakeup_tick_for_test as estimate_cos_queue_wakeup_tick;
+    use crate::afxdp::cos::tx_completion::cos_tick_for_ns;
+    // #15100 control: a queue already holding >= need is not parked
+    // for a frame refill — it wakes on the next tick.
+    let now = 1_000_000_000u64;
+    let wake =
+        estimate_cos_queue_wakeup_tick(1500, 0, 1500, 8_000, 1500, now, true).expect("wake tick");
+    assert_eq!(
+        wake,
+        cos_tick_for_ns(now) + 1,
+        "sufficient tokens must wake next tick, not after a frame park"
+    );
+}
+
+#[test]
+fn estimate_wakeup_rate_zero_transparent_15100() {
+    use crate::afxdp::cos::queue_service::estimate_cos_queue_wakeup_tick_for_test as estimate_cos_queue_wakeup_tick;
+    // Transparent control (#916 preserved): rate 0 returns Some.
+    let now = 1_000_000_000u64;
+    assert!(
+        estimate_cos_queue_wakeup_tick(0, 0, 0, 0, 1500, now, true).is_some(),
+        "transparent rates must still return a wake tick"
+    );
+}
+
+#[test]
 fn exact_queue_without_shared_lease_does_not_locally_refill() {
     let mut root = test_cos_runtime_with_queues(
         400_000_000 / 8,
