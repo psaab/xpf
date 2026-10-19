@@ -100,6 +100,8 @@ var valueSlotBindings = map[string]slotAdjudication{
 	"show security log zone":                     {bindTextForwarded, "show_security.go showEvents: full argument string to security-log (#3547)"},
 	"show security nat source deterministic-nat internal-host <address> pool":          {bindFixedPosition, "show_nat.go natPoolArg: trailing `pool <name>` into GetNATDeterministicRequest.Pool"},
 	"show security nat source deterministic-nat nat-ip <address> nat-port <port> pool": {bindFixedPosition, "show_nat.go natPoolArg: trailing `pool <name>` into GetNATDeterministicRequest.Pool"},
+	"show security nat source rule":                                                    {bindFixedPosition, "show_nat.go handleShowNAT: args[2] into GetNATRuleStatsRequest.Rule (+ client-side filter, #15773)"},
+	"show security nat destination rule":                                               {bindFixedPosition, "show_nat.go handleShowNAT: args[2] into GetNATRuleStatsRequest.Rule with NatType destination (+ client-side filter, #15773)"},
 	"show security policies from-zone":                                                 {bindKeyword, "show_security.go handleShowSecurity policies: parsePolicyShowQuery from-zone/to-zone pair walk (#12902 position-independent)"},
 	"show security policies from-zone to-zone":                                         {bindKeyword, "show_security.go handleShowSecurity policies: parsePolicyShowQuery from-zone/to-zone pair walk (#12902 position-independent)"},
 	"show security policies from-zone to-zone policy":                                  {bindRejectedRemotely, "show_security.go parsePolicyShowQuery: `policy` is not an admitted filter token"},

@@ -159,7 +159,7 @@ func TestCLIDNATSourceMatch15269(t *testing.T) {
 	views := map[string]func() error{
 		"detail":   func() error { return c.showNATDestinationRuleDetail(cfg) },
 		"rule-set": func() error { return c.showNATDestinationRuleSet(cfg, "drs") },
-		"rule all": func() error { return c.showNATDestinationRuleAll(cfg) },
+		"rule all": func() error { return c.showNATDestinationRuleAll(cfg, "") },
 		"default": func() error {
 			// default view (no subcommand)
 			return c.showNATDestination(cfg, nil)

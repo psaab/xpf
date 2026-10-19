@@ -1784,6 +1784,16 @@ persisted by an older binary, or synced from a peer. Seeing this line
 means the box is forwarding that traffic untranslated right now; the
 reason text names which condition fired.
 
+`show security nat source rule <name>` and `show security nat destination
+rule <name>` filter to the single named rule on both the local and remote
+CLIs (#15773); an unknown name is an error rather than a silent all-rules
+listing. Bare `rule` and `rule all` list every rule, and `rule detail`
+keeps its detailed rendering. The remote rule views also render the
+wire-carried `NOT INSTALLED` verdict and, for source rules backed by a
+`port no-translation` pool, a `Port translation: no-translation` line.
+Destination pool views (`destination summary`, `destination pool
+[<name>]`) list every configured pool, including pools no rule references.
+
 ## Security: NAT Source Rule All
 
 **Command:** `show security nat source rule all`
