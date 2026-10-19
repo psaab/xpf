@@ -42,9 +42,20 @@ type SamplingDir struct {
 // (both maps nil: no zone restriction for either family). For each
 // family independently: a nil map means unrestricted for that family,
 // and a non-nil empty map fails closed (deny) for that family.
+//
+// #15230 (A46-05): IfacesV4/IfacesV6 additionally carry the per-interface
+// selection keyed by authored unit ref ("ge-0/0/0.0"). Zone maps alone
+// OR every interface of a zone together, so an unsampled interface's
+// flows were exported whenever a zone-mate was sampled. When an iface
+// map is non-nil for a family, ShouldExportIface requires the record's
+// own ingress/egress interface to be selected; the zone maps remain for
+// hand-built configs and FlowDirection's zone fallback. A nil iface map
+// means "no per-interface data" and preserves pure zone semantics.
 type FamilySamplingDirs struct {
-	V4 map[uint16]SamplingDir
-	V6 map[uint16]SamplingDir
+	V4       map[uint16]SamplingDir
+	V6       map[uint16]SamplingDir
+	IfacesV4 map[string]SamplingDir
+	IfacesV6 map[string]SamplingDir
 }
 
 // dirsFor returns the per-zone directions for one family.
@@ -55,9 +66,43 @@ func (z FamilySamplingDirs) dirsFor(isIPv6 bool) map[uint16]SamplingDir {
 	return z.V4
 }
 
+// ifacesFor returns the per-interface directions for one family (#15230).
+func (z FamilySamplingDirs) ifacesFor(isIPv6 bool) map[string]SamplingDir {
+	if isIPv6 {
+		return z.IfacesV6
+	}
+	return z.IfacesV4
+}
+
+// sampledInterface returns the per-interface direction for an authored
+// unit ref ("ge-0/0/0.0") in one family (#15230). ok is false when no
+// per-interface data exists for the family or the ref is not selected.
+func (z FamilySamplingDirs) sampledInterface(ref string, isIPv6 bool) (SamplingDir, bool) {
+	m := z.ifacesFor(isIPv6)
+	if m == nil || ref == "" {
+		return SamplingDir{}, false
+	}
+	d, ok := m[canonicalIfaceRef(ref)]
+	return d, ok
+}
+
+// canonicalIfaceRef normalises an authored interface ref to the
+// "name.unit" spelling BuildSamplingZones keys on. Bare refs gain ".0";
+// refs already carrying a unit pass through (malformed suffixes pass
+// through too and simply miss the map, failing closed).
+func canonicalIfaceRef(ref string) string {
+	if ref == "" {
+		return ""
+	}
+	if !strings.Contains(ref, ".") {
+		return ref + ".0"
+	}
+	return ref
+}
+
 // unrestricted reports whether neither family carries a restriction.
 func (z FamilySamplingDirs) unrestricted() bool {
-	return z.V4 == nil && z.V6 == nil
+	return z.V4 == nil && z.V6 == nil && z.IfacesV4 == nil && z.IfacesV6 == nil
 }
 
 // ExportConfig holds the resolved NetFlow export configuration for a
@@ -858,17 +903,45 @@ func BuildSamplingZones(cfg *config.Config, zoneIDs map[string]uint16) FamilySam
 				}
 				continue
 			}
+			var idir4, idir6 SamplingDir
 			if unit.SamplingV4Input {
 				dir4.Input = true
+				idir4.Input = true
 			}
 			if unit.SamplingV4Output {
 				dir4.Output = true
+				idir4.Output = true
 			}
 			if unit.SamplingV6Input {
 				dir6.Input = true
+				idir6.Input = true
 			}
 			if unit.SamplingV6Output {
 				dir6.Output = true
+				idir6.Output = true
+			}
+			// #15230: record the per-interface selection under the
+			// authored ref as written in the zone (normalised to
+			// name.unit), so ShouldExportIface can test the record's
+			// own interface instead of OR-ing the whole zone.
+			key := canonicalIfaceRef(ifaceRef)
+			if idir4.Input || idir4.Output {
+				if result.IfacesV4 == nil {
+					result.IfacesV4 = make(map[string]SamplingDir)
+				}
+				cur := result.IfacesV4[key]
+				cur.Input = cur.Input || idir4.Input
+				cur.Output = cur.Output || idir4.Output
+				result.IfacesV4[key] = cur
+			}
+			if idir6.Input || idir6.Output {
+				if result.IfacesV6 == nil {
+					result.IfacesV6 = make(map[string]SamplingDir)
+				}
+				cur := result.IfacesV6[key]
+				cur.Input = cur.Input || idir6.Input
+				cur.Output = cur.Output || idir6.Output
+				result.IfacesV6[key] = cur
 			}
 		}
 		if dir4.Input || dir4.Output {
@@ -897,6 +970,16 @@ func BuildSamplingZones(cfg *config.Config, zoneIDs map[string]uint16) FamilySam
 		if result.V6 == nil {
 			result.V6 = make(map[uint16]SamplingDir)
 		}
+		// #15230: a family under restriction but with no sampled
+		// interface gets a non-nil empty iface map too, so the
+		// per-interface gate fails closed rather than falling back
+		// to zone semantics for that family.
+		if result.IfacesV4 == nil {
+			result.IfacesV4 = make(map[string]SamplingDir)
+		}
+		if result.IfacesV6 == nil {
+			result.IfacesV6 = make(map[string]SamplingDir)
+		}
 	}
 	return result
 }
@@ -911,33 +994,43 @@ func interfaceHasSampling(ifCfg *config.InterfaceConfig) bool {
 	return false
 }
 
-// ShouldExport checks whether a session close event should be exported based
-// on the ingress/egress zone sampling configuration for the record's own
-// address family (#14608) and the sampling rate. A session is exported if,
-// in its family, the ingress zone has sampling input enabled OR the egress
-// zone has sampling output enabled. A nil map for the record's family means
-// no zone restriction is configured for that family; a non-nil empty map
-// fails closed for that family. A record whose family was never sampled is
-// denied BEFORE the 1-in-N counter advances, so it never consumes a
-// sampling slot of the sampled family. When SamplingRate > 0, only 1-in-N
-// eligible sessions are actually exported.
-func (ec *ExportConfig) ShouldExport(inZone, outZone uint16, isIPv6 bool) bool {
-	if dirs := ec.SamplingZones.dirsFor(isIPv6); dirs != nil {
-		eligible := false
-		if d, ok := dirs[inZone]; ok && d.Input {
-			eligible = true
+// samplingEligible reports whether the zone/interface selection admits
+// the record before the 1-in-N counter (#15230). When per-interface data
+// exists for the family it is authoritative: the ingress interface must
+// carry sampling input or the egress interface sampling output. An empty
+// interface name (unknown ifindex) therefore fails closed under a
+// per-interface restriction. Without per-interface data the zone maps
+// decide exactly as before.
+func (ec *ExportConfig) samplingEligible(inZone, outZone uint16, isIPv6 bool, inIface, outIface string) bool {
+	if ifaces := ec.SamplingZones.ifacesFor(isIPv6); ifaces != nil {
+		if d, ok := ec.SamplingZones.sampledInterface(inIface, isIPv6); ok && d.Input {
+			return true
 		}
-		if d, ok := dirs[outZone]; ok && d.Output {
-			eligible = true
+		if d, ok := ec.SamplingZones.sampledInterface(outIface, isIPv6); ok && d.Output {
+			return true
 		}
-		if !eligible {
-			ec.stats().zoneFiltered.Add(1)
+		if inIface != "" || outIface != "" {
 			return false
 		}
+		// No interface identity at all: fall through to zone semantics
+		// below (legacy producers / direct-callback fixtures). A record
+		// that NAMES an interface is strictly per-interface.
 	}
+	if dirs := ec.SamplingZones.dirsFor(isIPv6); dirs != nil {
+		if d, ok := dirs[inZone]; ok && d.Input {
+			return true
+		}
+		if d, ok := dirs[outZone]; ok && d.Output {
+			return true
+		}
+		return false
+	}
+	return true
+}
+
+func (ec *ExportConfig) sampleAfterEligible() bool {
 	stats := ec.stats()
 	stats.evaluated.Add(1)
-	// Apply 1-in-N sampling rate
 	selected := true
 	if ec.SamplingRate > 1 {
 		n := ec.counter().Add(1)
@@ -949,28 +1042,85 @@ func (ec *ExportConfig) ShouldExport(inZone, outZone uint16, isIPv6 bool) bool {
 	return selected
 }
 
+// ShouldExport checks whether a session close event should be exported based
+// on the ingress/egress zone sampling configuration for the record's own
+// address family (#14608) and the sampling rate. Kept for zone-only
+// callers/tests; production callbacks use ShouldExportIface (#15230),
+// which additionally requires the record's own interface to be sampled
+// when per-interface data exists. A denied record never advances the
+// 1-in-N counter.
+func (ec *ExportConfig) ShouldExport(inZone, outZone uint16, isIPv6 bool) bool {
+	if !ec.samplingEligible(inZone, outZone, isIPv6, "", "") {
+		// Zone-only callers have no interface identity: when per-interface
+		// data exists, re-test with zone semantics only by clearing the
+		// iface maps is wrong; instead zone callers must not be gated by
+		// interfaces they cannot name. Detect that case: if iface data
+		// exists, fall back to the zone maps for this legacy entry point.
+		if ec.SamplingZones.ifacesFor(isIPv6) != nil {
+			dirs := ec.SamplingZones.dirsFor(isIPv6)
+			eligible := false
+			if dirs != nil {
+				if d, ok := dirs[inZone]; ok && d.Input {
+					eligible = true
+				}
+				if d, ok := dirs[outZone]; ok && d.Output {
+					eligible = true
+				}
+			} else {
+				eligible = true
+			}
+			if !eligible {
+				ec.stats().zoneFiltered.Add(1)
+				return false
+			}
+			return ec.sampleAfterEligible()
+		}
+		ec.stats().zoneFiltered.Add(1)
+		return false
+	}
+	return ec.sampleAfterEligible()
+}
+
+// ShouldExportIface is ShouldExport with the record's ingress/egress
+// interface refs (#15230 A46-05). When BuildSamplingZones recorded
+// per-interface sampling for the record's family, the record's OWN
+// interface must be selected — a sampled zone-mate no longer suffices.
+// Empty refs (unknown ifindex) fail closed under that restriction and
+// never consume a 1-in-N slot.
+func (ec *ExportConfig) ShouldExportIface(inZone, outZone uint16, isIPv6 bool, inIface, outIface string) bool {
+	if !ec.samplingEligible(inZone, outZone, isIPv6, inIface, outIface) {
+		ec.stats().zoneFiltered.Add(1)
+		return false
+	}
+	return ec.sampleAfterEligible()
+}
+
 // FlowDirection derives the NetFlow/IPFIX flowDirection (IE 61) for a flow
 // from the per-zone sampling-direction configuration for the flow's own
-// address family (#3270, per-family since #14608). RFC 5102:
-// 0 = ingress (observed at the ingress observation point), 1 = egress.
-//
-// xpf exports one record per bidirectional session anchored at the initiator
-// tuple, so the direction is the OBSERVATION anchor, derived from which
-// sampling direction (in the record's family) selected the flow for
-// export — exactly the signal ShouldExport already consults:
-//
-//   - the INGRESS zone has `sampling input` (in this family)  -> 0 (ingress)
-//   - else the EGRESS zone has `sampling output` (in this family) -> 1 (egress)
-//   - neither (or no sampling configured for this family) -> 0 (default ingress)
-//
-// Ingress wins ties (both directions sampled): it matches the record's
-// initiator-tuple anchor and Junos SRX inline active-flow-monitoring, which
-// applies input sampling first. The result is a pure function of the flow's
-// two zone IDs, its family, and the static sampling config; it is meaningful
-// only when the group advertises IE 61 (IncludeFlowDir) — the encoder writes
-// it only then, and a commit-time warning fires when flow-dir is enabled
-// with no sampling-direction configured (the field would always read 0).
+// address family (#3270, per-family since #14608). Ingress wins ties.
 func (ec *ExportConfig) FlowDirection(inZone, outZone uint16, isIPv6 bool) uint8 {
+	dirs := ec.SamplingZones.dirsFor(isIPv6)
+	if d, ok := dirs[inZone]; ok && d.Input {
+		return 0
+	}
+	if d, ok := dirs[outZone]; ok && d.Output {
+		return 1
+	}
+	return 0
+}
+
+// FlowDirectionIface is FlowDirection with per-interface selection
+// (#15230): under per-interface data the sampled interface decides.
+func (ec *ExportConfig) FlowDirectionIface(inZone, outZone uint16, isIPv6 bool, inIface, outIface string) uint8 {
+	if ec.SamplingZones.ifacesFor(isIPv6) != nil && (inIface != "" || outIface != "") {
+		if d, ok := ec.SamplingZones.sampledInterface(inIface, isIPv6); ok && d.Input {
+			return 0
+		}
+		if d, ok := ec.SamplingZones.sampledInterface(outIface, isIPv6); ok && d.Output {
+			return 1
+		}
+		return 0
+	}
 	dirs := ec.SamplingZones.dirsFor(isIPv6)
 	if d, ok := dirs[inZone]; ok && d.Input {
 		return 0

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,6 +56,30 @@ func (d *Daemon) ipfixExportBuildFailed() bool {
 	d.ipfixReconMu.Lock()
 	defer d.ipfixReconMu.Unlock()
 	return d.ipfixExportErr != nil
+}
+
+// FlowExportFailedGroups returns the sorted per-group build failures
+// (keys "family\x00instance") across both families (#15230). It lets
+// operators and tests distinguish "instance b failed, a is live" from a
+// whole-family failure. The family-level BuildFailed gauge stays set
+// whenever this is non-empty for that family.
+func (d *Daemon) FlowExportFailedGroups() []string {
+	if d == nil {
+		return nil
+	}
+	var out []string
+	d.flowReconMu.Lock()
+	for k := range d.flowFailedGroups {
+		out = append(out, k)
+	}
+	d.flowReconMu.Unlock()
+	d.ipfixReconMu.Lock()
+	for k := range d.ipfixFailedGroups {
+		out = append(out, k)
+	}
+	d.ipfixReconMu.Unlock()
+	sort.Strings(out)
+	return out
 }
 
 // flowExportRetryInterval is the cadence of the autonomous retry of a failed

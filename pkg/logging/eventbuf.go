@@ -41,6 +41,10 @@ type EventRecord struct {
 	RevSessionBytes uint64 // bytes from server (for SESSION_CLOSE)
 	AppName         string // resolved application name (e.g. "junos-http")
 	IngressIface    string // resolved interface name (e.g. "trust0")
+	// EgressIface is the resolved egress interface name (#15230), the
+	// name resolution of EgressIfindex, so flow-export per-interface
+	// sampling can test the record's own egress interface.
+	EgressIface string
 	// IngressIfindex is the raw numeric ingress ifindex carried on the
 	// SESSION_CLOSE wire frame ([128:132], #2615). IngressIface is the
 	// name resolution of this value; the numeric form is retained so the
