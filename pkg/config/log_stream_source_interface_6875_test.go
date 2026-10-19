@@ -72,6 +72,13 @@ func TestStreamSourceInterfacePrecedence_6875(t *testing.T) {
 	// global, which is indistinguishable from the global winning outright.
 	base := []string{
 		"set security log mode stream",
+		// #15731: reth1 unit 100 must be a tagged unit — the #15034 gate
+		// correctly rejects a non-zero untagged unit on an untagged parent,
+		// and reth1.100 is only a real device under vlan-tagging + vlan-id.
+		// The tagged form is the #15034 control shape; the address and the
+		// source-interface resolution under test are unchanged.
+		"set interfaces reth1 vlan-tagging",
+		"set interfaces reth1 unit 100 vlan-id 100",
 		// `primary` is load-bearing and not decoration: ResolveSyslogSourceAddr
 		// reads ONLY unit.PrimaryAddress from config, and a plain `address`
 		// line populates Addresses while leaving PrimaryAddress empty. Measured

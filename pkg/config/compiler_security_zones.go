@@ -623,8 +623,19 @@ func compileZones(node *Node, sec *SecurityConfig) error {
 					// instance's interface block ran first. Merge into
 					// whatever is already recorded for this interface name.
 					var hib *HostInboundTraffic
-					for _, hn := range iface.FindChildren("host-inbound-traffic") {
-						hib = mergeHostInbound(hib, parseHostInboundNode(hn))
+					// #15731: an apply-macro on this member's own Keys owns its
+					// braced payload (#12835) — the parser attaches it as this
+					// node's Children, so a `host-inbound-traffic ...` line
+					// inside the macro body arrives here as a child. It is
+					// opaque macro data, not an authored override: reading it
+					// would mint a phantom InterfaceHostInbound whose unknown
+					// tokens then hard-reject strict compilation. Skip the
+					// HIB read entirely when apply-meta stops the member Keys
+					// (mirrors zoneInterfaceMembers / zoneInterfaceMemberPackedTail).
+					if _, macroOwned := zoneInterfaceKeysBeforeBody(iface); !macroOwned || !zoneInterfaceHasApplyMeta(iface) {
+						for _, hn := range iface.FindChildren("host-inbound-traffic") {
+							hib = mergeHostInbound(hib, parseHostInboundNode(hn))
+						}
 					}
 					if hib != nil {
 						if zone.InterfaceHostInbound == nil {
@@ -893,6 +904,24 @@ func zoneInterfaceApplyMetaKeyword(tok string) bool {
 	switch tok {
 	case "apply-groups", "apply-groups-except", "apply-macro":
 		return true
+	}
+	return false
+}
+
+// zoneInterfaceHasApplyMeta reports whether an apply-meta keyword stops
+// this member node's own Keys (vs a body keyword). #15731 helper for the
+// macro-owned-payload guard in compileZones.
+func zoneInterfaceHasApplyMeta(iface *Node) bool {
+	for _, k := range iface.Keys {
+		if k == "" {
+			continue
+		}
+		if zoneInterfaceApplyMetaKeyword(k) {
+			return true
+		}
+		if zoneInterfaceBodyKeywords[k] {
+			return false
+		}
 	}
 	return false
 }

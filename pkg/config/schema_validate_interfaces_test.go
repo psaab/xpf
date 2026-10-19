@@ -314,6 +314,11 @@ func TestSchemaValidate_Interfaces_AcceptedValuesCompileAsWritten(t *testing.T) 
 		"set interfaces ge-0-0-0 mtu 9000",
 		"set interfaces ge-0-0-0 unit 0 family inet address 10.0.1.10/24",
 		"set interfaces ge-0-0-0 unit 0 family inet6 address 2001:db8::1/64",
+		// #15731: vlan-id 50 is only an accepted value under vlan-tagging —
+		// the #14574 gate correctly rejects it on an untagged parent, where
+		// the writers would duplicate the prefix on both wires. Adding the
+		// tagging flag keeps the vlan-id-compiles-verbatim assertion intact.
+		"set interfaces ge-0-0-2 vlan-tagging",
 		"set interfaces ge-0-0-2 unit 50 vlan-id 50",
 	} {
 		path, err := config.ParseSetCommand(line)
