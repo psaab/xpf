@@ -31,17 +31,18 @@ func (c *CLI) checkConfigShowRegex(args []string) error {
 		cfg = c.store.ActiveConfig()
 	}
 	// #14987: `show | compare [rollback <N>]` renders a candidate diff
-	// (against active, or against rollback slot N). It is not a path
-	// render: checkConfigShowRegex used to strip only display pipes, so
-	// the compare pipe fell through to the per-path arm and a
-	// *-configuration-restricted class was adjudicated on the edit
-	// path alone rather than as the whole-tree compare it is.
-	// Adjudicate it as AuthorizeConfigShowCompare: refused for a
-	// *-configuration-restricted class, operationally the bare
-	// `show configuration` command.
+	// (against active, or against rollback slot N). #15272 B24-03: a
+	// compare with an explicit/edit path renders only that subtree, so
+	// it is adjudicated as a path read; a bare compare is a whole-tree
+	// render (AuthorizeConfigShowCompare).
 	for i, a := range args {
 		if a == "|" && i+1 < len(args) && args[i+1] == "compare" {
-			return config.AuthorizeConfigShowCompare(cfg, c.userClass)
+			var comparePath []string
+			if c.store != nil {
+				comparePath = append(comparePath, c.store.GetEditPath()...)
+			}
+			comparePath = append(comparePath, args[:i]...)
+			return config.AuthorizeConfigShowCompareAtPath(cfg, c.userClass, comparePath)
 		}
 		if a != "|" {
 			continue

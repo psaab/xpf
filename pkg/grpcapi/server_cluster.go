@@ -760,11 +760,28 @@ func appendPredefinedApplicationSetCompletions(out []config.SchemaCompletion) []
 	return out
 }
 
+// completionConfig returns the config completion draws from and whether
+// the predefined catalogue is suppressed (#15272 B24-04, #5763): in
+// config mode a candidate compile cached by generation; otherwise (or
+// uncompilable candidate) the active config. Catalogue suppressed until
+// the first commit.
+func (s *Server) completionConfig() (*config.Config, bool) {
+	if s == nil || s.store == nil {
+		return nil, false
+	}
+	if s.store.InConfigMode() {
+		if cfg, ok := s.store.CandidateConfigForCompletion(); ok {
+			return cfg, !s.store.EverCommitted()
+		}
+	}
+	return s.store.ActiveConfig(), false
+}
+
 func (s *Server) valueProvider(hint config.ValueHint, path []string) []config.SchemaCompletion {
 	if s == nil || s.store == nil {
 		return nil
 	}
-	cfg := s.store.ActiveConfig()
+	cfg, catalogueSuppressed := s.completionConfig()
 	if cfg == nil {
 		return nil
 	}
@@ -801,6 +818,9 @@ func (s *Server) valueProvider(hint config.ValueHint, path []string) []config.Sc
 		for _, as := range cfg.Applications.ApplicationSets {
 			out = append(out, config.SchemaCompletion{Name: as.Name, Desc: "application-set"})
 		}
+		if catalogueSuppressed {
+			return out
+		}
 		for name := range config.PredefinedApplications {
 			out = append(out, config.SchemaCompletion{Name: name, Desc: "predefined"})
 		}
@@ -809,6 +829,9 @@ func (s *Server) valueProvider(hint config.ValueHint, path []string) []config.Sc
 		var out []config.SchemaCompletion
 		for _, as := range cfg.Applications.ApplicationSets {
 			out = append(out, config.SchemaCompletion{Name: as.Name, Desc: "application-set"})
+		}
+		if catalogueSuppressed {
+			return out
 		}
 		return appendPredefinedApplicationSetCompletions(out)
 	case config.ValueHintPoolName:
@@ -863,14 +886,18 @@ func (s *Server) valueProvider(hint config.ValueHint, path []string) []config.Sc
 		}
 		return out
 	case config.ValueHintPolicyApp:
-		out := []config.SchemaCompletion{
-			{Name: "any", Desc: "Any application"},
+		var out []config.SchemaCompletion
+		if !catalogueSuppressed {
+			out = append(out, config.SchemaCompletion{Name: "any", Desc: "Any application"})
 		}
 		for _, app := range cfg.Applications.Applications {
 			out = append(out, config.SchemaCompletion{Name: app.Name, Desc: app.Description})
 		}
 		for _, as := range cfg.Applications.ApplicationSets {
 			out = append(out, config.SchemaCompletion{Name: as.Name, Desc: "application-set"})
+		}
+		if catalogueSuppressed {
+			return out
 		}
 		for name := range config.PredefinedApplications {
 			out = append(out, config.SchemaCompletion{Name: name, Desc: "predefined"})

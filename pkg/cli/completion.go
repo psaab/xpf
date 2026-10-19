@@ -344,9 +344,29 @@ func appendPredefinedApplicationSetCompletions(out []config.SchemaCompletion) []
 	return out
 }
 
+// completionConfig returns the config completion draws from and whether
+// the predefined catalogue is suppressed (#15272 B24-04, #5763): in
+// config mode a candidate compile cached by generation, so candidate-
+// created names are offered and candidate-deleted names are not;
+// otherwise (or when the candidate does not compile) the active config.
+// The catalogue stays suppressed until the first commit (#5763).
+func (c *CLI) completionConfig() (*config.Config, bool) {
+	if c == nil || c.store == nil {
+		return nil, false
+	}
+	if c.store.InConfigMode() {
+		if cfg, ok := c.store.CandidateConfigForCompletion(); ok {
+			// #5763: the predefined catalogue is gated on a committed
+			// config, not on candidate presence.
+			return cfg, !c.store.EverCommitted()
+		}
+	}
+	return c.store.ActiveConfig(), false
+}
+
 // #1044c Phase 1: valueProvider relocated from cli.go (no behavior change).
 func (c *CLI) valueProvider(hint config.ValueHint, path []string) []config.SchemaCompletion {
-	cfg := c.store.ActiveConfig()
+	cfg, catalogueSuppressed := c.completionConfig()
 	if cfg == nil {
 		return nil
 	}
@@ -383,6 +403,9 @@ func (c *CLI) valueProvider(hint config.ValueHint, path []string) []config.Schem
 		for _, as := range cfg.Applications.ApplicationSets {
 			out = append(out, config.SchemaCompletion{Name: as.Name, Desc: "application-set"})
 		}
+		if catalogueSuppressed {
+			return out
+		}
 		for name := range config.PredefinedApplications {
 			out = append(out, config.SchemaCompletion{Name: name, Desc: "predefined"})
 		}
@@ -391,6 +414,9 @@ func (c *CLI) valueProvider(hint config.ValueHint, path []string) []config.Schem
 		var out []config.SchemaCompletion
 		for _, as := range cfg.Applications.ApplicationSets {
 			out = append(out, config.SchemaCompletion{Name: as.Name, Desc: "application-set"})
+		}
+		if catalogueSuppressed {
+			return out
 		}
 		return appendPredefinedApplicationSetCompletions(out)
 	case config.ValueHintPoolName:
@@ -451,14 +477,18 @@ func (c *CLI) valueProvider(hint config.ValueHint, path []string) []config.Schem
 		}
 		return out
 	case config.ValueHintPolicyApp:
-		out := []config.SchemaCompletion{
-			{Name: "any", Desc: "Any application"},
+		var out []config.SchemaCompletion
+		if !catalogueSuppressed {
+			out = append(out, config.SchemaCompletion{Name: "any", Desc: "Any application"})
 		}
 		for _, app := range cfg.Applications.Applications {
 			out = append(out, config.SchemaCompletion{Name: app.Name, Desc: app.Description})
 		}
 		for _, as := range cfg.Applications.ApplicationSets {
 			out = append(out, config.SchemaCompletion{Name: as.Name, Desc: "application-set"})
+		}
+		if catalogueSuppressed {
+			return out
 		}
 		for name := range config.PredefinedApplications {
 			out = append(out, config.SchemaCompletion{Name: name, Desc: "predefined"})

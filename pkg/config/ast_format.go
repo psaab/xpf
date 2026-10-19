@@ -560,6 +560,35 @@ func FormatCompare(oldTree, newTree *ConfigTree) string {
 	return b.String()
 }
 
+// FormatCompareAtPath is FormatCompare filtered to the subtree at path
+// (#15272 B24-03). Both trees are navigated to path; a side missing the
+// path contributes no children, so an added/deleted subtree renders as
+// +/- under its [edit <path>] header. A path present on neither side
+// yields "". An empty path is the global compare.
+func FormatCompareAtPath(oldTree, newTree *ConfigTree, path []string) string {
+	if len(path) == 0 {
+		return FormatCompare(oldTree, newTree)
+	}
+	var oldChildren, newChildren []*Node
+	if oldTree != nil {
+		for _, m := range navigatePath(oldTree.Children, path) {
+			if m != nil && !m.IsLeaf {
+				oldChildren = append(oldChildren, m.Children...)
+			}
+		}
+	}
+	if newTree != nil {
+		for _, m := range navigatePath(newTree.Children, path) {
+			if m != nil && !m.IsLeaf {
+				newChildren = append(newChildren, m.Children...)
+			}
+		}
+	}
+	var b strings.Builder
+	diffNodes(&b, oldChildren, newChildren, append([]string(nil), path...))
+	return b.String()
+}
+
 // alignSiblings aligns two sibling lists as sequences (#15168, B24-01).
 //
 // Pairing is by KeyPath, but duplicates are content-aware: among siblings

@@ -88,6 +88,17 @@ func AuthorizeConfigShowCompare(cfg *Config, class string) error {
 	return authorizeShowCommand(cfg, class, "show configuration", "")
 }
 
+// AuthorizeConfigShowCompareAtPath adjudicates a candidate diff filtered
+// to path (#15272 B24-03): the diff discloses only that subtree, so it is
+// priced as a path read (AuthorizeConfigShowPath), not refused as a
+// whole-tree render. A nil/empty path is the global compare.
+func AuthorizeConfigShowCompareAtPath(cfg *Config, class string, path []string) error {
+	if class == "" || len(path) == 0 {
+		return AuthorizeConfigShowCompare(cfg, class)
+	}
+	return AuthorizeConfigShowPath(cfg, class, path, "")
+}
+
 // AuthorizeConfigShowRollback adjudicates a rollback-slot render
 // (ShowRollback). Same whole-tree shape as AuthorizeConfigShowWhole.
 func AuthorizeConfigShowRollback(cfg *Config, class string, displaySuffix string) error {

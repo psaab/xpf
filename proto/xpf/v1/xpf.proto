@@ -161,6 +161,7 @@ message ShowConfigResponse { string output = 1; }
 
 message ShowCompareRequest {
   int32 rollback_n = 1;  // 0 = compare candidate vs active
+  repeated string path = 2; // optional subtree filter (#15272)
 }
 message ShowCompareResponse { string output = 1; }
 

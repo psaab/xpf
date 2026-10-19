@@ -1551,6 +1551,7 @@ func (x *ShowConfigResponse) GetOutput() string {
 type ShowCompareRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RollbackN     int32                  `protobuf:"varint,1,opt,name=rollback_n,json=rollbackN,proto3" json:"rollback_n,omitempty"` // 0 = compare candidate vs active
+	Path          []string               `protobuf:"bytes,2,rep,name=path,proto3" json:"path,omitempty"`                             // optional subtree filter (#15272)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1590,6 +1591,13 @@ func (x *ShowCompareRequest) GetRollbackN() int32 {
 		return x.RollbackN
 	}
 	return 0
+}
+
+func (x *ShowCompareRequest) GetPath() []string {
+	if x != nil {
+		return x.Path
+	}
+	return nil
 }
 
 type ShowCompareResponse struct {
@@ -9885,10 +9893,11 @@ const file_xpf_proto_rawDesc = "" +
 	"\x06target\x18\x02 \x01(\x0e2\x14.xpf.v1.ConfigTargetR\x06target\x12\x12\n" +
 	"\x04path\x18\x03 \x03(\tR\x04path\",\n" +
 	"\x12ShowConfigResponse\x12\x16\n" +
-	"\x06output\x18\x01 \x01(\tR\x06output\"3\n" +
+	"\x06output\x18\x01 \x01(\tR\x06output\"G\n" +
 	"\x12ShowCompareRequest\x12\x1d\n" +
 	"\n" +
-	"rollback_n\x18\x01 \x01(\x05R\trollbackN\"-\n" +
+	"rollback_n\x18\x01 \x01(\x05R\trollbackN\x12\x12\n" +
+	"\x04path\x18\x02 \x03(\tR\x04path\"-\n" +
 	"\x13ShowCompareResponse\x12\x16\n" +
 	"\x06output\x18\x01 \x01(\tR\x06output\"Q\n" +
 	"\x13ShowRollbackRequest\x12\f\n" +

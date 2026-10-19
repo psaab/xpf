@@ -365,11 +365,9 @@ func (c *ctl) handleConfigShow(args []string) error {
 		return err
 	}
 	if len(pipe) > 0 && pipe[0] == "compare" {
-		if len(path) > 0 {
-			return fmt.Errorf("usage: show | compare [rollback <N>] (cannot combine compare with a configuration path)")
-		}
-		// ShowCompare has no path field, so a bare compare is global even
-		// from a nested edit context; explicit paths above are rejected.
+		// #15272 B24-03: scoped compare filters server-side; the path is
+		// editPath+typed path, exactly as the local console computes it.
+		comparePath := append(append([]string(nil), c.editPath...), path...)
 		var n int32
 		switch {
 		case len(pipe) == 1:
@@ -378,6 +376,7 @@ func (c *ctl) handleConfigShow(args []string) error {
 			// parser. strconv.Atoi + int32() wrapped an out-of-range
 			// value (e.g. 4294967297 -> 1) and silently compared the
 			// wrong slot with a success exit.
+			var err error
 			n, err = parseRollbackSelector(pipe[2], "usage: show | compare rollback <N>", 1)
 			if err != nil {
 				return err
@@ -385,7 +384,7 @@ func (c *ctl) handleConfigShow(args []string) error {
 		default:
 			return fmt.Errorf("usage: show | compare [rollback <N>]")
 		}
-		resp, err := c.client.ShowCompare(c.ctx(), &pb.ShowCompareRequest{RollbackN: n})
+		resp, err := c.client.ShowCompare(c.ctx(), &pb.ShowCompareRequest{RollbackN: n, Path: comparePath})
 		if err != nil {
 			return fmt.Errorf("%v", err)
 		}

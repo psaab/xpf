@@ -89,6 +89,13 @@ func FormatCompareRedacted(oldTree, newTree *ConfigTree) string {
 	return maskCompareFingerprints(diff)
 }
 
+// FormatCompareRedactedAtPath is FormatCompareRedacted filtered to path
+// (#15272 B24-03).
+func FormatCompareRedactedAtPath(oldTree, newTree *ConfigTree, path []string) string {
+	diff := FormatCompareAtPath(fingerprintRedactedClone(oldTree), fingerprintRedactedClone(newTree), path)
+	return maskCompareFingerprints(diff)
+}
+
 func fingerprintRedactedClone(t *ConfigTree) *ConfigTree {
 	if t == nil {
 		return nil

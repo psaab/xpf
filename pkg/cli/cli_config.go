@@ -517,7 +517,7 @@ func (c *CLI) handleConfigShow(args []string) error {
 	// `| display <json|set|xml|inheritance>` (no trailing tokens) are
 	// accepted. Substring selection silently discarded trailing tokens, so
 	// `show | display set interfaces` rendered the whole candidate.
-	_, format, pipeRest, piped, pipeErr := splitConfigShowPipe(args)
+	path, format, pipeRest, piped, pipeErr := splitConfigShowPipe(args)
 	if pipeErr != nil {
 		fmt.Println(pipeErr.Error())
 		return nil
@@ -525,11 +525,18 @@ func (c *CLI) handleConfigShow(args []string) error {
 	if piped {
 		switch {
 		case len(pipeRest) > 0 && pipeRest[0] == "compare":
+			// #15272 B24-03: a path-scoped compare filters to the subtree
+			// at editPath+typed path, like every other display format.
+			// Previously this branch returned before displayPath was
+			// built and printed the global diff.
+			var comparePath []string
+			comparePath = append(comparePath, c.store.GetEditPath()...)
+			comparePath = append(comparePath, path...)
 			if len(pipeRest) == 1 {
 				if redact {
-					fmt.Print(c.store.ShowCompareRedacted())
+					fmt.Print(c.store.ShowCompareRedactedAtPath(comparePath))
 				} else {
-					fmt.Print(c.store.ShowCompare())
+					fmt.Print(c.store.ShowCompareAtPath(comparePath))
 				}
 				return nil
 			}
@@ -540,9 +547,9 @@ func (c *CLI) handleConfigShow(args []string) error {
 				}
 				var diff string
 				if redact {
-					diff, err = c.store.ShowCompareRollbackRedacted(n)
+					diff, err = c.store.ShowCompareRollbackRedactedAtPath(n, comparePath)
 				} else {
-					diff, err = c.store.ShowCompareRollback(n)
+					diff, err = c.store.ShowCompareRollbackAtPath(n, comparePath)
 				}
 				if err != nil {
 					return err
