@@ -57,8 +57,12 @@ the apply path pays no fsync (the file is regenerated on every apply).
   a total reload failure is returned and skips promotion/termination (#4898); a
   partial clear (#14589) restores and re-loads the prior file when charon still
   holds prior connections (or promotes the empty set when it holds none),
-  promotes that recovered set, and still returns the error; and a
-  failed terminate is carried as debt and returned (#6542).
+  promotes that recovered set, and still returns the error. The commit path
+  reaches the same clear via `ApplyGeneration` with an empty config, which
+  promotes the same recovered set (#15128): promoting the empty set there
+  forgot VPNs the rollback left running in charon, so their SAs were
+  never terminated; and a failed terminate is carried as debt and
+  returned (#6542).
 - `SAStatus`, `TerminateAllSAs`, `InitiateConnection`, `GetSAStatus`,
   `ActiveConnectionNames` — `ike.go`.
 - `PrepareConfig(cfg *config.Config) *config.IPsecConfig` — `policy.go`.

@@ -304,9 +304,17 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 			// do NOT fire Loaded (the candidate generation did not
 			// load), and still return the partial error.
 			var removed []string
-			if pae.clear {
+			if pae.clear && pae.names == nil {
+				// Empty-set clear recovered with nothing loaded
+				// (clearConfig encodes that as names={}); pae.names
+				// is then already the recovered set.
 				removed, _ = m.promoteConnNames(map[string]bool{}, map[string]string{})
 			} else {
+				// #15128: a clear partial that rolled charon back to
+				// the prior set carries that set in pae.names — the
+				// set charon still runs. Promote it (as Clear does);
+				// promoting {} here forgot VPNs charon still runs,
+				// so their SAs were never terminated.
 				removed, _ = m.promoteConnNames(pae.names, pae.hashes)
 			}
 			_, failed := m.terminateRemovedConns(removed)
@@ -434,10 +442,12 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, w
 	return rendered, hashes, nil
 }
 
-// partialApplyError is returned by applyConfig (and clearConfig, with a
-// nil set meaning empty) when a partial load was recovered to a
-// consistent state. ApplyGeneration promotes names/hashes (when
-// non-nil) and still returns the underlying partial error.
+// partialApplyError is returned by applyConfig (and clearConfig) when a
+// partial load was recovered to a consistent state. ApplyGeneration
+// promotes names/hashes and still returns the underlying partial error.
+// For clearConfig, names is the recovered set charon runs: {} when the
+// clear unloaded everything, the prior set when it was rolled back
+// (#15128).
 type partialApplyError struct {
 	err    error
 	names  map[string]bool
