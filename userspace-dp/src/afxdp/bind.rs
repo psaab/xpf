@@ -719,7 +719,7 @@ fn try_open_bind(
         let create_result = match socket_role.create_mode() {
             xsk_ffi::XskCreateMode::PrivateUmem => unsafe {
                 xsk_ffi::create_xsk_binding_private(
-                    worker_umem.umem_mut(),
+                    &mut worker_umem.umem_mut(),
                     info,
                     ring_entries,
                     bind_flags,
@@ -737,7 +737,7 @@ fn try_open_bind(
             // needs the same &mut Umem access as the private create.
             xsk_ffi::XskCreateMode::SharedOwnerUmem => unsafe {
                 xsk_ffi::create_xsk_binding_shared_owner(
-                    worker_umem.umem_mut(),
+                    &mut worker_umem.umem_mut(),
                     info,
                     ring_entries,
                     bind_flags,

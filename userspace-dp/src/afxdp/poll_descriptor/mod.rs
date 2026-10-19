@@ -434,10 +434,10 @@ use policy_revalidation::{
 // `&MmapArea` borrowed out of `binding.umem`'s `Rc<WorkerUmemInner>`
 // allocation. The pointee outlives this call — nothing on the poll
 // path drops or replaces `binding.umem`, and the only
-// `&mut WorkerUmemInner` escape hatch (`WorkerUmem::umem_mut` via
-// `Rc::get_mut`) runs solely at bind time, never while a worker is
-// polling — so each shared reborrow is valid and cannot alias a
-// mutable reference. The raw pointer only decouples the immutable
+// `&mut Umem` escape hatch (`WorkerUmem::umem_mut`, a `RefCell` borrow
+// — #15730) runs solely at bind time, never while a worker is polling
+// — so each shared reborrow is valid and cannot alias a mutable borrow.
+// The raw pointer only decouples the immutable
 // UMEM-area borrow from the `&mut BindingWorker` borrow.
 #[inline]
 fn dns_reply_qr_set(packet_frame: &[u8], meta: UserspaceDpMeta) -> bool {

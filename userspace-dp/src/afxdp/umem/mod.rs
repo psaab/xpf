@@ -31,16 +31,21 @@ pub(super) const UMEM_CREATE_FLAGS: u32 = 0;
 /// pinned by observation instead: `afxdp::umem::tests::drop_order`
 /// watches both destructors through `crate::drop_order_probe` and reds
 /// if these two lines are ever swapped back.
+/// #15730: the libxdp UMEM object is mutated only at socket-create time,
+/// and every create reaches it through `WorkerUmem::umem_mut(&self)`.
+/// `RefCell` (not `Rc::get_mut`) carries that exclusion: a shared group
+/// clones one `WorkerUmem` for every member binding, so the `Rc` is
+/// shared from the moment the group pool is built and `Rc::get_mut` can
+/// never succeed for the group's owner — its `expect("single-owner
+/// umem")` panicked the owner bind (and, via `BindingWorker::create`,
+/// would have panicked the private fallback too, whose fresh pool is
+/// the only unshared case) under the default CrossNic policy. The
+/// field order below stays load-bearing (#5192): `umem` (whose drop
+/// calls `xsk_umem__delete`) before `area` (`munmap`).
 pub(super) struct WorkerUmemInner {
-    umem: Umem,
+    umem: std::cell::RefCell<Umem>,
     area: MmapArea,
     total_frames: u32,
-}
-
-impl WorkerUmemInner {
-    fn umem_mut(&mut self) -> &mut Umem {
-        &mut self.umem
-    }
 }
 
 #[derive(Clone)]
@@ -63,7 +68,7 @@ impl WorkerUmem {
             .map_err(|e| format!("create umem: {e}"))?;
         Ok(Self {
             inner: Rc::new(WorkerUmemInner {
-                umem,
+                umem: std::cell::RefCell::new(umem),
                 area,
                 total_frames,
             }),
@@ -86,7 +91,7 @@ impl WorkerUmem {
         let umem = Umem::new_for_test(umem_cfg, area.as_nonnull_slice());
         Ok(Self {
             inner: Rc::new(WorkerUmemInner {
-                umem,
+                umem: std::cell::RefCell::new(umem),
                 area,
                 total_frames,
             }),
@@ -97,18 +102,28 @@ impl WorkerUmem {
         &self.inner.area
     }
 
-    pub(super) fn umem(&self) -> &Umem {
-        &self.inner.umem
+    pub(super) fn umem(&self) -> std::cell::Ref<'_, Umem> {
+        self.inner.umem.borrow()
     }
 
-    pub(super) fn umem_mut(&mut self) -> &mut Umem {
-        Rc::get_mut(&mut self.inner)
-            .expect("single-owner umem")
-            .umem_mut()
+    /// #15730: bind-time mutable access to the libxdp UMEM. Takes `&self`
+    /// because a shared group's `WorkerUmem` is legitimately cloned across
+    /// its member bindings (the owner borrows the UMEM's fill/comp rings,
+    /// as does the private create). The pre-#15730
+    /// `Rc::get_mut().expect("single-owner umem")` assumed sole ownership
+    /// and panicked on the first cloned owner — after the zero-copy
+    /// EINVAL had already been reported, so the copy fallback never ran.
+    /// Each create's borrow is confined to that one socket create and
+    /// released before the next binding's create; `RefCell` keeps any
+    /// overlap a loud panic rather than an alias. Sequential private
+    /// binds (the `XSK_BIND_FLAGS_COPY` fallback after a failed
+    /// zero-copy attempt on the same UMEM) are unshared and unaffected.
+    pub(super) fn umem_mut(&self) -> std::cell::RefMut<'_, Umem> {
+        self.inner.umem.borrow_mut()
     }
 
     pub(super) fn as_raw_umem_ptr(&self) -> *mut crate::xsk_ffi::XskUmemOpaque {
-        self.inner.umem.as_raw_ptr()
+        self.inner.umem.borrow().as_raw_ptr()
     }
 
     pub(super) fn total_frames(&self) -> u32 {
