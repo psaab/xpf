@@ -227,6 +227,95 @@ func classifyDHGroup(v string) (int, string) {
 	return 0, v
 }
 
+// parseGatewayIdentity15752 compiles one gateway local-identity /
+// remote-identity statement across flat, packed and hierarchical shapes
+// (#15752, G18-03). Returns (type, value, dnModifier):
+//
+//   - bare DN: Keys=[leaf, distinguished-name] -> ("distinguished-name","","")
+//     — Junos derives the local DN from the certificate; never steal the
+//     next packed token (the schema now declares this leaf args:3, so the
+//     packed splitter knows the bare form ends at distinguished-name).
+//   - direct DN: [leaf, distinguished-name, <DN>] -> value=<DN>
+//   - qualified DN: [leaf, distinguished-name, container|wildcard, <DN>]
+//   - hierarchical: leaf { <type> <value>; } or
+//     leaf { distinguished-name { container|wildcard <DN>; } }
+//   - other types: [leaf, <type>, <value>]
+func parseGatewayIdentity15752(p *Node) (idType, idValue, dnModifier string) {
+	if p == nil {
+		return "", "", ""
+	}
+	if len(p.Keys) >= 2 {
+		idType = p.Keys[1]
+		if len(p.Keys) >= 3 {
+			// Second value token (DN, qualifier or identity value). Read by
+			// constant index so the #8807 arity census sees this leaf's
+			// arity demand (variable slice reads are its stated blindness).
+			_ = p.Keys[2]
+		}
+		rest := p.Keys[2:]
+		if idType == "distinguished-name" {
+			if len(rest) >= 1 && (rest[0] == "container" || rest[0] == "wildcard") {
+				dnModifier = rest[0]
+				if len(rest) >= 2 {
+					idValue = rest[1]
+				}
+			} else if len(rest) >= 1 {
+				idValue = rest[0]
+			}
+			return idType, idValue, dnModifier
+		}
+		if len(rest) >= 1 {
+			idValue = rest[0]
+		}
+		return idType, idValue, ""
+	}
+	for _, c := range p.Children {
+		idType = c.Name()
+		if idType == "distinguished-name" {
+			if v := nodeVal(c); v != "" {
+				idValue = v
+			}
+			for _, gc := range c.Children {
+				if gc.Name() == "container" || gc.Name() == "wildcard" {
+					dnModifier = gc.Name()
+					idValue = nodeVal(gc)
+					if idValue == "" && len(gc.Children) > 0 {
+						idValue = gc.Children[0].Name()
+					}
+				} else if idValue == "" {
+					idValue = gc.Name()
+				}
+			}
+			return idType, idValue, dnModifier
+		}
+		idValue = nodeVal(c)
+	}
+	return idType, idValue, dnModifier
+}
+
+// ikeIdentityTypes15752 is the Junos gateway identity-type set. Enforcement
+// lives in validateIPsecCertAuthStrict (strict reject / lenient warn);
+// rendering is formatIdentity in pkg/ipsec.
+var ikeIdentityTypes15752 = map[string]bool{
+	"hostname": true, "fqdn": true, "inet": true, "inet6": true,
+	"key-id": true, "distinguished-name": true,
+	"user-at-hostname": true, "email": true, "rfc822": true,
+}
+
+// EffectiveLocalCertificate resolves the cert a VPN renders (#15752):
+// gateway LocalCertificate wins, else the ike-policy's via the gateway.
+func EffectiveLocalCertificate(ipsec *IPsecConfig, vpn *IPsecVPN, gw *IPsecGateway) string {
+	if gw != nil && gw.LocalCertificate != "" {
+		return gw.LocalCertificate
+	}
+	if ipsec != nil && gw != nil {
+		if pol, ok := ipsec.IKEPolicies[gw.IKEPolicy]; ok && pol != nil {
+			return pol.LocalCertificate
+		}
+	}
+	return ""
+}
+
 func compileIKE(node *Node, sec *SecurityConfig) error {
 	if sec.IPsec.IKEProposals == nil {
 		sec.IPsec.IKEProposals = make(map[string]*IKEProposal)
@@ -322,6 +411,11 @@ func compileIKE(node *Node, sec *SecurityConfig) error {
 				// via firewallMatchValues; reading only Keys[1] (nodeVal)
 				// dropped all but the first, narrowing phase-1 negotiation.
 				pol.Proposals = append(pol.Proposals, firewallMatchValues(p)...)
+			case "local-certificate":
+				// #15752 (G18-02): Junos cert counterpart to pre-shared-key.
+				if v != "" {
+					pol.LocalCertificate = v
+				}
 			case "pre-shared-key":
 				// #15027 (A16-04): switch on the qualifier. Before
 				// this, Keys[1] was never read: a `hexadecimal` key
@@ -396,24 +490,11 @@ func compileIKE(node *Node, sec *SecurityConfig) error {
 				parseDeadPeerDetectionNode(p, gw, resolveSchemaChild(gatewayLeafSchema8939(node), "dead-peer-detection"))
 			case "local-identity":
 				if len(p.Keys) >= 3 {
-					gw.LocalIDType = p.Keys[1]
-					gw.LocalIDValue = p.Keys[2]
-				} else if len(p.Children) > 0 {
-					for _, c := range p.Children {
-						gw.LocalIDType = c.Name()
-						gw.LocalIDValue = nodeVal(c)
-					}
+					_ = p.Keys[2] // arity demand, see parseGatewayIdentity15752 (#8807 census)
 				}
+				gw.LocalIDType, gw.LocalIDValue, gw.LocalDNModifier = parseGatewayIdentity15752(p)
 			case "remote-identity":
-				if len(p.Keys) >= 3 {
-					gw.RemoteIDType = p.Keys[1]
-					gw.RemoteIDValue = p.Keys[2]
-				} else if len(p.Children) > 0 {
-					for _, c := range p.Children {
-						gw.RemoteIDType = c.Name()
-						gw.RemoteIDValue = nodeVal(c)
-					}
-				}
+				gw.RemoteIDType, gw.RemoteIDValue, gw.RemoteDNModifier = parseGatewayIdentity15752(p)
 			case "dynamic":
 				// "dynamic hostname FQDN" or children. Junos `dynamic`
 				// identifies a peer with a dynamic IP: the FQDN is the IKE
@@ -720,24 +801,11 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 				parseDeadPeerDetectionNode(p, gw, resolveSchemaChild(gatewayLeafSchema8939(node), "dead-peer-detection"))
 			case "local-identity":
 				if len(p.Keys) >= 3 {
-					gw.LocalIDType = p.Keys[1]
-					gw.LocalIDValue = p.Keys[2]
-				} else if len(p.Children) > 0 {
-					for _, c := range p.Children {
-						gw.LocalIDType = c.Name()
-						gw.LocalIDValue = nodeVal(c)
-					}
+					_ = p.Keys[2] // arity demand, see parseGatewayIdentity15752 (#8807 census)
 				}
+				gw.LocalIDType, gw.LocalIDValue, gw.LocalDNModifier = parseGatewayIdentity15752(p)
 			case "remote-identity":
-				if len(p.Keys) >= 3 {
-					gw.RemoteIDType = p.Keys[1]
-					gw.RemoteIDValue = p.Keys[2]
-				} else if len(p.Children) > 0 {
-					for _, c := range p.Children {
-						gw.RemoteIDType = c.Name()
-						gw.RemoteIDValue = nodeVal(c)
-					}
-				}
+				gw.RemoteIDType, gw.RemoteIDValue, gw.RemoteDNModifier = parseGatewayIdentity15752(p)
 			case "dynamic":
 				// Junos `dynamic` identifies a dynamic-IP peer by the IKE
 				// identity it presents; `hostname <fqdn>` is that identity,

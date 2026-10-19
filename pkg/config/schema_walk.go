@@ -1158,8 +1158,41 @@ func resolveSchemaChild(parent *schemaNode, keyword string) *schemaNode {
 // (compoundKey descends one level). midKeyword sits within the arg span
 // and is consumed there, so it needs no separate accounting. This is only
 // used for container/untyped nodes; typed leaves treat Keys[1:] as value.
+// effectiveArgs15752 returns the token arity of s for the concrete keys
+// in a sibling context (container may be nil when unknown): a bare
+// distinguished-name identity consumes 1 — the token after it, when it
+// spells a sibling leaf of container (or when there is none), is the
+// next statement, never the DN value. container/wildcard + DN and a
+// direct DN consume the full declared arity. Splitters that pre-skip
+// value slots (flat-run, packed, SetPath) must use this, not s.args,
+// or a bare DN steals the following statement (#15752).
+func effectiveArgs15752(s *schemaNode, keys []string, container *schemaNode) int {
+	if s == nil {
+		return 0
+	}
+	if !s.identityBareDN {
+		return s.args
+	}
+	// Gateway identity leaf (#15752): a non-DN type takes exactly the
+	// type + one value (args:2 worth); DN takes type + optional
+	// qualifier + DN, and a bare DN takes the type alone.
+	if len(keys) < 2 || keys[1] != "distinguished-name" {
+		return 2
+	}
+	if len(keys) == 2 {
+		return 1
+	}
+	if keys[2] == "container" || keys[2] == "wildcard" {
+		return s.args
+	}
+	if container != nil && resolveSchemaChild(container, keys[2]) != nil {
+		return 1
+	}
+	return s.args
+}
+
 func consumeNodeKeys(keys []string, childSchema *schemaNode) (int, *schemaNode) {
-	consumed := 1 + childSchema.args
+	consumed := 1 + effectiveArgs15752(childSchema, keys, nil)
 	if consumed > len(keys) {
 		consumed = len(keys)
 	}

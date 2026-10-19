@@ -124,7 +124,7 @@ func expandFlatRun(children []*Node, container *schemaNode) []*Node {
 		// is the same information the schema already carries for the SetPath
 		// walk -- the scan simply never asked for it.
 		cut := []int{0}
-		i := 1 + leaf.args
+		i := 1 + effectiveArgs15752(leaf, n.Keys, container)
 		for ; i < len(n.Keys); i++ {
 			sib := resolveSchemaChild(container, n.Keys[i])
 			if sib == nil {
@@ -132,7 +132,7 @@ func expandFlatRun(children []*Node, container *schemaNode) []*Node {
 			}
 			cut = append(cut, i)
 			// The sibling's own value slots belong to it, not to the next cut.
-			i += sib.args
+			i += effectiveArgs15752(sib, n.Keys[i:], container)
 		}
 		if len(cut) > 1 {
 			changed = true

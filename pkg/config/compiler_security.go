@@ -41,6 +41,8 @@ func compileSecurity(node *Node, sec *SecurityConfig) error {
 			if err := compileIPsec(child, sec); err != nil {
 				return fmt.Errorf("ipsec: %w", err)
 			}
+		case "pki":
+			compilePKI(child, sec)
 		case "dynamic-address":
 			if err := compileDynamicAddress(child, sec); err != nil {
 				return fmt.Errorf("dynamic-address: %w", err)

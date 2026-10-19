@@ -655,7 +655,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 		}
 
 		// Consume keyword + extra args as this node's keys.
-		nodeKeyCount := 1 + childSchema.args
+		nodeKeyCount := 1 + effectiveArgs15752(childSchema, path[i:], schema)
 		// #6668: an authored bracket group carries the node's full key list,
 		// which the arity rule cannot infer. widenKeyCountToGroupEnd owns the
 		// widen-only rule; assign its result rather than re-testing it here.
@@ -1205,7 +1205,7 @@ func deletePath(current *[]*Node, path []string, grouped []bool, schema *schemaN
 	}
 
 	// Consume keyword + extra args as this node's keys.
-	nodeKeyCount := 1 + childSchema.args
+	nodeKeyCount := 1 + effectiveArgs15752(childSchema, path[i:], schema)
 	// #6668: widen to an authored bracket group's end, never narrower —
 	// widenKeyCountToGroupEnd owns that rule.
 	nodeKeyCount = widenKeyCountToGroupEnd(grouped, i, i+nodeKeyCount) - i
@@ -1391,7 +1391,7 @@ func setInactiveAtPath(current *[]*Node, path []string, grouped []bool, schema *
 		return markMultiLeafMembersInactive(current, keyword, path[i+1:], childSchema.valueList, inactive)
 	}
 
-	nodeKeyCount := 1 + childSchema.args
+	nodeKeyCount := 1 + effectiveArgs15752(childSchema, path[i:], schema)
 	// #6668: widen to an authored bracket group's end, never narrower —
 	// widenKeyCountToGroupEnd owns that rule.
 	nodeKeyCount = widenKeyCountToGroupEnd(grouped, i, i+nodeKeyCount) - i

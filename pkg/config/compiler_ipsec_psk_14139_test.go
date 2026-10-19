@@ -83,12 +83,22 @@ func TestIPsecPSKPresence14139(t *testing.T) {
 		}
 	})
 
-	t.Run("pubkey vpn without a key commits", func(t *testing.T) {
+	t.Run("pubkey vpn without a key commits only with a certificate (#15752)", func(t *testing.T) {
 		cmds := append(mkIKE("rsa-signatures"),
+			"set security ike gateway gw local-certificate GwCert",
 			"set security ipsec vpn v1 ike gateway gw",
 			"set security ipsec vpn v1 bind-interface st0.0")
 		if _, err := CompileConfig(build(t, cmds)); err != nil {
-			t.Fatalf("pubkey VPN must commit without a PSK: %v", err)
+			t.Fatalf("pubkey VPN with a certificate must commit without a PSK: %v", err)
+		}
+		// Without the certificate the #15752 gate refuses (credential-less
+		// pubkey); the no-PSK premise alone no longer commits.
+		cmds = append(mkIKE("rsa-signatures"),
+			"set security ipsec vpn v1 ike gateway gw",
+			"set security ipsec vpn v1 bind-interface st0.0")
+		if _, err := CompileConfig(build(t, cmds)); err == nil ||
+			!strings.Contains(err.Error(), "local-certificate") {
+			t.Fatalf("pubkey VPN without a certificate must refuse naming local-certificate, got %v", err)
 		}
 	})
 

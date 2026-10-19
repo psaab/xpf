@@ -384,6 +384,22 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 			continue
 		}
 
+		// #15752 (G18-02): a pubkey VPN with no effective local certificate
+		// (gateway, else ike-policy via EffectiveLocalCertificate) would
+		// render auth = pubkey with no certs — charon then picks any loaded
+		// cert or fails IKE_AUTH. Skip like every other credential failure;
+		// the strict gate is validateIPsecCertAuthStrict.
+		if authMethod == "pubkey" && config.EffectiveLocalCertificate(ipsecCfg, vpn, gw) == "" {
+			skipped[name] = true
+			slog.Warn("skipping IPsec VPN: public-key authentication "+
+				"with no local-certificate configured (neither the gateway "+
+				"local-certificate nor the ike-policy fallback) — configure "+
+				"a local-certificate (rendering the connection without a "+
+				"certificate would let strongSwan select any loaded "+
+				"certificate)", "vpn", name)
+			continue
+		}
+
 		// A responder-only PSK VPN whose gateway has no peer identity
 		// (#14591, Y09-04) accepts an initiator from any address, and
 		// with no configured peer identity its secret carries no id
@@ -517,8 +533,12 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 		}
 		b.WriteString("    local {\n")
 		fmt.Fprintf(&b, "      auth = %s\n", gc.authMethod)
-		if gw != nil && gw.LocalCertificate != "" {
-			fmt.Fprintf(&b, "      certs = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(gw.LocalCertificate)))
+		// #15752: certs only on pubkey, from the effective cert (gateway
+		// wins over ike-policy). A psk local{} must never carry certs.
+		if gc.authMethod == "pubkey" {
+			if cert := config.EffectiveLocalCertificate(ipsecCfg, gc.vpn, gw); cert != "" {
+				fmt.Fprintf(&b, "      certs = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(cert)))
+			}
 		}
 		if gw != nil && gw.LocalIDValue != "" {
 			fmt.Fprintf(&b, "      id = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(formatIdentity(gw.LocalIDType, gw.LocalIDValue))))
@@ -1217,12 +1237,24 @@ func defaultRemoteID(gw *config.IPsecGateway) string {
 	return addrs[0]
 }
 
-// formatIdentity formats an IKE identity for strongSwan.
+// formatIdentity formats an IKE identity for strongSwan (#15752, G18-03;
+// strongSwan identity parsing: @ = FQDN, @# = KEY_ID hex/literal, a DN
+// containing '=' parses as ASN.1 DN as-is, @@/bare user@host = RFC822).
 func formatIdentity(idType, idValue string) string {
 	switch idType {
 	case "hostname", "fqdn":
 		return "@" + idValue
-	default: // "inet", "ipv4", etc.
+	case "key-id":
+		// KEY_ID: @#<value> (strongSwan treats the tail as hex when it
+		// decodes, else the literal bytes via the quoted swanctl string).
+		if idValue == "" {
+			return ""
+		}
+		return "@#" + idValue
+	case "distinguished-name":
+		// DN as-is (contains '='); empty = cert-derived DN, caller omits id.
+		return idValue
+	default: // "inet", "inet6", "user-at-hostname", "email", etc.
 		return idValue
 	}
 }
@@ -1231,7 +1263,10 @@ func authMethodToSwan(method string) (string, error) {
 	switch method {
 	case "", "pre-shared-keys":
 		return "psk", nil
-	case "rsa-signatures", "ecdsa-signatures":
+	case "rsa-signatures", "ecdsa-signatures", "ecdsa-signatures-256", "ecdsa-signatures-384":
+		// Junos ecdsa-signatures-256/384 select the ECDSA curve/hash;
+		// swanctl auth itself is uniformly pubkey (the cert's key type
+		// constrains the signature scheme, strongSwan docs local.auth).
 		return "pubkey", nil
 	default:
 		return "", fmt.Errorf("%w: unsupported IKE authentication-method %q", errProposalUnresolved, method)

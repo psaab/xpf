@@ -1380,8 +1380,8 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 		"proposal": {desc: "IKE proposal name", args: 1, placeholder: "<proposal-name>", packedStatements: true, closedWorld: true, children: map[string]*schemaNode{
 			"authentication-method": {desc: "IKE authentication method", args: 1, placeholder: "<method>",
 				valueType: ValueEnumOf, valueDesc: "IKE phase 1 authentication method",
-				valueExamples: []string{"pre-shared-keys", "rsa-signatures", "ecdsa-signatures"},
-				validator:     ValidateEnum([]string{"pre-shared-keys", "rsa-signatures", "ecdsa-signatures"}), children: nil},
+				valueExamples: []string{"pre-shared-keys", "rsa-signatures", "ecdsa-signatures", "ecdsa-signatures-256", "ecdsa-signatures-384"},
+				validator:     ValidateEnum([]string{"pre-shared-keys", "rsa-signatures", "ecdsa-signatures", "ecdsa-signatures-256", "ecdsa-signatures-384"}), children: nil},
 			"dh-group": {desc: "Diffie-Hellman group (e.g. 14 or group14)", args: 1, placeholder: "<dh-group>",
 				valueType: ValueDHGroup, valueDesc: "Diffie-Hellman group",
 				valueExamples: []string{"2", "14", "group19"}, validator: ValidateDHGroup, children: nil},
@@ -1436,6 +1436,8 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			// (`... mode main`) could not be split and the second was swallowed
 			// (#8768). Declaring the arity is what makes the split possible.
 			"pre-shared-key": {desc: "Pre-shared key (ascii-text <key>)", args: 2, placeholder: "ascii-text <key>", children: nil},
+			// #15752 (G18-02): Junos cert counterpart to pre-shared-key.
+			"local-certificate": {desc: "Local certificate for IKE authentication", args: 1, placeholder: "<certificate-name>", children: nil},
 		}},
 		// packedStatements (#8768): compileIPsec reads address, external-interface,
 		// local-identity and the rest as separate statements; the packed spelling
@@ -1477,8 +1479,12 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"interval":          {desc: "DPD probe interval in seconds (default 10)", args: 1, valueType: ValueInteger, valueDesc: "Probe interval in seconds (1..3600)", valueExamples: []string{"10", "30"}, validator: ValidateInteger(MinIPsecDPDIntervalSeconds, MaxIPsecDPDIntervalSeconds), placeholder: "<seconds>", children: nil},
 				"threshold":         {desc: "Failed-probe count before peer is dead (default 5)", args: 1, valueType: ValueInteger, valueDesc: "Failed-probe count (1..100)", valueExamples: []string{"5", "3"}, validator: ValidateInteger(MinIPsecDPDThreshold, MaxIPsecDPDThreshold), placeholder: "<count>", children: nil},
 			}},
-			"local-identity":  {desc: "Local IKE identity (type and value)", args: 2, children: nil},
-			"remote-identity": {desc: "Remote IKE identity (type and value)", args: 2, children: nil},
+			// #15752 (G18-03): args:3 = type + optional qualifier + value.
+			// Bare `distinguished-name` (type only, cert-derived DN) ends the
+			// statement, so a packed sibling is never stolen as its value;
+			// allowEmptyValue admits the bare form past the missing-args gate.
+			"local-identity":  {desc: "Local IKE identity (type [qualifier] value; bare distinguished-name = cert DN)", args: 3, allowEmptyValue: true, identityBareDN: true, children: nil},
+			"remote-identity": {desc: "Remote IKE identity (type [qualifier] value; bare distinguished-name = cert DN)", args: 3, allowEmptyValue: true, identityBareDN: true, children: nil},
 			"dynamic": {desc: "Dynamic peer (peer has a dynamic IP and dials in). `hostname <fqdn>` is the IKE identity the peer presents (remote id @fqdn, responder-only remote_addrs = %any, #14590); a bare `dynamic` block marks a responder-only peer with no pinned identity (#2404)", children: map[string]*schemaNode{
 				"hostname": {desc: "Dynamic peer IKE identity FQDN (presented identity, not DNS-resolved)", args: 1, scalar: true, placeholder: "<fqdn>", children: nil},
 			}},
@@ -1644,8 +1650,9 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"interval":          {desc: "DPD probe interval in seconds (default 10)", args: 1, valueType: ValueInteger, valueDesc: "Probe interval in seconds (1..3600)", valueExamples: []string{"10", "30"}, validator: ValidateInteger(MinIPsecDPDIntervalSeconds, MaxIPsecDPDIntervalSeconds), placeholder: "<seconds>", children: nil},
 				"threshold":         {desc: "Failed-probe count before peer is dead (default 5)", args: 1, valueType: ValueInteger, valueDesc: "Failed-probe count (1..100)", valueExamples: []string{"5", "3"}, validator: ValidateInteger(MinIPsecDPDThreshold, MaxIPsecDPDThreshold), placeholder: "<count>", children: nil},
 			}},
-			"local-identity":  {desc: "Local IKE identity (type and value)", args: 2, children: nil},
-			"remote-identity": {desc: "Remote IKE identity (type and value)", args: 2, children: nil},
+			// #15752 (G18-03): mirror of the security ike gateway copy.
+			"local-identity":  {desc: "Local IKE identity (type [qualifier] value; bare distinguished-name = cert DN)", args: 3, allowEmptyValue: true, identityBareDN: true, children: nil},
+			"remote-identity": {desc: "Remote IKE identity (type [qualifier] value; bare distinguished-name = cert DN)", args: 3, allowEmptyValue: true, identityBareDN: true, children: nil},
 			"dynamic": {desc: "Dynamic peer (peer has a dynamic IP and dials in). `hostname <fqdn>` is the IKE identity the peer presents (remote id @fqdn, responder-only remote_addrs = %any, #14590); a bare `dynamic` block marks a responder-only peer with no pinned identity (#2404)", children: map[string]*schemaNode{
 				"hostname": {desc: "Dynamic peer IKE identity FQDN (presented identity, not DNS-resolved)", args: 1, scalar: true, placeholder: "<fqdn>", children: nil},
 			}},
@@ -1760,6 +1767,32 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"gateway":      {desc: "IKE gateway reference", args: 1, placeholder: "<gateway-name>", children: nil},
 				"ipsec-policy": {desc: "IPsec policy reference", args: 1, placeholder: "<policy-name>", children: nil},
 			}},
+		}},
+	}},
+	// #15752 (G18-01): security pki is captured (compiler_security_pki.go)
+	// with an accepted-only ValidateConfig advisory — xpf has no SCEP/
+	// CMPv2/CRL lifecycle runtime, so the stanza must not dangle silently
+	// beside the rendered gateway certs = reference.
+	"pki": {desc: "PKI / certificate management (accepted-only; no enrollment/CRL runtime, #15752)", children: map[string]*schemaNode{
+		"ca-profile": {desc: "CA profile name", args: 1, placeholder: "<profile-name>", children: map[string]*schemaNode{
+			"ca-identity": {desc: "CA identity", args: 1, placeholder: "<ca-identity>", children: nil},
+			"enrollment": {desc: "CA enrollment", children: map[string]*schemaNode{
+				"url":            {desc: "Enrollment URL", args: 1, placeholder: "<url>", children: nil},
+				"retry":          {desc: "Enrollment retry count", args: 1, placeholder: "<count>", children: nil},
+				"retry-interval": {desc: "Enrollment retry interval (seconds)", args: 1, placeholder: "<seconds>", children: nil},
+			}},
+			"revocation-check": {desc: "Revocation checking", children: map[string]*schemaNode{
+				"crl": {desc: "Check CRL", children: map[string]*schemaNode{
+					"url":                         {desc: "CRL URL", args: 1, placeholder: "<url>", children: nil},
+					"refresh-interval":            {desc: "CRL refresh interval (hours)", args: 1, placeholder: "<hours>", children: nil},
+					"disable-on-download-failure": {desc: "Disable on CRL download failure", children: nil},
+				}},
+				"use-ocsp": {desc: "Use OCSP for revocation checking", children: nil},
+				"disable":  {desc: "Disable revocation checking", children: nil},
+			}},
+		}},
+		"auto-re-enrollment": {desc: "Auto re-enrollment", children: map[string]*schemaNode{
+			"certificate-id": {desc: "Certificate ID for auto re-enrollment", args: 1, placeholder: "<certificate-id>", children: nil},
 		}},
 	}},
 	// Built in schema_security_dynamic_address.go (#9689 split this subtree out
