@@ -51,6 +51,13 @@ def _esp_output(missing_b_shim=False):
         lines.append(f'SEL {slot} set xpf_slot_initrd="initrd.img-{_KVER}"')
     return "\n".join(lines) + "\n"
 
+def _hash_output():
+    lines = []
+    for d in ("ubuntu",) + validate._AB_SLOTS:
+        for filename in validate._AB_LOADER_FILES:
+            lines.append(f"HASH {d} {filename} {'a' * 64}")
+    return "\n".join(lines) + "\n"
+
 
 class GateReactionTests(unittest.TestCase):
     def setUp(self):
@@ -89,6 +96,8 @@ class GateReactionTests(unittest.TestCase):
             if cmd[:2] == ("sh", "-c") and cmd[2] == validate._AB_SLOT_ESP_PROBE:
                 return _result(_esp_output(
                     missing_b_shim=branch == "esp-staging"))
+            if cmd[:2] == ("sh", "-c") and cmd[2] == validate._AB_SLOT_HASH_PROBE:
+                return _result(_hash_output())
             if cmd[0] == "efibootmgr":
                 if branch == "efibootmgr-command":
                     # The command fails, but the captured text is valid: if the

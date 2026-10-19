@@ -27,6 +27,62 @@
 
 set -u
 
+# --- A/B slot loader refresh (#15089, A57-01) ---
+# The bake copied shim/grub/mm from EFI/ubuntu into EFI/xpf-A and
+# EFI/xpf-B exactly once. Ubuntu's shim-signed / grub-efi-amd64-signed
+# updates install only to EFI/ubuntu, while BootOrder keeps booting the
+# xpf slots, so without a refresh the Secure-Boot chain stays on the
+# bake-time bootloader for the life of the appliance (a SBAT/dbx
+# revocation would never reach the booted loader). sync_ab_slots()
+# re-copies the loaders atomically on every boot and, via the dpkg file
+# trigger in debian/xpf.triggers, immediately after a bootloader
+# package update (postinst `triggered` -> this script --sync-only).
+#
+# Atomicity: each loader is written to a temp file in the SAME slot dir
+# and renamed over the live name, so a power cut mid-copy can never
+# leave a truncated loader at the booted path. cmp-gated: an in-sync
+# slot is not rewritten (no needless ESP writes / flash wear).
+# Fail-closed per file: a source loader that exists MUST land in both
+# slots; a copy failure returns non-zero so the caller can log it.
+# `mmx64.efi` obeys the same rule when EFI/ubuntu ships it; when the
+# source has no mm (the bake's fallback shape) absence in the slots is
+# left as-is rather than treated as drift. xpf.selector is slot state,
+# never loader state, and is never touched here.
+LOADER_FILES="shimx64.efi grubx64.efi mmx64.efi"
+
+sync_one_loader() {
+    _src="$1"; _dst="$2"
+    cmp -s "$_src" "$_dst" 2>/dev/null && return 0
+    _tmp="${_dst}.tmp-$$"
+    rm -f "$_tmp"
+    cp -f "$_src" "$_tmp" || { rm -f "$_tmp"; return 1; }
+    sync -f "$_tmp" 2>/dev/null || true
+    mv -f "$_tmp" "$_dst" || { rm -f "$_tmp"; return 1; }
+    sync -f "$_dst" 2>/dev/null || true
+    cmp -s "$_src" "$_dst" 2>/dev/null || return 1
+    return 0
+}
+
+sync_ab_slots() {
+    _src_dir="$ESP_ROOT/EFI/ubuntu"
+    [ -d "$_src_dir" ] || return 0
+    _rc=0
+    for _slot in xpf-A xpf-B; do
+        _dst_dir="$ESP_ROOT/EFI/$_slot"
+        [ -d "$_dst_dir" ] || continue
+        for _f in $LOADER_FILES; do
+            _src="$_src_dir/$_f"
+            [ -f "$_src" ] || continue
+            if ! sync_one_loader "$_src" "$_dst_dir/$_f"; then
+                log "WARNING: failed to refresh $_slot/$_f from EFI/ubuntu"
+                _rc=1
+            fi
+        done
+        sync -f "$_dst_dir" 2>/dev/null || true
+    done
+    return $_rc
+}
+
 # Force the C locale so efibootmgr's "BootOrder:" / "BootCurrent:" / "BootXXXX*"
 # headings are never localized — a translated heading would break every parse
 # below and could (pre-guard) wipe BootOrder (r1 AGY: locale-robust parsing).
@@ -52,6 +108,22 @@ ESP_DEV_ROOT="${XPF_UEFI_SLOTS_DEV_ROOT:-/dev}"
 # from these: it is a firmware path interpreted by the firmware, not a mount.
 EFIVARS_DIR="${XPF_UEFI_SLOTS_EFIVARS:-/sys/firmware/efi/efivars}"
 ESP_ROOT="${XPF_UEFI_SLOTS_ESP:-/boot/efi}"
+
+# --sync-only: refresh the slot loaders from EFI/ubuntu and exit. Used
+# by the dpkg file trigger (debian/xpf.triggers -> xpf.postinst
+# `triggered`) so a shim/grub package update lands in both slots
+# immediately, without waiting for a reboot. Deliberately independent
+# of the NVRAM capability gate below: syncing files on the ESP must
+# not require readable firmware variables. ESP_ROOT is already set
+# (production /boot/efi; the env override exists for the hermetic
+# self-test), and the sync itself is a no-op when EFI/ubuntu is absent.
+if [ "${1:-}" = "--sync-only" ]; then
+    if sync_ab_slots; then
+        exit 0
+    fi
+    log "WARNING: A/B slot loader refresh incomplete (non-fatal; next boot retries)"
+    exit 0
+fi
 
 # --- capability gate: UEFI + efibootmgr + writable efivars (all non-fatal) ---
 if [ ! -d "$EFIVARS_DIR" ]; then
@@ -161,6 +233,12 @@ for pre_id in "$PRE_A" "$PRE_B"; do
         *,"$pre_id",*) PRE_HAS_XPF=1 ;;
     esac
 done
+
+# Refresh stale slot loaders BEFORE registration verifies them (#15089):
+# a slot whose shim was just updated on disk must be the loader NVRAM
+# (re)registration points at. Non-fatal on failure — registration and
+# boot proceed on the existing copies ("degraded, not bricked").
+sync_ab_slots || log "WARNING: A/B slot loader refresh incomplete (non-fatal; continuing to registration)"
 
 register_slot xpf-A || true
 register_slot xpf-B || true
