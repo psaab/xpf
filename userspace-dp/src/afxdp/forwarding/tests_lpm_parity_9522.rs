@@ -1045,3 +1045,168 @@ fn nondrivable_gateway_does_not_suppress_discard_13950() {
         "a zero-ifindex link-local gateway must not suppress a later discard"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #15098: `RouteEntry.reject` must be a terminal FIB producer. Pre-fix,
+// `select_v*_route` checked only `discard`, so a reject row with no
+// next-hop fell to NoRoute (losing the ICMP unreachable) and a reject row
+// carrying a next-hop was forwarded. A next-table leak whose target LPM
+// is a reject route forwarded for the same reason.
+// ---------------------------------------------------------------------------
+
+fn reject_route_15098(destination: &str, family: &str, preference: i32) -> crate::RouteSnapshot {
+    crate::RouteSnapshot {
+        table: if family == "inet" {
+            "inet.0".into()
+        } else {
+            "inet6.0".into()
+        },
+        family: family.into(),
+        destination: destination.into(),
+        reject: true,
+        preference,
+        ..Default::default()
+    }
+}
+
+/// Reject-only rows (no next-hop) resolve RejectRoute, not NoRoute, in
+/// both families. FAIL-ON-REVERT: pre-fix this is NoRoute with egress 0.
+#[test]
+fn reject_only_route_rejects_v4_v6_15098() {
+    let state = build_forwarding_state(&discard_snapshot_13950(
+        vec![
+            reject_route_15098("203.0.113.0/24", "inet", 10),
+            reject_route_15098("2001:db8:300::/48", "inet6", 10),
+        ],
+        vec![],
+    ));
+    let v4 = resolve_v4(&state, Ipv4Addr::new(203, 0, 113, 5));
+    assert_eq!(v4.disposition, ForwardingDisposition::RejectRoute);
+    assert_eq!(v4.egress_ifindex, 0);
+    let v6 = resolve_v6(&state, "2001:db8:300::5".parse().unwrap());
+    assert_eq!(v6.disposition, ForwardingDisposition::RejectRoute);
+    assert_eq!(v6.egress_ifindex, 0);
+}
+
+/// A reject row carrying a (stale / Go-emitted) next-hop must still
+/// reject, never forward through that next-hop. FAIL-ON-REVERT: pre-fix
+/// the live gateway makes this ForwardCandidate.
+#[test]
+fn reject_with_next_hop_still_rejects_v4_v6_15098() {
+    let mut v4_reject = v4_route("203.0.113.0/24", vec!["10.99.0.2"], 5);
+    v4_reject.reject = true;
+    let mut v6_reject = v6_route("2001:db8:300::/48", vec!["2001:db8:99::2"], 5);
+    v6_reject.reject = true;
+    let state = build_forwarding_state(&discard_snapshot_13950(
+        vec![v4_reject, v6_reject],
+        vec![
+            reachable_neighbor_11316("ge-0-0-0", 11, "inet", "10.99.0.2", "00:11:22:33:44:61"),
+            reachable_neighbor_11316(
+                "ge-0-0-0",
+                11,
+                "inet6",
+                "2001:db8:99::2",
+                "00:11:22:33:44:62",
+            ),
+        ],
+    ));
+    assert_eq!(
+        resolve_v4(&state, Ipv4Addr::new(203, 0, 113, 5)).disposition,
+        ForwardingDisposition::RejectRoute,
+        "v4 reject+next-hop must reject, not forward"
+    );
+    assert_eq!(
+        resolve_v6(&state, "2001:db8:300::5".parse().unwrap()).disposition,
+        ForwardingDisposition::RejectRoute,
+        "v6 reject+next-hop must reject, not forward"
+    );
+}
+
+/// A next-table leak whose target-table LPM is a reject route must
+/// surface RejectRoute (terminal, not a leak miss), in both families.
+/// FAIL-ON-REVERT: pre-fix the target resolves NoRoute, the leak walk
+/// treats it as a miss, and the packet falls through / forwards.
+#[test]
+fn leak_into_reject_target_rejects_v4_v6_15098() {
+    let mut snap = base_snapshot();
+    let mut v4_target = reject_route_15098("10.7.0.0/16", "inet", 5);
+    v4_target.table = "other.inet.0".into();
+    let mut v6_target = reject_route_15098("2001:db8:700::/48", "inet6", 5);
+    v6_target.table = "other.inet6.0".into();
+    snap.routes = vec![
+        crate::RouteSnapshot {
+            next_table: "other.inet.0".into(),
+            mtu: 0,
+            ..v4_route("10.7.0.0/16", vec![], 5)
+        },
+        v4_target,
+        crate::RouteSnapshot {
+            next_table: "other.inet6.0".into(),
+            mtu: 0,
+            ..v6_route("2001:db8:700::/48", vec![], 5)
+        },
+        v6_target,
+    ];
+    let state = build_forwarding_state(&snap);
+    assert_eq!(
+        resolve_v4(&state, Ipv4Addr::new(10, 7, 1, 2)).disposition,
+        ForwardingDisposition::RejectRoute,
+        "v4 leak into a reject LPM must reject"
+    );
+    assert_eq!(
+        resolve_v6(&state, "2001:db8:700::5".parse().unwrap()).disposition,
+        ForwardingDisposition::RejectRoute,
+        "v6 leak into a reject LPM must reject"
+    );
+}
+
+/// Control: discard stays DiscardRoute (silent), and a preferred drivable
+/// gateway is not shadowed by a less-preferred reject row — the #13950
+/// preference gate applies to reject exactly as to discard.
+#[test]
+fn reject_controls_discard_and_preference_15098() {
+    let state = build_forwarding_state(&discard_snapshot_13950(
+        vec![
+            discard_route_13950("203.0.113.0/24", "inet", 10),
+            discard_route_13950("2001:db8:300::/48", "inet6", 10),
+        ],
+        vec![],
+    ));
+    assert_eq!(
+        resolve_v4(&state, Ipv4Addr::new(203, 0, 113, 5)).disposition,
+        ForwardingDisposition::DiscardRoute
+    );
+    assert_eq!(
+        resolve_v6(&state, "2001:db8:300::5".parse().unwrap()).disposition,
+        ForwardingDisposition::DiscardRoute
+    );
+
+    let state = build_forwarding_state(&discard_snapshot_13950(
+        vec![
+            v4_route("203.0.113.0/24", vec!["10.99.0.2"], 5),
+            reject_route_15098("203.0.113.0/24", "inet", 10),
+            v6_route("2001:db8:300::/48", vec!["2001:db8:99::2"], 5),
+            reject_route_15098("2001:db8:300::/48", "inet6", 10),
+        ],
+        vec![
+            reachable_neighbor_11316("ge-0-0-0", 11, "inet", "10.99.0.2", "00:11:22:33:44:61"),
+            reachable_neighbor_11316(
+                "ge-0-0-0",
+                11,
+                "inet6",
+                "2001:db8:99::2",
+                "00:11:22:33:44:62",
+            ),
+        ],
+    ));
+    assert_eq!(
+        resolve_v4(&state, Ipv4Addr::new(203, 0, 113, 5)).disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "v4: less-preferred reject must not shadow the preferred live gateway"
+    );
+    assert_eq!(
+        resolve_v6(&state, "2001:db8:300::5".parse().unwrap()).disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "v6: less-preferred reject must not shadow the preferred live gateway"
+    );
+}

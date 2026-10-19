@@ -721,12 +721,16 @@ fn lookup_forwarding_resolution_v4_inner(
             selected_route_lookup_result(state, table, resolution)
         }
         Some(ResolvedRouteV4::Static { route, selected }) => {
-            if route.discard {
+            if route.discard || route.reject {
                 return selected_route_lookup_result(
                     state,
                     table,
                     ForwardingResolution {
-                        disposition: ForwardingDisposition::DiscardRoute,
+                        disposition: if route.reject {
+                            ForwardingDisposition::RejectRoute
+                        } else {
+                            ForwardingDisposition::DiscardRoute
+                        },
                         local_ifindex: 0,
                         egress_ifindex: 0,
                         tx_ifindex: 0,
@@ -951,12 +955,16 @@ fn lookup_forwarding_resolution_v6_inner(
             selected_route_lookup_result(state, table, resolution)
         }
         Some(ResolvedRouteV6::Static { route, selected }) => {
-            if route.discard {
+            if route.discard || route.reject {
                 return selected_route_lookup_result(
                     state,
                     table,
                     ForwardingResolution {
-                        disposition: ForwardingDisposition::DiscardRoute,
+                        disposition: if route.reject {
+                            ForwardingDisposition::RejectRoute
+                        } else {
+                            ForwardingDisposition::DiscardRoute
+                        },
                         local_ifindex: 0,
                         egress_ifindex: 0,
                         tx_ifindex: 0,
@@ -1143,10 +1151,13 @@ fn select_v4_route<'a>(
             // Go emits same-preference QNH metric tiers as ordered rows. Each
             // row's next_hops remains ECMP; a later row is tried only when the
             // current tier has no live member.
-            if route.discard {
-                // Preserve an earlier gateway only when it has a drivable
-                // next-hop. An empty/invalid fallback must not suppress this
-                // terminal discard row.
+            if route.discard || route.reject {
+                // #15098: reject is a terminal row like discard — it must
+                // not fall through to next-hop selection (which would
+                // forward traffic the operator asked to reject). Preserve
+                // an earlier gateway only when it has a drivable next-hop.
+                // An empty/invalid fallback must not suppress this
+                // terminal row.
                 let fallback_drivable = fallback.is_some_and(|(_, selected)| {
                     selected.is_some_and(|nh| nh.ifindex > 0 || nh.tunnel_endpoint_id != 0)
                 });
@@ -1259,8 +1270,8 @@ fn select_v6_route<'a>(
             // Preserve same-preference metric-tier row order as in v4: ECMP
             // within a row, fall through to the next row only if all members
             // in the current tier are unavailable.
-            if route.discard {
-                // Keep the v4 drivable-fallback gate identical.
+            if route.discard || route.reject {
+                // #15098: keep the v4 reject/discard terminal gate identical.
                 let fallback_drivable = fallback.is_some_and(|(_, selected)| {
                     selected.is_some_and(|nh| nh.ifindex > 0 || nh.tunnel_endpoint_id != 0)
                 });
