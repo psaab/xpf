@@ -359,8 +359,6 @@ func (a *Agent) sendLinkTraps(linkUp bool, ifindex int, ifname string) {
 		return
 	}
 
-	community := selectTrapCommunity(cfg)
-
 	direction := "down"
 	if linkUp {
 		direction = "up"
@@ -381,6 +379,14 @@ func (a *Agent) sendLinkTraps(linkUp bool, ifindex int, ifname string) {
 	// time-stamps agree with each other and with event time.
 	uptime := int(time.Since(a.startTime).Milliseconds() / 10)
 	for _, tg := range sortedTrapGroups(cfg) {
+		// #15052 (A20-04): the v1/v2c trap community IS the trap-group
+		// name in Junos — `snmp trap-group <name>` sends with community
+		// <name>. The pre-fix code used selectTrapCommunity(cfg) (the
+		// alphabetically-first configured QUERY community) for every
+		// group, disclosing that query credential — possibly a
+		// read-write one — in cleartext to every trap target. Per-group
+		// resolution here keeps each group's credential boundary intact.
+		community := trapCommunityForGroup(tg)
 		// #5522: enforce the trap-group category filter. A link trap is in the
 		// "link" category; a group scoped to exclude link (e.g. `categories
 		// [configuration]`) must NOT receive it. A group with no `categories`
@@ -426,26 +432,23 @@ func (a *Agent) sendLinkTraps(linkUp bool, ifindex int, ifname string) {
 	}
 }
 
-// selectTrapCommunity picks the v2c trap community deterministically (#2989).
-// SNMPConfig.Communities is a Go map, whose iteration order is randomized, so
-// ranging over it and breaking on the first entry produced a different
-// community per process run when more than one community was configured —
-// collectors that accept only one community saw flaky traps and a less
-// privileged community could leak through the wrong credential boundary. We
-// instead pick the lexicographically-first configured community, a stable and
-// predictable selection. When no community is configured the v2c default
-// "public" is used (the configured set authorizes the trap on the wire and an
-// empty set has no on-wire credential to assert).
-func selectTrapCommunity(cfg *config.SNMPConfig) string {
-	if cfg == nil || len(cfg.Communities) == 0 {
+// trapCommunityForGroup returns the v1/v2c trap community for one trap
+// group (#15052 A20-04). In Junos the trap-group name IS the community
+// string sent in v1/v2c traps — there is no separate community leaf on
+// a trap group. The pre-fix code instead sent the alphabetically-first
+// configured query community (selectTrapCommunity, #2989) to every
+// trap target, disclosing a query credential (possibly read-write) in
+// cleartext to receivers that were never authorized for it.
+//
+// An unnamed group cannot occur from the compiler (trap-group names
+// are required keys); the "public" fallback preserves the historic
+// default for a hand-built unnamed group rather than emitting an
+// empty community.
+func trapCommunityForGroup(tg *config.SNMPTrapGroup) string {
+	if tg == nil || tg.Name == "" {
 		return "public"
 	}
-	names := make([]string, 0, len(cfg.Communities))
-	for name := range cfg.Communities {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names[0]
+	return tg.Name
 }
 
 // sortedTrapGroups returns the configured trap groups in deterministic
