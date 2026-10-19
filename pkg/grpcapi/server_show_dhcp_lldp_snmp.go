@@ -252,21 +252,27 @@ func (s *Server) showDHCPServerDetail(cfg *config.Config, buf *strings.Builder) 
 	}
 }
 
-// showDHCPDynamicDNS renders the DHCP dynamic-DNS configuration summary +
-// runtime counters, and (in detail mode) the records this node owns
-// (#1387 inc-2). It reads the daemon's always-on DDNS manager via the
-// injected stats/owned-records functions so the gRPC server does not hold
-// the manager pointer directly.
-func (s *Server) showDHCPDynamicDNS(cfg *config.Config, buf *strings.Builder, detail bool) {
-	var ddns *config.DHCPDynamicDNSConfig
-	if cfg != nil {
-		ddns = cfg.System.DHCPServer.DynamicDNS
+// ddnsProviderTarget renders the backend-appropriate target for a Surface A
+// provider (#15700), mirroring the CLI twin in pkg/cli.
+func ddnsProviderTarget(p *config.DDNSProvider, backend string) string {
+	switch backend {
+	case "rfc2136":
+		return "update-server=" + config.RedactURL(p.UpdateServer)
+	case "dyndns2", "duckdns":
+		return "server=" + config.RedactURL(p.Server)
+	case "cloudflare":
+		return "zone=" + p.Zone
+	case "route53":
+		return "hosted-zone-id=" + p.HostedZoneID
+	case "generic":
+		return "url-template=" + config.RedactURL(p.URLTemplate)
+	default:
+		return "update-server=" + config.RedactURL(p.UpdateServer)
 	}
-	if ddns == nil {
-		buf.WriteString("DHCP dynamic-DNS: not configured\n")
-		return
-	}
-	buf.WriteString("DHCP Dynamic DNS:\n")
+}
+
+func renderDHCPDDNSPolicy(buf *strings.Builder, label string, ddns *config.DHCPDynamicDNSConfig) {
+	fmt.Fprintf(buf, "DHCP Dynamic DNS (%s):\n", label)
 	fmt.Fprintf(buf, "  Enabled:         %t\n", ddns.Enabled)
 	if ddns.Backend != "" {
 		fmt.Fprintf(buf, "  Backend:         %s\n", ddns.Backend)
@@ -275,17 +281,39 @@ func (s *Server) showDHCPDynamicDNS(cfg *config.Config, buf *strings.Builder, de
 		fmt.Fprintf(buf, "  Domain:          %s\n", ddns.Domain)
 	}
 	if ddns.UpdateServer != "" {
-		// #9497: RedactURL, like show configuration / String / MarshalJSON and the
-		// #5521 feed-URL render. This topic is PermView, and a userinfo-bearing
-		// value would otherwise reach read-only clients and support bundles.
+		// #9497: RedactURL, like show configuration / String / MarshalJSON.
 		fmt.Fprintf(buf, "  Update server:   %s\n", config.RedactURL(ddns.UpdateServer))
 	}
 	if ddns.ConflictPolicy != "" {
 		fmt.Fprintf(buf, "  Conflict policy: %s\n", ddns.ConflictPolicy)
 	}
 	if ddns.TSIGKeyName != "" {
-		// Never print the secret — only that a key is configured.
 		fmt.Fprintf(buf, "  TSIG key:        %s (secret redacted)\n", ddns.TSIGKeyName)
+	}
+}
+
+// showDHCPDynamicDNS renders the DHCP dynamic-DNS configuration summary +
+// runtime counters, and (in detail mode) the records this node owns
+// (#1387 inc-2). It reads the daemon's always-on DDNS manager via the
+// injected stats/owned-records functions so the gRPC server does not hold
+// the manager pointer directly.
+func (s *Server) showDHCPDynamicDNS(cfg *config.Config, buf *strings.Builder, detail bool) {
+	var ddns, ddns6 *config.DHCPDynamicDNSConfig
+	if cfg != nil {
+		ddns = cfg.System.DHCPServer.DynamicDNS
+		ddns6 = cfg.System.DHCPServer.DynamicDNSv6
+	}
+	if ddns == nil && ddns6 == nil {
+		buf.WriteString("DHCP dynamic-DNS: not configured\n")
+		return
+	}
+	if ddns != nil && ddns6 != nil {
+		renderDHCPDDNSPolicy(buf, "IPv4", ddns)
+		renderDHCPDDNSPolicy(buf, "IPv6", ddns6)
+	} else if ddns != nil {
+		renderDHCPDDNSPolicy(buf, "IPv4, applies to IPv6 by inheritance", ddns)
+	} else {
+		renderDHCPDDNSPolicy(buf, "IPv6, applies to IPv4 by inheritance", ddns6)
 	}
 
 	if s.ddnsStatsFn == nil {
@@ -363,7 +391,7 @@ func (s *Server) showServicesDynamicDNS(cfg *config.Config, buf *strings.Builder
 				if backend == "" {
 					backend = "rfc2136"
 				}
-				fmt.Fprintf(buf, "    %s: backend=%s update-server=%s", n, backend, config.RedactURL(p.UpdateServer)) // #9497
+				fmt.Fprintf(buf, "    %s: backend=%s %s", n, backend, ddnsProviderTarget(p, backend)) // #9497/#15700
 				if p.TSIGKeyName != "" {
 					fmt.Fprintf(buf, " tsig-key=%s (secret redacted)", p.TSIGKeyName)
 				}
@@ -393,11 +421,17 @@ func (s *Server) showServicesDynamicDNS(cfg *config.Config, buf *strings.Builder
 		fmt.Fprintf(buf, "\n  ALARM: Surface A DDNS DEGRADED (fail-closed) — %s\n", st.DegradedReason)
 		buf.WriteString("    Publishing and withdrawals are SUSPENDED until the ownership state is resolved.\n")
 	}
+	if st.Orphaned > 0 {
+		fmt.Fprintf(buf, "\n  ALARM: %d record(s) orphaned at a previous provider endpoint —\n", st.Orphaned)
+		buf.WriteString("    a provider identity change left them stale and un-withdrawable through\n")
+		buf.WriteString("    the current catalog; manual cleanup required (see 'detail' for which).\n")
+	}
 	buf.WriteString("\n  Counters:\n")
 	fmt.Fprintf(buf, "    Publishes: ok=%d fail=%d\n", st.UpsertOK, st.UpsertFail)
 	fmt.Fprintf(buf, "    Withdraws: ok=%d fail=%d\n", st.DeleteOK, st.DeleteFail)
 	fmt.Fprintf(buf, "    Skipped:   unchanged=%d backoff=%d no-backend=%d\n", st.Skipped, st.BackedOff, st.SkippedNoBackend)
 	fmt.Fprintf(buf, "    Published records: %d\n", st.Scopes)
+	fmt.Fprintf(buf, "    Orphaned records:  %d\n", st.Orphaned)
 
 	if detail && s.surfaceADDNSStatusFn != nil {
 		views := s.surfaceADDNSStatusFn()

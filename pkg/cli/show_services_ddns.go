@@ -30,7 +30,7 @@ func (c *CLI) showServicesDynamicDNS(detail bool) error {
 				if backend == "" {
 					backend = "rfc2136"
 				}
-				fmt.Printf("    %s: backend=%s update-server=%s", n, backend, config.RedactURL(p.UpdateServer))
+				fmt.Printf("    %s: backend=%s %s", n, backend, ddnsProviderTarget(p, backend))
 				if p.TSIGKeyName != "" {
 					fmt.Printf(" tsig-key=%s (secret redacted)", p.TSIGKeyName)
 				}
@@ -117,21 +117,30 @@ func (c *CLI) showServicesDynamicDNS(detail bool) error {
 	return nil
 }
 
-// showDHCPDynamicDNS renders the DHCP dynamic-DNS config summary + runtime
-// counters (and, in detail mode, the owned records) for the in-process
-// interactive CLI (#1387 inc-2). Counters come from the daemon-injected
-// hooks; config comes from the active store.
-func (c *CLI) showDHCPDynamicDNS(detail bool) error {
-	cfg := c.store.ActiveConfig()
-	var ddns *config.DHCPDynamicDNSConfig
-	if cfg != nil {
-		ddns = cfg.System.DHCPServer.DynamicDNS
+// ddnsProviderTarget renders the backend-appropriate target for a Surface A
+// provider (#15700). rfc2136 targets an authoritative server (update-server);
+// the HTTP backends target other leaves, so printing update-server= for them
+// always showed a blank. URL-bearing values go through RedactURL.
+func ddnsProviderTarget(p *config.DDNSProvider, backend string) string {
+	switch backend {
+	case "rfc2136":
+		return "update-server=" + config.RedactURL(p.UpdateServer)
+	case "dyndns2", "duckdns":
+		return "server=" + config.RedactURL(p.Server)
+	case "cloudflare":
+		return "zone=" + p.Zone
+	case "route53":
+		return "hosted-zone-id=" + p.HostedZoneID
+	case "generic":
+		return "url-template=" + config.RedactURL(p.URLTemplate)
+	default:
+		return "update-server=" + config.RedactURL(p.UpdateServer)
 	}
-	if ddns == nil {
-		fmt.Println("DHCP dynamic-DNS: not configured")
-		return nil
-	}
-	fmt.Println("DHCP Dynamic DNS:")
+}
+
+// renderDHCPDDNSPolicy prints one family policy section.
+func renderDHCPDDNSPolicy(label string, ddns *config.DHCPDynamicDNSConfig) {
+	fmt.Printf("DHCP Dynamic DNS (%s):\n", label)
 	fmt.Printf("  Enabled:         %t\n", ddns.Enabled)
 	if ddns.Backend != "" {
 		fmt.Printf("  Backend:         %s\n", ddns.Backend)
@@ -141,9 +150,7 @@ func (c *CLI) showDHCPDynamicDNS(detail bool) error {
 	}
 	if ddns.UpdateServer != "" {
 		// #15174: RedactURL, like the gRPC twin / show configuration /
-		// String / MarshalJSON (#9497). This PermView surface would
-		// otherwise disclose a userinfo-bearing value to view-class
-		// console/SSH logins and captured command output.
+		// String / MarshalJSON (#9497).
 		fmt.Printf("  Update server:   %s\n", config.RedactURL(ddns.UpdateServer))
 	}
 	if ddns.ConflictPolicy != "" {
@@ -152,7 +159,33 @@ func (c *CLI) showDHCPDynamicDNS(detail bool) error {
 	if ddns.TSIGKeyName != "" {
 		fmt.Printf("  TSIG key:        %s (secret redacted)\n", ddns.TSIGKeyName)
 	}
+}
 
+// showDHCPDynamicDNS renders the DHCP dynamic-DNS config summary + runtime
+// counters (and, in detail mode, the owned records) for the in-process
+// interactive CLI (#1387 inc-2). Counters come from the daemon-injected
+// hooks; config comes from the active store.
+func (c *CLI) showDHCPDynamicDNS(detail bool) error {
+	cfg := c.store.ActiveConfig()
+	var ddns, ddns6 *config.DHCPDynamicDNSConfig
+	if cfg != nil {
+		ddns = cfg.System.DHCPServer.DynamicDNS
+		ddns6 = cfg.System.DHCPServer.DynamicDNSv6
+	}
+	if ddns == nil && ddns6 == nil {
+		fmt.Println("DHCP dynamic-DNS: not configured")
+		return nil
+	}
+	if ddns != nil && ddns6 != nil {
+		renderDHCPDDNSPolicy("IPv4", ddns)
+		renderDHCPDDNSPolicy("IPv6", ddns6)
+	} else if ddns != nil {
+		// Single-family inheritance (#2663): the lone policy applies to both
+		// families at reconcile time.
+		renderDHCPDDNSPolicy("IPv4, applies to IPv6 by inheritance", ddns)
+	} else {
+		renderDHCPDDNSPolicy("IPv6, applies to IPv4 by inheritance", ddns6)
+	}
 	if c.ddnsStatsFn == nil {
 		fmt.Println("\n  Runtime counters: unavailable")
 		return nil
