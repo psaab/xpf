@@ -2226,6 +2226,16 @@ never lock an operator out of a remote box it manages.
     family's dump errored — the error only matters when it could have hidden the
     answer. The second swallowed error there (`LinkByIndex` on a found route)
     is propagated for the same reason.
+  - **Split-default is not a default route (#15220).** Both lifeline route
+    walks (`detectLifelineInterface` selection and the `snapshotLifelineAddrs`
+    gateway snapshot) previously accepted any route whose destination IP was
+    unspecified, ignoring the mask — so a VPN split-default tunnel
+    (`0.0.0.0/1`, `128.0.0.0/1`, `::/1`) was treated as the default route: the
+    tunnel NIC was chosen as the management lifeline (and its tunnel gateway
+    pinned as the lifeline gateway) while the real management NIC was left
+    unprotected. Both sites now share `isDefaultRoute`, which requires a nil
+    destination or an unspecified destination with prefix length 0
+    (`0.0.0.0/0` / `::/0`); a non-zero mask is never a default route.
 - **Protected set** (`resolveProtectedInterfaces` →
   `dataplane.SetProtectedInterfaceResolver`): fxp0 + the lifeline NIC are NEVER
   marked Unmanaged / always-down / address-stripped, even on an
