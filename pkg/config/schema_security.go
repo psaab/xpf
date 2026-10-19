@@ -293,18 +293,45 @@ func validateZoneTCPRstNode13119(node *Node, _ *schemaNode) error {
 var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: true, children: map[string]*schemaNode{
 	// #9878: closed-world arm. Leaf-completeness audit (the schema.go
 	// contract: only flip a LEAF-COMPLETE subtree). zones children =
-	// {security-zone}: the zone compiler (compiler_security_zones.go)
-	// reads description, interfaces (dynamic names via wildcard),
-	// tcp-rst, screen, host-inbound-traffic, and the zone-local
-	// address-book — each modeled below; host-inbound service tokens
-	// ride as leaf VALUES validated by validateHostInboundTokensStrict,
-	// not as keywords, so no service name can false-reject. Unknown direct
-	// zone children remain strict rejects; compileZones records them for the
-	// tolerant #11575 warning and unbinds zones whose unknown keyword may carry
-	// enforcement. Verified three ways: the AcceptsValid inventory commits every
-	// modeled leaf, shipped/example configs validate, and the tolerant
-	// Load/SyncApply path preserves a cfg.Warnings diagnostic.
+	// {security-zone, functional-zone}: the zone compiler
+	// (compiler_security_zones.go) reads description, interfaces (dynamic
+	// names via wildcard), tcp-rst, screen, host-inbound-traffic, and the
+	// zone-local address-book for security-zone — each modeled below;
+	// host-inbound service tokens ride as leaf VALUES validated by
+	// validateHostInboundTokensStrict, not as keywords, so no service name
+	// can false-reject. Unknown direct zone children remain strict rejects;
+	// compileZones records them for the tolerant #11575 warning and unbinds
+	// zones whose unknown keyword may carry enforcement. Verified three
+	// ways: the AcceptsValid inventory commits every modeled leaf,
+	// shipped/example configs validate, and the tolerant Load/SyncApply
+	// path preserves a cfg.Warnings diagnostic.
+	//
+	// #15668: functional-zone management models Junos's management
+	// functional zone. Only the children Junos defines for it AND the zone
+	// compiler consumes are modelled (description, screen,
+	// host-inbound-traffic, interfaces — no tcp-rst / address-book, which
+	// have no management-zone semantics here); anything else under
+	// management is a closed-world strict reject and, on the tolerant
+	// path, quarantines the compiled "management" zone via the #11575
+	// unknown-child channel. The compiler funnels the stanza into
+	// sec.Zones["management"] through the same body compiler and strict
+	// validators as a security-zone, so a non-fxp0 management interface
+	// keeps its zone host-inbound treatment instead of falling into the
+	// unzoned junos-host catch-all.
 	"zones": {desc: "Security zones", closedWorld: true, children: map[string]*schemaNode{
+		"functional-zone": {desc: "Functional zones", closedWorld: true, children: map[string]*schemaNode{
+			"management": {desc: "Management functional zone", closedWorld: true, children: map[string]*schemaNode{
+				"description":          {desc: "Zone description", args: 1, scalar: true, placeholder: "<text>", children: nil},
+				"screen":               {desc: "Screen profile name", args: 1, scalar: true, placeholder: "<screen-name>", children: nil},
+				"host-inbound-traffic": {desc: "Host inbound traffic", children: hostInboundSchemaChildren()},
+				"interfaces": {desc: "Interfaces in management functional zone", wildcard: &schemaNode{
+					desc: "Interface name", valueHint: ValueHintInterfaceName, placeholder: "<interface-name>",
+					children: map[string]*schemaNode{
+						"host-inbound-traffic": {desc: "Per-interface host inbound traffic", children: hostInboundSchemaChildren()},
+					},
+				}},
+			}},
+		}},
 		"security-zone": {desc: "Security zone name", args: 1, valueHint: ValueHintZoneName, placeholder: "<zone-name>", children: map[string]*schemaNode{
 			"description": {desc: "Zone description", args: 1, scalar: true, placeholder: "<text>", children: nil},
 			// #3362: per-interface host-inbound-traffic override. The interface
@@ -519,13 +546,13 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"port-scan": {desc: "Port scan protection", children: map[string]*schemaNode{
 					"threshold": {desc: "Detection threshold", args: 1, placeholder: "<number>", children: nil},
 				}},
-				"land":       {desc: "Drop LAND attack (src == dst)", children: nil},
-				"winnuke":    {desc: "Drop WinNuke (OOB to NetBIOS)", children: nil},
-				"syn-frag":   {desc: "Drop fragmented SYN", children: nil},
-				"syn-fin":    {desc: "Drop SYN+FIN", children: nil},
-				"no-flag":    {desc: "Drop TCP with no flags set", children: nil},
+				"land":        {desc: "Drop LAND attack (src == dst)", children: nil},
+				"winnuke":     {desc: "Drop WinNuke (OOB to NetBIOS)", children: nil},
+				"syn-frag":    {desc: "Drop fragmented SYN", children: nil},
+				"syn-fin":     {desc: "Drop SYN+FIN", children: nil},
+				"no-flag":     {desc: "Drop TCP with no flags set", children: nil},
 				"tcp-no-flag": {desc: "Drop TCP with no flags set (Junos spelling)", children: nil},
-				"fin-no-ack": {desc: "Drop FIN without ACK", children: nil},
+				"fin-no-ack":  {desc: "Drop FIN without ACK", children: nil},
 			}},
 			"ip": {desc: "IP screening", closedWorldOpaque: true, children: map[string]*schemaNode{
 				"ip-sweep": {desc: "IP sweep protection", children: map[string]*schemaNode{

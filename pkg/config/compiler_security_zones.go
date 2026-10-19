@@ -516,288 +516,45 @@ func bracketedGroupInstances8794(nodes []*Node) []struct {
 	return out
 }
 
-func compileZones(node *Node, sec *SecurityConfig) error {
-	for _, inst := range bracketedGroupInstances8794(node.FindChildren("security-zone")) {
-		// #4818: find-or-create by name rather than always allocating a
-		// fresh ZoneConfig. A hand-authored `load override` config can carry
-		// two literal `security-zone <name> { ... }` TOP-LEVEL sibling
-		// blocks — the hierarchical parser (parseStatements) keeps them as
-		// separate same-key siblings (it does not merge), so namedInstances
-		// yields TWO entries for the same zone name. The pre-fix unconditional
-		// `zone := &ZoneConfig{...}` + `sec.Zones[inst.name] = zone` let the
-		// second instance silently REPLACE the first, discarding its
-		// interfaces/host-inbound/address-book/description/screen/tcp-rst
-		// wholesale. This is the outer-instance analogue of the #4544 fix
-		// below, which already merges repeated host-inbound-traffic blocks
-		// WITHIN one instance — that fix is a no-op against a duplicate
-		// instance because it never runs on the first instance's properties
-		// once the whole ZoneConfig is replaced. Properties below now
-		// accumulate into the SAME zone across every sibling instance:
-		// Interfaces appends, HostInboundTraffic/InterfaceHostInbound merge
-		// via mergeHostInbound, AddressBook merges by name (find-or-create,
-		// same as parseAddressBookEntries already does for repeated
-		// address/address-set children — #4706). ScreenProfile, TCPRst, and
-		// Description are scalars with no natural union; they are last-wins
-		// across sibling instances (matches their existing last-wins
-		// behaviour across repeated properties WITHIN one instance).
-		zone := sec.Zones[inst.name]
-		if zone == nil {
-			zone = &ZoneConfig{Name: inst.name}
-			sec.Zones[inst.name] = zone
-		}
+// functionalZoneManagementSchema15668 resolves the schema body of
+// `security zones functional-zone management` for the #9792 packed-run
+// expansion at the functional-zone compile site.
+func functionalZoneManagementSchema15668() *schemaNode {
+	return resolveSchemaPath9235("security", "zones", "functional-zone", "management")
+}
 
-		// #9792: a packed one-line run reaches this reader on the lenient path
-		// (Store.Load / Store.SyncApply); expand it as #9235 does. Lenient path only.
-		for _, prop := range expandResolvingRuns9792(inst.node.Children, securityZoneSchema9792()) {
-			switch prop.Name() {
-			case "interfaces":
-				// #6525: iterate the NORMALIZED member nodes, not prop.Children
-				// directly. The hierarchical COMPACT-LEAF spelling
-				// `interfaces ge-0/0/1.0;` carries the member name on the
-				// stanza's OWN Keys tail with nil Children, so a bare
-				// `range prop.Children` ran the body ZERO times and the zone
-				// compiled with no interfaces at all — silently, cleanly, and
-				// with both strict zone-membership gates then passing
-				// VACUOUSLY over the empty slice. zoneInterfaceMemberNodes
-				// rewrites that shape onto the block shape this loop already
-				// understands, so every spelling reaches the same body.
-				for _, iface := range zoneInterfaceMemberNodes(prop) {
-					// #5248: accumulate EVERY interface name this member node
-					// carries, across all parser AST shapes, not just the first.
-					// A bracketed flat-set / load-override membership list
-					// `interfaces [ ge-0/0/0 ge-0/0/1 ]` arrives bracket-stripped
-					// (the lexer drops `[`/`]`, #2419). Unlike a multi:true value
-					// leaf — where the surplus tokens collapse onto ONE leaf's
-					// Keys and firewallMatchValues recovers them — the schema
-					// models the interface name as a WILDCARD container, so
-					// SetPath NESTS each surplus token under the first member
-					// (`interfaces -> ge-0/0/0(container) -> ge-0/0/1(leaf)`; a
-					// 3+ list collapses the whole tail onto the deepest leaf's
-					// Keys, e.g. `[b c]`). Reading only iface.Name() compiled just
-					// the FIRST member and SILENTLY DROPPED the rest — a zone-
-					// membership (security boundary) loss: the dropped interfaces
-					// are left unmanaged / brought DOWN or evaluated against the
-					// wrong zone, and their absence hid them from the strict
-					// zone-interface-defined gate. zoneInterfaceMembers flattens
-					// the nested chain so the hierarchical `{ a; b; }`, a single
-					// `a`, and the bracketed `[ a b c ]` all yield every member.
-					// #7031: FIRST-SEEN dedupe. Naming a member twice -- once
-					// bare for membership, once as the head of a
-					// host-inbound-traffic body -- is the ORDINARY way an
-					// operator adds a member and then gives it an override, and
-					// it is what `show configuration | display set` emits for a
-					// zone that has both. It compiled to the member appearing
-					// TWICE in zone.Interfaces, committing clean with no
-					// warning, on master and on every tree measured in the
-					// issue.
-					//
-					// Deduping here rather than at each consumer because the
-					// duplicate has no meaning to preserve: zone membership is
-					// a SET. The per-interface override map is already keyed by
-					// name and merges (#4544/#4818), so the second mention has
-					// always contributed nothing but the extra slice entry.
-					//
-					// First-seen order, not sorted: the slice order is what the
-					// operator authored and several renderers show it verbatim.
-					for _, member := range zoneInterfaceMembers(iface) {
-						if !zoneHasInterface(zone, member) {
-							zone.Interfaces = append(zone.Interfaces, member)
-						}
-					}
-					// #3362: per-interface host-inbound-traffic override
-					// (`interfaces <if> host-inbound-traffic { ... }`). Same
-					// token grammar as the zone-level stanza; parsed by the
-					// shared parseHostInboundNode so both shapes stay in lockstep.
-					//
-					// #4544/#4818: MERGE across ALL host-inbound-traffic blocks
-					// under this interface (Junos merge semantics), not
-					// FindChild (first-wins) and not a bare overwrite. A
-					// hand-authored `load override` config can carry two
-					// literal blocks under one interface — either as siblings
-					// within one security-zone instance (#4544) or split
-					// across two duplicate top-level security-zone instances
-					// naming the same interface (#4818); the hierarchical
-					// parser keeps all of them as separate same-key siblings —
-					// it does NOT merge — so FindChild would read only the
-					// first and a plain map assignment would drop whichever
-					// instance's interface block ran first. Merge into
-					// whatever is already recorded for this interface name.
-					var hib *HostInboundTraffic
-					// #15731: an apply-macro on this member's own Keys owns its
-					// braced payload (#12835) — the parser attaches it as this
-					// node's Children, so a `host-inbound-traffic ...` line
-					// inside the macro body arrives here as a child. It is
-					// opaque macro data, not an authored override: reading it
-					// would mint a phantom InterfaceHostInbound whose unknown
-					// tokens then hard-reject strict compilation. Skip the
-					// HIB read entirely when apply-meta stops the member Keys
-					// (mirrors zoneInterfaceMembers / zoneInterfaceMemberPackedTail).
-					if _, macroOwned := zoneInterfaceKeysBeforeBody(iface); !macroOwned || !zoneInterfaceHasApplyMeta(iface) {
-						for _, hn := range iface.FindChildren("host-inbound-traffic") {
-							hib = mergeHostInbound(hib, parseHostInboundNode(hn))
-						}
-					}
-					if hib != nil {
-						if zone.InterfaceHostInbound == nil {
-							zone.InterfaceHostInbound = make(map[string]*HostInboundTraffic)
-						}
-						// #6391: apply the override to every name this member
-						// node's KEYS carry, and NEVER to its CHILDREN. That
-						// distinction is the whole fix; the two shapes it
-						// separates are NOT interchangeable:
-						//
-						//   Keys=[a b], no membership child
-						//       `interfaces { [ a b ] { host-inbound {...} } }`
-						//     A body authored ON a bracket membership — the
-						//     operator's MULTI-MEMBER intent. Both a and b get it.
-						//
-						//   Keys=[a], child leaf Keys=[b]
-						//       `set ... interfaces [ a b ]`
-						//       `set ... interfaces a host-inbound-traffic ... ssh`
-						//     SetPath descends the wildcard for the FIRST token and
-						//     NESTS the bracket tail under it, then the second `set`
-						//     REUSES that same `a` container — so `a` ends up
-						//     carrying both the `b` membership leaf and the
-						//     host-inbound body even though ssh is scoped to `a`
-						//     ALONE. Fanning here is the #6389 regression: it opens
-						//     ssh on `b`, which the operator never configured
-						//     (admission is additive — host_inbound_view.go).
-						//
-						// NO `set`-authored config can reach the multi-key shape,
-						// which is what makes keying on Keys safe rather than merely
-						// convenient. The interface name is `schemaNode.wildcard`
-						// with args:0, multi:false, compoundKey:false
-						// (schema_security.go), so SetPath's
-						// `nodeKeyCount = 1 + childSchema.args` (ast_edit.go:289 —
-						// NOT the same-named local in schema_complete.go,
-						// which is the completion walker and decides
-						// nothing here) is ALWAYS 1 and its
-						// container branch stores exactly one token; surplus bracket
-						// tokens can only land on a child LEAF (which has no
-						// host-inbound child, so it is never read here). A bracket
-						// list is therefore len(Keys)==1 from `set` and len(Keys)>1
-						// ONLY from a hierarchical parse (`load override`, a
-						// hand-authored config file). Pinned by
-						// TestHostInbound6391FlatSetNeverYieldsMultiKeyContainer.
-						//
-						// A nested extra membership under a bracket body
-						// (`[ a b ] { c; host-inbound {...} }`) fans to a and b but
-						// NOT c: c is a nested membership statement, not a bracket
-						// sibling of the node the body was authored on. Deliberate
-						// (#6391), pinned by
-						// TestHostInbound6391BracketBodyNestedExtraMemberScope.
-						//
-						// cloneHostInbound per key: mergeHostInbound returns src
-						// unchanged when dst is nil, so storing `hib` directly under
-						// several keys would alias ONE value across the members and a
-						// later in-place merge on one would surface on all of them.
-						//
-						// #6525: read the keys through zoneInterfaceMemberKeys
-						// rather than iface.Keys directly. It is iface.Keys
-						// TRUNCATED at the first body keyword, which is a no-op
-						// for every shape that existed before (`set` never puts
-						// a body keyword on Keys — it is always a child) and
-						// stops the compact-leaf packed spelling
-						// `interfaces a host-inbound-traffic ...` from keying
-						// the override on its own body tokens.
-						//
-						// #7027, measured at b4ac34f10: this truncation is now a
-						// BELT IN FRONT OF A GATE, not a load-bearing read. The
-						// issue reports that reverting it to iface.Keys leaves
-						// the whole pkg/config suite green and reads that as a
-						// missing assertion. It is not missing — the two
-						// expressions never DIFFER. Instrumenting this site to
-						// print whenever len(truncated) != len(iface.Keys) and
-						// running the full package (rc=0, 0 build errors, 0
-						// failures) produced ZERO hits: no config in the corpus
-						// reaches a member node whose Keys carry a body keyword.
-						//
-						// The spelling the truncation was written for is now
-						// rejected earlier: #6735's packed-tail gate refuses
-						// `interfaces a host-inbound-traffic <tail>` at commit
-						// (validateZoneInterfacePackedTailStrict), and the one
-						// remaining keyword-on-Keys spelling, the nested block
-						// `interfaces { a host-inbound-traffic { ... } }`, does
-						// not reach this branch at all — it compiles to the
-						// member with NO override, which is a separate question
-						// and not this one.
-						//
-						// So a regression test for the truncation would first
-						// need a config that both differs AND commits, and the
-						// sweep found none. Kept rather than deleted, and kept
-						// with this note rather than dressed up as load-bearing:
-						// if #6735's gate is ever narrowed, this belt becomes
-						// live again, and the next reader should know the
-						// dependency runs in that direction.
-						for _, name := range zoneInterfaceMemberKeys(iface) {
-							zone.InterfaceHostInbound[name] = mergeHostInbound(zone.InterfaceHostInbound[name], cloneHostInbound(hib))
-						}
-					}
-				}
-			case "screen":
-				if len(prop.Keys) > 2 || len(prop.Children) > 0 {
-					// #14343: screen is a leaf; surplus keys or a braced body
-					// folded onto it (compact header) cannot be zone body.
-					// Record as unknown so strict rejects and lenient
-					// quarantines instead of silently dropping interfaces /
-					// host-inbound / address-book carried in that body.
-					recordUnknownSecurityZoneChild11575(zone, prop.Keys)
-				} else {
-					zone.ScreenProfile = nodeVal(prop)
-					zone.ScreenProfileConfigured = true
-				}
-			case "host-inbound-traffic":
-				// #4544: MERGE repeated zone-level host-inbound-traffic blocks
-				// rather than overwrite (Junos merge semantics). This case
-				// fires once per host-inbound-traffic child; `load override`
-				// splices a raw hierarchical parse whose two literal blocks stay
-				// as separate siblings, so a bare `=` assignment silently drops
-				// every block but the last. Accumulate into the zone value.
-				// #4818 extends this across duplicate top-level security-zone
-				// instances too, since zone is now find-or-create.
-				zone.HostInboundTraffic = mergeHostInbound(zone.HostInboundTraffic, parseHostInboundNode(prop))
-			case "tcp-rst":
-				// #13097/#13119: tcp-rst is an args:0 flag. Malformed
-				// operands are not interpreted as "enable"; record them on
-				// the existing strict-reject / tolerant-warning channel and
-				// leave the flag unset.
-				if len(prop.Keys) > 1 || len(prop.Children) > 0 {
-					recordUnknownSecurityZoneChild11575(zone, prop.Keys)
-				} else {
-					zone.TCPRst = true
-				}
-			case "description":
-				if len(prop.Keys) > 2 || len(prop.Children) > 0 {
-					// #14343: same leaf-body guard as screen.
-					recordUnknownSecurityZoneChild11575(zone, prop.Keys)
-				} else {
-					zone.Description = nodeVal(prop)
-				}
-			case "address-book":
-				// #3061: zone-local address book. Same entry grammar as the
-				// global book; resolved into the global book under
-				// zone-qualified internal names later (resolveZoneLocalAddressBooks).
-				// #4818: find-or-create rather than always allocating a fresh
-				// AddressBook, so a second security-zone instance's
-				// address-book block MERGES into the first's (by address/
-				// address-set name, via parseAddressBookEntries's own
-				// find-or-create — #4706) instead of replacing it outright.
-				ab := zone.AddressBook
-				if ab == nil {
-					ab = &AddressBook{
-						Addresses:   make(map[string]*Address),
-						AddressSets: make(map[string]*AddressSet),
-					}
-					zone.AddressBook = ab
-				}
-				parseAddressBookEntries(prop, ab)
-				if len(ab.UnknownBookEntries) > 0 {
-					zone.DroppedEnforcementChild = true
-				}
-			default:
-				recordUnknownSecurityZoneChild11575(zone, prop.Keys)
-			}
+// managementFunctionalZoneInstances15668 returns every `functional-zone
+// management` body under zones, across the AST shapes the stanza reaches
+// the compiler in: the braced block (`functional-zone { management {
+// ... } }`), the compact header (`functional-zone management { ... }`,
+// whose body rides as children of the management-keyed node), and the
+// flat-set descent (one management container reused per `set` line).
+// Anything else under functional-zone is not Junos's management zone and
+// is ignored here; the closed-world schema rejects it at commit.
+func managementFunctionalZoneInstances15668(zonesNode *Node) []*Node {
+	var out []*Node
+	for _, fz := range zonesNode.FindChildren("functional-zone") {
+		out = append(out, fz.FindChildren("management")...)
+		if len(fz.Keys) > 1 && fz.Keys[1] == "management" {
+			out = append(out, fz)
 		}
+	}
+	return out
+}
+
+func compileZones(node *Node, sec *SecurityConfig) error {
+	// #15668: Junos's management functional zone compiles into the zone
+	// named "management" through the SAME body compiler as a
+	// security-zone, so its interfaces/host-inbound/screen/description
+	// receive identical strict validation and tolerant quarantine. It is
+	// compiled first; a literal `security-zone management` then merges
+	// into the same ZoneConfig find-or-create (last-wins scalars, unioned
+	// membership/host-inbound, #4818), never a second zone object.
+	for _, mgmt := range managementFunctionalZoneInstances15668(node) {
+		compileZoneBody15668(mgmt, "management", functionalZoneManagementSchema15668(), sec)
+	}
+	for _, inst := range bracketedGroupInstances8794(node.FindChildren("security-zone")) {
+		compileZoneBody15668(inst.node, inst.name, securityZoneSchema9792(), sec)
 	}
 	// Keep authored bindings intact through P6b: strict membership checks
 	// need them to preserve first-error priority, and tolerant conflict
@@ -805,6 +562,293 @@ func compileZones(node *Node, sec *SecurityConfig) error {
 	// clearDroppedEnforcementZoneBindings11575 performs the tolerant-path
 	// clearing after all compiler gates have run.
 	return nil
+}
+
+// compileZoneBody15668 compiles one zone body (a security-zone instance
+// or the functional-zone management stanza, #15668) into
+// sec.Zones[name], find-or-create.
+//
+// #4818: find-or-create by name rather than always allocating a fresh
+// ZoneConfig. A hand-authored `load override` config can carry two
+// literal `security-zone <name> { ... }` TOP-LEVEL sibling blocks — the
+// hierarchical parser (parseStatements) keeps them as separate same-key
+// siblings (it does not merge), so namedInstances yields TWO entries
+// for the same zone name. The pre-fix unconditional
+// `zone := &ZoneConfig{...}` + `sec.Zones[inst.name] = zone` let the
+// second instance silently REPLACE the first, discarding its
+// interfaces/host-inbound/address-book/description/screen/tcp-rst
+// wholesale. This is the outer-instance analogue of the #4544 fix below,
+// which already merges repeated host-inbound-traffic blocks WITHIN one
+// instance — that fix is a no-op against a duplicate instance because it
+// never runs on the first instance's properties once the whole
+// ZoneConfig is replaced. Properties below now accumulate into the SAME
+// zone across every sibling instance: Interfaces appends,
+// HostInboundTraffic/InterfaceHostInbound merge via mergeHostInbound,
+// AddressBook merges by name (find-or-create, same as
+// parseAddressBookEntries already does for repeated address/address-set
+// children — #4706). ScreenProfile, TCPRst, and Description are scalars
+// with no natural union; they are last-wins across sibling instances
+// (matches their existing last-wins behaviour across repeated properties
+// WITHIN one instance).
+func compileZoneBody15668(instNode *Node, instName string, schema *schemaNode, sec *SecurityConfig) {
+	zone := sec.Zones[instName]
+	if zone == nil {
+		zone = &ZoneConfig{Name: instName}
+		sec.Zones[instName] = zone
+	}
+
+	// #9792: a packed one-line run reaches this reader on the lenient path
+	// (Store.Load / Store.SyncApply); expand it as #9235 does. Lenient path only.
+	for _, prop := range expandResolvingRuns9792(instNode.Children, schema) {
+		switch prop.Name() {
+		case "interfaces":
+			// #6525: iterate the NORMALIZED member nodes, not prop.Children
+			// directly. The hierarchical COMPACT-LEAF spelling
+			// `interfaces ge-0/0/1.0;` carries the member name on the
+			// stanza's OWN Keys tail with nil Children, so a bare
+			// `range prop.Children` ran the body ZERO times and the zone
+			// compiled with no interfaces at all — silently, cleanly, and
+			// with both strict zone-membership gates then passing
+			// VACUOUSLY over the empty slice. zoneInterfaceMemberNodes
+			// rewrites that shape onto the block shape this loop already
+			// understands, so every spelling reaches the same body.
+			for _, iface := range zoneInterfaceMemberNodes(prop) {
+				// #5248: accumulate EVERY interface name this member node
+				// carries, across all parser AST shapes, not just the first.
+				// A bracketed flat-set / load-override membership list
+				// `interfaces [ ge-0/0/0 ge-0/0/1 ]` arrives bracket-stripped
+				// (the lexer drops `[`/`]`, #2419). Unlike a multi:true value
+				// leaf — where the surplus tokens collapse onto ONE leaf's
+				// Keys and firewallMatchValues recovers them — the schema
+				// models the interface name as a WILDCARD container, so
+				// SetPath NESTS each surplus token under the first member
+				// (`interfaces -> ge-0/0/0(container) -> ge-0/0/1(leaf)`; a
+				// 3+ list collapses the whole tail onto the deepest leaf's
+				// Keys, e.g. `[b c]`). Reading only iface.Name() compiled just
+				// the FIRST member and SILENTLY DROPPED the rest — a zone-
+				// membership (security boundary) loss: the dropped interfaces
+				// are left unmanaged / brought DOWN or evaluated against the
+				// wrong zone, and their absence hid them from the strict
+				// zone-interface-defined gate. zoneInterfaceMembers flattens
+				// the nested chain so the hierarchical `{ a; b; }`, a single
+				// `a`, and the bracketed `[ a b c ]` all yield every member.
+				// #7031: FIRST-SEEN dedupe. Naming a member twice -- once
+				// bare for membership, once as the head of a
+				// host-inbound-traffic body -- is the ORDINARY way an
+				// operator adds a member and then gives it an override, and
+				// it is what `show configuration | display set` emits for a
+				// zone that has both. It compiled to the member appearing
+				// TWICE in zone.Interfaces, committing clean with no
+				// warning, on master and on every tree measured in the
+				// issue.
+				//
+				// Deduping here rather than at each consumer because the
+				// duplicate has no meaning to preserve: zone membership is
+				// a SET. The per-interface override map is already keyed by
+				// name and merges (#4544/#4818), so the second mention has
+				// always contributed nothing but the extra slice entry.
+				//
+				// First-seen order, not sorted: the slice order is what the
+				// operator authored and several renderers show it verbatim.
+				for _, member := range zoneInterfaceMembers(iface) {
+					if !zoneHasInterface(zone, member) {
+						zone.Interfaces = append(zone.Interfaces, member)
+					}
+				}
+				// #3362: per-interface host-inbound-traffic override
+				// (`interfaces <if> host-inbound-traffic { ... }`). Same
+				// token grammar as the zone-level stanza; parsed by the
+				// shared parseHostInboundNode so both shapes stay in lockstep.
+				//
+				// #4544/#4818: MERGE across ALL host-inbound-traffic blocks
+				// under this interface (Junos merge semantics), not
+				// FindChild (first-wins) and not a bare overwrite. A
+				// hand-authored `load override` config can carry two
+				// literal blocks under one interface — either as siblings
+				// within one security-zone instance (#4544) or split
+				// across two duplicate top-level security-zone instances
+				// naming the same interface (#4818); the hierarchical
+				// parser keeps all of them as separate same-key siblings —
+				// it does NOT merge — so FindChild would read only the
+				// first and a plain map assignment would drop whichever
+				// instance's interface block ran first. Merge into
+				// whatever is already recorded for this interface name.
+				var hib *HostInboundTraffic
+				// #15731: an apply-macro on this member's own Keys owns its
+				// braced payload (#12835) — the parser attaches it as this
+				// node's Children, so a `host-inbound-traffic ...` line
+				// inside the macro body arrives here as a child. It is
+				// opaque macro data, not an authored override: reading it
+				// would mint a phantom InterfaceHostInbound whose unknown
+				// tokens then hard-reject strict compilation. Skip the
+				// HIB read entirely when apply-meta stops the member Keys
+				// (mirrors zoneInterfaceMembers / zoneInterfaceMemberPackedTail).
+				if _, macroOwned := zoneInterfaceKeysBeforeBody(iface); !macroOwned || !zoneInterfaceHasApplyMeta(iface) {
+					for _, hn := range iface.FindChildren("host-inbound-traffic") {
+						hib = mergeHostInbound(hib, parseHostInboundNode(hn))
+					}
+				}
+				if hib != nil {
+					if zone.InterfaceHostInbound == nil {
+						zone.InterfaceHostInbound = make(map[string]*HostInboundTraffic)
+					}
+					// #6391: apply the override to every name this member
+					// node's KEYS carry, and NEVER to its CHILDREN. That
+					// distinction is the whole fix; the two shapes it
+					// separates are NOT interchangeable:
+					//
+					//   Keys=[a b], no membership child
+					//       `interfaces { [ a b ] { host-inbound {...} } }`
+					//     A body authored ON a bracket membership — the
+					//     operator's MULTI-MEMBER intent. Both a and b get it.
+					//
+					//   Keys=[a], child leaf Keys=[b]
+					//       `set ... interfaces [ a b ]`
+					//       `set ... interfaces a host-inbound-traffic ... ssh`
+					//     SetPath descends the wildcard for the FIRST token and
+					//     NESTS the bracket tail under it, then the second `set`
+					//     REUSES that same `a` container — so `a` ends up
+					//     carrying both the `b` membership leaf and the
+					//     host-inbound body even though ssh is scoped to `a`
+					//     ALONE. Fanning here is the #6389 regression: it opens
+					//     ssh on `b`, which the operator never configured
+					//     (admission is additive — host_inbound_view.go).
+					//
+					// NO `set`-authored config can reach the multi-key shape,
+					// which is what makes keying on Keys safe rather than merely
+					// convenient. The interface name is `schemaNode.wildcard`
+					// with args:0, multi:false, compoundKey:false
+					// (schema_security.go), so SetPath's
+					// `nodeKeyCount = 1 + childSchema.args` (ast_edit.go:289 —
+					// NOT the same-named local in schema_complete.go,
+					// which is the completion walker and decides
+					// nothing here) is ALWAYS 1 and its
+					// container branch stores exactly one token; surplus bracket
+					// tokens can only land on a child LEAF (which has no
+					// host-inbound child, so it is never read here). A bracket
+					// list is therefore len(Keys)==1 from `set` and len(Keys)>1
+					// ONLY from a hierarchical parse (`load override`, a
+					// hand-authored config file). Pinned by
+					// TestHostInbound6391FlatSetNeverYieldsMultiKeyContainer.
+					//
+					// A nested extra membership under a bracket body
+					// (`[ a b ] { c; host-inbound {...} }`) fans to a and b but
+					// NOT c: c is a nested membership statement, not a bracket
+					// sibling of the node the body was authored on. Deliberate
+					// (#6391), pinned by
+					// TestHostInbound6391BracketBodyNestedExtraMemberScope.
+					//
+					// cloneHostInbound per key: mergeHostInbound returns src
+					// unchanged when dst is nil, so storing `hib` directly under
+					// several keys would alias ONE value across the members and a
+					// later in-place merge on one would surface on all of them.
+					//
+					// #6525: read the keys through zoneInterfaceMemberKeys
+					// rather than iface.Keys directly. It is iface.Keys
+					// TRUNCATED at the first body keyword, which is a no-op
+					// for every shape that existed before (`set` never puts
+					// a body keyword on Keys — it is always a child) and
+					// stops the compact-leaf packed spelling
+					// `interfaces a host-inbound-traffic ...` from keying
+					// the override on its own body tokens.
+					//
+					// #7027, measured at b4ac34f10: this truncation is now a
+					// BELT IN FRONT OF A GATE, not a load-bearing read. The
+					// issue reports that reverting it to iface.Keys leaves
+					// the whole pkg/config suite green and reads that as a
+					// missing assertion. It is not missing — the two
+					// expressions never DIFFER. Instrumenting this site to
+					// print whenever len(truncated) != len(iface.Keys) and
+					// running the full package (rc=0, 0 build errors, 0
+					// failures) produced ZERO hits: no config in the corpus
+					// reaches a member node whose Keys carry a body keyword.
+					//
+					// The spelling the truncation was written for is now
+					// rejected earlier: #6735's packed-tail gate refuses
+					// `interfaces a host-inbound-traffic <tail>` at commit
+					// (validateZoneInterfacePackedTailStrict), and the one
+					// remaining keyword-on-Keys spelling, the nested block
+					// `interfaces { a host-inbound-traffic { ... } }`, does
+					// not reach this branch at all — it compiles to the
+					// member with NO override, which is a separate question
+					// and not this one.
+					//
+					// So a regression test for the truncation would first
+					// need a config that both differs AND commits, and the
+					// sweep found none. Kept rather than deleted, and kept
+					// with this note rather than dressed up as load-bearing:
+					// if #6735's gate is ever narrowed, this belt becomes
+					// live again, and the next reader should know the
+					// dependency runs in that direction.
+					for _, name := range zoneInterfaceMemberKeys(iface) {
+						zone.InterfaceHostInbound[name] = mergeHostInbound(zone.InterfaceHostInbound[name], cloneHostInbound(hib))
+					}
+				}
+			}
+		case "screen":
+			if len(prop.Keys) > 2 || len(prop.Children) > 0 {
+				// #14343: screen is a leaf; surplus keys or a braced body
+				// folded onto it (compact header) cannot be zone body.
+				// Record as unknown so strict rejects and lenient
+				// quarantines instead of silently dropping interfaces /
+				// host-inbound / address-book carried in that body.
+				recordUnknownSecurityZoneChild11575(zone, prop.Keys)
+			} else {
+				zone.ScreenProfile = nodeVal(prop)
+				zone.ScreenProfileConfigured = true
+			}
+		case "host-inbound-traffic":
+			// #4544: MERGE repeated zone-level host-inbound-traffic blocks
+			// rather than overwrite (Junos merge semantics). This case
+			// fires once per host-inbound-traffic child; `load override`
+			// splices a raw hierarchical parse whose two literal blocks stay
+			// as separate siblings, so a bare `=` assignment silently drops
+			// every block but the last. Accumulate into the zone value.
+			// #4818 extends this across duplicate top-level security-zone
+			// instances too, since zone is now find-or-create.
+			zone.HostInboundTraffic = mergeHostInbound(zone.HostInboundTraffic, parseHostInboundNode(prop))
+		case "tcp-rst":
+			// #13097/#13119: tcp-rst is an args:0 flag. Malformed
+			// operands are not interpreted as "enable"; record them on
+			// the existing strict-reject / tolerant-warning channel and
+			// leave the flag unset.
+			if len(prop.Keys) > 1 || len(prop.Children) > 0 {
+				recordUnknownSecurityZoneChild11575(zone, prop.Keys)
+			} else {
+				zone.TCPRst = true
+			}
+		case "description":
+			if len(prop.Keys) > 2 || len(prop.Children) > 0 {
+				// #14343: same leaf-body guard as screen.
+				recordUnknownSecurityZoneChild11575(zone, prop.Keys)
+			} else {
+				zone.Description = nodeVal(prop)
+			}
+		case "address-book":
+			// #3061: zone-local address book. Same entry grammar as the
+			// global book; resolved into the global book under
+			// zone-qualified internal names later (resolveZoneLocalAddressBooks).
+			// #4818: find-or-create rather than always allocating a fresh
+			// AddressBook, so a second security-zone instance's
+			// address-book block MERGES into the first's (by address/
+			// address-set name, via parseAddressBookEntries's own
+			// find-or-create — #4706) instead of replacing it outright.
+			ab := zone.AddressBook
+			if ab == nil {
+				ab = &AddressBook{
+					Addresses:   make(map[string]*Address),
+					AddressSets: make(map[string]*AddressSet),
+				}
+				zone.AddressBook = ab
+			}
+			parseAddressBookEntries(prop, ab)
+			if len(ab.UnknownBookEntries) > 0 {
+				zone.DroppedEnforcementChild = true
+			}
+		default:
+			recordUnknownSecurityZoneChild11575(zone, prop.Keys)
+		}
+	}
 }
 
 // zoneInterfaceMembers flattens every interface name a `security-zone`
