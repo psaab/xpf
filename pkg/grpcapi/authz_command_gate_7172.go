@@ -3,6 +3,7 @@ package grpcapi
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -261,6 +262,18 @@ func rpcCanonicalCommand(fullMethod string, req any) (string, bool) {
 			return "", false
 		}
 		return systemInfoCanonicalCommand(info.GetType())
+	case getBGPStatusMethodName:
+		bgp, isBGP := req.(*pb.GetBGPStatusRequest)
+		if !isBGP || bgp == nil {
+			return "", false
+		}
+		return bgpStatusCanonicalCommand(bgp.GetType())
+	case getNATRuleStatsMethodName:
+		nat, isNAT := req.(*pb.GetNATRuleStatsRequest)
+		if !isNAT || nat == nil {
+			return "", false
+		}
+		return natRuleStatsCanonicalCommand(nat.GetNatType())
 	}
 	cmd, mapped := methodCanonicalCommand[method]
 	return cmd, mapped
@@ -297,6 +310,68 @@ func systemInfoCanonicalCommand(infoType string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// bgpStatusCanonicalCommand attributes each GetBGPStatus selection to the
+// `show protocols bgp …` command the remote cli line performs (#15076).
+// The argument-free charge drops the neighbor IP, exactly as the other
+// tables drop argument values. Unknown and `groups` selections have no
+// cmdtree command and return unresolved, so a restricted class denies
+// rather than receiving the summary charge.
+func bgpStatusCanonicalCommand(typ string) (string, bool) {
+	switch {
+	case typ == "" || typ == "summary":
+		return "show protocols bgp summary", true
+	case typ == "routes":
+		return "show protocols bgp routes", true
+	case typ == "neighbor":
+		return "show protocols bgp neighbor", true
+	case strings.HasPrefix(typ, "neighbor:"):
+		if ip := strings.TrimPrefix(typ, "neighbor:"); ip != "" && net.ParseIP(ip) != nil {
+			return "show protocols bgp neighbor", true
+		}
+		return "", false
+	case strings.HasPrefix(typ, "advertised-routes:"):
+		if ip := strings.TrimPrefix(typ, "advertised-routes:"); ip != "" && net.ParseIP(ip) != nil {
+			return "show protocols bgp neighbor advertised-routes", true
+		}
+		return "", false
+	case strings.HasPrefix(typ, "received-routes:"):
+		if ip := strings.TrimPrefix(typ, "received-routes:"); ip != "" && net.ParseIP(ip) != nil {
+			return "show protocols bgp neighbor received-routes", true
+		}
+		return "", false
+	default:
+		return "", false
+	}
+}
+
+// natRuleStatsCanonicalCommand attributes GetNATRuleStats by nat_type
+// (#15076). The handler accepts only "", "source" and "destination";
+// any other selector is unresolved here so a restricted class denies
+// instead of receiving the source charge. The rule-set name is an
+// argument value and stays dropped, exactly as the topic tables drop
+// theirs — both the `rule` and `rule-set <name>` lines perform this RPC
+// for the same family charge.
+func natRuleStatsCanonicalCommand(natType string) (string, bool) {
+	switch natType {
+	case "", "source":
+		return "show security nat source rule", true
+	case "destination":
+		return "show security nat destination rule", true
+	default:
+		return "", false
+	}
+}
+
+var bgpNATCanonicalCommands15076 = []string{
+	"show protocols bgp summary",
+	"show protocols bgp routes",
+	"show protocols bgp neighbor",
+	"show protocols bgp neighbor advertised-routes",
+	"show protocols bgp neighbor received-routes",
+	"show security nat source rule",
+	"show security nat destination rule",
 }
 
 // showTextTopicCanonicalCommand resolves one ShowText topic, using the SAME
@@ -344,7 +419,8 @@ func init() {
 }
 
 // allCanonicalCommands is every command string this surface can ever present to
-// a deny regex — the union of the three tables. Built once.
+// a deny regex — the union of the tables plus the request-decoded
+// GetSystemInfo / GetBGPStatus / GetNATRuleStats charges (#15076). Built once.
 var allCanonicalCommands = sync.OnceValue(func() []string {
 	seen := map[string]bool{}
 	for _, m := range []map[string]string{
@@ -353,6 +429,14 @@ var allCanonicalCommands = sync.OnceValue(func() []string {
 		for _, cmd := range m {
 			seen[cmd] = true
 		}
+	}
+	for _, infoType := range []string{"uptime", "memory", "processes", "processes-summary", "rescue-configuration", "storage", "users", "connections", "boot-messages", "arp", "ipv6-neighbors"} {
+		if cmd, ok := systemInfoCanonicalCommand(infoType); ok {
+			seen[cmd] = true
+		}
+	}
+	for _, cmd := range bgpNATCanonicalCommands15076 {
+		seen[cmd] = true
 	}
 	out := make([]string, 0, len(seen))
 	for cmd := range seen {

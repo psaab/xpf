@@ -86,7 +86,6 @@ var restRouteCommand = map[string]string{
 	"GET /api/v1/security/match":                       "show security match-policies",
 	"GET /api/v1/security/nat/source":                  "show security nat source pool",
 	"GET /api/v1/security/nat/pools":                   "show security nat source pool",
-	"GET /api/v1/security/nat/rules":                   "show security nat source rule",
 	"GET /api/v1/security/nat/destination":             "show security nat destination pool",
 	"GET /api/v1/security/nat/deterministic":           "show security nat source deterministic-nat",
 	"GET /api/v1/security/screen":                      "show security screen statistics",
@@ -97,7 +96,6 @@ var restRouteCommand = map[string]string{
 	"GET /api/v1/dhcp/leases":                          "show dhcp leases",
 	"GET /api/v1/dhcp/identifiers":                     "show dhcp client-identifier",
 	"GET /api/v1/routes":                               "show route",
-	"GET /api/v1/routing/bgp":                          "show bgp summary",
 	"GET /api/v1/config":                               "show configuration",
 	"GET /api/v1/config/show":                          "show configuration",
 	"GET /api/v1/config/compare":                       "show configuration",
@@ -158,9 +156,11 @@ var restRoutesNoCommand = map[string]string{
 	// Request-decoded routes: the command depends on a field of the request, so
 	// it is resolved at call time by restRequestCommand9952 rather than keyed by
 	// route. They are listed here so the census sees a decision, not a gap.
-	"GET /api/v1/show-text":      "request-decoded: the command is the TOPIC's, resolved per request from cmdtree.ShowTextTopicCommands()",
-	"POST /api/v1/system/action": "request-decoded: the command is the VERB's, resolved per request from authz.SystemActionVerbCommand",
-	"GET /api/v1/system/info":    "request-decoded: the command is the TYPE's, resolved per request (show system uptime / show system memory, as gRPC charges GetSystemInfo)",
+	"GET /api/v1/show-text":          "request-decoded: the command is the TOPIC's, resolved per request from cmdtree.ShowTextTopicCommands()",
+	"POST /api/v1/system/action":     "request-decoded: the command is the VERB's, resolved per request from authz.SystemActionVerbCommand",
+	"GET /api/v1/system/info":        "request-decoded: the command is the TYPE's, resolved per request (show system uptime / show system memory, as gRPC charges GetSystemInfo)",
+	"GET /api/v1/routing/bgp":        "request-decoded: the command is the ?type='s, resolved per request (show protocols bgp summary / routes, as gRPC charges GetBGPStatus) (#15076)",
+	"GET /api/v1/security/nat/rules": "request-decoded: the command is the ?type=/?nat_type='s, resolved per request (show security nat source/destination rule, as gRPC charges GetNATRuleStats) (#15076)",
 
 	// Read endpoints with no argument-free operational twin. Each is charged
 	// nothing rather than charged a command an operator cannot type: an entry
@@ -213,10 +213,15 @@ var allRESTCanonicalCommands9952 = sync.OnceValue(func() []string {
 		cmdtree.ShowTextTopicCommands(),
 		authz.SystemActionVerbCommand,
 		restSystemInfoCommands14146,
+		restBGPCommands15076,
+		restNATRuleCommands15076,
 	} {
 		for _, command := range commands {
 			seen[command] = true
 		}
+	}
+	for _, command := range restBGPNATCanonicalCommands15076 {
+		seen[command] = true
 	}
 	out := make([]string, 0, len(seen))
 	for command := range seen {
@@ -242,6 +247,38 @@ var restSystemInfoCommands14146 = map[string]string{
 	"memory": "show system memory",
 }
 
+// restBGPCommands15076 maps the REST bgpHandler `type` selector to the
+// command gRPC charges for the same GetBGPStatus selection (#15076).
+// bgpHandler serves only summary (default) and routes; any other type
+// falls into its summary branch today, but charging it summary would
+// repeat the fixed-charge defect, so it resolves to no command and
+// denies for a restricted class.
+var restBGPCommands15076 = map[string]string{
+	"":        "show protocols bgp summary",
+	"summary": "show protocols bgp summary",
+	"routes":  "show protocols bgp routes",
+}
+
+// restNATRuleCommands15076 maps the NAT rules selector to the command
+// gRPC charges for GetNATRuleStats. The REST handler always serves
+// source rules; `type`/`nat_type` are not handler inputs, so a
+// destination (or unknown) selector names a different command than the
+// one served and must be charged as that command — denying under a
+// destination deny and refusing under a source-only allow — rather
+// than silently receiving the source charge (#15076).
+var restNATRuleCommands15076 = map[string]string{
+	"":            "show security nat source rule",
+	"source":      "show security nat source rule",
+	"destination": "show security nat destination rule",
+}
+
+var restBGPNATCanonicalCommands15076 = []string{
+	"show protocols bgp summary",
+	"show protocols bgp routes",
+	"show security nat source rule",
+	"show security nat destination rule",
+}
+
 // restRequestCommand9952 resolves the canonical command for the request-decoded
 // routes.
 //
@@ -259,6 +296,16 @@ func restRequestCommand9952(route string, r *http.Request, actionVerb string) (s
 		return cmd, ok
 	case "GET /api/v1/system/info":
 		cmd, ok := restSystemInfoCommands14146[r.URL.Query().Get("type")]
+		return cmd, ok
+	case "GET /api/v1/routing/bgp":
+		cmd, ok := restBGPCommands15076[r.URL.Query().Get("type")]
+		return cmd, ok
+	case "GET /api/v1/security/nat/rules":
+		sel := r.URL.Query().Get("type")
+		if sel == "" {
+			sel = r.URL.Query().Get("nat_type")
+		}
+		cmd, ok := restNATRuleCommands15076[sel]
 		return cmd, ok
 	}
 	return "", false
@@ -381,7 +428,8 @@ func canonicalRESTRoute14712(method, path string) string {
 
 func isRequestDecodedRoute9952(route string) bool {
 	return route == "GET /api/v1/show-text" || route == "POST /api/v1/system/action" ||
-		route == "GET /api/v1/system/info"
+		route == "GET /api/v1/system/info" || route == "GET /api/v1/routing/bgp" ||
+		route == "GET /api/v1/security/nat/rules"
 }
 
 func evaluateCommand9952(rules config.CompiledLoginRegexes, class, cmd string) error {
