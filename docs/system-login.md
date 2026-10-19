@@ -578,6 +578,28 @@ Three consequences an operator should know:
   unaffected. The decision is shared (`AuthorizeConfigShow*` in
   `pkg/config`) so the surfaces cannot drift.
 
+  Residual closed by #14987: on the CLI the same decision now reaches
+  the `show system …` spellings that render configuration —
+  `show system rollback [compare] <N>`, `show system login`,
+  `show system internet-options`, `show system root-authentication`,
+  and `show system configuration rescue` — which previously were
+  charged only their literal `show system …` command, so
+  `deny-configuration "^security"` and an anchored
+  `deny-commands "^show configuration$"` did not conceal the tree
+  they render (the rollback slot is the whole earlier configuration).
+  The rollback timestamp list carries no content and stays ungated.
+  Config-mode `show | compare [rollback <N>]` is adjudicated as the
+  candidate diff it is, and the shared gate now normalizes the
+  display-format suffix itself, so `deny-commands "display set"`
+  fires identically whether the caller spells the suffix `set` or
+  `display set` (previously the CLI's stripped spelling never matched).
+  `commit`, `rollback <N>` (config-mode verb) and `load` keep their
+  existing adjudication: candidate paths were gated as written,
+  `rollback <N>`/whole-candidate loads refuse restricted classes
+  (#9892), and config-mode verbs carry no operational command on any
+  surface (`AuthorizeConfigMutation` doc) — #14987 adds no
+  `*-commands` charge there.
+
 > **This sentence was a LIVE OVERCLAIM until #9154, and the shape of the error
 > is worth keeping.** It said "every dispatch surface" and then enumerated two,
 > and the `*-configuration` pair was in force on exactly ONE of them — the

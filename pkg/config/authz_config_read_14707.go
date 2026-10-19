@@ -100,6 +100,40 @@ func AuthorizeConfigShowRollback(cfg *Config, class string, displaySuffix string
 	return authorizeShowCommand(cfg, class, "show configuration", displaySuffix)
 }
 
+// AuthorizeConfigShowSystemPath adjudicates an operational
+// `show system <subtree>` render of an explicit configuration path
+// (login, root-authentication): *-configuration on the path,
+// *-commands on the real command spelling `show system <name>` with
+// the bare `show configuration` as alternate form (mirroring
+// AuthorizeConfigShowRollback's alternate-form shape), so an anchored
+// `^show configuration$` deny covers these renders and a path-scoped
+// `show system login` deny fires. Added for #14987.
+func AuthorizeConfigShowSystemPath(cfg *Config, class string, path []string, command string) error {
+	if class == "" {
+		return nil
+	}
+	joined := strings.Join(path, " ")
+	if err := authorizeConfigReadPath(cfg, class, joined); err != nil {
+		return err
+	}
+	return authorizeShowCommand(cfg, class, command, "")
+}
+
+// AuthorizeConfigShowRescue adjudicates `show system configuration
+// rescue`: a whole-tree text render, refused for a *-configuration-
+// restricted class like AuthorizeConfigShowWhole, and evaluated
+// operationally on its real spelling with the bare form as alternate.
+// Added for #14987.
+func AuthorizeConfigShowRescue(cfg *Config, class string) error {
+	if class == "" {
+		return nil
+	}
+	if err := authorizeConfigWhole(cfg, class, "show system configuration rescue"); err != nil {
+		return err
+	}
+	return authorizeShowCommand(cfg, class, "show system configuration rescue", "")
+}
+
 func authorizeConfigReadPath(cfg *Config, class, joined string) error {
 	rules, ok, err := ConfigurationLoginRegexesFor(cfg, class)
 	if err != nil {
@@ -153,9 +187,21 @@ func authorizeShowCommand(cfg *Config, class, command, displaySuffix string) err
 	if !ok {
 		return nil
 	}
+	// #14987: callers pass the suffix in two spellings — the CLI's
+	// displaySuffix14707 strips "display " to the bare format word
+	// ("set"), while gRPC/REST pass ConfigShowDisplaySuffix output
+	// ("display set"). The matched string must be the operator's
+	// `| display set` in both cases; passing the bare word produced
+	// `show configuration … | set`, which a `display set` deny never
+	// matches. Normalize here, the one place the string is built.
+	suffix := displaySuffix
+	switch suffix {
+	case "set", "json", "xml", "inheritance":
+		suffix = "display " + suffix
+	}
 	full := command
-	if displaySuffix != "" {
-		full = command + " | " + displaySuffix
+	if suffix != "" {
+		full = command + " | " + suffix
 	}
 	if decision := rules.EvaluateForms(full, "show configuration"); !decision.Allowed {
 		return fmt.Errorf("permission denied: login class %q denies %q (%s)", class, command, decision.Reason)

@@ -373,6 +373,16 @@ func (c *CLI) dispatchOperational(line string) error {
 			return err
 		}
 	}
+	// #14987: `show system rollback|login|root-authentication|
+	// configuration rescue` render configuration through spellings the
+	// gate above charged only on their literal command. The
+	// *-configuration pair and the anchored `^show configuration$`
+	// alternate form apply there too (parts[1] is already resolved).
+	if parts[0] == "show" && len(parts) >= 2 && parts[1] == "system" {
+		if err := c.checkShowSystemConfigRead(parts[1:]); err != nil {
+			return err
+		}
+	}
 
 	switch parts[0] {
 	case "configure":
