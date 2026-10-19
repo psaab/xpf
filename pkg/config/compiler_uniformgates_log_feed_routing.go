@@ -39,6 +39,16 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 	} else {
 		cfg.Warnings = append(cfg.Warnings, w...)
 	}
+	// #15013 (A12-01): a RIP `authentication-key` longer than 16
+	// characters is rejected by FRR ripd on every frr-reload, so the
+	// reload never converges. Strict refuses so the operator shortens
+	// the key; lenient warns (#1960) and the FRR renderer withholds
+	// RIP enrollment for the over-long key.
+	if w, err := validateRIPAuthKeyLengthStrict(cfg, opts.lenientRIPAuthKeyLength15013); err != nil {
+		return err
+	} else {
+		cfg.Warnings = append(cfg.Warnings, w...)
+	}
 	// #2008 H7 security log profile -> stream cross-reference. A
 	// `security log profile <name> stream-name <stream>` that names a
 	// stream which is not configured would route to nowhere — the operator

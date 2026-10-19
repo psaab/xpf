@@ -1137,7 +1137,18 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			ripAuthTok14977, ripAuthTokOK14977 = authTokenOrOmit("rip", rip.AuthKey.Reveal())
 		}
 		ripUnrecognized14977 := rip.AuthKey != "" && config.AuthTypeUnrecognized(rip.AuthType)
-		ripFailClosed14977 := ripKeylessAuth14398 || !ripAuthTokOK14977 || ripUnrecognized14977
+		// #15013 (A12-01): an over-long key (>16 characters) is
+		// rejected by ripd on EVERY frr-reload, so emitting it would
+		// brick the reload forever. Fail closed exactly like the
+		// unrenderable-token arm: omit RIP enrollment entirely
+		// rather than the rejected line or an unauthenticated block.
+		ripKeyTooLong15013 := rip.AuthKey != "" && len([]rune(rip.AuthKey.Reveal())) > config.MaxRIPAuthKeyLen
+		if ripKeyTooLong15013 {
+			slog.Warn("frr: rip authentication-key exceeds the 16-character maximum accepted by ripd; "+
+				"NOT enrolling any interface in RIP rather than rendering a line ripd rejects on every reload (#15013)",
+				"key_len", len([]rune(rip.AuthKey.Reveal())), "max", config.MaxRIPAuthKeyLen)
+		}
+		ripFailClosed14977 := ripKeylessAuth14398 || !ripAuthTokOK14977 || ripUnrecognized14977 || ripKeyTooLong15013
 		if !ripAuthTokOK14977 {
 			slog.Warn("frr: rip authentication-key is not renderable as a single vtysh token; "+
 				"NOT enrolling any interface in RIP rather than rendering unauthenticated RIP (#14977)",
