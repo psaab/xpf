@@ -8020,6 +8020,35 @@ No `#1960` lenient opt is needed and that was verified rather than assumed:
 persisted or peer-synced config carrying one of these spellings cannot brick a
 boot. Pinned by `schema_ospf_authentication_8443_test.go`.
 
+**The OSPFv3 / virtual-link residual (#15136, A89-04).** #8443/#14402 gated
+only the OSPFv2 *interface* node. Two surfaces kept the same fail-open:
+OSPFv3 interfaces (Junos protects them only with a manual IPsec SA —
+`ipsec-sa <name>` — and shares the `authentication { md5|simple-password|
+keychain }` block grammar; xpf's OSPFv3 compiler switch has no auth case,
+`OSPFv3Interface` carries no auth field, and FRR renders no
+`ipv6 ospf6 authentication` line) and OSPFv2 virtual links (Junos accepts
+`authentication { ... }`, `authentication-key`, `authentication-type`,
+`ipsec-sa` and `keychain` beside `transit-area`; the compiler reads only
+`transit-area` and `OSPFVirtualLink` carries no auth, so FRR renders a bare
+`area A virtual-link R`). Every one of those spellings committed clean and
+left the adjacency / virtual link **UNAUTHENTICATED** while the configuration
+read as protected. They are now modeled in
+`schema_ospf_authentication_8443.go` SOLELY so they are refused at strict
+commit (`unmodeledOSPFIPsecSALeaf`, `unmodeledOSPFKeychainLeaf`,
+`unmodeledOSPFv3AuthTypeLeaf`/`unmodeledOSPFv3AuthKeyLeaf`,
+`unmodeledVLAuthTypeLeaf`/`unmodeledVLAuthKeyLeaf`, and the closed-world
+`unmodeledOSPFAuthenticationContainer` whose `md5`/`simple-password`/`keychain`
+children are themselves refusal stubs), on both the top-level and
+routing-instance copies via the shared `schemaProtocols` node. The OSPFv2
+interface `authentication { md5 ... }` control still commits and renders.
+Strict commit refuses; the tolerant Load/SyncApply path downgrades the
+typed-leaf refusals to named `[typed-leaf-tolerated]` warnings (the
+`authentication` container's nodeValidator refusal is logged on that path,
+not persisted, like every other nodeValidator gate) and still boots.
+Pinned by `ospf_auth_residual_15136_test.go` (pkg/config + pkg/configstore).
+If OSPFv3 IPsec or virtual-link authentication is ever implemented, replace
+these stubs with the real grammar instead of widening them.
+
 **A typed leaf whose constraint is the CONSUMER's grammar — OSPF
 `interface-type` (#8481).** `protocols ospf ... interface <n> interface-type`
 carried an arity and a placeholder but no `valueType` and no `validator`. The

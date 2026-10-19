@@ -627,7 +627,23 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// the per-instance schema now shares the global rib-groups subtree, whose
 	// import-policy is strict-rejected by design, so the differential observes
 	// no output change. Its global twin already sits in this/advisory class.
-	gateBlindUnreachable: 136,
+	// #15136 raises this 136 -> 164, deliberately, for the 28 OSPFv3-interface
+	// and OSPFv2-virtual-link auth leaves (7 sites x 2 protocols x 2 scopes:
+	// `authentication {keychain, md5 <*> key, simple-password <*> key}`,
+	// `authentication-key`, `authentication-type`, `ipsec-sa`, `keychain`).
+	// Like the #8443/#14402 leaves above, they are modeled SOLELY so they
+	// are refused at commit (schema_ospf_authentication_8443.go) — xpf
+	// renders no OSPFv3 or virtual-link authentication, and leaving them
+	// unmodeled meant they committed clean and left the adjacency /
+	// virtual link UNAUTHENTICATED. Both spellings of a refused leaf
+	// produce the same rejection, so the differential can observe no
+	// difference. If OSPFv3 IPsec or virtual-link auth is ever
+	// implemented, these 28 must LEAVE this class and the ceiling must
+	// come back down by 28. (Measured at this head against a pristine
+	// origin/master run of this same cell: master already exceeds the
+	// old ceilings by +8/+14/+10 from unrelated drift; only the +28
+	// delta here is this change's.)
+	gateBlindUnreachable: 164,
 	// #8830: read, value deliberately ignored, advisory says so. Measured at
 	// this head: vrrp-group track-interface priority-cost (inet and inet6),
 	// security log stream transport tls-profile, system dataplane
