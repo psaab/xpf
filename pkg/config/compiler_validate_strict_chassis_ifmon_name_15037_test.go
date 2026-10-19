@@ -52,6 +52,20 @@ func TestChassisInterfaceMonitorUndefinedNameFailsCommit_15037(t *testing.T) {
 		{"unit suffix", "ge-0/0/0.0", []string{
 			"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/30",
 		}},
+		{"peer typo not matching declared RETH member tail", "ge-0/0/99", []string{
+			"set interfaces ge-7/0/1 gigether-options redundant-parent reth0",
+			"set interfaces reth0 redundant-ether-options redundancy-group 1",
+		}},
+		{"same-slot nonmember beside declared RETH member", "ge-7/0/99", []string{
+			"set interfaces ge-7/0/1 gigether-options redundant-parent reth0",
+			"set interfaces reth0 redundant-ether-options redundancy-group 1",
+		}},
+		{"peer tail whose local twin belongs to different RETH group", "ge-0/0/1", []string{
+			"set interfaces ge-7/0/1 gigether-options redundant-parent reth0",
+			"set interfaces reth0 redundant-ether-options redundancy-group 2",
+			"set interfaces ge-7/0/2 gigether-options redundant-parent reth1",
+			"set interfaces reth1 redundant-ether-options redundancy-group 1",
+		}},
 		{"empty-adjacent fabric name", "fab0", []string{
 			"set interfaces fab0 unit 0 family inet address 10.99.0.1/30",
 		}},
@@ -99,8 +113,9 @@ func TestChassisInterfaceMonitorDefinedNameCommits_15037(t *testing.T) {
 			"set interfaces reth0 redundant-ether-options redundancy-group 1",
 		}},
 		{"stanza-less physical name (nothing declared anywhere)", "ge-0/0/0", nil},
-		{"peer member declared only top-level (fw1 shape)", "ge-0/0/1", []string{
+		{"peer member of declared RETH in single-node view (fw1 shape)", "ge-0/0/1", []string{
 			"set interfaces ge-7/0/1 gigether-options redundant-parent reth0",
+			"set interfaces reth0 redundant-ether-options redundancy-group 1",
 		}},
 	}
 	for _, tc := range cases {

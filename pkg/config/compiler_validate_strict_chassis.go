@@ -198,6 +198,13 @@ func ClampInterfaceMonitorWeight(w int) (int, bool) {
 //     stays attributable: a monitor on a not-yet-stanza'd slot is
 //     counted down at runtime, the #5080 fail-closed direction, and
 //     those fixtures compile no stanza at all.
+//
+// One narrow peer exception is applied by the RG-aware wrapper below:
+// in a single-node effective config, a peer-slot monitor is attributable
+// when the same redundancy group owns a declared RETH and a declared
+// local member of that RETH has the candidate's exact device/PIC/port
+// tail. This does not attribute arbitrary peer-shaped names or any typo
+// whose slot or tail differs from a declared member of the monitored RG.
 func interfaceMonitorNameAttributable(cfg *Config, name string) bool {
 	if cfg == nil || name == "" || strings.Contains(name, ".") {
 		return false
@@ -218,7 +225,88 @@ func interfaceMonitorNameAttributable(cfg *Config, name string) bool {
 	if len(declared) == 0 {
 		return true
 	}
-	return declared[LinuxIfName(name)]
+	if declared[LinuxIfName(name)] {
+		return true
+	}
+	return false
+}
+
+// interfaceMonitorPeerOfDeclaredReth handles the single-node effective
+// configuration shape carried by docs/ha-cluster*.conf expanded for one node
+// and, especially, test/incus/xpf-cluster-fw{0,1}.conf. Those files declare
+// the local member of a redundant-ethernet family and declare the RETH
+// itself bound to a redundancy group; the peer member's physical NIC belongs
+// to the peer's effective file and is deliberately absent here. Junos and the
+// runtime understand the monitor by slot: a name on the other node's slot is
+// skipped locally and reported by the peer. Attribute it only when the
+// monitor's own redundancy group is the group that owns a declared RETH,
+// and only when a declared member of that same RETH supplies the exact
+// device/port tail with the opposite node slot. Thus ge-0/0/1 in a node-1
+// effective config is attributable beside declared ge-7/0/1 -> reth0 in
+// RG 1, while ge-0/0/99 beside ge-0/0/0 -> reth0 remains an undeclared typo:
+// same slot is not a peer twin, and the PIC/port tail must match exactly.
+func interfaceMonitorNameAttributableForRG(cfg *Config, name string, rgID int) bool {
+	if !interfaceMonitorNameAttributable(cfg, name) {
+		return interfaceMonitorPeerOfDeclaredReth(cfg, name, rgID)
+	}
+	return true
+}
+
+func interfaceMonitorPeerOfDeclaredReth(cfg *Config, name string, rgID int) bool {
+	if cfg == nil || rgID <= 0 {
+		return false
+	}
+	slot := InterfaceSlot(name)
+	if slot < 0 {
+		return false
+	}
+	linuxName := LinuxIfName(name)
+	dash := strings.Index(linuxName, "-")
+	if dash < 0 {
+		return false
+	}
+	// Remove only the FPC slot. The remaining device-type prefix and
+	// PIC/port tail identify the same physical port on the peer chassis.
+	slotEnd := strings.Index(linuxName[dash+1:], "-")
+	if slotEnd < 0 {
+		return false
+	}
+	tail := linuxName[dash+1+slotEnd:]
+	candidateNode := SlotToNodeID(slot)
+
+	for parentName, parent := range cfg.Interfaces.Interfaces {
+		if parent == nil || parent.RedundancyGroup != rgID {
+			continue
+		}
+		if _, ok := RethIndex(parentName); !ok {
+			continue
+		}
+		for _, member := range cfg.Interfaces.Interfaces {
+			if member == nil || member.Name == "" || member.RedundantParent != parentName {
+				continue
+			}
+			memberSlot := InterfaceSlot(member.Name)
+			if memberSlot < 0 || SlotToNodeID(memberSlot) == candidateNode {
+				continue
+			}
+			memberLinux := LinuxIfName(member.Name)
+			memberDash := strings.Index(memberLinux, "-")
+			if memberDash < 0 {
+				continue
+			}
+			memberSlotEnd := strings.Index(memberLinux[memberDash+1:], "-")
+			if memberSlotEnd < 0 {
+				continue
+			}
+			if memberLinux[:memberDash] != linuxName[:dash] {
+				continue
+			}
+			if memberLinux[memberDash+1+memberSlotEnd:] == tail {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // physicalInterfacesInTree returns the set of physical interface names
@@ -251,19 +339,22 @@ func physicalInterfacesInTree(tree *ConfigTree) map[string]bool {
 // compileInterfaces reads child.Name() the same way); joining the Keys
 // would fuse the name with its body tokens.
 func collectPhysicalInterfaces(nodes []*Node, out map[string]bool) {
-	var walk func(ns []*Node, depth int)
-	walk = func(ns []*Node, depth int) {
+	var walk func(ns []*Node, inGroups bool, depth int)
+	walk = func(ns []*Node, inGroups bool, depth int) {
 		for _, n := range ns {
 			if n == nil {
 				continue
 			}
-			// A declaration lives at depth 0 (top level) or depth 1
-			// (inside a `groups <name>` block — group children splice
-			// in at the top level when applied). Anything deeper that
-			// spells "interfaces" (class-of-service interfaces <if>)
-			// is a REFERENCE, not a declaration, and must not mint
-			// attribution.
-			if depth <= 1 {
+			childInGroups := inGroups || n.Name() == "groups"
+			// Interface declarations are either top-level `interfaces`
+			// nodes or `interfaces` nodes at any depth beneath the
+			// unresolved top-level `groups { nodeN { ... } }` structure.
+			// The latter must be found before expansion splices the
+			// selected group into the compiled tree. An `interfaces`
+			// node nested under an ordinary compiled section (for
+			// example class-of-service interfaces) is a reference, not a
+			// declaration, and must not mint attribution.
+			if depth == 0 || childInGroups {
 				switch n.Name() {
 				case "interfaces":
 					for _, child := range n.Children {
@@ -290,10 +381,10 @@ func collectPhysicalInterfaces(nodes []*Node, out map[string]bool) {
 					}
 				}
 			}
-			walk(n.Children, depth+1)
+			walk(n.Children, childInGroups, depth+1)
 		}
 	}
-	walk(nodes, 0)
+	walk(nodes, false, 0)
 }
 
 // isClusterKeywordName reports whether name is a chassis-cluster /
@@ -506,7 +597,7 @@ func validateChassisClusterStrict(cfg *Config) error {
 			// existence alone is not the predicate). A RETH is never
 			// attributable: monitoring reth0 when its members are meant is
 			// the operator error this catches; monitor the members instead.
-			if !interfaceMonitorNameAttributable(cfg, im.Interface) {
+			if !interfaceMonitorNameAttributableForRG(cfg, im.Interface, rg.ID) {
 				return fmt.Errorf("chassis cluster: redundancy-group %d interface-monitor %s "+
 					"does not name a physical interface defined under `interfaces` "+
 					"(nor a fabric member-interfaces entry) — a redundant-ethernet "+
