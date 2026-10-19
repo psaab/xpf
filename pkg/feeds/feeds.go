@@ -264,14 +264,26 @@ type Manager struct {
 // Prefixes carries the epoch content set (#14395): the exact prefixes
 // installed at the last acknowledged epoch, so content churn can be
 // measured against the epoch rather than the immediate predecessor
-// across restarts. Records written before #14395 have no Prefixes; they
-// restore the count epoch only and the content epoch re-bootstraps on
-// the first install (the pre-existing bootstrap audit path).
+// across restarts. EpochHash (#15075) is that set's own digest, persisted
+// separately from Hash (the count high-water hash) so the epoch set can be
+// validated on restore even after an ordinary non-rebasing rotation has
+// advanced the high-water past the epoch. Records written before #14395
+// have no Prefixes; they restore the count epoch only and the content epoch
+// re-bootstraps on the first install (the pre-existing bootstrap audit
+// path). Records written before #15075 carry Prefixes without EpochHash;
+// they restore the epoch only when the set's digest equals Hash.
 type ShrinkHighWater struct {
 	Name     string   `json:"name"`
 	Count    int      `json:"count"`
 	Hash     string   `json:"hash"`
 	Prefixes []string `json:"prefixes,omitempty"`
+	// EpochHash is the hashPrefixes digest of Prefixes (#15075): the epoch
+	// content set is validated against its own digest on restore, not
+	// against Hash (the count high-water hash, which an ordinary
+	// non-rebasing rotation advances past the epoch set). Empty on records
+	// written before #15075; those restore Prefixes only when the set's
+	// digest equals Hash (the pre-rotation shape, where epoch == high-water).
+	EpochHash string `json:"epoch_hash,omitempty"`
 }
 
 type feedShrinkHistory struct {
@@ -443,21 +455,38 @@ func (m *Manager) RestoreShrinkHighWater(records []ShrinkHighWater) {
 		var hash [32]byte
 		copy(hash[:], raw)
 		hist := feedShrinkHistory{highWaterCount: record.Count, highWaterHash: hash}
-		// #14395 epoch content: accept only a canonical set, bounded by
-		// the feed entry cap. The set's digest is its own epoch hash: it
-		// need NOT equal the record Hash, which is the count high-water
-		// hash (the largest installed set, which an ordinary rotation may
-		// have advanced past the epoch set — #14994: requiring equality
-		// silently dropped every restored epoch whose high-water had
-		// moved, leaving churn unanchored on cold restart). A corrupt
-		// (non-canonical) set is dropped; the count epoch still restores
-		// and the content epoch then re-bootstraps under the #14994
-		// remembered-baseline guard.
+		// #14395 epoch content, #15075 restore key: accept only a canonical
+		// set, bounded by the feed entry cap, whose digest matches the
+		// persisted EpochHash — the epoch set's OWN digest, persisted
+		// separately from Hash. Hash is the count high-water hash (the
+		// largest installed set), which an ordinary non-rebasing rotation
+		// advances past the epoch set, so keying the epoch restore on Hash
+		// silently dropped every such epoch and left churn unanchored
+		// across the restart. Records written before #15075 have no
+		// EpochHash: accept their set only when its digest equals Hash
+		// (the shape where epoch == high-water, before any rotation
+		// diverged them). A corrupt (non-canonical) set or a set whose
+		// digest matches neither is dropped fail-closed: the count epoch
+		// still restores and the content epoch then re-bootstraps under
+		// the #14994 remembered-baseline guard.
 		if len(record.Prefixes) > 0 && len(record.Prefixes) <= maxFeedPrefixes {
 			canon := canonicalize(append([]string(nil), record.Prefixes...))
 			if len(canon) == len(record.Prefixes) {
-				hist.epochPrefixes = canon
-				hist.epochHash = hashPrefixes(canon)
+				digest := hashPrefixes(canon)
+				accept := false
+				if record.EpochHash != "" {
+					if raw, err := hex.DecodeString(record.EpochHash); err == nil && len(raw) == 32 {
+						var want [32]byte
+						copy(want[:], raw)
+						accept = digest == want
+					}
+				} else {
+					accept = digest == hash
+				}
+				if accept {
+					hist.epochPrefixes = canon
+					hist.epochHash = digest
+				}
 			}
 		}
 		m.shrinkHistory[record.Name] = hist
@@ -479,6 +508,7 @@ func (m *Manager) ShrinkHighWaterSnapshot() []ShrinkHighWater {
 		}
 		if len(history.epochPrefixes) > 0 {
 			rec.Prefixes = append([]string(nil), history.epochPrefixes...)
+			rec.EpochHash = fmt.Sprintf("%x", history.epochHash)
 		}
 		records = append(records, rec)
 	}
