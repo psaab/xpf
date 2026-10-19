@@ -450,26 +450,99 @@ fn tx_submit_ns_sidecar_single_writer_ownership_is_rc_not_arc() {
 }
 
 #[test]
-fn tx_latency_hist_shared_umem_oob_offset_stamp_silent_drop() {
-    // #812 Rust round-1 HIGH-1: under `shared_umem = true`
-    // (mlx5 special case), a frame offset can come from the
-    // shared pool such that `offset >> UMEM_FRAME_SHIFT` exceeds
-    // THIS binding's sidecar length. `stamp_submits` MUST drop
-    // the stamp silently — the slot belongs to a different
-    // binding's sidecar and touching it here would either
-    // overflow or corrupt an adjacent binding's accounting.
+fn tx_latency_hist_shared_umem_secondary_offsets_all_stamped_15244() {
+    // #15244 (A61-01): under a shared UMEM the pool is filled for
+    // the WHOLE group and each binding pops its carve-out
+    // sequentially, so the secondary owns offsets `[N, 2N)` while
+    // its own per-binding frame count is only N. Pre-fix the
+    // sidecar was sized to that per-binding count, so
+    // `stamp_submits` silently dropped every secondary stamp (and
+    // the reap fold dropped every matching completion) and the
+    // #812 histogram covered only the owner / a
+    // direction-dependent subset. The fix sizes the sidecar to
+    // `worker_umem.total_frames()` (the group sum) via
+    // `tx_submit_sidecar_len`.
     //
-    // Pin: build a small sidecar, drive `stamp_submits` with one
-    // in-range and two out-of-range offsets, assert the in-range
-    // slot landed exactly the stamp and ALL other slots are
-    // untouched. The test also proves a foreign-offset stamp
-    // cannot produce a phantom completion against an adjacent
-    // sidecar slot (the "honest histogram" invariant that
-    // HIGH-1 asked us to pin).
+    // RED on the pre-fix mechanism: `tx_submit_sidecar_len` does
+    // not exist pre-fix (the production literal was
+    // `vec![...; total_frames as usize]` with the per-binding
+    // count), and a sidecar built the old way (length N) drops the
+    // secondary stamps asserted below — the former
+    // `tx_latency_hist_shared_umem_oob_offset_stamp_silent_drop`
+    // pin asserted exactly that drop and is superseded by this
+    // test. The acceptance probe: `secondary_stamped=N/N`.
+    //
+    // The pool models `WorkerUmemPool::new(2N)`: offsets
+    // `[0, 2N)` in frame order; the owner pops `[0, N)`, the
+    // secondary `[N, 2N)`.
+    let n: u32 = 4;
+    let umem = WorkerUmem::new_for_test(2 * n).expect("group umem");
+    let secondary_len = crate::afxdp::worker::tx_submit_sidecar_len(&umem);
+    assert_eq!(
+        secondary_len, (2 * n) as usize,
+        "#15244: sidecar must span the whole shared region (group sum), \
+         not the secondary's own {n}-frame carve-out"
+    );
+    let mut sidecar = vec![TX_SIDECAR_UNSTAMPED; secondary_len];
+    let live = BindingLiveState::new();
+    let owner = &live.owner_profile_owner;
+    let t0 = 42_000_000_000u64;
+    // The secondary submits its whole carve-out `[N, 2N)`.
+    let secondary_offsets: Vec<u64> = (n..2 * n)
+        .map(|idx| (idx as u64) << UMEM_FRAME_SHIFT)
+        .collect();
+    crate::afxdp::tx::stamp_submits(&mut sidecar, secondary_offsets.iter().copied(), t0);
+    let secondary_stamped = sidecar[(n as usize)..]
+        .iter()
+        .filter(|slot| **slot == t0)
+        .count();
+    assert_eq!(
+        secondary_stamped, n as usize,
+        "#15244: secondary_stamped={secondary_stamped}/{} — every shared \
+         secondary stamp above its own frame count must land in its own \
+         sidecar",
+        n
+    );
+    assert!(
+        sidecar[..(n as usize)]
+            .iter()
+            .all(|slot| *slot == TX_SIDECAR_UNSTAMPED),
+        "the owner's half of the sidecar must stay unstamped"
+    );
+    // Every secondary completion is counted by its own binding.
+    let (count, sum) = crate::afxdp::tx::record_tx_completions_with_stamp(
+        &mut sidecar,
+        &secondary_offsets,
+        t0 + 10_000,
+        owner,
+    );
+    assert_eq!(
+        count, n as u64,
+        "#15244: every secondary completion must be counted by its own binding"
+    );
+    assert_eq!(sum, (n as u64) * 10_000);
+    assert_eq!(owner.tx_submit_latency_count.load(Ordering::Relaxed), n as u64);
+}
+
+#[test]
+fn tx_latency_hist_shared_umem_oob_offset_stamp_silent_drop() {
+    // #812 Rust round-1 HIGH-1, narrowed by #15244 (A61-01): an
+    // offset past the WHOLE UMEM region (not merely past this
+    // binding's own carve-out — those now stamp, see
+    // `tx_latency_hist_shared_umem_secondary_offsets_all_stamped_15244`)
+    // is genuinely foreign: a stale/cross-restart offset, never a
+    // live submit from this binding. `stamp_submits` MUST drop it
+    // silently — touching it would either overflow or corrupt an
+    // unrelated slot.
+    //
+    // Pin: build a region-sized sidecar, drive `stamp_submits`
+    // with one in-range and two past-the-region offsets, assert
+    // the in-range slot landed exactly the stamp and ALL other
+    // slots are untouched.
     let sidecar_len: u64 = 4;
     let mut sidecar = vec![TX_SIDECAR_UNSTAMPED; sidecar_len as usize];
     let in_range = 1u64 << UMEM_FRAME_SHIFT; // idx 1, inside
-    let just_past = sidecar_len << UMEM_FRAME_SHIFT; // idx == len
+    let just_past = sidecar_len << UMEM_FRAME_SHIFT; // idx == len (past region)
     let far_past = (sidecar_len + 1000) << UMEM_FRAME_SHIFT; // idx len+1000
     let ts = 42_000_000_000u64;
     crate::afxdp::tx::stamp_submits(
@@ -477,7 +550,7 @@ fn tx_latency_hist_shared_umem_oob_offset_stamp_silent_drop() {
         [in_range, just_past, far_past].into_iter(),
         ts,
     );
-    // Slot 1 stamped; slots 0, 2, 3 unchanged. OOB offsets
+    // Slot 1 stamped; slots 0, 2, 3 unchanged. Past-region offsets
     // produced NO allocation (slice not grown) and NO mutation
     // outside the bounds.
     assert_eq!(sidecar.len(), sidecar_len as usize, "len unchanged");
@@ -489,14 +562,14 @@ fn tx_latency_hist_shared_umem_oob_offset_stamp_silent_drop() {
 
 #[test]
 fn tx_latency_hist_shared_umem_oob_offset_reap_no_phantom_bucket() {
-    // #812 Rust round-1 HIGH-1 companion: drive
-    // `record_tx_completions_with_stamp` with an offset that
-    // would index past `sidecar.len()`. `get_mut` returns None
-    // → the fold treats the "stamp" as TX_SIDECAR_UNSTAMPED →
-    // the delta check drops the sample → NO bucket bumped, NO
-    // `count` / `sum_ns` increment. This is the reap-side half
-    // of the "honest histogram" invariant: cross-binding offset
-    // noise cannot produce a phantom completion.
+    // #812 Rust round-1 HIGH-1 companion, narrowed by #15244: drive
+    // `record_tx_completions_with_stamp` with an offset past the
+    // WHOLE region. `get_mut` returns None → the fold treats the
+    // "stamp" as TX_SIDECAR_UNSTAMPED → the delta check drops the
+    // sample → NO bucket bumped, NO `count` / `sum_ns` increment.
+    // This is the reap-side half of the "honest histogram"
+    // invariant: genuinely foreign offset noise cannot produce a
+    // phantom completion.
     let live = BindingLiveState::new();
     let owner = &live.owner_profile_owner;
     let sidecar_len: u64 = 4;
@@ -505,7 +578,7 @@ fn tx_latency_hist_shared_umem_oob_offset_reap_no_phantom_bucket() {
     // cross-slot bleed would be visible as a bucket bump.
     let t0 = 5_000_000_000u64;
     crate::afxdp::tx::stamp_submits(&mut sidecar, [0u64].into_iter(), t0);
-    // Completion against an OOB offset — must be dropped.
+    // Completion against a past-region offset — must be dropped.
     let oob_offset = (sidecar_len + 7) << UMEM_FRAME_SHIFT;
     let (count, sum) = crate::afxdp::tx::record_tx_completions_with_stamp(
         &mut sidecar,
@@ -513,16 +586,16 @@ fn tx_latency_hist_shared_umem_oob_offset_reap_no_phantom_bucket() {
         t0 + 10_000,
         owner,
     );
-    assert_eq!(count, 0, "OOB completion must not be counted");
-    assert_eq!(sum, 0, "OOB completion must not bump sum_ns");
+    assert_eq!(count, 0, "past-region completion must not be counted");
+    assert_eq!(sum, 0, "past-region completion must not bump sum_ns");
     for b in 0..TX_SUBMIT_LAT_BUCKETS {
         assert_eq!(
             owner.tx_submit_latency_hist[b].load(Ordering::Relaxed),
             0,
-            "bucket {b} must stay 0 on OOB completion",
+            "bucket {b} must stay 0 on past-region completion",
         );
     }
-    // Slot 0 is still stamped — the OOB reap must not have
+    // Slot 0 is still stamped — the foreign reap must not have
     // touched any in-range slot.
-    assert_eq!(sidecar[0], t0, "in-range slot corrupted by OOB reap");
+    assert_eq!(sidecar[0], t0, "in-range slot corrupted by foreign reap");
 }

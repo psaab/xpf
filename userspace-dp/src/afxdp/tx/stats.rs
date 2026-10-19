@@ -65,18 +65,26 @@ where
     }
     for offset in offsets {
         let idx = (offset >> UMEM_FRAME_SHIFT) as usize;
-        // #812 Rust round-1 HIGH-1: under `shared_umem = true` (mlx5
-        // special case), frames drawn from the shared pool CAN have
-        // offsets whose `offset >> UMEM_FRAME_SHIFT` exceeds THIS
-        // binding's `total_frames`. Silent-drop is the correct
-        // behaviour: the out-of-range frame belongs to a different
-        // binding's sidecar, and that binding's owner is responsible
-        // for stamping its own slots. Writing into this sidecar at a
-        // bounded-out-of-range index would overflow OR (after a
-        // resize up) corrupt an unrelated slot — `get_mut` returns
-        // None on out-of-range, which keeps the hot path sound.
-        // Pinned by the `tx_latency_hist_shared_umem_oob_offset_*`
-        // tests in `binding_state/tests` (canonical pin location after
+        // #15244 (A61-01): the sidecar is sized to the WHOLE UMEM
+        // region (`worker_umem.total_frames()` — the group sum under
+        // a shared UMEM; see `tx_submit_sidecar_len`), so every
+        // offset this binding can legally submit — including a
+        // shared secondary's `[N, 2N)` carve-out — indexes inside
+        // its OWN sidecar and is stamped here, by its own owner.
+        // The former claim that an out-of-range offset "belongs to
+        // a different binding's sidecar" was the bug: offsets are
+        // region-wide, the secondary's stamps landed above its
+        // per-binding-sized sidecar, and this `get_mut` silently
+        // dropped every one of them (the reap fold dropped the
+        // matching completions the same way), so the #812 histogram
+        // covered only a direction-dependent subset. `get_mut`
+        // remains as a soundness guard for a genuinely foreign
+        // offset (past the whole region — a stale/cross-restart
+        // completion, never a live submit from this binding): it
+        // returns None and the stamp is dropped rather than
+        // corrupting an unrelated slot.
+        // Pinned by the `tx_latency_hist_shared_umem_*` tests in
+        // `binding_state/tests` (canonical pin location after
         // #984 P2a — these tests reach this fn via
         // `crate::afxdp::tx::stamp_submits` through the load-bearing
         // re-export in `tx/mod.rs`).

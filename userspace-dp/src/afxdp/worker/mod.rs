@@ -49,7 +49,7 @@ pub(crate) use timers::WorkerTimers;
 // #959 Phase 7: per-binding TX pipeline state lives in
 // worker/tx_pipeline.rs.
 mod tx_pipeline;
-pub(crate) use tx_pipeline::WorkerTxPipeline;
+pub(crate) use tx_pipeline::{tx_submit_sidecar_len, WorkerTxPipeline};
 
 // #959 Phase 8: per-binding registration / identity metadata lives
 // in worker/bind_meta.rs.
@@ -552,6 +552,9 @@ impl BindingWorker {
             live.set_error(format!("update heartbeat slot: {err}"));
         }
         live.set_max_pending_tx(max_pending_tx);
+        // #15244 (A61-01): sidecar length from the UMEM region,
+        // computed before `worker_umem` moves into the worker.
+        let tx_submit_sidecar_len = tx_submit_sidecar_len(&worker_umem);
         let mut binding = Self {
             slot: binding.slot,
             queue_id: binding.queue_id,
@@ -573,16 +576,25 @@ impl BindingWorker {
                 in_flight_prepared_recycles: FastMap::default(),
                 in_flight_untracked_tx: FastSet::default(),
                 // #812: pre-allocate the submit-timestamp sidecar once,
-                // sized to the binding's total UMEM frame count so every
-                // legal `offset >> UMEM_FRAME_SHIFT` index lands inside
-                // the vec. Initial contents are the unstamped sentinel so
-                // any stray pre-existing offset in flight (cross-restart
-                // completion) is skipped by the reap path (plan §5.4).
-                // Allocation happens here — NEVER on the hot path.
+                // sized to the WHOLE UMEM region so every legal
+                // `offset >> UMEM_FRAME_SHIFT` index lands inside the
+                // vec. #15244 (A61-01): that is
+                // `worker_umem.total_frames()` — under a shared UMEM
+                // the group sum, NOT this binding's own
+                // `total_frames` carve-out: the pool hands the
+                // secondary offsets in `[N, 2N)`, and a sidecar of
+                // length N silently dropped every one of its stamps
+                // (and the matching completions), leaving the #812
+                // histogram covering only a subset. Initial contents
+                // are the unstamped sentinel so any stray pre-existing
+                // offset in flight (cross-restart completion) is
+                // skipped by the reap path (plan §5.4). Allocation
+                // happens here — NEVER on the hot path.
                 // Rust round-1 MED-1: Box<[u64]> — allocate-once, never
                 // grow. `vec![...].into_boxed_slice()` produces an
                 // exactly-sized heap allocation with no spare capacity.
-                tx_submit_ns: vec![TX_SIDECAR_UNSTAMPED; total_frames as usize].into_boxed_slice(),
+                tx_submit_ns: vec![TX_SIDECAR_UNSTAMPED; tx_submit_sidecar_len]
+                    .into_boxed_slice(),
             },
             cos: WorkerCos {
                 cos_fast_interfaces: FastMap::default(),

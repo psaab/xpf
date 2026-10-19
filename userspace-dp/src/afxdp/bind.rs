@@ -122,6 +122,46 @@ pub(super) fn ebusy_retry_allowed(role: XskSocketRole) -> bool {
     !matches!(role, XskSocketRole::SharedOwner)
 }
 
+/// #15244 (A61-03): a bind failure that happened AFTER a successful
+/// `xsk_socket__create`. libxdp clears the UMEM's saved fill/comp
+/// state on the first successful create, so a further
+/// `xsk_socket__create` on the SAME UMEM hands libxdp NULL fill/comp
+/// and fails `-EFAULT` ("Bad address") — and for the shared owner /
+/// private borrows, the post-create teardown (`xsk_socket__delete`)
+/// also unmaps the UMEM's rings. Retrying the flag/strategy ladder
+/// in `open_binding_worker_rings` on such a UMEM therefore cannot
+/// succeed and only replaces the true cause with the `-EFAULT`
+/// noise. Post-create failures are TERMINAL for the candidate loop:
+/// `open_binding_worker_rings` returns them immediately and the
+/// outer reconcile loop retries on a FRESH UMEM (a fresh
+/// `WorkerUmemPool` per group attempt, then private fallback).
+/// Create failures themselves (no socket was created — e.g. a
+/// `-EBUSY` before any create succeeded) keep the ladder: the UMEM
+/// is untouched and the next candidate may legitimately succeed.
+#[derive(Debug)]
+pub(super) struct PostCreateBindError {
+    message: String,
+}
+
+impl std::fmt::Display for PostCreateBindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PostCreateBindError {}
+
+pub(super) fn post_create_bind_error(message: String) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(PostCreateBindError { message })
+}
+
+/// Whether `err` is a post-create (terminal-for-the-ladder) bind
+/// failure. Pure so the ladder-exit decision is unit-testable
+/// without a bound socket.
+pub(super) fn is_post_create_bind_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    err.is::<PostCreateBindError>()
+}
+
 /// Total UMEM frames per binding: reserved TX + 2×ring_entries for RX fill.
 /// For virtio_net (fabric parent), reserved TX = ring_entries, so total is
 /// 3×ring_entries frames. At UMEM_FRAME_SIZE=4096 and ring_entries=8192,
@@ -272,6 +312,19 @@ pub(super) unsafe fn open_binding_worker_rings(
                     ));
                 }
                 Err(err) => {
+                    // #15244 (A61-03): a post-create failure is
+                    // terminal for this ladder. The create succeeded
+                    // and its teardown deleted the socket (unmapping
+                    // the UMEM's rings for owner/private borrows;
+                    // libxdp also cleared the saved fill/comp), so
+                    // every further candidate on this UMEM fails
+                    // `-EFAULT` and would replace the true cause in
+                    // `last_err` with "Bad address". Return the true
+                    // cause now; the outer reconcile loop retries on
+                    // a fresh UMEM.
+                    if is_post_create_bind_error(err.as_ref()) {
+                        return Err(err);
+                    }
                     last_err = Some(err);
                     let more_flag_attempts = flags_idx + 1 < bind_flag_candidates.len();
                     let more_strategy_attempts = strategy_idx + 1 < strategies.len();
@@ -639,7 +692,7 @@ fn fail_identity_mismatched_bind(
     drop(tx);
     drop(rx);
     drop(user);
-    format!("bind identity mismatch: {mismatch}").into()
+    post_create_bind_error(format!("bind identity mismatch: {mismatch}"))
 }
 
 fn try_open_bind(
@@ -651,7 +704,15 @@ fn try_open_bind(
     poll_mode: crate::PollMode,
     pre_bind_fill_offsets: Option<&[u64]>,
 ) -> Result<
-    (User, RingRx, RingTx, XskBindMode, u16, DeviceQueue, Vec<u64>),
+    (
+        User,
+        RingRx,
+        RingTx,
+        XskBindMode,
+        u16,
+        DeviceQueue,
+        Vec<u64>,
+    ),
     Box<dyn std::error::Error + Send + Sync>,
 > {
     for attempt in 0..BIND_RETRY_ATTEMPTS {
@@ -712,18 +773,42 @@ fn try_open_bind(
                 // worker stashes it in `pending_fill_frames` (#2374) instead
                 // of leaking the UMEM frames.
                 let uninserted_fill = match pre_bind_fill_offsets {
-                    Some(offsets) => prime_fill_ring_offsets(&mut device, offsets)?,
+                    Some(offsets) => match prime_fill_ring_offsets(&mut device, offsets) {
+                        Ok(suffix) => suffix,
+                        Err(err) => {
+                            // #15244 (A61-03): the socket was created;
+                            // dropping `device` here deletes it and
+                            // (owner/private) unmaps the UMEM rings, so
+                            // this failure is post-create terminal —
+                            // drop the handles device-first, matching
+                            // `fail_identity_mismatched_bind`.
+                            drop(device);
+                            drop(tx);
+                            drop(rx);
+                            drop(user);
+                            return Err(post_create_bind_error(format!(
+                                "prime fill ring after socket create: {err}"
+                            )));
+                        }
+                    },
                     None => Vec::new(),
                 };
 
                 let bind_mode = query_bound_xsk_mode(user_fd).unwrap_or(XskBindMode::Copy);
                 if socket_role.requires_zerocopy() && !bind_mode.is_zerocopy() {
-                    return Err(format!(
+                    // #15244 (A61-03): post-create terminal — dropping
+                    // the handles deletes the socket and (owner/
+                    // private) unmaps the UMEM rings; a further ladder
+                    // candidate on this UMEM would only fail `-EFAULT`.
+                    drop(device);
+                    drop(tx);
+                    drop(rx);
+                    drop(user);
+                    return Err(post_create_bind_error(format!(
                         "{} bind(fd={}) did not report XDP_OPTIONS_ZEROCOPY after bind",
                         socket_role.describe(),
                         user_fd
-                    )
-                    .into());
+                    )));
                 }
                 let busy_poll = set_busy_poll_opts(user_fd, poll_mode);
                 eprintln!(
@@ -899,7 +984,7 @@ fn set_busy_poll_opts(fd: c_int, poll_mode: crate::PollMode) -> BusyPollSetup {
 /// default/empty report) turns them RED.
 #[cfg(test)]
 mod busy_poll_report_tests {
-    use super::{BusyPollSetup, set_busy_poll_opts};
+    use super::{set_busy_poll_opts, BusyPollSetup};
 
     #[test]
     fn refused_busy_poll_opts_are_reported_not_swallowed() {
@@ -927,11 +1012,7 @@ mod busy_poll_report_tests {
             "SO_BUSY_POLL_BUDGET failure must carry the kernel errno"
         );
         let described = report.describe();
-        for opt in [
-            "SO_BUSY_POLL",
-            "SO_PREFER_BUSY_POLL",
-            "SO_BUSY_POLL_BUDGET",
-        ] {
+        for opt in ["SO_BUSY_POLL", "SO_PREFER_BUSY_POLL", "SO_BUSY_POLL_BUDGET"] {
             assert!(
                 described.contains(opt),
                 "the operator warning must NAME each refused option; {opt} \
@@ -1177,7 +1258,10 @@ mod umem_sizing_contract_tests {
     /// test above green.
     #[test]
     fn reserved_tx_still_differs_by_driver_below_the_clamp_7497() {
-        assert_eq!(reserved_tx_frames_for_driver(Some("virtio_net"), 8192), 8192);
+        assert_eq!(
+            reserved_tx_frames_for_driver(Some("virtio_net"), 8192),
+            8192
+        );
         assert_eq!(reserved_tx_frames_for_driver(Some("mlx5_core"), 8192), 4096);
         assert_eq!(mib_per_binding(Some("virtio_net"), 8192), 96);
         assert_eq!(mib_per_binding(Some("mlx5_core"), 8192), 80);
@@ -1192,9 +1276,8 @@ mod umem_sizing_contract_tests {
     /// loss-cluster topology is 3 candidates x 6 queues.
     #[test]
     fn hugepages_needed_tracks_total_bindings_not_one_nic_7497() {
-        let per_binding_pages = binding_frame_count_for_driver(Some("mlx5_core"), 16384) as u64
-            * FRAME
-            / HUGE;
+        let per_binding_pages =
+            binding_frame_count_for_driver(Some("mlx5_core"), 16384) as u64 * FRAME / HUGE;
         assert_eq!(per_binding_pages, 80, "160 MiB / 2 MiB");
 
         let one_nic = 6 * per_binding_pages;
@@ -1326,9 +1409,7 @@ mod bind_mismatch_teardown_9904_tests {
         );
         let msg = err.to_string();
         assert!(
-            msg.contains("bind identity mismatch")
-                && msg.contains("11")
-                && msg.contains("12"),
+            msg.contains("bind identity mismatch") && msg.contains("11") && msg.contains("12"),
             "mismatch teardown must fail closed with planned-vs-observed, got: {msg}"
         );
     }
@@ -1383,6 +1464,73 @@ mod bind_owner_retry_15088_tests {
             XskSocketRole::Private.create_mode(),
             xsk_ffi::XskCreateMode::PrivateUmem,
             "private must keep the private create"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bind_post_create_terminal_15244_tests {
+    use super::*;
+
+    // #15244 (A61-03): a forced identity mismatch must surface
+    // "bind identity mismatch: …" as the bind's reported cause, not
+    // the `-EFAULT` ("Bad address") of a follow-on create. The
+    // mismatch teardown returns a `PostCreateBindError`;
+    // `open_binding_worker_rings` returns such an error immediately
+    // instead of overwriting `last_err` with the next candidate's
+    // failure on the now-unmapped UMEM. The wiring is pinned by
+    // tests/post_create_bind_terminal_15244.rs; driving
+    // `open_binding_worker_rings` itself needs a real AF_XDP bind.
+    //
+    // RED on the pre-fix mechanism: `PostCreateBindError` /
+    // `is_post_create_bind_error` do not exist pre-fix and the
+    // mismatch error was a plain `String` error the ladder treated
+    // as an ordinary candidate failure.
+    #[test]
+    fn identity_mismatch_error_is_post_create_terminal_15244() {
+        let err = fail_identity_mismatched_bind(
+            User::new_for_test(-1),
+            RingRx::new_for_test(-1, 8),
+            RingTx::new_for_test(-1, 8),
+            DeviceQueue::new_for_test(-1, 8),
+            0,
+            "planned ifindex 11 but bound name \"eth0\" now resolves to ifindex 12".to_string(),
+        );
+        assert!(
+            is_post_create_bind_error(err.as_ref()),
+            "#15244: identity-mismatch error must be marked post-create \
+             terminal so the flag/strategy ladder exits with the true cause"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bind identity mismatch") && msg.contains("11") && msg.contains("12"),
+            "forced identity mismatch must surface as the reported cause, got: {msg}"
+        );
+        assert!(
+            !msg.contains("Bad address"),
+            "the reported cause must not be the -EFAULT follow-on noise, got: {msg}"
+        );
+    }
+
+    // Control: a plain create failure (no socket was created) is NOT
+    // post-create terminal — the ladder keeps its next candidate.
+    #[test]
+    fn plain_create_error_is_not_post_create_terminal_15244() {
+        let plain: Box<dyn std::error::Error + Send + Sync> =
+            "libxdp private bind(flags=0x0002): Device or resource busy".into();
+        assert!(
+            !is_post_create_bind_error(plain.as_ref()),
+            "#15244 control: a pre-create failure must keep the flag/strategy ladder"
+        );
+        let tagged = post_create_bind_error("prime fill ring after socket create: x".to_string());
+        assert!(
+            is_post_create_bind_error(tagged.as_ref()),
+            "#15244: post_create_bind_error must tag its error as terminal"
+        );
+        assert_eq!(
+            tagged.to_string(),
+            "prime fill ring after socket create: x",
+            "the tagged error must carry its message verbatim"
         );
     }
 }

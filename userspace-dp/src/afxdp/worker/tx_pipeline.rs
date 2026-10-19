@@ -21,8 +21,11 @@
 //! - `pending_fill_frames` — fill-ring back-pressure queue.
 //! - `in_flight_prepared_recycles` — completion-time recycle map.
 //! - `tx_submit_ns` — per-UMEM-frame submit timestamp sidecar
-//!   (#812). Pre-allocated to total UMEM frames at construction;
-//!   never grown. `Box<[u64]>` (not `Vec<u64>`) at the type level
+//!   (#812). Pre-allocated to the WHOLE UMEM region's frame count
+//!   (`worker_umem.total_frames()`) at construction — under a shared
+//!   UMEM that is the group sum, not this binding's own carve-out,
+//!   because frame offsets are region-wide (#15244 A61-01); never
+//!   grown. `Box<[u64]>` (not `Vec<u64>`) at the type level
 //!   so any future `push` attempt fails to compile.
 //!
 //! Pure structural extraction: capacities and access semantics
@@ -35,9 +38,11 @@ use super::*;
 /// Per-binding TX pipeline state. See module-level docs.
 ///
 /// **Intentionally NOT `Default`** — `tx_submit_ns` must be sized
-/// to `total_frames` at construction, not zero-length. Construction
-/// goes through the explicit literal in `BindingWorker::create`
-/// which receives `total_frames` from the BindingPlan.
+/// to the whole UMEM region (`worker_umem.total_frames()`) at
+/// construction, not zero-length and not this binding's own frame
+/// count. Construction goes through the explicit literal in
+/// `BindingWorker::create`, which sizes it via
+/// `tx_submit_sidecar_len`.
 pub(crate) struct WorkerTxPipeline {
     pub(crate) free_tx_frames: VecDeque<u64>,
     pub(crate) pending_tx_prepared: VecDeque<PreparedTxRequest>,
@@ -77,15 +82,37 @@ pub(crate) struct WorkerTxPipeline {
     /// carry exact ownership in `in_flight_prepared_recycles`.)
     pub(crate) in_flight_untracked_tx: FastSet<u64>,
     /// #812 per-UMEM-frame submit timestamp sidecar. Indexed by
-    /// `offset >> UMEM_FRAME_SHIFT`. Pre-allocated to total UMEM
-    /// frames at `BindingWorker::create` so the hot-path stamp
-    /// write is a single store — NO allocation, NO grow.
-    /// `Box<[u64]>` (not `Vec<u64>`) at the type level so any
-    /// future `push` attempt fails to compile (Rust round-1 MED-1).
-    /// Unstamped slots hold `TX_SIDECAR_UNSTAMPED` (`u64::MAX`); the
-    /// reap path skips the histogram increment for these to avoid
-    /// biasing the tail toward bucket 0 (plan §5.4).
+    /// `offset >> UMEM_FRAME_SHIFT`, where the offset spans the
+    /// WHOLE UMEM region. Pre-allocated to
+    /// `worker_umem.total_frames()` at `BindingWorker::create` —
+    /// under a shared UMEM the group sum, so a secondary whose
+    /// frames live at `[N, 2N)` still stamps its own slots (#15244
+    /// A61-01) — so the hot-path stamp write is a single store —
+    /// NO allocation, NO grow. `Box<[u64]>` (not `Vec<u64>`) at
+    /// the type level so any future `push` attempt fails to
+    /// compile (Rust round-1 MED-1). Unstamped slots hold
+    /// `TX_SIDECAR_UNSTAMPED` (`u64::MAX`); the reap path skips
+    /// the histogram increment for these to avoid biasing the
+    /// tail toward bucket 0 (plan §5.4).
     pub(crate) tx_submit_ns: Box<[u64]>,
+}
+
+/// #15244 (A61-01): length of the per-binding submit-timestamp
+/// sidecar. Frame offsets are UMEM-region-wide: `WorkerUmemPool`
+/// fills one pool for the whole shared group and each binding pops
+/// its carve-out sequentially, so a secondary owns offsets in
+/// `[N, 2N)` while its own `binding_frame_count_for_driver` count
+/// is only `N`. Sizing the sidecar to that per-binding count made
+/// `stamp_submits` silently drop every stamp above it (and the reap
+/// fold drop every matching completion), so the #812 histogram
+/// covered only the owner / a direction-dependent subset. The
+/// sidecar MUST span the whole region — `worker_umem.total_frames()`
+/// (the group sum under a shared UMEM, the binding's own count for
+/// a private UMEM, where the two coincide). Pure so the sizing
+/// decision is unit-testable without a bound socket; the production
+/// caller is `BindingWorker::create`.
+pub(crate) fn tx_submit_sidecar_len(worker_umem: &WorkerUmem) -> usize {
+    worker_umem.total_frames().max(1) as usize
 }
 
 impl WorkerTxPipeline {
