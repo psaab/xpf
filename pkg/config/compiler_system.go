@@ -1049,6 +1049,18 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				sys.Services.SSH.NoPasswords = true
 			}
 		}
+		// NETCONF over SSH (#15781): declared in the schema, but xpf has
+		// no NETCONF daemon. Record the knob so systemInertKnobWarnings
+		// can warn and `show system services` can report it as
+		// configured-but-not-served instead of a silent no-op; svcNode
+		// children carry the packed spellings (#13089 shapes).
+		if ncNode := svcNode.FindChild("netconf"); ncNode != nil &&
+			blockHasNetconfSSH15781(ncNode) {
+			if sys.Services == nil {
+				sys.Services = &SystemServicesConfig{}
+			}
+			sys.Services.NetconfSSH = true
+		}
 		// DNS service
 		if dnsNode := svcNode.FindChild("dns"); dnsNode != nil {
 			if sys.Services == nil {
@@ -3199,8 +3211,42 @@ func systemInertKnobWarnings(sysNode *Node, system *SystemConfig) []string {
 				add("system services ssh rate-limit: accepted but NOT enforced (sshd has no per-minute connection-rate limiter)")
 			}
 		}
+		// #15781: `system services netconf ssh` commits but starts no
+		// NETCONF server (xpf has no NETCONF daemon). The host-inbound
+		// tcp/830 opening alone must not read as a served port, so warn
+		// explicitly. Typed-flag keyed (like the NTP key ids above): the
+		// compiler reader already spans every AST spelling (#13089).
+		if system != nil && system.Services != nil && system.Services.NetconfSSH {
+			add("system services netconf ssh: accepted but NOT served (xpf has no NETCONF daemon; host-inbound tcp/830 admission alone does not provide NETCONF)")
+		}
 	}
 	return warnings
+}
+
+// blockHasNetconfSSH15781 reports whether a `netconf` container carries
+// the `ssh` leaf in any spelling compileSystem accepts (#13089 shapes):
+// braced child, packed on the netconf line (`netconf ssh;` — caught by
+// packedBodyChildren), or the flat-set chain (`set system services
+// netconf ssh` nests ssh under netconf). Used by compileSystem to set
+// SystemServicesConfig.NetconfSSH (#15781).
+func blockHasNetconfSSH15781(ncNode *Node) bool {
+	if ncNode == nil {
+		return false
+	}
+	if ncNode.FindChild("ssh") != nil {
+		return true
+	}
+	for _, k := range ncNode.Keys[1:] {
+		if k == "ssh" {
+			return true
+		}
+	}
+	for _, c := range packedBodyChildren(ncNode, schemaForPath("system", "services", "netconf")) {
+		if c.Name() == "ssh" || blockHasNetconfSSH15781(c) {
+			return true
+		}
+	}
+	return subtreeHasStatement13089(ncNode.Children, "ssh")
 }
 
 // systemServicesSSHSchema13089 resolves the `system services ssh` container

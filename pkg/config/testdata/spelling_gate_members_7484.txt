@@ -1210,7 +1210,7 @@ COMPARED	system services dynamic-dns provider <*> update-server
 COMPARED	system services dynamic-dns provider <*> url-template
 COMPARED	system services dynamic-dns provider <*> username
 COMPARED	system services dynamic-dns provider <*> zone
-unreachable (leaf changed nothing)	system services netconf ssh
+flag (read, but value-less)	system services netconf ssh
 COMPARED	system services ssh ciphers
 COMPARED	system services ssh client-alive-count-max
 COMPARED	system services ssh client-alive-interval

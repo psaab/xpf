@@ -391,6 +391,9 @@ func (c *CLI) showSystemServices() error {
 		}
 		fmt.Printf("  SSH:            enabled (root-login: %s)\n", rootLogin)
 	}
+	if cfg.System.Services != nil && cfg.System.Services.NetconfSSH {
+		fmt.Println("  NETCONF SSH:    configured but NOT served (no NETCONF daemon; tcp/830 not served)")
+	}
 
 	// SNMP
 	if cfg.System.SNMP != nil {

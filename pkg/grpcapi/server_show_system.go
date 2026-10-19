@@ -273,6 +273,9 @@ func (s *Server) showSystemServices(buf *strings.Builder) {
 			}
 			fmt.Fprintf(buf, "  SSH:            enabled (root-login: %s)\n", rootLogin)
 		}
+		if cfg.System.Services.NetconfSSH {
+			fmt.Fprintln(buf, "  NETCONF SSH:    configured but NOT served (no NETCONF daemon; tcp/830 not served)")
+		}
 		if cfg.System.Services.WebManagement != nil {
 			wm := cfg.System.Services.WebManagement
 			if wm.HTTP {
