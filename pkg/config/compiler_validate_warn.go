@@ -706,33 +706,9 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 			"session-forwarded regardless of this setting")
 	}
 
-	// #2078: the remaining `security flow tcp-session` presence flags
-	// (no-syn-check-in-tunnel, rst-invalidate-session, no-sequence-check) are
-	// typed and committed but not enforced by the userspace dataplane. Warn so
-	// an operator setting one is not misled about its runtime effect.
-	//
-	// #10703 wires no-syn-check and strict-syn-check into the transit
-	// session-MISS gate: mid-stream non-closing TCP is admitted only when
-	// no-syn-check is set, and strict-syn-check overrides it. Bare RST/FIN
-	// remain fail-closed. Those two selectors are therefore deliberately
-	// excluded from the accepted-only advisory.
-	if ts := cfg.Security.Flow.TCPSession; ts != nil {
-		var unenforced []string
-		if ts.NoSynCheckInTunnel {
-			unenforced = append(unenforced, "no-syn-check-in-tunnel")
-		}
-		if ts.RstInvalidateSession {
-			unenforced = append(unenforced, "rst-invalidate-session")
-		}
-		if ts.NoSequenceCheck {
-			unenforced = append(unenforced, "no-sequence-check")
-		}
-		if len(unenforced) > 0 {
-			warnings = append(warnings, fmt.Sprintf(
-				"security flow tcp-session %s configured but accepted-only — the userspace dataplane does not enforce these knobs (config-only parity, #2078)",
-				strings.Join(unenforced, ", ")))
-		}
-	}
+	// #15753: no-syn-check-in-tunnel, rst-invalidate-session and
+	// no-sequence-check are now enforced (snapshot -> Rust), so the
+	// #2078 accepted-only advisory for tcp-session is removed.
 
 	// #11061 R3: the rolling-upgrade compatibility knob is a BOUNDED window,
 	// not a steady state. While set, absent-stamp fabric arrivals on an RI

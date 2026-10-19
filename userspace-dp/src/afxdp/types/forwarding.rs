@@ -474,6 +474,12 @@ pub(in crate::afxdp) struct ForwardingState {
     /// admission. Strict mode wins if both flags are set.
     pub(in crate::afxdp) tcp_no_syn_check: bool,
     pub(in crate::afxdp) tcp_strict_syn_check: bool,
+    /// #15753: tunnel-only mid-stream admission + RST/sequence fidelity.
+    pub(in crate::afxdp) tcp_no_syn_check_in_tunnel: bool,
+    pub(in crate::afxdp) tcp_rst_invalidate_session: bool,
+    pub(in crate::afxdp) tcp_no_sequence_check: bool,
+    pub(in crate::afxdp) tcp_rst_sequence_check: bool,
+    pub(in crate::afxdp) tcp_maximum_window: u32,
     /// #3527: per-ingress-zone override (zone id → ns) of the global half-open
     /// (`tcp_opening_ns`) TCP window, built from each screened zone's
     /// `syn-flood timeout`. Pushed onto the worker `SessionTable` via

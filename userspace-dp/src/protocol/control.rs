@@ -277,7 +277,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // helper demotes only the cluster Null0 default to fabric redirect.
 // v57 -> v58 (#15742): FibRouteWire carries cluster_terminal and the
 // flowless path fabric-redirects ClusterTerminalHAInactive.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 58;
+// v58 -> v59 (#15753): FlowSnapshot carries tcp_no_syn_check_in_tunnel,
+// tcp_rst_invalidate_session, tcp_no_sequence_check,
+// tcp_rst_sequence_check and tcp_maximum_window.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 59;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

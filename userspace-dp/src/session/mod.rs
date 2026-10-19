@@ -749,6 +749,54 @@ impl SessionEntry {
     }
 }
 
+/// #15753: wrapping TCP sequence helpers (RFC 1982 serial arithmetic).
+#[inline]
+pub(crate) fn tcp_seq_after(a: u32, b: u32) -> bool {
+    (a.wrapping_sub(b) as i32) > 0
+}
+#[inline]
+pub(crate) fn tcp_seq_in_window(seq: u32, rcv_nxt: u32, rcv_wnd: u32) -> bool {
+    if rcv_wnd == 0 {
+        return seq == rcv_nxt;
+    }
+    // seq in [rcv_nxt, rcv_nxt+rcv_wnd)
+    seq.wrapping_sub(rcv_nxt) < rcv_wnd
+}
+
+impl SessionEntry {
+    /// Record this direction's seq/window from an observed segment.
+    #[inline]
+    pub(crate) fn note_tcp_seq(&mut self, seq: u32, ack: u32, window: u16, payload_len: u32, tcp_flags: u8, max_window: u32) {
+        let cap = if max_window == 0 { 65535 } else { max_window };
+        let wnd = (window as u32).min(cap);
+        // This direction's send stream: peer expects seq+payload (+SYN/FIN).
+        let mut end = seq.wrapping_add(payload_len);
+        if has_syn(tcp_flags) { end = end.wrapping_add(1); }
+        if has_fin(tcp_flags) { end = end.wrapping_add(1); }
+        if !self.tcp_seq_seen || tcp_seq_after(end, self.tcp_rcv_nxt) {
+            self.tcp_rcv_nxt = end;
+        }
+        let _ = ack;
+        self.tcp_rcv_wnd = wnd;
+        self.tcp_seq_seen = true;
+    }
+    /// Validate an incoming RST/FIN seq against the peer direction's window.
+    /// Caller passes the companion (sender-direction) entry's tracked state
+    /// via `tcp_rst_seq_valid_on` on the table; this is the per-entry check:
+    /// `self` is the entry in the RST's direction, so its rcv_nxt is what
+    /// the sender will send next — an RST seq must fall in the receiver's
+    /// window which is mirrored from the companion. For simplicity the table
+    /// method checks against the companion entry; see lookup.rs.
+    #[inline]
+    pub(crate) fn tcp_seq_valid(&self, seq: u32) -> bool {
+        if !self.tcp_seq_seen {
+            return true; // no state yet — cannot reject (mid-stream pickup)
+        }
+        tcp_seq_in_window(seq, self.tcp_rcv_nxt, self.tcp_rcv_wnd.max(1))
+            || seq == self.tcp_rcv_nxt
+    }
+}
+
 /// #7342: THE close-window formula. Four sites used to carry their own copy of
 /// "RST → 2s, else 30s" — `session_timeout_ns`, the read path in `lookup.rs`,
 /// the companion mirror in `propagate_tcp_state_to_companion`, and the HA
@@ -797,7 +845,7 @@ mod lookup;
 pub(crate) use install::PMechInstallPlan;
 // #7342: the read path's close/promotion signal bundle, applied to the
 // forward<->reverse companion by `propagate_tcp_state_to_companion` below.
-pub(crate) use lookup::{ExportWalkOutcome, IpsecReplyAliasLookup};
+pub(crate) use lookup::{ExportWalkOutcome, IpsecReplyAliasLookup, SeqVerdict};
 use lookup::TcpStatePropagation;
 
 /// #7212: the `(config generation, logical ingress interface)` pair a session's
@@ -1271,6 +1319,14 @@ struct SessionEntry {
     /// derived state, like `established`: `SessionEntry` carries no serde,
     /// so this is on no HA wire and a peer re-derives its own budget.
     last_icmp_error_tat: u64,
+    /// #15753: per-direction TCP sequence tracking for RST/FIN validation.
+    /// This entry's own send next-seq / ack (peer window edge) and whether
+    /// any seq was observed. Node-local, no wire. `rcv_nxt` is peer's next
+    /// expected seq as learned from this direction's packets (seq+payload);
+    /// `rcv_wnd` is this direction's advertised window capped by maximum-window.
+    tcp_rcv_nxt: u32,
+    tcp_rcv_wnd: u32,
+    tcp_seq_seen: bool,
 }
 
 /// Snapshot of one live half after a policy rebind. The worker uses this
@@ -5597,6 +5653,9 @@ mod tcp_close_state_7342_tests;
 #[cfg(test)]
 #[path = "close_refresh_gate_10885_tests.rs"]
 mod close_refresh_gate_10885_tests;
+#[cfg(test)]
+#[path = "tcp_seq_15753_tests.rs"]
+mod tcp_seq_15753_tests;
 
 // #13939 (H09-02): an Owner hit that promotes a peer-synced pair, then
 // applies the deferred FIN/RST close, must close BOTH halves. The promotion

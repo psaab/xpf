@@ -1,18 +1,27 @@
 use super::*;
 
-pub(in crate::afxdp) fn should_teardown_tcp_rst(_meta: UserspaceDpMeta, _flow: Option<&SessionFlow>) -> bool {
-    // Do not immediately delete live sessions on an observed TCP RST.
+pub(in crate::afxdp) fn should_teardown_tcp_rst(meta: UserspaceDpMeta, _flow: Option<&SessionFlow>) -> bool {
+    should_teardown_tcp_rst_with(meta, false)
+}
+
+/// #15753: knob-driven variant. Default (knob off) retains the HA
+/// stray-RST rationale below: do NOT immediately delete. When
+/// `rst_invalidate_session` is set, an observed RST tears down.
+pub(in crate::afxdp) fn should_teardown_tcp_rst_with(_meta: UserspaceDpMeta, rst_invalidate: bool) -> bool {
+    // Do not immediately delete live sessions on an observed TCP RST
+    // unless the operator configured rst-invalidate-session.
     //
     // On the current HA userspace dataplane, stray or misclassified reply-side
     // RSTs can appear while the real flow is still active. Immediate teardown
     // removes the pinned live-session keys from USERSPACE_SESSIONS, which then
     // causes userspace-xdp to stop redirecting valid reply traffic and the
     // kernel to emit follow-on RSTs that collapse the connection entirely.
+    // That hazard is why the default stays false and the knob is opt-in,
+    // diverging from Junos default-on explicitly per #15753 acceptance.
     //
     // The session table already marks TCP entries as closing when FIN/RST is
-    // seen and ages them on the shorter TCP_CLOSING timeout. Rely on that
-    // path for now until RST provenance is made trustworthy again.
-    false
+    // seen and ages them on the shorter TCP_CLOSING timeout.
+    rst_invalidate && crate::tcp_flags::has_rst(_meta.tcp_flags)
 }
 
 pub(in crate::afxdp) fn teardown_tcp_rst_flow(left: &mut [BindingWorker],

@@ -112,6 +112,19 @@ func buildFlowSnapshot(cfg *config.Config) FlowSnapshot {
 		// the mid-stream no-syn-check opt-out.
 		snap.TCPNoSynCheck = ts.NoSynCheck
 		snap.TCPStrictSynCheck = ts.StrictSynCheck
+		// #15753: thread the remaining tcp-session fidelity knobs.
+		snap.TCPNoSynCheckInTunnel = ts.NoSynCheckInTunnel
+		snap.TCPRstInvalidate = ts.RstInvalidateSession
+		snap.TCPNoSequenceCheck = ts.NoSequenceCheck
+		snap.TCPRstSequenceCheck = ts.RstSequenceCheck
+		if ts.MaximumWindow > 0 {
+			snap.TCPMaximumWindow = ts.MaximumWindow
+		}
+		// time-wait-state session-timeout overrides time-wait-timeout.
+		if ts.TimeWaitStateSessionTimeout > 0 {
+			snap.TCPTimeWaitTimeout = coerceWireSessionTimeout(
+				"tcp_time_wait_timeout", ts.TimeWaitStateSessionTimeout)
+		}
 	}
 	snap.ALGDisableFlags = algDisableFlags(&cfg.Security.ALG)
 	return snap

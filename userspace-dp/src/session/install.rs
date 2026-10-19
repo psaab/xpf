@@ -702,7 +702,9 @@ impl SessionTable {
                 // #4915: the stable id allocated above, write-once for the life
                 // of the entry.
                 session_id,
-                // #9901 (F-077): 0 = full error budget by construction.
+                tcp_rcv_nxt: 0,
+                tcp_rcv_wnd: 0,
+                tcp_seq_seen: false,
                 last_icmp_error_tat: 0,
             },
         };
@@ -1089,9 +1091,10 @@ impl SessionTable {
                 observed_tcp_flags: tcp_flags,
                 // #4915: fresh node-local id allocated above.
                 session_id,
+                tcp_rcv_nxt: 0,
+                tcp_rcv_wnd: 0,
+                tcp_seq_seen: false,
                 // #9901 (F-077): a re-imported copy starts with a FULL error
-                // budget — the peer's consumed budget is node-local and is
-                // not carried on the HA session-sync delta.
                 last_icmp_error_tat: 0,
             },
         };

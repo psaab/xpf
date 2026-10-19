@@ -14814,11 +14814,16 @@ the value sits in a single typed slot:
     mid-stream TCP misses, while `strict-syn-check` wins if both are set. Bare
     RST/FIN misses still drop (#4400). Missing selector keys decode false, and
     the protocol-v34 exact-version gate rejects a v33 helper that would ignore
-    an explicitly configured selector. The remaining presence flags are
-    typed-config only and emit one accepted-only advisory (#2078):
-    `no-syn-check-in-tunnel` lacks a tunnel-decap signal,
-    `rst-invalidate-session` does not select immediate RST invalidation, and
-    `no-sequence-check` has no sequence-window check to skip.
+    an explicitly configured selector. #15753 enforces the remaining
+    knobs: `no-syn-check-in-tunnel` admits tunnel-decapped mid-stream TCP,
+    `rst-invalidate-session` drives immediate RST teardown (opt-in;
+    default off per the HA stray-RST rationale in tx_cancel.rs), and
+    sequence tracking validates RST/FIN seq by default
+    (`rst-sequence-check`/`maximum-window` configure it,
+    `no-sequence-check` disables validation). New leaves
+    `rst-sequence-check`, `maximum-window <bytes>`, and
+    `time-wait-state { session-timeout; session-ageout;
+    apply-to-half-closed-state; }` are schema-accepted (#15753).
     (**#6539** narrowed an older sentence: the dataplane does have TCP state —
     #3152 adds OPENING vs established and #3046 distinguishes RST vs FIN close.
     Those states are precisely why the TIMEOUT leaves need a differently-worded

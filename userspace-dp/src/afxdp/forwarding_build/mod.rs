@@ -706,6 +706,12 @@ fn build_fallible_forwarding_state(
     // fail-closed default, and explicit strict mode takes precedence.
     state.tcp_no_syn_check = snapshot.flow.tcp_no_syn_check;
     state.tcp_strict_syn_check = snapshot.flow.tcp_strict_syn_check;
+    // #15753: tunnel/RST/sequence fidelity knobs.
+    state.tcp_no_syn_check_in_tunnel = snapshot.flow.tcp_no_syn_check_in_tunnel;
+    state.tcp_rst_invalidate_session = snapshot.flow.tcp_rst_invalidate_session;
+    state.tcp_no_sequence_check = snapshot.flow.tcp_no_sequence_check;
+    state.tcp_rst_sequence_check = snapshot.flow.tcp_rst_sequence_check;
+    state.tcp_maximum_window = snapshot.flow.tcp_maximum_window;
     // #3527: per-screened-zone half-open (`tcp_opening_ns`) overrides from each
     // zone's `syn-flood timeout`. The leaf maps to the Junos
     // half-completed-connection queue window, NOT the screen-rate substrate

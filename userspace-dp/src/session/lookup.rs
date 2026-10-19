@@ -15,6 +15,66 @@
 use super::*;
 use crate::tcp_flags::{has_ack, has_syn};
 
+/// #15753: result of sequence validation for a closing segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeqVerdict {
+    Valid,
+    Invalid,
+    Unknown,
+}
+
+impl SessionTable {
+    /// Note seq/window for the entry matching `key` (this packet's direction).
+    pub fn note_tcp_seq(&mut self, key: &SessionKey, seq: u32, ack: u32, window: u16, payload_len: u32, tcp_flags: u8, max_window: u32) {
+        if let Some(entry) = self.entry_by_key_mut(key) {
+            entry.note_tcp_seq(seq, ack, window, payload_len, tcp_flags, max_window);
+        }
+    }
+    /// Validate RST/FIN seq: the sender's next seq is tracked on the
+    /// companion entry (reverse of `key`). Unknown if no companion/state.
+    pub fn tcp_closing_seq_verdict(&self, key: &SessionKey, seq: u32) -> SeqVerdict {
+        // The entry for `key` itself is in the sender's direction: its
+        // tcp_rcv_nxt is the sender's next seq, tcp_rcv_wnd is sender's
+        // advertised window. Receiver window is companion's, but next-seq
+        // expectation is sender's own — an RST seq must be in receiver's
+        // window [companion_rcv_nxt - wnd, companion_rcv_nxt). We have no
+        // stored receiver rcv_nxt on companion for this direction's incoming
+        // stream except sender entry itself: incoming RST arrives on the
+        // reverse entry whose own stream is opposite. So validate against
+        // the matching entry's peer expectation stored as: the RST's seq
+        // should equal/behind the seq the receiver has seen from sender,
+        // which is tracked on the RECEIVER entry as its observed peer nxt.
+        // Our per-entry tracking stores sender nxt on sender entry; receiver
+        // entry's companion lookup gives sender entry.
+        let Some(entry) = self.entry_by_key(key) else { return SeqVerdict::Unknown };
+        let nat = entry.decision.nat;
+        let companion_key = reverse_session_key(key, nat);
+        // companion is receiver; its window toward sender is not directly
+        // stored, but sender entry's tcp_rcv_wnd is sender's advertised
+        // window (receiver's send window). For RST validation Junos checks
+        // seq in receiver's receive window: [receiver_rcv_nxt, +wnd) where
+        // receiver_rcv_nxt == sender's next seq (what receiver expects).
+        // That expectation IS sender entry's tcp_rcv_nxt if sender entry is
+        // looked up — here `entry` IS sender-direction if packet direction
+        // matches key direction. In poll, key is packet's forward_key as
+        // resolved (canonical direction varies). Use entry itself:
+        let _ = companion_key;
+        if !entry.tcp_seq_seen {
+            return SeqVerdict::Unknown;
+        }
+        // Receiver expects sender seq == tcp_rcv_nxt (next unsent). Valid
+        // RST seq is within [rcv_nxt - wnd, rcv_nxt] (already-sent range)
+        // or exactly rcv_nxt per RFC 5961; use window behind nxt plus nxt.
+        let wnd = entry.tcp_rcv_wnd.max(1);
+        let behind = entry.tcp_rcv_nxt.wrapping_sub(seq);
+        if behind < wnd || seq == entry.tcp_rcv_nxt {
+            SeqVerdict::Valid
+        } else {
+            SeqVerdict::Invalid
+        }
+    }
+}
+
 /// #4109: the TCP close / handshake-promotion state a `lookup_with_origin`
 /// mutation must mirror onto the matched entry's forward↔reverse companion.
 /// Captured inside the `&mut self.entries` borrow (which pins the matched

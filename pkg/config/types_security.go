@@ -349,12 +349,23 @@ type TCPSessionConfig struct {
 	ClosingTimeout       int
 	TimeWaitTimeout      int
 	NoSynCheck           bool // allow non-closing mid-stream TCP transit misses (#10703)
-	NoSynCheckInTunnel   bool // allow mid-stream TCP for tunnel traffic only
-	RstInvalidateSession bool // immediately expire session on RST
+	NoSynCheckInTunnel   bool // allow mid-stream TCP for tunnel traffic only (#15753)
+	RstInvalidateSession bool // immediately expire session on RST (#15753)
+	// RstSequenceCheck (`security flow tcp-session rst-sequence-check`,
+	// #15753): validate RST sequence against tracked receive window.
+	// Junos default-on; presence records explicit enable.
+	RstSequenceCheck bool
+	// MaximumWindow (`maximum-window <bytes>`, #15753): cap on tracked
+	// TCP receive window used for sequence validation. 0 = default.
+	MaximumWindow int
+	// TimeWaitStateSessionTimeout (`time-wait-state session-timeout`, #15753).
+	TimeWaitStateSessionTimeout int
+	TimeWaitStateSessionAgeout  bool
+	TimeWaitStateApplyToHalfClosed bool
 	// NoSequenceCheck disables TCP sequence-number validation for flow
 	// sessions (`set security flow tcp-session no-sequence-check`, #2008 M9).
-	// Typed-config only: the userspace dataplane does not currently perform
-	// TCP sequence-number window validation, so there is nothing to skip yet.
+	// When set, sequence tracking still records bounds but the poll path
+	// does not reject out-of-window RST/FIN (#15753).
 	NoSequenceCheck bool
 	// StrictSynCheck records `set security flow tcp-session strict-syn-check`
 	// (#8296). It is carried to the transit session-MISS gate, where it requires

@@ -12196,6 +12196,20 @@ fn tcp_syn_check_selectors_reach_forwarding_state_10703() {
     assert!(state.tcp_strict_syn_check);
 }
 
+#[test]
+fn tcp_fidelity_knobs_reach_forwarding_state_15753() {
+    let def = build_forwarding_state(&ConfigSnapshot::default());
+    assert!(!def.tcp_no_syn_check_in_tunnel && !def.tcp_rst_invalidate_session && !def.tcp_no_sequence_check);
+    let mut s = ConfigSnapshot::default();
+    s.flow.tcp_no_syn_check_in_tunnel = true;
+    s.flow.tcp_rst_invalidate_session = true;
+    s.flow.tcp_no_sequence_check = true;
+    s.flow.tcp_maximum_window = 32768;
+    let st = build_forwarding_state(&s);
+    assert!(st.tcp_no_syn_check_in_tunnel && st.tcp_rst_invalidate_session && st.tcp_no_sequence_check);
+    assert_eq!(st.tcp_maximum_window, 32768);
+}
+
 // ---------------------------------------------------------------------------
 // #7888: the inert set has to survive the trip from the wire into the
 // forwarding state. This is the Rust half of the wiring guard — the Go half
