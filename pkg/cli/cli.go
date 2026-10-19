@@ -538,27 +538,9 @@ func (c *CLI) Run() error {
 				words = words[:len(words)-1]
 			}
 			var candidates []completionCandidate
-			if c.store.InConfigMode() {
-				candidates = c.completeConfigWithDesc(words, partial)
-			} else {
-				// "show configuration <path>" — delegate sub-path to config schema
-				if subPath, ok := showConfigurationSubPath(words); ok {
-					if resolvedPath, resolved := config.ResolveConsumedSetPathTokens(subPath); resolved {
-						subPath = resolvedPath
-					}
-					schemaCompletions := config.CompleteSetPathWithValues(subPath, c.valueProvider)
-					if schemaCompletions != nil {
-						for _, sc := range schemaCompletions {
-							if partial == "" || strings.HasPrefix(sc.Name, partial) {
-								candidates = append(candidates, completionCandidate{name: sc.Name, desc: sc.Desc})
-							}
-						}
-					}
-				}
-				if len(candidates) == 0 {
-					candidates = completeFromTreeWithDesc(operationalTree, words, partial, c.store.ActiveConfig())
-				}
-			}
+			// #14988: `?` help goes through the same gated computation
+			// as TAB (completeForHelp) — never the ungated schema/tree.
+			candidates = c.completeForHelp(words, partial)
 			if len(candidates) > 0 {
 				writeCompletionHelp(c.rl.Stdout(), candidates)
 			}

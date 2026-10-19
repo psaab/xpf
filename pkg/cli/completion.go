@@ -93,28 +93,8 @@ func (cc *cliCompleter) Do(line []rune, pos int) ([][]rune, int) {
 		words = words[:len(words)-1]
 	}
 
-	var candidates []completionCandidate
-	if cc.cli.store.InConfigMode() {
-		candidates = cc.cli.completeConfigWithDesc(words, partial)
-	} else {
-		// "show configuration <path>" — delegate sub-path to config schema
-		if subPath, ok := showConfigurationSubPath(words); ok {
-			if resolvedPath, resolved := config.ResolveConsumedSetPathTokens(subPath); resolved {
-				subPath = resolvedPath
-			}
-			schemaCompletions := config.CompleteSetPathWithValues(subPath, cc.cli.valueProvider)
-			if schemaCompletions != nil {
-				for _, sc := range schemaCompletions {
-					if partial == "" || strings.HasPrefix(sc.Name, partial) {
-						candidates = append(candidates, completionCandidate{name: sc.Name, desc: sc.Desc})
-					}
-				}
-			}
-		}
-		if len(candidates) == 0 {
-			candidates = completeFromTreeWithDesc(operationalTree, words, partial, cc.cli.store.ActiveConfig())
-		}
-	}
+	// #14988: TAB goes through the same gated computation as `?`.
+	candidates := cc.cli.completeForHelp(words, partial)
 	if len(candidates) == 0 {
 		return nil, 0
 	}
@@ -145,62 +125,12 @@ func (cc *cliCompleter) Do(line []rune, pos int) ([][]rune, int) {
 	return [][]rune{[]rune(suffix)}, len(partial)
 }
 
+// completeConfigWithDesc is kept for existing callers/tests; it now
+// routes through the #14988 gated computation (completeForHelp's
+// config arm) so no caller can reach the ungated schema/tree.
 func (c *CLI) completeConfigWithDesc(words []string, partial string) []completionCandidate {
-	if len(words) == 0 {
-		return filterTreeCandidates(configTopLevel, partial)
-	}
-
-	resolvedTop, ok := resolveUniqueTreePrefix(configTopLevel, words[0])
-	if !ok {
-		if len(words) == 1 {
-			return filterTreeCandidates(configTopLevel, words[0])
-		}
-		return nil
-	}
-
-	switch resolvedTop {
-	case "set", "delete", "activate", "deactivate", "show", "edit":
-		// #2051: activate/deactivate complete with schema parity to delete
-		// (paths to existing nodes); CompleteSetPathWithValues is the
-		// schema-driven completer all path verbs share.
-		pathWords := words[1:]
-		if resolvedPath, resolved := config.ResolveConsumedSetPathTokens(pathWords); resolved {
-			pathWords = resolvedPath
-		}
-		schemaCompletions := config.CompleteSetPathWithValues(pathWords, c.valueProvider)
-		if schemaCompletions == nil {
-			return nil
-		}
-		var candidates []completionCandidate
-		for _, sc := range schemaCompletions {
-			if strings.HasPrefix(sc.Name, partial) {
-				candidates = append(candidates, completionCandidate{name: sc.Name, desc: sc.Desc})
-			}
-		}
-		return candidates
-
-	case "run":
-		return completeFromTreeWithDesc(operationalTree, words[1:], partial, c.store.ActiveConfig())
-
-	case "commit", "load":
-		if len(words) == 1 {
-			node := configTopLevel[resolvedTop]
-			if node == nil || node.Children == nil {
-				return nil
-			}
-			var candidates []completionCandidate
-			for name, child := range node.Children {
-				if strings.HasPrefix(name, partial) {
-					candidates = append(candidates, completionCandidate{name: name, desc: child.Desc})
-				}
-			}
-			return candidates
-		}
-		return nil
-
-	default:
-		return nil
-	}
+	auth := c.completionAuthz()
+	return c.completeConfigWithDescAuth(&auth, words, partial)
 }
 
 // resolveCommand performs Junos-style prefix matching.
