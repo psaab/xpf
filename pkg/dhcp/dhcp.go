@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/netip"
 	"sync"
@@ -97,10 +98,13 @@ type DelegatedPrefix struct {
 	Obtained          time.Time
 }
 
-// infiniteLifetime is the RFC 8415 0xFFFFFFFF-second sentinel decoded by
-// the dhcpv6 library as a duration far beyond any real clock; treat
-// durations >= this as infinite (never expires, never decays).
-const infiniteLifetime = time.Duration(1) << 62
+// infiniteLifetime is the RFC 8415 0xFFFFFFFF-second sentinel as decoded
+// by the dhcpv6 library (a whole-second duration); treat durations >=
+// this as infinite (never expires, never decays). It must be the wire
+// value itself: the previous 1<<62 threshold sat ABOVE the decoded
+// wire value, so infinite grants were treated as finite (~136 years),
+// decayed, and given a finite ExpiresAt (#15224, A39-08).
+const infiniteLifetime = time.Duration(math.MaxUint32) * time.Second
 
 // ExpiresAt returns Obtained+ValidLifetime, or zero if infinite/unknown.
 func (dp DelegatedPrefix) ExpiresAt() time.Time {
@@ -678,6 +682,29 @@ func (m *Manager) abandonLeaseAfterExpiry(key clientKey, expected *Lease) {
 	}
 	m.fireGatewayChange()
 	m.scheduleRecompile()
+}
+
+// clearDelegatedPDs drops the stored delegated-prefix set for key's
+// interface after an explicit IA_PD refusal (#15224, A39-02), so
+// DelegatedPrefixesForRA stops advertising the refused prefix
+// immediately. The lease record itself is left in place (the run loop
+// re-acquires next; expiry still owns lease teardown), but a recompile
+// is scheduled so the RA desired set reconverges. A no-op when nothing
+// is stored, so a refusal with no held delegation stays silent.
+func (m *Manager) clearDelegatedPDs(key clientKey, expected *Lease) {
+	m.mu.Lock()
+	if expected != nil && m.leases[key] != expected {
+		m.mu.Unlock()
+		return
+	}
+	_, had := m.delegatedPDs[key.iface]
+	if had {
+		delete(m.delegatedPDs, key.iface)
+	}
+	m.mu.Unlock()
+	if had {
+		m.scheduleRecompile()
+	}
 }
 
 // Renew restarts the DHCP client for the specified interface and address

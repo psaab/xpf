@@ -38,6 +38,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"testing"
@@ -312,7 +313,7 @@ func TestKernelAddrLifetimes15071(t *testing.T) {
 			name: "infinite lease installs forever sentinel",
 			lease: &Lease{
 				Address:   netip.MustParsePrefix("2606:4700::50/128"),
-				LeaseTime: infiniteLifetime, Obtained: now,
+				LeaseTime: time.Duration(math.MaxUint32) * time.Second, Obtained: now,
 			},
 			wantValid: 0xffffffff, wantPref: 0xffffffff,
 		},
