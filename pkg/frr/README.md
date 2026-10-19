@@ -1345,15 +1345,21 @@ step. Both are required — neither sees the other's case:
   malformed next-hop/prepend injection payloads; malformed prefix-list cases
   are covered by `TestPolicyPrefixListRenderOmitsMalformedCIDRs10823`.
 - **Malformed routing-only prefix-list entries are omitted before FRR emission
-  (#10823).** The #7273 strict CIDR gate is scoped to firewall-referenced
+  (#10823), and bare hosts render as host routes (#15012).** The #7273 strict CIDR gate is scoped to firewall-referenced
   lists, so a routing-only `policy-options prefix-list` can reach rendering
   unchecked on strict as well as tolerant compile paths. The top-level
   `ip/ipv6 prefix-list` definition and the same-family inline access-list both
-  apply `net.ParseCIDR`, warn, and omit malformed entries; unused sequence
+  apply the shared `config.NormalizePrefixListEntry` predicate (also read by
+  `prefixListRefMissingAtRender`), warn, and omit malformed entries; unused sequence
   slots remain gaps, so a bad entry cannot poison the whole frr-reload and
-  contributes no match. `TestPolicyPrefixListRenderOmitsMalformedCIDRs10823`
+  contributes no match. A mask-less entry is commit-valid Junos for a host
+  route (the #7273 firewall classifier already accepts it), so it is NOT
+  malformed: it renders as `/32` (v4) or `/128` (v6), and an all-bare list
+  is not treated as dangling. `TestPolicyPrefixListRenderOmitsMalformedCIDRs10823`
   covers `/33`, bad-octet, and non-IP entries through both compile paths while
-  checking valid siblings still render.
+  checking valid siblings still render; `policy_prefixlist_barehost_15012_test.go`
+  covers bare_mixed (`10.0.0.1/32`, `2001:db8::1/128`, inline ACL) and
+  bare_only (matching prefix-list, no deny-all downgrade).
 - **Prefix-list references with no rendered entry are fail-closed at the
   term (#14136, #14700).** `prefixListRefMissingAtRender` mirrors the #10823 belt
   per family: a `from prefix-list` name that is undefined, empty, or whose

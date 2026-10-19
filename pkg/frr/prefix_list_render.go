@@ -234,15 +234,18 @@ func renderFromPrefixListACL(b *strings.Builder, aclName, matchKW string, pl *co
 		// inline access-lists when a route-filter and from-prefix-list share
 		// a route-map term. Keep malformed entries out of this second FRR
 		// emission path as well as the top-level prefix-list definition.
-		if _, _, err := net.ParseCIDR(prefix); err != nil {
+		// #15012: the shared normaliser also renders a bare host with its
+		// /32 or /128 mask instead of omitting it.
+		normalized, ok := config.NormalizePrefixListEntry(prefix)
+		if !ok {
 			slog.Warn("frr: omitting malformed prefix-list entry from inline access-list",
-				"list", pl.Name, "prefix", prefix, "reason", err)
+				"list", pl.Name, "prefix", prefix)
 			continue
 		}
 		if v6 {
-			fmt.Fprintf(b, "ipv6 access-list %s seq %d permit %s exact-match\n", aclName, seqn, sanitizeFRRValue(prefix))
+			fmt.Fprintf(b, "ipv6 access-list %s seq %d permit %s exact-match\n", aclName, seqn, sanitizeFRRValue(normalized))
 		} else {
-			fmt.Fprintf(b, "access-list %s seq %d permit %s exact-match\n", aclName, seqn, sanitizeFRRValue(prefix))
+			fmt.Fprintf(b, "access-list %s seq %d permit %s exact-match\n", aclName, seqn, sanitizeFRRValue(normalized))
 		}
 		seqn += 5
 	}
