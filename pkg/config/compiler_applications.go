@@ -343,18 +343,23 @@ func isContainerTerm14340(leaf *Node) bool {
 // expandContainerTerm14340 unpacks a container term (`term { <name> { ... }
 // ... }`) into one synthesized named-term node per child, mirroring
 // namedInstances' container arm used by compileFirewall / compilePolicies.
-// Each synthesized node carries Keys ["term", <name>] and the child's body
-// as its children, so applicationTermKeys + parseApplicationTerms handle it
-// exactly like a canonically authored `term <name> { ... }`. A child with
-// no name token cannot be a term and is excluded here; the caller records
-// the container as nameless instead (#14340).
+// Each synthesized node carries Keys ["term", <name>, <packed header
+// tokens>...] and the child's body as its children, so
+// applicationTermKeys + parseApplicationTerms handle it exactly like a
+// canonically authored `term <name> { ... }`. Header tokens packed beside
+// the name (`t-ssh destination-port 22 { ... }`) are carried through
+// (#15120): recognized ones compile, unrecognized/dangling ones land in
+// UnknownTermLeaves / IncompleteTermLeaves for the #9595 strict gate
+// instead of being silently discarded. A child with no name token cannot
+// be a term and is excluded here; the caller records the container as
+// nameless instead (#14340).
 func expandContainerTerm14340(leaf *Node) []*Node {
 	var out []*Node
 	for _, sub := range leaf.Children {
 		if sub == nil || len(sub.Keys) == 0 || sub.Keys[0] == "" {
 			continue
 		}
-		out = append(out, &Node{Keys: []string{"term", sub.Keys[0]}, Children: sub.Children})
+		out = append(out, &Node{Keys: append([]string{"term"}, sub.Keys...), Children: sub.Children})
 	}
 	return out
 }
