@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 
 	fairnesscontract "github.com/psaab/xpf/pkg/fairness"
@@ -233,8 +234,15 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 	}
 
 	if classifiersNode := node.FindChild("classifiers"); classifiersNode != nil {
+		// #15006 (A09-03) find-or-create — see the schedulers loop below for
+		// the shared rule. A fresh classifier per instance overwrote the
+		// same-named earlier hierarchical block (second class-of-service
+		// root or second classifiers container), losing its code points.
 		for _, inst := range namedInstances(classifiersNode.FindChildren("dscp")) {
-			classifier := &CoSDSCPClassifier{Name: inst.name}
+			classifier := cos.DSCPClassifiers[inst.name]
+			if classifier == nil {
+				classifier = &CoSDSCPClassifier{Name: inst.name}
+			}
 			for _, fcNode := range inst.node.FindChildren("forwarding-class") {
 				className := ""
 				if len(fcNode.Keys) >= 2 {
@@ -278,7 +286,10 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 			}
 		}
 		for _, inst := range namedInstances(classifiersNode.FindChildren("ieee-802.1")) {
-			classifier := &CoSIEEE8021Classifier{Name: inst.name}
+			classifier := cos.IEEE8021Classifiers[inst.name]
+			if classifier == nil {
+				classifier = &CoSIEEE8021Classifier{Name: inst.name}
+			}
 			for _, fcNode := range inst.node.FindChildren("forwarding-class") {
 				className := ""
 				if len(fcNode.Keys) >= 2 {
@@ -327,8 +338,16 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 		// no binding site. The name list is still populated for the
 		// undefined-reference check; the entries drive the dataplane.
 		for _, inst := range namedInstances(classifiersNode.FindChildren("inet-precedence")) {
-			cos.INetPrecedenceClassifiers = append(cos.INetPrecedenceClassifiers, inst.name)
-			classifier := &CoSINetPrecedenceClassifier{Name: inst.name}
+			if !slices.Contains(cos.INetPrecedenceClassifiers, inst.name) {
+				cos.INetPrecedenceClassifiers = append(cos.INetPrecedenceClassifiers, inst.name)
+			}
+			var classifier *CoSINetPrecedenceClassifier
+			if cos.INetPrecedenceClassifierDefs != nil {
+				classifier = cos.INetPrecedenceClassifierDefs[inst.name]
+			}
+			if classifier == nil {
+				classifier = &CoSINetPrecedenceClassifier{Name: inst.name}
+			}
 			for _, fcNode := range inst.node.FindChildren("forwarding-class") {
 				className := ""
 				if len(fcNode.Keys) >= 2 {
@@ -383,8 +402,13 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 		// validation models so malformed code-points and loss-priorities are
 		// still rejected at strict commit (#11811).
 		for _, inst := range namedInstances(rewriteRulesNode.FindChildren("inet-precedence")) {
-			cos.INetPrecedenceRewriteRules = append(cos.INetPrecedenceRewriteRules, inst.name)
-			rewriteRule := &CoSINetPrecedenceRewriteRule{Name: inst.name}
+			if !slices.Contains(cos.INetPrecedenceRewriteRules, inst.name) {
+				cos.INetPrecedenceRewriteRules = append(cos.INetPrecedenceRewriteRules, inst.name)
+			}
+			rewriteRule := cos.INetPrecedenceRewriteRuleDefs[inst.name]
+			if rewriteRule == nil {
+				rewriteRule = &CoSINetPrecedenceRewriteRule{Name: inst.name}
+			}
 			for _, fcNode := range inst.node.FindChildren("forwarding-class") {
 				className := ""
 				if len(fcNode.Keys) >= 2 {
@@ -428,8 +452,13 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 			}
 		}
 		for _, inst := range namedInstances(rewriteRulesNode.FindChildren("exp")) {
-			cos.EXPRewriteRules = append(cos.EXPRewriteRules, inst.name)
-			rewriteRule := &CoSEXPRewriteRule{Name: inst.name}
+			if !slices.Contains(cos.EXPRewriteRules, inst.name) {
+				cos.EXPRewriteRules = append(cos.EXPRewriteRules, inst.name)
+			}
+			rewriteRule := cos.EXPRewriteRuleDefs[inst.name]
+			if rewriteRule == nil {
+				rewriteRule = &CoSEXPRewriteRule{Name: inst.name}
+			}
 			for _, fcNode := range inst.node.FindChildren("forwarding-class") {
 				className := ""
 				if len(fcNode.Keys) >= 2 {
@@ -473,7 +502,10 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 			}
 		}
 		for _, inst := range namedInstances(rewriteRulesNode.FindChildren("dscp")) {
-			rewriteRule := &CoSDSCPRewriteRule{Name: inst.name}
+			rewriteRule := cos.DSCPRewriteRules[inst.name]
+			if rewriteRule == nil {
+				rewriteRule = &CoSDSCPRewriteRule{Name: inst.name}
+			}
 			for _, fcNode := range inst.node.FindChildren("forwarding-class") {
 				className := ""
 				if len(fcNode.Keys) >= 2 {
@@ -521,7 +553,10 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 		// commit, but accepted-but-inert — the dataplane rewrites dscp on egress
 		// only (commit advisory).
 		for _, inst := range namedInstances(rewriteRulesNode.FindChildren("ieee-802.1")) {
-			rewriteRule := &CoSIEEE8021RewriteRule{Name: inst.name}
+			rewriteRule := cos.IEEE8021RewriteRules[inst.name]
+			if rewriteRule == nil {
+				rewriteRule = &CoSIEEE8021RewriteRule{Name: inst.name}
+			}
 			for _, fcNode := range inst.node.FindChildren("forwarding-class") {
 				className := ""
 				if len(fcNode.Keys) >= 2 {
