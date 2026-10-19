@@ -60,9 +60,10 @@ type narrowedChainSite struct {
 // here would double-count one config error under two different descriptions.
 //
 // Neighbour sites mirror the resolvers' most-specific-wins rule via
-// bgpNeighborAuthoredExport/Import, and the export side excludes bare protocol
-// tokens for the same reason the emptied path does: they are redistribute verbs,
-// not failed policy references, so a chain that "lost" one lost nothing.
+// bgpNeighborAuthoredExport/Import. A bare protocol token is excluded as a
+// redistribute verb ONLY when the authored list is the inherited global
+// export list; in a neighbour's own export list it renders as a route-map
+// name and resolves to nothing, so dropping it IS narrowing (#15159).
 func narrowedChainSites(bgp *config.BGPConfig, po *config.PolicyOptionsConfig) []narrowedChainSite {
 	if bgp == nil {
 		return nil
@@ -83,8 +84,7 @@ func narrowedChainSites(bgp *config.BGPConfig, po *config.PolicyOptionsConfig) [
 				continue
 			}
 			ghost := !isDefinedPolicyStatement(n, po) &&
-				!(protocolTokensAreRedistribute &&
-					(knownRedistProtocol(n) || knownRedistProtocol(junosProtocolToFRR7625(n))))
+				!(protocolTokensAreRedistribute && isProtocolToken7625(n))
 			if ghost {
 				dropped = append(dropped, n)
 				sawGhost = true
@@ -116,7 +116,8 @@ func narrowedChainSites(bgp *config.BGPConfig, po *config.PolicyOptionsConfig) [
 		}
 		add("neighbor "+n.Address+" export",
 			bgpNeighborAuthoredExport(n, bgp),
-			bgpNeighborExportChain(n, globalExportChain, po), true)
+			bgpNeighborExportChain(n, globalExportChain, po),
+			bgpNeighborAuthoredIsGlobal(n.Export))
 		add("neighbor "+n.Address+" import",
 			bgpNeighborAuthoredImport(n, bgp),
 			bgpNeighborImportChain(n, globalImportChain, po), false)

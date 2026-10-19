@@ -151,6 +151,16 @@ func narrowedAliasEligible10821(site narrowedChainSite, po *config.PolicyOptions
 // kept prefix that provably terminates for every route. In that case the ghost
 // is unreachable and the existing shared map is safe. A missing/unknown
 // direction or any reachable ghost is not proof and must fail closed.
+//
+// A bare protocol token counts as a non-ghost only for a site whose authored
+// list is the inherited GLOBAL export list (#15159); narrowedChainSites only
+// reports global-scope sites with a dropped member when the neighbour has no
+// own export, so an export site here is global exactly when no neighbour in
+// the same render carries this authored list as its own — the caller cannot
+// distinguish the two from the site alone, and treating the token as a ghost
+// (the conservative reading) only ever makes this proof fail closed, never
+// open: a global token after a terminator needs no proof, because the site
+// is not reported at all in that scope.
 func narrowedGhostsAfterTerminator10821(site narrowedChainSite, po *config.PolicyOptionsConfig) bool {
 	if po == nil {
 		return false
@@ -167,10 +177,6 @@ func narrowedGhostsAfterTerminator10821(site narrowedChainSite, po *config.Polic
 		}
 		if isDefinedPolicyStatement(name, po) {
 			prefix = append(prefix, name)
-			continue
-		}
-		if export && (knownRedistProtocol(name) ||
-			knownRedistProtocol(junosProtocolToFRR7625(name))) {
 			continue
 		}
 		sawGhost = true
