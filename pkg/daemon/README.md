@@ -316,8 +316,14 @@ always stays armed and the check runs twice:
     re-arms the same generation for 5 s, at most 24 times.
   - Any other refusal, or a feed still unready at the cap, promotes the store to
     the target (persisted as committed, as #6538 does for a recovered target
-    that no longer compiles). The daemon then enters the bootstrap/lifeline safe
-    state instead of applying a target the dataplane refuses.
+    that no longer compiles). The daemon then re-syncs the promoted target to
+    the cluster peer (#3868, #15056) — capturing the peer-snapshot
+    authorization first so an incapable peer is refused at the queue boundary
+    rather than silently narrowed — and only then enters the bootstrap/lifeline
+    safe state instead of applying a target the dataplane refuses. The order
+    is load-bearing: bootstrap entry relinquishes the cluster (#6742), after
+    which no push is possible, so a push placed after it would leave the
+    standby holding the abandoned unconfirmed config as its permanent active.
   - An appliable target rolls back and applies exactly as before.
 
 ### The recovered commit-confirmed rollback fires against a HALF-BUILT daemon (#6739)

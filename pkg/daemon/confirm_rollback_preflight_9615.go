@@ -63,6 +63,16 @@ func rollbackTargetRefusedOnlyForFeeds(target *config.Config) bool {
 //     target that no longer compiles) and enters the bootstrap/lifeline safe
 //     state instead of applying a target the dataplane refuses.
 //
+// #15056 (A32-03): the refused branch is also a rollback for #3868 purposes.
+// The standby holds the abandoned unconfirmed config (C2) as its permanent
+// active (config-sync SyncApply arms no confirm timer there), so the promoted
+// target must be re-synced to the peer BEFORE enterBootstrapMode
+// relinquishes the cluster (#6742 resigns every RG and stops comms — after
+// that no push is possible, and the #5863 reconciler is gated on RG0
+// authority and live comms too). The peer-snapshot authorization is captured
+// before the push so a multi-zone target is still refused for an incapable
+// peer at the queue boundary rather than silently narrowed there.
+//
 // Caller holds applySem.
 func (d *Daemon) confirmRollbackTargetHandledAtFire(gen uint64) bool {
 	target, _, ok := d.store.PendingRollbackTarget(gen)
@@ -100,6 +110,23 @@ func (d *Daemon) confirmRollbackTargetHandledAtFire(gen uint64) bool {
 		"NOT applying it. The configuration store is reverted to the target and persisted as "+
 		"committed, and the daemon enters the bootstrap/lifeline safe state; fix the "+
 		"configuration from the CLI", "err", rerr, "issue", "#9615")
+	// #15056: re-sync the promoted target to the peer BEFORE the bootstrap
+	// entry below relinquishes the cluster. Capture the peer-snapshot
+	// authorization first — the same fresh token the ordinary #3868 re-sync
+	// obtains inside pushCommittedConfigToPeer — so the push is gated on the
+	// peer's current capability, and surface a refusal instead of dropping
+	// it silently: after bootstrap there is no channel left to retry on.
+	activeTarget := d.store.ActiveConfig()
+	peerAuth, authErr := d.peerSnapshotProtocolAuthorizationForConfig(activeTarget)
+	if authErr != nil {
+		slog.Error("commit-confirmed refused-target rollback could not authorize the "+
+			"peer re-sync; the peer may keep the abandoned unconfirmed config until "+
+			"it is re-synced", "err", authErr, "issue", "#15056")
+	} else if pushErr := d.pushCommittedConfigToPeer(peerAuth); pushErr != nil {
+		slog.Error("commit-confirmed refused-target rollback peer re-sync did not "+
+			"complete; the peer may keep the abandoned unconfirmed config until "+
+			"it is re-synced", "err", pushErr, "issue", "#15056")
+	}
 	if err := d.enterBootstrapMode(); err != nil {
 		slog.Error("commit-confirmed rollback to the bootstrap safe state is DEGRADED: teardown "+
 			"did not fully converge", "err", err, "issue", "#9615")
