@@ -11,7 +11,7 @@
 //! Reconciliation: the engine rebuilds the peer set from the config
 //! snapshot whenever a new snapshot lands. Existing peer state is
 //! preserved across snapshots (same pubkey → same `Arc<Peer>`); the
-//! AllowedIPs trie is rebuilt fresh because its index space is
+//! AllowedIPs table is rebuilt fresh because its index space is
 //! tied to the snapshot.
 
 use super::session::{SessionRole, WgSession};

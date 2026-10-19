@@ -3,7 +3,7 @@
 //! and the explicit list of architectural choices that diverge from
 //! the prior attempt in PR #1492.
 //!
-//! Scope of this PR: engine, framing, allowed-IPs trie, helpers,
+//! Scope of this PR: engine, framing, allowed-IPs LPM, helpers,
 //! and unit tests. Hot-path activation in `tx/dispatch.rs` and
 //! `poll_descriptor.rs` is intentionally deferred — see the plan
 //! doc for the rationale.
@@ -142,7 +142,7 @@ mod poison_tests;
 
 pub(crate) use engine::{
     DecapError, DecapOutcome, EncapError, EncapOutcome, InitiationAction, InstallSessionError,
-    WgEngine, WgEngineConfig, WgPeerConfig,
+    PeerTable, WgEngine, WgEngineConfig, WgPeerConfig,
 };
 pub(crate) use scratch::WgWorkerScratch;
 

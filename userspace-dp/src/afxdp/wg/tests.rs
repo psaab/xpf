@@ -705,7 +705,7 @@ fn decap_lpm_rejects_spoofed_source_inside_more_specific_peer_prefix() {
 /// only 3 of 5 error arms; Codex r4 finding 3 / Gemini r4 finding F.
 #[test]
 fn decap_zeros_plaintext_on_allowed_ips_violation() {
-    // Set the AllowedIPs trie so the responder's view of the
+    // Set the AllowedIPs table so the responder's view of the
     // initiator covers `10.0.0.0/24` only. The initiator then
     // sends with inner src `10.0.99.99` — authenticates, fails
     // AllowedIPs gate, must return AllowedIpsViolation AND wipe.

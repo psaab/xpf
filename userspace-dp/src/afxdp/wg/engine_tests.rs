@@ -2712,3 +2712,88 @@ fn handshake_admission_9908_retransmit_tolerated_and_replay_preserved() {
         "#4092 TAI64N replay semantics preserved under the admission bound"
     );
 }
+
+/// #15250 (A69-03): encap peer selection at hub scale. 1024 peers
+/// each own a distinct /24 (plus a /8 catch-all peer); `peer_for_dest`
+/// must resolve the LAST peer's /24, the catch-all remainder, a v6
+/// peer, and a miss — through the production engine path
+/// (`reconcile_peers` → `AllowedIps` → `peer_for_dest`), not a
+/// reimplemented table. On the old flat list the answers were the
+/// same but each cost a scan of all 1025 entries; the flat-cost
+/// acceptance is gated by `benches/allowed_ips_lookup.rs`.
+#[test]
+fn peer_for_dest_at_1024_peer_scale_15250() {
+    let (init_priv, _init_pub) = keypair();
+    let mut peers: Vec<WgPeerConfig> = Vec::with_capacity(1026);
+    let mut pubs: Vec<[u8; 32]> = Vec::with_capacity(1026);
+    // Peer 0: the /8 catch-all.
+    let (_p, pub0) = keypair();
+    pubs.push(pub0);
+    peers.push(WgPeerConfig {
+        pubkey: pub0,
+        endpoint: Some("192.0.2.1:51820".parse().unwrap()),
+        persistent_keepalive: 0,
+        allowed_ips: vec!["10.0.0.0/8".parse().unwrap()],
+        preshared_key: [0u8; 32].into(),
+    });
+    for i in 0..1024u32 {
+        let (_p, pk) = keypair();
+        pubs.push(pk);
+        peers.push(WgPeerConfig {
+            pubkey: pk,
+            endpoint: Some(format!("192.0.2.{}:51820", (i % 250) + 1).parse().unwrap()),
+            persistent_keepalive: 0,
+            allowed_ips: vec![
+                format!("10.{}.{}.0/24", (i >> 8) & 0xff, i & 0xff)
+                    .parse()
+                    .unwrap(),
+            ],
+            preshared_key: [0u8; 32].into(),
+        });
+    }
+    let (_p, pub_v6) = keypair();
+    pubs.push(pub_v6);
+    peers.push(WgPeerConfig {
+        pubkey: pub_v6,
+        endpoint: Some("[2001:db8::1]:51820".parse().unwrap()),
+        persistent_keepalive: 0,
+        allowed_ips: vec!["2001:db8::/32".parse().unwrap()],
+        preshared_key: [0u8; 32].into(),
+    });
+    let engine = WgEngine::new(WgEngineConfig {
+        local_private_key: init_priv.into(),
+        listen_port: 51820,
+        peers,
+    });
+    // Last-inserted v4 /24 (peer index 1024) wins over the /8.
+    let (pk, ep) = engine
+        .peer_for_dest("10.3.255.7".parse().unwrap())
+        .expect("1024th peer /24 must cover 10.3.255.7");
+    assert_eq!(pk, pubs[1024]);
+    assert!(ep.is_some());
+    // Catch-all remainder resolves to peer 0.
+    assert_eq!(
+        engine
+            .peer_for_dest("10.9.9.9".parse().unwrap())
+            .map(|r| r.0),
+        Some(pubs[0])
+    );
+    // v6 peer resolves in its own family.
+    assert_eq!(
+        engine
+            .peer_for_dest("2001:db8:1::1".parse().unwrap())
+            .map(|r| r.0),
+        Some(pub_v6)
+    );
+    // Misses stay misses (fail closed: no peer = no encap target).
+    assert_eq!(engine.peer_for_dest("11.0.0.1".parse().unwrap()), None);
+    assert_eq!(engine.peer_for_dest("2001:db9::1".parse().unwrap()), None);
+    // One loaded snapshot answers identically (the #15250
+    // load-once path frame/PTB/dispatch callers share).
+    let table = engine.table_snapshot();
+    assert_eq!(
+        WgEngine::peer_for_dest_in(&table, "10.3.255.7".parse().unwrap())
+            .map(|r| r.0),
+        Some(pubs[1024])
+    );
+}

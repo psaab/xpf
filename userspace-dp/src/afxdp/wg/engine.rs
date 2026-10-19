@@ -3,7 +3,7 @@
 //! The engine owns:
 //!   - The local static key (X25519 private).
 //!   - The peer table, keyed by peer pubkey.
-//!   - The AllowedIPs LPM trie (used ONLY for inbound src-IP gate).
+//!   - The AllowedIPs LPM (decap src-IP gate and encap peer selection).
 //!   - The session-by-receiver-index demux map for inbound.
 //!
 //! API shape:
@@ -411,7 +411,8 @@ pub(crate) struct PeerTable {
     pub(crate) peers: Vec<PeerEntry>,
     /// peer_pubkey → index in `peers`.
     pub(crate) peer_index_by_pubkey: FxHashMap<[u8; 32], u32>,
-    /// AllowedIPs LPM. Only consulted on the decap path.
+    /// AllowedIPs LPM (#15250: per-family length-bucketed hash;
+    /// consulted on both the decap src gate and encap peer selection).
     pub(crate) allowed_ips: AllowedIps,
 }
 
@@ -942,20 +943,17 @@ impl WgEngine {
     }
 
     /// #1434 B1b cryptokey routing on EGRESS: longest-prefix-match the
-    /// inner destination IP against the AllowedIPs trie and return the
+    /// inner destination IP against the AllowedIPs table and return the
     /// owning peer's (pubkey, live-or-configured endpoint). `None`
     /// when no peer's AllowedIPs cover `inner_dst`. This is the encap
     /// counterpart to the decap-side AllowedIPs src-gate — the engine
     /// owns the LPM so the table swap is observed atomically. Slow-path
     /// / transit-encap (per WG-egress packet — the AllowedIps lookup is
-    /// a linear scan of a small, prefix-sorted table; no allocation).
+    /// a per-family length-bucketed hash probe, #15250; no allocation).
     pub(crate) fn peer_for_dest(
         &self,
         inner_dst: std::net::IpAddr,
     ) -> Option<([u8; WG_KEY_LEN], Option<std::net::SocketAddr>)> {
-        let table = self.load_table();
-        let idx = table.allowed_ips.lookup(inner_dst)?;
-        let entry = table.peers.get(idx as usize)?;
         // #2836 / codex-049-04: the AllowedIPs match and pubkey come
         // from the immutable per-snapshot config bundle captured by
         // this same `load`, so the LPM result can never pair an
@@ -969,10 +967,31 @@ impl WgEngine {
         // dataplane encap/PTB/outer-MTU path that selects via this
         // fn, while the control thread's keepalives (which use the
         // adopted map) kept working and masked the failure.
+        let table = self.load_table();
+        Self::peer_for_dest_in(&table, inner_dst)
+    }
+
+    /// `peer_for_dest` against an already-loaded table snapshot.
+    /// Per-packet callers that select the same peer more than once
+    /// (PTB/segmentation sizing, dispatch egress, encap) load the
+    /// table ONCE and pass it here, so one packet observes one
+    /// atomic snapshot and pays one ArcSwap load (#15250).
+    pub(crate) fn peer_for_dest_in(
+        table: &PeerTable,
+        inner_dst: std::net::IpAddr,
+    ) -> Option<([u8; WG_KEY_LEN], Option<std::net::SocketAddr>)> {
+        let idx = table.allowed_ips.lookup(inner_dst)?;
+        let entry = table.peers.get(idx as usize)?;
         Some((
             entry.peer.pubkey,
             entry.peer.live_endpoint().or(entry.config.endpoint),
         ))
+    }
+
+    /// Atomic snapshot of the peer-routing table for per-packet
+    /// callers outside the engine (frame/PTB/dispatch selection).
+    pub(crate) fn table_snapshot(&self) -> Arc<PeerTable> {
+        self.load_table()
     }
 
     /// #14675: drop a peer's adopted live endpoint (roam / DNS) when
@@ -1350,7 +1369,10 @@ impl WgEngine {
     /// long as the caller holds it. Module-visible so the #1888 timer
     /// pass (wg/timers.rs) can walk the peer slab for expiry.
     pub(in crate::afxdp::wg) fn load_table(&self) -> Arc<PeerTable> {
-        self.table.load_full()
+        // #15250: `load()` (guard) avoids `load_full()`'s fresh-Arc
+        // allocation per call; the clone below is a single refcount
+        // bump of the guard's Arc, materialised once by the caller.
+        Arc::clone(&self.table.load())
     }
 
     /// Test-only accessor: same as `load_table`, exposed at module

@@ -313,7 +313,7 @@ fn outer_physical_egress_mtu_with_dynamic(
 /// derive from, for a given inner destination (#2845).
 ///
 /// The encap path selects the egress peer by the inner destination's
-/// longest-prefix match in the AllowedIPs trie
+/// longest-prefix match in the AllowedIPs table
 /// (`wg_encap_frame` → `engine.peer_for_dest`) and resolves the outer hop
 /// from THAT peer's endpoint. Different peers of one wg interface can have
 /// different endpoints / underlay paths / MTUs, so the PTB must select the
@@ -344,9 +344,29 @@ fn wg_peer_outer_dst(
     endpoint: &TunnelEndpoint,
     inner_dst: Option<IpAddr>,
 ) -> Option<IpAddr> {
+    wg_peer_outer_dst_with_table(forwarding, endpoint, inner_dst, None)
+}
+
+/// `wg_peer_outer_dst` with an optional caller-loaded engine table
+/// snapshot (#15250): a caller that selects the peer more than once
+/// for one packet loads the table ONCE via `WgEngine::table_snapshot`
+/// and passes it here, so the packet pays one ArcSwap load and every
+/// selection observes the same atomic snapshot. `None` loads afresh
+/// (single-selection callers).
+#[inline]
+fn wg_peer_outer_dst_with_table(
+    forwarding: &ForwardingState,
+    endpoint: &TunnelEndpoint,
+    inner_dst: Option<IpAddr>,
+    table: Option<&std::sync::Arc<crate::afxdp::wg::PeerTable>>,
+) -> Option<IpAddr> {
     if let Some(dst) = inner_dst {
         if let Some(engine) = forwarding.wg_engines.get(&endpoint.id) {
-            if let Some((_pubkey, peer_endpoint)) = engine.peer_for_dest(dst) {
+            let selected = match table {
+                Some(t) => crate::afxdp::wg::WgEngine::peer_for_dest_in(t, dst),
+                None => engine.peer_for_dest(dst),
+            };
+            if let Some((_pubkey, peer_endpoint)) = selected {
                 // A covering peer was found: use ITS endpoint (or None if the
                 // peer has no learned/configured endpoint — see the doc note).
                 return peer_endpoint.map(|ep| ep.ip());
@@ -592,7 +612,7 @@ pub(in crate::afxdp) fn wg_transit_egress_physical_egress_ifindex_with_dynamic(
     }
     // #6340: DISPATCH must select the SAME peer `wg_encap_frame` emits bytes
     // for. The encap builder applies DNAT into the outgoing frame BEFORE
-    // `wg_encap_frame` LPMs the AllowedIPs trie on the POST-NAT inner dst
+    // `wg_encap_frame` LPMs the AllowedIPs table on the POST-NAT inner dst
     // (`build_forwarded_frame_into_from_frame` writes `nat.rewrite_dst` into
     // `out` via `apply_nat_ipv4/6`, then wg.rs reads `inner_dst_ip(&out)`).
     // Under a DNAT that rewrites the inner dst ACROSS AllowedIPs peers on
@@ -624,7 +644,7 @@ pub(in crate::afxdp) fn wg_transit_egress_physical_egress_ifindex_with_dynamic(
     // forward NAT64 translation applies, else the frame's parsed inner dst
     // (with the `meta.l3_offset` fallback) — which for a non-DNAT flow is
     // byte-identical to the frame the encap path reads. Then LPM the
-    // AllowedIPs trie to the covering peer's endpoint. For NAT64 the frame
+    // AllowedIPs table to the covering peer's endpoint. For NAT64 the frame
     // destination is the pre-translation family and must never be used as an
     // AllowedIPs key: if the translated destination is absent, fail closed to
     // the caller's logical fallback instead of falling back to the frame.
@@ -740,7 +760,7 @@ pub(super) fn wg_encap_frame_with_commit_and_dynamic(
     let inner_packet = &inner_packet[..inner_len];
 
     // #1434 B1b cryptokey routing: select the egress peer by the inner
-    // destination's longest-prefix match in the AllowedIPs trie (NOT a
+    // destination's longest-prefix match in the AllowedIPs table (NOT a
     // single scalar peer). A packet with no covering peer is dropped —
     // there is no peer to encrypt it to.
     let inner_dst = crate::afxdp::gre::inner_dst_ip(inner_packet, inner_meta.addr_family)?;
