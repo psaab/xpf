@@ -328,6 +328,10 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 							(af.Keys[i+1] == "input" || af.Keys[i+1] == "output") {
 							bindings = append(bindings, "policer "+af.Keys[i+1])
 						}
+						if af.Keys[i] == "sample" &&
+							(af.Keys[i+1] == "input" || af.Keys[i+1] == "output") {
+							bindings = append(bindings, "sample "+af.Keys[i+1])
+						}
 						if af.Keys[i] == "filter" && isFilterDirection12090(af.Keys[i+1]) {
 							bindings = append(bindings, "filter "+af.Keys[i+1])
 						}

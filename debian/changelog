@@ -1,5 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Reject the packed flat-set spelling of the Junos `sample`
+    binding under unconsumed interface families as well: the braced
+    spelling was rejected by #15654 but `family ethernet-switching
+    sample input` in set form still committed as a warned no-op
+    (#15805).
   * Fail closed on L2 interface families: authored content under
     `family ethernet-switching` / `family bridge` (interface-mode/
     port-mode, native VLAN, vlan members) and policer/sample bindings
