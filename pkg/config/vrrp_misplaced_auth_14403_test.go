@@ -222,6 +222,27 @@ func TestVRRPMisplacedAuthAncestorKeysPackedNoLeak14403(t *testing.T) {
     }
 }`,
 		`interfaces {
+    ge-0/0/1 {
+        unit 0 {
+            family inet {
+                address 10.0.1.1/24;
+            }
+        }
+    }
+    ge-0/0/2 {
+        unit 0 {
+            family inet {
+                address 10.0.2.1/24;
+            }
+        }
+    }
+    ge-0/0/3 {
+        unit 0 {
+            family inet {
+                address 10.0.3.1/24;
+            }
+        }
+    }
     reth0 {
         unit 0 {
             family inet {

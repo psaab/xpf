@@ -64,6 +64,17 @@ type Instance struct {
 	GARPCount         int // gratuitous ARP count per VIP on failover; 0 = default (3)
 }
 
+// resolveTrackInterface maps a configured track-interface ref to the kernel
+// device the link watcher and netlink lookups must use (#15048). An empty
+// ref stays empty (tracking not configured) and must not be passed to the
+// resolver, which would fabricate a name for it.
+func resolveTrackInterface(cfg *config.Config, ref string) string {
+	if ref == "" {
+		return ""
+	}
+	return cfg.ResolveKernelIfName(ref)
+}
+
 // CollectInstances extracts VRRP instances from the interface config.
 func CollectInstances(cfg *config.Config) []*Instance {
 	if cfg == nil {
@@ -119,12 +130,17 @@ func CollectInstances(cfg *config.Config) []*Instance {
 					VirtualAddresses:  vips,
 					AuthType:          vg.AuthType,
 					AuthKey:           vg.AuthKey.Reveal(),
-					// TrackInterface arrives as a Junos name
-					// (ge-0/0/1); normalize to the Linux name
-					// (ge-0-0-1) so netlink lookups and link-watcher
-					// event matching work (#1814 — the RETH path
-					// below normalizes the same way).
-					TrackInterface:    config.LinuxIfName(vg.TrackInterface),
+					// TrackInterface arrives as a Junos ref (ge-0/0/1,
+					// ge-0/0/1.0, a VLAN unit, a reth); resolve it through
+					// the SSOT ResolveKernelIfName — the same resolver used
+					// for the instance interface above — so netlink lookups
+					// and link-watcher event matching see the real kernel
+					// device (#15048). The previous slash-to-dash-only
+					// LinuxIfName left `ge-0/0/1.0` as `ge-0-0-1.0`, a VLAN
+					// unit as its base device, and a reth unresolved, so
+					// the name matched no netdev and the group stayed
+					// demoted for the life of the config.
+					TrackInterface:    resolveTrackInterface(cfg, vg.TrackInterface),
 					TrackPriorityCost: vg.TrackPriorityDelta,
 				}
 				if inst.AdvertiseInterval == 0 {

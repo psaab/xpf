@@ -263,6 +263,20 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
+	// #15048 track-interface declared-reference gate. Strict on commit /
+	// commit-check (hard-reject a track-interface naming no configured
+	// interface or unit — it resolves to no netdev, so the group is held
+	// at reduced priority forever and real link events are never seen).
+	// Lenient on load / peer-sync (#1960 no-brick).
+	if err := validateVRRPTrackInterfaceRefStrict(cfg); err != nil {
+		if opts.lenientVRRPTrackRef {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("vrrp track-interface reference (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #3055 reserved zone-name definition gate. Strict on commit / commit-check
 	// (hard-reject a `security zones security-zone <name>` whose name is a
 	// reserved sentinel — "junos-global" is reclassified by the userspace

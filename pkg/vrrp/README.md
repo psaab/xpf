@@ -721,8 +721,13 @@ load/peer-sync compile paths.
   (`CollectInstances`). RETH instances (`CollectRethInstances`) never
   carry track config, and RETH VRRP is suppressed entirely under
   `no-reth-vrrp` / `PrivateRGElection` — no chassis-cluster interaction.
-- `CollectInstances` normalizes `TrackInterface` from the Junos name
-  (`ge-0/0/1`) to the Linux name (`ge-0-0-1`) so netlink matching works.
+- `CollectInstances` resolves `TrackInterface` through the SSOT
+  `cfg.ResolveKernelIfName` (#15048) — a bare name, a unit ref, a VLAN
+  unit and a reth all yield the real kernel device (`ge-0-0-1`,
+  `ge-0-0-1.100`, the reth's physical member) so netlink matching works.
+  A track-interface naming no configured interface or unit is rejected
+  at strict commit (`validateVRRPTrackInterfaceRefStrict`) and warned
+  on tolerant loads.
 
 ## Sockets
 

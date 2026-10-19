@@ -71,6 +71,27 @@ func hasWarningContaining(warnings []string, substr string) bool {
 }
 
 const trackNestedHier = `interfaces {
+    ge-0/0/1 {
+        unit 0 {
+            family inet {
+                address 10.0.1.1/24;
+            }
+        }
+    }
+    ge-0/0/2 {
+        unit 0 {
+            family inet {
+                address 10.0.2.1/24;
+            }
+        }
+    }
+    ge-0/0/3 {
+        unit 0 {
+            family inet {
+                address 10.0.3.1/24;
+            }
+        }
+    }
     reth1 {
         unit 0 {
             family inet {
@@ -110,6 +131,9 @@ func TestVRRPTrackInterface_NestedFlatSet(t *testing.T) {
 		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 virtual-address 10.0.61.3",
 		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 priority 200",
 		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 track-interface ge-0/0/1 priority-cost 20",
+		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
+		"set interfaces ge-0/0/2 unit 0 family inet address 10.0.2.1/24",
+		"set interfaces ge-0/0/3 unit 0 family inet address 10.0.3.1/24",
 	})
 	cfg, err := CompileConfig(tree)
 	if err != nil {
@@ -126,6 +150,27 @@ func TestVRRPTrackInterface_NestedFlatSet(t *testing.T) {
 
 func TestVRRPTrackInterface_LegacySiblingHierarchical(t *testing.T) {
 	cfg, err := CompileConfig(parseHier(t, `interfaces {
+    ge-0/0/1 {
+        unit 0 {
+            family inet {
+                address 10.0.1.1/24;
+            }
+        }
+    }
+    ge-0/0/2 {
+        unit 0 {
+            family inet {
+                address 10.0.2.1/24;
+            }
+        }
+    }
+    ge-0/0/3 {
+        unit 0 {
+            family inet {
+                address 10.0.3.1/24;
+            }
+        }
+    }
     reth1 {
         unit 0 {
             family inet {
@@ -158,6 +203,9 @@ func TestVRRPTrackInterface_LegacySiblingFlatSet(t *testing.T) {
 		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 virtual-address 10.0.61.3",
 		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 track-interface ge-0/0/1",
 		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24 vrrp-group 1 track-priority-cost 30",
+		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
+		"set interfaces ge-0/0/2 unit 0 family inet address 10.0.2.1/24",
+		"set interfaces ge-0/0/3 unit 0 family inet address 10.0.3.1/24",
 	})
 	cfg, err := CompileConfig(tree)
 	if err != nil {
@@ -178,6 +226,27 @@ func TestVRRPTrackInterface_LegacySiblingFlatSet(t *testing.T) {
 func TestVRRPTrackInterface_NestedWinsOverSibling_BothOrders(t *testing.T) {
 	cases := map[string]string{
 		"nested-first": `interfaces {
+    ge-0/0/1 {
+        unit 0 {
+            family inet {
+                address 10.0.1.1/24;
+            }
+        }
+    }
+    ge-0/0/2 {
+        unit 0 {
+            family inet {
+                address 10.0.2.1/24;
+            }
+        }
+    }
+    ge-0/0/3 {
+        unit 0 {
+            family inet {
+                address 10.0.3.1/24;
+            }
+        }
+    }
     reth1 {
         unit 0 {
             family inet {
@@ -196,6 +265,27 @@ func TestVRRPTrackInterface_NestedWinsOverSibling_BothOrders(t *testing.T) {
     }
 }`,
 		"sibling-first": `interfaces {
+    ge-0/0/1 {
+        unit 0 {
+            family inet {
+                address 10.0.1.1/24;
+            }
+        }
+    }
+    ge-0/0/2 {
+        unit 0 {
+            family inet {
+                address 10.0.2.1/24;
+            }
+        }
+    }
+    ge-0/0/3 {
+        unit 0 {
+            family inet {
+                address 10.0.3.1/24;
+            }
+        }
+    }
     reth1 {
         unit 0 {
             family inet {
@@ -232,6 +322,27 @@ func TestVRRPTrackInterface_NestedWinsOverSibling_BothOrders(t *testing.T) {
 }
 
 const trackDuplicateHier = `interfaces {
+    ge-0/0/1 {
+        unit 0 {
+            family inet {
+                address 10.0.1.1/24;
+            }
+        }
+    }
+    ge-0/0/2 {
+        unit 0 {
+            family inet {
+                address 10.0.2.1/24;
+            }
+        }
+    }
+    ge-0/0/3 {
+        unit 0 {
+            family inet {
+                address 10.0.3.1/24;
+            }
+        }
+    }
     reth1 {
         unit 0 {
             family inet {
@@ -281,6 +392,27 @@ func TestVRRPTrackInterface_MultipleLenientFirstWins(t *testing.T) {
 
 func TestVRRPTrackInterface_MissingCostWarning(t *testing.T) {
 	cfg, err := CompileConfig(parseHier(t, `interfaces {
+    ge-0/0/1 {
+        unit 0 {
+            family inet {
+                address 10.0.1.1/24;
+            }
+        }
+    }
+    ge-0/0/2 {
+        unit 0 {
+            family inet {
+                address 10.0.2.1/24;
+            }
+        }
+    }
+    ge-0/0/3 {
+        unit 0 {
+            family inet {
+                address 10.0.3.1/24;
+            }
+        }
+    }
     reth1 {
         unit 0 {
             family inet {
@@ -357,6 +489,27 @@ func TestVRRPTrackInterface_OrphanPriorityCostChildWarning(t *testing.T) {
 
 func TestVRRPTrackInterface_OwnerPriority255Warning(t *testing.T) {
 	cfg, err := CompileConfig(parseHier(t, `interfaces {
+    ge-0/0/1 {
+        unit 0 {
+            family inet {
+                address 10.0.1.1/24;
+            }
+        }
+    }
+    ge-0/0/2 {
+        unit 0 {
+            family inet {
+                address 10.0.2.1/24;
+            }
+        }
+    }
+    ge-0/0/3 {
+        unit 0 {
+            family inet {
+                address 10.0.3.1/24;
+            }
+        }
+    }
     reth1 {
         unit 0 {
             family inet {
@@ -415,6 +568,27 @@ func TestVRRPTrackInterface_FormatSetRoundTrip(t *testing.T) {
 // lenient must first-wins.
 func TestVRRPTrackInterface_KeysPackedDuplicateStrictReject(t *testing.T) {
 	const text = `interfaces {
+    ge-0/0/1 {
+        unit 0 {
+            family inet {
+                address 10.0.1.1/24;
+            }
+        }
+    }
+    ge-0/0/2 {
+        unit 0 {
+            family inet {
+                address 10.0.2.1/24;
+            }
+        }
+    }
+    ge-0/0/3 {
+        unit 0 {
+            family inet {
+                address 10.0.3.1/24;
+            }
+        }
+    }
     reth1 {
         unit 0 {
             family inet {
@@ -448,6 +622,27 @@ func TestVRRPTrackInterface_KeysPackedDuplicateStrictReject(t *testing.T) {
 func TestVRRPTrackInterface_CostRangeValidation(t *testing.T) {
 	for _, val := range []string{"-50", "0", "255", "9999"} {
 		text := `interfaces {
+    ge-0/0/1 {
+        unit 0 {
+            family inet {
+                address 10.0.1.1/24;
+            }
+        }
+    }
+    ge-0/0/2 {
+        unit 0 {
+            family inet {
+                address 10.0.2.1/24;
+            }
+        }
+    }
+    ge-0/0/3 {
+        unit 0 {
+            family inet {
+                address 10.0.3.1/24;
+            }
+        }
+    }
     reth1 {
         unit 0 {
             family inet {
@@ -487,6 +682,27 @@ func TestVRRPTrackInterface_CostRangeValidation(t *testing.T) {
 // validated only the first occurrence).
 func TestVRRPTrackInterface_DuplicateCostChildValidated(t *testing.T) {
 	tree := parseHier(t, `interfaces {
+    ge-0/0/1 {
+        unit 0 {
+            family inet {
+                address 10.0.1.1/24;
+            }
+        }
+    }
+    ge-0/0/2 {
+        unit 0 {
+            family inet {
+                address 10.0.2.1/24;
+            }
+        }
+    }
+    ge-0/0/3 {
+        unit 0 {
+            family inet {
+                address 10.0.3.1/24;
+            }
+        }
+    }
     reth1 {
         unit 0 {
             family inet {

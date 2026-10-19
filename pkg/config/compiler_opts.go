@@ -2991,6 +2991,15 @@ type compileOpts struct {
 	// the second claimant, so a leniently-loaded duplicate is bounded to
 	// one seated election rather than two masters for one VIP.
 	lenientVRRPVIPCrossGroup bool
+	// lenientVRRPTrackRef (#15048) downgrades the track-interface
+	// declared-reference gate (validateVRRPTrackInterfaceRefStrict) from a
+	// hard compile error to a cfg.Warnings entry. A track-interface naming
+	// no configured interface or unit resolves to no netdev, so the group
+	// is held at reduced priority forever with tracking disabled. The
+	// strict commit / commit-check path hard-rejects naming the ref; the
+	// tolerant load / peer-sync paths warn so an already-persisted or
+	// peer-synced config still boots (#1960 no-brick).
+	lenientVRRPTrackRef bool
 
 	// lenientDNATToScope (#3444) downgrades the destination-NAT rule-set
 	// `to` scope reject (validateDNATRuleSetToScopeAST) from a hard compile
@@ -3653,6 +3662,7 @@ func lenientCompileOpts() compileOpts {
 		lenientVRRPVIPCount:                    true,
 		lenientVRRPVIPEmpty:                    true,
 		lenientVRRPVIPCrossGroup:               true,
+		lenientVRRPTrackRef:                    true,
 		lenientDNATToScope:                     true,
 		lenientNATMixedScope:                   true,
 		lenientNATEmptyScope:                   true,
