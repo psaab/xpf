@@ -325,7 +325,27 @@ pub(super) fn build_cos_batch_from_queue(
     if let Some(ff) = queue.flow_fair_state.as_mut() {
         ff.pop_snapshot_stack.clear();
     }
-    let head = cos_queue_front(queue)?;
+    // #15187 (C08-01): choose the batch arm from the SAME capped
+    // selection the pop will use. The pre-fix code matched on
+    // cos_queue_front (uncapped min-finish) and then popped through
+    // cos_queue_peek_min_bucket(queue, target_bps) (cap-aware): on a
+    // shaped flow-fair queue whose uncapped lowest-finish bucket is
+    // over the #1229 v7 cap while a bucket of the OTHER item kind is
+    // under it, the chosen arm's first capped peek returned the other
+    // kind, the arm-mismatch break left the scratch empty, and the
+    // build returned None with every item resident. observed_bps only
+    // decays on TX, so no later pass could progress — the class
+    // (including newcomers) wedged until a CoS config change, and the
+    // stuck Prepared items kept their UMEM frames. The capped peek
+    // falls back to the lowest-finish bucket when all are over-cap,
+    // so its head IS the uncapped head in that case; dispatching on it
+    // is byte-identical for unshaped / all-over-cap / single-kind
+    // queues and only changes the mixed-kind capped case that wedged.
+    let target_bps = compute_drain_target_bps(queue);
+    let head = match cos_queue_peek_min_bucket(queue, target_bps) {
+        Some((_bucket, front)) => front,
+        None => return None,
+    };
     // #13062 (D1-04): this builder is not a non-exact-only path. It
     // also serves (a) lazily-promoted non-exact guaranteed queues
     // (#1735: `!exact && transmit_rate_bytes > 0`), whose per-packet
@@ -347,7 +367,6 @@ pub(super) fn build_cos_batch_from_queue(
     // cap-aware peek/pop. `compute_drain_target_bps` returns
     // `u64::MAX` for non-flow-fair or unshaped queues, so best-effort
     // and unshaped builds keep byte-identical selection.
-    let target_bps = compute_drain_target_bps(queue);
     match head {
         CoSPendingTxItem::Local(_) => {
             local_scratch.clear();

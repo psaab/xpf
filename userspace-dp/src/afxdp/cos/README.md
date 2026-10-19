@@ -104,7 +104,12 @@ mod.rs for further file-level breakdown.
   `shared_exact` surplus path, so a surplus-draining worker can no
   longer publish `queue_vtime` far past the peer floor. Unshaped /
   non-flow-fair builds are byte-identical (`u64::MAX` target, V_min
-  self-gated no-op).
+  self-gated no-op). Since #15187 the builder also chooses its
+  Local/Prepared arm from that same capped peek (not the uncapped
+  `cos_queue_front` head): a mixed-kind queue whose uncapped head
+  bucket is over-cap while the other kind is under-cap previously
+  broke on the arm mismatch with an empty scratch on every pass and
+  wedged the class permanently.
 - Single-writer per FlowFairState. The owner worker that polls a
   binding is the same worker that owns the queue's
   `FlowFairState`; therefore `observed_bps` updates and reads do not
