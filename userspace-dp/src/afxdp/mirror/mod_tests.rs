@@ -368,6 +368,7 @@ fn live_mirror_admission_reserves_slot_against_interleaving_producer() {
 
     let result = enqueue_admitted_mirror_clone_to_live(
         admission,
+        &ForwardingState::default(),
         config,
         vec![0x22; 64],
         test_meta(),
@@ -833,8 +834,9 @@ fn mirror_output_logical_ifindex_resolves_parent_binding() {
     let mirror_targets = MirrorTargetMap::default();
     let (left, rest) = bindings.split_at_mut(0);
     let (ingress, right) = rest.split_first_mut().expect("ingress binding");
-    let frame: Vec<u8> = (0..96).map(|v| v as u8).collect();
-
+    // #15114: a real Ethernet IPv4 frame so the VID-80 output tag can be
+    // pushed; the assertion below pins parent-binding resolution.
+    let frame = tagged_mirror_frame(None);
     let result = enqueue_mirror_clone(
         left,
         0,
@@ -916,7 +918,9 @@ fn sampled_live_mirror_resolves_snapshot_logical_ingress_and_output() {
     let forwarding = build_forwarding_state(&snapshot);
     let mut sample_counter = 0;
     let frame = vec![0x88; 80];
-
+    // #15114: real Ethernet IPv4 frame; the VID-90 output tag is pushed, so
+    // compare against the pushed expectation instead of the raw sample.
+    let frame = tagged_mirror_frame(None);
     let result = enqueue_sampled_mirror_clone_to_live(
         &ingress_live,
         &mirror_targets,
@@ -930,15 +934,100 @@ fn sampled_live_mirror_resolves_snapshot_logical_ingress_and_output() {
         None,
         0,
     );
-
     assert_eq!(result, Some(MirrorCloneResult::Enqueued));
     let mut queued = VecDeque::new();
     unsafe { target_live.take_pending_tx_into(&mut queued) };
     let req = queued.pop_front().expect("mirror tx");
     assert_eq!(req.egress_ifindex, 200);
-    assert_eq!(req.bytes, frame);
+    assert_mirror_frame_vid90(&req.bytes, frame.len());
 }
 
+fn tagged_mirror_frame(vid: Option<u16>) -> Vec<u8> {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&[0x02, 0, 0, 0, 0, 0xaa]);
+    frame.extend_from_slice(&[0x02, 0, 0, 0, 0, 0xbb]);
+    if let Some(vid) = vid {
+        frame.extend_from_slice(&0x8100u16.to_be_bytes());
+        frame.extend_from_slice(&vid.to_be_bytes());
+    }
+    frame.extend_from_slice(&0x0800u16.to_be_bytes());
+    frame.extend_from_slice(&[0x45; 62]);
+    frame
+}
+
+fn mirror_vlan_snapshot(ingress_frame_vid: Option<u16>) -> (ConfigSnapshot, Vec<u8>) {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![
+            InterfaceSnapshot { ifindex: 6, parent_ifindex: 0, vlan_id: 0, ..InterfaceSnapshot::default() },
+            InterfaceSnapshot { ifindex: 20080, parent_ifindex: 6, vlan_id: 80, ..InterfaceSnapshot::default() },
+            InterfaceSnapshot { ifindex: 22, parent_ifindex: 0, vlan_id: 0, hardware_addr: "02:00:00:00:00:16".to_string(), ..InterfaceSnapshot::default() },
+            InterfaceSnapshot { ifindex: 200, parent_ifindex: 22, vlan_id: 90, ..InterfaceSnapshot::default() },
+        ],
+        mirror_configs: vec![MirrorConfigSnapshot { ingress_ifindex: 20080, output_ifindex: 200, rate: 0 }],
+        ..ConfigSnapshot::default()
+    };
+    (snapshot, tagged_mirror_frame(ingress_frame_vid))
+}
+
+fn assert_mirror_frame_vid90(frame: &[u8], original_payload_len: usize) {
+    assert_eq!(&frame[12..14], &[0x81, 0x00], "clone must carry an 802.1Q tag");
+    assert_eq!(u16::from_be_bytes([frame[14], frame[15]]) & 0x0fff, 90, "clone VID must be output unit 90, not ingress");
+    assert_eq!(&frame[16..18], &[0x08, 0x00], "inner ethertype must follow the output tag");
+    assert_eq!(&frame[18..], &[0x45u8; 62][..], "payload must be preserved byte-for-byte");
+}
+
+#[test]
+fn sampled_live_mirror_rewrites_ingress_vlan_to_output_vlan_15114() {
+    let ingress_live = BindingLiveState::new();
+    let target_live = Arc::new(BindingLiveState::new());
+    let mut mirror_targets = MirrorTargetMap::default();
+    mirror_targets.insert(&BindingIdentity { slot: 9, queue_id: 0, worker_id: 1, interface: Arc::<str>::from("mirror-out"), ifindex: 22 }, target_live.clone());
+    let (snapshot, frame) = mirror_vlan_snapshot(Some(80));
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut sample_counter = 0;
+    let result = enqueue_sampled_mirror_clone_to_live(&ingress_live, &mirror_targets, &forwarding, 6, 80, 0, &mut sample_counter, &frame, test_meta(), None, 0);
+    assert_eq!(result, Some(MirrorCloneResult::Enqueued));
+    let mut queued = VecDeque::new();
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
+    let req = queued.pop_front().expect("mirror tx");
+    assert_eq!(req.egress_ifindex, 200);
+    assert_mirror_frame_vid90(&req.bytes, frame.len());
+}
+
+#[test]
+fn sampled_live_mirror_pushes_output_vlan_for_untagged_ingress_15114() {
+    let ingress_live = BindingLiveState::new();
+    let target_live = Arc::new(BindingLiveState::new());
+    let mut mirror_targets = MirrorTargetMap::default();
+    mirror_targets.insert(&BindingIdentity { slot: 9, queue_id: 0, worker_id: 1, interface: Arc::<str>::from("mirror-out"), ifindex: 22 }, target_live.clone());
+    let (snapshot, frame) = mirror_vlan_snapshot(None);
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut sample_counter = 0;
+    let result = enqueue_sampled_mirror_clone_to_live(&ingress_live, &mirror_targets, &forwarding, 6, 80, 0, &mut sample_counter, &frame, test_meta(), None, 0);
+    assert_eq!(result, Some(MirrorCloneResult::Enqueued));
+    let mut queued = VecDeque::new();
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
+    let req = queued.pop_front().expect("mirror tx");
+    assert_mirror_frame_vid90(&req.bytes, frame.len());
+}
+
+#[test]
+fn same_worker_mirror_rewrites_ingress_vlan_to_output_vlan_15114() {
+    let mut bindings = vec![BindingWorker::new_for_mirror_test(0, 0, 11, 0), BindingWorker::new_for_mirror_test(1, 0, 22, 0)];
+    let lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let (snapshot, frame) = mirror_vlan_snapshot(Some(80));
+    let forwarding = build_forwarding_state(&snapshot);
+    let mirror_targets = MirrorTargetMap::default();
+    let (left, rest) = bindings.split_at_mut(0);
+    let (ingress, right) = rest.split_first_mut().expect("ingress binding");
+    let result = enqueue_mirror_clone(left, 0, ingress, right, &lookup, &mirror_targets, &forwarding, MirrorRuntimeConfig { output_ifindex: 200, rate: 0 }, 0, &frame, test_meta(), None, 0);
+    assert_eq!(result, MirrorCloneResult::Enqueued);
+    let target = &bindings[1];
+    let req = target.tx_pipeline.pending_tx_prepared.front().expect("mirror prepared request");
+    assert_eq!(req.egress_ifindex, 200);
+    let out = target.umem.area().slice(req.offset as usize, req.len as usize).expect("mirror frame");
+    assert_mirror_frame_vid90(out, frame.len());
+}
 #[test]
 fn missing_destination_binding_drop_counter() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);

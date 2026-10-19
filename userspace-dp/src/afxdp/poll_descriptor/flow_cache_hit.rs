@@ -892,6 +892,7 @@ pub(super) fn stage_flow_cache_hit(
                                     } else {
                                         enqueue_admitted_mirror_clone_to_live(
                                             admission,
+                                            worker_ctx.forwarding,
                                             mirror_config,
                                             mirror_frame,
                                             meta.into(),

@@ -1,5 +1,64 @@
 use super::*;
 
+/// #15114: put a mirror clone on the OUTPUT unit's VLAN, not the ingress one.
+/// The clone is transmitted on the analyzer parent binding
+/// (`resolve_tx_binding_ifindex(output_ifindex)`), so its outer 802.1Q tag
+/// must carry `forwarding.egress_tx_vlan_id(output_ifindex)` — the same VID
+/// the forward-path frame builder stamps for that egress. VID 0 (untagged
+/// or native-VLAN output) strips any ingress tag; a tagged output rewrites
+/// the VID of an existing single tag (preserving PCP/DEI) or pushes one onto
+/// an untagged frame. Returns `None` for a frame too short to hold the L2
+/// header the rewrite needs — the caller drops it (`NoFrame`) rather than
+/// emitting it on the wrong VLAN.
+fn mirror_output_frame<'a>(
+    forwarding: &ForwardingState,
+    output_ifindex: i32,
+    frame: &'a [u8],
+) -> Option<std::borrow::Cow<'a, [u8]>> {
+    use crate::afxdp::ethernet::{ETHERTYPE_VLAN, ETHERTYPE_VLAN_8021AD};
+    let target_vid = forwarding.egress_tx_vlan_id(output_ifindex) & 0x0fff;
+    if frame.len() < 14 {
+        return None;
+    }
+    let ether_type = u16::from_be_bytes([frame[12], frame[13]]);
+    let tagged = matches!(ether_type, ETHERTYPE_VLAN | ETHERTYPE_VLAN_8021AD);
+    if tagged && frame.len() < 18 {
+        return None;
+    }
+    // A tag push must splice before a real Ethernet payload; frames that do
+    // not parse as IPv4/IPv6/ARP after any single tag are refused rather than
+    // mutated into the output VLAN. VID rewrites, strips, and the
+    // untagged-to-untagged copy-the-sample case relocate no payload bytes
+    // and are untouched.
+    if target_vid > 0 && !tagged && !matches!(ether_type, 0x0800 | 0x86dd | 0x0806) {
+        return None;
+    }
+    match (tagged, target_vid) {
+        (false, 0) => Some(std::borrow::Cow::Borrowed(frame)),
+        (true, 0) => {
+            let mut out = Vec::with_capacity(frame.len() - 4);
+            out.extend_from_slice(&frame[..12]);
+            out.extend_from_slice(&frame[16..]);
+            Some(std::borrow::Cow::Owned(out))
+        }
+        (true, vid) => {
+            let mut out = frame.to_vec();
+            out[12..14].copy_from_slice(&ETHERTYPE_VLAN.to_be_bytes());
+            let tci = (u16::from_be_bytes([out[14], out[15]]) & 0xf000) | vid;
+            out[14..16].copy_from_slice(&tci.to_be_bytes());
+            Some(std::borrow::Cow::Owned(out))
+        }
+        (false, vid) => {
+            let mut out = Vec::with_capacity(frame.len() + 4);
+            out.extend_from_slice(&frame[..12]);
+            out.extend_from_slice(&ETHERTYPE_VLAN.to_be_bytes());
+            out.extend_from_slice(&vid.to_be_bytes());
+            out.extend_from_slice(&frame[12..]);
+            Some(std::borrow::Cow::Owned(out))
+        }
+    }
+}
+
 /// A mirror sample selected from the original frame but not yet committed to
 /// the analyzer queue. The sample counter is committed only after the primary
 /// forward is queued; bytes are copied only when that forward rewrites in place.
@@ -220,6 +279,7 @@ pub(in crate::afxdp) fn enqueue_sampled_mirror_clone(
         };
         return Some(enqueue_admitted_mirror_clone_to_live(
             admission,
+            forwarding,
             config,
             frame.to_vec(),
             meta,
@@ -250,6 +310,15 @@ fn enqueue_mirror_clone_to_binding(
     ) {
         return MirrorCloneResult::OutputFiltered;
     }
+    if frame.len() > tx_frame_capacity() {
+        return MirrorCloneResult::NoFrame;
+    }
+    // #15114: rewrite/push/strip the outer tag to the output unit's VID
+    // before the clone is copied into the analyzer binding's UMEM.
+    let Some(out_frame) = mirror_output_frame(forwarding, config.output_ifindex, frame) else {
+        return MirrorCloneResult::NoFrame;
+    };
+    let frame = out_frame.as_ref();
     if frame.len() > tx_frame_capacity() {
         return MirrorCloneResult::NoFrame;
     }
@@ -335,6 +404,7 @@ pub(in crate::afxdp) fn enqueue_mirror_clone_to_live(
     };
     enqueue_admitted_mirror_clone_to_live(
         admission,
+        forwarding,
         config,
         frame.to_vec(),
         meta,
@@ -346,6 +416,7 @@ pub(in crate::afxdp) fn enqueue_mirror_clone_to_live(
 
 pub(in crate::afxdp) fn enqueue_admitted_mirror_clone_to_live(
     admission: PendingTxAdmission,
+    forwarding: &ForwardingState,
     config: MirrorRuntimeConfig,
     frame: Vec<u8>,
     meta: ForwardPacketMeta,
@@ -353,6 +424,11 @@ pub(in crate::afxdp) fn enqueue_admitted_mirror_clone_to_live(
     cos_queue_id: Option<u8>,
     now_ns: u64,
 ) -> MirrorCloneResult {
+    // #15114: rewrite/push/strip the outer tag to the output unit's VID.
+    let Some(out_frame) = mirror_output_frame(forwarding, config.output_ifindex, &frame) else {
+        return MirrorCloneResult::NoFrame;
+    };
+    let frame = out_frame.into_owned();
     if frame.len() > tx_frame_capacity() {
         return MirrorCloneResult::NoFrame;
     }
@@ -423,6 +499,7 @@ pub(in crate::afxdp) fn enqueue_sampled_mirror_clone_to_live(
     let cos_queue_id = mirror_cos_queue_id(forwarding, config.output_ifindex, meta, flow_key);
     let result = enqueue_admitted_mirror_clone_to_live(
         admission,
+        forwarding,
         config,
         frame.to_vec(),
         meta,
