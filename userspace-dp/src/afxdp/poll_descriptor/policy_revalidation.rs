@@ -378,6 +378,7 @@ fn destination_nat_translation_still_valid(
     metadata: &SessionMetadata,
     forward_key: &SessionKey,
     now_ns: u64,
+    packet_icmp: Option<(u8, u8)>,
 ) -> bool {
     let nat = decision.nat;
     let Some(translated_dst) = nat.rewrite_dst else {
@@ -404,6 +405,11 @@ fn destination_nat_translation_still_valid(
         zone_override,
         scope_ifindex,
     );
+    // #15791: same precedence as session-miss admission
+    // (static -> persistent -> dnat, poll_descriptor/mod.rs): persistent
+    // is evaluated BEFORE the DNAT table, and the DNAT lookup receives
+    // the packet's real ICMP selector instead of the hardcoded None
+    // that revoked ICMP-application DNAT sessions on revalidation.
     let expected = forwarding
         .static_nat
         .match_dnat_with_counter_scoped(
@@ -415,22 +421,6 @@ fn destination_nat_translation_still_valid(
             scope.routing_instance,
         )
         .map(|(decision, _)| decision)
-        .or_else(|| {
-            forwarding
-                .dnat_table
-                .lookup_with_counter_scoped(
-                    forward_key.protocol,
-                    forward_key.src_ip,
-                    forward_key.dst_ip,
-                    forward_key.src_port,
-                    forward_key.dst_port,
-                    scope.zone_name,
-                    scope.ifname,
-                    scope.routing_instance,
-                    None,
-                )
-                .map(|(decision, _)| decision)
-        })
         .or_else(|| {
             // #15133: revalidation knows both of the session's zone ids.
             // The packet pair for the rule fold is (internal zone,
@@ -453,6 +443,22 @@ fn destination_nat_translation_still_valid(
                 scope.routing_instance,
                 internal_zone,
             )
+        })
+        .or_else(|| {
+            forwarding
+                .dnat_table
+                .lookup_with_counter_scoped(
+                    forward_key.protocol,
+                    forward_key.src_ip,
+                    forward_key.dst_ip,
+                    forward_key.src_port,
+                    forward_key.dst_port,
+                    scope.zone_name,
+                    scope.ifname,
+                    scope.routing_instance,
+                    packet_icmp,
+                )
+                .map(|(decision, _)| decision)
         });
     expected.is_some_and(|current| {
         current.rewrite_dst == Some(translated_dst)
@@ -631,6 +637,7 @@ fn source_nat_translation_still_valid(
     forward_key: &SessionKey,
     stored_static: Option<bool>,
     now_ns: u64,
+    packet_icmp: Option<(u8, u8)>,
 ) -> (bool, Option<bool>) {
     let nat = decision.nat;
     let destination_valid = destination_nat_translation_still_valid(
@@ -639,6 +646,7 @@ fn source_nat_translation_still_valid(
         metadata,
         forward_key,
         now_ns,
+        packet_icmp,
     );
     let Some(translated_src) = nat.rewrite_src else {
         return (destination_valid, None);
@@ -792,6 +800,7 @@ pub(super) fn source_nat_revocation_on_session_hit(
     source_nat_static: Option<bool>,
     source_nat_validation_key: Option<&SessionKey>,
     now_ns: u64,
+    packet_icmp: Option<(u8, u8)>,
 ) -> Option<PolicyRevocation> {
     source_nat_revocation_on_session_hit_with_ingress(
         forwarding,
@@ -806,6 +815,7 @@ pub(super) fn source_nat_revocation_on_session_hit(
         source_nat_static,
         source_nat_validation_key,
         now_ns,
+        packet_icmp,
     )
 }
 
@@ -823,6 +833,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     source_nat_static: Option<bool>,
     source_nat_validation_key: Option<&SessionKey>,
     now_ns: u64,
+    packet_icmp: Option<(u8, u8)>,
 ) -> Option<PolicyRevocation> {
     let (
         forward_key,
@@ -969,6 +980,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                         &forward_query,
                         source_nat_static,
                         now_ns,
+                        forward_decision.nat.source_nat_icmp,
                     );
                     return (!valid).then_some(PolicyRevocation {
                         canonical_key: None,
@@ -1054,6 +1066,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         &forward_key,
         stored_static,
         now_ns,
+        packet_icmp.or(forward_decision.nat.source_nat_icmp),
     );
     if valid {
         if let Some(canonical_key) = canonical_key.as_ref() {

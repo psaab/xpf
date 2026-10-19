@@ -589,6 +589,7 @@ fn ha_imported_static_snat_survives_first_hit_12187() {
             source_nat_static,
             None,
             1_000_000_000,
+            None,
         )
         .is_none(),
         "an imported static SNAT must survive its first hit with unchanged config"
@@ -630,6 +631,7 @@ fn ha_imported_dynamic_snat_survives_then_static_collision_revokes_12187() {
             source_nat_static,
             None,
             1_000_000_000,
+            None,
         )
         .is_none(),
         "an imported dynamic SNAT must survive its first hit with unchanged config"
@@ -648,6 +650,7 @@ fn ha_imported_dynamic_snat_survives_then_static_collision_revokes_12187() {
             source_nat_static,
             None,
             1_000_000_000,
+            None,
         )
         .is_some(),
         "a later same-tuple static SNAT must not launder the imported dynamic allocation"
@@ -751,6 +754,7 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
             resolved.source_nat_static,
             resolved.source_nat_validation_key.as_ref(),
             1_000_000_000,
+            None,
         )
         .is_none(),
         "transient imported dynamic SNAT must survive its unchanged first hit"
@@ -767,6 +771,7 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
             resolved.source_nat_static,
             resolved.source_nat_validation_key.as_ref(),
             1_000_000_000,
+            None,
         )
         .is_some(),
         "transient dynamic provenance must still reject a later static collision"
@@ -854,6 +859,7 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
             collision_resolved.source_nat_static,
             collision_resolved.source_nat_validation_key.as_ref(),
             1_000_000_000,
+            None,
         )
         .is_some(),
         "ambiguous original-tuple identity must fail closed, not borrow another flow's rule"
@@ -989,7 +995,8 @@ fn ha_imported_transient_dynamic_snat_keeps_canonical_worker_entry_12187() {
                 hit.source_nat_static,
                 hit.source_nat_validation_key.as_ref(),
                 1_000_000_000,
-            )
+                None,
+        )
             .is_none(),
             "unchanged dynamic SNAT survives each translated hit"
         );
@@ -1008,6 +1015,7 @@ fn ha_imported_transient_dynamic_snat_keeps_canonical_worker_entry_12187() {
             resolved.source_nat_static,
             resolved.source_nat_validation_key.as_ref(),
             1_000_000_000,
+            None,
         )
         .is_some(),
         "a later same-tuple static SNAT still revokes the imported dynamic allocation"
@@ -1162,6 +1170,7 @@ fn ha_imported_transient_dynamic_snat_local_alias_keeps_shared_canonical_12187()
             hit.source_nat_static,
             hit.source_nat_validation_key.as_ref(),
             1_000_000_000,
+            None,
         )
         .is_none(),
         "the local alias's unchanged dynamic SNAT survives sessionless revalidation"
@@ -2259,6 +2268,7 @@ fn source_nat_revalidation_resolves_vlan_logical_ingress_12861() {
         &key,
         Some(false),
         1_000_000_000,
+        None,
     );
     assert!(
         valid,
@@ -2310,6 +2320,7 @@ fn source_nat_vlan_logical_ingress_survives_generation_advance_12861() {
             static_nat,
             None,
             1_000_000_000,
+            None,
         )
         .is_none(),
         "the unchanged SNAT mapping on VLAN 50 must survive revalidation"
@@ -2332,6 +2343,7 @@ fn source_nat_revalidation_untagged_trunk_stays_valid_12861() {
         &key,
         Some(false),
         1_000_000_000,
+        None,
     );
     assert!(valid, "untagged SNAT session on lan unit must remain valid");
 }
@@ -2352,6 +2364,7 @@ fn source_nat_revalidation_physical_lan_stays_valid_12861() {
         &key,
         Some(false),
         1_000_000_000,
+        None,
     );
     assert!(
         valid,
@@ -2372,6 +2385,7 @@ fn source_nat_revalidation_fabric_keeps_recorded_zones_12861() {
         &key,
         Some(false),
         1_000_000_000,
+        None,
     );
     assert!(
         valid,
@@ -2396,6 +2410,7 @@ fn source_nat_revalidation_other_vlan_zone_still_revoked_12861() {
         &key,
         Some(false),
         1_000_000_000,
+        None,
     );
     assert!(
         !valid,
@@ -2813,6 +2828,7 @@ fn reverse_snat_hit_13652(
         case.7,
         None,
         1_000_000_000,
+        None,
     )
 }
 
@@ -3387,6 +3403,7 @@ fn established_session_is_revoked_when_its_dnat_rule_is_withdrawn_13923() {
             source_nat_static,
             None,
             1_000_000_000,
+            None,
         )
         .is_none(),
         "the session must survive while its port-forward still matches"
@@ -3405,6 +3422,7 @@ fn established_session_is_revoked_when_its_dnat_rule_is_withdrawn_13923() {
             source_nat_static,
             None,
             1_000_000_000,
+            None,
         )
         .is_some(),
         "withdrawing the destination-NAT rule must revoke the established session"
@@ -3743,6 +3761,7 @@ fn reverse_only_vlan_interface_snat_survives_14128() {
             case.7,
             None,
             1_000_000_000,
+            None,
         )
         .is_none(),
         "interface-SNAT on logical VLAN unit 13 must survive a companion-less reverse hit (#14128)"
@@ -3767,6 +3786,7 @@ fn reverse_only_vlan_interface_snat_survives_14128() {
             case.7,
             None,
             1_000_000_000,
+            None,
         )
         .is_some(),
         "a logical-unit address change must revoke the stale interface translation"
@@ -4005,13 +4025,197 @@ fn withdrawn_icmp_dnat_revokes_14315() {
     configured.dnat_table =
         crate::nat::DnatTable::from_snapshots(&[rule], &crate::nat::NatCounterStore::default());
     assert!(
-        destination_nat_translation_still_valid(&configured, &decision, &metadata, &key, NOW_14315),
+        destination_nat_translation_still_valid(
+            &configured,
+            &decision,
+            &metadata,
+            &key,
+            NOW_14315,
+            None
+        ),
         "ICMP DNAT session must validate while its rule exists"
     );
     let withdrawn = ForwardingState::default();
     assert!(
-        !destination_nat_translation_still_valid(&withdrawn, &decision, &metadata, &key, NOW_14315),
+        !destination_nat_translation_still_valid(
+            &withdrawn, &decision, &metadata, &key, NOW_14315, None
+        ),
         "withdrawing the ICMP DNAT rule must invalidate the session (#14315)"
+    );
+}
+
+/// #15791: an ICMP-application DNAT rule (match_icmp_type=8, echo-request)
+/// must survive revalidation when the hitting packet carries its real
+/// (8,0) selector, and must NOT validate for a different type (13) or
+/// for the old hardcoded None. RED pre-fix: the lookup passed None, so
+/// the type-constrained entry never matched and the session revoked.
+#[test]
+fn icmp_application_dnat_survives_revalidation_15791() {
+    let key = key_14315(
+        libc::IPPROTO_ICMP as u8,
+        "198.51.100.9",
+        "203.0.113.7",
+        0x1234,
+        0,
+    );
+    let decision = decision_14315(NatDecision {
+        rewrite_dst: Some("10.0.0.7".parse().expect("internal")),
+        ..NatDecision::default()
+    });
+    let metadata = meta_14315(2, 1);
+    let rule = crate::protocol::DestinationNATRuleSnapshot {
+        name: "icmp-ping-forward".to_string(),
+        destination_address: "203.0.113.7".to_string(),
+        pool_address: "10.0.0.7".to_string(),
+        protocol: "icmp".to_string(),
+        match_icmp_type: Some(8),
+        match_icmp_code: Some(0),
+        ..Default::default()
+    };
+    let mut configured = ForwardingState::default();
+    configured.dnat_table =
+        crate::nat::DnatTable::from_snapshots(&[rule], &crate::nat::NatCounterStore::default());
+    assert!(
+        destination_nat_translation_still_valid(
+            &configured,
+            &decision,
+            &metadata,
+            &key,
+            NOW_14315,
+            Some((8, 0))
+        ),
+        "ICMP echo DNAT session must validate with its real (8,0) selector (#15791)"
+    );
+    assert!(
+        !destination_nat_translation_still_valid(
+            &configured,
+            &decision,
+            &metadata,
+            &key,
+            NOW_14315,
+            None
+        ),
+        "type-constrained DNAT must fail closed for None (the pre-fix hardcoded value)"
+    );
+    assert!(
+        !destination_nat_translation_still_valid(
+            &configured,
+            &decision,
+            &metadata,
+            &key,
+            NOW_14315,
+            Some((13, 0))
+        ),
+        "type-constrained DNAT must not validate for a different ICMP type"
+    );
+}
+
+/// #15791: revalidation must agree with admission on persistent-vs-dnat
+/// precedence (static -> persistent -> dnat). A live persistent binding
+/// and a DNAT rule both claim the same public tuple but translate to
+/// different internals; admission picks persistent first, so a session
+/// admitted via persistent must stay valid and a session whose stored
+/// translation equals only the DNAT result must NOT be laundered by
+/// persistent taking precedence. RED pre-fix: dnat was checked before
+/// persistent, so the persistent-admitted session was revoked.
+#[test]
+fn persistent_precedes_dnat_in_revalidation_15791() {
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::protocol::SourceNATRuleSnapshot {
+            name: "persistent-snat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            pool_name: "persistent-pool".to_string(),
+            pool_addresses: vec!["203.0.113.10".to_string()],
+            port_low: 40000,
+            port_high: 40010,
+            persistent_nat: true,
+            persistent_nat_permit_any_remote_host: true,
+            persistent_nat_inactivity_timeout: 300,
+            ..Default::default()
+        }]);
+    // Mint the persistent binding exactly as an outbound flow would.
+    let mut counter = None;
+    let outbound = match crate::nat::match_source_nat_result_for_tuple(
+        &crate::nat::InterfaceNatAllocators::default(),
+        &forwarding.source_nat_rules,
+        &crate::nat::NatScopeCtx::default(),
+        "lan",
+        "wan",
+        "10.0.1.100".parse().expect("internal host"),
+        "8.8.8.8".parse().expect("remote"),
+        Some(6),
+        12345,
+        53,
+        None,
+        None,
+        NOW_14315,
+        false,
+        false,
+        crate::nat::NatHolder::Untracked,
+        &mut counter,
+    ) {
+        crate::nat::SourceNatLookup::Matched(decision) => decision,
+        other => panic!("expected matched persistent SNAT, got {other:?}"),
+    };
+    let public_ip = outbound.rewrite_src.expect("translated src");
+    let public_port = outbound.rewrite_src_port.expect("translated port");
+    // A DNAT rule claiming the SAME public tuple (addr+port) to a
+    // DIFFERENT internal host:port. Admission evaluates persistent
+    // before dnat, so this rule is shadowed for this tuple.
+    forwarding.dnat_table = crate::nat::DnatTable::from_snapshots(
+        &[crate::protocol::DestinationNATRuleSnapshot {
+            name: "shadowed-web-forward".to_string(),
+            destination_address: public_ip.to_string(),
+            destination_port: public_port,
+            protocol: "tcp".to_string(),
+            pool_address: "10.0.9.9".to_string(),
+            pool_port: 9999,
+            ..Default::default()
+        }],
+        &crate::nat::NatCounterStore::default(),
+    );
+    let in_key = key_14315(6, "8.8.8.8", &public_ip.to_string(), 53, public_port);
+    let metadata = meta_14315(2, 1);
+    // Session admitted via persistent (admission order): must stay valid.
+    let persistent_decision = decision_14315(NatDecision {
+        rewrite_dst: Some("10.0.1.100".parse().expect("internal host")),
+        rewrite_dst_port: Some(12345),
+        ..NatDecision::default()
+    });
+    assert!(
+        destination_nat_translation_still_valid(
+            &forwarding,
+            &persistent_decision,
+            &metadata,
+            &in_key,
+            NOW_14315 + 1,
+            None
+        ),
+        "persistent-admitted session must survive revalidation (persistent precedes dnat, #15791)"
+    );
+    // Stored translation equal to only the shadowed DNAT result: with
+    // persistent first, revalidation resolves to the persistent target
+    // and this must NOT validate (miss and hit paths agree).
+    let dnat_only_decision = decision_14315(NatDecision {
+        rewrite_dst: Some("10.0.9.9".parse().expect("dnat host")),
+        rewrite_dst_port: Some(9999),
+        ..NatDecision::default()
+    });
+    assert!(
+        !destination_nat_translation_still_valid(
+            &forwarding,
+            &dnat_only_decision,
+            &metadata,
+            &in_key,
+            NOW_14315 + 1,
+            None
+        ),
+        "shadowed DNAT translation must not validate when persistent precedes it (#15791)"
     );
 }
 
@@ -4035,12 +4239,21 @@ fn withdrawn_gre_static_nat_revokes_14315() {
         &crate::nat::NatCounterStore::default(),
     );
     assert!(
-        destination_nat_translation_still_valid(&configured, &decision, &metadata, &key, NOW_14315),
+        destination_nat_translation_still_valid(
+            &configured,
+            &decision,
+            &metadata,
+            &key,
+            NOW_14315,
+            None
+        ),
         "GRE static-NAT session must validate while its rule exists"
     );
     let withdrawn = ForwardingState::default();
     assert!(
-        !destination_nat_translation_still_valid(&withdrawn, &decision, &metadata, &key, NOW_14315),
+        !destination_nat_translation_still_valid(
+            &withdrawn, &decision, &metadata, &key, NOW_14315, None
+        ),
         "withdrawing the GRE static-NAT rule must invalidate the session (#14315)"
     );
 }
@@ -4082,7 +4295,8 @@ fn withdrawn_nptv6_prefix_revokes_14315() {
             &in_decision,
             &metadata,
             &in_key,
-            NOW_14315
+            NOW_14315,
+            None
         ),
         "NPTv6 inbound session must validate while its prefix rule exists"
     );
@@ -4092,7 +4306,8 @@ fn withdrawn_nptv6_prefix_revokes_14315() {
             &in_decision,
             &metadata,
             &in_key,
-            NOW_14315
+            NOW_14315,
+            None
         ),
         "withdrawing the NPTv6 prefix must invalidate the inbound session (#14315)"
     );
@@ -4112,6 +4327,7 @@ fn withdrawn_nptv6_prefix_revokes_14315() {
         &out_key,
         None,
         NOW_14315,
+        None,
     );
     assert!(
         valid,
@@ -4124,6 +4340,7 @@ fn withdrawn_nptv6_prefix_revokes_14315() {
         &out_key,
         None,
         NOW_14315,
+        None,
     );
     assert!(
         !valid,
@@ -4200,7 +4417,8 @@ fn persistent_nat_inbound_survives_revalidation_14315() {
             &in_decision,
             &metadata,
             &in_key,
-            NOW_14315 + 1
+            NOW_14315 + 1,
+            None
         ),
         "live Persistent-NAT inbound binding must survive revalidation (#14315)"
     );
@@ -4211,7 +4429,8 @@ fn persistent_nat_inbound_survives_revalidation_14315() {
             &in_decision,
             &metadata,
             &in_key,
-            NOW_14315 + 1
+            NOW_14315 + 1,
+            None
         ),
         "withdrawing the persistent rule must invalidate the inbound binding (#14315)"
     );
@@ -4310,7 +4529,8 @@ fn persistent_nat_cross_zone_grant_does_not_validate_revalidation_14802() {
             &in_decision,
             &wan_metadata,
             &in_key,
-            NOW_14315 + 1
+            NOW_14315 + 1,
+            None
         ),
         "dmz any-remote-host grant must not keep a wan-arriving session alive (#14802/#14322)"
     );
@@ -4322,7 +4542,8 @@ fn persistent_nat_cross_zone_grant_does_not_validate_revalidation_14802() {
             &in_decision,
             &dmz_metadata,
             &in_key,
-            NOW_14315 + 1
+            NOW_14315 + 1,
+            None
         ),
         "dmz-arriving session must validate on its own any-remote-host grant (#14802)"
     );
@@ -4387,7 +4608,8 @@ fn revalidation_leaves_nat_rule_counters_unchanged_14315() {
         &dnat_decision,
         &metadata,
         &dnat_key,
-        NOW_14315
+        NOW_14315,
+        None
     ));
     // Static SNAT session (also exercises the static destination branch).
     // Forward direction is lan -> wan; the validator resolves the zone pair
@@ -4405,6 +4627,7 @@ fn revalidation_leaves_nat_rule_counters_unchanged_14315() {
         &snat_key,
         Some(true),
         NOW_14315,
+        None,
     );
     assert!(
         valid,
@@ -4884,6 +5107,7 @@ fn scoped_snat_hit_15176(
         Some(false),
         None,
         1_000_000_000,
+        None,
     )
 }
 
@@ -5071,6 +5295,7 @@ fn nat64_deterministic_stale_geometry_revokes_15178() {
             None,
             None,
             1_000_000_000,
+            None,
         )
     };
     assert!(run(mk_nat64(32)).is_none(), "#15178 control: minting geometry survives");

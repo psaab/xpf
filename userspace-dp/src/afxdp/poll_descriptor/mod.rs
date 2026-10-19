@@ -3014,6 +3014,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 resolved.source_nat_static,
                                 resolved.source_nat_validation_key.as_ref(),
                                 now_ns,
+                                // #15791: the hitting packet's real ICMP
+                                // selector, so ICMP-application DNAT
+                                // sessions survive revalidation.
+                                policy_packet_icmp(packet_frame, meta),
                             );
                         let owner_icmp_verdict =
                             if session_hit_revocation.is_none() && foreign_arrival_zone.is_none() {
