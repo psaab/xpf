@@ -66,8 +66,10 @@ PINNED_TOOLCHAIN="${CHANNEL_LINES}"
 
 TOOLCHAIN="${RUST_BPF_TOOLCHAIN:-${PINNED_TOOLCHAIN}}"
 UNPINNED=0
+PINNED_BIT=1
 if [[ "${TOOLCHAIN}" != "${PINNED_TOOLCHAIN}" ]]; then
 	UNPINNED=1
+	PINNED_BIT=0
 	echo "build-userspace-xdp.sh: WARNING: building with UNPINNED toolchain '${TOOLCHAIN}' (pin is '${PINNED_TOOLCHAIN}')" >&2
 fi
 
@@ -110,9 +112,18 @@ SHIM_BUILD_DIGEST="$("${GO_BIN}" -C "${REPO_ROOT}" run ./cmd/shim-manifest -repo
 	fail "failed to hash the shim build inputs"
 [[ "${SHIM_BUILD_DIGEST}" =~ ^[0-9a-f]{64}$ ]] || fail "invalid shim build-input digest"
 
+# --- Codegen-env scrub + provenance (#15218) ---
+# RUSTFLAGS / CARGO_ENCODED_RUSTFLAGS from the ambient environment are
+# codegen inputs cargo honours silently; a pinned build under them is
+# not the pinned build. Scrub both for the cargo invocation below, so
+# the only codegen env a gated build can have is the empty one, and
+# record that fact as a digest the verdict carries.
+CODEGEN_ENV_DIGEST="$(printf 'RUSTFLAGS=\nCARGO_ENCODED_RUSTFLAGS=\n' | sha256sum | awk '{print $1}')"
+[[ "${CODEGEN_ENV_DIGEST}" =~ ^[0-9a-f]{64}$ ]] || fail "failed to compute the codegen-env digest"
+
 (
 	cd "${CRATE_DIR}"
-	"${CARGO_BIN}" "+${TOOLCHAIN}" build --release
+	env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS "${CARGO_BIN}" "+${TOOLCHAIN}" build --release
 )
 [[ -f "${CANDIDATE}" ]] || fail "cargo build did not produce ${CANDIDATE}"
 
@@ -145,11 +156,11 @@ run_verifier() {
 	local allow_low="${XPF_SHIM_ALLOW_LOW_HEADROOM:-0}"
 	if [[ "$(id -u)" -eq 0 ]]; then
 		SHIMVERIFY_ATTESTATION="$(mktemp -t shimverify-attestation.XXXXXX)" || return 1
-		XPF_SHIM_ALLOW_LOW_HEADROOM="${allow_low}" XPF_SHIM_BUILD_DIGEST="${SHIM_BUILD_DIGEST}" "${SHIMVERIFY}" "${CANDIDATE}" --gate-verdict "${SHIMVERIFY_ATTESTATION}"
+		XPF_SHIM_ALLOW_LOW_HEADROOM="${allow_low}" XPF_SHIM_BUILD_DIGEST="${SHIM_BUILD_DIGEST}" XPF_SHIM_TOOLCHAIN="${TOOLCHAIN}" XPF_SHIM_PINNED="${PINNED_BIT}" XPF_SHIM_BPF_LINKER="${BPF_LINKER_VERSION}" XPF_SHIM_CODEGEN_ENV_DIGEST="${CODEGEN_ENV_DIGEST}" "${SHIMVERIFY}" "${CANDIDATE}" --gate-verdict "${SHIMVERIFY_ATTESTATION}"
 	elif sudo -n true 2>/dev/null; then
 		SHIMVERIFY_ATTESTATION="$(sudo -n mktemp -t shimverify-attestation.XXXXXX)" || return 99
 		sudo -n chmod 0644 "${SHIMVERIFY_ATTESTATION}" || return 99
-		sudo -n env "XPF_SHIM_ALLOW_LOW_HEADROOM=${allow_low}" "XPF_SHIM_BUILD_DIGEST=${SHIM_BUILD_DIGEST}" "${SHIMVERIFY}" "${CANDIDATE}" --gate-verdict "${SHIMVERIFY_ATTESTATION}"
+		sudo -n env "XPF_SHIM_ALLOW_LOW_HEADROOM=${allow_low}" "XPF_SHIM_BUILD_DIGEST=${SHIM_BUILD_DIGEST}" "XPF_SHIM_TOOLCHAIN=${TOOLCHAIN}" "XPF_SHIM_PINNED=${PINNED_BIT}" "XPF_SHIM_BPF_LINKER=${BPF_LINKER_VERSION}" "XPF_SHIM_CODEGEN_ENV_DIGEST=${CODEGEN_ENV_DIGEST}" "${SHIMVERIFY}" "${CANDIDATE}" --gate-verdict "${SHIMVERIFY_ATTESTATION}"
 	else
 		return 99
 	fi
@@ -213,7 +224,16 @@ if [[ "${UNPINNED}" -eq 1 && "${XPF_SHIM_ALLOW_UNPINNED_INSTALL:-0}" != "1" ]]; 
 	fail "refusing to install an object built with unpinned toolchain '${TOOLCHAIN}' (pin: '${PINNED_TOOLCHAIN}').
   The verified candidate remains at ${CANDIDATE}.
   Set XPF_SHIM_ALLOW_UNPINNED_INSTALL=1 to install anyway (do NOT commit such an object:
-  the PR reproducibility gate regenerates with the pin and requires a clean git diff)."
+  its verdict records pinned=false, so the freshness gate
+  (TestUserspaceXDPShimObjectMatchesSourceManifest) and the release
+  retention gate (scripts/dist/retain_shim_verdict.py) reject it)."
+fi
+
+if [[ "${UNPINNED}" -eq 1 ]]; then
+	echo "build-userspace-xdp.sh: WARNING: installing ${OUT_FILE} with UNPINNED toolchain '${TOOLCHAIN}' (pin: '${PINNED_TOOLCHAIN}').
+  The gate verdict records pinned=false: the freshness gate and the release
+  retention gate will reject this object. Do NOT commit it." >&2
+	VERIFY_VERDICT="${VERIFY_VERDICT}, provenance UNPINNED (toolchain ${TOOLCHAIN}, NOT the pin) — NOT a pinned build"
 fi
 
 # Install the verifier's attestation beside the candidate object. Its hash

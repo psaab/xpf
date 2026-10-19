@@ -117,7 +117,7 @@ func run(
 
 	decision := decide(stats, getenv(allowLowHeadroomEnv) == "1")
 	if withVerdict && (decision.exit == 0 || decision.exit == 6) {
-		if err := writeGateVerdict(args[3], path, stats, decision, getenv("XPF_SHIM_BUILD_DIGEST")); err != nil {
+		if err := writeGateVerdict(args[3], path, stats, decision, getenv("XPF_SHIM_BUILD_DIGEST"), getenv); err != nil {
 			fmt.Fprintf(stderr, "shimverify: write gate verdict %s: %v\n", args[3], err)
 			return 1
 		}
@@ -359,18 +359,55 @@ type gateVerdictStats struct {
 	SlackToFloorInsns int     `json:"slack_to_floor_insns"`
 }
 
-type gateVerdict struct {
-	SchemaVersion    int              `json:"schema_version"`
-	VerifiedAt       string           `json:"verified_at"`
-	ObjectSHA256     string           `json:"object_sha256"`
-	BuildDigest      string           `json:"build_digest"`
-	Verdict          string           `json:"verdict"`
-	OverrideConsumed bool             `json:"override_consumed"`
-	Reason           string           `json:"reason"`
-	Stats            gateVerdictStats `json:"stats"`
+type gateVerdictProvenance struct {
+	Toolchain        string `json:"toolchain"`
+	Pinned           bool   `json:"pinned"`
+	BPFLinker        string `json:"bpf_linker"`
+	CodegenEnvDigest string `json:"codegen_env_digest"`
 }
 
-func writeGateVerdict(outPath, objectPath string, stats dataplane.ShimVerifierStats, decision shimverifyDecision, buildDigest string) error {
+type gateVerdict struct {
+	SchemaVersion    int                   `json:"schema_version"`
+	VerifiedAt       string                `json:"verified_at"`
+	ObjectSHA256     string                `json:"object_sha256"`
+	BuildDigest      string                `json:"build_digest"`
+	Verdict          string                `json:"verdict"`
+	OverrideConsumed bool                  `json:"override_consumed"`
+	Reason           string                `json:"reason"`
+	Stats            gateVerdictStats      `json:"stats"`
+	Provenance       gateVerdictProvenance `json:"provenance"`
+}
+
+// buildProvenance reads the #15218 provenance the recipe threads in.
+// Every field must be present and well-formed: a verdict written
+// without provenance is exactly the unverifiable PASS this issue
+// closes, so a partial env fails the write (and the run) closed.
+func buildProvenance(getenv func(string) string) (gateVerdictProvenance, error) {
+	p := gateVerdictProvenance{
+		Toolchain:        getenv("XPF_SHIM_TOOLCHAIN"),
+		BPFLinker:        getenv("XPF_SHIM_BPF_LINKER"),
+		CodegenEnvDigest: getenv("XPF_SHIM_CODEGEN_ENV_DIGEST"),
+	}
+	switch getenv("XPF_SHIM_PINNED") {
+	case "1":
+		p.Pinned = true
+	case "0":
+	default:
+		return p, fmt.Errorf("missing or invalid shim build provenance (XPF_SHIM_PINNED)")
+	}
+	if p.Toolchain == "" || p.BPFLinker == "" {
+		return p, fmt.Errorf("missing shim build provenance (XPF_SHIM_TOOLCHAIN/XPF_SHIM_BPF_LINKER)")
+	}
+	if len(p.CodegenEnvDigest) != sha256.Size*2 {
+		return p, fmt.Errorf("missing or invalid codegen env digest (XPF_SHIM_CODEGEN_ENV_DIGEST)")
+	}
+	if _, err := hex.DecodeString(p.CodegenEnvDigest); err != nil {
+		return p, fmt.Errorf("invalid codegen env digest: %w", err)
+	}
+	return p, nil
+}
+
+func writeGateVerdict(outPath, objectPath string, stats dataplane.ShimVerifierStats, decision shimverifyDecision, buildDigest string, getenv func(string) string) error {
 	if len(buildDigest) != sha256.Size*2 {
 		return fmt.Errorf("missing or invalid source build digest (XPF_SHIM_BUILD_DIGEST)")
 	}
@@ -390,8 +427,12 @@ func writeGateVerdict(outPath, objectPath string, stats dataplane.ShimVerifierSt
 		reason = fmt.Sprintf("measured headroom %.2f%% is below the %.1f%% floor; installed with %s=1",
 			stats.HeadroomPct(), dataplane.UserspaceShimMinVerifierHeadroomPct, allowLowHeadroomEnv)
 	}
+	provenance, err := buildProvenance(getenv)
+	if err != nil {
+		return err
+	}
 	verdict := gateVerdict{
-		SchemaVersion:    1,
+		SchemaVersion:    2,
 		VerifiedAt:       time.Now().UTC().Format(time.RFC3339Nano),
 		ObjectSHA256:     objectHash,
 		BuildDigest:      buildDigest,
@@ -406,6 +447,7 @@ func writeGateVerdict(outPath, objectPath string, stats dataplane.ShimVerifierSt
 			FloorPct:          dataplane.UserspaceShimMinVerifierHeadroomPct,
 			SlackToFloorInsns: stats.SlackToFloorInsns(dataplane.UserspaceShimMinVerifierHeadroomPct),
 		},
+		Provenance: provenance,
 	}
 	b, err := json.MarshalIndent(verdict, "", "  ")
 	if err != nil {
