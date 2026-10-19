@@ -2149,7 +2149,7 @@ type IPsecPolicyDef struct {
 // IPsecGateway defines a remote IKE gateway.
 type IPsecGateway struct {
 	Name             string
-	Address          string // remote gateway IP
+	Address          string // remote gateway address(es): comma-joined peer endpoint list when multiple `address` leaves / a bracket or comma list are configured (#15766); consumers split with SplitIPsecEndpointList
 	DynamicHostname  string // dynamic peer IKE identity hostname (expected FQDN identity, NOT a DNS dial address; #14590)
 	ResponderOnly    bool   // dynamic peer (bare `dynamic` or `dynamic hostname`): responder-only (remote_addrs = %any, never initiated)
 	LocalAddress     string // local IP
