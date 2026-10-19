@@ -123,8 +123,8 @@ func formatStructuredMsg(rec EventRecord, protoNum uint8) string {
 	// Split addr:port pairs
 	srcIP, srcPort := splitAddrPort(rec.SrcAddr)
 	dstIP, dstPort := splitAddrPort(rec.DstAddr)
-	natSrcIP, natSrcPort := splitAddrPort(rec.NATSrcAddr)
-	natDstIP, natDstPort := splitAddrPort(rec.NATDstAddr)
+	natSrcIP, natSrcPort := resolveNATAddrPort(rec.NATSrcAddr, srcIP, srcPort)
+	natDstIP, natDstPort := resolveNATAddrPort(rec.NATDstAddr, dstIP, dstPort)
 
 	policyName := rec.PolicyName
 	if policyName == "" {
@@ -328,4 +328,32 @@ func splitAddrPort(addr string) (string, string) {
 		return addr, "0"
 	}
 	return host, port
+}
+
+// resolveNATAddrPort returns the effective post-NAT (ip, port) for structured
+// RT_FLOW messages (#15697). When the wire NAT slot is untranslated (empty, or
+// a zero IP / zero port as the decoders render an absent rewrite), Junos vSRX
+// reports the original pre-NAT address/port for that component. Each
+// component resolves independently: a translated IP with an untranslated
+// port keeps the IP and mirrors the original port, and vice versa. Without
+// this, a non-NAT (or IP-only SNAT) session rendered
+// nat-source-address="0.0.0.0"/"::" nat-source-port="0", which SIEMs read as
+// a distinct bogus tuple instead of the effective one.
+func resolveNATAddrPort(natAddrPort, origIP, origPort string) (string, string) {
+	ip, port := splitAddrPort(natAddrPort)
+	if isZeroIP15697(ip) {
+		ip = origIP
+	}
+	if port == "" || port == "0" {
+		port = origPort
+	}
+	return ip, port
+}
+
+// isZeroIP15697 reports whether ip is the unspecified address ("0.0.0.0" or
+// any spelling of "::"), the placeholder the decoders emit for an absent NAT
+// rewrite. A value that does not parse as an IP is left untouched.
+func isZeroIP15697(ip string) bool {
+	parsed := net.ParseIP(ip)
+	return parsed != nil && parsed.IsUnspecified()
 }
