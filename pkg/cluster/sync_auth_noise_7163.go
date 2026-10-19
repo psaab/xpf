@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -267,8 +268,18 @@ func (s *SessionSync) performNoiseHandshake(conn net.Conn, key []byte, initiator
 	if cs1 == nil || cs2 == nil {
 		return syncNoiseKeysWithPSK{}, errors.New("cluster sync: noise handshake produced no cipher states")
 	}
+	keys := syncNoiseSplitKeys(true, cs1, cs2)
+	// #15140: msg2 verification proves the RESPONDER holds the PSK, but
+	// the responder cannot yet distinguish this live initiator from a
+	// replay of a captured msg1. Send the key confirmation sealed under
+	// the i2r key (our writeKey) over this handshake's channel binding:
+	// only the holder of the msg1 ephemeral private key can derive it.
+	confirm := syncConnectConfirmMAC(keys.writeKey, hs.ChannelBinding())
+	if err := writeMsg(conn, syncMsgAuthConfirm, confirm); err != nil {
+		return syncNoiseKeysWithPSK{}, err
+	}
 	return syncNoiseKeysWithPSK{
-		syncNoiseKeys: syncNoiseSplitKeys(true, cs1, cs2),
+		syncNoiseKeys: keys,
 		matchedPSK:    append([]byte(nil), key...),
 	}, nil
 }
@@ -283,13 +294,36 @@ func (s *SessionSync) performNoiseHandshake(conn net.Conn, key []byte, initiator
 // holding no ring member is rejected after the ring is exhausted — still
 // fail-closed, just widened from one key to the accepted set the heartbeat
 // and fabric gRPC listener already verify against.
-func (s *SessionSync) performNoiseResponderHandshake(conn net.Conn, accepted [][]byte, fabricIdx int) (syncNoiseKeysWithPSK, error) {
+// syncNoisePending is the #15140 PENDING responder result: msg1 verified
+// under a ring key and msg2 written, but the initiator has NOT yet proven
+// it holds the ephemeral private key behind msg1. Keys are derived but
+// must not be installed, recorded, or transmitted under until
+// awaitInitiatorConfirm verifies the key confirmation. A replayed msg1
+// reaches exactly this state and no further.
+type syncNoisePending struct {
+	keys    syncNoiseKeys
+	matched []byte
+	binding []byte
+}
+
+// syncConnectConfirmMAC is the #15140 key confirmation: HMAC-SHA256
+// under the initiator->responder frame key over the connect-confirm tag
+// and the Noise channel binding. Only a peer that completed Split()
+// with the initiator ephemeral private key can produce it.
+func syncConnectConfirmMAC(i2rKey, binding []byte) []byte {
+	mac := hmac.New(sha256.New, i2rKey)
+	mac.Write(syncAuthConfirmTag)
+	mac.Write(binding)
+	return mac.Sum(nil)
+}
+
+func (s *SessionSync) performNoiseResponderHandshake(conn net.Conn, accepted [][]byte, fabricIdx int) (syncNoisePending, error) {
 	typ, payload, err := readSyncFrameRaw(conn)
 	if err != nil {
-		return syncNoiseKeysWithPSK{}, err
+		return syncNoisePending{}, err
 	}
 	if typ != syncMsgAuthHello {
-		return syncNoiseKeysWithPSK{}, fmt.Errorf("cluster sync: expected noise msg1, got frame type %d", typ)
+		return syncNoisePending{}, fmt.Errorf("cluster sync: expected noise msg1, got frame type %d", typ)
 	}
 	var lastErr error
 	for _, candidate := range accepted {
@@ -298,7 +332,7 @@ func (s *SessionSync) performNoiseResponderHandshake(conn net.Conn, accepted [][
 		}
 		hs, err := s.newSyncNoiseState(candidate, false, syncNoisePhaseConnect, fabricIdx)
 		if err != nil {
-			return syncNoiseKeysWithPSK{}, err
+			return syncNoisePending{}, err
 		}
 		if _, _, _, err := hs.ReadMessage(nil, payload); err != nil {
 			lastErr = err
@@ -306,23 +340,50 @@ func (s *SessionSync) performNoiseResponderHandshake(conn net.Conn, accepted [][
 		}
 		msg2, cs1, cs2, err := hs.WriteMessage(nil, nil)
 		if err != nil {
-			return syncNoiseKeysWithPSK{}, fmt.Errorf("cluster sync: noise msg2: %w", err)
+			return syncNoisePending{}, fmt.Errorf("cluster sync: noise msg2: %w", err)
 		}
 		if cs1 == nil || cs2 == nil {
-			return syncNoiseKeysWithPSK{}, errors.New("cluster sync: noise handshake produced no cipher states")
+			return syncNoisePending{}, errors.New("cluster sync: noise handshake produced no cipher states")
 		}
+		keys := syncNoiseSplitKeys(false, cs1, cs2)
+		binding := append([]byte(nil), hs.ChannelBinding()...)
 		if err := writeMsg(conn, syncMsgAuthProof, msg2); err != nil {
-			return syncNoiseKeysWithPSK{}, err
+			return syncNoisePending{}, err
 		}
-		return syncNoiseKeysWithPSK{
-			syncNoiseKeys: syncNoiseSplitKeys(false, cs1, cs2),
-			matchedPSK:    append([]byte(nil), candidate...),
+		// PENDING (#15140): do NOT authenticate here. A captured msg1
+		// re-verifies and reaches this line with no PSK; only the
+		// initiator's key confirmation promotes the connection.
+		return syncNoisePending{
+			keys:    keys,
+			matched: append([]byte(nil), candidate...),
+			binding: binding,
 		}, nil
 	}
 	if lastErr != nil {
-		return syncNoiseKeysWithPSK{}, fmt.Errorf("cluster sync: noise msg1 rejected: %w", lastErr)
+		return syncNoisePending{}, fmt.Errorf("cluster sync: noise msg1 rejected: %w", lastErr)
 	}
-	return syncNoiseKeysWithPSK{}, errors.New("cluster sync: noise msg1 rejected: no accepted key")
+	return syncNoisePending{}, errors.New("cluster sync: noise msg1 rejected: no accepted key")
+}
+
+// awaitInitiatorConfirm is the #15140 responder gate: read exactly one
+// syncMsgAuthConfirm frame and verify it against the pending keys.
+// Silence, a wrong frame type, or a bad MAC all fail closed.
+func (s *SessionSync) awaitInitiatorConfirm(conn net.Conn, pending syncNoisePending) (syncNoiseKeysWithPSK, error) {
+	typ, payload, err := readSyncFrameRaw(conn)
+	if err != nil {
+		return syncNoiseKeysWithPSK{}, fmt.Errorf("cluster sync: noise key confirmation not received: %w", err)
+	}
+	if typ != syncMsgAuthConfirm {
+		return syncNoiseKeysWithPSK{}, fmt.Errorf("cluster sync: expected noise key confirmation, got frame type %d", typ)
+	}
+	want := syncConnectConfirmMAC(pending.keys.readKey, pending.binding)
+	if len(payload) != len(want) || !hmac.Equal(payload, want) {
+		return syncNoiseKeysWithPSK{}, errors.New("cluster sync: noise key confirmation rejected")
+	}
+	return syncNoiseKeysWithPSK{
+		syncNoiseKeys: pending.keys,
+		matchedPSK:    pending.matched,
+	}, nil
 }
 
 // newSyncNoiseState builds the Noise_NNpsk0 handshake state both exchanges run

@@ -264,6 +264,7 @@ func liveSyncMessageTypesExcept(under int) []syncMessageType {
 		{syncMsgFailoverBatchCommitAck, "FailoverBatchCommitAck"}, {syncMsgHeartbeatAck, "HeartbeatAck"},
 		{syncMsgDHCPLeaseV4, "DHCPLeaseV4"}, {syncMsgDHCPLeaseV6, "DHCPLeaseV6"},
 		{syncMsgAuthHello, "AuthHello"}, {syncMsgAuthProof, "AuthProof"},
+		{syncMsgAuthConfirm, "AuthConfirm"},
 		{syncMsgConfigApplyNack, "ConfigApplyNack"},
 		{syncMsgConfigApplyAck, "ConfigApplyAck"},
 		{syncMsgPeerCapabilities, "PeerCapabilities"},

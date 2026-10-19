@@ -66,7 +66,7 @@ var syncMagic = [4]byte{'B', 'P', 'S', 'Y'}
 // change does not touch — a second, unnecessary failure on top of the one this
 // change genuinely costs. #7925 split the counters precisely so a session-wire
 // change stops dragging the HA protocol out from under its own compat floor.
-const SessionSyncWireVersion = uint16(2)
+const SessionSyncWireVersion = uint16(3)
 
 const (
 	syncMsgSessionV4         = 1

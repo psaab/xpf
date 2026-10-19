@@ -76,6 +76,13 @@ const (
 	// for the current census.
 	syncMsgAuthHello = 27 // Noise_NNpsk0 handshake msg1 (raw; see performNoiseHandshake)
 	syncMsgAuthProof = 28 // Noise_NNpsk0 handshake msg2 (raw; see performNoiseHandshake)
+	// syncMsgAuthConfirm is the #15140 initiator key-confirmation: the
+	// third PRE-INSTALL handshake frame. Payload is HMAC-SHA256 under the
+	// initiator->responder frame key over syncAuthConfirmTag || channel
+	// binding. Value 44 is the first unused number above the post-install
+	// census (43); it is phase-separated like 27/28 and has no
+	// post-install receive arm.
+	syncMsgAuthConfirm = 44
 )
 
 const (
@@ -114,6 +121,11 @@ var (
 	// Without the tag a confirmation and a frame seal would be two HMACs under
 	// one key over attacker-influenced input.
 	syncAuthUpgradeConfirmTag = []byte("xpf-cluster-sync-upgrade-confirm-v1\x00")
+
+	// syncAuthConfirmTag separates the #15140 connect key-confirmation MAC
+	// from the frame seal and the #6628 upgrade confirm, which are keyed
+	// by the same directional key.
+	syncAuthConfirmTag = []byte("xpf-cluster-sync-connect-confirm-v1\x00")
 )
 
 var (
@@ -475,6 +487,14 @@ func readSyncFrameRaw(conn net.Conn) (typ uint8, payload []byte, err error) {
 // The initiator writes its Noise msg1 before reading the responder's msg2; the
 // responder reads msg1 before writing msg2. This role order avoids deadlock on
 // a fully-synchronous transport (net.Pipe in tests).
+//
+// #15140: after msg2 the initiator sends a mandatory key confirmation
+// (syncMsgAuthConfirm, HMAC under the i2r key over the channel binding)
+// and the responder remains PENDING until it verifies. A byte-identical
+// replay of a captured msg1 therefore never reaches installConn, never
+// records an authenticated peer, and reads nothing beyond msg2. This is
+// a flag-day wire change: SessionSyncWireVersion is bumped 2 -> 3 so a
+// mixed pair is refused up front rather than failing every handshake.
 func (s *SessionSync) performSyncHandshake(conn net.Conn, initiator bool, fabricIdx int) (syncAuthMode, syncNoiseKeysWithPSK, error) {
 	accepted := s.authAcceptedKeys()
 	if len(accepted) == 0 {
@@ -520,14 +540,25 @@ func (s *SessionSync) performSyncHandshake(conn net.Conn, initiator bool, fabric
 		}
 		result, err = s.performNoiseHandshake(conn, signing, true, fabricIdx)
 	} else {
-		result, err = s.performNoiseResponderHandshake(conn, accepted, fabricIdx)
+		// #15140: the responder is PENDING after msg2. A replayed msg1
+		// verifies under the ring and elicits msg2 with no PSK, so msg2
+		// alone must never record or install. Only a valid initiator
+		// key confirmation (which needs the msg1 ephemeral private key)
+		// promotes the connection to authenticated.
+		var pending syncNoisePending
+		pending, err = s.performNoiseResponderHandshake(conn, accepted, fabricIdx)
+		if err == nil {
+			result, err = s.awaitInitiatorConfirm(conn, pending)
+		}
 	}
 	if err != nil {
 		return syncAuthUnauthenticated, syncNoiseKeysWithPSK{}, err
 	}
-	// The Noise handshake proves that the peer holds a control-link PSK in
-	// the accepted ring. This also arms the fabric gRPC downgrade guard
-	// when the selected transport is fabric and no control-link heartbeat
+	// The completed handshake — including, on the responder, the #15140
+	// key confirmation — proves the peer holds a control-link PSK in
+	// the accepted ring and (responder side) actually holds the msg1
+	// ephemeral. This also arms the fabric gRPC downgrade guard when
+	// the selected transport is fabric and no control-link heartbeat
 	// is running.
 	s.recordAuthenticatedPeer()
 	return syncAuthAuthenticated, result, nil
