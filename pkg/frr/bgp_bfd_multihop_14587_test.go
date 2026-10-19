@@ -99,9 +99,11 @@ func TestBGPBFDMultihopProfile14587(t *testing.T) {
 		t.Errorf("ebgp-multihop must not render orphan single-hop peer, got:\n%s", gotEBGP)
 	}
 
-	// Control: iBGP neighbor WITHOUT update-source is still multihop
-	// (bgpd keys iBGP non-shared-network as multihop) — profile bound,
-	// peer keyed multihop without a local-address clause.
+	// Control (flipped by #15135/A89-03): iBGP neighbor WITHOUT
+	// update-source is multihop-classified, so the profile is still
+	// bound (timers reach bgpd's dynamic session) — but NO static peer
+	// line is rendered: the bare `peer X multihop` the pre-#15135 code
+	// emitted is rejected by bfdd 10.7.1 and fails every frr-reload.
 	ibgpNoSrc := &config.BGPConfig{
 		LocalAS: 65000,
 		Neighbors: []*config.BGPNeighbor{
@@ -112,11 +114,8 @@ func TestBGPBFDMultihopProfile14587(t *testing.T) {
 	if !strings.Contains(gotNoSrc, " neighbor 10.255.0.9 bfd profile "+bfdProfileName(400, 5)+"\n") {
 		t.Errorf("iBGP without update-source must still bind profile, got:\n%s", gotNoSrc)
 	}
-	if !strings.Contains(gotNoSrc, " peer 10.255.0.9 multihop\n") {
-		t.Errorf("iBGP without update-source peer must be keyed multihop, got:\n%s", gotNoSrc)
-	}
-	if strings.Contains(gotNoSrc, " peer 10.255.0.9\n") {
-		t.Errorf("iBGP without update-source must not render orphan peer, got:\n%s", gotNoSrc)
+	if strings.Contains(gotNoSrc, " peer 10.255.0.9") {
+		t.Errorf("iBGP without update-source must not render a static peer (#15135), got:\n%s", gotNoSrc)
 	}
 
 	// Control: multihop neighbor with NO explicit timers still binds the
@@ -134,5 +133,92 @@ func TestBGPBFDMultihopProfile14587(t *testing.T) {
 	}
 	if !strings.Contains(gotDef, " peer 10.255.0.12 multihop local-address 10.255.0.1\n") {
 		t.Errorf("multihop default-timer peer must be keyed multihop, got:\n%s", gotDef)
+	}
+}
+
+// #15135 (A89-03): a multihop peer keyed without a valid local-address
+// renders the bare line `peer X multihop`, which bfdd 10.7.1 rejects —
+// frr-reload.py exits 1 and every commit fails to converge. The static
+// peer must be omitted entirely (bgpd's own dynamic session keeps the
+// timers through the bound profile); a directly-connected peer must
+// never see the invalid line.
+//
+// FAIL-ON-REVERT: restoring the unconditional multihop peer emission
+// makes the bare-`multihop` assertions below RED.
+func TestBGPBFDMultihopNoLocalAddress15135(t *testing.T) {
+	m := New()
+
+	// (a) iBGP without local-address: profile still bound (timers reach
+	// bgpd's dynamic session), but NO static peer line at all — neither
+	// the invalid bare `peer X multihop` nor an orphan single-hop peer.
+	ibgpNoSrc := &config.BGPConfig{
+		LocalAS: 65000,
+		Neighbors: []*config.BGPNeighbor{
+			{Address: "10.255.0.9", PeerAS: 65000, BFD: true, BFDInterval: 400, BFDMultiplier: 5},
+		},
+	}
+	got := m.generateProtocols(nil, nil, ibgpNoSrc, nil, nil, "", 0, nil, nil)
+	if !strings.Contains(got, " neighbor 10.255.0.9 bfd profile "+bfdProfileName(400, 5)+"\n") {
+		t.Errorf("iBGP without local-address must still bind profile, got:\n%s", got)
+	}
+	if strings.Contains(got, " peer 10.255.0.9") {
+		t.Errorf("iBGP without local-address must not render any static peer line, got:\n%s", got)
+	}
+	if strings.Contains(got, "multihop\n") {
+		t.Errorf("render must never contain a bare `peer X multihop` line, got:\n%s", got)
+	}
+
+	// (b) eBGP-multihop without local-address: same rule.
+	ebgpNoSrc := &config.BGPConfig{
+		LocalAS: 65000,
+		Neighbors: []*config.BGPNeighbor{
+			{Address: "192.0.2.10", PeerAS: 65001, MultihopTTL: 5, BFD: true, BFDInterval: 500, BFDMultiplier: 4},
+		},
+	}
+	gotEBGP := m.generateProtocols(nil, nil, ebgpNoSrc, nil, nil, "", 0, nil, nil)
+	if !strings.Contains(gotEBGP, " neighbor 192.0.2.10 bfd profile "+bfdProfileName(500, 4)+"\n") {
+		t.Errorf("ebgp-multihop without local-address must still bind profile, got:\n%s", gotEBGP)
+	}
+	if strings.Contains(gotEBGP, " peer 192.0.2.10") {
+		t.Errorf("ebgp-multihop without local-address must not render any static peer line, got:\n%s", gotEBGP)
+	}
+
+	// (c) iBGP with an INVALID (whitespace-bearing, persisted pre-gate)
+	// local-address: the single-token belt drops the update-source line,
+	// so the peer has no valid local-address either — same omission.
+	ibgpBadSrc := &config.BGPConfig{
+		LocalAS: 65000,
+		Neighbors: []*config.BGPNeighbor{
+			{Address: "10.255.0.11", PeerAS: 65000, LocalAddress: "10.255.0.1 POISON", BFD: true, BFDInterval: 400, BFDMultiplier: 5},
+		},
+	}
+	gotBad := m.generateProtocols(nil, nil, ibgpBadSrc, nil, nil, "", 0, nil, nil)
+	if strings.Contains(gotBad, " peer 10.255.0.11") {
+		t.Errorf("iBGP with invalid local-address must not render any static peer line, got:\n%s", gotBad)
+	}
+
+	// (d) VRF-scoped iBGP without local-address: no `peer X vrf ... multihop`
+	// either — the accumulator is shared across instances.
+	vrfPeer := bfdPeer{address: "10.255.0.20", vrfName: "vrf-blue", interval: 400, multiplier: 5, multihop: true}
+	s := newBFDSection()
+	s.addPeer(vrfPeer)
+	if strings.Contains(s.render(), " peer 10.255.0.20") {
+		t.Errorf("VRF multihop peer without local-address must be omitted, got:\n%s", s.render())
+	}
+
+	// Control: VRF multihop WITH a valid local-address still renders
+	// the full keyed line.
+	s2 := newBFDSection()
+	s2.addPeer(bfdPeer{address: "10.255.0.21", vrfName: "vrf-blue", interval: 400, multiplier: 5, multihop: true, localAddress: "10.255.0.1"})
+	wantLine := " peer 10.255.0.21 vrf vrf-blue multihop local-address 10.255.0.1\n"
+	if !strings.Contains(s2.render(), wantLine) {
+		t.Errorf("VRF multihop peer with local-address must render %q, got:\n%s", wantLine, s2.render())
+	}
+
+	// Control: single-hop (non-multihop) bare peer is untouched.
+	s3 := newBFDSection()
+	s3.addPeer(bfdPeer{address: "192.0.2.30", interval: 300, multiplier: 3})
+	if !strings.Contains(s3.render(), " peer 192.0.2.30\n") {
+		t.Errorf("single-hop control must keep bare peer line, got:\n%s", s3.render())
 	}
 }
