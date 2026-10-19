@@ -115,6 +115,70 @@ fn select_mirror_config_falls_back_to_parent_ifindex() {
 }
 
 #[test]
+fn unit0_scoped_mirror_does_not_match_tagged_sibling_15113() {
+    // #15113 (A75-01) v28 cell: a unit-0 row on bind port 11 must
+    // return None for VID 100 and Some for VID 0, while a bare
+    // physical row on the same port matches every VID.
+    let mut forwarding = ForwardingState::default();
+    forwarding.ingress_logical_ifindex.insert((11, 0), 11);
+    forwarding.ingress_logical_ifindex.insert((11, 100), 11100);
+    forwarding.mirror_configs_scoped.insert(
+        (11, 0),
+        MirrorRuntimeConfig {
+            output_ifindex: 22,
+            rate: 0,
+        },
+    );
+    let mut counter = 0;
+    assert_eq!(
+        select_mirror_config(&forwarding, 11, 100, &mut counter),
+        None,
+        "unit-0 scoped row must not mirror tagged sibling VID 100"
+    );
+    assert_eq!(
+        select_mirror_config(&forwarding, 11, 0, &mut counter),
+        Some(MirrorRuntimeConfig {
+            output_ifindex: 22,
+            rate: 0
+        })
+    );
+    // Bare physical control: same port, unscoped row matches VID 100.
+    let mut bare = ForwardingState::default();
+    bare.ingress_logical_ifindex.insert((11, 100), 11100);
+    bare.mirror_configs.insert(
+        11,
+        MirrorRuntimeConfig {
+            output_ifindex: 22,
+            rate: 0,
+        },
+    );
+    assert_eq!(
+        select_mirror_config(&bare, 11, 100, &mut counter),
+        Some(MirrorRuntimeConfig {
+            output_ifindex: 22,
+            rate: 0
+        })
+    );
+    // Tagged-unit control: scoped VID 100 matches only VID 100.
+    let mut tagged = ForwardingState::default();
+    tagged.mirror_configs_scoped.insert(
+        (11, 100),
+        MirrorRuntimeConfig {
+            output_ifindex: 22,
+            rate: 0,
+        },
+    );
+    assert_eq!(
+        select_mirror_config(&tagged, 11, 100, &mut counter),
+        Some(MirrorRuntimeConfig {
+            output_ifindex: 22,
+            rate: 0
+        })
+    );
+    assert_eq!(select_mirror_config(&tagged, 11, 0, &mut counter), None);
+}
+
+#[test]
 fn cross_binding_inject_preserves_full_frame() {
     let mut bindings = vec![
         BindingWorker::new_for_mirror_test(0, 0, 11, 0),
@@ -910,6 +974,8 @@ fn sampled_live_mirror_resolves_snapshot_logical_ingress_and_output() {
             ingress_ifindex: 20080,
             output_ifindex: 200,
             rate: 0,
+            ingress_vlan_id: 0,
+            unit_scoped: false,
         }],
         ..ConfigSnapshot::default()
     };

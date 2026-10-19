@@ -58,11 +58,22 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 		return nil, nil
 	}
 	ifindexByName := make(map[string]int, len(interfaces))
+	// #15113: unit identity of the row a name resolves to. A unit row
+	// (IsUnit) is unit-scoped with its VLANID; a base row is the bare
+	// physical input. Unit 0 (VLANID 0) shares the base ifindex, so the
+	// ifindex alone cannot distinguish `ge-0/0/1.0` from `ge-0/0/1`.
+	type mirrorIngressScope struct {
+		vlanID     int
+		unitScoped bool
+	}
+	scopeByName := make(map[string]mirrorIngressScope, len(interfaces))
 	for _, iface := range interfaces {
 		if iface.Ifindex > 0 {
 			ifindexByName[iface.Name] = iface.Ifindex
+			scopeByName[iface.Name] = mirrorIngressScope{vlanID: iface.VLANID, unitScoped: iface.IsUnit}
 			if iface.LinuxName != "" {
 				ifindexByName[iface.LinuxName] = iface.Ifindex
+				scopeByName[iface.LinuxName] = mirrorIngressScope{vlanID: iface.VLANID, unitScoped: iface.IsUnit}
 			}
 		}
 	}
@@ -73,7 +84,15 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 	}
 	sort.Strings(instanceNames)
 
-	seenIngress := make(map[int]string)
+	// #15113: duplicate ownership is per (ifindex, vlan, unit-scoped), so
+	// a bare physical input and a unit-0 input on the same ifindex are
+	// distinct rows (the Rust resolver prefers the unit row for VID 0).
+	type mirrorIngressKey struct {
+		ifindex    int
+		vlanID     int
+		unitScoped bool
+	}
+	seenIngress := make(map[mirrorIngressKey]string)
 	out := make([]MirrorConfigSnapshot, 0)
 	var excluded []MirrorExclusion
 	for _, name := range instanceNames {
@@ -115,8 +134,10 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 
 		for _, input := range inst.Input {
 			ingressIfindex := ifindexByName[input]
+			scope, scopeOK := scopeByName[input]
 			if ingressIfindex <= 0 {
 				ingressIfindex = ifindexByName[config.LinuxIfName(input)]
+				scope, scopeOK = scopeByName[config.LinuxIfName(input)]
 			}
 			if ingressIfindex <= 0 {
 				slog.Warn("port-mirroring input interface not found",
@@ -128,9 +149,11 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 				})
 				continue
 			}
-			if previous, ok := seenIngress[ingressIfindex]; ok {
-				// One output per ingress ifindex: the first instance (sorted
-				// by name) owns it. Skip the conflicting entry, keep the rest.
+			if !scopeOK {
+				scope = mirrorIngressScope{}
+			}
+			key := mirrorIngressKey{ifindex: ingressIfindex, vlanID: scope.vlanID, unitScoped: scope.unitScoped}
+			if previous, ok := seenIngress[key]; ok {
 				slog.Warn("port-mirroring: skipping duplicate ingress interface (one output per ingress interface)",
 					"name", name, "interface", input, "ifindex", ingressIfindex, "owner", previous)
 				excluded = append(excluded, MirrorExclusion{
@@ -140,11 +163,13 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 				})
 				continue
 			}
-			seenIngress[ingressIfindex] = name
+			seenIngress[key] = name
 			out = append(out, MirrorConfigSnapshot{
 				IngressIfindex: ingressIfindex,
 				OutputIfindex:  outputIfindex,
 				Rate:           uint32(inst.InputRate),
+				IngressVLANID:  scope.vlanID,
+				UnitScoped:     scope.unitScoped,
 			})
 		}
 	}

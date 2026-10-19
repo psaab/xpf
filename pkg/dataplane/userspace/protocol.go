@@ -414,7 +414,11 @@ const (
 	// the fail-closed poison for a DNAT rule with a poisoned or unready
 	// address-name closure. An old helper ignores it and keeps translating
 	// the resolvable subset (or exempting via `off`), which is the defect.
-	ProtocolVersion = 52
+	// v52 -> v53 (#15113): MirrorConfigSnapshot carries ingress_vlan_id +
+	// unit_scoped. A v52 helper ignores them and keys the mirror table by
+	// the shared base ifindex alone, so a unit-0 input mirrors every
+	// tagged sibling unit on the port to the analyzer — the defect.
+	ProtocolVersion = 53
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -1490,6 +1494,15 @@ type MirrorConfigSnapshot struct {
 	IngressIfindex int    `json:"ingress_ifindex"`
 	OutputIfindex  int    `json:"output_ifindex"`
 	Rate           uint32 `json:"rate"`
+	// IngressVLANID is the unit scope of the ingress (#15113): the
+	// configured VLAN id of the named unit (0 for an untagged unit 0 or
+	// a bare physical input). UnitScoped distinguishes the two: a
+	// unit-scoped row matches only its own VID (or the native VID
+	// resolved for VID 0), while a bare physical row matches every
+	// unit on the bind port. Without the distinction, a unit-0 row
+	// keyed by the shared base ifindex mirrored every tagged sibling.
+	IngressVLANID int  `json:"ingress_vlan_id"`
+	UnitScoped    bool `json:"unit_scoped"`
 }
 
 type InterfaceAddressSnapshot struct {

@@ -572,6 +572,11 @@ pub(in crate::afxdp) struct ForwardingState {
     // removed. Flow export is owned by the Go control plane (pkg/flowexport);
     // the dataplane emits no flow records.
     pub(in crate::afxdp) mirror_configs: FastMap<i32, MirrorRuntimeConfig>,
+    /// #15113: unit-scoped mirror rows keyed by (bind_ifindex, vlan_id).
+    /// A row here matches only that VID (VID 0 covers untagged/native);
+    /// it is consulted before the bare `mirror_configs` fallback so a
+    /// unit-0 input never mirrors tagged siblings on the same port.
+    pub(in crate::afxdp) mirror_configs_scoped: FastMap<(i32, u16), MirrorRuntimeConfig>,
     pub(in crate::afxdp) tcp_mss_all_tcp: u16,
     pub(in crate::afxdp) tcp_mss_ipsec_vpn: u16,
     pub(in crate::afxdp) tcp_mss_gre_in: u16,

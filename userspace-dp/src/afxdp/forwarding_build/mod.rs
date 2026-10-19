@@ -926,13 +926,18 @@ fn build_fallible_forwarding_state(
         if mirror.ingress_ifindex <= 0 || mirror.output_ifindex <= 0 {
             continue;
         }
-        state.mirror_configs.insert(
-            mirror.ingress_ifindex,
-            MirrorRuntimeConfig {
-                output_ifindex: mirror.output_ifindex,
-                rate: mirror.rate,
-            },
-        );
+        let cfg = MirrorRuntimeConfig {
+            output_ifindex: mirror.output_ifindex,
+            rate: mirror.rate,
+        };
+        if mirror.unit_scoped {
+            let vid = u16::try_from(mirror.ingress_vlan_id).unwrap_or(0);
+            state
+                .mirror_configs_scoped
+                .insert((mirror.ingress_ifindex, vid), cfg);
+        } else {
+            state.mirror_configs.insert(mirror.ingress_ifindex, cfg);
+        }
     }
 
     // === Late-stage local-delivery additions ===========================
