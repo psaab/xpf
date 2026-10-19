@@ -113,6 +113,9 @@ func TestL2FamilyBindingsRejected15654(t *testing.T) {
 		{"es sample hier", func(t *testing.T) *ConfigTree {
 			return hierTree(t, "interfaces { ge-0/0/0 { unit 0 { family ethernet-switching { sample { input; } } } } }")
 		}, []string{"#15654", "ethernet-switching", "sample input"}},
+		{"es sample flat", func(t *testing.T) *ConfigTree {
+			return flatTreeFromSets(t, "set interfaces ge-0/0/0 unit 0 family ethernet-switching sample input")
+		}, []string{"#15654", "ethernet-switching", "sample input"}},
 		{"ccc policer flat", func(t *testing.T) *ConfigTree {
 			return flatTreeFromSets(t, "set interfaces ge-0/0/0 unit 0 family ccc policer output p1")
 		}, []string{"#15654", "ccc", "policer output"}},
