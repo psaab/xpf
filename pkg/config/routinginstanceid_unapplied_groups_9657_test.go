@@ -509,30 +509,25 @@ func TestTableIDGateCountsAnExclusionExpansionDoesNotHonour_9657(t *testing.T) {
 	}
 }
 
-// compileConfigWithOpts retries a failed "${node}" expansion with node0 on the
-// SAME, already-expanded tree. A group applied before the failure can therefore
-// add a node0 group that neither a fresh generic expansion nor a fresh node0
-// expansion sees. The generic view mirrors the retry, so what lands is counted.
+// #15031: the generic compile no longer retries a failed "${node}"
+// expansion on the SAME, already-expanded tree — it expands atomically
+// with node0 vars. A group applied before the (former) failure point
+// can therefore no longer inject a `groups node0` definition that the
+// retry alone would apply: the atomic expansion collects group
+// definitions before any group is applied, so `inj`'s nested
+// `groups node0` never becomes a definition, node0 is undefined, and
+// the compile refuses — exactly as a fresh node0 expansion does. The
+// generic view mirrors that single expansion, so nothing extra lands
+// and no collision is invented.
 func TestTableIDGateMirrorsTheGenericNodeRetry_9657(t *testing.T) {
 	assertFixtureCollides9657(t)
 	text := "groups {\n    inj {\n        groups {\n            node0 {\n                " + braced116_9657 +
 		"            }\n        }\n    }\n}\napply-groups [ inj \"${node}\" ];\n" + activeRI7_9657
-	cfg, err := compile9657(t, text, true)
-	if err != nil {
-		t.Fatalf("fixture: the lenient compile must succeed through the node0 retry: %v", err)
+	if _, err := compile9657(t, text, true); err == nil || !strings.Contains(err.Error(), `undefined group "node0"`) {
+		t.Fatalf("fixture: the atomic generic expansion must refuse the injected groups definition: %v", err)
 	}
-	quarantined := false
-	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "QUARANTINED") {
-			quarantined = true
-		}
-	}
-	if !quarantined {
-		t.Fatalf("fixture: the retry must land the injected ri116 beside ri7 and quarantine one; instances=%v warnings=%v",
-			riNames9657(cfg), cfg.Warnings)
-	}
-	if _, err := compile9657(t, text, false); err == nil || !strings.Contains(err.Error(), "table-id collision") {
-		t.Errorf("#9657: the generic retry lands ri116, so the collision must be refused on the strict path, got %v", err)
+	if _, err := compile9657(t, text, false); err == nil || !strings.Contains(err.Error(), `undefined group "node0"`) {
+		t.Errorf("#15031: the generic expansion is the fresh node0 expansion, so the injected node0 group must be refused, got %v", err)
 	}
 }
 
