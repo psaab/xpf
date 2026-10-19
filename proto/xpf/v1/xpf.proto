@@ -707,6 +707,10 @@ message NATDestInfo {
   // back-compat. Additive: an older client that does not read this decodes
   // it as empty and behaves exactly as before.
   repeated uint32 dst_ports = 11;
+  // #15269 C09-01: the enforced source-address match
+  // (natshow.RuleMatchSource; 0.0.0.0/0 when unscoped). Additive:
+  // older clients decode it as empty.
+  string source_match = 12;
 }
 
 message GetScreenRequest {}

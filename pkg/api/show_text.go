@@ -289,10 +289,12 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 						// restore/peer-sync loads.
 						continue
 					}
+					// #15269 C09-03: shared suffix (src-port/icmp/timeout) with gRPC twin.
 					fmt.Fprintf(&buf, "  %-20s proto=%-6s", name, app.Protocol)
 					if app.DestinationPort != "" {
 						fmt.Fprintf(&buf, " dst-port=%s", app.DestinationPort)
 					}
+					buf.WriteString(config.ApplicationTermSuffix(app))
 					buf.WriteString("\n")
 				}
 			}

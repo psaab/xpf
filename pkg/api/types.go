@@ -556,9 +556,11 @@ type NATDestInfo struct {
 	// #15226: the COMPLETE destination-port match set (sorted, valid
 	// 1..65535 ports only). dst_port keeps the first port for back-compat;
 	// a multi-port or port-range rule must not be understated as it.
-	DstPorts      []uint32 `json:"dst_ports,omitempty"`
-	TranslateIP   string   `json:"translate_ip"`
-	TranslatePort uint16   `json:"translate_port,omitempty"`
+	DstPorts []uint32 `json:"dst_ports,omitempty"`
+	// #15269 C09-01: enforced source-address match (0.0.0.0/0 unscoped).
+	SourceMatch   string `json:"source_match"`
+	TranslateIP   string `json:"translate_ip"`
+	TranslatePort uint16 `json:"translate_port,omitempty"`
 	// #7473: the snapshot builder's fail-closed verdict. NotInstalled true
 	// means every other field here is CONFIGURATION, not live state — a hit
 	// counter's zero then means "not armed", not "no traffic matched".

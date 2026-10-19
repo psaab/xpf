@@ -776,6 +776,8 @@ func (c *CLI) showNATDestination(cfg *config.Config, args []string) error {
 				len(rule.Match.DestinationAddressNames) > 0 {
 				fmt.Printf("    Match destination-address: %s\n", match)
 			}
+			// #15269 C09-01: enforced source match (0.0.0.0/0 when unscoped).
+			fmt.Printf("    Match source-address: %s\n", natshow.RuleMatchSource(rule))
 			if ports := natshow.RuleMatchDestPortsText(rule); ports != "" {
 				fmt.Printf("    Match destination-port: %s\n", ports)
 			}
@@ -1067,6 +1069,7 @@ func (c *CLI) showNATDestinationRuleSet(cfg *config.Config, rsName string) error
 			// destination rule rendered as 0.0.0.0/0 here too (#7363).
 			dstMatch := natshow.RuleMatchDestination(rule)
 			fmt.Printf("    Match destination-address: %s\n", dstMatch)
+			fmt.Printf("    Match source-address: %s\n", natshow.RuleMatchSource(rule))
 			excludedReason := destNATRuleNotInstalled(cfg, rule)
 			if line := natNotInstalledLine(excludedReason, false); line != "" {
 				fmt.Println("  " + line)
@@ -1117,7 +1120,7 @@ func (c *CLI) showNATDestinationRuleAll(cfg *config.Config) error {
 
 			fmt.Printf("Rule-set: %-20s Rule: %-12s from %s  Action: %s\n",
 				rs.Name, rule.Name, natshow.NATScopeLabelCLI(rs, true), action)
-			fmt.Printf("  Match: destination %s\n", dstMatch)
+			fmt.Printf("  Match: source %s destination %s\n", natshow.RuleMatchSource(rule), dstMatch)
 			// #7473: same archetype on the destination family.
 			excludedReason := destNATRuleNotInstalled(cfg, rule)
 			if line := natNotInstalledLine(excludedReason, false); line != "" {

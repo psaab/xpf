@@ -4665,7 +4665,11 @@ type NATDestInfo struct {
 	// understated as its first port. dst_port above keeps the first port for
 	// back-compat. Additive: an older client that does not read this decodes
 	// it as empty and behaves exactly as before.
-	DstPorts      []uint32 `protobuf:"varint,11,rep,packed,name=dst_ports,json=dstPorts,proto3" json:"dst_ports,omitempty"`
+	DstPorts []uint32 `protobuf:"varint,11,rep,packed,name=dst_ports,json=dstPorts,proto3" json:"dst_ports,omitempty"`
+	// #15269 C09-01: the enforced source-address match
+	// (natshow.RuleMatchSource; 0.0.0.0/0 when unscoped). Additive:
+	// older clients decode it as empty.
+	SourceMatch   string `protobuf:"bytes,12,opt,name=source_match,json=sourceMatch,proto3" json:"source_match,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4775,6 +4779,13 @@ func (x *NATDestInfo) GetDstPorts() []uint32 {
 		return x.DstPorts
 	}
 	return nil
+}
+
+func (x *NATDestInfo) GetSourceMatch() string {
+	if x != nil {
+		return x.SourceMatch
+	}
+	return ""
 }
 
 type GetScreenRequest struct {
@@ -10164,7 +10175,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\x19GetNATDestinationResponse\x12)\n" +
 	"\x05rules\x18\x01 \x03(\v2\x13.xpf.v1.NATDestInfoR\x05rules\x12:\n" +
 	"\x19total_active_translations\x18\x02 \x01(\x05R\x17totalActiveTranslations\x12F\n" +
-	"\x11rule_set_sessions\x18\x03 \x03(\v2\x1a.xpf.v1.NATRuleSetSessionsR\x0fruleSetSessions\"\x8d\x03\n" +
+	"\x11rule_set_sessions\x18\x03 \x03(\v2\x1a.xpf.v1.NATRuleSetSessionsR\x0fruleSetSessions\"\xb0\x03\n" +
 	"\vNATDestInfo\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x19\n" +
 	"\bdst_addr\x18\x02 \x01(\tR\adstAddr\x12\x19\n" +
@@ -10177,7 +10188,8 @@ const file_xpf_proto_rawDesc = "" +
 	"\x0efrom_interface\x18\t \x01(\tR\rfromInterface\x122\n" +
 	"\x15from_routing_instance\x18\n" +
 	" \x01(\tR\x13fromRoutingInstance\x12\x1b\n" +
-	"\tdst_ports\x18\v \x03(\rR\bdstPorts\"\x12\n" +
+	"\tdst_ports\x18\v \x03(\rR\bdstPorts\x12!\n" +
+	"\fsource_match\x18\f \x01(\tR\vsourceMatch\"\x12\n" +
 	"\x10GetScreenRequest\"A\n" +
 	"\x11GetScreenResponse\x12,\n" +
 	"\ascreens\x18\x01 \x03(\v2\x12.xpf.v1.ScreenInfoR\ascreens\"\xe9\x01\n" +

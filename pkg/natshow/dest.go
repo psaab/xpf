@@ -125,6 +125,8 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 			fmt.Fprintf(w, "    %s\n", natScopeLine(rs, cfg, true))
 			fmt.Fprintf(w, "    Match:\n")
 			fmt.Fprintf(w, "      Destination addresses: %s\n", dstMatch)
+			// #15269 C09-01: dataplane enforces match source-address; show it.
+			fmt.Fprintf(w, "      Source addresses:      %s\n", RuleMatchSource(rule))
 			if ports := RuleMatchDestPortsText(rule); ports != "" {
 				fmt.Fprintf(w, "      Destination port:      %s\n", ports)
 			}

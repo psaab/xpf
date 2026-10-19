@@ -283,30 +283,17 @@ func (c *CLI) showScreenIdsOptionDetail(name string) error {
 		fmt.Printf("  %-45s %-12s %s\n", "TCP SYN flood protection", valueStr(profile.TCP.SynFlood != nil), "disabled")
 		fmt.Printf("  %-45s %-12d %s\n", "  Attack threshold",
 			profile.TCP.SynFlood.AttackThreshold, "200")
-		if profile.TCP.SynFlood.AlarmThreshold > 0 {
-			fmt.Printf("  %-45s %-12d %s\n", "  Alarm threshold",
-				profile.TCP.SynFlood.AlarmThreshold, "512")
-		} else {
-			fmt.Printf("  %-45s %-12s %s\n", "  Alarm threshold", "(default)", "512")
-		}
-		if profile.TCP.SynFlood.SourceThreshold > 0 {
-			fmt.Printf("  %-45s %-12d %s\n", "  Source threshold",
-				profile.TCP.SynFlood.SourceThreshold, "4000")
-		} else {
-			fmt.Printf("  %-45s %-12s %s\n", "  Source threshold", "(default)", "4000")
-		}
-		if profile.TCP.SynFlood.DestinationThreshold > 0 {
-			fmt.Printf("  %-45s %-12d %s\n", "  Destination threshold",
-				profile.TCP.SynFlood.DestinationThreshold, "4000")
-		} else {
-			fmt.Printf("  %-45s %-12s %s\n", "  Destination threshold", "(default)", "4000")
-		}
-		if profile.TCP.SynFlood.Timeout > 0 {
-			fmt.Printf("  %-45s %-12d %s\n", "  Timeout (seconds)",
-				profile.TCP.SynFlood.Timeout, "20")
-		} else {
-			fmt.Printf("  %-45s %-12s %s\n", "  Timeout (seconds)", "(default)", "20")
-		}
+		// #15269 B18-01: unset sub-thresholds are disabled (snapshot
+		// publishes 0; Rust builds no sketch / alarm never trips), not
+		// the Junos default. Timeout shows the effective opening window.
+		fmt.Printf("  %-45s %-12s %s\n", "  Alarm threshold",
+			dpuserspace.SynFloodSubThresholdValue(profile.TCP.SynFlood.AlarmThreshold), dpuserspace.SynFloodSubThresholdDefault(profile.TCP.SynFlood.AlarmThreshold, 512))
+		fmt.Printf("  %-45s %-12s %s\n", "  Source threshold",
+			dpuserspace.SynFloodSubThresholdValue(profile.TCP.SynFlood.SourceThreshold), dpuserspace.SynFloodSubThresholdDefault(profile.TCP.SynFlood.SourceThreshold, 4000))
+		fmt.Printf("  %-45s %-12s %s\n", "  Destination threshold",
+			dpuserspace.SynFloodSubThresholdValue(profile.TCP.SynFlood.DestinationThreshold), dpuserspace.SynFloodSubThresholdDefault(profile.TCP.SynFlood.DestinationThreshold, 4000))
+		fmt.Printf("  %-45s %-12d %s\n", "  Timeout (seconds)",
+			dpuserspace.EffectiveSynFloodTimeout(profile, cfg), "20")
 	} else {
 		fmt.Printf("  %-45s %-12s %s\n", "TCP SYN flood protection", "disabled", "disabled")
 	}
