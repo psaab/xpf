@@ -35,6 +35,12 @@ func TestValidateVRFOverlapWarningCap_5194(t *testing.T) {
 
 	// Two filters so the terms land in two distinct routing-instances.
 	cfg := &Config{}
+	cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*InterfaceUnit{
+			0: {Number: 0, FilterInputV4: "fa"},
+			1: {Number: 1, FilterInputV4: "fb"},
+		}},
+	}
 	cfg.Firewall.FiltersInet = map[string]*FirewallFilter{
 		"fa": {Name: "fa", Terms: mkTerms("vrfA")},
 		"fb": {Name: "fb", Terms: mkTerms("vrfB")},
@@ -62,6 +68,12 @@ func TestValidateVRFOverlapWarningCap_5194(t *testing.T) {
 // with no truncation notice appended.
 func TestValidateVRFOverlapUnderCapNoTruncation_5194(t *testing.T) {
 	cfg := &Config{}
+	cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*InterfaceUnit{
+			0: {Number: 0, FilterInputV4: "fa"},
+			1: {Number: 1, FilterInputV4: "fb"},
+		}},
+	}
 	cfg.Firewall.FiltersInet = map[string]*FirewallFilter{
 		"fa": {Name: "fa", Terms: []*FirewallFilterTerm{
 			{Name: "a", RoutingInstance: "vrfA", SourceAddresses: []string{"10.0.0.0/24"}},

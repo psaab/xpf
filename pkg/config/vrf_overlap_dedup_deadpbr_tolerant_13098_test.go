@@ -40,6 +40,10 @@ func TestVRFOverlapNativeDoesNotMaskSteered_13098(t *testing.T) {
 		"set firewall family inet filter f1 term t1 from source-address 10.0.0.0/24",
 		"set firewall family inet filter f1 term t1 then routing-instance riA",
 		"set firewall family inet filter f2 term t1 then routing-instance riB",
+		"set interfaces ge-0/0/1 unit 0 family inet address 192.168.98.1/24",
+		"set interfaces ge-0/0/1 unit 0 family inet filter input f1",
+		"set interfaces ge-0/0/2 unit 0 family inet address 192.168.99.1/24",
+		"set interfaces ge-0/0/2 unit 0 family inet filter input f2",
 	})
 	if _, err := CompileConfig(tree); err == nil {
 		t.Fatal("strict compile accepted cross-filter PBR overlap: native 10.0.0.0/24 on riA masked the f1 steered claim, blinding the #9809 steeredAll check against f2 match-all into riB (#13098)")
@@ -55,6 +59,10 @@ func TestVRFOverlapNativeDoesNotMaskSteered_13098(t *testing.T) {
 		"set firewall family inet filter f1 term t1 from source-address 10.0.0.0/24",
 		"set firewall family inet filter f1 term t1 then routing-instance riA",
 		"set firewall family inet filter f2 term t1 then routing-instance riB",
+		"set interfaces ge-0/0/1 unit 0 family inet address 192.168.98.1/24",
+		"set interfaces ge-0/0/1 unit 0 family inet filter input f1",
+		"set interfaces ge-0/0/2 unit 0 family inet address 192.168.99.1/24",
+		"set interfaces ge-0/0/2 unit 0 family inet filter input f2",
 	}))
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
@@ -161,6 +169,7 @@ func TestVRFOverlapPrimaryClaimCountsNatively_13098(t *testing.T) {
 			{Name: "t1", RoutingInstance: "riA", SourceAddresses: []string{"192.0.2.0/24"}},
 		}},
 	}
+	cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0].FilterInputV4 = "f1"
 	warnings, admissions, err := validateVRFOverlap(cfg, true)
 	if err != nil {
 		t.Fatalf("validateVRFOverlap: %v", err)

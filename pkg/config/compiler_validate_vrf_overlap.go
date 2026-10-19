@@ -88,15 +88,22 @@ const (
 //  2. PBR filter terms — the space a `then routing-instance <name>` term steers
 //     INTO that VRF, as the PBR rule builder realises it (PBRDirectionSteers,
 //     #9809): prefix-lists expand, a bare host is a /32 or /128, and a term the
-//     builder drops contributes nothing. A term that matches every address
-//     (`any`, no address match, an empty `except`) adds MATCH-ALL steered space,
-//     which pairs only with steered space from ANOTHER filter. The residual
-//     above is one 5-tuple steered into two instances. A member prefix against
-//     steered space is the domain-separated pair, and two terms of ONE filter
-//     cannot both steer a packet, because the first match wins: a DSCP-only
-//     catch-all after an address term (TestFirewallFilter's multi-WAN filter)
-//     is not a collision. A literal 0.0.0.0/0 or ::/0 keeps its pre-#9809
-//     behaviour and pairs with everything.
+//     builder drops contributes nothing. Only filters attached as interface-unit
+//     INPUT filters count (#15130): the builder installs no rule for a dormant
+//     or output-only filter (#3430/#3432), so counting one manufactured a
+//     refusal (and a tolerant admission) for steering that never happens. The
+//     attachment census is the compiled FilterInputV4/V6 bindings, which is
+//     exactly what the builder walks — apply-groups/${node} attachments and
+//     #11321/#11589 FBF-member clones are plain bindings by the time this gate
+//     runs, so they count under their bound name. A term that matches every
+//     address (`any`, no address match, an empty `except`) adds MATCH-ALL
+//     steered space, which pairs only with steered space from ANOTHER filter.
+//     The residual above is one 5-tuple steered into two instances. A member
+//     prefix against steered space is the domain-separated pair, and two terms
+//     of ONE filter cannot both steer a packet, because the first match wins:
+//     a DSCP-only catch-all after an address term (TestFirewallFilter's
+//     multi-WAN filter) is not a collision. A literal 0.0.0.0/0 or ::/0 keeps
+//     its pre-#9809 behaviour and pairs with everything.
 //
 // then compares the prefix sets of every unordered pair of distinct
 // routing-instances for overlap (net/netip Prefix.Overlaps — contains-or-equal).
@@ -200,11 +207,37 @@ func validateVRFOverlap(cfg *Config, lenientPBR bool) ([]string, []VRFOverlapAdm
 		}
 	}
 
-	// Source 2: PBR `then routing-instance <name>` filter terms. A family-agnostic
-	// filter is duplicated into both FiltersInet and FiltersInet6; process both
-	// maps in sorted-name order and let the per-RI prefix de-dup collapse the
-	// repeat.
+	// Source 2: PBR `then routing-instance <name>` filter terms, restricted to
+	// filters attached as interface-unit INPUT filters (#15130). The builder
+	// (collectAttachedInputFilters in pkg/routing) installs steering only for
+	// such attachments, so a dormant or output-only filter's terms must set
+	// neither sawPBRRoutingInstance nor steered prefixes — counting them
+	// refused (and metered) overlaps for steering that never happens. The
+	// census below reads the same compiled FilterInputV4/V6 bindings the
+	// builder walks (including lo0 units and reth members; #11321/#11589
+	// member-FBF clones are bound under their clone name by tail-gate time).
+	// A family-agnostic filter is duplicated into both FiltersInet and
+	// FiltersInet6; process both in sorted-name order and let the per-RI
+	// prefix de-dup collapse the repeat.
 	pls := cfg.PolicyOptions.PrefixLists
+	attachedInet := map[string]bool{}
+	attachedInet6 := map[string]bool{}
+	for _, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		for _, unit := range ifc.Units {
+			if unit == nil {
+				continue
+			}
+			if unit.FilterInputV4 != "" {
+				attachedInet[unit.FilterInputV4] = true
+			}
+			if unit.FilterInputV6 != "" {
+				attachedInet6[unit.FilterInputV6] = true
+			}
+		}
+	}
 	addFilterTerms := func(filterName string, filter *FirewallFilter, matchAll netip.Prefix) {
 		if filter == nil {
 			return
@@ -241,14 +274,17 @@ func validateVRFOverlap(cfg *Config, lenientPBR bool) ([]string, []VRFOverlapAdm
 	}
 	for _, fam := range []struct {
 		filters  map[string]*FirewallFilter
+		attached map[string]bool
 		matchAll netip.Prefix
 	}{
-		{cfg.Firewall.FiltersInet, netip.MustParsePrefix("0.0.0.0/0")},
-		{cfg.Firewall.FiltersInet6, netip.MustParsePrefix("::/0")},
+		{cfg.Firewall.FiltersInet, attachedInet, netip.MustParsePrefix("0.0.0.0/0")},
+		{cfg.Firewall.FiltersInet6, attachedInet6, netip.MustParsePrefix("::/0")},
 	} {
 		names := make([]string, 0, len(fam.filters))
 		for name := range fam.filters {
-			names = append(names, name)
+			if fam.attached[name] {
+				names = append(names, name)
+			}
 		}
 		sort.Strings(names)
 		for _, name := range names {
