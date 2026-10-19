@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -10,24 +11,49 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// RibGroupReturnRulePriority is the ip-rule priority of the #9819 rib-group
-// return rules. A leaking instance gets destination-scoped lookup into each
-// peer's table, but only for prefixes leaked by OTHER instances (#11062):
+// RibGroupReturnRulePriority is the LEGACY flat ip-rule priority of the
+// pre-#14975 rib-group return rules. It is retained only so clear() and the
+// userspace FIB mirror recognize rules installed by an older binary during
+// an in-place upgrade. New installs use the per-prefix LPM priority from
+// config.RibGroupReturnRulePriority:
 //
-//	ip rule add pref 1500 to <peer-prefix> iif vrf-<instance> lookup <peer-table>
-//	ip rule add pref 1500 to <peer-prefix> oif vrf-<instance> lookup <peer-table>
+//	ip rule add pref <derived> to <peer-prefix> iif vrf-<instance> lookup <peer-table>
+//	ip rule add pref <derived> to <peer-prefix> oif vrf-<instance> lookup <peer-table>
 //
 // Looking up the peer table avoids falling through to main's default route.
 // The userspace FIB mirrors these rules as reverse NextTable routes between
 // the source and peer tables.
-const RibGroupReturnRulePriority = 1500
+const RibGroupReturnRulePriority = config.LegacyRibGroupReturnRulePriority
+
+// IsRibGroupReturnRulePriority reports whether priority belongs to a
+// rib-group return rule: the legacy flat 1500 or any priority in the
+// LPM-derived return window (1000, 2000). Kernel ip-rule priorities are
+// per-family, so the derived window is shared by both families.
+func IsRibGroupReturnRulePriority(priority int) bool {
+	return priority > 1000 && priority < 2000
+}
+
+// ribGroupReturnRulePriorityFor returns the LPM-ordered priority for one
+// peer prefix.
+func ribGroupReturnRulePriorityFor(prefix *net.IPNet) int {
+	if prefix == nil {
+		return RibGroupReturnRulePriority
+	}
+	prefixLength, addressBits := prefix.Mask.Size()
+	if addressBits == 0 {
+		// Unparseable mask: fail closed to the legacy value, which is
+		// still inside the return window and swept by clear().
+		return RibGroupReturnRulePriority
+	}
+	return config.RibGroupReturnRulePriority(prefixLength, addressBits)
+}
 
 // The ordering is load-bearing: scoped return rules run after the kernel's
-// l3mdev lookup and before the VRF miss terminator; the rib-group leak band
-// stays below both. These priorities are checked at compile time.
+// l3mdev lookup (1000) and before the VRF miss terminator (2000); the
+// rib-group leak band stays after both. Checked at compile time.
 const (
-	_ = uint(RibGroupReturnRulePriority - 1001)
-	_ = uint(vrfMissTerminatorPriority - RibGroupReturnRulePriority - 1)
+	_ = uint(config.RibGroupReturnRulePriorityBase - 1001)
+	_ = uint(vrfMissTerminatorPriority - (config.RibGroupReturnRulePriorityBase + config.RibGroupReturnRulePriorityWindow))
 	_ = uint(ribGroupLeakRulePriority - vrfMissTerminatorPriority - 1)
 )
 
@@ -48,14 +74,17 @@ func (rg *ribGroupManager) addRibGroupReturnRules(inst *config.RoutingInstanceCo
 	if inst.InstanceType == "forwarding" || config.IsReservedRoutingInstanceName(inst.Name) {
 		return nil
 	}
-	return installDestinationScopedReturnRules(rg.ops, "rib-group", inst.Name, RibGroupReturnRulePriority, peerPrefixes)
+	return installDestinationScopedReturnRules(rg.ops, "rib-group", inst.Name, peerPrefixes)
 }
 
 // installDestinationScopedReturnRules installs `to <peer-prefix> iif|oif
-// vrf-<instance> lookup <peer-table>`. Its Dst selector prevents an unrelated
-// VRF miss from entering another VRF; the same rule is represented by a
-// reverse NextTable route in the userspace FIB.
-func installDestinationScopedReturnRules(ops ruleOps, kind, instName string, priority int, prefixes map[int][]ribGroupPeerReturnPrefix) []error {
+// vrf-<instance> lookup <peer-table>` at the prefix's LPM-derived priority
+// (#14975). Its Dst selector prevents an unrelated VRF miss from entering
+// another VRF; the same rule is represented by a reverse NextTable route in
+// the userspace FIB. A pre-existing identical rule (EEXIST, e.g. a survivor
+// of a failed clear) counts as installed, mirroring next-table handling
+// (#9810); every other add failure is aggregated.
+func installDestinationScopedReturnRules(ops ruleOps, kind, instName string, prefixes map[int][]ribGroupPeerReturnPrefix) []error {
 	vrfName := "vrf-" + instName
 	var errs []error
 	seen := make(map[struct {
@@ -80,6 +109,7 @@ func installDestinationScopedReturnRules(ops ruleOps, kind, instName string, pri
 				continue
 			}
 			seen[key] = true
+			priority := ribGroupReturnRulePriorityFor(peer.prefix)
 			for _, selector := range []string{"iif", "oif"} {
 				rule := netlink.NewRule()
 				rule.Family = family
@@ -92,6 +122,9 @@ func installDestinationScopedReturnRules(ops ruleOps, kind, instName string, pri
 					rule.OifName = vrfName
 				}
 				if err := ops.RuleAdd(rule); err != nil {
+					if errors.Is(err, unix.EEXIST) {
+						continue
+					}
 					errs = append(errs, fmt.Errorf(
 						"add %s return rule to peer %s table %d %s %s family %d: %w",
 						kind, peer.prefix, peer.tableID, selector, vrfName, family, err))

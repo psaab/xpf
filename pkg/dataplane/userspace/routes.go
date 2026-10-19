@@ -362,8 +362,8 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 				Destination: route.Destination,
 				// `reject` and `discard` both install a terminal route, but only
 				// `reject` asks the dataplane to return an ICMP unreachable.
-				Reject:      route.Reject,
-				Discard:     route.Discard,
+				Reject:       route.Reject,
+				Discard:      route.Discard,
 				NextTable:    route.NextTable,
 				RulePriority: nextTableRulePriorities[route],
 				Preference:   route.Preference,
@@ -503,7 +503,7 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 			// below.
 			if ipRuleHasUnsupportedRouteLeakSelectors(
 				rule,
-				rule.Priority == routing.RibGroupReturnRulePriority,
+				routing.IsRibGroupReturnRulePriority(rule.Priority),
 			) {
 				continue
 			}
@@ -518,11 +518,15 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 				mainTable = "inet6.0"
 				suffix = ".inet6.0"
 			}
-			// A pref-1500 return rule looks up the peer VRF's table and is
-			// scoped to the source VRF by iif/oif. Mirror it in the reverse
-			// direction: source VRF table → peer table, for this destination
-			// prefix only. Looking up main here could select main's default.
-			if rule.Priority == routing.RibGroupReturnRulePriority {
+			// A rib-group return rule (legacy pref 1500 or the #14975
+			// LPM-derived priority in (1000,2000)) looks up the peer VRF's
+			// table and is scoped to the source VRF by iif/oif. Mirror it in
+			// the reverse direction: source VRF table → peer table, for this
+			// destination prefix only. Looking up main here could select
+			// main's default. RulePriority carries the kernel priority so the
+			// helper's leak index orders overlapping returns longest-first,
+			// exactly as the kernel RPDB does.
+			if routing.IsRibGroupReturnRulePriority(rule.Priority) {
 				sourceName, ok := ribGroupReturnRuleInstance(rule, instanceNameToTableID)
 				if !ok {
 					continue

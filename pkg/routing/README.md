@@ -42,7 +42,7 @@ which makes each domain unit-testable with a fake (see `rules_test.go`'s
 | `tunnel_keepalive_runner.go` | (part of `tunnelManager`) | keepalive **runner** half (#5661): `KeepaliveState`/`keepaliveRunner`, `startKeepalive`/`stopAll`, `keepaliveLoop`/`keepaliveTick`, `GetKeepaliveState` |
 | `xfrm.go` | `xfrmManager` | XFRM/IPsec interface lifecycle; own `mu` + tracked `name→if_id` set. `Apply` reconciles **differentially** against the tracked set (keep unchanged / create new / delete removed / recreate on `if_id` change) — it does NOT clear-all-then-rebuild, so an unrelated config commit leaves active xfrmi interfaces untouched (#2546). Refuses to create either of two distinct devices that derive the same `if_id` — fail-closed collision guard (#2909) |
 | `rules.go` | `nextTableManager` / `ribGroupManager` / `pbrManager` | policy-routing ip-rule reconcilers (`ruleOps`, stateless) |
-| `rib_group_return_9819.go` | routing return-rule helper | reciprocal peer-prefix-scoped return rules for rib-group sources (pref 1500); target return paths warn and use per-instance static next-hop routes (#11062/#11320) |
+| `rib_group_return_9819.go` | routing return-rule helper | reciprocal peer-prefix-scoped return rules for rib-group sources at LPM-derived prefs in (1000,2000) (#14975; legacy flat 1500 recognized for cleanup); target return paths warn and use per-instance static next-hop routes (#11062/#11320) |
 | `probe_pin.go` | `probePinManager` | RPM probe next-hop pin reconciler (#1827): fwmark rules in band 50-99 + pinned host routes in reserved tables 7000-7049 (`probePinOps`, stateless). `Apply` returns per-test install failures (keyed by TestKey) and rolls back the fwmark rule when the pinned route fails (best-effort — a failed rollback is swept by the next band clear; the pin reports failed either way); callers thread the failed map into `pkg/rpm` so affected tests hold state instead of probing unpinned (#1895) |
 | `bond.go` | `bondManager` | bond (fabric/ae LAG) device lifecycle; own `mu` + tracked `name→bondSig` set. `Apply` reconciles **differentially** against the tracked set (keep unchanged / create new / delete removed / recreate on signature change) — it does NOT clear-all-then-rebuild, so an unrelated config commit no longer flaps the LAG (#5119, mirroring #2546) |
 | `reth.go` | `rethManager` | stale `reth*` bond cleanup. `Clear` scans `LinkList` for `reth*` bond devices and deletes them; a per-bond `LinkDel` failure is aggregated with `errors.Join` and returned (NOT swallowed) so a stale reth bond left in the kernel fails the commit closed (#5704 / codex-review-182 M30, the reth analog of the #4901 xfrm/bond/tunnel `Clear` fix). Idempotent: an already-absent reth device is not returned by `LinkList`, so no `LinkDel` runs and no spurious error is produced; retry is implicit via the next reconcile's re-scan (no ownership map to retain) |
@@ -460,15 +460,19 @@ delegate to the owning domain. Exported types:
   listed because the next two entries are defined relative to it, and
   because it is a LOOKUP rule: a lookup that misses the VRF's table moves on
   down this list.
-- `1500`: rib-group **return rules** (#9819, narrowed by #11062). For each
-  family in which a source instance leaked, install an iif/oif pair per
-  prefix leaked by a different instance:
+- `1001–1999`: rib-group **return rules** (#9819, narrowed by #11062,
+  LPM-ordered by #14975). For each family in which a source instance leaked,
+  install an iif/oif pair per prefix leaked by a different instance at
+  `pref = config.RibGroupReturnRulePriority(prefix-len, addr-bits)`
+  (1001 + (bits−len)×28 for IPv4, ×7 for IPv6; longer prefixes first):
   `to <peer-prefix> iif vrf-<instance> lookup <peer-table>` and
-  `to <peer-prefix> oif vrf-<instance> lookup <peer-table>`. Main-only
-  destinations that are not another instance's leaked peer prefix miss these
-  rules and reach the VRF miss terminator. The AF_XDP FIB mirrors the same
-  destination scopes as reverse `NextTable` routes from the source instance
-  table to the peer table.
+  `to <peer-prefix> oif vrf-<instance> lookup <peer-table>`. The pre-#14975
+  flat `pref 1500` is legacy: recognized by clear() and the FIB mirror for
+  upgrade cleanup, never installed. Main-only destinations that are not
+  another instance's leaked peer prefix miss these rules and reach the VRF
+  miss terminator. The AF_XDP FIB mirrors the same destination scopes as
+  reverse `NextTable` routes from the source instance table to the peer
+  table, carrying the kernel priority for LPM ordering.
 - Next-table and PBR target return paths (#11320) do not receive a broad
   `lookup main` exception. The commit warns for each target because a
   main-only peer may be unreachable from its VRF. Configure a target-specific

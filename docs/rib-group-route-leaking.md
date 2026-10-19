@@ -94,12 +94,25 @@ table misses, processing continues down the RPDB. Without the #9819
 The terminator at priority 2000 makes unmatched VRF misses fail closed.
 
 For a source instance whose own rib-group leak installed, #11062 adds
-destination-scoped return rules for prefixes leaked by **other** instances:
+destination-scoped return rules for prefixes leaked by **other** instances.
+Since #14975 the priority is derived from the peer prefix length (longest
+prefix first) instead of the former flat 1500, staying inside (1000, 2000)
+so the rules still run after `l3mdev` and before the miss terminator:
 
 ```
-ip rule add pref 1500 to <peer-prefix> iif vrf-<instance> lookup <peer-table>
-ip rule add pref 1500 to <peer-prefix> oif vrf-<instance> lookup <peer-table>
+ip rule add pref <1001+(bits-len)*28|7> to <peer-prefix> iif vrf-<instance> lookup <peer-table>
+ip rule add pref <1001+(bits-len)*28|7> to <peer-prefix> oif vrf-<instance> lookup <peer-table>
 ```
+
+(IPv4 scale 28, IPv6 scale 7; `config.RibGroupReturnRulePriority`.) With
+flat 1500, overlapping peer prefixes (e.g. a broad `10.0.0.0/8` leaked by
+one instance and a narrow `10.40.1.0/24` by another) tied and the kernel
+picked by insertion order, potentially steering return traffic into the
+broad peer's capped VRF instead of the longest-prefix owner. The legacy
+flat-1500 rules are still recognized by `ribGroupManager.clear()` and the
+userspace FIB mirror so an in-place upgrade sweeps/mirrors them; a
+pre-existing identical rule (EEXIST) counts as installed rather than
+failing the apply.
 
 The peer-prefix set comes from the existing interface-routes rib-group
 configuration and the same static connected-prefix derivation used by the

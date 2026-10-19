@@ -185,3 +185,64 @@ func TestBuildRouteSnapshotsMirrorsRibGroupReturnRules(t *testing.T) {
 		t.Fatalf("reverse return snapshot = %+v, want src.inet.0 to b.inet.0 for peer prefix 10.40.0.0/24", got)
 	}
 }
+
+// TestBuildRouteSnapshotsMirrorsRibGroupReturnRulesLPM14975 pins #14975 in
+// the userspace FIB: return rules at LPM-derived priorities (not only legacy
+// 1500) are mirrored, and overlapping returns keep kernel LPM order via
+// RulePriority (narrower prefix = lower priority = evaluated first).
+func TestBuildRouteSnapshotsMirrorsRibGroupReturnRulesLPM14975(t *testing.T) {
+	orig := ruleListFn
+	t.Cleanup(func() { ruleListFn = orig })
+	broad := mustCIDR(t, "10.0.0.0/8")
+	narrow := mustCIDR(t, "10.40.1.0/24")
+	bpl, bbits := broad.Mask.Size()
+	npl, nbits := narrow.Mask.Size()
+	broadPrio := uint32(config.RibGroupReturnRulePriority(bpl, bbits))
+	narrowPrio := uint32(config.RibGroupReturnRulePriority(npl, nbits))
+	if !(narrowPrio < broadPrio) {
+		t.Fatalf("derived priorities not LPM-ordered: narrow %d broad %d", narrowPrio, broadPrio)
+	}
+	ruleListFn = func(family int) ([]netlink.Rule, error) {
+		if family == syscall.AF_INET {
+			return []netlink.Rule{
+				{Dst: broad, IifName: "vrf-src", Table: 300, Priority: int(broadPrio)},
+				{Dst: broad, OifName: "vrf-src", Table: 300, Priority: int(broadPrio)},
+				{Dst: narrow, IifName: "vrf-src", Table: 400, Priority: int(narrowPrio)},
+				{Dst: narrow, OifName: "vrf-src", Table: 400, Priority: int(narrowPrio)},
+			}, nil
+		}
+		return nil, nil
+	}
+	cfg := &config.Config{
+		RoutingInstances: []*config.RoutingInstanceConfig{
+			{Name: "src", TableID: 200},
+			{Name: "broad", TableID: 300},
+			{Name: "narrow", TableID: 400},
+		},
+	}
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRouteSnapshots: %v", err)
+	}
+	if len(routes) != 2 {
+		t.Fatalf("want 2 deduped reverse leaks (broad+narrow), got %+v", routes)
+	}
+	byDst := map[string]RouteSnapshot{}
+	for _, r := range routes {
+		byDst[r.Destination] = r
+	}
+	b, okB := byDst["10.0.0.0/8"]
+	n, okN := byDst["10.40.1.0/24"]
+	if !okB || !okN {
+		t.Fatalf("missing mirrored returns: %+v", routes)
+	}
+	if b.Table != "src.inet.0" || b.NextTable != "broad.inet.0" || b.RulePriority != broadPrio {
+		t.Fatalf("broad mirror = %+v, want src.inet.0 -> broad.inet.0 prio %d", b, broadPrio)
+	}
+	if n.Table != "src.inet.0" || n.NextTable != "narrow.inet.0" || n.RulePriority != narrowPrio {
+		t.Fatalf("narrow mirror = %+v, want src.inet.0 -> narrow.inet.0 prio %d", n, narrowPrio)
+	}
+	if !(n.RulePriority < b.RulePriority) {
+		t.Fatalf("FIB LPM order violated: narrow prio %d must precede broad %d", n.RulePriority, b.RulePriority)
+	}
+}
