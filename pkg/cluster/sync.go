@@ -1534,6 +1534,11 @@ type SessionSync struct {
 	// discipline as the bare stamp maps.
 	genSentScopedV4 map[scopedDeleteKeyV4]uint64
 	genSentScopedV6 map[scopedDeleteKeyV6]uint64
+	// scopedTupleIndex* invert the scoped stamp maps by bare tuple
+	// (#15039) so a bare close reclaims its tuple's scoped stamps in
+	// O(domains-per-tuple), not O(map). Guarded by genSentMu.
+	genSentScopedByTupleV4 scopedTupleIndex[dataplane.SessionKey, scopedDeleteKeyV4]
+	genSentScopedByTupleV6 scopedTupleIndex[dataplane.SessionKeyV6, scopedDeleteKeyV6]
 	// genSentOverflowV4/V6 latch, per family and for the life of the process, that
 	// the stamp map has ever been at its effective cap and skipped a key (#9719).
 	// After that, a delete for an unstamped key may be for a live session whose
@@ -1625,6 +1630,11 @@ type SessionSync struct {
 	// Guarded by recvGenMu; reclaimed/reset alongside the bare maps.
 	recvGenScopedV4 map[scopedDeleteKeyV4]uint64
 	recvGenScopedV6 map[scopedDeleteKeyV6]uint64
+	// recvGenScopedByTuple* invert the scoped receiver maps by bare tuple
+	// (#15039), guarded by recvGenMu, so a bare delete reaches its tuple's
+	// scoped entries without scanning the tombstone-pinned map.
+	recvGenScopedByTupleV4 scopedTupleIndex[dataplane.SessionKey, scopedDeleteKeyV4]
+	recvGenScopedByTupleV6 scopedTupleIndex[dataplane.SessionKeyV6, scopedDeleteKeyV6]
 	// recvTombV4/V6 order the TOMBSTONE entries of recvGenV4/V6, oldest first, so a
 	// map at its effective cap evicts the oldest tombstone to record a new key instead
 	// of skip-recording it (#9719). Guarded by recvGenMu; retained across same-namespace

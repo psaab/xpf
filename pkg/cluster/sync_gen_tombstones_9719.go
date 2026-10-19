@@ -63,6 +63,15 @@ func (o *genTombstoneOrder[K]) evictOldest(m map[K]uint64) bool {
 	return true
 }
 
+// frontKey returns the oldest tombstone key without removing it, or nil.
+func (o *genTombstoneOrder[K]) frontKey() *K {
+	if o.order == nil || o.order.Len() == 0 {
+		return nil
+	}
+	k := o.order.Front().Value.(K)
+	return &k
+}
+
 // size reports how many tombstones are recorded.
 func (o *genTombstoneOrder[K]) size() int {
 	if o.order == nil {
@@ -88,4 +97,22 @@ func putGenEvictingTombstones[K comparable](m map[K]uint64, tombs *genTombstoneO
 		evicted = tombs.evictOldest(m)
 	}
 	return putGenBounded(m, key, gen, maxEntries), evicted
+}
+
+// putScopedGenEvictingTombstones is putGenEvictingTombstones for a scoped
+// map plus its tuple index (#15039): an evicted oldest tombstone leaves
+// the index, and a stored key joins it. Tuple extraction is supplied by
+// the caller (the scoped key's bare tuple). Caller holds recvGenMu.
+func putScopedGenEvictingTombstones[K comparable, SK comparable](m map[SK]uint64, tombs *genTombstoneOrder[SK], ix *scopedTupleIndex[K, SK], tupleOf func(SK) K, skey SK, gen uint64, maxEntries int) (stored, evicted bool) {
+	if _, exists := m[skey]; !exists && len(m) >= maxEntries {
+		if front := tombs.frontKey(); front != nil && tombs.evictOldest(m) {
+			evicted = true
+			ix.remove(tupleOf(*front), *front)
+		}
+	}
+	stored = putGenBounded(m, skey, gen, maxEntries)
+	if stored {
+		ix.add(tupleOf(skey), skey)
+	}
+	return stored, evicted
 }
