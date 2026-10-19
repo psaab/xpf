@@ -201,8 +201,15 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 		// ALL-malformed direction already failed closed at match-time via
 		// `constrained && empty`, #2400.) Mark the term so the Rust filter
 		// compiler fails the snapshot CLOSED rather than enforcing the narrowed
-		// subset.
-		if len(term.UnknownAddresses) > 0 {
+		// subset. #14946 (D7-01): the same per-token drop applied to a malformed
+		// ENTRY inside a referenced prefix-list — the strict gate rejects it
+		// (#7273) but the tolerant path only warns, and the entry reaches here
+		// verbatim via ResolveFilterPrefixListAddrs with no UnknownAddresses
+		// record (that channel is literals-only). A positive term narrowed to
+		// the surviving entries (fall-through fail-open); a sole-`except` term
+		// matched the dropped range it was written to exclude. Detect it here
+		// with the same shared classifier so the marker covers both spellings.
+		if len(term.UnknownAddresses) > 0 || referencedPrefixListHasMalformedEntry(term, cfg) {
 			snap.AddressUnrepresentable = true
 		}
 		// #9875/#11334/#11451/#11896/#14132: refuse the whole snapshot when a
@@ -567,6 +574,35 @@ func hasUnresolvedPrefixListRef(refs []config.PrefixListRef, cfg *config.Config)
 	for _, ref := range refs {
 		if prefixLists[ref.Name] == nil {
 			return true
+		}
+	}
+	return false
+}
+
+// referencedPrefixListHasMalformedEntry reports whether any prefix-list a
+// term references (source or destination, positive or `except`) carries an
+// entry the shared address classifier cannot represent (#14946). Unresolved
+// references contribute no entries here — they are refused separately via
+// FromUnrepresentable (#11451/#14132). Empty entries are skipped, mirroring
+// the #7273 strict gate.
+func referencedPrefixListHasMalformedEntry(term *config.FirewallFilterTerm, cfg *config.Config) bool {
+	if term == nil || cfg == nil {
+		return false
+	}
+	for _, refs := range [][]config.PrefixListRef{term.SourcePrefixLists, term.DestPrefixLists} {
+		for _, ref := range refs {
+			pl := cfg.PolicyOptions.PrefixLists[ref.Name]
+			if pl == nil {
+				continue
+			}
+			for _, entry := range pl.Prefixes {
+				if entry == "" {
+					continue
+				}
+				if !config.FilterAddressRepresentable(entry) {
+					return true
+				}
+			}
 		}
 	}
 	return false
