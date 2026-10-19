@@ -238,6 +238,11 @@ var systemActionPermissions = map[string]config.LoginClassPermission{
 	// direction.
 	"rescue-save":   config.PermControl,
 	"rescue-delete": config.PermControl,
+	// #15239: `xpfd upgrade kernel rejoin` — the orchestrator node rejoin
+	// (ResetAllFailover + kernel-hold release). Maintenance-tier like the
+	// other destructive cluster lifecycle verbs; explicit rather than
+	// left to the PermMaint default so the price is auditable.
+	"cluster-rejoin": config.PermMaint,
 }
 
 // systemActionPermission prices one SystemAction verb.

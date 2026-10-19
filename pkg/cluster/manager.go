@@ -179,7 +179,9 @@ type Manager struct {
 	// kernelUpgradeHold, when set, unconditionally holds this node SECONDARY in
 	// election (#1930 INC-2): a kernel-upgrade candidate boot must not become
 	// primary until the promotion gate verifies the dataplane. Set BEFORE
-	// Start() on a candidate boot; cleared by promote/rejoin/revert.
+	// Start() on a candidate boot; cleared by the promotion-marker reconcile,
+	// by ResetAllFailover (orchestrator rejoin), or by the reboot to
+	// known-good. NOT cleared by a single-RG ResetFailover (#15239, A56-01).
 	kernelUpgradeHold bool
 	// kernelUpgradeHoldReason is WHY the hold is set — one of the
 	// KernelUpgradeHold* constants (#6495). The flag alone cannot tell an

@@ -228,11 +228,14 @@ func TestElection_KernelUpgradeHold_DemotesAlreadyPrimary(t *testing.T) {
 	}
 }
 
-// r2 Codex HIGH (never-both-down): the orchestrator's gRPC rejoin clears manual
-// failover PER-RG via Manager.ResetFailover. That path MUST also drop the kernel
-// hold synchronously, so the rejoined node is election-eligible the instant
-// rejoin returns — otherwise the driver could drain the peer while this node is
-// still held secondary (both secondary, no primary).
+// r2 Codex HIGH (never-both-down), preserved at the correct scope by
+// #15239 (A56-01): the orchestrator rejoin must drop the kernel hold
+// synchronously so the rejoined node is election-eligible the instant
+// rejoin returns — otherwise the driver could drain the peer while this
+// node is still held secondary (both secondary, no primary). That rejoin
+// is ResetAllFailover (every configured RG; `xpfd upgrade kernel rejoin`
+// and kernel self-recovery). A single-RG ResetFailover must NOT clear it —
+// see reset_failover_kernel_hold_15239_test.go.
 func TestResetFailover_ClearsKernelUpgradeHold(t *testing.T) {
 	m := NewManager(0, 1)
 	m.SetKernelUpgradeHold(KernelUpgradeHoldCandidate)
@@ -243,11 +246,11 @@ func TestResetFailover_ClearsKernelUpgradeHold(t *testing.T) {
 	}
 	drainEvents(m, 4)
 
-	if err := m.ResetFailover(0); err != nil {
-		t.Fatalf("ResetFailover: %v", err)
+	if err := m.ResetAllFailover(); err != nil {
+		t.Fatalf("ResetAllFailover: %v", err)
 	}
 	if m.KernelUpgradeHeld() {
-		t.Fatal("ResetFailover (rejoin) must clear the kernel-upgrade hold synchronously")
+		t.Fatal("ResetAllFailover (rejoin) must clear the kernel-upgrade hold synchronously")
 	}
 	if !m.IsLocalPrimary(0) {
 		t.Fatal("after rejoin the isolated node must reclaim primary (hold cleared)")

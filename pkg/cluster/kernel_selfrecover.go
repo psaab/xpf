@@ -177,13 +177,11 @@ func (m *Manager) KernelUpgradeHoldReason() string {
 // ClearKernelUpgradeHold releases the kernel-upgrade election hold and re-runs
 // election so the node can take its normal role. Callers: (1) the daemon's
 // reconcileKernelUpgradeHold once the promotion marker confirms THIS kernel was
-// verified+promoted, and (2) ResetAllFailover (the local self-recovery rejoin).
-// The orchestrator's gRPC `rejoin` clears the hold via a third path —
-// Manager.ResetFailover drops it inline per-RG so the node is election-eligible
-// the INSTANT rejoin returns, closing the never-both-down gap (r2 Codex HIGH:
-// otherwise the driver drains the peer while this node is still held). A
-// reverted/failed roll deliberately KEEPS the hold (fail-safe); it is then
-// dropped by the reboot to known-good, where it is never re-set.
+// verified+promoted, and (2) ResetAllFailover (the orchestrator / self-recovery
+// rejoin). A single-RG ResetFailover deliberately does NOT clear it (#15239,
+// A56-01): the hold is node-global and a per-RG operator reset is not a node
+// rejoin. A reverted/failed roll deliberately KEEPS the hold (fail-safe); it
+// is then dropped by the reboot to known-good, where it is never re-set.
 func (m *Manager) ClearKernelUpgradeHold() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -204,8 +202,17 @@ func (m *Manager) ClearKernelUpgradeHold() {
 
 // ResetAllFailover clears manual failover on every redundancy group (rejoin as
 // eligible; the election + VRRP preempt rules then decide primary). Used by the
-// kernel self-recovery when an orchestrator crash left this node orphaned-drained.
-// It also clears any kernel-upgrade election hold (the rejoin path).
+// orchestrator rejoin (`xpfd upgrade kernel rejoin` / RejoinAndConfirm, which
+// resets every configured RG via the gRPC grpcCluster.ResetFailover) and by
+// kernel self-recovery when an orchestrator crash left this node
+// orphaned-drained. It also clears any kernel-upgrade election hold,
+// SYNCHRONOUSLY, before the per-RG resets: the node must be election-eligible
+// the instant rejoin returns, or the roll driver — which advances to drain
+// the peer as soon as rejoin returns — could leave BOTH nodes secondary
+// (r2 Codex HIGH never-both-down). Clearing first (not via the first
+// ResetFailover) is what keeps that property after #15239 removed the
+// per-RG clear: each ResetFailover's recalcWeight election then runs with
+// the hold already gone, in deterministic RG order (RG0 before data RGs).
 func (m *Manager) ResetAllFailover() error {
 	m.mu.RLock()
 	ids := make([]int, 0, len(m.groups))
@@ -214,10 +221,7 @@ func (m *Manager) ResetAllFailover() error {
 	}
 	m.mu.RUnlock()
 	sort.Ints(ids)
-	if len(ids) == 0 {
-		m.ClearKernelUpgradeHold()
-		return nil
-	}
+	m.ClearKernelUpgradeHold()
 	for _, id := range ids {
 		if err := m.ResetFailover(id); err != nil {
 			return err

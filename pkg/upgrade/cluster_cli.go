@@ -12,7 +12,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/cluster"
-	"github.com/psaab/xpf/pkg/clusterfailover"
+
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
@@ -763,28 +763,19 @@ func parseNodeToken(tok string) (int, bool) {
 }
 
 func (g *grpcCluster) ResetFailover() error {
-	// ForceSecondary demotes EVERY configured RG, so ResetFailover must
-	// reset every configured RG — not a hardcoded set. Enumerate the live RG
-	// IDs from the status output and FAIL CLOSED if enumeration fails (#5044):
-	// the old {0,1,2} fallback silently left RG>=3 held ForceSecondary on a
-	// transient status error, and RG IDs are not bounded to {0,1,2} (>15 is
-	// possible). RejoinAndConfirm only checks PeerAlive/SyncEstablished — with
-	// a guessed set it would return nil and advance to drain/recreate the peer
-	// that still owns the un-reset groups, opening a no-primary window for
-	// them. Returning the error stops the roll instead.
-	rgs, err := g.configuredRGs()
-	if err != nil {
-		return err
-	}
-	var firstErr error
-	for _, rg := range rgs {
-		if err := g.systemAction(clusterfailover.ResetFailover(rg).Action()); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-		}
-	}
-	return firstErr
+	// The orchestrator rejoin is a NODE rejoin, not a set of per-RG
+	// resets: it must clear every configured RG's manual failover AND the
+	// node-global kernel-upgrade election hold, synchronously (#15239,
+	// A56-01). The single `cluster-rejoin` action does exactly that
+	// (Manager.ResetAllFailover). The previous shape — enumerate the live
+	// RG IDs and issue cluster-failover-reset:<rg> per RG — relied on
+	// each per-RG ResetFailover clearing the hold inline, which is the
+	// defect: a per-RG reset is not a promotion check, and the first RG's
+	// reset released the unverified candidate on every RG. Fail closed
+	// on the action error: RejoinAndConfirm's per-RG readback
+	// (LocalRejoinComplete, #5044/#5138) then refuses to confirm, so the
+	// roll stops instead of advancing to drain the peer.
+	return g.systemAction("cluster-rejoin")
 }
 
 // configuredRGs returns the redundancy-group IDs enumerated from the live
