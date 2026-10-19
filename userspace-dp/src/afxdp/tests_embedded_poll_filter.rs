@@ -3474,6 +3474,176 @@ fn poll_descriptor_nat64_undelivered_errors_refund_budget_14123() {
     );
 }
 
+/// #15152 FAIL-ON-REVERT (same-family builder-None budget): a same-family
+/// (non-NAT64) ICMP error that MATCHES + CHARGES the F-077 budget and then
+/// fails to build — here because the client neighbor is missing, so
+/// `build_nat_reversed_icmp_error_v4` returns `None` on `neighbor_mac?` —
+/// must REFUND the charged token before `try_reverse_embedded_icmp_error`
+/// returns `NotHandled`. This is the v41 subject cell the issue names and
+/// the same-family residual of #14123 (whose scope was NAT64-only).
+///
+/// Shape: 64 client-neighbor-missing errors (match + charge, builder
+/// declines, nothing queues) followed by a 65th deliverable error. On
+/// master the 64 leaked tokens exhaust the 64-burst, the 65th is
+/// `BudgetDenied` and queues nothing (RED). With the refund the 65th is
+/// admitted and queues exactly one reversed prebuilt. The fixture has NO
+/// client neighbor and NO route to the client, so every error's return
+/// resolution is neighbor-less — the exact missing-neighbor mechanism
+/// cited in the issue (`builders.rs: neighbor_mac?`).
+#[test]
+fn poll_descriptor_same_family_builder_none_refunds_budget_15152() {
+    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let snat_port: u16 = 40000;
+    let client_port: u16 = 12345;
+
+    // Outer: router -> SNAT address, quoting the SNAT'd client packet
+    // (client:client_port -> server:80 translated to snat_ip:snat_port).
+    let frame = build_icmp_te_frame_v4_with_mac(
+        router_ip,
+        snat_ip,
+        server_ip,
+        snat_port,
+        80,
+        PROTO_TCP,
+        TEST_WAN_MAC,
+    );
+
+    let mut snapshot = nat_snapshot();
+    // The deliverable (65th) leg needs wan->lan admitted; the 64 bad legs
+    // never queue, so this permit cannot mask a builder-None leak.
+    permit_wan_to_lan_flowless_icmp(&mut snapshot);
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+
+    // Install ONLY the forward NAT session (client -> server via SNAT).
+    // Deliberately NO reverse half and NO client neighbor: the matcher's
+    // return resolution (`embedded_icmp_return_resolution`) then falls
+    // back to `lookup_forwarding_resolution_with_dynamic(client)`, which
+    // has no route/neighbor toward 10.0.61.102, so `neighbor_mac` is
+    // `None` and the v4 builder declines AFTER the budget charge.
+    let mut sessions = SessionTable::new();
+    let forward_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(client_ip),
+        dst_ip: IpAddr::V4(server_ip),
+        src_port: client_port,
+        dst_port: 80,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let forward_nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(snat_ip)),
+        rewrite_dst: None,
+        rewrite_src_port: Some(snat_port),
+        rewrite_dst_port: None,
+        source_nat_icmp: None,
+        nat64: false,
+        nptv6: false,
+    };
+    assert!(sessions.install_with_protocol(
+        forward_key.clone(),
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+                tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: forward_nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        SessionMetadata {
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        123_000_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 42,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+
+    // 64 builder-None errors: each matches + charges, then declines on the
+    // missing client neighbor. None may queue a reversed prebuilt.
+    for i in 0..64 {
+        txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+            true,
+        );
+        assert!(
+            binding.scratch.scratch_forwards.is_empty(),
+            "#15152: missing-neighbor error {i} must not queue a reversed frame"
+        );
+        binding.scratch.scratch_recycle.clear();
+    }
+
+    // Direct budget oracle (the #14123 cell's queue-count shape cannot
+    // distinguish BudgetDenied-drop from builder-None fall-through here,
+    // because this fixture never learns a client neighbor): the full
+    // 64-token burst must still be available after the 64 failures.
+    // RED on master: every token leaked, so the first probe already fails.
+    for i in 0..64 {
+        assert!(
+            sessions.note_icmp_error_delivered(&forward_key, 123_000_000_000),
+            "#15152: undelivered builder-None errors must leave burst token {i} available (RED on master: token leaked on builder None)"
+        );
+    }
+    assert!(
+        !sessions.note_icmp_error_delivered(&forward_key, 123_000_000_000),
+        "#15152: the one permitted error must still consume budget (budget math unchanged)"
+    );
+}
+
 /// #14122: attach an egress output filter to the WAN unit (reth0.80,
 /// ifindex 12) — the egress of the V6->V4 NAT64 translated error.
 fn n14122_attach_wan_output_filter(snapshot: &mut ConfigSnapshot, term: FirewallTermSnapshot) {

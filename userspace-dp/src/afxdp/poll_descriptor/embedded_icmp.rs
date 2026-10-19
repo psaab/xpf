@@ -223,6 +223,20 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
         _ => None,
     };
     let Some(rewritten_frame) = rewritten else {
+        // #15152 (residual of #10667/#14123): the matcher already charged
+        // the F-077 token (`nat_match_v4.rs` `note_icmp_error_delivered`),
+        // but a same-family builder can still decline AFTER that charge —
+        // e.g. `neighbor_mac?` / `src_mac?` in `icmp_embed/builders.rs`
+        // when the client neighbor is missing, or a truncated/cross-family
+        // quote. Falling through as `NotHandled` then LEAKS the token:
+        // while the cause persists every genuine PMTUD / Time-Exceeded
+        // error for this session is suppressed until refill (~1s for the
+        // 64-burst at 64/s), exactly the starvation #14123 fixed for the
+        // NAT64 arm. The error still falls through to flowless
+        // enforcement unchanged (a miss is not a drop); only the charged
+        // token is returned, mirroring every sibling post-match terminal
+        // (TTL-expire above, CoS drop / policy-refuse in the queue tail).
+        sessions.refund_icmp_error_not_delivered(&icmp_match.budget_key, now_ns);
         #[cfg(feature = "debug-log")]
         if icmpv6_trace {
             debug_log!(
