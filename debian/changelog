@@ -7,6 +7,14 @@ xpf (0.0.0) unstable; urgency=medium
     day, and an inverted `start-date`/`stop-date` range is rejected at
     strict commit (warning on tolerant load) instead of committing
     clean and never activating (#15695).
+  * Apply day-2 VRRP advertise-interval and hold-time updates to running
+    timers: a MASTER now advertises immediately and re-arms its advert
+    timer when the interval or priority changes (instead of starving
+    backups into a dual-master window), config-update tokens no longer
+    leak across MASTER-to-BACKUP transitions, a BACKUP re-arms its
+    master-down timer when its fallback horizon shrinks or preemption
+    becomes warranted, and an armed preempt hold-time countdown is
+    preserved on unrelated edits instead of restarting (#15689).
 
   * Support standard Junos named address books
     (`security address-book <book> { ... attach { zone <z>; } }`) and

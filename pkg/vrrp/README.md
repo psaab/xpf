@@ -70,11 +70,16 @@ default RETH ownership/failover path.
   gap): the no-change gate compares `AdvertiseInterval` and `GARPCount` so a
   day-2 commit changing only `reth-advertise-interval` or
   `gratuitous-arp-count` is detected, and `updateConfig` copies both into the
-  running instance's `cfg` (#5087). Neither needs an explicit timer poke — the
-  MASTER advert timer re-arms via `advertTimer.Reset(vi.advertInterval())` on
-  its next fire, the BACKUP master-down horizon re-reads
-  `cfg.AdvertiseInterval` through `masterDownInterval()`, and the next
-  failover's `sendGARP` re-reads `cfg.GARPCount`. Before #5087 the stale value
+  running instance's `cfg` (#5087). Since #15689 the run loop consumes
+  `configUpdatedCh` in BOTH states: StateMaster immediately advertises and
+  re-arms `advertTimer` at the new `vi.advertInterval()` when the interval
+  or effective priority changed (a shrink left on the old arm starved
+  BACKUP peers into a dual-MASTER window, and the undrained token leaked
+  into a later BACKUP tenure); StateBackup re-arms `masterDownTimer` when
+  the no-learned-master fallback horizon shrank or preemption newly became
+  warranted, and preserves an armed preempt-hold countdown unless the
+  hold-time changed or the preempt premise was lost. The next failover's
+  `sendGARP` re-reads `cfg.GARPCount`. Before #5087 the stale value
   persisted until an unrelated restart.
   **Ifindex drift (#2294):** before the no-change / in-place branch, a
   cheap tolerant `name→ifindex` probe compares the live kernel ifindex
