@@ -892,23 +892,30 @@ func (c *CLI) handleShowSystem(args []string) error {
 		// (and the no-RBAC empty class) still sees cleartext.
 		redact := c.showConfigRedacted()
 		if len(args) >= 2 {
-			// "show system rollback compare N" — diff rollback N against the
-			// CANDIDATE (ShowCompareRollbackRedacted), not against active:
-			// the same both-arms candidate read the gRPC ShowCompare RPC
-			// prices at PermConfig (#9889).
+			// OPERATIONAL baseline (#15657 V45-03): Junos operational
+			// `show system rollback compare <N>` diffs rollback N
+			// against the ACTIVE configuration — the command tree's
+			// own description ("Compare rollback with active config").
+			// It must not require configuration mode and must not read
+			// another session's dirty candidate. (Config-mode
+			// `show | compare rollback <N>` keeps the candidate
+			// baseline in handleConfigShow.) Because the baseline is
+			// now committed state only, the handler serves view-level
+			// callers; the gates were re-priced to match (see
+			// permissions.go showSystemRollbackCompare).
 			if args[1] == "compare" {
-				if len(args) < 3 {
+				if len(args) != 3 {
 					return fmt.Errorf("usage: show system rollback compare <N>")
 				}
 				n, err := strconv.Atoi(args[2])
-				if err != nil || n < 1 {
-					return fmt.Errorf("usage: show system rollback compare <N>")
+				if err != nil || n < 0 {
+					return fmt.Errorf("usage: show system rollback compare <N> (0 = active configuration)")
 				}
 				var diff string
 				if redact {
-					diff, err = c.store.ShowCompareRollbackRedacted(n)
+					diff, err = c.store.ShowCompareRollbackActiveRedacted(n)
 				} else {
-					diff, err = c.store.ShowCompareRollback(n)
+					diff, err = c.store.ShowCompareRollbackActive(n)
 				}
 				if err != nil {
 					return err
@@ -921,49 +928,46 @@ func (c *CLI) handleShowSystem(args []string) error {
 				return nil
 			}
 
-			// "show system rollback N" — show specific rollback content.
+			// "show system rollback N" — show specific rollback
+			// content. Junos rollback 0 is the active configuration.
 			n, err := strconv.Atoi(args[1])
-			if err != nil || n < 1 {
-				return fmt.Errorf("usage: show system rollback <N>")
+			if err != nil || n < 0 {
+				return fmt.Errorf("usage: show system rollback <N> (0 = active configuration)")
 			}
-			// #14715/#13202: token-exact pipe parsing. Only
-			// `| display set` and a bare `compare` token are honoured;
-			// trailing tokens after a display format are a syntax error,
-			// never silently discarded (the substring check rendered the
-			// whole rollback slot for `| display set interfaces`).
-			_, rbFormat, rbPipe, rbPiped, rbErr := splitDisplayPipe(args[2:])
+			// #14715/#13202 token-exact pipe parsing, #15657 V47-02:
+			// `| compare` is a pipe like any other and is evaluated
+			// BEFORE the generic unknown-pipe case (previously the
+			// rbPiped arm matched first, making isCompare
+			// unreachable). Pre-pipe tokens are the subtree path for
+			// display formats and are only valid with one; a bare
+			// `compare` token without `|` (the spelling the gates
+			// historically recognised) keeps working, but any other
+			// stray pre-pipe token fails loudly instead of being
+			// silently ignored.
+			rbPath, rbFormat, rbPipe, rbPiped, rbErr := splitDisplayPipe(args[2:])
 			if rbErr != nil {
 				fmt.Println(rbErr.Error())
 				return nil
 			}
-			isCompare := false
-			for _, a := range args[2:] {
-				if a == "compare" {
-					isCompare = true
+			isPipeCompare := rbPiped && rbFormat == displayPipeNone && len(rbPipe) == 1 && rbPipe[0] == "compare"
+			isBareCompare := false
+			if !rbPiped {
+				for _, a := range args[2:] {
+					if a == "compare" {
+						isBareCompare = true
+					} else {
+						fmt.Printf("syntax error: unexpected token '%s' for rollback (use '| compare' or '| display <format>')\n", a)
+						return nil
+					}
 				}
 			}
 			switch {
-			case rbPiped && rbFormat == displayPipeSet:
-				var content string
-				if redact {
-					content, err = c.store.ShowRollbackSetRedacted(n)
-				} else {
-					content, err = c.store.ShowRollbackSet(n)
-				}
-				if err != nil {
-					return err
-				}
-				fmt.Print(content)
-			case rbPiped && rbFormat != displayPipeNone:
-				fmt.Printf("syntax error: unknown display option '%s' for rollback (only 'set' is supported)\n", args[len(args)-1])
-			case rbPiped:
-				fmt.Printf("syntax error: unknown pipe command '%s'\n", rbPipe[0])
-			case isCompare:
+			case isPipeCompare || isBareCompare:
 				var diff string
 				if redact {
-					diff, err = c.store.ShowCompareRollbackRedacted(n)
+					diff, err = c.store.ShowCompareRollbackActiveRedacted(n)
 				} else {
-					diff, err = c.store.ShowCompareRollback(n)
+					diff, err = c.store.ShowCompareRollbackActive(n)
 				}
 				if err != nil {
 					return err
@@ -973,6 +977,46 @@ func (c *CLI) handleShowSystem(args []string) error {
 				} else {
 					fmt.Print(diff)
 				}
+			case rbPiped && rbFormat != displayPipeNone:
+				// #15657 V48-02: every display format is honoured,
+				// scoped to the pre-pipe subtree path.
+				var content string
+				switch rbFormat {
+				case displayPipeSet:
+					if redact {
+						content, err = c.store.ShowRollbackSetRedactedPath(n, rbPath)
+					} else {
+						content, err = c.store.ShowRollbackSetPath(n, rbPath)
+					}
+				case displayPipeJSON:
+					if redact {
+						content, err = c.store.ShowRollbackJSONRedactedPath(n, rbPath)
+					} else {
+						content, err = c.store.ShowRollbackJSONPath(n, rbPath)
+					}
+				case displayPipeXML:
+					if redact {
+						content, err = c.store.ShowRollbackXMLRedactedPath(n, rbPath)
+					} else {
+						content, err = c.store.ShowRollbackXMLPath(n, rbPath)
+					}
+				case displayPipeInheritance:
+					if redact {
+						content, err = c.store.ShowRollbackInheritanceRedactedPath(n, rbPath)
+					} else {
+						content, err = c.store.ShowRollbackInheritancePath(n, rbPath)
+					}
+				}
+				if err != nil {
+					return err
+				}
+				if len(rbPath) > 0 && content == "" {
+					fmt.Printf("configuration path not found: %s\n", strings.Join(rbPath, " "))
+				} else {
+					fmt.Print(content)
+				}
+			case rbPiped:
+				fmt.Printf("syntax error: unknown pipe command '%s'\n", rbPipe[0])
 			default:
 				var content string
 				if redact {

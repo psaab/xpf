@@ -541,9 +541,11 @@ func (c *CLI) handleConfigShow(args []string) error {
 				return nil
 			}
 			if len(pipeRest) == 3 && pipeRest[1] == "rollback" {
+				// #15657 V45-03: rollback 0 is the active config,
+				// so `show | compare rollback 0` == `show | compare`.
 				n, err := strconv.Atoi(pipeRest[2])
-				if err != nil || n < 1 {
-					return fmt.Errorf("usage: show | compare rollback <N>")
+				if err != nil || n < 0 {
+					return fmt.Errorf("usage: show | compare rollback <N> (0 = active configuration)")
 				}
 				var diff string
 				if redact {

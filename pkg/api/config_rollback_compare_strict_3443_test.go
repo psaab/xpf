@@ -100,30 +100,22 @@ func TestConfigShowRollbackHandlerRejectsMalformedN(t *testing.T) {
 	}
 }
 
-// TestConfigShowRollbackHandlerRejectsZeroN pins the #4556 M-01 fix: `?n=0`
-// is a canonical non-negative uint that clears queryIntStrict, so the old
-// code passed it to ShowRollbackRedacted(0) → history.Get(-1) → the opaque
-// "history position -1 out of range" error. The handler now rejects n<=0 up
-// front with a clear positive-integer message. RED-on-revert: dropping the
-// n<=0 guard returns the store's out-of-range error, not this message.
+// TestConfigShowRollbackHandlerRejectsZeroN originally pinned #4556
+// M-01 (`?n=0` rejected). #15657 V45-03 supersedes it: Junos rollback
+// 0 IS the active configuration, so n=0 renders active with 200.
+// RED-on-revert to the zero rejection: status becomes 400.
 func TestConfigShowRollbackHandlerRejectsZeroN(t *testing.T) {
 	s := newCompareStore(t)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/config/show-rollback?n=0", nil)
 	s.configShowRollbackHandler(rr, req)
 
-	if rr.Code != 400 {
-		t.Fatalf("n=0: status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+	if rr.Code != 200 {
+		t.Fatalf("n=0: status = %d, want 200 (rollback 0 = active); body=%s", rr.Code, rr.Body.String())
 	}
 	resp := decodeResponse(t, rr.Body.String())
-	if resp.Success {
-		t.Fatalf("n=0: success=true, want false")
-	}
-	if !strings.Contains(resp.Error, "rollback index must be a positive integer") {
-		t.Fatalf("n=0: error = %q, want substring %q", resp.Error, "rollback index must be a positive integer")
-	}
-	if strings.Contains(resp.Error, "out of range") {
-		t.Fatalf("n=0: error leaked the opaque store message %q", resp.Error)
+	if !resp.Success {
+		t.Fatalf("n=0: success=false, want true")
 	}
 }
 

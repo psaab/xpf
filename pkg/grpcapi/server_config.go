@@ -452,6 +452,15 @@ func (s *Server) ShowCompare(_ context.Context, req *pb.ShowCompareRequest) (*pb
 		return nil, status.Errorf(codes.InvalidArgument,
 			"invalid rollback_n %d: must be non-negative (0 = candidate vs active)", req.RollbackN)
 	}
+	// #15657 V45-03: the operational baseline diffs the rollback slot
+	// (0 = active) against ACTIVE — no candidate read, no config mode.
+	if req.ActiveBaseline {
+		diff, err := s.store.ShowCompareRollbackActiveRedactedAtPath(int(req.RollbackN), req.Path)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+		}
+		return &pb.ShowCompareResponse{Output: diff}, nil
+	}
 	if req.RollbackN > 0 {
 		diff, err := s.store.ShowCompareRollbackRedactedAtPath(int(req.RollbackN), req.Path)
 		if err != nil {
@@ -463,22 +472,32 @@ func (s *Server) ShowCompare(_ context.Context, req *pb.ShowCompareRequest) (*pb
 }
 
 func (s *Server) ShowRollback(_ context.Context, req *pb.ShowRollbackRequest) (*pb.ShowRollbackResponse, error) {
-	// #4556 M-01: n selects a 1-based rollback slot. A non-positive n
-	// (0 or a negative wire value) maps to history.Get(n-1) =
-	// history.Get(<0) → the opaque store error "history position -1 out
-	// of range". Reject it up front with a clear positive-integer
-	// message, mirroring the REST show-rollback leg and the ShowCompare
-	// rollback_n guard (#3443 M6).
-	if req.N <= 0 {
+	// #15657 V45-03/V48-02: n == 0 is the active configuration (Junos
+	// rollback 0); only a negative wire value is invalid. Format and
+	// Path are honoured for every format — previously only SET was
+	// branched and xml/json/inheritance silently fell back to
+	// hierarchical text, and there was no subtree selector at all.
+	if req.N < 0 {
 		return nil, status.Errorf(codes.InvalidArgument,
-			"invalid n %d: rollback index must be a positive integer", req.N)
+			"invalid n %d: rollback index must be non-negative (0 = active configuration)", req.N)
+	}
+	var path []string
+	if len(req.Path) > 0 {
+		path = req.Path
 	}
 	var output string
 	var err error
-	if req.Format == pb.ConfigFormat_SET {
-		output, err = s.store.ShowRollbackSetRedacted(int(req.N))
-	} else {
-		output, err = s.store.ShowRollbackRedacted(int(req.N))
+	switch req.Format {
+	case pb.ConfigFormat_SET:
+		output, err = s.store.ShowRollbackSetRedactedPath(int(req.N), path)
+	case pb.ConfigFormat_JSON:
+		output, err = s.store.ShowRollbackJSONRedactedPath(int(req.N), path)
+	case pb.ConfigFormat_XML:
+		output, err = s.store.ShowRollbackXMLRedactedPath(int(req.N), path)
+	case pb.ConfigFormat_INHERITANCE:
+		output, err = s.store.ShowRollbackInheritanceRedactedPath(int(req.N), path)
+	default:
+		output, err = s.store.ShowRollbackRedactedPath(int(req.N), path)
 	}
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)

@@ -6,7 +6,6 @@ package cli
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -107,56 +106,21 @@ func (c *CLI) showActiveConfigPath(path []string) string {
 	return c.store.ShowActivePath(path)
 }
 
-// showSystemRollbackCompare reports whether the operational `show system
-// rollback` handler will read the shared candidate for a compare request.
-//
-// The first spelling is `show system rollback compare N`; the second is
-// `show system rollback N compare`. Keep this predicate aligned with
-// handleShowSystem's token-exact parsing (#14715): a `| display set` pipe
-// wins over the compare token, while the first spelling is checked before
-// any display suffix. The system token is resolved here exactly as
-// handleShow does, so an unambiguous abbreviation cannot bypass the
-// candidate-read price.
-func showSystemRollbackCompare(args []string) bool {
-	if len(args) < 3 {
-		return false
-	}
-	system, err := resolveCommand(args[0], keysFromTree(operationalTree["show"].Children))
-	if err != nil || system != "system" || args[1] != "rollback" {
-		return false
-	}
-
-	// `show system rollback compare N` is the handler's first branch.
-	if args[2] == "compare" {
-		if len(args) < 4 {
-			return false
-		}
-		n, err := strconv.Atoi(args[3])
-		return err == nil && n >= 1
-	}
-
-	// `show system rollback N ... compare` is the handler's second branch.
-	n, err := strconv.Atoi(args[2])
-	if err != nil || n < 1 {
-		return false
-	}
-	if _, format, _, piped, _ := splitDisplayPipe(args[3:]); piped && format == displayPipeSet {
-		return false
-	}
-	for _, a := range args[3:] {
-		if a == "compare" {
-			return true
-		}
-	}
-	return false
-}
+// showSystemRollbackCompare formerly reported whether the operational
+// `show system rollback` handler read the shared candidate, so the
+// coarse gate could price the compare spellings at PermConfig
+// (#10094/#9889). #15657 V45-03 moved the operational baseline to
+// ACTIVE (ShowCompareRollbackActive*): the handler no longer reads
+// s.candidate, so there is no candidate read to price and the whole
+// `show` family stays PermView. The predicate is deleted with the
+// price; config-mode `show | compare rollback <N>` still reads the
+// candidate and stays priced on that surface.
 
 // showSecurityMatchPolicies reports whether the operational `show`
 // arguments resolve to `security match-policies` — the shared
 // policymatch simulator. It resolves both tokens through the command
 // tree (operationalTree["show"].Children, then the security node's
-// children) via resolveCommand, mirroring showSystemRollbackCompare /
-// handleShowSecurity, so an unambiguous abbreviation (`show sec
+// children) via resolveCommand, so an unambiguous abbreviation (`show sec
 // match-p`) gates identically to the fully-spelled form and cannot
 // bypass the gate. An unresolvable/ambiguous token that the dispatcher
 // would never execute returns false.
@@ -185,17 +149,6 @@ func showSecurityMatchPolicies(args []string) bool {
 // command, with a few privileged subcommands needing a finer gate.
 func requiredPermission(parts []string) config.LoginClassPermission {
 	action := parts[0]
-
-	// #10094/#9889: ShowCompare's two operational console spellings both
-	// render a diff against the shared CANDIDATE. Reading another session's
-	// uncommitted configuration is a configure-mode activity, so price only
-	// those compare paths at PermConfig while the rest of `show` remains
-	// PermView. This mirrors #9889's gRPC contract; the in-process console's
-	// single coarse command price is intentionally a replacement (like the
-	// REST twin), rather than gRPC's additive method-table-plus-gate price.
-	if action == "show" && showSystemRollbackCompare(parts[1:]) {
-		return config.PermConfig
-	}
 
 	// #14408 (DR13-H1): `show security match-policies` runs the shared
 	// policymatch simulator over an arbitrary 5-tuple — the same verdict

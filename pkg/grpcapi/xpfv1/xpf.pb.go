@@ -1549,11 +1549,15 @@ func (x *ShowConfigResponse) GetOutput() string {
 }
 
 type ShowCompareRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RollbackN     int32                  `protobuf:"varint,1,opt,name=rollback_n,json=rollbackN,proto3" json:"rollback_n,omitempty"` // 0 = compare candidate vs active
-	Path          []string               `protobuf:"bytes,2,rep,name=path,proto3" json:"path,omitempty"`                             // optional subtree filter (#15272)
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	RollbackN int32                  `protobuf:"varint,1,opt,name=rollback_n,json=rollbackN,proto3" json:"rollback_n,omitempty"` // 0 = compare candidate vs active
+	Path      []string               `protobuf:"bytes,2,rep,name=path,proto3" json:"path,omitempty"`                             // optional subtree filter (#15272)
+	// #15657 V45-03: operational baseline — diff rollback_n (0 = active)
+	// against the ACTIVE configuration instead of the candidate. Needs
+	// no candidate and is priced as a committed-config read.
+	ActiveBaseline bool `protobuf:"varint,3,opt,name=active_baseline,json=activeBaseline,proto3" json:"active_baseline,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ShowCompareRequest) Reset() {
@@ -1598,6 +1602,13 @@ func (x *ShowCompareRequest) GetPath() []string {
 		return x.Path
 	}
 	return nil
+}
+
+func (x *ShowCompareRequest) GetActiveBaseline() bool {
+	if x != nil {
+		return x.ActiveBaseline
+	}
+	return false
 }
 
 type ShowCompareResponse struct {
@@ -1646,8 +1657,9 @@ func (x *ShowCompareResponse) GetOutput() string {
 
 type ShowRollbackRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	N             int32                  `protobuf:"varint,1,opt,name=n,proto3" json:"n,omitempty"`
+	N             int32                  `protobuf:"varint,1,opt,name=n,proto3" json:"n,omitempty"` // 0 = active configuration, 1..N = history slots (#15657)
 	Format        ConfigFormat           `protobuf:"varint,2,opt,name=format,proto3,enum=xpf.v1.ConfigFormat" json:"format,omitempty"`
+	Path          []string               `protobuf:"bytes,3,rep,name=path,proto3" json:"path,omitempty"` // optional subtree filter (#15657)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1694,6 +1706,13 @@ func (x *ShowRollbackRequest) GetFormat() ConfigFormat {
 		return x.Format
 	}
 	return ConfigFormat_HIERARCHICAL
+}
+
+func (x *ShowRollbackRequest) GetPath() []string {
+	if x != nil {
+		return x.Path
+	}
+	return nil
 }
 
 type ShowRollbackResponse struct {
@@ -9893,16 +9912,18 @@ const file_xpf_proto_rawDesc = "" +
 	"\x06target\x18\x02 \x01(\x0e2\x14.xpf.v1.ConfigTargetR\x06target\x12\x12\n" +
 	"\x04path\x18\x03 \x03(\tR\x04path\",\n" +
 	"\x12ShowConfigResponse\x12\x16\n" +
-	"\x06output\x18\x01 \x01(\tR\x06output\"G\n" +
+	"\x06output\x18\x01 \x01(\tR\x06output\"p\n" +
 	"\x12ShowCompareRequest\x12\x1d\n" +
 	"\n" +
 	"rollback_n\x18\x01 \x01(\x05R\trollbackN\x12\x12\n" +
-	"\x04path\x18\x02 \x03(\tR\x04path\"-\n" +
+	"\x04path\x18\x02 \x03(\tR\x04path\x12'\n" +
+	"\x0factive_baseline\x18\x03 \x01(\bR\x0eactiveBaseline\"-\n" +
 	"\x13ShowCompareResponse\x12\x16\n" +
-	"\x06output\x18\x01 \x01(\tR\x06output\"Q\n" +
+	"\x06output\x18\x01 \x01(\tR\x06output\"e\n" +
 	"\x13ShowRollbackRequest\x12\f\n" +
 	"\x01n\x18\x01 \x01(\x05R\x01n\x12,\n" +
-	"\x06format\x18\x02 \x01(\x0e2\x14.xpf.v1.ConfigFormatR\x06format\".\n" +
+	"\x06format\x18\x02 \x01(\x0e2\x14.xpf.v1.ConfigFormatR\x06format\x12\x12\n" +
+	"\x04path\x18\x03 \x03(\tR\x04path\".\n" +
 	"\x14ShowRollbackResponse\x12\x16\n" +
 	"\x06output\x18\x01 \x01(\tR\x06output\"\x14\n" +
 	"\x12ListHistoryRequest\"E\n" +

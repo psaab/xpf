@@ -12,14 +12,18 @@
 //     was silently ignored on every surface.
 //
 // The fix parses modifiers token-exactly (shared splitShowPipe and
-// parseShowDisplay helpers): only `| display set` on rollback,
+// parseShowDisplay helpers): `| display set` on rollback,
 // `| display <json|set|xml|inheritance>` on configuration show, and
 // `| compare [rollback <N>]` in config mode are accepted. Unsupported
 // combinations and trailing tokens error BEFORE any RPC is issued.
 //
+// #15657 V48-02 supersedes the rollback-format half: `| display
+// json|xml|inheritance` on rollback are now HONOURED (forwarded to
+// ShowRollback), not rejected — the reject cases below keep only the
+// shapes that remain invalid (bare/stray tokens, trailing garbage).
+//
 // RED-on-revert: restoring the substring checks makes the reject cases
-// return nil and issue the wrong RPC (asserted zero-call below), while
-// `show system rollback 1 | display json` incorrectly renders hierarchy.
+// return nil and issue the wrong RPC (asserted zero-call below).
 
 package main
 
@@ -84,12 +88,6 @@ func TestShowPipeModifierRejectsGarbage_13202(t *testing.T) {
 		name string
 		run  func(c *ctl) error
 	}{
-		{"rollback display json unsupported", func(c *ctl) error {
-			return c.handleShowSystem([]string{"rollback", "1", "|", "display", "json"})
-		}},
-		{"rollback display xml unsupported", func(c *ctl) error {
-			return c.handleShowSystem([]string{"rollback", "1", "|", "display", "xml"})
-		}},
 		{"rollback substring compare token", func(c *ctl) error {
 			return c.handleShowSystem([]string{"rollback", "1", "bogus_compare_token"})
 		}},
@@ -159,7 +157,10 @@ func TestShowPipeModifierAcceptsExact_13202(t *testing.T) {
 		args []string
 		fmt  pb.ConfigFormat
 	}{
-		"set": {[]string{"rollback", "1", "|", "display", "set"}, pb.ConfigFormat_SET},
+		"set":         {[]string{"rollback", "1", "|", "display", "set"}, pb.ConfigFormat_SET},
+		"json":        {[]string{"rollback", "1", "|", "display", "json"}, pb.ConfigFormat_JSON},
+		"xml":         {[]string{"rollback", "1", "|", "display", "xml"}, pb.ConfigFormat_XML},
+		"inheritance": {[]string{"rollback", "1", "|", "display", "inheritance"}, pb.ConfigFormat_INHERITANCE},
 	} {
 		t.Run("rollback display "+name, func(t *testing.T) {
 			fake := &showPipeRecorderClient{}

@@ -105,32 +105,45 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			return nil // timestamp list only
 		}
 		if args[2] == "compare" {
-			if len(args) < 4 {
+			if len(args) != 4 {
 				return nil // handler usage error; renders nothing
 			}
-			if n, err := strconv.Atoi(args[3]); err != nil || n < 1 {
+			if n, err := strconv.Atoi(args[3]); err != nil || n < 0 {
 				return nil
 			}
-			return config.AuthorizeConfigShowCompare(cfg, c.userClass)
+			// #15657 V45-03: operational compare diffs against
+			// ACTIVE — a whole committed-tree diff, adjudicated
+			// like ShowRollback, not the candidate compare.
+			return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
 		}
 		n, err := strconv.Atoi(args[2])
-		if err != nil || n < 1 {
+		if err != nil || n < 0 {
 			return nil // handler usage error
 		}
 		rest := args[3:]
-		_, format, _, piped, pipeErr := splitDisplayPipe(rest)
+		rbPath, format, pipe, piped, pipeErr := splitDisplayPipe(rest)
 		if pipeErr != nil {
 			return nil // handler prints the syntax error; renders nothing
 		}
-		if piped && format == displayPipeSet {
-			return config.AuthorizeConfigShowRollback(cfg, c.userClass, displaySuffix14707("display set"))
+		if piped && format != displayPipeNone {
+			// #15657 V48-02: display formats carry an optional
+			// pre-pipe subtree path; a path render is priced as a
+			// path read, a whole render as a rollback read.
+			suffix := config.ConfigShowDisplaySuffix(displaySuffix14707("display " + displayFormatName(format)))
+			if len(rbPath) > 0 {
+				return config.AuthorizeConfigShowPath(cfg, c.userClass, rbPath, suffix)
+			}
+			return config.AuthorizeConfigShowRollback(cfg, c.userClass, suffix)
 		}
 		if piped {
+			if len(pipe) == 1 && pipe[0] == "compare" {
+				return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
+			}
 			return nil // handler syntax error; renders nothing
 		}
 		for _, a := range rest {
 			if a == "compare" {
-				return config.AuthorizeConfigShowCompare(cfg, c.userClass)
+				return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
 			}
 		}
 		return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
@@ -150,6 +163,21 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 		return nil
 	}
 	return nil
+}
+
+// displayFormatName maps a displayPipeFormat to its spelling.
+func displayFormatName(f displayPipeFormat) string {
+	switch f {
+	case displayPipeSet:
+		return "set"
+	case displayPipeJSON:
+		return "json"
+	case displayPipeXML:
+		return "xml"
+	case displayPipeInheritance:
+		return "inheritance"
+	}
+	return ""
 }
 
 // checkShowConfigurationRead adjudicates operational
