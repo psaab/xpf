@@ -129,6 +129,30 @@ func (s *Server) GetSessions(ctx context.Context, req *pb.GetSessionsRequest) (*
 	return resp, rpcStatus(err)
 }
 
+// sessionHAActive derives HaActive from the session's owning data RG
+// (#15236 A52-03), not RG0. ok=false means ownership is unknown and the
+// caller must not stamp a guessed Active/Backup onto the entry.
+func (s *Server) sessionHAActive(inIf, outIf string, inZone, outZone uint16, zoneNames map[uint16]string) (bool, bool) {
+	if s.cluster == nil {
+		return true, true // standalone default
+	}
+	var cfg *config.Config
+	if s.store != nil {
+		cfg = s.store.ActiveConfig()
+	}
+	state := config.SessionHAState(cfg, inIf, outIf, inZone, outZone, zoneNames, func(rg int) (bool, bool) {
+		return s.cluster.LocalGroupPrimary(rg)
+	})
+	switch state {
+	case "Active":
+		return true, true
+	case "Backup":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 // getSessionsCursor implements cursor-based pagination.
 // It iterates only up to page_size matching entries, skips enrichment when
 // no_enrich is set, and computes the exact Total with a cancellation-sampled
@@ -159,11 +183,7 @@ func (s *Server) getSessionsCursor(ctx context.Context, req *pb.GetSessionsReque
 	now := monotonicSeconds()
 	all := make([]*pb.SessionEntry, 0, pageSize)
 
-	// Determine HA state for session display.
-	haActive := true
-	if s.cluster != nil {
-		haActive = s.cluster.IsLocalPrimary(0)
-	}
+	// #15236 (A52-03): HaActive is computed per session below.
 
 	// Parse page_token to determine where to resume.
 	startV4 := true  // iterate v4 sessions
@@ -233,7 +253,12 @@ func (s *Server) getSessionsCursor(ctx context.Context, req *pb.GetSessionsReque
 					val.FwdBytes += rev.FwdBytes
 				}
 			}
-			se := sessionEntryV4(key, val, now, filter.zoneNames, filter.policyNames, filter.zoneIfaces, filter.egressIfaces, haActive)
+			se := sessionEntryV4(key, val, now, filter.zoneNames, filter.policyNames, filter.zoneIfaces, filter.egressIfaces, true)
+			if active, known := s.sessionHAActive(se.IngressInterface, se.EgressInterface, val.IngressZone, val.EgressZone, filter.zoneNames); known {
+				se.HaActive = active
+			} else if s.cluster != nil {
+				se.HaActive = false
+			}
 			if !noEnrich {
 				se.Application = appid.ResolveSessionNameWithIndex(filter.appNames, filter.cfg, filter.appFallback, key.Protocol, ntohs(key.SrcPort), ntohs(key.DstPort), val.AppID)
 			}
@@ -290,7 +315,12 @@ func (s *Server) getSessionsCursor(ctx context.Context, req *pb.GetSessionsReque
 					val.FwdBytes += rev.FwdBytes
 				}
 			}
-			se := sessionEntryV6(key, val, now, filter.zoneNames, filter.policyNames, filter.zoneIfaces, filter.egressIfaces, haActive)
+			se := sessionEntryV6(key, val, now, filter.zoneNames, filter.policyNames, filter.zoneIfaces, filter.egressIfaces, true)
+			if active, known := s.sessionHAActive(se.IngressInterface, se.EgressInterface, val.IngressZone, val.EgressZone, filter.zoneNames); known {
+				se.HaActive = active
+			} else if s.cluster != nil {
+				se.HaActive = false
+			}
 			if !noEnrich {
 				se.Application = appid.ResolveSessionNameWithIndex(filter.appNames, filter.cfg, filter.appFallback, key.Protocol, ntohs(key.SrcPort), ntohs(key.DstPort), val.AppID)
 			}
@@ -885,11 +915,7 @@ func (s *Server) getSessionsLegacy(ctx context.Context, req *pb.GetSessionsReque
 	all := make([]*pb.SessionEntry, 0, limit)
 	idx := 0
 
-	// Determine HA state for session display.
-	haActive := true // standalone default
-	if s.cluster != nil {
-		haActive = s.cluster.IsLocalPrimary(0)
-	}
+	// #15236 (A52-03): HaActive is computed per session below.
 
 	// A backend iterator error (e.g. helper restart mid-scan) must fail
 	// the RPC rather than returning a partial session list as success —
@@ -916,7 +942,12 @@ func (s *Server) getSessionsLegacy(ctx context.Context, req *pb.GetSessionsReque
 					val.FwdBytes += rev.FwdBytes
 				}
 			}
-			se := sessionEntryV4(key, val, now, filter.zoneNames, filter.policyNames, filter.zoneIfaces, filter.egressIfaces, haActive)
+			se := sessionEntryV4(key, val, now, filter.zoneNames, filter.policyNames, filter.zoneIfaces, filter.egressIfaces, true)
+			if active, known := s.sessionHAActive(se.IngressInterface, se.EgressInterface, val.IngressZone, val.EgressZone, filter.zoneNames); known {
+				se.HaActive = active
+			} else if s.cluster != nil {
+				se.HaActive = false
+			}
 			if !noEnrich {
 				se.Application = appid.ResolveSessionNameWithIndex(filter.appNames, filter.cfg, filter.appFallback, key.Protocol, ntohs(key.SrcPort), ntohs(key.DstPort), val.AppID)
 			}
@@ -944,7 +975,12 @@ func (s *Server) getSessionsLegacy(ctx context.Context, req *pb.GetSessionsReque
 					val.FwdBytes += rev.FwdBytes
 				}
 			}
-			se := sessionEntryV6(key, val, now, filter.zoneNames, filter.policyNames, filter.zoneIfaces, filter.egressIfaces, haActive)
+			se := sessionEntryV6(key, val, now, filter.zoneNames, filter.policyNames, filter.zoneIfaces, filter.egressIfaces, true)
+			if active, known := s.sessionHAActive(se.IngressInterface, se.EgressInterface, val.IngressZone, val.EgressZone, filter.zoneNames); known {
+				se.HaActive = active
+			} else if s.cluster != nil {
+				se.HaActive = false
+			}
 			if !noEnrich {
 				se.Application = appid.ResolveSessionNameWithIndex(filter.appNames, filter.cfg, filter.appFallback, key.Protocol, ntohs(key.SrcPort), ntohs(key.DstPort), val.AppID)
 			}
@@ -979,6 +1015,23 @@ func (s *Server) getSessionsLegacy(ctx context.Context, req *pb.GetSessionsReque
 	s.setSessionsNodeID(resp)
 	s.fetchPeerSessions(ctx, req, resp)
 	return resp, nil
+}
+
+// buildSessionSummaryFilter reuses the GetSessions filter builder for the
+// summary request's filter fields (#15236 A52-04).
+func (s *Server) buildSessionSummaryFilter(req *pb.GetSessionSummaryRequest) *sessionFilter {
+	return s.buildSessionFilter(&pb.GetSessionsRequest{
+		Zone:              req.GetZone(),
+		Protocol:          req.GetProtocol(),
+		SourcePrefix:      req.GetSourcePrefix(),
+		DestinationPrefix: req.GetDestinationPrefix(),
+		SourcePort:        req.GetSourcePort(),
+		DestinationPort:   req.GetDestinationPort(),
+		NatOnly:           req.GetNatOnly(),
+		Application:       req.GetApplication(),
+		InterfaceFilter:   req.GetInterfaceFilter(),
+		SourceNatPool:     req.GetSourceNatPool(),
+	})
 }
 
 func (s *Server) GetSessionSummary(ctx context.Context, req *pb.GetSessionSummaryRequest) (*pb.GetSessionSummaryResponse, error) {
@@ -1020,10 +1073,20 @@ func (s *Server) GetSessionSummary(ctx context.Context, req *pb.GetSessionSummar
 	if err := ctx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
 	}
+	// #15236 (A52-04): apply the request's filters (if any) so a filtered
+	// summary — notably the peer leg of a filtered cluster summary — counts
+	// only matching sessions instead of the whole table.
+	summaryFilter := s.buildSessionSummaryFilter(req)
+	if err := summaryFilter.validate(); err != nil {
+		return nil, err
+	}
 	cancelled := newSessionWalkCancelSampler(ctx, sessionWalkCancelInterval9060)
-	if err := s.dp.IterateSessions(func(_ dataplane.SessionKey, val dataplane.SessionValue) bool {
+	if err := s.dp.IterateSessions(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
 		if cancelled() {
 			return false
+		}
+		if summaryFilter.hasFilters && !summaryFilter.matchV4(key, val) {
+			return true
 		}
 		resp.TotalEntries++
 		if val.IsReverse == 0 {
@@ -1050,9 +1113,12 @@ func (s *Server) GetSessionSummary(ctx context.Context, req *pb.GetSessionSummar
 		return nil, status.FromContextError(err).Err()
 	}
 
-	if err := s.dp.IterateSessionsV6(func(_ dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
+	if err := s.dp.IterateSessionsV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
 		if cancelled() {
 			return false
+		}
+		if summaryFilter.hasFilters && !summaryFilter.matchV6(key, val) {
+			return true
 		}
 		resp.TotalEntries++
 		if val.IsReverse == 0 {
@@ -1097,7 +1163,7 @@ func (s *Server) GetSessionSummary(ctx context.Context, req *pb.GetSessionSummar
 	// about it. A divergence there would always be a bug — the same peer fetch
 	// must classify the same way whichever surface asked.
 	if req.GetIncludePeer() {
-		peerResp, perr := s.proxyPeerSessionSummary(ctx)
+		peerResp, perr := s.proxyPeerSessionSummary(ctx, req)
 		s.attachPeerSessionSummary(resp, peerResp, perr)
 	} else {
 		resp.PeerStatus = pb.PeerFetchStatus_PEER_FETCH_STATUS_NOT_APPLICABLE
@@ -1124,7 +1190,7 @@ func (s *Server) peerAbsentStatus() pb.PeerFetchStatus {
 // dead peer so the caller can classify the absence. The forwarded request
 // carries include_peer=false so the peer answers from its local table without
 // recursing back.
-func (s *Server) proxyPeerSessionSummary(ctx context.Context) (*pb.GetSessionSummaryResponse, error) {
+func (s *Server) proxyPeerSessionSummary(ctx context.Context, req *pb.GetSessionSummaryRequest) (*pb.GetSessionSummaryResponse, error) {
 	if s.peerSessionSummaryFn != nil {
 		return s.peerSessionSummaryFn(ctx)
 	}
@@ -1144,7 +1210,11 @@ func (s *Server) proxyPeerSessionSummary(ctx context.Context) (*pb.GetSessionSum
 	defer conn.Close()
 	peerCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	return pb.NewBpfrxServiceClient(conn).GetSessionSummary(peerCtx, &pb.GetSessionSummaryRequest{})
+	fwd := &pb.GetSessionSummaryRequest{}
+	if req != nil {
+		fwd = &pb.GetSessionSummaryRequest{Zone: req.GetZone(), Protocol: req.GetProtocol(), SourcePrefix: req.GetSourcePrefix(), DestinationPrefix: req.GetDestinationPrefix(), SourcePort: req.GetSourcePort(), DestinationPort: req.GetDestinationPort(), NatOnly: req.GetNatOnly(), Application: req.GetApplication(), InterfaceFilter: req.GetInterfaceFilter(), SourceNatPool: req.GetSourceNatPool()}
+	}
+	return pb.NewBpfrxServiceClient(conn).GetSessionSummary(peerCtx, fwd)
 }
 
 // GetZonePairSummary aggregates the local session table by (ingress-zone,
@@ -1977,7 +2047,7 @@ func sessionStateName(state uint8) string {
 	}
 }
 
-func sessionEntryV4(key dataplane.SessionKey, val dataplane.SessionValue, now uint64, zoneNames map[uint16]string, policyNames map[uint32]string, zoneIfaces map[uint16][]string, egressIfaces map[sessionEgressKey]string, haActive bool) *pb.SessionEntry {
+func sessionEntryV4(key dataplane.SessionKey, val dataplane.SessionValue, now uint64, zoneNames map[uint16]string, policyNames map[uint32]string, zoneIfaces map[uint16][]string, egressIfaces map[sessionEgressKey]string, haActive bool) *pb.SessionEntry { // haActive retained for compat; HA is overwritten by caller when RG known
 	inIf := sessionIngressIfaceDisplay(val.IngressIfindex, val.IngressVlanID, val.IngressZone, zoneIfaces, egressIfaces)
 	if inIf == "" {
 		inIf = zoneNames[val.IngressZone]

@@ -597,6 +597,11 @@ type Config struct {
 	// IsLocalPrimary(0)). Optional; if nil the session view reports
 	// ha_active=true (the standalone default).
 	HAActiveFn func() bool
+	// HAActiveRGFn reports local primary state for a specific redundancy
+	// group (#15236 A52-03); known=false means the group is unknown and
+	// ha_active must not be guessed from RG0. Optional; nil keeps the
+	// legacy HAActiveFn behaviour for standalone/test servers.
+	HAActiveRGFn func(rg int) (primary bool, known bool)
 	// NodeIDFn returns this node's cluster id (0 standalone), stamped on the
 	// REST session list/summary/clear responses so an operator knows WHICH
 	// node a result came from (#3423 M5). Optional; if nil node_id reports 0.
@@ -762,6 +767,7 @@ type Server struct {
 	feedOverlayFn                        func() map[string][]string
 	policySchedActiveFn                  func() (map[string]bool, bool)
 	haActiveFn                           func() bool
+	haActiveRGFn                         func(rg int) (bool, bool)
 	nodeIDFn                             func() int
 	clusterSessionFn                     func() ClusterSessionService
 	startTime                            time.Time
@@ -898,6 +904,7 @@ func NewServer(cfg Config) *Server {
 		feedOverlayFn:                        cfg.FeedOverlayFn,
 		policySchedActiveFn:                  cfg.PolicySchedulerActiveStateFn,
 		haActiveFn:                           cfg.HAActiveFn,
+		haActiveRGFn:                         cfg.HAActiveRGFn,
 		nodeIDFn:                             cfg.NodeIDFn,
 		clusterSessionFn:                     cfg.ClusterSessionFn,
 		startTime:                            time.Now(),

@@ -1027,6 +1027,14 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 			}
 			return d.cluster.IsLocalPrimary(0)
 		},
+		// #15236 (A52-03): per-RG probe so REST ha_active follows the
+		// session's owning data RG, not RG0.
+		HAActiveRGFn: func(rg int) (bool, bool) {
+			if d.cluster == nil {
+				return true, true
+			}
+			return d.cluster.LocalGroupPrimary(rg)
+		},
 		// #3423 M5: stamp this node's cluster id on the REST session
 		// list/summary/clear responses so a dashboard knows WHICH node it
 		// observed. Standalone (no cluster) reports node 0.

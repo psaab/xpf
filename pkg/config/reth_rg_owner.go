@@ -107,3 +107,80 @@ func (c *Config) RethRGOwner(name string) (int, bool) {
 	rg, ok := c.RethRGOwners()[name]
 	return rg, ok
 }
+
+// SessionHAState returns "Active", "Backup", or "unknown" for a session whose
+// ingress/egress interfaces and zones are known (#15236 A52-03). The owning
+// data redundancy group is derived from the session's interface RETH RG
+// (via RethRGOwners, resolving reth units to their parent) or, failing that,
+// from an interface bound to its zones. primary reports local primary state
+// for a group and whether the group is known. "unknown" is returned when no
+// owning RG can be derived or the group is not known — never a guess from RG0.
+func SessionHAState(cfg *Config, ingressIface, egressIface string, ingressZoneID, egressZoneID uint16, zoneNames map[uint16]string, primary func(rg int) (bool, bool)) string {
+	if cfg == nil || primary == nil {
+		return "unknown"
+	}
+	owners := cfg.RethRGOwners()
+	if len(owners) == 0 {
+		return "unknown"
+	}
+	rgForIface := func(name string) (int, bool) {
+		if name == "" {
+			return 0, false
+		}
+		if rg, ok := owners[name]; ok {
+			return rg, true
+		}
+		if i := strings.LastIndex(name, "."); i > 0 {
+			if rg, ok := owners[name[:i]]; ok {
+				return rg, true
+			}
+		}
+		// Linux spelling (ge-0-0-0) vs Junos (ge-0/0/0): try both.
+		alt := strings.ReplaceAll(name, "-", "/")
+		if rg, ok := owners[alt]; ok {
+			return rg, true
+		}
+		if i := strings.LastIndex(alt, "."); i > 0 {
+			if rg, ok := owners[alt[:i]]; ok {
+				return rg, true
+			}
+		}
+		return 0, false
+	}
+	for _, name := range []string{ingressIface, egressIface} {
+		if rg, ok := rgForIface(name); ok {
+			if isPrimary, known := primary(rg); known {
+				if isPrimary {
+					return "Active"
+				}
+				return "Backup"
+			}
+			return "unknown"
+		}
+	}
+	// Fall back to interfaces bound to the session's zones.
+	if cfg.Security.Zones != nil && zoneNames != nil {
+		for _, zid := range []uint16{ingressZoneID, egressZoneID} {
+			zname := zoneNames[zid]
+			if zname == "" {
+				continue
+			}
+			zone := cfg.Security.Zones[zname]
+			if zone == nil {
+				continue
+			}
+			for _, ifName := range zone.Interfaces {
+				if rg, ok := rgForIface(ifName); ok {
+					if isPrimary, known := primary(rg); known {
+						if isPrimary {
+							return "Active"
+						}
+						return "Backup"
+					}
+					return "unknown"
+				}
+			}
+		}
+	}
+	return "unknown"
+}

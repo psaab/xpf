@@ -197,22 +197,35 @@ func (c *CLI) showRoutesForProtocol(proto string) error {
 		fmt.Println("Routing manager not available")
 		return nil
 	}
-
-	entries, err := c.routing.GetRoutes()
+	// #15236 (A52-02): translate completion/display spellings (direct,
+	// local, kernel, Access-internal) to the internal rtProtoName names and
+	// reject unknown protocols instead of printing a false "(no routes)".
+	normalized := routing.NormalizeRouteProtocol(proto)
+	if normalized == "" {
+		return fmt.Errorf("unknown route protocol %q", proto)
+	}
+	var instances []*config.RoutingInstanceConfig
+	if c.store != nil {
+		if cfg := c.store.ActiveConfig(); cfg != nil {
+			instances = cfg.RoutingInstances
+		}
+	}
+	// Iterate ALL tables (main + routing instances), not only the main table.
+	allTables, err := c.routing.GetAllTableRoutes(instances)
 	if err != nil {
 		fmt.Printf("warning: partial route display (some address families unavailable): %v\n", err)
 	}
-
-	proto = strings.ToLower(proto)
-	fmt.Printf("Routes matching protocol: %s\n", proto)
+	fmt.Printf("Routes matching protocol: %s\n", strings.ToLower(proto))
 	fmt.Printf("  %-24s %-20s %-14s %-12s %s\n",
 		"Destination", "Next-hop", "Interface", "Proto", "Pref")
 	count := 0
-	for _, e := range entries {
-		if strings.ToLower(e.Protocol) == proto {
-			fmt.Printf("  %-24s %-20s %-14s %-12s %d\n",
-				e.Destination, e.NextHop, e.Interface, e.Protocol, e.Preference)
-			count++
+	for _, table := range allTables {
+		for _, e := range table.Entries {
+			if routing.RouteProtocolMatches(e.Protocol, normalized) {
+				fmt.Printf("  %-24s %-20s %-14s %-12s %d\n",
+					e.Destination, e.NextHop, e.Interface, e.Protocol, e.Preference)
+				count++
+			}
 		}
 	}
 	if count == 0 {

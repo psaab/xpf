@@ -1232,6 +1232,7 @@ type sessionView struct {
 	egressIfaces map[sessionEgressKey]string
 	cfg          *config.Config
 	haActive     bool
+	haActiveRGFn func(rg int) (bool, bool)
 }
 
 // buildSessionView precomputes the enrichment maps from the last apply
@@ -1254,6 +1255,7 @@ func (s *Server) buildSessionView() sessionView {
 	if s.haActiveFn != nil {
 		v.haActive = s.haActiveFn()
 	}
+	v.haActiveRGFn = s.haActiveRGFn
 	cr := s.applyResult()
 	if cr != nil {
 		v.zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, v.cfg)
@@ -1670,6 +1672,19 @@ func zoneDisplayIface(zoneMembers []string) string {
 	return ""
 }
 
+// sessionHAActiveForView derives ha_active from the owning data RG when an
+// RG-aware probe is wired (#15236 A52-03); otherwise it keeps view.haActive.
+func sessionHAActiveForView(view sessionView, inIf, outIf string, inZone, outZone uint16) bool {
+	if view.haActiveRGFn == nil {
+		return view.haActive
+	}
+	state := config.SessionHAState(view.cfg, inIf, outIf, inZone, outZone, view.zoneNames, view.haActiveRGFn)
+	if state == "unknown" {
+		return false
+	}
+	return state == "Active"
+}
+
 func sessionEntryV4(key dataplane.SessionKey, val dataplane.SessionValue, now uint64, view sessionView) SessionEntry {
 	inIf := sessionIngressIfaceDisplay(val.IngressIfindex, val.IngressVlanID, val.IngressZone, view.zoneIfaces, view.egressIfaces)
 	if inIf == "" {
@@ -1702,7 +1717,7 @@ func sessionEntryV4(key dataplane.SessionKey, val dataplane.SessionValue, now ui
 		RevBytes:         val.RevBytes,
 		Timeout:          val.Timeout,
 		SessionID:        val.SessionID,
-		HAActive:         view.haActive,
+		HAActive:         sessionHAActiveForView(view, inIf, outIf, val.IngressZone, val.EgressZone),
 	}
 	if val.Created > 0 && now > val.Created {
 		se.Age = int64(now - val.Created)
@@ -1757,7 +1772,7 @@ func sessionEntryV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, no
 		RevBytes:         val.RevBytes,
 		Timeout:          val.Timeout,
 		SessionID:        val.SessionID,
-		HAActive:         view.haActive,
+		HAActive:         sessionHAActiveForView(view, inIf, outIf, val.IngressZone, val.EgressZone),
 	}
 	if val.Created > 0 && now > val.Created {
 		se.Age = int64(now - val.Created)

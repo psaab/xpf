@@ -158,6 +158,15 @@ func (s *Server) showFlowTimeouts(cfg *config.Config, buf *strings.Builder) {
 
 // showFlowStatistics renders global flow counters (sessions, packets,
 // drops, NAT, screen, host-inbound, NAT64, flow cache).
+// grpcSessionCount reads table occupancy via the shared backend counter.
+func grpcSessionCount(dp grpcRuntime) (v4, v6 int) {
+	if dp == nil {
+		return 0, 0
+	}
+	v4, v6, _ = backendSessionCountContext(context.Background(), dp)
+	return v4, v6
+}
+
 func (s *Server) showFlowStatistics(buf *strings.Builder) {
 	if s.dp == nil || !s.dp.IsLoaded() {
 		buf.WriteString("Flow statistics: dataplane not loaded\n")
@@ -175,8 +184,12 @@ func (s *Server) showFlowStatistics(buf *strings.Builder) {
 	}
 	sessNew := readCtr(dataplane.GlobalCtrSessionsNew)
 	sessClosed := readCtr(dataplane.GlobalCtrSessionsClosed)
+	// #15236 (A52-05): Current sessions = table occupancy (SessionCount),
+	// not create-minus-expire of locally created sessions.
+	v4Cur, v6Cur := grpcSessionCount(s.dp)
 	buf.WriteString("Flow statistics:\n")
-	fmt.Fprintf(buf, "  %-30s %d\n", "Current sessions:", dataplane.CurrentSessions(sessNew, sessClosed))
+	fmt.Fprintf(buf, "  %-30s %d\n", "Current sessions:", v4Cur+v6Cur)
+	fmt.Fprintf(buf, "  %-30s %d\n", "Local forwarding sessions (created-closed):", dataplane.CurrentSessions(sessNew, sessClosed))
 	fmt.Fprintf(buf, "  %-30s %d\n", "Sessions created:", sessNew)
 	fmt.Fprintf(buf, "  %-30s %d\n", "Sessions closed:", sessClosed)
 	buf.WriteString("\n")
