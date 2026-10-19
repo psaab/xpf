@@ -170,9 +170,10 @@ func ClampInterfaceMonitorWeight(w int) (int, bool) {
 // chassis-cluster config whose redundancy-group cardinality or ids exceed
 // what the HA heartbeat wire format can encode (#4434, codex-172 C172-H02),
 // whose per-RG node priority is out of the VRRP range (#4880), whose RG0 has
-// unsupported `preempt` configured (#10754), or whose interface-monitor weight
+// unsupported `preempt` configured (#10754), whose interface-monitor weight
 // (#6549) or ip-monitoring global-weight / global-threshold / per-target weight
-// (#6588) is out of the [0,255] heartbeat weight domain.
+// (#6588) is out of the [0,255] heartbeat weight domain, or which enables
+// `configuration-synchronize` without redundancy-group 0 (#15040).
 //
 // The heartbeat count byte and per-group id byte are both uint8. There is
 // no schema-level value validation on the `redundancy-group <id>` instance
@@ -212,6 +213,35 @@ func validateChassisClusterStrict(cfg *Config) error {
 	// combinations that cannot be represented.
 	if err := validateHeartbeatTimeoutProduct(cfg.Chassis.Cluster); err != nil {
 		return err
+	}
+
+	// #15040 (A24-01): configuration-synchronize without redundancy-group 0
+	// can never push. Config-sync authority is IsLocalPrimary(0)
+	// (rg0ConfigSyncAuthority, pkg/daemon) and the read-only gate is owned
+	// by RG0 (reconcileRG0ConfigOwnership returns early when GroupState(0)
+	// is nil), so an RG1-only (or RG-less) cluster with
+	// configuration-synchronize commits cleanly, never pushes, and leaves
+	// BOTH nodes writable and silently diverging. Reject at strict commit —
+	// this also covers deleting RG0 from a running cluster, since the
+	// delete is itself a commit of a ConfigSync config without RG0. The
+	// tolerant load / peer-sync paths downgrade this to a warning via
+	// lenientChassisRG (#1960 no-brick): a config persisted by an older
+	// binary still boots, it just cannot be newly committed.
+	if cfg.Chassis.Cluster.ConfigSync {
+		hasRG0 := false
+		for _, rg := range cfg.Chassis.Cluster.RedundancyGroups {
+			if rg != nil && rg.ID == 0 {
+				hasRG0 = true
+				break
+			}
+		}
+		if !hasRG0 {
+			return fmt.Errorf("chassis cluster: configuration-synchronize requires " +
+				"redundancy-group 0 (RG0 is the config-sync authority and owns the " +
+				"standby read-only gate; without it a commit succeeds but is never " +
+				"pushed to the peer and both nodes stay writable) — add " +
+				"`redundancy-group 0` or remove `configuration-synchronize`")
+		}
 	}
 
 	rgs := cfg.Chassis.Cluster.RedundancyGroups

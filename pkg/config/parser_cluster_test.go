@@ -230,7 +230,7 @@ func TestChassisClusterExtendedFieldsSet(t *testing.T) {
 }
 
 func TestChassisClusterSyncOptions(t *testing.T) {
-	commands := []string{"set chassis cluster authentication-key test-cluster-psk-6611", "set chassis cluster cluster-id 1", "set chassis cluster node 0", "set chassis cluster configuration-synchronize", "set chassis cluster nat-state-synchronization", "set chassis cluster ipsec-session-synchronization", "set chassis cluster dhcp-lease-synchronization"}
+	commands := []string{"set chassis cluster authentication-key test-cluster-psk-6611", "set chassis cluster cluster-id 1", "set chassis cluster node 0", "set chassis cluster configuration-synchronize", "set chassis cluster redundancy-group 0 node 0 priority 200", "set chassis cluster redundancy-group 0 node 1 priority 100", "set chassis cluster nat-state-synchronization", "set chassis cluster ipsec-session-synchronization", "set chassis cluster dhcp-lease-synchronization"}
 	tree := &ConfigTree{}
 	for _, cmd := range commands {
 		path, err := ParseSetCommand(cmd)
@@ -270,6 +270,7 @@ func TestChassisClusterSyncOptionsHierarchical(t *testing.T) {
         cluster-id 1;
         node 0;
         configuration-synchronize;
+        redundancy-group 0 { node 0 priority 200; node 1 priority 100; }
         nat-state-synchronization;
         ipsec-session-synchronization;
         dhcp-lease-synchronization;
