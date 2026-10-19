@@ -10,7 +10,12 @@ artifact in the publish set is properly signed:
       sidecar says `validated: true` (#4904 A — a --skip-validate bake binds
       validated:false and is REFUSED: an unvalidated dev/emergency image must
       never carry a release signature past this fail-closed boundary);
-  (b) each apt InRelease verifies against the archive pubkey; for flat repos,
+  (b) each apt InRelease verifies against the archive pubkey, and the SIGNED
+      cleartext Release carries exactly one parseable Date and Valid-Until
+      with Valid-Until after Date, Date not beyond the 5-minute future skew,
+      Valid-Until unexpired and more than the freshness margin away (default
+      7 days, XPF_APT_FRESHNESS_MARGIN_SECONDS) for EVERY suite in the tree,
+      target and non-target, flat and reprepro (#15277); for flat repos,
       the signed Packages index matches the suite pool and every Filename,
       Package, Version, and Architecture agrees with dpkg metadata. In a normal
       image+apt publish, its package version must equal the signed target
@@ -61,6 +66,7 @@ Usage:
 """
 
 import argparse
+import email.utils
 import glob
 import json
 import os
@@ -1034,16 +1040,116 @@ def _gate_apt_package_set(dist, suite, release_text, expected_versions=None):
         die(f"apt suite {suite} pool does not match its Packages index; "
             f"unindexed={unindexed or 'none'}")
 
+APT_FRESHNESS_MARGIN_ENV = "XPF_APT_FRESHNESS_MARGIN_SECONDS"
+APT_FRESHNESS_MARGIN_DEFAULT = 7 * 24 * 60 * 60
+APT_FUTURE_SKEW_SECONDS = 5 * 60
+_APT_FRESHNESS_MARGIN_MAX = 365 * 24 * 60 * 60
+_APT_FRESHNESS_MARGIN_RE = re.compile(r"[0-9]+\Z")
 
-def gate_apt(dist, channel, expected_versions=None):
+
+def _apt_freshness_margin():
+    raw = os.environ.get(APT_FRESHNESS_MARGIN_ENV)
+    if raw is None or raw == "":
+        return APT_FRESHNESS_MARGIN_DEFAULT
+    if not _APT_FRESHNESS_MARGIN_RE.match(raw):
+        die(f"{APT_FRESHNESS_MARGIN_ENV} must be a non-negative integer "
+            f"number of seconds (got {raw!r}) — refusing to publish with an "
+            "unparseable apt freshness margin.")
+    try:
+        margin = int(raw)
+    except ValueError:
+        die(f"{APT_FRESHNESS_MARGIN_ENV} must be a non-negative integer "
+            f"number of seconds (got {raw!r}) — refusing to publish with an "
+            "unparseable apt freshness margin.")
+    if margin > _APT_FRESHNESS_MARGIN_MAX:
+        die(f"{APT_FRESHNESS_MARGIN_ENV}={margin} exceeds the 365-day maximum "
+            "— refusing to publish with an effectively unbounded apt "
+            "freshness margin.")
+    return margin
+
+
+def _parse_apt_rfc_date(value):
+    parsed = email.utils.parsedate_to_datetime(value)
+    if parsed is None:
+        raise ValueError(f"unparseable date {value!r}")
+    if parsed.tzinfo is None:
+        raise ValueError(f"date {value!r} carries no timezone")
+    return parsed.timestamp()
+
+
+def _gate_apt_freshness(suite, release_text, now=None, margin=None):
+    """Refuse an apt suite whose signed Release is already expired or
+    expires within the freshness margin (#15277).
+
+    Parses the SIGNED cleartext (`gpg --decrypt` output of InRelease, so
+    the bytes are signature-verified) rather than the unsigned on-disk
+    Release/Release.gpg. Exactly one Date and one Valid-Until are required;
+    duplicates or a missing field refuse closed, mirroring the builder's
+    count==1 asserts. `Valid-Until <= Date`, a Date beyond the tolerated
+    clock skew, and a Valid-Until at or inside `now + margin` all refuse:
+    apt clients reject an expired channel outright, and a suite expiring
+    inside the margin would strand the channel before the next re-sign.
+    `now`/`margin` are injectable for deterministic tests.
+    """
+    now = time.time() if now is None else now
+    margin = _apt_freshness_margin() if margin is None else margin
+    fields = {}
+    for line in release_text.splitlines():
+        if line[:1].isspace() or ":" not in line:
+            continue
+        key, _sep, value = line.partition(":")
+        if key in ("Date", "Valid-Until"):
+            fields.setdefault(key, []).append(value.strip())
+    for key in ("Date", "Valid-Until"):
+        values = fields.get(key, [])
+        if len(values) != 1:
+            die(f"apt suite {suite} signed Release has {len(values)} {key} "
+                f"fields, want exactly 1 — refusing to publish an apt suite "
+                "whose freshness cannot be established (#15277).")
+    try:
+        date_epoch = _parse_apt_rfc_date(fields["Date"][0])
+    except (ValueError, TypeError, OverflowError) as e:
+        die(f"apt suite {suite} signed Release Date "
+            f"{fields['Date'][0]!r} is unparseable: {e}")
+    try:
+        valid_until_epoch = _parse_apt_rfc_date(fields["Valid-Until"][0])
+    except (ValueError, TypeError, OverflowError) as e:
+        die(f"apt suite {suite} signed Release Valid-Until "
+            f"{fields['Valid-Until'][0]!r} is unparseable: {e}")
+    if valid_until_epoch <= date_epoch:
+        die(f"apt suite {suite} signed Release Valid-Until "
+            f"({fields['Valid-Until'][0]}) is not after its Date "
+            f"({fields['Date'][0]}) — refusing to publish (#15277).")
+    if date_epoch > now + APT_FUTURE_SKEW_SECONDS:
+        die(f"apt suite {suite} signed Release Date "
+            f"({fields['Date'][0]}) is more than {APT_FUTURE_SKEW_SECONDS}s "
+            "in the future — refusing to publish (#15277).")
+    if valid_until_epoch <= now:
+        die(f"apt suite {suite} is EXPIRED: signed Release Valid-Until "
+            f"({fields['Valid-Until'][0]}) has passed — apt clients would "
+            "refuse the published channel. Rebuild/re-sign the suite "
+            "before publishing (#15277).")
+    if valid_until_epoch - now <= margin:
+        die(f"apt suite {suite} expires within the freshness margin: "
+            f"signed Release Valid-Until ({fields['Valid-Until'][0]}) is "
+            f"only {int(valid_until_epoch - now)}s away (margin {margin}s "
+            f"via {APT_FRESHNESS_MARGIN_ENV}) — rebuild/re-sign the suite "
+            "before publishing (#15277).")
+    return date_epoch, valid_until_epoch
+
+
+def gate_apt(dist, channel, expected_versions=None, now=None):
     """Verify signed apt metadata and, for flat suites, bind the Packages
     index to the exact pool and dpkg identities. `expected_versions` is the
-    already-verified target image version. Every suite in apt/ must be signed."""
-    apt_root = os.path.join(dist, "apt")
+    already-verified target image version. Every suite in apt/ must be signed,
+    and every suite's signed Release must be unexpired and outside the
+    freshness margin (#15277). `now` is injectable for deterministic tests;
+    production passes None (wall clock)."""
     # Reject symlinks anywhere under apt/ (Codex-r5): the apt tree is uploaded
     # as part of the dist root, and a dereferencing backend could follow a
     # symlink to publish unverified bytes — the same class as the image-sweep
     # symlink rejection, through the apt subtree.
+    apt_root = os.path.join(dist, "apt")
     if os.path.isdir(apt_root):
         for root, dirs, files in os.walk(apt_root):
             for nm in list(dirs) + files:
@@ -1098,6 +1204,10 @@ def gate_apt(dist, channel, expected_versions=None):
             if clear.returncode != 0:
                 die(f"cannot extract signed Release ({suite}): "
                     f"{clear.stderr.strip()}")
+            # #15277: freshness is judged on the VERIFIED cleartext, never
+            # the unsigned on-disk Release. Every suite (flat + reprepro,
+            # target + non-target) must be unexpired and outside the margin.
+            _gate_apt_freshness(suite, clear.stdout, now=now)
             # Flat repositories have a suite-scoped pool and exact-set
             # semantics. Reprepro keeps its own package history in a shared
             # component pool; preserve that opt-in backend's retention policy.
