@@ -6159,7 +6159,8 @@ fn poll_descriptor_policy_deny_keys_logical_ingress_zone_3021() {
             family: "inet".to_string(),
             address: "172.16.50.8/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot.neighbors = vec![NeighborSnapshot {
@@ -6825,7 +6826,8 @@ fn poll_descriptor_lo0_filter_discard_drops_without_reinject() {
         family: "inet".to_string(),
         address: "10.0.61.1/24".to_string(),
         scope: 0,
-    }];
+    ..Default::default()
+}];
     snapshot.flow.lo0_filter_input_v4 = "protect-re".to_string();
     snapshot.filters = vec![FirewallFilterSnapshot {
         name: "protect-re".to_string(),
@@ -7019,7 +7021,8 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
         family: "inet".to_string(),
         address: "10.0.61.1/24".to_string(),
         scope: 0,
-    }];
+    ..Default::default()
+}];
     snapshot.flow.lo0_filter_input_v4 = "protect-re".to_string();
     snapshot.filters = vec![FirewallFilterSnapshot {
         name: "protect-re".to_string(),
@@ -8011,7 +8014,8 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
             family: "inet".to_string(),
             address: "10.255.0.1/30".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot.tunnel_endpoints = vec![crate::protocol::snapshot::TunnelEndpointSnapshot {
@@ -8332,7 +8336,8 @@ fn gre_decapped_nat64_icmp_error_reads_the_inner_frame_8271() {
             family: "inet".to_string(),
             address: "10.255.0.1/30".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot.tunnel_endpoints = vec![crate::protocol::snapshot::TunnelEndpointSnapshot {

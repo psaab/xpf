@@ -165,7 +165,8 @@ fn tunnel_outer_egress_rg_must_be_forwarding_active_13980() {
             family: "inet6".to_string(),
             address: "2001:db8:1::8/64".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     for r in snap.routes.iter_mut() {
@@ -1249,7 +1250,8 @@ fn manager_neighbor_replace_filters_connected_directed_broadcast_11033() {
                         family: "inet".into(),
                         address: "192.168.1.1/24".into(),
                         scope: 0,
-                    }],
+                    ..Default::default()
+                }],
                     ..Default::default()
                 },
                 InterfaceSnapshot {
@@ -1259,7 +1261,8 @@ fn manager_neighbor_replace_filters_connected_directed_broadcast_11033() {
                         family: "inet".into(),
                         address: "203.0.113.1/24".into(),
                         scope: 0,
-                    }],
+                    ..Default::default()
+                }],
                     ..Default::default()
                 },
             ],
@@ -4647,7 +4650,8 @@ fn connected_routes_are_table_scoped_no_cross_vrf_leak() {
                     family: "inet".to_string(),
                     address: "10.0.0.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             crate::InterfaceSnapshot {
@@ -4661,7 +4665,8 @@ fn connected_routes_are_table_scoped_no_cross_vrf_leak() {
                     family: "inet".to_string(),
                     address: "10.0.0.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -4737,7 +4742,8 @@ fn local_delivery_is_table_scoped_no_cross_vrf_leak() {
                     family: "inet".to_string(),
                     address: "10.0.0.1/32".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             crate::InterfaceSnapshot {
@@ -4751,7 +4757,8 @@ fn local_delivery_is_table_scoped_no_cross_vrf_leak() {
                     family: "inet".to_string(),
                     address: "10.0.0.1/32".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -4824,7 +4831,8 @@ fn local_delivery_v6_is_table_scoped_no_cross_vrf_leak() {
                     family: "inet6".to_string(),
                     address: "2001:db8::1/128".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             crate::InterfaceSnapshot {
@@ -4838,7 +4846,8 @@ fn local_delivery_v6_is_table_scoped_no_cross_vrf_leak() {
                     family: "inet6".to_string(),
                     address: "2001:db8::1/128".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -4987,7 +4996,8 @@ fn interface_nat_local_delivery_is_table_scoped_no_cross_vrf_leak_12086() {
                     family: "inet".to_string(),
                     address: "10.0.0.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             crate::InterfaceSnapshot {
@@ -5003,12 +5013,14 @@ fn interface_nat_local_delivery_is_table_scoped_no_cross_vrf_leak_12086() {
                         family: "inet".to_string(),
                         address: "172.16.80.8/24".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                     crate::InterfaceAddressSnapshot {
                         family: "inet6".to_string(),
                         address: "2001:db8:80::8/64".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                 ],
                 ..Default::default()
             },
@@ -5143,12 +5155,14 @@ fn same_ip_two_vrfs_one_nat_keeps_per_table_local_state_14662() {
                         family: "inet".to_string(),
                         address: "192.0.2.99/24".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                     crate::InterfaceAddressSnapshot {
                         family: "inet6".to_string(),
                         address: "2001:db8:99::99/64".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                 ],
                 ..Default::default()
             },
@@ -5165,12 +5179,14 @@ fn same_ip_two_vrfs_one_nat_keeps_per_table_local_state_14662() {
                         family: "inet".to_string(),
                         address: "192.0.2.99/24".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                     crate::InterfaceAddressSnapshot {
                         family: "inet6".to_string(),
                         address: "2001:db8:99::99/64".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                 ],
                 ..Default::default()
             },
@@ -5185,7 +5201,8 @@ fn same_ip_two_vrfs_one_nat_keeps_per_table_local_state_14662() {
                     family: "inet".to_string(),
                     address: "198.51.100.99/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -5307,7 +5324,8 @@ fn unzoned_nat_diverted_interface_arms_5659_sentinel_14662() {
                     family: "inet".to_string(),
                     address: "192.0.2.77/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             crate::InterfaceSnapshot {
@@ -5321,7 +5339,8 @@ fn unzoned_nat_diverted_interface_arms_5659_sentinel_14662() {
                     family: "inet".to_string(),
                     address: "192.0.2.77/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -5527,7 +5546,8 @@ fn interface_local_delivery_single_vrf_no_cross_vrf_leak() {
                 family: "inet".to_string(),
                 address: "10.0.0.1/32".to_string(),
                 scope: 0,
-            }],
+            ..Default::default()
+        }],
             ..Default::default()
         }],
         ..Default::default()
@@ -5646,7 +5666,8 @@ fn ecmp_static_route_retains_all_next_hops_and_skips_dead() {
                     family: "inet".to_string(),
                     address: "192.0.2.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             crate::InterfaceSnapshot {
@@ -5659,7 +5680,8 @@ fn ecmp_static_route_retains_all_next_hops_and_skips_dead() {
                     family: "inet".to_string(),
                     address: "192.0.3.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -5774,7 +5796,8 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
                     family: "inet".to_string(),
                     address: "192.0.2.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             crate::InterfaceSnapshot {
@@ -5788,7 +5811,8 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
                     family: "inet".to_string(),
                     address: "192.0.3.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -5914,12 +5938,14 @@ fn ecmp_down_interface_only_member_does_not_share_gateway_hashes_11404() {
                         family: "inet".to_string(),
                         address: "192.0.2.1/24".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                     crate::InterfaceAddressSnapshot {
                         family: "inet6".to_string(),
                         address: "2001:db8:1::1/64".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                 ],
                 ..Default::default()
             },
@@ -5935,12 +5961,14 @@ fn ecmp_down_interface_only_member_does_not_share_gateway_hashes_11404() {
                         family: "inet".to_string(),
                         address: "192.0.3.1/24".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                     crate::InterfaceAddressSnapshot {
                         family: "inet6".to_string(),
                         address: "2001:db8:2::1/64".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                 ],
                 ..Default::default()
             },
@@ -6080,7 +6108,8 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
             family: "inet".to_string(),
             address: "192.0.2.1/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot.neighbors.push(crate::NeighborSnapshot {
@@ -6295,7 +6324,8 @@ fn ecmp_mixed_with_noroute_underlay_tunnel_uses_only_live_direct_hop() {
             family: "inet".to_string(),
             address: "192.0.2.1/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot.neighbors.push(crate::NeighborSnapshot {
@@ -6382,7 +6412,8 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
             family: "inet6".to_string(),
             address: "2001:db8:ec::1/64".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot.neighbors.push(crate::NeighborSnapshot {
@@ -6550,7 +6581,8 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
                     family: "inet".to_string(),
                     address: "192.0.2.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             crate::InterfaceSnapshot {
@@ -6563,7 +6595,8 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
                     family: "inet".to_string(),
                     address: "192.0.3.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -6827,12 +6860,14 @@ fn ecmp_dual_enumeration_snapshot_11686(
                     family: "inet".to_string(),
                     address: v4.to_string(),
                     scope: 0,
-                },
+                ..Default::default()
+            },
                 crate::InterfaceAddressSnapshot {
                     family: "inet6".to_string(),
                     address: v6.to_string(),
                     scope: 0,
-                },
+                ..Default::default()
+            },
             ],
             ..Default::default()
         }
@@ -7175,7 +7210,8 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                     family: "inet".to_string(),
                     address: "192.0.2.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             crate::InterfaceSnapshot {
@@ -7188,7 +7224,8 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                     family: "inet".to_string(),
                     address: "192.0.3.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -7283,7 +7320,8 @@ fn same_preference_qnh_metric_rows_fail_over_without_cross_tier_ecmp_11792() {
                 family: "inet".to_string(),
                 address: address.to_string(),
                 scope: 0,
-            }],
+            ..Default::default()
+        }],
             ..Default::default()
         }
     };
@@ -7686,7 +7724,8 @@ fn secure_tunnel_snapshot_6713(policy: TunnelPolicy6713) -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "10.0.61.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             // The secure tunnel, base + unit 0. Both share the xfrmi's single
@@ -7703,7 +7742,8 @@ fn secure_tunnel_snapshot_6713(policy: TunnelPolicy6713) -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "10.5.5.1/30".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             InterfaceSnapshot {
@@ -7718,7 +7758,8 @@ fn secure_tunnel_snapshot_6713(policy: TunnelPolicy6713) -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "10.5.5.1/30".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             // Scoping control, in the shape the GO BUILDER ACTUALLY EMITS
@@ -9761,12 +9802,14 @@ fn ecmp_member_removal_preserves_survivors_v4_v6_11403() {
                     family: "inet".to_string(),
                     address: v4.to_string(),
                     scope: 0,
-                },
+                ..Default::default()
+            },
                 InterfaceAddressSnapshot {
                     family: "inet6".to_string(),
                     address: v6.to_string(),
                     scope: 0,
-                },
+                ..Default::default()
+            },
             ],
             ..Default::default()
         }
@@ -10170,7 +10213,8 @@ fn connected_prefix_v6_subnet_router_anycast_is_table_scoped_10692() {
                 family: "inet6".to_string(),
                 address: "2001:db8:1::5/64".to_string(),
                 scope: 0,
-            }],
+            ..Default::default()
+        }],
             ..Default::default()
         },
         crate::InterfaceSnapshot {
@@ -10184,7 +10228,8 @@ fn connected_prefix_v6_subnet_router_anycast_is_table_scoped_10692() {
                 family: "inet6".to_string(),
                 address: "2001:db8:2::5/64".to_string(),
                 scope: 0,
-            }],
+            ..Default::default()
+        }],
             ..Default::default()
         },
     ]);
@@ -10231,7 +10276,8 @@ fn subnet_router_anycast_v6_prefix_len_guards_10692() {
                 family: "inet6".to_string(),
                 address: "2001:db8:9::7/128".to_string(),
                 scope: 0,
-            }],
+            ..Default::default()
+        }],
             ..Default::default()
         },
         crate::InterfaceSnapshot {
@@ -10245,7 +10291,8 @@ fn subnet_router_anycast_v6_prefix_len_guards_10692() {
                 family: "inet6".to_string(),
                 address: "2001:db8:b::7/127".to_string(),
                 scope: 0,
-            }],
+            ..Default::default()
+        }],
             ..Default::default()
         },
     ]);

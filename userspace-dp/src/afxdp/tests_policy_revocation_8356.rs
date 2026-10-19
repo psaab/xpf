@@ -153,11 +153,7 @@ fn forwarding_with_lan_return_route_9604() -> ForwardingState {
         .find(|interface| interface.name == "reth1.0")
         .expect("policy fixture must have the LAN interface");
     lan.redundancy_group = 1;
-    lan.addresses.push(crate::InterfaceAddressSnapshot {
-        family: "inet".into(),
-        address: "10.0.61.1/24".into(),
-        scope: 0,
-    });
+    lan.addresses.push(crate::InterfaceAddressSnapshot { family: "inet".into(), address: "10.0.61.1/24".into(), scope: 0, ..Default::default() });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "ge-0-0-1".into(),
         ifindex: LAN_IFINDEX,
@@ -1756,11 +1752,7 @@ fn forwarding_with_reverse_icmp_split_10637() -> ForwardingState {
         .find(|iface| iface.ifindex == LAN_IFINDEX)
         .expect("policy_deny_snapshot must carry reth1.0")
         .addresses
-        .push(crate::InterfaceAddressSnapshot {
-            family: "inet".into(),
-            address: "10.0.61.1/24".into(),
-            scope: 0,
-        });
+        .push(crate::InterfaceAddressSnapshot { family: "inet".into(), address: "10.0.61.1/24".into(), scope: 0, ..Default::default() });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "ge-0-0-1".into(),
         ifindex: LAN_IFINDEX,
@@ -1818,11 +1810,7 @@ fn forwarding_typeblind_reverse_icmp_13940() -> ForwardingState {
         .find(|iface| iface.ifindex == LAN_IFINDEX)
         .expect("policy_deny_snapshot must carry reth1.0")
         .addresses
-        .push(crate::InterfaceAddressSnapshot {
-            family: "inet".into(),
-            address: "10.0.61.1/24".into(),
-            scope: 0,
-        });
+        .push(crate::InterfaceAddressSnapshot { family: "inet".into(), address: "10.0.61.1/24".into(), scope: 0, ..Default::default() });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "ge-0-0-1".into(),
         ifindex: LAN_IFINDEX,
@@ -6526,7 +6514,8 @@ fn forwarding_with_fabric_dmz_10507() -> ForwardingState {
             family: "inet".to_string(),
             address: "203.0.113.1/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
@@ -6606,7 +6595,8 @@ fn forwarding_without_fabric_dmz_10507() -> ForwardingState {
             family: "inet".to_string(),
             address: "203.0.113.1/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
@@ -6970,7 +6960,8 @@ fn forwarding_with_fabric_dmz_armed_10507() -> ForwardingState {
             family: "inet".to_string(),
             address: "203.0.113.1/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
@@ -9920,7 +9911,8 @@ fn add_fib_move_egress_12074(
             family: "inet".into(),
             address: address.into(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot.neighbors.push(NeighborSnapshot {
@@ -11010,7 +11002,8 @@ fn no_local_entry_current_route_12074(
                     family: "inet".into(),
                     address: "203.0.113.1/24".into(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             });
             current.neighbors.push(NeighborSnapshot {
@@ -11049,11 +11042,7 @@ fn no_local_entry_current_route_12074(
         "local" => {
             for interface in &mut current.interfaces {
                 if interface.ifindex == WAN_IFINDEX {
-                    interface.addresses.push(crate::InterfaceAddressSnapshot {
-                        family: "inet".into(),
-                        address: format!("{FIB_MOVE_DST_12074}/32"),
-                        scope: 0,
-                    });
+                    interface.addresses.push(crate::InterfaceAddressSnapshot { family: "inet".into(), address: format!("{FIB_MOVE_DST_12074}/32"), scope: 0, ..Default::default() });
                 }
             }
             if !permit_new_zone {

@@ -575,7 +575,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 					rxQueues = parentRXQueues
 				}
 			}
-			addresses = mergeInterfaceAddressSnapshots(addresses, buildConfiguredAddressSnapshots(unit.Addresses))
+			addresses = mergeInterfaceAddressSnapshots(addresses, buildConfiguredAddressSnapshots(unit.Addresses, unit.PrimaryAddress))
 			if iface.Disable || unit.Disable {
 				addresses = nil
 			}
@@ -1614,7 +1614,15 @@ func revalidateSnapshotIfindexesInPlace(snap *ConfigSnapshot) (refreshed, droppe
 	return refreshed, dropped
 }
 
-func buildConfiguredAddressSnapshots(addrs []string) []InterfaceAddressSnapshot {
+// buildConfiguredAddressSnapshots renders the unit's configured CIDRs
+// as snapshot rows. primaryCIDR is the config's PrimaryAddress: the one
+// row whose canonical form matches it carries Primary (#15155), so the
+// designated address survives the deterministic string sort below
+// instead of being silently replaced by whichever address sorts first.
+// A primaryCIDR that parses to no configured row marks nothing (the
+// #13549 stale-metadata shape must not manufacture one), and an empty
+// primaryCIDR leaves every row unmarked, preserving the order rule.
+func buildConfiguredAddressSnapshots(addrs []string, primaryCIDR string) []InterfaceAddressSnapshot {
 	if len(addrs) == 0 {
 		return nil
 	}
@@ -1634,6 +1642,20 @@ func buildConfiguredAddressSnapshots(addrs []string) []InterfaceAddressSnapshot 
 			Address: netw.String(),
 			Scope:   int(netlink.SCOPE_UNIVERSE),
 		})
+	}
+	if primaryCIDR != "" {
+		if ip, netw, err := net.ParseCIDR(primaryCIDR); err == nil && netw != nil {
+			// Compare through the same canonicalisation as the rows
+			// (ParseCIDR + host bits kept), not the raw config string.
+			netw.IP = ip
+			want := netw.String()
+			for i := range out {
+				if out[i].Address == want {
+					out[i].Primary = true
+					break
+				}
+			}
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Family != out[j].Family {
@@ -1669,6 +1691,9 @@ func mergeInterfaceAddressSnapshots(live []InterfaceAddressSnapshot, configured 
 			// Universe scope here so the dataplane can distinguish them from
 			// incidental kernel link-local addresses.
 			out[index].Scope = addr.Scope
+			// #15155: the designation lives in config, not the kernel
+			// listing, so overlay it the same way.
+			out[index].Primary = out[index].Primary || addr.Primary
 			continue
 		}
 		indices[key] = len(out)

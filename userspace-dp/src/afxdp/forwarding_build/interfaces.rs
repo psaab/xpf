@@ -2123,12 +2123,17 @@ fn is_zone_gated_host_inbound_name(name: &str) -> bool {
     is_host_inbound_lifeline(name) && !is_narrow_host_inbound_lifeline(name)
 }
 
+/// The interface's primary IPv4: the address the operator designated
+/// `primary` when the snapshot marks one (#15155), else the first
+/// non-link-local address in snapshot order, else the first address
+/// of the family. An unmarked snapshot behaves exactly as before.
 pub(in crate::afxdp) fn pick_interface_v4(iface: &InterfaceSnapshot) -> Option<Ipv4Addr> {
     if iface.admin_disabled {
         return None;
     }
 
     let mut fallback = None;
+    let mut first_non_link_local = None;
     for addr in &iface.addresses {
         if addr.family != "inet" {
             continue;
@@ -2137,14 +2142,17 @@ pub(in crate::afxdp) fn pick_interface_v4(iface: &InterfaceSnapshot) -> Option<I
             continue;
         };
         let ip = net.addr();
+        if addr.primary {
+            return Some(ip);
+        }
         if fallback.is_none() {
             fallback = Some(ip);
         }
-        if !ip.is_link_local() {
-            return Some(ip);
+        if first_non_link_local.is_none() && !ip.is_link_local() {
+            first_non_link_local = Some(ip);
         }
     }
-    fallback
+    first_non_link_local.or(fallback)
 }
 
 pub(in crate::afxdp) fn pick_interface_v6(iface: &InterfaceSnapshot) -> Option<Ipv6Addr> {
@@ -2152,6 +2160,7 @@ pub(in crate::afxdp) fn pick_interface_v6(iface: &InterfaceSnapshot) -> Option<I
         return None;
     }
     let mut fallback = None;
+    let mut first_non_link_local = None;
     for addr in &iface.addresses {
         if addr.family != "inet6" {
             continue;
@@ -2160,14 +2169,17 @@ pub(in crate::afxdp) fn pick_interface_v6(iface: &InterfaceSnapshot) -> Option<I
             continue;
         };
         let ip = net.addr();
+        if addr.primary {
+            return Some(ip);
+        }
         if fallback.is_none() {
             fallback = Some(ip);
         }
-        if !ip.is_unicast_link_local() {
-            return Some(ip);
+        if first_non_link_local.is_none() && !ip.is_unicast_link_local() {
+            first_non_link_local = Some(ip);
         }
     }
-    fallback
+    first_non_link_local.or(fallback)
 }
 
 // #7160 (#2387) — the routing-domain half of the interface build.

@@ -1350,7 +1350,8 @@ fn queue_planner_keeps_queue_zero_available_for_userspace() {
                     family: "inet".to_string(),
                     address: "10.0.61.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],

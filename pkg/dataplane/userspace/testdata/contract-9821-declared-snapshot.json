@@ -1,5 +1,5 @@
 {
-  "version": 49,
+  "version": 54,
   "generation": 0,
   "generated_at": "1970-01-01T00:00:00Z",
   "summary": {
@@ -304,6 +304,7 @@
           "Units": {
             "0": {
               "Number": 0,
+              "Disable": false,
               "Description": "",
               "VlanID": 0,
               "InnerVlanID": 0,
@@ -336,6 +337,7 @@
             },
             "100": {
               "Number": 100,
+              "Disable": false,
               "Description": "",
               "VlanID": 100,
               "InnerVlanID": 0,
@@ -393,6 +395,7 @@
           "Units": {
             "0": {
               "Number": 0,
+              "Disable": false,
               "Description": "",
               "VlanID": 0,
               "InnerVlanID": 0,
@@ -527,6 +530,7 @@
       "NameServers": null,
       "NTPServers": null,
       "NTPServerOptions": null,
+      "NTPServerKeyIDs": null,
       "NTPThreshold": 0,
       "NTPThresholdAction": "",
       "NoRedirects": false,

@@ -145,12 +145,14 @@ pub(super) fn forwarding_snapshot(include_neighbor: bool) -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "172.16.50.8/24".to_string(),
                     scope: 0,
-                },
+                ..Default::default()
+            },
                 InterfaceAddressSnapshot {
                     family: "inet6".to_string(),
                     address: "2001:559:8585:50::8/64".to_string(),
                     scope: 0,
-                },
+                ..Default::default()
+            },
             ],
             ..Default::default()
         }],
@@ -249,7 +251,8 @@ pub(super) fn native_gre_snapshot(include_neighbor: bool) -> ConfigSnapshot {
                     family: "inet6".to_string(),
                     address: "2001:559:8585:80::8/64".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             InterfaceSnapshot {
@@ -272,7 +275,8 @@ pub(super) fn native_gre_snapshot(include_neighbor: bool) -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "10.255.192.42/30".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -374,7 +378,8 @@ pub(super) fn wg_outer_mtu_snapshot() -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "172.16.80.8/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             InterfaceSnapshot {
@@ -389,7 +394,8 @@ pub(super) fn wg_outer_mtu_snapshot() -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "10.123.0.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -465,7 +471,8 @@ pub(super) fn wg_two_peer_dnat_snapshot() -> ConfigSnapshot {
             family: "inet".to_string(),
             address: "172.16.50.8/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     // Route peer B's outer endpoint (198.51.100.7) out reth0.50 via the
@@ -515,7 +522,8 @@ pub(super) fn native_gre_pbr_snapshot(include_neighbor: bool) -> ConfigSnapshot 
             family: "inet".to_string(),
             address: "10.0.61.1/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot.filters = vec![FirewallFilterSnapshot {
@@ -602,12 +610,14 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
                     family: "inet".to_string(),
                     address: "172.16.50.8/24".to_string(),
                     scope: 0,
-                },
+                ..Default::default()
+            },
                 InterfaceAddressSnapshot {
                     family: "inet6".to_string(),
                     address: "2001:559:8585:50::8/64".to_string(),
                     scope: 0,
-                },
+                ..Default::default()
+            },
             ],
             ..Default::default()
         }],
@@ -750,12 +760,14 @@ pub(super) fn nat_snapshot() -> ConfigSnapshot {
                         family: "inet".to_string(),
                         address: "10.0.61.1/24".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                     InterfaceAddressSnapshot {
                         family: "inet6".to_string(),
                         address: "2001:559:8585:ef00::1/64".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                 ],
                 ..Default::default()
             },
@@ -773,12 +785,14 @@ pub(super) fn nat_snapshot() -> ConfigSnapshot {
                         family: "inet".to_string(),
                         address: "172.16.80.8/24".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                     InterfaceAddressSnapshot {
                         family: "inet6".to_string(),
                         address: "2001:559:8585:80::8/64".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                 ],
                 ..Default::default()
             },
@@ -924,7 +938,8 @@ pub(super) fn agreed_zone_trunk_snapshot_10313() -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "10.0.50.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             // The wan transit egress.
@@ -938,7 +953,8 @@ pub(super) fn agreed_zone_trunk_snapshot_10313() -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "172.16.80.8/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -1002,7 +1018,8 @@ pub(super) fn unitless_zoned_port_snapshot_10656() -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "10.0.60.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             // The wan transit egress.
@@ -1016,7 +1033,8 @@ pub(super) fn unitless_zoned_port_snapshot_10656() -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "172.16.80.8/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -1126,7 +1144,8 @@ pub(super) fn policy_deny_snapshot() -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "172.16.80.8/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -1198,7 +1217,8 @@ pub(super) fn static_nat_snapshot() -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "192.168.1.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             InterfaceSnapshot {
@@ -1211,7 +1231,8 @@ pub(super) fn static_nat_snapshot() -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "203.0.113.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -1387,7 +1408,8 @@ fn lan_row_6722() -> InterfaceSnapshot {
             family: "inet".to_string(),
             address: "10.0.61.1/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     }
 }
@@ -1472,7 +1494,8 @@ fn tunnel_unit_row_6722(
             family: "inet".to_string(),
             address: address.to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     }
 }
@@ -1744,7 +1767,8 @@ pub(super) fn reused_ifindex_snapshot_6722() -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "10.9.9.1/30".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -1822,7 +1846,8 @@ pub(super) fn reused_ifindex_agreeing_zones_snapshot_7509() -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "10.9.9.1/30".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -1928,7 +1953,8 @@ fn wg_row_6722(name: &str, zone: &str, address: Option<&str>) -> InterfaceSnapsh
                     family: "inet".to_string(),
                     address: a.to_string(),
                     scope: 0,
-                }]
+                ..Default::default()
+            }]
             })
             .unwrap_or_default(),
         ..Default::default()
@@ -2123,7 +2149,8 @@ fn reth_row_6722(
                     family: "inet".to_string(),
                     address: a.to_string(),
                     scope: 0,
-                }]
+                ..Default::default()
+            }]
             })
             .unwrap_or_default(),
         ..Default::default()
@@ -2147,7 +2174,8 @@ fn wan_row_6722() -> InterfaceSnapshot {
             family: "inet".to_string(),
             address: "172.16.80.8/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     }
 }

@@ -1013,7 +1013,8 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                 family: "inet".to_string(),
                 address: "172.16.50.8/24".to_string(),
                 scope: 0,
-            }],
+            ..Default::default()
+        }],
             ..Default::default()
             },
             // The red target routes below resolve through their own
@@ -1031,7 +1032,8 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "172.16.50.8/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],

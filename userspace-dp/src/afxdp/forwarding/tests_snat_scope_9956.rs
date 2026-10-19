@@ -40,11 +40,7 @@ const DOMAIN_A: u32 = 100001;
 const DOMAIN_B: u32 = 100002;
 
 fn addr_v4(s: &str) -> InterfaceAddressSnapshot {
-    InterfaceAddressSnapshot {
-        family: "inet".to_string(),
-        address: s.to_string(),
-        scope: 0,
-    }
+    InterfaceAddressSnapshot { family: "inet".to_string(), address: s.to_string(), scope: 0, ..Default::default() }
 }
 
 fn trunk_snapshot() -> ConfigSnapshot {

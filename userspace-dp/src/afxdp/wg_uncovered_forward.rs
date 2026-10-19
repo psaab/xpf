@@ -758,11 +758,7 @@ mod tests {
             .find(|interface| interface.ifindex == 400)
             .expect("WG fixture interface")
             .addresses
-            .push(crate::InterfaceAddressSnapshot {
-                family: "inet6".to_string(),
-                address: "2001:db8::1/64".to_string(),
-                scope: 0,
-            });
+            .push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:db8::1/64".to_string(), scope: 0, ..Default::default() });
         snapshot.tunnel_endpoints[0].wg_peers[0]
             .wg_allowed_ips
             .push("::ffff:10.123.0.0/120".to_string());

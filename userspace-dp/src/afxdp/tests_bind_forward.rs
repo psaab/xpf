@@ -2305,18 +2305,10 @@ fn static_nat_v6_dnat_and_snat() {
     // Add v6 addresses to interfaces
     snapshot.interfaces[0]
         .addresses
-        .push(InterfaceAddressSnapshot {
-            family: "inet6".to_string(),
-            address: "fd00::1/64".to_string(),
-            scope: 0,
-        });
+        .push(InterfaceAddressSnapshot { family: "inet6".to_string(), address: "fd00::1/64".to_string(), scope: 0, ..Default::default() });
     snapshot.interfaces[1]
         .addresses
-        .push(InterfaceAddressSnapshot {
-            family: "inet6".to_string(),
-            address: "2001:db8::1/64".to_string(),
-            scope: 0,
-        });
+        .push(InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:db8::1/64".to_string(), scope: 0, ..Default::default() });
     let state = build_forwarding_state(&snapshot);
 
     // External v6 IP should be in local_v6
@@ -2699,7 +2691,8 @@ fn subnet_directed_broadcast_is_never_locally_delivered_8061() {
                 family: "inet".into(),
                 address: "192.168.1.1/24".into(),
                 scope: 0,
-            }],
+            ..Default::default()
+        }],
             ..Default::default()
         }],
         ..Default::default()

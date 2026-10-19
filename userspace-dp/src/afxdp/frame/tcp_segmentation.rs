@@ -1873,11 +1873,7 @@ mod mode_aware_segmentation_tests {
         // wg_inner_mtu(AF_INET6, 1500) = 1405. Reverting the segmenter to
         // `tunnel_outer_mtu`+row family fails this exact-equality check.
         let mut snap = crate::afxdp::test_fixtures::wg_outer_mtu_snapshot();
-        snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot {
-            family: "inet6".to_string(),
-            address: "2001:559:8585:80::8/64".to_string(),
-            scope: 0,
-        });
+        snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:559:8585:80::8/64".to_string(), scope: 0, ..Default::default() });
         snap.routes.push(crate::RouteSnapshot {
             reject: false,
             table: "inet6.0".to_string(),
@@ -1961,11 +1957,7 @@ mod mode_aware_segmentation_tests {
         // 2001:559:8585:80::1 on ifindex 12) but leaves the next hop
         // dynamic-only.
         let mut snap = crate::afxdp::test_fixtures::wg_outer_mtu_snapshot();
-        snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot {
-            family: "inet6".to_string(),
-            address: "2001:559:8585:80::8/64".to_string(),
-            scope: 0,
-        });
+        snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:559:8585:80::8/64".to_string(), scope: 0, ..Default::default() });
         snap.routes.push(crate::RouteSnapshot {
             reject: false,
             table: "inet6.0".to_string(),

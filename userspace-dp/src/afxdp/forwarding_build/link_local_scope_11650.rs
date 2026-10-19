@@ -18,11 +18,7 @@ fn iface_11650(
         hardware_addr: format!("02:00:00:00:11:{:02x}", ifindex & 0xff),
         addresses: addresses
             .iter()
-            .map(|(address, scope)| InterfaceAddressSnapshot {
-                family: if address.contains(':') { "inet6" } else { "inet" }.into(),
-                address: (*address).into(),
-                scope: *scope,
-            })
+            .map(|(address, scope)| InterfaceAddressSnapshot { family: if address.contains(':') { "inet6" } else { "inet" }.into(), address: (*address).into(), scope: *scope, ..Default::default() })
             .collect(),
         ..Default::default()
     }

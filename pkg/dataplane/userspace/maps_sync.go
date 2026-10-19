@@ -2288,11 +2288,16 @@ func buildNATTranslatedLocalAddressExclusions(snapshot *ConfigSnapshot) (map[use
 	return excludedV4, excludedV6
 }
 
+// pickInterfaceSnapshotV4 returns the interface's primary IPv4: the
+// address the operator designated `primary` when one is marked
+// (#15155), else the first non-link-local address in snapshot order,
+// else the first address of the family. An unmarked snapshot (old
+// builder, hand-built fixture) behaves exactly as before the marker.
 func pickInterfaceSnapshotV4(iface InterfaceSnapshot) net.IP {
 	if iface.AdminDisabled {
 		return nil
 	}
-	var fallback net.IP
+	var fallback, firstNonLinkLocal net.IP
 	for _, addr := range iface.Addresses {
 		if addr.Family != "inet" {
 			continue
@@ -2305,12 +2310,18 @@ func pickInterfaceSnapshotV4(iface InterfaceSnapshot) net.IP {
 		if v4 == nil {
 			continue
 		}
+		if addr.Primary {
+			return append(net.IP(nil), v4...)
+		}
 		if fallback == nil {
 			fallback = append(net.IP(nil), v4...)
 		}
-		if !v4.IsLinkLocalUnicast() {
-			return append(net.IP(nil), v4...)
+		if firstNonLinkLocal == nil && !v4.IsLinkLocalUnicast() {
+			firstNonLinkLocal = append(net.IP(nil), v4...)
 		}
+	}
+	if firstNonLinkLocal != nil {
+		return firstNonLinkLocal
 	}
 	return fallback
 }
@@ -2319,7 +2330,7 @@ func pickInterfaceSnapshotV6(iface InterfaceSnapshot) net.IP {
 	if iface.AdminDisabled {
 		return nil
 	}
-	var fallback net.IP
+	var fallback, firstNonLinkLocal net.IP
 	for _, addr := range iface.Addresses {
 		if addr.Family != "inet6" {
 			continue
@@ -2332,12 +2343,18 @@ func pickInterfaceSnapshotV6(iface InterfaceSnapshot) net.IP {
 		if v6 == nil || ip.To4() != nil {
 			continue
 		}
+		if addr.Primary {
+			return append(net.IP(nil), v6...)
+		}
 		if fallback == nil {
 			fallback = append(net.IP(nil), v6...)
 		}
-		if !v6.IsLinkLocalUnicast() {
-			return append(net.IP(nil), v6...)
+		if firstNonLinkLocal == nil && !v6.IsLinkLocalUnicast() {
+			firstNonLinkLocal = append(net.IP(nil), v6...)
 		}
+	}
+	if firstNonLinkLocal != nil {
+		return firstNonLinkLocal
 	}
 	return fallback
 }

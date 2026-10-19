@@ -250,7 +250,8 @@ pub(super) fn pbr_nat64_snapshot() -> crate::ConfigSnapshot {
                     family: "inet6".to_string(),
                     address: "2001:db8:61::1/64".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             crate::InterfaceSnapshot {
@@ -265,12 +266,14 @@ pub(super) fn pbr_nat64_snapshot() -> crate::ConfigSnapshot {
                         family: "inet".to_string(),
                         address: "192.0.2.1/24".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                     crate::InterfaceAddressSnapshot {
                         family: "inet6".to_string(),
                         address: "2001:db8:dd::1/64".to_string(),
                         scope: 0,
-                    },
+                    ..Default::default()
+                },
                 ],
                 ..Default::default()
             },
@@ -340,7 +343,8 @@ pub(super) fn pbr_output_filter_snapshot() -> crate::ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "10.0.61.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             crate::InterfaceSnapshot {
@@ -355,7 +359,8 @@ pub(super) fn pbr_output_filter_snapshot() -> crate::ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "192.0.2.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             crate::InterfaceSnapshot {
@@ -369,7 +374,8 @@ pub(super) fn pbr_output_filter_snapshot() -> crate::ConfigSnapshot {
                     family: "inet".to_string(),
                     address: "192.0.2.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],

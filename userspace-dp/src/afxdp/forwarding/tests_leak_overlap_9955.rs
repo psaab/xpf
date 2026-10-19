@@ -122,6 +122,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
                 family: "inet".to_string(),
                 address: format!("172.16.{}.8/24", leak.subnet),
                 scope: 0,
+                ..Default::default()
             }],
             ..Default::default()
         })
@@ -298,7 +299,8 @@ fn leak_versus_ordinary_route_in_the_same_table_9955() {
             family: "inet".to_string(),
             address: "172.16.52.8/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot.neighbors.push(NeighborSnapshot {
@@ -372,7 +374,8 @@ fn a_leak_into_a_table_that_misses_falls_through_9955() {
             family: "inet".to_string(),
             address: "172.16.52.8/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     snapshot.neighbors.push(NeighborSnapshot {
@@ -819,6 +822,7 @@ fn snapshot_12086_leak_parity(
                         "2001:db8::1/64".to_string()
                     },
                     scope: 0,
+                    ..Default::default()
                 }],
                 ..Default::default()
             },
@@ -833,7 +837,8 @@ fn snapshot_12086_leak_parity(
                     family: wan_family.to_string(),
                     address: wan_addr.to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],

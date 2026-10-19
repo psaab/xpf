@@ -1096,7 +1096,8 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
         family: "inet".to_string(),
         address: "10.0.61.1/24".to_string(),
         scope: 0,
-    }];
+    ..Default::default()
+}];
     snapshot.destination_nat_rules = vec![DestinationNATRuleSnapshot {
         counter_id: 0,
         name: "web-dnat".to_string(),

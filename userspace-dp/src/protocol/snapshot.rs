@@ -276,6 +276,15 @@ pub(crate) struct InterfaceAddressSnapshot {
     pub address: String,
     #[serde(default)]
     pub scope: i32,
+    /// #15155: the operator's designated `primary` address on the
+    /// owning unit. The Go builder sorts addresses for a deterministic
+    /// wire, so without this marker pick_interface_v4/v6 used whichever
+    /// address sorted first as a string. No `skip_serializing_if`: the
+    /// false default stays on the wire so `protocol_wire_v1.json` pins
+    /// the key, mirroring `scope`. An absent key (old Go) decodes
+    /// false and every pick keeps the order-based rule.
+    #[serde(default)]
+    pub primary: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

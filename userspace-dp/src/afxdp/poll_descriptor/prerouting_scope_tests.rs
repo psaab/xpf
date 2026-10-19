@@ -43,7 +43,8 @@ mod prerouting_scope_tests {
                 family: "inet".to_string(),
                 address: "172.16.50.8/24".to_string(),
                 scope: 0,
-            }],
+            ..Default::default()
+        }],
             ..Default::default()
         });
         // Port DNAT scoped to unit-A's zone (wan): 172.16.80.200:443/tcp.

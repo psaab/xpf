@@ -641,11 +641,7 @@ fn icmp_hit_forwarding() -> ForwardingState {
             WAN_IFINDEX => interface.redundancy_group = 1,
             LAN_IFINDEX => {
                 interface.redundancy_group = 2;
-                interface.addresses.push(InterfaceAddressSnapshot {
-                    family: "inet".into(),
-                    address: "10.0.61.1/24".into(),
-                    scope: 0,
-                });
+                interface.addresses.push(InterfaceAddressSnapshot { family: "inet".into(), address: "10.0.61.1/24".into(), scope: 0, ..Default::default() });
             }
             _ => {}
         }
@@ -2227,11 +2223,7 @@ fn icmp_hit_forwarding_egress_moved(
             }
             LAN_IFINDEX => {
                 interface.redundancy_group = 2;
-                interface.addresses.push(InterfaceAddressSnapshot {
-                    family: "inet".into(),
-                    address: "10.0.61.1/24".into(),
-                    scope: 0,
-                });
+                interface.addresses.push(InterfaceAddressSnapshot { family: "inet".into(), address: "10.0.61.1/24".into(), scope: 0, ..Default::default() });
             }
             _ => {}
         }

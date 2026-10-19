@@ -4648,7 +4648,8 @@ fn wg2921_snapshot(
                     family: "inet".to_string(),
                     address: "10.50.0.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],
@@ -4790,7 +4791,8 @@ fn wg5291_per_peer_outer_mtu_resolves_distinct_underlays() {
                     family: "inet".to_string(),
                     address: "10.50.0.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
             // Peer B underlay @1400 (a DIFFERENT egress interface).
@@ -4804,7 +4806,8 @@ fn wg5291_per_peer_outer_mtu_resolves_distinct_underlays() {
                     family: "inet".to_string(),
                     address: "10.60.0.1/24".to_string(),
                     scope: 0,
-                }],
+                ..Default::default()
+            }],
                 ..Default::default()
             },
         ],

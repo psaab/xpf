@@ -1738,11 +1738,7 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v6() {
     // the underlay route resolves on reth0.80, and add the v6 underlay route.
     snap.interfaces[0]
         .addresses
-        .push(crate::InterfaceAddressSnapshot {
-            family: "inet6".to_string(),
-            address: "2001:559:8585:80::8/64".to_string(),
-            scope: 0,
-        });
+        .push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:559:8585:80::8/64".to_string(), scope: 0, ..Default::default() });
     snap.routes = vec![crate::RouteSnapshot {
         reject: false,
         table: "inet6.0".to_string(),
@@ -1865,7 +1861,8 @@ fn wg_two_peer_asymmetric_snapshot() -> crate::ConfigSnapshot {
             family: "inet".to_string(),
             address: "172.16.50.8/24".to_string(),
             scope: 0,
-        }],
+        ..Default::default()
+    }],
         ..Default::default()
     });
     // Route to peer B's endpoint egresses reth0.50.
@@ -2014,11 +2011,7 @@ fn post_transform_wg_inner_mtu_charges_selected_peer_family_14118() {
         ep.wg_peers[0].wg_endpoint = "[2001:db8:c0::7]:51820".to_string();
         ep.transport_table = "inet6.0".to_string();
     }
-    snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot {
-        family: "inet6".to_string(),
-        address: "2001:559:8585:80::8/64".to_string(),
-        scope: 0,
-    });
+    snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:559:8585:80::8/64".to_string(), scope: 0, ..Default::default() });
     snap.routes = vec![crate::RouteSnapshot {
         reject: false,
         table: "inet6.0".to_string(),
