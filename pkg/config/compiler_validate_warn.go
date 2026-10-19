@@ -11,11 +11,14 @@ import (
 // deterministicIPv4Enforced reports whether a deterministic-NAT pool uses the
 // IPv4-subscriber path (mode 1), which the userspace dataplane now enforces
 // (#4559). It returns true only for a valid IPv4 host CIDR with a positive
-// block size; an IPv6 host (mode 2 / NAT64) or an unparseable address is still
-// deferred (round-robin fallback) and keeps the accepted-but-inert advisory.
+// block size AND a prefix the builder can actually map (hostBits < 32, i.e.
+// /1../32 — #15275); an IPv6 host (mode 2 / NAT64), an unparseable address,
+// or an IPv4 /0 (2^32 subscribers, unrepresentable as a uint32 host count)
+// is still deferred (round-robin fallback) and keeps the
+// accepted-but-inert advisory.
 // This mirrors the enforced/deferred split in
-// userspace.deterministicSourceNATFields so the advisory and the dataplane
-// agree on which pools are actually enforced.
+// userspace.deterministicSourceNATFields (bits == 32 && hostBits < 32) so
+// the advisory and the dataplane agree on which pools are actually enforced.
 func deterministicIPv4Enforced(det *DeterministicNATConfig) bool {
 	if det == nil || det.BlockSize <= 0 || det.HostAddress == "" {
 		return false
@@ -24,8 +27,8 @@ func deterministicIPv4Enforced(det *DeterministicNATConfig) bool {
 	if err != nil {
 		return false
 	}
-	_, bits := hostNet.Mask.Size()
-	return bits == 32
+	ones, bits := hostNet.Mask.Size()
+	return bits == 32 && ones > 0
 }
 
 // deterministicNAPT64Enforced reports whether a deterministic-NAT pool uses the
@@ -988,8 +991,11 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	// host params; nat64.rs allocate_source → allocate_deterministic_v6 maps each
 	// IPv6 subscriber to a fixed external IPv4 + port block). What REMAINS
 	// deferred (and keeps the advisory) is a deterministic pool that the
-	// dataplane cannot map: an IPv6 host of an UNSUPPORTED subscriber-prefix
-	// length (only /32 and /64 map to a 32-bit subscriber word), an IPv6-host
+	// dataplane cannot map: an IPv4 /0 host (2^32 subscribers exceed the
+	// 32-bit deterministic host count — #15275; the strict gate rejects it,
+	// this is the tolerant-load fallback), an IPv6 host of an UNSUPPORTED
+	// subscriber-prefix length (only /32 and /64 map to a 32-bit subscriber
+	// word), an IPv6-host
 	// pool NOT referenced by any `security nat nat64` rule-set (a plain
 	// source-NAT rule cannot translate a v6 subscriber to a v4 pool), or a host
 	// address that no longer parses. Warn ONLY for those so the operator is not
@@ -1019,7 +1025,7 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 					"(round-robin/sticky SNAT is used instead). IPv4-subscriber "+
 					"deterministic CGNAT (mode 1) and IPv6/NAPT64 (mode 2, a /32 or "+
 					"/64 host referenced by a `security nat nat64` rule-set) ARE "+
-					"enforced; this pool is neither (unsupported IPv6 prefix length, "+
+					"enforced; this pool is neither (an IPv4 /0 host, an unsupported IPv6 prefix length, "+
 					"not referenced by a nat64 rule-set, or an unparseable host "+
 					"address) (#4559)",
 				strings.Join(detPools, ", ")))
