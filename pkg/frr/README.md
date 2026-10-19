@@ -1768,9 +1768,13 @@ step. Both are required — neither sees the other's case:
   therefore receives no QNH metric overlay, scrub, or readback and uses its
   default redistribution metric. Commit warns when a QNH metric setting would
   export to RIP; the lost RIP backup-cost behavior is tracked in #12531.
-  Cleanup is post-load only: if the reload fails, no pre-clear is attempted.
-  FRR loads are not transactional, so a failed load may still have partial
-  effects. Explicit "failed to connect to any daemons" readback errors are
+  No QNH pre-clear runs before a load, but `frr-reload.py` deletes the
+  memory-only overlay before it reaches a rejected line, so the reconcile
+  also runs on the hard-failure and failed-retry returns (#15183),
+  restoring the overlay with readback while the original failure still
+  propagates (any reconcile error is joined to it). FRR loads are not
+  transactional, so a failed load may still have partial effects.
+  Explicit "failed to connect to any daemons" readback errors are
   skipped for unavailable daemons; other cleanup and OSPFD overlay errors are
   hard. Overlays are memory-only, so a restart loads the metric-free config
   until Apply. Authored policy metrics are not copied into QNH overlays.

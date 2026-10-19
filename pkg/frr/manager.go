@@ -906,9 +906,10 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 // Return contract: nil = full diff convergence; ErrFRRReloadDegraded
 // (errors.Is) = additive fallback applied, retry scheduled when
 // enabled; other errors = HARD failure and the generation is marked
-// degraded with retry scheduled when enabled. QNH metric cleanup and replay
-// begin only after a config load succeeds, so a rejected load does not
-// pre-clear the previous QNH metrics. FRR loads are not transactional:
+// degraded with retry scheduled when enabled. A rejected load does not
+// pre-clear the previous QNH metrics, but frr-reload.py deletes the
+// memory-only overlay before it fails, so the reconcile also runs on
+// the failure returns (#15183). FRR loads are not transactional:
 // commands accepted before a later rejection may already have taken effect.
 func (m *Manager) commitManagedSection(section string, overlays map[string]string) error {
 	m.signalRetryCancel()
@@ -1559,7 +1560,17 @@ func (m *Manager) reloadLocked() error {
 		// Preserve BOTH causes: dropping perr would hide a pytools-missing
 		// primary behind the fallback error, defeating IsFRRReloadPyMissing
 		// (slow-cadence retry + the daemon's persistent-cause message, #9947).
-		return fmt.Errorf("vtysh reload: %w (primary frr-reload.py also failed: %w): %s", err, perr, string(output))
+		loadErr := fmt.Errorf("vtysh reload: %w (primary frr-reload.py also failed: %w): %s", err, perr, string(output))
+		// #15183: frr-reload.py deletes lines absent from frr.conf —
+		// including the memory-only QNH `set metric` overlay — BEFORE it
+		// reaches the line FRR rejects, and the failed additive load may
+		// have partially applied too. Restore the overlay (with readback)
+		// even on this hard failure, joining any reconcile error to the
+		// original instead of replacing it.
+		if rerr := m.reconcileQNHMetricOverlaysLocked(m.lifetimeCtx()); rerr != nil {
+			return fmt.Errorf("%w (additionally, reconciling QNH metric overlays after the failed reload: %w)", loadErr, rerr)
+		}
+		return loadErr
 	}
 	if err := m.reconcileQNHMetricOverlaysLocked(m.lifetimeCtx()); err != nil {
 		return fmt.Errorf("reconcile QNH metric overlays after additive reload: %w (primary frr-reload.py failed: %w)", err, perr)
@@ -1609,10 +1620,12 @@ func (m *Manager) warnPytoolsOnce(err error) {
 //     ensure a retry episode (when enabled). A pythontools-missing cause
 //     starts the retry at the slow cadence directly.
 //   - other errors (HARD failure, #5109): both frr-reload.py AND the
-//     additive vtysh -f fallback failed. QNH cleanup/replay only runs after
-//     a config load succeeds, so prior QNH metrics are not pre-cleared; the
-//     FRR load itself is not transactional and earlier accepted commands may
-//     still have taken effect. Treat it like degraded for recovery: set the
+//     additive vtysh -f fallback failed. No pre-clear runs before the
+//     load, but frr-reload.py deletes the memory-only QNH overlay before
+//     it fails, so reloadLocked reconciles (restores) the overlay on the
+//     failure return too (#15183); the FRR load itself is not
+//     transactional and earlier accepted commands may still have taken
+//     effect. Treat it like degraded for recovery: set the
 //     gauge and arm a retry against the on-disk managed section. The error
 //     still propagates to the caller. Before #5109 a hard failure from a
 //     non-degraded state hit no case here: the gauge stayed 0, no retry debt
@@ -1760,6 +1773,13 @@ func (m *Manager) retryReloadOnce(ctx context.Context) (stop, notFound bool) {
 			m.warnPytoolsOnce(err)
 		} else {
 			slog.Warn("FRR degraded-retry reload failed", "err", err)
+		}
+		// #15183: the failed reload already deleted the memory-only QNH
+		// `set metric` overlay from ospfd before hitting the rejected
+		// line. Restore it (with readback) even though this episode has
+		// not converged; the attempt still counts as failed.
+		if rerr := m.reconcileQNHMetricOverlaysLocked(ctx); rerr != nil {
+			slog.Warn("FRR degraded-retry could not reconcile QNH metric overlays after failed reload", "err", rerr)
 		}
 		return false, nf
 	}
