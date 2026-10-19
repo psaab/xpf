@@ -97,7 +97,7 @@ pub(crate) fn parse_filter_state_with_three_color_preserving(
         previous,
         &mut used_runtime_ids,
     );
-    parse_filter_table(&mut state, filters, &defined_policers)?;
+    parse_filter_table(&mut state, filters, &defined_policers, previous)?;
     assign_interface_filters(&mut state, interfaces)?;
     recompute_fast_map_aggregates(&mut state);
     state.lo0_filter_v4_fast = resolve_lo0_filter(&state.filters, "inet", lo0_filter_v4)?;
@@ -252,10 +252,15 @@ fn build_term_scoped_policer_runtimes(
 /// Parse every filter snapshot into a compiled `Filter` keyed by
 /// `family:name`. Term compilation fails closed (see `parse_term`), so one
 /// unrepresentable term rejects the whole snapshot.
+///
+/// #15108: `previous` carries the prior compiled state so a term whose
+/// (family, filter, term) identity and compiled shape are unchanged reuses
+/// its `Arc<FilterTermCounter>` instead of minting a fresh zeroed one.
 fn parse_filter_table(
     state: &mut FilterState,
     filters: &[FirewallFilterSnapshot],
     defined_policers: &rustc_hash::FxHashSet<&str>,
+    previous: Option<&FilterState>,
 ) -> Result<(), SnapshotIntegrityError> {
     for (filter_idx, snap) in filters.iter().enumerate() {
         let key = qualify_filter_key(&snap.family, &snap.name);
@@ -271,6 +276,7 @@ fn parse_filter_table(
                     &snap.name,
                     &state.three_color_policer_by_scope,
                     defined_policers,
+                    previous,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -688,6 +694,7 @@ fn parse_term(
         Arc<ThreeColorPolicerRuntime>,
     >,
     defined_policers: &rustc_hash::FxHashSet<&str>,
+    previous: Option<&FilterState>,
 ) -> Result<FilterTerm, SnapshotIntegrityError> {
     // Non-mutating preflight first: every guard rejects the WHOLE snapshot
     // (the reconcile preflight keeps the previous good filter state), so all
@@ -712,7 +719,7 @@ fn parse_term(
         );
         three_color_policers.get(&scope).cloned()
     };
-    Ok(build_filter_term(
+    let mut term = build_filter_term(
         snap,
         id,
         action,
@@ -720,7 +727,23 @@ fn parse_term(
         protocols,
         ports,
         policer_runtime,
-    ))
+    );
+    // #15108: carry the counter forward only when the previous term at the
+    // same (family, filter, term) identity has the same compiled shape.
+    // Any match/action/modifier/policer change (including a counter-name
+    // change or a policer shape change, which already mints a fresh
+    // runtime Arc) starts from zero so hits never leak across a different
+    // contract. The id is excluded (positional); the counter itself is
+    // excluded (it is the handle being carried).
+    if let Some(previous_term) = previous
+        .and_then(|state| state.filters.get(&qualify_filter_key(filter_family, filter_name)))
+        .and_then(|filter| filter.terms.iter().find(|term| term.name == snap.name))
+    {
+        if super::engine::filter_term_counter_shape_matches(previous_term, &term) {
+            term.counter = previous_term.counter.clone();
+        }
+    }
+    Ok(term)
 }
 
 /// Fail-closed preflight over the Go control plane's "unrepresentable" wire

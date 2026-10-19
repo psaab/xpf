@@ -25,6 +25,18 @@ fn three_color_policer_semantics_match(
     }
 }
 
+/// #15108: whether two terms have the same compiled shape for hit-counter
+/// carry-forward across a snapshot refresh. This is exactly
+/// `filter_term_semantics_match` (every match/action/modifier field,
+/// including the three-color policer runtime shape) — the counter Arc is
+/// the only excluded field, and it is the handle being carried. A `true`
+/// result means the previous term's counter may be reused; any shape
+/// change mints a fresh counter so hits never leak across a different
+/// contract.
+pub(crate) fn filter_term_counter_shape_matches(old: &FilterTerm, new: &FilterTerm) -> bool {
+    filter_term_semantics_match(old, new)
+}
+
 fn filter_term_semantics_match(old: &FilterTerm, new: &FilterTerm) -> bool {
     // #5293: derive this change-detector from an EXHAUSTIVE destructure of the
     // FilterTerm with NO `..` rest pattern. Every field is bound either to a
