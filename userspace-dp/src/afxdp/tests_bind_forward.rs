@@ -446,6 +446,201 @@ fn build_live_forward_request_threads_nat64_reverse_info_5606() {
     );
 }
 
+
+// #15246 (A65-02): on a NON-fabric (LAN) ingress a host can put any
+// `02:bf:73:<id>` V2 stamp in its Ethernet source MAC. The forward-request
+// builder used to preserve any such stamp that parsed as a same-zone V2
+// identity, letting the LAN host choose the interface scope the peer
+// applies to punted packets. The builder must preserve the frame stamp
+// only on a fabric ingress and otherwise mint from the real ingress
+// identity. These cells drive `build_live_forward_request_from_frame`
+// directly — the exact anchored function both the session-hit path
+// (`poll_descriptor/mod.rs`) and the flow-cache fallback
+// (`poll_descriptor/flow_cache_hit.rs`) call.
+//
+// RED on revert (drop the `ingress_is_fabric` gate): the LAN cell's
+// request carries the forged `forged_stamp` instead of `real_stamp`.
+// The fabric-ingress control stays green throughout — it is the
+// legitimate peer re-punt the V2 preservation exists for.
+fn v2_stamp_forwarding_15246() -> (ForwardingState, [u8; 6], [u8; 6]) {
+    let mut forwarding = ForwardingState::default();
+    // Fabric parent 21 (LAN port 10 is deliberately NOT a fabric).
+    forwarding.fabrics.push(FabricLink {
+        parent_ifindex: 21,
+        overlay_ifindex: 0,
+        peer_addr: IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2)),
+        peer_mac: [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+        local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
+        up: true,
+    });
+    forwarding
+        .zone_id_to_name
+        .insert(TEST_LAN_ZONE_ID, "lan".to_string());
+    // Real LAN ingress identity: logical ifindex 10.
+    let real_scope = crate::afxdp::forwarding::fabric_nat_scope_stamp_id(
+        TEST_LAN_ZONE_ID,
+        "reth0.10",
+        "default",
+    );
+    forwarding
+        .ifindex_to_fabric_nat_scope_id
+        .insert(10, real_scope);
+    forwarding.fabric_nat_scope_id_to_identity.insert(
+        real_scope,
+        FabricNatScopeIdentity {
+            zone_id: TEST_LAN_ZONE_ID,
+            ifindex: 10,
+            redundancy_group: 1,
+        },
+    );
+    // Forged identity: a DIFFERENT same-zone interface (ifindex 11) in a
+    // peer-active RG — the strongest claim a LAN host can forge.
+    let forged_scope = crate::afxdp::forwarding::fabric_nat_scope_stamp_id(
+        TEST_LAN_ZONE_ID,
+        "reth0.11",
+        "default",
+    );
+    assert_ne!(real_scope, forged_scope);
+    forwarding.fabric_nat_scope_id_to_identity.insert(
+        forged_scope,
+        FabricNatScopeIdentity {
+            zone_id: TEST_LAN_ZONE_ID,
+            ifindex: 11,
+            redundancy_group: 1,
+        },
+    );
+    let stamp = |scope: u32| {
+        [
+            FABRIC_NAT_SCOPE_MAC_PREFIX[0],
+            FABRIC_NAT_SCOPE_MAC_PREFIX[1],
+            FABRIC_NAT_SCOPE_MAC_PREFIX[2],
+            (scope >> 16) as u8,
+            (scope >> 8) as u8,
+            scope as u8,
+        ]
+    };
+    (forwarding, stamp(real_scope), stamp(forged_scope))
+}
+
+fn v2_stamp_request_15246(
+    forwarding: &ForwardingState,
+    ingress_ifindex: i32,
+    frame_src_mac: [u8; 6],
+) -> PendingForwardRequest {
+    let lookup = WorkerBindingLookup::default();
+    let ingress_ident = BindingIdentity {
+        slot: 7,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("ge-0-0-1"),
+        ifindex: ingress_ifindex,
+    };
+    let mut frame = vec![0u8; 64];
+    // Ethernet destination (fabric link MAC) + forged/real source stamp.
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&frame_src_mac);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: ingress_ifindex as u32,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        pkt_len: frame.len() as u16,
+        ..UserspaceDpMeta::default()
+    };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::FabricRedirect,
+            local_ifindex: 0,
+            egress_ifindex: 21,
+            tx_ifindex: 21,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
+            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+            // Placeholder the builder overwrites with the stamped scope.
+            src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    build_live_forward_request_from_frame(
+        &lookup,
+        0,
+        &ingress_ident,
+        XdpDesc {
+            addr: 0,
+            len: frame.len() as u32,
+            options: 0,
+        },
+        &frame,
+        meta,
+        &decision,
+        forwarding,
+        None,
+        Some(TEST_LAN_ZONE_ID),
+        false,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("fabric-redirect forward request")
+}
+
+#[test]
+fn lan_ingress_forged_v2_stamp_not_preserved_15246() {
+    let (forwarding, real_stamp, forged_stamp) = v2_stamp_forwarding_15246();
+    // LAN ingress (ifindex 10, not a fabric port) carrying a forged V2
+    // source naming ifindex 11's scope.
+    let req = v2_stamp_request_15246(&forwarding, 10, forged_stamp);
+    assert_eq!(
+        req.decision.resolution.src_mac,
+        Some(real_stamp),
+        "#15246: a LAN-ingress forged V2 stamp must be replaced by the \
+         stamp minted from the real ingress identity (ifindex 10)"
+    );
+    assert_ne!(
+        req.decision.resolution.src_mac,
+        Some(forged_stamp),
+        "#15246: the forged peer scope must never survive a LAN ingress"
+    );
+}
+
+#[test]
+fn fabric_ingress_v2_stamp_preserved_15246() {
+    let (forwarding, _real_stamp, forged_stamp) = v2_stamp_forwarding_15246();
+    // Fabric ingress (parent 21): a validated peer V2 stamp is preserved
+    // verbatim — the legitimate re-punt control.
+    let req = v2_stamp_request_15246(&forwarding, 21, forged_stamp);
+    assert_eq!(
+        req.decision.resolution.src_mac,
+        Some(forged_stamp),
+        "#15246 control: a fabric-ingress V2 stamp must be preserved"
+    );
+}
+
+#[test]
+fn lan_ingress_unstamped_gets_real_identity_stamp_15246() {
+    let (forwarding, real_stamp, _forged_stamp) = v2_stamp_forwarding_15246();
+    // LAN ingress with an ordinary host source MAC: the punt is stamped
+    // from the real ingress identity (unchanged neighbouring behaviour).
+    let req = v2_stamp_request_15246(&forwarding, 10, [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    assert_eq!(
+        req.decision.resolution.src_mac,
+        Some(real_stamp),
+        "#15246 control: an unstamped LAN punt keeps the real-identity stamp"
+    );
+}
+
+
+
 #[test]
 fn build_live_forward_request_from_frame_drops_logged_output_filter_discard() {
     let lookup = WorkerBindingLookup::default();
