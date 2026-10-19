@@ -1728,10 +1728,25 @@ step. Both are required — neither sees the other's case:
   neighbor activated in multiple families produces one disambiguated row per
   family (both `bgpAFILabel`-labelled and sorted for deterministic output). A
   non-JSON response (an older FRR `% BGP instance not found` banner, a wedged
-  vtysh) or a peerless/empty summary yields no peers and NO error — "no BGP
-  peers" is a valid state on the observability path, not a failure. The CLI /
-  REST / gRPC `show bgp summary` renderers now surface the `AF` and `PfxRcd`
-  columns.
+  vtysh) or a peerless/empty summary yields no peers and NO error on the
+  global show path — "no BGP peers" is a valid state there, not a failure.
+  The CLI / REST / gRPC `show bgp summary` renderers now surface the `AF`
+  and `PfxRcd` columns.
+
+  **VRF names + all-VRF summary (#15265).** The `Get*VRF` status queries take
+  the bare routing-instance name and normalize it through `frrVRFName`
+  (`diagcmd.VRFDeviceName`, prefix applied exactly once) inside
+  `vrfShowCommand`, so `tenant` queries `show bgp vrf vrf-tenant summary
+  json` — the VRF FRR actually has. Previously the bare name was interpolated,
+  FRR answered `{}`, and `parseBGPSummaryJSON` returned zero peers with no
+  error, so HA readiness could never satisfy an instance adjacency. For a
+  configured (non-empty) VRF, `GetBGPSummaryVRF` now treats `{}`/empty/
+  non-JSON as a status error (fail closed); the global path keeps the
+  no-peers/no-error contract. `GetBGPSummary` queries
+  `show bgp vrf all summary json` and `parseBGPSummaryJSON` handles both the
+  flat shape and the per-VRF nested shape, stamping `BGPPeerSummary.Instance`
+  (bare instance name, `""` for default) from `vrfName`/the enclosing VRF key;
+  all three renderers add an `Instance` column so VRF-only peers are listed.
 - `vtysh -c` is run synchronously in batch mode for MOST state queries:
   `Vtysh` buffers the whole stdout into a string. The ONE streaming
   exception is `VtyshStream` (behind `StreamBGPRoutes`), added for the

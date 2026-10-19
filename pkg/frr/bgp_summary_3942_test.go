@@ -101,7 +101,7 @@ Total number of neighbors 2
 func TestGetBGPSummaryJSON(t *testing.T) {
 	fake := &fakeExecutor{
 		vtyshResp: map[string]string{
-			"show bgp summary json": bgpSummaryJSONFixture,
+			"show bgp vrf all summary json": bgpSummaryJSONFixture,
 			// Legacy command the reverted implementation would call.
 			"show bgp summary": bgpSummaryTextFixture,
 		},
@@ -150,8 +150,8 @@ func TestGetBGPSummaryJSON(t *testing.T) {
 		t.Errorf("peers[1].PfxRcd = %q, want 1", peers[1].PfxRcd)
 	}
 	// The JSON command must be the one issued.
-	if fake.lastVtyshCmd != "show bgp summary json" {
-		t.Errorf("Vtysh called with %q, want %q", fake.lastVtyshCmd, "show bgp summary json")
+	if fake.lastVtyshCmd != "show bgp vrf all summary json" {
+		t.Errorf("Vtysh called with %q, want %q", fake.lastVtyshCmd, "show bgp vrf all summary json")
 	}
 }
 
@@ -197,7 +197,7 @@ const bgpSummaryDualFamilyFixture = `{
 // returned with the correct family label and per-family PfxRcd. #3942.
 func TestGetBGPSummaryDualFamily(t *testing.T) {
 	fake := &fakeExecutor{
-		vtyshResp: map[string]string{"show bgp summary json": bgpSummaryDualFamilyFixture},
+		vtyshResp: map[string]string{"show bgp vrf all summary json": bgpSummaryDualFamilyFixture},
 	}
 	m := &Manager{exec: fake}
 
@@ -237,7 +237,7 @@ func TestGetBGPSummaryNotEstablished(t *testing.T) {
   }
 }`
 	fake := &fakeExecutor{
-		vtyshResp: map[string]string{"show bgp summary json": fixture},
+		vtyshResp: map[string]string{"show bgp vrf all summary json": fixture},
 	}
 	m := &Manager{exec: fake}
 
@@ -272,7 +272,7 @@ func TestGetBGPSummaryNoPeers(t *testing.T) {
 	}
 	for name, out := range cases {
 		fake := &fakeExecutor{
-			vtyshResp: map[string]string{"show bgp summary json": out},
+			vtyshResp: map[string]string{"show bgp vrf all summary json": out},
 		}
 		m := &Manager{exec: fake}
 		peers, err := m.GetBGPSummary(context.Background())

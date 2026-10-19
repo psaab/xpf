@@ -84,7 +84,7 @@ func (vtyshEscapeExecutor6468) Vtysh(_ context.Context, cmd string) (string, err
 	switch cmd {
 	case "show isis neighbor":
 		return evilISISNeighborTable6468, nil
-	case "show bgp summary json":
+	case "show bgp vrf all summary json":
 		return evilBGPSummaryJSON6468, nil
 	}
 	return evilVtyshBlock6468, nil

@@ -392,12 +392,12 @@ func (c *CLI) showBGP(args []string) error {
 			fmt.Println("No BGP peers")
 			return nil
 		}
-		fmt.Printf("  %-20s %-13s %-8s %-9s %-9s %-11s %-12s %s\n",
-			"Neighbor", "AF", "AS", "MsgRcvd", "MsgSent", "Up/Down", "State", "PfxRcd")
+		fmt.Printf("  %-20s %-13s %-16s %-8s %-9s %-9s %-11s %-12s %s\n",
+			"Neighbor", "AF", "Instance", "AS", "MsgRcvd", "MsgSent", "Up/Down", "State", "PfxRcd")
 		for _, p := range peers {
-			fmt.Printf("  %-20s %-13s %-8s %-9s %-9s %-11s %-12s %s\n",
+			fmt.Printf("  %-20s %-13s %-16s %-8s %-9s %-9s %-11s %-12s %s\n",
 				termsafe.SanitizeRowForDisplay(
-					p.Neighbor, p.AddressFamily, p.AS, p.MsgRcvd, p.MsgSent, p.UpDown, p.State, p.PfxRcd)...)
+					p.Neighbor, p.AddressFamily, p.Instance, p.AS, p.MsgRcvd, p.MsgSent, p.UpDown, p.State, p.PfxRcd)...)
 		}
 		return nil
 
