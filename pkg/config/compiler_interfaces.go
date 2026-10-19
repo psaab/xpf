@@ -794,11 +794,15 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 						ifaces.MalformedAddresses = append(ifaces.MalformedAddresses, inetBad...)
 						for _, addrInst := range inetAddrs {
 							unit.Addresses = append(unit.Addresses, addrInst.name)
-							// Check for primary/preferred flags
+							// Check for primary/preferred flags. Preferred
+							// is first-wins across families (#15222): the
+							// inet6 arm already guards on empty, and a
+							// last-wins overwrite here would silently
+							// discard the first authored `preferred`.
 							if addrInst.node.FindChild("primary") != nil {
 								unit.PrimaryAddress = addrInst.name
 							}
-							if addrInst.node.FindChild("preferred") != nil {
+							if addrInst.node.FindChild("preferred") != nil && unit.PreferredAddress == "" {
 								unit.PreferredAddress = addrInst.name
 							}
 							parseVRRPGroups(unit, addrInst.name, addrInst.node)
