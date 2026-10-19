@@ -504,11 +504,21 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// on early-abort applies) and before everything that touches links.
 	// Post-handoff this is a no-op atomic check.
 	if err := d.requireEarlyInputProtectionPreApply(cfg); err != nil {
-		return err
+		// #14356 (reopened): Store.Commit already promoted cfg, so this
+		// earliest refusal is post-promotion too. Run the bounded closeout
+		// before propagating; its host-inbound owner re-invokes this same
+		// guard at its top and will fail visibly there if the barrier still
+		// cannot install, while the lo0 and credential owners still enforce
+		// the committed tightening.
+		return d.closeoutHostAuthOnPostPromotionError(err, cfg)
 	}
 
 	if err := d.applyHostInboundPreNetworkdAddressFence(cfg); err != nil {
-		return err
+		// #14356 (reopened): same post-promotion closeout. The fence helper
+		// already recorded staleness on its install failure; the closeout's
+		// real host-inbound install (or its retained-fence staleness record)
+		// is the fail-closed enforcement for this promoted generation.
+		return d.closeoutHostAuthOnPostPromotionError(err, cfg)
 	}
 
 	// #1922 Item 2 bootstrap exit: the FIRST apply of a non-empty config
