@@ -932,6 +932,18 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 	// suppressing the userspace merge above.
 	cr := dataplane.LastApplyResultOf(dp)
 
+	// #15192: a leniently-loaded filter may carry two same-named terms (a
+	// repeated hierarchical term stanza an older binary strict-committed).
+	// Emitting one xpf_filter_hits_total series per term instance would
+	// publish the identical (filter,family,term) labelset twice, which
+	// fails Prometheus Gather and 500s every scrape. Aggregate per key:
+	// sum the map-slot packets of every same-named instance, and merge the
+	// single userspace counter for the shared key exactly once.
+	type filterTermAgg15192 struct {
+		totalPkts   uint64
+		emit        bool
+		userspaceIn bool
+	}
 	emitFilters := func(family string, filters map[string]*config.FirewallFilter) {
 		names := make([]string, 0, len(filters))
 		for name := range filters {
@@ -966,11 +978,19 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 				}
 			}
 
+			aggs := make(map[string]*filterTermAgg15192)
+			var termOrder []string
 			for _, term := range filter.Terms {
 				if term == nil || term.Name == "" {
 					// Tolerant config paths can retain nil term slots. They
 					// have no counter series and must not abort a scrape.
 					continue
+				}
+				agg := aggs[term.Name]
+				if agg == nil {
+					agg = &filterTermAgg15192{}
+					aggs[term.Name] = agg
+					termOrder = append(termOrder, term.Name)
 				}
 				// #3459: the per-term counter-slot stride is the shared SSOT
 				// config.FilterTermExpansionCount (full src×dst×dstPort×
@@ -979,12 +999,11 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 				// prefix-lists and drifted later terms onto a neighbouring
 				// term's slots, mis-attributing the hit.
 				numRules := config.FilterTermExpansionCount(term, cfg.PolicyOptions.PrefixLists)
-				var totalPkts uint64
 				mapFailed := false
 				if hasMap {
 					for i := uint32(0); i < numRules; i++ {
 						if ctrs, err := dp.ReadFilterCounters(ruleOffset + i); err == nil {
-							totalPkts += ctrs.Packets
+							agg.totalPkts += ctrs.Packets
 						} else {
 							c.counterReadErrors.Add(1)
 							mapFailed = true
@@ -997,22 +1016,32 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 				userspaceCounter, userspaceOk := userspaceCounters[dpuserspace.FirewallFilterTermCounterKey{
 					Family: family, FilterName: name, TermName: term.Name,
 				}]
-				if userspaceOk {
-					totalPkts += userspaceCounter.Packets
+				if userspaceOk && !agg.userspaceIn {
+					agg.totalPkts += userspaceCounter.Packets
+					agg.userspaceIn = true
 				}
 
 				// #3408: on a map read failure with NO userspace signal, SKIP
 				// this term's sample (a missing sample, not a stale/partial 0)
 				// — matching the zone/policy collectors — and rely on the
 				// bumped counterReadErrors. A userspace-published counter is a
-				// real signal, so still emit when one is present (#3461).
+				// real signal, so still emit when one is present (#3461). For
+				// a duplicated key the verdict is per instance: one failed
+				// instance does not suppress a sibling that did emit.
 				if mapFailed && !userspaceOk {
 					continue
 				}
 				if hasMap || userspaceOk {
-					c.emitConstMetric(ch, c.filterHitsTotal, prometheus.CounterValue,
-						float64(totalPkts), name, family, term.Name)
+					agg.emit = true
 				}
+			}
+			for _, termName := range termOrder {
+				agg := aggs[termName]
+				if agg == nil || !agg.emit {
+					continue
+				}
+				c.emitConstMetric(ch, c.filterHitsTotal, prometheus.CounterValue,
+					float64(agg.totalPkts), name, family, termName)
 			}
 		}
 	}

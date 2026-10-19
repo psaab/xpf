@@ -312,6 +312,18 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
+	// #15192 (D07-01): duplicate term name inside ONE firewall filter.
+	// compileFirewall appends one term per hierarchical stanza with no
+	// merge, so a repeated `term T` strict-committed as two same-named
+	// terms while flat-set/load-merge merge to one. Strict rejects
+	// naming the duplicate; lenient warns and keeps both (#1960).
+	fwDupTermWarnings, err := validateFirewallFilterDuplicateTermsAST(
+		tree.Children, opts.lenientFirewallFilterFamilyCollisions)
+	if err != nil {
+		return nil, err
+	}
+	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, fwDupTermWarnings...)
+
 	// #9017 undeclared address-family token. Same AST-level reason as the
 	// collision gate above: an unknown family compiles to nothing (#9883
 	// quarantine in compileFirewall), so by the time fw.FiltersInet exists

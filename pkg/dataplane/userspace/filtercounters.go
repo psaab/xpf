@@ -17,6 +17,15 @@ func BuildFirewallFilterTermCounterIndex(status *ProcessStatus) map[FirewallFilt
 			FilterName: counter.FilterName,
 			TermName:   counter.TermName,
 		}
+		// #15192: a duplicated (family,filter,term) key — two same-named
+		// terms in one filter, each with its own runtime counter — must
+		// SUM, not last-wins. Every consumer of this index (Prometheus,
+		// CLI, gRPC) keys by the same triple, so last-wins silently
+		// dropped one term's hits.
+		if existing, ok := index[key]; ok {
+			counter.Packets += existing.Packets
+			counter.Bytes += existing.Bytes
+		}
 		index[key] = counter
 	}
 	return index
