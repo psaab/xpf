@@ -52,6 +52,9 @@ func syslogClientFingerprint(cfg *config.Config) (string, bool) {
 	sort.Strings(names)
 
 	h := sha256.New()
+	// #15078: the global source-interface has no single collector, so its
+	// fingerprint term keeps the family-blind resolution; per-stream terms
+	// below resolve against each stream's own collector family.
 	fmt.Fprintf(h, "mode=%s\nformat=%s\nsrcif=%s\nsrcaddr=%s\n",
 		cfg.Security.Log.Mode, cfg.Security.Log.Format,
 		cfg.Security.Log.SourceInterface,
@@ -65,7 +68,7 @@ func syslogClientFingerprint(cfg *config.Config) (string, bool) {
 		fmt.Fprintf(h, "stream=%s\nhost=%s\nport=%d\nproto=%s\nsev=%s\nfac=%s\ncat=%s\nfmt=%s\nsa=%s\nsi=%s\nrsi=%s\n",
 			name, st.Host, st.Port, st.Transport.Protocol, st.Severity, st.Facility,
 			st.Category, st.Format, st.SourceAddress, st.SourceInterface,
-			config.ResolveSyslogSourceAddr(cfg, st.SourceInterface))
+			config.ResolveSyslogSourceAddrForCollector(cfg, st.SourceInterface, st.Host))
 	}
 	return hex.EncodeToString(h.Sum(nil)), true
 }
@@ -209,13 +212,6 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		d.syslogHashSet = false
 	}
 
-	// Resolve global source-interface to IP (fallback for streams without source-address).
-	// Prefer PrimaryAddress from config if set on the source interface unit.
-	var globalSourceAddr string
-	if cfg.Security.Log.SourceInterface != "" {
-		globalSourceAddr = config.ResolveSyslogSourceAddr(cfg, cfg.Security.Log.SourceInterface)
-	}
-
 	var clients []*logging.SyslogClient
 	skipped := 0
 	for name, stream := range cfg.Security.Log.Streams {
@@ -233,12 +229,20 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		// global rather than pinning the stream to "": resolution reads
 		// interface state, so an interface that is merely not up yet must not
 		// permanently strip a source the operator did configure globally.
+		//
+		// #15078: both interface arms resolve against THIS stream's collector
+		// family (ResolveSyslogSourceAddrForCollector). There is deliberately
+		// no family-blind global fallback after them: for an IP-literal
+		// collector it would pin the primary (IPv4 on a dual-stack unit) and
+		// fail the dial, so no matching family leaves the bind unbound and
+		// the resolver warns. A hostname collector carries no family, so its
+		// global arm IS the legacy family-blind resolution.
 		srcAddr := stream.SourceAddress
 		if srcAddr == "" && stream.SourceInterface != "" {
-			srcAddr = config.ResolveSyslogSourceAddr(cfg, stream.SourceInterface)
+			srcAddr = config.ResolveSyslogSourceAddrForCollector(cfg, stream.SourceInterface, stream.Host)
 		}
-		if srcAddr == "" {
-			srcAddr = globalSourceAddr
+		if srcAddr == "" && cfg.Security.Log.SourceInterface != "" {
+			srcAddr = config.ResolveSyslogSourceAddrForCollector(cfg, cfg.Security.Log.SourceInterface, stream.Host)
 		}
 		protocol := stream.Transport.Protocol
 		if protocol == "" {
