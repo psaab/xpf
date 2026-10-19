@@ -513,30 +513,36 @@ func (c *CLI) dispatchConfig(line string) error {
 		// `top delete ... policy allow-all` left the permit
 		// policy in the candidate and committed it.
 		return c.dispatchTopUp15082(line)
-	case "set":
-		if len(parts) < 2 {
-			return fmt.Errorf("set: missing path")
+	case "set", "delete", "deactivate", "activate":
+		// #15167: derive the path from the SAME config lexer the gate
+		// adjudicated (config.ParseConfigMutationLine), never from
+		// strings.Fields above. Fields is unicode-aware, so a Unicode
+		// space after the verb or inside the path split tokens the
+		// lexer stopped before — the gate judged a prefix (or only the
+		// verb) while the store executed the full path, bypassing
+		// allow/deny-configuration. A line that does not lex cleanly is
+		// refused here for every class; a restricted class was already
+		// refused by checkConfigRegex above.
+		toks, _, lexOK := config.ParseConfigMutationLine(line)
+		if !lexOK || len(toks) == 0 || toks[0] != parts[0] {
+			return fmt.Errorf("%s: invalid path", parts[0])
 		}
-		fullPath := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), parts[1:]...)
-		return c.store.SetFromInputAsPlantClass(sessionID, config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
-	case "delete":
-		if len(parts) < 2 {
-			return fmt.Errorf("delete: missing path")
+		if len(toks) < 2 {
+			return fmt.Errorf("%s: missing path", parts[0])
 		}
-		fullPath := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), parts[1:]...)
-		return c.store.DeleteFromInputAsPlantClass(sessionID, config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
-	case "deactivate":
-		if len(parts) < 2 {
-			return fmt.Errorf("deactivate: missing path")
+		fullPath := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), toks[1:]...)
+		joined := strings.Join(fullPath, " ")
+		plant := config.EventPlantClassForMutation(c.userClass)
+		switch parts[0] {
+		case "set":
+			return c.store.SetFromInputAsPlantClass(sessionID, plant, joined)
+		case "delete":
+			return c.store.DeleteFromInputAsPlantClass(sessionID, plant, joined)
+		case "deactivate":
+			return c.store.DeactivateFromInputAsPlantClass(sessionID, plant, joined)
+		default: // activate
+			return c.store.ActivateFromInputAsPlantClass(sessionID, plant, joined)
 		}
-		fullPath := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), parts[1:]...)
-		return c.store.DeactivateFromInputAsPlantClass(sessionID, config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
-	case "activate":
-		if len(parts) < 2 {
-			return fmt.Errorf("activate: missing path")
-		}
-		fullPath := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), parts[1:]...)
-		return c.store.ActivateFromInputAsPlantClass(sessionID, config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
 	case "copy", "rename":
 		return c.handleCopyRename(line)
 	case "insert":

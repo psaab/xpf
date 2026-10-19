@@ -188,22 +188,51 @@ func configMutationPaths(editPath, parts []string, quoted []bool) ([]string, boo
 // makes `annotate`'s trailing comment one token, which is what lets the path be
 // extracted without a second parse.
 func lexConfigMutationLine9938(line string) (tokens []string, quoted []bool) {
+	tokens, quoted, _ = lexConfigMutationLineStrict15167(line)
+	return tokens, quoted
+}
+
+// lexConfigMutationLineStrict15167 is lexConfigMutationLine9938 reporting
+// whether the WHOLE line lexed cleanly. ok is false when the lexer stopped
+// early: a TokenError (a non-ASCII byte such as a Unicode space, an
+// unterminated string/comment), or a structural token ({ } ; |) that has
+// no place in a flat config-mode line.
+//
+// #15167 (V47-S1, shared with B23-01): the lenient lexer returns only a
+// PREFIX on such input. An executor that splits with strings.Fields
+// (unicode-aware) acts on the FULL path, so a gate judging the prefix
+// admits a mutation it never saw — `set<NBSP>system login ...` lexes to
+// just `set` here (ungated) while Fields executes `system login ...`.
+// AuthorizeConfigMutation therefore fails closed on !ok for a gated verb,
+// and executors use ParseConfigMutationLine so they act on exactly the
+// tokens the gate judged.
+func lexConfigMutationLineStrict15167(line string) (tokens []string, quoted []bool, ok bool) {
 	lex := NewLexer(line)
 	for {
 		tok := lex.Next()
 		switch tok.Type {
 		case TokenEOF:
-			return tokens, quoted
+			return tokens, quoted, true
 		case TokenIdentifier, TokenString:
 			tokens = append(tokens, tok.Value)
 			quoted = append(quoted, tok.Type == TokenString)
 		default:
-			// A brace or semicolon has no place in a flat config-mode line.
-			// Stopping rather than skipping keeps the gate's view of the line a
-			// PREFIX of what the dispatcher sees, never a different line.
-			return tokens, quoted
+			return tokens, quoted, false
 		}
 	}
+}
+
+// ParseConfigMutationLine lexes a full config-mode line the way the
+// authorization gate does (#15167): quotes are consumed and comments are
+// skipped, exactly as lexConfigMutationLine9938 tokenizes for
+// AuthorizeConfigMutation. ok is false when the line does not lex cleanly
+// end to end (see lexConfigMutationLineStrict15167), so an executor can
+// refuse it instead of re-splitting the raw text with strings.Fields and
+// acting on tokens the gate never judged. Executors of the flat verbs
+// (set/delete/deactivate/activate) must derive their path from this parse,
+// never from strings.Fields on the raw line.
+func ParseConfigMutationLine(line string) (tokens []string, quoted []bool, ok bool) {
+	return lexConfigMutationLineStrict15167(line)
 }
 
 // ParseConfigPath lexes a typed configuration-path fragment (for example
@@ -361,7 +390,7 @@ func authorizeConfigMutationDepth9939(cfg *Config, class string, editPath []stri
 	if class == "" {
 		return nil
 	}
-	parts, quoted := lexConfigMutationLine9938(line)
+	parts, quoted, lexOK := lexConfigMutationLineStrict15167(line)
 	// #14716: the stored cursor may carry raw, un-lexed tokens (quotes,
 	// comment fragments) from a writer that split with strings.Fields.
 	// Normalize it — including a block comment split across the cursor
@@ -376,7 +405,17 @@ func authorizeConfigMutationDepth9939(cfg *Config, class string, editPath []stri
 			editPath, parts, quoted = target, inner, innerQuoted
 		}
 	}
+	// #15167: a prefix that is exactly a gated verb (`set<NBSP>system ...`
+	// lexes to just `set`) carries no adjudicable path, so
+	// configMutationPaths declines it — but a Fields-splitting executor
+	// would act on the remainder. Treat a bare gated verb on a
+	// non-lexing line as gated here; the restricted-class arm below
+	// refuses it. Clean bare verbs (`set` alone) keep the arity error.
+	verbOnly15167 := !lexOK && len(parts) == 1 && configMutationVerbs[parts[0]]
 	paths, gated := configMutationPaths(editPath, parts, quoted)
+	if !gated && verbOnly15167 {
+		paths, gated = []string{strings.Join(editPath, " ")}, true
+	}
 	if !gated {
 		return nil
 	}
@@ -388,6 +427,20 @@ func authorizeConfigMutationDepth9939(cfg *Config, class string, editPath []stri
 	}
 	if !ok {
 		return nil
+	}
+	// #15167 (V47-S1, shared with B23-01): the line did not lex cleanly end
+	// to end — a Unicode space or other non-ASCII byte, an unterminated
+	// string/comment, or a structural token stopped the lexer, so `paths`
+	// above was resolved from a PREFIX of the line. A Fields-splitting
+	// executor acts on the full path, which this gate never saw. For a
+	// class that configured *-configuration regexes, fail closed rather
+	// than adjudicate a shorter mutation than the one that will run.
+	// Unrestricted classes returned above, so their malformed lines keep
+	// the executor's ordinary error.
+	if !lexOK {
+		return fmt.Errorf("permission denied: login class %q denies %s under %q (%s)",
+			class, parts[0], configAuditRoot(paths[0]),
+			"the line does not lex cleanly, so the path it acts on cannot be adjudicated")
 	}
 	// #9938 F-029: EVERY acted-upon path is adjudicated, and the FIRST denial
 	// refuses the whole command. A copy or rename that is permitted at one
