@@ -136,6 +136,25 @@ func (u *OSPFInterfaceUnion12186) Merge(src *OSPFInterface) []string {
 			}
 		}
 	}
+	// #15014 (A12-02): a key carried with NO type must survive the
+	// union as auth-configured evidence. The switch above only copies
+	// AuthKey under a matched simple/md5 type, so a typeless key was
+	// dropped here and the FRR renderer's fail-closed guard
+	// (`AuthType == "" && AuthKey != ""`, #14977) could never see it —
+	// the interface rendered `ip ospf area` with zero auth lines.
+	// Preserve the first such key (a differing second key is a
+	// conflict; values are never logged) without inventing a type.
+	// This arm only runs while the unioned AuthType is still "", so
+	// typed fragments keep their own key handling above; if a later
+	// fragment supplies a type, that type's key handling governs and
+	// the renderer then requires a renderable typed key (#14977).
+	if u.AuthType == "" && src.AuthKey != "" {
+		if u.AuthKey == "" {
+			u.AuthKey = src.AuthKey
+		} else if u.AuthKey != src.AuthKey {
+			conflicts = appendOSPFConflict12186(conflicts, "authentication-key")
+		}
+	}
 	return conflicts
 }
 
