@@ -62,10 +62,15 @@ import (
 //     intersection with what that listener already accepted may be enforced
 //     (#5561 round 12, api.AuthForRetainedListener). The gate for that is the
 //     property itself — every listener that is actually SERVING sits at an
-//     address `next` names (mgmtEndpoint.everyLiveLegNamedBy, #5561 round 13) —
-//     not "some leg moved and every rebind succeeded", which was a strictly
-//     wider proxy. A commit with nothing to converge, and one whose only failure
-//     was to ENABLE a leg that therefore does not exist, both publish whole.
+//     address `next` names — read from the LIVE leg set
+//     (liveLegsSanctionedLocked via api.Server.ServingLegAddrs, #14983;
+//     mgmtEndpoint.everyLiveLegNamedBy is the fingerprint fallback), not
+//     "some leg moved and every rebind succeeded", which was a strictly
+//     wider proxy, and not the recorded fingerprint alone, which desyncs
+//     after a positional swap or partial rebind. A commit with nothing to
+//     converge, and one whose only failure was to ENABLE a leg that
+//     therefore does not exist, both publish whole. After each reconcile
+//     m.cur resyncs from the serving legs (syncCurFromLiveLocked).
 //     Removing ALL api-auth is a revocation too and lands
 //     immediately, but WHAT lands depends on where the live legs are
 //     (publishNilDirectionLocked, #5561 round 14): the nil itself REMOVES a
@@ -602,7 +607,7 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 			m.lastHTTPAttempt = ""
 		}
 	}
-	sanctioned := m.cur.everyLiveLegNamedBy(next)
+	sanctioned := m.liveLegsSanctionedLocked(next)
 
 	// The REVOCATION half of a non-nil credential set is published BEFORE any
 	// listener is bound (#5561 round 9 finding 3; the grant half split off in
@@ -673,12 +678,14 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 		// Record the attempted bind so `show system services` reports the address
 		// a boot-failed listener is retrying, not the one it failed at boot (#6401).
 		m.lastHTTPAttempt = next.Addr
-		if err := m.srv.ReconcileHTTPAddrs(nextE.httpAddrs()); err != nil {
-			errs = append(errs, err)
-		} else {
-			// curSet advances here too: a boot bind failure leaves it false, and
-			// this is the reconcile that pays that retry debt off (#5561 round 14).
-			m.cur.addr, m.cur.addrs, m.cur.httpDegraded, m.curSet = next.Addr, nextE.addrs, next.HTTPBindDegraded, true
+		hErr := m.srv.ReconcileHTTPAddrs(nextE.httpAddrs())
+		// #14983: resync m.cur from the legs now serving even on a
+		// partial (joined-error) reconcile, so the fingerprint names
+		// the retained legs alongside the converged ones instead of
+		// keeping the pre-rebind set wholesale.
+		m.syncCurFromLiveLocked(next)
+		if hErr != nil {
+			errs = append(errs, hErr)
 		}
 	}
 
@@ -702,10 +709,10 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 	// boot bind (#5561 round 14, MAJOR 5); this is that check applied to the
 	// steady state rather than only to boot.
 	if next.TLS != m.cur.tls || !mgmtAddrsEqual(nextE.httpsBindAddrs(), m.cur.httpsBindAddrs()) || next.HTTPSBindDegraded != m.cur.httpsDegraded || (next.TLS && !m.srv.HTTPSServing()) {
-		if err := m.srv.ReconcileHTTPSAddrs(next.TLS, nextE.httpsBindAddrs()); err != nil {
-			errs = append(errs, err)
-		} else {
-			m.cur.tls, m.cur.httpsAddr, m.cur.httpsAddrs, m.cur.httpsDegraded = next.TLS, next.HTTPSAddr, nextE.httpsAddrs, next.HTTPSBindDegraded
+		hErr := m.srv.ReconcileHTTPSAddrs(next.TLS, nextE.httpsBindAddrs())
+		m.syncCurFromLiveLocked(next)
+		if hErr != nil {
+			errs = append(errs, hErr)
 		}
 	}
 
@@ -765,7 +772,7 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 	// address, so converging that bind, or committing the address that is
 	// actually serving, publishes the full set
 	// (TestMgmtWithheldGrantIsExitableByASubsequentCommit_5561).
-	if next.Auth != nil && !sanctioned && m.cur.everyLiveLegNamedBy(next) {
+	if next.Auth != nil && !sanctioned && m.liveLegsSanctionedLocked(next) {
 		m.srv.ReplaceAuth(next.Auth)
 	}
 
@@ -1014,11 +1021,105 @@ func (m *managementReconciler) warnStaleCertForHostName(hostName string) bool {
 // nil the operator committed genuinely takes effect and deny-all is not a
 // lockout.
 func (m *managementReconciler) publishNilDirectionLocked() {
-	if m.cur.allLoopback() {
+	// #14983: judge loopback-ness against the legs ACTUALLY serving,
+	// not only the recorded fingerprint. After a partial rebind the
+	// fingerprint can name only the converged (loopback) legs while a
+	// retained off-loopback leg is still serving; publishing nil there
+	// would expose an unauthenticated off-loopback API.
+	if m.liveAllLoopbackLocked() {
 		m.srv.ReplaceAuth(nil)
 		return
 	}
 	m.srv.ReplaceAuth(&api.AuthConfig{})
+}
+
+// liveLegsSanctionedLocked reports whether every listener ACTUALLY
+// serving right now sits at an address next names (#14983). It reads
+// the server's live leg set, falling back to the recorded fingerprint
+// when no server exists. The fingerprint alone desyncs after a
+// positional swap or a partial rebind: it covers only the addresses
+// the last SUCCESSFUL per-plane reconcile named, in that reconcile's
+// order, so a still-serving retained leg can be skipped or misjudged.
+// Caller holds mu.
+func (m *managementReconciler) liveLegsSanctionedLocked(next api.Config) bool {
+	if m.srv == nil {
+		return m.cur.everyLiveLegNamedBy(next)
+	}
+	nextE := endpointOf(next)
+	httpLive, httpsLive := m.srv.ServingLegAddrs()
+	for _, a := range httpLive {
+		if !addrInSet(a, nextE.httpAddrs()) {
+			return false
+		}
+	}
+	for _, a := range httpsLive {
+		if !next.TLS || !addrInSet(a, nextE.httpsBindAddrs()) {
+			return false
+		}
+	}
+	return true
+}
+
+// liveAllLoopbackLocked reports whether every listener ACTUALLY
+// serving right now is loopback-bound (#14983). Falls back to the
+// fingerprint when no server exists. Caller holds mu.
+func (m *managementReconciler) liveAllLoopbackLocked() bool {
+	if m.srv == nil {
+		return m.cur.allLoopback()
+	}
+	httpLive, httpsLive := m.srv.ServingLegAddrs()
+	for _, a := range httpLive {
+		if !mgmtAddrIsLoopback(a) {
+			return false
+		}
+	}
+	for _, a := range httpsLive {
+		if !mgmtAddrIsLoopback(a) {
+			return false
+		}
+	}
+	return true
+}
+
+// syncCurFromLiveLocked resyncs the recorded fingerprint from the
+// legs ACTUALLY serving after a (possibly partial) reconcile (#14983).
+// On full success this reproduces the exact pre-#14983 fingerprint
+// assignment (desired set, mirrors, degraded flags, tls); on partial
+// failure it records the UNION actually serving — converged legs at
+// their new addresses plus each retained leg at its old address — in
+// serving order, so later gates that still read m.cur see every live
+// leg. A plane with no serving leg keeps its previous fingerprint
+// (retry debt: the change-detection predicate stays unequal). Caller
+// holds mu.
+func (m *managementReconciler) syncCurFromLiveLocked(next api.Config) {
+	if m.srv == nil {
+		return
+	}
+	nextE := endpointOf(next)
+	httpLive, httpsLive := m.srv.ServingLegAddrs()
+	if len(httpLive) > 0 || len(nextE.httpAddrs()) == 0 {
+		m.cur.addrs = append([]string(nil), httpLive...)
+		m.cur.addr = ""
+		if len(httpLive) > 0 {
+			m.cur.addr = httpLive[0]
+		}
+		m.cur.httpDegraded = next.HTTPBindDegraded
+		m.curSet = true
+		m.lastHTTPAttempt = next.Addr
+	}
+	if len(httpsLive) > 0 {
+		m.cur.tls = true
+		m.cur.httpsAddrs = append([]string(nil), httpsLive...)
+		m.cur.httpsAddr = httpsLive[0]
+		m.cur.httpsDegraded = next.HTTPSBindDegraded
+	} else if !next.TLS {
+		m.cur.tls = false
+		m.cur.httpsAddr = ""
+		m.cur.httpsAddrs = nil
+		m.cur.httpsDegraded = next.HTTPSBindDegraded
+	}
+	// If TLS is desired but no HTTPS leg is serving, keep the previous
+	// HTTPS fingerprint so the change predicate retries the bind.
 }
 
 // mgmtAddrIsLoopback reports whether a "host:port" bind is loopback, treating an

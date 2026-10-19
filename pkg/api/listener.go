@@ -600,6 +600,32 @@ func legsAllServing(legs []*listenerLeg, want int) bool {
 	return true
 }
 
+// ServingLegAddrs returns the REQUESTED bind address (leg.srv.Addr) of
+// every serving leg on both planes, HTTP first (#14983). The daemon's
+// management reconciler sanctions credential publication against this
+// live ground truth rather than its recorded fingerprint, which covers
+// only the addresses the last SUCCESSFUL per-plane reconcile named:
+// after a partial rebind (one leg's replacement bind failed and its old
+// leg is retained) or a positional swap, the fingerprint can skip or
+// mis-order a still-serving leg. Requested (not Effective* bound)
+// addresses are returned so an ephemeral :0 leg, which the reconciler
+// never names, is not mistaken for an unnamed serving listener.
+func (s *Server) ServingLegAddrs() (httpAddrs, httpsAddrs []string) {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	for _, leg := range s.httpLegs {
+		if leg.serving() {
+			httpAddrs = append(httpAddrs, leg.srv.Addr)
+		}
+	}
+	for _, leg := range s.httpsLegs {
+		if leg.serving() {
+			httpsAddrs = append(httpsAddrs, leg.srv.Addr)
+		}
+	}
+	return httpAddrs, httpsAddrs
+}
+
 // ReconcileHTTP make-before-break rebinds ONLY the HTTP listener to addr (#5866),
 // leaving the HTTPS leg untouched. An empty addr disables HTTP and retires its
 // live leg. A same-addr call is a no-op. Bind failure retains the previous
@@ -610,11 +636,14 @@ func (s *Server) ReconcileHTTP(addr string) error {
 
 // ReconcileHTTPAddrs is the multi-address form of ReconcileHTTP (#14583): it
 // make-before-break reconciles the HTTP leg SET to addrs. An empty set
-// disables HTTP. Each address is reconciled independently: an address whose
-// leg is already serving there is a no-op; a changed address binds its new
-// leg before the old leg at that slot retires; legs beyond the desired count
-// retire. A bind failure on one address retains that slot's previous leg,
-// still converges the others, and returns the joined error (retry debt).
+// disables HTTP. Each address is reconciled independently, matched BY
+// ADDRESS (#14983): an address whose leg is already serving there (at
+// any slot) is adopted as a no-op, so a pure reorder converges without
+// EADDRINUSE; a changed address binds its new leg before the displaced
+// leg retires; legs beyond the desired count retire. A bind failure on
+// one address retains that slot's previous leg, still converges the
+// others, and returns the joined error (retry debt). Duplicate desired
+// addresses are rejected before any leg is touched.
 func (s *Server) ReconcileHTTPAddrs(addrs []string) error {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
@@ -646,9 +675,17 @@ func (s *Server) ReconcileHTTPSAddrs(useTLS bool, addrs []string) error {
 }
 
 // reconcileLegsLocked drives one leg set (HTTP or HTTPS) to addrs. Caller
-// holds lifeMu. Slots are positional: slot i serves addrs[i]; a nil hole is a
-// slot whose bind has not yet succeeded. Changed slots bind their replacement
-// before the old leg retires (make-before-break); surplus slots retire.
+// holds lifeMu. Legs are matched to desired addresses BY ADDRESS, not by
+// position (#14983): slot i in the resulting set serves addrs[i], but a
+// live leg already serving addrs[i] is ADOPTED into that slot rather than
+// re-bound. Positional matching manufactured a self-inflicted EADDRINUSE
+// on a pure reorder ([A,B] -> [B,A] bound B while the old B leg still
+// served, and A while the old A leg still served), so a swap could never
+// converge and every retry reproduced the collision. Adoption keeps the
+// socket (no bounce) and makes a reorder a no-op. Changed slots bind
+// their replacement before the old leg retires (make-before-break);
+// surplus legs retire; a duplicate desired address is rejected up front
+// rather than binding the same address twice.
 func (s *Server) reconcileLegsLocked(addrs []string, isTLS bool) error {
 	legs := s.httpLegs
 	if isTLS {
@@ -675,23 +712,54 @@ func (s *Server) reconcileLegsLocked(addrs []string, isTLS bool) error {
 		}
 		return nil
 	}
+	// A duplicate desired address cannot be served by two legs (the
+	// second bind would EADDRINUSE against the first). Reject it before
+	// mutating any leg so the live set is untouched.
+	seen := make(map[string]struct{}, len(addrs))
+	for _, addr := range addrs {
+		if _, dup := seen[addr]; dup {
+			return fmt.Errorf("api: duplicate %s listener address %q", legKind(isTLS), addr)
+		}
+		seen[addr] = struct{}{}
+	}
 	next := make([]*listenerLeg, len(addrs))
+	adopted := make(map[*listenerLeg]bool, len(legs))
 	var errs []error
 	for i, addr := range addrs {
-		var cur *listenerLeg
-		if i < len(legs) {
-			cur = legs[i]
-		}
+		// Prefer the leg at this very slot (the common unchanged case),
+		// else ANY serving leg already on addr — the swap/adoption case.
 		// The same-address short circuit requires the leg to still be
 		// SERVING (#6803/#6827): a dead-but-installed leg must be replaced.
-		if cur.serving() && cur.srv.Addr == addr {
+		var cur *listenerLeg
+		if i < len(legs) && legs[i].serving() && legs[i].srv.Addr == addr {
+			cur = legs[i]
+		} else {
+			for _, leg := range legs {
+				if leg.serving() && leg.srv.Addr == addr && !adopted[leg] {
+					cur = leg
+					break
+				}
+			}
+		}
+		if cur != nil {
 			next[i] = cur
+			adopted[cur] = true
 			continue
+		}
+		// The leg this slot held (if any) is a candidate for retention
+		// on failure (its own last known position) and must survive
+		// until all slots resolve: a later slot may still adopt it.
+		var displaced *listenerLeg
+		if i < len(legs) && !adopted[legs[i]] {
+			displaced = legs[i]
 		}
 		ln, err := s.listen("tcp", addr)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("api: bind %s listener %q: %w", legKind(isTLS), addr, err))
-			next[i] = cur // retain the previous leg (fail-closed)
+			next[i] = displaced // retain the previous leg (fail-closed)
+			if displaced != nil {
+				adopted[displaced] = true
+			}
 			continue
 		}
 		var plan legPlan
@@ -704,15 +772,31 @@ func (s *Server) reconcileLegsLocked(addrs []string, isTLS bool) error {
 			// #7041: close the just-bound socket or every retry EADDRINUSEs.
 			ln.Close()
 			errs = append(errs, fmt.Errorf("api: generate HTTPS certificate for %q: %w", addr, err))
-			next[i] = cur
+			next[i] = displaced
+			if displaced != nil {
+				adopted[displaced] = true
+			}
 			continue
 		}
 		next[i] = s.serveLegLocked(plan, ln, isTLS)
-		s.stopLegLocked(cur)
+		// displaced is NOT retired here: a later slot may still adopt it
+		// (the [C,A] reorder), and retiring it now would close the very
+		// socket that slot needs. The sweep below retires every leg that
+		// did not land in next, after all slots are resolved — still
+		// make-before-break, since every replacement is already serving.
 	}
-	// Retire surplus legs beyond the desired count.
-	if len(legs) > len(addrs) {
-		for _, leg := range legs[len(addrs):] {
+	// Retire every leg that was neither adopted nor retained in next:
+	// surplus slots beyond the desired count and any displaced leg that
+	// escaped the per-slot retirement above. Never stop an adopted leg:
+	// it is live in next (possibly at a different slot after a swap).
+	inNext := make(map[*listenerLeg]bool, len(next))
+	for _, leg := range next {
+		if leg != nil {
+			inNext[leg] = true
+		}
+	}
+	for _, leg := range legs {
+		if leg != nil && !inNext[leg] {
 			s.stopLegLocked(leg)
 		}
 	}
