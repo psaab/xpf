@@ -158,24 +158,25 @@ func TestDHCPPool6696DNSServerSpellingsAgree(t *testing.T) {
 		build func() *ConfigTree
 	}{
 		{"set bracketed", func() *ConfigTree {
-			return setTree6696(t, `set system services dhcp-local-server group g1 pool p1 dns-server [ 192.0.2.53 198.51.100.53 ]`)
+			return setTree6696(t, `set system services dhcp-local-server group g1 pool p1 subnet 192.0.2.0/24`, `set system services dhcp-local-server group g1 pool p1 dns-server [ 192.0.2.53 198.51.100.53 ]`)
 		}},
 		{"set repeated", func() *ConfigTree {
 			return setTree6696(t,
+				`set system services dhcp-local-server group g1 pool p1 subnet 192.0.2.0/24`,
 				`set system services dhcp-local-server group g1 pool p1 dns-server 192.0.2.53`,
 				`set system services dhcp-local-server group g1 pool p1 dns-server 198.51.100.53`)
 		}},
 		{"brace bracketed", func() *ConfigTree {
 			return braceTree6696(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n    pool p1 {\n"+
-				"     dns-server [ 192.0.2.53 198.51.100.53 ];\n    }\n   }\n  }\n }\n}\n")
+				"     subnet 192.0.2.0/24;\n     dns-server [ 192.0.2.53 198.51.100.53 ];\n    }\n   }\n  }\n }\n}\n")
 		}},
 		{"brace repeated", func() *ConfigTree {
 			return braceTree6696(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n    pool p1 {\n"+
-				"     dns-server 192.0.2.53;\n     dns-server 198.51.100.53;\n    }\n   }\n  }\n }\n}\n")
+				"     subnet 192.0.2.0/24;\n     dns-server 192.0.2.53;\n     dns-server 198.51.100.53;\n    }\n   }\n  }\n }\n}\n")
 		}},
 		{"brace value block", func() *ConfigTree {
 			return braceTree6696(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n    pool p1 {\n"+
-				"     dns-server {\n      192.0.2.53;\n      198.51.100.53;\n     }\n    }\n   }\n  }\n }\n}\n")
+				"     subnet 192.0.2.0/24;\n     dns-server {\n      192.0.2.53;\n      198.51.100.53;\n     }\n    }\n   }\n  }\n }\n}\n")
 		}},
 	}
 
@@ -202,6 +203,7 @@ func TestDHCPPool6696DNSServerSpellingsAgree(t *testing.T) {
 func TestDHCPv6Group6696SpellingsAgree(t *testing.T) {
 	tree := setTree6696(t,
 		`set system services dhcpv6-local-server group g6 interface [ ge-0/0/0.0 ge-0/0/1.0 ]`,
+		`set system services dhcpv6-local-server group g6 pool p6 subnet 2001:db8::/64`,
 		`set system services dhcpv6-local-server group g6 pool p6 dns-server [ 2001:db8::53 2001:db8::54 ]`)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
@@ -310,29 +312,29 @@ func TestDHCPGroup6696BareValueBlockStillReadsEveryValue(t *testing.T) {
 // schema layer alone.
 func TestDHCPGroup6696EveryElementIsValidated(t *testing.T) {
 	bad := []struct {
-		name string
-		line string
-		want string
+		name  string
+		lines []string
+		want  string
 	}{
 		{
 			"second dns-server is not an IP",
-			`set system services dhcp-local-server group g1 pool p1 dns-server [ 192.0.2.53 not-an-ip ]`,
+			[]string{`set system services dhcp-local-server group g1 pool p1 subnet 192.0.2.0/24`, `set system services dhcp-local-server group g1 pool p1 dns-server [ 192.0.2.53 not-an-ip ]`},
 			"not-an-ip",
 		},
 		{
 			"second interface has a glob metacharacter",
-			`set system services dhcp-local-server group g1 interface [ ge-0/0/0.0 ge-* ]`,
+			[]string{`set system services dhcp-local-server group g1 interface [ ge-0/0/0.0 ge-* ]`},
 			"ge-*",
 		},
 		{
 			"v6 second dns-server is not an IP",
-			`set system services dhcpv6-local-server group g6 pool p6 dns-server [ 2001:db8::53 nope ]`,
+			[]string{`set system services dhcpv6-local-server group g6 pool p6 subnet 2001:db8::/64`, `set system services dhcpv6-local-server group g6 pool p6 dns-server [ 2001:db8::53 nope ]`},
 			"nope",
 		},
 	}
 	for _, tc := range bad {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := setTree6696(t, tc.line)
+			tree := setTree6696(t, tc.lines...)
 			cfg, err := CompileConfig(tree)
 			if err != nil {
 				// #14601: the compiled pool gate refuses a malformed
@@ -371,6 +373,7 @@ func TestDHCPGroup6696EveryElementIsValidated(t *testing.T) {
 func TestDHCPGroup6696RealValuesStillCommitClean(t *testing.T) {
 	tree := setTree6696(t,
 		`set system services dhcp-local-server group g1 interface [ ge-0/0/1.0 ge-0-0-2 reth0.80 fxp0 ge-0/0/3 ]`,
+		`set system services dhcp-local-server group g1 pool p1 subnet 192.0.2.0/24`,
 		`set system services dhcp-local-server group g1 pool p1 dns-server [ 192.0.2.53 198.51.100.53 ]`,
 	)
 	cfg, err := CompileConfig(tree)

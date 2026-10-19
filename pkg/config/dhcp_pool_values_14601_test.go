@@ -48,8 +48,12 @@ func TestDHCPPoolValuesRefusedAtCommit14601(t *testing.T) {
 			lines: dhcpPool14601(v6, "g6", "p6", "2001:db8:61::/64", "2001:db8:61::100", "2001:db8:61::199", "", "2001:db8:61::53", "2001:db8:61::54"),
 		},
 		{
-			name:  "control: pool with dns-server only (no subnet) commits",
+			// Flipped by #15029: a subnet-less pool renders "subnet": ""
+			// and Kea refuses the whole file; it is no longer a control.
+			// Exercised in dhcp_pool_no_subnet_15029_test.go (C3/C4).
+			name:  "pool with dns-server only (no subnet) refused (#15029)",
 			lines: dhcpPool14601(v4, "g1", "p1", "", "", "", "", "10.0.61.53"),
+			want:  []string{v4, `group "g1" pool "p1"`, "subnet"},
 		},
 		{
 			name:  "control: pool with subnet only (no range) commits",

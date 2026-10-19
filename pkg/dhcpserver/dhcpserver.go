@@ -1361,6 +1361,11 @@ func (m *Manager) generateKea4Config(cfg *config.DHCPServerConfig) error {
 	// on both nodes (#5203).
 	for _, group := range stableGroups(cfg.DHCPLocalServer.Groups) {
 		for _, pool := range stablePools(group.Pools) {
+			if pool.Subnet == "" {
+				m.warn("skipping subnet-less DHCP pool (Kea refuses an empty subnet and would stop serving every pool of the family)",
+					"group", group.Name, "pool", pool.Name)
+				continue
+			}
 			if kept, dup := claimPoolSubnet(seenSubnets, group.Name, pool); dup {
 				m.warn("skipping DHCP pool whose subnet duplicates one already rendered (Kea refuses a second subnet with the same prefix)",
 					"group", group.Name, "pool", pool.Name, "subnet", pool.Subnet, "kept", kept)
@@ -1504,6 +1509,11 @@ func (m *Manager) generateKea6Config(cfg *config.DHCPServerConfig) error {
 	// pair still resolves identically on both nodes (#5203).
 	for _, group := range stableGroups(cfg.DHCPv6LocalServer.Groups) {
 		for _, pool := range stablePools(group.Pools) {
+			if pool.Subnet == "" {
+				m.warn("skipping subnet-less DHCP pool (Kea refuses an empty subnet and would stop serving every pool of the family)",
+					"group", group.Name, "pool", pool.Name)
+				continue
+			}
 			if kept, dup := claimPoolSubnet(seenSubnets, group.Name, pool); dup {
 				m.warn("skipping DHCP pool whose subnet duplicates one already rendered (Kea refuses a second subnet with the same prefix)",
 					"group", group.Name, "pool", pool.Name, "subnet", pool.Subnet, "kept", kept)

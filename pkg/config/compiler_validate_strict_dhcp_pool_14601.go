@@ -45,12 +45,11 @@ import (
 //     half is this gate's job; the parse half is repeated here because the
 //     tolerant paths do not run SchemaValidate.
 //
-// A pool with no subnet keeps the range checks that do not need a subnet
-// (family, parse, ordering) and skips only the
-// containment half; the missing subnet is a separate incompleteness the
-// operator hits first, the same posture validateDHCPStaticBindingsStrict
-// takes for its in-subnet check. Iteration is sorted so the first reported
-// error is stable across runs.
+// A pool with no subnet is refused outright (#15029, A17-02): it renders
+// "subnet": "" and Kea refuses the whole file, so the missing subnet is
+// itself the Kea-refused value, not a separate incompleteness. The other
+// leaves are still checked after this gate only when a subnet exists.
+// Iteration is sorted so the first reported error is stable across runs.
 func validateDHCPPoolValuesStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -79,11 +78,16 @@ func validateDHCPPoolValuesStrict(cfg *Config) error {
 				}
 				where := fmt.Sprintf("%s group %q pool %q", server, group.Name, pool.Name)
 
-				// Subnet: prefix shape + family. The masked prefix is
-				// kept for the range-containment checks below.
+				// Subnet: required, prefix shape + family. The masked
+				// prefix is kept for the range-containment checks below.
+				// An empty subnet renders "subnet": "" which Kea refuses,
+				// stopping every pool of the family (#15029).
+				if pool.Subnet == "" {
+					return fmt.Errorf("%s subnet is not set (a DHCP pool without a subnet renders an empty subnet, Kea refuses the whole config and stops serving every pool on the node)", where)
+				}
 				var prefix netip.Prefix
 				havePrefix := false
-				if pool.Subnet != "" {
+				{
 					p, err := netip.ParsePrefix(pool.Subnet)
 					if err != nil {
 						return fmt.Errorf("%s subnet %q is not a valid prefix with a prefix length (Kea refuses a subnet without one and stops serving every pool on the node)", where, pool.Subnet)

@@ -275,17 +275,23 @@ stopped.
   bounds present) low greater than high; a `router` that is not a valid
   IPv4 address (the v4 `routers` option; the v6 generator emits no router
   option, so the leaf is inert there and ungated); and every `dns-server`
-  element that is unparseable or wrong-family. A pool with no subnet keeps
-  the parse/family/ordering checks and skips only containment.
+  element that is unparseable or wrong-family. Since #15029 a pool with
+  no subnet at all is refused the same way: it renders `"subnet": ""`,
+  which Kea refuses, so the missing subnet is itself the Kea-refused
+  value (the #14601 "dns-server only, no subnet" control is flipped to a
+  refusal).
 - **Tolerant load and peer sync:** the gate downgrades to a `cfg.Warnings`
-  entry (`lenientDHCPPoolValues`), so a persisted config still boots;
-  Kea's own refusal remains the signal there, as before this gate.
-- **No render belt:** unlike the duplicate subnet, a bad value has no
-  safe kept-pool arbitration — dropping one mistyped pool would silently
-  unserve its clients — so the renderer is unchanged and commit is the
-  gate. `kea-dhcp4 -t` / `kea-dhcp6 -t` on rendered passing configs was
-  not exercised (no Kea binary in the test environment); the Kea refusal
-  shapes above are from the Kea source cited in #14601.
+  entry (`lenientDHCPPoolValues`), so a persisted config still boots.
+- **Render belt (#15029):** unlike a mistyped value, a subnet-less pool
+  has a safe belt: the generators skip it with a warning naming
+  group/pool before `resolveSubnetID` (so a skipped pool consumes no
+  subnet id and healthy pools keep their ids), and Kea then loads the
+  healthy pools of the family. A mistyped (non-empty) subnet still has
+  no belt — dropping it would silently unserve its clients — so commit
+  remains the gate there. `kea-dhcp4 -t` / `kea-dhcp6 -t` on rendered
+  passing configs was not exercised (no Kea binary in the test
+  environment); the Kea refusal shapes above are from the Kea source
+  cited in #14601.
 
 ## Expired-lease reclamation — #1387 (stale-lease-cleanup slice / Path S)
 
