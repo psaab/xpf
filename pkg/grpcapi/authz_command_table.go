@@ -83,6 +83,7 @@ var methodCanonicalCommand = map[string]string{
 	"ShowCompare":              "show configuration",
 	"ShowRollback":             "show configuration",
 	"ListHistory":              "show system commit history",
+	"GetVRRPStatus":            "show vrrp",
 
 	// Operational actions.
 	"Ping":              "ping",
@@ -144,8 +145,8 @@ var methodsWithoutCanonicalCommand = map[string]string{
 	"GetStatus":           "session plumbing probe (daemon liveness/cluster facts); not an operator command — coarse PermView only (#15077)",
 	"GetConfigModeStatus": "session plumbing probe (config-mode/dirty facts polled per prompt); not an operator command — coarse PermView only (#15077)",
 	// NO OPERATIONAL COMMAND EXISTS IN cmdtree FOR THESE. The routing-protocol
-	// status RPCs are served to the remote client, but `show ospf`, `show isis`,
-	// `show rip` and `show vrrp` are not nodes in the operational tree — so
+	// status RPCs are served to the remote client, but `show ospf`, `show isis`
+	// and `show rip` are not nodes in the operational tree — so
 	// there is no canonical spelling to map to, and inventing one would put a
 	// string in this table that no operator can type and no deny regex is
 	// written against.
@@ -160,7 +161,6 @@ var methodsWithoutCanonicalCommand = map[string]string{
 	"GetOSPFStatus":           "no `show ospf` node exists in the operational tree",
 	"GetISISStatus":           "no `show isis` node exists in the operational tree",
 	"GetRIPStatus":            "no `show rip` node exists in the operational tree",
-	"GetVRRPStatus":           "no `show vrrp` node exists in the operational tree",
 	"ShowText":                "priced from the decoded request; the topic selects the command (showTextTopicCommand)",
 	"GetSystemInfo":           "command selected by request type via systemInfoCanonicalCommand in rpcCanonicalCommand",
 	"GetBGPStatus":            "command selected by request type via bgpStatusCanonicalCommand in rpcCanonicalCommand (#15076)",

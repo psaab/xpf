@@ -92,6 +92,7 @@ var restRouteCommand = map[string]string{
 	"GET /api/v1/security/screen":                      "show security screen statistics",
 	"GET /api/v1/security/events":                      "show log",
 	"GET /api/v1/security/ipsec/sa":                    "show security ipsec security-associations",
+	"GET /api/v1/security/vrrp":                        "show vrrp",
 	"GET /api/v1/interfaces":                           "show interfaces",
 	"GET /api/v1/interfaces/detail":                    "show interfaces detail",
 	"GET /api/v1/dhcp/leases":                          "show dhcp leases",
@@ -177,7 +178,6 @@ var restRoutesNoCommand = map[string]string{
 	// DENIED for a restricted class, not allowed — see authorizeRESTCommand.
 	"GET /api/v1/statistics/interfaces":   "no argument-free operational twin: `show interfaces statistics` takes an interface name",
 	"GET /api/v1/statistics/zones":        "no operational twin: per-zone counters are surfaced by `show security zones`, which is already charged on its own route",
-	"GET /api/v1/security/vrrp":           "no argument-free operational twin in the operational tree",
 	"GET /api/v1/routing/ospf":            "no argument-free operational twin in the operational tree",
 	"GET /api/v1/system/buffers":          "no argument-free operational twin in the operational tree",
 	"GET /api/v1/services/flow-exporters": "no operational twin: REST-only observability surface (#2464)",
