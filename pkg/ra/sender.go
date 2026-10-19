@@ -71,6 +71,10 @@ const (
 	rsErrBackoff = 200 * time.Millisecond
 )
 
+// timeNowForRA is the clock for delegated-prefix expiry decay in buildRA;
+// a var so tests can pin it, production is time.Now (#15057).
+var timeNowForRA = time.Now
+
 // shutdownMode is the arbitrated teardown intent for a sender. It is set
 // (atomically) BEFORE stopCh is closed, so any owner wakeup that observes the
 // closed channel also observes the mode. graceful UPGRADES hard (never the
@@ -881,6 +885,73 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 		if err != nil {
 			slog.Warn("ra: invalid prefix, skipping",
 				"prefix", pfx.Prefix, "err", err)
+			continue
+		}
+
+		// #15057: a delegated prefix carrying an absolute expiry advertises
+		// the REMAINING lifetime at send time — never more than remains
+		// under the send clock (RFC 9096 L-15). Past valid expiry the PIO
+		// is omitted entirely (valid 0 on the wire would read as expired
+		// anyway, and an already-expired prefix must not be re-advertised;
+		// the prune at buildRAConfigs/DelegatedPrefixesForRA normally
+		// removes it first). Zero expiry (infinite/unset/operator) keeps
+		// the historical granted/default path below.
+		if pfx.ValidExpiresAt != 0 {
+			now := timeNowForRA()
+			validRem := time.Unix(0, pfx.ValidExpiresAt).Sub(now)
+			validRem = validRem / time.Second * time.Second
+			if validRem <= 0 {
+				continue
+			}
+			validLife := int64(validRem.Seconds())
+			var prefLife int64
+			if pfx.PreferredExpiresAt != 0 {
+				prefRem := time.Unix(0, pfx.PreferredExpiresAt).Sub(now)
+				prefRem = prefRem / time.Second * time.Second
+				if prefRem < 0 {
+					prefRem = 0
+				}
+				prefLife = int64(prefRem.Seconds())
+			} else if pfx.PreferredLifeSet && pfx.PreferredLife == 0 {
+				prefLife = 0 // deprecated (#14606)
+			} else if pfx.PreferredLifeSet {
+				// Granted preferred with no expiry: cannot outlive valid.
+				prefLife = int64(pfx.PreferredLife)
+			} else {
+				prefLife = defaultPreferredLifetime
+			}
+			validLife = clampPIOSeconds12193(validLife)
+			prefLife = clampPIOSeconds12193(prefLife)
+			if prefLife > validLife {
+				prefLife = validLife
+			}
+			if pfx.Delegated && prefix.Bits() == 0 {
+				slog.Warn("ra: refusing to advertise a delegated /0 prefix",
+					"prefix", pfx.Prefix, "interface", s.cfg.Interface)
+				continue
+			}
+			if pfx.Delegated {
+				if reason := config.DelegatedIPv6PrefixRefusalReason(prefix.Masked()); reason != "" {
+					slog.Warn("ra: refusing to advertise delegated prefix with blocked address class",
+						"prefix", pfx.Prefix, "interface", s.cfg.Interface,
+						"reason", reason)
+					continue
+				}
+				if hit := s.delegatedOverlapsProtected(prefix.Masked()); hit != "" {
+					slog.Warn("ra: refusing to advertise delegated prefix overlapping configured prefix",
+						"prefix", pfx.Prefix, "interface", s.cfg.Interface,
+						"configured", hit)
+					continue
+				}
+			}
+			ra.Options = append(ra.Options, &ndp.PrefixInformation{
+				PrefixLength:                   uint8(prefix.Bits()),
+				OnLink:                         pfx.OnLink,
+				AutonomousAddressConfiguration: pfx.Autonomous,
+				ValidLifetime:                  time.Duration(validLife) * time.Second,
+				PreferredLifetime:              time.Duration(prefLife) * time.Second,
+				Prefix:                         prefix.Masked().Addr(),
+			})
 			continue
 		}
 

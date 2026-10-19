@@ -59,28 +59,33 @@ func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig 
 				// DELEGATED prefix without breaking an operator-authored ::/0.
 				Delegated: true,
 			}
-			// #14598: DelegatedPrefixesForRA already returns decayed
-			// remaining lifetimes; decay again from Obtained as a
-			// defence-in-depth so no verbatim copy can exceed remaining.
-			// A mapping whose granted valid lifetime is 0 (test-seeded,
-			// no clock) has no remaining to compute: leave the RAPrefix
-			// lifetimes at 0, the sender default sentinel (#6531).
+			// #15057: carry the ABSOLUTE expiry (Obtained+granted) rather
+			// than a decayed remaining value. The desired set then stays
+			// byte-identical as wall time advances, so the 2s cluster
+			// reconcile hash and ra.configEqual no longer churn every
+			// second; pkg/ra buildRA computes the remaining lifetime at
+			// send time. ValidLifetime/PreferredLife keep the granted
+			// values as the no-expiry fallback (zero-obtained/test-seeded
+			// and legacy hand-built prefixes). A mapping whose granted
+			// valid lifetime is 0 (test-seeded, no clock) has no expiry:
+			// leave lifetimes at 0, the sender default sentinel (#6531).
 			if mapping.ValidLifetime > 0 {
-				remPref, remValid := mapping.RemainingLifetimes(timeNowForRA())
-				if remValid <= 0 {
+				if _, remValid := mapping.RemainingLifetimes(timeNowForRA()); remValid <= 0 && !mapping.Obtained.IsZero() {
 					continue
 				}
-				pfx.ValidLifetime = int(remValid.Seconds())
-				// #14606: the remaining preferred lifetime is explicit,
-				// and 0 is legal (deprecated, RFC 8415 §21.22) — whether
-				// granted as 0 or decayed to 0 while valid remains.
-				// Record it so pkg/ra does not conflate deprecated-0
-				// with unset and re-advertise the dying prefix at the
-				// 7-day default. Valid 0 never reaches here (skipped
-				// above or left as the sender default sentinel when the
-				// granted valid lifetime itself is 0).
-				pfx.PreferredLife = int(remPref.Seconds())
+				pfx.ValidLifetime = int(mapping.ValidLifetime.Seconds())
+				pfx.PreferredLife = int(mapping.PreferredLifetime.Seconds())
+				// #14606: the preferred lifetime is explicit, and 0 is
+				// legal (deprecated, RFC 8415 §21.22) — whether granted
+				// as 0 or decayed to 0 while valid remains. Record it so
+				// pkg/ra does not conflate deprecated-0 with unset.
 				pfx.PreferredLifeSet = true
+				if exp := mapping.ExpiresAt(); !exp.IsZero() {
+					pfx.ValidExpiresAt = exp.UnixNano()
+				}
+				if exp := mapping.PreferredExpiresAt(); !exp.IsZero() {
+					pfx.PreferredExpiresAt = exp.UnixNano()
+				}
 			}
 
 			if existing, ok := raByIface[mapping.RAIface]; ok {

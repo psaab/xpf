@@ -1503,7 +1503,12 @@ func configEqual(a, b *config.RAInterfaceConfig) bool {
 			// belongs in this change detector. The #4307 comment above
 			// records what omitting a wire-affecting field from this list
 			// cost last time: a stale advertisement.
-			a.Prefixes[i].Delegated != b.Prefixes[i].Delegated {
+			a.Prefixes[i].Delegated != b.Prefixes[i].Delegated ||
+			// #15057: the absolute expiries decide the lifetimes buildRA
+			// stamps at send time; a renewal that moves them must restart
+			// the sender, while the decay itself must not.
+			a.Prefixes[i].ValidExpiresAt != b.Prefixes[i].ValidExpiresAt ||
+			a.Prefixes[i].PreferredExpiresAt != b.Prefixes[i].PreferredExpiresAt {
 			return false
 		}
 	}

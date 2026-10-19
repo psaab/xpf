@@ -9,16 +9,22 @@ import (
 	"github.com/psaab/xpf/pkg/dhcp"
 )
 
-// #14598: buildRAConfigs must advertise decayed remaining lifetimes.
-// A PD at 60% of its lifetime is advertised with <=40% remaining.
+// #14598: a PD at 60% of its lifetime must not advertise more than the
+// remaining 40%. #15057 moved the decay to send time: buildRAConfigs now
+// carries the granted lifetimes plus the absolute expiry (Obtained+
+// granted), and pkg/ra computes the remainder when it emits the RA.
+// This test pins the producer half — granted (not decayed) lifetimes
+// with expiry = Obtained+100s; the wire half lives in pkg/ra
+// TestBuildRA_15057_RemainingFromExpiryAtSendTime.
 func TestBuildRAConfigsDecayedLifetimes14598(t *testing.T) {
+	obtained := time.Now().Add(-60 * time.Second)
 	mgr := dhcp.NewManagerForTesting(nil)
 	mgr.SeedDelegatedPrefixesForRATesting("ge-0/0/3", "trust0", []dhcp.DelegatedPrefix{{
 		Interface:         "ge-0/0/3",
 		Prefix:            netip.MustParsePrefix("2001:db8:1000::/48"),
 		PreferredLifetime: 100 * time.Second,
 		ValidLifetime:     100 * time.Second,
-		Obtained:          time.Now().Add(-60 * time.Second),
+		Obtained:          obtained,
 	}})
 	d := &Daemon{dhcp: mgr}
 	ras := d.buildRAConfigs(&config.Config{})
@@ -33,11 +39,11 @@ func TestBuildRAConfigsDecayedLifetimes14598(t *testing.T) {
 	if found == nil {
 		t.Fatal("no RA prefix for trust0")
 	}
-	if found.ValidLifetime <= 0 || found.ValidLifetime > 40 {
-		t.Fatalf("advertised ValidLifetime = %d, want (0,40]", found.ValidLifetime)
+	if found.ValidLifetime != 100 || found.PreferredLife != 100 {
+		t.Fatalf("carried lifetimes = valid %d / pref %d, want granted 100/100 (decay is at send time, #15057)", found.ValidLifetime, found.PreferredLife)
 	}
-	if found.PreferredLife < 0 || found.PreferredLife > 40 {
-		t.Fatalf("advertised PreferredLife = %d, want [0,40]", found.PreferredLife)
+	if want := obtained.Add(100 * time.Second).UnixNano(); found.ValidExpiresAt != want {
+		t.Fatalf("ValidExpiresAt = %d, want %d (Obtained+100s)", found.ValidExpiresAt, want)
 	}
 	// Control: fresh PD at 0% elapsed keeps near-full lifetimes.
 	mgr2 := dhcp.NewManagerForTesting(nil)
