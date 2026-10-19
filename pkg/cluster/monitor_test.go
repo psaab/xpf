@@ -277,7 +277,7 @@ func TestMonitor_IPMonitoring(t *testing.T) {
 
 	reachable := true
 	mon := NewMonitor(m, cfg.RedundancyGroups)
-	mon.icmpDialer = func(network string) (icmpConn, error) {
+	mon.icmpDialer = func(network, src string) (icmpConn, error) {
 		return &mockICMPConn{reachable: reachable}, nil
 	}
 	setNoDampening(mon)
@@ -486,7 +486,7 @@ func TestMonitor_IPDampening(t *testing.T) {
 
 	reachable := true
 	mon := NewMonitor(m, cfg.RedundancyGroups)
-	mon.icmpDialer = func(network string) (icmpConn, error) {
+	mon.icmpDialer = func(network, src string) (icmpConn, error) {
 		return &mockICMPConn{reachable: reachable}, nil
 	}
 	// Default thresholds (3/3), disable hold-down.
@@ -537,7 +537,7 @@ func TestMonitor_IPv6IPMonitoring(t *testing.T) {
 	reachable := true
 	var gotNetwork string
 	mon := NewMonitor(m, cfg.RedundancyGroups)
-	mon.icmpDialer = func(network string) (icmpConn, error) {
+	mon.icmpDialer = func(network, src string) (icmpConn, error) {
 		gotNetwork = network
 		return &mockICMPConn{reachable: reachable, v6: true}, nil
 	}
@@ -590,7 +590,7 @@ func TestMonitor_IPv4ProbeUsesUDP4(t *testing.T) {
 
 	var gotNetwork string
 	mon := NewMonitor(m, cfg.RedundancyGroups)
-	mon.icmpDialer = func(network string) (icmpConn, error) {
+	mon.icmpDialer = func(network, src string) (icmpConn, error) {
 		gotNetwork = network
 		return &mockICMPConn{reachable: true}, nil
 	}
@@ -622,7 +622,7 @@ func TestMonitor_InvalidAddress(t *testing.T) {
 
 	dialerCalled := false
 	mon := NewMonitor(m, cfg.RedundancyGroups)
-	mon.icmpDialer = func(network string) (icmpConn, error) {
+	mon.icmpDialer = func(network, src string) (icmpConn, error) {
 		dialerCalled = true
 		return &mockICMPConn{reachable: true}, nil
 	}
@@ -805,9 +805,9 @@ func TestProbeICMP_ReplyValidation(t *testing.T) {
 				tc.mutate(mc)
 			}
 			mon := &Monitor{
-				icmpDialer: func(network string) (icmpConn, error) { return mc, nil },
+				icmpDialer: func(network, src string) (icmpConn, error) { return mc, nil },
 			}
-			if got, _ := mon.probeICMP(context.Background(), tc.target); got != tc.want {
+			if got, _ := mon.probeICMP(context.Background(), ipProbeTask{target: &config.IPMonitorTarget{Address: tc.target}, rgID: -1}); got != tc.want {
 				t.Errorf("probeICMP(%s) = %v, want %v", tc.target, got, tc.want)
 			}
 		})
@@ -820,9 +820,9 @@ func TestProbeICMP_ReplyValidation(t *testing.T) {
 func TestProbeICMP_StaleSequenceAcrossProbes(t *testing.T) {
 	first := &mockICMPConn{reachable: true, localPort: 45502}
 	mon := &Monitor{
-		icmpDialer: func(network string) (icmpConn, error) { return first, nil },
+		icmpDialer: func(network, src string) (icmpConn, error) { return first, nil },
 	}
-	if r, _ := mon.probeICMP(context.Background(), "10.0.1.1"); !r {
+	if r, _ := mon.probeICMP(context.Background(), ipProbeTask{target: &config.IPMonitorTarget{Address: "10.0.1.1"}, rgID: -1}); !r {
 		t.Fatal("first probe should succeed")
 	}
 
@@ -830,8 +830,8 @@ func TestProbeICMP_StaleSequenceAcrossProbes(t *testing.T) {
 	// (captured in first.lastSeq) must be rejected because the second probe
 	// stamped a fresh sequence.
 	replay := &mockICMPConn{reachable: true, localPort: 45502, badSeq: &first.lastSeq}
-	mon.icmpDialer = func(network string) (icmpConn, error) { return replay, nil }
-	if r, _ := mon.probeICMP(context.Background(), "10.0.1.1"); r {
+	mon.icmpDialer = func(network, src string) (icmpConn, error) { return replay, nil }
+	if r, _ := mon.probeICMP(context.Background(), ipProbeTask{target: &config.IPMonitorTarget{Address: "10.0.1.1"}, rgID: -1}); r {
 		t.Error("probe accepted a reply carrying the previous probe's sequence")
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // NodeState represents the HA state of a node for a redundancy group.
@@ -952,6 +954,15 @@ func (m *Manager) Monitor() *Monitor {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.monitor
+}
+
+// SetMonitorConfig records the full compiled config on the monitor so
+// ip-monitor probe source resolution (#15038) can map target interfaces
+// to unit addresses and RG VIPs. No-op before Start creates a monitor.
+func (m *Manager) SetMonitorConfig(cfg *config.Config) {
+	if mon := m.Monitor(); mon != nil {
+		mon.SetConfig(cfg)
+	}
 }
 
 // SetOnEventDrop registers a callback invoked when a cluster event is

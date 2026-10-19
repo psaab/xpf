@@ -130,7 +130,7 @@ func TestMonitorPollDoesNotRaceUpdateGroups6550(t *testing.T) {
 	// transitions dampened state and installs/clears debts, rather than
 	// steady-stating into the no-op branch of reconcileRGIPDebts.
 	var tick atomic.Int64
-	mon.probeFn = func(_ context.Context, _ string) (bool, bool) {
+	mon.probeFn = func(_ context.Context, _ *config.IPMonitorTarget, _ string, _ string) (bool, bool) {
 		return tick.Load()%2 == 0, true
 	}
 
@@ -211,7 +211,7 @@ func TestMonitorPollDoesNotHoldMuAcrossManagerCallback6550(t *testing.T) {
 	mon := NewMonitor(m, full)
 	mon.nlHandle = nlh
 	setNoDampening(mon)
-	mon.probeFn = func(_ context.Context, _ string) (bool, bool) {
+	mon.probeFn = func(_ context.Context, _ *config.IPMonitorTarget, _ string, _ string) (bool, bool) {
 		return false, true // unreachable -> guarantees an ip-monitor debt apply
 	}
 
