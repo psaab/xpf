@@ -531,7 +531,10 @@ func (c *CLI) dispatchConfig(line string) error {
 			return fmt.Errorf("%s: missing path", parts[0])
 		}
 		fullPath := append(config.NormalizeEditPathTokens(c.store.GetEditPath()), toks[1:]...)
-		joined := strings.Join(fullPath, " ")
+		// #15237 A53-07: quote tokens that would not re-lex as
+		// themselves (a quoted value with interior whitespace) so
+		// the store lexer recovers them as single tokens.
+		joined := config.JoinConfigPathTokens(fullPath)
 		plant := config.EventPlantClassForMutation(c.userClass)
 		switch parts[0] {
 		case "set":
@@ -615,24 +618,47 @@ func (c *CLI) dispatchConfig(line string) error {
 		fmt.Println("annotation set")
 		return nil
 	case "exit", "quit":
-		if c.store.IsDirty() {
-			fmt.Println("warning: uncommitted changes will be discarded")
+		// #15237 A53-03: at a non-empty edit path, exit/quit behave
+		// like `up` (one schema identity) and stay in configuration
+		// mode; previously they discarded the candidate regardless
+		// of depth. At the top level the dirty warning below fires
+		// before the release.
+		if ep := c.store.GetEditPath(); len(ep) > 0 {
+			target := config.PopEditPathIdentity(config.NormalizeEditPathTokens(ep))
+			c.store.SetEditPath(target)
+			if c.rl != nil {
+				c.rl.SetPrompt(c.configPrompt())
+			}
+			if len(target) > 0 {
+				fmt.Printf("[edit %s]\n", strings.Join(target, " "))
+			} else {
+				fmt.Println("[edit]")
+			}
+			return nil
 		}
-		if c.configOwned {
-			c.store.ExitConfigure()
-			c.configOwned = false
-		}
-		if c.rl != nil {
-			c.rl.SetPrompt(c.operationalPrompt())
-		}
-		fmt.Println("Exiting configuration mode")
-		return nil
+		return c.exitConfigureTop()
 	case "?", "help":
 		c.showConfigHelp()
 		return nil
 	default:
 		return fmt.Errorf("unknown command: %s (in configuration mode)", parts[0])
 	}
+}
+
+// exitConfigureTop releases configuration mode from the top level
+// (#15237 A53-03 helper; also called directly by tests whose CLI
+// fixture carries no readline/configOwned wiring).
+func (c *CLI) exitConfigureTop() error {
+	if c.store.IsDirty() {
+		fmt.Println("warning: uncommitted changes will be discarded")
+	}
+	c.store.ExitConfigure()
+	c.configOwned = false
+	if c.rl != nil {
+		c.rl.SetPrompt(c.operationalPrompt())
+	}
+	fmt.Println("Exiting configuration mode")
+	return nil
 }
 
 // dispatchTopUp15082 handles bare and prefixed top/up (#15082).

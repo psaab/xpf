@@ -21,6 +21,7 @@ import (
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/cliterm"
 	"github.com/psaab/xpf/pkg/cmdtree"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/diagcmd"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
@@ -251,6 +252,7 @@ func main() {
 				Line:       text,
 				Pos:        int32(len(text)),
 				ConfigMode: c.configMode.Load(),
+				EditPath:   config.NormalizeEditPathTokens(c.editPath),
 			})
 			if err != nil || len(resp.Candidates) == 0 {
 				fmt.Fprintln(c.rl.Stdout(), "  (no help available)")

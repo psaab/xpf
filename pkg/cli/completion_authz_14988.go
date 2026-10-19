@@ -398,16 +398,21 @@ func (c *CLI) completeConfigWithDescAuth(a *completionAuthz, words []string, par
 		}
 		// Effective cursor: edit path + typed path (#14716 spelling —
 		// the gate matches the resolved path, never the fragment).
+		// #15237 A53-06: the schema walk is cursor-relative too —
+		// under `[edit system]`, `set host` must offer host-name,
+		// not the top-level keywords.
 		effective := pathWords
+		schemaWords := pathWords
 		if c.store != nil {
 			if ep := c.store.GetEditPath(); len(ep) > 0 {
 				effective = append(append([]string(nil), config.NormalizeEditPathTokens(ep)...), pathWords...)
+				schemaWords = effective
 			}
 		}
 		if !a.configPathAllowed(effective) {
 			return nil
 		}
-		schemaCompletions := config.CompleteSetPathWithValues(pathWords, c.wrapValueProvider(a))
+		schemaCompletions := config.CompleteSetPathWithValues(schemaWords, c.wrapValueProvider(a))
 		if schemaCompletions == nil {
 			return nil
 		}

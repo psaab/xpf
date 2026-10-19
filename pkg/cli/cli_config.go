@@ -96,7 +96,10 @@ func (c *CLI) handleCopyRename(line string) error {
 	editPath := config.NormalizeEditPathTokens(c.store.GetEditPath())
 	if len(editPath) > 0 {
 		srcPath = append(append([]string{}, editPath...), srcPath...)
-		dstPath = append(append([]string{}, editPath...), dstPath...)
+		// #15237 A53-04: a bare destination stays under the source
+		// parent (BareDestinationParent in CopyPath/RenamePath);
+		// prepending the cursor would misplace it.
+		dstPath = config.PrependEditPathForCopyDst(editPath, srcPath, dstPath)
 	}
 	if cmd == "rename" {
 		return c.store.RenameAsPlantClass(c.cliConfigSessionID(), config.EventPlantClassForMutation(c.userClass), srcPath, dstPath)

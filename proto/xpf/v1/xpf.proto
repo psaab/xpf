@@ -1384,6 +1384,11 @@ message CompleteRequest {
   // InvalidArgument (#4970).
   int32 pos = 2;
   bool config_mode = 3;
+  // edit_path is the caller's config-mode edit cursor (resolved tokens,
+  // e.g. ["system"]), so config-mode completion is computed relative to
+  // the cursor instead of the schema root (#15237 A53-06). Empty/absent
+  // (old clients) means the root, preserving prior behaviour.
+  repeated string edit_path = 4;
 }
 message CompleteResponse {
   repeated string candidates = 1;

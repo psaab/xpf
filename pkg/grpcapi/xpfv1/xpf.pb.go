@@ -8869,8 +8869,13 @@ type CompleteRequest struct {
 	// multibyte rune before the cursor makes pos < len(bytes) and the slice cuts
 	// a code point in half. The server rejects a pos that lands mid-rune with
 	// InvalidArgument (#4970).
-	Pos           int32 `protobuf:"varint,2,opt,name=pos,proto3" json:"pos,omitempty"`
-	ConfigMode    bool  `protobuf:"varint,3,opt,name=config_mode,json=configMode,proto3" json:"config_mode,omitempty"`
+	Pos        int32 `protobuf:"varint,2,opt,name=pos,proto3" json:"pos,omitempty"`
+	ConfigMode bool  `protobuf:"varint,3,opt,name=config_mode,json=configMode,proto3" json:"config_mode,omitempty"`
+	// edit_path is the caller's config-mode edit cursor (resolved tokens,
+	// e.g. ["system"]), so config-mode completion is computed relative to
+	// the cursor instead of the schema root (#15237 A53-06). Empty/absent
+	// (old clients) means the root, preserving prior behaviour.
+	EditPath      []string `protobuf:"bytes,4,rep,name=edit_path,json=editPath,proto3" json:"edit_path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -8924,6 +8929,13 @@ func (x *CompleteRequest) GetConfigMode() bool {
 		return x.ConfigMode
 	}
 	return false
+}
+
+func (x *CompleteRequest) GetEditPath() []string {
+	if x != nil {
+		return x.EditPath
+	}
+	return nil
 }
 
 type CompleteResponse struct {
@@ -10486,12 +10498,13 @@ const file_xpf_proto_rawDesc = "" +
 	"block_size\x18\f \x01(\rR\tblockSize\x12\x1f\n" +
 	"\vblock_index\x18\r \x01(\rR\n" +
 	"blockIndex\x12.\n" +
-	"\x13internal_prefix_len\x18\x0e \x01(\rR\x11internalPrefixLen\"X\n" +
+	"\x13internal_prefix_len\x18\x0e \x01(\rR\x11internalPrefixLen\"u\n" +
 	"\x0fCompleteRequest\x12\x12\n" +
 	"\x04line\x18\x01 \x01(\tR\x04line\x12\x10\n" +
 	"\x03pos\x18\x02 \x01(\x05R\x03pos\x12\x1f\n" +
 	"\vconfig_mode\x18\x03 \x01(\bR\n" +
-	"configMode\"V\n" +
+	"configMode\x12\x1b\n" +
+	"\tedit_path\x18\x04 \x03(\tR\beditPath\"V\n" +
 	"\x10CompleteResponse\x12\x1e\n" +
 	"\n" +
 	"candidates\x18\x01 \x03(\tR\n" +

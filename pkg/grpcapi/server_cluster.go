@@ -533,11 +533,16 @@ func (s *Server) Complete(ctx context.Context, req *pb.CompleteRequest) (*pb.Com
 		words = words[:len(words)-1]
 	}
 
+	// #15237 A53-06: a config-mode caller at an edit cursor completes
+	// relative to that cursor. Old clients send no edit_path and keep
+	// the root-relative behaviour.
+	editPath := config.NormalizeEditPathTokens(req.GetEditPath())
+
 	// #14144: bind live-config-derived candidates to the admitted principal.
 	auth := s.completionAuthFor(ctx)
 	var pairs []completionPair
 	if req.ConfigMode {
-		pairs = s.completeConfigPairsAuth(words, partial, &auth)
+		pairs = s.completeConfigPairsAuth(words, partial, &auth, editPath)
 	} else {
 		pairs = s.completeOperationalPairsAuth(words, partial, &auth)
 	}
@@ -661,10 +666,10 @@ func (s *Server) completeOperationalPairsAuth(words []string, partial string, au
 
 func (s *Server) completeConfigPairs(words []string, partial string) []completionPair {
 	auth := legacyCompletionAuth()
-	return s.completeConfigPairsAuth(words, partial, &auth)
+	return s.completeConfigPairsAuth(words, partial, &auth, nil)
 }
 
-func (s *Server) completeConfigPairsAuth(words []string, partial string, auth *completionAuth) []completionPair {
+func (s *Server) completeConfigPairsAuth(words []string, partial string, auth *completionAuth, editPath []string) []completionPair {
 	if len(words) == 0 {
 		return filterCompletionPairs(cmdtree.ConfigTopLevel, partial)
 	}
@@ -685,10 +690,20 @@ func (s *Server) completeConfigPairsAuth(words []string, partial string, auth *c
 		if resolvedPath, resolved := config.ResolveConsumedSetPathTokens(pathWords); resolved {
 			pathWords = resolvedPath
 		}
-		if !auth.configPathAllowed(pathWords) {
+		// #15237 A53-06: complete relative to the edit cursor. The
+		// gate prices the EFFECTIVE (cursor+typed) path; the schema
+		// walk starts at the cursor so `set host` under `[edit
+		// system]` offers host-name, not the top-level interfaces.
+		effective := pathWords
+		schemaWords := pathWords
+		if len(editPath) > 0 {
+			effective = append(append([]string(nil), editPath...), pathWords...)
+			schemaWords = effective
+		}
+		if !auth.configPathAllowed(effective) {
 			return nil
 		}
-		schemaCompletions := config.CompleteSetPathWithValues(pathWords, auth.wrapProvider(s))
+		schemaCompletions := config.CompleteSetPathWithValues(schemaWords, auth.wrapProvider(s))
 		if schemaCompletions == nil {
 			return nil
 		}

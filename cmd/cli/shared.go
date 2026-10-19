@@ -313,27 +313,31 @@ func (c *ctl) dispatchConfig(line string) error {
 		// silently kept the permit policy.
 		return c.dispatchTopUp15082(line)
 
-	case "set":
-		if len(parts) < 2 {
-			return fmt.Errorf("set: missing path")
+	case "set", "delete":
+		// #15237 A53-07: send the RAW remainder after the verb (only
+		// the verb token and its following whitespace are stripped),
+		// with the lexed edit-path tokens prepended (each quoted if
+		// it would not re-lex as itself). strings.Fields+Join here
+		// collapsed interior whitespace inside a quoted value
+		// (`message "a  b"`, a PSK with doubled spaces), so the
+		// stored secret silently differed from the peer's. The
+		// daemon lexes the wire line with the same lexer `load set`
+		// uses, so the quoted value now arrives byte-for-byte.
+		verb := parts[0]
+		raw := rawRemainderAfterVerb(line, verb)
+		if strings.TrimSpace(raw) == "" {
+			return fmt.Errorf("%s: missing path", verb)
 		}
-		fullPath := append(append([]string{}, config.NormalizeEditPathTokens(c.editPath)...), parts[1:]...)
-		_, err := c.client.Set(c.ctx(), &pb.SetRequest{
-			Input: strings.Join(fullPath, " "),
-		})
-		if err != nil {
-			return fmt.Errorf("%v", err)
+		input := raw
+		if norm := config.NormalizeEditPathTokens(c.editPath); len(norm) > 0 {
+			input = config.JoinConfigPathTokens(norm) + " " + raw
 		}
-		return nil
-
-	case "delete":
-		if len(parts) < 2 {
-			return fmt.Errorf("delete: missing path")
+		var err error
+		if verb == "set" {
+			_, err = c.client.Set(c.ctx(), &pb.SetRequest{Input: input})
+		} else {
+			_, err = c.client.Delete(c.ctx(), &pb.DeleteRequest{Input: input})
 		}
-		fullPath := append(append([]string{}, config.NormalizeEditPathTokens(c.editPath)...), parts[1:]...)
-		_, err := c.client.Delete(c.ctx(), &pb.DeleteRequest{
-			Input: strings.Join(fullPath, " "),
-		})
 		if err != nil {
 			return fmt.Errorf("%v", err)
 		}
@@ -349,7 +353,7 @@ func (c *ctl) dispatchConfig(line string) error {
 		}
 		fullPath := append(append([]string{}, config.NormalizeEditPathTokens(c.editPath)...), parts[1:]...)
 		_, err := c.client.Set(c.ctx(), &pb.SetRequest{
-			Input: parts[0] + " " + strings.Join(fullPath, " "),
+			Input: parts[0] + " " + config.JoinConfigPathTokens(fullPath),
 		})
 		if err != nil {
 			return fmt.Errorf("%v", err)
@@ -367,7 +371,7 @@ func (c *ctl) dispatchConfig(line string) error {
 			return nil
 		}
 		fullPath := append(append([]string{}, config.NormalizeEditPathTokens(c.editPath)...), annotPath...)
-		input := "annotate " + strings.Join(fullPath, " ") + " \"" + cliterm.EscapeAnnotateComment(comment) + "\""
+		input := "annotate " + config.JoinConfigPathTokens(fullPath) + " \"" + cliterm.EscapeAnnotateComment(comment) + "\""
 		_, err := c.client.Set(c.ctx(), &pb.SetRequest{Input: input})
 		if err != nil {
 			return fmt.Errorf("%v", err)
@@ -387,9 +391,12 @@ func (c *ctl) dispatchConfig(line string) error {
 		}
 		if norm := config.NormalizeEditPathTokens(c.editPath); len(norm) > 0 {
 			srcParts = append(append([]string{}, norm...), srcParts...)
-			dstParts = append(append([]string{}, norm...), dstParts...)
+			// #15237 A53-04: a bare destination stays under the
+			// source parent — do NOT prepend the cursor to it.
+			// The daemon applies the same rule (BareDestinationParent).
+			dstParts = config.PrependEditPathForCopyDst(norm, srcParts, dstParts)
 		}
-		fullInput := parts[0] + " " + strings.Join(srcParts, " ") + " to " + strings.Join(dstParts, " ")
+		fullInput := parts[0] + " " + config.JoinConfigPathTokens(srcParts) + " to " + config.JoinConfigPathTokens(dstParts)
 		_, err := c.client.Set(c.ctx(), &pb.SetRequest{Input: fullInput})
 		if err != nil {
 			return fmt.Errorf("%v", err)
@@ -410,7 +417,7 @@ func (c *ctl) dispatchConfig(line string) error {
 		if norm := config.NormalizeEditPathTokens(c.editPath); len(norm) > 0 {
 			elemParts = append(append([]string{}, norm...), elemParts...)
 		}
-		fullInput := "insert " + strings.Join(elemParts, " ") + " " + kw + " " + strings.Join(refTokens, " ")
+		fullInput := "insert " + config.JoinConfigPathTokens(elemParts) + " " + kw + " " + config.JoinConfigPathTokens(refTokens)
 		_, err := c.client.Set(c.ctx(), &pb.SetRequest{Input: fullInput})
 		if err != nil {
 			return fmt.Errorf("%v", err)
@@ -456,6 +463,27 @@ func (c *ctl) dispatchConfig(line string) error {
 		return c.dispatchOperational(strings.Join(parts[1:], " "))
 
 	case "exit", "quit":
+		// #15237 A53-03: at a non-empty edit path, exit/quit behave
+		// like `up` (one schema identity) and stay in configuration
+		// mode — previously they called ExitConfigure regardless of
+		// depth, discarding the candidate with no warning. At the
+		// top level, a dirty candidate (GetConfigModeStatus) warns
+		// before the release, mirroring the local CLI.
+		if norm := config.NormalizeEditPathTokens(c.editPath); len(norm) > 0 {
+			c.editPath = config.PopEditPathIdentity(norm)
+			if c.rl != nil {
+				c.rl.SetPrompt(c.configPrompt())
+			}
+			if len(c.editPath) > 0 {
+				fmt.Printf("[edit %s]\n", strings.Join(c.editPath, " "))
+			} else {
+				fmt.Println("[edit]")
+			}
+			return nil
+		}
+		if st, stErr := c.client.GetConfigModeStatus(c.ctx(), &pb.GetConfigModeStatusRequest{}); stErr == nil && st != nil && st.GetDirty() {
+			fmt.Println("warning: uncommitted changes will be discarded")
+		}
 		// #5812: an explicit exit/quit is a TRANSACTIONAL client state change,
 		// not best-effort teardown. If the ExitConfigure release RPC fails (a
 		// transport timeout/disconnect before it reaches the daemon), the
@@ -527,6 +555,18 @@ func (c *ctl) configPrompt() string {
 	return fmt.Sprintf("%s%s@%s# ", c.clusterPrefix(), c.username, c.hostname)
 }
 
+// rawRemainderAfterVerb returns the line's remainder after the first
+// (verb) token, preserving interior whitespace byte-for-byte
+// (#15237 A53-07). Only the verb token and the whitespace run after
+// it are stripped; a quoted value's doubled spaces survive.
+func rawRemainderAfterVerb(line, verb string) string {
+	trimmed := strings.TrimLeft(line, " \t")
+	if !strings.HasPrefix(trimmed, verb) {
+		return strings.TrimSpace(line)
+	}
+	return strings.TrimLeft(trimmed[len(verb):], " \t")
+}
+
 // --- Help ---
 
 func (c *ctl) showOperationalHelp() {
@@ -569,6 +609,7 @@ func (rc *remoteCompleter) Do(line []rune, pos int) ([][]rune, int) {
 		Line:       text,
 		Pos:        cursor,
 		ConfigMode: rc.ctl.configMode.Load(),
+		EditPath:   config.NormalizeEditPathTokens(rc.ctl.editPath),
 	})
 	if err != nil || len(resp.Candidates) == 0 {
 		return nil, 0
