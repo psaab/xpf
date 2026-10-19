@@ -538,6 +538,11 @@ func finalizeSourceNATPools(sec *SecurityConfig) {
 		if pool == nil || pool.PortNoTranslation {
 			continue
 		}
+		// #15675: an explicitly-invalid range keeps PortRangeInvalidSpec
+		// set (SourceNATPoolPortRange reports it unusable), but the raw
+		// fields still carry the unstamped 1024/65535 default the
+		// lenient contract pins (#5457/#6688) — usability is decided
+		// by the resolver, not the raw fields.
 		if pool.PortLow == 0 {
 			pool.PortLow = 1024
 		}
@@ -700,7 +705,18 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 						pool.PortLow = 0
 						pool.PortHigh = 0
 						pool.PortNoTranslation = false
-						pool.PortRangeInvalidSpec = strings.Join(toks, " ")
+						// #15675: an EMPTY explicit range (`port range;`,
+						// `port { range; }`) must not collapse to "" — that
+						// is indistinguishable from "no range configured"
+						// and finalize would silently widen it to
+						// 1024-65535 PAT. Record a non-empty sentinel so
+						// the strict gate rejects and the snapshot marks
+						// the pool unusable.
+						if spec := strings.TrimSpace(strings.Join(toks, " ")); spec != "" {
+							pool.PortRangeInvalidSpec = spec
+						} else {
+							pool.PortRangeInvalidSpec = "<empty>"
+						}
 					}
 				}
 
@@ -709,11 +725,13 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 				// "no-translation"]). #3906: `range` accepts both the Junos
 				// wire shape `<low> to <high>` and the legacy `low <lo> high
 				// <hi>` shape; `no-translation` preserves the source port.
-				if len(prop.Keys) >= 3 && prop.Keys[1] == "range" {
+				if len(prop.Keys) >= 2 && prop.Keys[1] == "range" {
 					setPortRange(prop.Keys[2:])
 				} else if len(prop.Keys) == 2 && prop.Keys[1] != "range" &&
 					prop.Keys[1] != "deterministic" &&
-					prop.Keys[1] != "no-translation" {
+					prop.Keys[1] != "no-translation" &&
+					prop.Keys[1] != "random-allocation" &&
+					prop.Keys[1] != "no-random-allocation" {
 					// "port N" single value — validated as a 1..65535 port via the
 					// shared parser (a single token is the [N,N] range shape).
 					setPortRange(prop.Keys[1:])
@@ -721,11 +739,18 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 				// no-translation may ride along on the flat-leaf keys
 				// (Keys=["port","no-translation"]).
 				for _, k := range prop.Keys[1:] {
-					if k == "no-translation" {
+					switch k {
+					case "no-translation":
 						pool.PortNoTranslation = true
 						pool.PortLow = 0
 						pool.PortHigh = 0
 						pool.PortRangeInvalidSpec = ""
+					case "random-allocation":
+						pool.PortRandomAllocation = true
+						pool.PortNoRandomAllocationAuthored = false
+					case "no-random-allocation":
+						pool.PortRandomAllocation = false
+						pool.PortNoRandomAllocationAuthored = true
 					}
 				}
 
@@ -740,8 +765,38 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 					case "range":
 						// range <low> to <high> | range low <lo> high <hi>
 						// (#3906). pc.Keys[1:] is the token slice after the
-						// `range` keyword.
-						setPortRange(pc.Keys[1:])
+						// `range` keyword. #15675: two child-bearing
+						// shapes must also be read:
+						//   - hierarchical `range { <low> to <high>; }`:
+						//     endpoints are CHILDREN of `range`.
+						//   - schema-grouped flat `port range 5000 to 6000`:
+						//     SetPath groups it as port{ range; 5000{to
+						//     6000} } — a bare `range` child (no keys, no
+						//     children) whose endpoints are SIBLINGS.
+						// An empty range with endpoints nowhere (siblings
+						// handled by the parent loop below) records the
+						// "<empty>" sentinel via setPortRange(nil) ONLY
+						// when no sibling supplies them; the parent loop
+						// therefore defers empty ranges — see below.
+						if len(pc.Keys) > 1 {
+							setPortRange(pc.Keys[1:])
+						} else if len(pc.Children) > 0 {
+							var toks []string
+							for _, rc := range pc.Children {
+								toks = append(toks, rc.Keys...)
+							}
+							setPortRange(toks)
+						}
+						// else: bare `range` — endpoints, if any, are
+						// sibling port children handled by the deferred
+						// pass after this loop; if none, that pass
+						// records "<empty>".
+					case "random-allocation":
+						pool.PortRandomAllocation = true
+						pool.PortNoRandomAllocationAuthored = false
+					case "no-random-allocation":
+						pool.PortRandomAllocation = false
+						pool.PortNoRandomAllocationAuthored = true
 					case "no-translation":
 						pool.PortNoTranslation = true
 						pool.PortLow = 0
@@ -753,9 +808,64 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 						// Bare numeric child: `port N` grouped under a
 						// modeled container becomes port { N }. Validated as a
 						// 1..65535 port via the shared parser.
-						if pc.IsLeaf && len(pc.Keys) == 1 {
+						// (Grouped `range` endpoints also arrive here as
+						// a bare-number child with a `to <high>` grandchild;
+						// they are collected by the deferred pass below,
+						// so a lone token here must not stamp [N,N] first.)
+						if pc.IsLeaf && len(pc.Keys) == 1 && len(pc.Children) == 0 {
 							setPortRange(pc.Keys)
 						}
+					}
+				}
+				// #15675 deferred grouped-range pass. SetPath groups a
+				// flat `port range ...` leaf into port{range; <endpoint
+				// siblings>} (and may group SEVERAL range leaves into
+				// ONE port node, #13212). Each bare `range` child owns
+				// the endpoint tokens that FOLLOW it up to the next
+				// `range` child; other modifiers are not endpoints.
+				// Applying them in authored order preserves later-wins
+				// (a later valid range clears an earlier invalid spec
+				// and vice versa). A bare range with no following
+				// endpoints is truly empty -> "<empty>".
+				{
+					children := prop.Children
+					for i, pc := range children {
+						if pc.Name() != "range" || len(pc.Keys) > 1 || len(pc.Children) > 0 {
+							continue
+						}
+						var toks []string
+						for _, sib := range children[i+1:] {
+							if sib.Name() == "range" {
+								break
+							}
+							// A sibling endpoint group carrying its own
+							// `to <high>` grandchild STARTS a new range
+							// when toks already form a complete range —
+							// several flat range leaves group into ONE
+							// port node with a single `range` child
+							// (#13212), so boundaries are endpoint
+							// groups, not `range` keywords.
+							// Complete means a well-formed SHAPE
+							// (legacy 4-token, single, or `<lo> to
+							// <hi>`), regardless of whether the
+							// endpoints validate — an invalid range
+							// is still a complete authored range
+							// that the next endpoint group replaces.
+							if len(toks) == 4 && toks[0] == "low" && toks[2] == "high" ||
+								len(toks) == 1 ||
+								len(toks) == 3 && toks[1] == "to" {
+								setPortRange(toks)
+								toks = nil
+							}
+							if sib.Name() == "no-translation" || sib.Name() == "deterministic" || sib.Name() == "random-allocation" || sib.Name() == "no-random-allocation" {
+								continue
+							}
+							toks = append(toks, sib.Keys...)
+							for _, gc := range sib.Children {
+								toks = append(toks, gc.Keys...)
+							}
+						}
+						setPortRange(toks)
 					}
 				}
 			case "persistent-nat":

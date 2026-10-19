@@ -624,7 +624,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				// result, and reds 14 existing NAT cells (#4521, #4422, #5144,
 				// #6812, deterministic-NAT flat-set). Measured both ways on master.
 				"address": {desc: "Address or range in the source NAT pool", args: 1, multi: true, groupReplace: true, placeholder: "<address>", children: nil},
-				"port": {desc: "Source pool port block configuration", children: map[string]*schemaNode{
+				"port": {desc: "Source pool port block configuration", wildcard: &schemaNode{desc: "Single translated source port (1..65535)", placeholder: "<port>"}, children: map[string]*schemaNode{
 					// #3906: `range <low> to <high>` (Junos) and the legacy
 					// `range low <lo> high <hi>` both collapse onto this multi
 					// leaf; the compiler parses both via parseSourcePoolPortRange.
@@ -632,6 +632,12 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 					// #3906: preserve the original source port (1:1) — the
 					// pool translates the address only. Value-less leaf.
 					"no-translation": {desc: "Preserve the source port (translate the address only)", children: nil},
+					// #15675: Junos port allocation modifiers. The
+					// compiler records PortRandomAllocation; the
+					// wildcard below admits `port <N>` (single port,
+					// validated by the strict pool gate as [N,N]).
+					"random-allocation":    {desc: "Allocate translated ports randomly (default)", children: nil},
+					"no-random-allocation": {desc: "Allocate translated ports sequentially (accepted, advisory)", children: nil},
 					"deterministic": {desc: "Deterministic (CGNAT) port block allocation", children: map[string]*schemaNode{
 						"block-size": {
 							desc:          "Ports allocated per subscriber block",
@@ -1216,8 +1222,8 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"session-timeout": {desc: "TIME_WAIT session timeout in seconds", args: 1, placeholder: "<seconds>",
 					valueType: ValueInteger, valueDesc: "TIME_WAIT session timeout in seconds (0..9223372036)",
 					valueExamples: []string{"150"}, validator: ValidateInteger(0, MaxDurationSeconds), children: nil},
-				"session-ageout":                {desc: "Age out TIME_WAIT sessions", children: nil},
-				"apply-to-half-closed-state":    {desc: "Apply TIME_WAIT handling to half-closed state", children: nil},
+				"session-ageout":             {desc: "Age out TIME_WAIT sessions", children: nil},
+				"apply-to-half-closed-state": {desc: "Apply TIME_WAIT handling to half-closed state", children: nil},
 			}},
 			"strict-syn-check": {desc: "Require SYN first for transit session creation; overrides no-syn-check", children: nil},
 		}},

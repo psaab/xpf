@@ -960,6 +960,15 @@ func validateSourceNATDeterministicStrict(cfg *Config) error {
 		if pool == nil || pool.Deterministic == nil {
 			continue
 		}
+		// #15675: `port no-translation` (preserve source port) and
+		// `port deterministic` (fixed port blocks) are mutually
+		// exclusive — deterministic allocation by definition rewrites
+		// the port into a subscriber block. Previously this compiled
+		// and the dataplane silently suppressed deterministic fields,
+		// round-robining instead of the authored CGNAT mapping.
+		if pool.PortNoTranslation {
+			return fmt.Errorf("pool %q: port no-translation and port deterministic are mutually exclusive", pool.Name)
+		}
 		det := pool.Deterministic
 		if det.BlockSize <= 0 {
 			return fmt.Errorf("pool %q: deterministic block-size must be > 0", pool.Name)
@@ -4229,6 +4238,15 @@ func SourceNATPoolPortRange(pool *NATPool) (uint16, uint16, bool) {
 	if pool.PortRangeInvalidSpec != "" {
 		return 0, 0, false
 	}
+	// #15675: `port no-translation` preserves the source port — the
+	// dataplane takes the address-only path and ignores PortLow/PortHigh.
+	// Report 0,0 (no port-bitmap capacity) so the aggregate budget walk
+	// charges 0 port slots per address instead of the 64,512 default PAT
+	// range. Callers that need a real window (deterministic block math)
+	// reject/guard on PortNoTranslation before consulting this.
+	if pool.PortNoTranslation {
+		return 0, 0, true
+	}
 	low := pool.PortLow
 	if low == 0 {
 		low = 1024
@@ -4491,15 +4509,26 @@ func sourceNATAggregateReferencedCharges(cfg *Config) []sourceNATAggregatePoolCh
 			// 1024-65535 and the dataplane charged 64,512 per address.
 			// The `ok=false` half cannot reach here (an unusable port range is
 			// already an invalid_port_range skip above), so this reads the pair.
-			portLow, portHigh, _ := SourceNATPoolPortRange(pool)
-			var portRange uint64
-			if portHigh >= portLow && portLow > 0 {
-				portRange = uint64(portHigh-portLow) + 1
+			// #15675: a `port no-translation` pool consumes no
+			// port-bitmap slots (address-only lease). Charge 0
+			// port capacity; address cardinality above still counts
+			// toward the address budget. SourceNATPoolPortRange
+			// already returns 0,0 for these pools, but spell the
+			// branch so the accounting intent survives resolver
+			// changes.
+			var portCap uint64
+			if !pool.PortNoTranslation {
+				portLow, portHigh, _ := SourceNATPoolPortRange(pool)
+				var portRange uint64
+				if portHigh >= portLow && portLow > 0 {
+					portRange = uint64(portHigh-portLow) + 1
+				}
+				portCap = checkedMulU64(poolAddrs, portRange)
 			}
 			charges = append(charges, sourceNATAggregatePoolCharge{
 				name:    name,
 				addrs:   poolAddrs,
-				portCap: checkedMulU64(poolAddrs, portRange),
+				portCap: portCap,
 			})
 		}
 	}

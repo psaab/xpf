@@ -1082,7 +1082,7 @@ var walkRuleAxisExemptions6812 = mergeAxisExemptions6812(
 			"production input records them for the strict/tolerant gate, but nothing "+
 			"sorts or compares on that diagnostic state.",
 		"Pool.PortRangeInvalidSpec", "Pool.Addresses.nil",
-		"Pool.PortNoTranslation", "Pool.PortOverloadingFactor", "Pool.RoutingInstance",
+		"Pool.PortNoTranslation", "Pool.PortRandomAllocation", "Pool.PortNoRandomAllocationAuthored", "Pool.PortOverloadingFactor", "Pool.RoutingInstance",
 		"Pool.PersistentNAT.nil", "Pool.Deterministic.nil",
 		"Pool.UnknownLeaves.nil", "Pool.UnknownLeaves.len",
 		"Pool.UnknownLeaves.all", "Pool.UnknownLeaves[0]",

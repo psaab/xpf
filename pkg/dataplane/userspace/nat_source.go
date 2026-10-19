@@ -616,6 +616,13 @@ func deterministicSourceNATFields(pool *config.NATPool, portLow, portHigh uint16
 	if pool == nil || pool.Deterministic == nil {
 		return 0, 0, 0, 0, 0
 	}
+	// #15675: `port no-translation` preserves the source port, so
+	// deterministic block allocation (which rewrites the port) cannot
+	// apply. Strict compile rejects the combination; this guard keeps
+	// the tolerant path from emitting deterministic wire fields for it.
+	if pool.PortNoTranslation {
+		return 0, 0, 0, 0, 0
+	}
 	det := pool.Deterministic
 	if det.BlockSize <= 0 || det.HostAddress == "" {
 		return 0, 0, 0, 0, 0

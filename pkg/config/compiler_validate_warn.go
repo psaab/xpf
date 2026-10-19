@@ -955,6 +955,25 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 		}
 	}
 
+	// #15675: `port no-random-allocation` is accepted + recorded but the
+	// SNAT allocator always seeds a random offset, so sequential
+	// allocation is not enforced. Mirror the accepted-only doctrine:
+	// warn so the operator is not misled into believing ports allocate
+	// sequentially.
+	{
+		var nrPools []string
+		for _, name := range sortedPoolNames(cfg.Security.NAT.SourcePools) {
+			if p := cfg.Security.NAT.SourcePools[name]; p != nil && p.PortNoRandomAllocationAuthored {
+				nrPools = append(nrPools, name)
+			}
+		}
+		if len(nrPools) > 0 {
+			warnings = append(warnings, fmt.Sprintf(
+				"security nat source pool %s: `port no-random-allocation` configured but accepted-only \u2014 the userspace dataplane seeds a random port offset, so sequential allocation is not enforced (#15675)",
+				strings.Join(nrPools, ", ")))
+		}
+	}
+
 	// #4292 (fable-167 N-3): NAT translation-TARGET routing-instance is now typed
 	// + recorded (compileNAT) but not enforced. `then static-nat {inet|prefix
 	// <ip>} routing-instance <ri>` and a source / destination NAT pool
