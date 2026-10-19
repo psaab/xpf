@@ -372,7 +372,7 @@ func isConfiguredVLANSubInterface(name string, cfg *config.Config) bool {
 				effective = parent
 			}
 		}
-		if !effective.VlanTagging || config.LinuxIfName(ifName) != base {
+		if !effective.TaggingEnabled() || config.LinuxIfName(ifName) != base {
 			continue
 		}
 		for _, unit := range effective.Units {
@@ -1528,7 +1528,7 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 			originalName = ""
 		}
 
-		if effectiveCfg.VlanTagging {
+		if effectiveCfg.TaggingEnabled() {
 			// VLAN parent: none of its units' addresses, just rename. The one
 			// exception is the VRRP advert source (#9721, vlanParentVRRPSource).
 			parentAddrs := vlanParentVRRPSource(effectiveCfg, isVRRPReth, clusterNodeID)
@@ -1831,7 +1831,7 @@ func buildBridgeDomainModels(cfg *config.Config, result *CompileResult, seen map
 				// physical member's Linux name.
 				memberBase = physical
 			}
-			if !effective.VlanTagging {
+			if !effective.TaggingEnabled() {
 				continue
 			}
 			unit := effective.Units[unitNumber]

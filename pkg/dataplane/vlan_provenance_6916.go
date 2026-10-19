@@ -76,6 +76,14 @@ func vlanDelegationDefect(lnk netlink.Link) string {
 //   - PARENT, because a genuine local vlan of a DIFFERENT physical interface
 //     answers every other check while delegating to a parent that is not the
 //     one whose XDP program is supposed to cover it.
+//   - PROTOCOL (#15215 A28-02), because an 802.1ad (0x88a8) vlan at
+//     "p0.100" answers kind/VID/parent while classifying on the S-tag
+//     ethertype. The create path builds netlink.Vlan{VlanId: vid} with no
+//     protocol (kernel default 802.1Q) and the parent XDP classifies
+//     802.1Q only, so adopting an 802.1ad child brings up a wrong-protocol
+//     kernel child as the configured 802.1Q unit. VLAN_PROTOCOL_UNKNOWN
+//     (zero) is accepted: netlink leaves it zero when IFLA_VLAN_PROTOCOL
+//     is absent, and the kernel default for a vlan device is 802.1Q.
 //
 // The caller decides what to do with a refusal. It is deliberately a reason
 // string rather than a sentinel error: the reason reaches the operator in an
@@ -98,6 +106,11 @@ func vlanAdoptionRefusal(existing netlink.Link, wantParent, wantVID int) string 
 	if vlan.VlanId != wantVID {
 		return fmt.Sprintf("ifindex %d is an 802.1Q vlan carrying VID %d, not the "+
 			"configured VID %d", vlan.Attrs().Index, vlan.VlanId, wantVID)
+	}
+	if vlan.VlanProtocol != netlink.VLAN_PROTOCOL_UNKNOWN && vlan.VlanProtocol != netlink.VLAN_PROTOCOL_8021Q {
+		return fmt.Sprintf("ifindex %d is a vlan with protocol %s (0x%04x), not "+
+			"802.1Q — refusing to adopt it as the configured 802.1Q child",
+			vlan.Attrs().Index, vlan.VlanProtocol.String(), uint16(vlan.VlanProtocol))
 	}
 	if got := vlan.Attrs().ParentIndex; got != wantParent {
 		return fmt.Sprintf("ifindex %d is an 802.1Q vlan delegating to ifindex %d, "+

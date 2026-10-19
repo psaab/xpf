@@ -72,6 +72,21 @@ type InterfaceConfig struct {
 	NoGratuitousARPRequest bool // no-gratuitous-arp-request — accepted-only (#4308)
 }
 
+// TaggingEnabled reports whether the interface enables VLAN tagging in
+// either mode: plain `vlan-tagging` (VlanTagging) or
+// `flexible-vlan-tagging` (FlexibleVlanTagging). Flexible tagging with a
+// single outer tag (the only shape the #5879 QinQ gate admits — an inner
+// tag is rejected at commit) creates the same 802.1Q `<parent>.<vid>`
+// children as plain tagging, so every writer that keys on tagging must
+// consult this helper rather than VlanTagging alone (#15215 A28-03: the
+// #14574 gate accepts flexible-vlan-tagging, and a writer keyed only on
+// VlanTagging silently folded the tagged unit's addresses onto the
+// untagged parent, left the bridge-domain member unenslaved, and split
+// VRRP/VIP placement). Nil-safe: a nil interface enables nothing.
+func (ifc *InterfaceConfig) TaggingEnabled() bool {
+	return ifc != nil && (ifc.VlanTagging || ifc.FlexibleVlanTagging)
+}
+
 // AggregatedEtherOptions defines LAG/ae interface parameters.
 type AggregatedEtherOptions struct {
 	LACPActive   bool   // LACP active mode

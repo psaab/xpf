@@ -167,7 +167,7 @@ func validateVRRPVIPCrossGroupStrict(cfg *Config) error {
 			continue
 		}
 		vrid := RethVRRPGroupIDBase + rgID
-		if ifc.VlanTagging {
+		if ifc.TaggingEnabled() {
 			for _, un := range unitNums {
 				unit := ifc.Units[un]
 				if unit == nil || len(unit.Addresses) == 0 {

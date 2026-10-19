@@ -329,7 +329,7 @@ func (c *CLI) showInterfaces(args []string) error {
 		}
 
 		// VLAN tagging
-		if ifCfg, ok := config.LookupInterface(cfg, physName); ok && ifCfg.VlanTagging {
+		if ifCfg, ok := config.LookupInterface(cfg, physName); ok && ifCfg.TaggingEnabled() {
 			fmt.Println("  VLAN tagging: Enabled")
 		}
 

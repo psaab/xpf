@@ -261,7 +261,7 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 		}
 		sort.Ints(unitNums)
 
-		if ifc.VlanTagging {
+		if ifc.TaggingEnabled() {
 			for _, n := range unitNums {
 				unit := ifc.Units[n]
 				// #6780: a present-but-nil unit reaches len(unit.Addresses) as
