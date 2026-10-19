@@ -49,25 +49,30 @@ func TestPSKEmptySecretSkipped14139(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderConfig: %v", err)
 	}
-	if rendered["no-secret"] {
+	// #15024: rendered/connections/secrets are gateway-keyed (gw-a..gw-d).
+	if rendered["gw-a"] {
 		t.Errorf("PSK VPN with empty effective secret was rendered; want skip-by-name:\n%s", text)
 	}
-	if !rendered["healthy"] || !rendered["policy-psk"] || !rendered["cert-vpn"] {
+	if !rendered["gw-b"] || !rendered["gw-c"] || !rendered["gw-d"] {
 		t.Errorf("healthy/policy-psk/cert VPNs must render, rendered=%v:\n%s", rendered, text)
 	}
 
 	doc := parseSwanctlDoc(t, text)
 	connections := doc.at(t, "connections")
+	connections.hasNoChild(t, "gw-a")
 	connections.hasNoChild(t, "no-secret")
+	connections.at(t, "gw-b", "children", "healthy")
+	connections.at(t, "gw-c", "children", "policy-psk")
+	connections.at(t, "gw-d", "children", "cert-vpn")
 
 	blocks := parseSecretBlocks(t, text)
-	if _, ok := blocks["ike-no-secret"]; ok {
+	if _, ok := blocks["ike-gw-a"]; ok {
 		t.Errorf("empty-PSK VPN emitted an orphan secret block")
 	}
-	if blk, ok := blocks["ike-policy-psk"]; !ok || blk.secret != "policy-secret" {
+	if blk, ok := blocks["ike-gw-c"]; !ok || blk.secret != "policy-secret" {
 		t.Errorf("IKE-policy fallback PSK secret = %+v (present=%v), want policy-secret", blk, ok)
 	}
-	if _, ok := blocks["ike-cert-vpn"]; ok {
+	if _, ok := blocks["ike-gw-d"]; ok {
 		t.Errorf("pubkey VPN must not emit a PSK secret block")
 	}
 }
@@ -90,9 +95,10 @@ func TestPSKIDSelectorsMultiAddress14139(t *testing.T) {
 		}
 		text := m.generateConfig(cfg)
 		blocks := parseSecretBlocks(t, text)
-		blk, ok := blocks["ike-multi"]
+		// #15024: multi renders under gateway gw.
+		blk, ok := blocks["ike-gw"]
 		if !ok {
-			t.Fatalf("addr %q: missing ike-multi secret block:\n%s", addr, text)
+			t.Fatalf("addr %q: missing ike-gw secret block:\n%s", addr, text)
 		}
 		if !containsStr(blk.ids, "203.0.113.1") || !containsStr(blk.ids, "203.0.113.2") {
 			t.Errorf("addr %q: id selectors %v, want one selector per peer address", addr, blk.ids)

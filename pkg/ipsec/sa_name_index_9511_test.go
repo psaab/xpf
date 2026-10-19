@@ -254,7 +254,7 @@ func TestSANameIndexSkipsUnsupportedAuthVPN9511(t *testing.T) {
 	}
 	if _, rendered, err := (&Manager{}).renderConfig(cfg); err != nil {
 		t.Fatalf("one unsupported-auth VPN must not abort render: %v", err)
-	} else if !rendered["site-a"] || rendered["bad"] {
+	} else if !rendered["site-a"] || rendered["gw-bad"] {
 		t.Fatalf("rendered VPN set = %v, want site-a only", rendered)
 	}
 

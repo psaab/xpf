@@ -84,7 +84,8 @@ func TestUnlistedDHGroupSkipsVPN_9919(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renderConfig must skip, not abort, on a bad IKE DH group: %v", err)
 		}
-		if rendered["tun1"] {
+		// #15024: this VPN renders under gw1 when not skipped.
+		if rendered["gw1"] {
 			t.Errorf("VPN with IKE dh-group 99 was rendered; want skip.\n%s", got)
 		}
 	})
@@ -231,10 +232,11 @@ func TestPartialDHListRendersGoodEntries_9919(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renderConfig: %v", err)
 		}
-		if !rendered["tun1"] {
+		// #15024: rendered is keyed by connection (gateway gw1).
+		if !rendered["gw1"] {
 			t.Fatalf("VPN with one good + one bad IKE proposal was skipped; want the good entry rendered.\n%s", got)
 		}
-		parseSwanctlDoc(t, got).at(t, "connections", "tun1").requireSetting(t, "proposals", "aes256-sha256-modp2048")
+		parseSwanctlDoc(t, got).at(t, "connections", "gw1").requireSetting(t, "proposals", "aes256-sha256-modp2048")
 	})
 
 	t.Run("IKE bad+bad skips", func(t *testing.T) {
@@ -257,7 +259,7 @@ func TestPartialDHListRendersGoodEntries_9919(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renderConfig must skip, not abort: %v", err)
 		}
-		if rendered["tun1"] {
+		if rendered["gw1"] {
 			t.Errorf("VPN with only bad-DH IKE proposals was rendered; want skip.\n%s", got)
 		}
 	})
@@ -418,9 +420,10 @@ func TestNoRandTimeEmitted_9919(t *testing.T) {
 	}
 	got := m.generateConfig(cfg)
 	doc := parseSwanctlDoc(t, got)
-	doc.at(t, "connections", "tun").requireSetting(t, "rekey_time", "28800s")
-	doc.at(t, "connections", "tun").hasNoSetting(t, "rand_time")
-	child := childSA_3904(t, got, "tun")
+	// #15024: tun renders under its gateway gw.
+	doc.at(t, "connections", "gw").requireSetting(t, "rekey_time", "28800s")
+	doc.at(t, "connections", "gw").hasNoSetting(t, "rand_time")
+	child := childSA_3904(t, got, "gw")
 	child.requireSetting(t, "rekey_time", "3600s")
 	child.hasNoSetting(t, "rand_time")
 	doc.hasNoSettingAnywhere(t, "rand_time")

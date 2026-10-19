@@ -142,14 +142,16 @@ func TestRenderConfigSkipsMixedIKEAuthenticationWithoutSuppressingHealthyVPN_108
 	if err != nil {
 		t.Fatalf("renderConfig returned an error instead of skipping only the conflicting VPN: %v", err)
 	}
-	if rendered["tun1"] || !rendered["tun-good"] || len(rendered) != 1 {
-		t.Fatalf("rendered VPNs = %v, want only healthy tun-good", rendered)
+	// #15024: rendered/connections/secrets are gateway-keyed.
+	if rendered["gw1"] || !rendered["gw-good"] || len(rendered) != 1 {
+		t.Fatalf("rendered connections = %v, want only healthy gw-good", rendered)
 	}
 	doc := parseSwanctlDoc(t, text)
 	connections := doc.at(t, "connections")
+	connections.hasNoChild(t, "gw1")
 	connections.hasNoChild(t, "tun1")
-	connections.at(t, "tun-good").requireSetting(t, "proposals", "aes256-sha256-modp2048,aes128-sha256-modp1536")
+	connections.at(t, "gw-good").requireSetting(t, "proposals", "aes256-sha256-modp2048,aes128-sha256-modp1536")
 	secrets := doc.at(t, "secrets")
-	secrets.hasNoChild(t, "ike-tun1")
-	secrets.at(t, "ike-tun-good")
+	secrets.hasNoChild(t, "ike-gw1")
+	secrets.at(t, "ike-gw-good")
 }

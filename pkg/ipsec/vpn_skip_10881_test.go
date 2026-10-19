@@ -131,10 +131,12 @@ func TestTolerantUnknownIKEAuthSkipsOnlyVPN10881(t *testing.T) {
 		t.Fatalf("reading applied swanctl config: %v", err)
 	}
 	doc := parseSwanctlDoc(t, string(generated))
+	// #15024: healthy renders under good-gw (child healthy); bad/gw-bad is skipped entirely.
+	doc.at(t, "connections").hasNoChild(t, "bad-gw")
 	doc.at(t, "connections").hasNoChild(t, "bad")
-	doc.at(t, "connections", "healthy")
-	doc.at(t, "secrets").hasNoChild(t, "ike-bad")
-	doc.at(t, "secrets", "ike-healthy")
+	doc.at(t, "connections", "good-gw", "children", "healthy")
+	doc.at(t, "secrets").hasNoChild(t, "ike-bad-gw")
+	doc.at(t, "secrets", "ike-good-gw")
 	if report := warnings.String(); !strings.Contains(report, "vpn=bad") || !strings.Contains(report, "dss-signatures") {
 		t.Fatalf("unknown-auth skip must be reported with VPN name and reason, got %q", report)
 	}

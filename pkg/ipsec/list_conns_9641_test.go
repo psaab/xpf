@@ -199,7 +199,8 @@ func TestExpectedLoadedConnsExcludesUnsupportedAuthVPN9641(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unsupported auth on one VPN must not abort render: %v", err)
 	}
-	if rendered["broken"] || !rendered["proof-ms"] || !rendered["proof-plain"] {
+	// #15024: broken renders under gw-bad when not skipped; proofs are inline.
+	if rendered["gw-bad"] || !rendered["proof-ms"] || !rendered["proof-plain"] {
 		t.Fatalf("rendered VPN set = %v, want only healthy proof VPNs", rendered)
 	}
 	got, err := expectedLoadedConns(cfg, nil)

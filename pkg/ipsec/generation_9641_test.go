@@ -326,7 +326,8 @@ func TestExpectedLoadedConnsRefusesApplyTimeLocalAddresses9641(t *testing.T) {
 			t.Errorf("%s: must be validatable, got %v", tc.name, err)
 			continue
 		}
-		if lc := got["tun"]; lc == nil || strings.Join(lc.LocalAddrs, ",") != tc.wantLocal {
+		// #15024: ExpectedLoadedConns is keyed by gateway connection gw (child tun).
+		if lc := got["gw"]; lc == nil || strings.Join(lc.LocalAddrs, ",") != tc.wantLocal {
 			t.Errorf("%s: expected %s, want local [%s]", tc.name, describe9641(got), tc.wantLocal)
 		}
 	}

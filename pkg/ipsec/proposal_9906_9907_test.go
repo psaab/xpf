@@ -51,7 +51,8 @@ func TestRenderRejectsProposalMetacharacters_9906(t *testing.T) {
 				if err != nil {
 					t.Fatalf("render returned error instead of tolerant skip: %v", err)
 				}
-				if rendered["tun"] {
+				// #15024: rendered is gateway-keyed (gw).
+				if rendered["gw"] {
 					t.Fatalf("unsafe %s proposal was reported rendered", slot)
 				}
 				if strings.Contains(text, value) {
@@ -118,10 +119,11 @@ func TestRenderPreservesSafeProposalLists_9906(t *testing.T) {
 	}
 	cfg.Policies["esp-pol"].Proposals = []string{"esp", "esp2"}
 	text, rendered, err := (&Manager{}).renderConfig(cfg)
-	if err != nil || !rendered["tun"] {
+	// #15024: tun renders under its defined gateway gw.
+	if err != nil || !rendered["gw"] {
 		t.Fatalf("safe ESP proposal list failed to render: rendered=%v err=%v\n%s", rendered, err, text)
 	}
-	childSA_3904(t, text, "tun").requireSetting(t, "esp_proposals", "aes256-sha256,aes128-sha1")
+	childSA_3904(t, text, "gw").requireSetting(t, "esp_proposals", "aes256-sha256,aes128-sha1")
 
 	cfg.Gateways["gw"].IKEPolicy = "ike-pol"
 	cfg.IKEPolicies = map[string]*config.IKEPolicy{
@@ -132,10 +134,10 @@ func TestRenderPreservesSafeProposalLists_9906(t *testing.T) {
 		"ike2": {Name: "ike2", EncryptionAlg: "aes-128-cbc", AuthAlg: "hmac-sha-1-96", DHGroup: 14},
 	}
 	text, rendered, err = (&Manager{}).renderConfig(cfg)
-	if err != nil || !rendered["tun"] {
+	if err != nil || !rendered["gw"] {
 		t.Fatalf("safe IKE proposal list failed to render: rendered=%v err=%v\n%s", rendered, err, text)
 	}
-	parseSwanctlDoc(t, text).at(t, "connections", "tun").
+	parseSwanctlDoc(t, text).at(t, "connections", "gw").
 		requireSetting(t, "proposals", "aes256-sha256-modp2048,aes128-sha1-modp2048")
 }
 

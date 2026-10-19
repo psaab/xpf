@@ -66,17 +66,18 @@ func TestRenderValidEndpoints_5630(t *testing.T) {
 			// SOMEWHERE in the document -- which a render that nested the
 			// setting under the wrong connection, under children{}, or after an
 			// unbalanced brace would satisfy just as well.
-			conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "tun")
+			// #15024: tun renders under its gateway gw (child still tun).
+			conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "gw")
 
 			if got := conn.setting(t, "remote_addrs"); got != c.wantRemote {
-				t.Errorf("connections.tun.remote_addrs = %q, want %q", got, c.wantRemote)
+				t.Errorf("connections.gw.remote_addrs = %q, want %q", got, c.wantRemote)
 			}
 			if c.wantLocal == "" {
 				// No local-address configured: the setting must be ABSENT, not
 				// merely un-searched-for. Containment could not express this.
 				conn.hasNoSetting(t, "local_addrs")
 			} else if got := conn.setting(t, "local_addrs"); got != c.wantLocal {
-				t.Errorf("connections.tun.local_addrs = %q, want %q", got, c.wantLocal)
+				t.Errorf("connections.gw.local_addrs = %q, want %q", got, c.wantLocal)
 			}
 
 			// The addresses belong to the CONNECTION, not to its auth rounds or

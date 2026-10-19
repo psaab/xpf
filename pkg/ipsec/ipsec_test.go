@@ -560,11 +560,12 @@ func TestGenerateConfig_GatewayReference(t *testing.T) {
 	// Contains(got, "proposals = aes256-sha256-modp2048") needle matched the
 	// esp_proposals line too, so the IKE assertion passed even with the
 	// Phase-1 line missing entirely.
-	conn := parseSwanctlDoc(t, got).at(t, "connections", "site-a")
+	// #15024: site-a renders under its gateway remote-gw.
+	conn := parseSwanctlDoc(t, got).at(t, "connections", "remote-gw")
 	conn.requireSetting(t, "remote_addrs", "10.0.2.1")
 	conn.requireSetting(t, "local_addrs", "10.0.1.1")
 	conn.requireSetting(t, "proposals", "aes256-sha256-modp2048")
-	childSA_3904(t, got, "site-a").
+	childSA_3904(t, got, "remote-gw").
 		requireSetting(t, "esp_proposals", "aes256-sha256-modp2048")
 }
 
@@ -723,7 +724,7 @@ func TestGenerateConfig_IKEChain(t *testing.T) {
 	// `proposals = aes256-sha256-modp2048`, which is a substring of the
 	// esp_proposals line, so it passed with the Phase-1 offer missing.
 	doc := parseSwanctlDoc(t, got)
-	kids := doc.at(t, "connections", "site-a", "children")
+	kids := doc.at(t, "connections", "gw1", "children")
 	if len(kids.order) != 1 {
 		t.Fatalf("expected exactly one child SA, got %v\n%s", kids.childNames(), kids)
 	}
@@ -735,21 +736,22 @@ func TestGenerateConfig_IKEChain(t *testing.T) {
 		key  string
 		want string
 	}{
-		{"IKE version", []string{"connections", "site-a"}, "version", "2"},
-		{"local addr", []string{"connections", "site-a"}, "local_addrs", "198.51.100.1"},
-		{"remote addr", []string{"connections", "site-a"}, "remote_addrs", "203.0.113.1"},
-		{"no NAT-T", []string{"connections", "site-a"}, "encap", "no"},
-		{"DPD", []string{"connections", "site-a"}, "dpd_delay", "10s"},
-		{"DPD timeout", []string{"connections", "site-a"}, "dpd_timeout", "50s"},
-		{"local identity", []string{"connections", "site-a", "local"}, "id", `"@vpn.example.com"`},
-		{"remote identity", []string{"connections", "site-a", "remote"}, "id", `"203.0.113.1"`},
-		{"IKE proposal", []string{"connections", "site-a"}, "proposals", "aes256-sha256-modp2048"},
-		{"ESP proposal", []string{"connections", "site-a", "children", childName}, "esp_proposals", "aes256-sha256-modp2048"},
-		{"copy DF", []string{"connections", "site-a", "children", childName}, "copy_df", "yes"},
-		{"start action", []string{"connections", "site-a", "children", childName}, "start_action", "start"},
-		{"DPD action", []string{"connections", "site-a", "children", childName}, "dpd_action", "restart"},
-		{"XFRM if_id", []string{"connections", "site-a", "children", childName}, "if_id_in", "1"},
-		{"PSK from IKE policy", []string{"secrets", "ike-site-a"}, "secret", `"secret123"`},
+		// #15024: site-a renders under gateway gw1 (child keeps its name).
+		{"IKE version", []string{"connections", "gw1"}, "version", "2"},
+		{"local addr", []string{"connections", "gw1"}, "local_addrs", "198.51.100.1"},
+		{"remote addr", []string{"connections", "gw1"}, "remote_addrs", "203.0.113.1"},
+		{"no NAT-T", []string{"connections", "gw1"}, "encap", "no"},
+		{"DPD", []string{"connections", "gw1"}, "dpd_delay", "10s"},
+		{"DPD timeout", []string{"connections", "gw1"}, "dpd_timeout", "50s"},
+		{"local identity", []string{"connections", "gw1", "local"}, "id", `"@vpn.example.com"`},
+		{"remote identity", []string{"connections", "gw1", "remote"}, "id", `"203.0.113.1"`},
+		{"IKE proposal", []string{"connections", "gw1"}, "proposals", "aes256-sha256-modp2048"},
+		{"ESP proposal", []string{"connections", "gw1", "children", childName}, "esp_proposals", "aes256-sha256-modp2048"},
+		{"copy DF", []string{"connections", "gw1", "children", childName}, "copy_df", "yes"},
+		{"start action", []string{"connections", "gw1", "children", childName}, "start_action", "start"},
+		{"DPD action", []string{"connections", "gw1", "children", childName}, "dpd_action", "restart"},
+		{"XFRM if_id", []string{"connections", "gw1", "children", childName}, "if_id_in", "1"},
+		{"PSK from IKE policy", []string{"secrets", "ike-gw1"}, "secret", `"secret123"`},
 	}
 	for _, c := range checks {
 		t.Run(c.name, func(t *testing.T) {
@@ -790,14 +792,14 @@ func TestGenerateConfig_DynamicHostname(t *testing.T) {
 		},
 	}
 	got := m.generateConfig(cfg)
-	conn := parseSwanctlDoc(t, got).at(t, "connections", "tun1")
+	conn := parseSwanctlDoc(t, got).at(t, "connections", "dyn-gw")
 	conn.requireSetting(t, "remote_addrs", "%any")
 	conn.requireSetting(t, "version", "2")
 	conn.at(t, "remote").requireSetting(t, "id", `"@peer.example.com"`)
 	// The xfrmi ids belong to the child SA. The old needles found them
 	// anywhere in the document, so a render that emitted them on the
 	// CONNECTION -- where charon would ignore them -- passed identically.
-	child := childSA_3904(t, got, "tun1")
+	child := childSA_3904(t, got, "dyn-gw")
 	child.requireSetting(t, "if_id_in", "2")
 	child.requireSetting(t, "if_id_out", "2")
 }
@@ -831,7 +833,7 @@ func TestGenerateConfig_NATTraversal_Disable(t *testing.T) {
 		},
 	}
 	doc := parseSwanctlDoc(t, m.generateConfig(cfg))
-	doc.at(t, "connections", "tun").requireSetting(t, "encap", "no")
+	doc.at(t, "connections", "gw").requireSetting(t, "encap", "no")
 	// Document-wide, as the deleted needle was: a SIBLING connection carrying
 	// forceencaps would have failed the old check and passes a path-scoped one.
 	doc.hasNoSettingAnywhere(t, "forceencaps")
@@ -853,7 +855,7 @@ func TestGenerateConfig_NATTraversal_Force(t *testing.T) {
 			"tun": {Gateway: "gw", PSK: "key"},
 		},
 	}
-	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "tun")
+	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "gw")
 	conn.requireSetting(t, "encap", "yes")
 	conn.hasNoSetting(t, "forceencaps")
 }
@@ -878,7 +880,7 @@ func TestGenerateConfig_NATTraversal_Enable(t *testing.T) {
 	// path is a weaker claim than the one being replaced, even when the fixture
 	// renders a single connection today.
 	doc := parseSwanctlDoc(t, m.generateConfig(cfg))
-	doc.at(t, "connections", "tun")
+	doc.at(t, "connections", "gw")
 	doc.hasNoSettingAnywhere(t, "encap")
 	doc.hasNoSettingAnywhere(t, "forceencaps")
 }
@@ -899,7 +901,7 @@ func TestGenerateConfig_NATTraversal_Default(t *testing.T) {
 	// #6824: `Contains(got, "encap")` also matched `forceencaps`, so this
 	// could never distinguish the two keys. Assert both absences explicitly.
 	doc := parseSwanctlDoc(t, m.generateConfig(cfg))
-	doc.at(t, "connections", "tun")
+	doc.at(t, "connections", "gw")
 	doc.hasNoSettingAnywhere(t, "encap")
 	doc.hasNoSettingAnywhere(t, "forceencaps")
 }
@@ -917,7 +919,7 @@ func TestGenerateConfig_NoNATTraversal_Legacy(t *testing.T) {
 		},
 	}
 	parseSwanctlDoc(t, m.generateConfig(cfg)).
-		at(t, "connections", "tun").
+		at(t, "connections", "gw").
 		requireSetting(t, "encap", "no")
 }
 
@@ -950,7 +952,7 @@ func TestGenerateConfig_AggressiveMode(t *testing.T) {
 			"tun": {PSK: "fixture-secret", Gateway: "gw"},
 		},
 	}
-	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "tun")
+	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "gw")
 	conn.requireSetting(t, "aggressive", "yes")
 	conn.requireSetting(t, "version", "1")
 }
@@ -984,7 +986,7 @@ func TestGenerateConfig_AggressiveMode_NotSet(t *testing.T) {
 		},
 	}
 	doc := parseSwanctlDoc(t, m.generateConfig(cfg))
-	doc.at(t, "connections", "tun")
+	doc.at(t, "connections", "gw")
 	doc.hasNoSettingAnywhere(t, "aggressive")
 }
 
@@ -1104,7 +1106,7 @@ func TestGenerateConfig_IKELifetime(t *testing.T) {
 	// #6824: `rekey_time` is emitted on BOTH the IKE connection and the child
 	// SA, so the old needle could be satisfied by the child's line while the
 	// IKE lifetime was missing. Pin the connection.
-	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "tun")
+	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "gw")
 	conn.requireSetting(t, "rekey_time", "28800s")
 	// #9919 F-163: no rand_time beside the IKE rekey_time — strongSwan's
 	// default jitter applies.
@@ -1157,10 +1159,10 @@ func TestGenerateConfig_DPDModes(t *testing.T) {
 	// The old loop asserted all three against the whole document, so it could
 	// not have caught any of them landing in the wrong section.
 	doc := parseSwanctlDoc(t, m.generateConfig(cfg))
-	conn := doc.at(t, "connections", "tun")
+	conn := doc.at(t, "connections", "gw")
 	conn.requireSetting(t, "dpd_delay", "7s")
 	conn.requireSetting(t, "dpd_timeout", "21s")
-	childSA_3904(t, m.generateConfig(cfg), "tun").requireSetting(t, "dpd_action", "trap")
+	childSA_3904(t, m.generateConfig(cfg), "gw").requireSetting(t, "dpd_action", "trap")
 }
 
 // TestGenerateConfig_DPDBareAndTuningForms compiles a full tunnel from flat-set
@@ -1214,27 +1216,27 @@ func TestGenerateConfig_DPDBareAndTuningForms(t *testing.T) {
 
 	t.Run("bare enables DPD with defaults", func(t *testing.T) {
 		out := m.generateConfig(compileFromSet(t, with(`set security ike gateway gw1 dead-peer-detection`)))
-		conn := parseSwanctlDoc(t, out).at(t, "connections", "tun1")
+		conn := parseSwanctlDoc(t, out).at(t, "connections", "gw1")
 		conn.requireSetting(t, "dpd_delay", "10s")
 		conn.requireSetting(t, "dpd_timeout", "50s")
-		childSA_3904(t, out, "tun1").requireSetting(t, "dpd_action", "clear")
+		childSA_3904(t, out, "gw1").requireSetting(t, "dpd_action", "clear")
 	})
 
 	t.Run("interval-only tunes delay", func(t *testing.T) {
 		out := m.generateConfig(compileFromSet(t, with(`set security ike gateway gw1 dead-peer-detection interval 20`)))
-		parseSwanctlDoc(t, out).at(t, "connections", "tun1").
+		parseSwanctlDoc(t, out).at(t, "connections", "gw1").
 			requireSetting(t, "dpd_delay", "20s")
 	})
 
 	t.Run("always-send maps to restart", func(t *testing.T) {
 		out := m.generateConfig(compileFromSet(t, with(`set security ike gateway gw1 dead-peer-detection always-send`)))
-		childSA_3904(t, out, "tun1").requireSetting(t, "dpd_action", "restart")
+		childSA_3904(t, out, "gw1").requireSetting(t, "dpd_action", "restart")
 	})
 
 	t.Run("no DPD stanza emits no dpd", func(t *testing.T) {
 		out := m.generateConfig(compileFromSet(t, base))
 		doc := parseSwanctlDoc(t, out)
-		doc.at(t, "connections", "tun1")
+		doc.at(t, "connections", "gw1")
 		doc.hasNoSettingAnywhere(t, "dpd_delay")
 	})
 }
@@ -1284,7 +1286,7 @@ func TestGenerateConfig_PubkeyAuth(t *testing.T) {
 	// needles matched either round, so a render that put the LOCAL certificate
 	// under remote{} -- where charon reads it as the peer's -- passed.
 	doc := parseSwanctlDoc(t, m.generateConfig(cfg))
-	local := doc.at(t, "connections", "tun", "local")
+	local := doc.at(t, "connections", "gw", "local")
 	local.requireSetting(t, "auth", "pubkey")
 	local.requireSetting(t, "certs", `"gw-cert.pem"`)
 	// No PSK anywhere: pubkey auth must not emit a secret in ANY section.
@@ -1752,7 +1754,7 @@ func TestRenderConfig_GatewayNameNeverLeaks(t *testing.T) {
 		// assertion about the renderer's INDENT standing in for one about the
 		// tree. Resolving the path says it directly.
 		doc := parseSwanctlDoc(t, got)
-		doc.at(t, "connections", "good")
+		doc.at(t, "connections", "good-gw", "children", "good")
 		vals := remoteAddrsValues(t, got)
 		if len(vals) != 1 || vals[0] != "192.0.2.10" {
 			t.Fatalf("healthy remote_addrs = %v, want [192.0.2.10]\n%s", vals, got)
@@ -1762,7 +1764,7 @@ func TestRenderConfig_GatewayNameNeverLeaks(t *testing.T) {
 		}
 		doc.at(t, "connections").hasNoChild(t, "bad")
 		doc.at(t, "secrets").hasNoChild(t, "ike-bad")
-		doc.at(t, "secrets", "ike-good")
+		doc.at(t, "secrets", "ike-good-gw")
 	})
 }
 
@@ -1805,7 +1807,7 @@ func TestGenerateConfig_ResponderOnlyGateway(t *testing.T) {
 				Proposals: map[string]*config.IPsecProposal{},
 			}
 			got := m.generateConfig(cfg)
-			conn := parseSwanctlDoc(t, got).at(t, "connections", "dyn")
+			conn := parseSwanctlDoc(t, got).at(t, "connections", "dial-in")
 			conn.requireSetting(t, "remote_addrs", "%any")
 			conn.at(t, "remote").requireSetting(t, "id", `"@dialin.example.com"`)
 			conn.requireSetting(t, "local_addrs", "203.0.113.5")

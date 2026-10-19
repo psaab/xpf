@@ -74,12 +74,14 @@ func TestRenderConfigFailsClosedOnUnresolvableExternalInterface_11689(t *testing
 			if err != nil {
 				t.Fatalf("renderConfig: %v", err)
 			}
-			if rendered["missing-vpn"] {
+			// #15024: missing-vpn renders under gateway missing when not skipped.
+			if rendered["missing"] {
 				t.Fatalf("VPN using unresolved external-interface %q rendered and would bind all local addresses:\n%s", tc.iface, got)
 			}
 			if !rendered["healthy"] {
 				t.Fatalf("healthy sibling VPN was dropped alongside the unresolved external-interface:\n%s", got)
 			}
+			parseSwanctlDoc(t, got).at(t, "connections").hasNoChild(t, "missing")
 			parseSwanctlDoc(t, got).at(t, "connections").hasNoChild(t, "missing-vpn")
 			if !strings.Contains(warnings.String(), tc.iface+".0") {
 				t.Fatalf("warning does not name external interface %q: %s", tc.iface+".0", warnings.String())
@@ -120,10 +122,11 @@ func TestRenderedVPNSetMatchesProductionRenderAndReplayFallback_13124(t *testing
 	if err != nil {
 		t.Fatalf("renderConfig: %v", err)
 	}
-	if runtimeRendered["vpn-unres"] {
+	// #15024: the production rendered set is connection-keyed (gateways).
+	if runtimeRendered["unres-gw"] {
 		t.Fatal("FIXTURE: production render must skip vpn-unres (#11689)")
 	}
-	if !runtimeRendered["vpn-fallback"] {
+	if !runtimeRendered["fallback-gw"] {
 		t.Fatal("FIXTURE: production render must load vpn-fallback via single-stack fallback")
 	}
 	if got := prepared.Gateways["fallback-gw"].LocalAddress; got != "192.0.2.10" {
@@ -179,10 +182,11 @@ func TestRenderConfigKeepsResolvedExternalInterfaceLocalBind_11689(t *testing.T)
 	if err != nil {
 		t.Fatalf("renderConfig: %v", err)
 	}
-	if !rendered["tun"] {
+	// #15024: tun renders under gateway gw.
+	if !rendered["gw"] {
 		t.Fatalf("resolvable external-interface was skipped:\n%s", got)
 	}
-	parseSwanctlDoc(t, got).at(t, "connections", "tun").requireSetting(t, "local_addrs", "198.51.100.7")
+	parseSwanctlDoc(t, got).at(t, "connections", "gw").requireSetting(t, "local_addrs", "198.51.100.7")
 }
 
 // Config-only generation validation cannot know whether the live kernel will

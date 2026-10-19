@@ -80,7 +80,8 @@ func renderImmediateVPN(t *testing.T) string {
 	// exactly the reason this issue exists: a byte check cannot say which
 	// SECTION a setting landed in, which is the entire defect here.
 	doc := parseSwanctlDoc(t, rendered)
-	if _, ok := doc.at(t, "connections").children["vpn-a"]; !ok {
+	// #15024: vpn-a renders as a child of its gateway gw-a.
+	if _, ok := doc.at(t, "connections").children["gw-a"]; !ok {
 		t.Fatalf("fixture rendered no connection at all, so nothing below is being "+
 			"asserted — a skipped VPN passes every check in this file. Got:\n%s", rendered)
 	}
@@ -94,13 +95,13 @@ func TestStartActionIsChildOnly7165(t *testing.T) {
 	// answers "unknown option: start_action, config discarded" and drops the
 	// ENTIRE connection, so IPsec does not come up for a VPN with
 	// establish-tunnels immediately (#7165).
-	doc.at(t, "connections", "vpn-a").hasNoSetting(t, "start_action")
+	doc.at(t, "connections", "gw-a").hasNoSetting(t, "start_action")
 
 	// And the child section MUST. Not decoration: a fix that deleted both
 	// emits would satisfy the assertion above while silently dropping the
 	// behaviour the operator asked for, leaving a connection that loads and
 	// never initiates.
-	doc.at(t, "connections", "vpn-a", "children", "vpn-a").
+	doc.at(t, "connections", "gw-a", "children", "vpn-a").
 		requireSetting(t, "start_action", "start")
 }
 
@@ -139,7 +140,7 @@ func TestStartActionTrapWhenEstablishTunnelsUnset14592(t *testing.T) {
 		t.Fatalf("renderConfig: %v", err)
 	}
 	doc := parseSwanctlDoc(t, rendered)
-	conn := doc.at(t, "connections", "vpn-a")
+	conn := doc.at(t, "connections", "gw-a")
 	conn.hasNoSetting(t, "start_action")
 	conn.at(t, "children", "vpn-a").requireSetting(t, "start_action", "trap")
 }
@@ -164,7 +165,7 @@ func TestStartActionAbsentWhenUnsetOnResponderOnly14592(t *testing.T) {
 		t.Fatalf("renderConfig: %v", err)
 	}
 	doc := parseSwanctlDoc(t, rendered)
-	conn := doc.at(t, "connections", "vpn-a")
+	conn := doc.at(t, "connections", "dial-in")
 	conn.hasNoSetting(t, "start_action")
 	conn.at(t, "children", "vpn-a").hasNoSetting(t, "start_action")
 }

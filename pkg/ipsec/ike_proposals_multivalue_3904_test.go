@@ -44,12 +44,11 @@ func TestGenerateConfig_MultiIKEProposals(t *testing.T) {
 			"esp-a": {Name: "esp-a", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256", DHGroup: 14},
 		},
 	}
-	// #6824: equality at connections.tun1.proposals subsumes both old checks.
-	// The second needle existed because containment on the joined string could
-	// not say the join was the WHOLE value -- an exact match at a known path
-	// says it, and additionally rejects a third proposal silently appearing.
+	// #15024: tun1 references the defined gateway gw1, so the connection
+	// is gateway-named; #6824: equality at connections.gw1.proposals
+	// subsumes both old checks.
 	parseSwanctlDoc(t, m.generateConfig(cfg)).
-		at(t, "connections", "tun1").
+		at(t, "connections", "gw1").
 		requireSetting(t, "proposals", "aes256-sha256-modp2048,aes128-sha256-modp1536")
 }
 
