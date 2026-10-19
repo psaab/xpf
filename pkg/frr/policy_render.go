@@ -1337,12 +1337,33 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			//   - delete → `set comm-list <name> delete` (strip by list)
 			//   - none   → `set community none` (strip all)
 			//   - set/"" → `set community <v>` (replace; legacy bare form)
+			// #15665: delete is decoupled from the value-carrying op —
+			// emit one delete line per CommunityDelete entry whenever
+			// non-empty, in addition to the set/add/none action below,
+			// in authored (statement) order relative to them: deletes
+			// were accumulated independently, so they render first.
+			// FRR's `set comm-list <name> delete` strips ONE
+			// community-list per line, so a multi-list
+			// `then community delete [ listA listB ]` emits one clause
+			// per referenced list — every name in order (#2902).
+			// #15008: a multi-member definition's public name is the
+			// conjunctive entry, which strips nothing per-value, so
+			// delete targets its generated per-member backing
+			// (communityDeleteTarget); single-member targets are
+			// unchanged.
+			if term.CommunityOp != "none" {
+				for _, name := range term.CommunityDelete {
+					if name != "" {
+						fmt.Fprintf(&b, " set comm-list %s delete\n", communityDeleteTarget(po, name))
+					}
+				}
+			}
 			switch term.CommunityOp {
 			case "none":
 				b.WriteString(" set community none\n")
-			case "add":
+			case "add", "delete":
 				if term.CommunityAdd != "" {
-					resolutionFailed := term.CommunityResolutionFailed
+					resolutionFailed := term.CommunityAddResolutionFailed
 					authoredValue := sanitizeFRRValue(term.CommunityAdd)
 					if !resolutionFailed && config.ValidCommunityValueLiteral(term.CommunityAdd) {
 						fmt.Fprintf(&b, " set community %s additive\n", sanitizeFRRValue(term.CommunityAdd))
@@ -1351,22 +1372,7 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 							"route_map", routeMapName, "term", term.Name, "value", authoredValue)
 					}
 				}
-			case "delete":
-				// FRR's `set comm-list <name> delete` strips ONE
-				// community-list per line, so a multi-list
-				// `then community delete [ listA listB ]` emits one clause
-				// per referenced list — every name in order (#2902).
-				// #15008: a multi-member definition's public name is the
-				// conjunctive entry, which strips nothing per-value, so
-				// delete targets its generated per-member backing
-				// (communityDeleteTarget); single-member targets are
-				// unchanged.
-				for _, name := range term.CommunityDelete {
-					if name != "" {
-						fmt.Fprintf(&b, " set comm-list %s delete\n", communityDeleteTarget(po, name))
-					}
-				}
-			default: // "" or "set" — whole-attribute replace
+			default: // "" or "set" — whole-attribute replace, plus any coexisting add
 				if term.Community != "" {
 					resolutionFailed := term.CommunityResolutionFailed
 					authoredValue := sanitizeFRRValue(term.Community)
@@ -1374,6 +1380,16 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 						fmt.Fprintf(&b, " set community %s\n", sanitizeFRRValue(term.Community))
 					} else {
 						slog.Warn("frr: omitting an unresolvable then community replacement value",
+							"route_map", routeMapName, "term", term.Name, "value", authoredValue)
+					}
+				}
+				if term.CommunityAdd != "" {
+					resolutionFailed := term.CommunityAddResolutionFailed
+					authoredValue := sanitizeFRRValue(term.CommunityAdd)
+					if !resolutionFailed && config.ValidCommunityValueLiteral(term.CommunityAdd) {
+						fmt.Fprintf(&b, " set community %s additive\n", sanitizeFRRValue(term.CommunityAdd))
+					} else {
+						slog.Warn("frr: omitting an unresolvable then community add value",
 							"route_map", routeMapName, "term", term.Name, "value", authoredValue)
 					}
 				}

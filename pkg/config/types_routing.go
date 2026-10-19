@@ -131,20 +131,22 @@ type PolicyTerm struct {
 	// Junos/vSRX supports append (additive), delete (by community-list), and
 	// none (strip all) in addition to whole-attribute replace; emitting only
 	// the replace clause (`set community <v>`) wiped any upstream-set
-	// communities, a vSRX-parity gap (#2848). The compiler sets CommunityOp
-	// to one of "", "set", "add", "delete", "none". Both "" and "set" mean
-	// replace using term.Community (the empty string preserves back-compat
+	// communities, a vSRX-parity gap (#2848). CommunityOp is one of "",
+	// "set", "add", "none" for the value-carrying action. Both "" and "set"
+	// mean replace using term.Community (the empty string preserves back-compat
 	// with the bare `then community <v>` form). For "add" the value lives in
-	// CommunityAdd (rendered `set community <v> additive`), for "delete" the
-	// referenced community-list NAMES live in CommunityDelete (one
-	// `set comm-list <name> delete` line per name — FRR's set clause takes a
-	// single community-list per line, so a multi-list
-	// `then community delete [ listA listB ]` must accumulate every name, not
-	// just the first; #2902), and "none" carries no argument (rendered
-	// `set community none`).
-	CommunityOp string // "", "set", "add", "delete", "none"
-	// CommunityAdd contains compiled FRR literals to append. Failed resolution
-	// preserves the authored operand and marks CommunityResolutionFailed.
+	// CommunityAdd (rendered `set community <v> additive`), and "none" carries
+	// no argument (rendered `set community none`).
+	// #15665: `then community delete` is DECOUPLED from CommunityOp — its
+	// referenced community-list NAMES live in CommunityDelete and render
+	// whenever non-empty, in addition to any set/add/none action, so a term
+	// combining `delete` + `add`/`set` keeps both. Legacy persisted terms with
+	// CommunityOp == "delete" carry their names in CommunityDelete too.
+	CommunityOp string // "", "set", "add", "none" (legacy persisted: "delete")
+	// CommunityAdd contains space-joined compiled FRR literals to append,
+	// accumulated across repeated `community add` statements in authored
+	// order (#15665). Failed resolution preserves the authored operands and
+	// marks the matching *ResolutionFailed flag.
 	CommunityAdd    string
 	CommunityDelete []string // community-list name(s) whose members to strip (`then community delete <name> ...`)
 	// CommunityResolutionFailed marks a failed one-time compiler lookup of an
@@ -153,8 +155,13 @@ type PolicyTerm struct {
 	// tolerant warnings can name it; the renderer omits the failed action.
 	// This compiler-only state is excluded from JSON to keep it off both the
 	// helper wire and REST config response.
-	CommunityResolutionFailed bool   `json:"-"`
-	Origin                    string // BGP origin: "igp", "egp", "incomplete"
+	CommunityResolutionFailed bool `json:"-"`
+	// CommunityAddResolutionFailed is the add-action counterpart of
+	// CommunityResolutionFailed (#15665): with delete decoupled, a term can
+	// carry both a set/bare and an add action, so each needs its own flag —
+	// otherwise a failed add would suppress a valid set (and vice versa).
+	CommunityAddResolutionFailed bool   `json:"-"`
+	Origin                       string // BGP origin: "igp", "egp", "incomplete"
 	// ASPathPrepend holds the ordered list of ASNs to prepend to the BGP
 	// AS_PATH attribute (`then as-path-prepend "<asn> <asn> ..."`), rendered
 	// as the FRR route-map clause `set as-path prepend <asn> <asn> ...`

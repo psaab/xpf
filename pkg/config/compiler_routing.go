@@ -1694,23 +1694,25 @@ func resolvePolicyCommunityOperands(cfg *Config) {
 			if term == nil {
 				continue
 			}
+			// #15665: resolve each value-carrying action independently.
+			// Community (set/bare) and CommunityAdd (add) can coexist with
+			// each other and with CommunityDelete. Each action keeps its
+			// own failure flag: CommunityResolutionFailed for set/bare,
+			// CommunityAddResolutionFailed for add.
 			term.CommunityResolutionFailed = false
-			switch term.CommunityOp {
-			case "add":
-				if term.CommunityAdd != "" {
-					if value, ok := ResolveCommunityValue(po, term.CommunityAdd); ok {
-						term.CommunityAdd = value
-					} else {
-						term.CommunityResolutionFailed = true
-					}
+			term.CommunityAddResolutionFailed = false
+			if term.CommunityAdd != "" {
+				if value, ok := ResolveCommunityValueTokens(po, term.CommunityAdd); ok {
+					term.CommunityAdd = value
+				} else {
+					term.CommunityAddResolutionFailed = true
 				}
-			case "", "set":
-				if term.Community != "" {
-					if value, ok := ResolveCommunityValue(po, term.Community); ok {
-						term.Community = value
-					} else {
-						term.CommunityResolutionFailed = true
-					}
+			}
+			if term.Community != "" {
+				if value, ok := ResolveCommunityValueTokens(po, term.Community); ok {
+					term.Community = value
+				} else {
+					term.CommunityResolutionFailed = true
 				}
 			}
 		}
@@ -2287,6 +2289,13 @@ func recordPolicyNextAction11780(term *PolicyTerm, value string) {
 // vals is the flattened token list of the clause (operation keyword first when
 // present, then the value/name). The first token selects the operation; any
 // other first token is treated as a bare replace value.
+//
+// #15665: `delete` is decoupled from the value-carrying operations. It only
+// appends to CommunityDelete and never overwrites CommunityOp/Community/
+// CommunityAdd, so `community delete C1; community add C2;` (either order)
+// keeps both actions. Repeated `add` statements accumulate their values in
+// authored order instead of overwriting. `none` strips everything and
+// therefore still clears every other community action.
 func applyCommunityAction(term *PolicyTerm, vals []string) {
 	if len(vals) == 0 {
 		return
@@ -2299,8 +2308,21 @@ func applyCommunityAction(term *PolicyTerm, vals []string) {
 		term.CommunityDelete = nil
 	case "add":
 		if len(vals) >= 2 {
-			term.CommunityOp = "add"
-			term.CommunityAdd = strings.Join(vals[1:], " ")
+			joined := strings.Join(vals[1:], " ")
+			if term.CommunityAdd == "" {
+				term.CommunityAdd = joined
+			} else {
+				term.CommunityAdd += " " + joined
+			}
+			if term.CommunityOp == "none" || term.CommunityOp == "delete" {
+				term.CommunityOp = "add"
+			} else if term.CommunityOp != "set" && term.Community == "" {
+				// No set/bare replace coexists: the add is the term's
+				// value-carrying operation. When a replace does coexist
+				// (CommunityOp ""/"set" with Community set), keep
+				// CommunityOp on the replace and render the add after it.
+				term.CommunityOp = "add"
+			}
 		}
 	case "delete":
 		// `then community delete [ listA listB ]` flattens (the lexer strips
@@ -2310,9 +2332,16 @@ func applyCommunityAction(term *PolicyTerm, vals []string) {
 		// accumulate all names (reading only vals[1] would silently drop
 		// listB... — the #2419/#2902 multi-value trap) and append so repeated
 		// `set ... then community delete` lines also keep every name.
+		// #15665: do NOT touch CommunityOp/Community/CommunityAdd here.
 		if len(vals) >= 2 {
-			term.CommunityOp = "delete"
 			term.CommunityDelete = append(term.CommunityDelete, vals[1:]...)
+			if term.CommunityOp == "" && term.Community == "" && term.CommunityAdd == "" {
+				// Pure-delete term: keep the legacy scalar marker so
+				// persisted/legacy consumers still recognise it. The
+				// renderer no longer depends on it (it emits delete
+				// whenever CommunityDelete is non-empty).
+				term.CommunityOp = "delete"
+			}
 		}
 	case "set":
 		if len(vals) >= 2 {
