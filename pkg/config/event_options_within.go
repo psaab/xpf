@@ -197,14 +197,38 @@ func validateEventWithinClause(policy string, w *Node, emit func(string, ...any)
 
 	// trigger — a within clause with no trigger gates nothing; the engine
 	// would treat it as an unconditional match (fail-open), so require one.
-	trigNode := w.FindChild("trigger")
-	if trigNode == nil {
+	//
+	// #15205 (residual of #6771): read EVERY `trigger` sibling, not just the
+	// first. compileEventOptions applies all siblings last-wins
+	// (FindChildren("trigger")), so validating only FindChild("trigger") let
+	// an invalid or contradictory later sibling commit clean — the compiler
+	// silently dropped its bad count or filled the contradictory field from
+	// it. Aggregating every sibling's specs subjects the later siblings to
+	// exactly the same checks (unknown keyword, both-on-and-until, count
+	// range) as if they had been packed into the first sibling, while a
+	// same-keyword valid re-set still passes and keeps its #6771 last-wins
+	// compiled value.
+	trigNodes := w.FindChildren("trigger")
+	if len(trigNodes) == 0 {
 		return emit("event-options policy %q within %d: missing a `trigger on|until "+
 			"<count>` (a within clause with no trigger gates nothing)",
 			policy, sec)
 	}
 
-	specs, unknown := parseEventTriggerSpecs(trigNode)
+	var specs []eventTriggerSpec
+	var unknown []string
+	for _, trigNode := range trigNodes {
+		s, u := parseEventTriggerSpecs(trigNode)
+		if len(s) == 0 && len(u) == 0 {
+			// A bare `trigger;` sibling carries no spec at all: reject it
+			// exactly as a lone empty trigger is rejected below, rather
+			// than letting an earlier valid sibling mask it.
+			return emit("event-options policy %q within %d: trigger requires `on` or "+
+				"`until` with a <count>", policy, sec)
+		}
+		specs = append(specs, s...)
+		unknown = append(unknown, u...)
+	}
 	for _, kw := range unknown {
 		return emit("event-options policy %q within %d: unknown trigger keyword %q "+
 			"(expected `on` or `until`)", policy, sec, kw)
