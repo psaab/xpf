@@ -131,3 +131,11 @@ harness = false
 [[bench]]
 name = "hot_hash"
 harness = false
+
+# #15250 (A69-03): AllowedIPs lookup-cost flatness gate — the old
+# flat prefix-length scan vs the per-family length-bucketed hash,
+# P=1..1024 peers. `harness = false` with its own main: the gate is
+# a ratio (bucketed cost at P=1024 vs P=1), not a single closure.
+[[bench]]
+name = "allowed_ips_lookup"
+harness = false

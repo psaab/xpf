@@ -10,6 +10,13 @@ xpf (0.0.0) unstable; urgency=medium
     scopes to no category xpf emits; correct feature-gaps,
     feature-coverage, and userspace FEATURES documentation to match
     the code (#15256).
+  * Make WireGuard AllowedIPs lookups independent of the configured
+    peer/prefix count: the per-family length-bucketed hash table
+    replaces the flat cross-family linear scan that every decap
+    source gate and encap peer selection paid per packet, and the
+    engine table load no longer allocates per packet. Longest-
+    prefix answers, the first-configured-peer tie rule, and
+    no-covering-peer drops are unchanged (#15250).
   * Preserve pre-existing foreign content at the four managed
     /usr/local/sbin names on first install instead of replacing it
     with the staged symlink: a regular file or directory is moved
