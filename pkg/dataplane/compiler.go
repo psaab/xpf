@@ -1447,6 +1447,23 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 			}
 		}
 		if !ok {
+			// #15002 (A08-03): the tolerant path downgrades the
+			// undefined-zone gate (#2401) to a warning. The userspace
+			// helper rejects a snapshot carrying an unresolvable zone
+			// reference whole — fail-closed, previous-good retained
+			// (#9410) — so skipping this zone-pair on the validation
+			// pass cannot install anything the helper would accept
+			// piecemeal; it only stops the Go pre-pass from aborting
+			// the apply ahead of that scoped rejection. The real pass
+			// keeps the hard rejection. policySetID stays consumed
+			// (incremented at the loop tail) so survivor IDs do not
+			// shift between passes.
+			if isValidationPass(dp) {
+				compileWarn(dp, "policy from-zone not found, skipping zone-pair",
+					"from-zone", zpp.FromZone, "to-zone", zpp.ToZone)
+				policySetID++
+				continue
+			}
 			return fmt.Errorf("policy from-zone %q not found", zpp.FromZone)
 		}
 		toZone, ok := result.ZoneIDs[zpp.ToZone]
@@ -1459,6 +1476,12 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 			toZone, ok = config.ZoneIDReservedMin, true
 		}
 		if !ok {
+			if isValidationPass(dp) {
+				compileWarn(dp, "policy to-zone not found, skipping zone-pair",
+					"from-zone", zpp.FromZone, "to-zone", zpp.ToZone)
+				policySetID++
+				continue
+			}
 			return fmt.Errorf("policy to-zone %q not found", zpp.ToZone)
 		}
 

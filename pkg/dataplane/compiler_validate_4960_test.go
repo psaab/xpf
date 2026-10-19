@@ -304,6 +304,16 @@ func TestNoHostMutationWhenNATPhaseFails_4960(t *testing.T) {
 	if !strings.Contains(err.Error(), "no-such-pool-4960") {
 		t.Fatalf("failed for the wrong reason: %v", err)
 	}
+	// #15002: the same dangling pool is warn-and-skip on the
+	// validation pass (the userspace builder ships the rule
+	// pool_unusable=missing_pool), so the pre-pass alone must
+	// accept this fixture — the rejection above is the REAL
+	// pass's, reached only because CompileConfig runs it after
+	// the pre-pass.
+	if err := validateBeforeMutate(failLaterNATPhaseConfig()); err != nil {
+		t.Fatalf("the #15002 validation pass must warn-and-skip a "+
+			"dangling SNAT pool, got: %v", err)
+	}
 }
 
 // #6894 r1 F1: assert over the TABLE ITSELF. The call site being bound proves
@@ -532,6 +542,12 @@ func TestEachValidationPhaseRowRunsItsOwnCompiler_4960(t *testing.T) {
 		dp    DataPlane // discardingDataPlane{} unless the row needs a dp failure
 		cfg   *config.Config
 		want  string // substring identifying the phase's OWN rejection
+		// realPassOnly marks a row whose fault #15002 moved to
+		// warn-and-skip on the validation pass: the pre-pass must
+		// ACCEPT it, and the row stays bound by driving the real
+		// pass (recordingDP) which must still reject it before
+		// compileZones.
+		realPassOnly bool
 	}{
 		{
 			phase: "address book",
@@ -562,14 +578,16 @@ func TestEachValidationPhaseRowRunsItsOwnCompiler_4960(t *testing.T) {
 			want: "no-such-application-6894",
 		},
 		{
+			// #15002: an undefined policy zone is no longer a pre-pass
+			// rejection — the tolerant path warns and the helper
+			// rejects the snapshot whole (#9410). The row stays bound
+			// through the REAL pass instead: recordingDP presents as
+			// the real pass (#7754), so CompileConfig must still
+			// reject before compileZones. Driven below, not through
+			// validateBeforeMutateWith.
 			phase: "policies",
 			dp:    discardingDataPlane{},
 			cfg: emptyCfgWith(func(c *config.Config) {
-				// Applications resolvable, so the `applications` row passes and
-				// `policies` is what rejects: the from-zone has no ZoneID.
-				// Named, not numbered — the r7 reorder moved every index but no
-				// name, and these three comments did not move with them
-				// (#6894 r8 F5).
 				c.Security.Policies = []*config.ZonePairPolicies{{
 					FromZone: "no-such-zone-6894", ToZone: "untrust",
 					Policies: []*config.Policy{{
@@ -579,7 +597,8 @@ func TestEachValidationPhaseRowRunsItsOwnCompiler_4960(t *testing.T) {
 					}},
 				}}
 			}),
-			want: "no-such-zone-6894",
+			want:         "no-such-zone-6894",
+			realPassOnly: true,
 		},
 		{
 			phase: "nat",
@@ -597,6 +616,9 @@ func TestEachValidationPhaseRowRunsItsOwnCompiler_4960(t *testing.T) {
 			want: "no-such-nat-zone-6894",
 		},
 		{
+			// #15002: a mixed-family static rule warn-and-skips in
+			// the pre-pass (the Rust table never matches it); the
+			// row stays bound through the real pass below.
 			phase: "static nat",
 			dp:    discardingDataPlane{},
 			cfg: emptyCfgWith(func(c *config.Config) {
@@ -607,18 +629,22 @@ func TestEachValidationPhaseRowRunsItsOwnCompiler_4960(t *testing.T) {
 					}},
 				}}
 			}),
-			want: "r-mixed-6894",
+			want:         "r-mixed-6894",
+			realPassOnly: true,
 		},
 		{
+			// #15002: a non-/96 NAT64 prefix warn-and-skips in the
+			// pre-pass (the Rust loader skips it, #3888); the row
+			// stays bound through the real pass below.
 			phase: "nat64",
 			dp:    discardingDataPlane{},
 			cfg: emptyCfgWith(func(c *config.Config) {
-				// /64 rather than the required /96.
 				c.Security.NAT.NAT64 = []*config.NAT64RuleSet{
 					{Name: "rs64-6894", Prefix: "64:ff9b::/64"},
 				}
 			}),
-			want: "rs64-6894",
+			want:         "rs64-6894",
+			realPassOnly: true,
 		},
 		{
 			// #7268 rebound this row. It used to bind NAME->BODY by faulting a
@@ -709,6 +735,30 @@ func TestEachValidationPhaseRowRunsItsOwnCompiler_4960(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.phase, func(t *testing.T) {
+			if tc.realPassOnly {
+				// #15002: the pre-pass must ACCEPT this fault
+				// (warn-and-skip), and the REAL pass must still
+				// reject it before compileZones — that pair is
+				// what binds the row's body now.
+				if err := validateBeforeMutateWith(tc.dp, tc.cfg); err != nil {
+					t.Fatalf("row %q: the #15002 validation pass must "+
+						"warn-and-skip this fault, got: %v", tc.phase, err)
+				}
+				dp := &recordingDP{}
+				_, err := CompileConfig(dp, tc.cfg, false)
+				if err == nil {
+					t.Fatalf("row %q accepted an input its own compiler "+
+						"rejects on the real pass — the row's BODY no "+
+						"longer validates anything (#6894 r2 F3, #15002)",
+						tc.phase)
+				}
+				assertNoHostMutation(t, dp)
+				if !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("row %q real-pass rejection must contain %q, got: %v",
+						tc.phase, tc.want, err)
+				}
+				return
+			}
 			err := validateBeforeMutateWith(tc.dp, tc.cfg)
 			if err == nil {
 				t.Fatalf("row %q accepted an input its own compiler rejects — "+

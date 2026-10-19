@@ -462,6 +462,33 @@ func TestOverReachArmCoversEveryReachableGate_4960(t *testing.T) {
 			"(`\"nptv6: \"+reason`), so it cannot be a static want at all; the " +
 			"census keys on the rendered record and would see it only with an " +
 			"NPTv6 fixture",
+		// #15002: the warn-and-skip gates added 17 counted call
+		// sites (each `if isValidationPass(dp)` arm with one
+		// compileWarn inside counts 2; the NAT64 block — one
+		// predicate, four compileWarn calls — counts 5). They are
+		// reconciled by the 12 entries below; the remaining
+		// counted sites are pre-existing base drift (measured on
+		// clean master: 39 counted vs 37 accounted, and this test
+		// already failed there before #15002 — the drift is
+		// recorded, not silently absorbed, because the total only
+		// reconciles when a future gate is also named). The records
+		// are validation-pass-only by construction (the real pass
+		// returns the hard error instead), so no real-pass fixture
+		// can reach them; widening one to suppress both passes is
+		// impossible without deleting the real-pass error the
+		// #15002 cells pin.
+		"compiler_nat.go:source NAT pool not found, skipping rule":                             "#15002 validation-only warn-and-skip",
+		"compiler_nat.go:DNAT pool not found, skipping rule":                                   "#15002 validation-only warn-and-skip",
+		"compiler_nat.go:DNAT pool address is a network prefix, skipping rule":                 "#15002 validation-only warn-and-skip",
+		"compiler_nat.go:static NAT rule has mixed address families, skipping rule":            "#15002 validation-only warn-and-skip",
+		"compiler_nat.go:NAT64 rule-set has invalid prefix, skipping rule-set":                 "#15002 validation-only warn-and-skip",
+		"compiler_nat.go:NAT64 rule-set prefix is not an IPv6 /96, skipping rule-set":          "#15002 validation-only warn-and-skip",
+		"compiler_nat.go:NAT64 rule-set source pool not found, skipping rule-set":              "#15002 validation-only warn-and-skip",
+		"compiler_nat.go:NAT64 rule-set source pool has no valid addresses, skipping rule-set": "#15002 validation-only warn-and-skip",
+		"compiler.go:policy from-zone not found, skipping zone-pair":                           "#15002 validation-only warn-and-skip",
+		"compiler.go:policy to-zone not found, skipping zone-pair":                             "#15002 validation-only warn-and-skip",
+		"compiler_nat.go:#15002 isValidationPass predicate arms (5 in this file)":              "the predicate half of the five compiler_nat.go warn-and-skip arms (SNAT, DNAT missing, DNAT network, static, NAT64 block); record halves are the eight compiler_nat.go entries above",
+		"compiler.go:#15002 isValidationPass predicate arms (2 in this file)":                  "the predicate half of the two compiler.go policy warn-and-skip arms; record halves are the two compiler.go entries above",
 	}
 
 	sites := countValidationPassGates(t)
