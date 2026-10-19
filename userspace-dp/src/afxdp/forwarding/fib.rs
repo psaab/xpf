@@ -335,6 +335,16 @@ pub(in crate::afxdp) fn nat_destination_claims_local(
 /// destination takes the ordinary lookup unchanged. Callers that already
 /// translated the packet resolve the translated target and never reach this
 /// helper with the wire destination.
+///
+/// #15768: `table` is the caller's PBR/native-VRF `route_table_override`
+/// (its resolving table; `None` = default `inet.0`/`inet6.0`) and `icmp`
+/// carries the packet's ICMP type/code when known, so the scoped claim check
+/// sees the same ICMP-constrained rules the pre-routing DNAT lookup saw.
+/// Both FIB arms resolve in `table` with the per-flow 5-tuple ECMP hash;
+/// `ForwardingLookupResult::selected_route` carries that table's identity
+/// (the caller in `poll_descriptor` stamps installing-table provenance from
+/// it — pre-fix the helper discarded it and the miss arm hard-coded
+/// `resolved_in_table = false`).
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn lookup_forwarding_resolution_for_nat_flow(
     state: &ForwardingState,
@@ -343,7 +353,9 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_for_nat_flow(
     ingress_zone: &str,
     ingress_ifname: &str,
     ingress_routing_instance: &str,
-) -> ForwardingResolution {
+    table: Option<&str>,
+    icmp: Option<(u8, u8)>,
+) -> ForwardingLookupResult {
     let dst = flow.dst_ip;
     let is_nat_local = match dst {
         IpAddr::V4(v4) => state.local_nat_to_self_v4.contains_key(&v4),
@@ -360,59 +372,78 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_for_nat_flow(
             ingress_zone,
             ingress_ifname,
             ingress_routing_instance,
-            None,
+            icmp,
         )
     {
-        return lookup_forwarding_resolution_without_nat_local(
+        return lookup_forwarding_resolution_without_nat_local_inner(
             state,
             dynamic_neighbors,
             dst,
-            None,
-        )
-        .resolution;
+            table,
+            Some(ecmp_hash_flow(&flow.forward_key)),
+        );
     }
     match dynamic_neighbors {
-        Some(neighbors) => {
-            lookup_forwarding_resolution_with_dynamic_for_flow(state, neighbors, dst, &flow.forward_key)
-                .resolution
-        }
-        None => lookup_forwarding_resolution(state, dst).resolution,
+        Some(neighbors) => match table {
+            Some(table) => lookup_forwarding_resolution_with_dynamic_for_flow_in_table(
+                state,
+                neighbors,
+                dst,
+                &flow.forward_key,
+                table,
+            ),
+            None => lookup_forwarding_resolution_with_dynamic_for_flow(
+                state,
+                neighbors,
+                dst,
+                &flow.forward_key,
+            ),
+        },
+        None => lookup_forwarding_resolution_inner_ecmp(
+            state,
+            None,
+            dst,
+            table,
+            Some(ecmp_hash_flow(&flow.forward_key)),
+        ),
     }
 }
 
 /// #15118: FIB lookup with the NAT-external local shortcut suppressed for
 /// `dst`. Interface addresses remain local; only the late NAT registration in
-/// `local_nat_to_self_*` is bypassed. Implemented by cloning the (small)
-/// local sets without the NAT entries — this is the cold session-miss path
-/// for an unclaimed NAT address, never the per-packet fast path.
+/// `local_nat_to_self_*` is bypassed.
+///
+/// #15768: this no longer deep-clones `ForwardingState`. The suppression is a
+/// `Some(dst)` marker threaded through the inner walk into the per-table
+/// local-ownership predicates (`local_*_owned_by_table`); the configured-
+/// interface exception is evaluated inside those predicates, so an address
+/// that is also a configured interface address stays local. The walk
+/// allocates nothing beyond the canonical-table `Cow` the ordinary lookup
+/// already produces.
 pub(in crate::afxdp) fn lookup_forwarding_resolution_without_nat_local(
     state: &ForwardingState,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
     dst: IpAddr,
     table: Option<&str>,
 ) -> ForwardingLookupResult {
-    let mut scoped = state.clone();
-    match dst {
-        IpAddr::V4(v4) => {
-            if scoped.local_nat_to_self_v4.contains_key(&v4)
-                && !scoped.configured_iface_v4.contains(&v4)
-            {
-                scoped.local_v4.remove(&v4);
-                scoped.local_nat_any_table_v4.remove(&v4);
-                scoped.local_tables_v4.remove(&v4);
-            }
-        }
-        IpAddr::V6(v6) => {
-            if scoped.local_nat_to_self_v6.contains_key(&v6)
-                && !scoped.configured_iface_v6.contains(&v6)
-            {
-                scoped.local_v6.remove(&v6);
-                scoped.local_nat_any_table_v6.remove(&v6);
-                scoped.local_tables_v6.remove(&v6);
-            }
-        }
-    }
-    lookup_forwarding_resolution_inner(&scoped, dynamic_neighbors, dst, table)
+    lookup_forwarding_resolution_without_nat_local_inner(state, dynamic_neighbors, dst, table, None)
+}
+
+fn lookup_forwarding_resolution_without_nat_local_inner(
+    state: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+    dst: IpAddr,
+    table: Option<&str>,
+    ecmp_flow_hash: Option<u64>,
+) -> ForwardingLookupResult {
+    lookup_forwarding_resolution_inner_ecmp_suppressing(
+        state,
+        dynamic_neighbors,
+        dst,
+        table,
+        ecmp_flow_hash,
+        Some(dst),
+    )
 }
 
 /// #9951: identify the exact inter-VRF leak selected by the immutable FIB
@@ -518,12 +549,35 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_inner_ecmp(
     table: Option<&str>,
     ecmp_flow_hash: Option<u64>,
 ) -> ForwardingLookupResult {
+    lookup_forwarding_resolution_inner_ecmp_suppressing(
+        state,
+        dynamic_neighbors,
+        dst,
+        table,
+        ecmp_flow_hash,
+        None,
+    )
+}
+
+/// #15768: as `lookup_forwarding_resolution_inner_ecmp`, plus an optional
+/// NAT-local suppression marker. `suppress_nat_local = Some(dst)` makes the
+/// per-table local-ownership predicates ignore `dst`'s NAT registration
+/// (unless `dst` is also a configured interface address) — the #15118
+/// unclaimed-NAT walk without cloning `ForwardingState`.
+fn lookup_forwarding_resolution_inner_ecmp_suppressing(
+    state: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+    dst: IpAddr,
+    table: Option<&str>,
+    ecmp_flow_hash: Option<u64>,
+    suppress_nat_local: Option<IpAddr>,
+) -> ForwardingLookupResult {
     match dst {
         IpAddr::V4(ip) => {
             let table = table
                 .map(|table| canonical_route_table(table, false))
                 .unwrap_or(Cow::Borrowed(DEFAULT_V4_TABLE));
-            lookup_forwarding_resolution_v4(
+            lookup_forwarding_resolution_v4_suppressing(
                 state,
                 dynamic_neighbors,
                 ip,
@@ -531,13 +585,14 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_inner_ecmp(
                 0,
                 true,
                 ecmp_flow_hash,
+                suppress_nat_local,
             )
         }
         IpAddr::V6(ip) => {
             let table = table
                 .map(|table| canonical_route_table(table, true))
                 .unwrap_or(Cow::Borrowed(DEFAULT_V6_TABLE));
-            lookup_forwarding_resolution_v6(
+            lookup_forwarding_resolution_v6_suppressing(
                 state,
                 dynamic_neighbors,
                 ip,
@@ -545,6 +600,7 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_inner_ecmp(
                 0,
                 true,
                 ecmp_flow_hash,
+                suppress_nat_local,
             )
         }
     }
@@ -559,6 +615,28 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_v4(
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
 ) -> ForwardingLookupResult {
+    lookup_forwarding_resolution_v4_suppressing(
+        state,
+        dynamic_neighbors,
+        ip,
+        table,
+        depth,
+        allow_tunnels,
+        ecmp_flow_hash,
+        None,
+    )
+}
+
+fn lookup_forwarding_resolution_v4_suppressing(
+    state: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+    ip: Ipv4Addr,
+    table: &str,
+    depth: usize,
+    allow_tunnels: bool,
+    ecmp_flow_hash: Option<u64>,
+    suppress_nat_local: Option<IpAddr>,
+) -> ForwardingLookupResult {
     // #9955: this wrapper enters the two-stage resolver with the rule stage
     // enabled. Leak-selected targets call the same table resolver with that
     // stage disabled, matching kernel ip-rule semantics.
@@ -571,11 +649,34 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_v4(
         true,
         allow_tunnels,
         ecmp_flow_hash,
+        suppress_nat_local,
     )
 }
 
 #[inline]
 fn local_v4_owned_by_table(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> bool {
+    local_v4_owned_by_table_suppressing(state, ip, table, None)
+}
+
+/// #15768: `suppress_nat_local = Some(dst)` ignores `dst`'s NAT registration
+/// for this ownership decision — mirroring the pre-fix clone-and-remove in
+/// `lookup_forwarding_resolution_without_nat_local` (which also removed the
+/// `local_nat_any_table_*` / `local_tables_*` attributions) — except that a
+/// `dst` that is also a configured interface address stays local, exactly as
+/// the clone's `configured_iface_*` guard preserved it.
+#[inline]
+fn local_v4_owned_by_table_suppressing(
+    state: &ForwardingState,
+    ip: Ipv4Addr,
+    table: &str,
+    suppress_nat_local: Option<IpAddr>,
+) -> bool {
+    if suppress_nat_local == Some(IpAddr::V4(ip))
+        && state.local_nat_to_self_v4.contains_key(&ip)
+        && !state.configured_iface_v4.contains(&ip)
+    {
+        return false;
+    }
     state.local_v4.contains(&ip)
         && (state.local_nat_any_table_v4.contains(&ip)
             || state
@@ -626,6 +727,17 @@ fn table_has_v4_route(
     table: &str,
     allow_tunnels: bool,
 ) -> bool {
+    table_has_v4_route_suppressing(state, ip, table, allow_tunnels, None)
+}
+
+#[inline]
+fn table_has_v4_route_suppressing(
+    state: &ForwardingState,
+    ip: Ipv4Addr,
+    table: &str,
+    allow_tunnels: bool,
+    suppress_nat_local: Option<IpAddr>,
+) -> bool {
     state.routes_v4.get(table).is_some_and(|routes| {
         routes.iter().any(|entry| {
             entry.next_table.is_empty()
@@ -636,7 +748,7 @@ fn table_has_v4_route(
         entry.table == table
             && entry.prefix.contains(ip)
             && (allow_tunnels || entry.tunnel_endpoint_id == 0)
-    }) || local_v4_owned_by_table(state, ip, table)
+    }) || local_v4_owned_by_table_suppressing(state, ip, table, suppress_nat_local)
         || state
             .interface_nat_tables_v4
             .get(&ip)
@@ -650,12 +762,25 @@ fn local_delivery_resolution_v4(
     table: &str,
     include_interface_nat_owner: bool,
 ) -> Option<ForwardingResolution> {
+    local_delivery_resolution_v4_suppressing(state, ip, table, include_interface_nat_owner, None)
+}
+
+#[inline]
+fn local_delivery_resolution_v4_suppressing(
+    state: &ForwardingState,
+    ip: Ipv4Addr,
+    table: &str,
+    include_interface_nat_owner: bool,
+    suppress_nat_local: Option<IpAddr>,
+) -> Option<ForwardingResolution> {
     let interface_nat_owner = include_interface_nat_owner
         && state
             .interface_nat_tables_v4
             .get(&ip)
             .is_some_and(|tables| tables.contains(table));
-    if !local_v4_owned_by_table(state, ip, table) && !interface_nat_owner {
+    if !local_v4_owned_by_table_suppressing(state, ip, table, suppress_nat_local)
+        && !interface_nat_owner
+    {
         return None;
     }
     // #10645: match the row's unmasked HOST address, not the masked
@@ -698,12 +823,25 @@ fn local_delivery_resolution_v6(
     table: &str,
     include_interface_nat_owner: bool,
 ) -> Option<ForwardingResolution> {
+    local_delivery_resolution_v6_suppressing(state, ip, table, include_interface_nat_owner, None)
+}
+
+#[inline]
+fn local_delivery_resolution_v6_suppressing(
+    state: &ForwardingState,
+    ip: Ipv6Addr,
+    table: &str,
+    include_interface_nat_owner: bool,
+    suppress_nat_local: Option<IpAddr>,
+) -> Option<ForwardingResolution> {
     let interface_nat_owner = include_interface_nat_owner
         && state
             .interface_nat_tables_v6
             .get(&ip)
             .is_some_and(|tables| tables.contains(table));
-    let local_ifindex = if local_v6_owned_by_table(state, ip, table) || interface_nat_owner {
+    let local_ifindex = if local_v6_owned_by_table_suppressing(state, ip, table, suppress_nat_local)
+        || interface_nat_owner
+    {
         // #10645: match the row's unmasked HOST address (see the v4 arm).
         // As with v4, make duplicate-host ownership deterministic rather than
         // depending on interface snapshot order.
@@ -762,14 +900,19 @@ fn lookup_forwarding_resolution_v4_inner(
     evaluate_leaks: bool,
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
+    suppress_nat_local: Option<IpAddr>,
 ) -> ForwardingLookupResult {
     // Per-table local entries retain their existing priority. Interface-NAT
     // ownership is admitted only for leak-target walks (`!evaluate_leaks`);
     // the ordinary source-table lookup leaves it to the session-miss gate.
     // Both outcomes precede the depth guard.
-    if let Some(resolution) =
-        local_delivery_resolution_v4(state, ip, table, !evaluate_leaks)
-    {
+    if let Some(resolution) = local_delivery_resolution_v4_suppressing(
+        state,
+        ip,
+        table,
+        !evaluate_leaks,
+        suppress_nat_local,
+    ) {
         return selected_route_lookup_result(state, table, resolution);
     }
     if depth >= MAX_NEXT_TABLE_DEPTH {
@@ -798,7 +941,13 @@ fn lookup_forwarding_resolution_v4_inner(
         if let Some(leaks) = state.leak_rules_v4.get(table) {
             for leak in leaks.iter().filter(|leak| leak.prefix.contains(ip)) {
                 let next_table_name = canonical_next_table(&leak.next_table, false);
-                if !table_has_v4_route(state, ip, next_table_name.as_ref(), allow_tunnels) {
+                if !table_has_v4_route_suppressing(
+                    state,
+                    ip,
+                    next_table_name.as_ref(),
+                    allow_tunnels,
+                    suppress_nat_local,
+                ) {
                     continue;
                 }
                 // #14319: a precheck-admitted target can still resolve to
@@ -815,17 +964,13 @@ fn lookup_forwarding_resolution_v4_inner(
                     false,
                     allow_tunnels,
                     ecmp_flow_hash,
+                    suppress_nat_local,
                 );
-                if resolved.resolution.disposition == ForwardingDisposition::NoRoute {
-                    continue;
-                }
                 return resolved;
             }
         }
     }
-    match select_v4_route(
-        state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash,
-    ) {
+    match select_v4_route(state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash) {
         Some(ResolvedRouteV4::Connected {
             ifindex,
             tunnel_endpoint_id,
@@ -960,6 +1105,28 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_v6(
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
 ) -> ForwardingLookupResult {
+    lookup_forwarding_resolution_v6_suppressing(
+        state,
+        dynamic_neighbors,
+        ip,
+        table,
+        depth,
+        allow_tunnels,
+        ecmp_flow_hash,
+        None,
+    )
+}
+
+fn lookup_forwarding_resolution_v6_suppressing(
+    state: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+    ip: Ipv6Addr,
+    table: &str,
+    depth: usize,
+    allow_tunnels: bool,
+    ecmp_flow_hash: Option<u64>,
+    suppress_nat_local: Option<IpAddr>,
+) -> ForwardingLookupResult {
     lookup_forwarding_resolution_v6_inner(
         state,
         dynamic_neighbors,
@@ -969,11 +1136,29 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_v6(
         true,
         allow_tunnels,
         ecmp_flow_hash,
+        suppress_nat_local,
     )
 }
 
 #[inline]
 fn local_v6_owned_by_table(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> bool {
+    local_v6_owned_by_table_suppressing(state, ip, table, None)
+}
+
+/// #15768: v6 twin of `local_v4_owned_by_table_suppressing`.
+#[inline]
+fn local_v6_owned_by_table_suppressing(
+    state: &ForwardingState,
+    ip: Ipv6Addr,
+    table: &str,
+    suppress_nat_local: Option<IpAddr>,
+) -> bool {
+    if suppress_nat_local == Some(IpAddr::V6(ip))
+        && state.local_nat_to_self_v6.contains_key(&ip)
+        && !state.configured_iface_v6.contains(&ip)
+    {
+        return false;
+    }
     state.local_v6.contains(&ip)
         && (state.local_nat_any_table_v6.contains(&ip)
             || state
@@ -989,6 +1174,17 @@ fn table_has_v6_route(
     table: &str,
     allow_tunnels: bool,
 ) -> bool {
+    table_has_v6_route_suppressing(state, ip, table, allow_tunnels, None)
+}
+
+#[inline]
+fn table_has_v6_route_suppressing(
+    state: &ForwardingState,
+    ip: Ipv6Addr,
+    table: &str,
+    allow_tunnels: bool,
+    suppress_nat_local: Option<IpAddr>,
+) -> bool {
     state.routes_v6.get(table).is_some_and(|routes| {
         routes.iter().any(|entry| {
             entry.next_table.is_empty()
@@ -999,14 +1195,13 @@ fn table_has_v6_route(
         entry.table == table
             && entry.prefix.contains(ip)
             && (allow_tunnels || entry.tunnel_endpoint_id == 0)
-    }) || local_v6_owned_by_table(state, ip, table)
+    }) || local_v6_owned_by_table_suppressing(state, ip, table, suppress_nat_local)
         || state
             .interface_nat_tables_v6
             .get(&ip)
             .is_some_and(|tables| tables.contains(table))
         || subnet_router_anycast_v6_owned_by_table(state, ip, table)
 }
-
 fn lookup_forwarding_resolution_v6_inner(
     state: &ForwardingState,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
@@ -1016,10 +1211,15 @@ fn lookup_forwarding_resolution_v6_inner(
     evaluate_leaks: bool,
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
+    suppress_nat_local: Option<IpAddr>,
 ) -> ForwardingLookupResult {
-    if let Some(resolution) =
-        local_delivery_resolution_v6(state, ip, table, !evaluate_leaks)
-    {
+    if let Some(resolution) = local_delivery_resolution_v6_suppressing(
+        state,
+        ip,
+        table,
+        !evaluate_leaks,
+        suppress_nat_local,
+    ) {
         return selected_route_lookup_result(state, table, resolution);
     }
     if depth >= MAX_NEXT_TABLE_DEPTH {
@@ -1045,7 +1245,13 @@ fn lookup_forwarding_resolution_v6_inner(
         if let Some(leaks) = state.leak_rules_v6.get(table) {
             for leak in leaks.iter().filter(|leak| leak.prefix.contains(ip)) {
                 let next_table_name = canonical_next_table(&leak.next_table, true);
-                if !table_has_v6_route(state, ip, next_table_name.as_ref(), allow_tunnels) {
+                if !table_has_v6_route_suppressing(
+                    state,
+                    ip,
+                    next_table_name.as_ref(),
+                    allow_tunnels,
+                    suppress_nat_local,
+                ) {
                     continue;
                 }
                 // #14319: see the v4 twin — a recursive NoRoute is a miss,
@@ -1059,6 +1265,7 @@ fn lookup_forwarding_resolution_v6_inner(
                     false,
                     allow_tunnels,
                     ecmp_flow_hash,
+                    suppress_nat_local,
                 );
                 if resolved.resolution.disposition == ForwardingDisposition::NoRoute {
                     continue;
@@ -1067,9 +1274,7 @@ fn lookup_forwarding_resolution_v6_inner(
             }
         }
     }
-    match select_v6_route(
-        state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash,
-    ) {
+    match select_v6_route(state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash) {
         Some(ResolvedRouteV6::Connected {
             ifindex,
             tunnel_endpoint_id,
