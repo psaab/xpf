@@ -863,8 +863,14 @@ fn build_eth_ndp_na_behind_fragment(frag_off_field: u16) -> Vec<u8> {
 
 #[test]
 fn parse_ndp_na_9893_non_first_fragment_refused_and_counted() {
-    // offset=1 (field 0x0008), M=0 — a non-first fragment per RFC 8200 §4.5,
-    // the exact shape the shim diverts to AF_XDP as a flowless session miss.
+    // Retained name for #9893/#14116 history; semantics narrowed by #15242:
+    // a non-first fragment (offset=1, field 0x0008, M=0) is refused (learns
+    // nothing) but must NOT be counted into the RFC 6980 NA series — its
+    // payload is not an L4 header, so no NA (ICMPv6 type 136) can be
+    // confirmed. Counting merely on Fragment Next Header == 58
+    // mis-attributes ordinary fragmented ICMPv6 transit to the attack
+    // series. First-fragment NA counting is pinned separately by
+    // `parse_ndp_na_9893_first_and_atomic_fragments_refused`.
     let _g = ndp_na_refusal_counter_test_lock();
     let f = build_eth_ndp_na_behind_fragment(0x0008);
     let frag_before = NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed);
@@ -875,8 +881,8 @@ fn parse_ndp_na_9893_non_first_fragment_refused_and_counted() {
     );
     assert_eq!(
         NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed),
-        frag_before + 1,
-        "the fragment refusal must be counted exactly once"
+        frag_before,
+        "a non-first fragment is unconfirmable as an NA and must not pollute the RFC 6980 series (#15242)"
     );
     assert_eq!(
         NDP_NA_BAD_SOURCE_REFUSED.load(Ordering::Relaxed),
@@ -885,8 +891,45 @@ fn parse_ndp_na_9893_non_first_fragment_refused_and_counted() {
     );
     assert_eq!(
         crate::afxdp::coordinator::Coordinator::new().ndp_na_frag_refused_total(),
-        frag_before + 1,
-        "the fragment refusal must be readable through the coordinator status surface"
+        frag_before,
+        "the uncounted non-first refusal must be readable through the coordinator status surface"
+    );
+}
+
+#[test]
+fn parse_ndp_na_15242_icmpv6_non_first_fragment_transit_does_not_count() {
+    // #15242 acceptance probe: an ordinary ICMPv6 trailing (non-first)
+    // fragment — Fragment header names ICMPv6 (58) but the payload is
+    // generic ICMPv6 continuation bytes, not an NA — must leave the
+    // RFC 6980 counter unchanged (it previously bumped on Next Header
+    // alone). This is the user-visible mis-attribution: large ping /
+    // ICMPv6 transit polluting the attack series.
+    let _g = ndp_na_refusal_counter_test_lock();
+    let mut f = Vec::new();
+    f.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    f.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+    f.extend_from_slice(&[0x86, 0xdd]);
+    f.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+    f.extend_from_slice(&16u16.to_be_bytes()); // frag(8) + 8 payload bytes
+    f.push(44); // next = Fragment
+    f.push(64); // hop limit (transit, not NDP)
+    f.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    f.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+    f.push(NEXT_HEADER_ICMPV6); // frag next = ICMPv6, but non-first: payload is not L4
+    f.push(0);
+    f.extend_from_slice(&0x0008u16.to_be_bytes()); // non-first, offset=1
+    f.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+    // ICMPv6 echo continuation garbage — deliberately NOT type 136.
+    f.extend_from_slice(&[128, 0, 0, 0, 0, 1, 0, 2]);
+    let frag_before = NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed);
+    assert!(
+        parse_ndp_neighbor_advert(&f).is_none(),
+        "a non-first ICMPv6 fragment is not a learnable NA"
+    );
+    assert_eq!(
+        NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed),
+        frag_before,
+        "ordinary fragmented ICMPv6 transit must not pollute the RFC 6980 series (#15242)"
     );
 }
 
@@ -966,13 +1009,22 @@ fn parse_ndp_na_9893_refusal_leaves_dynamic_neighbor_cap_drops_unchanged() {
 fn parse_ndp_na_9893_first_and_atomic_fragments_refused() {
     // RFC 6980 refuses ANY Fragment header — first (offset 0, M=1) and atomic
     // (offset 0, M=0) alike, not just non-first. Both carry a fully valid
-    // NA otherwise (hop-limit 255, code 0, good checksum).
+    // NA otherwise (hop-limit 255, code 0, good checksum). These go through
+    // the L4 outcome (readable NA shape: proto 58 + type 136), so — unlike
+    // the unconfirmable non-first case (#15242) — each MUST count exactly
+    // once into `NDP_NA_FRAG_REFUSED` (the issue's surviving-leg control).
     let _g = ndp_na_refusal_counter_test_lock();
     for (name, field) in [("first", 0x0001u16), ("atomic", 0x0000u16)] {
         let f = build_eth_ndp_na_behind_fragment(field);
+        let frag_before = NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed);
         assert!(
             parse_ndp_neighbor_advert(&f).is_none(),
             "NA behind a {name} fragment must be refused (RFC 6980 covers all)"
+        );
+        assert_eq!(
+            NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed),
+            frag_before + 1,
+            "a {name}-fragment NA is NA-shape-confirmed and must be counted exactly once"
         );
     }
 }
