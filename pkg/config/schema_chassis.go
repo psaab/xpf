@@ -347,6 +347,25 @@ var schemaChassis = &schemaNode{desc: "Chassis configuration", children: map[str
 							validator:     ValidateInteger(0, 255),
 							children:      nil,
 						},
+						// #15038: bind the probe to this unit; the primary
+						// probes from the unit VIP, the secondary from
+						// secondary-ip-address.
+						"interface": {
+							desc:          "Logical interface unit the probe is bound to",
+							args:          1,
+							valueType:     ValueString,
+							valueDesc:     "Logical interface unit (e.g. reth0.0)",
+							valueExamples: []string{"reth0.0"},
+							children:      nil,
+						},
+						"secondary-ip-address": {
+							desc:          "Source address a non-primary node uses for the probe",
+							args:          1,
+							valueType:     ValueIPAddress,
+							valueDesc:     "IPv4 address held by the secondary node",
+							valueExamples: []string{"10.0.0.3"},
+							children:      nil,
+						},
 					}}},
 				}},
 			}},
