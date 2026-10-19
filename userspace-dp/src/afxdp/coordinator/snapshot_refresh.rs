@@ -526,6 +526,11 @@ impl super::Coordinator {
         // `store_runtime_view` records the intended pair + the previous view
         // for the RED-on-revert test.
         self.publish_runtime_view();
+        // #15188 (C08-02): the publish above shipped this apply's single-use
+        // rename metadata on its clone. Strip the retained copies now so a
+        // later helper-internal republish (neighbor push, HA fabric refresh)
+        // cannot re-ship them to every worker's rotation branch.
+        self.clear_single_use_policy_metadata();
         // #15093: after the worker-visible store, record the era so a
         // re-introduced scheduled snapshot does not publish already expired.
         self.publish_snapshot_policy();

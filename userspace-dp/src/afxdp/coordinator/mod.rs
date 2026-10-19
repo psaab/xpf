@@ -2077,9 +2077,51 @@ impl Coordinator {
     /// `ha.forwarding.store(Arc::new(self.forwarding.clone()))` site did) and
     /// rotates the worker-visible forwarding `Arc`, so workers take their
     /// rotation branch.
+    ///
+    /// #15188 (C08-02): this choke point deliberately does NOT strip the
+    /// single-use rename metadata. The full-apply sites
+    /// (`refresh_runtime_snapshot_inner`, `reconcile/snapshot::apply_snapshot`)
+    /// publish through here and MUST ship `policy_session_rebinds` /
+    /// `policy_rename_ancestry` on that one publish; they strip the retained
+    /// `self.forwarding` copies immediately afterwards via
+    /// [`Self::clear_single_use_policy_metadata`]. Stripping here instead
+    /// would delete the metadata before the full apply could ship it, and
+    /// helper-internal republishes (neighbor push, HA fabric refresh, FibDump,
+    /// link-cycle restore, routing-domain seeds) could not be told apart from
+    /// a full apply at this single choke point.
     pub(crate) fn publish_runtime_view(&mut self) {
         let forwarding = Arc::new(self.forwarding.clone());
         self.store_runtime_view(forwarding);
+    }
+
+    /// #15188 (C08-02): strip the single-use rename metadata from the
+    /// RETAINED forwarding after a full snapshot apply has published it.
+    ///
+    /// `policy_session_rebinds` and `policy_rename_ancestry` describe exactly
+    /// one commit's rename. The full apply's `publish_runtime_view` clone
+    /// ships them to the workers, whose rotation branch consumes them once
+    /// (`rematch_bound_first_policy_sessions` /
+    /// `rebind_policy_sessions_from_snapshot` in `worker/loop_body`). If the
+    /// retained `self.forwarding` kept them, the next helper-internal
+    /// republish — a neighbor push (`apply_manager_neighbors_with_permanent`)
+    /// or an HA fabric refresh (`refresh_fabric_links`), both of which clone
+    /// `self.forwarding` through `publish_runtime_view` — would re-ship the
+    /// same records on a fresh forwarding `Arc`. Every worker would take its
+    /// rotation branch on that `Arc` and re-apply every record (two BPF
+    /// conntrack restamps plus shared-table restamps per record) with no
+    /// generation check, until the next Go partial or full publish happened
+    /// to clear them. Clearing the retained copies here makes every such
+    /// helper clone ship `rebinds=0` / `ancestry=0` by construction, so a
+    /// record is applied exactly once per config generation.
+    ///
+    /// Only the retained copies are cleared: the `Arc` the full apply just
+    /// published keeps its metadata, so workers still consume that apply's
+    /// rename exactly once. A later full apply rebuilds `self.forwarding`
+    /// from the new snapshot and ships its own fresh metadata before this
+    /// runs again — the strip is per-apply, not a latch.
+    pub(crate) fn clear_single_use_policy_metadata(&mut self) {
+        self.forwarding.policy_session_rebinds.clear();
+        self.forwarding.policy_rename_ancestry.clear();
     }
 
     /// #6592: publish a VALIDATION-ONLY change, reusing the forwarding `Arc`
