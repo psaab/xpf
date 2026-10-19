@@ -465,27 +465,37 @@ func validatePolicyCommunityReferencesStrict(cfg *Config) error {
 			// #12069: the compiler post-pass expands an authored community
 			// name once. This strict gate then accepts only the resulting
 			// FRR literal and must not look it up as a name again.
-			verb, value := "", ""
-			switch term.CommunityOp {
-			case "add":
-				verb, value = "add", term.CommunityAdd
-			case "set":
-				verb, value = "set", term.Community
-			case "":
-				value = term.Community
+			// #15665: check EVERY value-carrying action present (set/bare
+			// and add can coexist with each other and with delete), each
+			// against its own resolution flag, so a combined term cannot
+			// hide an unresolvable add behind a valid set or vice versa.
+			type communityCheck struct {
+				verb, value string
+				failed      bool
 			}
-			if value != "" {
-				if term.CommunityResolutionFailed || !ValidCommunityValueLiteral(value) {
-					clause := fmt.Sprintf("`then community %s`", value)
-					if verb != "" {
-						clause = fmt.Sprintf("`then community %s %s`", verb, value)
+			var checks []communityCheck
+			if term.CommunityAdd != "" {
+				checks = append(checks, communityCheck{"add", term.CommunityAdd, term.CommunityAddResolutionFailed})
+			}
+			if term.Community != "" {
+				verb := ""
+				if term.CommunityOp == "set" {
+					verb = "set"
+				}
+				checks = append(checks, communityCheck{verb, term.Community, term.CommunityResolutionFailed})
+			}
+			for _, chk := range checks {
+				if chk.failed || !ValidCommunityValueLiteral(chk.value) {
+					clause := fmt.Sprintf("`then community %s`", chk.value)
+					if chk.verb != "" {
+						clause = fmt.Sprintf("`then community %s %s`", chk.verb, chk.value)
 					}
 					return fmt.Errorf("policy-statement %s term %s %s uses %q, "+
 						"which is neither an FRR community literal nor a defined "+
 						"community whose members are all literals; the rendered "+
 						"`set community` line would be invalid — use a valid literal "+
 						"or define `policy-options community %s` with literal members",
-						psName, term.Name, clause, value, value)
+						psName, term.Name, clause, chk.value, chk.value)
 				}
 			}
 		}

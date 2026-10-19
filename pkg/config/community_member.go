@@ -240,6 +240,52 @@ func ResolveCommunityValue(po *PolicyOptionsConfig, value string) (string, bool)
 	return "", false
 }
 
+// ResolveCommunityValueTokens resolves a multi-token `then community
+// add|set|<value>` operand per token (#15665): each whitespace-separated
+// token is resolved independently — a defined community name expands to
+// its literal members, a valid literal passes through — and the resolved
+// literals are joined in authored order. This makes bracketed references
+// such as `add [ C1 C2 ]` (flattened by the lexer to "C1 C2") resolve,
+// where the whole-string lookup in ResolveCommunityValue treated
+// "C1 C2" as a single name and failed. A token that is a DEFINED name
+// whose definition cannot expand (empty / regex / non-literal members)
+// fails the whole operand rather than falling through to literal
+// acceptance, preserving the #12069 fail-closed rule. Any other
+// unresolvable token also fails the whole operand.
+func ResolveCommunityValueTokens(po *PolicyOptionsConfig, value string) (string, bool) {
+	// Split only on the separators FRR's literal grammar recognises
+	// (ASCII space / C0 / DEL, matching frrStandardCommunityLiteral):
+	// strings.Fields would also split on Unicode whitespace, silently
+	// accepting values the #12069 gate must reject.
+	tokens := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ' ' || r < 0x20 || r == 0x7f
+	})
+	if len(tokens) == 0 {
+		return "", false
+	}
+	if len(tokens) == 1 {
+		return ResolveCommunityValue(po, value)
+	}
+	resolved := make([]string, 0, len(tokens))
+	for _, tok := range tokens {
+		if po != nil && po.Communities != nil {
+			if _, exists := po.Communities[tok]; exists {
+				v, ok := ResolveCommunityValue(po, tok)
+				if !ok {
+					return "", false
+				}
+				resolved = append(resolved, v)
+				continue
+			}
+		}
+		if !frrStandardCommunityLiteral(tok) {
+			return "", false
+		}
+		resolved = append(resolved, tok)
+	}
+	return strings.Join(resolved, " "), true
+}
+
 // ValidCommunityValueLiteral checks an already-resolved `then community`
 // operand without consulting community names. Resolve authored names only in
 // the compiler post-pass; strict validation and rendering use this predicate

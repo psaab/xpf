@@ -224,12 +224,14 @@ func TestPolicyThenCommunityLiteralShapedFailedResolutionRejected12069(t *testin
 					}
 					term := lenient.PolicyOptions.PolicyStatements["P"].Terms[0]
 					operand := term.Community
+					failed := term.CommunityResolutionFailed
 					if term.CommunityOp == "add" {
 						operand = term.CommunityAdd
+						failed = term.CommunityAddResolutionFailed
 					}
-					if !term.CommunityResolutionFailed || operand != name {
+					if !failed || operand != name {
 						t.Fatalf("failed resolution state = (flag %v, operand %q), want (true, authored %q)",
-							term.CommunityResolutionFailed, operand, name)
+							failed, operand, name)
 					}
 				})
 			}
