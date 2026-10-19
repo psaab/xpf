@@ -1,12 +1,114 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net"
 	"sort"
 	"strconv"
 	"strings"
 )
+
+// validHexPSK reports whether s is a usable Junos hexadecimal
+// pre-shared-key value (#15027, A16-04): non-empty, even length, and
+// decodable hex. The renderer emits a valid value verbatim after a
+// `0x` prefix, so validity here is exactly "strongSwan will parse it
+// as the intended raw bytes".
+func validHexPSK(s string) bool {
+	if s == "" || len(s)%2 != 0 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
+// classifyPSKQualifier maps one authored `pre-shared-key` qualifier +
+// value onto the compiled PSK triple (#15027, A16-04):
+//
+//   - "ascii-text"    -> (value, false, "") — today's quoted-ASCII render
+//   - "hexadecimal"   -> (value, true, "") when value is even-length hex;
+//     otherwise (value, true, value) so the strict gate rejects it
+//   - anything else   -> (value, false, qualifier) so the strict gate
+//     rejects the unknown qualifier instead of silently treating its
+//     value as an ASCII secret (the pre-fix behaviour for EVERY
+//     qualifier, hexadecimal included)
+//
+// The third return is the PSKQualifierInvalidSpec to record ("" when
+// the spelling is well-formed); it never carries a valid secret on
+// the ascii-text path.
+func classifyPSKQualifier(qualifier, value string) (Secret, bool, string) {
+	switch qualifier {
+	case "ascii-text":
+		return Secret(value), false, ""
+	case "hexadecimal":
+		if !validHexPSK(value) {
+			return Secret(value), true, value
+		}
+		return Secret(value), true, ""
+	default:
+		return Secret(value), false, qualifier
+	}
+}
+
+// pskQualifierValue resolves the qualifier + value of a
+// `pre-shared-key` node across every parser shape (#15027):
+//
+//   - packed / flat with args:2 (IKE policy): Keys =
+//     [pre-shared-key, <qualifier>, <value>] — qualified.
+//   - flat with args:1 (IPsec VPN): SetPath saturates after the
+//     qualifier, so Keys = [pre-shared-key, <qualifier>] and the
+//     value rides as a child named by the value token — qualified
+//     when Keys[1] is present and a child exists.
+//   - block: `pre-shared-key { <qualifier> <value>; }` — the child
+//     name is the qualifier; its value is nodeVal(child) or, for
+//     `hexadecimal { <value>; }`, the grandchild name.
+//   - any other child name in block form is an unknown qualifier —
+//     returned as qualified so classifyPSKQualifier records it.
+//   - bare: Keys = [pre-shared-key, <value>] with no children (VPN
+//     args:1), or a lone value child — not qualified; value is the
+//     bare key.
+func pskQualifierValue(p *Node) (qualifier, value string, qualified bool) {
+	if len(p.Keys) >= 3 {
+		return p.Keys[1], p.Keys[2], true
+	}
+	if len(p.Children) > 0 {
+		c := p.Children[0]
+		switch c.Name() {
+		case "ascii-text", "hexadecimal":
+			v := nodeVal(c)
+			if v == "" && len(c.Children) > 0 {
+				v = c.Children[0].Name()
+			}
+			return c.Name(), v, true
+		default:
+			// A block child that is not a known qualifier: if the
+			// parent already carries a qualifier token (the VPN
+			// args:1 split, where the child IS the value), the
+			// qualifier is Keys[1]; otherwise the child name
+			// itself is the (unknown) qualifier.
+			if len(p.Keys) >= 2 {
+				v := nodeVal(c)
+				if v == "" {
+					v = c.Name()
+				}
+				return p.Keys[1], v, true
+			}
+			v := nodeVal(c)
+			if v == "" && len(c.Children) > 0 {
+				v = c.Children[0].Name()
+			}
+			return c.Name(), v, true
+		}
+	}
+	if len(p.Keys) >= 2 {
+		// Bare VPN form (args:1 saturates on the value) — or, for
+		// the IKE policy (args:2), a qualifier with no value and
+		// no children: treat Keys[1] as the qualifier with an
+		// empty value so a missing value cannot silently pass.
+		return "", p.Keys[1], false
+	}
+	return "", nodeVal(p), false
+}
 
 // parseDHGroup converts a Junos/vSRX dh-group value to its numeric
 // Diffie-Hellman group. It accepts both the prefixed Junos spelling
@@ -149,15 +251,21 @@ func compileIKE(node *Node, sec *SecurityConfig) error {
 				// dropped all but the first, narrowing phase-1 negotiation.
 				pol.Proposals = append(pol.Proposals, firewallMatchValues(p)...)
 			case "pre-shared-key":
-				// "pre-shared-key ascii-text VALUE" or children
-				if len(p.Keys) >= 3 {
-					pol.PSK = Secret(p.Keys[2])
-				} else {
-					for _, c := range p.Children {
-						if c.Name() == "ascii-text" {
-							pol.PSK = Secret(nodeVal(c))
-						}
-					}
+				// #15027 (A16-04): switch on the qualifier. Before
+				// this, Keys[1] was never read: a `hexadecimal` key
+				// stored its hex digits as an ASCII secret (rendered
+				// quoted, so the peer's raw bytes never matched),
+				// the block spelling dropped the key entirely, and
+				// ANY qualifier word was accepted. pskQualifierValue
+				// resolves the flat/packed/block shapes.
+				if qualifier, value, qualified := pskQualifierValue(p); qualified {
+					pol.PSK, pol.PSKHex, pol.PSKQualifierInvalidSpec = classifyPSKQualifier(qualifier, value)
+				} else if value != "" {
+					// Defensive: an unqualified single-value leaf
+					// keeps the legacy ASCII behaviour.
+					pol.PSK = Secret(value)
+					pol.PSKHex = false
+					pol.PSKQualifierInvalidSpec = ""
 				}
 			}
 		}
@@ -635,7 +743,24 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 			case "remote-identity":
 				vpn.RemoteID = normalizeHelperSupportedCIDRMaskPadding(v)
 			case "pre-shared-key":
-				vpn.PSK = Secret(v)
+				// #15027 (A16-04): VPN-level spelling is Junos-legal in
+				// both a bare form (`pre-shared-key <key>`, schema
+				// args:1 — kept as ASCII for compat) and a qualified
+				// form (`pre-shared-key ascii-text <key>` /
+				// `hexadecimal <hex>`). The schema declares args:1, so
+				// the flat qualified spelling can split as
+				// Keys=[pre-shared-key, hexadecimal] with the value
+				// child named by the value token, while the packed
+				// spelling collapses all three tokens onto Keys and
+				// the block spelling uses a qualifier-named child.
+				// pskQualifierValue resolves every shape.
+				if qualifier, value, qualified := pskQualifierValue(p); qualified {
+					vpn.PSK, vpn.PSKHex, vpn.PSKQualifierInvalidSpec = classifyPSKQualifier(qualifier, value)
+				} else {
+					vpn.PSK = Secret(value)
+					vpn.PSKHex = false
+					vpn.PSKQualifierInvalidSpec = ""
+				}
 			case "local-address":
 				vpn.LocalAddr = v
 			case "manual":

@@ -127,6 +127,11 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 	// decodedPSKs caches validated values for the secrets block, keyed by
 	// VPN name. A malformed key skips its VPN before emitting a connection.
 	decodedPSKs := make(map[string]string, len(ipsecCfg.VPNs))
+	// hexPSKs marks the subset of decodedPSKs whose value is hex
+	// digits authored as `pre-shared-key hexadecimal` (#15027): those
+	// render unquoted as `secret = 0x<hex>` so strongSwan derives the
+	// raw bytes the peer holds, not the ASCII digits.
+	hexPSKs := make(map[string]bool, len(ipsecCfg.VPNs))
 
 	// groups collects surviving VPNs by connection key in sorted order.
 	groups := make(map[string]*gatewayConn)
@@ -324,10 +329,28 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 		// unloads it and tears down any stale SA instead of aborting before
 		// promoteConnNames.
 		secret := vpn.PSK.Reveal()
+		secretHex := vpn.PSKHex
+		secretBadHex := vpn.PSKHex && !validHexPSKRender(secret)
 		if secret == "" && gw != nil {
 			if ikePol, ok := ipsecCfg.IKEPolicies[gw.IKEPolicy]; ok && ikePol != nil {
 				secret = ikePol.PSK.Reveal()
+				secretHex = ikePol.PSKHex
+				secretBadHex = ikePol.PSKHex && !validHexPSKRender(secret)
 			}
+		}
+		if secret != "" && secretBadHex {
+			// #15027 render belt: a hex-flagged value that is not
+			// valid even-length hex (directly constructed or
+			// peer-synced config that bypassed the strict commit
+			// gate) must never render as an ASCII secret — skip
+			// like every other malformed-PSK class so Apply
+			// unloads it and tears down any stale SA.
+			skipped[name] = true
+			slog.Warn("skipping IPsec VPN: hexadecimal pre-shared "+
+				"key is not valid hexadecimal (must be non-empty, "+
+				"even-length hex digits) — fix the key or use "+
+				"ascii-text", "vpn", name)
+			continue
 		}
 		if secret != "" {
 			decoded, err := normalizePSK(secret)
@@ -339,6 +362,9 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 				continue
 			}
 			decodedPSKs[name] = decoded
+			if secretHex {
+				hexPSKs[name] = true
+			}
 		} else if authMethod == "psk" {
 			// A PSK connection with no effective secret (#14139, D5-06)
 			// would render auth = psk with no matching secrets{} entry,
@@ -429,6 +455,14 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 		}
 		gc.children = append(gc.children, enriched...)
 		if d, ok := decodedPSKs[name]; ok {
+			// #15027: a hex PSK joins the group's list as its
+			// render token `0x<hex>` so dedupe and emission keep
+			// its encoding (an ASCII value that literally reads
+			// 0x<same digits> is quoted at emission and stays a
+			// distinct element).
+			if hexPSKs[name] {
+				d = "0x" + d
+			}
 			seen := false
 			for _, v := range gc.pskValues {
 				if v == d {
@@ -553,7 +587,27 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 		}
 		remoteAddr, _, gw, _ := resolveRemoteAddr(ipsecCfg, gc.vpn)
 		fmt.Fprintf(&b, "  ike-%s {\n", gc.name)
-		fmt.Fprintf(&b, "    secret = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(strings.Join(gc.pskValues, ","))))
+		// #15027 (A16-04): each comma-list element keeps its own
+		// encoding — a hexadecimal value renders as its bare
+		// `0x<hex>` token (raw bytes, validated hex so no quoting
+		// needed), an ascii-text value as the quoted #2126-escaped
+		// string. Elements are joined with ", " so every element
+		// parses independently.
+		parts := make([]string, len(gc.pskValues))
+		for i, v := range gc.pskValues {
+			if strings.HasPrefix(v, "0x") {
+				parts[i] = v
+			} else {
+				parts[i] = "\"" + escapeSwanctlQuoted(sanitizeSwanctlValue(v)) + "\""
+			}
+		}
+		fmt.Fprintf(&b, "    secret = %s\n", strings.Join(parts, ", "))
+		// Scope this PSK to its peer with id selectors (#3952). A PSK
+		// secret with NO id matches ANY peer, so with two or more PSK
+		// VPNs strongSwan can bind the wrong secret to a peer and IKE
+		// authentication fails. Each id-<n> narrows the secret to a
+		// peer whose IKE identity matches — the configured remote-id,
+		// else the remote gateway address (plus the local-id when set).
 		for i, sel := range pskIDSelectors(remoteAddr, gw) {
 			fmt.Fprintf(&b, "    id-%d = \"%s\"\n", i+1,
 				escapeSwanctlQuoted(sanitizeSwanctlValue(sel)))
